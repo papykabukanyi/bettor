@@ -1,0 +1,14 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Run Betting Bot",
+			"type": "shell",
+			"command": "python",
+			"args": [
+				"src/betting_bot.py"
+			],
+			"group": "build"
+		}
+	]
+}

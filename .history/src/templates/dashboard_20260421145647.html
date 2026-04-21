@@ -1,0 +1,672 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Bettor Dashboard</title>
+<style>
+  /* ── Reset & Base ──────────────────────────────────────────── */
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:       #0d0f14;
+    --surface:  #161b26;
+    --surface2: #1e2535;
+    --border:   #2b3347;
+    --text:     #e2e8f0;
+    --muted:    #8892a4;
+    --green:    #22c55e;
+    --yellow:   #eab308;
+    --red:      #ef4444;
+    --blue:     #3b82f6;
+    --purple:   #a855f7;
+    --orange:   #f97316;
+    --radius:   10px;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+    min-height: 100vh;
+  }
+
+  a { color: var(--blue); text-decoration: none; }
+
+  /* ── Layout ────────────────────────────────────────────────── */
+  .page { max-width: 1280px; margin: 0 auto; padding: 24px 16px; }
+
+  /* ── Header ─────────────────────────────────────────────────── */
+  .header {
+    display: flex; align-items: center; justify-content: space-between;
+    flex-wrap: wrap; gap: 12px;
+    padding-bottom: 20px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 24px;
+  }
+  .header-left h1 { font-size: 1.6rem; font-weight: 700; letter-spacing: -0.5px; }
+  .header-left h1 span { color: var(--green); }
+  .header-left p  { color: var(--muted); font-size: 12px; margin-top: 2px; }
+
+  .header-right { display: flex; align-items: center; gap: 12px; }
+
+  /* Status pill */
+  .status-pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 4px 12px; border-radius: 999px; font-size: 12px; font-weight: 600;
+  }
+  .status-pill.idle    { background: var(--surface2); color: var(--muted); }
+  .status-pill.running { background: #1c2d1c; color: var(--green); }
+  .status-pill.done    { background: #1a2d1a; color: var(--green); }
+  .status-pill.error   { background: #2d1a1a; color: var(--red); }
+
+  .dot { width: 8px; height: 8px; border-radius: 50%; }
+  .dot-idle    { background: var(--muted); }
+  .dot-running { background: var(--green); animation: pulse 1s infinite; }
+  .dot-done    { background: var(--green); }
+  .dot-error   { background: var(--red); }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
+
+  /* Run button */
+  #run-btn {
+    background: var(--green); color: #000; border: none;
+    padding: 8px 20px; border-radius: var(--radius);
+    font-weight: 700; font-size: 14px; cursor: pointer;
+    transition: opacity .15s;
+  }
+  #run-btn:hover { opacity: 0.85; }
+  #run-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  /* ── Stats bar ───────────────────────────────────────────────── */
+  .stats-bar {
+    display: flex; flex-wrap: wrap; gap: 12px;
+    margin-bottom: 28px;
+  }
+  .stat-card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 14px 20px; flex: 1; min-width: 130px;
+  }
+  .stat-card .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .5px; }
+  .stat-card .value { font-size: 1.6rem; font-weight: 700; margin-top: 2px; }
+  .stat-card .value.green  { color: var(--green); }
+  .stat-card .value.yellow { color: var(--yellow); }
+  .stat-card .value.blue   { color: var(--blue); }
+  .stat-card .value.purple { color: var(--purple); }
+  .stat-card .value.orange { color: var(--orange); }
+
+  /* ── Section headers ────────────────────────────────────────── */
+  .section-hdr {
+    display: flex; align-items: center; gap: 10px;
+    margin: 28px 0 16px;
+  }
+  .section-hdr h2 { font-size: 1rem; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; }
+  .section-hdr .badge {
+    background: var(--surface2); color: var(--muted);
+    font-size: 11px; padding: 2px 8px; border-radius: 999px;
+  }
+  .section-line { flex: 1; height: 1px; background: var(--border); }
+
+  /* ── Bet cards ───────────────────────────────────────────────── */
+  .cards-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+    gap: 14px;
+  }
+
+  .bet-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 16px;
+    position: relative;
+    overflow: hidden;
+    transition: border-color .15s;
+  }
+  .bet-card:hover { border-color: var(--blue); }
+
+  /* Grade accent stripe */
+  .bet-card::before {
+    content: '';
+    position: absolute; top: 0; left: 0;
+    width: 4px; height: 100%;
+    border-radius: var(--radius) 0 0 var(--radius);
+  }
+  .bet-card.grade-aplus::before { background: var(--green); }
+  .bet-card.grade-a::before     { background: var(--blue); }
+  .bet-card.grade-b::before     { background: var(--yellow); }
+  .bet-card.grade-c::before     { background: var(--muted); }
+  .bet-card.prop-strong-over::before  { background: var(--green); }
+  .bet-card.prop-lean-over::before    { background: var(--blue); }
+  .bet-card.prop-strong-under::before { background: var(--red); }
+  .bet-card.prop-lean-under::before   { background: var(--orange); }
+  .bet-card.prop-skip::before         { background: var(--muted); }
+
+  .card-header {
+    display: flex; align-items: flex-start; justify-content: space-between;
+    margin-bottom: 10px; padding-left: 10px;
+  }
+  .card-sport { font-size: 10px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: .6px; color: var(--muted); }
+  .card-matchup { font-size: 1rem; font-weight: 700; margin-top: 1px; }
+  .card-league { font-size: 11px; color: var(--muted); }
+
+  .grade-tag {
+    font-size: 11px; font-weight: 800; padding: 3px 10px;
+    border-radius: 999px; letter-spacing: .5px;
+    white-space: nowrap;
+  }
+  .grade-tag.grade-aplus { background: #14291a; color: var(--green); }
+  .grade-tag.grade-a     { background: #141d2d; color: var(--blue); }
+  .grade-tag.grade-b     { background: #2a2510; color: var(--yellow); }
+  .grade-tag.grade-c     { background: var(--surface2); color: var(--muted); }
+
+  /* Pick line */
+  .pick-line {
+    padding: 8px 12px; margin: 0 10px 10px;
+    background: var(--surface2); border-radius: 7px;
+    font-weight: 700; font-size: 0.95rem;
+  }
+  .pick-line .arrow { color: var(--green); margin-right: 6px; }
+
+  /* Bet stats row */
+  .bet-stats {
+    display: flex; flex-wrap: wrap; gap: 8px;
+    padding: 0 10px;
+  }
+  .bet-stat {
+    background: var(--surface2); border-radius: 6px;
+    padding: 5px 10px; flex: 1; min-width: 70px; text-align: center;
+  }
+  .bet-stat .s-label { font-size: 9px; text-transform: uppercase; color: var(--muted); }
+  .bet-stat .s-val   { font-weight: 700; font-size: 0.9rem; margin-top: 1px; }
+  .bet-stat .s-val.green  { color: var(--green); }
+  .bet-stat .s-val.yellow { color: var(--yellow); }
+  .bet-stat .s-val.blue   { color: var(--blue); }
+  .bet-stat .s-val.red    { color: var(--red); }
+
+  /* Starters row */
+  .starters {
+    display: flex; gap: 8px; padding: 8px 10px 0; flex-wrap: wrap;
+  }
+  .starter-chip {
+    background: var(--surface2); border-radius: 6px;
+    padding: 3px 8px; font-size: 11px; color: var(--muted);
+  }
+  .starter-chip span { color: var(--text); }
+
+  /* ── Prop cards (slightly different layout) ──────────────────── */
+  .prop-card .prop-header { padding: 0 10px 8px; }
+  .prop-card .prop-name   { font-size: 1rem; font-weight: 700; }
+  .prop-card .prop-meta   { font-size: 11px; color: var(--muted); margin-top: 1px; }
+
+  .prop-rec {
+    padding: 8px 12px; margin: 0 10px 10px;
+    border-radius: 7px; font-weight: 700; font-size: 0.9rem;
+  }
+  .prop-rec.over-strong  { background: #14291a; color: var(--green); }
+  .prop-rec.over-lean    { background: #141d2d; color: var(--blue); }
+  .prop-rec.under-strong { background: #2d1414; color: var(--red); }
+  .prop-rec.under-lean   { background: #2a1e0d; color: var(--orange); }
+  .prop-rec.coin         { background: var(--surface2); color: var(--muted); }
+
+  .prob-bar-wrap { padding: 6px 10px 4px; }
+  .prob-bar-label { display: flex; justify-content: space-between;
+    font-size: 10px; color: var(--muted); margin-bottom: 4px; }
+  .prob-bar { height: 6px; background: var(--surface2); border-radius: 999px; overflow: hidden; }
+  .prob-bar-fill { height: 100%; border-radius: 999px; transition: width .4s; }
+  .prob-bar-fill.green  { background: var(--green); }
+  .prob-bar-fill.red    { background: var(--red); }
+  .prob-bar-fill.yellow { background: var(--yellow); }
+
+  /* ── Parlay section ──────────────────────────────────────────── */
+  .parlay-list { display: flex; flex-direction: column; gap: 12px; }
+
+  .parlay-card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 14px 16px;
+  }
+  .parlay-card-header {
+    display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
+    margin-bottom: 10px;
+  }
+  .parlay-tag {
+    background: var(--purple); color: #fff;
+    font-size: 11px; font-weight: 700; padding: 3px 10px; border-radius: 999px;
+  }
+  .parlay-meta { display: flex; flex-wrap: wrap; gap: 8px; }
+  .parlay-chip {
+    background: var(--surface2); border-radius: 6px;
+    padding: 3px 10px; font-size: 11px;
+  }
+  .parlay-chip .val { font-weight: 700; }
+  .parlay-chip .val.green  { color: var(--green); }
+  .parlay-chip .val.yellow { color: var(--yellow); }
+  .parlay-chip .val.purple { color: var(--purple); }
+
+  .parlay-legs { list-style: none; }
+  .parlay-legs li {
+    padding: 4px 0; border-bottom: 1px solid var(--border);
+    font-size: 12px; color: var(--muted);
+  }
+  .parlay-legs li:last-child { border-bottom: none; }
+  .parlay-legs li::before { content: '▸ '; color: var(--purple); }
+
+  .parlay-payout {
+    margin-top: 10px; padding: 8px 12px;
+    background: var(--surface2); border-radius: 7px;
+    font-size: 12px; color: var(--muted);
+  }
+  .parlay-payout .amount { font-weight: 700; color: var(--green); font-size: 1rem; }
+
+  /* ── Empty state ──────────────────────────────────────────────── */
+  .empty {
+    text-align: center; padding: 32px; color: var(--muted);
+    background: var(--surface); border: 1px dashed var(--border);
+    border-radius: var(--radius);
+  }
+  .empty .icon { font-size: 2rem; margin-bottom: 8px; }
+
+  /* ── Error box ───────────────────────────────────────────────── */
+  .error-box {
+    background: #2d1414; border: 1px solid var(--red);
+    border-radius: var(--radius); padding: 14px 16px; color: var(--red);
+    font-family: monospace; font-size: 12px; white-space: pre-wrap;
+    overflow-x: auto; margin-bottom: 20px;
+  }
+
+  /* ── Footer ──────────────────────────────────────────────────── */
+  .footer {
+    margin-top: 40px; padding-top: 16px;
+    border-top: 1px solid var(--border);
+    color: var(--muted); font-size: 11px;
+    display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px;
+  }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <!-- ── Header ──────────────────────────────────────────────────── -->
+  <div class="header">
+    <div class="header-left">
+      <h1>Bettor <span>Dashboard</span></h1>
+      <p>
+        {% if state.last_updated %}
+          Last updated: {{ state.last_updated }}
+        {% else %}
+          No analysis run yet — click Run Analysis
+        {% endif %}
+      </p>
+    </div>
+    <div class="header-right">
+      <div class="status-pill {{ state.status }}" id="status-pill">
+        <div class="dot dot-{{ state.status }}" id="status-dot"></div>
+        <span id="status-text">{{ state.status | capitalize }}</span>
+      </div>
+      <button id="run-btn" onclick="runAnalysis()">⚡ Run Analysis</button>
+    </div>
+  </div>
+
+  <!-- ── Error ───────────────────────────────────────────────────── -->
+  {% if state.status == 'error' %}
+  <div class="error-box" id="error-box">{{ state.error }}</div>
+  {% else %}
+  <div class="error-box" id="error-box" style="display:none"></div>
+  {% endif %}
+
+  <!-- ── Stats bar ───────────────────────────────────────────────── -->
+  <div class="stats-bar" id="stats-bar">
+    <div class="stat-card">
+      <div class="label">Win Bets</div>
+      <div class="value green" id="stat-win">{{ state.win_bets | length }}</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Totals Bets</div>
+      <div class="value blue" id="stat-totals">{{ state.totals_bets | length }}</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Props Analyzed</div>
+      <div class="value orange" id="stat-props">{{ state.prop_stats | length }}</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Parlays</div>
+      <div class="value purple" id="stat-parlays">{{ state.parlays | length }}</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">MLB Games</div>
+      <div class="value" id="stat-mlb">{{ state.mlb_games }}</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Soccer Games</div>
+      <div class="value" id="stat-soccer">{{ state.soccer_games }}</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Bankroll</div>
+      <div class="value yellow">${{ "{:,.0f}".format(bankroll) }}</div>
+    </div>
+  </div>
+
+  <!-- ── Win Bets ─────────────────────────────────────────────────── -->
+  <div class="section-hdr">
+    <h2>Team Win Bets</h2>
+    <div class="badge" id="badge-win">{{ state.win_bets | length }}</div>
+    <div class="section-line"></div>
+  </div>
+
+  <div class="cards-grid" id="win-bets-grid">
+    {% if state.win_bets %}
+      {% for b in state.win_bets %}
+        {% set grade_key = 'aplus' if b.edge >= 0.15 else ('a' if b.edge >= 0.10 else ('b' if b.edge >= 0.07 else 'c')) %}
+        {% set grade_label = 'A+' if b.edge >= 0.15 else ('A' if b.edge >= 0.10 else ('B' if b.edge >= 0.07 else 'C')) %}
+        {% set parts = b.matchup.split(' vs ') %}
+        {% set home_t = parts[0] if parts|length == 2 else b.matchup %}
+        {% set away_t = parts[1] if parts|length == 2 else '?' %}
+        {% set pick = home_t + ' to WIN (home)' if b.bet == 'HOME' else (away_t + ' to WIN (away)' if b.bet == 'AWAY' else 'DRAW — ' + b.matchup) %}
+        {% set odds_s = ('+' + b.odds_am|string) if b.odds_am > 0 else b.odds_am|string %}
+        {% set payout = ((b.dec_odds - 1) * b.stake_usd) | round(2) %}
+        <div class="bet-card grade-{{ grade_key }}">
+          <div class="card-header">
+            <div>
+              <div class="card-sport">{{ b.sport }}</div>
+              <div class="card-matchup">{{ away_t }} @ {{ home_t }}</div>
+            </div>
+            <div class="grade-tag grade-{{ grade_key }}">Grade {{ grade_label }}</div>
+          </div>
+          <div class="pick-line"><span class="arrow">→</span>{{ pick }}</div>
+          <div class="bet-stats">
+            <div class="bet-stat">
+              <div class="s-label">Model</div>
+              <div class="s-val green">{{ "%.0f"|format(b.model_prob * 100) }}%</div>
+            </div>
+            <div class="bet-stat">
+              <div class="s-label">Book</div>
+              <div class="s-val">{{ "%.0f"|format(b.book_prob * 100) }}%</div>
+            </div>
+            <div class="bet-stat">
+              <div class="s-label">Edge</div>
+              <div class="s-val green">+{{ "%.0f"|format(b.edge * 100) }}%</div>
+            </div>
+            <div class="bet-stat">
+              <div class="s-label">Odds</div>
+              <div class="s-val blue">{{ odds_s }}</div>
+            </div>
+            <div class="bet-stat">
+              <div class="s-label">Stake</div>
+              <div class="s-val yellow">${{ "%.0f"|format(b.stake_usd) }}</div>
+            </div>
+            <div class="bet-stat">
+              <div class="s-label">To Win</div>
+              <div class="s-val green">${{ "%.0f"|format(payout) }}</div>
+            </div>
+          </div>
+        </div>
+      {% endfor %}
+    {% else %}
+      <div class="empty" style="grid-column:1/-1">
+        <div class="icon">📊</div>
+        <div>No win value bets found — models are aligned with the books.</div>
+        {% if state.status == 'idle' %}<div style="margin-top:6px">Click <strong>Run Analysis</strong> to start.</div>{% endif %}
+      </div>
+    {% endif %}
+  </div>
+
+  <!-- ── Totals (Over/Under) ──────────────────────────────────────── -->
+  <div class="section-hdr">
+    <h2>Over / Under</h2>
+    <div class="badge" id="badge-totals">{{ state.totals_bets | length }}</div>
+    <div class="section-line"></div>
+  </div>
+
+  <div class="cards-grid" id="totals-bets-grid">
+    {% if state.totals_bets %}
+      {% for b in state.totals_bets %}
+        {% set grade_key = 'aplus' if b.edge >= 0.15 else ('a' if b.edge >= 0.10 else ('b' if b.edge >= 0.07 else 'c')) %}
+        {% set grade_label = 'A+' if b.edge >= 0.15 else ('A' if b.edge >= 0.10 else ('B' if b.edge >= 0.07 else 'C')) %}
+        {% set parts = b.matchup.split(' vs ') %}
+        {% set home_t = parts[0] if parts|length == 2 else b.matchup %}
+        {% set away_t = parts[1] if parts|length == 2 else '?' %}
+        {% set odds_s = ('+' + b.odds_am|string) if b.odds_am > 0 else b.odds_am|string %}
+        {% set payout = ((b.dec_odds - 1) * b.stake_usd) | round(2) %}
+        <div class="bet-card grade-{{ grade_key }}">
+          <div class="card-header">
+            <div>
+              <div class="card-sport">{{ b.sport }} · Totals</div>
+              <div class="card-matchup">{{ away_t }} @ {{ home_t }}</div>
+            </div>
+            <div class="grade-tag grade-{{ grade_key }}">Grade {{ grade_label }}</div>
+          </div>
+          <div class="pick-line">
+            <span class="arrow">→</span>{{ b.bet }} {{ b.total_line }}
+            <span style="color:var(--muted);font-weight:400;font-size:.85em"> (model: {{ b.predicted_total }})</span>
+          </div>
+          <div class="bet-stats">
+            <div class="bet-stat">
+              <div class="s-label">Model</div>
+              <div class="s-val green">{{ "%.0f"|format(b.model_prob * 100) }}%</div>
+            </div>
+            <div class="bet-stat">
+              <div class="s-label">Book</div>
+              <div class="s-val">{{ "%.0f"|format(b.book_prob * 100) }}%</div>
+            </div>
+            <div class="bet-stat">
+              <div class="s-label">Edge</div>
+              <div class="s-val green">+{{ "%.0f"|format(b.edge * 100) }}%</div>
+            </div>
+            <div class="bet-stat">
+              <div class="s-label">Odds</div>
+              <div class="s-val blue">{{ odds_s }}</div>
+            </div>
+            <div class="bet-stat">
+              <div class="s-label">Stake</div>
+              <div class="s-val yellow">${{ "%.0f"|format(b.stake_usd) }}</div>
+            </div>
+            <div class="bet-stat">
+              <div class="s-label">To Win</div>
+              <div class="s-val green">${{ "%.0f"|format(payout) }}</div>
+            </div>
+          </div>
+        </div>
+      {% endfor %}
+    {% else %}
+      <div class="empty" style="grid-column:1/-1">
+        <div class="icon">📈</div>
+        <div>No totals value found — line is fair or totals odds not yet posted.</div>
+      </div>
+    {% endif %}
+  </div>
+
+  <!-- ── Player Props ─────────────────────────────────────────────── -->
+  <div class="section-hdr">
+    <h2>Player Props · Starters Strikeouts</h2>
+    <div class="badge" id="badge-props">{{ state.prop_stats | length }}</div>
+    <div class="section-line"></div>
+  </div>
+
+  <div class="cards-grid" id="props-grid">
+    {% if state.prop_stats %}
+      {% for p in state.prop_stats %}
+        {% set ov = p.over_prob %}
+        {% set un = p.under_prob %}
+        {% if ov >= 0.68 %}
+          {% set rec_text = 'STRONG OVER ' + p.line|string + ' Ks' %}
+          {% set rec_cls  = 'over-strong' %}
+          {% set card_cls = 'prop-strong-over' %}
+          {% set bar_cls  = 'green' %}
+          {% set bar_pct  = (ov * 100)|int %}
+        {% elif ov >= 0.58 %}
+          {% set rec_text = 'LEAN OVER ' + p.line|string + ' Ks' %}
+          {% set rec_cls  = 'over-lean' %}
+          {% set card_cls = 'prop-lean-over' %}
+          {% set bar_cls  = 'green' %}
+          {% set bar_pct  = (ov * 100)|int %}
+        {% elif un >= 0.68 %}
+          {% set rec_text = 'STRONG UNDER ' + p.line|string + ' Ks' %}
+          {% set rec_cls  = 'under-strong' %}
+          {% set card_cls = 'prop-strong-under' %}
+          {% set bar_cls  = 'red' %}
+          {% set bar_pct  = (un * 100)|int %}
+        {% elif un >= 0.58 %}
+          {% set rec_text = 'LEAN UNDER ' + p.line|string + ' Ks' %}
+          {% set rec_cls  = 'under-lean' %}
+          {% set card_cls = 'prop-lean-under' %}
+          {% set bar_cls  = 'yellow' %}
+          {% set bar_pct  = (un * 100)|int %}
+        {% else %}
+          {% set rec_text = 'COIN FLIP — SKIP' %}
+          {% set rec_cls  = 'coin' %}
+          {% set card_cls = 'prop-skip' %}
+          {% set bar_cls  = 'yellow' %}
+          {% set bar_pct  = 50 %}
+        {% endif %}
+
+        <div class="bet-card prop-card {{ card_cls }}">
+          <div class="card-header">
+            <div class="prop-header" style="padding:0">
+              <div class="card-sport">MLB · PITCHER PROP</div>
+              <div class="prop-name">{{ p.name }}</div>
+              <div class="prop-meta">{{ p.team }}  ·  {{ p.game }}</div>
+            </div>
+          </div>
+          <div class="prop-rec {{ rec_cls }}">{{ rec_text }}</div>
+          <div class="bet-stats">
+            <div class="bet-stat">
+              <div class="s-label">ERA</div>
+              <div class="s-val">{{ "%.2f"|format(p.era) }}</div>
+            </div>
+            <div class="bet-stat">
+              <div class="s-label">K/9</div>
+              <div class="s-val blue">{{ "%.1f"|format(p.k9) }}</div>
+            </div>
+            <div class="bet-stat">
+              <div class="s-label">WHIP</div>
+              <div class="s-val">{{ "%.2f"|format(p.whip) }}</div>
+            </div>
+            <div class="bet-stat">
+              <div class="s-label">IP/Start</div>
+              <div class="s-val">{{ "%.1f"|format(p.ip_per_start) }}</div>
+            </div>
+            <div class="bet-stat">
+              <div class="s-label">Avg Ks</div>
+              <div class="s-val green">{{ "%.1f"|format(p.avg_per_game) }}</div>
+            </div>
+            <div class="bet-stat">
+              <div class="s-label">Line</div>
+              <div class="s-val yellow">{{ p.line }}</div>
+            </div>
+          </div>
+          <div class="prob-bar-wrap">
+            <div class="prob-bar-label">
+              <span>Over {{ "%.0f"|format(p.over_prob * 100) }}%</span>
+              <span>Under {{ "%.0f"|format(p.under_prob * 100) }}%</span>
+            </div>
+            <div class="prob-bar">
+              <div class="prob-bar-fill {{ bar_cls }}" style="width:{{ bar_pct }}%"></div>
+            </div>
+          </div>
+        </div>
+      {% endfor %}
+    {% else %}
+      <div class="empty" style="grid-column:1/-1">
+        <div class="icon">⚾</div>
+        <div>No starter data yet — Baseball Reference may still be updating today's data.</div>
+      </div>
+    {% endif %}
+  </div>
+
+  <!-- ── Parlays ───────────────────────────────────────────────────── -->
+  {% if state.parlays %}
+  <div class="section-hdr">
+    <h2>Parlay Options</h2>
+    <div class="badge" id="badge-parlays">{{ state.parlays | length }}</div>
+    <div class="section-line"></div>
+  </div>
+  <div class="parlay-list" id="parlays-list">
+    {% for p in state.parlays %}
+      {% set parlay_stake = (bankroll * 0.02) | round(0) %}
+      {% set parlay_win   = (parlay_stake * p.combined_dec_odds) | round(2) %}
+      <div class="parlay-card">
+        <div class="parlay-card-header">
+          <div class="parlay-tag">{{ p.num_legs }}-LEG PARLAY</div>
+          <div class="parlay-meta">
+            <div class="parlay-chip">Odds: <span class="val purple">{{ "%.2f"|format(p.combined_dec_odds) }}x</span></div>
+            <div class="parlay-chip">Prob: <span class="val yellow">{{ "%.0f"|format(p.combined_prob * 100) }}%</span></div>
+            <div class="parlay-chip">EV: <span class="val {{ 'green' if p.ev > 0 else 'red' }}">{{ "%+.3f"|format(p.ev) }}</span></div>
+          </div>
+        </div>
+        <ul class="parlay-legs">
+          {% for leg in p.legs %}
+          <li>{{ leg }}</li>
+          {% endfor %}
+        </ul>
+        <div class="parlay-payout">
+          Stake <strong>${{ "%.0f"|format(parlay_stake) }}</strong>
+          &nbsp;→&nbsp;
+          potential win <span class="amount">${{ "%.0f"|format(parlay_win) }}</span>
+        </div>
+      </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  <!-- ── Footer ───────────────────────────────────────────────────── -->
+  <div class="footer">
+    <span>Bettor · MLB + Soccer Value Bet System</span>
+    <span>Min edge: {{ (0.05 * 100)|int }}%  ·  Kelly fraction: 25%  ·  Bankroll ${{ "{:,.0f}".format(bankroll) }}</span>
+  </div>
+
+</div><!-- .page -->
+
+<!-- ── JS: polling + run analysis ──────────────────────────────────── -->
+<script>
+  let _polling = null;
+
+  function runAnalysis() {
+    fetch('/api/run', { method: 'POST' })
+      .then(r => r.json())
+      .then(d => {
+        if (!d.ok) { alert(d.msg); return; }
+        setStatus('running');
+        startPolling();
+      })
+      .catch(e => alert('Error: ' + e));
+  }
+
+  function setStatus(s) {
+    const pill = document.getElementById('status-pill');
+    const dot  = document.getElementById('status-dot');
+    const txt  = document.getElementById('status-text');
+    const btn  = document.getElementById('run-btn');
+
+    pill.className = 'status-pill ' + s;
+    dot.className  = 'dot dot-' + s;
+    txt.textContent = s.charAt(0).toUpperCase() + s.slice(1);
+    btn.disabled = (s === 'running');
+  }
+
+  function startPolling() {
+    if (_polling) clearInterval(_polling);
+    _polling = setInterval(() => {
+      fetch('/api/status')
+        .then(r => r.json())
+        .then(d => {
+          setStatus(d.status);
+          if (d.status === 'done' || d.status === 'error') {
+            clearInterval(_polling);
+            _polling = null;
+            // Full page reload to render new results via Jinja
+            window.location.reload();
+          }
+        });
+    }, 2500);
+  }
+
+  // If page loads while analysis is already running, auto-poll
+  (function() {
+    const currentStatus = '{{ state.status }}';
+    if (currentStatus === 'running') startPolling();
+  })();
+</script>
+</body>
+</html>
