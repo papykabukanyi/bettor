@@ -1,4 +1,6 @@
-<!DOCTYPE html>
+import os, textwrap
+
+HTML = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -677,4 +679,9 @@ function startPolling() {
 (function() { if ('{{ state.status }}' === 'running') startPolling(); })();
 </script>
 </body>
-</html>
+</html>"""
+
+out = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src", "templates", "dashboard.html"))
+with open(out, "w", encoding="utf-8") as fh:
+    fh.write(HTML)
+print(f"Written {len(HTML.splitlines())} lines to {out}")

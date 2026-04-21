@@ -1,11 +1,14 @@
-"""
+import os
+
+content = """\
+\"\"\"
 Betting Bot - Web Dashboard
 Routes:
   GET  /            -> main dashboard
   POST /api/run     -> kick off analysis in background thread
   GET  /api/status  -> polling: {status, phase, phase_idx, phase_total, last_updated}
   GET  /api/games   -> upcoming games (today + tomorrow) from DB
-"""
+\"\"\"
 
 import os, sys, datetime, threading, traceback
 from flask import Flask, render_template, jsonify, request
@@ -207,10 +210,7 @@ def _build_upcoming(mlb_games, soccer_fixtures):
 @app.route("/")
 def index():
     with _lock: state = dict(_state)
-    today    = datetime.date.today().isoformat()
-    tomorrow = (datetime.date.today() + datetime.timedelta(days=1)).isoformat()
-    return render_template("dashboard.html", state=state, bankroll=BANKROLL,
-                           today=today, tomorrow=tomorrow)
+    return render_template("dashboard.html", state=state, bankroll=BANKROLL)
 
 @app.route("/api/run", methods=["POST"])
 def api_run():
@@ -245,3 +245,10 @@ if __name__ == "__main__":
         print(f"[dashboard] DB init: {e}")
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
+"""
+
+out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src", "dashboard.py")
+out = os.path.normpath(out)
+with open(out, "w", encoding="utf-8") as fh:
+    fh.write(content)
+print(f"Written {len(content.splitlines())} lines to {out}")
