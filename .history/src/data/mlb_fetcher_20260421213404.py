@@ -350,7 +350,7 @@ def get_player_prop_stats(player_name: str, season: int) -> dict:
         return {}
 
     import datetime
-    current_year = _et_today().year
+    current_year = datetime.date.today().year
     fallback_seasons = sorted({season, current_year - 1, current_year - 2}, reverse=True)
 
     # ── Hitter lookup ────────────────────────────────────────────────────
@@ -709,7 +709,7 @@ def get_hitter_props_batch(games: list[dict], season: int) -> list[dict]:
     if not games:
         return []
 
-    current_year = _et_today().year
+    current_year = datetime.date.today().year
     fallback_seasons = sorted({season, current_year - 1}, reverse=True)
 
     # ── Check DB cache before hitting external APIs ───────────────────────
@@ -878,7 +878,7 @@ def get_starters_props_batch(games: list[dict], season: int) -> list[dict]:
     if not games:
         return []
 
-    current_year = _et_today().year
+    current_year = datetime.date.today().year
     fallback_seasons = sorted({season, current_year - 1, current_year - 2}, reverse=True)
 
     # ── Check DB cache before hitting external APIs ───────────────────────

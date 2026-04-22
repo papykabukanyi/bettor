@@ -392,9 +392,9 @@ def get_soccer_player_props_from_odds(
             continue
 
         today_events = [e for e in events
-                        if str(e.get("commence_time", ""))[:10] in _et_dates][:max_events_per_league]
+                        if str(e.get("commence_time", ""))[:10] == today][:max_events_per_league]
         if not today_events:
-            print(f"[odds_fetcher] No {lk} events today/tomorrow")
+            print(f"[odds_fetcher] No {lk} events today")
             continue
 
         for event in today_events:

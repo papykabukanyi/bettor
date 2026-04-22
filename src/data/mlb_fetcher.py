@@ -23,6 +23,16 @@ import os
 import warnings
 warnings.filterwarnings("ignore")
 
+# Eastern-time date helper (10 PM cutover)
+try:
+    _SRC = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if _SRC not in sys.path:
+        sys.path.insert(0, _SRC)
+    from config import et_today as _et_today
+except Exception:
+    def _et_today():
+        return datetime.date.today()
+
 try:
     import pybaseball as pb
     pb.cache.enable()
@@ -180,7 +190,7 @@ def get_schedule_today() -> list[dict]:
     if not MLB_API_OK:
         return []
     try:
-        today = datetime.date.today().strftime("%Y-%m-%d")
+        today = _et_today().strftime("%Y-%m-%d")
         schedule = mlbstatsapi.schedule(start_date=today, end_date=today)
         games = [_parse_mlb_game(g, today) for g in schedule]
         _save_mlb_games_to_db(games)
@@ -198,7 +208,7 @@ def get_schedule_range(days_ahead: int = 1) -> list[dict]:
     if not MLB_API_OK:
         return []
     try:
-        today = datetime.date.today()
+        today = _et_today()
         end   = today + datetime.timedelta(days=days_ahead)
         schedule = mlbstatsapi.schedule(
             start_date=today.strftime("%Y-%m-%d"),
@@ -340,7 +350,7 @@ def get_player_prop_stats(player_name: str, season: int) -> dict:
         return {}
 
     import datetime
-    current_year = datetime.date.today().year
+    current_year = _et_today().year
     fallback_seasons = sorted({season, current_year - 1, current_year - 2}, reverse=True)
 
     # ── Hitter lookup ────────────────────────────────────────────────────
@@ -699,7 +709,7 @@ def get_hitter_props_batch(games: list[dict], season: int) -> list[dict]:
     if not games:
         return []
 
-    current_year = datetime.date.today().year
+    current_year = _et_today().year
     fallback_seasons = sorted({season, current_year - 1}, reverse=True)
 
     # ── Check DB cache before hitting external APIs ───────────────────────
@@ -868,7 +878,7 @@ def get_starters_props_batch(games: list[dict], season: int) -> list[dict]:
     if not games:
         return []
 
-    current_year = datetime.date.today().year
+    current_year = _et_today().year
     fallback_seasons = sorted({season, current_year - 1, current_year - 2}, reverse=True)
 
     # ── Check DB cache before hitting external APIs ───────────────────────

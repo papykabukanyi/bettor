@@ -21,7 +21,7 @@ import requests
 import pandas as pd
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from config import ODDS_API_KEY, ODDS_API_BASE, ODDS_REGIONS
+from config import ODDS_API_KEY, ODDS_API_BASE, ODDS_REGIONS, et_today as _et_today
 
 # Sports codes accepted by The Odds API
 SPORT_MAP = {
@@ -221,7 +221,9 @@ def get_player_props_odds(
         return []
 
     raw_sport = SPORT_MAP.get(sport_key.lower(), sport_key)
-    today     = datetime.date.today().isoformat()
+    import datetime as _ods_dt
+    _et_date   = _et_today()
+    _et_dates  = {_et_date.isoformat(), (_et_date + _ods_dt.timedelta(days=1)).isoformat()}
 
     # Step 1: get event list (0 credits used)
     events_url = f"{ODDS_API_BASE}/sports/{raw_sport}/events"
@@ -233,8 +235,8 @@ def get_player_props_odds(
         print(f"[odds_fetcher] events fetch error: {e}")
         return []
 
-    # Filter to today's events only, cap count
-    today_events = [e for e in events if str(e.get("commence_time", ""))[:10] == today]
+    # Filter to today+tomorrow ET window, cap count
+    today_events = [e for e in events if str(e.get("commence_time", ""))[:10] in _et_dates]
     today_events = today_events[:max_events]
 
     if not today_events:
@@ -369,7 +371,8 @@ def get_soccer_player_props_from_odds(
         return []
 
     use_leagues = league_keys or list(_SOCCER_PROP_SPORT_KEYS.keys())
-    today = datetime.date.today().isoformat()
+    _et_date   = _et_today()
+    _et_dates  = {_et_date.isoformat(), (_et_date + datetime.timedelta(days=1)).isoformat()}
     results: list[dict] = []
     seen: set = set()
 
@@ -389,9 +392,9 @@ def get_soccer_player_props_from_odds(
             continue
 
         today_events = [e for e in events
-                        if str(e.get("commence_time", ""))[:10] == today][:max_events_per_league]
+                        if str(e.get("commence_time", ""))[:10] in _et_dates][:max_events_per_league]
         if not today_events:
-            print(f"[odds_fetcher] No {lk} events today")
+            print(f"[odds_fetcher] No {lk} events today/tomorrow")
             continue
 
         for event in today_events:

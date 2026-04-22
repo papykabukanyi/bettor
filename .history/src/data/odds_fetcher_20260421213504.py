@@ -221,9 +221,7 @@ def get_player_props_odds(
         return []
 
     raw_sport = SPORT_MAP.get(sport_key.lower(), sport_key)
-    import datetime as _ods_dt
-    _et_date   = _et_today()
-    _et_dates  = {_et_date.isoformat(), (_et_date + _ods_dt.timedelta(days=1)).isoformat()}
+    today     = datetime.date.today().isoformat()
 
     # Step 1: get event list (0 credits used)
     events_url = f"{ODDS_API_BASE}/sports/{raw_sport}/events"
@@ -235,8 +233,8 @@ def get_player_props_odds(
         print(f"[odds_fetcher] events fetch error: {e}")
         return []
 
-    # Filter to today+tomorrow ET window, cap count
-    today_events = [e for e in events if str(e.get("commence_time", ""))[:10] in _et_dates]
+    # Filter to today's events only, cap count
+    today_events = [e for e in events if str(e.get("commence_time", ""))[:10] == today]
     today_events = today_events[:max_events]
 
     if not today_events:
@@ -371,8 +369,7 @@ def get_soccer_player_props_from_odds(
         return []
 
     use_leagues = league_keys or list(_SOCCER_PROP_SPORT_KEYS.keys())
-    _et_date   = _et_today()
-    _et_dates  = {_et_date.isoformat(), (_et_date + datetime.timedelta(days=1)).isoformat()}
+    today = datetime.date.today().isoformat()
     results: list[dict] = []
     seen: set = set()
 
@@ -392,9 +389,9 @@ def get_soccer_player_props_from_odds(
             continue
 
         today_events = [e for e in events
-                        if str(e.get("commence_time", ""))[:10] in _et_dates][:max_events_per_league]
+                        if str(e.get("commence_time", ""))[:10] == today][:max_events_per_league]
         if not today_events:
-            print(f"[odds_fetcher] No {lk} events today/tomorrow")
+            print(f"[odds_fetcher] No {lk} events today")
             continue
 
         for event in today_events:

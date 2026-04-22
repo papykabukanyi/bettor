@@ -181,8 +181,8 @@ def get_todays_fixtures(league_keys: list[str] | None = None) -> list[dict]:
     headers  = {"X-Auth-Token": FOOTBALL_DATA_API_KEY}
     use_keys = league_keys if league_keys else list(_FDORG_LEAGUE_MAP.keys())
     fixtures = []
-    today    = _et_today().isoformat()
-    tomorrow = (_et_today() + _dt.timedelta(days=1)).isoformat()
+    today    = _dt.date.today().isoformat()
+    tomorrow = (_dt.date.today() + _dt.timedelta(days=1)).isoformat()
 
     for lk in use_keys:
         comp_id = _FDORG_LEAGUE_MAP.get(lk)
@@ -243,8 +243,8 @@ def get_fixtures_range(league_keys=None) -> list[dict]:
     headers  = {"X-Auth-Token": FOOTBALL_DATA_API_KEY}
     use_keys = league_keys if league_keys else list(_FDORG_LEAGUE_MAP.keys())
     fixtures = []
-    today    = _et_today().isoformat()
-    tomorrow = (_et_today() + _dt.timedelta(days=1)).isoformat()
+    today    = _dt.date.today().isoformat()
+    tomorrow = (_dt.date.today() + _dt.timedelta(days=1)).isoformat()
 
     for lk in use_keys:
         comp_id = _FDORG_LEAGUE_MAP.get(lk)

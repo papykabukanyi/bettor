@@ -5,7 +5,7 @@ from flask import Flask, render_template, jsonify, request
 
 SRC_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SRC_DIR)
-from config import MIN_VALUE_EDGE, KELLY_FRACTION, MLB_SEASONS
+from config import MIN_VALUE_EDGE, KELLY_FRACTION, MLB_SEASONS, et_today
 
 app = Flask(__name__, template_folder="templates")
 
@@ -351,8 +351,8 @@ def _run_analysis():
         _logs.clear()
     _log("=== Analysis started ===")
     try:
-        today    = datetime.date.today().isoformat()
-        tomorrow = (datetime.date.today() + datetime.timedelta(days=1)).isoformat()
+        today    = et_today().isoformat()
+        tomorrow = (et_today() + datetime.timedelta(days=1)).isoformat()
 
         _phase(0)
         from data.mlb_fetcher import (get_schedule_range, build_game_dataset,
@@ -541,7 +541,7 @@ def _run_analysis():
             from data.soccer_fetcher import (get_soccer_player_props_batch,
                                               get_fixtures_range, _FBREF_BLOCKED)
             import datetime as _sdt
-            _cur_year = _sdt.date.today().year
+            _cur_year = et_today().year
             _soccer_season = f"{_cur_year - 1}-{_cur_year}"
             if not _FBREF_BLOCKED:
                 try:
@@ -681,8 +681,8 @@ def _run_analysis():
 
 
 def _build_upcoming(mlb_games, soccer_fixtures):
-    today    = datetime.date.today().isoformat()
-    tomorrow = (datetime.date.today() + datetime.timedelta(days=1)).isoformat()
+    today    = et_today().isoformat()
+    tomorrow = (et_today() + datetime.timedelta(days=1)).isoformat()
     result   = []
     for g in mlb_games:
         d = g.get("date", today)
@@ -707,8 +707,8 @@ def _build_upcoming(mlb_games, soccer_fixtures):
 @app.route("/")
 def index():
     with _lock: state = dict(_state)
-    today    = datetime.date.today().isoformat()
-    tomorrow = (datetime.date.today() + datetime.timedelta(days=1)).isoformat()
+    today    = et_today().isoformat()
+    tomorrow = (et_today() + datetime.timedelta(days=1)).isoformat()
     return render_template("dashboard.html", state=state, today=today, tomorrow=tomorrow)
 
 

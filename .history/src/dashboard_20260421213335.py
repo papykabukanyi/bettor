@@ -541,7 +541,7 @@ def _run_analysis():
             from data.soccer_fetcher import (get_soccer_player_props_batch,
                                               get_fixtures_range, _FBREF_BLOCKED)
             import datetime as _sdt
-            _cur_year = et_today().year
+            _cur_year = _sdt.date.today().year
             _soccer_season = f"{_cur_year - 1}-{_cur_year}"
             if not _FBREF_BLOCKED:
                 try:
