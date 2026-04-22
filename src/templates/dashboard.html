@@ -261,10 +261,197 @@ body{background:var(--bg);color:var(--tx);font-family:'Segoe UI',system-ui,sans-
   .tabs{gap:2px}.tab{padding:7px 12px;font-size:11px}
   .ltab-panel.on{grid-template-columns:1fr}
 }
+
+/* ════════════════════════════════════════════════════
+   LOADING SCREEN
+════════════════════════════════════════════════════ */
+#splash{
+  position:fixed;inset:0;z-index:9999;
+  background:var(--bg);
+  display:flex;flex-direction:column;align-items:center;justify-content:center;
+  transition:opacity .5s ease, visibility .5s ease;
+  overflow:hidden;
+}
+#splash.hidden{opacity:0;visibility:hidden;pointer-events:none}
+
+/* ── Particle field ── */
+#splash-particles{position:absolute;inset:0;overflow:hidden;pointer-events:none}
+.sp-dot{
+  position:absolute;border-radius:50%;
+  animation:sp-float linear infinite;
+  opacity:0;
+}
+@keyframes sp-float{
+  0%  {transform:translateY(0)   scale(1);   opacity:0}
+  10% {opacity:.6}
+  90% {opacity:.3}
+  100%{transform:translateY(-110vh) scale(.4);opacity:0}
+}
+
+/* ── Logo ── */
+.splash-logo{
+  width:80px;height:80px;border-radius:22px;
+  background:linear-gradient(135deg,#22c55e,#0d9488);
+  display:flex;align-items:center;justify-content:center;
+  font-size:40px;font-weight:900;color:#000;
+  box-shadow:0 0 50px #22c55e55, 0 0 100px #22c55e22;
+  animation:logo-breathe 2.5s ease-in-out infinite;
+  margin-bottom:22px;flex-shrink:0;
+}
+@keyframes logo-breathe{
+  0%,100%{box-shadow:0 0 40px #22c55e44,0 0 80px #22c55e18;transform:scale(1)}
+  50%    {box-shadow:0 0 70px #22c55e88,0 0 140px #22c55e44;transform:scale(1.04)}
+}
+
+/* ── Title ── */
+.splash-title{font-size:2rem;font-weight:900;letter-spacing:-.5px;margin-bottom:4px}
+.splash-title em{color:var(--gr);font-style:normal}
+.splash-sub{font-size:12px;color:var(--mt);margin-bottom:36px;letter-spacing:.3px}
+
+/* ── Stage list ── */
+.splash-stages{
+  display:flex;flex-direction:column;gap:8px;
+  width:min(380px,88vw);margin-bottom:28px;
+}
+.spl-stage{
+  display:flex;align-items:center;gap:10px;
+  font-size:12px;color:var(--mt2);
+  transition:color .3s;
+}
+.spl-stage.done{color:var(--mt)}
+.spl-stage.act {color:var(--gr);font-weight:700}
+.spl-stage-icon{
+  width:22px;height:22px;border-radius:50%;flex-shrink:0;
+  display:flex;align-items:center;justify-content:center;
+  font-size:10px;background:var(--s3);color:var(--mt2);
+  border:1px solid var(--bd);
+  transition:all .3s;
+}
+.spl-stage.done .spl-stage-icon{background:var(--gd);color:var(--gr);border-color:#22c55e44}
+.spl-stage.act  .spl-stage-icon{
+  background:var(--gd);color:var(--gr);border-color:#22c55e88;
+  animation:spl-spin 1s linear infinite;
+}
+@keyframes spl-spin{to{transform:rotate(360deg)}}
+.spl-stage-lbl{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.spl-stage-val{font-size:10px;font-weight:800;color:var(--gr);margin-left:auto;white-space:nowrap}
+
+/* ── Progress bar ── */
+.splash-bar-wrap{width:min(380px,88vw);margin-bottom:8px}
+.splash-bar-track{height:3px;background:var(--s3);border-radius:999px;overflow:hidden}
+.splash-bar-fill{
+  height:100%;border-radius:999px;
+  background:linear-gradient(90deg,var(--gr),var(--tl),var(--bl));
+  background-size:200% 100%;
+  animation:bar-shine 1.8s linear infinite;
+  transition:width .5s ease;
+  width:0%;
+}
+@keyframes bar-shine{
+  0%  {background-position:100% 0}
+  100%{background-position:-100% 0}
+}
+.splash-pct{font-size:10px;color:var(--mt);text-align:right;margin-top:4px}
+
+/* ── DB stats strip ── */
+.splash-db-strip{
+  display:flex;gap:20px;flex-wrap:wrap;justify-content:center;
+  padding:10px 20px;border-radius:10px;
+  border:1px solid var(--bd);background:var(--s2);
+  animation:fadeInUp .5s ease;
+}
+@keyframes fadeInUp{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+.sdb-item{text-align:center}
+.sdb-val{font-size:1.1rem;font-weight:900;color:var(--gr)}
+.sdb-lbl{font-size:9px;color:var(--mt);text-transform:uppercase;letter-spacing:.4px;font-weight:700}
+
+/* ── Cached-data preview cards ── */
+.splash-preview{
+  position:absolute;bottom:0;left:0;right:0;
+  background:linear-gradient(transparent,var(--bg) 30%);
+  padding:60px 20px 16px;
+  display:flex;gap:8px;overflow:hidden;justify-content:center;
+  pointer-events:none;
+}
+.spl-pcard{
+  background:var(--sur);border:1px solid var(--bd);border-radius:10px;
+  padding:10px 14px;min-width:160px;max-width:200px;flex-shrink:0;
+  opacity:.55;transform:translateY(6px);
+  transition:all .4s;font-size:11px;
+}
+.spl-pcard.vis{opacity:.9;transform:translateY(0)}
+.spl-pcard-head{font-size:9px;font-weight:800;text-transform:uppercase;color:var(--mt);letter-spacing:.4px;margin-bottom:4px}
+.spl-pcard-val{font-size:1.0rem;font-weight:900;color:var(--gr)}
+.spl-pcard-sub{font-size:9px;color:var(--mt);margin-top:1px}
 </style>
 </head>
 <body>
-<div class="page">
+
+<!-- ════════════════════════════════════════════════════
+     ANIMATED LOADING SCREEN
+════════════════════════════════════════════════════ -->
+<div id="splash">
+
+  <!-- Floating particle field (filled by JS) -->
+  <div id="splash-particles"></div>
+
+  <!-- Logo + title -->
+  <div class="splash-logo">B</div>
+  <div class="splash-title">Bettor <em>AI</em></div>
+  <div class="splash-sub" id="spl-sub">Initializing · Loading your data…</div>
+
+  <!-- Stage checklist -->
+  <div class="splash-stages" id="spl-stages">
+    <div class="spl-stage" id="sst-db">
+      <div class="spl-stage-icon">●</div>
+      <span class="spl-stage-lbl">Connecting to database</span>
+      <span class="spl-stage-val" id="sst-db-val"></span>
+    </div>
+    <div class="spl-stage" id="sst-games">
+      <div class="spl-stage-icon">●</div>
+      <span class="spl-stage-lbl">Loading today's games</span>
+      <span class="spl-stage-val" id="sst-games-val"></span>
+    </div>
+    <div class="spl-stage" id="sst-bets">
+      <div class="spl-stage-icon">●</div>
+      <span class="spl-stage-lbl">Restoring cached bets</span>
+      <span class="spl-stage-val" id="sst-bets-val"></span>
+    </div>
+    <div class="spl-stage" id="sst-props">
+      <div class="spl-stage-icon">●</div>
+      <span class="spl-stage-lbl">Restoring player props</span>
+      <span class="spl-stage-val" id="sst-props-val"></span>
+    </div>
+    <div class="spl-stage" id="sst-ready">
+      <div class="spl-stage-icon">●</div>
+      <span class="spl-stage-lbl">Preparing dashboard</span>
+      <span class="spl-stage-val" id="sst-ready-val"></span>
+    </div>
+  </div>
+
+  <!-- Progress bar -->
+  <div class="splash-bar-wrap">
+    <div class="splash-bar-track">
+      <div class="splash-bar-fill" id="spl-bar"></div>
+    </div>
+    <div class="splash-pct" id="spl-pct">0%</div>
+  </div>
+
+  <!-- DB stats strip (revealed after data loads) -->
+  <div class="splash-db-strip" id="spl-db-strip" style="display:none">
+    <div class="sdb-item"><div class="sdb-val" id="sdb-games">—</div><div class="sdb-lbl">Games</div></div>
+    <div class="sdb-item"><div class="sdb-val" id="sdb-bets">—</div><div class="sdb-lbl">Bets</div></div>
+    <div class="sdb-item"><div class="sdb-val" id="sdb-props">—</div><div class="sdb-lbl">Props</div></div>
+    <div class="sdb-item"><div class="sdb-val" id="sdb-updated">—</div><div class="sdb-lbl">Last Updated</div></div>
+  </div>
+
+  <!-- Preview cards (ghost of cached data) -->
+  <div class="splash-preview" id="spl-preview"></div>
+
+</div>
+<!-- END LOADING SCREEN -->
+
+<div class="page" id="main-app" style="opacity:0;transition:opacity .5s ease">
 
 <!-- HEADER -->
 <div class="hdr">
@@ -759,6 +946,7 @@ body{background:var(--bg);color:var(--tx);font-family:'Segoe UI',system-ui,sans-
 </div>
 
 </div><!-- /page -->
+</div><!-- /main-app -->
 
 <!-- CONSOLE -->
 <div class="console-wrap" id="console-wrap">
@@ -1138,6 +1326,219 @@ function startPolling() {
 }
 
 if (STATUS === 'running') startPolling();
+
+// ════════════════════════════════════════════════════
+// LOADING SCREEN  (session-aware boot)
+// ════════════════════════════════════════════════════
+(function () {
+  const _SES_KEY = 'bettor_v4_session';
+  const _SES_TTL = 30 * 60 * 1000; // 30 minutes
+
+  // ── Session helpers ──────────────────────────────
+  function _loadSession() {
+    try { return JSON.parse(localStorage.getItem(_SES_KEY) || 'null'); }
+    catch { return null; }
+  }
+  function _saveSession(data) {
+    try { localStorage.setItem(_SES_KEY, JSON.stringify({ ts: Date.now(), ...data })); }
+    catch {}
+  }
+  function _clearSession() {
+    try { localStorage.removeItem(_SES_KEY); }
+    catch {}
+  }
+  function _sessionFresh(ses) {
+    return ses && ses.ts && (Date.now() - ses.ts < _SES_TTL);
+  }
+
+  // ── Splash element helpers ───────────────────────
+  const $splash  = document.getElementById('splash');
+  const $main    = document.getElementById('main-app');
+  const $bar     = document.getElementById('spl-bar');
+  const $pct     = document.getElementById('spl-pct');
+  const $sub     = document.getElementById('spl-sub');
+  const $dbStrip = document.getElementById('spl-db-strip');
+  const $preview = document.getElementById('spl-preview');
+
+  function _setProgress(pct) {
+    $bar.style.width = pct + '%';
+    $pct.textContent = Math.round(pct) + '%';
+  }
+  function _activateStage(id) {
+    document.querySelectorAll('.spl-stage').forEach(s => {
+      if (s.id === id) { s.classList.add('act'); s.classList.remove('done'); }
+      else if (s.classList.contains('act')) { s.classList.remove('act'); s.classList.add('done'); s.querySelector('.spl-stage-icon').textContent = '✓'; }
+    });
+  }
+  function _doneStage(id, valText) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.classList.remove('act');
+    el.classList.add('done');
+    el.querySelector('.spl-stage-icon').textContent = '✓';
+    if (valText) document.getElementById(id + '-val').textContent = valText;
+  }
+
+  // ── Particles ────────────────────────────────────
+  function _spawnParticles() {
+    const field = document.getElementById('splash-particles');
+    const colors = ['#22c55e','#14b8a6','#3b82f6','#a855f7','#f0b429'];
+    const sizes  = [3,4,5,3,4,6];
+    for (let i = 0; i < 28; i++) {
+      const d = document.createElement('div');
+      d.className = 'sp-dot';
+      const sz = sizes[i % sizes.length];
+      d.style.cssText = [
+        `left:${Math.random()*100}%`,
+        `bottom:${-10 - Math.random()*20}px`,
+        `width:${sz}px`,`height:${sz}px`,
+        `background:${colors[i % colors.length]}`,
+        `animation-duration:${6 + Math.random()*10}s`,
+        `animation-delay:${Math.random()*12}s`,
+      ].join(';');
+      field.appendChild(d);
+    }
+  }
+
+  // ── Preview ghost cards ───────────────────────────
+  function _buildPreview(cache) {
+    if (!cache) return;
+    const items = [];
+    if (cache.db_stats.total_games > 0)
+      items.push({ head:'Games Today', val: cache.db_stats.total_games, sub: 'MLB + Soccer' });
+    if (cache.db_stats.total_props > 0)
+      items.push({ head:'Cached Props', val: cache.db_stats.total_props, sub: 'Player picks ready' });
+    if (cache.db_stats.total_bets > 0)
+      items.push({ head:'Cached Bets', val: cache.db_stats.total_bets, sub: 'Value bets found' });
+    if (cache.last_updated)
+      items.push({ head:'Last Run', val: cache.last_updated, sub: 'Data freshness', str: true });
+    if (!items.length) return;
+    items.forEach((item, i) => {
+      const c = document.createElement('div');
+      c.className = 'spl-pcard';
+      c.innerHTML = `<div class="spl-pcard-head">${item.head}</div>
+        <div class="spl-pcard-val">${item.val}</div>
+        <div class="spl-pcard-sub">${item.sub}</div>`;
+      $preview.appendChild(c);
+      setTimeout(() => c.classList.add('vis'), 100 + i * 120);
+    });
+  }
+
+  // ── Animate the progress bar smoothly ──────────────
+  let _pctNow = 0;
+  function _animTo(target, durationMs, onDone) {
+    const start = _pctNow;
+    const t0 = performance.now();
+    function tick(now) {
+      const elapsed = Math.min(now - t0, durationMs);
+      const frac    = elapsed / durationMs;
+      const ease    = 1 - Math.pow(1 - frac, 3);
+      _pctNow = start + (target - start) * ease;
+      _setProgress(_pctNow);
+      if (elapsed < durationMs) { requestAnimationFrame(tick); }
+      else { _pctNow = target; _setProgress(target); if (onDone) onDone(); }
+    }
+    requestAnimationFrame(tick);
+  }
+
+  // ── Reveal main app ────────────────────────────────
+  function _revealApp() {
+    $sub.textContent = 'Ready — entering dashboard…';
+    _animTo(100, 400, () => {
+      setTimeout(() => {
+        $splash.classList.add('hidden');
+        $main.style.opacity = '1';
+        // after splash hides, stop particles from eating memory
+        setTimeout(() => $splash.style.display = 'none', 600);
+      }, 500);
+    });
+  }
+
+  // ── Main boot sequence ─────────────────────────────
+  async function _boot() {
+    _spawnParticles();
+    _setProgress(0);
+
+    // ── Check for fresh session (skip heavy load) ──
+    const ses = _loadSession();
+    if (_sessionFresh(ses)) {
+      $sub.textContent = 'Session resumed (' + Math.round((Date.now()-ses.ts)/60000) + 'm ago)';
+      _activateStage('sst-ready');
+      _animTo(95, 600, () => {
+        _doneStage('sst-db',    ses.cache_stats ? ses.cache_stats.total_games + ' games' : '✓');
+        _doneStage('sst-games', '✓');
+        _doneStage('sst-bets',  ses.cache_stats ? ses.cache_stats.total_bets + ' bets' : '✓');
+        _doneStage('sst-props', ses.cache_stats ? ses.cache_stats.total_props + ' props' : '✓');
+        _doneStage('sst-ready', 'READY');
+        setTimeout(_revealApp, 700);
+      });
+      return;
+    }
+
+    // ── Fresh load — fetch cached-state from DB ──
+    _activateStage('sst-db');
+    $sub.textContent = 'Connecting to database…';
+    _animTo(15, 600);
+
+    let cacheData = null;
+    try {
+      const res = await fetch('/api/cached-state');
+      cacheData = await res.json();
+    } catch (e) {
+      cacheData = { has_cache: false, db_stats: { total_games:0, total_bets:0, total_props:0 } };
+    }
+
+    _doneStage('sst-db', 'connected');
+    _activateStage('sst-games');
+    $sub.textContent = 'Loading today\'s games…';
+    _animTo(35, 500);
+    await _delay(400);
+
+    const gs = cacheData.db_stats || {};
+    _doneStage('sst-games', (gs.total_games || 0) + ' games');
+    _activateStage('sst-bets');
+    $sub.textContent = 'Restoring cached bets…';
+    _animTo(55, 500);
+    await _delay(400);
+
+    _doneStage('sst-bets', (gs.total_bets || 0) + ' bets');
+    _activateStage('sst-props');
+    $sub.textContent = 'Restoring player props…';
+    _animTo(75, 500);
+    await _delay(400);
+
+    _doneStage('sst-props', (gs.total_props || 0) + ' props');
+    _activateStage('sst-ready');
+    $sub.textContent = 'Preparing dashboard…';
+    _animTo(92, 500);
+    await _delay(400);
+
+    // ── Show DB stats strip ──
+    if (cacheData.has_cache || gs.total_games > 0) {
+      document.getElementById('sdb-games').textContent   = gs.total_games || 0;
+      document.getElementById('sdb-bets').textContent    = gs.total_bets  || 0;
+      document.getElementById('sdb-props').textContent   = gs.total_props || 0;
+      document.getElementById('sdb-updated').textContent = cacheData.last_updated || '—';
+      $dbStrip.style.display = 'flex';
+      $dbStrip.style.animation = 'fadeInUp .4s ease';
+    }
+
+    _buildPreview(cacheData);
+    _doneStage('sst-ready', 'READY');
+
+    // ── Save session ──
+    _saveSession({ cache_stats: gs, has_cache: cacheData.has_cache });
+
+    await _delay(900);
+    _revealApp();
+  }
+
+  function _delay(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+  // ── Kick off on DOMContentLoaded (already fired since this is inline) ──
+  _boot();
+
+})();
 </script>
 </body>
 </html>

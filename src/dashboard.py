@@ -748,6 +748,93 @@ def api_games():
         return jsonify([])
 
 
+@app.route("/api/cached-state")
+def api_cached_state():
+    """
+    Return the last-saved bets + props from the database so the loading
+    screen can show real data while the app warms up.
+    Returns a JSON object mirroring the _state structure.
+    """
+    today    = et_today().isoformat()
+    tomorrow = (et_today() + datetime.timedelta(days=1)).isoformat()
+    result = {
+        "has_cache":         False,
+        "last_updated":      None,
+        "today_team_picks":  [],
+        "tomorrow_team_picks": [],
+        "player_props":      [],
+        "upcoming_games":    [],
+        "db_stats": {
+            "total_games": 0,
+            "total_bets":  0,
+            "total_props": 0,
+        }
+    }
+    try:
+        from data.db import get_conn, get_upcoming_games, get_todays_prop_picks
+        import psycopg2.extras
+
+        # ── 1. Upcoming games ──
+        games = get_upcoming_games(days_ahead=1)
+        result["upcoming_games"] = games
+        result["db_stats"]["total_games"] = len(games)
+
+        # ── 2. Today's cached prop picks (up to 4h old) ──
+        cached_props = get_todays_prop_picks(max_age_hours=4)
+        if cached_props:
+            result["player_props"] = cached_props
+            result["db_stats"]["total_props"] = len(cached_props)
+            result["has_cache"] = True
+
+        # ── 3. Today's + tomorrow's cached value bets ──
+        conn = get_conn()
+        if conn:
+            try:
+                cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+                cur.execute("""
+                    SELECT sport, matchup, game_date, bet, model_prob, book_prob,
+                           edge, odds_am, dec_odds, stake_usd, ev, bet_type, detected_at
+                    FROM   value_bets
+                    WHERE  game_date IN (%s::date, %s::date)
+                      AND  detected_at > NOW() - INTERVAL '6 hours'
+                    ORDER BY edge DESC NULLS LAST
+                    LIMIT 60
+                """, (today, tomorrow))
+                bets = []
+                for r in cur.fetchall():
+                    d = dict(r)
+                    if isinstance(d.get("game_date"), datetime.date):
+                        d["game_date"] = d["game_date"].isoformat()
+                    if d.get("detected_at"):
+                        d["detected_at"] = d["detected_at"].isoformat()
+                    # Determine when label
+                    d["when_label"] = "TODAY" if d.get("game_date") == today else "TOMORROW"
+                    bets.append(d)
+                result["today_team_picks"]    = [b for b in bets if b.get("game_date") == today]
+                result["tomorrow_team_picks"] = [b for b in bets if b.get("game_date") == tomorrow]
+                result["db_stats"]["total_bets"] = len(bets)
+                if bets:
+                    result["has_cache"] = True
+                # Get last detected_at as last_updated
+                cur.execute("SELECT MAX(detected_at) FROM value_bets WHERE game_date >= CURRENT_DATE - 1")
+                row = cur.fetchone()
+                if row and row.get("max"):
+                    ts = row["max"]
+                    if hasattr(ts, "strftime"):
+                        result["last_updated"] = ts.strftime("%b %d %I:%M %p ET")
+                    else:
+                        result["last_updated"] = str(ts)[:16]
+            except Exception as e:
+                print(f"[api/cached-state] value_bets query: {e}")
+            finally:
+                conn.close()
+    except Exception as e:
+        print(f"[api/cached-state] error: {e}")
+
+    return jsonify(result)
+
+
+
 if __name__ == "__main__":
     try:
         from data.db import init_schema
