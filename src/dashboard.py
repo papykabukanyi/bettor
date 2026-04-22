@@ -1,21 +1,22 @@
-"""Betting Bot - Web Dashboard"""
+"""Betting Bot - Web Dashboard v3"""
 import os, sys, datetime, threading, traceback
 from collections import deque
 from flask import Flask, render_template, jsonify, request
 
 SRC_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SRC_DIR)
-from config import BANKROLL, MIN_VALUE_EDGE, KELLY_FRACTION, MLB_SEASONS
+from config import MIN_VALUE_EDGE, KELLY_FRACTION, MLB_SEASONS
 
 app = Flask(__name__, template_folder="templates")
 
 _PHASES = [
     "Fetching MLB schedule",
     "Fetching soccer fixtures",
-    "Loading stats & model",
+    "Loading stats & models",
     "Fetching injury reports",
     "Fetching live odds",
-    "Running value models",
+    "Running team win algorithm",
+    "Analyzing player props",
     "Building parlays",
     "Saving to database",
 ]
@@ -23,15 +24,15 @@ _PHASES = [
 _state = {
     "status": "idle", "phase": "", "phase_idx": 0, "phase_total": len(_PHASES),
     "last_updated": None, "error": None,
-    "top_picks": [],
-    "win_bets": [], "totals_bets": [], "prop_stats": [],
-    "parlays": [], "parlays_2": [], "parlays_3": [], "parlays_4": [],
-    "mlb_games": 0, "soccer_games": 0,
-    "upcoming_games": [], "injuries": [], "api_remaining": None,
+    "today_team_picks": [],
+    "tomorrow_team_picks": [],
+    "player_props": [],
+    "prop_parlays": {},
+    "team_parlays": {},
+    "upcoming_games": [],
 }
 _lock = threading.Lock()
 
-# ── Live log buffer ───────────────────────────────────────────────
 _logs = deque(maxlen=400)
 _logs_lock = threading.Lock()
 
@@ -45,7 +46,6 @@ def _log(msg):
 
 
 class _StdoutCapture:
-    """Redirect stdout into the live log buffer during analysis."""
     def __init__(self, real):
         self._real = real
 
@@ -64,71 +64,129 @@ class _StdoutCapture:
         return self._real.fileno()
 
 
-# ── Plain-language top picks ──────────────────────────────────────
-def _make_top_picks(win_bets, totals_bets, prop_stats):
-    today    = datetime.date.today().isoformat()
-    tomorrow = (datetime.date.today() + datetime.timedelta(days=1)).isoformat()
-
-    def _when(b):
-        gdate = b.get("date", "")
-        gtime = b.get("game_time", "")
-        st    = (b.get("status") or "").upper()
-        if "IN PROGRESS" in st or "LIVE" in st:
-            return "LIVE NOW"
-        if gdate == today and gtime:
-            return f"TODAY {gtime} ET"
-        if gdate == today:
-            return "TODAY"
-        if gdate == tomorrow:
-            return ("TOMORROW " + gtime + " ET") if gtime else "TOMORROW"
-        return gdate or "TBD"
-
-    picks = []
-    for b in sorted(win_bets, key=lambda x: x.get("edge", 0), reverse=True)[:6]:
-        parts = (b.get("matchup") or "").split(" vs ")
-        ht = parts[0] if len(parts) == 2 else b.get("matchup", "?")
-        at = parts[1] if len(parts) == 2 else "?"
-        team = at if b.get("bet") == "AWAY" else (ht if b.get("bet") == "HOME" else "DRAW")
-        odds_am = b.get("odds_am", 0)
-        odds_s  = f"+{odds_am}" if odds_am > 0 else str(odds_am)
-        picks.append({
-            "text":  f"Bet ${round(b.get('stake_usd', 20))} on {team} to WIN",
-            "sub":   f"{at} @ {ht}  \u00b7  {_when(b)}  \u00b7  Odds {odds_s}  \u00b7  {round(b.get('model_prob', 0.5)*100)}% confident",
-            "type":  "win", "edge": b.get("edge", 0),
-            "sport": b.get("sport", "mlb"), "when": _when(b),
-        })
-
-    for b in sorted(totals_bets, key=lambda x: x.get("edge", 0), reverse=True)[:4]:
-        parts = (b.get("matchup") or "").split(" vs ")
-        ht = parts[0] if len(parts) == 2 else b.get("matchup", "?")
-        at = parts[1] if len(parts) == 2 else "?"
-        odds_am = b.get("odds_am", 0)
-        odds_s  = f"+{odds_am}" if odds_am > 0 else str(odds_am)
-        picks.append({
-            "text":  f"Bet ${round(b.get('stake_usd', 20))} on {b.get('bet','OVER')} {b.get('total_line','?')}",
-            "sub":   f"{at} @ {ht}  \u00b7  {_when(b)}  \u00b7  Odds {odds_s}  \u00b7  {round(b.get('model_prob', 0.5)*100)}% confident",
-            "type":  "total", "edge": b.get("edge", 0),
-            "sport": b.get("sport", "mlb"), "when": _when(b),
-        })
-
-    for p in prop_stats[:4]:
-        ov, un = p.get("over_prob", 0.5), p.get("under_prob", 0.5)
-        if max(ov, un) < 0.56:
-            continue
-        direction = "OVER" if ov >= un else "UNDER"
-        conf = round(max(ov, un) * 100)
-        picks.append({
-            "text":  f"Bet {direction} {p.get('line','?')} Ks - {p.get('name','?')}",
-            "sub":   f"MLB Pitcher Prop  \u00b7  {conf}% confident  \u00b7  {p.get('k9','?')} K/9 this season",
-            "type":  "prop", "edge": max(ov, un) - 0.5,
-            "sport": "mlb", "when": "TODAY",
-        })
-
-    picks.sort(key=lambda x: x.get("edge", 0), reverse=True)
-    return picks
+def _safety_score(model_prob, edge, book_prob=None):
+    prob_score  = min(float(model_prob or 0.5), 0.92)
+    edge_norm   = min(max(float(edge or 0), 0.0), 0.30) / 0.30
+    consistency = 1.0 - abs(float(model_prob or 0.5) - float(book_prob or model_prob or 0.5)) * 2.0
+    consistency = max(0.0, min(1.0, consistency))
+    return round(prob_score * 0.50 + edge_norm * 0.30 + consistency * 0.20, 4)
 
 
-# ── Phase helper ──────────────────────────────────────────────────
+def _safety_label(score):
+    if score >= 0.72:
+        return "ELITE"
+    if score >= 0.60:
+        return "SAFE"
+    if score >= 0.50:
+        return "MODERATE"
+    return "RISKY"
+
+
+def _when_str(gdate, gtime, status, today, tomorrow):
+    st = (status or "").upper()
+    if "IN PROGRESS" in st or "LIVE" in st:
+        return "LIVE NOW", "LIVE"
+    if gdate == today and gtime:
+        return f"TODAY {gtime} ET", "TODAY"
+    if gdate == today:
+        return "TODAY", "TODAY"
+    if gdate == tomorrow:
+        t = f" {gtime} ET" if gtime else ""
+        return f"TOMORROW{t}", "TOMORROW"
+    return gdate or "TBD", "UPCOMING"
+
+
+def _build_team_pick(bet, today, tomorrow):
+    parts     = (bet.get("matchup") or "").split(" vs ")
+    ht        = parts[0] if len(parts) == 2 else bet.get("matchup", "?")
+    at        = parts[1] if len(parts) == 2 else "?"
+    side      = bet.get("bet", "HOME")
+    pick_team = at if side == "AWAY" else (ht if side == "HOME" else "DRAW")
+    opp_team  = ht if side == "AWAY" else (at if side == "HOME" else "—")
+    odds_am   = bet.get("odds_am", 0)
+    safety    = _safety_score(bet.get("model_prob", 0.5), bet.get("edge", 0), bet.get("book_prob"))
+    when, when_label = _when_str(bet.get("date", today), bet.get("game_time"), bet.get("status"), today, tomorrow)
+    return {
+        "_id":          bet.get("_id", ""),
+        "sport":        (bet.get("sport") or "MLB").upper(),
+        "league":       bet.get("league", ""),
+        "home_team":    ht,
+        "away_team":    at,
+        "pick_team":    pick_team,
+        "opp_team":     opp_team,
+        "side":         side,
+        "conf":         round(float(bet.get("model_prob", 0.5)) * 100),
+        "edge":         round(float(bet.get("edge", 0)) * 100, 1),
+        "odds_am":      odds_am,
+        "odds_str":     (f"+{odds_am}" if odds_am and odds_am > 0 else str(odds_am or "N/A")),
+        "dec_odds":     float(bet.get("dec_odds", 2.0)),
+        "safety":       safety,
+        "safety_label": _safety_label(safety),
+        "when":         when,
+        "when_label":   when_label,
+        "home_starter": bet.get("home_starter", ""),
+        "away_starter": bet.get("away_starter", ""),
+        "ev":           round(float(bet.get("ev", 0)), 4),
+    }
+
+
+def _build_prop_pick(p, today, tomorrow):
+    ov, un    = float(p.get("over_prob", 0.5)), float(p.get("under_prob", 0.5))
+    direction = "OVER" if ov >= un else "UNDER"
+    conf      = round(max(ov, un) * 100)
+    dec_odds  = round(1.0 / max(ov, un), 3) if max(ov, un) > 0 else 2.0
+    safety    = _safety_score(max(ov, un), max(ov, un) - 0.5)
+    when, when_label = _when_str(p.get("date", today), p.get("game_time"), "", today, tomorrow)
+    return {
+        "_id":          p.get("_id", ""),
+        "name":         p.get("name", ""),
+        "team":         p.get("team", ""),
+        "game":         p.get("game", ""),
+        "prop_type":    "Pitcher Strikeouts",
+        "direction":    direction,
+        "line":         p.get("line", "?"),
+        "conf":         conf,
+        "safety":       safety,
+        "safety_label": _safety_label(safety),
+        "dec_odds":     dec_odds,
+        "when":         when,
+        "when_label":   when_label,
+        "era":          round(float(p.get("era", 0)), 2),
+        "k9":           round(float(p.get("k9", 0)), 1),
+        "whip":         round(float(p.get("whip", 0)), 2),
+        "avg_ks":       round(float(p.get("avg_per_game", 0)), 1),
+        "over_pct":     round(ov * 100),
+        "under_pct":    round(un * 100),
+    }
+
+
+def _build_parlays(picks, max_legs=10, top_n=3):
+    from itertools import combinations
+    result = {}
+    pool = sorted(picks, key=lambda x: x.get("safety", 0), reverse=True)[:18]
+    for n in range(2, min(max_legs + 1, len(pool) + 1)):
+        scored = []
+        for combo in combinations(pool, n):
+            comb_p = 1.0
+            for c in combo:
+                comb_p *= (c.get("conf", 50) / 100.0)
+            comb_d = 1.0
+            for c in combo:
+                comb_d *= float(c.get("dec_odds", 2.0))
+            avg_safety = sum(c.get("safety", 0) for c in combo) / n
+            scored.append({
+                "legs":          [c.get("label", "?") for c in combo],
+                "combined_prob": round(comb_p * 100, 1),
+                "combined_dec":  round(comb_d, 2),
+                "avg_safety":    round(avg_safety, 3),
+                "safety_label":  _safety_label(avg_safety),
+                "score":         round(comb_p * avg_safety, 5),
+            })
+        scored.sort(key=lambda x: x["score"], reverse=True)
+        result[str(n)] = scored[:top_n]
+    return result
+
+
 def _phase(idx, name=""):
     label = name or (_PHASES[idx] if idx < len(_PHASES) else name)
     with _lock:
@@ -137,7 +195,6 @@ def _phase(idx, name=""):
     _log(f"Phase {idx+1}/{len(_PHASES)}: {label}")
 
 
-# ── Main analysis thread ──────────────────────────────────────────
 def _run_analysis():
     import warnings; warnings.filterwarnings("ignore")
     import pandas as pd
@@ -145,19 +202,22 @@ def _run_analysis():
     sys.stdout = _StdoutCapture(_real)
     with _lock:
         _state["status"] = "running"; _state["error"] = None
-        _state["phase"] = _PHASES[0]; _state["phase_idx"] = 0
+        _state["phase"]  = _PHASES[0]; _state["phase_idx"] = 0
     with _logs_lock:
         _logs.clear()
     _log("=== Analysis started ===")
     try:
+        today    = datetime.date.today().isoformat()
+        tomorrow = (datetime.date.today() + datetime.timedelta(days=1)).isoformat()
+
         _phase(0)
         from data.mlb_fetcher import (get_schedule_range, build_game_dataset,
                                        estimate_game_total, get_starters_props_batch)
         from models.mlb_model import load_model, predict_from_season_stats
-        games = get_schedule_range(days_ahead=1)
-        today_str = datetime.date.today().isoformat()
-        today_games = [g for g in games if g.get("date", "") == today_str]
-        _log(f"MLB: {len(today_games)} games today, {len(games)} total scheduled")
+        games          = get_schedule_range(days_ahead=1)
+        today_games    = [g for g in games if g.get("date", "") == today]
+        tomorrow_games = [g for g in games if g.get("date", "") == tomorrow]
+        _log(f"MLB: {len(today_games)} today, {len(tomorrow_games)} tomorrow")
 
         _phase(1)
         from data.soccer_fetcher import get_todays_fixtures
@@ -165,32 +225,35 @@ def _run_analysis():
         soccer_model = load_soccer()
         soccer_preds = []
         fixtures = get_todays_fixtures(["EPL", "ESP", "GER"])
-        _log(f"Soccer: {len(fixtures)} fixtures today")
+        _log(f"Soccer: {len(fixtures)} fixtures")
         if soccer_model:
             for f in fixtures:
                 pred = soccer_model.predict(f["home_team"], f["away_team"])
                 pred.update({"home_team": f["home_team"], "away_team": f["away_team"],
                               "league": f.get("league", ""), "game_time": f.get("game_time"),
-                              "date": f.get("date", today_str)})
+                              "date": f.get("date", today)})
                 soccer_preds.append(pred)
         else:
             _log("WARNING: Soccer model not available")
 
         _phase(2)
-        _log("Loading season batting/pitching stats...")
-        stats = build_game_dataset([MLB_SEASONS[0]])
+        _log("Loading season stats for all teams...")
+        stats     = build_game_dataset([MLB_SEASONS[0]])
         mlb_model = load_model()
         mlb_preds = []
-        for g in today_games:
+        for g in games:
             if g.get("status", "") not in ("Preview", "Pre-Game", "Scheduled", "Warmup", ""):
-                _log(f"Skipping {g.get('home_team')} vs {g.get('away_team')} - {g.get('status')}")
                 continue
             pred = predict_from_season_stats(g["home_team"], g["away_team"], stats, mlb_model)
-            pred.update({"home_team": g["home_team"], "away_team": g["away_team"],
-                          "home_starter": g.get("home_starter", "TBD"),
-                          "away_starter": g.get("away_starter", "TBD"),
-                          "predicted_total": estimate_game_total(g["home_team"], g["away_team"], stats),
-                          "game_time": g.get("game_time"), "date": g.get("date", today_str)})
+            pred.update({
+                "home_team":       g["home_team"],
+                "away_team":       g["away_team"],
+                "home_starter":    g.get("home_starter", "TBD"),
+                "away_starter":    g.get("away_starter", "TBD"),
+                "predicted_total": estimate_game_total(g["home_team"], g["away_team"], stats),
+                "game_time":       g.get("game_time"),
+                "date":            g.get("date", today),
+            })
             mlb_preds.append(pred)
         _log(f"Predictions ready: {len(mlb_preds)} MLB, {len(soccer_preds)} soccer")
 
@@ -198,37 +261,29 @@ def _run_analysis():
         all_injuries = []
         try:
             from data.injury_fetcher import fetch_all_injuries
-            from data.db import save_injuries, get_injuries
+            from data.db import save_injuries
             raw_inj = fetch_all_injuries()
             for lk, lst in raw_inj.items():
-                sport = "mlb" if lk == "mlb" else "soccer"
-                save_injuries(sport, lst)
+                save_injuries("mlb" if lk == "mlb" else "soccer", lst)
                 all_injuries.extend(lst)
                 if lst:
                     _log(f"Injuries [{lk}]: {len(lst)} players affected")
-            if not all_injuries:
-                all_injuries = get_injuries()
-                _log(f"Using cached injuries: {len(all_injuries)} records")
         except Exception as e:
             _log(f"WARNING injuries skipped: {e}")
 
         _phase(4)
-        _log("Fetching live odds from The Odds API...")
+        _log("Fetching live odds...")
         from data.odds_fetcher import (get_live_odds, odds_to_dataframe,
                                         get_totals_odds, totals_to_dataframe)
-        ml_rows, tot_rows = [], []
+        ml_rows = []
         for sk in ["mlb", "epl", "laliga", "bundesliga"]:
             raw = get_live_odds(sk, markets="h2h")
             if raw:
                 d = odds_to_dataframe(raw); d["sport_key"] = sk; ml_rows.append(d)
-                _log(f"Moneyline [{sk}]: {len(raw)} games")
+                _log(f"Odds [{sk}]: {len(raw)} games")
             else:
-                _log(f"No moneyline odds for [{sk}]")
-            raw2 = get_totals_odds(sk)
-            if raw2:
-                d2 = totals_to_dataframe(raw2); d2["sport_key"] = sk; tot_rows.append(d2)
-        ml_df  = pd.concat(ml_rows,  ignore_index=True) if ml_rows  else pd.DataFrame()
-        tot_df = pd.concat(tot_rows, ignore_index=True) if tot_rows else pd.DataFrame()
+                _log(f"No odds yet [{sk}]")
+        ml_df = pd.concat(ml_rows, ignore_index=True) if ml_rows else pd.DataFrame()
 
         def sfilt(df, is_mlb):
             if df.empty: return df
@@ -236,35 +291,75 @@ def _run_analysis():
             return df[mask] if is_mlb else df[~mask]
 
         _phase(5)
-        _log("Comparing model probabilities vs bookmaker odds...")
-        from analysis.value_finder import find_value_bets, find_totals_bets, build_parlay
-        win_bets    = (find_value_bets(mlb_preds, sfilt(ml_df, True),  sport="mlb")
-                     + find_value_bets(soccer_preds, sfilt(ml_df, False), sport="soccer"))
-        totals_bets = (find_totals_bets(mlb_preds, sfilt(tot_df, True),  sport="mlb")
-                     + find_totals_bets(soccer_preds, sfilt(tot_df, False), sport="soccer"))
-        _log(f"Value found: {len(win_bets)} win bets, {len(totals_bets)} totals bets")
-        if not win_bets and not totals_bets:
-            _log("No value found - bookmaker odds are efficient or games not yet posted")
+        _log("Running team win algorithm (safety scores)...")
+        from analysis.value_finder import find_value_bets
+        win_bets = (find_value_bets(mlb_preds, sfilt(ml_df, True),  sport="mlb") +
+                    find_value_bets(soccer_preds, sfilt(ml_df, False), sport="soccer"))
+        _log(f"Team value bets: {len(win_bets)}")
+
+        game_lookup = {(g["home_team"], g["away_team"]): g for g in games}
+        for i, b in enumerate(win_bets):
+            b["_id"] = f"win_{i}"
+            pts = (b.get("matchup") or "").split(" vs ")
+            ht, at = (pts[0], pts[1]) if len(pts) == 2 else ("", "")
+            g = game_lookup.get((ht, at)) or {}
+            if not b.get("date"):      b["date"]      = g.get("date", today)
+            if not b.get("game_time"): b["game_time"] = g.get("game_time")
+            b["home_starter"] = g.get("home_starter", "")
+            b["away_starter"] = g.get("away_starter", "")
+
+        today_wins    = [b for b in win_bets if b.get("date", today) == today]
+        tomorrow_wins = [b for b in win_bets if b.get("date", "") == tomorrow]
 
         _phase(6)
-        parlays    = build_parlay(win_bets + totals_bets)
-        prop_stats = get_starters_props_batch(today_games, MLB_SEASONS[0])
-        _log(f"Props: {len(prop_stats)} starters, {len(parlays)} parlay combos")
+        _log("Analyzing player (pitcher) props...")
+        prop_raw = get_starters_props_batch(today_games + tomorrow_games, MLB_SEASONS[0])
+        for i, p in enumerate(prop_raw): p["_id"] = f"prop_{i}"
+        player_props = []
+        for p in prop_raw:
+            ov, un = float(p.get("over_prob", 0.5)), float(p.get("under_prob", 0.5))
+            if max(ov, un) >= 0.56:
+                for g in (today_games + tomorrow_games):
+                    if g.get("home_team", "") in (p.get("game", "")) or \
+                       g.get("away_team", "") in (p.get("game", "")):
+                        p["date"]      = g.get("date", today)
+                        p["game_time"] = g.get("game_time")
+                        break
+                player_props.append(_build_prop_pick(p, today, tomorrow))
+        player_props.sort(key=lambda x: x["safety"], reverse=True)
+        _log(f"Player props: {len(player_props)} qualifying picks")
 
         _phase(7)
+        _log("Building 2-10 leg parlays...")
+        today_team    = sorted([_build_team_pick(b, today, tomorrow) for b in today_wins],
+                               key=lambda x: x["safety"], reverse=True)
+        tomorrow_team = sorted([_build_team_pick(b, today, tomorrow) for b in tomorrow_wins],
+                               key=lambda x: x["safety"], reverse=True)
+
+        team_pool = [{"_id": p["_id"],
+                      "label": f"{p['pick_team']} to beat {p['opp_team']}",
+                      "dec_odds": p["dec_odds"], "conf": p["conf"], "safety": p["safety"]}
+                     for p in (today_team + tomorrow_team)]
+        prop_pool = [{"_id": p["_id"],
+                      "label": f"{p['name']} {p['direction']} {p['line']} Ks",
+                      "dec_odds": p["dec_odds"], "conf": p["conf"], "safety": p["safety"]}
+                     for p in player_props]
+
+        prop_parlays = _build_parlays(prop_pool, max_legs=10)
+        team_parlays = _build_parlays(team_pool, max_legs=6)
+        _log(f"Parlays: {sum(len(v) for v in prop_parlays.values())} prop, "
+             f"{sum(len(v) for v in team_parlays.values())} team")
+
+        _phase(8)
         upcoming_games = []
         try:
             from data.db import save_value_bets, get_upcoming_games
             save_value_bets(win_bets, "win")
-            save_value_bets(totals_bets, "totals")
             upcoming_games = get_upcoming_games(days_ahead=1)
-            _log(f"DB saved: {len(win_bets)+len(totals_bets)} bets, {len(upcoming_games)} games loaded")
+            _log(f"DB saved: {len(win_bets)} bets, {len(upcoming_games)} schedule rows")
         except Exception as e:
-            _log(f"DB save warning: {e}")
+            _log(f"DB warning: {e}")
             upcoming_games = _build_upcoming(games, fixtures)
-
-        top_picks = _make_top_picks(win_bets, totals_bets, prop_stats)
-        _log(f"Top picks ready: {len(top_picks)} recommendations")
 
         def _clean(obj):
             if isinstance(obj, list):  return [_clean(x) for x in obj]
@@ -274,31 +369,23 @@ def _run_analysis():
                 if isinstance(obj, np.integer):  return int(obj)
                 if isinstance(obj, np.floating): return float(obj)
                 if isinstance(obj, np.bool_):    return bool(obj)
-            except ImportError: pass
+            except ImportError:
+                pass
             if isinstance(obj, (datetime.date, datetime.datetime)):
                 return obj.isoformat()
             return obj
-
-        for i, b in enumerate(win_bets):    b["_id"] = f"win_{i}"
-        for i, b in enumerate(totals_bets): b["_id"] = f"tot_{i}"
-        for i, p in enumerate(prop_stats):  p["_id"] = f"prop_{i}"
-
-        p2 = [p for p in parlays if p["num_legs"] == 2][:10]
-        p3 = [p for p in parlays if p["num_legs"] == 3][:10]
-        p4 = [p for p in parlays if p["num_legs"] == 4][:10]
 
         _log("=== Done! ===")
         with _lock:
             _state.update({
                 "status": "done", "phase": "Complete",
-                "last_updated": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
-                "top_picks": _clean(top_picks),
-                "win_bets": _clean(win_bets), "totals_bets": _clean(totals_bets),
-                "prop_stats": _clean(prop_stats), "parlays": _clean(parlays[:5]),
-                "parlays_2": _clean(p2), "parlays_3": _clean(p3), "parlays_4": _clean(p4),
-                "mlb_games": len(mlb_preds), "soccer_games": len(soccer_preds),
-                "upcoming_games": _clean(upcoming_games),
-                "injuries": _clean(all_injuries[:100]),
+                "last_updated":        datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+                "today_team_picks":    _clean(today_team),
+                "tomorrow_team_picks": _clean(tomorrow_team),
+                "player_props":        _clean(player_props),
+                "prop_parlays":        _clean(prop_parlays),
+                "team_parlays":        _clean(team_parlays),
+                "upcoming_games":      _clean(upcoming_games),
             })
     except Exception:
         err = traceback.format_exc()
@@ -312,7 +399,7 @@ def _run_analysis():
 def _build_upcoming(mlb_games, soccer_fixtures):
     today    = datetime.date.today().isoformat()
     tomorrow = (datetime.date.today() + datetime.timedelta(days=1)).isoformat()
-    result = []
+    result   = []
     for g in mlb_games:
         d = g.get("date", today)
         if d in (today, tomorrow):
@@ -338,8 +425,7 @@ def index():
     with _lock: state = dict(_state)
     today    = datetime.date.today().isoformat()
     tomorrow = (datetime.date.today() + datetime.timedelta(days=1)).isoformat()
-    return render_template("dashboard.html", state=state, bankroll=BANKROLL,
-                           today=today, tomorrow=tomorrow)
+    return render_template("dashboard.html", state=state, today=today, tomorrow=tomorrow)
 
 
 @app.route("/api/run", methods=["POST"])

@@ -3,652 +3,766 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>Bettor Dashboard</title>
+<title>Bettor AI</title>
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 :root{
-  --bg:#08090d;--sur:#10131c;--s2:#181d2b;--s3:#1f2638;
-  --bd:#252d40;--bd2:#2e3851;--tx:#e4eaf4;--mt:#7a87a0;--mt2:#4a566a;
-  --gr:#22c55e;--gd:#14291a;--yw:#f0b429;--yd:#2a2510;
-  --re:#ef4444;--rd:#2d1414;--bl:#3b82f6;--bld:#141d2d;
-  --pu:#a855f7;--pd:#1e1030;--or:#f97316;--od:#2a1e0d;--tl:#14b8a6;
+  --bg:#070a10;--sur:#0e1118;--s2:#141820;--s3:#1a2030;--s4:#212840;
+  --bd:#1e2535;--bd2:#2a3450;--tx:#dde4f0;--mt:#7a8aa8;--mt2:#3d4f6a;
+  --gr:#22c55e;--gd:#0a1e10;--gd2:#0d2a14;
+  --yw:#f0b429;--yd:#1f1a08;
+  --re:#ef4444;--rd:#1f0a0a;
+  --bl:#3b82f6;--bld:#0a1020;
+  --pu:#a855f7;--pd:#160d24;
+  --or:#f97316;--od:#1f1208;
+  --tl:#14b8a6;--tld:#081a18;
+  --cy:#06b6d4;--cyd:#061418;
   --r:10px;--rl:14px;
+  --elite:#22c55e;--safe:#14b8a6;--mod:#f0b429;--risky:#ef4444;
 }
-body{background:var(--bg);color:var(--tx);font-family:'Segoe UI',system-ui,sans-serif;font-size:14px;line-height:1.5;min-height:100vh;padding-bottom:16px}
-a{color:inherit;text-decoration:none}
-.page{max-width:1280px;margin:0 auto;padding:20px 16px}
+body{background:var(--bg);color:var(--tx);font-family:'Segoe UI',system-ui,sans-serif;font-size:14px;line-height:1.5;min-height:100vh}
+.page{max-width:1360px;margin:0 auto;padding:18px 16px 32px}
 
-/* Header */
-.hdr{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;padding-bottom:18px;border-bottom:1px solid var(--bd);margin-bottom:18px}
+/* ── HEADER ── */
+.hdr{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;margin-bottom:20px;padding-bottom:16px;border-bottom:1px solid var(--bd)}
 .brand{display:flex;align-items:center;gap:12px}
-.brand-icon{width:42px;height:42px;border-radius:10px;background:linear-gradient(135deg,#22c55e,#16a34a);display:flex;align-items:center;justify-content:center;font-size:20px;font-weight:900;color:#000;flex-shrink:0}
-.brand h1{font-size:1.4rem;font-weight:800;letter-spacing:-.5px}
-.brand h1 span{color:var(--gr)}
-.brand p{color:var(--mt);font-size:11px}
+.logo{width:44px;height:44px;border-radius:12px;background:linear-gradient(135deg,#22c55e,#0d9488);display:flex;align-items:center;justify-content:center;font-size:22px;font-weight:900;color:#000;flex-shrink:0}
+.brand-text h1{font-size:1.35rem;font-weight:900;letter-spacing:-.5px}
+.brand-text h1 em{color:var(--gr);font-style:normal}
+.brand-text p{font-size:11px;color:var(--mt)}
 .hdr-right{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-.pill{display:inline-flex;align-items:center;gap:5px;padding:5px 13px;border-radius:999px;font-size:11px;font-weight:700;border:1px solid transparent}
-.pill.idle{background:var(--s2);color:var(--mt);border-color:var(--bd)}
-.pill.running{background:var(--gd);color:var(--gr);border-color:#22c55e44}
-.pill.done{background:var(--gd);color:var(--gr);border-color:#22c55e44}
-.pill.error{background:var(--rd);color:var(--re);border-color:#ef444444}
-.dot{width:7px;height:7px;border-radius:50%;flex-shrink:0}
-.dot.idle{background:var(--mt)}.dot.running{background:var(--gr);animation:blink 1s infinite}.dot.done{background:var(--gr)}.dot.error{background:var(--re)}
-@keyframes blink{0%,100%{opacity:1}50%{opacity:.2}}
-#run-btn{background:linear-gradient(135deg,#22c55e,#16a34a);color:#000;border:none;padding:9px 22px;border-radius:var(--r);font-weight:800;font-size:13px;cursor:pointer;transition:opacity .15s,transform .1s;white-space:nowrap}
-#run-btn:hover{opacity:.87;transform:translateY(-1px)}
-#run-btn:disabled{opacity:.35;cursor:not-allowed;transform:none}
+.status-pill{display:inline-flex;align-items:center;gap:5px;padding:5px 12px;border-radius:999px;font-size:11px;font-weight:700;border:1px solid transparent}
+.status-pill.idle{background:var(--s2);color:var(--mt);border-color:var(--bd)}
+.status-pill.running{background:var(--gd);color:var(--gr);border-color:#22c55e55}
+.status-pill.done{background:var(--gd);color:var(--gr);border-color:#22c55e44}
+.status-pill.error{background:var(--rd);color:var(--re);border-color:#ef444455}
+.sdot{width:7px;height:7px;border-radius:50%;flex-shrink:0}
+.sdot.idle{background:var(--mt)}.sdot.running{background:var(--gr);animation:pulse 1s infinite}.sdot.done{background:var(--gr)}.sdot.error{background:var(--re)}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
+.run-btn{background:linear-gradient(135deg,#22c55e,#0d9488);color:#000;border:none;padding:9px 22px;border-radius:var(--r);font-weight:800;font-size:13px;cursor:pointer;letter-spacing:.2px;transition:opacity .15s,transform .1s}
+.run-btn:hover{opacity:.88;transform:translateY(-1px)}
+.run-btn:disabled{opacity:.3;cursor:not-allowed;transform:none}
+.console-btn{background:var(--s2);color:var(--mt);border:1px solid var(--bd);padding:7px 13px;border-radius:var(--r);font-size:11px;font-weight:700;cursor:pointer;transition:all .15s}
+.console-btn:hover{border-color:var(--tl);color:var(--tl)}
 
-/* Progress */
-#progress-wrap{margin-bottom:18px;display:none}
-#progress-wrap.on{display:block}
-.prog-label{display:flex;justify-content:space-between;font-size:11px;color:var(--mt);margin-bottom:5px}
-.prog-track{height:4px;background:var(--s3);border-radius:999px;overflow:hidden}
-.prog-fill{height:100%;background:linear-gradient(90deg,var(--gr),var(--tl));border-radius:999px;transition:width .4s ease}
-.phase-steps{display:flex;gap:5px;flex-wrap:wrap;margin-top:7px}
-.ps{font-size:10px;padding:2px 7px;border-radius:999px;background:var(--s2);color:var(--mt2);border:1px solid var(--bd)}
-.ps.act{background:var(--gd);color:var(--gr);border-color:#22c55e44}
-.ps.dn{background:var(--s3);color:var(--mt);border-color:var(--bd)}
+/* ── PROGRESS ── */
+.prog-wrap{background:var(--sur);border:1px solid var(--bd);border-radius:var(--r);padding:14px 16px;margin-bottom:20px;display:none}
+.prog-wrap.on{display:block}
+.prog-head{display:flex;justify-content:space-between;font-size:11px;color:var(--mt);margin-bottom:8px}
+.prog-track{height:5px;background:var(--s3);border-radius:999px;overflow:hidden;margin-bottom:10px}
+.prog-fill{height:100%;background:linear-gradient(90deg,var(--gr),var(--tl));border-radius:999px;transition:width .5s ease}
+.phase-chips{display:flex;flex-wrap:wrap;gap:4px}
+.pchip{font-size:9px;padding:2px 8px;border-radius:999px;background:var(--s2);color:var(--mt2);border:1px solid var(--bd);white-space:nowrap}
+.pchip.act{background:var(--gd);color:var(--gr);border-color:#22c55e44}
+.pchip.done{background:var(--s3);color:var(--mt);border-color:var(--bd)}
 
-/* ── YOUR BETS TODAY (hero) ── */
-.hero{background:linear-gradient(135deg,#0d1a10,#101624);border:1px solid #22c55e33;border-radius:var(--rl);padding:20px;margin-bottom:22px}
-.hero-hdr{display:flex;align-items:center;gap:10px;margin-bottom:16px;flex-wrap:wrap}
-.hero-hdr h2{font-size:1.05rem;font-weight:900;letter-spacing:-.3px}
-.hero-badge{background:var(--gd);color:var(--gr);border:1px solid #22c55e44;font-size:10px;font-weight:800;padding:3px 10px;border-radius:999px}
-.hero-sub{font-size:11px;color:var(--mt);margin-left:auto}
-.picks-list{display:flex;flex-direction:column;gap:10px}
-.pick-row{display:flex;align-items:flex-start;gap:12px;background:var(--sur);border:1px solid var(--bd);border-radius:var(--r);padding:14px 16px;transition:border-color .15s}
-.pick-row:hover{border-color:var(--bd2)}
-.pick-num{width:28px;height:28px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:900;flex-shrink:0;margin-top:1px}
-.pick-num.win{background:var(--gd);color:var(--gr);border:1px solid #22c55e44}
-.pick-num.total{background:var(--bld);color:var(--bl);border:1px solid #3b82f644}
-.pick-num.prop{background:var(--od);color:var(--or);border:1px solid #f9731644}
-.pick-body{flex:1;min-width:0}
-.pick-text{font-size:1rem;font-weight:800;line-height:1.2}
-.pick-sub{font-size:11px;color:var(--mt);margin-top:3px;line-height:1.4}
-.pick-tag{display:inline-block;font-size:9px;font-weight:800;text-transform:uppercase;letter-spacing:.5px;padding:2px 7px;border-radius:4px;margin-top:5px}
-.pick-tag.win{background:var(--gd);color:var(--gr)}
-.pick-tag.total{background:var(--bld);color:var(--bl)}
-.pick-tag.prop{background:var(--od);color:var(--or)}
-.pick-tag.live{background:var(--rd);color:var(--re);animation:blink 1.2s infinite}
-.pick-edge{font-size:11px;font-weight:800;color:var(--gr);white-space:nowrap;padding-top:2px}
-.empty-hero{text-align:center;padding:28px 16px;color:var(--mt)}
-.empty-hero .ei{font-size:2rem;display:block;margin-bottom:8px}
-.empty-hero strong{display:block;color:var(--tx);font-size:.95rem}
-.empty-hero p{margin-top:5px;font-size:12px}
+/* ── ERROR BOX ── */
+.err-box{background:var(--rd);border:1px solid var(--re);border-radius:var(--r);padding:12px 14px;color:var(--re);font-family:monospace;font-size:11px;white-space:pre-wrap;overflow-x:auto;margin-bottom:16px}
 
-/* Stats bar */
-.stats-bar{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:8px;margin-bottom:20px}
-.sc{background:var(--sur);border:1px solid var(--bd);border-radius:var(--r);padding:12px 14px}
-.sc-label{font-size:9px;text-transform:uppercase;letter-spacing:.5px;color:var(--mt);font-weight:700}
-.sc-val{font-size:1.6rem;font-weight:800;margin-top:2px;line-height:1}
-.sc-val.gr{color:var(--gr)}.sc-val.yw{color:var(--yw)}.sc-val.bl{color:var(--bl)}.sc-val.pu{color:var(--pu)}.sc-val.or{color:var(--or)}.sc-val.tl{color:var(--tl)}
+/* ── TABS ── */
+.tabs{display:flex;gap:4px;flex-wrap:wrap;border-bottom:2px solid var(--bd);margin-bottom:20px;padding-bottom:0}
+.tab{padding:9px 18px;font-size:12px;font-weight:800;color:var(--mt);border:none;background:none;cursor:pointer;border-bottom:3px solid transparent;margin-bottom:-2px;transition:color .15s,border-color .15s;text-transform:uppercase;letter-spacing:.4px;display:flex;align-items:center;gap:6px;white-space:nowrap}
+.tab:hover{color:var(--tx)}
+.tab.act{color:var(--gr);border-bottom-color:var(--gr)}
+.tab-cnt{background:var(--s3);color:var(--mt);font-size:9px;font-weight:700;padding:1px 6px;border-radius:999px}
+.tab.act .tab-cnt{background:var(--gd);color:var(--gr)}
+.tab-panel{display:none}.tab-panel.on{display:block}
 
-/* Section header */
-.sec-hdr{display:flex;align-items:center;gap:8px;margin:22px 0 12px;cursor:pointer;user-select:none}
-.sec-hdr h3{font-size:.75rem;font-weight:800;text-transform:uppercase;letter-spacing:.7px;white-space:nowrap}
-.sec-cnt{background:var(--s3);color:var(--mt);font-size:10px;font-weight:700;padding:2px 8px;border-radius:999px}
-.sec-line{flex:1;height:1px;background:var(--bd)}
-.sec-toggle{font-size:11px;color:var(--mt);white-space:nowrap;padding:2px 8px;border-radius:5px;border:1px solid var(--bd);background:var(--s2);transition:all .15s}
-.sec-toggle:hover{border-color:var(--bd2);color:var(--tx)}
-.sec-body{overflow:hidden;transition:max-height .35s ease}
-.sec-body.collapsed{max-height:0!important}
+/* ── FILTER BAR ── */
+.filter-bar{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:16px;align-items:center}
+.filter-bar label{font-size:10px;color:var(--mt);font-weight:700;text-transform:uppercase;letter-spacing:.4px;margin-right:2px}
+.fbtn{padding:4px 12px;border-radius:999px;font-size:11px;font-weight:700;border:1px solid var(--bd);background:var(--s2);color:var(--mt);cursor:pointer;transition:all .15s;white-space:nowrap}
+.fbtn:hover{border-color:var(--bd2);color:var(--tx)}
+.fbtn.act{background:var(--gd);color:var(--gr);border-color:#22c55e44}
+.fbtn.act.bl{background:var(--bld);color:var(--bl);border-color:#3b82f644}
+.fbtn.act.pu{background:var(--pd);color:var(--pu);border-color:#a855f744}
 
-/* Schedule grid */
+/* ── SAFETY BADGE ── */
+.sbadge{display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:999px;font-size:9px;font-weight:900;letter-spacing:.4px;white-space:nowrap}
+.sbadge.ELITE{background:var(--gd2);color:var(--elite);border:1px solid #22c55e44}
+.sbadge.SAFE{background:var(--tld);color:var(--safe);border:1px solid #14b8a644}
+.sbadge.MODERATE{background:var(--yd);color:var(--mod);border:1px solid #f0b42944}
+.sbadge.RISKY{background:var(--rd);color:var(--risky);border:1px solid #ef444444}
+.sbar{height:3px;border-radius:999px;margin-top:5px}
+.sbar.ELITE{background:var(--elite)}.sbar.SAFE{background:var(--safe)}.sbar.MODERATE{background:var(--mod)}.sbar.RISKY{background:var(--risky)}
+
+/* ── WHEN BADGE ── */
+.wbadge{display:inline-flex;align-items:center;padding:2px 8px;border-radius:5px;font-size:9px;font-weight:800;white-space:nowrap}
+.wbadge.LIVE{background:var(--rd);color:var(--re);border:1px solid #ef444444;animation:pulse 1.4s infinite}
+.wbadge.TODAY{background:var(--gd);color:var(--gr);border:1px solid #22c55e44}
+.wbadge.TOMORROW{background:var(--od);color:var(--or);border:1px solid #f9731644}
+.wbadge.UPCOMING{background:var(--s3);color:var(--mt);border:1px solid var(--bd)}
+
+/* ── SPORT CHIP ── */
+.sport-chip{font-size:9px;font-weight:800;text-transform:uppercase;letter-spacing:.5px;padding:2px 7px;border-radius:4px}
+.sport-chip.MLB{background:var(--bld);color:var(--bl)}.sport-chip.SOCCER{background:var(--gd);color:var(--gr)}
+.sport-chip.EPL,.sport-chip.ESP,.sport-chip.GER,.sport-chip.ITA{background:var(--pd);color:var(--pu)}
+
+/* ── TEAM PICK CARD ── */
+.pick-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px}
+.pick-card{background:var(--sur);border:1px solid var(--bd);border-radius:var(--rl);overflow:hidden;transition:border-color .15s,transform .1s,box-shadow .15s}
+.pick-card:hover{border-color:var(--bd2);transform:translateY(-1px);box-shadow:0 4px 20px rgba(0,0,0,.4)}
+.pick-card.ELITE{border-top:3px solid var(--elite)}.pick-card.SAFE{border-top:3px solid var(--safe)}
+.pick-card.MODERATE{border-top:3px solid var(--mod)}.pick-card.RISKY{border-top:3px solid var(--risky)}
+.pc-header{padding:12px 14px 0;display:flex;justify-content:space-between;align-items:flex-start}
+.pc-meta{display:flex;align-items:center;gap:5px;flex-wrap:wrap}
+.pc-matchup{padding:8px 14px;font-size:.82rem;color:var(--mt)}
+.pc-matchup span{color:var(--tx);font-weight:600}
+.pc-pick{margin:0 14px 10px;padding:12px;background:var(--s2);border-radius:9px;display:flex;align-items:center;gap:10px}
+.pc-pick-icon{width:36px;height:36px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:17px;flex-shrink:0}
+.pc-pick-icon.ELITE{background:var(--gd2)}.pc-pick-icon.SAFE{background:var(--tld)}
+.pc-pick-icon.MODERATE{background:var(--yd)}.pc-pick-icon.RISKY{background:var(--rd)}
+.pc-pick-text{flex:1;min-width:0}
+.pc-pick-main{font-size:1rem;font-weight:900;line-height:1.2}
+.pc-pick-sub{font-size:10px;color:var(--mt);margin-top:2px}
+.pc-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:5px;padding:0 14px 12px}
+.ps-chip{background:var(--s3);border-radius:6px;padding:6px 8px;text-align:center}
+.ps-label{font-size:9px;text-transform:uppercase;color:var(--mt);letter-spacing:.3px;font-weight:700}
+.ps-val{font-size:.9rem;font-weight:800;margin-top:1px}
+.ps-val.gr{color:var(--gr)}.ps-val.bl{color:var(--bl)}.ps-val.yw{color:var(--yw)}.ps-val.re{color:var(--re)}.ps-val.tl{color:var(--tl)}.ps-val.mt{color:var(--mt)}
+.pc-footer{padding:8px 14px;background:var(--s2);border-top:1px solid var(--bd);display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:6px}
+.pc-time{font-size:10px;color:var(--mt)}
+.pc-time span{color:var(--tx)}
+.pc-odds{font-size:.85rem;font-weight:800;color:var(--bl)}
+.conf-bar{margin:0 14px 8px}
+.conf-lbl{display:flex;justify-content:space-between;font-size:10px;color:var(--mt);margin-bottom:3px}
+.conf-track{height:4px;background:var(--s3);border-radius:999px;overflow:hidden}
+.conf-fill{height:100%;border-radius:999px;transition:width .6s ease}
+.conf-fill.ELITE{background:var(--elite)}.conf-fill.SAFE{background:var(--safe)}
+.conf-fill.MODERATE{background:var(--mod)}.conf-fill.RISKY{background:var(--risky)}
+
+/* ── PLAYER PROP CARD ── */
+.prop-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px}
+.prop-card{background:var(--sur);border:1px solid var(--bd);border-radius:var(--rl);overflow:hidden;transition:border-color .15s}
+.prop-card:hover{border-color:var(--bd2)}
+.prop-card.OVER{border-left:3px solid var(--gr)}.prop-card.UNDER{border-left:3px solid var(--re)}
+.prp-header{padding:12px 14px;display:flex;justify-content:space-between;align-items:flex-start}
+.prp-name{font-size:.95rem;font-weight:800}
+.prp-team{font-size:10px;color:var(--mt);margin-top:1px}
+.prp-rec{margin:0 14px 10px;padding:10px 12px;border-radius:8px;display:flex;align-items:center;gap:8px;font-size:.9rem;font-weight:800}
+.prp-rec.OVER{background:var(--gd2);color:var(--gr)}.prp-rec.UNDER{background:var(--rd);color:var(--re)}
+.prp-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:4px;padding:0 14px 10px}
+.prp-bar{padding:0 14px 12px}
+.prp-bar-lbl{display:flex;justify-content:space-between;font-size:10px;color:var(--mt);margin-bottom:3px}
+.prp-bar-track{height:4px;background:var(--s3);border-radius:999px;overflow:hidden}
+.prp-bar-fill{height:100%;border-radius:999px}
+.prp-bar-fill.OVER{background:var(--gr)}.prp-bar-fill.UNDER{background:var(--re)}
+
+/* ── PARLAY SECTION ── */
+.parlay-leg-tabs{display:flex;gap:4px;flex-wrap:wrap;margin-bottom:14px}
+.ltab{padding:5px 13px;border-radius:999px;font-size:11px;font-weight:800;border:1px solid var(--bd);background:var(--s2);color:var(--mt);cursor:pointer;transition:all .15s;white-space:nowrap}
+.ltab:hover{border-color:var(--pu);color:var(--pu)}
+.ltab.act{background:var(--pd);border-color:var(--pu);color:var(--pu)}
+.ltab-panel{display:none}.ltab-panel.on{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:10px}
+.parl-card{background:var(--sur);border:1px solid var(--bd);border-radius:var(--rl);padding:14px 16px}
+.parl-card.ELITE{border-top:3px solid var(--elite)}.parl-card.SAFE{border-top:3px solid var(--safe)}
+.parl-card.MODERATE{border-top:3px solid var(--mod)}.parl-card.RISKY{border-top:3px solid var(--risky)}
+.parl-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;flex-wrap:wrap;gap:6px}
+.parl-tag{font-size:10px;font-weight:800;padding:3px 10px;border-radius:999px;background:var(--pd);color:var(--pu);border:1px solid #a855f744}
+.parl-stats{display:flex;gap:8px;flex-wrap:wrap}
+.pstat{font-size:10px;color:var(--mt)}.pstat span{font-weight:800;color:var(--tx)}
+.parl-legs{margin-bottom:10px}
+.leg-row{display:flex;align-items:flex-start;gap:7px;padding:5px 0;border-bottom:1px solid var(--bd);font-size:11px}
+.leg-row:last-child{border-bottom:none}
+.leg-dot{width:6px;height:6px;border-radius:50%;background:var(--pu);flex-shrink:0;margin-top:4px}
+.parl-footer{background:var(--s2);border-radius:7px;padding:8px 12px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:5px}
+.pf-prob{font-size:.9rem;font-weight:900;color:var(--gr)}.pf-odds{font-size:.85rem;font-weight:800;color:var(--pu)}.pf-lbl{font-size:9px;color:var(--mt)}
+
+/* ── SCHEDULE ── */
 .sched-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:8px}
-.gc{background:var(--sur);border:1px solid var(--bd);border-radius:var(--rl);padding:12px 14px;position:relative;overflow:hidden}
-.gc::before{content:'';position:absolute;top:0;left:0;width:3px;height:100%}
-.gc.mlb::before{background:var(--bl)}.gc.soccer::before{background:var(--gr)}
-.gc-row1{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px}
-.gc-teams{font-size:.88rem;font-weight:700}
-.gc-sport{font-size:9px;color:var(--mt);font-weight:700;text-transform:uppercase;margin-top:1px}
-.dbadge{display:inline-flex;align-items:center;padding:3px 8px;border-radius:999px;font-size:9px;font-weight:800;white-space:nowrap}
-.dbadge.live{background:var(--rd);color:var(--re);border:1px solid #ef444444;animation:blink 1.4s infinite}
-.dbadge.today{background:var(--gd);color:var(--gr);border:1px solid #22c55e44}
-.dbadge.later{background:var(--bld);color:var(--bl);border:1px solid #3b82f644}
-.dbadge.tmrw{background:var(--od);color:var(--or);border:1px solid #f9731644}
-.gc-starters{margin-top:6px;font-size:10px;color:var(--mt);background:var(--s2);padding:5px 8px;border-radius:6px}
-.gc-starters span{color:var(--tx);font-weight:700}
+.sc-card{background:var(--sur);border:1px solid var(--bd);border-radius:var(--rl);padding:12px 14px;border-left:3px solid var(--bd2)}
+.sc-card.mlb{border-left-color:var(--bl)}.sc-card.soccer{border-left-color:var(--gr)}
+.sc-head{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px}
+.sc-teams{font-size:.88rem;font-weight:700}
+.sc-league{font-size:9px;color:var(--mt);font-weight:700;text-transform:uppercase;margin-top:1px}
+.sc-starter{font-size:10px;color:var(--mt);background:var(--s2);padding:4px 8px;border-radius:5px;margin-top:6px}
+.sc-starter span{color:var(--tx);font-weight:700}
 
-/* Cards grid */
-.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:10px}
-.bc{background:var(--sur);border:1px solid var(--bd);border-radius:var(--rl);padding:14px;position:relative;overflow:hidden;transition:border-color .15s,transform .1s,box-shadow .15s}
-.bc:hover{border-color:var(--bd2);transform:translateY(-1px)}
-.bc.sel{border-color:var(--gr)!important;box-shadow:0 0 0 1px var(--gr),0 4px 16px #22c55e18}
-.bc::before{content:'';position:absolute;top:0;left:0;width:3px;height:100%}
-.bc.aplus::before{background:var(--gr)}.bc.a::before{background:var(--bl)}.bc.b::before{background:var(--yw)}.bc.c::before{background:var(--mt2)}
-.bc.sov::before{background:var(--gr)}.bc.lov::before{background:var(--tl)}.bc.sun::before{background:var(--re)}.bc.lun::before{background:var(--or)}.bc.skp::before{background:var(--mt2)}
-.ct{display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:8px;padding-left:8px}
-.cm{flex:1;min-width:0}
-.csport{font-size:9px;font-weight:800;text-transform:uppercase;letter-spacing:.6px;color:var(--mt)}
-.cmatch{font-size:.92rem;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.cwhen{font-size:11px;color:var(--mt);margin-top:1px}
-.ctr{display:flex;flex-direction:column;align-items:flex-end;gap:5px}
-.gbadge{font-size:9px;font-weight:900;padding:3px 9px;border-radius:999px}
-.gbadge.aplus{background:var(--gd);color:var(--gr);border:1px solid #22c55e33}
-.gbadge.a{background:var(--bld);color:var(--bl);border:1px solid #3b82f633}
-.gbadge.b{background:var(--yd);color:var(--yw);border:1px solid #f0b42933}
-.gbadge.c{background:var(--s3);color:var(--mt);border:1px solid var(--bd)}
-.addbtn{width:26px;height:26px;border-radius:50%;border:1.5px solid var(--bd2);background:var(--s2);color:var(--mt);font-size:15px;font-weight:700;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all .15s}
-.addbtn:hover{border-color:var(--gr);color:var(--gr);background:var(--gd)}
-.addbtn.on{border-color:var(--gr);color:#000;background:var(--gr)}
-.cpick{margin:0 8px 8px;padding:8px 12px;border-radius:7px;font-weight:800;font-size:.85rem;display:flex;align-items:center;gap:7px}
-.cpick.aplus{background:var(--gd);color:var(--gr)}.cpick.a{background:var(--bld);color:#6ba4ff}.cpick.b{background:var(--yd);color:var(--yw)}.cpick.c{background:var(--s3);color:var(--mt)}
-.prop-rec{margin:0 8px 8px;padding:8px 12px;border-radius:7px;font-weight:800;font-size:.85rem;display:flex;align-items:center;gap:7px}
-.prop-rec.sov{background:var(--gd);color:var(--gr)}.prop-rec.lov{background:#0d2020;color:var(--tl)}.prop-rec.sun{background:var(--rd);color:var(--re)}.prop-rec.lun{background:var(--od);color:var(--or)}.prop-rec.skp{background:var(--s3);color:var(--mt)}
-.chips{display:grid;grid-template-columns:repeat(3,1fr);gap:5px;padding:0 8px}
-.chip{background:var(--s2);border:1px solid var(--bd);border-radius:6px;padding:5px 7px;text-align:center}
-.ch-l{font-size:9px;text-transform:uppercase;color:var(--mt);letter-spacing:.3px}
-.ch-v{font-size:.85rem;font-weight:800;margin-top:1px}
-.ch-v.gr{color:var(--gr)}.ch-v.yw{color:var(--yw)}.ch-v.bl{color:var(--bl)}.ch-v.re{color:var(--re)}.ch-v.tl{color:var(--tl)}.ch-v.mt{color:var(--mt)}
-.cstake{display:flex;justify-content:space-between;margin:8px 8px 0;padding:7px 10px;background:var(--s2);border-radius:6px;font-size:11px}
-.ev{color:var(--tl);font-size:11px;font-weight:700}
-.pbar-wrap{padding:6px 8px 2px}
-.pbar-lbl{display:flex;justify-content:space-between;font-size:10px;color:var(--mt);margin-bottom:4px;font-weight:600}
-.pbar-track{height:4px;background:var(--s3);border-radius:999px;overflow:hidden}
-.pbar-fill{height:100%;border-radius:999px;transition:width .5s ease}
-.pbar-fill.gr{background:var(--gr)}.pbar-fill.re{background:var(--re)}.pbar-fill.tl{background:var(--tl)}.pbar-fill.yw{background:var(--yw)}
+/* ── EMPTY STATE ── */
+.empty{padding:36px 16px;text-align:center;color:var(--mt);grid-column:1/-1}
+.empty-icon{font-size:2.5rem;margin-bottom:10px;display:block}
+.empty strong{display:block;color:var(--tx);font-size:1rem;margin-bottom:6px}
+.empty p{font-size:12px;max-width:300px;margin:0 auto}
 
-/* Skeleton */
-@keyframes shimmer{0%{background-position:-500px 0}100%{background-position:500px 0}}
-.skel{background:var(--sur);border:1px solid var(--bd);border-radius:var(--rl);padding:14px;height:180px;overflow:hidden}
-.sl{border-radius:5px;background:linear-gradient(90deg,var(--s2) 25%,var(--s3) 50%,var(--s2) 75%);background-size:500px 100%;animation:shimmer 1.4s infinite;margin-bottom:9px}
-.sl.h8{height:8px;width:38%}.sl.h12{height:12px;width:72%}.sl.h16{height:16px;width:90%}.sl.h10{height:10px;width:55%}
-.skel-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:10px}
+/* ── SKELETON ── */
+@keyframes shimmer{0%{background-position:-600px 0}100%{background-position:600px 0}}
+.sk{background:linear-gradient(90deg,var(--s2) 25%,var(--s3) 50%,var(--s2) 75%);background-size:600px 100%;animation:shimmer 1.6s infinite;border-radius:5px}
+.sk.h8{height:8px}.sk.h12{height:12px}.sk.h16{height:16px}.sk.h20{height:20px}.sk.h24{height:24px}
+.sk-card{background:var(--sur);border:1px solid var(--bd);border-radius:var(--rl);padding:16px;height:180px;overflow:hidden}
+.sk-card .sk{margin-bottom:10px}
 
-/* Parlays */
-.ptabs{display:flex;gap:5px;margin-bottom:12px;flex-wrap:wrap}
-.ptab{padding:5px 14px;border-radius:999px;font-size:11px;font-weight:700;border:1.5px solid var(--bd2);background:var(--s2);color:var(--mt);cursor:pointer;transition:all .15s}
-.ptab:hover{border-color:var(--pu);color:var(--pu)}
-.ptab.act{background:var(--pd);border-color:var(--pu);color:var(--pu)}
-.psec{display:none}.psec.on{display:block}
-.pcard{background:var(--sur);border:1px solid var(--bd);border-radius:var(--rl);padding:14px 16px;margin-bottom:8px}
-.ph{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px}
-.ptag{background:var(--pd);border:1px solid #a855f744;color:var(--pu);font-size:10px;font-weight:800;padding:3px 10px;border-radius:999px}
-.pchips{display:flex;flex-wrap:wrap;gap:5px}
-.pchip{background:var(--s2);border:1px solid var(--bd);border-radius:5px;padding:2px 8px;font-size:10px}
-.pchip .v{font-weight:800}
-.pchip .v.gr{color:var(--gr)}.pchip .v.yw{color:var(--yw)}.pchip .v.pu{color:var(--pu)}.pchip .v.tl{color:var(--tl)}
-.plegs{margin-bottom:8px}
-.pleg{padding:4px 0;border-bottom:1px solid var(--bd);font-size:11px;color:var(--mt);display:flex;align-items:center;gap:5px}
-.pleg:last-child{border-bottom:none}
-.pdot{width:5px;height:5px;border-radius:50%;background:var(--pu);flex-shrink:0}
-.ppay{background:var(--pd);border:1px solid #a855f722;border-radius:7px;padding:9px 12px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px}
-.pp-lbl{font-size:10px;color:var(--mt)}.pp-win{font-size:1rem;font-weight:800;color:var(--gr)}.pp-stk{font-size:11px;color:var(--pu);font-weight:700}
+/* ── CONSOLE ── */
+.console-wrap{position:fixed;bottom:0;left:0;right:0;z-index:900;transform:translateY(100%);transition:transform .3s cubic-bezier(.4,0,.2,1)}
+.console-wrap.open{transform:translateY(0)}
+.console-pull{background:var(--s2);border-top:1px solid var(--tl);padding:7px 18px;display:flex;align-items:center;justify-content:space-between;cursor:pointer;max-width:1360px;margin:0 auto}
+.cpull-l{display:flex;align-items:center;gap:8px;font-size:11px;font-weight:700;font-family:monospace;color:var(--tl)}
+.cpull-dot{width:7px;height:7px;border-radius:50%;background:var(--mt2)}
+.cpull-dot.act{background:var(--gr);animation:pulse 1s infinite}
+.cpull-badge{font-size:10px;background:var(--s3);color:var(--mt);padding:1px 7px;border-radius:999px;font-family:monospace}
+.cpull-r{font-size:10px;color:var(--mt)}
+.console-body{background:#030608;max-height:260px;overflow-y:auto;padding:10px 18px;font-family:'Cascadia Code','Fira Code','Consolas',monospace;font-size:11px;line-height:1.65}
+.lg{display:flex;gap:8px;color:#5a7090}
+.lg .ts{color:#2d4055;flex-shrink:0}
+.lg .msg{word-break:break-word}
+.lg.err .msg{color:#ef4444}.lg.warn .msg{color:#f0b429}
+.lg.ok .msg{color:#22c55e}.lg.phase .msg{color:#a855f7;font-weight:700}
+.lg-empty{color:#2d4055;font-style:italic}
 
-/* Floating parlay builder */
-#pb{position:fixed;bottom:0;left:0;right:0;z-index:1000;background:var(--sur);border-top:1px solid var(--pu);box-shadow:0 -6px 24px rgba(168,85,247,.18);padding:10px 18px;transform:translateY(100%);transition:transform .3s cubic-bezier(.4,0,.2,1)}
-#pb.open{transform:translateY(0)}
-.pb-bar{max-width:1280px;margin:0 auto;display:flex;align-items:center;gap:12px;flex-wrap:wrap}
-.pb-ttl{font-size:11px;font-weight:800;color:var(--pu);text-transform:uppercase;letter-spacing:.5px;white-space:nowrap}
-.pb-legs{display:flex;flex-wrap:wrap;gap:5px;flex:1}
-.pb-chip{background:var(--pd);border:1px solid var(--pu);color:var(--tx);border-radius:5px;padding:3px 9px;font-size:10px;display:flex;align-items:center;gap:4px}
-.pb-rm{background:none;border:none;color:var(--mt);cursor:pointer;font-size:13px;line-height:1;padding:0}
-.pb-rm:hover{color:var(--re)}
-.pb-sum{display:flex;align-items:center;gap:10px;flex-wrap:wrap;flex-shrink:0}
-.pb-odds{font-size:.95rem;font-weight:800;color:var(--pu)}.pb-pay{font-size:.9rem;font-weight:800;color:var(--gr)}.pb-lbl{font-size:10px;color:var(--mt)}
-.pb-sk{display:flex;align-items:center;gap:5px}
-.pb-sk label{font-size:10px;color:var(--mt)}
-#pb-stk{width:62px;background:var(--s2);border:1px solid var(--bd2);color:var(--tx);border-radius:5px;padding:3px 7px;font-size:11px;font-weight:700}
-.pb-clr{background:var(--rd);border:1px solid #ef444444;color:var(--re);padding:5px 12px;border-radius:7px;font-size:11px;font-weight:700;cursor:pointer;white-space:nowrap}
-.pb-cpy{background:var(--pu);border:none;color:#fff;padding:6px 14px;border-radius:7px;font-size:11px;font-weight:800;cursor:pointer;white-space:nowrap}
+/* ── SCROLLBAR ── */
+::-webkit-scrollbar{width:5px;height:5px}
+::-webkit-scrollbar-track{background:var(--s2)}
+::-webkit-scrollbar-thumb{background:var(--mt2);border-radius:3px}
 
-/* Console */
-.console-wrap{margin-top:20px;border:1px solid var(--bd);border-radius:var(--rl);overflow:hidden}
-.console-hdr{display:flex;align-items:center;justify-content:space-between;padding:10px 16px;background:var(--s2);cursor:pointer;user-select:none;border-bottom:1px solid var(--bd)}
-.console-hdr-left{display:flex;align-items:center;gap:8px}
-.console-title{font-size:12px;font-weight:800;font-family:monospace;color:var(--tl)}
-.console-dot{width:8px;height:8px;border-radius:50%;background:var(--mt2)}
-.console-dot.active{background:var(--gr);animation:blink 1s infinite}
-.console-badge{font-size:10px;color:var(--mt);background:var(--s3);padding:2px 8px;border-radius:999px;font-family:monospace}
-.console-toggle{font-size:11px;color:var(--mt);padding:2px 8px;border-radius:5px;border:1px solid var(--bd);background:var(--s3)}
-.console-body{background:#030507;max-height:320px;overflow-y:auto;padding:12px 16px;font-family:'Cascadia Code','Fira Code',monospace;font-size:11px;line-height:1.6;transition:max-height .35s ease}
-.console-body.collapsed{max-height:0!important;padding:0}
-.log-line{display:flex;gap:8px;color:#8ba0b8}
-.log-line .ts{color:#3d5268;flex-shrink:0}
-.log-line .msg{word-break:break-word}
-.log-line.warn .msg{color:#f0b429}
-.log-line.err .msg{color:#ef4444}
-.log-line.ok .msg{color:#22c55e}
-.log-line.phase .msg{color:#a855f7;font-weight:700}
-.log-empty{color:#3d5268;font-style:italic}
-
-/* Empty */
-.empty{grid-column:1/-1;padding:28px;text-align:center;color:var(--mt);background:var(--sur);border:1px dashed var(--bd);border-radius:var(--rl)}
-.empty .ei{font-size:1.8rem;margin-bottom:6px}
-/* Error */
-.errbox{background:var(--rd);border:1px solid var(--re);border-radius:var(--r);padding:12px 14px;color:var(--re);font-family:monospace;font-size:11px;white-space:pre-wrap;overflow-x:auto;margin-bottom:18px}
-/* Footer */
-.ftr{margin-top:32px;padding-top:14px;border-top:1px solid var(--bd);color:var(--mt2);font-size:10px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:5px}
-
-@media(max-width:600px){
-  .cards,.sched-grid,.skel-grid{grid-template-columns:1fr}
-  .stats-bar{grid-template-columns:repeat(2,1fr)}
-  .chips{grid-template-columns:repeat(2,1fr)}
-  .pb-bar{flex-direction:column;align-items:flex-start}
+/* ── RESPONSIVE ── */
+@media(max-width:640px){
+  .pick-grid,.prop-grid{grid-template-columns:1fr}
+  .sched-grid{grid-template-columns:1fr}
+  .hdr{flex-direction:column;align-items:flex-start}
+  .tabs{gap:2px}.tab{padding:7px 12px;font-size:11px}
+  .ltab-panel.on{grid-template-columns:1fr}
 }
 </style>
 </head>
 <body>
 <div class="page">
 
-<!-- Header -->
+<!-- HEADER -->
 <div class="hdr">
   <div class="brand">
-    <div class="brand-icon">B</div>
-    <div>
-      <h1>Bettor <span>AI</span></h1>
-      <p id="lu">{% if state.last_updated %}Updated {{ state.last_updated }}{% else %}No analysis run yet{% endif %}</p>
+    <div class="logo">B</div>
+    <div class="brand-text">
+      <h1>Bettor <em>AI</em></h1>
+      <p id="lu">{% if state.last_updated %}Last updated {{ state.last_updated }}{% else %}Run analysis to get today's predictions{% endif %}</p>
     </div>
   </div>
   <div class="hdr-right">
-    <div class="pill {{ state.status }}" id="status-pill">
-      <div class="dot {{ state.status }}" id="sdot"></div>
-      <span id="stxt">{{ state.status | capitalize }}</span>
+    <div class="status-pill {{ state.status }}" id="spill">
+      <div class="sdot {{ state.status }}" id="sdot"></div>
+      <span id="stxt">{{ state.status|capitalize }}</span>
     </div>
-    <button id="run-btn" onclick="runAnalysis()" {% if state.status=='running' %}disabled{% endif %}>⚡ Run Analysis</button>
+    <button class="console-btn" onclick="toggleConsole()">📋 Console</button>
+    <button class="run-btn" id="run-btn" onclick="runAnalysis()" {% if state.status=='running' %}disabled{% endif %}>⚡ Run Analysis</button>
   </div>
 </div>
 
-<!-- Progress -->
-<div id="progress-wrap" class="{% if state.status=='running' %}on{% endif %}">
-  <div class="prog-label"><span id="pname">{{ state.phase }}</span><span id="ppct">{{ ((state.phase_idx/state.phase_total)*100)|int }}%</span></div>
-  <div class="prog-track"><div class="prog-fill" id="pfill" style="width:{{ ((state.phase_idx/state.phase_total)*100)|int }}%"></div></div>
-  <div class="phase-steps" id="psteps">
-    {% set labels=["MLB Schedule","Soccer","Stats","Injuries","Odds","Value Models","Parlays","Save DB"] %}
+<!-- PROGRESS -->
+<div class="prog-wrap {% if state.status=='running' %}on{% endif %}" id="prog-wrap">
+  <div class="prog-head">
+    <span id="pname">{{ state.phase }}</span>
+    <span id="ppct">{{ ((state.phase_idx / state.phase_total) * 100)|int }}%</span>
+  </div>
+  <div class="prog-track"><div class="prog-fill" id="pfill" style="width:{{ ((state.phase_idx / state.phase_total) * 100)|int }}%"></div></div>
+  <div class="phase-chips">
+    {% set labels=["MLB Schedule","Soccer","Stats","Injuries","Odds","Team Algorithm","Player Props","Parlays","Save DB"] %}
     {% for l in labels %}
-    <div class="ps {% if loop.index0<state.phase_idx %}dn{% elif loop.index0==state.phase_idx %}act{% endif %}" id="ps{{ loop.index0 }}">{{ l }}</div>
+    <div class="pchip {% if loop.index0 < state.phase_idx %}done{% elif loop.index0 == state.phase_idx %}act{% endif %}">{{ l }}</div>
     {% endfor %}
   </div>
 </div>
 
-{% if state.status=='error' %}<div class="errbox">{{ state.error }}</div>{% endif %}
+{% if state.status == 'error' %}<div class="err-box">{{ state.error }}</div>{% endif %}
 
-<!-- ════════ YOUR BETS TODAY ════════ -->
-<div class="hero">
-  <div class="hero-hdr">
-    <h2>🎯 Your Bets Today</h2>
-    <div class="hero-badge">{{ state.top_picks|length }} picks</div>
-    <div class="hero-sub">Sorted by edge · Kelly stake sizing</div>
+<!-- MAIN TABS -->
+<div class="tabs">
+  <button class="tab act" onclick="showTab('today',this)">
+    📅 Today
+    <span class="tab-cnt">{{ state.today_team_picks|length }}</span>
+  </button>
+  <button class="tab" onclick="showTab('tomorrow',this)">
+    🌅 Tomorrow
+    <span class="tab-cnt">{{ state.tomorrow_team_picks|length }}</span>
+  </button>
+  <button class="tab" onclick="showTab('props',this)">
+    ⚾ Player Props
+    <span class="tab-cnt">{{ state.player_props|length }}</span>
+  </button>
+  <button class="tab" onclick="showTab('parlays',this)">
+    🔗 Parlays
+    <span class="tab-cnt">{{ (state.prop_parlays.values()|sum(attribute='__len__') if state.prop_parlays else 0) + (state.team_parlays.values()|sum(attribute='__len__') if state.team_parlays else 0) }}</span>
+  </button>
+  <button class="tab" onclick="showTab('schedule',this)">
+    📋 Schedule
+    <span class="tab-cnt">{{ state.upcoming_games|length }}</span>
+  </button>
+</div>
+
+<!-- ══════════ TODAY TAB ══════════ -->
+<div class="tab-panel on" id="tab-today">
+  <div class="filter-bar">
+    <label>Filter:</label>
+    <button class="fbtn act" onclick="filterCards('today','all',this)">All</button>
+    <button class="fbtn" onclick="filterCards('today','MLB',this)">⚾ MLB</button>
+    <button class="fbtn" onclick="filterCards('today','SOCCER',this)">⚽ Soccer</button>
+    <button class="fbtn" onclick="filterCards('today','ELITE',this)">🟢 Elite only</button>
+    <button class="fbtn" onclick="filterCards('today','SAFE',this)">🔵 Safe+</button>
   </div>
 
-  {% if state.status=='running' %}
-  <div class="picks-list">
-    {% for _ in range(3) %}
-    <div class="skel" style="height:72px"><div class="sl h12"></div><div class="sl h8"></div></div>
-    {% endfor %}
-  </div>
-  {% elif state.top_picks %}
-  <div class="picks-list">
-    {% for p in state.top_picks %}
-    {% set is_live = 'LIVE' in (p.when or '').upper() %}
-    <div class="pick-row">
-      <div class="pick-num {{ p.type }}">{{ loop.index }}</div>
-      <div class="pick-body">
-        <div class="pick-text">{{ p.text }}</div>
-        <div class="pick-sub">{{ p.sub }}</div>
-        <span class="pick-tag {{ 'live' if is_live else p.type }}">
-          {% if is_live %}🔴 LIVE NOW{% elif p.type=='win' %}WIN BET{% elif p.type=='total' %}OVER/UNDER{% else %}PROP BET{% endif %}
-        </span>
+  {% if state.status == 'running' %}
+  <div class="pick-grid">{% for _ in range(6) %}
+    <div class="sk-card"><div class="sk h12" style="width:40%;margin-bottom:14px"></div><div class="sk h20" style="width:80%;margin-bottom:8px"></div><div class="sk h12" style="width:60%;margin-bottom:14px"></div><div class="sk h8" style="width:95%"></div></div>
+  {% endfor %}</div>
+  {% elif state.today_team_picks %}
+  <div class="pick-grid" id="grid-today">
+    {% for p in state.today_team_picks %}
+    <div class="pick-card {{ p.safety_label }}" data-sport="{{ p.sport }}" data-safety="{{ p.safety_label }}">
+      <div class="pc-header">
+        <div class="pc-meta">
+          <span class="sport-chip {{ p.sport }}">{{ p.sport }}</span>
+          {% if p.league %}<span style="font-size:9px;color:var(--mt)">{{ p.league }}</span>{% endif %}
+          <span class="wbadge {{ p.when_label }}">{{ p.when }}</span>
+        </div>
+        <span class="sbadge {{ p.safety_label }}">{{ p.safety_label }}</span>
       </div>
-      <div class="pick-edge">+{{ "%.0f"|format(p.edge*100) }}%<br><span style="font-size:9px;color:var(--mt);font-weight:400">edge</span></div>
+      <div class="pc-matchup">{{ p.away_team }} <span>@ {{ p.home_team }}</span></div>
+      <div class="pc-pick">
+        <div class="pc-pick-icon {{ p.safety_label }}">
+          {% if p.safety_label == 'ELITE' %}🏆{% elif p.safety_label == 'SAFE' %}✅{% elif p.safety_label == 'MODERATE' %}⚠️{% else %}⚡{% endif %}
+        </div>
+        <div class="pc-pick-text">
+          <div class="pc-pick-main">{{ p.pick_team }} to WIN</div>
+          <div class="pc-pick-sub">vs {{ p.opp_team }}{% if p.home_starter or p.away_starter %} · SP: {{ p.away_starter or 'TBD' }} vs {{ p.home_starter or 'TBD' }}{% endif %}</div>
+        </div>
+      </div>
+      <div class="conf-bar">
+        <div class="conf-lbl"><span>Algorithm confidence</span><span>{{ p.conf }}%</span></div>
+        <div class="conf-track"><div class="conf-fill {{ p.safety_label }}" style="width:{{ p.conf }}%"></div></div>
+      </div>
+      <div class="pc-stats">
+        <div class="ps-chip"><div class="ps-label">Confidence</div><div class="ps-val gr">{{ p.conf }}%</div></div>
+        <div class="ps-chip"><div class="ps-label">Edge</div><div class="ps-val {% if p.edge >= 10 %}gr{% elif p.edge >= 7 %}tl{% else %}yw{% endif %}">+{{ p.edge }}%</div></div>
+        <div class="ps-chip"><div class="ps-label">Odds</div><div class="ps-val bl">{{ p.odds_str }}</div></div>
+      </div>
+      <div class="pc-footer">
+        <span class="pc-time">{% if p.home_starter %}⚾ <span>{{ p.away_starter or 'TBD' }}</span> vs <span>{{ p.home_starter or 'TBD' }}</span>{% else %}Game time: <span>{{ p.when }}</span>{% endif %}</span>
+        <span class="pc-odds">{{ p.odds_str }}</span>
+      </div>
     </div>
     {% endfor %}
   </div>
   {% else %}
-  <div class="empty-hero">
-    <span class="ei">🎯</span>
-    <strong>No picks yet</strong>
-    <p>Click <strong>Run Analysis</strong> to load today's games and find value bets automatically.</p>
+  <div class="empty">
+    <span class="empty-icon">📅</span>
+    <strong>No picks for today yet</strong>
+    <p>Click <strong>Run Analysis</strong> to fetch today's games and run the algorithm.</p>
   </div>
   {% endif %}
 </div>
 
-<!-- Stats bar -->
-<div class="stats-bar">
-  <div class="sc"><div class="sc-label">Win Bets</div><div class="sc-val gr">{{ state.win_bets|length }}</div></div>
-  <div class="sc"><div class="sc-label">Over/Under</div><div class="sc-val bl">{{ state.totals_bets|length }}</div></div>
-  <div class="sc"><div class="sc-label">Props</div><div class="sc-val or">{{ state.prop_stats|length }}</div></div>
-  <div class="sc"><div class="sc-label">Parlays</div><div class="sc-val pu">{{ (state.parlays_2|length)+(state.parlays_3|length)+(state.parlays_4|length) }}</div></div>
-  <div class="sc"><div class="sc-label">MLB Games</div><div class="sc-val tl">{{ state.mlb_games }}</div></div>
-  <div class="sc"><div class="sc-label">Soccer</div><div class="sc-val">{{ state.soccer_games }}</div></div>
-  <div class="sc"><div class="sc-label">Bankroll</div><div class="sc-val yw">${{ "{:,.0f}".format(bankroll) }}</div></div>
-</div>
-
-<!-- ════════ SCHEDULE ════════ -->
-<div class="sec-hdr" onclick="toggleSec('sched')">
-  <h3>📅 Upcoming Schedule</h3>
-  <div class="sec-cnt">{{ state.upcoming_games|length }}</div>
-  <div class="sec-line"></div>
-  <div class="sec-toggle" id="sched-tog">▾ Hide</div>
-</div>
-<div class="sec-body" id="sched-body">
-{% if state.status=='running' %}
-  <div class="skel-grid">{% for _ in range(4) %}<div class="skel" style="height:110px"><div class="sl h8"></div><div class="sl h16"></div><div class="sl h10"></div></div>{% endfor %}</div>
-{% elif state.upcoming_games %}
-  <div class="sched-grid">
-  {% for g in state.upcoming_games %}
-    {% set gd=g.game_date or g.date or '' %}{% set gt=g.game_time %}{% set gs=(g.status or '')|upper %}
-    {% if 'IN PROGRESS' in gs or 'LIVE' in gs %}{% set bc='live' %}{% set bt='🔴 LIVE' %}
-    {% elif gd==today and gt %}{% set bc='later' %}{% set bt='⏰ TODAY '+gt+' ET' %}
-    {% elif gd==today %}{% set bc='today' %}{% set bt='📌 TODAY' %}
-    {% elif gd==tomorrow %}{% set bc='tmrw' %}{% set bt='🌅 TOMORROW'+(' '+gt+' ET' if gt else '') %}
-    {% else %}{% set bc='later' %}{% set bt=gd %}{% endif %}
-    <div class="gc {{ g.sport or 'mlb' }}">
-      <div class="gc-row1">
-        <div><div class="gc-sport">{{ (g.sport or 'mlb')|upper }} · {{ g.league or '' }}</div><div class="gc-teams">{{ g.away_team }} @ {{ g.home_team }}</div></div>
-        <div class="dbadge {{ bc }}">{{ bt }}</div>
-      </div>
-      {% if g.home_starter or g.away_starter %}<div class="gc-starters">⚾ <span>{{ g.away_starter or 'TBD' }}</span> vs <span>{{ g.home_starter or 'TBD' }}</span></div>{% endif %}
-    </div>
-  {% endfor %}
+<!-- ══════════ TOMORROW TAB ══════════ -->
+<div class="tab-panel" id="tab-tomorrow">
+  <div class="filter-bar">
+    <label>Filter:</label>
+    <button class="fbtn act" onclick="filterCards('tomorrow','all',this)">All</button>
+    <button class="fbtn" onclick="filterCards('tomorrow','MLB',this)">⚾ MLB</button>
+    <button class="fbtn" onclick="filterCards('tomorrow','SOCCER',this)">⚽ Soccer</button>
+    <button class="fbtn" onclick="filterCards('tomorrow','ELITE',this)">🟢 Elite only</button>
+    <button class="fbtn" onclick="filterCards('tomorrow','SAFE',this)">🔵 Safe+</button>
   </div>
-{% else %}
-  <div class="empty"><div class="ei">📅</div><strong>No games yet</strong> — run analysis to load today's schedule.</div>
-{% endif %}
-</div>
 
-<!-- ════════ WIN BETS ════════ -->
-<div class="sec-hdr" onclick="toggleSec('wins')">
-  <h3>🏆 Win Bet Details</h3><div class="sec-cnt">{{ state.win_bets|length }}</div>
-  <div class="sec-line"></div><div class="sec-toggle" id="wins-tog">▾ Hide</div>
-</div>
-<div class="sec-body" id="wins-body">
-<div class="cards" id="win-grid">
-{% if state.status=='running' %}
-  {% for _ in range(3) %}<div class="skel"><div class="sl h8"></div><div class="sl h16"></div><div class="sl h10"></div><div class="sl h12"></div><div class="sl h8"></div></div>{% endfor %}
-{% elif state.win_bets %}
-  {% for b in state.win_bets %}
-    {% if b.edge>=0.15 %}{% set gk='aplus' %}{% set gl='A+' %}{% elif b.edge>=0.10 %}{% set gk='a' %}{% set gl='A' %}{% elif b.edge>=0.07 %}{% set gk='b' %}{% set gl='B' %}{% else %}{% set gk='c' %}{% set gl='C' %}{% endif %}
-    {% set pts=(b.matchup or '').split(' vs ') %}{% set ht=pts[0] if pts|length==2 else b.matchup %}{% set at=pts[1] if pts|length==2 else '?' %}
-    {% set tm=at if b.bet=='AWAY' else (ht if b.bet=='HOME' else 'DRAW') %}
-    {% set oas=('+'+b.odds_am|string) if b.odds_am>0 else b.odds_am|string %}
-    {% set pw=((b.dec_odds-1)*b.stake_usd)|round(0)|int %}
-    {% set gd=b.date or today %}{% set gt=b.game_time or '' %}
-    <div class="bc {{ gk }}" id="card-{{ b._id }}" data-id="{{ b._id }}" data-label="{{ tm }} WIN" data-dec="{{ b.dec_odds }}" data-prob="{{ b.model_prob }}">
-      <div class="ct">
-        <div class="cm">
-          <div class="csport">{{ b.sport }} · WIN</div>
-          <div class="cmatch">{{ at }} @ {{ ht }}</div>
-          <div class="cwhen">{% if gd==today and gt %}⏰ {{ gt }} ET{% elif gd==today %}📌 TODAY{% elif gd==tomorrow %}🌅 TOMORROW{% else %}{{ gd }}{% endif %}</div>
+  {% if state.status == 'running' %}
+  <div class="pick-grid">{% for _ in range(4) %}
+    <div class="sk-card"><div class="sk h12" style="width:40%;margin-bottom:14px"></div><div class="sk h20" style="width:80%;margin-bottom:8px"></div><div class="sk h12" style="width:60%;margin-bottom:14px"></div><div class="sk h8" style="width:95%"></div></div>
+  {% endfor %}</div>
+  {% elif state.tomorrow_team_picks %}
+  <div class="pick-grid" id="grid-tomorrow">
+    {% for p in state.tomorrow_team_picks %}
+    <div class="pick-card {{ p.safety_label }}" data-sport="{{ p.sport }}" data-safety="{{ p.safety_label }}">
+      <div class="pc-header">
+        <div class="pc-meta">
+          <span class="sport-chip {{ p.sport }}">{{ p.sport }}</span>
+          {% if p.league %}<span style="font-size:9px;color:var(--mt)">{{ p.league }}</span>{% endif %}
+          <span class="wbadge {{ p.when_label }}">{{ p.when }}</span>
         </div>
-        <div class="ctr"><div class="gbadge {{ gk }}">{{ gl }}</div><button class="addbtn" id="ab-{{ b._id }}" onclick="toggleLeg('{{ b._id }}')">+</button></div>
+        <span class="sbadge {{ p.safety_label }}">{{ p.safety_label }}</span>
       </div>
-      <div class="cpick {{ gk }}"><span>→</span> BET {{ tm }} WIN <span style="font-size:.72rem;opacity:.6">({{ b.bet }})</span></div>
-      <div class="chips">
-        <div class="chip"><div class="ch-l">Model</div><div class="ch-v gr">{{ "%.0f"|format(b.model_prob*100) }}%</div></div>
-        <div class="chip"><div class="ch-l">Book</div><div class="ch-v mt">{{ "%.0f"|format(b.book_prob*100) }}%</div></div>
-        <div class="chip"><div class="ch-l">Edge</div><div class="ch-v gr">+{{ "%.0f"|format(b.edge*100) }}%</div></div>
-        <div class="chip"><div class="ch-l">Odds</div><div class="ch-v bl">{{ oas }}</div></div>
-        <div class="chip"><div class="ch-l">Stake</div><div class="ch-v yw">${{ "%.0f"|format(b.stake_usd) }}</div></div>
-        <div class="chip"><div class="ch-l">Win</div><div class="ch-v gr">${{ pw }}</div></div>
-      </div>
-      <div class="cstake"><span style="color:var(--mt)">Expected Value</span><span class="ev">EV {{ "%+.3f"|format(b.ev) }}</span></div>
-    </div>
-  {% endfor %}
-{% else %}
-  <div class="empty"><div class="ei">📊</div><strong>No win value bets found</strong><br>Click Run Analysis to start.</div>
-{% endif %}
-</div>
-</div>
-
-<!-- ════════ OVER/UNDER ════════ -->
-<div class="sec-hdr" onclick="toggleSec('tots')">
-  <h3>📈 Over / Under Details</h3><div class="sec-cnt">{{ state.totals_bets|length }}</div>
-  <div class="sec-line"></div><div class="sec-toggle" id="tots-tog">▾ Hide</div>
-</div>
-<div class="sec-body" id="tots-body">
-<div class="cards">
-{% if state.status=='running' %}
-  {% for _ in range(3) %}<div class="skel"><div class="sl h8"></div><div class="sl h16"></div><div class="sl h10"></div><div class="sl h12"></div><div class="sl h8"></div></div>{% endfor %}
-{% elif state.totals_bets %}
-  {% for b in state.totals_bets %}
-    {% if b.edge>=0.15 %}{% set gk='aplus' %}{% set gl='A+' %}{% elif b.edge>=0.10 %}{% set gk='a' %}{% set gl='A' %}{% elif b.edge>=0.07 %}{% set gk='b' %}{% set gl='B' %}{% else %}{% set gk='c' %}{% set gl='C' %}{% endif %}
-    {% set pts=(b.matchup or '').split(' vs ') %}{% set ht=pts[0] if pts|length==2 else b.matchup %}{% set at=pts[1] if pts|length==2 else '?' %}
-    {% set oas=('+'+b.odds_am|string) if b.odds_am>0 else b.odds_am|string %}
-    {% set pw=((b.dec_odds-1)*b.stake_usd)|round(0)|int %}
-    {% set oc='gr' if b.bet=='OVER' else 're' %}
-    {% set gd=b.date or today %}{% set gt=b.game_time or '' %}
-    <div class="bc {{ gk }}" id="card-{{ b._id }}" data-id="{{ b._id }}" data-label="{{ b.bet }} {{ b.total_line }} — {{ at }} @ {{ ht }}" data-dec="{{ b.dec_odds }}" data-prob="{{ b.model_prob }}">
-      <div class="ct">
-        <div class="cm">
-          <div class="csport">{{ b.sport }} · TOTALS</div>
-          <div class="cmatch">{{ at }} @ {{ ht }}</div>
-          <div class="cwhen">{% if gd==today and gt %}⏰ {{ gt }} ET{% elif gd==today %}📌 TODAY{% elif gd==tomorrow %}🌅 TOMORROW{% else %}{{ gd }}{% endif %}</div>
+      <div class="pc-matchup">{{ p.away_team }} <span>@ {{ p.home_team }}</span></div>
+      <div class="pc-pick">
+        <div class="pc-pick-icon {{ p.safety_label }}">
+          {% if p.safety_label == 'ELITE' %}🏆{% elif p.safety_label == 'SAFE' %}✅{% elif p.safety_label == 'MODERATE' %}⚠️{% else %}⚡{% endif %}
         </div>
-        <div class="ctr"><div class="gbadge {{ gk }}">{{ gl }}</div><button class="addbtn" id="ab-{{ b._id }}" onclick="toggleLeg('{{ b._id }}')">+</button></div>
+        <div class="pc-pick-text">
+          <div class="pc-pick-main">{{ p.pick_team }} to WIN</div>
+          <div class="pc-pick-sub">vs {{ p.opp_team }}{% if p.home_starter or p.away_starter %} · SP: {{ p.away_starter or 'TBD' }} vs {{ p.home_starter or 'TBD' }}{% endif %}</div>
+        </div>
       </div>
-      <div class="cpick {{ gk }}"><span>→</span> BET {{ b.bet }} {{ b.total_line }} <span style="font-size:.72rem;opacity:.6">(model: {{ b.predicted_total }})</span></div>
-      <div class="chips">
-        <div class="chip"><div class="ch-l">Model</div><div class="ch-v {{ oc }}">{{ "%.0f"|format(b.model_prob*100) }}%</div></div>
-        <div class="chip"><div class="ch-l">Book</div><div class="ch-v mt">{{ "%.0f"|format(b.book_prob*100) }}%</div></div>
-        <div class="chip"><div class="ch-l">Edge</div><div class="ch-v gr">+{{ "%.0f"|format(b.edge*100) }}%</div></div>
-        <div class="chip"><div class="ch-l">Odds</div><div class="ch-v bl">{{ oas }}</div></div>
-        <div class="chip"><div class="ch-l">Stake</div><div class="ch-v yw">${{ "%.0f"|format(b.stake_usd) }}</div></div>
-        <div class="chip"><div class="ch-l">Win</div><div class="ch-v gr">${{ pw }}</div></div>
+      <div class="conf-bar">
+        <div class="conf-lbl"><span>Algorithm confidence</span><span>{{ p.conf }}%</span></div>
+        <div class="conf-track"><div class="conf-fill {{ p.safety_label }}" style="width:{{ p.conf }}%"></div></div>
       </div>
-      <div class="cstake"><span style="color:var(--mt)">Expected Value</span><span class="ev">EV {{ "%+.3f"|format(b.ev) }}</span></div>
-    </div>
-  {% endfor %}
-{% else %}
-  <div class="empty"><div class="ei">📈</div><strong>No totals value found</strong><br>Lines are fair or odds not yet posted.</div>
-{% endif %}
-</div>
-</div>
-
-<!-- ════════ PROPS ════════ -->
-<div class="sec-hdr" onclick="toggleSec('props')">
-  <h3>⚾ Pitcher Props</h3><div class="sec-cnt">{{ state.prop_stats|length }}</div>
-  <div class="sec-line"></div><div class="sec-toggle" id="props-tog">▾ Hide</div>
-</div>
-<div class="sec-body" id="props-body">
-<div class="cards">
-{% if state.status=='running' %}
-  {% for _ in range(3) %}<div class="skel"><div class="sl h8"></div><div class="sl h16"></div><div class="sl h12"></div><div class="sl h10"></div></div>{% endfor %}
-{% elif state.prop_stats %}
-  {% for p in state.prop_stats %}
-    {% set ov=p.over_prob %}{% set un=p.under_prob %}
-    {% if ov>=0.68 %}{% set rcls='sov' %}{% set rt='STRONG OVER '+p.line|string+' Ks' %}{% set bc='gr' %}{% set bp=(ov*100)|int %}{% set dp=ov %}
-    {% elif ov>=0.58 %}{% set rcls='lov' %}{% set rt='LEAN OVER '+p.line|string+' Ks' %}{% set bc='tl' %}{% set bp=(ov*100)|int %}{% set dp=ov %}
-    {% elif un>=0.68 %}{% set rcls='sun' %}{% set rt='STRONG UNDER '+p.line|string+' Ks' %}{% set bc='re' %}{% set bp=(un*100)|int %}{% set dp=un %}
-    {% elif un>=0.58 %}{% set rcls='lun' %}{% set rt='LEAN UNDER '+p.line|string+' Ks' %}{% set bc='yw' %}{% set bp=(un*100)|int %}{% set dp=un %}
-    {% else %}{% set rcls='skp' %}{% set rt='COIN FLIP — SKIP' %}{% set bc='yw' %}{% set bp=50 %}{% set dp=0.5 %}{% endif %}
-    {% set fd=(1.0/dp)|round(2) %}
-    <div class="bc {{ rcls }}" id="card-{{ p._id }}" data-id="{{ p._id }}" data-label="{{ p.name }} {{ rt }}" data-dec="{{ fd }}" data-prob="{{ dp }}">
-      <div class="ct">
-        <div class="cm"><div class="csport">MLB · PITCHER PROP</div><div class="cmatch">{{ p.name }}</div><div class="cwhen">{{ p.team }} · {{ p.game }}</div></div>
-        <div class="ctr"><button class="addbtn" id="ab-{{ p._id }}" onclick="toggleLeg('{{ p._id }}')">+</button></div>
+      <div class="pc-stats">
+        <div class="ps-chip"><div class="ps-label">Confidence</div><div class="ps-val gr">{{ p.conf }}%</div></div>
+        <div class="ps-chip"><div class="ps-label">Edge</div><div class="ps-val {% if p.edge >= 10 %}gr{% elif p.edge >= 7 %}tl{% else %}yw{% endif %}">+{{ p.edge }}%</div></div>
+        <div class="ps-chip"><div class="ps-label">Odds</div><div class="ps-val bl">{{ p.odds_str }}</div></div>
       </div>
-      <div class="prop-rec {{ rcls }}">{{ rt }}</div>
-      <div class="chips">
-        <div class="chip"><div class="ch-l">ERA</div><div class="ch-v">{{ "%.2f"|format(p.era) }}</div></div>
-        <div class="chip"><div class="ch-l">K/9</div><div class="ch-v {{ bc }}">{{ "%.1f"|format(p.k9) }}</div></div>
-        <div class="chip"><div class="ch-l">WHIP</div><div class="ch-v">{{ "%.2f"|format(p.whip) }}</div></div>
-        <div class="chip"><div class="ch-l">IP/Start</div><div class="ch-v">{{ "%.1f"|format(p.ip_per_start) }}</div></div>
-        <div class="chip"><div class="ch-l">Avg Ks</div><div class="ch-v gr">{{ "%.1f"|format(p.avg_per_game) }}</div></div>
-        <div class="chip"><div class="ch-l">Line</div><div class="ch-v yw">{{ p.line }}</div></div>
-      </div>
-      <div class="pbar-wrap">
-        <div class="pbar-lbl"><span>Over {{ "%.0f"|format(p.over_prob*100) }}%</span><span>Under {{ "%.0f"|format(p.under_prob*100) }}%</span></div>
-        <div class="pbar-track"><div class="pbar-fill {{ bc }}" style="width:{{ bp }}%"></div></div>
+      <div class="pc-footer">
+        <span class="pc-time">{% if p.home_starter %}⚾ <span>{{ p.away_starter or 'TBD' }}</span> vs <span>{{ p.home_starter or 'TBD' }}</span>{% else %}Game time: <span>{{ p.when }}</span>{% endif %}</span>
+        <span class="pc-odds">{{ p.odds_str }}</span>
       </div>
     </div>
-  {% endfor %}
-{% else %}
-  <div class="empty"><div class="ei">⚾</div><strong>No pitcher props yet</strong><br>Baseball Reference may still be updating today's starter data.</div>
-{% endif %}
-</div>
-</div>
-
-<!-- ════════ PARLAYS ════════ -->
-{% set tp=(state.parlays_2|length)+(state.parlays_3|length)+(state.parlays_4|length) %}
-<div class="sec-hdr" onclick="toggleSec('parl')">
-  <h3>🔗 Auto Parlays</h3><div class="sec-cnt">{{ tp }}</div>
-  <div class="sec-line"></div><div class="sec-toggle" id="parl-tog">▾ Hide</div>
-</div>
-<div class="sec-body" id="parl-body">
-{% if state.status=='running' %}
-  <div class="skel-grid">{% for _ in range(2) %}<div class="skel" style="height:140px"><div class="sl h8"></div><div class="sl h12"></div><div class="sl h10"></div></div>{% endfor %}</div>
-{% elif tp>0 %}
-<div class="ptabs">
-  <button class="ptab act" onclick="fParlays('all',this)">All</button>
-  {% if state.parlays_2 %}<button class="ptab" onclick="fParlays('2',this)">2-Leg ({{ state.parlays_2|length }})</button>{% endif %}
-  {% if state.parlays_3 %}<button class="ptab" onclick="fParlays('3',this)">3-Leg ({{ state.parlays_3|length }})</button>{% endif %}
-  {% if state.parlays_4 %}<button class="ptab" onclick="fParlays('4',this)">4-Leg ({{ state.parlays_4|length }})</button>{% endif %}
-</div>
-{% for legs,pbets in [('2',state.parlays_2),('3',state.parlays_3),('4',state.parlays_4)] %}
-{% if pbets %}
-<div class="psec on" data-legs="{{ legs }}">
-  {% for p in pbets %}{% set ps=(bankroll*0.02)|round(0)|int %}{% set pw=(ps*p.combined_dec_odds)|round(0)|int %}
-  <div class="pcard">
-    <div class="ph"><div class="ptag">{{ legs }}-LEG PARLAY</div>
-      <div class="pchips">
-        <div class="pchip">Odds: <span class="v pu">{{ "%.2f"|format(p.combined_dec_odds) }}x</span></div>
-        <div class="pchip">Prob: <span class="v yw">{{ "%.0f"|format(p.combined_prob*100) }}%</span></div>
-        <div class="pchip">EV: <span class="v {{ 'gr' if p.ev>0 else 're' }}">{{ "%+.3f"|format(p.ev) }}</span></div>
-      </div>
-    </div>
-    <div class="plegs">{% for leg in p.legs %}<div class="pleg"><div class="pdot"></div><div>{{ leg }}</div></div>{% endfor %}</div>
-    <div class="ppay"><div><span class="pp-lbl">Stake </span><span class="pp-stk">${{ ps }}</span></div><div><span class="pp-lbl">Potential win </span><span class="pp-win">${{ pw }}</span></div></div>
-  </div>{% endfor %}
-</div>{% endif %}
-{% endfor %}
-{% else %}
-  <div class="empty"><div class="ei">🔗</div><strong>No auto parlays yet</strong><br>Run analysis or build one manually below.</div>
-{% endif %}
-</div>
-
-<!-- ════════ CONSOLE ════════ -->
-<div class="console-wrap">
-  <div class="console-hdr" onclick="toggleConsole()">
-    <div class="console-hdr-left">
-      <div class="console-dot {% if state.status=='running' %}active{% endif %}" id="cdot"></div>
-      <span class="console-title">▶ Console Log</span>
-      <span class="console-badge" id="ccount">0 lines</span>
-    </div>
-    <div class="console-toggle" id="ctog">▾ Show</div>
+    {% endfor %}
   </div>
-  <div class="console-body collapsed" id="console-body">
-    <div id="console-lines"><div class="log-empty">No logs yet — click Run Analysis to start.</div></div>
+  {% else %}
+  <div class="empty">
+    <span class="empty-icon">🌅</span>
+    <strong>No tomorrow picks yet</strong>
+    <p>Run analysis to see tomorrow's game predictions.</p>
+  </div>
+  {% endif %}
+</div>
+
+<!-- ══════════ PLAYER PROPS TAB ══════════ -->
+<div class="tab-panel" id="tab-props">
+  <div class="filter-bar">
+    <label>Filter:</label>
+    <button class="fbtn act" onclick="filterProps('all',this)">All</button>
+    <button class="fbtn" onclick="filterProps('OVER',this)">🟢 OVER</button>
+    <button class="fbtn" onclick="filterProps('UNDER',this)">🔴 UNDER</button>
+    <button class="fbtn" onclick="filterProps('ELITE',this)">🏆 Elite</button>
+    <button class="fbtn" onclick="filterProps('SAFE',this)">✅ Safe</button>
+    <button class="fbtn" onclick="filterProps('TODAY',this)">📅 Today</button>
+    <button class="fbtn" onclick="filterProps('TOMORROW',this)">🌅 Tomorrow</button>
+  </div>
+
+  {% if state.status == 'running' %}
+  <div class="prop-grid">{% for _ in range(4) %}
+    <div class="sk-card"><div class="sk h12" style="width:50%;margin-bottom:12px"></div><div class="sk h16" style="width:80%;margin-bottom:10px"></div><div class="sk h8" style="width:95%"></div></div>
+  {% endfor %}</div>
+  {% elif state.player_props %}
+  <div class="prop-grid" id="grid-props">
+    {% for p in state.player_props %}
+    <div class="prop-card {{ p.direction }}" data-dir="{{ p.direction }}" data-safety="{{ p.safety_label }}" data-when="{{ p.when_label }}">
+      <div class="prp-header">
+        <div>
+          <div class="prp-name">{{ p.name }}</div>
+          <div class="prp-team">{{ p.team }} · {{ p.game }}</div>
+        </div>
+        <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px">
+          <span class="sbadge {{ p.safety_label }}">{{ p.safety_label }}</span>
+          <span class="wbadge {{ p.when_label }}">{{ p.when }}</span>
+        </div>
+      </div>
+      <div class="prp-rec {{ p.direction }}">
+        {% if p.direction == 'OVER' %}📈{% else %}📉{% endif %}
+        {{ p.direction }} {{ p.line }} Strikeouts · {{ p.conf }}% confident
+      </div>
+      <div class="prp-stats">
+        <div class="ps-chip"><div class="ps-label">ERA</div><div class="ps-val {% if p.era < 3.5 %}gr{% elif p.era < 4.5 %}yw{% else %}re{% endif %}">{{ p.era }}</div></div>
+        <div class="ps-chip"><div class="ps-label">K/9</div><div class="ps-val gr">{{ p.k9 }}</div></div>
+        <div class="ps-chip"><div class="ps-label">WHIP</div><div class="ps-val {% if p.whip < 1.1 %}gr{% elif p.whip < 1.3 %}yw{% else %}re{% endif %}">{{ p.whip }}</div></div>
+        <div class="ps-chip"><div class="ps-label">Avg Ks</div><div class="ps-val tl">{{ p.avg_ks }}</div></div>
+        <div class="ps-chip"><div class="ps-label">Line</div><div class="ps-val yw">{{ p.line }}</div></div>
+        <div class="ps-chip"><div class="ps-label">Confidence</div><div class="ps-val {% if p.direction == 'OVER' %}gr{% else %}re{% endif %}">{{ p.conf }}%</div></div>
+      </div>
+      <div class="prp-bar">
+        <div class="prp-bar-lbl">
+          <span>Over {{ p.over_pct }}%</span>
+          <span>Under {{ p.under_pct }}%</span>
+        </div>
+        <div class="prp-bar-track">
+          <div class="prp-bar-fill {{ p.direction }}" style="width:{{ [p.over_pct, p.under_pct]|max }}%"></div>
+        </div>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div class="empty">
+    <span class="empty-icon">⚾</span>
+    <strong>No player props yet</strong>
+    <p>Props are fetched from Baseball Reference after lineups are posted.</p>
+  </div>
+  {% endif %}
+</div>
+
+<!-- ══════════ PARLAYS TAB ══════════ -->
+<div class="tab-panel" id="tab-parlays">
+  <!-- Sub-tabs: Team Parlays / Prop Parlays -->
+  <div class="filter-bar" style="margin-bottom:18px">
+    <label>Type:</label>
+    <button class="fbtn act" onclick="showParlayType('team',this)">🏆 Team Win Parlays</button>
+    <button class="fbtn" onclick="showParlayType('prop',this)">⚾ Player Prop Parlays</button>
+  </div>
+
+  <!-- TEAM PARLAYS -->
+  <div id="parl-team">
+    <div class="parlay-leg-tabs" id="team-leg-tabs"></div>
+    <div id="team-leg-panels"></div>
+    {% if not state.team_parlays %}
+    <div class="empty">
+      <span class="empty-icon">🏆</span>
+      <strong>No team parlays yet</strong>
+      <p>Run analysis to generate team win parlays ranked by safety score.</p>
+    </div>
+    {% endif %}
+  </div>
+
+  <!-- PROP PARLAYS -->
+  <div id="parl-prop" style="display:none">
+    <div class="parlay-leg-tabs" id="prop-leg-tabs"></div>
+    <div id="prop-leg-panels"></div>
+    {% if not state.prop_parlays %}
+    <div class="empty">
+      <span class="empty-icon">⚾</span>
+      <strong>No prop parlays yet</strong>
+      <p>Run analysis to generate 2-10 leg prop parlays ranked by combined safety.</p>
+    </div>
+    {% endif %}
   </div>
 </div>
 
-<div class="ftr">
-  <span>Bettor AI · MLB + Soccer Value System · For entertainment only</span>
-  <span>Min edge 5% · Kelly 25% · Bankroll ${{ "{:,.0f}".format(bankroll) }}</span>
-</div>
+<!-- ══════════ SCHEDULE TAB ══════════ -->
+<div class="tab-panel" id="tab-schedule">
+  <div class="filter-bar">
+    <label>Filter:</label>
+    <button class="fbtn act" onclick="filterSched('all',this)">All</button>
+    <button class="fbtn" onclick="filterSched('mlb',this)">⚾ MLB</button>
+    <button class="fbtn" onclick="filterSched('soccer',this)">⚽ Soccer</button>
+    <button class="fbtn" onclick="filterSched('today',this)">📅 Today</button>
+    <button class="fbtn" onclick="filterSched('tomorrow',this)">🌅 Tomorrow</button>
+  </div>
+
+  {% if state.upcoming_games %}
+  <div class="sched-grid" id="sched-grid">
+    {% for g in state.upcoming_games %}
+    {% set gd = g.game_date or g.date or '' %}
+    {% set gt = g.game_time or '' %}
+    {% set gs = (g.status or '')|upper %}
+    {% if 'IN PROGRESS' in gs or 'LIVE' in gs %}{% set wl = 'LIVE' %}{% set wt = '🔴 LIVE' %}
+    {% elif gd == today and gt %}{% set wl = 'TODAY' %}{% set wt = '⏰ TODAY ' + gt + ' ET' %}
+    {% elif gd == today %}{% set wl = 'TODAY' %}{% set wt = '📌 TODAY' %}
+    {% elif gd == tomorrow %}{% set wl = 'TOMORROW' %}{% set wt = '🌅 TOMORROW' + (' ' + gt + ' ET' if gt else '') %}
+    {% else %}{% set wl = 'UPCOMING' %}{% set wt = gd %}{% endif %}
+    <div class="sc-card {{ g.sport or 'mlb' }}" data-sport="{{ g.sport or 'mlb' }}" data-when="{{ wl|lower }}">
+      <div class="sc-head">
+        <div>
+          <div class="sc-league">{{ (g.sport or 'mlb')|upper }} · {{ g.league or 'MLB' }}</div>
+          <div class="sc-teams">{{ g.away_team }} @ {{ g.home_team }}</div>
+        </div>
+        <span class="wbadge {{ wl }}">{{ wt }}</span>
+      </div>
+      {% if g.home_starter or g.away_starter %}
+      <div class="sc-starter">⚾ <span>{{ g.away_starter or 'TBD' }}</span> vs <span>{{ g.home_starter or 'TBD' }}</span></div>
+      {% endif %}
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div class="empty">
+    <span class="empty-icon">📋</span>
+    <strong>No schedule data yet</strong>
+    <p>Run analysis to load today and tomorrow's schedule.</p>
+  </div>
+  {% endif %}
 </div>
 
-<!-- Floating Parlay Builder -->
-<div id="pb">
-  <div class="pb-bar">
-    <div class="pb-ttl">🔗 My Parlay</div>
-    <div class="pb-legs" id="pb-legs"></div>
-    <div class="pb-sum">
-      <div><div class="pb-lbl">Odds</div><div class="pb-odds" id="pb-odds">—</div></div>
-      <div class="pb-sk"><label>Stake $</label><input id="pb-stk" type="number" min="1" value="{{ (bankroll*0.02)|round(0)|int }}" oninput="updPB()"></div>
-      <div><div class="pb-lbl">To Win</div><div class="pb-pay" id="pb-pay">$0</div></div>
+</div><!-- /page -->
+
+<!-- CONSOLE -->
+<div class="console-wrap" id="console-wrap">
+  <div class="console-pull" onclick="toggleConsole()">
+    <div class="cpull-l">
+      <div class="cpull-dot" id="cdot"></div>
+      <span>▶ Console Log</span>
+      <span class="cpull-badge" id="ccount">0 lines</span>
     </div>
-    <button class="pb-clr" onclick="clearPB()">✕ Clear</button>
-    <button class="pb-cpy" onclick="copySlip()">📋 Copy</button>
+    <span class="cpull-r" id="ctog">▾ Show</span>
+  </div>
+  <div class="console-body" id="console-body">
+    <div id="clines"><div class="lg-empty">No logs yet — click Run Analysis to start.</div></div>
   </div>
 </div>
 
 <script>
-const TODAY = "{{ today }}";
-const TOMORROW = "{{ tomorrow }}";
-let legs = [];
-let _logOffset = 0;
-let _polling = null;
-let _consoleOpen = false;
+// ── Inline state from Jinja ───────────────────────────────────────
+const TEAM_PARLAYS = {{ state.team_parlays | tojson }};
+const PROP_PARLAYS = {{ state.prop_parlays | tojson }};
+const STATUS       = "{{ state.status }}";
 
-// ── Collapsible sections ──────────────────────────────────────────
-const _secState = {};
-function toggleSec(id) {
-  const body = document.getElementById(id + '-body');
-  const tog  = document.getElementById(id + '-tog');
-  if (!body) return;
-  const collapsed = body.classList.toggle('collapsed');
-  body.style.maxHeight = collapsed ? '0' : (body.scrollHeight + 'px');
-  tog.textContent = collapsed ? '▸ Show' : '▾ Hide';
-  if (!collapsed) body.style.maxHeight = '';
+// ── Tabs ─────────────────────────────────────────────────────────
+function showTab(id, btn) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('act'));
+  document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('on'));
+  btn.classList.add('act');
+  document.getElementById('tab-' + id).classList.add('on');
 }
 
+// ── Filters ──────────────────────────────────────────────────────
+function _setFilterBtn(bar, btn) {
+  bar.querySelectorAll('.fbtn').forEach(b => b.classList.remove('act','bl','pu'));
+  btn.classList.add('act');
+}
+
+function filterCards(grid, val, btn) {
+  _setFilterBtn(btn.closest('.filter-bar'), btn);
+  document.querySelectorAll('#grid-' + grid + ' .pick-card').forEach(c => {
+    if (val === 'all') { c.style.display = ''; return; }
+    const sport  = c.dataset.sport;
+    const safety = c.dataset.safety;
+    if (val === 'ELITE')  c.style.display = safety === 'ELITE' ? '' : 'none';
+    else if (val === 'SAFE')   c.style.display = ['ELITE','SAFE'].includes(safety) ? '' : 'none';
+    else c.style.display = sport === val ? '' : 'none';
+  });
+}
+
+function filterProps(val, btn) {
+  _setFilterBtn(btn.closest('.filter-bar'), btn);
+  document.querySelectorAll('#grid-props .prop-card').forEach(c => {
+    if (val === 'all') { c.style.display = ''; return; }
+    const dir    = c.dataset.dir;
+    const safety = c.dataset.safety;
+    const when   = c.dataset.when;
+    if (val === 'OVER' || val === 'UNDER')   c.style.display = dir === val ? '' : 'none';
+    else if (val === 'ELITE')  c.style.display = safety === 'ELITE' ? '' : 'none';
+    else if (val === 'SAFE')   c.style.display = ['ELITE','SAFE'].includes(safety) ? '' : 'none';
+    else if (val === 'TODAY' || val === 'TOMORROW') c.style.display = when === val ? '' : 'none';
+    else c.style.display = '';
+  });
+}
+
+function filterSched(val, btn) {
+  _setFilterBtn(btn.closest('.filter-bar'), btn);
+  document.querySelectorAll('#sched-grid .sc-card').forEach(c => {
+    if (val === 'all') { c.style.display = ''; return; }
+    const sport = c.dataset.sport;
+    const when  = c.dataset.when;
+    if (val === 'mlb' || val === 'soccer') c.style.display = sport === val ? '' : 'none';
+    else c.style.display = when === val ? '' : 'none';
+  });
+}
+
+// ── Parlay renderer ───────────────────────────────────────────────
+function renderParlays(data, tabsEl, panelsEl, labelFn) {
+  tabsEl.innerHTML = '';
+  panelsEl.innerHTML = '';
+  const keys = Object.keys(data).sort((a,b) => +a - +b);
+  if (!keys.length) return;
+  keys.forEach((n, idx) => {
+    const items = data[n];
+    if (!items.length) return;
+    const tab = document.createElement('button');
+    tab.className = 'ltab' + (idx === 0 ? ' act' : '');
+    tab.textContent = n + '-Leg (' + items.length + ')';
+    tab.onclick = function() {
+      tabsEl.querySelectorAll('.ltab').forEach(t => t.classList.remove('act'));
+      this.classList.add('act');
+      panelsEl.querySelectorAll('.ltab-panel').forEach(p => p.classList.remove('on'));
+      document.getElementById(panelsEl.id + '-' + n).classList.add('on');
+    };
+    tabsEl.appendChild(tab);
+
+    const panel = document.createElement('div');
+    panel.className = 'ltab-panel' + (idx === 0 ? ' on' : '');
+    panel.id = panelsEl.id + '-' + n;
+    items.forEach((p, i) => {
+      const card = document.createElement('div');
+      card.className = 'parl-card ' + p.safety_label;
+      card.innerHTML = `
+        <div class="parl-head">
+          <div class="parl-tag">${n}-LEG #${i+1}</div>
+          <span class="sbadge ${p.safety_label}">${p.safety_label}</span>
+        </div>
+        <div class="parl-legs">
+          ${p.legs.map(l => `<div class="leg-row"><div class="leg-dot"></div><div>${_esc(l)}</div></div>`).join('')}
+        </div>
+        <div class="parl-footer">
+          <div><div class="pf-lbl">Combined chance</div><div class="pf-prob">${p.combined_prob}%</div></div>
+          <div><div class="pf-lbl">Combined odds</div><div class="pf-odds">${p.combined_dec}x</div></div>
+        </div>`;
+      panel.appendChild(card);
+    });
+    panelsEl.appendChild(panel);
+  });
+}
+
+function _esc(s) { return s.replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+function showParlayType(type, btn) {
+  document.querySelectorAll('#tab-parlays .filter-bar .fbtn').forEach(b => b.classList.remove('act'));
+  btn.classList.add('act');
+  document.getElementById('parl-team').style.display = type === 'team' ? '' : 'none';
+  document.getElementById('parl-prop').style.display = type === 'prop' ? '' : 'none';
+}
+
+// Render on load
+(function() {
+  renderParlays(TEAM_PARLAYS, document.getElementById('team-leg-tabs'), document.getElementById('team-leg-panels'), n => n + '-Leg Team');
+  renderParlays(PROP_PARLAYS, document.getElementById('prop-leg-tabs'), document.getElementById('prop-leg-panels'), n => n + '-Leg Props');
+})();
+
 // ── Console ───────────────────────────────────────────────────────
+let _cOpen = false;
+let _logOffset = 0;
+let _polling   = null;
+
 function toggleConsole() {
-  const body = document.getElementById('console-body');
-  const tog  = document.getElementById('ctog');
-  _consoleOpen = !_consoleOpen;
-  if (_consoleOpen) {
-    body.classList.remove('collapsed');
-    body.style.maxHeight = '320px';
-    tog.textContent = '▴ Hide';
+  const wrap = document.getElementById('console-wrap');
+  _cOpen = !_cOpen;
+  if (_cOpen) {
+    wrap.classList.add('open');
+    document.getElementById('ctog').textContent = '▴ Hide';
+    document.getElementById('console-body').scrollTop = 99999;
   } else {
-    body.classList.add('collapsed');
-    body.style.maxHeight = '0';
-    tog.textContent = '▾ Show';
+    wrap.classList.remove('open');
+    document.getElementById('ctog').textContent = '▾ Show';
   }
 }
 
-function _classify(line) {
+function _classifyLog(line) {
   const l = line.toLowerCase();
   if (l.includes('error') || l.includes('traceback') || l.includes('exception')) return 'err';
-  if (l.includes('warning') || l.includes('warn') || l.includes('no ')) return 'warn';
-  if (l.includes('done') || l.includes('complete') || l.includes('saved') || l.includes('ready')) return 'ok';
+  if (l.includes('warning') || l.includes('warn')) return 'warn';
+  if (l.includes('done') || l.includes('saved') || l.includes('complete') || l.includes('ready')) return 'ok';
   if (l.includes('phase')) return 'phase';
   return '';
 }
 
 function appendLogs(lines) {
   if (!lines.length) return;
-  const container = document.getElementById('console-lines');
-  const wasEmpty = container.querySelector('.log-empty');
-  if (wasEmpty) container.innerHTML = '';
+  const container = document.getElementById('clines');
+  if (container.querySelector('.lg-empty')) container.innerHTML = '';
   lines.forEach(line => {
-    const m = line.match(/^\[(\d{2}:\d{2}:\d{2})\]\s*(.+)$/);
+    const m   = line.match(/^\[(\d{2}:\d{2}:\d{2})\]\s*(.+)$/);
     const ts  = m ? m[1] : '';
     const msg = m ? m[2] : line;
-    const cls = _classify(line);
-    const div = document.createElement('div');
-    div.className = 'log-line' + (cls ? ' ' + cls : '');
-    div.innerHTML = `<span class="ts">${ts}</span><span class="msg">${msg.replace(/</g,'&lt;')}</span>`;
-    container.appendChild(div);
+    const cls = _classifyLog(line);
+    const d   = document.createElement('div');
+    d.className = 'lg' + (cls ? ' ' + cls : '');
+    d.innerHTML = `<span class="ts">${ts}</span><span class="msg">${msg.replace(/</g,'&lt;')}</span>`;
+    container.appendChild(d);
   });
   document.getElementById('ccount').textContent = _logOffset + ' lines';
-  if (_consoleOpen) {
-    const body = document.getElementById('console-body');
-    body.scrollTop = body.scrollHeight;
-  }
+  if (_cOpen) document.getElementById('console-body').scrollTop = 99999;
 }
 
 function pollLogs() {
   fetch('/api/logs?since=' + _logOffset)
     .then(r => r.json())
     .then(d => {
-      if (d.logs && d.logs.length) {
-        appendLogs(d.logs);
-        _logOffset = d.total;
-      }
+      if (d.logs && d.logs.length) { appendLogs(d.logs); _logOffset = d.total; }
     }).catch(() => {});
 }
 
-// ── Run & Status polling ──────────────────────────────────────────
+// ── Run & Status ──────────────────────────────────────────────────
 function setStatus(s, phase, idx, total) {
-  const pill = document.getElementById('status-pill');
-  pill.className = 'pill ' + s;
-  document.getElementById('sdot').className = 'dot ' + s;
+  ['idle','running','done','error'].forEach(c => {
+    document.getElementById('spill').classList.remove(c);
+    document.getElementById('sdot').classList.remove(c);
+  });
+  document.getElementById('spill').classList.add(s);
+  document.getElementById('sdot').classList.add(s);
   document.getElementById('stxt').textContent = s.charAt(0).toUpperCase() + s.slice(1);
   document.getElementById('run-btn').disabled = (s === 'running');
-  document.getElementById('cdot').className = 'console-dot' + (s === 'running' ? ' active' : '');
+  document.getElementById('cdot').className = 'cpull-dot' + (s === 'running' ? ' act' : '');
 
-  const pw = document.getElementById('progress-wrap');
+  const pw = document.getElementById('prog-wrap');
   if (s === 'running') {
     pw.classList.add('on');
     if (phase) document.getElementById('pname').textContent = phase;
-    const pct = total > 0 ? Math.round((idx / total) * 100) : 0;
+    const pct = total > 0 ? Math.round(idx / total * 100) : 0;
     document.getElementById('ppct').textContent = pct + '%';
     document.getElementById('pfill').style.width = pct + '%';
-    document.querySelectorAll('.ps').forEach((el, i) => {
-      el.className = 'ps' + (i < idx ? ' dn' : (i === idx ? ' act' : ''));
+    document.querySelectorAll('.pchip').forEach((el, i) => {
+      el.className = 'pchip' + (i < idx ? ' done' : (i === idx ? ' act' : ''));
     });
   } else {
     pw.classList.remove('on');
@@ -657,13 +771,13 @@ function setStatus(s, phase, idx, total) {
 
 function runAnalysis() {
   _logOffset = 0;
-  document.getElementById('console-lines').innerHTML = '';
-  fetch('/api/run', { method: 'POST' })
-    .then(r => r.json()).then(d => {
+  document.getElementById('clines').innerHTML = '';
+  fetch('/api/run', {method: 'POST'})
+    .then(r => r.json())
+    .then(d => {
       if (!d.ok) { alert(d.msg); return; }
-      setStatus('running', '', 0, 8);
-      // Auto-open console
-      if (!_consoleOpen) toggleConsole();
+      setStatus('running', '', 0, 9);
+      if (!_cOpen) toggleConsole();
       startPolling();
     }).catch(e => alert('Error: ' + e));
 }
@@ -677,92 +791,13 @@ function startPolling() {
       if (d.status === 'done' || d.status === 'error') {
         clearInterval(_polling); _polling = null;
         pollLogs();
-        setTimeout(() => window.location.reload(), 800);
+        setTimeout(() => location.reload(), 1000);
       }
     });
   }, 1500);
 }
 
-(function() { if ('{{ state.status }}' === 'running') startPolling(); })();
-
-// ── Parlay builder ────────────────────────────────────────────────
-function toggleLeg(id) {
-  const idx = legs.findIndex(l => l.id === id);
-  if (idx === -1) {
-    const card = document.getElementById('card-' + id);
-    legs.push({ id, label: card.dataset.label, dec: parseFloat(card.dataset.dec), prob: parseFloat(card.dataset.prob) });
-    const btn = document.getElementById('ab-' + id);
-    btn.classList.add('on'); btn.textContent = '✓';
-    card.classList.add('sel');
-  } else {
-    legs.splice(idx, 1);
-    const btn = document.getElementById('ab-' + id);
-    btn.classList.remove('on'); btn.textContent = '+';
-    document.getElementById('card-' + id).classList.remove('sel');
-  }
-  updPB();
-}
-
-function removeLeg(id) {
-  const idx = legs.findIndex(l => l.id === id);
-  if (idx !== -1) legs.splice(idx, 1);
-  const btn  = document.getElementById('ab-' + id);
-  const card = document.getElementById('card-' + id);
-  if (btn)  { btn.classList.remove('on'); btn.textContent = '+'; }
-  if (card) card.classList.remove('sel');
-  updPB();
-}
-
-function updPB() {
-  const pb = document.getElementById('pb');
-  const ll = document.getElementById('pb-legs');
-  if (!legs.length) { pb.classList.remove('open'); return; }
-  pb.classList.add('open');
-  ll.innerHTML = legs.map(l =>
-    `<div class="pb-chip"><span>${l.label}</span><button class="pb-rm" onclick="removeLeg('${l.id}')">×</button></div>`
-  ).join('');
-  const comb = legs.reduce((a, l) => a * l.dec, 1.0);
-  const stake = parseFloat(document.getElementById('pb-stk').value) || 20;
-  document.getElementById('pb-odds').textContent = comb.toFixed(2) + 'x';
-  document.getElementById('pb-pay').textContent  = '$' + Math.round(stake * comb).toLocaleString();
-}
-
-function clearPB() {
-  legs.forEach(l => {
-    const btn = document.getElementById('ab-' + l.id);
-    const card = document.getElementById('card-' + l.id);
-    if (btn)  { btn.classList.remove('on'); btn.textContent = '+'; }
-    if (card) card.classList.remove('sel');
-  });
-  legs = [];
-  updPB();
-}
-
-function copySlip() {
-  if (!legs.length) return;
-  const comb = legs.reduce((a, l) => a * l.dec, 1.0);
-  const stake = parseFloat(document.getElementById('pb-stk').value) || 20;
-  const slip = ['=== MY PARLAY (' + legs.length + '-LEG) ===',
-    ...legs.map((l,i) => (i+1)+'. '+l.label), '',
-    'Combined: ' + comb.toFixed(2) + 'x',
-    'Stake: $' + stake,
-    'To Win: $' + Math.round(stake * comb).toLocaleString(),
-    'Date: ' + new Date().toLocaleDateString()
-  ].join('\n');
-  navigator.clipboard.writeText(slip).then(() => {
-    const btn = document.querySelector('.pb-cpy');
-    btn.textContent = '✅ Copied!';
-    setTimeout(() => btn.textContent = '📋 Copy', 2000);
-  });
-}
-
-function fParlays(legs, btn) {
-  document.querySelectorAll('.ptab').forEach(t => t.classList.remove('act'));
-  btn.classList.add('act');
-  document.querySelectorAll('.psec').forEach(s => {
-    s.classList.toggle('on', legs === 'all' || s.dataset.legs === legs);
-  });
-}
+if (STATUS === 'running') startPolling();
 </script>
 </body>
 </html>
