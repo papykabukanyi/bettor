@@ -79,6 +79,19 @@ body{background:var(--bg);color:var(--tx);font-family:'Segoe UI',system-ui,sans-
 .fbtn.re{background:#3b0a0a88;color:#f87171;border-color:#ef444444}
 .fbtn.yw{background:var(--yd);color:var(--yw);border-color:#f0b42944}
 .pfilt-sep{font-size:9px;font-weight:800;text-transform:uppercase;color:var(--mt);padding:0 4px 0 8px;letter-spacing:.5px;align-self:center;opacity:.7}
+/* ── Prop filter panel ── */
+#prop-filter-panel{display:flex;flex-direction:column;gap:6px;padding:10px 14px 8px;background:var(--s2);border:1px solid var(--bd);border-radius:var(--rl);margin-bottom:12px}
+.pfilt-row{display:flex;align-items:center;gap:6px;flex-wrap:wrap;min-height:28px}
+.pfilt-row-lbl{font-size:9px;font-weight:800;text-transform:uppercase;letter-spacing:.6px;color:var(--mt);min-width:72px;flex-shrink:0}
+.pfilt-btns{display:flex;flex-wrap:wrap;gap:4px;align-items:center}
+.pfilt-scope-badge{font-size:9px;font-weight:900;text-transform:uppercase;letter-spacing:.3px;padding:2px 7px;border-radius:4px;background:var(--s3);color:var(--mt);margin:0 2px;transition:opacity .2s}
+.pfilt-scope-badge.pfilt-off{opacity:.2}
+.fbtn.pfilt-off{opacity:.18;pointer-events:none;cursor:not-allowed}
+.pfilt-divider{height:1px;background:var(--bd);margin:2px 0}
+.pfilt-summary{display:flex;align-items:center;flex-wrap:wrap;gap:6px;padding-top:4px;border-top:1px solid var(--bd)}
+.pfilt-tag{font-size:10px;font-weight:800;padding:2px 8px;border-radius:5px;background:var(--s3);color:var(--tx);display:inline-flex;align-items:center;gap:4px}
+.pfilt-tag .ptag-x{opacity:.5;cursor:pointer;font-size:9px;margin-left:2px}.pfilt-tag .ptag-x:hover{opacity:1}
+#pfilt-count{font-size:11px;font-weight:800;color:var(--gr);margin-left:auto;white-space:nowrap}
 
 /* ── SAFETY BADGE ── */
 .sbadge{display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:999px;font-size:9px;font-weight:900;letter-spacing:.4px;white-space:nowrap}
@@ -440,45 +453,87 @@ body{background:var(--bg);color:var(--tx);font-family:'Segoe UI',system-ui,sans-
 
 <!-- ══════════ PLAYER PROPS TAB ══════════ -->
 <div class="tab-panel" id="tab-props">
-  <div class="filter-bar" style="flex-wrap:wrap;row-gap:6px">
-    <!-- ── Row: clear + sport ── -->
-    <button class="fbtn act" onclick="clearPropFilters(this)" style="margin-right:4px">All</button>
-    <span class="pfilt-sep">Sport</span>
-    <button class="fbtn" data-group="sport" onclick="filterProps('sport','mlb',this)">⚾ MLB</button>
-    <button class="fbtn" data-group="sport" onclick="filterProps('sport','soccer',this)">⚽ Soccer</button>
-    <!-- ── Direction ── -->
-    <span class="pfilt-sep">Dir</span>
-    <button class="fbtn" data-group="dir" onclick="filterProps('dir','OVER',this)">📈 Over</button>
-    <button class="fbtn" data-group="dir" onclick="filterProps('dir','UNDER',this)">📉 Under</button>
-    <!-- ── Safety ── -->
-    <span class="pfilt-sep">Safety</span>
-    <button class="fbtn" data-group="safety" onclick="filterProps('safety','ELITE',this)">🏆 Elite</button>
-    <button class="fbtn" data-group="safety" onclick="filterProps('safety','SAFE',this)">✅ Safe</button>
-    <button class="fbtn" data-group="safety" onclick="filterProps('safety','MODERATE',this)">⚠️ Mod</button>
-    <!-- ── Time ── -->
-    <span class="pfilt-sep">Time</span>
-    <button class="fbtn" data-group="when" onclick="filterProps('when','LIVE',this)">🔴 Live</button>
-    <button class="fbtn" data-group="when" onclick="filterProps('when','TODAY',this)">📅 Today</button>
-    <button class="fbtn" data-group="when" onclick="filterProps('when','TOMORROW',this)">🌅 Tmrw</button>
-    <!-- ── MLB Stat types ── -->
-    <span class="pfilt-sep">MLB Prop</span>
-    <button class="fbtn" data-group="stat" onclick="filterProps('stat','strikeouts',this)">⚾ P-Ks</button>
-    <button class="fbtn" data-group="stat" onclick="filterProps('stat','hits',this)">🏃 Hits</button>
-    <button class="fbtn" data-group="stat" onclick="filterProps('stat','home_runs',this)">💥 HR</button>
-    <button class="fbtn" data-group="stat" onclick="filterProps('stat','total_bases',this)">📊 TB</button>
-    <button class="fbtn" data-group="stat" onclick="filterProps('stat','rbi',this)">🏅 RBI</button>
-    <button class="fbtn" data-group="stat" onclick="filterProps('stat','runs',this)">🏁 R</button>
-    <button class="fbtn" data-group="stat" onclick="filterProps('stat','walks',this)">👀 BB</button>
-    <button class="fbtn" data-group="stat" onclick="filterProps('stat','stolen_bases',this)">💨 SB</button>
-    <button class="fbtn" data-group="stat" onclick="filterProps('stat','batter_strikeouts',this)">🔇 B-Ks</button>
-    <button class="fbtn" data-group="stat" onclick="filterProps('stat','doubles',this)">2️⃣ 2B</button>
-    <!-- ── Soccer Stat types ── -->
-    <span class="pfilt-sep">Soccer Prop</span>
-    <button class="fbtn" data-group="stat" onclick="filterProps('stat','goals_scored',this)">⚽ Goal</button>
-    <button class="fbtn" data-group="stat" onclick="filterProps('stat','assists',this)">🅰️ Assist</button>
-    <button class="fbtn" data-group="stat" onclick="filterProps('stat','goal_or_assist',this)">⚡ G+A</button>
-    <button class="fbtn" data-group="stat" onclick="filterProps('stat','shots_on_target',this)">🎯 SOT</button>
-    <button class="fbtn" data-group="stat" onclick="filterProps('stat','cards',this)">🟨 Card</button>
+
+  <div id="prop-filter-panel">
+
+    <!-- ROW: Sport -->
+    <div class="pfilt-row">
+      <span class="pfilt-row-lbl">Sport</span>
+      <div class="pfilt-btns">
+        <button class="fbtn" data-group="sport" data-val="mlb"    onclick="filterProps('sport','mlb',this)">⚾ MLB</button>
+        <button class="fbtn" data-group="sport" data-val="soccer" onclick="filterProps('sport','soccer',this)">⚽ Soccer</button>
+      </div>
+    </div>
+
+    <!-- ROW: Direction -->
+    <div class="pfilt-row">
+      <span class="pfilt-row-lbl">Direction</span>
+      <div class="pfilt-btns">
+        <button class="fbtn" data-group="dir" data-val="OVER"  onclick="filterProps('dir','OVER',this)">📈 Over</button>
+        <button class="fbtn" data-group="dir" data-val="UNDER" onclick="filterProps('dir','UNDER',this)">📉 Under</button>
+      </div>
+    </div>
+
+    <!-- ROW: Safety -->
+    <div class="pfilt-row">
+      <span class="pfilt-row-lbl">Safety</span>
+      <div class="pfilt-btns">
+        <button class="fbtn" data-group="safety" data-val="ELITE"    onclick="filterProps('safety','ELITE',this)">🏆 Elite</button>
+        <button class="fbtn" data-group="safety" data-val="SAFE"     onclick="filterProps('safety','SAFE',this)">✅ Safe</button>
+        <button class="fbtn" data-group="safety" data-val="MODERATE" onclick="filterProps('safety','MODERATE',this)">⚠️ Moderate</button>
+      </div>
+    </div>
+
+    <!-- ROW: Timing -->
+    <div class="pfilt-row">
+      <span class="pfilt-row-lbl">Timing</span>
+      <div class="pfilt-btns">
+        <button class="fbtn" data-group="when" data-val="LIVE"     onclick="filterProps('when','LIVE',this)">🔴 Live Now</button>
+        <button class="fbtn" data-group="when" data-val="TODAY"    onclick="filterProps('when','TODAY',this)">📅 Today</button>
+        <button class="fbtn" data-group="when" data-val="TOMORROW" onclick="filterProps('when','TOMORROW',this)">🌅 Tomorrow</button>
+      </div>
+    </div>
+
+    <div class="pfilt-divider"></div>
+
+    <!-- ROW: Prop Type — MLB (dims when Soccer selected) -->
+    <div class="pfilt-row" id="pfilt-row-mlb">
+      <span class="pfilt-row-lbl pfilt-scope-badge" id="pfilt-mlb-badge">⚾ MLB</span>
+      <div class="pfilt-btns">
+        <button class="fbtn" data-group="stat" data-val="strikeouts"       data-scope="mlb" onclick="filterProps('stat','strikeouts',this)">P-Ks</button>
+        <button class="fbtn" data-group="stat" data-val="hits"             data-scope="mlb" onclick="filterProps('stat','hits',this)">Hits</button>
+        <button class="fbtn" data-group="stat" data-val="home_runs"        data-scope="mlb" onclick="filterProps('stat','home_runs',this)">💥 HR</button>
+        <button class="fbtn" data-group="stat" data-val="total_bases"      data-scope="mlb" onclick="filterProps('stat','total_bases',this)">TB</button>
+        <button class="fbtn" data-group="stat" data-val="rbi"              data-scope="mlb" onclick="filterProps('stat','rbi',this)">RBI</button>
+        <button class="fbtn" data-group="stat" data-val="runs"             data-scope="mlb" onclick="filterProps('stat','runs',this)">Runs</button>
+        <button class="fbtn" data-group="stat" data-val="walks"            data-scope="mlb" onclick="filterProps('stat','walks',this)">BB</button>
+        <button class="fbtn" data-group="stat" data-val="stolen_bases"     data-scope="mlb" onclick="filterProps('stat','stolen_bases',this)">SB</button>
+        <button class="fbtn" data-group="stat" data-val="batter_strikeouts" data-scope="mlb" onclick="filterProps('stat','batter_strikeouts',this)">B-Ks</button>
+        <button class="fbtn" data-group="stat" data-val="doubles"          data-scope="mlb" onclick="filterProps('stat','doubles',this)">2B</button>
+      </div>
+    </div>
+
+    <!-- ROW: Prop Type — Soccer (dims when MLB selected) -->
+    <div class="pfilt-row" id="pfilt-row-soccer">
+      <span class="pfilt-row-lbl pfilt-scope-badge" id="pfilt-soc-badge">⚽ Soccer</span>
+      <div class="pfilt-btns">
+        <button class="fbtn" data-group="stat" data-val="goals_scored"    data-scope="soccer" onclick="filterProps('stat','goals_scored',this)">Goal</button>
+        <button class="fbtn" data-group="stat" data-val="assists"         data-scope="soccer" onclick="filterProps('stat','assists',this)">Assist</button>
+        <button class="fbtn" data-group="stat" data-val="goal_or_assist"  data-scope="soccer" onclick="filterProps('stat','goal_or_assist',this)">G+A</button>
+        <button class="fbtn" data-group="stat" data-val="shots_on_target" data-scope="soccer" onclick="filterProps('stat','shots_on_target',this)">SOT</button>
+        <button class="fbtn" data-group="stat" data-val="cards"           data-scope="soccer" onclick="filterProps('stat','cards',this)">🟨 Card</button>
+      </div>
+    </div>
+
+    <!-- Summary bar -->
+    <div class="pfilt-summary">
+      <span id="pfilt-summary-tags" style="display:flex;gap:4px;flex-wrap:wrap;align-items:center">
+        <span style="font-size:10px;color:var(--mt)">Showing all props</span>
+      </span>
+      <span id="pfilt-count"></span>
+      <button id="pfilt-reset-btn" onclick="clearPropFilters()" style="display:none" class="fbtn" style="font-size:10px">✕ Reset</button>
+    </div>
+
   </div>
 
   {% if state.status == 'running' %}
@@ -752,68 +807,156 @@ function filterCards(grid, val, btn) {
   });
 }
 
-// ── Multi-select prop filter ──────────────────────────────────────────────
-// Each button group (sport, direction, safety, stat, time) acts independently.
-// Within a group: clicking the same button deselects it (back to "any").
-// Across groups: all active selections must match (AND logic).
+// ── Prop filter panel ─────────────────────────────────────────────────────
+// Groups: sport | dir | safety | when | stat
+// Each group is single-select (radio style).
+// Click active button again → deselects back to "any".
+// When sport is selected, incompatible stat buttons are dimmed + blocked.
+// Incompatible active stat is auto-cleared when sport changes.
+
+const _MLB_STATS = ['strikeouts','hits','home_runs','total_bases','rbi','runs',
+                    'walks','stolen_bases','batter_strikeouts','doubles'];
+const _SOC_STATS = ['goals_scored','assists','goal_or_assist','shots_on_target','cards'];
 
 const _propFilters = {
-  sport:    null,  // 'mlb' | 'soccer' | null = any
-  dir:      null,  // 'OVER' | 'UNDER' | null
-  safety:   null,  // 'ELITE' | 'SAFE' | 'MODERATE' | null
-  stat:     null,  // stat_type string | null
-  when:     null,  // 'TODAY' | 'TOMORROW' | 'LIVE' | null
+  sport: null, dir: null, safety: null, stat: null, when: null
+};
+
+const _GROUP_LABELS = {
+  sport:  { mlb:'⚾ MLB', soccer:'⚽ Soccer' },
+  dir:    { OVER:'📈 Over', UNDER:'📉 Under' },
+  safety: { ELITE:'🏆 Elite', SAFE:'✅ Safe', MODERATE:'⚠️ Moderate' },
+  when:   { LIVE:'🔴 Live', TODAY:'📅 Today', TOMORROW:'🌅 Tomorrow' },
+  stat:   {
+    strikeouts:'P-Ks', hits:'Hits', home_runs:'HR', total_bases:'TB',
+    rbi:'RBI', runs:'Runs', walks:'BB', stolen_bases:'SB',
+    batter_strikeouts:'B-Ks', doubles:'2B',
+    goals_scored:'Goal', assists:'Assist', goal_or_assist:'G+A',
+    shots_on_target:'SOT', cards:'Card'
+  }
 };
 
 function _applyPropFilters() {
   const f = _propFilters;
+  let count = 0;
   document.querySelectorAll('#grid-props .prop-card').forEach(c => {
-    const dir    = c.dataset.dir;
-    const safety = c.dataset.safety;
-    const when   = c.dataset.when;
-    const stat   = c.dataset.stattype;
-    const sport  = c.dataset.sport;
     const show = (
-      (!f.sport  || sport  === f.sport)  &&
-      (!f.dir    || dir    === f.dir)    &&
-      (!f.safety || safety === f.safety) &&
-      (!f.stat   || stat   === f.stat)   &&
-      (!f.when   || when   === f.when)
+      (!f.sport  || c.dataset.sport    === f.sport)  &&
+      (!f.dir    || c.dataset.dir      === f.dir)    &&
+      (!f.safety || c.dataset.safety   === f.safety) &&
+      (!f.stat   || c.dataset.stattype === f.stat)   &&
+      (!f.when   || c.dataset.when     === f.when)
     );
     c.style.display = show ? '' : 'none';
+    if (show) count++;
   });
+  _refreshPfiltUI(count);
 }
 
-function _togglePropBtn(group, val, btn) {
-  const bar = btn.closest('.filter-bar');
-  // deselect all buttons in this group
-  bar.querySelectorAll(`.fbtn[data-group="${group}"]`).forEach(b => b.classList.remove('act','bl','pu','re','yw'));
-  if (_propFilters[group] === val) {
-    // clicking same value again → clear filter
-    _propFilters[group] = null;
+function _refreshPfiltUI(count) {
+  const panel = document.getElementById('prop-filter-panel');
+  if (!panel) return;
+  const f = _propFilters;
+
+  // ── 1. Dim/enable stat rows based on sport ──
+  const isMlb    = f.sport === 'mlb';
+  const isSoccer = f.sport === 'soccer';
+  panel.querySelectorAll('.fbtn[data-scope]').forEach(b => {
+    const sc = b.dataset.scope;
+    const off = (isMlb && sc === 'soccer') || (isSoccer && sc === 'mlb');
+    b.classList.toggle('pfilt-off', off);
+  });
+  // dim the sport-scope badges too
+  const mlbBadge = document.getElementById('pfilt-mlb-badge');
+  const socBadge = document.getElementById('pfilt-soc-badge');
+  if (mlbBadge) mlbBadge.classList.toggle('pfilt-off', isSoccer);
+  if (socBadge) socBadge.classList.toggle('pfilt-off', isMlb);
+
+  // ── 2. Result count ──
+  const countEl = document.getElementById('pfilt-count');
+  if (countEl) {
+    const total = document.querySelectorAll('#grid-props .prop-card').length;
+    countEl.textContent = (count < total) ? count + ' of ' + total + ' props' : total + ' props';
+    countEl.style.color = count === 0 ? 'var(--re)' : 'var(--gr)';
+  }
+
+  // ── 3. Summary tags ──
+  const tagsEl = document.getElementById('pfilt-summary-tags');
+  const resetBtn = document.getElementById('pfilt-reset-btn');
+  const active = Object.entries(f).filter(([,v]) => v !== null);
+  if (!tagsEl) return;
+  if (active.length === 0) {
+    tagsEl.innerHTML = '<span style="font-size:10px;color:var(--mt)">Showing all props · click any filter to narrow</span>';
+    if (resetBtn) resetBtn.style.display = 'none';
   } else {
-    _propFilters[group] = val;
-    // colour by group/value
-    let cls = 'act';
-    if (group === 'dir'    && val === 'UNDER') cls = 're';
-    else if (group === 'sport')                cls = 'bl';
-    else if (group === 'safety' && val === 'MODERATE') cls = 'yw';
-    btn.classList.add(cls);
+    tagsEl.innerHTML = active.map(([g, v]) => {
+      const lbl = (_GROUP_LABELS[g] || {})[v] || v;
+      return `<span class="pfilt-tag">${lbl}<span class="ptag-x" onclick="clearOnePropFilter('${g}')">✕</span></span>`;
+    }).join('');
+    if (resetBtn) resetBtn.style.display = '';
+  }
+}
+
+function _setPfiltBtnActive(group, val) {
+  const panel = document.getElementById('prop-filter-panel');
+  if (!panel) return;
+  // clear all buttons in group
+  panel.querySelectorAll(`.fbtn[data-group="${group}"]`).forEach(b =>
+    b.classList.remove('act','bl','pu','re','yw'));
+  if (val === null) return;
+  const btn = panel.querySelector(`.fbtn[data-group="${group}"][data-val="${val}"]`);
+  if (!btn) return;
+  let cls = 'act';
+  if (group === 'sport')                         cls = 'bl';
+  else if (group === 'dir' && val === 'UNDER')   cls = 're';
+  else if (group === 'when')                     cls = 'pu';
+  else if (group === 'safety' && val === 'MODERATE') cls = 'yw';
+  btn.classList.add(cls);
+}
+
+function filterProps(group, val, btn) {
+  const prev = _propFilters[group];
+  // Toggle: click same → deselect
+  const next = (prev === val) ? null : val;
+  _propFilters[group] = next;
+  _setPfiltBtnActive(group, next);
+
+  // If sport changed, auto-clear incompatible stat filter
+  if (group === 'sport' && _propFilters.stat) {
+    const isMlbStat = _MLB_STATS.includes(_propFilters.stat);
+    const isSocStat = _SOC_STATS.includes(_propFilters.stat);
+    const incompatible = (next === 'mlb' && isSocStat) || (next === 'soccer' && isMlbStat);
+    if (incompatible) {
+      _propFilters.stat = null;
+      _setPfiltBtnActive('stat', null);
+    }
   }
   _applyPropFilters();
 }
 
-function filterProps(group, val, btn) {
-  _togglePropBtn(group, val, btn);
-}
-
-function clearPropFilters(btn) {
-  Object.keys(_propFilters).forEach(k => _propFilters[k] = null);
-  btn.closest('.filter-bar').querySelectorAll('.fbtn').forEach(b =>
-    b.classList.remove('act','bl','pu','re','yw'));
-  btn.classList.add('act');
+function clearOnePropFilter(group) {
+  _propFilters[group] = null;
+  _setPfiltBtnActive(group, null);
   _applyPropFilters();
 }
+
+function clearPropFilters() {
+  Object.keys(_propFilters).forEach(k => _propFilters[k] = null);
+  const panel = document.getElementById('prop-filter-panel');
+  if (panel) panel.querySelectorAll('.fbtn').forEach(b =>
+    b.classList.remove('act','bl','pu','re','yw','pfilt-off'));
+  // re-enable all scoped btns
+  document.querySelectorAll('.fbtn[data-scope]').forEach(b => b.classList.remove('pfilt-off'));
+  document.querySelectorAll('#grid-props .prop-card').forEach(c => c.style.display = '');
+  const total = document.querySelectorAll('#grid-props .prop-card').length;
+  _refreshPfiltUI(total);
+}
+
+// Init count after page loads
+document.addEventListener('DOMContentLoaded', () => {
+  const total = document.querySelectorAll('#grid-props .prop-card').length;
+  if (total > 0) _refreshPfiltUI(total);
+});
 
 
 function filterSched(val, btn) {
