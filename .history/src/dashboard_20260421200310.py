@@ -434,7 +434,6 @@ def _run_analysis():
             if not b.get("game_time"): b["game_time"] = g.get("game_time")
             b["home_starter"] = g.get("home_starter", "")
             b["away_starter"] = g.get("away_starter", "")
-            b["status"]       = g.get("status", "")
 
         today_wins    = [b for b in win_bets if b.get("date", today) == today]
         tomorrow_wins = [b for b in win_bets if b.get("date", "") == tomorrow]

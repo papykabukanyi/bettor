@@ -434,6 +434,7 @@ def _run_analysis():
             if not b.get("game_time"): b["game_time"] = g.get("game_time")
             b["home_starter"] = g.get("home_starter", "")
             b["away_starter"] = g.get("away_starter", "")
+            b["status"]       = g.get("status", "")
 
         today_wins    = [b for b in win_bets if b.get("date", today) == today]
         tomorrow_wins = [b for b in win_bets if b.get("date", "") == tomorrow]
@@ -548,10 +549,13 @@ def _run_analysis():
         _phase(8)
         upcoming_games = []
         try:
-            from data.db import save_value_bets, get_upcoming_games
+            from data.db import save_value_bets, get_upcoming_games, save_prop_picks
             save_value_bets(win_bets, "win")
+            # Save today's qualified prop picks to prop_history
+            save_prop_picks(player_props)
             upcoming_games = get_upcoming_games(days_ahead=1)
-            _log(f"DB saved: {len(win_bets)} bets, {len(upcoming_games)} schedule rows")
+            _log(f"DB saved: {len(win_bets)} bets, {len(player_props)} props, "
+                 f"{len(upcoming_games)} schedule rows")
         except Exception as e:
             _log(f"DB warning: {e}")
             upcoming_games = _build_upcoming(games, fixtures)

@@ -93,6 +93,10 @@ body{background:var(--bg);color:var(--tx);font-family:'Segoe UI',system-ui,sans-
 .wbadge.TOMORROW{background:var(--od);color:var(--or);border:1px solid #f9731644}
 .wbadge.UPCOMING{background:var(--s3);color:var(--mt);border:1px solid var(--bd)}
 
+/* ── LIVE GAME BANNER ── */
+.live-banner{background:linear-gradient(90deg,#ef4444cc,#dc2626cc);color:#fff;padding:5px 14px;font-size:10px;font-weight:900;letter-spacing:1.5px;display:flex;align-items:center;gap:6px;animation:pulse 1.4s infinite}
+.pick-card.LIVE-GAME,.prop-card.LIVE-GAME{border-color:#ef444499!important;box-shadow:0 0 0 1px #ef444433}
+
 /* ── SPORT CHIP ── */
 .sport-chip{font-size:9px;font-weight:800;text-transform:uppercase;letter-spacing:.5px;padding:2px 7px;border-radius:4px}
 .sport-chip.MLB{background:var(--bld);color:var(--bl)}.sport-chip.SOCCER{background:var(--gd);color:var(--gr)}
@@ -304,7 +308,8 @@ body{background:var(--bg);color:var(--tx);font-family:'Segoe UI',system-ui,sans-
   {% elif state.today_team_picks %}
   <div class="pick-grid" id="grid-today">
     {% for p in state.today_team_picks %}
-    <div class="pick-card {{ p.safety_label }}" data-sport="{{ p.sport }}" data-safety="{{ p.safety_label }}">
+    <div class="pick-card {{ p.safety_label }}{% if p.when_label == 'LIVE' %} LIVE-GAME{% endif %}" data-sport="{{ p.sport }}" data-safety="{{ p.safety_label }}">
+      {% if p.when_label == 'LIVE' %}<div class="live-banner">🔴 &nbsp;GAME IN PROGRESS — LIVE NOW</div>{% endif %}
       <div class="pc-header">
         <div class="pc-meta">
           <span class="sport-chip {{ p.sport }}">{{ p.sport }}</span>
@@ -333,7 +338,7 @@ body{background:var(--bg);color:var(--tx);font-family:'Segoe UI',system-ui,sans-
         <div class="ps-chip"><div class="ps-label">Odds</div><div class="ps-val bl">{{ p.odds_str }}</div></div>
       </div>
       <div class="pc-footer">
-        <span class="pc-time">{% if p.home_starter %}⚾ <span>{{ p.away_starter or 'TBD' }}</span> vs <span>{{ p.home_starter or 'TBD' }}</span>{% else %}Game time: <span>{{ p.when }}</span>{% endif %}</span>
+        <span class="pc-time">{% if p.when_label == 'LIVE' %}🔴 <span style="color:#ef4444;font-weight:900">IN PROGRESS</span>{% else %}🕐 <span>{{ p.when }}</span>{% endif %}{% if p.sport == 'MLB' and p.home_starter %} &nbsp;·&nbsp; ⚾ <span>{{ p.away_starter or 'TBD' }}</span> vs <span>{{ p.home_starter or 'TBD' }}</span>{% elif p.sport == 'SOCCER' and p.home_starter %} &nbsp;·&nbsp; ⚽ <span>{{ p.home_starter }}</span>{% endif %}</span>
         <span class="pc-odds">{{ p.odds_str }}</span>
       </div>
     </div>
@@ -395,7 +400,7 @@ body{background:var(--bg);color:var(--tx);font-family:'Segoe UI',system-ui,sans-
         <div class="ps-chip"><div class="ps-label">Odds</div><div class="ps-val bl">{{ p.odds_str }}</div></div>
       </div>
       <div class="pc-footer">
-        <span class="pc-time">{% if p.home_starter %}⚾ <span>{{ p.away_starter or 'TBD' }}</span> vs <span>{{ p.home_starter or 'TBD' }}</span>{% else %}Game time: <span>{{ p.when }}</span>{% endif %}</span>
+        <span class="pc-time">🕐 <span>{{ p.when }}</span>{% if p.sport == 'MLB' and p.home_starter %} &nbsp;·&nbsp; ⚾ <span>{{ p.away_starter or 'TBD' }}</span> vs <span>{{ p.home_starter or 'TBD' }}</span>{% endif %}</span>
         <span class="pc-odds">{{ p.odds_str }}</span>
       </div>
     </div>
@@ -505,6 +510,9 @@ body{background:var(--bg);color:var(--tx);font-family:'Segoe UI',system-ui,sans-
         <div class="prp-bar-track">
           <div class="prp-bar-fill {{ p.direction }}" style="width:{{ [p.over_pct, p.under_pct]|max }}%"></div>
         </div>
+      </div>
+      <div class="pc-footer" style="padding:6px 14px">
+        <span class="pc-time">{% if p.when_label == 'LIVE' %}🔴 <span style="color:#ef4444;font-weight:900">IN PROGRESS</span>{% else %}🕐 <span>{{ p.when }}</span>{% endif %} &nbsp;·&nbsp; {{ p.game }}</span>
       </div>
     </div>
     {% endfor %}
