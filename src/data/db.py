@@ -248,6 +248,15 @@ CREATE INDEX IF NOT EXISTS idx_standings_league   ON standings(sport, league, se
 CREATE INDEX IF NOT EXISTS idx_news_team          ON news_articles(sport, team, fetched_at);
 CREATE INDEX IF NOT EXISTS idx_h2h_teams          ON head_to_head(sport, team_a, team_b);
 CREATE INDEX IF NOT EXISTS idx_player_prof_name   ON player_profiles(sport, player_name);
+
+-- ── Analysis cache: stores full game-card + parlay results per day ──
+CREATE TABLE IF NOT EXISTS analysis_cache (
+    id         SERIAL PRIMARY KEY,
+    cache_date DATE        NOT NULL UNIQUE,
+    data_json  JSONB       NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
 """
 
 
@@ -1050,6 +1059,72 @@ def save_match_events(events: list):
     except Exception as e:
         conn.rollback()
         print(f"[db] save_match_events error: {e}")
+    finally:
+        conn.close()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Analysis cache  (stores full game-card + parlay results per day)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def save_analysis_cache(data: dict, cache_date=None):
+    """
+    Save the full analysis result (game cards, parlays, picks) for today.
+    On a second run within the same day the row is updated in-place.
+    data: serialisable dict (all values must be JSON-safe).
+    """
+    if not data:
+        return
+    cdate = cache_date or datetime.date.today()
+    conn = get_conn()
+    if conn is None:
+        return
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO analysis_cache (cache_date, data_json, updated_at)
+            VALUES (%s, %s::jsonb, NOW())
+            ON CONFLICT (cache_date) DO UPDATE SET
+                data_json  = EXCLUDED.data_json,
+                updated_at = NOW()
+        """, (cdate, json.dumps(data)))
+        conn.commit()
+        print(f"[db] analysis_cache saved for {cdate}")
+    except Exception as e:
+        conn.rollback()
+        print(f"[db] save_analysis_cache error: {e}")
+    finally:
+        conn.close()
+
+
+def get_analysis_cache(max_age_hours: int = 22, cache_date=None) -> "dict | None":
+    """
+    Return today's cached analysis data if it was saved within max_age_hours.
+    Returns None when no fresh cache exists — caller should run full analysis.
+    The returned dict also contains '_updated_at' (ISO string) for display.
+    """
+    cdate = cache_date or datetime.date.today()
+    conn = get_conn()
+    if conn is None:
+        return None
+    try:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("""
+            SELECT data_json, updated_at
+            FROM   analysis_cache
+            WHERE  cache_date = %s
+              AND  updated_at > NOW() - (INTERVAL '1 hour' * %s)
+        """, (cdate, max_age_hours))
+        row = cur.fetchone()
+        if not row:
+            return None
+        data = dict(row["data_json"])
+        ts = row["updated_at"]
+        data["_updated_at"] = ts.strftime("%b %d %I:%M %p ET") if hasattr(ts, "strftime") else str(ts)[:16]
+        return data
+    except Exception as e:
+        print(f"[db] get_analysis_cache error: {e}")
+        return None
     finally:
         conn.close()
 

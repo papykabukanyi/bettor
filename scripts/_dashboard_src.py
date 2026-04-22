@@ -592,6 +592,61 @@ def _phase(idx, name=""):
     _log(f"Phase {idx+1}/{len(_PHASES)}: {label}")
 
 
+def _run_from_cache():
+    """
+    Reload analysis state from the DB cache without making any external API calls.
+    Falls through to a full _run_analysis() if no fresh cache exists.
+    """
+    _real = sys.stdout
+    sys.stdout = _StdoutCapture(_real)
+    with _lock:
+        _state["status"] = "running"; _state["error"] = None
+        _state["phase"]  = "Loading from database"; _state["phase_idx"] = 0
+    with _logs_lock:
+        _logs.clear()
+    _log("=== Loading from database cache ===")
+    try:
+        from data.db import get_analysis_cache, get_upcoming_games
+        cached = get_analysis_cache(max_age_hours=22)
+        if not cached:
+            _log("No fresh cache found — running full analysis instead...")
+            sys.stdout = _real
+            _run_analysis()
+            return
+        _log(f"Cache hit — last updated {cached.get('_updated_at', 'today')}")
+        upcoming_games = []
+        try:
+            upcoming_games = get_upcoming_games(days_ahead=1)
+        except Exception:
+            pass
+        _log("=== Loaded from cache ===")
+        with _lock:
+            _state.update({
+                "status":              "done",
+                "phase":               "Complete (from DB cache)",
+                "last_updated":        cached.get("last_updated",
+                                          cached.get("_updated_at",
+                                              datetime.datetime.now().strftime("%Y-%m-%d %H:%M"))),
+                "game_cards_today":    cached.get("game_cards_today", []),
+                "game_cards_tomorrow": cached.get("game_cards_tomorrow", []),
+                "best_parlays":        cached.get("best_parlays", []),
+                "today_team_picks":    cached.get("today_team_picks", []),
+                "tomorrow_team_picks": cached.get("tomorrow_team_picks", []),
+                "player_props":        cached.get("player_props", []),
+                "prop_parlays":        cached.get("prop_parlays", {}),
+                "team_parlays":        cached.get("team_parlays", {}),
+                "upcoming_games":      upcoming_games,
+                "error":               None,
+            })
+    except Exception:
+        err = traceback.format_exc()
+        _log(f"Cache load error — falling back to full analysis: {err}")
+        sys.stdout = _real
+        _run_analysis()
+    finally:
+        sys.stdout = _real
+
+
 def _run_analysis():
     import warnings; warnings.filterwarnings("ignore")
     import pandas as pd
@@ -939,7 +994,7 @@ def _run_analysis():
         _phase(8)
         upcoming_games = []
         try:
-            from data.db import save_value_bets, get_upcoming_games, save_prop_picks
+            from data.db import save_value_bets, get_upcoming_games, save_prop_picks, save_analysis_cache
             save_value_bets(win_bets, "win")
             # Save today's qualified prop picks to prop_history
             save_prop_picks(player_props)
@@ -965,19 +1020,45 @@ def _run_analysis():
             return obj
 
         _log("=== Done! ===")
+        _last_updated = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+        _clean_cards_today    = _clean(today_cards)
+        _clean_cards_tomorrow = _clean(tomorrow_cards)
+        _clean_parlays        = _clean(best_parlays)
+        _clean_today_team     = _clean(today_team)
+        _clean_tomorrow_team  = _clean(tomorrow_team)
+        _clean_props          = _clean(player_props)
+
+        # ── Save full result to DB so reruns can skip all API calls ──
+        try:
+            from data.db import save_analysis_cache
+            save_analysis_cache({
+                "game_cards_today":    _clean_cards_today,
+                "game_cards_tomorrow": _clean_cards_tomorrow,
+                "best_parlays":        _clean_parlays,
+                "today_team_picks":    _clean_today_team,
+                "tomorrow_team_picks": _clean_tomorrow_team,
+                "player_props":        _clean_props,
+                "prop_parlays":        _clean(prop_parlays),
+                "team_parlays":        _clean(team_parlays),
+                "last_updated":        _last_updated,
+            })
+            _log("Analysis cache saved to DB — next run will load from DB")
+        except Exception as _ce:
+            _log(f"Cache save skipped: {_ce}")
+
         with _lock:
             _state.update({
                 "status": "done", "phase": "Complete",
-                "last_updated":          datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
-                "today_team_picks":      _clean(today_team),
-                "tomorrow_team_picks":   _clean(tomorrow_team),
-                "player_props":          _clean(player_props),
+                "last_updated":          _last_updated,
+                "today_team_picks":      _clean_today_team,
+                "tomorrow_team_picks":   _clean_tomorrow_team,
+                "player_props":          _clean_props,
                 "prop_parlays":          _clean(prop_parlays),
                 "team_parlays":          _clean(team_parlays),
                 "upcoming_games":        _clean(upcoming_games),
-                "game_cards_today":      _clean(today_cards),
-                "game_cards_tomorrow":   _clean(tomorrow_cards),
-                "best_parlays":          _clean(best_parlays),
+                "game_cards_today":      _clean_cards_today,
+                "game_cards_tomorrow":   _clean_cards_tomorrow,
+                "best_parlays":          _clean_parlays,
             })
     except Exception:
         err = traceback.format_exc()
@@ -1022,14 +1103,17 @@ def index():
 
 @app.route("/api/run", methods=["POST"])
 def api_run():
+    data  = request.get_json(silent=True) or {}
+    force = bool(data.get("force", False))
     with _lock:
         if _state["status"] == "running":
             return jsonify({"ok": False, "msg": "Analysis already running"}), 409
         _state["status"] = "running"
         _state["phase"]  = _PHASES[0]
         _state["phase_idx"] = 0
-    threading.Thread(target=_run_analysis, daemon=True).start()
-    return jsonify({"ok": True, "msg": "Analysis started"})
+    target = _run_analysis if force else _run_from_cache
+    threading.Thread(target=target, daemon=True).start()
+    return jsonify({"ok": True, "msg": "Analysis started", "from_cache": not force})
 
 
 @app.route("/api/status")
