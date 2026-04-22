@@ -17,7 +17,7 @@ _PHASES = [
     "Fetching live odds",
     "Running team win algorithm",
     "Analyzing player props",
-    "Building parlays",
+    "Building game cards & parlays",
     "Saving to database",
 ]
 
@@ -30,6 +30,9 @@ _state = {
     "prop_parlays": {},
     "team_parlays": {},
     "upcoming_games": [],
+    "game_cards_today": [],
+    "game_cards_tomorrow": [],
+    "best_parlays": [],
 }
 _lock = threading.Lock()
 
@@ -329,6 +332,256 @@ def _build_parlays(picks, max_legs=10, top_n=3):
         scored.sort(key=lambda x: x["score"], reverse=True)
         result[str(n)] = scored[:top_n]
     return result
+
+
+# ── Game-card helpers ─────────────────────────────────────────────────────────
+
+def _norm_cdf(z):
+    """Standard normal CDF approximation (Abramowitz & Stegun, error < 7.5e-8)."""
+    import math
+    sign = 1 if z >= 0 else -1
+    z = abs(z)
+    t = 1.0 / (1.0 + 0.2316419 * z)
+    d = 0.3989422820 * math.exp(-z * z / 2.0)
+    p = d * t * (0.3193815 + t * (-0.3565638 + t * (1.7814779 + t * (-1.8212560 + t * 1.3302744))))
+    return 0.5 + sign * (0.5 - p)
+
+
+def _compute_game_prop(pred, sport, predicted_total=None):
+    """
+    Return the best single game prop for display.
+      Soccer → BTTS (both teams to score).
+      MLB    → Total Runs OVER/UNDER.
+    Returns a dict or None.
+    """
+    import math
+    try:
+        if sport == "soccer":
+            hxg = float(pred.get("home_xg") or pred.get("predicted_home_goals") or 0)
+            axg = float(pred.get("away_xg") or pred.get("predicted_away_goals") or 0)
+            if hxg > 0.1 and axg > 0.1:
+                p = (1 - math.exp(-hxg)) * (1 - math.exp(-axg))
+            else:
+                hw = float(pred.get("home_win_prob") or pred.get("home_win") or 0.38)
+                aw = float(pred.get("away_win_prob") or pred.get("away_win") or 0.28)
+                p = max(0.28, min(0.72, 0.28 + (1.0 - abs(hw - aw)) * 0.42))
+            p = round(p, 3)
+            if p < 0.50:
+                return None
+            s = _safety_score(p, p - 0.5)
+            return {"type": "btts", "label": "Both Teams to Score",
+                    "prob": p, "conf": round(p * 100),
+                    "safety": s, "safety_label": _safety_label(s),
+                    "dec_odds": round(1.0 / max(p, 0.01), 2), "line": None}
+        elif sport == "mlb":
+            total = float(predicted_total or 8.5)
+            line  = round(total * 2) / 2          # nearest 0.5
+            z     = (line - total) / 3.2
+            p_ov  = 1.0 - _norm_cdf(z)
+            direction, prob = ("OVER", round(p_ov, 3)) if p_ov >= 0.5 \
+                               else ("UNDER", round(1.0 - p_ov, 3))
+            if prob < 0.52:
+                return None
+            label = f"Total {direction} {line} Runs"
+            s = _safety_score(prob, prob - 0.5)
+            return {"type": f"total_{direction.lower()}", "label": label,
+                    "direction": direction, "prob": prob, "conf": round(prob * 100),
+                    "safety": s, "safety_label": _safety_label(s),
+                    "dec_odds": round(1.0 / max(prob, 0.01), 2), "line": line}
+    except Exception:
+        pass
+    return None
+
+
+def _build_game_cards(mlb_preds, soccer_preds, win_bets, player_props, today, tomorrow):
+    """
+    Group predictions by game into clean cards.
+    Each card has: win_pick, player_prop, game_prop.
+    Returns (today_cards, tomorrow_cards).
+    """
+    # win lookup: (home_team, away_team) → best win bet (highest edge)
+    win_by_game = {}
+    for b in win_bets:
+        parts = (b.get("matchup") or "").split(" vs ")
+        if len(parts) == 2:
+            key = (parts[0].strip(), parts[1].strip())
+            if key not in win_by_game or b.get("edge", 0) > win_by_game[key].get("edge", 0):
+                win_by_game[key] = b
+
+    # prop lookup: pick best prop for each game by scanning player_props
+    prop_by_game = {}  # (home, away) → prop dict
+    for p in sorted(player_props, key=lambda x: x.get("safety", 0), reverse=True):
+        gs = p.get("game", "")
+        matched = False
+        for (ht, at) in win_by_game:
+            if (ht in gs or at in gs) and (ht, at) not in prop_by_game:
+                prop_by_game[(ht, at)] = p
+                matched = True
+                break
+        if not matched:
+            # Try by team field
+            pt = p.get("team", "")
+            for (ht, at) in win_by_game:
+                if pt and (pt == ht or pt == at) and (ht, at) not in prop_by_game:
+                    prop_by_game[(ht, at)] = p
+                    break
+
+    today_cards, tomorrow_cards = [], []
+    seen = set()
+
+    for pred, sport in ([(p, "mlb") for p in mlb_preds] +
+                        [(p, "soccer") for p in soccer_preds]):
+        ht = pred.get("home_team", "")
+        at = pred.get("away_team", "")
+        if not ht or not at:
+            continue
+        key = (ht, at)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        gdate  = pred.get("date", today)
+        gtime  = pred.get("game_time")
+        status = pred.get("status", "")
+        if _game_is_over(status):
+            continue
+
+        when, when_label = _when_str(gdate, gtime, status, today, tomorrow)
+        if when_label not in ("TODAY", "TOMORROW", "LIVE", "UPCOMING"):
+            continue
+
+        # ── Win pick ──────────────────────────────────────────────
+        win_bet  = win_by_game.get(key)
+        win_pick = _build_team_pick(win_bet, today, tomorrow) if win_bet else None
+
+        # ── Player prop ───────────────────────────────────────────
+        raw_p = prop_by_game.get(key)
+        if not raw_p:
+            for p in player_props:
+                gs = p.get("game", "")
+                if ht in gs or at in gs:
+                    raw_p = p
+                    break
+        player_prop = None
+        if raw_p:
+            player_prop = {
+                "name":         raw_p.get("name", ""),
+                "team":         raw_p.get("team", ""),
+                "direction":    raw_p.get("direction", "OVER"),
+                "line":         raw_p.get("line", "?"),
+                "prop_label":   raw_p.get("prop_label", "Prop"),
+                "conf":         raw_p.get("conf", 50),
+                "safety":       raw_p.get("safety", 0.5),
+                "safety_label": raw_p.get("safety_label", "MODERATE"),
+                "sport":        raw_p.get("sport", sport),
+                "over_pct":     raw_p.get("over_pct", 50),
+                "under_pct":    raw_p.get("under_pct", 50),
+            }
+
+        # ── Game prop ─────────────────────────────────────────────
+        game_prop = _compute_game_prop(pred, sport, pred.get("predicted_total"))
+
+        if not win_pick and not player_prop and not game_prop:
+            continue
+
+        safeties    = [x["safety"] for x in [win_pick, player_prop, game_prop] if x]
+        overall_s   = round(sum(safeties) / len(safeties), 3) if safeties else 0.5
+
+        card = {
+            "game_key":              f"{at}@{ht}",
+            "sport":                 sport.upper(),
+            "league":                pred.get("league", sport.upper()),
+            "home_team":             ht,
+            "away_team":             at,
+            "when":                  when,
+            "when_label":            when_label,
+            "date":                  gdate,
+            "overall_safety":        overall_s,
+            "overall_safety_label":  _safety_label(overall_s),
+            "win_pick":              win_pick,
+            "player_prop":           player_prop,
+            "game_prop":             game_prop,
+            "home_starter":          pred.get("home_starter", ""),
+            "away_starter":          pred.get("away_starter", ""),
+        }
+
+        if gdate == today or when_label == "LIVE":
+            today_cards.append(card)
+        elif gdate == tomorrow:
+            tomorrow_cards.append(card)
+
+    today_cards.sort(key=lambda x: x["overall_safety"], reverse=True)
+    tomorrow_cards.sort(key=lambda x: x["overall_safety"], reverse=True)
+    return today_cards, tomorrow_cards
+
+
+def _build_best_parlays(all_cards, max_legs=10):
+    """
+    For each leg count 2..max_legs, find the safest parlay.
+    One pick per game (best safety across win/prop/game_prop).
+    Returns list of parlay dicts.
+    """
+    from itertools import combinations
+
+    pool = []
+    for card in all_cards:
+        candidates = []
+        for src, mk in [(card.get("win_pick"), "win"),
+                        (card.get("player_prop"), "prop"),
+                        (card.get("game_prop"), "game")]:
+            if not src:
+                continue
+            if mk == "win":
+                label   = f"{src['pick_team']} WIN"
+                dec     = max(float(src.get("dec_odds", 2.0)), 1.01)
+                conf_f  = src.get("conf", 50) / 100.0
+            elif mk == "prop":
+                conf_f  = src.get("conf", 50) / 100.0
+                label   = f"{src['name']} {src['direction']} {src['line']} {src['prop_label']}"
+                dec     = max(round(1.0 / max(conf_f, 0.01), 2), 1.01)
+            else:
+                conf_f  = src.get("conf", 50) / 100.0
+                label   = src.get("label", "Game Prop")
+                dec     = max(src.get("dec_odds", 2.0), 1.01)
+            candidates.append({
+                "label": label, "conf": conf_f, "dec_odds": dec,
+                "safety": src.get("safety", 0.5),
+                "badge":  src.get("safety_label", "MODERATE"),
+                "game":   card["game_key"],
+                "when":   card.get("when_label", "TODAY"),
+            })
+        if candidates:
+            pool.append(max(candidates, key=lambda x: x["safety"]))
+
+    if len(pool) < 2:
+        return []
+
+    results = []
+    for n in range(2, min(max_legs + 1, len(pool) + 1)):
+        best, best_score = None, -1.0
+        for combo in combinations(pool, n):
+            cp = 1.0
+            for c in combo: cp *= c["conf"]
+            cd = 1.0
+            for c in combo: cd *= c["dec_odds"]
+            avgs = sum(c["safety"] for c in combo) / n
+            score = cp * avgs
+            if score > best_score:
+                best_score = score
+                best = {
+                    "n_legs": n,
+                    "legs": [{"label": c["label"], "conf": round(c["conf"] * 100),
+                              "badge": c["badge"], "game": c["game"],
+                              "when": c["when"]} for c in combo],
+                    "combined_prob": round(cp * 100, 1),
+                    "combined_dec":  round(cd, 2),
+                    "avg_safety":    round(avgs, 3),
+                    "safety_label":  _safety_label(avgs),
+                    "score":         round(score, 5),
+                }
+        if best:
+            results.append(best)
+    return results
 
 
 def _phase(idx, name=""):
@@ -658,7 +911,7 @@ def _run_analysis():
         _log(f"Player props: {len(player_props)} qualifying picks")
 
         _phase(7)
-        _log("Building 2-10 leg parlays...")
+        _log("Building game cards and parlays...")
         today_team    = sorted([_build_team_pick(b, today, tomorrow) for b in today_wins],
                                key=lambda x: x["safety"], reverse=True)
         tomorrow_team = sorted([_build_team_pick(b, today, tomorrow) for b in tomorrow_wins],
@@ -675,8 +928,13 @@ def _run_analysis():
 
         prop_parlays = _build_parlays(prop_pool, max_legs=10)
         team_parlays = _build_parlays(team_pool, max_legs=6)
-        _log(f"Parlays: {sum(len(v) for v in prop_parlays.values())} prop, "
-             f"{sum(len(v) for v in team_parlays.values())} team")
+
+        # ── New: per-game cards + best combined parlays ──────────────────
+        today_cards, tomorrow_cards = _build_game_cards(
+            mlb_preds, soccer_preds, win_bets, player_props, today, tomorrow)
+        best_parlays = _build_best_parlays(today_cards + tomorrow_cards, max_legs=10)
+        _log(f"Game cards: {len(today_cards)} today, {len(tomorrow_cards)} tomorrow | "
+             f"Best parlays: {len(best_parlays)} options (2-{min(10, len(best_parlays)+1)} legs)")
 
         _phase(8)
         upcoming_games = []
@@ -710,13 +968,16 @@ def _run_analysis():
         with _lock:
             _state.update({
                 "status": "done", "phase": "Complete",
-                "last_updated":        datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
-                "today_team_picks":    _clean(today_team),
-                "tomorrow_team_picks": _clean(tomorrow_team),
-                "player_props":        _clean(player_props),
-                "prop_parlays":        _clean(prop_parlays),
-                "team_parlays":        _clean(team_parlays),
-                "upcoming_games":      _clean(upcoming_games),
+                "last_updated":          datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+                "today_team_picks":      _clean(today_team),
+                "tomorrow_team_picks":   _clean(tomorrow_team),
+                "player_props":          _clean(player_props),
+                "prop_parlays":          _clean(prop_parlays),
+                "team_parlays":          _clean(team_parlays),
+                "upcoming_games":        _clean(upcoming_games),
+                "game_cards_today":      _clean(today_cards),
+                "game_cards_tomorrow":   _clean(tomorrow_cards),
+                "best_parlays":          _clean(best_parlays),
             })
     except Exception:
         err = traceback.format_exc()

@@ -5,16 +5,12 @@
 <meta name="viewport" content="width=device-width,initial-scale=1.0,viewport-fit=cover">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="apple-mobile-web-app-title" content="Bettor AI">
 <meta name="theme-color" content="#070a10">
 <title>Bettor AI</title>
-<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0%25' y1='0%25' x2='100%25' y2='100%25'%3E%3Cstop offset='0%25' stop-color='%2322c55e'/%3E%3Cstop offset='100%25' stop-color='%230d9488'/%3E%3C/linearGradient%3E%3ClinearGradient id='sg' x1='0%25' y1='0%25' x2='100%25' y2='100%25'%3E%3Cstop offset='0%25' stop-color='%2322c55e' stop-opacity='0.3'/%3E%3Cstop offset='100%25' stop-color='%230d9488' stop-opacity='0.1'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='64' height='64' rx='14' fill='%23070a10'/%3E%3Crect width='64' height='64' rx='14' fill='url(%23sg)'/%3E%3Crect x='2' y='2' width='60' height='60' rx='12' fill='none' stroke='url(%23g)' stroke-width='1.5' stroke-opacity='0.6'/%3E%3Crect x='18' y='14' width='16' height='22' rx='4' fill='url(%23g)'/%3E%3Crect x='18' y='28' width='20' height='22' rx='4' fill='url(%23g)'/%3E%3Crect x='18' y='33' width='20' height='3' fill='%23070a10' fill-opacity='0.5'/%3E%3C/svg%3E">
-<link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0%25' y1='0%25' x2='100%25' y2='100%25'%3E%3Cstop offset='0%25' stop-color='%2322c55e'/%3E%3Cstop offset='100%25' stop-color='%230d9488'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='64' height='64' rx='14' fill='%23070a10'/%3E%3Crect x='18' y='14' width='16' height='22' rx='4' fill='url(%23g)'/%3E%3Crect x='18' y='28' width='20' height='22' rx='4' fill='url(%23g)'/%3E%3C/svg%3E">
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 :root{
-  --bg:#070a10;--sur:#0e1118;--s2:#141820;--s3:#1a2030;--s4:#212840;
+  --bg:#070a10;--sur:#0e1118;--s2:#141820;--s3:#1a2030;
   --bd:#1e2535;--bd2:#2a3450;--tx:#dde4f0;--mt:#7a8aa8;--mt2:#3d4f6a;
   --gr:#22c55e;--gd:#0a1e10;--gd2:#0d2a14;
   --yw:#f0b429;--yd:#1f1a08;
@@ -23,20 +19,17 @@
   --pu:#a855f7;--pd:#160d24;
   --or:#f97316;--od:#1f1208;
   --tl:#14b8a6;--tld:#081a18;
-  --cy:#06b6d4;--cyd:#061418;
   --r:10px;--rl:14px;
-  --elite:#22c55e;--safe:#14b8a6;--mod:#f0b429;--risky:#ef4444;
 }
-body{background:var(--bg);color:var(--tx);font-family:'Segoe UI',system-ui,sans-serif;font-size:14px;line-height:1.5;min-height:100vh;overflow-x:hidden;-webkit-font-smoothing:antialiased}
-.page{max-width:1360px;margin:0 auto;padding:12px 12px 80px;padding-bottom:calc(80px + env(safe-area-inset-bottom))}
-
-/* ── HEADER ── */
+body{background:var(--bg);color:var(--tx);font-family:"Segoe UI",system-ui,sans-serif;font-size:14px;line-height:1.5;min-height:100vh;overflow-x:hidden;-webkit-font-smoothing:antialiased}
+.page{max-width:1200px;margin:0 auto;padding:12px 12px 80px;padding-bottom:calc(80px + env(safe-area-inset-bottom))}
+/* HEADER */
 .hdr{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:16px;padding-bottom:12px;border-bottom:1px solid var(--bd)}
-.brand{display:flex;align-items:center;gap:10px;min-width:0}
+.brand{display:flex;align-items:center;gap:10px}
 .logo{width:40px;height:40px;border-radius:11px;background:linear-gradient(135deg,#22c55e,#0d9488);display:flex;align-items:center;justify-content:center;font-size:20px;font-weight:900;color:#000;flex-shrink:0}
-.brand-text h1{font-size:1.2rem;font-weight:900;letter-spacing:-.5px;white-space:nowrap}
+.brand-text h1{font-size:1.2rem;font-weight:900;letter-spacing:-.5px}
 .brand-text h1 em{color:var(--gr);font-style:normal}
-.brand-text p{font-size:10px;color:var(--mt);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:220px}
+.brand-text p{font-size:10px;color:var(--mt)}
 .hdr-right{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
 .status-pill{display:inline-flex;align-items:center;gap:5px;padding:5px 12px;border-radius:999px;font-size:11px;font-weight:700;border:1px solid transparent}
 .status-pill.idle{background:var(--s2);color:var(--mt);border-color:var(--bd)}
@@ -46,505 +39,211 @@ body{background:var(--bg);color:var(--tx);font-family:'Segoe UI',system-ui,sans-
 .sdot{width:7px;height:7px;border-radius:50%;flex-shrink:0}
 .sdot.idle{background:var(--mt)}.sdot.running{background:var(--gr);animation:pulse 1s infinite}.sdot.done{background:var(--gr)}.sdot.error{background:var(--re)}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
-.run-btn{background:linear-gradient(135deg,#22c55e,#0d9488);color:#000;border:none;padding:9px 22px;border-radius:var(--r);font-weight:800;font-size:13px;cursor:pointer;letter-spacing:.2px;transition:opacity .15s,transform .1s}
+.run-btn{background:linear-gradient(135deg,#22c55e,#0d9488);color:#000;border:none;padding:9px 22px;border-radius:var(--r);font-weight:800;font-size:13px;cursor:pointer;transition:opacity .15s,transform .1s}
 .run-btn:hover{opacity:.88;transform:translateY(-1px)}
 .run-btn:disabled{opacity:.3;cursor:not-allowed;transform:none}
 .console-btn{background:var(--s2);color:var(--mt);border:1px solid var(--bd);padding:7px 13px;border-radius:var(--r);font-size:11px;font-weight:700;cursor:pointer;transition:all .15s}
 .console-btn:hover{border-color:var(--tl);color:var(--tl)}
-
-/* ── PROGRESS ── */
+/* PROGRESS */
 .prog-wrap{background:var(--sur);border:1px solid var(--bd);border-radius:var(--r);padding:14px 16px;margin-bottom:20px;display:none}
 .prog-wrap.on{display:block}
 .prog-head{display:flex;justify-content:space-between;font-size:11px;color:var(--mt);margin-bottom:8px}
 .prog-track{height:5px;background:var(--s3);border-radius:999px;overflow:hidden;margin-bottom:10px}
 .prog-fill{height:100%;background:linear-gradient(90deg,var(--gr),var(--tl));border-radius:999px;transition:width .5s ease}
 .phase-chips{display:flex;flex-wrap:wrap;gap:4px}
-.pchip{font-size:9px;padding:2px 8px;border-radius:999px;background:var(--s2);color:var(--mt2);border:1px solid var(--bd);white-space:nowrap}
+.pchip{font-size:9px;padding:2px 8px;border-radius:999px;background:var(--s2);color:var(--mt2);border:1px solid var(--bd)}
 .pchip.act{background:var(--gd);color:var(--gr);border-color:#22c55e44}
-.pchip.done{background:var(--s3);color:var(--mt);border-color:var(--bd)}
-
-/* ── ERROR BOX ── */
+.pchip.done{background:var(--s3);color:var(--mt)}
 .err-box{background:var(--rd);border:1px solid var(--re);border-radius:var(--r);padding:12px 14px;color:var(--re);font-family:monospace;font-size:11px;white-space:pre-wrap;overflow-x:auto;margin-bottom:16px}
-
-/* ── TABS ── */
-.tabs{display:flex;gap:0;flex-wrap:wrap;border-bottom:2px solid var(--bd);margin-bottom:16px;padding-bottom:0;overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none}
+/* TABS */
+.tabs{display:flex;gap:0;border-bottom:2px solid var(--bd);margin-bottom:18px;overflow-x:auto;scrollbar-width:none}
 .tabs::-webkit-scrollbar{display:none}
-.tab{padding:9px 18px;font-size:12px;font-weight:800;color:var(--mt);border:none;background:none;cursor:pointer;border-bottom:3px solid transparent;margin-bottom:-2px;transition:color .15s,border-color .15s;text-transform:uppercase;letter-spacing:.4px;display:flex;align-items:center;gap:6px;white-space:nowrap}
+.tab{padding:9px 20px;font-size:12px;font-weight:800;color:var(--mt);border:none;background:none;cursor:pointer;border-bottom:3px solid transparent;margin-bottom:-2px;transition:color .15s,border-color .15s;text-transform:uppercase;letter-spacing:.4px;display:flex;align-items:center;gap:6px;white-space:nowrap;flex-shrink:0}
 .tab:hover{color:var(--tx)}
 .tab.act{color:var(--gr);border-bottom-color:var(--gr)}
 .tab-cnt{background:var(--s3);color:var(--mt);font-size:9px;font-weight:700;padding:1px 6px;border-radius:999px}
 .tab.act .tab-cnt{background:var(--gd);color:var(--gr)}
 .tab-panel{display:none}.tab-panel.on{display:block}
-
-/* ── FILTER BAR ── */
-.filter-bar{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:16px;align-items:center}
-.filter-bar label{font-size:10px;color:var(--mt);font-weight:700;text-transform:uppercase;letter-spacing:.4px;margin-right:2px}
-.fbtn{padding:4px 12px;border-radius:999px;font-size:11px;font-weight:700;border:1px solid var(--bd);background:var(--s2);color:var(--mt);cursor:pointer;transition:all .15s;white-space:nowrap}
-.fbtn:hover{border-color:var(--bd2);color:var(--tx)}
-.fbtn.act{background:var(--gd);color:var(--gr);border-color:#22c55e44}
-.fbtn.act.bl{background:var(--bld);color:var(--bl);border-color:#3b82f644}
-.fbtn.act.pu{background:var(--pd);color:var(--pu);border-color:#a855f744}
-.fbtn.re{background:#3b0a0a88;color:#f87171;border-color:#ef444444}
-.fbtn.yw{background:var(--yd);color:var(--yw);border-color:#f0b42944}
-.pfilt-sep{font-size:9px;font-weight:800;text-transform:uppercase;color:var(--mt);padding:0 4px 0 8px;letter-spacing:.5px;align-self:center;opacity:.7}
-/* ── Prop filter panel ── */
-#prop-filter-panel{display:flex;flex-direction:column;gap:6px;padding:10px 14px 8px;background:var(--s2);border:1px solid var(--bd);border-radius:var(--rl);margin-bottom:12px}
-.pfilt-row{display:flex;align-items:center;gap:6px;flex-wrap:wrap;min-height:28px}
-.pfilt-row-lbl{font-size:9px;font-weight:800;text-transform:uppercase;letter-spacing:.6px;color:var(--mt);min-width:72px;flex-shrink:0}
-.pfilt-btns{display:flex;flex-wrap:wrap;gap:4px;align-items:center}
-.pfilt-scope-badge{font-size:9px;font-weight:900;text-transform:uppercase;letter-spacing:.3px;padding:2px 7px;border-radius:4px;background:var(--s3);color:var(--mt);margin:0 2px;transition:opacity .2s}
-.pfilt-scope-badge.pfilt-off{opacity:.2}
-.fbtn.pfilt-off{opacity:.18;pointer-events:none;cursor:not-allowed}
-.pfilt-divider{height:1px;background:var(--bd);margin:2px 0}
-.pfilt-summary{display:flex;align-items:center;flex-wrap:wrap;gap:6px;padding-top:4px;border-top:1px solid var(--bd)}
-.pfilt-tag{font-size:10px;font-weight:800;padding:2px 8px;border-radius:5px;background:var(--s3);color:var(--tx);display:inline-flex;align-items:center;gap:4px}
-.pfilt-tag .ptag-x{opacity:.5;cursor:pointer;font-size:9px;margin-left:2px}.pfilt-tag .ptag-x:hover{opacity:1}
-#pfilt-count{font-size:11px;font-weight:800;color:var(--gr);margin-left:auto;white-space:nowrap}
-
-/* ── SAFETY BADGE ── */
-.sbadge{display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:999px;font-size:9px;font-weight:900;letter-spacing:.4px;white-space:nowrap}
-.sbadge.ELITE{background:var(--gd2);color:var(--elite);border:1px solid #22c55e44}
-.sbadge.SAFE{background:var(--tld);color:var(--safe);border:1px solid #14b8a644}
-.sbadge.MODERATE{background:var(--yd);color:var(--mod);border:1px solid #f0b42944}
-.sbadge.RISKY{background:var(--rd);color:var(--risky);border:1px solid #ef444444}
-.sbar{height:3px;border-radius:999px;margin-top:5px}
-.sbar.ELITE{background:var(--elite)}.sbar.SAFE{background:var(--safe)}.sbar.MODERATE{background:var(--mod)}.sbar.RISKY{background:var(--risky)}
-
-/* ── WHEN BADGE ── */
+/* BADGES */
+.sbadge{display:inline-flex;align-items:center;padding:3px 9px;border-radius:999px;font-size:9px;font-weight:900;letter-spacing:.4px;white-space:nowrap}
+.sbadge.ELITE{background:var(--gd2);color:#22c55e;border:1px solid #22c55e44}
+.sbadge.SAFE{background:var(--tld);color:#14b8a6;border:1px solid #14b8a644}
+.sbadge.MODERATE{background:var(--yd);color:#f0b429;border:1px solid #f0b42944}
+.sbadge.RISKY{background:var(--rd);color:#ef4444;border:1px solid #ef444444}
 .wbadge{display:inline-flex;align-items:center;padding:2px 8px;border-radius:5px;font-size:9px;font-weight:800;white-space:nowrap}
 .wbadge.LIVE{background:var(--rd);color:var(--re);border:1px solid #ef444444;animation:pulse 1.4s infinite}
 .wbadge.TODAY{background:var(--gd);color:var(--gr);border:1px solid #22c55e44}
 .wbadge.TOMORROW{background:var(--od);color:var(--or);border:1px solid #f9731644}
 .wbadge.UPCOMING{background:var(--s3);color:var(--mt);border:1px solid var(--bd)}
-
-/* ── LIVE GAME BANNER ── */
-.live-banner{background:linear-gradient(90deg,#ef4444cc,#dc2626cc);color:#fff;padding:5px 14px;font-size:10px;font-weight:900;letter-spacing:1.5px;display:flex;align-items:center;gap:6px;animation:pulse 1.4s infinite}
-.pick-card.LIVE-GAME,.prop-card.LIVE-GAME{border-color:#ef444499!important;box-shadow:0 0 0 1px #ef444433}
-
-/* ── SPORT CHIP ── */
 .sport-chip{font-size:9px;font-weight:800;text-transform:uppercase;letter-spacing:.5px;padding:2px 7px;border-radius:4px}
-.sport-chip.MLB{background:var(--bld);color:var(--bl)}.sport-chip.SOCCER{background:var(--gd);color:var(--gr)}
-.sport-chip.EPL,.sport-chip.ESP,.sport-chip.GER,.sport-chip.ITA{background:var(--pd);color:var(--pu)}
-
-/* ── TEAM PICK CARD ── */
-.pick-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(300px,100%),1fr));gap:10px}
-.pick-card{background:var(--sur);border:1px solid var(--bd);border-radius:var(--rl);overflow:hidden;transition:border-color .15s,transform .1s,box-shadow .15s}
-.pick-card:hover{border-color:var(--bd2);transform:translateY(-1px);box-shadow:0 4px 20px rgba(0,0,0,.4)}
-.pick-card.ELITE{border-top:3px solid var(--elite)}.pick-card.SAFE{border-top:3px solid var(--safe)}
-.pick-card.MODERATE{border-top:3px solid var(--mod)}.pick-card.RISKY{border-top:3px solid var(--risky)}
-.pc-header{padding:12px 14px 0;display:flex;justify-content:space-between;align-items:flex-start}
-.pc-meta{display:flex;align-items:center;gap:5px;flex-wrap:wrap}
-.pc-matchup{padding:8px 14px;font-size:.82rem;color:var(--mt)}
-.pc-matchup span{color:var(--tx);font-weight:600}
-.pc-pick{margin:0 14px 10px;padding:12px;background:var(--s2);border-radius:9px;display:flex;align-items:center;gap:10px}
-.pc-pick-icon{width:36px;height:36px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:17px;flex-shrink:0}
-.pc-pick-icon.ELITE{background:var(--gd2)}.pc-pick-icon.SAFE{background:var(--tld)}
-.pc-pick-icon.MODERATE{background:var(--yd)}.pc-pick-icon.RISKY{background:var(--rd)}
-.pc-pick-text{flex:1;min-width:0}
-.pc-pick-main{font-size:1rem;font-weight:900;line-height:1.2}
-.pc-pick-sub{font-size:10px;color:var(--mt);margin-top:2px}
-.pc-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:5px;padding:0 14px 12px}
-.ps-chip{background:var(--s3);border-radius:6px;padding:6px 8px;text-align:center}
-.ps-label{font-size:9px;text-transform:uppercase;color:var(--mt);letter-spacing:.3px;font-weight:700}
-.ps-val{font-size:.9rem;font-weight:800;margin-top:1px}
-.ps-val.gr{color:var(--gr)}.ps-val.bl{color:var(--bl)}.ps-val.yw{color:var(--yw)}.ps-val.re{color:var(--re)}.ps-val.tl{color:var(--tl)}.ps-val.mt{color:var(--mt)}
-.pc-footer{padding:8px 14px;background:var(--s2);border-top:1px solid var(--bd);display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:6px}
-.pc-time{font-size:10px;color:var(--mt)}
-.pc-time span{color:var(--tx)}
-.pc-odds{font-size:.85rem;font-weight:800;color:var(--bl)}
-.conf-bar{margin:0 14px 8px}
-.conf-lbl{display:flex;justify-content:space-between;font-size:10px;color:var(--mt);margin-bottom:3px}
-.conf-track{height:4px;background:var(--s3);border-radius:999px;overflow:hidden}
-.conf-fill{height:100%;border-radius:999px;transition:width .6s ease}
-.conf-fill.ELITE{background:var(--elite)}.conf-fill.SAFE{background:var(--safe)}
-.conf-fill.MODERATE{background:var(--mod)}.conf-fill.RISKY{background:var(--risky)}
-
-/* ── PLAYER PROP CARD ── */
-.prop-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(300px,100%),1fr));gap:10px}
-.prop-card{background:var(--sur);border:1px solid var(--bd);border-radius:var(--rl);overflow:hidden;transition:border-color .15s}
-.prop-card:hover{border-color:var(--bd2)}
-.prop-card.OVER{border-left:3px solid var(--gr)}.prop-card.UNDER{border-left:3px solid var(--re)}
-.prp-header{padding:12px 14px 8px;display:flex;justify-content:space-between;align-items:flex-start}
-.prp-name{font-size:.95rem;font-weight:800}
-.prp-team{font-size:10px;color:var(--mt);margin-top:2px;display:flex;align-items:center;gap:4px;flex-wrap:wrap}
-/* ── BET RECOMMENDATION BOX ── */
-.prp-rec{margin:0 14px 10px;border-radius:10px;overflow:hidden}
-.prp-rec.OVER{background:linear-gradient(135deg,#052e1688,#14532d44);border:1px solid #22c55e33}
-.prp-rec.UNDER{background:linear-gradient(135deg,#3b076477,#4c051433);border:1px solid #ef444433}
-.prp-rec-main{padding:10px 12px;display:flex;align-items:center;gap:10px}
-.prp-rec-icon{font-size:1.4rem;flex-shrink:0;line-height:1}
-.prp-rec-mid{flex:1;min-width:0}
-.prp-rec-action{font-size:1.0rem;font-weight:900;letter-spacing:.3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.prp-rec-action.OVER{color:#22c55e}.prp-rec-action.UNDER{color:#f87171}
-.prp-rec-sub{font-size:9px;color:var(--mt);margin-top:1px;font-weight:600}
-.prp-rec-right{display:flex;flex-direction:column;align-items:flex-end;gap:3px;flex-shrink:0}
-.prp-conf-badge{font-size:.72rem;font-weight:900;padding:2px 7px;border-radius:5px}
-.prp-conf-badge.ELITE,.prp-conf-badge.SAFE{background:var(--gd);color:var(--gr)}
-.prp-conf-badge.MODERATE{background:var(--yd);color:var(--yw)}
-.prp-conf-badge.RISKY{background:var(--rd);color:var(--re)}
-.prp-odds-pill{font-size:.72rem;font-weight:800;padding:2px 7px;border-radius:5px;background:var(--bld);color:var(--bl)}
-.prp-rate-row{padding:6px 12px;border-top:1px solid rgba(255,255,255,.07);display:flex;align-items:center;justify-content:space-between}
-.prp-rate-lbl{font-size:9px;text-transform:uppercase;color:var(--mt);font-weight:700;letter-spacing:.5px}
-.prp-rate-val{font-size:.9rem;font-weight:900;color:var(--tl)}
-/* ── STATS GRID ── */
-.prp-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:4px;padding:0 14px 10px}
-.prp-stats-4{display:grid;grid-template-columns:repeat(4,1fr);gap:4px;padding:0 14px 10px}
-.prp-bar{padding:0 14px 10px}
-.prp-bar-lbl{display:flex;justify-content:space-between;font-size:10px;font-weight:700;margin-bottom:3px}
-.prp-bar-lbl .ov{color:var(--gr)}.prp-bar-lbl .un{color:var(--re)}
-.prp-bar-track{height:6px;background:var(--s3);border-radius:999px;overflow:hidden}
-.prp-bar-fill{height:100%;border-radius:999px}
-.prp-bar-fill.OVER{background:linear-gradient(90deg,var(--gr),#86efac)}.prp-bar-fill.UNDER{background:linear-gradient(90deg,var(--re),#f87171)}
-
-/* ── PARLAY SECTION ── */
-.parlay-leg-tabs{display:flex;gap:4px;flex-wrap:wrap;margin-bottom:14px}
-.ltab{padding:5px 13px;border-radius:999px;font-size:11px;font-weight:800;border:1px solid var(--bd);background:var(--s2);color:var(--mt);cursor:pointer;transition:all .15s;white-space:nowrap}
-.ltab:hover{border-color:var(--pu);color:var(--pu)}
-.ltab.act{background:var(--pd);border-color:var(--pu);color:var(--pu)}
-.ltab-panel{display:none}.ltab-panel.on{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:10px}
-.parl-card{background:var(--sur);border:1px solid var(--bd);border-radius:var(--rl);padding:14px 16px}
-.parl-card.ELITE{border-top:3px solid var(--elite)}.parl-card.SAFE{border-top:3px solid var(--safe)}
-.parl-card.MODERATE{border-top:3px solid var(--mod)}.parl-card.RISKY{border-top:3px solid var(--risky)}
-.parl-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;flex-wrap:wrap;gap:6px}
-.parl-tag{font-size:10px;font-weight:800;padding:3px 10px;border-radius:999px;background:var(--pd);color:var(--pu);border:1px solid #a855f744}
-.parl-stats{display:flex;gap:8px;flex-wrap:wrap}
-.pstat{font-size:10px;color:var(--mt)}.pstat span{font-weight:800;color:var(--tx)}
-.parl-legs{margin-bottom:10px}
-.leg-row{display:flex;align-items:flex-start;gap:7px;padding:5px 0;border-bottom:1px solid var(--bd);font-size:11px}
-.leg-row:last-child{border-bottom:none}
-.leg-dot{width:6px;height:6px;border-radius:50%;background:var(--pu);flex-shrink:0;margin-top:4px}
-.parl-footer{background:var(--s2);border-radius:7px;padding:8px 12px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:5px}
-.pf-prob{font-size:.9rem;font-weight:900;color:var(--gr)}.pf-odds{font-size:.85rem;font-weight:800;color:var(--pu)}.pf-lbl{font-size:9px;color:var(--mt)}
-
-/* ── SCHEDULE ── */
-.sched-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(220px,100%),1fr));gap:8px}
-.sc-card{background:var(--sur);border:1px solid var(--bd);border-radius:var(--rl);padding:12px 14px;border-left:3px solid var(--bd2)}
-.sc-card.mlb{border-left-color:var(--bl)}.sc-card.soccer{border-left-color:var(--gr)}
-.sc-head{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px}
-.sc-teams{font-size:.88rem;font-weight:700}
-.sc-league{font-size:9px;color:var(--mt);font-weight:700;text-transform:uppercase;margin-top:1px}
-.sc-starter{font-size:10px;color:var(--mt);background:var(--s2);padding:4px 8px;border-radius:5px;margin-top:6px}
-.sc-starter span{color:var(--tx);font-weight:700}
-
-/* ── EMPTY STATE ── */
-.empty{padding:36px 16px;text-align:center;color:var(--mt);grid-column:1/-1}
-.empty-icon{font-size:2.5rem;margin-bottom:10px;display:block}
-.empty strong{display:block;color:var(--tx);font-size:1rem;margin-bottom:6px}
-.empty p{font-size:12px;max-width:300px;margin:0 auto}
-
-/* ── SKELETON ── */
+.sport-chip.MLB{background:var(--bld);color:var(--bl)}
+.sport-chip.SOCCER{background:var(--gd);color:var(--gr)}
+/* GAME CARD */
+.game-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(360px,100%),1fr));gap:12px}
+.game-card{background:var(--sur);border:1px solid var(--bd);border-radius:var(--rl);overflow:hidden;transition:border-color .15s,transform .1s,box-shadow .15s}
+.game-card:hover{border-color:var(--bd2);transform:translateY(-1px);box-shadow:0 4px 20px rgba(0,0,0,.35)}
+.game-card.ELITE{border-top:3px solid #22c55e}.game-card.SAFE{border-top:3px solid #14b8a6}
+.game-card.MODERATE{border-top:3px solid #f0b429}.game-card.RISKY{border-top:3px solid #ef4444}
+.game-card.LIVE-GAME{border-color:#ef444499!important}
+.gc-hdr{padding:12px 14px 8px;display:flex;justify-content:space-between;align-items:flex-start;gap:6px}
+.gc-hdr-left{display:flex;flex-direction:column;gap:4px;min-width:0;flex:1}
+.gc-meta{display:flex;align-items:center;gap:5px;flex-wrap:wrap}
+.gc-matchup{font-size:.95rem;font-weight:800;line-height:1.2}
+.gc-away{color:var(--tx)}.gc-sep{color:var(--mt);font-weight:400;padding:0 4px}
+.gc-home{color:var(--mt)}
+.gc-starter{font-size:10px;color:var(--mt);margin-top:2px}
+.gc-starter span{color:var(--tx);font-weight:600}
+.gc-rows{display:flex;flex-direction:column}
+.gc-row{display:flex;align-items:center;gap:10px;padding:10px 14px;border-top:1px solid var(--bd)}
+.gc-row:hover{background:var(--s2)}
+.gc-type{font-size:8px;font-weight:900;letter-spacing:.8px;text-transform:uppercase;width:38px;flex-shrink:0;padding:3px 0;text-align:center;border-radius:4px}
+.gc-type.WIN{background:#052e1688;color:#22c55e}
+.gc-type.PROP{background:var(--bld);color:var(--bl)}
+.gc-type.GAME{background:var(--pd);color:var(--pu)}
+.gc-type.NONE{background:var(--s3);color:var(--mt2)}
+.gc-content{flex:1;min-width:0}
+.gc-label{font-size:.88rem;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.gc-sublabel{font-size:10px;color:var(--mt);margin-top:1px}
+.gc-bar{height:2px;border-radius:999px;margin-top:4px;max-width:100%}
+.gc-bar.WIN{background:linear-gradient(90deg,#22c55e,#16a34a)}
+.gc-bar.PROP{background:linear-gradient(90deg,var(--bl),#6366f1)}
+.gc-bar.GAME{background:linear-gradient(90deg,var(--pu),#7c3aed)}
+.gc-right{display:flex;flex-direction:column;align-items:flex-end;gap:3px;flex-shrink:0}
+.gc-conf{font-size:1.0rem;font-weight:900;line-height:1}
+.gc-conf.ELITE{color:#22c55e}.gc-conf.SAFE{color:#14b8a6}
+.gc-conf.MODERATE{color:#f0b429}.gc-conf.RISKY{color:#ef4444}
+.gc-odds{font-size:10px;color:var(--bl);font-weight:700}
+.live-banner{background:linear-gradient(90deg,#ef4444cc,#dc2626cc);color:#fff;padding:5px 14px;font-size:10px;font-weight:900;letter-spacing:1.5px;display:flex;align-items:center;gap:6px;animation:pulse 1.4s infinite}
+/* PARLAY */
+.parlay-header{display:flex;align-items:center;gap:10px;margin-bottom:16px;flex-wrap:wrap}
+.parlay-header h2{font-size:1.1rem;font-weight:900;flex:1}
+.parlay-subtext{font-size:11px;color:var(--mt)}
+.parlay-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(320px,100%),1fr));gap:12px}
+.parl-card{background:var(--sur);border:1px solid var(--bd);border-radius:var(--rl);overflow:hidden;transition:border-color .15s,transform .1s}
+.parl-card:hover{border-color:var(--bd2);transform:translateY(-1px)}
+.parl-card.ELITE{border-top:3px solid #22c55e}.parl-card.SAFE{border-top:3px solid #14b8a6}
+.parl-card.MODERATE{border-top:3px solid #f0b429}.parl-card.RISKY{border-top:3px solid #ef4444}
+.parl-card.top-pick{border-color:#22c55e88;box-shadow:0 0 0 2px #22c55e22}
+.parl-hdr{padding:12px 14px 8px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.parl-n-badge{font-size:11px;font-weight:900;padding:4px 12px;border-radius:999px;background:var(--pd);color:var(--pu);border:1px solid #a855f744;white-space:nowrap}
+.parl-rec-badge{font-size:9px;font-weight:900;padding:2px 8px;border-radius:999px;background:#052e16;color:#22c55e;border:1px solid #22c55e44}
+.parl-stats{display:flex;gap:14px;padding:0 14px 10px;flex-wrap:wrap}
+.pstat{font-size:11px;color:var(--mt)}.pstat span{font-weight:800;color:var(--tx)}
+.pstat span.gr{color:#22c55e}.pstat span.pu{color:var(--pu)}.pstat span.yw{color:#f0b429}
+.parl-legs{padding:0 14px 12px}
+.parl-leg-item{display:flex;align-items:flex-start;gap:8px;padding:6px 0;border-bottom:1px solid var(--bd);font-size:12px}
+.parl-leg-item:last-child{border-bottom:none}
+.parl-leg-num{font-size:9px;font-weight:900;width:16px;height:16px;border-radius:50%;background:var(--s3);color:var(--mt);display:flex;align-items:center;justify-content:center;flex-shrink:0;margin-top:2px}
+.parl-leg-label{flex:1;font-weight:600;line-height:1.3}
+.parl-leg-conf{font-size:10px;font-weight:800;color:#22c55e;flex-shrink:0}
+.sbadge-sm{font-size:8px;font-weight:900;padding:1px 5px;border-radius:3px;flex-shrink:0}
+.sbadge-sm.ELITE{background:var(--gd);color:#22c55e}.sbadge-sm.SAFE{background:var(--tld);color:#14b8a6}
+.sbadge-sm.MODERATE{background:var(--yd);color:#f0b429}.sbadge-sm.RISKY{background:var(--rd);color:#ef4444}
+/* SKELETON */
 @keyframes shimmer{0%{background-position:-600px 0}100%{background-position:600px 0}}
 .sk{background:linear-gradient(90deg,var(--s2) 25%,var(--s3) 50%,var(--s2) 75%);background-size:600px 100%;animation:shimmer 1.6s infinite;border-radius:5px}
-.sk.h8{height:8px}.sk.h12{height:12px}.sk.h16{height:16px}.sk.h20{height:20px}.sk.h24{height:24px}
-.sk-card{background:var(--sur);border:1px solid var(--bd);border-radius:var(--rl);padding:16px;height:180px;overflow:hidden}
+.sk-card{background:var(--sur);border:1px solid var(--bd);border-radius:var(--rl);padding:16px;height:220px;overflow:hidden}
 .sk-card .sk{margin-bottom:10px}
-
-/* ── CONSOLE ── */
+/* EMPTY STATE */
+.empty{padding:40px 16px;text-align:center;color:var(--mt);grid-column:1/-1}
+.empty-icon{font-size:2.5rem;margin-bottom:10px;display:block}
+.empty strong{display:block;color:var(--tx);font-size:1rem;margin-bottom:6px}
+.empty p{font-size:12px;max-width:320px;margin:0 auto;line-height:1.6}
+/* CONSOLE */
 .console-wrap{position:fixed;bottom:0;left:0;right:0;z-index:900;transform:translateY(100%);transition:transform .3s cubic-bezier(.4,0,.2,1)}
 .console-wrap.open{transform:translateY(0)}
-.console-pull{background:var(--s2);border-top:1px solid var(--tl);padding:7px 18px;display:flex;align-items:center;justify-content:space-between;cursor:pointer;max-width:1360px;margin:0 auto}
+.console-pull{background:var(--s2);border-top:1px solid var(--tl);padding:7px 18px;display:flex;align-items:center;justify-content:space-between;cursor:pointer}
 .cpull-l{display:flex;align-items:center;gap:8px;font-size:11px;font-weight:700;font-family:monospace;color:var(--tl)}
 .cpull-dot{width:7px;height:7px;border-radius:50%;background:var(--mt2)}
 .cpull-dot.act{background:var(--gr);animation:pulse 1s infinite}
 .cpull-badge{font-size:10px;background:var(--s3);color:var(--mt);padding:1px 7px;border-radius:999px;font-family:monospace}
-.cpull-r{font-size:10px;color:var(--mt)}
-.console-body{background:#030608;max-height:260px;overflow-y:auto;padding:10px 18px;font-family:'Cascadia Code','Fira Code','Consolas',monospace;font-size:11px;line-height:1.65}
+.console-body{background:#030608;max-height:260px;overflow-y:auto;padding:10px 18px;font-family:"Cascadia Code","Fira Code","Consolas",monospace;font-size:11px;line-height:1.65}
 .lg{display:flex;gap:8px;color:#5a7090}
 .lg .ts{color:#2d4055;flex-shrink:0}
 .lg .msg{word-break:break-word}
-.lg.err .msg{color:#ef4444}.lg.warn .msg{color:#f0b429}
-.lg.ok .msg{color:#22c55e}.lg.phase .msg{color:#a855f7;font-weight:700}
+.lg.err .msg{color:#ef4444}.lg.warn .msg{color:#f0b429}.lg.ok .msg{color:#22c55e}.lg.phase .msg{color:#a855f7;font-weight:700}
 .lg-empty{color:#2d4055;font-style:italic}
-
-/* ── SCROLLBAR ── */
 ::-webkit-scrollbar{width:5px;height:5px}
 ::-webkit-scrollbar-track{background:var(--s2)}
 ::-webkit-scrollbar-thumb{background:var(--mt2);border-radius:3px}
-
-/* ── RESPONSIVE ── */
-/* ── RESPONSIVE – mobile-first ─────────────────────── */
-
-/* Extra-small (< 480px) */
+/* RESPONSIVE */
 @media(max-width:480px){
-  .page{padding:8px 8px 76px;padding-bottom:calc(76px + env(safe-area-inset-bottom))}
-  .hdr{flex-direction:column;align-items:flex-start;gap:8px;margin-bottom:12px;padding-bottom:10px}
-  .brand{gap:8px}
-  .logo{width:36px;height:36px;border-radius:9px;font-size:18px}
-  .brand-text h1{font-size:1.1rem}
-  .brand-text p{font-size:10px}
+  .page{padding:8px 8px 76px}
+  .hdr{flex-direction:column;align-items:flex-start}
   .hdr-right{width:100%;justify-content:space-between}
-  .status-pill{font-size:10px;padding:4px 9px}
-  .run-btn{padding:8px 16px;font-size:12px;flex:1;text-align:center}
-  .console-btn{padding:6px 10px;font-size:10px}
-
-  /* Tabs: horizontal scroll, no wrap */
-  .tabs{gap:0;flex-wrap:nowrap;overflow-x:auto;-webkit-overflow-scrolling:touch;padding-bottom:0;
-        scrollbar-width:none;border-bottom-color:var(--bd)}
-  .tabs::-webkit-scrollbar{display:none}
-  .tab{padding:8px 12px;font-size:11px;flex-shrink:0;white-space:nowrap}
+  .run-btn{flex:1;text-align:center}
+  .tabs{flex-wrap:nowrap}
+  .tab{padding:8px 12px;font-size:11px}
   .tab-cnt{display:none}
-
-  /* Grids: single column */
-  .pick-grid,.prop-grid,.sched-grid{grid-template-columns:1fr;gap:8px}
-  .ltab-panel.on{grid-template-columns:1fr;gap:8px}
-
-  /* Cards: tighter padding */
-  .pc-header{padding:10px 12px 0}
-  .pc-pick{margin:0 12px 8px;padding:10px}
-  .pc-stats{grid-template-columns:repeat(3,1fr);padding:0 12px 10px;gap:4px}
-  .ps-chip{padding:5px 6px}
-  .ps-val{font-size:.82rem}
-  .pc-footer{padding:7px 12px}
-  .conf-bar{margin:0 12px 6px}
-
-  .prp-header{padding:10px 12px 7px}
-  .prp-rec{margin:0 12px 8px}
-  .prp-stats,.prp-stats-4{padding:0 12px 8px;gap:3px}
-  .prp-bar{padding:0 12px 8px}
-
-  /* Filter panel: more compact */
-  #prop-filter-panel{padding:8px 10px 6px;gap:4px}
-  .pfilt-row-lbl{min-width:58px;font-size:8px}
-  .fbtn{padding:3px 9px;font-size:10px}
-
-  /* Progress chips: hide on very small */
-  .phase-chips{display:none}
-
-  /* Parlays */
-  .parl-card{padding:12px}
-  .parlay-leg-tabs{gap:3px}
-  .ltab{padding:4px 10px;font-size:10px}
-
-  /* Console */
-  .console-body{max-height:200px;font-size:10px}
-  .console-pull{padding:6px 12px}
-
-  /* Schedule */
-  .sc-card{padding:10px 12px}
+  .game-grid,.parlay-grid{grid-template-columns:1fr;gap:8px}
 }
-
-/* Small (481–640px) */
 @media(min-width:481px) and (max-width:640px){
-  .page{padding:10px 10px 76px}
-  .hdr{flex-direction:column;align-items:flex-start;gap:8px}
-  .hdr-right{width:100%}
-  .pick-grid,.prop-grid{grid-template-columns:1fr}
-  .sched-grid{grid-template-columns:repeat(auto-fill,minmax(240px,1fr))}
-  .ltab-panel.on{grid-template-columns:1fr}
-  .tabs{flex-wrap:nowrap;overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none}
-  .tabs::-webkit-scrollbar{display:none}
+  .game-grid,.parlay-grid{grid-template-columns:1fr}
+  .tabs{flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none}
   .tab{flex-shrink:0}
-  .phase-chips{flex-wrap:wrap}
 }
-
-/* Medium (641–900px) */
-@media(min-width:641px) and (max-width:900px){
-  .pick-grid,.prop-grid{grid-template-columns:repeat(auto-fill,minmax(270px,1fr))}
-  .sched-grid{grid-template-columns:repeat(auto-fill,minmax(210px,1fr))}
-  .ltab-panel.on{grid-template-columns:repeat(auto-fill,minmax(260px,1fr))}
-}
-
-/* Touch hover fix */
-@media(hover:none){
-  .pick-card:hover,.prop-card:hover{transform:none;box-shadow:none}
-  .run-btn:hover{opacity:1;transform:none}
-}
-
-/* Safe area for notched phones */
+@media(hover:none){.game-card:hover,.parl-card:hover{transform:none;box-shadow:none}.run-btn:hover{opacity:1;transform:none}}
 @supports(padding-bottom:env(safe-area-inset-bottom)){
   .console-wrap{padding-bottom:env(safe-area-inset-bottom)}
   .page{padding-left:max(12px,env(safe-area-inset-left));padding-right:max(12px,env(safe-area-inset-right))}
 }
-
-/* ════════════════════════════════════════════════════
-   LOADING SCREEN
-════════════════════════════════════════════════════ */
-#splash{
-  position:fixed;inset:0;z-index:9999;
-  background:var(--bg);
-  display:flex;flex-direction:column;align-items:center;justify-content:center;
-  transition:opacity .5s ease, visibility .5s ease;
-  overflow:hidden;
-}
+/* SPLASH */
+#splash{position:fixed;inset:0;z-index:9999;background:var(--bg);display:flex;flex-direction:column;align-items:center;justify-content:center;transition:opacity .5s ease,visibility .5s ease;overflow:hidden}
 #splash.hidden{opacity:0;visibility:hidden;pointer-events:none}
-
-/* ── Particle field ── */
 #splash-particles{position:absolute;inset:0;overflow:hidden;pointer-events:none}
-.sp-dot{
-  position:absolute;border-radius:50%;
-  animation:sp-float linear infinite;
-  opacity:0;
-}
-@keyframes sp-float{
-  0%  {transform:translateY(0)   scale(1);   opacity:0}
-  10% {opacity:.6}
-  90% {opacity:.3}
-  100%{transform:translateY(-110vh) scale(.4);opacity:0}
-}
-
-/* ── Logo ── */
-.splash-logo{
-  width:80px;height:80px;border-radius:22px;
-  background:linear-gradient(135deg,#22c55e,#0d9488);
-  display:flex;align-items:center;justify-content:center;
-  font-size:40px;font-weight:900;color:#000;
-  box-shadow:0 0 50px #22c55e55, 0 0 100px #22c55e22;
-  animation:logo-breathe 2.5s ease-in-out infinite;
-  margin-bottom:22px;flex-shrink:0;
-}
-@keyframes logo-breathe{
-  0%,100%{box-shadow:0 0 40px #22c55e44,0 0 80px #22c55e18;transform:scale(1)}
-  50%    {box-shadow:0 0 70px #22c55e88,0 0 140px #22c55e44;transform:scale(1.04)}
-}
-
-/* ── Title ── */
+.sp-dot{position:absolute;border-radius:50%;animation:sp-float linear infinite;opacity:0}
+@keyframes sp-float{0%{transform:translateY(0) scale(1);opacity:0}10%{opacity:.6}90%{opacity:.3}100%{transform:translateY(-110vh) scale(.4);opacity:0}}
+.splash-logo{width:80px;height:80px;border-radius:22px;background:linear-gradient(135deg,#22c55e,#0d9488);display:flex;align-items:center;justify-content:center;font-size:40px;font-weight:900;color:#000;box-shadow:0 0 50px #22c55e55;animation:logo-breathe 2.5s ease-in-out infinite;margin-bottom:22px}
+@keyframes logo-breathe{0%,100%{box-shadow:0 0 40px #22c55e44;transform:scale(1)}50%{box-shadow:0 0 70px #22c55e88;transform:scale(1.04)}}
 .splash-title{font-size:2rem;font-weight:900;letter-spacing:-.5px;margin-bottom:4px}
 .splash-title em{color:var(--gr);font-style:normal}
-.splash-sub{font-size:12px;color:var(--mt);margin-bottom:36px;letter-spacing:.3px}
-
-/* ── Stage list ── */
-.splash-stages{
-  display:flex;flex-direction:column;gap:8px;
-  width:min(380px,88vw);margin-bottom:28px;
-}
-.spl-stage{
-  display:flex;align-items:center;gap:10px;
-  font-size:12px;color:var(--mt2);
-  transition:color .3s;
-}
-.spl-stage.done{color:var(--mt)}
-.spl-stage.act {color:var(--gr);font-weight:700}
-.spl-stage-icon{
-  width:22px;height:22px;border-radius:50%;flex-shrink:0;
-  display:flex;align-items:center;justify-content:center;
-  font-size:10px;background:var(--s3);color:var(--mt2);
-  border:1px solid var(--bd);
-  transition:all .3s;
-}
+.splash-sub{font-size:12px;color:var(--mt);margin-bottom:36px}
+.splash-stages{display:flex;flex-direction:column;gap:8px;width:min(380px,88vw);margin-bottom:28px}
+.spl-stage{display:flex;align-items:center;gap:10px;font-size:12px;color:var(--mt2);transition:color .3s}
+.spl-stage.done{color:var(--mt)}.spl-stage.act{color:var(--gr);font-weight:700}
+.spl-stage-icon{width:22px;height:22px;border-radius:50%;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:10px;background:var(--s3);color:var(--mt2);border:1px solid var(--bd);transition:all .3s}
 .spl-stage.done .spl-stage-icon{background:var(--gd);color:var(--gr);border-color:#22c55e44}
-.spl-stage.act  .spl-stage-icon{
-  background:var(--gd);color:var(--gr);border-color:#22c55e88;
-  animation:spl-spin 1s linear infinite;
-}
+.spl-stage.act .spl-stage-icon{background:var(--gd);color:var(--gr);border-color:#22c55e88;animation:spl-spin 1s linear infinite}
 @keyframes spl-spin{to{transform:rotate(360deg)}}
-.spl-stage-lbl{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.spl-stage-val{font-size:10px;font-weight:800;color:var(--gr);margin-left:auto;white-space:nowrap}
-
-/* ── Progress bar ── */
+.spl-stage-lbl{flex:1}
+.spl-stage-val{font-size:10px;font-weight:800;color:var(--gr);margin-left:auto}
 .splash-bar-wrap{width:min(380px,88vw);margin-bottom:8px}
 .splash-bar-track{height:3px;background:var(--s3);border-radius:999px;overflow:hidden}
-.splash-bar-fill{
-  height:100%;border-radius:999px;
-  background:linear-gradient(90deg,var(--gr),var(--tl),var(--bl));
-  background-size:200% 100%;
-  animation:bar-shine 1.8s linear infinite;
-  transition:width .5s ease;
-  width:0%;
-}
-@keyframes bar-shine{
-  0%  {background-position:100% 0}
-  100%{background-position:-100% 0}
-}
+.splash-bar-fill{height:100%;border-radius:999px;background:linear-gradient(90deg,var(--gr),var(--tl),var(--bl));background-size:200% 100%;animation:bar-shine 1.8s linear infinite;transition:width .5s ease;width:0%}
+@keyframes bar-shine{0%{background-position:100% 0}100%{background-position:-100% 0}}
 .splash-pct{font-size:10px;color:var(--mt);text-align:right;margin-top:4px}
-
-/* ── DB stats strip ── */
-.splash-db-strip{
-  display:flex;gap:20px;flex-wrap:wrap;justify-content:center;
-  padding:10px 20px;border-radius:10px;
-  border:1px solid var(--bd);background:var(--s2);
-  animation:fadeInUp .5s ease;
-}
-@keyframes fadeInUp{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+.splash-db-strip{display:flex;gap:20px;flex-wrap:wrap;justify-content:center;padding:10px 20px;border-radius:10px;border:1px solid var(--bd);background:var(--s2)}
 .sdb-item{text-align:center}
 .sdb-val{font-size:1.1rem;font-weight:900;color:var(--gr)}
 .sdb-lbl{font-size:9px;color:var(--mt);text-transform:uppercase;letter-spacing:.4px;font-weight:700}
-
-/* ── Cached-data preview cards ── */
-.splash-preview{
-  position:absolute;bottom:0;left:0;right:0;
-  background:linear-gradient(transparent,var(--bg) 30%);
-  padding:60px 20px 16px;
-  display:flex;gap:8px;overflow:hidden;justify-content:center;
-  pointer-events:none;
-}
-.spl-pcard{
-  background:var(--sur);border:1px solid var(--bd);border-radius:10px;
-  padding:10px 14px;min-width:160px;max-width:200px;flex-shrink:0;
-  opacity:.55;transform:translateY(6px);
-  transition:all .4s;font-size:11px;
-}
-.spl-pcard.vis{opacity:.9;transform:translateY(0)}
-.spl-pcard-head{font-size:9px;font-weight:800;text-transform:uppercase;color:var(--mt);letter-spacing:.4px;margin-bottom:4px}
-.spl-pcard-val{font-size:1.0rem;font-weight:900;color:var(--gr)}
-.spl-pcard-sub{font-size:9px;color:var(--mt);margin-top:1px}
 </style>
 </head>
 <body>
 
-<!-- ════════════════════════════════════════════════════
-     ANIMATED LOADING SCREEN
-════════════════════════════════════════════════════ -->
+<!-- SPLASH -->
 <div id="splash">
-
-  <!-- Floating particle field (filled by JS) -->
   <div id="splash-particles"></div>
-
-  <!-- Logo + title -->
   <div class="splash-logo">B</div>
   <div class="splash-title">Bettor <em>AI</em></div>
-  <div class="splash-sub" id="spl-sub">Initializing · Loading your data…</div>
-
-  <!-- Stage checklist -->
-  <div class="splash-stages" id="spl-stages">
-    <div class="spl-stage" id="sst-db">
-      <div class="spl-stage-icon">●</div>
-      <span class="spl-stage-lbl">Connecting to database</span>
-      <span class="spl-stage-val" id="sst-db-val"></span>
-    </div>
-    <div class="spl-stage" id="sst-games">
-      <div class="spl-stage-icon">●</div>
-      <span class="spl-stage-lbl">Loading today's games</span>
-      <span class="spl-stage-val" id="sst-games-val"></span>
-    </div>
-    <div class="spl-stage" id="sst-bets">
-      <div class="spl-stage-icon">●</div>
-      <span class="spl-stage-lbl">Restoring cached bets</span>
-      <span class="spl-stage-val" id="sst-bets-val"></span>
-    </div>
-    <div class="spl-stage" id="sst-props">
-      <div class="spl-stage-icon">●</div>
-      <span class="spl-stage-lbl">Restoring player props</span>
-      <span class="spl-stage-val" id="sst-props-val"></span>
-    </div>
-    <div class="spl-stage" id="sst-ready">
-      <div class="spl-stage-icon">●</div>
-      <span class="spl-stage-lbl">Preparing dashboard</span>
-      <span class="spl-stage-val" id="sst-ready-val"></span>
-    </div>
+  <div class="splash-sub" id="spl-sub">Initializing&nbsp;&middot;&nbsp;Loading your data&hellip;</div>
+  <div class="splash-stages">
+    <div class="spl-stage" id="sst-db"><div class="spl-stage-icon">&#9679;</div><span class="spl-stage-lbl">Connecting to database</span><span class="spl-stage-val" id="sst-db-val"></span></div>
+    <div class="spl-stage" id="sst-games"><div class="spl-stage-icon">&#9679;</div><span class="spl-stage-lbl">Loading today's games</span><span class="spl-stage-val" id="sst-games-val"></span></div>
+    <div class="spl-stage" id="sst-bets"><div class="spl-stage-icon">&#9679;</div><span class="spl-stage-lbl">Restoring cached picks</span><span class="spl-stage-val" id="sst-bets-val"></span></div>
+    <div class="spl-stage" id="sst-ready"><div class="spl-stage-icon">&#9679;</div><span class="spl-stage-lbl">Preparing dashboard</span><span class="spl-stage-val" id="sst-ready-val"></span></div>
   </div>
-
-  <!-- Progress bar -->
   <div class="splash-bar-wrap">
-    <div class="splash-bar-track">
-      <div class="splash-bar-fill" id="spl-bar"></div>
-    </div>
+    <div class="splash-bar-track"><div class="splash-bar-fill" id="spl-bar"></div></div>
     <div class="splash-pct" id="spl-pct">0%</div>
   </div>
-
-  <!-- DB stats strip (revealed after data loads) -->
   <div class="splash-db-strip" id="spl-db-strip" style="display:none">
-    <div class="sdb-item"><div class="sdb-val" id="sdb-games">—</div><div class="sdb-lbl">Games</div></div>
-    <div class="sdb-item"><div class="sdb-val" id="sdb-bets">—</div><div class="sdb-lbl">Bets</div></div>
-    <div class="sdb-item"><div class="sdb-val" id="sdb-props">—</div><div class="sdb-lbl">Props</div></div>
-    <div class="sdb-item"><div class="sdb-val" id="sdb-updated">—</div><div class="sdb-lbl">Last Updated</div></div>
+    <div class="sdb-item"><div class="sdb-val" id="sdb-games">&#8212;</div><div class="sdb-lbl">Games</div></div>
+    <div class="sdb-item"><div class="sdb-val" id="sdb-bets">&#8212;</div><div class="sdb-lbl">Picks</div></div>
+    <div class="sdb-item"><div class="sdb-val" id="sdb-updated">&#8212;</div><div class="sdb-lbl">Updated</div></div>
   </div>
-
-  <!-- Preview cards (ghost of cached data) -->
-  <div class="splash-preview" id="spl-preview"></div>
-
 </div>
-<!-- END LOADING SCREEN -->
 
+<!-- MAIN APP -->
 <div class="page" id="main-app" style="opacity:0;transition:opacity .5s ease">
 
 <!-- HEADER -->
@@ -557,513 +256,178 @@ body{background:var(--bg);color:var(--tx);font-family:'Segoe UI',system-ui,sans-
     </div>
   </div>
   <div class="hdr-right">
-    <div class="status-pill {{ state.status }}" id="spill">
-      <div class="sdot {{ state.status }}" id="sdot"></div>
-      <span id="stxt">{{ state.status|capitalize }}</span>
-    </div>
-    <button class="console-btn" onclick="toggleConsole()">📋 Console</button>
-    <button class="run-btn" id="run-btn" onclick="runAnalysis()" {% if state.status=='running' %}disabled{% endif %}>⚡ Run Analysis</button>
+    <div class="status-pill {{ state.status }}" id="spill"><div class="sdot {{ state.status }}" id="sdot"></div><span id="stxt">{{ state.status|capitalize }}</span></div>
+    <button class="console-btn" onclick="toggleConsole()">&#128203; Console</button>
+    <button class="run-btn" id="run-btn" onclick="runAnalysis()" {% if state.status=='running' %}disabled{% endif %}>&#9889; Run Analysis</button>
   </div>
 </div>
 
 <!-- PROGRESS -->
 <div class="prog-wrap {% if state.status=='running' %}on{% endif %}" id="prog-wrap">
-  <div class="prog-head">
-    <span id="pname">{{ state.phase }}</span>
-    <span id="ppct">{{ ((state.phase_idx / state.phase_total) * 100)|int }}%</span>
-  </div>
+  <div class="prog-head"><span id="pname">{{ state.phase }}</span><span id="ppct">{{ ((state.phase_idx / state.phase_total) * 100)|int }}%</span></div>
   <div class="prog-track"><div class="prog-fill" id="pfill" style="width:{{ ((state.phase_idx / state.phase_total) * 100)|int }}%"></div></div>
   <div class="phase-chips">
-    {% set labels=["MLB Schedule","Soccer","Stats","Injuries","Odds","Team Algorithm","Player Props","Parlays","Save DB"] %}
-    {% for l in labels %}
-    <div class="pchip {% if loop.index0 < state.phase_idx %}done{% elif loop.index0 == state.phase_idx %}act{% endif %}">{{ l }}</div>
-    {% endfor %}
+    {% set labels=["MLB","Soccer","Stats","Injuries","Odds","Win Algo","Props","Cards","Save"] %}
+    {% for l in labels %}<div class="pchip {% if loop.index0 < state.phase_idx %}done{% elif loop.index0 == state.phase_idx %}act{% endif %}">{{ l }}</div>{% endfor %}
   </div>
 </div>
 
 {% if state.status == 'error' %}<div class="err-box">{{ state.error }}</div>{% endif %}
 
-<!-- MAIN TABS -->
+<!-- TABS -->
 <div class="tabs">
-  <button class="tab act" onclick="showTab('today',this)">
-    📅 Today
-    <span class="tab-cnt">{{ state.today_team_picks|length }}</span>
-  </button>
-  <button class="tab" onclick="showTab('tomorrow',this)">
-    🌅 Tomorrow
-    <span class="tab-cnt">{{ state.tomorrow_team_picks|length }}</span>
-  </button>
-  <button class="tab" onclick="showTab('props',this)">
-    ⚾ Player Props
-    <span class="tab-cnt">{{ state.player_props|length }}</span>
-  </button>
-  <button class="tab" onclick="showTab('parlays',this)">
-    🔗 Parlays
-    <span class="tab-cnt">{{ (state.prop_parlays.values()|map('length')|sum if state.prop_parlays else 0) + (state.team_parlays.values()|map('length')|sum if state.team_parlays else 0) }}</span>
-  </button>
-  <button class="tab" onclick="showTab('schedule',this)">
-    📋 Schedule
-    <span class="tab-cnt">{{ state.upcoming_games|length }}</span>
-  </button>
+  <button class="tab act" onclick="showTab('today',this)">&#128197; Today <span class="tab-cnt">{{ state.game_cards_today|length }}</span></button>
+  <button class="tab" onclick="showTab('tomorrow',this)">&#127749; Tomorrow <span class="tab-cnt">{{ state.game_cards_tomorrow|length }}</span></button>
+  <button class="tab" onclick="showTab('parlay',this)">&#128279; Top Parlay <span class="tab-cnt">{{ state.best_parlays|length }}</span></button>
 </div>
 
-<!-- ══════════ TODAY TAB ══════════ -->
+<!-- GAME CARD MACRO -->
+{% macro game_card(c) %}
+<div class="game-card {{ c.overall_safety_label }}{% if c.when_label == 'LIVE' %} LIVE-GAME{% endif %}">
+  {% if c.when_label == 'LIVE' %}<div class="live-banner">&#128308;&nbsp;&nbsp;LIVE NOW</div>{% endif %}
+  <div class="gc-hdr">
+    <div class="gc-hdr-left">
+      <div class="gc-meta">
+        <span class="sport-chip {{ c.sport }}">{{ c.sport }}</span>
+        {% if c.league and c.league != c.sport %}<span style="font-size:9px;color:var(--mt)">{{ c.league }}</span>{% endif %}
+        <span class="wbadge {{ c.when_label }}">{{ c.when }}</span>
+      </div>
+      <div class="gc-matchup"><span class="gc-away">{{ c.away_team }}</span><span class="gc-sep">@</span><span class="gc-home">{{ c.home_team }}</span></div>
+      {% if c.sport == 'MLB' and (c.home_starter or c.away_starter) %}<div class="gc-starter">&#9918; <span>{{ c.away_starter or 'TBD' }}</span> vs <span>{{ c.home_starter or 'TBD' }}</span></div>{% endif %}
+    </div>
+    <span class="sbadge {{ c.overall_safety_label }}">{{ c.overall_safety_label }}</span>
+  </div>
+  <div class="gc-rows">
+    {# WIN ROW #}
+    {% if c.win_pick %}{% set wp = c.win_pick %}
+    <div class="gc-row">
+      <span class="gc-type WIN">WIN</span>
+      <div class="gc-content">
+        <div class="gc-label">{{ wp.pick_team }}</div>
+        <div class="gc-sublabel">vs {{ wp.opp_team }}</div>
+        <div class="gc-bar WIN" style="width:{{ wp.conf }}%"></div>
+      </div>
+      <div class="gc-right">
+        <div class="gc-conf {{ wp.safety_label }}">{{ wp.conf }}%</div>
+        {% if wp.odds_str and wp.odds_str != 'N/A' %}<div class="gc-odds">{{ wp.odds_str }}</div>{% endif %}
+      </div>
+    </div>
+    {% else %}
+    <div class="gc-row" style="opacity:.3"><span class="gc-type NONE">WIN</span><div class="gc-content"><div class="gc-label" style="color:var(--mt)">No odds available</div></div></div>
+    {% endif %}
+    {# PLAYER PROP ROW #}
+    {% if c.player_prop %}{% set pp = c.player_prop %}
+    <div class="gc-row">
+      <span class="gc-type PROP">PROP</span>
+      <div class="gc-content">
+        <div class="gc-label">{{ pp.name }} {{ pp.direction }} {{ pp.line }} {{ pp.prop_label }}</div>
+        <div class="gc-sublabel">{{ pp.team }}</div>
+        <div class="gc-bar PROP" style="width:{{ pp.conf }}%"></div>
+      </div>
+      <div class="gc-right">
+        <div class="gc-conf {{ pp.safety_label }}">{{ pp.conf }}%</div>
+        <div class="gc-odds" style="color:{% if pp.direction == 'OVER' %}#22c55e{% else %}#ef4444{% endif %}">{{ pp.direction }}</div>
+      </div>
+    </div>
+    {% else %}
+    <div class="gc-row" style="opacity:.3"><span class="gc-type NONE">PROP</span><div class="gc-content"><div class="gc-label" style="color:var(--mt)">No prop available</div></div></div>
+    {% endif %}
+    {# GAME PROP ROW #}
+    {% if c.game_prop %}{% set gp = c.game_prop %}
+    <div class="gc-row">
+      <span class="gc-type GAME">GAME</span>
+      <div class="gc-content">
+        <div class="gc-label">{{ gp.label }}</div>
+        <div class="gc-sublabel">{% if c.sport == 'SOCCER' %}Both teams to score{% else %}Game total{% endif %}</div>
+        <div class="gc-bar GAME" style="width:{{ gp.conf }}%"></div>
+      </div>
+      <div class="gc-right">
+        <div class="gc-conf {{ gp.safety_label }}">{{ gp.conf }}%</div>
+      </div>
+    </div>
+    {% else %}
+    <div class="gc-row" style="opacity:.3"><span class="gc-type NONE">GAME</span><div class="gc-content"><div class="gc-label" style="color:var(--mt)">No game prop</div></div></div>
+    {% endif %}
+  </div>
+</div>
+{% endmacro %}
+
+<!-- TODAY TAB -->
 <div class="tab-panel on" id="tab-today">
-  <div class="filter-bar">
-    <label>Filter:</label>
-    <button class="fbtn act" onclick="filterCards('today','all',this)">All</button>
-    <button class="fbtn" onclick="filterCards('today','MLB',this)">⚾ MLB</button>
-    <button class="fbtn" onclick="filterCards('today','SOCCER',this)">⚽ Soccer</button>
-    <button class="fbtn" onclick="filterCards('today','ELITE',this)">🟢 Elite only</button>
-    <button class="fbtn" onclick="filterCards('today','SAFE',this)">🔵 Safe+</button>
-  </div>
-
   {% if state.status == 'running' %}
-  <div class="pick-grid">{% for _ in range(6) %}
-    <div class="sk-card"><div class="sk h12" style="width:40%;margin-bottom:14px"></div><div class="sk h20" style="width:80%;margin-bottom:8px"></div><div class="sk h12" style="width:60%;margin-bottom:14px"></div><div class="sk h8" style="width:95%"></div></div>
-  {% endfor %}</div>
-  {% elif state.today_team_picks %}
-  <div class="pick-grid" id="grid-today">
-    {% for p in state.today_team_picks %}
-    <div class="pick-card {{ p.safety_label }}{% if p.when_label == 'LIVE' %} LIVE-GAME{% endif %}" data-sport="{{ p.sport }}" data-safety="{{ p.safety_label }}">
-      {% if p.when_label == 'LIVE' %}<div class="live-banner">🔴 &nbsp;GAME IN PROGRESS — LIVE NOW</div>{% endif %}
-      <div class="pc-header">
-        <div class="pc-meta">
-          <span class="sport-chip {{ p.sport }}">{{ p.sport }}</span>
-          {% if p.league %}<span style="font-size:9px;color:var(--mt)">{{ p.league }}</span>{% endif %}
-          <span class="wbadge {{ p.when_label }}">{{ p.when }}</span>
-        </div>
-        <span class="sbadge {{ p.safety_label }}">{{ p.safety_label }}</span>
-      </div>
-      <div class="pc-matchup">{{ p.away_team }} <span>@ {{ p.home_team }}</span></div>
-      <div class="pc-pick">
-        <div class="pc-pick-icon {{ p.safety_label }}">
-          {% if p.safety_label == 'ELITE' %}🏆{% elif p.safety_label == 'SAFE' %}✅{% elif p.safety_label == 'MODERATE' %}⚠️{% else %}⚡{% endif %}
-        </div>
-        <div class="pc-pick-text">
-          <div class="pc-pick-main">{{ p.pick_team }} to WIN</div>
-          <div class="pc-pick-sub">vs {{ p.opp_team }}{% if p.home_starter or p.away_starter %} · SP: {{ p.away_starter or 'TBD' }} vs {{ p.home_starter or 'TBD' }}{% endif %}</div>
-        </div>
-      </div>
-      <div class="conf-bar">
-        <div class="conf-lbl"><span>Algorithm confidence</span><span>{{ p.conf }}%</span></div>
-        <div class="conf-track"><div class="conf-fill {{ p.safety_label }}" style="width:{{ p.conf }}%"></div></div>
-      </div>
-      <div class="pc-stats">
-        <div class="ps-chip"><div class="ps-label">Confidence</div><div class="ps-val gr">{{ p.conf }}%</div></div>
-        <div class="ps-chip"><div class="ps-label">Edge</div><div class="ps-val {% if p.edge >= 10 %}gr{% elif p.edge >= 7 %}tl{% else %}yw{% endif %}">+{{ p.edge }}%</div></div>
-        <div class="ps-chip"><div class="ps-label">Odds</div><div class="ps-val bl">{{ p.odds_str }}</div></div>
-      </div>
-      <div class="pc-footer">
-        <span class="pc-time">{% if p.when_label == 'LIVE' %}🔴 <span style="color:#ef4444;font-weight:900">IN PROGRESS</span>{% else %}🕐 <span>{{ p.when }}</span>{% endif %}{% if p.sport == 'MLB' and p.home_starter %} &nbsp;·&nbsp; ⚾ <span>{{ p.away_starter or 'TBD' }}</span> vs <span>{{ p.home_starter or 'TBD' }}</span>{% elif p.sport == 'SOCCER' and p.home_starter %} &nbsp;·&nbsp; ⚽ <span>{{ p.home_starter }}</span>{% endif %}</span>
-        <span class="pc-odds">{{ p.odds_str }}</span>
-      </div>
-    </div>
-    {% endfor %}
-  </div>
+  <div class="game-grid">{% for _ in range(4) %}<div class="sk-card"><div class="sk" style="height:12px;width:45%;margin-bottom:14px"></div><div class="sk" style="height:20px;width:90%;margin-bottom:10px"></div><div class="sk" style="height:14px;width:70%;margin-bottom:8px"></div><div class="sk" style="height:14px;width:80%"></div></div>{% endfor %}</div>
+  {% elif state.game_cards_today %}
+  <div class="game-grid">{% for c in state.game_cards_today %}{{ game_card(c) }}{% endfor %}</div>
   {% else %}
-  <div class="empty">
-    <span class="empty-icon">📅</span>
-    <strong>No picks for today yet</strong>
-    <p>Click <strong>Run Analysis</strong> to fetch today's games and run the algorithm.</p>
-  </div>
+  <div class="empty"><span class="empty-icon">&#128197;</span><strong>No picks for today yet</strong><p>Click <strong>Run Analysis</strong> to fetch today's games.</p></div>
   {% endif %}
 </div>
 
-<!-- ══════════ TOMORROW TAB ══════════ -->
+<!-- TOMORROW TAB -->
 <div class="tab-panel" id="tab-tomorrow">
-  <div class="filter-bar">
-    <label>Filter:</label>
-    <button class="fbtn act" onclick="filterCards('tomorrow','all',this)">All</button>
-    <button class="fbtn" onclick="filterCards('tomorrow','MLB',this)">⚾ MLB</button>
-    <button class="fbtn" onclick="filterCards('tomorrow','SOCCER',this)">⚽ Soccer</button>
-    <button class="fbtn" onclick="filterCards('tomorrow','ELITE',this)">🟢 Elite only</button>
-    <button class="fbtn" onclick="filterCards('tomorrow','SAFE',this)">🔵 Safe+</button>
-  </div>
-
   {% if state.status == 'running' %}
-  <div class="pick-grid">{% for _ in range(4) %}
-    <div class="sk-card"><div class="sk h12" style="width:40%;margin-bottom:14px"></div><div class="sk h20" style="width:80%;margin-bottom:8px"></div><div class="sk h12" style="width:60%;margin-bottom:14px"></div><div class="sk h8" style="width:95%"></div></div>
-  {% endfor %}</div>
-  {% elif state.tomorrow_team_picks %}
-  <div class="pick-grid" id="grid-tomorrow">
-    {% for p in state.tomorrow_team_picks %}
-    <div class="pick-card {{ p.safety_label }}" data-sport="{{ p.sport }}" data-safety="{{ p.safety_label }}">
-      <div class="pc-header">
-        <div class="pc-meta">
-          <span class="sport-chip {{ p.sport }}">{{ p.sport }}</span>
-          {% if p.league %}<span style="font-size:9px;color:var(--mt)">{{ p.league }}</span>{% endif %}
-          <span class="wbadge {{ p.when_label }}">{{ p.when }}</span>
+  <div class="game-grid">{% for _ in range(3) %}<div class="sk-card"><div class="sk" style="height:12px;width:45%;margin-bottom:14px"></div><div class="sk" style="height:20px;width:90%;margin-bottom:10px"></div><div class="sk" style="height:14px;width:70%;margin-bottom:8px"></div><div class="sk" style="height:14px;width:80%"></div></div>{% endfor %}</div>
+  {% elif state.game_cards_tomorrow %}
+  <div class="game-grid">{% for c in state.game_cards_tomorrow %}{{ game_card(c) }}{% endfor %}</div>
+  {% else %}
+  <div class="empty"><span class="empty-icon">&#127749;</span><strong>No picks for tomorrow yet</strong><p>Run analysis to see tomorrow's game predictions.</p></div>
+  {% endif %}
+</div>
+
+<!-- PARLAY TAB -->
+<div class="tab-panel" id="tab-parlay">
+  {% if state.best_parlays %}
+  <div class="parlay-header">
+    <h2>&#128279; Safest Parlays</h2>
+    <span class="parlay-subtext">Ranked by safety score &middot; One pick per game</span>
+  </div>
+  <div class="parlay-grid">
+    {% for parl in state.best_parlays %}
+    <div class="parl-card {{ parl.safety_label }}{% if loop.index0 == 0 %} top-pick{% endif %}">
+      <div class="parl-hdr">
+        <span class="parl-n-badge">{{ parl.n_legs }}-LEG PARLAY</span>
+        <span class="sbadge {{ parl.safety_label }}">{{ parl.safety_label }}</span>
+        {% if loop.index0 == 0 %}<span class="parl-rec-badge">&#11088; TOP PICK</span>{% endif %}
+      </div>
+      <div class="parl-stats">
+        <div class="pstat">Prob <span class="gr">{{ parl.combined_prob }}%</span></div>
+        <div class="pstat">Payout <span class="pu">{{ parl.combined_dec }}x</span></div>
+        <div class="pstat">Safety <span class="yw">{{ (parl.avg_safety * 100)|round|int }}%</span></div>
+      </div>
+      <div class="parl-legs">
+        {% for leg in parl.legs %}
+        <div class="parl-leg-item">
+          <div class="parl-leg-num">{{ loop.index }}</div>
+          <div class="parl-leg-label">{{ leg.label }}</div>
+          <span class="sbadge-sm {{ leg.badge }}">{{ leg.badge }}</span>
+          <div class="parl-leg-conf">{{ leg.conf }}%</div>
         </div>
-        <span class="sbadge {{ p.safety_label }}">{{ p.safety_label }}</span>
-      </div>
-      <div class="pc-matchup">{{ p.away_team }} <span>@ {{ p.home_team }}</span></div>
-      <div class="pc-pick">
-        <div class="pc-pick-icon {{ p.safety_label }}">
-          {% if p.safety_label == 'ELITE' %}🏆{% elif p.safety_label == 'SAFE' %}✅{% elif p.safety_label == 'MODERATE' %}⚠️{% else %}⚡{% endif %}
-        </div>
-        <div class="pc-pick-text">
-          <div class="pc-pick-main">{{ p.pick_team }} to WIN</div>
-          <div class="pc-pick-sub">vs {{ p.opp_team }}{% if p.home_starter or p.away_starter %} · SP: {{ p.away_starter or 'TBD' }} vs {{ p.home_starter or 'TBD' }}{% endif %}</div>
-        </div>
-      </div>
-      <div class="conf-bar">
-        <div class="conf-lbl"><span>Algorithm confidence</span><span>{{ p.conf }}%</span></div>
-        <div class="conf-track"><div class="conf-fill {{ p.safety_label }}" style="width:{{ p.conf }}%"></div></div>
-      </div>
-      <div class="pc-stats">
-        <div class="ps-chip"><div class="ps-label">Confidence</div><div class="ps-val gr">{{ p.conf }}%</div></div>
-        <div class="ps-chip"><div class="ps-label">Edge</div><div class="ps-val {% if p.edge >= 10 %}gr{% elif p.edge >= 7 %}tl{% else %}yw{% endif %}">+{{ p.edge }}%</div></div>
-        <div class="ps-chip"><div class="ps-label">Odds</div><div class="ps-val bl">{{ p.odds_str }}</div></div>
-      </div>
-      <div class="pc-footer">
-        <span class="pc-time">🕐 <span>{{ p.when }}</span>{% if p.sport == 'MLB' and p.home_starter %} &nbsp;·&nbsp; ⚾ <span>{{ p.away_starter or 'TBD' }}</span> vs <span>{{ p.home_starter or 'TBD' }}</span>{% endif %}</span>
-        <span class="pc-odds">{{ p.odds_str }}</span>
+        {% endfor %}
       </div>
     </div>
     {% endfor %}
   </div>
+  {% elif state.status == 'running' %}
+  <div class="parlay-grid">{% for _ in range(3) %}<div class="sk-card"><div class="sk" style="height:16px;width:50%;margin-bottom:12px"></div><div class="sk" style="height:12px;width:80%;margin-bottom:8px"></div><div class="sk" style="height:10px;width:90%;margin-bottom:6px"></div><div class="sk" style="height:10px;width:85%"></div></div>{% endfor %}</div>
   {% else %}
-  <div class="empty">
-    <span class="empty-icon">🌅</span>
-    <strong>No tomorrow picks yet</strong>
-    <p>Run analysis to see tomorrow's game predictions.</p>
-  </div>
+  <div class="empty"><span class="empty-icon">&#128279;</span><strong>No parlays yet</strong><p>Run analysis to generate the safest 2&ndash;10 leg parlays.</p></div>
   {% endif %}
 </div>
 
-<!-- ══════════ PLAYER PROPS TAB ══════════ -->
-<div class="tab-panel" id="tab-props">
-
-  <div id="prop-filter-panel">
-
-    <!-- ROW: Sport -->
-    <div class="pfilt-row">
-      <span class="pfilt-row-lbl">Sport</span>
-      <div class="pfilt-btns">
-        <button class="fbtn" data-group="sport" data-val="mlb"    onclick="filterProps('sport','mlb',this)">⚾ MLB</button>
-        <button class="fbtn" data-group="sport" data-val="soccer" onclick="filterProps('sport','soccer',this)">⚽ Soccer</button>
-      </div>
-    </div>
-
-    <!-- ROW: Direction -->
-    <div class="pfilt-row">
-      <span class="pfilt-row-lbl">Direction</span>
-      <div class="pfilt-btns">
-        <button class="fbtn" data-group="dir" data-val="OVER"  onclick="filterProps('dir','OVER',this)">📈 Over</button>
-        <button class="fbtn" data-group="dir" data-val="UNDER" onclick="filterProps('dir','UNDER',this)">📉 Under</button>
-      </div>
-    </div>
-
-    <!-- ROW: Safety -->
-    <div class="pfilt-row">
-      <span class="pfilt-row-lbl">Safety</span>
-      <div class="pfilt-btns">
-        <button class="fbtn" data-group="safety" data-val="ELITE"    onclick="filterProps('safety','ELITE',this)">🏆 Elite</button>
-        <button class="fbtn" data-group="safety" data-val="SAFE"     onclick="filterProps('safety','SAFE',this)">✅ Safe</button>
-        <button class="fbtn" data-group="safety" data-val="MODERATE" onclick="filterProps('safety','MODERATE',this)">⚠️ Moderate</button>
-      </div>
-    </div>
-
-    <!-- ROW: Timing -->
-    <div class="pfilt-row">
-      <span class="pfilt-row-lbl">Timing</span>
-      <div class="pfilt-btns">
-        <button class="fbtn" data-group="when" data-val="LIVE"     onclick="filterProps('when','LIVE',this)">🔴 Live Now</button>
-        <button class="fbtn" data-group="when" data-val="TODAY"    onclick="filterProps('when','TODAY',this)">📅 Today</button>
-        <button class="fbtn" data-group="when" data-val="TOMORROW" onclick="filterProps('when','TOMORROW',this)">🌅 Tomorrow</button>
-      </div>
-    </div>
-
-    <div class="pfilt-divider"></div>
-
-    <!-- ROW: Prop Type — MLB (dims when Soccer selected) -->
-    <div class="pfilt-row" id="pfilt-row-mlb">
-      <span class="pfilt-row-lbl pfilt-scope-badge" id="pfilt-mlb-badge">⚾ MLB</span>
-      <div class="pfilt-btns">
-        <button class="fbtn" data-group="stat" data-val="strikeouts"       data-scope="mlb" onclick="filterProps('stat','strikeouts',this)">P-Ks</button>
-        <button class="fbtn" data-group="stat" data-val="hits"             data-scope="mlb" onclick="filterProps('stat','hits',this)">Hits</button>
-        <button class="fbtn" data-group="stat" data-val="home_runs"        data-scope="mlb" onclick="filterProps('stat','home_runs',this)">💥 HR</button>
-        <button class="fbtn" data-group="stat" data-val="total_bases"      data-scope="mlb" onclick="filterProps('stat','total_bases',this)">TB</button>
-        <button class="fbtn" data-group="stat" data-val="rbi"              data-scope="mlb" onclick="filterProps('stat','rbi',this)">RBI</button>
-        <button class="fbtn" data-group="stat" data-val="runs"             data-scope="mlb" onclick="filterProps('stat','runs',this)">Runs</button>
-        <button class="fbtn" data-group="stat" data-val="walks"            data-scope="mlb" onclick="filterProps('stat','walks',this)">BB</button>
-        <button class="fbtn" data-group="stat" data-val="stolen_bases"     data-scope="mlb" onclick="filterProps('stat','stolen_bases',this)">SB</button>
-        <button class="fbtn" data-group="stat" data-val="batter_strikeouts" data-scope="mlb" onclick="filterProps('stat','batter_strikeouts',this)">B-Ks</button>
-        <button class="fbtn" data-group="stat" data-val="doubles"          data-scope="mlb" onclick="filterProps('stat','doubles',this)">2B</button>
-      </div>
-    </div>
-
-    <!-- ROW: Prop Type — Soccer (dims when MLB selected) -->
-    <div class="pfilt-row" id="pfilt-row-soccer">
-      <span class="pfilt-row-lbl pfilt-scope-badge" id="pfilt-soc-badge">⚽ Soccer</span>
-      <div class="pfilt-btns">
-        <button class="fbtn" data-group="stat" data-val="goals_scored"    data-scope="soccer" onclick="filterProps('stat','goals_scored',this)">Goal</button>
-        <button class="fbtn" data-group="stat" data-val="assists"         data-scope="soccer" onclick="filterProps('stat','assists',this)">Assist</button>
-        <button class="fbtn" data-group="stat" data-val="goal_or_assist"  data-scope="soccer" onclick="filterProps('stat','goal_or_assist',this)">G+A</button>
-        <button class="fbtn" data-group="stat" data-val="shots_on_target" data-scope="soccer" onclick="filterProps('stat','shots_on_target',this)">SOT</button>
-        <button class="fbtn" data-group="stat" data-val="cards"           data-scope="soccer" onclick="filterProps('stat','cards',this)">🟨 Card</button>
-      </div>
-    </div>
-
-    <!-- Summary bar -->
-    <div class="pfilt-summary">
-      <span id="pfilt-summary-tags" style="display:flex;gap:4px;flex-wrap:wrap;align-items:center">
-        <span style="font-size:10px;color:var(--mt)">Showing all props</span>
-      </span>
-      <span id="pfilt-count"></span>
-      <button id="pfilt-reset-btn" onclick="clearPropFilters()" style="display:none" class="fbtn" style="font-size:10px">✕ Reset</button>
-    </div>
-
-  </div>
-
-  {% if state.status == 'running' %}
-  <div class="prop-grid">{% for _ in range(4) %}
-    <div class="sk-card"><div class="sk h12" style="width:50%;margin-bottom:12px"></div><div class="sk h16" style="width:80%;margin-bottom:10px"></div><div class="sk h8" style="width:95%"></div></div>
-  {% endfor %}</div>
-  {% elif state.player_props %}
-  <div class="prop-grid" id="grid-props">
-    {% for p in state.player_props %}
-    <div class="prop-card {{ p.direction }}" data-dir="{{ p.direction }}" data-safety="{{ p.safety_label }}" data-when="{{ p.when_label }}" data-stattype="{{ p.stat_type or 'strikeouts' }}" data-sport="{{ p.sport or 'mlb' }}">
-
-      {# ── Header: name / team / badges ── #}
-      <div class="prp-header">
-        <div style="min-width:0">
-          <div class="prp-name">{{ p.name }}</div>
-          <div class="prp-team">
-            <span class="sport-chip {{ (p.sport or 'mlb')|upper }}" style="font-size:8px;padding:1px 5px">{{ (p.sport or 'MLB')|upper }}{% if p.league %} · {{ p.league }}{% endif %}</span>
-            <span>{{ p.team }}</span>
-          </div>
-        </div>
-        <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px;flex-shrink:0">
-          <span class="sbadge {{ p.safety_label }}">{{ p.safety_label }}</span>
-          <span class="wbadge {{ p.when_label }}">{{ p.when }}</span>
-        </div>
-      </div>
-
-      {# ── Bet Recommendation Box ── #}
-      <div class="prp-rec {{ p.direction }}">
-        <div class="prp-rec-main">
-          <span class="prp-rec-icon">{% if p.direction == 'OVER' %}📈{% else %}📉{% endif %}</span>
-          <div class="prp-rec-mid">
-            <div class="prp-rec-action {{ p.direction }}">{{ p.direction }} {{ p.line }} {{ p.prop_label or 'Prop' }}</div>
-            <div class="prp-rec-sub">Recommended bet · {{ p.game }}</div>
-          </div>
-          <div class="prp-rec-right">
-            <span class="prp-conf-badge {{ p.safety_label }}">{{ p.conf }}% CONF</span>
-            {% set _ov = p.over_odds_am %}{% set _un = p.under_odds_am %}
-            {% if p.direction == 'OVER' and _ov %}
-              <span class="prp-odds-pill">{{ '+' if _ov > 0 else '' }}{{ _ov }}</span>
-            {% elif p.direction == 'UNDER' and _un %}
-              <span class="prp-odds-pill">{{ '+' if _un > 0 else '' }}{{ _un }}</span>
-            {% endif %}
-          </div>
-        </div>
-        <div class="prp-rate-row">
-          <span class="prp-rate-lbl">{{ p.rate_label or 'Avg/Game' }}</span>
-          <span class="prp-rate-val">{{ p.avg_per_game }}</span>
-        </div>
-      </div>
-
-      {# ── Stats section: pitcher #}
-      {% if p.stat_type == 'strikeouts' %}
-      <div class="prp-stats">
-        <div class="ps-chip"><div class="ps-label">ERA</div><div class="ps-val {% if p.era < 3.5 %}gr{% elif p.era < 4.5 %}yw{% else %}re{% endif %}">{{ p.era }}</div></div>
-        <div class="ps-chip"><div class="ps-label">xFIP</div><div class="ps-val {% if p.xfip < 3.5 %}gr{% elif p.xfip < 4.5 %}yw{% else %}re{% endif %}">{{ p.xfip }}</div></div>
-        <div class="ps-chip"><div class="ps-label">K/9</div><div class="ps-val tl">{{ p.k9 }}</div></div>
-        <div class="ps-chip"><div class="ps-label">K%</div><div class="ps-val {% if p.k_pct > 0.25 %}gr{% else %}yw{% endif %}">{% if p.k_pct > 0 %}{{ (p.k_pct * 100)|round|int }}%{% else %}—{% endif %}</div></div>
-        <div class="ps-chip"><div class="ps-label">WHIP</div><div class="ps-val {% if p.whip < 1.1 %}gr{% elif p.whip < 1.3 %}yw{% else %}re{% endif %}">{{ p.whip }}</div></div>
-        <div class="ps-chip"><div class="ps-label">IP/Start</div><div class="ps-val mt">{{ p.ip_per_start if p.ip_per_start else '—' }}</div></div>
-      </div>
-      <div style="padding:0 14px 10px">
-        <div class="ps-chip" style="text-align:center;border:1px solid #22c55e22">
-          <div class="ps-label">Avg Strikeouts per Start</div>
-          <div class="ps-val gr" style="font-size:1.1rem">{{ p.avg_ks }}</div>
-        </div>
-      </div>
-
-      {# ── Stats section: soccer player props #}
-      {% elif p.sport == 'soccer' %}
-      <div class="prp-stats">
-        <div class="ps-chip"><div class="ps-label">xG</div><div class="ps-val {% if p.xg > 0.35 %}gr{% elif p.xg > 0.15 %}yw{% else %}mt{% endif %}">{{ p.xg if p.xg else '—' }}</div></div>
-        <div class="ps-chip"><div class="ps-label">xA</div><div class="ps-val {% if p.xa > 0.25 %}gr{% elif p.xa > 0.10 %}yw{% else %}mt{% endif %}">{{ p.xa if p.xa else '—' }}</div></div>
-        <div class="ps-chip"><div class="ps-label">G/Game</div><div class="ps-val tl">{{ p.goals_pg if p.goals_pg else '—' }}</div></div>
-        <div class="ps-chip"><div class="ps-label">A/Game</div><div class="ps-val tl">{{ p.assists_pg if p.assists_pg else '—' }}</div></div>
-        <div class="ps-chip"><div class="ps-label">{% if p.stat_type == 'cards' %}Card/Gm{% else %}Matches{% endif %}</div>
-          <div class="ps-val {% if p.stat_type == 'cards' %}yw{% else %}mt{% endif %}">{% if p.stat_type == 'cards' %}{{ p.card_pg }}{% else %}{{ p.mp }}{% endif %}</div></div>
-        <div class="ps-chip"><div class="ps-label">xG+A</div><div class="ps-val {% if (p.xg + p.xa) > 0.5 %}gr{% else %}yw{% endif %}">{{ ((p.xg or 0) + (p.xa or 0))|round(2) }}</div></div>
-      </div>
-      {# Over/Under odds side-by-side for soccer #}
-      {% if p.over_odds_am or p.under_odds_am %}
-      <div style="padding:0 14px 8px;display:flex;gap:6px">
-        <div class="ps-chip" style="flex:1;text-align:center{% if p.direction=='OVER' %};border:1px solid #22c55e44{% endif %}">
-          <div class="ps-label">Over Odds</div>
-          <div class="ps-val gr">{% if p.over_odds_am %}{{ '+' if p.over_odds_am > 0 else '' }}{{ p.over_odds_am }}{% else %}—{% endif %}</div>
-        </div>
-        <div class="ps-chip" style="flex:1;text-align:center{% if p.direction=='UNDER' %};border:1px solid #ef444444{% endif %}">
-          <div class="ps-label">Under Odds</div>
-          <div class="ps-val re">{% if p.under_odds_am %}{{ '+' if p.under_odds_am > 0 else '' }}{{ p.under_odds_am }}{% else %}—{% endif %}</div>
-        </div>
-      </div>
-      {% endif %}
-
-      {# ── Stats section: MLB hitter props (hits, HR, TB, RBI, R, BB, SB, K, 2B) #}
-      {% else %}
-      <div class="prp-stats">
-        <div class="ps-chip"><div class="ps-label">AVG</div><div class="ps-val {% if p.avg > 0.300 %}gr{% elif p.avg > 0.250 %}yw{% else %}re{% endif %}">.{{ (p.avg * 1000)|round|int if p.avg else '—' }}</div></div>
-        <div class="ps-chip"><div class="ps-label">OPS</div><div class="ps-val {% if p.ops > 0.850 %}gr{% elif p.ops > 0.720 %}yw{% else %}re{% endif %}">{{ p.ops if p.ops else '—' }}</div></div>
-        <div class="ps-chip"><div class="ps-label">wRC+</div><div class="ps-val {% if p.wrc_plus > 115 %}gr{% elif p.wrc_plus > 100 %}yw{% else %}mt{% endif %}">{{ p.wrc_plus if p.wrc_plus else '—' }}</div></div>
-      </div>
-      {# Over/Under odds side-by-side for MLB hitters #}
-      <div style="padding:0 14px 8px;display:flex;gap:6px">
-        <div class="ps-chip" style="flex:1;text-align:center{% if p.direction=='OVER' %};border:1px solid #22c55e44{% endif %}">
-          <div class="ps-label">Over Odds</div>
-          <div class="ps-val gr">{% if p.over_odds_am %}{{ '+' if p.over_odds_am > 0 else '' }}{{ p.over_odds_am }}{% else %}—{% endif %}</div>
-        </div>
-        <div class="ps-chip" style="flex:1;text-align:center{% if p.direction=='UNDER' %};border:1px solid #ef444444{% endif %}">
-          <div class="ps-label">Under Odds</div>
-          <div class="ps-val re">{% if p.under_odds_am %}{{ '+' if p.under_odds_am > 0 else '' }}{{ p.under_odds_am }}{% else %}—{% endif %}</div>
-        </div>
-        <div class="ps-chip" style="flex:1;text-align:center">
-          <div class="ps-label">Line</div>
-          <div class="ps-val yw">{{ p.line }}</div>
-        </div>
-      </div>
-      {% endif %}
-
-      {# ── Probability bar ── #}
-      <div class="prp-bar">
-        <div class="prp-bar-lbl">
-          <span class="ov">📈 Over {{ p.over_pct }}%</span>
-          <span class="un">📉 Under {{ p.under_pct }}%</span>
-        </div>
-        <div class="prp-bar-track">
-          <div class="prp-bar-fill {{ p.direction }}" style="width:{{ [p.over_pct, p.under_pct]|max }}%"></div>
-        </div>
-      </div>
-
-      {# ── Footer: time + game ── #}
-      <div class="pc-footer" style="padding:6px 14px">
-        <span class="pc-time">{% if p.when_label == 'LIVE' %}🔴 <span style="color:#ef4444;font-weight:900">IN PROGRESS</span>{% else %}🕐 <span>{{ p.when }}</span>{% endif %} &nbsp;·&nbsp; {{ p.game }}</span>
-      </div>
-    </div>
-    {% endfor %}
-  </div>
-  {% else %}
-  <div class="empty">
-    <span class="empty-icon">⚾</span>
-    <strong>No player props yet</strong>
-    <p>Props use MLB Stats API + FanGraphs + Odds API real lines. Run analysis to load.</p>
-  </div>
-  {% endif %}
-</div>
-
-<!-- ══════════ PARLAYS TAB ══════════ -->
-<div class="tab-panel" id="tab-parlays">
-  <!-- Sub-tabs: Team Parlays / Prop Parlays -->
-  <div class="filter-bar" style="margin-bottom:18px">
-    <label>Type:</label>
-    <button class="fbtn act" onclick="showParlayType('team',this)">🏆 Team Win Parlays</button>
-    <button class="fbtn" onclick="showParlayType('prop',this)">⚾ Player Prop Parlays</button>
-  </div>
-
-  <!-- TEAM PARLAYS -->
-  <div id="parl-team">
-    <div class="parlay-leg-tabs" id="team-leg-tabs"></div>
-    <div id="team-leg-panels"></div>
-    {% if not state.team_parlays %}
-    <div class="empty">
-      <span class="empty-icon">🏆</span>
-      <strong>No team parlays yet</strong>
-      <p>Run analysis to generate team win parlays ranked by safety score.</p>
-    </div>
-    {% endif %}
-  </div>
-
-  <!-- PROP PARLAYS -->
-  <div id="parl-prop" style="display:none">
-    <div class="parlay-leg-tabs" id="prop-leg-tabs"></div>
-    <div id="prop-leg-panels"></div>
-    {% if not state.prop_parlays %}
-    <div class="empty">
-      <span class="empty-icon">⚾</span>
-      <strong>No prop parlays yet</strong>
-      <p>Run analysis to generate 2-10 leg prop parlays ranked by combined safety.</p>
-    </div>
-    {% endif %}
-  </div>
-</div>
-
-<!-- ══════════ SCHEDULE TAB ══════════ -->
-<div class="tab-panel" id="tab-schedule">
-  <div class="filter-bar">
-    <label>Filter:</label>
-    <button class="fbtn act" onclick="filterSched('all',this)">All</button>
-    <button class="fbtn" onclick="filterSched('mlb',this)">⚾ MLB</button>
-    <button class="fbtn" onclick="filterSched('soccer',this)">⚽ Soccer</button>
-    <button class="fbtn" onclick="filterSched('today',this)">📅 Today</button>
-    <button class="fbtn" onclick="filterSched('tomorrow',this)">🌅 Tomorrow</button>
-  </div>
-
-  {% if state.upcoming_games %}
-  <div class="sched-grid" id="sched-grid">
-    {% for g in state.upcoming_games %}
-    {% set gd = g.game_date or g.date or '' %}
-    {% set gt = g.game_time or '' %}
-    {% set gs = (g.status or '')|upper %}
-    {% if 'IN PROGRESS' in gs or 'LIVE' in gs %}{% set wl = 'LIVE' %}{% set wt = '🔴 LIVE' %}
-    {% elif gd == today and gt %}{% set wl = 'TODAY' %}{% set wt = '⏰ TODAY ' + gt + ' ET' %}
-    {% elif gd == today %}{% set wl = 'TODAY' %}{% set wt = '📌 TODAY' %}
-    {% elif gd == tomorrow %}{% set wl = 'TOMORROW' %}{% set wt = '🌅 TOMORROW' + (' ' + gt + ' ET' if gt else '') %}
-    {% else %}{% set wl = 'UPCOMING' %}{% set wt = gd %}{% endif %}
-    <div class="sc-card {{ g.sport or 'mlb' }}" data-sport="{{ g.sport or 'mlb' }}" data-when="{{ wl|lower }}">
-      <div class="sc-head">
-        <div>
-          <div class="sc-league">{{ (g.sport or 'mlb')|upper }} · {{ g.league or 'MLB' }}</div>
-          <div class="sc-teams">{{ g.away_team }} @ {{ g.home_team }}</div>
-        </div>
-        <span class="wbadge {{ wl }}">{{ wt }}</span>
-      </div>
-      {% if g.home_starter or g.away_starter %}
-      <div class="sc-starter">⚾ <span>{{ g.away_starter or 'TBD' }}</span> vs <span>{{ g.home_starter or 'TBD' }}</span></div>
-      {% endif %}
-    </div>
-    {% endfor %}
-  </div>
-  {% else %}
-  <div class="empty">
-    <span class="empty-icon">📋</span>
-    <strong>No schedule data yet</strong>
-    <p>Run analysis to load today and tomorrow's schedule.</p>
-  </div>
-  {% endif %}
-</div>
-
-</div><!-- /page -->
 </div><!-- /main-app -->
 
 <!-- CONSOLE -->
 <div class="console-wrap" id="console-wrap">
   <div class="console-pull" onclick="toggleConsole()">
-    <div class="cpull-l">
-      <div class="cpull-dot" id="cdot"></div>
-      <span>▶ Console Log</span>
-      <span class="cpull-badge" id="ccount">0 lines</span>
-    </div>
-    <span class="cpull-r" id="ctog">▾ Show</span>
+    <div class="cpull-l"><div class="cpull-dot" id="cdot"></div><span>&#9654; Console Log</span><span class="cpull-badge" id="ccount">0 lines</span></div>
+    <span style="font-size:10px;color:var(--mt)" id="ctog">&#9662; Show</span>
   </div>
-  <div class="console-body" id="console-body">
-    <div id="clines"><div class="lg-empty">No logs yet — click Run Analysis to start.</div></div>
-  </div>
+  <div class="console-body" id="console-body"><div id="clines"><div class="lg-empty">No logs yet.</div></div></div>
 </div>
 
 <script>
-// ── Inline state from Jinja ───────────────────────────────────────
-const TEAM_PARLAYS = {{ state.team_parlays | tojson }};
-const PROP_PARLAYS = {{ state.prop_parlays | tojson }};
-const STATUS       = "{{ state.status }}";
+const STATUS = "{{ state.status }}";
 
-// ── Tabs ─────────────────────────────────────────────────────────
 function showTab(id, btn) {
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('act'));
   document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('on'));
@@ -1071,567 +435,138 @@ function showTab(id, btn) {
   document.getElementById('tab-' + id).classList.add('on');
 }
 
-// ── Filters ──────────────────────────────────────────────────────
-function _setFilterBtn(bar, btn) {
-  bar.querySelectorAll('.fbtn').forEach(b => b.classList.remove('act','bl','pu'));
-  btn.classList.add('act');
+async function runAnalysis() {
+  const btn = document.getElementById('run-btn');
+  btn.disabled = true;
+  try {
+    const r = await fetch('/api/run', {method:'POST'});
+    if (!r.ok) { const d = await r.json(); alert(d.msg || 'Error'); btn.disabled = false; return; }
+    setStatus('running');
+    startPolling();
+  } catch(e) { alert('Network error'); btn.disabled = false; }
 }
 
-function filterCards(grid, val, btn) {
-  _setFilterBtn(btn.closest('.filter-bar'), btn);
-  document.querySelectorAll('#grid-' + grid + ' .pick-card').forEach(c => {
-    if (val === 'all') { c.style.display = ''; return; }
-    const sport  = c.dataset.sport;
-    const safety = c.dataset.safety;
-    if (val === 'ELITE')  c.style.display = safety === 'ELITE' ? '' : 'none';
-    else if (val === 'SAFE')   c.style.display = ['ELITE','SAFE'].includes(safety) ? '' : 'none';
-    else c.style.display = sport === val ? '' : 'none';
+let _pt = null, _logOff = 0;
+function startPolling() {
+  if (_pt) clearInterval(_pt);
+  _pt = setInterval(async () => {
+    try {
+      const [sr, lr] = await Promise.all([
+        fetch('/api/status').then(r => r.json()),
+        fetch('/api/logs?since=' + _logOff).then(r => r.json()),
+      ]);
+      updateStatus(sr);
+      appendLogs(lr);
+      if (sr.status === 'done' || sr.status === 'error') {
+        clearInterval(_pt);
+        if (sr.status === 'done') setTimeout(() => location.reload(), 1200);
+      }
+    } catch(_) {}
+  }, 1800);
+}
+
+function updateStatus(s) {
+  setStatus(s.status);
+  document.getElementById('pname').textContent = s.phase || '';
+  document.getElementById('ppct').textContent  = Math.round((s.phase_idx / s.phase_total) * 100) + '%';
+  document.getElementById('pfill').style.width = Math.round((s.phase_idx / s.phase_total) * 100) + '%';
+  document.querySelectorAll('.pchip').forEach((c, i) => {
+    c.classList.toggle('done', i < s.phase_idx);
+    c.classList.toggle('act',  i === s.phase_idx);
   });
+  const pw = document.getElementById('prog-wrap');
+  if (s.status === 'running') pw.classList.add('on'); else pw.classList.remove('on');
 }
 
-// ── Prop filter panel ─────────────────────────────────────────────────────
-// Groups: sport | dir | safety | when | stat
-// Each group is single-select (radio style).
-// Click active button again → deselects back to "any".
-// When sport is selected, incompatible stat buttons are dimmed + blocked.
-// Incompatible active stat is auto-cleared when sport changes.
-
-const _MLB_STATS = ['strikeouts','hits','home_runs','total_bases','rbi','runs',
-                    'walks','stolen_bases','batter_strikeouts','doubles'];
-const _SOC_STATS = ['goals_scored','assists','goal_or_assist','shots_on_target','cards'];
-
-const _propFilters = {
-  sport: null, dir: null, safety: null, stat: null, when: null
-};
-
-const _GROUP_LABELS = {
-  sport:  { mlb:'⚾ MLB', soccer:'⚽ Soccer' },
-  dir:    { OVER:'📈 Over', UNDER:'📉 Under' },
-  safety: { ELITE:'🏆 Elite', SAFE:'✅ Safe', MODERATE:'⚠️ Moderate' },
-  when:   { LIVE:'🔴 Live', TODAY:'📅 Today', TOMORROW:'🌅 Tomorrow' },
-  stat:   {
-    strikeouts:'P-Ks', hits:'Hits', home_runs:'HR', total_bases:'TB',
-    rbi:'RBI', runs:'Runs', walks:'BB', stolen_bases:'SB',
-    batter_strikeouts:'B-Ks', doubles:'2B',
-    goals_scored:'Goal', assists:'Assist', goal_or_assist:'G+A',
-    shots_on_target:'SOT', cards:'Card'
-  }
-};
-
-function _applyPropFilters() {
-  const f = _propFilters;
-  let count = 0;
-  document.querySelectorAll('#grid-props .prop-card').forEach(c => {
-    const show = (
-      (!f.sport  || c.dataset.sport    === f.sport)  &&
-      (!f.dir    || c.dataset.dir      === f.dir)    &&
-      (!f.safety || c.dataset.safety   === f.safety) &&
-      (!f.stat   || c.dataset.stattype === f.stat)   &&
-      (!f.when   || c.dataset.when     === f.when)
-    );
-    c.style.display = show ? '' : 'none';
-    if (show) count++;
-  });
-  _refreshPfiltUI(count);
+function setStatus(st) {
+  const pill = document.getElementById('spill');
+  const dot  = document.getElementById('sdot');
+  pill.className = 'status-pill ' + st;
+  dot.className  = 'sdot ' + st;
+  document.getElementById('stxt').textContent = st.charAt(0).toUpperCase() + st.slice(1);
+  document.getElementById('run-btn').disabled = st === 'running';
+  document.getElementById('cdot').classList.toggle('act', st === 'running');
 }
-
-function _refreshPfiltUI(count) {
-  const panel = document.getElementById('prop-filter-panel');
-  if (!panel) return;
-  const f = _propFilters;
-
-  // ── 1. Dim/enable stat rows based on sport ──
-  const isMlb    = f.sport === 'mlb';
-  const isSoccer = f.sport === 'soccer';
-  panel.querySelectorAll('.fbtn[data-scope]').forEach(b => {
-    const sc = b.dataset.scope;
-    const off = (isMlb && sc === 'soccer') || (isSoccer && sc === 'mlb');
-    b.classList.toggle('pfilt-off', off);
-  });
-  // dim the sport-scope badges too
-  const mlbBadge = document.getElementById('pfilt-mlb-badge');
-  const socBadge = document.getElementById('pfilt-soc-badge');
-  if (mlbBadge) mlbBadge.classList.toggle('pfilt-off', isSoccer);
-  if (socBadge) socBadge.classList.toggle('pfilt-off', isMlb);
-
-  // ── 2. Result count ──
-  const countEl = document.getElementById('pfilt-count');
-  if (countEl) {
-    const total = document.querySelectorAll('#grid-props .prop-card').length;
-    countEl.textContent = (count < total) ? count + ' of ' + total + ' props' : total + ' props';
-    countEl.style.color = count === 0 ? 'var(--re)' : 'var(--gr)';
-  }
-
-  // ── 3. Summary tags ──
-  const tagsEl = document.getElementById('pfilt-summary-tags');
-  const resetBtn = document.getElementById('pfilt-reset-btn');
-  const active = Object.entries(f).filter(([,v]) => v !== null);
-  if (!tagsEl) return;
-  if (active.length === 0) {
-    tagsEl.innerHTML = '<span style="font-size:10px;color:var(--mt)">Showing all props · click any filter to narrow</span>';
-    if (resetBtn) resetBtn.style.display = 'none';
-  } else {
-    tagsEl.innerHTML = active.map(([g, v]) => {
-      const lbl = (_GROUP_LABELS[g] || {})[v] || v;
-      return `<span class="pfilt-tag">${lbl}<span class="ptag-x" onclick="clearOnePropFilter('${g}')">✕</span></span>`;
-    }).join('');
-    if (resetBtn) resetBtn.style.display = '';
-  }
-}
-
-function _setPfiltBtnActive(group, val) {
-  const panel = document.getElementById('prop-filter-panel');
-  if (!panel) return;
-  // clear all buttons in group
-  panel.querySelectorAll(`.fbtn[data-group="${group}"]`).forEach(b =>
-    b.classList.remove('act','bl','pu','re','yw'));
-  if (val === null) return;
-  const btn = panel.querySelector(`.fbtn[data-group="${group}"][data-val="${val}"]`);
-  if (!btn) return;
-  let cls = 'act';
-  if (group === 'sport')                         cls = 'bl';
-  else if (group === 'dir' && val === 'UNDER')   cls = 're';
-  else if (group === 'when')                     cls = 'pu';
-  else if (group === 'safety' && val === 'MODERATE') cls = 'yw';
-  btn.classList.add(cls);
-}
-
-function filterProps(group, val, btn) {
-  const prev = _propFilters[group];
-  // Toggle: click same → deselect
-  const next = (prev === val) ? null : val;
-  _propFilters[group] = next;
-  _setPfiltBtnActive(group, next);
-
-  // If sport changed, auto-clear incompatible stat filter
-  if (group === 'sport' && _propFilters.stat) {
-    const isMlbStat = _MLB_STATS.includes(_propFilters.stat);
-    const isSocStat = _SOC_STATS.includes(_propFilters.stat);
-    const incompatible = (next === 'mlb' && isSocStat) || (next === 'soccer' && isMlbStat);
-    if (incompatible) {
-      _propFilters.stat = null;
-      _setPfiltBtnActive('stat', null);
-    }
-  }
-  _applyPropFilters();
-}
-
-function clearOnePropFilter(group) {
-  _propFilters[group] = null;
-  _setPfiltBtnActive(group, null);
-  _applyPropFilters();
-}
-
-function clearPropFilters() {
-  Object.keys(_propFilters).forEach(k => _propFilters[k] = null);
-  const panel = document.getElementById('prop-filter-panel');
-  if (panel) panel.querySelectorAll('.fbtn').forEach(b =>
-    b.classList.remove('act','bl','pu','re','yw','pfilt-off'));
-  // re-enable all scoped btns
-  document.querySelectorAll('.fbtn[data-scope]').forEach(b => b.classList.remove('pfilt-off'));
-  document.querySelectorAll('#grid-props .prop-card').forEach(c => c.style.display = '');
-  const total = document.querySelectorAll('#grid-props .prop-card').length;
-  _refreshPfiltUI(total);
-}
-
-// Init count after page loads
-document.addEventListener('DOMContentLoaded', () => {
-  const total = document.querySelectorAll('#grid-props .prop-card').length;
-  if (total > 0) _refreshPfiltUI(total);
-});
-
-
-function filterSched(val, btn) {
-  _setFilterBtn(btn.closest('.filter-bar'), btn);
-  document.querySelectorAll('#sched-grid .sc-card').forEach(c => {
-    if (val === 'all') { c.style.display = ''; return; }
-    const sport = c.dataset.sport;
-    const when  = c.dataset.when;
-    if (val === 'mlb' || val === 'soccer') c.style.display = sport === val ? '' : 'none';
-    else c.style.display = when === val ? '' : 'none';
-  });
-}
-
-// ── Parlay renderer ───────────────────────────────────────────────
-function renderParlays(data, tabsEl, panelsEl, labelFn) {
-  tabsEl.innerHTML = '';
-  panelsEl.innerHTML = '';
-  const keys = Object.keys(data).sort((a,b) => +a - +b);
-  if (!keys.length) return;
-  keys.forEach((n, idx) => {
-    const items = data[n];
-    if (!items.length) return;
-    const tab = document.createElement('button');
-    tab.className = 'ltab' + (idx === 0 ? ' act' : '');
-    tab.textContent = n + '-Leg (' + items.length + ')';
-    tab.onclick = function() {
-      tabsEl.querySelectorAll('.ltab').forEach(t => t.classList.remove('act'));
-      this.classList.add('act');
-      panelsEl.querySelectorAll('.ltab-panel').forEach(p => p.classList.remove('on'));
-      document.getElementById(panelsEl.id + '-' + n).classList.add('on');
-    };
-    tabsEl.appendChild(tab);
-
-    const panel = document.createElement('div');
-    panel.className = 'ltab-panel' + (idx === 0 ? ' on' : '');
-    panel.id = panelsEl.id + '-' + n;
-    items.forEach((p, i) => {
-      const card = document.createElement('div');
-      card.className = 'parl-card ' + p.safety_label;
-      card.innerHTML = `
-        <div class="parl-head">
-          <div class="parl-tag">${n}-LEG #${i+1}</div>
-          <span class="sbadge ${p.safety_label}">${p.safety_label}</span>
-        </div>
-        <div class="parl-legs">
-          ${p.legs.map(l => `<div class="leg-row"><div class="leg-dot"></div><div>${_esc(l)}</div></div>`).join('')}
-        </div>
-        <div class="parl-footer">
-          <div><div class="pf-lbl">Combined chance</div><div class="pf-prob">${p.combined_prob}%</div></div>
-          <div><div class="pf-lbl">Combined odds</div><div class="pf-odds">${p.combined_dec}x</div></div>
-        </div>`;
-      panel.appendChild(card);
-    });
-    panelsEl.appendChild(panel);
-  });
-}
-
-function _esc(s) { return s.replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
-
-function showParlayType(type, btn) {
-  document.querySelectorAll('#tab-parlays .filter-bar .fbtn').forEach(b => b.classList.remove('act'));
-  btn.classList.add('act');
-  document.getElementById('parl-team').style.display = type === 'team' ? '' : 'none';
-  document.getElementById('parl-prop').style.display = type === 'prop' ? '' : 'none';
-}
-
-// Render on load
-(function() {
-  renderParlays(TEAM_PARLAYS, document.getElementById('team-leg-tabs'), document.getElementById('team-leg-panels'), n => n + '-Leg Team');
-  renderParlays(PROP_PARLAYS, document.getElementById('prop-leg-tabs'), document.getElementById('prop-leg-panels'), n => n + '-Leg Props');
-})();
-
-// ── Console ───────────────────────────────────────────────────────
-let _cOpen = false;
-let _logOffset = 0;
-let _polling   = null;
 
 function toggleConsole() {
-  const wrap = document.getElementById('console-wrap');
-  _cOpen = !_cOpen;
-  if (_cOpen) {
-    wrap.classList.add('open');
-    document.getElementById('ctog').textContent = '▴ Hide';
-    document.getElementById('console-body').scrollTop = 99999;
-  } else {
-    wrap.classList.remove('open');
-    document.getElementById('ctog').textContent = '▾ Show';
-  }
+  const w = document.getElementById('console-wrap');
+  const tog = document.getElementById('ctog');
+  const open = w.classList.toggle('open');
+  tog.textContent = open ? '\u25b4 Hide' : '\u25be Show';
 }
 
-function _classifyLog(line) {
-  const l = line.toLowerCase();
-  if (l.includes('error') || l.includes('traceback') || l.includes('exception')) return 'err';
-  if (l.includes('warning') || l.includes('warn')) return 'warn';
-  if (l.includes('done') || l.includes('saved') || l.includes('complete') || l.includes('ready')) return 'ok';
-  if (l.includes('phase')) return 'phase';
-  return '';
-}
-
-function appendLogs(lines) {
-  if (!lines.length) return;
-  const container = document.getElementById('clines');
-  if (container.querySelector('.lg-empty')) container.innerHTML = '';
-  lines.forEach(line => {
-    const m   = line.match(/^\[(\d{2}:\d{2}:\d{2})\]\s*(.+)$/);
-    const ts  = m ? m[1] : '';
-    const msg = m ? m[2] : line;
-    const cls = _classifyLog(line);
-    const d   = document.createElement('div');
-    d.className = 'lg' + (cls ? ' ' + cls : '');
-    d.innerHTML = `<span class="ts">${ts}</span><span class="msg">${msg.replace(/</g,'&lt;')}</span>`;
-    container.appendChild(d);
+function appendLogs(data) {
+  if (!data.logs || !data.logs.length) return;
+  const box = document.getElementById('clines');
+  if (box.querySelector('.lg-empty')) box.innerHTML = '';
+  data.logs.forEach(l => {
+    const d = document.createElement('div');
+    d.className = 'lg' + (l.includes('ERROR') ? ' err' : l.includes('WARNING') ? ' warn' :
+                          l.includes('===') ? ' phase' : l.includes('\u2713') ? ' ok' : '');
+    const m = l.match(/^\[(\d+:\d+:\d+)\]\s(.*)$/);
+    d.innerHTML = m ? '<span class="ts">'+m[1]+'</span><span class="msg">'+m[2]+'</span>'
+                    : '<span class="msg">'+l+'</span>';
+    box.appendChild(d);
   });
-  document.getElementById('ccount').textContent = _logOffset + ' lines';
-  if (_cOpen) document.getElementById('console-body').scrollTop = 99999;
+  _logOff = data.total;
+  document.getElementById('ccount').textContent = data.total + ' lines';
+  const body = document.getElementById('console-body');
+  body.scrollTop = body.scrollHeight;
 }
 
-function pollLogs() {
-  fetch('/api/logs?since=' + _logOffset)
-    .then(r => r.json())
-    .then(d => {
-      if (d.logs && d.logs.length) { appendLogs(d.logs); _logOffset = d.total; }
-    }).catch(() => {});
-}
-
-// ── Run & Status ──────────────────────────────────────────────────
-function setStatus(s, phase, idx, total) {
-  ['idle','running','done','error'].forEach(c => {
-    document.getElementById('spill').classList.remove(c);
-    document.getElementById('sdot').classList.remove(c);
-  });
-  document.getElementById('spill').classList.add(s);
-  document.getElementById('sdot').classList.add(s);
-  document.getElementById('stxt').textContent = s.charAt(0).toUpperCase() + s.slice(1);
-  document.getElementById('run-btn').disabled = (s === 'running');
-  document.getElementById('cdot').className = 'cpull-dot' + (s === 'running' ? ' act' : '');
-
-  const pw = document.getElementById('prog-wrap');
-  if (s === 'running') {
-    pw.classList.add('on');
-    if (phase) document.getElementById('pname').textContent = phase;
-    const pct = total > 0 ? Math.round(idx / total * 100) : 0;
-    document.getElementById('ppct').textContent = pct + '%';
-    document.getElementById('pfill').style.width = pct + '%';
-    document.querySelectorAll('.pchip').forEach((el, i) => {
-      el.className = 'pchip' + (i < idx ? ' done' : (i === idx ? ' act' : ''));
+(async function initSplash() {
+  const stages = ['sst-db','sst-games','sst-bets','sst-ready'];
+  const bar = document.getElementById('spl-bar');
+  const pct = document.getElementById('spl-pct');
+  const sub = document.getElementById('spl-sub');
+  const pf  = document.getElementById('splash-particles');
+  for (let i = 0; i < 22; i++) {
+    const d = document.createElement('div'); d.className = 'sp-dot';
+    const sz = Math.random() * 4 + 2;
+    d.style.cssText = 'left:'+Math.random()*100+'%;top:'+(80+Math.random()*30)+'%;'+
+      'width:'+sz+'px;height:'+sz+'px;'+
+      'background:'+['#22c55e','#0d9488','#3b82f6','#a855f7'][i%4]+';'+
+      'animation-duration:'+(5+Math.random()*8)+'s;animation-delay:'+Math.random()*4+'s';
+    pf.appendChild(d);
+  }
+  function setStage(i, val) {
+    stages.forEach((id, j) => {
+      const el = document.getElementById(id);
+      if (j < i) el.className = 'spl-stage done';
+      else if (j === i) el.className = 'spl-stage act';
+      else el.className = 'spl-stage';
     });
-  } else {
-    pw.classList.remove('on');
+    const p = Math.round((i / stages.length) * 100);
+    bar.style.width = p + '%'; pct.textContent = p + '%';
+    if (val !== undefined) { const v = document.getElementById(stages[i]+'-val'); if(v) v.textContent = val; }
   }
-}
-
-function runAnalysis() {
-  _logOffset = 0;
-  document.getElementById('clines').innerHTML = '';
-  fetch('/api/run', {method: 'POST'})
-    .then(r => r.json())
-    .then(d => {
-      if (!d.ok) { alert(d.msg); return; }
-      setStatus('running', '', 0, 9);
-      if (!_cOpen) toggleConsole();
-      startPolling();
-    }).catch(e => alert('Error: ' + e));
-}
-
-function startPolling() {
-  if (_polling) clearInterval(_polling);
-  _polling = setInterval(() => {
-    fetch('/api/status').then(r => r.json()).then(d => {
-      setStatus(d.status, d.phase, d.phase_idx, d.phase_total);
-      pollLogs();
-      if (d.status === 'done' || d.status === 'error') {
-        clearInterval(_polling); _polling = null;
-        pollLogs();
-        setTimeout(() => location.reload(), 1000);
-      }
-    });
-  }, 1500);
-}
-
-if (STATUS === 'running') startPolling();
-
-// ════════════════════════════════════════════════════
-// LOADING SCREEN  (session-aware boot)
-// ════════════════════════════════════════════════════
-(function () {
-  const _SES_KEY = 'bettor_v4_session';
-  const _SES_TTL = 30 * 60 * 1000; // 30 minutes
-
-  // ── Session helpers ──────────────────────────────
-  function _loadSession() {
-    try { return JSON.parse(localStorage.getItem(_SES_KEY) || 'null'); }
-    catch { return null; }
-  }
-  function _saveSession(data) {
-    try { localStorage.setItem(_SES_KEY, JSON.stringify({ ts: Date.now(), ...data })); }
-    catch {}
-  }
-  function _clearSession() {
-    try { localStorage.removeItem(_SES_KEY); }
-    catch {}
-  }
-  function _sessionFresh(ses) {
-    return ses && ses.ts && (Date.now() - ses.ts < _SES_TTL);
-  }
-
-  // ── Splash element helpers ───────────────────────
-  const $splash  = document.getElementById('splash');
-  const $main    = document.getElementById('main-app');
-  const $bar     = document.getElementById('spl-bar');
-  const $pct     = document.getElementById('spl-pct');
-  const $sub     = document.getElementById('spl-sub');
-  const $dbStrip = document.getElementById('spl-db-strip');
-  const $preview = document.getElementById('spl-preview');
-
-  function _setProgress(pct) {
-    $bar.style.width = pct + '%';
-    $pct.textContent = Math.round(pct) + '%';
-  }
-  function _activateStage(id) {
-    document.querySelectorAll('.spl-stage').forEach(s => {
-      if (s.id === id) { s.classList.add('act'); s.classList.remove('done'); }
-      else if (s.classList.contains('act')) { s.classList.remove('act'); s.classList.add('done'); s.querySelector('.spl-stage-icon').textContent = '✓'; }
-    });
-  }
-  function _doneStage(id, valText) {
-    const el = document.getElementById(id);
-    if (!el) return;
-    el.classList.remove('act');
-    el.classList.add('done');
-    el.querySelector('.spl-stage-icon').textContent = '✓';
-    if (valText) document.getElementById(id + '-val').textContent = valText;
-  }
-
-  // ── Particles ────────────────────────────────────
-  function _spawnParticles() {
-    const field = document.getElementById('splash-particles');
-    const colors = ['#22c55e','#14b8a6','#3b82f6','#a855f7','#f0b429'];
-    const sizes  = [3,4,5,3,4,6];
-    for (let i = 0; i < 28; i++) {
-      const d = document.createElement('div');
-      d.className = 'sp-dot';
-      const sz = sizes[i % sizes.length];
-      d.style.cssText = [
-        `left:${Math.random()*100}%`,
-        `bottom:${-10 - Math.random()*20}px`,
-        `width:${sz}px`,`height:${sz}px`,
-        `background:${colors[i % colors.length]}`,
-        `animation-duration:${6 + Math.random()*10}s`,
-        `animation-delay:${Math.random()*12}s`,
-      ].join(';');
-      field.appendChild(d);
+  try {
+    setStage(0);
+    sub.textContent = 'Connecting to database\u2026';
+    const data = await fetch('/api/cached-state').then(r => r.json());
+    setStage(1, '\u2713');
+    sub.textContent = "Loading today's games\u2026";
+    await new Promise(r => setTimeout(r, 300));
+    setStage(2, data.db_stats?.total_games ? data.db_stats.total_games+' games' : '');
+    sub.textContent = 'Restoring cached picks\u2026';
+    await new Promise(r => setTimeout(r, 300));
+    const tp = (data.db_stats?.total_bets||0)+(data.db_stats?.total_props||0);
+    setStage(3, tp ? tp+' picks' : '');
+    if (data.has_cache) {
+      const strip = document.getElementById('spl-db-strip');
+      document.getElementById('sdb-games').textContent   = data.db_stats?.total_games || '\u2014';
+      document.getElementById('sdb-bets').textContent    = tp || '\u2014';
+      document.getElementById('sdb-updated').textContent = data.last_updated
+        ? data.last_updated.replace(/\d{4}-\d{2}-\d{2}\s/,'') : '\u2014';
+      strip.style.display = 'flex';
     }
-  }
-
-  // ── Preview ghost cards ───────────────────────────
-  function _buildPreview(cache) {
-    if (!cache) return;
-    const items = [];
-    if (cache.db_stats.total_games > 0)
-      items.push({ head:'Games Today', val: cache.db_stats.total_games, sub: 'MLB + Soccer' });
-    if (cache.db_stats.total_props > 0)
-      items.push({ head:'Cached Props', val: cache.db_stats.total_props, sub: 'Player picks ready' });
-    if (cache.db_stats.total_bets > 0)
-      items.push({ head:'Cached Bets', val: cache.db_stats.total_bets, sub: 'Value bets found' });
-    if (cache.last_updated)
-      items.push({ head:'Last Run', val: cache.last_updated, sub: 'Data freshness', str: true });
-    if (!items.length) return;
-    items.forEach((item, i) => {
-      const c = document.createElement('div');
-      c.className = 'spl-pcard';
-      c.innerHTML = `<div class="spl-pcard-head">${item.head}</div>
-        <div class="spl-pcard-val">${item.val}</div>
-        <div class="spl-pcard-sub">${item.sub}</div>`;
-      $preview.appendChild(c);
-      setTimeout(() => c.classList.add('vis'), 100 + i * 120);
-    });
-  }
-
-  // ── Animate the progress bar smoothly ──────────────
-  let _pctNow = 0;
-  function _animTo(target, durationMs, onDone) {
-    const start = _pctNow;
-    const t0 = performance.now();
-    function tick(now) {
-      const elapsed = Math.min(now - t0, durationMs);
-      const frac    = elapsed / durationMs;
-      const ease    = 1 - Math.pow(1 - frac, 3);
-      _pctNow = start + (target - start) * ease;
-      _setProgress(_pctNow);
-      if (elapsed < durationMs) { requestAnimationFrame(tick); }
-      else { _pctNow = target; _setProgress(target); if (onDone) onDone(); }
-    }
-    requestAnimationFrame(tick);
-  }
-
-  // ── Reveal main app ────────────────────────────────
-  function _revealApp() {
-    $sub.textContent = 'Ready — entering dashboard…';
-    _animTo(100, 400, () => {
-      setTimeout(() => {
-        $splash.classList.add('hidden');
-        $main.style.opacity = '1';
-        // after splash hides, stop particles from eating memory
-        setTimeout(() => $splash.style.display = 'none', 600);
-      }, 500);
-    });
-  }
-
-  // ── Main boot sequence ─────────────────────────────
-  async function _boot() {
-    _spawnParticles();
-    _setProgress(0);
-
-    // ── Check for fresh session (skip heavy load) ──
-    const ses = _loadSession();
-    if (_sessionFresh(ses)) {
-      $sub.textContent = 'Session resumed (' + Math.round((Date.now()-ses.ts)/60000) + 'm ago)';
-      _activateStage('sst-ready');
-      _animTo(95, 600, () => {
-        _doneStage('sst-db',    ses.cache_stats ? ses.cache_stats.total_games + ' games' : '✓');
-        _doneStage('sst-games', '✓');
-        _doneStage('sst-bets',  ses.cache_stats ? ses.cache_stats.total_bets + ' bets' : '✓');
-        _doneStage('sst-props', ses.cache_stats ? ses.cache_stats.total_props + ' props' : '✓');
-        _doneStage('sst-ready', 'READY');
-        setTimeout(_revealApp, 700);
-      });
-      return;
-    }
-
-    // ── Fresh load — fetch cached-state from DB ──
-    _activateStage('sst-db');
-    $sub.textContent = 'Connecting to database…';
-    _animTo(15, 600);
-
-    let cacheData = null;
-    try {
-      const res = await fetch('/api/cached-state');
-      cacheData = await res.json();
-    } catch (e) {
-      cacheData = { has_cache: false, db_stats: { total_games:0, total_bets:0, total_props:0 } };
-    }
-
-    _doneStage('sst-db', 'connected');
-    _activateStage('sst-games');
-    $sub.textContent = 'Loading today\'s games…';
-    _animTo(35, 500);
-    await _delay(400);
-
-    const gs = cacheData.db_stats || {};
-    _doneStage('sst-games', (gs.total_games || 0) + ' games');
-    _activateStage('sst-bets');
-    $sub.textContent = 'Restoring cached bets…';
-    _animTo(55, 500);
-    await _delay(400);
-
-    _doneStage('sst-bets', (gs.total_bets || 0) + ' bets');
-    _activateStage('sst-props');
-    $sub.textContent = 'Restoring player props…';
-    _animTo(75, 500);
-    await _delay(400);
-
-    _doneStage('sst-props', (gs.total_props || 0) + ' props');
-    _activateStage('sst-ready');
-    $sub.textContent = 'Preparing dashboard…';
-    _animTo(92, 500);
-    await _delay(400);
-
-    // ── Show DB stats strip ──
-    if (cacheData.has_cache || gs.total_games > 0) {
-      document.getElementById('sdb-games').textContent   = gs.total_games || 0;
-      document.getElementById('sdb-bets').textContent    = gs.total_bets  || 0;
-      document.getElementById('sdb-props').textContent   = gs.total_props || 0;
-      document.getElementById('sdb-updated').textContent = cacheData.last_updated || '—';
-      $dbStrip.style.display = 'flex';
-      $dbStrip.style.animation = 'fadeInUp .4s ease';
-    }
-
-    _buildPreview(cacheData);
-    _doneStage('sst-ready', 'READY');
-
-    // ── Save session ──
-    _saveSession({ cache_stats: gs, has_cache: cacheData.has_cache });
-
-    await _delay(900);
-    _revealApp();
-  }
-
-  function _delay(ms) { return new Promise(r => setTimeout(r, ms)); }
-
-  // ── Kick off on DOMContentLoaded (already fired since this is inline) ──
-  _boot();
-
+    sub.textContent = 'Ready';
+    bar.style.width = '100%'; pct.textContent = '100%';
+    await new Promise(r => setTimeout(r, 500));
+  } catch(_) { bar.style.width = '100%'; }
+  document.getElementById('splash').classList.add('hidden');
+  document.getElementById('main-app').style.opacity = '1';
+  if (STATUS === 'running') startPolling();
 })();
 </script>
 </body>
