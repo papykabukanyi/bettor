@@ -89,7 +89,7 @@ def _fmt_time_12h(gtime: str) -> str:
     try:
         fmt = "%H:%M:%S" if gtime.count(":") == 2 else "%H:%M"
         t = datetime.datetime.strptime(gtime, fmt)
-        return t.strftime("%I:%M %p").lstrip("0")
+        return t.strftime("%-I:%M %p") if hasattr(datetime.datetime, "__format__") else t.strftime("%I:%M %p").lstrip("0")
     except Exception:
         return gtime
 

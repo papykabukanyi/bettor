@@ -82,16 +82,29 @@ def _safety_label(score):
     return "RISKY"
 
 
+def _fmt_time_12h(gtime: str) -> str:
+    """Convert '15:05' or '15:05:00' to '3:05 PM'."""
+    if not gtime:
+        return ""
+    try:
+        fmt = "%H:%M:%S" if gtime.count(":") == 2 else "%H:%M"
+        t = datetime.datetime.strptime(gtime, fmt)
+        return t.strftime("%I:%M %p").lstrip("0")
+    except Exception:
+        return gtime
+
+
 def _when_str(gdate, gtime, status, today, tomorrow):
     st = (status or "").upper()
     if "IN PROGRESS" in st or "LIVE" in st:
         return "LIVE NOW", "LIVE"
-    if gdate == today and gtime:
-        return f"TODAY {gtime} ET", "TODAY"
+    t12 = _fmt_time_12h(gtime)
+    if gdate == today and t12:
+        return f"TODAY {t12} ET", "TODAY"
     if gdate == today:
         return "TODAY", "TODAY"
     if gdate == tomorrow:
-        t = f" {gtime} ET" if gtime else ""
+        t = f" {t12} ET" if t12 else ""
         return f"TOMORROW{t}", "TOMORROW"
     return gdate or "TBD", "UPCOMING"
 
@@ -176,8 +189,27 @@ def _build_prop_pick(p, today, tomorrow, odds_lines: dict | None = None):
         "batter_strikeouts":  "batter_strikeouts",
         "doubles":            "batter_doubles",
     }
+    _RATE_LABELS = {
+        "strikeouts":         "K/Start",
+        "hits":               "H/Game",
+        "home_runs":          "HR/Game",
+        "total_bases":        "TB/Game",
+        "rbi":                "RBI/Gm",
+        "runs":               "R/Game",
+        "walks":              "BB/Game",
+        "stolen_bases":       "SB/Game",
+        "batter_strikeouts":  "K/Game",
+        "doubles":            "2B/Game",
+        "goals_scored":       "xG/Match",
+        "assists":            "xA/Match",
+        "shots_total":        "Sh/Match",
+        "shots_on_target":    "SOT/Match",
+        "goal_or_assist":     "xG+A",
+        "cards":              "Card/M",
+    }
 
     prop_label = _PROP_LABELS.get(stat_type, stat_type.replace("_", " ").title())
+    rate_label = _RATE_LABELS.get(stat_type, "Avg/Game")
     line       = p.get("line", "?")
 
     # If we have real book odds, use their line and recalculate confidence
@@ -244,6 +276,9 @@ def _build_prop_pick(p, today, tomorrow, odds_lines: dict | None = None):
         "mp":           round(float(p.get("mp",         0))),
         "over_pct":     round(ov * 100),
         "under_pct":    round(un * 100),
+        # bet label context
+        "rate_label":   rate_label,
+        "ip_per_start": round(float(p.get("ip_per_start", 0)), 1),
         # real odds from book
         "over_odds_am":  real_over_odds,
         "under_odds_am": real_under_odds,
