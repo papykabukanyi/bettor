@@ -76,6 +76,9 @@ body{background:var(--bg);color:var(--tx);font-family:'Segoe UI',system-ui,sans-
 .fbtn.act{background:var(--gd);color:var(--gr);border-color:#22c55e44}
 .fbtn.act.bl{background:var(--bld);color:var(--bl);border-color:#3b82f644}
 .fbtn.act.pu{background:var(--pd);color:var(--pu);border-color:#a855f744}
+.fbtn.re{background:#3b0a0a88;color:#f87171;border-color:#ef444444}
+.fbtn.yw{background:var(--yd);color:var(--yw);border-color:#f0b42944}
+.pfilt-sep{font-size:9px;font-weight:800;text-transform:uppercase;color:var(--mt);padding:0 4px 0 8px;letter-spacing:.5px;align-self:center;opacity:.7}
 
 /* ── SAFETY BADGE ── */
 .sbadge{display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:999px;font-size:9px;font-weight:900;letter-spacing:.4px;white-space:nowrap}
@@ -437,33 +440,45 @@ body{background:var(--bg);color:var(--tx);font-family:'Segoe UI',system-ui,sans-
 
 <!-- ══════════ PLAYER PROPS TAB ══════════ -->
 <div class="tab-panel" id="tab-props">
-  <div class="filter-bar">
-    <label>Filter:</label>
-    <button class="fbtn act" onclick="filterProps('all',this)">All</button>
-    <button class="fbtn" onclick="filterProps('OVER',this)">🟢 OVER</button>
-    <button class="fbtn" onclick="filterProps('UNDER',this)">🔴 UNDER</button>
-    <button class="fbtn" onclick="filterProps('strikeouts',this)">⚾ Pitcher Ks</button>
-    <button class="fbtn" onclick="filterProps('hits',this)">🏃 Hits</button>
-    <button class="fbtn" onclick="filterProps('home_runs',this)">💥 HR</button>
-    <button class="fbtn" onclick="filterProps('total_bases',this)">📊 Total Bases</button>
-    <button class="fbtn" onclick="filterProps('rbi',this)">🏅 RBI</button>
-    <button class="fbtn" onclick="filterProps('runs',this)">🏁 Runs</button>
-    <button class="fbtn" onclick="filterProps('walks',this)">👀 BB</button>
-    <button class="fbtn" onclick="filterProps('stolen_bases',this)">💨 SB</button>
-    <button class="fbtn" onclick="filterProps('batter_strikeouts',this)">🔇 Batter Ks</button>
-    <button class="fbtn" onclick="filterProps('doubles',this)">2️⃣ Doubles</button>
-    <span style="color:var(--mt);margin:0 4px">|</span>
-    <button class="fbtn" onclick="filterProps('goals_scored',this)">⚽ Goal</button>
-    <button class="fbtn" onclick="filterProps('assists',this)">🅰️ Assist</button>
-    <button class="fbtn" onclick="filterProps('goal_or_assist',this)">⚡ G+A</button>
-    <button class="fbtn" onclick="filterProps('shots_on_target',this)">🎯 SOT</button>
-    <button class="fbtn" onclick="filterProps('cards',this)">🟨 Card</button>
-    <span style="color:var(--mt);margin:0 4px">|</span>
-    <button class="fbtn" onclick="filterProps('ELITE',this)">🏆 Elite</button>
-    <button class="fbtn" onclick="filterProps('soccer',this)">⚽ Soccer only</button>
-    <button class="fbtn" onclick="filterProps('mlb',this)">⚾ MLB only</button>
-    <button class="fbtn" onclick="filterProps('TODAY',this)">📅 Today</button>
-    <button class="fbtn" onclick="filterProps('TOMORROW',this)">🌅 Tomorrow</button>
+  <div class="filter-bar" style="flex-wrap:wrap;row-gap:6px">
+    <!-- ── Row: clear + sport ── -->
+    <button class="fbtn act" onclick="clearPropFilters(this)" style="margin-right:4px">All</button>
+    <span class="pfilt-sep">Sport</span>
+    <button class="fbtn" data-group="sport" onclick="filterProps('sport','mlb',this)">⚾ MLB</button>
+    <button class="fbtn" data-group="sport" onclick="filterProps('sport','soccer',this)">⚽ Soccer</button>
+    <!-- ── Direction ── -->
+    <span class="pfilt-sep">Dir</span>
+    <button class="fbtn" data-group="dir" onclick="filterProps('dir','OVER',this)">📈 Over</button>
+    <button class="fbtn" data-group="dir" onclick="filterProps('dir','UNDER',this)">📉 Under</button>
+    <!-- ── Safety ── -->
+    <span class="pfilt-sep">Safety</span>
+    <button class="fbtn" data-group="safety" onclick="filterProps('safety','ELITE',this)">🏆 Elite</button>
+    <button class="fbtn" data-group="safety" onclick="filterProps('safety','SAFE',this)">✅ Safe</button>
+    <button class="fbtn" data-group="safety" onclick="filterProps('safety','MODERATE',this)">⚠️ Mod</button>
+    <!-- ── Time ── -->
+    <span class="pfilt-sep">Time</span>
+    <button class="fbtn" data-group="when" onclick="filterProps('when','LIVE',this)">🔴 Live</button>
+    <button class="fbtn" data-group="when" onclick="filterProps('when','TODAY',this)">📅 Today</button>
+    <button class="fbtn" data-group="when" onclick="filterProps('when','TOMORROW',this)">🌅 Tmrw</button>
+    <!-- ── MLB Stat types ── -->
+    <span class="pfilt-sep">MLB Prop</span>
+    <button class="fbtn" data-group="stat" onclick="filterProps('stat','strikeouts',this)">⚾ P-Ks</button>
+    <button class="fbtn" data-group="stat" onclick="filterProps('stat','hits',this)">🏃 Hits</button>
+    <button class="fbtn" data-group="stat" onclick="filterProps('stat','home_runs',this)">💥 HR</button>
+    <button class="fbtn" data-group="stat" onclick="filterProps('stat','total_bases',this)">📊 TB</button>
+    <button class="fbtn" data-group="stat" onclick="filterProps('stat','rbi',this)">🏅 RBI</button>
+    <button class="fbtn" data-group="stat" onclick="filterProps('stat','runs',this)">🏁 R</button>
+    <button class="fbtn" data-group="stat" onclick="filterProps('stat','walks',this)">👀 BB</button>
+    <button class="fbtn" data-group="stat" onclick="filterProps('stat','stolen_bases',this)">💨 SB</button>
+    <button class="fbtn" data-group="stat" onclick="filterProps('stat','batter_strikeouts',this)">🔇 B-Ks</button>
+    <button class="fbtn" data-group="stat" onclick="filterProps('stat','doubles',this)">2️⃣ 2B</button>
+    <!-- ── Soccer Stat types ── -->
+    <span class="pfilt-sep">Soccer Prop</span>
+    <button class="fbtn" data-group="stat" onclick="filterProps('stat','goals_scored',this)">⚽ Goal</button>
+    <button class="fbtn" data-group="stat" onclick="filterProps('stat','assists',this)">🅰️ Assist</button>
+    <button class="fbtn" data-group="stat" onclick="filterProps('stat','goal_or_assist',this)">⚡ G+A</button>
+    <button class="fbtn" data-group="stat" onclick="filterProps('stat','shots_on_target',this)">🎯 SOT</button>
+    <button class="fbtn" data-group="stat" onclick="filterProps('stat','cards',this)">🟨 Card</button>
   </div>
 
   {% if state.status == 'running' %}
@@ -737,36 +752,69 @@ function filterCards(grid, val, btn) {
   });
 }
 
-function filterProps(val, btn) {
-  _setFilterBtn(btn.closest('.filter-bar'), btn);
-  const MLB_STAT_TYPES   = ['strikeouts','hits','home_runs','total_bases','rbi','runs',
-                             'walks','stolen_bases','batter_strikeouts','doubles'];
-  const SOCCER_STAT_TYPES = ['goals_scored','assists','shots_total','shots_on_target',
-                              'goal_or_assist','cards'];
-  const ALL_STAT_TYPES    = [...MLB_STAT_TYPES, ...SOCCER_STAT_TYPES];
+// ── Multi-select prop filter ──────────────────────────────────────────────
+// Each button group (sport, direction, safety, stat, time) acts independently.
+// Within a group: clicking the same button deselects it (back to "any").
+// Across groups: all active selections must match (AND logic).
+
+const _propFilters = {
+  sport:    null,  // 'mlb' | 'soccer' | null = any
+  dir:      null,  // 'OVER' | 'UNDER' | null
+  safety:   null,  // 'ELITE' | 'SAFE' | 'MODERATE' | null
+  stat:     null,  // stat_type string | null
+  when:     null,  // 'TODAY' | 'TOMORROW' | 'LIVE' | null
+};
+
+function _applyPropFilters() {
+  const f = _propFilters;
   document.querySelectorAll('#grid-props .prop-card').forEach(c => {
-    if (val === 'all') { c.style.display = ''; return; }
-    const dir      = c.dataset.dir;
-    const safety   = c.dataset.safety;
-    const when     = c.dataset.when;
-    const stattype = c.dataset.stattype;
-    const sport    = c.dataset.sport;
-    if (val === 'OVER' || val === 'UNDER')
-      c.style.display = dir === val ? '' : 'none';
-    else if (ALL_STAT_TYPES.includes(val))
-      c.style.display = stattype === val ? '' : 'none';
-    else if (val === 'mlb')
-      c.style.display = (sport === 'mlb' || !sport) ? '' : 'none';
-    else if (val === 'soccer')
-      c.style.display = sport === 'soccer' ? '' : 'none';
-    else if (val === 'ELITE')
-      c.style.display = safety === 'ELITE' ? '' : 'none';
-    else if (val === 'TODAY' || val === 'TOMORROW')
-      c.style.display = when === val ? '' : 'none';
-    else
-      c.style.display = '';
+    const dir    = c.dataset.dir;
+    const safety = c.dataset.safety;
+    const when   = c.dataset.when;
+    const stat   = c.dataset.stattype;
+    const sport  = c.dataset.sport;
+    const show = (
+      (!f.sport  || sport  === f.sport)  &&
+      (!f.dir    || dir    === f.dir)    &&
+      (!f.safety || safety === f.safety) &&
+      (!f.stat   || stat   === f.stat)   &&
+      (!f.when   || when   === f.when)
+    );
+    c.style.display = show ? '' : 'none';
   });
 }
+
+function _togglePropBtn(group, val, btn) {
+  const bar = btn.closest('.filter-bar');
+  // deselect all buttons in this group
+  bar.querySelectorAll(`.fbtn[data-group="${group}"]`).forEach(b => b.classList.remove('act','bl','pu','re','yw'));
+  if (_propFilters[group] === val) {
+    // clicking same value again → clear filter
+    _propFilters[group] = null;
+  } else {
+    _propFilters[group] = val;
+    // colour by group/value
+    let cls = 'act';
+    if (group === 'dir'    && val === 'UNDER') cls = 're';
+    else if (group === 'sport')                cls = 'bl';
+    else if (group === 'safety' && val === 'MODERATE') cls = 'yw';
+    btn.classList.add(cls);
+  }
+  _applyPropFilters();
+}
+
+function filterProps(group, val, btn) {
+  _togglePropBtn(group, val, btn);
+}
+
+function clearPropFilters(btn) {
+  Object.keys(_propFilters).forEach(k => _propFilters[k] = null);
+  btn.closest('.filter-bar').querySelectorAll('.fbtn').forEach(b =>
+    b.classList.remove('act','bl','pu','re','yw'));
+  btn.classList.add('act');
+  _applyPropFilters();
+}
+
 
 function filterSched(val, btn) {
   _setFilterBtn(btn.closest('.filter-bar'), btn);

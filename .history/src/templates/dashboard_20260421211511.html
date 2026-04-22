@@ -793,11 +793,11 @@ function _togglePropBtn(group, val, btn) {
     _propFilters[group] = null;
   } else {
     _propFilters[group] = val;
-    // colour by group/value
-    let cls = 'act';
-    if (group === 'dir'    && val === 'UNDER') cls = 're';
-    else if (group === 'sport')                cls = 'bl';
-    else if (group === 'safety' && val === 'MODERATE') cls = 'yw';
+    // colour by type
+    const cls = group === 'dir'    ? (val === 'OVER' ? 'act' : 're')
+              : group === 'sport'  ? 'bl'
+              : group === 'safety' ? (val === 'ELITE' ? 'act' : val === 'MODERATE' ? 'yw' : 'act')
+              : 'act';
     btn.classList.add(cls);
   }
   _applyPropFilters();

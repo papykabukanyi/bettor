@@ -76,9 +76,6 @@ body{background:var(--bg);color:var(--tx);font-family:'Segoe UI',system-ui,sans-
 .fbtn.act{background:var(--gd);color:var(--gr);border-color:#22c55e44}
 .fbtn.act.bl{background:var(--bld);color:var(--bl);border-color:#3b82f644}
 .fbtn.act.pu{background:var(--pd);color:var(--pu);border-color:#a855f744}
-.fbtn.re{background:#3b0a0a88;color:#f87171;border-color:#ef444444}
-.fbtn.yw{background:var(--yd);color:var(--yw);border-color:#f0b42944}
-.pfilt-sep{font-size:9px;font-weight:800;text-transform:uppercase;color:var(--mt);padding:0 4px 0 8px;letter-spacing:.5px;align-self:center;opacity:.7}
 
 /* ── SAFETY BADGE ── */
 .sbadge{display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:999px;font-size:9px;font-weight:900;letter-spacing:.4px;white-space:nowrap}
@@ -793,11 +790,11 @@ function _togglePropBtn(group, val, btn) {
     _propFilters[group] = null;
   } else {
     _propFilters[group] = val;
-    // colour by group/value
-    let cls = 'act';
-    if (group === 'dir'    && val === 'UNDER') cls = 're';
-    else if (group === 'sport')                cls = 'bl';
-    else if (group === 'safety' && val === 'MODERATE') cls = 'yw';
+    // colour by type
+    const cls = group === 'dir'    ? (val === 'OVER' ? 'act' : 're')
+              : group === 'sport'  ? 'bl'
+              : group === 'safety' ? (val === 'ELITE' ? 'act' : val === 'MODERATE' ? 'yw' : 'act')
+              : 'act';
     btn.classList.add(cls);
   }
   _applyPropFilters();

@@ -656,11 +656,6 @@ def _build_hitter_df_from_mlb_api(games: list[dict], season: int) -> pd.DataFram
                 tb  = h + d2 + 2 * d3 + 3 * hr
                 avg_s = str(stat.get("avg",  ".000") or ".000")
                 ops_s = str(stat.get("ops",  ".000") or ".000")
-                def _safe_stat(s):
-                    try:
-                        return float(s)
-                    except Exception:
-                        return 0.0
                 rows.append({
                     "Name":  pname,
                     "Team":  team_name,
@@ -669,8 +664,8 @@ def _build_hitter_df_from_mlb_api(games: list[dict], season: int) -> pd.DataFram
                     "2B":    d2, "3B": d3,  "BB":  bb,
                     "SO":    so, "SB": sb,  "R":   r,
                     "TB":    tb,
-                    "AVG":   _safe_stat(avg_s),
-                    "OPS":   _safe_stat(ops_s),
+                    "AVG":   float(avg_s.lstrip(".").replace(".", "0.")) if avg_s not in ("-.--","--","") else 0.0,
+                    "OPS":   float(ops_s.lstrip(".").replace(".", "0.")) if ops_s not in ("-.--","--","") else 0.0,
                     "wRC+":  100,  # not in official API
                     "_source": "mlb_api",
                 })

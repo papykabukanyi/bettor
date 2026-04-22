@@ -76,9 +76,6 @@ body{background:var(--bg);color:var(--tx);font-family:'Segoe UI',system-ui,sans-
 .fbtn.act{background:var(--gd);color:var(--gr);border-color:#22c55e44}
 .fbtn.act.bl{background:var(--bld);color:var(--bl);border-color:#3b82f644}
 .fbtn.act.pu{background:var(--pd);color:var(--pu);border-color:#a855f744}
-.fbtn.re{background:#3b0a0a88;color:#f87171;border-color:#ef444444}
-.fbtn.yw{background:var(--yd);color:var(--yw);border-color:#f0b42944}
-.pfilt-sep{font-size:9px;font-weight:800;text-transform:uppercase;color:var(--mt);padding:0 4px 0 8px;letter-spacing:.5px;align-self:center;opacity:.7}
 
 /* ── SAFETY BADGE ── */
 .sbadge{display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:999px;font-size:9px;font-weight:900;letter-spacing:.4px;white-space:nowrap}
@@ -440,45 +437,33 @@ body{background:var(--bg);color:var(--tx);font-family:'Segoe UI',system-ui,sans-
 
 <!-- ══════════ PLAYER PROPS TAB ══════════ -->
 <div class="tab-panel" id="tab-props">
-  <div class="filter-bar" style="flex-wrap:wrap;row-gap:6px">
-    <!-- ── Row: clear + sport ── -->
-    <button class="fbtn act" onclick="clearPropFilters(this)" style="margin-right:4px">All</button>
-    <span class="pfilt-sep">Sport</span>
-    <button class="fbtn" data-group="sport" onclick="filterProps('sport','mlb',this)">⚾ MLB</button>
-    <button class="fbtn" data-group="sport" onclick="filterProps('sport','soccer',this)">⚽ Soccer</button>
-    <!-- ── Direction ── -->
-    <span class="pfilt-sep">Dir</span>
-    <button class="fbtn" data-group="dir" onclick="filterProps('dir','OVER',this)">📈 Over</button>
-    <button class="fbtn" data-group="dir" onclick="filterProps('dir','UNDER',this)">📉 Under</button>
-    <!-- ── Safety ── -->
-    <span class="pfilt-sep">Safety</span>
-    <button class="fbtn" data-group="safety" onclick="filterProps('safety','ELITE',this)">🏆 Elite</button>
-    <button class="fbtn" data-group="safety" onclick="filterProps('safety','SAFE',this)">✅ Safe</button>
-    <button class="fbtn" data-group="safety" onclick="filterProps('safety','MODERATE',this)">⚠️ Mod</button>
-    <!-- ── Time ── -->
-    <span class="pfilt-sep">Time</span>
-    <button class="fbtn" data-group="when" onclick="filterProps('when','LIVE',this)">🔴 Live</button>
-    <button class="fbtn" data-group="when" onclick="filterProps('when','TODAY',this)">📅 Today</button>
-    <button class="fbtn" data-group="when" onclick="filterProps('when','TOMORROW',this)">🌅 Tmrw</button>
-    <!-- ── MLB Stat types ── -->
-    <span class="pfilt-sep">MLB Prop</span>
-    <button class="fbtn" data-group="stat" onclick="filterProps('stat','strikeouts',this)">⚾ P-Ks</button>
-    <button class="fbtn" data-group="stat" onclick="filterProps('stat','hits',this)">🏃 Hits</button>
-    <button class="fbtn" data-group="stat" onclick="filterProps('stat','home_runs',this)">💥 HR</button>
-    <button class="fbtn" data-group="stat" onclick="filterProps('stat','total_bases',this)">📊 TB</button>
-    <button class="fbtn" data-group="stat" onclick="filterProps('stat','rbi',this)">🏅 RBI</button>
-    <button class="fbtn" data-group="stat" onclick="filterProps('stat','runs',this)">🏁 R</button>
-    <button class="fbtn" data-group="stat" onclick="filterProps('stat','walks',this)">👀 BB</button>
-    <button class="fbtn" data-group="stat" onclick="filterProps('stat','stolen_bases',this)">💨 SB</button>
-    <button class="fbtn" data-group="stat" onclick="filterProps('stat','batter_strikeouts',this)">🔇 B-Ks</button>
-    <button class="fbtn" data-group="stat" onclick="filterProps('stat','doubles',this)">2️⃣ 2B</button>
-    <!-- ── Soccer Stat types ── -->
-    <span class="pfilt-sep">Soccer Prop</span>
-    <button class="fbtn" data-group="stat" onclick="filterProps('stat','goals_scored',this)">⚽ Goal</button>
-    <button class="fbtn" data-group="stat" onclick="filterProps('stat','assists',this)">🅰️ Assist</button>
-    <button class="fbtn" data-group="stat" onclick="filterProps('stat','goal_or_assist',this)">⚡ G+A</button>
-    <button class="fbtn" data-group="stat" onclick="filterProps('stat','shots_on_target',this)">🎯 SOT</button>
-    <button class="fbtn" data-group="stat" onclick="filterProps('stat','cards',this)">🟨 Card</button>
+  <div class="filter-bar">
+    <label>Filter:</label>
+    <button class="fbtn act" onclick="filterProps('all',this)">All</button>
+    <button class="fbtn" onclick="filterProps('OVER',this)">🟢 OVER</button>
+    <button class="fbtn" onclick="filterProps('UNDER',this)">🔴 UNDER</button>
+    <button class="fbtn" onclick="filterProps('strikeouts',this)">⚾ Pitcher Ks</button>
+    <button class="fbtn" onclick="filterProps('hits',this)">🏃 Hits</button>
+    <button class="fbtn" onclick="filterProps('home_runs',this)">💥 HR</button>
+    <button class="fbtn" onclick="filterProps('total_bases',this)">📊 Total Bases</button>
+    <button class="fbtn" onclick="filterProps('rbi',this)">🏅 RBI</button>
+    <button class="fbtn" onclick="filterProps('runs',this)">🏁 Runs</button>
+    <button class="fbtn" onclick="filterProps('walks',this)">👀 BB</button>
+    <button class="fbtn" onclick="filterProps('stolen_bases',this)">💨 SB</button>
+    <button class="fbtn" onclick="filterProps('batter_strikeouts',this)">🔇 Batter Ks</button>
+    <button class="fbtn" onclick="filterProps('doubles',this)">2️⃣ Doubles</button>
+    <span style="color:var(--mt);margin:0 4px">|</span>
+    <button class="fbtn" onclick="filterProps('goals_scored',this)">⚽ Goal</button>
+    <button class="fbtn" onclick="filterProps('assists',this)">🅰️ Assist</button>
+    <button class="fbtn" onclick="filterProps('goal_or_assist',this)">⚡ G+A</button>
+    <button class="fbtn" onclick="filterProps('shots_on_target',this)">🎯 SOT</button>
+    <button class="fbtn" onclick="filterProps('cards',this)">🟨 Card</button>
+    <span style="color:var(--mt);margin:0 4px">|</span>
+    <button class="fbtn" onclick="filterProps('ELITE',this)">🏆 Elite</button>
+    <button class="fbtn" onclick="filterProps('soccer',this)">⚽ Soccer only</button>
+    <button class="fbtn" onclick="filterProps('mlb',this)">⚾ MLB only</button>
+    <button class="fbtn" onclick="filterProps('TODAY',this)">📅 Today</button>
+    <button class="fbtn" onclick="filterProps('TOMORROW',this)">🌅 Tomorrow</button>
   </div>
 
   {% if state.status == 'running' %}
@@ -793,11 +778,11 @@ function _togglePropBtn(group, val, btn) {
     _propFilters[group] = null;
   } else {
     _propFilters[group] = val;
-    // colour by group/value
-    let cls = 'act';
-    if (group === 'dir'    && val === 'UNDER') cls = 're';
-    else if (group === 'sport')                cls = 'bl';
-    else if (group === 'safety' && val === 'MODERATE') cls = 'yw';
+    // colour by type
+    const cls = group === 'dir'    ? (val === 'OVER' ? 'act' : 're')
+              : group === 'sport'  ? 'bl'
+              : group === 'safety' ? (val === 'ELITE' ? 'act' : val === 'MODERATE' ? 'yw' : 'act')
+              : 'act';
     btn.classList.add(cls);
   }
   _applyPropFilters();
