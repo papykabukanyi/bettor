@@ -391,8 +391,6 @@ def _run_analysis():
             _log("Soccer model loaded from disk")
         soccer_preds = []
         fixtures = get_todays_fixtures(["EPL", "ESP", "GER"])
-        # Only predict on live or upcoming fixtures — skip finished games
-        fixtures = [f for f in fixtures if not _game_is_over(f.get("status", ""))]
         _log(f"Soccer: {len(fixtures)} fixtures")
         if soccer_model and getattr(soccer_model, 'fitted', False):
             for f in fixtures:
@@ -525,7 +523,7 @@ def _run_analysis():
 
         # ── MLB Hitter props (H, HR, TB, RBI, R, BB, SB, K, 2B) ─────────
         from data.mlb_fetcher import get_hitter_props_batch
-        hitter_raw = get_hitter_props_batch(_active_mlb, MLB_SEASONS[0])
+        hitter_raw = get_hitter_props_batch(today_games + tomorrow_games, MLB_SEASONS[0])
         for i, p in enumerate(hitter_raw): p["_id"] = f"prop_h_{i}"
 
         # ── Soccer player props (goals, assists, shots, cards, G+A) ──────

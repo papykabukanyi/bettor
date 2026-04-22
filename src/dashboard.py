@@ -82,6 +82,22 @@ def _safety_label(score):
     return "RISKY"
 
 
+_FINAL_STATUSES = {
+    # MLB
+    "final", "game over", "f", "completed early", "postponed",
+    # soccer
+    "finished", "ft", "aet", "pen",
+}
+
+
+def _game_is_over(status: str) -> bool:
+    """Return True if game has already completed."""
+    st = (status or "").strip().lower()
+    if not st:
+        return False
+    return any(st == s or st.startswith(s) for s in _FINAL_STATUSES)
+
+
 def _fmt_time_12h(gtime: str) -> str:
     """Convert '15:05' or '15:05:00' to '3:05 PM'."""
     if not gtime:
@@ -96,7 +112,9 @@ def _fmt_time_12h(gtime: str) -> str:
 
 def _when_str(gdate, gtime, status, today, tomorrow):
     st = (status or "").upper()
-    if "IN PROGRESS" in st or "LIVE" in st:
+    if _game_is_over(status):
+        return "FINAL", "FINAL"
+    if "IN PROGRESS" in st or "LIVE" in st or "IN_PLAY" in st or "HALFTIME" in st or "PAUSED" in st:
         return "LIVE NOW", "LIVE"
     t12 = _fmt_time_12h(gtime)
     if gdate == today and t12:
@@ -373,6 +391,8 @@ def _run_analysis():
             _log("Soccer model loaded from disk")
         soccer_preds = []
         fixtures = get_todays_fixtures(["EPL", "ESP", "GER"])
+        # Only predict on live or upcoming fixtures — skip finished games
+        fixtures = [f for f in fixtures if not _game_is_over(f.get("status", ""))]
         _log(f"Soccer: {len(fixtures)} fixtures")
         if soccer_model and getattr(soccer_model, 'fitted', False):
             for f in fixtures:
@@ -471,6 +491,8 @@ def _run_analysis():
             b["away_starter"] = g.get("away_starter", "")
             b["status"]       = g.get("status", "")
 
+        # Drop bets for games that are already over
+        win_bets      = [b for b in win_bets if not _game_is_over(b.get("status", ""))]
         today_wins    = [b for b in win_bets if b.get("date", today) == today]
         tomorrow_wins = [b for b in win_bets if b.get("date", "") == tomorrow]
 
@@ -495,12 +517,15 @@ def _run_analysis():
             _log(f"Prop odds skipped (non-critical): {_e}")
 
         # ── MLB Pitcher strikeout props ───────────────────────────────────
-        pitcher_raw = get_starters_props_batch(today_games + tomorrow_games, MLB_SEASONS[0])
+        # Only fetch props for games that haven't ended yet
+        _active_mlb = [g for g in today_games + tomorrow_games
+                       if not _game_is_over(g.get("status", ""))]
+        pitcher_raw = get_starters_props_batch(_active_mlb, MLB_SEASONS[0])
         for i, p in enumerate(pitcher_raw): p["_id"] = f"prop_p_{i}"
 
         # ── MLB Hitter props (H, HR, TB, RBI, R, BB, SB, K, 2B) ─────────
         from data.mlb_fetcher import get_hitter_props_batch
-        hitter_raw = get_hitter_props_batch(today_games + tomorrow_games, MLB_SEASONS[0])
+        hitter_raw = get_hitter_props_batch(_active_mlb, MLB_SEASONS[0])
         for i, p in enumerate(hitter_raw): p["_id"] = f"prop_h_{i}"
 
         # ── Soccer player props (goals, assists, shots, cards, G+A) ──────
@@ -528,8 +553,15 @@ def _run_analysis():
              f"{len(soccer_props_raw)} soccer")
 
         # ── Attach game date/time and build display picks ─────────────────
+        # Only include props for games that are live or upcoming (not finished)
+        active_sched = [g for g in today_games + tomorrow_games
+                        if not _game_is_over(g.get("status", ""))]
+        # Also filter soccer props whose fixture is over
+        soccer_props_raw = [p for p in soccer_props_raw
+                            if not _game_is_over(p.get("status", ""))]
+
         mlb_raw   = pitcher_raw + hitter_raw
-        all_sched = today_games + tomorrow_games
+        all_sched = active_sched
         for p in mlb_raw:
             for g in all_sched:
                 if (g.get("home_team", "") in p.get("game", "") or
@@ -557,6 +589,8 @@ def _run_analysis():
             if max(ov, un) >= thresh:
                 player_props.append(_build_prop_pick(p, today, tomorrow, odds_lines))
 
+        # Drop any picks for games that ended up marked FINAL
+        player_props = [p for p in player_props if p.get("when_label") != "FINAL"]
         player_props.sort(key=lambda x: x["safety"], reverse=True)
         _log(f"Player props: {len(player_props)} qualifying picks")
 
