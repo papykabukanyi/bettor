@@ -45,10 +45,7 @@ _SOCCER_LEAGUES = {
 
 _SPORT_TO_TSDB = {
     "soccer": "Soccer",
-    "nba":    "Basketball",
     "mlb":    "Baseball",
-    "nfl":    "American Football",
-    "nhl":    "Ice Hockey",
 }
 
 # ─── helpers ─────────────────────────────────────────────────────────────────

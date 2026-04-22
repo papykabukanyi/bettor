@@ -1,12 +1,10 @@
 """
-SportsData.io fetcher  –  MLB, NBA, NCAA, NFL, NHL, Soccer.
+SportsData.io fetcher  –  MLB and Soccer only.
 Key:  3228e5282150459182dc4bbd731a330a  (trial tier)
 
 SportsData.io uses sport-specific base URLs:
   MLB:    https://api.sportsdata.io/v3/mlb/scores/json/...
-  NBA:    https://api.sportsdata.io/v3/nba/scores/json/...
   SOCCER: https://api.sportsdata.io/v3/soccer/scores/json/...
-  NFL:    https://api.sportsdata.io/v3/nfl/scores/json/...
 
 Auth:    ?key=<api_key>  OR  Ocp-Apim-Subscription-Key header
 """
@@ -21,8 +19,6 @@ from src.config import SPORTSDATA_API_KEY
 _KEY = SPORTSDATA_API_KEY
 _BASES = {
     "mlb":    "https://api.sportsdata.io/v3/mlb",
-    "nba":    "https://api.sportsdata.io/v3/nba",
-    "nfl":    "https://api.sportsdata.io/v3/nfl",
     "soccer": "https://api.sportsdata.io/v3/soccer",
 }
 _HEADERS = {"Ocp-Apim-Subscription-Key": _KEY}
@@ -90,31 +86,6 @@ def get_mlb_teams() -> list[dict]:
 def get_mlb_player_props_by_date(d: date = None) -> list[dict]:
     d = d or date.today()
     data = _get("mlb", f"/projections/json/DfsSlatesByDate/{d.strftime('%Y-%b-%d').upper()}")
-    return data or []
-
-
-# ─── NBA ─────────────────────────────────────────────────────────────────────
-
-def get_nba_games_by_date(d: date = None) -> list[dict]:
-    d = d or date.today()
-    data = _get("nba", f"/scores/json/GamesByDate/{d.strftime('%Y-%b-%d').upper()}")
-    return data or []
-
-
-def get_nba_standings(season: str = None) -> list[dict]:
-    season = season or f"{date.today().year}"
-    data = _get("nba", f"/scores/json/Standings/{season}")
-    return data or []
-
-
-def get_nba_player_season_stats(season: str = None) -> list[dict]:
-    season = season or f"{date.today().year}"
-    data = _get("nba", f"/stats/json/PlayerSeasonStats/{season}")
-    return (data or [])[:500]
-
-
-def get_nba_injuries() -> list[dict]:
-    data = _get("nba", "/scores/json/Injuries")
     return data or []
 
 
@@ -210,63 +181,6 @@ def populate_mlb(season: int = None):
         print(f"[sportsdata] MLB injuries: {len(inj_list)} saved")
 
 
-def populate_nba(season: str = None):
-    """Collect NBA standings, player stats, injuries → DB."""
-    from src.data.db import save_standings, save_player_season_stats, save_injuries
-
-    season_str = season or str(date.today().year)
-    print("[sportsdata] NBA populate …")
-
-    # Standings
-    standings_raw = get_nba_standings(season_str)
-    rows = []
-    for s in standings_raw:
-        rows.append({
-            "sport":      "nba",
-            "league":     "NBA",
-            "season":     int(season_str[:4]),
-            "team":       s.get("Name","") or s.get("City",""),
-            "rank":       s.get("ConferenceRank") or s.get("DivisionRank"),
-            "wins":       s.get("Wins"),
-            "losses":     s.get("Losses"),
-            "draws":      0,
-            "points":     s.get("Wins",0),
-            "form":       s.get("L10",""),
-            "stats_json": s,
-            "source":     "sportsdata",
-        })
-    if rows:
-        save_standings(rows)
-        print(f"[sportsdata] NBA standings: {len(rows)} saved")
-
-    # Player stats
-    pstats_raw = get_nba_player_season_stats(season_str)
-    prows = []
-    for p in pstats_raw:
-        name = p.get("Name","") or p.get("ShortName","")
-        if not name:
-            continue
-        prows.append({
-            "sport":       "nba",
-            "player_name": name,
-            "team":        p.get("Team",""),
-            "season":      int(season_str[:4]),
-            "stat_group":  "nba_season",
-            "stats_json":  p,
-            "source":      "sportsdata",
-        })
-    if prows:
-        save_player_season_stats(prows)
-        print(f"[sportsdata] NBA player stats: {len(prows)} saved")
-
-    # Injuries
-    inj_raw = get_nba_injuries()
-    inj_list = [_norm_injury(i, "nba") for i in inj_raw]
-    if inj_list:
-        save_injuries("nba", inj_list)
-        print(f"[sportsdata] NBA injuries: {len(inj_list)} saved")
-
-
 def populate_soccer(competition: int = 5, season: int = None):
     """Collect soccer standings, injuries → DB (Premier League default)."""
     from src.data.db import save_standings, save_injuries
@@ -309,9 +223,8 @@ def populate_soccer(competition: int = 5, season: int = None):
 
 
 def populate_all():
-    """Run all sport population functions."""
+    """Run MLB + Soccer population."""
     populate_mlb()
-    populate_nba()
     for comp in [5, 12, 10, 11, 8]:   # EPL, Ligue 1, Bundesliga, Serie A, La Liga
         try:
             populate_soccer(competition=comp)

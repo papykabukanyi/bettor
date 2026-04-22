@@ -5,18 +5,16 @@ Standalone data collection script.  Run manually or on a cron/Railway Job
 to pre-populate the database from all configured APIs.
 
 Usage:
-    python scripts/populate_db.py [--sport mlb|nba|soccer|all] [--force]
+    python scripts/populate_db.py [--sport mlb|soccer|all] [--force]
 
 What it does (in order):
   1.  Init schema (create new tables if missing)
   2.  SportsData.io  → MLB standings + player stats + injuries
-  3.  SportsData.io  → NBA standings + player stats + injuries
-  4.  SportsData.io  → Soccer standings + injuries (5 major leagues)
-  5.  BallDontLie    → NBA teams, standings, player profiles, season avgs, injuries, today's games
-  6.  TheSportsDB    → Soccer standings (6 leagues) + today's multi-sport events
-  7.  RapidAPI Live  → Current live soccer scores
-  8.  NewsAPI        → Sports headlines for all active teams (top 20 per sport)
-  9.  Report: row counts for all tables
+  3.  SportsData.io  → Soccer standings + injuries (5 major leagues)
+  4.  TheSportsDB    → Soccer standings (6 leagues) + today's events
+  5.  RapidAPI Live  → Current live soccer scores
+  6.  NewsAPI        → Sports headlines for all active teams
+  7.  Report: row counts for all tables
 """
 
 import sys
@@ -35,7 +33,7 @@ load_dotenv(os.path.join(ROOT, ".env"))
 # ── Args ──────────────────────────────────────────────────────────────────────
 parser = argparse.ArgumentParser(description="Populate betting bot database")
 parser.add_argument("--sport",  default="all",
-                    choices=["all", "mlb", "nba", "soccer"],
+                    choices=["all", "mlb", "soccer"],
                     help="Which sport(s) to collect data for")
 parser.add_argument("--force",  action="store_true",
                     help="Force refresh even if data is recent")
@@ -63,7 +61,7 @@ try:
 except Exception as e:
     _err(f"Schema init failed: {e}")
 
-# ── Step 2–4: SportsData.io ───────────────────────────────────────────────────
+# ── Step 2–3: SportsData.io ───────────────────────────────────────────────────
 if TARGET in ("all", "mlb"):
     _section("Step 2 · SportsData.io — MLB")
     try:
@@ -73,17 +71,8 @@ if TARGET in ("all", "mlb"):
     except Exception as e:
         _err(f"MLB: {e}")
 
-if TARGET in ("all", "nba"):
-    _section("Step 3 · SportsData.io — NBA")
-    try:
-        from src.data.sportsdata_fetcher import populate_nba
-        populate_nba()
-        _ok("NBA complete")
-    except Exception as e:
-        _err(f"NBA: {e}")
-
 if TARGET in ("all", "soccer"):
-    _section("Step 4 · SportsData.io — Soccer (5 leagues)")
+    _section("Step 3 · SportsData.io — Soccer (5 leagues)")
     COMP_IDS = {
         "EPL (5)":         5,
         "Ligue 1 (12)":   12,
@@ -102,25 +91,15 @@ if TARGET in ("all", "soccer"):
     except Exception as e:
         _err(f"Soccer import failed: {e}")
 
-# ── Step 5: BallDontLie ───────────────────────────────────────────────────────
-if TARGET in ("all", "nba"):
-    _section("Step 5 · BallDontLie — NBA")
-    try:
-        from src.data.balldontlie_fetcher import populate_db as bdl_populate
-        bdl_populate()
-        _ok("BallDontLie NBA complete")
-    except Exception as e:
-        _err(f"BallDontLie: {e}")
-
-# ── Step 6: TheSportsDB ───────────────────────────────────────────────────────
+# ── Step 4: TheSportsDB ───────────────────────────────────────────────────────
 if TARGET in ("all", "soccer"):
-    _section("Step 6 · TheSportsDB — Soccer standings + today events")
+    _section("Step 4 · TheSportsDB — Soccer standings + today events")
     try:
         from src.data.thesportsdb_fetcher import (populate_soccer_standings,
                                                     populate_today_events)
         populate_soccer_standings()
         _ok("Soccer standings saved")
-        for sport_name in ["Soccer", "Baseball", "Basketball"]:
+        for sport_name in ["Soccer", "Baseball"]:
             try:
                 populate_today_events(sport_name.lower())
                 _ok(f"Today events saved: {sport_name}")
@@ -129,9 +108,9 @@ if TARGET in ("all", "soccer"):
     except Exception as e:
         _err(f"TheSportsDB: {e}")
 
-# ── Step 7: RapidAPI live scores ──────────────────────────────────────────────
+# ── Step 5: RapidAPI live scores ──────────────────────────────────────────────
 if TARGET in ("all", "soccer"):
-    _section("Step 7 · RapidAPI — Live soccer scores")
+    _section("Step 5 · RapidAPI — Live soccer scores")
     try:
         from src.data.rapidapi_football_fetcher import populate_live_scores
         populate_live_scores()
@@ -139,15 +118,11 @@ if TARGET in ("all", "soccer"):
     except Exception as e:
         _warn(f"RapidAPI live scores: {e}")
 
-# ── Step 8: NewsAPI headlines ─────────────────────────────────────────────────
-_section("Step 8 · NewsAPI — Sports headlines")
+# ── Step 6: NewsAPI headlines ─────────────────────────────────────────────────
+_section("Step 6 · NewsAPI — Sports headlines")
 MLB_TEAMS = [
     "Yankees", "Dodgers", "Red Sox", "Cubs", "Giants", "Mets",
     "Cardinals", "Braves", "Astros", "Phillies",
-]
-NBA_TEAMS = [
-    "Lakers", "Celtics", "Warriors", "Bucks", "Heat",
-    "Nets", "Nuggets", "Suns", "76ers", "Clippers",
 ]
 SOCCER_TEAMS = [
     "Manchester City", "Arsenal", "Chelsea", "Liverpool",
@@ -158,8 +133,6 @@ SOCCER_TEAMS = [
 TEAM_MAP = {}
 if TARGET in ("all", "mlb"):
     TEAM_MAP.update({t: "mlb" for t in MLB_TEAMS})
-if TARGET in ("all", "nba"):
-    TEAM_MAP.update({t: "nba" for t in NBA_TEAMS})
 if TARGET in ("all", "soccer"):
     TEAM_MAP.update({t: "soccer" for t in SOCCER_TEAMS})
 
@@ -193,8 +166,8 @@ try:
 except Exception as e:
     _err(f"NewsAPI: {e}")
 
-# ── Step 9: Report ─────────────────────────────────────────────────────────────
-_section("Step 9 · Database row counts")
+# ── Step 7: Report ─────────────────────────────────────────────────────────────────
+_section("Step 7 · Database row counts")
 TABLES = [
     "games", "odds_history", "value_bets", "injury_reports",
     "team_stats", "prop_history", "player_profiles",

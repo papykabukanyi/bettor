@@ -454,14 +454,13 @@ def _run_analysis():
             _log(f"WARNING injuries skipped: {e}")
 
         # ── Populate DB from all extended data sources (background-safe) ──
-        _log("Populating DB from extended sources (SportsData, BallDontLie, TheSportsDB)...")
+        _log("Populating DB from extended sources (SportsData, TheSportsDB, RapidAPI)...")
         try:
             import threading as _t
             def _populate_extended():
                 try:
-                    from data.sportsdata_fetcher import populate_mlb, populate_nba, populate_soccer
+                    from data.sportsdata_fetcher import populate_mlb, populate_soccer
                     populate_mlb()
-                    populate_nba()
                     for _comp in [5, 12, 10, 11, 8]:
                         try:
                             populate_soccer(competition=_comp)
@@ -469,11 +468,6 @@ def _run_analysis():
                             pass
                 except Exception as _e:
                     print(f"[dashboard] sportsdata populate error: {_e}")
-                try:
-                    from data.balldontlie_fetcher import populate_db as _bdl_populate
-                    _bdl_populate()
-                except Exception as _e:
-                    print(f"[dashboard] balldontlie populate error: {_e}")
                 try:
                     from data.thesportsdb_fetcher import populate_soccer_standings, populate_today_events
                     populate_soccer_standings()
