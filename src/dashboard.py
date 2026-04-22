@@ -220,26 +220,62 @@ def _run_analysis():
         _log(f"MLB: {len(today_games)} today, {len(tomorrow_games)} tomorrow")
 
         _phase(1)
-        from data.soccer_fetcher import get_todays_fixtures
-        from models.soccer_model import load_model as load_soccer
+        from data.soccer_fetcher import (get_todays_fixtures, get_historical_matches,
+                                          compute_team_strength)
+        from models.soccer_model import load_model as load_soccer, SoccerModel
         soccer_model = load_soccer()
+        if soccer_model is None:
+            _log("No saved soccer model — training on historical match data...")
+            try:
+                all_matches = []
+                for lk in ["EPL", "ESP", "GER"]:
+                    m = get_historical_matches(lk)
+                    if not m.empty:
+                        all_matches.append(m)
+                        _log(f"  {lk}: {len(m)} historical matches loaded")
+                if all_matches:
+                    combined = pd.concat(all_matches, ignore_index=True)
+                    sm = SoccerModel()
+                    sm.fit(combined)
+                    soccer_model = sm
+                    _log(f"Soccer model trained: {len(combined)} matches, {combined['home_team'].nunique()} teams")
+                else:
+                    _log("WARNING: No historical soccer data — soccer model unavailable")
+            except Exception as _e:
+                _log(f"Soccer model training failed: {_e}")
+        else:
+            _log("Soccer model loaded from disk")
         soccer_preds = []
         fixtures = get_todays_fixtures(["EPL", "ESP", "GER"])
         _log(f"Soccer: {len(fixtures)} fixtures")
-        if soccer_model:
+        if soccer_model and getattr(soccer_model, 'fitted', False):
             for f in fixtures:
-                pred = soccer_model.predict(f["home_team"], f["away_team"])
-                pred.update({"home_team": f["home_team"], "away_team": f["away_team"],
-                              "league": f.get("league", ""), "game_time": f.get("game_time"),
-                              "date": f.get("date", today)})
-                soccer_preds.append(pred)
+                try:
+                    pred = soccer_model.predict(f["home_team"], f["away_team"])
+                    pred.update({"home_team": f["home_team"], "away_team": f["away_team"],
+                                  "league": f.get("league", ""), "game_time": f.get("game_time"),
+                                  "date": f.get("date", today)})
+                    soccer_preds.append(pred)
+                except Exception:
+                    pass
         else:
-            _log("WARNING: Soccer model not available")
+            _log("WARNING: Soccer model not available — soccer predictions skipped")
 
         _phase(2)
         _log("Loading season stats for all teams...")
-        stats     = build_game_dataset([MLB_SEASONS[0]])
+        stats     = build_game_dataset(MLB_SEASONS)   # use all configured seasons
         mlb_model = load_model()
+        if mlb_model is None:
+            if not stats.empty:
+                _log(f"No saved MLB model — training on {stats['team'].nunique()} teams "
+                     f"across {stats['season'].nunique()} season(s)...")
+                from models.mlb_model import train as _train_mlb
+                mlb_model = _train_mlb(stats, verbose=False)
+                _log("MLB model trained and cached for future runs")
+            else:
+                _log("WARNING: No season stats available — all MLB confidence will show 50%")
+        else:
+            _log(f"MLB model loaded — {stats['team'].nunique() if not stats.empty else 0} teams in stats")
         mlb_preds = []
         for g in games:
             if g.get("status", "") not in ("Preview", "Pre-Game", "Scheduled", "Warmup", ""):
