@@ -2,8 +2,15 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<meta name="viewport" content="width=device-width,initial-scale=1.0,viewport-fit=cover">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Bettor AI">
+<meta name="theme-color" content="#070a10">
 <title>Bettor AI</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0%25' y1='0%25' x2='100%25' y2='100%25'%3E%3Cstop offset='0%25' stop-color='%2322c55e'/%3E%3Cstop offset='100%25' stop-color='%230d9488'/%3E%3C/linearGradient%3E%3ClinearGradient id='sg' x1='0%25' y1='0%25' x2='100%25' y2='100%25'%3E%3Cstop offset='0%25' stop-color='%2322c55e' stop-opacity='0.3'/%3E%3Cstop offset='100%25' stop-color='%230d9488' stop-opacity='0.1'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='64' height='64' rx='14' fill='%23070a10'/%3E%3Crect width='64' height='64' rx='14' fill='url(%23sg)'/%3E%3Crect x='2' y='2' width='60' height='60' rx='12' fill='none' stroke='url(%23g)' stroke-width='1.5' stroke-opacity='0.6'/%3E%3Crect x='18' y='14' width='16' height='22' rx='4' fill='url(%23g)'/%3E%3Crect x='18' y='28' width='20' height='22' rx='4' fill='url(%23g)'/%3E%3Crect x='18' y='33' width='20' height='3' fill='%23070a10' fill-opacity='0.5'/%3E%3C/svg%3E">
+<link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0%25' y1='0%25' x2='100%25' y2='100%25'%3E%3Cstop offset='0%25' stop-color='%2322c55e'/%3E%3Cstop offset='100%25' stop-color='%230d9488'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='64' height='64' rx='14' fill='%23070a10'/%3E%3Crect x='18' y='14' width='16' height='22' rx='4' fill='url(%23g)'/%3E%3Crect x='18' y='28' width='20' height='22' rx='4' fill='url(%23g)'/%3E%3C/svg%3E">
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 :root{
@@ -20,17 +27,17 @@
   --r:10px;--rl:14px;
   --elite:#22c55e;--safe:#14b8a6;--mod:#f0b429;--risky:#ef4444;
 }
-body{background:var(--bg);color:var(--tx);font-family:'Segoe UI',system-ui,sans-serif;font-size:14px;line-height:1.5;min-height:100vh}
-.page{max-width:1360px;margin:0 auto;padding:18px 16px 32px}
+body{background:var(--bg);color:var(--tx);font-family:'Segoe UI',system-ui,sans-serif;font-size:14px;line-height:1.5;min-height:100vh;overflow-x:hidden;-webkit-font-smoothing:antialiased}
+.page{max-width:1360px;margin:0 auto;padding:12px 12px 80px;padding-bottom:calc(80px + env(safe-area-inset-bottom))}
 
 /* ── HEADER ── */
-.hdr{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;margin-bottom:20px;padding-bottom:16px;border-bottom:1px solid var(--bd)}
-.brand{display:flex;align-items:center;gap:12px}
-.logo{width:44px;height:44px;border-radius:12px;background:linear-gradient(135deg,#22c55e,#0d9488);display:flex;align-items:center;justify-content:center;font-size:22px;font-weight:900;color:#000;flex-shrink:0}
-.brand-text h1{font-size:1.35rem;font-weight:900;letter-spacing:-.5px}
+.hdr{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:16px;padding-bottom:12px;border-bottom:1px solid var(--bd)}
+.brand{display:flex;align-items:center;gap:10px;min-width:0}
+.logo{width:40px;height:40px;border-radius:11px;background:linear-gradient(135deg,#22c55e,#0d9488);display:flex;align-items:center;justify-content:center;font-size:20px;font-weight:900;color:#000;flex-shrink:0}
+.brand-text h1{font-size:1.2rem;font-weight:900;letter-spacing:-.5px;white-space:nowrap}
 .brand-text h1 em{color:var(--gr);font-style:normal}
-.brand-text p{font-size:11px;color:var(--mt)}
-.hdr-right{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.brand-text p{font-size:10px;color:var(--mt);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:220px}
+.hdr-right{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
 .status-pill{display:inline-flex;align-items:center;gap:5px;padding:5px 12px;border-radius:999px;font-size:11px;font-weight:700;border:1px solid transparent}
 .status-pill.idle{background:var(--s2);color:var(--mt);border-color:var(--bd)}
 .status-pill.running{background:var(--gd);color:var(--gr);border-color:#22c55e55}
@@ -60,7 +67,8 @@ body{background:var(--bg);color:var(--tx);font-family:'Segoe UI',system-ui,sans-
 .err-box{background:var(--rd);border:1px solid var(--re);border-radius:var(--r);padding:12px 14px;color:var(--re);font-family:monospace;font-size:11px;white-space:pre-wrap;overflow-x:auto;margin-bottom:16px}
 
 /* ── TABS ── */
-.tabs{display:flex;gap:4px;flex-wrap:wrap;border-bottom:2px solid var(--bd);margin-bottom:20px;padding-bottom:0}
+.tabs{display:flex;gap:0;flex-wrap:wrap;border-bottom:2px solid var(--bd);margin-bottom:16px;padding-bottom:0;overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none}
+.tabs::-webkit-scrollbar{display:none}
 .tab{padding:9px 18px;font-size:12px;font-weight:800;color:var(--mt);border:none;background:none;cursor:pointer;border-bottom:3px solid transparent;margin-bottom:-2px;transition:color .15s,border-color .15s;text-transform:uppercase;letter-spacing:.4px;display:flex;align-items:center;gap:6px;white-space:nowrap}
 .tab:hover{color:var(--tx)}
 .tab.act{color:var(--gr);border-bottom-color:var(--gr)}
@@ -119,7 +127,7 @@ body{background:var(--bg);color:var(--tx);font-family:'Segoe UI',system-ui,sans-
 .sport-chip.EPL,.sport-chip.ESP,.sport-chip.GER,.sport-chip.ITA{background:var(--pd);color:var(--pu)}
 
 /* ── TEAM PICK CARD ── */
-.pick-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px}
+.pick-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(300px,100%),1fr));gap:10px}
 .pick-card{background:var(--sur);border:1px solid var(--bd);border-radius:var(--rl);overflow:hidden;transition:border-color .15s,transform .1s,box-shadow .15s}
 .pick-card:hover{border-color:var(--bd2);transform:translateY(-1px);box-shadow:0 4px 20px rgba(0,0,0,.4)}
 .pick-card.ELITE{border-top:3px solid var(--elite)}.pick-card.SAFE{border-top:3px solid var(--safe)}
@@ -152,7 +160,7 @@ body{background:var(--bg);color:var(--tx);font-family:'Segoe UI',system-ui,sans-
 .conf-fill.MODERATE{background:var(--mod)}.conf-fill.RISKY{background:var(--risky)}
 
 /* ── PLAYER PROP CARD ── */
-.prop-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(310px,1fr));gap:12px}
+.prop-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(300px,100%),1fr));gap:10px}
 .prop-card{background:var(--sur);border:1px solid var(--bd);border-radius:var(--rl);overflow:hidden;transition:border-color .15s}
 .prop-card:hover{border-color:var(--bd2)}
 .prop-card.OVER{border-left:3px solid var(--gr)}.prop-card.UNDER{border-left:3px solid var(--re)}
@@ -209,7 +217,7 @@ body{background:var(--bg);color:var(--tx);font-family:'Segoe UI',system-ui,sans-
 .pf-prob{font-size:.9rem;font-weight:900;color:var(--gr)}.pf-odds{font-size:.85rem;font-weight:800;color:var(--pu)}.pf-lbl{font-size:9px;color:var(--mt)}
 
 /* ── SCHEDULE ── */
-.sched-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:8px}
+.sched-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(220px,100%),1fr));gap:8px}
 .sc-card{background:var(--sur);border:1px solid var(--bd);border-radius:var(--rl);padding:12px 14px;border-left:3px solid var(--bd2)}
 .sc-card.mlb{border-left-color:var(--bl)}.sc-card.soccer{border-left-color:var(--gr)}
 .sc-head{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px}
@@ -254,12 +262,98 @@ body{background:var(--bg);color:var(--tx);font-family:'Segoe UI',system-ui,sans-
 ::-webkit-scrollbar-thumb{background:var(--mt2);border-radius:3px}
 
 /* ── RESPONSIVE ── */
-@media(max-width:640px){
+/* ── RESPONSIVE – mobile-first ─────────────────────── */
+
+/* Extra-small (< 480px) */
+@media(max-width:480px){
+  .page{padding:8px 8px 76px;padding-bottom:calc(76px + env(safe-area-inset-bottom))}
+  .hdr{flex-direction:column;align-items:flex-start;gap:8px;margin-bottom:12px;padding-bottom:10px}
+  .brand{gap:8px}
+  .logo{width:36px;height:36px;border-radius:9px;font-size:18px}
+  .brand-text h1{font-size:1.1rem}
+  .brand-text p{font-size:10px}
+  .hdr-right{width:100%;justify-content:space-between}
+  .status-pill{font-size:10px;padding:4px 9px}
+  .run-btn{padding:8px 16px;font-size:12px;flex:1;text-align:center}
+  .console-btn{padding:6px 10px;font-size:10px}
+
+  /* Tabs: horizontal scroll, no wrap */
+  .tabs{gap:0;flex-wrap:nowrap;overflow-x:auto;-webkit-overflow-scrolling:touch;padding-bottom:0;
+        scrollbar-width:none;border-bottom-color:var(--bd)}
+  .tabs::-webkit-scrollbar{display:none}
+  .tab{padding:8px 12px;font-size:11px;flex-shrink:0;white-space:nowrap}
+  .tab-cnt{display:none}
+
+  /* Grids: single column */
+  .pick-grid,.prop-grid,.sched-grid{grid-template-columns:1fr;gap:8px}
+  .ltab-panel.on{grid-template-columns:1fr;gap:8px}
+
+  /* Cards: tighter padding */
+  .pc-header{padding:10px 12px 0}
+  .pc-pick{margin:0 12px 8px;padding:10px}
+  .pc-stats{grid-template-columns:repeat(3,1fr);padding:0 12px 10px;gap:4px}
+  .ps-chip{padding:5px 6px}
+  .ps-val{font-size:.82rem}
+  .pc-footer{padding:7px 12px}
+  .conf-bar{margin:0 12px 6px}
+
+  .prp-header{padding:10px 12px 7px}
+  .prp-rec{margin:0 12px 8px}
+  .prp-stats,.prp-stats-4{padding:0 12px 8px;gap:3px}
+  .prp-bar{padding:0 12px 8px}
+
+  /* Filter panel: more compact */
+  #prop-filter-panel{padding:8px 10px 6px;gap:4px}
+  .pfilt-row-lbl{min-width:58px;font-size:8px}
+  .fbtn{padding:3px 9px;font-size:10px}
+
+  /* Progress chips: hide on very small */
+  .phase-chips{display:none}
+
+  /* Parlays */
+  .parl-card{padding:12px}
+  .parlay-leg-tabs{gap:3px}
+  .ltab{padding:4px 10px;font-size:10px}
+
+  /* Console */
+  .console-body{max-height:200px;font-size:10px}
+  .console-pull{padding:6px 12px}
+
+  /* Schedule */
+  .sc-card{padding:10px 12px}
+}
+
+/* Small (481–640px) */
+@media(min-width:481px) and (max-width:640px){
+  .page{padding:10px 10px 76px}
+  .hdr{flex-direction:column;align-items:flex-start;gap:8px}
+  .hdr-right{width:100%}
   .pick-grid,.prop-grid{grid-template-columns:1fr}
-  .sched-grid{grid-template-columns:1fr}
-  .hdr{flex-direction:column;align-items:flex-start}
-  .tabs{gap:2px}.tab{padding:7px 12px;font-size:11px}
+  .sched-grid{grid-template-columns:repeat(auto-fill,minmax(240px,1fr))}
   .ltab-panel.on{grid-template-columns:1fr}
+  .tabs{flex-wrap:nowrap;overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none}
+  .tabs::-webkit-scrollbar{display:none}
+  .tab{flex-shrink:0}
+  .phase-chips{flex-wrap:wrap}
+}
+
+/* Medium (641–900px) */
+@media(min-width:641px) and (max-width:900px){
+  .pick-grid,.prop-grid{grid-template-columns:repeat(auto-fill,minmax(270px,1fr))}
+  .sched-grid{grid-template-columns:repeat(auto-fill,minmax(210px,1fr))}
+  .ltab-panel.on{grid-template-columns:repeat(auto-fill,minmax(260px,1fr))}
+}
+
+/* Touch hover fix */
+@media(hover:none){
+  .pick-card:hover,.prop-card:hover{transform:none;box-shadow:none}
+  .run-btn:hover{opacity:1;transform:none}
+}
+
+/* Safe area for notched phones */
+@supports(padding-bottom:env(safe-area-inset-bottom)){
+  .console-wrap{padding-bottom:env(safe-area-inset-bottom)}
+  .page{padding-left:max(12px,env(safe-area-inset-left));padding-right:max(12px,env(safe-area-inset-right))}
 }
 
 /* ════════════════════════════════════════════════════

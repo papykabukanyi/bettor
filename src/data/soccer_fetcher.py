@@ -164,15 +164,52 @@ _FDORG_LEAGUE_MAP = {
     "MLS": "MLS",    # MLS
 }
 
+# Circuit-breaker: set to True after first timeout to skip subsequent calls
+_FDORG_BLOCKED   = False
+_FDORG_FAIL_TS   = 0.0
+_FDORG_COOLDOWN  = 300   # seconds before retrying after a timeout
+
+def _fdorg_available() -> bool:
+    """Return True if football-data.org appears reachable (circuit-breaker check)."""
+    global _FDORG_BLOCKED, _FDORG_FAIL_TS
+    if not _FDORG_BLOCKED:
+        return True
+    if time.time() - _FDORG_FAIL_TS > _FDORG_COOLDOWN:
+        _FDORG_BLOCKED = False   # cooldown expired – retry
+        return True
+    return False
+
+def _fdorg_mark_blocked():
+    global _FDORG_BLOCKED, _FDORG_FAIL_TS
+    _FDORG_BLOCKED = True
+    _FDORG_FAIL_TS = time.time()
+
+def _fdorg_get(url: str, headers: dict, timeout: int = 6):
+    """Wrapper around requests.get with short timeout + circuit-breaker."""
+    if not _fdorg_available():
+        raise RuntimeError("football-data.org circuit-breaker open")
+    try:
+        resp = requests.get(url, headers=headers, timeout=timeout)
+        return resp
+    except (requests.exceptions.ConnectTimeout,
+            requests.exceptions.ReadTimeout,
+            requests.exceptions.ConnectionError) as exc:
+        _fdorg_mark_blocked()
+        raise RuntimeError(f"football-data.org unreachable: {exc}") from exc
+
 
 def get_todays_fixtures(league_keys: list[str] | None = None) -> list[dict]:
     """
     Fetch today's soccer fixtures from football-data.org API.
     Requires FOOTBALL_DATA_API_KEY in .env (free registration).
-    Falls back to empty list if key not set.
+    Falls back to empty list if key not set or API is timing out.
     """
     if not FOOTBALL_DATA_API_KEY or FOOTBALL_DATA_API_KEY == "your_football_data_key_here":
         print("[soccer_fetcher] FOOTBALL_DATA_API_KEY not set – skipping live fixtures.")
+        return []
+
+    if not _fdorg_available():
+        print("[soccer_fetcher] football-data.org circuit-breaker open – skipping get_todays_fixtures")
         return []
 
     import datetime as _dt
@@ -190,11 +227,11 @@ def get_todays_fixtures(league_keys: list[str] | None = None) -> list[dict]:
             continue
         url = f"{FOOTBALL_DATA_BASE}/competitions/{comp_id}/matches?status=SCHEDULED"
         try:
-            resp = requests.get(url, headers=headers, timeout=10)
+            resp = _fdorg_get(url, headers)
             if resp.status_code == 429:
                 print("[soccer_fetcher] Rate limit hit – sleeping 12s")
                 time.sleep(12)
-                resp = requests.get(url, headers=headers, timeout=10)
+                resp = _fdorg_get(url, headers)
             resp.raise_for_status()
             data = resp.json()
             for m in data.get("matches", []):
@@ -224,18 +261,91 @@ def get_todays_fixtures(league_keys: list[str] | None = None) -> list[dict]:
             time.sleep(1)  # stay under 10 req/min
         except Exception as e:
             print(f"[soccer_fetcher] fixture fetch error for {lk}: {e}")
+            if "circuit-breaker" in str(e) or _FDORG_BLOCKED:
+                break   # stop looping; API is down
 
     _save_soccer_fixtures_to_db(fixtures)
     return [f for f in fixtures if f["date"] == today]   # only today for analysis
+
+
+# ---------------------------------------------------------------------------
+# Odds API fixture fallback (when football-data.org is unavailable)
+# ---------------------------------------------------------------------------
+_ODDS_SOCCER_SPORT_KEYS = {
+    "EPL": "soccer_epl",
+    "ESP": "soccer_spain_la_liga",
+    "GER": "soccer_germany_bundesliga",
+    "ITA": "soccer_italy_serie_a",
+    "FRA": "soccer_france_ligue_1",
+    "MLS": "soccer_usa_mls",
+}
+
+def _fixtures_range_from_odds() -> list[dict]:
+    """
+    Fallback: derive soccer fixture schedule from The Odds API event list.
+    Returns today+tomorrow fixtures in the same format as get_fixtures_range.
+    """
+    try:
+        from config import ODDS_API_KEY, ODDS_API_BASE
+    except Exception:
+        return []
+    if not ODDS_API_KEY:
+        return []
+
+    import datetime as _dt
+    today    = _et_today().isoformat()
+    tomorrow = (_et_today() + _dt.timedelta(days=1)).isoformat()
+    fixtures = []
+
+    for lk, sport_key in _ODDS_SOCCER_SPORT_KEYS.items():
+        try:
+            url = f"{ODDS_API_BASE}/sports/{sport_key}/events"
+            resp = requests.get(url, params={"apiKey": ODDS_API_KEY}, timeout=8)
+            if resp.status_code != 200:
+                continue
+            events = resp.json()
+            for ev in events:
+                ct = ev.get("commence_time", "")[:10]
+                if ct not in (today, tomorrow):
+                    continue
+                # Parse time to ET
+                game_time = None
+                try:
+                    import pytz
+                    utc_dt  = _dt.datetime.fromisoformat(ev["commence_time"].replace("Z", "+00:00"))
+                    eastern = pytz.timezone("America/New_York")
+                    local   = utc_dt.astimezone(eastern)
+                    game_time = local.strftime("%H:%M")
+                except Exception:
+                    pass
+                fixtures.append({
+                    "league":    lk,
+                    "sport":     "soccer",
+                    "date":      ct,
+                    "game_time": game_time,
+                    "home_team": ev.get("home_team", ""),
+                    "away_team": ev.get("away_team", ""),
+                    "match_id":  ev.get("id", ""),
+                    "status":    "SCHEDULED",
+                    "_source":   "odds_api",
+                })
+        except Exception as e:
+            print(f"[soccer_fetcher] _fixtures_range_from_odds {lk}: {e}")
+    return fixtures
 
 
 def get_fixtures_range(league_keys=None) -> list[dict]:
     """
     Return today + tomorrow fixtures (for the upcoming schedule view).
     Uses same API call as get_todays_fixtures but returns all dates.
+    Falls back to Odds API if football-data.org is unavailable.
     """
     if not FOOTBALL_DATA_API_KEY or FOOTBALL_DATA_API_KEY == "your_football_data_key_here":
         return []
+
+    if not _fdorg_available():
+        print("[soccer_fetcher] football-data.org circuit-breaker open – skipping get_fixtures_range")
+        return _fixtures_range_from_odds()
 
     import datetime as _dt
     import pytz
@@ -252,10 +362,10 @@ def get_fixtures_range(league_keys=None) -> list[dict]:
             continue
         url = f"{FOOTBALL_DATA_BASE}/competitions/{comp_id}/matches?status=SCHEDULED"
         try:
-            resp = requests.get(url, headers=headers, timeout=10)
+            resp = _fdorg_get(url, headers)
             if resp.status_code == 429:
                 time.sleep(12)
-                resp = requests.get(url, headers=headers, timeout=10)
+                resp = _fdorg_get(url, headers)
             resp.raise_for_status()
             data = resp.json()
             for m in data.get("matches", []):
@@ -284,7 +394,12 @@ def get_fixtures_range(league_keys=None) -> list[dict]:
             time.sleep(1)
         except Exception as e:
             print(f"[soccer_fetcher] fixture_range error for {lk}: {e}")
+            if "circuit-breaker" in str(e) or _FDORG_BLOCKED:
+                break   # API down – stop looping
 
+    if not fixtures:
+        print("[soccer_fetcher] get_fixtures_range: no data from football-data.org – falling back to Odds API")
+        fixtures = _fixtures_range_from_odds()
     return fixtures
 
 

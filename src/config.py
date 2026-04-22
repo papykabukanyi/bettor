@@ -11,8 +11,13 @@ load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 
 # API Keys
-ODDS_API_KEY = os.getenv("ODDS_API_KEY", "")
+ODDS_API_KEY          = os.getenv("ODDS_API_KEY", "")
 FOOTBALL_DATA_API_KEY = os.getenv("FOOTBALL_DATA_API_KEY", "")
+NEWS_API_KEY          = os.getenv("NEWS_API_KEY", "")
+BALLDONTLIE_API_KEY   = os.getenv("BALLDONTLIE_API_KEY", "")
+RAPIDAPI_KEY          = os.getenv("RAPIDAPI_KEY", "")
+THESPORTSDB_API_KEY   = os.getenv("THESPORTSDB_API_KEY", "1")   # "1" = free tier
+SPORTSDATA_API_KEY    = os.getenv("SPORTSDATA_API_KEY", "")
 
 # Strategy settings
 MIN_VALUE_EDGE = float(os.getenv("MIN_VALUE_EDGE", "0.05"))

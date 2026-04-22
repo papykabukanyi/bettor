@@ -453,6 +453,44 @@ def _run_analysis():
         except Exception as e:
             _log(f"WARNING injuries skipped: {e}")
 
+        # ── Populate DB from all extended data sources (background-safe) ──
+        _log("Populating DB from extended sources (SportsData, BallDontLie, TheSportsDB)...")
+        try:
+            import threading as _t
+            def _populate_extended():
+                try:
+                    from data.sportsdata_fetcher import populate_mlb, populate_nba, populate_soccer
+                    populate_mlb()
+                    populate_nba()
+                    for _comp in [5, 12, 10, 11, 8]:
+                        try:
+                            populate_soccer(competition=_comp)
+                        except Exception:
+                            pass
+                except Exception as _e:
+                    print(f"[dashboard] sportsdata populate error: {_e}")
+                try:
+                    from data.balldontlie_fetcher import populate_db as _bdl_populate
+                    _bdl_populate()
+                except Exception as _e:
+                    print(f"[dashboard] balldontlie populate error: {_e}")
+                try:
+                    from data.thesportsdb_fetcher import populate_soccer_standings, populate_today_events
+                    populate_soccer_standings()
+                    populate_today_events("soccer")
+                except Exception as _e:
+                    print(f"[dashboard] thesportsdb populate error: {_e}")
+                try:
+                    from data.rapidapi_football_fetcher import populate_live_scores
+                    populate_live_scores()
+                except Exception as _e:
+                    print(f"[dashboard] rapidapi_football populate error: {_e}")
+            _t.Thread(target=_populate_extended, daemon=True).start()
+            _log("Extended data collection running in background...")
+        except Exception as _ext_e:
+            _log(f"Extended data collection skipped: {_ext_e}")
+
+
         _phase(4)
         _log("Fetching live odds...")
         from data.odds_fetcher import (get_live_odds, odds_to_dataframe,
@@ -478,6 +516,21 @@ def _run_analysis():
         win_bets = (find_value_bets(mlb_preds, sfilt(ml_df, True),  sport="mlb") +
                     find_value_bets(soccer_preds, sfilt(ml_df, False), sport="soccer"))
         _log(f"Team value bets: {len(win_bets)}")
+
+        # ── Enrich with multi-source news/form/injury signals ────────────
+        try:
+            from models.news_model import enrich_prediction
+            _log("Enriching predictions with news/form/injury signals...")
+            for b in win_bets:
+                pts  = (b.get("matchup") or "").split(" vs ")
+                ht   = pts[0] if len(pts) == 2 else ""
+                at   = pts[1] if len(pts) == 2 else ""
+                lk   = b.get("league", "")
+                sp   = b.get("sport", "mlb")
+                if ht and at:
+                    enrich_prediction(b, sport=sp, league=lk)
+        except Exception as _e:
+            _log(f"[news_model] skipped: {_e}")
 
         game_lookup = {(g["home_team"], g["away_team"]): g for g in games}
         for i, b in enumerate(win_bets):
