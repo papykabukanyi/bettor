@@ -623,23 +623,16 @@ function filterCards(grid, val, btn) {
 
 function filterProps(val, btn) {
   _setFilterBtn(btn.closest('.filter-bar'), btn);
-  const STAT_TYPES = ['strikeouts','hits','home_runs','total_bases'];
   document.querySelectorAll('#grid-props .prop-card').forEach(c => {
     if (val === 'all') { c.style.display = ''; return; }
-    const dir      = c.dataset.dir;
-    const safety   = c.dataset.safety;
-    const when     = c.dataset.when;
-    const stattype = c.dataset.stattype;
-    if (val === 'OVER' || val === 'UNDER')
-      c.style.display = dir === val ? '' : 'none';
-    else if (STAT_TYPES.includes(val))
-      c.style.display = stattype === val ? '' : 'none';
-    else if (val === 'ELITE')
-      c.style.display = safety === 'ELITE' ? '' : 'none';
-    else if (val === 'TODAY' || val === 'TOMORROW')
-      c.style.display = when === val ? '' : 'none';
-    else
-      c.style.display = '';
+    const dir    = c.dataset.dir;
+    const safety = c.dataset.safety;
+    const when   = c.dataset.when;
+    if (val === 'OVER' || val === 'UNDER')   c.style.display = dir === val ? '' : 'none';
+    else if (val === 'ELITE')  c.style.display = safety === 'ELITE' ? '' : 'none';
+    else if (val === 'SAFE')   c.style.display = ['ELITE','SAFE'].includes(safety) ? '' : 'none';
+    else if (val === 'TODAY' || val === 'TOMORROW') c.style.display = when === val ? '' : 'none';
+    else c.style.display = '';
   });
 }
 

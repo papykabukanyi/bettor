@@ -409,55 +409,20 @@ def _run_analysis():
         tomorrow_wins = [b for b in win_bets if b.get("date", "") == tomorrow]
 
         _phase(6)
-        _log("Analyzing player props (pitchers + hitters)...")
-        # ── Fetch real book player-prop lines (uses Odds API credits) ────
-        odds_lines: dict = {}   # {player_name: {market_key: {line, over_odds, under_odds}}}
-        try:
-            from data.odds_fetcher import get_player_props_odds
-            raw_lines = get_player_props_odds("mlb", max_events=15)
-            for ol in raw_lines:
-                pname = ol.get("player", "")
-                mkey  = ol.get("market", "")
-                if pname and mkey:
-                    odds_lines.setdefault(pname, {})[mkey] = {
-                        "line":       ol.get("line"),
-                        "over_odds":  ol.get("over_odds"),
-                        "under_odds": ol.get("under_odds"),
-                    }
-            _log(f"Real prop lines: {len(raw_lines)} from Odds API")
-        except Exception as _e:
-            _log(f"Prop odds skipped (non-critical): {_e}")
-
-        # ── Pitcher strikeout props ───────────────────────────────────────
-        pitcher_raw = get_starters_props_batch(today_games + tomorrow_games, MLB_SEASONS[0])
-        for i, p in enumerate(pitcher_raw): p["_id"] = f"prop_p_{i}"
-
-        # ── Hitter props (H, HR, Total Bases) ────────────────────────────
-        from data.mlb_fetcher import get_hitter_props_batch
-        hitter_raw = get_hitter_props_batch(today_games + tomorrow_games, MLB_SEASONS[0])
-        for i, p in enumerate(hitter_raw): p["_id"] = f"prop_h_{i}"
-        _log(f"Raw props: {len(pitcher_raw)} pitcher, {len(hitter_raw)} hitter")
-
-        # ── Attach game date/time and build display picks ─────────────────
-        prop_raw = pitcher_raw + hitter_raw
-        all_sched = today_games + tomorrow_games
-        for p in prop_raw:
-            for g in all_sched:
-                if (g.get("home_team", "") in p.get("game", "") or
-                        g.get("away_team", "") in p.get("game", "")):
-                    p["date"]      = g.get("date", today)
-                    p["game_time"] = g.get("game_time")
-                    break
-
-        # Confidence threshold: 0.52 for hitters (more prop variety), 0.54 for pitchers
+        _log("Analyzing player (pitcher) props...")
+        prop_raw = get_starters_props_batch(today_games + tomorrow_games, MLB_SEASONS[0])
+        for i, p in enumerate(prop_raw): p["_id"] = f"prop_{i}"
         player_props = []
         for p in prop_raw:
-            ov = float(p.get("over_prob", 0.5))
-            un = float(p.get("under_prob", 0.5))
-            thresh = 0.52 if p.get("stat_type", "strikeouts") != "strikeouts" else 0.54
-            if max(ov, un) >= thresh:
-                player_props.append(_build_prop_pick(p, today, tomorrow, odds_lines))
-
+            ov, un = float(p.get("over_prob", 0.5)), float(p.get("under_prob", 0.5))
+            if max(ov, un) >= 0.56:
+                for g in (today_games + tomorrow_games):
+                    if g.get("home_team", "") in (p.get("game", "")) or \
+                       g.get("away_team", "") in (p.get("game", "")):
+                        p["date"]      = g.get("date", today)
+                        p["game_time"] = g.get("game_time")
+                        break
+                player_props.append(_build_prop_pick(p, today, tomorrow))
         player_props.sort(key=lambda x: x["safety"], reverse=True)
         _log(f"Player props: {len(player_props)} qualifying picks")
 
@@ -473,7 +438,7 @@ def _run_analysis():
                       "dec_odds": p["dec_odds"], "conf": p["conf"], "safety": p["safety"]}
                      for p in (today_team + tomorrow_team)]
         prop_pool = [{"_id": p["_id"],
-                      "label": f"{p['name']} {p['direction']} {p['line']} {p.get('prop_label', 'Ks')}",
+                      "label": f"{p['name']} {p['direction']} {p['line']} Ks",
                       "dec_odds": p["dec_odds"], "conf": p["conf"], "safety": p["safety"]}
                      for p in player_props]
 

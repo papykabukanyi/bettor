@@ -473,7 +473,7 @@ def _run_analysis():
                       "dec_odds": p["dec_odds"], "conf": p["conf"], "safety": p["safety"]}
                      for p in (today_team + tomorrow_team)]
         prop_pool = [{"_id": p["_id"],
-                      "label": f"{p['name']} {p['direction']} {p['line']} {p.get('prop_label', 'Ks')}",
+                      "label": f"{p['name']} {p['direction']} {p['line']} Ks",
                       "dec_odds": p["dec_odds"], "conf": p["conf"], "safety": p["safety"]}
                      for p in player_props]
 

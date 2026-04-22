@@ -130,33 +130,94 @@ def _build_team_pick(bet, today, tomorrow):
     }
 
 
-def _build_prop_pick(p, today, tomorrow):
+def _build_prop_pick(p, today, tomorrow, odds_lines: dict | None = None):
+    """
+    Build a unified prop pick dict for display.
+    Handles both pitcher props (strikeouts) and hitter props (hits, HR, total_bases).
+    odds_lines: optional dict {player_name: {market: {line, over_odds, under_odds}}}
+                from The Odds API — used to replace estimated lines with real book lines.
+    """
     ov, un    = float(p.get("over_prob", 0.5)), float(p.get("under_prob", 0.5))
+    stat_type = p.get("stat_type", "strikeouts")
     direction = "OVER" if ov >= un else "UNDER"
     conf      = round(max(ov, un) * 100)
-    dec_odds  = round(1.0 / max(ov, un), 3) if max(ov, un) > 0 else 2.0
-    safety    = _safety_score(max(ov, un), max(ov, un) - 0.5)
+
+    # Map stat_type to readable labels
+    _PROP_LABELS = {
+        "strikeouts":   "Pitcher Strikeouts",
+        "hits":         "Batter Hits",
+        "home_runs":    "Batter Home Runs",
+        "total_bases":  "Total Bases",
+    }
+    _MARKET_MAP = {
+        "strikeouts":   "pitcher_strikeouts",
+        "hits":         "batter_hits",
+        "home_runs":    "batter_home_runs",
+        "total_bases":  "batter_total_bases",
+    }
+
+    prop_label = _PROP_LABELS.get(stat_type, stat_type.replace("_", " ").title())
+    line       = p.get("line", "?")
+
+    # If we have real book odds, use their line and recalculate confidence
+    real_over_odds  = None
+    real_under_odds = None
+    if odds_lines:
+        pname   = p.get("name", "")
+        mkey    = _MARKET_MAP.get(stat_type, "")
+        pdata   = odds_lines.get(pname, {}).get(mkey, {})
+        if pdata:
+            line            = pdata.get("line", line)
+            real_over_odds  = pdata.get("over_odds")
+            real_under_odds = pdata.get("under_odds")
+
+    # Dec odds: from real book if available, else estimated
+    if real_over_odds and direction == "OVER":
+        dec_odds = round((real_over_odds / 100 + 1) if real_over_odds > 0
+                         else (100 / abs(real_over_odds) + 1), 3)
+    elif real_under_odds and direction == "UNDER":
+        dec_odds = round((real_under_odds / 100 + 1) if real_under_odds > 0
+                         else (100 / abs(real_under_odds) + 1), 3)
+    else:
+        dec_odds = round(1.0 / max(ov, un), 3) if max(ov, un) > 0 else 2.0
+
+    edge   = max(ov, un) - 0.5
+    safety = _safety_score(max(ov, un), edge)
     when, when_label = _when_str(p.get("date", today), p.get("game_time"), "", today, tomorrow)
+
     return {
         "_id":          p.get("_id", ""),
         "name":         p.get("name", ""),
         "team":         p.get("team", ""),
         "game":         p.get("game", ""),
-        "prop_type":    "Pitcher Strikeouts",
+        "stat_type":    stat_type,
+        "prop_label":   prop_label,
         "direction":    direction,
-        "line":         p.get("line", "?"),
+        "line":         line,
         "conf":         conf,
         "safety":       safety,
         "safety_label": _safety_label(safety),
         "dec_odds":     dec_odds,
         "when":         when,
         "when_label":   when_label,
-        "era":          round(float(p.get("era", 0)), 2),
-        "k9":           round(float(p.get("k9", 0)), 1),
+        # pitcher-specific
+        "era":          round(float(p.get("era",  0)), 2),
+        "xfip":         round(float(p.get("xfip", p.get("era", 0))), 2),
+        "k9":           round(float(p.get("k9",   0)), 1),
+        "k_pct":        round(float(p.get("k_pct",0)), 1),
         "whip":         round(float(p.get("whip", 0)), 2),
         "avg_ks":       round(float(p.get("avg_per_game", 0)), 1),
+        # hitter-specific
+        "avg":          round(float(p.get("avg",      0)), 3),
+        "ops":          round(float(p.get("ops",      0)), 3),
+        "wrc_plus":     round(float(p.get("wrc_plus", 0))),
+        "avg_per_game": round(float(p.get("avg_per_game", 0)), 2),
         "over_pct":     round(ov * 100),
         "under_pct":    round(un * 100),
+        # real odds from book
+        "over_odds_am":  real_over_odds,
+        "under_odds_am": real_under_odds,
+        "_source":       p.get("_source", ""),
     }
 
 
@@ -348,20 +409,55 @@ def _run_analysis():
         tomorrow_wins = [b for b in win_bets if b.get("date", "") == tomorrow]
 
         _phase(6)
-        _log("Analyzing player (pitcher) props...")
-        prop_raw = get_starters_props_batch(today_games + tomorrow_games, MLB_SEASONS[0])
-        for i, p in enumerate(prop_raw): p["_id"] = f"prop_{i}"
+        _log("Analyzing player props (pitchers + hitters)...")
+        # ── Fetch real book player-prop lines (uses Odds API credits) ────
+        odds_lines: dict = {}   # {player_name: {market_key: {line, over_odds, under_odds}}}
+        try:
+            from data.odds_fetcher import get_player_props_odds
+            raw_lines = get_player_props_odds("mlb", max_events=15)
+            for ol in raw_lines:
+                pname = ol.get("player", "")
+                mkey  = ol.get("market", "")
+                if pname and mkey:
+                    odds_lines.setdefault(pname, {})[mkey] = {
+                        "line":       ol.get("line"),
+                        "over_odds":  ol.get("over_odds"),
+                        "under_odds": ol.get("under_odds"),
+                    }
+            _log(f"Real prop lines: {len(raw_lines)} from Odds API")
+        except Exception as _e:
+            _log(f"Prop odds skipped (non-critical): {_e}")
+
+        # ── Pitcher strikeout props ───────────────────────────────────────
+        pitcher_raw = get_starters_props_batch(today_games + tomorrow_games, MLB_SEASONS[0])
+        for i, p in enumerate(pitcher_raw): p["_id"] = f"prop_p_{i}"
+
+        # ── Hitter props (H, HR, Total Bases) ────────────────────────────
+        from data.mlb_fetcher import get_hitter_props_batch
+        hitter_raw = get_hitter_props_batch(today_games + tomorrow_games, MLB_SEASONS[0])
+        for i, p in enumerate(hitter_raw): p["_id"] = f"prop_h_{i}"
+        _log(f"Raw props: {len(pitcher_raw)} pitcher, {len(hitter_raw)} hitter")
+
+        # ── Attach game date/time and build display picks ─────────────────
+        prop_raw = pitcher_raw + hitter_raw
+        all_sched = today_games + tomorrow_games
+        for p in prop_raw:
+            for g in all_sched:
+                if (g.get("home_team", "") in p.get("game", "") or
+                        g.get("away_team", "") in p.get("game", "")):
+                    p["date"]      = g.get("date", today)
+                    p["game_time"] = g.get("game_time")
+                    break
+
+        # Confidence threshold: 0.52 for hitters (more prop variety), 0.54 for pitchers
         player_props = []
         for p in prop_raw:
-            ov, un = float(p.get("over_prob", 0.5)), float(p.get("under_prob", 0.5))
-            if max(ov, un) >= 0.56:
-                for g in (today_games + tomorrow_games):
-                    if g.get("home_team", "") in (p.get("game", "")) or \
-                       g.get("away_team", "") in (p.get("game", "")):
-                        p["date"]      = g.get("date", today)
-                        p["game_time"] = g.get("game_time")
-                        break
-                player_props.append(_build_prop_pick(p, today, tomorrow))
+            ov = float(p.get("over_prob", 0.5))
+            un = float(p.get("under_prob", 0.5))
+            thresh = 0.52 if p.get("stat_type", "strikeouts") != "strikeouts" else 0.54
+            if max(ov, un) >= thresh:
+                player_props.append(_build_prop_pick(p, today, tomorrow, odds_lines))
+
         player_props.sort(key=lambda x: x["safety"], reverse=True)
         _log(f"Player props: {len(player_props)} qualifying picks")
 
@@ -377,7 +473,7 @@ def _run_analysis():
                       "dec_odds": p["dec_odds"], "conf": p["conf"], "safety": p["safety"]}
                      for p in (today_team + tomorrow_team)]
         prop_pool = [{"_id": p["_id"],
-                      "label": f"{p['name']} {p['direction']} {p['line']} Ks",
+                      "label": f"{p['name']} {p['direction']} {p['line']} {p.get('prop_label', 'Ks')}",
                       "dec_odds": p["dec_odds"], "conf": p["conf"], "safety": p["safety"]}
                      for p in player_props]
 

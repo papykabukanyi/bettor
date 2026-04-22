@@ -433,7 +433,7 @@ body{background:var(--bg);color:var(--tx);font-family:'Segoe UI',system-ui,sans-
   {% elif state.player_props %}
   <div class="prop-grid" id="grid-props">
     {% for p in state.player_props %}
-    <div class="prop-card {{ p.direction }}" data-dir="{{ p.direction }}" data-safety="{{ p.safety_label }}" data-when="{{ p.when_label }}" data-stattype="{{ p.stat_type or 'strikeouts' }}">
+    <div class="prop-card {{ p.direction }}" data-dir="{{ p.direction }}" data-safety="{{ p.safety_label }}" data-when="{{ p.when_label }}">
       <div class="prp-header">
         <div>
           <div class="prp-name">{{ p.name }}</div>
@@ -623,23 +623,16 @@ function filterCards(grid, val, btn) {
 
 function filterProps(val, btn) {
   _setFilterBtn(btn.closest('.filter-bar'), btn);
-  const STAT_TYPES = ['strikeouts','hits','home_runs','total_bases'];
   document.querySelectorAll('#grid-props .prop-card').forEach(c => {
     if (val === 'all') { c.style.display = ''; return; }
-    const dir      = c.dataset.dir;
-    const safety   = c.dataset.safety;
-    const when     = c.dataset.when;
-    const stattype = c.dataset.stattype;
-    if (val === 'OVER' || val === 'UNDER')
-      c.style.display = dir === val ? '' : 'none';
-    else if (STAT_TYPES.includes(val))
-      c.style.display = stattype === val ? '' : 'none';
-    else if (val === 'ELITE')
-      c.style.display = safety === 'ELITE' ? '' : 'none';
-    else if (val === 'TODAY' || val === 'TOMORROW')
-      c.style.display = when === val ? '' : 'none';
-    else
-      c.style.display = '';
+    const dir    = c.dataset.dir;
+    const safety = c.dataset.safety;
+    const when   = c.dataset.when;
+    if (val === 'OVER' || val === 'UNDER')   c.style.display = dir === val ? '' : 'none';
+    else if (val === 'ELITE')  c.style.display = safety === 'ELITE' ? '' : 'none';
+    else if (val === 'SAFE')   c.style.display = ['ELITE','SAFE'].includes(safety) ? '' : 'none';
+    else if (val === 'TODAY' || val === 'TOMORROW') c.style.display = when === val ? '' : 'none';
+    else c.style.display = '';
   });
 }
 
