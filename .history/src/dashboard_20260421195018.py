@@ -144,37 +144,16 @@ def _build_prop_pick(p, today, tomorrow, odds_lines: dict | None = None):
 
     # Map stat_type to readable labels
     _PROP_LABELS = {
-        # MLB pitcher
-        "strikeouts":         "Pitcher Strikeouts",
-        # MLB hitter
-        "hits":               "Batter Hits",
-        "home_runs":          "Batter Home Runs",
-        "total_bases":        "Total Bases",
-        "rbi":                "RBI",
-        "runs":               "Runs Scored",
-        "walks":              "Walks (BB)",
-        "stolen_bases":       "Stolen Bases",
-        "batter_strikeouts":  "Batter Strikeouts",
-        "doubles":            "Doubles (2B)",
-        # Soccer
-        "goals_scored":       "Goal Scored (Anytime)",
-        "assists":            "Assist",
-        "shots_total":        "Shots",
-        "shots_on_target":    "Shots on Target",
-        "goal_or_assist":     "Goal or Assist",
-        "cards":              "Carded (Yellow/Red)",
+        "strikeouts":   "Pitcher Strikeouts",
+        "hits":         "Batter Hits",
+        "home_runs":    "Batter Home Runs",
+        "total_bases":  "Total Bases",
     }
     _MARKET_MAP = {
-        "strikeouts":         "pitcher_strikeouts",
-        "hits":               "batter_hits",
-        "home_runs":          "batter_home_runs",
-        "total_bases":        "batter_total_bases",
-        "rbi":                "batter_rbis",
-        "runs":               "batter_runs_scored",
-        "walks":              "batter_walks",
-        "stolen_bases":       "batter_stolen_bases",
-        "batter_strikeouts":  "batter_strikeouts",
-        "doubles":            "batter_doubles",
+        "strikeouts":   "pitcher_strikeouts",
+        "hits":         "batter_hits",
+        "home_runs":    "batter_home_runs",
+        "total_bases":  "batter_total_bases",
     }
 
     prop_label = _PROP_LABELS.get(stat_type, stat_type.replace("_", " ").title())
@@ -211,8 +190,6 @@ def _build_prop_pick(p, today, tomorrow, odds_lines: dict | None = None):
         "name":         p.get("name", ""),
         "team":         p.get("team", ""),
         "game":         p.get("game", ""),
-        "sport":        p.get("sport", "mlb"),
-        "league":       p.get("league", ""),
         "stat_type":    stat_type,
         "prop_label":   prop_label,
         "direction":    direction,
@@ -235,13 +212,6 @@ def _build_prop_pick(p, today, tomorrow, odds_lines: dict | None = None):
         "ops":          round(float(p.get("ops",      0)), 3),
         "wrc_plus":     round(float(p.get("wrc_plus", 0))),
         "avg_per_game": round(float(p.get("avg_per_game", 0)), 2),
-        # soccer-specific
-        "xg":           round(float(p.get("xg",         0)), 2),
-        "xa":           round(float(p.get("xa",         0)), 2),
-        "goals_pg":     round(float(p.get("goals_pg",   0)), 3),
-        "assists_pg":   round(float(p.get("assists_pg", 0)), 3),
-        "card_pg":      round(float(p.get("card_pg",    0)), 3),
-        "mp":           round(float(p.get("mp",         0))),
         "over_pct":     round(ov * 100),
         "under_pct":    round(un * 100),
         # real odds from book

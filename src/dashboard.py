@@ -144,16 +144,37 @@ def _build_prop_pick(p, today, tomorrow, odds_lines: dict | None = None):
 
     # Map stat_type to readable labels
     _PROP_LABELS = {
-        "strikeouts":   "Pitcher Strikeouts",
-        "hits":         "Batter Hits",
-        "home_runs":    "Batter Home Runs",
-        "total_bases":  "Total Bases",
+        # MLB pitcher
+        "strikeouts":         "Pitcher Strikeouts",
+        # MLB hitter
+        "hits":               "Batter Hits",
+        "home_runs":          "Batter Home Runs",
+        "total_bases":        "Total Bases",
+        "rbi":                "RBI",
+        "runs":               "Runs Scored",
+        "walks":              "Walks (BB)",
+        "stolen_bases":       "Stolen Bases",
+        "batter_strikeouts":  "Batter Strikeouts",
+        "doubles":            "Doubles (2B)",
+        # Soccer
+        "goals_scored":       "Goal Scored (Anytime)",
+        "assists":            "Assist",
+        "shots_total":        "Shots",
+        "shots_on_target":    "Shots on Target",
+        "goal_or_assist":     "Goal or Assist",
+        "cards":              "Carded (Yellow/Red)",
     }
     _MARKET_MAP = {
-        "strikeouts":   "pitcher_strikeouts",
-        "hits":         "batter_hits",
-        "home_runs":    "batter_home_runs",
-        "total_bases":  "batter_total_bases",
+        "strikeouts":         "pitcher_strikeouts",
+        "hits":               "batter_hits",
+        "home_runs":          "batter_home_runs",
+        "total_bases":        "batter_total_bases",
+        "rbi":                "batter_rbis",
+        "runs":               "batter_runs_scored",
+        "walks":              "batter_walks",
+        "stolen_bases":       "batter_stolen_bases",
+        "batter_strikeouts":  "batter_strikeouts",
+        "doubles":            "batter_doubles",
     }
 
     prop_label = _PROP_LABELS.get(stat_type, stat_type.replace("_", " ").title())
@@ -190,6 +211,8 @@ def _build_prop_pick(p, today, tomorrow, odds_lines: dict | None = None):
         "name":         p.get("name", ""),
         "team":         p.get("team", ""),
         "game":         p.get("game", ""),
+        "sport":        p.get("sport", "mlb"),
+        "league":       p.get("league", ""),
         "stat_type":    stat_type,
         "prop_label":   prop_label,
         "direction":    direction,
@@ -212,6 +235,13 @@ def _build_prop_pick(p, today, tomorrow, odds_lines: dict | None = None):
         "ops":          round(float(p.get("ops",      0)), 3),
         "wrc_plus":     round(float(p.get("wrc_plus", 0))),
         "avg_per_game": round(float(p.get("avg_per_game", 0)), 2),
+        # soccer-specific
+        "xg":           round(float(p.get("xg",         0)), 2),
+        "xa":           round(float(p.get("xa",         0)), 2),
+        "goals_pg":     round(float(p.get("goals_pg",   0)), 3),
+        "assists_pg":   round(float(p.get("assists_pg", 0)), 3),
+        "card_pg":      round(float(p.get("card_pg",    0)), 3),
+        "mp":           round(float(p.get("mp",         0))),
         "over_pct":     round(ov * 100),
         "under_pct":    round(un * 100),
         # real odds from book
@@ -409,7 +439,7 @@ def _run_analysis():
         tomorrow_wins = [b for b in win_bets if b.get("date", "") == tomorrow]
 
         _phase(6)
-        _log("Analyzing player props (pitchers + hitters)...")
+        _log("Analyzing player props (MLB pitchers + hitters + soccer)...")
         # ── Fetch real book player-prop lines (uses Odds API credits) ────
         odds_lines: dict = {}   # {player_name: {market_key: {line, over_odds, under_odds}}}
         try:
@@ -428,20 +458,43 @@ def _run_analysis():
         except Exception as _e:
             _log(f"Prop odds skipped (non-critical): {_e}")
 
-        # ── Pitcher strikeout props ───────────────────────────────────────
+        # ── MLB Pitcher strikeout props ───────────────────────────────────
         pitcher_raw = get_starters_props_batch(today_games + tomorrow_games, MLB_SEASONS[0])
         for i, p in enumerate(pitcher_raw): p["_id"] = f"prop_p_{i}"
 
-        # ── Hitter props (H, HR, Total Bases) ────────────────────────────
+        # ── MLB Hitter props (H, HR, TB, RBI, R, BB, SB, K, 2B) ─────────
         from data.mlb_fetcher import get_hitter_props_batch
         hitter_raw = get_hitter_props_batch(today_games + tomorrow_games, MLB_SEASONS[0])
         for i, p in enumerate(hitter_raw): p["_id"] = f"prop_h_{i}"
-        _log(f"Raw props: {len(pitcher_raw)} pitcher, {len(hitter_raw)} hitter")
+
+        # ── Soccer player props (goals, assists, shots, cards, G+A) ──────
+        soccer_props_raw: list[dict] = []
+        try:
+            from data.soccer_fetcher import get_soccer_player_props_batch, get_fixtures_range
+            import datetime as _sdt
+            _cur_year = _sdt.date.today().year
+            _soccer_season = f"{_cur_year - 1}-{_cur_year}"
+            # Use today+tomorrow range; fallback to today-only fixtures
+            try:
+                _all_soccer_fixtures = get_fixtures_range(["EPL", "ESP", "GER"])
+            except Exception:
+                _all_soccer_fixtures = fixtures  # today only
+            soccer_props_raw = get_soccer_player_props_batch(
+                _all_soccer_fixtures,
+                season=_soccer_season,
+            )
+            for i, p in enumerate(soccer_props_raw):
+                p["_id"] = f"prop_s_{i}"
+        except Exception as _se:
+            _log(f"Soccer props skipped (non-critical): {_se}")
+
+        _log(f"Raw props: {len(pitcher_raw)} pitcher, {len(hitter_raw)} hitter, "
+             f"{len(soccer_props_raw)} soccer")
 
         # ── Attach game date/time and build display picks ─────────────────
-        prop_raw = pitcher_raw + hitter_raw
+        mlb_raw   = pitcher_raw + hitter_raw
         all_sched = today_games + tomorrow_games
-        for p in prop_raw:
+        for p in mlb_raw:
             for g in all_sched:
                 if (g.get("home_team", "") in p.get("game", "") or
                         g.get("away_team", "") in p.get("game", "")):
@@ -449,12 +502,22 @@ def _run_analysis():
                     p["game_time"] = g.get("game_time")
                     break
 
-        # Confidence threshold: 0.52 for hitters (more prop variety), 0.54 for pitchers
+        # Soccer props already have date/game_time from fixture
+        prop_raw = mlb_raw + soccer_props_raw
+
+        # Confidence thresholds per sport/stat
         player_props = []
         for p in prop_raw:
             ov = float(p.get("over_prob", 0.5))
             un = float(p.get("under_prob", 0.5))
-            thresh = 0.52 if p.get("stat_type", "strikeouts") != "strikeouts" else 0.54
+            st = p.get("stat_type", "strikeouts")
+            sp = p.get("sport", "mlb")
+            if sp == "soccer":
+                thresh = 0.60   # stricter for soccer (binomial near-certainty props)
+            elif st == "strikeouts":
+                thresh = 0.54
+            else:
+                thresh = 0.52
             if max(ov, un) >= thresh:
                 player_props.append(_build_prop_pick(p, today, tomorrow, odds_lines))
 

@@ -593,8 +593,6 @@ def get_hitter_props_batch(games: list[dict], season: int) -> list[dict]:
         if not fg_df.empty:
             print(f"[mlb_fetcher] FanGraphs batting: {len(fg_df)} batters (season {s})")
             break
-        if _FANGRAPHS_BLOCKED:
-            break  # 403 hit — skip remaining seasons immediately
 
     if fg_df.empty and PYBASEBALL_OK:
         fg_df, _ = _load_bref_season(pb.batting_stats_bref, fallback_seasons)
@@ -653,31 +651,10 @@ def get_hitter_props_batch(games: list[dict], season: int) -> list[dict]:
                 ops   = float(row.get("OPS",  0) or 0)
                 wrc   = float(row.get("wRC+", 0) or 0)
 
-                rbi  = float(row.get("RBI", 0) or 0)
-                bb   = float(row.get("BB",  0) or 0)
-                r    = float(row.get("R",   0) or 0)
-                sb   = float(row.get("SB",  0) or 0)
-                so   = float(row.get("SO",  0) or 0)  # batter strikeouts
-                rbi_pg = rbi / _g
-                bb_pg  = bb  / _g
-                r_pg   = r   / _g
-                sb_pg  = sb  / _g
-                so_pg  = so  / _g
-                # 2B/game for doubles prop
-                d2b_pg = d2  / _g
-
-                # (stat_type, per-game mean, sportsbook line, std dev)
-                # Lines match typical DraftKings / FanDuel offerings
                 for prop_type, mean_val, line, std in [
-                    ("hits",             h_pg,   0.5,  0.65),
-                    ("home_runs",        hr_pg,  0.5,  0.22),
-                    ("total_bases",      tb_pg,  1.5,  1.05),
-                    ("rbi",              rbi_pg, 0.5,  0.72),
-                    ("runs",             r_pg,   0.5,  0.66),
-                    ("walks",            bb_pg,  0.5,  0.48),
-                    ("stolen_bases",     sb_pg,  0.5,  0.28),
-                    ("batter_strikeouts",so_pg,  0.5,  0.95),
-                    ("doubles",          d2b_pg, 0.5,  0.44),
+                    ("hits",        h_pg,  0.5,  0.65),
+                    ("home_runs",   hr_pg, 0.5,  0.22),
+                    ("total_bases", tb_pg, 1.5,  1.05),
                 ]:
                     over_p  = float(scipy_stats.norm.sf(line, loc=mean_val, scale=std))
                     under_p = 1.0 - over_p
@@ -732,8 +709,6 @@ def get_starters_props_batch(games: list[dict], season: int) -> list[dict]:
             combined_df = df
             print(f"[mlb_fetcher] FanGraphs pitching: {len(df)} pitchers (season {s})")
             break
-        if _FANGRAPHS_BLOCKED:
-            break  # 403 hit — skip remaining seasons immediately
 
     # ── Layer 2: Baseball Reference fallback ──────────────────────────────
     if combined_df.empty and PYBASEBALL_OK:
