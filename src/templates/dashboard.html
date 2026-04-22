@@ -278,7 +278,7 @@ body{background:var(--bg);color:var(--tx);font-family:'Segoe UI',system-ui,sans-
   </button>
   <button class="tab" onclick="showTab('parlays',this)">
     🔗 Parlays
-    <span class="tab-cnt">{{ (state.prop_parlays.values()|sum(attribute='__len__') if state.prop_parlays else 0) + (state.team_parlays.values()|sum(attribute='__len__') if state.team_parlays else 0) }}</span>
+    <span class="tab-cnt">{{ (state.prop_parlays.values()|map('length')|sum if state.prop_parlays else 0) + (state.team_parlays.values()|map('length')|sum if state.team_parlays else 0) }}</span>
   </button>
   <button class="tab" onclick="showTab('schedule',this)">
     📋 Schedule
