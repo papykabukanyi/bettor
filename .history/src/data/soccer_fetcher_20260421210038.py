@@ -506,22 +506,6 @@ def get_soccer_player_props_batch(
 
         # ── FBRef scrape (only if not cached) ──────────────────────────────
         df = _fbref_standard_stats(lk, season)
-        # Merge shooting stats to get real shot counts
-        if not df.empty and not _FBREF_BLOCKED:
-            try:
-                time.sleep(1)
-                sh_df = _fbref_shooting_stats(lk, season)
-                if not sh_df.empty:
-                    sh_key = next((c for c in ("player", "Player") if c in sh_df.columns), None)
-                    df_key = next((c for c in ("player", "Player") if c in df.columns), None)
-                    if sh_key and df_key:
-                        sh_df = sh_df.rename(columns={sh_key: df_key})
-                        # bring in sh (shots), sot (shots on target) columns
-                        sh_cols = [df_key] + [c for c in sh_df.columns if c in ("sh", "sot", "sh_90", "sot_90", "npxg_per_sh")]
-                        df = df.merge(sh_df[sh_cols], on=df_key, how="left")
-                        print(f"[soccer_fetcher] Merged shooting stats for {lk}")
-            except Exception as _sher:
-                print(f"[soccer_fetcher] Shooting merge skipped ({lk}): {_sher}")
         if not df.empty:
             std_frames.append(df)
             print(f"[soccer_fetcher] FBRef standard stats: {len(df)} players ({lk} {season})")
@@ -560,9 +544,6 @@ def get_soccer_player_props_batch(
     col_xa       = _col(combined, "xa", "xag", "expected_xa", "expected_xag")
     col_yc       = _col(combined, "crdy", "yellow_cards", "performance_crdy")
     col_rc       = _col(combined, "crdr", "red_cards",    "performance_crdr")
-    # Real shot columns (present after shooting merge)
-    col_sh       = _col(combined, "sh", "sh_x", "standard_sh")
-    col_sot      = _col(combined, "sot", "sot_x", "standard_sot")
 
     required = [col_player, col_squad, col_mp, col_goals]
     if any(c is None for c in required):
@@ -594,9 +575,6 @@ def get_soccer_player_props_batch(
         xa     = _flt(row, col_xa)
         yc     = _flt(row, col_yc)
         rc     = _flt(row, col_rc)
-        # Real shot stats (from merged shooting table, or xG-based estimate)
-        real_sh  = _flt(row, col_sh)  if col_sh  else 0.0
-        real_sot = _flt(row, col_sot) if col_sot else 0.0
 
         # Per-game rates (use xG as better predictor when available)
         goal_rate  = (xg if xg > 0 else goals) / mp
@@ -627,8 +605,8 @@ def get_soccer_player_props_batch(
             continue
         seen.add(key)
 
-        # Minimum games played filter — lowered to 3 so early-season players qualify
-        if mp < 3:
+        # Minimum games played filter
+        if mp < 5:
             continue
 
         # ── Poisson probabilities ─────────────────────────────────────────
@@ -664,15 +642,10 @@ def get_soccer_player_props_batch(
             ("goal_or_assist",  goa_rate  * min_ratio,  0.5,  True,  0.0),
             ("cards",           card_rate,              0.5,  True,  0.0),
         ]
-        # Use real shot counts if available, fall back to xG-based estimate
-        if real_sh > 0:
-            sh_rate  = real_sh  / mp
-            sot_rate = real_sot / mp if real_sot > 0 else sh_rate * 0.40
-        else:
-            sh_rate  = xg / 0.096 if xg > 0 else 0.0  # ~9.6% conversion
-            sot_rate = sh_rate * 0.40
-        # Always add shots props if player has any shot history
-        if sh_rate > 0:
+        # Add shots if FBRef shooting data is merged later (placeholder via xG proxy)
+        sh_rate  = xg / 0.096 if xg > 0 else 0.0  # ~9.6% shot conversion
+        sot_rate = sh_rate * 0.40  # ~40% of shots on target
+        if sh_rate > 0.5:
             base_props += [
                 ("shots_total",      sh_rate  * min_ratio, 1.5, False, 1.2),
                 ("shots_on_target",  sot_rate * min_ratio, 0.5, False, 0.7),

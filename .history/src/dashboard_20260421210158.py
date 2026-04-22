@@ -502,13 +502,7 @@ def _run_analysis():
         odds_lines: dict = {}   # {player_name: {market_key: {line, over_odds, under_odds}}}
         try:
             from data.odds_fetcher import get_player_props_odds
-            _all_mlb_markets = (
-                "pitcher_strikeouts,"
-                "batter_hits,batter_home_runs,batter_total_bases,"
-                "batter_rbis,batter_runs_scored,batter_walks,"
-                "batter_stolen_bases,batter_strikeouts,batter_doubles"
-            )
-            raw_lines = get_player_props_odds("mlb", markets=_all_mlb_markets, max_events=15)
+            raw_lines = get_player_props_odds("mlb", max_events=15)
             for ol in raw_lines:
                 pname = ol.get("player", "")
                 mkey  = ol.get("market", "")
@@ -535,31 +529,21 @@ def _run_analysis():
         for i, p in enumerate(hitter_raw): p["_id"] = f"prop_h_{i}"
 
         # ── Soccer player props (goals, assists, shots, cards, G+A) ──────
-        # Primary: FBRef scrape → Fallback: The Odds API soccer player props
         soccer_props_raw: list[dict] = []
         try:
-            from data.soccer_fetcher import (get_soccer_player_props_batch,
-                                              get_fixtures_range, _FBREF_BLOCKED)
+            from data.soccer_fetcher import get_soccer_player_props_batch, get_fixtures_range
             import datetime as _sdt
             _cur_year = _sdt.date.today().year
             _soccer_season = f"{_cur_year - 1}-{_cur_year}"
-            if not _FBREF_BLOCKED:
-                try:
-                    _all_soccer_fixtures = get_fixtures_range(["EPL", "ESP", "GER"])
-                except Exception:
-                    _all_soccer_fixtures = fixtures
-                soccer_props_raw = get_soccer_player_props_batch(
-                    _all_soccer_fixtures,
-                    season=_soccer_season,
-                )
-            if not soccer_props_raw:
-                # FBRef blocked or returned nothing — use The Odds API directly
-                _log("FBRef player stats unavailable — fetching soccer props from Odds API")
-                from data.odds_fetcher import get_soccer_player_props_from_odds
-                soccer_props_raw = get_soccer_player_props_from_odds(
-                    league_keys=["EPL", "ESP", "GER"],
-                    max_events_per_league=4,
-                )
+            # Use today+tomorrow range; fallback to today-only fixtures
+            try:
+                _all_soccer_fixtures = get_fixtures_range(["EPL", "ESP", "GER"])
+            except Exception:
+                _all_soccer_fixtures = fixtures  # today only
+            soccer_props_raw = get_soccer_player_props_batch(
+                _all_soccer_fixtures,
+                season=_soccer_season,
+            )
             for i, p in enumerate(soccer_props_raw):
                 p["_id"] = f"prop_s_{i}"
         except Exception as _se:

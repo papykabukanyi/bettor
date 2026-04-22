@@ -502,13 +502,7 @@ def _run_analysis():
         odds_lines: dict = {}   # {player_name: {market_key: {line, over_odds, under_odds}}}
         try:
             from data.odds_fetcher import get_player_props_odds
-            _all_mlb_markets = (
-                "pitcher_strikeouts,"
-                "batter_hits,batter_home_runs,batter_total_bases,"
-                "batter_rbis,batter_runs_scored,batter_walks,"
-                "batter_stolen_bases,batter_strikeouts,batter_doubles"
-            )
-            raw_lines = get_player_props_odds("mlb", markets=_all_mlb_markets, max_events=15)
+            raw_lines = get_player_props_odds("mlb", max_events=15)
             for ol in raw_lines:
                 pname = ol.get("player", "")
                 mkey  = ol.get("market", "")
