@@ -751,15 +751,14 @@ function renderProps() {
     box.innerHTML = '<div class="empty"><span class="empty-icon">&#128100;</span><strong>No props match these filters</strong><p>Try adjusting the filters above.</p></div>';
     return;
   }
-  const hdrActMap = {conf:'Confidence &#8595;',safety:'Safety &#8595;',name:'Player &#8597;',sport:'Sport &#8597;',line:'Line &#8597;'};
-  const hdr = '<div class="props-table-hdr">' +
-    '<span></span>' +
-    '<span class="sort-lbl'+(_propSort==='name'?' act':'')+'" onclick="setPropSort('name',this)">Player &#8597;</span>' +
-    '<span class="sort-lbl'+(_propSort==='sport'?' act':'')+'" onclick="setPropSort('sport',this)">Prop Type &#8597;</span>' +
-    '<span>Direction / Line</span>' +
-    '<span class="sort-lbl'+(_propSort==='conf'?' act':'')+'" style="justify-content:flex-end" onclick="setPropSort('conf',this)">Conf &#8597;</span>' +
-    '<span style="text-align:right">Safety / When</span>' +
-    '</div>';
+  const hdr = `<div class="props-table-hdr">` +
+    `<span></span>` +
+    `<span class="sort-lbl${_propSort==='name'?' act':''}" onclick="setPropSort('name',this)">Player &#8597;</span>` +
+    `<span class="sort-lbl${_propSort==='sport'?' act':''}" onclick="setPropSort('sport',this)">Prop Type &#8597;</span>` +
+    `<span>Direction / Line</span>` +
+    `<span class="sort-lbl${_propSort==='conf'?' act':''}" style="justify-content:flex-end" onclick="setPropSort('conf',this)">Conf &#8597;</span>` +
+    `<span style="text-align:right">Safety / When</span>` +
+    `</div>`;
   box.innerHTML = '<div class="props-table">'+hdr+data.map(p => propRowHTML(p)).join('')+'</div>';
 }
 function propRowHTML(p) {
