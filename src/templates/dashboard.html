@@ -6,7 +6,7 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#070a10">
-<link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
 <title>Bettor</title>
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
@@ -278,7 +278,7 @@ body{background:var(--bg);color:var(--tx);font-family:"Segoe UI",system-ui,sans-
 <div id="splash">
   <div id="splash-particles"></div>
   <div class="splash-logo">B</div>
-  <div class="splash-title">Bettor</div>
+  <div class="splash-title">Bettor <em>AI</em></div>
   <div class="splash-sub" id="spl-sub">Initializing&nbsp;&middot;&nbsp;Loading your data&hellip;</div>
   <div class="splash-stages">
     <div class="spl-stage" id="sst-db"><div class="spl-stage-icon">&#9679;</div><span class="spl-stage-lbl">Connecting to database</span><span class="spl-stage-val" id="sst-db-val"></span></div>
@@ -302,9 +302,9 @@ body{background:var(--bg);color:var(--tx);font-family:"Segoe UI",system-ui,sans-
 <!-- HEADER -->
 <div class="hdr">
   <div class="brand">
-    <div class="logo">B</div>
+    <div class="logo">💰</div>
     <div class="brand-text">
-      <h1>Bettor <em>AI</em></h1>
+      <h1>Bettor</h1>
       <p id="lu">{% if state.last_updated %}Last updated {{ state.last_updated }}{% else %}Run analysis to get today's predictions{% endif %}</p>
     </div>
   </div>
