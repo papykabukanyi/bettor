@@ -1,4 +1,12 @@
-<!DOCTYPE html>
+"""Writes the new 5-tab dashboard HTML with player props, team props, filters, and sort."""
+import pathlib
+
+ROOT = pathlib.Path(__file__).parent.parent
+OUT  = ROOT / "src" / "templates" / "dashboard.html"
+
+# ── Build HTML in sections ────────────────────────────────────────────────────
+
+HEAD = """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -257,7 +265,9 @@ body{background:var(--bg);color:var(--tx);font-family:"Segoe UI",system-ui,sans-
 </style>
 </head>
 <body>
+"""
 
+SPLASH = """
 <!-- SPLASH -->
 <div id="splash">
   <div id="splash-particles"></div>
@@ -280,6 +290,10 @@ body{background:var(--bg);color:var(--tx);font-family:"Segoe UI",system-ui,sans-
     <div class="sdb-item"><div class="sdb-val" id="sdb-updated">&#8212;</div><div class="sdb-lbl">Updated</div></div>
   </div>
 </div>
+"""
+
+# Note: {{ }} below are Jinja2 template expressions — they stay as-is in the HTML file
+HEADER_AND_TABS = """\
 <!-- MAIN APP -->
 <div class="page" id="main-app" style="opacity:0;transition:opacity .5s ease">
 
@@ -320,6 +334,9 @@ body{background:var(--bg);color:var(--tx);font-family:"Segoe UI",system-ui,sans-
   <button class="tab" onclick="showTab('teamprops',this)">&#9876; Team Props <span class="tab-cnt" id="tab-teamprops-cnt">{{ (state.game_cards_today + state.game_cards_tomorrow)|length }}</span></button>
   <button class="tab" onclick="showTab('parlay',this)">&#128279; Best Parlay <span class="tab-cnt">{{ state.best_parlays|length }}</span></button>
 </div>
+"""
+
+MACRO_AND_TODAY = """\
 <!-- GAME CARD MACRO -->
 {% macro game_card(c) %}
 <div class="game-card {{ c.overall_safety_label }}{% if c.when_label == 'LIVE' %} LIVE-GAME{% endif %}" data-sport="{{ c.sport|lower }}" data-safety="{{ c.overall_safety_label }}">
@@ -448,6 +465,10 @@ body{background:var(--bg);color:var(--tx);font-family:"Segoe UI",system-ui,sans-
   <div class="empty"><span class="empty-icon">&#127749;</span><strong>No picks for tomorrow yet</strong><p>Run analysis to see tomorrow's game predictions.</p></div>
   {% endif %}
 </div>
+"""
+
+# Player Props tab — JS-rendered from embedded JSON
+PROPS_TAB = """\
 <!-- PLAYER PROPS TAB -->
 <div class="tab-panel" id="tab-props">
   <div class="filter-bar">
@@ -534,6 +555,9 @@ body{background:var(--bg);color:var(--tx);font-family:"Segoe UI",system-ui,sans-
     {% endif %}
   </div>
 </div>
+"""
+
+PARLAY_TAB = """\
 <!-- PARLAY TAB -->
 <div class="tab-panel" id="tab-parlay">
   {% if state.best_parlays %}
@@ -575,6 +599,9 @@ body{background:var(--bg);color:var(--tx);font-family:"Segoe UI",system-ui,sans-
 </div>
 
 </div><!-- /main-app -->
+"""
+
+CONSOLE = """\
 <!-- CONSOLE -->
 <div class="console-wrap" id="console-wrap">
   <div class="console-pull" onclick="toggleConsole()">
@@ -583,6 +610,10 @@ body{background:var(--bg);color:var(--tx);font-family:"Segoe UI",system-ui,sans-
   </div>
   <div class="console-body" id="console-body"><div id="clines"><div class="lg-empty">No logs yet.</div></div></div>
 </div>
+"""
+
+# JS — note: {{ }} below are Jinja2 expressions preserved as-is in the output file
+JS = """\
 <script>
 const STATUS = "{{ state.status }}";
 
@@ -660,7 +691,7 @@ function toggleConsole() {
   const w = document.getElementById('console-wrap');
   const tog = document.getElementById('ctog');
   const open = w.classList.toggle('open');
-  tog.textContent = open ? '\u25b4 Hide' : '\u25be Show';
+  tog.textContent = open ? '\\u25b4 Hide' : '\\u25be Show';
 }
 
 function appendLogs(data) {
@@ -670,8 +701,8 @@ function appendLogs(data) {
   data.logs.forEach(l => {
     const d = document.createElement('div');
     d.className = 'lg' + (l.includes('ERROR') ? ' err' : l.includes('WARNING') ? ' warn' :
-                          l.includes('===') ? ' phase' : l.includes('\u2713') ? ' ok' : '');
-    const m = l.match(/^\[(\d+:\d+:\d+)\]\s(.*)$/);
+                          l.includes('===') ? ' phase' : l.includes('\\u2713') ? ' ok' : '');
+    const m = l.match(/^\\[(\\d+:\\d+:\\d+)\\]\\s(.*)$/);
     d.innerHTML = m ? '<span class="ts">'+m[1]+'</span><span class="msg">'+m[2]+'</span>'
                     : '<span class="msg">'+l+'</span>';
     box.appendChild(d);
@@ -754,10 +785,10 @@ function renderProps() {
   const hdrActMap = {conf:'Confidence &#8595;',safety:'Safety &#8595;',name:'Player &#8597;',sport:'Sport &#8597;',line:'Line &#8597;'};
   const hdr = '<div class="props-table-hdr">' +
     '<span></span>' +
-    '<span class="sort-lbl'+(_propSort==='name'?' act':'')+'" onclick="setPropSort('name',this)">Player &#8597;</span>' +
-    '<span class="sort-lbl'+(_propSort==='sport'?' act':'')+'" onclick="setPropSort('sport',this)">Prop Type &#8597;</span>' +
+    '<span class="sort-lbl'+(_propSort==='name'?' act':'')+'" onclick="setPropSort(\'name\',this)">Player &#8597;</span>' +
+    '<span class="sort-lbl'+(_propSort==='sport'?' act':'')+'" onclick="setPropSort(\'sport\',this)">Prop Type &#8597;</span>' +
     '<span>Direction / Line</span>' +
-    '<span class="sort-lbl'+(_propSort==='conf'?' act':'')+'" style="justify-content:flex-end" onclick="setPropSort('conf',this)">Conf &#8597;</span>' +
+    '<span class="sort-lbl'+(_propSort==='conf'?' act':'')+'" style="justify-content:flex-end" onclick="setPropSort(\'conf\',this)">Conf &#8597;</span>' +
     '<span style="text-align:right">Safety / When</span>' +
     '</div>';
   box.innerHTML = '<div class="props-table">'+hdr+data.map(p => propRowHTML(p)).join('')+'</div>';
@@ -889,22 +920,22 @@ function teamPropCardHTML(c) {
   }
   try {
     setStage(0);
-    sub.textContent = 'Connecting to database\u2026';
+    sub.textContent = 'Connecting to database\\u2026';
     const data = await fetch('/api/cached-state').then(r => r.json());
-    setStage(1, '\u2713');
-    sub.textContent = "Loading today's games\u2026";
+    setStage(1, '\\u2713');
+    sub.textContent = "Loading today's games\\u2026";
     await new Promise(r => setTimeout(r, 300));
     setStage(2, data.db_stats?.total_games ? data.db_stats.total_games+' games' : '');
-    sub.textContent = 'Restoring cached picks\u2026';
+    sub.textContent = 'Restoring cached picks\\u2026';
     await new Promise(r => setTimeout(r, 300));
     const tp = (data.db_stats?.total_bets||0)+(data.db_stats?.total_props||0);
     setStage(3, tp ? tp+' picks' : '');
     if (data.has_cache) {
       const strip = document.getElementById('spl-db-strip');
-      document.getElementById('sdb-games').textContent   = data.db_stats?.total_games || '\u2014';
-      document.getElementById('sdb-bets').textContent    = tp || '\u2014';
+      document.getElementById('sdb-games').textContent   = data.db_stats?.total_games || '\\u2014';
+      document.getElementById('sdb-bets').textContent    = tp || '\\u2014';
       document.getElementById('sdb-updated').textContent = data.last_updated
-        ? data.last_updated.replace(/\d{4}-\d{2}-\d{2}\s/,'') : '\u2014';
+        ? data.last_updated.replace(/\\d{4}-\\d{2}-\\d{2}\\s/,'') : '\\u2014';
       strip.style.display = 'flex';
     }
     sub.textContent = 'Ready';
@@ -921,3 +952,10 @@ function teamPropCardHTML(c) {
 </script>
 </body>
 </html>
+"""
+
+HTML = HEAD + SPLASH + HEADER_AND_TABS + MACRO_AND_TODAY + PROPS_TAB + PARLAY_TAB + CONSOLE + JS
+
+OUT.write_text(HTML, encoding='utf-8')
+lines = HTML.count('\n')
+print(f"Written: {lines} lines  ->  {OUT}")
