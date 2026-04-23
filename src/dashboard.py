@@ -3,6 +3,14 @@ import os, sys, datetime, threading, traceback
 from collections import deque
 from flask import Flask, render_template, jsonify, request
 
+try:
+    import pytz
+    from apscheduler.schedulers.background import BackgroundScheduler
+    from apscheduler.triggers.cron import CronTrigger
+    _SCHEDULER_OK = True
+except ImportError:
+    _SCHEDULER_OK = False
+
 SRC_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SRC_DIR)
 from config import MIN_VALUE_EDGE, KELLY_FRACTION, MLB_SEASONS, et_today
@@ -1151,8 +1159,7 @@ def api_games():
         return jsonify([])
 
 
-@app.route("/api/cached-state")
-def api_cached_state():
+@app.route("/api/cached-state")def api_cached_state():
     """
     Return the last-saved bets + props from the database so the loading
     screen can show real data while the app warms up.
@@ -1246,3 +1253,115 @@ if __name__ == "__main__":
         print(f"[dashboard] DB init: {e}")
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Scheduled morning run (6 AM ET every day)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _morning_job():
+    """Full analysis + SMS blast at 6 AM ET."""
+    _log("[scheduler] 6 AM ET — starting daily analysis + SMS")
+    with _lock:
+        if _state["status"] == "running":
+            _log("[scheduler] Already running — skipping scheduled run")
+            return
+        _state["status"]    = "running"
+        _state["phase"]     = _PHASES[0]
+        _state["phase_idx"] = 0
+
+    def _run_and_notify():
+        _run_analysis()
+        try:
+            from sms import send_daily_picks_to_all
+            with _lock:
+                st = dict(_state)
+            result = send_daily_picks_to_all(st)
+            _log(f"[scheduler] SMS sent: {result.get('sent',0)} ok, "
+                 f"{result.get('failed',0)} failed")
+        except Exception as _e:
+            _log(f"[scheduler] SMS error: {_e}")
+
+    threading.Thread(target=_run_and_notify, daemon=True).start()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phone-number management endpoints
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.route("/api/phone-numbers", methods=["GET"])
+def api_get_phones():
+    try:
+        from data.db import get_phone_numbers
+        return jsonify(get_phone_numbers(active_only=False))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/phone-numbers", methods=["POST"])
+def api_add_phone():
+    data  = request.get_json(silent=True) or {}
+    phone = (data.get("phone") or "").strip()
+    label = (data.get("label") or "").strip()
+    if not phone:
+        return jsonify({"ok": False, "msg": "phone is required"}), 400
+    # Validate: only digits, +, -, spaces, parentheses allowed
+    import re
+    if not re.match(r"^\+?[\d\s\-().]{7,20}$", phone):
+        return jsonify({"ok": False, "msg": "Invalid phone number format"}), 400
+    from data.db import add_phone_number
+    ok = add_phone_number(phone, label)
+    return jsonify({"ok": ok})
+
+
+@app.route("/api/phone-numbers/<path:phone>", methods=["DELETE"])
+def api_delete_phone(phone):
+    from data.db import remove_phone_number
+    ok = remove_phone_number(phone)
+    return jsonify({"ok": ok})
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SMS send endpoint
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.route("/api/sms/send", methods=["POST"])
+def api_sms_send():
+    """Send the current picks via SMS to all registered numbers immediately."""
+    with _lock:
+        st = dict(_state)
+    if st.get("status") not in ("done", "running"):
+        return jsonify({"ok": False, "msg": "No analysis data available yet — run analysis first"}), 400
+    try:
+        from sms import send_daily_picks_to_all
+        result = send_daily_picks_to_all(st)
+        return jsonify({"ok": True, **result})
+    except Exception as e:
+        return jsonify({"ok": False, "msg": str(e)}), 500
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Start APScheduler (fires 6 AM ET every day)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _start_scheduler():
+    if not _SCHEDULER_OK:
+        print("[scheduler] APScheduler not installed — daily SMS disabled")
+        return
+    try:
+        eastern   = pytz.timezone("America/New_York")
+        scheduler = BackgroundScheduler(timezone=eastern)
+        scheduler.add_job(
+            _morning_job,
+            CronTrigger(hour=6, minute=0, timezone=eastern),
+            id="morning_analysis",
+            replace_existing=True,
+            misfire_grace_time=3600,
+        )
+        scheduler.start()
+        print("[scheduler] Daily 6 AM ET job registered")
+    except Exception as exc:
+        print(f"[scheduler] Failed to start: {exc}")
+
+
+_start_scheduler()

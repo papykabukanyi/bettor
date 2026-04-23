@@ -31,3 +31,6 @@ psycopg2-binary
 
 # Timezone
 pytz
+
+# Scheduled jobs (daily 6 AM ET SMS run)
+APScheduler

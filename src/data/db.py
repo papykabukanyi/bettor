@@ -257,6 +257,15 @@ CREATE TABLE IF NOT EXISTS analysis_cache (
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
+
+-- ── SMS recipients: phone numbers to receive daily pick texts ──
+CREATE TABLE IF NOT EXISTS phone_numbers (
+    id       SERIAL PRIMARY KEY,
+    phone    VARCHAR(30) NOT NULL UNIQUE,
+    label    VARCHAR(100) DEFAULT '',
+    active   BOOLEAN      DEFAULT TRUE,
+    added_at TIMESTAMPTZ  DEFAULT NOW()
+);
 """
 
 
@@ -1128,3 +1137,71 @@ def get_analysis_cache(max_age_hours: int = 22, cache_date=None) -> "dict | None
     finally:
         conn.close()
 
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Phone numbers  (SMS recipient list)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def add_phone_number(phone: str, label: str = "") -> bool:
+    """Add or reactivate a phone number in the SMS recipient list."""
+    conn = get_conn()
+    if conn is None:
+        return False
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO phone_numbers (phone, label, active)
+            VALUES (%s, %s, TRUE)
+            ON CONFLICT (phone) DO UPDATE SET
+                label  = COALESCE(NULLIF(EXCLUDED.label, ''), phone_numbers.label),
+                active = TRUE
+        """, (phone.strip(), label.strip()))
+        conn.commit()
+        return True
+    except Exception as e:
+        conn.rollback()
+        print(f"[db] add_phone_number error: {e}")
+        return False
+    finally:
+        conn.close()
+
+
+def remove_phone_number(phone: str) -> bool:
+    """Permanently delete a phone number from the recipient list."""
+    conn = get_conn()
+    if conn is None:
+        return False
+    try:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM phone_numbers WHERE phone = %s", (phone.strip(),))
+        conn.commit()
+        return cur.rowcount > 0
+    except Exception as e:
+        conn.rollback()
+        print(f"[db] remove_phone_number error: {e}")
+        return False
+    finally:
+        conn.close()
+
+
+def get_phone_numbers(active_only: bool = True) -> list:
+    """Return all registered phone numbers, optionally only active ones."""
+    conn = get_conn()
+    if conn is None:
+        return []
+    try:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        if active_only:
+            cur.execute("SELECT * FROM phone_numbers WHERE active = TRUE ORDER BY added_at")
+        else:
+            cur.execute("SELECT * FROM phone_numbers ORDER BY added_at")
+        rows = [dict(r) for r in cur.fetchall()]
+        for r in rows:
+            if r.get("added_at"):
+                r["added_at"] = r["added_at"].isoformat()
+        return rows
+    except Exception as e:
+        print(f"[db] get_phone_numbers error: {e}")
+        return []
+    finally:
+        conn.close()
