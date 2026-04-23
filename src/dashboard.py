@@ -1159,7 +1159,8 @@ def api_games():
         return jsonify([])
 
 
-@app.route("/api/cached-state")def api_cached_state():
+@app.route("/api/cached-state")
+def api_cached_state():
     """
     Return the last-saved bets + props from the database so the loading
     screen can show real data while the app warms up.
