@@ -698,7 +698,7 @@ def _run_analysis():
         else:
             _log("Soccer model loaded from disk")
         soccer_preds = []
-        fixtures = get_todays_fixtures(["EPL", "ESP", "GER"])
+        fixtures = get_todays_fixtures(["EPL", "ESP", "GER", "ITA", "FRA", "MLS"])
         # Only predict on live or upcoming fixtures — skip finished games
         fixtures = [f for f in fixtures if not _game_is_over(f.get("status", ""))]
         _log(f"Soccer: {len(fixtures)} fixtures")

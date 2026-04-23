@@ -205,12 +205,12 @@ def get_todays_fixtures(league_keys: list[str] | None = None) -> list[dict]:
     Falls back to empty list if key not set or API is timing out.
     """
     if not FOOTBALL_DATA_API_KEY or FOOTBALL_DATA_API_KEY == "your_football_data_key_here":
-        print("[soccer_fetcher] FOOTBALL_DATA_API_KEY not set – skipping live fixtures.")
-        return []
+        print("[soccer_fetcher] FOOTBALL_DATA_API_KEY not set – using Odds API fallback for fixtures.")
+        return [f for f in _fixtures_range_from_odds() if f.get("date") == _et_today().isoformat()]
 
     if not _fdorg_available():
-        print("[soccer_fetcher] football-data.org circuit-breaker open – skipping get_todays_fixtures")
-        return []
+        print("[soccer_fetcher] football-data.org circuit-breaker open – using Odds API fallback for fixtures.")
+        return [f for f in _fixtures_range_from_odds() if f.get("date") == _et_today().isoformat()]
 
     import datetime as _dt
     import pytz
@@ -221,11 +221,15 @@ def get_todays_fixtures(league_keys: list[str] | None = None) -> list[dict]:
     today    = _et_today().isoformat()
     tomorrow = (_et_today() + _dt.timedelta(days=1)).isoformat()
 
+    eastern = pytz.timezone("America/New_York")
     for lk in use_keys:
         comp_id = _FDORG_LEAGUE_MAP.get(lk)
         if not comp_id:
             continue
-        url = f"{FOOTBALL_DATA_BASE}/competitions/{comp_id}/matches?status=SCHEDULED"
+        # Use dateFrom/dateTo — more reliable than status=SCHEDULED
+        # football-data.org uses TIMED for confirmed kickoff times;
+        # SCHEDULED means no time confirmed yet — filtering by status misses most games
+        url = f"{FOOTBALL_DATA_BASE}/competitions/{comp_id}/matches?dateFrom={today}&dateTo={tomorrow}"
         try:
             resp = _fdorg_get(url, headers)
             if resp.status_code == 429:
@@ -236,27 +240,31 @@ def get_todays_fixtures(league_keys: list[str] | None = None) -> list[dict]:
             data = resp.json()
             for m in data.get("matches", []):
                 raw_utc   = m.get("utcDate", "")
-                utc_date  = raw_utc[:10]
-                if utc_date not in (today, tomorrow):
+                m_status  = m.get("status", "")
+                # Skip already-finished or cancelled matches
+                if m_status in ("FINISHED", "CANCELLED", "POSTPONED", "AWARDED"):
                     continue
-                # Parse game time to ET
+                # Derive ET date (game belongs to whichever ET date it tips off)
                 game_time = None
+                et_date   = raw_utc[:10]   # fallback: UTC date
                 try:
                     utc_dt  = _dt.datetime.fromisoformat(raw_utc.replace("Z", "+00:00"))
-                    eastern = pytz.timezone("America/New_York")
                     local   = utc_dt.astimezone(eastern)
                     game_time = local.strftime("%H:%M")
+                    et_date   = local.strftime("%Y-%m-%d")
                 except Exception:
                     pass
+                if et_date not in (today, tomorrow):
+                    continue
                 fixtures.append({
                     "league":    lk,
                     "sport":     "soccer",
-                    "date":      utc_date,
+                    "date":      et_date,
                     "game_time": game_time,
                     "home_team": m["homeTeam"]["name"],
                     "away_team": m["awayTeam"]["name"],
                     "match_id":  m["id"],
-                    "status":    m.get("status", "SCHEDULED"),
+                    "status":    m_status,
                 })
             time.sleep(1)  # stay under 10 req/min
         except Exception as e:
@@ -264,6 +272,9 @@ def get_todays_fixtures(league_keys: list[str] | None = None) -> list[dict]:
             if "circuit-breaker" in str(e) or _FDORG_BLOCKED:
                 break   # stop looping; API is down
 
+    if not fixtures:
+        print("[soccer_fetcher] get_todays_fixtures: no data from football-data.org – falling back to Odds API")
+        fixtures = _fixtures_range_from_odds()
     _save_soccer_fixtures_to_db(fixtures)
     return [f for f in fixtures if f["date"] == today]   # only today for analysis
 
@@ -356,11 +367,12 @@ def get_fixtures_range(league_keys=None) -> list[dict]:
     today    = _et_today().isoformat()
     tomorrow = (_et_today() + _dt.timedelta(days=1)).isoformat()
 
+    eastern = pytz.timezone("America/New_York")
     for lk in use_keys:
         comp_id = _FDORG_LEAGUE_MAP.get(lk)
         if not comp_id:
             continue
-        url = f"{FOOTBALL_DATA_BASE}/competitions/{comp_id}/matches?status=SCHEDULED"
+        url = f"{FOOTBALL_DATA_BASE}/competitions/{comp_id}/matches?dateFrom={today}&dateTo={tomorrow}"
         try:
             resp = _fdorg_get(url, headers)
             if resp.status_code == 429:
@@ -370,26 +382,29 @@ def get_fixtures_range(league_keys=None) -> list[dict]:
             data = resp.json()
             for m in data.get("matches", []):
                 raw_utc  = m.get("utcDate", "")
-                utc_date = raw_utc[:10]
-                if utc_date not in (today, tomorrow):
+                m_status = m.get("status", "")
+                if m_status in ("FINISHED", "CANCELLED", "POSTPONED", "AWARDED"):
                     continue
                 game_time = None
+                et_date   = raw_utc[:10]
                 try:
                     utc_dt  = _dt.datetime.fromisoformat(raw_utc.replace("Z", "+00:00"))
-                    eastern = pytz.timezone("America/New_York")
                     local   = utc_dt.astimezone(eastern)
                     game_time = local.strftime("%H:%M")
+                    et_date   = local.strftime("%Y-%m-%d")
                 except Exception:
                     pass
+                if et_date not in (today, tomorrow):
+                    continue
                 fixtures.append({
                     "league":    lk,
                     "sport":     "soccer",
-                    "date":      utc_date,
+                    "date":      et_date,
                     "game_time": game_time,
                     "home_team": m["homeTeam"]["name"],
                     "away_team": m["awayTeam"]["name"],
                     "match_id":  m["id"],
-                    "status":    m.get("status", "SCHEDULED"),
+                    "status":    m_status,
                 })
             time.sleep(1)
         except Exception as e:
