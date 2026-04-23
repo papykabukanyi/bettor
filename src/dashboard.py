@@ -88,6 +88,42 @@ def _release_analysis_lock(conn):
         conn.close()
 
 
+def _load_cache_into_state(max_age_hours: int = 22) -> bool:
+    """Load DB cache into memory for the current worker. Returns True if loaded."""
+    try:
+        from data.db import get_analysis_cache, get_upcoming_games
+        cached = get_analysis_cache(max_age_hours=max_age_hours)
+        if not cached:
+            return False
+        upcoming_games = []
+        try:
+            upcoming_games = get_upcoming_games(days_ahead=1)
+        except Exception:
+            pass
+        with _lock:
+            _state.update({
+                "status":              "done",
+                "phase":               "Complete (from DB cache)",
+                "last_updated":        cached.get("last_updated",
+                                          cached.get("_updated_at",
+                                              datetime.datetime.now().strftime("%Y-%m-%d %H:%M"))),
+                "game_cards_today":    cached.get("game_cards_today", []),
+                "game_cards_tomorrow": cached.get("game_cards_tomorrow", []),
+                "best_parlays":        cached.get("best_parlays", []),
+                "today_team_picks":    cached.get("today_team_picks", []),
+                "tomorrow_team_picks": cached.get("tomorrow_team_picks", []),
+                "player_props":        cached.get("player_props", []),
+                "prop_parlays":        cached.get("prop_parlays", {}),
+                "team_parlays":        cached.get("team_parlays", {}),
+                "upcoming_games":      upcoming_games,
+                "error":               None,
+            })
+        return True
+    except Exception as e:
+        _log(f"Cache load error: {e}")
+        return False
+
+
 def _log(msg):
     ts = datetime.datetime.now().strftime("%H:%M:%S")
     entry = f"[{ts}] {msg}"
@@ -703,9 +739,10 @@ def _run_analysis():
     lock_conn = _try_analysis_lock()
     if lock_conn is None:
         _log("Another analysis run is active — skipping duplicate run")
-        with _lock:
-            _state["status"] = "done"
-            _state["phase"] = "Skipped duplicate run"
+        if not _load_cache_into_state():
+            with _lock:
+                _state["status"] = "running"
+                _state["phase"] = "Waiting for active run"
         sys.stdout = _real
         return False
     ok = False
@@ -1163,15 +1200,21 @@ def index():
     with _lock:
         state  = dict(_state)
         status = state.get("status", "idle")
-    # Auto-load from DB cache on every fresh page visit so the user
-    # never has to click a button just to see today's data.
+    # Load DB cache for this worker to avoid empty screens and double loads.
+    if status != "running":
+        _load_cache_into_state(max_age_hours=22)
+        with _lock:
+            state  = dict(_state)
+            status = state.get("status", "idle")
+    # If no cache exists, kick off a single background analysis.
     if status not in ("running", "done"):
         with _lock:
             _state["status"]    = "running"
             _state["phase"]     = _PHASES[0]
             _state["phase_idx"] = 0
-        threading.Thread(target=_run_from_cache, daemon=True).start()
-        with _lock: state = dict(_state)
+        threading.Thread(target=_run_analysis, daemon=True).start()
+        with _lock:
+            state = dict(_state)
     today    = et_today().isoformat()
     tomorrow = (et_today() + datetime.timedelta(days=1)).isoformat()
     return render_template("dashboard.html", state=state, today=today, tomorrow=tomorrow)
@@ -1194,6 +1237,10 @@ def api_run():
 
 @app.route("/api/status")
 def api_status():
+    with _lock:
+        st = _state.get("status", "idle")
+    if st == "idle":
+        _load_cache_into_state(max_age_hours=22)
     with _lock:
         return jsonify({k: _state[k] for k in
             ("status", "phase", "phase_idx", "phase_total", "last_updated", "error")})
