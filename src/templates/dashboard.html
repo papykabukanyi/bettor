@@ -623,6 +623,7 @@ body{background:var(--bg);color:var(--tx);font-family:"Segoe UI",system-ui,sans-
 </div>
 <script>
 const STATUS = "{{ state.status }}";
+const TODAY  = "{{ today }}";
 
 // ── Tab switching ──
 function showTab(id, btn) {
@@ -1038,6 +1039,7 @@ function teamPropCardHTML(c) {
   renderProps();
   renderTeamProps();
   attachCardInteractions();
+  window._smsReady = true;
 })();
 </script>
 
@@ -1066,7 +1068,17 @@ function teamPropCardHTML(c) {
 <script>
 // ── SMS / phone management ────────────────────────────────────────────────
 
-function sendToText() {
+function maybePromptSms() {
+  if (STATUS !== 'done') return;
+  if (!TODAY) return;
+  const key = 'smsPromptDate';
+  if (localStorage.getItem(key) === TODAY) return;
+  localStorage.setItem(key, TODAY);
+  if (confirm("Send today's picks to SMS now?")) sendToText(true);
+}
+
+function sendToText(skipConfirm = false) {
+  if (!skipConfirm && !confirm("Send today's picks to SMS now?")) return;
   const btn = document.getElementById('sms-btn');
   btn.disabled = true;
   btn.innerHTML = '&#128241; Sending\u2026';
@@ -1149,6 +1161,8 @@ function deletePhone(phone) {
 document.getElementById('phone-modal').addEventListener('click', function(e) {
   if (e.target === this) closePhoneModal();
 });
+
+if (window._smsReady) setTimeout(maybePromptSms, 300);
 </script>
 </body>
 </html>

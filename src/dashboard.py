@@ -17,6 +17,12 @@ from config import MIN_VALUE_EDGE, KELLY_FRACTION, MLB_SEASONS, et_today
 
 app = Flask(__name__, template_folder="templates")
 
+try:
+    from data.db import init_schema
+    init_schema()
+except Exception as e:
+    print(f"[dashboard] DB init: {e}")
+
 _PHASES = [
     "Fetching MLB schedule",
     "Fetching soccer fixtures",
@@ -1365,8 +1371,10 @@ def api_add_phone():
     if not re.match(r"^\+?[\d\s\-().]{7,20}$", phone):
         return jsonify({"ok": False, "msg": "Invalid phone number format"}), 400
     from data.db import add_phone_number
-    ok = add_phone_number(phone, label)
-    return jsonify({"ok": ok})
+    ok, msg = add_phone_number(phone, label)
+    if not ok:
+        return jsonify({"ok": False, "msg": msg or "Could not add number"}), 500
+    return jsonify({"ok": True})
 
 
 @app.route("/api/phone-numbers/<path:phone>", methods=["DELETE"])
@@ -1385,8 +1393,25 @@ def api_sms_send():
     """Send the current picks via SMS to all registered numbers immediately."""
     with _lock:
         st = dict(_state)
-    if st.get("status") not in ("done", "running"):
-        return jsonify({"ok": False, "msg": "No analysis data available yet — run analysis first"}), 400
+    if st.get("status") == "running" and not st.get("game_cards_today") and not st.get("player_props"):
+        # Try the DB cache if this worker doesn't have in-memory data yet
+        try:
+            from data.db import get_analysis_cache
+            cached = get_analysis_cache(max_age_hours=22)
+            if cached:
+                st = cached
+        except Exception as e:
+            return jsonify({"ok": False, "msg": str(e)}), 500
+    if st.get("status") not in ("done", "running") and not st.get("game_cards_today"):
+        try:
+            from data.db import get_analysis_cache
+            cached = get_analysis_cache(max_age_hours=22)
+            if cached:
+                st = cached
+            else:
+                return jsonify({"ok": False, "msg": "No cached analysis yet — wait for auto-run to finish"}), 400
+        except Exception as e:
+            return jsonify({"ok": False, "msg": str(e)}), 500
     try:
         from sms import send_daily_picks_to_all
         result = send_daily_picks_to_all(st)

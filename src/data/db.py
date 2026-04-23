@@ -1142,11 +1142,11 @@ def get_analysis_cache(max_age_hours: int = 22, cache_date=None) -> "dict | None
 # Phone numbers  (SMS recipient list)
 # ──────────────────────────────────────────────────────────────────────────────
 
-def add_phone_number(phone: str, label: str = "") -> bool:
+def add_phone_number(phone: str, label: str = "") -> tuple[bool, str]:
     """Add or reactivate a phone number in the SMS recipient list."""
     conn = get_conn()
     if conn is None:
-        return False
+        return False, "Database unavailable"
     try:
         cur = conn.cursor()
         cur.execute("""
@@ -1157,11 +1157,11 @@ def add_phone_number(phone: str, label: str = "") -> bool:
                 active = TRUE
         """, (phone.strip(), label.strip()))
         conn.commit()
-        return True
+        return True, "ok"
     except Exception as e:
         conn.rollback()
         print(f"[db] add_phone_number error: {e}")
-        return False
+        return False, str(e)
     finally:
         conn.close()
 
