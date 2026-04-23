@@ -295,8 +295,8 @@ body{background:var(--bg);color:var(--tx);font-family:"Segoe UI",system-ui,sans-
   <div class="hdr-right">
     <div class="status-pill {{ state.status }}" id="spill"><div class="sdot {{ state.status }}" id="sdot"></div><span id="stxt">{{ state.status|capitalize }}</span></div>
     <button class="console-btn" onclick="toggleConsole()">&#128203; Console</button>
-    <button class="run-btn" id="run-btn" onclick="runAnalysis(false)" {% if state.status=='running' %}disabled{% endif %}>&#9889; Run Analysis</button>
-    <button class="refresh-btn" id="refresh-btn" onclick="runAnalysis(true)" title="Force-fetch fresh data from all APIs" {% if state.status=='running' %}disabled{% endif %}>&#128260; Fresh API Pull</button>
+    <button class="run-btn" id="run-btn" onclick="runAnalysis(false)" title="Re-run algorithm on data already in the database" {% if state.status=='running' %}disabled{% endif %}>&#128260; Refresh Data</button>
+    <button class="refresh-btn" id="refresh-btn" onclick="runAnalysis(true)" title="Pull fresh data from all APIs, then re-run the algorithm" {% if state.status=='running' %}disabled{% endif %}>&#9889; Fetch New Data</button>
   </div>
 </div>
 
@@ -914,8 +914,9 @@ function teamPropCardHTML(c) {
     document.getElementById('splash').classList.add('hidden');
     document.getElementById('main-app').style.opacity = '1';
   }
+  // Always start polling if analysis is running (could have been auto-triggered on page load)
   if (STATUS === 'running') startPolling();
-  // Init dynamic renders
+  // Always render JS-driven tabs with whatever data is embedded in the page
   renderProps();
   renderTeamProps();
 })();

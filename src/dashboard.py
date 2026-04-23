@@ -1095,7 +1095,18 @@ def _build_upcoming(mlb_games, soccer_fixtures):
 
 @app.route("/")
 def index():
-    with _lock: state = dict(_state)
+    with _lock:
+        state  = dict(_state)
+        status = state.get("status", "idle")
+    # Auto-load from DB cache on every fresh page visit so the user
+    # never has to click a button just to see today's data.
+    if status not in ("running", "done"):
+        with _lock:
+            _state["status"]    = "running"
+            _state["phase"]     = _PHASES[0]
+            _state["phase_idx"] = 0
+        threading.Thread(target=_run_from_cache, daemon=True).start()
+        with _lock: state = dict(_state)
     today    = et_today().isoformat()
     tomorrow = (et_today() + datetime.timedelta(days=1)).isoformat()
     return render_template("dashboard.html", state=state, today=today, tomorrow=tomorrow)
