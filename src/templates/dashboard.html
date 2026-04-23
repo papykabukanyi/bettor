@@ -40,6 +40,7 @@ body{background:var(--bg);color:var(--tx);font-family:"Segoe UI",system-ui,sans-
 .sdot{width:7px;height:7px;border-radius:50%;flex-shrink:0}
 .sdot.idle{background:var(--mt)}.sdot.running{background:var(--gr);animation:pulse 1s infinite}.sdot.done{background:var(--gr)}.sdot.error{background:var(--re)}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
+@keyframes arrow-bob{0%,100%{transform:translateY(0)}50%{transform:translateY(-3px)}}
 .run-btn{background:linear-gradient(135deg,#22c55e,#0d9488);color:#000;border:none;padding:8px 20px;border-radius:var(--r);font-weight:800;font-size:12px;cursor:pointer;transition:opacity .15s,transform .1s}
 .run-btn:hover{opacity:.88;transform:translateY(-1px)}
 .run-btn:disabled{opacity:.3;cursor:not-allowed;transform:none}
@@ -112,6 +113,18 @@ body{background:var(--bg);color:var(--tx);font-family:"Segoe UI",system-ui,sans-
 .game-card.ELITE{border-top:3px solid #22c55e}.game-card.SAFE{border-top:3px solid #14b8a6}
 .game-card.MODERATE{border-top:3px solid #f0b429}.game-card.RISKY{border-top:3px solid #ef4444}
 .game-card.LIVE-GAME{border-color:#ef444499!important}
+.game-card.clickable{cursor:pointer}
+.gc-hdr-right{display:flex;flex-direction:column;align-items:flex-end;gap:6px}
+.gc-expand{display:flex;align-items:center;gap:6px;font-size:10px;font-weight:900;color:#22c55e;letter-spacing:.6px;text-transform:uppercase}
+.gc-arrow{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:rgba(34,197,94,.18);color:#22c55e;animation:arrow-bob 1.4s infinite}
+.game-card.open .gc-arrow{transform:rotate(180deg)}
+.gc-details{max-height:0;overflow:hidden;border-top:1px dashed var(--bd);padding:0 14px;transition:max-height .25s ease,padding .25s ease}
+.game-card.open .gc-details{max-height:240px;padding:10px 14px 12px}
+.gc-details-title{font-size:10px;font-weight:900;letter-spacing:.6px;color:var(--mt);text-transform:uppercase;margin-bottom:6px}
+.gc-details-body{display:flex;flex-direction:column;gap:6px}
+.gc-details-row{display:flex;justify-content:space-between;gap:8px;font-size:11px}
+.gc-details-row strong{color:var(--tx);font-weight:800}
+.gc-details-note{font-size:10px;color:var(--mt)}
 .gc-hdr{padding:11px 14px 7px;display:flex;justify-content:space-between;align-items:flex-start;gap:6px}
 .gc-hdr-left{display:flex;flex-direction:column;gap:4px;min-width:0;flex:1}
 .gc-meta{display:flex;align-items:center;gap:5px;flex-wrap:wrap}
@@ -340,7 +353,7 @@ body{background:var(--bg);color:var(--tx);font-family:"Segoe UI",system-ui,sans-
 </div>
 <!-- GAME CARD MACRO -->
 {% macro game_card(c) %}
-<div class="game-card {{ c.overall_safety_label }}{% if c.when_label == 'LIVE' %} LIVE-GAME{% endif %}" data-sport="{{ c.sport|lower }}" data-safety="{{ c.overall_safety_label }}">
+<div class="game-card {{ c.overall_safety_label }}{% if c.when_label == 'LIVE' %} LIVE-GAME{% endif %} clickable" data-sport="{{ c.sport|lower }}" data-safety="{{ c.overall_safety_label }}" data-game-key="{{ c.game_key }}" data-home="{{ c.home_team }}" data-away="{{ c.away_team }}">
   {% if c.when_label == 'LIVE' %}<div class="live-banner">&#128308;&nbsp;&nbsp;LIVE NOW</div>{% endif %}
   <div class="gc-hdr">
     <div class="gc-hdr-left">
@@ -352,7 +365,10 @@ body{background:var(--bg);color:var(--tx);font-family:"Segoe UI",system-ui,sans-
       <div class="gc-matchup"><span class="gc-away">{{ c.away_team }}</span><span class="gc-sep">@</span><span class="gc-home">{{ c.home_team }}</span></div>
       {% if c.sport == 'MLB' and (c.home_starter or c.away_starter) %}<div class="gc-starter">&#9918; <span>{{ c.away_starter or 'TBD' }}</span> vs <span>{{ c.home_starter or 'TBD' }}</span></div>{% endif %}
     </div>
-    <span class="sbadge {{ c.overall_safety_label }}">{{ c.overall_safety_label }}</span>
+    <div class="gc-hdr-right">
+      <span class="sbadge {{ c.overall_safety_label }}">{{ c.overall_safety_label }}</span>
+      <div class="gc-expand"><span class="gc-arrow">&#9650;</span><span>Details</span></div>
+    </div>
   </div>
   <div class="gc-rows">
     {# WIN ROW #}
@@ -405,6 +421,10 @@ body{background:var(--bg);color:var(--tx);font-family:"Segoe UI",system-ui,sans-
     {% else %}
     <div class="gc-row" style="opacity:.3"><span class="gc-type NONE">GAME</span><div class="gc-content"><div class="gc-label" style="color:var(--mt)">No game prop</div></div></div>
     {% endif %}
+  </div>
+  <div class="gc-details">
+    <div class="gc-details-title">All Predictions</div>
+    <div class="gc-details-body">Click to view details</div>
   </div>
 </div>
 {% endmacro %}
@@ -728,6 +748,82 @@ function applyCardFilter(tab) {
   if (cnt) cnt.textContent = vis;
 }
 
+// ── Card details (click to expand) ──
+function attachCardInteractions(root) {
+  const scope = root || document;
+  scope.querySelectorAll('.game-card').forEach(card => {
+    if (card.dataset.bound === '1') return;
+    card.dataset.bound = '1';
+    card.addEventListener('click', (e) => {
+      if (!e.target.closest('.game-card')) return;
+      card.classList.toggle('open');
+      if (card.classList.contains('open')) fillCardDetails(card);
+    });
+  });
+}
+
+function _matchPropToCard(p, home, away) {
+  const g = (p.game || '').toLowerCase();
+  if (g && home && away) {
+    return g.includes(home) && g.includes(away);
+  }
+  const t = (p.team || '').toLowerCase();
+  if (t && home && away) {
+    return t === home || t === away || home.includes(t) || away.includes(t);
+  }
+  return false;
+}
+
+function fillCardDetails(card) {
+  const body = card.querySelector('.gc-details-body');
+  if (!body) return;
+  const key = card.dataset.gameKey || '';
+  const home = (card.dataset.home || '').toLowerCase();
+  const away = (card.dataset.away || '').toLowerCase();
+  const cardData = (ALL_CARDS || []).find(c => (c.game_key || '') === key);
+
+  let html = '';
+  if (cardData && cardData.win_pick) {
+    const wp = cardData.win_pick;
+    html += '<div class="gc-details-row"><strong>Win:</strong><span>' +
+      esc(wp.pick_team) + ' ' + esc(wp.odds_str || '') + ' (' + wp.conf + '%)</span></div>';
+  }
+  if (cardData && cardData.game_prop) {
+    const gp = cardData.game_prop;
+    html += '<div class="gc-details-row"><strong>Game:</strong><span>' +
+      esc(gp.label) + ' (' + gp.conf + '%)</span></div>';
+  }
+  if (cardData && cardData.player_prop) {
+    const pp = cardData.player_prop;
+    html += '<div class="gc-details-row"><strong>Top Prop:</strong><span>' +
+      esc(pp.name) + ' ' + esc(pp.direction) + ' ' + esc(pp.line) + ' ' + esc(pp.prop_label) +
+      ' (' + pp.conf + '%)</span></div>';
+  }
+
+  let props = (ALL_PROPS || []).filter(p => _matchPropToCard(p, home, away));
+  if (cardData && cardData.player_prop) {
+    props = props.filter(p => !(
+      (p.name || '') === (cardData.player_prop.name || '') &&
+      (p.direction || '') === (cardData.player_prop.direction || '') &&
+      String(p.line || '') === String(cardData.player_prop.line || '')
+    ));
+  }
+  props.sort((a,b) => (b.safety || 0) - (a.safety || 0));
+  const top = props.slice(0, 6);
+  if (top.length) {
+    html += '<div class="gc-details-title" style="margin-top:6px">More Props</div>';
+    top.forEach(p => {
+      html += '<div class="gc-details-row"><span>' +
+        esc(p.name) + ' ' + esc(p.direction) + ' ' + esc(String(p.line)) + ' ' + esc(p.prop_label || '') +
+        '</span><span>' + esc(p.safety_label || '') + ' ' + (p.conf || 0) + '%</span></div>';
+    });
+  } else {
+    html += '<div class="gc-details-note">No additional player props for this game.</div>';
+  }
+
+  body.innerHTML = html || '<div class="gc-details-note">No extra predictions available.</div>';
+}
+
 // ── Player Props (JS-rendered from embedded JSON) ──
 const ALL_PROPS = {{ state.player_props | tojson }};
 let _propF = {sport:'all', dir:'all', safety:'all', when:'all'};
@@ -828,12 +924,13 @@ function renderTeamProps() {
     return;
   }
   box.innerHTML = '<div class="game-grid">'+data.map(c => teamPropCardHTML(c)).join('')+'</div>';
+  attachCardInteractions(box);
 }
 function teamPropCardHTML(c) {
   const sl = esc(c.overall_safety_label||'MODERATE');
   const sp = (c.sport||'MLB').toUpperCase();
   const isLive = c.when_label==='LIVE';
-  let h = '<div class="game-card '+sl+(isLive?' LIVE-GAME':'')+'">' +
+  let h = '<div class="game-card '+sl+(isLive?' LIVE-GAME':'')+' clickable" data-game-key="'+esc(c.game_key||'')+'" data-home="'+esc(c.home_team||'')+'" data-away="'+esc(c.away_team||'')+'">' +
     (isLive?'<div class="live-banner">&#128308;&nbsp;LIVE NOW</div>':'') +
     '<div class="gc-hdr"><div class="gc-hdr-left"><div class="gc-meta">' +
     '<span class="sport-chip '+sp+'">'+sp+'</span>' +
@@ -844,7 +941,8 @@ function teamPropCardHTML(c) {
     '<span class="gc-sep">@</span><span class="gc-home">'+esc(c.home_team)+'</span></div>' +
     (sp==='MLB'&&(c.home_starter||c.away_starter)?
       '<div class="gc-starter">&#9918; <span>'+esc(c.away_starter||'TBD')+'</span> vs <span>'+esc(c.home_starter||'TBD')+'</span></div>':'') +
-    '</div><span class="sbadge '+sl+'">'+sl+'</span></div>' +
+    '</div><div class="gc-hdr-right"><span class="sbadge '+sl+'">'+sl+'</span>' +
+    '<div class="gc-expand"><span class="gc-arrow">&#9650;</span><span>Details</span></div></div></div>' +
     '<div class="gc-rows">';
   // WIN row
   if (c.win_pick) {
@@ -873,7 +971,9 @@ function teamPropCardHTML(c) {
   } else {
     h += '<div class="gc-row" style="opacity:.3"><span class="gc-type NONE">GAME</span><div class="gc-content"><div class="gc-label" style="color:var(--mt)">No game prop</div></div></div>';
   }
-  h += '</div></div>';
+  h += '</div>' +
+       '<div class="gc-details"><div class="gc-details-title">All Predictions</div>' +
+       '<div class="gc-details-body">Click to view details</div></div></div>';
   return h;
 }
 
@@ -937,6 +1037,7 @@ function teamPropCardHTML(c) {
   // Always render JS-driven tabs with whatever data is embedded in the page
   renderProps();
   renderTeamProps();
+  attachCardInteractions();
 })();
 </script>
 

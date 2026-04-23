@@ -47,6 +47,40 @@ _lock = threading.Lock()
 _logs = deque(maxlen=400)
 _logs_lock = threading.Lock()
 
+_ANALYSIS_LOCK_KEY = 98243751
+
+
+def _try_analysis_lock():
+    """Return a DB connection holding the advisory lock, or None if unavailable."""
+    try:
+        from data.db import get_conn
+        conn = get_conn()
+        if conn is None:
+            return None
+        cur = conn.cursor()
+        cur.execute("SELECT pg_try_advisory_lock(%s)", (_ANALYSIS_LOCK_KEY,))
+        ok = cur.fetchone()[0]
+        if not ok:
+            conn.close()
+            return None
+        return conn
+    except Exception as e:
+        print(f"[analysis_lock] acquire error: {e}")
+        return None
+
+
+def _release_analysis_lock(conn):
+    if not conn:
+        return
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT pg_advisory_unlock(%s)", (_ANALYSIS_LOCK_KEY,))
+        conn.commit()
+    except Exception as e:
+        print(f"[analysis_lock] release error: {e}")
+    finally:
+        conn.close()
+
 
 def _log(msg):
     ts = datetime.datetime.now().strftime("%H:%M:%S")
@@ -660,6 +694,15 @@ def _run_analysis():
     import pandas as pd
     _real = sys.stdout
     sys.stdout = _StdoutCapture(_real)
+    lock_conn = _try_analysis_lock()
+    if lock_conn is None:
+        _log("Another analysis run is active — skipping duplicate run")
+        with _lock:
+            _state["status"] = "done"
+            _state["phase"] = "Skipped duplicate run"
+        sys.stdout = _real
+        return False
+    ok = False
     with _lock:
         _state["status"] = "running"; _state["error"] = None
         _state["phase"]  = _PHASES[0]; _state["phase_idx"] = 0
@@ -1049,6 +1092,11 @@ def _run_analysis():
                 "prop_parlays":        _clean(prop_parlays),
                 "team_parlays":        _clean(team_parlays),
                 "last_updated":        _last_updated,
+                "raw_games":           _clean(games),
+                "raw_fixtures":        _clean(fixtures),
+                "raw_mlb_preds":       _clean(mlb_preds),
+                "raw_soccer_preds":    _clean(soccer_preds),
+                "raw_win_bets":        _clean(win_bets),
             })
             _log("Analysis cache saved to DB — next run will load from DB")
         except Exception as _ce:
@@ -1068,6 +1116,7 @@ def _run_analysis():
                 "game_cards_tomorrow":   _clean_cards_tomorrow,
                 "best_parlays":          _clean_parlays,
             })
+        ok = True
     except Exception:
         err = traceback.format_exc()
         _log(f"ERROR: {err}")
@@ -1075,6 +1124,8 @@ def _run_analysis():
             _state["status"] = "error"; _state["phase"] = "Error"; _state["error"] = err
     finally:
         sys.stdout = _real
+        _release_analysis_lock(lock_conn)
+    return ok
 
 
 def _build_upcoming(mlb_games, soccer_fixtures):
@@ -1272,7 +1323,10 @@ def _morning_job():
         _state["phase_idx"] = 0
 
     def _run_and_notify():
-        _run_analysis()
+        ran = _run_analysis()
+        if not ran:
+            _log("[scheduler] Analysis skipped — no SMS sent")
+            return
         try:
             from sms import send_daily_picks_to_all
             with _lock:
