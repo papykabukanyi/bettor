@@ -597,11 +597,25 @@ def api_phone_remove():
 @app.route("/api/sms/send", methods=["POST"])
 def api_sms_send():
     try:
-        from sms import send_daily_picks
+        from sms import send_daily_picks_to_all
         with _lock:
-            props = list(_state.get("player_props", []))
-        send_daily_picks(props)
-        return jsonify({"ok": True, "msg": "SMS sent"})
+            state = {
+                "best_parlays": list(_state.get("best_parlays", [])),
+                "game_cards_today": list(_state.get("game_cards_today", [])),
+            }
+        result = send_daily_picks_to_all(state)
+        return jsonify({"ok": True, **result})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
+
+
+@app.route("/api/sms/send-parlay", methods=["POST"])
+def api_sms_send_parlay():
+    data = request.get_json(force=True) or {}
+    try:
+        from sms import send_parlay_to_all
+        result = send_parlay_to_all(data)
+        return jsonify({"ok": True, **result})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
 

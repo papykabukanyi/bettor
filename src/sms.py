@@ -115,6 +115,67 @@ def format_daily_picks(state: dict) -> str:
     return "\n".join(lines)
 
 
+def format_parlay_message(parlay: dict) -> str:
+    """Format a single parlay for SMS sending."""
+    today_str = datetime.date.today().strftime("%b %d")
+    name = parlay.get("name") or "Parlay"
+    legs = parlay.get("legs") or []
+    combined = float(parlay.get("combined_odds") or parlay.get("combined_dec") or 0)
+    pct_str = f"+{round((combined - 1) * 100)}%" if combined and combined > 1 else ""
+    lines = [f"BETTOR PARLAY - {today_str}", f"{name} {pct_str}".strip()]
+
+    if legs:
+        lines.append("")
+        lines.append("LEGS:")
+        for i, l in enumerate(legs[:8], 1):
+            label = l.get("label") or l.get("pick") or "?"
+            odds = l.get("dec_odds")
+            odds_str = f" x{float(odds):.2f}" if odds else ""
+            lines.append(f"{i}. {label}{odds_str}")
+        if len(legs) > 8:
+            lines.append(f"+{len(legs)-8} more")
+
+    return "\n".join(lines)
+
+
+def send_parlay_to_all(parlay: dict) -> dict:
+    """
+    Send a specific parlay to all active phone numbers.
+    Returns: {sent, failed, errors}
+    """
+    try:
+        import sys, os
+        sys.path.insert(0, os.path.dirname(__file__))
+        from data.db import get_phone_numbers
+        numbers = get_phone_numbers(active_only=True)
+    except Exception as exc:
+        return {"sent": 0, "failed": 0, "errors": [{"phone": "db", "error": str(exc)}]}
+
+    if not numbers:
+        return {"sent": 0, "failed": 0, "errors": [], "note": "No phone numbers registered"}
+
+    message = format_parlay_message(parlay)
+    results = {"sent": 0, "failed": 0, "errors": []}
+
+    for row in numbers:
+        phone = (row.get("phone") or "").strip()
+        if not phone:
+            continue
+        resp = send_sms(phone, message)
+        ok = (
+            resp.get("http_code") == 200
+            or (isinstance(resp.get("data"), dict)
+                and resp["data"].get("total_count") is not None)
+        )
+        if ok:
+            results["sent"] += 1
+        else:
+            results["failed"] += 1
+            results["errors"].append({"phone": phone, "error": str(resp)})
+
+    return results
+
+
 # ─── Bulk send ───────────────────────────────────────────────────────────────
 
 def send_daily_picks_to_all(state: dict) -> dict:
@@ -157,3 +218,8 @@ def send_daily_picks_to_all(state: dict) -> dict:
             results["errors"].append({"phone": phone, "error": str(resp)})
 
     return results
+
+
+# Backward-compatible alias
+def send_daily_picks(state: dict) -> dict:
+    return send_daily_picks_to_all(state)

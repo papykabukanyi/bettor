@@ -556,10 +556,26 @@ def build_parlays(all_picks: list[dict], max_legs: int = 8, top_n: int = 5) -> l
     if len(pool) < 2:
         return []
 
+    def _dir_tag(p: dict) -> str | None:
+        if p.get("bet_type") == "player_prop":
+            d = (p.get("direction") or "").upper()
+            return d if d in ("OVER", "UNDER") else None
+        pick = (p.get("pick") or "").upper()
+        if "OVER" in pick: return "OVER"
+        if "UNDER" in pick: return "UNDER"
+        return None
+
+    pool_dirs = {d for d in (_dir_tag(p) for p in pool) if d in ("OVER", "UNDER")}
+    require_mix = "OVER" in pool_dirs and "UNDER" in pool_dirs
+
     results = []
     for n in range(2, min(max_legs + 1, len(pool) + 1)):
         best_combos = []
         for combo in combinations(pool, n):
+            if require_mix:
+                dirs = {d for d in (_dir_tag(c) for c in combo) if d in ("OVER", "UNDER")}
+                if dirs and not ("OVER" in dirs and "UNDER" in dirs):
+                    continue
             comb_p = 1.0
             for c in combo: comb_p *= float(c.get("model_prob", 0.5))
             comb_d = 1.0

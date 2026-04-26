@@ -7,15 +7,20 @@
 <title>Bettor — MLB Dashboard</title>
 <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
 <style>
+@import url('https://fonts.googleapis.com/css2?family=Fraunces:wght@600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap');
 *{box-sizing:border-box;margin:0;padding:0}
 :root{
-  --bg:#070a10;--card:#0d1117;--card2:#111820;--border:#1e2a38;
-  --accent:#2563eb;--accent2:#1d4ed8;--green:#16a34a;--red:#dc2626;
-  --yellow:#ca8a04;--purple:#7c3aed;--text:#e2e8f0;--muted:#64748b;
-  --elite:#16a34a;--safe:#2563eb;--moderate:#ca8a04;--risky:#dc2626;
-  --radius:10px;--shadow:0 2px 16px rgba(0,0,0,.5);
+  --bg:#070a10;--card:#0b1118;--card2:#0f1722;--border:#1f2a37;
+  --accent:#14b8a6;--accent2:#0f766e;--green:#16a34a;--red:#ef4444;
+  --yellow:#eab308;--purple:#a855f7;--text:#e2e8f0;--muted:#7c8ca1;
+  --elite:#16a34a;--safe:#14b8a6;--moderate:#eab308;--risky:#ef4444;
+  --radius:12px;--shadow:0 6px 20px rgba(0,0,0,.45);
 }
-body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;min-height:100vh}
+body{background:
+  radial-gradient(900px 500px at 8% -10%, rgba(20,184,166,.18), transparent 55%),
+  radial-gradient(800px 400px at 92% -10%, rgba(168,85,247,.16), transparent 55%),
+  var(--bg);
+  color:var(--text);font-family:'Space Grotesk',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;min-height:100vh}
 a{color:inherit;text-decoration:none}
 
 /* ── Header ── */
@@ -24,7 +29,7 @@ a{color:inherit;text-decoration:none}
   background:linear-gradient(135deg,#0d1117 0%,#111820 100%)}
 .header-brand{display:flex;align-items:center;gap:10px}
 .header-brand img{width:32px;height:32px}
-.header-brand h1{font-size:1.25rem;font-weight:700;letter-spacing:.5px}
+.header-brand h1{font-size:1.25rem;font-weight:700;letter-spacing:.3px;font-family:'Fraunces',serif}
 .header-brand span{font-size:.7rem;color:var(--muted);background:#1e2a38;
   padding:2px 8px;border-radius:20px;margin-left:6px}
 .header-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
@@ -101,6 +106,26 @@ main{padding:20px;max-width:1400px;margin:0 auto}
 .team-starter{font-size:.7rem;color:var(--muted);margin-top:2px}
 .vs{font-size:.8rem;color:var(--muted);flex-shrink:0;padding:0 6px}
 .team-side.away{text-align:right}
+
+.winner-line{display:flex;align-items:center;justify-content:space-between;gap:10px;
+  padding:8px 10px;border:1px solid rgba(20,184,166,.35);
+  border-radius:10px;background:linear-gradient(135deg, rgba(20,184,166,.12), rgba(20,184,166,.02))}
+.winner-line.muted{border-color:var(--border);background:var(--card2);color:var(--muted)}
+.winner-left{display:flex;align-items:center;gap:8px;min-width:0}
+.winner-tag{font-size:.62rem;letter-spacing:.4px;text-transform:uppercase;
+  padding:2px 6px;border-radius:6px;background:rgba(20,184,166,.2);color:var(--accent)}
+.winner-team{font-size:.92rem;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.winner-right{display:flex;align-items:center;gap:8px;font-size:.75rem;color:var(--muted);white-space:nowrap}
+.winner-prob{font-size:.82rem;color:var(--text);font-weight:700}
+.winner-odds{color:var(--accent)}
+
+.props-preview{display:flex;flex-wrap:wrap;gap:6px}
+.prop-chip{font-size:.68rem;padding:3px 8px;border-radius:999px;border:1px solid var(--border);
+  background:rgba(255,255,255,.02);white-space:nowrap}
+.prop-chip.OVER{border-color:rgba(22,163,74,.5);color:var(--green)}
+.prop-chip.UNDER{border-color:rgba(234,179,8,.5);color:var(--yellow)}
+.prop-chip .prop-name{color:var(--text);font-weight:600}
+.prop-chip .prop-line{color:var(--muted)}
 
 .quick-bets{display:flex;gap:6px;flex-wrap:wrap;padding:4px 0 2px}
 .quick-chip{font-size:.72rem;padding:4px 8px;border-radius:6px;
@@ -466,6 +491,7 @@ body.console-open main{padding-bottom:236px}
           style="background:var(--card2);border:1px solid var(--border);color:var(--text);
           padding:6px 10px;border-radius:8px;font-size:.82rem;outline:none;width:90px">
         <button class="btn btn-primary btn-sm" onclick="saveParlay()">&#128190; Save</button>
+        <button class="btn btn-sm" onclick="sendBuilderParlay()">&#128232; Send SMS</button>
         <button class="btn btn-sm" onclick="clearParlay()">Clear</button>
       </div>
     </div>
@@ -667,6 +693,9 @@ function fmtEdge(edge) {
     ? `<span class="bet-edge pos">+${pct}%</span>`
     : `<span class="bet-edge neg">${pct}%</span>`;
 }
+function cleanPickTeam(pick) {
+  return (pick||'').replace(/\s+ML$/,'').trim();
+}
 
 // ── Render all ────────────────────────────────────────────────────────────
 function renderAll() {
@@ -698,12 +727,39 @@ function gameCard(c) {
   const slBadge = safetyBadge(c.overall_safety_label || 'MODERATE');
   const whenB   = whenBadge(c.when_label||'TODAY', c.when||'TODAY');
 
+  const win = c.moneyline;
+  const winHtml = win ? `
+    <div class="winner-line">
+      <div class="winner-left">
+        <span class="winner-tag">WIN PICK</span>
+        <span class="winner-team">${cleanPickTeam(win.pick||'')}</span>
+      </div>
+      <div class="winner-right">
+        <span class="winner-prob">${Math.round((win.model_prob||0.5)*100)}%</span>
+        <span class="winner-odds">${fmtOdds(win.odds_am)}</span>
+        ${fmtEdge(win.edge)}
+      </div>
+    </div>`
+    : `<div class="winner-line muted">No moneyline edge yet</div>`;
+
+  const topProps = [...(c.home_props||[]), ...(c.away_props||[])]
+    .sort((a,b)=> (b.safety||0) - (a.safety||0))
+    .slice(0, 3);
+  const propsPreview = topProps.length
+    ? topProps.map(p=>`<span class="prop-chip ${p.direction}">
+        <span class="prop-name">${p.name||'—'}</span>
+        <span class="prop-line"> ${p.direction} ${p.line}</span>
+      </span>`).join('')
+    : `<span style="color:var(--muted);font-size:.72rem">No top props yet</span>`;
+
   // Quick chips — best of ML, RL, Total
   const chips = [];
-  if (c.moneyline)  chips.push(quickChip('ML', c.moneyline));
-  if (c.run_line)   chips.push(quickChip('RL', c.run_line));
+  if (c.moneyline)  chips.push(quickChip('WIN', c.moneyline));
   if (c.total)      chips.push(quickChip('O/U', c.total));
-  const chipsHtml = chips.join('') || '<span style="color:var(--muted);font-size:.75rem">No picks above edge threshold</span>';
+  const teamTotal = c.home_team_total || c.away_team_total;
+  if (teamTotal)    chips.push(quickChip('TT', teamTotal));
+  if (c.run_line)   chips.push(quickChip('RL', c.run_line));
+  const chipsHtml = chips.join('') || '<span style="color:var(--muted);font-size:.75rem">No picks yet</span>';
 
   const propCount = (c.home_props||[]).length + (c.away_props||[]).length;
 
@@ -725,6 +781,8 @@ function gameCard(c) {
         <div class="team-starter">&#9918; ${c.home_starter||'TBD'}</div>
       </div>
     </div>
+    ${winHtml}
+    <div class="props-preview">${propsPreview}</div>
     <div class="quick-bets">${chipsHtml}</div>
   </div>
   <button class="card-expand-btn" onclick="toggleCard(this.parentElement)">
@@ -934,7 +992,10 @@ function renderParlays(parlays) {
     <span style="font-size:.78rem;color:var(--muted)">Hit: ${p.combined_prob||'?'}%</span>
   </div>
   ${legs}
-  <button class="parlay-save-btn" onclick="saveAutoParlay(${saveData})">&#128190; Save Parlay</button>
+  <div style="display:flex;gap:8px;margin-top:12px">
+    <button class="parlay-save-btn" style="flex:1" onclick="saveAutoParlay(${saveData})">&#128190; Save Parlay</button>
+    <button class="parlay-save-btn" style="flex:1" onclick="sendParlaySms(${saveData})">&#128232; Send SMS</button>
+  </div>
 </div>`;
   }).join('');
 }
@@ -985,6 +1046,25 @@ function saveParlay() {
     if(d.ok){toast('Parlay saved!','success');clearParlay();loadTrackedParlays();}
     else toast(d.error||'Error saving','error');
   });
+}
+
+function sendParlaySms(data) {
+  fetch('/api/sms/send-parlay',{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify(data)
+  }).then(r=>r.json()).then(d=>{
+    if (d.ok) toast(`SMS sent (${d.sent||0} delivered)`, 'success');
+    else toast(d.error||'Error sending SMS','error');
+  });
+}
+
+function sendBuilderParlay() {
+  if (!parlayLegs.length) { toast('Add legs first','error'); return; }
+  const combined = parlayLegs.reduce((acc,l)=>acc*(l.dec_odds||2),1);
+  const name  = document.getElementById('parlay-name').value.trim() || 'My Parlay';
+  const stake = parseFloat(document.getElementById('parlay-stake').value) || 0;
+  sendParlaySms({name, legs: parlayLegs, combined_odds: combined, stake_usd: stake});
 }
 
 function saveAutoParlay(data) {
