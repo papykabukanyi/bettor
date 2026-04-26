@@ -207,7 +207,8 @@ def _build_upcoming(mlb_games, soccer_fixtures):
 @app.route("/")
 def index():
     with _lock: state = dict(_state)
-    return render_template("dashboard.html", state=state, bankroll=BANKROLL)
+    return render_template("dashboard.html", state=state, bankroll=BANKROLL,
+                           phases=_PHASES)
 
 @app.route("/api/run", methods=["POST"])
 def api_run():
