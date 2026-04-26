@@ -34,6 +34,10 @@ SRC_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SRC_DIR)
 from config import BANKROLL, MIN_VALUE_EDGE, KELLY_FRACTION, MLB_SEASONS
 
+# Dashboard uses a lower edge threshold to show more picks
+# (bot tracks accuracy; high-edge filter is for real-money staking only)
+_DASH_MIN_EDGE = 0.02
+
 app = Flask(__name__, template_folder="templates")
 
 _PHASES = [
@@ -98,11 +102,26 @@ def _clean(obj):
     return obj
 
 
+def _norm_gk(s: str) -> str:
+    """Normalize game key so 'Away @ Home' == 'Away@Home'."""
+    return s.replace(" @ ", "@").replace(" @", "@").replace("@ ", "@").strip()
+
+
+def _team_words(full_name: str) -> list:
+    """Return meaningful words from a team name (skip short/common words)."""
+    return [w for w in full_name.lower().split() if len(w) > 3]
+
+
 def _build_card(game, bets, props, when):
     ht  = game.get("home_team", "")
     at  = game.get("away_team", "")
-    gk  = f"{at}@{ht}"
-    alt_gk = game.get("game_key", gk)
+    gk      = f"{at}@{ht}"
+    gk_norm = _norm_gk(gk)
+    alt_gk  = game.get("game_key", gk)
+    alt_norm = _norm_gk(alt_gk)
+
+    # Also store a reversed form for reverse-key matches
+    rev_gk  = _norm_gk(f"{ht}@{at}")
 
     card = {
         "game_key":     gk,
@@ -113,6 +132,10 @@ def _build_card(game, bets, props, when):
         "home_starter": game.get("home_starter", "TBD"),
         "away_starter": game.get("away_starter", "TBD"),
         "game_time":    game.get("game_time", ""),
+        "status":       game.get("status", ""),
+        "home_score":   game.get("home_score"),
+        "away_score":   game.get("away_score"),
+        "inning":       game.get("inning", ""),
         "moneyline":       None,
         "run_line":        None,
         "total":           None,
@@ -125,10 +148,15 @@ def _build_card(game, bets, props, when):
     }
 
     _GAME_BET_TYPES = ("moneyline", "run_line", "total", "f5_moneyline",
-                        "f5_total", "home_team_total", "away_team_total")
+                       "f5_total", "home_team_total", "away_team_total")
+
+    def _key_matches(k: str) -> bool:
+        kn = _norm_gk(k)
+        return kn in (gk_norm, alt_norm, rev_gk) or gk_norm in kn or alt_norm in kn
+
     for bet in bets:
         bk = bet.get("game_key", bet.get("game", ""))
-        if bk not in (gk, alt_gk):
+        if not _key_matches(bk):
             continue
         bt = bet.get("bet_type", "")
         if bt in _GAME_BET_TYPES:
@@ -136,14 +164,18 @@ def _build_card(game, bets, props, when):
             if current is None or bet.get("safety", 0) > current.get("safety", 0):
                 card[bt] = bet
 
-    ht_lc = ht.lower()
-    at_lc = at.lower()
+    ht_words = _team_words(ht)
+    at_words = _team_words(at)
     for p in props:
         pk = p.get("game_key", p.get("game", ""))
-        if pk not in (gk, alt_gk) and gk not in pk and alt_gk not in pk:
-            continue
+        if not _key_matches(pk):
+            # fallback: check if team name appears in prop team field
+            pt = (p.get("team", "")).lower()
+            if not any(w in pt for w in ht_words + at_words):
+                continue
         team_lc = (p.get("team", "")).lower()
-        if any(part in team_lc for part in ht_lc.split() if len(part) > 3):
+        # Assign to home or away side
+        if any(w in team_lc for w in ht_words):
             card["home_props"].append(p)
         else:
             card["away_props"].append(p)
@@ -185,10 +217,19 @@ def _run_analysis():
         _phase(1)
         _log("Loading team stats and model...")
         from data.mlb_fetcher import build_game_dataset
-        from models.mlb_model import load_model
-        team_stats = build_game_dataset([MLB_SEASONS[0]])
+        from models.mlb_model import load_model, train as train_model
+        # Use 3 seasons for robust team differentiation (early-season 2026 data is sparse)
+        team_stats = build_game_dataset(MLB_SEASONS[:3])
         model      = load_model()
-        _log(f"Team stats rows: {len(team_stats)}")
+        _log(f"Team stats rows: {len(team_stats)} (seasons: {sorted(team_stats['season'].unique().tolist(), reverse=True) if not team_stats.empty else 'none'})")
+        # Auto-train model if not found or team_stats updated
+        if model is None and not team_stats.empty:
+            _log("No saved model — training now...")
+            try:
+                model = train_model(team_stats, verbose=False)
+                _log("Model trained and saved.")
+            except Exception as e:
+                _log(f"Model training failed: {e}")
 
         _phase(2)
         _log("Fetching injury reports...")
@@ -223,25 +264,39 @@ def _run_analysis():
 
         _phase(4)
         _log("Running game predictions...")
+        import models.mlb_predictor as _mp
         from models.mlb_predictor import predict_game, build_game_bets
+        # Lower edge threshold so dashboard shows all value picks (accuracy tracking)
+        _orig_edge = _mp.MIN_VALUE_EDGE
+        _mp.MIN_VALUE_EDGE = _DASH_MIN_EDGE
 
         all_bets = []
+        _ALLOWED_STATUS = {"", "Preview", "Pre-Game", "Scheduled", "Warmup",
+                           "Postponed", "Delayed"}
         for g in today_games + tomorrow_games:
             ht = g.get("home_team", "")
             at = g.get("away_team", "")
             if not ht or not at:
                 continue
             st = g.get("status", "")
-            if st and st not in ("Preview", "Pre-Game", "Scheduled", "Warmup", ""):
+            if st and st not in _ALLOWED_STATUS:
+                _log(f"Skip {at}@{ht} status={st!r}")
                 continue
             try:
                 pred = predict_game(ht, at, team_stats, model, injuries=injuries)
+                hw   = pred.get("home_win_prob", 0.5)
+                _log(f"  {at}@{ht}: home win prob={hw:.1%}")
                 gk   = pred["game_key"]
-                orow = odds_by_game.get(gk) or odds_by_game.get(f"{at}@{ht}")
+                # Try exact key then reversed
+                orow = (odds_by_game.get(gk)
+                        or odds_by_game.get(f"{at}@{ht}")
+                        or odds_by_game.get(f"{ht}@{at}"))
                 gb   = build_game_bets(g, pred, orow)
                 all_bets.extend(gb)
+                _log(f"  bets for {gk}: {len(gb)}")
             except Exception as e:
                 _log(f"Prediction error {ht} vs {at}: {e}")
+        _mp.MIN_VALUE_EDGE = _orig_edge
         _log(f"Game bets generated: {len(all_bets)}")
 
         _phase(5)
@@ -549,6 +604,78 @@ def api_sms_send():
         return jsonify({"ok": True, "msg": "SMS sent"})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
+
+
+@app.route("/api/live-scores")
+def api_live_scores():
+    """Poll MLB Stats API for today's in-progress / final game scores."""
+    try:
+        import statsapi as mlbstatsapi
+        today = datetime.date.today().strftime("%m/%d/%Y")
+        raw = mlbstatsapi.schedule(start_date=today, end_date=today) or []
+        games = []
+        for g in raw:
+            status = g.get("status", "")
+            games.append({
+                "game_pk":     g.get("game_id"),
+                "home_team":   g.get("home_name", ""),
+                "away_team":   g.get("away_name", ""),
+                "home_score":  g.get("home_score"),
+                "away_score":  g.get("away_score"),
+                "status":      status,
+                "inning":      g.get("current_inning", ""),
+                "inning_half": g.get("inning_state", ""),
+                "game_key":    f"{g.get('away_name','')}@{g.get('home_name','')}",
+            })
+        return jsonify({"ok": True, "games": games})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e), "games": []})
+
+
+# ─── Live-score background watcher ───────────────────────────────────────────
+_live_score_timer = None
+_LIVE_SCORE_INTERVAL = 120  # seconds (2 min)
+
+
+def _poll_live_scores():
+    """Runs in background: updates live scores and auto-resolves completed games."""
+    global _live_score_timer
+    try:
+        import statsapi as mlbstatsapi
+        today = datetime.date.today().strftime("%m/%d/%Y")
+        raw = mlbstatsapi.schedule(start_date=today, end_date=today) or []
+        live = [g for g in raw if g.get("status") in
+                ("In Progress", "Final", "Game Over", "Completed Early")]
+        with _lock:
+            _state["live_scores"] = {
+                _norm_gk(f"{g.get('away_name','')}@{g.get('home_name','')}"): {
+                    "home_score":  g.get("home_score"),
+                    "away_score":  g.get("away_score"),
+                    "status":      g.get("status"),
+                    "inning":      g.get("current_inning", ""),
+                    "inning_half": g.get("inning_state", ""),
+                }
+                for g in live
+            }
+        # Auto-resolve finished games (non-blocking, errors suppressed)
+        if any(g.get("status") in ("Final", "Game Over", "Completed Early") for g in live):
+            try:
+                from models.mlb_predictor import resolve_game_outcomes
+                n = resolve_game_outcomes(days_back=1)
+                if n:
+                    print(f"[live-scores] Auto-resolved {n} predictions")
+            except Exception as exc:
+                print(f"[live-scores] resolve error: {exc}")
+    except Exception as exc:
+        print(f"[live-scores] poll error: {exc}")
+    finally:
+        _live_score_timer = threading.Timer(_LIVE_SCORE_INTERVAL, _poll_live_scores)
+        _live_score_timer.daemon = True
+        _live_score_timer.start()
+
+
+# Start live-score polling immediately
+_poll_live_scores()
 
 
 if __name__ == "__main__":
