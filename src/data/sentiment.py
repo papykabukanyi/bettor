@@ -118,20 +118,43 @@ def score_texts(texts: list[str], batch_size: int = 16) -> list[float]:
 
 
 def _keyword_sentiment(text: str) -> float:
-    """Simple lexicon-based sentiment as fallback."""
-    positive = {"win", "wins", "great", "amazing", "excellent", "hot", "fire",
-                "streak", "dominant", "crushing", "beast", "clutch", "ace",
-                "comeback", "solid", "on fire", "rolling", "strong", "shutdown",
-                "perfect", "lights out", "no hitter", "homer", "blast", "bomb"}
-    negative = {"loss", "losses", "terrible", "awful", "slump", "cold", "injury",
-                "injured", "out", "disabled", "struggling", "bad", "horrible",
-                "worst", "can't hit", "giving up", "collapse", "blown", "blew",
-                "ejected", "benched", "scratched", "day to day", "dl", "il"}
-    lower  = text.lower()
-    words  = set(re.findall(r"\b\w+\b", lower))
-    pos    = sum(1 for w in positive if w in lower)
-    neg    = sum(1 for w in negative if w in lower)
-    total  = pos + neg
+    """Extended MLB-specific lexicon-based sentiment as fallback."""
+    positive = {
+        # performance
+        "win", "wins", "won", "great", "amazing", "excellent", "elite",
+        "hot", "fire", "streak", "dominant", "dominates", "crushing",
+        "beast", "clutch", "ace", "comeback", "solid", "rolling", "strong",
+        "shutdown", "perfect", "lights out", "no hitter", "no-hitter",
+        "homer", "blast", "bomb", "dinger", "grand slam", "cycle",
+        "rbi", "walk-off", "walkoff", "saves", "efficient", "dominant",
+        # form
+        "on fire", "in form", "top form", "prime", "healthy", "activated",
+        "returns", "back", "cleared", "ready", "available", "confident",
+        "extension", "career high", "record", "breakout",
+        # stats
+        "strikeout", "strikeouts", "shutout", "complete game",
+        "batting average", "home run", "home runs",
+    }
+    negative = {
+        # results
+        "loss", "losses", "lost", "terrible", "awful", "slump", "cold",
+        "injury", "injured", "out", "disabled", "struggling", "bad",
+        "horrible", "worst", "giving up", "collapse", "blown", "blew",
+        "ejected", "benched", "scratched", "day to day", "dl", "il",
+        # health
+        "strained", "strain", "sprained", "sprain", "fracture", "fractured",
+        "surgery", "procedure", "rehab", "rehabbing", "shut down", "placed on",
+        "placed", "hamstring", "oblique", "elbow", "shoulder", "wrist",
+        "back pain", "side session", "limited", "questionable", "doubtful",
+        "missed", "skipped", "unable", "won't pitch", "not available",
+        # form
+        "rough", "blown save", "walks", "wild", "inconsistent", "struggling",
+        "early exit", "knocked out", "rocked", "shelled", "ineffective",
+    }
+    lower = text.lower()
+    pos   = sum(1 for w in positive if w in lower)
+    neg   = sum(1 for w in negative if w in lower)
+    total = pos + neg
     if total == 0:
         return 0.0
     return round((pos - neg) / total, 3)
@@ -228,96 +251,153 @@ def get_reddit_sentiment(entity: str, entity_type: str = "team",
 
 # ─── News API sentiment ───────────────────────────────────────────────────────
 
+_NEWS_STOP = {
+    "that", "this", "they", "with", "have", "from", "will", "game",
+    "baseball", "team", "player", "said", "their", "just", "been",
+    "would", "could", "should", "when", "what", "about", "more",
+    "also", "after", "into", "over", "first", "season", "last",
+    "year", "week", "time", "some", "were", "been", "than",
+}
+
+
+def _news_fetch_articles(query: str, days_back: int = 7,
+                          page_size: int = 100) -> list[dict]:
+    """
+    Single NewsAPI /everything call.  Returns raw article dicts or [].
+    Handles 426 (plan limit) and other errors gracefully.
+    """
+    global _NEWS_FAILED
+    url    = "https://newsapi.org/v2/everything"
+    params = {
+        "q":          query,
+        "language":   "en",
+        "searchIn":   "title,description",
+        "sortBy":     "publishedAt",
+        "pageSize":   min(int(page_size), 100),
+        "from":       (datetime.date.today() - datetime.timedelta(days=days_back)).isoformat(),
+        "apiKey":     NEWS_API_KEY,
+    }
+    try:
+        resp = requests.get(url, params=params, timeout=12)
+        if resp.status_code == 426:   # paid plan required
+            _NEWS_FAILED = True
+            return []
+        if resp.status_code == 429:   # rate limited
+            return []
+        if resp.status_code != 200:
+            print(f"[sentiment] NewsAPI status {resp.status_code} for: {query[:60]}")
+            return []
+        return resp.json().get("articles", [])
+    except Exception as e:
+        print(f"[sentiment] NewsAPI fetch error: {e}")
+        return []
+
+
 def get_news_sentiment(entity: str, entity_type: str = "team") -> dict:
     """
-    Fetch recent news headlines via NewsAPI and score their sentiment.
-    Returns {score, volume, keywords, source, articles}.
+    Fetch recent news via NewsAPI with multiple targeted queries and score
+    sentiment using HuggingFace DistilBERT (or keyword fallback).
+
+    Strategy (no Reddit, News-only):
+      Query 1 — general performance/results:  "<entity>" AND (MLB OR baseball)
+      Query 2 — injury / availability news:   "<entity>" AND (injury OR IL OR scratch)
+      Query 3 — stats / prop context (players only):
+                 "<entity>" AND (strikeout OR "home run" OR hits OR RBI OR stats)
+
+    Up to 100 articles per query, de-duplicated by URL.
+    Lookback: 7 days (vs prior 3).
     """
     global _NEWS_FAILED
     if _NEWS_FAILED or not NEWS_API_KEY or NEWS_API_KEY.startswith("YOUR_"):
         return {}
 
-    # MLB team names work better with "Yankees" vs "New York Yankees" in queries
-    search_q = entity.split()[-1] if entity_type == "team" else entity
-    # Add "MLB" context to avoid cross-sport confusion
-    query = f"{search_q} MLB baseball"
+    from collections import Counter
 
-    url    = "https://newsapi.org/v2/everything"
-    params = {
-        "q":          query,
-        "language":   "en",
-        "sortBy":     "publishedAt",
-        "pageSize":   20,
-        "from":       (datetime.date.today() - datetime.timedelta(days=3)).isoformat(),
-        "apiKey":     NEWS_API_KEY,
-    }
-    try:
-        resp = requests.get(url, params=params, timeout=10)
-        if resp.status_code == 426:  # Plan upgrade required
-            _NEWS_FAILED = True
-            return {}
-        if resp.status_code != 200:
-            return {}
-        data = resp.json()
-        articles = data.get("articles", [])
-        if not articles:
-            return {}
+    # Build entity token — for teams use last word ("Yankees"), for players use full name
+    if entity_type == "team":
+        short = entity.split()[-1]   # "New York Yankees" → "Yankees"
+        q_general  = f'"{short}" AND (MLB OR baseball)'
+        q_injury   = f'"{short}" AND (injury OR injured OR IL OR scratched OR "day to day")'
+        queries    = [q_general, q_injury]
+    else:
+        # Player: use quoted full name for precision
+        q_general  = f'"{entity}" AND (MLB OR baseball)'
+        q_injury   = f'"{entity}" AND (injury OR injured OR IL OR scratched OR limited)'
+        q_stats    = (f'"{entity}" AND '
+                      f'(strikeout OR "home run" OR hits OR RBI OR stats OR performance)')
+        queries    = [q_general, q_injury, q_stats]
 
-        texts = [
-            f"{a.get('title','')} {a.get('description','')}"
-            for a in articles
-        ]
-        scores   = score_texts(texts)
-        avg_score = round(sum(scores) / len(scores), 4) if scores else 0.0
+    # ── Fetch + de-duplicate ──────────────────────────────────────────────
+    seen_urls: set[str] = set()
+    all_articles: list[dict] = []
 
-        # Collect rich article data for DB
-        article_rows = []
-        for a, s in zip(articles, scores):
-            article_rows.append({
-                "sport":       "mlb",
-                "team":        entity,
-                "headline":    a.get("title", "")[:500],
-                "description": a.get("description", "")[:1000],
-                "url":         a.get("url", "")[:500],
-                "source_name": (a.get("source") or {}).get("name", "")[:100],
-                "sentiment":   round(s, 3),
-                "published_at": a.get("publishedAt"),
-            })
+    for q in queries:
+        if _NEWS_FAILED:
+            break
+        raw = _news_fetch_articles(q, days_back=7, page_size=100)
+        for a in raw:
+            url_ = a.get("url", "")
+            if url_ and url_ not in seen_urls:
+                seen_urls.add(url_)
+                all_articles.append(a)
 
-        # Save to DB
-        try:
-            from data.db import save_news_articles
-            save_news_articles(article_rows)
-        except Exception:
-            pass
-
-        all_text = " ".join(texts).lower()
-        words    = re.findall(r"\b[a-z]{4,}\b", all_text)
-        from collections import Counter
-        stop     = {"that", "this", "they", "with", "have", "from", "will", "game",
-                    "baseball", "team", "player", "said", "their", "just", "been"}
-        freq     = Counter(w for w in words if w not in stop)
-        keywords = ", ".join(w for w, _ in freq.most_common(8))
-
-        return {
-            "score":    avg_score,
-            "volume":   len(articles),
-            "keywords": keywords,
-            "source":   "news",
-            "articles": article_rows[:5],
-        }
-    except Exception as e:
-        print(f"[sentiment] News sentiment error for {entity}: {e}")
+    if not all_articles:
         return {}
+
+    # ── Score all texts ───────────────────────────────────────────────────
+    texts  = [
+        f"{a.get('title','')} {a.get('description','')}"
+        for a in all_articles
+    ]
+    scores     = score_texts(texts)
+    avg_score  = round(sum(scores) / len(scores), 4) if scores else 0.0
+
+    # ── Persist articles to DB ────────────────────────────────────────────
+    article_rows = []
+    for a, s in zip(all_articles, scores):
+        article_rows.append({
+            "sport":       "mlb",
+            "team":        entity,
+            "headline":    a.get("title", "")[:500],
+            "description": a.get("description", "")[:1000],
+            "url":         a.get("url", "")[:500],
+            "source_name": (a.get("source") or {}).get("name", "")[:100],
+            "sentiment":   round(s, 3),
+            "published_at": a.get("publishedAt"),
+        })
+    try:
+        from data.db import save_news_articles
+        save_news_articles(article_rows)
+    except Exception:
+        pass
+
+    # ── Top keywords ──────────────────────────────────────────────────────
+    all_text = " ".join(texts).lower()
+    words    = re.findall(r"\b[a-z]{4,}\b", all_text)
+    freq     = Counter(w for w in words if w not in _NEWS_STOP)
+    keywords = ", ".join(w for w, _ in freq.most_common(10))
+
+    print(f"[sentiment] News: {entity!r} → {len(all_articles)} articles "
+          f"({len(queries)} queries), score={avg_score:+.3f}")
+
+    return {
+        "score":    avg_score,
+        "volume":   len(all_articles),
+        "keywords": keywords,
+        "source":   "news",
+        "articles": article_rows[:8],   # top-8 for display
+    }
 
 
 # ─── Combined team / player sentiment ────────────────────────────────────────
 
 def get_team_sentiment(team_name: str) -> dict:
     """
-    Get combined sentiment for a team from Reddit + News.
-    Saves results to DB. Returns {reddit, news, combined} score dict.
+    Get sentiment for a team using NewsAPI (Reddit used automatically when
+    credentials are configured; silently skipped otherwise).
+    Returns {reddit, news, combined} score dict.
     """
+    # Reddit: only runs when real credentials are set
     reddit_data = get_reddit_sentiment(team_name, entity_type="team")
     news_data   = get_news_sentiment(team_name, entity_type="team")
 
@@ -332,10 +412,9 @@ def get_team_sentiment(team_name: str) -> dict:
 
     combined = 0.0
     if scores:
-        total_w   = sum(weights)
-        combined  = round(sum(s * w for s, w in zip(scores, weights)) / total_w, 4)
+        total_w  = sum(weights)
+        combined = round(sum(s * w for s, w in zip(scores, weights)) / total_w, 4)
 
-    # Persist
     try:
         from data.db import save_sentiment
         if reddit_data:
@@ -364,7 +443,7 @@ def get_team_sentiment(team_name: str) -> dict:
 
 
 def get_player_sentiment(player_name: str) -> dict:
-    """Get combined sentiment for a player from Reddit + News."""
+    """Get combined sentiment for a player from NewsAPI (+ Reddit when configured)."""
     reddit_data = get_reddit_sentiment(player_name, entity_type="player", post_limit=20)
     news_data   = get_news_sentiment(player_name, entity_type="player")
 
@@ -656,8 +735,8 @@ def get_player_prop_signal(
 
     # ── 5. Blend: 85 % historical + 15 % sentiment nudge ─────────────────
     # Positive sentiment → slightly more likely OVER.
-    # Scale: sentiment score ±1.0 maps to ±8 % probability swing.
-    sentiment_adj = sentiment_score * 0.08
+    # Scale: sentiment score ±1.0 maps to ±12 % swing (boosted: News is sole source).
+    sentiment_adj = sentiment_score * 0.12
     final_prob    = max(0.10, min(0.90, hist_prob + sentiment_adj))
 
     # ── 6. Build human-readable rationale ────────────────────────────────
