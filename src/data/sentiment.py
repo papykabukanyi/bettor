@@ -21,8 +21,16 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from config import NEWS_API_KEY, REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET, REDDIT_USER_AGENT, HF_API_KEY
 
 # ─── Hugging Face Inference API ──────────────────────────────────────────────
-_HF_MODEL   = "distilbert-base-uncased-finetuned-sst-2-english"
-_HF_API_URL = f"https://api-inference.huggingface.co/models/{_HF_MODEL}"
+# HF changed to a new router endpoint in 2025; try both bases in order
+_HF_MODELS = [
+    "cardiffnlp/twitter-roberta-base-sentiment-latest",
+    "distilbert-base-uncased-finetuned-sst-2-english",
+    "ProsusAI/finbert",
+]
+_HF_API_BASES = [
+    "https://router.huggingface.co/hf-inference/models",
+    "https://api-inference.huggingface.co/models",
+]
 
 # ─── Circuit breakers ────────────────────────────────────────────────────────
 _REDDIT_FAILED   = False
@@ -75,45 +83,83 @@ def _team_subreddit(team_name: str) -> str:
 
 # ─── Hugging Face sentiment scoring ─────────────────────────────────────────
 
+def _hf_parse_scores(results: list, model: str) -> list[float]:
+    """Parse HF inference API response into [-1, +1] scores."""
+    scores = []
+    for r in results:
+        if isinstance(r, list):
+            # SST-2 / finbert style: [{label, score}, ...]
+            pos_labels = {"POSITIVE", "positive", "POS", "pos", "LABEL_2", "label_2"}
+            neg_labels = {"NEGATIVE", "negative", "NEG", "neg", "LABEL_0", "label_0"}
+            pos = next((x["score"] for x in r if x["label"] in pos_labels), None)
+            neg = next((x["score"] for x in r if x["label"] in neg_labels), None)
+            if pos is not None:
+                scores.append(pos * 2 - 1)
+            elif neg is not None:
+                scores.append(-(neg * 2 - 1))
+            else:
+                scores.append(0.0)
+        elif isinstance(r, dict) and "label" in r:
+            lbl = r.get("label", "").upper()
+            sc  = r.get("score", 0.5)
+            if lbl in ("POSITIVE", "POS", "LABEL_2"):
+                scores.append(sc * 2 - 1)
+            elif lbl in ("NEGATIVE", "NEG", "LABEL_0"):
+                scores.append(-(sc * 2 - 1))
+            else:
+                scores.append(0.0)
+        else:
+            scores.append(0.0)
+    return scores
+
+
 def score_texts(texts: list[str], batch_size: int = 16) -> list[float]:
     """
-    Score a list of texts using DistilBERT SST-2 via HF Inference API.
-    Returns a list of sentiment scores in [-1, 1].
-    +1 = very positive, -1 = very negative.
-    Falls back to simple keyword scoring if HF API is unavailable.
+    Score texts via HF Inference API (tries multiple models).
+    Returns scores in [-1, +1].  Falls back to keyword scoring.
     """
     global _HF_FAILED
     if not texts:
         return []
 
-    # Try HF Inference API
     if HF_API_KEY and not _HF_FAILED:
-        try:
-            scores = []
-            headers = {"Authorization": f"Bearer {HF_API_KEY}"}
-            for i in range(0, len(texts), batch_size):
-                batch = [t[:512] for t in texts[i:i + batch_size]]
-                resp  = requests.post(_HF_API_URL, headers=headers,
-                                      json={"inputs": batch}, timeout=15)
-                if resp.status_code == 200:
-                    results = resp.json()
-                    for r in results:
-                        if isinstance(r, list):
-                            pos = next((x["score"] for x in r if x["label"] == "POSITIVE"), 0.5)
-                            scores.append(pos * 2 - 1)  # [0,1] → [-1,+1]
+        headers = {"Authorization": f"Bearer {HF_API_KEY}"}
+        for base in _HF_API_BASES:
+            for model in _HF_MODELS:
+                url = f"{base}/{model}"
+                try:
+                    all_scores: list[float] = []
+                    failed = False
+                    for i in range(0, len(texts), batch_size):
+                        batch = [t[:512] for t in texts[i:i + batch_size]]
+                        payload = {"inputs": batch, "options": {"wait_for_model": True}}
+                        resp = requests.post(url, headers=headers, json=payload, timeout=30)
+                        if resp.status_code == 200:
+                            raw = resp.json()
+                            # Normalize flat format: [[d1, d2, ...]] → [[d1], [d2], ...]
+                            if (isinstance(raw, list) and len(raw) == 1
+                                    and isinstance(raw[0], list)
+                                    and len(raw[0]) == len(batch)
+                                    and isinstance(raw[0][0], dict)
+                                    and "label" in raw[0][0]):
+                                raw = [[x] for x in raw[0]]
+                            parsed = _hf_parse_scores(raw, model)
+                            all_scores.extend(parsed)
+                        elif resp.status_code == 503:
+                            print(f"[sentiment] HF model {model} still loading — trying next")
+                            failed = True
+                            break
                         else:
-                            scores.append(0.0)
-                else:
-                    print(f"[sentiment] HF API status {resp.status_code} — falling back to keyword scoring")
-                    _HF_FAILED = True
-                    break
-            if len(scores) == len(texts):
-                return scores
-        except Exception as e:
-            print(f"[sentiment] HF API error: {e} — using keyword fallback")
-            _HF_FAILED = True
+                            failed = True
+                            break
+                    if not failed and len(all_scores) == len(texts):
+                        return all_scores
+                except Exception:
+                    pass
 
-    # ── Keyword fallback (no external API needed) ─────────────────────────
+        print("[sentiment] HF unavailable — using keyword fallback")
+        _HF_FAILED = True
+
     return [_keyword_sentiment(t) for t in texts]
 
 
