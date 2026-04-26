@@ -235,6 +235,12 @@ def _run_analysis():
         _log("Fetching injury reports...")
         injuries = []
         injured_names = set()
+        def _is_out(status: str) -> bool:
+            s = (status or "").lower()
+            return any(k in s for k in (
+                "out", "il", "dl", "inj", "dtd", "day-to-day",
+                "suspended", "inactive", "placed", "covid",
+            ))
         try:
             from data.injury_fetcher import fetch_all_injuries
             from data.db import save_injuries
@@ -242,10 +248,18 @@ def _run_analysis():
             mlb_inj = raw_inj.get("mlb", [])
             save_injuries("mlb", mlb_inj)
             injuries = mlb_inj
-            injured_names = {i.get("player_name", "") for i in injuries
-                             if i.get("status", "").lower() in ("out", "il", "dl", "dtd")}
         except Exception as e:
             _log(f"Injuries skipped: {e}")
+
+        if not injuries:
+            try:
+                from data.db import get_injuries
+                injuries = get_injuries(sport="mlb")
+                _log(f"Injuries loaded from DB: {len(injuries)}")
+            except Exception as e:
+                _log(f"Injuries DB fallback skipped: {e}")
+
+        injured_names = {i.get("player_name", "") for i in injuries if _is_out(i.get("status", ""))}
 
         _phase(3)
         _log("Fetching live odds...")

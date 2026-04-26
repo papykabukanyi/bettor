@@ -8,7 +8,9 @@ import sys
 import datetime
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SRC = os.path.join(ROOT, "src")
 sys.path.insert(0, ROOT)
+sys.path.insert(0, SRC)
 
 
 def _parse_days(argv) -> int:
