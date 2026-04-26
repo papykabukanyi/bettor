@@ -135,8 +135,20 @@ CREATE TABLE IF NOT EXISTS prop_history (
     under_prob      NUMERIC(5,4),
     recommendation  VARCHAR(30),
     stats_json      JSONB,
+    actual_value    NUMERIC(6,2),
+    outcome         VARCHAR(20)  DEFAULT 'PENDING',
+    resolved_at     TIMESTAMPTZ,
     detected_at     TIMESTAMPTZ DEFAULT NOW()
 );
+-- Add outcome columns to existing prop_history tables (idempotent)
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_name='prop_history' AND column_name='outcome') THEN
+        ALTER TABLE prop_history ADD COLUMN actual_value NUMERIC(6,2);
+        ALTER TABLE prop_history ADD COLUMN outcome VARCHAR(20) DEFAULT 'PENDING';
+        ALTER TABLE prop_history ADD COLUMN resolved_at TIMESTAMPTZ;
+    END IF;
+END $$;
 
 -- ── NEW: player profiles (BallDontLie, SportsData.io, TheSportsDB) ──
 CREATE TABLE IF NOT EXISTS player_profiles (
@@ -1439,6 +1451,107 @@ def get_performance_stats() -> dict:
     except Exception as e:
         print(f"[db] get_performance_stats error: {e}")
         return {}
+    finally:
+        conn.close()
+
+
+def get_prop_performance_stats() -> dict:
+    """Return prop hit-rate breakdown by prop_type for last 90 days."""
+    conn = get_conn()
+    if conn is None:
+        return {}
+    try:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        # Overall prop stats
+        cur.execute("""
+            SELECT
+                COUNT(*) FILTER (WHERE outcome='WIN')     AS wins,
+                COUNT(*) FILTER (WHERE outcome='LOSS')    AS losses,
+                COUNT(*) FILTER (WHERE outcome='PUSH')    AS pushes,
+                COUNT(*) FILTER (WHERE outcome='PENDING') AS pending,
+                COUNT(*) AS total,
+                ROUND(AVG(CASE WHEN outcome='WIN' THEN 1.0
+                               WHEN outcome='LOSS' THEN 0.0 END)*100, 1) AS hit_rate
+            FROM prop_history
+            WHERE game_date >= CURRENT_DATE - INTERVAL '90 days'
+        """)
+        row = cur.fetchone()
+        stats = dict(row) if row else {}
+        # By prop type
+        cur.execute("""
+            SELECT prop_type,
+                   recommendation,
+                   COUNT(*) FILTER (WHERE outcome='WIN')  AS wins,
+                   COUNT(*) FILTER (WHERE outcome='LOSS') AS losses,
+                   COUNT(*) AS total,
+                   ROUND(AVG(CASE WHEN outcome='WIN' THEN 1.0
+                                  WHEN outcome='LOSS' THEN 0.0 END)*100, 1) AS hit_rate
+            FROM prop_history
+            WHERE game_date >= CURRENT_DATE - INTERVAL '90 days'
+              AND outcome IN ('WIN','LOSS')
+            GROUP BY prop_type, recommendation
+            ORDER BY total DESC
+        """)
+        stats["by_prop_type"] = [dict(r) for r in cur.fetchall()]
+        # Last 30 days trend
+        cur.execute("""
+            SELECT game_date::text AS date,
+                   COUNT(*) FILTER (WHERE outcome='WIN')  AS wins,
+                   COUNT(*) FILTER (WHERE outcome='LOSS') AS losses
+            FROM prop_history
+            WHERE game_date >= CURRENT_DATE - INTERVAL '30 days'
+              AND outcome IN ('WIN','LOSS')
+            GROUP BY game_date ORDER BY game_date
+        """)
+        stats["daily_trend"] = [dict(r) for r in cur.fetchall()]
+        return stats
+    except Exception as e:
+        print(f"[db] get_prop_performance_stats error: {e}")
+        return {}
+    finally:
+        conn.close()
+
+
+def get_pending_props(days_back: int = 3) -> list:
+    """Return PENDING prop picks from the last N days for resolution."""
+    conn = get_conn()
+    if conn is None:
+        return []
+    try:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("""
+            SELECT id, player_name, team, game_date::text, prop_type, line,
+                   over_prob, under_prob, recommendation, stats_json
+            FROM prop_history
+            WHERE outcome = 'PENDING'
+              AND game_date >= CURRENT_DATE - (%s * INTERVAL '1 day')
+              AND game_date < CURRENT_DATE
+            ORDER BY game_date DESC
+        """, (days_back,))
+        return [dict(r) for r in cur.fetchall()]
+    except Exception as e:
+        print(f"[db] get_pending_props error: {e}")
+        return []
+    finally:
+        conn.close()
+
+
+def update_prop_outcome(prop_id: int, actual_value: float, outcome: str):
+    """Set actual_value + WIN/LOSS/PUSH/PENDING on a prop_history row."""
+    conn = get_conn()
+    if conn is None:
+        return
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            UPDATE prop_history
+            SET actual_value = %s, outcome = %s, resolved_at = NOW()
+            WHERE id = %s
+        """, (actual_value, outcome, prop_id))
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        print(f"[db] update_prop_outcome error: {e}")
     finally:
         conn.close()
 

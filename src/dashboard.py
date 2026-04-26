@@ -206,13 +206,27 @@ def _run_analysis():
         today_str    = datetime.date.today().isoformat()
         tomorrow_str = (datetime.date.today() + datetime.timedelta(days=1)).isoformat()
 
+        # Statuses that mean the game is finished or currently in-progress
+        # (should not appear in the "upcoming" display tab)
+        _DONE_STATUSES = {
+            "final", "game over", "f", "completed early", "completed",
+            "in progress", "live", "manager challenge", "delay", "delayed",
+            "cancelled", "suspended",
+        }
+
         _phase(0)
         _log("Fetching MLB schedule...")
         from data.mlb_fetcher import get_schedule_range
         all_games = get_schedule_range(days_ahead=2)
         today_games    = [g for g in all_games if g.get("date", "") == today_str]
         tomorrow_games = [g for g in all_games if g.get("date", "") == tomorrow_str]
-        _log(f"Schedule: {len(today_games)} today, {len(tomorrow_games)} tomorrow")
+
+        # Upcoming = not yet started; used for display only
+        upcoming_today    = [g for g in today_games
+                             if g.get("status", "").lower() not in _DONE_STATUSES]
+        upcoming_tomorrow = tomorrow_games  # tomorrow games can't be past
+        _log(f"Schedule: {len(today_games)} today ({len(upcoming_today)} upcoming), "
+             f"{len(tomorrow_games)} tomorrow")
 
         _phase(1)
         _log("Loading team stats and model...")
@@ -385,8 +399,9 @@ def _run_analysis():
         except Exception as e:
             _log(f"DB save error: {e}")
 
-        today_cards    = [_build_card(g, all_bets, all_props, "TODAY")    for g in today_games]
-        tomorrow_cards = [_build_card(g, all_bets, all_props, "TOMORROW") for g in tomorrow_games]
+        # Display only upcoming games; past/live ones were predicted & saved for accuracy tracking
+        today_cards    = [_build_card(g, all_bets, all_props, "TODAY")    for g in upcoming_today]
+        tomorrow_cards = [_build_card(g, all_bets, all_props, "TOMORROW") for g in upcoming_tomorrow]
 
         def _card_score(c):
             s = [b["safety"] for b in [c.get("moneyline"), c.get("run_line"), c.get("total")] if b]
@@ -420,7 +435,16 @@ def _run_analysis():
                 "player_props":        _clean(all_props_flat),
             })
 
-        _log(f"Analysis complete — {len(today_cards)} today, {len(tomorrow_cards)} tomorrow, {len(all_props_flat)} props")
+        # Auto-resolve outcomes for recent past predictions + props
+        try:
+            from models.mlb_predictor import resolve_game_outcomes, resolve_prop_outcomes
+            n_games = resolve_game_outcomes(days_back=3)
+            n_props = resolve_prop_outcomes(days_back=3)
+            _log(f"Auto-resolved: {n_games} game predictions, {n_props} props")
+        except Exception as e:
+            _log(f"Auto-resolve skipped: {e}")
+
+        _log(f"Analysis complete — {len(today_cards)} today (upcoming), {len(tomorrow_cards)} tomorrow, {len(all_props_flat)} props")
 
     except Exception:
         err = traceback.format_exc()
@@ -509,6 +533,15 @@ def api_performance():
         return jsonify({"ok": False, "error": str(e)})
 
 
+@app.route("/api/prop-performance")
+def api_prop_performance():
+    try:
+        from data.db import get_prop_performance_stats
+        return jsonify({"ok": True, "stats": get_prop_performance_stats()})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
+
+
 @app.route("/api/predictions")
 def api_predictions():
     days    = int(request.args.get("days", 30))
@@ -524,9 +557,11 @@ def api_predictions():
 @app.route("/api/resolve-outcomes", methods=["POST"])
 def api_resolve_outcomes():
     try:
-        from models.mlb_predictor import resolve_game_outcomes
-        n = resolve_game_outcomes(days_back=3)
-        return jsonify({"ok": True, "resolved": n, "msg": f"Resolved {n} predictions"})
+        from models.mlb_predictor import resolve_game_outcomes, resolve_prop_outcomes
+        n_games = resolve_game_outcomes(days_back=3)
+        n_props = resolve_prop_outcomes(days_back=3)
+        return jsonify({"ok": True, "resolved_games": n_games, "resolved_props": n_props,
+                        "msg": f"Resolved {n_games} game predictions + {n_props} props"})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
 

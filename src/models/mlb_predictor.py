@@ -702,3 +702,144 @@ def resolve_game_outcomes(days_back: int = 3) -> int:
 
     print(f"[mlb_predictor] Resolved {resolved} predictions")
     return resolved
+
+
+# ─── Prop outcome resolution ──────────────────────────────────────────────────
+
+def resolve_prop_outcomes(days_back: int = 3) -> int:
+    """
+    Fetch actual boxscore stats for completed games and mark PENDING props
+    as WIN / LOSS / PUSH in prop_history.
+    Returns count of resolved props.
+    """
+    try:
+        import statsapi as mlbstatsapi
+    except ImportError:
+        return 0
+    try:
+        from data.db import get_pending_props, update_prop_outcome
+    except Exception:
+        return 0
+
+    # MLB stat_type → boxscore stat key (pitching vs batting)
+    _PITCH_KEYS = {
+        "strikeouts":    ("pitching", "strikeOuts"),
+        "k_per_9":       ("pitching", "strikeOuts"),
+        "walks":         ("pitching", "baseOnBalls"),
+        "innings_pitched": ("pitching", "inningsPitched"),
+        "hits_allowed":  ("pitching", "hits"),
+        "era":           ("pitching", "era"),
+    }
+    _BAT_KEYS = {
+        "hits":           ("batting", "hits"),
+        "home_runs":      ("batting", "homeRuns"),
+        "rbi":            ("batting", "rbi"),
+        "runs":           ("batting", "runs"),
+        "stolen_bases":   ("batting", "stolenBases"),
+        "total_bases":    ("batting", "totalBases"),
+        "batter_strikeouts": ("batting", "strikeOuts"),
+        "walks":          ("batting", "baseOnBalls"),
+        "doubles":        ("batting", "doubles"),
+    }
+
+    pending = get_pending_props(days_back=days_back)
+    if not pending:
+        return 0
+
+    # Group by game_date to batch schedule calls
+    from collections import defaultdict
+    by_date = defaultdict(list)
+    for p in pending:
+        by_date[p["game_date"]].append(p)
+
+    resolved = 0
+    today = et_today()
+
+    for date_str, props in by_date.items():
+        try:
+            schedule = mlbstatsapi.schedule(start_date=date_str, end_date=date_str)
+        except Exception:
+            continue
+
+        for game in schedule:
+            status = game.get("status", "")
+            if "final" not in status.lower() and "completed" not in status.lower():
+                continue
+            game_pk = game.get("game_id")
+            if not game_pk:
+                continue
+
+            # Fetch boxscore
+            try:
+                boxscore = mlbstatsapi.boxscore_data(game_pk)
+            except Exception:
+                continue
+
+            # Build player stat lookup  {player_name_lower: {stat_key: value}}
+            player_stats: dict[str, dict] = {}
+            for side in ("home", "away"):
+                players = (boxscore.get(side, {})
+                                   .get("players", {}))
+                for pid, pdata in players.items():
+                    pname = (pdata.get("person", {})
+                                  .get("fullName", "")).lower()
+                    if not pname:
+                        continue
+                    stats_raw = pdata.get("stats", {})
+                    player_stats[pname] = {
+                        "pitching": stats_raw.get("pitching", {}),
+                        "batting":  stats_raw.get("batting",  {}),
+                    }
+
+            # Match pending props for this date to this game
+            ht = game.get("home_name", "").lower()
+            at = game.get("away_name", "").lower()
+
+            for p in props:
+                pname_low  = (p.get("player_name") or "").lower()
+                team_low   = (p.get("team") or "").lower()
+                # Only process props for players in this game
+                if not (any(w in ht for w in team_low.split() if len(w) > 3) or
+                        any(w in at for w in team_low.split() if len(w) > 3)):
+                    continue
+                if pname_low not in player_stats:
+                    # Try partial match
+                    parts = pname_low.split()
+                    match = next((k for k in player_stats
+                                  if all(part in k for part in parts
+                                         if len(part) > 2)), None)
+                    if not match:
+                        continue
+                    pname_low = match
+
+                pstats     = player_stats[pname_low]
+                prop_type  = (p.get("prop_type") or "").lower()
+                line_val   = float(p.get("line") or 0)
+                rec        = (p.get("recommendation") or "OVER").upper()
+
+                # Look up the actual stat
+                stat_info = _PITCH_KEYS.get(prop_type) or _BAT_KEYS.get(prop_type)
+                if not stat_info:
+                    continue
+                stat_group, stat_key = stat_info
+                raw_val = pstats.get(stat_group, {}).get(stat_key)
+                if raw_val is None:
+                    continue
+                try:
+                    actual = float(raw_val)
+                except (ValueError, TypeError):
+                    continue
+
+                if actual > line_val:
+                    outcome = "WIN" if rec == "OVER" else "LOSS"
+                elif actual < line_val:
+                    outcome = "WIN" if rec == "UNDER" else "LOSS"
+                else:
+                    outcome = "PUSH"
+
+                update_prop_outcome(p["id"], actual, outcome)
+                resolved += 1
+
+    print(f"[mlb_predictor] Resolved {resolved} prop outcomes")
+    return resolved
+

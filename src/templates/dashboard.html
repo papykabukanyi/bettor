@@ -99,6 +99,8 @@ main{padding:20px;max-width:1400px;margin:0 auto}
 .badge-SAFE{background:rgba(37,99,235,.2);color:var(--accent)}
 .badge-MODERATE{background:rgba(202,138,4,.2);color:var(--yellow)}
 .badge-RISKY{background:rgba(220,38,38,.2);color:var(--red)}
+.badge-blue{background:rgba(37,99,235,.2);color:var(--accent)}
+.badge-purple{background:rgba(139,92,246,.2);color:#a78bfa}
 
 .matchup{display:flex;align-items:center;justify-content:space-between;gap:8px}
 .team-side{flex:1;min-width:0}
@@ -542,6 +544,22 @@ body.console-open main{padding-bottom:236px}
         </select>
       </div>
       <div id="pred-history-list"><div class="no-games">Loading…</div></div>
+    </div>
+
+    <!-- PROP PERFORMANCE -->
+    <div class="section-header" style="margin-top:28px">
+      <span class="section-title">&#127919; Prop Bet Performance</span>
+      <span style="font-size:.78rem;color:var(--muted)">Auto-updated after each game</span>
+    </div>
+    <div class="perf-grid" id="prop-perf-stats" style="margin-bottom:16px"></div>
+    <h3 style="font-size:.9rem;font-weight:600;margin-bottom:10px">Hit Rate by Prop Type</h3>
+    <div style="overflow-x:auto;border:1px solid var(--border);border-radius:var(--radius)">
+      <table class="by-type-table" id="prop-type-table">
+        <thead><tr>
+          <th>Prop Type</th><th>Direction</th><th>W</th><th>L</th><th>Total</th><th>Hit Rate</th>
+        </tr></thead>
+        <tbody id="prop-type-tbody"></tbody>
+      </table>
     </div>
   </div>
 
@@ -1107,18 +1125,18 @@ function loadPerformance() {
     if (!d.ok) { return; }
     const s = d.stats||{};
     document.getElementById('perf-stats').innerHTML = `
-      <div class="perf-card"><div class="perf-val perf-win">${s.wins||0}</div><div class="perf-label">Wins</div></div>
-      <div class="perf-card"><div class="perf-val perf-loss">${s.losses||0}</div><div class="perf-label">Losses</div></div>
+      <div class="perf-card"><div class="perf-val perf-win">${s.wins||0}</div><div class="perf-label">Game Wins</div></div>
+      <div class="perf-card"><div class="perf-val perf-loss">${s.losses||0}</div><div class="perf-label">Game Losses</div></div>
       <div class="perf-card"><div class="perf-val perf-pend">${s.pushes||0}</div><div class="perf-label">Pushes</div></div>
       <div class="perf-card"><div class="perf-val perf-pend">${s.pending||0}</div><div class="perf-label">Pending</div></div>
-      <div class="perf-card"><div class="perf-val perf-rate">${s.hit_rate!=null?Math.round(s.hit_rate*100)+'%':'—'}</div><div class="perf-label">Hit Rate</div></div>
+      <div class="perf-card"><div class="perf-val perf-rate">${s.hit_rate!=null?s.hit_rate+'%':'—'}</div><div class="perf-label">Hit Rate</div></div>
       <div class="perf-card"><div class="perf-val" style="font-size:1.2rem">${s.total||0}</div><div class="perf-label">Total Bets</div></div>
     `;
-    const byType = s.by_bet_type||{};
+    const byType = s.by_bet_type||[];
     const tbody = document.getElementById('by-type-tbody');
-    tbody.innerHTML = Object.entries(byType).map(([bt,v])=>`
+    tbody.innerHTML = byType.map(v=>`
       <tr>
-        <td>${bt.replace(/_/g,' ')}</td>
+        <td>${(v.bet_type||'').replace(/_/g,' ')}</td>
         <td style="color:var(--green)">${v.wins||0}</td>
         <td style="color:var(--red)">${v.losses||0}</td>
         <td>${v.pushes||0}</td>
@@ -1128,6 +1146,44 @@ function loadPerformance() {
     ).join('') || '<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:16px">No data yet.</td></tr>';
   });
   loadHistory();
+  loadPropPerformance();
+}
+
+function loadPropPerformance() {
+  fetch('/api/prop-performance').then(r=>r.json()).then(d=>{
+    if (!d.ok) return;
+    const s = d.stats||{};
+    const hitRateColor = s.hit_rate >= 55 ? 'var(--green)' : s.hit_rate >= 45 ? 'var(--yellow)' : 'var(--red)';
+    document.getElementById('prop-perf-stats').innerHTML = `
+      <div class="perf-card"><div class="perf-val perf-win">${s.wins||0}</div><div class="perf-label">Prop Wins</div></div>
+      <div class="perf-card"><div class="perf-val perf-loss">${s.losses||0}</div><div class="perf-label">Prop Losses</div></div>
+      <div class="perf-card"><div class="perf-val perf-pend">${s.pushes||0}</div><div class="perf-label">Pushes</div></div>
+      <div class="perf-card"><div class="perf-val perf-pend">${s.pending||0}</div><div class="perf-label">Pending</div></div>
+      <div class="perf-card"><div class="perf-val" style="color:${hitRateColor}">${s.hit_rate!=null?s.hit_rate+'%':'—'}</div><div class="perf-label">Prop Hit Rate</div></div>
+      <div class="perf-card"><div class="perf-val" style="font-size:1.2rem">${s.total||0}</div><div class="perf-label">Total Props</div></div>
+    `;
+    const byType = s.by_prop_type||[];
+    const tbody = document.getElementById('prop-type-tbody');
+    tbody.innerHTML = byType.map(v=>{
+      const hr = v.wins&&(v.wins+v.losses) ? Math.round(v.wins/(v.wins+v.losses)*100) : null;
+      const hrColor = hr>=55?'var(--green)':hr>=45?'var(--yellow)':'var(--red)';
+      return `<tr>
+        <td>${(v.prop_type||'').replace(/_/g,' ')}</td>
+        <td><span class="badge ${v.recommendation==='OVER'?'badge-blue':'badge-purple'}">${v.recommendation||'—'}</span></td>
+        <td style="color:var(--green)">${v.wins||0}</td>
+        <td style="color:var(--red)">${v.losses||0}</td>
+        <td>${v.total||0}</td>
+        <td style="color:${hrColor};font-weight:700">${hr!=null?hr+'%':'—'}</td>
+      </tr>`;
+    }).join('') || '<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:16px">No prop results yet — runs automatically after games finish.</td></tr>';
+  });
+}
+
+function resolveOutcomes() {
+  fetch('/api/resolve-outcomes',{method:'POST'}).then(r=>r.json()).then(d=>{
+    toast(d.msg||'Resolving…','info');
+    setTimeout(loadPerformance, 4000);
+  });
 }
 
 function loadHistory() {
@@ -1148,13 +1204,6 @@ function loadHistory() {
         <span class="pred-meta">${p.confidence?p.confidence+'% conf':''}</span>
       </div>`
     ).join('');
-  });
-}
-
-function resolveOutcomes() {
-  fetch('/api/resolve-outcomes',{method:'POST'}).then(r=>r.json()).then(d=>{
-    toast(d.msg||'Resolving…','info');
-    setTimeout(loadPerformance, 4000);
   });
 }
 
