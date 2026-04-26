@@ -513,26 +513,29 @@ def get_value_bets_history(days=30):
 # Injuries
 # ──────────────────────────────────────────────────────────────────────────────
 
-def save_injuries(sport, injuries):
-    """Replace injury records for a sport with fresh data."""
+def save_injuries(sport, injuries, keep_history: bool = False):
+    """Save injury records. When keep_history is True, do not delete old rows."""
     conn = get_conn()
     if conn is None:
         return
     try:
         cur = conn.cursor()
-        # Delete stale records for this sport (older than 12h)
-        cur.execute("""
-            DELETE FROM injury_reports
-            WHERE sport = %s AND fetched_at < NOW() - INTERVAL '12 hours'
-        """, (sport,))
+        if not keep_history:
+            # Delete stale records for this sport (older than 12h)
+            cur.execute("""
+                DELETE FROM injury_reports
+                WHERE sport = %s AND fetched_at < NOW() - INTERVAL '12 hours'
+            """, (sport,))
         for inj in injuries:
+            fetched_at = inj.get("fetched_at")
             cur.execute("""
                 INSERT INTO injury_reports
-                    (sport, team, player_name, status, description, injury_type)
-                VALUES (%s, %s, %s, %s, %s, %s)
+                    (sport, team, player_name, status, description, injury_type, fetched_at)
+                VALUES (%s, %s, %s, %s, %s, %s, COALESCE(%s, NOW()))
             """, (
                 sport, inj.get("team"), inj.get("player_name"),
                 inj.get("status"), inj.get("description"), inj.get("injury_type"),
+                fetched_at,
             ))
         conn.commit()
     except Exception as e:

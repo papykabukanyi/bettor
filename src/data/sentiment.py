@@ -261,7 +261,9 @@ _NEWS_STOP = {
 
 
 def _news_fetch_articles(query: str, days_back: int = 7,
-                          page_size: int = 100) -> list[dict]:
+                          page_size: int = 100,
+                          start_date: str = None,
+                          end_date: str = None) -> list[dict]:
     """
     Single NewsAPI /everything call.  Returns raw article dicts or [].
     Handles 426 (plan limit) and other errors gracefully.
@@ -274,9 +276,13 @@ def _news_fetch_articles(query: str, days_back: int = 7,
         "searchIn":   "title,description",
         "sortBy":     "publishedAt",
         "pageSize":   min(int(page_size), 100),
-        "from":       (datetime.date.today() - datetime.timedelta(days=days_back)).isoformat(),
         "apiKey":     NEWS_API_KEY,
     }
+    if start_date and end_date:
+        params["from"] = start_date
+        params["to"] = end_date
+    else:
+        params["from"] = (datetime.date.today() - datetime.timedelta(days=days_back)).isoformat()
     try:
         resp = requests.get(url, params=params, timeout=12)
         if resp.status_code == 426:   # paid plan required
@@ -387,6 +393,104 @@ def get_news_sentiment(entity: str, entity_type: str = "team") -> dict:
         "source":   "news",
         "articles": article_rows[:8],   # top-8 for display
     }
+
+
+def _parse_rss_items(xml_text: str) -> list[dict]:
+    """Basic RSS parser (title/description/link/pubDate)."""
+    try:
+        import xml.etree.ElementTree as ET
+        root = ET.fromstring(xml_text)
+        items = []
+        for item in root.findall(".//item"):
+            items.append({
+                "title": (item.findtext("title") or "").strip(),
+                "description": (item.findtext("description") or "").strip(),
+                "url": (item.findtext("link") or "").strip(),
+                "publishedAt": (item.findtext("pubDate") or "").strip(),
+                "source": {"name": "rss"},
+            })
+        return items
+    except Exception:
+        return []
+
+
+def _google_news_rss(query: str) -> list[dict]:
+    """Fallback: Google News RSS (recent headlines only)."""
+    try:
+        from urllib.parse import quote
+        q = quote(query)
+        url = f"https://news.google.com/rss/search?q={q}&hl=en-US&gl=US&ceid=US:en"
+        resp = requests.get(url, timeout=12, headers={"User-Agent": "Mozilla/5.0"})
+        if resp.status_code != 200:
+            return []
+        return _parse_rss_items(resp.text)
+    except Exception:
+        return []
+
+
+def fetch_news_history(entity: str, start_date: str, end_date: str,
+                       entity_type: str = "team") -> list[dict]:
+    """
+    Fetch historical news for an entity between start_date and end_date.
+    Uses NewsAPI /everything when available; falls back to Google News RSS.
+    Returns article rows (also saved to DB).
+    """
+    global _NEWS_FAILED
+
+    if entity_type == "team":
+        short = entity.split()[-1]
+        q_general = f'"{short}" AND (MLB OR baseball)'
+        q_injury  = f'"{short}" AND (injury OR injured OR IL OR scratched OR "day to day")'
+        queries   = [q_general, q_injury]
+    else:
+        q_general = f'"{entity}" AND (MLB OR baseball)'
+        q_injury  = f'"{entity}" AND (injury OR injured OR IL OR scratched OR limited)'
+        q_stats   = (f'"{entity}" AND '
+                     f'(strikeout OR "home run" OR hits OR RBI OR stats OR performance)')
+        queries   = [q_general, q_injury, q_stats]
+
+    seen_urls: set[str] = set()
+    all_articles: list[dict] = []
+
+    for q in queries:
+        raw = []
+        if NEWS_API_KEY and not _NEWS_FAILED:
+            raw = _news_fetch_articles(q, page_size=100,
+                                       start_date=start_date, end_date=end_date)
+        if not raw:
+            raw = _google_news_rss(q)
+        for a in raw:
+            url_ = a.get("url", "")
+            if url_ and url_ not in seen_urls:
+                seen_urls.add(url_)
+                all_articles.append(a)
+
+    if not all_articles:
+        return []
+
+    texts  = [f"{a.get('title','')} {a.get('description','')}" for a in all_articles]
+    scores = score_texts(texts)
+
+    article_rows = []
+    for a, s in zip(all_articles, scores):
+        article_rows.append({
+            "sport":       "mlb",
+            "team":        entity,
+            "headline":    a.get("title", "")[:500],
+            "description": a.get("description", "")[:1000],
+            "url":         a.get("url", "")[:500],
+            "source_name": (a.get("source") or {}).get("name", "")[:100],
+            "sentiment":   round(float(s), 3),
+            "published_at": a.get("publishedAt") or None,
+        })
+
+    try:
+        from data.db import save_news_articles
+        save_news_articles(article_rows)
+    except Exception:
+        pass
+
+    return article_rows
 
 
 # ─── Combined team / player sentiment ────────────────────────────────────────
