@@ -266,6 +266,82 @@ CREATE TABLE IF NOT EXISTS phone_numbers (
     active   BOOLEAN      DEFAULT TRUE,
     added_at TIMESTAMPTZ  DEFAULT NOW()
 );
+
+-- ── MLB Predictions: every prediction the bot makes ──
+CREATE TABLE IF NOT EXISTS predictions (
+    id              SERIAL PRIMARY KEY,
+    game_key        VARCHAR(200)  NOT NULL,
+    sport           VARCHAR(20)   DEFAULT 'mlb',
+    bet_type        VARCHAR(50),  -- 'moneyline','spread','total','f5','player_prop','parlay'
+    pick            VARCHAR(200),
+    line            NUMERIC(6,2),
+    odds_am         INTEGER,
+    dec_odds        NUMERIC(8,4),
+    model_prob      NUMERIC(5,4),
+    confidence      INTEGER,
+    safety_label    VARCHAR(20),
+    game_date       DATE,
+    game_time       VARCHAR(20),
+    home_team       VARCHAR(100),
+    away_team       VARCHAR(100),
+    home_starter    VARCHAR(100),
+    away_starter    VARCHAR(100),
+    predicted_at    TIMESTAMPTZ   DEFAULT NOW(),
+    outcome         VARCHAR(20)   DEFAULT 'PENDING',  -- 'WIN','LOSS','PUSH','PENDING'
+    actual_result   TEXT,
+    resolved_at     TIMESTAMPTZ,
+    sentiment_score NUMERIC(5,4),
+    news_snippet    TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_predictions_date    ON predictions(game_date);
+CREATE INDEX IF NOT EXISTS idx_predictions_outcome ON predictions(outcome);
+
+-- ── Player trends: historical per-player stats ──
+CREATE TABLE IF NOT EXISTS player_trends (
+    id          SERIAL PRIMARY KEY,
+    player_name VARCHAR(150),
+    player_id   INTEGER,
+    team        VARCHAR(100),
+    season      INTEGER,
+    stat_type   VARCHAR(50),   -- 'batting','pitching'
+    last_5      JSONB,         -- {avg, hr, rbi, k, etc.}
+    last_10     JSONB,
+    season_avg  NUMERIC(8,4),
+    vs_lefty    NUMERIC(8,4),
+    vs_righty   NUMERIC(8,4),
+    home_avg    NUMERIC(8,4),
+    away_avg    NUMERIC(8,4),
+    updated_at  TIMESTAMPTZ    DEFAULT NOW(),
+    UNIQUE(player_name, season, stat_type)
+);
+CREATE INDEX IF NOT EXISTS idx_player_trends_name ON player_trends(player_name);
+
+-- ── Sentiment scores: Reddit/news/combined per team or player ──
+CREATE TABLE IF NOT EXISTS sentiment_scores (
+    id           SERIAL PRIMARY KEY,
+    entity       VARCHAR(150),   -- team or player name
+    entity_type  VARCHAR(20),    -- 'team' or 'player'
+    source       VARCHAR(50),    -- 'reddit','news','combined'
+    score        NUMERIC(5,4),   -- -1.0 to +1.0
+    volume       INTEGER,        -- number of posts/articles
+    keywords     TEXT,
+    computed_at  TIMESTAMPTZ     DEFAULT NOW(),
+    UNIQUE(entity, source, DATE(computed_at))
+);
+CREATE INDEX IF NOT EXISTS idx_sentiment_entity ON sentiment_scores(entity, computed_at);
+
+-- ── Tracked parlays: user-built and bot-generated parlays ──
+CREATE TABLE IF NOT EXISTS tracked_parlays (
+    id             SERIAL PRIMARY KEY,
+    name           VARCHAR(200),
+    legs_json      JSONB,          -- [{pick, game, odds, type}, ...]
+    combined_odds  NUMERIC(8,2),
+    stake_usd      NUMERIC(8,2)    DEFAULT 0,
+    created_at     TIMESTAMPTZ     DEFAULT NOW(),
+    resolved_at    TIMESTAMPTZ,
+    outcome        VARCHAR(20)     DEFAULT 'PENDING',
+    payout_usd     NUMERIC(8,2)
+);
 """
 
 
@@ -1205,3 +1281,366 @@ def get_phone_numbers(active_only: bool = True) -> list:
         return []
     finally:
         conn.close()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Predictions  (save every bet the bot recommends + track outcomes)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def save_predictions(predictions: list) -> int:
+    """
+    Bulk-insert new predictions.
+    Returns count of rows inserted.
+    """
+    if not predictions:
+        return 0
+    conn = get_conn()
+    if conn is None:
+        return 0
+    saved = 0
+    try:
+        cur = conn.cursor()
+        for p in predictions:
+            try:
+                cur.execute("""
+                    INSERT INTO predictions
+                        (game_key, sport, bet_type, pick, line, odds_am, dec_odds,
+                         model_prob, confidence, safety_label, game_date, game_time,
+                         home_team, away_team, home_starter, away_starter,
+                         outcome, sentiment_score, news_snippet)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'PENDING',%s,%s)
+                    ON CONFLICT DO NOTHING
+                """, (
+                    p.get("game_key"), p.get("sport","mlb"), p.get("bet_type"),
+                    p.get("pick"), p.get("line"), p.get("odds_am"), p.get("dec_odds"),
+                    p.get("model_prob"), p.get("confidence"), p.get("safety_label"),
+                    p.get("game_date"), p.get("game_time"),
+                    p.get("home_team"), p.get("away_team"),
+                    p.get("home_starter"), p.get("away_starter"),
+                    p.get("sentiment_score"), p.get("news_snippet","")[:500],
+                ))
+                saved += 1
+            except Exception:
+                pass
+        conn.commit()
+        print(f"[db] saved {saved} predictions")
+        return saved
+    except Exception as e:
+        conn.rollback()
+        print(f"[db] save_predictions error: {e}")
+        return 0
+    finally:
+        conn.close()
+
+
+def update_prediction_outcome(game_key: str, game_date: str, outcome: str,
+                               actual_result: str = ""):
+    """Mark pending predictions for a game as WIN/LOSS/PUSH."""
+    conn = get_conn()
+    if conn is None:
+        return
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            UPDATE predictions
+            SET outcome = %s, actual_result = %s, resolved_at = NOW()
+            WHERE game_key = %s AND game_date = %s AND outcome = 'PENDING'
+        """, (outcome.upper(), actual_result, game_key, game_date))
+        conn.commit()
+        print(f"[db] resolved {cur.rowcount} predictions → {outcome}")
+    except Exception as e:
+        conn.rollback()
+        print(f"[db] update_prediction_outcome error: {e}")
+    finally:
+        conn.close()
+
+
+def get_predictions(days: int = 30, outcome: str = None,
+                    bet_type: str = None) -> list:
+    """Fetch prediction history."""
+    conn = get_conn()
+    if conn is None:
+        return []
+    try:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        wheres = ["predicted_at > NOW() - (INTERVAL '1 day' * %s)"]
+        vals   = [days]
+        if outcome:
+            wheres.append("outcome = %s"); vals.append(outcome.upper())
+        if bet_type:
+            wheres.append("bet_type = %s"); vals.append(bet_type)
+        cur.execute(
+            f"SELECT * FROM predictions WHERE {' AND '.join(wheres)} "
+            "ORDER BY predicted_at DESC LIMIT 500", vals
+        )
+        rows = [dict(r) for r in cur.fetchall()]
+        for r in rows:
+            for k in ("game_date","predicted_at","resolved_at"):
+                if r.get(k):
+                    r[k] = r[k].isoformat() if hasattr(r[k],"isoformat") else str(r[k])
+        return rows
+    except Exception as e:
+        print(f"[db] get_predictions error: {e}")
+        return []
+    finally:
+        conn.close()
+
+
+def get_performance_stats() -> dict:
+    """Return win/loss/push counts and ROI for prediction tracking."""
+    conn = get_conn()
+    if conn is None:
+        return {}
+    try:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("""
+            SELECT
+                COUNT(*) FILTER (WHERE outcome = 'WIN')     AS wins,
+                COUNT(*) FILTER (WHERE outcome = 'LOSS')    AS losses,
+                COUNT(*) FILTER (WHERE outcome = 'PUSH')    AS pushes,
+                COUNT(*) FILTER (WHERE outcome = 'PENDING') AS pending,
+                COUNT(*) AS total,
+                ROUND(AVG(CASE WHEN outcome='WIN' THEN 1.0
+                               WHEN outcome='LOSS' THEN 0.0 END) * 100, 1) AS hit_rate,
+                ROUND(AVG(model_prob)*100, 1) AS avg_confidence,
+                COUNT(DISTINCT bet_type) AS bet_types_used
+            FROM predictions
+            WHERE predicted_at > NOW() - INTERVAL '90 days'
+        """)
+        row = cur.fetchone()
+        stats = dict(row) if row else {}
+        # By bet type
+        cur.execute("""
+            SELECT bet_type,
+                   COUNT(*) FILTER (WHERE outcome='WIN')  AS wins,
+                   COUNT(*) FILTER (WHERE outcome='LOSS') AS losses,
+                   COUNT(*) AS total
+            FROM predictions
+            WHERE predicted_at > NOW() - INTERVAL '90 days'
+              AND outcome IN ('WIN','LOSS')
+            GROUP BY bet_type ORDER BY total DESC
+        """)
+        stats["by_bet_type"] = [dict(r) for r in cur.fetchall()]
+        # Last 30 days trend
+        cur.execute("""
+            SELECT game_date::text AS date,
+                   COUNT(*) FILTER (WHERE outcome='WIN')  AS wins,
+                   COUNT(*) FILTER (WHERE outcome='LOSS') AS losses
+            FROM predictions
+            WHERE game_date >= CURRENT_DATE - INTERVAL '30 days'
+              AND outcome IN ('WIN','LOSS')
+            GROUP BY game_date ORDER BY game_date
+        """)
+        stats["daily_trend"] = [dict(r) for r in cur.fetchall()]
+        return stats
+    except Exception as e:
+        print(f"[db] get_performance_stats error: {e}")
+        return {}
+    finally:
+        conn.close()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Sentiment scores
+# ──────────────────────────────────────────────────────────────────────────────
+
+def save_sentiment(entity: str, entity_type: str, source: str,
+                   score: float, volume: int = 0, keywords: str = ""):
+    """Save or update a sentiment score for today."""
+    conn = get_conn()
+    if conn is None:
+        return
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO sentiment_scores
+                (entity, entity_type, source, score, volume, keywords, computed_at)
+            VALUES (%s, %s, %s, %s, %s, %s, NOW())
+            ON CONFLICT (entity, source, DATE(computed_at)) DO UPDATE SET
+                score       = EXCLUDED.score,
+                volume      = EXCLUDED.volume,
+                keywords    = EXCLUDED.keywords,
+                computed_at = NOW()
+        """, (entity, entity_type, source, score, volume, keywords[:500]))
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        print(f"[db] save_sentiment error: {e}")
+    finally:
+        conn.close()
+
+
+def get_sentiment(entity: str, hours: int = 24) -> dict:
+    """Get latest sentiment scores for an entity (team or player)."""
+    conn = get_conn()
+    if conn is None:
+        return {}
+    try:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("""
+            SELECT source, score, volume, keywords, computed_at
+            FROM sentiment_scores
+            WHERE entity ILIKE %s
+              AND computed_at > NOW() - (INTERVAL '1 hour' * %s)
+            ORDER BY source, computed_at DESC
+        """, (entity, hours))
+        rows = cur.fetchall()
+        result = {}
+        for r in rows:
+            result[r["source"]] = {
+                "score": float(r["score"] or 0),
+                "volume": r["volume"],
+                "keywords": r["keywords"],
+            }
+        return result
+    except Exception as e:
+        print(f"[db] get_sentiment error: {e}")
+        return {}
+    finally:
+        conn.close()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Player trends
+# ──────────────────────────────────────────────────────────────────────────────
+
+def save_player_trends(player_name: str, team: str, season: int,
+                       stat_type: str, trends: dict, player_id: int = None):
+    """Save historical trend data for a player."""
+    conn = get_conn()
+    if conn is None:
+        return
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO player_trends
+                (player_name, player_id, team, season, stat_type,
+                 last_5, last_10, season_avg, vs_lefty, vs_righty,
+                 home_avg, away_avg, updated_at)
+            VALUES (%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s,%s,%s,%s,%s,NOW())
+            ON CONFLICT (player_name, season, stat_type) DO UPDATE SET
+                team       = EXCLUDED.team,
+                last_5     = EXCLUDED.last_5,
+                last_10    = EXCLUDED.last_10,
+                season_avg = EXCLUDED.season_avg,
+                vs_lefty   = EXCLUDED.vs_lefty,
+                vs_righty  = EXCLUDED.vs_righty,
+                home_avg   = EXCLUDED.home_avg,
+                away_avg   = EXCLUDED.away_avg,
+                updated_at = NOW()
+        """, (
+            player_name, player_id, team, season, stat_type,
+            json.dumps(trends.get("last_5", {})),
+            json.dumps(trends.get("last_10", {})),
+            trends.get("season_avg"), trends.get("vs_lefty"),
+            trends.get("vs_righty"), trends.get("home_avg"), trends.get("away_avg"),
+        ))
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        print(f"[db] save_player_trends error: {e}")
+    finally:
+        conn.close()
+
+
+def get_player_trends(player_name: str, season: int = None) -> list:
+    conn = get_conn()
+    if conn is None:
+        return []
+    try:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        if season:
+            cur.execute("""
+                SELECT * FROM player_trends
+                WHERE player_name ILIKE %s AND season = %s
+                ORDER BY stat_type
+            """, (f"%{player_name}%", season))
+        else:
+            cur.execute("""
+                SELECT * FROM player_trends
+                WHERE player_name ILIKE %s
+                ORDER BY season DESC, stat_type
+                LIMIT 20
+            """, (f"%{player_name}%",))
+        return [dict(r) for r in cur.fetchall()]
+    except Exception as e:
+        print(f"[db] get_player_trends error: {e}")
+        return []
+    finally:
+        conn.close()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Tracked Parlays (user-built + bot-generated)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def save_tracked_parlay(name: str, legs: list, combined_odds: float,
+                        stake_usd: float = 0) -> int:
+    """Save a tracked parlay. Returns the new parlay ID."""
+    conn = get_conn()
+    if conn is None:
+        return 0
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO tracked_parlays
+                (name, legs_json, combined_odds, stake_usd, outcome)
+            VALUES (%s, %s::jsonb, %s, %s, 'PENDING')
+            RETURNING id
+        """, (name, json.dumps(legs), combined_odds, stake_usd))
+        row = cur.fetchone()
+        conn.commit()
+        return row[0] if row else 0
+    except Exception as e:
+        conn.rollback()
+        print(f"[db] save_tracked_parlay error: {e}")
+        return 0
+    finally:
+        conn.close()
+
+
+def get_tracked_parlays(include_resolved: bool = False) -> list:
+    conn = get_conn()
+    if conn is None:
+        return []
+    try:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        if include_resolved:
+            cur.execute("SELECT * FROM tracked_parlays ORDER BY created_at DESC LIMIT 100")
+        else:
+            cur.execute("""
+                SELECT * FROM tracked_parlays
+                WHERE outcome = 'PENDING'
+                ORDER BY created_at DESC LIMIT 50
+            """)
+        rows = [dict(r) for r in cur.fetchall()]
+        for r in rows:
+            for k in ("created_at", "resolved_at"):
+                if r.get(k):
+                    r[k] = r[k].isoformat()
+        return rows
+    except Exception as e:
+        print(f"[db] get_tracked_parlays error: {e}")
+        return []
+    finally:
+        conn.close()
+
+
+def resolve_tracked_parlay(parlay_id: int, outcome: str, payout: float = 0):
+    conn = get_conn()
+    if conn is None:
+        return
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            UPDATE tracked_parlays
+            SET outcome = %s, payout_usd = %s, resolved_at = NOW()
+            WHERE id = %s
+        """, (outcome.upper(), payout, parlay_id))
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        print(f"[db] resolve_tracked_parlay error: {e}")
+    finally:
+        conn.close()
+

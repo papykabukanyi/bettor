@@ -1,4 +1,7 @@
-<!DOCTYPE html>
+"""Write the new dashboard.html v4 — MLB-only, 5-tab design."""
+import os
+
+HTML = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -1108,4 +1111,10 @@ function toast(msg, type='info') {
 })();
 </script>
 </body>
-</html>
+</html>"""
+
+dst = os.path.join(os.path.dirname(__file__), '..', 'src', 'templates', 'dashboard.html')
+dst = os.path.normpath(dst)
+with open(dst, 'w', encoding='utf-8') as f:
+    f.write(HTML)
+print(f"Written {len(HTML)} chars to {dst}")

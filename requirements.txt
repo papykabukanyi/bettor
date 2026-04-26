@@ -20,7 +20,6 @@ seaborn
 # Utilities
 python-dotenv
 tabulate
-jupyter
 
 # Web dashboard
 flask
@@ -34,3 +33,6 @@ pytz
 
 # Scheduled jobs (daily 6 AM ET SMS run)
 APScheduler
+
+# Reddit API (sentiment)
+praw
