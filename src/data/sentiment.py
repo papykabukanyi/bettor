@@ -436,3 +436,270 @@ def get_game_sentiments(home_team: str, away_team: str) -> dict:
             "volume":        away_sent["volume"],
         },
     }
+
+
+# ─── Player prop signal (historical + sentiment) ──────────────────────────────
+
+# How volatile each stat is: higher = wider normal distribution = more uncertainty
+_STAT_STD_FACTORS = {
+    "strikeouts":         0.35,  # K/start: moderate variance
+    "hits":               0.55,  # H/game: fairly volatile
+    "home_runs":          0.80,  # HR: rare/bursty
+    "total_bases":        0.50,
+    "rbi":                0.65,
+    "runs":               0.60,
+    "walks":              0.60,
+    "stolen_bases":       0.75,
+    "batter_strikeouts":  0.55,
+    "doubles":            0.70,
+}
+
+_STAT_UNITS = {
+    "strikeouts":         "Ks",
+    "hits":               "H",
+    "home_runs":          "HR",
+    "total_bases":        "TB",
+    "rbi":                "RBI",
+    "runs":               "R",
+    "walks":              "BB",
+    "stolen_bases":       "SB",
+    "batter_strikeouts":  "K",
+    "doubles":            "2B",
+}
+
+# Keys to try when reading per-game avg from DB trend JSONB blobs
+_STAT_TREND_KEYS = {
+    "strikeouts":         ["strikeouts", "k", "so", "avg"],
+    "hits":               ["hits", "h", "avg"],
+    "home_runs":          ["home_runs", "hr", "avg"],
+    "total_bases":        ["total_bases", "tb", "avg"],
+    "rbi":                ["rbi", "avg"],
+    "runs":               ["runs", "r", "avg"],
+    "walks":              ["walks", "bb", "avg"],
+    "stolen_bases":       ["stolen_bases", "sb", "avg"],
+    "batter_strikeouts":  ["batter_strikeouts", "k", "so", "avg"],
+    "doubles":            ["doubles", "2b", "d", "avg"],
+}
+
+
+def _extract_trend_avg(blob, stat_type: str):
+    """Pull per-game average out of a trend JSONB blob (dict or raw float)."""
+    if blob is None:
+        return None
+    if isinstance(blob, (int, float)):
+        return float(blob)
+    if isinstance(blob, dict):
+        for key in _STAT_TREND_KEYS.get(stat_type, ["avg"]):
+            if key in blob:
+                try:
+                    return float(blob[key])
+                except (TypeError, ValueError):
+                    pass
+    return None
+
+
+def _over_prob_norm(avg_val, line: float, std_factor: float) -> float:
+    """P(X > line) using a normal approximation centred on avg_val."""
+    if avg_val is None or avg_val <= 0:
+        return 0.5
+    try:
+        from scipy.stats import norm
+        std = max(float(avg_val) * std_factor, 0.1)
+        return float(norm.sf(line, loc=float(avg_val), scale=std))
+    except Exception:
+        return 0.65 if float(avg_val) > line else 0.35
+
+
+def get_player_prop_signal(
+    player_name:  str,
+    stat_type:    str,
+    line:         float,
+    prop_data:    dict = None,
+    pitcher_hand: str  = None,   # "L" or "R" for batter split
+    venue:        str  = None,   # "home" or "away"
+) -> dict:
+    """
+    Generate a directional OVER/UNDER signal for a player prop by combining:
+      1. Historical player trends from DB (last_5, last_10, season_avg, splits)
+      2. Reddit + News sentiment scored by HuggingFace DistilBERT
+
+    Weights: 85 % historical performance / 15 % sentiment.
+
+    Returns:
+        direction      — "OVER" or "UNDER"
+        probability    — P(OVER) as a float [0, 1]
+        confidence     — % confidence in the chosen direction (int)
+        rationale      — human-readable explanation e.g.
+                         "OVER 6.5 Ks · L5 avg 7.2 ↑ · season 6.8 · positive buzz (+0.31)"
+        hist_prob      — blended historical probability before sentiment
+        sentiment_score — combined sentiment score [-1, +1]
+        data_sources   — list of data layers actually used
+    """
+    std_factor   = _STAT_STD_FACTORS.get(stat_type, 0.50)
+    stat_unit    = _STAT_UNITS.get(stat_type, stat_type[:3].upper())
+    rationale_parts: list[str] = []
+    data_sources:    list[str] = []
+
+    # ── 1. Pull historical trends from DB ─────────────────────────────────
+    season_prob  = None
+    last5_prob   = None
+    last10_prob  = None
+    matchup_prob = None
+    venue_prob   = None
+
+    season_avg_val = None
+    last5_avg_val  = None
+    last10_avg_val = None
+
+    try:
+        from data.db import get_player_trends
+        cur_year = datetime.date.today().year
+        trend_rows = get_player_trends(player_name, season=cur_year)
+        if not trend_rows:
+            trend_rows = get_player_trends(player_name, season=cur_year - 1)
+
+        # Find the trend row whose stat_type overlaps with the requested prop
+        _pitch_props = {"strikeouts"}
+        _bat_props   = {"hits", "home_runs", "total_bases", "rbi", "runs",
+                        "walks", "stolen_bases", "batter_strikeouts", "doubles"}
+
+        for t in trend_rows:
+            ttype = (t.get("stat_type") or "").lower()
+            is_hit = (
+                stat_type == ttype
+                or (stat_type in _pitch_props and ttype == "pitching")
+                or (stat_type in _bat_props   and ttype == "batting")
+            )
+            if not is_hit:
+                continue
+
+            sa = t.get("season_avg")
+            if sa is not None:
+                season_avg_val = float(sa)
+                season_prob    = _over_prob_norm(season_avg_val, line, std_factor)
+                data_sources.append("season_avg")
+
+            l5_avg = _extract_trend_avg(t.get("last_5"), stat_type)
+            if l5_avg is not None:
+                last5_avg_val = l5_avg
+                last5_prob    = _over_prob_norm(l5_avg, line, std_factor)
+                data_sources.append("last_5")
+
+            l10_avg = _extract_trend_avg(t.get("last_10"), stat_type)
+            if l10_avg is not None:
+                last10_avg_val = l10_avg
+                last10_prob    = _over_prob_norm(l10_avg, line, std_factor)
+                data_sources.append("last_10")
+
+            # Pitcher handedness split (for batters)
+            if pitcher_hand:
+                split_key = "vs_lefty" if pitcher_hand.upper() == "L" else "vs_righty"
+                split_val = t.get(split_key)
+                if split_val is not None:
+                    matchup_prob = _over_prob_norm(float(split_val), line, std_factor)
+                    data_sources.append(f"vs_{pitcher_hand.upper()}")
+
+            # Home/away split
+            if venue:
+                venue_key = f"{venue.lower()}_avg"
+                venue_val = t.get(venue_key)
+                if venue_val is not None:
+                    venue_prob = _over_prob_norm(float(venue_val), line, std_factor)
+                    data_sources.append(f"{venue}_split")
+
+            break  # use first matching trend row
+
+    except Exception as e:
+        print(f"[sentiment] prop_signal DB error: {e}")
+
+    # ── 2. Fall back to raw prop data when no DB trends ───────────────────
+    if prop_data and season_avg_val is None:
+        avg_pg = prop_data.get("avg_per_game")
+        if avg_pg:
+            season_avg_val = float(avg_pg)
+            season_prob    = _over_prob_norm(season_avg_val, line, std_factor)
+            data_sources.append("model_avg")
+
+    # ── 3. Weighted historical probability ────────────────────────────────
+    # Recent form weighs the most; season average is the baseline anchor.
+    hist_components = []
+    hist_weights    = []
+    if last5_prob   is not None: hist_components.append(last5_prob);   hist_weights.append(0.40)
+    if last10_prob  is not None: hist_components.append(last10_prob);  hist_weights.append(0.25)
+    if season_prob  is not None: hist_components.append(season_prob);  hist_weights.append(0.20)
+    if matchup_prob is not None: hist_components.append(matchup_prob); hist_weights.append(0.10)
+    if venue_prob   is not None: hist_components.append(venue_prob);   hist_weights.append(0.05)
+
+    if hist_components:
+        total_w   = sum(hist_weights)
+        hist_prob = sum(p * w for p, w in zip(hist_components, hist_weights)) / total_w
+    elif prop_data:
+        hist_prob = float(prop_data.get("over_prob", 0.5))
+    else:
+        hist_prob = 0.5
+
+    # ── 4. Sentiment score (check DB cache, then live fetch) ──────────────
+    sentiment_score = 0.0
+    try:
+        from data.db import get_sentiment as _db_sent
+        cached = _db_sent(player_name, hours=12)
+        if cached.get("combined"):
+            sentiment_score = float(cached["combined"]["score"])
+            data_sources.append("sentiment_cached")
+        elif not _HF_FAILED and not _NEWS_FAILED:
+            sent = get_player_sentiment(player_name)
+            sentiment_score = float(sent.get("combined", 0))
+            if abs(sentiment_score) > 0.05:
+                data_sources.append("sentiment_live")
+    except Exception as e:
+        print(f"[sentiment] prop_signal sentiment fetch error: {e}")
+
+    # ── 5. Blend: 85 % historical + 15 % sentiment nudge ─────────────────
+    # Positive sentiment → slightly more likely OVER.
+    # Scale: sentiment score ±1.0 maps to ±8 % probability swing.
+    sentiment_adj = sentiment_score * 0.08
+    final_prob    = max(0.10, min(0.90, hist_prob + sentiment_adj))
+
+    # ── 6. Build human-readable rationale ────────────────────────────────
+    direction  = "OVER" if final_prob >= 0.5 else "UNDER"
+    conf_prob  = final_prob if direction == "OVER" else 1.0 - final_prob
+    confidence = round(conf_prob * 100)
+
+    if last5_avg_val is not None and last10_avg_val is not None:
+        trend_arrow = "↑" if last5_avg_val > last10_avg_val else "↓"
+        rationale_parts.append(f"L5 {last5_avg_val:.1f} {stat_unit} {trend_arrow}")
+    elif last5_avg_val is not None:
+        rationale_parts.append(f"L5 avg {last5_avg_val:.1f} {stat_unit}")
+
+    if last10_avg_val is not None:
+        rationale_parts.append(f"L10 {last10_avg_val:.1f}")
+
+    if season_avg_val is not None and "season_avg" in data_sources:
+        rationale_parts.append(f"season {season_avg_val:.1f}")
+
+    if matchup_prob is not None:
+        hand_str = "vs LHP" if (pitcher_hand or "").upper() == "L" else "vs RHP"
+        rationale_parts.append(hand_str)
+
+    if abs(sentiment_score) > 0.10:
+        buzz = "positive buzz" if sentiment_score > 0 else "negative buzz"
+        rationale_parts.append(f"{buzz} ({sentiment_score:+.2f})")
+
+    if not rationale_parts:
+        # Nothing from DB — just show the model average
+        if season_avg_val is not None:
+            rationale_parts.append(f"avg {season_avg_val:.1f} {stat_unit}/game")
+        else:
+            rationale_parts.append("model projection")
+
+    rationale = f"{direction} {line} {stat_unit} · " + " · ".join(rationale_parts)
+
+    return {
+        "direction":       direction,
+        "probability":     round(final_prob, 4),   # P(OVER)
+        "confidence":      confidence,             # % confidence in chosen direction
+        "rationale":       rationale,
+        "hist_prob":       round(hist_prob, 4),
+        "sentiment_score": round(sentiment_score, 4),
+        "data_sources":    data_sources,
+    }

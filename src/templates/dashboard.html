@@ -155,6 +155,7 @@ main{padding:20px;max-width:1400px;margin:0 auto}
 .prop-dir.UNDER{color:var(--yellow)}
 .prop-conf{font-size:.72rem;color:var(--muted)}
 .prop-badge{font-size:.65rem;padding:2px 5px;border-radius:4px}
+.prop-rationale{font-size:.68rem;color:var(--muted);grid-column:1/-1;padding-left:2px;opacity:.85;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
 
 /* ── Empty state ── */
 .empty-state{text-align:center;padding:60px 20px;color:var(--muted)}
@@ -410,6 +411,7 @@ main{padding:20px;max-width:1400px;margin:0 auto}
             <th onclick="sortProps('model_prob')">Prob &#8597;</th>
             <th onclick="sortProps('safety')">Safety &#8597;</th>
             <th onclick="sortProps('ev')">EV &#8597;</th>
+            <th>Signal Rationale</th>
             <th>Add</th>
           </tr>
         </thead>
@@ -751,9 +753,10 @@ function propsSection(c) {
 }
 
 function propRow(p, gameKey) {
-  const dirCls = `prop-dir ${p.direction}`;
-  const sb     = safetyBadge(p.safety_label||'MODERATE');
-  const addKey = JSON.stringify({
+  const dirCls  = `prop-dir ${p.direction}`;
+  const sb      = safetyBadge(p.safety_label||'MODERATE');
+  const rationale = p.signal_rationale || '';
+  const addKey  = JSON.stringify({
     label: `${p.name} ${p.direction} ${p.line} ${p.prop_label}`,
     bet_type: 'player_prop',
     game: gameKey||p.game_key||'',
@@ -767,6 +770,7 @@ function propRow(p, gameKey) {
     <span class="${dirCls}">${p.direction} ${p.line}</span>
     <span class="prop-conf">${p.confidence||'?'}%</span>
     ${sb}
+    ${rationale ? `<span class="prop-rationale" title="${rationale.replace(/"/g,"&quot;")}">&#128202; ${rationale}</span>` : ''}
     <button class="bet-add" onclick="addToParlay(${addKey})">+</button>
   </div>`;
 }
@@ -835,6 +839,7 @@ function sortAndRenderProps() {
       <td>${p.model_prob!=null?Math.round(p.model_prob*100)+'%':'—'}</td>
       <td>${safetyBadge(p.safety_label||'MODERATE')}</td>
       <td style="color:${(p.ev||0)>=0?'var(--green)':'var(--red)'}">${p.ev!=null?p.ev.toFixed(3):'—'}</td>
+      <td style="font-size:11px;color:var(--muted);max-width:220px" title="${(p.signal_rationale||'').replace(/"/g,'&quot;')}">${p.signal_rationale||'—'}</td>
       <td><button class="bet-add" onclick="addToParlay(${addKey})">+</button></td>
     </tr>`;
   }).join('');

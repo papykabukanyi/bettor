@@ -396,6 +396,13 @@ def build_player_prop_bets(raw_props: list[dict], injured_players: set = None,
         "doubles":            "2B/Game",
     }
 
+    # Import signal generator (lazy — avoid circular import at module level)
+    try:
+        from data.sentiment import get_player_prop_signal as _prop_signal
+        _SIGNAL_OK = True
+    except Exception:
+        _SIGNAL_OK = False
+
     for p in raw_props:
         name = p.get("name", "")
         # Skip injured players
@@ -403,18 +410,12 @@ def build_player_prop_bets(raw_props: list[dict], injured_players: set = None,
                for inj in injured if inj):
             continue
 
-        ov      = float(p.get("over_prob",  0.5))
-        un      = float(p.get("under_prob", 0.5))
-        st      = p.get("stat_type", "strikeouts")
-        direction = "OVER" if ov >= un else "UNDER"
-        conf    = round(max(ov, un) * 100)
-        edge    = max(ov, un) - 0.5
+        st        = p.get("stat_type", "strikeouts")
+        raw_ov    = float(p.get("over_prob",  0.5))
+        raw_un    = float(p.get("under_prob", 0.5))
 
-        if max(ov, un) < 0.51:
-            continue
-
-        # Get real book line/odds if available
-        real_line = p.get("line", "?")
+        # ── Get real book line/odds first so we pass the real line to signal ──
+        real_line      = p.get("line", "?")
         real_over_odds = real_under_odds = None
         if odds_lines:
             mkey  = _MARKET_MAP.get(st, "")
@@ -424,7 +425,42 @@ def build_player_prop_bets(raw_props: list[dict], injured_players: set = None,
                 real_over_odds   = pdata.get("over_odds")
                 real_under_odds  = pdata.get("under_odds")
 
-        # Book probability from real odds (or model-implied)
+        # ── Run historical + sentiment signal ─────────────────────────────
+        signal: dict = {}
+        if _SIGNAL_OK:
+            try:
+                numeric_line = float(real_line) if real_line not in ("?", None) else float(p.get("line", 0.5))
+                signal = _prop_signal(
+                    player_name  = name,
+                    stat_type    = st,
+                    line         = numeric_line,
+                    prop_data    = p,
+                    pitcher_hand = p.get("pitcher_hand"),   # "L"/"R" if known
+                    venue        = p.get("venue"),           # "home"/"away" if known
+                )
+            except Exception as _se:
+                print(f"[predictor] prop signal error for {name}: {_se}")
+
+        # ── Use signal probability when available, else raw model ─────────
+        if signal:
+            # Signal is the primary source — it already blends history + sentiment
+            sig_ov    = float(signal["probability"])          # P(OVER)
+            sig_un    = 1.0 - sig_ov
+            direction = signal["direction"]
+            conf      = signal["confidence"]
+            ov        = sig_ov
+            un        = sig_un
+        else:
+            ov        = raw_ov
+            un        = raw_un
+            direction = "OVER" if ov >= un else "UNDER"
+            conf      = round(max(ov, un) * 100)
+
+        edge = max(ov, un) - 0.5
+        if max(ov, un) < 0.51:
+            continue
+
+        # ── Book probability from real odds (or model-implied) ────────────
         if real_over_odds and direction == "OVER":
             book_odds_am = int(real_over_odds)
             dec          = _am_odds_to_dec(book_odds_am)
@@ -442,50 +478,57 @@ def build_player_prop_bets(raw_props: list[dict], injured_players: set = None,
 
         bets.append({
             # Identity
-            "game_key":       p.get("game", ""),
-            "sport":          "mlb",
-            "bet_type":       "player_prop",
+            "game_key":          p.get("game", ""),
+            "sport":             "mlb",
+            "bet_type":          "player_prop",
             # Display
-            "name":           name,
-            "team":           p.get("team", ""),
-            "game":           p.get("game", ""),
-            "stat_type":      st,
-            "prop_label":     _PROP_LABELS.get(st, st.replace("_"," ").title()),
-            "rate_label":     _RATE_LABELS.get(st, "Avg/Game"),
-            "direction":      direction,
-            "line":           real_line,
-            "avg_per_game":   round(float(p.get("avg_per_game", 0)), 3),
+            "name":              name,
+            "team":              p.get("team", ""),
+            "game":              p.get("game", ""),
+            "stat_type":         st,
+            "prop_label":        _PROP_LABELS.get(st, st.replace("_", " ").title()),
+            "rate_label":        _RATE_LABELS.get(st, "Avg/Game"),
+            "direction":         direction,
+            "line":              real_line,
+            "avg_per_game":      round(float(p.get("avg_per_game", 0)), 3),
             # Odds
-            "odds_am":        book_odds_am,
-            "dec_odds":       dec,
-            "over_odds_am":   real_over_odds,
-            "under_odds_am":  real_under_odds,
-            # Model
-            "over_prob":      round(ov, 4),
-            "under_prob":     round(un, 4),
-            "over_pct":       round(ov * 100),
-            "under_pct":      round(un * 100),
-            "conf":           conf,
-            "model_prob":     round(max(ov, un), 4),
-            "confidence":     conf,
-            "edge":           round(edge, 4),
-            "safety":         safety,
-            "safety_label":   _safety_label(safety),
-            "ev":             round((dec - 1) * max(ov, un) - (1 - max(ov, un)), 4),
+            "odds_am":           book_odds_am,
+            "dec_odds":          dec,
+            "over_odds_am":      real_over_odds,
+            "under_odds_am":     real_under_odds,
+            # Probabilities (signal-adjusted when available)
+            "over_prob":         round(ov, 4),
+            "under_prob":        round(un, 4),
+            "over_pct":          round(ov * 100),
+            "under_pct":         round(un * 100),
+            "raw_over_prob":     round(raw_ov, 4),   # original model before signal
+            "raw_under_prob":    round(raw_un, 4),
+            "conf":              conf,
+            "model_prob":        round(max(ov, un), 4),
+            "confidence":        conf,
+            "edge":              round(edge, 4),
+            "safety":            safety,
+            "safety_label":      _safety_label(safety),
+            "ev":                round((dec - 1) * max(ov, un) - (1 - max(ov, un)), 4),
+            # Signal details (what drove the recommendation)
+            "signal_rationale":  signal.get("rationale", ""),
+            "signal_hist_prob":  signal.get("hist_prob", round(raw_ov, 4)),
+            "signal_sentiment":  signal.get("sentiment_score", 0.0),
+            "signal_sources":    signal.get("data_sources", []),
             # Stats for display
-            "era":            round(float(p.get("era", 0)), 2),
-            "xfip":           round(float(p.get("xfip", p.get("era", 0))), 2),
-            "k9":             round(float(p.get("k9", 0)), 1),
-            "k_pct":          round(float(p.get("k_pct", 0)), 1),
-            "whip":           round(float(p.get("whip", 0)), 2),
-            "avg_ks":         round(float(p.get("avg_per_game", 0)), 1),
-            "avg":            round(float(p.get("avg", 0)), 3),
-            "ops":            round(float(p.get("ops", 0)), 3),
-            "wrc_plus":       round(float(p.get("wrc_plus", 0))),
-            "ip_per_start":   round(float(p.get("ip_per_start", 0)), 1),
+            "era":               round(float(p.get("era", 0)), 2),
+            "xfip":              round(float(p.get("xfip", p.get("era", 0))), 2),
+            "k9":                round(float(p.get("k9", 0)), 1),
+            "k_pct":             round(float(p.get("k_pct", 0)), 1),
+            "whip":              round(float(p.get("whip", 0)), 2),
+            "avg_ks":            round(float(p.get("avg_per_game", 0)), 1),
+            "avg":               round(float(p.get("avg", 0)), 3),
+            "ops":               round(float(p.get("ops", 0)), 3),
+            "wrc_plus":          round(float(p.get("wrc_plus", 0))),
+            "ip_per_start":      round(float(p.get("ip_per_start", 0)), 1),
             # Timing
-            "date":           p.get("date", str(et_today())),
-            "game_time":      p.get("game_time", ""),
+            "date":              p.get("date", str(et_today())),
+            "game_time":         p.get("game_time", ""),
         })
 
     bets.sort(key=lambda x: x["safety"], reverse=True)
