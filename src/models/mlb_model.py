@@ -213,13 +213,21 @@ def _load_team_injury_counts_from_db() -> dict[str, int]:
         if not conn:
             return {}
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(
+            "SELECT column_name FROM information_schema.columns WHERE table_name = 'injury_reports'"
+        )
+        cols = {r["column_name"] for r in cur.fetchall()}
+        team_col = "team" if "team" in cols else "team_name" if "team_name" in cols else None
+        if not team_col:
+            conn.close()
+            return {}
         cur.execute("""
-            SELECT lower(team) AS team,
+            SELECT lower({team_col}) AS team,
                    COUNT(*) AS cnt
             FROM   injury_reports
             WHERE  fetched_at > NOW() - INTERVAL '14 days'
-            GROUP  BY lower(team)
-        """)
+            GROUP  BY lower({team_col})
+        """.format(team_col=team_col))
         result = {r["team"]: int(r["cnt"]) for r in cur.fetchall()}
         conn.close()
         return result

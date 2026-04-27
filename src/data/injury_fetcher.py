@@ -84,14 +84,38 @@ def fetch_mlb_transactions(start_date: str, end_date: str) -> list[dict]:
         "endDate":   end_date,
         "sportId":   1,
     }
-    try:
-        resp  = _req.get(url, params=params, timeout=20)
-        resp.raise_for_status()
-        data  = resp.json()
-        items = data.get("transactions", []) or []
-    except Exception as e:
-        print(f"[injury_fetcher] MLB transactions error: {e}")
-        return []
+    import datetime as _dt
+
+    def _fetch_transactions(qparams):
+        try:
+            resp = _req.get(url, params=qparams, timeout=20)
+            resp.raise_for_status()
+            data = resp.json()
+            return data.get("transactions", []) or [], None
+        except Exception as _e:
+            return None, _e
+
+    items, err = _fetch_transactions(params)
+    if items is None:
+        # Fallback: query per-day using "date" param to satisfy strict API validation.
+        try:
+            start = _dt.date.fromisoformat(start_date)
+            end = _dt.date.fromisoformat(end_date)
+        except Exception:
+            print(f"[injury_fetcher] MLB transactions error: {err}")
+            return []
+
+        items = []
+        current = start
+        while current <= end:
+            day_items, _ = _fetch_transactions({"date": current.isoformat(), "sportId": 1})
+            if day_items:
+                items.extend(day_items)
+            current += _dt.timedelta(days=1)
+
+        if not items:
+            print(f"[injury_fetcher] MLB transactions error: {err}")
+            return []
 
     injuries = []
     for t in items:

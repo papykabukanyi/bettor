@@ -38,6 +38,29 @@ def get_conn():
         print(f"[db] connection error: {e}")
         return None
 
+
+# Cache table columns to handle schema drift across deployments.
+_TABLE_COLS_CACHE: dict[str, set[str]] = {}
+
+
+def _get_table_columns(conn, table_name: str) -> set[str]:
+    cached = _TABLE_COLS_CACHE.get(table_name)
+    if cached is not None:
+        return cached
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT column_name FROM information_schema.columns WHERE table_name = %s",
+            (table_name,)
+        )
+        cols = {r[0] for r in cur.fetchall()}
+        _TABLE_COLS_CACHE[table_name] = cols
+        return cols
+    except Exception as e:
+        print(f"[db] column lookup error ({table_name}): {e}")
+        _TABLE_COLS_CACHE[table_name] = set()
+        return set()
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Schema
 # ──────────────────────────────────────────────────────────────────────────────
@@ -390,28 +413,51 @@ def upsert_game(sport, league, home_team, away_team, game_date,
         return None
     try:
         cur = conn.cursor()
-        cur.execute("""
-            INSERT INTO games
-                (sport, league, home_team, away_team, game_date, game_time,
-                 game_datetime, status, home_starter, away_starter,
-                 home_score, away_score, season, external_id)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        cols = _get_table_columns(conn, "games")
+        has_season = "season" in cols
+        has_external_id = "external_id" in cols
+
+        insert_cols = [
+            "sport", "league", "home_team", "away_team", "game_date", "game_time",
+            "game_datetime", "status", "home_starter", "away_starter",
+            "home_score", "away_score",
+        ]
+        values = [
+            sport, league, home_team, away_team, game_date, game_time,
+            game_datetime, status, home_starter, away_starter,
+            home_score, away_score,
+        ]
+        if has_season:
+            insert_cols.append("season")
+            values.append(season)
+        if has_external_id:
+            insert_cols.append("external_id")
+            values.append(str(external_id) if external_id else None)
+
+        update_parts = [
+            "status = EXCLUDED.status",
+            "league = COALESCE(EXCLUDED.league, games.league)",
+            "game_time = COALESCE(EXCLUDED.game_time, games.game_time)",
+            "game_datetime = COALESCE(EXCLUDED.game_datetime, games.game_datetime)",
+            "home_starter = COALESCE(EXCLUDED.home_starter, games.home_starter)",
+            "away_starter = COALESCE(EXCLUDED.away_starter, games.away_starter)",
+            "home_score = COALESCE(EXCLUDED.home_score, games.home_score)",
+            "away_score = COALESCE(EXCLUDED.away_score, games.away_score)",
+        ]
+        if has_season:
+            update_parts.append("season = COALESCE(EXCLUDED.season, games.season)")
+        if has_external_id:
+            update_parts.append("external_id = COALESCE(EXCLUDED.external_id, games.external_id)")
+        update_parts.append("updated_at = NOW()")
+
+        sql = f"""
+            INSERT INTO games ({', '.join(insert_cols)})
+            VALUES ({', '.join(['%s'] * len(insert_cols))})
             ON CONFLICT (sport, home_team, away_team, game_date) DO UPDATE SET
-                status        = EXCLUDED.status,
-                league        = COALESCE(EXCLUDED.league,        games.league),
-                game_time     = COALESCE(EXCLUDED.game_time,     games.game_time),
-                game_datetime = COALESCE(EXCLUDED.game_datetime, games.game_datetime),
-                home_starter  = COALESCE(EXCLUDED.home_starter,  games.home_starter),
-                away_starter  = COALESCE(EXCLUDED.away_starter,  games.away_starter),
-                home_score    = COALESCE(EXCLUDED.home_score,    games.home_score),
-                away_score    = COALESCE(EXCLUDED.away_score,    games.away_score),
-                season        = COALESCE(EXCLUDED.season,        games.season),
-                external_id   = COALESCE(EXCLUDED.external_id,   games.external_id),
-                updated_at    = NOW()
+                {', '.join(update_parts)}
             RETURNING id
-        """, (sport, league, home_team, away_team, game_date, game_time,
-              game_datetime, status, home_starter, away_starter,
-              home_score, away_score, season, str(external_id) if external_id else None))
+        """
+        cur.execute(sql, values)
         row = cur.fetchone()
         conn.commit()
         return row[0] if row else None
@@ -1867,30 +1913,60 @@ def get_completed_games_for_training(sport: str = "mlb",
         return []
     try:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        seasons_list = None
         if seasons:
-            placeholders = ",".join(["%s"] * len(seasons))
-            cur.execute(f"""
-                SELECT home_team, away_team, home_score, away_score,
-                       game_date, season
-                FROM   games
-                WHERE  sport = %s
-                  AND  home_score IS NOT NULL
-                  AND  away_score IS NOT NULL
-                  AND  status IN ('Final','Game Over','Completed Early','Completed')
-                  AND  season IN ({placeholders})
-                ORDER  BY game_date
-            """, [sport] + list(seasons))
+            seasons_list = [int(s) for s in seasons if s is not None]
+            if not seasons_list:
+                seasons_list = None
+
+        cols = _get_table_columns(conn, "games")
+        has_season = "season" in cols
+
+        base_where = """
+            sport = %s
+            AND home_score IS NOT NULL
+            AND away_score IS NOT NULL
+            AND status IN ('Final','Game Over','Completed Early','Completed')
+        """
+
+        if has_season:
+            if seasons_list:
+                placeholders = ",".join(["%s"] * len(seasons_list))
+                cur.execute(f"""
+                    SELECT home_team, away_team, home_score, away_score,
+                           game_date, season
+                    FROM   games
+                    WHERE  {base_where}
+                      AND  season IN ({placeholders})
+                    ORDER  BY game_date
+                """, [sport] + seasons_list)
+            else:
+                cur.execute(f"""
+                    SELECT home_team, away_team, home_score, away_score,
+                           game_date, season
+                    FROM   games
+                    WHERE  {base_where}
+                    ORDER  BY game_date
+                """, (sport,))
         else:
-            cur.execute("""
-                SELECT home_team, away_team, home_score, away_score,
-                       game_date, season
-                FROM   games
-                WHERE  sport = %s
-                  AND  home_score IS NOT NULL
-                  AND  away_score IS NOT NULL
-                  AND  status IN ('Final','Game Over','Completed Early','Completed')
-                ORDER  BY game_date
-            """, (sport,))
+            if seasons_list:
+                placeholders = ",".join(["%s"] * len(seasons_list))
+                cur.execute(f"""
+                    SELECT home_team, away_team, home_score, away_score,
+                           game_date, EXTRACT(YEAR FROM game_date)::int AS season
+                    FROM   games
+                    WHERE  {base_where}
+                      AND  EXTRACT(YEAR FROM game_date)::int IN ({placeholders})
+                    ORDER  BY game_date
+                """, [sport] + seasons_list)
+            else:
+                cur.execute(f"""
+                    SELECT home_team, away_team, home_score, away_score,
+                           game_date, EXTRACT(YEAR FROM game_date)::int AS season
+                    FROM   games
+                    WHERE  {base_where}
+                    ORDER  BY game_date
+                """, (sport,))
         rows = [dict(r) for r in cur.fetchall()]
         for r in rows:
             if isinstance(r.get("game_date"), datetime.date):

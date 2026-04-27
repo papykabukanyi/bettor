@@ -245,6 +245,22 @@ main{padding:20px;max-width:1400px;margin:0 auto}
 .parlay-builder-actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
 #parlay-combined-odds{font-size:.9rem;color:var(--purple);font-weight:700}
 
+/* Best legs */
+.best-legs-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px;margin-bottom:16px}
+.best-leg-card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:12px}
+.best-leg-title{font-size:.82rem;font-weight:600;line-height:1.3}
+.best-leg-meta{display:flex;flex-wrap:wrap;gap:8px;margin-top:6px;font-size:.72rem;color:var(--muted)}
+.best-leg-actions{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:10px}
+.best-leg-ev{font-size:.72rem;font-weight:700}
+
+/* Parlay mixer */
+.parlay-mixer{background:linear-gradient(135deg,rgba(16,185,129,.14),rgba(59,130,246,.10));
+  border:1px solid rgba(16,185,129,.4);border-radius:var(--radius);padding:16px 20px;margin-bottom:18px}
+.parlay-mixer-header{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px}
+.parlay-mixer-title{font-size:.95rem;font-weight:700;color:var(--green)}
+.parlay-mixer-actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.parlay-mixer-preview{font-size:.78rem;color:var(--muted);margin-top:8px}
+
 /* Tracked parlays */
 .tracked-parlay{background:var(--card2);border:1px solid var(--border);
   border-radius:var(--radius);padding:14px;margin-bottom:10px}
@@ -481,24 +497,28 @@ body.console-open main{padding-bottom:236px}
   <!-- PARLAYS -->
   <div class="tab-panel" id="panel-parlays">
 
-    <!-- ★ Elite Parlay Builder ★ -->
-    <div style="background:linear-gradient(135deg,rgba(124,58,237,.18),rgba(16,185,129,.12));
-         border:1px solid rgba(124,58,237,.4);border-radius:var(--radius);padding:16px 20px;
-         margin-bottom:20px">
-      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
+    <!-- ★ Best-Legs Mixer ★ -->
+    <div class="parlay-mixer">
+      <div class="parlay-mixer-header">
         <div>
-          <div style="font-size:.95rem;font-weight:700;color:var(--purple)">&#9889; Elite Auto-Parlay</div>
-          <div style="font-size:.78rem;color:var(--muted);margin-top:3px">
-            Only bets with <strong style="color:var(--green)">80%+</strong> probability,
-            <strong style="color:var(--green)">positive EV</strong>, and
-            <strong style="color:var(--accent)">ELITE</strong> safety
+          <div class="parlay-mixer-title">&#10024; Best-Legs Mixer</div>
+          <div class="parlay-mixer-preview">
+            Pulls legs from auto-parlays, ranks by EV then probability, and mixes the top legs into the builder.
           </div>
         </div>
-        <button class="btn btn-primary" id="btn-elite-parlay" onclick="buildEliteParlay()">
-          &#9889; Build Elite Parlay
-        </button>
+        <div class="parlay-mixer-actions">
+          <select id="best-legs-count" style="background:var(--card);border:1px solid var(--border);
+            color:var(--text);padding:6px 10px;border-radius:8px;font-size:.82rem">
+            <option value="2">2 legs</option>
+            <option value="3" selected>3 legs</option>
+            <option value="4">4 legs</option>
+            <option value="5">5 legs</option>
+          </select>
+          <button class="btn btn-primary" onclick="mixBestLegs()">Mix Best Legs</button>
+          <button class="btn btn-sm" id="btn-elite-parlay" onclick="buildEliteParlay()">Elite Parlay</button>
+        </div>
       </div>
-      <div id="elite-parlay-result" style="margin-top:14px"></div>
+      <div id="elite-parlay-result" style="margin-top:12px"></div>
     </div>
 
     <!-- Manual Builder -->
@@ -518,6 +538,14 @@ body.console-open main{padding-bottom:236px}
         <button class="btn btn-sm" onclick="clearParlay()">Clear</button>
       </div>
     </div>
+
+    <!-- Best legs list -->
+    <div class="section-header">
+      <span class="section-title">&#11088; Best Leg Options</span>
+      <span class="section-meta" id="best-legs-meta"></span>
+    </div>
+    <div class="best-legs-grid" id="best-legs-grid"></div>
+    <div class="no-games hidden" id="best-legs-empty">Run analysis to generate best legs.</div>
 
     <!-- Auto-generated parlays -->
     <div class="section-header">
@@ -546,7 +574,12 @@ body.console-open main{padding-bottom:236px}
   <!-- PERFORMANCE -->
   <div class="tab-panel" id="panel-performance">
     <div class="section-header">
-      <span class="section-title">Prediction Performance</span>
+      <span class="section-title">Bot Performance (Games + Props + Parlays)</span>
+      <button class="btn btn-sm" onclick="loadBotPerformance()">&#8635; Refresh</button>
+    </div>
+    <div class="perf-grid" id="bot-perf-stats"></div>
+    <div class="section-header">
+      <span class="section-title">Game Performance</span>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
         <button class="btn btn-sm" onclick="loadPerformance()">&#8635; Refresh</button>
         <button class="btn btn-sm" onclick="resolveOutcomes()">&#9989; Resolve Outcomes</button>
@@ -590,6 +623,15 @@ body.console-open main{padding-bottom:236px}
         </tr></thead>
         <tbody id="prop-type-tbody"></tbody>
       </table>
+    </div>
+
+    <!-- PARLAY PERFORMANCE -->
+    <div class="section-header" style="margin-top:28px">
+      <span class="section-title">&#128200; Parlay Performance</span>
+      <button class="btn btn-sm" onclick="loadParlayPerformance()">&#8635; Refresh</button>
+    </div>
+    <div class="perf-grid" id="parlay-perf-stats-perf" style="margin-bottom:16px">
+      <div class="no-games" style="grid-column:1/-1">Loading parlay stats…</div>
     </div>
 
     <!-- MODEL CALIBRATION -->
@@ -671,6 +713,7 @@ let TODAY_CARDS    = {{ today_cards|safe }};
 let TOMORROW_CARDS = {{ tomorrow_cards|safe }};
 let BEST_PARLAYS   = {{ best_parlays|safe }};
 let ALL_PROPS      = {{ all_props|safe }};
+let BEST_LEGS      = [];
 let parlayLegs     = [];
 let propsSortKey   = 'model_prob';
 let propsSortAsc   = false;
@@ -753,7 +796,7 @@ function switchTab(name) {
   document.querySelectorAll('.tab-panel').forEach(p=>p.classList.remove('active'));
   document.querySelector(`[data-tab="${name}"]`).classList.add('active');
   document.getElementById(`panel-${name}`).classList.add('active');
-  if (name === 'performance') { loadPerformance(); loadCalibration(); }
+  if (name === 'performance') { loadBotPerformance(); loadPerformance(); loadCalibration(); }
   if (name === 'parlays')     { loadTrackedParlays(); loadParlayPerformance(); }
 }
 
@@ -764,7 +807,7 @@ function buildEliteParlay() {
   fetch('/api/parlay/build-elite', {method: 'POST'})
     .then(r => r.json())
     .then(d => {
-      if (btn) { btn.disabled = false; btn.innerHTML = '&#9889; Build Elite Parlay'; }
+      if (btn) { btn.disabled = false; btn.innerHTML = '&#9889; Elite Parlay'; }
       const el = document.getElementById('elite-parlay-result');
       if (!d.ok || !d.parlay) {
         el.innerHTML = `<div class="no-games" style="color:var(--yellow);margin:8px 0">
@@ -800,7 +843,7 @@ function buildEliteParlay() {
       setTimeout(() => { loadTrackedParlays(); loadParlayPerformance(); }, 800);
     })
     .catch(e => {
-      if (btn) { btn.disabled = false; btn.innerHTML = '&#9889; Build Elite Parlay'; }
+      if (btn) { btn.disabled = false; btn.innerHTML = '&#9889; Elite Parlay'; }
       toast('Error: ' + e, 'error');
     });
 }
@@ -808,21 +851,28 @@ function buildEliteParlay() {
 // ── Parlay Performance ────────────────────────────────────────────────────
 function loadParlayPerformance() {
   fetch('/api/parlay/performance').then(r => r.json()).then(d => {
-    const el = document.getElementById('parlay-perf-stats');
-    if (!el) return;
-    if (!d.ok) { el.innerHTML = '<div class="no-games">Could not load parlay stats.</div>'; return; }
+    const targets = [
+      document.getElementById('parlay-perf-stats'),
+      document.getElementById('parlay-perf-stats-perf')
+    ].filter(Boolean);
+    if (!targets.length) return;
+    if (!d.ok) {
+      targets.forEach(el => el.innerHTML = '<div class="no-games">Could not load parlay stats.</div>');
+      return;
+    }
     const s = d.stats || {};
     const hr = s.hit_rate != null ? s.hit_rate + '%' : '—';
     const roi = s.roi != null ? s.roi + '%' : '—';
     const hrC  = s.hit_rate >= 55 ? 'var(--green)' : s.hit_rate >= 45 ? 'var(--yellow)' : 'var(--red)';
     const roiC = (s.roi || 0) >= 0 ? 'var(--green)' : 'var(--red)';
-    el.innerHTML = `
+    const html = `
       <div class="perf-card"><div class="perf-val perf-win">${s.wins||0}</div><div class="perf-label">Parlay Wins</div></div>
       <div class="perf-card"><div class="perf-val perf-loss">${s.losses||0}</div><div class="perf-label">Parlay Losses</div></div>
       <div class="perf-card"><div class="perf-val" style="color:var(--yellow)">${s.pending||0}</div><div class="perf-label">Pending</div></div>
       <div class="perf-card"><div class="perf-val" style="color:${hrC}">${hr}</div><div class="perf-label">Hit Rate</div></div>
       <div class="perf-card"><div class="perf-val" style="color:${roiC}">${roi}</div><div class="perf-label">ROI</div></div>
       <div class="perf-card"><div class="perf-val">${s.total||0}</div><div class="perf-label">Total Parlays</div></div>`;
+    targets.forEach(el => { el.innerHTML = html; });
   });
 }
 
@@ -1196,7 +1246,111 @@ function sortAndRenderProps() {
 }
 
 // ── Parlays ───────────────────────────────────────────────────────────────
-// Default: only ELITE safety + 80%+ combined hit prob + positive EV + OVER legs
+function _legProb(l) {
+  if (l == null) return 0;
+  if (l.model_prob != null) return Number(l.model_prob) || 0;
+  if (l.conf != null) return (Number(l.conf) || 0) / 100;
+  if (l.confidence != null) return (Number(l.confidence) || 0) / 100;
+  return 0;
+}
+function _legDec(l) {
+  return l && l.dec_odds != null ? Number(l.dec_odds) : 2.0;
+}
+function buildBestLegs(parlays) {
+  const map = new Map();
+  (parlays || []).forEach(p => {
+    (p.legs || []).forEach(l => {
+      const label = (l.label || l.pick || '').trim();
+      if (!label) return;
+      const prob = _legProb(l);
+      const dec  = _legDec(l);
+      const ev   = (dec - 1) * prob - (1 - prob);
+      const key  = `${label}|${(l.game||'').trim()}`;
+      const leg  = {
+        label,
+        game: l.game || '',
+        bet_type: l.bet_type || 'player_prop',
+        dec_odds: dec,
+        conf: l.conf != null ? l.conf : Math.round(prob * 100),
+        model_prob: prob,
+        ev,
+        badge: l.badge || l.safety_label || 'MODERATE',
+      };
+      const prev = map.get(key);
+      if (!prev || ev > prev.ev || (ev === prev.ev && prob > prev.model_prob)) {
+        map.set(key, leg);
+      }
+    });
+  });
+  return Array.from(map.values()).sort((a,b)=>{
+    if (b.ev !== a.ev) return b.ev - a.ev;
+    return b.model_prob - a.model_prob;
+  });
+}
+
+function renderBestLegs(legs) {
+  BEST_LEGS = legs || [];
+  const grid  = document.getElementById('best-legs-grid');
+  const empty = document.getElementById('best-legs-empty');
+  const meta  = document.getElementById('best-legs-meta');
+  if (!grid) return;
+  if (!BEST_LEGS.length) {
+    grid.innerHTML = '';
+    if (empty) empty.classList.remove('hidden');
+    if (meta) meta.textContent = '';
+    return;
+  }
+  if (empty) empty.classList.add('hidden');
+  if (meta) meta.textContent = `${BEST_LEGS.length} legs`;
+  grid.innerHTML = BEST_LEGS.map(l => {
+    const probPct = l.model_prob ? (l.model_prob * 100).toFixed(1) + '%' : (l.conf || '?') + '%';
+    const evPct   = (l.ev * 100).toFixed(1) + '%';
+    const evColor = l.ev >= 0 ? 'var(--green)' : 'var(--red)';
+    const addKey  = JSON.stringify({
+      label: l.label,
+      bet_type: l.bet_type,
+      game: l.game,
+      dec_odds: l.dec_odds,
+      conf: l.conf,
+      badge: l.badge || 'MODERATE',
+    }).replace(/"/g,'&quot;');
+    return `<div class="best-leg-card">
+      <div class="best-leg-title">${l.label}</div>
+      <div class="best-leg-meta">
+        <span>${l.game || '—'}</span>
+        <span style="color:var(--accent)">${probPct}</span>
+        <span class="best-leg-ev" style="color:${evColor}">EV ${evPct}</span>
+        <span>x${(l.dec_odds||2).toFixed(2)}</span>
+      </div>
+      <div class="best-leg-actions">
+        ${safetyBadge(l.badge || 'MODERATE')}
+        <button class="bet-add" onclick="addToParlay(${addKey})">+</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function mixBestLegs() {
+  if (!BEST_LEGS.length) {
+    toast('No best legs yet — run analysis first','info');
+    return;
+  }
+  const count = parseInt(document.getElementById('best-legs-count').value, 10) || 3;
+  parlayLegs = BEST_LEGS.slice(0, count).map(l => ({
+    label: l.label,
+    bet_type: l.bet_type,
+    game: l.game,
+    dec_odds: l.dec_odds,
+    conf: l.conf,
+    badge: l.badge || 'MODERATE',
+  }));
+  renderParlayBuilder();
+  const nameEl = document.getElementById('parlay-name');
+  if (nameEl) nameEl.value = `Best Mix ${parlayLegs.length}-Leg`;
+  toast(`Mixed top ${parlayLegs.length} legs`,'success');
+}
+
+// OVER-only parlays + best-leg pool for mixing
 function renderParlays(parlays) {
   BEST_PARLAYS = parlays || [];
   const grid  = document.getElementById('auto-parlays-grid');
@@ -1212,6 +1366,8 @@ function renderParlays(parlays) {
     }
     return legs.length >= 2;
   }).sort((a,b) => (b.score||b.combined_prob||0) - (a.score||a.combined_prob||0));
+
+  renderBestLegs(buildBestLegs(filtered));
 
   if (!filtered.length) {
     grid.innerHTML = '';
@@ -1360,7 +1516,43 @@ function loadTrackedParlays() {
 }
 
 // ── Performance ───────────────────────────────────────────────────────────
+function loadBotPerformance() {
+  const el = document.getElementById('bot-perf-stats');
+  if (!el) return;
+  Promise.all([
+    fetch('/api/performance').then(r=>r.json()),
+    fetch('/api/prop-performance').then(r=>r.json()),
+    fetch('/api/parlay/performance').then(r=>r.json()),
+  ]).then(([g, p, pr]) => {
+    if (!g.ok || !p.ok || !pr.ok) {
+      el.innerHTML = '<div class="no-games">Could not load bot performance.</div>';
+      return;
+    }
+    const gs = g.stats || {};
+    const ps = p.stats || {};
+    const rs = pr.stats || {};
+    const wins    = (gs.wins||0)   + (ps.wins||0)   + (rs.wins||0);
+    const losses  = (gs.losses||0) + (ps.losses||0) + (rs.losses||0);
+    const pushes  = (gs.pushes||0) + (ps.pushes||0) + (rs.pushes||0);
+    const pending = (gs.pending||0)+ (ps.pending||0)+ (rs.pending||0);
+    const total   = (gs.total||0)  + (ps.total||0)  + (rs.total||0);
+    const hitRate = (wins + losses) > 0 ? Math.round(wins / (wins + losses) * 100) : null;
+    const hrColor = hitRate >= 55 ? 'var(--green)' : hitRate >= 45 ? 'var(--yellow)' : 'var(--red)';
+    el.innerHTML = `
+      <div class="perf-card"><div class="perf-val perf-win">${wins}</div><div class="perf-label">Bot Wins</div></div>
+      <div class="perf-card"><div class="perf-val perf-loss">${losses}</div><div class="perf-label">Bot Losses</div></div>
+      <div class="perf-card"><div class="perf-val perf-pend">${pushes}</div><div class="perf-label">Pushes</div></div>
+      <div class="perf-card"><div class="perf-val perf-pend">${pending}</div><div class="perf-label">Pending</div></div>
+      <div class="perf-card"><div class="perf-val" style="color:${hrColor}">${hitRate!=null?hitRate+'%':'—'}</div><div class="perf-label">Bot Hit Rate</div></div>
+      <div class="perf-card"><div class="perf-val" style="font-size:1.2rem">${total}</div><div class="perf-label">Total Picks</div></div>
+    `;
+  }).catch(() => {
+    el.innerHTML = '<div class="no-games">Could not load bot performance.</div>';
+  });
+}
+
 function loadPerformance() {
+  loadBotPerformance();
   fetch('/api/performance').then(r=>r.json()).then(d=>{
     if (!d.ok) { return; }
     const s = d.stats||{};
@@ -1387,6 +1579,7 @@ function loadPerformance() {
   });
   loadHistory();
   loadPropPerformance();
+  loadParlayPerformance();
 }
 
 function loadPropPerformance() {
