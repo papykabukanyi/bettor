@@ -937,6 +937,8 @@ def get_starters_props_batch(games: list[dict], season: int) -> list[dict]:
                 continue
             seen.add(name)
 
+            team_name = g.get("home_team", "") if role_key == "home_starter" else g.get("away_team", "")
+
             stat: dict = {}
             source = "none"
 
@@ -989,7 +991,7 @@ def get_starters_props_batch(games: list[dict], season: int) -> list[dict]:
 
             props.append({
                 "name":         str(stat.get("Name", name)),
-                "team":         str(stat.get("Team", "")),
+                "team":         team_name or str(stat.get("Team", "")),
                 "game":         f"{g['away_team']} @ {g['home_team']}",
                 "stat_type":    "strikeouts",
                 "line":         prop_line,
