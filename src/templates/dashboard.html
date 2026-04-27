@@ -379,6 +379,7 @@ body.console-open main{padding-bottom:236px}
   <div class="header-actions">
     <span id="last-updated">{{ last_updated or 'Not loaded' }}</span>
     <button class="btn btn-primary" id="run-btn" onclick="runAnalysis()">&#9654; Run Analysis</button>
+    <button class="btn" onclick="triggerBackfill()" title="Backfill news, injuries, game scores and retrain model">&#8635; Backfill &amp; Retrain</button>
     <button class="btn" onclick="openPhoneModal()">&#128241; SMS</button>
     <button class="btn" id="console-btn" onclick="toggleConsole()" title="Toggle live console">&#128187; Console</button>
   </div>
@@ -600,6 +601,8 @@ body.console-open main{padding-bottom:236px}
           background:var(--card2);color:var(--text);font-weight:600">ECE: —</span>
         <button class="btn btn-sm" onclick="loadCalibration()">&#8635; Refresh</button>
         <button class="btn btn-sm" onclick="triggerAutoImprove()">&#129302; Auto-Improve</button>
+        <button class="btn btn-sm" onclick="triggerBackfill(3)">&#128190; Backfill 3d</button>
+        <button class="btn btn-sm" onclick="triggerBackfill(7)">&#128190; Backfill 7d</button>
       </div>
     </div>
     <div style="font-size:.78rem;color:var(--muted);margin-bottom:10px">
@@ -872,6 +875,37 @@ function triggerAutoImprove() {
       setTimeout(loadCalibration, 1500);
     })
     .catch(e => toast('Auto-improve error: ' + e, 'error'));
+}
+
+function triggerBackfill(days) {
+  days = days || 3;
+  toast(`Backfilling last ${days} days of data and retraining model…`, 'info');
+  fetch('/api/backfill', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({days_back: days})
+  })
+    .then(r => r.json())
+    .then(d => {
+      if (d.ok) {
+        toast(d.msg || 'Backfill started — check Console for progress', 'success');
+        // Open console so user can watch progress
+        const con = document.getElementById('live-console');
+        if (con && con.style.display === 'none') toggleConsole();
+        // Poll until idle
+        const poll = setInterval(() => {
+          fetch('/api/status').then(r=>r.json()).then(s => {
+            if (s.status !== 'running') {
+              clearInterval(poll);
+              toast('Backfill complete!', 'success');
+            }
+          });
+        }, 3000);
+      } else {
+        toast(d.msg || 'Backfill error', 'error');
+      }
+    })
+    .catch(e => toast('Backfill error: ' + e, 'error'));
 }
 
 // ── Safety badge helpers ──────────────────────────────────────────────────

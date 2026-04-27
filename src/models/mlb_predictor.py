@@ -566,7 +566,11 @@ def build_parlays(all_picks: list[dict], max_legs: int = 8, top_n: int = 5) -> l
         return None
 
     pool_dirs = {d for d in (_dir_tag(p) for p in pool) if d in ("OVER", "UNDER")}
-    require_mix = "OVER" in pool_dirs and "UNDER" in pool_dirs
+    # Only require OVER+UNDER mix if the pool itself has mixed signals.
+    # When all data points to OVER, an all-OVER parlay should be allowed.
+    over_count  = sum(1 for p in pool if _dir_tag(p) == "OVER")
+    under_count = sum(1 for p in pool if _dir_tag(p) == "UNDER")
+    require_mix = "OVER" in pool_dirs and "UNDER" in pool_dirs and over_count > 0 and under_count > 0 and abs(over_count - under_count) <= max(over_count, under_count) // 2
 
     results = []
     for n in range(2, min(max_legs + 1, len(pool) + 1)):

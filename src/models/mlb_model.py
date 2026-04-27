@@ -267,8 +267,13 @@ def retrain_with_history(team_stats: pd.DataFrame, verbose: bool = True) -> Pipe
     rows_X, rows_y = [], []
     actual_count = 0
     try:
+        # Use importlib to force a fresh attribute lookup even if data.db was
+        # loaded before get_completed_games_for_training was defined.
+        import importlib
         sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-        from data.db import get_completed_games_for_training
+        _db_mod = importlib.import_module("data.db")
+        importlib.reload(_db_mod)
+        get_completed_games_for_training = _db_mod.get_completed_games_for_training
         seasons_available = list(team_stats["season"].unique()) if not team_stats.empty else None
         actual_games = get_completed_games_for_training(sport="mlb",
                                                         seasons=seasons_available)

@@ -638,6 +638,76 @@ def api_auto_improve():
         return jsonify({"ok": False, "error": str(e)})
 
 
+@app.route("/api/backfill", methods=["POST"])
+def api_backfill():
+    """
+    Run the full backfill pipeline (news → injuries → game scores → retrain).
+    Accepts optional JSON body: {"days_back": 3}
+    Runs in a background thread; returns immediately.
+    """
+    with _lock:
+        if _state["status"] == "running":
+            return jsonify({"ok": False, "msg": "Analysis already running"}), 409
+
+    days_back = int((request.get_json(silent=True) or {}).get("days_back", 3))
+
+    def _run_backfill():
+        import sys, os
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
+        try:
+            with _lock:
+                _state["status"] = "running"
+                _state["phase"]  = "Backfilling data"
+            _log(f"[backfill] Starting backfill (days_back={days_back})")
+
+            # News
+            try:
+                from data.gdelt_fetcher import fetch_and_store_news
+                n = fetch_and_store_news(days_back=days_back)
+                _log(f"[backfill] News rows ingested: {n}")
+            except Exception as e:
+                _log(f"[backfill] News error: {e}")
+
+            # Injuries
+            try:
+                from data.injury_fetcher import fetch_and_store_injuries
+                inj = fetch_and_store_injuries()
+                _log(f"[backfill] Injury rows: {len(inj) if isinstance(inj, list) else inj}")
+            except Exception as e:
+                _log(f"[backfill] Injury error: {e}")
+
+            # Game results
+            try:
+                from data.history_ingest import backfill_game_results
+                n_games = backfill_game_results(days_back=days_back)
+                _log(f"[backfill] Completed games saved: {n_games}")
+            except Exception as e:
+                _log(f"[backfill] Game results error: {e}")
+
+            # Retrain
+            try:
+                import pandas as pd
+                from data.mlb_fetcher import build_game_dataset
+                from models.mlb_model import retrain_with_history
+                team_stats = build_game_dataset(MLB_SEASONS[:3])
+                retrain_with_history(team_stats)
+                _log("[backfill] Model retrained and saved.")
+            except Exception as e:
+                _log(f"[backfill] Retrain error: {e}")
+
+            with _lock:
+                _state["status"] = "idle"
+                _state["phase"]  = "Backfill complete"
+        except Exception as e:
+            _log(f"[backfill] Fatal error: {e}")
+            with _lock:
+                _state["status"] = "idle"
+                _state["error"]  = str(e)
+
+    threading.Thread(target=_run_backfill, daemon=True).start()
+    return jsonify({"ok": True, "msg": f"Backfill started (days_back={days_back})"})
+
+
 @app.route("/api/performance")
 def api_performance():
     try:
