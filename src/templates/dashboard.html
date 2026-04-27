@@ -739,6 +739,11 @@ let parlayLegs     = [];
 let _parlayTouched = false;
 let propsSortKey   = 'model_prob';
 let propsSortAsc   = false;
+const LOCAL_CACHE_KEY = 'bettor_last_session';
+const AUTO_REFRESH_MIN = 30;
+let _cacheUpdatedAtMs = null;
+let _autoRefreshTimer = null;
+let _autoRefreshInFlight = false;
 
 // ── Loading / status polling ───────────────────────────────────────────────
 const PHASES = {{ phases|tojson }};
@@ -789,16 +794,111 @@ function runAnalysis() {
   });
 }
 
+function _cacheAgeMinFromMs() {
+  if (!_cacheUpdatedAtMs) return null;
+  return Math.max(0, Math.floor((Date.now() - _cacheUpdatedAtMs) / 60000));
+}
+
+function saveLocalCache(data) {
+  try {
+    const payload = {
+      saved_at: Date.now(),
+      data: {
+        game_cards_today: data.game_cards_today || [],
+        game_cards_tomorrow: data.game_cards_tomorrow || [],
+        best_parlays: data.best_parlays || [],
+        player_props: data.player_props || [],
+        last_updated: data.last_updated || data._updated_at || '',
+        cache_updated_at_iso: data.cache_updated_at_iso || null,
+        cache_age_min: data.cache_age_min ?? null,
+      }
+    };
+    localStorage.setItem(LOCAL_CACHE_KEY, JSON.stringify(payload));
+  } catch (e) {}
+}
+
+function loadLocalCache() {
+  try {
+    const raw = localStorage.getItem(LOCAL_CACHE_KEY);
+    if (!raw) return null;
+    const obj = JSON.parse(raw);
+    return obj && obj.data ? obj.data : null;
+  } catch (e) { return null; }
+}
+
+function applyCachedData(d) {
+  if (!d) return;
+  TODAY_CARDS    = d.game_cards_today    || [];
+  TOMORROW_CARDS = d.game_cards_tomorrow || [];
+  BEST_PARLAYS   = d.best_parlays        || [];
+  ALL_PROPS      = d.player_props        || [];
+  renderAll();
+  if (d.last_updated) {
+    document.getElementById('last-updated').textContent = d.last_updated;
+  } else if (d._updated_at) {
+    document.getElementById('last-updated').textContent = d._updated_at;
+  }
+
+  if (typeof d.cache_age_min === 'number') {
+    _cacheUpdatedAtMs = Date.now() - d.cache_age_min * 60000;
+  } else if (typeof d.cache_updated_at_iso === 'string') {
+    const parsed = Date.parse(d.cache_updated_at_iso);
+    _cacheUpdatedAtMs = isNaN(parsed) ? null : parsed;
+  } else if (typeof d.last_updated === 'string') {
+    const m = d.last_updated.match(/^(\d{4})-(\d{2})-(\d{2})\s(\d{2}):(\d{2})/);
+    if (m) {
+      const ts = Date.parse(`${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:00`);
+      _cacheUpdatedAtMs = isNaN(ts) ? null : ts;
+    }
+  }
+}
+
+function maybeAutoRefresh(d) {
+  const age = typeof d.cache_age_min === 'number' ? d.cache_age_min : _cacheAgeMinFromMs();
+  if (age != null && age >= AUTO_REFRESH_MIN) {
+    triggerBackgroundRefresh();
+  }
+}
+
+function triggerBackgroundRefresh() {
+  if (_autoRefreshInFlight) return;
+  _autoRefreshInFlight = true;
+  fetch('/api/run', {method:'POST'}).then(r=>r.json()).then(d=>{
+    if (!d.ok) { _autoRefreshInFlight = false; return; }
+    const poll = setInterval(() => {
+      fetch('/api/status').then(r=>r.json()).then(s=>{
+        if (s.status !== 'running') {
+          clearInterval(poll);
+          _autoRefreshInFlight = false;
+          loadCachedState();
+        }
+      }).catch(()=>{});
+    }, 5000);
+  }).catch(()=>{ _autoRefreshInFlight = false; });
+}
+
+function startAutoRefreshTimer() {
+  if (_autoRefreshTimer) return;
+  _autoRefreshTimer = setInterval(() => {
+    const age = _cacheAgeMinFromMs();
+    if (age != null && age >= AUTO_REFRESH_MIN) {
+      triggerBackgroundRefresh();
+    }
+  }, 10 * 60 * 1000);
+}
+
 function loadCachedState() {
   fetch('/api/cached-state').then(r=>r.json()).then(d=>{
     if (!d.ok && d.status !== 'done') return;
-    TODAY_CARDS    = d.game_cards_today    || [];
-    TOMORROW_CARDS = d.game_cards_tomorrow || [];
-    BEST_PARLAYS   = d.best_parlays        || [];
-    ALL_PROPS      = d.player_props        || [];
-    renderAll();
-    if (d.last_updated) {
-      document.getElementById('last-updated').textContent = d.last_updated;
+    applyCachedData(d);
+    saveLocalCache(d);
+    maybeAutoRefresh(d);
+    startAutoRefreshTimer();
+  }).catch(() => {
+    const local = loadLocalCache();
+    if (local) {
+      applyCachedData(local);
+      startAutoRefreshTimer();
     }
   });
 }
@@ -2051,8 +2151,24 @@ function updateLiveScoreCards() {
       (TOMORROW_CARDS && TOMORROW_CARDS.length) ||
       (ALL_PROPS && ALL_PROPS.length)) {
     renderAll();
+    _cacheUpdatedAtMs = Date.now();
+    saveLocalCache({
+      game_cards_today: TODAY_CARDS,
+      game_cards_tomorrow: TOMORROW_CARDS,
+      best_parlays: BEST_PARLAYS,
+      player_props: ALL_PROPS,
+      last_updated: (document.getElementById('last-updated')||{}).textContent || '',
+      cache_age_min: 0,
+    });
+    startAutoRefreshTimer();
     hideOverlay();
   } else {
+    const local = loadLocalCache();
+    if (local) {
+      applyCachedData(local);
+      hideOverlay();
+      startAutoRefreshTimer();
+    }
     // Poll status — if running, show progress; else try to load cache
     fetch('/api/status').then(r=>r.json()).then(d=>{
       if (d.status === 'running') {

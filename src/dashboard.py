@@ -58,6 +58,7 @@ _state = {
     "phase_idx":        0,
     "phase_total":      len(_PHASES),
     "last_updated":     None,
+    "last_updated_ts":  None,
     "error":            None,
     "game_cards_today":    [],
     "game_cards_tomorrow": [],
@@ -435,7 +436,8 @@ def _run_analysis():
         tomorrow_cards.sort(key=_card_score, reverse=True)
         all_props_flat = sorted(all_props, key=lambda x: x.get("safety", 0), reverse=True)
 
-        last_updated = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+        now_ts = datetime.datetime.now(datetime.timezone.utc)
+        last_updated = now_ts.strftime("%Y-%m-%d %H:%M")
 
         try:
             save_analysis_cache({
@@ -453,6 +455,7 @@ def _run_analysis():
                 "status":              "done",
                 "phase":               "Complete",
                 "last_updated":        last_updated,
+                "last_updated_ts":     now_ts.isoformat(),
                 "game_cards_today":    _clean(today_cards),
                 "game_cards_tomorrow": _clean(tomorrow_cards),
                 "best_parlays":        _clean(best_parlays),
@@ -546,10 +549,21 @@ def api_status():
 def api_cached_state():
     with _lock:
         if _state.get("game_cards_today") or _state.get("player_props"):
+            cache_updated_at_iso = _state.get("last_updated_ts")
+            cache_age_min = None
+            if cache_updated_at_iso:
+                try:
+                    dt = datetime.datetime.fromisoformat(cache_updated_at_iso)
+                    now = datetime.datetime.now(datetime.timezone.utc) if dt.tzinfo else datetime.datetime.utcnow()
+                    cache_age_min = max(0, int((now - dt).total_seconds() / 60))
+                except Exception:
+                    cache_age_min = None
             return jsonify({
                 "ok":                  True,
                 "status":              _state["status"],
                 "last_updated":        _state["last_updated"],
+                "cache_updated_at_iso": cache_updated_at_iso,
+                "cache_age_min":        cache_age_min,
                 "game_cards_today":    _state["game_cards_today"],
                 "game_cards_tomorrow": _state["game_cards_tomorrow"],
                 "best_parlays":        _state["best_parlays"],

@@ -1267,6 +1267,16 @@ def get_analysis_cache(max_age_hours: int = 22, cache_date=None) -> "dict | None
         data = dict(row["data_json"])
         ts = row["updated_at"]
         data["_updated_at"] = ts.strftime("%b %d %I:%M %p ET") if hasattr(ts, "strftime") else str(ts)[:16]
+        if ts:
+            data["cache_updated_at_iso"] = ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
+            try:
+                if ts.tzinfo:
+                    now = datetime.datetime.now(datetime.timezone.utc)
+                else:
+                    now = datetime.datetime.utcnow()
+                data["cache_age_min"] = max(0, int((now - ts).total_seconds() / 60))
+            except Exception:
+                data["cache_age_min"] = None
         return data
     except Exception as e:
         print(f"[db] get_analysis_cache error: {e}")
