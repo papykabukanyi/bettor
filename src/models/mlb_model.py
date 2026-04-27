@@ -204,11 +204,11 @@ def _load_team_injury_counts_from_db() -> dict[str, int]:
             return {}
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cur.execute("""
-            SELECT lower(team_name) AS team,
+            SELECT lower(team) AS team,
                    COUNT(*) AS cnt
             FROM   injury_reports
             WHERE  updated_at > NOW() - INTERVAL '14 days'
-            GROUP  BY lower(team_name)
+            GROUP  BY lower(team)
         """)
         result = {r["team"]: int(r["cnt"]) for r in cur.fetchall()}
         conn.close()

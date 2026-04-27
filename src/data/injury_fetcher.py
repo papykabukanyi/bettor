@@ -72,49 +72,50 @@ def fetch_mlb_transactions(start_date: str, end_date: str) -> list[dict]:
     Fetch MLB transactions from StatsAPI and extract injury-related moves.
     start_date/end_date: YYYY-MM-DD
     Returns list of injury dicts with fetched_at set to transaction date.
-    """
-    try:
-        import statsapi as mlbstatsapi
-    except Exception:
-        return []
 
+    Uses requests directly — the statsapi Python library has client-side
+    parameter validation that incorrectly rejects startDate+endDate pairs.
+    """
+    import requests as _req
+
+    url = "https://statsapi.mlb.com/api/v1/transactions"
     params = {
-        "sportId": 1,
         "startDate": start_date,
-        "endDate": end_date,
+        "endDate":   end_date,
+        "sportId":   1,
     }
     try:
-        data = mlbstatsapi.get("transactions", params) or {}
-        items = data.get("transactions") if isinstance(data, dict) else data
-        if not items:
-            return []
+        resp  = _req.get(url, params=params, timeout=20)
+        resp.raise_for_status()
+        data  = resp.json()
+        items = data.get("transactions", []) or []
     except Exception as e:
         print(f"[injury_fetcher] MLB transactions error: {e}")
         return []
 
     injuries = []
     for t in items:
-        desc = t.get("description", "") or ""
+        desc  = t.get("description", "") or ""
         ttype = t.get("typeDesc") or t.get("typeCode") or t.get("transactionType") or ""
-        blob = f"{ttype} {desc}".lower()
+        blob  = f"{ttype} {desc}".lower()
         if not any(k in blob for k in ("injured", "injury", "il", "disabled list", "placed on")):
             continue
 
         person = t.get("person") or t.get("player") or {}
-        team = t.get("team") or t.get("toTeam") or {}
+        team   = t.get("team") or t.get("toTeam") or {}
         player_name = person.get("fullName") or person.get("name") or "Unknown"
-        team_name = team.get("name") or team.get("teamName") or "Unknown"
-        status = ttype or "Injury"
-        tdate = t.get("date") or t.get("transactionDate") or t.get("effectiveDate")
+        team_name   = team.get("name") or team.get("teamName") or "Unknown"
+        status      = ttype or "Injury"
+        tdate       = t.get("date") or t.get("transactionDate") or t.get("effectiveDate")
 
         injuries.append({
-            "sport": "mlb",
-            "team": team_name,
+            "sport":       "mlb",
+            "team":        team_name,
             "player_name": player_name,
-            "status": status,
+            "status":      status,
             "description": desc,
             "injury_type": "transaction",
-            "fetched_at": tdate,
+            "fetched_at":  tdate,
         })
 
     return injuries
