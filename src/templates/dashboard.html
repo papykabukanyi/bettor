@@ -978,6 +978,7 @@ function gameCard(c) {
     : `<div class="winner-line muted">No moneyline edge yet</div>`;
 
   const topProps = [...(c.home_props||[]), ...(c.away_props||[])]
+    .filter(p => (p.direction||'').toUpperCase() === 'OVER')
     .sort((a,b)=> (b.safety||0) - (a.safety||0))
     .slice(0, 3);
   const propsPreview = topProps.length
@@ -1146,12 +1147,12 @@ function renderPropsTable(props) {
 function filterProps() {
   const q     = (document.getElementById('props-search').value||'').toLowerCase();
   const stat  = document.getElementById('props-stat').value;
-  const dir   = document.getElementById('props-dir').value;
+  const dir   = document.getElementById('props-dir').value || 'OVER';
   const safe  = document.getElementById('props-safety').value;
   _filteredProps = ALL_PROPS.filter(p => {
     if (q && !(p.name||'').toLowerCase().includes(q) && !(p.team||'').toLowerCase().includes(q)) return false;
     if (stat && p.stat_type !== stat) return false;
-    if (dir && p.direction !== dir) return false;
+    if ((p.direction||'').toUpperCase() !== dir.toUpperCase()) return false;
     if (safe && p.safety_label !== safe) return false;
     return true;
   });
