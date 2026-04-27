@@ -33,6 +33,18 @@ def main():
     n_inj = backfill_injuries(days_back=days)
     print(f"[backfill] injuries rows: {n_inj}")
 
+    # Retrain the MLB model with collected sentiment + injury data
+    print("[backfill] Retraining model with historical data...")
+    try:
+        from data.mlb_fetcher import build_game_dataset
+        from models.mlb_model import retrain_with_history
+        from config import MLB_SEASONS
+        team_stats = build_game_dataset(MLB_SEASONS[:3])
+        retrain_with_history(team_stats, verbose=True)
+        print("[backfill] Model retrained and saved.")
+    except Exception as e:
+        print(f"[backfill] Model retrain failed (non-fatal): {e}")
+
 
 if __name__ == "__main__":
     main()

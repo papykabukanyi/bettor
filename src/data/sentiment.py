@@ -398,7 +398,7 @@ def get_news_sentiment(entity: str, entity_type: str = "team") -> dict:
 
     # ── Score all texts ───────────────────────────────────────────────────
     texts  = [
-        f"{a.get('title','')} {a.get('description','')}"
+        f"{a.get('title') or ''} {a.get('description') or ''}"
         for a in all_articles
     ]
     scores     = score_texts(texts)
@@ -410,9 +410,9 @@ def get_news_sentiment(entity: str, entity_type: str = "team") -> dict:
         article_rows.append({
             "sport":       "mlb",
             "team":        entity,
-            "headline":    a.get("title", "")[:500],
-            "description": a.get("description", "")[:1000],
-            "url":         a.get("url", "")[:500],
+            "headline":    (a.get("title") or "")[:500],
+            "description": (a.get("description") or "")[:1000],
+            "url":         (a.get("url") or "")[:500],
             "source_name": (a.get("source") or {}).get("name", "")[:100],
             "sentiment":   round(s, 3),
             "published_at": a.get("publishedAt"),
@@ -514,7 +514,7 @@ def fetch_news_history(entity: str, start_date: str, end_date: str,
     if not all_articles:
         return []
 
-    texts  = [f"{a.get('title','')} {a.get('description','')}" for a in all_articles]
+    texts  = [f"{a.get('title') or ''} {a.get('description') or ''}" for a in all_articles]
     scores = score_texts(texts)
 
     article_rows = []
@@ -522,9 +522,9 @@ def fetch_news_history(entity: str, start_date: str, end_date: str,
         article_rows.append({
             "sport":       "mlb",
             "team":        entity,
-            "headline":    a.get("title", "")[:500],
-            "description": a.get("description", "")[:1000],
-            "url":         a.get("url", "")[:500],
+            "headline":    (a.get("title") or "")[:500],
+            "description": (a.get("description") or "")[:1000],
+            "url":         (a.get("url") or "")[:500],
             "source_name": (a.get("source") or {}).get("name", "")[:100],
             "sentiment":   round(float(s), 3),
             "published_at": a.get("publishedAt") or None,
