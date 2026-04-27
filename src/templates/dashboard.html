@@ -252,6 +252,10 @@ main{padding:20px;max-width:1400px;margin:0 auto}
 .best-leg-meta{display:flex;flex-wrap:wrap;gap:8px;margin-top:6px;font-size:.72rem;color:var(--muted)}
 .best-leg-actions{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:10px}
 .best-leg-ev{font-size:.72rem;font-weight:700}
+.best-leg-type{font-size:.62rem;padding:2px 6px;border-radius:999px;font-weight:700;letter-spacing:.04em}
+.best-leg-type.prop{background:rgba(16,185,129,.15);color:var(--green)}
+.best-leg-type.game{background:rgba(59,130,246,.15);color:#60a5fa}
+.best-leg-type.parlay{background:rgba(124,58,237,.18);color:var(--purple)}
 
 /* Parlay mixer */
 .parlay-mixer{background:linear-gradient(135deg,rgba(16,185,129,.14),rgba(59,130,246,.10));
@@ -260,6 +264,10 @@ main{padding:20px;max-width:1400px;margin:0 auto}
 .parlay-mixer-title{font-size:.95rem;font-weight:700;color:var(--green)}
 .parlay-mixer-actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
 .parlay-mixer-preview{font-size:.78rem;color:var(--muted);margin-top:8px}
+.auto-mix-card{border:1px solid var(--border);border-radius:var(--radius);padding:14px;background:var(--card)}
+.auto-mix-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px}
+.auto-mix-title{font-size:.85rem;font-weight:700;color:var(--accent)}
+.auto-mix-meta{font-size:.72rem;color:var(--muted)}
 
 /* Tracked parlays */
 .tracked-parlay{background:var(--card2);border:1px solid var(--border);
@@ -497,33 +505,37 @@ body.console-open main{padding-bottom:236px}
   <!-- PARLAYS -->
   <div class="tab-panel" id="panel-parlays">
 
-    <!-- ★ Best-Legs Mixer ★ -->
+    <!-- ★ Auto-Mix Best Parlay ★ -->
     <div class="parlay-mixer">
       <div class="parlay-mixer-header">
         <div>
-          <div class="parlay-mixer-title">&#10024; Best-Legs Mixer</div>
+          <div class="parlay-mixer-title">&#10024; Auto-Mixed Best Parlay</div>
           <div class="parlay-mixer-preview">
-            Pulls legs from auto-parlays, ranks by EV then probability, and mixes the top legs into the builder.
+            Auto-scans all picks + props, ranks by EV then probability, and builds the best mix.
+            Builder is auto-filled — no button required.
           </div>
         </div>
         <div class="parlay-mixer-actions">
-          <select id="best-legs-count" style="background:var(--card);border:1px solid var(--border);
+          <label style="font-size:.78rem;color:var(--muted)">Legs</label>
+          <select id="auto-mix-count" onchange="refreshAutoMix()" style="background:var(--card);border:1px solid var(--border);
             color:var(--text);padding:6px 10px;border-radius:8px;font-size:.82rem">
-            <option value="2">2 legs</option>
-            <option value="3" selected>3 legs</option>
-            <option value="4">4 legs</option>
-            <option value="5">5 legs</option>
+            <option value="2">2</option>
+            <option value="3">3</option>
+            <option value="4" selected>4</option>
+            <option value="5">5</option>
+            <option value="6">6</option>
           </select>
-          <button class="btn btn-primary" onclick="mixBestLegs()">Mix Best Legs</button>
-          <button class="btn btn-sm" id="btn-elite-parlay" onclick="buildEliteParlay()">Elite Parlay</button>
+          <button class="btn btn-sm" onclick="saveAutoMixParlay()">&#128190; Save</button>
+          <button class="btn btn-sm" onclick="sendAutoMixSms()">&#128232; Send SMS</button>
         </div>
       </div>
-      <div id="elite-parlay-result" style="margin-top:12px"></div>
+      <div id="auto-mix-card" style="margin-top:12px"></div>
+      <div class="no-games hidden" id="auto-mix-empty">Run analysis to generate picks.</div>
     </div>
 
     <!-- Manual Builder -->
     <div class="parlay-builder">
-      <h3>&#10133; Parlay Builder <span style="font-size:.75rem;color:var(--muted);font-weight:400">(click + on any pick)</span></h3>
+      <h3>&#10133; Parlay Builder <span style="font-size:.75rem;color:var(--muted);font-weight:400">(auto-filled with best mix; click + to add)</span></h3>
       <div id="parlay-legs-list"><div style="color:var(--muted);font-size:.82rem">No legs added yet.</div></div>
       <div class="parlay-builder-actions">
         <span id="parlay-combined-odds"></span>
@@ -539,9 +551,17 @@ body.console-open main{padding-bottom:236px}
       </div>
     </div>
 
-    <!-- Best legs list -->
+    <!-- Top props list -->
     <div class="section-header">
-      <span class="section-title">&#11088; Best Leg Options</span>
+      <span class="section-title">&#127919; Top Props (OVER)</span>
+      <span class="section-meta" id="top-props-meta"></span>
+    </div>
+    <div class="best-legs-grid" id="top-props-grid"></div>
+    <div class="no-games hidden" id="top-props-empty">Run analysis to generate props.</div>
+
+    <!-- Best legs list -->
+    <div class="section-header" style="margin-top:18px">
+      <span class="section-title">&#11088; Best Legs (All Picks)</span>
       <span class="section-meta" id="best-legs-meta"></span>
     </div>
     <div class="best-legs-grid" id="best-legs-grid"></div>
@@ -714,7 +734,9 @@ let TOMORROW_CARDS = {{ tomorrow_cards|safe }};
 let BEST_PARLAYS   = {{ best_parlays|safe }};
 let ALL_PROPS      = {{ all_props|safe }};
 let BEST_LEGS      = [];
+let AUTO_MIX_LEGS  = [];
 let parlayLegs     = [];
+let _parlayTouched = false;
 let propsSortKey   = 'model_prob';
 let propsSortAsc   = false;
 
@@ -1256,17 +1278,78 @@ function _legProb(l) {
 function _legDec(l) {
   return l && l.dec_odds != null ? Number(l.dec_odds) : 2.0;
 }
-function buildBestLegs(parlays) {
+function _legEv(prob, dec) {
+  const p = Number(prob) || 0;
+  const d = Number(dec) || 2.0;
+  return (d - 1) * p - (1 - p);
+}
+
+function buildLegPool() {
   const map = new Map();
-  (parlays || []).forEach(p => {
+  const addLeg = (leg) => {
+    const key = `${leg.label}|${leg.game||''}`;
+    const prev = map.get(key);
+    if (!prev || leg.ev > prev.ev || (leg.ev === prev.ev && leg.model_prob > prev.model_prob)) {
+      map.set(key, leg);
+    }
+  };
+
+  // Player props (OVER only)
+  (ALL_PROPS || []).forEach(p => {
+    if ((p.direction || '').toUpperCase() !== 'OVER') return;
+    const prob = _legProb(p);
+    const dec  = _legDec(p) || 1.9;
+    const ev   = p.ev != null ? Number(p.ev) : _legEv(prob, dec);
+    const label = `${p.name} ${p.direction} ${p.line} ${p.prop_label}`.trim();
+    if (!label || !p.name) return;
+    addLeg({
+      label,
+      game: p.game_key || p.game || '',
+      bet_type: 'player_prop',
+      dec_odds: dec,
+      conf: p.confidence || Math.round(prob * 100),
+      model_prob: prob,
+      ev,
+      badge: p.safety_label || 'MODERATE',
+      source: 'prop',
+    });
+  });
+
+  // Game picks from cards
+  const betKeys = [
+    'moneyline','run_line','total','f5_moneyline','f5_total','home_team_total','away_team_total'
+  ];
+  const cards = ([]).concat(TODAY_CARDS || [], TOMORROW_CARDS || []);
+  cards.forEach(c => {
+    betKeys.forEach(k => {
+      const b = c[k];
+      if (!b || !b.pick) return;
+      const prob = _legProb(b);
+      const dec  = _legDec(b) || 2.0;
+      const ev   = b.ev != null ? Number(b.ev) : _legEv(prob, dec);
+      addLeg({
+        label: b.pick,
+        game: c.game_key || b.game_key || '',
+        bet_type: b.bet_type || k,
+        dec_odds: dec,
+        conf: b.confidence || Math.round(prob * 100),
+        model_prob: prob,
+        ev,
+        badge: b.safety_label || 'MODERATE',
+        source: 'game',
+      });
+    });
+  });
+
+  // Auto-parlay legs (as additional coverage)
+  (BEST_PARLAYS || []).forEach(p => {
     (p.legs || []).forEach(l => {
       const label = (l.label || l.pick || '').trim();
       if (!label) return;
       const prob = _legProb(l);
-      const dec  = _legDec(l);
-      const ev   = (dec - 1) * prob - (1 - prob);
-      const key  = `${label}|${(l.game||'').trim()}`;
-      const leg  = {
+      const dec  = _legDec(l) || 2.0;
+      const ev   = _legEv(prob, dec);
+      addLeg({
         label,
         game: l.game || '',
         bet_type: l.bet_type || 'player_prop',
@@ -1275,17 +1358,34 @@ function buildBestLegs(parlays) {
         model_prob: prob,
         ev,
         badge: l.badge || l.safety_label || 'MODERATE',
-      };
-      const prev = map.get(key);
-      if (!prev || ev > prev.ev || (ev === prev.ev && prob > prev.model_prob)) {
-        map.set(key, leg);
-      }
+        source: 'parlay',
+      });
     });
   });
-  return Array.from(map.values()).sort((a,b)=>{
+
+  const legs = Array.from(map.values());
+  legs.sort((a,b)=>{
     if (b.ev !== a.ev) return b.ev - a.ev;
     return b.model_prob - a.model_prob;
   });
+  return legs;
+}
+
+function renderTopProps(legs) {
+  const grid  = document.getElementById('top-props-grid');
+  const empty = document.getElementById('top-props-empty');
+  const meta  = document.getElementById('top-props-meta');
+  if (!grid) return;
+  const props = (legs || []).filter(l => l.source === 'prop').slice(0, 24);
+  if (!props.length) {
+    grid.innerHTML = '';
+    if (empty) empty.classList.remove('hidden');
+    if (meta) meta.textContent = '';
+    return;
+  }
+  if (empty) empty.classList.add('hidden');
+  if (meta) meta.textContent = `${props.length} props`;
+  grid.innerHTML = props.map(l => _renderLegCard(l)).join('');
 }
 
 function renderBestLegs(legs) {
@@ -1294,60 +1394,152 @@ function renderBestLegs(legs) {
   const empty = document.getElementById('best-legs-empty');
   const meta  = document.getElementById('best-legs-meta');
   if (!grid) return;
-  if (!BEST_LEGS.length) {
+  const best = BEST_LEGS.slice(0, 36);
+  if (!best.length) {
     grid.innerHTML = '';
     if (empty) empty.classList.remove('hidden');
     if (meta) meta.textContent = '';
     return;
   }
   if (empty) empty.classList.add('hidden');
-  if (meta) meta.textContent = `${BEST_LEGS.length} legs`;
-  grid.innerHTML = BEST_LEGS.map(l => {
-    const probPct = l.model_prob ? (l.model_prob * 100).toFixed(1) + '%' : (l.conf || '?') + '%';
-    const evPct   = (l.ev * 100).toFixed(1) + '%';
-    const evColor = l.ev >= 0 ? 'var(--green)' : 'var(--red)';
-    const addKey  = JSON.stringify({
-      label: l.label,
-      bet_type: l.bet_type,
-      game: l.game,
-      dec_odds: l.dec_odds,
-      conf: l.conf,
-      badge: l.badge || 'MODERATE',
-    }).replace(/"/g,'&quot;');
-    return `<div class="best-leg-card">
-      <div class="best-leg-title">${l.label}</div>
-      <div class="best-leg-meta">
-        <span>${l.game || '—'}</span>
-        <span style="color:var(--accent)">${probPct}</span>
-        <span class="best-leg-ev" style="color:${evColor}">EV ${evPct}</span>
-        <span>x${(l.dec_odds||2).toFixed(2)}</span>
-      </div>
-      <div class="best-leg-actions">
-        ${safetyBadge(l.badge || 'MODERATE')}
-        <button class="bet-add" onclick="addToParlay(${addKey})">+</button>
-      </div>
-    </div>`;
-  }).join('');
+  if (meta) meta.textContent = `${best.length} legs`;
+  grid.innerHTML = best.map(l => _renderLegCard(l)).join('');
 }
 
-function mixBestLegs() {
-  if (!BEST_LEGS.length) {
-    toast('No best legs yet — run analysis first','info');
-    return;
-  }
-  const count = parseInt(document.getElementById('best-legs-count').value, 10) || 3;
-  parlayLegs = BEST_LEGS.slice(0, count).map(l => ({
+function _renderLegCard(l) {
+  const probPct = l.model_prob ? (l.model_prob * 100).toFixed(1) + '%' : (l.conf || '?') + '%';
+  const evPct   = (l.ev * 100).toFixed(1) + '%';
+  const evColor = l.ev >= 0 ? 'var(--green)' : 'var(--red)';
+  const typeCls = l.source === 'prop' ? 'prop' : l.source === 'game' ? 'game' : 'parlay';
+  const typeLbl = l.source === 'prop' ? 'PROP' : l.source === 'game' ? 'GAME' : 'AUTO';
+  const addKey  = JSON.stringify({
     label: l.label,
     bet_type: l.bet_type,
     game: l.game,
     dec_odds: l.dec_odds,
     conf: l.conf,
     badge: l.badge || 'MODERATE',
-  }));
-  renderParlayBuilder();
-  const nameEl = document.getElementById('parlay-name');
-  if (nameEl) nameEl.value = `Best Mix ${parlayLegs.length}-Leg`;
-  toast(`Mixed top ${parlayLegs.length} legs`,'success');
+  }).replace(/"/g,'&quot;');
+  return `<div class="best-leg-card">
+    <div class="best-leg-title">${l.label}</div>
+    <div class="best-leg-meta">
+      <span class="best-leg-type ${typeCls}">${typeLbl}</span>
+      <span>${l.game || '—'}</span>
+      <span style="color:var(--accent)">${probPct}</span>
+      <span class="best-leg-ev" style="color:${evColor}">EV ${evPct}</span>
+      <span>x${(l.dec_odds||2).toFixed(2)}</span>
+    </div>
+    <div class="best-leg-actions">
+      ${safetyBadge(l.badge || 'MODERATE')}
+      <button class="bet-add" onclick="addToParlay(${addKey})">+</button>
+    </div>
+  </div>`;
+}
+
+function buildAutoMix(legs, count) {
+  const selected = [];
+  const usedGames = new Set();
+  const tryAdd = (l) => {
+    if (selected.length >= count) return;
+    if (l.game && usedGames.has(l.game)) return;
+    selected.push(l);
+    if (l.game) usedGames.add(l.game);
+  };
+  const props = (legs || []).filter(l => l.source === 'prop');
+  props.forEach(tryAdd);
+  (legs || []).forEach(tryAdd);
+  if (selected.length < count) {
+    (legs || []).forEach(l => {
+      if (selected.length >= count) return;
+      if (selected.find(s => s.label === l.label)) return;
+      selected.push(l);
+    });
+  }
+  return selected;
+}
+
+function renderAutoMixCard(mix) {
+  const el = document.getElementById('auto-mix-card');
+  const empty = document.getElementById('auto-mix-empty');
+  if (!el) return;
+  if (!mix.length) {
+    el.innerHTML = '';
+    if (empty) empty.classList.remove('hidden');
+    return;
+  }
+  if (empty) empty.classList.add('hidden');
+  const combinedProb = mix.reduce((acc,l)=>acc*_legProb(l), 1);
+  const combinedDec  = mix.reduce((acc,l)=>acc*_legDec(l), 1);
+  const combinedEv   = _legEv(combinedProb, combinedDec);
+  const evColor = combinedEv >= 0 ? 'var(--green)' : 'var(--red)';
+  const legsHtml = mix.map(l => {
+    const probPct = l.model_prob ? (l.model_prob * 100).toFixed(1) + '%' : (l.conf || '?') + '%';
+    return `<div class="parlay-leg">
+      <div class="leg-dot" style="background:var(--green)"></div>
+      <span class="leg-text">${l.label}</span>
+      <span class="leg-conf">${probPct} · x${(l.dec_odds||2).toFixed(2)}</span>
+    </div>`;
+  }).join('');
+  el.innerHTML = `
+    <div class="auto-mix-card">
+      <div class="auto-mix-head">
+        <div>
+          <div class="auto-mix-title">Best Mix · ${mix.length} legs</div>
+          <div class="auto-mix-meta">Hit: ${(combinedProb*100).toFixed(1)}% · EV ${((combinedEv||0)*100).toFixed(1)}%</div>
+        </div>
+        <div style="text-align:right">
+          <div style="font-size:1.1rem;font-weight:700">x${combinedDec.toFixed(2)}</div>
+          <div style="font-size:.78rem;color:${evColor}">$100 → $${(combinedDec*100).toFixed(0)}</div>
+        </div>
+      </div>
+      ${legsHtml}
+    </div>
+  `;
+}
+
+function refreshAutoMix(force) {
+  const count = parseInt(document.getElementById('auto-mix-count').value, 10) || 4;
+  const mix = buildAutoMix(BEST_LEGS, count);
+  AUTO_MIX_LEGS = mix;
+  if (!mix.length) {
+    renderAutoMixCard([]);
+    return;
+  }
+  if (force || !_parlayTouched || !parlayLegs.length) {
+    parlayLegs = mix.map(l => ({
+      label: l.label,
+      bet_type: l.bet_type,
+      game: l.game,
+      dec_odds: l.dec_odds,
+      conf: l.conf,
+      badge: l.badge || 'MODERATE',
+    }));
+    renderParlayBuilder();
+    const nameEl = document.getElementById('parlay-name');
+    if (nameEl) nameEl.value = `Auto Mix ${parlayLegs.length}-Leg`;
+  }
+  renderAutoMixCard(mix);
+}
+
+function saveAutoMixParlay() {
+  if (!AUTO_MIX_LEGS.length) { toast('No auto-mix yet','info'); return; }
+  const combined = AUTO_MIX_LEGS.reduce((acc,l)=>acc*(_legDec(l)||2),1);
+  const name = `Auto Mix ${AUTO_MIX_LEGS.length}-Leg`;
+  fetch('/api/parlay/save',{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({name, legs:AUTO_MIX_LEGS, combined_odds:combined, stake_usd:10})
+  }).then(r=>r.json()).then(d=>{
+    if(d.ok){toast('Auto-mix saved!','success');loadTrackedParlays();}
+    else toast(d.error||'Error saving','error');
+  });
+}
+
+function sendAutoMixSms() {
+  if (!AUTO_MIX_LEGS.length) { toast('No auto-mix yet','info'); return; }
+  const combined = AUTO_MIX_LEGS.reduce((acc,l)=>acc*(_legDec(l)||2),1);
+  const name = `Auto Mix ${AUTO_MIX_LEGS.length}-Leg`;
+  sendParlaySms({name, legs: AUTO_MIX_LEGS, combined_odds: combined, stake_usd: 10});
 }
 
 // OVER-only parlays + best-leg pool for mixing
@@ -1367,7 +1559,10 @@ function renderParlays(parlays) {
     return legs.length >= 2;
   }).sort((a,b) => (b.score||b.combined_prob||0) - (a.score||a.combined_prob||0));
 
-  renderBestLegs(buildBestLegs(filtered));
+  const legPool = buildLegPool();
+  renderTopProps(legPool);
+  renderBestLegs(legPool);
+  refreshAutoMix(true);
 
   if (!filtered.length) {
     grid.innerHTML = '';
@@ -1418,6 +1613,7 @@ function renderParlays(parlays) {
 function addToParlay(leg) {
   if (parlayLegs.length >= 12) { toast('Max 12 legs','info'); return; }
   if (parlayLegs.find(l=>l.label===leg.label)) { toast('Already added','info'); return; }
+  _parlayTouched = true;
   parlayLegs.push(leg);
   renderParlayBuilder();
   toast(`Added: ${leg.label}`,'success');
@@ -1442,10 +1638,11 @@ function renderParlayBuilder() {
 }
 
 function removeLeg(i) {
+  _parlayTouched = true;
   parlayLegs.splice(i, 1);
   renderParlayBuilder();
 }
-function clearParlay() { parlayLegs=[]; renderParlayBuilder(); }
+function clearParlay() { _parlayTouched = true; parlayLegs=[]; renderParlayBuilder(); }
 
 function saveParlay() {
   if (!parlayLegs.length) { toast('Add legs first','error'); return; }
