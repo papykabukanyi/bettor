@@ -1048,10 +1048,20 @@ function betRow(label, bet, card) {
 }
 
 function propsSection(c) {
-  const hp = c.home_props||[];
-  const ap = c.away_props||[];
+  // Only show players predicted to go OVER with 80%+ confidence, ELITE safety, positive EV
+  function qualifies(p) {
+    if ((p.direction || '').toUpperCase() !== 'OVER') return false;
+    if ((p.safety_label || '').toUpperCase() !== 'ELITE') return false;
+    const prob = p.model_prob != null ? p.model_prob : (p.confidence || 0) / 100;
+    if (prob < 0.80) return false;
+    if ((p.ev || 0) <= 0) return false;
+    return true;
+  }
+  const hp = (c.home_props || []).filter(qualifies);
+  const ap = (c.away_props || []).filter(qualifies);
   if (!hp.length && !ap.length) return '';
   let html = '<div class="props-section">';
+  html += `<div style="font-size:.68rem;color:var(--accent);font-weight:700;padding:4px 0 6px;letter-spacing:.04em;">&#9650; OVER TARGETS (80%+ · ELITE · +EV)</div>`;
   if (ap.length) {
     html += `<div class="props-team-header">${c.away_team}</div>`;
     html += ap.map(p => propRow(p, c.game_key)).join('');
@@ -1158,17 +1168,35 @@ function sortAndRenderProps() {
 }
 
 // ── Parlays ───────────────────────────────────────────────────────────────
+// Default: only ELITE safety + 80%+ combined hit prob + positive EV + OVER legs
 function renderParlays(parlays) {
   BEST_PARLAYS = parlays || [];
   const grid  = document.getElementById('auto-parlays-grid');
   const empty = document.getElementById('parlays-empty');
-  if (!BEST_PARLAYS.length) {
+
+  // Filter: ELITE safety, combined hit% >= 60, positive EV
+  const filtered = BEST_PARLAYS.filter(p => {
+    if ((p.safety_label||'').toUpperCase() !== 'ELITE') return false;
+    if ((p.combined_prob||0) < 60) return false;
+    if ((p.combined_ev != null) && (p.combined_ev||0) <= 0) return false;
+    // Every leg with a total/prop type must be OVER
+    const legs = p.legs || [];
+    for (const l of legs) {
+      const bt  = (l.bet_type||'').toLowerCase();
+      const lbl = (l.label||'').toUpperCase();
+      if ((bt === 'total' || bt === 'f5_total' || bt === 'player_prop') && !lbl.includes('OVER')) return false;
+    }
+    return true;
+  });
+
+  if (!filtered.length) {
     grid.innerHTML = '';
     empty.classList.remove('hidden');
+    empty.textContent = 'No parlays meet the ELITE · 80%+ · +EV · OVER criteria yet.';
     return;
   }
   empty.classList.add('hidden');
-  grid.innerHTML = BEST_PARLAYS.map(p => {
+  grid.innerHTML = filtered.map(p => {
     const legs = (p.legs||[]).map(l=>
       `<div class="parlay-leg">
         <div class="leg-dot"></div>
@@ -1177,20 +1205,22 @@ function renderParlays(parlays) {
        </div>`
     ).join('');
     const saveData = JSON.stringify({
-      name: `${p.n_legs||'?'}-Leg Auto Parlay`,
+      name: `${p.n_legs||'?'}-Leg Elite Parlay`,
       legs: p.legs||[],
       combined_odds: p.combined_dec||0,
       stake_usd: 10,
     }).replace(/"/g,'&quot;');
+    const evColor = (p.combined_ev||0) > 0 ? 'var(--green)' : 'var(--red)';
     return `
-<div class="parlay-card">
+<div class="parlay-card" style="border-color:var(--green)">
+  <div style="font-size:.65rem;color:var(--green);font-weight:700;letter-spacing:.05em;margin-bottom:6px">⚡ ELITE · +EV · OVER ONLY</div>
   <div class="parlay-header">
     <div class="parlay-meta">
-      <span class="parlay-legs-count">${p.n_legs||'?'}-Leg Parlay · ${safetyBadge(p.safety_label||'MODERATE')}</span>
+      <span class="parlay-legs-count">${p.n_legs||'?'}-Leg Parlay · ${safetyBadge(p.safety_label||'ELITE')}</span>
       <span class="parlay-odds">x${(p.combined_dec||0).toFixed(2)}</span>
       <span class="parlay-payout">$100 → $${(p.payout_100||0).toFixed(0)}</span>
     </div>
-    <span style="font-size:.78rem;color:var(--muted)">Hit: ${p.combined_prob||'?'}%</span>
+    <span style="font-size:.78rem;color:${evColor}">EV ${p.combined_ev!=null?((p.combined_ev||0)*100).toFixed(1)+'%':'?'} · Hit: ${p.combined_prob||'?'}%</span>
   </div>
   ${legs}
   <div style="display:flex;gap:8px;margin-top:12px">
@@ -1390,7 +1420,17 @@ function loadHistory() {
   });
 }
 
-// ── Phone / SMS ───────────────────────────────────────────────────────────
+// ── Phone / SMS — stored in localStorage, no DB needed ───────────────────
+const _PHONES_KEY = 'bettor_sms_recipients';
+
+function _getStoredPhones() {
+  try { return JSON.parse(localStorage.getItem(_PHONES_KEY) || '[]'); }
+  catch(e) { return []; }
+}
+function _saveStoredPhones(arr) {
+  localStorage.setItem(_PHONES_KEY, JSON.stringify(arr));
+}
+
 function openPhoneModal() {
   document.getElementById('phone-modal').classList.remove('hidden');
   loadPhones();
@@ -1400,48 +1440,53 @@ function closePhoneModal() {
 }
 
 function loadPhones() {
-  fetch('/api/phone-numbers').then(r=>r.json()).then(d=>{
-    const list = document.getElementById('phone-list');
-    if (!d.numbers || !d.numbers.length) {
-      list.innerHTML = '<div style="color:var(--muted);font-size:.82rem">No numbers saved.</div>';
-      return;
-    }
-    list.innerHTML = d.numbers.map(n=>`
-      <div class="phone-item">
-        <span>${n.phone_number||n.phone||n} ${n.label?'('+n.label+')':''}</span>
-        <button class="phone-remove" onclick="removePhone('${n.phone_number||n.phone||n}')">Remove</button>
-      </div>`
-    ).join('');
-  });
+  const list = document.getElementById('phone-list');
+  const numbers = _getStoredPhones();
+  if (!numbers.length) {
+    list.innerHTML = '<div style="color:var(--muted);font-size:.82rem">No numbers saved yet.</div>';
+    return;
+  }
+  list.innerHTML = numbers.map((n,i) =>
+    `<div class="phone-item">
+       <span>${n.phone} ${n.label ? '('+n.label+')' : ''}</span>
+       <button class="phone-remove" onclick="removePhone('${n.phone}')">Remove</button>
+     </div>`
+  ).join('');
 }
 
 function addPhone() {
-  const phone = document.getElementById('new-phone').value.trim();
-  const label = document.getElementById('new-phone-label').value.trim();
+  const phone = (document.getElementById('new-phone').value || '').trim();
+  const label = (document.getElementById('new-phone-label').value || '').trim();
   if (!phone) { toast('Enter a phone number','error'); return; }
-  fetch('/api/phone-numbers/add',{
-    method:'POST', headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({phone, label})
-  }).then(r=>r.json()).then(d=>{
-    if (d.ok) { toast('Number added','success'); loadPhones();
-      document.getElementById('new-phone').value='';
-    } else toast(d.msg||d.error||'Error','error');
-  });
+  if (!/^\+?[0-9]{7,15}$/.test(phone.replace(/[\s\-]/g,''))) {
+    toast('Invalid phone format (use +1XXXXXXXXXX)','error'); return;
+  }
+  const numbers = _getStoredPhones();
+  if (numbers.find(n => n.phone === phone)) { toast('Number already saved','info'); return; }
+  numbers.push({phone, label});
+  _saveStoredPhones(numbers);
+  toast('Number saved!','success');
+  document.getElementById('new-phone').value = '';
+  document.getElementById('new-phone-label').value = '';
+  loadPhones();
 }
 
 function removePhone(phone) {
-  fetch('/api/phone-numbers/remove',{
-    method:'POST', headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({phone})
-  }).then(r=>r.json()).then(d=>{
-    if (d.ok) { toast('Removed','success'); loadPhones(); }
-    else toast('Error removing','error');
-  });
+  const numbers = _getStoredPhones().filter(n => n.phone !== phone);
+  _saveStoredPhones(numbers);
+  toast('Removed','success');
+  loadPhones();
 }
 
 function sendSms() {
-  fetch('/api/sms/send',{method:'POST'}).then(r=>r.json()).then(d=>{
-    toast(d.ok ? 'SMS blast sent!' : (d.error||'Error sending'), d.ok?'success':'error');
+  const numbers = _getStoredPhones();
+  if (!numbers.length) { toast('No phone numbers saved — add one first','error'); return; }
+  fetch('/api/sms/send', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({numbers})
+  }).then(r => r.json()).then(d => {
+    toast(d.ok ? `SMS sent to ${numbers.length} number(s)!` : (d.error||'Error sending'), d.ok?'success':'error');
   });
 }
 

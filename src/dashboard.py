@@ -767,6 +767,8 @@ def api_phone_remove():
 
 @app.route("/api/sms/send", methods=["POST"])
 def api_sms_send():
+    data = request.get_json(force=True, silent=True) or {}
+    numbers = data.get("numbers") or []  # list of {phone, label} from localStorage
     try:
         from sms import send_daily_picks_to_all
         with _lock:
@@ -774,7 +776,7 @@ def api_sms_send():
                 "best_parlays": list(_state.get("best_parlays", [])),
                 "game_cards_today": list(_state.get("game_cards_today", [])),
             }
-        result = send_daily_picks_to_all(state)
+        result = send_daily_picks_to_all(state, numbers=numbers if numbers else None)
         return jsonify({"ok": True, **result})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})

@@ -178,24 +178,29 @@ def send_parlay_to_all(parlay: dict) -> dict:
 
 # ─── Bulk send ───────────────────────────────────────────────────────────────
 
-def send_daily_picks_to_all(state: dict) -> dict:
+def send_daily_picks_to_all(state: dict, numbers: list = None) -> dict:
     """
-    Format the picks message and send it to every active phone number
-    stored in the database.
+    Format the picks message and send it to phone numbers.
+
+    numbers: list of {phone, label} dicts passed directly from the client
+             (stored in localStorage — no DB required).
+             Falls back to DB if not provided.
 
     Returns:
         {"sent": int, "failed": int, "errors": [{"phone": ..., "error": ...}]}
     """
-    try:
-        import sys, os
-        sys.path.insert(0, os.path.dirname(__file__))
-        from data.db import get_phone_numbers
-        numbers = get_phone_numbers(active_only=True)
-    except Exception as exc:
-        return {"sent": 0, "failed": 0, "errors": [{"phone": "db", "error": str(exc)}]}
+    # Use caller-supplied numbers first (localStorage approach)
+    if not numbers:
+        try:
+            import sys, os
+            sys.path.insert(0, os.path.dirname(__file__))
+            from data.db import get_phone_numbers
+            numbers = get_phone_numbers(active_only=True)
+        except Exception as exc:
+            return {"sent": 0, "failed": 0, "errors": [{"phone": "db", "error": str(exc)}]}
 
     if not numbers:
-        return {"sent": 0, "failed": 0, "errors": [], "note": "No phone numbers registered"}
+        return {"sent": 0, "failed": 0, "errors": [], "note": "No phone numbers provided"}
 
     message = format_daily_picks(state)
     results = {"sent": 0, "failed": 0, "errors": []}
