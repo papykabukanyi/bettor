@@ -379,7 +379,6 @@ body.console-open main{padding-bottom:236px}
   <div class="header-actions">
     <span id="last-updated">{{ last_updated or 'Not loaded' }}</span>
     <button class="btn btn-primary" id="run-btn" onclick="runAnalysis()">&#9654; Run Analysis</button>
-    <button class="btn" onclick="triggerBackfill()" title="Backfill news, injuries, game scores and retrain model">&#8635; Backfill &amp; Retrain</button>
     <button class="btn" onclick="openPhoneModal()">&#128241; SMS</button>
     <button class="btn" id="console-btn" onclick="toggleConsole()" title="Toggle live console">&#128187; Console</button>
   </div>
@@ -430,7 +429,7 @@ body.console-open main{padding-bottom:236px}
   <!-- ALL PROPS -->
   <div class="tab-panel" id="panel-props">
     <div class="section-header">
-      <span class="section-title">All Player Props</span>
+      <span class="section-title">&#9650; All OVER Props</span>
       <span class="section-meta" id="props-meta"></span>
     </div>
     <div class="filter-bar">
@@ -446,14 +445,14 @@ body.console-open main{padding-bottom:236px}
         <option value="walks">Walks</option>
         <option value="stolen_bases">Stolen Bases</option>
       </select>
-      <select id="props-dir" onchange="filterProps()">
-        <option value="">All</option>
+      <select id="props-dir" onchange="filterProps()" style="display:none">
         <option value="OVER" selected>OVER</option>
         <option value="UNDER">UNDER</option>
+        <option value="">All</option>
       </select>
       <select id="props-safety" onchange="filterProps()">
         <option value="">All Safety</option>
-        <option value="ELITE">ELITE</option>
+        <option value="ELITE">&#11088; ELITE</option>
         <option value="SAFE">SAFE</option>
         <option value="MODERATE">MODERATE</option>
       </select>
@@ -601,8 +600,6 @@ body.console-open main{padding-bottom:236px}
           background:var(--card2);color:var(--text);font-weight:600">ECE: —</span>
         <button class="btn btn-sm" onclick="loadCalibration()">&#8635; Refresh</button>
         <button class="btn btn-sm" onclick="triggerAutoImprove()">&#129302; Auto-Improve</button>
-        <button class="btn btn-sm" onclick="triggerBackfill(3)">&#128190; Backfill 3d</button>
-        <button class="btn btn-sm" onclick="triggerBackfill(7)">&#128190; Backfill 7d</button>
       </div>
     </div>
     <div style="font-size:.78rem;color:var(--muted);margin-bottom:10px">
@@ -1083,20 +1080,16 @@ function betRow(label, bet, card) {
 }
 
 function propsSection(c) {
-  // Only show players predicted to go OVER with 80%+ confidence, ELITE safety, positive EV
+  // Show ALL OVER props — no probability or safety gate
   function qualifies(p) {
     if ((p.direction || '').toUpperCase() !== 'OVER') return false;
-    if ((p.safety_label || '').toUpperCase() !== 'ELITE') return false;
-    const prob = p.model_prob != null ? p.model_prob : (p.confidence || 0) / 100;
-    if (prob < 0.80) return false;
-    if ((p.ev || 0) <= 0) return false;
     return true;
   }
-  const hp = (c.home_props || []).filter(qualifies);
-  const ap = (c.away_props || []).filter(qualifies);
+  const hp = (c.home_props || []).filter(qualifies).sort((a,b)=>(b.model_prob||0)-(a.model_prob||0));
+  const ap = (c.away_props || []).filter(qualifies).sort((a,b)=>(b.model_prob||0)-(a.model_prob||0));
   if (!hp.length && !ap.length) return '';
   let html = '<div class="props-section">';
-  html += `<div style="font-size:.68rem;color:var(--accent);font-weight:700;padding:4px 0 6px;letter-spacing:.04em;">&#9650; OVER TARGETS (80%+ · ELITE · +EV)</div>`;
+  html += `<div style="font-size:.68rem;color:var(--accent);font-weight:700;padding:4px 0 6px;letter-spacing:.04em;">&#9650; ALL OVER PROPS (sorted by probability)</div>`;
   if (ap.length) {
     html += `<div class="props-team-header">${c.away_team}</div>`;
     html += ap.map(p => propRow(p, c.game_key)).join('');
@@ -1209,53 +1202,52 @@ function renderParlays(parlays) {
   const grid  = document.getElementById('auto-parlays-grid');
   const empty = document.getElementById('parlays-empty');
 
-  // Filter: ELITE safety, combined hit% >= 60, positive EV
+  // Filter: keep only parlays where all prop/total legs are OVER
   const filtered = BEST_PARLAYS.filter(p => {
-    if ((p.safety_label||'').toUpperCase() !== 'ELITE') return false;
-    if ((p.combined_prob||0) < 60) return false;
-    if ((p.combined_ev != null) && (p.combined_ev||0) <= 0) return false;
-    // Every leg with a total/prop type must be OVER
     const legs = p.legs || [];
+    // Remove any leg that is explicitly UNDER
     for (const l of legs) {
-      const bt  = (l.bet_type||'').toLowerCase();
       const lbl = (l.label||'').toUpperCase();
-      if ((bt === 'total' || bt === 'f5_total' || bt === 'player_prop') && !lbl.includes('OVER')) return false;
+      if (lbl.includes('UNDER')) return false;
     }
-    return true;
-  });
+    return legs.length >= 2;
+  }).sort((a,b) => (b.score||b.combined_prob||0) - (a.score||a.combined_prob||0));
 
   if (!filtered.length) {
     grid.innerHTML = '';
     empty.classList.remove('hidden');
-    empty.textContent = 'No parlays meet the ELITE · 80%+ · +EV · OVER criteria yet.';
+    empty.textContent = 'No OVER parlays generated yet — run analysis first.';
     return;
   }
   empty.classList.add('hidden');
   grid.innerHTML = filtered.map(p => {
-    const legs = (p.legs||[]).map(l=>
-      `<div class="parlay-leg">
-        <div class="leg-dot"></div>
-        <span class="leg-text">${l.label||'—'}</span>
+    const legs = (p.legs||[]).map(l=> {
+      const lbl = (l.label||'—');
+      const isOver = lbl.toUpperCase().includes('OVER');
+      return `<div class="parlay-leg">
+        <div class="leg-dot" style="background:var(--green)"></div>
+        <span class="leg-text" style="color:${isOver?'var(--green)':'var(--text)'}">${lbl}</span>
         <span class="leg-conf">${l.conf||'?'}% · x${(l.dec_odds||2).toFixed(2)}</span>
-       </div>`
-    ).join('');
+       </div>`;
+    }).join('');
     const saveData = JSON.stringify({
-      name: `${p.n_legs||'?'}-Leg Elite Parlay`,
+      name: `${p.n_legs||'?'}-Leg OVER Parlay`,
       legs: p.legs||[],
       combined_odds: p.combined_dec||0,
       stake_usd: 10,
     }).replace(/"/g,'&quot;');
-    const evColor = (p.combined_ev||0) > 0 ? 'var(--green)' : 'var(--red)';
+    const evColor = (p.combined_ev||0) > 0 ? 'var(--green)' : 'var(--yellow)';
+    const badge = p.safety_label ? safetyBadge(p.safety_label) : '';
     return `
 <div class="parlay-card" style="border-color:var(--green)">
-  <div style="font-size:.65rem;color:var(--green);font-weight:700;letter-spacing:.05em;margin-bottom:6px">⚡ ELITE · +EV · OVER ONLY</div>
+  <div style="font-size:.65rem;color:var(--green);font-weight:700;letter-spacing:.05em;margin-bottom:6px">&#9650; OVER PARLAY</div>
   <div class="parlay-header">
     <div class="parlay-meta">
-      <span class="parlay-legs-count">${p.n_legs||'?'}-Leg Parlay · ${safetyBadge(p.safety_label||'ELITE')}</span>
+      <span class="parlay-legs-count">${p.n_legs||'?'}-Leg Parlay · ${badge}</span>
       <span class="parlay-odds">x${(p.combined_dec||0).toFixed(2)}</span>
       <span class="parlay-payout">$100 → $${(p.payout_100||0).toFixed(0)}</span>
     </div>
-    <span style="font-size:.78rem;color:${evColor}">EV ${p.combined_ev!=null?((p.combined_ev||0)*100).toFixed(1)+'%':'?'} · Hit: ${p.combined_prob||'?'}%</span>
+    <span style="font-size:.78rem;color:${evColor}">Hit: ${p.combined_prob||'?'}%${p.combined_ev!=null?' · EV '+((p.combined_ev||0)*100).toFixed(1)+'%':''}</span>
   </div>
   ${legs}
   <div style="display:flex;gap:8px;margin-top:12px">

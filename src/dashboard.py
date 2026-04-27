@@ -207,6 +207,20 @@ def _run_analysis():
         today_str    = datetime.date.today().isoformat()
         tomorrow_str = (datetime.date.today() + datetime.timedelta(days=1)).isoformat()
 
+        # ── Auto-backfill 30 days of data and retrain model ──────────────────
+        _log("[backfill] Running 30-day backfill before analysis...")
+        try:
+            from data.history_ingest import backfill_news, backfill_injuries, backfill_game_results
+            n_news = backfill_news(days_back=30)
+            _log(f"[backfill] News rows: {n_news}")
+            n_inj = backfill_injuries(days_back=30)
+            _log(f"[backfill] Injury rows: {n_inj}")
+            n_games = backfill_game_results(days_back=30)
+            _log(f"[backfill] Game results saved: {n_games}")
+        except Exception as _bf_e:
+            _log(f"[backfill] Backfill error (continuing): {_bf_e}")
+        # Retrain deferred to after team_stats is loaded (later in pipeline)
+
         # Statuses that mean the game is finished or currently in-progress
         # (should not appear in the "upcoming" display tab)
         _DONE_STATUSES = {
@@ -245,6 +259,15 @@ def _run_analysis():
                 _log("Model trained and saved.")
             except Exception as e:
                 _log(f"Model training failed: {e}")
+
+        # Retrain enhanced model with backfilled game results
+        try:
+            from models.mlb_model import retrain_with_history
+            retrain_with_history(team_stats)
+            model = load_model()  # reload after retrain
+            _log("[backfill] Enhanced model retrained and reloaded.")
+        except Exception as _rt_e:
+            _log(f"[backfill] Retrain skipped: {_rt_e}")
 
         _phase(2)
         _log("Fetching injury reports...")
