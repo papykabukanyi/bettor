@@ -740,7 +740,7 @@ let _parlayTouched = false;
 let propsSortKey   = 'model_prob';
 let propsSortAsc   = false;
 const LOCAL_CACHE_KEY = 'bettor_last_session';
-const AUTO_REFRESH_MIN = 30;
+const AUTO_REFRESH_MIN = 60;
 let _cacheUpdatedAtMs = null;
 let _autoRefreshTimer = null;
 let _autoRefreshInFlight = false;
@@ -855,7 +855,11 @@ function applyCachedData(d) {
 
 function maybeAutoRefresh(d) {
   const age = typeof d.cache_age_min === 'number' ? d.cache_age_min : _cacheAgeMinFromMs();
-  if (age != null && age >= AUTO_REFRESH_MIN) {
+  if (age == null) {
+    triggerBackgroundRefresh();
+    return;
+  }
+  if (age >= AUTO_REFRESH_MIN) {
     triggerBackgroundRefresh();
   }
 }
