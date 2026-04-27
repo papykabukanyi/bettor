@@ -662,17 +662,17 @@ def api_backfill():
 
             # News
             try:
-                from data.gdelt_fetcher import fetch_and_store_news
-                n = fetch_and_store_news(days_back=days_back)
+                from data.history_ingest import backfill_news
+                n = backfill_news(days_back=days_back)
                 _log(f"[backfill] News rows ingested: {n}")
             except Exception as e:
                 _log(f"[backfill] News error: {e}")
 
             # Injuries
             try:
-                from data.injury_fetcher import fetch_and_store_injuries
-                inj = fetch_and_store_injuries()
-                _log(f"[backfill] Injury rows: {len(inj) if isinstance(inj, list) else inj}")
+                from data.history_ingest import backfill_injuries
+                inj = backfill_injuries(days_back=days_back)
+                _log(f"[backfill] Injury rows: {inj}")
             except Exception as e:
                 _log(f"[backfill] Injury error: {e}")
 
