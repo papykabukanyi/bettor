@@ -338,6 +338,139 @@ def retrain_with_history(team_stats: pd.DataFrame, verbose: bool = True) -> Pipe
     return pipeline
 
 
+# ─── Self-improvement / calibration ──────────────────────────────────────────
+
+def auto_improve(
+    team_stats: pd.DataFrame,
+    min_resolved: int = 50,
+    ece_threshold: float = 0.10,
+    verbose: bool = True,
+) -> dict:
+    """
+    Self-improvement loop:
+      1. Compute Expected Calibration Error (ECE) from resolved predictions.
+      2. If ECE > ece_threshold AND we have >= min_resolved predictions,
+         trigger retrain_with_history() to improve the model.
+      3. Log what happened and return a summary dict.
+
+    ECE is the average |predicted_prob − actual_win_rate| weighted by bucket size.
+    ECE < 0.05 = excellent, 0.05-0.10 = acceptable, > 0.10 = retrain.
+    """
+    cal = _compute_calibration()
+    total = cal.get("total_resolved", 0)
+    ece   = cal.get("expected_calibration_error")
+
+    result = {
+        "total_resolved": total,
+        "ece":            ece,
+        "bins":           cal.get("calibration_bins", []),
+        "retrained":      False,
+        "msg":            "",
+    }
+
+    if total < min_resolved:
+        result["msg"] = (
+            f"Only {total} resolved predictions — need {min_resolved} "
+            f"before auto-improvement triggers."
+        )
+        if verbose:
+            print(f"[mlb_model] auto_improve: {result['msg']}")
+        return result
+
+    if ece is None:
+        result["msg"] = "Calibration unavailable (no resolved predictions)"
+        return result
+
+    if verbose:
+        print(f"[mlb_model] auto_improve: ECE={ece:.4f}, resolved={total}")
+        for b in cal.get("calibration_bins", []):
+            bar = "█" * int(b["gap"] * 20)
+            print(f"  {b['bin']:10s} n={b['n']:4d}  "
+                  f"pred={b['avg_pred']:.2f} actual={b['avg_actual']:.2f}  "
+                  f"gap={b['gap']:.3f} {bar}")
+
+    if ece > ece_threshold:
+        if verbose:
+            print(f"[mlb_model] ECE={ece:.4f} > threshold={ece_threshold} — triggering retrain")
+        try:
+            retrain_with_history(team_stats, verbose=verbose)
+            result["retrained"] = True
+            result["msg"] = (
+                f"Auto-retrained (ECE was {ece:.4f}). "
+                f"Model refreshed with {total} resolved examples."
+            )
+        except Exception as e:
+            result["msg"] = f"Auto-retrain failed: {e}"
+    else:
+        result["msg"] = (
+            f"Model calibration is good (ECE={ece:.4f}). No retrain needed."
+        )
+
+    if verbose:
+        print(f"[mlb_model] auto_improve: {result['msg']}")
+
+    return result
+
+
+def _compute_calibration() -> dict:
+    """
+    Compute Expected Calibration Error (ECE) from the predictions DB table.
+    Returns dict with total_resolved, expected_calibration_error, calibration_bins.
+    """
+    try:
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+        from data.db import get_conn
+        import psycopg2.extras
+        conn = get_conn()
+        if not conn:
+            return {}
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("""
+            SELECT model_prob, outcome
+            FROM   predictions
+            WHERE  outcome IN ('WIN', 'LOSS')
+              AND  model_prob IS NOT NULL
+            ORDER  BY model_prob
+        """)
+        rows = cur.fetchall()
+        conn.close()
+
+        if len(rows) < 10:
+            return {"total_resolved": len(rows)}
+
+        probs   = np.array([float(r["model_prob"]) for r in rows])
+        actuals = np.array([1.0 if r["outcome"] == "WIN" else 0.0 for r in rows])
+        n = len(probs)
+
+        bins = np.linspace(0, 1, 11)
+        ece  = 0.0
+        calibration_bins = []
+        for lo, hi in zip(bins[:-1], bins[1:]):
+            mask = (probs >= lo) & (probs < hi)
+            if not mask.any():
+                continue
+            bn       = int(mask.sum())
+            avg_pred = float(probs[mask].mean())
+            avg_act  = float(actuals[mask].mean())
+            ece     += (bn / n) * abs(avg_pred - avg_act)
+            calibration_bins.append({
+                "bin":        f"{lo:.1f}-{hi:.1f}",
+                "n":          bn,
+                "avg_pred":   round(avg_pred, 3),
+                "avg_actual": round(avg_act, 3),
+                "gap":        round(abs(avg_pred - avg_act), 3),
+            })
+
+        return {
+            "total_resolved":            n,
+            "expected_calibration_error": round(float(ece), 4),
+            "calibration_bins":          calibration_bins,
+        }
+    except Exception as e:
+        print(f"[mlb_model] _compute_calibration error: {e}")
+        return {}
+
+
 def predict_game(home_stats: dict, away_stats: dict, model: Pipeline | None = None) -> dict:
     """
     Predict win probability for a single matchup.

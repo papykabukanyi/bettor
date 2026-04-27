@@ -1760,3 +1760,97 @@ def resolve_tracked_parlay(parlay_id: int, outcome: str, payout: float = 0):
     finally:
         conn.close()
 
+
+def get_parlay_performance_stats() -> dict:
+    """Win/loss/ROI stats for tracked parlays."""
+    conn = get_conn()
+    if conn is None:
+        return {}
+    try:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("""
+            SELECT
+                COUNT(*)                                           AS total,
+                COUNT(*) FILTER (WHERE outcome='WIN')             AS wins,
+                COUNT(*) FILTER (WHERE outcome='LOSS')            AS losses,
+                COUNT(*) FILTER (WHERE outcome='PUSH')            AS pushes,
+                COUNT(*) FILTER (WHERE outcome='PENDING')         AS pending,
+                COALESCE(SUM(payout_usd),0)                       AS total_payout,
+                COALESCE(SUM(stake_usd),0)                        AS total_staked
+            FROM tracked_parlays
+        """)
+        row = dict(cur.fetchone() or {})
+        wins   = int(row.get("wins",   0))
+        losses = int(row.get("losses", 0))
+        staked = float(row.get("total_staked",  0))
+        payout = float(row.get("total_payout",  0))
+        row["hit_rate"] = round(wins / (wins + losses) * 100, 1) if (wins + losses) > 0 else None
+        row["roi"]      = round((payout - staked) / staked * 100, 1) if staked > 0 else None
+        return {k: (int(v) if isinstance(v, float) and v == int(v) else v)
+                for k, v in row.items()}
+    except Exception as e:
+        print(f"[db] get_parlay_performance_stats error: {e}")
+        return {}
+    finally:
+        conn.close()
+
+
+def get_calibration_data(days_back: int = 90) -> dict:
+    """
+    Return raw model_prob + outcome data so the calibration curve can be computed.
+    Also returns pre-computed ECE and bin stats.
+    """
+    conn = get_conn()
+    if conn is None:
+        return {}
+    try:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("""
+            SELECT model_prob, outcome, bet_type, game_date
+            FROM   predictions
+            WHERE  outcome IN ('WIN','LOSS')
+              AND  model_prob IS NOT NULL
+              AND  game_date >= CURRENT_DATE - INTERVAL '%s days'
+            ORDER  BY model_prob
+        """ % int(days_back))
+        rows = cur.fetchall()
+        if not rows:
+            return {"total_resolved": 0, "bins": [], "ece": None}
+
+        import numpy as np
+        probs   = [float(r["model_prob"]) for r in rows]
+        actuals = [1.0 if r["outcome"] == "WIN" else 0.0 for r in rows]
+        probs_a   = np.array(probs)
+        actuals_a = np.array(actuals)
+        n = len(probs_a)
+
+        bins = np.linspace(0, 1, 11)
+        ece  = 0.0
+        bin_stats = []
+        for lo, hi in zip(bins[:-1], bins[1:]):
+            mask = (probs_a >= lo) & (probs_a < hi)
+            if not mask.any():
+                continue
+            bn       = int(mask.sum())
+            avg_pred = float(probs_a[mask].mean())
+            avg_act  = float(actuals_a[mask].mean())
+            ece     += (bn / n) * abs(avg_pred - avg_act)
+            bin_stats.append({
+                "bin":        f"{lo:.1f}–{hi:.1f}",
+                "n":          bn,
+                "avg_pred":   round(avg_pred, 3),
+                "avg_actual": round(avg_act, 3),
+                "gap":        round(abs(avg_pred - avg_act), 3),
+            })
+
+        return {
+            "total_resolved": n,
+            "ece":            round(float(ece), 4),
+            "bins":           bin_stats,
+        }
+    except Exception as e:
+        print(f"[db] get_calibration_data error: {e}")
+        return {}
+    finally:
+        conn.close()
+

@@ -480,7 +480,28 @@ body.console-open main{padding-bottom:236px}
 
   <!-- PARLAYS -->
   <div class="tab-panel" id="panel-parlays">
-    <!-- Builder -->
+
+    <!-- ★ Elite Parlay Builder ★ -->
+    <div style="background:linear-gradient(135deg,rgba(124,58,237,.18),rgba(16,185,129,.12));
+         border:1px solid rgba(124,58,237,.4);border-radius:var(--radius);padding:16px 20px;
+         margin-bottom:20px">
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
+        <div>
+          <div style="font-size:.95rem;font-weight:700;color:var(--purple)">&#9889; Elite Auto-Parlay</div>
+          <div style="font-size:.78rem;color:var(--muted);margin-top:3px">
+            Only bets with <strong style="color:var(--green)">80%+</strong> probability,
+            <strong style="color:var(--green)">positive EV</strong>, and
+            <strong style="color:var(--accent)">ELITE</strong> safety
+          </div>
+        </div>
+        <button class="btn btn-primary" id="btn-elite-parlay" onclick="buildEliteParlay()">
+          &#9889; Build Elite Parlay
+        </button>
+      </div>
+      <div id="elite-parlay-result" style="margin-top:14px"></div>
+    </div>
+
+    <!-- Manual Builder -->
     <div class="parlay-builder">
       <h3>&#10133; Parlay Builder <span style="font-size:.75rem;color:var(--muted);font-weight:400">(click + on any pick)</span></h3>
       <div id="parlay-legs-list"><div style="color:var(--muted);font-size:.82rem">No legs added yet.</div></div>
@@ -504,6 +525,15 @@ body.console-open main{padding-bottom:236px}
     </div>
     <div class="parlays-grid" id="auto-parlays-grid"></div>
     <div class="no-games hidden" id="parlays-empty">Run analysis to generate parlays.</div>
+
+    <!-- Parlay Performance -->
+    <div class="section-header" style="margin-top:28px">
+      <span class="section-title">&#128200; Parlay Performance</span>
+      <button class="btn btn-sm" onclick="loadParlayPerformance()">&#8635; Refresh</button>
+    </div>
+    <div class="perf-grid" id="parlay-perf-stats" style="margin-bottom:16px">
+      <div class="no-games" style="grid-column:1/-1">Loading parlay stats…</div>
+    </div>
 
     <!-- Tracked parlays -->
     <div class="section-header" style="margin-top:28px">
@@ -559,6 +589,33 @@ body.console-open main{padding-bottom:236px}
           <th>Prop Type</th><th>Direction</th><th>W</th><th>L</th><th>Total</th><th>Hit Rate</th>
         </tr></thead>
         <tbody id="prop-type-tbody"></tbody>
+      </table>
+    </div>
+
+    <!-- MODEL CALIBRATION -->
+    <div class="section-header" style="margin-top:32px">
+      <span class="section-title">&#127919; Model Calibration</span>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <span id="ece-badge" style="font-size:.8rem;padding:4px 12px;border-radius:20px;
+          background:var(--card2);color:var(--text);font-weight:600">ECE: —</span>
+        <button class="btn btn-sm" onclick="loadCalibration()">&#8635; Refresh</button>
+        <button class="btn btn-sm" onclick="triggerAutoImprove()">&#129302; Auto-Improve</button>
+      </div>
+    </div>
+    <div style="font-size:.78rem;color:var(--muted);margin-bottom:10px">
+      Expected Calibration Error (ECE): measures how well predicted probabilities match actual outcomes.
+      &lt;5% = excellent · 5-10% = acceptable · &gt;10% = triggers auto-retrain.
+    </div>
+    <div style="overflow-x:auto;border:1px solid var(--border);border-radius:var(--radius)">
+      <table class="by-type-table" id="calibration-table">
+        <thead><tr>
+          <th>Prob Bin</th><th>Samples</th><th>Avg Predicted</th><th>Avg Actual</th><th>Gap</th>
+        </tr></thead>
+        <tbody id="calibration-tbody">
+          <tr><td colspan="5" style="text-align:center;padding:20px;color:var(--muted)">
+            Click Refresh to load calibration data.
+          </td></tr>
+        </tbody>
       </table>
     </div>
   </div>
@@ -689,6 +746,132 @@ function switchTab(name) {
   document.getElementById(`panel-${name}`).classList.add('active');
   if (name === 'performance') loadPerformance();
   if (name === 'parlays') loadTrackedParlays();
+}
+
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+  document.querySelectorAll('.tab-panel').forEach(p=>p.classList.remove('active'));
+  document.querySelector(`[data-tab="${name}"]`).classList.add('active');
+  document.getElementById(`panel-${name}`).classList.add('active');
+  if (name === 'performance') { loadPerformance(); loadCalibration(); }
+  if (name === 'parlays')     { loadTrackedParlays(); loadParlayPerformance(); }
+}
+
+// ── Elite Parlay ──────────────────────────────────────────────────────────
+function buildEliteParlay() {
+  const btn = document.getElementById('btn-elite-parlay');
+  if (btn) { btn.disabled = true; btn.textContent = '⚡ Building…'; }
+  fetch('/api/parlay/build-elite', {method: 'POST'})
+    .then(r => r.json())
+    .then(d => {
+      if (btn) { btn.disabled = false; btn.innerHTML = '&#9889; Build Elite Parlay'; }
+      const el = document.getElementById('elite-parlay-result');
+      if (!d.ok || !d.parlay) {
+        el.innerHTML = `<div class="no-games" style="color:var(--yellow);margin:8px 0">
+          &#9888; ${d.msg || d.error || 'No elite picks available right now'}</div>`;
+        return;
+      }
+      const p = d.parlay;
+      const evColor = (p.combined_ev || 0) > 0 ? 'var(--green)' : 'var(--red)';
+      const legs = (p.legs || []).map(l =>
+        `<div style="display:flex;align-items:center;gap:8px;padding:7px 0;
+              border-bottom:1px solid var(--border);font-size:.82rem">
+          <span class="safety-badge badge-ELITE" style="font-size:.65rem;padding:2px 6px">ELITE</span>
+          <span style="flex:1">${l.label || l.pick || ''}</span>
+          <span style="color:var(--accent);font-weight:600">${((l.model_prob||0)*100).toFixed(1)}%</span>
+          <span style="color:var(--muted)">x${l.dec_odds||'?'}</span>
+        </div>`
+      ).join('');
+      el.innerHTML = `<div style="border:1px solid var(--green);border-radius:var(--radius);
+            background:rgba(16,185,129,.08);padding:14px;margin-top:6px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+          <span style="font-weight:700;color:var(--green)">&#9889; ${p.name || 'Elite Parlay'}</span>
+          <div style="text-align:right">
+            <div style="font-size:1.1rem;font-weight:700">x${p.combined_dec}</div>
+            <div style="font-size:.78rem;color:${evColor}">EV ${((p.combined_ev||0)*100).toFixed(1)}%</div>
+          </div>
+        </div>
+        ${legs}
+        <div style="font-size:.75rem;color:var(--muted);margin-top:10px">
+          ${p.n_legs} legs · ${p.combined_prob}% combined · $100 → $${p.payout_100} · ✅ Auto-saved to Tracked Parlays
+        </div>
+      </div>`;
+      toast('Elite parlay built & auto-saved!', 'success');
+      setTimeout(() => { loadTrackedParlays(); loadParlayPerformance(); }, 800);
+    })
+    .catch(e => {
+      if (btn) { btn.disabled = false; btn.innerHTML = '&#9889; Build Elite Parlay'; }
+      toast('Error: ' + e, 'error');
+    });
+}
+
+// ── Parlay Performance ────────────────────────────────────────────────────
+function loadParlayPerformance() {
+  fetch('/api/parlay/performance').then(r => r.json()).then(d => {
+    const el = document.getElementById('parlay-perf-stats');
+    if (!el) return;
+    if (!d.ok) { el.innerHTML = '<div class="no-games">Could not load parlay stats.</div>'; return; }
+    const s = d.stats || {};
+    const hr = s.hit_rate != null ? s.hit_rate + '%' : '—';
+    const roi = s.roi != null ? s.roi + '%' : '—';
+    const hrC  = s.hit_rate >= 55 ? 'var(--green)' : s.hit_rate >= 45 ? 'var(--yellow)' : 'var(--red)';
+    const roiC = (s.roi || 0) >= 0 ? 'var(--green)' : 'var(--red)';
+    el.innerHTML = `
+      <div class="perf-card"><div class="perf-val perf-win">${s.wins||0}</div><div class="perf-label">Parlay Wins</div></div>
+      <div class="perf-card"><div class="perf-val perf-loss">${s.losses||0}</div><div class="perf-label">Parlay Losses</div></div>
+      <div class="perf-card"><div class="perf-val" style="color:var(--yellow)">${s.pending||0}</div><div class="perf-label">Pending</div></div>
+      <div class="perf-card"><div class="perf-val" style="color:${hrC}">${hr}</div><div class="perf-label">Hit Rate</div></div>
+      <div class="perf-card"><div class="perf-val" style="color:${roiC}">${roi}</div><div class="perf-label">ROI</div></div>
+      <div class="perf-card"><div class="perf-val">${s.total||0}</div><div class="perf-label">Total Parlays</div></div>`;
+  });
+}
+
+// ── Calibration ───────────────────────────────────────────────────────────
+function loadCalibration() {
+  fetch('/api/calibration').then(r => r.json()).then(d => {
+    if (!d.ok) return;
+    const cal = d.calibration || {};
+    const ece = cal.ece;
+    const badge = document.getElementById('ece-badge');
+    if (badge) {
+      const c = ece == null ? 'var(--card2)' : ece < 0.05 ? 'var(--green)' : ece < 0.10 ? 'var(--yellow)' : 'var(--red)';
+      badge.textContent = `ECE: ${ece != null ? (ece * 100).toFixed(1) + '%' : '—'}`;
+      badge.style.background = c;
+      badge.style.color = ece == null ? 'var(--text)' : '#fff';
+    }
+    const tbody = document.getElementById('calibration-tbody');
+    if (!tbody) return;
+    const bins = cal.bins || [];
+    if (!bins.length) {
+      tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;padding:20px;color:var(--muted)">No resolved predictions yet.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = bins.map(b => {
+      const gc = b.gap < 0.05 ? 'var(--green)' : b.gap < 0.10 ? 'var(--yellow)' : 'var(--red)';
+      return `<tr>
+        <td>${b.bin}</td>
+        <td>${b.n}</td>
+        <td>${(b.avg_pred * 100).toFixed(1)}%</td>
+        <td>${(b.avg_actual * 100).toFixed(1)}%</td>
+        <td style="color:${gc};font-weight:700">${(b.gap * 100).toFixed(1)}%</td>
+      </tr>`;
+    }).join('');
+  }).catch(() => {});
+}
+
+function triggerAutoImprove() {
+  toast('Triggering auto-improve check…', 'info');
+  fetch('/api/auto-improve', {method: 'POST'})
+    .then(r => r.json())
+    .then(d => {
+      if (d.retrained) {
+        toast('Model retrained! ECE was high — refreshing calibration…', 'success');
+      } else {
+        toast(d.msg || 'Auto-improve complete', 'info');
+      }
+      setTimeout(loadCalibration, 1500);
+    })
+    .catch(e => toast('Auto-improve error: ' + e, 'error'));
 }
 
 // ── Safety badge helpers ──────────────────────────────────────────────────

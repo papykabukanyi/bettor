@@ -606,6 +606,205 @@ def build_parlays(all_picks: list[dict], max_legs: int = 8, top_n: int = 5) -> l
     return results[:top_n * max_legs]
 
 
+# ─── Elite parlay builder ─────────────────────────────────────────────────────
+
+#: Minimum thresholds for "elite" quality
+_ELITE_MIN_PROB   = 0.80   # 80 % model probability
+_ELITE_MIN_EV     = 0.0    # must have positive expected value
+_ELITE_SAFETY_MIN = 0.72   # maps to "ELITE" safety label
+
+
+def build_elite_parlay(
+    all_picks: list[dict],
+    min_prob: float = _ELITE_MIN_PROB,
+    min_ev: float   = _ELITE_MIN_EV,
+    max_legs: int   = 6,
+) -> dict | None:
+    """
+    Build ONE elite parlay using only:
+      • model_prob >= 0.80  (80 %+ probability)
+      • ev > 0              (green / positive expected value)
+      • safety >= 0.72      (ELITE safety tier)
+
+    Legs are picked greedily by (model_prob × ev) to maximise
+    combined edge. Returns a parlay dict or None if < 2 legs qualify.
+    Auto-saves the parlay to the tracked_parlays DB table.
+    """
+    # Filter to qualifying picks
+    elite = [
+        p for p in all_picks
+        if float(p.get("model_prob", 0)) >= min_prob
+        and float(p.get("ev", -1))       > min_ev
+        and float(p.get("safety",  0))   >= _ELITE_SAFETY_MIN
+    ]
+
+    if len(elite) < 2:
+        return None
+
+    # One pick per game/player, best safety wins ties
+    by_game: dict[str, dict] = {}
+    for p in elite:
+        gk = p.get("game_key", p.get("game", ""))
+        if gk not in by_game or p.get("safety", 0) > by_game[gk].get("safety", 0):
+            by_game[gk] = p
+
+    # Sort by prob × ev score (strongest legs first)
+    pool = sorted(
+        by_game.values(),
+        key=lambda x: float(x.get("model_prob", 0)) * float(x.get("ev", 0)),
+        reverse=True,
+    )[:max_legs]
+
+    if len(pool) < 2:
+        return None
+
+    # Combined parlay math
+    combined_prob = 1.0
+    combined_dec  = 1.0
+    for leg in pool:
+        combined_prob *= float(leg.get("model_prob", 0.5))
+        combined_dec  *= float(leg.get("dec_odds",   2.0))
+
+    combined_ev  = combined_dec * combined_prob - 1.0
+    avg_safety   = sum(l.get("safety", 0.72) for l in pool) / len(pool)
+
+    leg_dicts = []
+    for l in pool:
+        raw_label = (l.get("pick") or
+                     f"{l.get('name','')} {l.get('direction','')} {l.get('line','')} {l.get('prop_label','')}".strip())
+        leg_dicts.append({
+            "label":      raw_label,
+            "bet_type":   l.get("bet_type", ""),
+            "conf":       round(float(l.get("model_prob", 0.5)) * 100),
+            "badge":      "ELITE",
+            "game":       l.get("game_key", l.get("game", "")),
+            "dec_odds":   round(float(l.get("dec_odds", 2.0)), 2),
+            "model_prob": round(float(l.get("model_prob", 0.5)), 4),
+            "ev":         round(float(l.get("ev", 0)), 4),
+        })
+
+    parlay = {
+        "name":           f"Elite {len(pool)}-Leg Parlay",
+        "n_legs":         len(pool),
+        "legs":           leg_dicts,
+        "combined_prob":  round(combined_prob * 100, 1),
+        "combined_dec":   round(combined_dec, 2),
+        "combined_ev":    round(combined_ev, 4),
+        "avg_safety":     round(avg_safety, 3),
+        "safety_label":   "ELITE",
+        "payout_100":     round(combined_dec * 100, 0),
+        "is_elite":       True,
+        "score":          round(combined_prob * avg_safety, 5),
+    }
+
+    # Persist to DB automatically
+    try:
+        from data.db import save_tracked_parlay
+        parlay["id"] = save_tracked_parlay(
+            name          = parlay["name"],
+            legs          = leg_dicts,
+            combined_odds = parlay["combined_dec"],
+            stake_usd     = 0,
+        )
+    except Exception as exc:
+        print(f"[predictor] elite parlay DB save error: {exc}")
+
+    return parlay
+
+
+def resolve_tracked_parlays(days_back: int = 3) -> int:
+    """
+    Auto-resolve PENDING tracked parlays by inspecting each leg's
+    prediction outcome in the `predictions` table.
+
+    Rules:
+      ALL legs WIN  → parlay = WIN  (payout = combined_dec × stake)
+      ANY leg LOSS  → parlay = LOSS (payout = 0)
+      ALL legs PUSH → parlay = PUSH (payout = stake)
+
+    Returns count of parlays newly resolved.
+    """
+    try:
+        from data.db import get_tracked_parlays, resolve_tracked_parlay, get_conn
+        import psycopg2.extras
+    except Exception:
+        return 0
+
+    pending = get_tracked_parlays(include_resolved=False)
+    if not pending:
+        return 0
+
+    resolved_count = 0
+    for parlay in pending:
+        legs = parlay.get("legs_json") or []
+        if not legs:
+            continue
+
+        leg_outcomes: list[str] = []
+        for leg in legs:
+            game_key = (leg.get("game") or leg.get("game_key") or "").strip()
+            label    = (leg.get("label") or "").strip()
+            if not game_key:
+                continue
+
+            conn = get_conn()
+            if not conn:
+                break
+            try:
+                cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+                # Look up the prediction by game_key + pick label fragment
+                pick_fragment = label[:60] if label else "%"
+                cur.execute("""
+                    SELECT outcome FROM predictions
+                    WHERE (game_key ILIKE %s OR game_key ILIKE %s)
+                      AND pick ILIKE %s
+                      AND outcome != 'PENDING'
+                    ORDER BY predicted_at DESC LIMIT 1
+                """, (
+                    f"%{game_key}%",
+                    f"%{game_key.replace('@', '%')}%",
+                    f"%{pick_fragment}%",
+                ))
+                row = cur.fetchone()
+                if row:
+                    leg_outcomes.append(row["outcome"])
+            except Exception:
+                pass
+            finally:
+                conn.close()
+
+        # Require every leg to have resolved
+        expected_legs = len([l for l in legs if l.get("game") or l.get("game_key")])
+        if len(leg_outcomes) < max(expected_legs, 2):
+            continue
+
+        if all(o == "WIN" for o in leg_outcomes):
+            outcome = "WIN"
+            payout  = round(
+                float(parlay.get("combined_odds", 0)) *
+                float(parlay.get("stake_usd", 0) or 0),
+                2,
+            )
+        elif any(o == "LOSS" for o in leg_outcomes):
+            outcome = "LOSS"
+            payout  = 0.0
+        elif all(o == "PUSH" for o in leg_outcomes):
+            outcome = "PUSH"
+            payout  = float(parlay.get("stake_usd", 0) or 0)
+        else:
+            continue  # mixed WIN/PUSH — still outstanding
+
+        try:
+            resolve_tracked_parlay(parlay["id"], outcome, payout)
+            resolved_count += 1
+        except Exception as exc:
+            print(f"[predictor] resolve parlay {parlay['id']} error: {exc}")
+
+    if resolved_count:
+        print(f"[mlb_predictor] Resolved {resolved_count} tracked parlays")
+    return resolved_count
+
+
 # ─── Outcome resolution ──────────────────────────────────────────────────────
 
 def resolve_game_outcomes(days_back: int = 3) -> int:

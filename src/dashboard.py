@@ -63,6 +63,7 @@ _state = {
     "game_cards_tomorrow": [],
     "best_parlays":        [],
     "player_props":        [],
+    "elite_parlay":        None,
     "logs":                [],
 }
 _lock = threading.Lock()
@@ -435,16 +436,44 @@ def _run_analysis():
                 "player_props":        _clean(all_props_flat),
             })
 
-        # Auto-resolve outcomes for recent past predictions + props
+        # Auto-resolve outcomes for recent past predictions + props + tracked parlays
         try:
-            from models.mlb_predictor import resolve_game_outcomes, resolve_prop_outcomes
-            n_games = resolve_game_outcomes(days_back=3)
-            n_props = resolve_prop_outcomes(days_back=3)
-            _log(f"Auto-resolved: {n_games} game predictions, {n_props} props")
+            from models.mlb_predictor import (
+                resolve_game_outcomes, resolve_prop_outcomes, resolve_tracked_parlays
+            )
+            n_games  = resolve_game_outcomes(days_back=3)
+            n_props  = resolve_prop_outcomes(days_back=3)
+            n_parlay = resolve_tracked_parlays(days_back=3)
+            _log(f"Auto-resolved: {n_games} game preds, {n_props} props, {n_parlay} parlays")
         except Exception as e:
             _log(f"Auto-resolve skipped: {e}")
 
-        _log(f"Analysis complete — {len(today_cards)} today (upcoming), {len(tomorrow_cards)} tomorrow, {len(all_props_flat)} props")
+        # Build elite parlay and store in state
+        try:
+            from models.mlb_predictor import build_elite_parlay
+            elite = build_elite_parlay(all_bets + all_props)
+            with _lock:
+                _state["elite_parlay"] = _clean(elite)
+            if elite:
+                _log(f"Elite parlay built: {elite['n_legs']} legs, "
+                     f"combined prob={elite['combined_prob']}%, "
+                     f"EV={elite['combined_ev']:.3f}")
+            else:
+                _log("Elite parlay: no qualifying legs (need 80%+ prob + positive EV + ELITE)")
+        except Exception as e:
+            _log(f"Elite parlay skipped: {e}")
+
+        # Self-improvement: check calibration and retrain if needed
+        try:
+            from models.mlb_model import auto_improve
+            improve_result = auto_improve(team_stats, min_resolved=50, verbose=False)
+            _log(f"[calibration] {improve_result.get('msg', '')}  "
+                 f"(ECE={improve_result.get('ece')}, resolved={improve_result.get('total_resolved')})")
+        except Exception as e:
+            _log(f"Auto-improve skipped: {e}")
+
+        _log(f"Analysis complete — {len(today_cards)} today (upcoming), "
+             f"{len(tomorrow_cards)} tomorrow, {len(all_props_flat)} props")
 
     except Exception:
         err = traceback.format_exc()
@@ -502,6 +531,7 @@ def api_cached_state():
                 "game_cards_tomorrow": _state["game_cards_tomorrow"],
                 "best_parlays":        _state["best_parlays"],
                 "player_props":        _state["player_props"],
+                "elite_parlay":        _state.get("elite_parlay"),
             })
 
     try:
@@ -515,13 +545,97 @@ def api_cached_state():
 
     return jsonify({"ok": False, "status": "idle",
                     "game_cards_today": [], "game_cards_tomorrow": [],
-                    "best_parlays": [], "player_props": []})
+                    "best_parlays": [], "player_props": [],
+                    "elite_parlay": None})
 
 
 @app.route("/api/logs")
 def api_logs():
     with _lock:
         return jsonify({"logs": list(_state.get("logs", []))})
+
+
+@app.route("/api/parlay/build-elite", methods=["POST"])
+def api_parlay_build_elite():
+    """Build and save one elite parlay from the current in-memory state."""
+    with _lock:
+        all_bets  = list(_state.get("best_parlays", []))   # fallback
+        all_props = list(_state.get("player_props", []))
+        # Reconstruct from game cards for bet-level picks
+        raw_picks = []
+        for card in (_state.get("game_cards_today", []) +
+                     _state.get("game_cards_tomorrow", [])):
+            for slot in ("moneyline", "run_line", "total", "f5_moneyline",
+                         "f5_total", "home_team_total", "away_team_total"):
+                b = card.get(slot)
+                if b:
+                    raw_picks.append(b)
+        raw_picks += all_props
+
+    if not raw_picks:
+        return jsonify({"ok": False, "msg": "No picks available — run analysis first"})
+
+    try:
+        from models.mlb_predictor import build_elite_parlay
+        parlay = build_elite_parlay(raw_picks)
+        if parlay:
+            with _lock:
+                _state["elite_parlay"] = _clean(parlay)
+            return jsonify({"ok": True, "parlay": _clean(parlay)})
+        else:
+            return jsonify({
+                "ok":  False,
+                "msg": "No qualifying legs found. Need model_prob ≥ 80%, positive EV, and ELITE safety.",
+            })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
+
+
+@app.route("/api/calibration")
+def api_calibration():
+    """Return model calibration stats (ECE + per-bin breakdown)."""
+    days = int(request.args.get("days", 90))
+    try:
+        from data.db import get_calibration_data
+        return jsonify({"ok": True, "calibration": get_calibration_data(days_back=days)})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
+
+
+@app.route("/api/parlay/performance")
+def api_parlay_performance():
+    """Win/loss/ROI stats for all tracked parlays."""
+    try:
+        from data.db import get_parlay_performance_stats
+        return jsonify({"ok": True, "stats": get_parlay_performance_stats()})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
+
+
+@app.route("/api/parlay/auto-resolve", methods=["POST"])
+def api_parlay_auto_resolve():
+    """Auto-resolve pending tracked parlays based on leg prediction outcomes."""
+    try:
+        from models.mlb_predictor import resolve_tracked_parlays
+        n = resolve_tracked_parlays(days_back=7)
+        return jsonify({"ok": True, "resolved": n,
+                        "msg": f"Resolved {n} tracked parlay(s)"})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
+
+
+@app.route("/api/auto-improve", methods=["POST"])
+def api_auto_improve():
+    """Trigger calibration check + conditional model retrain."""
+    try:
+        import pandas as pd
+        from data.mlb_fetcher import build_game_dataset
+        from models.mlb_model import auto_improve
+        team_stats = build_game_dataset(MLB_SEASONS[:3])
+        result = auto_improve(team_stats, min_resolved=50, verbose=True)
+        return jsonify({"ok": True, **result})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
 
 
 @app.route("/api/performance")
@@ -557,11 +671,19 @@ def api_predictions():
 @app.route("/api/resolve-outcomes", methods=["POST"])
 def api_resolve_outcomes():
     try:
-        from models.mlb_predictor import resolve_game_outcomes, resolve_prop_outcomes
-        n_games = resolve_game_outcomes(days_back=3)
-        n_props = resolve_prop_outcomes(days_back=3)
-        return jsonify({"ok": True, "resolved_games": n_games, "resolved_props": n_props,
-                        "msg": f"Resolved {n_games} game predictions + {n_props} props"})
+        from models.mlb_predictor import (
+            resolve_game_outcomes, resolve_prop_outcomes, resolve_tracked_parlays
+        )
+        n_games  = resolve_game_outcomes(days_back=3)
+        n_props  = resolve_prop_outcomes(days_back=3)
+        n_parlay = resolve_tracked_parlays(days_back=7)
+        return jsonify({
+            "ok": True,
+            "resolved_games":  n_games,
+            "resolved_props":  n_props,
+            "resolved_parlays": n_parlay,
+            "msg": f"Resolved {n_games} game preds + {n_props} props + {n_parlay} parlays",
+        })
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
 
