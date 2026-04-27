@@ -150,6 +150,16 @@ def load_model() -> Pipeline | None:
     return None
 
 
+def load_enhanced_model() -> Pipeline | None:
+    """Load the sentiment+injury enhanced model if it exists, else fall back to base."""
+    enhanced = os.path.join(
+        os.path.dirname(__file__), "..", "..", "models", "mlb_model_enhanced.joblib"
+    )
+    if os.path.exists(enhanced):
+        return joblib.load(enhanced)
+    return load_model()
+
+
 # Extra features added by retrain_with_history (must be kept in sync)
 _EXTRA_FEATURE_COLS = ["sentiment_score", "injury_count"]
 
@@ -207,7 +217,7 @@ def _load_team_injury_counts_from_db() -> dict[str, int]:
             SELECT lower(team) AS team,
                    COUNT(*) AS cnt
             FROM   injury_reports
-            WHERE  updated_at > NOW() - INTERVAL '14 days'
+            WHERE  fetched_at > NOW() - INTERVAL '14 days'
             GROUP  BY lower(team)
         """)
         result = {r["team"]: int(r["cnt"]) for r in cur.fetchall()}
@@ -233,6 +243,9 @@ def _fuzzy_team_key(name: str, lookup: dict) -> str | None:
 def retrain_with_history(team_stats: pd.DataFrame, verbose: bool = True) -> Pipeline | None:
     """
     Retrain the model with sentiment + injury features pulled from the DB.
+    When actual completed games exist in the `games` table, those real W/L
+    outcomes are used as training labels instead of the synthetic season-run
+    comparison approach.
     Saves as mlb_model_enhanced.joblib for the dashboard to pick up.
     Falls back to the base model if DB data is insufficient.
     """
@@ -250,54 +263,134 @@ def retrain_with_history(team_stats: pd.DataFrame, verbose: bool = True) -> Pipe
         print("[mlb_model] No team stats — cannot retrain")
         return None
 
+    # ── Try actual game outcomes from DB first ──────────────────────────────
     rows_X, rows_y = [], []
+    actual_count = 0
+    try:
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+        from data.db import get_completed_games_for_training
+        seasons_available = list(team_stats["season"].unique()) if not team_stats.empty else None
+        actual_games = get_completed_games_for_training(sport="mlb",
+                                                        seasons=seasons_available)
+        if actual_games:
+            # Build team-stats lookup {(team_lower, season): stat_row}
+            stats_lookup = {}
+            for _, row in team_stats.iterrows():
+                key = (str(row.get("team", "")).lower(), int(row.get("season", 0)))
+                stats_lookup[key] = row
 
-    for season, grp in team_stats.groupby("season"):
-        teams = grp.reset_index(drop=True)
-        for i in range(len(teams)):
-            for j in range(i + 1, len(teams)):
-                home = teams.iloc[i]
-                away = teams.iloc[j]
+            for g in actual_games:
+                h_team   = str(g.get("home_team", ""))
+                a_team   = str(g.get("away_team", ""))
+                h_score  = g.get("home_score")
+                a_score  = g.get("away_score")
+                season   = g.get("season") or int(str(g.get("game_date", "2024"))[:4])
+                if h_score is None or a_score is None:
+                    continue
+
+                # Look up season stats for both teams (fuzzy match)
+                def _find_stats(team_name, season_yr):
+                    tl = team_name.lower()
+                    if (tl, season_yr) in stats_lookup:
+                        return stats_lookup[(tl, season_yr)]
+                    # Try last word match
+                    last = tl.split()[-1] if tl.split() else ""
+                    for (k, s), v in stats_lookup.items():
+                        if s == season_yr and last and last in k:
+                            return v
+                    return None
+
+                h_stat = _find_stats(h_team, season)
+                a_stat = _find_stats(a_team, season)
+                if h_stat is None or a_stat is None:
+                    continue
 
                 def diff(col):
-                    return float(home.get(col, 0) or 0) - float(away.get(col, 0) or 0)
+                    return float(h_stat.get(col, 0) or 0) - float(a_stat.get(col, 0) or 0)
 
-                # Base stat features (differentials)
-                row = {
-                    "runs_scored": diff("runs_scored"),
-                    "bat_avg":     diff("bat_avg"),
-                    "obp":         diff("obp"),
-                    "slg":         diff("slg"),
-                    "era":         diff("era"),
-                    "whip":        diff("whip"),
-                    "k_per_9":     diff("k_per_9"),
-                    "bb_per_9":    diff("bb_per_9"),
-                    "fip":         diff("fip"),
-                    "is_home":     1,
+                feat = {
+                    "runs_scored":  diff("runs_scored"),
+                    "bat_avg":      diff("bat_avg"),
+                    "obp":          diff("obp"),
+                    "slg":          diff("slg"),
+                    "era":          diff("era"),
+                    "whip":         diff("whip"),
+                    "k_per_9":      diff("k_per_9"),
+                    "bb_per_9":     diff("bb_per_9"),
+                    "fip":          diff("fip"),
+                    "is_home":      1,
                 }
+                hk = _fuzzy_team_key(h_team, sentiment_map)
+                ak = _fuzzy_team_key(a_team, sentiment_map)
+                feat["sentiment_score"] = round(
+                    (sentiment_map.get(hk, 0.0) if hk else 0.0) -
+                    (sentiment_map.get(ak, 0.0) if ak else 0.0), 4)
+                hik = _fuzzy_team_key(h_team, injury_map)
+                aik = _fuzzy_team_key(a_team, injury_map)
+                feat["injury_count"] = (
+                    (injury_map.get(hik, 0) if hik else 0) -
+                    (injury_map.get(aik, 0) if aik else 0))
 
-                # Sentiment differential (0 when not in DB)
-                hk = _fuzzy_team_key(str(home.get("team", "")), sentiment_map)
-                ak = _fuzzy_team_key(str(away.get("team", "")), sentiment_map)
-                h_sent = sentiment_map.get(hk, 0.0) if hk else 0.0
-                a_sent = sentiment_map.get(ak, 0.0) if ak else 0.0
-                row["sentiment_score"] = round(h_sent - a_sent, 4)
-
-                # Injury differential (more injuries = disadvantage)
-                hik = _fuzzy_team_key(str(home.get("team", "")), injury_map)
-                aik = _fuzzy_team_key(str(away.get("team", "")), injury_map)
-                h_inj = injury_map.get(hik, 0) if hik else 0
-                a_inj = injury_map.get(aik, 0) if aik else 0
-                row["injury_count"] = h_inj - a_inj
-
-                label = 1 if float(home.get("runs_scored", 0) or 0) > float(away.get("runs_scored", 0) or 0) else 0
-                rows_X.append(row)
+                # Real outcome: 1 = home won, 0 = away won (skip ties)
+                if int(h_score) == int(a_score):
+                    continue
+                label = 1 if int(h_score) > int(a_score) else 0
+                rows_X.append(feat)
                 rows_y.append(label)
+                actual_count += 1
 
-                row_rev = {k: -v if k != "is_home" else 0 for k, v in row.items()}
-                row_rev["is_home"] = 0
-                rows_X.append(row_rev)
-                rows_y.append(1 - label)
+        if verbose and actual_count:
+            print(f"[mlb_model] Using {actual_count} actual game outcomes from DB as training labels")
+    except Exception as e:
+        print(f"[mlb_model] Could not load actual games from DB ({e}); using synthetic labels")
+
+    # ── Fall back to synthetic season-run-comparison pairs ──────────────────
+    if len(rows_X) < 50:
+        for season, grp in team_stats.groupby("season"):
+            teams = grp.reset_index(drop=True)
+            for i in range(len(teams)):
+                for j in range(i + 1, len(teams)):
+                    home = teams.iloc[i]
+                    away = teams.iloc[j]
+
+                    def diff(col):
+                        return float(home.get(col, 0) or 0) - float(away.get(col, 0) or 0)
+
+                    row = {
+                        "runs_scored": diff("runs_scored"),
+                        "bat_avg":     diff("bat_avg"),
+                        "obp":         diff("obp"),
+                        "slg":         diff("slg"),
+                        "era":         diff("era"),
+                        "whip":        diff("whip"),
+                        "k_per_9":     diff("k_per_9"),
+                        "bb_per_9":    diff("bb_per_9"),
+                        "fip":         diff("fip"),
+                        "is_home":     1,
+                    }
+                    hk = _fuzzy_team_key(str(home.get("team", "")), sentiment_map)
+                    ak = _fuzzy_team_key(str(away.get("team", "")), sentiment_map)
+                    h_sent = sentiment_map.get(hk, 0.0) if hk else 0.0
+                    a_sent = sentiment_map.get(ak, 0.0) if ak else 0.0
+                    row["sentiment_score"] = round(h_sent - a_sent, 4)
+
+                    hik = _fuzzy_team_key(str(home.get("team", "")), injury_map)
+                    aik = _fuzzy_team_key(str(away.get("team", "")), injury_map)
+                    h_inj = injury_map.get(hik, 0) if hik else 0
+                    a_inj = injury_map.get(aik, 0) if aik else 0
+                    row["injury_count"] = h_inj - a_inj
+
+                    label = 1 if float(home.get("runs_scored", 0) or 0) > float(away.get("runs_scored", 0) or 0) else 0
+                    rows_X.append(row)
+                    rows_y.append(label)
+
+                    row_rev = {k: -v if k != "is_home" else 0 for k, v in row.items()}
+                    row_rev["is_home"] = 0
+                    rows_X.append(row_rev)
+                    rows_y.append(1 - label)
+
+        if verbose:
+            print(f"[mlb_model] Supplemented with synthetic pairs (total rows: {len(rows_X)})")
 
     X = pd.DataFrame(rows_X)[ENHANCED_FEATURE_COLS].fillna(0)
     y = pd.Series(rows_y)
@@ -327,13 +420,13 @@ def retrain_with_history(team_stats: pd.DataFrame, verbose: bool = True) -> Pipe
 
     os.makedirs(os.path.dirname(_ENHANCED_MODEL_PATH), exist_ok=True)
     joblib.dump(pipeline, _ENHANCED_MODEL_PATH)
-    # Also overwrite the primary model so dashboard picks it up immediately
-    joblib.dump(pipeline, MODEL_PATH)
+    # Keep the base model at MODEL_PATH separate — only save enhanced to its own path.
+    # predict_from_season_stats() will load the enhanced model automatically when available.
 
     if verbose:
         print(f"[mlb_model] Enhanced model trained on {len(X)} rows ({team_stats['season'].nunique()} seasons)")
         print(f"[mlb_model] CV ROC-AUC: {cv_scores.mean():.3f} ± {cv_scores.std():.3f}")
-        print(f"[mlb_model] Saved to {_ENHANCED_MODEL_PATH} + {MODEL_PATH}")
+        print(f"[mlb_model] Saved to {_ENHANCED_MODEL_PATH}")
 
     return pipeline
 
@@ -516,6 +609,7 @@ def predict_from_season_stats(
     """
     Look up both teams' stats from the team_stats DataFrame and predict.
     Uses most recent season available for each team.
+    Prefers enhanced model (sentiment + injury features from DB) when available.
     """
     def get_stats(team_name: str) -> dict:
         rows = team_stats[team_stats["team"].str.contains(team_name, case=False, na=False)]
@@ -530,6 +624,49 @@ def predict_from_season_stats(
         missing = home_team if not home_s else away_team
         print(f"[mlb_model] No stats found for: {missing}")
         return {"home_win_prob": 0.5, "away_win_prob": 0.5}
+
+    # Try enhanced model (adds live sentiment + injury from DB)
+    enhanced = load_enhanced_model()
+    enhanced_path = os.path.join(
+        os.path.dirname(__file__), "..", "..", "models", "mlb_model_enhanced.joblib"
+    )
+    if enhanced is not None and os.path.exists(enhanced_path):
+        try:
+            sentiment_map = _load_team_sentiment_from_db()
+            injury_map    = _load_team_injury_counts_from_db()
+
+            row = {}
+            for col in FEATURE_COLS:
+                if col == "is_home":
+                    row[col] = 1
+                    continue
+                row[col] = float(home_s.get(col, 0) or 0) - float(away_s.get(col, 0) or 0)
+
+            hk = _fuzzy_team_key(home_team, sentiment_map)
+            ak = _fuzzy_team_key(away_team, sentiment_map)
+            row["sentiment_score"] = round(
+                (sentiment_map.get(hk, 0.0) if hk else 0.0) -
+                (sentiment_map.get(ak, 0.0) if ak else 0.0), 4)
+
+            hik = _fuzzy_team_key(home_team, injury_map)
+            aik = _fuzzy_team_key(away_team, injury_map)
+            row["injury_count"] = (
+                (injury_map.get(hik, 0) if hik else 0) -
+                (injury_map.get(aik, 0) if aik else 0))
+
+            X = pd.DataFrame([row])[ENHANCED_FEATURE_COLS].fillna(0)
+            probs = enhanced.predict_proba(X)[0]
+            home_prob = float(probs[1])
+            home_prob = min(max(home_prob, 0.30), 0.70)
+            return {
+                "home_win_prob": round(home_prob, 4),
+                "away_win_prob": round(1.0 - home_prob, 4),
+                "used_enhanced": True,
+                "sentiment_diff": row["sentiment_score"],
+                "injury_diff":    row["injury_count"],
+            }
+        except Exception as e:
+            print(f"[mlb_model] enhanced predict failed, falling back: {e}")
 
     return predict_game(home_s, away_s, model)
 

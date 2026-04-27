@@ -1854,3 +1854,51 @@ def get_calibration_data(days_back: int = 90) -> dict:
     finally:
         conn.close()
 
+
+def get_completed_games_for_training(sport: str = "mlb",
+                                     seasons: list = None) -> list[dict]:
+    """
+    Return completed games with actual scores from the games table.
+    Used to build real W/L training labels instead of synthetic season-run comparisons.
+    Each returned dict: {home_team, away_team, home_score, away_score, game_date, season}
+    """
+    conn = get_conn()
+    if conn is None:
+        return []
+    try:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        if seasons:
+            placeholders = ",".join(["%s"] * len(seasons))
+            cur.execute(f"""
+                SELECT home_team, away_team, home_score, away_score,
+                       game_date, season
+                FROM   games
+                WHERE  sport = %s
+                  AND  home_score IS NOT NULL
+                  AND  away_score IS NOT NULL
+                  AND  status IN ('Final','Game Over','Completed Early','Completed')
+                  AND  season IN ({placeholders})
+                ORDER  BY game_date
+            """, [sport] + list(seasons))
+        else:
+            cur.execute("""
+                SELECT home_team, away_team, home_score, away_score,
+                       game_date, season
+                FROM   games
+                WHERE  sport = %s
+                  AND  home_score IS NOT NULL
+                  AND  away_score IS NOT NULL
+                  AND  status IN ('Final','Game Over','Completed Early','Completed')
+                ORDER  BY game_date
+            """, (sport,))
+        rows = [dict(r) for r in cur.fetchall()]
+        for r in rows:
+            if isinstance(r.get("game_date"), datetime.date):
+                r["game_date"] = r["game_date"].isoformat()
+        return rows
+    except Exception as e:
+        print(f"[db] get_completed_games_for_training error: {e}")
+        return []
+    finally:
+        conn.close()
+

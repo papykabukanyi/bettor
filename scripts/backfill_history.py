@@ -23,7 +23,7 @@ def _parse_days(argv) -> int:
 
 
 def main():
-    from data.history_ingest import backfill_news, backfill_injuries
+    from data.history_ingest import backfill_news, backfill_injuries, backfill_game_results
     days = _parse_days(sys.argv)
     print(f"[backfill] days_back={days}")
 
@@ -33,7 +33,11 @@ def main():
     n_inj = backfill_injuries(days_back=days)
     print(f"[backfill] injuries rows: {n_inj}")
 
+    n_games = backfill_game_results(days_back=days)
+    print(f"[backfill] completed games saved: {n_games}")
+
     # Retrain the MLB model with collected sentiment + injury data
+    # and actual game outcomes as training labels
     print("[backfill] Retraining model with historical data...")
     try:
         from data.mlb_fetcher import build_game_dataset
