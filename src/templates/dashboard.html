@@ -447,7 +447,7 @@ body.console-open main{padding-bottom:236px}
       </select>
       <select id="props-dir" onchange="filterProps()">
         <option value="">All</option>
-        <option value="OVER">OVER</option>
+        <option value="OVER" selected>OVER</option>
         <option value="UNDER">UNDER</option>
       </select>
       <select id="props-safety" onchange="filterProps()">
@@ -672,7 +672,7 @@ let TOMORROW_CARDS = {{ tomorrow_cards|safe }};
 let BEST_PARLAYS   = {{ best_parlays|safe }};
 let ALL_PROPS      = {{ all_props|safe }};
 let parlayLegs     = [];
-let propsSortKey   = 'safety';
+let propsSortKey   = 'model_prob';
 let propsSortAsc   = false;
 
 // ── Loading / status polling ───────────────────────────────────────────────
@@ -1090,7 +1090,7 @@ function propRow(p, gameKey) {
     <span class="prop-player">${p.name||'—'}</span>
     <span class="prop-stat">${p.prop_label||p.stat_type||'—'}</span>
     <span class="${dirCls}">${p.direction} ${p.line}</span>
-    <span class="prop-conf">${p.confidence||'?'}%</span>
+    <span class="prop-conf">${p.model_prob!=null?(p.model_prob*100).toFixed(1):(p.confidence||'?')}%</span>
     ${sb}
     ${rationale ? `<span class="prop-rationale" title="${rationale.replace(/"/g,"&quot;")}">&#128202; ${rationale}</span>` : ''}
     <button class="bet-add" onclick="addToParlay(${addKey})">+</button>
@@ -1158,7 +1158,7 @@ function sortAndRenderProps() {
       <td>${p.prop_label||p.stat_type||'—'}</td>
       <td>${p.line!=null?p.line:'—'}</td>
       <td class="${dirClass(p.direction)}">${p.direction||'—'}</td>
-      <td>${p.model_prob!=null?Math.round(p.model_prob*100)+'%':'—'}</td>
+      <td>${p.model_prob!=null?(p.model_prob*100).toFixed(1)+'%':'—'}</td>
       <td>${safetyBadge(p.safety_label||'MODERATE')}</td>
       <td style="color:${(p.ev||0)>=0?'var(--green)':'var(--red)'}">${p.ev!=null?p.ev.toFixed(3):'—'}</td>
       <td style="font-size:11px;color:var(--muted);max-width:220px" title="${(p.signal_rationale||'').replace(/"/g,'&quot;')}">${p.signal_rationale||'—'}</td>

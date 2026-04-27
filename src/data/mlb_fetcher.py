@@ -823,19 +823,22 @@ def get_hitter_props_batch(games: list[dict], season: int) -> list[dict]:
                 # 2B/game for doubles prop
                 d2b_pg = d2  / _g
 
-                # (stat_type, per-game mean, sportsbook line, std dev)
+                # (stat_type, per-game mean, sportsbook line, std_factor)
+                # std = max(mean * std_factor, 0.12) — proportional so high-avg
+                # players show meaningfully higher probability than average ones
                 # Lines match typical DraftKings / FanDuel offerings
-                for prop_type, mean_val, line, std in [
-                    ("hits",             h_pg,   0.5,  0.65),
-                    ("home_runs",        hr_pg,  0.5,  0.22),
-                    ("total_bases",      tb_pg,  1.5,  1.05),
-                    ("rbi",              rbi_pg, 0.5,  0.72),
-                    ("runs",             r_pg,   0.5,  0.66),
+                for prop_type, mean_val, line, sf in [
+                    ("hits",             h_pg,   0.5,  0.55),
+                    ("home_runs",        hr_pg,  0.5,  0.80),
+                    ("total_bases",      tb_pg,  1.5,  0.50),
+                    ("rbi",              rbi_pg, 0.5,  0.70),
+                    ("runs",             r_pg,   0.5,  0.65),
                     ("walks",            bb_pg,  0.5,  0.48),
-                    ("stolen_bases",     sb_pg,  0.5,  0.28),
-                    ("batter_strikeouts",so_pg,  0.5,  0.95),
-                    ("doubles",          d2b_pg, 0.5,  0.44),
+                    ("stolen_bases",     sb_pg,  0.5,  0.75),
+                    ("batter_strikeouts",so_pg,  0.5,  0.50),
+                    ("doubles",          d2b_pg, 0.5,  0.55),
                 ]:
+                    std     = max(mean_val * sf, 0.12)
                     over_p  = float(scipy_stats.norm.sf(line, loc=mean_val, scale=std))
                     under_p = 1.0 - over_p
                     if max(over_p, under_p) < 0.51:  # lower threshold = more props
@@ -926,7 +929,6 @@ def get_starters_props_batch(games: list[dict], season: int) -> list[dict]:
 
     props = []
     seen: set[str] = set()
-    K_STD = 2.5
 
     for g in games:
         for role_key in ("home_starter", "away_starter"):
@@ -971,8 +973,18 @@ def get_starters_props_batch(games: list[dict], season: int) -> list[dict]:
 
             k_per_start  = round(_so / max(_g, 1), 3)
             ip_per_start = round(_ip / max(_gs, 1), 3)
-            prop_line    = max(3.5, round(k_per_start * 2) / 2 - 0.5)
-            over_prob    = float(scipy_stats.norm.sf(prop_line, loc=k_per_start, scale=K_STD))
+            # Per-pitcher std: proportional to average K output (≈28% CV)
+            k_std = max(k_per_start * 0.28, 1.0)
+            # Tiered line: elite pitchers get a line further below their avg
+            # so their genuine edge is reflected in a higher over probability
+            if k_per_start >= 8.0:
+                line_offset = 1.5   # ace tier
+            elif k_per_start >= 6.5:
+                line_offset = 1.0   # good tier
+            else:
+                line_offset = 0.5   # average tier
+            prop_line    = max(3.5, round((k_per_start - line_offset) * 2) / 2)
+            over_prob    = float(scipy_stats.norm.sf(prop_line, loc=k_per_start, scale=k_std))
             under_prob   = 1.0 - over_prob
 
             props.append({
