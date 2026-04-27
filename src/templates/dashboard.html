@@ -1115,7 +1115,7 @@ function propRow(p, gameKey) {
     badge: p.safety_label||'MODERATE',
   }).replace(/"/g,'&quot;');
   return `<div class="prop-row">
-    <span class="prop-player">${p.name||'—'}</span>
+    <span class="prop-player">${p.name||'—'}${p.team ? ` (${p.team})` : ''}</span>
     <span class="prop-stat">${p.prop_label||p.stat_type||'—'}</span>
     <span class="${dirCls}">${p.direction} ${p.line}</span>
     <span class="prop-conf">${p.model_prob!=null?(p.model_prob*100).toFixed(1):(p.confidence||'?')}%</span>
