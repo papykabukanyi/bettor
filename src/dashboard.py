@@ -23,12 +23,13 @@ Routes:
 import os
 import sys
 import json
+import queue
 import datetime
 import threading
 import traceback
 import warnings
 
-from flask import Flask, render_template, jsonify, request
+from flask import Flask, render_template, jsonify, request, Response
 
 SRC_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SRC_DIR)
@@ -39,6 +40,33 @@ from config import BANKROLL, MIN_VALUE_EDGE, KELLY_FRACTION, MLB_SEASONS
 _DASH_MIN_EDGE = 0.02
 
 app = Flask(__name__, template_folder="templates")
+
+# ─── Gunicorn / production: init once per worker ─────────────────────────────
+_worker_initialized = False
+_worker_init_lock   = threading.Lock()
+_scheduler          = None
+
+
+def _init_worker():
+    global _worker_initialized, _scheduler
+    with _worker_init_lock:
+        if _worker_initialized:
+            return
+        _worker_initialized = True
+    try:
+        from data.db import init_schema
+        init_schema()
+    except Exception as e:
+        print(f"[worker-init] DB init: {e}")
+    _scheduler = _start_scheduler()
+    _auto_boot_analysis()
+
+
+@app.before_request
+def _lazy_init():
+    """Triggered once per-worker on the very first request."""
+    if not _worker_initialized:
+        _init_worker()
 
 _PHASES = [
     "Fetching MLB schedule",
@@ -65,9 +93,28 @@ _state = {
     "best_parlays":        [],
     "player_props":        [],
     "elite_parlay":        None,
+    "live_scores":         {},
     "logs":                [],
 }
 _lock = threading.Lock()
+
+# ─── Server-Sent Events broadcast ────────────────────────────────────────────
+_sse_clients: list[queue.Queue] = []
+_sse_lock = threading.Lock()
+
+
+def _sse_broadcast(event: str, data: dict):
+    """Push an SSE message to every connected browser tab."""
+    msg = f"event: {event}\ndata: {json.dumps(data)}\n\n"
+    with _sse_lock:
+        dead = []
+        for q in _sse_clients:
+            try:
+                q.put_nowait(msg)
+            except queue.Full:
+                dead.append(q)
+        for q in dead:
+            _sse_clients.remove(q)
 
 
 def _log(msg):
@@ -531,6 +578,17 @@ def _run_analysis():
         _log(f"Analysis complete — {len(today_cards)} today (upcoming), "
              f"{len(tomorrow_cards)} tomorrow, {len(all_props_flat)} props")
 
+        # Broadcast full state update to all SSE clients
+        _sse_broadcast("state_update", {
+            "status":              "done",
+            "last_updated":        last_updated,
+            "game_cards_today":    _clean(today_cards),
+            "game_cards_tomorrow": _clean(tomorrow_cards),
+            "best_parlays":        _clean(best_parlays),
+            "player_props":        _clean(all_props_flat),
+            "elite_parlay":        _clean(_state.get("elite_parlay")),
+        })
+
     except Exception:
         err = traceback.format_exc()
         _log(f"Analysis FAILED:\n{err}")
@@ -538,6 +596,7 @@ def _run_analysis():
             _state["status"] = "error"
             _state["phase"]  = "Error"
             _state["error"]  = err
+        _sse_broadcast("status", {"status": "error", "error": err[:300]})
 
 
 @app.route("/")
@@ -969,25 +1028,42 @@ def _poll_live_scores():
         today = datetime.date.today().strftime("%m/%d/%Y")
         raw = mlbstatsapi.schedule(start_date=today, end_date=today) or []
         live = [g for g in raw if g.get("status") in
-                ("In Progress", "Final", "Game Over", "Completed Early")]
-        with _lock:
-            _state["live_scores"] = {
-                _norm_gk(f"{g.get('away_name','')}@{g.get('home_name','')}"): {
-                    "home_score":  g.get("home_score"),
-                    "away_score":  g.get("away_score"),
-                    "status":      g.get("status"),
-                    "inning":      g.get("current_inning", ""),
-                    "inning_half": g.get("inning_state", ""),
-                }
-                for g in live
+                ("In Progress", "Final", "Game Over", "Completed Early",
+                 "Warmup", "Pre-Game")]
+        live_map = {
+            _norm_gk(f"{g.get('away_name','')}@{g.get('home_name','')}"): {
+                "home_score":  g.get("home_score"),
+                "away_score":  g.get("away_score"),
+                "status":      g.get("status"),
+                "inning":      g.get("current_inning", ""),
+                "inning_half": g.get("inning_state", ""),
             }
+            for g in live
+        }
+        with _lock:
+            _state["live_scores"] = live_map
+
+        # Broadcast live scores to all SSE clients
+        if live_map:
+            _sse_broadcast("live_scores", {"scores": live_map})
+
         # Auto-resolve finished games (non-blocking, errors suppressed)
         if any(g.get("status") in ("Final", "Game Over", "Completed Early") for g in live):
             try:
-                from models.mlb_predictor import resolve_game_outcomes
-                n = resolve_game_outcomes(days_back=1)
-                if n:
-                    print(f"[live-scores] Auto-resolved {n} predictions")
+                from models.mlb_predictor import resolve_game_outcomes, resolve_prop_outcomes
+                n_g = resolve_game_outcomes(days_back=1)
+                n_p = resolve_prop_outcomes(days_back=1)
+                if n_g or n_p:
+                    print(f"[live-scores] Auto-resolved {n_g} predictions, {n_p} props")
+                    # Push updated performance to clients
+                    try:
+                        from data.db import get_performance_stats, get_parlay_performance_stats
+                        _sse_broadcast("performance_update", {
+                            "stats":        get_performance_stats(),
+                            "parlay_stats": get_parlay_performance_stats(),
+                        })
+                    except Exception:
+                        pass
             except Exception as exc:
                 print(f"[live-scores] resolve error: {exc}")
     except Exception as exc:
@@ -1002,11 +1078,146 @@ def _poll_live_scores():
 _poll_live_scores()
 
 
+# ─── SSE stream endpoint ─────────────────────────────────────────────────────
+@app.route("/api/stream")
+def api_stream():
+    """Long-lived SSE connection. Each browser tab connects once."""
+    q: queue.Queue = queue.Queue(maxsize=50)
+    with _sse_lock:
+        _sse_clients.append(q)
+
+    # Immediately send current state so fresh page loads fill in fast
+    with _lock:
+        hello = {
+            "status":              _state.get("status", "idle"),
+            "last_updated":        _state.get("last_updated"),
+            "game_cards_today":    _state.get("game_cards_today", []),
+            "game_cards_tomorrow": _state.get("game_cards_tomorrow", []),
+            "best_parlays":        _state.get("best_parlays", []),
+            "player_props":        _state.get("player_props", []),
+            "elite_parlay":        _state.get("elite_parlay"),
+            "live_scores":         _state.get("live_scores", {}),
+        }
+    try:
+        q.put_nowait(f"event: state_update\ndata: {json.dumps(hello)}\n\n")
+    except queue.Full:
+        pass
+
+    def _generate():
+        yield ": connected\n\n"
+        while True:
+            try:
+                msg = q.get(timeout=25)
+                yield msg
+            except queue.Empty:
+                yield ": ping\n\n"   # keep-alive
+
+    def _cleanup(resp):
+        with _sse_lock:
+            if q in _sse_clients:
+                _sse_clients.remove(q)
+        return resp
+
+    response = Response(
+        _generate(),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
+    response.call_on_close(lambda: _cleanup(None))
+    return response
+
+
+# ─── APScheduler: auto-run analysis every 30 minutes ────────────────────────
+def _scheduled_analysis():
+    """Called by APScheduler. Skips if already running or cache is very fresh."""
+    with _lock:
+        if _state["status"] == "running":
+            return
+        last_ts = _state.get("last_updated_ts")
+
+    # Skip if ran within the last 28 minutes
+    if last_ts:
+        try:
+            dt = datetime.datetime.fromisoformat(last_ts)
+            now = datetime.datetime.now(datetime.timezone.utc) if dt.tzinfo else datetime.datetime.utcnow()
+            age_min = (now - dt).total_seconds() / 60
+            if age_min < 28:
+                return
+        except Exception:
+            pass
+
+    print(f"[scheduler] Auto-running analysis at {datetime.datetime.now().strftime('%H:%M')}")
+    with _lock:
+        _state["status"]    = "running"
+        _state["phase"]     = _PHASES[0]
+        _state["phase_idx"] = 0
+    _sse_broadcast("status", {"status": "running", "phase": _PHASES[0]})
+    threading.Thread(target=_run_analysis, daemon=True).start()
+
+
+def _start_scheduler():
+    try:
+        from apscheduler.schedulers.background import BackgroundScheduler
+        from apscheduler.triggers.interval import IntervalTrigger
+        sched = BackgroundScheduler(daemon=True)
+        # Run every 30 minutes
+        sched.add_job(_scheduled_analysis, IntervalTrigger(minutes=30), id="auto_analysis",
+                      max_instances=1, coalesce=True)
+        sched.start()
+        print("[scheduler] APScheduler started — analysis every 30 minutes")
+        return sched
+    except Exception as e:
+        print(f"[scheduler] Could not start APScheduler: {e}")
+        return None
+
+
+def _auto_boot_analysis():
+    """On startup: load cache, and if it's stale (>30 min) kick off analysis immediately."""
+    try:
+        from data.db import get_analysis_cache
+        cached = get_analysis_cache(max_age_hours=22)
+        if cached:
+            with _lock:
+                _state.update({
+                    "game_cards_today":    cached.get("game_cards_today", []),
+                    "game_cards_tomorrow": cached.get("game_cards_tomorrow", []),
+                    "best_parlays":        cached.get("best_parlays", []),
+                    "player_props":        cached.get("player_props", []),
+                    "last_updated":        cached.get("last_updated"),
+                })
+            print(f"[boot] Loaded cache from DB (last updated: {cached.get('last_updated')})")
+            # Check age
+            lu = cached.get("last_updated", "")
+            stale = True
+            if lu:
+                try:
+                    dt = datetime.datetime.strptime(lu, "%Y-%m-%d %H:%M")
+                    age_min = (datetime.datetime.utcnow() - dt).total_seconds() / 60
+                    stale = age_min > 30
+                except Exception:
+                    pass
+            if stale:
+                print("[boot] Cache is stale — triggering fresh analysis...")
+                threading.Thread(target=_run_analysis, daemon=True).start()
+        else:
+            print("[boot] No DB cache — triggering fresh analysis...")
+            threading.Thread(target=_run_analysis, daemon=True).start()
+    except Exception as e:
+        print(f"[boot] Auto-boot error: {e}")
+        threading.Thread(target=_run_analysis, daemon=True).start()
+
+
 if __name__ == "__main__":
     try:
         from data.db import init_schema
         init_schema()
     except Exception as e:
         print(f"[dashboard] DB init: {e}")
+    _scheduler = _start_scheduler()
+    _auto_boot_analysis()
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)

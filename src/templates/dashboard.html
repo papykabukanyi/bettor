@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -151,85 +151,7 @@ main{padding:20px;max-width:1400px;margin:0 auto}
 /* ── Bet rows ── */
 .bet-section{padding:12px 14px}
 .bet-section-title{font-size:.7rem;font-weight:600;color:var(--muted);
-  text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px}
-.bet-row{display:flex;align-items:center;justify-content:space-between;
-  padding:7px 0;border-bottom:1px solid rgba(255,255,255,.04);gap:8px}
-.bet-row:last-child{border-bottom:none}
-.bet-label{font-size:.75rem;color:var(--muted);min-width:90px}
-.bet-pick{font-size:.82rem;font-weight:600;flex:1}
-.bet-odds{font-size:.78rem;color:var(--muted)}
-.bet-edge{font-size:.72rem;padding:2px 6px;border-radius:4px}
-.bet-edge.pos{background:rgba(22,163,74,.15);color:var(--green)}
-.bet-edge.neg{background:rgba(220,38,38,.1);color:var(--muted)}
-.bet-add{padding:3px 8px;font-size:.7rem;border-radius:5px;background:var(--card2);
-  border:1px solid var(--border);color:var(--muted);cursor:pointer;flex-shrink:0}
-.bet-add:hover{border-color:var(--accent);color:var(--accent)}
-.bet-add.added{border-color:var(--green);color:var(--green)}
-
-/* ── Props section ── */
-.props-section{padding:10px 14px 14px}
-.props-team-header{font-size:.75rem;font-weight:600;color:var(--muted);
-  text-transform:uppercase;letter-spacing:.5px;margin:8px 0 6px;
-  display:flex;align-items:center;gap:6px}
-.props-team-header::after{content:'';flex:1;height:1px;background:var(--border)}
-.prop-row{display:flex;align-items:center;gap:8px;padding:6px 0;
-  border-bottom:1px solid rgba(255,255,255,.04)}
-.prop-row:last-child{border-bottom:none}
-.prop-player{font-size:.82rem;font-weight:600;min-width:120px}
-.prop-stat{font-size:.72rem;color:var(--muted);min-width:80px}
-.prop-dir{font-size:.78rem;font-weight:700;min-width:70px}
-.prop-dir.OVER{color:var(--green)}
-.prop-dir.UNDER{color:var(--yellow)}
-.prop-conf{font-size:.72rem;color:var(--muted)}
-.prop-badge{font-size:.65rem;padding:2px 5px;border-radius:4px}
-.prop-rationale{font-size:.68rem;color:var(--muted);grid-column:1/-1;padding-left:2px;opacity:.85;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
-
-/* ── Empty state ── */
-.empty-state{text-align:center;padding:60px 20px;color:var(--muted)}
-.empty-state .icon{font-size:3rem;margin-bottom:16px;opacity:.4}
-.empty-state p{font-size:.9rem}
-
-/* ── Props table ── */
-.props-table-wrap{overflow-x:auto;border-radius:var(--radius);border:1px solid var(--border)}
-.props-table{width:100%;border-collapse:collapse;font-size:.82rem}
-.props-table th{background:var(--card2);padding:10px 12px;text-align:left;
-  font-size:.72rem;font-weight:600;color:var(--muted);text-transform:uppercase;
-  letter-spacing:.5px;white-space:nowrap;border-bottom:1px solid var(--border);cursor:pointer}
-.props-table th:hover{color:var(--text)}
-.props-table td{padding:9px 12px;border-bottom:1px solid rgba(255,255,255,.04);
-  white-space:nowrap}
-.props-table tr:last-child td{border-bottom:none}
-.props-table tr:hover td{background:rgba(255,255,255,.02)}
-.props-table .dir-OVER{color:var(--green);font-weight:700}
-.props-table .dir-UNDER{color:var(--yellow);font-weight:700}
-
-/* ── Filter bar ── */
-.filter-bar{display:flex;align-items:center;gap:10px;margin-bottom:16px;flex-wrap:wrap}
-.filter-bar input,.filter-bar select{
-  background:var(--card);border:1px solid var(--border);color:var(--text);
-  padding:7px 10px;border-radius:8px;font-size:.82rem;outline:none}
-.filter-bar input:focus,.filter-bar select:focus{border-color:var(--accent)}
-
-/* ── Parlays ── */
-.parlays-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:16px}
-.parlay-card{background:var(--card);border:1px solid var(--border);
-  border-radius:var(--radius);padding:16px;transition:border-color .2s}
-.parlay-card:hover{border-color:var(--purple)}
-.parlay-header{display:flex;align-items:flex-start;justify-content:space-between;
-  margin-bottom:12px;gap:8px}
-.parlay-meta{display:flex;flex-direction:column;gap:3px}
-.parlay-legs-count{font-size:.72rem;color:var(--muted)}
-.parlay-odds{font-size:1.1rem;font-weight:700;color:var(--purple)}
-.parlay-payout{font-size:.78rem;color:var(--muted)}
-.parlay-leg{display:flex;align-items:center;gap:8px;padding:5px 0;
-  border-bottom:1px solid rgba(255,255,255,.05)}
-.parlay-leg:last-child{border-bottom:none}
-.leg-dot{width:6px;height:6px;border-radius:50%;background:var(--accent);flex-shrink:0}
-.leg-text{font-size:.78rem;flex:1}
-.leg-conf{font-size:.7rem;color:var(--muted)}
-.parlay-save-btn{margin-top:12px;width:100%;padding:8px;border-radius:8px;
-  background:rgba(124,58,237,.15);border:1px solid var(--purple);
-  color:var(--purple);font-size:.78rem;cursor:pointer;transition:all .2s}
+  text-transform:uppercase;letter-spacing:.5px}
 .parlay-save-btn:hover{background:rgba(124,58,237,.3)}
 
 /* Parlay builder */
@@ -279,6 +201,9 @@ main{padding:20px;max-width:1400px;margin:0 auto}
 .tp-WIN{background:rgba(22,163,74,.15);color:var(--green)}
 .tp-LOSS{background:rgba(220,38,38,.15);color:var(--red)}
 .tp-meta{font-size:.75rem;color:var(--muted);margin-top:4px}
+.pick-phrase{font-weight:700}
+.pick-phrase.win{color:var(--green)}
+.prop-phrase{color:var(--accent);font-weight:700}
 
 /* ── Performance ── */
 .perf-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:14px;margin-bottom:24px}
@@ -383,7 +308,33 @@ main{padding:20px;max-width:1400px;margin:0 auto}
 .cbtn:hover{color:var(--text);border-color:var(--text)}
 body.console-open main{padding-bottom:236px}
 #toast{z-index:500;bottom:30px}
+/* ── Simplified plain-English picks ── */
+.pick-card{padding:10px 12px;border-radius:10px;border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.03);margin:6px 0}
+.win-card{border-color:rgba(22,163,74,.35)!important;background:linear-gradient(135deg,rgba(22,163,74,.12),rgba(22,163,74,.02))!important}
+.pick-headline{font-size:1.05rem;font-weight:800;line-height:1.25}
+.pick-conf{display:flex;align-items:center;gap:8px;margin-top:4px;font-size:.78rem;flex-wrap:wrap}
+.plain-bets-list{display:flex;flex-direction:column;gap:4px;margin:6px 0}
+.plain-bet-chip{font-size:.82rem;font-weight:600;padding:3px 0}
+.plain-props-preview{display:flex;flex-direction:column;gap:3px;margin-top:4px;padding:4px 0}
+.plain-prop-chip{font-size:.78rem;font-weight:600;padding:2px 0}
+/* ── Auto parlay combo grid ── */
+.parlay-combo-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(290px,1fr));gap:16px;margin-bottom:20px}
+.parlay-combo-card{background:linear-gradient(135deg,rgba(20,184,166,.08),rgba(168,85,247,.05),var(--card));border:1px solid rgba(20,184,166,.4);border-radius:var(--radius);padding:16px;display:flex;flex-direction:column;gap:12px}
+.combo-header{display:flex;justify-content:space-between;align-items:flex-start;gap:10px}
+.combo-title{font-size:.95rem;font-weight:800;color:var(--accent)}
+.combo-prob{font-size:.73rem;color:var(--muted);margin-top:2px}
+.combo-odds{font-size:1.3rem;font-weight:800}
+.combo-legs{display:flex;flex-direction:column;gap:8px}
+.combo-leg{padding:8px 10px;background:rgba(255,255,255,.04);border-radius:8px;font-size:.82rem}
+.combo-actions{display:flex;gap:8px;margin-top:4px}
+/* ── Live score badges ───────────────────────────────────────────── */
+.live-score{font-size:1.05rem;font-weight:800;color:var(--accent);margin:0 6px}
+.live-status{font-size:.7rem;font-weight:700;padding:2px 7px;border-radius:20px;margin-left:4px}
+.live-status.in-progress{background:rgba(22,163,74,.18);color:var(--green)}
+.live-status.final{background:rgba(124,58,237,.18);color:var(--purple)}
+#conn-badge{font-size:.7rem;font-weight:700;letter-spacing:.5px}
 </style>
+
 </head>
 <body>
 
@@ -402,6 +353,7 @@ body.console-open main{padding-bottom:236px}
   </div>
   <div class="header-actions">
     <span id="last-updated">{{ last_updated or 'Not loaded' }}</span>
+    <span id="conn-badge" style="font-size:.7rem;font-weight:700;letter-spacing:.5px">&#9675; connecting</span>
     <button class="btn btn-primary" id="run-btn" onclick="runAnalysis()">&#9654; Run Analysis</button>
     <button class="btn" onclick="openPhoneModal()">&#128241; SMS</button>
     <button class="btn" id="console-btn" onclick="toggleConsole()" title="Toggle live console">&#128187; Console</button>
@@ -483,19 +435,8 @@ body.console-open main{padding-bottom:236px}
     </div>
     <div class="props-table-wrap">
       <table class="props-table">
-        <thead>
-          <tr>
-            <th onclick="sortProps('name')">Player &#8597;</th>
-            <th onclick="sortProps('team')">Team &#8597;</th>
-            <th onclick="sortProps('prop_label')">Stat &#8597;</th>
-            <th onclick="sortProps('line')">Line &#8597;</th>
-            <th onclick="sortProps('direction')">Dir &#8597;</th>
-            <th onclick="sortProps('model_prob')">Prob &#8597;</th>
-            <th onclick="sortProps('safety')">Safety &#8597;</th>
-            <th onclick="sortProps('ev')">EV &#8597;</th>
-            <th>Signal Rationale</th>
-            <th>Add</th>
-          </tr>
+        <thead><tr>
+          <tr id="props-thead-row"></tr>
         </thead>
         <tbody id="props-tbody"></tbody>
       </table>
@@ -504,97 +445,28 @@ body.console-open main{padding-bottom:236px}
 
   <!-- PARLAYS -->
   <div class="tab-panel" id="panel-parlays">
-
-    <!-- ★ Auto-Mix Best Parlay ★ -->
-    <div class="parlay-mixer">
-      <div class="parlay-mixer-header">
-        <div>
-          <div class="parlay-mixer-title">&#10024; Auto-Mixed Best Parlay</div>
-          <div class="parlay-mixer-preview">
-            Auto-scans all picks + props, ranks by EV then probability, and builds the best mix.
-            Builder is auto-filled — no button required.
-          </div>
-        </div>
-        <div class="parlay-mixer-actions">
-          <label style="font-size:.78rem;color:var(--muted)">Legs</label>
-          <select id="auto-mix-count" onchange="refreshAutoMix()" style="background:var(--card);border:1px solid var(--border);
-            color:var(--text);padding:6px 10px;border-radius:8px;font-size:.82rem">
-            <option value="2">2</option>
-            <option value="3">3</option>
-            <option value="4" selected>4</option>
-            <option value="5">5</option>
-            <option value="6">6</option>
-          </select>
-          <button class="btn btn-sm" onclick="saveAutoMixParlay()">&#128190; Save</button>
-          <button class="btn btn-sm" onclick="sendAutoMixSms()">&#128232; Send SMS</button>
-        </div>
-      </div>
-      <div id="auto-mix-card" style="margin-top:12px"></div>
-      <div class="no-games hidden" id="auto-mix-empty">Run analysis to generate picks.</div>
-    </div>
-
-    <!-- Manual Builder -->
-    <div class="parlay-builder">
-      <h3>&#10133; Parlay Builder <span style="font-size:.75rem;color:var(--muted);font-weight:400">(auto-filled with best mix; click + to add)</span></h3>
-      <div id="parlay-legs-list"><div style="color:var(--muted);font-size:.82rem">No legs added yet.</div></div>
-      <div class="parlay-builder-actions">
-        <span id="parlay-combined-odds"></span>
-        <input type="text" id="parlay-name" placeholder="Parlay name…"
-          style="background:var(--card2);border:1px solid var(--border);color:var(--text);
-          padding:6px 10px;border-radius:8px;font-size:.82rem;outline:none;flex:1;max-width:200px">
-        <input type="number" id="parlay-stake" placeholder="Stake $"
-          style="background:var(--card2);border:1px solid var(--border);color:var(--text);
-          padding:6px 10px;border-radius:8px;font-size:.82rem;outline:none;width:90px">
-        <button class="btn btn-primary btn-sm" onclick="saveParlay()">&#128190; Save</button>
-        <button class="btn btn-sm" onclick="sendBuilderParlay()">&#128232; Send SMS</button>
-        <button class="btn btn-sm" onclick="clearParlay()">Clear</button>
+    <div class="section-header">
+      <span class="section-title">&#127917; Auto Parlays — Built from Props</span>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <span class="section-meta" id="parlay-auto-meta"></span>
+        <button class="btn btn-sm" onclick="autoGenParlaysFromProps()">&#8635; Refresh</button>
       </div>
     </div>
+    <div id="parlay-combos-empty" class="no-games hidden">Run analysis to generate props first.</div>
+    <div class="parlay-combo-grid" id="parlay-combos-grid"></div>
 
-    <!-- Top props list -->
-    <div class="section-header">
-      <span class="section-title">&#127919; Top Props (OVER)</span>
-      <span class="section-meta" id="top-props-meta"></span>
-    </div>
-    <div class="best-legs-grid" id="top-props-grid"></div>
-    <div class="no-games hidden" id="top-props-empty">Run analysis to generate props.</div>
-
-    <!-- Best legs list -->
-    <div class="section-header" style="margin-top:18px">
-      <span class="section-title">&#11088; Best Legs (All Picks)</span>
-      <span class="section-meta" id="best-legs-meta"></span>
-    </div>
-    <div class="best-legs-grid" id="best-legs-grid"></div>
-    <div class="no-games hidden" id="best-legs-empty">Run analysis to generate best legs.</div>
-
-    <!-- Auto-generated parlays -->
-    <div class="section-header">
-      <span class="section-title">&#129351; Best Auto-Parlays</span>
-    </div>
-    <div class="parlays-grid" id="auto-parlays-grid"></div>
-    <div class="no-games hidden" id="parlays-empty">Run analysis to generate parlays.</div>
-
-    <!-- Parlay Performance -->
     <div class="section-header" style="margin-top:28px">
-      <span class="section-title">&#128200; Parlay Performance</span>
-      <button class="btn btn-sm" onclick="loadParlayPerformance()">&#8635; Refresh</button>
-    </div>
-    <div class="perf-grid" id="parlay-perf-stats" style="margin-bottom:16px">
-      <div class="no-games" style="grid-column:1/-1">Loading parlay stats…</div>
-    </div>
-
-    <!-- Tracked parlays -->
-    <div class="section-header" style="margin-top:28px">
-      <span class="section-title">&#128204; Tracked Parlays</span>
-      <button class="btn btn-sm" onclick="loadTrackedParlays()">Refresh</button>
+      <span class="section-title">&#128204; Saved &amp; Tracked Parlays</span>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn btn-sm" onclick="loadTrackedParlays()">&#8635; Refresh</button>
+        <button class="btn btn-sm" onclick="resolveOutcomes()">&#9989; Resolve</button>
+      </div>
     </div>
     <div id="tracked-parlays-list"><div class="no-games">No tracked parlays yet.</div></div>
-  </div>
 
-  <!-- PERFORMANCE -->
-  <div class="tab-panel" id="panel-performance">
-    <div class="section-header">
-      <span class="section-title">Bot Performance (Games + Props + Parlays)</span>
+    <div class="section-header" style="margin-top:24px">
+      <span class="section-title">&#128200; Parlay Performance</span>
+      <button class="btn btn-sm" onclick="loadParlayPerformance()">&#8635; Parlays)</span>
       <button class="btn btn-sm" onclick="loadBotPerformance()">&#8635; Refresh</button>
     </div>
     <div class="perf-grid" id="bot-perf-stats"></div>
@@ -733,6 +605,7 @@ let TODAY_CARDS    = {{ today_cards|safe }};
 let TOMORROW_CARDS = {{ tomorrow_cards|safe }};
 let BEST_PARLAYS   = {{ best_parlays|safe }};
 let ALL_PROPS      = {{ all_props|safe }};
+let AUTO_PROP_PARLAY = {{ auto_props_parlay|safe }};
 let BEST_LEGS      = [];
 let AUTO_MIX_LEGS  = [];
 let parlayLegs     = [];
@@ -740,12 +613,81 @@ let _parlayTouched = false;
 let propsSortKey   = 'model_prob';
 let propsSortAsc   = false;
 const LOCAL_CACHE_KEY = 'bettor_last_session';
-const AUTO_REFRESH_MIN = 60;
 let _cacheUpdatedAtMs = null;
-let _autoRefreshTimer = null;
 let _autoRefreshInFlight = false;
 
-// ── Loading / status polling ───────────────────────────────────────────────
+// ── SSE live connection ────────────────────────────────────────────────────
+let _sse = null;
+let _sseReconnectDelay = 3000;
+
+function _connectSSE() {
+  if (_sse) { try { _sse.close(); } catch(e){} }
+  _sse = new EventSource('/api/stream');
+
+  _sse.onopen = () => {
+    _sseReconnectDelay = 3000;
+    _updateConnBadge(true);
+  };
+
+  // Full state push (on connect + after every analysis run)
+  _sse.addEventListener('state_update', e => {
+    try {
+      const d = JSON.parse(e.data);
+      if (d.status === 'running') {
+        showOverlay(d.phase || 'Working…', 5);
+        return;
+      }
+      hideOverlay();
+      if (d.game_cards_today  !== undefined) applyCachedData(d);
+      if (d.live_scores       !== undefined) _applyLiveScores(d.live_scores);
+      saveLocalCache(d);
+      // Refresh secondary panels silently
+      _silentRefreshPanels();
+    } catch(err) { console.warn('SSE state_update parse error', err); }
+  });
+
+  // Live score ticks (every 90 s from backend)
+  _sse.addEventListener('live_scores', e => {
+    try {
+      const d = JSON.parse(e.data);
+      _applyLiveScores(d.scores || {});
+    } catch(err) {}
+  });
+
+  // Status-only events (running / error)
+  _sse.addEventListener('status', e => {
+    try {
+      const d = JSON.parse(e.data);
+      if (d.status === 'running') showOverlay(d.phase || 'Running…', 5);
+      if (d.status === 'error')   { hideOverlay(); toast('Analysis error — check logs', 'error'); }
+    } catch(err) {}
+  });
+
+  // Performance push after auto-resolve
+  _sse.addEventListener('performance_update', e => {
+    try {
+      const d = JSON.parse(e.data);
+      if (d.stats)        _renderBotPerf(d.stats);
+      if (d.parlay_stats) _renderParlayPerf(d.parlay_stats);
+    } catch(err) {}
+  });
+
+  _sse.onerror = () => {
+    _updateConnBadge(false);
+    _sse.close();
+    setTimeout(_connectSSE, _sseReconnectDelay);
+    _sseReconnectDelay = Math.min(_sseReconnectDelay * 1.5, 30000);
+  };
+}
+
+function _updateConnBadge(live) {
+  const el = document.getElementById('conn-badge');
+  if (!el) return;
+  el.textContent = live ? '● LIVE' : '○ offline';
+  el.style.color = live ? 'var(--green)' : 'var(--red)';
+}
+
+// ── Loading / status overlay ───────────────────────────────────────────────
 const PHASES = {{ phases|tojson }};
 let pollingId = null;
 
@@ -758,6 +700,7 @@ function showOverlay(phase, pct) {
   document.getElementById('progress-fill').style.width = (pct||5)+'%';
 }
 
+/* Legacy polling kept for manual "Run" button fallback */
 function startPolling() {
   if (pollingId) return;
   pollingId = setInterval(pollStatus, 2500);
@@ -776,11 +719,6 @@ function pollStatus() {
     } else {
       stopPolling();
       hideOverlay();
-      if (data.status === 'done') {
-        loadCachedState();
-      } else if (data.status === 'error') {
-        toast('Analysis error — check logs', 'error');
-      }
     }
   }).catch(()=>{ stopPolling(); hideOverlay(); });
 }
@@ -794,23 +732,16 @@ function runAnalysis() {
   });
 }
 
-function _cacheAgeMinFromMs() {
-  if (!_cacheUpdatedAtMs) return null;
-  return Math.max(0, Math.floor((Date.now() - _cacheUpdatedAtMs) / 60000));
-}
-
 function saveLocalCache(data) {
   try {
     const payload = {
       saved_at: Date.now(),
       data: {
-        game_cards_today: data.game_cards_today || [],
-        game_cards_tomorrow: data.game_cards_tomorrow || [],
-        best_parlays: data.best_parlays || [],
-        player_props: data.player_props || [],
-        last_updated: data.last_updated || data._updated_at || '',
-        cache_updated_at_iso: data.cache_updated_at_iso || null,
-        cache_age_min: data.cache_age_min ?? null,
+        game_cards_today:     data.game_cards_today    || [],
+        game_cards_tomorrow:  data.game_cards_tomorrow || [],
+        best_parlays:         data.best_parlays        || [],
+        player_props:         data.player_props        || [],
+        last_updated:         data.last_updated        || '',
       }
     };
     localStorage.setItem(LOCAL_CACHE_KEY, JSON.stringify(payload));
@@ -828,86 +759,75 @@ function loadLocalCache() {
 
 function applyCachedData(d) {
   if (!d) return;
-  TODAY_CARDS    = d.game_cards_today    || [];
-  TOMORROW_CARDS = d.game_cards_tomorrow || [];
-  BEST_PARLAYS   = d.best_parlays        || [];
-  ALL_PROPS      = d.player_props        || [];
+  if (d.game_cards_today    !== undefined) TODAY_CARDS    = d.game_cards_today    || [];
+  if (d.game_cards_tomorrow !== undefined) TOMORROW_CARDS = d.game_cards_tomorrow || [];
+  if (d.best_parlays        !== undefined) BEST_PARLAYS   = d.best_parlays        || [];
+  if (d.player_props        !== undefined) ALL_PROPS      = d.player_props        || [];
   renderAll();
-  if (d.last_updated) {
-    document.getElementById('last-updated').textContent = d.last_updated;
-  } else if (d._updated_at) {
-    document.getElementById('last-updated').textContent = d._updated_at;
-  }
+  const lu = d.last_updated || d._updated_at;
+  if (lu) document.getElementById('last-updated').textContent = '⟳ ' + lu;
+}
 
-  if (typeof d.cache_age_min === 'number') {
-    _cacheUpdatedAtMs = Date.now() - d.cache_age_min * 60000;
-  } else if (typeof d.cache_updated_at_iso === 'string') {
-    const parsed = Date.parse(d.cache_updated_at_iso);
-    _cacheUpdatedAtMs = isNaN(parsed) ? null : parsed;
-  } else if (typeof d.last_updated === 'string') {
-    const m = d.last_updated.match(/^(\d{4})-(\d{2})-(\d{2})\s(\d{2}):(\d{2})/);
-    if (m) {
-      const ts = Date.parse(`${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:00`);
-      _cacheUpdatedAtMs = isNaN(ts) ? null : ts;
+// ── Live score injection ────────────────────────────────────────────────────
+let _liveScores = {};
+
+function _norm(s) {
+  return (s||'').replace(/ @ /g,'@').replace(/ @/g,'@').replace(/@ /g,'@').trim();
+}
+
+function _applyLiveScores(scores) {
+  _liveScores = Object.assign(_liveScores, scores);
+  // Update all game cards on screen
+  document.querySelectorAll('[data-game-key]').forEach(card => {
+    const gk = _norm(card.dataset.gameKey);
+    const s  = _liveScores[gk];
+    if (!s) return;
+    const scoreEl  = card.querySelector('.live-score');
+    const statusEl = card.querySelector('.live-status');
+    if (scoreEl && s.home_score != null && s.away_score != null) {
+      scoreEl.textContent  = `${s.away_score} – ${s.home_score}`;
+      scoreEl.style.display = 'inline';
     }
-  }
-}
-
-function maybeAutoRefresh(d) {
-  const age = typeof d.cache_age_min === 'number' ? d.cache_age_min : _cacheAgeMinFromMs();
-  if (age == null) {
-    triggerBackgroundRefresh();
-    return;
-  }
-  if (age >= AUTO_REFRESH_MIN) {
-    triggerBackgroundRefresh();
-  }
-}
-
-function triggerBackgroundRefresh() {
-  if (_autoRefreshInFlight) return;
-  _autoRefreshInFlight = true;
-  fetch('/api/run', {method:'POST'}).then(r=>r.json()).then(d=>{
-    if (!d.ok) { _autoRefreshInFlight = false; return; }
-    const poll = setInterval(() => {
-      fetch('/api/status').then(r=>r.json()).then(s=>{
-        if (s.status !== 'running') {
-          clearInterval(poll);
-          _autoRefreshInFlight = false;
-          loadCachedState();
-        }
-      }).catch(()=>{});
-    }, 5000);
-  }).catch(()=>{ _autoRefreshInFlight = false; });
-}
-
-function startAutoRefreshTimer() {
-  if (_autoRefreshTimer) return;
-  _autoRefreshTimer = setInterval(() => {
-    const age = _cacheAgeMinFromMs();
-    if (age != null && age >= AUTO_REFRESH_MIN) {
-      triggerBackgroundRefresh();
-    }
-  }, 10 * 60 * 1000);
-}
-
-function loadCachedState() {
-  fetch('/api/cached-state').then(r=>r.json()).then(d=>{
-    if (!d.ok && d.status !== 'done') return;
-    applyCachedData(d);
-    loadPerformance();
-    saveLocalCache(d);
-    maybeAutoRefresh(d);
-    startAutoRefreshTimer();
-  }).catch(() => {
-    const local = loadLocalCache();
-    if (local) {
-      applyCachedData(local);
-      loadPerformance();
-      startAutoRefreshTimer();
+    if (statusEl) {
+      const inn = s.inning ? ` • ${s.inning_half||''} ${s.inning}` : '';
+      statusEl.textContent  = `${s.status}${inn}`;
+      statusEl.style.display = 'inline';
+      statusEl.className    = 'live-status ' +
+        (s.status === 'Final' || s.status === 'Game Over' ? 'final' : 'in-progress');
     }
   });
 }
+
+// ── Silent background panel refresh (called after state_update) ─────────────
+let _silentPerfTimer = null;
+function _silentRefreshPanels() {
+  // Stagger to avoid hammering the server
+  clearTimeout(_silentPerfTimer);
+  _silentPerfTimer = setTimeout(() => {
+    _fetchAndRenderPerf();
+    _fetchAndRenderParlayPerf();
+    loadTrackedParlays();
+    autoGenParlaysFromProps();
+  }, 1500);
+}
+
+// ── Periodic silent refresh every 5 minutes (covers SSE gaps) ───────────────
+setInterval(() => {
+  _fetchAndRenderPerf();
+  _fetchAndRenderParlayPerf();
+  loadTrackedParlays();
+}, 5 * 60 * 1000);
+
+// ── Performance render wrappers (called by SSE performance_update) ──────────
+function _renderBotPerf(_stats) {
+  // Stats from SSE; just re-fetch to keep rendering in sync with existing code
+  loadBotPerformance();
+}
+function _renderParlayPerf(_stats) {
+  loadParlayPerformance();
+}
+function _fetchAndRenderPerf()     { loadBotPerformance(); loadPerformance(); }
+function _fetchAndRenderParlayPerf() { loadParlayPerformance(); }
 
 // ── Tab switching ─────────────────────────────────────────────────────────
 function switchTab(name) {
@@ -915,17 +835,8 @@ function switchTab(name) {
   document.querySelectorAll('.tab-panel').forEach(p=>p.classList.remove('active'));
   document.querySelector(`[data-tab="${name}"]`).classList.add('active');
   document.getElementById(`panel-${name}`).classList.add('active');
-  if (name === 'performance') loadPerformance();
-  if (name === 'parlays') loadTrackedParlays();
-}
-
-function switchTab(name) {
-  document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
-  document.querySelectorAll('.tab-panel').forEach(p=>p.classList.remove('active'));
-  document.querySelector(`[data-tab="${name}"]`).classList.add('active');
-  document.getElementById(`panel-${name}`).classList.add('active');
   if (name === 'performance') { loadBotPerformance(); loadPerformance(); loadCalibration(); }
-  if (name === 'parlays')     { loadTrackedParlays(); loadParlayPerformance(); }
+  if (name === 'parlays')     { autoGenParlaysFromProps(); loadTrackedParlays(); loadParlayPerformance(); }
 }
 
 // ── Elite Parlay ──────────────────────────────────────────────────────────
@@ -1112,101 +1023,165 @@ function renderAll() {
   renderGames('today-grid', TODAY_CARDS, 'today-empty', 'today-meta', 'badge-today');
   renderGames('tomorrow-grid', TOMORROW_CARDS, 'tomorrow-empty', 'tomorrow-meta', 'badge-tomorrow');
   renderPropsTable(ALL_PROPS);
-  renderParlays(BEST_PARLAYS);
+  autoGenParlaysFromProps();
 }
 
 // ── Game cards ────────────────────────────────────────────────────────────
 function renderGames(gridId, cards, emptyId, metaId, badgeId) {
-  const grid = document.getElementById(gridId);
-  const empty = document.getElementById(emptyId);
-  const meta  = document.getElementById(metaId);
-  const badge = document.getElementById(badgeId);
-  if (!cards || !cards.length) {
-    grid.innerHTML = '';
-    empty.classList.remove('hidden');
-    if (badge) badge.textContent = '0';
-    return;
+// ── Plain-English helpers ─────────────────────────────────────────────────
+function plainEnglishBet(bet, homeTeam, awayTeam) {
+  if (!bet) return null;
+  const bt   = (bet.bet_type||'').toLowerCase();
+  const pick = bet.pick || '';
+  const line = parseFloat(bet.line) || 0;
+  const isOver = pick.toUpperCase().includes('OVER');
+  const team = cleanPickTeam(pick);
+  if (bt === 'moneyline') return { text: `${team} will WIN`, emoji: '&#127942;', color: 'var(--green)' };
+  if (bt === 'run_line') {
+    if (pick.includes('+1.5')) return { text: `${team} wins or stays within 1 run`, emoji: '&#128202;', color: '#818cf8' };
+    return { text: `${team} wins by 2+ runs`, emoji: '&#128202;', color: '#818cf8' };
   }
-  empty.classList.add('hidden');
-  if (badge) badge.textContent = cards.length;
-  if (meta) meta.textContent = `${cards.length} game${cards.length!==1?'s':''} · MLB`;
-  grid.innerHTML = cards.map(c => gameCard(c)).join('');
+  if (bt === 'total' || bt === 'game_total') {
+    return isOver
+      ? { text: `Game will have MORE than ${line} total runs`, emoji: '&#127919;', color: 'var(--accent)' }
+      : { text: `Game will have FEWER than ${line} total runs`, emoji: '&#127919;', color: 'var(--yellow)' };
+  }
+  if (bt === 'f5_total') {
+    return isOver
+      ? { text: `First 5 innings: MORE than ${line} runs`, emoji: '&#9203;', color: 'var(--accent)' }
+      : { text: `First 5 innings: FEWER than ${line} runs`, emoji: '&#9203;', color: 'var(--yellow)' };
+  }
+  if (bt === 'f5_moneyline') return { text: `${team} leads after 5 innings`, emoji: '&#9203;', color: '#a78bfa' };
+  if (bt === 'home_team_total') {
+    return isOver
+      ? { text: `${homeTeam} scores MORE than ${line} runs`, emoji: '&#127968;', color: 'var(--accent)' }
+      : { text: `${homeTeam} scores fewer than ${line} runs`, emoji: '&#127968;', color: 'var(--yellow)' };
+  }
+  if (bt === 'away_team_total') {
+    return isOver
+      ? { text: `${awayTeam} scores MORE than ${line} runs`, emoji: '&#9992;', color: 'var(--accent)' }
+      : { text: `${awayTeam} scores fewer than ${line} runs`, emoji: '&#9992;', color: 'var(--yellow)' };
+  }
+  return { text: pick, emoji: '&#127919;', color: 'var(--text)' };
 }
 
-function _lineValue(v) {
-  const m = String(v ?? '').match(/-?\d+(?:\.\d+)?/);
-  return m ? Number(m[0]) : NaN;
+function plainEnglishPropText(p) {
+  const name = p.name || '—';
+  const line = parseFloat(p.line) || 0;
+  const st   = p.stat_type || '';
+  if (st === 'strikeouts')        return { text: `${name} strikes out ${line}+ batters`,            emoji: '&#128293;', color: '#a78bfa' };
+  if (st === 'hits')              return { text: `${name} gets ${line}+ hit${line!==1?'s':''}`,     emoji: '&#9918;',   color: 'var(--accent)' };
+  if (st === 'home_runs')         return { text: line<=1?`${name} hits a Home Run`:`${name} hits ${line}+ Home Runs`, emoji: '&#128165;', color: 'var(--green)' };
+  if (st === 'rbi')               return { text: `${name} drives in ${line}+ run${line!==1?'s':''}`,emoji: '&#127919;', color: 'var(--accent)' };
+  if (st === 'runs')              return { text: `${name} scores ${line}+ run${line!==1?'s':''}`,   emoji: '&#127939;', color: 'var(--green)' };
+  if (st === 'walks')             return { text: `${name} draws ${line}+ walk${line!==1?'s':''}`,   emoji: '&#128694;', color: '#94a3b8' };
+  if (st === 'stolen_bases')      return { text: `${name} steals ${line}+ base${line!==1?'s':''}`,  emoji: '&#128168;', color: 'var(--yellow)' };
+  if (st === 'total_bases')       return { text: `${name} has ${line}+ total bases`,                emoji: '&#128208;', color: 'var(--accent)' };
+  if (st === 'batter_strikeouts') return { text: `${name} strikes out ${line}+ times as batter`,   emoji: '&#10060;',  color: 'var(--red)' };
+  if (st === 'doubles')           return { text: `${name} hits ${line}+ double${line!==1?'s':''}`,  emoji: '&#128640;', color: 'var(--accent)' };
+  return { text: `${name} OVER ${line} ${p.prop_label||st}`, emoji: '&#9650;', color: 'var(--accent)' };
 }
 
 function gameCard(c) {
   const slBadge = safetyBadge(c.overall_safety_label || 'MODERATE');
   const whenB   = whenBadge(c.when_label||'TODAY', c.when||'TODAY');
 
-  const win = c.moneyline;
-  const winHtml = win ? `
-    <div class="winner-line">
-      <div class="winner-left">
-        <span class="winner-tag">WIN PICK</span>
-        <span class="winner-team">${cleanPickTeam(win.pick||'')}</span>
+  // Main WIN pick — big coloured headline
+  let mainPickHtml = '';
+  if (c.moneyline) {
+    const pbt  = plainEnglishBet(c.moneyline, c.home_team, c.away_team);
+    const prob = Math.round((c.moneyline.model_prob||0.5)*100);
+    const probColor = prob >= 65 ? 'var(--green)' : prob >= 55 ? 'var(--accent)' : 'var(--yellow)';
+    mainPickHtml = `<div class="pick-card win-card">
+      <div class="pick-headline" style="color:${pbt.color}">${pbt.emoji} ${pbt.text}</div>
+      <div class="pick-conf">
+        <span style="color:${probColor};font-weight:700">${prob}% confident</span>
+        <span style="color:var(--muted)">&middot; ${fmtOdds(c.moneyline.odds_am)}</span>
+        ${fmtEdge(c.moneyline.edge)}
+        ${safetyBadge(c.moneyline.safety_label||'MODERATE')}
       </div>
-      <div class="winner-right">
-        <span class="winner-prob">${Math.round((win.model_prob||0.5)*100)}%</span>
-        <span class="winner-odds">${fmtOdds(win.odds_am)}</span>
-        ${fmtEdge(win.edge)}
-      </div>
-    </div>`
-    : `<div class="winner-line muted">No moneyline edge yet</div>`;
+    </div>`;
+  } else {
+    mainPickHtml = `<div class="pick-card" style="color:var(--muted);font-size:.82rem">No moneyline edge yet</div>`;
+  }
 
+  // Other predictions as plain-English chips
+  const otherBets = [];
+  for (const key of ['total','run_line','f5_moneyline','f5_total']) {
+    if (c[key]) {
+      const pbt  = plainEnglishBet(c[key], c.home_team, c.away_team);
+      const prob = Math.round((c[key].model_prob||0.5)*100);
+      otherBets.push(`<div class="plain-bet-chip" style="color:${pbt.color}">${pbt.emoji} ${pbt.text} <span style="color:var(--muted);font-size:.72rem">(${prob}%)</span></div>`);
+    }
+  }
+  const otherHtml = otherBets.length ? `<div class="plain-bets-list">${otherBets.join('')}</div>` : '';
+
+  // Top prop picks preview — plain English, no chip clutter
   const topProps = [...(c.home_props||[]), ...(c.away_props||[])]
     .filter(p => (p.direction||'').toUpperCase() === 'OVER')
-    .filter(p => {
-      const lv = _lineValue(p.line);
-      return !(Number.isFinite(lv) && lv <= 0.5);
-    })
-    .sort((a,b)=> (b.safety||0) - (a.safety||0))
+    .filter(p => { const lv = _lineValue(p.line); return !(Number.isFinite(lv) && lv <= 0.5); })
+    .sort((a,b) => (b.model_prob||0) - (a.model_prob||0))
     .slice(0, 3);
-  const propsPreview = topProps.length
-    ? topProps.map(p=>`<span class="prop-chip ${p.direction}">
-        <span class="prop-name">${p.name||'—'}</span>
-        <span class="prop-line"> ${p.direction} ${p.line}</span>
-      </span>`).join('')
-    : `<span style="color:var(--muted);font-size:.72rem">No top props yet</span>`;
-
-  // Quick chips — best of ML, RL, Total
-  const chips = [];
-  if (c.moneyline)  chips.push(quickChip('WIN', c.moneyline));
-  if (c.total)      chips.push(quickChip('O/U', c.total));
-  const teamTotal = c.home_team_total || c.away_team_total;
-  if (teamTotal)    chips.push(quickChip('TT', teamTotal));
-  if (c.run_line)   chips.push(quickChip('RL', c.run_line));
-  const chipsHtml = chips.join('') || '<span style="color:var(--muted);font-size:.75rem">No picks yet</span>';
+  const propsHtml = topProps.length ? `<div class="plain-props-preview">${topProps.map(p => {
+    const ppt = plainEnglishPropText(p);
+    const pct = Math.round((p.model_prob||0.5)*100);
+    return `<div class="plain-prop-chip" style="color:${ppt.color}">${ppt.emoji} ${ppt.text} <span style="color:var(--muted);font-size:.7rem">${pct}%</span></div>`;
+  }).join('')}</div>` : '';
 
   const propCount = [...(c.home_props||[]), ...(c.away_props||[])]
     .filter(p => (p.direction||'').toUpperCase() === 'OVER')
-    .filter(p => {
-      const lv = _lineValue(p.line);
-      return !(Number.isFinite(lv) && lv <= 0.5);
-    })
+    .filter(p => { const lv = _lineValue(p.line); return !(Number.isFinite(lv) && lv <= 0.5); })
     .length;
 
-  return `
-<div class="game-card" id="card-${c.game_key.replace(/[@\s]/g,'_')}">
+  return `<div class="game-card" id="card-${c.game_key.replace(/[@\s]/g,'_')}">
   <div class="card-header" onclick="toggleCard(this.parentElement)">
-    <div class="card-when">
-      ${whenB}
-      ${slBadge}
-    </div>
+    <div class="card-when">${whenB}${slBadge}</div>
     <div class="matchup">
       <div class="team-side">
         <div class="team-name">${c.away_team}</div>
         <div class="team-starter">&#9918; ${c.away_starter||'TBD'}</div>
+      </pbt  = plainEnglishBet(bet, card.home_team, card.away_team);
+  const prob = Math.round((bet.model_prob||0.5)*100);
+  const probColor = prob >= 65 ? 'var(--green)' : prob >= 55 ? 'var(--accent)' : 'var(--yellow)';
+  return `<div class="bet-row">
+    <span class="bet-label" style="font-size:.72rem;color:var(--muted)">${label}</span>
+    <span class="bet-pick" style="color:${pbt.color};font-weight:700">${pbt.emoji} ${pbt.text}</span>
+    <span style="color:${probColor};font-size:.78rem;font-weight:700">${prob}%</span>
+    <span class="bet-odds">${fmtOdds(bet.odds_am)}</span>
+    ${safetyBadge(bet.safety_label||'MODERATE')}
+  </div>`;
+}
+
+function propsSection(c) { return detailPropsSection(c); }
+
+function propRow(p, gameKey) {
+  const ppt  = plainEnglishPropText(p);
+  const prob = Math.round((p.model_prob||0.5)*100);
+  const probColor = prob >= 70 ? 'var(--green)' : prob >= 62 ? 'var(--accent)' : 'var(--yellow)';
+  return `<div class="prop-row">
+    <span style="color:${ppt.color};font-size:.88rem;font-weight:700">${ppt.emoji} ${ppt.text}</span>
+    <span style="color:${probColor};font-size:.78rem;font-weight:700">${prob}%</span>
+    ${safetyBadge(p.safety_label||'MODERATE')
+  if (!hp.length && !ap.length) return '';
+  const renderList = (props, teamName) => {
+    if (!props.length) return '';
+    return `<div class="props-team-header">${teamName}</div>
+    ${props.map(p => {
+      const ppt = plainEnglishPropText(p);
+      const prob = Math.round((p.model_prob||0.5)*100);
+      const probColor = prob >= 70 ? 'var(--green)' : prob >= 62 ? 'var(--accent)' : 'var(--yellow)';
+      return `<div class="prop-row">
+        <span style="color:${ppt.color};font-size:.88rem;font-weight:700">${ppt.emoji} ${ppt.text}</span>
+        <span style="color:${probColor};font-size:.78rem;font-weight:700">${prob}%</span>
+        ${safetyBadge(p.safety_label||'MODERATE')}
+      </div>`;
+    }).join('')}`;
+  };
+  return `<div class="props-section">
+    <div style="font-size:.68rem;color:var(--accent);font-weight:700;padding:4px 0 6px;letter-spacing:.04em;">&#9650; ALL OVER PROPS</div>
+    ${renderList(ap, c.away_team)}
+    ${renderList(hp, c.home_team)}
       </div>
-      <div class="vs">@</div>
-      <div class="team-side away">
-        <div class="team-name">${c.home_team}</div>
-        <div class="team-starter">&#9918; ${c.home_starter||'TBD'}</div>
-      </div>
-    </div>
     ${winHtml}
     <div class="props-preview">${propsPreview}</div>
     <div class="quick-bets">${chipsHtml}</div>
@@ -1250,25 +1225,22 @@ function betSection(title, rows) {
 
 function betRow(label, bet, card) {
   if (!bet) return '';
-  const pick = bet.pick || '—';
+  const bt = (bet.bet_type || '').toLowerCase();
+  let pick = bet.pick || '—';
+  if (bt.includes('moneyline')) {
+    const team = cleanPickTeam(pick);
+    pick = team ? `${team} will win` : pick;
+  }
+  const pickCls = bt.includes('moneyline') ? 'pick-phrase win' : 'pick-phrase';
   const odds = fmtOdds(bet.odds_am);
   const edge = fmtEdge(bet.edge);
   const sb   = safetyBadge(bet.safety_label||'MODERATE');
-  const addKey = JSON.stringify({
-    label: pick,
-    bet_type: bet.bet_type,
-    game: card.game_key,
-    dec_odds: bet.dec_odds||2,
-    conf: bet.confidence||50,
-    badge: bet.safety_label||'MODERATE',
-  }).replace(/"/g,'&quot;');
   return `<div class="bet-row">
     <span class="bet-label">${label}</span>
-    <span class="bet-pick">${pick}</span>
+    <span class="bet-pick ${pickCls}">${pick}</span>
     <span class="bet-odds">${odds}</span>
     ${edge}
     ${sb}
-    <button class="bet-add" onclick="addToParlay(${addKey})">+</button>
   </div>`;
 }
 
@@ -1301,22 +1273,16 @@ function propRow(p, gameKey) {
   const dirCls  = `prop-dir ${p.direction}`;
   const sb      = safetyBadge(p.safety_label||'MODERATE');
   const rationale = p.signal_rationale || '';
-  const addKey  = JSON.stringify({
-    label: `${p.name} ${p.direction} ${p.line} ${p.prop_label}`,
-    bet_type: 'player_prop',
-    game: gameKey||p.game_key||'',
-    dec_odds: p.dec_odds||1.9,
-    conf: p.confidence||50,
-    badge: p.safety_label||'MODERATE',
-  }).replace(/"/g,'&quot;');
+  const stat = (p.prop_label || p.stat_type || '').replace(/_/g,' ');
+  const line = p.line != null ? `${p.line}+` : '';
+  const phrase = `${p.name||'Player'} will have ${line} ${stat}`.replace(/\s+/g,' ').trim();
   return `<div class="prop-row">
     <span class="prop-player">${p.name||'—'}</span>
-    <span class="prop-stat">${p.prop_label||p.stat_type||'—'}</span>
+    <span class="prop-stat prop-phrase">${phrase}</span>
     <span class="${dirCls}">${p.direction} ${p.line}</span>
     <span class="prop-conf">${p.model_prob!=null?(p.model_prob*100).toFixed(1):(p.confidence||'?')}%</span>
     ${sb}
     ${rationale ? `<span class="prop-rationale" title="${rationale.replace(/"/g,"&quot;")}">&#128202; ${rationale}</span>` : ''}
-    <button class="bet-add" onclick="addToParlay(${addKey})">+</button>
   </div>`;
 }
 
@@ -1349,10 +1315,116 @@ function filterProps() {
   sortAndRenderProps();
 }
 
-function sortProps(key) {
-  if (propsSortKey === key) propsSortAsc = !propsSortAsc;
-  else { propsSortKey = key; propsSortAsc = false; }
-  sortAndRenderProps();
+// ── Auto Parlay Combos ────────────────────────────────────────────────────────────────────
+function autoGenParlaysFromProps() {
+  const qualified = (ALL_PROPS || []).filter(p => {
+    if ((p.direction||'').toUpperCase() !== 'OVER') return false;
+    const lv = _lineValue(p.line);
+    if (Number.isFinite(lv) && lv <= 0.5) return false;
+    return _legProb(p) >= 0.61;
+  }).sort((a,b) => _legProb(b) - _legProb(a));
+
+  const grid  = document.getElementById('parlay-combos-grid');
+  const empty = document.getElementById('parlay-combos-empty');
+  const meta  = document.getElementById('parlay-auto-meta');
+  if (!grid) return;
+
+  if (!qualified.length) {
+    grid.innerHTML = '';
+    if (empty) empty.classList.remove('hidden');
+    if (meta) meta.textContent = 'No qualifying props yet — run analysis first.';
+    return;
+  }
+  if (empty) empty.classList.add('hidden');
+
+  const combos = [];
+  const maxLegs = Math.min(5, qualified.length);
+  for (let n = 2; n <= maxLegs; n++) {
+    const legs = [];
+    const usedGames   = new Set();
+    const usedPlayers = new Set();
+    for (let i = 0; i < qualified.length && legs.length < n; i++) {
+      const p = qualified[i];
+      const gk = p.game_key || p.game || '';
+      if (usedGames.has(gk) && usedGames.size >= 2) continue;
+      if (usedPlayers.has(p.name)) continue;
+      legs.push(p);
+      usedGames.add(gk);
+      usedPlayers.add(p.name);
+    }
+    if (legs.length === n) {
+      const prob = legs.reduce((acc,l) => acc * _legProb(l), 1);
+      const dec  = legs.reduce((acc,l) => acc * (l.dec_odds || 1.9), 1);
+      const amer = dec >= 2 ? Math.round((dec-1)*100) : Math.round(-100/(dec-1));
+      combos.push({ legs, prob, dec, amer, n });
+    }
+  }
+
+  if (!combos.length) {
+    grid.innerHTML = '<div class="no-games" style="grid-column:1/-1">Not enough props to build combos yet.</div>';
+    if (meta) meta.textContent = '';
+    return;
+  }
+  if (meta) meta.textContent = `${combos.length} auto-combo${combos.length>1?'s':''} from ${qualified.length} props`;
+  grid.innerHTML = combos.map(c => parlayComboCard(c)).join('');
+}
+
+
+function parlayComboCard(c) {
+  const probPct  = (c.combinedProb * 100).toFixed(1);
+  const payout   = (c.combinedDec * 100).toFixed(0);
+  const evRaw    = _legEv(c.combinedProb, c.combinedDec);
+  const evColor  = evRaw >= 0 ? 'var(--green)' : 'var(--yellow)';
+  const legsHtml = c.legs.map(p => {
+    const ppt = plainEnglishPropText(p);
+    const pct = (_legProb(p) * 100).toFixed(1);
+    const dec = (_legDec(p) || 1.9).toFixed(2);
+    return `<div class="combo-leg">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+        <span style="color:${ppt.color};font-weight:600">${ppt.emoji} ${ppt.text}</span>
+        <span style="color:var(--muted);font-size:.72rem;white-space:nowrap">${pct}% &middot; x${dec}</span>
+      </div>
+    </div>`;
+  }).join('');
+  const saveData = JSON.stringify({
+    name: `Auto ${c.n_legs}-Leg Props Parlay`,
+    legs: c.legs.map(p => {
+      const ppt = plainEnglishPropText(p);
+      return {
+        label:    ppt.text,
+        bet_type: 'player_prop',
+        game:     p.game_key || p.game || '',
+        dec_odds: _legDec(p) || 1.9,
+        conf:     Math.round(_legProb(p) * 100),
+        badge:    p.safety_label || 'MODERATE',
+      };
+    }),
+    combined_odds: c.combinedDec,
+    stake_usd: 10,
+  }).replace(/"/g,'&quot;');
+  return `<div class="parlay-combo-card">
+  <div class="combo-header">
+    <div>
+      <div class="combo-title">&#9650; ${c.n_legs}-Leg OVER Parlay</div>
+      <div class="combo-prob">Hit chance: ${probPct}% &middot; <span style="color:${evColor}">EV ${(evRaw*100).toFixed(1)}%</span></div>
+    </div>
+    <div style="text-align:right">
+      <div class="combo-odds">x${c.combinedDec.toFixed(2)}</div>
+      <div style="font-size:.75rem;color:var(--muted)">$100 &#8594; $${payout}</div>
+    </div>
+  </div>
+  <div class="combo-legs">${legsHtml}</div>
+  <div class="combo-actions">
+    <button class="btn btn-primary btn-sm" style="flex:1" onclick="saveAutoParlay(${saveData})">&#128190; Save &amp; Track</button>
+    <button class="btn btn-sm" style="flex:1" onclick="sendParlaySms(${saveData})">&#128241; SMS</button>
+  </div>
+</div>`;
+}
+
+// Legacy renderParlays (no-op, parlays now come from props only)
+function renderParlays(parlays) {
+  BEST_PARLAYS = parlays || [];
+  autoGenParlaysFromProps();
 }
 
 function sortAndRenderProps() {
@@ -1381,6 +1453,9 @@ function sortAndRenderProps() {
       <td>${p.name||'—'}</td>
       <td>${p.team||'—'}</td>
       <td>${p.prop_label||p.stat_type||'—'}</td>
+      badge: p.safety_label||'MODERATE',
+    }).replace(/"/g,'&quot;');
+    return `<tr>
       <td>${p.line!=null?p.line:'—'}</td>
       <td class="${dirClass(p.direction)}">${p.direction||'—'}</td>
       <td>${p.model_prob!=null?(p.model_prob*100).toFixed(1)+'%':'—'}</td>
@@ -1669,71 +1744,10 @@ function sendAutoMixSms() {
   sendParlaySms({name, legs: AUTO_MIX_LEGS, combined_odds: combined, stake_usd: 10});
 }
 
-// OVER-only parlays + best-leg pool for mixing
+// Legacy renderParlays — now delegates to auto-combo generator
 function renderParlays(parlays) {
   BEST_PARLAYS = parlays || [];
-  const grid  = document.getElementById('auto-parlays-grid');
-  const empty = document.getElementById('parlays-empty');
-
-  // Filter: keep only parlays where all prop/total legs are OVER
-  const filtered = BEST_PARLAYS.filter(p => {
-    const legs = p.legs || [];
-    // Remove any leg that is explicitly UNDER
-    for (const l of legs) {
-      const lbl = (l.label||'').toUpperCase();
-      if (lbl.includes('UNDER')) return false;
-    }
-    return legs.length >= 2;
-  }).sort((a,b) => (b.score||b.combined_prob||0) - (a.score||a.combined_prob||0));
-
-  const legPool = buildLegPool();
-  renderTopProps(legPool);
-  renderBestLegs(legPool);
-  refreshAutoMix(true);
-
-  if (!filtered.length) {
-    grid.innerHTML = '';
-    empty.classList.remove('hidden');
-    empty.textContent = 'No OVER parlays generated yet — run analysis first.';
-    return;
-  }
-  empty.classList.add('hidden');
-  grid.innerHTML = filtered.map(p => {
-    const legs = (p.legs||[]).map(l=> {
-      const lbl = (l.label||'—');
-      const isOver = lbl.toUpperCase().includes('OVER');
-      return `<div class="parlay-leg">
-        <div class="leg-dot" style="background:var(--green)"></div>
-        <span class="leg-text" style="color:${isOver?'var(--green)':'var(--text)'}">${lbl}</span>
-        <span class="leg-conf">${l.conf||'?'}% · x${(l.dec_odds||2).toFixed(2)}</span>
-       </div>`;
-    }).join('');
-    const saveData = JSON.stringify({
-      name: `${p.n_legs||'?'}-Leg OVER Parlay`,
-      legs: p.legs||[],
-      combined_odds: p.combined_dec||0,
-      stake_usd: 10,
-    }).replace(/"/g,'&quot;');
-    const evColor = (p.combined_ev||0) > 0 ? 'var(--green)' : 'var(--yellow)';
-    const badge = p.safety_label ? safetyBadge(p.safety_label) : '';
-    return `
-<div class="parlay-card" style="border-color:var(--green)">
-  <div style="font-size:.65rem;color:var(--green);font-weight:700;letter-spacing:.05em;margin-bottom:6px">&#9650; OVER PARLAY</div>
-  <div class="parlay-header">
-    <div class="parlay-meta">
-      <span class="parlay-legs-count">${p.n_legs||'?'}-Leg Parlay · ${badge}</span>
-      <span class="parlay-odds">x${(p.combined_dec||0).toFixed(2)}</span>
-      <span class="parlay-payout">$100 → $${(p.payout_100||0).toFixed(0)}</span>
-    </div>
-    <span style="font-size:.78rem;color:${evColor}">Hit: ${p.combined_prob||'?'}%${p.combined_ev!=null?' · EV '+((p.combined_ev||0)*100).toFixed(1)+'%':''}</span>
-  </div>
-  ${legs}
-  <div style="display:flex;gap:8px;margin-top:12px">
-    <button class="parlay-save-btn" style="flex:1" onclick="saveAutoParlay(${saveData})">&#128190; Save Parlay</button>
-    <button class="parlay-save-btn" style="flex:1" onclick="sendParlaySms(${saveData})">&#128232; Send SMS</button>
-  </div>
-</div>`;
-  }).join('');
+  autoGenParlaysFromProps();
 }
 
 // Parlay builder
@@ -2105,31 +2119,10 @@ function stopConsolePoll() {
   if (_consoleOpen) refreshConsole(); // final refresh
 }
 
-// ── Live scores ───────────────────────────────────────────────────────────
-let _liveScores  = {};
-let _livePollId  = null;
-
+// ── Live scores (DOM update via card IDs) ─────────────────────────────────
 function normKey(s) {
   return s.replace(/ @ /g,'@').replace(/ @/g,'@').replace(/@ /g,'@').replace(/\s+/g,'');
 }
-
-function startLiveScorePoll() {
-  if (_livePollId) return;
-  pollLiveScores();
-  _livePollId = setInterval(pollLiveScores, 60000);
-}
-
-function pollLiveScores() {
-  fetch('/api/live-scores').then(r=>r.json()).then(d=>{
-    if (!d.ok || !d.games) return;
-    d.games.forEach(g => {
-      const key = normKey(g.away_team + '@' + g.home_team);
-      _liveScores[key] = g;
-    });
-    updateLiveScoreCards();
-  }).catch(()=>{});
-}
-
 function updateLiveScoreCards() {
   Object.values(_liveScores).forEach(g => {
     const nk    = normKey(g.away_team + '@' + g.home_team);
@@ -2137,7 +2130,10 @@ function updateLiveScoreCards() {
     const el    = document.getElementById(cardId);
     if (!el) return;
     const isLive  = g.status === 'In Progress';
-    const isFinal = ['Final','Game Over','Completed Early'].includes(g.status);
+    constnormKey(s) {
+  return s.replace(/ @ /g,'@').replace(/ @/g,'@').replace(/@ /g,'@').replace(/\s+/g,'');
+}
+function  isFinal = ['Final','Game Over','Completed Early'].includes(g.status);
     if (!isLive && !isFinal) return;
 
     // Update when-badge
@@ -2170,42 +2166,26 @@ function updateLiveScoreCards() {
   });
 }
 
-// ── Init ──────────────────────────────────────────────────────────────────
+
+// ── Init ──────────────────────────────────────────────────────────────────────────
 (function init() {
-  startLiveScorePoll();
-  // If data was injected server-side, render immediately
-  if ((TODAY_CARDS && TODAY_CARDS.length) ||
-      (TOMORROW_CARDS && TOMORROW_CARDS.length) ||
-      (ALL_PROPS && ALL_PROPS.length)) {
-    renderAll();
-    _cacheUpdatedAtMs = Date.now();
-    saveLocalCache({
-      game_cards_today: TODAY_CARDS,
-      game_cards_tomorrow: TOMORROW_CARDS,
-      best_parlays: BEST_PARLAYS,
-      player_props: ALL_PROPS,
-      last_updated: (document.getElementById('last-updated')||{}).textContent || '',
-      cache_age_min: 0,
-    });
-    startAutoRefreshTimer();
-    hideOverlay();
-  } else {
-    const local = loadLocalCache();
-    if (local) {
-      applyCachedData(local);
-      hideOverlay();
-      startAutoRefreshTimer();
-    }
-    // Poll status — if running, show progress; else try to load cache
-    fetch('/api/status').then(r=>r.json()).then(d=>{
-      if (d.status === 'running') {
-        openConsole(); startConsolePoll(); startPolling();
-      } else {
-        loadCachedState();
-        hideOverlay();
-      }
-    }).catch(()=>{ hideOverlay(); });
+  // Show local cache immediately so page is not blank
+  const local = loadLocalCache();
+  if (local && (local.game_cards_today||[]).length) {
+    applyCachedData(local);
   }
+  hideOverlay();
+
+  // Connect SSE — server sends full state on connect + after every analysis run.
+  _connectSSE();
+
+  // If analysis is already running when we load, show the progress overlay
+  fetch('/api/status').then(r=>r.json()).then(d=>{
+    if (d.status === 'running') {
+      showOverlay(d.phase || 'Running…', 5);
+      startPolling();
+    }
+  }).catch(()=>{});
 })();
 </script>
 </body>
