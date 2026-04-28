@@ -1044,6 +1044,11 @@ function renderGames(gridId, cards, emptyId, metaId, badgeId) {
   if (grid) grid.innerHTML = cards.map(c => gameCard(c)).join('');
 }
 
+function _lineValue(v) {
+  const m = String(v ?? '').match(/-?\d+(?:\.\d+)?/);
+  return m ? Number(m[0]) : NaN;
+}
+
 // ── Plain-English helpers ─────────────────────────────────────────────────
 function plainEnglishBet(bet, homeTeam, awayTeam) {
   if (!bet) return null;
