@@ -419,6 +419,36 @@ def _run_analysis():
                     "game_date":    b.get("game_date", today_str),
                     "matchup":      b.get("matchup", ""),
                 })
+            for p in all_props:
+                game_str = p.get("game") or p.get("game_key") or ""
+                away_team = ""
+                home_team = ""
+                if "@" in game_str:
+                    parts = [s.strip() for s in game_str.split("@")]
+                    if len(parts) == 2:
+                        away_team, home_team = parts[0], parts[1]
+                pick_label = f"{p.get('name','')} {p.get('direction','')} {p.get('line','')} {p.get('prop_label','')}".strip()
+                pred_rows.append({
+                    "game_key":     p.get("game_key", p.get("game", "")),
+                    "sport":        "mlb",
+                    "bet_type":     "player_prop",
+                    "pick":         pick_label,
+                    "line":         p.get("line"),
+                    "odds_am":      p.get("odds_am"),
+                    "dec_odds":     p.get("dec_odds", 2.0),
+                    "confidence":   p.get("confidence", p.get("conf", 50)),
+                    "model_prob":   p.get("model_prob", 0.0),
+                    "safety_label": p.get("safety_label", "MODERATE"),
+                    "edge":         p.get("edge", 0.0),
+                    "stake_usd":    0.0,
+                    "ev":           p.get("ev", 0.0),
+                    "game_date":    p.get("date", today_str),
+                    "game_time":    p.get("game_time", ""),
+                    "home_team":    home_team,
+                    "away_team":    away_team,
+                    "matchup":      game_str,
+                    "sentiment_score": p.get("signal_sentiment"),
+                })
             save_predictions(pred_rows)
             save_prop_picks(all_props)
         except Exception as e:

@@ -25,6 +25,7 @@ import math
 import datetime
 import json
 import warnings
+import re
 from typing import Optional
 
 import numpy as np
@@ -68,6 +69,30 @@ def _am_odds_to_dec(am: int) -> float:
 def _dec_to_prob(dec: float) -> float:
     if not dec or dec <= 1: return 0.5
     return round(1.0 / dec, 4)
+
+
+def _line_to_float(val) -> float | None:
+    if val is None:
+        return None
+    if isinstance(val, (int, float)):
+        return float(val)
+    try:
+        s = str(val).strip()
+    except Exception:
+        return None
+    if not s:
+        return None
+    try:
+        return float(s)
+    except Exception:
+        pass
+    m = re.search(r"-?\d+(?:\.\d+)?", s)
+    if not m:
+        return None
+    try:
+        return float(m.group(0))
+    except Exception:
+        return None
 
 
 def _remove_vig(p1: float, p2: float) -> tuple:
@@ -429,7 +454,9 @@ def build_player_prop_bets(raw_props: list[dict], injured_players: set = None,
         signal: dict = {}
         if _SIGNAL_OK:
             try:
-                numeric_line = float(real_line) if real_line not in ("?", None) else float(p.get("line", 0.5))
+                numeric_line = _line_to_float(real_line)
+                if numeric_line is None:
+                    numeric_line = _line_to_float(p.get("line", 0.5)) or 0.5
                 signal = _prop_signal(
                     player_name  = name,
                     stat_type    = st,
@@ -442,13 +469,9 @@ def build_player_prop_bets(raw_props: list[dict], injured_players: set = None,
                 print(f"[predictor] prop signal error for {name}: {_se}")
 
         # ── Filter out tiny lines (0.5 or less) ───────────────────────────
-        try:
-            line_val = float(real_line)
-        except Exception:
-            try:
-                line_val = float(p.get("line", 0))
-            except Exception:
-                line_val = None
+        line_val = _line_to_float(real_line)
+        if line_val is None:
+            line_val = _line_to_float(p.get("line"))
         if line_val is not None and line_val <= 0.5:
             continue
 
@@ -933,7 +956,7 @@ def resolve_prop_outcomes(days_back: int = 3) -> int:
     except ImportError:
         return 0
     try:
-        from data.db import get_pending_props, update_prop_outcome
+        from data.db import get_pending_props, update_prop_outcome, get_conn
     except Exception:
         return 0
 
@@ -1054,6 +1077,37 @@ def resolve_prop_outcomes(days_back: int = 3) -> int:
                     outcome = "PUSH"
 
                 update_prop_outcome(p["id"], actual, outcome)
+                # Also update predictions table so Performance reflects prop outcomes
+                conn = None
+                try:
+                    conn = get_conn()
+                    if conn is not None:
+                        cur = conn.cursor()
+                        pick_like = f"%{p.get('player_name','')}%"
+                        cur.execute("""
+                            UPDATE predictions
+                            SET outcome = %s,
+                                actual_result = %s,
+                                resolved_at = NOW()
+                            WHERE bet_type = 'player_prop'
+                              AND outcome = 'PENDING'
+                              AND game_date = %s
+                              AND line = %s
+                              AND pick ILIKE %s
+                        """, (outcome, f"{prop_type}={actual}", p.get("game_date"), line_val, pick_like))
+                        conn.commit()
+                except Exception:
+                    try:
+                        if conn is not None:
+                            conn.rollback()
+                    except Exception:
+                        pass
+                finally:
+                    try:
+                        if conn is not None:
+                            conn.close()
+                    except Exception:
+                        pass
                 resolved += 1
 
     print(f"[mlb_predictor] Resolved {resolved} prop outcomes")

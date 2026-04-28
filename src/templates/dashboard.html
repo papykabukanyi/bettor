@@ -1133,6 +1133,11 @@ function renderGames(gridId, cards, emptyId, metaId, badgeId) {
   grid.innerHTML = cards.map(c => gameCard(c)).join('');
 }
 
+function _lineValue(v) {
+  const m = String(v ?? '').match(/-?\d+(?:\.\d+)?/);
+  return m ? Number(m[0]) : NaN;
+}
+
 function gameCard(c) {
   const slBadge = safetyBadge(c.overall_safety_label || 'MODERATE');
   const whenB   = whenBadge(c.when_label||'TODAY', c.when||'TODAY');
@@ -1154,6 +1159,10 @@ function gameCard(c) {
 
   const topProps = [...(c.home_props||[]), ...(c.away_props||[])]
     .filter(p => (p.direction||'').toUpperCase() === 'OVER')
+    .filter(p => {
+      const lv = _lineValue(p.line);
+      return !(Number.isFinite(lv) && lv <= 0.5);
+    })
     .sort((a,b)=> (b.safety||0) - (a.safety||0))
     .slice(0, 3);
   const propsPreview = topProps.length
@@ -1172,7 +1181,13 @@ function gameCard(c) {
   if (c.run_line)   chips.push(quickChip('RL', c.run_line));
   const chipsHtml = chips.join('') || '<span style="color:var(--muted);font-size:.75rem">No picks yet</span>';
 
-  const propCount = (c.home_props||[]).length + (c.away_props||[]).length;
+  const propCount = [...(c.home_props||[]), ...(c.away_props||[])]
+    .filter(p => (p.direction||'').toUpperCase() === 'OVER')
+    .filter(p => {
+      const lv = _lineValue(p.line);
+      return !(Number.isFinite(lv) && lv <= 0.5);
+    })
+    .length;
 
   return `
 <div class="game-card" id="card-${c.game_key.replace(/[@\s]/g,'_')}">
@@ -1261,6 +1276,8 @@ function propsSection(c) {
   // Show ALL OVER props — no probability or safety gate
   function qualifies(p) {
     if ((p.direction || '').toUpperCase() !== 'OVER') return false;
+    const lv = _lineValue(p.line);
+    if (Number.isFinite(lv) && lv <= 0.5) return false;
     return true;
   }
   const hp = (c.home_props || []).filter(qualifies).sort((a,b)=>(b.model_prob||0)-(a.model_prob||0));
@@ -1325,6 +1342,8 @@ function filterProps() {
     if (stat && p.stat_type !== stat) return false;
     if ((p.direction||'').toUpperCase() !== dir.toUpperCase()) return false;
     if (safe && p.safety_label !== safe) return false;
+    const lv = _lineValue(p.line);
+    if (Number.isFinite(lv) && lv <= 0.5) return false;
     return true;
   });
   sortAndRenderProps();
@@ -1403,6 +1422,8 @@ function buildLegPool() {
   // Player props (OVER only)
   (ALL_PROPS || []).forEach(p => {
     if ((p.direction || '').toUpperCase() !== 'OVER') return;
+    const lv = _lineValue(p.line);
+    if (Number.isFinite(lv) && lv <= 0.5) return;
     const prob = _legProb(p);
     const dec  = _legDec(p) || 1.9;
     const ev   = p.ev != null ? Number(p.ev) : _legEv(prob, dec);
