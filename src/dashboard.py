@@ -33,11 +33,13 @@ from flask import Flask, render_template, jsonify, request, Response
 
 SRC_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SRC_DIR)
-from config import BANKROLL, MIN_VALUE_EDGE, KELLY_FRACTION, MLB_SEASONS
+from config import BANKROLL, MIN_VALUE_EDGE, KELLY_FRACTION, MLB_SEASONS, et_today
 
 # Dashboard uses a lower edge threshold to show more picks
 # (bot tracks accuracy; high-edge filter is for real-money staking only)
 _DASH_MIN_EDGE = 0.02
+_DAILY_LOCK_HOUR_ET = int(os.getenv("DAILY_LOCK_HOUR_ET", "7"))
+_DAILY_LOCK_MINUTE_ET = int(os.getenv("DAILY_LOCK_MINUTE_ET", "5"))
 
 app = Flask(__name__, template_folder="templates")
 
@@ -240,7 +242,7 @@ def _build_card(game, bets, props, when):
     return card
 
 
-def _run_analysis():
+def _run_analysis(lock_date: datetime.date | None = None):
     warnings.filterwarnings("ignore")
     import pandas as pd
 
@@ -252,6 +254,28 @@ def _run_analysis():
         _state["phase_idx"] = 0
 
     try:
+        # Decide whether this run should lock/save today's picks
+        need_preds = False
+        need_props = False
+        try:
+            from data.db import has_predictions_for_date, has_prop_picks_for_date
+            if lock_date is None:
+                today = et_today()
+                need_preds = not has_predictions_for_date(today)
+                need_props = not has_prop_picks_for_date(today)
+                if need_preds or need_props:
+                    lock_date = today
+                    _log(f"[lock] Daily picks missing for {today} - locking this run")
+            else:
+                need_preds = not has_predictions_for_date(lock_date)
+                need_props = not has_prop_picks_for_date(lock_date)
+        except Exception as _le:
+            _log(f"[lock] Daily lock check failed: {_le}")
+            if lock_date is None:
+                lock_date = et_today()
+            need_preds = True
+            need_props = True
+
         today_str    = datetime.date.today().isoformat()
         tomorrow_str = (datetime.date.today() + datetime.timedelta(days=1)).isoformat()
 
@@ -309,13 +333,14 @@ def _run_analysis():
                 _log(f"Model training failed: {e}")
 
         # Retrain enhanced model with backfilled game results
-        try:
-            from models.mlb_model import retrain_with_history
-            retrain_with_history(team_stats)
-            model = load_model()  # reload after retrain
-            _log("[backfill] Enhanced model retrained and reloaded.")
-        except Exception as _rt_e:
-            _log(f"[backfill] Retrain skipped: {_rt_e}")
+        if lock_date:
+            try:
+                from models.mlb_model import retrain_with_history
+                retrain_with_history(team_stats)
+                model = load_model()  # reload after retrain
+                _log("[backfill] Enhanced model retrained and reloaded.")
+            except Exception as _rt_e:
+                _log(f"[backfill] Retrain skipped: {_rt_e}")
 
         _phase(2)
         _log("Fetching injury reports...")
@@ -421,9 +446,22 @@ def _run_analysis():
 
             raw_props = starter_props + hitter_props
             _log(f"Raw props fetched: {len(raw_props)}")
-            all_props = build_player_prop_bets(raw_props,
-                                               injured_players=injured_names,
-                                               odds_lines=prop_odds)
+            all_props = build_player_prop_bets(
+                raw_props,
+                injured_players=injured_names,
+                odds_lines=prop_odds,
+                min_prob=0.60,
+                only_over=True,
+            )
+            if not all_props:
+                _log("No qualifying OVER props at 0.60 - relaxing to 0.55")
+                all_props = build_player_prop_bets(
+                    raw_props,
+                    injured_players=injured_names,
+                    odds_lines=prop_odds,
+                    min_prob=0.55,
+                    only_over=True,
+                )
             _log(f"Prop bets built: {len(all_props)}")
         except Exception as e:
             _log(f"Props error: {e}")
@@ -446,6 +484,13 @@ def _run_analysis():
         _phase(8)
         _log("Saving to database and building cards...")
         from data.db import save_predictions, save_prop_picks, save_analysis_cache
+
+        def _date_str(val) -> str:
+            if isinstance(val, datetime.datetime):
+                return val.date().isoformat()
+            if isinstance(val, datetime.date):
+                return val.isoformat()
+            return str(val) if val is not None else ""
 
         try:
             pred_rows = []
@@ -496,8 +541,21 @@ def _run_analysis():
                     "matchup":      game_str,
                     "sentiment_score": p.get("signal_sentiment"),
                 })
-            save_predictions(pred_rows)
-            save_prop_picks(all_props)
+            if lock_date:
+                lock_str = _date_str(lock_date)
+                if need_preds:
+                    pred_rows_locked = [p for p in pred_rows if _date_str(p.get("game_date")) == lock_str]
+                    save_predictions(pred_rows_locked)
+                else:
+                    _log(f"[lock] Predictions already locked for {lock_str} - skipping DB save")
+
+                if need_props:
+                    props_locked = [p for p in all_props if _date_str(p.get("date")) == lock_str]
+                    save_prop_picks(props_locked, game_date=lock_date)
+                else:
+                    _log(f"[lock] Props already locked for {lock_str} - skipping DB save")
+            else:
+                _log("[lock] Daily picks already locked - skipping DB save")
         except Exception as e:
             _log(f"DB save error: {e}")
 
@@ -1132,7 +1190,7 @@ def api_stream():
 
 
 # ─── APScheduler: auto-run analysis every 30 minutes ────────────────────────
-def _scheduled_analysis():
+def _scheduled_analysis(force: bool = False, lock_today: bool = False):
     """Called by APScheduler. Skips if already running or cache is very fresh."""
     with _lock:
         if _state["status"] == "running":
@@ -1140,7 +1198,7 @@ def _scheduled_analysis():
         last_ts = _state.get("last_updated_ts")
 
     # Skip if ran within the last 28 minutes
-    if last_ts:
+    if not force and last_ts:
         try:
             dt = datetime.datetime.fromisoformat(last_ts)
             now = datetime.datetime.now(datetime.timezone.utc) if dt.tzinfo else datetime.datetime.utcnow()
@@ -1156,17 +1214,28 @@ def _scheduled_analysis():
         _state["phase"]     = _PHASES[0]
         _state["phase_idx"] = 0
     _sse_broadcast("status", {"status": "running", "phase": _PHASES[0]})
-    threading.Thread(target=_run_analysis, daemon=True).start()
+    lock_date = et_today() if lock_today else None
+    threading.Thread(target=_run_analysis, args=(lock_date,), daemon=True).start()
 
 
 def _start_scheduler():
     try:
         from apscheduler.schedulers.background import BackgroundScheduler
         from apscheduler.triggers.interval import IntervalTrigger
+        from apscheduler.triggers.cron import CronTrigger
         sched = BackgroundScheduler(daemon=True)
         # Run every 30 minutes
         sched.add_job(_scheduled_analysis, IntervalTrigger(minutes=30), id="auto_analysis",
                       max_instances=1, coalesce=True)
+        # Daily lock run (ET morning)
+        sched.add_job(
+            lambda: _scheduled_analysis(force=True, lock_today=True),
+            CronTrigger(hour=_DAILY_LOCK_HOUR_ET, minute=_DAILY_LOCK_MINUTE_ET,
+                        timezone="America/New_York"),
+            id="daily_lock",
+            max_instances=1,
+            coalesce=True,
+        )
         sched.start()
         print("[scheduler] APScheduler started — analysis every 30 minutes")
         return sched
@@ -1202,6 +1271,9 @@ def _auto_boot_analysis():
                     pass
             if stale:
                 print("[boot] Cache is stale — triggering fresh analysis...")
+                threading.Thread(target=_run_analysis, daemon=True).start()
+            elif not cached.get("player_props"):
+                print("[boot] Cache missing props - triggering fresh analysis...")
                 threading.Thread(target=_run_analysis, daemon=True).start()
         else:
             print("[boot] No DB cache — triggering fresh analysis...")

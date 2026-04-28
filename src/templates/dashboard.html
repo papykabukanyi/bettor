@@ -2117,6 +2117,11 @@ function stopConsolePoll() {
   // Connect SSE — server sends full state on connect + after every analysis run.
   _connectSSE();
 
+  // Fetch cached state as a fallback if SSE is slow or blocked.
+  fetch('/api/cached-state').then(r=>r.json()).then(d=>{
+    if (d && d.ok) applyCachedData(d);
+  }).catch(()=>{});
+
   // If analysis is already running when we load, show the progress overlay
   fetch('/api/status').then(r=>r.json()).then(d=>{
     if (d.status === 'running') {

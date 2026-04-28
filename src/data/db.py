@@ -813,6 +813,28 @@ def get_todays_prop_picks(sport: str = None, max_age_hours: int = 2) -> list:
         conn.close()
 
 
+def has_prop_picks_for_date(game_date: "datetime.date | str", sport: str = "mlb") -> bool:
+    """Return True if any prop_history rows exist for the given game_date."""
+    conn = get_conn()
+    if conn is None:
+        return False
+    try:
+        cur = conn.cursor()
+        if sport:
+            cur.execute(
+                "SELECT 1 FROM prop_history WHERE game_date = %s AND sport = %s LIMIT 1",
+                (game_date, sport),
+            )
+        else:
+            cur.execute("SELECT 1 FROM prop_history WHERE game_date = %s LIMIT 1", (game_date,))
+        return cur.fetchone() is not None
+    except Exception as e:
+        print(f"[db] has_prop_picks_for_date error: {e}")
+        return False
+    finally:
+        conn.close()
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Player profiles
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1402,6 +1424,22 @@ def save_predictions(predictions: list) -> int:
         conn.rollback()
         print(f"[db] save_predictions error: {e}")
         return 0
+    finally:
+        conn.close()
+
+
+def has_predictions_for_date(game_date: "datetime.date | str") -> bool:
+    """Return True if any predictions already exist for the given game_date."""
+    conn = get_conn()
+    if conn is None:
+        return False
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT 1 FROM predictions WHERE game_date = %s LIMIT 1", (game_date,))
+        return cur.fetchone() is not None
+    except Exception as e:
+        print(f"[db] has_predictions_for_date error: {e}")
+        return False
     finally:
         conn.close()
 

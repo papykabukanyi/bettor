@@ -372,7 +372,9 @@ def build_game_bets(game: dict, pred: dict, odds_row: dict = None) -> list[dict]
 # ─── Player prop predictions ─────────────────────────────────────────────────
 
 def build_player_prop_bets(raw_props: list[dict], injured_players: set = None,
-                            odds_lines: dict = None) -> list[dict]:
+                            odds_lines: dict = None,
+                            min_prob: float = 0.60,
+                            only_over: bool = True) -> list[dict]:
     """
     Convert raw props from mlb_fetcher into full bet dicts.
 
@@ -380,6 +382,8 @@ def build_player_prop_bets(raw_props: list[dict], injured_players: set = None,
     injured_players: set of player names to exclude
     odds_lines: {player_name: {market_key: {line, over_odds, under_odds}}}
     Returns list of bet dicts.
+    min_prob: minimum probability threshold for a prop to qualify.
+    only_over: when True, keep only OVER picks (matches dashboard defaults).
     """
     injured = injured_players or set()
     bets    = []
@@ -490,8 +494,11 @@ def build_player_prop_bets(raw_props: list[dict], injured_players: set = None,
             direction = "OVER" if ov >= un else "UNDER"
             conf      = round(max(ov, un) * 100)
 
-        # Keep only OVER props with strong probability (> 0.60)
-        if direction != "OVER" or ov <= 0.60:
+        # Keep only props meeting the min probability threshold
+        prob = ov if direction == "OVER" else un
+        if only_over and direction != "OVER":
+            continue
+        if prob < float(min_prob or 0):
             continue
 
         edge = ov - 0.5
