@@ -1133,58 +1133,27 @@ function gameCard(c) {
     .filter(p => { const lv = _lineValue(p.line); return !(Number.isFinite(lv) && lv <= 0.5); })
     .length;
 
-  return `<div class="game-card" id="card-${c.game_key.replace(/[@\s]/g,'_')}">
+  return `<div class="game-card" data-game-key="${c.game_key}" id="card-${c.game_key.replace(/[@\s]/g,'_')}">
   <div class="card-header" onclick="toggleCard(this.parentElement)">
     <div class="card-when">${whenB}${slBadge}</div>
     <div class="matchup">
       <div class="team-side">
         <div class="team-name">${c.away_team}</div>
         <div class="team-starter">&#9918; ${c.away_starter||'TBD'}</div>
-      </pbt  = plainEnglishBet(bet, card.home_team, card.away_team);
-  const prob = Math.round((bet.model_prob||0.5)*100);
-  const probColor = prob >= 65 ? 'var(--green)' : prob >= 55 ? 'var(--accent)' : 'var(--yellow)';
-  return `<div class="bet-row">
-    <span class="bet-label" style="font-size:.72rem;color:var(--muted)">${label}</span>
-    <span class="bet-pick" style="color:${pbt.color};font-weight:700">${pbt.emoji} ${pbt.text}</span>
-    <span style="color:${probColor};font-size:.78rem;font-weight:700">${prob}%</span>
-    <span class="bet-odds">${fmtOdds(bet.odds_am)}</span>
-    ${safetyBadge(bet.safety_label||'MODERATE')}
-  </div>`;
-}
-
-function propsSection(c) { return detailPropsSection(c); }
-
-function propRow(p, gameKey) {
-  const ppt  = plainEnglishPropText(p);
-  const prob = Math.round((p.model_prob||0.5)*100);
-  const probColor = prob >= 70 ? 'var(--green)' : prob >= 62 ? 'var(--accent)' : 'var(--yellow)';
-  return `<div class="prop-row">
-    <span style="color:${ppt.color};font-size:.88rem;font-weight:700">${ppt.emoji} ${ppt.text}</span>
-    <span style="color:${probColor};font-size:.78rem;font-weight:700">${prob}%</span>
-    ${safetyBadge(p.safety_label||'MODERATE')
-  if (!hp.length && !ap.length) return '';
-  const renderList = (props, teamName) => {
-    if (!props.length) return '';
-    return `<div class="props-team-header">${teamName}</div>
-    ${props.map(p => {
-      const ppt = plainEnglishPropText(p);
-      const prob = Math.round((p.model_prob||0.5)*100);
-      const probColor = prob >= 70 ? 'var(--green)' : prob >= 62 ? 'var(--accent)' : 'var(--yellow)';
-      return `<div class="prop-row">
-        <span style="color:${ppt.color};font-size:.88rem;font-weight:700">${ppt.emoji} ${ppt.text}</span>
-        <span style="color:${probColor};font-size:.78rem;font-weight:700">${prob}%</span>
-        ${safetyBadge(p.safety_label||'MODERATE')}
-      </div>`;
-    }).join('')}`;
-  };
-  return `<div class="props-section">
-    <div style="font-size:.68rem;color:var(--accent);font-weight:700;padding:4px 0 6px;letter-spacing:.04em;">&#9650; ALL OVER PROPS</div>
-    ${renderList(ap, c.away_team)}
-    ${renderList(hp, c.home_team)}
       </div>
-    ${winHtml}
-    <div class="props-preview">${propsPreview}</div>
-    <div class="quick-bets">${chipsHtml}</div>
+      <div class="vs">vs</div>
+      <div class="team-side away">
+        <div class="team-name">${c.home_team}</div>
+        <div class="team-starter">&#9918; ${c.home_starter||'TBD'}</div>
+      </div>
+    </div>
+    <div>
+      <span class="live-score" style="display:none"></span>
+      <span class="live-status" style="display:none"></span>
+    </div>
+    ${mainPickHtml}
+    ${otherHtml}
+    ${propsHtml}
   </div>
   <button class="card-expand-btn" onclick="toggleCard(this.parentElement)">
     <span>All Bets${propCount?' + '+propCount+' Props':''}</span>
@@ -2118,54 +2087,6 @@ function stopConsolePoll() {
   if (dot) { dot.classList.add('idle'); }
   if (_consoleOpen) refreshConsole(); // final refresh
 }
-
-// ── Live scores (DOM update via card IDs) ─────────────────────────────────
-function normKey(s) {
-  return s.replace(/ @ /g,'@').replace(/ @/g,'@').replace(/@ /g,'@').replace(/\s+/g,'');
-}
-function updateLiveScoreCards() {
-  Object.values(_liveScores).forEach(g => {
-    const nk    = normKey(g.away_team + '@' + g.home_team);
-    const cardId = 'card-' + nk.replace(/@/g,'_');
-    const el    = document.getElementById(cardId);
-    if (!el) return;
-    const isLive  = g.status === 'In Progress';
-    constnormKey(s) {
-  return s.replace(/ @ /g,'@').replace(/ @/g,'@').replace(/@ /g,'@').replace(/\s+/g,'');
-}
-function  isFinal = ['Final','Game Over','Completed Early'].includes(g.status);
-    if (!isLive && !isFinal) return;
-
-    // Update when-badge
-    const badge = el.querySelector('.when-badge');
-    if (badge) {
-      if (isLive) {
-        badge.className = 'when-badge when-LIVE';
-        badge.textContent = `LIVE \u2022 ${g.away_score??''}–${g.home_score??''} ${g.inning_half??''} ${g.inning??''}`.trim();
-      } else {
-        badge.className = 'when-badge when-FINAL';
-        badge.textContent = `FINAL ${g.away_score??''}–${g.home_score??''}`;
-      }
-    }
-
-    // Inject / update live score line under matchup
-    const cardHdr = el.querySelector('.card-header');
-    let scoreEl   = el.querySelector('.live-score-line');
-    if (!scoreEl && cardHdr) {
-      scoreEl = document.createElement('div');
-      scoreEl.className = 'live-score-line';
-      scoreEl.style.cssText = 'font-size:.82rem;font-weight:700;text-align:center;padding:2px 0 4px;color:var(--text)';
-      cardHdr.appendChild(scoreEl);
-    }
-    if (scoreEl) {
-      const awAbbr = g.away_team.split(' ').pop();
-      const htAbbr = g.home_team.split(' ').pop();
-      const liveDot = isLive ? ` <span style="color:var(--red);font-size:.68rem">\u25cf ${g.inning_half??''} ${g.inning??''}</span>` : '';
-      scoreEl.innerHTML = `${awAbbr} <strong>${g.away_score??'–'}</strong>&nbsp;&mdash;&nbsp;<strong>${g.home_score??'–'}</strong> ${htAbbr}${liveDot}`;
-    }
-  });
-}
-
 
 // ── Init ──────────────────────────────────────────────────────────────────────────
 (function init() {

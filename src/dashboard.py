@@ -408,8 +408,8 @@ def _run_analysis():
 
             prop_odds = {}
             try:
-                from data.odds_fetcher import get_player_prop_odds
-                prop_odds = get_player_prop_odds("baseball_mlb") or {}
+                from data.odds_fetcher import get_player_props_odds
+                prop_odds = get_player_props_odds("baseball_mlb") or {}
             except Exception as e:
                 _log(f"Prop odds skipped: {e}")
 
