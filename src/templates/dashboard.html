@@ -895,6 +895,7 @@ function loadCachedState() {
   fetch('/api/cached-state').then(r=>r.json()).then(d=>{
     if (!d.ok && d.status !== 'done') return;
     applyCachedData(d);
+    loadPerformance();
     saveLocalCache(d);
     maybeAutoRefresh(d);
     startAutoRefreshTimer();
@@ -902,6 +903,7 @@ function loadCachedState() {
     const local = loadLocalCache();
     if (local) {
       applyCachedData(local);
+      loadPerformance();
       startAutoRefreshTimer();
     }
   });

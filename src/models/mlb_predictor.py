@@ -456,9 +456,11 @@ def build_player_prop_bets(raw_props: list[dict], injured_players: set = None,
             direction = "OVER" if ov >= un else "UNDER"
             conf      = round(max(ov, un) * 100)
 
-        edge = max(ov, un) - 0.5
-        if max(ov, un) < 0.51:
+        # Keep only OVER props with strong probability (> 0.60)
+        if direction != "OVER" or ov <= 0.60:
             continue
+
+        edge = ov - 0.5
 
         # ── Book probability from real odds (or model-implied) ────────────
         if real_over_odds and direction == "OVER":
@@ -474,7 +476,7 @@ def build_player_prop_bets(raw_props: list[dict], injured_players: set = None,
             book_prob    = 0.476
             dec          = round(1.0 / max(max(ov, un), 0.01), 3)
 
-        safety = _safety_score(max(ov, un), edge, book_prob)
+        safety = _safety_score(ov, edge, book_prob)
 
         bets.append({
             # Identity
@@ -504,12 +506,12 @@ def build_player_prop_bets(raw_props: list[dict], injured_players: set = None,
             "raw_over_prob":     round(raw_ov, 4),   # original model before signal
             "raw_under_prob":    round(raw_un, 4),
             "conf":              conf,
-            "model_prob":        round(max(ov, un), 4),
+            "model_prob":        round(ov, 4),
             "confidence":        conf,
             "edge":              round(edge, 4),
             "safety":            safety,
             "safety_label":      _safety_label(safety),
-            "ev":                round((dec - 1) * max(ov, un) - (1 - max(ov, un)), 4),
+            "ev":                round((dec - 1) * ov - (1 - ov), 4),
             # Signal details (what drove the recommendation)
             "signal_rationale":  signal.get("rationale", ""),
             "signal_hist_prob":  signal.get("hist_prob", round(raw_ov, 4)),
