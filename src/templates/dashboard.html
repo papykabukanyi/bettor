@@ -1422,15 +1422,11 @@ function sortAndRenderProps() {
       <td>${p.name||'—'}</td>
       <td>${p.team||'—'}</td>
       <td>${p.prop_label||p.stat_type||'—'}</td>
-      badge: p.safety_label||'MODERATE',
-    }).replace(/"/g,'&quot;');
-    return `<tr>
       <td>${p.line!=null?p.line:'—'}</td>
       <td class="${dirClass(p.direction)}">${p.direction||'—'}</td>
-      <td>${p.model_prob!=null?(p.model_prob*100).toFixed(1)+'%':'—'}</td>
+      <td>${p.model_prob!=null?Math.round(p.model_prob*100)+'%':'—'}</td>
       <td>${safetyBadge(p.safety_label||'MODERATE')}</td>
       <td style="color:${(p.ev||0)>=0?'var(--green)':'var(--red)'}">${p.ev!=null?p.ev.toFixed(3):'—'}</td>
-      <td style="font-size:11px;color:var(--muted);max-width:220px" title="${(p.signal_rationale||'').replace(/"/g,'&quot;')}">${p.signal_rationale||'—'}</td>
       <td><button class="bet-add" onclick="addToParlay(${addKey})">+</button></td>
     </tr>`;
   }).join('');
