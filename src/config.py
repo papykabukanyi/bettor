@@ -23,6 +23,13 @@ REDDIT_USER_AGENT    = os.getenv("REDDIT_USER_AGENT", "bettor-bot/1.0")
 # Hugging Face (sentiment scoring via Inference API)
 HF_API_KEY = os.getenv("HF_API_KEY", "")
 
+# Discord (sentiment)
+DISCORD_BOT_TOKEN      = os.getenv("DISCORD_BOT_TOKEN", "")
+DISCORD_CHANNELS       = os.getenv("DISCORD_CHANNELS", "")
+DISCORD_LOOKBACK_HOURS = int(os.getenv("DISCORD_LOOKBACK_HOURS", "12"))
+DISCORD_MAX_MESSAGES   = int(os.getenv("DISCORD_MAX_MESSAGES", "300"))
+DISCORD_CACHE_MINUTES  = int(os.getenv("DISCORD_CACHE_MINUTES", "15"))
+
 # ClickSend SMS
 CLICKSEND_USERNAME = os.getenv("CLICKSEND_USERNAME", "")
 CLICKSEND_API_KEY  = os.getenv("CLICKSEND_API_KEY", "")

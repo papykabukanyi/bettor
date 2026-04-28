@@ -18,7 +18,18 @@ import datetime
 import requests
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from config import NEWS_API_KEY, REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET, REDDIT_USER_AGENT, HF_API_KEY
+from config import (
+    NEWS_API_KEY,
+    REDDIT_CLIENT_ID,
+    REDDIT_CLIENT_SECRET,
+    REDDIT_USER_AGENT,
+    HF_API_KEY,
+    DISCORD_BOT_TOKEN,
+    DISCORD_CHANNELS,
+    DISCORD_LOOKBACK_HOURS,
+    DISCORD_MAX_MESSAGES,
+    DISCORD_CACHE_MINUTES,
+)
 
 # ─── Hugging Face Inference API ──────────────────────────────────────────────
 # HF changed to a new router endpoint in 2025; try both bases in order
@@ -36,6 +47,8 @@ _HF_API_BASES = [
 _REDDIT_FAILED   = False
 _HF_FAILED       = False
 _NEWS_FAILED     = False
+_DISCORD_FAILED  = False
+_DISCORD_CACHE   = {"fetched_at": None, "messages": []}
 
 # ─── MLB team → subreddit mapping ────────────────────────────────────────────
 _TEAM_SUBREDDITS = {
@@ -79,6 +92,177 @@ def _team_subreddit(team_name: str) -> str:
         if keyword in lower:
             return sub
     return ""
+
+
+# ─── Discord sentiment ─────────────────────────────────────────────────────
+
+def _parse_discord_channels(raw: str) -> list[dict]:
+    """Parse DISCORD_CHANNELS into a list of {guild_id, channel_id} dicts."""
+    if not raw:
+        return []
+    tokens = re.split(r"[\s,]+", raw.strip())
+    parsed = []
+    for t in tokens:
+        if not t:
+            continue
+        ids = re.findall(r"\d{5,}", t)
+        if len(ids) >= 2:
+            guild_id, channel_id = ids[-2], ids[-1]
+        elif len(ids) == 1:
+            guild_id, channel_id = "", ids[0]
+        else:
+            continue
+        parsed.append({"guild_id": guild_id, "channel_id": channel_id, "raw": t})
+    return parsed
+
+
+def _discord_headers() -> dict:
+    return {"Authorization": f"Bot {DISCORD_BOT_TOKEN}"}
+
+
+def _parse_discord_ts(ts: str) -> "datetime.datetime | None":
+    if not ts:
+        return None
+    try:
+        return datetime.datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def _fetch_discord_messages() -> list[dict]:
+    """Fetch recent Discord messages from configured channels (cached)."""
+    global _DISCORD_FAILED, _DISCORD_CACHE
+    if _DISCORD_FAILED:
+        return []
+    if not DISCORD_BOT_TOKEN or not DISCORD_CHANNELS:
+        return []
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    cached_at = _DISCORD_CACHE.get("fetched_at")
+    if cached_at and isinstance(cached_at, datetime.datetime):
+        age_min = (now - cached_at).total_seconds() / 60
+        if age_min <= float(DISCORD_CACHE_MINUTES):
+            return list(_DISCORD_CACHE.get("messages", []))
+
+    channels = _parse_discord_channels(DISCORD_CHANNELS)
+    if not channels:
+        return []
+
+    cutoff = now - datetime.timedelta(hours=float(DISCORD_LOOKBACK_HOURS))
+    max_messages = max(1, int(DISCORD_MAX_MESSAGES))
+    all_msgs: list[dict] = []
+
+    for ch in channels:
+        channel_id = ch.get("channel_id")
+        if not channel_id:
+            continue
+        url = f"https://discord.com/api/v10/channels/{channel_id}/messages"
+        before = None
+        fetched = 0
+        while fetched < max_messages:
+            params = {"limit": min(100, max_messages - fetched)}
+            if before:
+                params["before"] = before
+            try:
+                resp = requests.get(url, headers=_discord_headers(), params=params, timeout=15)
+                if resp.status_code == 401 or resp.status_code == 403:
+                    print("[sentiment] Discord auth error (check bot token or channel permissions)")
+                    _DISCORD_FAILED = True
+                    break
+                if resp.status_code == 429:
+                    print("[sentiment] Discord rate limited - skipping")
+                    break
+                if resp.status_code != 200:
+                    break
+                batch = resp.json() or []
+            except Exception:
+                break
+
+            if not batch:
+                break
+
+            stop_early = False
+            for msg in batch:
+                ts = _parse_discord_ts(msg.get("timestamp"))
+                if ts and ts < cutoff:
+                    stop_early = True
+                    break
+                content = (msg.get("content") or "").strip()
+                if not content:
+                    continue
+                if msg.get("author", {}).get("bot"):
+                    continue
+                all_msgs.append({
+                    "content": content,
+                    "timestamp": msg.get("timestamp"),
+                    "channel_id": channel_id,
+                })
+                fetched += 1
+                if fetched >= max_messages:
+                    break
+
+            before = batch[-1].get("id")
+            if stop_early or not before:
+                break
+
+    _DISCORD_CACHE = {"fetched_at": now, "messages": list(all_msgs)}
+    return all_msgs
+
+
+def _entity_tokens(entity: str, entity_type: str) -> list[str]:
+    base = (entity or "").lower().strip()
+    if not base:
+        return []
+    tokens = {base}
+    parts = re.findall(r"[a-zA-Z]{3,}", base)
+    tokens.update(parts)
+    if entity_type == "team" and parts:
+        tokens.add(parts[-1])
+    return [t for t in tokens if len(t) >= 3]
+
+
+def _discord_texts_for_entity(entity: str, entity_type: str) -> list[str]:
+    msgs = _fetch_discord_messages()
+    if not msgs:
+        return []
+    tokens = _entity_tokens(entity, entity_type)
+    if not tokens:
+        return []
+    hits: list[str] = []
+    for m in msgs:
+        text = m.get("content", "")
+        lower = text.lower()
+        if any(t in lower for t in tokens):
+            hits.append(text)
+    return hits
+
+
+def get_discord_sentiment(entity: str, entity_type: str = "team") -> dict:
+    """Fetch recent Discord messages, score sentiment, return summary."""
+    if not DISCORD_BOT_TOKEN or not DISCORD_CHANNELS:
+        return {}
+    texts = _discord_texts_for_entity(entity, entity_type)
+    if not texts:
+        return {}
+
+    scores = score_texts(texts)
+    avg_score = round(sum(scores) / len(scores), 4) if scores else 0.0
+
+    all_text = " ".join(texts).lower()
+    words = re.findall(r"\b[a-z]{4,}\b", all_text)
+    from collections import Counter
+    stop = {"that", "this", "they", "with", "have", "from", "will", "game",
+            "baseball", "team", "player", "said", "their", "just", "been",
+            "would", "could", "should", "when", "what", "about", "more"}
+    freq = Counter(w for w in words if w not in stop)
+    keywords = ", ".join(w for w, _ in freq.most_common(8))
+
+    return {
+        "score":    avg_score,
+        "volume":   len(texts),
+        "keywords": keywords,
+        "source":   "discord",
+    }
 
 
 # ─── Hugging Face sentiment scoring ─────────────────────────────────────────
@@ -548,8 +732,9 @@ def get_team_sentiment(team_name: str) -> dict:
     Returns {reddit, news, combined} score dict.
     """
     # Reddit: only runs when real credentials are set
-    reddit_data = get_reddit_sentiment(team_name, entity_type="team")
-    news_data   = get_news_sentiment(team_name, entity_type="team")
+    reddit_data  = get_reddit_sentiment(team_name, entity_type="team")
+    news_data    = get_news_sentiment(team_name, entity_type="team")
+    discord_data = get_discord_sentiment(team_name, entity_type="team")
 
     scores  = []
     weights = []
@@ -559,6 +744,9 @@ def get_team_sentiment(team_name: str) -> dict:
     if news_data.get("score") is not None and news_data.get("volume", 0) > 0:
         scores.append(float(news_data["score"]))
         weights.append(news_data["volume"])
+    if discord_data.get("score") is not None and discord_data.get("volume", 0) > 0:
+        scores.append(float(discord_data["score"]))
+        weights.append(discord_data["volume"])
 
     combined = 0.0
     if scores:
@@ -577,6 +765,11 @@ def get_team_sentiment(team_name: str) -> dict:
                            news_data.get("score", 0.0),
                            news_data.get("volume", 0),
                            news_data.get("keywords", ""))
+        if discord_data:
+            save_sentiment(team_name, "team", "discord",
+                           discord_data.get("score", 0.0),
+                           discord_data.get("volume", 0),
+                           discord_data.get("keywords", ""))
         if scores:
             save_sentiment(team_name, "team", "combined", combined,
                            sum(weights), "")
@@ -594,8 +787,9 @@ def get_team_sentiment(team_name: str) -> dict:
 
 def get_player_sentiment(player_name: str) -> dict:
     """Get combined sentiment for a player from NewsAPI (+ Reddit when configured)."""
-    reddit_data = get_reddit_sentiment(player_name, entity_type="player", post_limit=20)
-    news_data   = get_news_sentiment(player_name, entity_type="player")
+    reddit_data  = get_reddit_sentiment(player_name, entity_type="player", post_limit=20)
+    news_data    = get_news_sentiment(player_name, entity_type="player")
+    discord_data = get_discord_sentiment(player_name, entity_type="player")
 
     scores  = []
     weights = []
@@ -605,6 +799,9 @@ def get_player_sentiment(player_name: str) -> dict:
     if news_data.get("score") is not None and news_data.get("volume", 0) > 0:
         scores.append(float(news_data["score"]))
         weights.append(news_data["volume"])
+    if discord_data.get("score") is not None and discord_data.get("volume", 0) > 0:
+        scores.append(float(discord_data["score"]))
+        weights.append(discord_data["volume"])
 
     combined = 0.0
     if scores:
@@ -623,6 +820,7 @@ def get_player_sentiment(player_name: str) -> dict:
         "player":   player_name,
         "reddit":   reddit_data,
         "news":     news_data,
+        "discord":  discord_data,
         "combined": combined,
     }
 

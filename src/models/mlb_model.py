@@ -186,13 +186,26 @@ def _load_team_sentiment_from_db() -> dict[str, float]:
             return {}
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cur.execute("""
-            SELECT lower(team) AS team,
-                   AVG(sentiment) AS avg_sentiment
-            FROM   news_articles
-            WHERE  fetched_at > NOW() - INTERVAL '30 days'
-            GROUP  BY lower(team)
+            SELECT lower(entity) AS team,
+                   AVG(score) AS avg_sentiment
+            FROM   sentiment_scores
+            WHERE  entity_type = 'team'
+              AND  source = 'combined'
+              AND  computed_at > NOW() - INTERVAL '30 days'
+            GROUP  BY lower(entity)
         """)
-        result = {r["team"]: float(r["avg_sentiment"]) for r in cur.fetchall()}
+        rows = cur.fetchall()
+        if rows:
+            result = {r["team"]: float(r["avg_sentiment"]) for r in rows}
+        else:
+            cur.execute("""
+                SELECT lower(team) AS team,
+                       AVG(sentiment) AS avg_sentiment
+                FROM   news_articles
+                WHERE  fetched_at > NOW() - INTERVAL '30 days'
+                GROUP  BY lower(team)
+            """)
+            result = {r["team"]: float(r["avg_sentiment"]) for r in cur.fetchall()}
         conn.close()
         return result
     except Exception as e:

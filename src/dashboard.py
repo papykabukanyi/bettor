@@ -38,8 +38,8 @@ from config import BANKROLL, MIN_VALUE_EDGE, KELLY_FRACTION, MLB_SEASONS, et_tod
 # Dashboard uses a lower edge threshold to show more picks
 # (bot tracks accuracy; high-edge filter is for real-money staking only)
 _DASH_MIN_EDGE = 0.02
-_DAILY_LOCK_HOUR_ET = int(os.getenv("DAILY_LOCK_HOUR_ET", "7"))
-_DAILY_LOCK_MINUTE_ET = int(os.getenv("DAILY_LOCK_MINUTE_ET", "5"))
+_DAILY_LOCK_HOUR_ET = int(os.getenv("DAILY_LOCK_HOUR_ET", "5"))
+_DAILY_LOCK_MINUTE_ET = int(os.getenv("DAILY_LOCK_MINUTE_ET", "0"))
 
 app = Flask(__name__, template_folder="templates")
 
