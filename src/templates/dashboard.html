@@ -1361,9 +1361,9 @@ function autoGenParlaysFromProps() {
 
 
 function parlayComboCard(c) {
-  const probPct  = (c.combinedProb * 100).toFixed(1);
-  const payout   = (c.combinedDec * 100).toFixed(0);
-  const evRaw    = _legEv(c.combinedProb, c.combinedDec);
+  const probPct  = ((c.prob ?? 0) * 100).toFixed(1);
+  const payout   = ((c.dec ?? 0) * 100).toFixed(0);
+  const evRaw    = _legEv(c.prob ?? 0, c.dec ?? 0);
   const evColor  = evRaw >= 0 ? 'var(--green)' : 'var(--yellow)';
   const legsHtml = c.legs.map(p => {
     const ppt = plainEnglishPropText(p);
@@ -1377,7 +1377,7 @@ function parlayComboCard(c) {
     </div>`;
   }).join('');
   const saveData = JSON.stringify({
-    name: `Auto ${c.n_legs}-Leg Props Parlay`,
+    name: `Auto ${c.n}-Leg Props Parlay`,
     legs: c.legs.map(p => {
       const ppt = plainEnglishPropText(p);
       return {
@@ -1389,17 +1389,17 @@ function parlayComboCard(c) {
         badge:    p.safety_label || 'MODERATE',
       };
     }),
-    combined_odds: c.combinedDec,
+    combined_odds: c.dec ?? 0,
     stake_usd: 10,
   }).replace(/"/g,'&quot;');
   return `<div class="parlay-combo-card">
   <div class="combo-header">
     <div>
-      <div class="combo-title">&#9650; ${c.n_legs}-Leg OVER Parlay</div>
+      <div class="combo-title">&#9650; ${c.n}-Leg OVER Parlay</div>
       <div class="combo-prob">Hit chance: ${probPct}% &middot; <span style="color:${evColor}">EV ${(evRaw*100).toFixed(1)}%</span></div>
     </div>
     <div style="text-align:right">
-      <div class="combo-odds">x${c.combinedDec.toFixed(2)}</div>
+      <div class="combo-odds">x${(c.dec ?? 0).toFixed(2)}</div>
       <div style="font-size:.75rem;color:var(--muted)">$100 &#8594; $${payout}</div>
     </div>
   </div>
