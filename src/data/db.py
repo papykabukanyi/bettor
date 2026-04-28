@@ -363,7 +363,8 @@ CREATE TABLE IF NOT EXISTS sentiment_scores (
     volume       INTEGER,        -- number of posts/articles
     keywords     TEXT,
     computed_at  TIMESTAMPTZ     DEFAULT NOW(),
-    UNIQUE(entity, source, DATE(computed_at))
+    computed_date DATE           NOT NULL DEFAULT CURRENT_DATE,
+    UNIQUE(entity, source, computed_date)
 );
 CREATE INDEX IF NOT EXISTS idx_sentiment_entity ON sentiment_scores(entity, computed_at);
 
@@ -1627,13 +1628,14 @@ def save_sentiment(entity: str, entity_type: str, source: str,
         cur = conn.cursor()
         cur.execute("""
             INSERT INTO sentiment_scores
-                (entity, entity_type, source, score, volume, keywords, computed_at)
-            VALUES (%s, %s, %s, %s, %s, %s, NOW())
-            ON CONFLICT (entity, source, DATE(computed_at)) DO UPDATE SET
+                (entity, entity_type, source, score, volume, keywords, computed_at, computed_date)
+            VALUES (%s, %s, %s, %s, %s, %s, NOW(), CURRENT_DATE)
+            ON CONFLICT (entity, source, computed_date) DO UPDATE SET
                 score       = EXCLUDED.score,
                 volume      = EXCLUDED.volume,
                 keywords    = EXCLUDED.keywords,
-                computed_at = NOW()
+                computed_at = NOW(),
+                computed_date = EXCLUDED.computed_date
         """, (entity, entity_type, source, score, volume, keywords[:500]))
         conn.commit()
     except Exception as e:
