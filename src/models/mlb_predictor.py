@@ -441,6 +441,17 @@ def build_player_prop_bets(raw_props: list[dict], injured_players: set = None,
             except Exception as _se:
                 print(f"[predictor] prop signal error for {name}: {_se}")
 
+        # ── Filter out tiny lines (0.5 or less) ───────────────────────────
+        try:
+            line_val = float(real_line)
+        except Exception:
+            try:
+                line_val = float(p.get("line", 0))
+            except Exception:
+                line_val = None
+        if line_val is not None and line_val <= 0.5:
+            continue
+
         # ── Use signal probability when available, else raw model ─────────
         if signal:
             # Signal is the primary source — it already blends history + sentiment
