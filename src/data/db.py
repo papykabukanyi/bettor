@@ -28,9 +28,11 @@ except ImportError:
 def get_conn():
     """Return a new psycopg2 connection, or None if unavailable."""
     if not PSYCOPG2_OK:
+        print("[db] psycopg2 not available")
         return None
     url = DATABASE_URL or os.getenv("DATABASE_URL", "")
     if not url:
+        print("[db] DATABASE_URL not set")
         return None
     try:
         return psycopg2.connect(url, connect_timeout=10)
@@ -384,8 +386,7 @@ def init_schema():
     """Create all tables. Called once at dashboard startup."""
     conn = get_conn()
     if conn is None:
-        print("[db] schema init skipped — no DB connection")
-        return False
+        raise Exception("No DB connection - DATABASE_URL not set or connection failed")
     try:
         cur = conn.cursor()
         cur.execute(_SCHEMA)
@@ -395,7 +396,7 @@ def init_schema():
     except Exception as e:
         conn.rollback()
         print(f"[db] schema init error: {e}")
-        return False
+        raise
     finally:
         conn.close()
 

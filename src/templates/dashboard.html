@@ -601,10 +601,10 @@ body.console-open main{padding-bottom:236px}
 
 <script>
 // ── Injected data ──────────────────────────────────────────────────────────
-let TODAY_CARDS    = {{ today_cards|safe }};
-let TOMORROW_CARDS = {{ tomorrow_cards|safe }};
-let BEST_PARLAYS   = {{ best_parlays|safe }};
-let ALL_PROPS      = {{ all_props|safe }};
+let TODAY_CARDS    = {{ today_cards|tojson }};
+let TOMORROW_CARDS = {{ tomorrow_cards|tojson }};
+let BEST_PARLAYS   = {{ best_parlays|tojson }};
+let ALL_PROPS      = {{ all_props|tojson }};
 let AUTO_PROP_PARLAY = null;
 let BEST_LEGS      = [];
 let AUTO_MIX_LEGS  = [];
