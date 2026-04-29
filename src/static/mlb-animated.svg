@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" role="img" aria-label="Baseball league logo">
+  <defs>
+    <radialGradient id="bg" cx="30%" cy="20%" r="80%">
+      <stop offset="0%" stop-color="#22c55e"/>
+      <stop offset="55%" stop-color="#0ea5a4"/>
+      <stop offset="100%" stop-color="#0b1220"/>
+    </radialGradient>
+    <linearGradient id="ring" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#f59e0b"/>
+      <stop offset="100%" stop-color="#ef4444"/>
+    </linearGradient>
+  </defs>
+
+  <circle cx="60" cy="60" r="54" fill="#0b1118" stroke="url(#ring)" stroke-width="4"/>
+  <circle cx="60" cy="60" r="48" fill="url(#bg)"/>
+
+  <g>
+    <animateTransform attributeName="transform" type="translate" values="0 0;0 -2;0 0" dur="2.2s" repeatCount="indefinite"/>
+    <g>
+      <circle cx="60" cy="60" r="28" fill="#f8fafc" stroke="#e2e8f0" stroke-width="2"/>
+      <g fill="none" stroke="#ef4444" stroke-width="2" stroke-linecap="round">
+        <path d="M44 50 C50 56,50 64,44 70"/>
+        <path d="M76 50 C70 56,70 64,76 70"/>
+        <animateTransform attributeName="transform" type="rotate" from="0 60 60" to="360 60 60" dur="6s" repeatCount="indefinite"/>
+      </g>
+    </g>
+  </g>
+
+  <g>
+    <circle cx="84" cy="30" r="2" fill="#fbbf24">
+      <animate attributeName="opacity" values="0;1;0" dur="1.6s" repeatCount="indefinite"/>
+    </circle>
+    <circle cx="34" cy="28" r="1.8" fill="#a78bfa">
+      <animate attributeName="opacity" values="0;1;0" dur="2s" begin="0.6s" repeatCount="indefinite"/>
+    </circle>
+  </g>
+</svg>

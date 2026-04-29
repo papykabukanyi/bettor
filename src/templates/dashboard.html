@@ -29,6 +29,7 @@ a{color:inherit;text-decoration:none}
   background:linear-gradient(135deg,#0d1117 0%,#111820 100%)}
 .header-brand{display:flex;align-items:center;gap:10px}
 .header-brand img{width:32px;height:32px}
+.header-brand .mlb-logo{width:36px;height:36px;filter:drop-shadow(0 2px 8px rgba(20,184,166,.5))}
 .header-brand h1{font-size:1.25rem;font-weight:700;letter-spacing:.3px;font-family:'Fraunces',serif}
 .header-brand span{font-size:.7rem;color:var(--muted);background:#1e2a38;
   padding:2px 8px;border-radius:20px;margin-left:6px}
@@ -43,15 +44,17 @@ a{color:inherit;text-decoration:none}
 #last-updated{font-size:.75rem;color:var(--muted)}
 
 /* ── Loading overlay ── */
-#loading-overlay{position:fixed;inset:0;background:rgba(7,10,16,.92);
-  display:flex;flex-direction:column;align-items:center;justify-content:center;
-  z-index:1000;gap:20px;transition:opacity .4s}
+#loading-overlay{position:fixed;right:16px;bottom:16px;max-width:320px;
+  background:rgba(7,10,16,.92);border:1px solid var(--border);border-radius:12px;
+  display:flex;flex-direction:column;align-items:flex-start;justify-content:center;
+  z-index:1000;gap:12px;padding:14px 16px;box-shadow:var(--shadow);pointer-events:none;
+  transition:opacity .4s}
 #loading-overlay.hidden{opacity:0;pointer-events:none}
 .spinner{width:48px;height:48px;border:4px solid var(--border);
   border-top-color:var(--accent);border-radius:50%;animation:spin 1s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
-#load-phase{font-size:.9rem;color:var(--muted);max-width:300px;text-align:center}
-.progress-bar{width:280px;height:4px;background:var(--border);border-radius:4px;overflow:hidden}
+#load-phase{font-size:.82rem;color:var(--muted);max-width:260px;text-align:left}
+.progress-bar{width:240px;height:4px;background:var(--border);border-radius:4px;overflow:hidden}
 .progress-fill{height:100%;background:var(--accent);transition:width .4s;border-radius:4px}
 
 /* ── Tabs ── */
@@ -85,7 +88,8 @@ main{padding:20px;max-width:1400px;margin:0 auto}
   overflow:hidden;transition:border-color .2s,box-shadow .2s,transform .2s;cursor:pointer;position:relative}
 .game-card:hover{border-color:var(--accent);box-shadow:var(--shadow);transform:translateY(-2px)}
 .game-card.expanded .card-body{display:block}
-.game-card.in-progress{border-color:rgba(22,163,74,.6);box-shadow:0 0 0 1px rgba(22,163,74,.35),var(--shadow)}
+.game-card.in-progress{border-color:rgba(22,163,74,.6);
+  box-shadow:0 0 0 1px rgba(22,163,74,.35),var(--shadow);animation:liveGlow 2.2s ease-in-out infinite}
 .game-card.final{opacity:.82}
 
 .card-header{padding:14px 16px 10px;display:flex;flex-direction:column;gap:10px}
@@ -98,6 +102,11 @@ main{padding:20px;max-width:1400px;margin:0 auto}
 .when-LIVE{background:rgba(220,38,38,.15);color:var(--red);animation:pulse 2s infinite}
 .when-FINAL{background:#1e2a38;color:var(--muted)}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+@keyframes liveGlow{0%,100%{box-shadow:0 0 0 1px rgba(22,163,74,.35),var(--shadow)}
+  50%{box-shadow:0 0 0 2px rgba(22,163,74,.7),0 0 22px rgba(22,163,74,.35)}}
+@keyframes eyeBlink{0%,92%,100%{transform:scaleY(1)}94%{transform:scaleY(.12)}}
+@keyframes eyePulse{0%,100%{transform:scale(1)}50%{transform:scale(1.25)}}
+@keyframes legSweep{0%{transform:translateX(-120%)}60%{transform:translateX(120%)}100%{transform:translateX(120%)}}
 .safety-badge{font-size:.7rem;font-weight:700;padding:3px 8px;border-radius:6px}
 .badge-ELITE{background:rgba(22,163,74,.2);color:var(--green)}
 .badge-SAFE{background:rgba(37,99,235,.2);color:var(--accent)}
@@ -166,7 +175,18 @@ main{padding:20px;max-width:1400px;margin:0 auto}
 /* ── Bet rows ── */
 .bet-section{padding:12px 14px}
 .bet-section-title{font-size:.7rem;font-weight:600;color:var(--muted);
-  text-transform:uppercase;letter-spacing:.5px}
+  text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px}
+.bet-row{display:grid;grid-template-columns:110px minmax(0,1fr) auto auto auto;
+  gap:8px;align-items:center;padding:8px 0;border-bottom:1px dashed var(--border)}
+.bet-row:last-child{border-bottom:none}
+.bet-label{font-size:.66rem;color:var(--muted);text-transform:uppercase;letter-spacing:.08em}
+.bet-pick{font-size:.84rem;font-weight:700;line-height:1.2;min-width:0}
+.bet-odds{font-size:.72rem;color:var(--muted);white-space:nowrap}
+.bet-edge{font-size:.7rem;font-weight:700;padding:2px 6px;border-radius:6px;
+  background:rgba(255,255,255,.04);white-space:nowrap}
+.bet-edge.pos{color:var(--green)}
+.bet-edge.neg{color:var(--red)}
+.bet-row .safety-badge{white-space:nowrap}
 .parlay-save-btn:hover{background:rgba(124,58,237,.3)}
 
 /* Parlay builder */
@@ -218,9 +238,35 @@ main{padding:20px;max-width:1400px;margin:0 auto}
 .tp-WIN{background:rgba(22,163,74,.15);color:var(--green)}
 .tp-LOSS{background:rgba(220,38,38,.15);color:var(--red)}
 .tp-meta{font-size:.75rem;color:var(--muted);margin-top:4px}
+.tp-legs{margin-top:10px;border-left:2px solid rgba(148,163,184,.2);padding-left:10px;
+  display:flex;flex-direction:column;gap:6px}
+.tp-leg{position:relative;padding:6px 8px;background:rgba(255,255,255,.03);
+  border:1px solid var(--border);border-radius:8px;font-size:.78rem;overflow:hidden}
+.tp-leg::after{content:'';position:absolute;inset:0;background:linear-gradient(120deg,transparent,rgba(20,184,166,.12),transparent);
+  transform:translateX(-120%);animation:legSweep 3.2s infinite;pointer-events:none}
 .pick-phrase{font-weight:700}
 .pick-phrase.win{color:var(--green)}
 .prop-phrase{color:var(--accent);font-weight:700}
+.prop-row{display:grid;grid-template-columns:140px minmax(0,1fr) auto auto auto;
+  gap:8px;align-items:center;padding:6px 0;border-bottom:1px dashed var(--border);font-size:.78rem}
+.prop-row:last-child{border-bottom:none}
+.prop-player{font-weight:700;display:flex;align-items:center;gap:6px;min-width:0}
+.prop-stat{color:var(--text);min-width:0}
+.prop-dir{font-size:.66rem;font-weight:700;padding:2px 6px;border-radius:999px;border:1px solid var(--border);white-space:nowrap}
+.prop-dir.OVER{border-color:rgba(22,163,74,.5);color:var(--green)}
+.prop-dir.UNDER{border-color:rgba(234,179,8,.5);color:var(--yellow)}
+.prop-conf{font-weight:700;color:var(--accent);white-space:nowrap}
+.prop-rationale{grid-column:1/-1;font-size:.72rem;color:var(--muted);padding:2px 0 4px}
+.prop-live-eye{width:16px;height:8px;border:1px solid rgba(226,232,240,.6);border-radius:999px;
+  position:relative;display:inline-flex;align-items:center;justify-content:center;opacity:0;transform:scale(.95);transition:opacity .2s}
+.prop-live-eye::after{content:'';width:4px;height:4px;border-radius:50%;background:var(--accent);animation:eyePulse 2.6s infinite}
+.game-card.in-progress .prop-live-eye{opacity:1;animation:eyeBlink 3.8s infinite}
+.live-eye{width:16px;height:8px;border:1px solid rgba(226,232,240,.6);border-radius:999px;display:inline-flex;
+  align-items:center;justify-content:center;margin-right:6px;position:relative;vertical-align:middle;animation:eyeBlink 4s infinite}
+.live-eye::after{content:'';width:4px;height:4px;border-radius:50%;background:var(--accent);animation:eyePulse 2.4s infinite}
+.parlay-leg,.combo-leg{position:relative;overflow:hidden}
+.parlay-leg::after,.combo-leg::after{content:'';position:absolute;inset:0;background:linear-gradient(120deg,transparent,rgba(124,58,237,.14),transparent);
+  transform:translateX(-120%);animation:legSweep 3.4s infinite;pointer-events:none}
 
 /* ── Performance ── */
 .perf-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:14px;margin-bottom:24px}
@@ -228,6 +274,7 @@ main{padding:20px;max-width:1400px;margin:0 auto}
   padding:16px;text-align:center}
 .perf-val{font-size:2rem;font-weight:800;margin-bottom:4px}
 .perf-label{font-size:.75rem;color:var(--muted);text-transform:uppercase;letter-spacing:.5px}
+.perf-sub{font-size:.68rem;color:var(--muted);margin-top:2px}
 .perf-win{color:var(--green)}
 .perf-loss{color:var(--red)}
 .perf-pend{color:var(--yellow)}
@@ -295,6 +342,8 @@ main{padding:20px;max-width:1400px;margin:0 auto}
   .tabs{padding:10px 14px 0}
   .tab{padding:7px 12px;font-size:.78rem}
   .props-table{min-width:640px}
+  .bet-row{grid-template-columns:1fr;gap:4px}
+  .prop-row{grid-template-columns:1fr;gap:4px}
 }
 @media(max-width:520px){
   .matchup{flex-direction:column;align-items:stretch}
@@ -372,7 +421,7 @@ body.console-open main{padding-bottom:236px}
 <!-- Header -->
 <header class="header">
   <div class="header-brand">
-    <img src="/static/favicon.svg" alt="Bettor" onerror="this.style.display='none'">
+    <img class="mlb-logo" src="/static/mlb-animated.svg" alt="Baseball league logo" onerror="this.style.display='none'">
     <h1>Bettor <span>MLB</span></h1>
   </div>
   <div class="header-actions">
@@ -470,35 +519,23 @@ body.console-open main{padding-bottom:236px}
   <div class="tab-panel" id="panel-parlays">
     <div class="section-header">
       <span class="section-title">&#127917; Auto Parlays — Built from Props</span>
-      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-        <span class="section-meta" id="parlay-auto-meta"></span>
-        <button class="btn btn-sm" onclick="autoGenParlaysFromProps()">&#8635; Refresh</button>
-      </div>
+      <span class="section-meta" id="parlay-auto-meta"></span>
     </div>
     <div id="parlay-combos-empty" class="no-games hidden">Run analysis to generate props first.</div>
     <div class="parlay-combo-grid" id="parlay-combos-grid"></div>
 
     <div class="section-header" style="margin-top:28px">
       <span class="section-title">&#128204; Saved &amp; Tracked Parlays</span>
-      <div style="display:flex;gap:8px;flex-wrap:wrap">
-        <button class="btn btn-sm" onclick="loadTrackedParlays()">&#8635; Refresh</button>
-        <button class="btn btn-sm" onclick="resolveOutcomes()">&#9989; Resolve</button>
-      </div>
+      <button class="btn btn-sm" onclick="resolveOutcomes()">&#9989; Resolve Outcomes</button>
     </div>
     <div id="tracked-parlays-list"><div class="no-games">No tracked parlays yet.</div></div>
 
     <div class="section-header" style="margin-top:24px">
       <span class="section-title">&#128200; Parlay Performance</span>
-      <button class="btn btn-sm" onclick="loadParlayPerformance()">&#8635; Parlays)</span>
-      <button class="btn btn-sm" onclick="loadBotPerformance()">&#8635; Refresh</button>
     </div>
     <div class="perf-grid" id="bot-perf-stats"></div>
     <div class="section-header">
       <span class="section-title">Game Performance</span>
-      <div style="display:flex;gap:8px;flex-wrap:wrap">
-        <button class="btn btn-sm" onclick="loadPerformance()">&#8635; Refresh</button>
-        <button class="btn btn-sm" onclick="resolveOutcomes()">&#9989; Resolve Outcomes</button>
-      </div>
     </div>
     <div class="perf-grid" id="perf-stats"></div>
     <h3 style="font-size:.9rem;font-weight:600;margin-bottom:12px;margin-top:4px">By Bet Type</h3>
@@ -543,7 +580,6 @@ body.console-open main{padding-bottom:236px}
     <!-- PARLAY PERFORMANCE -->
     <div class="section-header" style="margin-top:28px">
       <span class="section-title">&#128200; Parlay Performance</span>
-      <button class="btn btn-sm" onclick="loadParlayPerformance()">&#8635; Refresh</button>
     </div>
     <div class="perf-grid" id="parlay-perf-stats-perf" style="margin-bottom:16px">
       <div class="no-games" style="grid-column:1/-1">Loading parlay stats…</div>
@@ -555,7 +591,6 @@ body.console-open main{padding-bottom:236px}
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
         <span id="ece-badge" style="font-size:.8rem;padding:4px 12px;border-radius:20px;
           background:var(--card2);color:var(--text);font-weight:600">ECE: —</span>
-        <button class="btn btn-sm" onclick="loadCalibration()">&#8635; Refresh</button>
         <button class="btn btn-sm" onclick="triggerAutoImprove()">&#129302; Auto-Improve</button>
       </div>
     </div>
@@ -570,7 +605,7 @@ body.console-open main{padding-bottom:236px}
         </tr></thead>
         <tbody id="calibration-tbody">
           <tr><td colspan="5" style="text-align:center;padding:20px;color:var(--muted)">
-            Click Refresh to load calibration data.
+            Calibration updates automatically after runs.
           </td></tr>
         </tbody>
       </table>
@@ -800,6 +835,24 @@ function _norm(s) {
   return (s||'').replace(/ @ /g,'@').replace(/ @/g,'@').replace(/@ /g,'@').trim();
 }
 
+function _isLiveStatus(status) {
+  const s = (status || '').toLowerCase();
+  if (!s) return false;
+  if (s.includes('final') || s.includes('game over') || s.includes('completed')) return false;
+  return s.includes('progress') || s.includes('warmup') || s.includes('live');
+}
+
+function _isFinalStatus(status) {
+  const s = (status || '').toLowerCase();
+  return s.includes('final') || s.includes('game over') || s.includes('completed');
+}
+
+function _isLiveGame(gameKey) {
+  if (!gameKey) return false;
+  const s = _liveScores[_norm(gameKey)];
+  return s ? _isLiveStatus(s.status) : false;
+}
+
 function _applyLiveScores(scores) {
   _liveScores = Object.assign(_liveScores, scores);
   // Update all game cards on screen
@@ -810,9 +863,8 @@ function _applyLiveScores(scores) {
     const scoreEl  = card.querySelector('.live-score');
     const statusEl = card.querySelector('.live-status');
     const dotEl    = card.querySelector('.live-dot');
-    const statusTxt = (s.status || '').toLowerCase();
-    const isFinal = statusTxt.includes('final') || statusTxt.includes('game over') || statusTxt.includes('completed');
-    const isLive  = statusTxt.includes('progress') || statusTxt.includes('warmup') || statusTxt.includes('live');
+    const isFinal = _isFinalStatus(s.status);
+    const isLive  = _isLiveStatus(s.status);
     if (scoreEl && s.home_score != null && s.away_score != null) {
       scoreEl.textContent  = `${s.away_score} – ${s.home_score}`;
       scoreEl.style.display = 'inline';
@@ -828,6 +880,7 @@ function _applyLiveScores(scores) {
     card.classList.toggle('final', isFinal);
     if (dotEl) dotEl.style.display = (isLive && !isFinal) ? 'inline-block' : 'none';
   });
+  if (document.getElementById('props-tbody')) sortAndRenderProps();
 }
 
 // ── Silent background panel refresh (called after state_update) ─────────────
@@ -1301,7 +1354,7 @@ function propRow(p, gameKey) {
   const line = p.line != null ? `${p.line}+` : '';
   const phrase = `${p.name||'Player'} will have ${line} ${stat}`.replace(/\s+/g,' ').trim();
   return `<div class="prop-row">
-    <span class="prop-player">${p.name||'—'}</span>
+    <span class="prop-player">${p.name||'—'} <span class="prop-live-eye" title="Live tracking"></span></span>
     <span class="prop-stat prop-phrase">${phrase}</span>
     <span class="${dirCls}">${p.direction} ${p.line}</span>
     <span class="prop-conf">${p.model_prob!=null?(p.model_prob*100).toFixed(1):(p.confidence||'?')}%</span>
@@ -1488,8 +1541,11 @@ function sortAndRenderProps() {
     document.getElementById('props-meta').textContent = '';
     return;
   }
-  document.getElementById('props-meta').textContent = `${sorted.length} props`;
+  const liveCount = sorted.reduce((acc,p)=>acc + (_isLiveGame(p.game_key||p.game||'') ? 1 : 0), 0);
+  document.getElementById('props-meta').textContent = `${sorted.length} props${liveCount?` · ${liveCount} live`:''}`;
   tbody.innerHTML = sorted.map(p => {
+    const isLive = _isLiveGame(p.game_key||p.game||'');
+    const liveEye = isLive ? '<span class="live-eye" title="Live prop"></span>' : '';
     const addKey = JSON.stringify({
       label: `${p.name} ${p.direction} ${p.line} ${p.prop_label}`,
       bet_type: 'player_prop',
@@ -1499,7 +1555,7 @@ function sortAndRenderProps() {
       badge: p.safety_label||'MODERATE',
     }).replace(/"/g,'&quot;');
     return `<tr>
-      <td>${p.name||'—'}</td>
+      <td>${liveEye}${p.name||'—'}</td>
       <td>${p.team||'—'}</td>
       <td>${p.prop_label||p.stat_type||'—'}</td>
       <td>${p.line!=null?p.line:'—'}</td>
@@ -1970,13 +2026,17 @@ function loadPropPerformance() {
     if (!d.ok) return;
     const s = d.stats||{};
     const hitRateColor = s.hit_rate >= 55 ? 'var(--green)' : s.hit_rate >= 45 ? 'var(--yellow)' : 'var(--red)';
+    const totalOver = Array.isArray(ALL_PROPS) ? ALL_PROPS.length : (s.total||0);
+    const liveOver = Array.isArray(ALL_PROPS)
+      ? ALL_PROPS.filter(p => _isLiveGame(p.game_key||p.game||'')).length
+      : 0;
     document.getElementById('prop-perf-stats').innerHTML = `
       <div class="perf-card"><div class="perf-val perf-win">${s.wins||0}</div><div class="perf-label">Prop Wins</div></div>
       <div class="perf-card"><div class="perf-val perf-loss">${s.losses||0}</div><div class="perf-label">Prop Losses</div></div>
       <div class="perf-card"><div class="perf-val perf-pend">${s.pushes||0}</div><div class="perf-label">Pushes</div></div>
       <div class="perf-card"><div class="perf-val perf-pend">${s.pending||0}</div><div class="perf-label">Pending</div></div>
       <div class="perf-card"><div class="perf-val" style="color:${hitRateColor}">${s.hit_rate!=null?s.hit_rate+'%':'—'}</div><div class="perf-label">Prop Hit Rate</div></div>
-      <div class="perf-card"><div class="perf-val" style="font-size:1.2rem">${s.total||0}</div><div class="perf-label">Total Props</div></div>
+      <div class="perf-card"><div class="perf-val" style="font-size:1.2rem">${totalOver||0}</div><div class="perf-label">Total OVER Props</div>${liveOver?`<div class="perf-sub">${liveOver} live</div>`:''}</div>
     `;
     const byType = s.by_prop_type||[];
     const tbody = document.getElementById('prop-type-tbody');
@@ -2196,4 +2256,4 @@ function stopConsolePoll() {
 })();
 </script>
 </body>
-</html>
+</html></html>
