@@ -1404,6 +1404,14 @@ def save_predictions(predictions: list) -> int:
         cur = conn.cursor()
         for p in predictions:
             try:
+                cur.execute(
+                    """SELECT 1 FROM predictions
+                       WHERE game_key = %s AND bet_type = %s AND pick = %s AND game_date = %s
+                       LIMIT 1""",
+                    (p.get("game_key"), p.get("bet_type"), p.get("pick"), p.get("game_date")),
+                )
+                if cur.fetchone():
+                    continue
                 cur.execute("""
                     INSERT INTO predictions
                         (game_key, sport, bet_type, pick, line, odds_am, dec_odds,

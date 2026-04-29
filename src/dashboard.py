@@ -28,6 +28,8 @@ import datetime
 import threading
 import traceback
 import warnings
+import atexit
+import tempfile
 
 from flask import Flask, render_template, jsonify, request, Response
 
@@ -48,9 +50,59 @@ _worker_initialized = False
 _worker_init_lock   = threading.Lock()
 _scheduler          = None
 
+_BG_LOCK_PATH = os.path.join(tempfile.gettempdir(), "bettor_bg.lock")
+_BG_LOCK_FD = None
+_BG_IS_LEADER = False
+
+
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except Exception:
+        return False
+
+
+def _release_bg_lock():
+    global _BG_LOCK_FD
+    try:
+        if _BG_LOCK_FD is not None:
+            os.close(_BG_LOCK_FD)
+            _BG_LOCK_FD = None
+        if os.path.exists(_BG_LOCK_PATH):
+            os.remove(_BG_LOCK_PATH)
+    except Exception:
+        pass
+
+
+def _acquire_bg_lock() -> bool:
+    """Return True if this process becomes the background-job leader."""
+    global _BG_LOCK_FD
+    try:
+        fd = os.open(_BG_LOCK_PATH, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.write(fd, str(os.getpid()).encode("utf-8"))
+        _BG_LOCK_FD = fd
+        atexit.register(_release_bg_lock)
+        return True
+    except FileExistsError:
+        try:
+            with open(_BG_LOCK_PATH, "r", encoding="utf-8") as f:
+                pid = int((f.read() or "0").strip() or "0")
+            if _pid_alive(pid):
+                return False
+        except Exception:
+            return False
+        try:
+            os.remove(_BG_LOCK_PATH)
+        except Exception:
+            return False
+        return _acquire_bg_lock()
+
 
 def _init_worker():
-    global _worker_initialized, _scheduler
+    global _worker_initialized, _scheduler, _BG_IS_LEADER
     with _worker_init_lock:
         if _worker_initialized:
             return
@@ -60,8 +112,14 @@ def _init_worker():
         init_schema()
     except Exception as e:
         print(f"[worker-init] DB init: {e}")
-    _scheduler = _start_scheduler()
-    _auto_boot_analysis()
+    _BG_IS_LEADER = _acquire_bg_lock()
+    if _BG_IS_LEADER:
+        _scheduler = _start_scheduler()
+        _start_live_scores()
+        _auto_boot_analysis()
+    else:
+        _scheduler = None
+        _start_cache_poller()
 
 
 @app.before_request
@@ -276,8 +334,9 @@ def _run_analysis(lock_date: datetime.date | None = None):
             need_preds = True
             need_props = True
 
-        today_str    = datetime.date.today().isoformat()
-        tomorrow_str = (datetime.date.today() + datetime.timedelta(days=1)).isoformat()
+        today_date = et_today()
+        today_str  = today_date.isoformat()
+        tomorrow_str = (today_date + datetime.timedelta(days=1)).isoformat()
 
         # ── Auto-backfill 30 days of data and retrain model ──────────────────
         _log("[backfill] Running 30-day backfill before analysis...")
@@ -1076,6 +1135,67 @@ def api_live_scores():
 # ─── Live-score background watcher ───────────────────────────────────────────
 _live_score_timer = None
 _LIVE_SCORE_INTERVAL = 120  # seconds (2 min)
+_cache_poll_timer = None
+_CACHE_POLL_INTERVAL = int(os.getenv("CACHE_POLL_INTERVAL_SEC", "120"))
+
+
+def _sync_state_from_cache(broadcast: bool = False) -> bool:
+    """Refresh in-memory state from DB cache when available."""
+    try:
+        from data.db import get_analysis_cache
+        cached = get_analysis_cache(max_age_hours=22)
+        if not cached:
+            return False
+        cache_iso = cached.get("cache_updated_at_iso")
+        with _lock:
+            if cache_iso and cache_iso == _state.get("last_updated_ts"):
+                return False
+            if _state.get("status") == "running":
+                return False
+            _state.update({
+                "game_cards_today":    cached.get("game_cards_today", []),
+                "game_cards_tomorrow": cached.get("game_cards_tomorrow", []),
+                "best_parlays":        cached.get("best_parlays", []),
+                "player_props":        cached.get("player_props", []),
+                "elite_parlay":        cached.get("elite_parlay"),
+                "last_updated":        cached.get("last_updated"),
+            })
+            if cache_iso:
+                _state["last_updated_ts"] = cache_iso
+        if broadcast:
+            _sse_broadcast("state_update", {
+                "status":              "done",
+                "last_updated":        cached.get("last_updated"),
+                "game_cards_today":    cached.get("game_cards_today", []),
+                "game_cards_tomorrow": cached.get("game_cards_tomorrow", []),
+                "best_parlays":        cached.get("best_parlays", []),
+                "player_props":        cached.get("player_props", []),
+                "elite_parlay":        cached.get("elite_parlay"),
+            })
+        return True
+    except Exception:
+        return False
+
+
+def _start_cache_poller():
+    """Non-leader workers poll DB cache and broadcast updates to their SSE clients."""
+    global _cache_poll_timer
+    if _cache_poll_timer is not None:
+        return
+
+    def _tick():
+        global _cache_poll_timer
+        _sync_state_from_cache(broadcast=True)
+        _cache_poll_timer = threading.Timer(_CACHE_POLL_INTERVAL, _tick)
+        _cache_poll_timer.daemon = True
+        _cache_poll_timer.start()
+
+    _tick()
+
+
+def _start_live_scores():
+    if _live_score_timer is None:
+        _poll_live_scores()
 
 
 def _poll_live_scores():
@@ -1132,8 +1252,7 @@ def _poll_live_scores():
         _live_score_timer.start()
 
 
-# Start live-score polling immediately
-_poll_live_scores()
+# Live-score polling is started by the leader worker.
 
 
 # ─── SSE stream endpoint ─────────────────────────────────────────────────────
@@ -1292,7 +1411,13 @@ if __name__ == "__main__":
         init_schema()
     except Exception as e:
         print(f"[dashboard] DB init: {e}")
-    _scheduler = _start_scheduler()
-    _auto_boot_analysis()
+    _BG_IS_LEADER = _acquire_bg_lock()
+    if _BG_IS_LEADER:
+        _scheduler = _start_scheduler()
+        _start_live_scores()
+        _auto_boot_analysis()
+    else:
+        _scheduler = None
+        _start_cache_poller()
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
