@@ -513,7 +513,7 @@ def _run_analysis(lock_date: datetime.date | None = None):
                 only_over=True,
             )
             if not all_props:
-                _log("No qualifying OVER props at 0.60 - relaxing to 0.55")
+                _log("No qualifying props at 0.60 - relaxing to 0.55")
                 all_props = build_player_prop_bets(
                     raw_props,
                     injured_players=injured_names,

@@ -477,7 +477,7 @@ body.console-open main{padding-bottom:236px}
   <!-- ALL PROPS -->
   <div class="tab-panel" id="panel-props">
     <div class="section-header">
-      <span class="section-title">&#9650; All OVER Props</span>
+      <span class="section-title">&#9650; All Props</span>
       <span class="section-meta" id="props-meta"></span>
     </div>
     <div class="filter-bar">
@@ -1322,7 +1322,7 @@ function betRow(label, bet, card) {
 }
 
 function propsSection(c) {
-  // Show ALL OVER props — no probability or safety gate
+  // Show ALL props — no probability or safety gate
   function qualifies(p) {
     if ((p.direction || '').toUpperCase() !== 'OVER') return false;
     const lv = _lineValue(p.line);
@@ -1333,7 +1333,7 @@ function propsSection(c) {
   const ap = (c.away_props || []).filter(qualifies).sort((a,b)=>(b.model_prob||0)-(a.model_prob||0));
   if (!hp.length && !ap.length) return '';
   let html = '<div class="props-section">';
-  html += `<div style="font-size:.68rem;color:var(--accent);font-weight:700;padding:4px 0 6px;letter-spacing:.04em;">&#9650; ALL OVER PROPS (sorted by probability)</div>`;
+  html += `<div style="font-size:.68rem;color:var(--accent);font-weight:700;padding:4px 0 6px;letter-spacing:.04em;">&#9650; All Props (sorted by probability)</div>`;
   if (ap.length) {
     html += `<div class="props-team-header">${c.away_team}</div>`;
     html += ap.map(p => propRow(p, c.game_key)).join('');
@@ -1974,7 +1974,7 @@ function loadBotPerformance() {
     const losses  = (gs.losses||0) + (ps.losses||0) + (rs.losses||0);
     const pushes  = (gs.pushes||0) + (ps.pushes||0) + (rs.pushes||0);
     const pending = (gs.pending||0)+ (ps.pending||0)+ (rs.pending||0);
-    const total   = (gs.total||0)  + (ps.total||0)  + (rs.total||0);
+    const totalProps = Array.isArray(ALL_PROPS) ? ALL_PROPS.length : 0;
     const hitRate = (wins + losses) > 0 ? Math.round(wins / (wins + losses) * 100) : null;
     const hrColor = hitRate >= 55 ? 'var(--green)' : hitRate >= 45 ? 'var(--yellow)' : 'var(--red)';
     el.innerHTML = `
@@ -1983,7 +1983,7 @@ function loadBotPerformance() {
       <div class="perf-card"><div class="perf-val perf-pend">${pushes}</div><div class="perf-label">Pushes</div></div>
       <div class="perf-card"><div class="perf-val perf-pend">${pending}</div><div class="perf-label">Pending</div></div>
       <div class="perf-card"><div class="perf-val" style="color:${hrColor}">${hitRate!=null?hitRate+'%':'—'}</div><div class="perf-label">Bot Hit Rate</div></div>
-      <div class="perf-card"><div class="perf-val" style="font-size:1.2rem">${total}</div><div class="perf-label">Total Picks</div></div>
+      <div class="perf-card"><div class="perf-val" style="font-size:1.2rem">${totalProps}</div><div class="perf-label">Total Bets</div><div class="perf-sub">All Props</div></div>
     `;
   }).catch(() => {
     el.innerHTML = '<div class="no-games">Could not load bot performance.</div>';
@@ -1995,13 +1995,14 @@ function loadPerformance() {
   fetch('/api/performance').then(r=>r.json()).then(d=>{
     if (!d.ok) { return; }
     const s = d.stats||{};
+    const totalProps = Array.isArray(ALL_PROPS) ? ALL_PROPS.length : 0;
     document.getElementById('perf-stats').innerHTML = `
       <div class="perf-card"><div class="perf-val perf-win">${s.wins||0}</div><div class="perf-label">Game Wins</div></div>
       <div class="perf-card"><div class="perf-val perf-loss">${s.losses||0}</div><div class="perf-label">Game Losses</div></div>
       <div class="perf-card"><div class="perf-val perf-pend">${s.pushes||0}</div><div class="perf-label">Pushes</div></div>
       <div class="perf-card"><div class="perf-val perf-pend">${s.pending||0}</div><div class="perf-label">Pending</div></div>
       <div class="perf-card"><div class="perf-val perf-rate">${s.hit_rate!=null?s.hit_rate+'%':'—'}</div><div class="perf-label">Hit Rate</div></div>
-      <div class="perf-card"><div class="perf-val" style="font-size:1.2rem">${s.total||0}</div><div class="perf-label">Total Bets</div></div>
+      <div class="perf-card"><div class="perf-val" style="font-size:1.2rem">${totalProps}</div><div class="perf-label">Total Bets</div><div class="perf-sub">All Props</div></div>
     `;
     const byType = s.by_bet_type||[];
     const tbody = document.getElementById('by-type-tbody');
@@ -2026,17 +2027,16 @@ function loadPropPerformance() {
     if (!d.ok) return;
     const s = d.stats||{};
     const hitRateColor = s.hit_rate >= 55 ? 'var(--green)' : s.hit_rate >= 45 ? 'var(--yellow)' : 'var(--red)';
-    const totalOver = Array.isArray(ALL_PROPS) ? ALL_PROPS.length : (s.total||0);
+    const totalProps = Array.isArray(ALL_PROPS) ? ALL_PROPS.length : (s.total||0);
     const liveOver = Array.isArray(ALL_PROPS)
       ? ALL_PROPS.filter(p => _isLiveGame(p.game_key||p.game||'')).length
       : 0;
     document.getElementById('prop-perf-stats').innerHTML = `
       <div class="perf-card"><div class="perf-val perf-win">${s.wins||0}</div><div class="perf-label">Prop Wins</div></div>
-      <div class="perf-card"><div class="perf-val perf-loss">${s.losses||0}</div><div class="perf-label">Prop Losses</div></div>
+      <div class="perf-card"><div class="perf-val" style="font-size:1.2rem">${totalProps}</div><div class="perf-label">All Props</div>${liveOver?`<div class="perf-sub">${liveOver} live</div>`:''}</div>
       <div class="perf-card"><div class="perf-val perf-pend">${s.pushes||0}</div><div class="perf-label">Pushes</div></div>
       <div class="perf-card"><div class="perf-val perf-pend">${s.pending||0}</div><div class="perf-label">Pending</div></div>
       <div class="perf-card"><div class="perf-val" style="color:${hitRateColor}">${s.hit_rate!=null?s.hit_rate+'%':'—'}</div><div class="perf-label">Prop Hit Rate</div></div>
-      <div class="perf-card"><div class="perf-val" style="font-size:1.2rem">${totalOver||0}</div><div class="perf-label">Total OVER Props</div>${liveOver?`<div class="perf-sub">${liveOver} live</div>`:''}</div>
     `;
     const byType = s.by_prop_type||[];
     const tbody = document.getElementById('prop-type-tbody');
