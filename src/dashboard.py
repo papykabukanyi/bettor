@@ -962,7 +962,7 @@ def api_parlay_save():
 def api_parlay_list():
     try:
         from data.db import get_tracked_parlays
-        return jsonify({"ok": True, "parlays": _clean(get_tracked_parlays(include_resolved=True))})
+        return jsonify({"ok": True, "parlays": _clean(get_tracked_parlays(include_resolved=False))})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e), "parlays": []})
 
@@ -1259,14 +1259,17 @@ def _auto_boot_analysis():
                     "last_updated":        cached.get("last_updated"),
                 })
             print(f"[boot] Loaded cache from DB (last updated: {cached.get('last_updated')})")
-            # Check age
+            # Check age (treat cache as fresh for ~5 hours)
             lu = cached.get("last_updated", "")
+            age_min = cached.get("cache_age_min")
             stale = True
-            if lu:
+            if age_min is not None:
+                stale = age_min > 300
+            elif lu:
                 try:
                     dt = datetime.datetime.strptime(lu, "%Y-%m-%d %H:%M")
                     age_min = (datetime.datetime.utcnow() - dt).total_seconds() / 60
-                    stale = age_min > 30
+                    stale = age_min > 300
                 except Exception:
                     pass
             if stale:

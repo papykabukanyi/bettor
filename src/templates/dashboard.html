@@ -78,16 +78,20 @@ main{padding:20px;max-width:1400px;margin:0 auto}
 .section-meta{font-size:.78rem;color:var(--muted)}
 
 /* ── Game cards grid ── */
-.games-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:16px}
+.games-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px}
 
 /* ── Game card ── */
 .game-card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);
-  overflow:hidden;transition:border-color .2s,box-shadow .2s;cursor:pointer}
-.game-card:hover{border-color:var(--accent);box-shadow:var(--shadow)}
+  overflow:hidden;transition:border-color .2s,box-shadow .2s,transform .2s;cursor:pointer;position:relative}
+.game-card:hover{border-color:var(--accent);box-shadow:var(--shadow);transform:translateY(-2px)}
 .game-card.expanded .card-body{display:block}
+.game-card.in-progress{border-color:rgba(22,163,74,.6);box-shadow:0 0 0 1px rgba(22,163,74,.35),var(--shadow)}
+.game-card.final{opacity:.82}
 
 .card-header{padding:14px 16px 10px;display:flex;flex-direction:column;gap:10px}
-.card-when{display:flex;align-items:center;justify-content:space-between}
+.card-when{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.live-dot{width:8px;height:8px;border-radius:50%;background:var(--green);
+  box-shadow:0 0 8px rgba(22,163,74,.8);animation:pulse 1.6s infinite;display:none}
 .when-badge{font-size:.7rem;font-weight:600;padding:3px 8px;border-radius:6px;text-transform:uppercase}
 .when-TODAY{background:rgba(22,163,74,.15);color:var(--green)}
 .when-TOMORROW{background:rgba(37,99,235,.15);color:var(--accent)}
@@ -112,6 +116,17 @@ main{padding:20px;max-width:1400px;margin:0 auto}
 .winner-line{display:flex;align-items:center;justify-content:space-between;gap:10px;
   padding:8px 10px;border:1px solid rgba(20,184,166,.35);
   border-radius:10px;background:linear-gradient(135deg, rgba(20,184,166,.12), rgba(20,184,166,.02))}
+.filter-bar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;
+  background:var(--card2);border:1px solid var(--border);border-radius:10px;padding:10px;margin-bottom:12px}
+.filter-bar input,.filter-bar select{background:var(--bg);border:1px solid var(--border);color:var(--text);
+  padding:7px 10px;border-radius:8px;font-size:.82rem;outline:none}
+.filter-bar input:focus,.filter-bar select:focus{border-color:var(--accent)}
+.props-table-wrap{border:1px solid var(--border);border-radius:12px;overflow:auto;background:var(--card)}
+.props-table{width:100%;min-width:760px;border-collapse:collapse;font-size:.82rem}
+.props-table thead th{position:sticky;top:0;background:var(--card2);z-index:1;color:var(--muted);
+  text-transform:uppercase;font-size:.68rem;letter-spacing:.4px;padding:10px 12px;border-bottom:1px solid var(--border)}
+.props-table td{padding:10px 12px;border-bottom:1px solid var(--border)}
+.props-table tr:hover td{background:rgba(255,255,255,.03)}
 .winner-line.muted{border-color:var(--border);background:var(--card2);color:var(--muted)}
 .winner-left{display:flex;align-items:center;gap:8px;min-width:0}
 .winner-tag{font-size:.62rem;letter-spacing:.4px;text-transform:uppercase;
@@ -197,7 +212,9 @@ main{padding:20px;max-width:1400px;margin:0 auto}
 .tracked-parlay-header{display:flex;align-items:center;justify-content:space-between}
 .tp-name{font-weight:600;font-size:.88rem}
 .tp-outcome{font-size:.72rem;padding:2px 6px;border-radius:4px;font-weight:600}
-.tp-PENDING{background:rgba(202,138,4,.15);color:var(--yellow)}
+.tp-PENDING{background:rgba(202,138,4,.15);color:var(--yellow);position:relative;padding-right:16px}
+.tp-PENDING::after{content:'';position:absolute;right:6px;top:50%;transform:translateY(-50%);
+  width:6px;height:6px;border-radius:50%;background:var(--yellow);animation:pulse 1.6s infinite}
 .tp-WIN{background:rgba(22,163,74,.15);color:var(--green)}
 .tp-LOSS{background:rgba(220,38,38,.15);color:var(--red)}
 .tp-meta{font-size:.75rem;color:var(--muted);margin-top:4px}
@@ -277,6 +294,13 @@ main{padding:20px;max-width:1400px;margin:0 auto}
   .games-grid{grid-template-columns:1fr}
   .tabs{padding:10px 14px 0}
   .tab{padding:7px 12px;font-size:.78rem}
+  .props-table{min-width:640px}
+}
+@media(max-width:520px){
+  .matchup{flex-direction:column;align-items:stretch}
+  .vs{display:none}
+  .team-side{display:flex;align-items:center;justify-content:space-between}
+  .team-side.away{text-align:left}
 }
 
 /* ── Console panel ── */
@@ -372,9 +396,6 @@ body.console-open main{padding-bottom:236px}
   </div>
   <div class="tab" data-tab="parlays" onclick="switchTab('parlays')">
     &#127917; Parlays
-  </div>
-  <div class="tab" data-tab="performance" onclick="switchTab('performance')">
-    &#128202; Performance
   </div>
 </div>
 
@@ -755,6 +776,8 @@ function loadLocalCache() {
     const raw = localStorage.getItem(LOCAL_CACHE_KEY);
     if (!raw) return null;
     const obj = JSON.parse(raw);
+    const maxAgeMs = 5 * 60 * 60 * 1000;
+    if (obj && obj.saved_at && Date.now() - obj.saved_at > maxAgeMs) return null;
     return obj && obj.data ? obj.data : null;
   } catch (e) { return null; }
 }
@@ -786,6 +809,10 @@ function _applyLiveScores(scores) {
     if (!s) return;
     const scoreEl  = card.querySelector('.live-score');
     const statusEl = card.querySelector('.live-status');
+    const dotEl    = card.querySelector('.live-dot');
+    const statusTxt = (s.status || '').toLowerCase();
+    const isFinal = statusTxt.includes('final') || statusTxt.includes('game over') || statusTxt.includes('completed');
+    const isLive  = statusTxt.includes('progress') || statusTxt.includes('warmup') || statusTxt.includes('live');
     if (scoreEl && s.home_score != null && s.away_score != null) {
       scoreEl.textContent  = `${s.away_score} – ${s.home_score}`;
       scoreEl.style.display = 'inline';
@@ -795,8 +822,11 @@ function _applyLiveScores(scores) {
       statusEl.textContent  = `${s.status}${inn}`;
       statusEl.style.display = 'inline';
       statusEl.className    = 'live-status ' +
-        (s.status === 'Final' || s.status === 'Game Over' ? 'final' : 'in-progress');
+        (isFinal ? 'final' : 'in-progress');
     }
+    card.classList.toggle('in-progress', isLive && !isFinal);
+    card.classList.toggle('final', isFinal);
+    if (dotEl) dotEl.style.display = (isLive && !isFinal) ? 'inline-block' : 'none';
   });
 }
 
@@ -837,7 +867,6 @@ function switchTab(name) {
   document.querySelectorAll('.tab-panel').forEach(p=>p.classList.remove('active'));
   document.querySelector(`[data-tab="${name}"]`).classList.add('active');
   document.getElementById(`panel-${name}`).classList.add('active');
-  if (name === 'performance') { loadBotPerformance(); loadPerformance(); loadCalibration(); }
   if (name === 'parlays')     { autoGenParlaysFromProps(); loadTrackedParlays(); loadParlayPerformance(); }
 }
 
@@ -1158,7 +1187,10 @@ function gameCard(c) {
 
   return `<div class="game-card" data-game-key="${c.game_key}" id="card-${c.game_key.replace(/[@\s]/g,'_')}">
   <div class="card-header" onclick="toggleCard(this.parentElement)">
-    <div class="card-when">${whenB}${slBadge}</div>
+    <div class="card-when">
+      <div>${whenB}${slBadge}</div>
+      <span class="live-dot" title="Live"></span>
+    </div>
     <div class="matchup">
       <div class="team-side">
         <div class="team-name">${c.away_team}</div>
@@ -1308,6 +1340,30 @@ function filterProps() {
 }
 
 // ── Auto Parlay Combos ────────────────────────────────────────────────────────────────────
+function _mixPropsByType(props) {
+  const buckets = {};
+  props.forEach(p => {
+    const key = p.stat_type || 'other';
+    if (!buckets[key]) buckets[key] = [];
+    buckets[key].push(p);
+  });
+  Object.values(buckets).forEach(list => list.sort((a,b)=>_legProb(b)-_legProb(a)));
+  const keys = Object.keys(buckets).sort((a,b)=>_legProb(buckets[b][0])-_legProb(buckets[a][0]));
+  const mixed = [];
+  let added = true;
+  while (added) {
+    added = false;
+    for (const k of keys) {
+      const list = buckets[k];
+      if (list && list.length) {
+        mixed.push(list.shift());
+        added = true;
+      }
+    }
+  }
+  return mixed;
+}
+
 function autoGenParlaysFromProps() {
   const qualified = (ALL_PROPS || []).filter(p => {
     if ((p.direction||'').toUpperCase() !== 'OVER') return false;
@@ -1315,6 +1371,7 @@ function autoGenParlaysFromProps() {
     if (Number.isFinite(lv) && lv <= 0.5) return false;
     return _legProb(p) >= 0.61;
   }).sort((a,b) => _legProb(b) - _legProb(a));
+  const mixedQualified = _mixPropsByType(qualified);
 
   const grid  = document.getElementById('parlay-combos-grid');
   const empty = document.getElementById('parlay-combos-empty');
@@ -1335,8 +1392,8 @@ function autoGenParlaysFromProps() {
     const legs = [];
     const usedGames   = new Set();
     const usedPlayers = new Set();
-    for (let i = 0; i < qualified.length && legs.length < n; i++) {
-      const p = qualified[i];
+    for (let i = 0; i < mixedQualified.length && legs.length < n; i++) {
+      const p = mixedQualified[i];
       const gk = p.game_key || p.game || '';
       if (usedGames.has(gk) && usedGames.size >= 2) continue;
       if (usedPlayers.has(p.name)) continue;
@@ -1947,7 +2004,7 @@ function resolveOutcomes() {
 
 function loadHistory() {
   const outcome = document.getElementById('pred-filter-outcome').value;
-  let url = '/api/predictions?days=30';
+  let url = '/api/predictions?days=1';
   if (outcome) url += `&outcome=${outcome}`;
   fetch(url).then(r=>r.json()).then(d=>{
     const el = document.getElementById('pred-history-list');
@@ -2130,6 +2187,11 @@ function stopConsolePoll() {
       showOverlay(d.phase || 'Running…', 5);
       startPolling();
     }
+  }).catch(()=>{});
+})();
+</script>
+</body>
+</html>    }
   }).catch(()=>{});
 })();
 </script>
