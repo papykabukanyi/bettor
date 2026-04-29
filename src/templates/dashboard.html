@@ -441,7 +441,7 @@ body.console-open main{padding-bottom:236px}
     &#128197; Tomorrow <span class="tab-badge" id="badge-tomorrow">0</span>
   </div>
   <div class="tab" data-tab="props" onclick="switchTab('props')">
-    &#128200; All props
+    &#128200; Over Bets
   </div>
   <div class="tab" data-tab="parlays" onclick="switchTab('parlays')">
     &#127917; Parlays
@@ -474,10 +474,10 @@ body.console-open main{padding-bottom:236px}
     <div class="no-games hidden" id="tomorrow-empty">No games tomorrow or analysis not yet run.</div>
   </div>
 
-  <!-- ALL PROPS -->
+  <!-- OVER BETS OF THE DAY -->
   <div class="tab-panel" id="panel-props">
     <div class="section-header">
-      <span class="section-title">&#9650; All props</span>
+      <span class="section-title">&#9650; Over Bets of the Day</span>
       <span class="section-meta" id="props-meta"></span>
     </div>
     <div class="filter-bar">
@@ -533,7 +533,7 @@ body.console-open main{padding-bottom:236px}
     <!-- PROP PERFORMANCE -->
     <div class="section-header" style="margin-top:28px">
       <span class="section-title">&#127919; Prop Bet Performance</span>
-      <span style="font-size:.78rem;color:var(--muted)">All props lock on the first AM run; game props tracked separately</span>
+      <span style="font-size:.78rem;color:var(--muted)">Over Bets of the Day lock on the first AM run; game props tracked separately</span>
     </div>
     <div class="perf-grid" id="prop-perf-stats" style="margin-bottom:16px"></div>
     <h3 style="font-size:.9rem;font-weight:600;margin-bottom:10px">Hit Rate by Prop Type</h3>
@@ -1308,7 +1308,7 @@ function propsSection(c) {
   const ap = (c.away_props || []).filter(qualifies).sort((a,b)=>(b.model_prob||0)-(a.model_prob||0));
   if (!hp.length && !ap.length) return '';
   let html = '<div class="props-section">';
-  html += `<div style="font-size:.68rem;color:var(--accent);font-weight:700;padding:4px 0 6px;letter-spacing:.04em;">&#9650; All props (sorted by probability)</div>`;
+  html += `<div style="font-size:.68rem;color:var(--accent);font-weight:700;padding:4px 0 6px;letter-spacing:.04em;">&#9650; Over Bets of the Day (sorted by probability)</div>`;
   if (ap.length) {
     html += `<div class="props-team-header">${c.away_team}</div>`;
     html += ap.map(p => propRow(p, c.game_key)).join('');
@@ -1517,7 +1517,7 @@ function sortAndRenderProps() {
     return;
   }
   const liveCount = sorted.reduce((acc,p)=>acc + (_isLiveGame(p.game_key||p.game||'') ? 1 : 0), 0);
-  document.getElementById('props-meta').textContent = `${sorted.length} props${liveCount?` · ${liveCount} live`:''}`;
+  document.getElementById('props-meta').textContent = `${sorted.length} over bets${liveCount?` · ${liveCount} live`:''}`;
   tbody.innerHTML = sorted.map(p => {
     const isLive = _isLiveGame(p.game_key||p.game||'');
     const liveEye = isLive ? '<span class="live-eye" title="Live prop"></span>' : '';
@@ -1958,7 +1958,7 @@ function loadBotPerformance() {
       <div class="perf-card"><div class="perf-val perf-pend">${pushes}</div><div class="perf-label">Pushes</div></div>
       <div class="perf-card"><div class="perf-val perf-pend">${pending}</div><div class="perf-label">Pending</div></div>
       <div class="perf-card"><div class="perf-val" style="color:${hrColor}">${hitRate!=null?hitRate+'%':'—'}</div><div class="perf-label">Bot Hit Rate</div></div>
-      <div class="perf-card"><div class="perf-val" style="font-size:1.2rem">${totalProps}</div><div class="perf-label">Total Bets</div><div class="perf-sub">All props</div></div>
+      <div class="perf-card"><div class="perf-val" style="font-size:1.2rem">${totalProps}</div><div class="perf-label">Total Over Bets</div><div class="perf-sub">Bets of the Day</div></div>
     `;
   }).catch(() => {
     el.innerHTML = '<div class="no-games">Could not load bot performance.</div>';
@@ -1979,7 +1979,7 @@ function loadPerformance() {
       <div class="perf-card"><div class="perf-val perf-pend">${s.pushes||0}</div><div class="perf-label">Pushes</div></div>
       <div class="perf-card"><div class="perf-val perf-pend">${s.pending||0}</div><div class="perf-label">Pending</div></div>
       <div class="perf-card"><div class="perf-val perf-rate">${s.hit_rate!=null?s.hit_rate+'%':'—'}</div><div class="perf-label">Hit Rate</div></div>
-      <div class="perf-card"><div class="perf-val" style="font-size:1.2rem">${totalProps}</div><div class="perf-label">Total Bets</div><div class="perf-sub">All props</div></div>
+      <div class="perf-card"><div class="perf-val" style="font-size:1.2rem">${totalProps}</div><div class="perf-label">Total Over Bets</div><div class="perf-sub">Bets of the Day</div></div>
     `;
   });
 }
@@ -1995,7 +1995,7 @@ function loadPropPerformance() {
       : 0;
     document.getElementById('prop-perf-stats').innerHTML = `
       <div class="perf-card"><div class="perf-val perf-win">${s.wins||0}</div><div class="perf-label">Prop Wins</div></div>
-      <div class="perf-card"><div class="perf-val" style="font-size:1.2rem">${totalProps}</div><div class="perf-label">Total Bets</div><div class="perf-sub">All props</div>${liveOver?`<div class="perf-sub">${liveOver} live</div>`:''}</div>
+      <div class="perf-card"><div class="perf-val" style="font-size:1.2rem">${totalProps}</div><div class="perf-label">Total Over Bets</div><div class="perf-sub">Bets of the Day</div>${liveOver?`<div class="perf-sub">${liveOver} live</div>`:''}</div>
       <div class="perf-card"><div class="perf-val perf-pend">${s.pushes||0}</div><div class="perf-label">Pushes</div></div>
       <div class="perf-card"><div class="perf-val perf-pend">${s.pending||0}</div><div class="perf-label">Pending</div></div>
       <div class="perf-card"><div class="perf-val" style="color:${hitRateColor}">${s.hit_rate!=null?s.hit_rate+'%':'—'}</div><div class="perf-label">Prop Hit Rate</div></div>

@@ -30,6 +30,7 @@ import traceback
 import warnings
 import atexit
 import tempfile
+import re
 
 from flask import Flask, render_template, jsonify, request, Response
 
@@ -219,6 +220,39 @@ def _norm_gk(s: str) -> str:
 def _team_words(full_name: str) -> list:
     """Return meaningful words from a team name (skip short/common words)."""
     return [w for w in full_name.lower().split() if len(w) > 3]
+
+
+def _line_value(val) -> float | None:
+    if val is None:
+        return None
+    if isinstance(val, (int, float)):
+        return float(val)
+    try:
+        s = str(val).strip()
+    except Exception:
+        return None
+    if not s:
+        return None
+    try:
+        return float(s)
+    except Exception:
+        pass
+    m = re.search(r"-?\d+(?:\.\d+)?", s)
+    if not m:
+        return None
+    try:
+        return float(m.group(0))
+    except Exception:
+        return None
+
+
+def _is_public_prop(p: dict) -> bool:
+    if (p.get("direction") or "").upper() != "OVER":
+        return False
+    lv = _line_value(p.get("line"))
+    if lv is not None and lv <= 0.5:
+        return False
+    return True
 
 
 def _build_card(game, bets, props, when):
@@ -522,6 +556,10 @@ def _run_analysis(lock_date: datetime.date | None = None):
                     only_over=True,
                 )
             _log(f"Prop bets built: {len(all_props)}")
+            raw_props_count = len(all_props)
+            all_props = [p for p in all_props if _is_public_prop(p)]
+            if len(all_props) != raw_props_count:
+                _log(f"Public props tracked: {len(all_props)}/{raw_props_count}")
         except Exception as e:
             _log(f"Props error: {e}")
 

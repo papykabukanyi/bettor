@@ -785,13 +785,15 @@ def get_todays_prop_picks(sport: str = None, max_age_hours: int = 2) -> list:
         return []
     try:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        base = """
-            SELECT sport, player_name, team, game_date, prop_type,
-                   line, over_prob, under_prob, recommendation, stats_json, detected_at
-            FROM   prop_history
-            WHERE  game_date  = CURRENT_DATE
-              AND  detected_at > NOW() - (INTERVAL '1 hour' * %s)
-        """
+         base = """
+             SELECT sport, player_name, team, game_date, prop_type,
+                 line, over_prob, under_prob, recommendation, stats_json, detected_at
+             FROM   prop_history
+             WHERE  game_date  = CURRENT_DATE
+            AND  detected_at > NOW() - (INTERVAL '1 hour' * %s)
+            AND  recommendation = 'OVER'
+            AND  (line IS NULL OR line > 0.5)
+         """
         if sport:
             cur.execute(base + " AND sport = %s ORDER BY detected_at DESC",
                         (max_age_hours, sport))
@@ -822,11 +824,26 @@ def has_prop_picks_for_date(game_date: "datetime.date | str", sport: str = "mlb"
         cur = conn.cursor()
         if sport:
             cur.execute(
-                "SELECT 1 FROM prop_history WHERE game_date = %s AND sport = %s LIMIT 1",
+                """
+                SELECT 1 FROM prop_history
+                WHERE game_date = %s AND sport = %s
+                  AND recommendation = 'OVER'
+                  AND (line IS NULL OR line > 0.5)
+                LIMIT 1
+                """,
                 (game_date, sport),
             )
         else:
-            cur.execute("SELECT 1 FROM prop_history WHERE game_date = %s LIMIT 1", (game_date,))
+            cur.execute(
+                """
+                SELECT 1 FROM prop_history
+                WHERE game_date = %s
+                  AND recommendation = 'OVER'
+                  AND (line IS NULL OR line > 0.5)
+                LIMIT 1
+                """,
+                (game_date,),
+            )
         return cur.fetchone() is not None
     except Exception as e:
         print(f"[db] has_prop_picks_for_date error: {e}")
@@ -1585,35 +1602,41 @@ def get_prop_performance_stats() -> dict:
                                WHEN outcome='LOSS' THEN 0.0 END)*100, 1) AS hit_rate
             FROM prop_history
             WHERE game_date >= CURRENT_DATE - INTERVAL '90 days'
+              AND recommendation = 'OVER'
+              AND (line IS NULL OR line > 0.5)
         """)
         row = cur.fetchone()
         stats = dict(row) if row else {}
         # By prop type
-        cur.execute("""
-            SELECT prop_type,
-                   recommendation,
-                   COUNT(*) FILTER (WHERE outcome='WIN')  AS wins,
-                   COUNT(*) FILTER (WHERE outcome='LOSS') AS losses,
-                   COUNT(*) AS total,
-                   ROUND(AVG(CASE WHEN outcome='WIN' THEN 1.0
-                                  WHEN outcome='LOSS' THEN 0.0 END)*100, 1) AS hit_rate
-            FROM prop_history
-            WHERE game_date >= CURRENT_DATE - INTERVAL '90 days'
-              AND outcome IN ('WIN','LOSS')
-            GROUP BY prop_type, recommendation
-            ORDER BY total DESC
-        """)
+                cur.execute("""
+                        SELECT prop_type,
+                                     recommendation,
+                                     COUNT(*) FILTER (WHERE outcome='WIN')  AS wins,
+                                     COUNT(*) FILTER (WHERE outcome='LOSS') AS losses,
+                                     COUNT(*) AS total,
+                                     ROUND(AVG(CASE WHEN outcome='WIN' THEN 1.0
+                                                                    WHEN outcome='LOSS' THEN 0.0 END)*100, 1) AS hit_rate
+                        FROM prop_history
+                        WHERE game_date >= CURRENT_DATE - INTERVAL '90 days'
+                            AND outcome IN ('WIN','LOSS')
+                            AND recommendation = 'OVER'
+                            AND (line IS NULL OR line > 0.5)
+                        GROUP BY prop_type, recommendation
+                        ORDER BY total DESC
+                """)
         stats["by_prop_type"] = [dict(r) for r in cur.fetchall()]
         # Last 30 days trend
-        cur.execute("""
-            SELECT game_date::text AS date,
-                   COUNT(*) FILTER (WHERE outcome='WIN')  AS wins,
-                   COUNT(*) FILTER (WHERE outcome='LOSS') AS losses
-            FROM prop_history
-            WHERE game_date >= CURRENT_DATE - INTERVAL '30 days'
-              AND outcome IN ('WIN','LOSS')
-            GROUP BY game_date ORDER BY game_date
-        """)
+                cur.execute("""
+                        SELECT game_date::text AS date,
+                                     COUNT(*) FILTER (WHERE outcome='WIN')  AS wins,
+                                     COUNT(*) FILTER (WHERE outcome='LOSS') AS losses
+                        FROM prop_history
+                        WHERE game_date >= CURRENT_DATE - INTERVAL '30 days'
+                            AND outcome IN ('WIN','LOSS')
+                            AND recommendation = 'OVER'
+                            AND (line IS NULL OR line > 0.5)
+                        GROUP BY game_date ORDER BY game_date
+                """)
         stats["daily_trend"] = [dict(r) for r in cur.fetchall()]
         return stats
     except Exception as e:
@@ -1630,15 +1653,17 @@ def get_pending_props(days_back: int = 3) -> list:
         return []
     try:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cur.execute("""
-            SELECT id, player_name, team, game_date::text, prop_type, line,
-                   over_prob, under_prob, recommendation, stats_json
-            FROM prop_history
-            WHERE outcome = 'PENDING'
-              AND game_date >= CURRENT_DATE - (%s * INTERVAL '1 day')
-              AND game_date < CURRENT_DATE
-            ORDER BY game_date DESC
-        """, (days_back,))
+                cur.execute("""
+                        SELECT id, player_name, team, game_date::text, prop_type, line,
+                                     over_prob, under_prob, recommendation, stats_json
+                        FROM prop_history
+                        WHERE outcome = 'PENDING'
+                            AND game_date >= CURRENT_DATE - (%s * INTERVAL '1 day')
+                            AND game_date < CURRENT_DATE
+                            AND recommendation = 'OVER'
+                            AND (line IS NULL OR line > 0.5)
+                        ORDER BY game_date DESC
+                """, (days_back,))
         return [dict(r) for r in cur.fetchall()]
     except Exception as e:
         print(f"[db] get_pending_props error: {e}")
