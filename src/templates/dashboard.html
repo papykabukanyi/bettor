@@ -441,7 +441,7 @@ body.console-open main{padding-bottom:236px}
     &#128197; Tomorrow <span class="tab-badge" id="badge-tomorrow">0</span>
   </div>
   <div class="tab" data-tab="props" onclick="switchTab('props')">
-    &#128200; All Props
+    &#128200; All props
   </div>
   <div class="tab" data-tab="parlays" onclick="switchTab('parlays')">
     &#127917; Parlays
@@ -477,7 +477,7 @@ body.console-open main{padding-bottom:236px}
   <!-- ALL PROPS -->
   <div class="tab-panel" id="panel-props">
     <div class="section-header">
-      <span class="section-title">&#9650; All Props</span>
+      <span class="section-title">&#9650; All props</span>
       <span class="section-meta" id="props-meta"></span>
     </div>
     <div class="filter-bar">
@@ -530,41 +530,10 @@ body.console-open main{padding-bottom:236px}
     </div>
     <div id="tracked-parlays-list"><div class="no-games">No tracked parlays yet.</div></div>
 
-    <div class="section-header" style="margin-top:24px">
-      <span class="section-title">&#128200; Parlay Performance</span>
-    </div>
-    <div class="perf-grid" id="bot-perf-stats"></div>
-    <div class="section-header">
-      <span class="section-title">Game Performance</span>
-    </div>
-    <div class="perf-grid" id="perf-stats"></div>
-    <h3 style="font-size:.9rem;font-weight:600;margin-bottom:12px;margin-top:4px">By Bet Type</h3>
-    <div style="overflow-x:auto;border:1px solid var(--border);border-radius:var(--radius)">
-      <table class="by-type-table" id="by-type-table">
-        <thead><tr>
-          <th>Bet Type</th><th>W</th><th>L</th><th>Push</th><th>Pending</th><th>Hit Rate</th>
-        </tr></thead>
-        <tbody id="by-type-tbody"></tbody>
-      </table>
-    </div>
-    <div class="pred-history">
-      <div class="section-header" style="margin-top:24px">
-        <span class="section-title">Recent Predictions</span>
-        <select id="pred-filter-outcome" onchange="loadHistory()" style="background:var(--card);
-          border:1px solid var(--border);color:var(--text);padding:5px 8px;border-radius:6px;font-size:.78rem">
-          <option value="">All outcomes</option>
-          <option value="WIN">WIN</option>
-          <option value="LOSS">LOSS</option>
-          <option value="PENDING">PENDING</option>
-        </select>
-      </div>
-      <div id="pred-history-list"><div class="no-games">Loading…</div></div>
-    </div>
-
     <!-- PROP PERFORMANCE -->
     <div class="section-header" style="margin-top:28px">
       <span class="section-title">&#127919; Prop Bet Performance</span>
-      <span style="font-size:.78rem;color:var(--muted)">Auto-updated after each game</span>
+      <span style="font-size:.78rem;color:var(--muted)">All props lock on the first AM run; game props tracked separately</span>
     </div>
     <div class="perf-grid" id="prop-perf-stats" style="margin-bottom:16px"></div>
     <h3 style="font-size:.9rem;font-weight:600;margin-bottom:10px">Hit Rate by Prop Type</h3>
@@ -575,14 +544,6 @@ body.console-open main{padding-bottom:236px}
         </tr></thead>
         <tbody id="prop-type-tbody"></tbody>
       </table>
-    </div>
-
-    <!-- PARLAY PERFORMANCE -->
-    <div class="section-header" style="margin-top:28px">
-      <span class="section-title">&#128200; Parlay Performance</span>
-    </div>
-    <div class="perf-grid" id="parlay-perf-stats-perf" style="margin-bottom:16px">
-      <div class="no-games" style="grid-column:1/-1">Loading parlay stats…</div>
     </div>
 
     <!-- MODEL CALIBRATION -->
@@ -693,9 +654,11 @@ function _connectSSE() {
       const d = JSON.parse(e.data);
       if (d.status === 'running') {
         showOverlay(d.phase || 'Working…', 5);
+        startPolling();
         return;
       }
       hideOverlay();
+      stopPolling();
       if (d.game_cards_today  !== undefined) applyCachedData(d);
       if (d.live_scores       !== undefined) _applyLiveScores(d.live_scores);
       saveLocalCache(d);
@@ -716,8 +679,15 @@ function _connectSSE() {
   _sse.addEventListener('status', e => {
     try {
       const d = JSON.parse(e.data);
-      if (d.status === 'running') showOverlay(d.phase || 'Running…', 5);
-      if (d.status === 'error')   { hideOverlay(); toast('Analysis error — check logs', 'error'); }
+      if (d.status === 'running') {
+        showOverlay(d.phase || 'Running…', 5);
+        startPolling();
+      }
+      if (d.status === 'error')   {
+        hideOverlay();
+        stopPolling();
+        toast('Analysis error — check logs', 'error');
+      }
     } catch(err) {}
   });
 
@@ -885,12 +855,16 @@ function _applyLiveScores(scores) {
 
 // ── Silent background panel refresh (called after state_update) ─────────────
 let _silentPerfTimer = null;
+function _isParlaysActive() {
+  const panel = document.getElementById('panel-parlays');
+  return !!(panel && panel.classList.contains('active'));
+}
 function _silentRefreshPanels() {
   // Stagger to avoid hammering the server
   clearTimeout(_silentPerfTimer);
   _silentPerfTimer = setTimeout(() => {
-    _fetchAndRenderPerf();
-    _fetchAndRenderParlayPerf();
+    if (!_isParlaysActive()) return;
+    loadPropPerformance();
     loadTrackedParlays();
     autoGenParlaysFromProps();
   }, 1500);
@@ -898,20 +872,21 @@ function _silentRefreshPanels() {
 
 // ── Periodic silent refresh every 5 minutes (covers SSE gaps) ───────────────
 setInterval(() => {
-  _fetchAndRenderPerf();
-  _fetchAndRenderParlayPerf();
+  if (!_isParlaysActive()) return;
+  loadPropPerformance();
   loadTrackedParlays();
+  autoGenParlaysFromProps();
 }, 5 * 60 * 1000);
 
 // ── Performance render wrappers (called by SSE performance_update) ──────────
 function _renderBotPerf(_stats) {
   // Stats from SSE; just re-fetch to keep rendering in sync with existing code
-  loadBotPerformance();
+  loadPropPerformance();
 }
 function _renderParlayPerf(_stats) {
   loadParlayPerformance();
 }
-function _fetchAndRenderPerf()     { loadBotPerformance(); loadPerformance(); }
+function _fetchAndRenderPerf()     { loadPropPerformance(); }
 function _fetchAndRenderParlayPerf() { loadParlayPerformance(); }
 
 // ── Tab switching ─────────────────────────────────────────────────────────
@@ -920,7 +895,7 @@ function switchTab(name) {
   document.querySelectorAll('.tab-panel').forEach(p=>p.classList.remove('active'));
   document.querySelector(`[data-tab="${name}"]`).classList.add('active');
   document.getElementById(`panel-${name}`).classList.add('active');
-  if (name === 'parlays')     { autoGenParlaysFromProps(); loadTrackedParlays(); loadParlayPerformance(); }
+  if (name === 'parlays')     { autoGenParlaysFromProps(); loadTrackedParlays(); loadPropPerformance(); }
 }
 
 // ── Elite Parlay ──────────────────────────────────────────────────────────
@@ -1107,7 +1082,7 @@ function renderAll() {
   renderGames('today-grid', TODAY_CARDS, 'today-empty', 'today-meta', 'badge-today');
   renderGames('tomorrow-grid', TOMORROW_CARDS, 'tomorrow-empty', 'tomorrow-meta', 'badge-tomorrow');
   renderPropsTable(ALL_PROPS);
-  autoGenParlaysFromProps();
+  if (_isParlaysActive()) autoGenParlaysFromProps();
 }
 
 // ── Game cards ────────────────────────────────────────────────────────────
@@ -1322,7 +1297,7 @@ function betRow(label, bet, card) {
 }
 
 function propsSection(c) {
-  // Show ALL props — no probability or safety gate
+  // Show all props — no probability or safety gate
   function qualifies(p) {
     if ((p.direction || '').toUpperCase() !== 'OVER') return false;
     const lv = _lineValue(p.line);
@@ -1333,7 +1308,7 @@ function propsSection(c) {
   const ap = (c.away_props || []).filter(qualifies).sort((a,b)=>(b.model_prob||0)-(a.model_prob||0));
   if (!hp.length && !ap.length) return '';
   let html = '<div class="props-section">';
-  html += `<div style="font-size:.68rem;color:var(--accent);font-weight:700;padding:4px 0 6px;letter-spacing:.04em;">&#9650; All Props (sorted by probability)</div>`;
+  html += `<div style="font-size:.68rem;color:var(--accent);font-weight:700;padding:4px 0 6px;letter-spacing:.04em;">&#9650; All props (sorted by probability)</div>`;
   if (ap.length) {
     html += `<div class="props-team-header">${c.away_team}</div>`;
     html += ap.map(p => propRow(p, c.game_key)).join('');
@@ -1983,7 +1958,7 @@ function loadBotPerformance() {
       <div class="perf-card"><div class="perf-val perf-pend">${pushes}</div><div class="perf-label">Pushes</div></div>
       <div class="perf-card"><div class="perf-val perf-pend">${pending}</div><div class="perf-label">Pending</div></div>
       <div class="perf-card"><div class="perf-val" style="color:${hrColor}">${hitRate!=null?hitRate+'%':'—'}</div><div class="perf-label">Bot Hit Rate</div></div>
-      <div class="perf-card"><div class="perf-val" style="font-size:1.2rem">${totalProps}</div><div class="perf-label">Total Bets</div><div class="perf-sub">All Props</div></div>
+      <div class="perf-card"><div class="perf-val" style="font-size:1.2rem">${totalProps}</div><div class="perf-label">Total Bets</div><div class="perf-sub">All props</div></div>
     `;
   }).catch(() => {
     el.innerHTML = '<div class="no-games">Could not load bot performance.</div>';
@@ -1991,35 +1966,22 @@ function loadBotPerformance() {
 }
 
 function loadPerformance() {
-  loadBotPerformance();
+  loadPropPerformance();
+  const perfEl = document.getElementById('perf-stats');
+  if (!perfEl) return;
   fetch('/api/performance').then(r=>r.json()).then(d=>{
     if (!d.ok) { return; }
     const s = d.stats||{};
     const totalProps = Array.isArray(ALL_PROPS) ? ALL_PROPS.length : 0;
-    document.getElementById('perf-stats').innerHTML = `
+    perfEl.innerHTML = `
       <div class="perf-card"><div class="perf-val perf-win">${s.wins||0}</div><div class="perf-label">Game Wins</div></div>
       <div class="perf-card"><div class="perf-val perf-loss">${s.losses||0}</div><div class="perf-label">Game Losses</div></div>
       <div class="perf-card"><div class="perf-val perf-pend">${s.pushes||0}</div><div class="perf-label">Pushes</div></div>
       <div class="perf-card"><div class="perf-val perf-pend">${s.pending||0}</div><div class="perf-label">Pending</div></div>
       <div class="perf-card"><div class="perf-val perf-rate">${s.hit_rate!=null?s.hit_rate+'%':'—'}</div><div class="perf-label">Hit Rate</div></div>
-      <div class="perf-card"><div class="perf-val" style="font-size:1.2rem">${totalProps}</div><div class="perf-label">Total Bets</div><div class="perf-sub">All Props</div></div>
+      <div class="perf-card"><div class="perf-val" style="font-size:1.2rem">${totalProps}</div><div class="perf-label">Total Bets</div><div class="perf-sub">All props</div></div>
     `;
-    const byType = s.by_bet_type||[];
-    const tbody = document.getElementById('by-type-tbody');
-    tbody.innerHTML = byType.map(v=>`
-      <tr>
-        <td>${(v.bet_type||'').replace(/_/g,' ')}</td>
-        <td style="color:var(--green)">${v.wins||0}</td>
-        <td style="color:var(--red)">${v.losses||0}</td>
-        <td>${v.pushes||0}</td>
-        <td style="color:var(--yellow)">${v.pending||0}</td>
-        <td style="color:var(--accent)">${v.wins&&(v.wins+v.losses)?Math.round(v.wins/(v.wins+v.losses)*100)+'%':'—'}</td>
-      </tr>`
-    ).join('') || '<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:16px">No data yet.</td></tr>';
   });
-  loadHistory();
-  loadPropPerformance();
-  loadParlayPerformance();
 }
 
 function loadPropPerformance() {
@@ -2033,7 +1995,7 @@ function loadPropPerformance() {
       : 0;
     document.getElementById('prop-perf-stats').innerHTML = `
       <div class="perf-card"><div class="perf-val perf-win">${s.wins||0}</div><div class="perf-label">Prop Wins</div></div>
-      <div class="perf-card"><div class="perf-val" style="font-size:1.2rem">${totalProps}</div><div class="perf-label">All Props</div>${liveOver?`<div class="perf-sub">${liveOver} live</div>`:''}</div>
+      <div class="perf-card"><div class="perf-val" style="font-size:1.2rem">${totalProps}</div><div class="perf-label">Total Bets</div><div class="perf-sub">All props</div>${liveOver?`<div class="perf-sub">${liveOver} live</div>`:''}</div>
       <div class="perf-card"><div class="perf-val perf-pend">${s.pushes||0}</div><div class="perf-label">Pushes</div></div>
       <div class="perf-card"><div class="perf-val perf-pend">${s.pending||0}</div><div class="perf-label">Pending</div></div>
       <div class="perf-card"><div class="perf-val" style="color:${hitRateColor}">${s.hit_rate!=null?s.hit_rate+'%':'—'}</div><div class="perf-label">Prop Hit Rate</div></div>
@@ -2063,6 +2025,8 @@ function resolveOutcomes() {
 }
 
 function loadHistory() {
+  const listEl = document.getElementById('pred-history-list');
+  if (!listEl) return;
   const outcome = document.getElementById('pred-filter-outcome').value;
   let url = '/api/predictions?days=1';
   if (outcome) url += `&outcome=${outcome}`;
