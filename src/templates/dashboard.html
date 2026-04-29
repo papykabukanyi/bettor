@@ -99,6 +99,7 @@ main{padding:20px;max-width:1400px;margin:0 auto}
 .when-badge{font-size:.7rem;font-weight:600;padding:3px 8px;border-radius:6px;text-transform:uppercase}
 .when-TODAY{background:rgba(22,163,74,.15);color:var(--green)}
 .when-TOMORROW{background:rgba(37,99,235,.15);color:var(--accent)}
+.when-UPCOMING{background:rgba(37,99,235,.15);color:var(--accent)}
 .when-LIVE{background:rgba(220,38,38,.15);color:var(--red);animation:pulse 2s infinite}
 .when-FINAL{background:#1e2a38;color:var(--muted)}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
@@ -806,15 +807,31 @@ function _norm(s) {
 }
 
 function _isLiveStatus(status) {
-  const s = (status || '').toLowerCase();
-  if (!s) return false;
-  if (s.includes('final') || s.includes('game over') || s.includes('completed')) return false;
-  return s.includes('progress') || s.includes('warmup') || s.includes('live');
+  return _statusPhase(status) === 'live';
 }
 
 function _isFinalStatus(status) {
+  return _statusPhase(status) === 'final';
+}
+
+function _statusPhase(status) {
   const s = (status || '').toLowerCase();
-  return s.includes('final') || s.includes('game over') || s.includes('completed');
+  if (!s) return 'upcoming';
+  if (s.includes('final') || s.includes('game over') || s.includes('completed')) return 'final';
+  if (s.includes('in progress') || s.includes('progress') || s.includes('live') || s.includes('warmup')) return 'live';
+  return 'upcoming';
+}
+
+function _fmtGameTime(hhmm) {
+  if (!hhmm) return '';
+  const parts = String(hhmm).split(':');
+  if (parts.length < 2) return String(hhmm);
+  let h = parseInt(parts[0], 10);
+  const m = parts[1];
+  if (Number.isNaN(h)) return String(hhmm);
+  const ampm = h >= 12 ? 'PM' : 'AM';
+  h = h % 12; if (h === 0) h = 12;
+  return `${h}:${m} ${ampm} ET`;
 }
 
 function _isLiveGame(gameKey) {
@@ -1057,8 +1074,22 @@ function triggerBackfill(days) {
 function safetyBadge(label) {
   return `<span class="safety-badge badge-${label}">${label}</span>`;
 }
-function whenBadge(label, when) {
-  return `<span class="when-badge when-${label}">${when}</span>`;
+function whenBadge(label, when, baseLabel) {
+  const base = baseLabel || label;
+  return `<span class="when-badge when-${label}" data-when-base="${base}">${when}</span>`;
+}
+function _badgeInfoForCard(c) {
+  const phase = _statusPhase(c.status || '');
+  if (phase === 'live')  return { label: 'LIVE',  text: 'LIVE' };
+  if (phase === 'final') return { label: 'FINAL', text: 'FINAL' };
+  return { label: 'UPCOMING', text: 'UPCOMING' };
+}
+function _setWhenBadge(el, label, text, baseWhen) {
+  if (!el) return;
+  const base = (baseWhen || el.dataset.whenBase || label || '').toUpperCase();
+  el.dataset.whenBase = base;
+  el.className = `when-badge when-${label}`;
+  el.textContent = text;
 }
 function dirClass(dir) { return dir === 'OVER' ? 'dir-OVER' : 'dir-UNDER'; }
 
@@ -1164,7 +1195,20 @@ function plainEnglishPropText(p) {
 
 function gameCard(c) {
   const slBadge = safetyBadge(c.overall_safety_label || 'MODERATE');
-  const whenB   = whenBadge(c.when_label||'TODAY', c.when||'TODAY');
+  const baseWhen = (c.when_label || c.when || 'TODAY').toUpperCase();
+  const badgeInfo = _badgeInfoForCard(c);
+  const whenB   = whenBadge(badgeInfo.label, badgeInfo.text, baseWhen);
+  const phase = _statusPhase(c.status || '');
+  const timeText = _fmtGameTime(c.game_time);
+  const initialStatusText = phase === 'final'
+    ? 'FINAL'
+    : phase === 'live'
+      ? 'LIVE'
+      : (timeText ? `Starts ${timeText}` : 'UPCOMING');
+  const initialStatusClass = phase === 'final' ? 'final' : phase === 'live' ? 'in-progress' : '';
+  const scoreText = (c.away_score != null && c.home_score != null)
+    ? `${c.away_score} – ${c.home_score}`
+    : '';
 
   // Main WIN pick — big coloured headline
   let mainPickHtml = '';
@@ -1213,7 +1257,8 @@ function gameCard(c) {
     .filter(p => { const lv = _lineValue(p.line); return !(Number.isFinite(lv) && lv <= 0.5); })
     .length;
 
-  return `<div class="game-card" data-game-key="${c.game_key}" id="card-${c.game_key.replace(/[@\s]/g,'_')}">
+  return `<div class="game-card" data-game-key="${c.game_key}" data-game-date="${c.game_date||''}"
+    data-game-time="${c.game_time||''}" data-when-base="${baseWhen}" id="card-${c.game_key.replace(/[@\s]/g,'_')}">
   <div class="card-header" onclick="toggleCard(this.parentElement)">
     <div class="card-when">
       <div>${whenB}${slBadge}</div>
@@ -1231,8 +1276,8 @@ function gameCard(c) {
       </div>
     </div>
     <div>
-      <span class="live-score" style="display:none"></span>
-      <span class="live-status" style="display:none"></span>
+      <span class="live-score" style="${scoreText ? '' : 'display:none'}">${scoreText}</span>
+      <span class="live-status ${initialStatusClass}" style="${initialStatusText ? '' : 'display:none'}">${initialStatusText}</span>
     </div>
     ${mainPickHtml}
     ${otherHtml}
@@ -2213,6 +2258,14 @@ function stopConsolePoll() {
     }
   }).catch(()=>{});
 })();
+</script>
+</body>
+</html>    }
+  }).catch(()=>{});
+})();
+</script>
+</body>
+</html></html>})();
 </script>
 </body>
 </html>    }

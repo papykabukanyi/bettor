@@ -268,6 +268,7 @@ def _build_card(game, bets, props, when):
 
     card = {
         "game_key":     gk,
+        "game_date":    game.get("date") or game.get("game_date"),
         "when":         when,
         "when_label":   when,
         "home_team":    ht,
