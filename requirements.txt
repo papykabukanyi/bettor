@@ -36,3 +36,4 @@ APScheduler
 
 # Reddit API (sentiment)
 praw
+

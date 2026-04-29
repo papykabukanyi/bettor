@@ -15,6 +15,7 @@ import sys
 import re
 import json
 import datetime
+import unicodedata
 import requests
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -84,6 +85,51 @@ _TEAM_SUBREDDITS = {
     "diamondbacks": "azdiamondbacks",
 }
 
+# Common MLB team abbreviations used in chat
+_TEAM_ABBR = {
+    "yankees": "NYY",
+    "red sox": "BOS",
+    "blue jays": "TOR",
+    "rays": "TBR",
+    "orioles": "BAL",
+    "white sox": "CHW",
+    "guardians": "CLE",
+    "tigers": "DET",
+    "royals": "KCR",
+    "twins": "MIN",
+    "astros": "HOU",
+    "athletics": "OAK",
+    "mariners": "SEA",
+    "angels": "LAA",
+    "rangers": "TEX",
+    "braves": "ATL",
+    "phillies": "PHI",
+    "mets": "NYM",
+    "marlins": "MIA",
+    "nationals": "WSN",
+    "cubs": "CHC",
+    "cardinals": "STL",
+    "brewers": "MIL",
+    "reds": "CIN",
+    "pirates": "PIT",
+    "dodgers": "LAD",
+    "giants": "SFG",
+    "padres": "SDP",
+    "rockies": "COL",
+    "diamondbacks": "ARI",
+}
+
+_DISCORD_SLANG = {
+    "raking": "hitting excellently",
+    "dealing": "pitching excellently",
+    "got lit up": "pitched terribly",
+    "cooked": "performing poorly",
+    "dog water": "terrible",
+    "w player": "great player",
+    "l take": "bad opinion",
+    "no cap": "honestly",
+}
+
 
 def _team_subreddit(team_name: str) -> str:
     """Return the team-specific subreddit name."""
@@ -92,6 +138,22 @@ def _team_subreddit(team_name: str) -> str:
         if keyword in lower:
             return sub
     return ""
+
+
+def _normalize_text(text: str) -> str:
+    """Lowercase + strip accents/punct for robust token matching."""
+    raw = unicodedata.normalize("NFKD", str(text))
+    ascii_txt = raw.encode("ascii", "ignore").decode("ascii")
+    ascii_txt = ascii_txt.lower()
+    ascii_txt = re.sub(r"[^a-z0-9]+", " ", ascii_txt)
+    return f" {ascii_txt.strip()} "
+
+
+def _normalize_discord_slang(text: str) -> str:
+    t = (text or "").lower()
+    for slang, meaning in _DISCORD_SLANG.items():
+        t = t.replace(slang, meaning)
+    return t
 
 
 # ─── Discord sentiment ─────────────────────────────────────────────────────
@@ -210,15 +272,34 @@ def _fetch_discord_messages() -> list[dict]:
 
 
 def _entity_tokens(entity: str, entity_type: str) -> list[str]:
-    base = (entity or "").lower().strip()
+    base = (entity or "").strip()
     if not base:
         return []
-    tokens = {base}
-    parts = re.findall(r"[a-zA-Z]{3,}", base)
+    norm = _normalize_text(base).strip()
+    tokens = set()
+    if norm:
+        tokens.add(norm)
+        tokens.add(norm.replace(" ", ""))
+    parts = [p for p in norm.split() if p]
     tokens.update(parts)
+
     if entity_type == "team" and parts:
-        tokens.add(parts[-1])
-    return [t for t in tokens if len(t) >= 3]
+        last = parts[-1]
+        tokens.add(last)
+        abbr = _TEAM_ABBR.get(last)
+        if abbr:
+            tokens.add(abbr.lower())
+
+    if entity_type == "player" and parts:
+        suffixes = {"jr", "sr", "ii", "iii", "iv", "v"}
+        last = parts[-1]
+        if last in suffixes and len(parts) >= 2:
+            last = parts[-2]
+        tokens.add(last)
+        tokens.add(parts[0])
+
+    # Keep short tokens, but only match them with word boundaries later.
+    return sorted(tokens, key=len, reverse=True)
 
 
 def _discord_texts_for_entity(entity: str, entity_type: str) -> list[str]:
@@ -229,11 +310,32 @@ def _discord_texts_for_entity(entity: str, entity_type: str) -> list[str]:
     if not tokens:
         return []
     hits: list[str] = []
+    seen = set()
     for m in msgs:
         text = m.get("content", "")
-        lower = text.lower()
-        if any(t in lower for t in tokens):
+        if not text:
+            continue
+        norm_text = _normalize_text(text)
+        norm_nospace = norm_text.replace(" ", "")
+        matched = False
+        for t in tokens:
+            if not t:
+                continue
+            if " " in t:
+                if f" {t} " in norm_text:
+                    matched = True
+                    break
+            elif len(t) <= 3:
+                if f" {t} " in norm_text:
+                    matched = True
+                    break
+            else:
+                if t in norm_text or t in norm_nospace:
+                    matched = True
+                    break
+        if matched and text not in seen:
             hits.append(text)
+            seen.add(text)
     return hits
 
 
@@ -245,10 +347,14 @@ def get_discord_sentiment(entity: str, entity_type: str = "team") -> dict:
     if not texts:
         return {}
 
-    scores = score_texts(texts)
+    norm_texts = [_normalize_discord_slang(t) for t in texts if t.strip()]
+    if not norm_texts:
+        return {}
+
+    scores = score_texts(norm_texts)
     avg_score = round(sum(scores) / len(scores), 4) if scores else 0.0
 
-    all_text = " ".join(texts).lower()
+    all_text = " ".join(norm_texts).lower()
     words = re.findall(r"\b[a-z]{4,}\b", all_text)
     from collections import Counter
     stop = {"that", "this", "they", "with", "have", "from", "will", "game",
@@ -780,6 +886,7 @@ def get_team_sentiment(team_name: str) -> dict:
         "team":     team_name,
         "reddit":   reddit_data,
         "news":     news_data,
+        "discord":  discord_data,
         "combined": combined,
         "volume":   sum(weights),
     }
@@ -810,6 +917,21 @@ def get_player_sentiment(player_name: str) -> dict:
 
     try:
         from data.db import save_sentiment
+        if reddit_data:
+            save_sentiment(player_name, "player", "reddit",
+                           reddit_data.get("score", 0.0),
+                           reddit_data.get("volume", 0),
+                           reddit_data.get("keywords", ""))
+        if news_data:
+            save_sentiment(player_name, "player", "news",
+                           news_data.get("score", 0.0),
+                           news_data.get("volume", 0),
+                           news_data.get("keywords", ""))
+        if discord_data:
+            save_sentiment(player_name, "player", "discord",
+                           discord_data.get("score", 0.0),
+                           discord_data.get("volume", 0),
+                           discord_data.get("keywords", ""))
         if scores:
             save_sentiment(player_name, "player", "combined", combined,
                            sum(weights), "")
@@ -852,14 +974,18 @@ def get_game_sentiments(home_team: str, away_team: str) -> dict:
             "combined":      home_sent["combined"],
             "reddit_score":  home_sent["reddit"].get("score", 0),
             "news_score":    home_sent["news"].get("score", 0),
+            "discord_score": home_sent.get("discord", {}).get("score", 0),
             "news_keywords": home_sent["news"].get("keywords", ""),
+            "discord_keywords": home_sent.get("discord", {}).get("keywords", ""),
             "volume":        home_sent["volume"],
         },
         "away": {
             "combined":      away_sent["combined"],
             "reddit_score":  away_sent["reddit"].get("score", 0),
             "news_score":    away_sent["news"].get("score", 0),
+            "discord_score": away_sent.get("discord", {}).get("score", 0),
             "news_keywords": away_sent["news"].get("keywords", ""),
+            "discord_keywords": away_sent.get("discord", {}).get("keywords", ""),
             "volume":        away_sent["volume"],
         },
     }
