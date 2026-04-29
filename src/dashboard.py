@@ -581,7 +581,7 @@ def _run_analysis(lock_date: datetime.date | None = None):
                 "best_parlays":        best_parlays,
                 "player_props":        all_props_flat,
                 "last_updated":        last_updated,
-            })
+            }, cache_date=et_today())
         except Exception as e:
             _log(f"Cache save error: {e}")
 

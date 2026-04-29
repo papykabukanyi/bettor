@@ -1237,6 +1237,13 @@ def save_match_events(events: list):
 # Analysis cache  (stores full game-card + parlay results per day)
 # ──────────────────────────────────────────────────────────────────────────────
 
+def _cache_date_default() -> datetime.date:
+    try:
+        from config import et_today
+        return et_today()
+    except Exception:
+        return datetime.date.today()
+
 def save_analysis_cache(data: dict, cache_date=None):
     """
     Save the full analysis result (game cards, parlays, picks) for today.
@@ -1245,7 +1252,7 @@ def save_analysis_cache(data: dict, cache_date=None):
     """
     if not data:
         return
-    cdate = cache_date or datetime.date.today()
+    cdate = cache_date or _cache_date_default()
     conn = get_conn()
     if conn is None:
         return
@@ -1273,7 +1280,7 @@ def get_analysis_cache(max_age_hours: int = 22, cache_date=None) -> "dict | None
     Returns None when no fresh cache exists — caller should run full analysis.
     The returned dict also contains '_updated_at' (ISO string) for display.
     """
-    cdate = cache_date or datetime.date.today()
+    cdate = cache_date or _cache_date_default()
     conn = get_conn()
     if conn is None:
         return None
