@@ -354,7 +354,6 @@ body.console-open main{padding-bottom:236px}
   <div class="header-actions">
     <span id="last-updated">{{ last_updated or 'Not loaded' }}</span>
     <span id="conn-badge" style="font-size:.7rem;font-weight:700;letter-spacing:.5px">&#9675; connecting</span>
-    <button class="btn btn-primary" id="run-btn" onclick="runAnalysis()">&#9654; Run Analysis</button>
     <button class="btn" onclick="openPhoneModal()">&#128241; SMS</button>
     <button class="btn" id="console-btn" onclick="toggleConsole()" title="Toggle live console">&#128187; Console</button>
   </div>
@@ -396,7 +395,10 @@ body.console-open main{padding-bottom:236px}
   <div class="tab-panel" id="panel-tomorrow">
     <div class="section-header">
       <span class="section-title">Tomorrow's Games</span>
-      <span class="section-meta" id="tomorrow-meta"></span>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <span class="section-meta" id="tomorrow-meta"></span>
+        <button class="btn btn-sm" id="run-tomorrow-btn" onclick="runAnalysis()">&#9654; Run Tomorrow Analysis</button>
+      </div>
     </div>
     <div class="games-grid" id="tomorrow-grid"></div>
     <div class="no-games hidden" id="tomorrow-empty">No games tomorrow or analysis not yet run.</div>

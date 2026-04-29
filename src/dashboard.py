@@ -1189,7 +1189,7 @@ def api_stream():
     return response
 
 
-# ─── APScheduler: auto-run analysis every 30 minutes ────────────────────────
+# ─── APScheduler: auto-run analysis every 5 hours ───────────────────────────
 def _scheduled_analysis(force: bool = False, lock_today: bool = False):
     """Called by APScheduler. Skips if already running or cache is very fresh."""
     with _lock:
@@ -1197,13 +1197,13 @@ def _scheduled_analysis(force: bool = False, lock_today: bool = False):
             return
         last_ts = _state.get("last_updated_ts")
 
-    # Skip if ran within the last 28 minutes
+    # Skip if ran within the last ~5 hours
     if not force and last_ts:
         try:
             dt = datetime.datetime.fromisoformat(last_ts)
             now = datetime.datetime.now(datetime.timezone.utc) if dt.tzinfo else datetime.datetime.utcnow()
             age_min = (now - dt).total_seconds() / 60
-            if age_min < 28:
+            if age_min < 295:
                 return
         except Exception:
             pass
@@ -1224,8 +1224,8 @@ def _start_scheduler():
         from apscheduler.triggers.interval import IntervalTrigger
         from apscheduler.triggers.cron import CronTrigger
         sched = BackgroundScheduler(daemon=True)
-        # Run every 30 minutes
-        sched.add_job(_scheduled_analysis, IntervalTrigger(minutes=30), id="auto_analysis",
+        # Run every 5 hours
+        sched.add_job(_scheduled_analysis, IntervalTrigger(minutes=300), id="auto_analysis",
                       max_instances=1, coalesce=True)
         # Daily lock run (ET morning)
         sched.add_job(
@@ -1237,7 +1237,7 @@ def _start_scheduler():
             coalesce=True,
         )
         sched.start()
-        print("[scheduler] APScheduler started — analysis every 30 minutes")
+        print("[scheduler] APScheduler started — analysis every 5 hours")
         return sched
     except Exception as e:
         print(f"[scheduler] Could not start APScheduler: {e}")
