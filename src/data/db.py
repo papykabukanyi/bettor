@@ -1294,6 +1294,7 @@ def save_analysis_cache(data: dict, cache_date=None):
 def get_analysis_cache(max_age_hours: int = 22, cache_date=None) -> "dict | None":
     """
     Return today's cached analysis data if it was saved within max_age_hours.
+    If today's row is missing, fall back to the most recently updated fresh row.
     Returns None when no fresh cache exists — caller should run full analysis.
     The returned dict also contains '_updated_at' (ISO string) for display.
     """
@@ -1310,6 +1311,15 @@ def get_analysis_cache(max_age_hours: int = 22, cache_date=None) -> "dict | None
               AND  updated_at > NOW() - (INTERVAL '1 hour' * %s)
         """, (cdate, max_age_hours))
         row = cur.fetchone()
+        if not row:
+            cur.execute("""
+                SELECT data_json, updated_at
+                FROM   analysis_cache
+                WHERE  updated_at > NOW() - (INTERVAL '1 hour' * %s)
+                ORDER BY updated_at DESC
+                LIMIT 1
+            """, (max_age_hours,))
+            row = cur.fetchone()
         if not row:
             return None
         data = dict(row["data_json"])

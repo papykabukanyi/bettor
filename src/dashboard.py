@@ -1474,6 +1474,47 @@ def _start_scheduler():
         return None
 
 
+def _load_boot_schedule_fallback() -> bool:
+    """Populate state with schedule-only cards so UI isn't blank when cache is absent."""
+    try:
+        from data.mlb_fetcher import get_schedule_range
+
+        today_date = _et_calendar_today()
+        today_str = today_date.isoformat()
+        tomorrow_str = (today_date + datetime.timedelta(days=1)).isoformat()
+        done_statuses = {
+            "final", "game over", "f", "completed early", "completed",
+            "cancelled", "suspended", "postponed",
+        }
+
+        all_games = get_schedule_range(days_ahead=2) or []
+        today_games = [
+            g for g in all_games
+            if g.get("date", "") == today_str
+            and (g.get("status", "").lower() not in done_statuses)
+        ]
+        tomorrow_games = [g for g in all_games if g.get("date", "") == tomorrow_str]
+
+        today_cards = [_build_card(g, [], [], "TODAY") for g in today_games]
+        tomorrow_cards = [_build_card(g, [], [], "TOMORROW") for g in tomorrow_games]
+
+        with _lock:
+            _state.update({
+                "status": "idle",
+                "game_cards_today": today_cards,
+                "game_cards_tomorrow": tomorrow_cards,
+                "best_parlays": [],
+                "player_props": [],
+                "last_updated": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+            })
+
+        print(f"[boot] Loaded schedule fallback ({len(today_cards)} today, {len(tomorrow_cards)} tomorrow)")
+        return True
+    except Exception as exc:
+        print(f"[boot] Schedule fallback load failed: {exc}")
+        return False
+
+
 def _auto_boot_analysis():
     """On startup: load cache, and if it's stale (>30 min) kick off analysis immediately."""
     try:
@@ -1509,11 +1550,15 @@ def _auto_boot_analysis():
                 print("[boot] Cache missing props - triggering fresh analysis...")
                 threading.Thread(target=_run_analysis, daemon=True).start()
         else:
-            print("[boot] No DB cache — triggering fresh analysis...")
-            threading.Thread(target=_run_analysis, daemon=True).start()
+            _load_boot_schedule_fallback()
+            print("[boot] No recent DB cache found")
+            if os.getenv("AUTO_BOOT_ANALYSIS_EMPTY_CACHE", "0").strip().lower() in {"1", "true", "yes", "on"}:
+                print("[boot] Empty-cache auto-analysis enabled — triggering fresh analysis...")
+                threading.Thread(target=_run_analysis, daemon=True).start()
     except Exception as e:
         print(f"[boot] Auto-boot error: {e}")
-        threading.Thread(target=_run_analysis, daemon=True).start()
+        if not _load_boot_schedule_fallback():
+            threading.Thread(target=_run_analysis, daemon=True).start()
 
 
 if __name__ == "__main__":

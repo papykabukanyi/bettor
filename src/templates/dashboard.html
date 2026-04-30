@@ -654,6 +654,8 @@ let propsSortAsc   = false;
 const LOCAL_CACHE_KEY = 'bettor_last_session';
 let _cacheUpdatedAtMs = null;
 let _autoRefreshInFlight = false;
+const _gameStartCache = new Map();
+let _lastLiveScoresDigest = '';
 
 function _asArray(v) {
   return Array.isArray(v) ? v : [];
@@ -888,13 +890,29 @@ function _etLocalToUtc(gameDate, gameTime) {
   return new Date(utcMs);
 }
 
+function _gameStartCacheSet(key, valueMsOrZero) {
+  if (_gameStartCache.size > 2048) _gameStartCache.clear();
+  _gameStartCache.set(key, valueMsOrZero);
+}
+
 function _parseGameStart(gameDate, gameTime, gameDateTime) {
+  const cacheKey = `${gameDate || ''}|${gameTime || ''}|${gameDateTime || ''}`;
+  if (_gameStartCache.has(cacheKey)) {
+    const cached = _gameStartCache.get(cacheKey);
+    return cached ? new Date(cached) : null;
+  }
+
   const iso = String(gameDateTime || '').trim();
   if (iso) {
     const dt = new Date(iso);
-    if (!Number.isNaN(dt.getTime())) return dt;
+    if (!Number.isNaN(dt.getTime())) {
+      _gameStartCacheSet(cacheKey, dt.getTime());
+      return dt;
+    }
   }
-  return _etLocalToUtc(gameDate, gameTime);
+  const fallback = _etLocalToUtc(gameDate, gameTime);
+  _gameStartCacheSet(cacheKey, fallback ? fallback.getTime() : 0);
+  return fallback;
 }
 
 function _phaseFromSchedule(gameDate, gameTime, gameDateTime) {
@@ -968,21 +986,54 @@ function _isLiveGame(gameKey) {
   return _phaseForCard(card.status || '', card.game_date || '', card.game_time || '', card.game_datetime || '') === 'live';
 }
 
+function _liveScoresDigest(scores) {
+  const map = scores || {};
+  const keys = Object.keys(map);
+  if (!keys.length) return '';
+  keys.sort();
+  const parts = [];
+  for (let i = 0; i < keys.length; i++) {
+    const k = keys[i];
+    const v = map[k] || {};
+    parts.push(`${k}|${v.status || ''}|${v.home_score ?? ''}|${v.away_score ?? ''}|${v.inning_half || ''}|${v.inning || ''}`);
+  }
+  return parts.join('~');
+}
+
 function _applyLiveScores(scores, opts) {
   const options = opts || {};
+  const incoming = scores || {};
   if (options.replace === true) {
-    _liveScores = Object.assign({}, scores || {});
+    const nextDigest = _liveScoresDigest(incoming);
+    if (!options.force && nextDigest === _lastLiveScoresDigest) {
+      _schedulePropsRender(false);
+      return;
+    }
+    _lastLiveScoresDigest = nextDigest;
+    _liveScores = Object.assign({}, incoming);
   } else {
-    _liveScores = Object.assign(_liveScores, scores || {});
+    _liveScores = Object.assign(_liveScores, incoming);
+    _lastLiveScoresDigest = _liveScoresDigest(_liveScores);
+  }
+  const cards = document.querySelectorAll('[data-game-key]');
+  if (!cards.length) {
+    _schedulePropsRender(false);
+    return;
   }
   // Update all game cards on screen
-  document.querySelectorAll('[data-game-key]').forEach(card => {
+  cards.forEach(card => {
+    const refs = card._liveRefs || (card._liveRefs = {
+      scoreEl: card.querySelector('.live-score'),
+      statusEl: card.querySelector('.live-status'),
+      dotEl: card.querySelector('.live-dot'),
+      whenEl: card.querySelector('.when-badge'),
+    });
     const gk = _norm(card.dataset.gameKey);
     const s  = _liveScores[gk];
-    const scoreEl  = card.querySelector('.live-score');
-    const statusEl = card.querySelector('.live-status');
-    const dotEl    = card.querySelector('.live-dot');
-    const whenEl = card.querySelector('.when-badge');
+    const scoreEl  = refs.scoreEl;
+    const statusEl = refs.statusEl;
+    const dotEl    = refs.dotEl;
+    const whenEl   = refs.whenEl;
     const gameDate = card.dataset.gameDate || '';
     const gameTime = card.dataset.gameTime || '';
     const gameDateTime = card.dataset.gameDatetime || '';
@@ -994,23 +1045,27 @@ function _applyLiveScores(scores, opts) {
     const isLive  = phase === 'live';
 
     if (scoreEl && s && s.home_score != null && s.away_score != null) {
-      scoreEl.textContent = `${s.away_score} – ${s.home_score}`;
+      const nextScore = `${s.away_score} – ${s.home_score}`;
+      if (scoreEl.textContent !== nextScore) scoreEl.textContent = nextScore;
       scoreEl.style.display = 'inline';
     }
     if (statusEl) {
+      let nextStatus = '';
       if (s) {
         const inn = s.inning ? ` • ${s.inning_half||''} ${s.inning}` : '';
-        statusEl.textContent = `${s.status}${inn}`;
+        nextStatus = `${s.status}${inn}`;
       } else if (isFinal) {
-        statusEl.textContent = 'FINAL';
+        nextStatus = 'FINAL';
       } else if (isLive) {
-        statusEl.textContent = 'LIVE';
+        nextStatus = 'LIVE';
       } else {
         const tt = _fmtGameTime(gameTime);
-        statusEl.textContent = tt ? `Starts ${tt}` : 'UPCOMING';
+        nextStatus = tt ? `Starts ${tt}` : 'UPCOMING';
       }
+      if (statusEl.textContent !== nextStatus) statusEl.textContent = nextStatus;
       statusEl.style.display = 'inline';
-      statusEl.className = 'live-status ' + (isFinal ? 'final' : isLive ? 'in-progress' : '');
+      const nextClass = 'live-status ' + (isFinal ? 'final' : isLive ? 'in-progress' : '');
+      if (statusEl.className !== nextClass) statusEl.className = nextClass;
     }
 
     _setWhenBadge(whenEl, isFinal ? 'FINAL' : isLive ? 'LIVE' : 'UPCOMING', isFinal ? 'FINAL' : isLive ? 'LIVE' : 'UPCOMING', card.dataset.whenBase || 'TODAY');
@@ -1019,10 +1074,11 @@ function _applyLiveScores(scores, opts) {
     card.classList.toggle('final', isFinal);
     if (dotEl) dotEl.style.display = (isLive && !isFinal) ? 'inline-block' : 'none';
   });
-  if (document.getElementById('props-tbody')) sortAndRenderProps();
+  _schedulePropsRender(false);
 }
 
 function _refreshScheduledStatuses() {
+  if (document.hidden) return;
   _applyLiveScores({}, { replace: false });
 }
 
@@ -1031,6 +1087,19 @@ let _silentPerfTimer = null;
 function _isParlaysActive() {
   const panel = document.getElementById('panel-parlays');
   return !!(panel && panel.classList.contains('active'));
+}
+function _isPropsActive() {
+  const panel = document.getElementById('panel-props');
+  return !!(panel && panel.classList.contains('active'));
+}
+let _propsRenderTimer = null;
+function _schedulePropsRender(force) {
+  if (!document.getElementById('props-tbody')) return;
+  if (!force && !_isPropsActive()) return;
+  clearTimeout(_propsRenderTimer);
+  _propsRenderTimer = setTimeout(() => {
+    sortAndRenderProps();
+  }, 80);
 }
 function _silentRefreshPanels() {
   // Stagger to avoid hammering the server
@@ -1070,6 +1139,9 @@ function switchTab(name) {
   document.querySelectorAll('.tab-panel').forEach(p=>p.classList.remove('active'));
   document.querySelector(`[data-tab="${name}"]`).classList.add('active');
   document.getElementById(`panel-${name}`).classList.add('active');
+  if (name === 'props') {
+    _schedulePropsRender(true);
+  }
   if (name === 'parlays')     {
     autoGenParlaysFromProps();
     loadTrackedParlays();
@@ -1252,8 +1324,9 @@ function _setWhenBadge(el, label, text, baseWhen) {
   if (!el) return;
   const base = (baseWhen || el.dataset.whenBase || label || '').toUpperCase();
   el.dataset.whenBase = base;
-  el.className = `when-badge when-${label}`;
-  el.textContent = text;
+  const nextClass = `when-badge when-${label}`;
+  if (el.className !== nextClass) el.className = nextClass;
+  if (el.textContent !== text) el.textContent = text;
 }
 function dirClass(dir) { return dir === 'OVER' ? 'dir-OVER' : 'dir-UNDER'; }
 
@@ -1725,22 +1798,60 @@ function renderParlays(parlays) {
   autoGenParlaysFromProps();
 }
 
+function _getLiveGameKeySet() {
+  const liveKeys = new Set();
+  Object.entries(_liveScores || {}).forEach(([k, v]) => {
+    if (_isLiveStatus((v || {}).status || '')) liveKeys.add(_norm(k));
+  });
+  const cards = ([]).concat(TODAY_CARDS || [], TOMORROW_CARDS || []);
+  cards.forEach(c => {
+    const gk = _norm(c.game_key || '');
+    if (!gk) return;
+    const phase = _phaseForCard(c.status || '', c.game_date || '', c.game_time || '', c.game_datetime || '');
+    if (phase === 'live') liveKeys.add(gk);
+  });
+  return liveKeys;
+}
+
+function _isLiveFromSet(gameKey, liveKeys, liveArr) {
+  const nk = _norm(gameKey || '');
+  if (!nk) return false;
+  if (liveKeys.has(nk)) return true;
+  const nkl = nk.toLowerCase();
+  const parts = nkl.split('@').map(v => (v || '').trim());
+  for (let i = 0; i < liveArr.length; i++) {
+    const lk = liveArr[i];
+    if (lk === nkl || lk.includes(nkl) || nkl.includes(lk)) return true;
+    const lp = lk.split('@').map(v => (v || '').trim());
+    if (parts.length === 2 && lp.length === 2) {
+      if ((parts[0].includes(lp[0]) || lp[0].includes(parts[0])) &&
+          (parts[1].includes(lp[1]) || lp[1].includes(parts[1]))) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 function sortAndRenderProps() {
+  const tbody = document.getElementById('props-tbody');
+  if (!tbody) return;
   const sorted = [..._filteredProps].sort((a,b)=>{
     const va = a[propsSortKey]||''; const vb = b[propsSortKey]||'';
     const cmp = typeof va === 'number' ? va-vb : String(va).localeCompare(String(vb));
     return propsSortAsc ? cmp : -cmp;
   });
-  const tbody = document.getElementById('props-tbody');
+  const liveKeys = _getLiveGameKeySet();
+  const liveArr = Array.from(liveKeys).map(v => v.toLowerCase());
   if (!sorted.length) {
     tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:24px">No props match filter.</td></tr>';
     document.getElementById('props-meta').textContent = '';
     return;
   }
-  const liveCount = sorted.reduce((acc,p)=>acc + (_isLiveGame(p.game_key||p.game||'') ? 1 : 0), 0);
+  const liveCount = sorted.reduce((acc,p)=>acc + (_isLiveFromSet(p.game_key||p.game||'', liveKeys, liveArr) ? 1 : 0), 0);
   document.getElementById('props-meta').textContent = `${sorted.length} over bets${liveCount?` · ${liveCount} live`:''}`;
   tbody.innerHTML = sorted.map(p => {
-    const isLive = _isLiveGame(p.game_key||p.game||'');
+    const isLive = _isLiveFromSet(p.game_key||p.game||'', liveKeys, liveArr);
     const liveEye = isLive ? '<span class="live-eye" title="Live prop"></span>' : '';
     return `<tr>
       <td>${liveEye}${p.name||'—'}</td>
