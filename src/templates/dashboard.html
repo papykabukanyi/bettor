@@ -84,15 +84,18 @@ main{padding:20px;max-width:1400px;margin:0 auto}
 .games-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px}
 
 /* ── Game card ── */
-.game-card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);
+.game-card{background:linear-gradient(165deg, rgba(15,23,34,.98), rgba(11,17,24,.98));
+  border:1px solid rgba(31,42,55,.95);border-radius:14px;
   overflow:hidden;transition:border-color .2s,box-shadow .2s,transform .2s;cursor:pointer;position:relative}
-.game-card:hover{border-color:var(--accent);box-shadow:var(--shadow);transform:translateY(-2px)}
+.game-card:hover{border-color:rgba(20,184,166,.65);box-shadow:0 10px 30px rgba(0,0,0,.45);transform:translateY(-2px)}
 .game-card.expanded .card-body{display:block}
 .game-card.in-progress{border-color:rgba(22,163,74,.6);
   box-shadow:0 0 0 1px rgba(22,163,74,.35),var(--shadow);animation:liveGlow 2.2s ease-in-out infinite}
 .game-card.final{opacity:.82}
 
-.card-header{padding:14px 16px 10px;display:flex;flex-direction:column;gap:10px}
+.card-header{padding:14px 16px 12px;display:flex;flex-direction:column;gap:10px}
+.card-topline{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.card-top-right{display:flex;align-items:center;gap:8px}
 .card-when{display:flex;align-items:center;justify-content:space-between;gap:8px}
 .live-dot{width:8px;height:8px;border-radius:50%;background:var(--green);
   box-shadow:0 0 8px rgba(22,163,74,.8);animation:pulse 1.6s infinite;display:none}
@@ -862,8 +865,17 @@ function _etLocalToUtc(gameDate, gameTime) {
   return new Date(utcMs);
 }
 
-function _phaseFromSchedule(gameDate, gameTime) {
-  const start = _etLocalToUtc(gameDate, gameTime);
+function _parseGameStart(gameDate, gameTime, gameDateTime) {
+  const iso = String(gameDateTime || '').trim();
+  if (iso) {
+    const dt = new Date(iso);
+    if (!Number.isNaN(dt.getTime())) return dt;
+  }
+  return _etLocalToUtc(gameDate, gameTime);
+}
+
+function _phaseFromSchedule(gameDate, gameTime, gameDateTime) {
+  const start = _parseGameStart(gameDate, gameTime, gameDateTime);
   if (!start) return 'upcoming';
   const now = Date.now();
   const startMs = start.getTime();
@@ -874,10 +886,10 @@ function _phaseFromSchedule(gameDate, gameTime) {
   return 'upcoming';
 }
 
-function _phaseForCard(status, gameDate, gameTime) {
+function _phaseForCard(status, gameDate, gameTime, gameDateTime) {
   const statusPhase = _statusPhase(status);
   if (statusPhase === 'live' || statusPhase === 'final') return statusPhase;
-  return _phaseFromSchedule(gameDate, gameTime);
+  return _phaseFromSchedule(gameDate, gameTime, gameDateTime);
 }
 
 function _publicOverProps(list) {
@@ -930,7 +942,7 @@ function _isLiveGame(gameKey) {
   const cards = ([]).concat(TODAY_CARDS || [], TOMORROW_CARDS || []);
   const card = cards.find(c => _keyLooseMatch(c.game_key || '', nk));
   if (!card) return false;
-  return _phaseForCard(card.status || '', card.game_date || '', card.game_time || '') === 'live';
+  return _phaseForCard(card.status || '', card.game_date || '', card.game_time || '', card.game_datetime || '') === 'live';
 }
 
 function _applyLiveScores(scores) {
@@ -945,10 +957,11 @@ function _applyLiveScores(scores) {
     const whenEl = card.querySelector('.when-badge');
     const gameDate = card.dataset.gameDate || '';
     const gameTime = card.dataset.gameTime || '';
+    const gameDateTime = card.dataset.gameDatetime || '';
 
     const phase = s
-      ? _phaseForCard(s.status, gameDate, gameTime)
-      : _phaseFromSchedule(gameDate, gameTime);
+      ? _phaseForCard(s.status, gameDate, gameTime, gameDateTime)
+      : _phaseFromSchedule(gameDate, gameTime, gameDateTime);
     const isFinal = phase === 'final';
     const isLive  = phase === 'live';
 
@@ -1202,7 +1215,7 @@ function whenBadge(label, when, baseLabel) {
   return `<span class="when-badge when-${label}" data-when-base="${base}">${when}</span>`;
 }
 function _badgeInfoForCard(c) {
-  const phase = _phaseForCard(c.status || '', c.game_date || '', c.game_time || '');
+  const phase = _phaseForCard(c.status || '', c.game_date || '', c.game_time || '', c.game_datetime || '');
   if (phase === 'live')  return { label: 'LIVE',  text: 'LIVE' };
   if (phase === 'final') return { label: 'FINAL', text: 'FINAL' };
   return { label: 'UPCOMING', text: 'UPCOMING' };
@@ -1321,7 +1334,7 @@ function gameCard(c) {
   const baseWhen = (c.when_label || c.when || 'TODAY').toUpperCase();
   const badgeInfo = _badgeInfoForCard(c);
   const whenB   = whenBadge(badgeInfo.label, badgeInfo.text, baseWhen);
-  const phase = _phaseForCard(c.status || '', c.game_date || '', c.game_time || '');
+  const phase = _phaseForCard(c.status || '', c.game_date || '', c.game_time || '', c.game_datetime || '');
   const timeText = _fmtGameTime(c.game_time);
   const initialStatusText = phase === 'final'
     ? 'FINAL'
@@ -1380,12 +1393,18 @@ function gameCard(c) {
     .filter(p => { const lv = _lineValue(p.line); return !(Number.isFinite(lv) && lv <= 0.5); })
     .length;
 
-  return `<div class="game-card" data-game-key="${c.game_key}" data-game-date="${c.game_date||''}"
+  return `<div class="game-card" data-game-key="${c.game_key}" data-game-date="${c.game_date||''}" data-game-datetime="${c.game_datetime||''}"
     data-game-time="${c.game_time||''}" data-when-base="${baseWhen}" id="card-${c.game_key.replace(/[@\s]/g,'_')}">
   <div class="card-header" onclick="toggleCard(this.parentElement)">
-    <div class="card-when">
-      <div>${whenB}${slBadge}</div>
-      <span class="live-dot" title="Live"></span>
+    <div class="card-topline">
+      <div class="card-when">
+        <div>${whenB}${slBadge}</div>
+      </div>
+      <div class="card-top-right">
+        <span class="live-dot" title="Live"></span>
+        <span class="live-score" style="${scoreText ? '' : 'display:none'}">${scoreText}</span>
+        <span class="live-status ${initialStatusClass}" style="${initialStatusText ? '' : 'display:none'}">${initialStatusText}</span>
+      </div>
     </div>
     <div class="matchup">
       <div class="team-side">
@@ -1397,10 +1416,6 @@ function gameCard(c) {
         <div class="team-name">${c.home_team}</div>
         <div class="team-starter">&#9918; ${c.home_starter||'TBD'}</div>
       </div>
-    </div>
-    <div>
-      <span class="live-score" style="${scoreText ? '' : 'display:none'}">${scoreText}</span>
-      <span class="live-status ${initialStatusClass}" style="${initialStatusText ? '' : 'display:none'}">${initialStatusText}</span>
     </div>
     ${mainPickHtml}
     ${otherHtml}
@@ -1445,7 +1460,7 @@ function betSection(title, rows) {
 
 function betRow(label, bet, card) {
   if (!bet) return '';
-  const phase = _phaseForCard(card.status || '', card.game_date || '', card.game_time || '');
+  const phase = _phaseForCard(card.status || '', card.game_date || '', card.game_time || '', card.game_datetime || '');
   const bt = (bet.bet_type || '').toLowerCase();
   const pbt = plainEnglishBet(bet, card.home_team || '', card.away_team || '', phase);
   const pick = (pbt && pbt.text) ? pbt.text : (bet.pick || '—');
@@ -1494,7 +1509,7 @@ function propRow(p, gameKey) {
   const stat = (p.prop_label || p.stat_type || '').replace(/_/g,' ');
   const cards = ([]).concat(TODAY_CARDS || [], TOMORROW_CARDS || []);
   const card = cards.find(c => _norm(c.game_key || '') === _norm(gameKey || ''));
-  const phase = card ? _phaseForCard(card.status || '', card.game_date || '', card.game_time || '') : 'upcoming';
+  const phase = card ? _phaseForCard(card.status || '', card.game_date || '', card.game_time || '', card.game_datetime || '') : 'upcoming';
   const phrase = plainEnglishPropText(p, phase).text;
   return `<div class="prop-row">
     <span class="prop-player">${p.name||'—'} <span class="prop-live-eye" title="Live tracking"></span></span>

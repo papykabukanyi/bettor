@@ -157,6 +157,7 @@ def _parse_mlb_game(game, fallback_date: str) -> dict:
     raw_dt = game.get("game_datetime", "") or ""
     game_time = None
     game_datetime_iso = None
+    game_date = game.get("game_date", fallback_date)
     if raw_dt:
         try:
             import pytz
@@ -165,11 +166,12 @@ def _parse_mlb_game(game, fallback_date: str) -> dict:
             local_dt = utc_dt.astimezone(eastern)
             game_time = local_dt.strftime("%H:%M")
             game_datetime_iso = local_dt.isoformat()
+            game_date = local_dt.date().isoformat()
         except Exception:
             pass
     return {
         "game_pk":           game.get("game_id"),
-        "date":              game.get("game_date", fallback_date),
+        "date":              game_date,
         "game_time":         game_time,
         "game_datetime":     game_datetime_iso,
         "home_team":         game.get("home_name", ""),
