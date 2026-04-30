@@ -43,7 +43,6 @@ from config import BANKROLL, MIN_VALUE_EDGE, KELLY_FRACTION, MLB_SEASONS, et_tod
 _DASH_MIN_EDGE = 0.02
 _DAILY_LOCK_HOUR_ET = int(os.getenv("DAILY_LOCK_HOUR_ET", "5"))
 _DAILY_LOCK_MINUTE_ET = int(os.getenv("DAILY_LOCK_MINUTE_ET", "0"))
-_AUTO_BOOT_ANALYSIS = os.getenv("AUTO_BOOT_ANALYSIS", "0").strip().lower() in {"1", "true", "yes", "on"}
 
 app = Flask(__name__, template_folder="templates")
 
@@ -118,10 +117,7 @@ def _init_worker():
     if _BG_IS_LEADER:
         _scheduler = _start_scheduler()
         _start_live_scores()
-        if _AUTO_BOOT_ANALYSIS:
-            _auto_boot_analysis()
-        else:
-            print("[boot] AUTO_BOOT_ANALYSIS disabled — waiting for manual Run Analysis")
+        _auto_boot_analysis()
     else:
         _scheduler = None
         _start_cache_poller()
@@ -1461,10 +1457,7 @@ if __name__ == "__main__":
     if _BG_IS_LEADER:
         _scheduler = _start_scheduler()
         _start_live_scores()
-        if _AUTO_BOOT_ANALYSIS:
-            _auto_boot_analysis()
-        else:
-            print("[boot] AUTO_BOOT_ANALYSIS disabled — waiting for manual Run Analysis")
+        _auto_boot_analysis()
     else:
         _scheduler = None
         _start_cache_poller()
