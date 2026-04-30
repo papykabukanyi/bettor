@@ -174,17 +174,24 @@ main{padding:20px;max-width:1400px;margin:0 auto}
 .expanded .expand-icon{transform:rotate(180deg)}
 
 /* ── Card body (expanded) ── */
-.card-body{display:none;border-top:1px solid var(--border)}
+.card-body{display:none;border-top:1px solid var(--border);
+  background:linear-gradient(180deg,rgba(7,10,16,.75),rgba(7,10,16,.95))}
+.card-body-grid{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);gap:12px;padding:12px}
+.card-panel{background:rgba(255,255,255,.02);border:1px solid var(--border);
+  border-radius:12px;padding:12px}
+.panel-title{font-size:.72rem;font-weight:700;color:var(--muted);
+  letter-spacing:.16em;text-transform:uppercase;margin-bottom:6px}
+.panel-sub{font-size:.7rem;color:var(--muted);margin-top:-2px;margin-bottom:8px}
 
 /* ── Bet rows ── */
-.bet-section{padding:12px 14px}
-.bet-section-title{font-size:.7rem;font-weight:600;color:var(--muted);
-  text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px}
-.bet-row{display:grid;grid-template-columns:110px minmax(0,1fr) auto auto auto;
-  gap:8px;align-items:center;padding:8px 0;border-bottom:1px dashed var(--border)}
+.bet-section{display:flex;flex-direction:column;gap:8px}
+.bet-row{display:grid;grid-template-columns:100px minmax(0,1fr);
+  gap:10px;align-items:flex-start;padding:8px 0;border-bottom:1px dashed var(--border)}
 .bet-row:last-child{border-bottom:none}
-.bet-label{font-size:.66rem;color:var(--muted);text-transform:uppercase;letter-spacing:.08em}
-.bet-pick{font-size:.84rem;font-weight:700;line-height:1.2;min-width:0}
+.bet-label{font-size:.66rem;color:var(--muted);text-transform:uppercase;letter-spacing:.12em}
+.bet-main{display:flex;flex-direction:column;gap:4px;min-width:0}
+.bet-pick{font-size:.88rem;font-weight:700;line-height:1.25;min-width:0}
+.bet-meta{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:.72rem;color:var(--muted)}
 .bet-odds{font-size:.72rem;color:var(--muted);white-space:nowrap}
 .bet-edge{font-size:.7rem;font-weight:700;padding:2px 6px;border-radius:6px;
   background:rgba(255,255,255,.04);white-space:nowrap}
@@ -251,9 +258,14 @@ main{padding:20px;max-width:1400px;margin:0 auto}
 .pick-phrase{font-weight:700}
 .pick-phrase.win{color:var(--green)}
 .prop-phrase{color:var(--accent);font-weight:700}
-.prop-row{display:grid;grid-template-columns:140px minmax(0,1fr) auto auto auto;
-  gap:8px;align-items:center;padding:6px 0;border-bottom:1px dashed var(--border);font-size:.78rem}
-.prop-row:last-child{border-bottom:none}
+.props-section{display:flex;flex-direction:column;gap:8px}
+.props-team-header{font-size:.72rem;font-weight:700;color:var(--muted);
+  letter-spacing:.12em;text-transform:uppercase;margin-top:2px}
+.prop-row{display:grid;grid-template-columns:minmax(0,1fr) auto;
+  gap:10px;align-items:center;padding:8px 10px;border:1px solid var(--border);
+  border-radius:10px;font-size:.78rem;background:rgba(255,255,255,.02)}
+.prop-left{display:flex;flex-direction:column;gap:4px;min-width:0}
+.prop-right{display:flex;align-items:center;gap:6px;flex-wrap:wrap;justify-content:flex-end}
 .prop-player{font-weight:700;display:flex;align-items:center;gap:6px;min-width:0}
 .prop-stat{color:var(--text);min-width:0}
 .prop-dir{font-size:.66rem;font-weight:700;padding:2px 6px;border-radius:999px;border:1px solid var(--border);white-space:nowrap}
@@ -346,8 +358,13 @@ main{padding:20px;max-width:1400px;margin:0 auto}
   .tabs{padding:10px 14px 0}
   .tab{padding:7px 12px;font-size:.78rem}
   .props-table{min-width:640px}
-  .bet-row{grid-template-columns:1fr;gap:4px}
-  .prop-row{grid-template-columns:1fr;gap:4px}
+  .card-body-grid{grid-template-columns:1fr}
+  .bet-row{grid-template-columns:1fr;gap:6px}
+  .prop-row{grid-template-columns:1fr;gap:6px}
+  .prop-right{justify-content:flex-start}
+}
+@media(max-width:980px){
+  .card-body-grid{grid-template-columns:1fr}
 }
 @media(max-width:520px){
   .matchup{flex-direction:column;align-items:stretch}
@@ -1422,20 +1439,22 @@ function gameCard(c) {
     ${propsHtml}
   </div>
   <button class="card-expand-btn" onclick="toggleCard(this.parentElement)">
-    <span>All Bets${propCount?' + '+propCount+' Props':''}</span>
+    <span>View Full Card${propCount?' · '+propCount+' Props':''}</span>
     <span class="expand-icon">&#9660;</span>
   </button>
   <div class="card-body">
-    ${betSection('Game Bets', [
-      betRow('Moneyline',       c.moneyline,       c),
-      betRow('Run Line',        c.run_line,        c),
-      betRow('Total',           c.total,           c),
-      betRow('F5 Moneyline',    c.f5_moneyline,    c),
-      betRow('F5 Total',        c.f5_total,        c),
-      betRow('Home Team Total', c.home_team_total, c),
-      betRow('Away Team Total', c.away_team_total, c),
-    ])}
-    ${propsSection(c)}
+    <div class="card-body-grid">
+      ${betSection('Game Bets', [
+        betRow('Moneyline',       c.moneyline,       c),
+        betRow('Run Line',        c.run_line,        c),
+        betRow('Total',           c.total,           c),
+        betRow('F5 Moneyline',    c.f5_moneyline,    c),
+        betRow('F5 Total',        c.f5_total,        c),
+        betRow('Home Team Total', c.home_team_total, c),
+        betRow('Away Team Total', c.away_team_total, c),
+      ])}
+      ${propsSection(c)}
+    </div>
   </div>
 </div>`;
 }
@@ -1452,9 +1471,9 @@ function quickChip(label, bet) {
 function betSection(title, rows) {
   const validRows = rows.filter(Boolean);
   if (!validRows.length) return '';
-  return `<div class="bet-section">
-    <div class="bet-section-title">${title}</div>
-    ${validRows.join('')}
+  return `<div class="card-panel">
+    <div class="panel-title">${title}</div>
+    <div class="bet-section">${validRows.join('')}</div>
   </div>`;
 }
 
@@ -1470,10 +1489,14 @@ function betRow(label, bet, card) {
   const sb   = safetyBadge(bet.safety_label||'MODERATE');
   return `<div class="bet-row">
     <span class="bet-label">${label}</span>
-    <span class="bet-pick ${pickCls}">${pick}</span>
-    <span class="bet-odds">${odds}</span>
-    ${edge}
-    ${sb}
+    <div class="bet-main">
+      <span class="bet-pick ${pickCls}">${pick}</span>
+      <div class="bet-meta">
+        <span class="bet-odds">${odds}</span>
+        ${edge}
+        ${sb}
+      </div>
+    </div>
   </div>`;
 }
 
@@ -1488,8 +1511,10 @@ function propsSection(c) {
   const hp = (c.home_props || []).filter(qualifies).sort((a,b)=>(b.model_prob||0)-(a.model_prob||0));
   const ap = (c.away_props || []).filter(qualifies).sort((a,b)=>(b.model_prob||0)-(a.model_prob||0));
   if (!hp.length && !ap.length) return '';
-  let html = '<div class="props-section">';
-  html += `<div style="font-size:.68rem;color:var(--accent);font-weight:700;padding:4px 0 6px;letter-spacing:.04em;">&#9650; Over Bets of the Day (sorted by probability)</div>`;
+  let html = '<div class="card-panel">';
+  html += `<div class="panel-title">Over Bets of the Day</div>`;
+  html += `<div class="panel-sub">Sorted by probability</div>`;
+  html += '<div class="props-section">';
   if (ap.length) {
     html += `<div class="props-team-header">${c.away_team}</div>`;
     html += ap.map(p => propRow(p, c.game_key)).join('');
@@ -1498,7 +1523,7 @@ function propsSection(c) {
     html += `<div class="props-team-header">${c.home_team}</div>`;
     html += hp.map(p => propRow(p, c.game_key)).join('');
   }
-  html += '</div>';
+  html += '</div></div>';
   return html;
 }
 
@@ -1512,11 +1537,15 @@ function propRow(p, gameKey) {
   const phase = card ? _phaseForCard(card.status || '', card.game_date || '', card.game_time || '', card.game_datetime || '') : 'upcoming';
   const phrase = plainEnglishPropText(p, phase).text;
   return `<div class="prop-row">
-    <span class="prop-player">${p.name||'—'} <span class="prop-live-eye" title="Live tracking"></span></span>
-    <span class="prop-stat prop-phrase">${phrase}</span>
-    <span class="${dirCls}">${p.direction} ${p.line}</span>
-    <span class="prop-conf">${p.model_prob!=null?(p.model_prob*100).toFixed(1):(p.confidence||'?')}%</span>
-    ${sb}
+    <div class="prop-left">
+      <span class="prop-player">${p.name||'—'} <span class="prop-live-eye" title="Live tracking"></span></span>
+      <span class="prop-stat prop-phrase">${phrase}</span>
+    </div>
+    <div class="prop-right">
+      <span class="${dirCls}">${p.direction} ${p.line}</span>
+      <span class="prop-conf">${p.model_prob!=null?(p.model_prob*100).toFixed(1):(p.confidence||'?')}%</span>
+      ${sb}
+    </div>
     ${rationale ? `<span class="prop-rationale" title="${rationale.replace(/"/g,"&quot;")}">&#128202; ${rationale}</span>` : ''}
   </div>`;
 }

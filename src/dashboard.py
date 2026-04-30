@@ -1245,11 +1245,21 @@ def _poll_live_scores():
     global _live_score_timer
     try:
         import statsapi as mlbstatsapi
-        today = datetime.date.today().strftime("%m/%d/%Y")
-        raw = mlbstatsapi.schedule(start_date=today, end_date=today) or []
-        live = [g for g in raw if g.get("status") in
-                ("In Progress", "Final", "Game Over", "Completed Early",
-                 "Warmup", "Pre-Game")]
+        # Use ET date instead of server local time
+        today = et_today()
+        today_str = today.strftime("%m/%d/%Y")
+        raw = mlbstatsapi.schedule(start_date=today_str, end_date=today_str) or []
+        
+        # More robust status matching - include any active/live game statuses
+        def _is_active_game(status):
+            s = (status or "").lower()
+            # Include: live games, warmup, pre-game, final/completed (for scores)
+            return any(k in s for k in (
+                "progress", "live", "warmup", "pre-game", "pregame",
+                "final", "game over", "completed", "delay", "challenge"
+            ))
+        
+        live = [g for g in raw if _is_active_game(g.get("status", ""))]
         live_map = {
             _norm_gk(f"{g.get('away_name','')}@{g.get('home_name','')}"): {
                 "home_score":  g.get("home_score"),
@@ -1268,7 +1278,11 @@ def _poll_live_scores():
             _sse_broadcast("live_scores", {"scores": live_map})
 
         # Auto-resolve finished games (non-blocking, errors suppressed)
-        if any(g.get("status") in ("Final", "Game Over", "Completed Early") for g in live):
+        def _is_final_status(status):
+            s = (status or "").lower()
+            return any(k in s for k in ("final", "game over", "completed"))
+        
+        if any(_is_final_status(g.get("status", "")) for g in live):
             try:
                 from models.mlb_predictor import resolve_game_outcomes, resolve_prop_outcomes
                 n_g = resolve_game_outcomes(days_back=1)
