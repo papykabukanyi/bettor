@@ -527,7 +527,6 @@ body.console-open main{padding-bottom:236px}
 
     <div class="section-header" style="margin-top:28px">
       <span class="section-title">&#128204; Saved &amp; Tracked Parlays</span>
-      <button class="btn btn-sm" onclick="resolveOutcomes()">&#9989; Resolve Outcomes</button>
     </div>
     <div id="tracked-parlays-list"><div class="no-games">No tracked parlays yet.</div></div>
 
@@ -793,7 +792,7 @@ function applyCachedData(d) {
   if (d.game_cards_today    !== undefined) TODAY_CARDS    = d.game_cards_today    || [];
   if (d.game_cards_tomorrow !== undefined) TOMORROW_CARDS = d.game_cards_tomorrow || [];
   if (d.best_parlays        !== undefined) BEST_PARLAYS   = d.best_parlays        || [];
-  if (d.player_props        !== undefined) ALL_PROPS      = d.player_props        || [];
+  if (d.player_props        !== undefined) ALL_PROPS      = _publicOverProps(d.player_props || []);
   renderAll();
   const lu = d.last_updated || d._updated_at;
   if (lu) document.getElementById('last-updated').textContent = '⟳ ' + lu;
@@ -822,6 +821,75 @@ function _statusPhase(status) {
   return 'upcoming';
 }
 
+function _zonedParts(dt, tz) {
+  const f = new Intl.DateTimeFormat('en-US', {
+    timeZone: tz,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+    hour12: false,
+  });
+  const out = {};
+  f.formatToParts(dt).forEach(p => {
+    if (p.type !== 'literal') out[p.type] = p.value;
+  });
+  return {
+    year: Number(out.year), month: Number(out.month), day: Number(out.day),
+    hour: Number(out.hour), minute: Number(out.minute), second: Number(out.second),
+  };
+}
+
+function _etLocalToUtc(gameDate, gameTime) {
+  const d = String(gameDate || '').trim();
+  const t = String(gameTime || '').trim();
+  const dm = d.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  const tm = t.match(/^(\d{1,2}):(\d{2})/);
+  if (!dm || !tm) return null;
+  const y = Number(dm[1]);
+  const mo = Number(dm[2]);
+  const da = Number(dm[3]);
+  const hh = Number(tm[1]);
+  const mm = Number(tm[2]);
+  if (![y, mo, da, hh, mm].every(Number.isFinite)) return null;
+  let utcMs = Date.UTC(y, mo - 1, da, hh, mm, 0);
+  for (let i = 0; i < 4; i++) {
+    const p = _zonedParts(new Date(utcMs), 'America/New_York');
+    const observed = Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second);
+    const target = Date.UTC(y, mo - 1, da, hh, mm, 0);
+    utcMs += (target - observed);
+  }
+  return new Date(utcMs);
+}
+
+function _phaseFromSchedule(gameDate, gameTime) {
+  const start = _etLocalToUtc(gameDate, gameTime);
+  if (!start) return 'upcoming';
+  const now = Date.now();
+  const startMs = start.getTime();
+  const liveBufferMs = 10 * 60 * 1000;
+  const maxGameWindowMs = 6 * 60 * 60 * 1000;
+  if (now >= startMs + maxGameWindowMs) return 'final';
+  if (now >= startMs - liveBufferMs) return 'live';
+  return 'upcoming';
+}
+
+function _phaseForCard(status, gameDate, gameTime) {
+  const statusPhase = _statusPhase(status);
+  if (statusPhase === 'live' || statusPhase === 'final') return statusPhase;
+  return _phaseFromSchedule(gameDate, gameTime);
+}
+
+function _publicOverProps(list) {
+  return (Array.isArray(list) ? list : []).filter(p => {
+    if ((p.direction || '').toUpperCase() !== 'OVER') return false;
+    const lv = _lineValue(p.line);
+    return !(Number.isFinite(lv) && lv <= 0.5);
+  });
+}
+
+function _overBetsTotal() {
+  return _publicOverProps(ALL_PROPS).length;
+}
+
 function _fmtGameTime(hhmm) {
   if (!hhmm) return '';
   const parts = String(hhmm).split(':');
@@ -846,28 +914,50 @@ function _applyLiveScores(scores) {
   document.querySelectorAll('[data-game-key]').forEach(card => {
     const gk = _norm(card.dataset.gameKey);
     const s  = _liveScores[gk];
-    if (!s) return;
     const scoreEl  = card.querySelector('.live-score');
     const statusEl = card.querySelector('.live-status');
     const dotEl    = card.querySelector('.live-dot');
-    const isFinal = _isFinalStatus(s.status);
-    const isLive  = _isLiveStatus(s.status);
-    if (scoreEl && s.home_score != null && s.away_score != null) {
-      scoreEl.textContent  = `${s.away_score} – ${s.home_score}`;
+    const whenEl = card.querySelector('.when-badge');
+    const gameDate = card.dataset.gameDate || '';
+    const gameTime = card.dataset.gameTime || '';
+
+    const phase = s
+      ? _phaseForCard(s.status, gameDate, gameTime)
+      : _phaseFromSchedule(gameDate, gameTime);
+    const isFinal = phase === 'final';
+    const isLive  = phase === 'live';
+
+    if (scoreEl && s && s.home_score != null && s.away_score != null) {
+      scoreEl.textContent = `${s.away_score} – ${s.home_score}`;
       scoreEl.style.display = 'inline';
     }
     if (statusEl) {
-      const inn = s.inning ? ` • ${s.inning_half||''} ${s.inning}` : '';
-      statusEl.textContent  = `${s.status}${inn}`;
+      if (s) {
+        const inn = s.inning ? ` • ${s.inning_half||''} ${s.inning}` : '';
+        statusEl.textContent = `${s.status}${inn}`;
+      } else if (isFinal) {
+        statusEl.textContent = 'FINAL';
+      } else if (isLive) {
+        statusEl.textContent = 'LIVE';
+      } else {
+        const tt = _fmtGameTime(gameTime);
+        statusEl.textContent = tt ? `Starts ${tt}` : 'UPCOMING';
+      }
       statusEl.style.display = 'inline';
-      statusEl.className    = 'live-status ' +
-        (isFinal ? 'final' : 'in-progress');
+      statusEl.className = 'live-status ' + (isFinal ? 'final' : isLive ? 'in-progress' : '');
     }
+
+    _setWhenBadge(whenEl, isFinal ? 'FINAL' : isLive ? 'LIVE' : 'UPCOMING', isFinal ? 'FINAL' : isLive ? 'LIVE' : 'UPCOMING', card.dataset.whenBase || 'TODAY');
+
     card.classList.toggle('in-progress', isLive && !isFinal);
     card.classList.toggle('final', isFinal);
     if (dotEl) dotEl.style.display = (isLive && !isFinal) ? 'inline-block' : 'none';
   });
   if (document.getElementById('props-tbody')) sortAndRenderProps();
+}
+
+function _refreshScheduledStatuses() {
+  _applyLiveScores({});
 }
 
 // ── Silent background panel refresh (called after state_update) ─────────────
@@ -895,6 +985,8 @@ setInterval(() => {
   autoGenParlaysFromProps();
 }, 5 * 60 * 1000);
 
+setInterval(_refreshScheduledStatuses, 60 * 1000);
+
 // ── Performance render wrappers (called by SSE performance_update) ──────────
 function _renderBotPerf(_stats) {
   // Stats from SSE; just re-fetch to keep rendering in sync with existing code
@@ -912,7 +1004,13 @@ function switchTab(name) {
   document.querySelectorAll('.tab-panel').forEach(p=>p.classList.remove('active'));
   document.querySelector(`[data-tab="${name}"]`).classList.add('active');
   document.getElementById(`panel-${name}`).classList.add('active');
-  if (name === 'parlays')     { autoGenParlaysFromProps(); loadTrackedParlays(); loadPropPerformance(); }
+  if (name === 'parlays')     {
+    autoGenParlaysFromProps();
+    loadTrackedParlays();
+    loadPropPerformance();
+    loadParlayPerformance();
+    resolveOutcomesSilent();
+  }
 }
 
 // ── Elite Parlay ──────────────────────────────────────────────────────────
@@ -1079,7 +1177,7 @@ function whenBadge(label, when, baseLabel) {
   return `<span class="when-badge when-${label}" data-when-base="${base}">${when}</span>`;
 }
 function _badgeInfoForCard(c) {
-  const phase = _statusPhase(c.status || '');
+  const phase = _phaseForCard(c.status || '', c.game_date || '', c.game_time || '');
   if (phase === 'live')  return { label: 'LIVE',  text: 'LIVE' };
   if (phase === 'final') return { label: 'FINAL', text: 'FINAL' };
   return { label: 'UPCOMING', text: 'UPCOMING' };
@@ -1391,7 +1489,7 @@ function toggleCard(cardEl) {
 let _filteredProps = [];
 
 function renderPropsTable(props) {
-  ALL_PROPS = props || [];
+  ALL_PROPS = _publicOverProps(props || []);
   filterProps();
 }
 
@@ -1438,12 +1536,9 @@ function _mixPropsByType(props) {
 }
 
 function autoGenParlaysFromProps() {
-  const qualified = (ALL_PROPS || []).filter(p => {
-    if ((p.direction||'').toUpperCase() !== 'OVER') return false;
-    const lv = _lineValue(p.line);
-    if (Number.isFinite(lv) && lv <= 0.5) return false;
-    return _legProb(p) >= 0.61;
-  }).sort((a,b) => _legProb(b) - _legProb(a));
+  const qualified = _publicOverProps(ALL_PROPS || [])
+    .filter(p => _legProb(p) >= 0.61)
+    .sort((a,b) => _legProb(b) - _legProb(a));
   const mixedQualified = _mixPropsByType(qualified);
 
   const grid  = document.getElementById('parlay-combos-grid');
@@ -1616,10 +1711,7 @@ function buildLegPool() {
   };
 
   // Player props (OVER only)
-  (ALL_PROPS || []).forEach(p => {
-    if ((p.direction || '').toUpperCase() !== 'OVER') return;
-    const lv = _lineValue(p.line);
-    if (Number.isFinite(lv) && lv <= 0.5) return;
+  _publicOverProps(ALL_PROPS || []).forEach(p => {
     const prob = _legProb(p);
     const dec  = _legDec(p) || 1.9;
     const ev   = p.ev != null ? Number(p.ev) : _legEv(prob, dec);
@@ -1994,7 +2086,7 @@ function loadBotPerformance() {
     const losses  = (gs.losses||0) + (ps.losses||0) + (rs.losses||0);
     const pushes  = (gs.pushes||0) + (ps.pushes||0) + (rs.pushes||0);
     const pending = (gs.pending||0)+ (ps.pending||0)+ (rs.pending||0);
-    const totalProps = Array.isArray(ALL_PROPS) ? ALL_PROPS.length : 0;
+    const totalProps = _overBetsTotal();
     const hitRate = (wins + losses) > 0 ? Math.round(wins / (wins + losses) * 100) : null;
     const hrColor = hitRate >= 55 ? 'var(--green)' : hitRate >= 45 ? 'var(--yellow)' : 'var(--red)';
     el.innerHTML = `
@@ -2017,7 +2109,7 @@ function loadPerformance() {
   fetch('/api/performance').then(r=>r.json()).then(d=>{
     if (!d.ok) { return; }
     const s = d.stats||{};
-    const totalProps = Array.isArray(ALL_PROPS) ? ALL_PROPS.length : 0;
+    const totalProps = _overBetsTotal();
     perfEl.innerHTML = `
       <div class="perf-card"><div class="perf-val perf-win">${s.wins||0}</div><div class="perf-label">Game Wins</div></div>
       <div class="perf-card"><div class="perf-val perf-loss">${s.losses||0}</div><div class="perf-label">Game Losses</div></div>
@@ -2034,7 +2126,7 @@ function loadPropPerformance() {
     if (!d.ok) return;
     const s = d.stats||{};
     const hitRateColor = s.hit_rate >= 55 ? 'var(--green)' : s.hit_rate >= 45 ? 'var(--yellow)' : 'var(--red)';
-    const totalProps = Array.isArray(ALL_PROPS) ? ALL_PROPS.length : (s.total||0);
+    const totalProps = _overBetsTotal() || (s.total||0);
     const liveOver = Array.isArray(ALL_PROPS)
       ? ALL_PROPS.filter(p => _isLiveGame(p.game_key||p.game||'')).length
       : 0;
@@ -2062,11 +2154,24 @@ function loadPropPerformance() {
   });
 }
 
+let _resolveInFlight = false;
+function resolveOutcomesSilent() {
+  if (_resolveInFlight) return;
+  _resolveInFlight = true;
+  fetch('/api/resolve-outcomes', {method:'POST'})
+    .then(r => r.json())
+    .then(() => {
+      loadTrackedParlays();
+      loadPropPerformance();
+      loadParlayPerformance();
+      loadPerformance();
+    })
+    .catch(() => {})
+    .finally(() => { _resolveInFlight = false; });
+}
+
 function resolveOutcomes() {
-  fetch('/api/resolve-outcomes',{method:'POST'}).then(r=>r.json()).then(d=>{
-    toast(d.msg||'Resolving…','info');
-    setTimeout(loadPerformance, 4000);
-  });
+  resolveOutcomesSilent();
 }
 
 function loadHistory() {
@@ -2257,20 +2362,19 @@ function stopConsolePoll() {
       startPolling();
     }
   }).catch(()=>{});
+
+  _refreshScheduledStatuses();
+
+  // Keep parlays and outcomes fully automatic without manual actions.
+  resolveOutcomesSilent();
+  setInterval(resolveOutcomesSilent, 10 * 60 * 1000);
+  setInterval(() => {
+    if (!_isParlaysActive()) return;
+    loadTrackedParlays();
+    loadPropPerformance();
+    loadParlayPerformance();
+  }, 2 * 60 * 1000);
 })();
 </script>
 </body>
-</html>    }
-  }).catch(()=>{});
-})();
-</script>
-</body>
-</html></html>})();
-</script>
-</body>
-</html>    }
-  }).catch(()=>{});
-})();
-</script>
-</body>
-</html></html>
+</html>
