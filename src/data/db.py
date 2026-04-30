@@ -785,15 +785,15 @@ def get_todays_prop_picks(sport: str = None, max_age_hours: int = 2) -> list:
         return []
     try:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-         base = """
-             SELECT sport, player_name, team, game_date, prop_type,
-                 line, over_prob, under_prob, recommendation, stats_json, detected_at
-             FROM   prop_history
-             WHERE  game_date  = CURRENT_DATE
-            AND  detected_at > NOW() - (INTERVAL '1 hour' * %s)
-            AND  recommendation = 'OVER'
-            AND  (line IS NULL OR line > 0.5)
-         """
+        base = """
+            SELECT sport, player_name, team, game_date, prop_type,
+                   line, over_prob, under_prob, recommendation, stats_json, detected_at
+            FROM   prop_history
+            WHERE  game_date  = CURRENT_DATE
+              AND  detected_at > NOW() - (INTERVAL '1 hour' * %s)
+              AND  recommendation = 'OVER'
+              AND  (line IS NULL OR line > 0.5)
+        """
         if sport:
             cur.execute(base + " AND sport = %s ORDER BY detected_at DESC",
                         (max_age_hours, sport))

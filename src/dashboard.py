@@ -764,10 +764,10 @@ def index():
         state=state,
         bankroll=BANKROLL,
         phases=_PHASES,
-        today_cards=json.dumps([]),
-        tomorrow_cards=json.dumps([]),
-        best_parlays=json.dumps([]),
-        all_props=json.dumps([]),
+        today_cards=[],
+        tomorrow_cards=[],
+        best_parlays=[],
+        all_props=[],
     )
 
 

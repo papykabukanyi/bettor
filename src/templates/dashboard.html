@@ -624,7 +624,7 @@ body.console-open main{padding-bottom:236px}
 let TODAY_CARDS    = {{ today_cards|tojson }};
 let TOMORROW_CARDS = {{ tomorrow_cards|tojson }};
 let BEST_PARLAYS   = {{ best_parlays|tojson }};
-let ALL_PROPS      = {{ all_props|tojson }};
+let ALL_PROPS      = (function(v){ return Array.isArray(v) ? v : []; })({{ all_props|tojson }});
 let AUTO_PROP_PARLAY = null;
 let BEST_LEGS      = [];
 let AUTO_MIX_LEGS  = [];
