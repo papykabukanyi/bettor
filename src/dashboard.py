@@ -846,6 +846,43 @@ def api_cached_state():
     except Exception:
         pass
 
+    # Fallback: build schedule-only cards so tabs are never blank while analysis/cache is unavailable.
+    try:
+        from data.mlb_fetcher import get_schedule_range
+
+        today_date = _et_calendar_today()
+        today_str = today_date.isoformat()
+        tomorrow_str = (today_date + datetime.timedelta(days=1)).isoformat()
+        done_statuses = {
+            "final", "game over", "f", "completed early", "completed",
+            "cancelled", "suspended", "postponed",
+        }
+
+        all_games = get_schedule_range(days_ahead=2) or []
+        today_games = [
+            g for g in all_games
+            if g.get("date", "") == today_str
+            and (g.get("status", "").lower() not in done_statuses)
+        ]
+        tomorrow_games = [g for g in all_games if g.get("date", "") == tomorrow_str]
+
+        fallback_today = [_build_card(g, [], [], "TODAY") for g in today_games]
+        fallback_tomorrow = [_build_card(g, [], [], "TOMORROW") for g in tomorrow_games]
+
+        if fallback_today or fallback_tomorrow:
+            return jsonify({
+                "ok": True,
+                "status": "idle",
+                "last_updated": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+                "game_cards_today": fallback_today,
+                "game_cards_tomorrow": fallback_tomorrow,
+                "best_parlays": [],
+                "player_props": [],
+                "elite_parlay": None,
+            })
+    except Exception:
+        pass
+
     return jsonify({"ok": False, "status": "idle",
                     "game_cards_today": [], "game_cards_tomorrow": [],
                     "best_parlays": [], "player_props": [],

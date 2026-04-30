@@ -655,6 +655,10 @@ const LOCAL_CACHE_KEY = 'bettor_last_session';
 let _cacheUpdatedAtMs = null;
 let _autoRefreshInFlight = false;
 
+function _asArray(v) {
+  return Array.isArray(v) ? v : [];
+}
+
 // ── SSE live connection ────────────────────────────────────────────────────
 let _sse = null;
 let _sseReconnectDelay = 3000;
@@ -785,10 +789,10 @@ function saveLocalCache(data) {
     const payload = {
       saved_at: Date.now(),
       data: {
-        game_cards_today:     data.game_cards_today    || [],
-        game_cards_tomorrow:  data.game_cards_tomorrow || [],
-        best_parlays:         data.best_parlays        || [],
-        player_props:         data.player_props        || [],
+        game_cards_today:     _asArray(data.game_cards_today),
+        game_cards_tomorrow:  _asArray(data.game_cards_tomorrow),
+        best_parlays:         _asArray(data.best_parlays),
+        player_props:         _asArray(data.player_props),
         last_updated:         data.last_updated        || '',
       }
     };
@@ -809,10 +813,10 @@ function loadLocalCache() {
 
 function applyCachedData(d) {
   if (!d) return;
-  if (d.game_cards_today    !== undefined) TODAY_CARDS    = d.game_cards_today    || [];
-  if (d.game_cards_tomorrow !== undefined) TOMORROW_CARDS = d.game_cards_tomorrow || [];
-  if (d.best_parlays        !== undefined) BEST_PARLAYS   = d.best_parlays        || [];
-  if (d.player_props        !== undefined) ALL_PROPS      = _publicOverProps(d.player_props || []);
+  if (d.game_cards_today    !== undefined) TODAY_CARDS    = _asArray(d.game_cards_today);
+  if (d.game_cards_tomorrow !== undefined) TOMORROW_CARDS = _asArray(d.game_cards_tomorrow);
+  if (d.best_parlays        !== undefined) BEST_PARLAYS   = _asArray(d.best_parlays);
+  if (d.player_props        !== undefined) ALL_PROPS      = _publicOverProps(_asArray(d.player_props));
   renderAll();
   const lu = d.last_updated || d._updated_at;
   if (lu) document.getElementById('last-updated').textContent = '⟳ ' + lu;
@@ -1278,6 +1282,7 @@ function renderAll() {
 
 // ── Game cards ────────────────────────────────────────────────────────────
 function renderGames(gridId, cards, emptyId, metaId, badgeId) {
+  cards = _asArray(cards);
   const grid = document.getElementById(gridId);
   const empty = document.getElementById(emptyId);
   const meta  = document.getElementById(metaId);
@@ -2415,7 +2420,7 @@ function stopConsolePoll() {
 (function init() {
   // Show local cache immediately so page is not blank
   const local = loadLocalCache();
-  if (local && (local.game_cards_today||[]).length) {
+  if (local && _asArray(local.game_cards_today).length) {
     applyCachedData(local);
   }
   hideOverlay();
