@@ -49,6 +49,23 @@ except ImportError:
     print("[mlb_fetcher] MLB-StatsAPI not installed – pip install MLB-StatsAPI")
 
 
+def _calendar_today_et() -> datetime.date:
+    """Return calendar date in America/New_York (no 10 PM cutover)."""
+    try:
+        import zoneinfo
+
+        eastern = zoneinfo.ZoneInfo("America/New_York")
+        return datetime.datetime.now(tz=eastern).date()
+    except Exception:
+        try:
+            import pytz
+
+            eastern = pytz.timezone("America/New_York")
+            return datetime.datetime.now(tz=eastern).date()
+        except Exception:
+            return datetime.date.today()
+
+
 def get_team_batting_stats(season: int) -> pd.DataFrame:
     """Return team-level batting stats for a season via official MLB Stats API."""
     if not MLB_API_OK:
@@ -192,7 +209,7 @@ def get_schedule_today() -> list[dict]:
     if not MLB_API_OK:
         return []
     try:
-        today = _et_today().strftime("%Y-%m-%d")
+        today = _calendar_today_et().strftime("%Y-%m-%d")
         schedule = mlbstatsapi.schedule(start_date=today, end_date=today)
         games = [_parse_mlb_game(g, today) for g in schedule]
         _save_mlb_games_to_db(games)
@@ -210,7 +227,7 @@ def get_schedule_range(days_ahead: int = 1) -> list[dict]:
     if not MLB_API_OK:
         return []
     try:
-        today = _et_today()
+        today = _calendar_today_et()
         end   = today + datetime.timedelta(days=days_ahead)
         schedule = mlbstatsapi.schedule(
             start_date=today.strftime("%Y-%m-%d"),

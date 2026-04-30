@@ -217,6 +217,23 @@ def _norm_gk(s: str) -> str:
     return s.replace(" @ ", "@").replace(" @", "@").replace("@ ", "@").strip()
 
 
+def _et_calendar_today() -> datetime.date:
+    """Return calendar date in America/New_York (no 10 PM cutover)."""
+    try:
+        import zoneinfo
+
+        eastern = zoneinfo.ZoneInfo("America/New_York")
+        return datetime.datetime.now(tz=eastern).date()
+    except Exception:
+        try:
+            import pytz
+
+            eastern = pytz.timezone("America/New_York")
+            return datetime.datetime.now(tz=eastern).date()
+        except Exception:
+            return datetime.date.today()
+
+
 def _team_words(full_name: str) -> list:
     """Return meaningful words from a team name (skip short/common words)."""
     return [w for w in full_name.lower().split() if len(w) > 3]
@@ -370,7 +387,8 @@ def _run_analysis(lock_date: datetime.date | None = None):
             need_preds = True
             need_props = True
 
-        today_date = et_today()
+        # Dashboard display should follow calendar ET date (no betting-day cutover).
+        today_date = _et_calendar_today()
         today_str  = today_date.isoformat()
         tomorrow_str = (today_date + datetime.timedelta(days=1)).isoformat()
 
@@ -391,7 +409,7 @@ def _run_analysis(lock_date: datetime.date | None = None):
         # Statuses that should be hidden from Today cards because they're fully done/cancelled.
         _DONE_STATUSES = {
             "final", "game over", "f", "completed early", "completed",
-            "cancelled", "suspended",
+            "cancelled", "suspended", "postponed",
         }
 
         _phase(0)
@@ -492,7 +510,7 @@ def _run_analysis(lock_date: datetime.date | None = None):
         def _is_terminal_status(s: str) -> bool:
             sl = (s or "").lower()
             return any(k in sl for k in (
-                "final", "game over", "completed", "cancelled", "suspended"
+                "final", "game over", "completed", "cancelled", "suspended", "postponed"
             ))
 
         for g in today_games + tomorrow_games:
@@ -1153,7 +1171,7 @@ def api_live_scores():
     """Poll MLB Stats API for today's in-progress / final game scores."""
     try:
         import statsapi as mlbstatsapi
-        today = datetime.date.today().strftime("%m/%d/%Y")
+        today = _et_calendar_today().strftime("%m/%d/%Y")
         raw = mlbstatsapi.schedule(start_date=today, end_date=today) or []
         games = []
         for g in raw:
@@ -1245,8 +1263,8 @@ def _poll_live_scores():
     global _live_score_timer
     try:
         import statsapi as mlbstatsapi
-        # Use ET date instead of server local time
-        today = et_today()
+        # Use calendar ET date (no 10 PM cutover) to avoid dropping late live games.
+        today = _et_calendar_today()
         today_str = today.strftime("%m/%d/%Y")
         raw = mlbstatsapi.schedule(start_date=today_str, end_date=today_str) or []
         
@@ -1256,7 +1274,8 @@ def _poll_live_scores():
             # Include: live games, warmup, pre-game, final/completed (for scores)
             return any(k in s for k in (
                 "progress", "live", "warmup", "pre-game", "pregame",
-                "final", "game over", "completed", "delay", "challenge"
+                "final", "game over", "completed", "delay", "challenge",
+                "postpon", "cancel", "suspend"
             ))
         
         live = [g for g in raw if _is_active_game(g.get("status", ""))]
@@ -1273,9 +1292,8 @@ def _poll_live_scores():
         with _lock:
             _state["live_scores"] = live_map
 
-        # Broadcast live scores to all SSE clients
-        if live_map:
-            _sse_broadcast("live_scores", {"scores": live_map})
+        # Broadcast full live map every poll (including empty) so clients can clear stale entries.
+        _sse_broadcast("live_scores", {"scores": live_map})
 
         # Auto-resolve finished games (non-blocking, errors suppressed)
         def _is_final_status(status):

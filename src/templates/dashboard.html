@@ -680,7 +680,7 @@ function _connectSSE() {
       hideOverlay();
       stopPolling();
       if (d.game_cards_today  !== undefined) applyCachedData(d);
-      if (d.live_scores       !== undefined) _applyLiveScores(d.live_scores);
+      if (d.live_scores       !== undefined) _applyLiveScores(d.live_scores, {replace: true});
       saveLocalCache(d);
       // Refresh secondary panels silently
       _silentRefreshPanels();
@@ -691,7 +691,7 @@ function _connectSSE() {
   _sse.addEventListener('live_scores', e => {
     try {
       const d = JSON.parse(e.data);
-      _applyLiveScores(d.scores || {});
+      _applyLiveScores(d.scores || {}, {replace: true});
     } catch(err) {}
   });
 
@@ -836,8 +836,10 @@ function _isFinalStatus(status) {
 function _statusPhase(status) {
   const s = (status || '').toLowerCase();
   if (!s) return 'upcoming';
+  if (s.includes('postpon') || s.includes('cancel') || s.includes('suspend')) return 'final';
   if (s.includes('final') || s.includes('game over') || s.includes('completed')) return 'final';
   if (/\b(top|bottom|mid|end)\s*\d/.test(s)) return 'live';
+  if (s.includes('delayed start')) return 'upcoming';
   if (s.includes('inning') && !s.includes('scheduled')) return 'live';
   if (s.includes('in progress') || s.includes('progress') || s.includes('live') || s.includes('warmup')) return 'live';
   return 'upcoming';
@@ -962,8 +964,13 @@ function _isLiveGame(gameKey) {
   return _phaseForCard(card.status || '', card.game_date || '', card.game_time || '', card.game_datetime || '') === 'live';
 }
 
-function _applyLiveScores(scores) {
-  _liveScores = Object.assign(_liveScores, scores);
+function _applyLiveScores(scores, opts) {
+  const options = opts || {};
+  if (options.replace === true) {
+    _liveScores = Object.assign({}, scores || {});
+  } else {
+    _liveScores = Object.assign(_liveScores, scores || {});
+  }
   // Update all game cards on screen
   document.querySelectorAll('[data-game-key]').forEach(card => {
     const gk = _norm(card.dataset.gameKey);
@@ -1012,7 +1019,7 @@ function _applyLiveScores(scores) {
 }
 
 function _refreshScheduledStatuses() {
-  _applyLiveScores({});
+  _applyLiveScores({}, { replace: false });
 }
 
 // ── Silent background panel refresh (called after state_update) ─────────────
