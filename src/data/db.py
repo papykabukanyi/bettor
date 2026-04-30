@@ -1584,14 +1584,15 @@ def get_performance_stats() -> dict:
 
 
 def get_prop_performance_stats() -> dict:
-    """Return prop hit-rate breakdown by prop_type for last 90 days."""
+    """Return today's OVER prop stats (line > 0.5) for dashboard performance."""
     conn = get_conn()
     if conn is None:
         return {}
     try:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        et_today_sql = "timezone('America/New_York', now())::date"
         # Overall prop stats
-        cur.execute("""
+        cur.execute(f"""
             SELECT
                 COUNT(*) FILTER (WHERE outcome='WIN')     AS wins,
                 COUNT(*) FILTER (WHERE outcome='LOSS')    AS losses,
@@ -1601,43 +1602,37 @@ def get_prop_performance_stats() -> dict:
                 ROUND(AVG(CASE WHEN outcome='WIN' THEN 1.0
                                WHEN outcome='LOSS' THEN 0.0 END)*100, 1) AS hit_rate
             FROM prop_history
-            WHERE game_date >= CURRENT_DATE - INTERVAL '90 days'
+            WHERE game_date = {et_today_sql}
               AND recommendation = 'OVER'
               AND (line IS NULL OR line > 0.5)
         """)
         row = cur.fetchone()
         stats = dict(row) if row else {}
         # By prop type
-        cur.execute("""
+        cur.execute(f"""
             SELECT prop_type,
                    recommendation,
                    COUNT(*) FILTER (WHERE outcome='WIN')  AS wins,
                    COUNT(*) FILTER (WHERE outcome='LOSS') AS losses,
+                   COUNT(*) FILTER (WHERE outcome='PUSH') AS pushes,
+                   COUNT(*) FILTER (WHERE outcome='PENDING') AS pending,
                    COUNT(*) AS total,
                    ROUND(AVG(CASE WHEN outcome='WIN' THEN 1.0
                                   WHEN outcome='LOSS' THEN 0.0 END)*100, 1) AS hit_rate
             FROM prop_history
-            WHERE game_date >= CURRENT_DATE - INTERVAL '90 days'
-              AND outcome IN ('WIN','LOSS')
+            WHERE game_date = {et_today_sql}
               AND recommendation = 'OVER'
               AND (line IS NULL OR line > 0.5)
             GROUP BY prop_type, recommendation
             ORDER BY total DESC
         """)
         stats["by_prop_type"] = [dict(r) for r in cur.fetchall()]
-        # Last 30 days trend
-        cur.execute("""
-            SELECT game_date::text AS date,
-                   COUNT(*) FILTER (WHERE outcome='WIN')  AS wins,
-                   COUNT(*) FILTER (WHERE outcome='LOSS') AS losses
-            FROM prop_history
-            WHERE game_date >= CURRENT_DATE - INTERVAL '30 days'
-              AND outcome IN ('WIN','LOSS')
-              AND recommendation = 'OVER'
-              AND (line IS NULL OR line > 0.5)
-            GROUP BY game_date ORDER BY game_date
-        """)
-        stats["daily_trend"] = [dict(r) for r in cur.fetchall()]
+        # Keep shape stable for frontend consumers.
+        stats["daily_trend"] = [{
+            "date": datetime.datetime.now().date().isoformat(),
+            "wins": stats.get("wins", 0) or 0,
+            "losses": stats.get("losses", 0) or 0,
+        }]
         return stats
     except Exception as e:
         print(f"[db] get_prop_performance_stats error: {e}")

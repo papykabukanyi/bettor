@@ -387,11 +387,9 @@ def _run_analysis(lock_date: datetime.date | None = None):
             _log(f"[backfill] Backfill error (continuing): {_bf_e}")
         # Retrain deferred to after team_stats is loaded (later in pipeline)
 
-        # Statuses that mean the game is finished or currently in-progress
-        # (should not appear in the "upcoming" display tab)
+        # Statuses that should be hidden from Today cards because they're fully done/cancelled.
         _DONE_STATUSES = {
             "final", "game over", "f", "completed early", "completed",
-            "in progress", "live", "manager challenge", "delay", "delayed",
             "cancelled", "suspended",
         }
 
@@ -402,9 +400,9 @@ def _run_analysis(lock_date: datetime.date | None = None):
         today_games    = [g for g in all_games if g.get("date", "") == today_str]
         tomorrow_games = [g for g in all_games if g.get("date", "") == tomorrow_str]
 
-        # Upcoming = not yet started; used for display only
+        # Display all still-relevant today games, including active/in-progress.
         upcoming_today    = [g for g in today_games
-                             if g.get("status", "").lower() not in _DONE_STATUSES]
+                     if g.get("status", "").lower() not in _DONE_STATUSES]
         upcoming_tomorrow = tomorrow_games  # tomorrow games can't be past
         _log(f"Schedule: {len(today_games)} today ({len(upcoming_today)} upcoming), "
              f"{len(tomorrow_games)} tomorrow")
@@ -491,7 +489,8 @@ def _run_analysis(lock_date: datetime.date | None = None):
 
         all_bets = []
         _ALLOWED_STATUS = {"", "Preview", "Pre-Game", "Scheduled", "Warmup",
-                           "Postponed", "Delayed"}
+                   "Postponed", "Delayed", "In Progress", "Live",
+                   "Manager Challenge", "Delay"}
         for g in today_games + tomorrow_games:
             ht = g.get("home_team", "")
             at = g.get("away_team", "")

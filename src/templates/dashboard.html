@@ -904,8 +904,14 @@ function _fmtGameTime(hhmm) {
 
 function _isLiveGame(gameKey) {
   if (!gameKey) return false;
-  const s = _liveScores[_norm(gameKey)];
-  return s ? _isLiveStatus(s.status) : false;
+  const nk = _norm(gameKey);
+  const s = _liveScores[nk];
+  if (s) return _isLiveStatus(s.status);
+
+  const cards = ([]).concat(TODAY_CARDS || [], TOMORROW_CARDS || []);
+  const card = cards.find(c => _norm(c.game_key || '') === nk);
+  if (!card) return false;
+  return _phaseForCard(card.status || '', card.game_date || '', card.game_time || '') === 'live';
 }
 
 function _applyLiveScores(scores) {
@@ -2140,14 +2146,15 @@ function loadPropPerformance() {
     const byType = s.by_prop_type||[];
     const tbody = document.getElementById('prop-type-tbody');
     tbody.innerHTML = byType.map(v=>{
-      const hr = v.wins&&(v.wins+v.losses) ? Math.round(v.wins/(v.wins+v.losses)*100) : null;
+      const wl = (v.wins||0) + (v.losses||0);
+      const hr = wl > 0 ? Math.round((v.wins||0)/wl*100) : null;
       const hrColor = hr>=55?'var(--green)':hr>=45?'var(--yellow)':'var(--red)';
       return `<tr>
         <td>${(v.prop_type||'').replace(/_/g,' ')}</td>
         <td><span class="badge ${v.recommendation==='OVER'?'badge-blue':'badge-purple'}">${v.recommendation||'—'}</span></td>
         <td style="color:var(--green)">${v.wins||0}</td>
         <td style="color:var(--red)">${v.losses||0}</td>
-        <td>${v.total||0}</td>
+        <td>${v.total||0}${(v.pending||0)?` · ${v.pending} pending`:''}${(v.pushes||0)?` · ${v.pushes} push`:''}</td>
         <td style="color:${hrColor};font-weight:700">${hr!=null?hr+'%':'—'}</td>
       </tr>`;
     }).join('') || '<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:16px">No prop results yet — runs automatically after games finish.</td></tr>';
