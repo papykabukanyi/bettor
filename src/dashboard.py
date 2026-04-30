@@ -488,16 +488,19 @@ def _run_analysis(lock_date: datetime.date | None = None):
         _mp.MIN_VALUE_EDGE = _DASH_MIN_EDGE
 
         all_bets = []
-        _ALLOWED_STATUS = {"", "Preview", "Pre-Game", "Scheduled", "Warmup",
-                   "Postponed", "Delayed", "In Progress", "Live",
-                   "Manager Challenge", "Delay"}
+        def _is_terminal_status(s: str) -> bool:
+            sl = (s or "").lower()
+            return any(k in sl for k in (
+                "final", "game over", "completed", "cancelled", "suspended"
+            ))
+
         for g in today_games + tomorrow_games:
             ht = g.get("home_team", "")
             at = g.get("away_team", "")
             if not ht or not at:
                 continue
             st = g.get("status", "")
-            if st and st not in _ALLOWED_STATUS:
+            if _is_terminal_status(st):
                 _log(f"Skip {at}@{ht} status={st!r}")
                 continue
             try:

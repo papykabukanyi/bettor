@@ -817,6 +817,8 @@ function _statusPhase(status) {
   const s = (status || '').toLowerCase();
   if (!s) return 'upcoming';
   if (s.includes('final') || s.includes('game over') || s.includes('completed')) return 'final';
+  if (/\b(top|bottom|mid|end)\s*\d/.test(s)) return 'live';
+  if (s.includes('inning') && !s.includes('scheduled')) return 'live';
   if (s.includes('in progress') || s.includes('progress') || s.includes('live') || s.includes('warmup')) return 'live';
   return 'upcoming';
 }
@@ -890,6 +892,12 @@ function _overBetsTotal() {
   return _publicOverProps(ALL_PROPS).length;
 }
 
+function _phaseVerb(phase, futureText, liveText, pastText) {
+  if (phase === 'final') return pastText;
+  if (phase === 'live') return liveText;
+  return futureText;
+}
+
 function _fmtGameTime(hhmm) {
   if (!hhmm) return '';
   const parts = String(hhmm).split(':');
@@ -908,8 +916,19 @@ function _isLiveGame(gameKey) {
   const s = _liveScores[nk];
   if (s) return _isLiveStatus(s.status);
 
+  const _keyLooseMatch = (a, b) => {
+    const x = _norm(a || '').toLowerCase();
+    const y = _norm(b || '').toLowerCase();
+    if (!x || !y) return false;
+    if (x === y || x.includes(y) || y.includes(x)) return true;
+    const [xa, xh] = x.split('@').map(v => (v || '').trim());
+    const [ya, yh] = y.split('@').map(v => (v || '').trim());
+    if (!xa || !xh || !ya || !yh) return false;
+    return (xa.includes(ya) || ya.includes(xa)) && (xh.includes(yh) || yh.includes(xh));
+  };
+
   const cards = ([]).concat(TODAY_CARDS || [], TOMORROW_CARDS || []);
-  const card = cards.find(c => _norm(c.game_key || '') === nk);
+  const card = cards.find(c => _keyLooseMatch(c.game_key || '', nk));
   if (!card) return false;
   return _phaseForCard(card.status || '', card.game_date || '', card.game_time || '') === 'live';
 }
@@ -1244,57 +1263,57 @@ function _lineValue(v) {
 }
 
 // ── Plain-English helpers ─────────────────────────────────────────────────
-function plainEnglishBet(bet, homeTeam, awayTeam) {
+function plainEnglishBet(bet, homeTeam, awayTeam, phase='upcoming') {
   if (!bet) return null;
   const bt   = (bet.bet_type||'').toLowerCase();
   const pick = bet.pick || '';
   const line = parseFloat(bet.line) || 0;
   const isOver = pick.toUpperCase().includes('OVER');
   const team = cleanPickTeam(pick);
-  if (bt === 'moneyline') return { text: `${team} will WIN`, emoji: '&#127942;', color: 'var(--green)' };
+  if (bt === 'moneyline') return { text: _phaseVerb(phase, `${team} will WIN`, `${team} is LIVE to WIN`, `${team} result is FINAL`), emoji: '&#127942;', color: 'var(--green)' };
   if (bt === 'run_line') {
-    if (pick.includes('+1.5')) return { text: `${team} wins or stays within 1 run`, emoji: '&#128202;', color: '#818cf8' };
-    return { text: `${team} wins by 2+ runs`, emoji: '&#128202;', color: '#818cf8' };
+    if (pick.includes('+1.5')) return { text: _phaseVerb(phase, `${team} wins or stays within 1 run`, `${team} is LIVE within 1 run`, `${team} run-line result is FINAL`), emoji: '&#128202;', color: '#818cf8' };
+    return { text: _phaseVerb(phase, `${team} wins by 2+ runs`, `${team} is LIVE for 2+ run margin`, `${team} run-line result is FINAL`), emoji: '&#128202;', color: '#818cf8' };
   }
   if (bt === 'total' || bt === 'game_total') {
     return isOver
-      ? { text: `Game will have MORE than ${line} total runs`, emoji: '&#127919;', color: 'var(--accent)' }
-      : { text: `Game will have FEWER than ${line} total runs`, emoji: '&#127919;', color: 'var(--yellow)' };
+      ? { text: _phaseVerb(phase, `Game will have MORE than ${line} total runs`, `Game total is LIVE over ${line}`, `Game total result is FINAL`), emoji: '&#127919;', color: 'var(--accent)' }
+      : { text: _phaseVerb(phase, `Game will have FEWER than ${line} total runs`, `Game total is LIVE under ${line}`, `Game total result is FINAL`), emoji: '&#127919;', color: 'var(--yellow)' };
   }
   if (bt === 'f5_total') {
     return isOver
-      ? { text: `First 5 innings: MORE than ${line} runs`, emoji: '&#9203;', color: 'var(--accent)' }
-      : { text: `First 5 innings: FEWER than ${line} runs`, emoji: '&#9203;', color: 'var(--yellow)' };
+      ? { text: _phaseVerb(phase, `First 5 innings: MORE than ${line} runs`, `F5 total is LIVE over ${line}`, `F5 total result is FINAL`), emoji: '&#9203;', color: 'var(--accent)' }
+      : { text: _phaseVerb(phase, `First 5 innings: FEWER than ${line} runs`, `F5 total is LIVE under ${line}`, `F5 total result is FINAL`), emoji: '&#9203;', color: 'var(--yellow)' };
   }
-  if (bt === 'f5_moneyline') return { text: `${team} leads after 5 innings`, emoji: '&#9203;', color: '#a78bfa' };
+  if (bt === 'f5_moneyline') return { text: _phaseVerb(phase, `${team} leads after 5 innings`, `${team} F5 is LIVE`, `${team} F5 result is FINAL`), emoji: '&#9203;', color: '#a78bfa' };
   if (bt === 'home_team_total') {
     return isOver
-      ? { text: `${homeTeam} scores MORE than ${line} runs`, emoji: '&#127968;', color: 'var(--accent)' }
-      : { text: `${homeTeam} scores fewer than ${line} runs`, emoji: '&#127968;', color: 'var(--yellow)' };
+      ? { text: _phaseVerb(phase, `${homeTeam} scores MORE than ${line} runs`, `${homeTeam} team total is LIVE over ${line}`, `${homeTeam} team-total result is FINAL`), emoji: '&#127968;', color: 'var(--accent)' }
+      : { text: _phaseVerb(phase, `${homeTeam} scores fewer than ${line} runs`, `${homeTeam} team total is LIVE under ${line}`, `${homeTeam} team-total result is FINAL`), emoji: '&#127968;', color: 'var(--yellow)' };
   }
   if (bt === 'away_team_total') {
     return isOver
-      ? { text: `${awayTeam} scores MORE than ${line} runs`, emoji: '&#9992;', color: 'var(--accent)' }
-      : { text: `${awayTeam} scores fewer than ${line} runs`, emoji: '&#9992;', color: 'var(--yellow)' };
+      ? { text: _phaseVerb(phase, `${awayTeam} scores MORE than ${line} runs`, `${awayTeam} team total is LIVE over ${line}`, `${awayTeam} team-total result is FINAL`), emoji: '&#9992;', color: 'var(--accent)' }
+      : { text: _phaseVerb(phase, `${awayTeam} scores fewer than ${line} runs`, `${awayTeam} team total is LIVE under ${line}`, `${awayTeam} team-total result is FINAL`), emoji: '&#9992;', color: 'var(--yellow)' };
   }
   return { text: pick, emoji: '&#127919;', color: 'var(--text)' };
 }
 
-function plainEnglishPropText(p) {
+function plainEnglishPropText(p, phase='upcoming') {
   const name = p.name || '—';
   const line = parseFloat(p.line) || 0;
   const st   = p.stat_type || '';
-  if (st === 'strikeouts')        return { text: `${name} strikes out ${line}+ batters`,            emoji: '&#128293;', color: '#a78bfa' };
-  if (st === 'hits')              return { text: `${name} gets ${line}+ hit${line!==1?'s':''}`,     emoji: '&#9918;',   color: 'var(--accent)' };
-  if (st === 'home_runs')         return { text: line<=1?`${name} hits a Home Run`:`${name} hits ${line}+ Home Runs`, emoji: '&#128165;', color: 'var(--green)' };
-  if (st === 'rbi')               return { text: `${name} drives in ${line}+ run${line!==1?'s':''}`,emoji: '&#127919;', color: 'var(--accent)' };
-  if (st === 'runs')              return { text: `${name} scores ${line}+ run${line!==1?'s':''}`,   emoji: '&#127939;', color: 'var(--green)' };
-  if (st === 'walks')             return { text: `${name} draws ${line}+ walk${line!==1?'s':''}`,   emoji: '&#128694;', color: '#94a3b8' };
-  if (st === 'stolen_bases')      return { text: `${name} steals ${line}+ base${line!==1?'s':''}`,  emoji: '&#128168;', color: 'var(--yellow)' };
-  if (st === 'total_bases')       return { text: `${name} has ${line}+ total bases`,                emoji: '&#128208;', color: 'var(--accent)' };
-  if (st === 'batter_strikeouts') return { text: `${name} strikes out ${line}+ times as batter`,   emoji: '&#10060;',  color: 'var(--red)' };
-  if (st === 'doubles')           return { text: `${name} hits ${line}+ double${line!==1?'s':''}`,  emoji: '&#128640;', color: 'var(--accent)' };
-  return { text: `${name} OVER ${line} ${p.prop_label||st}`, emoji: '&#9650;', color: 'var(--accent)' };
+  if (st === 'strikeouts')        return { text: _phaseVerb(phase, `${name} strikes out ${line}+ batters`, `${name} strikeouts are LIVE`, `${name} strikeout result is FINAL`),            emoji: '&#128293;', color: '#a78bfa' };
+  if (st === 'hits')              return { text: _phaseVerb(phase, `${name} gets ${line}+ hit${line!==1?'s':''}`, `${name} hits prop is LIVE`, `${name} hits result is FINAL`),     emoji: '&#9918;',   color: 'var(--accent)' };
+  if (st === 'home_runs')         return { text: _phaseVerb(phase, line<=1?`${name} hits a Home Run`:`${name} hits ${line}+ Home Runs`, `${name} HR prop is LIVE`, `${name} HR result is FINAL`), emoji: '&#128165;', color: 'var(--green)' };
+  if (st === 'rbi')               return { text: _phaseVerb(phase, `${name} drives in ${line}+ run${line!==1?'s':''}`, `${name} RBI prop is LIVE`, `${name} RBI result is FINAL`), emoji: '&#127919;', color: 'var(--accent)' };
+  if (st === 'runs')              return { text: _phaseVerb(phase, `${name} scores ${line}+ run${line!==1?'s':''}`, `${name} runs prop is LIVE`, `${name} runs result is FINAL`),   emoji: '&#127939;', color: 'var(--green)' };
+  if (st === 'walks')             return { text: _phaseVerb(phase, `${name} draws ${line}+ walk${line!==1?'s':''}`, `${name} walks prop is LIVE`, `${name} walks result is FINAL`),   emoji: '&#128694;', color: '#94a3b8' };
+  if (st === 'stolen_bases')      return { text: _phaseVerb(phase, `${name} steals ${line}+ base${line!==1?'s':''}`, `${name} steals prop is LIVE`, `${name} steals result is FINAL`),  emoji: '&#128168;', color: 'var(--yellow)' };
+  if (st === 'total_bases')       return { text: _phaseVerb(phase, `${name} has ${line}+ total bases`, `${name} total bases prop is LIVE`, `${name} total bases result is FINAL`),                emoji: '&#128208;', color: 'var(--accent)' };
+  if (st === 'batter_strikeouts') return { text: _phaseVerb(phase, `${name} strikes out ${line}+ times as batter`, `${name} batter-K prop is LIVE`, `${name} batter-K result is FINAL`),   emoji: '&#10060;',  color: 'var(--red)' };
+  if (st === 'doubles')           return { text: _phaseVerb(phase, `${name} hits ${line}+ double${line!==1?'s':''}`, `${name} doubles prop is LIVE`, `${name} doubles result is FINAL`),  emoji: '&#128640;', color: 'var(--accent)' };
+  return { text: _phaseVerb(phase, `${name} OVER ${line} ${p.prop_label||st}`, `${name} prop is LIVE`, `${name} prop result is FINAL`), emoji: '&#9650;', color: 'var(--accent)' };
 }
 
 function gameCard(c) {
@@ -1302,7 +1321,7 @@ function gameCard(c) {
   const baseWhen = (c.when_label || c.when || 'TODAY').toUpperCase();
   const badgeInfo = _badgeInfoForCard(c);
   const whenB   = whenBadge(badgeInfo.label, badgeInfo.text, baseWhen);
-  const phase = _statusPhase(c.status || '');
+  const phase = _phaseForCard(c.status || '', c.game_date || '', c.game_time || '');
   const timeText = _fmtGameTime(c.game_time);
   const initialStatusText = phase === 'final'
     ? 'FINAL'
@@ -1317,7 +1336,7 @@ function gameCard(c) {
   // Main WIN pick — big coloured headline
   let mainPickHtml = '';
   if (c.moneyline) {
-    const pbt  = plainEnglishBet(c.moneyline, c.home_team, c.away_team);
+    const pbt  = plainEnglishBet(c.moneyline, c.home_team, c.away_team, phase);
     const prob = Math.round((c.moneyline.model_prob||0.5)*100);
     const probColor = prob >= 65 ? 'var(--green)' : prob >= 55 ? 'var(--accent)' : 'var(--yellow)';
     mainPickHtml = `<div class="pick-card win-card">
@@ -1337,7 +1356,7 @@ function gameCard(c) {
   const otherBets = [];
   for (const key of ['total','run_line','f5_moneyline','f5_total']) {
     if (c[key]) {
-      const pbt  = plainEnglishBet(c[key], c.home_team, c.away_team);
+      const pbt  = plainEnglishBet(c[key], c.home_team, c.away_team, phase);
       const prob = Math.round((c[key].model_prob||0.5)*100);
       otherBets.push(`<div class="plain-bet-chip" style="color:${pbt.color}">${pbt.emoji} ${pbt.text} <span style="color:var(--muted);font-size:.72rem">(${prob}%)</span></div>`);
     }
@@ -1351,7 +1370,7 @@ function gameCard(c) {
     .sort((a,b) => (b.model_prob||0) - (a.model_prob||0))
     .slice(0, 3);
   const propsHtml = topProps.length ? `<div class="plain-props-preview">${topProps.map(p => {
-    const ppt = plainEnglishPropText(p);
+    const ppt = plainEnglishPropText(p, phase);
     const pct = Math.round((p.model_prob||0.5)*100);
     return `<div class="plain-prop-chip" style="color:${ppt.color}">${ppt.emoji} ${ppt.text} <span style="color:var(--muted);font-size:.7rem">${pct}%</span></div>`;
   }).join('')}</div>` : '';
@@ -1426,12 +1445,10 @@ function betSection(title, rows) {
 
 function betRow(label, bet, card) {
   if (!bet) return '';
+  const phase = _phaseForCard(card.status || '', card.game_date || '', card.game_time || '');
   const bt = (bet.bet_type || '').toLowerCase();
-  let pick = bet.pick || '—';
-  if (bt.includes('moneyline')) {
-    const team = cleanPickTeam(pick);
-    pick = team ? `${team} will win` : pick;
-  }
+  const pbt = plainEnglishBet(bet, card.home_team || '', card.away_team || '', phase);
+  const pick = (pbt && pbt.text) ? pbt.text : (bet.pick || '—');
   const pickCls = bt.includes('moneyline') ? 'pick-phrase win' : 'pick-phrase';
   const odds = fmtOdds(bet.odds_am);
   const edge = fmtEdge(bet.edge);
@@ -1475,8 +1492,10 @@ function propRow(p, gameKey) {
   const sb      = safetyBadge(p.safety_label||'MODERATE');
   const rationale = p.signal_rationale || '';
   const stat = (p.prop_label || p.stat_type || '').replace(/_/g,' ');
-  const line = p.line != null ? `${p.line}+` : '';
-  const phrase = `${p.name||'Player'} will have ${line} ${stat}`.replace(/\s+/g,' ').trim();
+  const cards = ([]).concat(TODAY_CARDS || [], TOMORROW_CARDS || []);
+  const card = cards.find(c => _norm(c.game_key || '') === _norm(gameKey || ''));
+  const phase = card ? _phaseForCard(card.status || '', card.game_date || '', card.game_time || '') : 'upcoming';
+  const phrase = plainEnglishPropText(p, phase).text;
   return `<div class="prop-row">
     <span class="prop-player">${p.name||'—'} <span class="prop-live-eye" title="Live tracking"></span></span>
     <span class="prop-stat prop-phrase">${phrase}</span>
@@ -1658,7 +1677,7 @@ function sortAndRenderProps() {
   });
   const tbody = document.getElementById('props-tbody');
   if (!sorted.length) {
-    tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--muted);padding:24px">No props match filter.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:24px">No props match filter.</td></tr>';
     document.getElementById('props-meta').textContent = '';
     return;
   }
@@ -1667,14 +1686,6 @@ function sortAndRenderProps() {
   tbody.innerHTML = sorted.map(p => {
     const isLive = _isLiveGame(p.game_key||p.game||'');
     const liveEye = isLive ? '<span class="live-eye" title="Live prop"></span>' : '';
-    const addKey = JSON.stringify({
-      label: `${p.name} ${p.direction} ${p.line} ${p.prop_label}`,
-      bet_type: 'player_prop',
-      game: p.game_key||p.game||'',
-      dec_odds: p.dec_odds||1.9,
-      conf: p.confidence||50,
-      badge: p.safety_label||'MODERATE',
-    }).replace(/"/g,'&quot;');
     return `<tr>
       <td>${liveEye}${p.name||'—'}</td>
       <td>${p.team||'—'}</td>
@@ -1684,7 +1695,6 @@ function sortAndRenderProps() {
       <td>${p.model_prob!=null?Math.round(p.model_prob*100)+'%':'—'}</td>
       <td>${safetyBadge(p.safety_label||'MODERATE')}</td>
       <td style="color:${(p.ev||0)>=0?'var(--green)':'var(--red)'}">${p.ev!=null?p.ev.toFixed(3):'—'}</td>
-      <td><button class="bet-add" onclick="addToParlay(${addKey})">+</button></td>
     </tr>`;
   }).join('');
 }
@@ -2128,9 +2138,13 @@ function loadPerformance() {
 }
 
 function loadPropPerformance() {
-  fetch('/api/prop-performance').then(r=>r.json()).then(d=>{
+  Promise.all([
+    fetch('/api/prop-performance').then(r=>r.json()),
+    fetch('/api/performance').then(r=>r.json()).catch(()=>({ok:false,stats:{}})),
+  ]).then(([d, g])=>{
     if (!d.ok) return;
     const s = d.stats||{};
+    const gs = (g && g.ok) ? (g.stats || {}) : {};
     const hitRateColor = s.hit_rate >= 55 ? 'var(--green)' : s.hit_rate >= 45 ? 'var(--yellow)' : 'var(--red)';
     const totalProps = _overBetsTotal() || (s.total||0);
     const liveOver = Array.isArray(ALL_PROPS)
@@ -2142,6 +2156,7 @@ function loadPropPerformance() {
       <div class="perf-card"><div class="perf-val perf-pend">${s.pushes||0}</div><div class="perf-label">Pushes</div></div>
       <div class="perf-card"><div class="perf-val perf-pend">${s.pending||0}</div><div class="perf-label">Pending</div></div>
       <div class="perf-card"><div class="perf-val" style="color:${hitRateColor}">${s.hit_rate!=null?s.hit_rate+'%':'—'}</div><div class="perf-label">Prop Hit Rate</div></div>
+      <div class="perf-card"><div class="perf-val">${gs.wins||0}-${gs.losses||0}</div><div class="perf-label">Game Bets (W-L)</div><div class="perf-sub">${gs.pending||0} pending · ${gs.pushes||0} pushes</div></div>
     `;
     const byType = s.by_prop_type||[];
     const tbody = document.getElementById('prop-type-tbody');
