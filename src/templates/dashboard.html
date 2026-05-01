@@ -545,22 +545,16 @@ body.console-open main{padding-bottom:236px}
     <div id="parlay-combos-empty" class="no-games hidden">Run analysis to generate props first.</div>
     <div class="parlay-combo-grid" id="parlay-combos-grid"></div>
 
-    <div class="section-header" style="margin-top:20px">
-      <span class="section-title">&#127919; Model Game Parlays</span>
-      <span class="section-meta" id="model-parlay-meta"></span>
-    </div>
-    <div id="model-parlays-empty" class="no-games hidden">No model game parlays yet.</div>
-    <div class="parlay-combo-grid" id="model-parlays-grid"></div>
-
     <div class="section-header" style="margin-top:28px">
-      <span class="section-title">&#128204; Saved &amp; Tracked Parlays</span>
+      <span class="section-title">&#128204; Tracked Parlays (Live / Win / Loss)</span>
+      <span class="section-meta" id="tracked-parlay-meta"></span>
     </div>
     <div id="tracked-parlays-list"><div class="no-games">No tracked parlays yet.</div></div>
 
     <!-- PROP PERFORMANCE -->
     <div class="section-header" style="margin-top:28px">
-      <span class="section-title">&#127919; Prop Bet Performance</span>
-      <span style="font-size:.78rem;color:var(--muted)">Over Bets of the Day lock on the first AM run; game props tracked separately</span>
+      <span class="section-title">&#127919; Tracking Summary</span>
+      <span style="font-size:.78rem;color:var(--muted)">Fewer cards, clearer view of live and settled bets</span>
     </div>
     <div class="perf-grid" id="prop-perf-stats" style="margin-bottom:16px"></div>
     <h3 style="font-size:.9rem;font-weight:600;margin-bottom:10px">Hit Rate by Prop Type</h3>
@@ -659,13 +653,45 @@ let _parlayTouched = false;
 let propsSortKey   = 'model_prob';
 let propsSortAsc   = false;
 const LOCAL_CACHE_KEY = 'bettor_last_session';
+const AUTO_TRACKED_PARLAYS_KEY = 'bettor_auto_tracked_parlays_v1';
 let _cacheUpdatedAtMs = null;
 let _autoRefreshInFlight = false;
 const _gameStartCache = new Map();
 let _lastLiveScoresDigest = '';
+const _autoTrackInflight = new Set();
 
 function _asArray(v) {
   return Array.isArray(v) ? v : [];
+}
+
+function _localDayKey() {
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${dd}`;
+}
+
+function _readAutoTrackedSignatures() {
+  try {
+    const raw = localStorage.getItem(AUTO_TRACKED_PARLAYS_KEY);
+    const day = _localDayKey();
+    if (!raw) return new Set();
+    const parsed = JSON.parse(raw);
+    if (!parsed || parsed.day !== day || !Array.isArray(parsed.keys)) return new Set();
+    return new Set(parsed.keys.map(v => String(v)));
+  } catch (e) {
+    return new Set();
+  }
+}
+
+function _writeAutoTrackedSignatures(sigSet) {
+  try {
+    localStorage.setItem(AUTO_TRACKED_PARLAYS_KEY, JSON.stringify({
+      day: _localDayKey(),
+      keys: Array.from(sigSet),
+    }));
+  } catch (e) {}
 }
 
 // ── SSE live connection ────────────────────────────────────────────────────
@@ -1163,67 +1189,11 @@ function switchTab(name) {
   }
   if (name === 'parlays')     {
     autoGenParlaysFromProps();
-    renderModelParlays();
     loadTrackedParlays();
     loadPropPerformance();
     loadParlayPerformance();
     resolveOutcomesSilent();
   }
-}
-
-function renderModelParlays() {
-  const grid = document.getElementById('model-parlays-grid');
-  const empty = document.getElementById('model-parlays-empty');
-  const meta = document.getElementById('model-parlay-meta');
-  if (!grid) return;
-  const list = _asArray(BEST_PARLAYS);
-  if (!list.length) {
-    grid.innerHTML = '';
-    if (empty) empty.classList.remove('hidden');
-    if (meta) meta.textContent = '';
-    return;
-  }
-  if (empty) empty.classList.add('hidden');
-  if (meta) meta.textContent = `${list.length} model parlay${list.length > 1 ? 's' : ''}`;
-  grid.innerHTML = list.slice(0, 8).map((p, idx) => {
-    const legs = _asArray(p.legs);
-    const legsHtml = legs.map(l => `<div class="combo-leg">
-      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
-        <span style="font-weight:600">${l.label || 'Leg'}</span>
-        <span style="color:var(--muted);font-size:.72rem;white-space:nowrap">${l.conf != null ? l.conf + '%' : ''} ${l.dec_odds != null ? '&middot; x' + Number(l.dec_odds).toFixed(2) : ''}</span>
-      </div>
-    </div>`).join('');
-    const title = `${p.n_legs || legs.length || 0}-Leg Model Parlay`;
-    const saveData = JSON.stringify({
-      name: p.name || title,
-      legs: legs.map(l => ({
-        label: l.label || 'Leg',
-        bet_type: l.bet_type || 'mixed',
-        game: l.game || '',
-        dec_odds: l.dec_odds != null ? Number(l.dec_odds) : 2.0,
-        conf: l.conf != null ? Number(l.conf) : null,
-        badge: l.badge || 'MODERATE',
-      })),
-      combined_odds: p.combined_dec != null ? Number(p.combined_dec) : 0,
-      stake_usd: 10,
-    }).replace(/"/g, '&quot;');
-    return `<div class="parlay-combo-card">
-      <div class="combo-header">
-        <div>
-          <div class="combo-title">&#127919; ${title}</div>
-          <div class="combo-prob">Hit chance: ${p.combined_prob != null ? p.combined_prob + '%' : '—'}${p.safety_label ? ` &middot; ${p.safety_label}` : ''}</div>
-        </div>
-        <div style="text-align:right">
-          <div class="combo-odds">x${p.combined_dec != null ? Number(p.combined_dec).toFixed(2) : '—'}</div>
-          <div style="font-size:.75rem;color:var(--muted)">$100 &#8594; $${p.payout_100 != null ? p.payout_100 : '—'}</div>
-        </div>
-      </div>
-      <div class="combo-legs">${legsHtml || '<div class="no-games" style="padding:0">No legs available.</div>'}</div>
-      <div class="combo-actions">
-        <button class="btn btn-primary btn-sm" style="flex:1" onclick="saveAutoParlay(${saveData})">&#128190; Save &amp; Track</button>
-      </div>
-    </div>`;
-  }).join('');
 }
 
 // ── Elite Parlay ──────────────────────────────────────────────────────────
@@ -1425,10 +1395,7 @@ function renderAll() {
   renderGames('today-grid', TODAY_CARDS, 'today-empty', 'today-meta', 'badge-today');
   renderGames('tomorrow-grid', TOMORROW_CARDS, 'tomorrow-empty', 'tomorrow-meta', 'badge-tomorrow');
   renderPropsTable(ALL_PROPS);
-  if (_isParlaysActive()) {
-    autoGenParlaysFromProps();
-    renderModelParlays();
-  }
+  if (_isParlaysActive()) autoGenParlaysFromProps();
 }
 
 // ── Game cards ────────────────────────────────────────────────────────────
@@ -1767,6 +1734,77 @@ function _mixPropsByType(props) {
   return mixed;
 }
 
+function _autoParlayPayload(c) {
+  return {
+    name: `Auto ${c.n}-Leg Props Parlay`,
+    legs: _asArray(c.legs).map(p => {
+      const ppt = plainEnglishPropText(p);
+      return {
+        label: ppt.text,
+        bet_type: 'player_prop',
+        game: p.game_key || p.game || '',
+        dec_odds: _legDec(p) || 1.9,
+        conf: Math.round(_legProb(p) * 100),
+        badge: p.safety_label || 'MODERATE',
+      };
+    }),
+    combined_odds: c.dec ?? 0,
+    stake_usd: 10,
+  };
+}
+
+function _autoParlaySignature(c) {
+  const parts = _asArray(c.legs).map(p => {
+    const player = (p.name || '').trim().toLowerCase();
+    const stat = (p.prop_label || p.stat_type || '').trim().toLowerCase();
+    const dir = (p.direction || '').trim().toUpperCase();
+    const line = String(p.line ?? '');
+    const game = (p.game_key || p.game || '').trim().toLowerCase();
+    return `${player}|${stat}|${dir}|${line}|${game}`;
+  });
+  return `${c.n || parts.length}:${parts.join('||')}`;
+}
+
+function _autoTrackParlayCombos(combos) {
+  const list = _asArray(combos);
+  if (!list.length) return;
+  const tracked = _readAutoTrackedSignatures();
+  const jobs = [];
+  list.forEach(c => {
+    const sig = _autoParlaySignature(c);
+    if (!sig || tracked.has(sig) || _autoTrackInflight.has(sig)) return;
+    _autoTrackInflight.add(sig);
+    jobs.push({ sig, payload: _autoParlayPayload(c) });
+  });
+  if (!jobs.length) return;
+
+  Promise.all(jobs.map(job => {
+    return fetch('/api/parlay/save', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ ...job.payload, dedupe_pending: true }),
+    }).then(r => r.json())
+      .then(d => {
+        if (d && d.ok) {
+          tracked.add(job.sig);
+          return true;
+        }
+        return false;
+      })
+      .catch(() => false)
+      .finally(() => { _autoTrackInflight.delete(job.sig); });
+  })).then(results => {
+    const savedCount = results.filter(Boolean).length;
+    if (!savedCount) return;
+    _writeAutoTrackedSignatures(tracked);
+    if (_isParlaysActive()) {
+      loadTrackedParlays();
+      loadPropPerformance();
+      loadParlayPerformance();
+    }
+  });
+}
+
 function autoGenParlaysFromProps() {
   const qualified = _publicOverProps(ALL_PROPS || [])
     .filter(p => _legProb(p) >= 0.61)
@@ -1814,8 +1852,9 @@ function autoGenParlaysFromProps() {
     if (meta) meta.textContent = '';
     return;
   }
-  if (meta) meta.textContent = `${combos.length} auto-combo${combos.length>1?'s':''} from ${qualified.length} props`;
+  if (meta) meta.textContent = `${combos.length} auto-combo${combos.length>1?'s':''} from ${qualified.length} props · auto-tracked`;
   grid.innerHTML = combos.map(c => parlayComboCard(c)).join('');
+  _autoTrackParlayCombos(combos);
 }
 
 
@@ -1835,22 +1874,7 @@ function parlayComboCard(c) {
       </div>
     </div>`;
   }).join('');
-  const saveData = JSON.stringify({
-    name: `Auto ${c.n}-Leg Props Parlay`,
-    legs: c.legs.map(p => {
-      const ppt = plainEnglishPropText(p);
-      return {
-        label:    ppt.text,
-        bet_type: 'player_prop',
-        game:     p.game_key || p.game || '',
-        dec_odds: _legDec(p) || 1.9,
-        conf:     Math.round(_legProb(p) * 100),
-        badge:    p.safety_label || 'MODERATE',
-      };
-    }),
-    combined_odds: c.dec ?? 0,
-    stake_usd: 10,
-  }).replace(/"/g,'&quot;');
+  const smsData = JSON.stringify(_autoParlayPayload(c)).replace(/"/g,'&quot;');
   return `<div class="parlay-combo-card">
   <div class="combo-header">
     <div>
@@ -1864,8 +1888,8 @@ function parlayComboCard(c) {
   </div>
   <div class="combo-legs">${legsHtml}</div>
   <div class="combo-actions">
-    <button class="btn btn-primary btn-sm" style="flex:1" onclick="saveAutoParlay(${saveData})">&#128190; Save &amp; Track</button>
-    <button class="btn btn-sm" style="flex:1" onclick="sendParlaySms(${saveData})">&#128241; SMS</button>
+    <span class="section-meta" style="flex:1;display:flex;align-items:center">Auto-tracked in Tracked Parlays</span>
+    <button class="btn btn-sm" style="flex:1" onclick="sendParlaySms(${smsData})">&#128241; SMS</button>
   </div>
 </div>`;
 }
@@ -2293,35 +2317,43 @@ function sendBuilderParlay() {
   sendParlaySms({name, legs: parlayLegs, combined_odds: combined, stake_usd: stake});
 }
 
-function saveAutoParlay(data) {
-  fetch('/api/parlay/save',{
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify(data)
-  }).then(r=>r.json()).then(d=>{
-    if(d.ok){toast('Parlay saved!','success');loadTrackedParlays();switchTab('parlays');}
-    else toast(d.error||'Error','error');
-  });
-}
-
 function loadTrackedParlays() {
   fetch('/api/parlay/list?include_resolved=1').then(r=>r.json()).then(d=>{
     const el = document.getElementById('tracked-parlays-list');
+    const metaEl = document.getElementById('tracked-parlay-meta');
     const rows = _asArray(d.parlays);
     if (!d.ok || !rows.length) {
       el.innerHTML = '<div class="no-games">No tracked parlays yet.</div>';
+      if (metaEl) metaEl.textContent = '';
       return;
     }
-    const pending = rows.filter(p => (p.outcome || 'PENDING') === 'PENDING');
-    const resolved = rows.filter(p => (p.outcome || 'PENDING') !== 'PENDING');
+
+    const pending = rows.filter(p => (p.outcome || 'PENDING').toUpperCase() === 'PENDING');
+    const wins = rows.filter(p => (p.outcome || '').toUpperCase() === 'WIN');
+    const losses = rows.filter(p => (p.outcome || '').toUpperCase() === 'LOSS');
+    const pushes = rows.filter(p => {
+      const out = (p.outcome || '').toUpperCase();
+      return out && out !== 'PENDING' && out !== 'WIN' && out !== 'LOSS';
+    });
+
+    if (metaEl) {
+      metaEl.textContent = `Live: ${pending.length} · Won: ${wins.length} · Lost: ${losses.length} · Total: ${rows.length}`;
+    }
+
+    const outcomeLabel = (v) => {
+      const out = (v || 'PENDING').toUpperCase();
+      return out === 'PENDING' ? 'LIVE TRACKING' : out;
+    };
+
     const renderList = (arr) => arr.map(p=>{
       const legs = (p.legs_json||[]).map(l=>
         `<div style="font-size:.78rem;color:var(--muted);padding:3px 0">&bull; ${l.label||JSON.stringify(l)}</div>`
       ).join('');
+      const out = (p.outcome || 'PENDING').toUpperCase();
       return `<div class="tracked-parlay">
         <div class="tracked-parlay-header">
           <span class="tp-name">${p.name||'Parlay #'+p.id}</span>
-          <span class="tp-outcome tp-${p.outcome||'PENDING'}">${p.outcome||'PENDING'}</span>
+          <span class="tp-outcome tp-${out}">${outcomeLabel(out)}</span>
         </div>
         <div class="tp-meta">x${(p.combined_odds||0).toFixed(2)} · $${p.stake_usd||0} stake · ${p.created_at||''}</div>
         ${legs}
@@ -2329,9 +2361,14 @@ function loadTrackedParlays() {
     }).join('');
 
     el.innerHTML = `
-      <div class="section-meta" style="margin-bottom:8px">Pending: ${pending.length} · Resolved: ${resolved.length}</div>
-      ${pending.length ? renderList(pending) : '<div class="no-games" style="padding:14px 10px">No pending parlays.</div>'}
-      ${resolved.length ? `<div class="section-meta" style="margin:14px 0 6px">Resolved Parlays</div>${renderList(resolved.slice(0, 30))}` : ''}
+      <div class="section-meta" style="margin-bottom:8px">All tracked bets are shown below.</div>
+      <div class="section-meta" style="margin:10px 0 6px">Live Tracking (${pending.length})</div>
+      ${pending.length ? renderList(pending) : '<div class="no-games" style="padding:14px 10px">No live tracked parlays.</div>'}
+      <div class="section-meta" style="margin:14px 0 6px">Won (${wins.length})</div>
+      ${wins.length ? renderList(wins) : '<div class="no-games" style="padding:14px 10px">No winning parlays yet.</div>'}
+      <div class="section-meta" style="margin:14px 0 6px">Lost (${losses.length})</div>
+      ${losses.length ? renderList(losses) : '<div class="no-games" style="padding:14px 10px">No losing parlays yet.</div>'}
+      ${pushes.length ? `<div class="section-meta" style="margin:14px 0 6px">Other (${pushes.length})</div>${renderList(pushes)}` : ''}
     `;
   });
 }
@@ -2394,26 +2431,36 @@ function loadPerformance() {
 function loadPropPerformance() {
   Promise.all([
     fetch('/api/prop-performance').then(r=>r.json()),
-    fetch('/api/performance').then(r=>r.json()).catch(()=>({ok:false,stats:{}})),
     fetch('/api/parlay/performance').then(r=>r.json()).catch(()=>({ok:false,stats:{}})),
-  ]).then(([d, g, pr])=>{
+  ]).then(([d, pr])=>{
     if (!d.ok) return;
     const s = d.stats||{};
-    const gs = (g && g.ok) ? (g.stats || {}) : {};
     const prs = (pr && pr.ok) ? (pr.stats || {}) : {};
-    const hitRateColor = s.hit_rate >= 55 ? 'var(--green)' : s.hit_rate >= 45 ? 'var(--yellow)' : 'var(--red)';
-    const totalProps = _overBetsTotal() || (s.total||0);
+
+    const propWins = Number(s.wins || 0);
+    const propLosses = Number(s.losses || 0);
+    const propPending = Number(s.pending || 0);
+    const parlayWins = Number(prs.wins || 0);
+    const parlayLosses = Number(prs.losses || 0);
+    const parlayPending = Number(prs.pending || 0);
+
+    const settledWins = propWins + parlayWins;
+    const settledLosses = propLosses + parlayLosses;
+    const settledTotal = settledWins + settledLosses;
+    const liveTracked = propPending + parlayPending;
+    const totalTracked = Number(s.total || 0) + Number(prs.total || 0);
+    const overallHitRate = settledTotal > 0 ? Math.round((settledWins / settledTotal) * 100) : null;
+    const overallColor = overallHitRate >= 55 ? 'var(--green)' : overallHitRate >= 45 ? 'var(--yellow)' : 'var(--red)';
+
     const liveOver = Array.isArray(ALL_PROPS)
       ? ALL_PROPS.filter(p => _isLiveGame(p.game_key||p.game||'')).length
       : 0;
+
     document.getElementById('prop-perf-stats').innerHTML = `
-      <div class="perf-card"><div class="perf-val perf-win">${s.wins||0}</div><div class="perf-label">Prop Wins</div></div>
-      <div class="perf-card"><div class="perf-val" style="font-size:1.2rem">${totalProps}</div><div class="perf-label">Total Over Bets</div><div class="perf-sub">Bets of the Day</div>${liveOver?`<div class="perf-sub">${liveOver} live</div>`:''}</div>
-      <div class="perf-card"><div class="perf-val perf-pend">${s.pushes||0}</div><div class="perf-label">Pushes</div></div>
-      <div class="perf-card"><div class="perf-val perf-pend">${s.pending||0}</div><div class="perf-label">Pending</div></div>
-      <div class="perf-card"><div class="perf-val" style="color:${hitRateColor}">${s.hit_rate!=null?s.hit_rate+'%':'—'}</div><div class="perf-label">Prop Hit Rate</div></div>
-      <div class="perf-card"><div class="perf-val">${gs.wins||0}-${gs.losses||0}</div><div class="perf-label">Game Bets (W-L)</div><div class="perf-sub">${gs.pending||0} pending · ${gs.pushes||0} pushes</div></div>
-      <div class="perf-card"><div class="perf-val">${prs.wins||0}-${prs.losses||0}</div><div class="perf-label">Tracked Parlays (W-L)</div><div class="perf-sub">${prs.pending||0} pending · ${prs.total||0} total</div></div>
+      <div class="perf-card"><div class="perf-val perf-pend">${liveTracked}</div><div class="perf-label">Live Tracked Bets</div><div class="perf-sub">Props ${propPending} · Parlays ${parlayPending}${liveOver ? ` · ${liveOver} in live games` : ''}</div></div>
+      <div class="perf-card"><div class="perf-val">${settledWins}-${settledLosses}</div><div class="perf-label">Settled W-L</div><div class="perf-sub">Props + Tracked Parlays</div></div>
+      <div class="perf-card"><div class="perf-val" style="color:${overallColor}">${overallHitRate!=null?overallHitRate+'%':'—'}</div><div class="perf-label">Overall Win Rate</div><div class="perf-sub">Settled bets only</div></div>
+      <div class="perf-card"><div class="perf-val" style="font-size:1.2rem">${totalTracked}</div><div class="perf-label">Total Tracked Bets</div><div class="perf-sub">Props ${s.total||0} · Parlays ${prs.total||0}</div></div>
     `;
     const byType = s.by_prop_type||[];
     const tbody = document.getElementById('prop-type-tbody');

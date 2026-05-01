@@ -1833,19 +1833,33 @@ def get_player_trends(player_name: str, season: int = None) -> list:
 # ──────────────────────────────────────────────────────────────────────────────
 
 def save_tracked_parlay(name: str, legs: list, combined_odds: float,
-                        stake_usd: float = 0) -> int:
-    """Save a tracked parlay. Returns the new parlay ID."""
+                        stake_usd: float = 0, dedupe_pending: bool = False) -> int:
+    """Save a tracked parlay. Returns existing/new parlay ID when saved."""
     conn = get_conn()
     if conn is None:
         return 0
     try:
         cur = conn.cursor()
+        legs_json = json.dumps(legs or [])
+        if dedupe_pending:
+            cur.execute("""
+                SELECT id
+                FROM tracked_parlays
+                WHERE outcome = 'PENDING'
+                  AND legs_json = %s::jsonb
+                  AND ABS(COALESCE(combined_odds, 0) - COALESCE(%s, 0)) < 0.01
+                ORDER BY created_at DESC
+                LIMIT 1
+            """, (legs_json, combined_odds))
+            existing = cur.fetchone()
+            if existing:
+                return int(existing[0])
         cur.execute("""
             INSERT INTO tracked_parlays
                 (name, legs_json, combined_odds, stake_usd, outcome)
             VALUES (%s, %s::jsonb, %s, %s, 'PENDING')
             RETURNING id
-        """, (name, json.dumps(legs), combined_odds, stake_usd))
+        """, (name, legs_json, combined_odds, stake_usd))
         row = cur.fetchone()
         conn.commit()
         return row[0] if row else 0
@@ -1864,12 +1878,12 @@ def get_tracked_parlays(include_resolved: bool = False) -> list:
     try:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         if include_resolved:
-            cur.execute("SELECT * FROM tracked_parlays ORDER BY created_at DESC LIMIT 100")
+            cur.execute("SELECT * FROM tracked_parlays ORDER BY created_at DESC")
         else:
             cur.execute("""
                 SELECT * FROM tracked_parlays
                 WHERE outcome = 'PENDING'
-                ORDER BY created_at DESC LIMIT 50
+                ORDER BY created_at DESC
             """)
         rows = [dict(r) for r in cur.fetchall()]
         for r in rows:

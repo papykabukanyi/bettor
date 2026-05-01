@@ -1103,13 +1103,16 @@ def api_parlay_save():
     data = request.get_json(force=True) or {}
     try:
         from data.db import save_tracked_parlay
-        save_tracked_parlay(
+        dedupe_raw = str(data.get("dedupe_pending", "0")).strip().lower()
+        dedupe_pending = dedupe_raw in {"1", "true", "yes", "on"}
+        pid = save_tracked_parlay(
             name=data.get("name", "My Parlay"),
             legs=data.get("legs", []),
             combined_odds=float(data.get("combined_odds", 0)),
             stake_usd=float(data.get("stake_usd", 0)),
+            dedupe_pending=dedupe_pending,
         )
-        return jsonify({"ok": True})
+        return jsonify({"ok": True, "id": pid})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
 
