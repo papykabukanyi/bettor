@@ -1118,7 +1118,9 @@ def api_parlay_save():
 def api_parlay_list():
     try:
         from data.db import get_tracked_parlays
-        return jsonify({"ok": True, "parlays": _clean(get_tracked_parlays(include_resolved=False))})
+        inc = str(request.args.get("include_resolved", "1")).strip().lower()
+        include_resolved = inc in {"1", "true", "yes", "on"}
+        return jsonify({"ok": True, "parlays": _clean(get_tracked_parlays(include_resolved=include_resolved))})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e), "parlays": []})
 

@@ -49,6 +49,7 @@ _REDDIT_FAILED   = False
 _HF_FAILED       = False
 _NEWS_FAILED     = False
 _DISCORD_FAILED  = False
+_DISCORD_AUTH_LOGGED = False
 _DISCORD_CACHE   = {"fetched_at": None, "messages": []}
 
 # ─── MLB team → subreddit mapping ────────────────────────────────────────────
@@ -193,7 +194,7 @@ def _parse_discord_ts(ts: str) -> "datetime.datetime | None":
 
 def _fetch_discord_messages() -> list[dict]:
     """Fetch recent Discord messages from configured channels (cached)."""
-    global _DISCORD_FAILED, _DISCORD_CACHE
+    global _DISCORD_FAILED, _DISCORD_CACHE, _DISCORD_AUTH_LOGGED
     if _DISCORD_FAILED:
         return []
     if not DISCORD_BOT_TOKEN or not DISCORD_CHANNELS:
@@ -227,9 +228,18 @@ def _fetch_discord_messages() -> list[dict]:
                 params["before"] = before
             try:
                 resp = requests.get(url, headers=_discord_headers(), params=params, timeout=15)
-                if resp.status_code == 401 or resp.status_code == 403:
-                    print("[sentiment] Discord auth error (check bot token or channel permissions)")
+                if resp.status_code == 401:
+                    # Invalid token: stop Discord sentiment attempts for this process.
+                    if not _DISCORD_AUTH_LOGGED:
+                        print("[sentiment] Discord auth error (invalid bot token)")
+                        _DISCORD_AUTH_LOGGED = True
                     _DISCORD_FAILED = True
+                    return []
+                if resp.status_code == 403:
+                    # Missing channel permission: skip this channel, continue others.
+                    if not _DISCORD_AUTH_LOGGED:
+                        print("[sentiment] Discord auth error (check channel permissions)")
+                        _DISCORD_AUTH_LOGGED = True
                     break
                 if resp.status_code == 429:
                     print("[sentiment] Discord rate limited - skipping")

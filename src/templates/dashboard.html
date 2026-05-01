@@ -545,6 +545,13 @@ body.console-open main{padding-bottom:236px}
     <div id="parlay-combos-empty" class="no-games hidden">Run analysis to generate props first.</div>
     <div class="parlay-combo-grid" id="parlay-combos-grid"></div>
 
+    <div class="section-header" style="margin-top:20px">
+      <span class="section-title">&#127919; Model Game Parlays</span>
+      <span class="section-meta" id="model-parlay-meta"></span>
+    </div>
+    <div id="model-parlays-empty" class="no-games hidden">No model game parlays yet.</div>
+    <div class="parlay-combo-grid" id="model-parlays-grid"></div>
+
     <div class="section-header" style="margin-top:28px">
       <span class="section-title">&#128204; Saved &amp; Tracked Parlays</span>
     </div>
@@ -951,7 +958,12 @@ function _phaseVerb(phase, futureText, liveText, pastText) {
   return futureText;
 }
 
-function _fmtGameTime(hhmm) {
+function _isMobileViewport() {
+  return typeof window !== 'undefined' && window.matchMedia && window.matchMedia('(max-width: 640px)').matches;
+}
+
+function _fmtGameTime(hhmm, opts) {
+  const options = opts || {};
   if (!hhmm) return '';
   const parts = String(hhmm).split(':');
   if (parts.length < 2) return String(hhmm);
@@ -960,7 +972,15 @@ function _fmtGameTime(hhmm) {
   if (Number.isNaN(h)) return String(hhmm);
   const ampm = h >= 12 ? 'PM' : 'AM';
   h = h % 12; if (h === 0) h = 12;
+  if (options.short) return `${h}:${m} ${ampm}`;
   return `${h}:${m} ${ampm} ET`;
+}
+
+function _startLabel(gameTime) {
+  const mobile = _isMobileViewport();
+  const tt = _fmtGameTime(gameTime, { short: mobile });
+  if (!tt) return 'UPCOMING';
+  return mobile ? tt : `Starts ${tt}`;
 }
 
 function _isLiveGame(gameKey) {
@@ -1057,13 +1077,12 @@ function _applyLiveScores(scores, opts) {
       } else if (isFinal) {
         nextStatus = 'FINAL';
       } else if (isLive) {
-        nextStatus = 'LIVE';
+        nextStatus = '';
       } else {
-        const tt = _fmtGameTime(gameTime);
-        nextStatus = tt ? `Starts ${tt}` : 'UPCOMING';
+        nextStatus = _startLabel(gameTime);
       }
       if (statusEl.textContent !== nextStatus) statusEl.textContent = nextStatus;
-      statusEl.style.display = 'inline';
+      statusEl.style.display = nextStatus ? 'inline' : 'none';
       const nextClass = 'live-status ' + (isFinal ? 'final' : isLive ? 'in-progress' : '');
       if (statusEl.className !== nextClass) statusEl.className = nextClass;
     }
@@ -1144,11 +1163,67 @@ function switchTab(name) {
   }
   if (name === 'parlays')     {
     autoGenParlaysFromProps();
+    renderModelParlays();
     loadTrackedParlays();
     loadPropPerformance();
     loadParlayPerformance();
     resolveOutcomesSilent();
   }
+}
+
+function renderModelParlays() {
+  const grid = document.getElementById('model-parlays-grid');
+  const empty = document.getElementById('model-parlays-empty');
+  const meta = document.getElementById('model-parlay-meta');
+  if (!grid) return;
+  const list = _asArray(BEST_PARLAYS);
+  if (!list.length) {
+    grid.innerHTML = '';
+    if (empty) empty.classList.remove('hidden');
+    if (meta) meta.textContent = '';
+    return;
+  }
+  if (empty) empty.classList.add('hidden');
+  if (meta) meta.textContent = `${list.length} model parlay${list.length > 1 ? 's' : ''}`;
+  grid.innerHTML = list.slice(0, 8).map((p, idx) => {
+    const legs = _asArray(p.legs);
+    const legsHtml = legs.map(l => `<div class="combo-leg">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+        <span style="font-weight:600">${l.label || 'Leg'}</span>
+        <span style="color:var(--muted);font-size:.72rem;white-space:nowrap">${l.conf != null ? l.conf + '%' : ''} ${l.dec_odds != null ? '&middot; x' + Number(l.dec_odds).toFixed(2) : ''}</span>
+      </div>
+    </div>`).join('');
+    const title = `${p.n_legs || legs.length || 0}-Leg Model Parlay`;
+    const saveData = JSON.stringify({
+      name: p.name || title,
+      legs: legs.map(l => ({
+        label: l.label || 'Leg',
+        bet_type: l.bet_type || 'mixed',
+        game: l.game || '',
+        dec_odds: l.dec_odds != null ? Number(l.dec_odds) : 2.0,
+        conf: l.conf != null ? Number(l.conf) : null,
+        badge: l.badge || 'MODERATE',
+      })),
+      combined_odds: p.combined_dec != null ? Number(p.combined_dec) : 0,
+      stake_usd: 10,
+    }).replace(/"/g, '&quot;');
+    return `<div class="parlay-combo-card">
+      <div class="combo-header">
+        <div>
+          <div class="combo-title">&#127919; ${title}</div>
+          <div class="combo-prob">Hit chance: ${p.combined_prob != null ? p.combined_prob + '%' : '—'}${p.safety_label ? ` &middot; ${p.safety_label}` : ''}</div>
+        </div>
+        <div style="text-align:right">
+          <div class="combo-odds">x${p.combined_dec != null ? Number(p.combined_dec).toFixed(2) : '—'}</div>
+          <div style="font-size:.75rem;color:var(--muted)">$100 &#8594; $${p.payout_100 != null ? p.payout_100 : '—'}</div>
+        </div>
+      </div>
+      <div class="combo-legs">${legsHtml || '<div class="no-games" style="padding:0">No legs available.</div>'}</div>
+      <div class="combo-actions">
+        <button class="btn btn-primary btn-sm" style="flex:1" onclick="saveAutoParlay(${saveData})">&#128190; Save &amp; Track</button>
+      </div>
+    </div>`;
+  }).join('');
 }
 
 // ── Elite Parlay ──────────────────────────────────────────────────────────
@@ -1350,7 +1425,10 @@ function renderAll() {
   renderGames('today-grid', TODAY_CARDS, 'today-empty', 'today-meta', 'badge-today');
   renderGames('tomorrow-grid', TOMORROW_CARDS, 'tomorrow-empty', 'tomorrow-meta', 'badge-tomorrow');
   renderPropsTable(ALL_PROPS);
-  if (_isParlaysActive()) autoGenParlaysFromProps();
+  if (_isParlaysActive()) {
+    autoGenParlaysFromProps();
+    renderModelParlays();
+  }
 }
 
 // ── Game cards ────────────────────────────────────────────────────────────
@@ -1441,8 +1519,8 @@ function gameCard(c) {
   const initialStatusText = phase === 'final'
     ? 'FINAL'
     : phase === 'live'
-      ? 'LIVE'
-      : (timeText ? `Starts ${timeText}` : 'UPCOMING');
+      ? ''
+      : _startLabel(c.game_time);
   const initialStatusClass = phase === 'final' ? 'final' : phase === 'live' ? 'in-progress' : '';
   const scoreText = (c.away_score != null && c.home_score != null)
     ? `${c.away_score} – ${c.home_score}`
@@ -2227,13 +2305,16 @@ function saveAutoParlay(data) {
 }
 
 function loadTrackedParlays() {
-  fetch('/api/parlay/list').then(r=>r.json()).then(d=>{
+  fetch('/api/parlay/list?include_resolved=1').then(r=>r.json()).then(d=>{
     const el = document.getElementById('tracked-parlays-list');
-    if (!d.ok || !d.parlays || !d.parlays.length) {
+    const rows = _asArray(d.parlays);
+    if (!d.ok || !rows.length) {
       el.innerHTML = '<div class="no-games">No tracked parlays yet.</div>';
       return;
     }
-    el.innerHTML = d.parlays.map(p=>{
+    const pending = rows.filter(p => (p.outcome || 'PENDING') === 'PENDING');
+    const resolved = rows.filter(p => (p.outcome || 'PENDING') !== 'PENDING');
+    const renderList = (arr) => arr.map(p=>{
       const legs = (p.legs_json||[]).map(l=>
         `<div style="font-size:.78rem;color:var(--muted);padding:3px 0">&bull; ${l.label||JSON.stringify(l)}</div>`
       ).join('');
@@ -2246,6 +2327,12 @@ function loadTrackedParlays() {
         ${legs}
       </div>`;
     }).join('');
+
+    el.innerHTML = `
+      <div class="section-meta" style="margin-bottom:8px">Pending: ${pending.length} · Resolved: ${resolved.length}</div>
+      ${pending.length ? renderList(pending) : '<div class="no-games" style="padding:14px 10px">No pending parlays.</div>'}
+      ${resolved.length ? `<div class="section-meta" style="margin:14px 0 6px">Resolved Parlays</div>${renderList(resolved.slice(0, 30))}` : ''}
+    `;
   });
 }
 
@@ -2308,10 +2395,12 @@ function loadPropPerformance() {
   Promise.all([
     fetch('/api/prop-performance').then(r=>r.json()),
     fetch('/api/performance').then(r=>r.json()).catch(()=>({ok:false,stats:{}})),
-  ]).then(([d, g])=>{
+    fetch('/api/parlay/performance').then(r=>r.json()).catch(()=>({ok:false,stats:{}})),
+  ]).then(([d, g, pr])=>{
     if (!d.ok) return;
     const s = d.stats||{};
     const gs = (g && g.ok) ? (g.stats || {}) : {};
+    const prs = (pr && pr.ok) ? (pr.stats || {}) : {};
     const hitRateColor = s.hit_rate >= 55 ? 'var(--green)' : s.hit_rate >= 45 ? 'var(--yellow)' : 'var(--red)';
     const totalProps = _overBetsTotal() || (s.total||0);
     const liveOver = Array.isArray(ALL_PROPS)
@@ -2324,6 +2413,7 @@ function loadPropPerformance() {
       <div class="perf-card"><div class="perf-val perf-pend">${s.pending||0}</div><div class="perf-label">Pending</div></div>
       <div class="perf-card"><div class="perf-val" style="color:${hitRateColor}">${s.hit_rate!=null?s.hit_rate+'%':'—'}</div><div class="perf-label">Prop Hit Rate</div></div>
       <div class="perf-card"><div class="perf-val">${gs.wins||0}-${gs.losses||0}</div><div class="perf-label">Game Bets (W-L)</div><div class="perf-sub">${gs.pending||0} pending · ${gs.pushes||0} pushes</div></div>
+      <div class="perf-card"><div class="perf-val">${prs.wins||0}-${prs.losses||0}</div><div class="perf-label">Tracked Parlays (W-L)</div><div class="perf-sub">${prs.pending||0} pending · ${prs.total||0} total</div></div>
     `;
     const byType = s.by_prop_type||[];
     const tbody = document.getElementById('prop-type-tbody');
