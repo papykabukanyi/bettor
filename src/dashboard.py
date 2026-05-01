@@ -406,12 +406,6 @@ def _run_analysis(lock_date: datetime.date | None = None):
             _log(f"[backfill] Backfill error (continuing): {_bf_e}")
         # Retrain deferred to after team_stats is loaded (later in pipeline)
 
-        # Statuses that should be hidden from Today cards because they're fully done/cancelled.
-        _DONE_STATUSES = {
-            "final", "game over", "f", "completed early", "completed",
-            "cancelled", "suspended", "postponed",
-        }
-
         _phase(0)
         _log("Fetching MLB schedule...")
         from data.mlb_fetcher import get_schedule_range
@@ -419,12 +413,11 @@ def _run_analysis(lock_date: datetime.date | None = None):
         today_games    = [g for g in all_games if g.get("date", "") == today_str]
         tomorrow_games = [g for g in all_games if g.get("date", "") == tomorrow_str]
 
-        # Display all still-relevant today games, including active/in-progress.
-        upcoming_today    = [g for g in today_games
-                     if g.get("status", "").lower() not in _DONE_STATUSES]
-        upcoming_tomorrow = tomorrow_games  # tomorrow games can't be past
-        _log(f"Schedule: {len(today_games)} today ({len(upcoming_today)} upcoming), "
-             f"{len(tomorrow_games)} tomorrow")
+        # Keep all calendar-today games visible on the Today tab, including finals,
+        # until the next refresh/day boundary removes them naturally.
+        display_today = today_games
+        display_tomorrow = tomorrow_games
+        _log(f"Schedule: {len(display_today)} today, {len(display_tomorrow)} tomorrow")
 
         _phase(1)
         _log("Loading team stats and model...")
@@ -679,8 +672,8 @@ def _run_analysis(lock_date: datetime.date | None = None):
             _log(f"DB save error: {e}")
 
         # Display only upcoming games; past/live ones were predicted & saved for accuracy tracking
-        today_cards    = [_build_card(g, all_bets, all_props, "TODAY")    for g in upcoming_today]
-        tomorrow_cards = [_build_card(g, all_bets, all_props, "TOMORROW") for g in upcoming_tomorrow]
+        today_cards    = [_build_card(g, all_bets, all_props, "TODAY")    for g in display_today]
+        tomorrow_cards = [_build_card(g, all_bets, all_props, "TOMORROW") for g in display_tomorrow]
 
         def _card_score(c):
             s = [b["safety"] for b in [c.get("moneyline"), c.get("run_line"), c.get("total")] if b]
@@ -853,17 +846,8 @@ def api_cached_state():
         today_date = _et_calendar_today()
         today_str = today_date.isoformat()
         tomorrow_str = (today_date + datetime.timedelta(days=1)).isoformat()
-        done_statuses = {
-            "final", "game over", "f", "completed early", "completed",
-            "cancelled", "suspended", "postponed",
-        }
-
         all_games = get_schedule_range(days_ahead=2) or []
-        today_games = [
-            g for g in all_games
-            if g.get("date", "") == today_str
-            and (g.get("status", "").lower() not in done_statuses)
-        ]
+        today_games = [g for g in all_games if g.get("date", "") == today_str]
         tomorrow_games = [g for g in all_games if g.get("date", "") == tomorrow_str]
 
         fallback_today = [_build_card(g, [], [], "TODAY") for g in today_games]
@@ -1487,17 +1471,8 @@ def _load_boot_schedule_fallback() -> bool:
         today_date = _et_calendar_today()
         today_str = today_date.isoformat()
         tomorrow_str = (today_date + datetime.timedelta(days=1)).isoformat()
-        done_statuses = {
-            "final", "game over", "f", "completed early", "completed",
-            "cancelled", "suspended", "postponed",
-        }
-
         all_games = get_schedule_range(days_ahead=2) or []
-        today_games = [
-            g for g in all_games
-            if g.get("date", "") == today_str
-            and (g.get("status", "").lower() not in done_statuses)
-        ]
+        today_games = [g for g in all_games if g.get("date", "") == today_str]
         tomorrow_games = [g for g in all_games if g.get("date", "") == tomorrow_str]
 
         today_cards = [_build_card(g, [], [], "TODAY") for g in today_games]

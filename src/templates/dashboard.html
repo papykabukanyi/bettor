@@ -664,6 +664,11 @@ function _asArray(v) {
   return Array.isArray(v) ? v : [];
 }
 
+function _num(v, fallback) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : (fallback == null ? 0 : fallback);
+}
+
 function _pad2(n) {
   return String(Number(n) || 0).padStart(2, '0');
 }
@@ -2382,12 +2387,14 @@ function loadTrackedParlays() {
         `<div style="font-size:.78rem;color:var(--muted);padding:3px 0">&bull; ${l.label||JSON.stringify(l)}</div>`
       ).join('');
       const out = (p.outcome || 'PENDING').toUpperCase();
+      const combinedOdds = _num(p.combined_odds, 0);
+      const stakeUsd = _num(p.stake_usd, 0);
       return `<div class="tracked-parlay">
         <div class="tracked-parlay-header">
           <span class="tp-name">${p.name||'Parlay #'+p.id}</span>
           <span class="tp-outcome tp-${out}">${outcomeLabel(out)}</span>
         </div>
-        <div class="tp-meta">x${(p.combined_odds||0).toFixed(2)} · $${p.stake_usd||0} stake · ${p.created_at||''}</div>
+        <div class="tp-meta">x${combinedOdds.toFixed(2)} · $${stakeUsd.toFixed(2)} stake · ${p.created_at||''}</div>
         ${legs}
       </div>`;
     }).join('');
