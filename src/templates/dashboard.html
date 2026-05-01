@@ -664,6 +664,38 @@ function _asArray(v) {
   return Array.isArray(v) ? v : [];
 }
 
+function _pad2(n) {
+  return String(Number(n) || 0).padStart(2, '0');
+}
+
+function _etScheduleFromIso(gameDateTime) {
+  const iso = String(gameDateTime || '').trim();
+  if (!iso) return null;
+  const dt = new Date(iso);
+  if (Number.isNaN(dt.getTime())) return null;
+  const parts = _zonedParts(dt, 'America/New_York');
+  if (!parts || !parts.year || !parts.month || !parts.day) return null;
+  return {
+    game_date: `${parts.year}-${_pad2(parts.month)}-${_pad2(parts.day)}`,
+    game_time: `${_pad2(parts.hour)}:${_pad2(parts.minute)}`,
+  };
+}
+
+function _normalizeCardSchedule(card) {
+  if (!card || typeof card !== 'object') return card;
+  const repaired = _etScheduleFromIso(card.game_datetime);
+  if (!repaired) return card;
+  return {
+    ...card,
+    game_date: repaired.game_date,
+    game_time: repaired.game_time,
+  };
+}
+
+function _normalizeCardList(cards) {
+  return _asArray(cards).map(_normalizeCardSchedule);
+}
+
 function _localDayKey() {
   const d = new Date();
   const y = d.getFullYear();
@@ -824,8 +856,8 @@ function saveLocalCache(data) {
     const payload = {
       saved_at: Date.now(),
       data: {
-        game_cards_today:     _asArray(data.game_cards_today),
-        game_cards_tomorrow:  _asArray(data.game_cards_tomorrow),
+        game_cards_today:     _normalizeCardList(data.game_cards_today),
+        game_cards_tomorrow:  _normalizeCardList(data.game_cards_tomorrow),
         best_parlays:         _asArray(data.best_parlays),
         player_props:         _asArray(data.player_props),
         last_updated:         data.last_updated        || '',
@@ -848,8 +880,8 @@ function loadLocalCache() {
 
 function applyCachedData(d) {
   if (!d) return;
-  if (d.game_cards_today    !== undefined) TODAY_CARDS    = _asArray(d.game_cards_today);
-  if (d.game_cards_tomorrow !== undefined) TOMORROW_CARDS = _asArray(d.game_cards_tomorrow);
+  if (d.game_cards_today    !== undefined) TODAY_CARDS    = _normalizeCardList(d.game_cards_today);
+  if (d.game_cards_tomorrow !== undefined) TOMORROW_CARDS = _normalizeCardList(d.game_cards_tomorrow);
   if (d.best_parlays        !== undefined) BEST_PARLAYS   = _asArray(d.best_parlays);
   if (d.player_props        !== undefined) ALL_PROPS      = _publicOverProps(_asArray(d.player_props));
   renderAll();
@@ -1400,7 +1432,7 @@ function renderAll() {
 
 // ── Game cards ────────────────────────────────────────────────────────────
 function renderGames(gridId, cards, emptyId, metaId, badgeId) {
-  cards = _asArray(cards);
+  cards = _normalizeCardList(cards);
   const grid = document.getElementById(gridId);
   const empty = document.getElementById(emptyId);
   const meta  = document.getElementById(metaId);
