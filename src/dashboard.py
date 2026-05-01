@@ -217,6 +217,59 @@ def _norm_gk(s: str) -> str:
     return s.replace(" @ ", "@").replace(" @", "@").replace("@ ", "@").strip()
 
 
+def _compose_game_key(away_team: str, home_team: str,
+                      game_datetime=None, game_date=None, game_time=None) -> str:
+    """Build a stable unique key for a scheduled game instance."""
+    match_key = _norm_gk(f"{away_team}@{home_team}")
+    suffix = str(game_datetime or "").strip()
+    if not suffix:
+        gd = str(game_date or "").strip()
+        gt = str(game_time or "").strip()
+        suffix = f"{gd}T{gt}".strip("T")
+    return f"{match_key}#{suffix}" if suffix else match_key
+
+
+def _card_date_from_iso(game_datetime) -> str:
+    try:
+        raw = str(game_datetime or "").strip()
+        if not raw:
+            return ""
+        return datetime.datetime.fromisoformat(raw).date().isoformat()
+    except Exception:
+        return ""
+
+
+def _normalize_card_list(cards, expected_date: str | None = None) -> list:
+    out = []
+    seen = set()
+    for raw in cards or []:
+        if not isinstance(raw, dict):
+            continue
+        card = dict(raw)
+        away = card.get("away_team", "")
+        home = card.get("home_team", "")
+        match_key = card.get("match_key") or _norm_gk(f"{away}@{home}")
+        game_date = card.get("game_date") or _card_date_from_iso(card.get("game_datetime"))
+        if expected_date and game_date and game_date != expected_date:
+            continue
+        card["match_key"] = match_key
+        if game_date and not card.get("game_date"):
+            card["game_date"] = game_date
+        card["game_key"] = _compose_game_key(
+            away,
+            home,
+            card.get("game_datetime"),
+            card.get("game_date"),
+            card.get("game_time"),
+        )
+        dedupe_key = card.get("game_key") or match_key
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        out.append(card)
+    return out
+
+
 def _et_calendar_today() -> datetime.date:
     """Return calendar date in America/New_York (no 10 PM cutover)."""
     try:
@@ -275,16 +328,26 @@ def _is_public_prop(p: dict) -> bool:
 def _build_card(game, bets, props, when):
     ht  = game.get("home_team", "")
     at  = game.get("away_team", "")
-    gk      = f"{at}@{ht}"
-    gk_norm = _norm_gk(gk)
-    alt_gk  = game.get("game_key", gk)
+    match_key = _norm_gk(game.get("match_key") or f"{at}@{ht}")
+    unique_gk = _compose_game_key(
+        at,
+        ht,
+        game.get("game_datetime"),
+        game.get("date") or game.get("game_date"),
+        game.get("game_time"),
+    )
+    gk_norm = _norm_gk(match_key)
+    unique_norm = _norm_gk(unique_gk)
+    alt_gk  = game.get("match_key", match_key)
     alt_norm = _norm_gk(alt_gk)
 
     # Also store a reversed form for reverse-key matches
     rev_gk  = _norm_gk(f"{ht}@{at}")
 
     card = {
-        "game_key":     gk,
+        "game_key":     unique_gk,
+        "match_key":    match_key,
+        "game_pk":      game.get("game_pk") or game.get("game_id") or game.get("external_id"),
         "game_date":    game.get("date") or game.get("game_date"),
         "game_datetime": game.get("game_datetime"),
         "when":         when,
@@ -314,7 +377,12 @@ def _build_card(game, bets, props, when):
 
     def _key_matches(k: str) -> bool:
         kn = _norm_gk(k)
-        return kn in (gk_norm, alt_norm, rev_gk) or gk_norm in kn or alt_norm in kn
+        return (
+            kn in (gk_norm, alt_norm, rev_gk, unique_norm)
+            or gk_norm in kn
+            or alt_norm in kn
+            or kn in unique_norm
+        )
 
     for bet in bets:
         bk = bet.get("game_key", bet.get("game", ""))
@@ -808,6 +876,10 @@ def api_status():
 def api_cached_state():
     with _lock:
         if _state.get("game_cards_today") or _state.get("player_props"):
+            today_str = _et_calendar_today().isoformat()
+            tomorrow_str = (_et_calendar_today() + datetime.timedelta(days=1)).isoformat()
+            today_cards = _normalize_card_list(_state.get("game_cards_today", []), expected_date=today_str)
+            tomorrow_cards = _normalize_card_list(_state.get("game_cards_tomorrow", []), expected_date=tomorrow_str)
             cache_updated_at_iso = _state.get("last_updated_ts")
             cache_age_min = None
             if cache_updated_at_iso:
@@ -823,8 +895,8 @@ def api_cached_state():
                 "last_updated":        _state["last_updated"],
                 "cache_updated_at_iso": cache_updated_at_iso,
                 "cache_age_min":        cache_age_min,
-                "game_cards_today":    _state["game_cards_today"],
-                "game_cards_tomorrow": _state["game_cards_tomorrow"],
+                "game_cards_today":    today_cards,
+                "game_cards_tomorrow": tomorrow_cards,
                 "best_parlays":        _state["best_parlays"],
                 "player_props":        _state["player_props"],
                 "elite_parlay":        _state.get("elite_parlay"),
@@ -834,6 +906,10 @@ def api_cached_state():
         from data.db import get_analysis_cache
         cached = get_analysis_cache(max_age_hours=22)
         if cached:
+            today_str = _et_calendar_today().isoformat()
+            tomorrow_str = (_et_calendar_today() + datetime.timedelta(days=1)).isoformat()
+            cached["game_cards_today"] = _normalize_card_list(cached.get("game_cards_today", []), expected_date=today_str)
+            cached["game_cards_tomorrow"] = _normalize_card_list(cached.get("game_cards_tomorrow", []), expected_date=tomorrow_str)
             cached["ok"] = True
             return jsonify(cached)
     except Exception:
@@ -1194,14 +1270,17 @@ def api_sms_send_parlay():
 
 @app.route("/api/live-scores")
 def api_live_scores():
-    """Poll MLB Stats API for today's in-progress / final game scores."""
+    """Poll MLB Stats API for today's game statuses/scores."""
     try:
         import statsapi as mlbstatsapi
+        from data.mlb_fetcher import _parse_mlb_game
         today = _et_calendar_today().strftime("%m/%d/%Y")
         raw = mlbstatsapi.schedule(start_date=today, end_date=today) or []
         games = []
         for g in raw:
             status = g.get("status", "")
+            parsed = _parse_mlb_game(g, _et_calendar_today().isoformat())
+            match_key = _norm_gk(f"{g.get('away_name','')}@{g.get('home_name','')}")
             games.append({
                 "game_pk":     g.get("game_id"),
                 "home_team":   g.get("home_name", ""),
@@ -1211,7 +1290,14 @@ def api_live_scores():
                 "status":      status,
                 "inning":      g.get("current_inning", ""),
                 "inning_half": g.get("inning_state", ""),
-                "game_key":    f"{g.get('away_name','')}@{g.get('home_name','')}",
+                "match_key":   match_key,
+                "game_key":    _compose_game_key(
+                    g.get("away_name", ""),
+                    g.get("home_name", ""),
+                    parsed.get("game_datetime"),
+                    parsed.get("date"),
+                    parsed.get("game_time"),
+                ),
             })
         return jsonify({"ok": True, "games": games})
     except Exception as e:
@@ -1232,6 +1318,10 @@ def _sync_state_from_cache(broadcast: bool = False) -> bool:
         cached = get_analysis_cache(max_age_hours=22)
         if not cached:
             return False
+        today_str = _et_calendar_today().isoformat()
+        tomorrow_str = (_et_calendar_today() + datetime.timedelta(days=1)).isoformat()
+        today_cards = _normalize_card_list(cached.get("game_cards_today", []), expected_date=today_str)
+        tomorrow_cards = _normalize_card_list(cached.get("game_cards_tomorrow", []), expected_date=tomorrow_str)
         cache_iso = cached.get("cache_updated_at_iso")
         with _lock:
             if cache_iso and cache_iso == _state.get("last_updated_ts"):
@@ -1239,8 +1329,8 @@ def _sync_state_from_cache(broadcast: bool = False) -> bool:
             if _state.get("status") == "running":
                 return False
             _state.update({
-                "game_cards_today":    cached.get("game_cards_today", []),
-                "game_cards_tomorrow": cached.get("game_cards_tomorrow", []),
+                "game_cards_today":    today_cards,
+                "game_cards_tomorrow": tomorrow_cards,
                 "best_parlays":        cached.get("best_parlays", []),
                 "player_props":        cached.get("player_props", []),
                 "elite_parlay":        cached.get("elite_parlay"),
@@ -1252,8 +1342,8 @@ def _sync_state_from_cache(broadcast: bool = False) -> bool:
             _sse_broadcast("state_update", {
                 "status":              "done",
                 "last_updated":        cached.get("last_updated"),
-                "game_cards_today":    cached.get("game_cards_today", []),
-                "game_cards_tomorrow": cached.get("game_cards_tomorrow", []),
+                "game_cards_today":    today_cards,
+                "game_cards_tomorrow": tomorrow_cards,
                 "best_parlays":        cached.get("best_parlays", []),
                 "player_props":        cached.get("player_props", []),
                 "elite_parlay":        cached.get("elite_parlay"),
@@ -1289,44 +1379,45 @@ def _poll_live_scores():
     global _live_score_timer
     try:
         import statsapi as mlbstatsapi
+        from data.mlb_fetcher import _parse_mlb_game
         # Use calendar ET date (no 10 PM cutover) to avoid dropping late live games.
         today = _et_calendar_today()
         today_str = today.strftime("%m/%d/%Y")
         raw = mlbstatsapi.schedule(start_date=today_str, end_date=today_str) or []
-        
-        # More robust status matching - include any active/live game statuses
-        def _is_active_game(status):
-            s = (status or "").lower()
-            # Include: live games, warmup, pre-game, final/completed (for scores)
-            return any(k in s for k in (
-                "progress", "live", "warmup", "pre-game", "pregame",
-                "final", "game over", "completed", "delay", "challenge",
-                "postpon", "cancel", "suspend"
-            ))
-        
-        live = [g for g in raw if _is_active_game(g.get("status", ""))]
-        live_map = {
-            _norm_gk(f"{g.get('away_name','')}@{g.get('home_name','')}"): {
+
+        state_map = {}
+        for g in raw:
+            parsed = _parse_mlb_game(g, today.isoformat())
+            match_key = _norm_gk(f"{g.get('away_name','')}@{g.get('home_name','')}")
+            key = _compose_game_key(
+                g.get("away_name", ""),
+                g.get("home_name", ""),
+                parsed.get("game_datetime"),
+                parsed.get("date"),
+                parsed.get("game_time"),
+            )
+            state_map[key] = {
+                "game_pk":     g.get("game_id"),
+                "match_key":   match_key,
+                "game_key":    key,
                 "home_score":  g.get("home_score"),
                 "away_score":  g.get("away_score"),
                 "status":      g.get("status"),
                 "inning":      g.get("current_inning", ""),
                 "inning_half": g.get("inning_state", ""),
             }
-            for g in live
-        }
         with _lock:
-            _state["live_scores"] = live_map
+            _state["live_scores"] = state_map
 
-        # Broadcast full live map every poll (including empty) so clients can clear stale entries.
-        _sse_broadcast("live_scores", {"scores": live_map})
+        # Broadcast full status map every poll (including empty) so clients can clear stale entries.
+        _sse_broadcast("live_scores", {"scores": state_map})
 
         # Auto-resolve finished games (non-blocking, errors suppressed)
         def _is_final_status(status):
             s = (status or "").lower()
             return any(k in s for k in ("final", "game over", "completed"))
         
-        if any(_is_final_status(g.get("status", "")) for g in live):
+        if any(_is_final_status(g.get("status", "")) for g in raw):
             try:
                 from models.mlb_predictor import resolve_game_outcomes, resolve_prop_outcomes
                 n_g = resolve_game_outcomes(days_back=1)
@@ -1501,10 +1592,12 @@ def _auto_boot_analysis():
         from data.db import get_analysis_cache
         cached = get_analysis_cache(max_age_hours=22)
         if cached:
+            today_str = _et_calendar_today().isoformat()
+            tomorrow_str = (_et_calendar_today() + datetime.timedelta(days=1)).isoformat()
             with _lock:
                 _state.update({
-                    "game_cards_today":    cached.get("game_cards_today", []),
-                    "game_cards_tomorrow": cached.get("game_cards_tomorrow", []),
+                    "game_cards_today":    _normalize_card_list(cached.get("game_cards_today", []), expected_date=today_str),
+                    "game_cards_tomorrow": _normalize_card_list(cached.get("game_cards_tomorrow", []), expected_date=tomorrow_str),
                     "best_parlays":        cached.get("best_parlays", []),
                     "player_props":        cached.get("player_props", []),
                     "last_updated":        cached.get("last_updated"),

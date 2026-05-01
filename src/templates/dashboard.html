@@ -673,6 +673,44 @@ function _pad2(n) {
   return String(Number(n) || 0).padStart(2, '0');
 }
 
+function _stripGameKeySuffix(v) {
+  return _norm(String(v || '').split('#')[0] || '');
+}
+
+function _cardMatchKey(card) {
+  if (!card || typeof card !== 'object') return '';
+  const explicit = _norm(card.match_key || '');
+  if (explicit) return explicit;
+  const fromKey = _stripGameKeySuffix(card.game_key || '');
+  if (fromKey) return fromKey;
+  const away = String(card.away_team || '').trim();
+  const home = String(card.home_team || '').trim();
+  return away && home ? _norm(`${away}@${home}`) : '';
+}
+
+function _composeClientGameKey(matchKey, gameDateTime, gameDate, gameTime) {
+  const base = _norm(matchKey || '');
+  const suffix = String(gameDateTime || '').trim() || `${String(gameDate || '').trim()}T${String(gameTime || '').trim()}`.replace(/^T|T$/g, '');
+  return base && suffix ? `${base}#${suffix}` : (base || _norm(suffix));
+}
+
+function _cardUniqueKey(card) {
+  if (!card || typeof card !== 'object') return '';
+  const matchKey = _cardMatchKey(card);
+  return _composeClientGameKey(matchKey, card.game_datetime, card.game_date, card.game_time) || _norm(card.game_key || '');
+}
+
+function _gameKeyLooseMatch(a, b) {
+  const x = _stripGameKeySuffix(a).toLowerCase();
+  const y = _stripGameKeySuffix(b).toLowerCase();
+  if (!x || !y) return false;
+  if (x === y || x.includes(y) || y.includes(x)) return true;
+  const [xa, xh] = x.split('@').map(v => (v || '').trim());
+  const [ya, yh] = y.split('@').map(v => (v || '').trim());
+  if (!xa || !xh || !ya || !yh) return false;
+  return (xa.includes(ya) || ya.includes(xa)) && (xh.includes(yh) || yh.includes(xh));
+}
+
 function _etScheduleFromIso(gameDateTime) {
   const iso = String(gameDateTime || '').trim();
   if (!iso) return null;
@@ -689,12 +727,16 @@ function _etScheduleFromIso(gameDateTime) {
 function _normalizeCardSchedule(card) {
   if (!card || typeof card !== 'object') return card;
   const repaired = _etScheduleFromIso(card.game_datetime);
-  if (!repaired) return card;
-  return {
+  const next = {
     ...card,
-    game_date: repaired.game_date,
-    game_time: repaired.game_time,
+    match_key: _cardMatchKey(card),
   };
+  if (repaired) {
+    next.game_date = repaired.game_date;
+    next.game_time = repaired.game_time;
+  }
+  next.game_key = _cardUniqueKey(next);
+  return next;
 }
 
 function _normalizeCardList(cards) {
@@ -912,12 +954,13 @@ function _isFinalStatus(status) {
 function _statusPhase(status) {
   const s = (status || '').toLowerCase();
   if (!s) return 'upcoming';
+  if (s.includes('pre-game') || s.includes('pregame') || s.includes('warmup')) return 'upcoming';
   if (s.includes('postpon') || s.includes('cancel') || s.includes('suspend')) return 'final';
   if (s.includes('final') || s.includes('game over') || s.includes('completed')) return 'final';
   if (/\b(top|bottom|mid|end)\s*\d/.test(s)) return 'live';
   if (s.includes('delayed start')) return 'upcoming';
   if (s.includes('inning') && !s.includes('scheduled')) return 'live';
-  if (s.includes('in progress') || s.includes('progress') || s.includes('live') || s.includes('warmup')) return 'live';
+  if (s.includes('in progress') || s.includes('progress') || s.includes('challenge') || s.includes('live')) return 'live';
   return 'upcoming';
 }
 
@@ -990,10 +1033,8 @@ function _phaseFromSchedule(gameDate, gameTime, gameDateTime) {
   if (!start) return 'upcoming';
   const now = Date.now();
   const startMs = start.getTime();
-  const liveBufferMs = 10 * 60 * 1000;
   const maxGameWindowMs = 6 * 60 * 60 * 1000;
   if (now >= startMs + maxGameWindowMs) return 'final';
-  if (now >= startMs - liveBufferMs) return 'live';
   return 'upcoming';
 }
 
@@ -1052,19 +1093,8 @@ function _isLiveGame(gameKey) {
   const s = _liveScores[nk];
   if (s) return _isLiveStatus(s.status);
 
-  const _keyLooseMatch = (a, b) => {
-    const x = _norm(a || '').toLowerCase();
-    const y = _norm(b || '').toLowerCase();
-    if (!x || !y) return false;
-    if (x === y || x.includes(y) || y.includes(x)) return true;
-    const [xa, xh] = x.split('@').map(v => (v || '').trim());
-    const [ya, yh] = y.split('@').map(v => (v || '').trim());
-    if (!xa || !xh || !ya || !yh) return false;
-    return (xa.includes(ya) || ya.includes(xa)) && (xh.includes(yh) || yh.includes(xh));
-  };
-
   const cards = ([]).concat(TODAY_CARDS || [], TOMORROW_CARDS || []);
-  const card = cards.find(c => _keyLooseMatch(c.game_key || '', nk));
+  const card = cards.find(c => _gameKeyLooseMatch(c.match_key || c.game_key || '', nk));
   if (!card) return false;
   return _phaseForCard(card.status || '', card.game_date || '', card.game_time || '', card.game_datetime || '') === 'live';
 }
@@ -1112,7 +1142,10 @@ function _applyLiveScores(scores, opts) {
       whenEl: card.querySelector('.when-badge'),
     });
     const gk = _norm(card.dataset.gameKey);
-    const s  = _liveScores[gk];
+    const matchKey = _norm(card.dataset.matchKey || '');
+    const s  = _liveScores[gk]
+      || (matchKey ? _liveScores[matchKey] : undefined)
+      || Object.values(_liveScores).find(v => _gameKeyLooseMatch(v.game_key || v.match_key || '', gk || matchKey));
     const scoreEl  = refs.scoreEl;
     const statusEl = refs.statusEl;
     const dotEl    = refs.dotEl;
@@ -1578,7 +1611,7 @@ function gameCard(c) {
     .length;
 
   return `<div class="game-card" data-game-key="${c.game_key}" data-game-date="${c.game_date||''}" data-game-datetime="${c.game_datetime||''}"
-    data-game-time="${c.game_time||''}" data-when-base="${baseWhen}" id="card-${c.game_key.replace(/[@\s]/g,'_')}">
+    data-game-time="${c.game_time||''}" data-match-key="${c.match_key||''}" data-when-base="${baseWhen}" id="card-${c.game_key.replace(/[#@\s]/g,'_')}">
   <div class="card-header" onclick="toggleCard(this.parentElement)">
     <div class="card-topline">
       <div class="card-when">
@@ -1940,14 +1973,21 @@ function renderParlays(parlays) {
 function _getLiveGameKeySet() {
   const liveKeys = new Set();
   Object.entries(_liveScores || {}).forEach(([k, v]) => {
-    if (_isLiveStatus((v || {}).status || '')) liveKeys.add(_norm(k));
+    if (_isLiveStatus((v || {}).status || '')) {
+      liveKeys.add(_norm(k));
+      if (v && v.match_key) liveKeys.add(_norm(v.match_key));
+    }
   });
   const cards = ([]).concat(TODAY_CARDS || [], TOMORROW_CARDS || []);
   cards.forEach(c => {
     const gk = _norm(c.game_key || '');
+    const mk = _norm(c.match_key || '');
     if (!gk) return;
     const phase = _phaseForCard(c.status || '', c.game_date || '', c.game_time || '', c.game_datetime || '');
-    if (phase === 'live') liveKeys.add(gk);
+    if (phase === 'live') {
+      liveKeys.add(gk);
+      if (mk) liveKeys.add(mk);
+    }
   });
   return liveKeys;
 }
@@ -1957,11 +1997,11 @@ function _isLiveFromSet(gameKey, liveKeys, liveArr) {
   if (!nk) return false;
   if (liveKeys.has(nk)) return true;
   const nkl = nk.toLowerCase();
-  const parts = nkl.split('@').map(v => (v || '').trim());
+  const parts = _stripGameKeySuffix(nkl).split('@').map(v => (v || '').trim());
   for (let i = 0; i < liveArr.length; i++) {
     const lk = liveArr[i];
     if (lk === nkl || lk.includes(nkl) || nkl.includes(lk)) return true;
-    const lp = lk.split('@').map(v => (v || '').trim());
+    const lp = _stripGameKeySuffix(lk).split('@').map(v => (v || '').trim());
     if (parts.length === 2 && lp.length === 2) {
       if ((parts[0].includes(lp[0]) || lp[0].includes(parts[0])) &&
           (parts[1].includes(lp[1]) || lp[1].includes(parts[1]))) {
