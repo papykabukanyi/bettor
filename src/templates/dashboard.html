@@ -2395,7 +2395,7 @@ function sendBuilderParlay() {
 }
 
 function loadTrackedParlays() {
-  fetch('/api/parlay/list?include_resolved=1').then(r=>r.json()).then(d=>{
+  fetch('/api/parlay/list?include_resolved=1&current_only=1').then(r=>r.json()).then(d=>{
     const el = document.getElementById('tracked-parlays-list');
     const metaEl = document.getElementById('tracked-parlay-meta');
     const rows = _asArray(d.parlays);

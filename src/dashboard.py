@@ -43,6 +43,7 @@ from config import BANKROLL, MIN_VALUE_EDGE, KELLY_FRACTION, MLB_SEASONS, et_tod
 _DASH_MIN_EDGE = 0.02
 _DAILY_LOCK_HOUR_ET = int(os.getenv("DAILY_LOCK_HOUR_ET", "5"))
 _DAILY_LOCK_MINUTE_ET = int(os.getenv("DAILY_LOCK_MINUTE_ET", "0"))
+_AUTO_ANALYSIS_INTERVAL_MIN = int(os.getenv("AUTO_ANALYSIS_INTERVAL_MIN", "0"))
 
 app = Flask(__name__, template_folder="templates")
 
@@ -433,13 +434,17 @@ def _run_analysis(lock_date: datetime.date | None = None):
         _state["phase_idx"] = 0
 
     try:
+        today_date = _et_calendar_today()
+        today_str  = today_date.isoformat()
+        tomorrow_str = (today_date + datetime.timedelta(days=1)).isoformat()
+
         # Decide whether this run should lock/save today's picks
         need_preds = False
         need_props = False
         try:
             from data.db import has_predictions_for_date, has_prop_picks_for_date
             if lock_date is None:
-                today = et_today()
+                today = today_date
                 need_preds = not has_predictions_for_date(today)
                 need_props = not has_prop_picks_for_date(today)
                 if need_preds or need_props:
@@ -451,14 +456,9 @@ def _run_analysis(lock_date: datetime.date | None = None):
         except Exception as _le:
             _log(f"[lock] Daily lock check failed: {_le}")
             if lock_date is None:
-                lock_date = et_today()
+                lock_date = today_date
             need_preds = True
             need_props = True
-
-        # Dashboard display should follow calendar ET date (no betting-day cutover).
-        today_date = _et_calendar_today()
-        today_str  = today_date.isoformat()
-        tomorrow_str = (today_date + datetime.timedelta(days=1)).isoformat()
 
         # ── Auto-backfill 30 days of data and retrain model ──────────────────
         _log("[backfill] Running 30-day backfill before analysis...")
@@ -562,12 +562,14 @@ def _run_analysis(lock_date: datetime.date | None = None):
         _phase(4)
         _log("Running game predictions...")
         import models.mlb_predictor as _mp
+        from data.sentiment import get_game_sentiments
         from models.mlb_predictor import predict_game, build_game_bets
         # Lower edge threshold so dashboard shows all value picks (accuracy tracking)
         _orig_edge = _mp.MIN_VALUE_EDGE
         _mp.MIN_VALUE_EDGE = _DASH_MIN_EDGE
 
         all_bets = []
+        sentiment_cache = {}
         def _is_terminal_status(s: str) -> bool:
             sl = (s or "").lower()
             return any(k in sl for k in (
@@ -584,10 +586,27 @@ def _run_analysis(lock_date: datetime.date | None = None):
                 _log(f"Skip {at}@{ht} status={st!r}")
                 continue
             try:
-                pred = predict_game(ht, at, team_stats, model, injuries=injuries)
+                match_key = _norm_gk(f"{at}@{ht}")
+                matchup_sentiment = sentiment_cache.get(match_key)
+                if matchup_sentiment is None:
+                    try:
+                        matchup_sentiment = get_game_sentiments(ht, at)
+                    except Exception as sentiment_exc:
+                        _log(f"Sentiment skipped for {at}@{ht}: {sentiment_exc}")
+                        matchup_sentiment = {}
+                    sentiment_cache[match_key] = matchup_sentiment
+                pred = predict_game(ht, at, team_stats, model, sentiment=matchup_sentiment, injuries=injuries)
+                pred["game_key"] = _compose_game_key(
+                    at,
+                    ht,
+                    g.get("game_datetime"),
+                    g.get("date"),
+                    g.get("game_time"),
+                )
+                pred["match_key"] = match_key
                 hw   = pred.get("home_win_prob", 0.5)
                 _log(f"  {at}@{ht}: home win prob={hw:.1%}")
-                gk   = pred["game_key"]
+                gk   = pred["match_key"]
                 # Try exact key then reversed
                 orow = (odds_by_game.get(gk)
                         or odds_by_game.get(f"{at}@{ht}")
@@ -621,6 +640,33 @@ def _run_analysis(lock_date: datetime.date | None = None):
                 hitter_props = []
 
             raw_props = starter_props + hitter_props
+            scheduled_keys_by_slot = {}
+            scheduled_keys_by_match_day = {}
+            for sg in today_games + tomorrow_games:
+                match_key = _norm_gk(f"{sg.get('away_team','')}@{sg.get('home_team','')}")
+                slot = (match_key, str(sg.get("date") or ""), str(sg.get("game_time") or "").strip())
+                unique_key = _compose_game_key(
+                    sg.get("away_team", ""),
+                    sg.get("home_team", ""),
+                    sg.get("game_datetime"),
+                    sg.get("date"),
+                    sg.get("game_time"),
+                )
+                scheduled_keys_by_slot[slot] = unique_key
+                scheduled_keys_by_match_day.setdefault((match_key, str(sg.get("date") or "")), []).append(unique_key)
+
+            for raw_prop in raw_props:
+                game_str = _norm_gk(str(raw_prop.get("game") or ""))
+                raw_date = str(raw_prop.get("date") or "")
+                raw_time = str(raw_prop.get("game_time") or "").strip()
+                unique_prop_key = scheduled_keys_by_slot.get((game_str, raw_date, raw_time))
+                if not unique_prop_key:
+                    day_matches = scheduled_keys_by_match_day.get((game_str, raw_date), [])
+                    if len(day_matches) == 1:
+                        unique_prop_key = day_matches[0]
+                raw_prop["match_key"] = game_str
+                raw_prop["game_key"] = unique_prop_key or game_str
+
             _log(f"Raw props fetched: {len(raw_props)}")
             all_props = build_player_prop_bets(
                 raw_props,
@@ -653,13 +699,7 @@ def _run_analysis(lock_date: datetime.date | None = None):
         _log(f"Parlays built: {len(best_parlays)}")
 
         _phase(7)
-        _log("Fetching sentiment (non-blocking)...")
-        try:
-            from data.sentiment import get_game_sentiments
-            for g in today_games[:5]:
-                get_game_sentiments(g.get("home_team", ""), g.get("away_team", ""))
-        except Exception as e:
-            _log(f"Sentiment skipped: {e}")
+        _log(f"Sentiment snapshot ready for {len(sentiment_cache)} matchups")
 
         _phase(8)
         _log("Saving to database and building cards...")
@@ -683,13 +723,17 @@ def _run_analysis(lock_date: datetime.date | None = None):
                     "line":         b.get("line"),
                     "odds_am":      b.get("odds_am"),
                     "dec_odds":     b.get("dec_odds", 2.0),
+                    "model_prob":   b.get("model_prob", 0.0),
                     "confidence":   b.get("confidence", 50),
                     "safety_label": b.get("safety_label", "MODERATE"),
-                    "edge":         b.get("edge", 0.0),
-                    "stake_usd":    b.get("stake_usd", 0.0),
-                    "ev":           b.get("ev", 0.0),
                     "game_date":    b.get("game_date", today_str),
-                    "matchup":      b.get("matchup", ""),
+                    "game_time":    b.get("game_time", ""),
+                    "home_team":    b.get("home_team", ""),
+                    "away_team":    b.get("away_team", ""),
+                    "home_starter": b.get("home_starter", ""),
+                    "away_starter": b.get("away_starter", ""),
+                    "sentiment_score": (sentiment_cache.get(b.get("match_key", ""), {}).get("home", {}) or {}).get("combined"),
+                    "news_snippet": "",
                 })
             for p in all_props:
                 game_str = p.get("game") or p.get("game_key") or ""
@@ -761,7 +805,7 @@ def _run_analysis(lock_date: datetime.date | None = None):
                 "best_parlays":        best_parlays,
                 "player_props":        all_props_flat,
                 "last_updated":        last_updated,
-            }, cache_date=et_today())
+            }, cache_date=today_date)
         except Exception as e:
             _log(f"Cache save error: {e}")
 
@@ -1183,7 +1227,13 @@ def api_parlay_list():
         from data.db import get_tracked_parlays
         inc = str(request.args.get("include_resolved", "1")).strip().lower()
         include_resolved = inc in {"1", "true", "yes", "on"}
-        return jsonify({"ok": True, "parlays": _clean(get_tracked_parlays(include_resolved=include_resolved))})
+        current_only_raw = str(request.args.get("current_only", "1")).strip().lower()
+        current_only = current_only_raw in {"1", "true", "yes", "on"}
+        target_date = _et_calendar_today() if current_only else None
+        return jsonify({
+            "ok": True,
+            "parlays": _clean(get_tracked_parlays(include_resolved=include_resolved, target_date=target_date)),
+        })
     except Exception as e:
         return jsonify({"ok": False, "error": str(e), "parlays": []})
 
@@ -1524,7 +1574,7 @@ def _scheduled_analysis(force: bool = False, lock_today: bool = False):
         _state["phase"]     = _PHASES[0]
         _state["phase_idx"] = 0
     _sse_broadcast("status", {"status": "running", "phase": _PHASES[0]})
-    lock_date = et_today() if lock_today else None
+    lock_date = _et_calendar_today() if lock_today else None
     threading.Thread(target=_run_analysis, args=(lock_date,), daemon=True).start()
 
 
@@ -1534,9 +1584,14 @@ def _start_scheduler():
         from apscheduler.triggers.interval import IntervalTrigger
         from apscheduler.triggers.cron import CronTrigger
         sched = BackgroundScheduler(daemon=True)
-        # Run every 5 hours
-        sched.add_job(_scheduled_analysis, IntervalTrigger(minutes=300), id="auto_analysis",
-                      max_instances=1, coalesce=True)
+        if _AUTO_ANALYSIS_INTERVAL_MIN > 0:
+            sched.add_job(
+                _scheduled_analysis,
+                IntervalTrigger(minutes=_AUTO_ANALYSIS_INTERVAL_MIN),
+                id="auto_analysis",
+                max_instances=1,
+                coalesce=True,
+            )
         # Daily lock run (ET morning)
         sched.add_job(
             lambda: _scheduled_analysis(force=True, lock_today=True),
@@ -1547,7 +1602,10 @@ def _start_scheduler():
             coalesce=True,
         )
         sched.start()
-        print("[scheduler] APScheduler started — analysis every 5 hours")
+        if _AUTO_ANALYSIS_INTERVAL_MIN > 0:
+            print(f"[scheduler] APScheduler started — analysis every {_AUTO_ANALYSIS_INTERVAL_MIN} minutes")
+        else:
+            print("[scheduler] APScheduler started — daily morning snapshot only")
         return sched
     except Exception as e:
         print(f"[scheduler] Could not start APScheduler: {e}")
@@ -1587,7 +1645,7 @@ def _load_boot_schedule_fallback() -> bool:
 
 
 def _auto_boot_analysis():
-    """On startup: load cache, and if it's stale (>30 min) kick off analysis immediately."""
+    """On startup: load today's DB snapshot, or generate one if today's snapshot is missing."""
     try:
         from data.db import get_analysis_cache
         cached = get_analysis_cache(max_age_hours=22)
@@ -1603,24 +1661,8 @@ def _auto_boot_analysis():
                     "last_updated":        cached.get("last_updated"),
                 })
             print(f"[boot] Loaded cache from DB (last updated: {cached.get('last_updated')})")
-            # Check age (treat cache as fresh for ~5 hours)
-            lu = cached.get("last_updated", "")
-            age_min = cached.get("cache_age_min")
-            stale = True
-            if age_min is not None:
-                stale = age_min > 300
-            elif lu:
-                try:
-                    dt = datetime.datetime.strptime(lu, "%Y-%m-%d %H:%M")
-                    age_min = (datetime.datetime.utcnow() - dt).total_seconds() / 60
-                    stale = age_min > 300
-                except Exception:
-                    pass
-            if stale:
-                print("[boot] Cache is stale — triggering fresh analysis...")
-                threading.Thread(target=_run_analysis, daemon=True).start()
-            elif not cached.get("player_props"):
-                print("[boot] Cache missing props - triggering fresh analysis...")
+            if not cached.get("game_cards_today") and not cached.get("game_cards_tomorrow"):
+                print("[boot] Today's snapshot is empty — triggering fresh analysis...")
                 threading.Thread(target=_run_analysis, daemon=True).start()
         else:
             _load_boot_schedule_fallback()

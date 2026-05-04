@@ -239,7 +239,7 @@ def build_game_bets(game: dict, pred: dict, odds_row: dict = None) -> list[dict]
     bets = []
     ht   = pred["home_team"]
     at   = pred["away_team"]
-    gk   = pred["game_key"]
+    gk   = game.get("game_key") or pred.get("game_key") or f"{at}@{ht}"
     gd   = game.get("date", str(et_today()))
     gt   = game.get("game_time", "")
     hs   = game.get("home_starter", "TBD")
@@ -256,6 +256,7 @@ def build_game_bets(game: dict, pred: dict, odds_row: dict = None) -> list[dict]
         stake_pct  = _kelly(model_prob, dec_odds)
         return {
             "game_key":       gk,
+            "match_key":      f"{at}@{ht}",
             "sport":          "mlb",
             "bet_type":       bet_type,
             "pick":           pick,
@@ -521,7 +522,8 @@ def build_player_prop_bets(raw_props: list[dict], injured_players: set = None,
 
         bets.append({
             # Identity
-            "game_key":          p.get("game", ""),
+            "game_key":          p.get("game_key") or p.get("game", ""),
+            "match_key":         p.get("match_key") or p.get("game", ""),
             "sport":             "mlb",
             "bet_type":          "player_prop",
             # Display

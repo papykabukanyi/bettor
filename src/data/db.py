@@ -150,6 +150,7 @@ CREATE TABLE IF NOT EXISTS team_stats (
 
 CREATE TABLE IF NOT EXISTS prop_history (
     id              SERIAL PRIMARY KEY,
+    game_key        VARCHAR(200),
     sport           VARCHAR(20),
     player_name     VARCHAR(100),
     team            VARCHAR(100),
@@ -172,6 +173,10 @@ DO $$ BEGIN
         ALTER TABLE prop_history ADD COLUMN actual_value NUMERIC(6,2);
         ALTER TABLE prop_history ADD COLUMN outcome VARCHAR(20) DEFAULT 'PENDING';
         ALTER TABLE prop_history ADD COLUMN resolved_at TIMESTAMPTZ;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_name='prop_history' AND column_name='game_key') THEN
+        ALTER TABLE prop_history ADD COLUMN game_key VARCHAR(200);
     END IF;
 END $$;
 
@@ -733,12 +738,19 @@ def save_prop_picks(picks: list, game_date=None):
     conn = get_conn()
     if conn is None:
         return
-    gdate = game_date or datetime.date.today()
     saved = 0
     try:
         cur = conn.cursor()
+        cols = _get_table_columns(conn, "prop_history")
+        has_game_key = "game_key" in cols
         for p in picks:
+            pick_game_key = (p.get("game_key") or p.get("game") or "").strip()
+            pick_game_date = p.get("date") or game_date or datetime.date.today()
+            prop_type = p.get("stat_type")
+            recommendation = p.get("direction")
+            line_value = p.get("line")
             stats_snap = json.dumps({
+                "game_key":  pick_game_key,
                 "era":       p.get("era"),     "k9":        p.get("k9"),
                 "avg":       p.get("avg"),     "ops":       p.get("ops"),
                 "xg":        p.get("xg"),      "xa":        p.get("xa"),
@@ -746,23 +758,88 @@ def save_prop_picks(picks: list, game_date=None):
                 "league":    p.get("league"),  "game":      p.get("game"),
             })
             try:
-                cur.execute("""
-                    INSERT INTO prop_history
-                        (sport, player_name, team, game_date, prop_type,
-                         line, over_prob, under_prob, recommendation, stats_json)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                """, (
-                    p.get("sport", "mlb"),
-                    p.get("name"),
-                    p.get("team"),
-                    gdate,
-                    p.get("stat_type"),
-                    p.get("line"),
-                    (p.get("over_pct") or 50) / 100.0,
-                    (p.get("under_pct") or 50) / 100.0,
-                    p.get("direction"),
-                    stats_snap,
-                ))
+                if has_game_key and pick_game_key:
+                    cur.execute(
+                        """
+                        SELECT 1 FROM prop_history
+                        WHERE game_key = %s
+                          AND player_name = %s
+                          AND game_date = %s
+                          AND prop_type = %s
+                          AND recommendation = %s
+                          AND COALESCE(line::text, '') = COALESCE(%s::text, '')
+                        LIMIT 1
+                        """,
+                        (
+                            pick_game_key,
+                            p.get("name"),
+                            pick_game_date,
+                            prop_type,
+                            recommendation,
+                            line_value,
+                        ),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        SELECT 1 FROM prop_history
+                        WHERE player_name = %s
+                          AND team = %s
+                          AND game_date = %s
+                          AND prop_type = %s
+                          AND recommendation = %s
+                          AND COALESCE(line::text, '') = COALESCE(%s::text, '')
+                        LIMIT 1
+                        """,
+                        (
+                            p.get("name"),
+                            p.get("team"),
+                            pick_game_date,
+                            prop_type,
+                            recommendation,
+                            line_value,
+                        ),
+                    )
+                if cur.fetchone():
+                    continue
+
+                if has_game_key:
+                    cur.execute("""
+                        INSERT INTO prop_history
+                            (game_key, sport, player_name, team, game_date, prop_type,
+                             line, over_prob, under_prob, recommendation, stats_json)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """, (
+                        pick_game_key or None,
+                        p.get("sport", "mlb"),
+                        p.get("name"),
+                        p.get("team"),
+                        pick_game_date,
+                        prop_type,
+                        line_value,
+                        (p.get("over_pct") or 50) / 100.0,
+                        (p.get("under_pct") or 50) / 100.0,
+                        recommendation,
+                        stats_snap,
+                    ))
+                else:
+                    cur.execute("""
+                        INSERT INTO prop_history
+                            (sport, player_name, team, game_date, prop_type,
+                             line, over_prob, under_prob, recommendation, stats_json)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """, (
+                        p.get("sport", "mlb"),
+                        p.get("name"),
+                        p.get("team"),
+                        pick_game_date,
+                        prop_type,
+                        line_value,
+                        (p.get("over_pct") or 50) / 100.0,
+                        (p.get("under_pct") or 50) / 100.0,
+                        recommendation,
+                        stats_snap,
+                    ))
                 saved += 1
             except Exception:
                 pass  # ignore duplicate key violations per pick
@@ -1256,10 +1333,18 @@ def save_match_events(events: list):
 
 def _cache_date_default() -> datetime.date:
     try:
-        from config import et_today
-        return et_today()
+        import zoneinfo
+
+        eastern = zoneinfo.ZoneInfo("America/New_York")
+        return datetime.datetime.now(tz=eastern).date()
     except Exception:
-        return datetime.date.today()
+        try:
+            import pytz
+
+            eastern = pytz.timezone("America/New_York")
+            return datetime.datetime.now(tz=eastern).date()
+        except Exception:
+            return datetime.date.today()
 
 def save_analysis_cache(data: dict, cache_date=None):
     """
@@ -1289,12 +1374,13 @@ def save_analysis_cache(data: dict, cache_date=None):
         print(f"[db] save_analysis_cache error: {e}")
     finally:
         conn.close()
-
-
-def get_analysis_cache(max_age_hours: int = 22, cache_date=None) -> "dict | None":
+def get_analysis_cache(max_age_hours: int = 22, cache_date=None,
+                       allow_latest_fallback: bool = False) -> "dict | None":
     """
-    Return today's cached analysis data if it was saved within max_age_hours.
-    If today's row is missing, fall back to the most recently updated fresh row.
+    Return the requested day's cached analysis data if it was saved within
+    max_age_hours.
+    When allow_latest_fallback is True, the most recently updated fresh row may
+    be returned if the requested day is missing.
     Returns None when no fresh cache exists — caller should run full analysis.
     The returned dict also contains '_updated_at' (ISO string) for display.
     """
@@ -1311,7 +1397,7 @@ def get_analysis_cache(max_age_hours: int = 22, cache_date=None) -> "dict | None
               AND  updated_at > NOW() - (INTERVAL '1 hour' * %s)
         """, (cdate, max_age_hours))
         row = cur.fetchone()
-        if not row:
+        if not row and allow_latest_fallback:
             cur.execute("""
                 SELECT data_json, updated_at
                 FROM   analysis_cache
@@ -1341,8 +1427,6 @@ def get_analysis_cache(max_age_hours: int = 22, cache_date=None) -> "dict | None
         return None
     finally:
         conn.close()
-
-
 # ──────────────────────────────────────────────────────────────────────────────
 # Phone numbers  (SMS recipient list)
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1354,15 +1438,18 @@ def add_phone_number(phone: str, label: str = "") -> tuple[bool, str]:
         return False, "Database unavailable"
     try:
         cur = conn.cursor()
-        cur.execute("""
+        cur.execute(
+            """
             INSERT INTO phone_numbers (phone, label, active)
             VALUES (%s, %s, TRUE)
             ON CONFLICT (phone) DO UPDATE SET
-                label  = COALESCE(NULLIF(EXCLUDED.label, ''), phone_numbers.label),
+                label = EXCLUDED.label,
                 active = TRUE
-        """, (phone.strip(), label.strip()))
+            """,
+            (phone.strip(), (label or "").strip()),
+        )
         conn.commit()
-        return True, "ok"
+        return True, "Phone number saved"
     except Exception as e:
         conn.rollback()
         print(f"[db] add_phone_number error: {e}")
@@ -1841,16 +1928,18 @@ def save_tracked_parlay(name: str, legs: list, combined_odds: float,
     try:
         cur = conn.cursor()
         legs_json = json.dumps(legs or [])
+        current_date = _cache_date_default()
         if dedupe_pending:
             cur.execute("""
                 SELECT id
                 FROM tracked_parlays
                 WHERE outcome = 'PENDING'
+                  AND DATE(created_at AT TIME ZONE 'America/New_York') = %s
                   AND legs_json = %s::jsonb
                   AND ABS(COALESCE(combined_odds, 0) - COALESCE(%s, 0)) < 0.01
                 ORDER BY created_at DESC
                 LIMIT 1
-            """, (legs_json, combined_odds))
+            """, (current_date, legs_json, combined_odds))
             existing = cur.fetchone()
             if existing:
                 return int(existing[0])
@@ -1869,22 +1958,24 @@ def save_tracked_parlay(name: str, legs: list, combined_odds: float,
         return 0
     finally:
         conn.close()
-
-
-def get_tracked_parlays(include_resolved: bool = False) -> list:
+def get_tracked_parlays(include_resolved: bool = False, target_date=None) -> list:
     conn = get_conn()
     if conn is None:
         return []
     try:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        if include_resolved:
-            cur.execute("SELECT * FROM tracked_parlays ORDER BY created_at DESC")
-        else:
-            cur.execute("""
-                SELECT * FROM tracked_parlays
-                WHERE outcome = 'PENDING'
-                ORDER BY created_at DESC
-            """)
+        clauses = []
+        params = []
+        if not include_resolved:
+            clauses.append("outcome = 'PENDING'")
+        if target_date is not None:
+            clauses.append("DATE(created_at AT TIME ZONE 'America/New_York') = %s")
+            params.append(target_date)
+        where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        cur.execute(
+            f"SELECT * FROM tracked_parlays {where_sql} ORDER BY created_at DESC",
+            tuple(params),
+        )
         rows = [dict(r) for r in cur.fetchall()]
         for r in rows:
             for k in ("created_at", "resolved_at"):

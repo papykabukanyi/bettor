@@ -15,6 +15,7 @@ import sys
 import re
 import json
 import datetime
+import math
 import unicodedata
 import requests
 
@@ -43,6 +44,12 @@ _HF_API_BASES = [
     "https://router.huggingface.co/hf-inference/models",
     "https://api-inference.huggingface.co/models",
 ]
+
+_SENTIMENT_WEIGHT_CAPS = {
+    "news": 8.0,
+    "reddit": 5.0,
+    "discord": 4.0,
+}
 
 # ─── Circuit breakers ────────────────────────────────────────────────────────
 _REDDIT_FAILED   = False
@@ -774,6 +781,51 @@ def _google_news_rss(query: str) -> list[dict]:
         return []
 
 
+def _cached_sentiment_payload(entity: str, entity_kind: str) -> dict | None:
+    try:
+        from data.db import get_sentiment as db_get_sentiment
+
+        cached = db_get_sentiment(entity, hours=18)
+    except Exception:
+        return None
+    if not cached or "combined" not in cached:
+        return None
+    return {
+        entity_kind: entity,
+        "reddit": cached.get("reddit", {}),
+        "news": cached.get("news", {}),
+        "discord": cached.get("discord", {}),
+        "combined": float((cached.get("combined") or {}).get("score", 0.0) or 0.0),
+        "volume": sum(int((cached.get(src) or {}).get("volume", 0) or 0) for src in ("reddit", "news", "discord")),
+    }
+
+
+def _sentiment_weight(source_name: str, source_data: dict) -> float:
+    score = source_data.get("score")
+    volume = int(source_data.get("volume", 0) or 0)
+    if score is None or volume <= 0:
+        return 0.0
+    return min(_SENTIMENT_WEIGHT_CAPS.get(source_name, 4.0), math.sqrt(volume))
+
+
+def _combine_sentiment_sources(reddit_data: dict, news_data: dict, discord_data: dict) -> tuple[float, int]:
+    scores = []
+    weights = []
+    raw_volume = 0
+    for source_name, source_data in (("reddit", reddit_data), ("news", news_data), ("discord", discord_data)):
+        raw_volume += int(source_data.get("volume", 0) or 0)
+        weight = _sentiment_weight(source_name, source_data)
+        if weight <= 0:
+            continue
+        scores.append(float(source_data.get("score", 0.0)))
+        weights.append(weight)
+    if not scores:
+        return 0.0, raw_volume
+    total_weight = sum(weights)
+    combined = round(sum(score * weight for score, weight in zip(scores, weights)) / total_weight, 4)
+    return combined, raw_volume
+
+
 def fetch_news_history(entity: str, start_date: str, end_date: str,
                        entity_type: str = "team") -> list[dict]:
     """
@@ -847,27 +899,16 @@ def get_team_sentiment(team_name: str) -> dict:
     credentials are configured; silently skipped otherwise).
     Returns {reddit, news, combined} score dict.
     """
+    cached = _cached_sentiment_payload(team_name, "team")
+    if cached:
+        return cached
+
     # Reddit: only runs when real credentials are set
     reddit_data  = get_reddit_sentiment(team_name, entity_type="team")
     news_data    = get_news_sentiment(team_name, entity_type="team")
     discord_data = get_discord_sentiment(team_name, entity_type="team")
 
-    scores  = []
-    weights = []
-    if reddit_data.get("score") is not None and reddit_data.get("volume", 0) > 0:
-        scores.append(float(reddit_data["score"]))
-        weights.append(reddit_data["volume"])
-    if news_data.get("score") is not None and news_data.get("volume", 0) > 0:
-        scores.append(float(news_data["score"]))
-        weights.append(news_data["volume"])
-    if discord_data.get("score") is not None and discord_data.get("volume", 0) > 0:
-        scores.append(float(discord_data["score"]))
-        weights.append(discord_data["volume"])
-
-    combined = 0.0
-    if scores:
-        total_w  = sum(weights)
-        combined = round(sum(s * w for s, w in zip(scores, weights)) / total_w, 4)
+    combined, raw_volume = _combine_sentiment_sources(reddit_data, news_data, discord_data)
 
     try:
         from data.db import save_sentiment
@@ -886,9 +927,9 @@ def get_team_sentiment(team_name: str) -> dict:
                            discord_data.get("score", 0.0),
                            discord_data.get("volume", 0),
                            discord_data.get("keywords", ""))
-        if scores:
+        if raw_volume > 0:
             save_sentiment(team_name, "team", "combined", combined,
-                           sum(weights), "")
+                           raw_volume, "")
     except Exception as e:
         print(f"[sentiment] DB save error: {e}")
 
@@ -898,32 +939,21 @@ def get_team_sentiment(team_name: str) -> dict:
         "news":     news_data,
         "discord":  discord_data,
         "combined": combined,
-        "volume":   sum(weights),
+        "volume":   raw_volume,
     }
 
 
 def get_player_sentiment(player_name: str) -> dict:
     """Get combined sentiment for a player from NewsAPI (+ Reddit when configured)."""
+    cached = _cached_sentiment_payload(player_name, "player")
+    if cached:
+        return cached
+
     reddit_data  = get_reddit_sentiment(player_name, entity_type="player", post_limit=20)
     news_data    = get_news_sentiment(player_name, entity_type="player")
     discord_data = get_discord_sentiment(player_name, entity_type="player")
 
-    scores  = []
-    weights = []
-    if reddit_data.get("score") is not None and reddit_data.get("volume", 0) > 0:
-        scores.append(float(reddit_data["score"]))
-        weights.append(reddit_data["volume"])
-    if news_data.get("score") is not None and news_data.get("volume", 0) > 0:
-        scores.append(float(news_data["score"]))
-        weights.append(news_data["volume"])
-    if discord_data.get("score") is not None and discord_data.get("volume", 0) > 0:
-        scores.append(float(discord_data["score"]))
-        weights.append(discord_data["volume"])
-
-    combined = 0.0
-    if scores:
-        total_w   = sum(weights)
-        combined  = round(sum(s * w for s, w in zip(scores, weights)) / total_w, 4)
+    combined, raw_volume = _combine_sentiment_sources(reddit_data, news_data, discord_data)
 
     try:
         from data.db import save_sentiment
@@ -942,9 +972,9 @@ def get_player_sentiment(player_name: str) -> dict:
                            discord_data.get("score", 0.0),
                            discord_data.get("volume", 0),
                            discord_data.get("keywords", ""))
-        if scores:
+        if raw_volume > 0:
             save_sentiment(player_name, "player", "combined", combined,
-                           sum(weights), "")
+                           raw_volume, "")
     except Exception:
         pass
 
@@ -954,6 +984,7 @@ def get_player_sentiment(player_name: str) -> dict:
         "news":     news_data,
         "discord":  discord_data,
         "combined": combined,
+        "volume":   raw_volume,
     }
 
 
