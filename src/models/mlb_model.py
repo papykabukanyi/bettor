@@ -143,9 +143,17 @@ def train(team_stats: pd.DataFrame, verbose: bool = True) -> Pipeline:
 
 
 def load_model() -> Pipeline | None:
-    """Load saved model from disk. Returns None if not found."""
+    """Load saved model from disk. Returns None if not found or incompatible."""
     if os.path.exists(MODEL_PATH):
-        return joblib.load(MODEL_PATH)
+        try:
+            return joblib.load(MODEL_PATH)
+        except Exception as _e:
+            print(f"[mlb_model] Model load failed ({_e}) — deleting for retrain")
+            try:
+                os.remove(MODEL_PATH)
+            except OSError:
+                pass
+            return None
     print("[mlb_model] No saved model found – call train() first.")
     return None
 
@@ -156,7 +164,14 @@ def load_enhanced_model() -> Pipeline | None:
         os.path.dirname(__file__), "..", "..", "models", "mlb_model_enhanced.joblib"
     )
     if os.path.exists(enhanced):
-        return joblib.load(enhanced)
+        try:
+            return joblib.load(enhanced)
+        except Exception as _e:
+            print(f"[mlb_model] Enhanced model load failed ({_e}) — deleting for retrain")
+            try:
+                os.remove(enhanced)
+            except OSError:
+                pass
     return load_model()
 
 

@@ -335,15 +335,6 @@ CREATE TABLE IF NOT EXISTS analysis_cache (
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- ── SMS recipients: phone numbers to receive daily pick texts ──
-CREATE TABLE IF NOT EXISTS phone_numbers (
-    id       SERIAL PRIMARY KEY,
-    phone    VARCHAR(30) NOT NULL UNIQUE,
-    label    VARCHAR(100) DEFAULT '',
-    active   BOOLEAN      DEFAULT TRUE,
-    added_at TIMESTAMPTZ  DEFAULT NOW()
-);
-
 -- ── MLB Predictions: every prediction the bot makes ──
 CREATE TABLE IF NOT EXISTS predictions (
     id              SERIAL PRIMARY KEY,
@@ -1456,76 +1447,7 @@ def get_analysis_cache(max_age_hours: int = 22, cache_date=None,
         return None
     finally:
         conn.close()
-# ──────────────────────────────────────────────────────────────────────────────
-# Phone numbers  (SMS recipient list)
-# ──────────────────────────────────────────────────────────────────────────────
 
-def add_phone_number(phone: str, label: str = "") -> tuple[bool, str]:
-    """Add or reactivate a phone number in the SMS recipient list."""
-    conn = get_conn()
-    if conn is None:
-        return False, "Database unavailable"
-    try:
-        cur = conn.cursor()
-        cur.execute(
-            """
-            INSERT INTO phone_numbers (phone, label, active)
-            VALUES (%s, %s, TRUE)
-            ON CONFLICT (phone) DO UPDATE SET
-                label = EXCLUDED.label,
-                active = TRUE
-            """,
-            (phone.strip(), (label or "").strip()),
-        )
-        conn.commit()
-        return True, "Phone number saved"
-    except Exception as e:
-        conn.rollback()
-        print(f"[db] add_phone_number error: {e}")
-        return False, str(e)
-    finally:
-        conn.close()
-
-
-def remove_phone_number(phone: str) -> bool:
-    """Permanently delete a phone number from the recipient list."""
-    conn = get_conn()
-    if conn is None:
-        return False
-    try:
-        cur = conn.cursor()
-        cur.execute("DELETE FROM phone_numbers WHERE phone = %s", (phone.strip(),))
-        conn.commit()
-        return cur.rowcount > 0
-    except Exception as e:
-        conn.rollback()
-        print(f"[db] remove_phone_number error: {e}")
-        return False
-    finally:
-        conn.close()
-
-
-def get_phone_numbers(active_only: bool = True) -> list:
-    """Return all registered phone numbers, optionally only active ones."""
-    conn = get_conn()
-    if conn is None:
-        return []
-    try:
-        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        if active_only:
-            cur.execute("SELECT * FROM phone_numbers WHERE active = TRUE ORDER BY added_at")
-        else:
-            cur.execute("SELECT * FROM phone_numbers ORDER BY added_at")
-        rows = [dict(r) for r in cur.fetchall()]
-        for r in rows:
-            if r.get("added_at"):
-                r["added_at"] = r["added_at"].isoformat()
-        return rows
-    except Exception as e:
-        print(f"[db] get_phone_numbers error: {e}")
-        return []
-    finally:
-        conn.close()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1753,6 +1675,51 @@ def update_prediction_outcome(game_key: str, game_date: str, outcome: str,
     except Exception as e:
         conn.rollback()
         print(f"[db] update_prediction_outcome error: {e}")
+    finally:
+        conn.close()
+
+
+def get_predictions_for_date(game_date: "str | datetime.date") -> list:
+    """
+    Return saved prediction rows for a specific game_date, formatted as bet dicts
+    compatible with _build_card in dashboard.py (includes a numeric 'safety' score).
+    """
+    _SAFETY_SCORES = {"ELITE": 0.80, "SAFE": 0.65, "MODERATE": 0.52, "RISKY": 0.45}
+    conn = get_conn()
+    if conn is None:
+        return []
+    try:
+        date_str = game_date.isoformat() if hasattr(game_date, "isoformat") else str(game_date)
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(
+            """SELECT game_key, bet_type, pick, line, odds_am, dec_odds, model_prob,
+                      confidence, safety_label, game_date, game_time,
+                      home_team, away_team, home_starter, away_starter, outcome
+               FROM predictions
+               WHERE game_date = %s AND outcome != 'ARCHIVED'
+               ORDER BY model_prob DESC""",
+            (date_str,)
+        )
+        rows = []
+        for r in cur.fetchall():
+            d = dict(r)
+            d["safety"] = _SAFETY_SCORES.get(d.get("safety_label", "MODERATE"), 0.52)
+            d["match_key"] = d.get("game_key", "")
+            d["edge"] = max(0.0, float(d.get("model_prob") or 0.5) - 0.476)
+            for k in ("game_date",):
+                if d.get(k) and hasattr(d[k], "isoformat"):
+                    d[k] = d[k].isoformat()
+            for k in ("line", "dec_odds", "model_prob"):
+                if d.get(k) is not None:
+                    try:
+                        d[k] = float(d[k])
+                    except (TypeError, ValueError):
+                        pass
+            rows.append(d)
+        return rows
+    except Exception as e:
+        print(f"[db] get_predictions_for_date error: {e}")
+        return []
     finally:
         conn.close()
 

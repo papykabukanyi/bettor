@@ -448,7 +448,7 @@ body.console-open main{padding-bottom:236px}
   <div class="header-actions">
     <span id="last-updated">{{ last_updated or 'Not loaded' }}</span>
     <span id="conn-badge" style="font-size:.7rem;font-weight:700;letter-spacing:.5px">&#9675; connecting</span>
-    <button class="btn" onclick="openPhoneModal()">&#128241; SMS</button>
+    <button class="btn" onclick="openEmailModal()">&#9993; Email</button>
     <button class="btn" id="console-btn" onclick="toggleConsole()" title="Toggle live console">&#128187; Console</button>
   </div>
 </header>
@@ -596,23 +596,15 @@ body.console-open main{padding-bottom:236px}
 
 </main>
 
-<!-- Phone modal -->
-<div class="modal-overlay hidden" id="phone-modal">
+<!-- Email modal -->
+<div class="modal-overlay hidden" id="email-modal">
   <div class="modal">
-    <button class="modal-close" onclick="closePhoneModal()">&times;</button>
-    <h2>&#128241; SMS Recipients</h2>
-    <div class="form-row">
-      <label>Phone number (+1XXXXXXXXXX)</label>
-      <input type="tel" id="new-phone" placeholder="+15551234567">
-    </div>
-    <div class="form-row">
-      <label>Label (optional)</label>
-      <input type="text" id="new-phone-label" placeholder="e.g. Main">
-    </div>
-    <button class="btn btn-primary" onclick="addPhone()" style="width:100%;margin-bottom:12px">Add Number</button>
-    <div class="phone-list" id="phone-list"></div>
+    <button class="modal-close" onclick="closeEmailModal()">&times;</button>
+    <h2>&#9993; Email Notifications</h2>
+    <p style="color:var(--muted);font-size:.82rem;margin-bottom:14px">Recipients are configured via the <code>EMAIL_TO</code> environment variable.</p>
+    <div class="phone-list" id="email-recipient-list">Loading&hellip;</div>
     <div style="margin-top:14px;border-top:1px solid var(--border);padding-top:12px">
-      <button class="btn btn-primary" onclick="sendSms()" style="width:100%">&#128232; Send Today's Picks</button>
+      <button class="btn btn-primary" onclick="sendPicksEmail()" style="width:100%">&#128232; Send Today's Picks</button>
     </div>
   </div>
 </div>
@@ -1944,7 +1936,7 @@ function parlayComboCard(c) {
       </div>
     </div>`;
   }).join('');
-  const smsData = JSON.stringify(_autoParlayPayload(c)).replace(/"/g,'&quot;');
+  const emailData = JSON.stringify(_autoParlayPayload(c)).replace(/"/g,'&quot;');
   return `<div class="parlay-combo-card">
   <div class="combo-header">
     <div>
@@ -1959,7 +1951,7 @@ function parlayComboCard(c) {
   <div class="combo-legs">${legsHtml}</div>
   <div class="combo-actions">
     <span class="section-meta" style="flex:1;display:flex;align-items:center">Auto-tracked in Tracked Parlays</span>
-    <button class="btn btn-sm" style="flex:1" onclick="sendParlaySms(${smsData})">&#128241; SMS</button>
+    <button class="btn btn-sm" style="flex:1" onclick="sendParlayEmail(${emailData})">&#9993; Email</button>
   </div>
 </div>`;
 }
@@ -2312,11 +2304,11 @@ function saveAutoMixParlay() {
   });
 }
 
-function sendAutoMixSms() {
+function sendAutoMixEmail() {
   if (!AUTO_MIX_LEGS.length) { toast('No auto-mix yet','info'); return; }
   const combined = AUTO_MIX_LEGS.reduce((acc,l)=>acc*(_legDec(l)||2),1);
   const name = `Auto Mix ${AUTO_MIX_LEGS.length}-Leg`;
-  sendParlaySms({name, legs: AUTO_MIX_LEGS, combined_odds: combined, stake_usd: 10});
+  sendParlayEmail({name, legs: AUTO_MIX_LEGS, combined_odds: combined, stake_usd: 10});
 }
 
 // Legacy renderParlays — now delegates to auto-combo generator
@@ -2375,14 +2367,14 @@ function saveParlay() {
   });
 }
 
-function sendParlaySms(data) {
-  fetch('/api/sms/send-parlay',{
+function sendParlayEmail(data) {
+  fetch('/api/email/send-parlay',{
     method:'POST',
     headers:{'Content-Type':'application/json'},
     body:JSON.stringify(data)
   }).then(r=>r.json()).then(d=>{
-    if (d.ok) toast(`SMS sent (${d.sent||0} delivered)`, 'success');
-    else toast(d.error||'Error sending SMS','error');
+    if (d.ok) toast(`Email sent (${d.sent||0} delivered)`, 'success');
+    else toast(d.error||'Error sending email','error');
   });
 }
 
@@ -2391,7 +2383,7 @@ function sendBuilderParlay() {
   const combined = parlayLegs.reduce((acc,l)=>acc*(l.dec_odds||2),1);
   const name  = document.getElementById('parlay-name').value.trim() || 'My Parlay';
   const stake = parseFloat(document.getElementById('parlay-stake').value) || 0;
-  sendParlaySms({name, legs: parlayLegs, combined_odds: combined, stake_usd: stake});
+  sendParlayEmail({name, legs: parlayLegs, combined_odds: combined, stake_usd: stake});
 }
 
 function loadTrackedParlays() {
@@ -2602,74 +2594,36 @@ function loadHistory() {
   });
 }
 
-// ── Phone / SMS — stored in localStorage, no DB needed ───────────────────
-const _PHONES_KEY = 'bettor_sms_recipients';
-
-function _getStoredPhones() {
-  try { return JSON.parse(localStorage.getItem(_PHONES_KEY) || '[]'); }
-  catch(e) { return []; }
+// ── Email notifications ───────────────────────────────────────────────────
+function openEmailModal() {
+  document.getElementById('email-modal').classList.remove('hidden');
+  loadEmailRecipients();
 }
-function _saveStoredPhones(arr) {
-  localStorage.setItem(_PHONES_KEY, JSON.stringify(arr));
+function closeEmailModal() {
+  document.getElementById('email-modal').classList.add('hidden');
 }
 
-function openPhoneModal() {
-  document.getElementById('phone-modal').classList.remove('hidden');
-  loadPhones();
-}
-function closePhoneModal() {
-  document.getElementById('phone-modal').classList.add('hidden');
-}
-
-function loadPhones() {
-  const list = document.getElementById('phone-list');
-  const numbers = _getStoredPhones();
-  if (!numbers.length) {
-    list.innerHTML = '<div style="color:var(--muted);font-size:.82rem">No numbers saved yet.</div>';
-    return;
-  }
-  list.innerHTML = numbers.map((n,i) =>
-    `<div class="phone-item">
-       <span>${n.phone} ${n.label ? '('+n.label+')' : ''}</span>
-       <button class="phone-remove" onclick="removePhone('${n.phone}')">Remove</button>
-     </div>`
-  ).join('');
-}
-
-function addPhone() {
-  const phone = (document.getElementById('new-phone').value || '').trim();
-  const label = (document.getElementById('new-phone-label').value || '').trim();
-  if (!phone) { toast('Enter a phone number','error'); return; }
-  if (!/^\+?[0-9]{7,15}$/.test(phone.replace(/[\s\-]/g,''))) {
-    toast('Invalid phone format (use +1XXXXXXXXXX)','error'); return;
-  }
-  const numbers = _getStoredPhones();
-  if (numbers.find(n => n.phone === phone)) { toast('Number already saved','info'); return; }
-  numbers.push({phone, label});
-  _saveStoredPhones(numbers);
-  toast('Number saved!','success');
-  document.getElementById('new-phone').value = '';
-  document.getElementById('new-phone-label').value = '';
-  loadPhones();
-}
-
-function removePhone(phone) {
-  const numbers = _getStoredPhones().filter(n => n.phone !== phone);
-  _saveStoredPhones(numbers);
-  toast('Removed','success');
-  loadPhones();
-}
-
-function sendSms() {
-  const numbers = _getStoredPhones();
-  if (!numbers.length) { toast('No phone numbers saved — add one first','error'); return; }
-  fetch('/api/sms/send', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({numbers})
-  }).then(r => r.json()).then(d => {
-    toast(d.ok ? `SMS sent to ${numbers.length} number(s)!` : (d.error||'Error sending'), d.ok?'success':'error');
+function loadEmailRecipients() {
+  const list = document.getElementById('email-recipient-list');
+  fetch('/api/email/recipients').then(r=>r.json()).then(d=>{
+    const emails = d.recipients || [];
+    if (!emails.length) {
+      list.innerHTML = '<div style="color:var(--muted);font-size:.82rem">No recipients configured (set EMAIL_TO in environment).</div>';
+      return;
+    }
+    list.innerHTML = emails.map(e=>
+      `<div class="phone-item"><span>&#9993; ${e}</span></div>`
+    ).join('');
+  }).catch(()=>{
+    list.innerHTML = '<div style="color:var(--muted);font-size:.82rem">Could not load recipients.</div>';
   });
+}
+
+function sendPicksEmail() {
+  fetch('/api/email/send', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'})
+    .then(r=>r.json()).then(d=>{
+      toast(d.ok ? `Email sent (${d.sent||0} delivered)` : (d.error||'Error sending'), d.ok?'success':'error');
+    });
 }
 
 // ── Toast ─────────────────────────────────────────────────────────────────

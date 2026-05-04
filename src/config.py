@@ -30,10 +30,6 @@ DISCORD_LOOKBACK_HOURS = int(os.getenv("DISCORD_LOOKBACK_HOURS", "12"))
 DISCORD_MAX_MESSAGES   = int(os.getenv("DISCORD_MAX_MESSAGES", "300"))
 DISCORD_CACHE_MINUTES  = int(os.getenv("DISCORD_CACHE_MINUTES", "15"))
 
-# ClickSend SMS
-CLICKSEND_USERNAME = os.getenv("CLICKSEND_USERNAME", "")
-CLICKSEND_API_KEY  = os.getenv("CLICKSEND_API_KEY", "")
-
 # Strategy settings
 MIN_VALUE_EDGE = float(os.getenv("MIN_VALUE_EDGE", "0.05"))
 KELLY_FRACTION = float(os.getenv("KELLY_FRACTION", "0.25"))

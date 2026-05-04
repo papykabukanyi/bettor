@@ -589,6 +589,11 @@ def _run_analysis(lock_date: datetime.date | None = None):
                 "final", "game over", "completed", "cancelled", "suspended", "postponed"
             ))
 
+        # Identify which games are still upcoming (not yet final)
+        _today_upcoming   = [g for g in today_games    if not _is_terminal_status(g.get("status", ""))]
+        _tomorrow_upcoming = [g for g in tomorrow_games if not _is_terminal_status(g.get("status", ""))]
+        _all_today_final   = len(today_games) > 0 and len(_today_upcoming) == 0
+
         for g in today_games + tomorrow_games:
             ht = g.get("home_team", "")
             at = g.get("away_team", "")
@@ -631,6 +636,20 @@ def _run_analysis(lock_date: datetime.date | None = None):
                 _log(f"Prediction error {ht} vs {at}: {e}")
         _mp.MIN_VALUE_EDGE = _orig_edge
         _log(f"Game bets generated: {len(all_bets)}")
+
+        # ── DB fallback: restore today's saved predictions when all today games are Final ──
+        if _all_today_final:
+            _log(f"[fallback] All {len(today_games)} today games are Final — loading saved predictions from DB for today's cards...")
+            try:
+                from data.db import get_predictions_for_date
+                saved_today = get_predictions_for_date(today_str)
+                if saved_today:
+                    all_bets.extend(saved_today)
+                    _log(f"[fallback] Restored {len(saved_today)} saved picks for today's cards")
+                else:
+                    _log("[fallback] No saved predictions found in DB for today")
+            except Exception as _fb_e:
+                _log(f"[fallback] DB prediction restore failed: {_fb_e}")
 
         _phase(5)
         _log("Building player prop bets...")
