@@ -291,6 +291,41 @@ CREATE INDEX IF NOT EXISTS idx_news_team          ON news_articles(sport, team, 
 CREATE INDEX IF NOT EXISTS idx_h2h_teams          ON head_to_head(sport, team_a, team_b);
 CREATE INDEX IF NOT EXISTS idx_player_prof_name   ON player_profiles(sport, player_name);
 
+-- ── Daily run log: one row per morning analysis run ──
+CREATE TABLE IF NOT EXISTS daily_runs (
+    id           SERIAL PRIMARY KEY,
+    run_id       VARCHAR(50) NOT NULL UNIQUE,  -- e.g. 'MLB-2026-05-03'
+    run_date     DATE        NOT NULL,
+    status       VARCHAR(20) DEFAULT 'RUNNING',  -- RUNNING, DONE, ARCHIVED
+    games_today  INTEGER     DEFAULT 0,
+    games_tmrw   INTEGER     DEFAULT 0,
+    props_count  INTEGER     DEFAULT 0,
+    parlays_count INTEGER    DEFAULT 0,
+    started_at   TIMESTAMPTZ DEFAULT NOW(),
+    finished_at  TIMESTAMPTZ,
+    archived_at  TIMESTAMPTZ
+);
+
+-- Idempotent migrations for run_date tracking
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_name='predictions' AND column_name='run_date') THEN
+        ALTER TABLE predictions ADD COLUMN run_date DATE;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_name='prop_history' AND column_name='run_date') THEN
+        ALTER TABLE prop_history ADD COLUMN run_date DATE;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_name='predictions' AND column_name='run_id') THEN
+        ALTER TABLE predictions ADD COLUMN run_id VARCHAR(50);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_name='prop_history' AND column_name='run_id') THEN
+        ALTER TABLE prop_history ADD COLUMN run_id VARCHAR(50);
+    END IF;
+END $$;
+
 -- ── Analysis cache: stores full game-card + parlay results per day ──
 CREATE TABLE IF NOT EXISTS analysis_cache (
     id         SERIAL PRIMARY KEY,
@@ -743,6 +778,8 @@ def save_prop_picks(picks: list, game_date=None):
         cur = conn.cursor()
         cols = _get_table_columns(conn, "prop_history")
         has_game_key = "game_key" in cols
+        has_run_id   = "run_id"   in cols
+        has_run_date = "run_date" in cols
         for p in picks:
             pick_game_key = (p.get("game_key") or p.get("game") or "").strip()
             pick_game_date = p.get("date") or game_date or datetime.date.today()
@@ -757,6 +794,8 @@ def save_prop_picks(picks: list, game_date=None):
                 "over_pct":  p.get("over_pct"),"under_pct": p.get("under_pct"),
                 "league":    p.get("league"),  "game":      p.get("game"),
             })
+            pick_run_id   = p.get("run_id")
+            pick_run_date = p.get("run_date") or str(pick_game_date)
             try:
                 if has_game_key and pick_game_key:
                     cur.execute(
@@ -768,6 +807,7 @@ def save_prop_picks(picks: list, game_date=None):
                           AND prop_type = %s
                           AND recommendation = %s
                           AND COALESCE(line::text, '') = COALESCE(%s::text, '')
+                          AND outcome != 'ARCHIVED'
                         LIMIT 1
                         """,
                         (
@@ -789,6 +829,7 @@ def save_prop_picks(picks: list, game_date=None):
                           AND prop_type = %s
                           AND recommendation = %s
                           AND COALESCE(line::text, '') = COALESCE(%s::text, '')
+                          AND outcome != 'ARCHIVED'
                         LIMIT 1
                         """,
                         (
@@ -803,43 +844,29 @@ def save_prop_picks(picks: list, game_date=None):
                 if cur.fetchone():
                     continue
 
+                # Build dynamic INSERT to support optional run_id / run_date columns
+                base_cols = ["sport", "player_name", "team", "game_date", "prop_type",
+                             "line", "over_prob", "under_prob", "recommendation", "stats_json"]
+                base_vals = [
+                    p.get("sport", "mlb"), p.get("name"), p.get("team"),
+                    pick_game_date, prop_type, line_value,
+                    (p.get("over_pct") or 50) / 100.0,
+                    (p.get("under_pct") or 50) / 100.0,
+                    recommendation, stats_snap,
+                ]
                 if has_game_key:
-                    cur.execute("""
-                        INSERT INTO prop_history
-                            (game_key, sport, player_name, team, game_date, prop_type,
-                             line, over_prob, under_prob, recommendation, stats_json)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    """, (
-                        pick_game_key or None,
-                        p.get("sport", "mlb"),
-                        p.get("name"),
-                        p.get("team"),
-                        pick_game_date,
-                        prop_type,
-                        line_value,
-                        (p.get("over_pct") or 50) / 100.0,
-                        (p.get("under_pct") or 50) / 100.0,
-                        recommendation,
-                        stats_snap,
-                    ))
-                else:
-                    cur.execute("""
-                        INSERT INTO prop_history
-                            (sport, player_name, team, game_date, prop_type,
-                             line, over_prob, under_prob, recommendation, stats_json)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    """, (
-                        p.get("sport", "mlb"),
-                        p.get("name"),
-                        p.get("team"),
-                        pick_game_date,
-                        prop_type,
-                        line_value,
-                        (p.get("over_pct") or 50) / 100.0,
-                        (p.get("under_pct") or 50) / 100.0,
-                        recommendation,
-                        stats_snap,
-                    ))
+                    base_cols.insert(0, "game_key")
+                    base_vals.insert(0, pick_game_key or None)
+                if has_run_id and pick_run_id:
+                    base_cols.append("run_id");   base_vals.append(pick_run_id)
+                if has_run_date:
+                    base_cols.append("run_date"); base_vals.append(pick_run_date)
+
+                ph = ", ".join(["%s"] * len(base_vals))
+                cur.execute(
+                    f"INSERT INTO prop_history ({', '.join(base_cols)}) VALUES ({ph})",
+                    base_vals
+                )
                 saved += 1
             except Exception:
                 pass  # ignore duplicate key violations per pick
@@ -893,7 +920,7 @@ def get_todays_prop_picks(sport: str = None, max_age_hours: int = 2) -> list:
 
 
 def has_prop_picks_for_date(game_date: "datetime.date | str", sport: str = "mlb") -> bool:
-    """Return True if any prop_history rows exist for the given game_date."""
+    """Return True if any non-archived prop_history rows exist for the given game_date."""
     conn = get_conn()
     if conn is None:
         return False
@@ -906,6 +933,7 @@ def has_prop_picks_for_date(game_date: "datetime.date | str", sport: str = "mlb"
                 WHERE game_date = %s AND sport = %s
                   AND recommendation = 'OVER'
                   AND (line IS NULL OR line > 0.5)
+                  AND outcome != 'ARCHIVED'
                 LIMIT 1
                 """,
                 (game_date, sport),
@@ -917,6 +945,7 @@ def has_prop_picks_for_date(game_date: "datetime.date | str", sport: str = "mlb"
                 WHERE game_date = %s
                   AND recommendation = 'OVER'
                   AND (line IS NULL OR line > 0.5)
+                  AND outcome != 'ARCHIVED'
                 LIMIT 1
                 """,
                 (game_date,),
@@ -1516,23 +1545,38 @@ def save_predictions(predictions: list) -> int:
     saved = 0
     try:
         cur = conn.cursor()
+        cols = _get_table_columns(conn, "predictions")
+        has_run_id   = "run_id"   in cols
+        has_run_date = "run_date" in cols
         for p in predictions:
             try:
                 cur.execute(
                     """SELECT 1 FROM predictions
                        WHERE game_key = %s AND bet_type = %s AND pick = %s AND game_date = %s
+                         AND outcome != 'ARCHIVED'
                        LIMIT 1""",
                     (p.get("game_key"), p.get("bet_type"), p.get("pick"), p.get("game_date")),
                 )
                 if cur.fetchone():
                     continue
-                cur.execute("""
+                extra_cols = ""
+                extra_ph   = ""
+                extra_vals = []
+                if has_run_id:
+                    extra_cols += ", run_id"
+                    extra_ph   += ", %s"
+                    extra_vals.append(p.get("run_id"))
+                if has_run_date:
+                    extra_cols += ", run_date"
+                    extra_ph   += ", %s"
+                    extra_vals.append(p.get("run_date") or p.get("game_date"))
+                cur.execute(f"""
                     INSERT INTO predictions
                         (game_key, sport, bet_type, pick, line, odds_am, dec_odds,
                          model_prob, confidence, safety_label, game_date, game_time,
                          home_team, away_team, home_starter, away_starter,
-                         outcome, sentiment_score, news_snippet)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'PENDING',%s,%s)
+                         outcome, sentiment_score, news_snippet{extra_cols})
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'PENDING',%s,%s{extra_ph})
                     ON CONFLICT DO NOTHING
                 """, (
                     p.get("game_key"), p.get("sport","mlb"), p.get("bet_type"),
@@ -1542,6 +1586,7 @@ def save_predictions(predictions: list) -> int:
                     p.get("home_team"), p.get("away_team"),
                     p.get("home_starter"), p.get("away_starter"),
                     p.get("sentiment_score"), p.get("news_snippet","")[:500],
+                    *extra_vals,
                 ))
                 saved += 1
             except Exception:
@@ -1558,17 +1603,134 @@ def save_predictions(predictions: list) -> int:
 
 
 def has_predictions_for_date(game_date: "datetime.date | str") -> bool:
-    """Return True if any predictions already exist for the given game_date."""
+    """Return True if any non-archived predictions exist for the given game_date."""
     conn = get_conn()
     if conn is None:
         return False
     try:
         cur = conn.cursor()
-        cur.execute("SELECT 1 FROM predictions WHERE game_date = %s LIMIT 1", (game_date,))
+        cur.execute(
+            "SELECT 1 FROM predictions WHERE game_date = %s AND outcome != 'ARCHIVED' LIMIT 1",
+            (game_date,)
+        )
         return cur.fetchone() is not None
     except Exception as e:
         print(f"[db] has_predictions_for_date error: {e}")
         return False
+    finally:
+        conn.close()
+
+
+def archive_previous_day_data(today_date: "datetime.date | str") -> dict:
+    """
+    Archive all PENDING predictions and prop_history rows from before today.
+    This lets the daily lock check always pass for a genuinely new day.
+    Returns dict with counts of archived rows.
+    """
+    conn = get_conn()
+    if conn is None:
+        return {}
+    results = {}
+    try:
+        cur = conn.cursor()
+        # Archive old PENDING predictions
+        cur.execute(
+            """
+            UPDATE predictions
+            SET outcome = 'ARCHIVED', resolved_at = NOW()
+            WHERE game_date < %s
+              AND outcome = 'PENDING'
+            """,
+            (today_date,)
+        )
+        results["predictions_archived"] = cur.rowcount
+        # Archive old PENDING prop picks
+        cur.execute(
+            """
+            UPDATE prop_history
+            SET outcome = 'ARCHIVED', resolved_at = NOW()
+            WHERE game_date < %s
+              AND outcome = 'PENDING'
+            """,
+            (today_date,)
+        )
+        results["props_archived"] = cur.rowcount
+        # Delete stale analysis_cache rows older than 2 days (keep yesterday for resolution)
+        cur.execute(
+            """
+            DELETE FROM analysis_cache
+            WHERE cache_date < %s - INTERVAL '2 days'
+            """,
+            (today_date,)
+        )
+        results["cache_rows_deleted"] = cur.rowcount
+        conn.commit()
+        print(f"[db] archived {results.get('predictions_archived',0)} predictions, "
+              f"{results.get('props_archived',0)} props, "
+              f"deleted {results.get('cache_rows_deleted',0)} stale cache rows")
+        return results
+    except Exception as e:
+        conn.rollback()
+        print(f"[db] archive_previous_day_data error: {e}")
+        return {}
+    finally:
+        conn.close()
+
+
+def upsert_daily_run(run_id: str, run_date, status: str = 'RUNNING',
+                     games_today: int = 0, games_tmrw: int = 0,
+                     props_count: int = 0, parlays_count: int = 0,
+                     finished: bool = False) -> int:
+    """Insert or update a daily run log entry. Returns the run's DB id."""
+    conn = get_conn()
+    if conn is None:
+        return 0
+    try:
+        cur = conn.cursor()
+        if finished:
+            cur.execute(
+                """
+                INSERT INTO daily_runs
+                    (run_id, run_date, status, games_today, games_tmrw,
+                     props_count, parlays_count, finished_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())
+                ON CONFLICT (run_id) DO UPDATE SET
+                    status        = EXCLUDED.status,
+                    games_today   = EXCLUDED.games_today,
+                    games_tmrw    = EXCLUDED.games_tmrw,
+                    props_count   = EXCLUDED.props_count,
+                    parlays_count = EXCLUDED.parlays_count,
+                    finished_at   = NOW()
+                RETURNING id
+                """,
+                (run_id, run_date, status, games_today, games_tmrw,
+                 props_count, parlays_count)
+            )
+        else:
+            cur.execute(
+                """
+                INSERT INTO daily_runs
+                    (run_id, run_date, status, games_today, games_tmrw,
+                     props_count, parlays_count)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (run_id) DO UPDATE SET
+                    status        = EXCLUDED.status,
+                    games_today   = EXCLUDED.games_today,
+                    games_tmrw    = EXCLUDED.games_tmrw,
+                    props_count   = EXCLUDED.props_count,
+                    parlays_count = EXCLUDED.parlays_count
+                RETURNING id
+                """,
+                (run_id, run_date, status, games_today, games_tmrw,
+                 props_count, parlays_count)
+            )
+        row = cur.fetchone()
+        conn.commit()
+        return row[0] if row else 0
+    except Exception as e:
+        conn.rollback()
+        print(f"[db] upsert_daily_run error: {e}")
+        return 0
     finally:
         conn.close()
 

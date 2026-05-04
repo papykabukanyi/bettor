@@ -437,6 +437,18 @@ def _run_analysis(lock_date: datetime.date | None = None):
         today_date = _et_calendar_today()
         today_str  = today_date.isoformat()
         tomorrow_str = (today_date + datetime.timedelta(days=1)).isoformat()
+        run_id = f"MLB-{today_str}"
+
+        # ── Step 0: Archive previous-day PENDING picks so lock check is fresh ──
+        try:
+            from data.db import archive_previous_day_data, upsert_daily_run
+            arch = archive_previous_day_data(today_date)
+            if arch.get("predictions_archived") or arch.get("props_archived"):
+                _log(f"[archive] Archived {arch.get('predictions_archived',0)} preds, "
+                     f"{arch.get('props_archived',0)} props from prior days for training")
+            upsert_daily_run(run_id, today_date, status="RUNNING")
+        except Exception as _ae:
+            _log(f"[archive] Archive step skipped: {_ae}")
 
         # Decide whether this run should lock/save today's picks
         need_preds = False
@@ -449,7 +461,9 @@ def _run_analysis(lock_date: datetime.date | None = None):
                 need_props = not has_prop_picks_for_date(today)
                 if need_preds or need_props:
                     lock_date = today
-                    _log(f"[lock] Daily picks missing for {today} - locking this run")
+                    _log(f"[lock] No picks for {today} yet — this run will lock picks")
+                else:
+                    _log(f"[lock] Today's picks already saved for {today} — updating cards only")
             else:
                 need_preds = not has_predictions_for_date(lock_date)
                 need_props = not has_prop_picks_for_date(lock_date)
@@ -717,6 +731,8 @@ def _run_analysis(lock_date: datetime.date | None = None):
             for b in all_bets:
                 pred_rows.append({
                     "game_key":     b.get("game_key", ""),
+                    "run_id":       run_id,
+                    "run_date":     today_str,
                     "sport":        "mlb",
                     "bet_type":     b.get("bet_type", ""),
                     "pick":         b.get("pick", ""),
@@ -746,6 +762,8 @@ def _run_analysis(lock_date: datetime.date | None = None):
                 pick_label = f"{p.get('name','')} {p.get('direction','')} {p.get('line','')} {p.get('prop_label','')}".strip()
                 pred_rows.append({
                     "game_key":     p.get("game_key", p.get("game", "")),
+                    "run_id":       run_id,
+                    "run_date":     today_str,
                     "sport":        "mlb",
                     "bet_type":     "player_prop",
                     "pick":         pick_label,
@@ -771,15 +789,18 @@ def _run_analysis(lock_date: datetime.date | None = None):
                     pred_rows_locked = [p for p in pred_rows if _date_str(p.get("game_date")) == lock_str]
                     save_predictions(pred_rows_locked)
                 else:
-                    _log(f"[lock] Predictions already locked for {lock_str} - skipping DB save")
+                    _log(f"[lock] Predictions already saved for {lock_str} — cards updating")
 
                 if need_props:
                     props_locked = [p for p in all_props if _date_str(p.get("date")) == lock_str]
+                    # Stamp run_id on each prop pick
+                    for _pp in props_locked:
+                        _pp["run_id"] = run_id
                     save_prop_picks(props_locked, game_date=lock_date)
                 else:
-                    _log(f"[lock] Props already locked for {lock_str} - skipping DB save")
+                    _log(f"[lock] Props already saved for {lock_str} — tracking only")
             else:
-                _log("[lock] Daily picks already locked - skipping DB save")
+                _log("[lock] No lock_date — updating analysis cards without re-saving picks")
         except Exception as e:
             _log(f"DB save error: {e}")
 
@@ -859,6 +880,18 @@ def _run_analysis(lock_date: datetime.date | None = None):
 
         _log(f"Analysis complete — {len(today_cards)} today (upcoming), "
              f"{len(tomorrow_cards)} tomorrow, {len(all_props_flat)} props")
+
+        # Mark the daily run as finished in DB
+        try:
+            from data.db import upsert_daily_run
+            upsert_daily_run(run_id, today_date, status="DONE",
+                             games_today=len(today_cards),
+                             games_tmrw=len(tomorrow_cards),
+                             props_count=len(all_props_flat),
+                             parlays_count=len(best_parlays),
+                             finished=True)
+        except Exception as _re:
+            _log(f"[run-log] {_re}")
 
         # Broadcast full state update to all SSE clients
         _sse_broadcast("state_update", {
@@ -1645,31 +1678,55 @@ def _load_boot_schedule_fallback() -> bool:
 
 
 def _auto_boot_analysis():
-    """On startup: load today's DB snapshot, or generate one if today's snapshot is missing."""
+    """On startup: load today's DB snapshot, or generate one if today's snapshot is missing/stale."""
     try:
         from data.db import get_analysis_cache
+        today_str    = _et_calendar_today().isoformat()
+        tomorrow_str = (_et_calendar_today() + datetime.timedelta(days=1)).isoformat()
         cached = get_analysis_cache(max_age_hours=22)
+
         if cached:
-            today_str = _et_calendar_today().isoformat()
-            tomorrow_str = (_et_calendar_today() + datetime.timedelta(days=1)).isoformat()
-            with _lock:
-                _state.update({
-                    "game_cards_today":    _normalize_card_list(cached.get("game_cards_today", []), expected_date=today_str),
-                    "game_cards_tomorrow": _normalize_card_list(cached.get("game_cards_tomorrow", []), expected_date=tomorrow_str),
-                    "best_parlays":        cached.get("best_parlays", []),
-                    "player_props":        cached.get("player_props", []),
-                    "last_updated":        cached.get("last_updated"),
-                })
-            print(f"[boot] Loaded cache from DB (last updated: {cached.get('last_updated')})")
-            if not cached.get("game_cards_today") and not cached.get("game_cards_tomorrow"):
-                print("[boot] Today's snapshot is empty — triggering fresh analysis...")
-                threading.Thread(target=_run_analysis, daemon=True).start()
+            raw_today    = cached.get("game_cards_today", [])
+            raw_tomorrow = cached.get("game_cards_tomorrow", [])
+
+            # Validate that cached cards actually match today's calendar date
+            today_dates    = {c.get("game_date") for c in raw_today    if isinstance(c, dict)}
+            tomorrow_dates = {c.get("game_date") for c in raw_tomorrow if isinstance(c, dict)}
+            cache_is_fresh = (
+                (not raw_today    or today_str    in today_dates)
+                and
+                (not raw_tomorrow or tomorrow_str in tomorrow_dates)
+            )
+
+            if cache_is_fresh:
+                with _lock:
+                    _state.update({
+                        "game_cards_today":    _normalize_card_list(raw_today,    expected_date=today_str),
+                        "game_cards_tomorrow": _normalize_card_list(raw_tomorrow, expected_date=tomorrow_str),
+                        "best_parlays":        cached.get("best_parlays", []),
+                        "player_props":        cached.get("player_props", []),
+                        "last_updated":        cached.get("last_updated"),
+                    })
+                n_today = len(_state["game_cards_today"])
+                n_tmrw  = len(_state["game_cards_tomorrow"])
+                print(f"[boot] Loaded valid today cache — {n_today} today, {n_tmrw} tomorrow "
+                      f"(last updated: {cached.get('last_updated')})")
+                # If cached cards are empty (no games at all), still trigger a refresh
+                if n_today == 0 and n_tmrw == 0:
+                    print("[boot] Cache has 0 games — triggering fresh analysis...")
+                    threading.Thread(target=_run_analysis, daemon=True).start()
+                return
+            else:
+                stale_dates = today_dates | tomorrow_dates
+                print(f"[boot] Cache has stale game dates {stale_dates} (expected {today_str}) "
+                      f"— triggering fresh analysis to replace stale data...")
         else:
             _load_boot_schedule_fallback()
-            print("[boot] No recent DB cache found")
-            if os.getenv("AUTO_BOOT_ANALYSIS_EMPTY_CACHE", "0").strip().lower() in {"1", "true", "yes", "on"}:
-                print("[boot] Empty-cache auto-analysis enabled — triggering fresh analysis...")
-                threading.Thread(target=_run_analysis, daemon=True).start()
+            print(f"[boot] No cache for {today_str} — triggering fresh analysis...")
+
+        # Always run fresh analysis when cache is missing or stale
+        threading.Thread(target=_run_analysis, daemon=True).start()
+
     except Exception as e:
         print(f"[boot] Auto-boot error: {e}")
         if not _load_boot_schedule_fallback():
