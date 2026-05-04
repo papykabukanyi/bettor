@@ -14,10 +14,9 @@ Routes:
   POST /api/parlay/save       → {ok}
   GET  /api/parlay/list       → {ok, parlays}
   POST /api/parlay/resolve    → {ok}
-  GET  /api/phone-numbers     → {numbers}
-  POST /api/phone-numbers/add → {ok, msg}
-  POST /api/phone-numbers/remove → {ok}
-  POST /api/sms/send          → {ok} / {error}
+  GET  /api/email/recipients  → {recipients}
+  POST /api/email/send        → {ok} / {error}
+  POST /api/email/send-parlay → {ok}
 """
 
 import os
@@ -893,6 +892,21 @@ def _run_analysis(lock_date: datetime.date | None = None):
         except Exception as _re:
             _log(f"[run-log] {_re}")
 
+        # ── Send email notification when new picks are saved ──────────────────
+        if need_preds or need_props:
+            try:
+                from email_notify import send_daily_picks
+                _mail_state = {
+                    "best_parlays":     _clean(best_parlays),
+                    "game_cards_today": _clean(today_cards),
+                    "player_props":     _clean(all_props_flat),
+                }
+                _mail_result = send_daily_picks(_mail_state)
+                _log(f"[email] Sent daily picks — {_mail_result.get('sent',0)} delivered, "
+                     f"{_mail_result.get('failed',0)} failed")
+            except Exception as _me:
+                _log(f"[email] Send failed: {_me}")
+
         # Broadcast full state update to all SSE clients
         _sse_broadcast("state_update", {
             "status":              "done",
@@ -1286,66 +1300,41 @@ def api_parlay_resolve():
         return jsonify({"ok": False, "error": str(e)})
 
 
-@app.route("/api/phone-numbers")
-def api_phone_numbers():
+@app.route("/api/email/recipients")
+def api_email_recipients():
+    """Return the configured email recipients from ENV."""
     try:
-        from data.db import get_phone_numbers
-        return jsonify({"ok": True, "numbers": get_phone_numbers()})
+        raw = os.getenv("EMAIL_TO", "")
+        recipients = [e.strip() for e in raw.split(",") if e.strip()]
+        return jsonify({"ok": True, "recipients": recipients})
     except Exception as e:
-        return jsonify({"ok": False, "numbers": [], "error": str(e)})
+        return jsonify({"ok": False, "recipients": [], "error": str(e)})
 
 
-@app.route("/api/phone-numbers/add", methods=["POST"])
-def api_phone_add():
-    data  = request.get_json(force=True) or {}
-    phone = (data.get("phone") or "").strip()
-    label = (data.get("label") or "").strip()
-    if not phone:
-        return jsonify({"ok": False, "msg": "Phone number required"}), 400
+@app.route("/api/email/send", methods=["POST"])
+def api_email_send():
+    """Manually trigger a daily picks email to all configured recipients."""
     try:
-        from data.db import add_phone_number
-        ok, msg = add_phone_number(phone, label)
-        return jsonify({"ok": ok, "msg": msg})
-    except Exception as e:
-        return jsonify({"ok": False, "msg": str(e)})
-
-
-@app.route("/api/phone-numbers/remove", methods=["POST"])
-def api_phone_remove():
-    data  = request.get_json(force=True) or {}
-    phone = (data.get("phone") or "").strip()
-    if not phone:
-        return jsonify({"ok": False, "msg": "Phone number required"}), 400
-    try:
-        from data.db import remove_phone_number
-        return jsonify({"ok": remove_phone_number(phone)})
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)})
-
-
-@app.route("/api/sms/send", methods=["POST"])
-def api_sms_send():
-    data = request.get_json(force=True, silent=True) or {}
-    numbers = data.get("numbers") or []  # list of {phone, label} from localStorage
-    try:
-        from sms import send_daily_picks_to_all
+        from email_notify import send_daily_picks
         with _lock:
             state = {
-                "best_parlays": list(_state.get("best_parlays", [])),
+                "best_parlays":     list(_state.get("best_parlays", [])),
                 "game_cards_today": list(_state.get("game_cards_today", [])),
+                "player_props":     list(_state.get("player_props", [])),
             }
-        result = send_daily_picks_to_all(state, numbers=numbers if numbers else None)
+        result = send_daily_picks(state)
         return jsonify({"ok": True, **result})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
 
 
-@app.route("/api/sms/send-parlay", methods=["POST"])
-def api_sms_send_parlay():
+@app.route("/api/email/send-parlay", methods=["POST"])
+def api_email_send_parlay():
+    """Send a parlay alert email."""
     data = request.get_json(force=True) or {}
     try:
-        from sms import send_parlay_to_all
-        result = send_parlay_to_all(data)
+        from email_notify import send_parlay_alert
+        result = send_parlay_alert(data)
         return jsonify({"ok": True, **result})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
