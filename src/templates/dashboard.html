@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0,viewport-fit=cover">
 <meta name="mobile-web-app-capable" content="yes">
-<title>Bettor — MLB Dashboard</title>
+<title>Bettor — World Cup 2026</title>
 <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Fraunces:wght@600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap');
@@ -521,8 +521,8 @@ body.console-open main{padding-bottom:236px}
 <!-- Header -->
 <header class="header">
   <div class="header-brand">
-    <img class="mlb-logo" src="/static/mlb-animated.svg" alt="Baseball league logo" onerror="this.style.display='none'">
-    <h1>Bettor <span>MLB</span></h1>
+    <span style="font-size:2rem;line-height:1">⚽</span>
+    <h1>Bettor <span>WC 2026</span></h1>
   </div>
   <div class="header-actions">
     <span id="last-updated">{{ last_updated or 'Not loaded' }}</span>
@@ -541,10 +541,13 @@ body.console-open main{padding-bottom:236px}
     &#128197; Tomorrow <span class="tab-badge" id="badge-tomorrow">0</span>
   </div>
   <div class="tab" data-tab="props" onclick="switchTab('props')">
-    &#128200; Over Bets
+    &#128200; Player Props
   </div>
   <div class="tab" data-tab="parlays" onclick="switchTab('parlays')">
     &#127917; Parlays
+  </div>
+  <div class="tab" data-tab="wcgroups" onclick="switchTab('wcgroups')">
+    &#127942; WC Groups
   </div>
 </div>
 
@@ -690,6 +693,15 @@ body.console-open main{padding-bottom:236px}
 
 <!-- Toast -->
 <div id="toast"></div>
+
+<!-- WC Groups Panel (injected separately so tab works standalone) -->
+<div class="tab-panel" id="panel-wcgroups" style="display:none">
+  <div class="section-header">
+    <span class="section-title">&#127942; FIFA World Cup 2026 — Group Stage</span>
+    <span class="section-meta">USA · Canada · Mexico &nbsp;|&nbsp; June 11 – July 19, 2026</span>
+  </div>
+  <div id="wc-groups-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px;margin-top:8px"></div>
+</div>
 
 <!-- Live Console Panel -->
 <div id="console-panel" class="console-panel">
@@ -1325,9 +1337,19 @@ function _fetchAndRenderParlayPerf() { loadParlayPerformance(); }
 // ── Tab switching ─────────────────────────────────────────────────────────
 function switchTab(name) {
   document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
-  document.querySelectorAll('.tab-panel').forEach(p=>p.classList.remove('active'));
-  document.querySelector(`[data-tab="${name}"]`).classList.add('active');
-  document.getElementById(`panel-${name}`).classList.add('active');
+  document.querySelectorAll('.tab-panel').forEach(p=>{p.classList.remove('active');p.style.display='';});
+  const activeTab = document.querySelector(`[data-tab="${name}"]`);
+  const activePanel = document.getElementById(`panel-${name}`);
+  if (activeTab) activeTab.classList.add('active');
+  if (activePanel) {
+    // wcgroups panel uses display:none/block instead of .active class
+    if (name === 'wcgroups') {
+      activePanel.style.display = 'block';
+      _renderWcGroups();
+    } else {
+      activePanel.classList.add('active');
+    }
+  }
   if (name === 'props') {
     _schedulePropsRender(true);
   }
@@ -1338,6 +1360,48 @@ function switchTab(name) {
     loadParlayPerformance();
     resolveOutcomesSilent();
   }
+}
+
+// ── WC Groups rendering ───────────────────────────────────────────────────
+const WC_GROUPS_STATIC = {
+  "A":["🇺🇸 United States","🇵🇦 Panama","🇧🇴 Bolivia","TBD"],
+  "B":["🇲🇽 Mexico","🇪🇨 Ecuador","🇳🇿 New Zealand","TBD"],
+  "C":["🇨🇦 Canada","🇺🇾 Uruguay","🇻🇪 Venezuela","TBD"],
+  "D":["🇧🇷 Brazil","🇵🇾 Paraguay","🇨🇷 Costa Rica","TBD"],
+  "E":["🇦🇷 Argentina","🇨🇱 Chile","🇵🇪 Peru","TBD"],
+  "F":["🇨🇴 Colombia","🇭🇳 Honduras","TBD","TBD"],
+  "G":["🇫🇷 France","🇧🇪 Belgium","🇷🇸 Serbia","TBD"],
+  "H":["🇪🇸 Spain","🇭🇷 Croatia","🇲🇦 Morocco","TBD"],
+  "I":["🏴󠁧󠁢󠁥󠁮󠁧󠁿 England","🇳🇱 Netherlands","🇸🇳 Senegal","TBD"],
+  "J":["🇩🇪 Germany","🇵🇹 Portugal","🇹🇷 Turkey","TBD"],
+  "K":["🇯🇵 Japan","🇰🇷 South Korea","🇦🇺 Australia","TBD"],
+  "L":["🇸🇦 Saudi Arabia","🇮🇷 Iran","TBD","TBD"],
+};
+
+function _renderWcGroups() {
+  const container = document.getElementById('wc-groups-grid');
+  if (!container || container.dataset.rendered) return;
+  container.dataset.rendered = '1';
+  let html = '';
+  for (const [grp, teams] of Object.entries(WC_GROUPS_STATIC)) {
+    const rows = teams.map((t,i)=>`
+      <div style="display:flex;align-items:center;gap:8px;padding:8px 12px;
+        border-bottom:1px solid rgba(255,255,255,.04);font-size:.85rem">
+        <span style="width:20px;text-align:center;color:var(--muted);font-size:.72rem">${i+1}</span>
+        <span style="flex:1">${t}</span>
+      </div>`).join('');
+    html += `
+      <div style="background:var(--card2);border:1px solid var(--border);border-radius:var(--radius);
+        overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,.25)">
+        <div style="background:linear-gradient(135deg,#14b8a6,#0891b2);padding:10px 14px;
+          display:flex;align-items:center;justify-content:space-between">
+          <span style="font-weight:700;font-size:.95rem;letter-spacing:.5px">GROUP ${grp}</span>
+          <span style="font-size:.7rem;color:rgba(255,255,255,.7)">4 teams</span>
+        </div>
+        ${rows}
+      </div>`;
+  }
+  container.innerHTML = html;
 }
 
 // ── Elite Parlay ──────────────────────────────────────────────────────────

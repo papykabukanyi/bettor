@@ -972,7 +972,30 @@ def api_run():
         _state["phase"]     = _PHASES[0]
         _state["phase_idx"] = 0
     threading.Thread(target=_run_analysis, daemon=True).start()
+    threading.Thread(target=_run_wc_analysis, daemon=True).start()
     return jsonify({"ok": True, "msg": "Analysis started"})
+
+
+@app.route("/api/wc/run", methods=["POST"])
+def api_wc_run():
+    """Manually trigger WC 2026 soccer analysis."""
+    threading.Thread(target=_run_wc_analysis, daemon=True).start()
+    return jsonify({"ok": True, "msg": "WC analysis started"})
+
+
+@app.route("/api/wc/state")
+def api_wc_state():
+    """Return WC dashboard state (cards, props, parlays)."""
+    with _lock:
+        return jsonify({
+            "wc_game_cards_today":    _state.get("wc_game_cards_today", []),
+            "wc_game_cards_tomorrow": _state.get("wc_game_cards_tomorrow", []),
+            "wc_best_parlays":        _state.get("wc_best_parlays", []),
+            "wc_player_props":        _state.get("wc_player_props", []),
+            "wc_live_scores":         _state.get("wc_live_scores", {}),
+            "wc_status":              _state.get("wc_status", "idle"),
+            "wc_date":                _state.get("wc_date", ""),
+        })
 
 
 @app.route("/api/status")
@@ -1617,6 +1640,118 @@ def _poll_live_scores():
 # Live-score polling is started by the leader worker.
 
 
+# ─── WC 2026 analysis pipeline ───────────────────────────────────────────────
+def _run_wc_analysis():
+    """
+    Full WC 2026 soccer analysis run — mirrors _run_analysis() for MLB.
+    Fetches today's + tomorrow's WC matches, runs the soccer model,
+    builds bets/props/parlays, broadcasts via SSE, and sends morning email.
+    """
+    from config import SPORT, WC_START_DATE, WC_END_DATE
+    import datetime as _dt
+
+    today_str = _et_calendar_today().isoformat()
+    print(f"[wc-analysis] Running WC analysis for {today_str}")
+
+    try:
+        from data.wc2026_fetcher import get_matches_today, get_matches_tomorrow
+        from models.soccer_predictor import analyze_matches
+
+        today_matches    = get_matches_today()
+        tomorrow_matches = get_matches_tomorrow()
+        all_matches = today_matches + tomorrow_matches
+
+        if not all_matches:
+            print("[wc-analysis] No WC matches found for today/tomorrow (pre-tournament?)")
+            # Build placeholder state so dashboard shows tournament info
+            with _lock:
+                _state["wc_status"] = "no_matches_today"
+                _state["wc_date"]   = today_str
+            return
+
+        state = analyze_matches(all_matches)
+
+        today_cards    = [c for c in state.get("games", []) if c.get("date","") == today_str]
+        tomorrow_cards = [c for c in state.get("games", []) if c.get("date","") != today_str]
+
+        with _lock:
+            _state["wc_game_cards_today"]    = today_cards
+            _state["wc_game_cards_tomorrow"] = tomorrow_cards
+            _state["wc_best_parlays"]        = state.get("parlays", [])
+            _state["wc_player_props"]        = state.get("props", [])
+            _state["wc_status"]              = "done"
+            _state["wc_date"]                = today_str
+            _state["last_updated"]           = _dt.datetime.now().isoformat()
+
+        # Broadcast to all SSE clients
+        payload = {
+            "status":                   "done",
+            "last_updated":             _state.get("last_updated"),
+            "wc_game_cards_today":      today_cards,
+            "wc_game_cards_tomorrow":   tomorrow_cards,
+            "wc_best_parlays":          state.get("parlays", []),
+            "wc_player_props":          state.get("props", []),
+        }
+        _broadcast(payload)
+
+        # Morning picks email
+        try:
+            from email_notify import send_daily_picks
+            picks_state = {
+                "game_cards_today":    today_cards,
+                "game_cards_tomorrow": tomorrow_cards,
+                "best_parlays":        state.get("parlays", []),
+                "player_props":        state.get("props", []),
+                "sport":               "soccer",
+                "date":                today_str,
+            }
+            send_daily_picks(picks_state)
+            print(f"[wc-analysis] Morning picks email sent — {len(today_cards)} matches today")
+        except Exception as email_e:
+            print(f"[wc-analysis] Email error: {email_e}")
+
+        print(f"[wc-analysis] Done — {len(today_cards)} today, {len(tomorrow_cards)} tomorrow")
+
+    except Exception as e:
+        import traceback as _tb
+        print(f"[wc-analysis] Error: {e}")
+        _tb.print_exc()
+        with _lock:
+            _state["wc_status"] = "error"
+
+
+def _poll_wc_scores():
+    """Poll football-data.org for live WC match updates and broadcast via SSE."""
+    global _live_score_timer
+    try:
+        from data.wc2026_fetcher import get_wc_matches_live
+
+        live = get_wc_matches_live()
+        if not live:
+            return
+
+        live_map: dict = {}
+        for m in live:
+            gk = m.get("game_key", "")
+            if gk:
+                live_map[gk] = {
+                    "home_score": m.get("home_score"),
+                    "away_score": m.get("away_score"),
+                    "status":     m.get("status",""),
+                    "match_key":  m.get("match_key",""),
+                }
+
+        if live_map:
+            with _lock:
+                existing = _state.get("wc_live_scores", {})
+                existing.update(live_map)
+                _state["wc_live_scores"] = existing
+            _broadcast({"wc_live_scores": live_map})
+
+    except Exception as e:
+        print(f"[wc-scores] poll error: {e}")
+
+
 # ─── SSE stream endpoint ─────────────────────────────────────────────────────
 @app.route("/api/stream")
 def api_stream():
@@ -1697,6 +1832,8 @@ def _scheduled_analysis(force: bool = False, lock_today: bool = False):
     _sse_broadcast("status", {"status": "running", "phase": _PHASES[0]})
     lock_date = _et_calendar_today() if lock_today else None
     threading.Thread(target=_run_analysis, args=(lock_date,), daemon=True).start()
+    # Also run WC soccer analysis in parallel
+    threading.Thread(target=_run_wc_analysis, daemon=True).start()
 
 
 def _start_scheduler():

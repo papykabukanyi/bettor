@@ -13,6 +13,10 @@ beautifulsoup4
 pybaseball
 MLB-StatsAPI
 
+# Soccer / World Cup data (free)
+soccerdata>=1.5.0
+understat>=0.2
+
 # Visualization
 matplotlib
 seaborn
