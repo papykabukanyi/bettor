@@ -1152,10 +1152,13 @@ function _applyLiveScores(scores, opts) {
     const isFinal = phase === 'final';
     const isLive  = phase === 'live';
 
-    if (scoreEl && s && s.home_score != null && s.away_score != null) {
+    if (scoreEl && s && s.home_score != null && s.away_score != null && (isFinal || isLive)) {
       const nextScore = `${s.away_score} – ${s.home_score}`;
       if (scoreEl.textContent !== nextScore) scoreEl.textContent = nextScore;
       scoreEl.style.display = 'inline';
+    } else if (scoreEl && !isFinal && !isLive) {
+      // Clear any stale score from a previous live update when game goes back to upcoming
+      scoreEl.style.display = 'none';
     }
     if (statusEl) {
       let nextStatus = '';
@@ -1551,7 +1554,9 @@ function gameCard(c) {
       ? ''
       : _startLabel(c.game_time);
   const initialStatusClass = phase === 'final' ? 'final' : phase === 'live' ? 'in-progress' : '';
-  const scoreText = (c.away_score != null && c.home_score != null)
+  // Only show scores on the initial render when the game is already final/live —
+  // never show a score on a future (upcoming) game or tomorrow's games.
+  const scoreText = (phase !== 'upcoming' && c.away_score != null && c.home_score != null)
     ? `${c.away_score} – ${c.home_score}`
     : '';
 

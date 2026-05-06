@@ -1398,6 +1398,7 @@ def api_live_scores():
 # ─── Live-score background watcher ───────────────────────────────────────────
 _live_score_timer = None
 _LIVE_SCORE_INTERVAL = 120  # seconds (2 min)
+_eod_email_sent_dates: set = set()  # track which dates have had EOD results email sent
 _cache_poll_timer = None
 _CACHE_POLL_INTERVAL = int(os.getenv("CACHE_POLL_INTERVAL_SEC", "120"))
 
@@ -1526,6 +1527,85 @@ def _poll_live_scores():
                         pass
             except Exception as exc:
                 print(f"[live-scores] resolve error: {exc}")
+
+        # ── EOD results email — fire once when all today's games are Final ──
+        today_key = today.isoformat()
+        all_today_final = bool(raw) and all(_is_final_status(g.get("status","")) for g in raw)
+        if all_today_final and today_key not in _eod_email_sent_dates:
+            print(f"[live-scores] All today's games final — building EOD results email for {today_key}")
+            try:
+                from data.db import get_conn
+                import psycopg2.extras
+                conn = get_conn()
+                rows = []
+                if conn:
+                    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+                    cur.execute("""
+                        SELECT bet_type, pick, odds_am, model_prob, confidence,
+                               home_team, away_team, outcome
+                        FROM predictions
+                        WHERE game_date = %s AND outcome IN ('WIN','LOSS','PUSH')
+                        ORDER BY outcome, model_prob DESC
+                    """, (today_key,))
+                    rows = [dict(r) for r in cur.fetchall()]
+                    conn.close()
+
+                prop_rows = []
+                try:
+                    conn2 = get_conn()
+                    if conn2:
+                        cur2 = conn2.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+                        cur2.execute("""
+                            SELECT name, team, stat_type, prop_label, line, direction, outcome, actual
+                            FROM prop_history
+                            WHERE game_date = %s AND outcome IN ('WIN','LOSS','PUSH')
+                            ORDER BY outcome
+                        """, (today_key,))
+                        prop_rows = [dict(r) for r in cur2.fetchall()]
+                        conn2.close()
+                except Exception:
+                    pass
+
+                wins   = sum(1 for r in rows if r.get("outcome") == "WIN")
+                losses = sum(1 for r in rows if r.get("outcome") == "LOSS")
+                pushes = sum(1 for r in rows if r.get("outcome") == "PUSH")
+                total  = wins + losses + pushes
+                hit_rate = round(wins / total * 100, 1) if total > 0 else 0.0
+
+                picks_formatted = [
+                    {
+                        "pick":      r.get("pick",""),
+                        "bet_type":  r.get("bet_type",""),
+                        "outcome":   r.get("outcome",""),
+                        "game":      f"{r.get('away_team','')} @ {r.get('home_team','')}",
+                        "odds_am":   r.get("odds_am"),
+                        "model_prob":r.get("model_prob",0),
+                    }
+                    for r in rows
+                ]
+
+                import datetime as _dt
+                results_payload = {
+                    "date_str": _dt.date.today().strftime("%A, %B %d, %Y"),
+                    "total":    total,
+                    "wins":     wins,
+                    "losses":   losses,
+                    "pushes":   pushes,
+                    "hit_rate": hit_rate,
+                    "picks":    picks_formatted,
+                    "props":    prop_rows,
+                    "parlays":  [],
+                }
+
+                from email_notify import send_daily_results
+                result = send_daily_results(results_payload)
+                if result.get("sent", 0) > 0:
+                    _eod_email_sent_dates.add(today_key)
+                    print(f"[live-scores] EOD results email sent ({wins}W/{losses}L/{pushes}P)")
+                else:
+                    print(f"[live-scores] EOD email failed: {result.get('errors')}")
+            except Exception as _eod_e:
+                print(f"[live-scores] EOD email error: {_eod_e}")
     except Exception as exc:
         print(f"[live-scores] poll error: {exc}")
     finally:
