@@ -1,0 +1,17 @@
+.git
+.github
+.history
+.vscode
+.venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+.mypy_cache
+.coverage
+htmlcov
+.env
+.env.*
+scripts/*_out.txt
+scripts/*_err.txt
