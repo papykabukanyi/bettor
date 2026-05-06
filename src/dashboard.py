@@ -183,6 +183,11 @@ def _sse_broadcast(event: str, data: dict):
             _sse_clients.remove(q)
 
 
+def _broadcast(data: dict):
+    """Backward-compatible wrapper for generic dashboard state broadcasts."""
+    _sse_broadcast("state_update", _clean(data))
+
+
 def _log(msg):
     ts = datetime.datetime.now().strftime("%H:%M:%S")
     line = f"[{ts}] {msg}"
@@ -219,7 +224,8 @@ def _clean(obj):
 
 def _norm_gk(s: str) -> str:
     """Normalize game key so 'Away @ Home' == 'Away@Home'."""
-    return s.replace(" @ ", "@").replace(" @", "@").replace("@ ", "@").strip()
+    raw = str(s or "")
+    return raw.replace(" @ ", "@").replace(" @", "@").replace("@ ", "@").strip()
 
 
 def _compose_game_key(away_team: str, home_team: str,
@@ -1499,33 +1505,31 @@ def api_email_send_parlay():
 
 @app.route("/api/live-scores")
 def api_live_scores():
-    """Poll MLB Stats API for today's game statuses/scores."""
+    """Return current soccer live scores across tracked competitions."""
     try:
-        import statsapi as mlbstatsapi
-        from data.mlb_fetcher import _parse_mlb_game
-        today = _et_calendar_today().strftime("%m/%d/%Y")
-        raw = mlbstatsapi.schedule(start_date=today, end_date=today) or []
+        from data.soccer_fetcher import get_live_matches
+
         games = []
-        for g in raw:
-            status = g.get("status", "")
-            parsed = _parse_mlb_game(g, _et_calendar_today().isoformat())
-            match_key = _norm_gk(f"{g.get('away_name','')}@{g.get('home_name','')}")
+        for g in get_live_matches() or []:
+            away = g.get("away_team") or "TBD"
+            home = g.get("home_team") or "TBD"
+            match_key = _norm_gk(g.get("match_key") or f"{away}@{home}")
             games.append({
-                "game_pk":     g.get("game_id"),
-                "home_team":   g.get("home_name", ""),
-                "away_team":   g.get("away_name", ""),
+                "game_pk":     g.get("game_pk") or g.get("match_id"),
+                "home_team":   home,
+                "away_team":   away,
                 "home_score":  g.get("home_score"),
                 "away_score":  g.get("away_score"),
-                "status":      status,
-                "inning":      g.get("current_inning", ""),
-                "inning_half": g.get("inning_state", ""),
+                "status":      g.get("status", ""),
+                "inning":      "",
+                "inning_half": "",
                 "match_key":   match_key,
                 "game_key":    _compose_game_key(
-                    g.get("away_name", ""),
-                    g.get("home_name", ""),
-                    parsed.get("game_datetime"),
-                    parsed.get("date"),
-                    parsed.get("game_time"),
+                    away,
+                    home,
+                    g.get("game_datetime"),
+                    g.get("date") or g.get("game_date"),
+                    g.get("game_time"),
                 ),
             })
         return jsonify({"ok": True, "games": games})
@@ -1885,26 +1889,30 @@ def _start_soccer_polling():
 def _poll_soccer_scores():
     """Poll football-data.org for live match updates and broadcast via SSE."""
     try:
-        from data.wc2026_fetcher import get_wc_matches_live
-        live = get_wc_matches_live()
-        if not live:
-            return
+        from data.soccer_fetcher import get_live_matches
+
+        live = get_live_matches() or []
         live_map: dict = {}
         for m in live:
-            gk = m.get("game_key", "")
+            away = m.get("away_team") or "TBD"
+            home = m.get("home_team") or "TBD"
+            gk = m.get("game_key") or _compose_game_key(
+                away,
+                home,
+                m.get("game_datetime"),
+                m.get("date") or m.get("game_date"),
+                m.get("game_time"),
+            )
             if gk:
                 live_map[gk] = {
                     "home_score": m.get("home_score"),
                     "away_score": m.get("away_score"),
                     "status":     m.get("status", ""),
-                    "match_key":  m.get("match_key", ""),
+                    "match_key":  m.get("match_key") or _norm_gk(f"{away}@{home}"),
                 }
-        if live_map:
-            with _lock:
-                existing = _state.get("live_scores", {})
-                existing.update(live_map)
-                _state["live_scores"] = existing
-            _broadcast({"live_scores": live_map})
+        with _lock:
+            _state["live_scores"] = live_map
+        _broadcast({"live_scores": live_map})
     except Exception as e:
         print(f"[soccer-poll] score error: {e}")
 
@@ -2128,17 +2136,22 @@ def _start_scheduler():
 def _load_boot_schedule_fallback() -> bool:
     """Populate state with schedule-only cards so UI isn't blank when cache is absent."""
     try:
-        from data.mlb_fetcher import get_schedule_range
+        from data.soccer_fetcher import get_matches_today_all, get_matches_tomorrow_all
 
         today_date = _et_calendar_today()
-        today_str = today_date.isoformat()
-        tomorrow_str = (today_date + datetime.timedelta(days=1)).isoformat()
-        all_games = get_schedule_range(days_ahead=2) or []
-        today_games = [g for g in all_games if g.get("date", "") == today_str]
-        tomorrow_games = [g for g in all_games if g.get("date", "") == tomorrow_str]
+        today_games = get_matches_today_all() or []
+        tomorrow_games = get_matches_tomorrow_all() or []
 
-        today_cards = [_build_card(g, [], [], "TODAY") for g in today_games]
-        tomorrow_cards = [_build_card(g, [], [], "TOMORROW") for g in tomorrow_games]
+        def _fallback_card(game: dict, when: str) -> dict:
+            card = _build_card(game, [], [], when)
+            card["competition"] = game.get("competition", "")
+            card["comp_name"] = game.get("comp_name", game.get("competition", ""))
+            card["comp_emoji"] = game.get("comp_emoji", "⚽")
+            card["venue"] = game.get("venue", "")
+            return card
+
+        today_cards = [_fallback_card(g, "TODAY") for g in today_games]
+        tomorrow_cards = [_fallback_card(g, "TOMORROW") for g in tomorrow_games]
 
         with _lock:
             _state.update({
@@ -2150,7 +2163,7 @@ def _load_boot_schedule_fallback() -> bool:
                 "last_updated": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
             })
 
-        print(f"[boot] Loaded schedule fallback ({len(today_cards)} today, {len(tomorrow_cards)} tomorrow)")
+        print(f"[boot] Loaded soccer schedule fallback ({len(today_cards)} today, {len(tomorrow_cards)} tomorrow)")
         return True
     except Exception as exc:
         print(f"[boot] Schedule fallback load failed: {exc}")

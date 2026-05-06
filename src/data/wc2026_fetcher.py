@@ -379,8 +379,8 @@ def _normalize_fd_match(m: dict) -> dict:
         "PAUSED":    "In Progress", "FINISHED": "Final",
         "CANCELLED": "Cancelled",  "POSTPONED": "Postponed",
     }
-    home = m.get("homeTeam", {}).get("name", "TBD")
-    away = m.get("awayTeam", {}).get("name", "TBD")
+    home = m.get("homeTeam", {}).get("name") or "TBD"
+    away = m.get("awayTeam", {}).get("name") or "TBD"
     score = m.get("score", {})
     return {
         "match_id":   str(m.get("id", "")),

@@ -43,6 +43,7 @@ _CACHE_MATCH  = 180    # 3 min for live matches
 _CACHE_SQUAD  = 3600   # 1 h for squads
 _CACHE_STATIC = 86400  # 24 h for standings/scorers
 _cache: dict[str, tuple[Any, float]] = {}
+_PRIORITY_COMPETITIONS = ("WC", "CL", "PL", "BL1", "SA", "PD", "FL1")
 
 
 # ── All supported tournaments ─────────────────────────────────────────────────
@@ -164,7 +165,12 @@ def _fd_get(path: str, params: dict | None = None) -> Any:
     try:
         r = requests.get(url, headers=headers, params=params or {}, timeout=10)
         if r.status_code == 429:
-            time.sleep(12)  # rate limit: 10 req/min on free tier
+            retry_after = r.headers.get("Retry-After", "12")
+            try:
+                retry_delay = max(1, int(float(retry_after)))
+            except (TypeError, ValueError):
+                retry_delay = 12
+            time.sleep(retry_delay)
             r = requests.get(url, headers=headers, params=params or {}, timeout=10)
         if r.status_code == 200:
             return r.json()
@@ -198,6 +204,11 @@ def _cached(key: str, ttl: int, fn, *args, **kwargs) -> Any:
     return val
 
 
+def _safe_team_name(value: Any, default: str = "TBD") -> str:
+    name = str(value or "").strip()
+    return name or default
+
+
 # ── Competition metadata ──────────────────────────────────────────────────────
 def get_tournaments() -> list[dict]:
     """Return list of all supported tournaments with metadata."""
@@ -218,14 +229,18 @@ def get_upcoming_matches(competition_code: str, days_ahead: int = 7) -> list[dic
     today    = datetime.date.today()
     date_to  = (today + datetime.timedelta(days=days_ahead)).isoformat()
     date_from = today.isoformat()
-    key = f"upcoming_{competition_code}_{date_from}_{days_ahead}"
-    return _cached(key, _CACHE_MATCH, _fetch_matches, competition_code, date_from, date_to)
+    return get_matches_in_range(competition_code, date_from, date_to)
 
 
 def get_matches_for_date(competition_code: str, date_str: str) -> list[dict]:
     """Matches for a specific date in a competition."""
-    key = f"matches_{competition_code}_{date_str}"
-    return _cached(key, _CACHE_MATCH, _fetch_matches, competition_code, date_str, date_str) or []
+    return get_matches_in_range(competition_code, date_str, date_str)
+
+
+def get_matches_in_range(competition_code: str, date_from: str, date_to: str) -> list[dict]:
+    """Matches for a competition over a date range."""
+    key = f"matches_{competition_code}_{date_from}_{date_to}"
+    return _cached(key, _CACHE_MATCH, _fetch_matches_window, competition_code, date_from, date_to) or []
 
 
 def get_live_matches(competition_code: str | None = None) -> list[dict]:
@@ -243,6 +258,16 @@ def get_live_matches(competition_code: str | None = None) -> list[dict]:
     return results
 
 
+def get_matches_range_all(date_from: str, date_to: str,
+                          competition_codes: list[str] | tuple[str, ...] | None = None) -> list[dict]:
+    """Fetch one cached window per competition and flatten the results."""
+    codes = competition_codes or _PRIORITY_COMPETITIONS
+    all_matches: list[dict] = []
+    for code in codes:
+        all_matches.extend(get_matches_in_range(code, date_from, date_to))
+    return all_matches
+
+
 def get_all_today_matches(competition_codes: list[str] | None = None) -> dict[str, list[dict]]:
     """
     Get today's matches across all (or specified) competitions.
@@ -258,15 +283,36 @@ def get_all_today_matches(competition_codes: list[str] | None = None) -> dict[st
     return result
 
 
-def _fetch_matches(code: str, date_from: str, date_to: str) -> list[dict]:
-    """Fetch matches from football-data.org."""
+def _fetch_matches_window(code: str, date_from: str, date_to: str) -> list[dict]:
+    """Fetch matches from football-data.org for a date range."""
     data = _fd_get(f"/competitions/{code}/matches",
                    {"dateFrom": date_from, "dateTo": date_to,
                     "status": "SCHEDULED,IN_PLAY,PAUSED,FINISHED,LIVE"})
     if not data or "matches" not in data:
-        # Try ESPN fallback
-        return _fetch_matches_espn(code, date_from) or []
+        return _fetch_matches_espn_range(code, date_from, date_to)
     return [_normalize_fd_match(m, code) for m in data.get("matches", [])]
+
+
+def _fetch_matches_espn_range(code: str, date_from: str, date_to: str) -> list[dict]:
+    """ESPN fallback for one or more calendar days."""
+    try:
+        start = datetime.date.fromisoformat(date_from)
+        end = datetime.date.fromisoformat(date_to)
+    except ValueError:
+        return _fetch_matches_espn(code, date_from) or []
+
+    seen: set[str] = set()
+    matches: list[dict] = []
+    day = start
+    while day <= end:
+        for match in _fetch_matches_espn(code, day.isoformat()) or []:
+            dedupe_key = str(match.get("match_id") or match.get("game_key") or "")
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            matches.append(match)
+        day += datetime.timedelta(days=1)
+    return matches
 
 
 def _fetch_matches_espn(code: str, date_str: str) -> list[dict]:
@@ -526,8 +572,8 @@ def _normalize_fd_match(m: dict, competition_code: str = "") -> dict:
         "POSTPONED":  "Postponed",
     }
 
-    home = m.get("homeTeam", {}).get("name", "TBD")
-    away = m.get("awayTeam", {}).get("name", "TBD")
+    home = _safe_team_name(m.get("homeTeam", {}).get("name"))
+    away = _safe_team_name(m.get("awayTeam", {}).get("name"))
     home_crest = m.get("homeTeam", {}).get("crest", "")
     away_crest = m.get("awayTeam", {}).get("crest", "")
     score  = m.get("score", {})
@@ -573,8 +619,8 @@ def _normalize_espn_event(e: dict) -> dict:
     home_c = next((c for c in competitors if c.get("homeAway") == "home"), {})
     away_c = next((c for c in competitors if c.get("homeAway") == "away"), {})
 
-    home = home_c.get("team", {}).get("displayName", "TBD")
-    away = away_c.get("team", {}).get("displayName", "TBD")
+    home = _safe_team_name(home_c.get("team", {}).get("displayName"))
+    away = _safe_team_name(away_c.get("team", {}).get("displayName"))
 
     date_str = e.get("date", "")[:10]
     time_str = e.get("date", "")[11:16]
@@ -630,18 +676,14 @@ def refresh_all_competitions() -> dict[str, list[dict]]:
 def get_matches_today_all() -> list[dict]:
     """All matches today across all supported competitions."""
     today = datetime.date.today().isoformat()
-    all_matches: list[dict] = []
-    for code in ["WC", "CL", "PL", "BL1", "SA", "PD", "FL1"]:  # prioritize major comps
-        matches = get_matches_for_date(code, today)
-        all_matches.extend(matches)
-    return all_matches
+    tomorrow = (datetime.date.today() + datetime.timedelta(days=1)).isoformat()
+    window_matches = get_matches_range_all(today, tomorrow, _PRIORITY_COMPETITIONS)
+    return [m for m in window_matches if (m.get("game_date") or m.get("date")) == today]
 
 
 def get_matches_tomorrow_all() -> list[dict]:
     """All matches tomorrow across all supported competitions."""
     tomorrow = (datetime.date.today() + datetime.timedelta(days=1)).isoformat()
-    all_matches: list[dict] = []
-    for code in ["WC", "CL", "PL", "BL1", "SA", "PD", "FL1"]:
-        matches = get_matches_for_date(code, tomorrow)
-        all_matches.extend(matches)
-    return all_matches
+    today = datetime.date.today().isoformat()
+    window_matches = get_matches_range_all(today, tomorrow, _PRIORITY_COMPETITIONS)
+    return [m for m in window_matches if (m.get("game_date") or m.get("date")) == tomorrow]
