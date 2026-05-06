@@ -86,9 +86,10 @@ main{padding:20px;max-width:1400px;margin:0 auto}
 /* ── Game card ── */
 .game-card{background:linear-gradient(165deg, rgba(15,23,34,.98), rgba(11,17,24,.98));
   border:1px solid rgba(31,42,55,.95);border-radius:14px;
-  overflow:hidden;transition:border-color .2s,box-shadow .2s,transform .2s;cursor:pointer;position:relative}
+  overflow:hidden;transition:border-color .25s,box-shadow .25s,transform .2s;cursor:pointer;position:relative}
 .game-card:hover{border-color:rgba(20,184,166,.65);box-shadow:0 10px 30px rgba(0,0,0,.45);transform:translateY(-2px)}
-.game-card.expanded .card-body{display:block}
+.game-card.expanded{border-color:rgba(20,184,166,.5);box-shadow:0 12px 40px rgba(0,0,0,.6)}
+.game-card.expanded .card-body{max-height:2800px;opacity:1}
 .game-card.in-progress{border-color:rgba(22,163,74,.6);
   box-shadow:0 0 0 1px rgba(22,163,74,.35),var(--shadow);animation:liveGlow 2.2s ease-in-out infinite}
 .game-card.final{opacity:.82}
@@ -167,37 +168,115 @@ main{padding:20px;max-width:1400px;margin:0 auto}
 .chip-MODERATE{border-color:var(--yellow);color:var(--yellow)}
 .chip-RISKY{border-color:var(--red);color:var(--red)}
 
-.card-expand-btn{width:100%;padding:8px;background:none;border:none;border-top:1px solid var(--border);
-  color:var(--muted);font-size:.75rem;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:4px}
-.card-expand-btn:hover{color:var(--text);background:rgba(255,255,255,.03)}
-.expand-icon{transition:transform .2s}
+.card-expand-btn{width:100%;padding:10px;background:none;border:none;border-top:1px solid var(--border);
+  color:var(--muted);font-size:.78rem;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:6px;
+  transition:all .2s;letter-spacing:.02em}
+.card-expand-btn:hover{color:var(--accent);background:rgba(20,184,166,.06)}
+.expand-icon{transition:transform .3s cubic-bezier(.34,1.56,.64,1);font-size:.7rem}
 .expanded .expand-icon{transform:rotate(180deg)}
 
 /* ── Card body (expanded) ── */
-.card-body{display:none;border-top:1px solid var(--border);
-  background:linear-gradient(180deg,rgba(7,10,16,.75),rgba(7,10,16,.95))}
-.card-body-grid{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);gap:12px;padding:12px}
-.card-panel{background:rgba(255,255,255,.02);border:1px solid var(--border);
-  border-radius:12px;padding:12px}
-.panel-title{font-size:.72rem;font-weight:700;color:var(--muted);
-  letter-spacing:.16em;text-transform:uppercase;margin-bottom:6px}
-.panel-sub{font-size:.7rem;color:var(--muted);margin-top:-2px;margin-bottom:8px}
+.card-body{max-height:0;opacity:0;overflow:hidden;
+  transition:max-height .55s cubic-bezier(.4,0,.2,1),opacity .35s ease;
+  background:linear-gradient(180deg,rgba(7,10,16,.8),rgba(5,8,14,.98))}
+.game-card.expanded .card-body{border-top:1px solid rgba(31,42,55,.7)}
+.card-body-inner{padding:0 14px 14px}
+
+/* ── Expanded top strip ── */
+.card-expand-strip{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;
+  padding:14px 14px 12px;border-bottom:1px solid rgba(31,42,55,.7);
+  background:linear-gradient(135deg,rgba(20,184,166,.07),rgba(168,85,247,.05))}
+.cx-stat{display:flex;flex-direction:column;align-items:center;gap:4px;text-align:center}
+.cx-stat-val{font-size:1.4rem;font-weight:800;line-height:1}
+.cx-stat-label{font-size:.62rem;color:var(--muted);text-transform:uppercase;letter-spacing:.12em}
+
+/* ── Win probability arc ── */
+.prob-arc-wrap{display:flex;flex-direction:column;align-items:center;gap:2px}
+.prob-arc-svg{overflow:visible}
+.prob-arc-track{fill:none;stroke:rgba(31,42,55,.9);stroke-width:8;stroke-linecap:round}
+.prob-arc-fill{fill:none;stroke-width:8;stroke-linecap:round;transition:stroke-dasharray 1.2s cubic-bezier(.4,0,.2,1) .25s}
+.prob-arc-text{font-size:16px;font-weight:800;dominant-baseline:middle;text-anchor:middle;font-family:'Space Grotesk',sans-serif}
+.prob-arc-sub{font-size:7px;dominant-baseline:middle;text-anchor:middle;font-family:'Space Grotesk',sans-serif;fill:#7c8ca1;letter-spacing:.08em;text-transform:uppercase}
+
+/* ── Section panels ── */
+.xpanel{margin-top:12px;border:1px solid rgba(31,42,55,.8);
+  border-radius:13px;overflow:hidden;background:rgba(11,17,24,.7)}
+.xpanel-head{display:flex;align-items:center;justify-content:space-between;
+  padding:10px 14px;background:rgba(255,255,255,.02);border-bottom:1px solid rgba(31,42,55,.7)}
+.xpanel-title{font-size:.66rem;font-weight:700;letter-spacing:.18em;text-transform:uppercase;color:var(--muted)}
+.xpanel-count{font-size:.66rem;padding:2px 7px;border-radius:20px;background:rgba(255,255,255,.06);color:var(--muted)}
 
 /* ── Bet rows ── */
-.bet-section{display:flex;flex-direction:column;gap:8px}
-.bet-row{display:grid;grid-template-columns:100px minmax(0,1fr);
-  gap:10px;align-items:flex-start;padding:8px 0;border-bottom:1px dashed var(--border)}
-.bet-row:last-child{border-bottom:none}
-.bet-label{font-size:.66rem;color:var(--muted);text-transform:uppercase;letter-spacing:.12em}
-.bet-main{display:flex;flex-direction:column;gap:4px;min-width:0}
-.bet-pick{font-size:.88rem;font-weight:700;line-height:1.25;min-width:0}
-.bet-meta{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:.72rem;color:var(--muted)}
-.bet-odds{font-size:.72rem;color:var(--muted);white-space:nowrap}
-.bet-edge{font-size:.7rem;font-weight:700;padding:2px 6px;border-radius:6px;
-  background:rgba(255,255,255,.04);white-space:nowrap}
-.bet-edge.pos{color:var(--green)}
-.bet-edge.neg{color:var(--red)}
-.bet-row .safety-badge{white-space:nowrap}
+.xbet-list{display:flex;flex-direction:column;gap:0}
+.xbet-row{padding:12px 14px;border-bottom:1px solid rgba(31,42,55,.5);position:relative;overflow:hidden;transition:background .2s}
+.xbet-row:last-child{border-bottom:none}
+.xbet-row::before{content:'';position:absolute;left:0;top:0;bottom:0;width:3px}
+.xbet-row.sl-ELITE::before{background:var(--green)}
+.xbet-row.sl-SAFE::before{background:var(--accent)}
+.xbet-row.sl-MODERATE::before{background:var(--yellow)}
+.xbet-row.sl-RISKY::before{background:var(--red)}
+.xbet-top{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;margin-bottom:8px}
+.xbet-left{display:flex;flex-direction:column;gap:3px;min-width:0;flex:1}
+.xbet-type{font-size:.62rem;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+.xbet-pick{font-size:.95rem;font-weight:800;line-height:1.2}
+.xbet-right{display:flex;flex-direction:column;align-items:flex-end;gap:4px;flex-shrink:0}
+.xbet-odds{font-size:.85rem;font-weight:700;color:var(--text)}
+.xbet-edge-badge{font-size:.65rem;font-weight:700;padding:2px 7px;border-radius:20px;white-space:nowrap}
+.xbet-edge-badge.pos{background:rgba(22,163,74,.18);color:var(--green)}
+.xbet-edge-badge.neg{background:rgba(220,38,38,.18);color:var(--red)}
+/* probability bar */
+.xbet-bar-wrap{position:relative;height:22px;background:rgba(255,255,255,.04);
+  border-radius:6px;overflow:hidden;margin-top:2px}
+.xbet-bar-fill{position:absolute;left:0;top:0;bottom:0;border-radius:6px;
+  transition:width 1.1s cubic-bezier(.4,0,.2,1) .3s}
+.xbet-bar-fill.sl-ELITE{background:linear-gradient(90deg,rgba(22,163,74,.5),rgba(22,163,74,.9))}
+.xbet-bar-fill.sl-SAFE{background:linear-gradient(90deg,rgba(20,184,166,.4),rgba(20,184,166,.9))}
+.xbet-bar-fill.sl-MODERATE{background:linear-gradient(90deg,rgba(234,179,8,.4),rgba(234,179,8,.85))}
+.xbet-bar-fill.sl-RISKY{background:linear-gradient(90deg,rgba(220,38,38,.4),rgba(220,38,38,.8))}
+.xbet-bar-label{position:absolute;right:8px;top:50%;transform:translateY(-50%);
+  font-size:.68rem;font-weight:700;color:rgba(255,255,255,.85);pointer-events:none;letter-spacing:.02em}
+.xbet-bar-pct{position:absolute;left:8px;top:50%;transform:translateY(-50%);
+  font-size:.68rem;color:rgba(255,255,255,.6);pointer-events:none}
+
+/* ── Prop rows (expanded) ── */
+.xprop-list{display:flex;flex-direction:column;gap:0}
+.xprop-row{padding:11px 14px;border-bottom:1px solid rgba(31,42,55,.4);overflow:hidden;transition:background .2s}
+.xprop-row:last-child{border-bottom:none}
+.xprop-team-divider{padding:8px 14px 4px;font-size:.62rem;font-weight:700;letter-spacing:.14em;
+  text-transform:uppercase;color:var(--muted);background:rgba(255,255,255,.015);
+  border-bottom:1px solid rgba(31,42,55,.4)}
+.xprop-top{display:flex;align-items:flex-start;justify-content:space-between;gap:8px;margin-bottom:7px}
+.xprop-name{font-size:.88rem;font-weight:700;line-height:1.2}
+.xprop-team-tag{font-size:.62rem;color:var(--muted);margin-left:4px}
+.xprop-stat-type{font-size:.68rem;color:var(--accent);font-weight:600;margin-top:2px;letter-spacing:.04em}
+.xprop-right{display:flex;flex-direction:column;align-items:flex-end;gap:3px;flex-shrink:0}
+.xprop-line{font-size:.92rem;font-weight:800}
+.xprop-dir{font-size:.62rem;font-weight:700;padding:2px 7px;border-radius:20px;border:1px solid;white-space:nowrap}
+.xprop-dir.OVER{border-color:rgba(22,163,74,.5);color:var(--green)}
+.xprop-dir.UNDER{border-color:rgba(234,179,8,.5);color:var(--yellow)}
+/* mini stat bars for props */
+.xprop-bars{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:6px}
+.xprop-mini-bar{display:flex;flex-direction:column;gap:3px}
+.xprop-mini-label{font-size:.6rem;color:var(--muted);letter-spacing:.06em;text-transform:uppercase}
+.xprop-mini-track{position:relative;height:16px;background:rgba(255,255,255,.04);border-radius:4px;overflow:hidden}
+.xprop-mini-fill{position:absolute;left:0;top:0;bottom:0;border-radius:4px;transition:width 1.3s cubic-bezier(.4,0,.2,1) .5s}
+.xprop-mini-fill.green{background:linear-gradient(90deg,rgba(22,163,74,.4),rgba(22,163,74,.85))}
+.xprop-mini-fill.teal{background:linear-gradient(90deg,rgba(20,184,166,.35),rgba(20,184,166,.8))}
+.xprop-mini-fill.purple{background:linear-gradient(90deg,rgba(168,85,247,.3),rgba(168,85,247,.75))}
+.xprop-mini-val{position:absolute;right:6px;top:50%;transform:translateY(-50%);
+  font-size:.62rem;font-weight:700;color:rgba(255,255,255,.8)}
+.xprop-rationale{font-size:.68rem;color:var(--muted);margin-top:5px;display:flex;align-items:center;gap:4px}
+
+/* ── Odds chart (mini sparkline row) ── */
+.xbet-implied{font-size:.65rem;color:var(--muted);margin-top:2px}
+
+/* Responsive expanded */
+@media(max-width:560px){
+  .card-expand-strip{grid-template-columns:1fr 1fr}
+  .cx-stat:last-child{display:none}
+  .cx-stat-val{font-size:1.1rem}
+  .xbet-bar-label{font-size:.6rem}
+}
 .parlay-save-btn:hover{background:rgba(124,58,237,.3)}
 
 /* Parlay builder */
@@ -1607,6 +1686,10 @@ function gameCard(c) {
     .filter(p => { const lv = _lineValue(p.line); return !(Number.isFinite(lv) && lv <= 0.5); })
     .length;
 
+  // Count all bets for expand button label
+  const allBetKeys = ['moneyline','run_line','total','f5_moneyline','f5_total','home_team_total','away_team_total'];
+  const betCount = allBetKeys.filter(k => c[k]).length;
+
   return `<div class="game-card" data-game-key="${c.game_key}" data-game-date="${c.game_date||''}" data-game-datetime="${c.game_datetime||''}"
     data-game-time="${c.game_time||''}" data-match-key="${c.match_key||''}" data-when-base="${baseWhen}" id="card-${c.game_key.replace(/[#@\s]/g,'_')}">
   <div class="card-header" onclick="toggleCard(this.parentElement)">
@@ -1636,24 +1719,237 @@ function gameCard(c) {
     ${propsHtml}
   </div>
   <button class="card-expand-btn" onclick="toggleCard(this.parentElement)">
-    <span>View Full Card${propCount?' · '+propCount+' Props':''}</span>
-    <span class="expand-icon">&#9660;</span>
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="flex-shrink:0"><path d="M9 18l6-6-6-6"/></svg>
+    <span>${betCount ? betCount+' Bet'+(betCount>1?'s':'') : 'Game Details'}${propCount?' · '+propCount+' Props':''}</span>
+    <span class="expand-icon" style="margin-left:auto">&#9660;</span>
   </button>
   <div class="card-body">
-    <div class="card-body-grid">
-      ${betSection('Game Bets', [
-        betRow('Moneyline',       c.moneyline,       c),
-        betRow('Run Line',        c.run_line,        c),
-        betRow('Total',           c.total,           c),
-        betRow('F5 Moneyline',    c.f5_moneyline,    c),
-        betRow('F5 Total',        c.f5_total,        c),
-        betRow('Home Team Total', c.home_team_total, c),
-        betRow('Away Team Total', c.away_team_total, c),
-      ])}
-      ${propsSection(c)}
-    </div>
+    ${_expandedCardBody(c, phase)}
   </div>
 </div>`;
+}
+
+// ── Expanded card body builder ────────────────────────────────────────────
+function _expandedCardBody(c, phase) {
+  const BET_DEFS = [
+    { key: 'moneyline',       label: 'Moneyline',        icon: '🏆' },
+    { key: 'run_line',        label: 'Run Line ±1.5',    icon: '📊' },
+    { key: 'total',           label: 'Total Runs',       icon: '⚾' },
+    { key: 'f5_moneyline',    label: 'F5 Moneyline',     icon: '5️⃣' },
+    { key: 'f5_total',        label: 'F5 Total',         icon: '📈' },
+    { key: 'home_team_total', label: 'Home Team Total',  icon: '🏠' },
+    { key: 'away_team_total', label: 'Away Team Total',  icon: '✈️' },
+  ];
+
+  // Summary strip stats
+  const allBets = BET_DEFS.map(d => c[d.key]).filter(Boolean);
+  const mlProb  = c.moneyline ? Math.round((c.moneyline.model_prob||0.5)*100) : null;
+  const bestEdge = allBets.length ? Math.max(...allBets.map(b => b.edge||0)) : 0;
+  const avgConf  = allBets.length ? Math.round(allBets.reduce((s,b)=>s+(b.model_prob||0.5),0)/allBets.length*100) : null;
+
+  const stripColor = mlProb >= 65 ? 'var(--green)' : mlProb >= 55 ? 'var(--accent)' : 'var(--yellow)';
+  const propTotal  = [...(c.home_props||[]), ...(c.away_props||[])]
+    .filter(p=>(p.direction||'').toUpperCase()==='OVER')
+    .filter(p=>{ const lv=_lineValue(p.line); return !(Number.isFinite(lv)&&lv<=0.5); }).length;
+
+  // SVG arc gauge for win prob
+  const arcSvg = mlProb != null ? _probArcSvg(mlProb, stripColor) : '';
+
+  let html = `<div class="card-expand-strip">
+    <div class="cx-stat prob-arc-wrap">${arcSvg}
+      <div class="cx-stat-label" style="margin-top:-2px">Win Prob</div>
+    </div>
+    <div class="cx-stat">
+      <div class="cx-stat-val" style="color:${bestEdge>0?'var(--green)':'var(--muted)'}">${bestEdge>0?'+':''}${(bestEdge*100).toFixed(1)}%</div>
+      <div class="cx-stat-label">Best Edge</div>
+    </div>
+    <div class="cx-stat">
+      <div class="cx-stat-val" style="color:var(--accent)">${avgConf != null ? avgConf+'%' : '—'}</div>
+      <div class="cx-stat-label">Avg Conf</div>
+    </div>
+  </div>`;
+
+  html += `<div class="card-body-inner">`;
+
+  // ── Game Bets ──
+  const betRows = BET_DEFS.filter(d => c[d.key]).map(d => _xBetRow(d, c[d.key], c, phase));
+  if (betRows.length) {
+    html += `<div class="xpanel">
+      <div class="xpanel-head">
+        <span class="xpanel-title">⚾ Game Bets</span>
+        <span class="xpanel-count">${betRows.length} bet${betRows.length>1?'s':''}</span>
+      </div>
+      <div class="xbet-list">${betRows.join('')}</div>
+    </div>`;
+  }
+
+  // ── Player Props ──
+  html += _xPropsPanel(c, phase);
+
+  html += `</div>`; // card-body-inner
+  return html;
+}
+
+function _probArcSvg(pct, color) {
+  // 200-deg arc, center at 56,56, r=44
+  const R = 44, cx = 56, cy = 60;
+  const startAngle = -200 * Math.PI / 180; // degrees to radians — start at -200° (bottom-left)
+  const sweep = 200; // total arc span in degrees
+  const filled = sweep * Math.min(pct, 100) / 100;
+  // Arc from -200° to -200° + sweep (i.e. bottom-left → bottom-right going through top)
+  // Using standard trigonometry: angle 0 = right, positive clockwise
+  function polar(deg) {
+    const rad = (deg - 90) * Math.PI / 180;
+    return [cx + R * Math.cos(rad), cy + R * Math.sin(rad)];
+  }
+  const startDeg = -100; // leftmost
+  const endDeg   = startDeg + sweep;
+  const fillDeg  = startDeg + filled;
+  const [sx, sy] = polar(startDeg);
+  const [ex, ey] = polar(endDeg);
+  const [fx, fy] = polar(fillDeg);
+  const lg = filled > 180 ? 1 : 0;
+  const trackPath = `M ${sx} ${sy} A ${R} ${R} 0 1 1 ${ex} ${ey}`;
+  const fillLg = filled > 180 ? 1 : 0;
+  const fillPath = filled > 0
+    ? `M ${sx} ${sy} A ${R} ${R} 0 ${fillLg} 1 ${fx} ${fy}`
+    : '';
+  return `<svg width="80" height="72" class="prob-arc-svg" viewBox="0 0 112 88">
+    <path class="prob-arc-track" d="${trackPath}" stroke-linecap="round"/>
+    ${fillPath ? `<path class="prob-arc-fill" d="${fillPath}" stroke="${color}" stroke-linecap="round" stroke-dasharray="1000" stroke-dashoffset="0"/>` : ''}
+    <text class="prob-arc-text" x="${cx}" y="${cy-6}" fill="${color}" font-size="18">${pct}%</text>
+    <text class="prob-arc-sub" x="${cx}" y="${cy+14}" fill="#7c8ca1" font-size="8">MODEL</text>
+  </svg>`;
+}
+
+function _xBetRow(def, bet, card, phase) {
+  if (!bet) return '';
+  const sl     = (bet.safety_label || 'MODERATE').toUpperCase();
+  const pbt    = plainEnglishBet(bet, card.home_team||'', card.away_team||'', phase);
+  const pick   = pbt && pbt.text ? pbt.text : (bet.pick || '—');
+  const prob   = Math.round((bet.model_prob||0.5)*100);
+  const edge   = bet.edge || 0;
+  const edgeS  = (edge > 0 ? '+' : '') + (edge*100).toFixed(1) + '%';
+  const edgeCls= edge >= 0 ? 'pos' : 'neg';
+  const odds   = fmtOdds(bet.odds_am);
+  const impliedPct = bet.odds_am != null ? _impliedProb(bet.odds_am) : null;
+
+  // Color for pick text
+  const pickColor = sl === 'ELITE' ? 'var(--green)' : sl === 'SAFE' ? 'var(--accent)' : sl === 'MODERATE' ? 'var(--yellow)' : 'var(--red)';
+
+  const impliedHtml = impliedPct != null
+    ? `<span class="xbet-implied">Market: ${impliedPct}% implied &nbsp;·&nbsp; Model: ${prob}%</span>`
+    : `<span class="xbet-implied">Model confidence: ${prob}%</span>`;
+
+  return `<div class="xbet-row sl-${sl}">
+    <div class="xbet-top">
+      <div class="xbet-left">
+        <span class="xbet-type">${def.icon} ${def.label}</span>
+        <span class="xbet-pick" style="color:${pickColor}">${pick}</span>
+        ${impliedHtml}
+      </div>
+      <div class="xbet-right">
+        <span class="xbet-odds">${odds}</span>
+        <span class="xbet-edge-badge ${edgeCls}">${edgeS} edge</span>
+        ${safetyBadge(sl)}
+      </div>
+    </div>
+    <div class="xbet-bar-wrap">
+      <div class="xbet-bar-fill sl-${sl}" style="width:${prob}%"></div>
+      <span class="xbet-bar-pct">${prob}%</span>
+      <span class="xbet-bar-label">${sl}</span>
+    </div>
+  </div>`;
+}
+
+function _impliedProb(oddsAm) {
+  if (oddsAm == null) return null;
+  const o = parseInt(oddsAm, 10);
+  if (isNaN(o)) return null;
+  const raw = o < 0 ? Math.abs(o)/(Math.abs(o)+100)*100 : 100/(o+100)*100;
+  return Math.round(raw);
+}
+
+function _xPropsPanel(c, phase) {
+  function qualifies(p) {
+    if ((p.direction||'').toUpperCase() !== 'OVER') return false;
+    const lv = _lineValue(p.line);
+    if (Number.isFinite(lv) && lv <= 0.5) return false;
+    return true;
+  }
+  const hp = (c.home_props||[]).filter(qualifies).sort((a,b)=>(b.model_prob||0)-(a.model_prob||0));
+  const ap = (c.away_props||[]).filter(qualifies).sort((a,b)=>(b.model_prob||0)-(a.model_prob||0));
+  if (!hp.length && !ap.length) return '';
+
+  const total = hp.length + ap.length;
+  let html = `<div class="xpanel" style="margin-top:10px">
+    <div class="xpanel-head">
+      <span class="xpanel-title">🎯 Player Props — OVER</span>
+      <span class="xpanel-count">${total} prop${total>1?'s':''}</span>
+    </div>
+    <div class="xprop-list">`;
+
+  if (ap.length) {
+    html += `<div class="xprop-team-divider">✈️ ${c.away_team}</div>`;
+    html += ap.map(p => _xPropRow(p, phase)).join('');
+  }
+  if (hp.length) {
+    html += `<div class="xprop-team-divider">🏠 ${c.home_team}</div>`;
+    html += hp.map(p => _xPropRow(p, phase)).join('');
+  }
+  html += `</div></div>`;
+  return html;
+}
+
+function _xPropRow(p, phase) {
+  const prob     = Math.round((p.model_prob||0.5)*100);
+  const dir      = (p.direction||'OVER').toUpperCase();
+  const stat     = (p.prop_label || p.stat_type || '').replace(/_/g,' ');
+  const phrase   = plainEnglishPropText(p, phase).text;
+  const sl       = (p.safety_label||'MODERATE').toUpperCase();
+  const rationale = p.signal_rationale || '';
+
+  // Mini stat bars: model prob, season avg (if available), recent trend
+  const seasonAvg = p.season_avg != null ? parseFloat(p.season_avg) : null;
+  const lineVal   = parseFloat(p.line) || 0;
+  const avgPct    = seasonAvg != null && lineVal > 0 ? Math.min(100, Math.round((seasonAvg/lineVal)*80)) : null;
+  const l10Avg    = p.last10_avg != null ? parseFloat(p.last10_avg) : null;
+  const l10Pct    = l10Avg != null && lineVal > 0 ? Math.min(100, Math.round((l10Avg/lineVal)*80)) : null;
+
+  const barsHtml = (avgPct != null || l10Pct != null) ? `<div class="xprop-bars">
+    ${avgPct != null ? `<div class="xprop-mini-bar">
+      <span class="xprop-mini-label">Season Avg${seasonAvg!=null?' ('+seasonAvg.toFixed(1)+')'  :''}</span>
+      <div class="xprop-mini-track"><div class="xprop-mini-fill teal" style="width:${avgPct}%"></div>
+        <span class="xprop-mini-val">${seasonAvg!=null?seasonAvg.toFixed(1):''}</span></div>
+    </div>` : ''}
+    ${l10Pct != null ? `<div class="xprop-mini-bar">
+      <span class="xprop-mini-label">L10 Avg${l10Avg!=null?' ('+l10Avg.toFixed(1)+')':''}</span>
+      <div class="xprop-mini-track"><div class="xprop-mini-fill purple" style="width:${l10Pct}%"></div>
+        <span class="xprop-mini-val">${l10Avg!=null?l10Avg.toFixed(1):''}</span></div>
+    </div>` : ''}
+  </div>` : '';
+
+  const probColor = prob >= 70 ? 'var(--green)' : prob >= 60 ? 'var(--accent)' : 'var(--yellow)';
+
+  return `<div class="xprop-row">
+    <div class="xprop-top">
+      <div>
+        <div class="xprop-name">${p.name||'—'} <span class="xprop-team-tag">${p.team?'('+p.team+')':''}</span></div>
+        <div class="xprop-stat-type">${stat}</div>
+      </div>
+      <div class="xprop-right">
+        <span class="xprop-line" style="color:${probColor}">${p.line}</span>
+        <span class="xprop-dir ${dir}">${dir}</span>
+      </div>
+    </div>
+    <div class="xbet-bar-wrap" style="height:20px">
+      <div class="xbet-bar-fill sl-${sl}" style="width:${prob}%"></div>
+      <span class="xbet-bar-pct">${prob}% confident</span>
+      <span class="xbet-bar-label">${sl}</span>
+    </div>
+    ${barsHtml}
+    ${rationale ? `<div class="xprop-rationale">📊 ${rationale}</div>` : ''}
+  </div>`;
 }
 
 function quickChip(label, bet) {
@@ -1698,30 +1994,7 @@ function betRow(label, bet, card) {
 }
 
 function propsSection(c) {
-  // Show all props — no probability or safety gate
-  function qualifies(p) {
-    if ((p.direction || '').toUpperCase() !== 'OVER') return false;
-    const lv = _lineValue(p.line);
-    if (Number.isFinite(lv) && lv <= 0.5) return false;
-    return true;
-  }
-  const hp = (c.home_props || []).filter(qualifies).sort((a,b)=>(b.model_prob||0)-(a.model_prob||0));
-  const ap = (c.away_props || []).filter(qualifies).sort((a,b)=>(b.model_prob||0)-(a.model_prob||0));
-  if (!hp.length && !ap.length) return '';
-  let html = '<div class="card-panel">';
-  html += `<div class="panel-title">Over Bets of the Day</div>`;
-  html += `<div class="panel-sub">Sorted by probability</div>`;
-  html += '<div class="props-section">';
-  if (ap.length) {
-    html += `<div class="props-team-header">${c.away_team}</div>`;
-    html += ap.map(p => propRow(p, c.game_key)).join('');
-  }
-  if (hp.length) {
-    html += `<div class="props-team-header">${c.home_team}</div>`;
-    html += hp.map(p => propRow(p, c.game_key)).join('');
-  }
-  html += '</div></div>';
-  return html;
+  return ''; // legacy — replaced by _xPropsPanel inside _expandedCardBody
 }
 
 function propRow(p, gameKey) {
@@ -1748,7 +2021,18 @@ function propRow(p, gameKey) {
 }
 
 function toggleCard(cardEl) {
+  const wasExpanded = cardEl.classList.contains('expanded');
   cardEl.classList.toggle('expanded');
+  // Trigger bar animations after expand by briefly forcing reflow
+  if (!wasExpanded) {
+    requestAnimationFrame(() => {
+      cardEl.querySelectorAll('.xbet-bar-fill, .xprop-mini-fill').forEach(el => {
+        const w = el.style.width;
+        el.style.width = '0%';
+        requestAnimationFrame(() => { el.style.width = w; });
+      });
+    });
+  }
 }
 
 // ── Props table ───────────────────────────────────────────────────────────
