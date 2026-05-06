@@ -8,14 +8,7 @@ joblib
 # HTTP / scraping
 requests
 beautifulsoup4
-
-# MLB data (free)
-pybaseball
-MLB-StatsAPI
-
-# Soccer / World Cup data (free)
-soccerdata>=1.5.0
-understat>=0.2
+lxml
 
 # Visualization
 matplotlib
@@ -37,7 +30,4 @@ pytz
 
 # Scheduled jobs
 APScheduler
-
-# Reddit API (sentiment)
-praw
 
