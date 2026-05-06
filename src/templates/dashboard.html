@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0,viewport-fit=cover">
 <meta name="mobile-web-app-capable" content="yes">
-<title>Bettor — World Cup 2026</title>
+<title>Bettor — Soccer</title>
 <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Fraunces:wght@600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap');
@@ -522,7 +522,7 @@ body.console-open main{padding-bottom:236px}
 <header class="header">
   <div class="header-brand">
     <span style="font-size:2rem;line-height:1">⚽</span>
-    <h1>Bettor <span>WC 2026</span></h1>
+    <h1>Bettor <span>Soccer</span></h1>
   </div>
   <div class="header-actions">
     <span id="last-updated">{{ last_updated or 'Not loaded' }}</span>
@@ -546,8 +546,8 @@ body.console-open main{padding-bottom:236px}
   <div class="tab" data-tab="parlays" onclick="switchTab('parlays')">
     &#127917; Parlays
   </div>
-  <div class="tab" data-tab="wcgroups" onclick="switchTab('wcgroups')">
-    &#127942; WC Groups
+  <div class="tab" data-tab="tournament" onclick="switchTab('tournament');loadTournamentTab()">
+    &#127942; Tournament
   </div>
 </div>
 
@@ -587,14 +587,12 @@ body.console-open main{padding-bottom:236px}
       <input type="text" id="props-search" placeholder="Search player, team…" oninput="filterProps()">
       <select id="props-stat" onchange="filterProps()">
         <option value="">All Stats</option>
-        <option value="strikeouts">Pitcher Ks</option>
-        <option value="hits">Hits</option>
-        <option value="home_runs">Home Runs</option>
-        <option value="total_bases">Total Bases</option>
-        <option value="rbi">RBI</option>
-        <option value="runs">Runs</option>
-        <option value="walks">Walks</option>
-        <option value="stolen_bases">Stolen Bases</option>
+        <option value="goals">Goals</option>
+        <option value="assists">Assists</option>
+        <option value="shots_on_target">Shots on Target</option>
+        <option value="shots">Shots</option>
+        <option value="key_passes">Key Passes</option>
+        <option value="dribbles">Dribbles</option>
       </select>
       <select id="props-dir" onchange="filterProps()" style="display:none">
         <option value="OVER" selected>OVER</option>
@@ -694,13 +692,70 @@ body.console-open main{padding-bottom:236px}
 <!-- Toast -->
 <div id="toast"></div>
 
-<!-- WC Groups Panel (injected separately so tab works standalone) -->
-<div class="tab-panel" id="panel-wcgroups" style="display:none">
-  <div class="section-header">
-    <span class="section-title">&#127942; FIFA World Cup 2026 — Group Stage</span>
-    <span class="section-meta">USA · Canada · Mexico &nbsp;|&nbsp; June 11 – July 19, 2026</span>
+<!-- Tournament Panel -->
+<div class="tab-panel" id="panel-tournament" style="display:none">
+  <div class="section-header" style="flex-wrap:wrap;gap:12px">
+    <span class="section-title">&#127942; Tournament Center</span>
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      <select id="tournament-select" onchange="loadTournament(this.value)"
+        style="background:var(--card2);border:1px solid var(--border);color:var(--text);
+               padding:6px 12px;border-radius:8px;font-size:.85rem;cursor:pointer">
+        <option value="">&#8212; Select Competition &#8212;</option>
+        <option value="WC">&#127758; FIFA World Cup 2026</option>
+        <option value="CL">&#11088; UEFA Champions League</option>
+        <option value="PL">&#127988; Premier League</option>
+        <option value="BL1">&#127465;&#127466; Bundesliga</option>
+        <option value="SA">&#127470;&#127481; Serie A</option>
+        <option value="PD">&#127466;&#127480; La Liga</option>
+        <option value="FL1">&#127467;&#127479; Ligue 1</option>
+        <option value="DED">&#127475;&#127473; Eredivisie</option>
+        <option value="PPL">&#127477;&#127481; Primeira Liga</option>
+        <option value="BSA">&#127463;&#127479; S&#233;rie A (Brazil)</option>
+        <option value="ELC">&#127988; Championship</option>
+      </select>
+      <select id="tournament-days" onchange="loadTournament(document.getElementById('tournament-select').value)"
+        style="background:var(--card2);border:1px solid var(--border);color:var(--text);
+               padding:6px 12px;border-radius:8px;font-size:.85rem;cursor:pointer">
+        <option value="3">Next 3 days</option>
+        <option value="7" selected>Next 7 days</option>
+        <option value="14">Next 14 days</option>
+      </select>
+      <button id="tournament-tab-btn" onclick="loadTournament(document.getElementById('tournament-select').value)"
+        class="btn btn-sm" style="padding:6px 14px">&#9654; Load</button>
+    </div>
   </div>
-  <div id="wc-groups-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px;margin-top:8px"></div>
+
+  <!-- Sub-tabs: Matches / Standings / Scorers -->
+  <div id="tournament-subtabs" style="display:flex;gap:4px;margin:14px 0;flex-wrap:wrap">
+    <button class="btn btn-sm t-subtab active" data-subtab="matches"
+      onclick="_tSwitchSub('matches')" style="border-radius:20px">&#128200; Matches</button>
+    <button class="btn btn-sm t-subtab" data-subtab="standings"
+      onclick="_tSwitchSub('standings')" style="border-radius:20px">&#128202; Standings</button>
+    <button class="btn btn-sm t-subtab" data-subtab="scorers"
+      onclick="_tSwitchSub('scorers')" style="border-radius:20px">&#9917; Top Scorers</button>
+  </div>
+
+  <div id="tournament-matches-panel">
+    <div id="tournament-matches-loading" style="display:none;text-align:center;padding:40px;color:var(--muted)">
+      <div class="spinner" style="margin:0 auto 12px"></div>Loading matches&hellip;
+    </div>
+    <div id="tournament-matches-empty" class="no-games hidden">No upcoming matches found.</div>
+    <div class="games-grid" id="tournament-matches-grid"></div>
+  </div>
+
+  <div id="tournament-standings-panel" style="display:none">
+    <div id="tournament-standings-loading" style="display:none;text-align:center;padding:40px;color:var(--muted)">
+      <div class="spinner" style="margin:0 auto 12px"></div>Loading standings&hellip;
+    </div>
+    <div id="tournament-standings-content" style="overflow-x:auto"></div>
+  </div>
+
+  <div id="tournament-scorers-panel" style="display:none">
+    <div id="tournament-scorers-loading" style="display:none;text-align:center;padding:40px;color:var(--muted)">
+      <div class="spinner" style="margin:0 auto 12px"></div>Loading scorers&hellip;
+    </div>
+    <div id="tournament-scorers-content"></div>
+  </div>
 </div>
 
 <!-- Live Console Panel -->
@@ -1342,8 +1397,10 @@ function switchTab(name) {
   const activePanel = document.getElementById(`panel-${name}`);
   if (activeTab) activeTab.classList.add('active');
   if (activePanel) {
-    // wcgroups panel uses display:none/block instead of .active class
-    if (name === 'wcgroups') {
+    // tournament panel uses display:none/block
+    if (name === 'tournament') {
+      activePanel.style.display = 'block';
+    } else if (name === 'wcgroups') {
       activePanel.style.display = 'block';
       _renderWcGroups();
     } else {
@@ -1621,7 +1678,7 @@ function renderGames(gridId, cards, emptyId, metaId, badgeId) {
   }
   if (empty) empty.classList.add('hidden');
   if (badge) badge.textContent = String(cards.length);
-  if (meta) meta.textContent = `${cards.length} game${cards.length!==1?'s':''} &middot; MLB`;
+  if (meta) meta.textContent = `${cards.length} match${cards.length!==1?'es':''} · Soccer`;
   if (grid) grid.innerHTML = cards.map(c => gameCard(c)).join('');
 }
 
@@ -1638,33 +1695,36 @@ function plainEnglishBet(bet, homeTeam, awayTeam, phase='upcoming') {
   const line = parseFloat(bet.line) || 0;
   const isOver = pick.toUpperCase().includes('OVER');
   const team = cleanPickTeam(pick);
-  if (bt === 'moneyline') return { text: _phaseVerb(phase, `${team} will WIN`, `${team} is LIVE to WIN`, `${team} result is FINAL`), emoji: '&#127942;', color: 'var(--green)' };
-  if (bt === 'run_line') {
-    if (pick.includes('+1.5')) return { text: _phaseVerb(phase, `${team} wins or stays within 1 run`, `${team} is LIVE within 1 run`, `${team} run-line result is FINAL`), emoji: '&#128202;', color: '#818cf8' };
-    return { text: _phaseVerb(phase, `${team} wins by 2+ runs`, `${team} is LIVE for 2+ run margin`, `${team} run-line result is FINAL`), emoji: '&#128202;', color: '#818cf8' };
+  if (bt === 'moneyline' || bt === '1x2') return { text: _phaseVerb(phase, `${team} will WIN`, `${team} is LIVE to WIN`, `${team} WINS`), emoji: '&#9917;', color: 'var(--green)' };
+  if (bt === 'run_line' || bt === 'draw no bet') {
+    if (pick.toLowerCase().includes('dnb') || bt === 'draw no bet')
+      return { text: _phaseVerb(phase, `${team} wins (Draw No Bet)`, `${team} DNB is LIVE`, `${team} DNB result is FINAL`), emoji: '&#128202;', color: '#818cf8' };
+    return { text: _phaseVerb(phase, `${team} to win or draw`, `${team} result is LIVE`, `${team} result is FINAL`), emoji: '&#128202;', color: '#818cf8' };
   }
-  if (bt === 'total' || bt === 'game_total') {
+  if (bt === 'total' || bt === 'game_total' || bt === 'goals o/u') {
+    const goalsLine = line || 2.5;
     return isOver
-      ? { text: _phaseVerb(phase, `Game will have MORE than ${line} total runs`, `Game total is LIVE over ${line}`, `Game total result is FINAL`), emoji: '&#127919;', color: 'var(--accent)' }
-      : { text: _phaseVerb(phase, `Game will have FEWER than ${line} total runs`, `Game total is LIVE under ${line}`, `Game total result is FINAL`), emoji: '&#127919;', color: 'var(--yellow)' };
+      ? { text: _phaseVerb(phase, `Over ${goalsLine} goals in this match`, `Match total is LIVE over ${goalsLine}`, `Match total result is FINAL`), emoji: '&#127919;', color: 'var(--accent)' }
+      : { text: _phaseVerb(phase, `Under ${goalsLine} goals in this match`, `Match total is LIVE under ${goalsLine}`, `Match total result is FINAL`), emoji: '&#127919;', color: 'var(--yellow)' };
   }
-  if (bt === 'f5_total') {
+  if (bt === 'f5_total' || bt === 'btts') {
+    if (bt === 'btts') return { text: _phaseVerb(phase, `Both teams score`, `Both teams scoring LIVE`, `BTTS result is FINAL`), emoji: '&#9889;', color: '#a78bfa' };
     return isOver
-      ? { text: _phaseVerb(phase, `First 5 innings: MORE than ${line} runs`, `F5 total is LIVE over ${line}`, `F5 total result is FINAL`), emoji: '&#9203;', color: 'var(--accent)' }
-      : { text: _phaseVerb(phase, `First 5 innings: FEWER than ${line} runs`, `F5 total is LIVE under ${line}`, `F5 total result is FINAL`), emoji: '&#9203;', color: 'var(--yellow)' };
+      ? { text: _phaseVerb(phase, `First Half: Over ${line} goals`, `First Half total is LIVE over ${line}`, `HT total result is FINAL`), emoji: '&#9203;', color: 'var(--accent)' }
+      : { text: _phaseVerb(phase, `First Half: Under ${line} goals`, `First Half total is LIVE under ${line}`, `HT total result is FINAL`), emoji: '&#9203;', color: 'var(--yellow)' };
   }
-  if (bt === 'f5_moneyline') return { text: _phaseVerb(phase, `${team} leads after 5 innings`, `${team} F5 is LIVE`, `${team} F5 result is FINAL`), emoji: '&#9203;', color: '#a78bfa' };
+  if (bt === 'f5_moneyline') return { text: _phaseVerb(phase, `Both teams score (BTTS)`, `BTTS is LIVE`, `BTTS result is FINAL`), emoji: '&#9889;', color: '#a78bfa' };
   if (bt === 'home_team_total') {
     return isOver
-      ? { text: _phaseVerb(phase, `${homeTeam} scores MORE than ${line} runs`, `${homeTeam} team total is LIVE over ${line}`, `${homeTeam} team-total result is FINAL`), emoji: '&#127968;', color: 'var(--accent)' }
-      : { text: _phaseVerb(phase, `${homeTeam} scores fewer than ${line} runs`, `${homeTeam} team total is LIVE under ${line}`, `${homeTeam} team-total result is FINAL`), emoji: '&#127968;', color: 'var(--yellow)' };
+      ? { text: _phaseVerb(phase, `${homeTeam} scores MORE than ${line} goals`, `${homeTeam} goals is LIVE over ${line}`, `${homeTeam} goals result is FINAL`), emoji: '&#127968;', color: 'var(--accent)' }
+      : { text: _phaseVerb(phase, `${homeTeam} scores fewer than ${line} goals`, `${homeTeam} goals is LIVE under ${line}`, `${homeTeam} goals result is FINAL`), emoji: '&#127968;', color: 'var(--yellow)' };
   }
   if (bt === 'away_team_total') {
     return isOver
-      ? { text: _phaseVerb(phase, `${awayTeam} scores MORE than ${line} runs`, `${awayTeam} team total is LIVE over ${line}`, `${awayTeam} team-total result is FINAL`), emoji: '&#9992;', color: 'var(--accent)' }
-      : { text: _phaseVerb(phase, `${awayTeam} scores fewer than ${line} runs`, `${awayTeam} team total is LIVE under ${line}`, `${awayTeam} team-total result is FINAL`), emoji: '&#9992;', color: 'var(--yellow)' };
+      ? { text: _phaseVerb(phase, `${awayTeam} scores MORE than ${line} goals`, `${awayTeam} goals is LIVE over ${line}`, `${awayTeam} goals result is FINAL`), emoji: '&#9992;', color: 'var(--accent)' }
+      : { text: _phaseVerb(phase, `${awayTeam} scores fewer than ${line} goals`, `${awayTeam} goals is LIVE under ${line}`, `${awayTeam} goals result is FINAL`), emoji: '&#9992;', color: 'var(--yellow)' };
   }
-  return { text: pick, emoji: '&#127919;', color: 'var(--text)' };
+  return { text: pick, emoji: '&#9917;', color: 'var(--text)' };
 }
 
 function plainEnglishPropText(p, phase='upcoming') {
@@ -1677,14 +1737,50 @@ function plainEnglishPropText(p, phase='upcoming') {
   if (st === 'rbi')               return { text: _phaseVerb(phase, `${name} drives in ${line}+ run${line!==1?'s':''}`, `${name} RBI prop is LIVE`, `${name} RBI result is FINAL`), emoji: '&#127919;', color: 'var(--accent)' };
   if (st === 'runs')              return { text: _phaseVerb(phase, `${name} scores ${line}+ run${line!==1?'s':''}`, `${name} runs prop is LIVE`, `${name} runs result is FINAL`),   emoji: '&#127939;', color: 'var(--green)' };
   if (st === 'walks')             return { text: _phaseVerb(phase, `${name} draws ${line}+ walk${line!==1?'s':''}`, `${name} walks prop is LIVE`, `${name} walks result is FINAL`),   emoji: '&#128694;', color: '#94a3b8' };
-  if (st === 'stolen_bases')      return { text: _phaseVerb(phase, `${name} steals ${line}+ base${line!==1?'s':''}`, `${name} steals prop is LIVE`, `${name} steals result is FINAL`),  emoji: '&#128168;', color: 'var(--yellow)' };
-  if (st === 'total_bases')       return { text: _phaseVerb(phase, `${name} has ${line}+ total bases`, `${name} total bases prop is LIVE`, `${name} total bases result is FINAL`),                emoji: '&#128208;', color: 'var(--accent)' };
-  if (st === 'batter_strikeouts') return { text: _phaseVerb(phase, `${name} strikes out ${line}+ times as batter`, `${name} batter-K prop is LIVE`, `${name} batter-K result is FINAL`),   emoji: '&#10060;',  color: 'var(--red)' };
-  if (st === 'doubles')           return { text: _phaseVerb(phase, `${name} hits ${line}+ double${line!==1?'s':''}`, `${name} doubles prop is LIVE`, `${name} doubles result is FINAL`),  emoji: '&#128640;', color: 'var(--accent)' };
+  if (st === 'goals')           return { text: _phaseVerb(phase, `${name} scores ${line}+ goal${line!==1?'s':''}`, `${name} goals prop LIVE`, `${name} goals result FINAL`),           emoji: '&#9917;',   color: 'var(--green)' };
+  if (st === 'assists')         return { text: _phaseVerb(phase, `${name} gets ${line}+ assist${line!==1?'s':''}`, `${name} assists prop LIVE`, `${name} assists result FINAL`),       emoji: '&#128200;', color: 'var(--accent)' };
+  if (st === 'shots_on_target') return { text: _phaseVerb(phase, `${name} has ${line}+ shots on target`, `${name} SOT prop LIVE`, `${name} SOT result FINAL`),                       emoji: '&#127919;', color: '#818cf8' };
+  if (st === 'shots')           return { text: _phaseVerb(phase, `${name} attempts ${line}+ shots`, `${name} shots prop LIVE`, `${name} shots result FINAL`),                         emoji: '&#128165;', color: 'var(--yellow)' };
+  if (st === 'key_passes')      return { text: _phaseVerb(phase, `${name} makes ${line}+ key passes`, `${name} KP prop LIVE`, `${name} KP result FINAL`),                            emoji: '&#128204;', color: '#a78bfa' };
+  if (st === 'dribbles')        return { text: _phaseVerb(phase, `${name} completes ${line}+ dribbles`, `${name} dribbles prop LIVE`, `${name} dribbles result FINAL`),              emoji: '&#127939;', color: 'var(--accent)' };
+  if (st === 'tackles')         return { text: _phaseVerb(phase, `${name} makes ${line}+ tackle${line!==1?'s':''}`, `${name} tackles prop LIVE`, `${name} tackles result FINAL`),   emoji: '&#129354;', color: 'var(--accent)' };
+  if (st === 'xg')              return { text: _phaseVerb(phase, `${name} xG ${line}+ this match`, `${name} xG prop LIVE`, `${name} xG result FINAL`),                               emoji: '&#128262;', color: '#10b981' };
   return { text: _phaseVerb(phase, `${name} OVER ${line} ${p.prop_label||st}`, `${name} prop is LIVE`, `${name} prop result is FINAL`), emoji: '&#9650;', color: 'var(--accent)' };
 }
 
+// ── Soccer card normalizer ─────────────────────────────────────────────────
+// Converts bets[] array (soccer_predictor format) to named props (moneyline, total, etc.)
+// so the existing gameCard() render logic works seamlessly.
+function _normalizeSoccerCard(c) {
+  if (!c || !Array.isArray(c.bets) || c.bets.length === 0) return c;
+  for (const bet of c.bets) {
+    const bt = (bet.bet_type || '').toLowerCase();
+    const side = (bet.pick_side || '').toLowerCase();
+    const norm = { ...bet, model_prob: bet.probability, odds_am: bet.odds,
+                   pick: bet.pick_label || '', line: 2.5 };
+    if (bt === '1x2') {
+      if (side === 'home' && !c.moneyline) c.moneyline = norm;
+      else if (side === 'draw' && !c.draw_bet) c.draw_bet = norm;
+      else if (side === 'away' && !c.away_win) c.away_win = norm;
+    } else if (bt === 'goals o/u' && side === 'over' && !c.total) {
+      c.total = { ...norm, pick: 'OVER 2.5' };
+    } else if (bt === 'goals o/u' && side === 'under' && !c.total_under) {
+      c.total_under = { ...norm, pick: 'UNDER 2.5' };
+    } else if (bt === 'btts' && !c.f5_moneyline) {
+      c.f5_moneyline = { ...norm, bet_type: 'BTTS' };
+    } else if (bt === 'draw no bet' && !c.run_line) {
+      c.run_line = norm;
+    }
+  }
+  // Derive overall_safety_label from best bet
+  if (!c.overall_safety_label && c.moneyline) {
+    c.overall_safety_label = c.moneyline.safety_label || 'MODERATE';
+  }
+  return c;
+}
+
 function gameCard(c) {
+  c = _normalizeSoccerCard(c);
   const slBadge = safetyBadge(c.overall_safety_label || 'MODERATE');
   const baseWhen = (c.when_label || c.when || 'TODAY').toUpperCase();
   const badgeInfo = _badgeInfoForCard(c);
@@ -1719,12 +1815,12 @@ function gameCard(c) {
       </div>
     </div>`;
   } else {
-    mainPickHtml = `<div class="pick-card" style="color:var(--muted);font-size:.82rem">No moneyline edge yet</div>`;
+    mainPickHtml = `<div class="pick-card" style="color:var(--muted);font-size:.82rem">No clear edge yet</div>`;
   }
 
   // Other predictions as plain-English chips
   const otherBets = [];
-  for (const key of ['total','run_line','f5_moneyline','f5_total']) {
+  for (const key of ['total','run_line','f5_moneyline','away_win','draw_bet','total_under']) {
     if (c[key]) {
       const pbt  = plainEnglishBet(c[key], c.home_team, c.away_team, phase);
       const prob = Math.round((c[key].model_prob||0.5)*100);
@@ -1751,7 +1847,7 @@ function gameCard(c) {
     .length;
 
   // Count all bets for expand button label
-  const allBetKeys = ['moneyline','run_line','total','f5_moneyline','f5_total','home_team_total','away_team_total'];
+  const allBetKeys = ['moneyline','run_line','total','total_under','f5_moneyline','away_win','draw_bet','home_team_total','away_team_total'];
   const betCount = allBetKeys.filter(k => c[k]).length;
 
   return `<div class="game-card" data-game-key="${c.game_key}" data-game-date="${c.game_date||''}" data-game-datetime="${c.game_datetime||''}"
@@ -1770,12 +1866,12 @@ function gameCard(c) {
     <div class="matchup">
       <div class="team-side">
         <div class="team-name">${c.away_team}</div>
-        <div class="team-starter">&#9918; ${c.away_starter||'TBD'}</div>
+        ${c.comp_emoji ? `<div class="team-starter">${c.comp_emoji} ${c.comp_name||''}</div>` : ''}
       </div>
       <div class="vs">vs</div>
       <div class="team-side away">
         <div class="team-name">${c.home_team}</div>
-        <div class="team-starter">&#9918; ${c.home_starter||'TBD'}</div>
+        ${c.venue ? `<div class="team-starter">&#127968; ${c.venue}</div>` : ''}
       </div>
     </div>
     ${mainPickHtml}
@@ -1796,13 +1892,13 @@ function gameCard(c) {
 // ── Expanded card body builder ────────────────────────────────────────────
 function _expandedCardBody(c, phase) {
   const BET_DEFS = [
-    { key: 'moneyline',       label: 'Moneyline',        icon: '🏆' },
-    { key: 'run_line',        label: 'Run Line ±1.5',    icon: '📊' },
-    { key: 'total',           label: 'Total Runs',       icon: '⚾' },
-    { key: 'f5_moneyline',    label: 'F5 Moneyline',     icon: '5️⃣' },
-    { key: 'f5_total',        label: 'F5 Total',         icon: '📈' },
-    { key: 'home_team_total', label: 'Home Team Total',  icon: '🏠' },
-    { key: 'away_team_total', label: 'Away Team Total',  icon: '✈️' },
+    { key: 'moneyline',       label: '1X2',              icon: '⚽' },
+    { key: 'run_line',        label: 'Draw No Bet',      icon: '🛡️' },
+    { key: 'total',           label: 'Goals O/U 2.5',    icon: '🎯' },
+    { key: 'f5_moneyline',    label: 'BTTS',             icon: '⚡' },
+    { key: 'f5_total',        label: 'Both Halves Score',icon: '📈' },
+    { key: 'home_team_total', label: 'Home Goals',       icon: '🏠' },
+    { key: 'away_team_total', label: 'Away Goals',       icon: '✈️' },
   ];
 
   // Summary strip stats
@@ -1840,7 +1936,7 @@ function _expandedCardBody(c, phase) {
   if (betRows.length) {
     html += `<div class="xpanel">
       <div class="xpanel-head">
-        <span class="xpanel-title">⚾ Game Bets</span>
+        <span class="xpanel-title">⚽ Match Bets</span>
         <span class="xpanel-count">${betRows.length} bet${betRows.length>1?'s':''}</span>
       </div>
       <div class="xbet-list">${betRows.join('')}</div>
@@ -2737,6 +2833,210 @@ function sendBuilderParlay() {
   const name  = document.getElementById('parlay-name').value.trim() || 'My Parlay';
   const stake = parseFloat(document.getElementById('parlay-stake').value) || 0;
   sendParlayEmail({name, legs: parlayLegs, combined_odds: combined, stake_usd: stake});
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TOURNAMENT TAB — Competition selector, matches, standings, scorers
+// ═══════════════════════════════════════════════════════════════════════════
+let _currentTournament = null;
+let _currentTournamentSub = 'matches';
+
+function loadTournamentTab() {
+  // Called when Tournament tab is clicked — auto-load if one was previously selected
+  if (_currentTournament) loadTournament(_currentTournament);
+}
+
+function loadTournament(code) {
+  if (!code) return;
+  _currentTournament = code;
+  if (_currentTournamentSub === 'matches')   _loadTournamentMatches(code);
+  else if (_currentTournamentSub === 'standings') _loadTournamentStandings(code);
+  else if (_currentTournamentSub === 'scorers')   _loadTournamentScorers(code);
+}
+
+function _tSwitchSub(sub) {
+  _currentTournamentSub = sub;
+  document.querySelectorAll('.t-subtab').forEach(b => b.classList.remove('active'));
+  const btn = document.querySelector(`.t-subtab[data-subtab="${sub}"]`);
+  if (btn) btn.classList.add('active');
+  document.getElementById('tournament-matches-panel').style.display   = sub === 'matches'   ? '' : 'none';
+  document.getElementById('tournament-standings-panel').style.display = sub === 'standings' ? '' : 'none';
+  document.getElementById('tournament-scorers-panel').style.display   = sub === 'scorers'   ? '' : 'none';
+  if (_currentTournament) loadTournament(_currentTournament);
+}
+
+function _loadTournamentMatches(code) {
+  const days = document.getElementById('tournament-days')?.value || 7;
+  const grid = document.getElementById('tournament-matches-grid');
+  const loading = document.getElementById('tournament-matches-loading');
+  const empty = document.getElementById('tournament-matches-empty');
+  if (grid) grid.innerHTML = '';
+  if (empty) empty.classList.add('hidden');
+  if (loading) loading.style.display = 'block';
+  fetch(`/api/tournament/${code}/matches?days=${days}&predictions=1`)
+    .then(r => r.json())
+    .then(data => {
+      if (loading) loading.style.display = 'none';
+      if (!data.ok || !data.matches || !data.matches.length) {
+        if (empty) { empty.textContent = data.error || 'No upcoming matches found.'; empty.classList.remove('hidden'); }
+        return;
+      }
+      const cards = data.matches.map(m => _tournamentMatchCard(m, data));
+      if (grid) grid.innerHTML = cards.join('');
+    })
+    .catch(e => {
+      if (loading) loading.style.display = 'none';
+      if (empty) { empty.textContent = `Error: ${e.message}`; empty.classList.remove('hidden'); }
+    });
+}
+
+function _tournamentMatchCard(m, compData) {
+  const hp = m.home_prob ? Math.round(m.home_prob * 100) : null;
+  const dp = m.draw_prob ? Math.round(m.draw_prob * 100) : null;
+  const ap = m.away_prob ? Math.round(m.away_prob * 100) : null;
+  const topBet = hp && dp && ap
+    ? (hp > ap && hp > dp
+        ? { label: `${m.home_team} WIN`, pct: hp, color: 'var(--green)' }
+        : ap > hp && ap > dp
+          ? { label: `${m.away_team} WIN`, pct: ap, color: 'var(--green)' }
+          : { label: 'DRAW', pct: dp, color: 'var(--yellow)' })
+    : null;
+  const over25 = m.over25_prob ? Math.round(m.over25_prob * 100) : null;
+  const btts   = m.btts_prob   ? Math.round(m.btts_prob   * 100) : null;
+  const probBar = pct => `<div style="height:4px;border-radius:2px;background:var(--border);margin-top:4px">
+    <div style="height:4px;border-radius:2px;background:var(--accent);width:${pct}%"></div></div>`;
+  return `<div class="game-card" style="cursor:default">
+    <div class="card-header">
+      <div class="card-topline">
+        <div class="card-when">
+          <div class="when-badge when-TODAY">${m.date||m.game_date||''}</div>
+          <span style="font-size:.7rem;color:var(--muted);margin-left:6px">${m.comp_emoji||'⚽'} ${m.comp_name||compData.name||code}</span>
+        </div>
+        <div class="card-top-right" style="font-size:.75rem;color:var(--muted)">${m.game_time||''}</div>
+      </div>
+      <div class="matchup">
+        <div class="team-side">
+          <div class="team-name">${m.away_team}</div>
+        </div>
+        <div class="vs">vs</div>
+        <div class="team-side away">
+          <div class="team-name">${m.home_team}</div>
+        </div>
+      </div>
+      ${topBet ? `<div class="pick-card win-card" style="padding:10px 14px">
+        <div class="pick-headline" style="color:${topBet.color}">&#9917; ${topBet.label}</div>
+        <div class="pick-conf"><span style="color:${topBet.color};font-weight:700">${topBet.pct}% confident</span></div>
+      </div>` : ''}
+      ${hp ? `<div style="display:flex;gap:12px;padding:8px 14px;font-size:.72rem;color:var(--muted)">
+        <div style="flex:1;text-align:center">${m.away_team.split(' ').pop()} WIN<br><b style="color:var(--text)">${ap}%</b>${probBar(ap)}</div>
+        <div style="flex:1;text-align:center">DRAW<br><b style="color:var(--text)">${dp}%</b>${probBar(dp)}</div>
+        <div style="flex:1;text-align:center">${m.home_team.split(' ').pop()} WIN<br><b style="color:var(--text)">${hp}%</b>${probBar(hp)}</div>
+      </div>` : ''}
+      ${(over25||btts) ? `<div style="display:flex;gap:16px;padding:4px 14px 10px;font-size:.72rem">
+        ${over25 ? `<span style="color:var(--muted)">O2.5: <b style="color:var(--accent)">${over25}%</b></span>` : ''}
+        ${btts   ? `<span style="color:var(--muted)">BTTS: <b style="color:#a78bfa">${btts}%</b></span>` : ''}
+        ${m.venue ? `<span style="color:var(--muted);margin-left:auto">&#127968; ${m.venue}</span>` : ''}
+      </div>` : ''}
+    </div>
+  </div>`;
+}
+
+function _loadTournamentStandings(code) {
+  const loading = document.getElementById('tournament-standings-loading');
+  const content = document.getElementById('tournament-standings-content');
+  if (content) content.innerHTML = '';
+  if (loading) loading.style.display = 'block';
+  fetch(`/api/tournament/${code}/standings`)
+    .then(r => r.json())
+    .then(data => {
+      if (loading) loading.style.display = 'none';
+      if (!data.ok || !data.standings || !data.standings.length) {
+        if (content) content.innerHTML = `<div class="no-games">${data.error || 'Standings not available.'}</div>`;
+        return;
+      }
+      let html = '';
+      for (const group of data.standings) {
+        html += `<div style="margin-bottom:28px">
+          <h3 style="font-size:.9rem;font-weight:600;color:var(--accent);margin-bottom:8px">
+            ${group.group || group.stage || 'League Table'}</h3>
+          <div style="overflow-x:auto;border:1px solid var(--border);border-radius:var(--radius)">
+            <table style="width:100%;border-collapse:collapse;font-size:.78rem">
+              <thead><tr style="border-bottom:1px solid var(--border);color:var(--muted)">
+                <th style="padding:8px 10px;text-align:left">#</th>
+                <th style="padding:8px 10px;text-align:left">Team</th>
+                <th style="padding:8px 6px">GP</th><th style="padding:8px 6px">W</th>
+                <th style="padding:8px 6px">D</th><th style="padding:8px 6px">L</th>
+                <th style="padding:8px 6px">GF</th><th style="padding:8px 6px">GA</th>
+                <th style="padding:8px 6px">GD</th>
+                <th style="padding:8px 10px;font-weight:700;color:var(--accent)">Pts</th>
+              </tr></thead><tbody>`;
+        for (const row of group.table) {
+          const gdColor = row.gd > 0 ? 'var(--green)' : row.gd < 0 ? 'var(--red)' : 'var(--muted)';
+          html += `<tr style="border-bottom:1px solid var(--border)">
+            <td style="padding:7px 10px;color:var(--muted)">${row.position}</td>
+            <td style="padding:7px 10px;font-weight:500">${row.team}</td>
+            <td style="padding:7px 6px;text-align:center">${row.played}</td>
+            <td style="padding:7px 6px;text-align:center;color:var(--green)">${row.won}</td>
+            <td style="padding:7px 6px;text-align:center">${row.drawn}</td>
+            <td style="padding:7px 6px;text-align:center;color:var(--red)">${row.lost}</td>
+            <td style="padding:7px 6px;text-align:center">${row.gf}</td>
+            <td style="padding:7px 6px;text-align:center">${row.ga}</td>
+            <td style="padding:7px 6px;text-align:center;color:${gdColor}">${row.gd>0?'+':''}${row.gd}</td>
+            <td style="padding:7px 10px;text-align:center;font-weight:700;color:var(--accent)">${row.pts}</td>
+          </tr>`;
+        }
+        html += `</tbody></table></div></div>`;
+      }
+      if (content) content.innerHTML = html;
+    })
+    .catch(e => {
+      if (loading) loading.style.display = 'none';
+      if (content) content.innerHTML = `<div class="no-games">Error: ${e.message}</div>`;
+    });
+}
+
+function _loadTournamentScorers(code) {
+  const loading = document.getElementById('tournament-scorers-loading');
+  const content = document.getElementById('tournament-scorers-content');
+  if (content) content.innerHTML = '';
+  if (loading) loading.style.display = 'block';
+  fetch(`/api/tournament/${code}/scorers?limit=20`)
+    .then(r => r.json())
+    .then(data => {
+      if (loading) loading.style.display = 'none';
+      if (!data.ok || !data.scorers || !data.scorers.length) {
+        if (content) content.innerHTML = `<div class="no-games">${data.error || 'Scorer data not available.'}</div>`;
+        return;
+      }
+      let html = `<div style="overflow-x:auto;border:1px solid var(--border);border-radius:var(--radius)">
+        <table style="width:100%;border-collapse:collapse;font-size:.78rem">
+          <thead><tr style="border-bottom:1px solid var(--border);color:var(--muted)">
+            <th style="padding:8px 10px;text-align:left">#</th>
+            <th style="padding:8px 10px;text-align:left">Player</th>
+            <th style="padding:8px 10px;text-align:left">Team</th>
+            <th style="padding:8px 10px;text-align:left">Nation</th>
+            <th style="padding:8px 6px">GP</th>
+            <th style="padding:8px 10px;font-weight:700;color:var(--green)">Goals</th>
+            <th style="padding:8px 10px;color:var(--accent)">Assists</th>
+          </tr></thead><tbody>`;
+      data.scorers.forEach((s, i) => {
+        html += `<tr style="border-bottom:1px solid var(--border)">
+          <td style="padding:7px 10px;color:var(--muted)">${i+1}</td>
+          <td style="padding:7px 10px;font-weight:500">${s.name}</td>
+          <td style="padding:7px 10px;color:var(--muted)">${s.team}</td>
+          <td style="padding:7px 10px;color:var(--muted)">${s.nationality||'—'}</td>
+          <td style="padding:7px 6px;text-align:center">${s.played||'—'}</td>
+          <td style="padding:7px 10px;text-align:center;font-weight:700;color:var(--green)">${s.goals}</td>
+          <td style="padding:7px 10px;text-align:center;color:var(--accent)">${s.assists||0}</td>
+        </tr>`;
+      });
+      html += `</tbody></table></div>`;
+      if (content) content.innerHTML = html;
+    })
+    .catch(e => {
+      if (loading) loading.style.display = 'none';
+      if (content) content.innerHTML = `<div class="no-games">Error: ${e.message}</div>`;
+    });
 }
 
 function loadTrackedParlays() {

@@ -1,8 +1,14 @@
 """
-soccer_predictor.py — WC 2026 match bet builder
-================================================
-Builds structured bet dicts from model predictions + odds,
+soccer_predictor.py — Multi-tournament soccer bet builder
+=========================================================
+Builds structured bet dicts from model predictions + odds + news sentiment,
 matching the same schema as MLB bets (for dashboard compatibility).
+
+Sentiment integration:
+  - News/sentiment signal from soccer_news.py (cached 2h)
+  - Adjusts base model probabilities by up to ±3% based on team news
+  - Strong positive news (injury return, winning run) → small prob boost
+  - Strong negative news (key injury, suspension) → small prob reduction
 """
 
 from __future__ import annotations
@@ -13,6 +19,21 @@ from typing import Any
 from models.soccer_model import predict as _model_predict, STAGE_MAP
 from data.club_stats_fetcher import get_squad_props, get_wc_player_stats
 from data.wc2026_fetcher import TEAM_ELO, get_wc_odds
+
+try:
+    from data.soccer_news import get_match_news_signal, get_injury_alerts
+    _NEWS_AVAILABLE = True
+except ImportError:
+    _NEWS_AVAILABLE = False
+    def get_match_news_signal(h, a): return {}
+    def get_injury_alerts(t): return []
+
+try:
+    from data.soccer_fetcher import get_competition_odds, FD_TO_ODDS_SPORT, TOURNAMENTS
+except ImportError:
+    def get_competition_odds(code): return []
+    FD_TO_ODDS_SPORT = {}
+    TOURNAMENTS = {}
 
 
 # ── Safety thresholds (same as MLB) ──────────────────────────────────────────
@@ -126,16 +147,21 @@ def _get_live_odds_for_match(home: str, away: str, all_odds: list[dict]) -> dict
 
 # ── Core bet builder ──────────────────────────────────────────────────────────
 def predict_match(
-    home: str, away: str, stage: str = "group"
+    home: str, away: str, stage: str = "group",
+    home_elo: float | None = None, away_elo: float | None = None,
+    use_sentiment: bool = True,
 ) -> dict[str, float]:
-    """Call soccer_model.predict with team stats lookup."""
-    h_elo = TEAM_ELO.get(home, 1850.0)
-    a_elo = TEAM_ELO.get(away, 1850.0)
+    """
+    Call soccer_model.predict with team stats lookup.
+    Optionally adjusts probabilities with news sentiment signal.
+    """
+    h_elo = home_elo or TEAM_ELO.get(home, 1850.0)
+    a_elo = away_elo or TEAM_ELO.get(away, 1850.0)
     gfh, gah, xfh, xah = _team_stats(home)
     gfa, gaa, xfa, xaa = _team_stats(away)
     stage_id = STAGE_MAP.get(stage.lower(), 0)
 
-    return _model_predict(
+    probs = _model_predict(
         home_elo=h_elo,    away_elo=a_elo,
         goals_for_h=gfh,   goals_ag_h=gah,
         goals_for_a=gfa,   goals_ag_a=gaa,
@@ -143,6 +169,35 @@ def predict_match(
         xg_for_a=xfa,      xg_ag_a=xaa,
         stage=stage_id,
     )
+
+    # ── Sentiment adjustment (small nudge, max ±3%) ────────────────────────
+    if use_sentiment and _NEWS_AVAILABLE:
+        try:
+            signal = get_match_news_signal(home, away)
+            combined = signal.get("combined_signal", 0.0)  # home - away, -2 to +2
+            # Scale: clamp to ±1, multiply by 0.03 → max ±0.03 shift
+            adj = max(-1.0, min(1.0, combined)) * 0.03
+            hp  = probs["home_prob"] + adj
+            ap  = probs["away_prob"] - adj
+            dp  = probs["draw_prob"]
+            # Renormalise
+            total = hp + dp + ap
+            if total > 0:
+                probs["home_prob"] = round(max(0.02, hp / total), 4)
+                probs["away_prob"] = round(max(0.02, ap / total), 4)
+                probs["draw_prob"] = round(max(0.02, dp / total), 4)
+            # Carry sentiment through
+            probs["home_sentiment"] = signal.get("home_sentiment", 0.0)
+            probs["away_sentiment"] = signal.get("away_sentiment", 0.0)
+            probs["sentiment_signal"] = combined
+            probs["home_sentiment_label"] = signal.get("home_label", "neutral")
+            probs["away_sentiment_label"] = signal.get("away_label", "neutral")
+            probs["home_headlines"] = signal.get("home_headlines", [])
+            probs["away_headlines"] = signal.get("away_headlines", [])
+        except Exception as e:
+            print(f"[soccer_predictor] Sentiment error: {e}")
+
+    return probs
 
 
 def build_match_bets(match: dict, live_odds: list[dict] | None = None) -> list[dict]:
@@ -422,12 +477,17 @@ def build_parlay(bets: list[dict], max_legs: int = 4) -> dict | None:
     }
 
 
-def analyze_matches(matches: list[dict]) -> dict[str, Any]:
+def analyze_matches(matches: list[dict], competition_code: str = "WC") -> dict[str, Any]:
     """
-    Run full analysis on a list of WC matches.
+    Run full analysis on a list of soccer matches from any competition.
     Returns state dict compatible with dashboard / email_notify.
     """
-    live_odds = get_wc_odds()
+    # Get live odds for this competition
+    try:
+        live_odds = get_competition_odds(competition_code) or get_wc_odds()
+    except Exception:
+        live_odds = get_wc_odds()
+
     all_bets:  list[dict] = []
     all_props: list[dict] = []
     cards:     list[dict] = []
@@ -438,42 +498,79 @@ def analyze_matches(matches: list[dict]) -> dict[str, Any]:
         all_bets.extend(bets)
         all_props.extend(props)
 
-        home = match["home_team"]
-        away = match["away_team"]
-        probs = predict_match(home, away, match.get("stage","group"))
+        home  = match["home_team"]
+        away  = match["away_team"]
+        stage = match.get("stage", "group")
+        probs = predict_match(home, away, stage, use_sentiment=True)
+
+        # Injury alerts for UI display
+        home_injuries = []
+        away_injuries = []
+        if _NEWS_AVAILABLE:
+            try:
+                home_injuries = get_injury_alerts(home)
+                away_injuries = get_injury_alerts(away)
+            except Exception:
+                pass
+
+        comp_code = match.get("competition", competition_code)
+        comp_info = TOURNAMENTS.get(comp_code, {"name": comp_code, "emoji": "⚽"})
 
         cards.append({
-            "game_key":   match.get("game_key",""),
-            "match_key":  match.get("match_key",""),
-            "home_team":  home,
-            "away_team":  away,
-            "home_flag":  match.get("home_flag","🏳"),
-            "away_flag":  match.get("away_flag","🏳"),
-            "game_time":  match.get("game_time","TBD"),
-            "venue":      match.get("venue",""),
-            "city":       match.get("city",""),
-            "group":      match.get("group",""),
-            "status":     match.get("status","Scheduled"),
-            "home_score": match.get("home_score"),
-            "away_score": match.get("away_score"),
-            "home_prob":  probs["home_prob"],
-            "draw_prob":  probs["draw_prob"],
-            "away_prob":  probs["away_prob"],
-            "over25":     probs["over25_prob"],
-            "btts":       probs["btts_prob"],
-            "bets":       bets,
-            "props":      props,
-            "sport":      "soccer",
+            "game_key":           match.get("game_key", ""),
+            "match_key":          match.get("match_key", ""),
+            "game_date":          match.get("date", match.get("game_date", "")),
+            "game_time":          match.get("game_time", "TBD"),
+            "home_team":          home,
+            "away_team":          away,
+            "home_crest":         match.get("home_crest", ""),
+            "away_crest":         match.get("away_crest", ""),
+            "venue":              match.get("venue", ""),
+            "group":              match.get("group", ""),
+            "stage":              stage,
+            "status":             match.get("status", "Scheduled"),
+            "home_score":         match.get("home_score"),
+            "away_score":         match.get("away_score"),
+            "home_prob":          probs["home_prob"],
+            "draw_prob":          probs["draw_prob"],
+            "away_prob":          probs["away_prob"],
+            "over25":             probs["over25_prob"],
+            "btts":               probs["btts_prob"],
+            # Sentiment
+            "home_sentiment":     probs.get("home_sentiment", 0.0),
+            "away_sentiment":     probs.get("away_sentiment", 0.0),
+            "sentiment_signal":   probs.get("sentiment_signal", 0.0),
+            "home_sentiment_label": probs.get("home_sentiment_label", "neutral"),
+            "away_sentiment_label": probs.get("away_sentiment_label", "neutral"),
+            "home_headlines":     probs.get("home_headlines", []),
+            "away_headlines":     probs.get("away_headlines", []),
+            "home_injuries":      home_injuries,
+            "away_injuries":      away_injuries,
+            # Competition info
+            "competition":        comp_code,
+            "comp_name":          comp_info.get("name", comp_code),
+            "comp_emoji":         comp_info.get("emoji", "⚽"),
+            # Bets
+            "bets":               bets,
+            "home_props":         [p for p in props if p.get("team") == home],
+            "away_props":         [p for p in props if p.get("team") == away],
+            "sport":              "soccer",
+            # Dashboard compatibility fields
+            "overall_safety_label": _safety(probs["home_prob"]),
+            "when_label":         "TODAY",
         })
 
     parlay = build_parlay(all_bets)
     parlays = [parlay] if parlay else []
 
     return {
-        "games":   cards,
-        "bets":    all_bets,
-        "props":   all_props,
-        "parlays": parlays,
-        "sport":   "soccer",
-        "date":    matches[0].get("date","") if matches else "",
+        "game_cards_today":    cards,
+        "game_cards_tomorrow": [],
+        "games":               cards,
+        "bets":                all_bets,
+        "player_props":        all_props,
+        "best_parlays":        parlays,
+        "sport":               "soccer",
+        "competition":         competition_code,
+        "date":                matches[0].get("date", "") if matches else "",
     }

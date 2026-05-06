@@ -1,6 +1,7 @@
 ﻿"""
-Betting Bot — Web Dashboard (MLB)
-==================================
+Betting Bot — Web Dashboard (Soccer)
+=====================================
+Sport: Soccer — All major competitions via football-data.org
 Routes:
   GET  /                      → main dashboard (SSR empty arrays + phases)
   POST /api/run               → kick off analysis in background thread
@@ -17,6 +18,10 @@ Routes:
   GET  /api/email/recipients  → {recipients}
   POST /api/email/send        → {ok} / {error}
   POST /api/email/send-parlay → {ok}
+  GET  /api/tournaments       → list all supported competitions
+  GET  /api/tournament/<code>/matches   → upcoming matches for competition
+  GET  /api/tournament/<code>/standings → league standings
+  GET  /api/tournament/<code>/scorers   → top scorers
 """
 
 import os
@@ -116,7 +121,7 @@ def _init_worker():
     _BG_IS_LEADER = _acquire_bg_lock()
     if _BG_IS_LEADER:
         _scheduler = _start_scheduler()
-        _start_live_scores()
+        _start_soccer_polling()   # soccer live score polling
         _auto_boot_analysis()
     else:
         _scheduler = None
@@ -130,14 +135,14 @@ def _lazy_init():
         _init_worker()
 
 _PHASES = [
-    "Fetching MLB schedule",
+    "Fetching soccer schedule",
     "Loading team stats & model",
-    "Fetching injuries",
+    "Fetching injuries & suspensions",
     "Fetching live odds",
-    "Running game predictions",
+    "Running match predictions",
     "Building player props",
     "Building parlays",
-    "Fetching sentiment",
+    "Fetching news & sentiment",
     "Saving to database",
 ]
 
@@ -971,9 +976,9 @@ def api_run():
         _state["status"]    = "running"
         _state["phase"]     = _PHASES[0]
         _state["phase_idx"] = 0
-    threading.Thread(target=_run_analysis, daemon=True).start()
-    threading.Thread(target=_run_wc_analysis, daemon=True).start()
-    return jsonify({"ok": True, "msg": "Analysis started"})
+    # Soccer-only analysis
+    threading.Thread(target=_run_soccer_analysis, daemon=True).start()
+    return jsonify({"ok": True, "msg": "Soccer analysis started"})
 
 
 @app.route("/api/wc/run", methods=["POST"])
@@ -985,17 +990,127 @@ def api_wc_run():
 
 @app.route("/api/wc/state")
 def api_wc_state():
-    """Return WC dashboard state (cards, props, parlays)."""
+    """Return soccer dashboard state (backward-compat with WC endpoint)."""
     with _lock:
         return jsonify({
-            "wc_game_cards_today":    _state.get("wc_game_cards_today", []),
-            "wc_game_cards_tomorrow": _state.get("wc_game_cards_tomorrow", []),
-            "wc_best_parlays":        _state.get("wc_best_parlays", []),
-            "wc_player_props":        _state.get("wc_player_props", []),
-            "wc_live_scores":         _state.get("wc_live_scores", {}),
-            "wc_status":              _state.get("wc_status", "idle"),
+            "wc_game_cards_today":    _state.get("wc_game_cards_today",    _state.get("game_cards_today", [])),
+            "wc_game_cards_tomorrow": _state.get("wc_game_cards_tomorrow", _state.get("game_cards_tomorrow", [])),
+            "wc_best_parlays":        _state.get("wc_best_parlays",        _state.get("best_parlays", [])),
+            "wc_player_props":        _state.get("wc_player_props",        _state.get("player_props", [])),
+            "wc_live_scores":         _state.get("live_scores", {}),
+            "wc_status":              _state.get("wc_status", _state.get("status", "idle")),
             "wc_date":                _state.get("wc_date", ""),
         })
+
+
+# ─── Tournament API endpoints ─────────────────────────────────────────────────
+@app.route("/api/tournaments")
+def api_tournaments():
+    """List all supported soccer competitions."""
+    try:
+        from data.soccer_fetcher import TOURNAMENTS
+        return jsonify({"ok": True, "tournaments": [
+            {"code": k, **v} for k, v in TOURNAMENTS.items()
+        ]})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/tournament/<code>/matches")
+def api_tournament_matches(code: str):
+    """Upcoming matches for a competition over the next 7 days."""
+    try:
+        days = int(request.args.get("days", 7))
+        from data.soccer_fetcher import get_upcoming_matches, TOURNAMENTS
+        matches = get_upcoming_matches(code, days_ahead=days)
+        # Optionally enrich with predictions
+        enrich = request.args.get("predictions", "1") == "1"
+        if enrich and matches:
+            try:
+                from models.soccer_predictor import build_match_bets, predict_match
+                for m in matches:
+                    probs = predict_match(m["home_team"], m["away_team"],
+                                         m.get("stage", "group"), use_sentiment=False)
+                    m["home_prob"]   = probs["home_prob"]
+                    m["draw_prob"]   = probs["draw_prob"]
+                    m["away_prob"]   = probs["away_prob"]
+                    m["over25_prob"] = probs["over25_prob"]
+                    m["btts_prob"]   = probs["btts_prob"]
+            except Exception as pe:
+                print(f"[api] prediction enrichment error: {pe}")
+        comp_info = TOURNAMENTS.get(code, {"name": code, "emoji": "⚽"})
+        return jsonify({
+            "ok":          True,
+            "code":        code,
+            "name":        comp_info.get("name", code),
+            "emoji":       comp_info.get("emoji", "⚽"),
+            "matches":     matches,
+            "match_count": len(matches),
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/tournament/<code>/standings")
+def api_tournament_standings(code: str):
+    """League table / group standings for a competition."""
+    try:
+        from data.soccer_fetcher import get_standings, TOURNAMENTS
+        standings = get_standings(code)
+        comp_info = TOURNAMENTS.get(code, {"name": code})
+        return jsonify({
+            "ok":       True,
+            "code":     code,
+            "name":     comp_info.get("name", code),
+            "standings": standings,
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/tournament/<code>/scorers")
+def api_tournament_scorers(code: str):
+    """Top scorers for a competition."""
+    try:
+        limit = int(request.args.get("limit", 20))
+        from data.soccer_fetcher import get_top_scorers, TOURNAMENTS
+        scorers = get_top_scorers(code, limit=limit)
+        comp_info = TOURNAMENTS.get(code, {"name": code})
+        return jsonify({
+            "ok":      True,
+            "code":    code,
+            "name":    comp_info.get("name", code),
+            "scorers": scorers,
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/soccer/news")
+def api_soccer_news():
+    """Recent soccer news, optionally filtered by team."""
+    try:
+        team = request.args.get("team")
+        competition = request.args.get("competition")
+        from data.soccer_news import get_soccer_news
+        articles = get_soccer_news(team=team, competition=competition, max_results=15)
+        return jsonify({"ok": True, "articles": articles})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/soccer/sentiment")
+def api_soccer_sentiment():
+    """Team sentiment score from recent news."""
+    try:
+        team = request.args.get("team", "")
+        if not team:
+            return jsonify({"ok": False, "error": "team param required"}), 400
+        from data.soccer_news import get_team_sentiment
+        result = get_team_sentiment(team)
+        return jsonify({"ok": True, **result})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 @app.route("/api/status")
@@ -1752,6 +1867,148 @@ def _poll_wc_scores():
         print(f"[wc-scores] poll error: {e}")
 
 
+# ─── Soccer live score polling ────────────────────────────────────────────────
+def _start_soccer_polling():
+    """Start background soccer score polling (all competitions)."""
+    def _poll_loop():
+        import time
+        while True:
+            try:
+                _poll_soccer_scores()
+            except Exception as e:
+                print(f"[soccer-poll] error: {e}")
+            time.sleep(60)  # poll every minute
+    t = threading.Thread(target=_poll_loop, daemon=True)
+    t.start()
+
+
+def _poll_soccer_scores():
+    """Poll football-data.org for live match updates and broadcast via SSE."""
+    try:
+        from data.wc2026_fetcher import get_wc_matches_live
+        live = get_wc_matches_live()
+        if not live:
+            return
+        live_map: dict = {}
+        for m in live:
+            gk = m.get("game_key", "")
+            if gk:
+                live_map[gk] = {
+                    "home_score": m.get("home_score"),
+                    "away_score": m.get("away_score"),
+                    "status":     m.get("status", ""),
+                    "match_key":  m.get("match_key", ""),
+                }
+        if live_map:
+            with _lock:
+                existing = _state.get("live_scores", {})
+                existing.update(live_map)
+                _state["live_scores"] = existing
+            _broadcast({"live_scores": live_map})
+    except Exception as e:
+        print(f"[soccer-poll] score error: {e}")
+
+
+def _run_soccer_analysis():
+    """
+    Full multi-tournament soccer analysis — primary analysis for this branch.
+    Fetches today's + tomorrow's matches across all major competitions,
+    runs the soccer model with sentiment, builds bets/props/parlays,
+    broadcasts via SSE, sends morning email.
+    """
+    import datetime as _dt
+    today_str = _et_calendar_today().isoformat()
+    tomorrow_str = (_et_calendar_today() + _dt.timedelta(days=1)).isoformat()
+    print(f"[soccer-analysis] Running multi-tournament analysis for {today_str}")
+
+    try:
+        from data.soccer_fetcher import get_matches_today_all, get_matches_tomorrow_all
+        from models.soccer_predictor import analyze_matches as _analyze
+
+        # Try multi-tournament fetcher first; fall back to WC-only
+        try:
+            today_matches    = get_matches_today_all()
+            tomorrow_matches = get_matches_tomorrow_all()
+        except Exception as fe:
+            print(f"[soccer-analysis] multi-fetcher error: {fe} — falling back to WC")
+            from data.wc2026_fetcher import get_matches_today, get_matches_tomorrow
+            today_matches    = get_matches_today()
+            tomorrow_matches = get_matches_tomorrow()
+
+        all_matches = (today_matches if isinstance(today_matches, list)
+                       else [m for ms in today_matches.values() for m in ms])
+        all_matches += (tomorrow_matches if isinstance(tomorrow_matches, list)
+                        else [m for ms in tomorrow_matches.values() for m in ms])
+
+        if not all_matches:
+            print("[soccer-analysis] No matches found for today/tomorrow")
+            with _lock:
+                _state["status"] = "idle"
+                _state["last_updated"] = _dt.datetime.now().isoformat()
+            return
+
+        state = _analyze(all_matches)
+
+        today_cards    = [c for c in state.get("game_cards_today", state.get("games", []))
+                          if c.get("game_date", c.get("date", "")) == today_str]
+        tomorrow_cards = [c for c in state.get("game_cards_today", state.get("games", []))
+                          if c.get("game_date", c.get("date", "")) == tomorrow_str]
+        if not tomorrow_cards:
+            tomorrow_cards = state.get("game_cards_tomorrow", [])
+
+        with _lock:
+            _state["game_cards_today"]    = today_cards
+            _state["game_cards_tomorrow"] = tomorrow_cards
+            _state["best_parlays"]        = state.get("best_parlays", state.get("parlays", []))
+            _state["player_props"]        = state.get("player_props", state.get("props", []))
+            _state["status"]              = "done"
+            _state["last_updated"]        = _dt.datetime.now().isoformat()
+            # WC-specific keys for backward compat
+            _state["wc_game_cards_today"]    = today_cards
+            _state["wc_game_cards_tomorrow"] = tomorrow_cards
+            _state["wc_best_parlays"]        = state.get("best_parlays", state.get("parlays", []))
+            _state["wc_player_props"]        = state.get("player_props", state.get("props", []))
+            _state["wc_status"]              = "done"
+
+        payload = {
+            "status":                "done",
+            "last_updated":          _state["last_updated"],
+            "game_cards_today":      today_cards,
+            "game_cards_tomorrow":   tomorrow_cards,
+            "best_parlays":          _state["best_parlays"],
+            "player_props":          _state["player_props"],
+            "wc_game_cards_today":   today_cards,
+            "wc_game_cards_tomorrow":tomorrow_cards,
+        }
+        _broadcast(payload)
+
+        # Morning picks email
+        try:
+            from email_notify import send_daily_picks
+            picks_state = {
+                "game_cards_today":    today_cards,
+                "game_cards_tomorrow": tomorrow_cards,
+                "best_parlays":        _state["best_parlays"],
+                "player_props":        _state["player_props"],
+                "sport":               "soccer",
+                "date":                today_str,
+            }
+            send_daily_picks(picks_state)
+            print(f"[soccer-analysis] Morning picks email sent — {len(today_cards)} today")
+        except Exception as email_e:
+            print(f"[soccer-analysis] Email error: {email_e}")
+
+        print(f"[soccer-analysis] Done — {len(today_cards)} today, {len(tomorrow_cards)} tomorrow")
+
+    except Exception as e:
+        import traceback as _tb
+        print(f"[soccer-analysis] Error: {e}")
+        _tb.print_exc()
+        with _lock:
+            _state["status"] = "error"
+            _state["error"]  = str(e)
+
+
 # ─── SSE stream endpoint ─────────────────────────────────────────────────────
 @app.route("/api/stream")
 def api_stream():
@@ -1830,10 +2087,8 @@ def _scheduled_analysis(force: bool = False, lock_today: bool = False):
         _state["phase"]     = _PHASES[0]
         _state["phase_idx"] = 0
     _sse_broadcast("status", {"status": "running", "phase": _PHASES[0]})
-    lock_date = _et_calendar_today() if lock_today else None
-    threading.Thread(target=_run_analysis, args=(lock_date,), daemon=True).start()
-    # Also run WC soccer analysis in parallel
-    threading.Thread(target=_run_wc_analysis, daemon=True).start()
+    # Soccer-only: run multi-tournament soccer analysis
+    threading.Thread(target=_run_soccer_analysis, daemon=True).start()
 
 
 def _start_scheduler():
@@ -1938,24 +2193,22 @@ def _auto_boot_analysis():
                       f"(last updated: {cached.get('last_updated')})")
                 # If cached cards are empty (no games at all), still trigger a refresh
                 if n_today == 0 and n_tmrw == 0:
-                    print("[boot] Cache has 0 games — triggering fresh analysis...")
-                    threading.Thread(target=_run_analysis, daemon=True).start()
+                    print("[boot] Cache has 0 games — triggering fresh soccer analysis...")
+                    threading.Thread(target=_run_soccer_analysis, daemon=True).start()
                 return
             else:
                 stale_dates = today_dates | tomorrow_dates
                 print(f"[boot] Cache has stale game dates {stale_dates} (expected {today_str}) "
                       f"— triggering fresh analysis to replace stale data...")
         else:
-            _load_boot_schedule_fallback()
-            print(f"[boot] No cache for {today_str} — triggering fresh analysis...")
+            print(f"[boot] No cache for {today_str} — triggering fresh soccer analysis...")
 
-        # Always run fresh analysis when cache is missing or stale
-        threading.Thread(target=_run_analysis, daemon=True).start()
+        # Always run fresh soccer analysis when cache is missing or stale
+        threading.Thread(target=_run_soccer_analysis, daemon=True).start()
 
     except Exception as e:
         print(f"[boot] Auto-boot error: {e}")
-        if not _load_boot_schedule_fallback():
-            threading.Thread(target=_run_analysis, daemon=True).start()
+        threading.Thread(target=_run_soccer_analysis, daemon=True).start()
 
 
 if __name__ == "__main__":
@@ -1967,7 +2220,7 @@ if __name__ == "__main__":
     _BG_IS_LEADER = _acquire_bg_lock()
     if _BG_IS_LEADER:
         _scheduler = _start_scheduler()
-        _start_live_scores()
+        _start_soccer_polling()
         _auto_boot_analysis()
     else:
         _scheduler = None
