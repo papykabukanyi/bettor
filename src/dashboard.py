@@ -951,15 +951,19 @@ def _run_analysis(lock_date: datetime.date | None = None):
 def index():
     with _lock:
         state = dict(_state)
+    today_str = _et_calendar_today().isoformat()
+    tomorrow_str = (_et_calendar_today() + datetime.timedelta(days=1)).isoformat()
+    today_cards = _normalize_card_list(state.get("game_cards_today", []), expected_date=today_str)
+    tomorrow_cards = _normalize_card_list(state.get("game_cards_tomorrow", []), expected_date=tomorrow_str)
     return render_template(
         "dashboard.html",
         state=state,
         bankroll=BANKROLL,
         phases=_PHASES,
-        today_cards=[],
-        tomorrow_cards=[],
-        best_parlays=[],
-        all_props=[],
+        today_cards=today_cards,
+        tomorrow_cards=tomorrow_cards,
+        best_parlays=state.get("best_parlays", []),
+        all_props=state.get("player_props", []),
     )
 
 
@@ -985,7 +989,12 @@ def api_status():
 @app.route("/api/cached-state")
 def api_cached_state():
     with _lock:
-        if _state.get("game_cards_today") or _state.get("player_props"):
+        if (
+            _state.get("game_cards_today")
+            or _state.get("game_cards_tomorrow")
+            or _state.get("player_props")
+            or _state.get("best_parlays")
+        ):
             today_str = _et_calendar_today().isoformat()
             tomorrow_str = (_et_calendar_today() + datetime.timedelta(days=1)).isoformat()
             today_cards = _normalize_card_list(_state.get("game_cards_today", []), expected_date=today_str)
@@ -1020,6 +1029,14 @@ def api_cached_state():
             tomorrow_str = (_et_calendar_today() + datetime.timedelta(days=1)).isoformat()
             cached["game_cards_today"] = _normalize_card_list(cached.get("game_cards_today", []), expected_date=today_str)
             cached["game_cards_tomorrow"] = _normalize_card_list(cached.get("game_cards_tomorrow", []), expected_date=tomorrow_str)
+            if not (
+                cached.get("game_cards_today")
+                or cached.get("game_cards_tomorrow")
+                or cached.get("player_props")
+                or cached.get("best_parlays")
+            ):
+                cached = None
+        if cached:
             cached["ok"] = True
             return jsonify(cached)
     except Exception:

@@ -558,7 +558,7 @@ body.console-open main{padding-bottom:236px}
       <span class="section-meta" id="today-meta"></span>
     </div>
     <div class="games-grid" id="today-grid"></div>
-    <div class="no-games hidden" id="today-empty"></div>
+    <div class="no-games hidden" id="today-empty">No games in the Today slate. Check Tomorrow for upcoming picks.</div>
   </div>
 
   <!-- TOMORROW -->
@@ -1003,8 +1003,16 @@ function applyCachedData(d) {
   if (d.best_parlays        !== undefined) BEST_PARLAYS   = _asArray(d.best_parlays);
   if (d.player_props        !== undefined) ALL_PROPS      = _publicOverProps(_asArray(d.player_props));
   renderAll();
+  _autoSelectDefaultTab();
   const lu = d.last_updated || d._updated_at;
   if (lu) document.getElementById('last-updated').textContent = '⟳ ' + lu;
+}
+
+function _autoSelectDefaultTab() {
+  const active = document.querySelector('.tab.active')?.dataset?.tab || 'today';
+  if (active === 'today' && (!TODAY_CARDS || !TODAY_CARDS.length) && (TOMORROW_CARDS || []).length) {
+    switchTab('tomorrow');
+  }
 }
 
 // ── Live score injection ────────────────────────────────────────────────────
@@ -2990,10 +2998,16 @@ function stopConsolePoll() {
 (function init() {
   // Show local cache immediately so page is not blank
   const local = loadLocalCache();
-  if (local && _asArray(local.game_cards_today).length) {
+  if (local && (
+    _asArray(local.game_cards_today).length ||
+    _asArray(local.game_cards_tomorrow).length ||
+    _asArray(local.player_props).length ||
+    _asArray(local.best_parlays).length
+  )) {
     applyCachedData(local);
   }
   hideOverlay();
+  _autoSelectDefaultTab();
 
   // Connect SSE — server sends full state on connect + after every analysis run.
   _connectSSE();
