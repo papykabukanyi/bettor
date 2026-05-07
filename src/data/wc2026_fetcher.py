@@ -22,6 +22,23 @@ from typing import Any
 
 import requests
 
+
+def _et_calendar_today() -> datetime.date:
+    """Return calendar date in America/New_York to match dashboard filtering."""
+    try:
+        import zoneinfo
+
+        eastern = zoneinfo.ZoneInfo("America/New_York")
+        return datetime.datetime.now(tz=eastern).date()
+    except Exception:
+        try:
+            import pytz
+
+            eastern = pytz.timezone("America/New_York")
+            return datetime.datetime.now(tz=eastern).date()
+        except Exception:
+            return datetime.date.today()
+
 # ── Config ────────────────────────────────────────────────────────────────────
 _FD_API_KEY   = os.getenv("FOOTBALL_DATA_API_KEY", "")  # football-data.org
 _FD_BASE      = "https://api.football-data.org/v4"
@@ -420,7 +437,6 @@ def _normalize_player(p: dict) -> dict:
 
 def _get_wc_matches_static() -> list[dict]:
     """Return static schedule with Elo ratings attached (no API key needed)."""
-    today = datetime.date.today().isoformat()
     result = []
     for m in _WC_SCHEDULE_STATIC:
         if m.get("home", "").startswith("TBD") or m.get("away", "").startswith("TBD"):
@@ -452,12 +468,12 @@ def _get_wc_matches_static() -> list[dict]:
 
 
 def get_matches_today() -> list[dict]:
-    today = datetime.date.today().isoformat()
+    today = _et_calendar_today().isoformat()
     return get_wc_matches_for_date(today) or _get_wc_matches_static_for_date(today)
 
 
 def get_matches_tomorrow() -> list[dict]:
-    tomorrow = (datetime.date.today() + datetime.timedelta(days=1)).isoformat()
+    tomorrow = (_et_calendar_today() + datetime.timedelta(days=1)).isoformat()
     return get_wc_matches_for_date(tomorrow) or _get_wc_matches_static_for_date(tomorrow)
 
 

@@ -962,15 +962,17 @@ def _run_analysis(lock_date: datetime.date | None = None):
 def index():
     with _lock:
         state = dict(_state)
+    today_str = _et_calendar_today().isoformat()
+    tomorrow_str = (_et_calendar_today() + datetime.timedelta(days=1)).isoformat()
     return render_template(
         "dashboard.html",
         state=state,
         bankroll=BANKROLL,
         phases=_PHASES,
-        today_cards=[],
-        tomorrow_cards=[],
-        best_parlays=[],
-        all_props=[],
+        today_cards=_normalize_card_list(state.get("game_cards_today", []), expected_date=today_str),
+        tomorrow_cards=_normalize_card_list(state.get("game_cards_tomorrow", []), expected_date=tomorrow_str),
+        best_parlays=state.get("best_parlays", []),
+        all_props=state.get("player_props", []),
     )
 
 
@@ -1164,24 +1166,36 @@ def api_cached_state():
             tomorrow_str = (_et_calendar_today() + datetime.timedelta(days=1)).isoformat()
             cached["game_cards_today"] = _normalize_card_list(cached.get("game_cards_today", []), expected_date=today_str)
             cached["game_cards_tomorrow"] = _normalize_card_list(cached.get("game_cards_tomorrow", []), expected_date=tomorrow_str)
-            cached["ok"] = True
-            return jsonify(cached)
+            has_cached_payload = bool(
+                cached.get("game_cards_today")
+                or cached.get("game_cards_tomorrow")
+                or cached.get("player_props")
+                or cached.get("best_parlays")
+            )
+            if has_cached_payload:
+                cached["ok"] = True
+                return jsonify(cached)
     except Exception:
         pass
 
     # Fallback: build schedule-only cards so tabs are never blank while analysis/cache is unavailable.
     try:
-        from data.mlb_fetcher import get_schedule_range
+        from data.soccer_fetcher import get_matches_today_all, get_matches_tomorrow_all
 
         today_date = _et_calendar_today()
-        today_str = today_date.isoformat()
-        tomorrow_str = (today_date + datetime.timedelta(days=1)).isoformat()
-        all_games = get_schedule_range(days_ahead=2) or []
-        today_games = [g for g in all_games if g.get("date", "") == today_str]
-        tomorrow_games = [g for g in all_games if g.get("date", "") == tomorrow_str]
+        today_games = get_matches_today_all() or []
+        tomorrow_games = get_matches_tomorrow_all() or []
 
-        fallback_today = [_build_card(g, [], [], "TODAY") for g in today_games]
-        fallback_tomorrow = [_build_card(g, [], [], "TOMORROW") for g in tomorrow_games]
+        def _fallback_card(game: dict, when: str) -> dict:
+            card = _build_card(game, [], [], when)
+            card["competition"] = game.get("competition", "")
+            card["comp_name"] = game.get("comp_name", game.get("competition", ""))
+            card["comp_emoji"] = game.get("comp_emoji", "⚽")
+            card["venue"] = game.get("venue", "")
+            return card
+
+        fallback_today = [_fallback_card(g, "TODAY") for g in today_games]
+        fallback_tomorrow = [_fallback_card(g, "TOMORROW") for g in tomorrow_games]
 
         if fallback_today or fallback_tomorrow:
             return jsonify({
@@ -2215,6 +2229,11 @@ def _auto_boot_analysis():
                       f"— triggering fresh analysis to replace stale data...")
         else:
             print(f"[boot] No cache for {today_str} — triggering fresh soccer analysis...")
+
+        try:
+            _load_boot_schedule_fallback()
+        except Exception as fallback_exc:
+            print(f"[boot] Soccer schedule fallback skipped: {fallback_exc}")
 
         # Always run fresh soccer analysis when cache is missing or stale
         threading.Thread(target=_run_soccer_analysis, daemon=True).start()

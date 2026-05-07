@@ -561,7 +561,7 @@ body.console-open main{padding-bottom:236px}
       <span class="section-meta" id="today-meta"></span>
     </div>
     <div class="games-grid" id="today-grid"></div>
-    <div class="no-games hidden" id="today-empty"></div>
+    <div class="no-games hidden" id="today-empty">No matches in the Today slate. Check Tomorrow or Tournament Center.</div>
   </div>
 
   <!-- TOMORROW -->
@@ -1070,8 +1070,16 @@ function applyCachedData(d) {
   if (d.best_parlays        !== undefined) BEST_PARLAYS   = _asArray(d.best_parlays);
   if (d.player_props        !== undefined) ALL_PROPS      = _publicOverProps(_asArray(d.player_props));
   renderAll();
+  _autoSelectDefaultTab();
   const lu = d.last_updated || d._updated_at;
   if (lu) document.getElementById('last-updated').textContent = '⟳ ' + lu;
+}
+
+function _autoSelectDefaultTab() {
+  const active = document.querySelector('.tab.active')?.dataset?.tab || 'today';
+  if (active === 'today' && (!TODAY_CARDS || !TODAY_CARDS.length) && (TOMORROW_CARDS || []).length) {
+    switchTab('tomorrow');
+  }
 }
 
 // ── Live score injection ────────────────────────────────────────────────────
@@ -2842,8 +2850,10 @@ let _currentTournament = null;
 let _currentTournamentSub = 'matches';
 
 function loadTournamentTab() {
-  // Called when Tournament tab is clicked — auto-load if one was previously selected
-  if (_currentTournament) loadTournament(_currentTournament);
+  // Called when Tournament tab is clicked — load current select value on first open.
+  const select = document.getElementById('tournament-select');
+  const code = (select && select.value) || _currentTournament;
+  if (code) loadTournament(code);
 }
 
 function loadTournament(code) {
@@ -2891,6 +2901,7 @@ function _loadTournamentMatches(code) {
 }
 
 function _tournamentMatchCard(m, compData) {
+  const compCode = (compData && compData.code) || m.competition || '';
   const hp = m.home_prob ? Math.round(m.home_prob * 100) : null;
   const dp = m.draw_prob ? Math.round(m.draw_prob * 100) : null;
   const ap = m.away_prob ? Math.round(m.away_prob * 100) : null;
@@ -2910,7 +2921,7 @@ function _tournamentMatchCard(m, compData) {
       <div class="card-topline">
         <div class="card-when">
           <div class="when-badge when-TODAY">${m.date||m.game_date||''}</div>
-          <span style="font-size:.7rem;color:var(--muted);margin-left:6px">${m.comp_emoji||'⚽'} ${m.comp_name||compData.name||code}</span>
+          <span style="font-size:.7rem;color:var(--muted);margin-left:6px">${m.comp_emoji||'⚽'} ${m.comp_name||compData.name||compCode}</span>
         </div>
         <div class="card-top-right" style="font-size:.75rem;color:var(--muted)">${m.game_time||''}</div>
       </div>

@@ -34,6 +34,23 @@ from typing import Any
 
 import requests
 
+
+def _et_calendar_today() -> datetime.date:
+    """Return calendar date in America/New_York to match dashboard filtering."""
+    try:
+        import zoneinfo
+
+        eastern = zoneinfo.ZoneInfo("America/New_York")
+        return datetime.datetime.now(tz=eastern).date()
+    except Exception:
+        try:
+            import pytz
+
+            eastern = pytz.timezone("America/New_York")
+            return datetime.datetime.now(tz=eastern).date()
+        except Exception:
+            return datetime.date.today()
+
 # ── Config ────────────────────────────────────────────────────────────────────
 _FD_KEY  = os.getenv("FOOTBALL_DATA_API_KEY", "")
 _FD_BASE = "https://api.football-data.org/v4"
@@ -226,7 +243,7 @@ def get_competition_info(code: str) -> dict:
 # ── Matches ───────────────────────────────────────────────────────────────────
 def get_upcoming_matches(competition_code: str, days_ahead: int = 7) -> list[dict]:
     """Fetch upcoming matches for a competition over the next N days."""
-    today    = datetime.date.today()
+    today    = _et_calendar_today()
     date_to  = (today + datetime.timedelta(days=days_ahead)).isoformat()
     date_from = today.isoformat()
     return get_matches_in_range(competition_code, date_from, date_to)
@@ -273,7 +290,7 @@ def get_all_today_matches(competition_codes: list[str] | None = None) -> dict[st
     Get today's matches across all (or specified) competitions.
     Returns dict of {competition_code: [matches]}.
     """
-    today = datetime.date.today().isoformat()
+    today = _et_calendar_today().isoformat()
     codes = competition_codes or list(TOURNAMENTS.keys())
     result: dict[str, list[dict]] = {}
     for code in codes:
@@ -675,15 +692,15 @@ def refresh_all_competitions() -> dict[str, list[dict]]:
 
 def get_matches_today_all() -> list[dict]:
     """All matches today across all supported competitions."""
-    today = datetime.date.today().isoformat()
-    tomorrow = (datetime.date.today() + datetime.timedelta(days=1)).isoformat()
+    today = _et_calendar_today().isoformat()
+    tomorrow = (_et_calendar_today() + datetime.timedelta(days=1)).isoformat()
     window_matches = get_matches_range_all(today, tomorrow, _PRIORITY_COMPETITIONS)
     return [m for m in window_matches if (m.get("game_date") or m.get("date")) == today]
 
 
 def get_matches_tomorrow_all() -> list[dict]:
     """All matches tomorrow across all supported competitions."""
-    tomorrow = (datetime.date.today() + datetime.timedelta(days=1)).isoformat()
-    today = datetime.date.today().isoformat()
+    tomorrow = (_et_calendar_today() + datetime.timedelta(days=1)).isoformat()
+    today = _et_calendar_today().isoformat()
     window_matches = get_matches_range_all(today, tomorrow, _PRIORITY_COMPETITIONS)
     return [m for m in window_matches if (m.get("game_date") or m.get("date")) == tomorrow]
