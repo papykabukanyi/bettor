@@ -3157,7 +3157,14 @@ let _currentTournamentSub = 'matches';
 function loadTournamentTab() {
   // Called when Tournament tab is clicked — load current select value on first open.
   const select = document.getElementById('tournament-select');
-  const code = (select && select.value) || _currentTournament;
+  let code = (select && select.value) || _currentTournament;
+  if (!code && select) {
+    const defaultCode = select.querySelector('option[value="WC"]') ? 'WC' : (select.options[1] && select.options[1].value);
+    if (defaultCode) {
+      select.value = defaultCode;
+      code = defaultCode;
+    }
+  }
   if (code) loadTournament(code);
 }
 
@@ -3210,6 +3217,8 @@ function _tournamentMatchCard(m, compData) {
   const hp = m.home_prob ? Math.round(m.home_prob * 100) : null;
   const dp = m.draw_prob ? Math.round(m.draw_prob * 100) : null;
   const ap = m.away_prob ? Math.round(m.away_prob * 100) : null;
+  const awayProps = Array.isArray(m.away_props) ? m.away_props : [];
+  const homeProps = Array.isArray(m.home_props) ? m.home_props : [];
   const topBet = hp && dp && ap
     ? (hp > ap && hp > dp
         ? { label: `${m.home_team} WIN`, pct: hp, color: 'var(--green)' }
@@ -3221,6 +3230,31 @@ function _tournamentMatchCard(m, compData) {
   const btts   = m.btts_prob   ? Math.round(m.btts_prob   * 100) : null;
   const probBar = pct => `<div style="height:4px;border-radius:2px;background:var(--border);margin-top:4px">
     <div style="height:4px;border-radius:2px;background:var(--accent);width:${pct}%"></div></div>`;
+  const _propRow = p => {
+    const stat = (p.prop_label || p.stat_type || 'Prop').replace(/_/g, ' ');
+    const pct = Math.round(((p.model_prob != null ? p.model_prob : 0.5) * 100));
+    return `<div style="display:flex;justify-content:space-between;gap:10px;padding:6px 0;border-bottom:1px dashed var(--border)">
+      <span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
+        ${p.name || 'Player'} · OVER ${p.line} ${stat}
+      </span>
+      <span style="color:var(--accent);font-weight:600;white-space:nowrap">${pct}%</span>
+    </div>`;
+  };
+  const _propsTeamSection = (team, props, icon) => {
+    if (!props.length) return '';
+    const rows = props.map(_propRow).join('');
+    return `<div style="margin-top:10px">
+      <div style="font-size:.72rem;color:var(--muted);margin-bottom:4px">${icon} ${team} · ${props.length} player predictions</div>
+      <div style="max-height:220px;overflow:auto;padding-right:2px">${rows}</div>
+    </div>`;
+  };
+  const playerPredictions = awayProps.length || homeProps.length
+    ? `<details style="margin:8px 14px 12px;border:1px solid var(--border);border-radius:10px;padding:8px 10px;background:rgba(255,255,255,.02)">
+      <summary style="cursor:pointer;color:var(--text);font-size:.78rem;font-weight:600">🎯 Full Player Predictions (${awayProps.length + homeProps.length})</summary>
+      ${_propsTeamSection(m.away_team, awayProps, '✈️')}
+      ${_propsTeamSection(m.home_team, homeProps, '🏠')}
+    </details>`
+    : '';
   return `<div class="game-card" style="cursor:default">
     <div class="card-header">
       <div class="card-topline">
@@ -3253,6 +3287,7 @@ function _tournamentMatchCard(m, compData) {
         ${btts   ? `<span style="color:var(--muted)">BTTS: <b style="color:#a78bfa">${btts}%</b></span>` : ''}
         ${m.venue ? `<span style="color:var(--muted);margin-left:auto">&#127968; ${m.venue}</span>` : ''}
       </div>` : ''}
+      ${playerPredictions}
     </div>
   </div>`;
 }

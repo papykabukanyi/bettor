@@ -342,7 +342,7 @@ def _fetch_matches_espn(code: str, date_str: str) -> list[dict]:
     data = _espn_get(f"{espn_league}/scoreboard", {"dates": dates_formatted})
     if not data:
         return []
-    return [_normalize_espn_event(e) for e in data.get("events", [])]
+    return [_normalize_espn_event(e, code) for e in data.get("events", [])]
 
 
 def _fd_to_espn_league(code: str) -> str:
@@ -628,7 +628,7 @@ def _normalize_fd_match(m: dict, competition_code: str = "") -> dict:
     }
 
 
-def _normalize_espn_event(e: dict) -> dict:
+def _normalize_espn_event(e: dict, competition_code: str = "ESPN") -> dict:
     """Normalize ESPN event to internal format."""
     competitions = e.get("competitions", [{}])
     comp = competitions[0] if competitions else {}
@@ -648,11 +648,14 @@ def _normalize_espn_event(e: dict) -> dict:
         "Halftime": "Halftime", "Final": "Final", "Full Time": "Final",
     }
 
+    comp_code = (competition_code or "ESPN").upper()
+    t_info = TOURNAMENTS.get(comp_code, {"emoji": "⚽", "name": e.get("name", comp_code)})
+
     return {
         "match_id":    str(e.get("id", "")),
-        "competition": "ESPN",
-        "comp_name":   e.get("name", ""),
-        "comp_emoji":  "⚽",
+        "competition": comp_code,
+        "comp_name":   t_info.get("name", e.get("name", "")),
+        "comp_emoji":  t_info.get("emoji", "⚽"),
         "group":       "",
         "stage":       "REGULAR_SEASON",
         "date":        date_str,

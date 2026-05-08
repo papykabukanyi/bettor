@@ -14,7 +14,13 @@ Sentiment integration:
 from __future__ import annotations
 
 import datetime
+import re
 from typing import Any
+
+try:
+    import requests
+except ImportError:
+    requests = None
 
 from models.soccer_model import predict as _model_predict, STAGE_MAP
 from data.club_stats_fetcher import get_squad_props, get_wc_player_stats
@@ -29,9 +35,10 @@ except ImportError:
     def get_injury_alerts(t): return []
 
 try:
-    from data.soccer_fetcher import get_competition_odds, FD_TO_ODDS_SPORT, TOURNAMENTS
+    from data.soccer_fetcher import get_competition_odds, FD_TO_ODDS_SPORT, TOURNAMENTS, get_team_squad
 except ImportError:
     def get_competition_odds(code): return []
+    def get_team_squad(team_id=None, team_name=None, competition_code=None): return []
     FD_TO_ODDS_SPORT = {}
     TOURNAMENTS = {}
 
@@ -143,6 +150,327 @@ def _get_live_odds_for_match(home: str, away: str, all_odds: list[dict]) -> dict
                                 result["under25"] = result["under25"] or outcome.get("price")
             return result
     return {}
+
+
+def _clamp(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))
+
+
+def _norm_name(name: str | None) -> str:
+    return " ".join(str(name or "").strip().lower().split())
+
+
+def _position_bucket(position: str | None) -> str:
+    p = str(position or "").strip().lower()
+    if not p:
+        return "mid"
+    if "goal" in p or p in {"gk", "keeper"}:
+        return "gk"
+    if "def" in p or "back" in p:
+        return "def"
+    if "for" in p or "striker" in p or "attack" in p or "wing" in p:
+        return "att"
+    if "mid" in p:
+        return "mid"
+    return "mid"
+
+
+def _competition_candidates(match_competition: str | None) -> list[str]:
+    seen = set()
+    out: list[str] = []
+
+    def _add(code: str | None):
+        c = str(code or "").strip().upper()
+        if not c or c in seen:
+            return
+        seen.add(c)
+        out.append(c)
+
+    # Prefer the declared competition if it is one of our supported codes.
+    _add(match_competition)
+
+    # Core football-data competitions used by this project.
+    for code in ("WC", "CL", "PL", "BL1", "SA", "PD", "FL1", "DED", "PPL", "BSA", "ELC"):
+        _add(code)
+
+    for code in TOURNAMENTS.keys():
+        _add(code)
+
+    return out
+
+
+_ESPN_LEAGUE_MAP = {
+    "PL": "eng.1",
+    "BL1": "ger.1",
+    "SA": "ita.1",
+    "PD": "esp.1",
+    "FL1": "fra.1",
+    "DED": "ned.1",
+    "PPL": "por.1",
+    "CL": "uefa.champions",
+    "ELC": "eng.2",
+    "BSA": "bra.1",
+    "MLS": "usa.1",
+}
+
+
+def _espn_slug_for_comp(code: str | None) -> str:
+    return _ESPN_LEAGUE_MAP.get(str(code or "").strip().upper(), "")
+
+
+def _extract_espn_team_id(crest_url: str | None) -> str:
+    url = str(crest_url or "")
+    if not url:
+        return ""
+    m = re.search(r"/(\d+)\.(?:png|svg|jpg|jpeg)(?:\?|$)", url, flags=re.IGNORECASE)
+    return m.group(1) if m else ""
+
+
+def _fetch_espn_roster(team_id: str, league_slug: str) -> list[dict]:
+    if not requests or not team_id or not league_slug:
+        return []
+    url = f"https://site.api.espn.com/apis/site/v2/sports/soccer/{league_slug}/teams/{team_id}/roster"
+    try:
+        resp = requests.get(url, timeout=8)
+        if resp.status_code != 200:
+            return []
+        data = resp.json() or {}
+    except Exception:
+        return []
+
+    roster: list[dict] = []
+    seen = set()
+    athletes = data.get("athletes", []) or []
+
+    # ESPN currently returns either:
+    # 1) flat list of athletes, or
+    # 2) grouped list where each item has an `items` array.
+    flat_items: list[dict] = []
+    if athletes and isinstance(athletes, list) and isinstance(athletes[0], dict) and isinstance(athletes[0].get("items"), list):
+        for group in athletes:
+            for item in group.get("items", []) or []:
+                if isinstance(item, dict):
+                    flat_items.append(item)
+    else:
+        flat_items = [a for a in athletes if isinstance(a, dict)]
+
+    for item in flat_items:
+        name = str(item.get("displayName") or item.get("fullName") or item.get("shortName") or "").strip()
+        if not name:
+            continue
+        key = _norm_name(name)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        pos_obj = item.get("position") or item.get("defaultPosition") or {}
+        if isinstance(pos_obj, dict):
+            position = pos_obj.get("displayName") or pos_obj.get("abbreviation") or ""
+        else:
+            position = str(pos_obj or "")
+
+        roster.append({
+            "id": str(item.get("id") or ""),
+            "name": name,
+            "position": position,
+            "nationality": item.get("citizenship") or item.get("nationality") or "",
+        })
+    return roster
+
+
+def _fallback_profile_players(team_name: str) -> list[dict]:
+    norm_team = _norm_name(team_name)
+    if not norm_team:
+        return []
+    players = get_wc_player_stats() or []
+    out: list[dict] = []
+    seen = set()
+    for p in players:
+        club = _norm_name(p.get("team"))
+        if not club:
+            continue
+        if club == norm_team or norm_team in club or club in norm_team:
+            name = str(p.get("name") or "").strip()
+            if not name:
+                continue
+            key = _norm_name(name)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(p)
+    return out
+
+
+def _resolve_team_squad(
+    team_name: str,
+    team_id: Any,
+    match_competition: str | None,
+    team_crest: str | None = None,
+) -> list[dict]:
+    if team_id:
+        squad = get_team_squad(team_id=team_id)
+        if squad:
+            return squad
+
+    for comp_code in _competition_candidates(match_competition):
+        squad = get_team_squad(team_name=team_name, competition_code=comp_code)
+        if squad:
+            return squad
+
+    # Fallback: ESPN roster endpoint using crest-derived team id.
+    espn_team_id = _extract_espn_team_id(team_crest)
+    if espn_team_id:
+        slugs = []
+        for comp_code in _competition_candidates(match_competition):
+            slug = _espn_slug_for_comp(comp_code)
+            if slug and slug not in slugs:
+                slugs.append(slug)
+        if not slugs:
+            slugs = list(dict.fromkeys(_ESPN_LEAGUE_MAP.values()))
+
+        for slug in slugs:
+            squad = _fetch_espn_roster(espn_team_id, slug)
+            if squad:
+                return squad
+
+    # Final fallback: match known club profiles.
+    fallback = _fallback_profile_players(team_name)
+    if fallback:
+        return fallback
+
+    return []
+
+
+def _side_win_prob(team_name: str, match: dict, match_probs: dict | None) -> float:
+    probs = match_probs or {}
+    if str(team_name or "") == str(match.get("home_team") or ""):
+        return float(probs.get("home_prob", 0.5) or 0.5)
+    if str(team_name or "") == str(match.get("away_team") or ""):
+        return float(probs.get("away_prob", 0.5) or 0.5)
+    return 0.5
+
+
+def _player_stat_row(player_name: str) -> dict:
+    rows = get_wc_player_stats(player_name=player_name) or []
+    return rows[0] if rows else {}
+
+
+def _build_player_prop(player: dict, team_name: str, match: dict, team_win_prob: float) -> dict | None:
+    name = str(player.get("name") or "").strip()
+    if not name:
+        return None
+
+    pos_raw = player.get("position")
+    pos_bucket = _position_bucket(pos_raw)
+    stat_row = _player_stat_row(name)
+
+    stat_type = "key_passes"
+    prop_label = "Key Passes"
+    line = 1.5
+    season_avg = None
+    model_prob = 0.55
+    rationale = "Position-based baseline projection."
+
+    if pos_bucket == "gk":
+        stat_type = "saves"
+        prop_label = "Saves"
+        line = 2.5
+        model_prob = 0.55 + max(0.0, (0.58 - team_win_prob)) * 0.45
+        rationale = "Goalkeeper save volume projection from expected shot pressure."
+    elif pos_bucket == "def":
+        stat_type = "tackles"
+        prop_label = "Tackles"
+        line = 1.5
+        model_prob = 0.54 + max(0.0, (0.55 - team_win_prob)) * 0.25
+        rationale = "Defender tackling projection from expected defensive workload."
+    elif pos_bucket == "mid":
+        stat_type = "key_passes"
+        prop_label = "Key Passes"
+        line = 1.5
+        model_prob = 0.54 + (team_win_prob - 0.5) * 0.16
+        rationale = "Midfield creativity projection adjusted by match control expectation."
+    elif pos_bucket == "att":
+        stat_type = "shots_on_target"
+        prop_label = "Shots on Target"
+        line = 1.5
+        model_prob = 0.56 + (team_win_prob - 0.5) * 0.20
+        rationale = "Attacker shot-on-target projection adjusted by team win probability."
+
+    try:
+        mins_90 = float(stat_row.get("minutes_90s", 0) or 0)
+    except (TypeError, ValueError):
+        mins_90 = 0.0
+    try:
+        goals_p90 = float(stat_row.get("goals_per90", 0) or 0)
+    except (TypeError, ValueError):
+        goals_p90 = 0.0
+    try:
+        xg_p90 = float(stat_row.get("xg_per90", 0) or 0)
+    except (TypeError, ValueError):
+        xg_p90 = 0.0
+    try:
+        sot_total = float(stat_row.get("shots_on_target", 0) or 0)
+    except (TypeError, ValueError):
+        sot_total = 0.0
+    try:
+        xa_total = float(stat_row.get("xa", 0) or 0)
+    except (TypeError, ValueError):
+        xa_total = 0.0
+
+    sot_p90 = (sot_total / mins_90) if mins_90 > 0 else 0.0
+    xa_p90 = (xa_total / mins_90) if mins_90 > 0 else 0.0
+
+    if pos_bucket == "att":
+        if sot_p90 > 0:
+            season_avg = round(sot_p90, 2)
+            model_prob = 0.44 + min(0.34, sot_p90 * 0.24) + (team_win_prob - 0.5) * 0.15
+            rationale = f"{sot_p90:.2f} shots on target per 90 with {xg_p90:.2f} xG per 90."
+        elif goals_p90 > 0:
+            season_avg = round(goals_p90, 2)
+            model_prob = 0.40 + min(0.30, goals_p90 * 0.50) + (team_win_prob - 0.5) * 0.14
+            rationale = f"{goals_p90:.2f} goals per 90 profile driving attacking projection."
+    elif pos_bucket == "mid":
+        if xa_p90 > 0:
+            season_avg = round(max(xa_p90 * 3.0, 0.1), 2)
+            model_prob = 0.46 + min(0.25, xa_p90 * 0.80) + (team_win_prob - 0.5) * 0.12
+            rationale = f"Creative midfield profile ({xa_p90:.2f} xA per 90)."
+    elif pos_bucket == "gk" and mins_90 > 0:
+        season_avg = 3.0
+    elif pos_bucket == "def":
+        season_avg = 1.8
+
+    model_prob = round(_clamp(model_prob, 0.22, 0.86), 3)
+    dec_odds = 1.91
+    implied = round(1.0 / dec_odds, 4)
+    edge = _edge(model_prob, implied)
+    ev = round((dec_odds - 1.0) * model_prob - (1.0 - model_prob), 4)
+
+    prop = {
+        "name": name,
+        "team": team_name,
+        "nation": team_name,
+        "position": pos_raw or "",
+        "stat_type": stat_type,
+        "prop_label": prop_label,
+        "line": line,
+        "direction": "OVER",
+        "model_prob": model_prob,
+        "confidence": int(round(model_prob * 100)),
+        "safety_label": _safety(model_prob),
+        "season_avg": season_avg,
+        "signal_rationale": rationale,
+        "odds_am": -110,
+        "dec_odds": dec_odds,
+        "edge": edge,
+        "ev": ev,
+        "sport": "soccer",
+    }
+
+    club_team = str(stat_row.get("team") or "").strip()
+    if club_team:
+        prop["club_team"] = club_team
+
+    return prop
 
 
 # ── Core bet builder ──────────────────────────────────────────────────────────
@@ -393,28 +721,88 @@ def build_match_bets(match: dict, live_odds: list[dict] | None = None) -> list[d
     return bets
 
 
-def get_player_props(match: dict) -> list[dict]:
+def get_player_props(
+    match: dict,
+    include_all_players: bool = True,
+    match_probs: dict | None = None,
+) -> list[dict]:
     """
     Build player prop bets for a WC match.
     Uses club_stats_fetcher to get top players for each national team.
     """
     home = match["home_team"]
     away = match["away_team"]
-    game_key = match.get("game_key", "")
-    date_str = match.get("date", "")
+    competition = match.get("competition", "")
+    game_key = match.get("game_key") or f"{match.get('date','')}#{away}@{home}"
+    date_str = match.get("date") or match.get("game_date") or ""
+    match_key = match.get("match_key", "")
 
-    home_props = get_squad_props(home, top_n=5)
-    away_props = get_squad_props(away, top_n=5)
-    all_props  = home_props + away_props
+    home_props: list[dict] = []
+    away_props: list[dict] = []
 
-    # Attach match context
+    if include_all_players:
+        home_team_id = match.get("home_id")
+        away_team_id = match.get("away_id")
+
+        home_squad = _resolve_team_squad(home, home_team_id, competition, match.get("home_crest"))
+        away_squad = _resolve_team_squad(away, away_team_id, competition, match.get("away_crest"))
+
+        home_prob = _side_win_prob(home, match, match_probs)
+        away_prob = _side_win_prob(away, match, match_probs)
+
+        for player in home_squad:
+            prop = _build_player_prop(player, home, match, home_prob)
+            if prop:
+                home_props.append(prop)
+        for player in away_squad:
+            prop = _build_player_prop(player, away, match, away_prob)
+            if prop:
+                away_props.append(prop)
+
+        # Fallback for national-team contexts where squad endpoints are incomplete.
+        if not home_props:
+            for player in (get_wc_player_stats(nation=home) or []):
+                prop = _build_player_prop(player, home, match, home_prob)
+                if prop:
+                    home_props.append(prop)
+        if not away_props:
+            for player in (get_wc_player_stats(nation=away) or []):
+                prop = _build_player_prop(player, away, match, away_prob)
+                if prop:
+                    away_props.append(prop)
+    else:
+        home_props = get_squad_props(home, top_n=5)
+        away_props = get_squad_props(away, top_n=5)
+
+    all_props = home_props + away_props
+
+    dedup: dict[tuple[str, str, str], dict] = {}
+    for prop in all_props:
+        key = (
+            _norm_name(prop.get("name")),
+            str(prop.get("team") or ""),
+            str(prop.get("stat_type") or ""),
+        )
+        prev = dedup.get(key)
+        if prev is None or float(prop.get("model_prob", 0) or 0) > float(prev.get("model_prob", 0) or 0):
+            dedup[key] = prop
+
+    all_props = list(dedup.values())
+    all_props.sort(key=lambda p: (
+        0 if str(p.get("team") or "") == away else 1,
+        -(float(p.get("model_prob", 0) or 0)),
+        str(p.get("name") or ""),
+    ))
+
     for p in all_props:
-        p["game_key"]  = game_key
-        p["date"]      = date_str
+        p["game"] = p.get("game") or f"{away}@{home}"
+        p["game_key"] = game_key
+        p["date"] = date_str
         p["home_team"] = home
         p["away_team"] = away
-        p["match_key"] = match.get("match_key", "")
-        p["sport"]     = "soccer"
+        p["match_key"] = match_key
+        p["competition"] = competition
+        p["sport"] = "soccer"
 
     return all_props
 
@@ -482,26 +870,40 @@ def analyze_matches(matches: list[dict], competition_code: str = "WC") -> dict[s
     Run full analysis on a list of soccer matches from any competition.
     Returns state dict compatible with dashboard / email_notify.
     """
-    # Get live odds for this competition
-    try:
-        live_odds = get_competition_odds(competition_code) or get_wc_odds()
-    except Exception:
-        live_odds = get_wc_odds()
+    odds_cache: dict[str, list[dict]] = {}
+
+    def _odds_for_comp(comp_code: str) -> list[dict]:
+        cc = str(comp_code or competition_code or "WC")
+        if cc in odds_cache:
+            return odds_cache[cc]
+        try:
+            odds = get_competition_odds(cc) or []
+        except Exception:
+            odds = []
+        if not odds and cc == "WC":
+            try:
+                odds = get_wc_odds()
+            except Exception:
+                odds = []
+        odds_cache[cc] = odds
+        return odds
 
     all_bets:  list[dict] = []
     all_props: list[dict] = []
     cards:     list[dict] = []
 
     for match in matches:
-        bets  = build_match_bets(match, live_odds)
-        props = get_player_props(match)
-        all_bets.extend(bets)
-        all_props.extend(props)
-
         home  = match["home_team"]
         away  = match["away_team"]
         stage = match.get("stage", "group")
+        comp_code = match.get("competition", competition_code)
+
         probs = predict_match(home, away, stage, use_sentiment=True)
+        bets = build_match_bets(match, _odds_for_comp(comp_code))
+        props = get_player_props(match, include_all_players=True, match_probs=probs)
+        all_bets.extend(bets)
+        all_props.extend(props)
+
 
         # Injury alerts for UI display
         home_injuries = []
@@ -513,7 +915,6 @@ def analyze_matches(matches: list[dict], competition_code: str = "WC") -> dict[s
             except Exception:
                 pass
 
-        comp_code = match.get("competition", competition_code)
         comp_info = TOURNAMENTS.get(comp_code, {"name": comp_code, "emoji": "⚽"})
 
         cards.append({

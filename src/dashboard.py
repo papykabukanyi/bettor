@@ -1030,13 +1030,16 @@ def api_tournament_matches(code: str):
     """Upcoming matches for a competition over the next 7 days."""
     try:
         days = int(request.args.get("days", 7))
-        from data.soccer_fetcher import get_upcoming_matches, TOURNAMENTS
-        matches = get_upcoming_matches(code, days_ahead=days)
-        # Optionally enrich with predictions
         enrich = request.args.get("predictions", "1") == "1"
+        include_players = request.args.get("players", "1") == "1"
+
+        from data.soccer_fetcher import get_upcoming_matches, TOURNAMENTS, get_competition_odds
+        matches = get_upcoming_matches(code, days_ahead=days)
+
         if enrich and matches:
             try:
-                from models.soccer_predictor import build_match_bets, predict_match
+                from models.soccer_predictor import build_match_bets, predict_match, get_player_props
+                live_odds = get_competition_odds(code) or []
                 for m in matches:
                     probs = predict_match(m["home_team"], m["away_team"],
                                          m.get("stage", "group"), use_sentiment=False)
@@ -1045,8 +1048,28 @@ def api_tournament_matches(code: str):
                     m["away_prob"]   = probs["away_prob"]
                     m["over25_prob"] = probs["over25_prob"]
                     m["btts_prob"]   = probs["btts_prob"]
+                    m["bets"] = build_match_bets(m, live_odds)
+                    if include_players:
+                        props = get_player_props(m, include_all_players=True, match_probs=probs)
+                        home = str(m.get("home_team") or "")
+                        away = str(m.get("away_team") or "")
+                        m["player_props"] = props
+                        m["home_props"] = [p for p in props if str(p.get("team") or "") == home]
+                        m["away_props"] = [p for p in props if str(p.get("team") or "") == away]
+                    else:
+                        m["player_props"] = []
+                        m["home_props"] = []
+                        m["away_props"] = []
+                    m["sport"] = "soccer"
             except Exception as pe:
                 print(f"[api] prediction enrichment error: {pe}")
+
+        matches.sort(key=lambda m: (
+            str(m.get("game_date") or m.get("date") or ""),
+            str(m.get("game_time") or ""),
+            str(m.get("home_team") or ""),
+        ))
+
         comp_info = TOURNAMENTS.get(code, {"name": code, "emoji": "⚽"})
         return jsonify({
             "ok":          True,
@@ -2031,10 +2054,35 @@ def _run_soccer_analysis():
 
         if not all_matches:
             print("[soccer-analysis] No matches found for today/tomorrow")
+            now_ts = _dt.datetime.now(_dt.timezone.utc)
             with _lock:
-                _state["sport"] = "soccer"
-                _state["status"] = "idle"
-                _state["last_updated"] = _dt.datetime.now().isoformat()
+                _state.update({
+                    "sport": "soccer",
+                    "status": "idle",
+                    "phase": "No matches",
+                    "phase_idx": 0,
+                    "error": None,
+                    "last_updated": now_ts.strftime("%Y-%m-%d %H:%M"),
+                    "last_updated_ts": now_ts.isoformat(),
+                    "game_cards_today": [],
+                    "game_cards_tomorrow": [],
+                    "best_parlays": [],
+                    "player_props": [],
+                    "elite_parlay": None,
+                    "wc_game_cards_today": [],
+                    "wc_game_cards_tomorrow": [],
+                    "wc_best_parlays": [],
+                    "wc_player_props": [],
+                    "wc_status": "idle",
+                })
+            _broadcast({
+                "sport": "soccer",
+                "status": "idle",
+                "game_cards_today": [],
+                "game_cards_tomorrow": [],
+                "best_parlays": [],
+                "player_props": [],
+            })
             return
 
         state = _analyze(all_matches)
@@ -2046,29 +2094,58 @@ def _run_soccer_analysis():
         if not tomorrow_cards:
             tomorrow_cards = state.get("game_cards_tomorrow", [])
 
+        best_parlays = state.get("best_parlays", state.get("parlays", []))
+        player_props = state.get("player_props", state.get("props", []))
+
+        now_ts = _dt.datetime.now(_dt.timezone.utc)
+        last_updated = now_ts.strftime("%Y-%m-%d %H:%M")
+
+        try:
+            from data.db import save_analysis_cache
+            save_analysis_cache({
+                "sport": "soccer",
+                "status": "done",
+                "game_cards_today": today_cards,
+                "game_cards_tomorrow": tomorrow_cards,
+                "best_parlays": best_parlays,
+                "player_props": player_props,
+                "last_updated": last_updated,
+                "last_updated_ts": now_ts.isoformat(),
+            }, cache_date=_et_calendar_today())
+        except Exception as cache_e:
+            print(f"[soccer-analysis] Cache save error: {cache_e}")
+
         with _lock:
-            _state["sport"] = "soccer"
-            _state["game_cards_today"]    = today_cards
-            _state["game_cards_tomorrow"] = tomorrow_cards
-            _state["best_parlays"]        = state.get("best_parlays", state.get("parlays", []))
-            _state["player_props"]        = state.get("player_props", state.get("props", []))
-            _state["status"]              = "done"
-            _state["last_updated"]        = _dt.datetime.now().isoformat()
-            # WC-specific keys for backward compat
-            _state["wc_game_cards_today"]    = today_cards
-            _state["wc_game_cards_tomorrow"] = tomorrow_cards
-            _state["wc_best_parlays"]        = state.get("best_parlays", state.get("parlays", []))
-            _state["wc_player_props"]        = state.get("player_props", state.get("props", []))
-            _state["wc_status"]              = "done"
+            _state.update({
+                "sport": "soccer",
+                "status": "done",
+                "phase": "Complete",
+                "phase_idx": len(_PHASES) - 1,
+                "error": None,
+                "last_updated": last_updated,
+                "last_updated_ts": now_ts.isoformat(),
+                "game_cards_today": today_cards,
+                "game_cards_tomorrow": tomorrow_cards,
+                "best_parlays": best_parlays,
+                "player_props": player_props,
+                "elite_parlay": None,
+                # WC-specific keys for backward compat
+                "wc_game_cards_today": today_cards,
+                "wc_game_cards_tomorrow": tomorrow_cards,
+                "wc_best_parlays": best_parlays,
+                "wc_player_props": player_props,
+                "wc_status": "done",
+            })
 
         payload = {
             "sport":                 "soccer",
             "status":                "done",
-            "last_updated":          _state["last_updated"],
+            "last_updated":          last_updated,
+            "last_updated_ts":       now_ts.isoformat(),
             "game_cards_today":      today_cards,
             "game_cards_tomorrow":   tomorrow_cards,
-            "best_parlays":          _state["best_parlays"],
-            "player_props":          _state["player_props"],
+            "best_parlays":          best_parlays,
+            "player_props":          player_props,
             "wc_game_cards_today":   today_cards,
             "wc_game_cards_tomorrow":tomorrow_cards,
         }
@@ -2080,8 +2157,8 @@ def _run_soccer_analysis():
             picks_state = {
                 "game_cards_today":    today_cards,
                 "game_cards_tomorrow": tomorrow_cards,
-                "best_parlays":        _state["best_parlays"],
-                "player_props":        _state["player_props"],
+                "best_parlays":        best_parlays,
+                "player_props":        player_props,
                 "sport":               "soccer",
                 "date":                today_str,
             }

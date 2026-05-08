@@ -158,7 +158,7 @@ def train(save: bool = True) -> dict[str, Any]:
     if save:
         os.makedirs(os.path.dirname(MODEL_PATH), exist_ok=True)
         joblib.dump(bundle, MODEL_PATH)
-        print(f"[soccer_model] Saved → {MODEL_PATH}")
+        print(f"[soccer_model] Saved -> {MODEL_PATH}")
 
     return bundle
 
