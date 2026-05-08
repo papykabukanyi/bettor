@@ -439,6 +439,12 @@ body.modal-open{overflow:hidden}
 /* ── No-data helpers ── */
 .no-games{text-align:center;padding:40px 20px;color:var(--muted);font-size:.9rem}
 
+@media (min-width: 981px){
+  .card-expand-btn{display:none}
+  .game-card .card-body,
+  .game-card.expanded .card-body{display:none !important;max-height:0 !important;opacity:0 !important;border-top:none !important}
+}
+
 @media (max-width: 980px){
   .modal.game-details-modal{max-width:min(100vw - 20px,720px);max-height:calc(100vh - 20px)}
   .game-details-head{padding:18px 18px 14px}
