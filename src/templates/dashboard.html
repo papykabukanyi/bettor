@@ -268,6 +268,15 @@ main{padding:20px;max-width:1400px;margin:0 auto}
   font-size:.62rem;font-weight:700;color:rgba(255,255,255,.8)}
 .xprop-rationale{font-size:.68rem;color:var(--muted);margin-top:5px;display:flex;align-items:center;gap:4px}
 
+/* ── Probability Charts ── */
+.bet-prob-chart-wrap,.prop-prob-chart-wrap{margin-top:12px;padding:12px 14px;
+  background:rgba(255,255,255,.02);border:1px solid rgba(31,42,55,.6);border-radius:10px}
+.chart-title{font-size:.7rem;font-weight:700;letter-spacing:.12em;text-transform:uppercase;
+  color:var(--muted);margin-bottom:8px;text-align:center}
+.bet-prob-chart,.prop-prob-chart{overflow:visible}
+.bet-prob-chart text,.prop-prob-chart text{fill:var(--text);font-size:11px;font-family:'Space Grotesk',sans-serif}
+.bet-prob-chart rect,.prop-prob-chart rect{stroke:none;rx:2}
+
 /* ── Odds chart (mini sparkline row) ── */
 .xbet-implied{font-size:.65rem;color:var(--muted);margin-top:2px}
 
@@ -1739,34 +1748,34 @@ function plainEnglishBet(bet, homeTeam, awayTeam, phase='upcoming') {
   const line = parseFloat(bet.line) || 0;
   const isOver = pick.toUpperCase().includes('OVER');
   const team = cleanPickTeam(pick);
-  if (bt === 'moneyline' || bt === '1x2') return { text: _phaseVerb(phase, `${team} will WIN`, `${team} is LIVE to WIN`, `${team} WINS`), emoji: '&#9917;', color: 'var(--green)' };
+  if (bt === 'moneyline' || bt === '1x2') return { text: _phaseVerb(phase, `Bet ${team} to win!`, `${team} is winning right now`, `${team} won!`), emoji: '&#9917;', color: 'var(--green)' };
   if (bt === 'run_line' || bt === 'draw no bet') {
     if (pick.toLowerCase().includes('dnb') || bt === 'draw no bet')
-      return { text: _phaseVerb(phase, `${team} wins (Draw No Bet)`, `${team} DNB is LIVE`, `${team} DNB result is FINAL`), emoji: '&#128202;', color: '#818cf8' };
-    return { text: _phaseVerb(phase, `${team} to win or draw`, `${team} result is LIVE`, `${team} result is FINAL`), emoji: '&#128202;', color: '#818cf8' };
+      return { text: _phaseVerb(phase, `Bet ${team} to win (no draw)`, `${team} DNB is live`, `${team} DNB final`), emoji: '&#128202;', color: '#818cf8' };
+    return { text: _phaseVerb(phase, `Bet ${team} to win or draw`, `${team} result is live`, `${team} result final`), emoji: '&#128202;', color: '#818cf8' };
   }
   if (bt === 'total' || bt === 'game_total' || bt === 'goals o/u') {
     const goalsLine = line || 2.5;
     return isOver
-      ? { text: _phaseVerb(phase, `Over ${goalsLine} goals in this match`, `Match total is LIVE over ${goalsLine}`, `Match total result is FINAL`), emoji: '&#127919;', color: 'var(--accent)' }
-      : { text: _phaseVerb(phase, `Under ${goalsLine} goals in this match`, `Match total is LIVE under ${goalsLine}`, `Match total result is FINAL`), emoji: '&#127919;', color: 'var(--yellow)' };
+      ? { text: _phaseVerb(phase, `Bet OVER ${goalsLine} goals`, `Match over ${goalsLine} live`, `Match over ${goalsLine} final`), emoji: '&#127919;', color: 'var(--accent)' }
+      : { text: _phaseVerb(phase, `Bet UNDER ${goalsLine} goals`, `Match under ${goalsLine} live`, `Match under ${goalsLine} final`), emoji: '&#127919;', color: 'var(--yellow)' };
   }
   if (bt === 'f5_total' || bt === 'btts') {
-    if (bt === 'btts') return { text: _phaseVerb(phase, `Both teams score`, `Both teams scoring LIVE`, `BTTS result is FINAL`), emoji: '&#9889;', color: '#a78bfa' };
+    if (bt === 'btts') return { text: _phaseVerb(phase, `Bet both teams score`, `Both teams scoring live`, `BTTS final`), emoji: '&#9889;', color: '#a78bfa' };
     return isOver
-      ? { text: _phaseVerb(phase, `First Half: Over ${line} goals`, `First Half total is LIVE over ${line}`, `HT total result is FINAL`), emoji: '&#9203;', color: 'var(--accent)' }
-      : { text: _phaseVerb(phase, `First Half: Under ${line} goals`, `First Half total is LIVE under ${line}`, `HT total result is FINAL`), emoji: '&#9203;', color: 'var(--yellow)' };
+      ? { text: _phaseVerb(phase, `Bet HT OVER ${line} goals`, `HT over ${line} live`, `HT over ${line} final`), emoji: '&#9203;', color: 'var(--accent)' }
+      : { text: _phaseVerb(phase, `Bet HT UNDER ${line} goals`, `HT under ${line} live`, `HT under ${line} final`), emoji: '&#9203;', color: 'var(--yellow)' };
   }
-  if (bt === 'f5_moneyline') return { text: _phaseVerb(phase, `Both teams score (BTTS)`, `BTTS is LIVE`, `BTTS result is FINAL`), emoji: '&#9889;', color: '#a78bfa' };
+  if (bt === 'f5_moneyline') return { text: _phaseVerb(phase, `Bet both teams score`, `BTTS live`, `BTTS final`), emoji: '&#9889;', color: '#a78bfa' };
   if (bt === 'home_team_total') {
     return isOver
-      ? { text: _phaseVerb(phase, `${homeTeam} scores MORE than ${line} goals`, `${homeTeam} goals is LIVE over ${line}`, `${homeTeam} goals result is FINAL`), emoji: '&#127968;', color: 'var(--accent)' }
-      : { text: _phaseVerb(phase, `${homeTeam} scores fewer than ${line} goals`, `${homeTeam} goals is LIVE under ${line}`, `${homeTeam} goals result is FINAL`), emoji: '&#127968;', color: 'var(--yellow)' };
+      ? { text: _phaseVerb(phase, `Bet ${homeTeam} OVER ${line} goals`, `${homeTeam} over ${line} live`, `${homeTeam} over ${line} final`), emoji: '&#127968;', color: 'var(--accent)' }
+      : { text: _phaseVerb(phase, `Bet ${homeTeam} UNDER ${line} goals`, `${homeTeam} under ${line} live`, `${homeTeam} under ${line} final`), emoji: '&#127968;', color: 'var(--yellow)' };
   }
   if (bt === 'away_team_total') {
     return isOver
-      ? { text: _phaseVerb(phase, `${awayTeam} scores MORE than ${line} goals`, `${awayTeam} goals is LIVE over ${line}`, `${awayTeam} goals result is FINAL`), emoji: '&#9992;', color: 'var(--accent)' }
-      : { text: _phaseVerb(phase, `${awayTeam} scores fewer than ${line} goals`, `${awayTeam} goals is LIVE under ${line}`, `${awayTeam} goals result is FINAL`), emoji: '&#9992;', color: 'var(--yellow)' };
+      ? { text: _phaseVerb(phase, `Bet ${awayTeam} OVER ${line} goals`, `${awayTeam} over ${line} live`, `${awayTeam} over ${line} final`), emoji: '&#9992;', color: 'var(--accent)' }
+      : { text: _phaseVerb(phase, `Bet ${awayTeam} UNDER ${line} goals`, `${awayTeam} under ${line} live`, `${awayTeam} under ${line} final`), emoji: '&#9992;', color: 'var(--yellow)' };
   }
   return { text: pick, emoji: '&#9917;', color: 'var(--text)' };
 }
@@ -1775,21 +1784,21 @@ function plainEnglishPropText(p, phase='upcoming') {
   const name = p.name || '—';
   const line = parseFloat(p.line) || 0;
   const st   = p.stat_type || '';
-  if (st === 'strikeouts')        return { text: _phaseVerb(phase, `${name} strikes out ${line}+ batters`, `${name} strikeouts are LIVE`, `${name} strikeout result is FINAL`),            emoji: '&#128293;', color: '#a78bfa' };
-  if (st === 'hits')              return { text: _phaseVerb(phase, `${name} gets ${line}+ hit${line!==1?'s':''}`, `${name} hits prop is LIVE`, `${name} hits result is FINAL`),     emoji: '&#9918;',   color: 'var(--accent)' };
-  if (st === 'home_runs')         return { text: _phaseVerb(phase, line<=1?`${name} hits a Home Run`:`${name} hits ${line}+ Home Runs`, `${name} HR prop is LIVE`, `${name} HR result is FINAL`), emoji: '&#128165;', color: 'var(--green)' };
-  if (st === 'rbi')               return { text: _phaseVerb(phase, `${name} drives in ${line}+ run${line!==1?'s':''}`, `${name} RBI prop is LIVE`, `${name} RBI result is FINAL`), emoji: '&#127919;', color: 'var(--accent)' };
-  if (st === 'runs')              return { text: _phaseVerb(phase, `${name} scores ${line}+ run${line!==1?'s':''}`, `${name} runs prop is LIVE`, `${name} runs result is FINAL`),   emoji: '&#127939;', color: 'var(--green)' };
-  if (st === 'walks')             return { text: _phaseVerb(phase, `${name} draws ${line}+ walk${line!==1?'s':''}`, `${name} walks prop is LIVE`, `${name} walks result is FINAL`),   emoji: '&#128694;', color: '#94a3b8' };
-  if (st === 'goals')           return { text: _phaseVerb(phase, `${name} scores ${line}+ goal${line!==1?'s':''}`, `${name} goals prop LIVE`, `${name} goals result FINAL`),           emoji: '&#9917;',   color: 'var(--green)' };
-  if (st === 'assists')         return { text: _phaseVerb(phase, `${name} gets ${line}+ assist${line!==1?'s':''}`, `${name} assists prop LIVE`, `${name} assists result FINAL`),       emoji: '&#128200;', color: 'var(--accent)' };
-  if (st === 'shots_on_target') return { text: _phaseVerb(phase, `${name} has ${line}+ shots on target`, `${name} SOT prop LIVE`, `${name} SOT result FINAL`),                       emoji: '&#127919;', color: '#818cf8' };
-  if (st === 'shots')           return { text: _phaseVerb(phase, `${name} attempts ${line}+ shots`, `${name} shots prop LIVE`, `${name} shots result FINAL`),                         emoji: '&#128165;', color: 'var(--yellow)' };
-  if (st === 'key_passes')      return { text: _phaseVerb(phase, `${name} makes ${line}+ key passes`, `${name} KP prop LIVE`, `${name} KP result FINAL`),                            emoji: '&#128204;', color: '#a78bfa' };
-  if (st === 'dribbles')        return { text: _phaseVerb(phase, `${name} completes ${line}+ dribbles`, `${name} dribbles prop LIVE`, `${name} dribbles result FINAL`),              emoji: '&#127939;', color: 'var(--accent)' };
-  if (st === 'tackles')         return { text: _phaseVerb(phase, `${name} makes ${line}+ tackle${line!==1?'s':''}`, `${name} tackles prop LIVE`, `${name} tackles result FINAL`),   emoji: '&#129354;', color: 'var(--accent)' };
-  if (st === 'xg')              return { text: _phaseVerb(phase, `${name} xG ${line}+ this match`, `${name} xG prop LIVE`, `${name} xG result FINAL`),                               emoji: '&#128262;', color: '#10b981' };
-  return { text: _phaseVerb(phase, `${name} OVER ${line} ${p.prop_label||st}`, `${name} prop is LIVE`, `${name} prop result is FINAL`), emoji: '&#9650;', color: 'var(--accent)' };
+  if (st === 'strikeouts')        return { text: _phaseVerb(phase, `Bet ${name} strikes out ${line}+ batters`, `${name} is striking out batters live`, `${name} struck out ${line}+`),            emoji: '&#128293;', color: '#a78bfa' };
+  if (st === 'hits')              return { text: _phaseVerb(phase, `Bet ${name} gets ${line}+ hit${line!==1?'s':''}`, `${name} is getting hits live`, `${name} got ${line}+ hits`),     emoji: '&#9918;',   color: 'var(--accent)' };
+  if (st === 'home_runs')         return { text: _phaseVerb(phase, line<=1?`Bet ${name} hits a Home Run`:`Bet ${name} hits ${line}+ Home Runs`, `${name} is hitting HRs live`, `${name} hit ${line}+ HRs`), emoji: '&#128165;', color: 'var(--green)' };
+  if (st === 'rbi')               return { text: _phaseVerb(phase, `Bet ${name} drives in ${line}+ run${line!==1?'s':''}`, `${name} is driving in runs live`, `${name} drove in ${line}+`), emoji: '&#127919;', color: 'var(--accent)' };
+  if (st === 'runs')              return { text: _phaseVerb(phase, `Bet ${name} scores ${line}+ run${line!==1?'s':''}`, `${name} is scoring runs live`, `${name} scored ${line}+`),   emoji: '&#127939;', color: 'var(--green)' };
+  if (st === 'walks')             return { text: _phaseVerb(phase, `Bet ${name} draws ${line}+ walk${line!==1?'s':''}`, `${name} is drawing walks live`, `${name} drew ${line}+`),   emoji: '&#128694;', color: '#94a3b8' };
+  if (st === 'goals')           return { text: _phaseVerb(phase, `Bet ${name} scores ${line}+ goal${line!==1?'s':''}`, `${name} is scoring live`, `${name} scored ${line}+ goal${line!==1?'s':''}`),           emoji: '&#9917;',   color: 'var(--green)' };
+  if (st === 'assists')         return { text: _phaseVerb(phase, `Bet ${name} gets ${line}+ assist${line!==1?'s':''}`, `${name} is assisting live`, `${name} got ${line}+ assist${line!==1?'s':''}`),       emoji: '&#128200;', color: 'var(--accent)' };
+  if (st === 'shots_on_target') return { text: _phaseVerb(phase, `Bet ${name} has ${line}+ shots on target`, `${name} is on target live`, `${name} had ${line}+ on target`),                       emoji: '&#127919;', color: '#818cf8' };
+  if (st === 'shots')           return { text: _phaseVerb(phase, `Bet ${name} takes ${line}+ shot${line!==1?'s':''}`, `${name} is shooting live`, `${name} took ${line}+ shot${line!==1?'s':''}`),                         emoji: '&#128165;', color: 'var(--yellow)' };
+  if (st === 'key_passes')      return { text: _phaseVerb(phase, `Bet ${name} makes ${line}+ key passes`, `${name} is key passing live`, `${name} made ${line}+ key passes`),                            emoji: '&#128204;', color: '#a78bfa' };
+  if (st === 'dribbles')        return { text: _phaseVerb(phase, `Bet ${name} completes ${line}+ dribbles`, `${name} is dribbling live`, `${name} completed ${line}+ dribbles`),              emoji: '&#127939;', color: 'var(--accent)' };
+  if (st === 'tackles')         return { text: _phaseVerb(phase, `Bet ${name} makes ${line}+ tackle${line!==1?'s':''}`, `${name} is tackling live`, `${name} made ${line}+ tackle${line!==1?'s':''}`),   emoji: '&#129354;', color: 'var(--accent)' };
+  if (st === 'xg')              return { text: _phaseVerb(phase, `Bet ${name} xG ${line}+ this match`, `${name} xG live`, `${name} xG final`),                               emoji: '&#128262;', color: '#10b981' };
+  return { text: _phaseVerb(phase, `Bet ${name} OVER ${line} ${p.prop_label||st}`, `${name} prop is live`, `${name} prop is final`), emoji: '&#9650;', color: 'var(--accent)' };
 }
 
 // ── Soccer card normalizer ─────────────────────────────────────────────────
@@ -1984,6 +1993,7 @@ function _expandedCardBody(c, phase) {
         <span class="xpanel-count">${betRows.length} bet${betRows.length>1?'s':''}</span>
       </div>
       <div class="xbet-list">${betRows.join('')}</div>
+      ${_betProbabilityChart(BET_DEFS.filter(d => c[d.key]).map(d => ({ label: d.label, prob: Math.round((c[d.key].model_prob||0.5)*100) })) )}
     </div>`;
   }
 
@@ -2024,6 +2034,26 @@ function _probArcSvg(pct, color) {
     <text class="prob-arc-text" x="${cx}" y="${cy-6}" fill="${color}" font-size="18">${pct}%</text>
     <text class="prob-arc-sub" x="${cx}" y="${cy+14}" fill="#7c8ca1" font-size="8">MODEL</text>
   </svg>`;
+}
+
+function _betProbabilityChart(bets) {
+  if (!bets.length) return '';
+  const barHeight = 20;
+  const barGap = 5;
+  const labelWidth = 100;
+  const chartWidth = 300;
+  const chartHeight = bets.length * (barHeight + barGap) - barGap;
+  let svg = `<svg width="${chartWidth + labelWidth}" height="${chartHeight}" class="bet-prob-chart" viewBox="0 0 ${chartWidth + labelWidth} ${chartHeight}">`;
+  bets.forEach((bet, i) => {
+    const y = i * (barHeight + barGap);
+    const barWidth = (bet.prob / 100) * chartWidth;
+    const color = bet.prob >= 70 ? 'var(--green)' : bet.prob >= 60 ? 'var(--accent)' : 'var(--yellow)';
+    svg += `<text x="0" y="${y + barHeight/2 + 5}" font-size="12" fill="var(--text)">${bet.label}</text>`;
+    svg += `<rect x="${labelWidth}" y="${y}" width="${barWidth}" height="${barHeight}" fill="${color}" rx="2"/>`;
+    svg += `<text x="${labelWidth + barWidth + 5}" y="${y + barHeight/2 + 5}" font-size="12" fill="var(--text)">${bet.prob}%</text>`;
+  });
+  svg += '</svg>';
+  return `<div class="bet-prob-chart-wrap"><div class="chart-title">Bet Probabilities</div>${svg}</div>`;
 }
 
 function _xBetRow(def, bet, card, phase) {
@@ -2101,6 +2131,8 @@ function _xPropsPanel(c, phase) {
     html += `<div class="xprop-team-divider">🏠 ${c.home_team}</div>`;
     html += hp.map(p => _xPropRow(p, phase)).join('');
   }
+  const allProps = [...ap, ...hp];
+  html += _propProbabilityChart(allProps);
   html += `</div></div>`;
   return html;
 }
@@ -2154,6 +2186,30 @@ function _xPropRow(p, phase) {
     ${barsHtml}
     ${rationale ? `<div class="xprop-rationale">📊 ${rationale}</div>` : ''}
   </div>`;
+}
+
+function _propProbabilityChart(props) {
+  if (!props.length) return '';
+  const barHeight = 15;
+  const barGap = 3;
+  const labelWidth = 120;
+  const chartWidth = 200;
+  const chartHeight = props.length * (barHeight + barGap) - barGap;
+  let svg = `<svg width="${chartWidth + labelWidth}" height="${chartHeight}" class="prop-prob-chart" viewBox="0 0 ${chartWidth + labelWidth} ${chartHeight}">`;
+  props.forEach((p, i) => {
+    const y = i * (barHeight + barGap);
+    const prob = Math.round((p.model_prob||0.5)*100);
+    const barWidth = (prob / 100) * chartWidth;
+    const color = prob >= 70 ? 'var(--green)' : prob >= 60 ? 'var(--accent)' : 'var(--yellow)';
+    const name = p.name || '—';
+    const stat = (p.prop_label || p.stat_type || '').replace(/_/g,' ');
+    const label = `${name} ${stat}`;
+    svg += `<text x="0" y="${y + barHeight/2 + 4}" font-size="10" fill="var(--text)" text-anchor="start">${label.length > 15 ? label.substring(0,15)+'...' : label}</text>`;
+    svg += `<rect x="${labelWidth}" y="${y}" width="${barWidth}" height="${barHeight}" fill="${color}" rx="1"/>`;
+    svg += `<text x="${labelWidth + barWidth + 3}" y="${y + barHeight/2 + 4}" font-size="10" fill="var(--text)">${prob}%</text>`;
+  });
+  svg += '</svg>';
+  return `<div class="prop-prob-chart-wrap"><div class="chart-title">Player Prop Probabilities</div>${svg}</div>`;
 }
 
 function quickChip(label, bet) {
