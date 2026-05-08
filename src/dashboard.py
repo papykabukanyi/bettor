@@ -147,6 +147,7 @@ _PHASES = [
 ]
 
 _state = {
+    "sport":            "soccer",
     "status":           "idle",
     "phase":            "",
     "phase_idx":        0,
@@ -1128,15 +1129,82 @@ def api_status():
             ("status", "phase", "phase_idx", "phase_total", "last_updated", "error")})
 
 
+def _payload_list(payload: dict, key: str) -> list:
+    items = payload.get(key, []) if isinstance(payload, dict) else []
+    return items if isinstance(items, list) else []
+
+
+def _is_soccer_cache_payload(payload: dict | None) -> bool:
+    if not isinstance(payload, dict):
+        return False
+
+    top_sport = str(payload.get("sport") or "").strip().lower()
+    if top_sport in {"soccer", "football"}:
+        return True
+
+    soccer_signal = False
+    for key in ("game_cards_today", "game_cards_tomorrow", "player_props", "best_parlays"):
+        for item in _payload_list(payload, key):
+            if not isinstance(item, dict):
+                continue
+
+            item_sport = str(item.get("sport") or "").strip().lower()
+            if item_sport in {"mlb", "baseball", "baseball_mlb"}:
+                return False
+            if item_sport in {"soccer", "football"}:
+                soccer_signal = True
+                continue
+
+            if (
+                item.get("competition")
+                or item.get("comp_name")
+                or item.get("draw_prob") is not None
+                or item.get("btts_prob") is not None
+            ):
+                soccer_signal = True
+                continue
+
+            bets = item.get("bets")
+            if isinstance(bets, list) and any(
+                isinstance(bet, dict) and "draw" in str(bet.get("market", "")).lower()
+                for bet in bets
+            ):
+                soccer_signal = True
+
+    return soccer_signal
+
+
+def _normalize_soccer_payload(payload: dict | None) -> dict | None:
+    if not _is_soccer_cache_payload(payload):
+        return None
+
+    today_str = _et_calendar_today().isoformat()
+    tomorrow_str = (_et_calendar_today() + datetime.timedelta(days=1)).isoformat()
+    normalized = dict(payload)
+    normalized["game_cards_today"] = _normalize_card_list(
+        _payload_list(normalized, "game_cards_today"),
+        expected_date=today_str,
+    )
+    normalized["game_cards_tomorrow"] = _normalize_card_list(
+        _payload_list(normalized, "game_cards_tomorrow"),
+        expected_date=tomorrow_str,
+    )
+    return normalized
+
+
 @app.route("/api/cached-state")
 def api_cached_state():
     with _lock:
-        if _state.get("game_cards_today") or _state.get("player_props"):
-            today_str = _et_calendar_today().isoformat()
-            tomorrow_str = (_et_calendar_today() + datetime.timedelta(days=1)).isoformat()
-            today_cards = _normalize_card_list(_state.get("game_cards_today", []), expected_date=today_str)
-            tomorrow_cards = _normalize_card_list(_state.get("game_cards_tomorrow", []), expected_date=tomorrow_str)
-            cache_updated_at_iso = _state.get("last_updated_ts")
+        live_payload = None
+        if (
+            _state.get("game_cards_today")
+            or _state.get("game_cards_tomorrow")
+            or _state.get("player_props")
+            or _state.get("best_parlays")
+        ):
+            live_payload = _normalize_soccer_payload(dict(_state))
+        if live_payload is not None:
+            cache_updated_at_iso = live_payload.get("last_updated_ts")
             cache_age_min = None
             if cache_updated_at_iso:
                 try:
@@ -1147,25 +1215,24 @@ def api_cached_state():
                     cache_age_min = None
             return jsonify({
                 "ok":                  True,
-                "status":              _state["status"],
-                "last_updated":        _state["last_updated"],
+                "status":              live_payload.get("status", "idle"),
+                "last_updated":        live_payload.get("last_updated"),
                 "cache_updated_at_iso": cache_updated_at_iso,
                 "cache_age_min":        cache_age_min,
-                "game_cards_today":    today_cards,
-                "game_cards_tomorrow": tomorrow_cards,
-                "best_parlays":        _state["best_parlays"],
-                "player_props":        _state["player_props"],
-                "elite_parlay":        _state.get("elite_parlay"),
+                "game_cards_today":    live_payload.get("game_cards_today", []),
+                "game_cards_tomorrow": live_payload.get("game_cards_tomorrow", []),
+                "best_parlays":        live_payload.get("best_parlays", []),
+                "player_props":        live_payload.get("player_props", []),
+                "elite_parlay":        live_payload.get("elite_parlay"),
             })
 
     try:
         from data.db import get_analysis_cache
-        cached = get_analysis_cache(max_age_hours=22)
+        raw_cached = get_analysis_cache(max_age_hours=22)
+        cached = _normalize_soccer_payload(raw_cached)
+        if raw_cached and cached is None:
+            print("[cache] Ignoring non-soccer cache row on soccer branch")
         if cached:
-            today_str = _et_calendar_today().isoformat()
-            tomorrow_str = (_et_calendar_today() + datetime.timedelta(days=1)).isoformat()
-            cached["game_cards_today"] = _normalize_card_list(cached.get("game_cards_today", []), expected_date=today_str)
-            cached["game_cards_tomorrow"] = _normalize_card_list(cached.get("game_cards_tomorrow", []), expected_date=tomorrow_str)
             has_cached_payload = bool(
                 cached.get("game_cards_today")
                 or cached.get("game_cards_tomorrow")
@@ -1965,6 +2032,7 @@ def _run_soccer_analysis():
         if not all_matches:
             print("[soccer-analysis] No matches found for today/tomorrow")
             with _lock:
+                _state["sport"] = "soccer"
                 _state["status"] = "idle"
                 _state["last_updated"] = _dt.datetime.now().isoformat()
             return
@@ -1979,6 +2047,7 @@ def _run_soccer_analysis():
             tomorrow_cards = state.get("game_cards_tomorrow", [])
 
         with _lock:
+            _state["sport"] = "soccer"
             _state["game_cards_today"]    = today_cards
             _state["game_cards_tomorrow"] = tomorrow_cards
             _state["best_parlays"]        = state.get("best_parlays", state.get("parlays", []))
@@ -1993,6 +2062,7 @@ def _run_soccer_analysis():
             _state["wc_status"]              = "done"
 
         payload = {
+            "sport":                 "soccer",
             "status":                "done",
             "last_updated":          _state["last_updated"],
             "game_cards_today":      today_cards,
@@ -2169,6 +2239,7 @@ def _load_boot_schedule_fallback() -> bool:
 
         with _lock:
             _state.update({
+                "sport": "soccer",
                 "status": "idle",
                 "game_cards_today": today_cards,
                 "game_cards_tomorrow": tomorrow_cards,
@@ -2190,7 +2261,11 @@ def _auto_boot_analysis():
         from data.db import get_analysis_cache
         today_str    = _et_calendar_today().isoformat()
         tomorrow_str = (_et_calendar_today() + datetime.timedelta(days=1)).isoformat()
-        cached = get_analysis_cache(max_age_hours=22)
+        raw_cached = get_analysis_cache(max_age_hours=22)
+        cached = _normalize_soccer_payload(raw_cached)
+
+        if raw_cached and cached is None:
+            print("[boot] Ignoring non-soccer cache row on soccer branch")
 
         if cached:
             raw_today    = cached.get("game_cards_today", [])

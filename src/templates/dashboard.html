@@ -790,8 +790,9 @@ let parlayLegs     = [];
 let _parlayTouched = false;
 let propsSortKey   = 'model_prob';
 let propsSortAsc   = false;
-const LOCAL_CACHE_KEY = 'bettor_last_session';
-const AUTO_TRACKED_PARLAYS_KEY = 'bettor_auto_tracked_parlays_v1';
+const DASHBOARD_SPORT = 'soccer';
+const LOCAL_CACHE_KEY = 'bettor_soccer_last_session_v1';
+const AUTO_TRACKED_PARLAYS_KEY = 'bettor_soccer_auto_tracked_parlays_v1';
 let _cacheUpdatedAtMs = null;
 let _autoRefreshInFlight = false;
 const _gameStartCache = new Map();
@@ -895,7 +896,7 @@ function _readAutoTrackedSignatures() {
     const day = _localDayKey();
     if (!raw) return new Set();
     const parsed = JSON.parse(raw);
-    if (!parsed || parsed.day !== day || !Array.isArray(parsed.keys)) return new Set();
+    if (!parsed || parsed.sport !== DASHBOARD_SPORT || parsed.day !== day || !Array.isArray(parsed.keys)) return new Set();
     return new Set(parsed.keys.map(v => String(v)));
   } catch (e) {
     return new Set();
@@ -905,6 +906,7 @@ function _readAutoTrackedSignatures() {
 function _writeAutoTrackedSignatures(sigSet) {
   try {
     localStorage.setItem(AUTO_TRACKED_PARLAYS_KEY, JSON.stringify({
+      sport: DASHBOARD_SPORT,
       day: _localDayKey(),
       keys: Array.from(sigSet),
     }));
@@ -1039,6 +1041,7 @@ function runAnalysis() {
 function saveLocalCache(data) {
   try {
     const payload = {
+      sport: DASHBOARD_SPORT,
       saved_at: Date.now(),
       data: {
         game_cards_today:     _normalizeCardList(data.game_cards_today),
@@ -1057,6 +1060,7 @@ function loadLocalCache() {
     const raw = localStorage.getItem(LOCAL_CACHE_KEY);
     if (!raw) return null;
     const obj = JSON.parse(raw);
+    if (!obj || obj.sport !== DASHBOARD_SPORT) return null;
     const maxAgeMs = 5 * 60 * 60 * 1000;
     if (obj && obj.saved_at && Date.now() - obj.saved_at > maxAgeMs) return null;
     return obj && obj.data ? obj.data : null;
@@ -3365,7 +3369,12 @@ function stopConsolePoll() {
 (function init() {
   // Show local cache immediately so page is not blank
   const local = loadLocalCache();
-  if (local && _asArray(local.game_cards_today).length) {
+  if (local && (
+    _asArray(local.game_cards_today).length ||
+    _asArray(local.game_cards_tomorrow).length ||
+    _asArray(local.player_props).length ||
+    _asArray(local.best_parlays).length
+  )) {
     applyCachedData(local);
   }
   hideOverlay();
