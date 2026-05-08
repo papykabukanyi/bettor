@@ -118,33 +118,35 @@ def _analyze_mlb():
 
 def _analyze_soccer(league_keys: list[str] | None = None):
     """Fetch today's soccer fixtures, predict outcomes, return prediction list."""
-    from data.soccer_fetcher import get_todays_fixtures
-    from models.soccer_model import load_model
+    from data.soccer_fetcher import get_all_today_matches
+    from models.soccer_predictor import predict_match
 
     use_keys = league_keys or ["EPL", "ESP", "GER", "MLS"]
     print(f"\n[SOCCER] Fetching today's fixtures for: {use_keys} …")
-    fixtures = get_todays_fixtures(use_keys)
+    fixtures_dict = get_all_today_matches(use_keys)
+    
+    # Flatten the dict into a list of fixtures
+    fixtures = []
+    for code, matches in fixtures_dict.items():
+        for match in matches:
+            match["league"] = code  # Add league info
+            fixtures.append(match)
 
     if not fixtures:
         print("[SOCCER] No fixtures today or API key not set.")
         return []
 
-    model = load_model()
-    if model is None:
-        print("[SOCCER] Model not trained – run with --train first.")
-        return []
-
     predictions = []
     for f in fixtures:
-        pred = model.predict(f["home_team"], f["away_team"])
+        pred = predict_match(f["home_team"], f["away_team"])
         pred["home_team"] = f["home_team"]
         pred["away_team"] = f["away_team"]
         pred["league"]    = f.get("league", "")
         predictions.append(pred)
         print(f"  [{pred['league']}] {f['away_team']} @ {f['home_team']}"
-              f"  →  H:{pred.get('home_win',0):.1%}"
-              f" D:{pred.get('draw',0):.1%}"
-              f" A:{pred.get('away_win',0):.1%}")
+              f"  →  H:{pred.get('home_prob',0):.1%}"
+              f" D:{pred.get('draw_prob',0):.1%}"
+              f" A:{pred.get('away_prob',0):.1%}")
 
     return predictions
 

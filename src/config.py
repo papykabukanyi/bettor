@@ -43,6 +43,9 @@ ODDS_MARKETS    = "h2h,spreads,totals"
 # MLB seasons to pull historical data (most recent first)
 MLB_SEASONS = [2026, 2025, 2024, 2023]
 
+# Soccer leagues (Football-Data.co.uk style keys)
+FOOTBALL_DATA_UK_LEAGUES = ["EPL", "ESP", "GER", "MLS"]
+
 # ---------------------------------------------------------------------------
 # Eastern-time date helper
 # ---------------------------------------------------------------------------
