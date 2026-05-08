@@ -200,25 +200,45 @@ main{padding:20px;max-width:1400px;margin:0 auto}
 .prob-arc-sub{font-size:7px;dominant-baseline:middle;text-anchor:middle;font-family:'Space Grotesk',sans-serif;fill:#7c8ca1;letter-spacing:.08em;text-transform:uppercase}
 
 /* ── Section panels ── */
-.xpanel{margin-top:12px;border:1px solid rgba(31,42,55,.8);
-  border-radius:13px;overflow:hidden;background:rgba(11,17,24,.7)}
+.xpanel{margin-top:14px;border:1px solid rgba(56,189,248,.18);
+  border-radius:15px;overflow:hidden;
+  background:linear-gradient(145deg,rgba(10,16,28,.92),rgba(8,12,22,.96));
+  box-shadow:0 10px 28px rgba(0,0,0,.28)}
 .xpanel-head{display:flex;align-items:center;justify-content:space-between;
-  padding:10px 14px;background:rgba(255,255,255,.02);border-bottom:1px solid rgba(31,42,55,.7)}
-.xpanel-title{font-size:.66rem;font-weight:700;letter-spacing:.18em;text-transform:uppercase;color:var(--muted)}
-.xpanel-count{font-size:.66rem;padding:2px 7px;border-radius:20px;background:rgba(255,255,255,.06);color:var(--muted)}
+  padding:11px 14px;
+  background:linear-gradient(120deg,rgba(20,184,166,.12),rgba(20,184,166,.03) 45%,rgba(30,41,59,.15));
+  border-bottom:1px solid rgba(56,189,248,.16)}
+.xpanel-title{font-size:.66rem;font-weight:700;letter-spacing:.18em;text-transform:uppercase;color:#b8c7da}
+.xpanel-count{font-size:.66rem;padding:2px 8px;border-radius:20px;
+  background:rgba(255,255,255,.08);color:#d7e4f4}
+
+/* ── Modal hero charts ── */
+.modal-hero-grid{display:grid;grid-template-columns:1.2fr .9fr;gap:12px;margin-top:12px}
+.modal-hero-card{border:1px solid rgba(56,189,248,.2);border-radius:12px;padding:12px;
+  background:linear-gradient(145deg,rgba(9,14,24,.9),rgba(8,12,21,.95))}
+.hero-chart-title{font-size:.64rem;letter-spacing:.16em;text-transform:uppercase;color:#a7bdd6;font-weight:700}
+.hero-chart-sub{margin-top:4px;font-size:.74rem;color:var(--muted)}
+.hero-trend-svg,.hero-bars-svg{width:100%;height:auto;display:block;margin-top:10px}
+.hero-kpis{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:7px;margin-top:10px}
+.hero-kpi{padding:8px 7px;border:1px solid rgba(148,163,184,.2);border-radius:8px;
+  background:rgba(15,23,42,.45);text-align:center}
+.hero-kpi span{display:block;font-size:.58rem;letter-spacing:.1em;text-transform:uppercase;color:#8da3bb}
+.hero-kpi strong{display:block;margin-top:3px;font-size:.92rem;color:#e2edf8}
 
 /* ── Bet rows ── */
 .xbet-list{display:flex;flex-direction:column;gap:0}
-.xbet-row{padding:12px 14px;border-bottom:1px solid rgba(31,42,55,.5);position:relative;overflow:hidden;transition:background .2s}
+.xbet-row{padding:12px 14px;border-bottom:1px solid rgba(56,189,248,.14);position:relative;overflow:hidden;
+  transition:background .2s;background:rgba(2,6,23,.16)}
+.xbet-row:hover{background:rgba(30,64,175,.08)}
 .xbet-row:last-child{border-bottom:none}
 .xbet-row::before{content:'';position:absolute;left:0;top:0;bottom:0;width:3px}
 .xbet-row.sl-ELITE::before{background:var(--green)}
 .xbet-row.sl-SAFE::before{background:var(--accent)}
 .xbet-row.sl-MODERATE::before{background:var(--yellow)}
 .xbet-row.sl-RISKY::before{background:var(--red)}
-.xbet-top{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;margin-bottom:8px}
+.xbet-top{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;margin-bottom:9px}
 .xbet-left{display:flex;flex-direction:column;gap:3px;min-width:0;flex:1}
-.xbet-type{font-size:.62rem;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+.xbet-type{font-size:.61rem;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:#99aec7}
 .xbet-pick{font-size:.95rem;font-weight:800;line-height:1.2}
 .xbet-right{display:flex;flex-direction:column;align-items:flex-end;gap:4px;flex-shrink:0}
 .xbet-odds{font-size:.85rem;font-weight:700;color:var(--text)}
@@ -226,7 +246,7 @@ main{padding:20px;max-width:1400px;margin:0 auto}
 .xbet-edge-badge.pos{background:rgba(22,163,74,.18);color:var(--green)}
 .xbet-edge-badge.neg{background:rgba(220,38,38,.18);color:var(--red)}
 /* probability bar */
-.xbet-bar-wrap{position:relative;height:22px;background:rgba(255,255,255,.04);
+.xbet-bar-wrap{position:relative;height:22px;background:rgba(255,255,255,.05);
   border-radius:6px;overflow:hidden;margin-top:2px}
 .xbet-bar-fill{position:absolute;left:0;top:0;bottom:0;border-radius:6px;
   transition:width 1.1s cubic-bezier(.4,0,.2,1) .3s}
@@ -241,20 +261,28 @@ main{padding:20px;max-width:1400px;margin:0 auto}
 
 /* ── Prop rows (expanded) ── */
 .xprop-list{display:flex;flex-direction:column;gap:0}
-.xprop-row{padding:11px 14px;border-bottom:1px solid rgba(31,42,55,.4);overflow:hidden;transition:background .2s}
+.xprop-row{padding:12px 14px;border-bottom:1px solid rgba(56,189,248,.14);overflow:hidden;
+  transition:background .2s;background:rgba(2,6,23,.18)}
+.xprop-row:hover{background:rgba(16,185,129,.08)}
 .xprop-row:last-child{border-bottom:none}
 .xprop-team-divider{padding:8px 14px 4px;font-size:.62rem;font-weight:700;letter-spacing:.14em;
-  text-transform:uppercase;color:var(--muted);background:rgba(255,255,255,.015);
-  border-bottom:1px solid rgba(31,42,55,.4)}
+  text-transform:uppercase;color:#9cb2c9;background:rgba(255,255,255,.02);
+  border-bottom:1px solid rgba(56,189,248,.14)}
 .xprop-top{display:flex;align-items:flex-start;justify-content:space-between;gap:8px;margin-bottom:7px}
+.xprop-main{flex:1;min-width:0;display:flex;flex-direction:column;gap:3px}
 .xprop-name{font-size:.88rem;font-weight:700;line-height:1.2}
 .xprop-team-tag{font-size:.62rem;color:var(--muted);margin-left:4px}
 .xprop-stat-type{font-size:.68rem;color:var(--accent);font-weight:600;margin-top:2px;letter-spacing:.04em}
+.xprop-phrase{font-size:.78rem;font-weight:700;color:#d6e7f8;line-height:1.3}
 .xprop-right{display:flex;flex-direction:column;align-items:flex-end;gap:3px;flex-shrink:0}
 .xprop-line{font-size:.92rem;font-weight:800}
 .xprop-dir{font-size:.62rem;font-weight:700;padding:2px 7px;border-radius:20px;border:1px solid;white-space:nowrap}
 .xprop-dir.OVER{border-color:rgba(22,163,74,.5);color:var(--green)}
 .xprop-dir.UNDER{border-color:rgba(234,179,8,.5);color:var(--yellow)}
+.xprop-dial{width:52px;height:52px;display:block}
+.xprop-dial-track{fill:none;stroke:rgba(148,163,184,.25);stroke-width:4}
+.xprop-dial-fill{fill:none;stroke-width:4;stroke-linecap:round;transform:rotate(-90deg);transform-origin:22px 22px}
+.xprop-dial-text{font-size:8px;font-weight:800;fill:#e2e8f0;text-anchor:middle;dominant-baseline:middle}
 /* mini stat bars for props */
 .xprop-bars{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:6px}
 .xprop-mini-bar{display:flex;flex-direction:column;gap:3px}
@@ -268,15 +296,6 @@ main{padding:20px;max-width:1400px;margin:0 auto}
   font-size:.62rem;font-weight:700;color:rgba(255,255,255,.8)}
 .xprop-rationale{font-size:.68rem;color:var(--muted);margin-top:5px;display:flex;align-items:center;gap:4px}
 
-/* ── Probability Charts ── */
-.bet-prob-chart-wrap,.prop-prob-chart-wrap{margin-top:12px;padding:12px 14px;
-  background:rgba(255,255,255,.02);border:1px solid rgba(31,42,55,.6);border-radius:10px}
-.chart-title{font-size:.7rem;font-weight:700;letter-spacing:.12em;text-transform:uppercase;
-  color:var(--muted);margin-bottom:8px;text-align:center}
-.bet-prob-chart,.prop-prob-chart{overflow:visible}
-.bet-prob-chart text,.prop-prob-chart text{fill:var(--text);font-size:11px;font-family:'Space Grotesk',sans-serif}
-.bet-prob-chart rect,.prop-prob-chart rect{stroke:none;rx:2}
-
 /* ── Odds chart (mini sparkline row) ── */
 .xbet-implied{font-size:.65rem;color:var(--muted);margin-top:2px}
 
@@ -286,6 +305,8 @@ main{padding:20px;max-width:1400px;margin:0 auto}
   .cx-stat:last-child{display:none}
   .cx-stat-val{font-size:1.1rem}
   .xbet-bar-label{font-size:.6rem}
+  .modal-hero-grid{grid-template-columns:1fr}
+  .hero-kpis{grid-template-columns:1fr 1fr 1fr}
 }
 .parlay-save-btn:hover{background:rgba(124,58,237,.3)}
 
@@ -405,7 +426,7 @@ main{padding:20px;max-width:1400px;margin:0 auto}
 .pred-meta{color:var(--muted);font-size:.75rem}
 
 /* ── Phone modal ── */
-.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:100;
+.modal-overlay{position:fixed;inset:0;background:rgba(1,7,14,.72);backdrop-filter:blur(6px);z-index:100;
   display:flex;align-items:center;justify-content:center;padding:20px}
 .modal-overlay.hidden{display:none}
 .modal{background:var(--card);border:1px solid var(--border);border-radius:12px;
@@ -413,14 +434,24 @@ main{padding:20px;max-width:1400px;margin:0 auto}
 .modal h2{font-size:1rem;font-weight:600;margin-bottom:16px}
 .modal-close{float:right;background:none;border:none;color:var(--muted);
   font-size:1.2rem;cursor:pointer;line-height:1}
-.modal.game-details-modal{padding:0;max-width:min(1040px,calc(100vw - 48px));max-height:calc(100vh - 48px);overflow:hidden}
-.game-details-head{padding:22px 24px 18px;border-bottom:1px solid var(--border);
-  background:linear-gradient(135deg,rgba(20,184,166,.12),rgba(59,130,246,.06))}
+.modal.game-details-modal{position:relative;padding:0;max-width:min(1120px,calc(100vw - 42px));max-height:calc(100vh - 34px);overflow:hidden;
+  border:1px solid rgba(56,189,248,.22);
+  box-shadow:0 35px 80px rgba(0,0,0,.62),0 0 0 1px rgba(14,116,144,.2) inset;
+  background:linear-gradient(170deg,rgba(5,10,18,.98),rgba(5,9,17,.98))}
+.modal.game-details-modal .modal-close{position:absolute;top:14px;right:14px;float:none;
+  width:32px;height:32px;border-radius:50%;border:1px solid rgba(148,163,184,.3);
+  background:rgba(2,6,23,.7);color:#dbe9f8;display:grid;place-items:center;z-index:3}
+.modal.game-details-modal .modal-close:hover{border-color:rgba(56,189,248,.55);color:#fff;background:rgba(15,23,42,.92)}
+.game-details-head{padding:24px 24px 18px;border-bottom:1px solid rgba(56,189,248,.16);
+  background:
+    radial-gradient(110% 130% at 4% 0%, rgba(20,184,166,.26), transparent 52%),
+    radial-gradient(90% 110% at 100% 0%, rgba(59,130,246,.22), transparent 56%),
+    linear-gradient(135deg,rgba(20,184,166,.09),rgba(59,130,246,.05))}
 .game-details-label{font-size:.68rem;letter-spacing:.16em;text-transform:uppercase;color:var(--muted);font-weight:700}
-.game-details-title{margin:8px 0 10px;font-size:1.5rem;font-weight:700;line-height:1.15}
-.game-details-meta{display:flex;flex-wrap:wrap;gap:8px;color:var(--muted);font-size:.84rem}
-.game-details-chip{padding:5px 10px;border-radius:999px;background:rgba(255,255,255,.05);border:1px solid rgba(148,163,184,.18)}
-.game-details-content{overflow:auto;padding-bottom:20px}
+.game-details-title{margin:8px 0 10px;font-size:1.56rem;font-weight:700;line-height:1.15}
+.game-details-meta{display:flex;flex-wrap:wrap;gap:8px;color:#bfd0e3;font-size:.82rem}
+.game-details-chip{padding:5px 10px;border-radius:999px;background:rgba(15,23,42,.55);border:1px solid rgba(148,163,184,.22)}
+.game-details-content{overflow:auto;padding-bottom:16px}
 .game-details-content .card-body-inner{padding:0 20px 20px}
 body.modal-open{overflow:hidden}
 .form-row{margin-bottom:12px}
@@ -455,8 +486,9 @@ body.modal-open{overflow:hidden}
 }
 
 @media (max-width: 980px){
-  .modal.game-details-modal{max-width:min(100vw - 20px,720px);max-height:calc(100vh - 20px)}
-  .game-details-head{padding:18px 18px 14px}
+  .modal.game-details-modal{max-width:min(100vw - 14px,760px);max-height:calc(100vh - 14px)}
+  .modal.game-details-modal .modal-close{top:10px;right:10px}
+  .game-details-head{padding:18px 16px 14px}
   .game-details-title{font-size:1.15rem}
   .game-details-content .card-body-inner{padding:0 14px 16px}
 }
@@ -1748,34 +1780,34 @@ function plainEnglishBet(bet, homeTeam, awayTeam, phase='upcoming') {
   const line = parseFloat(bet.line) || 0;
   const isOver = pick.toUpperCase().includes('OVER');
   const team = cleanPickTeam(pick);
-  if (bt === 'moneyline' || bt === '1x2') return { text: _phaseVerb(phase, `Bet ${team} to win!`, `${team} is winning right now`, `${team} won!`), emoji: '&#9917;', color: 'var(--green)' };
+  if (bt === 'moneyline' || bt === '1x2') return { text: _phaseVerb(phase, `Ride ${team} to win`, `${team} win ticket is live`, `${team} win ticket is final`), emoji: '&#9917;', color: 'var(--green)' };
   if (bt === 'run_line' || bt === 'draw no bet') {
     if (pick.toLowerCase().includes('dnb') || bt === 'draw no bet')
-      return { text: _phaseVerb(phase, `Bet ${team} to win (no draw)`, `${team} DNB is live`, `${team} DNB final`), emoji: '&#128202;', color: '#818cf8' };
-    return { text: _phaseVerb(phase, `Bet ${team} to win or draw`, `${team} result is live`, `${team} result final`), emoji: '&#128202;', color: '#818cf8' };
+      return { text: _phaseVerb(phase, `Take ${team} DNB (draw gets refunded)`, `${team} DNB is live`, `${team} DNB is final`), emoji: '&#128202;', color: '#818cf8' };
+    return { text: _phaseVerb(phase, `Double chance: ${team} or draw`, `${team} double chance is live`, `${team} double chance is final`), emoji: '&#128202;', color: '#818cf8' };
   }
   if (bt === 'total' || bt === 'game_total' || bt === 'goals o/u') {
     const goalsLine = line || 2.5;
     return isOver
-      ? { text: _phaseVerb(phase, `Bet OVER ${goalsLine} goals`, `Match over ${goalsLine} live`, `Match over ${goalsLine} final`), emoji: '&#127919;', color: 'var(--accent)' }
-      : { text: _phaseVerb(phase, `Bet UNDER ${goalsLine} goals`, `Match under ${goalsLine} live`, `Match under ${goalsLine} final`), emoji: '&#127919;', color: 'var(--yellow)' };
+      ? { text: _phaseVerb(phase, `Smash OVER ${goalsLine} goals`, `OVER ${goalsLine} is sweating live`, `OVER ${goalsLine} is final`), emoji: '&#127919;', color: 'var(--accent)' }
+      : { text: _phaseVerb(phase, `Take UNDER ${goalsLine} goals`, `UNDER ${goalsLine} is sweating live`, `UNDER ${goalsLine} is final`), emoji: '&#127919;', color: 'var(--yellow)' };
   }
   if (bt === 'f5_total' || bt === 'btts') {
-    if (bt === 'btts') return { text: _phaseVerb(phase, `Bet both teams score`, `Both teams scoring live`, `BTTS final`), emoji: '&#9889;', color: '#a78bfa' };
+    if (bt === 'btts') return { text: _phaseVerb(phase, `Both teams to score`, `BTTS is live`, `BTTS is final`), emoji: '&#9889;', color: '#a78bfa' };
     return isOver
-      ? { text: _phaseVerb(phase, `Bet HT OVER ${line} goals`, `HT over ${line} live`, `HT over ${line} final`), emoji: '&#9203;', color: 'var(--accent)' }
-      : { text: _phaseVerb(phase, `Bet HT UNDER ${line} goals`, `HT under ${line} live`, `HT under ${line} final`), emoji: '&#9203;', color: 'var(--yellow)' };
+      ? { text: _phaseVerb(phase, `First half OVER ${line} goals`, `First half over is live`, `First half over is final`), emoji: '&#9203;', color: 'var(--accent)' }
+      : { text: _phaseVerb(phase, `First half UNDER ${line} goals`, `First half under is live`, `First half under is final`), emoji: '&#9203;', color: 'var(--yellow)' };
   }
-  if (bt === 'f5_moneyline') return { text: _phaseVerb(phase, `Bet both teams score`, `BTTS live`, `BTTS final`), emoji: '&#9889;', color: '#a78bfa' };
+  if (bt === 'f5_moneyline') return { text: _phaseVerb(phase, `Both teams to score`, `BTTS is live`, `BTTS is final`), emoji: '&#9889;', color: '#a78bfa' };
   if (bt === 'home_team_total') {
     return isOver
-      ? { text: _phaseVerb(phase, `Bet ${homeTeam} OVER ${line} goals`, `${homeTeam} over ${line} live`, `${homeTeam} over ${line} final`), emoji: '&#127968;', color: 'var(--accent)' }
-      : { text: _phaseVerb(phase, `Bet ${homeTeam} UNDER ${line} goals`, `${homeTeam} under ${line} live`, `${homeTeam} under ${line} final`), emoji: '&#127968;', color: 'var(--yellow)' };
+      ? { text: _phaseVerb(phase, `${homeTeam} to score ${line}+`, `${homeTeam} goals over is live`, `${homeTeam} goals over is final`), emoji: '&#127968;', color: 'var(--accent)' }
+      : { text: _phaseVerb(phase, `${homeTeam} stays under ${line}`, `${homeTeam} goals under is live`, `${homeTeam} goals under is final`), emoji: '&#127968;', color: 'var(--yellow)' };
   }
   if (bt === 'away_team_total') {
     return isOver
-      ? { text: _phaseVerb(phase, `Bet ${awayTeam} OVER ${line} goals`, `${awayTeam} over ${line} live`, `${awayTeam} over ${line} final`), emoji: '&#9992;', color: 'var(--accent)' }
-      : { text: _phaseVerb(phase, `Bet ${awayTeam} UNDER ${line} goals`, `${awayTeam} under ${line} live`, `${awayTeam} under ${line} final`), emoji: '&#9992;', color: 'var(--yellow)' };
+      ? { text: _phaseVerb(phase, `${awayTeam} to score ${line}+`, `${awayTeam} goals over is live`, `${awayTeam} goals over is final`), emoji: '&#9992;', color: 'var(--accent)' }
+      : { text: _phaseVerb(phase, `${awayTeam} stays under ${line}`, `${awayTeam} goals under is live`, `${awayTeam} goals under is final`), emoji: '&#9992;', color: 'var(--yellow)' };
   }
   return { text: pick, emoji: '&#9917;', color: 'var(--text)' };
 }
@@ -1784,21 +1816,21 @@ function plainEnglishPropText(p, phase='upcoming') {
   const name = p.name || '—';
   const line = parseFloat(p.line) || 0;
   const st   = p.stat_type || '';
-  if (st === 'strikeouts')        return { text: _phaseVerb(phase, `Bet ${name} strikes out ${line}+ batters`, `${name} is striking out batters live`, `${name} struck out ${line}+`),            emoji: '&#128293;', color: '#a78bfa' };
-  if (st === 'hits')              return { text: _phaseVerb(phase, `Bet ${name} gets ${line}+ hit${line!==1?'s':''}`, `${name} is getting hits live`, `${name} got ${line}+ hits`),     emoji: '&#9918;',   color: 'var(--accent)' };
-  if (st === 'home_runs')         return { text: _phaseVerb(phase, line<=1?`Bet ${name} hits a Home Run`:`Bet ${name} hits ${line}+ Home Runs`, `${name} is hitting HRs live`, `${name} hit ${line}+ HRs`), emoji: '&#128165;', color: 'var(--green)' };
-  if (st === 'rbi')               return { text: _phaseVerb(phase, `Bet ${name} drives in ${line}+ run${line!==1?'s':''}`, `${name} is driving in runs live`, `${name} drove in ${line}+`), emoji: '&#127919;', color: 'var(--accent)' };
-  if (st === 'runs')              return { text: _phaseVerb(phase, `Bet ${name} scores ${line}+ run${line!==1?'s':''}`, `${name} is scoring runs live`, `${name} scored ${line}+`),   emoji: '&#127939;', color: 'var(--green)' };
-  if (st === 'walks')             return { text: _phaseVerb(phase, `Bet ${name} draws ${line}+ walk${line!==1?'s':''}`, `${name} is drawing walks live`, `${name} drew ${line}+`),   emoji: '&#128694;', color: '#94a3b8' };
-  if (st === 'goals')           return { text: _phaseVerb(phase, `Bet ${name} scores ${line}+ goal${line!==1?'s':''}`, `${name} is scoring live`, `${name} scored ${line}+ goal${line!==1?'s':''}`),           emoji: '&#9917;',   color: 'var(--green)' };
-  if (st === 'assists')         return { text: _phaseVerb(phase, `Bet ${name} gets ${line}+ assist${line!==1?'s':''}`, `${name} is assisting live`, `${name} got ${line}+ assist${line!==1?'s':''}`),       emoji: '&#128200;', color: 'var(--accent)' };
-  if (st === 'shots_on_target') return { text: _phaseVerb(phase, `Bet ${name} has ${line}+ shots on target`, `${name} is on target live`, `${name} had ${line}+ on target`),                       emoji: '&#127919;', color: '#818cf8' };
-  if (st === 'shots')           return { text: _phaseVerb(phase, `Bet ${name} takes ${line}+ shot${line!==1?'s':''}`, `${name} is shooting live`, `${name} took ${line}+ shot${line!==1?'s':''}`),                         emoji: '&#128165;', color: 'var(--yellow)' };
-  if (st === 'key_passes')      return { text: _phaseVerb(phase, `Bet ${name} makes ${line}+ key passes`, `${name} is key passing live`, `${name} made ${line}+ key passes`),                            emoji: '&#128204;', color: '#a78bfa' };
-  if (st === 'dribbles')        return { text: _phaseVerb(phase, `Bet ${name} completes ${line}+ dribbles`, `${name} is dribbling live`, `${name} completed ${line}+ dribbles`),              emoji: '&#127939;', color: 'var(--accent)' };
-  if (st === 'tackles')         return { text: _phaseVerb(phase, `Bet ${name} makes ${line}+ tackle${line!==1?'s':''}`, `${name} is tackling live`, `${name} made ${line}+ tackle${line!==1?'s':''}`),   emoji: '&#129354;', color: 'var(--accent)' };
-  if (st === 'xg')              return { text: _phaseVerb(phase, `Bet ${name} xG ${line}+ this match`, `${name} xG live`, `${name} xG final`),                               emoji: '&#128262;', color: '#10b981' };
-  return { text: _phaseVerb(phase, `Bet ${name} OVER ${line} ${p.prop_label||st}`, `${name} prop is live`, `${name} prop is final`), emoji: '&#9650;', color: 'var(--accent)' };
+  if (st === 'goals')           return { text: _phaseVerb(phase, `Back ${name} for ${line}+ goal${line!==1?'s':''}`, `${name} goals prop is live`, `${name} goals prop is final`), emoji: '&#9917;', color: 'var(--green)' };
+  if (st === 'assists')         return { text: _phaseVerb(phase, `${name} for ${line}+ assist${line!==1?'s':''}`, `${name} assists prop is live`, `${name} assists prop is final`), emoji: '&#128200;', color: 'var(--accent)' };
+  if (st === 'shots_on_target') return { text: _phaseVerb(phase, `${name} for ${line}+ shots on target`, `${name} SOT prop is live`, `${name} SOT prop is final`), emoji: '&#127919;', color: '#818cf8' };
+  if (st === 'shots')           return { text: _phaseVerb(phase, `${name} for ${line}+ total shots`, `${name} shots prop is live`, `${name} shots prop is final`), emoji: '&#128165;', color: 'var(--yellow)' };
+  if (st === 'key_passes')      return { text: _phaseVerb(phase, `${name} for ${line}+ key passes`, `${name} key pass prop is live`, `${name} key pass prop is final`), emoji: '&#128204;', color: '#a78bfa' };
+  if (st === 'dribbles')        return { text: _phaseVerb(phase, `${name} for ${line}+ dribbles`, `${name} dribble prop is live`, `${name} dribble prop is final`), emoji: '&#127939;', color: 'var(--accent)' };
+  if (st === 'tackles')         return { text: _phaseVerb(phase, `${name} for ${line}+ tackle${line!==1?'s':''}`, `${name} tackles prop is live`, `${name} tackles prop is final`), emoji: '&#129354;', color: 'var(--accent)' };
+  if (st === 'xg')              return { text: _phaseVerb(phase, `${name} xG over ${line}`, `${name} xG prop is live`, `${name} xG prop is final`), emoji: '&#128262;', color: '#10b981' };
+  if (st === 'strikeouts')      return { text: _phaseVerb(phase, `${name} for ${line}+ strikeouts`, `${name} K prop is live`, `${name} K prop is final`), emoji: '&#128293;', color: '#a78bfa' };
+  if (st === 'hits')            return { text: _phaseVerb(phase, `${name} for ${line}+ hits`, `${name} hit prop is live`, `${name} hit prop is final`), emoji: '&#9918;', color: 'var(--accent)' };
+  if (st === 'home_runs')       return { text: _phaseVerb(phase, `${name} to homer`, `${name} HR prop is live`, `${name} HR prop is final`), emoji: '&#128165;', color: 'var(--green)' };
+  if (st === 'rbi')             return { text: _phaseVerb(phase, `${name} for ${line}+ RBI`, `${name} RBI prop is live`, `${name} RBI prop is final`), emoji: '&#127919;', color: 'var(--accent)' };
+  if (st === 'runs')            return { text: _phaseVerb(phase, `${name} to score ${line}+`, `${name} runs prop is live`, `${name} runs prop is final`), emoji: '&#127939;', color: 'var(--green)' };
+  if (st === 'walks')           return { text: _phaseVerb(phase, `${name} for ${line}+ walks`, `${name} walks prop is live`, `${name} walks prop is final`), emoji: '&#128694;', color: '#94a3b8' };
+  return { text: _phaseVerb(phase, `Take ${name} over ${line} ${(p.prop_label||st)}`.trim(), `${name} prop is live`, `${name} prop is final`), emoji: '&#9650;', color: 'var(--accent)' };
 }
 
 // ── Soccer card normalizer ─────────────────────────────────────────────────
@@ -1959,11 +1991,12 @@ function _expandedCardBody(c, phase) {
   const mlProb  = c.moneyline ? Math.round((c.moneyline.model_prob||0.5)*100) : null;
   const bestEdge = allBets.length ? Math.max(...allBets.map(b => b.edge||0)) : 0;
   const avgConf  = allBets.length ? Math.round(allBets.reduce((s,b)=>s+(b.model_prob||0.5),0)/allBets.length*100) : null;
-
   const stripColor = mlProb >= 65 ? 'var(--green)' : mlProb >= 55 ? 'var(--accent)' : 'var(--yellow)';
-  const propTotal  = [...(c.home_props||[]), ...(c.away_props||[])]
-    .filter(p=>(p.direction||'').toUpperCase()==='OVER')
-    .filter(p=>{ const lv=_lineValue(p.line); return !(Number.isFinite(lv)&&lv<=0.5); }).length;
+  const topProps = [...(c.home_props||[]), ...(c.away_props||[])]
+    .filter(p => (p.direction||'').toUpperCase() === 'OVER')
+    .filter(p => { const lv = _lineValue(p.line); return !(Number.isFinite(lv) && lv <= 0.5); })
+    .sort((a,b) => (b.model_prob||0) - (a.model_prob||0))
+    .slice(0, 6);
 
   // SVG arc gauge for win prob
   const arcSvg = mlProb != null ? _probArcSvg(mlProb, stripColor) : '';
@@ -1983,6 +2016,7 @@ function _expandedCardBody(c, phase) {
   </div>`;
 
   html += `<div class="card-body-inner">`;
+  html += _modalHeroInsights(allBets, topProps, mlProb, avgConf, bestEdge);
 
   // ── Game Bets ──
   const betRows = BET_DEFS.filter(d => c[d.key]).map(d => _xBetRow(d, c[d.key], c, phase));
@@ -1993,7 +2027,6 @@ function _expandedCardBody(c, phase) {
         <span class="xpanel-count">${betRows.length} bet${betRows.length>1?'s':''}</span>
       </div>
       <div class="xbet-list">${betRows.join('')}</div>
-      ${_betProbabilityChart(BET_DEFS.filter(d => c[d.key]).map(d => ({ label: d.label, prob: Math.round((c[d.key].model_prob||0.5)*100) })) )}
     </div>`;
   }
 
@@ -2036,24 +2069,101 @@ function _probArcSvg(pct, color) {
   </svg>`;
 }
 
-function _betProbabilityChart(bets) {
-  if (!bets.length) return '';
-  const barHeight = 20;
-  const barGap = 5;
-  const labelWidth = 100;
-  const chartWidth = 300;
-  const chartHeight = bets.length * (barHeight + barGap) - barGap;
-  let svg = `<svg width="${chartWidth + labelWidth}" height="${chartHeight}" class="bet-prob-chart" viewBox="0 0 ${chartWidth + labelWidth} ${chartHeight}">`;
-  bets.forEach((bet, i) => {
-    const y = i * (barHeight + barGap);
-    const barWidth = (bet.prob / 100) * chartWidth;
-    const color = bet.prob >= 70 ? 'var(--green)' : bet.prob >= 60 ? 'var(--accent)' : 'var(--yellow)';
-    svg += `<text x="0" y="${y + barHeight/2 + 5}" font-size="12" fill="var(--text)">${bet.label}</text>`;
-    svg += `<rect x="${labelWidth}" y="${y}" width="${barWidth}" height="${barHeight}" fill="${color}" rx="2"/>`;
-    svg += `<text x="${labelWidth + barWidth + 5}" y="${y + barHeight/2 + 5}" font-size="12" fill="var(--text)">${bet.prob}%</text>`;
-  });
-  svg += '</svg>';
-  return `<div class="bet-prob-chart-wrap"><div class="chart-title">Bet Probabilities</div>${svg}</div>`;
+function _modalHeroInsights(allBets, topProps, mlProb, avgConf, bestEdge) {
+  const betTrend = (allBets || []).map(b => Math.round((b.model_prob || 0.5) * 100)).sort((a,b) => b - a).slice(0, 7);
+  if (!betTrend.length) betTrend.push(50, 52, 48, 53, 51);
+
+  const propTrend = (topProps || []).map(p => Math.round((p.model_prob || 0.5) * 100)).slice(0, 7);
+  if (!propTrend.length) propTrend.push(49, 51, 50, 52, 48);
+
+  const propAvg = propTrend.length ? Math.round(propTrend.reduce((s,v) => s + v, 0) / propTrend.length) : null;
+  const betAvg = avgConf != null
+    ? avgConf
+    : Math.round(betTrend.reduce((s,v) => s + v, 0) / Math.max(1, betTrend.length));
+  const winVibe = mlProb != null ? mlProb : 50;
+  const heat = bestEdge > 0.08 ? 'very hot' : bestEdge > 0.03 ? 'warm edge' : bestEdge > 0 ? 'small edge' : 'coin flip';
+
+  return `<div class="modal-hero-grid">
+    <div class="modal-hero-card">
+      <div class="hero-chart-title">Momentum Graph</div>
+      <div class="hero-chart-sub">Model pulse across your best angles and player props.</div>
+      ${_heroTrendSvg(betTrend, propTrend)}
+    </div>
+    <div class="modal-hero-card">
+      <div class="hero-chart-title">Quick Read</div>
+      <div class="hero-chart-sub">One-glance feel before you lock anything in.</div>
+      <div class="hero-kpis">
+        <div class="hero-kpi"><span>win vibe</span><strong>${winVibe}%</strong></div>
+        <div class="hero-kpi"><span>bet avg</span><strong>${betAvg}%</strong></div>
+        <div class="hero-kpi"><span>edge temp</span><strong>${heat}</strong></div>
+      </div>
+      ${_heroBarsSvg([winVibe, betAvg, propAvg != null ? propAvg : 50], ['Win', 'Bets', 'Props'])}
+    </div>
+  </div>`;
+}
+
+function _heroTrendSvg(primaryValues, secondaryValues) {
+  const w = 320;
+  const h = 104;
+  const padX = 14;
+  const padY = 12;
+
+  const pVals = (primaryValues && primaryValues.length ? primaryValues : [50, 52, 48, 53, 51]).map(v => Math.max(35, Math.min(100, v)));
+  const sVals = (secondaryValues && secondaryValues.length ? secondaryValues : [49, 51, 50, 52, 48]).map(v => Math.max(35, Math.min(100, v)));
+  const len = Math.max(pVals.length, sVals.length, 2);
+
+  const expand = (arr) => {
+    if (!arr.length) return Array.from({ length: len }, () => 50);
+    if (arr.length >= len) return arr.slice(0, len);
+    const out = [...arr];
+    while (out.length < len) out.push(arr[arr.length - 1]);
+    return out;
+  };
+
+  const p = expand(pVals);
+  const s = expand(sVals);
+
+  const xAt = (idx) => padX + (idx * (w - padX * 2) / (len - 1));
+  const yAt = (val) => h - padY - ((val - 35) / 65) * (h - padY * 2);
+
+  const pPts = p.map((v, i) => `${xAt(i).toFixed(1)},${yAt(v).toFixed(1)}`).join(' ');
+  const sPts = s.map((v, i) => `${xAt(i).toFixed(1)},${yAt(v).toFixed(1)}`).join(' ');
+  const area = `${pPts} ${xAt(len - 1).toFixed(1)},${(h - padY).toFixed(1)} ${xAt(0).toFixed(1)},${(h - padY).toFixed(1)}`;
+
+  return `<svg class="hero-trend-svg" viewBox="0 0 ${w} ${h}" role="img" aria-label="bet trend chart">
+    <line x1="${padX}" y1="${h-padY}" x2="${w-padX}" y2="${h-padY}" stroke="rgba(148,163,184,.2)"/>
+    <polygon points="${area}" fill="rgba(20,184,166,.22)"/>
+    <polyline points="${sPts}" fill="none" stroke="rgba(99,102,241,.65)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    <polyline points="${pPts}" fill="none" stroke="rgba(20,184,166,.96)" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+  </svg>`;
+}
+
+function _heroBarsSvg(values, labels) {
+  const vals = (values || [50, 50, 50]).map(v => Math.max(0, Math.min(100, Number(v) || 0)));
+  const labs = labels || ['A', 'B', 'C'];
+  const w = 248;
+  const h = 96;
+  const barW = 42;
+  const gap = 26;
+  const x0 = 16;
+  const base = 72;
+
+  const colors = vals.map(v => v >= 66 ? 'rgba(34,197,94,.9)' : (v >= 55 ? 'rgba(20,184,166,.92)' : (v >= 45 ? 'rgba(234,179,8,.9)' : 'rgba(239,68,68,.9)')));
+
+  const bars = vals.map((v, i) => {
+    const bh = Math.max(8, (v / 100) * 52);
+    const x = x0 + i * (barW + gap);
+    const y = base - bh;
+    return `
+      <rect x="${x}" y="${y.toFixed(1)}" width="${barW}" height="${bh.toFixed(1)}" rx="6" fill="${colors[i]}"/>
+      <text x="${x + barW/2}" y="${(y - 4).toFixed(1)}" fill="#d8e7f7" font-size="10" text-anchor="middle">${Math.round(v)}%</text>
+      <text x="${x + barW/2}" y="${base + 14}" fill="#90a6be" font-size="9" text-anchor="middle">${labs[i] || ''}</text>`;
+  }).join('');
+
+  return `<svg class="hero-bars-svg" viewBox="0 0 ${w} ${h}" role="img" aria-label="confidence bars">
+    <line x1="10" y1="${base}" x2="${w - 10}" y2="${base}" stroke="rgba(148,163,184,.25)"/>
+    ${bars}
+  </svg>`;
 }
 
 function _xBetRow(def, bet, card, phase) {
@@ -2118,7 +2228,7 @@ function _xPropsPanel(c, phase) {
   const total = hp.length + ap.length;
   let html = `<div class="xpanel" style="margin-top:10px">
     <div class="xpanel-head">
-      <span class="xpanel-title">🎯 Player Props — OVER</span>
+      <span class="xpanel-title">🎯 Player Prop Heat</span>
       <span class="xpanel-count">${total} prop${total>1?'s':''}</span>
     </div>
     <div class="xprop-list">`;
@@ -2131,10 +2241,28 @@ function _xPropsPanel(c, phase) {
     html += `<div class="xprop-team-divider">🏠 ${c.home_team}</div>`;
     html += hp.map(p => _xPropRow(p, phase)).join('');
   }
-  const allProps = [...ap, ...hp];
-  html += _propProbabilityChart(allProps);
   html += `</div></div>`;
   return html;
+}
+
+function _propConfidenceDial(prob, sl) {
+  const p = Math.max(0, Math.min(100, prob || 0));
+  const r = 15;
+  const c = 2 * Math.PI * r;
+  const fill = c * (p / 100);
+  const color = sl === 'ELITE'
+    ? 'rgba(34,197,94,.96)'
+    : sl === 'SAFE'
+      ? 'rgba(20,184,166,.96)'
+      : sl === 'MODERATE'
+        ? 'rgba(234,179,8,.95)'
+        : 'rgba(239,68,68,.95)';
+
+  return `<svg class="xprop-dial" viewBox="0 0 44 44" role="img" aria-label="${p}% confidence">
+    <circle class="xprop-dial-track" cx="22" cy="22" r="${r}"/>
+    <circle class="xprop-dial-fill" cx="22" cy="22" r="${r}" stroke="${color}" stroke-dasharray="${fill.toFixed(2)} ${c.toFixed(2)}"/>
+    <text class="xprop-dial-text" x="22" y="22">${p}%</text>
+  </svg>`;
 }
 
 function _xPropRow(p, phase) {
@@ -2169,13 +2297,15 @@ function _xPropRow(p, phase) {
 
   return `<div class="xprop-row">
     <div class="xprop-top">
-      <div>
+      <div class="xprop-main">
         <div class="xprop-name">${p.name||'—'} <span class="xprop-team-tag">${p.team?'('+p.team+')':''}</span></div>
         <div class="xprop-stat-type">${stat}</div>
+        <div class="xprop-phrase">${phrase}</div>
       </div>
       <div class="xprop-right">
-        <span class="xprop-line" style="color:${probColor}">${p.line}</span>
-        <span class="xprop-dir ${dir}">${dir}</span>
+        ${_propConfidenceDial(prob, sl)}
+        <span class="xprop-dir ${dir}">${dir} ${p.line}</span>
+        <span class="xprop-line" style="color:${probColor}">${prob}% hit vibe</span>
       </div>
     </div>
     <div class="xbet-bar-wrap" style="height:20px">
@@ -2186,30 +2316,6 @@ function _xPropRow(p, phase) {
     ${barsHtml}
     ${rationale ? `<div class="xprop-rationale">📊 ${rationale}</div>` : ''}
   </div>`;
-}
-
-function _propProbabilityChart(props) {
-  if (!props.length) return '';
-  const barHeight = 15;
-  const barGap = 3;
-  const labelWidth = 120;
-  const chartWidth = 200;
-  const chartHeight = props.length * (barHeight + barGap) - barGap;
-  let svg = `<svg width="${chartWidth + labelWidth}" height="${chartHeight}" class="prop-prob-chart" viewBox="0 0 ${chartWidth + labelWidth} ${chartHeight}">`;
-  props.forEach((p, i) => {
-    const y = i * (barHeight + barGap);
-    const prob = Math.round((p.model_prob||0.5)*100);
-    const barWidth = (prob / 100) * chartWidth;
-    const color = prob >= 70 ? 'var(--green)' : prob >= 60 ? 'var(--accent)' : 'var(--yellow)';
-    const name = p.name || '—';
-    const stat = (p.prop_label || p.stat_type || '').replace(/_/g,' ');
-    const label = `${name} ${stat}`;
-    svg += `<text x="0" y="${y + barHeight/2 + 4}" font-size="10" fill="var(--text)" text-anchor="start">${label.length > 15 ? label.substring(0,15)+'...' : label}</text>`;
-    svg += `<rect x="${labelWidth}" y="${y}" width="${barWidth}" height="${barHeight}" fill="${color}" rx="1"/>`;
-    svg += `<text x="${labelWidth + barWidth + 3}" y="${y + barHeight/2 + 4}" font-size="10" fill="var(--text)">${prob}%</text>`;
-  });
-  svg += '</svg>';
-  return `<div class="prop-prob-chart-wrap"><div class="chart-title">Player Prop Probabilities</div>${svg}</div>`;
 }
 
 function quickChip(label, bet) {
