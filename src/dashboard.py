@@ -955,6 +955,110 @@ def _build_model_fallback_bets(games: list[dict]) -> list[dict]:
     return deduped
 
 
+def _multi_sport_best_bets_rows(bets: list[dict]) -> list[dict]:
+    """Convert ranked game bets into rows consumed by the Best Bets table."""
+    rows: list[dict] = []
+    seen = set()
+
+    for b in (bets or []):
+        if not isinstance(b, dict):
+            continue
+
+        pick = str(b.get("pick") or b.get("pick_label") or "").strip()
+        if not pick:
+            continue
+
+        market = str(b.get("bet_type") or "best_bet").strip() or "best_bet"
+        sport = _infer_sport_group(b.get("sport") or b.get("competition") or b.get("league") or "")
+        home = str(b.get("home_team") or "").strip()
+        away = str(b.get("away_team") or "").strip()
+        game_date = str(b.get("game_date") or b.get("date") or "").strip()
+        game_time = str(b.get("game_time") or "")
+        game_key = str(b.get("game_key") or "").strip()
+        if not game_key and (home and away):
+            game_key = _compose_game_key(away, home, b.get("game_datetime"), game_date, game_time)
+
+        # Keep a stable, compact stat token for table filters and sorting.
+        stat_type = re.sub(r"[^a-z0-9_]+", "_", market.lower()).strip("_") or "best_bet"
+        prop_label = market.replace("_", " ").strip().title() or "Best Bet"
+
+        prob_raw = b.get("model_prob", b.get("probability", 0.5))
+        try:
+            prob = float(prob_raw)
+        except (TypeError, ValueError):
+            prob = 0.5
+        prob = max(0.01, min(0.99, prob))
+
+        direction = ""
+        pick_up = pick.upper()
+        if "OVER" in pick_up:
+            direction = "OVER"
+        elif "UNDER" in pick_up:
+            direction = "UNDER"
+
+        team = str(b.get("team") or "").strip()
+        if not team:
+            if home and home.upper() in pick_up:
+                team = home
+            elif away and away.upper() in pick_up:
+                team = away
+            else:
+                team = str(b.get("competition_name") or b.get("league") or sport.upper() or "SPORT")
+
+        dec_odds = b.get("dec_odds")
+        try:
+            dec_odds_f = float(dec_odds)
+        except (TypeError, ValueError):
+            dec_odds_f = None
+
+        ev_val = b.get("ev")
+        try:
+            ev = float(ev_val)
+        except (TypeError, ValueError):
+            if dec_odds_f and dec_odds_f > 1:
+                ev = (dec_odds_f - 1.0) * prob - (1.0 - prob)
+            else:
+                ev = 0.0
+
+        row = {
+            "sport": sport,
+            "name": pick,
+            "team": team,
+            "prop_label": prop_label,
+            "stat_type": stat_type,
+            "line": b.get("line"),
+            "direction": direction,
+            "model_prob": prob,
+            "safety_label": str(b.get("safety_label") or _safety_label_from_prob(prob)).upper(),
+            "ev": ev,
+            "odds_am": b.get("odds_am"),
+            "dec_odds": dec_odds_f,
+            "confidence": int(b.get("confidence") or round(prob * 100)),
+            "pick": pick,
+            "game": b.get("game") or (f"{away} @ {home}" if (away and home) else ""),
+            "game_key": game_key,
+            "match_key": b.get("match_key") or _norm_gk(f"{away}@{home}") if (away and home) else "",
+            "game_date": game_date,
+            "game_time": game_time,
+            "league": b.get("league"),
+            "competition": b.get("competition"),
+            "competition_name": b.get("competition_name") or b.get("league"),
+        }
+
+        dedupe_key = (
+            str(row.get("game_key") or ""),
+            str(row.get("stat_type") or ""),
+            str(row.get("pick") or ""),
+        )
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        rows.append(row)
+
+    rows.sort(key=lambda x: float(x.get("model_prob") or 0.0), reverse=True)
+    return rows[:300]
+
+
 def _build_multi_sport_snapshot(force_refresh: bool = False) -> dict:
     now = datetime.datetime.now(datetime.timezone.utc).timestamp()
     if not force_refresh:
@@ -1178,7 +1282,10 @@ def _run_all_sports_analysis():
         _phase(1)
         games = snapshot.get("games") or []
         bets = snapshot.get("bets") or []
+        best_bet_rows = _multi_sport_best_bets_rows(bets)
         _log(f"[all-sports] Pulled {len(games)} games and {len(bets)} ranked bets")
+        if best_bet_rows:
+            _log(f"[all-sports] Best-bets table rows prepared: {len(best_bet_rows)}")
 
         today_str = _et_calendar_today().isoformat()
         tomorrow_str = (_et_calendar_today() + datetime.timedelta(days=1)).isoformat()
@@ -1214,7 +1321,7 @@ def _run_all_sports_analysis():
                 "game_cards_today": _clean(today_cards),
                 "game_cards_tomorrow": _clean(tomorrow_cards),
                 "best_parlays": _clean(best_parlays),
-                "player_props": [],
+                "player_props": _clean(best_bet_rows),
                 "elite_parlay": None,
             })
 
@@ -1224,7 +1331,7 @@ def _run_all_sports_analysis():
             "game_cards_today": _clean(today_cards),
             "game_cards_tomorrow": _clean(tomorrow_cards),
             "best_parlays": _clean(best_parlays),
-            "player_props": [],
+            "player_props": _clean(best_bet_rows),
             "elite_parlay": None,
         })
         _log(f"[all-sports] Complete — {len(today_cards)} today, {len(tomorrow_cards)} tomorrow")
@@ -2122,6 +2229,7 @@ def api_cached_state():
             today_games = [g for g in all_games if str(g.get("game_date") or "") == today_str]
             tomorrow_games = [g for g in all_games if str(g.get("game_date") or "") == tomorrow_str]
             all_bets = snap.get("bets") or []
+            fallback_props = _multi_sport_best_bets_rows(all_bets)
             fallback_today = [_build_card(g, all_bets, [], "TODAY") for g in today_games]
             fallback_tomorrow = [_build_card(g, all_bets, [], "TOMORROW") for g in tomorrow_games]
         elif _ACTIVE_SPORT == "soccer":
@@ -2149,7 +2257,7 @@ def api_cached_state():
                 "game_cards_today": fallback_today,
                 "game_cards_tomorrow": fallback_tomorrow,
                 "best_parlays": [],
-                "player_props": [],
+                "player_props": _clean(fallback_props) if _ACTIVE_SPORT == "all" else [],
                 "elite_parlay": None,
             })
     except Exception:
@@ -3054,6 +3162,7 @@ def _load_boot_schedule_fallback() -> bool:
             snap = _build_multi_sport_snapshot(force_refresh=False)
             all_games = snap.get("games") or []
             all_bets = snap.get("bets") or []
+            boot_props = _multi_sport_best_bets_rows(all_bets)
             today_games = [g for g in all_games if str(g.get("game_date") or "") == today_str]
             tomorrow_games = [g for g in all_games if str(g.get("game_date") or "") == tomorrow_str]
             today_cards = [_build_card(g, all_bets, [], "TODAY") for g in today_games]
@@ -3080,7 +3189,7 @@ def _load_boot_schedule_fallback() -> bool:
                 "game_cards_today": today_cards,
                 "game_cards_tomorrow": tomorrow_cards,
                 "best_parlays": [],
-                "player_props": [],
+                "player_props": _clean(boot_props) if _ACTIVE_SPORT == "all" else [],
                 "last_updated": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
             })
 
