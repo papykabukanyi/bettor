@@ -481,13 +481,13 @@ body.modal-open{overflow:hidden}
 /* ── No-data helpers ── */
 .no-games{text-align:center;padding:40px 20px;color:var(--muted);font-size:.9rem}
 
-@media (min-width: 981px){
+@media (min-width: 761px){
   .card-expand-btn{display:none}
   .game-card .card-body,
   .game-card.expanded .card-body{display:none !important;max-height:0 !important;opacity:0 !important;border-top:none !important}
 }
 
-@media (max-width: 980px){
+@media (max-width: 760px){
   .modal.game-details-modal{width:calc(100vw - 8px);height:calc(100vh - 8px)}
   .modal.game-details-modal .modal-close{top:10px;right:10px}
   .game-details-head{padding:18px 16px 14px}
@@ -2514,7 +2514,7 @@ function toggleCard(cardEl) {
 }
 
 function _useGameDetailsModal() {
-  return window.matchMedia('(min-width: 981px)').matches;
+  return window.matchMedia('(min-width: 761px)').matches;
 }
 
 function _allDashboardCards() {
@@ -2581,7 +2581,7 @@ function _gameDetailsMarkup(card) {
 let _gameDetailsFitRaf = null;
 
 function _isDesktopDetailsViewport() {
-  return !!(window.matchMedia && window.matchMedia('(min-width: 981px)').matches);
+  return !!(window.matchMedia && window.matchMedia('(min-width: 761px)').matches);
 }
 
 function _fitGameDetailsModal() {
