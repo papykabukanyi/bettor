@@ -440,12 +440,13 @@ main{padding:20px;max-width:1400px;margin:0 auto}
 .modal-overlay{position:fixed;inset:0;background:rgba(1,7,14,.72);backdrop-filter:blur(6px);z-index:100;
   display:flex;align-items:center;justify-content:center;padding:20px;overflow:hidden}
 .modal-overlay.hidden{display:none}
+#game-details-modal{align-items:flex-start;padding:10px 14px 14px;overflow:auto}
 .modal{background:var(--card);border:1px solid var(--border);border-radius:12px;
   padding:24px;max-width:480px;width:100%}
 .modal h2{font-size:1rem;font-weight:600;margin-bottom:16px}
 .modal-close{float:right;background:none;border:none;color:var(--muted);
   font-size:1.2rem;cursor:pointer;line-height:1}
-.modal.game-details-modal{position:relative;padding:0;width:min(1400px,calc(100vw - 22px));height:calc(100vh - 22px);max-width:none;max-height:none;overflow:hidden;
+.modal.game-details-modal{position:relative;padding:0;width:min(1380px,calc(100vw - 28px));height:min(940px,calc(100dvh - 24px));max-width:none;max-height:calc(100dvh - 24px);overflow:hidden;margin:0 auto;
   border:1px solid rgba(56,189,248,.22);
   box-shadow:0 35px 80px rgba(0,0,0,.62),0 0 0 1px rgba(14,116,144,.2) inset;
   background:linear-gradient(170deg,rgba(5,10,18,.98),rgba(5,9,17,.98));
@@ -454,18 +455,34 @@ main{padding:20px;max-width:1400px;margin:0 auto}
   width:32px;height:32px;border-radius:50%;border:1px solid rgba(148,163,184,.3);
   background:rgba(2,6,23,.7);color:#dbe9f8;display:grid;place-items:center;z-index:3}
 .modal.game-details-modal .modal-close:hover{border-color:rgba(56,189,248,.55);color:#fff;background:rgba(15,23,42,.92)}
-.game-details-head{padding:24px 24px 18px;border-bottom:1px solid rgba(56,189,248,.16);
+.game-details-head{padding:18px 54px 14px 18px;border-bottom:1px solid rgba(56,189,248,.16);
   background:
     radial-gradient(110% 130% at 4% 0%, rgba(20,184,166,.26), transparent 52%),
     radial-gradient(90% 110% at 100% 0%, rgba(59,130,246,.22), transparent 56%),
     linear-gradient(135deg,rgba(20,184,166,.09),rgba(59,130,246,.05));
   flex:0 0 auto}
 .game-details-label{font-size:.68rem;letter-spacing:.16em;text-transform:uppercase;color:var(--muted);font-weight:700}
-.game-details-title{margin:8px 0 10px;font-size:1.56rem;font-weight:700;line-height:1.15}
-.game-details-meta{display:flex;flex-wrap:wrap;gap:8px;color:#bfd0e3;font-size:.82rem}
-.game-details-chip{padding:5px 10px;border-radius:999px;background:rgba(15,23,42,.55);border:1px solid rgba(148,163,184,.22)}
-.game-details-content{flex:1 1 auto;min-height:0;overflow:auto;padding:0 0 8px;display:block}
-.game-details-content .card-body-inner{padding:0 20px 20px;width:min(1280px,100%);max-width:100%;margin:0 auto;transform:none !important}
+.game-details-title{margin:6px 0 8px;font-size:1.42rem;font-weight:700;line-height:1.1}
+.game-details-meta{display:flex;flex-wrap:wrap;gap:6px;color:#bfd0e3;font-size:.78rem}
+.game-details-chip{padding:4px 9px;border-radius:999px;background:rgba(15,23,42,.55);border:1px solid rgba(148,163,184,.22)}
+.game-details-content{flex:1 1 auto;min-height:0;overflow:auto;padding:0 0 10px;display:block}
+.game-details-content .card-body-inner{padding:0 16px 16px;width:min(1200px,100%);max-width:100%;margin:0 auto;transform:none !important}
+.game-details-content .card-expand-strip{gap:8px;padding:10px 12px 9px}
+.game-details-content .modal-hero-grid{grid-template-columns:minmax(0,1fr) minmax(0,.92fr);gap:10px;margin-top:10px}
+.game-details-content .modal-hero-card{padding:10px}
+.game-details-content .hero-kpis{gap:6px;margin-top:8px}
+.game-details-content .xpanel{margin-top:10px}
+.game-details-content .xpanel-head{padding:9px 12px}
+.game-details-content .xbet-row,.game-details-content .xprop-row{padding:10px 12px}
+.game-details-content .xbet-top,.game-details-content .xprop-top{margin-bottom:7px}
+.modal.game-details-modal.game-details-compact .game-details-head{padding:14px 50px 10px 16px}
+.modal.game-details-modal.game-details-compact .game-details-title{font-size:1.22rem;margin:4px 0 6px}
+.modal.game-details-modal.game-details-compact .game-details-meta{font-size:.74rem;gap:5px}
+.modal.game-details-modal.game-details-compact .game-details-content .card-body-inner{padding:0 12px 12px;width:min(1080px,100%)}
+.modal.game-details-modal.game-details-compact .game-details-content .card-expand-strip{padding:8px 10px 8px}
+.modal.game-details-modal.game-details-compact .game-details-content .modal-hero-grid{grid-template-columns:1fr;gap:8px;margin-top:8px}
+.modal.game-details-modal.game-details-compact .game-details-content .hero-kpis{margin-top:6px}
+.modal.game-details-modal.game-details-compact .game-details-content .xpanel{margin-top:8px}
 body.modal-open{overflow:hidden}
 .form-row{margin-bottom:12px}
 .form-row label{display:block;font-size:.78rem;color:var(--muted);margin-bottom:4px}
@@ -499,7 +516,8 @@ body.modal-open{overflow:hidden}
 }
 
 @media (max-width: 760px){
-  .modal.game-details-modal{width:calc(100vw - 8px);height:calc(100vh - 8px)}
+  #game-details-modal{padding:4px;overflow:hidden}
+  .modal.game-details-modal{width:calc(100vw - 8px);height:calc(100dvh - 8px);max-height:calc(100dvh - 8px)}
   .modal.game-details-modal .modal-close{top:10px;right:10px}
   .game-details-head{padding:18px 16px 14px}
   .game-details-title{font-size:1.15rem}
@@ -787,10 +805,10 @@ body.console-open main{padding-bottom:236px}
   <!-- PARLAYS -->
   <div class="tab-panel" id="panel-parlays">
     <div class="section-header">
-      <span class="section-title">&#127917; Auto Parlays — Built from Props</span>
+      <span class="section-title">&#127917; Auto Parlays — Mixed Highest-Confidence Bets</span>
       <span class="section-meta" id="parlay-auto-meta"></span>
     </div>
-    <div id="parlay-combos-empty" class="no-games hidden">Run analysis to generate props first.</div>
+    <div id="parlay-combos-empty" class="no-games hidden">Run analysis to generate game bets and player props first.</div>
     <div class="parlay-combo-grid" id="parlay-combos-grid"></div>
 
     <div class="section-header" style="margin-top:28px">
@@ -895,6 +913,7 @@ let BEST_PARLAYS   = {{ best_parlays|tojson }};
 let ALL_PROPS      = (function(v){ return Array.isArray(v) ? v : []; })({{ all_props|tojson }});
 const ACTIVE_SPORT = {{ (active_sport or 'mlb')|tojson }};
 let AUTO_PROP_PARLAY = null;
+let AUTO_PARLAY_COMBOS = [];
 let BEST_LEGS      = [];
 let AUTO_MIX_LEGS  = [];
 let parlayLegs     = [];
@@ -2797,12 +2816,29 @@ function _isDesktopDetailsViewport() {
 function _fitGameDetailsModal() {
   const modalOverlay = document.getElementById('game-details-modal');
   if (!modalOverlay || modalOverlay.classList.contains('hidden')) return;
+  const modal = modalOverlay.querySelector('.modal.game-details-modal');
   const inner = modalOverlay.querySelector('.game-details-content .card-body-inner');
-  if (!inner) return;
+  if (!modal || !inner) return;
 
-  // Keep modal content at natural scale and rely on internal scrolling.
+  const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
+  const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+  const desktop = _isDesktopDetailsViewport();
+  const compact = desktop && (viewportHeight < 880 || viewportWidth < 1180);
+
+  modal.classList.toggle('game-details-compact', compact);
+  if (desktop) {
+    const usableHeight = Math.max(560, Math.min(940, viewportHeight - 24));
+    modal.style.height = `${usableHeight}px`;
+    modal.style.maxHeight = `${Math.max(560, viewportHeight - 24)}px`;
+  } else {
+    modal.style.height = '';
+    modal.style.maxHeight = '';
+  }
+
   inner.style.transform = 'none';
-  inner.style.width = _isDesktopDetailsViewport() ? 'min(1280px,100%)' : '100%';
+  inner.style.width = desktop
+    ? (compact ? 'min(1080px,100%)' : 'min(1200px,100%)')
+    : '100%';
 }
 
 function _scheduleGameDetailsFit() {
@@ -2920,18 +2956,131 @@ function _mixPropsByType(props) {
   return mixed;
 }
 
+function _legSourceGroup(leg) {
+  const source = String((leg && leg.source) || '').toLowerCase();
+  if (source === 'prop') return 'prop';
+  if (source === 'game') return 'game';
+  return 'combo';
+}
+
+function _legDisplayText(leg) {
+  if (!leg) return '—';
+  if (leg.display_label) return leg.display_label;
+  if (_legSourceGroup(leg) === 'prop' && leg.name) {
+    return plainEnglishPropText(leg).text;
+  }
+  return leg.label || leg.pick || '—';
+}
+
+function _comboCandidateLegs() {
+  const legs = buildLegPool().filter(leg => {
+    const source = _legSourceGroup(leg);
+    if (source !== 'prop' && source !== 'game') return false;
+    const minProb = source === 'prop' ? 0.58 : 0.55;
+    return _legProb(leg) >= minProb;
+  });
+  legs.sort((a, b) => {
+    const probDelta = _legProb(b) - _legProb(a);
+    if (Math.abs(probDelta) > 1e-9) return probDelta;
+    const evDelta = (b.ev || 0) - (a.ev || 0);
+    if (Math.abs(evDelta) > 1e-9) return evDelta;
+    return _legDec(b) - _legDec(a);
+  });
+  return legs;
+}
+
+function _buildMixedCombo(candidates, legCount, seed) {
+  const pool = _asArray(candidates);
+  if (pool.length < legCount || legCount < 2) return null;
+
+  const props = pool.filter(leg => _legSourceGroup(leg) === 'prop');
+  const games = pool.filter(leg => _legSourceGroup(leg) === 'game');
+  const availableSports = new Set(pool.map(leg => _sportMetaFromKey(leg.sport || '').key).filter(key => key && key !== 'other'));
+  const shouldMixSources = props.length > 0 && games.length > 0;
+
+  const selected = [];
+  const usedGames = new Set();
+  const usedPlayers = new Set();
+  const usedSports = new Set();
+
+  const addLeg = (leg, allowRepeatSport) => {
+    if (!leg) return false;
+    const gameKey = String(leg.game || leg.game_key || '').trim();
+    const playerKey = String(leg.player || leg.name || '').trim().toLowerCase();
+    const sportKey = _sportMetaFromKey(leg.sport || '').key;
+    if (gameKey && usedGames.has(gameKey)) return false;
+    if (playerKey && usedPlayers.has(playerKey)) return false;
+    if (!allowRepeatSport && sportKey && sportKey !== 'other' && usedSports.has(sportKey)) return false;
+    selected.push(leg);
+    if (gameKey) usedGames.add(gameKey);
+    if (playerKey) usedPlayers.add(playerKey);
+    if (sportKey && sportKey !== 'other') usedSports.add(sportKey);
+    return true;
+  };
+
+  const pickFrom = (list, startIndex, predicate, allowRepeatSport) => {
+    if (!list.length) return false;
+    const start = Math.max(0, startIndex || 0);
+    for (let offset = 0; offset < list.length; offset++) {
+      const leg = list[(start + offset) % list.length];
+      if (!leg || selected.includes(leg)) continue;
+      if (predicate && !predicate(leg)) continue;
+      if (addLeg(leg, allowRepeatSport)) return true;
+    }
+    return false;
+  };
+
+  const propSeed = props.length ? (seed || 0) % props.length : 0;
+  const gameSeed = games.length ? (seed || 0) % games.length : 0;
+  const allSeed = pool.length ? (seed || 0) % pool.length : 0;
+
+  if (shouldMixSources) {
+    pickFrom(props, propSeed, null, false);
+    if (!pickFrom(games, gameSeed, leg => !usedSports.has(_sportMetaFromKey(leg.sport || '').key), false)) {
+      pickFrom(games, gameSeed, null, true);
+    }
+  } else {
+    pickFrom(pool, allSeed, null, false);
+  }
+
+  while (selected.length < legCount) {
+    const wantNewSport = usedSports.size < Math.min(legCount, availableSports.size || 0);
+    const startIndex = (allSeed + selected.length) % pool.length;
+    if (wantNewSport && pickFrom(pool, startIndex, leg => {
+      const sportKey = _sportMetaFromKey(leg.sport || '').key;
+      return sportKey && sportKey !== 'other' && !usedSports.has(sportKey);
+    }, false)) {
+      continue;
+    }
+    if (!pickFrom(pool, startIndex, null, true)) break;
+  }
+
+  if (selected.length !== legCount) return null;
+  if (shouldMixSources) {
+    const hasProp = selected.some(leg => _legSourceGroup(leg) === 'prop');
+    const hasGame = selected.some(leg => _legSourceGroup(leg) === 'game');
+    if (!hasProp || !hasGame) return null;
+  }
+  if (availableSports.size > 1) {
+    const selectedSports = new Set(selected.map(leg => _sportMetaFromKey(leg.sport || '').key).filter(key => key && key !== 'other'));
+    if (selectedSports.size < Math.min(2, availableSports.size, legCount)) return null;
+  }
+  return selected;
+}
+
 function _autoParlayPayload(c) {
   return {
-    name: `Auto ${c.n}-Leg Props Parlay`,
+    name: `Auto ${c.n}-Leg Mixed Parlay`,
     legs: _asArray(c.legs).map(p => {
-      const ppt = plainEnglishPropText(p);
       return {
-        label: ppt.text,
-        bet_type: 'player_prop',
+        label: _legDisplayText(p),
+        bet_type: p.bet_type || (_legSourceGroup(p) === 'prop' ? 'player_prop' : 'game_pick'),
         game: p.game_key || p.game || '',
         dec_odds: _legDec(p) || 1.9,
         conf: Math.round(_legProb(p) * 100),
-        badge: p.safety_label || 'MODERATE',
+        badge: p.badge || p.safety_label || 'MODERATE',
+        source: _legSourceGroup(p),
+        sport: p.sport || '',
       };
     }),
     combined_odds: c.dec ?? 0,
@@ -2941,12 +3090,13 @@ function _autoParlayPayload(c) {
 
 function _autoParlaySignature(c) {
   const parts = _asArray(c.legs).map(p => {
-    const player = (p.name || '').trim().toLowerCase();
-    const stat = (p.prop_label || p.stat_type || '').trim().toLowerCase();
+    const source = _legSourceGroup(p);
+    const sport = String(p.sport || '').trim().toLowerCase();
+    const label = _legDisplayText(p).trim().toLowerCase();
     const dir = (p.direction || '').trim().toUpperCase();
     const line = String(p.line ?? '');
     const game = (p.game_key || p.game || '').trim().toLowerCase();
-    return `${player}|${stat}|${dir}|${line}|${game}`;
+    return `${source}|${sport}|${label}|${dir}|${line}|${game}`;
   });
   return `${c.n || parts.length}:${parts.join('||')}`;
 }
@@ -2992,53 +3142,48 @@ function _autoTrackParlayCombos(combos) {
 }
 
 function autoGenParlaysFromProps() {
-  const qualified = _publicOverProps(ALL_PROPS || [])
-    .filter(p => _legProb(p) >= 0.61)
-    .sort((a,b) => _legProb(b) - _legProb(a));
-  const mixedQualified = _mixPropsByType(qualified);
+  const candidateLegs = _comboCandidateLegs();
+  const propCount = candidateLegs.filter(leg => _legSourceGroup(leg) === 'prop').length;
+  const gameCount = candidateLegs.filter(leg => _legSourceGroup(leg) === 'game').length;
 
   const grid  = document.getElementById('parlay-combos-grid');
   const empty = document.getElementById('parlay-combos-empty');
   const meta  = document.getElementById('parlay-auto-meta');
   if (!grid) return;
 
-  if (!qualified.length) {
+  if (!candidateLegs.length) {
+    AUTO_PROP_PARLAY = null;
+    AUTO_PARLAY_COMBOS = [];
     grid.innerHTML = '';
     if (empty) empty.classList.remove('hidden');
-    if (meta) meta.textContent = 'No qualifying props yet — run analysis first.';
+    if (meta) meta.textContent = 'No qualifying game bets or props yet — run analysis first.';
     return;
   }
   if (empty) empty.classList.add('hidden');
 
   const combos = [];
-  const maxLegs = Math.min(5, qualified.length);
+  const maxLegs = Math.min(5, candidateLegs.length);
   for (let n = 2; n <= maxLegs; n++) {
-    const legs = [];
-    const usedGames   = new Set();
-    const usedPlayers = new Set();
-    for (let i = 0; i < mixedQualified.length && legs.length < n; i++) {
-      const p = mixedQualified[i];
-      const gk = p.game_key || p.game || '';
-      if (usedGames.has(gk) && usedGames.size >= 2) continue;
-      if (usedPlayers.has(p.name)) continue;
-      legs.push(p);
-      usedGames.add(gk);
-      usedPlayers.add(p.name);
-    }
-    if (legs.length === n) {
+    const legs = _buildMixedCombo(candidateLegs, n, n - 2);
+    if (legs && legs.length === n) {
       const prob = legs.reduce((acc,l) => acc * _legProb(l), 1);
       const dec  = legs.reduce((acc,l) => acc * (l.dec_odds || 1.9), 1);
       const amer = dec >= 2 ? Math.round((dec-1)*100) : Math.round(-100/(dec-1));
-      combos.push({ legs, prob, dec, amer, n });
+      const sports = Array.from(new Set(legs.map(l => _sportMetaFromKey(l.sport || '').label)));
+      const sources = Array.from(new Set(legs.map(l => _legSourceGroup(l))));
+      combos.push({ legs, prob, dec, amer, n, sports, sources });
     }
   }
 
+  AUTO_PROP_PARLAY = combos[0] || null;
+  AUTO_PARLAY_COMBOS = combos;
+
   if (!combos.length) {
-    grid.innerHTML = '<div class="no-games" style="grid-column:1/-1">Not enough props to build combos yet.</div>';
-    if (meta) meta.textContent = '';
+    grid.innerHTML = '<div class="no-games" style="grid-column:1/-1">Not enough qualified mixed legs to build combos yet.</div>';
+    if (meta) meta.textContent = 'Need more high-confidence game bets and props to build mixed combos.';
     return;
   }
-  if (meta) meta.textContent = `${combos.length} auto-combo${combos.length>1?'s':''} from ${qualified.length} props · auto-tracked`;
+  if (meta) meta.textContent = `${combos.length} auto-combo${combos.length>1?'s':''} from ${candidateLegs.length} legs · props ${propCount} · game picks ${gameCount}`;
   grid.innerHTML = combos.map(c => parlayComboCard(c)).join('');
   _autoTrackParlayCombos(combos);
 }
@@ -3050,22 +3195,28 @@ function parlayComboCard(c) {
   const evRaw    = _legEv(c.prob ?? 0, c.dec ?? 0);
   const evColor  = evRaw >= 0 ? 'var(--green)' : 'var(--yellow)';
   const legsHtml = c.legs.map(p => {
-    const ppt = plainEnglishPropText(p);
+    const source = _legSourceGroup(p);
+    const text = _legDisplayText(p);
+    const sportMeta = _sportMetaFromKey(p.sport || 'other');
+    const color = source === 'prop' ? plainEnglishPropText(p).color : 'var(--accent)';
+    const sourceLabel = source === 'prop' ? 'Player Prop' : source === 'game' ? 'Game Pick' : 'Combo Leg';
     const pct = (_legProb(p) * 100).toFixed(1);
     const dec = (_legDec(p) || 1.9).toFixed(2);
     return `<div class="combo-leg">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
-        <span style="color:${ppt.color};font-weight:600">${ppt.emoji} ${ppt.text}</span>
+        <span style="color:${color};font-weight:600">${text}</span>
         <span style="color:var(--muted);font-size:.72rem;white-space:nowrap">${pct}% &middot; x${dec}</span>
       </div>
+      <div style="margin-top:4px;font-size:.68rem;color:var(--muted)">${sportMeta.icon} ${sportMeta.label} &middot; ${sourceLabel}</div>
     </div>`;
   }).join('');
+  const comboMix = `${(c.sports || []).length} sport${(c.sports || []).length !== 1 ? 's' : ''} · ${(c.sources || []).map(v => v === 'prop' ? 'props' : v === 'game' ? 'games' : 'combos').join(' + ')}`;
   const emailData = JSON.stringify(_autoParlayPayload(c)).replace(/"/g,'&quot;');
   return `<div class="parlay-combo-card">
   <div class="combo-header">
     <div>
       <div class="combo-title">&#9650; ${c.n}-Leg ${_isAllSportsMode() ? 'Best Bets' : (_isSoccerMode() ? 'Props' : 'OVER')} Parlay</div>
-      <div class="combo-prob">Hit chance: ${probPct}% &middot; <span style="color:${evColor}">EV ${(evRaw*100).toFixed(1)}%</span></div>
+      <div class="combo-prob">Hit chance: ${probPct}% &middot; <span style="color:${evColor}">EV ${(evRaw*100).toFixed(1)}%</span> &middot; ${comboMix}</div>
     </div>
     <div style="text-align:right">
       <div class="combo-odds">x${(c.dec ?? 0).toFixed(2)}</div>
@@ -3203,10 +3354,11 @@ function buildLegPool() {
     const prob = _legProb(p);
     const dec  = _legDec(p) || 1.9;
     const ev   = p.ev != null ? Number(p.ev) : _legEv(prob, dec);
-    const label = `${p.name} ${p.direction} ${p.line} ${p.prop_label}`.trim();
+    const label = plainEnglishPropText(p).text;
     if (!label || !p.name) return;
     addLeg({
       label,
+      display_label: label,
       game: p.game_key || p.game || '',
       bet_type: 'player_prop',
       dec_odds: dec,
@@ -3215,6 +3367,14 @@ function buildLegPool() {
       ev,
       badge: p.safety_label || 'MODERATE',
       source: 'prop',
+      sport: p.sport || '',
+      player: p.name || '',
+      name: p.name || '',
+      team: p.team || '',
+      direction: p.direction || '',
+      line: p.line,
+      prop_label: p.prop_label || p.stat_type || '',
+      stat_type: p.stat_type || '',
     });
   });
 
@@ -3232,6 +3392,7 @@ function buildLegPool() {
       const ev   = b.ev != null ? Number(b.ev) : _legEv(prob, dec);
       addLeg({
         label: b.pick,
+        display_label: b.pick,
         game: c.game_key || b.game_key || '',
         bet_type: b.bet_type || k,
         dec_odds: dec,
@@ -3240,6 +3401,10 @@ function buildLegPool() {
         ev,
         badge: b.safety_label || 'MODERATE',
         source: 'game',
+        sport: c.sport || b.sport || '',
+        team: cleanPickTeam(b.pick || ''),
+        line: b.line,
+        pick: b.pick,
       });
     });
   });
@@ -3254,6 +3419,7 @@ function buildLegPool() {
       const ev   = _legEv(prob, dec);
       addLeg({
         label,
+        display_label: label,
         game: l.game || '',
         bet_type: l.bet_type || 'player_prop',
         dec_odds: dec,
@@ -3262,14 +3428,17 @@ function buildLegPool() {
         ev,
         badge: l.badge || l.safety_label || 'MODERATE',
         source: 'parlay',
+        sport: l.sport || '',
       });
     });
   });
 
   const legs = Array.from(map.values());
   legs.sort((a,b)=>{
+    const probDelta = _legProb(b) - _legProb(a);
+    if (Math.abs(probDelta) > 1e-9) return probDelta;
     if (b.ev !== a.ev) return b.ev - a.ev;
-    return b.model_prob - a.model_prob;
+    return _legDec(b) - _legDec(a);
   });
   return legs;
 }
@@ -3340,25 +3509,12 @@ function _renderLegCard(l) {
 }
 
 function buildAutoMix(legs, count) {
-  const selected = [];
-  const usedGames = new Set();
-  const tryAdd = (l) => {
-    if (selected.length >= count) return;
-    if (l.game && usedGames.has(l.game)) return;
-    selected.push(l);
-    if (l.game) usedGames.add(l.game);
-  };
-  const props = (legs || []).filter(l => l.source === 'prop');
-  props.forEach(tryAdd);
-  (legs || []).forEach(tryAdd);
-  if (selected.length < count) {
-    (legs || []).forEach(l => {
-      if (selected.length >= count) return;
-      if (selected.find(s => s.label === l.label)) return;
-      selected.push(l);
-    });
-  }
-  return selected;
+  const primary = _buildMixedCombo((legs || []).filter(l => {
+    const source = _legSourceGroup(l);
+    return source === 'prop' || source === 'game';
+  }), count, 0);
+  if (primary && primary.length) return primary;
+  return (legs || []).slice(0, count);
 }
 
 function renderAutoMixCard(mix) {
@@ -3656,6 +3812,10 @@ function loadPropPerformance() {
     const totalTracked = Number(s.total || 0) + Number(prs.total || 0);
     const overallHitRate = settledTotal > 0 ? Math.round((settledWins / settledTotal) * 100) : null;
     const overallColor = overallHitRate >= 55 ? 'var(--green)' : overallHitRate >= 45 ? 'var(--yellow)' : 'var(--red)';
+    const candidateLegs = _comboCandidateLegs();
+    const propLegs = candidateLegs.filter(leg => _legSourceGroup(leg) === 'prop').length;
+    const gameLegs = candidateLegs.filter(leg => _legSourceGroup(leg) === 'game').length;
+    const autoComboCount = _asArray(AUTO_PARLAY_COMBOS).length;
 
     const liveOver = Array.isArray(ALL_PROPS)
       ? ALL_PROPS.filter(p => _isLiveGame(p.game_key||p.game||'')).length
@@ -3665,6 +3825,8 @@ function loadPropPerformance() {
       <div class="perf-card"><div class="perf-val perf-pend">${liveTracked}</div><div class="perf-label">Live Tracked Bets</div><div class="perf-sub">Props ${propPending} · Parlays ${parlayPending}${liveOver ? ` · ${liveOver} in live games` : ''}</div></div>
       <div class="perf-card"><div class="perf-val">${settledWins}-${settledLosses}</div><div class="perf-label">Settled W-L</div><div class="perf-sub">Props + Tracked Parlays</div></div>
       <div class="perf-card"><div class="perf-val" style="color:${overallColor}">${overallHitRate!=null?overallHitRate+'%':'—'}</div><div class="perf-label">Overall Win Rate</div><div class="perf-sub">Settled bets only</div></div>
+      <div class="perf-card"><div class="perf-val" style="font-size:1.2rem">${candidateLegs.length}</div><div class="perf-label">Qualified Legs</div><div class="perf-sub">Props ${propLegs} · Games ${gameLegs}</div></div>
+      <div class="perf-card"><div class="perf-val" style="font-size:1.2rem">${autoComboCount}</div><div class="perf-label">Auto Combos</div><div class="perf-sub">Mixed props + game bets</div></div>
       <div class="perf-card"><div class="perf-val" style="font-size:1.2rem">${totalTracked}</div><div class="perf-label">Total Tracked Bets</div><div class="perf-sub">Props ${s.total||0} · Parlays ${prs.total||0}</div></div>
     `;
     const byType = s.by_prop_type||[];
