@@ -2338,8 +2338,23 @@ function _expandedCardBody(c, phase) {
     { key: 'away_team_total', label: 'Away Team Total',  icon: '✈️' },
   ];
 
-  // Summary strip stats
-  const allBets = BET_DEFS.map(d => c[d.key]).filter(Boolean);
+  // Summary strip stats (use all matched markets when available)
+  const fixedBets = BET_DEFS.map(d => c[d.key]).filter(Boolean);
+  const allBetsMap = new Map();
+  const allBetsSource = [...fixedBets, ..._asArray(c.suggested_bets || c.bets || [])];
+  allBetsSource.forEach(b => {
+    if (!b) return;
+    const sig = [
+      String(b.bet_type || ''),
+      String(b.pick || ''),
+      String(b.line != null ? b.line : ''),
+      String(b.odds_am != null ? b.odds_am : ''),
+    ].join('|').toLowerCase();
+    if (!allBetsMap.has(sig) || Number(b.model_prob || 0) > Number(allBetsMap.get(sig).model_prob || 0)) {
+      allBetsMap.set(sig, b);
+    }
+  });
+  const allBets = Array.from(allBetsMap.values());
   const mlProb  = c.moneyline ? Math.round((c.moneyline.model_prob||0.5)*100) : null;
   const bestEdge = allBets.length ? Math.max(...allBets.map(b => b.edge||0)) : 0;
   const avgConf  = allBets.length ? Math.round(allBets.reduce((s,b)=>s+(b.model_prob||0.5),0)/allBets.length*100) : null;
@@ -2368,12 +2383,33 @@ function _expandedCardBody(c, phase) {
   html += `<div class="card-body-inner">`;
   html += _modalHeroInsights(allBets, topProps, mlProb, avgConf, bestEdge);
 
-  // ── Game Bets ──
-  const betRows = BET_DEFS.filter(d => c[d.key]).map(d => _xBetRow(d, c[d.key], c, phase));
+  // ── Game Bets / Markets ──
+  const allBetsForModal = [];
+  const seenBetSig = new Set();
+  const addBetForModal = (bet, def) => {
+    if (!bet) return;
+    const sig = [
+      String(bet.bet_type || ''),
+      String(bet.pick || ''),
+      String(bet.line != null ? bet.line : ''),
+      String(bet.odds_am != null ? bet.odds_am : ''),
+    ].join('|').toLowerCase();
+    if (seenBetSig.has(sig)) return;
+    seenBetSig.add(sig);
+    allBetsForModal.push({ bet, def });
+  };
+
+  BET_DEFS.forEach(def => addBetForModal(c[def.key], def));
+  _asArray(c.suggested_bets || c.bets || []).forEach(b => {
+    addBetForModal(b, _betTypeMeta(b.bet_type || 'market'));
+  });
+
+  allBetsForModal.sort((a, b) => Number(b.bet?.model_prob || 0) - Number(a.bet?.model_prob || 0));
+  const betRows = allBetsForModal.map(x => _xBetRow(x.def, x.bet, c, phase));
   if (betRows.length) {
     html += `<div class="xpanel">
       <div class="xpanel-head">
-        <span class="xpanel-title">⚾ Game Bets</span>
+        <span class="xpanel-title">⚾ Game Markets</span>
         <span class="xpanel-count">${betRows.length} bet${betRows.length>1?'s':''}</span>
       </div>
       <div class="xbet-list">${betRows.join('')}</div>
@@ -2514,6 +2550,23 @@ function _heroBarsSvg(values, labels) {
     <line x1="10" y1="${base}" x2="${w - 10}" y2="${base}" stroke="rgba(148,163,184,.25)"/>
     ${bars}
   </svg>`;
+}
+
+function _betTypeMeta(betType) {
+  const bt = String(betType || '').trim().toLowerCase();
+  if (!bt) return { icon: '🎯', label: 'Market' };
+  if (bt === 'moneyline') return { icon: '🏆', label: 'Moneyline' };
+  if (bt === 'run_line' || bt === 'spread' || bt === 'point_spread' || bt === 'puck_line') return { icon: '📊', label: 'Spread / Line' };
+  if (bt === 'total' || bt === 'game_total') return { icon: '⚾', label: 'Total' };
+  if (bt === 'f5_moneyline') return { icon: '5️⃣', label: 'F5 Moneyline' };
+  if (bt === 'f5_total') return { icon: '📈', label: 'F5 Total' };
+  if (bt === 'home_team_total') return { icon: '🏠', label: 'Home Team Total' };
+  if (bt === 'away_team_total') return { icon: '✈️', label: 'Away Team Total' };
+  if (bt === '1x2') return { icon: '⚽', label: '1X2' };
+  if (bt === 'draw no bet' || bt === 'draw_no_bet') return { icon: '⚖️', label: 'Draw No Bet' };
+  if (bt === 'goals o/u' || bt === 'goals_o_u') return { icon: '🥅', label: 'Goals O/U' };
+  if (bt === 'btts') return { icon: '🤝', label: 'BTTS' };
+  return { icon: '🎯', label: bt.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()) };
 }
 
 function _xBetRow(def, bet, card, phase) {
@@ -2773,6 +2826,7 @@ function _cloneCardForModal(card) {
   if (!card) return null;
   return {
     ...card,
+    suggested_bets: Array.isArray(card.suggested_bets) ? card.suggested_bets.map(b => ({ ...b })) : [],
     bets: Array.isArray(card.bets) ? card.bets.map(b => ({ ...b })) : card.bets,
     home_props: Array.isArray(card.home_props) ? card.home_props.map(p => ({ ...p })) : [],
     away_props: Array.isArray(card.away_props) ? card.away_props.map(p => ({ ...p })) : [],
@@ -3719,12 +3773,7 @@ function loadTrackedParlays() {
   fetch('/api/parlay/list?include_resolved=1&current_only=1').then(r=>r.json()).then(d=>{
     const el = document.getElementById('tracked-parlays-list');
     const metaEl = document.getElementById('tracked-parlay-meta');
-    const rows = _asArray(d.parlays);
-    if (!d.ok || !rows.length) {
-      el.innerHTML = '<div class="no-games">No tracked parlays yet.</div>';
-      if (metaEl) metaEl.textContent = '';
-      return;
-    }
+    const rows = d.ok ? _asArray(d.parlays) : [];
 
     const pending = rows.filter(p => (p.outcome || 'PENDING').toUpperCase() === 'PENDING');
     const wins = rows.filter(p => (p.outcome || '').toUpperCase() === 'WIN');
@@ -3760,8 +3809,12 @@ function loadTrackedParlays() {
       </div>`;
     }).join('');
 
+    const intro = !d.ok
+      ? 'Could not load tracked parlays. Showing empty sections.'
+      : (rows.length ? 'All tracked bets are shown below.' : 'No tracked parlays yet. New tracked bets will appear below.');
+
     el.innerHTML = `
-      <div class="section-meta" style="margin-bottom:8px">All tracked bets are shown below.</div>
+      <div class="section-meta" style="margin-bottom:8px">${intro}</div>
       <div class="section-meta" style="margin:10px 0 6px">Live Tracking (${pending.length})</div>
       ${pending.length ? renderList(pending) : '<div class="no-games" style="padding:14px 10px">No live tracked parlays.</div>'}
       <div class="section-meta" style="margin:14px 0 6px">Won (${wins.length})</div>

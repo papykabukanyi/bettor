@@ -424,6 +424,7 @@ def _build_card(game, bets, props, when):
         "f5_total":        None,
         "home_team_total": None,
         "away_team_total": None,
+        "suggested_bets": [],
         "home_props":  [],
         "away_props":  [],
     }
@@ -491,6 +492,8 @@ def _build_card(game, bets, props, when):
 
     card_date = str(card.get("game_date") or "").strip()
 
+    matched_bets = {}
+
     for bet in bets:
         bet_sport = _infer_sport_group(
             bet.get("sport") or bet.get("competition") or bet.get("league") or ""
@@ -506,11 +509,29 @@ def _build_card(game, bets, props, when):
         bm = bet.get("match_key", "")
         if not (_key_matches(bk) or _key_matches(bm)):
             continue
+
+        # Keep every matched market for modal/details rendering.
+        sig = "|".join([
+            str(bet.get("bet_type") or ""),
+            str(bet.get("pick") or ""),
+            str(bet.get("line") if bet.get("line") is not None else ""),
+            str(bet.get("odds_am") if bet.get("odds_am") is not None else ""),
+        ])
+        prev = matched_bets.get(sig)
+        if prev is None or float(bet.get("model_prob") or 0.0) > float(prev.get("model_prob") or 0.0):
+            matched_bets[sig] = bet
+
         slot = _slot_for_bet(bet)
         if slot:
             current = card[slot]
             if current is None or bet.get("safety", 0) > current.get("safety", 0):
                 card[slot] = bet
+
+    card["suggested_bets"] = sorted(
+        matched_bets.values(),
+        key=lambda b: float(b.get("model_prob") or 0.0),
+        reverse=True,
+    )
 
     for p in props:
         prop_sport = _infer_sport_group(
@@ -3761,7 +3782,7 @@ def api_parlay_auto_resolve():
     """Auto-resolve pending tracked parlays based on leg prediction outcomes."""
     try:
         # First run the universal resolver so game/prop outcomes are up-to-date
-        result   = _resolve_all_sports_outcomes(days_back=7)
+        result   = _resolve_all_sports_outcomes(days_back=21)
         n_parlay = result.get("parlays", 0)
         n_other  = result.get("games", 0) + result.get("props", 0)
         return jsonify({
@@ -4184,17 +4205,28 @@ def api_tournament_data():
 
 
 # ─── Universal all-sport outcome resolver ────────────────────────────────────
+_SOCCER_STAT_MAP = {
+    "goals": "goals",
+    "assists": "assists",
+    "shotsontarget": "shots_on_target",
+    "shotsongoal": "shots_on_target",
+    "keypasses": "key_passes",
+    "tackles": "tackles",
+    "saves": "saves",
+}
+
+
 _ESPN_RESOLVE_CONFIGS = [
     # (espn_sport_path, espn_league_path, sport_label, boxscore_stat_map)
     ("basketball", "nba",                       "basketball",      {"points": "points", "rebounds": "totalRebounds", "assists": "assists", "steals": "steals", "blocks": "blocks", "threePointFieldGoalsMade": "threes"}),
     ("basketball", "wnba",                      "basketball",      {"points": "points", "rebounds": "totalRebounds", "assists": "assists"}),
     ("hockey",     "nhl",                       "icehockey",       {"goals": "goals", "assists": "assists", "shots": "shots_on_goal", "saves": "saves"}),
-    ("football",   "nfl",                       "americanfootball",{"passingYards": "passing_yards", "rushingYards": "rushing_yards", "receivingYards": "receiving_yards", "touchdowns": "touchdowns", "receptions": "receptions"}),
+    ("football",   "nfl",                       "americanfootball", {"passingYards": "passing_yards", "rushingYards": "rushing_yards", "receivingYards": "receiving_yards", "touchdowns": "touchdowns", "receptions": "receptions"}),
     ("baseball",   "mlb",                       "baseball",        {"hits": "hits", "homeRuns": "home_runs", "rbi": "rbi", "strikeouts": "strikeouts"}),
-    ("soccer",     "usa.1",                     "soccer",          {"goals": "goals", "assists": "assists"}),
-    ("soccer",     "eng.1",                     "soccer",          {"goals": "goals", "assists": "assists"}),
-    ("soccer",     "esp.1",                     "soccer",          {"goals": "goals", "assists": "assists"}),
-    ("soccer",     "ger.1",                     "soccer",          {"goals": "goals", "assists": "assists"}),
+    ("soccer",     "usa.1",                     "soccer",          _SOCCER_STAT_MAP),
+    ("soccer",     "eng.1",                     "soccer",          _SOCCER_STAT_MAP),
+    ("soccer",     "esp.1",                     "soccer",          _SOCCER_STAT_MAP),
+    ("soccer",     "ger.1",                     "soccer",          _SOCCER_STAT_MAP),
 ]
 
 
@@ -4242,11 +4274,73 @@ def _resolve_all_sports_outcomes(days_back: int = 3) -> dict:
                 return True
         return False
 
+    def _stat_key_norm(v: str) -> str:
+        return re.sub(r"[^a-z0-9]+", "", str(v or "").lower())
+
+    def _prop_type_aliases(v: str):
+        compact = _stat_key_norm(v)
+        base = re.sub(r"[^a-z0-9]+", "_", str(v or "").lower()).strip("_")
+        aliases = {base, compact}
+        alias_map = {
+            "keypasses": {"key_passes", "keypasses"},
+            "shotsontarget": {"shots_on_target", "shotsontarget", "shots_on_goal", "shotsongoal"},
+            "shotsongoal": {"shots_on_target", "shots_on_goal", "shotsontarget", "shotsongoal"},
+            "tackles": {"tackles", "tackles_won", "tackleswon"},
+            "saves": {"saves"},
+            "goals": {"goals"},
+            "assists": {"assists"},
+            "strikeouts": {"strikeouts"},
+        }
+        aliases.update(alias_map.get(compact, set()))
+        return [a for a in aliases if a]
+
     # ── 1. Collect all ESPN completed games grouped by (sport_path, league_path) ──
-    completed_games_by_config: dict[tuple, list] = {}
-    # Include today (days_ago=0) so same-day finals resolve immediately.
-    for days_ago in range(0, days_back + 1):
-        check_date = today - datetime.timedelta(days=days_ago)
+    # Prefer only dates that still have pending records to keep resolver fast while
+    # still allowing wider backfill windows.
+    completed_games_by_config = {}
+    pending_dates = set()
+    conn_dates = get_conn()
+    if conn_dates:
+        try:
+            cdates = conn_dates.cursor()
+            cdates.execute("""
+                SELECT DISTINCT game_date::date
+                FROM predictions
+                WHERE outcome = 'PENDING'
+                  AND game_date >= CURRENT_DATE - INTERVAL '%s days'
+                  AND game_date <= CURRENT_DATE
+            """ % int(days_back + 1))
+            for row in (cdates.fetchall() or []):
+                d = row[0] if row else None
+                if d:
+                    pending_dates.add(d)
+
+            cdates.execute("""
+                SELECT DISTINCT game_date::date
+                FROM prop_history
+                WHERE outcome = 'PENDING'
+                  AND game_date >= CURRENT_DATE - INTERVAL '%s days'
+                  AND game_date <= CURRENT_DATE
+            """ % int(days_back + 1))
+            for row in (cdates.fetchall() or []):
+                d = row[0] if row else None
+                if d:
+                    pending_dates.add(d)
+        except Exception:
+            pass
+        finally:
+            try:
+                conn_dates.close()
+            except Exception:
+                pass
+
+    if pending_dates:
+        check_dates = sorted(pending_dates, reverse=True)
+    else:
+        # Include today (days_ago=0) so same-day finals resolve immediately.
+        check_dates = [today - datetime.timedelta(days=days_ago) for days_ago in range(0, days_back + 1)]
+
+    for check_date in check_dates:
         dates_token = check_date.strftime("%Y%m%d")
         for cfg in _ESPN_RESOLVE_CONFIGS:
             sport_path, league_path, sport_group, _stat_map = cfg
@@ -4414,7 +4508,8 @@ def _resolve_all_sports_outcomes(days_back: int = 3) -> dict:
             prop_sport  = str(prop.get("sport") or "").lower()
             player_name = str(prop.get("player_name") or "").strip().lower()
             team_name   = str(prop.get("team") or "").strip().lower()
-            prop_type   = str(prop.get("prop_type") or "").strip().lower()
+            prop_type_raw = str(prop.get("prop_type") or "").strip().lower()
+            prop_type = re.sub(r"[^a-z0-9]+", "_", prop_type_raw).strip("_")
             line_val    = _num(prop.get("line")) or 0.0
             rec         = str(prop.get("recommendation") or "OVER").upper()
             game_key    = str(prop.get("game_key") or "")
@@ -4460,7 +4555,7 @@ def _resolve_all_sports_outcomes(days_back: int = 3) -> dict:
 
                 # Fetch + cache boxscore
                 if cache_key not in _boxscore_cache:
-                    player_stats: dict[str, dict[str, float]] = {}
+                    player_stats = {}
                     try:
                         url = f"https://site.api.espn.com/apis/site/v2/sports/{sport_path}/{league_path}/summary"
                         resp = _req.get(url, params={"event": event_id}, timeout=8)
@@ -4470,7 +4565,7 @@ def _resolve_all_sports_outcomes(days_back: int = 3) -> dict:
                             for team_box in ((summary.get("boxscore") or {}).get("players") or []):
                                 for stat_block in (team_box.get("statistics") or []):
                                     keys = [str(k or "").strip() for k in (stat_block.get("keys") or [])]
-                                    key_idx = {k.lower(): i for i, k in enumerate(keys)}
+                                    key_idx = {_stat_key_norm(k): i for i, k in enumerate(keys)}
                                     for arow in (stat_block.get("athletes") or []):
                                         athlete  = arow.get("athlete") or {}
                                         pname    = str(athlete.get("displayName") or athlete.get("fullName") or "").strip().lower()
@@ -4478,7 +4573,7 @@ def _resolve_all_sports_outcomes(days_back: int = 3) -> dict:
                                             continue
                                         vals = arow.get("stats") or []
                                         for raw_k, mapped_k in stat_map.items():
-                                            idx = key_idx.get(raw_k.lower())
+                                            idx = key_idx.get(_stat_key_norm(raw_k))
                                             if idx is not None and idx < len(vals):
                                                 v = _num(vals[idx])
                                                 if v is not None:
@@ -4488,7 +4583,8 @@ def _resolve_all_sports_outcomes(days_back: int = 3) -> dict:
                                 for cat in (team_bucket.get("leaders") or []):
                                     cat_name = str(cat.get("name") or "").strip()
                                     for raw_k, mapped_k in stat_map.items():
-                                        if cat_name.lower() == raw_k.lower() or mapped_k.lower() == cat_name.lower():
+                                        if (_stat_key_norm(cat_name) == _stat_key_norm(raw_k)
+                                                or _stat_key_norm(mapped_k) == _stat_key_norm(cat_name)):
                                             for lead in (cat.get("leaders") or []):
                                                 athlete = lead.get("athlete") or {}
                                                 pname   = str(athlete.get("displayName") or athlete.get("fullName") or "").strip().lower()
@@ -4516,13 +4612,21 @@ def _resolve_all_sports_outcomes(days_back: int = 3) -> dict:
 
                 # Find the actual stat value
                 # prop_type in db can be "points", "rebounds", "assists", "goals", "shots_on_goal" etc.
-                actual_val = matched_stats.get(prop_type)
+                prop_aliases = _prop_type_aliases(prop_type)
+                prop_alias_norms = {_stat_key_norm(a) for a in prop_aliases}
+                actual_val = None
+                for alias in prop_aliases:
+                    actual_val = matched_stats.get(alias)
+                    if actual_val is not None:
+                        break
                 if actual_val is None:
                     # Try mapped alias
                     for raw_k, mapped_k in stat_map.items():
-                        if mapped_k == prop_type or raw_k.lower() == prop_type:
+                        if (_stat_key_norm(mapped_k) in prop_alias_norms
+                                or _stat_key_norm(raw_k) in prop_alias_norms):
                             actual_val = matched_stats.get(mapped_k)
-                            break
+                            if actual_val is not None:
+                                break
                 if actual_val is None:
                     continue
 
@@ -4577,7 +4681,7 @@ def _resolve_all_sports_outcomes(days_back: int = 3) -> dict:
 @app.route("/api/resolve-outcomes", methods=["POST"])
 def api_resolve_outcomes():
     try:
-        result = _resolve_all_sports_outcomes(days_back=3)
+        result = _resolve_all_sports_outcomes(days_back=21)
         n_games  = result["games"]
         n_props  = result["props"]
         n_parlay = result["parlays"]
@@ -4854,7 +4958,7 @@ _resolve_poller_timer: threading.Timer | None = None
 
 
 def _start_outcome_resolver():
-    """Periodically resolve pending bets for ALL sports every 15 minutes.
+    """Periodically resolve pending bets for ALL sports every 5 minutes.
     Uses threading.Timer — no APScheduler needed."""
     global _resolve_poller_timer
     if _resolve_poller_timer is not None:
@@ -4864,7 +4968,7 @@ def _start_outcome_resolver():
         global _resolve_poller_timer
         try:
             print("[auto-resolve] Running periodic all-sport resolver…")
-            _resolve_all_sports_outcomes(days_back=3)
+            _resolve_all_sports_outcomes(days_back=21)
         except Exception as exc:
             print(f"[auto-resolve] error: {exc}")
         _resolve_poller_timer = threading.Timer(_RESOLVE_INTERVAL, _tick)
