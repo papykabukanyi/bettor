@@ -450,7 +450,6 @@ CREATE TABLE IF NOT EXISTS predictions (
 );
 CREATE INDEX IF NOT EXISTS idx_predictions_date    ON predictions(game_date);
 CREATE INDEX IF NOT EXISTS idx_predictions_outcome ON predictions(outcome);
-CREATE UNIQUE INDEX IF NOT EXISTS uq_predictions_bet_uid ON predictions(bet_uid);
 
 -- ── Player trends: historical per-player stats ──
 CREATE TABLE IF NOT EXISTS player_trends (
@@ -530,6 +529,7 @@ SET parlay_uid = CONCAT('par_legacy_', id::text)
 WHERE parlay_uid IS NULL;
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_prop_history_bet_uid ON prop_history(bet_uid);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_predictions_bet_uid ON predictions(bet_uid);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_tracked_parlays_uid ON tracked_parlays(parlay_uid);
 """
 
@@ -543,6 +543,7 @@ def init_schema():
         cur = conn.cursor()
         cur.execute(_SCHEMA)
         conn.commit()
+        _TABLE_COLS_CACHE.clear()
         print("[db] schema ready")
         return True
     except Exception as e:
@@ -1015,13 +1016,15 @@ def get_todays_prop_picks(sport: str = None, max_age_hours: int = 2) -> list:
         return []
     try:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cols = _get_table_columns(conn, "prop_history")
+        bet_uid_col = "bet_uid" if "bet_uid" in cols else "NULL::text AS bet_uid"
         base = """
-                        SELECT bet_uid, sport, player_name, team, game_date, prop_type,
+            SELECT {bet_uid_col}, sport, player_name, team, game_date, prop_type,
                    line, over_prob, under_prob, recommendation, stats_json, detected_at
             FROM   prop_history
             WHERE  game_date  = CURRENT_DATE
               AND  detected_at > NOW() - (INTERVAL '1 hour' * %s)
-        """
+        """.format(bet_uid_col=bet_uid_col)
         if sport:
             cur.execute(base + " AND sport = %s ORDER BY detected_at DESC",
                         (max_age_hours, sport))
@@ -1843,13 +1846,15 @@ def get_predictions_for_date(game_date: "str | datetime.date", sport: str | None
     try:
         date_str = game_date.isoformat() if hasattr(game_date, "isoformat") else str(game_date)
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cols = _get_table_columns(conn, "predictions")
+        bet_uid_col = "bet_uid" if "bet_uid" in cols else "NULL::text AS bet_uid"
         wheres = ["game_date = %s", "outcome != 'ARCHIVED'"]
         vals = [date_str]
         if sport:
             wheres.append("sport = %s")
             vals.append(sport)
         cur.execute(
-            f"""SELECT bet_uid, game_key, bet_type, pick, line, odds_am, dec_odds, model_prob,
+            f"""SELECT {bet_uid_col}, game_key, bet_type, pick, line, odds_am, dec_odds, model_prob,
                       confidence, safety_label, game_date, game_time,
                       home_team, away_team, home_starter, away_starter, outcome
                FROM predictions
@@ -2063,6 +2068,9 @@ def get_pending_props(days_back: int = 3, sport: str | None = None) -> list:
         return []
     try:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cols = _get_table_columns(conn, "prop_history")
+        bet_uid_col = "bet_uid" if "bet_uid" in cols else "NULL::text AS bet_uid"
+        game_key_col = "game_key" if "game_key" in cols else "NULL::text AS game_key"
         vals: list = [days_back]
         sport_where = ""
         if sport:
@@ -2070,12 +2078,12 @@ def get_pending_props(days_back: int = 3, sport: str | None = None) -> list:
             vals.append(sport)
         # No recommendation filter — resolve all bet types for all sports
         cur.execute(f"""
-            SELECT id, bet_uid, game_key, sport, player_name, team, game_date::text,
+            SELECT id, {bet_uid_col}, {game_key_col}, sport, player_name, team, game_date::text,
                    prop_type, line, over_prob, under_prob, recommendation, stats_json
             FROM prop_history
             WHERE outcome = 'PENDING'
               AND game_date >= CURRENT_DATE - (%s * INTERVAL '1 day')
-                            AND game_date <= CURRENT_DATE
+              AND game_date <= CURRENT_DATE
               {sport_where}
             ORDER BY game_date DESC
         """, vals)
