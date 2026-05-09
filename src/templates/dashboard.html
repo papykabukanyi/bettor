@@ -464,8 +464,8 @@ main{padding:20px;max-width:1400px;margin:0 auto}
 .game-details-title{margin:8px 0 10px;font-size:1.56rem;font-weight:700;line-height:1.15}
 .game-details-meta{display:flex;flex-wrap:wrap;gap:8px;color:#bfd0e3;font-size:.82rem}
 .game-details-chip{padding:5px 10px;border-radius:999px;background:rgba(15,23,42,.55);border:1px solid rgba(148,163,184,.22)}
-.game-details-content{flex:1 1 auto;min-height:0;overflow:hidden;padding-bottom:0;display:flex;align-items:flex-start;justify-content:center}
-.game-details-content .card-body-inner{padding:0 20px 20px;transform-origin:top center;will-change:transform}
+.game-details-content{flex:1 1 auto;min-height:0;overflow:auto;padding:0 0 8px;display:block}
+.game-details-content .card-body-inner{padding:0 20px 20px;width:min(1280px,100%);max-width:100%;margin:0 auto;transform:none !important}
 body.modal-open{overflow:hidden}
 .form-row{margin-bottom:12px}
 .form-row label{display:block;font-size:.78rem;color:var(--muted);margin-bottom:4px}
@@ -504,7 +504,7 @@ body.modal-open{overflow:hidden}
   .game-details-head{padding:18px 16px 14px}
   .game-details-title{font-size:1.15rem}
   .game-details-content{overflow:auto;display:block}
-  .game-details-content .card-body-inner{padding:0 14px 16px;transform:none !important;width:auto !important}
+  .game-details-content .card-body-inner{padding:0 14px 16px;transform:none !important;width:100% !important;max-width:100% !important}
 }
 
 /* ── Responsive ── */
@@ -2713,23 +2713,12 @@ function _isDesktopDetailsViewport() {
 function _fitGameDetailsModal() {
   const modalOverlay = document.getElementById('game-details-modal');
   if (!modalOverlay || modalOverlay.classList.contains('hidden')) return;
-  const contentWrap = modalOverlay.querySelector('.game-details-content');
   const inner = modalOverlay.querySelector('.game-details-content .card-body-inner');
-  if (!contentWrap || !inner) return;
+  if (!inner) return;
 
+  // Keep modal content at natural scale and rely on internal scrolling.
   inner.style.transform = 'none';
-  inner.style.width = 'auto';
-
-  if (!_isDesktopDetailsViewport()) return;
-
-  const availableW = Math.max(1, contentWrap.clientWidth - 2);
-  const availableH = Math.max(1, contentWrap.clientHeight - 2);
-  const naturalW = Math.max(1, inner.scrollWidth);
-  const naturalH = Math.max(1, inner.scrollHeight);
-  const scale = Math.min(1, availableW / naturalW, availableH / naturalH);
-  if (scale < 0.999) {
-    inner.style.transform = `scale(${scale})`;
-  }
+  inner.style.width = _isDesktopDetailsViewport() ? 'min(1280px,100%)' : '100%';
 }
 
 function _scheduleGameDetailsFit() {

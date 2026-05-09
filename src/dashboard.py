@@ -444,17 +444,66 @@ def _build_card(game, bets, props, when):
         return None
 
     def _key_matches(k: str) -> bool:
-        kn = _norm_gk(k)
-        return (
-            kn in (gk_norm, alt_norm, rev_gk, unique_norm)
-            or gk_norm in kn
-            or alt_norm in kn
-            or kn in unique_norm
-        )
+        kn = _norm_gk(str(k or ""))
+        if not kn:
+            return False
+
+        # Exact key match first (supports fully-qualified unique keys).
+        if kn in (gk_norm, alt_norm, rev_gk, unique_norm):
+            return True
+
+        # If both keys include a unique suffix, require exact match to avoid
+        # leaking props/bets across different scheduled instances.
+        if "#" in kn and "#" in unique_norm:
+            return False
+
+        base = kn.split("#", 1)[0]
+        return base in (gk_norm, alt_norm, rev_gk)
+
+    def _team_token(name: str) -> str:
+        return re.sub(r"[^a-z0-9]+", "", str(name or "").strip().lower())
+
+    def _team_aliases(name: str) -> set[str]:
+        words = [w for w in re.findall(r"[a-z0-9]+", str(name or "").lower()) if w]
+        aliases: set[str] = set()
+        full = "".join(words)
+        if full:
+            aliases.add(full)
+        if words:
+            aliases.add(words[-1])
+            aliases.add("".join(w[0] for w in words))
+        if len(words) >= 2:
+            aliases.add("".join(words[-2:]))
+        return {a for a in aliases if len(a) >= 2}
+
+    home_token = _team_token(ht)
+    away_token = _team_token(at)
+    home_aliases = _team_aliases(ht)
+    away_aliases = _team_aliases(at)
+
+    def _same_matchup(row: dict) -> bool:
+        rh = _team_token(row.get("home_team") or "")
+        ra = _team_token(row.get("away_team") or "")
+        if not rh or not ra:
+            return False
+        return (rh == home_token and ra == away_token) or (rh == away_token and ra == home_token)
+
+    card_date = str(card.get("game_date") or "").strip()
 
     for bet in bets:
+        bet_sport = _infer_sport_group(
+            bet.get("sport") or bet.get("competition") or bet.get("league") or ""
+        )
+        if bet_sport not in {"other", ""} and sport_group not in {"other", ""} and bet_sport != sport_group:
+            continue
+
+        bet_date = str(bet.get("game_date") or bet.get("date") or "").strip()
+        if card_date and bet_date and bet_date != card_date:
+            continue
+
         bk = bet.get("game_key", bet.get("game", ""))
-        if not _key_matches(bk):
+        bm = bet.get("match_key", "")
+        if not (_key_matches(bk) or _key_matches(bm)):
             continue
         slot = _slot_for_bet(bet)
         if slot:
@@ -462,18 +511,32 @@ def _build_card(game, bets, props, when):
             if current is None or bet.get("safety", 0) > current.get("safety", 0):
                 card[slot] = bet
 
-    ht_words = _team_words(ht)
-    at_words = _team_words(at)
     for p in props:
+        prop_sport = _infer_sport_group(
+            p.get("sport") or p.get("competition") or p.get("league") or ""
+        )
+        if prop_sport not in {"other", ""} and sport_group not in {"other", ""} and prop_sport != sport_group:
+            continue
+
+        prop_date = str(p.get("game_date") or p.get("date") or "").strip()
+        if card_date and prop_date and prop_date != card_date:
+            continue
+
         pk = p.get("game_key", p.get("game", ""))
-        if not _key_matches(pk):
-            # fallback: check if team name appears in prop team field
-            pt = (p.get("team", "")).lower()
-            if not any(w in pt for w in ht_words + at_words):
-                continue
-        team_lc = (p.get("team", "")).lower()
-        # Assign to home or away side
-        if any(w in team_lc for w in ht_words):
+        pm = p.get("match_key", "")
+        key_match = _key_matches(pk) or _key_matches(pm)
+        if not key_match and not _same_matchup(p):
+            continue
+
+        team_token = _team_token(p.get("team") or "")
+        is_home = team_token in home_aliases if team_token else False
+        is_away = team_token in away_aliases if team_token else False
+
+        # Skip ambiguous/unmapped props instead of attaching to the wrong team.
+        if is_home == is_away:
+            continue
+
+        if is_home:
             card["home_props"].append(p)
         else:
             card["away_props"].append(p)
