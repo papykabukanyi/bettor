@@ -1832,22 +1832,20 @@ def get_performance_stats(sport: str | None = None) -> dict:
         conn.close()
 
 
-def get_prop_performance_stats(sport: str | None = None) -> dict:
-    """Return today's prop stats for dashboard performance."""
+def get_prop_performance_stats(sport: str | None = None, days_back: int = 7) -> dict:
+    """Return prop stats for dashboard performance covering the last N days (default 7)."""
     conn = get_conn()
     if conn is None:
         return {}
     try:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        et_today_sql = "timezone('America/New_York', now())::date"
-        vals = []
+        vals: list = []
         sport_where = ""
         if sport:
             sport_where = " AND sport = %s"
             vals.append(sport)
-        prop_filter = ""
-        if sport and str(sport).lower() != "soccer":
-            prop_filter = " AND recommendation = 'OVER' AND (line IS NULL OR line > 0.5)"
+        # No recommendation filter — track all bet types across all sports
+        date_filter = f"AND game_date >= CURRENT_DATE - ({max(1, int(days_back))} * INTERVAL '1 day')"
 
         # Overall prop stats
         cur.execute(f"""
@@ -1860,37 +1858,47 @@ def get_prop_performance_stats(sport: str | None = None) -> dict:
                 ROUND(AVG(CASE WHEN outcome='WIN' THEN 1.0
                                WHEN outcome='LOSS' THEN 0.0 END)*100, 1) AS hit_rate
             FROM prop_history
-            WHERE game_date = {et_today_sql}
-                            {prop_filter}
+            WHERE outcome != 'ARCHIVED'
+              {date_filter}
               {sport_where}
         """, vals)
         row = cur.fetchone()
         stats = dict(row) if row else {}
         # By prop type
         cur.execute(f"""
-            SELECT prop_type,
+            SELECT sport,
+                   prop_type,
                    recommendation,
-                   COUNT(*) FILTER (WHERE outcome='WIN')  AS wins,
-                   COUNT(*) FILTER (WHERE outcome='LOSS') AS losses,
-                   COUNT(*) FILTER (WHERE outcome='PUSH') AS pushes,
+                   COUNT(*) FILTER (WHERE outcome='WIN')     AS wins,
+                   COUNT(*) FILTER (WHERE outcome='LOSS')    AS losses,
+                   COUNT(*) FILTER (WHERE outcome='PUSH')    AS pushes,
                    COUNT(*) FILTER (WHERE outcome='PENDING') AS pending,
                    COUNT(*) AS total,
                    ROUND(AVG(CASE WHEN outcome='WIN' THEN 1.0
                                   WHEN outcome='LOSS' THEN 0.0 END)*100, 1) AS hit_rate
             FROM prop_history
-            WHERE game_date = {et_today_sql}
-                            {prop_filter}
+            WHERE outcome != 'ARCHIVED'
+              {date_filter}
               {sport_where}
-            GROUP BY prop_type, recommendation
+            GROUP BY sport, prop_type, recommendation
             ORDER BY total DESC
         """, vals)
         stats["by_prop_type"] = [dict(r) for r in cur.fetchall()]
-        # Keep shape stable for frontend consumers.
-        stats["daily_trend"] = [{
-            "date": datetime.datetime.now().date().isoformat(),
-            "wins": stats.get("wins", 0) or 0,
-            "losses": stats.get("losses", 0) or 0,
-        }]
+        # Daily trend for last 7 days
+        cur.execute(f"""
+            SELECT game_date::text AS date,
+                   COUNT(*) FILTER (WHERE outcome='WIN')  AS wins,
+                   COUNT(*) FILTER (WHERE outcome='LOSS') AS losses,
+                   COUNT(*) FILTER (WHERE outcome='PENDING') AS pending
+            FROM prop_history
+            WHERE outcome != 'ARCHIVED'
+              {date_filter}
+              {sport_where}
+            GROUP BY game_date
+            ORDER BY game_date DESC
+            LIMIT 14
+        """, vals)
+        stats["daily_trend"] = [dict(r) for r in cur.fetchall()]
         return stats
     except Exception as e:
         print(f"[db] get_prop_performance_stats error: {e}")
@@ -1906,22 +1914,19 @@ def get_pending_props(days_back: int = 3, sport: str | None = None) -> list:
         return []
     try:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        vals = [days_back]
+        vals: list = [days_back]
         sport_where = ""
         if sport:
             sport_where = " AND sport = %s"
             vals.append(sport)
-        prop_filter = ""
-        if sport and str(sport).lower() != "soccer":
-            prop_filter = " AND recommendation = 'OVER' AND (line IS NULL OR line > 0.5)"
+        # No recommendation filter — resolve all bet types for all sports
         cur.execute(f"""
-            SELECT id, player_name, team, game_date::text, prop_type, line,
-                   over_prob, under_prob, recommendation, stats_json
+            SELECT id, game_key, sport, player_name, team, game_date::text,
+                   prop_type, line, over_prob, under_prob, recommendation, stats_json
             FROM prop_history
             WHERE outcome = 'PENDING'
               AND game_date >= CURRENT_DATE - (%s * INTERVAL '1 day')
               AND game_date < CURRENT_DATE
-              {prop_filter}
               {sport_where}
             ORDER BY game_date DESC
         """, vals)

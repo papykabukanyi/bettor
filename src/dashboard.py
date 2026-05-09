@@ -121,6 +121,7 @@ def _init_worker():
     if _BG_IS_LEADER:
         _scheduler = _start_scheduler()
         _start_live_scores()
+        _start_outcome_resolver()
         _auto_boot_analysis()
     else:
         _scheduler = None
@@ -3758,14 +3759,16 @@ def api_parlay_performance():
 @app.route("/api/parlay/auto-resolve", methods=["POST"])
 def api_parlay_auto_resolve():
     """Auto-resolve pending tracked parlays based on leg prediction outcomes."""
-    if _ACTIVE_SPORT != "mlb":
-        return jsonify({"ok": True, "resolved": 0,
-                        "msg": "Auto-resolve is currently available for MLB mode only"})
     try:
-        from models.mlb_predictor import resolve_tracked_parlays
-        n = resolve_tracked_parlays(days_back=7)
-        return jsonify({"ok": True, "resolved": n,
-                        "msg": f"Resolved {n} tracked parlay(s)"})
+        # First run the universal resolver so game/prop outcomes are up-to-date
+        result   = _resolve_all_sports_outcomes(days_back=7)
+        n_parlay = result.get("parlays", 0)
+        n_other  = result.get("games", 0) + result.get("props", 0)
+        return jsonify({
+            "ok":      True,
+            "resolved": n_parlay,
+            "msg":     f"Resolved {n_parlay} parlay(s) + {n_other} game/prop bet(s)",
+        })
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
 
@@ -4180,27 +4183,407 @@ def api_tournament_data():
         return jsonify({"ok": False, "error": str(e), "matches": [], "standings": [], "top_scorers": []})
 
 
-@app.route("/api/resolve-outcomes", methods=["POST"])
-def api_resolve_outcomes():
-    if _ACTIVE_SPORT != "mlb":
-        return jsonify({
-            "ok": True,
-            "resolved_games": 0,
-            "resolved_props": 0,
-            "resolved_parlays": 0,
-            "msg": "Auto-resolve is currently available for MLB mode only",
-        })
+# ─── Universal all-sport outcome resolver ────────────────────────────────────
+_ESPN_RESOLVE_CONFIGS = [
+    # (espn_sport_path, espn_league_path, sport_label, boxscore_stat_map)
+    ("basketball", "nba",                       "basketball",      {"points": "points", "rebounds": "totalRebounds", "assists": "assists", "steals": "steals", "blocks": "blocks", "threePointFieldGoalsMade": "threes"}),
+    ("basketball", "wnba",                      "basketball",      {"points": "points", "rebounds": "totalRebounds", "assists": "assists"}),
+    ("hockey",     "nhl",                       "icehockey",       {"goals": "goals", "assists": "assists", "shots": "shots_on_goal", "saves": "saves"}),
+    ("football",   "nfl",                       "americanfootball",{"passingYards": "passing_yards", "rushingYards": "rushing_yards", "receivingYards": "receiving_yards", "touchdowns": "touchdowns", "receptions": "receptions"}),
+    ("baseball",   "mlb",                       "baseball",        {"hits": "hits", "homeRuns": "home_runs", "rbi": "rbi", "strikeouts": "strikeouts"}),
+    ("soccer",     "usa.1",                     "soccer",          {"goals": "goals", "assists": "assists"}),
+    ("soccer",     "eng.1",                     "soccer",          {"goals": "goals", "assists": "assists"}),
+    ("soccer",     "esp.1",                     "soccer",          {"goals": "goals", "assists": "assists"}),
+    ("soccer",     "ger.1",                     "soccer",          {"goals": "goals", "assists": "assists"}),
+]
+
+
+def _resolve_all_sports_outcomes(days_back: int = 3) -> dict:
+    """
+    Universal outcome resolver.  For each sport/day with PENDING bets:
+      1. Fetches completed ESPN scoreboards.
+      2. Resolves pending game predictions (moneyline / spread / total).
+      3. Resolves pending player props using ESPN boxscore stats.
+      4. Resolves pending tracked parlays once all their legs are settled.
+    Works in 'all' mode and every single-sport mode.
+    Returns {"games": N, "props": N, "parlays": N}.
+    """
+    import requests as _req
+    try:
+        from data.db import (
+            get_conn, get_pending_props, update_prop_outcome,
+            get_tracked_parlays, resolve_tracked_parlay,
+        )
+        import psycopg2.extras as _dba
+    except Exception:
+        return {"games": 0, "props": 0, "parlays": 0}
+
+    today        = _et_calendar_today()
+    n_games      = 0
+    n_props      = 0
+    n_parlays    = 0
+
+    def _num(v):
+        if v is None:
+            return None
+        try:
+            return float(str(v).strip().replace(",", ""))
+        except Exception:
+            return None
+
+    def _teams_match(espn_name: str, pick_fragment: str) -> bool:
+        en = espn_name.lower()
+        pf = pick_fragment.lower()
+        # direct substring or any two-char+ word overlap
+        if en in pf or pf in en:
+            return True
+        for word in en.split():
+            if len(word) > 2 and word in pf:
+                return True
+        return False
+
+    # ── 1. Collect all ESPN completed games grouped by (sport_path, league_path) ──
+    completed_games_by_config: dict[tuple, list] = {}
+    for days_ago in range(1, days_back + 2):
+        check_date = today - datetime.timedelta(days=days_ago)
+        dates_token = check_date.strftime("%Y%m%d")
+        for cfg in _ESPN_RESOLVE_CONFIGS:
+            sport_path, league_path, sport_group, _stat_map = cfg
+            url = f"https://site.api.espn.com/apis/site/v2/sports/{sport_path}/{league_path}/scoreboard"
+            try:
+                resp = _req.get(url, params={"dates": dates_token, "limit": 200}, timeout=8)
+                if resp.status_code != 200:
+                    continue
+                data = resp.json() or {}
+            except Exception:
+                continue
+            for ev in (data.get("events") or []):
+                comp   = (ev.get("competitions") or [{}])[0]
+                status = str(((comp.get("status") or {}).get("type") or {}).get("name") or "").lower()
+                if not any(k in status for k in ("final", "complete", "finished", "ended", "postgame")):
+                    continue
+                competitors = comp.get("competitors") or []
+                if len(competitors) < 2:
+                    continue
+                home_c = next((c for c in competitors if str(c.get("homeAway") or "").lower() == "home"), competitors[0])
+                away_c = next((c for c in competitors if str(c.get("homeAway") or "").lower() == "away"), competitors[1] if len(competitors) > 1 else competitors[0])
+                home   = str(((home_c.get("team") or {}).get("displayName") or "")).strip()
+                away   = str(((away_c.get("team") or {}).get("displayName") or "")).strip()
+                h_sc   = _num(home_c.get("score"))
+                a_sc   = _num(away_c.get("score"))
+                if not home or not away or h_sc is None or a_sc is None:
+                    continue
+                key = (sport_path, league_path)
+                completed_games_by_config.setdefault(key, []).append({
+                    "event_id":   str(ev.get("id") or ""),
+                    "sport_path": sport_path,
+                    "league_path": league_path,
+                    "sport_group": sport_group,
+                    "home":       home,
+                    "away":       away,
+                    "home_score": h_sc,
+                    "away_score": a_sc,
+                    "total":      h_sc + a_sc,
+                    "game_date":  check_date.isoformat(),
+                    "stat_map":   _stat_map,
+                })
+
+    all_completed = [g for games in completed_games_by_config.values() for g in games]
+
+    # ── 2. Resolve pending game predictions ───────────────────────────────────
+    conn = get_conn()
+    if conn:
+        try:
+            cur = conn.cursor(cursor_factory=_dba.RealDictCursor)
+            cur.execute("""
+                SELECT id, sport, bet_type, pick, line, game_key, game_date::text
+                FROM predictions
+                WHERE outcome = 'PENDING'
+                  AND game_date >= CURRENT_DATE - INTERVAL '%s days'
+                  AND game_date < CURRENT_DATE
+            """ % int(days_back + 1))
+            pending_preds = cur.fetchall()
+
+            for pred in pending_preds:
+                pick     = str(pred.get("pick") or "")
+                line_val = _num(pred.get("line")) or 0.0
+                bet_type = str(pred.get("bet_type") or "").lower()
+                game_key = str(pred.get("game_key") or "")
+                pred_sport = str(pred.get("sport") or "").lower()
+
+                for g in all_completed:
+                    sport_group = g["sport_group"]
+                    # sport filter
+                    if pred_sport and pred_sport not in (sport_group, "all", ""):
+                        if pred_sport == "mlb" and sport_group != "baseball":
+                            continue
+                        if pred_sport not in ("all", ""):
+                            if pred_sport == "basketball" and sport_group != "basketball":
+                                continue
+                            if pred_sport == "icehockey" and sport_group != "icehockey":
+                                continue
+                            if pred_sport == "soccer" and sport_group != "soccer":
+                                continue
+
+                    home, away = g["home"], g["away"]
+                    h_sc, a_sc = g["home_score"], g["away_score"]
+                    total = g["total"]
+
+                    # Verify this game matches the prediction's game_key
+                    if game_key and home not in game_key and away not in game_key:
+                        if not (any(w in game_key.lower() for w in home.lower().split() if len(w) > 3) or
+                                any(w in game_key.lower() for w in away.lower().split() if len(w) > 3)):
+                            continue
+
+                    outcome = None
+                    result_str = f"{away} {int(a_sc)} @ {home} {int(h_sc)}"
+
+                    if "moneyline" in bet_type or bet_type == "money_line":
+                        winner = home if h_sc > a_sc else away
+                        if h_sc == a_sc:
+                            outcome = "PUSH"
+                        elif _teams_match(winner, pick):
+                            outcome = "WIN"
+                        else:
+                            outcome = "LOSS"
+
+                    elif bet_type in ("run_line", "puck_line", "spread", "point_spread"):
+                        margin = h_sc - a_sc
+                        # '+' / '-' convention in pick
+                        if f"-1.5" in pick or f"-2.5" in pick:
+                            fav_margin = float(next((p for p in pick.split() if p.startswith("-")), "-1.5"))
+                            fav_team   = pick.split()[0] if pick else ""
+                            if _teams_match(home, fav_team):
+                                outcome = "WIN" if margin > abs(fav_margin) else "LOSS"
+                            else:
+                                outcome = "WIN" if -margin > abs(fav_margin) else "LOSS"
+                        elif "+1.5" in pick or "+2.5" in pick:
+                            dog_margin = float(next((p for p in pick.split() if p.startswith("+")), "+1.5"))
+                            dog_team   = pick.split()[0] if pick else ""
+                            if _teams_match(home, dog_team):
+                                outcome = "WIN" if margin > -abs(dog_margin) else "LOSS"
+                            else:
+                                outcome = "WIN" if -margin > -abs(dog_margin) else "LOSS"
+
+                    elif bet_type in ("total", "f5_total", "game_total"):
+                        if "OVER" in pick.upper():
+                            if total > line_val:
+                                outcome = "WIN"
+                            elif total == line_val:
+                                outcome = "PUSH"
+                            else:
+                                outcome = "LOSS"
+                        elif "UNDER" in pick.upper():
+                            if total < line_val:
+                                outcome = "WIN"
+                            elif total == line_val:
+                                outcome = "PUSH"
+                            else:
+                                outcome = "LOSS"
+
+                    if outcome:
+                        try:
+                            cur.execute("""
+                                UPDATE predictions
+                                SET outcome = %s, actual_result = %s, resolved_at = NOW()
+                                WHERE id = %s AND outcome = 'PENDING'
+                            """, (outcome, result_str, pred["id"]))
+                            n_games += cur.rowcount
+                        except Exception:
+                            pass
+                        break  # matched — stop searching completed games for this pred
+
+            conn.commit()
+        except Exception as exc:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            print(f"[resolve] game predictions error: {exc}")
+        finally:
+            conn.close()
+
+    # ── 3. Resolve pending player props via ESPN boxscore ─────────────────────
+    pending_props = get_pending_props(days_back=days_back)
+    if pending_props:
+        # Cache boxscore player stats per event_id so we don't re-fetch
+        _boxscore_cache: dict[str, dict[str, float]] = {}
+
+        for prop in pending_props:
+            prop_sport  = str(prop.get("sport") or "").lower()
+            player_name = str(prop.get("player_name") or "").strip().lower()
+            team_name   = str(prop.get("team") or "").strip().lower()
+            prop_type   = str(prop.get("prop_type") or "").strip().lower()
+            line_val    = _num(prop.get("line")) or 0.0
+            rec         = str(prop.get("recommendation") or "OVER").upper()
+            game_key    = str(prop.get("game_key") or "")
+
+            for g in all_completed:
+                sport_group = g["sport_group"]
+                stat_map    = g["stat_map"]
+
+                # Sport matching
+                def _sport_matches(ps: str, sg: str) -> bool:
+                    if not ps or ps in ("all", ""):
+                        return True
+                    if ps == sg:
+                        return True
+                    if ps == "mlb" and sg == "baseball":
+                        return True
+                    if ps == "basketball" and sg == "basketball":
+                        return True
+                    if ps == "icehockey" and sg == "icehockey":
+                        return True
+                    if ps == "soccer" and sg == "soccer":
+                        return True
+                    return False
+
+                if not _sport_matches(prop_sport, sport_group):
+                    continue
+
+                # Game matching
+                home, away = g["home"], g["away"]
+                if game_key:
+                    if not (any(w in game_key.lower() for w in home.lower().split() if len(w) > 3) or
+                            any(w in game_key.lower() for w in away.lower().split() if len(w) > 3)):
+                        if not any(w in game_key.lower() for w in team_name.split() if len(w) > 3):
+                            continue
+                else:
+                    if team_name and not (_teams_match(home, team_name) or _teams_match(away, team_name)):
+                        continue
+
+                event_id    = g["event_id"]
+                sport_path  = g["sport_path"]
+                league_path = g["league_path"]
+                cache_key   = f"{sport_path}/{league_path}/{event_id}"
+
+                # Fetch + cache boxscore
+                if cache_key not in _boxscore_cache:
+                    player_stats: dict[str, dict[str, float]] = {}
+                    try:
+                        url = f"https://site.api.espn.com/apis/site/v2/sports/{sport_path}/{league_path}/summary"
+                        resp = _req.get(url, params={"event": event_id}, timeout=8)
+                        if resp.status_code == 200:
+                            summary = resp.json() or {}
+                            # Boxscore players block
+                            for team_box in ((summary.get("boxscore") or {}).get("players") or []):
+                                for stat_block in (team_box.get("statistics") or []):
+                                    keys = [str(k or "").strip() for k in (stat_block.get("keys") or [])]
+                                    key_idx = {k.lower(): i for i, k in enumerate(keys)}
+                                    for arow in (stat_block.get("athletes") or []):
+                                        athlete  = arow.get("athlete") or {}
+                                        pname    = str(athlete.get("displayName") or athlete.get("fullName") or "").strip().lower()
+                                        if not pname:
+                                            continue
+                                        vals = arow.get("stats") or []
+                                        for raw_k, mapped_k in stat_map.items():
+                                            idx = key_idx.get(raw_k.lower())
+                                            if idx is not None and idx < len(vals):
+                                                v = _num(vals[idx])
+                                                if v is not None:
+                                                    player_stats.setdefault(pname, {})[mapped_k] = v
+                            # Leaders block as fallback
+                            for team_bucket in (summary.get("leaders") or []):
+                                for cat in (team_bucket.get("leaders") or []):
+                                    cat_name = str(cat.get("name") or "").strip()
+                                    for raw_k, mapped_k in stat_map.items():
+                                        if cat_name.lower() == raw_k.lower() or mapped_k.lower() == cat_name.lower():
+                                            for lead in (cat.get("leaders") or []):
+                                                athlete = lead.get("athlete") or {}
+                                                pname   = str(athlete.get("displayName") or athlete.get("fullName") or "").strip().lower()
+                                                v       = _num(lead.get("value"))
+                                                if pname and v is not None:
+                                                    player_stats.setdefault(pname, {})[mapped_k] = v
+                    except Exception:
+                        pass
+                    _boxscore_cache[cache_key] = player_stats
+
+                player_stats = _boxscore_cache[cache_key]
+                if not player_stats:
+                    continue
+
+                # Find player in boxscore (exact or partial)
+                matched_stats = player_stats.get(player_name)
+                if matched_stats is None:
+                    parts = [w for w in player_name.split() if len(w) > 2]
+                    matched_stats = next(
+                        (v for k, v in player_stats.items() if all(p in k for p in parts)),
+                        None,
+                    )
+                if matched_stats is None:
+                    continue
+
+                # Find the actual stat value
+                # prop_type in db can be "points", "rebounds", "assists", "goals", "shots_on_goal" etc.
+                actual_val = matched_stats.get(prop_type)
+                if actual_val is None:
+                    # Try mapped alias
+                    for raw_k, mapped_k in stat_map.items():
+                        if mapped_k == prop_type or raw_k.lower() == prop_type:
+                            actual_val = matched_stats.get(mapped_k)
+                            break
+                if actual_val is None:
+                    continue
+
+                # Resolve
+                if actual_val > line_val:
+                    outcome = "WIN" if rec == "OVER" else "LOSS"
+                elif actual_val < line_val:
+                    outcome = "LOSS" if rec == "OVER" else "WIN"
+                else:
+                    outcome = "PUSH"
+
+                update_prop_outcome(prop["id"], actual_val, outcome)
+                n_props += 1
+                break  # matched this prop — move to next
+
+    # ── 4. MLB-specific prop + game resolution (statsapi) ─────────────────────
     try:
         from models.mlb_predictor import (
-            resolve_game_outcomes, resolve_prop_outcomes, resolve_tracked_parlays
+            resolve_game_outcomes as _mlb_game_res,
+            resolve_prop_outcomes as _mlb_prop_res,
         )
-        n_games  = resolve_game_outcomes(days_back=3)
-        n_props  = resolve_prop_outcomes(days_back=3)
-        n_parlay = resolve_tracked_parlays(days_back=7)
+        ng = _mlb_game_res(days_back=days_back)
+        np_ = _mlb_prop_res(days_back=days_back)
+        n_games += ng
+        n_props  += np_
+    except Exception:
+        pass
+
+    # ── 5. Resolve parlays ─────────────────────────────────────────────────────
+    try:
+        from models.mlb_predictor import resolve_tracked_parlays as _rtp
+        n_parlays = _rtp(days_back=days_back + 4)
+    except Exception:
+        n_parlays = 0
+
+    total = n_games + n_props + n_parlays
+    if total:
+        print(f"[resolve_all] Resolved {n_games} game preds + {n_props} props + {n_parlays} parlays")
+        try:
+            from data.db import get_performance_stats, get_parlay_performance_stats
+            db_sport = None if _ACTIVE_SPORT == "all" else _ACTIVE_SPORT
+            _sse_broadcast("performance_update", {
+                "stats":        get_performance_stats(sport=db_sport),
+                "parlay_stats": get_parlay_performance_stats(sport=db_sport),
+            })
+        except Exception:
+            pass
+
+    return {"games": n_games, "props": n_props, "parlays": n_parlays}
+
+
+@app.route("/api/resolve-outcomes", methods=["POST"])
+def api_resolve_outcomes():
+    try:
+        result = _resolve_all_sports_outcomes(days_back=3)
+        n_games  = result["games"]
+        n_props  = result["props"]
+        n_parlay = result["parlays"]
         return jsonify({
             "ok": True,
-            "resolved_games":  n_games,
-            "resolved_props":  n_props,
+            "resolved_games":   n_games,
+            "resolved_props":   n_props,
             "resolved_parlays": n_parlay,
             "msg": f"Resolved {n_games} game preds + {n_props} props + {n_parlay} parlays",
         })
@@ -4445,9 +4828,38 @@ def _start_cache_poller():
     _tick()
 
 
-def _start_live_scores():
-    if _ACTIVE_SPORT != "mlb":
+# Interval for the periodic background outcome resolver (15 minutes)
+_RESOLVE_INTERVAL = 15 * 60
+_resolve_poller_timer: threading.Timer | None = None
+
+
+def _start_outcome_resolver():
+    """Periodically resolve pending bets for ALL sports every 15 minutes.
+    Uses threading.Timer — no APScheduler needed."""
+    global _resolve_poller_timer
+    if _resolve_poller_timer is not None:
         return
+
+    def _tick():
+        global _resolve_poller_timer
+        try:
+            print("[auto-resolve] Running periodic all-sport resolver…")
+            _resolve_all_sports_outcomes(days_back=3)
+        except Exception as exc:
+            print(f"[auto-resolve] error: {exc}")
+        _resolve_poller_timer = threading.Timer(_RESOLVE_INTERVAL, _tick)
+        _resolve_poller_timer.daemon = True
+        _resolve_poller_timer.start()
+
+    # First run after 2 minutes so startup completes first
+    _resolve_poller_timer = threading.Timer(120, _tick)
+    _resolve_poller_timer.daemon = True
+    _resolve_poller_timer.start()
+    print(f"[auto-resolve] Periodic resolver started (every {_RESOLVE_INTERVAL // 60} min)")
+
+
+def _start_live_scores():
+    # Start live-score + auto-resolve polling for all sports
     if _live_score_timer is None:
         _poll_live_scores()
 
@@ -4497,20 +4909,12 @@ def _poll_live_scores():
         
         if any(_is_final_status(g.get("status", "")) for g in raw):
             try:
-                from models.mlb_predictor import resolve_game_outcomes, resolve_prop_outcomes
-                n_g = resolve_game_outcomes(days_back=1)
-                n_p = resolve_prop_outcomes(days_back=1)
+                # Universal resolver handles all sports (MLB statsapi path included)
+                res = _resolve_all_sports_outcomes(days_back=1)
+                n_g = res.get("games", 0)
+                n_p = res.get("props", 0)
                 if n_g or n_p:
                     print(f"[live-scores] Auto-resolved {n_g} predictions, {n_p} props")
-                    # Push updated performance to clients
-                    try:
-                        from data.db import get_performance_stats, get_parlay_performance_stats
-                        _sse_broadcast("performance_update", {
-                            "stats":        get_performance_stats(sport="mlb"),
-                            "parlay_stats": get_parlay_performance_stats(sport="mlb"),
-                        })
-                    except Exception:
-                        pass
             except Exception as exc:
                 print(f"[live-scores] resolve error: {exc}")
 
@@ -4839,6 +5243,7 @@ if __name__ == "__main__":
     if _BG_IS_LEADER:
         _scheduler = _start_scheduler()
         _start_live_scores()
+        _start_outcome_resolver()
         _auto_boot_analysis()
     else:
         _scheduler = None
