@@ -169,6 +169,14 @@ TOURNAMENTS: dict[str, dict] = {
         "season":  "2026",
         "type":    "club",
     },
+    "CLI": {
+        "name":    "Copa Libertadores",
+        "emoji":   "🏆",
+        "flag":    "🌎",
+        "country": "South America",
+        "season":  "2026",
+        "type":    "club",
+    },
 }
 
 
@@ -697,7 +705,7 @@ def get_matches_today_all() -> list[dict]:
     """All matches today across all supported competitions."""
     today = _et_calendar_today().isoformat()
     tomorrow = (_et_calendar_today() + datetime.timedelta(days=1)).isoformat()
-    window_matches = get_matches_range_all(today, tomorrow, _PRIORITY_COMPETITIONS)
+    window_matches = get_matches_range_all(today, tomorrow, list(TOURNAMENTS.keys()))
     return [m for m in window_matches if (m.get("game_date") or m.get("date")) == today]
 
 
@@ -705,5 +713,5 @@ def get_matches_tomorrow_all() -> list[dict]:
     """All matches tomorrow across all supported competitions."""
     tomorrow = (_et_calendar_today() + datetime.timedelta(days=1)).isoformat()
     today = _et_calendar_today().isoformat()
-    window_matches = get_matches_range_all(today, tomorrow, _PRIORITY_COMPETITIONS)
+    window_matches = get_matches_range_all(today, tomorrow, list(TOURNAMENTS.keys()))
     return [m for m in window_matches if (m.get("game_date") or m.get("date")) == tomorrow]

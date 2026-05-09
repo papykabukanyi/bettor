@@ -6,10 +6,9 @@ and produces a combined signal (-1.0 to +1.0) used by the betting model.
 
 Sources:
   1. NewsAPI (free tier, 100 req/day) — filtered by team/competition
-  2. ESPN Soccer RSS   (no auth)
-  3. BBC Sport Football RSS (no auth)
-  4. Sky Sports Soccer RSS (no auth)
-  5. Hugging Face inference API (BART/DistilBERT sentiment) OR keyword fallback
+    2. Multi-feed RSS (ESPN, BBC, Goal, Sky Sports, Guardian, Reuters)
+    3. GDELT DOC API (free, no auth)
+    4. Hugging Face inference API (BART/DistilBERT sentiment) OR keyword fallback
 
 Caching: 2-hour TTL to respect NewsAPI's 100 req/day limit.
 """
@@ -21,6 +20,7 @@ import os
 import re
 import time
 import xml.etree.ElementTree as ET
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 import requests
@@ -35,10 +35,15 @@ _cache: dict[str, tuple[Any, float]] = {}
 
 # RSS feeds (no auth required)
 RSS_FEEDS = {
-    "espn":    "http://www.espn.com/espn/rss/soccer/news",
+    "espn":    "https://www.espn.com/espn/rss/soccer/news",
     "bbc":     "https://feeds.bbci.co.uk/sport/football/rss.xml",
     "goal":    "https://www.goal.com/en/news/soccer/rss",
+    "sky":     "https://www.skysports.com/rss/12040",
+    "guardian": "https://www.theguardian.com/football/rss",
+    "reuters": "https://feeds.reuters.com/reuters/sportsNews",
 }
+
+_GDELT_DOC_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
 
 # Keywords: injury/suspension/controversy (negative) vs form/win/comeback (positive)
 _NEGATIVE_SIGNALS = [
@@ -161,6 +166,91 @@ def _fetch_all_rss(team_filter: str | None = None) -> list[dict]:
     return unique
 
 
+def _fetch_gdelt(query: str, max_results: int = 20) -> list[dict]:
+    """Fetch free soccer headlines from GDELT DOC API."""
+    q = (query or "soccer").strip()
+    if not q:
+        q = "soccer"
+    try:
+        r = requests.get(
+            _GDELT_DOC_URL,
+            params={
+                "query": f'"{q}" soccer',
+                "mode": "artlist",
+                "maxrecords": max(5, min(max_results, 50)),
+                "format": "json",
+                "sourcelang": "english",
+                "sort": "datedesc",
+            },
+            timeout=8,
+        )
+        if r.status_code != 200:
+            return []
+        articles = (r.json() or {}).get("articles", []) or []
+        rows: list[dict] = []
+        for a in articles:
+            title = (a.get("title") or "").strip()
+            if not title:
+                continue
+            domain = (a.get("domain") or "gdelt").strip() or "gdelt"
+            rows.append({
+                "title": title,
+                "description": "",
+                "url": (a.get("url") or "").strip(),
+                "source": domain,
+                "published": (a.get("seendate") or "").strip(),
+                "text": title,
+            })
+        return rows
+    except Exception as e:
+        print(f"[soccer_news] GDELT error: {e}")
+        return []
+
+
+def _parse_published_dt(value: str | None) -> datetime.datetime | None:
+    """Parse common RSS/ISO/GDELT timestamp formats into aware UTC datetimes."""
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        dt = datetime.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+        return dt.astimezone(datetime.timezone.utc)
+    except Exception:
+        pass
+    try:
+        dt = parsedate_to_datetime(raw)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+        return dt.astimezone(datetime.timezone.utc)
+    except Exception:
+        pass
+    for fmt in ("%Y%m%d%H%M%S", "%Y%m%dT%H%M%SZ", "%Y-%m-%d %H:%M:%S"):
+        try:
+            dt = datetime.datetime.strptime(raw, fmt).replace(tzinfo=datetime.timezone.utc)
+            return dt
+        except Exception:
+            continue
+    return None
+
+
+def _filter_recent_articles(articles: list[dict], max_age_hours: int) -> list[dict]:
+    if max_age_hours <= 0:
+        return list(articles)
+    cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=max_age_hours)
+    recent: list[dict] = []
+    for a in articles:
+        published_dt = _parse_published_dt(a.get("published"))
+        if published_dt is None or published_dt >= cutoff:
+            recent.append(a)
+    recent.sort(
+        key=lambda x: (_parse_published_dt(x.get("published")) or datetime.datetime.min.replace(tzinfo=datetime.timezone.utc)),
+        reverse=True,
+    )
+    return recent
+
+
 # ── Hugging Face sentiment ────────────────────────────────────────────────────
 def _hf_sentiment(text: str) -> float:
     """
@@ -213,8 +303,9 @@ def get_soccer_news(team: str | None = None,
     Articles older than max_age_hours are excluded.
     """
     query = team or competition or "soccer"
-    cache_key = f"news_{query.lower().replace(' ', '_')}"
-    return _cached(cache_key, _do_fetch_news, query, max_results)
+    cache_key = f"news_{query.lower().replace(' ', '_')}_{max_age_hours}_{max_results}"
+    articles = _cached(cache_key, _do_fetch_news, query, max_results)
+    return _filter_recent_articles(articles or [], max_age_hours)[:max_results]
 
 
 def _do_fetch_news(query: str, max_results: int) -> list[dict]:
@@ -222,17 +313,28 @@ def _do_fetch_news(query: str, max_results: int) -> list[dict]:
     results: list[dict] = []
     # 1. NewsAPI
     results.extend(_fetch_newsapi(query, max_results))
-    # 2. RSS feeds filtered by team name
+    # 2. RSS feeds filtered by team/competition query
     results.extend(_fetch_all_rss(team_filter=query if query != "soccer" else None))
+    # 3. GDELT free global news monitor
+    results.extend(_fetch_gdelt(query, max_results=max_results * 2))
+
     # Deduplicate
-    seen = set()
+    seen: set[str] = set()
     unique: list[dict] = []
     for a in results:
-        t = a.get("title", "").lower()[:80]
-        if t and t not in seen:
-            seen.add(t)
-            unique.append(a)
-    return unique[:max_results]
+        title = a.get("title", "").lower().strip()
+        url = a.get("url", "").lower().strip()
+        key = f"{title[:120]}|{url[:200]}"
+        if not title or key in seen:
+            continue
+        seen.add(key)
+        unique.append(a)
+
+    unique.sort(
+        key=lambda x: (_parse_published_dt(x.get("published")) or datetime.datetime.min.replace(tzinfo=datetime.timezone.utc)),
+        reverse=True,
+    )
+    return unique[: max(max_results * 3, 30)]
 
 
 def get_team_sentiment(team_name: str) -> dict:
@@ -260,9 +362,23 @@ def _compute_team_sentiment(team_name: str) -> dict:
             "label":         "neutral",
             "article_count": 0,
             "headlines":     [],
+            "sources":       [],
+            "source_counts": {},
         }
-    scores = [_hf_sentiment(a.get("text", a.get("title", ""))) for a in articles]
-    avg_score = round(sum(scores) / len(scores), 4) if scores else 0.0
+
+    weighted_sum = 0.0
+    total_weight = 0.0
+    source_counts: dict[str, int] = {}
+    for a in articles:
+        source = str(a.get("source") or "unknown").strip().lower() or "unknown"
+        idx = source_counts.get(source, 0)
+        weight = 1.0 / (1.0 + (idx * 0.35))
+        source_counts[source] = idx + 1
+        score = _hf_sentiment(a.get("text", a.get("title", "")))
+        weighted_sum += score * weight
+        total_weight += weight
+
+    avg_score = round(weighted_sum / total_weight, 4) if total_weight > 0 else 0.0
     label = "positive" if avg_score > 0.1 else "negative" if avg_score < -0.1 else "neutral"
     return {
         "team":          team_name,
@@ -270,6 +386,8 @@ def _compute_team_sentiment(team_name: str) -> dict:
         "label":         label,
         "article_count": len(articles),
         "headlines":     [a.get("title", "") for a in articles[:5]],
+        "sources":       sorted(source_counts.keys()),
+        "source_counts": source_counts,
     }
 
 
@@ -303,7 +421,9 @@ def get_match_news_signal(home_team: str, away_team: str) -> dict:
 def _compute_match_signal(home_team: str, away_team: str) -> dict:
     home_s = _compute_team_sentiment(home_team)
     away_s = _compute_team_sentiment(away_team)
-    combined = round(home_s["score"] - away_s["score"], 4)
+    source_coverage = len(home_s.get("sources", [])) + len(away_s.get("sources", []))
+    coverage_scale = 1.0 + min(0.20, max(0.0, (source_coverage - 2) * 0.03))
+    combined = round((home_s["score"] - away_s["score"]) * coverage_scale, 4)
     strength = "strong" if abs(combined) > 0.4 else "moderate" if abs(combined) > 0.15 else "weak"
     return {
         "home_team":       home_team,
@@ -315,14 +435,18 @@ def _compute_match_signal(home_team: str, away_team: str) -> dict:
         "combined_signal": combined,
         "home_headlines":  home_s.get("headlines", []),
         "away_headlines":  away_s.get("headlines", []),
+        "home_sources":    home_s.get("sources", []),
+        "away_sources":    away_s.get("sources", []),
+        "source_coverage": source_coverage,
         "signal_strength": strength,
     }
 
 
 def get_competition_news(competition_name: str, max_results: int = 20) -> list[dict]:
     """News about an entire competition (e.g. 'Champions League', 'Premier League')."""
-    cache_key = f"comp_news_{competition_name.lower().replace(' ', '_')}"
-    return _cached(cache_key, _fetch_newsapi, competition_name, max_results)
+    cache_key = f"comp_news_{competition_name.lower().replace(' ', '_')}_{max_results}"
+    articles = _cached(cache_key, _do_fetch_news, competition_name, max_results)
+    return (articles or [])[:max_results]
 
 
 def batch_team_sentiments(teams: list[str]) -> dict[str, dict]:

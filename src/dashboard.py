@@ -1365,7 +1365,7 @@ def api_parlay_performance():
     """Win/loss/ROI stats for all tracked parlays."""
     try:
         from data.db import get_parlay_performance_stats
-        return jsonify({"ok": True, "stats": get_parlay_performance_stats()})
+        return jsonify({"ok": True, "stats": get_parlay_performance_stats(sport="soccer")})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
 
@@ -1373,13 +1373,11 @@ def api_parlay_performance():
 @app.route("/api/parlay/auto-resolve", methods=["POST"])
 def api_parlay_auto_resolve():
     """Auto-resolve pending tracked parlays based on leg prediction outcomes."""
-    try:
-        from models.mlb_predictor import resolve_tracked_parlays
-        n = resolve_tracked_parlays(days_back=7)
-        return jsonify({"ok": True, "resolved": n,
-                        "msg": f"Resolved {n} tracked parlay(s)"})
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)})
+    return jsonify({
+        "ok": True,
+        "resolved": 0,
+        "msg": "Soccer tracked parlays are not auto-resolved by MLB handlers on this branch.",
+    })
 
 
 @app.route("/api/auto-improve", methods=["POST"])
@@ -1470,7 +1468,7 @@ def api_backfill():
 def api_performance():
     try:
         from data.db import get_performance_stats
-        return jsonify({"ok": True, "stats": get_performance_stats()})
+        return jsonify({"ok": True, "stats": get_performance_stats(sport="soccer")})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
 
@@ -1479,7 +1477,7 @@ def api_performance():
 def api_prop_performance():
     try:
         from data.db import get_prop_performance_stats
-        return jsonify({"ok": True, "stats": get_prop_performance_stats()})
+        return jsonify({"ok": True, "stats": get_prop_performance_stats(sport="soccer")})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
 
@@ -1490,7 +1488,7 @@ def api_predictions():
     outcome = request.args.get("outcome")
     try:
         from data.db import get_predictions
-        preds = get_predictions(days=days, outcome=outcome or None)
+        preds = get_predictions(days=days, outcome=outcome or None, sport="soccer")
         return jsonify({"ok": True, "predictions": _clean(preds)})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e), "predictions": []})
@@ -1498,22 +1496,13 @@ def api_predictions():
 
 @app.route("/api/resolve-outcomes", methods=["POST"])
 def api_resolve_outcomes():
-    try:
-        from models.mlb_predictor import (
-            resolve_game_outcomes, resolve_prop_outcomes, resolve_tracked_parlays
-        )
-        n_games  = resolve_game_outcomes(days_back=3)
-        n_props  = resolve_prop_outcomes(days_back=3)
-        n_parlay = resolve_tracked_parlays(days_back=7)
-        return jsonify({
-            "ok": True,
-            "resolved_games":  n_games,
-            "resolved_props":  n_props,
-            "resolved_parlays": n_parlay,
-            "msg": f"Resolved {n_games} game preds + {n_props} props + {n_parlay} parlays",
-        })
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)})
+    return jsonify({
+        "ok": True,
+        "resolved_games": 0,
+        "resolved_props": 0,
+        "resolved_parlays": 0,
+        "msg": "Soccer outcomes are not auto-resolved by MLB handlers on this branch.",
+    })
 
 
 @app.route("/api/parlay/save", methods=["POST"])
@@ -1523,9 +1512,17 @@ def api_parlay_save():
         from data.db import save_tracked_parlay
         dedupe_raw = str(data.get("dedupe_pending", "0")).strip().lower()
         dedupe_pending = dedupe_raw in {"1", "true", "yes", "on"}
+        raw_legs = data.get("legs", [])
+        norm_legs = []
+        if isinstance(raw_legs, list):
+            for leg in raw_legs:
+                if isinstance(leg, dict):
+                    leg_payload = dict(leg)
+                    leg_payload.setdefault("sport", "soccer")
+                    norm_legs.append(leg_payload)
         pid = save_tracked_parlay(
             name=data.get("name", "My Parlay"),
-            legs=data.get("legs", []),
+            legs=norm_legs,
             combined_odds=float(data.get("combined_odds", 0)),
             stake_usd=float(data.get("stake_usd", 0)),
             dedupe_pending=dedupe_pending,
@@ -1546,7 +1543,11 @@ def api_parlay_list():
         target_date = _et_calendar_today() if current_only else None
         return jsonify({
             "ok": True,
-            "parlays": _clean(get_tracked_parlays(include_resolved=include_resolved, target_date=target_date)),
+            "parlays": _clean(get_tracked_parlays(
+                include_resolved=include_resolved,
+                target_date=target_date,
+                sport="soccer",
+            )),
         })
     except Exception as e:
         return jsonify({"ok": False, "error": str(e), "parlays": []})
@@ -2096,6 +2097,67 @@ def _run_soccer_analysis():
 
         best_parlays = state.get("best_parlays", state.get("parlays", []))
         player_props = state.get("player_props", state.get("props", []))
+
+        # Persist soccer picks so performance metrics stay sport-isolated.
+        try:
+            from data.db import save_predictions, save_prop_picks
+
+            def _dec_from_american(odds):
+                try:
+                    o = float(odds)
+                except (TypeError, ValueError):
+                    return 1.91
+                if o > 0:
+                    return round(1 + (o / 100.0), 4)
+                if o < 0:
+                    return round(1 + (100.0 / abs(o)), 4)
+                return 1.91
+
+            prediction_rows = []
+            for bet in state.get("bets", []):
+                game_date = str(bet.get("date") or "")
+                model_prob = float(bet.get("probability") or 0.0)
+                prediction_rows.append({
+                    "game_key": bet.get("game_key", ""),
+                    "sport": "soccer",
+                    "bet_type": str(bet.get("bet_type") or "soccer_bet"),
+                    "pick": str(bet.get("pick_label") or ""),
+                    "line": bet.get("line"),
+                    "odds_am": bet.get("odds"),
+                    "dec_odds": _dec_from_american(bet.get("odds")),
+                    "model_prob": model_prob,
+                    "confidence": int(round(model_prob * 100)),
+                    "safety_label": bet.get("safety_label", "MODERATE"),
+                    "game_date": game_date,
+                    "game_time": str(bet.get("game_time") or ""),
+                    "home_team": bet.get("home_team", ""),
+                    "away_team": bet.get("away_team", ""),
+                    "home_starter": "",
+                    "away_starter": "",
+                    "sentiment_score": None,
+                    "news_snippet": "",
+                })
+            if prediction_rows:
+                save_predictions(prediction_rows)
+
+            prop_rows = []
+            for prop in player_props:
+                direction = str(prop.get("direction") or "OVER").upper()
+                model_prob = float(prop.get("model_prob") or 0.5)
+                over_prob = model_prob if direction == "OVER" else (1.0 - model_prob)
+                over_pct = max(0.0, min(100.0, over_prob * 100.0))
+                prop_rows.append({
+                    **prop,
+                    "sport": "soccer",
+                    "name": prop.get("name"),
+                    "date": prop.get("date") or prop.get("game_date") or today_str,
+                    "over_pct": round(over_pct, 2),
+                    "under_pct": round(100.0 - over_pct, 2),
+                })
+            if prop_rows:
+                save_prop_picks(prop_rows)
+        except Exception as persist_e:
+            print(f"[soccer-analysis] Persist picks error: {persist_e}")
 
         now_ts = _dt.datetime.now(_dt.timezone.utc)
         last_updated = now_ts.strftime("%Y-%m-%d %H:%M")

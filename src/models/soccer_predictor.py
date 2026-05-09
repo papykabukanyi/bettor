@@ -503,8 +503,10 @@ def predict_match(
         try:
             signal = get_match_news_signal(home, away)
             combined = signal.get("combined_signal", 0.0)  # home - away, -2 to +2
-            # Scale: clamp to ±1, multiply by 0.03 → max ±0.03 shift
-            adj = max(-1.0, min(1.0, combined)) * 0.03
+            # Scale by source coverage, clamp to keep shifts stable.
+            src_cov = float(signal.get("source_coverage", 0) or 0)
+            max_shift = 0.03 + min(0.03, src_cov * 0.003)
+            adj = max(-1.0, min(1.0, combined)) * max_shift
             hp  = probs["home_prob"] + adj
             ap  = probs["away_prob"] - adj
             dp  = probs["draw_prob"]
@@ -522,6 +524,7 @@ def predict_match(
             probs["away_sentiment_label"] = signal.get("away_label", "neutral")
             probs["home_headlines"] = signal.get("home_headlines", [])
             probs["away_headlines"] = signal.get("away_headlines", [])
+            probs["source_coverage"] = int(src_cov)
         except Exception as e:
             print(f"[soccer_predictor] Sentiment error: {e}")
 

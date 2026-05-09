@@ -427,14 +427,14 @@ main{padding:20px;max-width:1400px;margin:0 auto}
 
 /* ── Phone modal ── */
 .modal-overlay{position:fixed;inset:0;background:rgba(1,7,14,.72);backdrop-filter:blur(6px);z-index:100;
-  display:flex;align-items:center;justify-content:center;padding:20px;overflow:auto}
+  display:flex;align-items:center;justify-content:center;padding:20px;overflow:hidden}
 .modal-overlay.hidden{display:none}
 .modal{background:var(--card);border:1px solid var(--border);border-radius:12px;
   padding:24px;max-width:480px;width:100%}
 .modal h2{font-size:1rem;font-weight:600;margin-bottom:16px}
 .modal-close{float:right;background:none;border:none;color:var(--muted);
   font-size:1.2rem;cursor:pointer;line-height:1}
-.modal.game-details-modal{position:relative;padding:0;max-width:min(1120px,calc(100vw - 42px));max-height:calc(100vh - 34px);overflow:hidden;
+.modal.game-details-modal{position:relative;padding:0;width:min(1400px,calc(100vw - 22px));height:calc(100vh - 22px);max-width:none;max-height:none;overflow:hidden;
   border:1px solid rgba(56,189,248,.22);
   box-shadow:0 35px 80px rgba(0,0,0,.62),0 0 0 1px rgba(14,116,144,.2) inset;
   background:linear-gradient(170deg,rgba(5,10,18,.98),rgba(5,9,17,.98));
@@ -454,10 +454,9 @@ main{padding:20px;max-width:1400px;margin:0 auto}
 .game-details-title{margin:8px 0 10px;font-size:1.56rem;font-weight:700;line-height:1.15}
 .game-details-meta{display:flex;flex-wrap:wrap;gap:8px;color:#bfd0e3;font-size:.82rem}
 .game-details-chip{padding:5px 10px;border-radius:999px;background:rgba(15,23,42,.55);border:1px solid rgba(148,163,184,.22)}
-.game-details-content{flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:hidden;
-  overscroll-behavior:contain;-webkit-overflow-scrolling:touch;padding-bottom:16px}
+.game-details-content{flex:1 1 auto;min-height:0;overflow:visible;padding-bottom:0}
 .game-details-content .card-body-inner{padding:0 20px 20px}
-body.modal-open{overflow:hidden}
+body.modal-open{overflow:auto}
 .form-row{margin-bottom:12px}
 .form-row label{display:block;font-size:.78rem;color:var(--muted);margin-bottom:4px}
 .form-row input{width:100%;background:var(--card2);border:1px solid var(--border);
@@ -490,7 +489,7 @@ body.modal-open{overflow:hidden}
 }
 
 @media (max-width: 980px){
-  .modal.game-details-modal{max-width:min(100vw - 14px,760px);max-height:calc(100vh - 14px)}
+  .modal.game-details-modal{width:calc(100vw - 8px);height:calc(100vh - 8px)}
   .modal.game-details-modal .modal-close{top:10px;right:10px}
   .game-details-head{padding:18px 16px 14px}
   .game-details-title{font-size:1.15rem}
@@ -646,10 +645,10 @@ body.console-open main{padding-bottom:236px}
     <div class="no-games hidden" id="tomorrow-empty">No games tomorrow or analysis not yet run.</div>
   </div>
 
-  <!-- OVER BETS OF THE DAY -->
+  <!-- PLAYER BETS OF THE DAY -->
   <div class="tab-panel" id="panel-props">
     <div class="section-header">
-      <span class="section-title">&#9650; Over Bets of the Day</span>
+      <span class="section-title">&#127919; Player Bets of the Day</span>
       <span class="section-meta" id="props-meta"></span>
     </div>
     <div class="filter-bar">
@@ -663,8 +662,9 @@ body.console-open main{padding-bottom:236px}
         <option value="key_passes">Key Passes</option>
         <option value="dribbles">Dribbles</option>
       </select>
-      <select id="props-dir" onchange="filterProps()" style="display:none">
-        <option value="OVER" selected>OVER</option>
+      <select id="props-dir" onchange="filterProps()">
+        <option value="" selected>All Directions</option>
+        <option value="OVER">OVER</option>
         <option value="UNDER">UNDER</option>
         <option value="">All</option>
       </select>
@@ -778,17 +778,6 @@ body.console-open main{padding-bottom:236px}
         style="background:var(--card2);border:1px solid var(--border);color:var(--text);
                padding:6px 12px;border-radius:8px;font-size:.85rem;cursor:pointer">
         <option value="">&#8212; Select Competition &#8212;</option>
-        <option value="WC">&#127758; FIFA World Cup 2026</option>
-        <option value="CL">&#11088; UEFA Champions League</option>
-        <option value="PL">&#127988; Premier League</option>
-        <option value="BL1">&#127465;&#127466; Bundesliga</option>
-        <option value="SA">&#127470;&#127481; Serie A</option>
-        <option value="PD">&#127466;&#127480; La Liga</option>
-        <option value="FL1">&#127467;&#127479; Ligue 1</option>
-        <option value="DED">&#127475;&#127473; Eredivisie</option>
-        <option value="PPL">&#127477;&#127481; Primeira Liga</option>
-        <option value="BSA">&#127463;&#127479; S&#233;rie A (Brazil)</option>
-        <option value="ELC">&#127988; Championship</option>
       </select>
       <select id="tournament-days" onchange="loadTournament(document.getElementById('tournament-select').value)"
         style="background:var(--card2);border:1px solid var(--border);color:var(--text);
@@ -1149,7 +1138,7 @@ function applyCachedData(d) {
   if (d.game_cards_today    !== undefined) TODAY_CARDS    = _normalizeCardList(d.game_cards_today);
   if (d.game_cards_tomorrow !== undefined) TOMORROW_CARDS = _normalizeCardList(d.game_cards_tomorrow);
   if (d.best_parlays        !== undefined) BEST_PARLAYS   = _asArray(d.best_parlays);
-  if (d.player_props        !== undefined) ALL_PROPS      = _publicOverProps(_asArray(d.player_props));
+  if (d.player_props        !== undefined) ALL_PROPS      = _publicProps(_asArray(d.player_props));
   renderAll();
   _autoSelectDefaultTab();
   const lu = d.last_updated || d._updated_at;
@@ -1271,16 +1260,12 @@ function _phaseForCard(status, gameDate, gameTime, gameDateTime) {
   return _phaseFromSchedule(gameDate, gameTime, gameDateTime);
 }
 
-function _publicOverProps(list) {
-  return (Array.isArray(list) ? list : []).filter(p => {
-    if ((p.direction || '').toUpperCase() !== 'OVER') return false;
-    const lv = _lineValue(p.line);
-    return !(Number.isFinite(lv) && lv <= 0.5);
-  });
+function _publicProps(list) {
+  return (Array.isArray(list) ? list : []).filter(p => p && typeof p === 'object');
 }
 
-function _overBetsTotal() {
-  return _publicOverProps(ALL_PROPS).length;
+function _propBetsTotal() {
+  return _publicProps(ALL_PROPS).length;
 }
 
 function _phaseVerb(phase, futureText, liveText, pastText) {
@@ -1820,6 +1805,8 @@ function plainEnglishPropText(p, phase='upcoming') {
   const name = p.name || '—';
   const line = parseFloat(p.line) || 0;
   const st   = p.stat_type || '';
+  const dir  = String(p.direction || 'OVER').toUpperCase();
+  const dirText = dir === 'UNDER' ? 'under' : 'over';
   if (st === 'goals')           return { text: _phaseVerb(phase, `Back ${name} for ${line}+ goal${line!==1?'s':''}`, `${name} goals prop is live`, `${name} goals prop is final`), emoji: '&#9917;', color: 'var(--green)' };
   if (st === 'assists')         return { text: _phaseVerb(phase, `${name} for ${line}+ assist${line!==1?'s':''}`, `${name} assists prop is live`, `${name} assists prop is final`), emoji: '&#128200;', color: 'var(--accent)' };
   if (st === 'shots_on_target') return { text: _phaseVerb(phase, `${name} for ${line}+ shots on target`, `${name} SOT prop is live`, `${name} SOT prop is final`), emoji: '&#127919;', color: '#818cf8' };
@@ -1834,7 +1821,7 @@ function plainEnglishPropText(p, phase='upcoming') {
   if (st === 'rbi')             return { text: _phaseVerb(phase, `${name} for ${line}+ RBI`, `${name} RBI prop is live`, `${name} RBI prop is final`), emoji: '&#127919;', color: 'var(--accent)' };
   if (st === 'runs')            return { text: _phaseVerb(phase, `${name} to score ${line}+`, `${name} runs prop is live`, `${name} runs prop is final`), emoji: '&#127939;', color: 'var(--green)' };
   if (st === 'walks')           return { text: _phaseVerb(phase, `${name} for ${line}+ walks`, `${name} walks prop is live`, `${name} walks prop is final`), emoji: '&#128694;', color: '#94a3b8' };
-  return { text: _phaseVerb(phase, `Take ${name} over ${line} ${(p.prop_label||st)}`.trim(), `${name} prop is live`, `${name} prop is final`), emoji: '&#9650;', color: 'var(--accent)' };
+  return { text: _phaseVerb(phase, `Take ${name} ${dirText} ${line} ${(p.prop_label||st)}`.trim(), `${name} prop is live`, `${name} prop is final`), emoji: '&#9650;', color: 'var(--accent)' };
 }
 
 // ── Soccer card normalizer ─────────────────────────────────────────────────
@@ -1920,8 +1907,7 @@ function gameCard(c) {
 
   // Top prop picks preview — plain English, no chip clutter
   const topProps = [...(c.home_props||[]), ...(c.away_props||[])]
-    .filter(p => (p.direction||'').toUpperCase() === 'OVER')
-    .filter(p => { const lv = _lineValue(p.line); return !(Number.isFinite(lv) && lv <= 0.5); })
+    .filter(p => p && typeof p === 'object')
     .sort((a,b) => (b.model_prob||0) - (a.model_prob||0))
     .slice(0, 3);
   const propsHtml = topProps.length ? `<div class="plain-props-preview">${topProps.map(p => {
@@ -1931,8 +1917,7 @@ function gameCard(c) {
   }).join('')}</div>` : '';
 
   const propCount = [...(c.home_props||[]), ...(c.away_props||[])]
-    .filter(p => (p.direction||'').toUpperCase() === 'OVER')
-    .filter(p => { const lv = _lineValue(p.line); return !(Number.isFinite(lv) && lv <= 0.5); })
+    .filter(p => p && typeof p === 'object')
     .length;
 
   // Count all bets for expand button label
@@ -1997,8 +1982,7 @@ function _expandedCardBody(c, phase) {
   const avgConf  = allBets.length ? Math.round(allBets.reduce((s,b)=>s+(b.model_prob||0.5),0)/allBets.length*100) : null;
   const stripColor = mlProb >= 65 ? 'var(--green)' : mlProb >= 55 ? 'var(--accent)' : 'var(--yellow)';
   const topProps = [...(c.home_props||[]), ...(c.away_props||[])]
-    .filter(p => (p.direction||'').toUpperCase() === 'OVER')
-    .filter(p => { const lv = _lineValue(p.line); return !(Number.isFinite(lv) && lv <= 0.5); })
+    .filter(p => p && typeof p === 'object')
     .sort((a,b) => (b.model_prob||0) - (a.model_prob||0))
     .slice(0, 6);
 
@@ -2220,10 +2204,7 @@ function _impliedProb(oddsAm) {
 
 function _xPropsPanel(c, phase) {
   function qualifies(p) {
-    if ((p.direction||'').toUpperCase() !== 'OVER') return false;
-    const lv = _lineValue(p.line);
-    if (Number.isFinite(lv) && lv <= 0.5) return false;
-    return true;
+    return !!(p && typeof p === 'object');
   }
   const hp = (c.home_props||[]).filter(qualifies).sort((a,b)=>(b.model_prob||0)-(a.model_prob||0));
   const ap = (c.away_props||[]).filter(qualifies).sort((a,b)=>(b.model_prob||0)-(a.model_prob||0));
@@ -2470,6 +2451,7 @@ function openGameDetails(gameKey, matchKey) {
   const modal = document.getElementById('game-details-modal');
   const content = document.getElementById('game-details-content');
   if (!modal || !content || !card) return;
+  window.scrollTo({ top: 0, behavior: 'auto' });
   content.innerHTML = _gameDetailsMarkup(card);
   modal.classList.remove('hidden');
   document.body.classList.add('modal-open');
@@ -2478,8 +2460,10 @@ function openGameDetails(gameKey, matchKey) {
 function closeGameDetailsModal(event) {
   if (event && event.target !== event.currentTarget) return;
   const modal = document.getElementById('game-details-modal');
+  const content = document.getElementById('game-details-content');
   if (!modal) return;
   modal.classList.add('hidden');
+  if (content) content.innerHTML = '';
   document.body.classList.remove('modal-open');
 }
 
@@ -2512,22 +2496,20 @@ function handleGameCardKeydown(event, cardEl) {
 let _filteredProps = [];
 
 function renderPropsTable(props) {
-  ALL_PROPS = _publicOverProps(props || []);
+  ALL_PROPS = _publicProps(props || []);
   filterProps();
 }
 
 function filterProps() {
   const q     = (document.getElementById('props-search').value||'').toLowerCase();
   const stat  = document.getElementById('props-stat').value;
-  const dir   = document.getElementById('props-dir').value || 'OVER';
+  const dir   = document.getElementById('props-dir').value || '';
   const safe  = document.getElementById('props-safety').value;
   _filteredProps = ALL_PROPS.filter(p => {
     if (q && !(p.name||'').toLowerCase().includes(q) && !(p.team||'').toLowerCase().includes(q)) return false;
     if (stat && p.stat_type !== stat) return false;
-    if ((p.direction||'').toUpperCase() !== dir.toUpperCase()) return false;
+    if (dir && (p.direction||'').toUpperCase() !== dir.toUpperCase()) return false;
     if (safe && p.safety_label !== safe) return false;
-    const lv = _lineValue(p.line);
-    if (Number.isFinite(lv) && lv <= 0.5) return false;
     return true;
   });
   sortAndRenderProps();
@@ -2630,7 +2612,7 @@ function _autoTrackParlayCombos(combos) {
 }
 
 function autoGenParlaysFromProps() {
-  const qualified = _publicOverProps(ALL_PROPS || [])
+  const qualified = _publicProps(ALL_PROPS || [])
     .filter(p => _legProb(p) >= 0.61)
     .sort((a,b) => _legProb(b) - _legProb(a));
   const mixedQualified = _mixPropsByType(qualified);
@@ -2702,7 +2684,7 @@ function parlayComboCard(c) {
   return `<div class="parlay-combo-card">
   <div class="combo-header">
     <div>
-      <div class="combo-title">&#9650; ${c.n}-Leg OVER Parlay</div>
+      <div class="combo-title">&#9650; ${c.n}-Leg Player Props Parlay</div>
       <div class="combo-prob">Hit chance: ${probPct}% &middot; <span style="color:${evColor}">EV ${(evRaw*100).toFixed(1)}%</span></div>
     </div>
     <div style="text-align:right">
@@ -2782,7 +2764,7 @@ function sortAndRenderProps() {
     return;
   }
   const liveCount = sorted.reduce((acc,p)=>acc + (_isLiveFromSet(p.game_key||p.game||'', liveKeys, liveArr) ? 1 : 0), 0);
-  document.getElementById('props-meta').textContent = `${sorted.length} over bets${liveCount?` · ${liveCount} live`:''}`;
+  document.getElementById('props-meta').textContent = `${sorted.length} player bets${liveCount?` · ${liveCount} live`:''}`;
   tbody.innerHTML = sorted.map(p => {
     const isLive = _isLiveFromSet(p.game_key||p.game||'', liveKeys, liveArr);
     const liveEye = isLive ? '<span class="live-eye" title="Live prop"></span>' : '';
@@ -2826,8 +2808,8 @@ function buildLegPool() {
     }
   };
 
-  // Player props (OVER only)
-  _publicOverProps(ALL_PROPS || []).forEach(p => {
+  // Player props
+  _publicProps(ALL_PROPS || []).forEach(p => {
     const prob = _legProb(p);
     const dec  = _legDec(p) || 1.9;
     const ev   = p.ev != null ? Number(p.ev) : _legEv(prob, dec);
@@ -3154,18 +3136,67 @@ function sendBuilderParlay() {
 let _currentTournament = null;
 let _currentTournamentSub = 'matches';
 
+function _escHtml(s) {
+  return String(s || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/\"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function _renderTournamentOptions(items) {
+  const select = document.getElementById('tournament-select');
+  if (!select) return;
+  const tournaments = Array.isArray(items) ? items : [];
+  const current = select.value || _currentTournament || '';
+  let html = '<option value="">&#8212; Select Competition &#8212;</option>';
+  tournaments.forEach(t => {
+    const code = String(t.code || '').trim();
+    if (!code) return;
+    const emoji = String(t.emoji || '&#9917;').trim();
+    const name = _escHtml(t.name || code);
+    html += `<option value="${code}">${emoji} ${name}</option>`;
+  });
+  select.innerHTML = html;
+
+  if (current && tournaments.some(t => String(t.code || '') === current)) {
+    select.value = current;
+    return;
+  }
+  if (tournaments.some(t => String(t.code || '') === 'WC')) {
+    select.value = 'WC';
+  } else if (tournaments.length) {
+    select.value = String(tournaments[0].code || '');
+  }
+}
+
+function _loadTournamentOptions() {
+  return fetch('/api/tournaments')
+    .then(r => r.json())
+    .then(data => {
+      if (data && data.ok) {
+        _renderTournamentOptions(data.tournaments || []);
+      }
+      return data;
+    })
+    .catch(() => null);
+}
+
 function loadTournamentTab() {
   // Called when Tournament tab is clicked — load current select value on first open.
   const select = document.getElementById('tournament-select');
-  let code = (select && select.value) || _currentTournament;
-  if (!code && select) {
-    const defaultCode = select.querySelector('option[value="WC"]') ? 'WC' : (select.options[1] && select.options[1].value);
-    if (defaultCode) {
-      select.value = defaultCode;
-      code = defaultCode;
+  _loadTournamentOptions().finally(() => {
+    let code = (select && select.value) || _currentTournament;
+    if (!code && select) {
+      const defaultCode = select.querySelector('option[value="WC"]') ? 'WC' : (select.options[1] && select.options[1].value);
+      if (defaultCode) {
+        select.value = defaultCode;
+        code = defaultCode;
+      }
     }
-  }
-  if (code) loadTournament(code);
+    if (code) loadTournament(code);
+  });
 }
 
 function loadTournament(code) {
@@ -3232,10 +3263,11 @@ function _tournamentMatchCard(m, compData) {
     <div style="height:4px;border-radius:2px;background:var(--accent);width:${pct}%"></div></div>`;
   const _propRow = p => {
     const stat = (p.prop_label || p.stat_type || 'Prop').replace(/_/g, ' ');
+    const dir = String(p.direction || 'OVER').toUpperCase();
     const pct = Math.round(((p.model_prob != null ? p.model_prob : 0.5) * 100));
     return `<div style="display:flex;justify-content:space-between;gap:10px;padding:6px 0;border-bottom:1px dashed var(--border)">
       <span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
-        ${p.name || 'Player'} · OVER ${p.line} ${stat}
+        ${p.name || 'Player'} · ${dir} ${p.line} ${stat}
       </span>
       <span style="color:var(--accent);font-weight:600;white-space:nowrap">${pct}%</span>
     </div>`;
@@ -3245,7 +3277,7 @@ function _tournamentMatchCard(m, compData) {
     const rows = props.map(_propRow).join('');
     return `<div style="margin-top:10px">
       <div style="font-size:.72rem;color:var(--muted);margin-bottom:4px">${icon} ${team} · ${props.length} player predictions</div>
-      <div style="max-height:220px;overflow:auto;padding-right:2px">${rows}</div>
+      <div style="padding-right:2px">${rows}</div>
     </div>`;
   };
   const playerPredictions = awayProps.length || homeProps.length
@@ -3468,7 +3500,7 @@ function loadBotPerformance() {
     const losses  = (gs.losses||0) + (ps.losses||0) + (rs.losses||0);
     const pushes  = (gs.pushes||0) + (ps.pushes||0) + (rs.pushes||0);
     const pending = (gs.pending||0)+ (ps.pending||0)+ (rs.pending||0);
-    const totalProps = _overBetsTotal();
+    const totalProps = _propBetsTotal();
     const hitRate = (wins + losses) > 0 ? Math.round(wins / (wins + losses) * 100) : null;
     const hrColor = hitRate >= 55 ? 'var(--green)' : hitRate >= 45 ? 'var(--yellow)' : 'var(--red)';
     el.innerHTML = `
@@ -3477,7 +3509,7 @@ function loadBotPerformance() {
       <div class="perf-card"><div class="perf-val perf-pend">${pushes}</div><div class="perf-label">Pushes</div></div>
       <div class="perf-card"><div class="perf-val perf-pend">${pending}</div><div class="perf-label">Pending</div></div>
       <div class="perf-card"><div class="perf-val" style="color:${hrColor}">${hitRate!=null?hitRate+'%':'—'}</div><div class="perf-label">Bot Hit Rate</div></div>
-      <div class="perf-card"><div class="perf-val" style="font-size:1.2rem">${totalProps}</div><div class="perf-label">Total Over Bets</div><div class="perf-sub">Bets of the Day</div></div>
+      <div class="perf-card"><div class="perf-val" style="font-size:1.2rem">${totalProps}</div><div class="perf-label">Total Player Bets</div><div class="perf-sub">Bets of the Day</div></div>
     `;
   }).catch(() => {
     el.innerHTML = '<div class="no-games">Could not load bot performance.</div>';
@@ -3491,14 +3523,14 @@ function loadPerformance() {
   fetch('/api/performance').then(r=>r.json()).then(d=>{
     if (!d.ok) { return; }
     const s = d.stats||{};
-    const totalProps = _overBetsTotal();
+    const totalProps = _propBetsTotal();
     perfEl.innerHTML = `
       <div class="perf-card"><div class="perf-val perf-win">${s.wins||0}</div><div class="perf-label">Game Wins</div></div>
       <div class="perf-card"><div class="perf-val perf-loss">${s.losses||0}</div><div class="perf-label">Game Losses</div></div>
       <div class="perf-card"><div class="perf-val perf-pend">${s.pushes||0}</div><div class="perf-label">Pushes</div></div>
       <div class="perf-card"><div class="perf-val perf-pend">${s.pending||0}</div><div class="perf-label">Pending</div></div>
       <div class="perf-card"><div class="perf-val perf-rate">${s.hit_rate!=null?s.hit_rate+'%':'—'}</div><div class="perf-label">Hit Rate</div></div>
-      <div class="perf-card"><div class="perf-val" style="font-size:1.2rem">${totalProps}</div><div class="perf-label">Total Over Bets</div><div class="perf-sub">Bets of the Day</div></div>
+      <div class="perf-card"><div class="perf-val" style="font-size:1.2rem">${totalProps}</div><div class="perf-label">Total Player Bets</div><div class="perf-sub">Bets of the Day</div></div>
     `;
   });
 }
@@ -3703,6 +3735,8 @@ function stopConsolePoll() {
 
 // ── Init ──────────────────────────────────────────────────────────────────────────
 (function init() {
+  _loadTournamentOptions();
+
   // Show local cache immediately so page is not blank
   const local = loadLocalCache();
   if (local && (
