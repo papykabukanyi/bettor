@@ -33,9 +33,15 @@ from config import (
     DISCORD_LOOKBACK_HOURS,
     DISCORD_MAX_MESSAGES,
     DISCORD_CACHE_MINUTES,
+    DISCORD_ENABLE_ATTACHMENT_OCR,
+    DISCORD_MAX_IMAGE_ATTACHMENTS,
+    DISCORD_OCR_TIMEOUT_SECONDS,
     TIKTOK_ENABLED,
     TIKTOK_HASHTAGS,
     TIKTOK_MAX_VIDEOS,
+    TIKTOK_MAX_COMMENTS,
+    TIKTOK_COMMENTS_PER_VIDEO,
+    TIKTOK_FETCH_COMMENTS,
     TIKTOK_CACHE_MINUTES,
     SOCIAL_PLAYER_MIN_MENTIONS,
     SOCIAL_MAX_PLAYERS_PER_GAME,
@@ -47,6 +53,10 @@ _HF_MODELS = [
     "cardiffnlp/twitter-roberta-base-sentiment-latest",
     "distilbert-base-uncased-finetuned-sst-2-english",
     "ProsusAI/finbert",
+]
+_HF_OCR_MODELS = [
+    "microsoft/trocr-base-printed",
+    "Salesforce/blip-image-captioning-base",
 ]
 _HF_API_BASES = [
     "https://router.huggingface.co/hf-inference/models",
@@ -67,6 +77,7 @@ _NEWS_FAILED     = False
 _DISCORD_FAILED  = False
 _DISCORD_AUTH_LOGGED = False
 _DISCORD_CACHE: dict[str, dict] = {}
+_DISCORD_IMAGE_OCR_CACHE: dict[str, str] = {}
 _TIKTOK_CACHE: dict[str, dict] = {}
 _SOCIAL_PLAYER_CACHE: dict[str, dict] = {}
 _HIST_PLAYER_CACHE: dict[str, dict] = {}
@@ -233,9 +244,24 @@ def _resolve_discord_channels_for_sport(sport: str | None = None) -> list[dict]:
     by_sport = _parse_discord_channel_map(DISCORD_CHANNELS_BY_SPORT)
     sport_key = str(sport or "all").strip().lower()
 
+    alias_map = {
+        "mlb": ["baseball", "mlb"],
+        "baseball": ["baseball", "mlb"],
+        "soccer": ["soccer", "football"],
+        "basketball": ["basketball", "nba", "wnba", "ncaab"],
+        "americanfootball": ["americanfootball", "football", "nfl", "ncaaf"],
+        "icehockey": ["icehockey", "hockey", "nhl"],
+        "tennis": ["tennis"],
+        "mma": ["mma", "ufc"],
+        "all": ["all"],
+    }
+    keys = [sport_key]
+    keys.extend(alias_map.get(sport_key, []))
+
     channels.extend(by_sport.get("all", []))
     if sport_key and sport_key != "all":
-        channels.extend(by_sport.get(sport_key, []))
+        for key in keys:
+            channels.extend(by_sport.get(key, []))
 
     deduped: list[dict] = []
     seen = set()
@@ -257,6 +283,76 @@ def _discord_cache_key(sport: str | None, channels: list[dict]) -> str:
 
 def _discord_headers() -> dict:
     return {"Authorization": f"Bot {DISCORD_BOT_TOKEN}"}
+
+
+def _is_image_attachment(att: dict) -> bool:
+    content_type = str(att.get("content_type") or "").lower()
+    if content_type.startswith("image/"):
+        return True
+    filename = str(att.get("filename") or "").lower()
+    return filename.endswith((".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tiff"))
+
+
+def _ocr_text_from_image_url(url: str) -> str:
+    if not DISCORD_ENABLE_ATTACHMENT_OCR:
+        return ""
+    if not HF_API_KEY:
+        return ""
+    u = str(url or "").strip()
+    if not u:
+        return ""
+    cached = _DISCORD_IMAGE_OCR_CACHE.get(u)
+    if cached is not None:
+        return cached
+
+    try:
+        img_resp = requests.get(u, timeout=max(3, int(DISCORD_OCR_TIMEOUT_SECONDS)))
+        if img_resp.status_code != 200:
+            _DISCORD_IMAGE_OCR_CACHE[u] = ""
+            return ""
+        img_bytes = img_resp.content or b""
+    except Exception:
+        _DISCORD_IMAGE_OCR_CACHE[u] = ""
+        return ""
+
+    if not img_bytes:
+        _DISCORD_IMAGE_OCR_CACHE[u] = ""
+        return ""
+
+    headers = {
+        "Authorization": f"Bearer {HF_API_KEY}",
+        "Content-Type": "application/octet-stream",
+    }
+    for base in _HF_API_BASES:
+        for model in _HF_OCR_MODELS:
+            endpoint = f"{base}/{model}"
+            try:
+                r = requests.post(
+                    endpoint,
+                    headers=headers,
+                    data=img_bytes,
+                    timeout=max(3, int(DISCORD_OCR_TIMEOUT_SECONDS)),
+                )
+                if r.status_code != 200:
+                    continue
+                payload = r.json() if r.text else []
+                text = ""
+                if isinstance(payload, list) and payload:
+                    first = payload[0] or {}
+                    if isinstance(first, dict):
+                        text = str(first.get("generated_text") or first.get("caption") or "").strip()
+                    else:
+                        text = str(first).strip()
+                elif isinstance(payload, dict):
+                    text = str(payload.get("generated_text") or payload.get("text") or payload.get("caption") or "").strip()
+                if text:
+                    _DISCORD_IMAGE_OCR_CACHE[u] = text
+                    return text
+            except Exception:
+                continue
+
+    _DISCORD_IMAGE_OCR_CACHE[u] = ""
+    return ""
 
 
 def _parse_discord_ts(ts: str) -> "datetime.datetime | None":
@@ -292,6 +388,7 @@ def _fetch_discord_messages(sport: str | None = None) -> list[dict]:
 
     cutoff = now - datetime.timedelta(hours=float(DISCORD_LOOKBACK_HOURS))
     max_messages = max(1, int(DISCORD_MAX_MESSAGES))
+    remaining_ocr = max(0, int(DISCORD_MAX_IMAGE_ATTACHMENTS))
     all_msgs: list[dict] = []
 
     for ch in channels:
@@ -338,13 +435,34 @@ def _fetch_discord_messages(sport: str | None = None) -> list[dict]:
                 if ts and ts < cutoff:
                     stop_early = True
                     break
-                content = (msg.get("content") or "").strip()
-                if not content:
-                    continue
                 if msg.get("author", {}).get("bot"):
                     continue
+                chunks = []
+                content = (msg.get("content") or "").strip()
+                if content:
+                    chunks.append(content)
+
+                for att in (msg.get("attachments") or []):
+                    desc = str(att.get("description") or "").strip()
+                    if desc:
+                        chunks.append(desc)
+                    filename = str(att.get("filename") or "").strip()
+                    if filename:
+                        name_hint = re.sub(r"[_\-]+", " ", filename)
+                        name_hint = re.sub(r"\.[a-z0-9]{2,5}$", "", name_hint, flags=re.IGNORECASE).strip()
+                        if name_hint and len(name_hint) >= 3:
+                            chunks.append(name_hint)
+                    if remaining_ocr > 0 and _is_image_attachment(att):
+                        ocr = _ocr_text_from_image_url(att.get("url") or att.get("proxy_url") or "")
+                        if ocr:
+                            chunks.append(ocr)
+                        remaining_ocr -= 1
+
+                combined = " ".join(x for x in chunks if x).strip()
+                if not combined:
+                    continue
                 all_msgs.append({
-                    "content": content,
+                    "content": combined,
                     "timestamp": msg.get("timestamp"),
                     "channel_id": channel_id,
                 })
@@ -500,6 +618,47 @@ def _tiktok_cache_key(sport: str, hashtags: list[str]) -> str:
     return f"{sk}|{'-'.join(sorted(hashtags))}"
 
 
+def _fetch_tiktok_comments(aweme_id: str, limit: int, headers: dict) -> list[str]:
+    rows: list[str] = []
+    cursor = 0
+    max_items = max(0, int(limit or 0))
+    while len(rows) < max_items:
+        params = {
+            "aweme_id": aweme_id,
+            "count": min(50, max_items - len(rows)),
+            "cursor": cursor,
+        }
+        try:
+            resp = requests.get(
+                "https://www.tiktok.com/api/comment/list/",
+                params=params,
+                headers=headers,
+                timeout=12,
+            )
+            if resp.status_code != 200:
+                break
+            payload = resp.json() if resp.text else {}
+            comments = payload.get("comments") or payload.get("commentList") or []
+            if not comments:
+                break
+            for c in comments:
+                text = str(c.get("text") or "").strip()
+                if text:
+                    rows.append(text)
+                    if len(rows) >= max_items:
+                        break
+            has_more = bool(payload.get("has_more") or payload.get("hasMore"))
+            next_cursor = payload.get("cursor")
+            if next_cursor is None:
+                next_cursor = payload.get("next_cursor")
+            if not has_more or next_cursor is None:
+                break
+            cursor = int(next_cursor)
+        except Exception:
+            break
+    return rows
+
+
 def _fetch_tiktok_hashtag_texts(sport: str = "all", limit: int = 60) -> list[str]:
     if not TIKTOK_ENABLED:
         return []
@@ -509,7 +668,9 @@ def _fetch_tiktok_hashtag_texts(sport: str = "all", limit: int = 60) -> list[str
     if not tags:
         return []
 
-    max_items = max(1, min(int(limit or TIKTOK_MAX_VIDEOS or 40), int(TIKTOK_MAX_VIDEOS or 40)))
+    max_videos = max(1, min(int(limit or TIKTOK_MAX_VIDEOS or 40), int(TIKTOK_MAX_VIDEOS or 40)))
+    comment_budget = max(0, int(TIKTOK_MAX_COMMENTS or 0))
+    comments_per_video = max(0, int(TIKTOK_COMMENTS_PER_VIDEO or 0))
     cache_key = _tiktok_cache_key(sport, tags)
     now = datetime.datetime.now(datetime.timezone.utc)
     cached = _TIKTOK_CACHE.get(cache_key, {})
@@ -517,19 +678,21 @@ def _fetch_tiktok_hashtag_texts(sport: str = "all", limit: int = 60) -> list[str
     if cached_at and isinstance(cached_at, datetime.datetime):
         age_min = (now - cached_at).total_seconds() / 60
         if age_min <= float(TIKTOK_CACHE_MINUTES):
-            return list(cached.get("texts", []))[:max_items]
+            max_rows = max_videos + comment_budget
+            return list(cached.get("texts", []))[:max_rows]
 
     rows: list[str] = []
     seen = set()
+    video_count = 0
     headers = {
         "User-Agent": "Mozilla/5.0",
         "Accept": "application/json,text/plain,*/*",
     }
 
     for tag in tags:
-        if len(rows) >= max_items:
+        if video_count >= max_videos:
             break
-        remaining = max_items - len(rows)
+        remaining = max_videos - video_count
         url = "https://www.tiktok.com/api/challenge/item_list/"
         params = {
             "challengeName": tag,
@@ -543,13 +706,27 @@ def _fetch_tiktok_hashtag_texts(sport: str = "all", limit: int = 60) -> list[str
             payload = resp.json() if resp.text else {}
             items = payload.get("itemList") or payload.get("items") or []
             for item in items:
+                if video_count >= max_videos:
+                    break
                 text = str(item.get("desc") or "").strip()
                 if not text or text in seen:
                     continue
                 seen.add(text)
                 rows.append(text)
-                if len(rows) >= max_items:
-                    break
+                video_count += 1
+
+                if TIKTOK_FETCH_COMMENTS and comment_budget > 0 and comments_per_video > 0:
+                    aweme_id = str(item.get("id") or item.get("aweme_id") or "").strip()
+                    if aweme_id:
+                        wanted = min(comment_budget, comments_per_video)
+                        for cm in _fetch_tiktok_comments(aweme_id, wanted, headers):
+                            if not cm or cm in seen:
+                                continue
+                            seen.add(cm)
+                            rows.append(cm)
+                            comment_budget -= 1
+                            if comment_budget <= 0:
+                                break
         except Exception:
             continue
 

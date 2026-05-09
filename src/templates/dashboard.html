@@ -648,7 +648,7 @@ body.console-open main{padding-bottom:236px}
     &#128197; Tomorrow <span class="tab-badge" id="badge-tomorrow">0</span>
   </div>
   <div class="tab" data-tab="tournaments" onclick="switchTab('tournaments')">
-    &#127942; Tournaments
+    &#129517; Sports
   </div>
   <div class="tab" data-tab="props" onclick="switchTab('props')">
     &#128200; {{ 'Best Bets' if active_sport == 'all' else ('Player Props' if active_sport == 'soccer' else 'Over Bets') }}
@@ -686,12 +686,15 @@ body.console-open main{padding-bottom:236px}
 
   <div class="tab-panel" id="panel-tournaments">
     <div class="section-header">
-      <span class="section-title">&#127942; Tournament Hub</span>
+      <span class="section-title">&#129517; Sports Hub</span>
       <span class="section-meta" id="tournament-meta"></span>
     </div>
     <div class="filter-bar">
+      <select id="tournament-sport" onchange="loadTournamentData()">
+        <option value="all">All Sports</option>
+      </select>
       <select id="tournament-code" onchange="loadTournamentData()">
-        <option value="">Choose tournament</option>
+        <option value="">All Leagues</option>
       </select>
       <select id="tournament-days" onchange="loadTournamentData()">
         <option value="3">Next 3 Days</option>
@@ -710,16 +713,16 @@ body.console-open main{padding-bottom:236px}
     </div>
     <div class="tournament-grid">
       <div class="tournament-card">
-        <div class="section-header" style="margin-bottom:8px"><span class="section-title">Fixtures</span></div>
-        <div id="tournament-fixtures" class="tournament-scroll"><div class="no-games">Select a tournament to load fixtures.</div></div>
+        <div class="section-header" style="margin-bottom:8px"><span class="section-title">Games / Fixtures</span></div>
+        <div id="tournament-fixtures" class="tournament-scroll"><div class="no-games">Select a sport or league to load games.</div></div>
       </div>
       <div class="tournament-card">
-        <div class="section-header" style="margin-bottom:8px"><span class="section-title">Standings</span></div>
-        <div id="tournament-standings" class="tournament-scroll"><div class="no-games">Standings will appear here.</div></div>
+        <div class="section-header" style="margin-bottom:8px"><span class="section-title">Team Bet Analysis</span></div>
+        <div id="tournament-standings" class="tournament-scroll"><div class="no-games">Team-level analysis will appear here.</div></div>
       </div>
       <div class="tournament-card">
-        <div class="section-header" style="margin-bottom:8px"><span class="section-title">Top Scorers</span></div>
-        <div id="tournament-scorers" class="tournament-scroll"><div class="no-games">Top scorers will appear here.</div></div>
+        <div class="section-header" style="margin-bottom:8px"><span class="section-title">Market Breakdown</span></div>
+        <div id="tournament-scorers" class="tournament-scroll"><div class="no-games">Market signals will appear here.</div></div>
       </div>
     </div>
   </div>
@@ -773,6 +776,7 @@ body.console-open main{padding-bottom:236px}
             <th>Model</th>
             <th>Safety</th>
             <th>EV</th>
+            <th>Signal Rationale</th>
           </tr>
         </thead>
         <tbody id="props-tbody"></tbody>
@@ -1667,9 +1671,38 @@ function _renderTournamentStandings(standings) {
   if (!el) return;
   const blocks = _asArray(standings);
   if (!blocks.length) {
-    el.innerHTML = '<div class="no-games">No standings available.</div>';
+    el.innerHTML = '<div class="no-games">No team analysis available.</div>';
     return;
   }
+
+  const teamMode = blocks.some(b => String(b.mode || '').toLowerCase() === 'team_bets');
+  if (teamMode) {
+    const rows = blocks.flatMap(b => _asArray(b.table || []));
+    if (!rows.length) {
+      el.innerHTML = '<div class="no-games">No team bet signals for this filter.</div>';
+      return;
+    }
+    const html = `
+      <table class="standings-table">
+        <thead><tr><th>Team</th><th>Games</th><th>Team Picks</th><th>Against</th><th>Props</th><th>Avg Model</th><th>Top Market</th></tr></thead>
+        <tbody>
+          ${rows.slice(0, 60).map(row => `
+            <tr>
+              <td>${row.team || ''}</td>
+              <td>${row.games ?? 0}</td>
+              <td>${row.team_picks ?? 0}</td>
+              <td>${row.against_picks ?? 0}</td>
+              <td>${row.prop_count ?? 0}</td>
+              <td>${row.avg_model != null ? row.avg_model + '%' : '—'}</td>
+              <td>${row.top_market || '—'}</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>`;
+    el.innerHTML = html;
+    return;
+  }
+
   const html = blocks.map(block => {
     const table = _asArray(block.table);
     if (!table.length) return '';
@@ -1701,9 +1734,23 @@ function _renderTournamentScorers(scorers) {
   if (!el) return;
   const rows = _asArray(scorers);
   if (!rows.length) {
-    el.innerHTML = '<div class="no-games">No scorer data available.</div>';
+    el.innerHTML = '<div class="no-games">No market breakdown available.</div>';
     return;
   }
+
+  if (rows[0] && Object.prototype.hasOwnProperty.call(rows[0], 'count')) {
+    el.innerHTML = rows.slice(0, 40).map((r, idx) => `
+      <div class="scorer-row">
+        <div>
+          <div class="scorer-name">${idx + 1}. ${r.name || 'market'}</div>
+          <div class="scorer-team">Best: ${r.best_pick || '—'}</div>
+        </div>
+        <div class="scorer-goals">${r.count || 0} · ${r.avg_model != null ? r.avg_model + '%' : '—'}</div>
+      </div>
+    `).join('');
+    return;
+  }
+
   el.innerHTML = rows.slice(0, 30).map((s, idx) => `
     <div class="scorer-row">
       <div>
@@ -1718,21 +1765,54 @@ function _renderTournamentScorers(scorers) {
 function loadTournaments() {
   if (!_isSoccerMode()) return Promise.resolve();
   const select = document.getElementById('tournament-code');
+  const sportSelect = document.getElementById('tournament-sport');
   if (!select) return Promise.resolve();
   return fetch('/api/tournaments')
     .then(r => r.json())
     .then(d => {
       if (!d.ok) return;
       TOURNAMENTS = _asArray(d.tournaments);
-      if (!TOURNAMENTS.length) return;
+
+      if (sportSelect) {
+        const mode = String(ACTIVE_SPORT || '').toLowerCase();
+        if (mode === 'all') {
+          const bySport = new Map();
+          for (const t of TOURNAMENTS) {
+            const meta = _sportMetaFromKey(t.type || t.sport || 'other');
+            if (!bySport.has(meta.key)) bySport.set(meta.key, meta);
+          }
+          const sportOptions = Array.from(bySport.values())
+            .sort((a, b) => a.order - b.order)
+            .map(meta => `<option value="${meta.key}">${meta.icon} ${meta.label}</option>`)
+            .join('');
+          const prevSport = sportSelect.value || 'all';
+          sportSelect.innerHTML = `<option value="all">All Sports</option>${sportOptions}`;
+          sportSelect.disabled = false;
+          sportSelect.value = sportSelect.querySelector(`option[value="${prevSport}"]`) ? prevSport : 'all';
+        } else {
+          const fallback = mode === 'soccer' ? 'soccer' : mode;
+          const meta = _sportMetaFromKey(fallback);
+          sportSelect.innerHTML = `<option value="${meta.key}">${meta.icon} ${meta.label}</option>`;
+          sportSelect.value = meta.key;
+          sportSelect.disabled = true;
+        }
+      }
+
       const current = select.value;
-      select.innerHTML = TOURNAMENTS.map(t => {
+      const mode = String(ACTIVE_SPORT || '').toLowerCase();
+      const leadOption = mode === 'all'
+        ? '<option value="">All Leagues</option>'
+        : '<option value="">Choose tournament</option>';
+      select.innerHTML = leadOption + TOURNAMENTS.map(t => {
         const count = Number(t.match_count || 0);
-        const label = `${t.emoji || '⚽'} ${t.name || t.code}${count ? ` (${count})` : ''}`;
+        const icon = mode === 'all' ? _sportMetaFromKey(t.type || t.sport || 'other').icon : (t.emoji || '⚽');
+        const label = `${icon} ${t.name || t.code}${count ? ` (${count})` : ''}`;
         return `<option value="${t.code}">${label}</option>`;
       }).join('');
       if (current && TOURNAMENTS.some(t => String(t.code) === current)) {
         select.value = current;
+      } else if (mode !== 'all' && TOURNAMENTS.length) {
+        select.value = String(TOURNAMENTS[0].code || '');
       }
     })
     .catch(() => {});
@@ -1740,6 +1820,7 @@ function loadTournaments() {
 
 function loadTournamentData(force) {
   if (!_isSoccerMode()) return;
+  const sportEl = document.getElementById('tournament-sport');
   const codeEl = document.getElementById('tournament-code');
   const daysEl = document.getElementById('tournament-days');
   const statusEl = document.getElementById('tournament-status');
@@ -1748,19 +1829,21 @@ function loadTournamentData(force) {
   if (!codeEl) return;
 
   const code = String(codeEl.value || '').trim();
-  if (!code) {
+  const sport = String(sportEl ? sportEl.value : (_isAllSportsMode() ? 'all' : 'soccer')).trim() || 'all';
+  if (!code && !_isAllSportsMode()) {
     if (meta) meta.textContent = 'Select a tournament to start.';
     return;
   }
 
   const params = new URLSearchParams();
-  params.set('code', code);
+  if (code) params.set('code', code);
+  params.set('sport', sport);
   params.set('days', String(daysEl ? daysEl.value : '5'));
   params.set('status', String(statusEl ? statusEl.value : 'all'));
   const q = String(qEl ? qEl.value : '').trim();
   if (q) params.set('q', q);
 
-  if (meta) meta.textContent = 'Loading tournament data…';
+  if (meta) meta.textContent = 'Loading sports data…';
   fetch(`/api/tournament/data?${params.toString()}`)
     .then(r => r.json())
     .then(d => {
@@ -1769,12 +1852,13 @@ function loadTournamentData(force) {
       _renderTournamentFixtures(d.matches || []);
       _renderTournamentStandings(d.standings || []);
       _renderTournamentScorers(d.top_scorers || []);
-      const name = (d.competition && d.competition.name) ? d.competition.name : code;
+      const name = (d.competition && d.competition.name) ? d.competition.name : (code || 'All Sports');
       const count = _asArray(d.matches).length;
-      if (meta) meta.textContent = `${name} · ${count} fixture${count !== 1 ? 's' : ''}`;
+      const teamRows = _asArray((d.standings && d.standings[0] && d.standings[0].table) || []).length;
+      if (meta) meta.textContent = `${name} · ${count} game${count !== 1 ? 's' : ''} · ${teamRows} team signals`;
     })
     .catch((err) => {
-      if (meta) meta.textContent = `Tournament load failed: ${err.message || err}`;
+      if (meta) meta.textContent = `Sports load failed: ${err.message || err}`;
       _renderTournamentFixtures([]);
       _renderTournamentStandings([]);
       _renderTournamentScorers([]);
@@ -3055,7 +3139,7 @@ function sortAndRenderProps() {
   const liveKeys = _getLiveGameKeySet();
   const liveArr = Array.from(liveKeys).map(v => v.toLowerCase());
   if (!sorted.length) {
-    tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--muted);padding:24px">No props match filter.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;color:var(--muted);padding:24px">No props match filter.</td></tr>';
     document.getElementById('props-meta').textContent = '';
     return;
   }
@@ -3082,6 +3166,7 @@ function sortAndRenderProps() {
       <td>${p.model_prob!=null?Math.round(p.model_prob*100)+'%':'—'}</td>
       <td>${safetyBadge(p.safety_label||'MODERATE')}</td>
       <td style="color:${(p.ev||0)>=0?'var(--green)':'var(--red)'}">${p.ev!=null?p.ev.toFixed(3):'—'}</td>
+      <td>${p.signal_rationale || '—'}</td>
     </tr>`;
   }).join('');
 }

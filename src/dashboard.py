@@ -1,4 +1,4 @@
-﻿"""
+"""
 Betting Bot — Web Dashboard (MLB)
 ==================================
 Routes:
@@ -1888,6 +1888,213 @@ def _build_model_player_props_fallback(games: list[dict], max_per_game: int = 6)
     except Exception as e:
         _log(f"[all-sports] basketball player-prop fallback skipped: {e}")
 
+    # Hockey player props from ESPN summary leaders (free endpoint).
+    try:
+        import requests
+
+        hockey_games = [
+            g for g in (games or [])
+            if _infer_sport_group(g.get("sport") or g.get("competition") or g.get("league") or "") == "icehockey"
+        ]
+
+        if hockey_games:
+            stat_meta = {
+                "goals": ("goals", "Goals", 0.5),
+                "assists": ("assists", "Assists", 0.5),
+                "shots": ("shots_on_goal", "Shots on Goal", 1.5),
+                "saves": ("saves", "Saves", 20.5),
+            }
+            scoreboard_cache: dict[tuple[str, str], list[dict]] = {}
+
+            def _h_num(value):
+                if value is None:
+                    return None
+                if isinstance(value, (int, float)):
+                    return float(value)
+                s = str(value).strip()
+                if not s:
+                    return None
+                m = re.search(r"-?\d+(?:\.\d+)?", s)
+                if not m:
+                    return None
+                try:
+                    return float(m.group(0))
+                except Exception:
+                    return None
+
+            def _team_token(name: str) -> str:
+                return re.sub(r"[^a-z0-9]+", "", str(name or "").strip().lower())
+
+            def _h_poisson_over(rate: float, line: float) -> float:
+                lam = max(0.01, float(rate or 0.01))
+                target = int(math.floor(float(line or 0.5)) + 1)
+                cdf = 0.0
+                for k in range(max(0, target)):
+                    try:
+                        cdf += math.exp(-lam) * (lam ** k) / math.factorial(k)
+                    except Exception:
+                        pass
+                return max(0.05, min(0.95, 1.0 - cdf))
+
+            def _scoreboard_events(slug: str, date_token: str) -> list[dict]:
+                key = (slug, date_token)
+                if key in scoreboard_cache:
+                    return scoreboard_cache[key]
+                url = f"https://site.api.espn.com/apis/site/v2/sports/hockey/{slug}/scoreboard"
+                try:
+                    resp = requests.get(url, params={"dates": date_token, "limit": 200}, timeout=8)
+                    if resp.status_code != 200:
+                        scoreboard_cache[key] = []
+                        return []
+                    events = (resp.json() or {}).get("events") or []
+                    scoreboard_cache[key] = events
+                    return events
+                except Exception:
+                    scoreboard_cache[key] = []
+                    return []
+
+            def _resolve_event_id(game: dict, slug: str) -> str:
+                eid = str(game.get("espn_event_id") or game.get("event_id") or "").strip()
+                if eid:
+                    return eid
+                gd = str(game.get("game_date") or game.get("date") or "").strip()
+                date_token = gd.replace("-", "") if re.match(r"^\d{4}-\d{2}-\d{2}$", gd) else _et_calendar_today().strftime("%Y%m%d")
+
+                away_tok = _team_token(game.get("away_team") or "")
+                home_tok = _team_token(game.get("home_team") or "")
+                if not away_tok or not home_tok:
+                    return ""
+
+                for ev in _scoreboard_events(slug, date_token):
+                    comp = (ev.get("competitions") or [{}])[0]
+                    competitors = comp.get("competitors") or []
+                    if len(competitors) < 2:
+                        continue
+                    home_c = next((c for c in competitors if str(c.get("homeAway") or "").lower() == "home"), competitors[0])
+                    away_c = next((c for c in competitors if str(c.get("homeAway") or "").lower() == "away"), competitors[1] if len(competitors) > 1 else competitors[0])
+                    eh = _team_token((home_c.get("team") or {}).get("displayName") or "")
+                    ea = _team_token((away_c.get("team") or {}).get("displayName") or "")
+                    if eh == home_tok and ea == away_tok:
+                        return str(ev.get("id") or "").strip()
+                    if eh == away_tok and ea == home_tok:
+                        return str(ev.get("id") or "").strip()
+                return ""
+
+            def _mk_hockey_row(game: dict, team_name: str, player_name: str, stat_name: str, raw_value: float, source: str) -> dict:
+                stat_type, stat_label, min_line = stat_meta.get(stat_name, ("goals", "Goals", 0.5))
+
+                # ESPN leader values can be season totals for pregame cards.
+                if stat_name in {"goals", "assists", "shots"}:
+                    base_rate = float(raw_value) / 82.0 if raw_value > 8 else float(raw_value)
+                elif stat_name == "saves":
+                    base_rate = float(raw_value) / 60.0 if raw_value > 70 else float(raw_value)
+                else:
+                    base_rate = float(raw_value)
+
+                base_rate = max(0.05, base_rate)
+                line_val = max(min_line, round(max(min_line, base_rate * 0.9) * 2.0) / 2.0)
+                over_prob = _h_poisson_over(base_rate, line_val)
+                model_prob = max(0.52, min(0.86, over_prob))
+                odds_am = _prob_to_american(model_prob)
+                dec_odds = round((1 + (odds_am / 100.0)) if odds_am > 0 else (1 + (100.0 / abs(odds_am))), 4)
+                ev = (dec_odds - 1.0) * model_prob - (1.0 - model_prob)
+
+                home = str(game.get("home_team") or "").strip()
+                away = str(game.get("away_team") or "").strip()
+                game_date = str(game.get("game_date") or game.get("date") or today_str)
+                game_time = str(game.get("game_time") or "")
+                game_key = str(game.get("game_key") or _compose_game_key(away, home, game.get("game_datetime"), game_date, game_time))
+                match_key = _norm_gk(game.get("match_key") or f"{away}@{home}")
+
+                return {
+                    "sport": "icehockey",
+                    "name": player_name,
+                    "team": team_name or home,
+                    "prop_label": f"Projected {stat_label}",
+                    "stat_type": stat_type,
+                    "line": line_val,
+                    "direction": "OVER",
+                    "model_prob": round(model_prob, 4),
+                    "confidence": int(round(model_prob * 100)),
+                    "safety_label": _safety_label_from_prob(model_prob),
+                    "ev": round(ev, 4),
+                    "odds_am": odds_am,
+                    "dec_odds": dec_odds,
+                    "game": f"{away} @ {home}",
+                    "game_key": game_key,
+                    "match_key": match_key,
+                    "game_date": game_date,
+                    "game_time": game_time,
+                    "home_team": home,
+                    "away_team": away,
+                    "sentiment_score": 0.0,
+                    "sentiment_mentions": 0,
+                    "sentiment_sources": source,
+                    "worth_it": model_prob >= 0.57,
+                    "worth_score": round(model_prob * 100.0, 2),
+                    "worth_reason": "ESPN hockey leaders trend",
+                }
+
+            for g in hockey_games[:50]:
+                home = str(g.get("home_team") or "").strip()
+                away = str(g.get("away_team") or "").strip()
+                if not home or not away:
+                    continue
+
+                league_slug = str(g.get("espn_league_path") or "nhl").strip().lower() or "nhl"
+                event_id = _resolve_event_id(g, league_slug)
+                if not event_id:
+                    continue
+
+                url = f"https://site.api.espn.com/apis/site/v2/sports/hockey/{league_slug}/summary"
+                try:
+                    resp = requests.get(url, params={"event": event_id}, timeout=8)
+                    if resp.status_code != 200:
+                        continue
+                    summary = resp.json() or {}
+                except Exception:
+                    continue
+
+                game_rows: list[dict] = []
+                for team_bucket in (summary.get("leaders") or []):
+                    team_name = str(((team_bucket.get("team") or {}).get("displayName") or "")).strip()
+                    for cat in (team_bucket.get("leaders") or []):
+                        stat_name = str(cat.get("name") or "").strip().lower()
+                        if stat_name not in stat_meta:
+                            continue
+                        leader_list = cat.get("leaders") or []
+                        if not leader_list:
+                            continue
+                        lead = leader_list[0] or {}
+                        athlete = lead.get("athlete") or {}
+                        player_name = str(athlete.get("displayName") or athlete.get("fullName") or "").strip()
+                        if not player_name:
+                            continue
+                        raw_val = _h_num(lead.get("value"))
+                        if raw_val is None:
+                            raw_val = _h_num(lead.get("displayValue"))
+                        if raw_val is None or raw_val <= 0:
+                            continue
+                        game_rows.append(_mk_hockey_row(g, team_name, player_name, stat_name, raw_val, "espn_hockey_leaders"))
+
+                deduped_game_rows: list[dict] = []
+                seen_game = set()
+                for row in game_rows:
+                    key = (
+                        str(row.get("game_key") or ""),
+                        str(row.get("name") or "").strip().lower(),
+                        str(row.get("stat_type") or "").strip().lower(),
+                    )
+                    if key in seen_game:
+                        continue
+                    seen_game.add(key)
+                    deduped_game_rows.append(row)
+
+                deduped_game_rows.sort(key=lambda x: float(x.get("model_prob") or 0.0), reverse=True)
+                rows.extend(deduped_game_rows[:max_per_game])
+    except Exception as e:
+        _log(f"[all-sports] hockey player-prop fallback skipped: {e}")
+
     # MLB historical hitter props across recent seasons.
     try:
         from data import mlb_fetcher as _mlb_fetcher
@@ -3727,19 +3934,23 @@ def api_tournaments():
 def api_tournament_data():
     if _ACTIVE_SPORT == "all":
         code = str(request.args.get("code", "") or "").strip()
-        if not code:
-            return jsonify({"ok": False, "error": "Missing sport code", "matches": [], "standings": [], "top_scorers": []}), 400
+        sport_filter = _infer_sport_group(str(request.args.get("sport", "all") or "all").strip())
+        if sport_filter in {"", "other", "all"}:
+            sport_filter = "all"
         query = str(request.args.get("q", "") or "").strip().lower()
         status_filter = str(request.args.get("status", "all") or "all").strip().lower()
         try:
             snap = _build_multi_sport_snapshot(force_refresh=bool(request.args.get("refresh")))
             tournaments = {str(t.get("code") or ""): t for t in (snap.get("tournaments") or [])}
-            if code not in tournaments:
+            if code and code not in tournaments:
                 return jsonify({"ok": False, "error": f"Unsupported sport code: {code}", "matches": [], "standings": [], "top_scorers": []}), 404
 
             matches = []
             for m in (snap.get("games") or []):
-                if str(m.get("competition") or "") != code:
+                if code and str(m.get("competition") or "") != code:
+                    continue
+                ms = _infer_sport_group(m.get("sport") or m.get("competition") or m.get("league") or "")
+                if sport_filter != "all" and ms != sport_filter:
                     continue
                 bucket = _match_status_bucket(m.get("status", ""))
                 if status_filter in {"scheduled", "live", "finished"} and bucket != status_filter:
@@ -3754,13 +3965,160 @@ def api_tournament_data():
                 matches.append(row)
 
             matches.sort(key=lambda x: (x.get("game_date") or x.get("date") or "", x.get("game_time") or ""))
+
+            match_keys = {
+                _norm_gk(str(m.get("match_key") or f"{m.get('away_team','')}@{m.get('home_team','')}"))
+                for m in matches
+            }
+            team_map = {}
+            for m in matches:
+                for t in (m.get("home_team"), m.get("away_team")):
+                    token = re.sub(r"[^a-z0-9]+", "", str(t or "").strip().lower())
+                    if token:
+                        team_map[token] = str(t or "").strip()
+
+            def _resolve_team_name(name: str) -> str:
+                token = re.sub(r"[^a-z0-9]+", "", str(name or "").strip().lower())
+                if not token:
+                    return ""
+                if token in team_map:
+                    return team_map[token]
+                for tk, label in team_map.items():
+                    if token in tk or tk in token:
+                        return label
+                return ""
+
+            selected_bets = []
+            if match_keys:
+                for b in (snap.get("bets") or []):
+                    bm = _norm_gk(str(b.get("match_key") or f"{b.get('away_team','')}@{b.get('home_team','')}"))
+                    if bm not in match_keys:
+                        continue
+                    selected_bets.append(b)
+
+            with _lock:
+                state_props = list(_state.get("player_props") or [])
+            selected_props = []
+            if match_keys:
+                for p in state_props:
+                    pm = _norm_gk(str(p.get("match_key") or ""))
+                    if not pm:
+                        pm = _norm_gk(str(p.get("game") or "").replace(" @ ", "@"))
+                    if pm not in match_keys:
+                        continue
+                    ps = _infer_sport_group(p.get("sport") or p.get("competition") or p.get("league") or "")
+                    if sport_filter != "all" and ps != sport_filter:
+                        continue
+                    selected_props.append(p)
+
+            team_stats: dict[str, dict] = {}
+            for m in matches:
+                for label in (str(m.get("home_team") or "").strip(), str(m.get("away_team") or "").strip()):
+                    if not label:
+                        continue
+                    team_stats.setdefault(label, {
+                        "team": label,
+                        "games": 0,
+                        "team_picks": 0,
+                        "against_picks": 0,
+                        "prop_count": 0,
+                        "prob_sum": 0.0,
+                        "prob_n": 0,
+                        "markets": {},
+                    })
+                    team_stats[label]["games"] += 1
+
+            for b in selected_bets:
+                home = str(b.get("home_team") or "").strip()
+                away = str(b.get("away_team") or "").strip()
+                pick = str(b.get("pick") or "").strip().lower()
+                bet_type = str(b.get("bet_type") or "moneyline").strip().lower()
+                prob = float(b.get("model_prob") or 0.0)
+
+                pick_team = ""
+                if home and home.lower() in pick:
+                    pick_team = home
+                elif away and away.lower() in pick:
+                    pick_team = away
+                elif "home" in pick and home:
+                    pick_team = home
+                elif "away" in pick and away:
+                    pick_team = away
+
+                if pick_team and pick_team in team_stats:
+                    row = team_stats[pick_team]
+                    row["team_picks"] += 1
+                    row["prob_sum"] += prob
+                    row["prob_n"] += 1
+                    row["markets"][bet_type] = row["markets"].get(bet_type, 0) + 1
+                    opp = away if pick_team == home else home
+                    if opp in team_stats:
+                        team_stats[opp]["against_picks"] += 1
+
+            for p in selected_props:
+                team_label = _resolve_team_name(p.get("team") or "")
+                if team_label and team_label in team_stats:
+                    team_stats[team_label]["prop_count"] += 1
+
+            team_rows = []
+            for row in team_stats.values():
+                avg_prob = (row["prob_sum"] / row["prob_n"]) if row["prob_n"] else 0.0
+                markets = row.get("markets") or {}
+                top_market = max(markets.items(), key=lambda kv: kv[1])[0] if markets else "—"
+                team_rows.append({
+                    "team": row["team"],
+                    "games": int(row["games"]),
+                    "team_picks": int(row["team_picks"]),
+                    "against_picks": int(row["against_picks"]),
+                    "prop_count": int(row["prop_count"]),
+                    "avg_model": round(avg_prob * 100.0, 1),
+                    "top_market": top_market.replace("_", " "),
+                })
+
+            team_rows.sort(key=lambda x: (x.get("team_picks", 0), x.get("prop_count", 0), x.get("avg_model", 0.0)), reverse=True)
+
+            market_stats: dict[str, dict] = {}
+            for b in selected_bets:
+                market = str(b.get("bet_type") or "moneyline").strip().lower() or "moneyline"
+                entry = market_stats.setdefault(market, {"count": 0, "prob_sum": 0.0, "best_prob": 0.0, "best_pick": ""})
+                prob = float(b.get("model_prob") or 0.0)
+                entry["count"] += 1
+                entry["prob_sum"] += prob
+                if prob > entry["best_prob"]:
+                    entry["best_prob"] = prob
+                    entry["best_pick"] = str(b.get("pick") or "")
+
+            for p in selected_props:
+                market = str(p.get("stat_type") or "player_prop").strip().lower() or "player_prop"
+                entry = market_stats.setdefault(market, {"count": 0, "prob_sum": 0.0, "best_prob": 0.0, "best_pick": ""})
+                prob = float(p.get("model_prob") or 0.0)
+                entry["count"] += 1
+                entry["prob_sum"] += prob
+                if prob > entry["best_prob"]:
+                    entry["best_prob"] = prob
+                    entry["best_pick"] = f"{p.get('name','')} {str(p.get('direction') or '').upper()} {p.get('line')}"
+
+            market_rows = []
+            for name, stat in market_stats.items():
+                cnt = int(stat.get("count") or 0)
+                avg_prob = (float(stat.get("prob_sum") or 0.0) / cnt) if cnt else 0.0
+                market_rows.append({
+                    "name": name.replace("_", " "),
+                    "count": cnt,
+                    "avg_model": round(avg_prob * 100.0, 1),
+                    "best_pick": str(stat.get("best_pick") or ""),
+                    "best_model": round(float(stat.get("best_prob") or 0.0) * 100.0, 1),
+                })
+            market_rows.sort(key=lambda x: (x.get("count", 0), x.get("avg_model", 0.0)), reverse=True)
+
             return jsonify({
                 "ok": True,
                 "code": code,
-                "competition": tournaments.get(code, {"code": code, "name": code}),
+                "sport": sport_filter,
+                "competition": tournaments.get(code, {"code": code, "name": code or "All Sports"}),
                 "matches": matches,
-                "standings": [],
-                "top_scorers": [],
+                "standings": [{"group": "Team Bet Analysis", "mode": "team_bets", "table": team_rows}],
+                "top_scorers": market_rows,
             })
         except Exception as e:
             return jsonify({"ok": False, "error": str(e), "matches": [], "standings": [], "top_scorers": []})
