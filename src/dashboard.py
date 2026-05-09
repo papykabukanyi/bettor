@@ -1030,6 +1030,9 @@ def _collect_fallback_games_for_all_sports(today: datetime.date, tomorrow: datet
                             away_rec = _record_summary(away_c)
                             rows[-1].update({
                                 "source": "espn",
+                                "espn_event_id": str(ev.get("id") or "").strip(),
+                                "espn_sport_path": sport_path,
+                                "espn_league_path": league_path,
                                 "home_record": home_rec,
                                 "away_record": away_rec,
                                 "home_record_pct": _record_win_pct(home_rec),
@@ -1557,8 +1560,24 @@ def _build_all_sport_sentiment_props(games: list[dict], bets: list[dict]) -> lis
 
     # If social mention volume is low, backfill with model-generated player props.
     fallback_threshold = max(6, min(60, len(target_games)))
-    if len(rows) < fallback_threshold:
+    game_sports = {
+        _infer_sport_group(g.get("sport") or g.get("competition") or g.get("league") or "")
+        for g in target_games
+    }
+    row_sports = {
+        _infer_sport_group(r.get("sport") or r.get("competition") or r.get("league") or "")
+        for r in rows
+    }
+    missing_sports = sorted(s for s in game_sports if s not in {"", "other"} and s not in row_sports)
+    should_backfill = len(rows) < fallback_threshold or bool(missing_sports)
+
+    if should_backfill:
         model_rows = _build_model_player_props_fallback(target_games, max_per_game=_ALL_SPORTS_SENTIMENT_PLAYERS_PER_GAME)
+        if model_rows and missing_sports:
+            model_rows = [
+                r for r in model_rows
+                if _infer_sport_group(r.get("sport") or r.get("competition") or r.get("league") or "") in set(missing_sports)
+            ]
         if model_rows:
             seen = {
                 (
@@ -1623,6 +1642,251 @@ def _build_model_player_props_fallback(games: list[dict], max_per_game: int = 6)
             rows.extend(per_game[:max_per_game])
     except Exception as e:
         _log(f"[all-sports] soccer player-prop fallback skipped: {e}")
+
+    # Basketball player props from ESPN summary leaders/boxscore (free endpoint).
+    try:
+        import requests
+
+        basketball_games = [
+            g for g in (games or [])
+            if _infer_sport_group(g.get("sport") or g.get("competition") or g.get("league") or "") == "basketball"
+        ]
+
+        if basketball_games:
+            stat_meta = {
+                "points": ("points", "Points", 8.5),
+                "rebounds": ("rebounds", "Rebounds", 3.5),
+                "assists": ("assists", "Assists", 2.5),
+            }
+            scoreboard_cache: dict[tuple[str, str], list[dict]] = {}
+
+            def _b_num(value):
+                if value is None:
+                    return None
+                if isinstance(value, (int, float)):
+                    return float(value)
+                s = str(value).strip()
+                if not s:
+                    return None
+                m = re.search(r"-?\d+(?:\.\d+)?", s)
+                if not m:
+                    return None
+                try:
+                    return float(m.group(0))
+                except Exception:
+                    return None
+
+            def _team_token(name: str) -> str:
+                return re.sub(r"[^a-z0-9]+", "", str(name or "").strip().lower())
+
+            def _b_poisson_over(rate: float, line: float) -> float:
+                lam = max(0.01, float(rate or 0.01))
+                target = int(math.floor(float(line or 0.5)) + 1)
+                cdf = 0.0
+                for k in range(max(0, target)):
+                    try:
+                        cdf += math.exp(-lam) * (lam ** k) / math.factorial(k)
+                    except Exception:
+                        pass
+                return max(0.05, min(0.95, 1.0 - cdf))
+
+            def _league_slug(game: dict) -> str:
+                src_slug = str(game.get("espn_league_path") or "").strip().lower()
+                if src_slug:
+                    return src_slug
+                comp = str(game.get("competition") or "").lower()
+                league = str(game.get("league") or game.get("competition_name") or "").lower()
+                if "wnba" in comp or "wnba" in league:
+                    return "wnba"
+                if "womens-college-basketball" in comp or "womens_college_basketball" in comp:
+                    return "womens-college-basketball"
+                if "mens-college-basketball" in comp or "mens_college_basketball" in comp or "ncaab" in comp:
+                    return "mens-college-basketball"
+                if "nba" in comp or "nba" in league:
+                    return "nba"
+                return "nba"
+
+            def _scoreboard_events(slug: str, date_token: str) -> list[dict]:
+                key = (slug, date_token)
+                if key in scoreboard_cache:
+                    return scoreboard_cache[key]
+                url = f"https://site.api.espn.com/apis/site/v2/sports/basketball/{slug}/scoreboard"
+                try:
+                    resp = requests.get(url, params={"dates": date_token, "limit": 200}, timeout=8)
+                    if resp.status_code != 200:
+                        scoreboard_cache[key] = []
+                        return []
+                    events = (resp.json() or {}).get("events") or []
+                    scoreboard_cache[key] = events
+                    return events
+                except Exception:
+                    scoreboard_cache[key] = []
+                    return []
+
+            def _resolve_event_id(game: dict, slug: str) -> str:
+                eid = str(game.get("espn_event_id") or game.get("event_id") or "").strip()
+                if eid:
+                    return eid
+
+                gd = str(game.get("game_date") or game.get("date") or "").strip()
+                date_token = gd.replace("-", "") if re.match(r"^\d{4}-\d{2}-\d{2}$", gd) else _et_calendar_today().strftime("%Y%m%d")
+
+                away_tok = _team_token(game.get("away_team") or "")
+                home_tok = _team_token(game.get("home_team") or "")
+                if not away_tok or not home_tok:
+                    return ""
+
+                for ev in _scoreboard_events(slug, date_token):
+                    comp = (ev.get("competitions") or [{}])[0]
+                    competitors = comp.get("competitors") or []
+                    if len(competitors) < 2:
+                        continue
+                    home_c = next((c for c in competitors if str(c.get("homeAway") or "").lower() == "home"), competitors[0])
+                    away_c = next((c for c in competitors if str(c.get("homeAway") or "").lower() == "away"), competitors[1] if len(competitors) > 1 else competitors[0])
+                    eh = _team_token((home_c.get("team") or {}).get("displayName") or "")
+                    ea = _team_token((away_c.get("team") or {}).get("displayName") or "")
+                    if eh == home_tok and ea == away_tok:
+                        return str(ev.get("id") or "").strip()
+                    if eh == away_tok and ea == home_tok:
+                        return str(ev.get("id") or "").strip()
+                return ""
+
+            def _mk_bball_row(game: dict, team_name: str, player_name: str, stat_name: str, raw_value: float, source: str) -> dict:
+                stat_type, stat_label, min_line = stat_meta.get(stat_name, ("points", "Points", 8.5))
+                base_rate = max(0.1, float(raw_value or min_line))
+                line_val = max(min_line, round(max(min_line, base_rate * 0.88) * 2.0) / 2.0)
+                over_prob = _b_poisson_over(base_rate, line_val)
+                model_prob = max(0.52, min(0.88, over_prob))
+                odds_am = _prob_to_american(model_prob)
+                dec_odds = round((1 + (odds_am / 100.0)) if odds_am > 0 else (1 + (100.0 / abs(odds_am))), 4)
+                ev = (dec_odds - 1.0) * model_prob - (1.0 - model_prob)
+
+                home = str(game.get("home_team") or "").strip()
+                away = str(game.get("away_team") or "").strip()
+                game_date = str(game.get("game_date") or game.get("date") or today_str)
+                game_time = str(game.get("game_time") or "")
+                game_key = str(game.get("game_key") or _compose_game_key(away, home, game.get("game_datetime"), game_date, game_time))
+                match_key = _norm_gk(game.get("match_key") or f"{away}@{home}")
+
+                return {
+                    "sport": "basketball",
+                    "name": player_name,
+                    "team": team_name or home,
+                    "prop_label": f"Projected {stat_label}",
+                    "stat_type": stat_type,
+                    "line": line_val,
+                    "direction": "OVER",
+                    "model_prob": round(model_prob, 4),
+                    "confidence": int(round(model_prob * 100)),
+                    "safety_label": _safety_label_from_prob(model_prob),
+                    "ev": round(ev, 4),
+                    "odds_am": odds_am,
+                    "dec_odds": dec_odds,
+                    "game": f"{away} @ {home}",
+                    "game_key": game_key,
+                    "match_key": match_key,
+                    "game_date": game_date,
+                    "game_time": game_time,
+                    "home_team": home,
+                    "away_team": away,
+                    "sentiment_score": 0.0,
+                    "sentiment_mentions": 0,
+                    "sentiment_sources": source,
+                    "worth_it": model_prob >= 0.57,
+                    "worth_score": round(model_prob * 100.0, 2),
+                    "worth_reason": "ESPN team leaders + boxscore trend",
+                }
+
+            for g in basketball_games[:60]:
+                home = str(g.get("home_team") or "").strip()
+                away = str(g.get("away_team") or "").strip()
+                if not home or not away:
+                    continue
+
+                league_slug = _league_slug(g)
+                event_id = _resolve_event_id(g, league_slug)
+                if not event_id:
+                    continue
+
+                url = f"https://site.api.espn.com/apis/site/v2/sports/basketball/{league_slug}/summary"
+                try:
+                    resp = requests.get(url, params={"event": event_id}, timeout=8)
+                    if resp.status_code != 200:
+                        continue
+                    summary = resp.json() or {}
+                except Exception:
+                    continue
+
+                game_rows: list[dict] = []
+
+                for team_bucket in (summary.get("leaders") or []):
+                    team_name = str(((team_bucket.get("team") or {}).get("displayName") or "")).strip()
+                    for cat in (team_bucket.get("leaders") or []):
+                        stat_name = str(cat.get("name") or "").strip().lower()
+                        if stat_name not in stat_meta:
+                            continue
+                        leader_list = cat.get("leaders") or []
+                        if not leader_list:
+                            continue
+                        lead = leader_list[0] or {}
+                        athlete = lead.get("athlete") or {}
+                        player_name = str(athlete.get("displayName") or athlete.get("fullName") or "").strip()
+                        if not player_name:
+                            continue
+                        raw_val = _b_num(lead.get("value"))
+                        if raw_val is None:
+                            raw_val = _b_num(lead.get("displayValue"))
+                        if raw_val is None:
+                            stats_arr = lead.get("statistics") or []
+                            raw_val = _b_num((stats_arr[0] or {}).get("value")) if stats_arr else None
+                        if raw_val is None or raw_val <= 0:
+                            continue
+                        game_rows.append(_mk_bball_row(g, team_name, player_name, stat_name, raw_val, "espn_basketball_leaders"))
+
+                if not game_rows:
+                    for team_box in ((summary.get("boxscore") or {}).get("players") or []):
+                        team_name = str(((team_box.get("team") or {}).get("displayName") or "")).strip()
+                        top_by_stat: dict[str, tuple[str, float]] = {}
+                        for stat_block in (team_box.get("statistics") or []):
+                            keys = [str(k or "").strip().lower() for k in (stat_block.get("keys") or [])]
+                            key_idx = {k: i for i, k in enumerate(keys)}
+                            for arow in (stat_block.get("athletes") or []):
+                                athlete = arow.get("athlete") or {}
+                                player_name = str(athlete.get("displayName") or athlete.get("fullName") or "").strip()
+                                if not player_name:
+                                    continue
+                                vals = arow.get("stats") or []
+                                for stat_name in stat_meta:
+                                    idx = key_idx.get(stat_name)
+                                    if idx is None or idx >= len(vals):
+                                        continue
+                                    raw_val = _b_num(vals[idx])
+                                    if raw_val is None or raw_val <= 0:
+                                        continue
+                                    prev = top_by_stat.get(stat_name)
+                                    if (not prev) or raw_val > prev[1]:
+                                        top_by_stat[stat_name] = (player_name, raw_val)
+
+                        for stat_name, payload in top_by_stat.items():
+                            game_rows.append(_mk_bball_row(g, team_name, payload[0], stat_name, payload[1], "espn_basketball_boxscore"))
+
+                deduped_game_rows: list[dict] = []
+                seen_game = set()
+                for row in game_rows:
+                    key = (
+                        str(row.get("game_key") or ""),
+                        str(row.get("name") or "").strip().lower(),
+                        str(row.get("stat_type") or "").strip().lower(),
+                    )
+                    if key in seen_game:
+                        continue
+                    seen_game.add(key)
+                    deduped_game_rows.append(row)
+
+                deduped_game_rows.sort(key=lambda x: float(x.get("model_prob") or 0.0), reverse=True)
+                rows.extend(deduped_game_rows[:max_per_game])
+    except Exception as e:
+        _log(f"[all-sports] basketball player-prop fallback skipped: {e}")
 
     # MLB historical hitter props across recent seasons.
     try:
