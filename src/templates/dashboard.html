@@ -762,8 +762,18 @@ body.console-open main{padding-bottom:236px}
     </div>
     <div class="props-table-wrap">
       <table class="props-table">
-        <thead><tr>
-          <tr id="props-thead-row"></tr>
+        <thead>
+          <tr id="props-thead-row">
+            <th>Sport</th>
+            <th>Player / Pick</th>
+            <th>Team</th>
+            <th>Market</th>
+            <th>Line</th>
+            <th>Direction</th>
+            <th>Model</th>
+            <th>Safety</th>
+            <th>EV</th>
+          </tr>
         </thead>
         <tbody id="props-tbody"></tbody>
       </table>
@@ -2766,7 +2776,7 @@ function filterProps() {
   const dir   = dirSel ? (dirSel.value || (_isSoccerMode() ? '' : 'OVER')) : (_isSoccerMode() ? '' : 'OVER');
   const safe  = document.getElementById('props-safety').value;
   _filteredProps = ALL_PROPS.filter(p => {
-    if (q && !(p.name||'').toLowerCase().includes(q) && !(p.team||'').toLowerCase().includes(q)) return false;
+    if (q && !(p.name||'').toLowerCase().includes(q) && !(p.team||'').toLowerCase().includes(q) && !(p.sport||'').toLowerCase().includes(q)) return false;
     if (stat && p.stat_type !== stat) return false;
     if (dir && (p.direction||'').toUpperCase() !== dir.toUpperCase()) return false;
     if (safe && p.safety_label !== safe) return false;
@@ -3020,16 +3030,25 @@ function sortAndRenderProps() {
   const liveKeys = _getLiveGameKeySet();
   const liveArr = Array.from(liveKeys).map(v => v.toLowerCase());
   if (!sorted.length) {
-    tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:24px">No props match filter.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--muted);padding:24px">No props match filter.</td></tr>';
     document.getElementById('props-meta').textContent = '';
     return;
   }
   const liveCount = sorted.reduce((acc,p)=>acc + (_isLiveFromSet(p.game_key||p.game||'', liveKeys, liveArr) ? 1 : 0), 0);
   document.getElementById('props-meta').textContent = `${sorted.length} ${_isAllSportsMode() ? 'best bets' : (_isSoccerMode() ? 'props' : 'over bets')}${liveCount?` · ${liveCount} live`:''}`;
+  const todayIso = new Date().toLocaleDateString('en-CA');
+  const tomorrow = new Date();
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  const tomorrowIso = tomorrow.toLocaleDateString('en-CA');
   tbody.innerHTML = sorted.map(p => {
     const isLive = _isLiveFromSet(p.game_key||p.game||'', liveKeys, liveArr);
     const liveEye = isLive ? '<span class="live-eye" title="Live prop"></span>' : '';
+    const rawSport = String(p.sport || '').trim();
+    const sportLabel = rawSport ? rawSport.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()) : _sportDisplayName();
+    const gd = String(p.game_date || '').trim();
+    const dayChip = gd === todayIso ? 'TODAY' : (gd === tomorrowIso ? 'TOMORROW' : '');
     return `<tr>
+      <td>${sportLabel}${dayChip ? `<div style="font-size:.68rem;color:var(--muted)">${dayChip}</div>` : ''}</td>
       <td>${liveEye}${p.name||'—'}</td>
       <td>${p.team||'—'}</td>
       <td>${p.prop_label||p.stat_type||'—'}</td>

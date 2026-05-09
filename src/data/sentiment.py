@@ -18,6 +18,7 @@ import datetime
 import math
 import unicodedata
 import requests
+from collections import Counter
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from config import (
@@ -28,9 +29,16 @@ from config import (
     HF_API_KEY,
     DISCORD_BOT_TOKEN,
     DISCORD_CHANNELS,
+    DISCORD_CHANNELS_BY_SPORT,
     DISCORD_LOOKBACK_HOURS,
     DISCORD_MAX_MESSAGES,
     DISCORD_CACHE_MINUTES,
+    TIKTOK_ENABLED,
+    TIKTOK_HASHTAGS,
+    TIKTOK_MAX_VIDEOS,
+    TIKTOK_CACHE_MINUTES,
+    SOCIAL_PLAYER_MIN_MENTIONS,
+    SOCIAL_MAX_PLAYERS_PER_GAME,
 )
 
 # ─── Hugging Face Inference API ──────────────────────────────────────────────
@@ -49,6 +57,7 @@ _SENTIMENT_WEIGHT_CAPS = {
     "news": 8.0,
     "reddit": 5.0,
     "discord": 4.0,
+    "tiktok": 4.0,
 }
 
 # ─── Circuit breakers ────────────────────────────────────────────────────────
@@ -57,7 +66,9 @@ _HF_FAILED       = False
 _NEWS_FAILED     = False
 _DISCORD_FAILED  = False
 _DISCORD_AUTH_LOGGED = False
-_DISCORD_CACHE   = {"fetched_at": None, "messages": []}
+_DISCORD_CACHE: dict[str, dict] = {}
+_TIKTOK_CACHE: dict[str, dict] = {}
+_SOCIAL_PLAYER_CACHE: dict[str, dict] = {}
 
 # ─── MLB team → subreddit mapping ────────────────────────────────────────────
 _TEAM_SUBREDDITS = {
@@ -170,7 +181,7 @@ def _parse_discord_channels(raw: str) -> list[dict]:
     """Parse DISCORD_CHANNELS into a list of {guild_id, channel_id} dicts."""
     if not raw:
         return []
-    tokens = re.split(r"[\s,]+", raw.strip())
+    tokens = re.split(r"[\s,|]+", raw.strip())
     parsed = []
     for t in tokens:
         if not t:
@@ -186,6 +197,63 @@ def _parse_discord_channels(raw: str) -> list[dict]:
     return parsed
 
 
+def _parse_discord_channel_map(raw: str) -> dict[str, list[dict]]:
+    """
+    Parse DISCORD_CHANNELS_BY_SPORT from entries like:
+      mlb=123:456|123:789; soccer=234:567; all=999:111
+    """
+    out: dict[str, list[dict]] = {}
+    if not raw:
+        return out
+
+    for block in re.split(r"[;\n]+", str(raw or "").strip()):
+        part = block.strip()
+        if not part:
+            continue
+        if "=" in part:
+            sport_key, values = part.split("=", 1)
+        elif ":" in part:
+            sport_key, values = part.split(":", 1)
+        else:
+            continue
+        key = str(sport_key or "").strip().lower()
+        if not key:
+            continue
+        if not re.match(r"^[a-z_]+$", key):
+            continue
+        channels = _parse_discord_channels(values)
+        if channels:
+            out[key] = channels
+    return out
+
+
+def _resolve_discord_channels_for_sport(sport: str | None = None) -> list[dict]:
+    channels = _parse_discord_channels(DISCORD_CHANNELS)
+    by_sport = _parse_discord_channel_map(DISCORD_CHANNELS_BY_SPORT)
+    sport_key = str(sport or "all").strip().lower()
+
+    channels.extend(by_sport.get("all", []))
+    if sport_key and sport_key != "all":
+        channels.extend(by_sport.get(sport_key, []))
+
+    deduped: list[dict] = []
+    seen = set()
+    for ch in channels:
+        cid = str(ch.get("channel_id") or "")
+        if not cid or cid in seen:
+            continue
+        seen.add(cid)
+        deduped.append(ch)
+    return deduped
+
+
+def _discord_cache_key(sport: str | None, channels: list[dict]) -> str:
+    sport_key = str(sport or "all").strip().lower()
+    ids = sorted(str(c.get("channel_id") or "") for c in channels if c.get("channel_id"))
+    joined = "-".join(ids)
+    return f"{sport_key}|{joined}"
+
+
 def _discord_headers() -> dict:
     return {"Authorization": f"Bot {DISCORD_BOT_TOKEN}"}
 
@@ -199,24 +267,27 @@ def _parse_discord_ts(ts: str) -> "datetime.datetime | None":
         return None
 
 
-def _fetch_discord_messages() -> list[dict]:
+def _fetch_discord_messages(sport: str | None = None) -> list[dict]:
     """Fetch recent Discord messages from configured channels (cached)."""
     global _DISCORD_FAILED, _DISCORD_CACHE, _DISCORD_AUTH_LOGGED
     if _DISCORD_FAILED:
         return []
-    if not DISCORD_BOT_TOKEN or not DISCORD_CHANNELS:
+    if not DISCORD_BOT_TOKEN:
         return []
 
+    channels = _resolve_discord_channels_for_sport(sport)
+    if not channels:
+        return []
+
+    cache_key = _discord_cache_key(sport, channels)
+
     now = datetime.datetime.now(datetime.timezone.utc)
-    cached_at = _DISCORD_CACHE.get("fetched_at")
+    cached_row = _DISCORD_CACHE.get(cache_key, {})
+    cached_at = cached_row.get("fetched_at")
     if cached_at and isinstance(cached_at, datetime.datetime):
         age_min = (now - cached_at).total_seconds() / 60
         if age_min <= float(DISCORD_CACHE_MINUTES):
-            return list(_DISCORD_CACHE.get("messages", []))
-
-    channels = _parse_discord_channels(DISCORD_CHANNELS)
-    if not channels:
-        return []
+            return list(cached_row.get("messages", []))
 
     cutoff = now - datetime.timedelta(hours=float(DISCORD_LOOKBACK_HOURS))
     max_messages = max(1, int(DISCORD_MAX_MESSAGES))
@@ -284,7 +355,7 @@ def _fetch_discord_messages() -> list[dict]:
             if stop_early or not before:
                 break
 
-    _DISCORD_CACHE = {"fetched_at": now, "messages": list(all_msgs)}
+    _DISCORD_CACHE[cache_key] = {"fetched_at": now, "messages": list(all_msgs)}
     return all_msgs
 
 
@@ -319,8 +390,8 @@ def _entity_tokens(entity: str, entity_type: str) -> list[str]:
     return sorted(tokens, key=len, reverse=True)
 
 
-def _discord_texts_for_entity(entity: str, entity_type: str) -> list[str]:
-    msgs = _fetch_discord_messages()
+def _discord_texts_for_entity(entity: str, entity_type: str, sport: str | None = None) -> list[str]:
+    msgs = _fetch_discord_messages(sport=sport)
     if not msgs:
         return []
     tokens = _entity_tokens(entity, entity_type)
@@ -356,11 +427,11 @@ def _discord_texts_for_entity(entity: str, entity_type: str) -> list[str]:
     return hits
 
 
-def get_discord_sentiment(entity: str, entity_type: str = "team") -> dict:
+def get_discord_sentiment(entity: str, entity_type: str = "team", sport: str | None = None) -> dict:
     """Fetch recent Discord messages, score sentiment, return summary."""
-    if not DISCORD_BOT_TOKEN or not DISCORD_CHANNELS:
+    if not DISCORD_BOT_TOKEN:
         return {}
-    texts = _discord_texts_for_entity(entity, entity_type)
+    texts = _discord_texts_for_entity(entity, entity_type, sport=sport)
     if not texts:
         return {}
 
@@ -373,7 +444,6 @@ def get_discord_sentiment(entity: str, entity_type: str = "team") -> dict:
 
     all_text = " ".join(norm_texts).lower()
     words = re.findall(r"\b[a-z]{4,}\b", all_text)
-    from collections import Counter
     stop = {"that", "this", "they", "with", "have", "from", "will", "game",
             "baseball", "team", "player", "said", "their", "just", "been",
             "would", "could", "should", "when", "what", "about", "more"}
@@ -385,6 +455,473 @@ def get_discord_sentiment(entity: str, entity_type: str = "team") -> dict:
         "volume":   len(texts),
         "keywords": keywords,
         "source":   "discord",
+    }
+
+
+def _parse_tiktok_hashtags(raw: str) -> list[str]:
+    if not raw:
+        return []
+    tags: list[str] = []
+    seen = set()
+    for token in re.split(r"[\s,|]+", str(raw or "").strip()):
+        t = str(token or "").strip().lstrip("#").lower()
+        if not t:
+            continue
+        t = re.sub(r"[^a-z0-9_]", "", t)
+        if not t or t in seen:
+            continue
+        seen.add(t)
+        tags.append(t)
+    return tags
+
+
+def _default_tiktok_hashtags_for_sport(sport: str) -> list[str]:
+    mapping = {
+        "baseball": ["mlb", "mlbpicks", "mlbprops", "baseballbetting"],
+        "soccer": ["soccer", "soccerbets", "footballbetting", "soccerprops"],
+        "basketball": ["nba", "nbabets", "basketballbets", "nbaprops"],
+        "americanfootball": ["nfl", "nflbets", "footballbets", "nflprops"],
+        "icehockey": ["nhl", "nhlbets", "hockeybets"],
+        "tennis": ["tennis", "tennisbets"],
+        "mma": ["mma", "ufc", "ufcbets"],
+    }
+    sk = str(sport or "all").strip().lower()
+    if sk == "all":
+        merged = []
+        for arr in mapping.values():
+            merged.extend(arr)
+        return merged
+    return mapping.get(sk, [])
+
+
+def _tiktok_cache_key(sport: str, hashtags: list[str]) -> str:
+    sk = str(sport or "all").strip().lower()
+    return f"{sk}|{'-'.join(sorted(hashtags))}"
+
+
+def _fetch_tiktok_hashtag_texts(sport: str = "all", limit: int = 60) -> list[str]:
+    if not TIKTOK_ENABLED:
+        return []
+
+    env_tags = _parse_tiktok_hashtags(TIKTOK_HASHTAGS)
+    tags = env_tags + [t for t in _default_tiktok_hashtags_for_sport(sport) if t not in env_tags]
+    if not tags:
+        return []
+
+    max_items = max(1, min(int(limit or TIKTOK_MAX_VIDEOS or 40), int(TIKTOK_MAX_VIDEOS or 40)))
+    cache_key = _tiktok_cache_key(sport, tags)
+    now = datetime.datetime.now(datetime.timezone.utc)
+    cached = _TIKTOK_CACHE.get(cache_key, {})
+    cached_at = cached.get("fetched_at")
+    if cached_at and isinstance(cached_at, datetime.datetime):
+        age_min = (now - cached_at).total_seconds() / 60
+        if age_min <= float(TIKTOK_CACHE_MINUTES):
+            return list(cached.get("texts", []))[:max_items]
+
+    rows: list[str] = []
+    seen = set()
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json,text/plain,*/*",
+    }
+
+    for tag in tags:
+        if len(rows) >= max_items:
+            break
+        remaining = max_items - len(rows)
+        url = "https://www.tiktok.com/api/challenge/item_list/"
+        params = {
+            "challengeName": tag,
+            "count": min(35, max(1, remaining)),
+            "cursor": 0,
+        }
+        try:
+            resp = requests.get(url, params=params, headers=headers, timeout=12)
+            if resp.status_code != 200:
+                continue
+            payload = resp.json() if resp.text else {}
+            items = payload.get("itemList") or payload.get("items") or []
+            for item in items:
+                text = str(item.get("desc") or "").strip()
+                if not text or text in seen:
+                    continue
+                seen.add(text)
+                rows.append(text)
+                if len(rows) >= max_items:
+                    break
+        except Exception:
+            continue
+
+    _TIKTOK_CACHE[cache_key] = {"fetched_at": now, "texts": rows}
+    return rows
+
+
+def _team_alias_tokens(team_name: str) -> list[str]:
+    base = _normalize_text(team_name).strip()
+    if not base:
+        return []
+    parts = [p for p in base.split() if p]
+    stop = {"club", "city", "fc", "cf", "sc", "the", "de", "and"}
+    tokens = {base, base.replace(" ", "")}
+    for p in parts:
+        if len(p) >= 3 and p not in stop:
+            tokens.add(p)
+    if parts:
+        last = parts[-1]
+        if last not in stop:
+            tokens.add(last)
+        abbr = _TEAM_ABBR.get(last)
+        if abbr:
+            tokens.add(abbr.lower())
+    return sorted(tokens, key=len, reverse=True)
+
+
+def _text_has_token(norm_text: str, norm_nospace: str, token: str) -> bool:
+    if not token:
+        return False
+    t = token.strip().lower()
+    if not t:
+        return False
+    if " " in t:
+        return f" {t} " in norm_text
+    if len(t) <= 3:
+        return f" {t} " in norm_text
+    return (t in norm_text) or (t in norm_nospace)
+
+
+def _text_mentions_team(text: str, aliases: list[str]) -> bool:
+    norm_text = _normalize_text(text)
+    norm_nospace = norm_text.replace(" ", "")
+    for token in aliases:
+        if _text_has_token(norm_text, norm_nospace, token):
+            return True
+    return False
+
+
+def _infer_team_from_text(text: str, home_team: str, away_team: str) -> str:
+    home_alias = _team_alias_tokens(home_team)
+    away_alias = _team_alias_tokens(away_team)
+    home_hit = _text_mentions_team(text, home_alias)
+    away_hit = _text_mentions_team(text, away_alias)
+    if home_hit and not away_hit:
+        return home_team
+    if away_hit and not home_hit:
+        return away_team
+    return ""
+
+
+def _extract_player_name_candidates(text: str) -> list[str]:
+    raw = str(text or "")
+    if not raw:
+        return []
+
+    block_words = {
+        "Major League", "Premier League", "World Cup", "Champions League",
+        "New York", "Los Angeles", "Golden State", "Manchester United",
+        "First Half", "Second Half", "Full Time", "Game Total",
+    }
+    lowered_block = {
+        "sportsbook", "odds", "moneyline", "parlay", "spread", "under", "over",
+        "today", "tomorrow", "daily", "betting", "market", "props", "team",
+    }
+
+    out: list[str] = []
+    seen = set()
+
+    for m in re.finditer(r"\b[A-Z][a-z]{1,}(?:\s+[A-Z][a-z]{1,}){1,2}\b", raw):
+        cand = m.group(0).strip()
+        if not cand or cand in block_words:
+            continue
+        parts = cand.split()
+        if len(parts) < 2:
+            continue
+        if any(ch.isdigit() for ch in cand):
+            continue
+        if any(p.lower() in lowered_block for p in parts):
+            continue
+        key = cand.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(cand)
+
+    # Hashtag fallback (#ShoheiOhtani -> Shohei Ohtani)
+    for tag in re.findall(r"#([A-Za-z][A-Za-z0-9]{5,})", raw):
+        split = re.sub(r"([a-z])([A-Z])", r"\1 \2", tag).strip()
+        if " " not in split:
+            continue
+        if any(ch.isdigit() for ch in split):
+            continue
+        if split.lower() in seen:
+            continue
+        seen.add(split.lower())
+        out.append(split)
+
+    return out
+
+
+def _american_from_prob(prob: float) -> int:
+    p = max(0.01, min(0.99, float(prob or 0.5)))
+    if p >= 0.5:
+        return int(round(-p / (1.0 - p) * 100))
+    return int(round((1.0 - p) / p * 100))
+
+
+def _implied_prob_from_american(odds) -> float | None:
+    try:
+        o = float(odds)
+    except (TypeError, ValueError):
+        return None
+    if o == 0:
+        return None
+    if o > 0:
+        return 100.0 / (o + 100.0)
+    return abs(o) / (abs(o) + 100.0)
+
+
+def _blend_prob_with_odds(sentiment_prob: float, odds_hint) -> float:
+    implied = _implied_prob_from_american(odds_hint)
+    if implied is None:
+        return sentiment_prob
+    blended = sentiment_prob * 0.72 + implied * 0.28
+    return max(0.05, min(0.95, blended))
+
+
+def _safety_label_from_prob(prob: float) -> str:
+    p = float(prob or 0.5)
+    if p >= 0.72:
+        return "ELITE"
+    if p >= 0.60:
+        return "SAFE"
+    if p >= 0.50:
+        return "MODERATE"
+    return "RISKY"
+
+
+def get_game_player_sentiment_props(
+    home_team: str,
+    away_team: str,
+    sport: str = "all",
+    game_key: str = "",
+    game_date: str = "",
+    game_time: str = "",
+    max_players: int | None = None,
+    odds_hint=None,
+    include_news: bool = True,
+) -> list[dict]:
+    """
+    Build player rows from social sentiment mentions only.
+    Output rows are compatible with dashboard player_props table.
+    """
+    home = str(home_team or "").strip()
+    away = str(away_team or "").strip()
+    if not home or not away:
+        return []
+
+    max_rows = int(max_players or SOCIAL_MAX_PLAYERS_PER_GAME or 8)
+    max_rows = max(1, min(max_rows, 24))
+    min_mentions = max(1, int(SOCIAL_PLAYER_MIN_MENTIONS or 1))
+
+    cache_key = json.dumps({
+        "home": home.lower(),
+        "away": away.lower(),
+        "sport": str(sport or "all").lower(),
+        "gk": str(game_key or ""),
+        "include_news": bool(include_news),
+        "max_rows": max_rows,
+        "odds_hint": odds_hint,
+    }, sort_keys=True)
+    now = datetime.datetime.now(datetime.timezone.utc)
+    cached = _SOCIAL_PLAYER_CACHE.get(cache_key, {})
+    cached_at = cached.get("fetched_at")
+    if cached_at and isinstance(cached_at, datetime.datetime):
+        age_min = (now - cached_at).total_seconds() / 60
+        max_age = max(float(DISCORD_CACHE_MINUTES), float(TIKTOK_CACHE_MINUTES), 10.0)
+        if age_min <= max_age:
+            return list(cached.get("rows", []))
+
+    source_rows: list[tuple[str, str]] = []
+    seen_text = set()
+
+    for txt in _discord_texts_for_entity(home, "team", sport=sport):
+        if txt and txt not in seen_text:
+            seen_text.add(txt)
+            source_rows.append(("discord", txt))
+    for txt in _discord_texts_for_entity(away, "team", sport=sport):
+        if txt and txt not in seen_text:
+            seen_text.add(txt)
+            source_rows.append(("discord", txt))
+
+    home_aliases = _team_alias_tokens(home)
+    away_aliases = _team_alias_tokens(away)
+
+    for txt in _fetch_tiktok_hashtag_texts(sport=sport, limit=80):
+        if not txt:
+            continue
+        if not (_text_mentions_team(txt, home_aliases) or _text_mentions_team(txt, away_aliases)):
+            continue
+        if txt in seen_text:
+            continue
+        seen_text.add(txt)
+        source_rows.append(("tiktok", txt))
+
+    if include_news:
+        home_key = home.split()[-1]
+        away_key = away.split()[-1]
+        query = f'("{home_key}" OR "{away_key}") AND (player OR lineup OR prop OR odds OR injury)'
+        news_rows: list[dict] = []
+        if NEWS_API_KEY and not _NEWS_FAILED:
+            news_rows = _news_fetch_articles(query, days_back=3, page_size=30)
+        if not news_rows:
+            news_rows = _google_news_rss(query)
+        for article in news_rows:
+            text = f"{article.get('title') or ''} {article.get('description') or ''}".strip()
+            if not text:
+                continue
+            if not (_text_mentions_team(text, home_aliases) or _text_mentions_team(text, away_aliases)):
+                continue
+            if text in seen_text:
+                continue
+            seen_text.add(text)
+            source_rows.append(("news", text))
+
+    if not source_rows:
+        _SOCIAL_PLAYER_CACHE[cache_key] = {"fetched_at": now, "rows": []}
+        return []
+
+    source_rows = source_rows[:180]
+    score_inputs = [
+        _normalize_discord_slang(text) if src == "discord" else text
+        for src, text in source_rows
+    ]
+    scores = score_texts(score_inputs)
+    if len(scores) != len(source_rows):
+        scores = [_keyword_sentiment(text) for _, text in source_rows]
+
+    buckets: dict[str, dict] = {}
+    for (src, text), sc in zip(source_rows, scores):
+        names = list(set(_extract_player_name_candidates(text)))
+        if not names:
+            continue
+        team_hit = _infer_team_from_text(text, home, away)
+        for name in names:
+            row = buckets.setdefault(name, {
+                "mentions": 0,
+                "sentiment_sum": 0.0,
+                "sources": set(),
+                "team_hits": {},
+            })
+            row["mentions"] += 1
+            row["sentiment_sum"] += float(sc or 0.0)
+            row["sources"].add(src)
+            if team_hit:
+                team_counts = row["team_hits"]
+                team_counts[team_hit] = team_counts.get(team_hit, 0) + 1
+
+    rows: list[dict] = []
+    for player_name, data in buckets.items():
+        mentions = int(data.get("mentions", 0) or 0)
+        if mentions < min_mentions:
+            continue
+
+        avg_sent = float(data.get("sentiment_sum", 0.0) or 0.0) / max(mentions, 1)
+        direction = "OVER" if avg_sent >= 0 else "UNDER"
+
+        sentiment_strength = min(0.30, abs(avg_sent) * 0.22 + min(0.12, math.log1p(mentions) * 0.06))
+        model_prob = 0.50 + sentiment_strength
+        model_prob = _blend_prob_with_odds(model_prob, odds_hint)
+        model_prob = max(0.51, min(0.92, model_prob))
+
+        odds_am = _american_from_prob(model_prob)
+        dec_odds = round((1 + (odds_am / 100.0)) if odds_am > 0 else (1 + (100.0 / abs(odds_am))), 4)
+        ev = (dec_odds - 1.0) * model_prob - (1.0 - model_prob)
+
+        team_hits = data.get("team_hits", {}) or {}
+        if team_hits:
+            team_name = max(team_hits.items(), key=lambda kv: kv[1])[0]
+        else:
+            team_name = home
+
+        sport_key = re.sub(r"[^a-z0-9_]+", "_", str(sport or "all").lower()).strip("_") or "all"
+        rows.append({
+            "sport": sport_key,
+            "name": player_name,
+            "team": team_name,
+            "prop_label": "Sentiment -Odds Edge",
+            "stat_type": f"{sport_key}_sentiment",
+            "line": 0.5,
+            "direction": direction,
+            "model_prob": round(model_prob, 4),
+            "confidence": int(round(model_prob * 100)),
+            "safety_label": _safety_label_from_prob(model_prob),
+            "ev": round(ev, 4),
+            "odds_am": odds_am,
+            "dec_odds": dec_odds,
+            "game": f"{away} @ {home}",
+            "game_key": game_key,
+            "match_key": f"{away}@{home}",
+            "game_date": game_date,
+            "game_time": game_time,
+            "home_team": home,
+            "away_team": away,
+            "sentiment_score": round(avg_sent, 4),
+            "sentiment_mentions": mentions,
+            "sentiment_sources": ",".join(sorted(data.get("sources") or [])),
+            "worth_it": model_prob >= 0.57,
+            "worth_score": round(model_prob * 100.0, 2),
+            "worth_reason": "Only players mentioned in social sentiment feeds are included",
+        })
+
+    rows.sort(key=lambda r: (int(r.get("sentiment_mentions") or 0), float(r.get("model_prob") or 0.0)), reverse=True)
+    rows = rows[:max_rows]
+    _SOCIAL_PLAYER_CACHE[cache_key] = {"fetched_at": now, "rows": rows}
+    return rows
+
+
+def get_tiktok_sentiment(entity: str, entity_type: str = "team", sport: str | None = None) -> dict:
+    """Estimate sentiment for an entity from TikTok hashtag descriptions."""
+    if not TIKTOK_ENABLED:
+        return {}
+    texts = _fetch_tiktok_hashtag_texts(sport=sport or "all", limit=90)
+    if not texts:
+        return {}
+
+    tokens = _entity_tokens(entity, entity_type)
+    if not tokens:
+        return {}
+
+    hits: list[str] = []
+    seen = set()
+    for text in texts:
+        norm_text = _normalize_text(text)
+        norm_nospace = norm_text.replace(" ", "")
+        matched = False
+        for t in tokens:
+            if _text_has_token(norm_text, norm_nospace, t):
+                matched = True
+                break
+        if matched and text not in seen:
+            seen.add(text)
+            hits.append(text)
+
+    if not hits:
+        return {}
+
+    scores = score_texts(hits)
+    avg_score = round(sum(scores) / len(scores), 4) if scores else 0.0
+    words = re.findall(r"\b[a-z]{4,}\b", " ".join(hits).lower())
+    stop = {
+        "that", "this", "they", "with", "have", "from", "will", "game",
+        "team", "player", "props", "odds", "betting", "more", "today",
+    }
+    freq = Counter(w for w in words if w not in stop)
+    keywords = ", ".join(w for w, _ in freq.most_common(8))
+
+    return {
+        "score": avg_score,
+        "volume": len(hits),
+        "keywords": keywords,
+        "source": "tiktok",
     }
 
 
@@ -795,8 +1332,9 @@ def _cached_sentiment_payload(entity: str, entity_kind: str) -> dict | None:
         "reddit": cached.get("reddit", {}),
         "news": cached.get("news", {}),
         "discord": cached.get("discord", {}),
+        "tiktok": cached.get("tiktok", {}),
         "combined": float((cached.get("combined") or {}).get("score", 0.0) or 0.0),
-        "volume": sum(int((cached.get(src) or {}).get("volume", 0) or 0) for src in ("reddit", "news", "discord")),
+        "volume": sum(int((cached.get(src) or {}).get("volume", 0) or 0) for src in ("reddit", "news", "discord", "tiktok")),
     }
 
 
@@ -808,11 +1346,21 @@ def _sentiment_weight(source_name: str, source_data: dict) -> float:
     return min(_SENTIMENT_WEIGHT_CAPS.get(source_name, 4.0), math.sqrt(volume))
 
 
-def _combine_sentiment_sources(reddit_data: dict, news_data: dict, discord_data: dict) -> tuple[float, int]:
+def _combine_sentiment_sources(
+    reddit_data: dict,
+    news_data: dict,
+    discord_data: dict,
+    tiktok_data: dict | None = None,
+) -> tuple[float, int]:
     scores = []
     weights = []
     raw_volume = 0
-    for source_name, source_data in (("reddit", reddit_data), ("news", news_data), ("discord", discord_data)):
+    for source_name, source_data in (
+        ("reddit", reddit_data),
+        ("news", news_data),
+        ("discord", discord_data),
+        ("tiktok", tiktok_data or {}),
+    ):
         raw_volume += int(source_data.get("volume", 0) or 0)
         weight = _sentiment_weight(source_name, source_data)
         if weight <= 0:
@@ -893,7 +1441,7 @@ def fetch_news_history(entity: str, start_date: str, end_date: str,
 
 # ─── Combined team / player sentiment ────────────────────────────────────────
 
-def get_team_sentiment(team_name: str) -> dict:
+def get_team_sentiment(team_name: str, sport: str | None = None) -> dict:
     """
     Get sentiment for a team using NewsAPI (Reddit used automatically when
     credentials are configured; silently skipped otherwise).
@@ -906,9 +1454,10 @@ def get_team_sentiment(team_name: str) -> dict:
     # Reddit: only runs when real credentials are set
     reddit_data  = get_reddit_sentiment(team_name, entity_type="team")
     news_data    = get_news_sentiment(team_name, entity_type="team")
-    discord_data = get_discord_sentiment(team_name, entity_type="team")
+    discord_data = get_discord_sentiment(team_name, entity_type="team", sport=sport)
+    tiktok_data  = get_tiktok_sentiment(team_name, entity_type="team", sport=sport)
 
-    combined, raw_volume = _combine_sentiment_sources(reddit_data, news_data, discord_data)
+    combined, raw_volume = _combine_sentiment_sources(reddit_data, news_data, discord_data, tiktok_data)
 
     try:
         from data.db import save_sentiment
@@ -927,6 +1476,11 @@ def get_team_sentiment(team_name: str) -> dict:
                            discord_data.get("score", 0.0),
                            discord_data.get("volume", 0),
                            discord_data.get("keywords", ""))
+        if tiktok_data:
+            save_sentiment(team_name, "team", "tiktok",
+                           tiktok_data.get("score", 0.0),
+                           tiktok_data.get("volume", 0),
+                           tiktok_data.get("keywords", ""))
         if raw_volume > 0:
             save_sentiment(team_name, "team", "combined", combined,
                            raw_volume, "")
@@ -938,12 +1492,13 @@ def get_team_sentiment(team_name: str) -> dict:
         "reddit":   reddit_data,
         "news":     news_data,
         "discord":  discord_data,
+        "tiktok":   tiktok_data,
         "combined": combined,
         "volume":   raw_volume,
     }
 
 
-def get_player_sentiment(player_name: str) -> dict:
+def get_player_sentiment(player_name: str, sport: str | None = None) -> dict:
     """Get combined sentiment for a player from NewsAPI (+ Reddit when configured)."""
     cached = _cached_sentiment_payload(player_name, "player")
     if cached:
@@ -951,9 +1506,10 @@ def get_player_sentiment(player_name: str) -> dict:
 
     reddit_data  = get_reddit_sentiment(player_name, entity_type="player", post_limit=20)
     news_data    = get_news_sentiment(player_name, entity_type="player")
-    discord_data = get_discord_sentiment(player_name, entity_type="player")
+    discord_data = get_discord_sentiment(player_name, entity_type="player", sport=sport)
+    tiktok_data  = get_tiktok_sentiment(player_name, entity_type="player", sport=sport)
 
-    combined, raw_volume = _combine_sentiment_sources(reddit_data, news_data, discord_data)
+    combined, raw_volume = _combine_sentiment_sources(reddit_data, news_data, discord_data, tiktok_data)
 
     try:
         from data.db import save_sentiment
@@ -972,6 +1528,11 @@ def get_player_sentiment(player_name: str) -> dict:
                            discord_data.get("score", 0.0),
                            discord_data.get("volume", 0),
                            discord_data.get("keywords", ""))
+        if tiktok_data:
+            save_sentiment(player_name, "player", "tiktok",
+                           tiktok_data.get("score", 0.0),
+                           tiktok_data.get("volume", 0),
+                           tiktok_data.get("keywords", ""))
         if raw_volume > 0:
             save_sentiment(player_name, "player", "combined", combined,
                            raw_volume, "")
@@ -983,12 +1544,13 @@ def get_player_sentiment(player_name: str) -> dict:
         "reddit":   reddit_data,
         "news":     news_data,
         "discord":  discord_data,
+        "tiktok":   tiktok_data,
         "combined": combined,
         "volume":   raw_volume,
     }
 
 
-def get_game_sentiments(home_team: str, away_team: str) -> dict:
+def get_game_sentiments(home_team: str, away_team: str, sport: str | None = None) -> dict:
     """
     Get sentiment for both teams in a game.
     Returns {home: {...}, away: {...}} with combined scores.
@@ -1008,16 +1570,18 @@ def get_game_sentiments(home_team: str, away_team: str) -> dict:
     except Exception:
         pass
 
-    home_sent = get_team_sentiment(home_team)
-    away_sent = get_team_sentiment(away_team)
+    home_sent = get_team_sentiment(home_team, sport=sport)
+    away_sent = get_team_sentiment(away_team, sport=sport)
     return {
         "home": {
             "combined":      home_sent["combined"],
             "reddit_score":  home_sent["reddit"].get("score", 0),
             "news_score":    home_sent["news"].get("score", 0),
             "discord_score": home_sent.get("discord", {}).get("score", 0),
+            "tiktok_score":  home_sent.get("tiktok", {}).get("score", 0),
             "news_keywords": home_sent["news"].get("keywords", ""),
             "discord_keywords": home_sent.get("discord", {}).get("keywords", ""),
+            "tiktok_keywords": home_sent.get("tiktok", {}).get("keywords", ""),
             "volume":        home_sent["volume"],
         },
         "away": {
@@ -1025,8 +1589,10 @@ def get_game_sentiments(home_team: str, away_team: str) -> dict:
             "reddit_score":  away_sent["reddit"].get("score", 0),
             "news_score":    away_sent["news"].get("score", 0),
             "discord_score": away_sent.get("discord", {}).get("score", 0),
+            "tiktok_score":  away_sent.get("tiktok", {}).get("score", 0),
             "news_keywords": away_sent["news"].get("keywords", ""),
             "discord_keywords": away_sent.get("discord", {}).get("keywords", ""),
+            "tiktok_keywords": away_sent.get("tiktok", {}).get("keywords", ""),
             "volume":        away_sent["volume"],
         },
     }

@@ -7,6 +7,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+
+def _env_bool(name: str, default: str = "false") -> bool:
+    return str(os.getenv(name, default)).strip().lower() in {"1", "true", "yes", "on"}
+
 # Database
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 
@@ -27,9 +31,18 @@ HF_API_KEY = os.getenv("HF_API_KEY", "")
 # Discord (sentiment)
 DISCORD_BOT_TOKEN      = os.getenv("DISCORD_BOT_TOKEN", "")
 DISCORD_CHANNELS       = os.getenv("DISCORD_CHANNELS", "")
+DISCORD_CHANNELS_BY_SPORT = os.getenv("DISCORD_CHANNELS_BY_SPORT", "")
 DISCORD_LOOKBACK_HOURS = int(os.getenv("DISCORD_LOOKBACK_HOURS", "12"))
 DISCORD_MAX_MESSAGES   = int(os.getenv("DISCORD_MAX_MESSAGES", "300"))
 DISCORD_CACHE_MINUTES  = int(os.getenv("DISCORD_CACHE_MINUTES", "15"))
+
+# TikTok + social player sentiment
+TIKTOK_ENABLED           = _env_bool("TIKTOK_ENABLED", "false")
+TIKTOK_HASHTAGS          = os.getenv("TIKTOK_HASHTAGS", "")
+TIKTOK_MAX_VIDEOS        = int(os.getenv("TIKTOK_MAX_VIDEOS", "40"))
+TIKTOK_CACHE_MINUTES     = int(os.getenv("TIKTOK_CACHE_MINUTES", "20"))
+SOCIAL_PLAYER_MIN_MENTIONS = int(os.getenv("SOCIAL_PLAYER_MIN_MENTIONS", "1"))
+SOCIAL_MAX_PLAYERS_PER_GAME = int(os.getenv("SOCIAL_MAX_PLAYERS_PER_GAME", "8"))
 
 # Strategy settings
 MIN_VALUE_EDGE = float(os.getenv("MIN_VALUE_EDGE", "0.05"))

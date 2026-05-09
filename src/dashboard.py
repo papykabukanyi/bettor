@@ -174,6 +174,16 @@ _MULTI_SPORT_CACHE = {
 _MULTI_SPORT_CACHE_TTL_SEC = int(os.getenv("MULTI_SPORT_CACHE_TTL_SEC", "180"))
 _MAX_ODDS_SPORTS = int(os.getenv("MAX_ODDS_SPORTS", "12"))
 
+
+def _env_flag(name: str, default: str = "0") -> bool:
+    return str(os.getenv(name, default)).strip().lower() in {"1", "true", "yes", "on"}
+
+
+_ALL_SPORTS_SENTIMENT_MAX_GAMES = max(1, int(os.getenv("ALL_SPORTS_SENTIMENT_MAX_GAMES", "24")))
+_ALL_SPORTS_SENTIMENT_PLAYERS_PER_GAME = max(1, int(os.getenv("ALL_SPORTS_SENTIMENT_PLAYERS_PER_GAME", "8")))
+_ALL_SPORTS_SENTIMENT_INCLUDE_NEWS = _env_flag("ALL_SPORTS_SENTIMENT_INCLUDE_NEWS", "0")
+_ALL_SPORTS_STRICT_SENTIMENT_ONLY = _env_flag("ALL_SPORTS_STRICT_SENTIMENT_ONLY", "0")
+
 _state = {
     "status":           "idle",
     "phase":            "",
@@ -1059,6 +1069,128 @@ def _multi_sport_best_bets_rows(bets: list[dict]) -> list[dict]:
     return rows[:300]
 
 
+def _build_all_sport_sentiment_props(games: list[dict], bets: list[dict]) -> list[dict]:
+    """Build all-sports player rows strictly from sentiment-mentioned players."""
+    try:
+        from data.sentiment import get_game_player_sentiment_props
+    except Exception as e:
+        _log(f"[all-sports] sentiment player extractor unavailable: {e}")
+        return []
+
+    if not games:
+        return []
+
+    today_str = _et_calendar_today().isoformat()
+    tomorrow_str = (_et_calendar_today() + datetime.timedelta(days=1)).isoformat()
+    allowed = {today_str, tomorrow_str}
+
+    target_games = [g for g in (games or []) if str(g.get("game_date") or "") in allowed]
+    target_games = target_games[:_ALL_SPORTS_SENTIMENT_MAX_GAMES]
+    if not target_games:
+        return []
+
+    # Index ranked bets by game/match key to extract an odds anchor per game.
+    idx: dict[str, list[dict]] = {}
+
+    def _index_bet_key(k: str, row: dict):
+        nk = _norm_gk(k or "")
+        if not nk:
+            return
+        idx.setdefault(nk, []).append(row)
+
+    for b in (bets or []):
+        if not isinstance(b, dict):
+            continue
+        _index_bet_key(str(b.get("game_key") or ""), b)
+        _index_bet_key(str(b.get("match_key") or ""), b)
+        home = str(b.get("home_team") or "").strip()
+        away = str(b.get("away_team") or "").strip()
+        if home and away:
+            _index_bet_key(f"{away}@{home}", b)
+
+    rows: list[dict] = []
+    seen = set()
+    include_news = _ALL_SPORTS_SENTIMENT_INCLUDE_NEWS and len(target_games) <= 12
+
+    for g in target_games:
+        home = str(g.get("home_team") or "").strip()
+        away = str(g.get("away_team") or "").strip()
+        if not home or not away:
+            continue
+
+        game_date = str(g.get("game_date") or g.get("date") or "")
+        game_time = str(g.get("game_time") or "")
+        match_key = _norm_gk(g.get("match_key") or f"{away}@{home}")
+        game_key = str(g.get("game_key") or _compose_game_key(away, home, g.get("game_datetime"), game_date, game_time))
+        sport = _infer_sport_group(g.get("sport") or g.get("competition") or g.get("league") or "other")
+
+        keys = {
+            _norm_gk(game_key),
+            match_key,
+            _norm_gk(f"{home}@{away}"),
+        }
+        candidate_bets: list[dict] = []
+        for k in keys:
+            if not k:
+                continue
+            candidate_bets.extend(idx.get(k, []))
+        candidate_bets.sort(key=lambda x: float(x.get("model_prob") or 0.0), reverse=True)
+
+        odds_hint = None
+        for cb in candidate_bets:
+            if cb.get("odds_am") is not None:
+                odds_hint = cb.get("odds_am")
+                break
+
+        try:
+            per_game = get_game_player_sentiment_props(
+                home_team=home,
+                away_team=away,
+                sport=sport,
+                game_key=game_key,
+                game_date=game_date,
+                game_time=game_time,
+                max_players=_ALL_SPORTS_SENTIMENT_PLAYERS_PER_GAME,
+                odds_hint=odds_hint,
+                include_news=include_news,
+            ) or []
+        except Exception as e:
+            _log(f"[all-sports] sentiment extraction failed for {away}@{home}: {e}")
+            continue
+
+        for r in per_game:
+            row = dict(r)
+            row["sport"] = _infer_sport_group(row.get("sport") or sport)
+            row["league"] = row.get("league") or g.get("league") or g.get("competition_name")
+            row["competition"] = row.get("competition") or g.get("competition")
+            row["competition_name"] = row.get("competition_name") or g.get("competition_name") or g.get("league")
+            row["game_key"] = row.get("game_key") or game_key
+            row["match_key"] = row.get("match_key") or match_key
+            row["game_date"] = row.get("game_date") or game_date
+            row["game_time"] = row.get("game_time") or game_time
+            row["home_team"] = row.get("home_team") or home
+            row["away_team"] = row.get("away_team") or away
+
+            dedupe_key = (
+                str(row.get("game_key") or ""),
+                str(row.get("name") or "").strip().lower(),
+                str(row.get("stat_type") or "").strip().lower(),
+            )
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            rows.append(row)
+
+    rows.sort(
+        key=lambda x: (
+            float(x.get("model_prob") or 0.0),
+            int(x.get("sentiment_mentions") or 0),
+        ),
+        reverse=True,
+    )
+    return rows[:400]
+
+
 def _build_multi_sport_snapshot(force_refresh: bool = False) -> dict:
     now = datetime.datetime.now(datetime.timezone.utc).timestamp()
     if not force_refresh:
@@ -1283,9 +1415,13 @@ def _run_all_sports_analysis():
         games = snapshot.get("games") or []
         bets = snapshot.get("bets") or []
         best_bet_rows = _multi_sport_best_bets_rows(bets)
+        sentiment_prop_rows = _build_all_sport_sentiment_props(games, bets)
+        table_rows = sentiment_prop_rows if (sentiment_prop_rows or _ALL_SPORTS_STRICT_SENTIMENT_ONLY) else best_bet_rows
         _log(f"[all-sports] Pulled {len(games)} games and {len(bets)} ranked bets")
         if best_bet_rows:
             _log(f"[all-sports] Best-bets table rows prepared: {len(best_bet_rows)}")
+        if sentiment_prop_rows:
+            _log(f"[all-sports] Sentiment player rows prepared: {len(sentiment_prop_rows)}")
 
         today_str = _et_calendar_today().isoformat()
         tomorrow_str = (_et_calendar_today() + datetime.timedelta(days=1)).isoformat()
@@ -1295,8 +1431,8 @@ def _run_all_sports_analysis():
         tomorrow_games = [g for g in games if str(g.get("game_date") or "") == tomorrow_str]
 
         _phase(3)
-        today_cards = [_build_card(g, bets, [], "TODAY") for g in today_games]
-        tomorrow_cards = [_build_card(g, bets, [], "TOMORROW") for g in tomorrow_games]
+        today_cards = [_build_card(g, bets, table_rows, "TODAY") for g in today_games]
+        tomorrow_cards = [_build_card(g, bets, table_rows, "TOMORROW") for g in tomorrow_games]
 
         def _card_score(card: dict) -> float:
             s = [b["safety"] for b in [card.get("moneyline"), card.get("run_line"), card.get("total")] if b]
@@ -1321,7 +1457,7 @@ def _run_all_sports_analysis():
                 "game_cards_today": _clean(today_cards),
                 "game_cards_tomorrow": _clean(tomorrow_cards),
                 "best_parlays": _clean(best_parlays),
-                "player_props": _clean(best_bet_rows),
+                "player_props": _clean(table_rows),
                 "elite_parlay": None,
             })
 
@@ -1331,7 +1467,7 @@ def _run_all_sports_analysis():
             "game_cards_today": _clean(today_cards),
             "game_cards_tomorrow": _clean(tomorrow_cards),
             "best_parlays": _clean(best_parlays),
-            "player_props": _clean(best_bet_rows),
+            "player_props": _clean(table_rows),
             "elite_parlay": None,
         })
         _log(f"[all-sports] Complete — {len(today_cards)} today, {len(tomorrow_cards)} tomorrow")
@@ -2229,9 +2365,11 @@ def api_cached_state():
             today_games = [g for g in all_games if str(g.get("game_date") or "") == today_str]
             tomorrow_games = [g for g in all_games if str(g.get("game_date") or "") == tomorrow_str]
             all_bets = snap.get("bets") or []
-            fallback_props = _multi_sport_best_bets_rows(all_bets)
-            fallback_today = [_build_card(g, all_bets, [], "TODAY") for g in today_games]
-            fallback_tomorrow = [_build_card(g, all_bets, [], "TOMORROW") for g in tomorrow_games]
+            fallback_props = _build_all_sport_sentiment_props(all_games, all_bets)
+            if not fallback_props and not _ALL_SPORTS_STRICT_SENTIMENT_ONLY:
+                fallback_props = _multi_sport_best_bets_rows(all_bets)
+            fallback_today = [_build_card(g, all_bets, fallback_props, "TODAY") for g in today_games]
+            fallback_tomorrow = [_build_card(g, all_bets, fallback_props, "TOMORROW") for g in tomorrow_games]
         elif _ACTIVE_SPORT == "soccer":
             from data.soccer_fetcher import get_matches_today_all, get_matches_tomorrow_all
 
@@ -3162,11 +3300,13 @@ def _load_boot_schedule_fallback() -> bool:
             snap = _build_multi_sport_snapshot(force_refresh=False)
             all_games = snap.get("games") or []
             all_bets = snap.get("bets") or []
-            boot_props = _multi_sport_best_bets_rows(all_bets)
+            boot_props = _build_all_sport_sentiment_props(all_games, all_bets)
+            if not boot_props and not _ALL_SPORTS_STRICT_SENTIMENT_ONLY:
+                boot_props = _multi_sport_best_bets_rows(all_bets)
             today_games = [g for g in all_games if str(g.get("game_date") or "") == today_str]
             tomorrow_games = [g for g in all_games if str(g.get("game_date") or "") == tomorrow_str]
-            today_cards = [_build_card(g, all_bets, [], "TODAY") for g in today_games]
-            tomorrow_cards = [_build_card(g, all_bets, [], "TOMORROW") for g in tomorrow_games]
+            today_cards = [_build_card(g, all_bets, boot_props, "TODAY") for g in today_games]
+            tomorrow_cards = [_build_card(g, all_bets, boot_props, "TOMORROW") for g in tomorrow_games]
         elif _ACTIVE_SPORT == "soccer":
             from data.soccer_fetcher import get_matches_today_all, get_matches_tomorrow_all
 
