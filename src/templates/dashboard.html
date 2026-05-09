@@ -453,9 +453,9 @@ main{padding:20px;max-width:1400px;margin:0 auto}
 .game-details-title{margin:8px 0 10px;font-size:1.56rem;font-weight:700;line-height:1.15}
 .game-details-meta{display:flex;flex-wrap:wrap;gap:8px;color:#bfd0e3;font-size:.82rem}
 .game-details-chip{padding:5px 10px;border-radius:999px;background:rgba(15,23,42,.55);border:1px solid rgba(148,163,184,.22)}
-.game-details-content{flex:1 1 auto;min-height:0;overflow:visible;padding-bottom:0}
-.game-details-content .card-body-inner{padding:0 20px 20px}
-body.modal-open{overflow:auto}
+.game-details-content{flex:1 1 auto;min-height:0;overflow:hidden;padding-bottom:0;display:flex;align-items:flex-start;justify-content:center}
+.game-details-content .card-body-inner{padding:0 20px 20px;transform-origin:top center;will-change:transform}
+body.modal-open{overflow:hidden}
 .form-row{margin-bottom:12px}
 .form-row label{display:block;font-size:.78rem;color:var(--muted);margin-bottom:4px}
 .form-row input{width:100%;background:var(--card2);border:1px solid var(--border);
@@ -492,7 +492,8 @@ body.modal-open{overflow:auto}
   .modal.game-details-modal .modal-close{top:10px;right:10px}
   .game-details-head{padding:18px 16px 14px}
   .game-details-title{font-size:1.15rem}
-  .game-details-content .card-body-inner{padding:0 14px 16px}
+  .game-details-content{overflow:auto;display:block}
+  .game-details-content .card-body-inner{padding:0 14px 16px;transform:none !important;width:auto !important}
 }
 
 /* ── Responsive ── */
@@ -2554,8 +2555,10 @@ function _gameDetailsMarkup(card) {
   const scoreText = card.away_score != null && card.home_score != null
     ? `${card.away_score} - ${card.home_score}`
     : 'Pre-game';
+  const leagueFallback = _isSoccerMode() ? 'Soccer' : 'MLB';
+  const detailsLabel = _isSoccerMode() ? 'Soccer Match Breakdown' : 'Game Breakdown';
   const metaBits = [
-    card.league || 'MLB',
+    card.league || card.competition_name || leagueFallback,
     kickoff,
     card.away_starter ? `Away SP: ${card.away_starter}` : '',
     card.home_starter ? `Home SP: ${card.home_starter}` : '',
@@ -2563,7 +2566,7 @@ function _gameDetailsMarkup(card) {
   ].filter(Boolean);
 
   return `<div class="game-details-head">
-    <div class="game-details-label">Game Breakdown</div>
+    <div class="game-details-label">${detailsLabel}</div>
     <h2 id="game-details-title" class="game-details-title">${card.away_team} vs ${card.home_team}</h2>
     <div class="game-details-meta">
       ${metaBits.map(bit => `<span class="game-details-chip">${bit}</span>`).join('')}
@@ -2575,6 +2578,49 @@ function _gameDetailsMarkup(card) {
   </div>`;
 }
 
+let _gameDetailsFitRaf = null;
+
+function _isDesktopDetailsViewport() {
+  return !!(window.matchMedia && window.matchMedia('(min-width: 981px)').matches);
+}
+
+function _fitGameDetailsModal() {
+  const modalOverlay = document.getElementById('game-details-modal');
+  if (!modalOverlay || modalOverlay.classList.contains('hidden')) return;
+  const contentWrap = modalOverlay.querySelector('.game-details-content');
+  const inner = modalOverlay.querySelector('.game-details-content .card-body-inner');
+  if (!contentWrap || !inner) return;
+
+  inner.style.transform = 'none';
+  inner.style.width = 'auto';
+
+  if (!_isDesktopDetailsViewport()) return;
+
+  const availableW = Math.max(1, contentWrap.clientWidth - 2);
+  const availableH = Math.max(1, contentWrap.clientHeight - 2);
+  const naturalW = Math.max(1, inner.scrollWidth);
+  const naturalH = Math.max(1, inner.scrollHeight);
+  const scale = Math.min(1, availableW / naturalW, availableH / naturalH);
+  if (scale < 0.999) {
+    inner.style.transform = `scale(${scale})`;
+  }
+}
+
+function _scheduleGameDetailsFit() {
+  if (_gameDetailsFitRaf) {
+    cancelAnimationFrame(_gameDetailsFitRaf);
+    _gameDetailsFitRaf = null;
+  }
+  _gameDetailsFitRaf = requestAnimationFrame(() => {
+    _fitGameDetailsModal();
+    _gameDetailsFitRaf = null;
+  });
+}
+
+window.addEventListener('resize', () => {
+  _scheduleGameDetailsFit();
+});
+
 function openGameDetails(gameKey, matchKey) {
   const rawCard = _findDashboardCard(gameKey, matchKey);
   if (!rawCard) return;
@@ -2582,10 +2628,12 @@ function openGameDetails(gameKey, matchKey) {
   const modal = document.getElementById('game-details-modal');
   const content = document.getElementById('game-details-content');
   if (!modal || !content || !card) return;
-  window.scrollTo({ top: 0, behavior: 'auto' });
   content.innerHTML = _gameDetailsMarkup(card);
   modal.classList.remove('hidden');
   document.body.classList.add('modal-open');
+  _scheduleGameDetailsFit();
+  setTimeout(_scheduleGameDetailsFit, 60);
+  setTimeout(_scheduleGameDetailsFit, 180);
 }
 
 function closeGameDetailsModal(event) {
