@@ -23,6 +23,16 @@ import pandas as pd
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from config import ODDS_API_KEY, ODDS_API_BASE, ODDS_REGIONS, et_today as _et_today
 
+_ODDS_API_DISABLED = False
+
+
+def _disable_odds_api(reason: str):
+    global _ODDS_API_DISABLED
+    if _ODDS_API_DISABLED:
+        return
+    _ODDS_API_DISABLED = True
+    print(f"[odds_fetcher] disabling odds provider for this process: {reason}")
+
 # Sports codes accepted by The Odds API
 SPORT_MAP = {
     "mlb":      "baseball_mlb",
@@ -54,6 +64,8 @@ def get_live_odds(sport_key: str = "mlb", markets: str = "h2h") -> list[dict]:
     if not ODDS_API_KEY or ODDS_API_KEY == "your_odds_api_key_here":
         print("[odds_fetcher] ODDS_API_KEY not set in .env – returning empty.")
         return []
+    if _ODDS_API_DISABLED:
+        return []
 
     raw_sport = SPORT_MAP.get(sport_key.lower(), sport_key)
     url = f"{ODDS_API_BASE}/sports/{raw_sport}/odds"
@@ -71,6 +83,8 @@ def get_live_odds(sport_key: str = "mlb", markets: str = "h2h") -> list[dict]:
         return resp.json()
     except requests.HTTPError:
         code = getattr(resp, "status_code", "?")
+        if code in (401, 403):
+            _disable_odds_api(f"HTTP {code}")
         print(f"[odds_fetcher] fetch error: HTTP {code} for sport={raw_sport}")
         return []
     except Exception as e:
@@ -194,6 +208,8 @@ def get_available_sports() -> list[dict]:
     """List all sports currently available on The Odds API."""
     if not ODDS_API_KEY or ODDS_API_KEY == "your_odds_api_key_here":
         return []
+    if _ODDS_API_DISABLED:
+        return []
     url = f"{ODDS_API_BASE}/sports"
     try:
         resp = requests.get(url, params={"apiKey": ODDS_API_KEY}, timeout=10)
@@ -201,6 +217,8 @@ def get_available_sports() -> list[dict]:
         return resp.json()
     except requests.HTTPError:
         code = getattr(resp, "status_code", "?")
+        if code in (401, 403):
+            _disable_odds_api(f"sports list HTTP {code}")
         print(f"[odds_fetcher] sports list error: HTTP {code}")
         return []
     except Exception as e:
