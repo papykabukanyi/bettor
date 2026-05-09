@@ -14,6 +14,7 @@ Usage:
 from __future__ import annotations
 
 import json
+import math
 import os
 import time
 from typing import Any
@@ -344,7 +345,7 @@ def get_wc_player_stats(player_name: str | None = None,
 def get_squad_props(nation: str, top_n: int = 6) -> list[dict]:
     """
     Generate player prop bets for a national team's top players.
-    Returns props for goals, assists, shots on target per match.
+    Uses season historical rates and emits both OVER and UNDER directions.
     """
     players = get_wc_player_stats(nation=nation)
     if not players:
@@ -354,52 +355,134 @@ def get_squad_props(nation: str, top_n: int = 6) -> list[dict]:
     players = sorted(players, key=lambda p: p.get("xg", 0), reverse=True)[:top_n]
     props = []
 
+    def _poisson_over_prob(rate: float, line: float) -> float:
+        lam = max(0.05, float(rate or 0.0))
+        if line <= 0.5:
+            # P(X >= 1)
+            return max(0.02, min(0.98, 1.0 - math.exp(-lam)))
+        if line <= 1.5:
+            # P(X >= 2)
+            return max(0.02, min(0.98, 1.0 - math.exp(-lam) * (1.0 + lam)))
+        # Approx fallback for higher lines
+        return max(0.02, min(0.98, 1.0 - math.exp(-lam)))
+
+    def _add_directional_prop(
+        *,
+        name: str,
+        team: str,
+        nation_: str,
+        stat_type: str,
+        prop_label: str,
+        line: float,
+        rate: float,
+        model_over_prob: float,
+        rationale: str,
+    ):
+        over_p = max(0.02, min(0.98, float(model_over_prob)))
+        under_p = max(0.02, min(0.98, 1.0 - over_p))
+
+        base = {
+            "name": name,
+            "team": team,
+            "nation": nation_,
+            "stat_type": stat_type,
+            "prop_label": prop_label,
+            "line": line,
+            "season_avg": round(max(0.0, float(rate)), 2),
+            "last10_avg": round(max(0.0, float(rate) * 0.92), 2),
+            "signal_rationale": rationale,
+            "market_popularity": 0.0,
+            "market_mentions": 0,
+            "worth_score": 0.0,
+            "worth_it": False,
+            "worth_reason": "Pending market worth evaluation",
+        }
+
+        props.append(
+            {
+                **base,
+                "direction": "OVER",
+                "model_prob": round(over_p, 3),
+                "confidence": round(over_p * 100),
+                "safety_label": _prob_to_safety(over_p),
+                "over_pct": round(over_p * 100, 2),
+                "under_pct": round(100.0 - (over_p * 100), 2),
+                "odds_am": -110,
+                "dec_odds": 1.91,
+            }
+        )
+        props.append(
+            {
+                **base,
+                "direction": "UNDER",
+                "model_prob": round(under_p, 3),
+                "confidence": round(under_p * 100),
+                "safety_label": _prob_to_safety(under_p),
+                "over_pct": round(over_p * 100, 2),
+                "under_pct": round(under_p * 100, 2),
+                "odds_am": -110,
+                "dec_odds": 1.91,
+            }
+        )
+
     for p in players:
         name     = p["name"]
         team     = p.get("team", "")
         nation_  = p.get("nation", nation)
         xg_p90   = float(p.get("xg_per90", p.get("xg", 0) / max(p.get("minutes_90s", 1), 1) if p.get("minutes_90s") else 0.3))
         goals_p90 = float(p.get("goals_per90", xg_p90 * 0.85))
-        shots_p90 = float(p.get("shots_on_target", 0)) / max(float(p.get("minutes_90s", 35)), 1)
+        assists_total = float(p.get("assists", 0) or 0)
+        minutes_90s = float(p.get("minutes_90s", 35) or 35)
+        assists_p90 = assists_total / max(minutes_90s, 1.0)
+        shots_p90 = float(p.get("shots_on_target", 0) or 0) / max(minutes_90s, 1.0)
 
-        # Goals prop (only for forwards/midfielders with ≥0.2 goals/90)
+        # Goals prop (historical season rate)
         if goals_p90 >= 0.18:
-            line = 0.5  # over 0.5 goals = score anytime
-            model_prob = min(0.92, max(0.35, goals_p90 * 0.95))
-            props.append({
-                "name":          name,
-                "team":          team,
-                "nation":        nation_,
-                "stat_type":     "goals",
-                "prop_label":    "Anytime Goalscorer",
-                "line":          line,
-                "direction":     "OVER",
-                "model_prob":    round(model_prob, 3),
-                "confidence":    round(model_prob * 100),
-                "safety_label":  _prob_to_safety(model_prob),
-                "season_avg":    round(goals_p90, 2),
-                "xg_per90":      round(xg_p90, 2),
-                "signal_rationale": f"{goals_p90:.2f} goals/90 this season, {p.get('xg',0):.1f} xG total",
-            })
+            line = 0.5
+            model_prob = _poisson_over_prob(goals_p90, line)
+            _add_directional_prop(
+                name=name,
+                team=team,
+                nation_=nation_,
+                stat_type="goals",
+                prop_label="Anytime Goalscorer",
+                line=line,
+                rate=goals_p90,
+                model_over_prob=model_prob,
+                rationale=f"{goals_p90:.2f} goals/90 and {xg_p90:.2f} xG/90 from season historical data",
+            )
 
         # Shots on target prop
         if shots_p90 >= 0.5:
+            line = 0.5 if shots_p90 < 1.4 else 1.5
+            model_prob = _poisson_over_prob(shots_p90, line)
+            _add_directional_prop(
+                name=name,
+                team=team,
+                nation_=nation_,
+                stat_type="shots_on_target",
+                prop_label="Shots on Target",
+                line=line,
+                rate=shots_p90,
+                model_over_prob=model_prob,
+                rationale=f"{shots_p90:.2f} shots on target per 90 over season sample",
+            )
+
+        # Assists prop
+        if assists_p90 >= 0.12:
             line = 0.5
-            model_prob = min(0.88, max(0.30, shots_p90 * 0.85))
-            props.append({
-                "name":          name,
-                "team":          team,
-                "nation":        nation_,
-                "stat_type":     "shots_on_target",
-                "prop_label":    "Shots on Target",
-                "line":          line,
-                "direction":     "OVER",
-                "model_prob":    round(model_prob, 3),
-                "confidence":    round(model_prob * 100),
-                "safety_label":  _prob_to_safety(model_prob),
-                "season_avg":    round(shots_p90, 2),
-                "signal_rationale": f"{p.get('shots_on_target', 0)} shots on target this season",
-            })
+            model_prob = _poisson_over_prob(assists_p90, line)
+            _add_directional_prop(
+                name=name,
+                team=team,
+                nation_=nation_,
+                stat_type="assists",
+                prop_label="Assist",
+                line=line,
+                rate=assists_p90,
+                model_over_prob=model_prob,
+                rationale=f"{assists_p90:.2f} assists/90 from season historical profile",
+            )
 
     return props
 

@@ -35,7 +35,7 @@ from flask import Flask, render_template, jsonify, request, Response
 
 SRC_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SRC_DIR)
-from config import BANKROLL, MIN_VALUE_EDGE, KELLY_FRACTION, MLB_SEASONS, et_today
+from config import BANKROLL, MIN_VALUE_EDGE, KELLY_FRACTION, MLB_SEASONS, et_today, SPORT as CONFIG_SPORT
 
 # Dashboard uses a lower edge threshold to show more picks
 # (bot tracks accuracy; high-edge filter is for real-money staking only)
@@ -43,6 +43,9 @@ _DASH_MIN_EDGE = 0.02
 _DAILY_LOCK_HOUR_ET = int(os.getenv("DAILY_LOCK_HOUR_ET", "5"))
 _DAILY_LOCK_MINUTE_ET = int(os.getenv("DAILY_LOCK_MINUTE_ET", "0"))
 _AUTO_ANALYSIS_INTERVAL_MIN = int(os.getenv("AUTO_ANALYSIS_INTERVAL_MIN", "0"))
+_ACTIVE_SPORT = str(CONFIG_SPORT or os.getenv("SPORT", "mlb") or "mlb").strip().lower()
+if _ACTIVE_SPORT not in {"mlb", "soccer"}:
+    _ACTIVE_SPORT = "mlb"
 
 app = Flask(__name__, template_folder="templates")
 
@@ -129,7 +132,7 @@ def _lazy_init():
     if not _worker_initialized:
         _init_worker()
 
-_PHASES = [
+_MLB_PHASES = [
     "Fetching MLB schedule",
     "Loading team stats & model",
     "Fetching injuries",
@@ -140,6 +143,16 @@ _PHASES = [
     "Fetching sentiment",
     "Saving to database",
 ]
+
+_SOCCER_PHASES = [
+    "Fetching tournament fixtures",
+    "Running soccer model + sentiment",
+    "Building player props",
+    "Building parlays",
+    "Saving to database",
+]
+
+_PHASES = _SOCCER_PHASES if _ACTIVE_SPORT == "soccer" else _MLB_PHASES
 
 _state = {
     "status":           "idle",
@@ -317,6 +330,8 @@ def _line_value(val) -> float | None:
 
 
 def _is_public_prop(p: dict) -> bool:
+    if _ACTIVE_SPORT == "soccer":
+        return True
     if (p.get("direction") or "").upper() != "OVER":
         return False
     lv = _line_value(p.get("line"))
@@ -375,6 +390,19 @@ def _build_card(game, bets, props, when):
     _GAME_BET_TYPES = ("moneyline", "run_line", "total", "f5_moneyline",
                        "f5_total", "home_team_total", "away_team_total")
 
+    def _slot_for_bet(bet: dict) -> str | None:
+        bt = str(bet.get("bet_type", ""))
+        if bt in _GAME_BET_TYPES:
+            return bt
+        if _ACTIVE_SPORT == "soccer":
+            if bt in {"1X2", "Draw No Bet"}:
+                return "moneyline"
+            if bt == "Goals O/U":
+                return "total"
+            if bt == "BTTS":
+                return "run_line"
+        return None
+
     def _key_matches(k: str) -> bool:
         kn = _norm_gk(k)
         return (
@@ -388,11 +416,11 @@ def _build_card(game, bets, props, when):
         bk = bet.get("game_key", bet.get("game", ""))
         if not _key_matches(bk):
             continue
-        bt = bet.get("bet_type", "")
-        if bt in _GAME_BET_TYPES:
-            current = card[bt]
+        slot = _slot_for_bet(bet)
+        if slot:
+            current = card[slot]
             if current is None or bet.get("safety", 0) > current.get("safety", 0):
-                card[bt] = bet
+                card[slot] = bet
 
     ht_words = _team_words(ht)
     at_words = _team_words(at)
@@ -421,7 +449,375 @@ def _build_card(game, bets, props, when):
     return card
 
 
+def _safety_label_from_prob(prob: float) -> str:
+    p = float(prob or 0.5)
+    if p >= 0.72:
+        return "ELITE"
+    if p >= 0.60:
+        return "SAFE"
+    if p >= 0.50:
+        return "MODERATE"
+    return "RISKY"
+
+
+def _safety_score_from_label(label: str | None) -> float:
+    v = str(label or "MODERATE").upper()
+    if v == "ELITE":
+        return 0.80
+    if v == "SAFE":
+        return 0.65
+    if v == "MODERATE":
+        return 0.52
+    return 0.45
+
+
+def _normalize_soccer_bet(game: dict, bet: dict, default_date: str) -> dict:
+    row = dict(bet or {})
+    home = game.get("home_team", "")
+    away = game.get("away_team", "")
+    match_key = _norm_gk(game.get("match_key") or row.get("match_key") or f"{away}@{home}")
+    game_key = row.get("game_key") or _compose_game_key(
+        away,
+        home,
+        game.get("game_datetime"),
+        game.get("date") or game.get("game_date"),
+        game.get("game_time"),
+    )
+
+    try:
+        odds_am = int(float(row.get("odds_am", row.get("odds", -110)) or -110))
+    except (TypeError, ValueError):
+        odds_am = -110
+    try:
+        dec_odds = float(row.get("dec_odds") or (1 + (odds_am / 100.0) if odds_am > 0 else 1 + (100.0 / abs(odds_am))))
+    except Exception:
+        dec_odds = 1.91
+
+    model_prob = float(row.get("model_prob", row.get("probability", 0.5)) or 0.5)
+    safety_label = row.get("safety_label") or _safety_label_from_prob(model_prob)
+    confidence = int(row.get("confidence") or round(model_prob * 100))
+
+    row.update({
+        "sport": "soccer",
+        "pick": row.get("pick") or row.get("pick_label") or row.get("bet_type") or "Soccer Market",
+        "match_key": match_key,
+        "game_key": game_key,
+        "game_date": row.get("game_date") or game.get("date") or game.get("game_date") or default_date,
+        "game_time": row.get("game_time") or game.get("game_time") or "",
+        "home_team": row.get("home_team") or home,
+        "away_team": row.get("away_team") or away,
+        "odds_am": odds_am,
+        "dec_odds": round(dec_odds, 4),
+        "model_prob": max(0.01, min(0.99, model_prob)),
+        "confidence": confidence,
+        "safety_label": safety_label,
+        "safety": float(row.get("safety", _safety_score_from_label(safety_label))),
+    })
+    row.setdefault("worth_score", 0.0)
+    row.setdefault("worth_it", False)
+    row.setdefault("worth_reason", "")
+    row.setdefault("market_popularity", 0.0)
+    row.setdefault("market_mentions", 0)
+    return row
+
+
+def _normalize_soccer_prop(game: dict, prop: dict, default_date: str) -> dict:
+    row = dict(prop or {})
+    home = game.get("home_team", "")
+    away = game.get("away_team", "")
+    match_key = _norm_gk(game.get("match_key") or row.get("match_key") or f"{away}@{home}")
+    game_key = row.get("game_key") or _compose_game_key(
+        away,
+        home,
+        game.get("game_datetime"),
+        game.get("date") or game.get("game_date"),
+        game.get("game_time"),
+    )
+    try:
+        odds_am = int(float(row.get("odds_am", -110) or -110))
+    except (TypeError, ValueError):
+        odds_am = -110
+    try:
+        dec_odds = float(row.get("dec_odds") or (1 + (odds_am / 100.0) if odds_am > 0 else 1 + (100.0 / abs(odds_am))))
+    except Exception:
+        dec_odds = 1.91
+
+    model_prob = float(row.get("model_prob", 0.5) or 0.5)
+    safety_label = row.get("safety_label") or _safety_label_from_prob(model_prob)
+
+    row.update({
+        "sport": "soccer",
+        "game": row.get("game") or f"{away} @ {home}",
+        "match_key": match_key,
+        "game_key": game_key,
+        "date": row.get("date") or game.get("date") or game.get("game_date") or default_date,
+        "game_date": row.get("game_date") or game.get("date") or game.get("game_date") or default_date,
+        "game_time": row.get("game_time") or game.get("game_time") or "",
+        "home_team": row.get("home_team") or home,
+        "away_team": row.get("away_team") or away,
+        "direction": str(row.get("direction") or "OVER").upper(),
+        "odds_am": odds_am,
+        "dec_odds": round(dec_odds, 4),
+        "model_prob": max(0.01, min(0.99, model_prob)),
+        "confidence": int(row.get("confidence") or round(model_prob * 100)),
+        "safety_label": safety_label,
+        "safety": float(row.get("safety", _safety_score_from_label(safety_label))),
+    })
+    row.setdefault("worth_score", 0.0)
+    row.setdefault("worth_it", False)
+    row.setdefault("worth_reason", "")
+    row.setdefault("market_popularity", 0.0)
+    row.setdefault("market_mentions", 0)
+    return row
+
+
+def _run_soccer_analysis(lock_date: datetime.date | None = None):
+    warnings.filterwarnings("ignore")
+
+    with _lock:
+        _state["status"] = "running"
+        _state["error"] = None
+        _state["logs"] = []
+        _state["phase"] = _PHASES[0]
+        _state["phase_idx"] = 0
+
+    try:
+        today_date = _et_calendar_today()
+        today_str = today_date.isoformat()
+        tomorrow_str = (today_date + datetime.timedelta(days=1)).isoformat()
+        run_id = f"SOCCER-{today_str}"
+
+        need_preds = False
+        need_props = False
+        try:
+            from data.db import has_predictions_for_date, has_prop_picks_for_date, upsert_daily_run
+            upsert_daily_run(run_id, today_date, status="RUNNING")
+            if lock_date is None:
+                need_preds = not has_predictions_for_date(today_date, sport="soccer")
+                need_props = not has_prop_picks_for_date(today_date, sport="soccer")
+                if need_preds or need_props:
+                    lock_date = today_date
+                    _log(f"[lock] No soccer picks for {today_date} yet — this run will lock picks")
+                else:
+                    _log(f"[lock] Soccer picks already saved for {today_date} — updating cards only")
+            else:
+                need_preds = not has_predictions_for_date(lock_date, sport="soccer")
+                need_props = not has_prop_picks_for_date(lock_date, sport="soccer")
+        except Exception as lock_exc:
+            _log(f"[lock] Soccer lock check failed: {lock_exc}")
+            if lock_date is None:
+                lock_date = today_date
+            need_preds = True
+            need_props = True
+
+        _phase(0)
+        _log("Fetching soccer fixtures across tournaments...")
+        from data.soccer_fetcher import get_matches_today_all, get_matches_tomorrow_all
+
+        today_games = get_matches_today_all() or []
+        tomorrow_games = get_matches_tomorrow_all() or []
+        display_today = today_games
+        display_tomorrow = tomorrow_games
+        all_games = display_today + display_tomorrow
+        _log(f"Fixtures: {len(display_today)} today, {len(display_tomorrow)} tomorrow")
+
+        _phase(1)
+        _log("Running soccer model + sentiment analysis...")
+        from models.soccer_predictor import analyze_matches
+
+        analyzed = analyze_matches(all_games, use_sentiment=True) or []
+        by_match: dict[str, dict] = {}
+        by_game: dict[str, dict] = {}
+        for card in analyzed:
+            mk = _norm_gk(card.get("match_key") or "")
+            gk = _norm_gk(card.get("game_key") or "")
+            if mk:
+                by_match[mk] = card
+            if gk:
+                by_game[gk] = card
+
+        all_bets: list[dict] = []
+        all_props: list[dict] = []
+
+        for g in all_games:
+            home = g.get("home_team", "")
+            away = g.get("away_team", "")
+            match_key = _norm_gk(f"{away}@{home}")
+            game_key = _norm_gk(_compose_game_key(
+                away,
+                home,
+                g.get("game_datetime"),
+                g.get("date") or g.get("game_date"),
+                g.get("game_time"),
+            ))
+            card = by_game.get(game_key) or by_match.get(match_key)
+            if not card:
+                continue
+            for bet in card.get("suggested_bets", []) or []:
+                all_bets.append(_normalize_soccer_bet(g, bet, today_str))
+            for prop in card.get("suggested_props", []) or []:
+                all_props.append(_normalize_soccer_prop(g, prop, today_str))
+
+        _log(f"Soccer bets generated: {len(all_bets)}")
+        _phase(2)
+        _log(f"Soccer player props generated: {len(all_props)}")
+
+        _phase(3)
+        _log("Building soccer parlays...")
+        try:
+            from models.mlb_predictor import build_parlays
+            best_parlays = build_parlays(all_bets + all_props, max_legs=5, top_n=5)
+        except Exception as parlay_exc:
+            _log(f"Parlay builder fallback: {parlay_exc}")
+            best_parlays = []
+
+        _phase(4)
+        _log("Saving soccer analysis and building cards...")
+        from data.db import save_predictions, save_prop_picks, save_analysis_cache
+
+        def _date_str(value) -> str:
+            if isinstance(value, datetime.datetime):
+                return value.date().isoformat()
+            if isinstance(value, datetime.date):
+                return value.isoformat()
+            return str(value or "")
+
+        pred_rows = []
+        for b in all_bets:
+            pred_rows.append({
+                "game_key": b.get("game_key", ""),
+                "run_id": run_id,
+                "run_date": today_str,
+                "sport": "soccer",
+                "bet_type": b.get("bet_type", "soccer_market"),
+                "pick": b.get("pick") or b.get("pick_label") or "Soccer Market",
+                "line": b.get("line"),
+                "odds_am": b.get("odds_am"),
+                "dec_odds": b.get("dec_odds", 1.91),
+                "model_prob": b.get("model_prob", 0.5),
+                "confidence": b.get("confidence", 50),
+                "safety_label": b.get("safety_label", "MODERATE"),
+                "game_date": b.get("game_date", today_str),
+                "game_time": b.get("game_time", ""),
+                "home_team": b.get("home_team", ""),
+                "away_team": b.get("away_team", ""),
+                "home_starter": "",
+                "away_starter": "",
+                "sentiment_score": b.get("market_popularity"),
+                "news_snippet": (b.get("worth_reason") or "")[:500],
+            })
+
+        if lock_date:
+            lock_str = _date_str(lock_date)
+            if need_preds:
+                pred_rows_locked = [p for p in pred_rows if _date_str(p.get("game_date")) == lock_str]
+                save_predictions(pred_rows_locked)
+            else:
+                _log(f"[lock] Soccer predictions already saved for {lock_str} — cards updating")
+
+            if need_props:
+                props_locked = [p for p in all_props if _date_str(p.get("date") or p.get("game_date")) == lock_str]
+                for pp in props_locked:
+                    pp["run_id"] = run_id
+                save_prop_picks(props_locked, game_date=lock_date)
+            else:
+                _log(f"[lock] Soccer props already saved for {lock_str} — tracking only")
+        else:
+            _log("[lock] No lock_date — updating analysis cards without re-saving soccer picks")
+
+        today_cards = [_build_card(g, all_bets, all_props, "TODAY") for g in display_today]
+        tomorrow_cards = [_build_card(g, all_bets, all_props, "TOMORROW") for g in display_tomorrow]
+
+        def _card_score(card: dict) -> float:
+            s = [b["safety"] for b in [card.get("moneyline"), card.get("run_line"), card.get("total")] if b]
+            return sum(s) / len(s) if s else 0.45
+
+        today_cards.sort(key=_card_score, reverse=True)
+        tomorrow_cards.sort(key=_card_score, reverse=True)
+        all_props_flat = sorted(all_props, key=lambda x: x.get("safety", 0), reverse=True)
+
+        now_ts = datetime.datetime.now(datetime.timezone.utc)
+        last_updated = now_ts.strftime("%Y-%m-%d %H:%M")
+        try:
+            save_analysis_cache({
+                "game_cards_today": today_cards,
+                "game_cards_tomorrow": tomorrow_cards,
+                "best_parlays": best_parlays,
+                "player_props": all_props_flat,
+                "last_updated": last_updated,
+            }, cache_date=today_date)
+        except Exception as cache_exc:
+            _log(f"Soccer cache save error: {cache_exc}")
+
+        with _lock:
+            _state.update({
+                "status": "done",
+                "phase": "Complete",
+                "last_updated": last_updated,
+                "last_updated_ts": now_ts.isoformat(),
+                "game_cards_today": _clean(today_cards),
+                "game_cards_tomorrow": _clean(tomorrow_cards),
+                "best_parlays": _clean(best_parlays),
+                "player_props": _clean(all_props_flat),
+                "elite_parlay": None,
+            })
+
+        try:
+            from data.db import upsert_daily_run
+            upsert_daily_run(
+                run_id,
+                today_date,
+                status="DONE",
+                games_today=len(today_cards),
+                games_tmrw=len(tomorrow_cards),
+                props_count=len(all_props_flat),
+                parlays_count=len(best_parlays),
+                finished=True,
+            )
+        except Exception as run_exc:
+            _log(f"[run-log] {run_exc}")
+
+        if need_preds or need_props:
+            try:
+                from email_notify import send_daily_picks
+                mail_state = {
+                    "best_parlays": _clean(best_parlays),
+                    "game_cards_today": _clean(today_cards),
+                    "player_props": _clean(all_props_flat),
+                }
+                mail_result = send_daily_picks(mail_state)
+                _log(f"[email] Sent daily picks — {mail_result.get('sent',0)} delivered, {mail_result.get('failed',0)} failed")
+            except Exception as mail_exc:
+                _log(f"[email] Soccer send failed: {mail_exc}")
+
+        _sse_broadcast("state_update", {
+            "status": "done",
+            "last_updated": last_updated,
+            "game_cards_today": _clean(today_cards),
+            "game_cards_tomorrow": _clean(tomorrow_cards),
+            "best_parlays": _clean(best_parlays),
+            "player_props": _clean(all_props_flat),
+            "elite_parlay": None,
+        })
+
+        _log(
+            f"Soccer analysis complete — {len(today_cards)} today, "
+            f"{len(tomorrow_cards)} tomorrow, {len(all_props_flat)} props"
+        )
+    except Exception:
+        err = traceback.format_exc()
+        _log(f"Soccer analysis FAILED:\n{err}")
+        with _lock:
+            _state["status"] = "error"
+            _state["phase"] = "Error"
+            _state["error"] = err
+        _sse_broadcast("status", {"status": "error", "error": err[:300]})
+
+
 def _run_analysis(lock_date: datetime.date | None = None):
+    if _ACTIVE_SPORT == "soccer":
+        return _run_soccer_analysis(lock_date)
+
     warnings.filterwarnings("ignore")
     import pandas as pd
 
@@ -959,6 +1355,7 @@ def index():
         "dashboard.html",
         state=state,
         bankroll=BANKROLL,
+        active_sport=_ACTIVE_SPORT,
         phases=_PHASES,
         today_cards=today_cards,
         tomorrow_cards=tomorrow_cards,
@@ -1010,6 +1407,7 @@ def api_cached_state():
                     cache_age_min = None
             return jsonify({
                 "ok":                  True,
+                "sport":               _ACTIVE_SPORT,
                 "status":              _state["status"],
                 "last_updated":        _state["last_updated"],
                 "cache_updated_at_iso": cache_updated_at_iso,
@@ -1038,20 +1436,27 @@ def api_cached_state():
                 cached = None
         if cached:
             cached["ok"] = True
+            cached["sport"] = _ACTIVE_SPORT
             return jsonify(cached)
     except Exception:
         pass
 
     # Fallback: build schedule-only cards so tabs are never blank while analysis/cache is unavailable.
     try:
-        from data.mlb_fetcher import get_schedule_range
-
         today_date = _et_calendar_today()
         today_str = today_date.isoformat()
         tomorrow_str = (today_date + datetime.timedelta(days=1)).isoformat()
-        all_games = get_schedule_range(days_ahead=2) or []
-        today_games = [g for g in all_games if g.get("date", "") == today_str]
-        tomorrow_games = [g for g in all_games if g.get("date", "") == tomorrow_str]
+        if _ACTIVE_SPORT == "soccer":
+            from data.soccer_fetcher import get_matches_today_all, get_matches_tomorrow_all
+
+            today_games = get_matches_today_all() or []
+            tomorrow_games = get_matches_tomorrow_all() or []
+        else:
+            from data.mlb_fetcher import get_schedule_range
+
+            all_games = get_schedule_range(days_ahead=2) or []
+            today_games = [g for g in all_games if g.get("date", "") == today_str]
+            tomorrow_games = [g for g in all_games if g.get("date", "") == tomorrow_str]
 
         fallback_today = [_build_card(g, [], [], "TODAY") for g in today_games]
         fallback_tomorrow = [_build_card(g, [], [], "TOMORROW") for g in tomorrow_games]
@@ -1059,6 +1464,7 @@ def api_cached_state():
         if fallback_today or fallback_tomorrow:
             return jsonify({
                 "ok": True,
+                "sport": _ACTIVE_SPORT,
                 "status": "idle",
                 "last_updated": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
                 "game_cards_today": fallback_today,
@@ -1070,7 +1476,7 @@ def api_cached_state():
     except Exception:
         pass
 
-    return jsonify({"ok": False, "status": "idle",
+    return jsonify({"ok": False, "sport": _ACTIVE_SPORT, "status": "idle",
                     "game_cards_today": [], "game_cards_tomorrow": [],
                     "best_parlays": [], "player_props": [],
                     "elite_parlay": None})
@@ -1134,7 +1540,7 @@ def api_parlay_performance():
     """Win/loss/ROI stats for all tracked parlays."""
     try:
         from data.db import get_parlay_performance_stats
-        return jsonify({"ok": True, "stats": get_parlay_performance_stats()})
+        return jsonify({"ok": True, "stats": get_parlay_performance_stats(sport=_ACTIVE_SPORT)})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
 
@@ -1142,6 +1548,9 @@ def api_parlay_performance():
 @app.route("/api/parlay/auto-resolve", methods=["POST"])
 def api_parlay_auto_resolve():
     """Auto-resolve pending tracked parlays based on leg prediction outcomes."""
+    if _ACTIVE_SPORT != "mlb":
+        return jsonify({"ok": True, "resolved": 0,
+                        "msg": "Auto-resolve is currently available for MLB mode only"})
     try:
         from models.mlb_predictor import resolve_tracked_parlays
         n = resolve_tracked_parlays(days_back=7)
@@ -1239,7 +1648,7 @@ def api_backfill():
 def api_performance():
     try:
         from data.db import get_performance_stats
-        return jsonify({"ok": True, "stats": get_performance_stats()})
+        return jsonify({"ok": True, "stats": get_performance_stats(sport=_ACTIVE_SPORT)})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
 
@@ -1248,7 +1657,7 @@ def api_performance():
 def api_prop_performance():
     try:
         from data.db import get_prop_performance_stats
-        return jsonify({"ok": True, "stats": get_prop_performance_stats()})
+        return jsonify({"ok": True, "stats": get_prop_performance_stats(sport=_ACTIVE_SPORT)})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
 
@@ -1259,14 +1668,118 @@ def api_predictions():
     outcome = request.args.get("outcome")
     try:
         from data.db import get_predictions
-        preds = get_predictions(days=days, outcome=outcome or None)
+        preds = get_predictions(days=days, outcome=outcome or None, sport=_ACTIVE_SPORT)
         return jsonify({"ok": True, "predictions": _clean(preds)})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e), "predictions": []})
 
 
+def _match_status_bucket(status: str) -> str:
+    s = str(status or "").lower()
+    if any(k in s for k in ("in progress", "in_play", "live", "halftime", "paused")):
+        return "live"
+    if any(k in s for k in ("final", "finished", "completed")):
+        return "finished"
+    return "scheduled"
+
+
+@app.route("/api/tournaments")
+def api_tournaments():
+    if _ACTIVE_SPORT != "soccer":
+        return jsonify({"ok": True, "tournaments": []})
+    try:
+        from data.soccer_fetcher import get_tournaments, get_matches_today_all, get_matches_tomorrow_all
+
+        tournaments = get_tournaments() or []
+        counts: dict[str, int] = {}
+        for m in (get_matches_today_all() or []) + (get_matches_tomorrow_all() or []):
+            code = str(m.get("competition") or "").strip().upper()
+            if not code:
+                continue
+            counts[code] = counts.get(code, 0) + 1
+
+        payload = []
+        for t in tournaments:
+            code = str(t.get("code") or "").upper()
+            row = dict(t)
+            row["match_count"] = int(counts.get(code, 0))
+            payload.append(row)
+
+        payload.sort(key=lambda x: (x.get("match_count", 0), x.get("name", "")), reverse=True)
+        return jsonify({"ok": True, "tournaments": payload})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e), "tournaments": []})
+
+
+@app.route("/api/tournament/data")
+def api_tournament_data():
+    if _ACTIVE_SPORT != "soccer":
+        return jsonify({"ok": False, "error": "Tournament data is available only in soccer mode"}), 400
+
+    code = str(request.args.get("code", "PL") or "PL").strip().upper()
+    try:
+        days = int(request.args.get("days", 7) or 7)
+    except Exception:
+        days = 7
+    days = max(1, min(days, 14))
+    query = str(request.args.get("q", "") or "").strip().lower()
+    status_filter = str(request.args.get("status", "all") or "all").strip().lower()
+
+    try:
+        from data.soccer_fetcher import (
+            TOURNAMENTS,
+            get_competition_info,
+            get_matches_in_range,
+            get_standings,
+            get_top_scorers,
+        )
+
+        if code not in TOURNAMENTS:
+            return jsonify({"ok": False, "error": f"Unsupported tournament code: {code}"}), 404
+
+        start_date = _et_calendar_today()
+        end_date = start_date + datetime.timedelta(days=days)
+        matches = get_matches_in_range(code, start_date.isoformat(), end_date.isoformat()) or []
+
+        filtered = []
+        for m in matches:
+            bucket = _match_status_bucket(m.get("status", ""))
+            if status_filter in {"scheduled", "live", "finished"} and bucket != status_filter:
+                continue
+            if query:
+                home = str(m.get("home_team") or "").lower()
+                away = str(m.get("away_team") or "").lower()
+                if query not in home and query not in away:
+                    continue
+            row = dict(m)
+            row["status_bucket"] = bucket
+            filtered.append(row)
+
+        filtered.sort(key=lambda x: (x.get("game_date") or x.get("date") or "", x.get("game_time") or ""))
+        standings = get_standings(code) or []
+        top_scorers = get_top_scorers(code, limit=20) or []
+        return jsonify({
+            "ok": True,
+            "code": code,
+            "competition": get_competition_info(code),
+            "matches": filtered,
+            "standings": standings,
+            "top_scorers": top_scorers,
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e), "matches": [], "standings": [], "top_scorers": []})
+
+
 @app.route("/api/resolve-outcomes", methods=["POST"])
 def api_resolve_outcomes():
+    if _ACTIVE_SPORT != "mlb":
+        return jsonify({
+            "ok": True,
+            "resolved_games": 0,
+            "resolved_props": 0,
+            "resolved_parlays": 0,
+            "msg": "Auto-resolve is currently available for MLB mode only",
+        })
     try:
         from models.mlb_predictor import (
             resolve_game_outcomes, resolve_prop_outcomes, resolve_tracked_parlays
@@ -1292,9 +1805,17 @@ def api_parlay_save():
         from data.db import save_tracked_parlay
         dedupe_raw = str(data.get("dedupe_pending", "0")).strip().lower()
         dedupe_pending = dedupe_raw in {"1", "true", "yes", "on"}
+        raw_legs = data.get("legs", [])
+        norm_legs = []
+        if isinstance(raw_legs, list):
+            for leg in raw_legs:
+                if isinstance(leg, dict):
+                    leg_payload = dict(leg)
+                    leg_payload.setdefault("sport", _ACTIVE_SPORT)
+                    norm_legs.append(leg_payload)
         pid = save_tracked_parlay(
             name=data.get("name", "My Parlay"),
-            legs=data.get("legs", []),
+            legs=norm_legs,
             combined_odds=float(data.get("combined_odds", 0)),
             stake_usd=float(data.get("stake_usd", 0)),
             dedupe_pending=dedupe_pending,
@@ -1315,7 +1836,11 @@ def api_parlay_list():
         target_date = _et_calendar_today() if current_only else None
         return jsonify({
             "ok": True,
-            "parlays": _clean(get_tracked_parlays(include_resolved=include_resolved, target_date=target_date)),
+            "parlays": _clean(get_tracked_parlays(
+                include_resolved=include_resolved,
+                target_date=target_date,
+                sport=_ACTIVE_SPORT,
+            )),
         })
     except Exception as e:
         return jsonify({"ok": False, "error": str(e), "parlays": []})
@@ -1379,6 +1904,35 @@ def api_email_send_parlay():
 @app.route("/api/live-scores")
 def api_live_scores():
     """Poll MLB Stats API for today's game statuses/scores."""
+    if _ACTIVE_SPORT == "soccer":
+        try:
+            from data.soccer_fetcher import get_live_matches
+            live = get_live_matches() or []
+            games = []
+            for g in live:
+                away = g.get("away_team", "")
+                home = g.get("home_team", "")
+                game_key = _compose_game_key(
+                    away,
+                    home,
+                    g.get("game_datetime"),
+                    g.get("game_date") or g.get("date"),
+                    g.get("game_time"),
+                )
+                games.append({
+                    "home_team": home,
+                    "away_team": away,
+                    "home_score": g.get("home_score"),
+                    "away_score": g.get("away_score"),
+                    "status": g.get("status"),
+                    "inning": g.get("minute", ""),
+                    "inning_half": "",
+                    "match_key": _norm_gk(g.get("match_key") or f"{away}@{home}"),
+                    "game_key": game_key,
+                })
+            return jsonify({"ok": True, "games": games})
+        except Exception as e:
+            return jsonify({"ok": False, "error": str(e), "games": []})
     try:
         import statsapi as mlbstatsapi
         from data.mlb_fetcher import _parse_mlb_game
@@ -1479,6 +2033,8 @@ def _start_cache_poller():
 
 
 def _start_live_scores():
+    if _ACTIVE_SPORT != "mlb":
+        return
     if _live_score_timer is None:
         _poll_live_scores()
 
@@ -1537,8 +2093,8 @@ def _poll_live_scores():
                     try:
                         from data.db import get_performance_stats, get_parlay_performance_stats
                         _sse_broadcast("performance_update", {
-                            "stats":        get_performance_stats(),
-                            "parlay_stats": get_parlay_performance_stats(),
+                            "stats":        get_performance_stats(sport="mlb"),
+                            "parlay_stats": get_parlay_performance_stats(sport="mlb"),
                         })
                     except Exception:
                         pass
@@ -1561,7 +2117,7 @@ def _poll_live_scores():
                         SELECT bet_type, pick, odds_am, model_prob, confidence,
                                home_team, away_team, outcome
                         FROM predictions
-                        WHERE game_date = %s AND outcome IN ('WIN','LOSS','PUSH')
+                        WHERE game_date = %s AND sport = 'mlb' AND outcome IN ('WIN','LOSS','PUSH')
                         ORDER BY outcome, model_prob DESC
                     """, (today_key,))
                     rows = [dict(r) for r in cur.fetchall()]
@@ -1575,7 +2131,7 @@ def _poll_live_scores():
                         cur2.execute("""
                             SELECT name, team, stat_type, prop_label, line, direction, outcome, actual
                             FROM prop_history
-                            WHERE game_date = %s AND outcome IN ('WIN','LOSS','PUSH')
+                            WHERE game_date = %s AND sport = 'mlb' AND outcome IN ('WIN','LOSS','PUSH')
                             ORDER BY outcome
                         """, (today_key,))
                         prop_rows = [dict(r) for r in cur2.fetchall()]
@@ -1753,14 +2309,20 @@ def _start_scheduler():
 def _load_boot_schedule_fallback() -> bool:
     """Populate state with schedule-only cards so UI isn't blank when cache is absent."""
     try:
-        from data.mlb_fetcher import get_schedule_range
-
         today_date = _et_calendar_today()
         today_str = today_date.isoformat()
         tomorrow_str = (today_date + datetime.timedelta(days=1)).isoformat()
-        all_games = get_schedule_range(days_ahead=2) or []
-        today_games = [g for g in all_games if g.get("date", "") == today_str]
-        tomorrow_games = [g for g in all_games if g.get("date", "") == tomorrow_str]
+        if _ACTIVE_SPORT == "soccer":
+            from data.soccer_fetcher import get_matches_today_all, get_matches_tomorrow_all
+
+            today_games = get_matches_today_all() or []
+            tomorrow_games = get_matches_tomorrow_all() or []
+        else:
+            from data.mlb_fetcher import get_schedule_range
+
+            all_games = get_schedule_range(days_ahead=2) or []
+            today_games = [g for g in all_games if g.get("date", "") == today_str]
+            tomorrow_games = [g for g in all_games if g.get("date", "") == tomorrow_str]
 
         today_cards = [_build_card(g, [], [], "TODAY") for g in today_games]
         tomorrow_cards = [_build_card(g, [], [], "TOMORROW") for g in tomorrow_games]

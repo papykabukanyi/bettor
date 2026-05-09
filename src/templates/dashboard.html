@@ -427,14 +427,14 @@ main{padding:20px;max-width:1400px;margin:0 auto}
 
 /* ── Phone modal ── */
 .modal-overlay{position:fixed;inset:0;background:rgba(1,7,14,.72);backdrop-filter:blur(6px);z-index:100;
-  display:flex;align-items:center;justify-content:center;padding:20px;overflow:auto}
+  display:flex;align-items:center;justify-content:center;padding:20px;overflow:hidden}
 .modal-overlay.hidden{display:none}
 .modal{background:var(--card);border:1px solid var(--border);border-radius:12px;
   padding:24px;max-width:480px;width:100%}
 .modal h2{font-size:1rem;font-weight:600;margin-bottom:16px}
 .modal-close{float:right;background:none;border:none;color:var(--muted);
   font-size:1.2rem;cursor:pointer;line-height:1}
-.modal.game-details-modal{position:relative;padding:0;max-width:min(1120px,calc(100vw - 42px));max-height:calc(100vh - 34px);overflow:hidden;
+.modal.game-details-modal{position:relative;padding:0;width:min(1400px,calc(100vw - 22px));height:calc(100vh - 22px);max-width:none;max-height:none;overflow:hidden;
   border:1px solid rgba(56,189,248,.22);
   box-shadow:0 35px 80px rgba(0,0,0,.62),0 0 0 1px rgba(14,116,144,.2) inset;
   background:linear-gradient(170deg,rgba(5,10,18,.98),rgba(5,9,17,.98));
@@ -453,10 +453,9 @@ main{padding:20px;max-width:1400px;margin:0 auto}
 .game-details-title{margin:8px 0 10px;font-size:1.56rem;font-weight:700;line-height:1.15}
 .game-details-meta{display:flex;flex-wrap:wrap;gap:8px;color:#bfd0e3;font-size:.82rem}
 .game-details-chip{padding:5px 10px;border-radius:999px;background:rgba(15,23,42,.55);border:1px solid rgba(148,163,184,.22)}
-.game-details-content{flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:hidden;
-  overscroll-behavior:contain;-webkit-overflow-scrolling:touch;padding-bottom:16px}
+.game-details-content{flex:1 1 auto;min-height:0;overflow:visible;padding-bottom:0}
 .game-details-content .card-body-inner{padding:0 20px 20px}
-body.modal-open{overflow:hidden}
+body.modal-open{overflow:auto}
 .form-row{margin-bottom:12px}
 .form-row label{display:block;font-size:.78rem;color:var(--muted);margin-bottom:4px}
 .form-row input{width:100%;background:var(--card2);border:1px solid var(--border);
@@ -489,7 +488,7 @@ body.modal-open{overflow:hidden}
 }
 
 @media (max-width: 980px){
-  .modal.game-details-modal{max-width:min(100vw - 14px,760px);max-height:calc(100vh - 14px)}
+  .modal.game-details-modal{width:calc(100vw - 8px);height:calc(100vh - 8px)}
   .modal.game-details-modal .modal-close{top:10px;right:10px}
   .game-details-head{padding:18px 16px 14px}
   .game-details-title{font-size:1.15rem}
@@ -568,6 +567,34 @@ body.console-open main{padding-bottom:236px}
 .combo-legs{display:flex;flex-direction:column;gap:8px}
 .combo-leg{padding:8px 10px;background:rgba(255,255,255,.04);border-radius:8px;font-size:.82rem}
 .combo-actions{display:flex;gap:8px;margin-top:4px}
+
+/* ── Tournament hub ── */
+.tournament-grid{display:grid;grid-template-columns:1.2fr 1fr .9fr;gap:14px;align-items:start}
+.tournament-card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:12px}
+.tournament-scroll{max-height:560px;overflow:auto;padding-right:4px}
+.tournament-match{display:grid;grid-template-columns:1fr auto 1fr auto;gap:8px;align-items:center;padding:8px 0;border-bottom:1px solid var(--border);font-size:.82rem}
+.tournament-match:last-child{border-bottom:0}
+.tm-home{text-align:right;font-weight:600}
+.tm-away{font-weight:600}
+.tm-score{font-weight:800;color:var(--accent);min-width:48px;text-align:center}
+.tm-meta{color:var(--muted);font-size:.73rem;white-space:nowrap}
+.tm-status{font-size:.66rem;font-weight:700;padding:2px 7px;border-radius:999px;display:inline-flex;align-items:center;justify-content:center}
+.tm-status.scheduled{background:rgba(148,163,184,.16);color:#cbd5e1}
+.tm-status.live{background:rgba(16,185,129,.2);color:var(--green)}
+.tm-status.finished{background:rgba(124,58,237,.2);color:#c4b5fd}
+.standings-table{width:100%;border-collapse:collapse;font-size:.78rem}
+.standings-table th,.standings-table td{padding:6px 4px;border-bottom:1px solid var(--border);text-align:right}
+.standings-table th:first-child,.standings-table td:first-child{text-align:left}
+.standings-table tr:last-child td{border-bottom:0}
+.scorer-row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px 0;border-bottom:1px solid var(--border);font-size:.8rem}
+.scorer-row:last-child{border-bottom:0}
+.scorer-name{font-weight:600}
+.scorer-team{color:var(--muted);font-size:.72rem}
+.scorer-goals{font-weight:800;color:var(--accent)}
+@media (max-width:1100px){
+  .tournament-grid{grid-template-columns:1fr}
+  .tournament-scroll{max-height:none}
+}
 /* ── Live score badges ───────────────────────────────────────────── */
 .live-score{font-size:1.05rem;font-weight:800;color:var(--accent);margin:0 6px}
 .live-status{font-size:.7rem;font-weight:700;padding:2px 7px;border-radius:20px;margin-left:4px}
@@ -589,8 +616,10 @@ body.console-open main{padding-bottom:236px}
 <!-- Header -->
 <header class="header">
   <div class="header-brand">
+    {% if active_sport != 'soccer' %}
     <img class="mlb-logo" src="/static/mlb-animated.svg" alt="Baseball league logo" onerror="this.style.display='none'">
-    <h1>Bettor <span>MLB</span></h1>
+    {% endif %}
+    <h1>Bettor <span>{{ 'Soccer' if active_sport == 'soccer' else 'MLB' }}</span></h1>
   </div>
   <div class="header-actions">
     <span id="last-updated">{{ last_updated or 'Not loaded' }}</span>
@@ -608,8 +637,13 @@ body.console-open main{padding-bottom:236px}
   <div class="tab" data-tab="tomorrow" onclick="switchTab('tomorrow')">
     &#128197; Tomorrow <span class="tab-badge" id="badge-tomorrow">0</span>
   </div>
+  {% if active_sport == 'soccer' %}
+  <div class="tab" data-tab="tournaments" onclick="switchTab('tournaments')">
+    &#127942; Tournaments
+  </div>
+  {% endif %}
   <div class="tab" data-tab="props" onclick="switchTab('props')">
-    &#128200; Over Bets
+    &#128200; {{ 'Player Props' if active_sport == 'soccer' else 'Over Bets' }}
   </div>
   <div class="tab" data-tab="parlays" onclick="switchTab('parlays')">
     &#127917; Parlays
@@ -642,16 +676,65 @@ body.console-open main{padding-bottom:236px}
     <div class="no-games hidden" id="tomorrow-empty">No games tomorrow or analysis not yet run.</div>
   </div>
 
+  {% if active_sport == 'soccer' %}
+  <div class="tab-panel" id="panel-tournaments">
+    <div class="section-header">
+      <span class="section-title">&#127942; Tournament Hub</span>
+      <span class="section-meta" id="tournament-meta"></span>
+    </div>
+    <div class="filter-bar">
+      <select id="tournament-code" onchange="loadTournamentData()">
+        <option value="">Choose tournament</option>
+      </select>
+      <select id="tournament-days" onchange="loadTournamentData()">
+        <option value="3">Next 3 Days</option>
+        <option value="5" selected>Next 5 Days</option>
+        <option value="7">Next 7 Days</option>
+        <option value="14">Next 14 Days</option>
+      </select>
+      <select id="tournament-status" onchange="loadTournamentData()">
+        <option value="all" selected>All Status</option>
+        <option value="scheduled">Scheduled</option>
+        <option value="live">Live</option>
+        <option value="finished">Finished</option>
+      </select>
+      <input type="text" id="tournament-search" placeholder="Search team…" oninput="debouncedTournamentData()">
+      <button class="btn btn-sm" onclick="loadTournamentData(true)">&#8635; Refresh</button>
+    </div>
+    <div class="tournament-grid">
+      <div class="tournament-card">
+        <div class="section-header" style="margin-bottom:8px"><span class="section-title">Fixtures</span></div>
+        <div id="tournament-fixtures" class="tournament-scroll"><div class="no-games">Select a tournament to load fixtures.</div></div>
+      </div>
+      <div class="tournament-card">
+        <div class="section-header" style="margin-bottom:8px"><span class="section-title">Standings</span></div>
+        <div id="tournament-standings" class="tournament-scroll"><div class="no-games">Standings will appear here.</div></div>
+      </div>
+      <div class="tournament-card">
+        <div class="section-header" style="margin-bottom:8px"><span class="section-title">Top Scorers</span></div>
+        <div id="tournament-scorers" class="tournament-scroll"><div class="no-games">Top scorers will appear here.</div></div>
+      </div>
+    </div>
+  </div>
+  {% endif %}
+
   <!-- OVER BETS OF THE DAY -->
   <div class="tab-panel" id="panel-props">
     <div class="section-header">
-      <span class="section-title">&#9650; Over Bets of the Day</span>
+      <span class="section-title">{{ '&#127919; Soccer Props of the Day' if active_sport == 'soccer' else '&#9650; Over Bets of the Day' }}</span>
       <span class="section-meta" id="props-meta"></span>
     </div>
     <div class="filter-bar">
       <input type="text" id="props-search" placeholder="Search player, team…" oninput="filterProps()">
       <select id="props-stat" onchange="filterProps()">
         <option value="">All Stats</option>
+        {% if active_sport == 'soccer' %}
+        <option value="goals">Goals</option>
+        <option value="assists">Assists</option>
+        <option value="shots_on_target">Shots on Target</option>
+        <option value="cards">Cards</option>
+        <option value="corners">Corners</option>
+        {% else %}
         <option value="strikeouts">Pitcher Ks</option>
         <option value="hits">Hits</option>
         <option value="home_runs">Home Runs</option>
@@ -660,11 +743,12 @@ body.console-open main{padding-bottom:236px}
         <option value="runs">Runs</option>
         <option value="walks">Walks</option>
         <option value="stolen_bases">Stolen Bases</option>
+        {% endif %}
       </select>
-      <select id="props-dir" onchange="filterProps()" style="display:none">
-        <option value="OVER" selected>OVER</option>
+      <select id="props-dir" onchange="filterProps()" {% if active_sport != 'soccer' %}style="display:none"{% endif %}>
+        <option value="" {% if active_sport == 'soccer' %}selected{% endif %}>All Directions</option>
+        <option value="OVER" {% if active_sport != 'soccer' %}selected{% endif %}>OVER</option>
         <option value="UNDER">UNDER</option>
-        <option value="">All</option>
       </select>
       <select id="props-safety" onchange="filterProps()">
         <option value="">All Safety</option>
@@ -792,6 +876,7 @@ let TODAY_CARDS    = {{ today_cards|tojson }};
 let TOMORROW_CARDS = {{ tomorrow_cards|tojson }};
 let BEST_PARLAYS   = {{ best_parlays|tojson }};
 let ALL_PROPS      = (function(v){ return Array.isArray(v) ? v : []; })({{ all_props|tojson }});
+const ACTIVE_SPORT = {{ (active_sport or 'mlb')|tojson }};
 let AUTO_PROP_PARLAY = null;
 let BEST_LEGS      = [];
 let AUTO_MIX_LEGS  = [];
@@ -806,6 +891,13 @@ let _autoRefreshInFlight = false;
 const _gameStartCache = new Map();
 let _lastLiveScoresDigest = '';
 const _autoTrackInflight = new Set();
+let TOURNAMENTS = [];
+let TOURNAMENT_DATA = null;
+let _tournamentFilterTimer = null;
+
+function _isSoccerMode() {
+  return String(ACTIVE_SPORT || '').toLowerCase() === 'soccer';
+}
 
 function _asArray(v) {
   return Array.isArray(v) ? v : [];
@@ -1199,12 +1291,17 @@ function _phaseForCard(status, gameDate, gameTime, gameDateTime) {
   return _phaseFromSchedule(gameDate, gameTime, gameDateTime);
 }
 
-function _publicOverProps(list) {
-  return (Array.isArray(list) ? list : []).filter(p => {
+function _isPublicProp(p) {
+  if (!_isSoccerMode()) {
     if ((p.direction || '').toUpperCase() !== 'OVER') return false;
     const lv = _lineValue(p.line);
-    return !(Number.isFinite(lv) && lv <= 0.5);
-  });
+    if (Number.isFinite(lv) && lv <= 0.5) return false;
+  }
+  return true;
+}
+
+function _publicOverProps(list) {
+  return (Array.isArray(list) ? list : []).filter(_isPublicProp);
 }
 
 function _overBetsTotal() {
@@ -1422,6 +1519,161 @@ function switchTab(name) {
     loadParlayPerformance();
     resolveOutcomesSilent();
   }
+  if (name === 'tournaments' && _isSoccerMode()) {
+    loadTournamentData();
+  }
+}
+
+function debouncedTournamentData() {
+  clearTimeout(_tournamentFilterTimer);
+  _tournamentFilterTimer = setTimeout(() => loadTournamentData(), 220);
+}
+
+function _renderTournamentFixtures(matches) {
+  const el = document.getElementById('tournament-fixtures');
+  if (!el) return;
+  const rows = _asArray(matches);
+  if (!rows.length) {
+    el.innerHTML = '<div class="no-games">No fixtures for this filter.</div>';
+    return;
+  }
+  const html = rows.slice(0, 80).map(m => {
+    const date = m.game_date || m.date || '';
+    const time = _fmtGameTime(m.game_time || '', { short: true });
+    const bucket = (m.status_bucket || 'scheduled').toLowerCase();
+    const score = (m.home_score != null && m.away_score != null)
+      ? `${m.away_score}-${m.home_score}`
+      : 'vs';
+    return `<div class="tournament-match">
+      <div class="tm-home">${m.home_team || 'Home'}</div>
+      <div class="tm-score">${score}</div>
+      <div class="tm-away">${m.away_team || 'Away'}</div>
+      <div class="tm-meta">
+        <div>${date} ${time ? '· ' + time : ''}</div>
+        <span class="tm-status ${bucket}">${bucket.toUpperCase()}</span>
+      </div>
+    </div>`;
+  }).join('');
+  el.innerHTML = html;
+}
+
+function _renderTournamentStandings(standings) {
+  const el = document.getElementById('tournament-standings');
+  if (!el) return;
+  const blocks = _asArray(standings);
+  if (!blocks.length) {
+    el.innerHTML = '<div class="no-games">No standings available.</div>';
+    return;
+  }
+  const html = blocks.map(block => {
+    const table = _asArray(block.table);
+    if (!table.length) return '';
+    return `<div style="margin-bottom:12px">
+      <div class="section-meta" style="margin-bottom:6px">${block.group || block.stage || 'Table'}</div>
+      <table class="standings-table">
+        <thead><tr><th>Team</th><th>P</th><th>W</th><th>D</th><th>L</th><th>GD</th><th>Pts</th></tr></thead>
+        <tbody>
+          ${table.slice(0, 24).map(row => `
+            <tr>
+              <td>${row.position != null ? row.position + '. ' : ''}${row.short || row.team || ''}</td>
+              <td>${row.played ?? 0}</td>
+              <td>${row.won ?? 0}</td>
+              <td>${row.drawn ?? 0}</td>
+              <td>${row.lost ?? 0}</td>
+              <td>${row.gd ?? 0}</td>
+              <td><strong>${row.pts ?? 0}</strong></td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    </div>`;
+  }).join('');
+  el.innerHTML = html || '<div class="no-games">No standings available.</div>';
+}
+
+function _renderTournamentScorers(scorers) {
+  const el = document.getElementById('tournament-scorers');
+  if (!el) return;
+  const rows = _asArray(scorers);
+  if (!rows.length) {
+    el.innerHTML = '<div class="no-games">No scorer data available.</div>';
+    return;
+  }
+  el.innerHTML = rows.slice(0, 30).map((s, idx) => `
+    <div class="scorer-row">
+      <div>
+        <div class="scorer-name">${idx + 1}. ${s.name || 'Unknown'}</div>
+        <div class="scorer-team">${s.team || ''}${s.position ? ' · ' + s.position : ''}</div>
+      </div>
+      <div class="scorer-goals">${s.goals ?? 0} G</div>
+    </div>
+  `).join('');
+}
+
+function loadTournaments() {
+  if (!_isSoccerMode()) return Promise.resolve();
+  const select = document.getElementById('tournament-code');
+  if (!select) return Promise.resolve();
+  return fetch('/api/tournaments')
+    .then(r => r.json())
+    .then(d => {
+      if (!d.ok) return;
+      TOURNAMENTS = _asArray(d.tournaments);
+      if (!TOURNAMENTS.length) return;
+      const current = select.value;
+      select.innerHTML = TOURNAMENTS.map(t => {
+        const count = Number(t.match_count || 0);
+        const label = `${t.emoji || '⚽'} ${t.name || t.code}${count ? ` (${count})` : ''}`;
+        return `<option value="${t.code}">${label}</option>`;
+      }).join('');
+      if (current && TOURNAMENTS.some(t => String(t.code) === current)) {
+        select.value = current;
+      }
+    })
+    .catch(() => {});
+}
+
+function loadTournamentData(force) {
+  if (!_isSoccerMode()) return;
+  const codeEl = document.getElementById('tournament-code');
+  const daysEl = document.getElementById('tournament-days');
+  const statusEl = document.getElementById('tournament-status');
+  const qEl = document.getElementById('tournament-search');
+  const meta = document.getElementById('tournament-meta');
+  if (!codeEl) return;
+
+  const code = String(codeEl.value || '').trim();
+  if (!code) {
+    if (meta) meta.textContent = 'Select a tournament to start.';
+    return;
+  }
+
+  const params = new URLSearchParams();
+  params.set('code', code);
+  params.set('days', String(daysEl ? daysEl.value : '5'));
+  params.set('status', String(statusEl ? statusEl.value : 'all'));
+  const q = String(qEl ? qEl.value : '').trim();
+  if (q) params.set('q', q);
+
+  if (meta) meta.textContent = 'Loading tournament data…';
+  fetch(`/api/tournament/data?${params.toString()}`)
+    .then(r => r.json())
+    .then(d => {
+      if (!d.ok) throw new Error(d.error || 'Tournament request failed');
+      TOURNAMENT_DATA = d;
+      _renderTournamentFixtures(d.matches || []);
+      _renderTournamentStandings(d.standings || []);
+      _renderTournamentScorers(d.top_scorers || []);
+      const name = (d.competition && d.competition.name) ? d.competition.name : code;
+      const count = _asArray(d.matches).length;
+      if (meta) meta.textContent = `${name} · ${count} fixture${count !== 1 ? 's' : ''}`;
+    })
+    .catch((err) => {
+      if (meta) meta.textContent = `Tournament load failed: ${err.message || err}`;
+      _renderTournamentFixtures([]);
+      _renderTournamentStandings([]);
+      _renderTournamentScorers([]);
+    });
 }
 
 // ── Elite Parlay ──────────────────────────────────────────────────────────
@@ -1623,6 +1875,9 @@ function renderAll() {
   renderGames('today-grid', TODAY_CARDS, 'today-empty', 'today-meta', 'badge-today');
   renderGames('tomorrow-grid', TOMORROW_CARDS, 'tomorrow-empty', 'tomorrow-meta', 'badge-tomorrow');
   renderPropsTable(ALL_PROPS);
+  if (_isSoccerMode() && TOURNAMENTS.length && !TOURNAMENT_DATA) {
+    loadTournamentData();
+  }
   if (_isParlaysActive()) autoGenParlaysFromProps();
 }
 
@@ -1641,7 +1896,7 @@ function renderGames(gridId, cards, emptyId, metaId, badgeId) {
   }
   if (empty) empty.classList.add('hidden');
   if (badge) badge.textContent = String(cards.length);
-  if (meta) meta.textContent = `${cards.length} game${cards.length!==1?'s':''} &middot; MLB`;
+  if (meta) meta.textContent = `${cards.length} game${cards.length!==1?'s':''} &middot; ${_isSoccerMode() ? 'Soccer' : 'MLB'}`;
   if (grid) grid.innerHTML = cards.map(c => gameCard(c)).join('');
 }
 
@@ -1658,6 +1913,25 @@ function plainEnglishBet(bet, homeTeam, awayTeam, phase='upcoming') {
   const line = parseFloat(bet.line) || 0;
   const isOver = pick.toUpperCase().includes('OVER');
   const team = cleanPickTeam(pick);
+  if (_isSoccerMode()) {
+    if (bt === '1x2') {
+      if ((bet.pick_side || '').toLowerCase() === 'draw') {
+        return { text: _phaseVerb(phase, 'Back the draw result', 'Draw market live', 'Draw market final'), emoji: '&#8646;', color: 'var(--yellow)' };
+      }
+      return { text: _phaseVerb(phase, `Back ${team || pick}`, `${team || pick} is live`, `${team || pick} market is final`), emoji: '&#9917;', color: 'var(--green)' };
+    }
+    if (bt === 'goals o/u') {
+      return isOver
+        ? { text: _phaseVerb(phase, `Over ${line} total goals`, `Over ${line} goals live`, `Over ${line} goals final`), emoji: '&#128293;', color: 'var(--accent)' }
+        : { text: _phaseVerb(phase, `Under ${line} total goals`, `Under ${line} goals live`, `Under ${line} goals final`), emoji: '&#129532;', color: 'var(--yellow)' };
+    }
+    if (bt === 'btts') {
+      return { text: _phaseVerb(phase, 'Both teams to score', 'BTTS market live', 'BTTS market final'), emoji: '&#9889;', color: 'var(--accent)' };
+    }
+    if (bt === 'draw no bet') {
+      return { text: _phaseVerb(phase, `${team || pick} draw-no-bet`, `${team || pick} DNB live`, `${team || pick} DNB final`), emoji: '&#128737;', color: '#93c5fd' };
+    }
+  }
   if (bt === 'moneyline') return { text: _phaseVerb(phase, `Ride ${team} ML`, `${team} ML is cooking live`, `${team} ML ticket is closed`), emoji: '&#127942;', color: 'var(--green)' };
   if (bt === 'run_line') {
     if (pick.includes('+1.5')) return { text: _phaseVerb(phase, `Take ${team} +1.5 as the safe cover`, `${team} +1.5 is alive`, `${team} +1.5 is graded`), emoji: '&#128202;', color: '#818cf8' };
@@ -1691,6 +1965,14 @@ function plainEnglishPropText(p, phase='upcoming') {
   const name = p.name || '—';
   const line = parseFloat(p.line) || 0;
   const st   = p.stat_type || '';
+  const dir  = (p.direction || 'OVER').toUpperCase();
+  if (_isSoccerMode()) {
+    if (st === 'goals')          return { text: _phaseVerb(phase, `${name} ${dir === 'UNDER' ? 'under' : 'over'} ${line} goals`, `${name} goals prop live`, `${name} goals prop final`), emoji: '&#9917;', color: dir === 'UNDER' ? 'var(--yellow)' : 'var(--green)' };
+    if (st === 'assists')        return { text: _phaseVerb(phase, `${name} ${dir === 'UNDER' ? 'under' : 'over'} ${line} assists`, `${name} assist prop live`, `${name} assist prop final`), emoji: '&#129309;', color: 'var(--accent)' };
+    if (st === 'shots_on_target')return { text: _phaseVerb(phase, `${name} ${dir === 'UNDER' ? 'under' : 'over'} ${line} shots on target`, `${name} SOT prop live`, `${name} SOT prop final`), emoji: '&#127919;', color: dir === 'UNDER' ? 'var(--yellow)' : 'var(--accent)' };
+    if (st === 'cards')          return { text: _phaseVerb(phase, `${name} ${dir === 'UNDER' ? 'under' : 'over'} ${line} cards`, `${name} cards prop live`, `${name} cards prop final`), emoji: '&#128993;', color: 'var(--yellow)' };
+    if (st === 'corners')        return { text: _phaseVerb(phase, `${name} ${dir === 'UNDER' ? 'under' : 'over'} ${line} corners`, `${name} corners prop live`, `${name} corners prop final`), emoji: '&#9873;', color: 'var(--accent)' };
+  }
   if (st === 'strikeouts')        return { text: _phaseVerb(phase, `Back ${name} for ${line}+ Ks`, `${name} K prop is live`, `${name} K prop is final`), emoji: '&#128293;', color: '#a78bfa' };
   if (st === 'hits')              return { text: _phaseVerb(phase, `${name} for ${line}+ hit${line!==1?'s':''}`, `${name} hit prop is live`, `${name} hit prop is final`), emoji: '&#9918;', color: 'var(--accent)' };
   if (st === 'home_runs')         return { text: _phaseVerb(phase, line<=1?`${name} to go yard`:`${name} for ${line}+ HRs`, `${name} HR prop is live`, `${name} HR prop is final`), emoji: '&#128165;', color: 'var(--green)' };
@@ -1754,9 +2036,7 @@ function gameCard(c) {
   const otherHtml = otherBets.length ? `<div class="plain-bets-list">${otherBets.join('')}</div>` : '';
 
   // Top prop picks preview — plain English, no chip clutter
-  const topProps = [...(c.home_props||[]), ...(c.away_props||[])]
-    .filter(p => (p.direction||'').toUpperCase() === 'OVER')
-    .filter(p => { const lv = _lineValue(p.line); return !(Number.isFinite(lv) && lv <= 0.5); })
+  const topProps = _publicOverProps([...(c.home_props||[]), ...(c.away_props||[])])
     .sort((a,b) => (b.model_prob||0) - (a.model_prob||0))
     .slice(0, 3);
   const propsHtml = topProps.length ? `<div class="plain-props-preview">${topProps.map(p => {
@@ -1765,10 +2045,7 @@ function gameCard(c) {
     return `<div class="plain-prop-chip" style="color:${ppt.color}">${ppt.emoji} ${ppt.text} <span style="color:var(--muted);font-size:.7rem">${pct}%</span></div>`;
   }).join('')}</div>` : '';
 
-  const propCount = [...(c.home_props||[]), ...(c.away_props||[])]
-    .filter(p => (p.direction||'').toUpperCase() === 'OVER')
-    .filter(p => { const lv = _lineValue(p.line); return !(Number.isFinite(lv) && lv <= 0.5); })
-    .length;
+  const propCount = _publicOverProps([...(c.home_props||[]), ...(c.away_props||[])]).length;
 
   // Count all bets for expand button label
   const allBetKeys = ['moneyline','run_line','total','f5_moneyline','f5_total','home_team_total','away_team_total'];
@@ -1831,9 +2108,7 @@ function _expandedCardBody(c, phase) {
   const bestEdge = allBets.length ? Math.max(...allBets.map(b => b.edge||0)) : 0;
   const avgConf  = allBets.length ? Math.round(allBets.reduce((s,b)=>s+(b.model_prob||0.5),0)/allBets.length*100) : null;
   const stripColor = mlProb >= 65 ? 'var(--green)' : mlProb >= 55 ? 'var(--accent)' : 'var(--yellow)';
-  const topProps = [...(c.home_props||[]), ...(c.away_props||[])]
-    .filter(p => (p.direction||'').toUpperCase() === 'OVER')
-    .filter(p => { const lv = _lineValue(p.line); return !(Number.isFinite(lv) && lv <= 0.5); })
+  const topProps = _publicOverProps([...(c.home_props||[]), ...(c.away_props||[])])
     .sort((a,b) => (b.model_prob||0) - (a.model_prob||0))
     .slice(0, 6);
 
@@ -2055,10 +2330,7 @@ function _impliedProb(oddsAm) {
 
 function _xPropsPanel(c, phase) {
   function qualifies(p) {
-    if ((p.direction||'').toUpperCase() !== 'OVER') return false;
-    const lv = _lineValue(p.line);
-    if (Number.isFinite(lv) && lv <= 0.5) return false;
-    return true;
+    return _isPublicProp(p);
   }
   const hp = (c.home_props||[]).filter(qualifies).sort((a,b)=>(b.model_prob||0)-(a.model_prob||0));
   const ap = (c.away_props||[]).filter(qualifies).sort((a,b)=>(b.model_prob||0)-(a.model_prob||0));
@@ -2310,6 +2582,7 @@ function openGameDetails(gameKey, matchKey) {
   const modal = document.getElementById('game-details-modal');
   const content = document.getElementById('game-details-content');
   if (!modal || !content || !card) return;
+  window.scrollTo({ top: 0, behavior: 'auto' });
   content.innerHTML = _gameDetailsMarkup(card);
   modal.classList.remove('hidden');
   document.body.classList.add('modal-open');
@@ -2318,8 +2591,10 @@ function openGameDetails(gameKey, matchKey) {
 function closeGameDetailsModal(event) {
   if (event && event.target !== event.currentTarget) return;
   const modal = document.getElementById('game-details-modal');
+  const content = document.getElementById('game-details-content');
   if (!modal) return;
   modal.classList.add('hidden');
+  if (content) content.innerHTML = '';
   document.body.classList.remove('modal-open');
 }
 
@@ -2359,15 +2634,15 @@ function renderPropsTable(props) {
 function filterProps() {
   const q     = (document.getElementById('props-search').value||'').toLowerCase();
   const stat  = document.getElementById('props-stat').value;
-  const dir   = document.getElementById('props-dir').value || 'OVER';
+  const dirSel = document.getElementById('props-dir');
+  const dir   = dirSel ? (dirSel.value || (_isSoccerMode() ? '' : 'OVER')) : (_isSoccerMode() ? '' : 'OVER');
   const safe  = document.getElementById('props-safety').value;
   _filteredProps = ALL_PROPS.filter(p => {
     if (q && !(p.name||'').toLowerCase().includes(q) && !(p.team||'').toLowerCase().includes(q)) return false;
     if (stat && p.stat_type !== stat) return false;
-    if ((p.direction||'').toUpperCase() !== dir.toUpperCase()) return false;
+    if (dir && (p.direction||'').toUpperCase() !== dir.toUpperCase()) return false;
     if (safe && p.safety_label !== safe) return false;
-    const lv = _lineValue(p.line);
-    if (Number.isFinite(lv) && lv <= 0.5) return false;
+    if (!_isPublicProp(p)) return false;
     return true;
   });
   sortAndRenderProps();
@@ -2542,7 +2817,7 @@ function parlayComboCard(c) {
   return `<div class="parlay-combo-card">
   <div class="combo-header">
     <div>
-      <div class="combo-title">&#9650; ${c.n}-Leg OVER Parlay</div>
+      <div class="combo-title">&#9650; ${c.n}-Leg ${_isSoccerMode() ? 'Props' : 'OVER'} Parlay</div>
       <div class="combo-prob">Hit chance: ${probPct}% &middot; <span style="color:${evColor}">EV ${(evRaw*100).toFixed(1)}%</span></div>
     </div>
     <div style="text-align:right">
@@ -2622,7 +2897,7 @@ function sortAndRenderProps() {
     return;
   }
   const liveCount = sorted.reduce((acc,p)=>acc + (_isLiveFromSet(p.game_key||p.game||'', liveKeys, liveArr) ? 1 : 0), 0);
-  document.getElementById('props-meta').textContent = `${sorted.length} over bets${liveCount?` · ${liveCount} live`:''}`;
+  document.getElementById('props-meta').textContent = `${sorted.length} ${_isSoccerMode() ? 'props' : 'over bets'}${liveCount?` · ${liveCount} live`:''}`;
   tbody.innerHTML = sorted.map(p => {
     const isLive = _isLiveFromSet(p.game_key||p.game||'', liveKeys, liveArr);
     const liveEye = isLive ? '<span class="live-eye" title="Live prop"></span>' : '';
@@ -3075,7 +3350,7 @@ function loadBotPerformance() {
       <div class="perf-card"><div class="perf-val perf-pend">${pushes}</div><div class="perf-label">Pushes</div></div>
       <div class="perf-card"><div class="perf-val perf-pend">${pending}</div><div class="perf-label">Pending</div></div>
       <div class="perf-card"><div class="perf-val" style="color:${hrColor}">${hitRate!=null?hitRate+'%':'—'}</div><div class="perf-label">Bot Hit Rate</div></div>
-      <div class="perf-card"><div class="perf-val" style="font-size:1.2rem">${totalProps}</div><div class="perf-label">Total Over Bets</div><div class="perf-sub">Bets of the Day</div></div>
+      <div class="perf-card"><div class="perf-val" style="font-size:1.2rem">${totalProps}</div><div class="perf-label">${_isSoccerMode() ? 'Total Props' : 'Total Over Bets'}</div><div class="perf-sub">Bets of the Day</div></div>
     `;
   }).catch(() => {
     el.innerHTML = '<div class="no-games">Could not load bot performance.</div>';
@@ -3096,7 +3371,7 @@ function loadPerformance() {
       <div class="perf-card"><div class="perf-val perf-pend">${s.pushes||0}</div><div class="perf-label">Pushes</div></div>
       <div class="perf-card"><div class="perf-val perf-pend">${s.pending||0}</div><div class="perf-label">Pending</div></div>
       <div class="perf-card"><div class="perf-val perf-rate">${s.hit_rate!=null?s.hit_rate+'%':'—'}</div><div class="perf-label">Hit Rate</div></div>
-      <div class="perf-card"><div class="perf-val" style="font-size:1.2rem">${totalProps}</div><div class="perf-label">Total Over Bets</div><div class="perf-sub">Bets of the Day</div></div>
+      <div class="perf-card"><div class="perf-val" style="font-size:1.2rem">${totalProps}</div><div class="perf-label">${_isSoccerMode() ? 'Total Props' : 'Total Over Bets'}</div><div class="perf-sub">Bets of the Day</div></div>
     `;
   });
 }
@@ -3313,6 +3588,10 @@ function stopConsolePoll() {
   }
   hideOverlay();
   _autoSelectDefaultTab();
+
+  if (_isSoccerMode()) {
+    loadTournaments().then(() => loadTournamentData());
+  }
 
   // Connect SSE — server sends full state on connect + after every analysis run.
   _connectSSE();

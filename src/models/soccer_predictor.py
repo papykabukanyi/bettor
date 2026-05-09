@@ -21,17 +21,35 @@ from data.club_stats_fetcher import get_squad_props, get_wc_player_stats
 from data.wc2026_fetcher import TEAM_ELO, get_wc_odds
 
 try:
-    from data.soccer_news import get_match_news_signal, get_injury_alerts
+    from data.soccer_news import (
+        get_match_news_signal,
+        get_injury_alerts,
+        get_market_popularity_signal,
+    )
     _NEWS_AVAILABLE = True
 except ImportError:
     _NEWS_AVAILABLE = False
     def get_match_news_signal(h, a): return {}
     def get_injury_alerts(t): return []
+    def get_market_popularity_signal(h, a): return {}
 
 try:
-    from data.soccer_fetcher import get_competition_odds, FD_TO_ODDS_SPORT, TOURNAMENTS
+    from data.soccer_fetcher import (
+        get_competition_odds,
+        FD_TO_ODDS_SPORT,
+        TOURNAMENTS,
+        get_team_recent_form,
+    )
 except ImportError:
     def get_competition_odds(code): return []
+    def get_team_recent_form(team_name, days_back=140, max_matches=12, competition_codes=None):
+        return {
+            "sample_size": 0,
+            "goals_for_per_match": 0.0,
+            "goals_against_per_match": 0.0,
+            "points_per_match": 0.0,
+            "win_rate": 0.0,
+        }
     FD_TO_ODDS_SPORT = {}
     TOURNAMENTS = {}
 
@@ -70,6 +88,41 @@ def _implied_to_american(prob: float) -> int:
         return int(round(-prob / (1 - prob) * 100))
     else:
         return int(round((1 - prob) / prob * 100))
+
+
+def _american_to_decimal(odds: int | float | None) -> float:
+    try:
+        o = float(odds)
+    except (TypeError, ValueError):
+        return 1.91
+    if o > 0:
+        return round(1 + (o / 100.0), 4)
+    if o < 0:
+        return round(1 + (100.0 / abs(o)), 4)
+    return 1.91
+
+
+def _safety_score(label: str | None) -> float:
+    v = str(label or "MODERATE").upper()
+    if v == "ELITE":
+        return 0.80
+    if v == "SAFE":
+        return 0.65
+    if v == "MODERATE":
+        return 0.52
+    return 0.45
+
+
+def _worth_eval(prob: float, odds_am: int | float | None, edge: float, popularity: float) -> tuple[float, bool, str]:
+    implied = _american_to_implied(odds_am)
+    base_delta = float(prob or 0.0) - float(implied or 0.0)
+    score = round(base_delta + max(0.0, float(edge or 0.0)) * 0.35 + max(0.0, float(popularity or 0.0)) * 0.12, 4)
+    worth_it = score >= 0.03 and float(prob or 0.0) >= 0.5
+    reason = (
+        f"Model {prob:.1%} vs implied {implied:.1%}; edge {edge:+.1%}; chatter {popularity:.2f}"
+        if isinstance(prob, float) else "Model/value comparison unavailable"
+    )
+    return score, worth_it, reason
 
 
 # ── Team statistics lookup ────────────────────────────────────────────────────
@@ -115,6 +168,30 @@ def _team_stats(team: str) -> tuple[float, float, float, float]:
     return _TEAM_STATS_DEFAULTS.get(team, (1.40, 1.05, 1.35, 1.08))
 
 
+def _blend_team_stats_with_recent_form(team: str, base_stats: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
+    """Blend static priors with recent season form from historical finished matches."""
+    g_for, g_against, xg_for, xg_against = base_stats
+    try:
+        form = get_team_recent_form(team, days_back=140, max_matches=12)
+    except Exception:
+        return base_stats
+
+    sample = int(form.get("sample_size", 0) or 0)
+    if sample < 3:
+        return base_stats
+
+    form_weight = min(0.45, 0.18 + (sample * 0.02))
+    hist_for = float(form.get("goals_for_per_match", g_for) or g_for)
+    hist_against = float(form.get("goals_against_per_match", g_against) or g_against)
+    blended_for = (g_for * (1.0 - form_weight)) + (hist_for * form_weight)
+    blended_against = (g_against * (1.0 - form_weight)) + (hist_against * form_weight)
+
+    # Keep xG tied to historical goal tendencies for stability.
+    blended_xg_for = (xg_for * (1.0 - form_weight)) + (hist_for * form_weight)
+    blended_xg_against = (xg_against * (1.0 - form_weight)) + (hist_against * form_weight)
+    return (blended_for, blended_against, blended_xg_for, blended_xg_against)
+
+
 def _get_live_odds_for_match(home: str, away: str, all_odds: list[dict]) -> dict:
     """Find odds for a specific match from the odds API response."""
     h_low = home.lower()
@@ -157,8 +234,8 @@ def predict_match(
     """
     h_elo = home_elo or TEAM_ELO.get(home, 1850.0)
     a_elo = away_elo or TEAM_ELO.get(away, 1850.0)
-    gfh, gah, xfh, xah = _team_stats(home)
-    gfa, gaa, xfa, xaa = _team_stats(away)
+    gfh, gah, xfh, xah = _blend_team_stats_with_recent_form(home, _team_stats(home))
+    gfa, gaa, xfa, xaa = _blend_team_stats_with_recent_form(away, _team_stats(away))
     stage_id = STAGE_MAP.get(stage.lower(), 0)
 
     probs = _model_predict(
@@ -170,13 +247,14 @@ def predict_match(
         stage=stage_id,
     )
 
-    # ── Sentiment adjustment (small nudge, max ±3%) ────────────────────────
+    # ── Sentiment adjustment (coverage-aware nudge) ─────────────────────────
     if use_sentiment and _NEWS_AVAILABLE:
         try:
             signal = get_match_news_signal(home, away)
             combined = signal.get("combined_signal", 0.0)  # home - away, -2 to +2
-            # Scale: clamp to ±1, multiply by 0.03 → max ±0.03 shift
-            adj = max(-1.0, min(1.0, combined)) * 0.03
+            src_cov = float(signal.get("source_coverage", 0) or 0)
+            max_shift = 0.03 + min(0.03, src_cov * 0.003)
+            adj = max(-1.0, min(1.0, combined)) * max_shift
             hp  = probs["home_prob"] + adj
             ap  = probs["away_prob"] - adj
             dp  = probs["draw_prob"]
@@ -194,6 +272,10 @@ def predict_match(
             probs["away_sentiment_label"] = signal.get("away_label", "neutral")
             probs["home_headlines"] = signal.get("home_headlines", [])
             probs["away_headlines"] = signal.get("away_headlines", [])
+            probs["home_sources"] = signal.get("home_sources", [])
+            probs["away_sources"] = signal.get("away_sources", [])
+            probs["source_coverage"] = int(src_cov)
+            probs["market_popularity"] = signal.get("market_popularity", {})
         except Exception as e:
             print(f"[soccer_predictor] Sentiment error: {e}")
 
@@ -255,8 +337,11 @@ def build_match_bets(match: dict, live_odds: list[dict] | None = None) -> list[d
             "pick_label":  f"{home} to Win",
             "pick_side":   "home",
             "probability": hp,
+            "model_prob":  hp,
             "edge":        _edge(hp, ih),
             "odds":        oh,
+            "odds_am":     oh,
+            "dec_odds":    _american_to_decimal(oh),
             "safety_label": _safety(hp),
             "match_key":   match_key,
             "game_key":    game_key,
@@ -273,8 +358,11 @@ def build_match_bets(match: dict, live_odds: list[dict] | None = None) -> list[d
             "pick_label":  "Draw",
             "pick_side":   "draw",
             "probability": dp,
+            "model_prob":  dp,
             "edge":        _edge(dp, id_),
             "odds":        od,
+            "odds_am":     od,
+            "dec_odds":    _american_to_decimal(od),
             "safety_label": _safety(dp),
             "match_key":   match_key,
             "game_key":    game_key,
@@ -291,8 +379,11 @@ def build_match_bets(match: dict, live_odds: list[dict] | None = None) -> list[d
             "pick_label":  f"{away} to Win",
             "pick_side":   "away",
             "probability": ap,
+            "model_prob":  ap,
             "edge":        _edge(ap, ia),
             "odds":        oa,
+            "odds_am":     oa,
+            "dec_odds":    _american_to_decimal(oa),
             "safety_label": _safety(ap),
             "match_key":   match_key,
             "game_key":    game_key,
@@ -309,8 +400,11 @@ def build_match_bets(match: dict, live_odds: list[dict] | None = None) -> list[d
             "pick_label":  f"Over 2.5 Goals",
             "pick_side":   "over",
             "probability": o25,
+            "model_prob":  o25,
             "edge":        _edge(o25, iov),
             "odds":        oov,
+            "odds_am":     oov,
+            "dec_odds":    _american_to_decimal(oov),
             "safety_label": _safety(o25),
             "match_key":   match_key,
             "game_key":    game_key,
@@ -330,8 +424,11 @@ def build_match_bets(match: dict, live_odds: list[dict] | None = None) -> list[d
             "pick_label":  "Under 2.5 Goals",
             "pick_side":   "under",
             "probability": u25,
+            "model_prob":  u25,
             "edge":        _edge(u25, iund),
             "odds":        ound,
+            "odds_am":     ound,
+            "dec_odds":    _american_to_decimal(ound),
             "safety_label": _safety(u25),
             "match_key":   match_key,
             "game_key":    game_key,
@@ -351,8 +448,11 @@ def build_match_bets(match: dict, live_odds: list[dict] | None = None) -> list[d
             "pick_label":  "Both Teams to Score — Yes",
             "pick_side":   "yes",
             "probability": btts,
+            "model_prob":  btts,
             "edge":        _edge(btts, ibtts),
             "odds":        obtts,
+            "odds_am":     obtts,
+            "dec_odds":    _american_to_decimal(obtts),
             "safety_label": _safety(btts),
             "match_key":   match_key,
             "game_key":    game_key,
@@ -379,8 +479,11 @@ def build_match_bets(match: dict, live_odds: list[dict] | None = None) -> list[d
             "pick_label":  f"{dnb_side} (DNB)",
             "pick_side":   "home" if dnb_side == home else "away",
             "probability": dnb_prob,
+            "model_prob":  dnb_prob,
             "edge":        _edge(dnb_prob, idnb),
             "odds":        -115,
+            "odds_am":     -115,
+            "dec_odds":    _american_to_decimal(-115),
             "safety_label": _safety(dnb_prob),
             "match_key":   match_key,
             "game_key":    game_key,
@@ -389,6 +492,48 @@ def build_match_bets(match: dict, live_odds: list[dict] | None = None) -> list[d
             "home_team":   home,
             "away_team":   away,
         })
+
+    market_signal = get_market_popularity_signal(home, away) if _NEWS_AVAILABLE else {}
+    market_scores = (market_signal or {}).get("market_scores", {}) or {}
+    market_counts = (market_signal or {}).get("market_counts", {}) or {}
+
+    def _market_key_for_bet(bet: dict) -> str:
+        bt = str(bet.get("bet_type") or "").lower()
+        side = str(bet.get("pick_side") or "").lower()
+        if bt == "1x2" and side == "home":
+            return "home_win"
+        if bt == "1x2" and side == "away":
+            return "away_win"
+        if bt == "1x2" and side == "draw":
+            return "draw"
+        if bt == "goals o/u" and side == "over":
+            return "over_2_5"
+        if bt == "goals o/u" and side == "under":
+            return "under_2_5"
+        if bt == "btts":
+            return "btts_yes"
+        if bt == "draw no bet" and side == "home":
+            return "home_win"
+        if bt == "draw no bet" and side == "away":
+            return "away_win"
+        return "home_win"
+
+    for bet in bets:
+        key = _market_key_for_bet(bet)
+        pop = float(market_scores.get(key, 0.0) or 0.0)
+        mentions = int(market_counts.get(key, 0) or 0)
+        score, worth_it, reason = _worth_eval(
+            float(bet.get("probability", 0.5) or 0.5),
+            bet.get("odds_am"),
+            float(bet.get("edge", 0.0) or 0.0),
+            pop,
+        )
+        bet["market_popularity"] = round(pop, 4)
+        bet["market_mentions"] = mentions
+        bet["worth_score"] = score
+        bet["worth_it"] = worth_it
+        bet["worth_reason"] = reason
+        bet["safety"] = _safety_score(bet.get("safety_label"))
 
     return bets
 
@@ -407,6 +552,10 @@ def get_player_props(match: dict) -> list[dict]:
     away_props = get_squad_props(away, top_n=5)
     all_props  = home_props + away_props
 
+    market_signal = get_market_popularity_signal(home, away) if _NEWS_AVAILABLE else {}
+    prop_pop = float(((market_signal or {}).get("market_scores") or {}).get("player_props", 0.0) or 0.0)
+    prop_mentions = int(((market_signal or {}).get("market_counts") or {}).get("player_props", 0) or 0)
+
     # Attach match context
     for p in all_props:
         p["game_key"]  = game_key
@@ -415,6 +564,21 @@ def get_player_props(match: dict) -> list[dict]:
         p["away_team"] = away
         p["match_key"] = match.get("match_key", "")
         p["sport"]     = "soccer"
+        p.setdefault("odds_am", -110)
+        p.setdefault("dec_odds", _american_to_decimal(p.get("odds_am")))
+        p.setdefault("model_prob", 0.5)
+        p["safety"] = _safety_score(p.get("safety_label"))
+
+        prob = float(p.get("model_prob", 0.5) or 0.5)
+        implied = _american_to_implied(p.get("odds_am", -110))
+        score = round((prob - implied) + (prop_pop * 0.10), 4)
+        p["market_popularity"] = round(prop_pop, 4)
+        p["market_mentions"] = prop_mentions
+        p["worth_score"] = score
+        p["worth_it"] = bool(score >= 0.025 and prob >= 0.5)
+        p["worth_reason"] = (
+            f"Player prop model {prob:.1%} vs implied {implied:.1%}; chatter {prop_pop:.2f}"
+        )
 
     return all_props
 
@@ -544,6 +708,8 @@ def analyze_matches(matches: list[dict], competition_code: str = "WC") -> dict[s
             "away_sentiment_label": probs.get("away_sentiment_label", "neutral"),
             "home_headlines":     probs.get("home_headlines", []),
             "away_headlines":     probs.get("away_headlines", []),
+            "source_coverage":    probs.get("source_coverage", 0),
+            "market_popularity":  probs.get("market_popularity", {}),
             "home_injuries":      home_injuries,
             "away_injuries":      away_injuries,
             # Competition info

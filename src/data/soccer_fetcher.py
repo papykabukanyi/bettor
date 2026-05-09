@@ -169,6 +169,14 @@ TOURNAMENTS: dict[str, dict] = {
         "season":  "2026",
         "type":    "club",
     },
+    "CLI": {
+        "name":    "Copa Libertadores",
+        "emoji":   "🏆",
+        "flag":    "🌎",
+        "country": "South America",
+        "season":  "2026",
+        "type":    "club",
+    },
 }
 
 
@@ -694,7 +702,7 @@ def get_matches_today_all() -> list[dict]:
     """All matches today across all supported competitions."""
     today = _et_calendar_today().isoformat()
     tomorrow = (_et_calendar_today() + datetime.timedelta(days=1)).isoformat()
-    window_matches = get_matches_range_all(today, tomorrow, _PRIORITY_COMPETITIONS)
+    window_matches = get_matches_range_all(today, tomorrow, list(TOURNAMENTS.keys()))
     return [m for m in window_matches if (m.get("game_date") or m.get("date")) == today]
 
 
@@ -702,5 +710,110 @@ def get_matches_tomorrow_all() -> list[dict]:
     """All matches tomorrow across all supported competitions."""
     tomorrow = (_et_calendar_today() + datetime.timedelta(days=1)).isoformat()
     today = _et_calendar_today().isoformat()
-    window_matches = get_matches_range_all(today, tomorrow, _PRIORITY_COMPETITIONS)
+    window_matches = get_matches_range_all(today, tomorrow, list(TOURNAMENTS.keys()))
     return [m for m in window_matches if (m.get("game_date") or m.get("date")) == tomorrow]
+
+
+def get_team_recent_form(
+    team_name: str,
+    days_back: int = 140,
+    max_matches: int = 12,
+    competition_codes: list[str] | None = None,
+) -> dict:
+    """
+    Compute recent historical form for a team from finished matches.
+    Used by the soccer predictor to blend model priors with season form.
+    """
+    team = _safe_team_name(team_name, default="").strip()
+    if not team:
+        return {
+            "sample_size": 0,
+            "goals_for_per_match": 0.0,
+            "goals_against_per_match": 0.0,
+            "points_per_match": 0.0,
+            "win_rate": 0.0,
+        }
+
+    codes = competition_codes or list(TOURNAMENTS.keys())
+    end_date = _et_calendar_today()
+    start_date = end_date - datetime.timedelta(days=max(7, int(days_back)))
+    cache_key = f"recent_form::{team.lower()}::{start_date.isoformat()}::{end_date.isoformat()}::{','.join(codes)}::{max_matches}"
+
+    def _compute() -> dict:
+        matches: list[dict] = []
+        for code in codes:
+            try:
+                rows = get_matches_in_range(code, start_date.isoformat(), end_date.isoformat())
+                matches.extend(rows or [])
+            except Exception:
+                continue
+
+        team_low = team.lower()
+        relevant: list[dict] = []
+        for m in matches:
+            status = str(m.get("status") or "").lower()
+            if "final" not in status and "completed" not in status:
+                continue
+            home = str(m.get("home_team") or "").strip()
+            away = str(m.get("away_team") or "").strip()
+            if team_low not in home.lower() and team_low not in away.lower():
+                continue
+            relevant.append(m)
+
+        relevant.sort(key=lambda x: (x.get("game_date") or x.get("date") or ""), reverse=True)
+        relevant = relevant[: max(1, max_matches)]
+
+        gf = 0.0
+        ga = 0.0
+        wins = 0
+        points = 0
+        used = 0
+        for m in relevant:
+            home = str(m.get("home_team") or "")
+            away = str(m.get("away_team") or "")
+            hs = m.get("home_score")
+            as_ = m.get("away_score")
+            if hs is None or as_ is None:
+                continue
+            try:
+                hs_f = float(hs)
+                as_f = float(as_)
+            except (TypeError, ValueError):
+                continue
+
+            is_home = team_low in home.lower()
+            scored = hs_f if is_home else as_f
+            conceded = as_f if is_home else hs_f
+            gf += scored
+            ga += conceded
+            used += 1
+            if scored > conceded:
+                wins += 1
+                points += 3
+            elif scored == conceded:
+                points += 1
+
+        if used == 0:
+            return {
+                "sample_size": 0,
+                "goals_for_per_match": 0.0,
+                "goals_against_per_match": 0.0,
+                "points_per_match": 0.0,
+                "win_rate": 0.0,
+            }
+
+        return {
+            "sample_size": used,
+            "goals_for_per_match": round(gf / used, 3),
+            "goals_against_per_match": round(ga / used, 3),
+            "points_per_match": round(points / used, 3),
+            "win_rate": round(wins / used, 3),
+        }
+
+    return _cached(cache_key, _CACHE_MATCH, _compute) or {
+        "sample_size": 0,
+        "goals_for_per_match": 0.0,
+        "goals_against_per_match": 0.0,
+        "points_per_match": 0.0,
+        "win_rate": 0.0,
+    }

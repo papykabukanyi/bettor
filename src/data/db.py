@@ -880,17 +880,18 @@ def get_todays_prop_picks(sport: str = None, max_age_hours: int = 2) -> list:
         return []
     try:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        prop_filter = ""
+        if sport and str(sport).lower() != "soccer":
+            prop_filter = " AND recommendation = 'OVER' AND (line IS NULL OR line > 0.5)"
         base = """
             SELECT sport, player_name, team, game_date, prop_type,
                    line, over_prob, under_prob, recommendation, stats_json, detected_at
             FROM   prop_history
             WHERE  game_date  = CURRENT_DATE
               AND  detected_at > NOW() - (INTERVAL '1 hour' * %s)
-              AND  recommendation = 'OVER'
-              AND  (line IS NULL OR line > 0.5)
         """
         if sport:
-            cur.execute(base + " AND sport = %s ORDER BY detected_at DESC",
+            cur.execute(base + prop_filter + " AND sport = %s ORDER BY detected_at DESC",
                         (max_age_hours, sport))
         else:
             cur.execute(base + " ORDER BY detected_at DESC", (max_age_hours,))
@@ -917,26 +918,26 @@ def has_prop_picks_for_date(game_date: "datetime.date | str", sport: str = "mlb"
         return False
     try:
         cur = conn.cursor()
+        apply_mlb_prop_filter = bool(sport and str(sport).lower() != "soccer")
+        common_filter = " AND outcome != 'ARCHIVED'"
+        if apply_mlb_prop_filter:
+            common_filter += " AND recommendation = 'OVER' AND (line IS NULL OR line > 0.5)"
         if sport:
             cur.execute(
-                """
+                f"""
                 SELECT 1 FROM prop_history
                 WHERE game_date = %s AND sport = %s
-                  AND recommendation = 'OVER'
-                  AND (line IS NULL OR line > 0.5)
-                  AND outcome != 'ARCHIVED'
+                  {common_filter}
                 LIMIT 1
                 """,
                 (game_date, sport),
             )
         else:
             cur.execute(
-                """
+                f"""
                 SELECT 1 FROM prop_history
                 WHERE game_date = %s
-                  AND recommendation = 'OVER'
-                  AND (line IS NULL OR line > 0.5)
-                  AND outcome != 'ARCHIVED'
+                  {common_filter}
                 LIMIT 1
                 """,
                 (game_date,),
@@ -1524,17 +1525,23 @@ def save_predictions(predictions: list) -> int:
         conn.close()
 
 
-def has_predictions_for_date(game_date: "datetime.date | str") -> bool:
+def has_predictions_for_date(game_date: "datetime.date | str", sport: str | None = None) -> bool:
     """Return True if any non-archived predictions exist for the given game_date."""
     conn = get_conn()
     if conn is None:
         return False
     try:
         cur = conn.cursor()
-        cur.execute(
-            "SELECT 1 FROM predictions WHERE game_date = %s AND outcome != 'ARCHIVED' LIMIT 1",
-            (game_date,)
-        )
+        if sport:
+            cur.execute(
+                "SELECT 1 FROM predictions WHERE game_date = %s AND sport = %s AND outcome != 'ARCHIVED' LIMIT 1",
+                (game_date, sport),
+            )
+        else:
+            cur.execute(
+                "SELECT 1 FROM predictions WHERE game_date = %s AND outcome != 'ARCHIVED' LIMIT 1",
+                (game_date,),
+            )
         return cur.fetchone() is not None
     except Exception as e:
         print(f"[db] has_predictions_for_date error: {e}")
@@ -1679,7 +1686,7 @@ def update_prediction_outcome(game_key: str, game_date: str, outcome: str,
         conn.close()
 
 
-def get_predictions_for_date(game_date: "str | datetime.date") -> list:
+def get_predictions_for_date(game_date: "str | datetime.date", sport: str | None = None) -> list:
     """
     Return saved prediction rows for a specific game_date, formatted as bet dicts
     compatible with _build_card in dashboard.py (includes a numeric 'safety' score).
@@ -1691,14 +1698,19 @@ def get_predictions_for_date(game_date: "str | datetime.date") -> list:
     try:
         date_str = game_date.isoformat() if hasattr(game_date, "isoformat") else str(game_date)
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        wheres = ["game_date = %s", "outcome != 'ARCHIVED'"]
+        vals = [date_str]
+        if sport:
+            wheres.append("sport = %s")
+            vals.append(sport)
         cur.execute(
-            """SELECT game_key, bet_type, pick, line, odds_am, dec_odds, model_prob,
+            f"""SELECT game_key, bet_type, pick, line, odds_am, dec_odds, model_prob,
                       confidence, safety_label, game_date, game_time,
                       home_team, away_team, home_starter, away_starter, outcome
                FROM predictions
-               WHERE game_date = %s AND outcome != 'ARCHIVED'
+               WHERE {' AND '.join(wheres)}
                ORDER BY model_prob DESC""",
-            (date_str,)
+            vals,
         )
         rows = []
         for r in cur.fetchall():
@@ -1725,7 +1737,7 @@ def get_predictions_for_date(game_date: "str | datetime.date") -> list:
 
 
 def get_predictions(days: int = 30, outcome: str = None,
-                    bet_type: str = None) -> list:
+                    bet_type: str = None, sport: str | None = None) -> list:
     """Fetch prediction history."""
     conn = get_conn()
     if conn is None:
@@ -1738,6 +1750,8 @@ def get_predictions(days: int = 30, outcome: str = None,
             wheres.append("outcome = %s"); vals.append(outcome.upper())
         if bet_type:
             wheres.append("bet_type = %s"); vals.append(bet_type)
+        if sport:
+            wheres.append("sport = %s"); vals.append(sport)
         cur.execute(
             f"SELECT * FROM predictions WHERE {' AND '.join(wheres)} "
             "ORDER BY predicted_at DESC LIMIT 500", vals
@@ -1755,14 +1769,20 @@ def get_predictions(days: int = 30, outcome: str = None,
         conn.close()
 
 
-def get_performance_stats() -> dict:
+def get_performance_stats(sport: str | None = None) -> dict:
     """Return win/loss/push counts and ROI for prediction tracking."""
     conn = get_conn()
     if conn is None:
         return {}
     try:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cur.execute("""
+        vals = []
+        sport_where = ""
+        if sport:
+            sport_where = " AND sport = %s"
+            vals.append(sport)
+
+        cur.execute(f"""
             SELECT
                 COUNT(*) FILTER (WHERE outcome = 'WIN')     AS wins,
                 COUNT(*) FILTER (WHERE outcome = 'LOSS')    AS losses,
@@ -1775,31 +1795,34 @@ def get_performance_stats() -> dict:
                 COUNT(DISTINCT bet_type) AS bet_types_used
             FROM predictions
             WHERE predicted_at > NOW() - INTERVAL '90 days'
-        """)
+            {sport_where}
+        """, vals)
         row = cur.fetchone()
         stats = dict(row) if row else {}
         # By bet type
-        cur.execute("""
+        cur.execute(f"""
             SELECT bet_type,
                    COUNT(*) FILTER (WHERE outcome='WIN')  AS wins,
                    COUNT(*) FILTER (WHERE outcome='LOSS') AS losses,
                    COUNT(*) AS total
             FROM predictions
             WHERE predicted_at > NOW() - INTERVAL '90 days'
+              {sport_where}
               AND outcome IN ('WIN','LOSS')
             GROUP BY bet_type ORDER BY total DESC
-        """)
+        """, vals)
         stats["by_bet_type"] = [dict(r) for r in cur.fetchall()]
         # Last 30 days trend
-        cur.execute("""
+        cur.execute(f"""
             SELECT game_date::text AS date,
                    COUNT(*) FILTER (WHERE outcome='WIN')  AS wins,
                    COUNT(*) FILTER (WHERE outcome='LOSS') AS losses
             FROM predictions
             WHERE game_date >= CURRENT_DATE - INTERVAL '30 days'
+              {sport_where}
               AND outcome IN ('WIN','LOSS')
             GROUP BY game_date ORDER BY game_date
-        """)
+        """, vals)
         stats["daily_trend"] = [dict(r) for r in cur.fetchall()]
         return stats
     except Exception as e:
@@ -1809,14 +1832,23 @@ def get_performance_stats() -> dict:
         conn.close()
 
 
-def get_prop_performance_stats() -> dict:
-    """Return today's OVER prop stats (line > 0.5) for dashboard performance."""
+def get_prop_performance_stats(sport: str | None = None) -> dict:
+    """Return today's prop stats for dashboard performance."""
     conn = get_conn()
     if conn is None:
         return {}
     try:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         et_today_sql = "timezone('America/New_York', now())::date"
+        vals = []
+        sport_where = ""
+        if sport:
+            sport_where = " AND sport = %s"
+            vals.append(sport)
+        prop_filter = ""
+        if sport and str(sport).lower() != "soccer":
+            prop_filter = " AND recommendation = 'OVER' AND (line IS NULL OR line > 0.5)"
+
         # Overall prop stats
         cur.execute(f"""
             SELECT
@@ -1829,9 +1861,9 @@ def get_prop_performance_stats() -> dict:
                                WHEN outcome='LOSS' THEN 0.0 END)*100, 1) AS hit_rate
             FROM prop_history
             WHERE game_date = {et_today_sql}
-              AND recommendation = 'OVER'
-              AND (line IS NULL OR line > 0.5)
-        """)
+                            {prop_filter}
+              {sport_where}
+        """, vals)
         row = cur.fetchone()
         stats = dict(row) if row else {}
         # By prop type
@@ -1847,11 +1879,11 @@ def get_prop_performance_stats() -> dict:
                                   WHEN outcome='LOSS' THEN 0.0 END)*100, 1) AS hit_rate
             FROM prop_history
             WHERE game_date = {et_today_sql}
-              AND recommendation = 'OVER'
-              AND (line IS NULL OR line > 0.5)
+                            {prop_filter}
+              {sport_where}
             GROUP BY prop_type, recommendation
             ORDER BY total DESC
-        """)
+        """, vals)
         stats["by_prop_type"] = [dict(r) for r in cur.fetchall()]
         # Keep shape stable for frontend consumers.
         stats["daily_trend"] = [{
@@ -1867,24 +1899,32 @@ def get_prop_performance_stats() -> dict:
         conn.close()
 
 
-def get_pending_props(days_back: int = 3) -> list:
+def get_pending_props(days_back: int = 3, sport: str | None = None) -> list:
     """Return PENDING prop picks from the last N days for resolution."""
     conn = get_conn()
     if conn is None:
         return []
     try:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cur.execute("""
+        vals = [days_back]
+        sport_where = ""
+        if sport:
+            sport_where = " AND sport = %s"
+            vals.append(sport)
+        prop_filter = ""
+        if sport and str(sport).lower() != "soccer":
+            prop_filter = " AND recommendation = 'OVER' AND (line IS NULL OR line > 0.5)"
+        cur.execute(f"""
             SELECT id, player_name, team, game_date::text, prop_type, line,
                    over_prob, under_prob, recommendation, stats_json
             FROM prop_history
             WHERE outcome = 'PENDING'
               AND game_date >= CURRENT_DATE - (%s * INTERVAL '1 day')
               AND game_date < CURRENT_DATE
-              AND recommendation = 'OVER'
-              AND (line IS NULL OR line > 0.5)
+              {prop_filter}
+              {sport_where}
             ORDER BY game_date DESC
-        """, (days_back,))
+        """, vals)
         return [dict(r) for r in cur.fetchall()]
     except Exception as e:
         print(f"[db] get_pending_props error: {e}")
@@ -2087,7 +2127,8 @@ def save_tracked_parlay(name: str, legs: list, combined_odds: float,
         return 0
     finally:
         conn.close()
-def get_tracked_parlays(include_resolved: bool = False, target_date=None) -> list:
+def get_tracked_parlays(include_resolved: bool = False, target_date=None,
+                       sport: str | None = None) -> list:
     conn = get_conn()
     if conn is None:
         return []
@@ -2100,9 +2141,23 @@ def get_tracked_parlays(include_resolved: bool = False, target_date=None) -> lis
         if target_date is not None:
             clauses.append("DATE(created_at AT TIME ZONE 'America/New_York') = %s")
             params.append(target_date)
+        if sport:
+            clauses.append("""
+                EXISTS (
+                    SELECT 1
+                    FROM jsonb_array_elements(
+                        CASE
+                            WHEN jsonb_typeof(tp.legs_json) = 'array' THEN tp.legs_json
+                            ELSE '[]'::jsonb
+                        END
+                    ) AS leg
+                    WHERE lower(COALESCE(leg->>'sport', '')) = %s
+                )
+            """)
+            params.append(str(sport).lower())
         where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         cur.execute(
-            f"SELECT * FROM tracked_parlays {where_sql} ORDER BY created_at DESC",
+            f"SELECT * FROM tracked_parlays tp {where_sql} ORDER BY created_at DESC",
             tuple(params),
         )
         rows = [dict(r) for r in cur.fetchall()]
@@ -2137,14 +2192,30 @@ def resolve_tracked_parlay(parlay_id: int, outcome: str, payout: float = 0):
         conn.close()
 
 
-def get_parlay_performance_stats() -> dict:
+def get_parlay_performance_stats(sport: str | None = None) -> dict:
     """Win/loss/ROI stats for tracked parlays."""
     conn = get_conn()
     if conn is None:
         return {}
     try:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cur.execute("""
+        where_sql = ""
+        vals = []
+        if sport:
+            where_sql = """
+            WHERE EXISTS (
+                SELECT 1
+                FROM jsonb_array_elements(
+                    CASE
+                        WHEN jsonb_typeof(tp.legs_json) = 'array' THEN tp.legs_json
+                        ELSE '[]'::jsonb
+                    END
+                ) AS leg
+                WHERE lower(COALESCE(leg->>'sport', '')) = %s
+            )
+            """
+            vals.append(str(sport).lower())
+        cur.execute(f"""
             SELECT
                 COUNT(*)                                           AS total,
                 COUNT(*) FILTER (WHERE outcome='WIN')             AS wins,
@@ -2153,8 +2224,9 @@ def get_parlay_performance_stats() -> dict:
                 COUNT(*) FILTER (WHERE outcome='PENDING')         AS pending,
                 COALESCE(SUM(payout_usd),0)                       AS total_payout,
                 COALESCE(SUM(stake_usd),0)                        AS total_staked
-            FROM tracked_parlays
-        """)
+            FROM tracked_parlays tp
+            {where_sql}
+        """, vals)
         row = dict(cur.fetchone() or {})
         wins   = int(row.get("wins",   0))
         losses = int(row.get("losses", 0))
