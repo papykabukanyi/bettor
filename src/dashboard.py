@@ -363,6 +363,11 @@ def _is_public_prop(p: dict) -> bool:
 def _build_card(game, bets, props, when):
     ht  = game.get("home_team", "")
     at  = game.get("away_team", "")
+    sport_group = _infer_sport_group(
+        game.get("sport") or game.get("competition") or game.get("league") or _ACTIVE_SPORT
+    )
+    competition_name = str(game.get("competition_name") or game.get("league") or "").strip()
+    league_name = str(game.get("league") or competition_name or sport_group.upper() or "SPORT").strip()
     match_key = _norm_gk(game.get("match_key") or f"{at}@{ht}")
     unique_gk = _compose_game_key(
         at,
@@ -382,6 +387,10 @@ def _build_card(game, bets, props, when):
     card = {
         "game_key":     unique_gk,
         "match_key":    match_key,
+        "sport":        sport_group,
+        "league":       league_name,
+        "competition":  str(game.get("competition") or "").strip(),
+        "competition_name": competition_name or league_name,
         "game_pk":      game.get("game_pk") or game.get("game_id") or game.get("external_id"),
         "game_date":    game.get("date") or game.get("game_date"),
         "game_datetime": game.get("game_datetime"),
