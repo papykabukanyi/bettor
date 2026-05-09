@@ -1433,7 +1433,13 @@ function _publicOverProps(list) {
 }
 
 function _overBetsTotal() {
-  return _publicOverProps(ALL_PROPS).length;
+  const cards = ([]).concat(TODAY_CARDS || [], TOMORROW_CARDS || []);
+  const gameBetCount = cards.reduce((acc, c) => {
+    const keys = ['moneyline','run_line','total','f5_moneyline','f5_total','home_team_total','away_team_total'];
+    return acc + keys.reduce((sum, k) => sum + (c && c[k] ? 1 : 0), 0);
+  }, 0);
+  const propCount = _publicOverProps(ALL_PROPS).length;
+  return gameBetCount + propCount;
 }
 
 function _phaseVerb(phase, futureText, liveText, pastText) {
@@ -3072,15 +3078,28 @@ function _autoParlayPayload(c) {
   return {
     name: `Auto ${c.n}-Leg Mixed Parlay`,
     legs: _asArray(c.legs).map(p => {
+      const gameKey = p.game_key || p.game || '';
       return {
         label: _legDisplayText(p),
+        pick: p.pick || _legDisplayText(p),
         bet_type: p.bet_type || (_legSourceGroup(p) === 'prop' ? 'player_prop' : 'game_pick'),
-        game: p.game_key || p.game || '',
+        game: gameKey,
+        game_key: gameKey,
+        game_date: p.game_date || p.date || '',
         dec_odds: _legDec(p) || 1.9,
         conf: Math.round(_legProb(p) * 100),
         badge: p.badge || p.safety_label || 'MODERATE',
         source: _legSourceGroup(p),
         sport: p.sport || '',
+        prediction_uid: p.prediction_uid || p.bet_uid || '',
+        player_name: p.player_name || p.player || p.name || '',
+        name: p.name || p.player_name || '',
+        team: p.team || '',
+        prop_type: p.prop_type || p.stat_type || '',
+        stat_type: p.stat_type || p.prop_type || '',
+        line: p.line,
+        recommendation: (p.recommendation || p.direction || '').toUpperCase(),
+        direction: (p.direction || p.recommendation || '').toUpperCase(),
       };
     }),
     combined_odds: c.dec ?? 0,
@@ -3360,6 +3379,7 @@ function buildLegPool() {
       label,
       display_label: label,
       game: p.game_key || p.game || '',
+      game_date: p.date || p.game_date || '',
       bet_type: 'player_prop',
       dec_odds: dec,
       conf: p.confidence || Math.round(prob * 100),
@@ -3368,6 +3388,7 @@ function buildLegPool() {
       badge: p.safety_label || 'MODERATE',
       source: 'prop',
       sport: p.sport || '',
+      prediction_uid: p.prediction_uid || p.bet_uid || '',
       player: p.name || '',
       name: p.name || '',
       team: p.team || '',
@@ -3394,6 +3415,7 @@ function buildLegPool() {
         label: b.pick,
         display_label: b.pick,
         game: c.game_key || b.game_key || '',
+        game_date: b.game_date || c.game_date || '',
         bet_type: b.bet_type || k,
         dec_odds: dec,
         conf: b.confidence || Math.round(prob * 100),
@@ -3402,6 +3424,7 @@ function buildLegPool() {
         badge: b.safety_label || 'MODERATE',
         source: 'game',
         sport: c.sport || b.sport || '',
+        prediction_uid: b.prediction_uid || b.bet_uid || '',
         team: cleanPickTeam(b.pick || ''),
         line: b.line,
         pick: b.pick,
@@ -3421,6 +3444,7 @@ function buildLegPool() {
         label,
         display_label: label,
         game: l.game || '',
+        game_date: l.game_date || '',
         bet_type: l.bet_type || 'player_prop',
         dec_odds: dec,
         conf: l.conf != null ? l.conf : Math.round(prob * 100),
@@ -3429,6 +3453,7 @@ function buildLegPool() {
         badge: l.badge || l.safety_label || 'MODERATE',
         source: 'parlay',
         sport: l.sport || '',
+        prediction_uid: l.prediction_uid || l.bet_uid || '',
       });
     });
   });
@@ -3486,11 +3511,25 @@ function _renderLegCard(l) {
   const typeLbl = l.source === 'prop' ? 'PROP' : l.source === 'game' ? 'GAME' : 'AUTO';
   const addKey  = JSON.stringify({
     label: l.label,
+    pick: l.pick || l.label,
     bet_type: l.bet_type,
     game: l.game,
+    game_key: l.game,
+    game_date: l.game_date || '',
     dec_odds: l.dec_odds,
     conf: l.conf,
     badge: l.badge || 'MODERATE',
+    source: l.source || '',
+    sport: l.sport || '',
+    prediction_uid: l.prediction_uid || l.bet_uid || '',
+    player_name: l.player_name || l.player || l.name || '',
+    name: l.name || l.player_name || '',
+    team: l.team || '',
+    prop_type: l.prop_type || l.stat_type || '',
+    stat_type: l.stat_type || l.prop_type || '',
+    line: l.line,
+    recommendation: (l.recommendation || l.direction || '').toUpperCase(),
+    direction: (l.direction || l.recommendation || '').toUpperCase(),
   }).replace(/"/g,'&quot;');
   return `<div class="best-leg-card">
     <div class="best-leg-title">${l.label}</div>
@@ -3763,7 +3802,7 @@ function loadBotPerformance() {
       <div class="perf-card"><div class="perf-val perf-pend">${pushes}</div><div class="perf-label">Pushes</div></div>
       <div class="perf-card"><div class="perf-val perf-pend">${pending}</div><div class="perf-label">Pending</div></div>
       <div class="perf-card"><div class="perf-val" style="color:${hrColor}">${hitRate!=null?hitRate+'%':'—'}</div><div class="perf-label">Bot Hit Rate</div></div>
-      <div class="perf-card"><div class="perf-val" style="font-size:1.2rem">${totalProps}</div><div class="perf-label">${_isAllSportsMode() ? 'Total Best Bets' : (_isSoccerMode() ? 'Total Props' : 'Total Over Bets')}</div><div class="perf-sub">Bets of the Day</div></div>
+      <div class="perf-card"><div class="perf-val" style="font-size:1.2rem">${totalProps}</div><div class="perf-label">${_isAllSportsMode() ? 'Total Tracked Bets' : (_isSoccerMode() ? 'Total Tracked Bets' : 'Total Tracked Bets')}</div><div class="perf-sub">Game picks + props (today)</div></div>
     `;
   }).catch(() => {
     el.innerHTML = '<div class="no-games">Could not load bot performance.</div>';
@@ -3784,7 +3823,7 @@ function loadPerformance() {
       <div class="perf-card"><div class="perf-val perf-pend">${s.pushes||0}</div><div class="perf-label">Pushes</div></div>
       <div class="perf-card"><div class="perf-val perf-pend">${s.pending||0}</div><div class="perf-label">Pending</div></div>
       <div class="perf-card"><div class="perf-val perf-rate">${s.hit_rate!=null?s.hit_rate+'%':'—'}</div><div class="perf-label">Hit Rate</div></div>
-      <div class="perf-card"><div class="perf-val" style="font-size:1.2rem">${totalProps}</div><div class="perf-label">${_isAllSportsMode() ? 'Total Best Bets' : (_isSoccerMode() ? 'Total Props' : 'Total Over Bets')}</div><div class="perf-sub">Bets of the Day</div></div>
+      <div class="perf-card"><div class="perf-val" style="font-size:1.2rem">${totalProps}</div><div class="perf-label">${_isAllSportsMode() ? 'Total Tracked Bets' : (_isSoccerMode() ? 'Total Tracked Bets' : 'Total Tracked Bets')}</div><div class="perf-sub">Game picks + props (today)</div></div>
     `;
   });
 }
@@ -4036,7 +4075,7 @@ function stopConsolePoll() {
 
   // Keep parlays and outcomes fully automatic without manual actions.
   resolveOutcomesSilent();
-  setInterval(resolveOutcomesSilent, 10 * 60 * 1000);
+  setInterval(resolveOutcomesSilent, 2 * 60 * 1000);
   setInterval(() => {
     if (!_isParlaysActive()) return;
     loadTrackedParlays();

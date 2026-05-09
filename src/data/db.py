@@ -9,6 +9,7 @@ import os
 import sys
 import json
 import datetime
+import hashlib
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -62,6 +63,86 @@ def _get_table_columns(conn, table_name: str) -> set[str]:
         print(f"[db] column lookup error ({table_name}): {e}")
         _TABLE_COLS_CACHE[table_name] = set()
         return set()
+
+
+def _uid_part(value) -> str:
+    """Normalize values before hashing to build deterministic tracking IDs."""
+    if value is None:
+        return ""
+    if isinstance(value, datetime.datetime):
+        return value.date().isoformat()
+    if isinstance(value, datetime.date):
+        return value.isoformat()
+    if isinstance(value, float):
+        txt = f"{value:.4f}".rstrip("0").rstrip(".")
+        return txt
+    return str(value).strip().lower()
+
+
+def _make_tracking_uid(prefix: str, *parts) -> str:
+    raw = "|".join(_uid_part(p) for p in parts)
+    digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:20]
+    return f"{prefix}_{digest}"
+
+
+def _prediction_uid(payload: dict) -> str:
+    """Deterministic unique ID for a game/prediction row."""
+    return _make_tracking_uid(
+        "pred",
+        payload.get("sport", ""),
+        payload.get("game_date", ""),
+        payload.get("game_key", ""),
+        payload.get("bet_type", ""),
+        payload.get("pick", ""),
+        payload.get("line", ""),
+    )
+
+
+def _prop_uid(payload: dict, game_date=None) -> str:
+    """Deterministic unique ID for a player prop row."""
+    return _make_tracking_uid(
+        "prop",
+        payload.get("sport", ""),
+        game_date or payload.get("date") or payload.get("game_date") or "",
+        payload.get("game_key") or payload.get("game") or "",
+        payload.get("name") or payload.get("player_name") or "",
+        payload.get("team", ""),
+        payload.get("stat_type") or payload.get("prop_type") or "",
+        payload.get("line", ""),
+        payload.get("direction") or payload.get("recommendation") or "",
+    )
+
+
+def _normalize_parlay_legs_for_uid(legs: list) -> list:
+    normalized = []
+    for leg in (legs or []):
+        if not isinstance(leg, dict):
+            continue
+        normalized.append({
+            "prediction_uid": _uid_part(leg.get("prediction_uid") or leg.get("bet_uid") or ""),
+            "source": _uid_part(leg.get("source") or ""),
+            "sport": _uid_part(leg.get("sport") or ""),
+            "game": _uid_part(leg.get("game") or leg.get("game_key") or ""),
+            "bet_type": _uid_part(leg.get("bet_type") or ""),
+            "label": _uid_part(leg.get("label") or leg.get("pick") or ""),
+            "line": _uid_part(leg.get("line") or ""),
+            "direction": _uid_part(leg.get("direction") or leg.get("recommendation") or ""),
+            "player": _uid_part(leg.get("player_name") or leg.get("name") or ""),
+            "prop_type": _uid_part(leg.get("prop_type") or leg.get("stat_type") or ""),
+        })
+    normalized.sort(key=lambda row: json.dumps(row, sort_keys=True))
+    return normalized
+
+
+def _parlay_uid(name: str, legs: list, created_date=None) -> str:
+    """Deterministic unique ID for tracked parlays (date-scoped)."""
+    day = created_date or _cache_date_default()
+    legs_norm = _normalize_parlay_legs_for_uid(legs)
+    return _make_tracking_uid(
+        "par",
+        day,
+        json.dumps(legs_norm, sort_keys=True),
+    )
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Schema
@@ -150,6 +231,7 @@ CREATE TABLE IF NOT EXISTS team_stats (
 
 CREATE TABLE IF NOT EXISTS prop_history (
     id              SERIAL PRIMARY KEY,
+    bet_uid         VARCHAR(80),
     game_key        VARCHAR(200),
     sport           VARCHAR(20),
     player_name     VARCHAR(100),
@@ -177,6 +259,10 @@ DO $$ BEGIN
     IF NOT EXISTS (SELECT 1 FROM information_schema.columns
                    WHERE table_name='prop_history' AND column_name='game_key') THEN
         ALTER TABLE prop_history ADD COLUMN game_key VARCHAR(200);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_name='prop_history' AND column_name='bet_uid') THEN
+        ALTER TABLE prop_history ADD COLUMN bet_uid VARCHAR(80);
     END IF;
 END $$;
 
@@ -338,6 +424,7 @@ CREATE TABLE IF NOT EXISTS analysis_cache (
 -- ── MLB Predictions: every prediction the bot makes ──
 CREATE TABLE IF NOT EXISTS predictions (
     id              SERIAL PRIMARY KEY,
+    bet_uid         VARCHAR(80),
     game_key        VARCHAR(200)  NOT NULL,
     sport           VARCHAR(20)   DEFAULT 'mlb',
     bet_type        VARCHAR(50),  -- 'moneyline','spread','total','f5','player_prop','parlay'
@@ -363,6 +450,7 @@ CREATE TABLE IF NOT EXISTS predictions (
 );
 CREATE INDEX IF NOT EXISTS idx_predictions_date    ON predictions(game_date);
 CREATE INDEX IF NOT EXISTS idx_predictions_outcome ON predictions(outcome);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_predictions_bet_uid ON predictions(bet_uid);
 
 -- ── Player trends: historical per-player stats ──
 CREATE TABLE IF NOT EXISTS player_trends (
@@ -402,6 +490,7 @@ CREATE INDEX IF NOT EXISTS idx_sentiment_entity ON sentiment_scores(entity, comp
 -- ── Tracked parlays: user-built and bot-generated parlays ──
 CREATE TABLE IF NOT EXISTS tracked_parlays (
     id             SERIAL PRIMARY KEY,
+    parlay_uid     VARCHAR(80),
     name           VARCHAR(200),
     legs_json      JSONB,          -- [{pick, game, odds, type}, ...]
     combined_odds  NUMERIC(8,2),
@@ -411,6 +500,37 @@ CREATE TABLE IF NOT EXISTS tracked_parlays (
     outcome        VARCHAR(20)     DEFAULT 'PENDING',
     payout_usd     NUMERIC(8,2)
 );
+
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_name='predictions' AND column_name='bet_uid') THEN
+        ALTER TABLE predictions ADD COLUMN bet_uid VARCHAR(80);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_name='prop_history' AND column_name='bet_uid') THEN
+        ALTER TABLE prop_history ADD COLUMN bet_uid VARCHAR(80);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_name='tracked_parlays' AND column_name='parlay_uid') THEN
+        ALTER TABLE tracked_parlays ADD COLUMN parlay_uid VARCHAR(80);
+    END IF;
+END $$;
+
+-- Backfill stable IDs for legacy rows that predate tracking UID support.
+UPDATE predictions
+SET bet_uid = CONCAT('pred_legacy_', id::text)
+WHERE bet_uid IS NULL;
+
+UPDATE prop_history
+SET bet_uid = CONCAT('prop_legacy_', id::text)
+WHERE bet_uid IS NULL;
+
+UPDATE tracked_parlays
+SET parlay_uid = CONCAT('par_legacy_', id::text)
+WHERE parlay_uid IS NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_prop_history_bet_uid ON prop_history(bet_uid);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_tracked_parlays_uid ON tracked_parlays(parlay_uid);
 """
 
 
@@ -768,6 +888,7 @@ def save_prop_picks(picks: list, game_date=None):
     try:
         cur = conn.cursor()
         cols = _get_table_columns(conn, "prop_history")
+        has_bet_uid  = "bet_uid"  in cols
         has_game_key = "game_key" in cols
         has_run_id   = "run_id"   in cols
         has_run_date = "run_date" in cols
@@ -777,6 +898,7 @@ def save_prop_picks(picks: list, game_date=None):
             prop_type = p.get("stat_type")
             recommendation = p.get("direction")
             line_value = p.get("line")
+            pick_bet_uid = _prop_uid(p, game_date=pick_game_date)
             stats_snap = json.dumps({
                 "game_key":  pick_game_key,
                 "era":       p.get("era"),     "k9":        p.get("k9"),
@@ -788,7 +910,17 @@ def save_prop_picks(picks: list, game_date=None):
             pick_run_id   = p.get("run_id")
             pick_run_date = p.get("run_date") or str(pick_game_date)
             try:
-                if has_game_key and pick_game_key:
+                if has_bet_uid and pick_bet_uid:
+                    cur.execute(
+                        """
+                        SELECT 1 FROM prop_history
+                        WHERE bet_uid = %s
+                          AND outcome != 'ARCHIVED'
+                        LIMIT 1
+                        """,
+                        (pick_bet_uid,),
+                    )
+                elif has_game_key and pick_game_key:
                     cur.execute(
                         """
                         SELECT 1 FROM prop_history
@@ -845,6 +977,9 @@ def save_prop_picks(picks: list, game_date=None):
                     (p.get("under_pct") or 50) / 100.0,
                     recommendation, stats_snap,
                 ]
+                if has_bet_uid:
+                    base_cols.insert(0, "bet_uid")
+                    base_vals.insert(0, pick_bet_uid)
                 if has_game_key:
                     base_cols.insert(0, "game_key")
                     base_vals.insert(0, pick_game_key or None)
@@ -880,18 +1015,15 @@ def get_todays_prop_picks(sport: str = None, max_age_hours: int = 2) -> list:
         return []
     try:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        prop_filter = ""
-        if sport and str(sport).lower() != "soccer":
-            prop_filter = " AND recommendation = 'OVER' AND (line IS NULL OR line > 0.5)"
         base = """
-            SELECT sport, player_name, team, game_date, prop_type,
+                        SELECT bet_uid, sport, player_name, team, game_date, prop_type,
                    line, over_prob, under_prob, recommendation, stats_json, detected_at
             FROM   prop_history
             WHERE  game_date  = CURRENT_DATE
               AND  detected_at > NOW() - (INTERVAL '1 hour' * %s)
         """
         if sport:
-            cur.execute(base + prop_filter + " AND sport = %s ORDER BY detected_at DESC",
+            cur.execute(base + " AND sport = %s ORDER BY detected_at DESC",
                         (max_age_hours, sport))
         else:
             cur.execute(base + " ORDER BY detected_at DESC", (max_age_hours,))
@@ -918,10 +1050,7 @@ def has_prop_picks_for_date(game_date: "datetime.date | str", sport: str = "mlb"
         return False
     try:
         cur = conn.cursor()
-        apply_mlb_prop_filter = bool(sport and str(sport).lower() != "soccer")
         common_filter = " AND outcome != 'ARCHIVED'"
-        if apply_mlb_prop_filter:
-            common_filter += " AND recommendation = 'OVER' AND (line IS NULL OR line > 0.5)"
         if sport:
             cur.execute(
                 f"""
@@ -1469,22 +1598,37 @@ def save_predictions(predictions: list) -> int:
     try:
         cur = conn.cursor()
         cols = _get_table_columns(conn, "predictions")
+        has_bet_uid  = "bet_uid"  in cols
         has_run_id   = "run_id"   in cols
         has_run_date = "run_date" in cols
         for p in predictions:
             try:
-                cur.execute(
-                    """SELECT 1 FROM predictions
-                       WHERE game_key = %s AND bet_type = %s AND pick = %s AND game_date = %s
-                         AND outcome != 'ARCHIVED'
-                       LIMIT 1""",
-                    (p.get("game_key"), p.get("bet_type"), p.get("pick"), p.get("game_date")),
-                )
+                pred_uid = _prediction_uid(p)
+                if has_bet_uid:
+                    cur.execute(
+                        """SELECT 1 FROM predictions
+                           WHERE bet_uid = %s
+                             AND outcome != 'ARCHIVED'
+                           LIMIT 1""",
+                        (pred_uid,),
+                    )
+                else:
+                    cur.execute(
+                        """SELECT 1 FROM predictions
+                           WHERE game_key = %s AND bet_type = %s AND pick = %s AND game_date = %s
+                             AND outcome != 'ARCHIVED'
+                           LIMIT 1""",
+                        (p.get("game_key"), p.get("bet_type"), p.get("pick"), p.get("game_date")),
+                    )
                 if cur.fetchone():
                     continue
                 extra_cols = ""
                 extra_ph   = ""
                 extra_vals = []
+                if has_bet_uid:
+                    extra_cols += ", bet_uid"
+                    extra_ph   += ", %s"
+                    extra_vals.append(pred_uid)
                 if has_run_id:
                     extra_cols += ", run_id"
                     extra_ph   += ", %s"
@@ -1493,6 +1637,7 @@ def save_predictions(predictions: list) -> int:
                     extra_cols += ", run_date"
                     extra_ph   += ", %s"
                     extra_vals.append(p.get("run_date") or p.get("game_date"))
+                conflict_sql = "ON CONFLICT (bet_uid) DO NOTHING" if has_bet_uid else "ON CONFLICT DO NOTHING"
                 cur.execute(f"""
                     INSERT INTO predictions
                         (game_key, sport, bet_type, pick, line, odds_am, dec_odds,
@@ -1500,7 +1645,7 @@ def save_predictions(predictions: list) -> int:
                          home_team, away_team, home_starter, away_starter,
                          outcome, sentiment_score, news_snippet{extra_cols})
                     VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'PENDING',%s,%s{extra_ph})
-                    ON CONFLICT DO NOTHING
+                    {conflict_sql}
                 """, (
                     p.get("game_key"), p.get("sport","mlb"), p.get("bet_type"),
                     p.get("pick"), p.get("line"), p.get("odds_am"), p.get("dec_odds"),
@@ -1511,7 +1656,7 @@ def save_predictions(predictions: list) -> int:
                     p.get("sentiment_score"), p.get("news_snippet","")[:500],
                     *extra_vals,
                 ))
-                saved += 1
+                saved += cur.rowcount
             except Exception:
                 pass
         conn.commit()
@@ -1704,7 +1849,7 @@ def get_predictions_for_date(game_date: "str | datetime.date", sport: str | None
             wheres.append("sport = %s")
             vals.append(sport)
         cur.execute(
-            f"""SELECT game_key, bet_type, pick, line, odds_am, dec_odds, model_prob,
+            f"""SELECT bet_uid, game_key, bet_type, pick, line, odds_am, dec_odds, model_prob,
                       confidence, safety_label, game_date, game_time,
                       home_team, away_team, home_starter, away_starter, outcome
                FROM predictions
@@ -1794,7 +1939,7 @@ def get_performance_stats(sport: str | None = None) -> dict:
                 ROUND(AVG(model_prob)*100, 1) AS avg_confidence,
                 COUNT(DISTINCT bet_type) AS bet_types_used
             FROM predictions
-            WHERE predicted_at > NOW() - INTERVAL '90 days'
+            WHERE outcome != 'ARCHIVED'
             {sport_where}
         """, vals)
         row = cur.fetchone()
@@ -1806,8 +1951,8 @@ def get_performance_stats(sport: str | None = None) -> dict:
                    COUNT(*) FILTER (WHERE outcome='LOSS') AS losses,
                    COUNT(*) AS total
             FROM predictions
-            WHERE predicted_at > NOW() - INTERVAL '90 days'
-              {sport_where}
+                        WHERE outcome != 'ARCHIVED'
+                            {sport_where}
               AND outcome IN ('WIN','LOSS')
             GROUP BY bet_type ORDER BY total DESC
         """, vals)
@@ -1819,6 +1964,7 @@ def get_performance_stats(sport: str | None = None) -> dict:
                    COUNT(*) FILTER (WHERE outcome='LOSS') AS losses
             FROM predictions
             WHERE game_date >= CURRENT_DATE - INTERVAL '30 days'
+                            AND outcome != 'ARCHIVED'
               {sport_where}
               AND outcome IN ('WIN','LOSS')
             GROUP BY game_date ORDER BY game_date
@@ -1832,8 +1978,8 @@ def get_performance_stats(sport: str | None = None) -> dict:
         conn.close()
 
 
-def get_prop_performance_stats(sport: str | None = None, days_back: int = 7) -> dict:
-    """Return prop stats for dashboard performance covering the last N days (default 7)."""
+def get_prop_performance_stats(sport: str | None = None, days_back: int | None = None) -> dict:
+    """Return prop stats for dashboard tracking (all-time by default)."""
     conn = get_conn()
     if conn is None:
         return {}
@@ -1844,8 +1990,11 @@ def get_prop_performance_stats(sport: str | None = None, days_back: int = 7) -> 
         if sport:
             sport_where = " AND sport = %s"
             vals.append(sport)
-        # No recommendation filter — track all bet types across all sports
-        date_filter = f"AND game_date >= CURRENT_DATE - ({max(1, int(days_back))} * INTERVAL '1 day')"
+        # No recommendation filter — track all bet types across all sports.
+        # If days_back is provided (>0), limit to that trailing window; otherwise all-time.
+        date_filter = ""
+        if days_back is not None and int(days_back) > 0:
+            date_filter = f"AND game_date >= CURRENT_DATE - ({int(days_back)} * INTERVAL '1 day')"
 
         # Overall prop stats
         cur.execute(f"""
@@ -1884,7 +2033,7 @@ def get_prop_performance_stats(sport: str | None = None, days_back: int = 7) -> 
             ORDER BY total DESC
         """, vals)
         stats["by_prop_type"] = [dict(r) for r in cur.fetchall()]
-        # Daily trend for last 7 days
+        # Daily trend
         cur.execute(f"""
             SELECT game_date::text AS date,
                    COUNT(*) FILTER (WHERE outcome='WIN')  AS wins,
@@ -1896,7 +2045,7 @@ def get_prop_performance_stats(sport: str | None = None, days_back: int = 7) -> 
               {sport_where}
             GROUP BY game_date
             ORDER BY game_date DESC
-            LIMIT 14
+            LIMIT 30
         """, vals)
         stats["daily_trend"] = [dict(r) for r in cur.fetchall()]
         return stats
@@ -1921,12 +2070,12 @@ def get_pending_props(days_back: int = 3, sport: str | None = None) -> list:
             vals.append(sport)
         # No recommendation filter — resolve all bet types for all sports
         cur.execute(f"""
-            SELECT id, game_key, sport, player_name, team, game_date::text,
+            SELECT id, bet_uid, game_key, sport, player_name, team, game_date::text,
                    prop_type, line, over_prob, under_prob, recommendation, stats_json
             FROM prop_history
             WHERE outcome = 'PENDING'
               AND game_date >= CURRENT_DATE - (%s * INTERVAL '1 day')
-              AND game_date < CURRENT_DATE
+                            AND game_date <= CURRENT_DATE
               {sport_where}
             ORDER BY game_date DESC
         """, vals)
@@ -2101,8 +2250,42 @@ def save_tracked_parlay(name: str, legs: list, combined_odds: float,
         return 0
     try:
         cur = conn.cursor()
+        cols = _get_table_columns(conn, "tracked_parlays")
+        has_parlay_uid = "parlay_uid" in cols
         legs_json = json.dumps(legs or [])
         current_date = _cache_date_default()
+
+        # Always compute a deterministic UID so the same parlay is not re-inserted.
+        par_uid = _parlay_uid(name=name, legs=legs or [], created_date=current_date)
+
+        if has_parlay_uid and par_uid:
+            if dedupe_pending:
+                cur.execute(
+                    """
+                    SELECT id
+                    FROM tracked_parlays
+                    WHERE parlay_uid = %s
+                      AND outcome = 'PENDING'
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """,
+                    (par_uid,),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT id
+                    FROM tracked_parlays
+                    WHERE parlay_uid = %s
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """,
+                    (par_uid,),
+                )
+            existing = cur.fetchone()
+            if existing:
+                return int(existing[0])
+
         if dedupe_pending:
             cur.execute("""
                 SELECT id
@@ -2117,12 +2300,27 @@ def save_tracked_parlay(name: str, legs: list, combined_odds: float,
             existing = cur.fetchone()
             if existing:
                 return int(existing[0])
-        cur.execute("""
-            INSERT INTO tracked_parlays
-                (name, legs_json, combined_odds, stake_usd, outcome)
-            VALUES (%s, %s::jsonb, %s, %s, 'PENDING')
-            RETURNING id
-        """, (name, legs_json, combined_odds, stake_usd))
+
+        if has_parlay_uid:
+            cur.execute(
+                """
+                INSERT INTO tracked_parlays
+                    (parlay_uid, name, legs_json, combined_odds, stake_usd, outcome)
+                VALUES (%s, %s, %s::jsonb, %s, %s, 'PENDING')
+                RETURNING id
+                """,
+                (par_uid, name, legs_json, combined_odds, stake_usd),
+            )
+        else:
+            cur.execute(
+                """
+                INSERT INTO tracked_parlays
+                    (name, legs_json, combined_odds, stake_usd, outcome)
+                VALUES (%s, %s::jsonb, %s, %s, 'PENDING')
+                RETURNING id
+                """,
+                (name, legs_json, combined_odds, stake_usd),
+            )
         row = cur.fetchone()
         conn.commit()
         return row[0] if row else 0

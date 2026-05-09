@@ -789,41 +789,137 @@ def resolve_tracked_parlays(days_back: int = 3) -> int:
         if not legs:
             continue
 
+        conn = get_conn()
+        if not conn:
+            continue
+
         leg_outcomes: list[str] = []
-        for leg in legs:
-            game_key = (leg.get("game") or leg.get("game_key") or "").strip()
-            label    = (leg.get("label") or "").strip()
-            if not game_key:
-                continue
+        try:
+            cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
-            conn = get_conn()
-            if not conn:
-                break
-            try:
-                cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-                # Look up the prediction by game_key + pick label fragment
-                pick_fragment = label[:60] if label else "%"
-                cur.execute("""
-                    SELECT outcome FROM predictions
-                    WHERE (game_key ILIKE %s OR game_key ILIKE %s)
-                      AND pick ILIKE %s
-                      AND outcome != 'PENDING'
-                    ORDER BY predicted_at DESC LIMIT 1
-                """, (
-                    f"%{game_key}%",
-                    f"%{game_key.replace('@', '%')}%",
-                    f"%{pick_fragment}%",
-                ))
-                row = cur.fetchone()
-                if row:
-                    leg_outcomes.append(row["outcome"])
-            except Exception:
-                pass
-            finally:
-                conn.close()
+            for leg in legs:
+                game_key = (leg.get("game") or leg.get("game_key") or "").strip()
+                label = (leg.get("label") or leg.get("pick") or "").strip()
+                bet_type = str(leg.get("bet_type") or "").lower()
+                source = str(leg.get("source") or "").lower()
+                prediction_uid = str(leg.get("prediction_uid") or leg.get("bet_uid") or "").strip()
+                row = None
 
-        # Require every leg to have resolved
-        expected_legs = len([l for l in legs if l.get("game") or l.get("game_key")])
+                # 1) Exact lookup by deterministic prediction UID (best match)
+                if prediction_uid:
+                    cur.execute(
+                        """
+                        SELECT outcome FROM predictions
+                        WHERE bet_uid = %s
+                          AND outcome != 'PENDING'
+                        ORDER BY predicted_at DESC
+                        LIMIT 1
+                        """,
+                        (prediction_uid,),
+                    )
+                    row = cur.fetchone()
+
+                # 2) Prop legs can resolve from prop_history (critical for combo parlays)
+                is_prop_leg = source == "prop" or "prop" in bet_type
+                if not row and is_prop_leg:
+                    prop_uid = str(leg.get("prop_uid") or "").strip()
+                    if prop_uid:
+                        cur.execute(
+                            """
+                            SELECT outcome FROM prop_history
+                            WHERE bet_uid = %s
+                              AND outcome != 'PENDING'
+                            ORDER BY detected_at DESC
+                            LIMIT 1
+                            """,
+                            (prop_uid,),
+                        )
+                        row = cur.fetchone()
+
+                    if not row:
+                        player_name = str(leg.get("player_name") or leg.get("name") or "").strip()
+                        prop_type = str(leg.get("prop_type") or leg.get("stat_type") or "").strip()
+                        recommendation = str(leg.get("recommendation") or leg.get("direction") or "").strip().upper()
+                        line_txt = "" if leg.get("line") is None else str(leg.get("line"))
+                        if player_name:
+                            cur.execute(
+                                """
+                                SELECT outcome FROM prop_history
+                                WHERE player_name ILIKE %s
+                                  AND (%s = '' OR game_key ILIKE %s OR game_key ILIKE %s)
+                                  AND (%s = '' OR lower(prop_type) = lower(%s))
+                                  AND (%s = '' OR upper(recommendation) = %s)
+                                  AND (%s = '' OR COALESCE(line::text, '') = %s)
+                                  AND outcome != 'PENDING'
+                                ORDER BY detected_at DESC
+                                LIMIT 1
+                                """,
+                                (
+                                    f"%{player_name}%",
+                                    game_key,
+                                    f"%{game_key}%",
+                                    f"%{game_key.replace('@', '%')}%",
+                                    prop_type,
+                                    prop_type,
+                                    recommendation,
+                                    recommendation,
+                                    line_txt,
+                                    line_txt,
+                                ),
+                            )
+                            row = cur.fetchone()
+
+                    if not row and label:
+                        cur.execute(
+                            """
+                            SELECT outcome FROM prop_history
+                            WHERE (%s = '' OR game_key ILIKE %s OR game_key ILIKE %s)
+                              AND (player_name || ' ' || recommendation || ' ' || COALESCE(line::text,'') || ' ' || COALESCE(prop_type,'')) ILIKE %s
+                              AND outcome != 'PENDING'
+                            ORDER BY detected_at DESC
+                            LIMIT 1
+                            """,
+                            (
+                                game_key,
+                                f"%{game_key}%",
+                                f"%{game_key.replace('@', '%')}%",
+                                f"%{label[:60]}%",
+                            ),
+                        )
+                        row = cur.fetchone()
+
+                # 3) Fallback: game-key + label fuzzy match in predictions
+                if not row and game_key:
+                    pick_fragment = label[:60] if label else "%"
+                    cur.execute(
+                        """
+                        SELECT outcome FROM predictions
+                        WHERE (game_key ILIKE %s OR game_key ILIKE %s)
+                          AND pick ILIKE %s
+                          AND outcome != 'PENDING'
+                        ORDER BY predicted_at DESC
+                        LIMIT 1
+                        """,
+                        (
+                            f"%{game_key}%",
+                            f"%{game_key.replace('@', '%')}%",
+                            f"%{pick_fragment}%",
+                        ),
+                    )
+                    row = cur.fetchone()
+
+                if row and row.get("outcome"):
+                    leg_outcomes.append(str(row.get("outcome")).upper())
+        except Exception:
+            pass
+        finally:
+            conn.close()
+
+        # Require every trackable leg to have resolved
+        expected_legs = len([
+            l for l in legs
+            if l.get("game") or l.get("game_key") or l.get("prediction_uid") or l.get("player_name") or l.get("name")
+        ])
         if len(leg_outcomes) < max(expected_legs, 2):
             continue
 

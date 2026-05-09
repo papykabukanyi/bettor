@@ -4244,7 +4244,8 @@ def _resolve_all_sports_outcomes(days_back: int = 3) -> dict:
 
     # ── 1. Collect all ESPN completed games grouped by (sport_path, league_path) ──
     completed_games_by_config: dict[tuple, list] = {}
-    for days_ago in range(1, days_back + 2):
+    # Include today (days_ago=0) so same-day finals resolve immediately.
+    for days_ago in range(0, days_back + 1):
         check_date = today - datetime.timedelta(days=days_ago)
         dates_token = check_date.strftime("%Y%m%d")
         for cfg in _ESPN_RESOLVE_CONFIGS:
@@ -4300,7 +4301,7 @@ def _resolve_all_sports_outcomes(days_back: int = 3) -> dict:
                 FROM predictions
                 WHERE outcome = 'PENDING'
                   AND game_date >= CURRENT_DATE - INTERVAL '%s days'
-                  AND game_date < CURRENT_DATE
+                                    AND game_date <= CURRENT_DATE
             """ % int(days_back + 1))
             pending_preds = cur.fetchall()
 
@@ -4595,8 +4596,9 @@ def api_resolve_outcomes():
 def api_parlay_save():
     data = request.get_json(force=True) or {}
     try:
-        from data.db import save_tracked_parlay
-        dedupe_raw = str(data.get("dedupe_pending", "0")).strip().lower()
+        from data.db import save_tracked_parlay, _prediction_uid
+        # Default to duplicate prevention for all saves unless explicitly disabled.
+        dedupe_raw = str(data.get("dedupe_pending", "1")).strip().lower()
         dedupe_pending = dedupe_raw in {"1", "true", "yes", "on"}
         raw_legs = data.get("legs", [])
         norm_legs = []
@@ -4605,6 +4607,24 @@ def api_parlay_save():
                 if isinstance(leg, dict):
                     leg_payload = dict(leg)
                     leg_payload.setdefault("sport", _ACTIVE_SPORT)
+                    leg_payload.setdefault("game_key", leg_payload.get("game", ""))
+                    leg_payload.setdefault("game", leg_payload.get("game_key", ""))
+
+                    # Attach deterministic prediction UID per leg for exact outcome lookups.
+                    if not leg_payload.get("prediction_uid"):
+                        pick_label = (
+                            leg_payload.get("pick")
+                            or leg_payload.get("label")
+                            or ""
+                        )
+                        leg_payload["prediction_uid"] = _prediction_uid({
+                            "sport": leg_payload.get("sport", _ACTIVE_SPORT),
+                            "game_date": leg_payload.get("game_date") or _et_calendar_today().isoformat(),
+                            "game_key": leg_payload.get("game_key") or leg_payload.get("game") or "",
+                            "bet_type": leg_payload.get("bet_type") or "",
+                            "pick": pick_label,
+                            "line": leg_payload.get("line"),
+                        })
                     norm_legs.append(leg_payload)
         pid = save_tracked_parlay(
             name=data.get("name", "My Parlay"),
@@ -4828,8 +4848,8 @@ def _start_cache_poller():
     _tick()
 
 
-# Interval for the periodic background outcome resolver (15 minutes)
-_RESOLVE_INTERVAL = 15 * 60
+# Interval for the periodic background outcome resolver (5 minutes)
+_RESOLVE_INTERVAL = 5 * 60
 _resolve_poller_timer: threading.Timer | None = None
 
 
