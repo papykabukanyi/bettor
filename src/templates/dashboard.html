@@ -1384,8 +1384,29 @@ function _isPublicProp(p) {
   return true;
 }
 
+function _dedupePropRows(list) {
+  const rows = Array.isArray(list) ? list : [];
+  const out = [];
+  const seen = new Set();
+  for (const p of rows) {
+    if (!p || typeof p !== 'object') continue;
+    const key = [
+      String(p.game_key || p.game || '').toLowerCase(),
+      String(p.name || '').trim().toLowerCase(),
+      String(p.team || '').trim().toLowerCase(),
+      String(p.stat_type || '').trim().toLowerCase(),
+      String(p.line ?? ''),
+      String(p.direction || '').trim().toUpperCase(),
+    ].join('|');
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(p);
+  }
+  return out;
+}
+
 function _publicOverProps(list) {
-  return (Array.isArray(list) ? list : []).filter(_isPublicProp);
+  return _dedupePropRows((Array.isArray(list) ? list : []).filter(_isPublicProp));
 }
 
 function _overBetsTotal() {
@@ -2000,80 +2021,95 @@ function plainEnglishBet(bet, homeTeam, awayTeam, phase='upcoming') {
   if (!bet) return null;
   const bt   = (bet.bet_type||'').toLowerCase();
   const pick = bet.pick || '';
-  const line = parseFloat(bet.line) || 0;
+  const lv = _lineValue(bet.line);
+  const line = Number.isFinite(lv) ? lv : null;
+  const lineTxt = line == null ? '' : String(line).replace(/\.0$/, '');
   const isOver = pick.toUpperCase().includes('OVER');
   const team = cleanPickTeam(pick);
   if (_isSoccerMode()) {
     if (bt === '1x2') {
       if ((bet.pick_side || '').toLowerCase() === 'draw') {
-        return { text: _phaseVerb(phase, 'Back the draw result', 'Draw market live', 'Draw market final'), emoji: '&#8646;', color: 'var(--yellow)' };
+        return { text: _phaseVerb(phase, 'Draw', 'Draw', 'Draw'), emoji: '&#8646;', color: 'var(--yellow)' };
       }
-      return { text: _phaseVerb(phase, `Back ${team || pick}`, `${team || pick} is live`, `${team || pick} market is final`), emoji: '&#9917;', color: 'var(--green)' };
+      return { text: _phaseVerb(phase, `${team || pick}`, `${team || pick}`, `${team || pick}`), emoji: '&#9917;', color: 'var(--green)' };
     }
     if (bt === 'goals o/u') {
       return isOver
-        ? { text: _phaseVerb(phase, `Over ${line} total goals`, `Over ${line} goals live`, `Over ${line} goals final`), emoji: '&#128293;', color: 'var(--accent)' }
-        : { text: _phaseVerb(phase, `Under ${line} total goals`, `Under ${line} goals live`, `Under ${line} goals final`), emoji: '&#129532;', color: 'var(--yellow)' };
+        ? { text: _phaseVerb(phase, `Over ${lineTxt} Goals`, `Over ${lineTxt} Goals`, `Over ${lineTxt} Goals`), emoji: '&#128293;', color: 'var(--accent)' }
+        : { text: _phaseVerb(phase, `Under ${lineTxt} Goals`, `Under ${lineTxt} Goals`, `Under ${lineTxt} Goals`), emoji: '&#129532;', color: 'var(--yellow)' };
     }
     if (bt === 'btts') {
-      return { text: _phaseVerb(phase, 'Both teams to score', 'BTTS market live', 'BTTS market final'), emoji: '&#9889;', color: 'var(--accent)' };
+      return { text: _phaseVerb(phase, 'BTTS', 'BTTS', 'BTTS'), emoji: '&#9889;', color: 'var(--accent)' };
     }
     if (bt === 'draw no bet') {
-      return { text: _phaseVerb(phase, `${team || pick} draw-no-bet`, `${team || pick} DNB live`, `${team || pick} DNB final`), emoji: '&#128737;', color: '#93c5fd' };
+      return { text: _phaseVerb(phase, `${team || pick} DNB`, `${team || pick} DNB`, `${team || pick} DNB`), emoji: '&#128737;', color: '#93c5fd' };
     }
   }
-  if (bt === 'moneyline') return { text: _phaseVerb(phase, `Ride ${team} ML`, `${team} ML is cooking live`, `${team} ML ticket is closed`), emoji: '&#127942;', color: 'var(--green)' };
+  if (bt === 'moneyline') return { text: _phaseVerb(phase, `${team || pick} ML`, `${team || pick} ML`, `${team || pick} ML`), emoji: '&#127942;', color: 'var(--green)' };
   if (bt === 'run_line') {
-    if (pick.includes('+1.5')) return { text: _phaseVerb(phase, `Take ${team} +1.5 as the safe cover`, `${team} +1.5 is alive`, `${team} +1.5 is graded`), emoji: '&#128202;', color: '#818cf8' };
-    return { text: _phaseVerb(phase, `Back ${team} -1.5 for a blowout`, `${team} -1.5 is live`, `${team} -1.5 is graded`), emoji: '&#128202;', color: '#818cf8' };
+    if (pick.includes('+1.5')) return { text: _phaseVerb(phase, `${team || pick} +1.5`, `${team || pick} +1.5`, `${team || pick} +1.5`), emoji: '&#128202;', color: '#818cf8' };
+    if (pick.includes('-1.5')) return { text: _phaseVerb(phase, `${team || pick} -1.5`, `${team || pick} -1.5`, `${team || pick} -1.5`), emoji: '&#128202;', color: '#818cf8' };
+    return { text: _phaseVerb(phase, `${team || pick} Run Line`, `${team || pick} Run Line`, `${team || pick} Run Line`), emoji: '&#128202;', color: '#818cf8' };
   }
   if (bt === 'total' || bt === 'game_total') {
     return isOver
-      ? { text: _phaseVerb(phase, `Smash OVER ${line} runs`, `OVER ${line} is sweating live`, `OVER ${line} is final`), emoji: '&#127919;', color: 'var(--accent)' }
-      : { text: _phaseVerb(phase, `Grab UNDER ${line} runs`, `UNDER ${line} is sweating live`, `UNDER ${line} is final`), emoji: '&#127919;', color: 'var(--yellow)' };
+      ? { text: _phaseVerb(phase, `Over ${lineTxt} Runs`, `Over ${lineTxt} Runs`, `Over ${lineTxt} Runs`), emoji: '&#127919;', color: 'var(--accent)' }
+      : { text: _phaseVerb(phase, `Under ${lineTxt} Runs`, `Under ${lineTxt} Runs`, `Under ${lineTxt} Runs`), emoji: '&#127919;', color: 'var(--yellow)' };
   }
   if (bt === 'f5_total') {
     return isOver
-      ? { text: _phaseVerb(phase, `First 5 OVER ${line} runs`, `F5 OVER ${line} is live`, `F5 OVER ${line} is final`), emoji: '&#9203;', color: 'var(--accent)' }
-      : { text: _phaseVerb(phase, `First 5 UNDER ${line} runs`, `F5 UNDER ${line} is live`, `F5 UNDER ${line} is final`), emoji: '&#9203;', color: 'var(--yellow)' };
+      ? { text: _phaseVerb(phase, `Over ${lineTxt} Runs (F5)`, `Over ${lineTxt} Runs (F5)`, `Over ${lineTxt} Runs (F5)`), emoji: '&#9203;', color: 'var(--accent)' }
+      : { text: _phaseVerb(phase, `Under ${lineTxt} Runs (F5)`, `Under ${lineTxt} Runs (F5)`, `Under ${lineTxt} Runs (F5)`), emoji: '&#9203;', color: 'var(--yellow)' };
   }
-  if (bt === 'f5_moneyline') return { text: _phaseVerb(phase, `Back ${team} in the first 5`, `${team} F5 is live`, `${team} F5 is final`), emoji: '&#9203;', color: '#a78bfa' };
+  if (bt === 'f5_moneyline') return { text: _phaseVerb(phase, `${team || pick} ML (F5)`, `${team || pick} ML (F5)`, `${team || pick} ML (F5)`), emoji: '&#9203;', color: '#a78bfa' };
   if (bt === 'home_team_total') {
     return isOver
-      ? { text: _phaseVerb(phase, `${homeTeam} to score ${line}+ runs`, `${homeTeam} team total over is live`, `${homeTeam} team total over is final`), emoji: '&#127968;', color: 'var(--accent)' }
-      : { text: _phaseVerb(phase, `${homeTeam} stays under ${line} runs`, `${homeTeam} team total under is live`, `${homeTeam} team total under is final`), emoji: '&#127968;', color: 'var(--yellow)' };
+      ? { text: _phaseVerb(phase, `${homeTeam} Over ${lineTxt}`, `${homeTeam} Over ${lineTxt}`, `${homeTeam} Over ${lineTxt}`), emoji: '&#127968;', color: 'var(--accent)' }
+      : { text: _phaseVerb(phase, `${homeTeam} Under ${lineTxt}`, `${homeTeam} Under ${lineTxt}`, `${homeTeam} Under ${lineTxt}`), emoji: '&#127968;', color: 'var(--yellow)' };
   }
   if (bt === 'away_team_total') {
     return isOver
-      ? { text: _phaseVerb(phase, `${awayTeam} to score ${line}+ runs`, `${awayTeam} team total over is live`, `${awayTeam} team total over is final`), emoji: '&#9992;', color: 'var(--accent)' }
-      : { text: _phaseVerb(phase, `${awayTeam} stays under ${line} runs`, `${awayTeam} team total under is live`, `${awayTeam} team total under is final`), emoji: '&#9992;', color: 'var(--yellow)' };
+      ? { text: _phaseVerb(phase, `${awayTeam} Over ${lineTxt}`, `${awayTeam} Over ${lineTxt}`, `${awayTeam} Over ${lineTxt}`), emoji: '&#9992;', color: 'var(--accent)' }
+      : { text: _phaseVerb(phase, `${awayTeam} Under ${lineTxt}`, `${awayTeam} Under ${lineTxt}`, `${awayTeam} Under ${lineTxt}`), emoji: '&#9992;', color: 'var(--yellow)' };
   }
   return { text: pick, emoji: '&#127919;', color: 'var(--text)' };
 }
 
 function plainEnglishPropText(p, phase='upcoming') {
   const name = p.name || '—';
-  const line = parseFloat(p.line) || 0;
+  const lv   = _lineValue(p.line);
+  const line = Number.isFinite(lv) ? lv : null;
+  const lineTxt = line == null ? '' : String(line).replace(/\.0$/, '');
   const st   = p.stat_type || '';
   const dir  = (p.direction || 'OVER').toUpperCase();
   if (_isSoccerMode()) {
-    if (st === 'goals')          return { text: _phaseVerb(phase, `${name} ${dir === 'UNDER' ? 'under' : 'over'} ${line} goals`, `${name} goals prop live`, `${name} goals prop final`), emoji: '&#9917;', color: dir === 'UNDER' ? 'var(--yellow)' : 'var(--green)' };
-    if (st === 'assists')        return { text: _phaseVerb(phase, `${name} ${dir === 'UNDER' ? 'under' : 'over'} ${line} assists`, `${name} assist prop live`, `${name} assist prop final`), emoji: '&#129309;', color: 'var(--accent)' };
-    if (st === 'shots_on_target')return { text: _phaseVerb(phase, `${name} ${dir === 'UNDER' ? 'under' : 'over'} ${line} shots on target`, `${name} SOT prop live`, `${name} SOT prop final`), emoji: '&#127919;', color: dir === 'UNDER' ? 'var(--yellow)' : 'var(--accent)' };
-    if (st === 'cards')          return { text: _phaseVerb(phase, `${name} ${dir === 'UNDER' ? 'under' : 'over'} ${line} cards`, `${name} cards prop live`, `${name} cards prop final`), emoji: '&#128993;', color: 'var(--yellow)' };
-    if (st === 'corners')        return { text: _phaseVerb(phase, `${name} ${dir === 'UNDER' ? 'under' : 'over'} ${line} corners`, `${name} corners prop live`, `${name} corners prop final`), emoji: '&#9873;', color: 'var(--accent)' };
+    if (st === 'goals')          return { text: _phaseVerb(phase, `${name} ${dir} ${lineTxt} Goals`, `${name} ${dir} ${lineTxt} Goals`, `${name} ${dir} ${lineTxt} Goals`), emoji: '&#9917;', color: dir === 'UNDER' ? 'var(--yellow)' : 'var(--green)' };
+    if (st === 'assists')        return { text: _phaseVerb(phase, `${name} ${dir} ${lineTxt} Assists`, `${name} ${dir} ${lineTxt} Assists`, `${name} ${dir} ${lineTxt} Assists`), emoji: '&#129309;', color: 'var(--accent)' };
+    if (st === 'shots_on_target')return { text: _phaseVerb(phase, `${name} ${dir} ${lineTxt} SOT`, `${name} ${dir} ${lineTxt} SOT`, `${name} ${dir} ${lineTxt} SOT`), emoji: '&#127919;', color: dir === 'UNDER' ? 'var(--yellow)' : 'var(--accent)' };
+    if (st === 'cards')          return { text: _phaseVerb(phase, `${name} ${dir} ${lineTxt} Cards`, `${name} ${dir} ${lineTxt} Cards`, `${name} ${dir} ${lineTxt} Cards`), emoji: '&#128993;', color: 'var(--yellow)' };
+    if (st === 'corners')        return { text: _phaseVerb(phase, `${name} ${dir} ${lineTxt} Corners`, `${name} ${dir} ${lineTxt} Corners`, `${name} ${dir} ${lineTxt} Corners`), emoji: '&#9873;', color: 'var(--accent)' };
   }
-  if (st === 'strikeouts')        return { text: _phaseVerb(phase, `Back ${name} for ${line}+ Ks`, `${name} K prop is live`, `${name} K prop is final`), emoji: '&#128293;', color: '#a78bfa' };
-  if (st === 'hits')              return { text: _phaseVerb(phase, `${name} for ${line}+ hit${line!==1?'s':''}`, `${name} hit prop is live`, `${name} hit prop is final`), emoji: '&#9918;', color: 'var(--accent)' };
-  if (st === 'home_runs')         return { text: _phaseVerb(phase, line<=1?`${name} to go yard`:`${name} for ${line}+ HRs`, `${name} HR prop is live`, `${name} HR prop is final`), emoji: '&#128165;', color: 'var(--green)' };
-  if (st === 'rbi')               return { text: _phaseVerb(phase, `${name} for ${line}+ RBI`, `${name} RBI prop is live`, `${name} RBI prop is final`), emoji: '&#127919;', color: 'var(--accent)' };
-  if (st === 'runs')              return { text: _phaseVerb(phase, `${name} to score ${line}+ run${line!==1?'s':''}`, `${name} run prop is live`, `${name} run prop is final`), emoji: '&#127939;', color: 'var(--green)' };
-  if (st === 'walks')             return { text: _phaseVerb(phase, `${name} for ${line}+ walk${line!==1?'s':''}`, `${name} walk prop is live`, `${name} walk prop is final`), emoji: '&#128694;', color: '#94a3b8' };
-  if (st === 'stolen_bases')      return { text: _phaseVerb(phase, `${name} for ${line}+ steal${line!==1?'s':''}`, `${name} steal prop is live`, `${name} steal prop is final`), emoji: '&#128168;', color: 'var(--yellow)' };
-  if (st === 'total_bases')       return { text: _phaseVerb(phase, `${name} for ${line}+ total bases`, `${name} TB prop is live`, `${name} TB prop is final`), emoji: '&#128208;', color: 'var(--accent)' };
-  if (st === 'batter_strikeouts') return { text: _phaseVerb(phase, `${name} to K ${line}+ times`, `${name} batter K prop is live`, `${name} batter K prop is final`), emoji: '&#10060;', color: 'var(--red)' };
-  if (st === 'doubles')           return { text: _phaseVerb(phase, `${name} for ${line}+ doubles`, `${name} doubles prop is live`, `${name} doubles prop is final`), emoji: '&#128640;', color: 'var(--accent)' };
-  return { text: _phaseVerb(phase, `Take ${name} over ${line} ${(p.prop_label||st)}`.trim(), `${name} prop is live`, `${name} prop is final`), emoji: '&#9650;', color: 'var(--accent)' };
+  if (st === 'strikeouts')        return { text: _phaseVerb(phase, `${name} ${dir} ${lineTxt} Ks`, `${name} ${dir} ${lineTxt} Ks`, `${name} ${dir} ${lineTxt} Ks`), emoji: '&#128293;', color: '#a78bfa' };
+  if (st === 'hits')              return { text: _phaseVerb(phase, `${name} ${dir} ${lineTxt} Hits`, `${name} ${dir} ${lineTxt} Hits`, `${name} ${dir} ${lineTxt} Hits`), emoji: '&#9918;', color: 'var(--accent)' };
+  if (st === 'home_runs')         return { text: _phaseVerb(phase, `${name} ${dir} ${lineTxt} HR`, `${name} ${dir} ${lineTxt} HR`, `${name} ${dir} ${lineTxt} HR`), emoji: '&#128165;', color: 'var(--green)' };
+  if (st === 'rbi')               return { text: _phaseVerb(phase, `${name} ${dir} ${lineTxt} RBI`, `${name} ${dir} ${lineTxt} RBI`, `${name} ${dir} ${lineTxt} RBI`), emoji: '&#127919;', color: 'var(--accent)' };
+  if (st === 'runs')              return { text: _phaseVerb(phase, `${name} ${dir} ${lineTxt} Runs`, `${name} ${dir} ${lineTxt} Runs`, `${name} ${dir} ${lineTxt} Runs`), emoji: '&#127939;', color: 'var(--green)' };
+  if (st === 'walks')             return { text: _phaseVerb(phase, `${name} ${dir} ${lineTxt} Walks`, `${name} ${dir} ${lineTxt} Walks`, `${name} ${dir} ${lineTxt} Walks`), emoji: '&#128694;', color: '#94a3b8' };
+  if (st === 'stolen_bases')      return { text: _phaseVerb(phase, `${name} ${dir} ${lineTxt} SB`, `${name} ${dir} ${lineTxt} SB`, `${name} ${dir} ${lineTxt} SB`), emoji: '&#128168;', color: 'var(--yellow)' };
+  if (st === 'total_bases')       return { text: _phaseVerb(phase, `${name} ${dir} ${lineTxt} TB`, `${name} ${dir} ${lineTxt} TB`, `${name} ${dir} ${lineTxt} TB`), emoji: '&#128208;', color: 'var(--accent)' };
+  if (st === 'batter_strikeouts') return { text: _phaseVerb(phase, `${name} ${dir} ${lineTxt} Batter Ks`, `${name} ${dir} ${lineTxt} Batter Ks`, `${name} ${dir} ${lineTxt} Batter Ks`), emoji: '&#10060;', color: 'var(--red)' };
+  if (st === 'doubles')           return { text: _phaseVerb(phase, `${name} ${dir} ${lineTxt} Doubles`, `${name} ${dir} ${lineTxt} Doubles`, `${name} ${dir} ${lineTxt} Doubles`), emoji: '&#128640;', color: 'var(--accent)' };
+
+  const labelRaw = String((p.prop_label || st || 'Prop')).replace(/_/g, ' ').trim();
+  const marketLike = /moneyline|run line|total|1x2|goals o\/u|draw no bet|btts/i.test(labelRaw)
+    || /moneyline|run_line|total|1x2|goals_o_u|draw_no_bet|btts/.test(String(st||'').toLowerCase());
+  if (marketLike) {
+    return { text: _phaseVerb(phase, `${name}`, `${name}`, `${name}`), emoji: '&#9650;', color: 'var(--accent)' };
+  }
+  const shortText = line == null
+    ? `${name} ${labelRaw}`.trim()
+    : `${name} ${dir} ${lineTxt} ${labelRaw}`.trim();
+  return { text: _phaseVerb(phase, shortText, shortText, shortText), emoji: '&#9650;', color: 'var(--accent)' };
 }
 
 function gameCard(c) {

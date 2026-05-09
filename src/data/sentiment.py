@@ -69,6 +69,7 @@ _DISCORD_AUTH_LOGGED = False
 _DISCORD_CACHE: dict[str, dict] = {}
 _TIKTOK_CACHE: dict[str, dict] = {}
 _SOCIAL_PLAYER_CACHE: dict[str, dict] = {}
+_HIST_PLAYER_CACHE: dict[str, dict] = {}
 
 # ─── MLB team → subreddit mapping ────────────────────────────────────────────
 _TEAM_SUBREDDITS = {
@@ -698,6 +699,274 @@ def _safety_label_from_prob(prob: float) -> str:
     return "RISKY"
 
 
+def _sport_for_stats(sport: str) -> str:
+    sk = str(sport or "").strip().lower()
+    if sk in {"baseball", "mlb", "baseball_mlb"}:
+        return "mlb"
+    if sk in {"soccer", "football"}:
+        return "soccer"
+    if sk in {"basketball", "nba"}:
+        return "basketball"
+    if sk in {"americanfootball", "nfl"}:
+        return "americanfootball"
+    if sk in {"icehockey", "nhl", "hockey"}:
+        return "icehockey"
+    return sk or "mlb"
+
+
+def _to_float(value) -> float | None:
+    try:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, (int, float)):
+            return float(value)
+        s = str(value).strip().replace(",", "")
+        if not s:
+            return None
+        return float(s)
+    except Exception:
+        return None
+
+
+def _first_numeric(stats: dict, keys: list[str]) -> float | None:
+    if not isinstance(stats, dict):
+        return None
+    lowered = {str(k).lower(): v for k, v in stats.items()}
+    for key in keys:
+        if key in lowered:
+            val = _to_float(lowered[key])
+            if val is not None:
+                return val
+    return None
+
+
+def _poisson_over_prob(rate: float, line: float) -> float:
+    lam = max(0.01, float(rate or 0.01))
+    target = int(math.floor(float(line or 0.5)) + 1)
+    if target <= 1:
+        return max(0.05, min(0.95, 1.0 - math.exp(-lam)))
+
+    # P(X > line) where X ~ Poisson(lambda), for integer thresholds.
+    cdf = 0.0
+    for k in range(target):
+        try:
+            cdf += math.exp(-lam) * (lam ** k) / math.factorial(k)
+        except Exception:
+            pass
+    return max(0.05, min(0.95, 1.0 - cdf))
+
+
+def _metric_from_stats_json(stats: dict, sport: str) -> tuple[str, str, float, float] | None:
+    if not isinstance(stats, dict):
+        return None
+
+    sk = _sport_for_stats(sport)
+    games = _first_numeric(stats, ["games", "g", "gp", "appearances", "matches", "played"])
+    if games is None or games <= 0:
+        return None
+
+    if sk == "mlb":
+        hits = _first_numeric(stats, ["hits", "h"])
+        hr = _first_numeric(stats, ["home_runs", "homeruns", "hr"])
+        rbi = _first_numeric(stats, ["rbi"])
+        runs = _first_numeric(stats, ["runs", "r"])
+        candidates = []
+        if hits is not None:
+            candidates.append(("hits", "Hits", hits / games, 0.5))
+        if hr is not None:
+            candidates.append(("home_runs", "Home Runs", hr / games, 0.5))
+        if rbi is not None:
+            candidates.append(("rbi", "RBI", rbi / games, 0.5))
+        if runs is not None:
+            candidates.append(("runs", "Runs", runs / games, 0.5))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda x: x[2], reverse=True)
+        return candidates[0]
+
+    if sk == "soccer":
+        goals = _first_numeric(stats, ["goals", "goals_scored"])
+        assists = _first_numeric(stats, ["assists"])
+        shots_on = _first_numeric(stats, ["shots_on_target", "sot"])
+        candidates = []
+        if goals is not None:
+            candidates.append(("goals", "Goals", goals / games, 0.5))
+        if assists is not None:
+            candidates.append(("assists", "Assists", assists / games, 0.5))
+        if shots_on is not None:
+            candidates.append(("shots_on_target", "Shots on Target", shots_on / games, 0.5))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda x: x[2], reverse=True)
+        return candidates[0]
+
+    if sk == "basketball":
+        points = _first_numeric(stats, ["points", "pts"])
+        assists = _first_numeric(stats, ["assists", "ast"])
+        rebounds = _first_numeric(stats, ["rebounds", "reb"])
+        candidates = []
+        if points is not None:
+            avg = points / games
+            candidates.append(("points", "Points", avg, max(8.5, round(avg * 0.85, 1))))
+        if assists is not None:
+            avg = assists / games
+            candidates.append(("assists", "Assists", avg, max(2.5, round(avg * 0.85, 1))))
+        if rebounds is not None:
+            avg = rebounds / games
+            candidates.append(("rebounds", "Rebounds", avg, max(3.5, round(avg * 0.85, 1))))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda x: x[2], reverse=True)
+        return candidates[0]
+
+    if sk == "americanfootball":
+        tds = _first_numeric(stats, ["touchdowns", "td", "passing_tds", "rushing_tds", "receiving_tds"])
+        if tds is not None:
+            return ("touchdowns", "Touchdowns", tds / games, 0.5)
+        yards = _first_numeric(stats, ["passing_yards", "rushing_yards", "receiving_yards", "yards"])
+        if yards is not None:
+            avg = yards / games
+            return ("yards", "Yards", avg / 100.0, max(35.5, round(avg * 0.85, 1)))
+
+    return None
+
+
+def _is_team_like_name(name: str, home_team: str, away_team: str) -> bool:
+    n = _normalize_text(name).strip()
+    if not n:
+        return True
+    for team in (home_team, away_team):
+        t = _normalize_text(team).strip()
+        if not t:
+            continue
+        if n == t or n in t or t in n:
+            return True
+        n_parts = set(n.split())
+        t_parts = set(t.split())
+        if n_parts and len(n_parts.intersection(t_parts)) >= min(len(n_parts), 2):
+            return True
+    return False
+
+
+def _historical_team_player_candidates(team_name: str, sport: str, max_rows: int = 8) -> list[dict]:
+    max_rows = max(1, min(int(max_rows or 8), 50))
+    stats_sport = _sport_for_stats(sport)
+    cache_key = f"{stats_sport}|{_normalize_text(team_name).strip()}|{max_rows}"
+    now = datetime.datetime.now(datetime.timezone.utc)
+
+    cached = _HIST_PLAYER_CACHE.get(cache_key, {})
+    cached_at = cached.get("fetched_at")
+    if cached_at and isinstance(cached_at, datetime.datetime):
+        age_min = (now - cached_at).total_seconds() / 60
+        if age_min <= 90:
+            return list(cached.get("rows", []))
+
+    try:
+        from data.db import get_player_season_stats
+    except Exception:
+        return []
+
+    rows = get_player_season_stats(stats_sport) or []
+    if not rows:
+        _HIST_PLAYER_CACHE[cache_key] = {"fetched_at": now, "rows": []}
+        return []
+
+    aliases = _team_alias_tokens(team_name)
+    by_player: dict[str, dict] = {}
+    current_year = datetime.date.today().year
+
+    for row in rows:
+        rteam = str(row.get("team") or "").strip()
+        if rteam and not (_text_mentions_team(rteam, aliases) or _text_mentions_team(team_name, _team_alias_tokens(rteam))):
+            continue
+
+        pname = str(row.get("player_name") or "").strip()
+        if not pname:
+            continue
+
+        metric = _metric_from_stats_json(row.get("stats_json") or {}, sport)
+        if not metric:
+            continue
+        stat_type, prop_label, rate, line = metric
+        if rate <= 0:
+            continue
+
+        season_raw = row.get("season")
+        try:
+            season = int(season_raw) if season_raw is not None else 0
+        except Exception:
+            season = 0
+        age = max(0, current_year - season) if season else 3
+        if age > 8:
+            continue
+        weight = 1.0 / (1.0 + 0.45 * age)
+
+        pentry = by_player.setdefault(pname, {
+            "player": pname,
+            "team": rteam or team_name,
+            "metrics": {},
+        })
+        mkey = f"{stat_type}|{line}|{prop_label}"
+        mentry = pentry["metrics"].setdefault(mkey, {
+            "stat_type": stat_type,
+            "prop_label": prop_label,
+            "line": float(line),
+            "weighted_rate": 0.0,
+            "weight_total": 0.0,
+            "seasons": set(),
+            "last_season": 0,
+        })
+        mentry["weighted_rate"] += float(rate) * weight
+        mentry["weight_total"] += weight
+        if season:
+            mentry["seasons"].add(season)
+            if season > mentry["last_season"]:
+                mentry["last_season"] = season
+
+    candidates: list[dict] = []
+    for player_name, pdata in by_player.items():
+        best_metric = None
+        best_rate = 0.0
+        for m in pdata.get("metrics", {}).values():
+            total_w = float(m.get("weight_total") or 0.0)
+            if total_w <= 0:
+                continue
+            avg_rate = float(m.get("weighted_rate") or 0.0) / total_w
+            if avg_rate > best_rate:
+                best_rate = avg_rate
+                best_metric = m
+        if not best_metric or best_rate <= 0:
+            continue
+
+        line = float(best_metric.get("line") or 0.5)
+        hist_prob = _poisson_over_prob(best_rate, line)
+        candidates.append({
+            "name": player_name,
+            "team": pdata.get("team") or team_name,
+            "stat_type": best_metric.get("stat_type") or "historical",
+            "prop_label": f"Historical {best_metric.get('prop_label') or 'Edge'}",
+            "line": line,
+            "hist_rate": round(best_rate, 4),
+            "hist_prob": round(hist_prob, 4),
+            "seasons_count": len(best_metric.get("seasons") or []),
+            "last_season": int(best_metric.get("last_season") or 0),
+        })
+
+    candidates.sort(
+        key=lambda x: (
+            float(x.get("hist_prob") or 0.0),
+            int(x.get("seasons_count") or 0),
+            int(x.get("last_season") or 0),
+        ),
+        reverse=True,
+    )
+    candidates = candidates[:max_rows]
+    _HIST_PLAYER_CACHE[cache_key] = {"fetched_at": now, "rows": candidates}
+    return candidates
+
+
 def get_game_player_sentiment_props(
     home_team: str,
     away_team: str,
@@ -785,51 +1054,79 @@ def get_game_player_sentiment_props(
             seen_text.add(text)
             source_rows.append(("news", text))
 
-    if not source_rows:
+    hist_candidates = (
+        _historical_team_player_candidates(home, sport, max_rows=max_rows * 2)
+        + _historical_team_player_candidates(away, sport, max_rows=max_rows * 2)
+    )
+    hist_by_name: dict[str, dict] = {}
+    for cand in hist_candidates:
+        key = str(cand.get("name") or "").strip().lower()
+        if not key:
+            continue
+        prev = hist_by_name.get(key)
+        if (not prev) or float(cand.get("hist_prob") or 0.0) > float(prev.get("hist_prob") or 0.0):
+            hist_by_name[key] = cand
+
+    if not source_rows and not hist_candidates:
         _SOCIAL_PLAYER_CACHE[cache_key] = {"fetched_at": now, "rows": []}
         return []
 
-    source_rows = source_rows[:180]
-    score_inputs = [
-        _normalize_discord_slang(text) if src == "discord" else text
-        for src, text in source_rows
-    ]
-    scores = score_texts(score_inputs)
-    if len(scores) != len(source_rows):
-        scores = [_keyword_sentiment(text) for _, text in source_rows]
-
     buckets: dict[str, dict] = {}
-    for (src, text), sc in zip(source_rows, scores):
-        names = list(set(_extract_player_name_candidates(text)))
-        if not names:
-            continue
-        team_hit = _infer_team_from_text(text, home, away)
-        for name in names:
-            row = buckets.setdefault(name, {
-                "mentions": 0,
-                "sentiment_sum": 0.0,
-                "sources": set(),
-                "team_hits": {},
-            })
-            row["mentions"] += 1
-            row["sentiment_sum"] += float(sc or 0.0)
-            row["sources"].add(src)
-            if team_hit:
-                team_counts = row["team_hits"]
-                team_counts[team_hit] = team_counts.get(team_hit, 0) + 1
+    if source_rows:
+        source_rows = source_rows[:180]
+        score_inputs = [
+            _normalize_discord_slang(text) if src == "discord" else text
+            for src, text in source_rows
+        ]
+        scores = score_texts(score_inputs)
+        if len(scores) != len(source_rows):
+            scores = [_keyword_sentiment(text) for _, text in source_rows]
+
+        for (src, text), sc in zip(source_rows, scores):
+            names = list(set(_extract_player_name_candidates(text)))
+            if not names:
+                continue
+            team_hit = _infer_team_from_text(text, home, away)
+            for name in names:
+                if _is_team_like_name(name, home, away):
+                    continue
+                row = buckets.setdefault(name, {
+                    "mentions": 0,
+                    "sentiment_sum": 0.0,
+                    "sources": set(),
+                    "team_hits": {},
+                })
+                row["mentions"] += 1
+                row["sentiment_sum"] += float(sc or 0.0)
+                row["sources"].add(src)
+                if team_hit:
+                    team_counts = row["team_hits"]
+                    team_counts[team_hit] = team_counts.get(team_hit, 0) + 1
 
     rows: list[dict] = []
+    existing_names: set[str] = set()
+    sport_key = re.sub(r"[^a-z0-9_]+", "_", str(sport or "all").lower()).strip("_") or "all"
     for player_name, data in buckets.items():
         mentions = int(data.get("mentions", 0) or 0)
         if mentions < min_mentions:
             continue
+        if _is_team_like_name(player_name, home, away):
+            continue
 
         avg_sent = float(data.get("sentiment_sum", 0.0) or 0.0) / max(mentions, 1)
-        direction = "OVER" if avg_sent >= 0 else "UNDER"
+        hist = hist_by_name.get(player_name.strip().lower())
+        hist_prob = float(hist.get("hist_prob") or 0.0) if hist else None
 
-        sentiment_strength = min(0.30, abs(avg_sent) * 0.22 + min(0.12, math.log1p(mentions) * 0.06))
-        model_prob = 0.50 + sentiment_strength
-        model_prob = _blend_prob_with_odds(model_prob, odds_hint)
+        # Convert sentiment into an OVER baseline, then blend with historical rate.
+        over_prob = 0.50 + max(-0.30, min(0.30, avg_sent * 0.22)) + min(0.10, math.log1p(mentions) * 0.03)
+        over_prob = max(0.05, min(0.95, over_prob))
+        if hist_prob is not None:
+            over_prob = over_prob * 0.58 + hist_prob * 0.42
+            over_prob = max(0.05, min(0.95, over_prob))
+
+        direction = "OVER" if over_prob >= 0.5 else "UNDER"
+        pick_prob = over_prob if direction == "OVER" else (1.0 - over_prob)
+        model_prob = _blend_prob_with_odds(pick_prob, odds_hint)
         model_prob = max(0.51, min(0.92, model_prob))
 
         odds_am = _american_from_prob(model_prob)
@@ -840,16 +1137,22 @@ def get_game_player_sentiment_props(
         if team_hits:
             team_name = max(team_hits.items(), key=lambda kv: kv[1])[0]
         else:
-            team_name = home
+            team_name = str((hist or {}).get("team") or home)
 
-        sport_key = re.sub(r"[^a-z0-9_]+", "_", str(sport or "all").lower()).strip("_") or "all"
+        stat_type = str((hist or {}).get("stat_type") or f"{sport_key}_sentiment")
+        prop_label = str((hist or {}).get("prop_label") or "Sentiment -Odds Edge")
+        line = float((hist or {}).get("line") or 0.5)
+        reason = "Social sentiment + historical multi-season profile"
+        if hist is None:
+            reason = "Only players mentioned in social sentiment feeds are included"
+
         rows.append({
             "sport": sport_key,
             "name": player_name,
             "team": team_name,
-            "prop_label": "Sentiment -Odds Edge",
-            "stat_type": f"{sport_key}_sentiment",
-            "line": 0.5,
+            "prop_label": prop_label,
+            "stat_type": stat_type,
+            "line": line,
             "direction": direction,
             "model_prob": round(model_prob, 4),
             "confidence": int(round(model_prob * 100)),
@@ -869,11 +1172,94 @@ def get_game_player_sentiment_props(
             "sentiment_sources": ",".join(sorted(data.get("sources") or [])),
             "worth_it": model_prob >= 0.57,
             "worth_score": round(model_prob * 100.0, 2),
-            "worth_reason": "Only players mentioned in social sentiment feeds are included",
+            "worth_reason": reason,
         })
+        existing_names.add(player_name.strip().lower())
 
-    rows.sort(key=lambda r: (int(r.get("sentiment_mentions") or 0), float(r.get("model_prob") or 0.0)), reverse=True)
-    rows = rows[:max_rows]
+    # Fill gaps with historical performers when social volume is thin.
+    for cand in hist_candidates:
+        if len(rows) >= max_rows:
+            break
+        player_name = str(cand.get("name") or "").strip()
+        if not player_name:
+            continue
+        low_name = player_name.lower()
+        if low_name in existing_names:
+            continue
+        if _is_team_like_name(player_name, home, away):
+            continue
+
+        hist_prob = float(cand.get("hist_prob") or 0.5)
+        cached_sent = _cached_sentiment_payload(player_name, "player")
+        sent_score = float((cached_sent or {}).get("combined") or 0.0)
+
+        over_prob = max(0.05, min(0.95, hist_prob + sent_score * 0.08))
+        direction = "OVER" if over_prob >= 0.5 else "UNDER"
+        pick_prob = over_prob if direction == "OVER" else (1.0 - over_prob)
+        model_prob = _blend_prob_with_odds(pick_prob, odds_hint)
+        model_prob = max(0.51, min(0.92, model_prob))
+
+        odds_am = _american_from_prob(model_prob)
+        dec_odds = round((1 + (odds_am / 100.0)) if odds_am > 0 else (1 + (100.0 / abs(odds_am))), 4)
+        ev = (dec_odds - 1.0) * model_prob - (1.0 - model_prob)
+
+        src = "history"
+        if cached_sent:
+            src = "history,sentiment_cached"
+
+        rows.append({
+            "sport": sport_key,
+            "name": player_name,
+            "team": str(cand.get("team") or home),
+            "prop_label": str(cand.get("prop_label") or "Historical Edge"),
+            "stat_type": str(cand.get("stat_type") or f"{sport_key}_historical"),
+            "line": float(cand.get("line") or 0.5),
+            "direction": direction,
+            "model_prob": round(model_prob, 4),
+            "confidence": int(round(model_prob * 100)),
+            "safety_label": _safety_label_from_prob(model_prob),
+            "ev": round(ev, 4),
+            "odds_am": odds_am,
+            "dec_odds": dec_odds,
+            "game": f"{away} @ {home}",
+            "game_key": game_key,
+            "match_key": f"{away}@{home}",
+            "game_date": game_date,
+            "game_time": game_time,
+            "home_team": home,
+            "away_team": away,
+            "sentiment_score": round(sent_score, 4),
+            "sentiment_mentions": 0,
+            "sentiment_sources": src,
+            "worth_it": model_prob >= 0.57,
+            "worth_score": round(model_prob * 100.0, 2),
+            "worth_reason": "Historical multi-season trend with sentiment adjustment",
+        })
+        existing_names.add(low_name)
+
+    deduped: list[dict] = []
+    seen = set()
+    for row in rows:
+        key = (
+            str(row.get("game_key") or ""),
+            str(row.get("name") or "").strip().lower(),
+            str(row.get("stat_type") or "").strip().lower(),
+            str(row.get("line") if row.get("line") is not None else ""),
+            str(row.get("direction") or "").strip().upper(),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(row)
+
+    deduped.sort(
+        key=lambda r: (
+            float(r.get("model_prob") or 0.0),
+            int(r.get("sentiment_mentions") or 0),
+        ),
+        reverse=True,
+    )
+    rows = deduped[:max_rows]
     _SOCIAL_PLAYER_CACHE[cache_key] = {"fetched_at": now, "rows": rows}
     return rows
 

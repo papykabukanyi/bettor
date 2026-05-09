@@ -30,6 +30,7 @@ import warnings
 import atexit
 import tempfile
 import re
+import math
 
 from flask import Flask, render_template, jsonify, request, Response
 
@@ -614,9 +615,50 @@ def _infer_sport_group(sport_key: str) -> str:
     raw = str(sport_key or "").strip().lower()
     if not raw:
         return "other"
-    if "_" in raw:
-        return raw.split("_", 1)[0]
-    return raw
+
+    token = re.sub(r"[^a-z0-9]+", "_", raw).strip("_")
+    compact = token.replace("_", "")
+    exact = {
+        "mlb": "baseball",
+        "baseball": "baseball",
+        "baseball_mlb": "baseball",
+        "soccer": "soccer",
+        "football": "soccer",
+        "basketball": "basketball",
+        "nba": "basketball",
+        "wnba": "basketball",
+        "americanfootball": "americanfootball",
+        "american_football": "americanfootball",
+        "nfl": "americanfootball",
+        "ncaaf": "americanfootball",
+        "icehockey": "icehockey",
+        "ice_hockey": "icehockey",
+        "hockey": "icehockey",
+        "nhl": "icehockey",
+        "tennis": "tennis",
+        "mma": "mma",
+    }
+    if token in exact:
+        return exact[token]
+    if compact in exact:
+        return exact[compact]
+
+    if any(k in token for k in ("american_football", "americanfootball", "nfl", "ncaaf", "college_football", "xfl", "ufl", "cfl")):
+        return "americanfootball"
+    if any(k in token for k in ("ice_hockey", "icehockey", "nhl", "hockey")):
+        return "icehockey"
+    if any(k in token for k in ("basketball", "nba", "wnba", "ncaab", "euroleague")):
+        return "basketball"
+    if any(k in token for k in ("baseball", "mlb", "npb", "kbo")):
+        return "baseball"
+    if any(k in token for k in ("soccer", "mls", "epl", "bundesliga", "la_liga", "ligue", "serie_a", "uefa", "fifa", "eng_1", "ger_1", "ita_1", "esp_1", "fra_1", "ned_1", "por_1", "champions")):
+        return "soccer"
+    if any(k in token for k in ("tennis", "atp", "wta")):
+        return "tennis"
+    if any(k in token for k in ("mma", "ufc", "bellator", "pfl")):
+        return "mma"
+
+    return token or "other"
 
 
 def _prob_from_american(odds) -> float | None:
@@ -721,6 +763,42 @@ def _collect_fallback_games_for_all_sports(today: datetime.date, tomorrow: datet
             "game_key": game_key,
         })
 
+    def _as_score_int(value):
+        try:
+            if value is None:
+                return None
+            if isinstance(value, str) and not value.strip():
+                return None
+            return int(float(value))
+        except Exception:
+            return None
+
+    def _record_summary(comp: dict) -> str:
+        recs = comp.get("records") or []
+        if not recs:
+            return ""
+        for rec in recs:
+            rtype = str(rec.get("type") or "").strip().lower()
+            rname = str(rec.get("name") or "").strip().lower()
+            if rtype in {"total", "overall"} or rname in {"overall", "total"}:
+                return str(rec.get("summary") or "")
+        return str(recs[0].get("summary") or "")
+
+    def _record_win_pct(summary: str) -> float | None:
+        s = str(summary or "").strip()
+        if not s:
+            return None
+        nums = [int(x) for x in re.findall(r"\d+", s)]
+        if len(nums) < 2:
+            return None
+        wins = float(nums[0])
+        losses = float(nums[1])
+        draws = float(nums[2]) if len(nums) >= 3 else 0.0
+        total = wins + losses + draws
+        if total <= 0:
+            return None
+        return round((wins + 0.5 * draws) / total, 4)
+
     # 0) Prefer DB-cached schedule first for speed.
     has_mlb = False
     has_soccer = False
@@ -809,7 +887,97 @@ def _collect_fallback_games_for_all_sports(today: datetime.date, tomorrow: datet
         except Exception as e:
             _log(f"[all-sports] Soccer fallback fetch failed: {e}")
 
-    # 3) TheSportsDB (multi-sport free fixture feed) - opt-in due endpoint variability.
+    # 3) ESPN multi-sport scoreboards (free) for non-MLB/soccer coverage.
+    espn_enabled = str(os.getenv("ENABLE_ESPN_MULTI_SPORT_FALLBACK", "1")).strip().lower() in {"1", "true", "yes", "on"}
+    if espn_enabled:
+        try:
+            import requests
+
+            espn_sources = [
+                ("basketball", "nba", "basketball", "NBA"),
+                ("basketball", "wnba", "basketball", "WNBA"),
+                ("hockey", "nhl", "icehockey", "NHL"),
+                ("football", "nfl", "americanfootball", "NFL"),
+                ("football", "college-football", "americanfootball", "NCAAF"),
+                ("basketball", "mens-college-basketball", "basketball", "NCAAB"),
+                ("basketball", "womens-college-basketball", "basketball", "WNCAAB"),
+                ("tennis", "atp", "tennis", "ATP"),
+                ("tennis", "wta", "tennis", "WTA"),
+                ("mma", "ufc", "mma", "UFC"),
+            ]
+            for d in (today, tomorrow):
+                dates_token = d.strftime("%Y%m%d")
+                for sport_path, league_path, sport_group, league_label in espn_sources:
+                    url = f"https://site.api.espn.com/apis/site/v2/sports/{sport_path}/{league_path}/scoreboard"
+                    try:
+                        resp = requests.get(url, params={"dates": dates_token, "limit": 200}, timeout=8)
+                        if resp.status_code != 200:
+                            continue
+                        data = resp.json() or {}
+                    except Exception:
+                        continue
+
+                    for ev in (data.get("events") or []):
+                        comp = (ev.get("competitions") or [{}])[0]
+                        competitors = comp.get("competitors") or []
+                        if len(competitors) < 2:
+                            continue
+
+                        home_c = next((c for c in competitors if str(c.get("homeAway") or "").lower() == "home"), competitors[0])
+                        away_c = next((c for c in competitors if str(c.get("homeAway") or "").lower() == "away"), competitors[1] if len(competitors) > 1 else competitors[0])
+                        home = str(((home_c.get("team") or {}).get("displayName") or "")).strip()
+                        away = str(((away_c.get("team") or {}).get("displayName") or "")).strip()
+                        if not home or not away:
+                            continue
+
+                        iso_dt = str(ev.get("date") or comp.get("date") or "").strip()
+                        game_date, game_time = _datetime_to_et_parts(iso_dt)
+                        if not game_date:
+                            game_date = d.isoformat()
+
+                        status_desc = str((((ev.get("status") or {}).get("type") or {}).get("description")) or "").strip()
+                        status_state = str((((ev.get("status") or {}).get("type") or {}).get("state")) or "").strip().lower()
+                        status_low = status_desc.lower()
+                        if status_state in {"post", "final", "finished"} or "final" in status_low:
+                            status = "Final"
+                        elif status_state in {"in", "in_progress", "live"} or "progress" in status_low or "halftime" in status_low:
+                            status = "In Progress"
+                        else:
+                            status = "Scheduled"
+
+                        competition_name = str((comp.get("league") or {}).get("name") or league_label).strip()
+                        comp_code = f"espn_{_slug_token(sport_group)}_{_slug_token(league_path)}".upper()[:64]
+                        before = len(rows)
+                        _push_game(
+                            sport_group=sport_group,
+                            league=competition_name or league_label,
+                            competition=comp_code,
+                            competition_name=competition_name or league_label,
+                            home=home,
+                            away=away,
+                            game_date=game_date,
+                            game_time=game_time,
+                            game_datetime=iso_dt,
+                            status=status,
+                            home_score=_as_score_int(home_c.get("score")),
+                            away_score=_as_score_int(away_c.get("score")),
+                        )
+                        if len(rows) > before:
+                            home_rec = _record_summary(home_c)
+                            away_rec = _record_summary(away_c)
+                            rows[-1].update({
+                                "source": "espn",
+                                "home_record": home_rec,
+                                "away_record": away_rec,
+                                "home_record_pct": _record_win_pct(home_rec),
+                                "away_record_pct": _record_win_pct(away_rec),
+                                "home_rank": home_c.get("curatedRank") or (home_c.get("team") or {}).get("rank"),
+                                "away_rank": away_c.get("curatedRank") or (away_c.get("team") or {}).get("rank"),
+                            })
+        except Exception as e:
+            _log(f"[all-sports] ESPN multi-sport fallback fetch failed: {e}")
+
+    # 4) TheSportsDB (multi-sport free fixture feed) - opt-in due endpoint variability.
     tsdb_enabled = str(os.getenv("ENABLE_TSDB_FALLBACK", "0")).strip().lower() in {"1", "true", "yes", "on"}
     if tsdb_enabled:
         try:
@@ -891,6 +1059,83 @@ def _build_model_fallback_bets(games: list[dict]) -> list[dict]:
             return int(round(-p / (1.0 - p) * 100))
         return int(round((1.0 - p) / p * 100))
 
+    def _record_win_pct(summary: str) -> float | None:
+        s = str(summary or "").strip()
+        if not s:
+            return None
+        nums = [int(x) for x in re.findall(r"\d+", s)]
+        if len(nums) < 2:
+            return None
+        wins = float(nums[0])
+        losses = float(nums[1])
+        draws = float(nums[2]) if len(nums) >= 3 else 0.0
+        total = wins + losses + draws
+        if total <= 0:
+            return None
+        return (wins + (0.5 * draws)) / total
+
+    def _to_float(value) -> float | None:
+        try:
+            if value is None:
+                return None
+            if isinstance(value, str) and not value.strip():
+                return None
+            return float(value)
+        except Exception:
+            return None
+
+    def _to_int(value) -> int | None:
+        try:
+            if value is None:
+                return None
+            if isinstance(value, str) and not value.strip():
+                return None
+            return int(float(value))
+        except Exception:
+            return None
+
+    def _estimate_home_prob(game: dict, sport: str) -> float:
+        if sport == "soccer":
+            base = 0.45
+        elif sport in {"baseball", "mlb"}:
+            base = 0.55
+        else:
+            base = 0.53
+
+        hp = _to_float(game.get("home_record_pct"))
+        ap = _to_float(game.get("away_record_pct"))
+        if hp is None:
+            hp = _record_win_pct(game.get("home_record") or "")
+        if ap is None:
+            ap = _record_win_pct(game.get("away_record") or "")
+        if hp is not None and ap is not None:
+            base = 0.5 + ((hp - ap) * 0.75)
+            if sport != "soccer":
+                base += 0.02  # modest home-edge prior
+
+        hr = _to_int(game.get("home_rank"))
+        ar = _to_int(game.get("away_rank"))
+        if hr and ar and hr > 0 and ar > 0:
+            # Lower rank number is stronger.
+            rank_edge = (ar - hr) / max(10.0, float(ar + hr))
+            base += max(-0.08, min(0.08, rank_edge * 0.6))
+
+        hs = _to_int(game.get("home_score"))
+        aw = _to_int(game.get("away_score"))
+        status = str(game.get("status") or "").strip().lower()
+        if hs is not None and aw is not None:
+            diff = hs - aw
+            if "final" in status:
+                if diff > 0:
+                    return 0.99
+                if diff < 0:
+                    return 0.01
+                return 0.50
+            if "progress" in status or "live" in status:
+                base += max(-0.22, min(0.22, diff * 0.035))
+
+        return max(0.05, min(0.95, float(base)))
+
     # Deterministic, zero-network fallback pick generation.
     # Used only when sportsbook/model feeds are unavailable.
     for g in (games or [])[:120]:
@@ -900,21 +1145,19 @@ def _build_model_fallback_bets(games: list[dict]) -> list[dict]:
             continue
 
         sport = _infer_sport_group(g.get("sport") or g.get("competition") or "")
+        home_prob = _estimate_home_prob(g, sport)
+        pick_home = home_prob >= 0.5
+        pick_prob = home_prob if pick_home else (1.0 - home_prob)
+        pick_team = home if pick_home else away
         if sport == "soccer":
-            home_prob = 0.45
             bet_type = "1X2"
-            pick = f"{home} to Win"
-        elif sport in {"baseball", "mlb"}:
-            home_prob = 0.55
-            bet_type = "moneyline"
-            pick = f"{home} ML"
+            pick = f"{pick_team} to Win"
         else:
-            home_prob = 0.53
             bet_type = "moneyline"
-            pick = f"{home} ML"
+            pick = f"{pick_team} ML"
 
-        odds_am = _prob_to_american(home_prob)
-        label = _rank_label(home_prob)
+        odds_am = _prob_to_american(pick_prob)
+        label = _rank_label(pick_prob)
         game_date = g.get("game_date") or g.get("date") or today_str
         game_key = g.get("game_key") or _compose_game_key(
             away,
@@ -923,6 +1166,13 @@ def _build_model_fallback_bets(games: list[dict]) -> list[dict]:
             game_date,
             g.get("game_time"),
         )
+
+        reason = "Fallback baseline pick while live odds are unavailable"
+        home_rec = str(g.get("home_record") or "").strip()
+        away_rec = str(g.get("away_record") or "").strip()
+        if home_rec or away_rec:
+            reason = f"Record-based fallback ({away} {away_rec or '?'} at {home} {home_rec or '?'})"
+
         bets.append({
             "sport": sport,
             "league": g.get("league") or g.get("competition_name") or sport.upper(),
@@ -933,8 +1183,8 @@ def _build_model_fallback_bets(games: list[dict]) -> list[dict]:
             "line": None,
             "odds_am": odds_am,
             "dec_odds": round((1 + (odds_am / 100.0)) if odds_am > 0 else (1 + (100.0 / abs(odds_am))), 4),
-            "model_prob": round(home_prob, 4),
-            "confidence": int(round(home_prob * 100)),
+            "model_prob": round(pick_prob, 4),
+            "confidence": int(round(pick_prob * 100)),
             "safety_label": label,
             "safety": _safety_score_from_label(label),
             "game_date": game_date,
@@ -943,9 +1193,9 @@ def _build_model_fallback_bets(games: list[dict]) -> list[dict]:
             "away_team": away,
             "match_key": g.get("match_key") or _norm_gk(f"{away}@{home}"),
             "game_key": game_key,
-            "worth_it": home_prob >= 0.53,
-            "worth_score": round(home_prob * 100.0, 2),
-            "worth_reason": "Fallback baseline pick while live odds are unavailable",
+            "worth_it": pick_prob >= 0.53,
+            "worth_score": round(pick_prob * 100.0, 2),
+            "worth_reason": reason,
         })
 
     # Dedupe similar bets.
@@ -1069,6 +1319,59 @@ def _multi_sport_best_bets_rows(bets: list[dict]) -> list[dict]:
     return rows[:300]
 
 
+def _merge_all_sports_table_rows(sentiment_rows: list[dict], best_bet_rows: list[dict]) -> list[dict]:
+    """Combine sentiment/player rows with best-bet rows for sports not covered by props."""
+    s_rows = list(sentiment_rows or [])
+    b_rows = list(best_bet_rows or [])
+
+    if _ALL_SPORTS_STRICT_SENTIMENT_ONLY:
+        return s_rows[:400]
+    if not s_rows:
+        return b_rows[:400]
+
+    covered_sports = {
+        _infer_sport_group(r.get("sport") or r.get("competition") or r.get("league") or "")
+        for r in s_rows
+    }
+    merged = list(s_rows)
+    seen = {
+        (
+            str(r.get("game_key") or ""),
+            str(r.get("name") or r.get("pick") or "").strip().lower(),
+            str(r.get("stat_type") or "").strip().lower(),
+            str(r.get("line") if r.get("line") is not None else ""),
+            str(r.get("direction") or "").strip().upper(),
+        )
+        for r in merged
+    }
+
+    for row in b_rows:
+        sport = _infer_sport_group(row.get("sport") or row.get("competition") or row.get("league") or "")
+        if sport in covered_sports:
+            continue
+
+        key = (
+            str(row.get("game_key") or ""),
+            str(row.get("name") or row.get("pick") or "").strip().lower(),
+            str(row.get("stat_type") or "").strip().lower(),
+            str(row.get("line") if row.get("line") is not None else ""),
+            str(row.get("direction") or "").strip().upper(),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(row)
+
+    merged.sort(
+        key=lambda x: (
+            float(x.get("model_prob") or 0.0),
+            int(x.get("sentiment_mentions") or 0),
+        ),
+        reverse=True,
+    )
+    return merged[:400]
+
+
 def _build_all_sport_sentiment_props(games: list[dict], bets: list[dict]) -> list[dict]:
     """Build all-sports player rows strictly from sentiment-mentioned players."""
     try:
@@ -1188,7 +1491,447 @@ def _build_all_sport_sentiment_props(games: list[dict], bets: list[dict]) -> lis
         ),
         reverse=True,
     )
+
+    # If social mention volume is low, backfill with model-generated player props.
+    fallback_threshold = max(6, min(60, len(target_games)))
+    if len(rows) < fallback_threshold:
+        model_rows = _build_model_player_props_fallback(target_games, max_per_game=_ALL_SPORTS_SENTIMENT_PLAYERS_PER_GAME)
+        if model_rows:
+            seen = {
+                (
+                    str(r.get("game_key") or ""),
+                    str(r.get("name") or "").strip().lower(),
+                    str(r.get("stat_type") or "").strip().lower(),
+                )
+                for r in rows
+            }
+            for r in model_rows:
+                key = (
+                    str(r.get("game_key") or ""),
+                    str(r.get("name") or "").strip().lower(),
+                    str(r.get("stat_type") or "").strip().lower(),
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                rows.append(r)
+            rows.sort(
+                key=lambda x: (
+                    float(x.get("model_prob") or 0.0),
+                    int(x.get("sentiment_mentions") or 0),
+                ),
+                reverse=True,
+            )
     return rows[:400]
+
+
+def _build_model_player_props_fallback(games: list[dict], max_per_game: int = 6) -> list[dict]:
+    """Fallback player props from model/history sources when social mentions are sparse."""
+    rows: list[dict] = []
+    max_per_game = max(1, min(int(max_per_game or 6), 12))
+    today_str = _et_calendar_today().isoformat()
+    season = _et_calendar_today().year
+
+    def _prob_to_american(prob: float) -> int:
+        p = max(0.01, min(0.99, float(prob or 0.5)))
+        if p >= 0.5:
+            return int(round(-p / (1.0 - p) * 100))
+        return int(round((1.0 - p) / p * 100))
+
+    # Soccer model props (uses squad/market context).
+    try:
+        from models.soccer_predictor import get_player_props as get_soccer_player_props
+
+        soccer_games = [
+            g for g in (games or [])
+            if _infer_sport_group(g.get("sport") or g.get("competition") or g.get("league") or "") == "soccer"
+        ]
+        for g in soccer_games[:36]:
+            props = get_soccer_player_props(g) or []
+            per_game = []
+            for prop in props:
+                norm = _normalize_soccer_prop(g, prop, today_str)
+                norm["prop_label"] = norm.get("prop_label") or str(norm.get("stat_type") or "soccer_prop").replace("_", " ").title()
+                norm.setdefault("sentiment_mentions", int(norm.get("market_mentions") or 0))
+                norm.setdefault("sentiment_sources", "soccer_model")
+                norm.setdefault("worth_reason", "Soccer model + market popularity")
+                per_game.append(norm)
+            per_game.sort(key=lambda x: float(x.get("model_prob") or 0.0), reverse=True)
+            rows.extend(per_game[:max_per_game])
+    except Exception as e:
+        _log(f"[all-sports] soccer player-prop fallback skipped: {e}")
+
+    # MLB historical hitter props across recent seasons.
+    try:
+        from data import mlb_fetcher as _mlb_fetcher
+
+        mlb_games = [
+            g for g in (games or [])
+            if _infer_sport_group(g.get("sport") or g.get("competition") or g.get("league") or "") in {"baseball", "mlb"}
+        ]
+        if mlb_games and getattr(_mlb_fetcher, "PYBASEBALL_OK", False):
+            by_match = {}
+            batch_games = []
+            for g in mlb_games[:40]:
+                home = str(g.get("home_team") or "").strip()
+                away = str(g.get("away_team") or "").strip()
+                if not home or not away:
+                    continue
+                match_key = _norm_gk(g.get("match_key") or f"{away}@{home}")
+                by_match[match_key] = g
+                batch_games.append({
+                    "home_team": home,
+                    "away_team": away,
+                    "game_time": g.get("game_time") or "",
+                    "date": g.get("game_date") or g.get("date") or today_str,
+                    "game_date": g.get("game_date") or g.get("date") or today_str,
+                    "game_datetime": g.get("game_datetime") or "",
+                    "match_key": match_key,
+                })
+
+            raw = _mlb_fetcher.get_hitter_props_batch(batch_games, season=season) or []
+            per_game: dict[str, list[dict]] = {}
+            for p in raw:
+                game_txt = str(p.get("game") or "").strip()
+                mk = _norm_gk(game_txt.replace(" @ ", "@")) if game_txt else ""
+                g = by_match.get(mk)
+                if not g:
+                    continue
+
+                over_p = float(p.get("over_prob") or 0.5)
+                under_p = float(p.get("under_prob") or (1.0 - over_p))
+                direction = "OVER" if over_p >= under_p else "UNDER"
+                model_prob = max(over_p, under_p)
+                model_prob = max(0.01, min(0.99, model_prob))
+                odds_am = _prob_to_american(model_prob)
+                dec_odds = round((1 + (odds_am / 100.0)) if odds_am > 0 else (1 + (100.0 / abs(odds_am))), 4)
+                ev = (dec_odds - 1.0) * model_prob - (1.0 - model_prob)
+
+                home = str(g.get("home_team") or "").strip()
+                away = str(g.get("away_team") or "").strip()
+                game_date = str(g.get("game_date") or g.get("date") or today_str)
+                game_time = str(g.get("game_time") or "")
+                game_key = str(g.get("game_key") or _compose_game_key(away, home, g.get("game_datetime"), game_date, game_time))
+                stat_type = str(p.get("stat_type") or "hits")
+
+                row = {
+                    "sport": "baseball",
+                    "name": p.get("name"),
+                    "team": p.get("team") or home,
+                    "prop_label": f"Historical {stat_type.replace('_', ' ').title()}",
+                    "stat_type": stat_type,
+                    "line": p.get("line"),
+                    "direction": direction,
+                    "model_prob": round(model_prob, 4),
+                    "confidence": int(round(model_prob * 100)),
+                    "safety_label": _safety_label_from_prob(model_prob),
+                    "ev": round(ev, 4),
+                    "odds_am": odds_am,
+                    "dec_odds": dec_odds,
+                    "game": f"{away} @ {home}",
+                    "game_key": game_key,
+                    "match_key": mk,
+                    "game_date": game_date,
+                    "game_time": game_time,
+                    "home_team": home,
+                    "away_team": away,
+                    "sentiment_score": 0.0,
+                    "sentiment_mentions": 0,
+                    "sentiment_sources": "mlb_historical_model",
+                    "worth_it": model_prob >= 0.57,
+                    "worth_score": round(model_prob * 100.0, 2),
+                    "worth_reason": "Historical multi-season batter profile",
+                }
+                per_game.setdefault(game_key, []).append(row)
+
+            for gk, arr in per_game.items():
+                arr.sort(key=lambda x: float(x.get("model_prob") or 0.0), reverse=True)
+                rows.extend(arr[:max_per_game])
+
+        existing_mlb_rows = [r for r in rows if _infer_sport_group(r.get("sport") or "") in {"baseball", "mlb"}]
+        if mlb_games and len(existing_mlb_rows) < max(8, len(mlb_games)):
+            try:
+                from data.sportsdata_fetcher import get_mlb_player_season_stats, get_mlb_teams
+
+                def _norm_team_name(name: str) -> str:
+                    return re.sub(r"[^a-z0-9]+", "", str(name or "").strip().lower())
+
+                def _poisson_over_prob(rate: float, line: float) -> float:
+                    lam = max(0.01, float(rate or 0.01))
+                    target = int(math.floor(float(line or 0.5)) + 1)
+                    cdf = 0.0
+                    for k in range(max(0, target)):
+                        try:
+                            cdf += math.exp(-lam) * (lam ** k) / math.factorial(k)
+                        except Exception:
+                            pass
+                    return max(0.05, min(0.95, 1.0 - cdf))
+
+                team_rows = get_mlb_teams() or []
+                alias_to_key: dict[str, str] = {}
+                for t in team_rows:
+                    key = str(t.get("Key") or "").strip().upper()
+                    city = str(t.get("City") or "").strip()
+                    name = str(t.get("Name") or "").strip()
+                    full = f"{city} {name}".strip()
+                    for alias in (full, name):
+                        a = _norm_team_name(alias)
+                        if a and key:
+                            alias_to_key[a] = key
+
+                def _resolve_team_key(team_name: str) -> str:
+                    n = _norm_team_name(team_name)
+                    if not n:
+                        return ""
+                    if n in alias_to_key:
+                        return alias_to_key[n]
+                    for alias, key in alias_to_key.items():
+                        if n and (n in alias or alias in n):
+                            return key
+                    return ""
+
+                player_stats = get_mlb_player_season_stats(season=season) or []
+                if not player_stats:
+                    player_stats = get_mlb_player_season_stats() or []
+
+                by_team: dict[str, list[dict]] = {}
+                for p in player_stats:
+                    tkey = str(p.get("Team") or "").strip().upper()
+                    if not tkey:
+                        continue
+                    by_team.setdefault(tkey, []).append(p)
+
+                def _mk_prop_row(game: dict, team_name: str, player_name: str, stat_type: str, prop_label: str,
+                                 line_val: float, over_prob: float, direction: str, source: str) -> dict:
+                    model_prob = over_prob if direction == "OVER" else (1.0 - over_prob)
+                    model_prob = max(0.01, min(0.99, model_prob))
+                    odds_am = _prob_to_american(model_prob)
+                    dec_odds = round((1 + (odds_am / 100.0)) if odds_am > 0 else (1 + (100.0 / abs(odds_am))), 4)
+                    ev = (dec_odds - 1.0) * model_prob - (1.0 - model_prob)
+                    home = str(game.get("home_team") or "").strip()
+                    away = str(game.get("away_team") or "").strip()
+                    game_date = str(game.get("game_date") or game.get("date") or today_str)
+                    game_time = str(game.get("game_time") or "")
+                    game_key = str(game.get("game_key") or _compose_game_key(away, home, game.get("game_datetime"), game_date, game_time))
+                    match_key = _norm_gk(game.get("match_key") or f"{away}@{home}")
+                    return {
+                        "sport": "baseball",
+                        "name": player_name,
+                        "team": team_name,
+                        "prop_label": prop_label,
+                        "stat_type": stat_type,
+                        "line": line_val,
+                        "direction": direction,
+                        "model_prob": round(model_prob, 4),
+                        "confidence": int(round(model_prob * 100)),
+                        "safety_label": _safety_label_from_prob(model_prob),
+                        "ev": round(ev, 4),
+                        "odds_am": odds_am,
+                        "dec_odds": dec_odds,
+                        "game": f"{away} @ {home}",
+                        "game_key": game_key,
+                        "match_key": match_key,
+                        "game_date": game_date,
+                        "game_time": game_time,
+                        "home_team": home,
+                        "away_team": away,
+                        "sentiment_score": 0.0,
+                        "sentiment_mentions": 0,
+                        "sentiment_sources": source,
+                        "worth_it": model_prob >= 0.57,
+                        "worth_score": round(model_prob * 100.0, 2),
+                        "worth_reason": "Historical MLB season profile",
+                    }
+
+                for g in mlb_games[:40]:
+                    home = str(g.get("home_team") or "").strip()
+                    away = str(g.get("away_team") or "").strip()
+                    if not home or not away:
+                        continue
+                    hk = _resolve_team_key(home)
+                    ak = _resolve_team_key(away)
+                    game_rows: list[dict] = []
+
+                    for team_name, tkey in ((home, hk), (away, ak)):
+                        if not tkey:
+                            continue
+                        candidates = by_team.get(tkey, [])
+                        if not candidates:
+                            continue
+
+                        hitters = [p for p in candidates if str(p.get("PositionCategory") or "").upper() != "P"]
+                        pitchers = [p for p in candidates if str(p.get("PositionCategory") or "").upper() == "P"]
+
+                        hitters.sort(key=lambda x: float(x.get("FantasyPoints") or 0.0), reverse=True)
+                        for p in hitters[:3]:
+                            pname = str(p.get("Name") or "").strip()
+                            games_played = float(p.get("Games") or 0.0)
+                            if not pname or games_played < 5:
+                                continue
+                            stats = [
+                                ("hits", "Historical Hits", float(p.get("Hits") or 0.0), 0.5),
+                                ("home_runs", "Historical Home Runs", float(p.get("HomeRuns") or 0.0), 0.5),
+                                ("rbi", "Historical RBI", float(p.get("RunsBattedIn") or 0.0), 0.5),
+                                ("runs", "Historical Runs", float(p.get("Runs") or 0.0), 0.5),
+                                ("stolen_bases", "Historical Stolen Bases", float(p.get("StolenBases") or 0.0), 0.5),
+                                ("total_bases", "Historical Total Bases", float(p.get("TotalBases") or 0.0), 1.5),
+                            ]
+                            best_prop = None
+                            best_prob = 0.0
+                            for stat_type, label, total_val, line_val in stats:
+                                if total_val <= 0:
+                                    continue
+                                rate = total_val / max(games_played, 1.0)
+                                over_prob = _poisson_over_prob(rate, line_val)
+                                if over_prob >= 0.52 and over_prob > best_prob:
+                                    best_prob = over_prob
+                                    best_prop = (stat_type, label, line_val, over_prob)
+                            if best_prop:
+                                game_rows.append(
+                                    _mk_prop_row(
+                                        g,
+                                        team_name,
+                                        pname,
+                                        best_prop[0],
+                                        best_prop[1],
+                                        best_prop[2],
+                                        best_prop[3],
+                                        "OVER",
+                                        "mlb_sportsdata_historical",
+                                    )
+                                )
+
+                        pitchers.sort(key=lambda x: float(x.get("PitchingStrikeouts") or 0.0), reverse=True)
+                        for p in pitchers[:1]:
+                            pname = str(p.get("Name") or "").strip()
+                            games_played = float(p.get("Games") or p.get("Started") or 0.0)
+                            strikeouts = float(p.get("PitchingStrikeouts") or 0.0)
+                            if not pname or games_played < 3 or strikeouts <= 0:
+                                continue
+                            k_rate = strikeouts / max(games_played, 1.0)
+                            line_val = max(3.5, round(k_rate * 0.85 * 2.0) / 2.0)
+                            over_prob = _poisson_over_prob(k_rate, line_val)
+                            if over_prob >= 0.52:
+                                game_rows.append(
+                                    _mk_prop_row(
+                                        g,
+                                        team_name,
+                                        pname,
+                                        "strikeouts",
+                                        "Historical Pitcher Strikeouts",
+                                        line_val,
+                                        over_prob,
+                                        "OVER",
+                                        "mlb_sportsdata_historical",
+                                    )
+                                )
+
+                    game_rows.sort(key=lambda x: float(x.get("model_prob") or 0.0), reverse=True)
+                    rows.extend(game_rows[:max_per_game])
+            except Exception as se:
+                _log(f"[all-sports] sportsdata MLB fallback skipped: {se}")
+        elif mlb_games:
+            _log("[all-sports] pybaseball unavailable — skipping bulk hitter fallback")
+    except Exception as e:
+        _log(f"[all-sports] mlb player-prop fallback skipped: {e}")
+
+    # Last-resort MLB starter props (does not require pybaseball dependencies).
+    if not rows:
+        try:
+            from data.sentiment import get_player_prop_signal
+
+            starter_rows: list[dict] = []
+            for g in (games or []):
+                sport = _infer_sport_group(g.get("sport") or g.get("competition") or g.get("league") or "")
+                if sport not in {"baseball", "mlb"}:
+                    continue
+                home = str(g.get("home_team") or "").strip()
+                away = str(g.get("away_team") or "").strip()
+                game_date = str(g.get("game_date") or g.get("date") or today_str)
+                game_time = str(g.get("game_time") or "")
+                game_key = str(g.get("game_key") or _compose_game_key(away, home, g.get("game_datetime"), game_date, game_time))
+                match_key = _norm_gk(g.get("match_key") or f"{away}@{home}")
+
+                starters = [
+                    (str(g.get("home_starter") or "").strip(), home),
+                    (str(g.get("away_starter") or "").strip(), away),
+                ]
+                for starter_name, team in starters:
+                    if not starter_name or starter_name.upper() == "TBD":
+                        continue
+
+                    line = 4.5
+                    direction = "OVER"
+                    chosen_prob = 0.55
+                    sent_score = 0.0
+                    reason = "Starter historical + sentiment strikeout profile"
+
+                    try:
+                        signal = get_player_prop_signal(starter_name, "strikeouts", line)
+                        over_prob = float(signal.get("probability") or 0.5)
+                        direction = str(signal.get("direction") or "OVER").upper()
+                        chosen_prob = over_prob if direction == "OVER" else (1.0 - over_prob)
+                        sent_score = float(signal.get("sentiment_score") or 0.0)
+                        if signal.get("rationale"):
+                            reason = str(signal.get("rationale"))[:220]
+                    except Exception:
+                        pass
+
+                    chosen_prob = max(0.51, min(0.88, float(chosen_prob)))
+                    odds_am = _prob_to_american(chosen_prob)
+                    dec_odds = round((1 + (odds_am / 100.0)) if odds_am > 0 else (1 + (100.0 / abs(odds_am))), 4)
+                    ev = (dec_odds - 1.0) * chosen_prob - (1.0 - chosen_prob)
+
+                    starter_rows.append({
+                        "sport": "baseball",
+                        "name": starter_name,
+                        "team": team,
+                        "prop_label": "Pitcher Strikeouts",
+                        "stat_type": "strikeouts",
+                        "line": line,
+                        "direction": direction,
+                        "model_prob": round(chosen_prob, 4),
+                        "confidence": int(round(chosen_prob * 100)),
+                        "safety_label": _safety_label_from_prob(chosen_prob),
+                        "ev": round(ev, 4),
+                        "odds_am": odds_am,
+                        "dec_odds": dec_odds,
+                        "game": f"{away} @ {home}",
+                        "game_key": game_key,
+                        "match_key": match_key,
+                        "game_date": game_date,
+                        "game_time": game_time,
+                        "home_team": home,
+                        "away_team": away,
+                        "sentiment_score": round(sent_score, 4),
+                        "sentiment_mentions": 0,
+                        "sentiment_sources": "historical_trends,sentiment",
+                        "worth_it": chosen_prob >= 0.56,
+                        "worth_score": round(chosen_prob * 100.0, 2),
+                        "worth_reason": reason,
+                    })
+
+            starter_rows.sort(key=lambda x: float(x.get("model_prob") or 0.0), reverse=True)
+            rows.extend(starter_rows)
+        except Exception as e:
+            _log(f"[all-sports] starter-prop fallback skipped: {e}")
+
+    deduped: list[dict] = []
+    seen = set()
+    for r in rows:
+        key = (
+            str(r.get("game_key") or ""),
+            str(r.get("name") or "").strip().lower(),
+            str(r.get("stat_type") or "").strip().lower(),
+            str(r.get("line") if r.get("line") is not None else ""),
+            str(r.get("direction") or "").strip().upper(),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(r)
+    deduped.sort(key=lambda x: float(x.get("model_prob") or 0.0), reverse=True)
+    return deduped[:350]
 
 
 def _build_multi_sport_snapshot(force_refresh: bool = False) -> dict:
@@ -1416,7 +2159,8 @@ def _run_all_sports_analysis():
         bets = snapshot.get("bets") or []
         best_bet_rows = _multi_sport_best_bets_rows(bets)
         sentiment_prop_rows = _build_all_sport_sentiment_props(games, bets)
-        table_rows = sentiment_prop_rows if (sentiment_prop_rows or _ALL_SPORTS_STRICT_SENTIMENT_ONLY) else best_bet_rows
+        table_rows = _merge_all_sports_table_rows(sentiment_prop_rows, best_bet_rows)
+        card_prop_rows = sentiment_prop_rows if sentiment_prop_rows else []
         _log(f"[all-sports] Pulled {len(games)} games and {len(bets)} ranked bets")
         if best_bet_rows:
             _log(f"[all-sports] Best-bets table rows prepared: {len(best_bet_rows)}")
@@ -1431,8 +2175,8 @@ def _run_all_sports_analysis():
         tomorrow_games = [g for g in games if str(g.get("game_date") or "") == tomorrow_str]
 
         _phase(3)
-        today_cards = [_build_card(g, bets, table_rows, "TODAY") for g in today_games]
-        tomorrow_cards = [_build_card(g, bets, table_rows, "TOMORROW") for g in tomorrow_games]
+        today_cards = [_build_card(g, bets, card_prop_rows, "TODAY") for g in today_games]
+        tomorrow_cards = [_build_card(g, bets, card_prop_rows, "TOMORROW") for g in tomorrow_games]
 
         def _card_score(card: dict) -> float:
             s = [b["safety"] for b in [card.get("moneyline"), card.get("run_line"), card.get("total")] if b]
@@ -2365,11 +3109,11 @@ def api_cached_state():
             today_games = [g for g in all_games if str(g.get("game_date") or "") == today_str]
             tomorrow_games = [g for g in all_games if str(g.get("game_date") or "") == tomorrow_str]
             all_bets = snap.get("bets") or []
-            fallback_props = _build_all_sport_sentiment_props(all_games, all_bets)
-            if not fallback_props and not _ALL_SPORTS_STRICT_SENTIMENT_ONLY:
-                fallback_props = _multi_sport_best_bets_rows(all_bets)
-            fallback_today = [_build_card(g, all_bets, fallback_props, "TODAY") for g in today_games]
-            fallback_tomorrow = [_build_card(g, all_bets, fallback_props, "TOMORROW") for g in tomorrow_games]
+            fallback_player_props = _build_all_sport_sentiment_props(all_games, all_bets)
+            fallback_best_bets = _multi_sport_best_bets_rows(all_bets)
+            fallback_props = _merge_all_sports_table_rows(fallback_player_props, fallback_best_bets)
+            fallback_today = [_build_card(g, all_bets, fallback_player_props, "TODAY") for g in today_games]
+            fallback_tomorrow = [_build_card(g, all_bets, fallback_player_props, "TOMORROW") for g in tomorrow_games]
         elif _ACTIVE_SPORT == "soccer":
             from data.soccer_fetcher import get_matches_today_all, get_matches_tomorrow_all
 
@@ -3300,13 +4044,13 @@ def _load_boot_schedule_fallback() -> bool:
             snap = _build_multi_sport_snapshot(force_refresh=False)
             all_games = snap.get("games") or []
             all_bets = snap.get("bets") or []
-            boot_props = _build_all_sport_sentiment_props(all_games, all_bets)
-            if not boot_props and not _ALL_SPORTS_STRICT_SENTIMENT_ONLY:
-                boot_props = _multi_sport_best_bets_rows(all_bets)
+            boot_player_props = _build_all_sport_sentiment_props(all_games, all_bets)
+            boot_best_bets = _multi_sport_best_bets_rows(all_bets)
+            boot_props = _merge_all_sports_table_rows(boot_player_props, boot_best_bets)
             today_games = [g for g in all_games if str(g.get("game_date") or "") == today_str]
             tomorrow_games = [g for g in all_games if str(g.get("game_date") or "") == tomorrow_str]
-            today_cards = [_build_card(g, all_bets, boot_props, "TODAY") for g in today_games]
-            tomorrow_cards = [_build_card(g, all_bets, boot_props, "TOMORROW") for g in tomorrow_games]
+            today_cards = [_build_card(g, all_bets, boot_player_props, "TODAY") for g in today_games]
+            tomorrow_cards = [_build_card(g, all_bets, boot_player_props, "TOMORROW") for g in tomorrow_games]
         elif _ACTIVE_SPORT == "soccer":
             from data.soccer_fetcher import get_matches_today_all, get_matches_tomorrow_all
 
