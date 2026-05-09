@@ -43,9 +43,9 @@ _DASH_MIN_EDGE = 0.02
 _DAILY_LOCK_HOUR_ET = int(os.getenv("DAILY_LOCK_HOUR_ET", "5"))
 _DAILY_LOCK_MINUTE_ET = int(os.getenv("DAILY_LOCK_MINUTE_ET", "0"))
 _AUTO_ANALYSIS_INTERVAL_MIN = int(os.getenv("AUTO_ANALYSIS_INTERVAL_MIN", "0"))
-_ACTIVE_SPORT = str(CONFIG_SPORT or os.getenv("SPORT", "mlb") or "mlb").strip().lower()
-if _ACTIVE_SPORT not in {"mlb", "soccer"}:
-    _ACTIVE_SPORT = "mlb"
+_ACTIVE_SPORT = str(CONFIG_SPORT or os.getenv("SPORT", "all") or "all").strip().lower()
+if _ACTIVE_SPORT not in {"mlb", "soccer", "all"}:
+    _ACTIVE_SPORT = "all"
 
 app = Flask(__name__, template_folder="templates")
 
@@ -152,7 +152,27 @@ _SOCCER_PHASES = [
     "Saving to database",
 ]
 
-_PHASES = _SOCCER_PHASES if _ACTIVE_SPORT == "soccer" else _MLB_PHASES
+_ALL_SPORTS_PHASES = [
+    "Discovering available sports",
+    "Fetching live odds feed",
+    "Ranking best available bets",
+    "Building cards",
+]
+
+if _ACTIVE_SPORT == "soccer":
+    _PHASES = _SOCCER_PHASES
+elif _ACTIVE_SPORT == "mlb":
+    _PHASES = _MLB_PHASES
+else:
+    _PHASES = _ALL_SPORTS_PHASES
+
+
+_MULTI_SPORT_CACHE = {
+    "snapshot": None,
+    "ts": 0.0,
+}
+_MULTI_SPORT_CACHE_TTL_SEC = int(os.getenv("MULTI_SPORT_CACHE_TTL_SEC", "180"))
+_MAX_ODDS_SPORTS = int(os.getenv("MAX_ODDS_SPORTS", "12"))
 
 _state = {
     "status":           "idle",
@@ -571,6 +591,316 @@ def _normalize_soccer_prop(game: dict, prop: dict, default_date: str) -> dict:
     return row
 
 
+def _infer_sport_group(sport_key: str) -> str:
+    raw = str(sport_key or "").strip().lower()
+    if not raw:
+        return "other"
+    if "_" in raw:
+        return raw.split("_", 1)[0]
+    return raw
+
+
+def _prob_from_american(odds) -> float | None:
+    try:
+        o = float(odds)
+    except (TypeError, ValueError):
+        return None
+    if o == 0:
+        return None
+    if o > 0:
+        return 100.0 / (o + 100.0)
+    return abs(o) / (abs(o) + 100.0)
+
+
+def _datetime_to_et_parts(iso_value: str) -> tuple[str, str]:
+    raw = str(iso_value or "").strip()
+    if not raw:
+        return "", ""
+    try:
+        dt = datetime.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+        try:
+            import zoneinfo
+
+            eastern = zoneinfo.ZoneInfo("America/New_York")
+            et = dt.astimezone(eastern)
+        except Exception:
+            et = dt
+        return et.date().isoformat(), et.strftime("%H:%M")
+    except Exception:
+        return "", ""
+
+
+def _rank_label(prob: float) -> str:
+    if prob >= 0.72:
+        return "ELITE"
+    if prob >= 0.60:
+        return "SAFE"
+    if prob >= 0.50:
+        return "MODERATE"
+    return "RISKY"
+
+
+def _build_multi_sport_snapshot(force_refresh: bool = False) -> dict:
+    now = datetime.datetime.now(datetime.timezone.utc).timestamp()
+    if not force_refresh:
+        cached = _MULTI_SPORT_CACHE.get("snapshot")
+        cache_ts = float(_MULTI_SPORT_CACHE.get("ts") or 0.0)
+        if cached and (now - cache_ts) < _MULTI_SPORT_CACHE_TTL_SEC:
+            return cached
+
+    snapshot = {
+        "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "tournaments": [],
+        "games": [],
+        "bets": [],
+    }
+
+    try:
+        from data.odds_fetcher import get_available_sports, get_live_odds
+    except Exception as e:
+        _log(f"[all-sports] odds fetcher unavailable: {e}")
+        return snapshot
+
+    sports = get_available_sports() or []
+    if not sports:
+        _log("[all-sports] No sports returned by odds API (missing key or quota exhausted)")
+        return snapshot
+
+    active = []
+    for s in sports:
+        if s.get("has_outrights"):
+            continue
+        key = str(s.get("key") or "").strip()
+        if not key:
+            continue
+        active.append(s)
+
+    active = active[: max(1, _MAX_ODDS_SPORTS)]
+    today = _et_calendar_today()
+    tomorrow = today + datetime.timedelta(days=1)
+    allowed_dates = {today.isoformat(), tomorrow.isoformat()}
+
+    tournament_counts: dict[str, int] = {}
+    tournament_meta: dict[str, dict] = {}
+    games: list[dict] = []
+    bets: list[dict] = []
+    empty_streak = 0
+
+    for sport in active:
+        sport_key = str(sport.get("key") or "").strip()
+        title = str(sport.get("title") or sport_key)
+        if not sport_key:
+            continue
+
+        try:
+            events = get_live_odds(sport_key, markets="h2h") or []
+        except Exception as e:
+            _log(f"[all-sports] {sport_key} odds error: {e}")
+            empty_streak += 1
+            if empty_streak >= 5 and not games:
+                _log("[all-sports] Stopping fetch early (likely API auth/quota issue)")
+                break
+            continue
+
+        if not events:
+            empty_streak += 1
+            if empty_streak >= 5 and not games:
+                _log("[all-sports] Stopping fetch early (no events returned across multiple sports)")
+                break
+            continue
+        empty_streak = 0
+
+        for ev in events:
+            home = str(ev.get("home_team") or "").strip()
+            away = str(ev.get("away_team") or "").strip()
+            if not home or not away:
+                continue
+
+            game_datetime = str(ev.get("commence_time") or "").strip()
+            game_date, game_time = _datetime_to_et_parts(game_datetime)
+            if game_date and game_date not in allowed_dates:
+                continue
+
+            match_key = _norm_gk(f"{away}@{home}")
+            game_key = _compose_game_key(away, home, game_datetime, game_date, game_time)
+            status = str(ev.get("status") or "Scheduled")
+            sport_group = _infer_sport_group(sport_key)
+
+            games.append({
+                "sport": sport_group,
+                "league": title,
+                "competition": sport_key,
+                "competition_name": title,
+                "home_team": home,
+                "away_team": away,
+                "date": game_date,
+                "game_date": game_date,
+                "game_time": game_time,
+                "game_datetime": game_datetime,
+                "status": status,
+                "match_key": match_key,
+                "game_key": game_key,
+            })
+
+            tournament_counts[sport_key] = tournament_counts.get(sport_key, 0) + 1
+            if sport_key not in tournament_meta:
+                tournament_meta[sport_key] = {
+                    "code": sport_key,
+                    "name": title,
+                    "country": sport.get("description") or "Global",
+                    "type": sport_group,
+                }
+
+            books = ev.get("bookmakers") or []
+            if not books:
+                continue
+            market = None
+            for m in (books[0].get("markets") or []):
+                if str(m.get("key") or "") == "h2h":
+                    market = m
+                    break
+            if not market:
+                continue
+
+            outcomes = market.get("outcomes") or []
+            priced = []
+            for out in outcomes:
+                name = str(out.get("name") or "").strip()
+                odds_am = out.get("price")
+                implied = _prob_from_american(odds_am)
+                if not name or implied is None:
+                    continue
+                priced.append((name, odds_am, implied))
+            if len(priced) < 2:
+                continue
+
+            total = sum(x[2] for x in priced)
+            norm = []
+            for name, odds_am, implied in priced:
+                true_prob = implied / total if total > 0 else implied
+                norm.append((name, odds_am, max(0.01, min(0.99, true_prob))))
+
+            pick_name, pick_odds, model_prob = max(norm, key=lambda x: x[2])
+            label = _rank_label(model_prob)
+            bet = {
+                "sport": sport_group,
+                "league": title,
+                "competition": sport_key,
+                "competition_name": title,
+                "bet_type": "moneyline",
+                "pick": pick_name,
+                "line": None,
+                "odds_am": int(float(pick_odds)),
+                "dec_odds": round((1 + (pick_odds / 100.0)) if float(pick_odds) > 0 else (1 + 100.0 / abs(float(pick_odds))), 4),
+                "model_prob": float(model_prob),
+                "confidence": int(round(model_prob * 100)),
+                "safety_label": label,
+                "safety": _safety_score_from_label(label),
+                "game_date": game_date,
+                "game_time": game_time,
+                "home_team": home,
+                "away_team": away,
+                "match_key": match_key,
+                "game_key": game_key,
+                "worth_it": model_prob >= 0.56,
+                "worth_score": round(model_prob * 100.0, 2),
+                "worth_reason": f"Best no-vig side from live h2h market ({title})",
+            }
+            bets.append(bet)
+
+    tournaments = []
+    for code, meta in tournament_meta.items():
+        row = dict(meta)
+        row["match_count"] = int(tournament_counts.get(code, 0))
+        tournaments.append(row)
+    tournaments.sort(key=lambda x: (x.get("match_count", 0), x.get("name", "")), reverse=True)
+
+    snapshot["tournaments"] = tournaments
+    snapshot["games"] = games
+    snapshot["bets"] = sorted(bets, key=lambda x: (x.get("model_prob") or 0), reverse=True)
+    _MULTI_SPORT_CACHE["snapshot"] = snapshot
+    _MULTI_SPORT_CACHE["ts"] = now
+    return snapshot
+
+
+def _run_all_sports_analysis():
+    with _lock:
+        _state["status"] = "running"
+        _state["error"] = None
+        _state["logs"] = []
+        _state["phase"] = _PHASES[0]
+        _state["phase_idx"] = 0
+
+    try:
+        _phase(0)
+        _log("[all-sports] Discovering online sportsbooks and events...")
+        snapshot = _build_multi_sport_snapshot(force_refresh=True)
+
+        _phase(1)
+        games = snapshot.get("games") or []
+        bets = snapshot.get("bets") or []
+        _log(f"[all-sports] Pulled {len(games)} games and {len(bets)} ranked bets")
+
+        today_str = _et_calendar_today().isoformat()
+        tomorrow_str = (_et_calendar_today() + datetime.timedelta(days=1)).isoformat()
+
+        _phase(2)
+        today_games = [g for g in games if str(g.get("game_date") or "") == today_str]
+        tomorrow_games = [g for g in games if str(g.get("game_date") or "") == tomorrow_str]
+
+        _phase(3)
+        today_cards = [_build_card(g, bets, [], "TODAY") for g in today_games]
+        tomorrow_cards = [_build_card(g, bets, [], "TOMORROW") for g in tomorrow_games]
+
+        def _card_score(card: dict) -> float:
+            s = [b["safety"] for b in [card.get("moneyline"), card.get("run_line"), card.get("total")] if b]
+            return sum(s) / len(s) if s else 0.45
+
+        today_cards.sort(key=_card_score, reverse=True)
+        tomorrow_cards.sort(key=_card_score, reverse=True)
+        best_parlays = []
+        try:
+            from models.mlb_predictor import build_parlays
+            best_parlays = build_parlays(bets, max_legs=5, top_n=5)
+        except Exception as parlay_exc:
+            _log(f"[all-sports] parlay builder skipped: {parlay_exc}")
+
+        last_updated = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M")
+        with _lock:
+            _state.update({
+                "status": "done",
+                "phase": "Complete",
+                "last_updated": last_updated,
+                "last_updated_ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "game_cards_today": _clean(today_cards),
+                "game_cards_tomorrow": _clean(tomorrow_cards),
+                "best_parlays": _clean(best_parlays),
+                "player_props": [],
+                "elite_parlay": None,
+            })
+
+        _sse_broadcast("state_update", {
+            "status": "done",
+            "last_updated": last_updated,
+            "game_cards_today": _clean(today_cards),
+            "game_cards_tomorrow": _clean(tomorrow_cards),
+            "best_parlays": _clean(best_parlays),
+            "player_props": [],
+            "elite_parlay": None,
+        })
+        _log(f"[all-sports] Complete — {len(today_cards)} today, {len(tomorrow_cards)} tomorrow")
+    except Exception:
+        err = traceback.format_exc()
+        _log(f"[all-sports] FAILED:\n{err}")
+        with _lock:
+            _state["status"] = "error"
+            _state["phase"] = "Error"
+            _state["error"] = err
+        _sse_broadcast("status", {"status": "error", "error": err[:300]})
+
+
 def _run_soccer_analysis(lock_date: datetime.date | None = None):
     warnings.filterwarnings("ignore")
 
@@ -815,6 +1145,8 @@ def _run_soccer_analysis(lock_date: datetime.date | None = None):
 
 
 def _run_analysis(lock_date: datetime.date | None = None):
+    if _ACTIVE_SPORT == "all":
+        return _run_all_sports_analysis()
     if _ACTIVE_SPORT == "soccer":
         return _run_soccer_analysis(lock_date)
 
@@ -1419,47 +1751,57 @@ def api_cached_state():
                 "elite_parlay":        _state.get("elite_parlay"),
             })
 
-    try:
-        from data.db import get_analysis_cache
-        cached = get_analysis_cache(max_age_hours=22)
-        if cached:
-            today_str = _et_calendar_today().isoformat()
-            tomorrow_str = (_et_calendar_today() + datetime.timedelta(days=1)).isoformat()
-            cached["game_cards_today"] = _normalize_card_list(cached.get("game_cards_today", []), expected_date=today_str)
-            cached["game_cards_tomorrow"] = _normalize_card_list(cached.get("game_cards_tomorrow", []), expected_date=tomorrow_str)
-            if not (
-                cached.get("game_cards_today")
-                or cached.get("game_cards_tomorrow")
-                or cached.get("player_props")
-                or cached.get("best_parlays")
-            ):
-                cached = None
-        if cached:
-            cached["ok"] = True
-            cached["sport"] = _ACTIVE_SPORT
-            return jsonify(cached)
-    except Exception:
-        pass
+    if _ACTIVE_SPORT != "all":
+        try:
+            from data.db import get_analysis_cache
+            cached = get_analysis_cache(max_age_hours=22)
+            if cached:
+                today_str = _et_calendar_today().isoformat()
+                tomorrow_str = (_et_calendar_today() + datetime.timedelta(days=1)).isoformat()
+                cached["game_cards_today"] = _normalize_card_list(cached.get("game_cards_today", []), expected_date=today_str)
+                cached["game_cards_tomorrow"] = _normalize_card_list(cached.get("game_cards_tomorrow", []), expected_date=tomorrow_str)
+                if not (
+                    cached.get("game_cards_today")
+                    or cached.get("game_cards_tomorrow")
+                    or cached.get("player_props")
+                    or cached.get("best_parlays")
+                ):
+                    cached = None
+            if cached:
+                cached["ok"] = True
+                cached["sport"] = _ACTIVE_SPORT
+                return jsonify(cached)
+        except Exception:
+            pass
 
     # Fallback: build schedule-only cards so tabs are never blank while analysis/cache is unavailable.
     try:
         today_date = _et_calendar_today()
         today_str = today_date.isoformat()
         tomorrow_str = (today_date + datetime.timedelta(days=1)).isoformat()
-        if _ACTIVE_SPORT == "soccer":
+        if _ACTIVE_SPORT == "all":
+            snap = _build_multi_sport_snapshot(force_refresh=False)
+            all_games = snap.get("games") or []
+            today_games = [g for g in all_games if str(g.get("game_date") or "") == today_str]
+            tomorrow_games = [g for g in all_games if str(g.get("game_date") or "") == tomorrow_str]
+            all_bets = snap.get("bets") or []
+            fallback_today = [_build_card(g, all_bets, [], "TODAY") for g in today_games]
+            fallback_tomorrow = [_build_card(g, all_bets, [], "TOMORROW") for g in tomorrow_games]
+        elif _ACTIVE_SPORT == "soccer":
             from data.soccer_fetcher import get_matches_today_all, get_matches_tomorrow_all
 
             today_games = get_matches_today_all() or []
             tomorrow_games = get_matches_tomorrow_all() or []
+            fallback_today = [_build_card(g, [], [], "TODAY") for g in today_games]
+            fallback_tomorrow = [_build_card(g, [], [], "TOMORROW") for g in tomorrow_games]
         else:
             from data.mlb_fetcher import get_schedule_range
 
             all_games = get_schedule_range(days_ahead=2) or []
             today_games = [g for g in all_games if g.get("date", "") == today_str]
             tomorrow_games = [g for g in all_games if g.get("date", "") == tomorrow_str]
-
-        fallback_today = [_build_card(g, [], [], "TODAY") for g in today_games]
-        fallback_tomorrow = [_build_card(g, [], [], "TOMORROW") for g in tomorrow_games]
+            fallback_today = [_build_card(g, [], [], "TODAY") for g in today_games]
+            fallback_tomorrow = [_build_card(g, [], [], "TOMORROW") for g in tomorrow_games]
 
         if fallback_today or fallback_tomorrow:
             return jsonify({
@@ -1476,10 +1818,16 @@ def api_cached_state():
     except Exception:
         pass
 
-    return jsonify({"ok": False, "sport": _ACTIVE_SPORT, "status": "idle",
-                    "game_cards_today": [], "game_cards_tomorrow": [],
-                    "best_parlays": [], "player_props": [],
-                    "elite_parlay": None})
+    return jsonify({
+        "ok": True if _ACTIVE_SPORT == "all" else False,
+        "sport": _ACTIVE_SPORT,
+        "status": "idle",
+        "game_cards_today": [],
+        "game_cards_tomorrow": [],
+        "best_parlays": [],
+        "player_props": [],
+        "elite_parlay": None,
+    })
 
 
 @app.route("/api/logs")
@@ -1540,7 +1888,8 @@ def api_parlay_performance():
     """Win/loss/ROI stats for all tracked parlays."""
     try:
         from data.db import get_parlay_performance_stats
-        return jsonify({"ok": True, "stats": get_parlay_performance_stats(sport=_ACTIVE_SPORT)})
+        db_sport = None if _ACTIVE_SPORT == "all" else _ACTIVE_SPORT
+        return jsonify({"ok": True, "stats": get_parlay_performance_stats(sport=db_sport)})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
 
@@ -1648,7 +1997,8 @@ def api_backfill():
 def api_performance():
     try:
         from data.db import get_performance_stats
-        return jsonify({"ok": True, "stats": get_performance_stats(sport=_ACTIVE_SPORT)})
+        db_sport = None if _ACTIVE_SPORT == "all" else _ACTIVE_SPORT
+        return jsonify({"ok": True, "stats": get_performance_stats(sport=db_sport)})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
 
@@ -1657,7 +2007,8 @@ def api_performance():
 def api_prop_performance():
     try:
         from data.db import get_prop_performance_stats
-        return jsonify({"ok": True, "stats": get_prop_performance_stats(sport=_ACTIVE_SPORT)})
+        db_sport = None if _ACTIVE_SPORT == "all" else _ACTIVE_SPORT
+        return jsonify({"ok": True, "stats": get_prop_performance_stats(sport=db_sport)})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
 
@@ -1668,7 +2019,8 @@ def api_predictions():
     outcome = request.args.get("outcome")
     try:
         from data.db import get_predictions
-        preds = get_predictions(days=days, outcome=outcome or None, sport=_ACTIVE_SPORT)
+        db_sport = None if _ACTIVE_SPORT == "all" else _ACTIVE_SPORT
+        preds = get_predictions(days=days, outcome=outcome or None, sport=db_sport)
         return jsonify({"ok": True, "predictions": _clean(preds)})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e), "predictions": []})
@@ -1685,6 +2037,12 @@ def _match_status_bucket(status: str) -> str:
 
 @app.route("/api/tournaments")
 def api_tournaments():
+    if _ACTIVE_SPORT == "all":
+        try:
+            snap = _build_multi_sport_snapshot(force_refresh=False)
+            return jsonify({"ok": True, "tournaments": snap.get("tournaments", [])})
+        except Exception as e:
+            return jsonify({"ok": False, "error": str(e), "tournaments": []})
     if _ACTIVE_SPORT != "soccer":
         return jsonify({"ok": True, "tournaments": []})
     try:
@@ -1713,6 +2071,46 @@ def api_tournaments():
 
 @app.route("/api/tournament/data")
 def api_tournament_data():
+    if _ACTIVE_SPORT == "all":
+        code = str(request.args.get("code", "") or "").strip()
+        if not code:
+            return jsonify({"ok": False, "error": "Missing sport code", "matches": [], "standings": [], "top_scorers": []}), 400
+        query = str(request.args.get("q", "") or "").strip().lower()
+        status_filter = str(request.args.get("status", "all") or "all").strip().lower()
+        try:
+            snap = _build_multi_sport_snapshot(force_refresh=bool(request.args.get("refresh")))
+            tournaments = {str(t.get("code") or ""): t for t in (snap.get("tournaments") or [])}
+            if code not in tournaments:
+                return jsonify({"ok": False, "error": f"Unsupported sport code: {code}", "matches": [], "standings": [], "top_scorers": []}), 404
+
+            matches = []
+            for m in (snap.get("games") or []):
+                if str(m.get("competition") or "") != code:
+                    continue
+                bucket = _match_status_bucket(m.get("status", ""))
+                if status_filter in {"scheduled", "live", "finished"} and bucket != status_filter:
+                    continue
+                if query:
+                    home = str(m.get("home_team") or "").lower()
+                    away = str(m.get("away_team") or "").lower()
+                    if query not in home and query not in away:
+                        continue
+                row = dict(m)
+                row["status_bucket"] = bucket
+                matches.append(row)
+
+            matches.sort(key=lambda x: (x.get("game_date") or x.get("date") or "", x.get("game_time") or ""))
+            return jsonify({
+                "ok": True,
+                "code": code,
+                "competition": tournaments.get(code, {"code": code, "name": code}),
+                "matches": matches,
+                "standings": [],
+                "top_scorers": [],
+            })
+        except Exception as e:
+            return jsonify({"ok": False, "error": str(e), "matches": [], "standings": [], "top_scorers": []})
+
     if _ACTIVE_SPORT != "soccer":
         return jsonify({"ok": False, "error": "Tournament data is available only in soccer mode"}), 400
 
@@ -1834,12 +2232,13 @@ def api_parlay_list():
         current_only_raw = str(request.args.get("current_only", "1")).strip().lower()
         current_only = current_only_raw in {"1", "true", "yes", "on"}
         target_date = _et_calendar_today() if current_only else None
+        db_sport = None if _ACTIVE_SPORT == "all" else _ACTIVE_SPORT
         return jsonify({
             "ok": True,
             "parlays": _clean(get_tracked_parlays(
                 include_resolved=include_resolved,
                 target_date=target_date,
-                sport=_ACTIVE_SPORT,
+                sport=db_sport,
             )),
         })
     except Exception as e:
@@ -1976,6 +2375,8 @@ _CACHE_POLL_INTERVAL = int(os.getenv("CACHE_POLL_INTERVAL_SEC", "120"))
 
 def _sync_state_from_cache(broadcast: bool = False) -> bool:
     """Refresh in-memory state from DB cache when available."""
+    if _ACTIVE_SPORT == "all":
+        return False
     try:
         from data.db import get_analysis_cache
         cached = get_analysis_cache(max_age_hours=22)
@@ -2312,20 +2713,29 @@ def _load_boot_schedule_fallback() -> bool:
         today_date = _et_calendar_today()
         today_str = today_date.isoformat()
         tomorrow_str = (today_date + datetime.timedelta(days=1)).isoformat()
-        if _ACTIVE_SPORT == "soccer":
+        if _ACTIVE_SPORT == "all":
+            snap = _build_multi_sport_snapshot(force_refresh=False)
+            all_games = snap.get("games") or []
+            all_bets = snap.get("bets") or []
+            today_games = [g for g in all_games if str(g.get("game_date") or "") == today_str]
+            tomorrow_games = [g for g in all_games if str(g.get("game_date") or "") == tomorrow_str]
+            today_cards = [_build_card(g, all_bets, [], "TODAY") for g in today_games]
+            tomorrow_cards = [_build_card(g, all_bets, [], "TOMORROW") for g in tomorrow_games]
+        elif _ACTIVE_SPORT == "soccer":
             from data.soccer_fetcher import get_matches_today_all, get_matches_tomorrow_all
 
             today_games = get_matches_today_all() or []
             tomorrow_games = get_matches_tomorrow_all() or []
+            today_cards = [_build_card(g, [], [], "TODAY") for g in today_games]
+            tomorrow_cards = [_build_card(g, [], [], "TOMORROW") for g in tomorrow_games]
         else:
             from data.mlb_fetcher import get_schedule_range
 
             all_games = get_schedule_range(days_ahead=2) or []
             today_games = [g for g in all_games if g.get("date", "") == today_str]
             tomorrow_games = [g for g in all_games if g.get("date", "") == tomorrow_str]
-
-        today_cards = [_build_card(g, [], [], "TODAY") for g in today_games]
-        tomorrow_cards = [_build_card(g, [], [], "TOMORROW") for g in tomorrow_games]
+            today_cards = [_build_card(g, [], [], "TODAY") for g in today_games]
+            tomorrow_cards = [_build_card(g, [], [], "TOMORROW") for g in tomorrow_games]
 
         with _lock:
             _state.update({
@@ -2346,6 +2756,10 @@ def _load_boot_schedule_fallback() -> bool:
 
 def _auto_boot_analysis():
     """On startup: load today's DB snapshot, or generate one if today's snapshot is missing/stale."""
+    if _ACTIVE_SPORT == "all":
+        _load_boot_schedule_fallback()
+        threading.Thread(target=_run_analysis, daemon=True).start()
+        return
     try:
         from data.db import get_analysis_cache
         today_str    = _et_calendar_today().isoformat()

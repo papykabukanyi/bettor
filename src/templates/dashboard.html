@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0,viewport-fit=cover">
 <meta name="mobile-web-app-capable" content="yes">
-<title>Bettor — MLB Dashboard</title>
+<title>Bettor — All Sports Dashboard</title>
 <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Fraunces:wght@600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap');
@@ -617,10 +617,8 @@ body.console-open main{padding-bottom:236px}
 <!-- Header -->
 <header class="header">
   <div class="header-brand">
-    {% if active_sport != 'soccer' %}
-    <img class="mlb-logo" src="/static/mlb-animated.svg" alt="Baseball league logo" onerror="this.style.display='none'">
-    {% endif %}
-    <h1>Bettor <span>{{ 'Soccer' if active_sport == 'soccer' else 'MLB' }}</span></h1>
+    <img class="mlb-logo" src="/static/mlb-animated.svg" alt="Bettor logo" onerror="this.style.display='none'">
+    <h1>Bettor <span>{{ 'All Sports' if active_sport == 'all' else ('Soccer' if active_sport == 'soccer' else 'MLB') }}</span></h1>
   </div>
   <div class="header-actions">
     <span id="last-updated">{{ last_updated or 'Not loaded' }}</span>
@@ -638,13 +636,11 @@ body.console-open main{padding-bottom:236px}
   <div class="tab" data-tab="tomorrow" onclick="switchTab('tomorrow')">
     &#128197; Tomorrow <span class="tab-badge" id="badge-tomorrow">0</span>
   </div>
-  {% if active_sport == 'soccer' %}
   <div class="tab" data-tab="tournaments" onclick="switchTab('tournaments')">
     &#127942; Tournaments
   </div>
-  {% endif %}
   <div class="tab" data-tab="props" onclick="switchTab('props')">
-    &#128200; {{ 'Player Props' if active_sport == 'soccer' else 'Over Bets' }}
+    &#128200; {{ 'Best Bets' if active_sport == 'all' else ('Player Props' if active_sport == 'soccer' else 'Over Bets') }}
   </div>
   <div class="tab" data-tab="parlays" onclick="switchTab('parlays')">
     &#127917; Parlays
@@ -677,7 +673,6 @@ body.console-open main{padding-bottom:236px}
     <div class="no-games hidden" id="tomorrow-empty">No games tomorrow or analysis not yet run.</div>
   </div>
 
-  {% if active_sport == 'soccer' %}
   <div class="tab-panel" id="panel-tournaments">
     <div class="section-header">
       <span class="section-title">&#127942; Tournament Hub</span>
@@ -717,25 +712,22 @@ body.console-open main{padding-bottom:236px}
       </div>
     </div>
   </div>
-  {% endif %}
 
   <!-- OVER BETS OF THE DAY -->
   <div class="tab-panel" id="panel-props">
     <div class="section-header">
-      <span class="section-title">{{ '&#127919; Soccer Props of the Day' if active_sport == 'soccer' else '&#9650; Over Bets of the Day' }}</span>
+      <span class="section-title">{{ '&#127919; Best Bets of the Day' if active_sport == 'all' else ('&#127919; Soccer Props of the Day' if active_sport == 'soccer' else '&#9650; Over Bets of the Day') }}</span>
       <span class="section-meta" id="props-meta"></span>
     </div>
     <div class="filter-bar">
       <input type="text" id="props-search" placeholder="Search player, team…" oninput="filterProps()">
       <select id="props-stat" onchange="filterProps()">
         <option value="">All Stats</option>
-        {% if active_sport == 'soccer' %}
         <option value="goals">Goals</option>
         <option value="assists">Assists</option>
         <option value="shots_on_target">Shots on Target</option>
         <option value="cards">Cards</option>
         <option value="corners">Corners</option>
-        {% else %}
         <option value="strikeouts">Pitcher Ks</option>
         <option value="hits">Hits</option>
         <option value="home_runs">Home Runs</option>
@@ -744,11 +736,10 @@ body.console-open main{padding-bottom:236px}
         <option value="runs">Runs</option>
         <option value="walks">Walks</option>
         <option value="stolen_bases">Stolen Bases</option>
-        {% endif %}
       </select>
-      <select id="props-dir" onchange="filterProps()" {% if active_sport != 'soccer' %}style="display:none"{% endif %}>
-        <option value="" {% if active_sport == 'soccer' %}selected{% endif %}>All Directions</option>
-        <option value="OVER" {% if active_sport != 'soccer' %}selected{% endif %}>OVER</option>
+      <select id="props-dir" onchange="filterProps()" {% if active_sport == 'mlb' %}style="display:none"{% endif %}>
+        <option value="" {% if active_sport != 'mlb' %}selected{% endif %}>All Directions</option>
+        <option value="OVER" {% if active_sport == 'mlb' %}selected{% endif %}>OVER</option>
         <option value="UNDER">UNDER</option>
       </select>
       <select id="props-safety" onchange="filterProps()">
@@ -897,7 +888,17 @@ let TOURNAMENT_DATA = null;
 let _tournamentFilterTimer = null;
 
 function _isSoccerMode() {
-  return String(ACTIVE_SPORT || '').toLowerCase() === 'soccer';
+  const mode = String(ACTIVE_SPORT || '').toLowerCase();
+  return mode === 'soccer' || mode === 'all';
+}
+
+function _isAllSportsMode() {
+  return String(ACTIVE_SPORT || '').toLowerCase() === 'all';
+}
+
+function _sportDisplayName() {
+  if (_isAllSportsMode()) return 'All Sports';
+  return _isSoccerMode() ? 'Soccer' : 'MLB';
 }
 
 function _asArray(v) {
@@ -1897,7 +1898,7 @@ function renderGames(gridId, cards, emptyId, metaId, badgeId) {
   }
   if (empty) empty.classList.add('hidden');
   if (badge) badge.textContent = String(cards.length);
-  if (meta) meta.textContent = `${cards.length} game${cards.length!==1?'s':''} &middot; ${_isSoccerMode() ? 'Soccer' : 'MLB'}`;
+  if (meta) meta.textContent = `${cards.length} game${cards.length!==1?'s':''} &middot; ${_sportDisplayName()}`;
   if (grid) grid.innerHTML = cards.map(c => gameCard(c)).join('');
 }
 
@@ -2555,8 +2556,8 @@ function _gameDetailsMarkup(card) {
   const scoreText = card.away_score != null && card.home_score != null
     ? `${card.away_score} - ${card.home_score}`
     : 'Pre-game';
-  const leagueFallback = _isSoccerMode() ? 'Soccer' : 'MLB';
-  const detailsLabel = _isSoccerMode() ? 'Soccer Match Breakdown' : 'Game Breakdown';
+  const leagueFallback = _sportDisplayName();
+  const detailsLabel = _isAllSportsMode() ? 'Matchup Breakdown' : (_isSoccerMode() ? 'Soccer Match Breakdown' : 'Game Breakdown');
   const metaBits = [
     card.league || card.competition_name || leagueFallback,
     kickoff,
@@ -2865,7 +2866,7 @@ function parlayComboCard(c) {
   return `<div class="parlay-combo-card">
   <div class="combo-header">
     <div>
-      <div class="combo-title">&#9650; ${c.n}-Leg ${_isSoccerMode() ? 'Props' : 'OVER'} Parlay</div>
+      <div class="combo-title">&#9650; ${c.n}-Leg ${_isAllSportsMode() ? 'Best Bets' : (_isSoccerMode() ? 'Props' : 'OVER')} Parlay</div>
       <div class="combo-prob">Hit chance: ${probPct}% &middot; <span style="color:${evColor}">EV ${(evRaw*100).toFixed(1)}%</span></div>
     </div>
     <div style="text-align:right">
@@ -2945,7 +2946,7 @@ function sortAndRenderProps() {
     return;
   }
   const liveCount = sorted.reduce((acc,p)=>acc + (_isLiveFromSet(p.game_key||p.game||'', liveKeys, liveArr) ? 1 : 0), 0);
-  document.getElementById('props-meta').textContent = `${sorted.length} ${_isSoccerMode() ? 'props' : 'over bets'}${liveCount?` · ${liveCount} live`:''}`;
+  document.getElementById('props-meta').textContent = `${sorted.length} ${_isAllSportsMode() ? 'best bets' : (_isSoccerMode() ? 'props' : 'over bets')}${liveCount?` · ${liveCount} live`:''}`;
   tbody.innerHTML = sorted.map(p => {
     const isLive = _isLiveFromSet(p.game_key||p.game||'', liveKeys, liveArr);
     const liveEye = isLive ? '<span class="live-eye" title="Live prop"></span>' : '';
@@ -3398,7 +3399,7 @@ function loadBotPerformance() {
       <div class="perf-card"><div class="perf-val perf-pend">${pushes}</div><div class="perf-label">Pushes</div></div>
       <div class="perf-card"><div class="perf-val perf-pend">${pending}</div><div class="perf-label">Pending</div></div>
       <div class="perf-card"><div class="perf-val" style="color:${hrColor}">${hitRate!=null?hitRate+'%':'—'}</div><div class="perf-label">Bot Hit Rate</div></div>
-      <div class="perf-card"><div class="perf-val" style="font-size:1.2rem">${totalProps}</div><div class="perf-label">${_isSoccerMode() ? 'Total Props' : 'Total Over Bets'}</div><div class="perf-sub">Bets of the Day</div></div>
+      <div class="perf-card"><div class="perf-val" style="font-size:1.2rem">${totalProps}</div><div class="perf-label">${_isAllSportsMode() ? 'Total Best Bets' : (_isSoccerMode() ? 'Total Props' : 'Total Over Bets')}</div><div class="perf-sub">Bets of the Day</div></div>
     `;
   }).catch(() => {
     el.innerHTML = '<div class="no-games">Could not load bot performance.</div>';
@@ -3419,7 +3420,7 @@ function loadPerformance() {
       <div class="perf-card"><div class="perf-val perf-pend">${s.pushes||0}</div><div class="perf-label">Pushes</div></div>
       <div class="perf-card"><div class="perf-val perf-pend">${s.pending||0}</div><div class="perf-label">Pending</div></div>
       <div class="perf-card"><div class="perf-val perf-rate">${s.hit_rate!=null?s.hit_rate+'%':'—'}</div><div class="perf-label">Hit Rate</div></div>
-      <div class="perf-card"><div class="perf-val" style="font-size:1.2rem">${totalProps}</div><div class="perf-label">${_isSoccerMode() ? 'Total Props' : 'Total Over Bets'}</div><div class="perf-sub">Bets of the Day</div></div>
+      <div class="perf-card"><div class="perf-val" style="font-size:1.2rem">${totalProps}</div><div class="perf-label">${_isAllSportsMode() ? 'Total Best Bets' : (_isSoccerMode() ? 'Total Props' : 'Total Over Bets')}</div><div class="perf-sub">Bets of the Day</div></div>
     `;
   });
 }

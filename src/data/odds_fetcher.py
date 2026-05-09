@@ -69,8 +69,12 @@ def get_live_odds(sport_key: str = "mlb", markets: str = "h2h") -> list[dict]:
         print(f"[odds_fetcher] Requests remaining this month: {remaining}")
         resp.raise_for_status()
         return resp.json()
+    except requests.HTTPError:
+        code = getattr(resp, "status_code", "?")
+        print(f"[odds_fetcher] fetch error: HTTP {code} for sport={raw_sport}")
+        return []
     except Exception as e:
-        print(f"[odds_fetcher] fetch error: {e}")
+        print(f"[odds_fetcher] fetch error for sport={raw_sport}: {e.__class__.__name__}")
         return []
 
 
@@ -195,8 +199,12 @@ def get_available_sports() -> list[dict]:
         resp = requests.get(url, params={"apiKey": ODDS_API_KEY}, timeout=10)
         resp.raise_for_status()
         return resp.json()
+    except requests.HTTPError:
+        code = getattr(resp, "status_code", "?")
+        print(f"[odds_fetcher] sports list error: HTTP {code}")
+        return []
     except Exception as e:
-        print(f"[odds_fetcher] sports list error: {e}")
+        print(f"[odds_fetcher] sports list error: {e.__class__.__name__}")
         return []
 
 

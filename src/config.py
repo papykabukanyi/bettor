@@ -47,7 +47,7 @@ MLB_SEASONS = [2026, 2025, 2024, 2023]
 # Soccer / World Cup 2026
 # ---------------------------------------------------------------------------
 FOOTBALL_DATA_API_KEY = os.getenv("FOOTBALL_DATA_API_KEY", "")
-SPORT                 = os.getenv("SPORT", "soccer")   # "mlb" or "soccer"
+SPORT                 = os.getenv("SPORT", "all")   # "all", "mlb", or "soccer"
 WC_START_DATE         = "2026-06-11"
 WC_END_DATE           = "2026-07-19"
 
