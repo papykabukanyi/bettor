@@ -4334,6 +4334,8 @@ def _resolve_all_sports_outcomes(days_back: int = 3) -> dict:
             except Exception:
                 pass
 
+    pending_dates.add(today)
+
     if pending_dates:
         check_dates = sorted(pending_dates, reverse=True)
     else:
