@@ -1919,6 +1919,42 @@ def get_predictions(days: int = 30, outcome: str = None,
         conn.close()
 
 
+def get_props(days: int = 30, outcome: str = None, sport: str | None = None) -> list:
+    """Fetch prop history."""
+    conn = get_conn()
+    if conn is None:
+        return []
+    try:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cols = _get_table_columns(conn, "prop_history")
+        bet_uid_col = "bet_uid" if "bet_uid" in cols else "NULL::text AS bet_uid"
+        game_key_col = "game_key" if "game_key" in cols else "NULL::text AS game_key"
+        wheres = ["detected_at > NOW() - (INTERVAL '1 day' * %s)"]
+        vals   = [days]
+        if outcome:
+            wheres.append("outcome = %s"); vals.append(outcome.upper())
+        if sport:
+            wheres.append("sport = %s"); vals.append(sport)
+        cur.execute(
+            f"SELECT id, {bet_uid_col}, {game_key_col}, sport, player_name, team, game_date::text, "
+            "prop_type, line, over_prob, under_prob, recommendation, stats_json, "
+            "actual_value, outcome, resolved_at, detected_at "
+            f"FROM prop_history WHERE {' AND '.join(wheres)} "
+            "ORDER BY detected_at DESC LIMIT 500", vals
+        )
+        rows = [dict(r) for r in cur.fetchall()]
+        for r in rows:
+            for k in ("game_date","detected_at","resolved_at"):
+                if r.get(k):
+                    r[k] = r[k].isoformat() if hasattr(r[k],"isoformat") else str(r[k])
+        return rows
+    except Exception as e:
+        print(f"[db] get_props error: {e}")
+        return []
+    finally:
+        conn.close()
+
+
 def get_performance_stats(sport: str | None = None) -> dict:
     """Return win/loss/push counts and ROI for prediction tracking."""
     conn = get_conn()

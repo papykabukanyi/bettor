@@ -3911,6 +3911,19 @@ def api_predictions():
         return jsonify({"ok": False, "error": str(e), "predictions": []})
 
 
+@app.route("/api/props")
+def api_props():
+    days    = int(request.args.get("days", 30))
+    outcome = request.args.get("outcome")
+    try:
+        from data.db import get_props
+        db_sport = None if _ACTIVE_SPORT == "all" else _ACTIVE_SPORT
+        props = get_props(days=days, outcome=outcome or None, sport=db_sport)
+        return jsonify({"ok": True, "props": _clean(props)})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e), "props": []})
+
+
 def _match_status_bucket(status: str) -> str:
     s = str(status or "").lower()
     if any(k in s for k in ("in progress", "in_play", "live", "halftime", "paused")):

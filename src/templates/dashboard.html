@@ -3770,10 +3770,20 @@ function sendBuilderParlay() {
 }
 
 function loadTrackedParlays() {
-  fetch('/api/parlay/list?include_resolved=1&current_only=0').then(r=>r.json()).then(d=>{
+  Promise.all([
+    fetch('/api/parlay/list?include_resolved=1&current_only=0').then(r=>r.json()),
+    fetch('/api/predictions?outcome=WIN&days=30').then(r=>r.json()),
+    fetch('/api/predictions?outcome=LOSS&days=30').then(r=>r.json()),
+    fetch('/api/props?outcome=WIN&days=30').then(r=>r.json()),
+    fetch('/api/props?outcome=LOSS&days=30').then(r=>r.json()),
+  ]).then(([pd, wd, ld, wpd, lpd]) => {
     const el = document.getElementById('tracked-parlays-list');
     const metaEl = document.getElementById('tracked-parlay-meta');
-    const rows = d.ok ? _asArray(d.parlays) : [];
+    const rows = pd.ok ? _asArray(pd.parlays) : [];
+    const winPreds = wd.ok ? _asArray(wd.predictions) : [];
+    const lossPreds = ld.ok ? _asArray(ld.predictions) : [];
+    const winProps = wpd.ok ? _asArray(wpd.props) : [];
+    const lossProps = lpd.ok ? _asArray(lpd.props) : [];
 
     const pending = rows.filter(p => (p.outcome || 'PENDING').toUpperCase() === 'PENDING');
     const wins = rows.filter(p => (p.outcome || '').toUpperCase() === 'WIN');
@@ -3784,7 +3794,7 @@ function loadTrackedParlays() {
     });
 
     if (metaEl) {
-      metaEl.textContent = `Live: ${pending.length} · Won: ${wins.length} · Lost: ${losses.length} · Total: ${rows.length}`;
+      metaEl.textContent = `Live: ${pending.length} · Won: ${wins.length + winPreds.length + winProps.length} · Lost: ${losses.length + lossPreds.length + lossProps.length} · Total: ${rows.length + winPreds.length + lossPreds.length + winProps.length + lossProps.length}`;
     }
 
     const outcomeLabel = (v) => {
@@ -3792,7 +3802,7 @@ function loadTrackedParlays() {
       return out === 'PENDING' ? 'LIVE TRACKING' : out;
     };
 
-    const renderList = (arr) => arr.map(p=>{
+    const renderParlayList = (arr) => arr.map(p=>{
       const legs = (p.legs_json||[]).map(l=>
         `<div style="font-size:.78rem;color:var(--muted);padding:3px 0">&bull; ${l.label||JSON.stringify(l)}</div>`
       ).join('');
@@ -3809,25 +3819,110 @@ function loadTrackedParlays() {
       </div>`;
     }).join('');
 
-    const intro = !d.ok
-      ? 'Could not load tracked parlays. Showing empty sections.'
-      : (rows.length ? 'All tracked bets are shown below.' : 'No tracked parlays yet. New tracked bets will appear below.');
+    const renderSingleList = (arr, outcome) => arr.map(pred=>{
+      const betType = _betTypeMeta(pred.bet_type || 'market');
+      const line = pred.line != null ? ` ${pred.line}` : '';
+      const odds = pred.odds_am ? ` (${pred.odds_am > 0 ? '+' : ''}${pred.odds_am})` : '';
+      const prob = pred.model_prob ? ` ${Math.round(pred.model_prob * 100)}%` : '';
+      return `<div class="tracked-parlay">
+        <div class="tracked-parlay-header">
+          <span class="tp-name">${pred.home_team} vs ${pred.away_team}</span>
+          <span class="tp-outcome tp-${outcome}">${outcome}</span>
+        </div>
+        <div class="tp-meta">${betType.icon} ${betType.label}: ${pred.pick}${line}${odds}${prob} · ${pred.game_date}</div>
+      </div>`;
+    }).join('');
+
+    const renderPropList = (arr, outcome) => arr.map(prop=>{
+      const rec = prop.recommendation || 'OVER';
+      const line = prop.line != null ? ` ${prop.line}` : '';
+      const prob = rec === 'OVER' ? prop.over_prob : prop.under_prob;
+      const probStr = prob ? ` ${Math.round(prob * 100)}%` : '';
+      return `<div class="tracked-parlay">
+        <div class="tracked-parlay-header">
+          <span class="tp-name">${prop.player_name} (${prop.team})</span>
+          <span class="tp-outcome tp-${outcome}">${outcome}</span>
+        </div>
+        <div class="tp-meta">${prop.prop_type}${line} ${rec}${probStr} · ${prop.game_date}</div>
+      </div>`;
+    }).join('');
+
+    const intro = !pd.ok
+      ? 'Could not load tracked bets. Showing empty sections.'
+      : ((rows.length + winPreds.length + lossPreds.length) ? 'All tracked bets are shown below.' : 'No tracked bets yet. New tracked bets will appear below.');
 
     el.innerHTML = `
-      <div class="section-meta" style="margin-bottom:8px">${intro}</div>
-      <div class="section-meta" style="margin:10px 0 6px">Live Tracking (${pending.length})</div>
-      ${pending.length ? renderList(pending) : '<div class="no-games" style="padding:14px 10px">No live tracked parlays.</div>'}
-      <div class="section-meta" style="margin:14px 0 6px">Won (${wins.length})</div>
-      ${wins.length ? renderList(wins) : '<div class="no-games" style="padding:14px 10px">No winning parlays yet.</div>'}
-      <div class="section-meta" style="margin:14px 0 6px">Lost (${losses.length})</div>
-      ${losses.length ? renderList(losses) : '<div class="no-games" style="padding:14px 10px">No losing parlays yet.</div>'}
-      ${pushes.length ? `<div class="section-meta" style="margin:14px 0 6px">Other (${pushes.length})</div>${renderList(pushes)}` : ''}
+      <div style="max-height: 800px; overflow-y: auto;">
+        <div class="section-meta" style="margin-bottom:8px">${intro}</div>
+        <div class="section-meta" style="margin:10px 0 6px; cursor: pointer;" onclick="toggleSection('live-parlays')">
+          Live Tracking (${pending.length}) <span class="toggle-icon">-</span>
+        </div>
+        <div id="live-parlays-content">
+          ${pending.length ? renderParlayList(pending) : '<div class="no-games" style="padding:14px 10px">No live tracked parlays.</div>'}
+        </div>
+        <div class="section-meta" style="margin:14px 0 6px; cursor: pointer;" onclick="toggleSection('won-parlays')">
+          Won Parlays (${wins.length}) <span class="toggle-icon">-</span>
+        </div>
+        <div id="won-parlays-content">
+          ${wins.length ? renderParlayList(wins) : '<div class="no-games" style="padding:14px 10px">No winning parlays yet.</div>'}
+        </div>
+        <div class="section-meta" style="margin:14px 0 6px; cursor: pointer;" onclick="toggleSection('won-singles')">
+          Won Singles (${winPreds.length}) <span class="toggle-icon">-</span>
+        </div>
+        <div id="won-singles-content">
+          ${winPreds.length ? renderSingleList(winPreds, 'WIN') : '<div class="no-games" style="padding:14px 10px">No winning singles yet.</div>'}
+        </div>
+        <div class="section-meta" style="margin:14px 0 6px; cursor: pointer;" onclick="toggleSection('won-props')">
+          Won Props (${winProps.length}) <span class="toggle-icon">-</span>
+        </div>
+        <div id="won-props-content">
+          ${winProps.length ? renderPropList(winProps, 'WIN') : '<div class="no-games" style="padding:14px 10px">No winning props yet.</div>'}
+        </div>
+        <div class="section-meta" style="margin:14px 0 6px; cursor: pointer;" onclick="toggleSection('lost-parlays')">
+          Lost Parlays (${losses.length}) <span class="toggle-icon">-</span>
+        </div>
+        <div id="lost-parlays-content">
+          ${losses.length ? renderParlayList(losses) : '<div class="no-games" style="padding:14px 10px">No losing parlays yet.</div>'}
+        </div>
+        <div class="section-meta" style="margin:14px 0 6px; cursor: pointer;" onclick="toggleSection('lost-singles')">
+          Lost Singles (${lossPreds.length}) <span class="toggle-icon">-</span>
+        </div>
+        <div id="lost-singles-content">
+          ${lossPreds.length ? renderSingleList(lossPreds, 'LOSS') : '<div class="no-games" style="padding:14px 10px">No losing singles yet.</div>'}
+        </div>
+        <div class="section-meta" style="margin:14px 0 6px; cursor: pointer;" onclick="toggleSection('lost-props')">
+          Lost Props (${lossProps.length}) <span class="toggle-icon">-</span>
+        </div>
+        <div id="lost-props-content">
+          ${lossProps.length ? renderPropList(lossProps, 'LOSS') : '<div class="no-games" style="padding:14px 10px">No losing props yet.</div>'}
+        </div>
+        ${pushes.length ? `<div class="section-meta" style="margin:14px 0 6px; cursor: pointer;" onclick="toggleSection('other-parlays')">
+          Other (${pushes.length}) <span class="toggle-icon">-</span>
+        </div>
+        <div id="other-parlays-content">
+          ${renderParlayList(pushes)}
+        </div>` : ''}
+      </div>
     `;
   });
 }
 
-// ── Performance ───────────────────────────────────────────────────────────
-function loadBotPerformance() {
+// ── Toggle sections ───────────────────────────────────────────────────────
+function toggleSection(id) {
+  const contentEl = document.getElementById(id + '-content');
+  const iconEl = document.querySelector(`[onclick="toggleSection('${id}')"] .toggle-icon`);
+  if (contentEl && iconEl) {
+    if (contentEl.style.display === 'none') {
+      contentEl.style.display = 'block';
+      iconEl.textContent = '-';
+    } else {
+      contentEl.style.display = 'none';
+      iconEl.textContent = '+';
+    }
+  }
+}
+
+function loadTrackedParlays() {
   const el = document.getElementById('bot-perf-stats');
   if (!el) return;
   Promise.all([
