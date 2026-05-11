@@ -4932,6 +4932,25 @@ def api_kalshi_events():
         return jsonify({"ok": False, "error": str(e), "events": [], "count": 0})
 
 
+@app.route("/api/kalshi/balance")
+def api_kalshi_balance():
+    """Fetch current Kalshi account balance (authenticated)."""
+    try:
+        from data.kalshi import get_balance
+        data = get_balance()
+        balance_cents = int(data.get("balance", 0) or 0)
+        portfolio_cents = int(data.get("portfolio_value", 0) or 0)
+        return jsonify({
+            "ok": True,
+            "balance_cents": balance_cents,
+            "balance_usd": round(balance_cents / 100, 2),
+            "portfolio_cents": portfolio_cents,
+            "portfolio_usd": round(portfolio_cents / 100, 2),
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
+
+
 @app.route("/api/kalshi/order", methods=["POST"])
 def api_kalshi_order():
     """Execute a Kalshi order using API credentials from environment variables."""

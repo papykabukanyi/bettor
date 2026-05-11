@@ -401,18 +401,62 @@ main{padding:20px;max-width:1400px;margin:0 auto}
 .ready-pill{font-size:.67rem;padding:3px 7px;border-radius:999px;border:1px solid var(--border);color:var(--muted)}
 .ready-pill.good{border-color:rgba(22,163,74,.45);color:var(--green)}
 .ready-pill.warn{border-color:rgba(234,179,8,.45);color:var(--yellow)}
-.ready-actions{display:grid;grid-template-columns:minmax(150px,2fr) minmax(120px,1fr) minmax(90px,1fr) minmax(74px,1fr) minmax(74px,1fr) auto;gap:8px;margin-top:9px}
-.ready-actions select,.ready-actions input{width:100%;padding:8px;border:1px solid var(--border);border-radius:8px;background:var(--card);color:var(--text);font-size:.76rem}
-.ready-actions button{white-space:nowrap}
+.ready-actions{display:flex;align-items:center;gap:8px;margin-top:9px;flex-wrap:wrap}
+.ready-actions input[type=number]{width:90px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;background:var(--card);color:var(--text);font-size:.76rem;flex-shrink:0}
+.ready-actions button{white-space:nowrap;flex-shrink:0;padding:8px 18px;font-size:.82rem}
+.ready-match-chip{flex:1;min-width:160px;display:flex;align-items:center;gap:8px;background:#0f172a;border:1px solid var(--border);border-radius:8px;padding:6px 12px;font-size:.73rem;overflow:hidden}
+.ready-match-chip .match-name{color:#e2e8f0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;font-weight:600}
+.ready-match-chip .match-ticker{color:var(--muted);font-family:monospace;font-size:.68rem;white-space:nowrap;flex-shrink:0}
+.ready-match-chip .match-icon{flex-shrink:0;color:var(--green)}
+.ready-no-match{flex:1;min-width:160px}
+.ready-no-match input{width:100%;padding:8px 10px;border:1px solid rgba(239,68,68,.4);border-radius:8px;background:var(--card);color:var(--text);font-size:.74rem}
+.ready-side-badge{padding:5px 12px;border-radius:999px;font-size:.72rem;font-weight:700;white-space:nowrap;flex-shrink:0}
+.ready-side-badge.yes{background:rgba(22,163,74,.15);border:1px solid rgba(22,163,74,.4);color:var(--green)}
+.ready-side-badge.no{background:rgba(239,68,68,.15);border:1px solid rgba(239,68,68,.4);color:var(--red)}
+/* Kalshi balance bar */
+.rb-balance-bar{display:flex;align-items:center;gap:12px;padding:12px 18px;background:linear-gradient(90deg,#052e16,#0f172a);border:1px solid rgba(22,163,74,.4);border-radius:12px;margin-bottom:16px;flex-wrap:wrap}
+.rb-balance-amount{font-size:24px;font-weight:800;color:#4ade80;letter-spacing:-.5px}
+.rb-balance-port{font-size:14px;color:#60a5fa;font-weight:600}
+.rb-balance-label{font-size:.72rem;color:var(--muted);line-height:1.3}
+.rb-balance-warn{font-size:.71rem;color:var(--yellow);margin-left:auto;text-align:right}
+.rb-balance-bar .btn{margin-left:auto}
 .ready-order-log{max-height:230px;overflow:auto;border:1px solid var(--border);border-radius:12px;background:var(--card2);padding:10px}
 .ready-order-row{padding:8px 0;border-bottom:1px solid var(--border);font-size:.76rem}
 .ready-order-row:last-child{border-bottom:0}
 .ready-order-row.ok{color:var(--green)}
 .ready-order-row.err{color:var(--red)}
 
+/* Kalshi Markets Browser */
+.km-search-bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px}
+.km-search-bar input,.km-search-bar select{padding:8px 10px;border:1px solid var(--border);border-radius:8px;background:var(--card);color:var(--text);font-size:.78rem}
+.km-search-bar input{flex:1;min-width:160px}
+.km-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(290px,1fr));gap:12px;max-height:560px;overflow:auto;padding:4px 2px 12px}
+.km-card{background:var(--card2);border:1px solid var(--border);border-radius:12px;padding:13px;display:flex;flex-direction:column;gap:6px;transition:border-color .2s}
+.km-card:hover{border-color:var(--accent)}
+.km-card-title{font-size:.82rem;font-weight:700;line-height:1.35}
+.km-card-meta{font-size:.68rem;color:var(--muted)}
+.km-card-prices{display:flex;gap:10px;font-size:.74rem;align-items:center}
+.km-price-yes{color:var(--green);font-weight:700}
+.km-price-no{color:var(--yellow);font-weight:700}
+.km-price-vol{color:var(--muted)}
+.km-card-actions{display:grid;grid-template-columns:minmax(55px,1fr) minmax(60px,1fr) minmax(55px,1fr) auto;gap:6px;margin-top:2px}
+.km-card-actions input,.km-card-actions select{padding:6px 8px;border:1px solid var(--border);border-radius:7px;background:var(--card);color:var(--text);font-size:.74rem;width:100%}
+.km-section-header{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:10px}
+/* Combo legs preview inside ready-item */
+.combo-legs-preview{background:rgba(0,0,0,.18);border-radius:8px;padding:8px 10px;margin:7px 0;display:flex;flex-direction:column;gap:5px}
+.combo-leg-row{display:grid;grid-template-columns:22px 1fr auto;gap:7px;align-items:center;font-size:.75rem}
+.clr-num{width:18px;height:18px;border-radius:50%;background:rgba(124,58,237,.7);color:#fff;font-size:.65rem;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.clr-prob{color:var(--accent);font-weight:700;white-space:nowrap;font-size:.72rem}
+.ready-combo-item{border-color:rgba(124,58,237,.35) !important}
+.rb-tabs{display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap}
+.rb-tab{padding:6px 16px;border-radius:999px;border:1px solid var(--border);font-size:.78rem;cursor:pointer;background:var(--card2);color:var(--muted);transition:all .2s}
+.rb-tab.active{background:var(--accent);color:#fff;border-color:var(--accent)}
+.rb-panel{display:none}.rb-panel.active{display:block}
 @media (max-width:980px){
-  .ready-actions{grid-template-columns:1fr 1fr 1fr}
-  .ready-actions button{grid-column:1/-1}
+  .ready-actions{flex-wrap:wrap}
+  .ready-match-chip,.ready-no-match{width:100%;flex:unset}
+  .km-card-actions{grid-template-columns:1fr 1fr}
+  .km-card-actions button{grid-column:1/-1}
 }
 .pick-phrase{font-weight:700}
 .pick-phrase.win{color:var(--green)}
@@ -845,25 +889,77 @@ body.console-open main{padding-bottom:236px}
 
   <!-- READY BETS -->
   <div class="tab-panel" id="panel-readybets">
-    <div class="section-header">
-      <span class="section-title">&#9989; Ready Bets (Bot-Qualified)</span>
+    <!-- ── Header ── -->
+    <div class="section-header" style="flex-wrap:wrap;gap:8px">
+      <span class="section-title">&#9989; Ready Bets &amp; Kalshi Execution</span>
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
         <span class="section-meta" id="ready-bets-meta"></span>
         <button class="btn btn-sm" onclick="refreshReadyBets(true)">&#8635; Refresh</button>
         <button class="btn btn-sm" onclick="loadKalshiMarkets(true)">&#127760; Load Kalshi Markets</button>
       </div>
     </div>
-    <div class="section-meta" id="ready-kalshi-meta" style="margin-bottom:10px">
-      Pulling public market data from Kalshi. Orders use your API key from environment.
-    </div>
-    <div id="ready-bets-list"><div class="no-games">Run analysis to build ready bets.</div></div>
 
-    <div class="section-header" style="margin-top:18px">
-      <span class="section-title">&#128221; Ready-Bet Order Log</span>
-      <span class="section-meta" id="ready-order-meta"></span>
+    <!-- ── Live Balance Bar ── -->
+    <div class="rb-balance-bar" id="rb-balance-bar">
+      <div>
+        <div class="rb-balance-label">Available Cash</div>
+        <div class="rb-balance-amount" id="rb-balance-cash">—</div>
+      </div>
+      <div>
+        <div class="rb-balance-label">Portfolio Value</div>
+        <div class="rb-balance-port" id="rb-balance-port">—</div>
+      </div>
+      <div class="rb-balance-warn" id="rb-balance-warn" style="display:none">⚠ Real account. Orders execute immediately.</div>
+      <button class="btn btn-sm" onclick="fetchKalshiBalance()" title="Refresh balance">&#8635;</button>
     </div>
-    <div id="ready-order-log" class="ready-order-log">
-      <div class="no-games">No order attempts yet.</div>
+
+    <!-- ── Sub-tabs ── -->
+    <div class="rb-tabs">
+      <div class="rb-tab active" onclick="rbSwitchTab('rb-markets')">&#127760; Kalshi Markets</div>
+      <div class="rb-tab" onclick="rbSwitchTab('rb-singles')">&#9989; Bot Singles</div>
+      <div class="rb-tab" onclick="rbSwitchTab('rb-combos')">&#9889; Bot Combos</div>
+      <div class="rb-tab" onclick="rbSwitchTab('rb-log')">&#128221; Order Log</div>
+    </div>
+
+    <!-- ── 1: Kalshi Markets Browser ── -->
+    <div class="rb-panel active" id="rb-markets">
+      <div class="km-search-bar">
+        <input type="text" id="km-search" placeholder="&#128269; Search markets by title or ticker…" oninput="filterKalshiBrowser()">
+        <select id="km-category-filter" onchange="filterKalshiBrowser()">
+          <option value="">All Categories</option>
+        </select>
+        <span class="section-meta" id="km-count-meta"></span>
+      </div>
+      <div id="kalshi-markets-browser" class="km-grid">
+        <div class="no-games" style="grid-column:1/-1">Click "&#127760; Load Kalshi Markets" to browse all open prediction markets.</div>
+      </div>
+    </div>
+
+    <!-- ── 2: Bot-Qualified Singles + Props ── -->
+    <div class="rb-panel" id="rb-singles">
+      <div class="section-meta" style="margin-bottom:8px">
+        Bot-qualified bets matched to Kalshi markets. Enter amount and click Place — order executes immediately on your real account.
+      </div>
+      <div id="ready-bets-list"><div class="no-games">Run analysis to build ready bets.</div></div>
+    </div>
+
+    <!-- ── 3: Auto Combo Bets ── -->
+    <div class="rb-panel" id="rb-combos">
+      <div class="section-meta" style="margin-bottom:8px">
+        Auto-generated multi-leg combo bets. Each combo shows all legs. Enter amount and click Place.
+      </div>
+      <div id="ready-combos-list"><div class="no-games">Run analysis to generate combo bets.</div></div>
+    </div>
+
+    <!-- ── 4: Order Log ── -->
+    <div class="rb-panel" id="rb-log">
+      <div class="section-header" style="margin-bottom:8px">
+        <span class="section-title">&#128221; Order Log</span>
+        <span class="section-meta" id="ready-order-meta"></span>
+      </div>
+      <div id="ready-order-log" class="ready-order-log">
+        <div class="no-games">No order attempts yet.</div>
+      </div>
     </div>
   </div>
 
@@ -1773,6 +1869,7 @@ function switchTab(name) {
   if (name === 'readybets') {
     refreshReadyBets(true);
     loadKalshiMarkets(false);
+    fetchKalshiBalance();
   }
   if (name === 'parlays')     {
     autoGenParlaysFromProps();
@@ -3945,119 +4042,322 @@ function _appendReadyOrderLog(ok, label, msg) {
   _renderReadyOrderLog();
 }
 
+function fetchKalshiBalance() {
+  const cashEl = document.getElementById('rb-balance-cash');
+  const portEl = document.getElementById('rb-balance-port');
+  const warnEl = document.getElementById('rb-balance-warn');
+  if (cashEl) cashEl.textContent = '…';
+  if (portEl) portEl.textContent = '…';
+  fetch('/api/kalshi/balance')
+    .then(r => r.json())
+    .then(d => {
+      if (d.ok) {
+        if (cashEl) cashEl.textContent = '$' + Number(d.balance_usd || 0).toFixed(2);
+        if (portEl) portEl.textContent = '$' + Number(d.portfolio_usd || 0).toFixed(2);
+        if (warnEl) warnEl.style.display = '';
+      } else {
+        if (cashEl) cashEl.textContent = 'Error';
+        if (portEl) portEl.textContent = d.error || 'Check credentials';
+        if (warnEl) warnEl.style.display = 'none';
+      }
+    })
+    .catch(err => {
+      if (cashEl) cashEl.textContent = 'Error';
+      if (portEl) portEl.textContent = String(err);
+      if (warnEl) warnEl.style.display = 'none';
+    });
+}
+
 function loadKalshiMarkets(force) {
   if (!force && KALSHI_MARKETS.length) {
     const metaEl = document.getElementById('ready-kalshi-meta');
-    if (metaEl) metaEl.textContent = `Kalshi markets loaded: ${KALSHI_MARKETS.length}`;
+    if (metaEl) metaEl.textContent = `Kalshi: ${KALSHI_MARKETS.length} markets loaded`;
+    renderKalshiMarketsBrowser();
     return Promise.resolve(KALSHI_MARKETS);
   }
 
   const metaEl = document.getElementById('ready-kalshi-meta');
-  if (metaEl) metaEl.textContent = 'Loading Kalshi public markets…';
+  if (metaEl) metaEl.textContent = 'Loading Kalshi markets…';
 
   return fetch('/api/kalshi/markets?limit=250&status=open').then(r => r.json()).then(d => {
     if (!d.ok) {
-      if (metaEl) metaEl.textContent = `Kalshi market fetch failed: ${d.error || 'unknown error'}`;
+      if (metaEl) metaEl.textContent = `Kalshi fetch failed: ${d.error || 'unknown error'}`;
       return [];
     }
     KALSHI_MARKETS = _asArray(d.markets);
     KALSHI_MARKETS_CURSOR = d.cursor || null;
     if (metaEl) {
-      metaEl.textContent = `Kalshi markets loaded: ${KALSHI_MARKETS.length}${KALSHI_MARKETS_CURSOR ? ' (more available)' : ''}`;
+      metaEl.textContent = `Kalshi: ${KALSHI_MARKETS.length} markets loaded${KALSHI_MARKETS_CURSOR ? ' (more available)' : ''}`;
     }
+    renderKalshiMarketsBrowser();
     renderReadyBets();
     return KALSHI_MARKETS;
   }).catch(err => {
-    if (metaEl) metaEl.textContent = `Kalshi market fetch failed: ${err}`;
+    if (metaEl) metaEl.textContent = `Kalshi fetch failed: ${err}`;
     return [];
+  });
+}
+
+// ── Kalshi Markets Browser ───────────────────────────────────────────
+function rbSwitchTab(id) {
+  const panel = document.getElementById('panel-readybets');
+  if (!panel) return;
+  panel.querySelectorAll('.rb-tab').forEach((t,i) => {
+    const panels = ['rb-markets','rb-singles','rb-combos','rb-log'];
+    t.classList.toggle('active', panels[i] === id);
+  });
+  panel.querySelectorAll('.rb-panel').forEach(p => p.classList.toggle('active', p.id === id));
+  if (id === 'rb-markets' && !KALSHI_MARKETS.length) loadKalshiMarkets(false);
+  if (id === 'rb-combos' && !READY_BETS.length) refreshReadyBets(false);
+}
+
+function renderKalshiMarketsBrowser() {
+  const container = document.getElementById('kalshi-markets-browser');
+  const countMeta = document.getElementById('km-count-meta');
+  if (!container) return;
+
+  const q = (document.getElementById('km-search')?.value || '').toLowerCase().trim();
+  const catFilter = (document.getElementById('km-category-filter')?.value || '').toLowerCase().trim();
+
+  let markets = _asArray(KALSHI_MARKETS);
+  if (q) markets = markets.filter(m => {
+    const title = String(m.title || m.subtitle || '').toLowerCase();
+    const ticker = String(m.ticker || '').toLowerCase();
+    const event = String(m.event_ticker || '').toLowerCase();
+    return title.includes(q) || ticker.includes(q) || event.includes(q);
+  });
+  if (catFilter) markets = markets.filter(m => {
+    const cat = String(m.category || m.series_ticker || m.event_ticker || '').toLowerCase();
+    return cat.includes(catFilter);
+  });
+
+  if (countMeta) countMeta.textContent = `${markets.length} market${markets.length !== 1 ? 's' : ''}`;
+
+  // Populate category filter once
+  const catSelect = document.getElementById('km-category-filter');
+  if (catSelect && catSelect.options.length < 3 && KALSHI_MARKETS.length) {
+    const cats = [...new Set(KALSHI_MARKETS.map(m => String(m.category || (m.series_ticker || '').split('-')[0] || '').trim()).filter(Boolean))].sort().slice(0, 40);
+    cats.forEach(c => {
+      const opt = document.createElement('option');
+      opt.value = c.toLowerCase(); opt.textContent = c;
+      catSelect.appendChild(opt);
+    });
+  }
+
+  if (!markets.length) {
+    container.innerHTML = `<div class="no-games" style="grid-column:1/-1">${KALSHI_MARKETS.length ? 'No markets match your filter.' : 'Click "&#127760; Load Kalshi Markets" to browse.'}</div>`;
+    return;
+  }
+
+  container.innerHTML = markets.slice(0, 150).map(m => {
+    const ticker = String(m.ticker || '').trim();
+    const title = String(m.title || m.subtitle || ticker || 'Kalshi Market').trim();
+    const yesBid = Number(m.yes_bid || 0);
+    const noBid = Number(m.no_bid || 0) || Math.max(0, 100 - yesBid - 2);
+    const vol = Number(m.volume || m.volume_24h || 0);
+    const closeTime = m.close_time ? new Date(m.close_time).toLocaleDateString() : '';
+    const cat = String(m.category || m.series_ticker || '').split('-')[0] || '';
+    const safeTicker = ticker.replace(/[^a-zA-Z0-9_]/g, '_');
+    const defaultYesPrice = yesBid || 50;
+    return `<div class="km-card">
+      <div class="km-card-title">${title}</div>
+      <div class="km-card-meta">${ticker}${cat ? ' · '+cat : ''}${closeTime ? ' · closes '+closeTime : ''}</div>
+      <div class="km-card-prices">
+        <span class="km-price-yes">YES ${yesBid}&#162;</span>
+        <span class="km-price-no">NO ${noBid}&#162;</span>
+        ${vol ? `<span class="km-price-vol">Vol ${vol.toLocaleString()}</span>` : ''}
+      </div>
+      <div class="km-card-actions">
+        <input type="number" id="km-amt-${safeTicker}" min="1" step="1" value="25" title="Amount in USD">
+        <select id="km-side-${safeTicker}" onchange="document.getElementById('km-price-${safeTicker}').value=this.value==='yes'?${defaultYesPrice}:${noBid||50}">
+          <option value="yes">YES</option><option value="no">NO</option>
+        </select>
+        <input type="number" id="km-price-${safeTicker}" min="1" max="99" step="1" value="${defaultYesPrice}" title="Limit price in cents (1-99)">
+        <button class="btn btn-primary" onclick="placeKalshiDirectOrder('${ticker}','${safeTicker}',event)">Place</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function filterKalshiBrowser() { renderKalshiMarketsBrowser(); }
+
+function placeKalshiDirectOrder(ticker, safeTicker, evt) {
+  const btn = evt?.target || evt?.currentTarget;
+  const amt = Number(document.getElementById(`km-amt-${safeTicker}`)?.value || 0);
+  if (!amt || amt <= 0) { toast('Enter a valid amount ($).', 'error'); return; }
+  const side = String(document.getElementById(`km-side-${safeTicker}`)?.value || 'yes');
+  const price = Math.max(1, Math.min(99, Math.round(Number(document.getElementById(`km-price-${safeTicker}`)?.value || 50))));
+  const count = Math.max(1, Math.floor((amt * 100) / price));
+  const day = _localDayKey().replace(/-/g, '');
+  const clientOrderId = `direct_${safeTicker}_${side}_${day}_${Date.now() % 100000}`;
+
+  if (btn) { btn.disabled = true; btn.textContent = '…'; }
+  fetch('/api/kalshi/order', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ market_ticker: ticker, amount_usd: amt, side, limit_price_cents: price, count, client_order_id: clientOrderId }),
+  }).then(r => r.json()).then(d => {
+    if (btn) { btn.disabled = false; btn.textContent = 'Place'; }
+    if (d.ok) {
+      _appendReadyOrderLog(true, ticker, `${side.toUpperCase()} $${amt} @ ${price}¢ · id: ${d.client_order_id || clientOrderId}`);
+      toast(`✓ ${ticker} ${side.toUpperCase()} $${amt} placed!`, 'success');
+    } else {
+      _appendReadyOrderLog(false, ticker, d.error || 'Order failed');
+      toast(d.error || 'Order failed', 'error');
+    }
+  }).catch(err => {
+    if (btn) { btn.disabled = false; btn.textContent = 'Place'; }
+    _appendReadyOrderLog(false, ticker, String(err));
+    toast('Order error: ' + err, 'error');
   });
 }
 
 function renderReadyBets() {
   const container = document.getElementById('ready-bets-list');
+  const comboContainer = document.getElementById('ready-combos-list');
   const metaEl = document.getElementById('ready-bets-meta');
-  if (!container) return;
 
   const rows = READY_BETS;
-  if (!rows.length) {
-    container.innerHTML = '<div class="no-games">No ready bets met qualification rules yet.</div>';
-    if (metaEl) metaEl.textContent = '0 qualified';
-    return;
-  }
-
   const groups = {
     single: rows.filter(r => r.kind === 'single'),
     team_prop: rows.filter(r => r.kind === 'team_prop'),
     player_prop: rows.filter(r => r.kind === 'player_prop'),
     combo: rows.filter(r => r.kind === 'combo'),
   };
+  const nonCombo = groups.single.length + groups.team_prop.length + groups.player_prop.length;
   if (metaEl) {
-    metaEl.textContent = `${rows.length} qualified · singles ${groups.single.length} · team props ${groups.team_prop.length} · player props ${groups.player_prop.length} · combos ${groups.combo.length}`;
+    metaEl.textContent = `${rows.length} qualified · ${nonCombo} singles/props · ${groups.combo.length} combos`;
   }
 
-  const renderItem = (b) => {
+  // ── shared: render action row for any ready bet ──
+  const renderActionRow = (b) => {
     const uidDom = _safeDomId(b.uid);
+    // Auto-pick the single best-matching Kalshi market — no dropdown
+    const markets = _matchedMarketOptions(b, 3);
+    const best = markets[0] || null;
+    const autoTicker = best ? String(best.ticker || '').trim() : '';
+    const autoPrice = best
+      ? (b.side_default === 'no'
+          ? Math.round((best.no_ask || best.last_price || 50))
+          : Math.round((best.yes_ask || best.last_price || 50)))
+      : 50;
+    const sideVal = (b.side_default === 'no') ? 'no' : 'yes';
+
+    const matchHtml = best
+      ? `<div class="ready-match-chip">
+          <span class="match-icon">📍</span>
+          <span class="match-name">${(_kalshiMarketLabel(best) || best.ticker || 'Matched market')}</span>
+          <span class="match-ticker">${autoTicker}</span>
+        </div>`
+      : `<div class="ready-no-match"><input id="ready-manual-${uidDom}" type="text" placeholder="Enter Kalshi ticker…" title="Kalshi market ticker"></div>`;
+
+    const sideBadge = `<span class="ready-side-badge ${sideVal}">${sideVal.toUpperCase()}</span>`;
+
+    return `<div class="ready-actions" data-uid="${b.uid}" data-ticker="${autoTicker}" data-side="${sideVal}" data-price="${autoPrice}">
+      ${matchHtml}
+      ${sideBadge}
+      <input id="ready-amt-${uidDom}" type="number" min="1" step="1" value="25" placeholder="$">
+      <button class="btn btn-primary" onclick="executeReadyBet('${b.uid}')">Place ▶</button>
+    </div>`;
+  };
+
+  // ── single / prop item ──
+  const renderItem = (b) => {
     const probPct = Math.round((Number(b.model_prob) || 0) * 100);
     const qualityPct = Math.round((Number(b.quality) || 0) * 100);
     const evPct = ((Number(b.ev) || 0) * 100).toFixed(1);
-    const markets = _matchedMarketOptions(b, 8);
-    const opts = markets.map(m => {
-      const title = _kalshiMarketLabel(m) || m.ticker || 'Market';
-      const ticker = String(m.ticker || '').trim();
-      return `<option value="${ticker}">${title} (${ticker || 'no-ticker'})</option>`;
-    }).join('');
     const summaryBits = [
       b.sport ? String(b.sport).replace(/_/g, ' ').toUpperCase() : '',
       b.game_date || '',
       b.team || b.player_name || '',
       b.game || '',
-      `UID ${String(b.bet_uid || b.uid).slice(-12)}`,
     ].filter(Boolean);
-    return `
-      <div class="ready-item">
-        <div class="ready-item-head">
-          <div>
-            <div class="ready-item-title">${b.label}</div>
-            <div class="ready-item-sub">${summaryBits.map(x => `<span>${x}</span>`).join('')}</div>
-          </div>
-          <span class="tp-outcome tp-PENDING">${probPct}%</span>
+    return `<div class="ready-item">
+      <div class="ready-item-head">
+        <div>
+          <div class="ready-item-title">${b.label}</div>
+          <div class="ready-item-sub">${summaryBits.map(x => `<span>${x}</span>`).join('')}</div>
         </div>
-        <div class="ready-kpis">
-          <span class="ready-pill good">Quality ${qualityPct}%</span>
-          <span class="ready-pill ${Number(evPct) >= 0 ? 'good' : 'warn'}">EV ${evPct}%</span>
-          <span class="ready-pill">${String(b.safety_label || 'MODERATE').toUpperCase()}</span>
-          ${b.signal_rationale ? '<span class="ready-pill">Sentiment/News checked</span>' : ''}
-        </div>
-        <div class="ready-actions">
-          <select id="ready-market-${uidDom}">
-            <option value="">${markets.length ? 'Select Kalshi market' : 'No auto market match'}</option>
-            ${opts}
-          </select>
-          <input id="ready-manual-${uidDom}" type="text" placeholder="Ticker override">
-          <input id="ready-amt-${uidDom}" type="number" min="1" step="1" value="25" title="Amount USD">
-          <select id="ready-side-${uidDom}"><option value="yes" ${b.side_default === 'no' ? '' : 'selected'}>YES</option><option value="no" ${b.side_default === 'no' ? 'selected' : ''}>NO</option></select>
-          <input id="ready-price-${uidDom}" type="number" min="1" max="99" step="1" value="50" title="Limit price cents">
-          <button class="btn btn-primary" onclick="executeReadyBet('${b.uid}')">Place</button>
-        </div>
+        <span class="tp-outcome tp-PENDING">${probPct}%</span>
       </div>
-    `;
+      <div class="ready-kpis">
+        <span class="ready-pill good">Quality ${qualityPct}%</span>
+        <span class="ready-pill ${Number(evPct) >= 0 ? 'good' : 'warn'}">EV ${evPct}%</span>
+        <span class="ready-pill">${String(b.safety_label || 'MODERATE').toUpperCase()}</span>
+        ${b.signal_rationale ? '<span class="ready-pill">&#127780; Sentiment checked</span>' : ''}
+      </div>
+      ${renderActionRow(b)}
+    </div>`;
   };
 
-  const renderGroup = (title, arr, empty, open) => `
+  // ── combo item — shows each leg ──
+  const renderComboItem = (b) => {
+    const probPct = Math.round((Number(b.model_prob) || 0) * 100);
+    const qualityPct = Math.round((Number(b.quality) || 0) * 100);
+    const evPct = ((Number(b.ev) || 0) * 100).toFixed(1);
+    const dec = (Number(b.dec_odds) || 1.9).toFixed(2);
+    const legs = _asArray(b.legs);
+    const legsHtml = legs.length ? `<div class="combo-legs-preview">${legs.map((l, i) => {
+      const lp = Math.round(_legProb(l) * 100);
+      const lbl = l.label || l.pick || `Leg ${i+1}`;
+      const sport = l.sport ? `[${String(l.sport).replace(/_/g,' ').toUpperCase()}]` : '';
+      return `<div class="combo-leg-row">
+        <span class="clr-num">${i+1}</span>
+        <span>${sport} ${lbl}</span>
+        <span class="clr-prob">${lp}%</span>
+      </div>`;
+    }).join('')}</div>` : '';
+    return `<div class="ready-item ready-combo-item">
+      <div class="ready-item-head">
+        <div>
+          <div class="ready-item-title">&#9889; ${b.label}</div>
+          <div class="ready-item-sub">
+            <span>${legs.length} legs</span>
+            <span>x${dec} combined odds</span>
+            <span>${probPct}% hit probability</span>
+            ${b.game_date ? `<span>${b.game_date}</span>` : ''}
+          </div>
+        </div>
+        <span class="tp-outcome tp-PENDING">EV ${evPct}%</span>
+      </div>
+      ${legsHtml}
+      <div class="ready-kpis">
+        <span class="ready-pill good">Quality ${qualityPct}%</span>
+        <span class="ready-pill ${Number(evPct) >= 0 ? 'good' : 'warn'}">EV ${evPct}%</span>
+        <span class="ready-pill">&#128274; SAFE</span>
+      </div>
+      ${renderActionRow(b)}
+    </div>`;
+  };
+
+  const renderGroup = (title, arr, empty, open, renderFn) => `
     <details class="ready-group" ${open ? 'open' : ''}>
       <summary>${title} (${arr.length})</summary>
       <div class="ready-scroll">
-        ${arr.length ? arr.map(renderItem).join('') : `<div class="no-games">${empty}</div>`}
+        ${arr.length ? arr.map(renderFn).join('') : `<div class="no-games">${empty}</div>`}
       </div>
-    </details>
-  `;
+    </details>`;
 
-  container.innerHTML = `
-    ${renderGroup('Ready Singles', groups.single, 'No qualified singles right now.', true)}
-    ${renderGroup('Ready Team Props', groups.team_prop, 'No qualified team props right now.', false)}
-    ${renderGroup('Ready Player Props', groups.player_prop, 'No qualified player props right now.', false)}
-    ${renderGroup('Ready Combos', groups.combo, 'No qualified combo rows right now.', false)}
-  `;
+  // ── Render singles/props panel ──
+  if (container) {
+    if (!nonCombo && !rows.length) {
+      container.innerHTML = '<div class="no-games">Run analysis to generate bot-qualified bets.</div>';
+    } else {
+      container.innerHTML =
+        renderGroup('&#9989; Qualified Singles', groups.single, 'No qualified singles today.', true, renderItem) +
+        renderGroup('&#128204; Team Prop Bets', groups.team_prop, 'No qualified team props today.', false, renderItem) +
+        renderGroup('&#129330; Player Props', groups.player_prop, 'No qualified player props today.', false, renderItem);
+    }
+  }
+
+  // ── Render combos panel ──
+  if (comboContainer) {
+    if (!groups.combo.length) {
+      comboContainer.innerHTML = '<div class="no-games">Run analysis to generate auto combo bets. Need at least 2 high-confidence predictions.</div>';
+    } else {
+      comboContainer.innerHTML = groups.combo.map(renderComboItem).join('');
+    }
+  }
 }
 
 function refreshReadyBets(forceKalshi) {
@@ -4077,11 +4377,14 @@ function executeReadyBet(uid) {
   }
 
   const uidDom = _safeDomId(uid);
-  const selectedTicker = (document.getElementById(`ready-market-${uidDom}`)?.value || '').trim();
+  // Get ticker from the action row's data-ticker attribute (auto-matched market)
+  // Fall back to manual input if no market was matched
+  const rowEl = document.querySelector(`.ready-actions[data-uid="${uid}"]`);
+  const autoTicker = rowEl ? (rowEl.dataset.ticker || '').trim() : '';
   const manualTicker = (document.getElementById(`ready-manual-${uidDom}`)?.value || '').trim();
-  const ticker = manualTicker || selectedTicker;
+  const ticker = manualTicker || autoTicker;
   if (!ticker) {
-    toast('Select a Kalshi market or enter ticker override.', 'error');
+    toast('No Kalshi market matched. Enter a ticker in the text field.', 'error');
     return;
   }
 
@@ -4091,8 +4394,9 @@ function executeReadyBet(uid) {
     return;
   }
 
-  const side = String(document.getElementById(`ready-side-${uidDom}`)?.value || 'yes').toLowerCase();
-  const price = Number(document.getElementById(`ready-price-${uidDom}`)?.value || 50);
+  // Get side and price from the action row data attributes (set when rendered)
+  const side = String((rowEl && rowEl.dataset.side) || 'yes').toLowerCase();
+  const price = Number((rowEl && rowEl.dataset.price) || 50);
   const priceCents = Math.max(1, Math.min(99, Math.round(price)));
   const count = Math.max(1, Math.floor((amount * 100) / priceCents));
   const day = _localDayKey().replace(/-/g, '');
@@ -4125,8 +4429,9 @@ function executeReadyBet(uid) {
     if (d.ok) {
       sentIds.add(clientOrderId);
       _writeReadyOrderIds(sentIds);
-      _appendReadyOrderLog(true, bet.label, `Ticker ${ticker} · count ${count} · ${d.client_order_id || clientOrderId}`);
-      toast('Kalshi order sent successfully.', 'success');
+      _appendReadyOrderLog(true, bet.label, `Ticker ${ticker} · ${side.toUpperCase()} · count ${count} · ${d.client_order_id || clientOrderId}`);
+      toast('✓ Kalshi order placed successfully!', 'success');
+      fetchKalshiBalance(); // refresh balance after order
       return;
     }
     _appendReadyOrderLog(false, bet.label, d.error || 'Kalshi order failed');

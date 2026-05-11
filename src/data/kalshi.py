@@ -203,6 +203,12 @@ def list_events(
     return {"events": events, "cursor": next_cursor, "raw": data}
 
 
+def get_balance() -> dict[str, Any]:
+    """Get the authenticated user's Kalshi portfolio balance."""
+    data = _request_json("GET", "/portfolio/balance", auth=True)
+    return data
+
+
 def place_order(order_payload: dict[str, Any]) -> dict[str, Any]:
     """Place a Kalshi order using RSA-signed authentication.
 
