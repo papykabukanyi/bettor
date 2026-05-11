@@ -413,6 +413,10 @@ main{padding:20px;max-width:1400px;margin:0 auto}
 .ready-side-badge{padding:5px 12px;border-radius:999px;font-size:.72rem;font-weight:700;white-space:nowrap;flex-shrink:0}
 .ready-side-badge.yes{background:rgba(22,163,74,.15);border:1px solid rgba(22,163,74,.4);color:var(--green)}
 .ready-side-badge.no{background:rgba(239,68,68,.15);border:1px solid rgba(239,68,68,.4);color:var(--red)}
+/* Amount input wrapper */
+.ready-amt-wrap{display:flex;align-items:center;gap:0;background:var(--card);border:1.5px solid var(--accent);border-radius:8px;overflow:hidden;flex-shrink:0}
+.ready-amt-sign{padding:0 6px 0 10px;color:var(--accent);font-weight:700;font-size:.85rem;line-height:1}
+.ready-amt-wrap input{border:none;background:transparent;color:var(--text);width:80px;padding:8px 8px 8px 2px;font-size:.82rem;outline:none}
 /* Kalshi balance bar */
 .rb-balance-bar{display:flex;align-items:center;gap:12px;padding:12px 18px;background:linear-gradient(90deg,#052e16,#0f172a);border:1px solid rgba(22,163,74,.4);border-radius:12px;margin-bottom:16px;flex-wrap:wrap}
 .rb-balance-amount{font-size:24px;font-weight:800;color:#4ade80;letter-spacing:-.5px}
@@ -3801,11 +3805,49 @@ function _normText(v) {
   return String(v || '').toLowerCase().replace(/[^a-z0-9\s]+/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
+// Detect sport from a bet object
+function _betSportTag(bet) {
+  const s = _normText(bet.sport || bet.bet_type || bet.game || '');
+  if (s.includes('basketball') || s.includes('nba')) return 'basketball';
+  if (s.includes('baseball') || s.includes('mlb')) return 'baseball';
+  if (s.includes('football') || s.includes('nfl')) return 'football';
+  if (s.includes('hockey') || s.includes('nhl')) return 'hockey';
+  if (s.includes('soccer') || s.includes('mls') || s.includes('wc') || s.includes('copa') || s.includes('bundesliga') || s.includes('premier')) return 'soccer';
+  return '';
+}
+
+// Detect sport from a Kalshi market object (ticker/series_ticker)
+function _marketSportTag(m) {
+  const t = _normText(`${m.series_ticker || ''} ${m.event_ticker || ''} ${m.ticker || ''} ${m.category || ''}`);
+  if (t.includes('nba') || t.includes('nbafinals') || t.includes('nbaplayoff') || t.includes('basketball')) return 'basketball';
+  if (t.includes('mlb') || t.includes('baseball')) return 'baseball';
+  if (t.includes('nfl') || t.includes('football')) return 'football';
+  if (t.includes('nhl') || t.includes('hockey')) return 'hockey';
+  if (t.includes('soccer') || t.includes('mls') || t.includes('mvp') || t.includes('fifawc') || t.includes('wc2026') || t.includes('copa')) return 'soccer';
+  if (t.includes('multigame') || t.includes('esport') || t.includes('multileg') || t.includes('parlay')) return 'multi';
+  return '';
+}
+
 function _kalshiMarketLabel(m) {
-  return String(m.title || m.subtitle || m.question || m.market_title || m.ticker || '').trim();
+  // Prefer the clean title fields; avoid subtitle that can be a comma-list of sub-markets
+  let lbl = String(m.title || m.question || m.market_title || '').trim();
+  if (!lbl) lbl = String(m.subtitle || m.ticker || '').trim();
+  // If the label looks like a comma-separated sub-market list (multi-game), use the ticker instead
+  if (lbl.includes(',yes ') || lbl.includes(',no ') || lbl.startsWith('yes ') || lbl.startsWith('no ')) {
+    lbl = String(m.ticker || lbl).trim();
+  }
+  return lbl;
 }
 
 function _scoreKalshiMarket(bet, market) {
+  // ── Sport guard ──────────────────────────────────────────────────────────
+  const betSport  = _betSportTag(bet);
+  const mktSport  = _marketSportTag(market);
+  // Multi-game / esports parcels never match a single-game bet
+  if (mktSport === 'multi') return 0;
+  // Cross-sport: if both are identifiable and differ → no match
+  if (betSport && mktSport && betSport !== mktSport) return 0;
+
   const hay = _normText(`${_kalshiMarketLabel(market)} ${market.event_ticker || ''} ${market.series_ticker || ''}`);
   if (!hay) return 0;
   const needles = [
@@ -3832,15 +3874,16 @@ function _scoreKalshiMarket(bet, market) {
   return score;
 }
 
+// Returns [{market, score}, ...] sorted best-first, only genuine matches
 function _matchedMarketOptions(bet, maxN) {
   const list = _asArray(KALSHI_MARKETS);
   if (!list.length) return [];
-  const scored = list.map(m => ({ market: m, score: _scoreKalshiMarket(bet, m) }))
-    .filter(x => x.score > 0)
+  const scored = list
+    .map(m => ({ market: m, score: _scoreKalshiMarket(bet, m) }))
+    .filter(x => x.score >= 4.0)          // minimum meaningful match score
     .sort((a, b) => b.score - a.score)
-    .slice(0, maxN || 8)
-    .map(x => x.market);
-  return scored;
+    .slice(0, maxN || 8);
+  return scored;   // [{market, score}]
 }
 
 function _deriveComboReadyRows() {
@@ -4168,7 +4211,7 @@ function renderKalshiMarketsBrowser() {
         ${vol ? `<span class="km-price-vol">Vol ${vol.toLocaleString()}</span>` : ''}
       </div>
       <div class="km-card-actions">
-        <input type="number" id="km-amt-${safeTicker}" min="1" step="1" value="25" title="Amount in USD">
+        <input type="number" id="km-amt-${safeTicker}" min="1" step="1" placeholder="$" title="Amount in USD">
         <select id="km-side-${safeTicker}" onchange="document.getElementById('km-price-${safeTicker}').value=this.value==='yes'?${defaultYesPrice}:${noBid||50}">
           <option value="yes">YES</option><option value="no">NO</option>
         </select>
@@ -4183,8 +4226,13 @@ function filterKalshiBrowser() { renderKalshiMarketsBrowser(); }
 
 function placeKalshiDirectOrder(ticker, safeTicker, evt) {
   const btn = evt?.target || evt?.currentTarget;
-  const amt = Number(document.getElementById(`km-amt-${safeTicker}`)?.value || 0);
-  if (!amt || amt <= 0) { toast('Enter a valid amount ($).', 'error'); return; }
+  const amtEl = document.getElementById(`km-amt-${safeTicker}`);
+  const amt = Number(amtEl?.value || 0);
+  if (!amt || amt <= 0) {
+    toast('Enter the dollar amount before placing.', 'error');
+    amtEl?.focus();
+    return;
+  }
   const side = String(document.getElementById(`km-side-${safeTicker}`)?.value || 'yes');
   const price = Math.max(1, Math.min(99, Math.round(Number(document.getElementById(`km-price-${safeTicker}`)?.value || 50))));
   const count = Math.max(1, Math.floor((amt * 100) / price));
@@ -4232,31 +4280,35 @@ function renderReadyBets() {
   // ── shared: render action row for any ready bet ──
   const renderActionRow = (b) => {
     const uidDom = _safeDomId(b.uid);
-    // Auto-pick the single best-matching Kalshi market — no dropdown
-    const markets = _matchedMarketOptions(b, 3);
-    const best = markets[0] || null;
+    // Auto-match best Kalshi market — now returns [{market, score}]
+    const matches = _matchedMarketOptions(b, 3);
+    const bestEntry = matches[0] || null;
+    const best = bestEntry ? bestEntry.market : null;
     const autoTicker = best ? String(best.ticker || '').trim() : '';
-    const autoPrice = best
-      ? (b.side_default === 'no'
-          ? Math.round((best.no_ask || best.last_price || 50))
-          : Math.round((best.yes_ask || best.last_price || 50)))
-      : 50;
+    // Price: use yes_ask (ask = price to buy YES) or fallback
+    const yesCents = best ? Math.max(1, Math.min(99, Math.round(Number(best.yes_ask || best.yes_bid || best.last_price || 50)))) : 50;
+    const noCents  = best ? Math.max(1, Math.min(99, Math.round(Number(best.no_ask  || best.no_bid  || 0) || (100 - yesCents)))) : 50;
     const sideVal = (b.side_default === 'no') ? 'no' : 'yes';
+    const autoPrice = sideVal === 'no' ? noCents : yesCents;
+
+    // Truncate the title to 55 chars for display
+    let chipTitle = best ? (_kalshiMarketLabel(best) || best.ticker || 'Matched market') : '';
+    if (chipTitle.length > 55) chipTitle = chipTitle.slice(0, 52) + '…';
 
     const matchHtml = best
-      ? `<div class="ready-match-chip">
+      ? `<div class="ready-match-chip" title="${autoTicker}">
           <span class="match-icon">📍</span>
-          <span class="match-name">${(_kalshiMarketLabel(best) || best.ticker || 'Matched market')}</span>
+          <span class="match-name">${chipTitle}</span>
           <span class="match-ticker">${autoTicker}</span>
         </div>`
-      : `<div class="ready-no-match"><input id="ready-manual-${uidDom}" type="text" placeholder="Enter Kalshi ticker…" title="Kalshi market ticker"></div>`;
+      : `<div class="ready-no-match"><input id="ready-manual-${uidDom}" type="text" placeholder="Enter Kalshi ticker (no match found)" title="Paste a Kalshi market ticker"></div>`;
 
     const sideBadge = `<span class="ready-side-badge ${sideVal}">${sideVal.toUpperCase()}</span>`;
 
     return `<div class="ready-actions" data-uid="${b.uid}" data-ticker="${autoTicker}" data-side="${sideVal}" data-price="${autoPrice}">
       ${matchHtml}
       ${sideBadge}
-      <input id="ready-amt-${uidDom}" type="number" min="1" step="1" value="25" placeholder="$">
+      <label class="ready-amt-wrap"><span class="ready-amt-sign">$</span><input id="ready-amt-${uidDom}" type="number" min="1" max="10000" step="1" value="" placeholder="Amount"></label>
       <button class="btn btn-primary" onclick="executeReadyBet('${b.uid}')">Place ▶</button>
     </div>`;
   };
@@ -4390,7 +4442,8 @@ function executeReadyBet(uid) {
 
   const amount = Number(document.getElementById(`ready-amt-${uidDom}`)?.value || 0);
   if (!Number.isFinite(amount) || amount <= 0) {
-    toast('Enter a valid amount.', 'error');
+    toast('Enter an amount in dollars ($) before placing.', 'error');
+    document.getElementById(`ready-amt-${uidDom}`)?.focus();
     return;
   }
 
