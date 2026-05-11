@@ -4951,20 +4951,15 @@ def api_kalshi_resolve_ready():
         return jsonify({"ok": False, "error": str(e), "resolutions": {}, "summary": {}})
 
 
-@app.route("/api/kalshi/today-tickers")
+@app.route("/api/kalshi/today-tickers", methods=["GET"])
 def api_kalshi_today_tickers():
-    """Return today's open Kalshi markets grouped by sport for reverse matching.
-
-    The front-end can use this to discover which games/events are available
-    on Kalshi today, then match them back to the bot's predictions.
-    """
+    """Reverse-match: return all open Kalshi sports markets for today, grouped by sport."""
     try:
-        from data.kalshi import get_today_sports_tickers
-        force = request.args.get("force", "").lower() in ("1", "true", "yes")
-        result = get_today_sports_tickers(force_refresh=force)
+        from data.kalshi import get_today_kalshi_tickers
+        result = get_today_kalshi_tickers()
         return jsonify({"ok": True, **_clean(result)})
     except Exception as e:
-        return jsonify({"ok": False, "error": str(e), "by_sport": {}, "total": 0})
+        return jsonify({"ok": False, "error": str(e), "sports": {}, "total": 0})
 
 
 @app.route("/api/kalshi/balance")
@@ -5056,12 +5051,9 @@ def api_kalshi_order():
         else:
             count = max(1, int(count))
 
-        # Use UUID4 for client_order_id per Kalshi docs — prevents accidental
-        # double orders. Client may supply its own (for retry deduplication).
-        import uuid as _uuid
         client_order_id = (
             str(data.get("client_order_id") or "").strip()
-            or str(_uuid.uuid4())
+            or f"bettor_{_et_calendar_today().strftime('%Y%m%d')}_{abs(hash((ticker, side, count, price_cents))) % 1000000:06d}"
         )
 
         payload = {

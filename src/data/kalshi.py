@@ -32,6 +32,26 @@ _KALSHI_BASE_PATH = urlparse(KALSHI_BASE_URL).path.rstrip("/")  # e.g. /trade-ap
 _KALSHI_MARKET_CACHE_TTL_SEC = max(
     60, int(os.getenv("KALSHI_MARKET_CACHE_TTL_SEC", "600") or "600")
 )
+
+# Series ticker prefix → sport (updated per Kalshi documentation)
+_SERIES_SPORT_MAP: dict[str, str] = {
+    # Baseball (MLB)
+    "MLBWIN": "baseball", "MLBOU": "baseball", "MLBHR": "baseball",
+    "MLBRUNS": "baseball", "MLBK": "baseball", "MLBHITS": "baseball",
+    "MLBWSERIES": "baseball", "KXMLB": "baseball",
+    # Basketball (NBA/WNBA)
+    "KXNBA": "basketball", "NBAPTSO": "basketball", "NBAMVP": "basketball",
+    "NBACHAMP": "basketball", "KXWNBA": "basketball",
+    # Football (NFL)
+    "NFLWIN": "football", "NFLOU": "football", "NFLTD": "football",
+    "NFLMVP": "football", "NFLSB": "football", "KXNFL": "football",
+    # Hockey (NHL)
+    "NHLWIN": "hockey", "NHLOU": "hockey", "NHLCHAMP": "hockey",
+    "NHLIN": "hockey", "KXNHL": "hockey",
+    # Soccer
+    "MSLWIN": "soccer", "EPLWIN": "soccer", "UCLWIN": "soccer",
+    "KXMLS": "soccer", "KXEPL": "soccer", "KXFIFA": "soccer",
+}
 _KALSHI_MARKET_CACHE_LOCK = threading.Lock()
 _KALSHI_MARKET_CACHE: dict[str, Any] = {
     "ts": 0.0,
@@ -455,51 +475,37 @@ def _bet_sport_tag(bet: dict[str, Any]) -> str:
 
 
 def _market_sport_tag(market: dict[str, Any]) -> str:
-    # ── Fast prefix lookup using known Kalshi series ticker prefixes ──────
-    # These are the official series tickers that Kalshi creates new markets
-    # under each day. Check ticker and event_ticker first (most specific).
-    _SERIES_SPORT_MAP = {
-        # Basketball
-        "KXNBA": "basketball", "KXWNBA": "basketball",
-        "NBAPTSO": "basketball", "NBAMVP": "basketball", "NBACHAMP": "basketball",
-        # Baseball
-        "MLBWIN": "baseball", "MLBOU": "baseball", "MLBHR": "baseball",
-        "MLBRUNS": "baseball", "MLBK": "baseball", "MLBHITS": "baseball",
-        "MLBWSERIES": "baseball", "KXMLB": "baseball",
-        # Football
-        "NFLWIN": "football", "NFLOU": "football", "NFLTD": "football",
-        "NFLMVP": "football", "NFLSB": "football", "KXNFL": "football",
-        # Hockey
-        "NHLWIN": "hockey", "NHLOU": "hockey", "NHLIN": "hockey",
-        "NHLCHAMP": "hockey", "KXNHL": "hockey",
-        # Soccer
-        "MSLWIN": "soccer", "EPLWIN": "soccer", "UCLWIN": "soccer",
-        "KXMLS": "soccer", "KXEPL": "soccer", "KXFIFA": "soccer",
-    }
-    ticker_up = str(market.get("ticker") or "").upper()
-    event_up = str(market.get("event_ticker") or "").upper()
-    for prefix, sport in _SERIES_SPORT_MAP.items():
-        if ticker_up.startswith(prefix) or event_up.startswith(prefix):
-            return sport
-
-    # ── Fallback: full-text sport detection ──────────────────────────────
     text = _norm_text(
         " ".join(
             str(market.get(key) or "")
-            for key in ("ticker", "event_ticker", "title", "yes_sub_title", "no_sub_title", "category")
+            for key in (
+                "ticker",
+                "event_ticker",
+                "title",
+                "yes_sub_title",
+                "no_sub_title",
+                "category",
+            )
         )
     )
     if "kxmve" in text or "crosscategory" in text or "multigame" in text:
         return "multi"
-    if any(tok in text for tok in ("basketball", "nba", "wnba")):
+    # Check known series ticker prefixes first (most reliable)
+    ticker_upper = str(market.get("ticker") or "").upper()
+    event_upper = str(market.get("event_ticker") or "").upper()
+    for prefix, sport in _SERIES_SPORT_MAP.items():
+        if ticker_upper.startswith(prefix) or event_upper.startswith(prefix):
+            return sport
+    # Fallback to text-based detection
+    if any(token in text for token in ("kxnba", "kxwnba", "nbaptso", "nbamvp", "nbachamp", "basketball", "nba", "wnba")):
         return "basketball"
-    if any(tok in text for tok in ("baseball", "mlb")):
+    if any(token in text for token in ("mlbwin", "mlbou", "mlbhr", "mlbruns", "mlbk", "kxmlb", "baseball", "mlb")):
         return "baseball"
-    if any(tok in text for tok in ("football", "nfl")):
+    if any(token in text for token in ("nflwin", "nflou", "nfltd", "nflmvp", "nflsb", "kxnfl", "football", "nfl")):
         return "football"
-    if any(tok in text for tok in ("hockey", "nhl", "icehockey")):
+    if any(token in text for token in ("nhlwin", "nhlou", "nhlchamp", "nhlin", "kxnhl", "hockey", "nhl")):
         return "hockey"
-    if any(tok in text for tok in ("soccer", "mls", "premier", "bundesliga", "serie a", "laliga", "ligue 1", "uefa", "fifa")):
+    if any(token in text for token in ("mslwin", "eplwin", "uclwin", "kxmls", "kxepl", "kxfifa", "soccer", "mls", "premier", "bundesliga", "serie a", "laliga", "ligue 1", "uefa", "fifa")):
         return "soccer"
     return ""
 
@@ -624,6 +630,38 @@ def _bet_schedule_state(bet: dict[str, Any]) -> dict[str, Any]:
         return {"state": "unknown", "scheduled_start": None}
 
     now = _utc_now()
+
+    # If start_dt has no time component (midnight UTC from a date-only string like "2026-05-10"),
+    # treat the entire calendar day as "upcoming" and only mark "done" after the next calendar
+    # day plus the sport's typical game duration.  This prevents bets being discarded early in
+    # the morning before games have actually started.
+    is_date_only = (
+        start_dt.hour == 0
+        and start_dt.minute == 0
+        and start_dt.second == 0
+    )
+
+    if is_date_only:
+        sport = _bet_sport_tag(bet)
+        done_after_hours = _SPORT_DONE_HOURS.get(sport, 3.5)
+        # "done" = start of next day UTC + sport duration, so games on "today" are never
+        # prematurely closed.
+        next_day_midnight = (start_dt + datetime.timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        done_cutoff = next_day_midnight + datetime.timedelta(hours=done_after_hours)
+        if now >= done_cutoff:
+            return {
+                "state": "done",
+                "scheduled_start": start_dt.isoformat().replace("+00:00", "Z"),
+                "seconds_since_start": int((now - start_dt).total_seconds()),
+            }
+        # On the same day or not yet past done_cutoff: leave as upcoming so the resolver
+        # continues searching for an open Kalshi market.
+        return {
+            "state": "upcoming",
+            "scheduled_start": start_dt.isoformat().replace("+00:00", "Z"),
+            "seconds_to_start": 0,
+        }
+
     if now < start_dt:
         return {
             "state": "upcoming",
@@ -974,88 +1012,41 @@ def resolve_ready_bets(
     }
 
 
-def get_today_sports_tickers(*, force_refresh: bool = False) -> dict[str, Any]:
-    """Reverse-matching: return today's open Kalshi markets grouped by sport.
+def get_today_kalshi_tickers() -> dict[str, Any]:
+    """Reverse-match approach: fetch all open sports markets available today/upcoming,
+    grouped by sport. Use to discover what Kalshi has available today before matching to games."""
+    catalog = get_open_market_catalog()
+    markets = [m for m in catalog["markets"] if not _is_combo_market(m)]
 
-    Fetches the open market catalog and structures the data so the UI can
-    discover what games/events are actually available on Kalshi today, then
-    match those back to the bot's game cards.
+    today_utc = _utc_now().date()
+    result: dict[str, list[dict[str, Any]]] = {}
 
-    Returns:
-        {
-          "by_sport": {
-            "basketball": [{"ticker", "event_ticker", "title", "price_cents",
-                             "close_time", "series_prefix"}],
-            ...
-          },
-          "total": int,
-          "cache_age_sec": float,
-        }
-    """
-    _SERIES_PREFIX_MAP: dict[str, str] = {
-        "KXNBA": "basketball", "KXWNBA": "basketball",
-        "NBAPTSO": "basketball", "NBAMVP": "basketball", "NBACHAMP": "basketball",
-        "MLBWIN": "baseball", "MLBOU": "baseball", "MLBHR": "baseball",
-        "MLBRUNS": "baseball", "MLBK": "baseball", "MLBHITS": "baseball",
-        "MLBWSERIES": "baseball", "KXMLB": "baseball",
-        "NFLWIN": "football", "NFLOU": "football", "NFLTD": "football",
-        "NFLMVP": "football", "NFLSB": "football", "KXNFL": "football",
-        "NHLWIN": "hockey", "NHLOU": "hockey", "NHLIN": "hockey",
-        "NHLCHAMP": "hockey", "KXNHL": "hockey",
-        "MSLWIN": "soccer", "EPLWIN": "soccer", "UCLWIN": "soccer",
-        "KXMLS": "soccer", "KXEPL": "soccer", "KXFIFA": "soccer",
-    }
-
-    catalog = get_open_market_catalog(force_refresh=force_refresh)
-    by_sport: dict[str, list[dict[str, Any]]] = {}
-    today_str = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
-
-    for market in catalog.get("markets", []):
-        if _is_combo_market(market):
-            continue
-        ticker = str(market.get("ticker") or "").upper()
-        event_ticker = str(market.get("event_ticker") or "").upper()
-
-        # Determine series prefix
-        series_prefix = ""
-        sport = ""
-        for prefix, sp in _SERIES_PREFIX_MAP.items():
-            if ticker.startswith(prefix) or event_ticker.startswith(prefix):
-                series_prefix = prefix
-                sport = sp
-                break
-        if not sport:
-            sport = _market_sport_tag(market)
+    for market in markets:
+        sport = _market_sport_tag(market)
         if not sport or sport == "multi":
             continue
+        # Only include upcoming / today markets
+        close_dt = _market_time(market)
+        if close_dt is None:
+            continue
+        if close_dt.date() < today_utc:
+            continue  # already expired
 
-        # Only include markets that look like they're for today or upcoming
-        close_time = str(market.get("close_time") or market.get("expiration_time") or "")
-        if close_time and close_time[:10] < today_str:
-            continue  # Skip already-expired markets
-
-        price_cents = _market_price_cents(market, "yes")
-        entry: dict[str, Any] = {
-            "ticker": str(market.get("ticker") or ""),
+        entry = {
+            "ticker": market.get("ticker"),
             "event_ticker": str(market.get("event_ticker") or ""),
-            "title": str(market.get("title") or ""),
-            "series_prefix": series_prefix,
-            "price_cents": price_cents,
-            "close_time": close_time,
-            "kind": _market_kind_tag(market),
+            "title": str(market.get("title") or market.get("question") or ""),
+            "close_time": str(market.get("close_time") or ""),
+            "yes_price": _market_price_cents(market, "yes"),
+            "no_price": _market_price_cents(market, "no"),
         }
-        if sport not in by_sport:
-            by_sport[sport] = []
-        by_sport[sport].append(entry)
-
-    # Sort each sport's markets by close_time ascending
-    for sport_key in by_sport:
-        by_sport[sport_key].sort(key=lambda m: m.get("close_time") or "")
+        result.setdefault(sport, []).append(entry)
 
     return {
-        "by_sport": by_sport,
-        "total": sum(len(v) for v in by_sport.values()),
-        "cache_age_sec": float(catalog.get("cache_age_sec") or 0.0),
+        "sports": result,
+        "total": sum(len(v) for v in result.values()),
+        "date": today_utc.isoformat(),
+        "market_count": catalog.get("count", 0),
     }
 
 

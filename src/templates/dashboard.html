@@ -436,24 +436,21 @@ main{padding:20px;max-width:1400px;margin:0 auto}
 .ready-order-row:last-child{border-bottom:0}
 .ready-order-row.ok{color:var(--green)}
 .ready-order-row.err{color:var(--red)}
-/* ── Ops Console ─────────────────────────────────────────── */
-.rb-ops-console{margin:0 0 10px;border:1px solid rgba(99,102,241,.35);border-radius:10px;background:rgba(15,15,30,.7);overflow:hidden}
-.rb-ops-header{display:flex;align-items:center;gap:8px;padding:7px 12px;cursor:pointer;user-select:none;font-size:.73rem;font-weight:600;color:var(--muted);background:rgba(99,102,241,.08)}
-.rb-ops-header:hover{background:rgba(99,102,241,.14)}
-.rb-ops-title{flex:1}
-.rb-ops-count{font-size:.68rem;background:rgba(99,102,241,.25);color:#a5b4fc;border-radius:10px;padding:1px 7px}
-.rb-ops-toggle{font-size:.6rem;color:var(--muted);transition:transform .2s}
-.rb-ops-toggle.open{transform:rotate(180deg)}
-.rb-ops-body{max-height:200px;overflow-y:auto;padding:0 12px 8px}
-.rb-ops-row{display:grid;grid-template-columns:60px 1fr;gap:4px;align-items:baseline;padding:4px 0;border-bottom:1px solid rgba(255,255,255,.04);font-size:.69rem;font-family:monospace}
-.rb-ops-row:last-child{border-bottom:0}
-.rb-ops-row.ok .rb-ops-badge{color:#4ade80}
-.rb-ops-row.info .rb-ops-badge{color:#60a5fa}
-.rb-ops-row.warn .rb-ops-badge{color:var(--yellow)}
-.rb-ops-row.error .rb-ops-badge{color:var(--red)}
-.rb-ops-badge{font-weight:700;font-size:.65rem;text-transform:uppercase}
-.rb-ops-msg{color:rgba(255,255,255,.75);word-break:break-all}
-.rb-ops-ts{display:block;font-size:.6rem;color:var(--muted);margin-top:1px}
+/* ── Ops Console ── */
+.rb-ops-console{border:1px solid rgba(99,102,241,.3);border-radius:10px;margin-bottom:12px;overflow:hidden;background:rgba(0,0,0,.22)}
+.rb-ops-header{display:flex;justify-content:space-between;align-items:center;padding:7px 14px;cursor:pointer;font-size:.75rem;font-weight:600;color:var(--muted);background:rgba(99,102,241,.08);user-select:none;gap:8px}
+.rb-ops-header:hover{background:rgba(99,102,241,.15)}
+.rb-ops-count{font-size:.68rem;background:rgba(99,102,241,.25);color:#a5b4fc;padding:2px 8px;border-radius:999px;white-space:nowrap}
+.rb-ops-log-list{max-height:200px;overflow-y:auto;padding:6px 10px;display:flex;flex-direction:column;gap:3px}
+.ops-entry{display:grid;grid-template-columns:64px 64px 1fr;gap:6px;font-size:.68rem;line-height:1.4;padding:2px 0;border-bottom:1px solid rgba(255,255,255,.04)}
+.ops-entry:last-child{border-bottom:0}
+.ops-ts{color:var(--muted);white-space:nowrap}
+.ops-type{font-weight:700;white-space:nowrap}
+.ops-msg{color:var(--text);word-break:break-word}
+.ops-entry.ops-ok .ops-type{color:var(--green)}
+.ops-entry.ops-err .ops-type{color:var(--red)}
+.ops-entry.ops-warn .ops-type{color:var(--yellow)}
+.ops-entry.ops-info .ops-type{color:#a5b4fc}
 
 /* Combo legs preview inside ready-item */
 .combo-legs-preview{background:rgba(0,0,0,.18);border-radius:8px;padding:8px 10px;margin:7px 0;display:flex;flex-direction:column;gap:5px}
@@ -908,7 +905,7 @@ body.console-open main{padding-bottom:236px}
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
         <span class="section-meta" id="ready-bets-meta"></span>
         <button class="btn btn-sm" onclick="refreshReadyBets(true)">&#8635; Refresh Bets</button>
-        <button class="btn btn-sm" onclick="fetchKalshiTodayTickers()" title="Reverse-match: load today&#39;s available Kalshi tickers and match to games">&#128204; Today&#39;s Kalshi Tickers</button>
+        <button class="btn btn-sm" onclick="fetchKalshiTodayTickers()" title="Check what Kalshi has available today (reverse match)">&#128270; Today Tickers</button>
       </div>
     </div>
 
@@ -926,16 +923,13 @@ body.console-open main{padding-bottom:236px}
       <button class="btn btn-sm" onclick="fetchKalshiBalance()" title="Refresh balance">&#8635;</button>
     </div>
 
-    <!-- ── Operations Console ── -->
+    <!-- ── Ops Console ── -->
     <div class="rb-ops-console" id="rb-ops-console">
       <div class="rb-ops-header" onclick="toggleOpsConsole()">
-        <span class="rb-ops-title">&#9881; Operations Log</span>
-        <span class="rb-ops-count" id="rb-ops-count">0 ops</span>
-        <span class="rb-ops-toggle" id="rb-ops-toggle">&#9660;</span>
+        <span id="rb-ops-toggle-label">▶ Operations Console</span>
+        <span id="rb-ops-count" class="rb-ops-count">0 ops</span>
       </div>
-      <div class="rb-ops-body" id="rb-ops-body" style="display:none">
-        <div id="rb-ops-log-list"></div>
-      </div>
+      <div id="rb-ops-log-list" class="rb-ops-log-list" style="display:none"></div>
     </div>
 
     <!-- ── Sub-tabs ── -->
@@ -1105,13 +1099,89 @@ let TOURNAMENTS = [];
 let TOURNAMENT_DATA = null;
 let _tournamentFilterTimer = null;
 let READY_BETS = [];
-let _lastKalshiResolveMs = 0;   // debounce — ms timestamp of last resolve call
-const _KALSHI_RESOLVE_DEBOUNCE_MS = 90_000; // 90 s between auto-resolves
 let READY_KALSHI_RESOLUTIONS = {};
 let READY_KALSHI_STATUS = { loading: false, matched: 0, started: 0, done: 0, unavailable: 0, count: 0, market_count: 0, error: '' };
 const READY_ORDER_LOG_MAX = 120;
 let READY_ORDER_LOG = [];
 const READY_ORDER_IDS_KEY = 'bettor_ready_order_ids_v1';
+
+// ── Ops Console ────────────────────────────────────────────────────────────
+let KALSHI_TODAY_DATA = null;  // cached result of fetchKalshiTodayTickers
+let READY_OPS_LOG = [];
+const READY_OPS_LOG_MAX = 150;
+let _lastKalshiResolveMs = 0;
+const _KALSHI_RESOLVE_DEBOUNCE_MS = 120_000; // 2 min between auto-resolves
+
+// Game-level bet types that come through the props pipeline but are NOT player props
+const GAME_LEVEL_BET_TYPES = new Set([
+  'moneyline','1x2','run_line','total','f5_moneyline','f5_total',
+  'home_team_total','away_team_total','goals_o_u','draw_no_bet','btts',
+  'team_total','spread','handicap','double_chance','dnb',
+  'match_result','match_winner','match winner','result',
+]);
+
+function _logOp(type, msg) {
+  const ts = new Date().toLocaleTimeString();
+  READY_OPS_LOG.unshift({ ts, type: String(type || 'info'), msg: String(msg || '') });
+  if (READY_OPS_LOG.length > READY_OPS_LOG_MAX) READY_OPS_LOG = READY_OPS_LOG.slice(0, READY_OPS_LOG_MAX);
+  _renderOpsConsole();
+}
+
+function _renderOpsConsole() {
+  const listEl = document.getElementById('rb-ops-log-list');
+  const countEl = document.getElementById('rb-ops-count');
+  if (!listEl) return;
+  if (countEl) countEl.textContent = `${READY_OPS_LOG.length} ops`;
+  listEl.innerHTML = READY_OPS_LOG.slice(0, 80).map(e => {
+    const cls = e.type === 'error' ? 'ops-err' : e.type === 'success' ? 'ops-ok' : e.type === 'warn' ? 'ops-warn' : 'ops-info';
+    return `<div class="ops-entry ${cls}"><span class="ops-ts">${e.ts}</span><span class="ops-type">[${String(e.type).toUpperCase()}]</span><span class="ops-msg">${e.msg}</span></div>`;
+  }).join('');
+}
+
+function toggleOpsConsole() {
+  const listEl = document.getElementById('rb-ops-log-list');
+  const label = document.getElementById('rb-ops-toggle-label');
+  if (!listEl) return;
+  const open = listEl.style.display !== 'none';
+  listEl.style.display = open ? 'none' : 'block';
+  if (label) label.textContent = (open ? '▶' : '▼') + ' Operations Console';
+}
+
+function _generateClientOrderId(uid, day) {
+  const storeKey = `kco_${uid}_${day}`;
+  try {
+    const stored = localStorage.getItem(storeKey);
+    if (stored) return stored;
+  } catch {}
+  const newId = (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function')
+    ? crypto.randomUUID()
+    : 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+        const r = Math.random() * 16 | 0;
+        return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
+      });
+  try { localStorage.setItem(storeKey, newId); } catch {}
+  return newId;
+}
+
+function fetchKalshiTodayTickers() {
+  _logOp('info', 'Fetching Kalshi today tickers (reverse match)…');
+  return fetch('/api/kalshi/today-tickers')
+    .then(r => r.json())
+    .then(d => {
+      if (d.ok) {
+        KALSHI_TODAY_DATA = d;
+        const total = d.total || 0;
+        const sports = Object.keys(d.sports || {});
+        const sportSummary = sports.map(s => `${s}(${(d.sports[s]||[]).length})`).join(', ');
+        _logOp('success', `Today tickers: ${total} open markets — ${sportSummary || 'no sports'} (${d.market_count || 0} total scanned)`);
+        renderReadyBets();
+        return d;
+      }
+      _logOp('error', `Today tickers failed: ${d.error || 'Unknown'}`);
+      return null;
+    })
+    .catch(err => { _logOp('error', `Today tickers error: ${err}`); return null; });
+}
 
 function _isSoccerMode() {
   const mode = String(ACTIVE_SPORT || '').toLowerCase();
@@ -3353,15 +3423,12 @@ function _buildMixedCombo(candidates, legCount, seed) {
   if (shouldMixSources) {
     const hasProp = selected.some(leg => _legSourceGroup(leg) === 'prop');
     const hasGame = selected.some(leg => _legSourceGroup(leg) === 'game');
-    if (!hasProp || !hasGame) {
-      // Relax: allow all-prop combos when no game legs are available
-      if (games.length > 0 && (!hasProp || !hasGame)) return null;
-    }
+    if (!hasProp || !hasGame) return null;
   }
-  // Multi-sport check: if >1 sport available, need at least 2 represented (but not required if only 1 sport)
-  if (availableSports.size > 1) {
+  // Only enforce multi-sport when ≥3 distinct sports are available (allow same-sport combos)
+  if (availableSports.size >= 3) {
     const selectedSports = new Set(selected.map(leg => _sportMetaFromKey(leg.sport || '').key).filter(key => key && key !== 'other'));
-    if (selectedSports.size < Math.min(2, availableSports.size, legCount, 2)) return null;
+    if (selectedSports.size < Math.min(2, availableSports.size, legCount)) return null;
   }
   return selected;
 }
@@ -3661,7 +3728,7 @@ function buildLegPool() {
     }
   };
 
-  // Player props (OVER only)
+  // Player props (OVER only, must have player name)
   _publicOverProps(ALL_PROPS || []).forEach(p => {
     const gd = String(p.game_date || p.date || '').slice(0, 10);
     if (gd && gd !== todayIso) return;
@@ -3691,6 +3758,40 @@ function buildLegPool() {
       line: p.line,
       prop_label: p.prop_label || p.stat_type || '',
       stat_type: p.stat_type || '',
+    });
+  });
+
+  // Game-level bets from ALL_PROPS (e.g. soccer 1x2, WNBA moneylines that have no player name)
+  _publicOverProps(ALL_PROPS || []).forEach(p => {
+    const gd = String(p.game_date || p.date || '').slice(0, 10);
+    if (gd && gd !== todayIso) return;
+    if (p.name) return; // player props already handled above
+    const rawBetType = String(p.bet_type || p.stat_type || '').toLowerCase().replace(/[\s-]+/g, '_');
+    if (!GAME_LEVEL_BET_TYPES.has(rawBetType) && !GAME_LEVEL_BET_TYPES.has(String(p.bet_type || '').toLowerCase())) return;
+    const prob = _legProb(p);
+    const dec  = _legDec(p) || 1.9;
+    const ev   = p.ev != null ? Number(p.ev) : _legEv(prob, dec);
+    const label = plainEnglishPropText(p).text;
+    if (!label) return;
+    addLeg({
+      label,
+      display_label: label,
+      game: p.game_key || p.game || '',
+      game_date: p.date || p.game_date || '',
+      bet_type: rawBetType || 'moneyline',
+      dec_odds: dec,
+      conf: p.confidence || Math.round(prob * 100),
+      model_prob: prob,
+      ev,
+      badge: p.safety_label || 'MODERATE',
+      source: 'game',  // classify as game source so combos can mix it
+      sport: p.sport || '',
+      prediction_uid: p.prediction_uid || p.bet_uid || '',
+      team: p.team || '',
+      home_team: p.home_team || '',
+      away_team: p.away_team || '',
+      line: p.line,
+      pick: label,
     });
   });
 
@@ -3815,48 +3916,41 @@ function _normText(v) {
 function _deriveComboReadyRows() {
   const rows = [];
   const candidateLegs = _comboCandidateLegs();
-  // Attempt several seed offsets to generate varied combos
+  if (candidateLegs.length < 2) return rows;
   const maxLegs = Math.min(5, candidateLegs.length);
-  const seeds = [0, 1, 2, 3, 5, 8, 13];
-  const usedCombos = new Set();
   for (let n = 2; n <= maxLegs; n++) {
-    for (const seed of seeds) {
-      const legs = _buildMixedCombo(candidateLegs, n, seed);
-      if (!legs || legs.length !== n) continue;
-      const legKey = legs.map(l => l.label || l.bet_uid || '').sort().join('||');
-      if (usedCombos.has(legKey)) continue;
-      usedCombos.add(legKey);
-      const prob = legs.reduce((acc, l) => acc * _legProb(l), 1);
-      const dec = legs.reduce((acc, l) => acc * (_legDec(l) || 1.9), 1);
-      const ev = _legEv(prob, dec);
-      const quality = _readyQuality(prob, ev, 'SAFE', 0, 0, true);
-      // Relaxed thresholds for combos: focus on positive EV, not combined prob
-      if (prob < 0.30 || ev < 0.01 || quality < 0.48) continue;
+    const legs = _buildMixedCombo(candidateLegs, n, n - 2);
+    if (!legs || legs.length !== n) continue;
+    const prob = legs.reduce((acc, l) => acc * _legProb(l), 1);
+    const dec = legs.reduce((acc, l) => acc * (_legDec(l) || 1.9), 1);
+    const ev = _legEv(prob, dec);
+    const quality = _readyQuality(prob, ev, 'SAFE', 0, 0, true);
+    // Relaxed thresholds for combos (parlay adds value even at lower individual prob)
+    if (prob < 0.50 || ev < -0.05 || quality < 0.50) continue;
 
-      const uidParts = legs.map(l => l.bet_uid || l.prediction_uid || l.label || '').join('|');
-      const uid = _readyUid('combo', [n, uidParts, prob.toFixed(4), dec.toFixed(4)]);
-      rows.push({
-        uid,
-        kind: 'combo',
-        label: `Auto ${n}-Leg Combo`,
-        pick: `Auto ${n}-Leg Combo`,
-        bet_type: 'combo',
-        game: legs.map(l => l.game || '').filter(Boolean).slice(0, 2).join(' · '),
-        game_date: _etTodayIso(),
-        sport: legs[0]?.sport || '',
-        model_prob: prob,
-        dec_odds: dec,
-        ev,
-        safety_label: 'SAFE',
-        quality,
-        signal_rationale: `Built from ${n} high-confidence legs (mixed game + prop sources).`,
-        legs: legs,
-        bet_uid: uid,
-        prediction_uid: uid,
-        side_default: 'yes',
-      });
-    } // end seeds loop
-  } // end n loop
+    const uidParts = legs.map(l => l.bet_uid || l.prediction_uid || l.label || '').join('|');
+    const uid = _readyUid('combo', [n, uidParts, prob.toFixed(4), dec.toFixed(4)]);
+    rows.push({
+      uid,
+      kind: 'combo',
+      label: `Auto ${n}-Leg Combo`,
+      pick: `Auto ${n}-Leg Combo`,
+      bet_type: 'combo',
+      game: legs.map(l => l.game || '').filter(Boolean).slice(0, 2).join(' · '),
+      game_date: _etTodayIso(),
+      sport: legs[0]?.sport || '',
+      model_prob: prob,
+      dec_odds: dec,
+      ev,
+      safety_label: 'SAFE',
+      quality,
+      signal_rationale: `Built from ${n} high-confidence legs (mixed game + prop sources).`,
+      legs: legs,
+      bet_uid: uid,
+      prediction_uid: uid,
+      side_default: 'yes',
+    });
+  }
   return rows;
 }
 
@@ -3900,6 +3994,7 @@ function _deriveReadyBets() {
         bet_type: bet.bet_type || k,
         game: card.game_key || '',
         game_date: card.game_date || todayIso,
+        scheduled_start: card.game_datetime || null,
         sport: card.sport || bet.sport || '',
         model_prob: prob,
         dec_odds: dec,
@@ -3919,13 +4014,6 @@ function _deriveReadyBets() {
       });
     });
   });
-
-  // Game-level bet types that may appear in the props feed (soccer 1x2, btts, etc.)
-  const GAME_LEVEL_BET_TYPES = new Set([
-    '1x2','moneyline','match_winner','draw_no_bet','dnb','btts','both_teams_to_score',
-    'result','match_result','double_chance','first_half_result','f5_moneyline',
-    'draw','home_win','away_win','team_to_win',
-  ]);
 
   _publicOverProps(ALL_PROPS || []).forEach(p => {
     const gd = String(p.game_date || p.date || '').slice(0, 10);
@@ -3951,19 +4039,17 @@ function _deriveReadyBets() {
       gd || todayIso,
     ]);
 
-    // Classify: game-level bets (no player name, or game bet_type) → 'single'; else → 'player_prop'
-    const rawBetType = String(p.bet_type || p.stat_type || p.prop_type || '').toLowerCase().replace(/[\s\-]+/g,'_');
-    const hasPlayer = !!(p.name || p.player_name);
-    const isGameBet = GAME_LEVEL_BET_TYPES.has(rawBetType) || (!hasPlayer && rawBetType && !['player_prop','prop'].includes(rawBetType));
-    const propKind = isGameBet ? 'single' : 'player_prop';
-    const propBetType = isGameBet ? (rawBetType || 'moneyline') : 'player_prop';
+    // Classify: game-level bets from props pipeline → kind='single', true player props stay
+    const rawBetType = String(p.bet_type || p.stat_type || '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '');
+    const isGameLevelBet = GAME_LEVEL_BET_TYPES.has(rawBetType) || GAME_LEVEL_BET_TYPES.has(String(p.bet_type || '').toLowerCase());
+    const propKind = isGameLevelBet ? 'single' : 'player_prop';
 
     out.push({
       uid,
       kind: propKind,
       label,
       pick: label,
-      bet_type: propBetType,
+      bet_type: p.bet_type || p.stat_type || 'player_prop',
       game: p.game_key || p.game || '',
       game_date: gd || todayIso,
       sport: p.sport || '',
@@ -3976,12 +4062,13 @@ function _deriveReadyBets() {
       signal_hist_prob: histProb,
       signal_rationale: p.signal_rationale || p.worth_reason || '',
       team: p.team || '',
-      player_name: p.name || p.player_name || '',
+      home_team: p.home_team || '',
+      away_team: p.away_team || '',
+      player_name: isGameLevelBet ? '' : (p.name || ''),
       prop_type: p.stat_type || p.prop_type || '',
       line: p.line,
       direction: p.direction || '',
-      home_team: p.home_team || '',
-      away_team: p.away_team || '',
+      scheduled_start: p.game_datetime || p.scheduled_start || null,
       bet_uid: uid,
       prediction_uid: uid,
       side_default: 'yes',
@@ -4036,42 +4123,6 @@ function _appendReadyOrderLog(ok, label, msg) {
   _renderReadyOrderLog();
 }
 
-// ── Operations Console ──────────────────────────────────────────────
-let READY_OPS_LOG = [];   // [{type:'ok'|'info'|'warn'|'error', msg, ts}]
-const READY_OPS_LOG_MAX = 80;
-
-function _logOp(type, msg) {
-  const ts = new Date().toLocaleTimeString();
-  READY_OPS_LOG.unshift({ type: String(type || 'info'), msg: String(msg || ''), ts });
-  if (READY_OPS_LOG.length > READY_OPS_LOG_MAX) READY_OPS_LOG = READY_OPS_LOG.slice(0, READY_OPS_LOG_MAX);
-  _renderOpsConsole();
-}
-
-function _renderOpsConsole() {
-  const countEl = document.getElementById('rb-ops-count');
-  const listEl = document.getElementById('rb-ops-log-list');
-  if (countEl) countEl.textContent = `${READY_OPS_LOG.length} op${READY_OPS_LOG.length !== 1 ? 's' : ''}`;
-  if (!listEl) return;
-  if (!READY_OPS_LOG.length) {
-    listEl.innerHTML = '<div style="padding:8px 0;font-size:.68rem;color:var(--muted)">No operations yet.</div>';
-    return;
-  }
-  listEl.innerHTML = READY_OPS_LOG.map(r => `
-    <div class="rb-ops-row ${r.type}">
-      <span class="rb-ops-badge">${r.type}</span>
-      <span><span class="rb-ops-msg">${r.msg}</span><span class="rb-ops-ts">${r.ts}</span></span>
-    </div>`).join('');
-}
-
-function toggleOpsConsole() {
-  const body = document.getElementById('rb-ops-body');
-  const toggle = document.getElementById('rb-ops-toggle');
-  if (!body) return;
-  const visible = body.style.display !== 'none';
-  body.style.display = visible ? 'none' : 'block';
-  if (toggle) toggle.classList.toggle('open', !visible);
-}
-
 function fetchKalshiBalance() {
   const cashEl = document.getElementById('rb-balance-cash');
   const portEl = document.getElementById('rb-balance-port');
@@ -4086,19 +4137,19 @@ function fetchKalshiBalance() {
         if (cashEl) cashEl.textContent = '$' + Number(d.balance_usd || 0).toFixed(2);
         if (portEl) portEl.textContent = '$' + Number(d.portfolio_usd || 0).toFixed(2);
         if (warnEl) warnEl.style.display = '';
-        _logOp('ok', `Balance: $${Number(d.balance_usd||0).toFixed(2)} cash · $${Number(d.portfolio_usd||0).toFixed(2)} portfolio`);
+        _logOp('success', `Balance: cash $${Number(d.balance_usd || 0).toFixed(2)} · portfolio $${Number(d.portfolio_usd || 0).toFixed(2)}`);
       } else {
         if (cashEl) cashEl.textContent = 'Error';
         if (portEl) portEl.textContent = d.error || 'Check credentials';
         if (warnEl) warnEl.style.display = 'none';
-        _logOp('error', `Balance fetch failed: ${d.error || 'unknown'}`)
+        _logOp('error', `Balance fetch failed: ${d.error || 'Check Kalshi credentials'}`);
       }
     })
     .catch(err => {
       if (cashEl) cashEl.textContent = 'Error';
       if (portEl) portEl.textContent = String(err);
       if (warnEl) warnEl.style.display = 'none';
-      _logOp('error', `Balance fetch exception: ${err}`);
+      _logOp('error', `Balance fetch error: ${err}`);
     });
 }
 
@@ -4110,16 +4161,15 @@ function resolveKalshiReadyBets(force) {
     return Promise.resolve({});
   }
 
-  // Debounce: skip if called too recently (unless force=true)
+  // Debounce: skip if last resolve was recent and not forced
   const now = Date.now();
-  if (!force && (now - _lastKalshiResolveMs) < _KALSHI_RESOLVE_DEBOUNCE_MS) {
-    _logOp('info', `Kalshi resolve skipped (cached — ${Math.round((now - _lastKalshiResolveMs)/1000)}s ago, debounce ${_KALSHI_RESOLVE_DEBOUNCE_MS/1000}s)`);
-    renderReadyBets();
+  if (!force && (now - _lastKalshiResolveMs) < _KALSHI_RESOLVE_DEBOUNCE_MS && Object.keys(READY_KALSHI_RESOLUTIONS).length > 0) {
+    const ageSec = Math.round((now - _lastKalshiResolveMs) / 1000);
+    _logOp('info', `Kalshi resolve skipped — using cache from ${ageSec}s ago (${Object.keys(READY_KALSHI_RESOLUTIONS).length} resolved). Force refresh to update.`);
     return Promise.resolve(READY_KALSHI_RESOLUTIONS);
   }
-  _lastKalshiResolveMs = now;
 
-  _logOp('info', `Resolving ${READY_BETS.length} bets against Kalshi markets…`);
+  _logOp('info', `Starting Kalshi resolve for ${READY_BETS.length} bets…`);
   READY_KALSHI_STATUS = {
     ...READY_KALSHI_STATUS,
     loading: true,
@@ -4134,19 +4184,7 @@ function resolveKalshiReadyBets(force) {
     body: JSON.stringify({ bets: READY_BETS, force_refresh: !!force }),
   }).then(r => r.json()).then(d => {
     if (!d.ok) {
-      const errMsg = String(d.error || 'Kalshi resolve failed');
-      // Handle 429 gracefully — use cached resolutions and show a friendlier message
-      if (errMsg.includes('429') || errMsg.toLowerCase().includes('too many')) {
-        _logOp('warn', `Kalshi rate limited (429) — using cached data. Retry in ${_KALSHI_RESOLVE_DEBOUNCE_MS/1000}s.`);
-        READY_KALSHI_STATUS = {
-          ...READY_KALSHI_STATUS,
-          loading: false,
-          error: 'Rate limited — using cached results (retry in 90s)',
-        };
-        renderReadyBets();
-        return READY_KALSHI_RESOLUTIONS;
-      }
-      throw new Error(errMsg);
+      throw new Error(d.error || 'Kalshi resolve failed');
     }
     READY_KALSHI_RESOLUTIONS = d.resolutions || {};
     READY_KALSHI_STATUS = {
@@ -4159,20 +4197,25 @@ function resolveKalshiReadyBets(force) {
       market_count: Number(d.market_count || d.summary?.market_count || 0),
       error: '',
     };
-    _logOp('ok', `Kalshi resolved: ${READY_KALSHI_STATUS.matched} matched · ${READY_KALSHI_STATUS.done} done · ${READY_KALSHI_STATUS.unavailable} unavailable · ${READY_KALSHI_STATUS.market_count} markets scanned`);
+    _lastKalshiResolveMs = Date.now();
+    const cacheAge = d.cache_age_sec ? ` (cache ${Math.round(d.cache_age_sec)}s old)` : '';
+    _logOp('success', `Resolved: ${READY_KALSHI_STATUS.matched} matched, ${READY_KALSHI_STATUS.started} started, ${READY_KALSHI_STATUS.done} done, ${READY_KALSHI_STATUS.unavailable} unavailable — ${READY_KALSHI_STATUS.market_count} Kalshi markets scanned${cacheAge}`);
     renderReadyBets();
     return READY_KALSHI_RESOLUTIONS;
   }).catch(err => {
-    const errStr = String(err);
-    _logOp('error', `Kalshi resolve error: ${errStr}`);
-    // On 429, preserve previous resolutions
-    if (errStr.includes('429') || errStr.toLowerCase().includes('too many')) {
-      READY_KALSHI_STATUS = { ...READY_KALSHI_STATUS, loading: false, error: 'Rate limited — using cached results' };
-      renderReadyBets();
-      return READY_KALSHI_RESOLUTIONS;
-    }
     READY_KALSHI_RESOLUTIONS = {};
-    READY_KALSHI_STATUS = { ...READY_KALSHI_STATUS, loading: false, error: errStr, market_count: 0 };
+    READY_KALSHI_STATUS = {
+      ...READY_KALSHI_STATUS,
+      loading: false,
+      error: String(err),
+      market_count: 0,
+    };
+    const errStr = String(err);
+    if (errStr.includes('429')) {
+      _logOp('warn', `Kalshi rate limited (429) — wait 2 min or check credentials. Error: ${errStr}`);
+    } else {
+      _logOp('error', `Kalshi resolve failed: ${errStr}`);
+    }
     renderReadyBets();
     return {};
   });
@@ -4213,6 +4256,10 @@ function renderReadyBets() {
       if (READY_KALSHI_STATUS.market_count) bits.push(`${READY_KALSHI_STATUS.market_count} markets scanned`);
     }
     if (READY_KALSHI_STATUS.error) bits.push(`Kalshi resolve failed: ${READY_KALSHI_STATUS.error}`);
+    if (KALSHI_TODAY_DATA) {
+      const todaySports = Object.keys(KALSHI_TODAY_DATA.sports || {});
+      if (todaySports.length) bits.push(`Today: ${KALSHI_TODAY_DATA.total || 0} Kalshi mkts (${todaySports.length} sports)`);
+    }
     metaEl.textContent = bits.join(' · ');
   }
 
@@ -4378,11 +4425,21 @@ function renderReadyBets() {
 
 function refreshReadyBets(forceKalshi) {
   READY_BETS = _deriveReadyBets();
-  READY_KALSHI_RESOLUTIONS = {};
-  READY_KALSHI_STATUS = { loading: false, matched: 0, started: 0, done: 0, unavailable: 0, count: READY_BETS.length, market_count: 0, error: '' };
-  const groups = { single: READY_BETS.filter(r=>r.kind==='single'), team_prop: READY_BETS.filter(r=>r.kind==='team_prop'), player_prop: READY_BETS.filter(r=>r.kind==='player_prop'), combo: READY_BETS.filter(r=>r.kind==='combo') };
-  _logOp('info', `Derived ${READY_BETS.length} ready bets — ${groups.single.length+groups.team_prop.length} game bets · ${groups.player_prop.length} props · ${groups.combo.length} combos`);
+  const combos = READY_BETS.filter(r => r.kind === 'combo').length;
+  const singles = READY_BETS.filter(r => r.kind === 'single' || r.kind === 'team_prop').length;
+  const props = READY_BETS.filter(r => r.kind === 'player_prop').length;
+  _logOp('info', `Derived ${READY_BETS.length} ready bets: ${singles} game bets, ${props} player props, ${combos} combos`);
+  if (forceKalshi) {
+    _lastKalshiResolveMs = 0; // force bypass debounce on manual refresh
+    READY_KALSHI_RESOLUTIONS = {};
+    READY_KALSHI_STATUS = { loading: false, matched: 0, started: 0, done: 0, unavailable: 0, count: READY_BETS.length, market_count: 0, error: '' };
+  } else {
+    READY_KALSHI_RESOLUTIONS = {};
+    READY_KALSHI_STATUS = { loading: false, matched: 0, started: 0, done: 0, unavailable: 0, count: READY_BETS.length, market_count: 0, error: '' };
+  }
   renderReadyBets();
+  // Also fetch today's tickers in background for reverse-match insight
+  if (forceKalshi) fetchKalshiTodayTickers();
   return resolveKalshiReadyBets(!!forceKalshi);
 }
 
@@ -4416,10 +4473,8 @@ function executeReadyBet(uid) {
   const price = Number(resolution.price_cents || (rowEl && rowEl.dataset.price) || 50);
   const priceCents = Math.max(1, Math.min(99, Math.round(price)));
   const count = Math.max(1, Math.floor((amount * 100) / priceCents));
-  // Use UUID4 style client_order_id: uid + day + random hex for deduplication
   const day = _localDayKey().replace(/-/g, '');
-  const randHex = Math.random().toString(16).slice(2, 10);
-  const clientOrderId = `${uid.slice(0, 24)}_${day}_${randHex}`;
+  const clientOrderId = _generateClientOrderId(uid, day);
 
   const sentIds = _readReadyOrderIds();
   if (sentIds.has(clientOrderId)) {
@@ -4427,7 +4482,7 @@ function executeReadyBet(uid) {
     return;
   }
 
-  _logOp('info', `Placing order — ${bet.label} | ${ticker} | ${side.toUpperCase()} | $${amount} | ${count} contracts @ ${priceCents}¢`);
+  _logOp('info', `Placing order: ${bet.label} | Ticker ${ticker} | ${side.toUpperCase()} | $${amount} (${count}×${priceCents}¢) | ID ${clientOrderId}`);
 
   const payload = {
     market_ticker: ticker,
@@ -4452,49 +4507,19 @@ function executeReadyBet(uid) {
       _writeReadyOrderIds(sentIds);
       const finalTicker = (d.resolution && d.resolution.market_ticker) || ticker;
       _appendReadyOrderLog(true, bet.label, `Ticker ${finalTicker} · ${side.toUpperCase()} · count ${count} · ${d.client_order_id || clientOrderId}`);
-      _logOp('ok', `Order SUCCESS — ${finalTicker} | ${side.toUpperCase()} | ${count} contracts | ID: ${d.client_order_id || clientOrderId}`);
+      _logOp('success', `Order placed ✓ ${bet.label} | Ticker ${finalTicker} | ${side.toUpperCase()} | count ${count} | ID ${d.client_order_id || clientOrderId}`);
       toast('✓ Kalshi order placed successfully!', 'success');
       fetchKalshiBalance(); // refresh balance after order
       return;
     }
     _appendReadyOrderLog(false, bet.label, d.error || 'Kalshi order failed');
-    _logOp('error', `Order FAILED — ${bet.label}: ${d.error || 'unknown error'}`);
+    _logOp('error', `Order failed: ${bet.label} | ${d.error || 'Kalshi order failed'}`);
     toast(d.error || 'Kalshi order failed', 'error');
   }).catch(err => {
     _appendReadyOrderLog(false, bet.label, String(err));
-    _logOp('error', `Order exception — ${bet.label}: ${err}`);
+    _logOp('error', `Order error: ${bet.label} | ${err}`);
     toast('Kalshi order failed', 'error');
   });
-}
-
-// ── Reverse matching: fetch today's open Kalshi tickers by sport ─────────
-function fetchKalshiTodayTickers() {
-  _logOp('info', 'Fetching today\'s Kalshi tickers for reverse matching…');
-  fetch('/api/kalshi/today-tickers')
-    .then(r => r.json())
-    .then(d => {
-      if (!d.ok) throw new Error(d.error || 'Failed to load tickers');
-      const bySport = d.by_sport || {};
-      const total = Number(d.total || 0);
-      const sportLines = Object.entries(bySport).map(([sport, mkts]) => {
-        const sample = mkts.slice(0, 3).map(m => m.ticker).join(', ');
-        return `${sport.toUpperCase()}: ${mkts.length} markets (e.g. ${sample})`;
-      });
-      _logOp('ok', `Today's Kalshi tickers — ${total} markets across ${Object.keys(bySport).length} sports`);
-      sportLines.forEach(line => _logOp('info', '  ' + line));
-      // Auto-expand ops console so user can see the output
-      const body = document.getElementById('rb-ops-body');
-      const toggle = document.getElementById('rb-ops-toggle');
-      if (body && body.style.display === 'none') {
-        body.style.display = 'block';
-        if (toggle) toggle.classList.add('open');
-      }
-      toast(`Loaded ${total} Kalshi tickers across ${Object.keys(bySport).length} sports — see Ops Log`, 'success');
-    })
-    .catch(err => {
-      _logOp('error', `Today's Kalshi tickers error: ${err}`);
-      toast('Could not load today\'s Kalshi tickers', 'error');
-    });
 }
 
 function renderTopProps(legs) {
