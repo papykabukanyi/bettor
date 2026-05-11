@@ -376,6 +376,44 @@ main{padding:20px;max-width:1400px;margin:0 auto}
   border:1px solid var(--border);border-radius:8px;font-size:.78rem;overflow:hidden}
 .tp-leg::after{content:'';position:absolute;inset:0;background:linear-gradient(120deg,transparent,rgba(20,184,166,.12),transparent);
   transform:translateX(-120%);animation:legSweep 3.2s infinite;pointer-events:none}
+.tracked-group{border:1px solid var(--border);border-radius:12px;background:var(--card2);margin-bottom:10px;overflow:hidden}
+.tracked-group > summary{list-style:none;cursor:pointer;padding:10px 12px;font-size:.8rem;font-weight:700;color:var(--text);display:flex;align-items:center;justify-content:space-between;gap:8px}
+.tracked-group > summary::-webkit-details-marker{display:none}
+.tracked-group[open] > summary{border-bottom:1px solid var(--border)}
+.tracked-scroll{max-height:300px;overflow:auto;padding:10px}
+.tracked-single{background:rgba(255,255,255,.03);border:1px solid var(--border);border-radius:10px;padding:10px 11px;margin-bottom:8px}
+.tracked-single-top{display:flex;align-items:flex-start;justify-content:space-between;gap:10px}
+.tracked-single-title{font-size:.82rem;font-weight:700;line-height:1.25}
+.tracked-single-meta{font-size:.72rem;color:var(--muted);margin-top:4px;display:flex;gap:8px;flex-wrap:wrap}
+
+/* Ready Bets */
+.ready-group{border:1px solid var(--border);border-radius:12px;background:var(--card2);margin-bottom:10px;overflow:hidden}
+.ready-group > summary{list-style:none;cursor:pointer;padding:10px 12px;font-size:.82rem;font-weight:700;color:var(--text);display:flex;align-items:center;justify-content:space-between;gap:8px}
+.ready-group > summary::-webkit-details-marker{display:none}
+.ready-group[open] > summary{border-bottom:1px solid var(--border)}
+.ready-scroll{max-height:420px;overflow:auto;padding:10px}
+.ready-item{background:rgba(255,255,255,.03);border:1px solid var(--border);border-radius:10px;padding:10px;margin-bottom:10px}
+.ready-item:last-child{margin-bottom:0}
+.ready-item-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px}
+.ready-item-title{font-size:.84rem;font-weight:700;line-height:1.25}
+.ready-item-sub{font-size:.72rem;color:var(--muted);margin-top:4px;display:flex;gap:8px;flex-wrap:wrap}
+.ready-kpis{display:flex;gap:7px;flex-wrap:wrap;margin-top:8px}
+.ready-pill{font-size:.67rem;padding:3px 7px;border-radius:999px;border:1px solid var(--border);color:var(--muted)}
+.ready-pill.good{border-color:rgba(22,163,74,.45);color:var(--green)}
+.ready-pill.warn{border-color:rgba(234,179,8,.45);color:var(--yellow)}
+.ready-actions{display:grid;grid-template-columns:minmax(150px,2fr) minmax(120px,1fr) minmax(90px,1fr) minmax(74px,1fr) minmax(74px,1fr) auto;gap:8px;margin-top:9px}
+.ready-actions select,.ready-actions input{width:100%;padding:8px;border:1px solid var(--border);border-radius:8px;background:var(--card);color:var(--text);font-size:.76rem}
+.ready-actions button{white-space:nowrap}
+.ready-order-log{max-height:230px;overflow:auto;border:1px solid var(--border);border-radius:12px;background:var(--card2);padding:10px}
+.ready-order-row{padding:8px 0;border-bottom:1px solid var(--border);font-size:.76rem}
+.ready-order-row:last-child{border-bottom:0}
+.ready-order-row.ok{color:var(--green)}
+.ready-order-row.err{color:var(--red)}
+
+@media (max-width:980px){
+  .ready-actions{grid-template-columns:1fr 1fr 1fr}
+  .ready-actions button{grid-column:1/-1}
+}
 .pick-phrase{font-weight:700}
 .pick-phrase.win{color:var(--green)}
 .prop-phrase{color:var(--accent);font-weight:700}
@@ -671,6 +709,9 @@ body.console-open main{padding-bottom:236px}
   <div class="tab" data-tab="props" onclick="switchTab('props')">
     &#128200; {{ 'Best Bets' if active_sport == 'all' else ('Player Props' if active_sport == 'soccer' else 'Over Bets') }}
   </div>
+  <div class="tab" data-tab="readybets" onclick="switchTab('readybets')">
+    &#9989; Ready Bets
+  </div>
   <div class="tab" data-tab="parlays" onclick="switchTab('parlays')">
     &#127917; Parlays
   </div>
@@ -802,6 +843,30 @@ body.console-open main{padding-bottom:236px}
     </div>
   </div>
 
+  <!-- READY BETS -->
+  <div class="tab-panel" id="panel-readybets">
+    <div class="section-header">
+      <span class="section-title">&#9989; Ready Bets (Bot-Qualified)</span>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <span class="section-meta" id="ready-bets-meta"></span>
+        <button class="btn btn-sm" onclick="refreshReadyBets(true)">&#8635; Refresh</button>
+        <button class="btn btn-sm" onclick="loadKalshiMarkets(true)">&#127760; Load Kalshi Markets</button>
+      </div>
+    </div>
+    <div class="section-meta" id="ready-kalshi-meta" style="margin-bottom:10px">
+      Pulling public market data from Kalshi. Orders use your API key from environment.
+    </div>
+    <div id="ready-bets-list"><div class="no-games">Run analysis to build ready bets.</div></div>
+
+    <div class="section-header" style="margin-top:18px">
+      <span class="section-title">&#128221; Ready-Bet Order Log</span>
+      <span class="section-meta" id="ready-order-meta"></span>
+    </div>
+    <div id="ready-order-log" class="ready-order-log">
+      <div class="no-games">No order attempts yet.</div>
+    </div>
+  </div>
+
   <!-- PARLAYS -->
   <div class="tab-panel" id="panel-parlays">
     <div class="section-header">
@@ -816,6 +881,12 @@ body.console-open main{padding-bottom:236px}
       <span class="section-meta" id="tracked-parlay-meta"></span>
     </div>
     <div id="tracked-parlays-list"><div class="no-games">No tracked parlays yet.</div></div>
+
+    <div class="section-header" style="margin-top:20px">
+      <span class="section-title">&#128196; Tracked Singles + Team Props</span>
+      <span class="section-meta" id="tracked-singles-meta"></span>
+    </div>
+    <div id="tracked-singles-list"><div class="no-games">No tracked single bets yet.</div></div>
 
     <!-- PROP PERFORMANCE -->
     <div class="section-header" style="margin-top:28px">
@@ -930,6 +1001,12 @@ const _autoTrackInflight = new Set();
 let TOURNAMENTS = [];
 let TOURNAMENT_DATA = null;
 let _tournamentFilterTimer = null;
+let READY_BETS = [];
+let KALSHI_MARKETS = [];
+let KALSHI_MARKETS_CURSOR = null;
+const READY_ORDER_LOG_MAX = 120;
+let READY_ORDER_LOG = [];
+const READY_ORDER_IDS_KEY = 'bettor_ready_order_ids_v1';
 
 function _isSoccerMode() {
   const mode = String(ACTIVE_SPORT || '').toLowerCase();
@@ -1095,6 +1172,33 @@ function _localDayKey() {
   const m = String(d.getMonth() + 1).padStart(2, '0');
   const dd = String(d.getDate()).padStart(2, '0');
   return `${y}-${m}-${dd}`;
+}
+
+function _etTodayIso() {
+  const p = _zonedParts(new Date(), 'America/New_York');
+  return `${p.year}-${_pad2(p.month)}-${_pad2(p.day)}`;
+}
+
+function _readReadyOrderIds() {
+  try {
+    const raw = localStorage.getItem(READY_ORDER_IDS_KEY);
+    const day = _localDayKey();
+    if (!raw) return new Set();
+    const parsed = JSON.parse(raw);
+    if (!parsed || parsed.day !== day || !Array.isArray(parsed.ids)) return new Set();
+    return new Set(parsed.ids.map(v => String(v)));
+  } catch (e) {
+    return new Set();
+  }
+}
+
+function _writeReadyOrderIds(idSet) {
+  try {
+    localStorage.setItem(READY_ORDER_IDS_KEY, JSON.stringify({
+      day: _localDayKey(),
+      ids: Array.from(idSet),
+    }));
+  } catch (e) {}
 }
 
 function _readAutoTrackedSignatures() {
@@ -1433,12 +1537,19 @@ function _publicOverProps(list) {
 }
 
 function _overBetsTotal() {
-  const cards = ([]).concat(TODAY_CARDS || [], TOMORROW_CARDS || []);
+  const todayIso = _etTodayIso();
+  const cards = _asArray(TODAY_CARDS || []).filter(c => {
+    const gd = String((c && c.game_date) || '').slice(0, 10);
+    return !gd || gd === todayIso;
+  });
   const gameBetCount = cards.reduce((acc, c) => {
     const keys = ['moneyline','run_line','total','f5_moneyline','f5_total','home_team_total','away_team_total'];
     return acc + keys.reduce((sum, k) => sum + (c && c[k] ? 1 : 0), 0);
   }, 0);
-  const propCount = _publicOverProps(ALL_PROPS).length;
+  const propCount = _publicOverProps(ALL_PROPS).filter(p => {
+    const gd = String(p.game_date || p.date || '').slice(0, 10);
+    return !gd || gd === todayIso;
+  }).length;
   return gameBetCount + propCount;
 }
 
@@ -1596,6 +1707,10 @@ function _isPropsActive() {
   const panel = document.getElementById('panel-props');
   return !!(panel && panel.classList.contains('active'));
 }
+function _isReadyBetsActive() {
+  const panel = document.getElementById('panel-readybets');
+  return !!(panel && panel.classList.contains('active'));
+}
 let _propsRenderTimer = null;
 function _schedulePropsRender(force) {
   if (!document.getElementById('props-tbody')) return;
@@ -1609,18 +1724,27 @@ function _silentRefreshPanels() {
   // Stagger to avoid hammering the server
   clearTimeout(_silentPerfTimer);
   _silentPerfTimer = setTimeout(() => {
+    if (_isReadyBetsActive()) {
+      refreshReadyBets(false);
+      loadKalshiMarkets(false);
+    }
     if (!_isParlaysActive()) return;
     loadPropPerformance();
     loadTrackedParlays();
+    loadTrackedSingles();
     autoGenParlaysFromProps();
   }, 1500);
 }
 
 // ── Periodic silent refresh every 5 minutes (covers SSE gaps) ───────────────
 setInterval(() => {
+  if (_isReadyBetsActive()) {
+    refreshReadyBets(false);
+  }
   if (!_isParlaysActive()) return;
   loadPropPerformance();
   loadTrackedParlays();
+  loadTrackedSingles();
   autoGenParlaysFromProps();
 }, 5 * 60 * 1000);
 
@@ -1646,9 +1770,14 @@ function switchTab(name) {
   if (name === 'props') {
     _schedulePropsRender(true);
   }
+  if (name === 'readybets') {
+    refreshReadyBets(true);
+    loadKalshiMarkets(false);
+  }
   if (name === 'parlays')     {
     autoGenParlaysFromProps();
     loadTrackedParlays();
+    loadTrackedSingles();
     loadPropPerformance();
     loadParlayPerformance();
     resolveOutcomesSilent();
@@ -2089,6 +2218,7 @@ function renderAll() {
   renderGames('today-grid', TODAY_CARDS, 'today-empty', 'today-meta', 'badge-today');
   renderGames('tomorrow-grid', TOMORROW_CARDS, 'tomorrow-empty', 'tomorrow-meta', 'badge-tomorrow');
   renderPropsTable(ALL_PROPS);
+  if (_isReadyBetsActive()) refreshReadyBets(false);
   if (_isSoccerMode() && TOURNAMENTS.length && !TOURNAMENT_DATA) {
     loadTournamentData();
   }
@@ -3414,6 +3544,7 @@ function _legEv(prob, dec) {
 
 function buildLegPool() {
   const map = new Map();
+  const todayIso = _etTodayIso();
   const addLeg = (leg) => {
     const key = `${leg.label}|${leg.game||''}`;
     const prev = map.get(key);
@@ -3424,6 +3555,8 @@ function buildLegPool() {
 
   // Player props (OVER only)
   _publicOverProps(ALL_PROPS || []).forEach(p => {
+    const gd = String(p.game_date || p.date || '').slice(0, 10);
+    if (gd && gd !== todayIso) return;
     const prob = _legProb(p);
     const dec  = _legDec(p) || 1.9;
     const ev   = p.ev != null ? Number(p.ev) : _legEv(prob, dec);
@@ -3457,7 +3590,10 @@ function buildLegPool() {
   const betKeys = [
     'moneyline','run_line','total','f5_moneyline','f5_total','home_team_total','away_team_total'
   ];
-  const cards = ([]).concat(TODAY_CARDS || [], TOMORROW_CARDS || []);
+  const cards = _normalizeCardList(TODAY_CARDS || []).filter(c => {
+    const gd = String((c && c.game_date) || '').slice(0, 10);
+    return !gd || gd === todayIso;
+  });
   cards.forEach(c => {
     betKeys.forEach(k => {
       const b = c[k];
@@ -3520,6 +3656,485 @@ function buildLegPool() {
     return _legDec(b) - _legDec(a);
   });
   return legs;
+}
+
+function _simpleHash(txt) {
+  let h = 2166136261;
+  const s = String(txt || '');
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return (h >>> 0).toString(16).padStart(8, '0');
+}
+
+function _safeDomId(v) {
+  return String(v || '').replace(/[^a-zA-Z0-9_-]+/g, '_');
+}
+
+function _readyUid(prefix, parts) {
+  const day = _etTodayIso().replace(/-/g, '');
+  const hash = _simpleHash(_asArray(parts).map(v => String(v || '').toLowerCase()).join('|'));
+  return `${prefix}_${day}_${hash}`;
+}
+
+function _readySafetyWeight(label) {
+  const s = String(label || '').toUpperCase();
+  if (s === 'ELITE') return 0.12;
+  if (s === 'SAFE') return 0.08;
+  if (s === 'MODERATE') return 0.03;
+  return -0.05;
+}
+
+function _readyQuality(prob, ev, safetyLabel, sentiment, histProb, hasRationale) {
+  const p = Math.max(0, Math.min(1, Number(prob) || 0));
+  const e = Number(ev) || 0;
+  const s = Number(sentiment) || 0;
+  const h = Math.max(0, Math.min(1, Number(histProb) || 0));
+  let score = p * 0.62;
+  score += Math.max(-0.07, Math.min(0.12, e * 0.6));
+  score += _readySafetyWeight(safetyLabel);
+  score += Math.max(-0.05, Math.min(0.06, s * 0.12));
+  score += h * 0.14;
+  if (hasRationale) score += 0.02;
+  return Math.max(0, Math.min(0.99, score));
+}
+
+function _normText(v) {
+  return String(v || '').toLowerCase().replace(/[^a-z0-9\s]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function _kalshiMarketLabel(m) {
+  return String(m.title || m.subtitle || m.question || m.market_title || m.ticker || '').trim();
+}
+
+function _scoreKalshiMarket(bet, market) {
+  const hay = _normText(`${_kalshiMarketLabel(market)} ${market.event_ticker || ''} ${market.series_ticker || ''}`);
+  if (!hay) return 0;
+  const needles = [
+    bet.label,
+    bet.pick,
+    bet.game,
+    bet.home_team,
+    bet.away_team,
+    bet.team,
+    bet.player_name,
+    bet.prop_type,
+  ].map(_normText).filter(Boolean);
+  if (!needles.length) return 0;
+  let score = 0;
+  needles.forEach(n => {
+    if (!n) return;
+    if (hay.includes(n)) score += Math.min(8, n.length / 3);
+    n.split(' ').forEach(tok => {
+      if (tok.length >= 4 && hay.includes(tok)) score += 0.9;
+    });
+  });
+  const ticker = _normText(market.ticker || '');
+  if (ticker && needles.some(n => ticker.includes(n))) score += 2.2;
+  return score;
+}
+
+function _matchedMarketOptions(bet, maxN) {
+  const list = _asArray(KALSHI_MARKETS);
+  if (!list.length) return [];
+  const scored = list.map(m => ({ market: m, score: _scoreKalshiMarket(bet, m) }))
+    .filter(x => x.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, maxN || 8)
+    .map(x => x.market);
+  return scored;
+}
+
+function _deriveComboReadyRows() {
+  const rows = [];
+  const candidateLegs = _comboCandidateLegs();
+  const maxLegs = Math.min(5, candidateLegs.length);
+  for (let n = 2; n <= maxLegs; n++) {
+    const legs = _buildMixedCombo(candidateLegs, n, n - 2);
+    if (!legs || legs.length !== n) continue;
+    const prob = legs.reduce((acc, l) => acc * _legProb(l), 1);
+    const dec = legs.reduce((acc, l) => acc * (_legDec(l) || 1.9), 1);
+    const ev = _legEv(prob, dec);
+    const quality = _readyQuality(prob, ev, 'SAFE', 0, 0, true);
+    if (prob < 0.62 || ev < 0 || quality < 0.61) continue;
+
+    const uidParts = legs.map(l => l.bet_uid || l.prediction_uid || l.label || '').join('|');
+    const uid = _readyUid('combo', [n, uidParts, prob.toFixed(4), dec.toFixed(4)]);
+    rows.push({
+      uid,
+      kind: 'combo',
+      label: `Auto ${n}-Leg Combo`,
+      pick: `Auto ${n}-Leg Combo`,
+      bet_type: 'combo',
+      game: legs.map(l => l.game || '').filter(Boolean).slice(0, 2).join(' · '),
+      game_date: _etTodayIso(),
+      sport: legs[0]?.sport || '',
+      model_prob: prob,
+      dec_odds: dec,
+      ev,
+      safety_label: 'SAFE',
+      quality,
+      signal_rationale: `Built from ${n} high-confidence legs (mixed game + prop sources).`,
+      legs: legs,
+      bet_uid: uid,
+      prediction_uid: uid,
+      side_default: 'yes',
+    });
+  }
+  return rows;
+}
+
+function _deriveReadyBets() {
+  const out = [];
+  const todayIso = _etTodayIso();
+  const gameKeys = ['moneyline','run_line','total','f5_moneyline','f5_total','home_team_total','away_team_total'];
+
+  _normalizeCardList(TODAY_CARDS || []).forEach(card => {
+    const cardDate = String(card.game_date || '').slice(0, 10);
+    if (cardDate && cardDate !== todayIso) return;
+    gameKeys.forEach(k => {
+      const bet = card[k];
+      if (!bet || !bet.pick) return;
+      const prob = _legProb(bet);
+      const dec = _legDec(bet) || 1.9;
+      const ev = bet.ev != null ? Number(bet.ev) : _legEv(prob, dec);
+      const sentiment = Number(bet.signal_sentiment != null ? bet.signal_sentiment : bet.sentiment_score) || 0;
+      const histProb = Number(bet.signal_hist_prob) || 0;
+      const safety = bet.safety_label || 'MODERATE';
+      const hasRationale = !!(bet.signal_rationale || bet.news_snippet);
+      const quality = _readyQuality(prob, ev, safety, sentiment, histProb, hasRationale);
+      if (prob < 0.58 || ev < -0.02 || quality < 0.58) return;
+      if (String(safety).toUpperCase() === 'RISKY') return;
+
+      const kind = (k === 'home_team_total' || k === 'away_team_total') ? 'team_prop' : 'single';
+      const labelObj = plainEnglishBet(bet, card.home_team || '', card.away_team || '', 'upcoming');
+      const label = (labelObj && labelObj.text) || bet.pick;
+      const uid = bet.bet_uid || bet.prediction_uid || _readyUid('pred', [
+        card.game_key || '',
+        bet.bet_type || '',
+        bet.pick || '',
+        bet.line != null ? bet.line : '',
+        card.game_date || '',
+      ]);
+      out.push({
+        uid,
+        kind,
+        label,
+        pick: bet.pick,
+        bet_type: bet.bet_type || k,
+        game: card.game_key || '',
+        game_date: card.game_date || todayIso,
+        sport: card.sport || bet.sport || '',
+        model_prob: prob,
+        dec_odds: dec,
+        ev,
+        safety_label: safety,
+        quality,
+        sentiment_score: sentiment,
+        signal_hist_prob: histProb,
+        signal_rationale: bet.signal_rationale || bet.news_snippet || '',
+        home_team: card.home_team || '',
+        away_team: card.away_team || '',
+        team: kind === 'team_prop' ? (k === 'home_team_total' ? card.home_team : card.away_team) : '',
+        line: bet.line,
+        bet_uid: uid,
+        prediction_uid: uid,
+        side_default: 'yes',
+      });
+    });
+  });
+
+  _publicOverProps(ALL_PROPS || []).forEach(p => {
+    const gd = String(p.game_date || p.date || '').slice(0, 10);
+    if (gd && gd !== todayIso) return;
+    const prob = _legProb(p);
+    const dec = _legDec(p) || 1.9;
+    const ev = p.ev != null ? Number(p.ev) : _legEv(prob, dec);
+    const sentiment = Number(p.signal_sentiment) || 0;
+    const histProb = Number(p.signal_hist_prob) || 0;
+    const safety = p.safety_label || 'MODERATE';
+    const hasRationale = !!(p.signal_rationale || p.worth_reason || p.news_snippet);
+    const quality = _readyQuality(prob, ev, safety, sentiment, histProb, hasRationale);
+    if (prob < 0.6 || ev < -0.02 || quality < 0.6) return;
+    if (String(safety).toUpperCase() === 'RISKY') return;
+
+    const label = plainEnglishPropText(p).text;
+    const uid = p.bet_uid || p.prediction_uid || _readyUid('prop', [
+      p.game_key || p.game || '',
+      p.name || '',
+      p.stat_type || p.prop_type || '',
+      p.direction || '',
+      p.line != null ? p.line : '',
+      gd || todayIso,
+    ]);
+
+    out.push({
+      uid,
+      kind: 'player_prop',
+      label,
+      pick: label,
+      bet_type: 'player_prop',
+      game: p.game_key || p.game || '',
+      game_date: gd || todayIso,
+      sport: p.sport || '',
+      model_prob: prob,
+      dec_odds: dec,
+      ev,
+      safety_label: safety,
+      quality,
+      sentiment_score: sentiment,
+      signal_hist_prob: histProb,
+      signal_rationale: p.signal_rationale || p.worth_reason || '',
+      team: p.team || '',
+      player_name: p.name || '',
+      prop_type: p.stat_type || p.prop_type || '',
+      line: p.line,
+      direction: p.direction || '',
+      bet_uid: uid,
+      prediction_uid: uid,
+      side_default: 'yes',
+    });
+  });
+
+  out.push(..._deriveComboReadyRows());
+
+  const dedupe = new Map();
+  out.forEach(row => {
+    if (!row || !row.uid) return;
+    if (!dedupe.has(row.uid)) {
+      dedupe.set(row.uid, row);
+      return;
+    }
+    const prev = dedupe.get(row.uid);
+    if ((row.quality || 0) > (prev.quality || 0)) dedupe.set(row.uid, row);
+  });
+
+  return Array.from(dedupe.values()).sort((a, b) => {
+    const q = (b.quality || 0) - (a.quality || 0);
+    if (Math.abs(q) > 1e-9) return q;
+    const p = (b.model_prob || 0) - (a.model_prob || 0);
+    if (Math.abs(p) > 1e-9) return p;
+    return (b.ev || 0) - (a.ev || 0);
+  });
+}
+
+function _renderReadyOrderLog() {
+  const el = document.getElementById('ready-order-log');
+  const metaEl = document.getElementById('ready-order-meta');
+  if (!el) return;
+  if (metaEl) metaEl.textContent = `${READY_ORDER_LOG.length} event${READY_ORDER_LOG.length !== 1 ? 's' : ''}`;
+  if (!READY_ORDER_LOG.length) {
+    el.innerHTML = '<div class="no-games">No order attempts yet.</div>';
+    return;
+  }
+  el.innerHTML = READY_ORDER_LOG.map(r => `
+    <div class="ready-order-row ${r.ok ? 'ok' : 'err'}">
+      <div style="font-weight:700">${r.ok ? 'SUCCESS' : 'FAILED'} · ${r.label}</div>
+      <div style="font-size:.72rem;color:var(--muted)">${r.ts} · ${r.msg}</div>
+    </div>
+  `).join('');
+}
+
+function _appendReadyOrderLog(ok, label, msg) {
+  const ts = new Date().toLocaleString();
+  READY_ORDER_LOG.unshift({ ok: !!ok, label: String(label || 'Order'), msg: String(msg || ''), ts });
+  if (READY_ORDER_LOG.length > READY_ORDER_LOG_MAX) {
+    READY_ORDER_LOG = READY_ORDER_LOG.slice(0, READY_ORDER_LOG_MAX);
+  }
+  _renderReadyOrderLog();
+}
+
+function loadKalshiMarkets(force) {
+  if (!force && KALSHI_MARKETS.length) {
+    const metaEl = document.getElementById('ready-kalshi-meta');
+    if (metaEl) metaEl.textContent = `Kalshi markets loaded: ${KALSHI_MARKETS.length}`;
+    return Promise.resolve(KALSHI_MARKETS);
+  }
+
+  const metaEl = document.getElementById('ready-kalshi-meta');
+  if (metaEl) metaEl.textContent = 'Loading Kalshi public markets…';
+
+  return fetch('/api/kalshi/markets?limit=250&status=open').then(r => r.json()).then(d => {
+    if (!d.ok) {
+      if (metaEl) metaEl.textContent = `Kalshi market fetch failed: ${d.error || 'unknown error'}`;
+      return [];
+    }
+    KALSHI_MARKETS = _asArray(d.markets);
+    KALSHI_MARKETS_CURSOR = d.cursor || null;
+    if (metaEl) {
+      metaEl.textContent = `Kalshi markets loaded: ${KALSHI_MARKETS.length}${KALSHI_MARKETS_CURSOR ? ' (more available)' : ''}`;
+    }
+    renderReadyBets();
+    return KALSHI_MARKETS;
+  }).catch(err => {
+    if (metaEl) metaEl.textContent = `Kalshi market fetch failed: ${err}`;
+    return [];
+  });
+}
+
+function renderReadyBets() {
+  const container = document.getElementById('ready-bets-list');
+  const metaEl = document.getElementById('ready-bets-meta');
+  if (!container) return;
+
+  const rows = READY_BETS;
+  if (!rows.length) {
+    container.innerHTML = '<div class="no-games">No ready bets met qualification rules yet.</div>';
+    if (metaEl) metaEl.textContent = '0 qualified';
+    return;
+  }
+
+  const groups = {
+    single: rows.filter(r => r.kind === 'single'),
+    team_prop: rows.filter(r => r.kind === 'team_prop'),
+    player_prop: rows.filter(r => r.kind === 'player_prop'),
+    combo: rows.filter(r => r.kind === 'combo'),
+  };
+  if (metaEl) {
+    metaEl.textContent = `${rows.length} qualified · singles ${groups.single.length} · team props ${groups.team_prop.length} · player props ${groups.player_prop.length} · combos ${groups.combo.length}`;
+  }
+
+  const renderItem = (b) => {
+    const uidDom = _safeDomId(b.uid);
+    const probPct = Math.round((Number(b.model_prob) || 0) * 100);
+    const qualityPct = Math.round((Number(b.quality) || 0) * 100);
+    const evPct = ((Number(b.ev) || 0) * 100).toFixed(1);
+    const markets = _matchedMarketOptions(b, 8);
+    const opts = markets.map(m => {
+      const title = _kalshiMarketLabel(m) || m.ticker || 'Market';
+      const ticker = String(m.ticker || '').trim();
+      return `<option value="${ticker}">${title} (${ticker || 'no-ticker'})</option>`;
+    }).join('');
+    const summaryBits = [
+      b.sport ? String(b.sport).replace(/_/g, ' ').toUpperCase() : '',
+      b.game_date || '',
+      b.team || b.player_name || '',
+      b.game || '',
+      `UID ${String(b.bet_uid || b.uid).slice(-12)}`,
+    ].filter(Boolean);
+    return `
+      <div class="ready-item">
+        <div class="ready-item-head">
+          <div>
+            <div class="ready-item-title">${b.label}</div>
+            <div class="ready-item-sub">${summaryBits.map(x => `<span>${x}</span>`).join('')}</div>
+          </div>
+          <span class="tp-outcome tp-PENDING">${probPct}%</span>
+        </div>
+        <div class="ready-kpis">
+          <span class="ready-pill good">Quality ${qualityPct}%</span>
+          <span class="ready-pill ${Number(evPct) >= 0 ? 'good' : 'warn'}">EV ${evPct}%</span>
+          <span class="ready-pill">${String(b.safety_label || 'MODERATE').toUpperCase()}</span>
+          ${b.signal_rationale ? '<span class="ready-pill">Sentiment/News checked</span>' : ''}
+        </div>
+        <div class="ready-actions">
+          <select id="ready-market-${uidDom}">
+            <option value="">${markets.length ? 'Select Kalshi market' : 'No auto market match'}</option>
+            ${opts}
+          </select>
+          <input id="ready-manual-${uidDom}" type="text" placeholder="Ticker override">
+          <input id="ready-amt-${uidDom}" type="number" min="1" step="1" value="25" title="Amount USD">
+          <select id="ready-side-${uidDom}"><option value="yes" ${b.side_default === 'no' ? '' : 'selected'}>YES</option><option value="no" ${b.side_default === 'no' ? 'selected' : ''}>NO</option></select>
+          <input id="ready-price-${uidDom}" type="number" min="1" max="99" step="1" value="50" title="Limit price cents">
+          <button class="btn btn-primary" onclick="executeReadyBet('${b.uid}')">Place</button>
+        </div>
+      </div>
+    `;
+  };
+
+  const renderGroup = (title, arr, empty, open) => `
+    <details class="ready-group" ${open ? 'open' : ''}>
+      <summary>${title} (${arr.length})</summary>
+      <div class="ready-scroll">
+        ${arr.length ? arr.map(renderItem).join('') : `<div class="no-games">${empty}</div>`}
+      </div>
+    </details>
+  `;
+
+  container.innerHTML = `
+    ${renderGroup('Ready Singles', groups.single, 'No qualified singles right now.', true)}
+    ${renderGroup('Ready Team Props', groups.team_prop, 'No qualified team props right now.', false)}
+    ${renderGroup('Ready Player Props', groups.player_prop, 'No qualified player props right now.', false)}
+    ${renderGroup('Ready Combos', groups.combo, 'No qualified combo rows right now.', false)}
+  `;
+}
+
+function refreshReadyBets(forceKalshi) {
+  READY_BETS = _deriveReadyBets();
+  renderReadyBets();
+  if (forceKalshi) {
+    loadKalshiMarkets(true);
+  }
+}
+
+function executeReadyBet(uid) {
+  const bet = READY_BETS.find(r => r.uid === uid);
+  if (!bet) {
+    toast('Ready bet no longer available. Refreshing…', 'info');
+    refreshReadyBets(false);
+    return;
+  }
+
+  const uidDom = _safeDomId(uid);
+  const selectedTicker = (document.getElementById(`ready-market-${uidDom}`)?.value || '').trim();
+  const manualTicker = (document.getElementById(`ready-manual-${uidDom}`)?.value || '').trim();
+  const ticker = manualTicker || selectedTicker;
+  if (!ticker) {
+    toast('Select a Kalshi market or enter ticker override.', 'error');
+    return;
+  }
+
+  const amount = Number(document.getElementById(`ready-amt-${uidDom}`)?.value || 0);
+  if (!Number.isFinite(amount) || amount <= 0) {
+    toast('Enter a valid amount.', 'error');
+    return;
+  }
+
+  const side = String(document.getElementById(`ready-side-${uidDom}`)?.value || 'yes').toLowerCase();
+  const price = Number(document.getElementById(`ready-price-${uidDom}`)?.value || 50);
+  const priceCents = Math.max(1, Math.min(99, Math.round(price)));
+  const count = Math.max(1, Math.floor((amount * 100) / priceCents));
+  const day = _localDayKey().replace(/-/g, '');
+  const clientOrderId = `${uid}_${day}`;
+
+  const sentIds = _readReadyOrderIds();
+  if (sentIds.has(clientOrderId)) {
+    toast('This ready bet was already submitted today.', 'info');
+    return;
+  }
+
+  const payload = {
+    market_ticker: ticker,
+    amount_usd: amount,
+    side,
+    limit_price_cents: priceCents,
+    count,
+    client_order_id: clientOrderId,
+    bet_kind: bet.kind,
+    bet_uid: bet.bet_uid || bet.uid,
+    bet_label: bet.label,
+    bet_payload: bet,
+  };
+
+  fetch('/api/kalshi/order', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(payload),
+  }).then(r => r.json()).then(d => {
+    if (d.ok) {
+      sentIds.add(clientOrderId);
+      _writeReadyOrderIds(sentIds);
+      _appendReadyOrderLog(true, bet.label, `Ticker ${ticker} · count ${count} · ${d.client_order_id || clientOrderId}`);
+      toast('Kalshi order sent successfully.', 'success');
+      return;
+    }
+    _appendReadyOrderLog(false, bet.label, d.error || 'Kalshi order failed');
+    toast(d.error || 'Kalshi order failed', 'error');
+  }).catch(err => {
+    _appendReadyOrderLog(false, bet.label, String(err));
+    toast('Kalshi order failed', 'error');
+  });
 }
 
 function renderTopProps(legs) {
@@ -3770,20 +4385,11 @@ function sendBuilderParlay() {
 }
 
 function loadTrackedParlays() {
-  Promise.all([
-    fetch('/api/parlay/list?include_resolved=1&current_only=0').then(r=>r.json()),
-    fetch('/api/predictions?outcome=WIN&days=30').then(r=>r.json()),
-    fetch('/api/predictions?outcome=LOSS&days=30').then(r=>r.json()),
-    fetch('/api/props?outcome=WIN&days=30').then(r=>r.json()),
-    fetch('/api/props?outcome=LOSS&days=30').then(r=>r.json()),
-  ]).then(([pd, wd, ld, wpd, lpd]) => {
+  fetch('/api/parlay/list?include_resolved=1&current_only=0').then(r=>r.json()).then(d=>{
     const el = document.getElementById('tracked-parlays-list');
     const metaEl = document.getElementById('tracked-parlay-meta');
-    const rows = pd.ok ? _asArray(pd.parlays) : [];
-    const winPreds = wd.ok ? _asArray(wd.predictions) : [];
-    const lossPreds = ld.ok ? _asArray(ld.predictions) : [];
-    const winProps = wpd.ok ? _asArray(wpd.props) : [];
-    const lossProps = lpd.ok ? _asArray(lpd.props) : [];
+    if (!el) return;
+    const rows = d.ok ? _asArray(d.parlays) : [];
 
     const pending = rows.filter(p => (p.outcome || 'PENDING').toUpperCase() === 'PENDING');
     const wins = rows.filter(p => (p.outcome || '').toUpperCase() === 'WIN');
@@ -3794,7 +4400,7 @@ function loadTrackedParlays() {
     });
 
     if (metaEl) {
-      metaEl.textContent = `Live: ${pending.length} · Won: ${wins.length + winPreds.length + winProps.length} · Lost: ${losses.length + lossPreds.length + lossProps.length} · Total: ${rows.length + winPreds.length + lossPreds.length + winProps.length + lossProps.length}`;
+      metaEl.textContent = `Live: ${pending.length} · Won: ${wins.length} · Lost: ${losses.length} · Total: ${rows.length}`;
     }
 
     const outcomeLabel = (v) => {
@@ -3802,9 +4408,9 @@ function loadTrackedParlays() {
       return out === 'PENDING' ? 'LIVE TRACKING' : out;
     };
 
-    const renderParlayList = (arr) => arr.map(p=>{
+    const renderList = (arr) => arr.map(p=>{
       const legs = (p.legs_json||[]).map(l=>
-        `<div style="font-size:.78rem;color:var(--muted);padding:3px 0">&bull; ${l.label||JSON.stringify(l)}</div>`
+        `<div class="tp-leg">${l.label||JSON.stringify(l)}</div>`
       ).join('');
       const out = (p.outcome || 'PENDING').toUpperCase();
       const combinedOdds = _num(p.combined_odds, 0);
@@ -3815,114 +4421,115 @@ function loadTrackedParlays() {
           <span class="tp-outcome tp-${out}">${outcomeLabel(out)}</span>
         </div>
         <div class="tp-meta">x${combinedOdds.toFixed(2)} · $${stakeUsd.toFixed(2)} stake · ${p.created_at||''}</div>
-        ${legs}
+        <div class="tp-legs">${legs || '<div class="tp-leg">No legs recorded.</div>'}</div>
       </div>`;
     }).join('');
 
-    const renderSingleList = (arr, outcome) => arr.map(pred=>{
-      const betType = _betTypeMeta(pred.bet_type || 'market');
-      const line = pred.line != null ? ` ${pred.line}` : '';
-      const odds = pred.odds_am ? ` (${pred.odds_am > 0 ? '+' : ''}${pred.odds_am})` : '';
-      const prob = pred.model_prob ? ` ${Math.round(pred.model_prob * 100)}%` : '';
-      return `<div class="tracked-parlay">
-        <div class="tracked-parlay-header">
-          <span class="tp-name">${pred.home_team} vs ${pred.away_team}</span>
-          <span class="tp-outcome tp-${outcome}">${outcome}</span>
+    const renderGroup = (title, arr, emptyMsg, open) => `
+      <details class="tracked-group" ${open ? 'open' : ''}>
+        <summary>${title} (${arr.length})</summary>
+        <div class="tracked-scroll">
+          ${arr.length ? renderList(arr) : `<div class="no-games" style="padding:12px">${emptyMsg}</div>`}
         </div>
-        <div class="tp-meta">${betType.icon} ${betType.label}: ${pred.pick}${line}${odds}${prob} · ${pred.game_date}</div>
-      </div>`;
-    }).join('');
+      </details>
+    `;
 
-    const renderPropList = (arr, outcome) => arr.map(prop=>{
-      const rec = prop.recommendation || 'OVER';
-      const line = prop.line != null ? ` ${prop.line}` : '';
-      const prob = rec === 'OVER' ? prop.over_prob : prop.under_prob;
-      const probStr = prob ? ` ${Math.round(prob * 100)}%` : '';
-      return `<div class="tracked-parlay">
-        <div class="tracked-parlay-header">
-          <span class="tp-name">${prop.player_name} (${prop.team})</span>
-          <span class="tp-outcome tp-${outcome}">${outcome}</span>
-        </div>
-        <div class="tp-meta">${prop.prop_type}${line} ${rec}${probStr} · ${prop.game_date}</div>
-      </div>`;
-    }).join('');
-
-    const intro = !pd.ok
-      ? 'Could not load tracked bets. Showing empty sections.'
-      : ((rows.length + winPreds.length + lossPreds.length) ? 'All tracked bets are shown below.' : 'No tracked bets yet. New tracked bets will appear below.');
+    const intro = !d.ok
+      ? 'Could not load tracked parlays. Showing empty sections.'
+      : (rows.length ? 'All tracked bets are shown below.' : 'No tracked parlays yet. New tracked bets will appear below.');
 
     el.innerHTML = `
-      <div style="max-height: 800px; overflow-y: auto;">
-        <div class="section-meta" style="margin-bottom:8px">${intro}</div>
-        <div class="section-meta" style="margin:10px 0 6px; cursor: pointer;" onclick="toggleSection('live-parlays')">
-          Live Tracking (${pending.length}) <span class="toggle-icon">-</span>
-        </div>
-        <div id="live-parlays-content">
-          ${pending.length ? renderParlayList(pending) : '<div class="no-games" style="padding:14px 10px">No live tracked parlays.</div>'}
-        </div>
-        <div class="section-meta" style="margin:14px 0 6px; cursor: pointer;" onclick="toggleSection('won-parlays')">
-          Won Parlays (${wins.length}) <span class="toggle-icon">-</span>
-        </div>
-        <div id="won-parlays-content">
-          ${wins.length ? renderParlayList(wins) : '<div class="no-games" style="padding:14px 10px">No winning parlays yet.</div>'}
-        </div>
-        <div class="section-meta" style="margin:14px 0 6px; cursor: pointer;" onclick="toggleSection('won-singles')">
-          Won Singles (${winPreds.length}) <span class="toggle-icon">-</span>
-        </div>
-        <div id="won-singles-content">
-          ${winPreds.length ? renderSingleList(winPreds, 'WIN') : '<div class="no-games" style="padding:14px 10px">No winning singles yet.</div>'}
-        </div>
-        <div class="section-meta" style="margin:14px 0 6px; cursor: pointer;" onclick="toggleSection('won-props')">
-          Won Props (${winProps.length}) <span class="toggle-icon">-</span>
-        </div>
-        <div id="won-props-content">
-          ${winProps.length ? renderPropList(winProps, 'WIN') : '<div class="no-games" style="padding:14px 10px">No winning props yet.</div>'}
-        </div>
-        <div class="section-meta" style="margin:14px 0 6px; cursor: pointer;" onclick="toggleSection('lost-parlays')">
-          Lost Parlays (${losses.length}) <span class="toggle-icon">-</span>
-        </div>
-        <div id="lost-parlays-content">
-          ${losses.length ? renderParlayList(losses) : '<div class="no-games" style="padding:14px 10px">No losing parlays yet.</div>'}
-        </div>
-        <div class="section-meta" style="margin:14px 0 6px; cursor: pointer;" onclick="toggleSection('lost-singles')">
-          Lost Singles (${lossPreds.length}) <span class="toggle-icon">-</span>
-        </div>
-        <div id="lost-singles-content">
-          ${lossPreds.length ? renderSingleList(lossPreds, 'LOSS') : '<div class="no-games" style="padding:14px 10px">No losing singles yet.</div>'}
-        </div>
-        <div class="section-meta" style="margin:14px 0 6px; cursor: pointer;" onclick="toggleSection('lost-props')">
-          Lost Props (${lossProps.length}) <span class="toggle-icon">-</span>
-        </div>
-        <div id="lost-props-content">
-          ${lossProps.length ? renderPropList(lossProps, 'LOSS') : '<div class="no-games" style="padding:14px 10px">No losing props yet.</div>'}
-        </div>
-        ${pushes.length ? `<div class="section-meta" style="margin:14px 0 6px; cursor: pointer;" onclick="toggleSection('other-parlays')">
-          Other (${pushes.length}) <span class="toggle-icon">-</span>
-        </div>
-        <div id="other-parlays-content">
-          ${renderParlayList(pushes)}
-        </div>` : ''}
-      </div>
+      <div class="section-meta" style="margin-bottom:8px">${intro}</div>
+      ${renderGroup('Live Tracking', pending, 'No live tracked parlays.', true)}
+      ${renderGroup('Won', wins, 'No winning parlays yet.', false)}
+      ${renderGroup('Lost', losses, 'No losing parlays yet.', false)}
+      ${pushes.length ? renderGroup('Other', pushes, 'No other settled parlays.', false) : ''}
     `;
+  }).catch(() => {
+    const el = document.getElementById('tracked-parlays-list');
+    if (el) el.innerHTML = '<div class="no-games" style="padding:12px">Could not load tracked parlays.</div>';
   });
 }
 
-// ── Toggle sections ───────────────────────────────────────────────────────
-function toggleSection(id) {
-  const contentEl = document.getElementById(id + '-content');
-  const iconEl = document.querySelector(`[onclick="toggleSection('${id}')"] .toggle-icon`);
-  if (contentEl && iconEl) {
-    if (contentEl.style.display === 'none') {
-      contentEl.style.display = 'block';
-      iconEl.textContent = '-';
-    } else {
-      contentEl.style.display = 'none';
-      iconEl.textContent = '+';
+function loadTrackedSingles() {
+  fetch('/api/predictions?days=21').then(r=>r.json()).then(d => {
+    const el = document.getElementById('tracked-singles-list');
+    const metaEl = document.getElementById('tracked-singles-meta');
+    if (!el) return;
+
+    const rows = d.ok ? _asArray(d.predictions) : [];
+    const dedupe = new Map();
+    rows.forEach(r => {
+      if (!r || typeof r !== 'object') return;
+      const uid = String(r.bet_uid || [
+        r.game_key || '',
+        r.bet_type || '',
+        r.pick || '',
+        r.line != null ? r.line : '',
+        r.game_date || '',
+      ].join('|')).trim().toLowerCase();
+      if (!uid) return;
+      if (!dedupe.has(uid)) dedupe.set(uid, r);
+    });
+
+    const singles = Array.from(dedupe.values()).filter(r => {
+      const bt = String(r.bet_type || '').toLowerCase();
+      return bt !== 'parlay';
+    });
+
+    const pending = singles.filter(r => String(r.outcome || 'PENDING').toUpperCase() === 'PENDING');
+    const wins = singles.filter(r => String(r.outcome || '').toUpperCase() === 'WIN');
+    const losses = singles.filter(r => String(r.outcome || '').toUpperCase() === 'LOSS');
+
+    if (metaEl) {
+      metaEl.textContent = `Live: ${pending.length} · Won: ${wins.length} · Lost: ${losses.length} · Total: ${singles.length}`;
     }
-  }
+
+    const renderRows = (arr) => arr.map(r => {
+      const out = String(r.outcome || 'PENDING').toUpperCase();
+      const betType = String(r.bet_type || '').replace(/_/g, ' ').toUpperCase();
+      const uid = String(r.bet_uid || '').trim();
+      const uidShort = uid ? uid.slice(-12) : 'N/A';
+      const gameDate = String(r.game_date || '').slice(0, 10);
+      const lineTxt = r.line != null && r.line !== '' ? ` · line ${r.line}` : '';
+      return `<div class="tracked-single">
+        <div class="tracked-single-top">
+          <div>
+            <div class="tracked-single-title">${r.pick || 'Bet'}</div>
+            <div class="tracked-single-meta">
+              <span>${betType || 'MARKET'}</span>
+              <span>${gameDate || '—'}</span>
+              <span>UID ${uidShort}</span>
+              <span>${r.home_team || ''}${r.away_team ? ` vs ${r.away_team}` : ''}${lineTxt}</span>
+            </div>
+          </div>
+          <span class="tp-outcome tp-${out}">${out === 'PENDING' ? 'LIVE TRACKING' : out}</span>
+        </div>
+      </div>`;
+    }).join('');
+
+    const renderGroup = (title, arr, emptyMsg, open) => `
+      <details class="tracked-group" ${open ? 'open' : ''}>
+        <summary>${title} (${arr.length})</summary>
+        <div class="tracked-scroll">
+          ${arr.length ? renderRows(arr) : `<div class="no-games" style="padding:12px">${emptyMsg}</div>`}
+        </div>
+      </details>
+    `;
+
+    el.innerHTML = `
+      ${renderGroup('Live Tracking', pending, 'No live tracked singles/team props.', true)}
+      ${renderGroup('Won', wins, 'No winning singles/team props yet.', false)}
+      ${renderGroup('Lost', losses, 'No losing singles/team props yet.', false)}
+    `;
+  }).catch(() => {
+    const el = document.getElementById('tracked-singles-list');
+    if (el) el.innerHTML = '<div class="no-games" style="padding:12px">Could not load tracked singles.</div>';
+  });
 }
 
-function loadTrackedParlays() {
+// ── Performance ───────────────────────────────────────────────────────────
+function loadBotPerformance() {
   const el = document.getElementById('bot-perf-stats');
   if (!el) return;
   Promise.all([
@@ -4193,6 +4800,8 @@ function stopConsolePoll() {
     applyCachedData(local);
   }
   hideOverlay();
+  _renderReadyOrderLog();
+  refreshReadyBets(false);
   _autoSelectDefaultTab();
 
   if (_isSoccerMode()) {
@@ -4225,8 +4834,13 @@ function stopConsolePoll() {
   resolveOutcomesSilent();
   setInterval(resolveOutcomesSilent, 2 * 60 * 1000);
   setInterval(() => {
+    if (_isReadyBetsActive()) {
+      refreshReadyBets(false);
+      loadKalshiMarkets(false);
+    }
     if (!_isParlaysActive()) return;
     loadTrackedParlays();
+    loadTrackedSingles();
     loadPropPerformance();
     loadParlayPerformance();
   }, 2 * 60 * 1000);

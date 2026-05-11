@@ -372,6 +372,62 @@ def _is_public_prop(p: dict) -> bool:
     return True
 
 
+def _attach_tracking_uids(game_bets: list[dict], prop_rows: list[dict]):
+    """Attach deterministic IDs to every displayed/saved bet row."""
+    try:
+        from data.db import _prediction_uid, _prop_uid
+    except Exception:
+        return
+
+    for bet in game_bets or []:
+        if not isinstance(bet, dict):
+            continue
+        game_date = (
+            bet.get("game_date")
+            or bet.get("date")
+            or _et_calendar_today().isoformat()
+        )
+        payload = {
+            "sport": bet.get("sport") or _ACTIVE_SPORT,
+            "game_date": game_date,
+            "game_key": bet.get("game_key") or bet.get("game") or bet.get("match_key") or "",
+            "bet_type": bet.get("bet_type") or "",
+            "pick": bet.get("pick") or "",
+            "line": bet.get("line"),
+        }
+        uid = bet.get("bet_uid") or bet.get("prediction_uid") or _prediction_uid(payload)
+        if uid:
+            bet["bet_uid"] = uid
+            bet.setdefault("prediction_uid", uid)
+
+    for prop in prop_rows or []:
+        if not isinstance(prop, dict):
+            continue
+        game_date = (
+            prop.get("date")
+            or prop.get("game_date")
+            or _et_calendar_today().isoformat()
+        )
+        payload = {
+            "sport": prop.get("sport") or _ACTIVE_SPORT,
+            "game_date": game_date,
+            "date": game_date,
+            "game_key": prop.get("game_key") or prop.get("game") or prop.get("match_key") or "",
+            "name": prop.get("name") or prop.get("player_name") or "",
+            "player_name": prop.get("player_name") or prop.get("name") or "",
+            "team": prop.get("team") or "",
+            "stat_type": prop.get("stat_type") or prop.get("prop_type") or "",
+            "prop_type": prop.get("prop_type") or prop.get("stat_type") or "",
+            "line": prop.get("line"),
+            "direction": prop.get("direction") or prop.get("recommendation") or "",
+            "recommendation": prop.get("recommendation") or prop.get("direction") or "",
+        }
+        uid = prop.get("bet_uid") or prop.get("prediction_uid") or _prop_uid(payload, game_date=game_date)
+        if uid:
+            prop["bet_uid"] = uid
+            prop.setdefault("prediction_uid", uid)
+
+
 def _build_card(game, bets, props, when):
     ht  = game.get("home_team", "")
     at  = game.get("away_team", "")
@@ -2716,6 +2772,7 @@ def _run_all_sports_analysis():
         best_bet_rows = _multi_sport_best_bets_rows(bets)
         sentiment_prop_rows = _build_all_sport_sentiment_props(games, bets)
         table_rows = _merge_all_sports_table_rows(sentiment_prop_rows, best_bet_rows)
+        _attach_tracking_uids(bets, table_rows)
         card_prop_rows = sentiment_prop_rows if sentiment_prop_rows else []
         _log(f"[all-sports] Pulled {len(games)} games and {len(bets)} ranked bets")
         if best_bet_rows:
@@ -2867,6 +2924,8 @@ def _run_soccer_analysis(lock_date: datetime.date | None = None):
                 all_bets.append(_normalize_soccer_bet(g, bet, today_str))
             for prop in card.get("suggested_props", []) or []:
                 all_props.append(_normalize_soccer_prop(g, prop, today_str))
+
+        _attach_tracking_uids(all_bets, all_props)
 
         _log(f"Soccer bets generated: {len(all_bets)}")
         _phase(2)
@@ -3331,6 +3390,8 @@ def _run_analysis(lock_date: datetime.date | None = None):
                 _log(f"Public props tracked: {len(all_props)}/{raw_props_count}")
         except Exception as e:
             _log(f"Props error: {e}")
+
+        _attach_tracking_uids(all_bets, all_props)
 
         _phase(6)
         _log("Building parlays...")
@@ -3909,19 +3970,6 @@ def api_predictions():
         return jsonify({"ok": True, "predictions": _clean(preds)})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e), "predictions": []})
-
-
-@app.route("/api/props")
-def api_props():
-    days    = int(request.args.get("days", 30))
-    outcome = request.args.get("outcome")
-    try:
-        from data.db import get_props
-        db_sport = None if _ACTIVE_SPORT == "all" else _ACTIVE_SPORT
-        props = get_props(days=days, outcome=outcome or None, sport=db_sport)
-        return jsonify({"ok": True, "props": _clean(props)})
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e), "props": []})
 
 
 def _match_status_bucket(status: str) -> str:
@@ -4715,7 +4763,7 @@ def api_resolve_outcomes():
 def api_parlay_save():
     data = request.get_json(force=True) or {}
     try:
-        from data.db import save_tracked_parlay, _prediction_uid
+        from data.db import save_tracked_parlay, _prediction_uid, _prop_uid
         # Default to duplicate prevention for all saves unless explicitly disabled.
         dedupe_raw = str(data.get("dedupe_pending", "1")).strip().lower()
         dedupe_pending = dedupe_raw in {"1", "true", "yes", "on"}
@@ -4730,20 +4778,52 @@ def api_parlay_save():
                     leg_payload.setdefault("game", leg_payload.get("game_key", ""))
 
                     # Attach deterministic prediction UID per leg for exact outcome lookups.
-                    if not leg_payload.get("prediction_uid"):
-                        pick_label = (
-                            leg_payload.get("pick")
-                            or leg_payload.get("label")
-                            or ""
+                    if not leg_payload.get("prediction_uid") and not leg_payload.get("bet_uid"):
+                        game_date = leg_payload.get("game_date") or _et_calendar_today().isoformat()
+                        source = str(leg_payload.get("source") or "").strip().lower()
+                        bet_type = str(leg_payload.get("bet_type") or "").strip().lower()
+
+                        is_prop_leg = (
+                            source == "prop"
+                            or bet_type == "player_prop"
+                            or bool(leg_payload.get("prop_type") or leg_payload.get("stat_type"))
                         )
-                        leg_payload["prediction_uid"] = _prediction_uid({
-                            "sport": leg_payload.get("sport", _ACTIVE_SPORT),
-                            "game_date": leg_payload.get("game_date") or _et_calendar_today().isoformat(),
-                            "game_key": leg_payload.get("game_key") or leg_payload.get("game") or "",
-                            "bet_type": leg_payload.get("bet_type") or "",
-                            "pick": pick_label,
-                            "line": leg_payload.get("line"),
-                        })
+
+                        if is_prop_leg:
+                            leg_uid = _prop_uid({
+                                "sport": leg_payload.get("sport", _ACTIVE_SPORT),
+                                "game_date": game_date,
+                                "game_key": leg_payload.get("game_key") or leg_payload.get("game") or "",
+                                "name": leg_payload.get("name") or leg_payload.get("player_name") or "",
+                                "player_name": leg_payload.get("player_name") or leg_payload.get("name") or "",
+                                "team": leg_payload.get("team") or "",
+                                "stat_type": leg_payload.get("stat_type") or leg_payload.get("prop_type") or "",
+                                "prop_type": leg_payload.get("prop_type") or leg_payload.get("stat_type") or "",
+                                "line": leg_payload.get("line"),
+                                "direction": leg_payload.get("direction") or leg_payload.get("recommendation") or "",
+                                "recommendation": leg_payload.get("recommendation") or leg_payload.get("direction") or "",
+                            }, game_date=game_date)
+                        else:
+                            pick_label = (
+                                leg_payload.get("pick")
+                                or leg_payload.get("label")
+                                or ""
+                            )
+                            leg_uid = _prediction_uid({
+                                "sport": leg_payload.get("sport", _ACTIVE_SPORT),
+                                "game_date": game_date,
+                                "game_key": leg_payload.get("game_key") or leg_payload.get("game") or "",
+                                "bet_type": leg_payload.get("bet_type") or "",
+                                "pick": pick_label,
+                                "line": leg_payload.get("line"),
+                            })
+
+                        leg_payload["prediction_uid"] = leg_uid
+                        leg_payload["bet_uid"] = leg_uid
+                    elif leg_payload.get("prediction_uid") and not leg_payload.get("bet_uid"):
+                        leg_payload["bet_uid"] = leg_payload.get("prediction_uid")
+                    elif leg_payload.get("bet_uid") and not leg_payload.get("prediction_uid"):
+                        leg_payload["prediction_uid"] = leg_payload.get("bet_uid")
                     norm_legs.append(leg_payload)
         pid = save_tracked_parlay(
             name=data.get("name", "My Parlay"),
@@ -4790,6 +4870,136 @@ def api_parlay_resolve():
             payout=float(data.get("payout", 0)),
         )
         return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
+
+
+@app.route("/api/kalshi/markets")
+def api_kalshi_markets():
+    """Public Kalshi market data (no auth required on Kalshi side)."""
+    try:
+        from data.kalshi import list_markets
+
+        limit = int(request.args.get("limit", 200))
+        cursor = (request.args.get("cursor") or "").strip() or None
+        status = (request.args.get("status") or "open").strip() or None
+        event_ticker = (request.args.get("event_ticker") or "").strip() or None
+        series_ticker = (request.args.get("series_ticker") or "").strip() or None
+
+        data = list_markets(
+            limit=limit,
+            cursor=cursor,
+            status=status,
+            event_ticker=event_ticker,
+            series_ticker=series_ticker,
+        )
+        markets = data.get("markets") or []
+        return jsonify({
+            "ok": True,
+            "markets": _clean(markets),
+            "cursor": data.get("cursor"),
+            "count": len(markets),
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e), "markets": [], "count": 0})
+
+
+@app.route("/api/kalshi/events")
+def api_kalshi_events():
+    """Public Kalshi event data (for market timing context)."""
+    try:
+        from data.kalshi import list_events
+
+        limit = int(request.args.get("limit", 200))
+        cursor = (request.args.get("cursor") or "").strip() or None
+        status = (request.args.get("status") or "").strip() or None
+        series_ticker = (request.args.get("series_ticker") or "").strip() or None
+
+        data = list_events(
+            limit=limit,
+            cursor=cursor,
+            status=status,
+            series_ticker=series_ticker,
+        )
+        events = data.get("events") or []
+        return jsonify({
+            "ok": True,
+            "events": _clean(events),
+            "cursor": data.get("cursor"),
+            "count": len(events),
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e), "events": [], "count": 0})
+
+
+@app.route("/api/kalshi/order", methods=["POST"])
+def api_kalshi_order():
+    """Execute a Kalshi order using API credentials from environment variables."""
+    data = request.get_json(force=True) or {}
+    try:
+        from data.kalshi import place_order
+
+        ticker = str(data.get("market_ticker") or data.get("ticker") or "").strip()
+        if not ticker:
+            return jsonify({"ok": False, "error": "market_ticker is required"}), 400
+
+        side = str(data.get("side") or "yes").strip().lower()
+        if side not in {"yes", "no"}:
+            side = "yes"
+
+        action = str(data.get("action") or "buy").strip().lower()
+        if action not in {"buy", "sell"}:
+            action = "buy"
+
+        try:
+            amount_usd = float(data.get("amount_usd", 0) or 0)
+        except Exception:
+            amount_usd = 0.0
+        try:
+            price_cents = int(float(data.get("limit_price_cents", data.get("price_cents", 50)) or 50))
+        except Exception:
+            price_cents = 50
+        price_cents = max(1, min(price_cents, 99))
+
+        count = data.get("count")
+        if count is None:
+            if amount_usd > 0:
+                count = max(1, int((amount_usd * 100.0) // max(price_cents, 1)))
+            else:
+                count = 1
+        else:
+            count = max(1, int(count))
+
+        client_order_id = (
+            str(data.get("client_order_id") or "").strip()
+            or f"bettor_{_et_calendar_today().strftime('%Y%m%d')}_{abs(hash((ticker, side, count, price_cents))) % 1000000:06d}"
+        )
+
+        payload = {
+            "ticker": ticker,
+            "side": side,
+            "action": action,
+            "type": str(data.get("type") or "limit"),
+            "count": count,
+            "client_order_id": client_order_id,
+        }
+        if side == "yes":
+            payload["yes_price"] = price_cents
+        else:
+            payload["no_price"] = price_cents
+
+        # Allow advanced callers to override/append raw order fields.
+        raw_order = data.get("order")
+        if isinstance(raw_order, dict):
+            payload.update(raw_order)
+
+        response = place_order(payload)
+        return jsonify({
+            "ok": True,
+            "client_order_id": client_order_id,
+            "request": _clean(payload),
+            "response": _clean(response),
+        })
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
 
