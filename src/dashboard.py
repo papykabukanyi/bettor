@@ -4932,6 +4932,25 @@ def api_kalshi_events():
         return jsonify({"ok": False, "error": str(e), "events": [], "count": 0})
 
 
+@app.route("/api/kalshi/resolve-ready", methods=["POST"])
+def api_kalshi_resolve_ready():
+    """Resolve dashboard Ready Bets to exact Kalshi markets on the server."""
+    data = request.get_json(force=True) or {}
+    try:
+        from data.kalshi import resolve_ready_bets
+
+        bets = data.get("bets") or []
+        if not isinstance(bets, list):
+            bets = []
+        resolved = resolve_ready_bets(
+            [bet for bet in bets if isinstance(bet, dict)],
+            force_refresh=bool(data.get("force_refresh")),
+        )
+        return jsonify({"ok": True, **_clean(resolved)})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e), "resolutions": {}, "summary": {}})
+
+
 @app.route("/api/kalshi/balance")
 def api_kalshi_balance():
     """Fetch current Kalshi account balance (authenticated)."""
@@ -4956,13 +4975,39 @@ def api_kalshi_order():
     """Execute a Kalshi order using API credentials from environment variables."""
     data = request.get_json(force=True) or {}
     try:
-        from data.kalshi import place_order
+        from data.kalshi import place_order, resolve_ready_bets
 
-        ticker = str(data.get("market_ticker") or data.get("ticker") or "").strip()
+        resolved_bet = None
+        bet_payload = data.get("bet_payload")
+        if isinstance(bet_payload, dict):
+            resolved = resolve_ready_bets([bet_payload], force_refresh=True)
+            resolved_map = resolved.get("resolutions") or {}
+            bet_uid = str(
+                bet_payload.get("uid")
+                or bet_payload.get("bet_uid")
+                or bet_payload.get("prediction_uid")
+                or "ready_0"
+            )
+            resolved_bet = resolved_map.get(bet_uid) or resolved_map.get("ready_0")
+            if isinstance(resolved_bet, dict):
+                status = str(resolved_bet.get("status") or "")
+                if status and status != "matched":
+                    return jsonify({
+                        "ok": False,
+                        "error": resolved_bet.get("message") or "Kalshi market is not available for this bet.",
+                        "resolution": _clean(resolved_bet),
+                    }), 400
+
+        ticker = str(
+            (resolved_bet or {}).get("market_ticker")
+            or data.get("market_ticker")
+            or data.get("ticker")
+            or ""
+        ).strip()
         if not ticker:
             return jsonify({"ok": False, "error": "market_ticker is required"}), 400
 
-        side = str(data.get("side") or "yes").strip().lower()
+        side = str((resolved_bet or {}).get("side") or data.get("side") or "yes").strip().lower()
         if side not in {"yes", "no"}:
             side = "yes"
 
@@ -4975,7 +5020,13 @@ def api_kalshi_order():
         except Exception:
             amount_usd = 0.0
         try:
-            price_cents = int(float(data.get("limit_price_cents", data.get("price_cents", 50)) or 50))
+            price_cents = int(
+                float(
+                    (resolved_bet or {}).get("price_cents")
+                    or data.get("limit_price_cents", data.get("price_cents", 50))
+                    or 50
+                )
+            )
         except Exception:
             price_cents = 50
         price_cents = max(1, min(price_cents, 99))
@@ -5016,6 +5067,7 @@ def api_kalshi_order():
         return jsonify({
             "ok": True,
             "client_order_id": client_order_id,
+            "resolution": _clean(resolved_bet) if isinstance(resolved_bet, dict) else None,
             "request": _clean(payload),
             "response": _clean(response),
         })

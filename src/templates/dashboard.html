@@ -415,6 +415,12 @@ main{padding:20px;max-width:1400px;margin:0 auto}
 /* No-match states */
 .ready-no-match-badge{flex:1;min-width:160px;padding:7px 12px;border-radius:8px;border:1px dashed rgba(234,179,8,.4);color:var(--yellow);font-size:.72rem;font-weight:600;background:rgba(234,179,8,.05)}
 .ready-no-match-hint{font-size:.71rem;color:var(--muted);font-style:italic}
+.ready-status-badge{flex:1;min-width:180px;padding:7px 12px;border-radius:8px;font-size:.72rem;font-weight:600;border:1px solid rgba(148,163,184,.28);background:rgba(148,163,184,.08);color:var(--text)}
+.ready-status-badge.loading{border-color:rgba(59,130,246,.35);background:rgba(59,130,246,.08);color:#93c5fd}
+.ready-status-badge.started{border-color:rgba(239,68,68,.35);background:rgba(239,68,68,.08);color:#fca5a5}
+.ready-status-badge.done{border-color:rgba(148,163,184,.35);background:rgba(148,163,184,.08);color:#cbd5e1}
+.ready-status-badge.unavailable{border-style:dashed;border-color:rgba(234,179,8,.4);background:rgba(234,179,8,.05);color:var(--yellow)}
+.ready-status-hint{font-size:.71rem;color:var(--muted);font-style:italic}
 .ready-amt-wrap{display:flex;align-items:center;gap:0;background:var(--card);border:1.5px solid var(--accent);border-radius:8px;overflow:hidden;flex-shrink:0}
 .ready-amt-sign{padding:0 6px 0 10px;color:var(--accent);font-weight:700;font-size:.85rem;line-height:1}
 .ready-amt-wrap input{border:none;background:transparent;color:var(--text);width:80px;padding:8px 8px 8px 2px;font-size:.82rem;outline:none}
@@ -1068,8 +1074,8 @@ let TOURNAMENTS = [];
 let TOURNAMENT_DATA = null;
 let _tournamentFilterTimer = null;
 let READY_BETS = [];
-let KALSHI_MARKETS = [];
-let KALSHI_MARKETS_CURSOR = null;
+let READY_KALSHI_RESOLUTIONS = {};
+let READY_KALSHI_STATUS = { loading: false, matched: 0, started: 0, done: 0, unavailable: 0, count: 0, market_count: 0, error: '' };
 const READY_ORDER_LOG_MAX = 120;
 let READY_ORDER_LOG = [];
 const READY_ORDER_IDS_KEY = 'bettor_ready_order_ids_v1';
@@ -1792,7 +1798,6 @@ function _silentRefreshPanels() {
   _silentPerfTimer = setTimeout(() => {
     if (_isReadyBetsActive()) {
       refreshReadyBets(false);
-      loadKalshiMarkets(false);
     }
     if (!_isParlaysActive()) return;
     loadPropPerformance();
@@ -1838,12 +1843,7 @@ function switchTab(name) {
   }
   if (name === 'readybets') {
     fetchKalshiBalance();
-    // Load Kalshi markets first (needed for matching), then derive bets
-    if (!KALSHI_MARKETS.length) {
-      loadKalshiMarkets(false).then(() => refreshReadyBets(false));
-    } else {
-      refreshReadyBets(false);
-    }
+    refreshReadyBets(false);
   }
   if (name === 'parlays')     {
     autoGenParlaysFromProps();
@@ -3775,87 +3775,6 @@ function _normText(v) {
   return String(v || '').toLowerCase().replace(/[^a-z0-9\s]+/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
-// Detect sport from a bet object
-function _betSportTag(bet) {
-  const s = _normText(bet.sport || bet.bet_type || bet.game || '');
-  if (s.includes('basketball') || s.includes('nba')) return 'basketball';
-  if (s.includes('baseball') || s.includes('mlb')) return 'baseball';
-  if (s.includes('football') || s.includes('nfl')) return 'football';
-  if (s.includes('hockey') || s.includes('nhl')) return 'hockey';
-  if (s.includes('soccer') || s.includes('mls') || s.includes('wc') || s.includes('copa') || s.includes('bundesliga') || s.includes('premier')) return 'soccer';
-  return '';
-}
-
-// Detect sport from a Kalshi market object (ticker/series_ticker)
-function _marketSportTag(m) {
-  const t = _normText(`${m.series_ticker || ''} ${m.event_ticker || ''} ${m.ticker || ''} ${m.category || ''}`);
-  if (t.includes('nba') || t.includes('nbafinals') || t.includes('nbaplayoff') || t.includes('basketball')) return 'basketball';
-  if (t.includes('mlb') || t.includes('baseball')) return 'baseball';
-  if (t.includes('nfl') || t.includes('football')) return 'football';
-  if (t.includes('nhl') || t.includes('hockey')) return 'hockey';
-  if (t.includes('soccer') || t.includes('mls') || t.includes('mvp') || t.includes('fifawc') || t.includes('wc2026') || t.includes('copa')) return 'soccer';
-  if (t.includes('multigame') || t.includes('esport') || t.includes('multileg') || t.includes('parlay')) return 'multi';
-  return '';
-}
-
-function _kalshiMarketLabel(m) {
-  // Prefer the clean title fields; avoid subtitle that can be a comma-list of sub-markets
-  let lbl = String(m.title || m.question || m.market_title || '').trim();
-  if (!lbl) lbl = String(m.subtitle || m.ticker || '').trim();
-  // If the label looks like a comma-separated sub-market list (multi-game), use the ticker instead
-  if (lbl.includes(',yes ') || lbl.includes(',no ') || lbl.startsWith('yes ') || lbl.startsWith('no ')) {
-    lbl = String(m.ticker || lbl).trim();
-  }
-  return lbl;
-}
-
-function _scoreKalshiMarket(bet, market) {
-  // ── Sport guard ──────────────────────────────────────────────────────────
-  const betSport  = _betSportTag(bet);
-  const mktSport  = _marketSportTag(market);
-  // Multi-game / esports parcels never match a single-game bet
-  if (mktSport === 'multi') return 0;
-  // Cross-sport: if both are identifiable and differ → no match
-  if (betSport && mktSport && betSport !== mktSport) return 0;
-
-  const hay = _normText(`${_kalshiMarketLabel(market)} ${market.event_ticker || ''} ${market.series_ticker || ''}`);
-  if (!hay) return 0;
-  const needles = [
-    bet.label,
-    bet.pick,
-    bet.game,
-    bet.home_team,
-    bet.away_team,
-    bet.team,
-    bet.player_name,
-    bet.prop_type,
-  ].map(_normText).filter(Boolean);
-  if (!needles.length) return 0;
-  let score = 0;
-  needles.forEach(n => {
-    if (!n) return;
-    if (hay.includes(n)) score += Math.min(8, n.length / 3);
-    n.split(' ').forEach(tok => {
-      if (tok.length >= 4 && hay.includes(tok)) score += 0.9;
-    });
-  });
-  const ticker = _normText(market.ticker || '');
-  if (ticker && needles.some(n => ticker.includes(n))) score += 2.2;
-  return score;
-}
-
-// Returns [{market, score}, ...] sorted best-first, only genuine matches
-function _matchedMarketOptions(bet, maxN) {
-  const list = _asArray(KALSHI_MARKETS);
-  if (!list.length) return [];
-  const scored = list
-    .map(m => ({ market: m, score: _scoreKalshiMarket(bet, m) }))
-    .filter(x => x.score >= 4.0)          // minimum meaningful match score
-    .sort((a, b) => b.score - a.score)
-    .slice(0, maxN || 8);
-  return scored;   // [{market, score}]
-}
-
 function _deriveComboReadyRows() {
   const rows = [];
   const candidateLegs = _comboCandidateLegs();
@@ -4081,29 +4000,53 @@ function fetchKalshiBalance() {
     });
 }
 
-function loadKalshiMarkets(force) {
-  if (!force && KALSHI_MARKETS.length) {
-    return Promise.resolve(KALSHI_MARKETS);
+function resolveKalshiReadyBets(force) {
+  if (!READY_BETS.length) {
+    READY_KALSHI_RESOLUTIONS = {};
+    READY_KALSHI_STATUS = { loading: false, matched: 0, started: 0, done: 0, unavailable: 0, count: 0, market_count: 0, error: '' };
+    renderReadyBets();
+    return Promise.resolve({});
   }
 
-  const metaEl = document.getElementById('ready-kalshi-meta');
-  if (metaEl) metaEl.textContent = 'Loading Kalshi markets…';
+  READY_KALSHI_STATUS = {
+    ...READY_KALSHI_STATUS,
+    loading: true,
+    error: '',
+    count: READY_BETS.length,
+  };
+  renderReadyBets();
 
-  return fetch('/api/kalshi/markets?limit=250&status=open').then(r => r.json()).then(d => {
+  return fetch('/api/kalshi/resolve-ready', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ bets: READY_BETS, force_refresh: !!force }),
+  }).then(r => r.json()).then(d => {
     if (!d.ok) {
-      if (metaEl) metaEl.textContent = `Kalshi fetch failed: ${d.error || 'unknown error'}`;
-      return [];
+      throw new Error(d.error || 'Kalshi resolve failed');
     }
-    KALSHI_MARKETS = _asArray(d.markets);
-    KALSHI_MARKETS_CURSOR = d.cursor || null;
-    if (metaEl) {
-      metaEl.textContent = `Kalshi: ${KALSHI_MARKETS.length} markets loaded${KALSHI_MARKETS_CURSOR ? ' (more available)' : ''}`;
-    }
+    READY_KALSHI_RESOLUTIONS = d.resolutions || {};
+    READY_KALSHI_STATUS = {
+      loading: false,
+      matched: Number(d.summary?.matched || 0),
+      started: Number(d.summary?.started || 0),
+      done: Number(d.summary?.done || 0),
+      unavailable: Number(d.summary?.unavailable || 0),
+      count: Number(d.summary?.count || READY_BETS.length || 0),
+      market_count: Number(d.market_count || d.summary?.market_count || 0),
+      error: '',
+    };
     renderReadyBets();
-    return KALSHI_MARKETS;
+    return READY_KALSHI_RESOLUTIONS;
   }).catch(err => {
-    if (metaEl) metaEl.textContent = `Kalshi fetch failed: ${err}`;
-    return [];
+    READY_KALSHI_RESOLUTIONS = {};
+    READY_KALSHI_STATUS = {
+      ...READY_KALSHI_STATUS,
+      loading: false,
+      error: String(err),
+      market_count: 0,
+    };
+    renderReadyBets();
+    return {};
   });
 }
 
@@ -4131,38 +4074,68 @@ function renderReadyBets() {
   };
   const nonCombo = groups.single.length + groups.team_prop.length + groups.player_prop.length;
   if (metaEl) {
-    metaEl.textContent = `${rows.length} qualified · ${nonCombo} singles/props · ${groups.combo.length} combos`;
+    const bits = [`${rows.length} qualified`, `${nonCombo} singles/props`, `${groups.combo.length} combos`];
+    if (READY_KALSHI_STATUS.loading) {
+      bits.push(`Kalshi resolving ${READY_KALSHI_STATUS.count || rows.length} bets…`);
+    } else if (READY_KALSHI_STATUS.market_count || READY_KALSHI_STATUS.count) {
+      bits.push(`Kalshi ${READY_KALSHI_STATUS.matched || 0} matched`);
+      if (READY_KALSHI_STATUS.started) bits.push(`${READY_KALSHI_STATUS.started} started`);
+      if (READY_KALSHI_STATUS.done) bits.push(`${READY_KALSHI_STATUS.done} done`);
+      if (READY_KALSHI_STATUS.unavailable) bits.push(`${READY_KALSHI_STATUS.unavailable} unavailable`);
+      if (READY_KALSHI_STATUS.market_count) bits.push(`${READY_KALSHI_STATUS.market_count} markets scanned`);
+    }
+    if (READY_KALSHI_STATUS.error) bits.push(`Kalshi resolve failed: ${READY_KALSHI_STATUS.error}`);
+    metaEl.textContent = bits.join(' · ');
   }
 
   // ── shared: render action row for any ready bet ──
   const renderActionRow = (b) => {
     const uidDom = _safeDomId(b.uid);
-    // Auto-match best Kalshi market — returns [{market, score}]
-    const matches = _matchedMarketOptions(b, 3);
-    const bestEntry = matches[0] || null;
-    const best = bestEntry ? bestEntry.market : null;
-    const autoTicker = best ? String(best.ticker || '').trim() : '';
-    // Price: use yes_ask (ask = price to buy YES) or fallback
-    const yesCents = best ? Math.max(1, Math.min(99, Math.round(Number(best.yes_ask || best.yes_bid || best.last_price || 50)))) : 50;
-    const noCents  = best ? Math.max(1, Math.min(99, Math.round(Number(best.no_ask  || best.no_bid  || 0) || (100 - yesCents)))) : 50;
-    const sideVal  = (b.side_default === 'no') ? 'no' : 'yes';
-    const autoPrice = sideVal === 'no' ? noCents : yesCents;
+    const resolution = READY_KALSHI_RESOLUTIONS[b.uid] || null;
+    const resolutionStatus = resolution ? String(resolution.status || '') : (READY_KALSHI_STATUS.loading ? 'loading' : 'pending');
+    const autoTicker = resolutionStatus === 'matched' ? String(resolution.market_ticker || '').trim() : '';
+    const sideVal = resolutionStatus === 'matched'
+      ? String(resolution.side || 'yes').toLowerCase()
+      : ((b.side_default === 'no') ? 'no' : 'yes');
+    const autoPrice = resolutionStatus === 'matched'
+      ? Math.max(1, Math.min(99, Math.round(Number(resolution.price_cents || 50))))
+      : 50;
 
-    // Truncate title for the chip
-    let chipTitle = best ? (_kalshiMarketLabel(best) || best.ticker || '') : '';
+    let chipTitle = resolutionStatus === 'matched'
+      ? String(resolution.market_title || autoTicker || '')
+      : '';
     if (chipTitle.length > 55) chipTitle = chipTitle.slice(0, 52) + '…';
 
-    const hasMatch = !!autoTicker;
-    const matchHtml = hasMatch
-      ? `<div class="ready-match-chip" title="${autoTicker}">
+    let matchHtml = '';
+    let hintHtml = '';
+    if (resolutionStatus === 'matched' && autoTicker) {
+      matchHtml = `<div class="ready-match-chip" title="${autoTicker}">
           <span class="match-icon">📍</span>
           <span class="match-name">${chipTitle}</span>
           <span class="match-ticker">${autoTicker}</span>
-        </div>`
-      : `<div class="ready-no-match-badge" title="No Kalshi market found for this bet yet. Markets are still loading or this bet type is not on Kalshi.">
-          ⚠ No Kalshi market matched
         </div>`;
+    } else if (resolutionStatus === 'loading' || resolutionStatus === 'pending') {
+      matchHtml = `<div class="ready-status-badge loading">⌛ Finding exact Kalshi market…</div>`;
+      hintHtml = `<span class="ready-status-hint">Server is checking teams, start time, and combo legs.</span>`;
+    } else {
+      const stateClass = ['done', 'started'].includes(resolutionStatus) ? resolutionStatus : 'unavailable';
+      const stateText = resolution && resolution.message
+        ? resolution.message
+        : (resolutionStatus === 'done'
+            ? 'Game is done.'
+            : resolutionStatus === 'started'
+              ? 'Game already started.'
+              : 'No exact Kalshi market is open for this bet.');
+      matchHtml = `<div class="ready-status-badge ${stateClass}">${stateText}</div>`;
+      if (resolution && resolution.scheduled_start) {
+        const when = String(resolution.scheduled_start).replace('T', ' ').replace('Z', ' UTC');
+        hintHtml = `<span class="ready-status-hint">Scheduled start: ${when}</span>`;
+      } else if (resolutionStatus === 'unavailable') {
+        hintHtml = `<span class="ready-status-hint">Not currently listed on Kalshi as an exact market.</span>`;
+      }
+    }
 
+    const hasMatch = !!autoTicker;
     const sideBadge = hasMatch ? `<span class="ready-side-badge ${sideVal}">${sideVal.toUpperCase()}</span>` : '';
 
     return `<div class="ready-actions" data-uid="${b.uid}" data-ticker="${autoTicker}" data-side="${sideVal}" data-price="${autoPrice}">
@@ -4171,7 +4144,7 @@ function renderReadyBets() {
       ${hasMatch
         ? `<label class="ready-amt-wrap"><span class="ready-amt-sign">$</span><input id="ready-amt-${uidDom}" type="number" min="1" max="10000" step="1" value="" placeholder="Amount"></label>
            <button class="btn btn-primary" onclick="executeReadyBet('${b.uid}')">Place ▶</button>`
-        : `<span class="ready-no-match-hint">Not available on Kalshi</span>`}
+        : hintHtml}
     </div>`;
   };
 
@@ -4255,9 +4228,7 @@ function renderReadyBets() {
   // ── Render singles/props panel ──
   if (container) {
     if (!nonCombo && !rows.length) {
-      container.innerHTML = KALSHI_MARKETS.length
-        ? '<div class="no-games">No bot-qualified bets for today\'s games yet. Run analysis first.</div>'
-        : '<div class="no-games">Loading Kalshi markets… bets will appear shortly.</div>';
+      container.innerHTML = '<div class="no-games">No bot-qualified bets for today\'s games yet. Run analysis first.</div>';
     } else {
       // Merge singles + team_prop together as "Game Bets"
       const gameBets = [...groups.single, ...groups.team_prop];
@@ -4278,16 +4249,11 @@ function renderReadyBets() {
 }
 
 function refreshReadyBets(forceKalshi) {
-  if (forceKalshi && !KALSHI_MARKETS.length) {
-    // Markets not loaded yet — load them, then derive + render
-    loadKalshiMarkets(false).then(() => {
-      READY_BETS = _deriveReadyBets();
-      renderReadyBets();
-    });
-  } else {
-    READY_BETS = _deriveReadyBets();
-    renderReadyBets();
-  }
+  READY_BETS = _deriveReadyBets();
+  READY_KALSHI_RESOLUTIONS = {};
+  READY_KALSHI_STATUS = { loading: false, matched: 0, started: 0, done: 0, unavailable: 0, count: READY_BETS.length, market_count: 0, error: '' };
+  renderReadyBets();
+  return resolveKalshiReadyBets(!!forceKalshi);
 }
 
 function executeReadyBet(uid) {
@@ -4298,17 +4264,16 @@ function executeReadyBet(uid) {
     return;
   }
 
-  const uidDom = _safeDomId(uid);
-  // Get ticker from the action row's data-ticker attribute (auto-matched market)
-  // Fall back to manual input if no market was matched
-  const rowEl = document.querySelector(`.ready-actions[data-uid="${uid}"]`);
-  const autoTicker = rowEl ? (rowEl.dataset.ticker || '').trim() : '';
-  const manualTicker = (document.getElementById(`ready-manual-${uidDom}`)?.value || '').trim();
-  const ticker = manualTicker || autoTicker;
-  if (!ticker) {
-    toast('No Kalshi market matched. Enter a ticker in the text field.', 'error');
+  const resolution = READY_KALSHI_RESOLUTIONS[uid] || null;
+  if (!resolution || String(resolution.status || '') !== 'matched' || !resolution.market_ticker) {
+    toast((resolution && resolution.message) || 'Kalshi market is not ready for this bet. Refreshing matches…', 'error');
+    resolveKalshiReadyBets(true);
     return;
   }
+
+  const uidDom = _safeDomId(uid);
+  const rowEl = document.querySelector(`.ready-actions[data-uid="${uid}"]`);
+  const ticker = String(resolution.market_ticker || '').trim();
 
   const amount = Number(document.getElementById(`ready-amt-${uidDom}`)?.value || 0);
   if (!Number.isFinite(amount) || amount <= 0) {
@@ -4317,9 +4282,8 @@ function executeReadyBet(uid) {
     return;
   }
 
-  // Get side and price from the action row data attributes (set when rendered)
-  const side = String((rowEl && rowEl.dataset.side) || 'yes').toLowerCase();
-  const price = Number((rowEl && rowEl.dataset.price) || 50);
+  const side = String(resolution.side || (rowEl && rowEl.dataset.side) || 'yes').toLowerCase();
+  const price = Number(resolution.price_cents || (rowEl && rowEl.dataset.price) || 50);
   const priceCents = Math.max(1, Math.min(99, Math.round(price)));
   const count = Math.max(1, Math.floor((amount * 100) / priceCents));
   const day = _localDayKey().replace(/-/g, '');
@@ -4352,7 +4316,8 @@ function executeReadyBet(uid) {
     if (d.ok) {
       sentIds.add(clientOrderId);
       _writeReadyOrderIds(sentIds);
-      _appendReadyOrderLog(true, bet.label, `Ticker ${ticker} · ${side.toUpperCase()} · count ${count} · ${d.client_order_id || clientOrderId}`);
+      const finalTicker = (d.resolution && d.resolution.market_ticker) || ticker;
+      _appendReadyOrderLog(true, bet.label, `Ticker ${finalTicker} · ${side.toUpperCase()} · count ${count} · ${d.client_order_id || clientOrderId}`);
       toast('✓ Kalshi order placed successfully!', 'success');
       fetchKalshiBalance(); // refresh balance after order
       return;
@@ -5064,7 +5029,6 @@ function stopConsolePoll() {
   setInterval(() => {
     if (_isReadyBetsActive()) {
       refreshReadyBets(false);
-      loadKalshiMarkets(false);
     }
     if (!_isParlaysActive()) return;
     loadTrackedParlays();
