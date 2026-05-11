@@ -30,7 +30,7 @@ KALSHI_TIMEOUT_SEC = int(os.getenv("KALSHI_TIMEOUT_SEC", "15"))
 # Path prefix used when signing (everything after the hostname).
 _KALSHI_BASE_PATH = urlparse(KALSHI_BASE_URL).path.rstrip("/")  # e.g. /trade-api/v2
 _KALSHI_MARKET_CACHE_TTL_SEC = max(
-    15, int(os.getenv("KALSHI_MARKET_CACHE_TTL_SEC", "90") or "90")
+    60, int(os.getenv("KALSHI_MARKET_CACHE_TTL_SEC", "600") or "600")
 )
 _KALSHI_MARKET_CACHE_LOCK = threading.Lock()
 _KALSHI_MARKET_CACHE: dict[str, Any] = {
@@ -455,30 +455,51 @@ def _bet_sport_tag(bet: dict[str, Any]) -> str:
 
 
 def _market_sport_tag(market: dict[str, Any]) -> str:
+    # ── Fast prefix lookup using known Kalshi series ticker prefixes ──────
+    # These are the official series tickers that Kalshi creates new markets
+    # under each day. Check ticker and event_ticker first (most specific).
+    _SERIES_SPORT_MAP = {
+        # Basketball
+        "KXNBA": "basketball", "KXWNBA": "basketball",
+        "NBAPTSO": "basketball", "NBAMVP": "basketball", "NBACHAMP": "basketball",
+        # Baseball
+        "MLBWIN": "baseball", "MLBOU": "baseball", "MLBHR": "baseball",
+        "MLBRUNS": "baseball", "MLBK": "baseball", "MLBHITS": "baseball",
+        "MLBWSERIES": "baseball", "KXMLB": "baseball",
+        # Football
+        "NFLWIN": "football", "NFLOU": "football", "NFLTD": "football",
+        "NFLMVP": "football", "NFLSB": "football", "KXNFL": "football",
+        # Hockey
+        "NHLWIN": "hockey", "NHLOU": "hockey", "NHLIN": "hockey",
+        "NHLCHAMP": "hockey", "KXNHL": "hockey",
+        # Soccer
+        "MSLWIN": "soccer", "EPLWIN": "soccer", "UCLWIN": "soccer",
+        "KXMLS": "soccer", "KXEPL": "soccer", "KXFIFA": "soccer",
+    }
+    ticker_up = str(market.get("ticker") or "").upper()
+    event_up = str(market.get("event_ticker") or "").upper()
+    for prefix, sport in _SERIES_SPORT_MAP.items():
+        if ticker_up.startswith(prefix) or event_up.startswith(prefix):
+            return sport
+
+    # ── Fallback: full-text sport detection ──────────────────────────────
     text = _norm_text(
         " ".join(
             str(market.get(key) or "")
-            for key in (
-                "ticker",
-                "event_ticker",
-                "title",
-                "yes_sub_title",
-                "no_sub_title",
-                "category",
-            )
+            for key in ("ticker", "event_ticker", "title", "yes_sub_title", "no_sub_title", "category")
         )
     )
     if "kxmve" in text or "crosscategory" in text or "multigame" in text:
         return "multi"
-    if any(token in text for token in ("kxnba", "kxwnba", "basketball", "nba", "wnba")):
+    if any(tok in text for tok in ("basketball", "nba", "wnba")):
         return "basketball"
-    if any(token in text for token in ("kxmlb", "baseball", "mlb")):
+    if any(tok in text for tok in ("baseball", "mlb")):
         return "baseball"
-    if any(token in text for token in ("kxnfl", "football", "nfl")):
+    if any(tok in text for tok in ("football", "nfl")):
         return "football"
-    if any(token in text for token in ("kxnhl", "hockey", "nhl")):
+    if any(tok in text for tok in ("hockey", "nhl", "icehockey")):
         return "hockey"
-    if any(token in text for token in ("kxmls", "kxepl", "kxfifa", "soccer", "mls", "premier", "bundesliga", "serie a", "laliga", "ligue 1", "uefa", "fifa")):
+    if any(tok in text for tok in ("soccer", "mls", "premier", "bundesliga", "serie a", "laliga", "ligue 1", "uefa", "fifa")):
         return "soccer"
     return ""
 
@@ -949,6 +970,91 @@ def resolve_ready_bets(
         "resolutions": resolutions,
         "summary": summary,
         "market_count": int(catalog.get("count") or 0),
+        "cache_age_sec": float(catalog.get("cache_age_sec") or 0.0),
+    }
+
+
+def get_today_sports_tickers(*, force_refresh: bool = False) -> dict[str, Any]:
+    """Reverse-matching: return today's open Kalshi markets grouped by sport.
+
+    Fetches the open market catalog and structures the data so the UI can
+    discover what games/events are actually available on Kalshi today, then
+    match those back to the bot's game cards.
+
+    Returns:
+        {
+          "by_sport": {
+            "basketball": [{"ticker", "event_ticker", "title", "price_cents",
+                             "close_time", "series_prefix"}],
+            ...
+          },
+          "total": int,
+          "cache_age_sec": float,
+        }
+    """
+    _SERIES_PREFIX_MAP: dict[str, str] = {
+        "KXNBA": "basketball", "KXWNBA": "basketball",
+        "NBAPTSO": "basketball", "NBAMVP": "basketball", "NBACHAMP": "basketball",
+        "MLBWIN": "baseball", "MLBOU": "baseball", "MLBHR": "baseball",
+        "MLBRUNS": "baseball", "MLBK": "baseball", "MLBHITS": "baseball",
+        "MLBWSERIES": "baseball", "KXMLB": "baseball",
+        "NFLWIN": "football", "NFLOU": "football", "NFLTD": "football",
+        "NFLMVP": "football", "NFLSB": "football", "KXNFL": "football",
+        "NHLWIN": "hockey", "NHLOU": "hockey", "NHLIN": "hockey",
+        "NHLCHAMP": "hockey", "KXNHL": "hockey",
+        "MSLWIN": "soccer", "EPLWIN": "soccer", "UCLWIN": "soccer",
+        "KXMLS": "soccer", "KXEPL": "soccer", "KXFIFA": "soccer",
+    }
+
+    catalog = get_open_market_catalog(force_refresh=force_refresh)
+    by_sport: dict[str, list[dict[str, Any]]] = {}
+    today_str = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+
+    for market in catalog.get("markets", []):
+        if _is_combo_market(market):
+            continue
+        ticker = str(market.get("ticker") or "").upper()
+        event_ticker = str(market.get("event_ticker") or "").upper()
+
+        # Determine series prefix
+        series_prefix = ""
+        sport = ""
+        for prefix, sp in _SERIES_PREFIX_MAP.items():
+            if ticker.startswith(prefix) or event_ticker.startswith(prefix):
+                series_prefix = prefix
+                sport = sp
+                break
+        if not sport:
+            sport = _market_sport_tag(market)
+        if not sport or sport == "multi":
+            continue
+
+        # Only include markets that look like they're for today or upcoming
+        close_time = str(market.get("close_time") or market.get("expiration_time") or "")
+        if close_time and close_time[:10] < today_str:
+            continue  # Skip already-expired markets
+
+        price_cents = _market_price_cents(market, "yes")
+        entry: dict[str, Any] = {
+            "ticker": str(market.get("ticker") or ""),
+            "event_ticker": str(market.get("event_ticker") or ""),
+            "title": str(market.get("title") or ""),
+            "series_prefix": series_prefix,
+            "price_cents": price_cents,
+            "close_time": close_time,
+            "kind": _market_kind_tag(market),
+        }
+        if sport not in by_sport:
+            by_sport[sport] = []
+        by_sport[sport].append(entry)
+
+    # Sort each sport's markets by close_time ascending
+    for sport_key in by_sport:
+        by_sport[sport_key].sort(key=lambda m: m.get("close_time") or "")
+
+    return {
+        "by_sport": by_sport,
+        "total": sum(len(v) for v in by_sport.values()),
         "cache_age_sec": float(catalog.get("cache_age_sec") or 0.0),
     }
 
