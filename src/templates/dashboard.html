@@ -1550,12 +1550,29 @@ function loadLocalCache() {
   } catch (e) { return null; }
 }
 
-function applyCachedData(d) {
+function _assignCachedArray(currentValue, nextValue, normalize, preserveIfIncomingEmpty) {
+  const next = normalize(nextValue);
+  if (preserveIfIncomingEmpty && !next.length && _asArray(currentValue).length) {
+    return currentValue;
+  }
+  return next;
+}
+
+function applyCachedData(d, opts) {
   if (!d) return;
-  if (d.game_cards_today    !== undefined) TODAY_CARDS    = _normalizeCardList(d.game_cards_today);
-  if (d.game_cards_tomorrow !== undefined) TOMORROW_CARDS = _normalizeCardList(d.game_cards_tomorrow);
-  if (d.best_parlays        !== undefined) BEST_PARLAYS   = _asArray(d.best_parlays);
-  if (d.player_props        !== undefined) ALL_PROPS      = _publicOverProps(_asArray(d.player_props));
+  const preserveIfIncomingEmpty = !!(opts && opts.preserveIfIncomingEmpty);
+  if (d.game_cards_today !== undefined) {
+    TODAY_CARDS = _assignCachedArray(TODAY_CARDS, d.game_cards_today, _normalizeCardList, preserveIfIncomingEmpty);
+  }
+  if (d.game_cards_tomorrow !== undefined) {
+    TOMORROW_CARDS = _assignCachedArray(TOMORROW_CARDS, d.game_cards_tomorrow, _normalizeCardList, preserveIfIncomingEmpty);
+  }
+  if (d.best_parlays !== undefined) {
+    BEST_PARLAYS = _assignCachedArray(BEST_PARLAYS, d.best_parlays, _asArray, preserveIfIncomingEmpty);
+  }
+  if (d.player_props !== undefined) {
+    ALL_PROPS = _assignCachedArray(ALL_PROPS, d.player_props, rows => _publicOverProps(_asArray(rows)), preserveIfIncomingEmpty);
+  }
   renderAll();
   _autoSelectDefaultTab();
   const lu = d.last_updated || d._updated_at;
@@ -5338,7 +5355,7 @@ function stopConsolePoll() {
     _asArray(local.player_props).length ||
     _asArray(local.best_parlays).length
   )) {
-    applyCachedData(local);
+    applyCachedData(local, { preserveIfIncomingEmpty: true });
   }
   hideOverlay();
   _renderReadyOrderLog();
@@ -5354,7 +5371,7 @@ function stopConsolePoll() {
 
   // Fetch cached state as a fallback if SSE is slow or blocked.
   fetch('/api/cached-state').then(r=>r.json()).then(d=>{
-    if (d && d.ok) applyCachedData(d);
+    if (d && d.ok) applyCachedData(d, { preserveIfIncomingEmpty: true });
   }).catch(()=>{});
 
   // If analysis is already running when we load, show the progress overlay

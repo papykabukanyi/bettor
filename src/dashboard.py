@@ -279,7 +279,16 @@ def _card_date_from_iso(game_datetime) -> str:
         raw = str(game_datetime or "").strip()
         if not raw:
             return ""
-        return datetime.datetime.fromisoformat(raw).date().isoformat()
+        dt = datetime.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            return dt.date().isoformat()
+        try:
+            import zoneinfo
+
+            eastern = zoneinfo.ZoneInfo("America/New_York")
+            return dt.astimezone(eastern).date().isoformat()
+        except Exception:
+            return dt.date().isoformat()
     except Exception:
         return ""
 
