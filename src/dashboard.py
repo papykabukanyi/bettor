@@ -293,9 +293,27 @@ def _card_date_from_iso(game_datetime) -> str:
         return ""
 
 
+def _card_status_phase(status: str) -> str:
+    s = str(status or "").lower()
+    if not s:
+        return "upcoming"
+    if any(token in s for token in ("pre-game", "pregame", "warmup", "scheduled")):
+        return "upcoming"
+    if any(token in s for token in ("postpon", "cancel", "suspend", "final", "game over", "completed", "finished")):
+        return "final"
+    if re.search(r"\b(top|bottom|mid|end)\s*\d", s):
+        return "live"
+    if "inning" in s and "scheduled" not in s:
+        return "live"
+    if any(token in s for token in ("in progress", "in_play", "live", "halftime", "paused", "challenge", "progress")):
+        return "live"
+    return "upcoming"
+
+
 def _normalize_card_list(cards, expected_date: str | None = None) -> list:
     out = []
     seen = set()
+    tomorrow_str = (_et_calendar_today() + datetime.timedelta(days=1)).isoformat() if expected_date else None
     for raw in cards or []:
         if not isinstance(raw, dict):
             continue
@@ -305,6 +323,8 @@ def _normalize_card_list(cards, expected_date: str | None = None) -> list:
         match_key = card.get("match_key") or _norm_gk(f"{away}@{home}")
         game_date = card.get("game_date") or _card_date_from_iso(card.get("game_datetime"))
         if expected_date and game_date and game_date != expected_date:
+            continue
+        if expected_date and expected_date == tomorrow_str and _card_status_phase(card.get("status", "")) != "upcoming":
             continue
         card["match_key"] = match_key
         if game_date and not card.get("game_date"):
@@ -322,6 +342,15 @@ def _normalize_card_list(cards, expected_date: str | None = None) -> list:
         seen.add(dedupe_key)
         out.append(card)
     return out
+
+
+def _normalize_dashboard_card_buckets(today_cards, tomorrow_cards) -> tuple[list, list]:
+    today_str = _et_calendar_today().isoformat()
+    tomorrow_str = (_et_calendar_today() + datetime.timedelta(days=1)).isoformat()
+    return (
+        _normalize_card_list(today_cards, expected_date=today_str),
+        _normalize_card_list(tomorrow_cards, expected_date=tomorrow_str),
+    )
 
 
 def _et_calendar_today() -> datetime.date:
@@ -2806,6 +2835,7 @@ def _run_all_sports_analysis():
 
         today_cards.sort(key=_card_score, reverse=True)
         tomorrow_cards.sort(key=_card_score, reverse=True)
+        today_cards, tomorrow_cards = _normalize_dashboard_card_buckets(today_cards, tomorrow_cards)
         best_parlays = []
         try:
             from models.mlb_predictor import build_parlays
@@ -3012,6 +3042,7 @@ def _run_soccer_analysis(lock_date: datetime.date | None = None):
 
         today_cards.sort(key=_card_score, reverse=True)
         tomorrow_cards.sort(key=_card_score, reverse=True)
+        today_cards, tomorrow_cards = _normalize_dashboard_card_buckets(today_cards, tomorrow_cards)
         all_props_flat = sorted(all_props, key=lambda x: x.get("safety", 0), reverse=True)
 
         now_ts = datetime.datetime.now(datetime.timezone.utc)
@@ -3510,6 +3541,7 @@ def _run_analysis(lock_date: datetime.date | None = None):
 
         today_cards.sort(key=_card_score, reverse=True)
         tomorrow_cards.sort(key=_card_score, reverse=True)
+        today_cards, tomorrow_cards = _normalize_dashboard_card_buckets(today_cards, tomorrow_cards)
         all_props_flat = sorted(all_props, key=lambda x: x.get("safety", 0), reverse=True)
 
         now_ts = datetime.datetime.now(datetime.timezone.utc)
@@ -4785,19 +4817,54 @@ def api_parlay_save():
                     leg_payload.setdefault("sport", _ACTIVE_SPORT)
                     leg_payload.setdefault("game_key", leg_payload.get("game", ""))
                     leg_payload.setdefault("game", leg_payload.get("game_key", ""))
+                    game_date = leg_payload.get("game_date") or _et_calendar_today().isoformat()
+                    source = str(leg_payload.get("source") or "").strip().lower()
+                    bet_type = str(leg_payload.get("bet_type") or "").strip().lower()
+
+                    is_prop_leg = (
+                        source == "prop"
+                        or bet_type == "player_prop"
+                        or bool(leg_payload.get("prop_type") or leg_payload.get("stat_type"))
+                    )
+
+                    scheduled_start = str(leg_payload.get("scheduled_start") or "").strip()
+                    if not scheduled_start:
+                        game_ref = str(leg_payload.get("game_key") or leg_payload.get("game") or "")
+                        if "#" in game_ref:
+                            scheduled_start = game_ref.rsplit("#", 1)[-1].strip()
+
+                    direction = str(
+                        leg_payload.get("direction")
+                        or leg_payload.get("recommendation")
+                        or ""
+                    ).strip().upper()
+                    direction_text = " ".join(
+                        str(leg_payload.get(key) or "")
+                        for key in ("direction", "recommendation", "pick", "label", "bet_type")
+                    ).upper()
+                    side_default = str(leg_payload.get("side_default") or "").strip().lower()
+                    if side_default not in {"yes", "no"}:
+                        side_default = "no" if "UNDER" in direction_text else "yes"
+
+                    leg_payload["game_date"] = game_date
+                    leg_payload["scheduled_start"] = scheduled_start
+                    leg_payload["direction"] = direction
+                    leg_payload["recommendation"] = direction
+                    leg_payload["player_name"] = leg_payload.get("player_name") or leg_payload.get("name") or ""
+                    leg_payload["name"] = leg_payload.get("name") or leg_payload.get("player_name") or ""
+                    leg_payload["prop_type"] = leg_payload.get("prop_type") or leg_payload.get("stat_type") or ""
+                    leg_payload["stat_type"] = leg_payload.get("stat_type") or leg_payload.get("prop_type") or ""
+                    leg_payload["kind"] = leg_payload.get("kind") or ("player_prop" if is_prop_leg else "single")
+                    leg_payload["bet_type"] = leg_payload.get("bet_type") or ("player_prop" if is_prop_leg else "single")
+                    leg_payload["label"] = leg_payload.get("label") or leg_payload.get("pick") or ""
+                    leg_payload["pick"] = leg_payload.get("pick") or leg_payload.get("label") or ""
+                    leg_payload["home_team"] = leg_payload.get("home_team") or ""
+                    leg_payload["away_team"] = leg_payload.get("away_team") or ""
+                    leg_payload["team"] = leg_payload.get("team") or ""
+                    leg_payload["side_default"] = side_default
 
                     # Attach deterministic prediction UID per leg for exact outcome lookups.
                     if not leg_payload.get("prediction_uid") and not leg_payload.get("bet_uid"):
-                        game_date = leg_payload.get("game_date") or _et_calendar_today().isoformat()
-                        source = str(leg_payload.get("source") or "").strip().lower()
-                        bet_type = str(leg_payload.get("bet_type") or "").strip().lower()
-
-                        is_prop_leg = (
-                            source == "prop"
-                            or bet_type == "player_prop"
-                            or bool(leg_payload.get("prop_type") or leg_payload.get("stat_type"))
-                        )
-
                         if is_prop_leg:
                             leg_uid = _prop_uid({
                                 "sport": leg_payload.get("sport", _ACTIVE_SPORT),
@@ -4833,6 +4900,7 @@ def api_parlay_save():
                         leg_payload["bet_uid"] = leg_payload.get("prediction_uid")
                     elif leg_payload.get("bet_uid") and not leg_payload.get("prediction_uid"):
                         leg_payload["prediction_uid"] = leg_payload.get("bet_uid")
+                    leg_payload["uid"] = leg_payload.get("uid") or leg_payload.get("bet_uid") or leg_payload.get("prediction_uid") or ""
                     norm_legs.append(leg_payload)
         pid = save_tracked_parlay(
             name=data.get("name", "My Parlay"),
@@ -5595,6 +5663,8 @@ def _load_boot_schedule_fallback() -> bool:
             tomorrow_games = [g for g in all_games if g.get("date", "") == tomorrow_str]
             today_cards = [_build_card(g, [], [], "TODAY") for g in today_games]
             tomorrow_cards = [_build_card(g, [], [], "TOMORROW") for g in tomorrow_games]
+
+        today_cards, tomorrow_cards = _normalize_dashboard_card_buckets(today_cards, tomorrow_cards)
 
         with _lock:
             _state.update({

@@ -1354,6 +1354,64 @@ function _etTodayIso() {
   return `${p.year}-${_pad2(p.month)}-${_pad2(p.day)}`;
 }
 
+function _etOffsetIso(offsetDays) {
+  const ref = new Date(Date.now() + (Number(offsetDays) || 0) * 24 * 60 * 60 * 1000);
+  const p = _zonedParts(ref, 'America/New_York');
+  return `${p.year}-${_pad2(p.month)}-${_pad2(p.day)}`;
+}
+
+function _scheduledStartFromGameKey(gameKey) {
+  const raw = String(gameKey || '').trim();
+  if (!raw || raw.indexOf('#') < 0) return '';
+  return raw.split('#').pop().trim();
+}
+
+function _sanitizeCardBucket(cards, bucket) {
+  const target = bucket === 'today' ? _etOffsetIso(0) : bucket === 'tomorrow' ? _etOffsetIso(1) : '';
+  return _normalizeCardList(cards).filter(card => {
+    const gameDate = String(card.game_date || '').slice(0, 10);
+    if (target && gameDate && gameDate !== target) return false;
+    if (bucket === 'tomorrow') {
+      return _phaseForCard(card.status || '', card.game_date || '', card.game_time || '', card.game_datetime || '') === 'upcoming';
+    }
+    return true;
+  });
+}
+
+function _liveLookupSnapshot() {
+  const liveKeys = _getLiveGameKeySet();
+  return {
+    liveKeys,
+    liveArr: Array.from(liveKeys).map(v => String(v).toLowerCase()),
+  };
+}
+
+function _rowPhaseLike(row, liveLookup) {
+  const lookup = liveLookup || _liveLookupSnapshot();
+  const gameKey = (row && (row.game_key || row.game)) || '';
+  if (gameKey && _isLiveFromSet(gameKey, lookup.liveKeys, lookup.liveArr)) return 'live';
+  return _phaseForCard(
+    row && row.status || '',
+    row && (row.game_date || row.date) || '',
+    row && row.game_time || '',
+    row && (row.scheduled_start || row.game_datetime || _scheduledStartFromGameKey(gameKey)) || ''
+  );
+}
+
+function _defaultKalshiSide(row) {
+  const text = ['direction', 'recommendation', 'pick', 'label', 'bet_type']
+    .map(key => String((row && row[key]) || ''))
+    .join(' ')
+    .toUpperCase();
+  return text.includes('UNDER') ? 'no' : 'yes';
+}
+
+function _parlayPendingBucket(parlay, liveLookup) {
+  const legs = _asArray(parlay && parlay.legs_json);
+  if (!legs.length) return 'upcoming';
+  return legs.some(leg => _rowPhaseLike(leg, liveLookup) === 'live') ? 'live' : 'upcoming';
+}
+
 function _readReadyOrderIds() {
   try {
     const raw = localStorage.getItem(READY_ORDER_IDS_KEY);
@@ -1562,10 +1620,10 @@ function applyCachedData(d, opts) {
   if (!d) return;
   const preserveIfIncomingEmpty = !!(opts && opts.preserveIfIncomingEmpty);
   if (d.game_cards_today !== undefined) {
-    TODAY_CARDS = _assignCachedArray(TODAY_CARDS, d.game_cards_today, _normalizeCardList, preserveIfIncomingEmpty);
+    TODAY_CARDS = _assignCachedArray(TODAY_CARDS, d.game_cards_today, rows => _sanitizeCardBucket(rows, 'today'), preserveIfIncomingEmpty);
   }
   if (d.game_cards_tomorrow !== undefined) {
-    TOMORROW_CARDS = _assignCachedArray(TOMORROW_CARDS, d.game_cards_tomorrow, _normalizeCardList, preserveIfIncomingEmpty);
+    TOMORROW_CARDS = _assignCachedArray(TOMORROW_CARDS, d.game_cards_tomorrow, rows => _sanitizeCardBucket(rows, 'tomorrow'), preserveIfIncomingEmpty);
   }
   if (d.best_parlays !== undefined) {
     BEST_PARLAYS = _assignCachedArray(BEST_PARLAYS, d.best_parlays, _asArray, preserveIfIncomingEmpty);
@@ -2260,12 +2318,12 @@ function buildEliteParlay() {
 
 // ── Parlay Performance ────────────────────────────────────────────────────
 function loadParlayPerformance() {
+  const targets = [
+    document.getElementById('parlay-perf-stats'),
+    document.getElementById('parlay-perf-stats-perf')
+  ].filter(Boolean);
+  if (!targets.length) return;
   fetch('/api/parlay/performance').then(r => r.json()).then(d => {
-    const targets = [
-      document.getElementById('parlay-perf-stats'),
-      document.getElementById('parlay-perf-stats-perf')
-    ].filter(Boolean);
-    if (!targets.length) return;
     if (!d.ok) {
       targets.forEach(el => el.innerHTML = '<div class="no-games">Could not load parlay stats.</div>');
       return;
@@ -2283,6 +2341,8 @@ function loadParlayPerformance() {
       <div class="perf-card"><div class="perf-val" style="color:${roiC}">${roi}</div><div class="perf-label">ROI</div></div>
       <div class="perf-card"><div class="perf-val">${s.total||0}</div><div class="perf-label">Total Parlays</div></div>`;
     targets.forEach(el => { el.innerHTML = html; });
+  }).catch(() => {
+    targets.forEach(el => el.innerHTML = '<div class="no-games">Could not load parlay stats.</div>');
   });
 }
 
@@ -3462,27 +3522,39 @@ function _autoParlayPayload(c) {
     name: `Auto ${c.n}-Leg Mixed Parlay`,
     legs: _asArray(c.legs).map(p => {
       const gameKey = p.game_key || p.game || '';
+      const betType = p.bet_type || (_legSourceGroup(p) === 'prop' ? 'player_prop' : 'game_pick');
+      const scheduledStart = p.scheduled_start || _scheduledStartFromGameKey(gameKey);
+      const legUid = p.prediction_uid || p.bet_uid || p.uid || '';
       return {
+        uid: legUid,
         label: _legDisplayText(p),
         pick: p.pick || _legDisplayText(p),
-        bet_type: p.bet_type || (_legSourceGroup(p) === 'prop' ? 'player_prop' : 'game_pick'),
+        kind: p.kind || (_legSourceGroup(p) === 'prop' ? 'player_prop' : 'single'),
+        bet_type: betType,
+        raw_bet_type: p.raw_bet_type || betType,
         game: gameKey,
         game_key: gameKey,
         game_date: p.game_date || p.date || '',
+        game_time: p.game_time || '',
+        scheduled_start: scheduledStart,
         dec_odds: _legDec(p) || 1.9,
         conf: Math.round(_legProb(p) * 100),
         badge: p.badge || p.safety_label || 'MODERATE',
         source: _legSourceGroup(p),
         sport: p.sport || '',
-        prediction_uid: p.prediction_uid || p.bet_uid || '',
+        prediction_uid: legUid,
+        bet_uid: legUid,
         player_name: p.player_name || p.player || p.name || '',
         name: p.name || p.player_name || '',
         team: p.team || '',
+        home_team: p.home_team || '',
+        away_team: p.away_team || '',
         prop_type: p.prop_type || p.stat_type || '',
         stat_type: p.stat_type || p.prop_type || '',
         line: p.line,
         recommendation: (p.recommendation || p.direction || '').toUpperCase(),
         direction: (p.direction || p.recommendation || '').toUpperCase(),
+        side_default: p.side_default || _defaultKalshiSide(p),
       };
     }),
     combined_odds: c.dec ?? 0,
@@ -3744,6 +3816,7 @@ function _legEv(prob, dec) {
 function buildLegPool() {
   const map = new Map();
   const todayIso = _etTodayIso();
+  const liveLookup = _liveLookupSnapshot();
   const addLeg = (leg) => {
     const key = `${leg.label}|${leg.game||''}`;
     const prev = map.get(key);
@@ -3756,6 +3829,15 @@ function buildLegPool() {
   _publicOverProps(ALL_PROPS || []).forEach(p => {
     const gd = String(p.game_date || p.date || '').slice(0, 10);
     if (gd && gd !== todayIso) return;
+    const gameKey = p.game_key || p.game || '';
+    const scheduledStart = p.scheduled_start || _scheduledStartFromGameKey(gameKey);
+    if (_rowPhaseLike({
+      game_key: gameKey,
+      game: gameKey,
+      game_date: p.game_date || p.date || '',
+      game_time: p.game_time || '',
+      scheduled_start: scheduledStart,
+    }, liveLookup) !== 'upcoming') return;
     const prob = _legProb(p);
     const dec  = _legDec(p) || 1.9;
     const ev   = p.ev != null ? Number(p.ev) : _legEv(prob, dec);
@@ -3764,9 +3846,14 @@ function buildLegPool() {
     addLeg({
       label,
       display_label: label,
-      game: p.game_key || p.game || '',
+      kind: 'player_prop',
+      game: gameKey,
+      game_key: gameKey,
       game_date: p.date || p.game_date || '',
+      game_time: p.game_time || '',
+      scheduled_start: scheduledStart,
       bet_type: 'player_prop',
+      raw_bet_type: p.bet_type || p.stat_type || 'player_prop',
       dec_odds: dec,
       conf: p.confidence || Math.round(prob * 100),
       model_prob: prob,
@@ -3785,12 +3872,18 @@ function buildLegPool() {
       signal_sentiment: Number(p.signal_sentiment != null ? p.signal_sentiment : (p.sentiment_score != null ? p.sentiment_score : p.market_popularity || 0)),
       signal_rationale: p.signal_rationale || p.worth_reason || p.news_snippet || '',
       player: p.name || '',
+      player_name: p.name || '',
       name: p.name || '',
       team: p.team || '',
+      home_team: p.home_team || '',
+      away_team: p.away_team || '',
       direction: p.direction || '',
+      recommendation: p.direction || '',
+      side_default: _defaultKalshiSide(p),
       line: p.line,
       prop_label: p.prop_label || p.stat_type || '',
       stat_type: p.stat_type || '',
+      prop_type: p.prop_type || p.stat_type || '',
     });
   });
 
@@ -3801,6 +3894,15 @@ function buildLegPool() {
     if (p.name) return; // player props already handled above
     const rawBetType = String(p.bet_type || p.stat_type || '').toLowerCase().replace(/[\s-]+/g, '_');
     if (!GAME_LEVEL_BET_TYPES.has(rawBetType) && !GAME_LEVEL_BET_TYPES.has(String(p.bet_type || '').toLowerCase())) return;
+    const gameKey = p.game_key || p.game || '';
+    const scheduledStart = p.scheduled_start || _scheduledStartFromGameKey(gameKey);
+    if (_rowPhaseLike({
+      game_key: gameKey,
+      game: gameKey,
+      game_date: p.game_date || p.date || '',
+      game_time: p.game_time || '',
+      scheduled_start: scheduledStart,
+    }, liveLookup) !== 'upcoming') return;
     const prob = _legProb(p);
     const dec  = _legDec(p) || 1.9;
     const ev   = p.ev != null ? Number(p.ev) : _legEv(prob, dec);
@@ -3809,9 +3911,14 @@ function buildLegPool() {
     addLeg({
       label,
       display_label: label,
-      game: p.game_key || p.game || '',
+      kind: 'single',
+      game: gameKey,
+      game_key: gameKey,
       game_date: p.date || p.game_date || '',
+      game_time: p.game_time || '',
+      scheduled_start: scheduledStart,
       bet_type: rawBetType || 'moneyline',
+      raw_bet_type: p.bet_type || p.stat_type || rawBetType || 'moneyline',
       dec_odds: dec,
       conf: p.confidence || Math.round(prob * 100),
       model_prob: prob,
@@ -3832,6 +3939,9 @@ function buildLegPool() {
       team: p.team || '',
       home_team: p.home_team || '',
       away_team: p.away_team || '',
+      direction: p.direction || '',
+      recommendation: p.recommendation || p.direction || '',
+      side_default: _defaultKalshiSide(p),
       line: p.line,
       pick: label,
     });
@@ -3843,7 +3953,8 @@ function buildLegPool() {
   ];
   const cards = _normalizeCardList(TODAY_CARDS || []).filter(c => {
     const gd = String((c && c.game_date) || '').slice(0, 10);
-    return !gd || gd === todayIso;
+    return (!gd || gd === todayIso)
+      && _phaseForCard(c.status || '', c.game_date || '', c.game_time || '', c.game_datetime || '') === 'upcoming';
   });
   cards.forEach(c => {
     betKeys.forEach(k => {
@@ -3852,12 +3963,18 @@ function buildLegPool() {
       const prob = _legProb(b);
       const dec  = _legDec(b) || 2.0;
       const ev   = b.ev != null ? Number(b.ev) : _legEv(prob, dec);
+      const gameKey = c.game_key || b.game_key || '';
       addLeg({
         label: b.pick,
         display_label: b.pick,
-        game: c.game_key || b.game_key || '',
+        kind: 'single',
+        game: gameKey,
+        game_key: gameKey,
         game_date: b.game_date || c.game_date || '',
+        game_time: b.game_time || c.game_time || '',
+        scheduled_start: c.game_datetime || b.scheduled_start || _scheduledStartFromGameKey(gameKey),
         bet_type: b.bet_type || k,
+        raw_bet_type: b.bet_type || k,
         dec_odds: dec,
         conf: b.confidence || Math.round(prob * 100),
         model_prob: prob,
@@ -3876,6 +3993,11 @@ function buildLegPool() {
         signal_sentiment: Number(b.signal_sentiment != null ? b.signal_sentiment : (b.sentiment_score != null ? b.sentiment_score : b.market_popularity || 0)),
         signal_rationale: b.signal_rationale || b.worth_reason || b.news_snippet || '',
         team: cleanPickTeam(b.pick || ''),
+        home_team: c.home_team || '',
+        away_team: c.away_team || '',
+        direction: b.direction || '',
+        recommendation: b.recommendation || b.direction || '',
+        side_default: _defaultKalshiSide(b),
         line: b.line,
         pick: b.pick,
       });
@@ -4948,8 +5070,11 @@ function loadTrackedParlays() {
     const metaEl = document.getElementById('tracked-parlay-meta');
     if (!el) return;
     const rows = d.ok ? _asArray(d.parlays) : [];
+    const liveLookup = _liveLookupSnapshot();
 
     const pending = rows.filter(p => (p.outcome || 'PENDING').toUpperCase() === 'PENDING');
+    const pendingLive = pending.filter(p => _parlayPendingBucket(p, liveLookup) === 'live');
+    const pendingUpcoming = pending.filter(p => _parlayPendingBucket(p, liveLookup) !== 'live');
     const wins = rows.filter(p => (p.outcome || '').toUpperCase() === 'WIN');
     const losses = rows.filter(p => (p.outcome || '').toUpperCase() === 'LOSS');
     const pushes = rows.filter(p => {
@@ -4958,12 +5083,13 @@ function loadTrackedParlays() {
     });
 
     if (metaEl) {
-      metaEl.textContent = `Live: ${pending.length} · Won: ${wins.length} · Lost: ${losses.length} · Total: ${rows.length}`;
+      metaEl.textContent = `Upcoming: ${pendingUpcoming.length} · Live: ${pendingLive.length} · Won: ${wins.length} · Lost: ${losses.length} · Total: ${rows.length}`;
     }
 
-    const outcomeLabel = (v) => {
+    const outcomeLabel = (v, pendingBucket) => {
       const out = (v || 'PENDING').toUpperCase();
-      return out === 'PENDING' ? 'LIVE TRACKING' : out;
+      if (out !== 'PENDING') return out;
+      return pendingBucket === 'live' ? 'LIVE TRACKING' : 'UPCOMING';
     };
 
     const renderList = (arr) => arr.map(p=>{
@@ -4971,12 +5097,13 @@ function loadTrackedParlays() {
         `<div class="tp-leg">${l.label||JSON.stringify(l)}</div>`
       ).join('');
       const out = (p.outcome || 'PENDING').toUpperCase();
+      const pendingBucket = out === 'PENDING' ? _parlayPendingBucket(p, liveLookup) : '';
       const combinedOdds = _num(p.combined_odds, 0);
       const stakeUsd = _num(p.stake_usd, 0);
       return `<div class="tracked-parlay">
         <div class="tracked-parlay-header">
           <span class="tp-name">${p.name||'Parlay #'+p.id}</span>
-          <span class="tp-outcome tp-${out}">${outcomeLabel(out)}</span>
+          <span class="tp-outcome tp-${out}">${outcomeLabel(out, pendingBucket)}</span>
         </div>
         <div class="tp-meta">x${combinedOdds.toFixed(2)} · $${stakeUsd.toFixed(2)} stake · ${p.created_at||''}</div>
         <div class="tp-legs">${legs || '<div class="tp-leg">No legs recorded.</div>'}</div>
@@ -4998,7 +5125,8 @@ function loadTrackedParlays() {
 
     el.innerHTML = `
       <div class="section-meta" style="margin-bottom:8px">${intro}</div>
-      ${renderGroup('Live Tracking', pending, 'No live tracked parlays.', true)}
+      ${renderGroup('Upcoming', pendingUpcoming, 'No upcoming tracked parlays.', true)}
+      ${renderGroup('Live Tracking', pendingLive, 'No live tracked parlays.', false)}
       ${renderGroup('Won', wins, 'No winning parlays yet.', false)}
       ${renderGroup('Lost', losses, 'No losing parlays yet.', false)}
       ${pushes.length ? renderGroup('Other', pushes, 'No other settled parlays.', false) : ''}
@@ -5014,6 +5142,7 @@ function loadTrackedSingles() {
     const el = document.getElementById('tracked-singles-list');
     const metaEl = document.getElementById('tracked-singles-meta');
     if (!el) return;
+    const liveLookup = _liveLookupSnapshot();
 
     const rows = d.ok ? _asArray(d.predictions) : [];
     const dedupe = new Map();
@@ -5036,15 +5165,18 @@ function loadTrackedSingles() {
     });
 
     const pending = singles.filter(r => String(r.outcome || 'PENDING').toUpperCase() === 'PENDING');
+    const pendingLive = pending.filter(r => _rowPhaseLike(r, liveLookup) === 'live');
+    const pendingUpcoming = pending.filter(r => _rowPhaseLike(r, liveLookup) !== 'live');
     const wins = singles.filter(r => String(r.outcome || '').toUpperCase() === 'WIN');
     const losses = singles.filter(r => String(r.outcome || '').toUpperCase() === 'LOSS');
 
     if (metaEl) {
-      metaEl.textContent = `Live: ${pending.length} · Won: ${wins.length} · Lost: ${losses.length} · Total: ${singles.length}`;
+      metaEl.textContent = `Upcoming: ${pendingUpcoming.length} · Live: ${pendingLive.length} · Won: ${wins.length} · Lost: ${losses.length} · Total: ${singles.length}`;
     }
 
     const renderRows = (arr) => arr.map(r => {
       const out = String(r.outcome || 'PENDING').toUpperCase();
+      const pendingBucket = out === 'PENDING' ? _rowPhaseLike(r, liveLookup) : '';
       const betType = String(r.bet_type || '').replace(/_/g, ' ').toUpperCase();
       const uid = String(r.bet_uid || '').trim();
       const uidShort = uid ? uid.slice(-12) : 'N/A';
@@ -5061,7 +5193,7 @@ function loadTrackedSingles() {
               <span>${r.home_team || ''}${r.away_team ? ` vs ${r.away_team}` : ''}${lineTxt}</span>
             </div>
           </div>
-          <span class="tp-outcome tp-${out}">${out === 'PENDING' ? 'LIVE TRACKING' : out}</span>
+          <span class="tp-outcome tp-${out}">${out === 'PENDING' ? (pendingBucket === 'live' ? 'LIVE TRACKING' : 'UPCOMING') : out}</span>
         </div>
       </div>`;
     }).join('');
@@ -5076,7 +5208,8 @@ function loadTrackedSingles() {
     `;
 
     el.innerHTML = `
-      ${renderGroup('Live Tracking', pending, 'No live tracked singles/team props.', true)}
+      ${renderGroup('Upcoming', pendingUpcoming, 'No upcoming tracked singles/team props.', true)}
+      ${renderGroup('Live Tracking', pendingLive, 'No live tracked singles/team props.', false)}
       ${renderGroup('Won', wins, 'No winning singles/team props yet.', false)}
       ${renderGroup('Lost', losses, 'No losing singles/team props yet.', false)}
     `;
