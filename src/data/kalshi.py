@@ -183,6 +183,11 @@ _KALSHI_MARKET_CACHE: dict[str, Any] = {
     "count": 0,
 }
 
+# Module-level resolution cache: keyed by bet_signature, valid for current catalog epoch.
+# Survives across HTTP requests — avoids re-scoring every market on every auto-poll.
+_RESOLUTION_CACHE: dict[str, dict[str, Any]] = {}
+_RESOLUTION_CACHE_CATALOG_TS: float = 0.0  # catalog timestamp when cache was built
+
 _ENTITY_STOPWORDS = {
     "ac",
     "afc",
@@ -202,20 +207,132 @@ _SPORT_DONE_HOURS = {
     "soccer": 2.5,
 }
 _SPECIAL_ENTITY_ALIASES: dict[str, set[str]] = {
-    "montreal canadiens": {"mtl canadiens", "canadiens"},
+    # ── NBA ──────────────────────────────────────────────────────────────────
+    "atlanta hawks": {"atl", "hawks"},
+    "boston celtics": {"bos", "celtics"},
+    "brooklyn nets": {"bkn", "nets"},
+    "charlotte hornets": {"cha", "clt", "hornets"},
+    "chicago bulls": {"chi", "bulls"},
+    "cleveland cavaliers": {"cle", "cavaliers", "cavs"},
+    "dallas mavericks": {"dal", "mavericks", "mavs"},
+    "denver nuggets": {"den", "nuggets"},
+    "detroit pistons": {"det", "pistons"},
+    "golden state warriors": {"gsw", "warriors"},
+    "houston rockets": {"hou", "rockets"},
+    "indiana pacers": {"ind", "pacers"},
+    "los angeles clippers": {"lac", "clippers"},
+    "los angeles lakers": {"lal", "lakers"},
+    "memphis grizzlies": {"mem", "grizzlies"},
+    "miami heat": {"mia", "heat"},
+    "milwaukee bucks": {"mil", "bucks"},
+    "minnesota timberwolves": {"min", "timberwolves", "wolves"},
+    "new orleans pelicans": {"nop", "pelicans"},
+    "new york knicks": {"nyk", "knicks"},
+    "oklahoma city thunder": {"okc", "thunder"},
+    "orlando magic": {"orl", "magic"},
+    "philadelphia 76ers": {"phi", "76ers", "sixers"},
+    "phoenix suns": {"phx", "pho", "suns"},
+    "portland trail blazers": {"por", "blazers", "trail blazers"},
+    "sacramento kings": {"sac", "kings"},
+    "san antonio spurs": {"sas", "spurs"},
+    "toronto raptors": {"tor", "raptors"},
+    "utah jazz": {"uta", "jazz"},
+    "washington wizards": {"was", "wiz", "wizards"},
+    # ── WNBA ─────────────────────────────────────────────────────────────────
+    "las vegas aces": {"lva", "aces"},
+    "new york liberty": {"nyl", "liberty"},
+    "seattle storm": {"sea", "storm"},
+    "connecticut sun": {"con", "sun"},
+    "washington mystics": {"wsh", "mystics"},
+    "los angeles sparks": {"las", "sparks"},
+    "chicago sky": {"chi", "sky"},
+    "dallas wings": {"dal", "wings"},
+    "indiana fever": {"ind", "fever"},
+    "atlanta dream": {"atl", "dream"},
+    "phoenix mercury": {"phx", "mercury"},
+    "minnesota lynx": {"min", "lynx"},
+    # ── NHL ──────────────────────────────────────────────────────────────────
+    "anaheim ducks": {"ana", "ducks"},
+    "boston bruins": {"bos", "bruins"},
+    "buffalo sabres": {"buf", "sabres"},
+    "calgary flames": {"cgy", "flames"},
+    "carolina hurricanes": {"car", "hurricanes", "canes"},
+    "chicago blackhawks": {"chi", "blackhawks", "hawks"},
+    "colorado avalanche": {"col", "avalanche", "avs"},
+    "columbus blue jackets": {"cbj", "blue jackets", "jackets"},
+    "dallas stars": {"dal", "stars"},
+    "detroit red wings": {"det", "red wings", "wings"},
+    "edmonton oilers": {"edm", "oilers"},
+    "florida panthers": {"fla", "panthers"},
+    "los angeles kings": {"lak", "kings"},
+    "minnesota wild": {"min", "wild"},
+    "montreal canadiens": {"mtl", "canadiens", "habs"},
+    "nashville predators": {"nsh", "predators", "preds"},
+    "new jersey devils": {"njd", "devils"},
+    "new york islanders": {"nyi", "islanders", "isles"},
+    "new york rangers": {"nyr", "rangers"},
+    "ottawa senators": {"ott", "senators", "sens"},
+    "philadelphia flyers": {"phi", "flyers"},
+    "pittsburgh penguins": {"pit", "penguins", "pens"},
+    "san jose sharks": {"sjs", "sharks"},
+    "seattle kraken": {"sea", "kraken"},
+    "st. louis blues": {"stl", "blues"},
+    "tampa bay lightning": {"tbl", "tbl", "lightning"},
+    "toronto maple leafs": {"tor", "maple leafs", "leafs"},
+    "utah hockey club": {"uta", "utah"},
+    "vancouver canucks": {"van", "canucks"},
+    "vegas golden knights": {"vgk", "golden knights"},
+    "washington capitals": {"wsh", "caps", "capitals"},
+    "winnipeg jets": {"wpg", "jets"},
+    # ── MLB ──────────────────────────────────────────────────────────────────
+    "arizona diamondbacks": {"ari", "dbacks", "diamondbacks"},
+    "atlanta braves": {"atl", "braves"},
+    "baltimore orioles": {"bal", "orioles", "birds"},
+    "boston red sox": {"bos", "red sox"},
+    "chicago cubs": {"chc", "cubs"},
+    "chicago white sox": {"cws", "chw", "white sox"},
+    "cincinnati reds": {"cin", "reds"},
+    "cleveland guardians": {"cle", "guardians"},
+    "colorado rockies": {"col", "rockies"},
+    "detroit tigers": {"det", "tigers"},
+    "houston astros": {"hou", "astros"},
+    "kansas city royals": {"kc", "kcr", "royals"},
+    "los angeles angels": {"laa", "angels"},
+    "los angeles dodgers": {"lad", "dodgers"},
+    "miami marlins": {"mia", "mar", "marlins"},
+    "milwaukee brewers": {"mil", "brewers"},
+    "minnesota twins": {"min", "twi", "twins"},
+    "new york mets": {"nym", "mets"},
+    "new york yankees": {"nyy", "yankees"},
+    "oakland athletics": {"oak", "ath", "athletics"},
+    "philadelphia phillies": {"phi", "phillies"},
+    "pittsburgh pirates": {"pit", "pirates"},
+    "san diego padres": {"sd", "sdp", "padres"},
+    "san francisco giants": {"sf", "sfg", "giants"},
+    "seattle mariners": {"sea", "mar", "mariners"},
+    "st. louis cardinals": {"stl", "cardinals"},
+    "tampa bay rays": {"tb", "tbr", "rays"},
+    "texas rangers": {"tex", "rangers"},
+    "toronto blue jays": {"tor", "bluejays", "blue jays"},
+    "washington nationals": {"was", "wsh", "nationals", "nats"},
+    # ── MLS ──────────────────────────────────────────────────────────────────
     "new york city fc": {"nycfc", "new york city"},
-    "philadelphia 76ers": {"76ers", "sixers"},
-    "minnesota timberwolves": {"timberwolves", "wolves"},
-    "new york knicks": {"knicks"},
-    "new york liberty": {"liberty"},
-    "las vegas aces": {"aces"},
-    "seattle storm": {"storm"},
-    "west ham united": {"west ham"},
-    "washington mystics": {"mystics"},
-    "connecticut sun": {"sun"},
-    "los angeles sparks": {"sparks"},
-    "columbus crew": {"crew"},
-    "arsenal": {"arsenal"},
+    "columbus crew": {"clb", "crew"},
+    "west ham united": {"whu", "west ham"},
+    "arsenal": {"afc", "arsenal"},
+    "fc barcelona": {"bar", "barcelona", "barca"},
+    "real madrid": {"rma", "real madrid"},
+    "manchester city": {"mci", "man city"},
+    "manchester united": {"mun", "man utd"},
+    "liverpool": {"liv", "liverpool"},
+    "chelsea": {"che", "chelsea"},
+    "tottenham hotspur": {"tot", "spurs"},
+    "atletico madrid": {"atm", "atletico"},
+    "paris saint germain": {"psg"},
+    "paris saint-germain": {"psg"},
+    "inter milan": {"int", "inter"},
+    "juventus": {"juv", "juve"},
+    "ac milan": {"acm", "milan"},
 }
 _PROP_HINTS = {
     "points",
@@ -666,7 +783,7 @@ def _score_event_group(bet: dict[str, Any], event_group: dict[str, Any]) -> floa
     bet_kind = _bet_kind_tag(bet)
     if bet_kind == "player_prop":
         player_score = _entity_match_score(text, bet.get("player_name") or bet.get("name"))
-        if player_score < 3.0:
+        if player_score < 2.5:
             return 0.0
         score = player_score * 2.1
         score += max(
@@ -700,9 +817,9 @@ def _score_event_group(bet: dict[str, Any], event_group: dict[str, Any]) -> floa
         _entity_match_score(text, bet.get("label")),
     )
 
-    if max(home_score, away_score, pick_score) < 2.4:
+    if max(home_score, away_score, pick_score) < 1.9:
         return 0.0
-    if (bet.get("home_team") or bet.get("away_team")) and home_score < 2.0 and away_score < 2.0:
+    if (bet.get("home_team") or bet.get("away_team")) and home_score < 1.7 and away_score < 1.7:
         return 0.0
 
     score = time_score
@@ -1058,7 +1175,7 @@ def _score_single_market(bet: dict[str, Any], market: dict[str, Any]) -> float:
 
     if bet_kind == "player_prop":
         player_score = _entity_match_score(text, bet.get("player_name") or bet.get("name"))
-        if player_score < 3.0:
+        if player_score < 2.5:
             return 0.0
         line_score = _line_match_score(text, bet.get("line"), allow_half_step_integer=True)
         if _as_float(bet.get("line")) is not None and line_score <= 0.0:
@@ -1172,7 +1289,7 @@ def _resolve_single_bet(
             scored_events.append((score, event_group))
     scored_events.sort(key=lambda item: item[0], reverse=True)
 
-    if not scored_events or scored_events[0][0] < 8.5:
+    if not scored_events or scored_events[0][0] < 7.5:
         return _single_resolution_payload(
             "unavailable",
             message="No exact Kalshi event matches this prediction.",
@@ -1182,7 +1299,7 @@ def _resolve_single_bet(
     if len(scored_events) > 1:
         top_event_score = scored_events[0][0]
         next_event_score = scored_events[1][0]
-        if next_event_score >= 8.0 and (top_event_score - next_event_score) < 1.25:
+        if next_event_score >= 7.0 and (top_event_score - next_event_score) < 1.5:
             return _single_resolution_payload(
                 "unavailable",
                 message="Kalshi event match is ambiguous; refusing to guess a ticker.",
@@ -1202,14 +1319,14 @@ def _resolve_single_bet(
         elif score > second_best_score:
             second_best_score = score
 
-    if best_market is None or best_score < 10.5:
+    if best_market is None or best_score < 9.5:
         return _single_resolution_payload(
             "unavailable",
             message="No exact Kalshi market is open for this bet.",
             scheduled_start=schedule.get("scheduled_start"),
         )
 
-    if second_best_score >= 9.5 and (best_score - second_best_score) < 0.85:
+    if second_best_score >= 9.0 and (best_score - second_best_score) < 1.0:
         return _single_resolution_payload(
             "unavailable",
             message="Kalshi market match is ambiguous within the event; refusing to guess.",
@@ -1390,7 +1507,16 @@ def resolve_ready_bets(
     *,
     force_refresh: bool = False,
 ) -> dict[str, Any]:
+    global _RESOLUTION_CACHE, _RESOLUTION_CACHE_CATALOG_TS
+
     catalog = get_open_market_catalog(force_refresh=force_refresh)
+    catalog_ts = float(_KALSHI_MARKET_CACHE.get("ts") or 0.0)
+
+    # Invalidate resolution cache whenever the market catalog has been refreshed
+    if catalog_ts != _RESOLUTION_CACHE_CATALOG_TS or force_refresh:
+        _RESOLUTION_CACHE = {}
+        _RESOLUTION_CACHE_CATALOG_TS = catalog_ts
+
     markets = [market for market in catalog["markets"] if not _is_combo_market(market)]
     combo_markets = list(catalog["combo_markets"])
     event_index = _build_event_index(markets)
@@ -1415,7 +1541,12 @@ def resolve_ready_bets(
         else:
             sig = _bet_signature(bet)
             if sig not in single_cache:
-                single_cache[sig] = _resolve_single_bet(bet, markets, event_index)
+                # Try module-level cache first (survives across requests)
+                if sig in _RESOLUTION_CACHE:
+                    single_cache[sig] = _RESOLUTION_CACHE[sig]
+                else:
+                    single_cache[sig] = _resolve_single_bet(bet, markets, event_index)
+                    _RESOLUTION_CACHE[sig] = single_cache[sig]
             result = dict(single_cache[sig])
         resolutions[uid] = result
         summary["count"] += 1

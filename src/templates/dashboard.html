@@ -1113,7 +1113,7 @@ let KALSHI_TODAY_DATA = null;  // cached result of fetchKalshiTodayTickers
 let READY_OPS_LOG = [];
 const READY_OPS_LOG_MAX = 150;
 let _lastKalshiResolveMs = 0;
-const _KALSHI_RESOLVE_DEBOUNCE_MS = 120_000; // 2 min between auto-resolves
+const _KALSHI_RESOLVE_DEBOUNCE_MS = 600_000; // 10 min between auto-resolves (keeps matches stable)
 
 // Game-level bet types that come through the props pipeline but are NOT player props
 const GAME_LEVEL_BET_TYPES = new Set([
@@ -4812,18 +4812,37 @@ function renderReadyBets() {
 }
 
 function refreshReadyBets(forceKalshi) {
+  const prevBets = READY_BETS;
   READY_BETS = _deriveReadyBets();
   const combos = READY_BETS.filter(r => r.kind === 'combo').length;
   const singles = READY_BETS.filter(r => r.kind === 'single' || r.kind === 'team_prop').length;
   const props = READY_BETS.filter(r => r.kind === 'player_prop').length;
   _logOp('info', `Derived ${READY_BETS.length} ready bets: ${singles} game bets, ${props} player props, ${combos} combos`);
+
   if (forceKalshi) {
-    _lastKalshiResolveMs = 0; // force bypass debounce on manual refresh
+    // Full reset on manual refresh
+    _lastKalshiResolveMs = 0;
     READY_KALSHI_RESOLUTIONS = {};
     READY_KALSHI_STATUS = { loading: false, matched: 0, started: 0, done: 0, unavailable: 0, count: READY_BETS.length, market_count: 0, error: '' };
   } else {
-    READY_KALSHI_RESOLUTIONS = {};
-    READY_KALSHI_STATUS = { loading: false, matched: 0, started: 0, done: 0, unavailable: 0, count: READY_BETS.length, market_count: 0, error: '' };
+    // Auto-refresh: KEEP existing resolutions — prune UIDs no longer in the bet list.
+    // This prevents the "0 matched" flash every time data auto-polls.
+    const currentUids = new Set(READY_BETS.map(r => r.uid));
+    const pruned = {};
+    let kept = 0;
+    Object.entries(READY_KALSHI_RESOLUTIONS).forEach(([uid, res]) => {
+      if (currentUids.has(uid)) { pruned[uid] = res; kept++; }
+    });
+    READY_KALSHI_RESOLUTIONS = pruned;
+    // Only reset status counters — don't wipe the resolved count display
+    READY_KALSHI_STATUS = {
+      ...READY_KALSHI_STATUS,
+      count: READY_BETS.length,
+      matched: Object.values(pruned).filter(r => r.status === 'matched').length,
+      unavailable: Object.values(pruned).filter(r => r.status === 'unavailable').length,
+      started: Object.values(pruned).filter(r => r.status === 'started').length,
+      done: Object.values(pruned).filter(r => r.status === 'done').length,
+    };
   }
   renderReadyBets();
   // Also fetch today's tickers in background for reverse-match insight
