@@ -2859,7 +2859,26 @@ def _run_all_sports_analysis():
         best_parlays = []
         try:
             from models.mlb_predictor import build_parlays
-            best_parlays = build_parlays(bets, max_legs=5, top_n=5)
+            # Build all-sports parlay pool: raw game bets + best-bet rows for all sports
+            _parlay_pool: list[dict] = []
+            _pp_seen: set[tuple] = set()
+            for _b in (bets or []):
+                _pk = (str(_b.get("game_key") or ""), str(_b.get("pick") or ""))
+                if _pk not in _pp_seen and float(_b.get("model_prob") or 0) >= 0.54:
+                    _pp_seen.add(_pk)
+                    _parlay_pool.append(_b)
+            for _r in (best_bet_rows or []):
+                _pk = (str(_r.get("game_key") or ""), str(_r.get("pick") or _r.get("name") or ""))
+                if _pk in _pp_seen:
+                    continue
+                if float(_r.get("model_prob") or 0) < 0.54:
+                    continue
+                _pp_seen.add(_pk)
+                _sl = str(_r.get("safety_label") or "MODERATE").upper()
+                _sf = {"ELITE": 0.80, "SAFE": 0.65, "MODERATE": 0.52, "RISKY": 0.35}.get(_sl, 0.52)
+                _parlay_pool.append({**_r, "safety": _sf})
+            best_parlays = build_parlays(_parlay_pool, max_legs=5, top_n=5)
+            _log(f"[all-sports] Parlay pool: {len(_parlay_pool)} bets → {len(best_parlays)} combos")
         except Exception as parlay_exc:
             _log(f"[all-sports] parlay builder skipped: {parlay_exc}")
 

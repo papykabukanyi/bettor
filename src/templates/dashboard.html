@@ -3438,7 +3438,9 @@ function _comboCandidateLegs() {
     const decision = _readySelection(leg, source === 'prop' ? 'player_prop' : 'single');
     if (!decision.keep) return false;
     const minProb = source === 'prop' ? 0.58 : 0.55;
-    const minEvidence = source === 'prop' ? 0.60 : 0.57;
+    // Game bets from non-baseball sports lack sentiment/hist signals so their evidenceScore
+    // naturally runs ~0.38-0.42. Use a lower threshold (0.35) to include all sports.
+    const minEvidence = source === 'prop' ? 0.55 : 0.35;
     return decision.prob >= minProb && decision.evidenceScore >= minEvidence;
   });
   legs.sort((a, b) => {
