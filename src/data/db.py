@@ -2017,10 +2017,12 @@ def get_prop_performance_stats(sport: str | None = None, days_back: int | None =
         # Overall prop stats
         cur.execute(f"""
             SELECT
-                COUNT(*) FILTER (WHERE outcome='WIN')     AS wins,
-                COUNT(*) FILTER (WHERE outcome='LOSS')    AS losses,
-                COUNT(*) FILTER (WHERE outcome='PUSH')    AS pushes,
-                COUNT(*) FILTER (WHERE outcome='PENDING') AS pending,
+                COUNT(*) FILTER (WHERE outcome='WIN')      AS wins,
+                COUNT(*) FILTER (WHERE outcome='LOSS')     AS losses,
+                COUNT(*) FILTER (WHERE outcome='PUSH')     AS pushes,
+                COUNT(*) FILTER (WHERE outcome='PENDING')  AS pending,
+                COUNT(*) FILTER (WHERE outcome='ARCHIVED') AS archived,
+                COUNT(*) FILTER (WHERE outcome NOT IN ('PENDING','ARCHIVED')) AS total_resolved,
                 COUNT(*) AS total,
                 ROUND(AVG(CASE WHEN outcome='WIN' THEN 1.0
                                WHEN outcome='LOSS' THEN 0.0 END)*100, 1) AS hit_rate
@@ -2031,20 +2033,21 @@ def get_prop_performance_stats(sport: str | None = None, days_back: int | None =
         """, vals)
         row = cur.fetchone()
         stats = dict(row) if row else {}
-        # By prop type
+        # By prop type — include archived count for transparency
         cur.execute(f"""
             SELECT sport,
                    prop_type,
                    recommendation,
-                   COUNT(*) FILTER (WHERE outcome='WIN')     AS wins,
-                   COUNT(*) FILTER (WHERE outcome='LOSS')    AS losses,
-                   COUNT(*) FILTER (WHERE outcome='PUSH')    AS pushes,
-                   COUNT(*) FILTER (WHERE outcome='PENDING') AS pending,
+                   COUNT(*) FILTER (WHERE outcome='WIN')      AS wins,
+                   COUNT(*) FILTER (WHERE outcome='LOSS')     AS losses,
+                   COUNT(*) FILTER (WHERE outcome='PUSH')     AS pushes,
+                   COUNT(*) FILTER (WHERE outcome='PENDING')  AS pending,
+                   COUNT(*) FILTER (WHERE outcome='ARCHIVED') AS unresolvable,
                    COUNT(*) AS total,
                    ROUND(AVG(CASE WHEN outcome='WIN' THEN 1.0
                                   WHEN outcome='LOSS' THEN 0.0 END)*100, 1) AS hit_rate
             FROM prop_history
-            WHERE outcome != 'ARCHIVED'
+            WHERE 1=1
               {date_filter}
               {sport_where}
             GROUP BY sport, prop_type, recommendation

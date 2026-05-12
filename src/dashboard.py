@@ -4308,15 +4308,31 @@ def api_tournament_data():
 
 # ─── Universal all-sport outcome resolver ────────────────────────────────────
 _SOCCER_STAT_MAP = {
+    # Standard ESPN soccer stat block keys (after _stat_key_norm lowercases & strips)
     "goals": "goals",
+    "g": "goals",
     "assists": "assists",
+    "a": "assists",
     "shotsontarget": "shots_on_target",
     "shotsongoal": "shots_on_target",
+    "sot": "shots_on_target",   # ESPN abbreviation
+    "sh": "shots",
+    "shots": "shots",
     "keypasses": "key_passes",
+    "kp": "key_passes",         # ESPN abbreviation (if present)
     "tackles": "tackles",
+    "tkl": "tackles",           # ESPN abbreviation (if present)
+    "tackleswon": "tackles",
     "saves": "saves",
+    "sv": "saves",              # ESPN abbreviation (goalkeeper)
 }
 
+# Soccer prop types that ESPN boxscore API cannot resolve (Opta-only data).
+# Props of these types are archived after 3 days if still PENDING.
+_SOCCER_ESPN_UNRESOLVABLE = frozenset({
+    "key_passes", "keypasses",
+    "tackles", "tackles_won", "tackleswon",
+})
 
 _ESPN_RESOLVE_CONFIGS = [
     # (espn_sport_path, espn_league_path, sport_label, boxscore_stat_map)
@@ -4746,7 +4762,41 @@ def _resolve_all_sports_outcomes(days_back: int = 3) -> dict:
                 n_props += 1
                 break  # matched this prop — move to next
 
-    # ── 4. MLB-specific prop + game resolution (statsapi) ─────────────────────
+    # ── 4. ARCHIVE soccer props that ESPN cannot resolve (key_passes, tackles) ─
+    # These prop types rely on Opta/WhoScored data — ESPN boxscore API never
+    # returns per-player key passes or tackle counts.  After 3 days with no
+    # resolution they are permanently stuck; archive them to keep the hit-rate
+    # table accurate.
+    conn_archive = get_conn()
+    if conn_archive:
+        try:
+            ca = conn_archive.cursor()
+            ca.execute("""
+                UPDATE prop_history
+                SET outcome = 'ARCHIVED', resolved_at = NOW()
+                WHERE outcome = 'PENDING'
+                  AND sport = 'soccer'
+                  AND game_date < CURRENT_DATE - INTERVAL '3 days'
+                  AND LOWER(REGEXP_REPLACE(prop_type, '[^a-z0-9]', '_', 'g'))
+                      = ANY(%s)
+            """, (list(_SOCCER_ESPN_UNRESOLVABLE),))
+            n_archived_soccer = ca.rowcount
+            conn_archive.commit()
+            if n_archived_soccer:
+                _log(f"[resolve] Archived {n_archived_soccer} unresolvable soccer props (ESPN data unavailable)")
+        except Exception as _arc_err:
+            try:
+                conn_archive.rollback()
+            except Exception:
+                pass
+            _log(f"[resolve] soccer archive step error: {_arc_err}")
+        finally:
+            try:
+                conn_archive.close()
+            except Exception:
+                pass
+
+    # ── 5. MLB-specific prop + game resolution (statsapi) ─────────────────────
     try:
         from models.mlb_predictor import (
             resolve_game_outcomes as _mlb_game_res,
@@ -4759,7 +4809,7 @@ def _resolve_all_sports_outcomes(days_back: int = 3) -> dict:
     except Exception:
         pass
 
-    # ── 5. Resolve parlays ─────────────────────────────────────────────────────
+    # ── 6. Resolve parlays ─────────────────────────────────────────────────────
     try:
         from models.mlb_predictor import resolve_tracked_parlays as _rtp
         n_parlays = _rtp(days_back=days_back + 4)

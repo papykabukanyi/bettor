@@ -4152,10 +4152,12 @@ function _readyEvidence(row) {
 function _readySelection(row, kind) {
   const metrics = _readyEvidence(row);
   const isProp = kind === 'player_prop';
-  const minProb = isProp ? 0.58 : 0.56;
-  const minQuality = isProp ? 0.60 : 0.57;
-  const minEvidence = isProp ? 0.60 : 0.57;
-  const minSupport = isProp ? 3 : 2;
+  // Thresholds calibrated to actual model output ranges:
+  // _readyQuality returns ~0.37-0.52 for MODERATE-safety bets with prob 0.54-0.65.
+  const minProb = isProp ? 0.56 : 0.54;
+  const minQuality = isProp ? 0.38 : 0.34;
+  const minEvidence = isProp ? 0.26 : 0.22;
+  const minSupport = isProp ? 2 : 1;
 
   if (metrics.safetyLabel === 'RISKY') return { ...metrics, keep: false, reason: 'risky' };
   if (metrics.prob < minProb) return { ...metrics, keep: false, reason: 'probability' };
@@ -4167,9 +4169,6 @@ function _readySelection(row, kind) {
   }
   if (metrics.supportCount < minSupport && metrics.evidenceScore < minEvidence) {
     return { ...metrics, keep: false, reason: 'insufficient_support' };
-  }
-  if (!metrics.worthIt && metrics.supportCount < (minSupport + 1) && metrics.evidenceScore < (minEvidence + 0.03) && metrics.edge < 0.015) {
-    return { ...metrics, keep: false, reason: 'thin_evidence' };
   }
   return { ...metrics, keep: true, reason: 'qualified' };
 }
@@ -5320,13 +5319,20 @@ function loadPropPerformance() {
       const wl = (v.wins||0) + (v.losses||0);
       const hr = wl > 0 ? Math.round((v.wins||0)/wl*100) : null;
       const hrColor = hr>=55?'var(--green)':hr>=45?'var(--yellow)':'var(--red)';
+      const unresolvable = Number(v.unresolvable || 0);
+      // Build the total cell — show unresolvable separately so it's clear these can't be tracked
+      let totalCell = String(v.total||0);
+      if ((v.pending||0) > 0) totalCell += ` · ${v.pending} pending`;
+      if ((v.pushes||0) > 0) totalCell += ` · ${v.pushes} push`;
+      if (unresolvable > 0) totalCell += ` · <span style="color:var(--muted);font-size:.78em" title="No ESPN data available for this stat type">${unresolvable} no data</span>`;
+      const hrCell = hr!=null ? hr+'%' : (unresolvable > 0 && wl === 0 ? '<span style="color:var(--muted);font-size:.82em">no data</span>' : '—');
       return `<tr>
         <td>${(v.prop_type||'').replace(/_/g,' ')}</td>
         <td><span class="badge ${v.recommendation==='OVER'?'badge-blue':'badge-purple'}">${v.recommendation||'—'}</span></td>
         <td style="color:var(--green)">${v.wins||0}</td>
         <td style="color:var(--red)">${v.losses||0}</td>
-        <td>${v.total||0}${(v.pending||0)?` · ${v.pending} pending`:''}${(v.pushes||0)?` · ${v.pushes} push`:''}</td>
-        <td style="color:${hrColor};font-weight:700">${hr!=null?hr+'%':'—'}</td>
+        <td>${totalCell}</td>
+        <td style="color:${hrColor};font-weight:700">${hrCell}</td>
       </tr>`;
     }).join('') || '<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:16px">No prop results yet — runs automatically after games finish.</td></tr>';
   });
