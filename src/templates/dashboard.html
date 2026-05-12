@@ -408,6 +408,7 @@ main{padding:20px;max-width:1400px;margin:0 auto}
 .ready-match-chip .match-name{color:#e2e8f0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;font-weight:600}
 .ready-match-chip .match-ticker{color:var(--muted);font-family:monospace;font-size:.68rem;white-space:nowrap;flex-shrink:0}
 .ready-match-chip .match-icon{flex-shrink:0;color:var(--green)}
+.ready-match-chip .match-line-note{display:block;width:100%;color:#f59e0b;font-size:.65rem;font-style:italic;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 
 .ready-side-badge{padding:5px 12px;border-radius:999px;font-size:.72rem;font-weight:700;white-space:nowrap;flex-shrink:0}
 .ready-side-badge.yes{background:rgba(22,163,74,.15);border:1px solid rgba(22,163,74,.4);color:var(--green)}
@@ -1483,6 +1484,20 @@ function _connectSSE() {
       }
       hideOverlay();
       stopPolling();
+      // Server sends lightweight SSE (needs_refresh:true) to avoid memory spikes.
+      // When set, fetch the full state from /api/cached-state instead.
+      if (d.needs_refresh && d.status === 'done') {
+        fetch('/api/cached-state')
+          .then(r => r.json())
+          .then(full => {
+            if (full.ok !== false) applyCachedData(full);
+            if (full.live_scores !== undefined) _applyLiveScores(full.live_scores, {replace: true});
+            saveLocalCache(full);
+            _silentRefreshPanels();
+          })
+          .catch(err => console.warn('cached-state fetch failed', err));
+        return;
+      }
       if (d.game_cards_today  !== undefined) applyCachedData(d);
       if (d.live_scores       !== undefined) _applyLiveScores(d.live_scores, {replace: true});
       saveLocalCache(d);
@@ -4659,10 +4674,15 @@ function renderReadyBets() {
     let matchHtml = '';
     let hintHtml = '';
     if (resolutionStatus === 'matched' && autoTicker) {
+      const lineNote = String(resolution.line_note || '').trim();
+      const lineNoteHtml = lineNote
+        ? `<span class="match-line-note" title="${lineNote}">⚠ ${lineNote}</span>`
+        : '';
       matchHtml = `<div class="ready-match-chip" title="${autoTicker}">
           <span class="match-icon">📍</span>
           <span class="match-name">${chipTitle}</span>
           <span class="match-ticker">${autoTicker}</span>
+          ${lineNoteHtml}
         </div>`;
     } else if (resolutionStatus === 'loading' || resolutionStatus === 'pending') {
       matchHtml = `<div class="ready-status-badge loading">⌛ Finding exact Kalshi market…</div>`;

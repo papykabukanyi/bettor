@@ -211,8 +211,27 @@ _sse_lock = threading.Lock()
 
 
 def _sse_broadcast(event: str, data: dict):
-    """Push an SSE message to every connected browser tab."""
-    msg = f"event: {event}\ndata: {json.dumps(data)}\n\n"
+    """Push an SSE message to every connected browser tab.
+
+    For 'state_update' events, strip the large game-card / player-prop arrays
+    from the payload and replace them with a ``needs_refresh: true`` flag.
+    The client will call /api/cached-state to get the full data.  This keeps
+    SSE messages tiny (< 1 KB) and avoids the memory spike that was causing
+    the Gunicorn worker to be OOM-killed after every analysis run.
+    """
+    if event == "state_update":
+        light = {
+            "status":         data.get("status"),
+            "phase":          data.get("phase"),
+            "last_updated":   data.get("last_updated"),
+            "needs_refresh":  True,
+            # Pass along live_scores as they're small
+            "live_scores":    data.get("live_scores"),
+        }
+        # Strip Nones to keep the payload minimal
+        msg = f"event: {event}\ndata: {json.dumps({k: v for k, v in light.items() if v is not None})}\n\n"
+    else:
+        msg = f"event: {event}\ndata: {json.dumps(data)}\n\n"
     with _sse_lock:
         dead = []
         for q in _sse_clients:
@@ -2901,6 +2920,14 @@ def _run_all_sports_analysis():
             "elite_parlay": None,
         })
         _log(f"[all-sports] Complete — {len(today_cards)} today, {len(tomorrow_cards)} tomorrow")
+        # Free intermediate analysis objects so memory is released back to the OS
+        del snapshot, games, bets, best_bet_rows, sentiment_prop_rows, table_rows
+        del card_prop_rows, today_cards, tomorrow_cards, today_games, tomorrow_games
+        try:
+            import gc as _gc
+            _gc.collect()
+        except Exception:
+            pass
     except Exception:
         err = traceback.format_exc()
         _log(f"[all-sports] FAILED:\n{err}")
@@ -5612,17 +5639,23 @@ def _send_kalshi_alert(matched_bets: list[dict]):
             price_cents = res.get("price_cents")
             close_time = res.get("close_time") or ""
             price_str = f"{price_cents}¢" if price_cents else "—"
+            line_note = str(res.get("line_note") or "").strip()
+            line_note_html = (
+                f"<br><small style='color:#e67e22'><b>⚠ {line_note}</b></small>"
+                if line_note else ""
+            )
             rows_html += (
                 f"<tr>"
                 f"<td style='padding:6px 10px'><b>{sport}</b></td>"
                 f"<td style='padding:6px 10px'>{game}<br><small>{game_date}</small></td>"
-                f"<td style='padding:6px 10px'>{pick}</td>"
+                f"<td style='padding:6px 10px'>{pick}{line_note_html}</td>"
                 f"<td style='padding:6px 10px'>{market_ticker}<br><small>{market_title}</small></td>"
                 f"<td style='padding:6px 10px; text-align:center'>{price_str}</td>"
                 f"<td style='padding:6px 10px'>{close_time[:16]}</td>"
                 f"</tr>"
             )
-            rows_plain += f"  [{sport}] {pick} | {game} | Ticker: {market_ticker} | Price: {price_str}\n"
+            note_suffix = f" [{line_note}]" if line_note else ""
+            rows_plain += f"  [{sport}] {pick}{note_suffix} | {game} | Ticker: {market_ticker} | Price: {price_str}\n"
 
         subject = f"🎯 {len(matched_bets)} Kalshi bet(s) now available — place now!"
         html_body = f"""
@@ -5852,6 +5885,16 @@ def _poll_live_scores():
 @app.route("/api/stream")
 def api_stream():
     """Long-lived SSE connection. Each browser tab connects once."""
+    # Enforce a hard cap so SSE connections can't starve all Gunicorn threads.
+    _MAX_SSE_CLIENTS = 8
+    with _sse_lock:
+        if len(_sse_clients) >= _MAX_SSE_CLIENTS:
+            # Drop oldest client to make room
+            try:
+                evicted = _sse_clients.pop(0)
+                evicted.put_nowait("event: close\ndata: {}\n\n")
+            except Exception:
+                pass
     q: queue.Queue = queue.Queue(maxsize=50)
     with _sse_lock:
         _sse_clients.append(q)

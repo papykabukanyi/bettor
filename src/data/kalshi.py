@@ -551,6 +551,13 @@ def _as_float(value: Any) -> float | None:
         return None
 
 
+def _fmt_num(value: float) -> str:
+    """Format a number for display: remove trailing zeros after decimal point."""
+    if float(value).is_integer():
+        return str(int(value))
+    return f"{value:g}"
+
+
 def _parse_iso_dt(value: Any) -> datetime.datetime | None:
     if isinstance(value, datetime.datetime):
         dt = value
@@ -749,13 +756,16 @@ def _line_proximity_score(text: str, line: Any, *, direction: str = "") -> float
         aligned = [n for n in nums if n <= bet_num]
         misaligned = [n for n in nums if n > bet_num]
     else:
-        # No direction info — use plain proximity
+        # No direction info — proximity only.
+        # ±1 is treated as essentially exact (Kalshi thresholds are often ±0.5–1 from model).
         closest_diff = min(abs(n - bet_num) for n in nums)
-        if closest_diff <= 0.5:
-            return 2.8
+        if closest_diff <= 1.0:
+            return 2.8   # ±1 → essentially exact
         if closest_diff <= 2.5:
-            return 1.2
-        if closest_diff <= 7.0:
+            return 2.0   # very close (was 1.2)
+        if closest_diff <= 5.0:
+            return 1.0   # close enough to prefer over nothing
+        if closest_diff <= 8.0:
             return 0.4
         return 0.0
 
@@ -763,16 +773,16 @@ def _line_proximity_score(text: str, line: Any, *, direction: str = "") -> float
     closest_aligned_diff = min((abs(n - bet_num) for n in aligned), default=float("inf"))
     closest_misaligned_diff = min((abs(n - bet_num) for n in misaligned), default=float("inf"))
 
-    if closest_aligned_diff <= 0.5:
-        return 2.8   # essentially exact + correct direction
-    if closest_aligned_diff <= 2.5:
-        return 2.5   # very close + correct direction (beats misaligned by design)
-    if closest_aligned_diff <= 7.0:
+    if closest_aligned_diff <= 1.0:
+        return 2.8   # ±1 + correct direction → essentially exact
+    if closest_aligned_diff <= 3.0:
+        return 2.5   # very close + correct direction
+    if closest_aligned_diff <= 8.0:
         return 1.5   # moderate + correct direction
     # No aligned threshold close enough — fall back to misaligned with heavy penalty
     if closest_misaligned_diff <= 2.5:
         return 0.7
-    if closest_misaligned_diff <= 7.0:
+    if closest_misaligned_diff <= 8.0:
         return 0.3
     return 0.0
 
@@ -796,6 +806,25 @@ def _combined_market_text(markets: list[dict[str, Any]]) -> str:
             if isinstance(market, dict)
         )
     )
+
+
+def _closest_num_in_text(text: str, bet_num: float) -> float | None:
+    """Return the number in *text* that is closest to *bet_num*.
+
+    Used to extract the actual Kalshi threshold (e.g. 35) from a matched market's
+    text so we can annotate 'Adjusted: your line 32.5 → Kalshi threshold 35'.
+    Only considers numbers in the range [3, 600] to avoid jersey numbers / years.
+    Returns None if no candidates found.
+    """
+    import re as _re
+    nums: list[float] = []
+    for tok in _re.findall(r'\b\d+(?:[._]\d+)?\b', text):
+        val = _as_float(tok.replace("_", "."))
+        if val is not None and 3.0 <= val <= 600.0:
+            nums.append(val)
+    if not nums:
+        return None
+    return min(nums, key=lambda n: abs(n - bet_num))
 
 
 def _build_event_index(markets: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -1318,6 +1347,8 @@ def _single_resolution_payload(
     market: dict[str, Any] | None = None,
     side: str = "yes",
     score: float = 0.0,
+    bet_line: float | None = None,
+    kalshi_line: float | None = None,
 ) -> dict[str, Any]:
     payload = {
         "status": status,
@@ -1338,6 +1369,21 @@ def _single_resolution_payload(
                 "close_time": str(market.get("close_time") or market.get("expiration_time") or ""),
             }
         )
+        # Annotate when the Kalshi threshold differs from our predicted line
+        if kalshi_line is not None and bet_line is not None:
+            payload["kalshi_line"] = kalshi_line
+            payload["bet_line"] = bet_line
+            diff = abs(kalshi_line - bet_line)
+            if diff > 0.25:
+                payload["line_note"] = (
+                    f"Adjusted: your line {_fmt_num(bet_line)} → "
+                    f"Kalshi threshold {_fmt_num(kalshi_line)} "
+                    f"(±{_fmt_num(diff)})"
+                )
+            else:
+                payload["line_note"] = ""
+        else:
+            payload["line_note"] = ""
     return payload
 
 
@@ -1398,7 +1444,7 @@ def _resolve_single_bet(
         elif score > second_best_score:
             second_best_score = score
 
-    if best_market is None or best_score < 9.5:
+    if best_market is None or best_score < 8.5:
         return _single_resolution_payload(
             "unavailable",
             message="No exact Kalshi market is open for this bet.",
@@ -1413,6 +1459,13 @@ def _resolve_single_bet(
         )
 
     side = _resolve_market_side(bet, best_market)
+    # Extract the actual Kalshi threshold from the matched market's text so we can
+    # annotate "Adjusted: your line X → Kalshi threshold Y" in the UI.
+    bet_line_val = _as_float(bet.get("line"))
+    market_text_for_line = _market_text(best_market)
+    kalshi_line_val: float | None = None
+    if bet_line_val is not None:
+        kalshi_line_val = _closest_num_in_text(market_text_for_line, bet_line_val)
     return _single_resolution_payload(
         "matched",
         message="Matched to a live Kalshi market.",
@@ -1420,6 +1473,8 @@ def _resolve_single_bet(
         market=best_market,
         side=side,
         score=best_score,
+        bet_line=bet_line_val,
+        kalshi_line=kalshi_line_val,
     )
 
 
