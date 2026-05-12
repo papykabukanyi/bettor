@@ -2828,7 +2828,16 @@ def _run_all_sports_analysis():
         games = snapshot.get("games") or []
         bets = snapshot.get("bets") or []
         best_bet_rows = _multi_sport_best_bets_rows(bets)
-        sentiment_prop_rows = _build_all_sport_sentiment_props(games, bets)
+        fallback_only = bool(bets) and all(
+            "fallback" in str(b.get("worth_reason") or "").lower()
+            for b in bets
+            if isinstance(b, dict)
+        )
+        if fallback_only:
+            _log("[all-sports] Snapshot is fallback-only; skipping sentiment/player-prop expansion")
+            sentiment_prop_rows = []
+        else:
+            sentiment_prop_rows = _build_all_sport_sentiment_props(games, bets)
         table_rows = _merge_all_sports_table_rows(sentiment_prop_rows, best_bet_rows)
         _attach_tracking_uids(bets, table_rows)
         card_prop_rows = sentiment_prop_rows if sentiment_prop_rows else []
@@ -5490,8 +5499,6 @@ _CACHE_POLL_INTERVAL = int(os.getenv("CACHE_POLL_INTERVAL_SEC", "120"))
 
 def _sync_state_from_cache(broadcast: bool = False) -> bool:
     """Refresh in-memory state from DB cache when available."""
-    if _ACTIVE_SPORT == "all":
-        return False
     try:
         from data.db import get_analysis_cache
         cached = get_analysis_cache(max_age_hours=22)
@@ -6050,7 +6057,16 @@ def _load_boot_schedule_fallback() -> bool:
             snap = _build_multi_sport_snapshot(force_refresh=False)
             all_games = snap.get("games") or []
             all_bets = snap.get("bets") or []
-            boot_player_props = _build_all_sport_sentiment_props(all_games, all_bets)
+            fallback_only = bool(all_bets) and all(
+                "fallback" in str(b.get("worth_reason") or "").lower()
+                for b in all_bets
+                if isinstance(b, dict)
+            )
+            if fallback_only:
+                _log("[boot] All-sports fallback snapshot is model-only; skipping prop expansion")
+                boot_player_props = []
+            else:
+                boot_player_props = _build_all_sport_sentiment_props(all_games, all_bets)
             boot_best_bets = _multi_sport_best_bets_rows(all_bets)
             boot_props = _merge_all_sports_table_rows(boot_player_props, boot_best_bets)
             today_games = [g for g in all_games if str(g.get("game_date") or "") == today_str]
@@ -6096,6 +6112,7 @@ def _auto_boot_analysis():
     """On startup: load today's DB snapshot, or generate one if today's snapshot is missing/stale."""
     if _ACTIVE_SPORT == "all":
         # Try to restore from DB cache first so dashboard isn't blank after a crash
+        restored_cache = False
         try:
             from data.db import get_analysis_cache
             today_str    = _et_calendar_today().isoformat()
@@ -6120,6 +6137,7 @@ def _auto_boot_analysis():
                             "player_props":        cached.get("player_props", []),
                             "last_updated":        cached.get("last_updated"),
                         })
+                    restored_cache = True
                     n_today = len(_state["game_cards_today"])
                     n_tmrw  = len(_state["game_cards_tomorrow"])
                     print(f"[boot] Loaded all-sports cache — {n_today} today, {n_tmrw} tomorrow "
@@ -6127,7 +6145,8 @@ def _auto_boot_analysis():
         except Exception as _boot_cache_exc:
             print(f"[boot] All-sports cache restore error: {_boot_cache_exc}")
         # Always run fresh analysis in background (updates the cache once done)
-        _load_boot_schedule_fallback()
+        if not restored_cache:
+            _load_boot_schedule_fallback()
         threading.Thread(target=_run_analysis, daemon=True).start()
         return
     try:

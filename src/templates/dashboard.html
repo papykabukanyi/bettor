@@ -1316,6 +1316,12 @@ function _gameKeyLooseMatch(a, b) {
 function _etScheduleFromIso(gameDateTime) {
   const iso = String(gameDateTime || '').trim();
   if (!iso) return null;
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?$/.test(iso) && !/[zZ]|[+-]\d{2}:?\d{2}$/.test(iso)) {
+    return {
+      game_date: iso.slice(0, 10),
+      game_time: iso.slice(11, 16),
+    };
+  }
   const dt = new Date(iso);
   if (Number.isNaN(dt.getTime())) return null;
   const parts = _zonedParts(dt, 'America/New_York');
@@ -1743,10 +1749,18 @@ function _parseGameStart(gameDate, gameTime, gameDateTime) {
 
   const iso = String(gameDateTime || '').trim();
   if (iso) {
-    const dt = new Date(iso);
-    if (!Number.isNaN(dt.getTime())) {
-      _gameStartCacheSet(cacheKey, dt.getTime());
-      return dt;
+    if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?$/.test(iso) && !/[zZ]|[+-]\d{2}:?\d{2}$/.test(iso)) {
+      const etNaive = _etLocalToUtc(iso.slice(0, 10), iso.slice(11, 16));
+      if (etNaive) {
+        _gameStartCacheSet(cacheKey, etNaive.getTime());
+        return etNaive;
+      }
+    } else {
+      const dt = new Date(iso);
+      if (!Number.isNaN(dt.getTime())) {
+        _gameStartCacheSet(cacheKey, dt.getTime());
+        return dt;
+      }
     }
   }
   const fallback = _etLocalToUtc(gameDate, gameTime);

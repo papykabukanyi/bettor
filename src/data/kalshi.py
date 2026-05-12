@@ -578,6 +578,29 @@ def _parse_iso_dt(value: Any) -> datetime.datetime | None:
     return dt.astimezone(datetime.timezone.utc)
 
 
+def _parse_et_local_dt(value: Any) -> datetime.datetime | None:
+    raw = str(value or "").strip()
+    if not raw or not re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?$", raw):
+        return None
+    try:
+        dt = datetime.datetime.fromisoformat(raw)
+    except Exception:
+        return None
+    try:
+        import zoneinfo
+
+        eastern = zoneinfo.ZoneInfo("America/New_York")
+        return dt.replace(tzinfo=eastern).astimezone(datetime.timezone.utc)
+    except Exception:
+        try:
+            import pytz
+
+            eastern = pytz.timezone("America/New_York")
+            return eastern.localize(dt).astimezone(datetime.timezone.utc)
+        except Exception:
+            return dt.replace(tzinfo=datetime.timezone.utc)
+
+
 def _market_time(market: dict[str, Any]) -> datetime.datetime | None:
     for key in (
         "occurrence_datetime",
@@ -594,17 +617,31 @@ def _market_time(market: dict[str, Any]) -> datetime.datetime | None:
 
 
 def _bet_start_dt(bet: dict[str, Any]) -> datetime.datetime | None:
-    candidates = [
+    for value in (
         bet.get("scheduled_start"),
         bet.get("start_time"),
-        bet.get("game_time"),
-        bet.get("game_date"),
-    ]
+        bet.get("game_datetime"),
+    ):
+        dt = _parse_iso_dt(value)
+        if dt is not None:
+            return dt
+
+    game_date = str(bet.get("game_date") or "").strip()
+    game_time = str(bet.get("game_time") or "").strip()
+    if game_date and game_time:
+        dt = _parse_et_local_dt(f"{game_date}T{game_time}")
+        if dt is not None:
+            return dt
+
     for key in ("game", "game_key"):
         raw = str(bet.get(key) or "")
         if "#" in raw:
-            candidates.append(raw.rsplit("#", 1)[-1])
-    for value in candidates:
+            suffix = raw.rsplit("#", 1)[-1].strip()
+            dt = _parse_et_local_dt(suffix) or _parse_iso_dt(suffix)
+            if dt is not None:
+                return dt
+
+    for value in (bet.get("game_date"),):
         dt = _parse_iso_dt(value)
         if dt is not None:
             return dt
@@ -721,6 +758,29 @@ def _line_match_score(text: str, line: Any, *, allow_half_step_integer: bool = F
     return 2.8 if any(candidate and candidate in text for candidate in candidates) else 0.0
 
 
+def _line_candidate_numbers(text: str, *, bet_num: float | None = None) -> list[float]:
+    import re as _re
+
+    nums: list[float] = []
+    max_diff = None
+    if bet_num is not None:
+        scale = abs(float(bet_num or 0.0))
+        max_diff = max(8.0, min(20.0, scale * 0.10))
+
+    for tok in _re.findall(r'\b\d+(?:[._]\d+)?\b', text):
+        val = _as_float(tok.replace("_", "."))
+        if val is None:
+            continue
+        if val < 0.25 or val > 600.0:
+            continue
+        if 1900.0 <= val <= 2100.0:
+            continue
+        if max_diff is not None and abs(val - bet_num) > max_diff:
+            continue
+        nums.append(val)
+    return nums
+
+
 def _line_proximity_score(text: str, line: Any, *, direction: str = "") -> float:
     """Return a score based on how close the nearest number in text is to the bet line.
 
@@ -733,28 +793,26 @@ def _line_proximity_score(text: str, line: Any, *, direction: str = "") -> float
     higher than direction-opposing thresholds.  This breaks the tie between markets
     equidistant from the bet line (e.g. "35 pts" and "30 pts" when bet line=32.5 over).
     """
-    import re as _re
     bet_num = _as_float(line)
     if bet_num is None:
         return 0.0
-    nums: list[float] = []
-    for tok in _re.findall(r'\b\d+(?:[._]\d+)?\b', text):
-        val = _as_float(tok.replace("_", "."))
-        if val is not None and 3.0 <= val <= 600.0:
-            nums.append(val)
+    nums = _line_candidate_numbers(text, bet_num=bet_num)
     if not nums:
         return 0.0
+
+    moderate_window = max(5.0, min(12.0, abs(bet_num) * 0.05))
+    far_window = max(8.0, min(20.0, abs(bet_num) * 0.10))
 
     direction_norm = _norm_text(str(direction))
     is_over = "over" in direction_norm
     is_under = "under" in direction_norm
 
     if is_over:
-        aligned = [n for n in nums if n >= bet_num]
-        misaligned = [n for n in nums if n < bet_num]
+        favorable = [n for n in nums if n <= bet_num]
+        stretch = [n for n in nums if n > bet_num]
     elif is_under:
-        aligned = [n for n in nums if n <= bet_num]
-        misaligned = [n for n in nums if n > bet_num]
+        favorable = [n for n in nums if n >= bet_num]
+        stretch = [n for n in nums if n < bet_num]
     else:
         # No direction info — proximity only.
         # ±1 is treated as essentially exact (Kalshi thresholds are often ±0.5–1 from model).
@@ -763,27 +821,30 @@ def _line_proximity_score(text: str, line: Any, *, direction: str = "") -> float
             return 2.8   # ±1 → essentially exact
         if closest_diff <= 2.5:
             return 2.0   # very close (was 1.2)
-        if closest_diff <= 5.0:
+        if closest_diff <= moderate_window:
             return 1.0   # close enough to prefer over nothing
-        if closest_diff <= 8.0:
+        if closest_diff <= far_window:
             return 0.4
         return 0.0
 
-    # Score the closest direction-aligned threshold highly, misaligned threshold low
-    closest_aligned_diff = min((abs(n - bet_num) for n in aligned), default=float("inf"))
-    closest_misaligned_diff = min((abs(n - bet_num) for n in misaligned), default=float("inf"))
+    # For OVER picks, a slightly lower Kalshi threshold is still a valid match and usually
+    # easier to clear; for UNDER picks, the mirror image applies.  Also allow a nearby
+    # tougher threshold on the opposite side when it is the closest open market.
+    closest_favorable_diff = min((abs(n - bet_num) for n in favorable), default=float("inf"))
+    closest_stretch_diff = min((abs(n - bet_num) for n in stretch), default=float("inf"))
 
-    if closest_aligned_diff <= 1.0:
-        return 2.8   # ±1 + correct direction → essentially exact
-    if closest_aligned_diff <= 3.0:
-        return 2.5   # very close + correct direction
-    if closest_aligned_diff <= 8.0:
-        return 1.5   # moderate + correct direction
-    # No aligned threshold close enough — fall back to misaligned with heavy penalty
-    if closest_misaligned_diff <= 2.5:
-        return 0.7
-    if closest_misaligned_diff <= 8.0:
-        return 0.3
+    if closest_favorable_diff <= 1.0:
+        return 2.8
+    if closest_stretch_diff <= 1.0:
+        return 2.7
+    if closest_favorable_diff <= 3.0:
+        return 2.6
+    if closest_stretch_diff <= 3.0:
+        return 2.4
+    if closest_favorable_diff <= far_window:
+        return 1.7
+    if closest_stretch_diff <= far_window:
+        return 1.4
     return 0.0
 
 
@@ -816,12 +877,7 @@ def _closest_num_in_text(text: str, bet_num: float) -> float | None:
     Only considers numbers in the range [3, 600] to avoid jersey numbers / years.
     Returns None if no candidates found.
     """
-    import re as _re
-    nums: list[float] = []
-    for tok in _re.findall(r'\b\d+(?:[._]\d+)?\b', text):
-        val = _as_float(tok.replace("_", "."))
-        if val is not None and 3.0 <= val <= 600.0:
-            nums.append(val)
+    nums = _line_candidate_numbers(text, bet_num=bet_num)
     if not nums:
         return None
     return min(nums, key=lambda n: abs(n - bet_num))
@@ -1468,7 +1524,7 @@ def _resolve_single_bet(
         kalshi_line_val = _closest_num_in_text(market_text_for_line, bet_line_val)
     return _single_resolution_payload(
         "matched",
-        message="Matched to a live Kalshi market.",
+        message="Matched to an open Kalshi market.",
         scheduled_start=schedule.get("scheduled_start"),
         market=best_market,
         side=side,
