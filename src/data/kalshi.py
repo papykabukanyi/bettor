@@ -12,10 +12,12 @@ from __future__ import annotations
 
 import base64
 import datetime
+import json
 import os
 import re
 import threading
 import time
+from itertools import combinations
 from typing import Any
 from urllib.parse import urlparse
 
@@ -35,49 +37,144 @@ _KALSHI_MARKET_CACHE_TTL_SEC = max(
 
 # Series ticker prefix → sport (updated per Kalshi documentation)
 _SERIES_SPORT_MAP: dict[str, str] = {
-    # Baseball (MLB) — confirmed live series
-    "KXMLBHRR": "baseball",   # player hits+runs+RBIs props
-    "KXMLBTOTAL": "baseball", # game totals (runs)
-    "KXMLB": "baseball",      # other MLB (futures, misc)
+    # ── Baseball (MLB) — confirmed live series ──
+    "KXMLBHRR": "baseball",   # player hits+runs+RBIs combined props
+    "KXMLBHIT": "baseball",   # player hits props
+    "KXMLBTOTAL": "baseball", # game run totals
+    "KXMLB": "baseball",      # futures / misc
     "MLBWIN": "baseball", "MLBOU": "baseball", "MLBHR": "baseball",
     "MLBRUNS": "baseball", "MLBK": "baseball", "MLBHITS": "baseball",
     "MLBWSERIES": "baseball",
-    # Basketball (NBA/WNBA) — confirmed live series
+    # ── Basketball (NBA/WNBA) — confirmed live series ──
     "KXNBAPTS": "basketball",   # player points props
-    "KXNBATOTAL": "basketball", # game totals (points)
+    "KXNBATOTAL": "basketball", # game point totals
     "KXNBAREB": "basketball",   # player rebounds props
     "KXNBAAST": "basketball",   # player assists props
-    "KXNBA": "basketball",      # futures/championship
+    "KXNBA": "basketball",      # futures / championship
     "KXWNBA": "basketball",
     "NBAPTSO": "basketball", "NBAMVP": "basketball", "NBACHAMP": "basketball",
-    # Football (NFL)
+    # ── Hockey (NHL) — confirmed live series ──
+    "KXNHLPTS": "hockey",   # player points (goals+assists) props
+    "KXNHLTOTAL": "hockey", # game goal totals
+    "KXNHLAST": "hockey",   # player assists props
+    "KXNHL": "hockey",      # futures / misc
+    "NHLWIN": "hockey", "NHLOU": "hockey", "NHLCHAMP": "hockey", "NHLIN": "hockey",
+    # ── Football (NFL) ──
     "KXNFL": "football",
     "NFLWIN": "football", "NFLOU": "football", "NFLTD": "football",
     "NFLMVP": "football", "NFLSB": "football",
-    # Hockey (NHL)
-    "KXNHL": "hockey",
-    "NHLWIN": "hockey", "NHLOU": "hockey", "NHLCHAMP": "hockey", "NHLIN": "hockey",
-    # Soccer
+    # ── Soccer ──
     "KXMLS": "soccer", "KXEPL": "soccer", "KXFIFA": "soccer",
     "MSLWIN": "soccer", "EPLWIN": "soccer", "UCLWIN": "soccer",
 }
 
 # Confirmed live Kalshi sports series to fetch explicitly (bypasses pagination ordering issues).
 # The general /markets endpoint returns 25k+ non-sports markets first, so we target these directly.
+# Add new confirmed series here — they will be persisted to the DB series registry automatically.
 _SPORTS_SERIES_TO_FETCH: list[str] = [
-    # NBA player props + game markets
-    "KXNBAPTS", "KXNBATOTAL", "KXNBAREB", "KXNBAAST", "KXNBA",
+    # NBA — player props + game markets
+    "KXNBAPTS",    # player points
+    "KXNBATOTAL",  # game totals
+    "KXNBAREB",    # player rebounds
+    "KXNBAAST",    # player assists
+    "KXNBA",       # futures / misc
     # WNBA
     "KXWNBA",
-    # MLB player props + game markets
-    "KXMLBHRR", "KXMLBTOTAL", "KXMLB",
-    # NFL
+    # MLB — player props + game markets
+    "KXMLBHRR",    # hits + runs + RBIs combined
+    "KXMLBHIT",    # hits only
+    "KXMLBTOTAL",  # game run totals
+    "KXMLB",       # futures / misc
+    # NHL — player props + game markets
+    "KXNHLPTS",    # player points (goals+assists)
+    "KXNHLTOTAL",  # game goal totals
+    "KXNHLAST",    # player assists
+    "KXNHL",       # futures / misc
+    # NFL (off-season — will return empty but keeps the door open)
     "KXNFL",
-    # NHL
-    "KXNHL",
     # Soccer
     "KXMLS", "KXEPL", "KXFIFA",
 ]
+
+# Per-series stat-type hints used to disambiguate player prop events.
+# Maps a substring that appears in the series/event ticker to the bet stat types it covers.
+# Keys are upper-case substrings; values are lower-case prop_type keywords.
+_SERIES_STAT_HINTS: dict[str, list[str]] = {
+    "NBAPTS":  ["point", "pts"],
+    "NHLPTS":  ["point", "pts"],
+    "NBAREB":  ["rebound", "reb"],
+    "NBAAST":  ["assist", "ast"],
+    "NHLAST":  ["assist", "ast"],
+    "NHLGLS":  ["goal", "goals"],
+    "MLBHRR":  ["hit", "run", "rbi", "hrr"],
+    "MLBHIT":  ["hit", "hits"],
+    "MLBHR":   ["home run", "hr"],
+    "NBATOTAL": ["total"],
+    "NHLTOTAL": ["total", "goal"],
+    "MLBTOTAL": ["total", "run"],
+}
+
+# ── Series registry persistence ─────────────────────────────────────────────────────
+# Keeps track of all confirmed working series tickers across restarts.  Written to a
+# local JSON file so the bot can recover known-good series without a full Kalshi scan.
+_SERIES_REGISTRY_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "data", "kalshi_series_registry.json",
+)
+_SERIES_REGISTRY_LOCK = threading.Lock()
+
+
+def _load_series_registry() -> dict[str, str]:
+    """Load persisted {series_ticker: sport} mapping from disk."""
+    try:
+        if os.path.exists(_SERIES_REGISTRY_PATH):
+            with open(_SERIES_REGISTRY_PATH, "r") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    return {str(k): str(v) for k, v in data.items()}
+    except Exception:
+        pass
+    return {}
+
+
+def _save_series_registry(registry: dict[str, str]) -> None:
+    """Persist series registry to disk."""
+    try:
+        os.makedirs(os.path.dirname(_SERIES_REGISTRY_PATH), exist_ok=True)
+        with open(_SERIES_REGISTRY_PATH, "w") as f:
+            json.dump(registry, f, indent=2, sort_keys=True)
+    except Exception:
+        pass
+
+
+def _update_series_registry(new_series: dict[str, str]) -> None:
+    """Merge newly confirmed series into the persistent registry."""
+    with _SERIES_REGISTRY_LOCK:
+        registry = _load_series_registry()
+        updated = False
+        for ticker, sport in new_series.items():
+            if ticker and sport and registry.get(ticker) != sport:
+                registry[ticker] = sport
+                updated = True
+        if updated:
+            _save_series_registry(registry)
+
+
+def _detect_sport_from_series(series_ticker: str) -> str:
+    """Best-effort sport detection from a series ticker not in _SERIES_SPORT_MAP."""
+    t = series_ticker.upper()
+    if "MLB" in t or "BASEBALL" in t:
+        return "baseball"
+    if "NBA" in t or "BASKETBALL" in t or "WNBA" in t:
+        return "basketball"
+    if "NHL" in t or "HOCKEY" in t:
+        return "hockey"
+    if "NFL" in t or "FOOTBALL" in t:
+        return "football"
+    if "MLS" in t or "EPL" in t or "FIFA" in t or "SOCCER" in t:
+        return "soccer"
+    return ""
+
 _KALSHI_MARKET_CACHE_LOCK = threading.Lock()
 _KALSHI_MARKET_CACHE: dict[str, Any] = {
     "ts": 0.0,
@@ -585,13 +682,6 @@ def _score_event_group(bet: dict[str, Any], event_group: dict[str, Any]) -> floa
         # This disambiguates KXNBAPTS vs KXNBAREB vs KXNBAAST for the same player.
         event_ticker_upper = str(event_group.get("event_ticker") or "").upper()
         prop_type_norm = _norm_text(bet.get("prop_type") or "")
-        _SERIES_STAT_HINTS: dict[str, list[str]] = {
-            "PTS": ["point", "pts"],
-            "REB": ["rebound", "reb"],
-            "AST": ["assist", "ast"],
-            "HRR": ["hit", "run", "rbi"],
-            "TOTAL": ["total"],
-        }
         for series_suffix, prop_hints in _SERIES_STAT_HINTS.items():
             if series_suffix in event_ticker_upper:
                 if any(h in prop_type_norm for h in prop_hints):
@@ -1239,9 +1329,15 @@ def get_open_market_catalog(*, force_refresh: bool = False) -> dict[str, Any]:
     seen_tickers: set[str] = set()
     markets: list[dict[str, Any]] = []
 
-    for series in _SPORTS_SERIES_TO_FETCH:
+    # Merge hardcoded series with anything previously confirmed in the persistent registry
+    registry = _load_series_registry()
+    series_to_fetch = list(dict.fromkeys(list(_SPORTS_SERIES_TO_FETCH) + list(registry.keys())))
+    newly_confirmed: dict[str, str] = {}
+
+    for series in series_to_fetch:
         cursor: str | None = None
         pages = 0
+        series_count = 0
         while True:
             pages += 1
             try:
@@ -1256,9 +1352,19 @@ def get_open_market_catalog(*, force_refresh: bool = False) -> dict[str, Any]:
                 if ticker and ticker not in seen_tickers:
                     seen_tickers.add(ticker)
                     markets.append(row)
+                    series_count += 1
             cursor = data.get("cursor")
             if not cursor or pages >= 20:
                 break
+        # Record confirmed series (returned at least one market) for persistence
+        if series_count > 0:
+            sport = _SERIES_SPORT_MAP.get(series) or registry.get(series) or _detect_sport_from_series(series)
+            if sport:
+                newly_confirmed[series] = sport
+
+    # Persist any newly confirmed or registry-missing series
+    if newly_confirmed:
+        _update_series_registry(newly_confirmed)
 
     combo_markets = [market for market in markets if _is_combo_market(market)]
     with _KALSHI_MARKET_CACHE_LOCK:
@@ -1324,6 +1430,133 @@ def resolve_ready_bets(
         "market_count": int(catalog.get("count") or 0),
         "cache_age_sec": float(catalog.get("cache_age_sec") or 0.0),
     }
+
+
+def suggest_combo_bets(
+    bets: list[dict[str, Any]],
+    *,
+    resolutions: dict[str, dict[str, Any]] | None = None,
+    max_legs: int = 4,
+    min_legs: int = 2,
+    min_combined_prob: float = 0.20,
+    min_ev: float = -0.10,
+    max_combos: int = 30,
+) -> list[dict[str, Any]]:
+    """Analyze a set of ready bets and suggest the best multi-leg combo parlays.
+
+    Args:
+        bets:              List of ready-bet dicts (same format sent to resolve_ready_bets).
+        resolutions:       Optional pre-computed Kalshi resolution map {uid: resolution}.
+        max_legs:          Maximum legs per combo (default 4).
+        min_legs:          Minimum legs (default 2).
+        min_combined_prob: Minimum parlay hit probability to include (default 20%).
+        min_ev:            Minimum expected value (default -10% — allows slightly -EV to learn).
+        max_combos:        Cap on returned suggestions (sorted by EV descending).
+
+    Returns:
+        List of combo suggestion dicts, each containing:
+          - legs: list of individual bet dicts with their Kalshi ticker if matched
+          - combined_prob: float (product of individual probs)
+          - combined_dec_odds: float (product of individual decimal odds)
+          - ev: float (combined_prob * combined_dec_odds - 1)
+          - quality: float 0-1
+          - label: str
+          - all_matched: bool (all legs have a Kalshi market ticker)
+    """
+    if not bets:
+        return []
+
+    resolutions = resolutions or {}
+
+    # Filter to bets with a meaningful probability
+    candidates: list[dict[str, Any]] = []
+    for i, bet in enumerate(bets):
+        if not isinstance(bet, dict):
+            continue
+        uid = str(bet.get("bet_uid") or bet.get("uid") or bet.get("prediction_uid") or f"bet_{i}")
+        prob = float(bet.get("model_prob") or bet.get("probability") or 0.0)
+        dec = float(bet.get("dec_odds") or bet.get("decimal_odds") or 1.9)
+        if prob < 0.50 or dec < 1.01:
+            continue
+        # Single-bet EV gate
+        single_ev = prob * dec - 1.0
+        if single_ev < -0.15:
+            continue
+        res = resolutions.get(uid) or {}
+        matched_ticker = str(res.get("market_ticker") or "") if str(res.get("status") or "") == "matched" else ""
+        candidates.append({
+            **bet,
+            "uid": uid,
+            "model_prob": prob,
+            "dec_odds": dec,
+            "single_ev": single_ev,
+            "_matched_ticker": matched_ticker,
+        })
+
+    if len(candidates) < min_legs:
+        return []
+
+    combos: list[dict[str, Any]] = []
+    for n_legs in range(min_legs, min(max_legs + 1, len(candidates) + 1)):
+        for leg_set in combinations(candidates, n_legs):
+            # Prefer diversification: penalise same-game combos (not illegal, just lower value signal)
+            game_keys = [str(l.get("game") or l.get("game_key") or "") for l in leg_set]
+            distinct_games = len(set(g for g in game_keys if g))
+
+            prob = 1.0
+            dec = 1.0
+            for leg in leg_set:
+                prob *= leg["model_prob"]
+                dec *= leg["dec_odds"]
+
+            if prob < min_combined_prob:
+                continue
+
+            ev = prob * dec - 1.0
+            if ev < min_ev:
+                continue
+
+            # Quality score: weigh EV + prob + diversity
+            diversity_bonus = (distinct_games / max(n_legs, 1)) * 0.1
+            quality = min(1.0, max(0.0, (0.4 * prob + 0.4 * max(0.0, ev) + 0.2 * (n_legs / max_legs)) + diversity_bonus))
+
+            all_matched = all(bool(l.get("_matched_ticker")) for l in leg_set)
+            tickers = [l["_matched_ticker"] for l in leg_set if l.get("_matched_ticker")]
+
+            combo = {
+                "uid": "combo_" + "_".join(l["uid"][:8] for l in leg_set),
+                "kind": "combo",
+                "label": f"{n_legs}-Leg Combo {'✓' if all_matched else '~'}",
+                "n_legs": n_legs,
+                "legs": [
+                    {
+                        "uid": l["uid"],
+                        "label": l.get("label") or l.get("pick") or l.get("uid"),
+                        "sport": l.get("sport") or "",
+                        "game": l.get("game") or l.get("game_key") or "",
+                        "game_date": l.get("game_date") or "",
+                        "player_name": l.get("player_name") or "",
+                        "prop_type": l.get("prop_type") or l.get("bet_type") or "",
+                        "model_prob": l["model_prob"],
+                        "dec_odds": l["dec_odds"],
+                        "ev": l["single_ev"],
+                        "kalshi_ticker": l.get("_matched_ticker") or "",
+                    }
+                    for l in leg_set
+                ],
+                "combined_prob": round(prob, 4),
+                "combined_dec_odds": round(dec, 3),
+                "ev": round(ev, 4),
+                "quality": round(quality, 3),
+                "all_matched": all_matched,
+                "matched_tickers": tickers,
+                "distinct_games": distinct_games,
+            }
+            combos.append(combo)
+
+    # Sort: all-matched first, then by EV descending
+    combos.sort(key=lambda c: (not c["all_matched"], -c["ev"]))
+    return combos[:max_combos]
 
 
 def get_today_kalshi_tickers() -> dict[str, Any]:

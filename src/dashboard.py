@@ -5064,18 +5064,86 @@ def api_kalshi_resolve_ready():
     """Resolve dashboard Ready Bets to exact Kalshi markets on the server."""
     data = request.get_json(force=True) or {}
     try:
-        from data.kalshi import resolve_ready_bets
+        from data.kalshi import resolve_ready_bets, suggest_combo_bets
 
         bets = data.get("bets") or []
         if not isinstance(bets, list):
             bets = []
+        clean_bets = [bet for bet in bets if isinstance(bet, dict)]
         resolved = resolve_ready_bets(
-            [bet for bet in bets if isinstance(bet, dict)],
+            clean_bets,
             force_refresh=bool(data.get("force_refresh")),
         )
-        return jsonify({"ok": True, **_clean(resolved)})
+        # Auto-generate combo suggestions from matched bets
+        combos = suggest_combo_bets(
+            clean_bets,
+            resolutions=resolved.get("resolutions") or {},
+            max_legs=4,
+            min_legs=2,
+        )
+        return jsonify({"ok": True, **_clean(resolved), "combo_suggestions": _clean(combos)})
     except Exception as e:
-        return jsonify({"ok": False, "error": str(e), "resolutions": {}, "summary": {}})
+        return jsonify({"ok": False, "error": str(e), "resolutions": {}, "summary": {}, "combo_suggestions": []})
+
+
+@app.route("/api/kalshi/combo-study", methods=["POST"])
+def api_kalshi_combo_study():
+    """Analyze a set of bets and return combo parlay suggestions with EV scores.
+
+    Accepts the same bets payload as /api/kalshi/resolve-ready but focuses on
+    multi-leg parlay combinations.  Pre-runs Kalshi resolution so each leg shows
+    its matched ticker.
+    """
+    data = request.get_json(force=True) or {}
+    try:
+        from data.kalshi import resolve_ready_bets, suggest_combo_bets
+
+        bets = data.get("bets") or []
+        if not isinstance(bets, list):
+            bets = []
+        clean_bets = [bet for bet in bets if isinstance(bet, dict)]
+
+        # Resolve individual bets first so combo legs show Kalshi tickers
+        force = bool(data.get("force_refresh"))
+        resolved = resolve_ready_bets(clean_bets, force_refresh=force)
+
+        max_legs = min(int(data.get("max_legs") or 4), 6)
+        min_legs = max(2, int(data.get("min_legs") or 2))
+        min_prob = float(data.get("min_combined_prob") or 0.15)
+        min_ev = float(data.get("min_ev") or -0.10)
+
+        combos = suggest_combo_bets(
+            clean_bets,
+            resolutions=resolved.get("resolutions") or {},
+            max_legs=max_legs,
+            min_legs=min_legs,
+            min_combined_prob=min_prob,
+            min_ev=min_ev,
+            max_combos=50,
+        )
+        return jsonify({
+            "ok": True,
+            "combos": _clean(combos),
+            "count": len(combos),
+            "bet_count": len(clean_bets),
+            "market_count": int(resolved.get("market_count") or 0),
+            "resolutions": _clean(resolved.get("resolutions") or {}),
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e), "combos": [], "count": 0})
+
+
+@app.route("/api/kalshi/series-registry", methods=["GET"])
+def api_kalshi_series_registry():
+    """Return the current persisted Kalshi series registry."""
+    try:
+        from data.kalshi import _load_series_registry, _SPORTS_SERIES_TO_FETCH, _SERIES_SPORT_MAP
+        registry = _load_series_registry()
+        # Merge with hardcoded series so the response is comprehensive
+        merged = {**{s: _SERIES_SPORT_MAP.get(s, "") for s in _SPORTS_SERIES_TO_FETCH}, **registry}
+        return jsonify({"ok": True, "series": merged, "count": len(merged)})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e), "series": {}})
 
 
 @app.route("/api/kalshi/today-tickers", methods=["GET"])

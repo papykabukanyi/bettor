@@ -946,10 +946,13 @@ body.console-open main{padding-bottom:236px}
 
     <!-- ── 2: Auto Combo Bets ── -->
     <div class="rb-panel" id="rb-combos">
-      <div class="section-meta" style="margin-bottom:8px">
-        Auto-generated multi-leg combo bets. Each combo shows all legs. Enter amount and click Place.
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
+        <span class="section-meta">Multi-leg combo bets ranked by EV. All-matched combos (&#9989;) can be placed on Kalshi.</span>
+        <button class="btn btn-sm" onclick="studyCombos()" title="Deep-analyze all ready bets for best parlay combinations">&#128202; Study Combos</button>
+        <button class="btn btn-sm" onclick="refreshReadyBets(true)" title="Refresh bets and re-generate combos">&#8635; Refresh</button>
+        <span class="section-meta" id="combo-study-meta"></span>
       </div>
-      <div id="ready-combos-list"><div class="no-games">Run analysis to generate combo bets.</div></div>
+      <div id="ready-combos-list"><div class="no-games">Run analysis or click &quot;Study Combos&quot; to generate combo suggestions.</div></div>
     </div>
 
     <!-- ── 3: Order Log ── -->
@@ -4491,9 +4494,25 @@ function resolveKalshiReadyBets(force) {
       market_count: Number(d.market_count || d.summary?.market_count || 0),
       error: '',
     };
+    // Inject server-side combo suggestions into READY_BETS
+    const serverCombos = _asArray(d.combo_suggestions);
+    if (serverCombos.length) {
+      // Replace any existing 'combo' rows with fresh server suggestions
+      const nonCombo = READY_BETS.filter(r => r.kind !== 'combo');
+      READY_BETS = [...nonCombo, ...serverCombos.map(c => ({
+        ...c,
+        kind: 'combo',
+        label: c.label || `${c.n_legs || 2}-Leg Combo`,
+        model_prob: c.combined_prob || 0,
+        dec_odds: c.combined_dec_odds || 1.9,
+        bet_uid: c.uid,
+        prediction_uid: c.uid,
+        side_default: 'yes',
+      }))];
+    }
     _lastKalshiResolveMs = Date.now();
     const cacheAge = d.cache_age_sec ? ` (cache ${Math.round(d.cache_age_sec)}s old)` : '';
-    _logOp('success', `Resolved: ${READY_KALSHI_STATUS.matched} matched, ${READY_KALSHI_STATUS.started} started, ${READY_KALSHI_STATUS.done} done, ${READY_KALSHI_STATUS.unavailable} unavailable — ${READY_KALSHI_STATUS.market_count} Kalshi markets scanned${cacheAge}`);
+    _logOp('success', `Resolved: ${READY_KALSHI_STATUS.matched} matched, ${READY_KALSHI_STATUS.started} started, ${READY_KALSHI_STATUS.done} done, ${READY_KALSHI_STATUS.unavailable} unavailable — ${READY_KALSHI_STATUS.market_count} Kalshi markets scanned${cacheAge}${serverCombos.length ? ` · ${serverCombos.length} combo suggestions` : ''}`);
     renderReadyBets();
     return READY_KALSHI_RESOLUTIONS;
   }).catch(err => {
@@ -4512,6 +4531,68 @@ function resolveKalshiReadyBets(force) {
     }
     renderReadyBets();
     return {};
+  });
+}
+
+// ── Study Combos — deep combo analysis via backend ────────────────────
+function studyCombos() {
+  if (!READY_BETS.length) {
+    toast('Run analysis first to generate bets, then study combos.', 'info');
+    refreshReadyBets(false);
+    return;
+  }
+  const metaEl = document.getElementById('combo-study-meta');
+  const comboContainer = document.getElementById('ready-combos-list');
+  if (metaEl) metaEl.textContent = 'Analyzing…';
+  if (comboContainer) comboContainer.innerHTML = '<div class="no-games">&#128202; Studying combo opportunities…</div>';
+
+  // Switch to combos tab so user sees the result
+  rbSwitchTab('rb-combos');
+
+  fetch('/api/kalshi/combo-study', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      bets: READY_BETS.filter(r => r.kind !== 'combo'),
+      max_legs: 4,
+      min_legs: 2,
+      min_combined_prob: 0.15,
+      min_ev: -0.10,
+      force_refresh: false,
+    }),
+  }).then(r => r.json()).then(d => {
+    if (!d.ok) throw new Error(d.error || 'Combo study failed');
+    const combos = _asArray(d.combos);
+    if (metaEl) metaEl.textContent = `${combos.length} combos found from ${d.bet_count || READY_BETS.length} bets · ${d.market_count || 0} Kalshi markets`;
+    _logOp('success', `Combo study: ${combos.length} combos — ${combos.filter(c=>c.all_matched).length} fully matched on Kalshi`);
+
+    // Also update resolutions if returned
+    if (d.resolutions && Object.keys(d.resolutions).length) {
+      READY_KALSHI_RESOLUTIONS = { ...READY_KALSHI_RESOLUTIONS, ...d.resolutions };
+    }
+
+    if (!combos.length) {
+      if (comboContainer) comboContainer.innerHTML = '<div class="no-games">No viable combos found. Try running analysis first for more predictions.</div>';
+      return;
+    }
+
+    // Inject server combos into READY_BETS
+    const nonCombo = READY_BETS.filter(r => r.kind !== 'combo');
+    READY_BETS = [...nonCombo, ...combos.map(c => ({
+      ...c,
+      kind: 'combo',
+      label: c.label || `${c.n_legs || 2}-Leg Combo`,
+      model_prob: c.combined_prob || 0,
+      dec_odds: c.combined_dec_odds || 1.9,
+      bet_uid: c.uid,
+      prediction_uid: c.uid,
+      side_default: 'yes',
+    }))];
+    renderReadyBets();
+  }).catch(err => {
+    if (metaEl) metaEl.textContent = `Error: ${err}`;
+    _logOp('error', `Combo study failed: ${err}`);
+    if (comboContainer) comboContainer.innerHTML = `<div class="no-games">Error: ${err}</div>`;
   });
 }
 
@@ -4648,21 +4729,34 @@ function renderReadyBets() {
 
   // ── combo item — shows each leg ──
   const renderComboItem = (b) => {
-    const probPct = Math.round((Number(b.model_prob) || 0) * 100);
+    const probPct = Math.round((Number(b.model_prob || b.combined_prob) || 0) * 100);
     const qualityPct = Math.round((Number(b.quality) || 0) * 100);
-    const evPct = ((Number(b.ev) || 0) * 100).toFixed(1);
-    const dec = (Number(b.dec_odds) || 1.9).toFixed(2);
+    const ev = Number(b.ev) || 0;
+    const evPct = (ev * 100).toFixed(1);
+    const dec = (Number(b.dec_odds || b.combined_dec_odds) || 1.9).toFixed(2);
+    const allMatched = !!b.all_matched;
     const legs = _asArray(b.legs);
     const legsHtml = legs.length ? `<div class="combo-legs-preview">${legs.map((l, i) => {
       const lp = Math.round(_legProb(l) * 100);
       const lbl = l.label || l.pick || `Leg ${i+1}`;
       const sport = l.sport ? `[${String(l.sport).replace(/_/g,' ').toUpperCase()}]` : '';
+      const ticker = l.kalshi_ticker || '';
+      const matchBadge = ticker
+        ? `<span class="ready-pill good" style="font-size:10px;padding:1px 5px" title="${ticker}">&#9989;</span>`
+        : `<span class="ready-pill warn" style="font-size:10px;padding:1px 5px">~</span>`;
       return `<div class="combo-leg-row">
         <span class="clr-num">${i+1}</span>
         <span>${sport} ${lbl}</span>
-        <span class="clr-prob">${lp}%</span>
+        <span style="display:flex;align-items:center;gap:4px">
+          <span class="clr-prob">${lp}%</span>
+          ${matchBadge}
+          ${ticker ? `<span style="font-size:9px;color:var(--text-muted);font-family:monospace">${ticker}</span>` : ''}
+        </span>
       </div>`;
     }).join('')}</div>` : '';
+    const matchStatusBadge = allMatched
+      ? `<span class="ready-pill good">&#9989; All Matched</span>`
+      : `<span class="ready-pill warn">&#9888; Partial Match</span>`;
     return `<div class="ready-item ready-combo-item">
       <div class="ready-item-head">
         <div>
@@ -4670,19 +4764,19 @@ function renderReadyBets() {
           <div class="ready-item-sub">
             <span>${legs.length} legs</span>
             <span>x${dec} combined odds</span>
-            <span>${probPct}% hit probability</span>
+            <span>${probPct}% hit prob</span>
             ${b.game_date ? `<span>${b.game_date}</span>` : ''}
+            ${b.distinct_games ? `<span>${b.distinct_games} game${b.distinct_games > 1 ? 's' : ''}</span>` : ''}
           </div>
         </div>
-        <span class="tp-outcome tp-PENDING">EV ${evPct}%</span>
+        <span class="tp-outcome ${ev >= 0 ? 'tp-WIN' : 'tp-LOSS'}">EV ${evPct}%</span>
       </div>
       ${legsHtml}
       <div class="ready-kpis">
         <span class="ready-pill good">Quality ${qualityPct}%</span>
-        <span class="ready-pill ${Number(evPct) >= 0 ? 'good' : 'warn'}">EV ${evPct}%</span>
-        <span class="ready-pill">&#128274; SAFE</span>
+        <span class="ready-pill ${ev >= 0 ? 'good' : 'warn'}">EV ${evPct}%</span>
+        ${matchStatusBadge}
       </div>
-      ${renderActionRow(b)}
     </div>`;
   };
 
