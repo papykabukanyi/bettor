@@ -2884,6 +2884,20 @@ def _run_all_sports_analysis():
 
         last_updated = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M")
 
+        # ── Persist analysis cache so state survives worker crashes ───────────
+        try:
+            from data.db import save_analysis_cache as _sac
+            _sac({
+                "game_cards_today":    _clean(today_cards),
+                "game_cards_tomorrow": _clean(tomorrow_cards),
+                "best_parlays":        _clean(best_parlays),
+                "player_props":        _clean(table_rows),
+                "last_updated":        last_updated,
+            }, cache_date=_et_calendar_today())
+            _log("[all-sports] Analysis cache saved to DB")
+        except Exception as _cache_exc:
+            _log(f"[all-sports] Cache save error: {_cache_exc}")
+
         # ── Persist all-sports bets to DB so they survive server restarts ─────
         try:
             from data.db import save_predictions
@@ -6081,6 +6095,38 @@ def _load_boot_schedule_fallback() -> bool:
 def _auto_boot_analysis():
     """On startup: load today's DB snapshot, or generate one if today's snapshot is missing/stale."""
     if _ACTIVE_SPORT == "all":
+        # Try to restore from DB cache first so dashboard isn't blank after a crash
+        try:
+            from data.db import get_analysis_cache
+            today_str    = _et_calendar_today().isoformat()
+            tomorrow_str = (_et_calendar_today() + datetime.timedelta(days=1)).isoformat()
+            cached = get_analysis_cache(max_age_hours=22)
+            if cached:
+                raw_today    = cached.get("game_cards_today", [])
+                raw_tomorrow = cached.get("game_cards_tomorrow", [])
+                today_dates    = {c.get("game_date") for c in raw_today    if isinstance(c, dict)}
+                tomorrow_dates = {c.get("game_date") for c in raw_tomorrow if isinstance(c, dict)}
+                cache_is_fresh = (
+                    (not raw_today    or today_str    in today_dates)
+                    and
+                    (not raw_tomorrow or tomorrow_str in tomorrow_dates)
+                )
+                if cache_is_fresh and (raw_today or raw_tomorrow):
+                    with _lock:
+                        _state.update({
+                            "game_cards_today":    _normalize_card_list(raw_today,    expected_date=today_str),
+                            "game_cards_tomorrow": _normalize_card_list(raw_tomorrow, expected_date=tomorrow_str),
+                            "best_parlays":        cached.get("best_parlays", []),
+                            "player_props":        cached.get("player_props", []),
+                            "last_updated":        cached.get("last_updated"),
+                        })
+                    n_today = len(_state["game_cards_today"])
+                    n_tmrw  = len(_state["game_cards_tomorrow"])
+                    print(f"[boot] Loaded all-sports cache — {n_today} today, {n_tmrw} tomorrow "
+                          f"(last updated: {cached.get('last_updated')})")
+        except Exception as _boot_cache_exc:
+            print(f"[boot] All-sports cache restore error: {_boot_cache_exc}")
+        # Always run fresh analysis in background (updates the cache once done)
         _load_boot_schedule_fallback()
         threading.Thread(target=_run_analysis, daemon=True).start()
         return
