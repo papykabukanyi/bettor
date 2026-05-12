@@ -714,6 +714,69 @@ def _line_match_score(text: str, line: Any, *, allow_half_step_integer: bool = F
     return 2.8 if any(candidate and candidate in text for candidate in candidates) else 0.0
 
 
+def _line_proximity_score(text: str, line: Any, *, direction: str = "") -> float:
+    """Return a score based on how close the nearest number in text is to the bet line.
+
+    Used as a fallback when _line_match_score returns 0.  Kalshi prop/total markets
+    have discrete thresholds (32, 35, 40 points; 195.5, 197 total) that often differ
+    from a model's predicted line.  Proximity scoring lets us pick the closest Kalshi
+    market without requiring exact line equality.
+
+    When ``direction`` is provided ("over"/"under"), direction-aligned thresholds score
+    higher than direction-opposing thresholds.  This breaks the tie between markets
+    equidistant from the bet line (e.g. "35 pts" and "30 pts" when bet line=32.5 over).
+    """
+    import re as _re
+    bet_num = _as_float(line)
+    if bet_num is None:
+        return 0.0
+    nums: list[float] = []
+    for tok in _re.findall(r'\b\d+(?:[._]\d+)?\b', text):
+        val = _as_float(tok.replace("_", "."))
+        if val is not None and 3.0 <= val <= 600.0:
+            nums.append(val)
+    if not nums:
+        return 0.0
+
+    direction_norm = _norm_text(str(direction))
+    is_over = "over" in direction_norm
+    is_under = "under" in direction_norm
+
+    if is_over:
+        aligned = [n for n in nums if n >= bet_num]
+        misaligned = [n for n in nums if n < bet_num]
+    elif is_under:
+        aligned = [n for n in nums if n <= bet_num]
+        misaligned = [n for n in nums if n > bet_num]
+    else:
+        # No direction info — use plain proximity
+        closest_diff = min(abs(n - bet_num) for n in nums)
+        if closest_diff <= 0.5:
+            return 2.8
+        if closest_diff <= 2.5:
+            return 1.2
+        if closest_diff <= 7.0:
+            return 0.4
+        return 0.0
+
+    # Score the closest direction-aligned threshold highly, misaligned threshold low
+    closest_aligned_diff = min((abs(n - bet_num) for n in aligned), default=float("inf"))
+    closest_misaligned_diff = min((abs(n - bet_num) for n in misaligned), default=float("inf"))
+
+    if closest_aligned_diff <= 0.5:
+        return 2.8   # essentially exact + correct direction
+    if closest_aligned_diff <= 2.5:
+        return 2.5   # very close + correct direction (beats misaligned by design)
+    if closest_aligned_diff <= 7.0:
+        return 1.5   # moderate + correct direction
+    # No aligned threshold close enough — fall back to misaligned with heavy penalty
+    if closest_misaligned_diff <= 2.5:
+        return 0.7
+    if closest_misaligned_diff <= 7.0:
+        return 0.3
+    return 0.0
+
+
 def _combined_market_text(markets: list[dict[str, Any]]) -> str:
     return _norm_text(
         " ".join(
@@ -829,8 +892,13 @@ def _score_event_group(bet: dict[str, Any], event_group: dict[str, Any]) -> floa
 
     if bet_kind in {"spread", "total", "team_total"}:
         line_score = _line_match_score(text, bet.get("line"))
-        if _as_float(bet.get("line")) is not None and line_score <= 0.0:
-            return 0.0
+        if line_score <= 0.0:
+            # Kalshi total/spread lines differ from model lines; use proximity fallback
+            # so that team/time matching still identifies the correct event.
+            direction_hint = str(
+                bet.get("direction") or bet.get("pick") or bet.get("label") or ""
+            )
+            line_score = _line_proximity_score(text, bet.get("line"), direction=direction_hint)
         score += line_score
     return score
 
@@ -1178,8 +1246,14 @@ def _score_single_market(bet: dict[str, Any], market: dict[str, Any]) -> float:
         if player_score < 2.5:
             return 0.0
         line_score = _line_match_score(text, bet.get("line"), allow_half_step_integer=True)
-        if _as_float(bet.get("line")) is not None and line_score <= 0.0:
-            return 0.0
+        if line_score <= 0.0:
+            # Kalshi has discrete prop thresholds (32, 35, 40 pts); use proximity to
+            # pick the closest market without requiring exact line equality.
+            # Pass direction so the closest direction-aligned threshold wins.
+            direction_hint = str(
+                bet.get("direction") or bet.get("pick") or bet.get("label") or ""
+            )
+            line_score = _line_proximity_score(text, bet.get("line"), direction=direction_hint)
         score = player_score * 1.8
         score += _entity_match_score(text, bet.get("team")) * 0.6
         score += _token_overlap_score(
@@ -1213,8 +1287,13 @@ def _score_single_market(bet: dict[str, Any], market: dict[str, Any]) -> float:
 
     if bet_kind in {"total", "team_total", "spread"}:
         line_score = _line_match_score(text, bet.get("line"))
-        if _as_float(bet.get("line")) is not None and line_score <= 0.0:
-            return 0.0
+        if line_score <= 0.0:
+            # Use proximity so we pick the closest available Kalshi threshold rather
+            # than failing when model line (e.g. 211.5) differs from Kalshi (195.5).
+            direction_hint = str(
+                bet.get("direction") or bet.get("pick") or bet.get("label") or ""
+            )
+            line_score = _line_proximity_score(text, bet.get("line"), direction=direction_hint)
         score += line_score
         direction = _norm_text(bet.get("pick") or bet.get("direction") or bet.get("label"))
         if "over" in direction and "over" in text:

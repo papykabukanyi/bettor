@@ -122,6 +122,7 @@ def _init_worker():
         _scheduler = _start_scheduler()
         _start_live_scores()
         _start_outcome_resolver()
+        _start_kalshi_monitor()
         _auto_boot_analysis()
     else:
         _scheduler = None
@@ -2844,6 +2845,39 @@ def _run_all_sports_analysis():
             _log(f"[all-sports] parlay builder skipped: {parlay_exc}")
 
         last_updated = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M")
+
+        # ── Persist all-sports bets to DB so they survive server restarts ─────
+        try:
+            from data.db import save_predictions
+            today_str_allsports = _et_calendar_today().isoformat()
+            run_id_allsports = f"ALL-{today_str_allsports}"
+            pred_rows_allsports = []
+            for b in bets:
+                pred_rows_allsports.append({
+                    "game_key":     b.get("game_key") or b.get("match_key") or "",
+                    "run_id":       run_id_allsports,
+                    "run_date":     today_str_allsports,
+                    "sport":        b.get("sport") or "unknown",
+                    "bet_type":     b.get("bet_type") or "moneyline",
+                    "pick":         b.get("pick") or "",
+                    "line":         b.get("line"),
+                    "odds_am":      b.get("odds_am"),
+                    "dec_odds":     b.get("dec_odds") or 2.0,
+                    "model_prob":   float(b.get("model_prob") or 0.5),
+                    "confidence":   int(b.get("confidence") or 50),
+                    "safety_label": b.get("safety_label") or "MODERATE",
+                    "game_date":    b.get("game_date") or today_str_allsports,
+                    "game_time":    b.get("game_time") or "",
+                    "home_team":    b.get("home_team") or "",
+                    "away_team":    b.get("away_team") or "",
+                    "bet_uid":      b.get("bet_uid") or "",
+                })
+            if pred_rows_allsports:
+                save_predictions(pred_rows_allsports)
+                _log(f"[all-sports] Saved {len(pred_rows_allsports)} bets to DB")
+        except Exception as _db_exc:
+            _log(f"[all-sports] DB save skipped: {_db_exc}")
+
         with _lock:
             _state.update({
                 "status": "done",
@@ -5458,6 +5492,187 @@ def _start_cache_poller():
 _RESOLVE_INTERVAL = 5 * 60
 _resolve_poller_timer: threading.Timer | None = None
 
+# ─── Kalshi availability monitor ─────────────────────────────────────────────
+_KALSHI_MONITOR_INTERVAL_SEC = 20 * 60   # check every 20 minutes
+_kalshi_monitor_timer: threading.Timer | None = None
+_kalshi_monitor_last_statuses: dict[str, str] = {}   # bet_uid → last known status
+
+
+def _run_kalshi_monitor():
+    """Check all DB predictions against live Kalshi markets.
+    When a bet transitions to 'matched', send an email alert.
+    Runs every 20 minutes without hammering the Kalshi API.
+    """
+    global _kalshi_monitor_last_statuses
+    try:
+        today_str = _et_calendar_today().isoformat()
+        from data.db import get_predictions_for_date
+        from data.kalshi import resolve_ready_bets
+        from email_notify import send_email
+
+        preds = []
+        try:
+            preds = get_predictions_for_date(today_str) or []
+        except Exception:
+            pass
+        if not preds:
+            return
+
+        # Build bet dicts compatible with resolve_ready_bets
+        ready_bets = []
+        for p in preds:
+            ready_bets.append({
+                "bet_uid":     p.get("bet_uid") or str(p.get("id") or ""),
+                "sport":       p.get("sport") or "",
+                "bet_type":    p.get("bet_type") or "moneyline",
+                "pick":        p.get("pick") or "",
+                "label":       p.get("pick") or "",
+                "line":        p.get("line"),
+                "game_date":   str(p.get("game_date") or today_str),
+                "game_time":   str(p.get("game_time") or ""),
+                "home_team":   p.get("home_team") or "",
+                "away_team":   p.get("away_team") or "",
+                "player_name": _extract_player_name(p.get("pick") or ""),
+                "team":        p.get("home_team") or p.get("away_team") or "",
+                "direction":   _extract_direction(p.get("pick") or ""),
+                "prop_type":   _extract_prop_type(p.get("bet_type") or "", p.get("pick") or ""),
+            })
+
+        if not ready_bets:
+            return
+
+        resolutions = resolve_ready_bets(ready_bets)
+        newly_matched = []
+        for uid, res in resolutions.items():
+            status = res.get("status") or ""
+            prev = _kalshi_monitor_last_statuses.get(uid)
+            _kalshi_monitor_last_statuses[uid] = status
+            if status == "matched" and prev != "matched":
+                # Find the original bet details
+                bet = next((b for b in ready_bets if b.get("bet_uid") == uid), {})
+                pred = next((p for p in preds if (p.get("bet_uid") or str(p.get("id") or "")) == uid), {})
+                newly_matched.append({
+                    "bet_uid": uid,
+                    "bet": bet,
+                    "pred": pred,
+                    "resolution": res,
+                })
+
+        if newly_matched:
+            _send_kalshi_alert(newly_matched)
+    except Exception as exc:
+        print(f"[kalshi-monitor] Error: {exc}")
+
+
+def _extract_player_name(pick_text: str) -> str:
+    """Try to extract a player name from a pick label like 'Victor Wembanyama Over 32.5 Points'."""
+    import re
+    m = re.match(r'^([A-Z][a-z]+ [A-Z][a-z\']+)', pick_text.strip())
+    return m.group(1) if m else ""
+
+
+def _extract_direction(pick_text: str) -> str:
+    t = pick_text.lower()
+    if "over" in t:
+        return "over"
+    if "under" in t:
+        return "under"
+    return ""
+
+
+def _extract_prop_type(bet_type: str, pick_text: str) -> str:
+    if bet_type == "player_prop":
+        t = pick_text.lower()
+        if "point" in t or "pts" in t:
+            return "points"
+        if "rebound" in t or "reb" in t:
+            return "rebounds"
+        if "assist" in t or "ast" in t:
+            return "assists"
+        if "hit" in t:
+            return "hits"
+    return bet_type
+
+
+def _send_kalshi_alert(matched_bets: list[dict]):
+    """Send email alert for newly matched Kalshi bets."""
+    try:
+        from email_notify import send_email
+        rows_html = ""
+        rows_plain = ""
+        for item in matched_bets:
+            pred = item.get("pred") or {}
+            res = item.get("resolution") or {}
+            sport = str(pred.get("sport") or "").upper()
+            pick = str(pred.get("pick") or item.get("bet", {}).get("pick") or "")
+            game = f"{pred.get('away_team') or ''} @ {pred.get('home_team') or ''}".strip(" @")
+            game_date = str(pred.get("game_date") or "")
+            market_ticker = res.get("market_ticker") or ""
+            market_title = res.get("market_title") or ""
+            price_cents = res.get("price_cents")
+            close_time = res.get("close_time") or ""
+            price_str = f"{price_cents}¢" if price_cents else "—"
+            rows_html += (
+                f"<tr>"
+                f"<td style='padding:6px 10px'><b>{sport}</b></td>"
+                f"<td style='padding:6px 10px'>{game}<br><small>{game_date}</small></td>"
+                f"<td style='padding:6px 10px'>{pick}</td>"
+                f"<td style='padding:6px 10px'>{market_ticker}<br><small>{market_title}</small></td>"
+                f"<td style='padding:6px 10px; text-align:center'>{price_str}</td>"
+                f"<td style='padding:6px 10px'>{close_time[:16]}</td>"
+                f"</tr>"
+            )
+            rows_plain += f"  [{sport}] {pick} | {game} | Ticker: {market_ticker} | Price: {price_str}\n"
+
+        subject = f"🎯 {len(matched_bets)} Kalshi bet(s) now available — place now!"
+        html_body = f"""
+        <html><body style='font-family:Arial,sans-serif'>
+        <h2 style='color:#1a7a4a'>🎯 Kalshi Bets Available Now</h2>
+        <p>{len(matched_bets)} prediction(s) have been matched to open Kalshi markets.
+        Log in to <a href='https://kalshi.com'>kalshi.com</a> to place your bets before markets close.</p>
+        <table border='1' cellspacing='0' style='border-collapse:collapse;width:100%'>
+        <thead><tr style='background:#1a7a4a;color:white'>
+          <th style='padding:8px'>Sport</th>
+          <th style='padding:8px'>Game</th>
+          <th style='padding:8px'>Pick</th>
+          <th style='padding:8px'>Kalshi Market</th>
+          <th style='padding:8px'>Price</th>
+          <th style='padding:8px'>Closes</th>
+        </tr></thead>
+        <tbody>{rows_html}</tbody>
+        </table>
+        <p style='color:#666;font-size:12px'>This alert was generated automatically by your Bettor bot.</p>
+        </body></html>
+        """
+        plain_body = f"Kalshi Bets Available:\n{rows_plain}\nLog in to kalshi.com to place your bets."
+        result = send_email(subject, html_body, plain_body)
+        print(f"[kalshi-monitor] Email alert sent: {result}")
+    except Exception as exc:
+        print(f"[kalshi-monitor] Email send failed: {exc}")
+
+
+def _start_kalshi_monitor():
+    """Start the background Kalshi availability monitor."""
+    global _kalshi_monitor_timer
+    if _kalshi_monitor_timer is not None:
+        return
+
+    def _tick():
+        global _kalshi_monitor_timer
+        try:
+            _run_kalshi_monitor()
+        except Exception as exc:
+            print(f"[kalshi-monitor] tick error: {exc}")
+        _kalshi_monitor_timer = threading.Timer(_KALSHI_MONITOR_INTERVAL_SEC, _tick)
+        _kalshi_monitor_timer.daemon = True
+        _kalshi_monitor_timer.start()
+
+    # First check after 3 minutes (let startup complete)
+    _kalshi_monitor_timer = threading.Timer(180, _tick)
+    _kalshi_monitor_timer.daemon = True
+    _kalshi_monitor_timer.start()
+    print(f"[kalshi-monitor] Started (every {_KALSHI_MONITOR_INTERVAL_SEC // 60} min)")
+
 
 def _start_outcome_resolver():
     """Periodically resolve pending bets for ALL sports every 5 minutes.
@@ -5872,6 +6087,7 @@ if __name__ == "__main__":
         _scheduler = _start_scheduler()
         _start_live_scores()
         _start_outcome_resolver()
+        _start_kalshi_monitor()
         _auto_boot_analysis()
     else:
         _scheduler = None
