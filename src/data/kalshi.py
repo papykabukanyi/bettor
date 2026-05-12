@@ -35,23 +35,49 @@ _KALSHI_MARKET_CACHE_TTL_SEC = max(
 
 # Series ticker prefix → sport (updated per Kalshi documentation)
 _SERIES_SPORT_MAP: dict[str, str] = {
-    # Baseball (MLB)
+    # Baseball (MLB) — confirmed live series
+    "KXMLBHRR": "baseball",   # player hits+runs+RBIs props
+    "KXMLBTOTAL": "baseball", # game totals (runs)
+    "KXMLB": "baseball",      # other MLB (futures, misc)
     "MLBWIN": "baseball", "MLBOU": "baseball", "MLBHR": "baseball",
     "MLBRUNS": "baseball", "MLBK": "baseball", "MLBHITS": "baseball",
-    "MLBWSERIES": "baseball", "KXMLB": "baseball",
-    # Basketball (NBA/WNBA)
-    "KXNBA": "basketball", "NBAPTSO": "basketball", "NBAMVP": "basketball",
-    "NBACHAMP": "basketball", "KXWNBA": "basketball",
+    "MLBWSERIES": "baseball",
+    # Basketball (NBA/WNBA) — confirmed live series
+    "KXNBAPTS": "basketball",   # player points props
+    "KXNBATOTAL": "basketball", # game totals (points)
+    "KXNBAREB": "basketball",   # player rebounds props
+    "KXNBAAST": "basketball",   # player assists props
+    "KXNBA": "basketball",      # futures/championship
+    "KXWNBA": "basketball",
+    "NBAPTSO": "basketball", "NBAMVP": "basketball", "NBACHAMP": "basketball",
     # Football (NFL)
+    "KXNFL": "football",
     "NFLWIN": "football", "NFLOU": "football", "NFLTD": "football",
-    "NFLMVP": "football", "NFLSB": "football", "KXNFL": "football",
+    "NFLMVP": "football", "NFLSB": "football",
     # Hockey (NHL)
-    "NHLWIN": "hockey", "NHLOU": "hockey", "NHLCHAMP": "hockey",
-    "NHLIN": "hockey", "KXNHL": "hockey",
+    "KXNHL": "hockey",
+    "NHLWIN": "hockey", "NHLOU": "hockey", "NHLCHAMP": "hockey", "NHLIN": "hockey",
     # Soccer
-    "MSLWIN": "soccer", "EPLWIN": "soccer", "UCLWIN": "soccer",
     "KXMLS": "soccer", "KXEPL": "soccer", "KXFIFA": "soccer",
+    "MSLWIN": "soccer", "EPLWIN": "soccer", "UCLWIN": "soccer",
 }
+
+# Confirmed live Kalshi sports series to fetch explicitly (bypasses pagination ordering issues).
+# The general /markets endpoint returns 25k+ non-sports markets first, so we target these directly.
+_SPORTS_SERIES_TO_FETCH: list[str] = [
+    # NBA player props + game markets
+    "KXNBAPTS", "KXNBATOTAL", "KXNBAREB", "KXNBAAST", "KXNBA",
+    # WNBA
+    "KXWNBA",
+    # MLB player props + game markets
+    "KXMLBHRR", "KXMLBTOTAL", "KXMLB",
+    # NFL
+    "KXNFL",
+    # NHL
+    "KXNHL",
+    # Soccer
+    "KXMLS", "KXEPL", "KXFIFA",
+]
 _KALSHI_MARKET_CACHE_LOCK = threading.Lock()
 _KALSHI_MARKET_CACHE: dict[str, Any] = {
     "ts": 0.0,
@@ -554,6 +580,26 @@ def _score_event_group(bet: dict[str, Any], event_group: dict[str, Any]) -> floa
         score += _token_overlap_score(text, bet.get("prop_type"), bet.get("direction"), bet.get("label"))
         score += _line_match_score(text, bet.get("line"), allow_half_step_integer=True)
         score += time_score
+
+        # Strongly prefer the event whose series ticker matches the bet's stat type.
+        # This disambiguates KXNBAPTS vs KXNBAREB vs KXNBAAST for the same player.
+        event_ticker_upper = str(event_group.get("event_ticker") or "").upper()
+        prop_type_norm = _norm_text(bet.get("prop_type") or "")
+        _SERIES_STAT_HINTS: dict[str, list[str]] = {
+            "PTS": ["point", "pts"],
+            "REB": ["rebound", "reb"],
+            "AST": ["assist", "ast"],
+            "HRR": ["hit", "run", "rbi"],
+            "TOTAL": ["total"],
+        }
+        for series_suffix, prop_hints in _SERIES_STAT_HINTS.items():
+            if series_suffix in event_ticker_upper:
+                if any(h in prop_type_norm for h in prop_hints):
+                    score += 4.0   # correct stat series → strong bonus
+                else:
+                    score -= 6.0   # wrong stat series → strong penalty
+                break
+
         return score
 
     home_score = _entity_match_score(text, bet.get("home_team"))
@@ -740,8 +786,17 @@ def _market_kind_tag(market: dict[str, Any]) -> str:
     title = _norm_text(raw_title)
     event = _norm_text(market.get("event_ticker"))
     primary_participant = _norm_text(market.get("primary_participant_key"))
-    if (":" in raw_title or "player" in primary_participant) and any(hint in text for hint in _PROP_HINTS):
+
+    # Player prop: use primary_participant_key first (most reliable for KX* series).
+    # Fallback: title pattern "PlayerName: N+" where digit or "+" follows the colon.
+    is_player_prop = "player" in primary_participant
+    if not is_player_prop and ": " in raw_title:
+        after_colon = raw_title[raw_title.index(": ") + 2:]
+        if after_colon and (after_colon[0].isdigit() or after_colon.startswith("+")):
+            is_player_prop = True
+    if is_player_prop and any(hint in text for hint in _PROP_HINTS):
         return "player_prop"
+
     if any(token in text for token in ("spread", "run line")) or "spread" in event:
         return "spread"
     if any(token in text for token in ("total", "over", "under", "btts")) or "total" in event:
@@ -789,6 +844,18 @@ def _time_match_score(bet: dict[str, Any], market: dict[str, Any]) -> float:
     market_dt = _market_time(market)
     if bet_dt is None or market_dt is None:
         return 0.0
+
+    # Date-only bets (midnight UTC) are lenient: many US games start after midnight UTC.
+    # Allow same date or adjacent date (e.g., 10:30 PM ET crosses midnight to next UTC day).
+    bet_is_date_only = (bet_dt.hour == 0 and bet_dt.minute == 0 and bet_dt.second == 0)
+    if bet_is_date_only:
+        diff_days = abs((market_dt.date() - bet_dt.date()).days)
+        if diff_days == 0:
+            return 1.5   # same calendar date
+        if diff_days == 1:
+            return 0.5   # adjacent date — late-night US game crossing UTC midnight
+        return -2.0
+
     diff_minutes = abs((market_dt - bet_dt).total_seconds()) / 60.0
     if diff_minutes <= 30:
         return 6.0
@@ -800,6 +867,10 @@ def _time_match_score(bet: dict[str, Any], market: dict[str, Any]) -> float:
         return 1.0
     if bet_dt.date() == market_dt.date():
         return 0.25
+    # Allow adjacent dates for late-night US games
+    diff_days = abs((market_dt.date() - bet_dt.date()).days)
+    if diff_days == 1 and diff_minutes <= 1500:
+        return -0.5
     return -2.0
 
 
@@ -1162,17 +1233,32 @@ def get_open_market_catalog(*, force_refresh: bool = False) -> dict[str, Any]:
                 "cache_age_sec": age,
             }
 
+    # Fetch markets from known sports series directly — the general /markets endpoint
+    # returns non-sports (politics/crypto/economics) first and the 25k cap is reached
+    # before any NBA/MLB markets appear.  Targeting specific series tickers is fast and precise.
+    seen_tickers: set[str] = set()
     markets: list[dict[str, Any]] = []
-    cursor: str | None = None
-    pages = 0
-    while True:
-        pages += 1
-        data = list_markets(limit=500, cursor=cursor, status="open")
-        rows = data.get("markets") or []
-        markets.extend(row for row in rows if isinstance(row, dict))
-        cursor = data.get("cursor")
-        if not cursor or pages >= 60 or len(markets) >= 25000:
-            break
+
+    for series in _SPORTS_SERIES_TO_FETCH:
+        cursor: str | None = None
+        pages = 0
+        while True:
+            pages += 1
+            try:
+                data = list_markets(limit=500, cursor=cursor, status="open", series_ticker=series)
+            except Exception:
+                break
+            rows = data.get("markets") or []
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                ticker = str(row.get("ticker") or "")
+                if ticker and ticker not in seen_tickers:
+                    seen_tickers.add(ticker)
+                    markets.append(row)
+            cursor = data.get("cursor")
+            if not cursor or pages >= 20:
+                break
 
     combo_markets = [market for market in markets if _is_combo_market(market)]
     with _KALSHI_MARKET_CACHE_LOCK:
