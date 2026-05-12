@@ -332,7 +332,14 @@ def _parse_iso_dt(value: Any) -> datetime.datetime | None:
 
 
 def _market_time(market: dict[str, Any]) -> datetime.datetime | None:
-    for key in ("close_time", "expiration_time", "expected_expiration_time", "open_time"):
+    for key in (
+        "occurrence_datetime",
+        "close_time",
+        "expiration_time",
+        "expected_expiration_time",
+        "latest_expiration_time",
+        "open_time",
+    ):
         dt = _parse_iso_dt(market.get(key))
         if dt is not None:
             return dt
@@ -378,6 +385,7 @@ def _bet_signature(bet: dict[str, Any]) -> str:
         str(bet.get("direction") or ""),
         str(bet.get("game") or bet.get("game_key") or ""),
         str(bet.get("game_date") or ""),
+        str(bet.get("scheduled_start") or bet.get("start_time") or bet.get("game_time") or ""),
     ]
     return "|".join(parts)
 
@@ -394,8 +402,12 @@ def _entity_aliases(name: Any) -> set[str]:
     if no_stop:
         aliases.add(" ".join(no_stop))
         aliases.add(no_stop[-1])
+        if len(no_stop[0]) >= 4:
+            aliases.add(no_stop[0])
         if len(no_stop) >= 2:
+            aliases.add(" ".join(no_stop[:2]))
             aliases.add(" ".join(no_stop[-2:]))
+            aliases.add(" ".join(no_stop[:-1] + [no_stop[-1][:1]]))
     if len(tokens) >= 2:
         aliases.add(" ".join(tokens[-2:]))
     if "76ers" in str(name):
@@ -443,15 +455,180 @@ def _token_overlap_score(text: str, *values: Any) -> float:
     return score
 
 
-def _line_match_score(text: str, line: Any) -> float:
+def _line_match_score(text: str, line: Any, *, allow_half_step_integer: bool = False) -> float:
     num = _as_float(line)
     if num is None:
         return 0.0
-    candidates = {str(num).rstrip("0").rstrip("."), f"{num:.1f}"}
+    candidates = {
+        _norm_text(str(num).rstrip("0").rstrip(".")),
+        _norm_text(f"{num:.1f}"),
+    }
     if float(num).is_integer():
-        candidates.add(str(int(num)))
-        candidates.add(f"{int(num)}.0")
+        candidates.add(_norm_text(str(int(num))))
+        candidates.add(_norm_text(f"{int(num)}.0"))
+    elif allow_half_step_integer:
+        rounded_half = round(num * 2.0)
+        if abs(num * 2.0 - rounded_half) <= 1e-9 and rounded_half % 2 == 1:
+            # Kalshi player props often phrase 2.5 as "3+" and similar threshold markets.
+            candidates.add(_norm_text(str(int(num + 0.5))))
     return 2.8 if any(candidate and candidate in text for candidate in candidates) else 0.0
+
+
+def _combined_market_text(markets: list[dict[str, Any]]) -> str:
+    return _norm_text(
+        " ".join(
+            " ".join(
+                str(market.get(key) or "")
+                for key in (
+                    "ticker",
+                    "event_ticker",
+                    "title",
+                    "subtitle",
+                    "yes_sub_title",
+                    "no_sub_title",
+                    "question",
+                )
+            )
+            for market in markets
+            if isinstance(market, dict)
+        )
+    )
+
+
+def _build_event_index(markets: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    event_index: dict[str, dict[str, Any]] = {}
+    for market in markets:
+        if not isinstance(market, dict):
+            continue
+        event_ticker = str(market.get("event_ticker") or market.get("ticker") or "").strip()
+        if not event_ticker:
+            continue
+        bucket = event_index.setdefault(
+            event_ticker,
+            {
+                "event_ticker": event_ticker,
+                "markets": [],
+                "sport": "",
+            },
+        )
+        bucket["markets"].append(market)
+        if not bucket["sport"]:
+            bucket["sport"] = _market_sport_tag(market)
+
+    for bucket in event_index.values():
+        markets_in_event = bucket.get("markets") or []
+        bucket["text"] = _combined_market_text(markets_in_event)
+        times = [dt for dt in (_market_time(m) for m in markets_in_event) if dt is not None]
+        bucket["occurrence_datetime"] = (
+            min(times).isoformat().replace("+00:00", "Z") if times else None
+        )
+    return event_index
+
+
+def _score_event_group(bet: dict[str, Any], event_group: dict[str, Any]) -> float:
+    text = str(event_group.get("text") or "")
+    if not text:
+        return 0.0
+
+    bet_sport = _bet_sport_tag(bet)
+    market_sport = str(event_group.get("sport") or "")
+    if bet_sport and market_sport and bet_sport != market_sport:
+        return 0.0
+
+    pseudo_market = {"occurrence_datetime": event_group.get("occurrence_datetime")}
+    time_score = _time_match_score(bet, pseudo_market)
+    if time_score < -1.5:
+        return 0.0
+
+    bet_kind = _bet_kind_tag(bet)
+    if bet_kind == "player_prop":
+        player_score = _entity_match_score(text, bet.get("player_name") or bet.get("name"))
+        if player_score < 3.0:
+            return 0.0
+        score = player_score * 2.1
+        score += max(
+            _entity_match_score(text, bet.get("team")),
+            _entity_match_score(text, bet.get("home_team")),
+            _entity_match_score(text, bet.get("away_team")),
+        ) * 0.35
+        score += _token_overlap_score(text, bet.get("prop_type"), bet.get("direction"), bet.get("label"))
+        score += _line_match_score(text, bet.get("line"), allow_half_step_integer=True)
+        score += time_score
+        return score
+
+    home_score = _entity_match_score(text, bet.get("home_team"))
+    away_score = _entity_match_score(text, bet.get("away_team"))
+    pick_score = max(
+        _entity_match_score(text, bet.get("team")),
+        _entity_match_score(text, bet.get("pick")),
+        _entity_match_score(text, bet.get("label")),
+    )
+
+    if max(home_score, away_score, pick_score) < 2.4:
+        return 0.0
+    if (bet.get("home_team") or bet.get("away_team")) and home_score < 2.0 and away_score < 2.0:
+        return 0.0
+
+    score = time_score
+    score += home_score + away_score
+    score += pick_score * 1.2
+    score += _token_overlap_score(text, bet.get("label"), bet.get("pick"), bet.get("bet_type"))
+
+    if bet_kind in {"spread", "total", "team_total"}:
+        line_score = _line_match_score(text, bet.get("line"))
+        if _as_float(bet.get("line")) is not None and line_score <= 0.0:
+            return 0.0
+        score += line_score
+    return score
+
+
+def _picked_team_name(bet: dict[str, Any]) -> str:
+    team = str(bet.get("team") or "").strip()
+    if team:
+        return team
+
+    pick_text = _norm_text(" ".join(str(bet.get(key) or "") for key in ("pick", "label")))
+    if not pick_text:
+        return ""
+
+    home_team = str(bet.get("home_team") or "").strip()
+    away_team = str(bet.get("away_team") or "").strip()
+    home_score = _entity_match_score(pick_text, home_team)
+    away_score = _entity_match_score(pick_text, away_team)
+    if max(home_score, away_score) < 2.2:
+        return ""
+    return home_team if home_score >= away_score else away_team
+
+
+def _resolve_market_side(bet: dict[str, Any], market: dict[str, Any]) -> str:
+    direction_text = _norm_text(
+        " ".join(str(bet.get(key) or "") for key in ("direction", "pick", "label", "bet_type"))
+    )
+    market_text = _market_text(market)
+    bet_kind = _bet_kind_tag(bet)
+
+    if bet_kind == "player_prop":
+        return "no" if "under" in direction_text else "yes"
+
+    if bet_kind in {"total", "team_total"}:
+        if "under" in direction_text:
+            return "no"
+        if "over" in direction_text:
+            return "yes"
+
+    picked_team = _picked_team_name(bet)
+    if picked_team:
+        picked_score = _entity_match_score(market_text, picked_team)
+        if picked_score >= 2.2:
+            return "yes"
+
+        home_team = str(bet.get("home_team") or "").strip()
+        away_team = str(bet.get("away_team") or "").strip()
+        other_team = away_team if picked_team == home_team else home_team if picked_team == away_team else ""
+        if other_team and _entity_match_score(market_text, other_team) >= 2.2:
+            return "no"
+
+    return "no" if str(bet.get("side_default") or "yes").lower() == "no" else "yes"
 
 
 def _bet_sport_tag(bet: dict[str, Any]) -> str:
@@ -559,9 +736,11 @@ def _market_kind_tag(market: dict[str, Any]) -> str:
         return "combo"
 
     text = _market_text(market)
-    title = _norm_text(market.get("title"))
+    raw_title = str(market.get("title") or "")
+    title = _norm_text(raw_title)
     event = _norm_text(market.get("event_ticker"))
-    if any(hint in text for hint in _PROP_HINTS) or ":" in str(market.get("title") or ""):
+    primary_participant = _norm_text(market.get("primary_participant_key"))
+    if (":" in raw_title or "player" in primary_participant) and any(hint in text for hint in _PROP_HINTS):
         return "player_prop"
     if any(token in text for token in ("spread", "run line")) or "spread" in event:
         return "spread"
@@ -720,6 +899,9 @@ def _score_single_market(bet: dict[str, Any], market: dict[str, Any]) -> float:
         player_score = _entity_match_score(text, bet.get("player_name") or bet.get("name"))
         if player_score < 3.0:
             return 0.0
+        line_score = _line_match_score(text, bet.get("line"), allow_half_step_integer=True)
+        if _as_float(bet.get("line")) is not None and line_score <= 0.0:
+            return 0.0
         score = player_score * 1.8
         score += _entity_match_score(text, bet.get("team")) * 0.6
         score += _token_overlap_score(
@@ -728,7 +910,7 @@ def _score_single_market(bet: dict[str, Any], market: dict[str, Any]) -> float:
             bet.get("direction"),
             bet.get("label"),
         )
-        score += _line_match_score(text, bet.get("line"))
+        score += line_score
         score += time_score
         return score
 
@@ -752,7 +934,10 @@ def _score_single_market(bet: dict[str, Any], market: dict[str, Any]) -> float:
     score += _token_overlap_score(text, bet.get("label"), bet.get("pick"), bet.get("bet_type"))
 
     if bet_kind in {"total", "team_total", "spread"}:
-        score += _line_match_score(text, bet.get("line"))
+        line_score = _line_match_score(text, bet.get("line"))
+        if _as_float(bet.get("line")) is not None and line_score <= 0.0:
+            return 0.0
+        score += line_score
         direction = _norm_text(bet.get("pick") or bet.get("direction") or bet.get("label"))
         if "over" in direction and "over" in text:
             score += 1.5
@@ -799,7 +984,11 @@ def _single_resolution_payload(
     return payload
 
 
-def _resolve_single_bet(bet: dict[str, Any], markets: list[dict[str, Any]]) -> dict[str, Any]:
+def _resolve_single_bet(
+    bet: dict[str, Any],
+    markets: list[dict[str, Any]],
+    event_index: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     schedule = _bet_schedule_state(bet)
     if schedule["state"] == "done":
         return _single_resolution_payload(
@@ -814,22 +1003,59 @@ def _resolve_single_bet(bet: dict[str, Any], markets: list[dict[str, Any]]) -> d
             scheduled_start=schedule.get("scheduled_start"),
         )
 
+    local_event_index = event_index or _build_event_index(markets)
+    scored_events: list[tuple[float, dict[str, Any]]] = []
+    for event_group in local_event_index.values():
+        score = _score_event_group(bet, event_group)
+        if score > 0.0:
+            scored_events.append((score, event_group))
+    scored_events.sort(key=lambda item: item[0], reverse=True)
+
+    if not scored_events or scored_events[0][0] < 8.5:
+        return _single_resolution_payload(
+            "unavailable",
+            message="No exact Kalshi event matches this prediction.",
+            scheduled_start=schedule.get("scheduled_start"),
+        )
+
+    if len(scored_events) > 1:
+        top_event_score = scored_events[0][0]
+        next_event_score = scored_events[1][0]
+        if next_event_score >= 8.0 and (top_event_score - next_event_score) < 1.25:
+            return _single_resolution_payload(
+                "unavailable",
+                message="Kalshi event match is ambiguous; refusing to guess a ticker.",
+                scheduled_start=schedule.get("scheduled_start"),
+            )
+
+    candidate_markets = list(scored_events[0][1].get("markets") or [])
     best_market: dict[str, Any] | None = None
     best_score = 0.0
-    for market in markets:
+    second_best_score = 0.0
+    for market in candidate_markets:
         score = _score_single_market(bet, market)
         if score > best_score:
+            second_best_score = best_score
             best_market = market
             best_score = score
+        elif score > second_best_score:
+            second_best_score = score
 
-    if best_market is None or best_score < 10.0:
+    if best_market is None or best_score < 10.5:
         return _single_resolution_payload(
             "unavailable",
             message="No exact Kalshi market is open for this bet.",
             scheduled_start=schedule.get("scheduled_start"),
         )
 
-    side = "no" if str(bet.get("side_default") or "yes").lower() == "no" else "yes"
+    if second_best_score >= 9.5 and (best_score - second_best_score) < 0.85:
+        return _single_resolution_payload(
+            "unavailable",
+            message="Kalshi market match is ambiguous within the event; refusing to guess.",
+            scheduled_start=schedule.get("scheduled_start"),
+        )
+
+    side = _resolve_market_side(bet, best_market)
     return _single_resolution_payload(
         "matched",
         message="Matched to a live Kalshi market.",
@@ -845,6 +1071,7 @@ def _resolve_combo_bet(
     markets: list[dict[str, Any]],
     combo_markets: list[dict[str, Any]],
     single_cache: dict[str, dict[str, Any]],
+    event_index: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     legs = [leg for leg in (bet.get("legs") or []) if isinstance(leg, dict)]
     if len(legs) < 2:
@@ -854,7 +1081,7 @@ def _resolve_combo_bet(
     for leg in legs:
         sig = _bet_signature(leg)
         if sig not in single_cache:
-            single_cache[sig] = _resolve_single_bet(leg, markets)
+            single_cache[sig] = _resolve_single_bet(leg, markets, event_index)
         leg_result = single_cache[sig]
         resolved_legs.append(leg_result)
         if leg_result.get("status") in {"done", "started"}:
@@ -974,6 +1201,7 @@ def resolve_ready_bets(
     catalog = get_open_market_catalog(force_refresh=force_refresh)
     markets = [market for market in catalog["markets"] if not _is_combo_market(market)]
     combo_markets = list(catalog["combo_markets"])
+    event_index = _build_event_index(markets)
 
     resolutions: dict[str, dict[str, Any]] = {}
     summary = {
@@ -991,11 +1219,11 @@ def resolve_ready_bets(
             continue
         uid = _bet_identity(bet, index)
         if _bet_kind_tag(bet) == "combo":
-            result = _resolve_combo_bet(bet, markets, combo_markets, single_cache)
+            result = _resolve_combo_bet(bet, markets, combo_markets, single_cache, event_index)
         else:
             sig = _bet_signature(bet)
             if sig not in single_cache:
-                single_cache[sig] = _resolve_single_bet(bet, markets)
+                single_cache[sig] = _resolve_single_bet(bet, markets, event_index)
             result = dict(single_cache[sig])
         resolutions[uid] = result
         summary["count"] += 1

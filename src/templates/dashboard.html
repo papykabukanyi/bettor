@@ -3340,10 +3340,17 @@ function _comboCandidateLegs() {
   const legs = buildLegPool().filter(leg => {
     const source = _legSourceGroup(leg);
     if (source !== 'prop' && source !== 'game') return false;
+    const decision = _readySelection(leg, source === 'prop' ? 'player_prop' : 'single');
+    if (!decision.keep) return false;
     const minProb = source === 'prop' ? 0.58 : 0.55;
-    return _legProb(leg) >= minProb;
+    const minEvidence = source === 'prop' ? 0.60 : 0.57;
+    return decision.prob >= minProb && decision.evidenceScore >= minEvidence;
   });
   legs.sort((a, b) => {
+    const aEvidence = _readyEvidence(a).evidenceScore;
+    const bEvidence = _readyEvidence(b).evidenceScore;
+    const evidenceDelta = bEvidence - aEvidence;
+    if (Math.abs(evidenceDelta) > 1e-9) return evidenceDelta;
     const probDelta = _legProb(b) - _legProb(a);
     if (Math.abs(probDelta) > 1e-9) return probDelta;
     const evDelta = (b.ev || 0) - (a.ev || 0);
@@ -3751,6 +3758,15 @@ function buildLegPool() {
       source: 'prop',
       sport: p.sport || '',
       prediction_uid: p.prediction_uid || p.bet_uid || '',
+      confidence: p.confidence || Math.round(prob * 100),
+      edge: Number(p.edge || 0),
+      worth_score: p.worth_score || 0,
+      worth_it: !!p.worth_it,
+      market_popularity: Number(p.market_popularity || 0),
+      market_mentions: Number(p.market_mentions || 0),
+      signal_hist_prob: Number(p.signal_hist_prob || 0),
+      signal_sentiment: Number(p.signal_sentiment != null ? p.signal_sentiment : (p.sentiment_score != null ? p.sentiment_score : p.market_popularity || 0)),
+      signal_rationale: p.signal_rationale || p.worth_reason || p.news_snippet || '',
       player: p.name || '',
       name: p.name || '',
       team: p.team || '',
@@ -3787,6 +3803,15 @@ function buildLegPool() {
       source: 'game',  // classify as game source so combos can mix it
       sport: p.sport || '',
       prediction_uid: p.prediction_uid || p.bet_uid || '',
+      confidence: p.confidence || Math.round(prob * 100),
+      edge: Number(p.edge || 0),
+      worth_score: p.worth_score || 0,
+      worth_it: !!p.worth_it,
+      market_popularity: Number(p.market_popularity || 0),
+      market_mentions: Number(p.market_mentions || 0),
+      signal_hist_prob: Number(p.signal_hist_prob || 0),
+      signal_sentiment: Number(p.signal_sentiment != null ? p.signal_sentiment : (p.sentiment_score != null ? p.sentiment_score : p.market_popularity || 0)),
+      signal_rationale: p.signal_rationale || p.worth_reason || p.news_snippet || '',
       team: p.team || '',
       home_team: p.home_team || '',
       away_team: p.away_team || '',
@@ -3824,6 +3849,15 @@ function buildLegPool() {
         source: 'game',
         sport: c.sport || b.sport || '',
         prediction_uid: b.prediction_uid || b.bet_uid || '',
+        confidence: b.confidence || Math.round(prob * 100),
+        edge: Number(b.edge || 0),
+        worth_score: b.worth_score || 0,
+        worth_it: !!b.worth_it,
+        market_popularity: Number(b.market_popularity || 0),
+        market_mentions: Number(b.market_mentions || 0),
+        signal_hist_prob: Number(b.signal_hist_prob || 0),
+        signal_sentiment: Number(b.signal_sentiment != null ? b.signal_sentiment : (b.sentiment_score != null ? b.sentiment_score : b.market_popularity || 0)),
+        signal_rationale: b.signal_rationale || b.worth_reason || b.news_snippet || '',
         team: cleanPickTeam(b.pick || ''),
         line: b.line,
         pick: b.pick,
@@ -3909,6 +3943,98 @@ function _readyQuality(prob, ev, safetyLabel, sentiment, histProb, hasRationale)
   return Math.max(0, Math.min(0.99, score));
 }
 
+function _readyRatioish(v) {
+  let num = Number(v);
+  if (!Number.isFinite(num)) return 0;
+  if (Math.abs(num) > 1.5) num /= 100;
+  return Math.max(0, Math.min(1, num));
+}
+
+function _readyEvidence(row) {
+  const prob = Math.max(0, Math.min(1, _legProb(row)));
+  const dec = _legDec(row) || 1.9;
+  const ev = Number(row && row.ev != null ? row.ev : _legEv(prob, dec)) || 0;
+  const edge = Number(row && row.edge != null ? row.edge : 0) || 0;
+  const safetyLabel = String((row && (row.safety_label || row.badge)) || 'MODERATE').toUpperCase();
+  const confidenceRaw = row && row.confidence != null ? row.confidence : (row && row.conf != null ? row.conf : Math.round(prob * 100));
+  const confidence = Number(confidenceRaw) || 0;
+  const histProb = _readyRatioish(row && (row.signal_hist_prob != null ? row.signal_hist_prob : row.hist_prob));
+  const sentimentA = Number(row && row.signal_sentiment != null ? row.signal_sentiment : (row && row.sentiment_score != null ? row.sentiment_score : 0)) || 0;
+  const sentimentB = Number(row && row.market_popularity != null ? row.market_popularity : 0) || 0;
+  const sentiment = Math.max(sentimentA, sentimentB);
+  const worthScore = _readyRatioish(row && row.worth_score);
+  const worthIt = !!(row && row.worth_it);
+  const mentions = Math.max(0, Number(row && (row.market_mentions != null ? row.market_mentions : row.sentiment_mentions)) || 0);
+  const hasRationale = !!(row && (row.signal_rationale || row.worth_reason || row.news_snippet));
+  const quality = Math.max(0, Math.min(0.99, Number(row && row.quality != null ? row.quality : _readyQuality(prob, ev, safetyLabel, sentiment, histProb, hasRationale)) || 0));
+  const supportCount = [
+    prob >= 0.56,
+    ev >= 0,
+    edge >= 0.015,
+    histProb >= Math.max(0.50, prob - 0.08),
+    confidence >= 58,
+    safetyLabel === 'SAFE' || safetyLabel === 'ELITE',
+    worthIt || worthScore >= 0.55,
+    sentiment >= 0.04,
+    mentions >= 5,
+    hasRationale,
+  ].filter(Boolean).length;
+  const mentionBoost = mentions > 0 ? Math.min(0.05, Math.log10(mentions + 1) * 0.03) : 0;
+  const evidenceScore = Math.max(0, Math.min(0.99,
+    quality * 0.50 +
+    Math.max(-0.03, Math.min(0.10, ev * 0.40)) +
+    Math.max(0, Math.min(0.10, edge * 2.5)) +
+    worthScore * 0.10 +
+    (worthIt ? 0.05 : 0) +
+    Math.max(0, Math.min(0.06, sentiment * 0.22)) +
+    mentionBoost +
+    Math.max(0, Math.min(0.05, (confidence - 50) / 100)) +
+    (hasRationale ? 0.03 : 0)
+  ));
+
+  return {
+    prob,
+    ev,
+    edge,
+    quality,
+    confidence,
+    histProb,
+    sentiment,
+    worthScore,
+    worthIt,
+    mentions,
+    hasRationale,
+    safetyLabel,
+    supportCount,
+    evidenceScore,
+  };
+}
+
+function _readySelection(row, kind) {
+  const metrics = _readyEvidence(row);
+  const isProp = kind === 'player_prop';
+  const minProb = isProp ? 0.58 : 0.56;
+  const minQuality = isProp ? 0.60 : 0.57;
+  const minEvidence = isProp ? 0.60 : 0.57;
+  const minSupport = isProp ? 3 : 2;
+
+  if (metrics.safetyLabel === 'RISKY') return { ...metrics, keep: false, reason: 'risky' };
+  if (metrics.prob < minProb) return { ...metrics, keep: false, reason: 'probability' };
+  if (metrics.ev < -0.02) return { ...metrics, keep: false, reason: 'negative_ev' };
+  if (metrics.edge < -0.01) return { ...metrics, keep: false, reason: 'negative_edge' };
+  if (metrics.quality < minQuality) return { ...metrics, keep: false, reason: 'quality' };
+  if (!metrics.hasRationale && !metrics.worthIt && metrics.edge <= 0 && metrics.histProb > 0 && metrics.histProb < Math.max(0.50, metrics.prob - 0.10)) {
+    return { ...metrics, keep: false, reason: 'weak_history' };
+  }
+  if (metrics.supportCount < minSupport && metrics.evidenceScore < minEvidence) {
+    return { ...metrics, keep: false, reason: 'insufficient_support' };
+  }
+  if (!metrics.worthIt && metrics.supportCount < (minSupport + 1) && metrics.evidenceScore < (minEvidence + 0.03) && metrics.edge < 0.015) {
+    return { ...metrics, keep: false, reason: 'thin_evidence' };
+  }
+  return { ...metrics, keep: true, reason: 'qualified' };
+}
+
 function _normText(v) {
   return String(v || '').toLowerCase().replace(/[^a-z0-9\s]+/g, ' ').replace(/\s+/g, ' ').trim();
 }
@@ -3971,10 +4097,9 @@ function _deriveReadyBets() {
       const sentiment = Number(bet.signal_sentiment != null ? bet.signal_sentiment : bet.sentiment_score) || 0;
       const histProb = Number(bet.signal_hist_prob) || 0;
       const safety = bet.safety_label || 'MODERATE';
-      const hasRationale = !!(bet.signal_rationale || bet.news_snippet);
+      const hasRationale = !!(bet.signal_rationale || bet.worth_reason || bet.news_snippet);
       const quality = _readyQuality(prob, ev, safety, sentiment, histProb, hasRationale);
-      if (prob < 0.58 || ev < -0.02 || quality < 0.58) return;
-      if (String(safety).toUpperCase() === 'RISKY') return;
+      if (prob < 0.54 || ev < -0.03) return;
 
       const kind = (k === 'home_team_total' || k === 'away_team_total') ? 'team_prop' : 'single';
       const labelObj = plainEnglishBet(bet, card.home_team || '', card.away_team || '', 'upcoming');
@@ -3986,7 +4111,7 @@ function _deriveReadyBets() {
         bet.line != null ? bet.line : '',
         card.game_date || '',
       ]);
-      out.push({
+      const row = {
         uid,
         kind,
         label,
@@ -4003,7 +4128,13 @@ function _deriveReadyBets() {
         quality,
         sentiment_score: sentiment,
         signal_hist_prob: histProb,
-        signal_rationale: bet.signal_rationale || bet.news_snippet || '',
+        signal_rationale: bet.signal_rationale || bet.worth_reason || bet.news_snippet || '',
+        confidence: Number(bet.confidence || Math.round(prob * 100)) || Math.round(prob * 100),
+        edge: Number(bet.edge || 0),
+        worth_score: bet.worth_score || 0,
+        worth_it: !!bet.worth_it,
+        market_popularity: Number(bet.market_popularity || 0),
+        market_mentions: Number(bet.market_mentions || 0),
         home_team: card.home_team || '',
         away_team: card.away_team || '',
         team: kind === 'team_prop' ? (k === 'home_team_total' ? card.home_team : card.away_team) : '',
@@ -4011,6 +4142,15 @@ function _deriveReadyBets() {
         bet_uid: uid,
         prediction_uid: uid,
         side_default: 'yes',
+      };
+      const selection = _readySelection(row, kind === 'team_prop' ? 'single' : kind);
+      if (!selection.keep) return;
+      out.push({
+        ...row,
+        quality: selection.quality,
+        evidence_score: selection.evidenceScore,
+        support_count: selection.supportCount,
+        selection_reason: selection.reason,
       });
     });
   });
@@ -4026,8 +4166,7 @@ function _deriveReadyBets() {
     const safety = p.safety_label || 'MODERATE';
     const hasRationale = !!(p.signal_rationale || p.worth_reason || p.news_snippet);
     const quality = _readyQuality(prob, ev, safety, sentiment, histProb, hasRationale);
-    if (prob < 0.6 || ev < -0.02 || quality < 0.6) return;
-    if (String(safety).toUpperCase() === 'RISKY') return;
+    if (prob < 0.55 || ev < -0.03) return;
 
     const label = plainEnglishPropText(p).text;
     const uid = p.bet_uid || p.prediction_uid || _readyUid('prop', [
@@ -4044,7 +4183,7 @@ function _deriveReadyBets() {
     const isGameLevelBet = GAME_LEVEL_BET_TYPES.has(rawBetType) || GAME_LEVEL_BET_TYPES.has(String(p.bet_type || '').toLowerCase());
     const propKind = isGameLevelBet ? 'single' : 'player_prop';
 
-    out.push({
+    const row = {
       uid,
       kind: propKind,
       label,
@@ -4061,6 +4200,12 @@ function _deriveReadyBets() {
       sentiment_score: sentiment,
       signal_hist_prob: histProb,
       signal_rationale: p.signal_rationale || p.worth_reason || '',
+      confidence: Number(p.confidence || Math.round(prob * 100)) || Math.round(prob * 100),
+      edge: Number(p.edge || 0),
+      worth_score: p.worth_score || 0,
+      worth_it: !!p.worth_it,
+      market_popularity: Number(p.market_popularity || 0),
+      market_mentions: Number(p.market_mentions || 0),
       team: p.team || '',
       home_team: p.home_team || '',
       away_team: p.away_team || '',
@@ -4072,6 +4217,15 @@ function _deriveReadyBets() {
       bet_uid: uid,
       prediction_uid: uid,
       side_default: 'yes',
+    };
+    const selection = _readySelection(row, propKind);
+    if (!selection.keep) return;
+    out.push({
+      ...row,
+      quality: selection.quality,
+      evidence_score: selection.evidenceScore,
+      support_count: selection.supportCount,
+      selection_reason: selection.reason,
     });
   });
 
@@ -4085,10 +4239,12 @@ function _deriveReadyBets() {
       return;
     }
     const prev = dedupe.get(row.uid);
-    if ((row.quality || 0) > (prev.quality || 0)) dedupe.set(row.uid, row);
+    if ((row.evidence_score || row.quality || 0) > (prev.evidence_score || prev.quality || 0)) dedupe.set(row.uid, row);
   });
 
   return Array.from(dedupe.values()).sort((a, b) => {
+    const evidenceDelta = (b.evidence_score || 0) - (a.evidence_score || 0);
+    if (Math.abs(evidenceDelta) > 1e-9) return evidenceDelta;
     const q = (b.quality || 0) - (a.quality || 0);
     if (Math.abs(q) > 1e-9) return q;
     const p = (b.model_prob || 0) - (a.model_prob || 0);
