@@ -2645,7 +2645,6 @@ def _build_multi_sport_snapshot(force_refresh: bool = False) -> dict:
 
     games: list[dict] = []
     bets: list[dict] = []
-    empty_streak = 0
 
     for sport in active:
         sport_key = str(sport.get("key") or "").strip()
@@ -2657,19 +2656,10 @@ def _build_multi_sport_snapshot(force_refresh: bool = False) -> dict:
             events = get_live_odds(sport_key, markets="h2h") or []
         except Exception as e:
             _log(f"[all-sports] {sport_key} odds error: {e}")
-            empty_streak += 1
-            if empty_streak >= 5 and not games:
-                _log("[all-sports] Stopping fetch early (likely API auth/quota issue)")
-                break
             continue
 
         if not events:
-            empty_streak += 1
-            if empty_streak >= 5 and not games:
-                _log("[all-sports] Stopping fetch early (no events returned across multiple sports)")
-                break
             continue
-        empty_streak = 0
 
         for ev in events:
             home = str(ev.get("home_team") or "").strip()
@@ -2834,8 +2824,8 @@ def _run_all_sports_analysis():
             if isinstance(b, dict)
         )
         if fallback_only:
-            _log("[all-sports] Snapshot is fallback-only; skipping sentiment/player-prop expansion")
-            sentiment_prop_rows = []
+            _log("[all-sports] Snapshot is fallback-only; using lightweight model player props")
+            sentiment_prop_rows = _build_model_player_props_fallback((games or [])[:12], max_per_game=2)
         else:
             sentiment_prop_rows = _build_all_sport_sentiment_props(games, bets)
         table_rows = _merge_all_sports_table_rows(sentiment_prop_rows, best_bet_rows)
@@ -3897,8 +3887,8 @@ def api_cached_state():
                 "sport": _ACTIVE_SPORT,
                 "status": "idle",
                 "last_updated": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
-                "game_cards_today": fallback_today,
-                "game_cards_tomorrow": fallback_tomorrow,
+                "game_cards_today": _clean(fallback_today),
+                "game_cards_tomorrow": _clean(fallback_tomorrow),
                 "best_parlays": [],
                 "player_props": _clean(fallback_props) if _ACTIVE_SPORT == "all" else [],
                 "elite_parlay": None,
@@ -5177,13 +5167,18 @@ def api_kalshi_resolve_ready():
             clean_bets,
             force_refresh=bool(data.get("force_refresh")),
         )
-        # Auto-generate combo suggestions from matched bets
-        combos = suggest_combo_bets(
-            clean_bets,
-            resolutions=resolved.get("resolutions") or {},
-            max_legs=4,
-            min_legs=2,
-        )
+        # Auto-generate combo suggestions from matched bets.
+        # Never fail the whole resolve response if combo analysis crashes.
+        combos = []
+        try:
+            combos = suggest_combo_bets(
+                clean_bets,
+                resolutions=resolved.get("resolutions") or {},
+                max_legs=4,
+                min_legs=2,
+            )
+        except Exception as combo_exc:
+            _log(f"[kalshi] combo suggestion skipped: {combo_exc}")
         return jsonify({"ok": True, **_clean(resolved), "combo_suggestions": _clean(combos)})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e), "resolutions": {}, "summary": {}, "combo_suggestions": []})
@@ -6063,8 +6058,8 @@ def _load_boot_schedule_fallback() -> bool:
                 if isinstance(b, dict)
             )
             if fallback_only:
-                _log("[boot] All-sports fallback snapshot is model-only; skipping prop expansion")
-                boot_player_props = []
+                _log("[boot] All-sports fallback snapshot is model-only; building lightweight model props")
+                boot_player_props = _build_model_player_props_fallback((all_games or [])[:10], max_per_game=2)
             else:
                 boot_player_props = _build_all_sport_sentiment_props(all_games, all_bets)
             boot_best_bets = _multi_sport_best_bets_rows(all_bets)

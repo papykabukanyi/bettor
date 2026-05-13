@@ -199,6 +199,15 @@ _ENTITY_STOPWORDS = {
     "the",
     "united",
 }
+_AMBIGUOUS_TEAM_ALIASES = {
+    "new york",
+    "los angeles",
+    "san antonio",
+    "san francisco",
+    "san diego",
+    "kansas city",
+    "oklahoma city",
+}
 _SPORT_DONE_HOURS = {
     "baseball": 4.5,
     "basketball": 3.5,
@@ -689,11 +698,17 @@ def _entity_aliases(name: Any) -> set[str]:
         if len(no_stop[0]) >= 4:
             aliases.add(no_stop[0])
         if len(no_stop) >= 2:
-            aliases.add(" ".join(no_stop[:2]))
-            aliases.add(" ".join(no_stop[-2:]))
+            first_two = " ".join(no_stop[:2])
+            last_two = " ".join(no_stop[-2:])
+            if first_two not in _AMBIGUOUS_TEAM_ALIASES:
+                aliases.add(first_two)
+            if last_two not in _AMBIGUOUS_TEAM_ALIASES:
+                aliases.add(last_two)
             aliases.add(" ".join(no_stop[:-1] + [no_stop[-1][:1]]))
     if len(tokens) >= 2:
-        aliases.add(" ".join(tokens[-2:]))
+        token_last_two = " ".join(tokens[-2:])
+        if token_last_two not in _AMBIGUOUS_TEAM_ALIASES:
+            aliases.add(token_last_two)
     if "76ers" in str(name):
         aliases.update({"76ers", "sixers"})
 
@@ -718,7 +733,10 @@ def _entity_match_score(text: str, name: Any) -> float:
     last_token = name_tokens[-1] if name_tokens else ""
     for alias in aliases:
         if alias in text:
-            score = 5.8 if " " in alias else 2.2
+            if " " in alias:
+                score = 1.6 if alias in _AMBIGUOUS_TEAM_ALIASES else 5.2
+            else:
+                score = 2.2
             if alias == last_token and len(name_tokens) >= 2:
                 score = 3.2
             best = max(best, score)
@@ -940,7 +958,13 @@ def _score_event_group(bet: dict[str, Any], event_group: dict[str, Any]) -> floa
             _entity_match_score(text, bet.get("away_team")),
         ) * 0.35
         score += _token_overlap_score(text, bet.get("prop_type"), bet.get("direction"), bet.get("label"))
-        score += _line_match_score(text, bet.get("line"), allow_half_step_integer=True)
+        line_score = _line_match_score(text, bet.get("line"), allow_half_step_integer=True)
+        if line_score <= 0.0:
+            direction_hint = str(
+                bet.get("direction") or bet.get("pick") or bet.get("label") or ""
+            )
+            line_score = _line_proximity_score(text, bet.get("line"), direction=direction_hint)
+        score += line_score
         score += time_score
 
         # Strongly prefer the event whose series ticker matches the bet's stat type.
@@ -959,13 +983,18 @@ def _score_event_group(bet: dict[str, Any], event_group: dict[str, Any]) -> floa
 
     home_score = _entity_match_score(text, bet.get("home_team"))
     away_score = _entity_match_score(text, bet.get("away_team"))
+    picked_team = _picked_team_name(bet)
+    picked_team_score = _entity_match_score(text, picked_team) if picked_team else 0.0
     pick_score = max(
+        picked_team_score,
         _entity_match_score(text, bet.get("team")),
         _entity_match_score(text, bet.get("pick")),
         _entity_match_score(text, bet.get("label")),
     )
 
     if max(home_score, away_score, pick_score) < 1.9:
+        return 0.0
+    if bet_kind == "moneyline" and picked_team and picked_team_score < 2.2:
         return 0.0
     if (bet.get("home_team") or bet.get("away_team")) and home_score < 1.7 and away_score < 1.7:
         return 0.0
@@ -989,21 +1018,21 @@ def _score_event_group(bet: dict[str, Any], event_group: dict[str, Any]) -> floa
 
 
 def _picked_team_name(bet: dict[str, Any]) -> str:
+    pick_text = _norm_text(" ".join(str(bet.get(key) or "") for key in ("pick", "label")))
+    home_team = str(bet.get("home_team") or "").strip()
+    away_team = str(bet.get("away_team") or "").strip()
+
+    if pick_text and (home_team or away_team):
+        home_score = _entity_match_score(pick_text, home_team)
+        away_score = _entity_match_score(pick_text, away_team)
+        if max(home_score, away_score) >= 2.2:
+            return home_team if home_score >= away_score else away_team
+
     team = str(bet.get("team") or "").strip()
     if team:
         return team
 
-    pick_text = _norm_text(" ".join(str(bet.get(key) or "") for key in ("pick", "label")))
-    if not pick_text:
-        return ""
-
-    home_team = str(bet.get("home_team") or "").strip()
-    away_team = str(bet.get("away_team") or "").strip()
-    home_score = _entity_match_score(pick_text, home_team)
-    away_score = _entity_match_score(pick_text, away_team)
-    if max(home_score, away_score) < 2.2:
-        return ""
-    return home_team if home_score >= away_score else away_team
+    return ""
 
 
 def _resolve_market_side(bet: dict[str, Any], market: dict[str, Any]) -> str:
@@ -1463,6 +1492,9 @@ def _resolve_single_bet(
         )
 
     local_event_index = event_index or _build_event_index(markets)
+    bet_kind = _bet_kind_tag(bet)
+    min_event_score = 6.8 if bet_kind == "player_prop" else 7.5
+    min_market_score = 7.2 if bet_kind == "player_prop" else 8.5
     scored_events: list[tuple[float, dict[str, Any]]] = []
     for event_group in local_event_index.values():
         score = _score_event_group(bet, event_group)
@@ -1470,7 +1502,7 @@ def _resolve_single_bet(
             scored_events.append((score, event_group))
     scored_events.sort(key=lambda item: item[0], reverse=True)
 
-    if not scored_events or scored_events[0][0] < 7.5:
+    if not scored_events or scored_events[0][0] < min_event_score:
         return _single_resolution_payload(
             "unavailable",
             message="No exact Kalshi event matches this prediction.",
@@ -1480,7 +1512,8 @@ def _resolve_single_bet(
     if len(scored_events) > 1:
         top_event_score = scored_events[0][0]
         next_event_score = scored_events[1][0]
-        if next_event_score >= 7.0 and (top_event_score - next_event_score) < 1.5:
+        event_ambiguity_gap = 0.8 if bet_kind == "moneyline" else 1.0
+        if next_event_score >= 7.0 and (top_event_score - next_event_score) < event_ambiguity_gap:
             return _single_resolution_payload(
                 "unavailable",
                 message="Kalshi event match is ambiguous; refusing to guess a ticker.",
@@ -1500,7 +1533,7 @@ def _resolve_single_bet(
         elif score > second_best_score:
             second_best_score = score
 
-    if best_market is None or best_score < 8.5:
+    if best_market is None or best_score < min_market_score:
         return _single_resolution_payload(
             "unavailable",
             message="No exact Kalshi market is open for this bet.",
@@ -1618,6 +1651,9 @@ def get_open_market_catalog(*, force_refresh: bool = False) -> dict[str, Any]:
     now = time.time()
     with _KALSHI_MARKET_CACHE_LOCK:
         age = now - float(_KALSHI_MARKET_CACHE.get("ts") or 0.0)
+        cached_markets = list(_KALSHI_MARKET_CACHE.get("markets") or [])
+        cached_combo_markets = list(_KALSHI_MARKET_CACHE.get("combo_markets") or [])
+        cached_count = int(_KALSHI_MARKET_CACHE.get("count") or 0)
         if (
             not force_refresh
             and _KALSHI_MARKET_CACHE.get("markets")
@@ -1669,20 +1705,59 @@ def get_open_market_catalog(*, force_refresh: bool = False) -> dict[str, Any]:
             if sport:
                 newly_confirmed[series] = sport
 
+    # If targeted series fetch returns nothing (transient API issues),
+    # fall back to broad sports scan to avoid "0 markets scanned" responses.
+    if not markets:
+        cursor = None
+        scan_pages = max(2, min(30, int(os.getenv("KALSHI_FALLBACK_SCAN_PAGES", "12") or "12")))
+        pages = 0
+        while pages < scan_pages:
+            pages += 1
+            try:
+                data = list_markets(limit=500, cursor=cursor, status="open")
+            except Exception:
+                break
+            rows = data.get("markets") or []
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                sport = _market_sport_tag(row)
+                if not sport or sport == "multi":
+                    continue
+                ticker = str(row.get("ticker") or "")
+                if ticker and ticker not in seen_tickers:
+                    seen_tickers.add(ticker)
+                    markets.append(row)
+            cursor = data.get("cursor")
+            if not cursor:
+                break
+
     # Persist any newly confirmed or registry-missing series
     if newly_confirmed:
         _update_series_registry(newly_confirmed)
 
+    # If fetch still failed but we have a previous non-empty cache, return stale cache
+    # instead of dropping to zero markets.
+    if not markets and cached_markets:
+        stale_age = now - float(_KALSHI_MARKET_CACHE.get("ts") or 0.0)
+        return {
+            "markets": list(cached_markets),
+            "combo_markets": list(cached_combo_markets),
+            "count": int(cached_count),
+            "cache_age_sec": max(0.0, stale_age),
+        }
+
     combo_markets = [market for market in markets if _is_combo_market(market)]
-    with _KALSHI_MARKET_CACHE_LOCK:
-        _KALSHI_MARKET_CACHE.update(
-            {
-                "ts": time.time(),
-                "markets": markets,
-                "combo_markets": combo_markets,
-                "count": len(markets),
-            }
-        )
+    if markets:
+        with _KALSHI_MARKET_CACHE_LOCK:
+            _KALSHI_MARKET_CACHE.update(
+                {
+                    "ts": time.time(),
+                    "markets": markets,
+                    "combo_markets": combo_markets,
+                    "count": len(markets),
+                }
+            )
 
     return {
         "markets": list(markets),
@@ -1700,6 +1775,9 @@ def resolve_ready_bets(
     global _RESOLUTION_CACHE, _RESOLUTION_CACHE_CATALOG_TS
 
     catalog = get_open_market_catalog(force_refresh=force_refresh)
+    if not int(catalog.get("count") or 0) and not force_refresh:
+        # Retry once with hard refresh before accepting a zero-market catalog.
+        catalog = get_open_market_catalog(force_refresh=True)
     catalog_ts = float(_KALSHI_MARKET_CACHE.get("ts") or 0.0)
 
     # Invalidate resolution cache whenever the market catalog has been refreshed

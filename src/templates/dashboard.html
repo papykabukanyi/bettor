@@ -1653,7 +1653,7 @@ function applyCachedData(d, opts) {
     BEST_PARLAYS = _assignCachedArray(BEST_PARLAYS, d.best_parlays, _asArray, preserveIfIncomingEmpty);
   }
   if (d.player_props !== undefined) {
-    ALL_PROPS = _assignCachedArray(ALL_PROPS, d.player_props, rows => _publicOverProps(_asArray(rows)), preserveIfIncomingEmpty);
+    ALL_PROPS = _assignCachedArray(ALL_PROPS, d.player_props, _asArray, preserveIfIncomingEmpty);
   }
   renderAll();
   _autoSelectDefaultTab();
@@ -3383,7 +3383,7 @@ function handleGameCardKeydown(event, cardEl) {
 let _filteredProps = [];
 
 function renderPropsTable(props) {
-  ALL_PROPS = _publicOverProps(props || []);
+  ALL_PROPS = _asArray(props || []);
   filterProps();
 }
 
@@ -3850,6 +3850,8 @@ function _legEv(prob, dec) {
 function buildLegPool() {
   const map = new Map();
   const todayIso = _etTodayIso();
+  const tomorrowIso = _etOffsetIso(1);
+  const allowedDates = new Set([todayIso, tomorrowIso]);
   const liveLookup = _liveLookupSnapshot();
   const addLeg = (leg) => {
     const key = `${leg.label}|${leg.game||''}`;
@@ -3859,10 +3861,10 @@ function buildLegPool() {
     }
   };
 
-  // Player props (OVER only, must have player name)
-  _publicOverProps(ALL_PROPS || []).forEach(p => {
+  // Player props (all directions, must have player name)
+  _asArray(ALL_PROPS || []).forEach(p => {
     const gd = String(p.game_date || p.date || '').slice(0, 10);
-    if (gd && gd !== todayIso) return;
+    if (gd && !allowedDates.has(gd)) return;
     const gameKey = p.game_key || p.game || '';
     const scheduledStart = p.scheduled_start || _scheduledStartFromGameKey(gameKey);
     if (_rowPhaseLike({
@@ -3922,9 +3924,9 @@ function buildLegPool() {
   });
 
   // Game-level bets from ALL_PROPS (e.g. soccer 1x2, WNBA moneylines that have no player name)
-  _publicOverProps(ALL_PROPS || []).forEach(p => {
+  _asArray(ALL_PROPS || []).forEach(p => {
     const gd = String(p.game_date || p.date || '').slice(0, 10);
-    if (gd && gd !== todayIso) return;
+    if (gd && !allowedDates.has(gd)) return;
     if (p.name) return; // player props already handled above
     const rawBetType = String(p.bet_type || p.stat_type || '').toLowerCase().replace(/[\s-]+/g, '_');
     if (!GAME_LEVEL_BET_TYPES.has(rawBetType) && !GAME_LEVEL_BET_TYPES.has(String(p.bet_type || '').toLowerCase())) return;
@@ -3985,9 +3987,9 @@ function buildLegPool() {
   const betKeys = [
     'moneyline','run_line','total','f5_moneyline','f5_total','home_team_total','away_team_total'
   ];
-  const cards = _normalizeCardList(TODAY_CARDS || []).filter(c => {
+  const cards = _normalizeCardList([...(TODAY_CARDS || []), ...(TOMORROW_CARDS || [])]).filter(c => {
     const gd = String((c && c.game_date) || '').slice(0, 10);
-    return (!gd || gd === todayIso)
+    return (!gd || allowedDates.has(gd))
       && _phaseForCard(c.status || '', c.game_date || '', c.game_time || '', c.game_datetime || '') === 'upcoming';
   });
   cards.forEach(c => {
@@ -4255,11 +4257,13 @@ function _deriveComboReadyRows() {
 function _deriveReadyBets() {
   const out = [];
   const todayIso = _etTodayIso();
+  const tomorrowIso = _etOffsetIso(1);
+  const allowedDates = new Set([todayIso, tomorrowIso]);
   const gameKeys = ['moneyline','run_line','total','f5_moneyline','f5_total','home_team_total','away_team_total'];
 
-  _normalizeCardList(TODAY_CARDS || []).forEach(card => {
+  _normalizeCardList([...(TODAY_CARDS || []), ...(TOMORROW_CARDS || [])]).forEach(card => {
     const cardDate = String(card.game_date || '').slice(0, 10);
-    if (cardDate && cardDate !== todayIso) return;
+    if (cardDate && !allowedDates.has(cardDate)) return;
     gameKeys.forEach(k => {
       const bet = card[k];
       if (!bet || !bet.pick) return;
@@ -4309,11 +4313,11 @@ function _deriveReadyBets() {
         market_mentions: Number(bet.market_mentions || 0),
         home_team: card.home_team || '',
         away_team: card.away_team || '',
-        team: kind === 'team_prop' ? (k === 'home_team_total' ? card.home_team : card.away_team) : '',
+        team: kind === 'team_prop' ? (k === 'home_team_total' ? card.home_team : card.away_team) : (cleanPickTeam(bet.pick || '') || ''),
         line: bet.line,
         bet_uid: uid,
         prediction_uid: uid,
-        side_default: 'yes',
+        side_default: _defaultKalshiSide(bet),
       };
       const selection = _readySelection(row, kind === 'team_prop' ? 'single' : kind);
       if (!selection.keep) return;
@@ -4327,9 +4331,9 @@ function _deriveReadyBets() {
     });
   });
 
-  _publicOverProps(ALL_PROPS || []).forEach(p => {
+  _asArray(ALL_PROPS || []).forEach(p => {
     const gd = String(p.game_date || p.date || '').slice(0, 10);
-    if (gd && gd !== todayIso) return;
+    if (gd && !allowedDates.has(gd)) return;
     const prob = _legProb(p);
     const dec = _legDec(p) || 1.9;
     const ev = p.ev != null ? Number(p.ev) : _legEv(prob, dec);
@@ -4388,7 +4392,7 @@ function _deriveReadyBets() {
       scheduled_start: p.game_datetime || p.scheduled_start || null,
       bet_uid: uid,
       prediction_uid: uid,
-      side_default: 'yes',
+      side_default: _defaultKalshiSide(p),
     };
     const selection = _readySelection(row, propKind);
     if (!selection.keep) return;
