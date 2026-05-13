@@ -20,21 +20,26 @@ import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
-# ── Config ────────────────────────────────────────────────────────────────────
-_ENABLED  = os.getenv("EMAIL_ENABLED", "true").strip().lower() in {"true", "1", "yes", "on"}
-_HOST     = os.getenv("EMAIL_HOST",    "smtp.gmail.com")
-_PORT     = int(os.getenv("EMAIL_PORT", "587"))
-_USER     = os.getenv("EMAIL_USER",    "")
-_PASS     = os.getenv("EMAIL_PASS",    "").replace(" ", "")   # strip spaces from app password
-_TO_RAW   = os.getenv("EMAIL_TO",      "")
-
 # Primary recipient — always gets all emails
 _PRIMARY_RECIPIENT = "papykabukanyi@gmail.com"
 
 
-def _recipients() -> list[str]:
+def _email_settings() -> dict:
+    return {
+        "enabled": os.getenv("EMAIL_ENABLED", "true").strip().lower() in {"true", "1", "yes", "on"},
+        "host": os.getenv("EMAIL_HOST", "smtp.gmail.com").strip() or "smtp.gmail.com",
+        "port": int(os.getenv("EMAIL_PORT", "587") or "587"),
+        "user": os.getenv("EMAIL_USER", "").strip(),
+        "password": os.getenv("EMAIL_PASS", "").replace(" ", ""),
+        "to_raw": os.getenv("EMAIL_TO", ""),
+        "use_ssl": os.getenv("EMAIL_USE_SSL", "").strip().lower() in {"true", "1", "yes", "on"},
+    }
+
+
+def _recipients(settings: dict | None = None) -> list[str]:
     """Return deduped recipient list, always including the primary address."""
-    extras = [e.strip() for e in _TO_RAW.split(",") if e.strip()]
+    cfg = settings or _email_settings()
+    extras = [e.strip() for e in str(cfg.get("to_raw") or "").split(",") if e.strip()]
     seen = set()
     result = []
     for addr in [_PRIMARY_RECIPIENT] + extras:
@@ -51,31 +56,36 @@ def send_email(subject: str, html_body: str, plain_body: str = "") -> dict:
     Send an email to all configured recipients.
     Returns {"sent": n, "failed": n, "errors": [...]}
     """
-    if not _ENABLED:
-        return {"sent": 0, "failed": 0, "errors": [], "note": "Email disabled (EMAIL_ENABLED=false)"}
-    if not _USER or not _PASS:
-        return {"sent": 0, "failed": 0, "errors": ["EMAIL_USER or EMAIL_PASS not set"]}
+    settings = _email_settings()
+    if not settings["enabled"]:
+        return {"ok": False, "sent": 0, "failed": 0, "errors": [], "note": "Email disabled (EMAIL_ENABLED=false)"}
+    if not settings["user"] or not settings["password"]:
+        return {"ok": False, "sent": 0, "failed": 0, "errors": ["EMAIL_USER or EMAIL_PASS not set"]}
 
-    to_list = _recipients()
+    to_list = _recipients(settings)
     if not to_list:
-        return {"sent": 0, "failed": 0, "errors": [], "note": "No recipients in EMAIL_TO"}
+        return {"ok": False, "sent": 0, "failed": 0, "errors": [], "note": "No recipients in EMAIL_TO"}
 
-    results = {"sent": 0, "failed": 0, "errors": []}
+    results = {"ok": False, "sent": 0, "failed": 0, "errors": []}
     try:
-        with smtplib.SMTP(_HOST, _PORT, timeout=20) as server:
+        use_ssl = bool(settings.get("use_ssl")) or int(settings.get("port") or 0) == 465
+        smtp_cls = smtplib.SMTP_SSL if use_ssl else smtplib.SMTP
+        with smtp_cls(settings["host"], settings["port"], timeout=20) as server:
             server.ehlo()
-            server.starttls()
-            server.login(_USER, _PASS)
+            if not use_ssl:
+                server.starttls()
+                server.ehlo()
+            server.login(settings["user"], settings["password"])
             for recipient in to_list:
                 try:
                     msg = MIMEMultipart("alternative")
                     msg["Subject"] = subject
-                    msg["From"]    = _USER
+                    msg["From"]    = settings["user"]
                     msg["To"]      = recipient
                     if plain_body:
                         msg.attach(MIMEText(plain_body, "plain"))
                     msg.attach(MIMEText(html_body, "html"))
-                    server.sendmail(_USER, recipient, msg.as_string())
+                    server.sendmail(settings["user"], recipient, msg.as_string())
                     results["sent"] += 1
                     print(f"[email] Sent to {recipient}")
                 except Exception as exc:
@@ -85,6 +95,7 @@ def send_email(subject: str, html_body: str, plain_body: str = "") -> dict:
         results["failed"] += len(to_list)
         results["errors"].append({"to": "smtp", "error": str(exc)})
 
+    results["ok"] = results["sent"] > 0 and results["failed"] == 0
     return results
 
 

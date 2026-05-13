@@ -964,13 +964,14 @@ def resolve_game_outcomes(days_back: int = 3) -> int:
         return 0
 
     try:
-        from data.db import get_predictions, update_prediction_outcome, get_conn
+        from data.db import get_conn
     except Exception:
         return 0
 
     resolved = 0
     today = et_today()
-    for delta in range(1, days_back + 1):
+    # Include current date as well, so late-day finals can resolve immediately.
+    for delta in range(0, days_back + 1):
         check_date = today - datetime.timedelta(days=delta)
         date_str   = check_date.isoformat()
         try:
@@ -999,8 +1000,17 @@ def resolve_game_outcomes(days_back: int = 3) -> int:
                 cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
                 cur.execute("""
                     SELECT id, bet_type, pick, line FROM predictions
-                    WHERE game_key = %s AND game_date = %s AND outcome = 'PENDING'
-                """, (gk, date_str))
+                    WHERE game_date = %s
+                      AND outcome = 'PENDING'
+                      AND COALESCE(NULLIF(sport, ''), 'mlb') = 'mlb'
+                      AND (
+                            game_key = %s
+                            OR (
+                                LOWER(COALESCE(home_team, '')) = LOWER(%s)
+                                AND LOWER(COALESCE(away_team, '')) = LOWER(%s)
+                            )
+                      )
+                """, (date_str, gk, ht, at))
                 pending = cur.fetchall()
             except Exception:
                 conn.close()

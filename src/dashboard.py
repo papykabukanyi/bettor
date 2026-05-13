@@ -4106,6 +4106,20 @@ def api_predictions():
         return jsonify({"ok": False, "error": str(e), "predictions": []})
 
 
+@app.route("/api/prop-history")
+def api_prop_history():
+    days = int(request.args.get("days", 30))
+    outcome = request.args.get("outcome")
+    try:
+        from data.db import get_prop_history
+
+        db_sport = None if _ACTIVE_SPORT == "all" else _ACTIVE_SPORT
+        rows = get_prop_history(days=days, outcome=outcome or None, sport=db_sport)
+        return jsonify({"ok": True, "props": _clean(rows)})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e), "props": []})
+
+
 def _match_status_bucket(status: str) -> str:
     s = str(status or "").lower()
     if any(k in s for k in ("in progress", "in_play", "live", "halftime", "paused")):
@@ -5163,22 +5177,24 @@ def api_kalshi_resolve_ready():
         if not isinstance(bets, list):
             bets = []
         clean_bets = [bet for bet in bets if isinstance(bet, dict)]
+        include_combo_suggestions = bool(data.get("include_combo_suggestions"))
         resolved = resolve_ready_bets(
             clean_bets,
             force_refresh=bool(data.get("force_refresh")),
         )
-        # Auto-generate combo suggestions from matched bets.
-        # Never fail the whole resolve response if combo analysis crashes.
         combos = []
-        try:
-            combos = suggest_combo_bets(
-                clean_bets,
-                resolutions=resolved.get("resolutions") or {},
-                max_legs=4,
-                min_legs=2,
-            )
-        except Exception as combo_exc:
-            _log(f"[kalshi] combo suggestion skipped: {combo_exc}")
+        if include_combo_suggestions:
+            # Combo suggestion search is CPU-heavier; run only when explicitly requested.
+            # Never fail the whole resolve response if combo analysis crashes.
+            try:
+                combos = suggest_combo_bets(
+                    clean_bets,
+                    resolutions=resolved.get("resolutions") or {},
+                    max_legs=4,
+                    min_legs=2,
+                )
+            except Exception as combo_exc:
+                _log(f"[kalshi] combo suggestion skipped: {combo_exc}")
         return jsonify({"ok": True, **_clean(resolved), "combo_suggestions": _clean(combos)})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e), "resolutions": {}, "summary": {}, "combo_suggestions": []})
@@ -5402,7 +5418,8 @@ def api_email_send():
                 "player_props":     list(_state.get("player_props", [])),
             }
         result = send_daily_picks(state)
-        return jsonify({"ok": True, **result})
+        ok = bool(result.get("ok")) or (int(result.get("sent", 0) or 0) > 0 and int(result.get("failed", 0) or 0) == 0)
+        return jsonify({"ok": ok, **result}), (200 if ok else 500)
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
 
@@ -5414,7 +5431,8 @@ def api_email_send_parlay():
     try:
         from email_notify import send_parlay_alert
         result = send_parlay_alert(data)
-        return jsonify({"ok": True, **result})
+        ok = bool(result.get("ok")) or (int(result.get("sent", 0) or 0) > 0 and int(result.get("failed", 0) or 0) == 0)
+        return jsonify({"ok": ok, **result}), (200 if ok else 500)
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
 
@@ -5583,30 +5601,39 @@ def _run_kalshi_monitor():
         # Build bet dicts compatible with resolve_ready_bets
         ready_bets = []
         for p in preds:
+            pick = str(p.get("pick") or "")
+            home_team = str(p.get("home_team") or "")
+            away_team = str(p.get("away_team") or "")
             ready_bets.append({
                 "bet_uid":     p.get("bet_uid") or str(p.get("id") or ""),
                 "sport":       p.get("sport") or "",
                 "bet_type":    p.get("bet_type") or "moneyline",
-                "pick":        p.get("pick") or "",
-                "label":       p.get("pick") or "",
+                "pick":        pick,
+                "label":       pick,
                 "line":        p.get("line"),
                 "game_date":   str(p.get("game_date") or today_str),
                 "game_time":   str(p.get("game_time") or ""),
-                "home_team":   p.get("home_team") or "",
-                "away_team":   p.get("away_team") or "",
-                "player_name": _extract_player_name(p.get("pick") or ""),
-                "team":        p.get("home_team") or p.get("away_team") or "",
-                "direction":   _extract_direction(p.get("pick") or ""),
-                "prop_type":   _extract_prop_type(p.get("bet_type") or "", p.get("pick") or ""),
+                "home_team":   home_team,
+                "away_team":   away_team,
+                "player_name": _extract_player_name(pick),
+                "team":        _extract_pick_team(pick, home_team, away_team),
+                "direction":   _extract_direction(pick),
+                "prop_type":   _extract_prop_type(p.get("bet_type") or "", pick),
+                "side_default": "no" if "under" in pick.lower() else "yes",
             })
 
         if not ready_bets:
             return
 
-        resolutions = resolve_ready_bets(ready_bets)
+        resolved_payload = resolve_ready_bets(ready_bets)
+        resolutions = resolved_payload.get("resolutions") if isinstance(resolved_payload, dict) else {}
+        if not isinstance(resolutions, dict):
+            resolutions = {}
         newly_matched = []
         for uid, res in resolutions.items():
-            status = res.get("status") or ""
+            if not isinstance(res, dict):
+                continue
+            status = str(res.get("status") or "")
             prev = _kalshi_monitor_last_statuses.get(uid)
             _kalshi_monitor_last_statuses[uid] = status
             if status == "matched" and prev != "matched":
@@ -5631,6 +5658,34 @@ def _extract_player_name(pick_text: str) -> str:
     import re
     m = re.match(r'^([A-Z][a-z]+ [A-Z][a-z\']+)', pick_text.strip())
     return m.group(1) if m else ""
+
+
+def _extract_pick_team(pick_text: str, home_team: str, away_team: str) -> str:
+    """Best-effort team extraction from a pick label for resolver context."""
+    import re
+
+    pick = str(pick_text or "").lower()
+    home = str(home_team or "").strip()
+    away = str(away_team or "").strip()
+    if not pick:
+        return ""
+
+    if home and home.lower() in pick:
+        return home
+    if away and away.lower() in pick:
+        return away
+
+    stop = {"the", "fc", "cf", "sc", "club", "city", "united"}
+
+    def _tokens(team_name: str) -> list[str]:
+        return [t for t in re.findall(r"[a-z0-9']+", team_name.lower()) if len(t) >= 4 and t not in stop]
+
+    home_hits = sum(1 for tok in _tokens(home) if tok in pick)
+    away_hits = sum(1 for tok in _tokens(away) if tok in pick)
+
+    if home_hits == 0 and away_hits == 0:
+        return ""
+    return home if home_hits >= away_hits else away
 
 
 def _extract_direction(pick_text: str) -> str:

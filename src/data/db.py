@@ -1867,7 +1867,7 @@ def get_predictions_for_date(game_date: "str | datetime.date", sport: str | None
             wheres.append("sport = %s")
             vals.append(sport)
         cur.execute(
-            f"""SELECT {bet_uid_col}, game_key, bet_type, pick, line, odds_am, dec_odds, model_prob,
+            f"""SELECT {bet_uid_col}, sport, game_key, bet_type, pick, line, odds_am, dec_odds, model_prob,
                       confidence, safety_label, game_date, game_time,
                       home_team, away_team, home_starter, away_starter, outcome
                FROM predictions
@@ -1927,6 +1927,46 @@ def get_predictions(days: int = 30, outcome: str = None,
         return rows
     except Exception as e:
         print(f"[db] get_predictions error: {e}")
+        return []
+    finally:
+        conn.close()
+
+
+def get_prop_history(days: int = 30, outcome: str = None,
+                     sport: str | None = None) -> list:
+    """Fetch prop history rows for tracking UI and status summaries."""
+    conn = get_conn()
+    if conn is None:
+        return []
+    try:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        wheres = ["detected_at > NOW() - (INTERVAL '1 day' * %s)"]
+        vals = [days]
+        if outcome:
+            wheres.append("outcome = %s")
+            vals.append(outcome.upper())
+        if sport:
+            wheres.append("sport = %s")
+            vals.append(sport)
+
+        cur.execute(
+            f"SELECT * FROM prop_history WHERE {' AND '.join(wheres)} "
+            "ORDER BY detected_at DESC LIMIT 500",
+            vals,
+        )
+        rows = [dict(r) for r in cur.fetchall()]
+        for row in rows:
+            for key in ("game_date", "detected_at", "resolved_at"):
+                if row.get(key):
+                    row[key] = row[key].isoformat() if hasattr(row[key], "isoformat") else str(row[key])
+            if isinstance(row.get("stats_json"), str):
+                try:
+                    row["stats_json"] = json.loads(row["stats_json"])
+                except Exception:
+                    row["stats_json"] = {}
+        return rows
+    except Exception as e:
+        print(f"[db] get_prop_history error: {e}")
         return []
     finally:
         conn.close()

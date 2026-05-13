@@ -65,7 +65,7 @@ _SERIES_SPORT_MAP: dict[str, str] = {
     "NFLMVP": "football", "NFLSB": "football",
     # ── Soccer ──
     "KXMLS": "soccer", "KXEPL": "soccer", "KXFIFA": "soccer",
-    "MSLWIN": "soccer", "EPLWIN": "soccer", "UCLWIN": "soccer",
+    "MSLWIN": "soccer", "MLSWIN": "soccer", "EPLWIN": "soccer", "UCLWIN": "soccer",
 }
 
 # Confirmed live Kalshi sports series to fetch explicitly (bypasses pagination ordering issues).
@@ -81,19 +81,24 @@ _SPORTS_SERIES_TO_FETCH: list[str] = [
     # WNBA
     "KXWNBA",
     # MLB — player props + game markets
+    "MLBWIN",      # game winners / moneylines
+    "MLBOU",       # game totals/over-under
     "KXMLBHRR",    # hits + runs + RBIs combined
     "KXMLBHIT",    # hits only
     "KXMLBTOTAL",  # game run totals
     "KXMLB",       # futures / misc
     # NHL — player props + game markets
+    "NHLWIN",      # game winners / moneylines
+    "NHLOU",       # game totals/over-under
     "KXNHLPTS",    # player points (goals+assists)
     "KXNHLTOTAL",  # game goal totals
     "KXNHLAST",    # player assists
     "KXNHL",       # futures / misc
     # NFL (off-season — will return empty but keeps the door open)
+    "NFLWIN", "NFLOU", "NFLTD",
     "KXNFL",
     # Soccer
-    "KXMLS", "KXEPL", "KXFIFA",
+    "KXMLS", "KXEPL", "KXFIFA", "MSLWIN", "MLSWIN", "EPLWIN", "UCLWIN",
 ]
 
 # Per-series stat-type hints used to disambiguate player prop events.
@@ -363,6 +368,21 @@ _PROP_HINTS = {
     "corners",
 }
 
+_TICKER_MONTHS = {
+    "JAN": 1,
+    "FEB": 2,
+    "MAR": 3,
+    "APR": 4,
+    "MAY": 5,
+    "JUN": 6,
+    "JUL": 7,
+    "AUG": 8,
+    "SEP": 9,
+    "OCT": 10,
+    "NOV": 11,
+    "DEC": 12,
+}
+
 
 def _load_private_key():
     """Load and cache the RSA private key from environment."""
@@ -622,7 +642,32 @@ def _market_time(market: dict[str, Any]) -> datetime.datetime | None:
         dt = _parse_iso_dt(market.get(key))
         if dt is not None:
             return dt
+    for key in ("ticker", "event_ticker"):
+        dt = _ticker_time(str(market.get(key) or ""))
+        if dt is not None:
+            return dt
     return None
+
+
+def _ticker_time(value: str) -> datetime.datetime | None:
+    text = str(value or "").upper().strip()
+    if not text:
+        return None
+    match = re.search(r"(?<!\d)(\d{2})(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)(\d{2})(\d{4})?", text)
+    if not match:
+        return None
+    year = 2000 + int(match.group(1))
+    month = _TICKER_MONTHS.get(match.group(2), 0)
+    day = int(match.group(3))
+    hhmm = match.group(4) or ""
+    if not month:
+        return None
+    if len(hhmm) == 4:
+        hour = int(hhmm[:2])
+        minute = int(hhmm[2:])
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            return _parse_et_local_dt(f"{year:04d}-{month:02d}-{day:02d}T{hour:02d}:{minute:02d}")
+    return _parse_iso_dt(f"{year:04d}-{month:02d}-{day:02d}")
 
 
 def _bet_start_dt(bet: dict[str, Any]) -> datetime.datetime | None:
@@ -915,14 +960,20 @@ def _build_event_index(markets: list[dict[str, Any]]) -> dict[str, dict[str, Any
                 "event_ticker": event_ticker,
                 "markets": [],
                 "sport": "",
+                "market_kinds": set(),
             },
         )
         bucket["markets"].append(market)
         if not bucket["sport"]:
             bucket["sport"] = _market_sport_tag(market)
+        market_kind = _market_kind_tag(market)
+        if market_kind:
+            bucket["market_kinds"].add(market_kind)
 
     for bucket in event_index.values():
         markets_in_event = bucket.get("markets") or []
+        if isinstance(bucket.get("market_kinds"), set):
+            bucket["market_kinds"] = sorted(bucket["market_kinds"])
         bucket["text"] = _combined_market_text(markets_in_event)
         times = [dt for dt in (_market_time(m) for m in markets_in_event) if dt is not None]
         bucket["occurrence_datetime"] = (
@@ -947,6 +998,14 @@ def _score_event_group(bet: dict[str, Any], event_group: dict[str, Any]) -> floa
         return 0.0
 
     bet_kind = _bet_kind_tag(bet)
+    event_kinds = {str(kind) for kind in (event_group.get("market_kinds") or []) if kind}
+    if bet_kind == "moneyline" and event_kinds and "moneyline" not in event_kinds:
+        return 0.0
+    if bet_kind == "spread" and event_kinds and "spread" not in event_kinds:
+        return 0.0
+    if bet_kind in {"total", "team_total"} and event_kinds and "total" not in event_kinds:
+        return 0.0
+
     if bet_kind == "player_prop":
         player_score = _entity_match_score(text, bet.get("player_name") or bet.get("name"))
         if player_score < 2.5:
@@ -1117,7 +1176,7 @@ def _market_sport_tag(market: dict[str, Any]) -> str:
         return "football"
     if any(token in text for token in ("nhlwin", "nhlou", "nhlchamp", "nhlin", "kxnhl", "hockey", "nhl")):
         return "hockey"
-    if any(token in text for token in ("mslwin", "eplwin", "uclwin", "kxmls", "kxepl", "kxfifa", "soccer", "mls", "premier", "bundesliga", "serie a", "laliga", "ligue 1", "uefa", "fifa")):
+    if any(token in text for token in ("mslwin", "mlswin", "eplwin", "uclwin", "kxmls", "kxepl", "kxfifa", "soccer", "mls", "premier", "bundesliga", "serie a", "laliga", "ligue 1", "uefa", "fifa")):
         return "soccer"
     return ""
 

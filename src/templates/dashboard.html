@@ -1108,12 +1108,14 @@ let READY_KALSHI_STATUS = { loading: false, matched: 0, started: 0, done: 0, una
 const READY_ORDER_LOG_MAX = 120;
 let READY_ORDER_LOG = [];
 const READY_ORDER_IDS_KEY = 'bettor_ready_order_ids_v1';
+const READY_SENT_BETS_KEY = 'bettor_ready_sent_bets_v1';
 
 // ── Ops Console ────────────────────────────────────────────────────────────
 let KALSHI_TODAY_DATA = null;  // cached result of fetchKalshiTodayTickers
 let READY_OPS_LOG = [];
 const READY_OPS_LOG_MAX = 150;
 let _lastKalshiResolveMs = 0;
+let _lastKalshiResolveKey = '';
 const _KALSHI_RESOLVE_DEBOUNCE_MS = 600_000; // 10 min between auto-resolves (keeps matches stable)
 
 // Game-level bet types that come through the props pipeline but are NOT player props
@@ -1442,6 +1444,56 @@ function _writeReadyOrderIds(idSet) {
       ids: Array.from(idSet),
     }));
   } catch (e) {}
+}
+
+function _readReadySentBets() {
+  try {
+    const raw = localStorage.getItem(READY_SENT_BETS_KEY);
+    const day = _localDayKey();
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    if (!parsed || parsed.day !== day || !parsed.items || typeof parsed.items !== 'object') return {};
+    return parsed.items;
+  } catch (e) {
+    return {};
+  }
+}
+
+function _writeReadySentBets(items) {
+  try {
+    localStorage.setItem(READY_SENT_BETS_KEY, JSON.stringify({
+      day: _localDayKey(),
+      items: items || {},
+    }));
+  } catch (e) {}
+}
+
+function _readySentInfo(rowOrUid, sentItems) {
+  const items = sentItems || _readReadySentBets();
+  const keys = typeof rowOrUid === 'string'
+    ? [rowOrUid]
+    : [rowOrUid && rowOrUid.uid, rowOrUid && rowOrUid.bet_uid, rowOrUid && rowOrUid.prediction_uid];
+  for (const key of keys) {
+    const lookup = String(key || '').trim();
+    if (lookup && items[lookup]) return items[lookup];
+  }
+  return null;
+}
+
+function _markReadyBetSent(row, info) {
+  const items = _readReadySentBets();
+  const record = {
+    ...(info || {}),
+    uid: String((row && (row.bet_uid || row.uid || row.prediction_uid)) || ''),
+    label: String((info && info.label) || (row && row.label) || ''),
+    sent_at: String((info && info.sent_at) || new Date().toISOString()),
+  };
+  [row && row.uid, row && row.bet_uid, row && row.prediction_uid].forEach(key => {
+    const lookup = String(key || '').trim();
+    if (lookup) items[lookup] = record;
+  });
+  _writeReadySentBets(items);
+  return record;
 }
 
 function _readAutoTrackedSignatures() {
@@ -1894,11 +1946,12 @@ function _liveScoresDigest(scores) {
 
 function _applyLiveScores(scores, opts) {
   const options = opts || {};
+  const skipPropsRender = options.skipPropsRender === true;
   const incoming = scores || {};
   if (options.replace === true) {
     const nextDigest = _liveScoresDigest(incoming);
     if (!options.force && nextDigest === _lastLiveScoresDigest) {
-      _schedulePropsRender(false);
+      if (!skipPropsRender) _schedulePropsRender(false);
       return;
     }
     _lastLiveScoresDigest = nextDigest;
@@ -1909,9 +1962,10 @@ function _applyLiveScores(scores, opts) {
   }
   const cards = document.querySelectorAll('[data-game-key]');
   if (!cards.length) {
-    _schedulePropsRender(false);
+    if (!skipPropsRender) _schedulePropsRender(false);
     return;
   }
+  const liveValues = Object.values(_liveScores);
   // Update all game cards on screen
   cards.forEach(card => {
     const refs = card._liveRefs || (card._liveRefs = {
@@ -1924,7 +1978,7 @@ function _applyLiveScores(scores, opts) {
     const matchKey = _norm(card.dataset.matchKey || '');
     const s  = _liveScores[gk]
       || (matchKey ? _liveScores[matchKey] : undefined)
-      || Object.values(_liveScores).find(v => _gameKeyLooseMatch(v.game_key || v.match_key || '', gk || matchKey));
+      || liveValues.find(v => _gameKeyLooseMatch(v.game_key || v.match_key || '', gk || matchKey));
     const scoreEl  = refs.scoreEl;
     const statusEl = refs.statusEl;
     const dotEl    = refs.dotEl;
@@ -1971,12 +2025,12 @@ function _applyLiveScores(scores, opts) {
     card.classList.toggle('final', isFinal);
     if (dotEl) dotEl.style.display = (isLive && !isFinal) ? 'inline-block' : 'none';
   });
-  _schedulePropsRender(false);
+  if (!skipPropsRender) _schedulePropsRender(false);
 }
 
 function _refreshScheduledStatuses() {
   if (document.hidden) return;
-  _applyLiveScores({}, { replace: false });
+  _applyLiveScores({}, { replace: false, skipPropsRender: true });
 }
 
 // ── Silent background panel refresh (called after state_update) ─────────────
@@ -4489,13 +4543,20 @@ function resolveKalshiReadyBets(force) {
   if (!READY_BETS.length) {
     READY_KALSHI_RESOLUTIONS = {};
     READY_KALSHI_STATUS = { loading: false, matched: 0, started: 0, done: 0, unavailable: 0, count: 0, market_count: 0, error: '' };
+    _lastKalshiResolveKey = '';
     renderReadyBets();
     return Promise.resolve({});
   }
 
   // Debounce: skip if last resolve was recent and not forced
   const now = Date.now();
-  if (!force && (now - _lastKalshiResolveMs) < _KALSHI_RESOLVE_DEBOUNCE_MS && Object.keys(READY_KALSHI_RESOLUTIONS).length > 0) {
+  const resolveKey = READY_BETS
+    .filter(r => r && r.kind !== 'combo')
+    .map(r => String(r.uid || r.bet_uid || r.prediction_uid || '').trim())
+    .filter(Boolean)
+    .sort()
+    .join('|');
+  if (!force && resolveKey && resolveKey === _lastKalshiResolveKey && (now - _lastKalshiResolveMs) < _KALSHI_RESOLVE_DEBOUNCE_MS && Object.keys(READY_KALSHI_RESOLUTIONS).length > 0) {
     const ageSec = Math.round((now - _lastKalshiResolveMs) / 1000);
     _logOp('info', `Kalshi resolve skipped — using cache from ${ageSec}s ago (${Object.keys(READY_KALSHI_RESOLUTIONS).length} resolved). Force refresh to update.`);
     return Promise.resolve(READY_KALSHI_RESOLUTIONS);
@@ -4509,11 +4570,17 @@ function resolveKalshiReadyBets(force) {
     count: READY_BETS.length,
   };
   renderReadyBets();
+  const combosTabActive = !!document.getElementById('rb-combos')?.classList.contains('active');
+  const includeComboSuggestions = !!force || combosTabActive;
 
   return fetch('/api/kalshi/resolve-ready', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ bets: READY_BETS, force_refresh: !!force }),
+    body: JSON.stringify({
+      bets: READY_BETS,
+      force_refresh: !!force,
+      include_combo_suggestions: includeComboSuggestions,
+    }),
   }).then(r => r.json()).then(d => {
     if (!d.ok) {
       throw new Error(d.error || 'Kalshi resolve failed');
@@ -4546,6 +4613,7 @@ function resolveKalshiReadyBets(force) {
       }))];
     }
     _lastKalshiResolveMs = Date.now();
+    _lastKalshiResolveKey = resolveKey;
     const cacheAge = d.cache_age_sec ? ` (cache ${Math.round(d.cache_age_sec)}s old)` : '';
     _logOp('success', `Resolved: ${READY_KALSHI_STATUS.matched} matched, ${READY_KALSHI_STATUS.started} started, ${READY_KALSHI_STATUS.done} done, ${READY_KALSHI_STATUS.unavailable} unavailable — ${READY_KALSHI_STATUS.market_count} Kalshi markets scanned${cacheAge}${serverCombos.length ? ` · ${serverCombos.length} combo suggestions` : ''}`);
     renderReadyBets();
@@ -4646,7 +4714,16 @@ function renderReadyBets() {
   const comboContainer = document.getElementById('ready-combos-list');
   const metaEl = document.getElementById('ready-bets-meta');
 
-  const rows = READY_BETS;
+  const allRows = READY_BETS;
+  const sentItems = _readReadySentBets();
+  const isSent = (row) => !!_readySentInfo(row, sentItems);
+  const openRows = allRows.filter(row => !isSent(row));
+  const isMatched = (row) => {
+    if (!row || row.kind === 'combo') return !!row?.all_matched;
+    const resolution = READY_KALSHI_RESOLUTIONS[row.uid] || READY_KALSHI_RESOLUTIONS[row.bet_uid] || null;
+    return String(resolution?.status || '').toLowerCase() === 'matched' && !!resolution?.market_ticker;
+  };
+  const rows = openRows.filter(isMatched);
   const groups = {
     single: rows.filter(r => r.kind === 'single'),
     team_prop: rows.filter(r => r.kind === 'team_prop'),
@@ -4655,9 +4732,13 @@ function renderReadyBets() {
   };
   const nonCombo = groups.single.length + groups.team_prop.length + groups.player_prop.length;
   if (metaEl) {
-    const bits = [`${rows.length} qualified`, `${nonCombo} singles/props`, `${groups.combo.length} combos`];
+    const hiddenUnmatched = Math.max(0, openRows.length - rows.length);
+    const bits = [`${rows.length} ready now`, `${openRows.length} open candidates`, `${nonCombo} singles/props`, `${groups.combo.length} combos`];
+    if (hiddenUnmatched) bits.push(`${hiddenUnmatched} waiting for exact Kalshi ticker`);
+    const sentCount = Math.max(0, allRows.length - openRows.length);
+    if (sentCount) bits.push(`${sentCount} tracking on Kalshi`);
     if (READY_KALSHI_STATUS.loading) {
-      bits.push(`Kalshi resolving ${READY_KALSHI_STATUS.count || rows.length} bets…`);
+      bits.push(`Kalshi resolving ${READY_KALSHI_STATUS.count || openRows.length} bets…`);
     } else if (READY_KALSHI_STATUS.market_count || READY_KALSHI_STATUS.count) {
       bits.push(`Kalshi ${READY_KALSHI_STATUS.matched || 0} matched`);
       if (READY_KALSHI_STATUS.started) bits.push(`${READY_KALSHI_STATUS.started} started`);
@@ -4677,6 +4758,7 @@ function renderReadyBets() {
   const renderActionRow = (b) => {
     const uidDom = _safeDomId(b.uid);
     const resolution = READY_KALSHI_RESOLUTIONS[b.uid] || null;
+    const sentInfo = _readySentInfo(b, sentItems);
     const resolutionStatus = resolution ? String(resolution.status || '') : (READY_KALSHI_STATUS.loading ? 'loading' : 'pending');
     const autoTicker = resolutionStatus === 'matched' ? String(resolution.market_ticker || '').trim() : '';
     const sideVal = resolutionStatus === 'matched'
@@ -4727,6 +4809,18 @@ function renderReadyBets() {
 
     const hasMatch = !!autoTicker;
     const sideBadge = hasMatch ? `<span class="ready-side-badge ${sideVal}">${sideVal.toUpperCase()}</span>` : '';
+
+    if (sentInfo) {
+      const sentBits = [
+        sentInfo.ticker ? `<span class="match-ticker">${sentInfo.ticker}</span>` : '',
+        sentInfo.side ? `<span class="ready-side-badge ${String(sentInfo.side).toLowerCase()}">${String(sentInfo.side).toUpperCase()}</span>` : '',
+        sentInfo.count ? `<span class="ready-status-hint">count ${sentInfo.count}</span>` : '',
+      ].filter(Boolean).join('');
+      return `<div class="ready-actions" data-uid="${b.uid}">
+        <div class="ready-status-badge done">Tracking on Kalshi</div>
+        ${sentBits}
+      </div>`;
+    }
 
     return `<div class="ready-actions" data-uid="${b.uid}" data-ticker="${autoTicker}" data-side="${sideVal}" data-price="${autoPrice}">
       ${matchHtml}
@@ -4830,21 +4924,33 @@ function renderReadyBets() {
 
   // ── Render singles/props panel ──
   if (container) {
-    if (!nonCombo && !rows.length) {
+    if (!allRows.length) {
       container.innerHTML = '<div class="no-games">No bot-qualified bets for today\'s games yet. Run analysis first.</div>';
+    } else if (!nonCombo) {
+      if (openRows.length === 0) {
+        container.innerHTML = '<div class="no-games">All matched singles and props already moved to live tracking after send.</div>';
+      } else if (READY_KALSHI_STATUS.loading) {
+        container.innerHTML = '<div class="no-games">Matching exact Kalshi singles and props right now… unmatched bets stay hidden until a live ticker exists.</div>';
+      } else {
+        container.innerHTML = '<div class="no-games">No exact Kalshi singles or props are ready now. Unmatched bets stay hidden until Kalshi lists the ticker.</div>';
+      }
     } else {
       // Merge singles + team_prop together as "Game Bets"
       const gameBets = [...groups.single, ...groups.team_prop];
       container.innerHTML =
-        renderGroup('&#127942; Game Bets (Moneylines, Totals, Team Props)', gameBets, 'No qualified game bets today.', true, renderItem) +
-        renderGroup('&#129330; Player Props', groups.player_prop, 'No qualified player props today.', true, renderItem);
+        renderGroup('&#127942; Game Bets (Moneylines, Totals, Team Props)', gameBets, 'No exact Kalshi game bets are ready right now.', true, renderItem) +
+        renderGroup('&#129330; Player Props', groups.player_prop, 'No exact Kalshi player props are ready right now.', true, renderItem);
     }
   }
 
   // ── Render combos panel ──
   if (comboContainer) {
-    if (!groups.combo.length) {
+    if (!allRows.length) {
       comboContainer.innerHTML = '<div class="no-games">Run analysis to generate auto combo bets. Need at least 2 high-confidence predictions.</div>';
+    } else if (!groups.combo.length) {
+      comboContainer.innerHTML = READY_KALSHI_STATUS.loading
+        ? '<div class="no-games">Matching exact Kalshi combo legs right now… only fully matched combos are shown.</div>'
+        : '<div class="no-games">No fully matched Kalshi combos are ready now. Partial combos stay hidden until every leg has a ticker.</div>';
     } else {
       comboContainer.innerHTML = groups.combo.map(renderComboItem).join('');
     }
@@ -4857,11 +4963,12 @@ function refreshReadyBets(forceKalshi) {
   const combos = READY_BETS.filter(r => r.kind === 'combo').length;
   const singles = READY_BETS.filter(r => r.kind === 'single' || r.kind === 'team_prop').length;
   const props = READY_BETS.filter(r => r.kind === 'player_prop').length;
-  _logOp('info', `Derived ${READY_BETS.length} ready bets: ${singles} game bets, ${props} player props, ${combos} combos`);
+  _logOp('info', `Derived ${READY_BETS.length} ready candidates: ${singles} game bets, ${props} player props, ${combos} combos`);
 
   if (forceKalshi) {
     // Full reset on manual refresh
     _lastKalshiResolveMs = 0;
+    _lastKalshiResolveKey = '';
     READY_KALSHI_RESOLUTIONS = {};
     READY_KALSHI_STATUS = { loading: false, matched: 0, started: 0, done: 0, unavailable: 0, count: READY_BETS.length, market_count: 0, error: '' };
   } else {
@@ -4953,9 +5060,20 @@ function executeReadyBet(uid) {
       sentIds.add(clientOrderId);
       _writeReadyOrderIds(sentIds);
       const finalTicker = (d.resolution && d.resolution.market_ticker) || ticker;
+      _markReadyBetSent(bet, {
+        ticker: finalTicker,
+        side,
+        count,
+        amount_usd: amount,
+        client_order_id: d.client_order_id || clientOrderId,
+        sent_at: new Date().toISOString(),
+        label: bet.label,
+      });
       _appendReadyOrderLog(true, bet.label, `Ticker ${finalTicker} · ${side.toUpperCase()} · count ${count} · ${d.client_order_id || clientOrderId}`);
       _logOp('success', `Order placed ✓ ${bet.label} | Ticker ${finalTicker} | ${side.toUpperCase()} | count ${count} | ID ${d.client_order_id || clientOrderId}`);
       toast('✓ Kalshi order placed successfully!', 'success');
+      renderReadyBets();
+      loadTrackedSingles();
       fetchKalshiBalance(); // refresh balance after order
       return;
     }
@@ -4974,15 +5092,16 @@ function renderTopProps(legs) {
   const empty = document.getElementById('top-props-empty');
   const meta  = document.getElementById('top-props-meta');
   if (!grid) return;
-  const props = (legs || []).filter(l => l.source === 'prop').slice(0, 24);
-  if (!props.length) {
+  const allProps = (legs || []).filter(l => l.source === 'prop');
+  const props = allProps.slice(0, 24);
+  if (!allProps.length) {
     grid.innerHTML = '';
     if (empty) empty.classList.remove('hidden');
     if (meta) meta.textContent = '';
     return;
   }
   if (empty) empty.classList.add('hidden');
-  if (meta) meta.textContent = `${props.length} props`;
+  if (meta) meta.textContent = allProps.length > props.length ? `${props.length} of ${allProps.length} props` : `${allProps.length} props`;
   grid.innerHTML = props.map(l => _renderLegCard(l)).join('');
 }
 
@@ -4993,14 +5112,14 @@ function renderBestLegs(legs) {
   const meta  = document.getElementById('best-legs-meta');
   if (!grid) return;
   const best = BEST_LEGS.slice(0, 36);
-  if (!best.length) {
+  if (!BEST_LEGS.length) {
     grid.innerHTML = '';
     if (empty) empty.classList.remove('hidden');
     if (meta) meta.textContent = '';
     return;
   }
   if (empty) empty.classList.add('hidden');
-  if (meta) meta.textContent = `${best.length} legs`;
+  if (meta) meta.textContent = BEST_LEGS.length > best.length ? `${best.length} of ${BEST_LEGS.length} legs` : `${BEST_LEGS.length} legs`;
   grid.innerHTML = best.map(l => _renderLegCard(l)).join('');
 }
 
@@ -5290,15 +5409,41 @@ function loadTrackedParlays() {
 }
 
 function loadTrackedSingles() {
-  fetch('/api/predictions?days=21').then(r=>r.json()).then(d => {
+  Promise.all([
+    fetch('/api/predictions?days=21').then(r => r.json()).catch(() => ({ ok: false, predictions: [] })),
+    fetch('/api/prop-history?days=21').then(r => r.json()).catch(() => ({ ok: false, props: [] })),
+  ]).then(([d, p]) => {
     const el = document.getElementById('tracked-singles-list');
     const metaEl = document.getElementById('tracked-singles-meta');
     if (!el) return;
     const liveLookup = _liveLookupSnapshot();
-
+    const sentItems = _readReadySentBets();
     const rows = d.ok ? _asArray(d.predictions) : [];
+    const propRows = p.ok ? _asArray(p.props).map(r => {
+      const stats = (r && typeof r.stats_json === 'object' && r.stats_json) ? r.stats_json : {};
+      const direction = String(r.recommendation || '').toUpperCase();
+      const propType = String(r.prop_type || 'player_prop').replace(/_/g, ' ');
+      const lineTxt = r.line != null && r.line !== '' ? ` ${r.line}` : '';
+      const pick = `${r.player_name || 'Player'} ${direction} ${lineTxt} ${propType}`.replace(/\s+/g, ' ').trim();
+      return {
+        ...r,
+        pick,
+        bet_type: 'player_prop',
+        game: r.game || stats.game || '',
+        game_key: r.game_key || stats.game_key || stats.game || '',
+        predicted_at: r.detected_at || '',
+      };
+    }) : [];
     const dedupe = new Map();
-    rows.forEach(r => {
+    const mergeRow = (base, incoming) => {
+      const merged = { ...(base || {}) };
+      Object.entries(incoming || {}).forEach(([key, value]) => {
+        if (value == null || value === '') return;
+        if (merged[key] == null || merged[key] === '') merged[key] = value;
+      });
+      return merged;
+    };
+    [...rows, ...propRows].forEach(r => {
       if (!r || typeof r !== 'object') return;
       const uid = String(r.bet_uid || [
         r.game_key || '',
@@ -5309,6 +5454,7 @@ function loadTrackedSingles() {
       ].join('|')).trim().toLowerCase();
       if (!uid) return;
       if (!dedupe.has(uid)) dedupe.set(uid, r);
+      else dedupe.set(uid, mergeRow(dedupe.get(uid), r));
     });
 
     const singles = Array.from(dedupe.values()).filter(r => {
@@ -5321,9 +5467,10 @@ function loadTrackedSingles() {
     const pendingUpcoming = pending.filter(r => _rowPhaseLike(r, liveLookup) !== 'live');
     const wins = singles.filter(r => String(r.outcome || '').toUpperCase() === 'WIN');
     const losses = singles.filter(r => String(r.outcome || '').toUpperCase() === 'LOSS');
+    const trackedOnKalshi = singles.filter(r => !!_readySentInfo(r, sentItems)).length;
 
     if (metaEl) {
-      metaEl.textContent = `Upcoming: ${pendingUpcoming.length} · Live: ${pendingLive.length} · Won: ${wins.length} · Lost: ${losses.length} · Total: ${singles.length}`;
+      metaEl.textContent = `Upcoming: ${pendingUpcoming.length} · Live: ${pendingLive.length} · Won: ${wins.length} · Lost: ${losses.length} · Kalshi Tracking: ${trackedOnKalshi} · Total: ${singles.length}`;
     }
 
     const renderRows = (arr) => arr.map(r => {
@@ -5334,6 +5481,15 @@ function loadTrackedSingles() {
       const uidShort = uid ? uid.slice(-12) : 'N/A';
       const gameDate = String(r.game_date || '').slice(0, 10);
       const lineTxt = r.line != null && r.line !== '' ? ` · line ${r.line}` : '';
+      const sentInfo = _readySentInfo(r, sentItems);
+      const matchup = `${r.home_team || ''}${r.away_team ? ` vs ${r.away_team}` : ''}`.trim() || r.game || r.team || '—';
+      const pendingLabel = pendingBucket === 'live' ? 'LIVE TRACKING' : (sentInfo ? 'TRACKING' : 'UPCOMING');
+      const kalshiBits = sentInfo ? [
+        sentInfo.ticker ? `<span>Kalshi ${sentInfo.ticker}</span>` : '',
+        sentInfo.side ? `<span>${String(sentInfo.side).toUpperCase()}</span>` : '',
+        sentInfo.count ? `<span>x${sentInfo.count}</span>` : '',
+        sentInfo.client_order_id ? `<span>ID ${String(sentInfo.client_order_id).slice(-10)}</span>` : '',
+      ].filter(Boolean).join('') : '';
       return `<div class="tracked-single">
         <div class="tracked-single-top">
           <div>
@@ -5342,10 +5498,11 @@ function loadTrackedSingles() {
               <span>${betType || 'MARKET'}</span>
               <span>${gameDate || '—'}</span>
               <span>UID ${uidShort}</span>
-              <span>${r.home_team || ''}${r.away_team ? ` vs ${r.away_team}` : ''}${lineTxt}</span>
+              <span>${matchup}${lineTxt}</span>
+              ${kalshiBits}
             </div>
           </div>
-          <span class="tp-outcome tp-${out}">${out === 'PENDING' ? (pendingBucket === 'live' ? 'LIVE TRACKING' : 'UPCOMING') : out}</span>
+          <span class="tp-outcome tp-${out}">${out === 'PENDING' ? pendingLabel : out}</span>
         </div>
       </div>`;
     }).join('');
@@ -5651,7 +5808,9 @@ function stopConsolePoll() {
   }
   hideOverlay();
   _renderReadyOrderLog();
-  refreshReadyBets(false);
+  if (_isReadyBetsActive()) {
+    refreshReadyBets(false);
+  }
   _autoSelectDefaultTab();
 
   if (_isSoccerMode()) {
