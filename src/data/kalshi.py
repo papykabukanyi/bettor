@@ -47,13 +47,24 @@ _KALSHI_MAX_DISCOVERED_SERIES = max(
 _KALSHI_SERIES_FETCH_WORKERS = max(
     1, min(int(os.getenv("KALSHI_SERIES_FETCH_WORKERS", "6") or "6"), 16)
 )
+_KALSHI_COMBO_MARKET_PAGES = max(
+    1, min(int(os.getenv("KALSHI_COMBO_MARKET_PAGES", "4") or "4"), 12)
+)
 
 # Series ticker prefix → sport (updated per Kalshi documentation)
 _SERIES_SPORT_MAP: dict[str, str] = {
     # ── Baseball (MLB) — confirmed live series ──
+    "KXMLBGAME": "baseball",  # game winners / moneylines
+    "KXMLBSPREAD": "baseball",  # run line / spreads
+    "KXMLBF5": "baseball",  # first-five derivatives
     "KXMLBHRR": "baseball",   # player hits+runs+RBIs combined props
     "KXMLBHIT": "baseball",   # player hits props
+    "KXMLBRBI": "baseball",   # player RBI props
     "KXMLBTOTAL": "baseball", # game run totals
+    "KXMLBTB": "baseball",    # total bases props
+    "KXKBOGAME": "baseball",
+    "KXNPBGAME": "baseball",
+    "KXNCAABBGAME": "baseball",
     "KXMLB": "baseball",      # futures / misc
     "MLBWIN": "baseball", "MLBOU": "baseball", "MLBHR": "baseball",
     "MLBRUNS": "baseball", "MLBK": "baseball", "MLBHITS": "baseball",
@@ -63,11 +74,15 @@ _SERIES_SPORT_MAP: dict[str, str] = {
     "KXNBATOTAL": "basketball", # game point totals
     "KXNBAREB": "basketball",   # player rebounds props
     "KXNBAAST": "basketball",   # player assists props
+    "KXNBARA": "basketball",    # player rebounds+assists props
     "KXNBAGAME": "basketball",
     "KXNBASPREAD": "basketball",
     "KXNBATEAMTOTAL": "basketball",
     "KXNBA1H": "basketball",
+    "KXNBA1HWINNER": "basketball",
     "KXNBA1HSPREAD": "basketball",
+    "KXNBA1QSPREAD": "basketball",
+    "KXNBA2HSPREAD": "basketball",
     "KXNBA": "basketball",      # futures / championship
     "KXWNBA": "basketball",
     "KXWNBAGAME": "basketball",
@@ -78,11 +93,20 @@ _SERIES_SPORT_MAP: dict[str, str] = {
     "KXWNBAPTS": "basketball",
     "KXWNBA1H": "basketball",
     "KXWNBA1HSPREAD": "basketball",
+    "KXWNBA1HTOTAL": "basketball",
     "NBAPTSO": "basketball", "NBAMVP": "basketball", "NBACHAMP": "basketball",
     # ── Hockey (NHL) — confirmed live series ──
     "KXNHLPTS": "hockey",   # player points (goals+assists) props
     "KXNHLTOTAL": "hockey", # game goal totals
     "KXNHLAST": "hockey",   # player assists props
+    "KXNHLSPREAD": "hockey",
+    "KXNHLGOAL": "hockey",
+    "KXNHLANYGOAL": "hockey",
+    "KXAHLGAME": "hockey",
+    "KXWOMHOCKEYGOAL": "hockey",
+    "KXWOMHOCKEYTOTAL": "hockey",
+    "KXWOMHOCKEYFIRSTGOAL": "hockey",
+    "KXWOMHOCKEYSPREAD": "hockey",
     "KXNHL": "hockey",      # futures / misc
     "NHLWIN": "hockey", "NHLOU": "hockey", "NHLCHAMP": "hockey", "NHLIN": "hockey",
     # ── Football (NFL) ──
@@ -90,7 +114,8 @@ _SERIES_SPORT_MAP: dict[str, str] = {
     "NFLWIN": "football", "NFLOU": "football", "NFLTD": "football",
     "NFLMVP": "football", "NFLSB": "football",
     # ── Soccer ──
-    "KXMLS": "soccer", "KXEPL": "soccer", "KXFIFA": "soccer",
+    "KXMLS": "soccer", "KXMLSGAME": "soccer", "KXMLSSPREAD": "soccer",
+    "KXEPL": "soccer", "KXEPLSPREAD": "soccer", "KXFIFA": "soccer",
     "MSLWIN": "soccer", "MLSWIN": "soccer", "EPLWIN": "soccer", "UCLWIN": "soccer",
 }
 
@@ -106,11 +131,13 @@ _SPORTS_SERIES_TO_FETCH: list[str] = [
     "KXNBATEAMTOTAL", # team totals
     "KXNBAREB",    # player rebounds
     "KXNBAAST",    # player assists
+    "KXNBARA",     # player rebounds + assists
     "KXNBA1H",     # first-half winner
+    "KXNBA1HWINNER",
     "KXNBA1HSPREAD", # first-half spread
-    "KXNBA",       # futures / misc
+    "KXNBA1QSPREAD",
+    "KXNBA2HSPREAD",
     # WNBA
-    "KXWNBA",
     "KXWNBAGAME",
     "KXWNBASPREAD",
     "KXWNBATOTAL",
@@ -119,25 +146,36 @@ _SPORTS_SERIES_TO_FETCH: list[str] = [
     "KXWNBAAST",
     "KXWNBA1H",
     "KXWNBA1HSPREAD",
+    "KXWNBA1HTOTAL",
     # MLB — player props + game markets
     "MLBWIN",      # game winners / moneylines
     "MLBOU",       # game totals/over-under
+    "KXMLBGAME",
+    "KXMLBSPREAD",
     "KXMLBHRR",    # hits + runs + RBIs combined
     "KXMLBHIT",    # hits only
+    "KXMLBRBI",
     "KXMLBTOTAL",  # game run totals
-    "KXMLB",       # futures / misc
+    "KXMLBF5TOTAL",
+    "KXMLBF5SPREAD",
+    "KXMLBTB",
+    "KXKBOGAME",
+    "KXNPBGAME",
+    "KXNCAABBGAME",
     # NHL — player props + game markets
     "NHLWIN",      # game winners / moneylines
     "NHLOU",       # game totals/over-under
     "KXNHLPTS",    # player points (goals+assists)
     "KXNHLTOTAL",  # game goal totals
     "KXNHLAST",    # player assists
-    "KXNHL",       # futures / misc
+    "KXNHLSPREAD",
+    "KXNHLGOAL",
+    "KXNHLANYGOAL",
+    "KXAHLGAME",
     # NFL (off-season — will return empty but keeps the door open)
     "NFLWIN", "NFLOU", "NFLTD",
-    "KXNFL",
     # Soccer
-    "KXMLS", "KXEPL", "KXFIFA", "MSLWIN", "MLSWIN", "EPLWIN", "UCLWIN",
+    "KXMLS", "KXMLSGAME", "KXMLSSPREAD", "KXEPL", "KXEPLSPREAD", "KXFIFA", "MSLWIN", "MLSWIN", "EPLWIN", "UCLWIN",
 ]
 
 # Per-series stat-type hints used to disambiguate player prop events.
@@ -239,6 +277,53 @@ _DISCOVERY_EXCLUDE_TICKER = (
     "PREPACK",
     "WINS",
 )
+
+_VALID_SPORT_TAGS = {"baseball", "basketball", "football", "hockey", "soccer"}
+_ACTIONABLE_SERIES_TICKER_INCLUDE = _DISCOVERY_INCLUDE_TICKER + (
+    "WIN",
+    "WINNER",
+    "MONEYLINE",
+    "F5",
+    "1Q",
+    "2Q",
+    "3Q",
+    "4Q",
+    "2H",
+    "ANYGOAL",
+    "SHOT",
+    "SAVE",
+    "CARD",
+    "CORNER",
+    "BTTS",
+    "TB",
+)
+_ACTIONABLE_SERIES_TICKER_EXCLUDE = _DISCOVERY_EXCLUDE_TICKER + (
+    "POY",
+    "6POY",
+    "TOPAPRANK",
+    "TOP25",
+    "VIEWER",
+    "GAMESPLAYED",
+    "ALEAST",
+    "ALWEST",
+    "NLEAST",
+    "NLWEST",
+    "EAST",
+    "WEST",
+    "NORTH",
+    "SOUTH",
+    "PACIFIC",
+    "ATLANTIC",
+    "CENTRAL",
+    "SOUTHEAST",
+    "NORTHEAST",
+    "NORTHWEST",
+    "SOUTHWEST",
+    "DIV",
+    "DIVISION",
+    "RANK",
+)
+_ACTIONABLE_SERIES_FETCH_SET = {series.upper() for series in _SPORTS_SERIES_TO_FETCH}
 
 # ── Series registry persistence ─────────────────────────────────────────────────────
 # Keeps track of all confirmed working series tickers across restarts.  Written to a
@@ -347,6 +432,9 @@ def _detect_sport_from_series_row(series: dict[str, Any]) -> str:
 
 
 def _is_actionable_sports_series(series: dict[str, Any]) -> bool:
+    ticker = str(series.get("ticker") or "").strip().upper()
+    if ticker and _is_actionable_series_ticker(ticker):
+        return True
     raw = " ".join(
         [
             str(series.get("ticker") or ""),
@@ -364,6 +452,19 @@ def _is_actionable_sports_series(series: dict[str, Any]) -> bool:
     return any(token in raw_upper for token in _DISCOVERY_INCLUDE_TICKER) or any(
         f" {token} " in padded_text for token in _DISCOVERY_INCLUDE_TEXT
     )
+
+
+def _is_actionable_series_ticker(series_ticker: str) -> bool:
+    raw_upper = str(series_ticker or "").strip().upper()
+    if not raw_upper:
+        return False
+    if raw_upper in _ACTIONABLE_SERIES_FETCH_SET:
+        return True
+    if any(token in raw_upper for token in _ACTIONABLE_SERIES_TICKER_EXCLUDE):
+        return False
+    if any(token in raw_upper for token in _ACTIONABLE_SERIES_TICKER_INCLUDE):
+        return True
+    return raw_upper.endswith(("GAME", "SPREAD", "TOTAL"))
 
 
 def _discover_actionable_sports_series(*, force_refresh: bool = False) -> dict[str, str]:
@@ -757,8 +858,9 @@ def list_markets(
     status: str | None = "open",
     event_ticker: str | None = None,
     series_ticker: str | None = None,
+    mve_filter: str | None = None,
 ) -> dict[str, Any]:
-    params: dict[str, Any] = {"limit": max(1, min(int(limit or 200), 500))}
+    params: dict[str, Any] = {"limit": max(1, min(int(limit or 200), 1000))}
     if cursor:
         params["cursor"] = cursor
     if status:
@@ -767,6 +869,8 @@ def list_markets(
         params["event_ticker"] = event_ticker
     if series_ticker:
         params["series_ticker"] = series_ticker
+    if mve_filter in {"only", "exclude"}:
+        params["mve_filter"] = mve_filter
 
     data = _request_json("GET", "/markets", params=params)
     markets, next_cursor = _parse_list_response(data, "markets")
@@ -1229,7 +1333,7 @@ def _build_event_index(markets: list[dict[str, Any]]) -> dict[str, dict[str, Any
         )
         bucket["markets"].append(market)
         if not bucket["sport"]:
-            bucket["sport"] = _market_sport_tag(market)
+            bucket["sport"] = str(market.get("sport") or "").strip().lower() or _market_sport_tag(market)
         market_kind = _market_kind_tag(market)
         if market_kind:
             bucket["market_kinds"].add(market_kind)
@@ -1376,6 +1480,18 @@ def _resolve_market_side(bet: dict[str, Any], market: dict[str, Any]) -> str:
 
     picked_team = _picked_team_name(bet)
     if picked_team:
+        selected_side_text = _market_selected_side_text(market)
+        if selected_side_text:
+            selected_score = _entity_match_score(selected_side_text, picked_team)
+            home_team = str(bet.get("home_team") or "").strip()
+            away_team = str(bet.get("away_team") or "").strip()
+            other_team = away_team if picked_team == home_team else home_team if picked_team == away_team else ""
+            other_score = _entity_match_score(selected_side_text, other_team) if other_team else 0.0
+            if selected_score >= 2.2 and selected_score >= other_score:
+                return "yes"
+            if other_score >= 2.2 and other_score > selected_score:
+                return "no"
+
         picked_score = _entity_match_score(market_text, picked_team)
         if picked_score >= 2.2:
             return "yes"
@@ -1424,6 +1540,9 @@ def _series_ticker_from_market(market: dict[str, Any]) -> str:
 
 
 def _market_sport_tag(market: dict[str, Any]) -> str:
+    explicit_sport = str(market.get("sport") or "").strip().lower()
+    if explicit_sport in _VALID_SPORT_TAGS:
+        return explicit_sport
     text = _norm_text(
         " ".join(
             str(market.get(key) or "")
@@ -1499,6 +1618,19 @@ def _market_text(market: dict[str, Any]) -> str:
     )
 
 
+def _market_selected_side_text(market: dict[str, Any]) -> str:
+    return _norm_text(
+        " ".join(
+            str(market.get(key) or "")
+            for key in (
+                "yes_sub_title",
+                "subtitle",
+                "ticker",
+            )
+        )
+    )
+
+
 def _is_combo_market(market: dict[str, Any]) -> bool:
     legs = market.get("mve_selected_legs")
     if isinstance(legs, list) and legs:
@@ -1516,6 +1648,7 @@ def _market_kind_tag(market: dict[str, Any]) -> str:
     raw_title = str(market.get("title") or "")
     title = _norm_text(raw_title)
     event = _norm_text(market.get("event_ticker"))
+    series_upper = _series_ticker_from_market(market)
     primary_participant = _norm_text(market.get("primary_participant_key"))
 
     # Player prop: use primary_participant_key first (most reliable for KX* series).
@@ -1528,11 +1661,18 @@ def _market_kind_tag(market: dict[str, Any]) -> str:
     if is_player_prop and any(hint in text for hint in _PROP_HINTS):
         return "player_prop"
 
+    if any(token in series_upper for token in ("SPREAD", "RUNLINE")):
+        return "spread"
+    if any(token in series_upper for token in ("TEAMTOTAL", "TOTAL", "BTTS")):
+        return "total"
+    if any(token in series_upper for token in ("GAME", "MATCH", "WINNER", "MONEYLINE", "1HWINNER")) or series_upper.endswith(("1H", "2H")):
+        return "moneyline"
+
     if any(token in text for token in ("spread", "run line")) or "spread" in event:
         return "spread"
     if any(token in text for token in ("total", "over", "under", "btts")) or "total" in event:
         return "total"
-    if any(token in text for token in ("wins", "to win", "moneyline")) or "match" in event:
+    if any(token in text for token in ("wins", "winner", "to win", "moneyline")) or "match" in event:
         return "moneyline"
     if any(token in title for token in ("yes ", "no ")) and "scored" not in text:
         return "moneyline"
@@ -1727,6 +1867,7 @@ def _score_single_market(bet: dict[str, Any], market: dict[str, Any]) -> float:
         _entity_match_score(text, bet.get("pick")),
         _entity_match_score(text, bet.get("label")),
     )
+    picked_team = _picked_team_name(bet)
     home_score = _entity_match_score(text, bet.get("home_team"))
     away_score = _entity_match_score(text, bet.get("away_team"))
     team_hits = sum(1 for value in (home_score, away_score) if value >= 3.0)
@@ -1740,6 +1881,18 @@ def _score_single_market(bet: dict[str, Any], market: dict[str, Any]) -> float:
     else:
         score += max(home_score, away_score)
     score += _token_overlap_score(text, bet.get("label"), bet.get("pick"), bet.get("bet_type"))
+
+    if bet_kind == "moneyline" and picked_team:
+        selected_side_text = _market_selected_side_text(market)
+        selected_score = _entity_match_score(selected_side_text, picked_team)
+        home_team = str(bet.get("home_team") or "").strip()
+        away_team = str(bet.get("away_team") or "").strip()
+        other_team = away_team if picked_team == home_team else home_team if picked_team == away_team else ""
+        other_selected_score = _entity_match_score(selected_side_text, other_team) if other_team else 0.0
+        if selected_score >= 2.2 and selected_score >= other_selected_score:
+            score += 4.0
+        elif other_selected_score >= 2.2 and other_selected_score > selected_score:
+            return 0.0
 
     if bet_kind in {"total", "team_total", "spread"}:
         line_score = _line_match_score(text, bet.get("line"))
@@ -1996,7 +2149,13 @@ def _fetch_open_markets_for_series(series: str, sport_hint: str = "") -> tuple[s
     while True:
         pages += 1
         try:
-            data = list_markets(limit=500, cursor=cursor, status="open", series_ticker=series)
+            data = list_markets(
+                limit=1000,
+                cursor=cursor,
+                status="open",
+                series_ticker=series,
+                mve_filter="exclude",
+            )
         except Exception:
             break
         rows = data.get("markets") or []
@@ -2017,35 +2176,90 @@ def _fetch_open_markets_for_series(series: str, sport_hint: str = "") -> tuple[s
     return series, rows_out, (sport_hint or _detect_sport_from_series(series))
 
 
-def get_open_market_catalog(*, force_refresh: bool = False) -> dict[str, Any]:
+def _fetch_open_combo_markets() -> list[dict[str, Any]]:
+    rows_out: list[dict[str, Any]] = []
+    seen_tickers: set[str] = set()
+    cursor: str | None = None
+    pages = 0
+    while True:
+        pages += 1
+        try:
+            data = list_markets(limit=1000, cursor=cursor, status="open", mve_filter="only")
+        except Exception:
+            break
+        rows = data.get("markets") or []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            ticker = str(row.get("ticker") or "")
+            if ticker and ticker in seen_tickers:
+                continue
+            if ticker:
+                seen_tickers.add(ticker)
+            rows_out.append(dict(row))
+        cursor = data.get("cursor")
+        if not cursor or pages >= _KALSHI_COMBO_MARKET_PAGES:
+            break
+    return rows_out
+
+
+def get_open_market_catalog(
+    *,
+    force_refresh: bool = False,
+    include_combo_markets: bool = False,
+) -> dict[str, Any]:
     now = time.time()
+    cached_markets: list[dict[str, Any]] = []
+    cached_combo_markets: list[dict[str, Any]] = []
+    cached_count = 0
+    markets_cache_fresh = False
+    combo_cache_fresh = False
     with _KALSHI_MARKET_CACHE_LOCK:
         age = now - float(_KALSHI_MARKET_CACHE.get("ts") or 0.0)
         cached_markets = list(_KALSHI_MARKET_CACHE.get("markets") or [])
         cached_combo_markets = list(_KALSHI_MARKET_CACHE.get("combo_markets") or [])
         cached_count = int(_KALSHI_MARKET_CACHE.get("count") or 0)
-        if (
+        markets_cache_fresh = bool(
             not force_refresh
-            and _KALSHI_MARKET_CACHE.get("markets")
+            and cached_markets
             and age < _KALSHI_MARKET_CACHE_TTL_SEC
-        ):
+        )
+        combo_cache_fresh = bool(
+            not force_refresh
+            and cached_combo_markets
+            and age < _KALSHI_MARKET_CACHE_TTL_SEC
+        )
+        if markets_cache_fresh and (not include_combo_markets or combo_cache_fresh):
+            combo_rows = list(cached_combo_markets) if include_combo_markets else []
             return {
-                "markets": list(_KALSHI_MARKET_CACHE.get("markets") or []),
-                "combo_markets": list(_KALSHI_MARKET_CACHE.get("combo_markets") or []),
-                "count": int(_KALSHI_MARKET_CACHE.get("count") or 0),
+                "markets": list(cached_markets),
+                "combo_markets": combo_rows,
+                "count": len(cached_markets) + len(combo_rows),
                 "cache_age_sec": age,
             }
 
     # Fetch markets from known sports series directly — the general /markets endpoint
     # returns non-sports (politics/crypto/economics) first and the 25k cap is reached
     # before any NBA/MLB markets appear.  Targeting specific series tickers is fast and precise.
-    seen_tickers: set[str] = set()
-    markets: list[dict[str, Any]] = []
+    seen_tickers: set[str] = {
+        str(market.get("ticker") or "")
+        for market in (cached_markets if markets_cache_fresh else [])
+        if isinstance(market, dict) and str(market.get("ticker") or "")
+    }
+    markets: list[dict[str, Any]] = list(cached_markets) if markets_cache_fresh else []
 
     # Merge hardcoded series with anything previously confirmed in the persistent registry
     # plus dynamically discovered actionable sports series from Kalshi's public /series feed.
-    registry = _load_series_registry()
-    discovered_series = _discover_actionable_sports_series(force_refresh=not registry)
+    registry = {
+        ticker: sport
+        for ticker, sport in _load_series_registry().items()
+        if _is_actionable_series_ticker(ticker)
+    }
+    discovered_series = {
+        ticker: sport
+        for ticker, sport in _discover_actionable_sports_series(force_refresh=not registry).items()
+        if _is_actionable_series_ticker(ticker)
+    }
     series_to_fetch = list(
         dict.fromkeys(
             list(_SPORTS_SERIES_TO_FETCH)
@@ -2060,33 +2274,34 @@ def get_open_market_catalog(*, force_refresh: bool = False) -> dict[str, Any]:
         **registry,
         **discovered_series,
     }
-    max_workers = min(max(1, _KALSHI_SERIES_FETCH_WORKERS), max(1, len(series_to_fetch)))
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_map = {
-            executor.submit(
-                _fetch_open_markets_for_series,
-                series,
-                series_hints.get(series) or _detect_sport_from_series(series),
-            ): series
-            for series in series_to_fetch
-        }
-        for future in as_completed(future_map):
-            series = future_map[future]
-            try:
-                _, fetched_rows, sport_hint = future.result()
-            except Exception:
-                continue
-            series_count = 0
-            for normalized_row in fetched_rows:
-                ticker = str(normalized_row.get("ticker") or "")
-                if ticker and ticker not in seen_tickers:
-                    seen_tickers.add(ticker)
-                    markets.append(normalized_row)
-                    series_count += 1
-            if series_count > 0:
-                sport = sport_hint or _detect_sport_from_series(series)
-                if sport:
-                    newly_confirmed[series] = sport
+    if not markets:
+        max_workers = min(max(1, _KALSHI_SERIES_FETCH_WORKERS), max(1, len(series_to_fetch)))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_map = {
+                executor.submit(
+                    _fetch_open_markets_for_series,
+                    series,
+                    series_hints.get(series) or _detect_sport_from_series(series),
+                ): series
+                for series in series_to_fetch
+            }
+            for future in as_completed(future_map):
+                series = future_map[future]
+                try:
+                    _, fetched_rows, sport_hint = future.result()
+                except Exception:
+                    continue
+                series_count = 0
+                for normalized_row in fetched_rows:
+                    ticker = str(normalized_row.get("ticker") or "")
+                    if ticker and ticker not in seen_tickers:
+                        seen_tickers.add(ticker)
+                        markets.append(normalized_row)
+                        series_count += 1
+                if series_count > 0:
+                    sport = sport_hint or _detect_sport_from_series(series)
+                    if sport:
+                        newly_confirmed[series] = sport
 
     # If targeted series fetch returns nothing (transient API issues),
     # fall back to broad sports scan to avoid "0 markets scanned" responses.
@@ -2126,29 +2341,33 @@ def get_open_market_catalog(*, force_refresh: bool = False) -> dict[str, Any]:
     # instead of dropping to zero markets.
     if not markets and cached_markets:
         stale_age = now - float(_KALSHI_MARKET_CACHE.get("ts") or 0.0)
+        combo_rows = list(cached_combo_markets) if include_combo_markets else []
         return {
             "markets": list(cached_markets),
-            "combo_markets": list(cached_combo_markets),
-            "count": int(cached_count),
+            "combo_markets": combo_rows,
+            "count": len(cached_markets) + len(combo_rows),
             "cache_age_sec": max(0.0, stale_age),
         }
 
-    combo_markets = [market for market in markets if _is_combo_market(market)]
+    combo_markets = list(cached_combo_markets) if (include_combo_markets and combo_cache_fresh) else []
+    if include_combo_markets and not combo_markets:
+        combo_markets = _fetch_open_combo_markets()
+
     if markets:
         with _KALSHI_MARKET_CACHE_LOCK:
-            _KALSHI_MARKET_CACHE.update(
-                {
-                    "ts": time.time(),
-                    "markets": markets,
-                    "combo_markets": combo_markets,
-                    "count": len(markets),
-                }
-            )
+            updated_cache = {
+                "ts": time.time(),
+                "markets": markets,
+                "count": len(markets) + len(combo_markets),
+            }
+            if include_combo_markets:
+                updated_cache["combo_markets"] = combo_markets
+            _KALSHI_MARKET_CACHE.update(updated_cache)
 
     return {
         "markets": list(markets),
-        "combo_markets": list(combo_markets),
-        "count": len(markets),
+        "combo_markets": list(combo_markets) if include_combo_markets else [],
+        "count": len(markets) + len(combo_markets),
         "cache_age_sec": 0.0,
     }
 
@@ -2160,10 +2379,20 @@ def resolve_ready_bets(
 ) -> dict[str, Any]:
     global _RESOLUTION_CACHE, _RESOLUTION_CACHE_CATALOG_TS
 
-    catalog = get_open_market_catalog(force_refresh=force_refresh)
+    needs_combo_markets = any(
+        isinstance(bet, dict) and _bet_kind_tag(bet) == "combo"
+        for bet in (bets or [])
+    )
+    catalog = get_open_market_catalog(
+        force_refresh=force_refresh,
+        include_combo_markets=needs_combo_markets,
+    )
     if not int(catalog.get("count") or 0) and not force_refresh:
         # Retry once with hard refresh before accepting a zero-market catalog.
-        catalog = get_open_market_catalog(force_refresh=True)
+        catalog = get_open_market_catalog(
+            force_refresh=True,
+            include_combo_markets=needs_combo_markets,
+        )
     catalog_ts = float(_KALSHI_MARKET_CACHE.get("ts") or 0.0)
 
     # Invalidate resolution cache whenever the market catalog has been refreshed
@@ -2359,9 +2588,7 @@ def get_today_kalshi_tickers() -> dict[str, Any]:
             continue
         # Only include upcoming / today markets
         close_dt = _market_time(market)
-        if close_dt is None:
-            continue
-        if close_dt.date() < today_utc:
+        if close_dt is not None and close_dt.date() < today_utc:
             continue  # already expired
 
         entry = {

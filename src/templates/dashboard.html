@@ -906,7 +906,7 @@ body.console-open main{padding-bottom:236px}
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
         <span class="section-meta" id="ready-bets-meta"></span>
         <button class="btn btn-sm" onclick="refreshReadyBets(true)">&#8635; Refresh Bets</button>
-        <button class="btn btn-sm" onclick="fetchKalshiTodayTickers()" title="Check what Kalshi has available today (reverse match)">&#128270; Today Tickers</button>
+        <button class="btn btn-sm" onclick="fetchKalshiTodayTickers()" title="Check what Kalshi has open now and upcoming (reverse match)">&#128270; Open Tickers</button>
       </div>
     </div>
 
@@ -1172,7 +1172,7 @@ function _generateClientOrderId(uid, day) {
 }
 
 function fetchKalshiTodayTickers() {
-  _logOp('info', 'Fetching Kalshi today tickers (reverse match)…');
+  _logOp('info', 'Fetching Kalshi open and upcoming tickers (reverse match)…');
   return fetch('/api/kalshi/today-tickers')
     .then(r => r.json())
     .then(d => {
@@ -1181,14 +1181,14 @@ function fetchKalshiTodayTickers() {
         const total = d.total || 0;
         const sports = Object.keys(d.sports || {});
         const sportSummary = sports.map(s => `${s}(${(d.sports[s]||[]).length})`).join(', ');
-        _logOp('success', `Today tickers: ${total} open markets — ${sportSummary || 'no sports'} (${d.market_count || 0} total scanned)`);
+        _logOp('success', `Open tickers: ${total} markets — ${sportSummary || 'no sports'} (${d.market_count || 0} total scanned)`);
         renderReadyBets();
         return d;
       }
-      _logOp('error', `Today tickers failed: ${d.error || 'Unknown'}`);
+      _logOp('error', `Open tickers failed: ${d.error || 'Unknown'}`);
       return null;
     })
-    .catch(err => { _logOp('error', `Today tickers error: ${err}`); return null; });
+    .catch(err => { _logOp('error', `Open tickers error: ${err}`); return null; });
 }
 
 function _isSoccerMode() {
@@ -4693,13 +4693,14 @@ function resolveKalshiReadyBets(force) {
   };
   renderReadyBets();
   const combosTabActive = !!document.getElementById('rb-combos')?.classList.contains('active');
-  const includeComboSuggestions = !!force || combosTabActive;
+  const includeComboSuggestions = combosTabActive;
+  const betsToResolve = includeComboSuggestions ? READY_BETS : READY_BETS.filter(r => r && r.kind !== 'combo');
 
   return fetch('/api/kalshi/resolve-ready', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      bets: READY_BETS,
+      bets: betsToResolve,
       force_refresh: !!force,
       include_combo_suggestions: includeComboSuggestions,
     }),
@@ -4841,8 +4842,12 @@ function renderReadyBets() {
   const isSent = (row) => !!_readySentInfo(row, sentItems);
   const openRows = allRows.filter(row => !isSent(row));
   const isMatched = (row) => {
-    if (!row || row.kind === 'combo') return !!row?.all_matched;
-    const resolution = READY_KALSHI_RESOLUTIONS[row.uid] || READY_KALSHI_RESOLUTIONS[row.bet_uid] || null;
+    if (!row) return false;
+    const resolution = READY_KALSHI_RESOLUTIONS[row.uid] || READY_KALSHI_RESOLUTIONS[row.bet_uid] || READY_KALSHI_RESOLUTIONS[row.prediction_uid] || (row.market_ticker ? row : null);
+    if (row.kind === 'combo') {
+      return String((resolution && resolution.status) || row.status || '').toLowerCase() === 'matched'
+        && !!String((resolution && resolution.market_ticker) || row.market_ticker || '').trim();
+    }
     return String(resolution?.status || '').toLowerCase() === 'matched' && !!resolution?.market_ticker;
   };
   const rows = openRows.filter(isMatched);
@@ -4871,7 +4876,7 @@ function renderReadyBets() {
     if (READY_KALSHI_STATUS.error) bits.push(`Kalshi resolve failed: ${READY_KALSHI_STATUS.error}`);
     if (KALSHI_TODAY_DATA) {
       const todaySports = Object.keys(KALSHI_TODAY_DATA.sports || {});
-      if (todaySports.length) bits.push(`Today: ${KALSHI_TODAY_DATA.total || 0} Kalshi mkts (${todaySports.length} sports)`);
+      if (todaySports.length) bits.push(`Open: ${KALSHI_TODAY_DATA.total || 0} Kalshi mkts (${todaySports.length} sports)`);
     }
     metaEl.textContent = bits.join(' · ');
   }
@@ -4879,26 +4884,28 @@ function renderReadyBets() {
   // ── shared: render action row for any ready bet ──
   const renderActionRow = (b) => {
     const uidDom = _safeDomId(b.uid);
-    const resolution = READY_KALSHI_RESOLUTIONS[b.uid] || null;
+    const resolution = READY_KALSHI_RESOLUTIONS[b.uid] || READY_KALSHI_RESOLUTIONS[b.bet_uid] || READY_KALSHI_RESOLUTIONS[b.prediction_uid] || (b && b.market_ticker ? b : null);
     const sentInfo = _readySentInfo(b, sentItems);
-    const resolutionStatus = resolution ? String(resolution.status || '') : (READY_KALSHI_STATUS.loading ? 'loading' : 'pending');
-    const autoTicker = resolutionStatus === 'matched' ? String(resolution.market_ticker || '').trim() : '';
+    const resolutionStatus = resolution
+      ? String(resolution.status || '')
+      : (String(b.status || '') || (READY_KALSHI_STATUS.loading ? 'loading' : 'pending'));
+    const autoTicker = resolutionStatus === 'matched' ? String((resolution && resolution.market_ticker) || b.market_ticker || '').trim() : '';
     const sideVal = resolutionStatus === 'matched'
-      ? String(resolution.side || 'yes').toLowerCase()
+      ? String((resolution && resolution.side) || b.side || 'yes').toLowerCase()
       : ((b.side_default === 'no') ? 'no' : 'yes');
     const autoPrice = resolutionStatus === 'matched'
-      ? Math.max(1, Math.min(99, Math.round(Number(resolution.price_cents || 50))))
+      ? Math.max(1, Math.min(99, Math.round(Number((resolution && resolution.price_cents) || b.price_cents || 50))))
       : 50;
 
     let chipTitle = resolutionStatus === 'matched'
-      ? String(resolution.market_title || autoTicker || '')
+      ? String(((resolution && resolution.market_title) || b.market_title || autoTicker || ''))
       : '';
     if (chipTitle.length > 55) chipTitle = chipTitle.slice(0, 52) + '…';
 
     let matchHtml = '';
     let hintHtml = '';
     if (resolutionStatus === 'matched' && autoTicker) {
-      const lineNote = String(resolution.line_note || '').trim();
+      const lineNote = String(((resolution && resolution.line_note) || b.line_note || '')).trim();
       const lineNoteHtml = lineNote
         ? `<span class="match-line-note" title="${lineNote}">⚠ ${lineNote}</span>`
         : '';
@@ -4990,7 +4997,8 @@ function renderReadyBets() {
     const ev = Number(b.ev) || 0;
     const evPct = (ev * 100).toFixed(1);
     const dec = (Number(b.dec_odds || b.combined_dec_odds) || 1.9).toFixed(2);
-    const allMatched = !!b.all_matched;
+    const comboResolution = READY_KALSHI_RESOLUTIONS[b.uid] || READY_KALSHI_RESOLUTIONS[b.bet_uid] || b;
+    const exactComboMatched = String(comboResolution.status || '').toLowerCase() === 'matched' && !!String(comboResolution.market_ticker || '').trim();
     const legs = _asArray(b.legs);
     const legsHtml = legs.length ? `<div class="combo-legs-preview">${legs.map((l, i) => {
       const lp = Math.round(_legProb(l) * 100);
@@ -5010,9 +5018,9 @@ function renderReadyBets() {
         </span>
       </div>`;
     }).join('')}</div>` : '';
-    const matchStatusBadge = allMatched
-      ? `<span class="ready-pill good">&#9989; All Matched</span>`
-      : `<span class="ready-pill warn">&#9888; Partial Match</span>`;
+    const matchStatusBadge = exactComboMatched
+      ? `<span class="ready-pill good">&#9989; Exact Kalshi Combo</span>`
+      : `<span class="ready-pill warn">&#9888; Matched legs only</span>`;
     return `<div class="ready-item ready-combo-item">
       <div class="ready-item-head">
         <div>
@@ -5033,6 +5041,7 @@ function renderReadyBets() {
         <span class="ready-pill ${ev >= 0 ? 'good' : 'warn'}">EV ${evPct}%</span>
         ${matchStatusBadge}
       </div>
+      ${renderActionRow(b)}
     </div>`;
   };
 

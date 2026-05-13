@@ -5193,6 +5193,28 @@ def api_kalshi_resolve_ready():
                     max_legs=4,
                     min_legs=2,
                 )
+                if combos:
+                    combo_resolved = resolve_ready_bets(combos, force_refresh=False)
+                    combo_resolution_map = combo_resolved.get("resolutions") or {}
+                    if combo_resolution_map:
+                        resolved_map = resolved.get("resolutions") or {}
+                        resolved_map.update(combo_resolution_map)
+                        resolved["resolutions"] = resolved_map
+                        hydrated_combos = []
+                        for combo in combos:
+                            combo_uid = str(combo.get("uid") or "")
+                            combo_resolution = combo_resolution_map.get(combo_uid)
+                            if isinstance(combo_resolution, dict):
+                                hydrated_combos.append(
+                                    {
+                                        **combo,
+                                        **{k: v for k, v in combo_resolution.items() if k != "legs"},
+                                        "all_matched": str(combo_resolution.get("status") or "").lower() == "matched",
+                                    }
+                                )
+                            else:
+                                hydrated_combos.append(combo)
+                        combos = hydrated_combos
             except Exception as combo_exc:
                 _log(f"[kalshi] combo suggestion skipped: {combo_exc}")
         return jsonify({"ok": True, **_clean(resolved), "combo_suggestions": _clean(combos)})
@@ -5235,6 +5257,28 @@ def api_kalshi_combo_study():
             min_ev=min_ev,
             max_combos=50,
         )
+        if combos:
+            combo_resolved = resolve_ready_bets(combos, force_refresh=False)
+            combo_resolution_map = combo_resolved.get("resolutions") or {}
+            if combo_resolution_map:
+                resolved_map = resolved.get("resolutions") or {}
+                resolved_map.update(combo_resolution_map)
+                resolved["resolutions"] = resolved_map
+                hydrated_combos = []
+                for combo in combos:
+                    combo_uid = str(combo.get("uid") or "")
+                    combo_resolution = combo_resolution_map.get(combo_uid)
+                    if isinstance(combo_resolution, dict):
+                        hydrated_combos.append(
+                            {
+                                **combo,
+                                **{k: v for k, v in combo_resolution.items() if k != "legs"},
+                                "all_matched": str(combo_resolution.get("status") or "").lower() == "matched",
+                            }
+                        )
+                    else:
+                        hydrated_combos.append(combo)
+                combos = hydrated_combos
         return jsonify({
             "ok": True,
             "combos": _clean(combos),
