@@ -17,6 +17,7 @@ import os
 import re
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from itertools import combinations
 from typing import Any
 from urllib.parse import urlparse
@@ -34,6 +35,18 @@ _KALSHI_BASE_PATH = urlparse(KALSHI_BASE_URL).path.rstrip("/")  # e.g. /trade-ap
 _KALSHI_MARKET_CACHE_TTL_SEC = max(
     60, int(os.getenv("KALSHI_MARKET_CACHE_TTL_SEC", "600") or "600")
 )
+_KALSHI_SERIES_DISCOVERY_TTL_SEC = max(
+    300, int(os.getenv("KALSHI_SERIES_DISCOVERY_TTL_SEC", "1800") or "1800")
+)
+_KALSHI_SERIES_DISCOVERY_PAGES = max(
+    1, min(int(os.getenv("KALSHI_SERIES_DISCOVERY_PAGES", "2") or "2"), 10)
+)
+_KALSHI_MAX_DISCOVERED_SERIES = max(
+    10, min(int(os.getenv("KALSHI_MAX_DISCOVERED_SERIES", "25") or "25"), 400)
+)
+_KALSHI_SERIES_FETCH_WORKERS = max(
+    1, min(int(os.getenv("KALSHI_SERIES_FETCH_WORKERS", "6") or "6"), 16)
+)
 
 # Series ticker prefix → sport (updated per Kalshi documentation)
 _SERIES_SPORT_MAP: dict[str, str] = {
@@ -50,8 +63,21 @@ _SERIES_SPORT_MAP: dict[str, str] = {
     "KXNBATOTAL": "basketball", # game point totals
     "KXNBAREB": "basketball",   # player rebounds props
     "KXNBAAST": "basketball",   # player assists props
+    "KXNBAGAME": "basketball",
+    "KXNBASPREAD": "basketball",
+    "KXNBATEAMTOTAL": "basketball",
+    "KXNBA1H": "basketball",
+    "KXNBA1HSPREAD": "basketball",
     "KXNBA": "basketball",      # futures / championship
     "KXWNBA": "basketball",
+    "KXWNBAGAME": "basketball",
+    "KXWNBASPREAD": "basketball",
+    "KXWNBATOTAL": "basketball",
+    "KXWNBAREB": "basketball",
+    "KXWNBAAST": "basketball",
+    "KXWNBAPTS": "basketball",
+    "KXWNBA1H": "basketball",
+    "KXWNBA1HSPREAD": "basketball",
     "NBAPTSO": "basketball", "NBAMVP": "basketball", "NBACHAMP": "basketball",
     # ── Hockey (NHL) — confirmed live series ──
     "KXNHLPTS": "hockey",   # player points (goals+assists) props
@@ -73,13 +99,26 @@ _SERIES_SPORT_MAP: dict[str, str] = {
 # Add new confirmed series here — they will be persisted to the DB series registry automatically.
 _SPORTS_SERIES_TO_FETCH: list[str] = [
     # NBA — player props + game markets
+    "KXNBAGAME",   # game winners / moneylines
+    "KXNBASPREAD", # game spreads
     "KXNBAPTS",    # player points
     "KXNBATOTAL",  # game totals
+    "KXNBATEAMTOTAL", # team totals
     "KXNBAREB",    # player rebounds
     "KXNBAAST",    # player assists
+    "KXNBA1H",     # first-half winner
+    "KXNBA1HSPREAD", # first-half spread
     "KXNBA",       # futures / misc
     # WNBA
     "KXWNBA",
+    "KXWNBAGAME",
+    "KXWNBASPREAD",
+    "KXWNBATOTAL",
+    "KXWNBAPTS",
+    "KXWNBAREB",
+    "KXWNBAAST",
+    "KXWNBA1H",
+    "KXWNBA1HSPREAD",
     # MLB — player props + game markets
     "MLBWIN",      # game winners / moneylines
     "MLBOU",       # game totals/over-under
@@ -106,18 +145,100 @@ _SPORTS_SERIES_TO_FETCH: list[str] = [
 # Keys are upper-case substrings; values are lower-case prop_type keywords.
 _SERIES_STAT_HINTS: dict[str, list[str]] = {
     "NBAPTS":  ["point", "pts"],
+    "WNBAPTS": ["point", "pts"],
     "NHLPTS":  ["point", "pts"],
     "NBAREB":  ["rebound", "reb"],
+    "WNBAREB": ["rebound", "reb"],
     "NBAAST":  ["assist", "ast"],
+    "WNBAAST": ["assist", "ast"],
     "NHLAST":  ["assist", "ast"],
     "NHLGLS":  ["goal", "goals"],
     "MLBHRR":  ["hit", "run", "rbi", "hrr"],
     "MLBHIT":  ["hit", "hits"],
     "MLBHR":   ["home run", "hr"],
     "NBATOTAL": ["total"],
+    "WNBATOTAL": ["total"],
     "NHLTOTAL": ["total", "goal"],
     "MLBTOTAL": ["total", "run"],
 }
+
+_DISCOVERY_SUPPORTED_SPORTS = {"basketball", "baseball", "hockey"}
+_DISCOVERY_INCLUDE_TEXT = (
+    "game",
+    "match",
+    "spread",
+    "total",
+    "team total",
+    "first half",
+    "1st half",
+    "points",
+    "pra",
+    "rebounds",
+    "assists",
+    "hits",
+    "runs",
+    "rbi",
+    "home run",
+    "goals",
+    "goal",
+)
+_DISCOVERY_INCLUDE_TICKER = (
+    "GAME",
+    "MATCH",
+    "SPREAD",
+    "TOTAL",
+    "1H",
+    "TEAMTOTAL",
+    "REB",
+    "HIT",
+    "HRR",
+    "RBI",
+    "GOAL",
+    "GLS",
+)
+_DISCOVERY_EXCLUDE_TEXT = (
+    "draft",
+    "mvp",
+    "rookie",
+    "coach",
+    "manager",
+    "next team",
+    "transfer",
+    "leader",
+    "all star",
+    "seed",
+    "record",
+    "debut",
+    "of the year",
+    "most improved",
+    "pick",
+    "combine",
+    "season delay",
+    "division",
+    "rank",
+)
+_DISCOVERY_EXCLUDE_TICKER = (
+    "DRAFT",
+    "MVP",
+    "ROY",
+    "ROTY",
+    "OPOY",
+    "DPOTY",
+    "COTY",
+    "MIMP",
+    "COACH",
+    "MANAGER",
+    "LEADER",
+    "SEED",
+    "RECORD",
+    "DEBUT",
+    "PICK",
+    "COMBINE",
+    "RETURN",
+    "DELAY",
+    "PREPACK",
+    "WINS",
+)
 
 # ── Series registry persistence ─────────────────────────────────────────────────────
 # Keeps track of all confirmed working series tickers across restarts.  Written to a
@@ -168,17 +289,125 @@ def _update_series_registry(new_series: dict[str, str]) -> None:
 def _detect_sport_from_series(series_ticker: str) -> str:
     """Best-effort sport detection from a series ticker not in _SERIES_SPORT_MAP."""
     t = series_ticker.upper()
-    if "MLB" in t or "BASEBALL" in t:
+    if any(token in t for token in ("MLB", "BASEBALL", "KBO", "NPB", "WBC")):
         return "baseball"
-    if "NBA" in t or "BASKETBALL" in t or "WNBA" in t:
+    if any(
+        token in t
+        for token in (
+            "NBA",
+            "BASKETBALL",
+            "WNBA",
+            "NCAAMB",
+            "NCAAWB",
+            "EUROLEAGUE",
+            "NBL",
+            "FIBA",
+            "JBLEAGUE",
+            "ABA",
+            "GBL",
+        )
+    ):
         return "basketball"
-    if "NHL" in t or "HOCKEY" in t:
+    if any(token in t for token in ("NHL", "HOCKEY", "IIHF")):
         return "hockey"
     if "NFL" in t or "FOOTBALL" in t:
         return "football"
-    if "MLS" in t or "EPL" in t or "FIFA" in t or "SOCCER" in t:
+    if any(token in t for token in ("MLS", "EPL", "FIFA", "SOCCER", "UEFA", "LALIGA", "BUNDESLIGA", "LIGUE")):
         return "soccer"
     return ""
+
+
+def _detect_sport_from_series_row(series: dict[str, Any]) -> str:
+    ticker = str(series.get("ticker") or "")
+    tags = " ".join(str(tag or "") for tag in (series.get("tags") or []))
+    title = str(series.get("title") or "")
+    text = _norm_text(" ".join((ticker, title, tags)))
+
+    if any(token in text for token in (
+        "women s pro basketball",
+        "women s basketball",
+        "wnba",
+        "pro basketball",
+        "college basketball",
+        "march madness",
+        "euroleague",
+        "fiba",
+        "basketball",
+    )):
+        return "basketball"
+    if any(token in text for token in ("pro baseball", "college baseball", "baseball", "mlb", "kbo", "npb", "world baseball")):
+        return "baseball"
+    if any(token in text for token in ("pro hockey", "college hockey", "hockey", "nhl", "iihf", "olympic hockey")):
+        return "hockey"
+    if any(token in text for token in ("pro football", "college football", "football", "nfl", "super bowl")):
+        return "football"
+    if any(token in text for token in ("soccer", "mls", "premier league", "epl", "uefa", "fifa", "liga", "bundesliga", "ligue", "cup")):
+        return "soccer"
+    return _detect_sport_from_series(ticker)
+
+
+def _is_actionable_sports_series(series: dict[str, Any]) -> bool:
+    raw = " ".join(
+        [
+            str(series.get("ticker") or ""),
+            str(series.get("title") or ""),
+            " ".join(str(tag or "") for tag in (series.get("tags") or [])),
+        ]
+    )
+    raw_upper = raw.upper()
+    text = _norm_text(raw)
+    padded_text = f" {text} "
+    if any(token in raw_upper for token in _DISCOVERY_EXCLUDE_TICKER):
+        return False
+    if any(f" {token} " in padded_text for token in _DISCOVERY_EXCLUDE_TEXT):
+        return False
+    return any(token in raw_upper for token in _DISCOVERY_INCLUDE_TICKER) or any(
+        f" {token} " in padded_text for token in _DISCOVERY_INCLUDE_TEXT
+    )
+
+
+def _discover_actionable_sports_series(*, force_refresh: bool = False) -> dict[str, str]:
+    now = time.time()
+    with _KALSHI_SERIES_CACHE_LOCK:
+        age = now - float(_KALSHI_SERIES_CACHE.get("ts") or 0.0)
+        if (
+            not force_refresh
+            and _KALSHI_SERIES_CACHE.get("series")
+            and age < _KALSHI_SERIES_DISCOVERY_TTL_SEC
+        ):
+            return dict(_KALSHI_SERIES_CACHE.get("series") or {})
+
+    discovered: dict[str, str] = {}
+    cursor: str | None = None
+    for _ in range(_KALSHI_SERIES_DISCOVERY_PAGES):
+        try:
+            data = list_series(limit=200, cursor=cursor, category="Sports")
+        except Exception:
+            break
+        rows = data.get("series") or []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            sport = _detect_sport_from_series_row(row)
+            if sport not in _DISCOVERY_SUPPORTED_SPORTS:
+                continue
+            if not _is_actionable_sports_series(row):
+                continue
+            ticker = str(row.get("ticker") or "").strip().upper()
+            if not ticker:
+                continue
+            discovered.setdefault(ticker, sport)
+            if len(discovered) >= _KALSHI_MAX_DISCOVERED_SERIES:
+                break
+        if len(discovered) >= _KALSHI_MAX_DISCOVERED_SERIES:
+            break
+        cursor = data.get("cursor")
+        if not cursor:
+            break
+
+    with _KALSHI_SERIES_CACHE_LOCK:
+        _KALSHI_SERIES_CACHE.update({"ts": time.time(), "series": dict(discovered)})
+    return discovered
 
 _KALSHI_MARKET_CACHE_LOCK = threading.Lock()
 _KALSHI_MARKET_CACHE: dict[str, Any] = {
@@ -186,6 +415,11 @@ _KALSHI_MARKET_CACHE: dict[str, Any] = {
     "markets": [],
     "combo_markets": [],
     "count": 0,
+}
+_KALSHI_SERIES_CACHE_LOCK = threading.Lock()
+_KALSHI_SERIES_CACHE: dict[str, Any] = {
+    "ts": 0.0,
+    "series": {},
 }
 
 # Module-level resolution cache: keyed by bet_signature, valid for current catalog epoch.
@@ -557,6 +791,35 @@ def list_events(
     data = _request_json("GET", "/events", params=params)
     events, next_cursor = _parse_list_response(data, "events")
     return {"events": events, "cursor": next_cursor, "raw": data}
+
+
+def list_series(
+    *,
+    limit: int = 200,
+    cursor: str | None = None,
+    category: str | None = None,
+    tags: str | None = None,
+    include_product_metadata: bool | None = None,
+    include_volume: bool | None = None,
+    min_updated_ts: int | None = None,
+) -> dict[str, Any]:
+    params: dict[str, Any] = {"limit": max(1, min(int(limit or 200), 200))}
+    if cursor:
+        params["cursor"] = cursor
+    if category:
+        params["category"] = category
+    if tags:
+        params["tags"] = tags
+    if include_product_metadata is not None:
+        params["include_product_metadata"] = bool(include_product_metadata)
+    if include_volume is not None:
+        params["include_volume"] = bool(include_volume)
+    if min_updated_ts is not None:
+        params["min_updated_ts"] = int(min_updated_ts)
+
+    data = _request_json("GET", "/series", params=params)
+    series, next_cursor = _parse_list_response(data, "series")
+    return {"series": series, "cursor": next_cursor, "raw": data}
 
 
 def _utc_now() -> datetime.datetime:
@@ -958,6 +1221,7 @@ def _build_event_index(markets: list[dict[str, Any]]) -> dict[str, dict[str, Any
             event_ticker,
             {
                 "event_ticker": event_ticker,
+                "series_ticker": _series_ticker_from_market(market),
                 "markets": [],
                 "sport": "",
                 "market_kinds": set(),
@@ -1145,6 +1409,20 @@ def _bet_sport_tag(bet: dict[str, Any]) -> str:
     return ""
 
 
+def _series_ticker_from_market(market: dict[str, Any]) -> str:
+    explicit = str(market.get("series_ticker") or "").strip()
+    if explicit:
+        return explicit.upper()
+    for key in ("event_ticker", "ticker"):
+        value = str(market.get(key) or "").strip()
+        if not value:
+            continue
+        if "-" in value:
+            return value.split("-", 1)[0].upper()
+        return value.upper()
+    return ""
+
+
 def _market_sport_tag(market: dict[str, Any]) -> str:
     text = _norm_text(
         " ".join(
@@ -1164,8 +1442,13 @@ def _market_sport_tag(market: dict[str, Any]) -> str:
     # Check known series ticker prefixes first (most reliable)
     ticker_upper = str(market.get("ticker") or "").upper()
     event_upper = str(market.get("event_ticker") or "").upper()
+    series_upper = _series_ticker_from_market(market)
     for prefix, sport in _SERIES_SPORT_MAP.items():
-        if ticker_upper.startswith(prefix) or event_upper.startswith(prefix):
+        if (
+            ticker_upper.startswith(prefix)
+            or event_upper.startswith(prefix)
+            or series_upper.startswith(prefix)
+        ):
             return sport
     # Fallback to text-based detection
     if any(token in text for token in ("kxnba", "kxwnba", "nbaptso", "nbamvp", "nbachamp", "basketball", "nba", "wnba")):
@@ -1706,6 +1989,34 @@ def _resolve_combo_bet(
     }
 
 
+def _fetch_open_markets_for_series(series: str, sport_hint: str = "") -> tuple[str, list[dict[str, Any]], str]:
+    rows_out: list[dict[str, Any]] = []
+    cursor: str | None = None
+    pages = 0
+    while True:
+        pages += 1
+        try:
+            data = list_markets(limit=500, cursor=cursor, status="open", series_ticker=series)
+        except Exception:
+            break
+        rows = data.get("markets") or []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            normalized_row = dict(row)
+            normalized_row["series_ticker"] = str(
+                normalized_row.get("series_ticker") or series
+            ).upper()
+            detected_sport = sport_hint or _market_sport_tag(normalized_row)
+            if detected_sport:
+                normalized_row["sport"] = str(normalized_row.get("sport") or detected_sport)
+            rows_out.append(normalized_row)
+        cursor = data.get("cursor")
+        if not cursor or pages >= 20:
+            break
+    return series, rows_out, (sport_hint or _detect_sport_from_series(series))
+
+
 def get_open_market_catalog(*, force_refresh: bool = False) -> dict[str, Any]:
     now = time.time()
     with _KALSHI_MARKET_CACHE_LOCK:
@@ -1732,37 +2043,50 @@ def get_open_market_catalog(*, force_refresh: bool = False) -> dict[str, Any]:
     markets: list[dict[str, Any]] = []
 
     # Merge hardcoded series with anything previously confirmed in the persistent registry
+    # plus dynamically discovered actionable sports series from Kalshi's public /series feed.
     registry = _load_series_registry()
-    series_to_fetch = list(dict.fromkeys(list(_SPORTS_SERIES_TO_FETCH) + list(registry.keys())))
+    discovered_series = _discover_actionable_sports_series(force_refresh=not registry)
+    series_to_fetch = list(
+        dict.fromkeys(
+            list(_SPORTS_SERIES_TO_FETCH)
+            + list(discovered_series.keys())
+            + list(registry.keys())
+        )
+    )
     newly_confirmed: dict[str, str] = {}
 
-    for series in series_to_fetch:
-        cursor: str | None = None
-        pages = 0
-        series_count = 0
-        while True:
-            pages += 1
+    series_hints = {
+        **{series: _SERIES_SPORT_MAP.get(series, "") for series in series_to_fetch},
+        **registry,
+        **discovered_series,
+    }
+    max_workers = min(max(1, _KALSHI_SERIES_FETCH_WORKERS), max(1, len(series_to_fetch)))
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_map = {
+            executor.submit(
+                _fetch_open_markets_for_series,
+                series,
+                series_hints.get(series) or _detect_sport_from_series(series),
+            ): series
+            for series in series_to_fetch
+        }
+        for future in as_completed(future_map):
+            series = future_map[future]
             try:
-                data = list_markets(limit=500, cursor=cursor, status="open", series_ticker=series)
+                _, fetched_rows, sport_hint = future.result()
             except Exception:
-                break
-            rows = data.get("markets") or []
-            for row in rows:
-                if not isinstance(row, dict):
-                    continue
-                ticker = str(row.get("ticker") or "")
+                continue
+            series_count = 0
+            for normalized_row in fetched_rows:
+                ticker = str(normalized_row.get("ticker") or "")
                 if ticker and ticker not in seen_tickers:
                     seen_tickers.add(ticker)
-                    markets.append(row)
+                    markets.append(normalized_row)
                     series_count += 1
-            cursor = data.get("cursor")
-            if not cursor or pages >= 20:
-                break
-        # Record confirmed series (returned at least one market) for persistence
-        if series_count > 0:
-            sport = _SERIES_SPORT_MAP.get(series) or registry.get(series) or _detect_sport_from_series(series)
-            if sport:
-                newly_confirmed[series] = sport
+            if series_count > 0:
+                sport = sport_hint or _detect_sport_from_series(series)
+                if sport:
+                    newly_confirmed[series] = sport
 
     # If targeted series fetch returns nothing (transient API issues),
     # fall back to broad sports scan to avoid "0 markets scanned" responses.
@@ -1780,13 +2104,16 @@ def get_open_market_catalog(*, force_refresh: bool = False) -> dict[str, Any]:
             for row in rows:
                 if not isinstance(row, dict):
                     continue
-                sport = _market_sport_tag(row)
+                normalized_row = dict(row)
+                normalized_row["series_ticker"] = _series_ticker_from_market(normalized_row)
+                sport = _market_sport_tag(normalized_row)
                 if not sport or sport == "multi":
                     continue
-                ticker = str(row.get("ticker") or "")
+                normalized_row["sport"] = sport
+                ticker = str(normalized_row.get("ticker") or "")
                 if ticker and ticker not in seen_tickers:
                     seen_tickers.add(ticker)
-                    markets.append(row)
+                    markets.append(normalized_row)
             cursor = data.get("cursor")
             if not cursor:
                 break
@@ -2080,4 +2407,25 @@ def place_order(order_payload: dict[str, Any]) -> dict[str, Any]:
     if last_error:
         raise last_error
     raise RuntimeError("Kalshi order placement failed")
+
+
+def get_order(order_id: str) -> dict[str, Any]:
+    """Fetch a single authenticated Kalshi order by ID."""
+    clean_order_id = str(order_id or "").strip()
+    if not clean_order_id:
+        raise RuntimeError("order_id is required")
+
+    last_error: Exception | None = None
+    for path in (f"/portfolio/orders/{clean_order_id}", f"/orders/{clean_order_id}"):
+        try:
+            return _request_json("GET", path, auth=True)
+        except Exception as exc:
+            last_error = exc
+            if "(404)" in str(exc):
+                continue
+            raise
+
+    if last_error:
+        raise last_error
+    raise RuntimeError("Kalshi order lookup failed")
 

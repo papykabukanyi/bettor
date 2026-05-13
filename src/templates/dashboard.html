@@ -1108,6 +1108,7 @@ let READY_KALSHI_STATUS = { loading: false, matched: 0, started: 0, done: 0, una
 const READY_ORDER_LOG_MAX = 120;
 let READY_ORDER_LOG = [];
 const READY_ORDER_IDS_KEY = 'bettor_ready_order_ids_v1';
+const READY_ORDER_LOG_KEY = 'bettor_ready_order_log_v1';
 const READY_SENT_BETS_KEY = 'bettor_ready_sent_bets_v1';
 
 // ── Ops Console ────────────────────────────────────────────────────────────
@@ -1116,6 +1117,7 @@ let READY_OPS_LOG = [];
 const READY_OPS_LOG_MAX = 150;
 let _lastKalshiResolveMs = 0;
 let _lastKalshiResolveKey = '';
+let _readyOrderSyncInFlight = false;
 const _KALSHI_RESOLVE_DEBOUNCE_MS = 600_000; // 10 min between auto-resolves (keeps matches stable)
 
 // Game-level bet types that come through the props pipeline but are NOT player props
@@ -1446,6 +1448,28 @@ function _writeReadyOrderIds(idSet) {
   } catch (e) {}
 }
 
+function _readReadyOrderLog() {
+  try {
+    const raw = localStorage.getItem(READY_ORDER_LOG_KEY);
+    const day = _localDayKey();
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!parsed || parsed.day !== day || !Array.isArray(parsed.entries)) return [];
+    return parsed.entries.filter(v => v && typeof v === 'object').slice(0, READY_ORDER_LOG_MAX);
+  } catch (e) {
+    return [];
+  }
+}
+
+function _writeReadyOrderLog(entries) {
+  try {
+    localStorage.setItem(READY_ORDER_LOG_KEY, JSON.stringify({
+      day: _localDayKey(),
+      entries: _asArray(entries).slice(0, READY_ORDER_LOG_MAX),
+    }));
+  } catch (e) {}
+}
+
 function _readReadySentBets() {
   try {
     const raw = localStorage.getItem(READY_SENT_BETS_KEY);
@@ -1466,6 +1490,21 @@ function _writeReadySentBets(items) {
       items: items || {},
     }));
   } catch (e) {}
+}
+
+function _readySentRecords(sentItems) {
+  const dedupe = new Map();
+  Object.values(sentItems || {}).forEach(record => {
+    if (!record || typeof record !== 'object') return;
+    const key = String(record.order_id || record.client_order_id || record.uid || record.ticker || '').trim();
+    if (!key) return;
+    if (!dedupe.has(key)) {
+      dedupe.set(key, { ...record });
+      return;
+    }
+    dedupe.set(key, { ...dedupe.get(key), ...record });
+  });
+  return Array.from(dedupe.values());
 }
 
 function _readySentInfo(rowOrUid, sentItems) {
@@ -4487,26 +4526,109 @@ function _renderReadyOrderLog() {
   const el = document.getElementById('ready-order-log');
   const metaEl = document.getElementById('ready-order-meta');
   if (!el) return;
-  if (metaEl) metaEl.textContent = `${READY_ORDER_LOG.length} event${READY_ORDER_LOG.length !== 1 ? 's' : ''}`;
+  const sentRecords = _readySentRecords(_readReadySentBets());
+  const activeTracked = sentRecords.filter(r => !['executed', 'canceled'].includes(String(r.order_status || '').toLowerCase())).length;
+  if (metaEl) metaEl.textContent = `${READY_ORDER_LOG.length} event${READY_ORDER_LOG.length !== 1 ? 's' : ''} · ${activeTracked} tracked`;
   if (!READY_ORDER_LOG.length) {
     el.innerHTML = '<div class="no-games">No order attempts yet.</div>';
     return;
   }
   el.innerHTML = READY_ORDER_LOG.map(r => `
     <div class="ready-order-row ${r.ok ? 'ok' : 'err'}">
-      <div style="font-weight:700">${r.ok ? 'SUCCESS' : 'FAILED'} · ${r.label}</div>
+      <div style="font-weight:700">${String(r.status || (r.ok ? 'SUCCESS' : 'FAILED')).toUpperCase()} · ${r.label}</div>
       <div style="font-size:.72rem;color:var(--muted)">${r.ts} · ${r.msg}</div>
     </div>
   `).join('');
 }
 
-function _appendReadyOrderLog(ok, label, msg) {
-  const ts = new Date().toLocaleString();
-  READY_ORDER_LOG.unshift({ ok: !!ok, label: String(label || 'Order'), msg: String(msg || ''), ts });
+function _appendReadyOrderLog(ok, label, msg, extra) {
+  const entry = {
+    ok: !!ok,
+    label: String(label || 'Order'),
+    msg: String(msg || ''),
+    ts: String((extra && extra.ts) || new Date().toLocaleString()),
+    status: String((extra && extra.status) || ''),
+    order_id: String((extra && extra.order_id) || ''),
+    client_order_id: String((extra && extra.client_order_id) || ''),
+  };
+  const dedupeKey = `${entry.order_id || ''}|${entry.client_order_id || ''}|${entry.status || ''}|${entry.msg}`;
+  if (dedupeKey !== '|||') {
+    const exists = READY_ORDER_LOG.some(r => `${r.order_id || ''}|${r.client_order_id || ''}|${r.status || ''}|${r.msg}` === dedupeKey);
+    if (exists) {
+      _renderReadyOrderLog();
+      return;
+    }
+  }
+  READY_ORDER_LOG.unshift(entry);
   if (READY_ORDER_LOG.length > READY_ORDER_LOG_MAX) {
     READY_ORDER_LOG = READY_ORDER_LOG.slice(0, READY_ORDER_LOG_MAX);
   }
+  _writeReadyOrderLog(READY_ORDER_LOG);
   _renderReadyOrderLog();
+}
+
+function syncReadyOrderTracking() {
+  if (_readyOrderSyncInFlight) return Promise.resolve(null);
+  const sentItems = _readReadySentBets();
+  const records = _readySentRecords(sentItems).filter(r => r && r.order_id && !['executed', 'canceled'].includes(String(r.order_status || '').toLowerCase()));
+  if (!records.length) {
+    _renderReadyOrderLog();
+    return Promise.resolve(null);
+  }
+
+  _readyOrderSyncInFlight = true;
+  return fetch('/api/kalshi/order-statuses', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ order_ids: records.map(r => r.order_id) }),
+  }).then(r => r.json()).then(d => {
+    if (!d.ok && !Object.keys(d.orders || {}).length) {
+      throw new Error(d.error || 'Kalshi order status sync failed');
+    }
+    const orders = d.orders || {};
+    let changed = false;
+    Object.entries(sentItems).forEach(([key, value]) => {
+      if (!value || typeof value !== 'object') return;
+      const order = orders[String(value.order_id || '')];
+      if (!order || typeof order !== 'object') return;
+      const nextStatus = String(order.status || '').toLowerCase();
+      const prevStatus = String(value.order_status || '').toLowerCase();
+      sentItems[key] = {
+        ...value,
+        order_status: nextStatus || value.order_status || '',
+        order_id: String(order.order_id || value.order_id || ''),
+        client_order_id: String(order.client_order_id || value.client_order_id || ''),
+        fill_count_fp: String(order.fill_count_fp || value.fill_count_fp || ''),
+        remaining_count_fp: String(order.remaining_count_fp || value.remaining_count_fp || ''),
+        last_update_time: String(order.last_update_time || order.created_time || value.last_update_time || ''),
+      };
+      if (nextStatus && nextStatus !== prevStatus) {
+        changed = true;
+        const fillBits = [
+          order.fill_count_fp ? `filled ${order.fill_count_fp}` : '',
+          order.remaining_count_fp ? `remaining ${order.remaining_count_fp}` : '',
+        ].filter(Boolean).join(' · ');
+        _appendReadyOrderLog(nextStatus !== 'canceled', value.label || 'Order', `Ticker ${value.ticker || order.ticker || '—'} · ${nextStatus.toUpperCase()}${fillBits ? ` · ${fillBits}` : ''}`, {
+          status: nextStatus,
+          order_id: String(order.order_id || ''),
+          client_order_id: String(order.client_order_id || ''),
+        });
+      }
+    });
+    _writeReadySentBets(sentItems);
+    if (changed) {
+      renderReadyBets();
+      loadTrackedSingles();
+    } else {
+      _renderReadyOrderLog();
+    }
+    return d;
+  }).catch(err => {
+    _logOp('warn', `Order tracking sync failed: ${err}`);
+    return null;
+  }).finally(() => {
+    _readyOrderSyncInFlight = false;
+  });
 }
 
 function fetchKalshiBalance() {
@@ -5060,21 +5182,34 @@ function executeReadyBet(uid) {
       sentIds.add(clientOrderId);
       _writeReadyOrderIds(sentIds);
       const finalTicker = (d.resolution && d.resolution.market_ticker) || ticker;
+      const order = d.order || (d.response && d.response.order) || {};
+      const orderId = String(order.order_id || '').trim();
+      const orderStatus = String(order.status || 'resting').trim().toLowerCase();
       _markReadyBetSent(bet, {
         ticker: finalTicker,
         side,
         count,
         amount_usd: amount,
+        order_id: orderId,
+        order_status: orderStatus,
+        fill_count_fp: String(order.fill_count_fp || ''),
+        remaining_count_fp: String(order.remaining_count_fp || ''),
+        last_update_time: String(order.last_update_time || order.created_time || ''),
         client_order_id: d.client_order_id || clientOrderId,
         sent_at: new Date().toISOString(),
         label: bet.label,
       });
-      _appendReadyOrderLog(true, bet.label, `Ticker ${finalTicker} · ${side.toUpperCase()} · count ${count} · ${d.client_order_id || clientOrderId}`);
+      _appendReadyOrderLog(true, bet.label, `Ticker ${finalTicker} · ${side.toUpperCase()} · count ${count} · ${d.client_order_id || clientOrderId}${orderId ? ` · order ${orderId.slice(-10)}` : ''}`, {
+        status: orderStatus || 'success',
+        order_id: orderId,
+        client_order_id: d.client_order_id || clientOrderId,
+      });
       _logOp('success', `Order placed ✓ ${bet.label} | Ticker ${finalTicker} | ${side.toUpperCase()} | count ${count} | ID ${d.client_order_id || clientOrderId}`);
       toast('✓ Kalshi order placed successfully!', 'success');
       renderReadyBets();
       loadTrackedSingles();
       fetchKalshiBalance(); // refresh balance after order
+      syncReadyOrderTracking();
       return;
     }
     _appendReadyOrderLog(false, bet.label, d.error || 'Kalshi order failed');
@@ -5486,6 +5621,7 @@ function loadTrackedSingles() {
       const pendingLabel = pendingBucket === 'live' ? 'LIVE TRACKING' : (sentInfo ? 'TRACKING' : 'UPCOMING');
       const kalshiBits = sentInfo ? [
         sentInfo.ticker ? `<span>Kalshi ${sentInfo.ticker}</span>` : '',
+        sentInfo.order_status ? `<span>${String(sentInfo.order_status).toUpperCase()}</span>` : '',
         sentInfo.side ? `<span>${String(sentInfo.side).toUpperCase()}</span>` : '',
         sentInfo.count ? `<span>x${sentInfo.count}</span>` : '',
         sentInfo.client_order_id ? `<span>ID ${String(sentInfo.client_order_id).slice(-10)}</span>` : '',
@@ -5807,7 +5943,9 @@ function stopConsolePoll() {
     applyCachedData(local, { preserveIfIncomingEmpty: true });
   }
   hideOverlay();
+  READY_ORDER_LOG = _readReadyOrderLog();
   _renderReadyOrderLog();
+  syncReadyOrderTracking();
   if (_isReadyBetsActive()) {
     refreshReadyBets(false);
   }
@@ -5842,10 +5980,12 @@ function stopConsolePoll() {
   // Keep parlays and outcomes fully automatic without manual actions.
   resolveOutcomesSilent();
   setInterval(resolveOutcomesSilent, 2 * 60 * 1000);
+  setInterval(() => { syncReadyOrderTracking(); }, 60 * 1000);
   setInterval(() => {
     if (_isReadyBetsActive()) {
       refreshReadyBets(false);
     }
+    syncReadyOrderTracking();
     if (!_isParlaysActive()) return;
     loadTrackedParlays();
     loadTrackedSingles();

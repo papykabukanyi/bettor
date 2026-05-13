@@ -5384,15 +5384,57 @@ def api_kalshi_order():
             payload.update(raw_order)
 
         response = place_order(payload)
+        order = response.get("order") if isinstance(response, dict) else None
         return jsonify({
             "ok": True,
             "client_order_id": client_order_id,
+            "order": _clean(order) if isinstance(order, dict) else None,
             "resolution": _clean(resolved_bet) if isinstance(resolved_bet, dict) else None,
             "request": _clean(payload),
             "response": _clean(response),
         })
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
+
+
+@app.route("/api/kalshi/order-statuses", methods=["POST"])
+def api_kalshi_order_statuses():
+    """Fetch current Kalshi order status for one or more submitted orders."""
+    data = request.get_json(force=True) or {}
+    raw_ids = data.get("order_ids") or []
+    order_ids = []
+    for value in raw_ids if isinstance(raw_ids, list) else []:
+        clean_value = str(value or "").strip()
+        if clean_value and clean_value not in order_ids:
+            order_ids.append(clean_value)
+        if len(order_ids) >= 20:
+            break
+    if not order_ids:
+        return jsonify({"ok": False, "error": "order_ids are required", "orders": {}}), 400
+
+    try:
+        from data.kalshi import get_order
+
+        orders = {}
+        errors = {}
+        for order_id in order_ids:
+            try:
+                payload = get_order(order_id)
+                order = payload.get("order") if isinstance(payload, dict) else None
+                if isinstance(order, dict):
+                    orders[order_id] = _clean(order)
+                else:
+                    errors[order_id] = "Order payload missing order object"
+            except Exception as exc:
+                errors[order_id] = str(exc)
+        return jsonify({
+            "ok": bool(orders),
+            "orders": orders,
+            "errors": errors,
+            "count": len(orders),
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e), "orders": {}}), 500
 
 
 @app.route("/api/email/recipients")
