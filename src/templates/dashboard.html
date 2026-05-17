@@ -5865,6 +5865,7 @@ function loadPropPerformance() {
       <div class="perf-card"><div class="perf-val" style="font-size:1.2rem">${totalTracked}</div><div class="perf-label">Total Tracked Bets</div><div class="perf-sub">Singles/Props ${trackedSingles.length} · Parlays ${trackedParlays.length} · Pending ${singlePending + parlayPending}</div></div>
     `;
     const byType = s.by_prop_type||[];
+    const fallbackDays = Number(s.fallback_window_days || 0);
     const tbody = document.getElementById('prop-type-tbody');
     tbody.innerHTML = byType.map(v=>{
       const wl = (v.wins||0) + (v.losses||0);
@@ -5895,7 +5896,15 @@ function loadPropPerformance() {
         <td>${totalCell}</td>
         <td style="color:${hrColor};font-weight:700">${hrCell}</td>
       </tr>`;
-    }).join('') || '<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:16px">No prop results yet — runs automatically after games finish.</td></tr>';
+    }).join('') || `<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:16px">No prop results yet${fallbackDays ? ` (last ${fallbackDays} days checked)` : ''} — runs automatically after games finish.</td></tr>`;
+
+    const perfStatsEl = document.getElementById('prop-perf-stats');
+    if (fallbackDays && perfStatsEl && !perfStatsEl.dataset.fallbackNote) {
+      perfStatsEl.dataset.fallbackNote = '1';
+      perfStatsEl.insertAdjacentHTML('beforeend', `<div class="perf-card" style="grid-column:1/-1"><div class="perf-sub" style="font-size:.78rem">Hit Rate by Prop Type is showing a rolling ${fallbackDays}-day fallback because today has no resolved prop outcomes yet.</div></div>`);
+    } else if (!fallbackDays && perfStatsEl) {
+      delete perfStatsEl.dataset.fallbackNote;
+    }
   });
 }
 

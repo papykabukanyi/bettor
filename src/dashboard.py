@@ -2766,10 +2766,21 @@ def _build_multi_sport_snapshot(force_refresh: bool = False) -> dict:
     }
 
     try:
-        from data.odds_fetcher import get_available_sports, get_live_odds
+        from data.odds_fetcher import get_available_sports, get_live_odds, get_odds_budget_state
     except Exception as e:
         _log(f"[all-sports] odds fetcher unavailable: {e}")
         return snapshot
+
+    budget = get_odds_budget_state() or {}
+    est_remaining = budget.get("estimated_remaining")
+    reserve = int(budget.get("reserve") or 0)
+    hard_stop = int(budget.get("hard_stop") or 0)
+    if isinstance(est_remaining, int):
+        _log(
+            "[all-sports] odds credits "
+            f"remaining~{est_remaining}/{int(budget.get('monthly_limit') or 0)} "
+            f"(reserve={reserve}, hard_stop={hard_stop})"
+        )
 
     sports = get_available_sports() or []
     if not sports:
@@ -2784,7 +2795,42 @@ def _build_multi_sport_snapshot(force_refresh: bool = False) -> dict:
             continue
         active.append(s)
 
-    active = active[: max(1, _MAX_ODDS_SPORTS)] if active else []
+    # League-aware ordering so top markets are covered first when credits are limited.
+    league_priority = {
+        "americanfootball_nfl": 400,
+        "basketball_nba": 390,
+        "baseball_mlb": 380,
+        "icehockey_nhl": 370,
+        "soccer_epl": 360,
+        "soccer_uefa_champs_league": 350,
+        "soccer_spain_la_liga": 340,
+        "soccer_germany_bundesliga": 335,
+        "soccer_italy_serie_a": 330,
+        "soccer_france_ligue_1": 325,
+        "soccer_usa_mls": 320,
+        "basketball_wnba": 315,
+        "americanfootball_ncaaf": 310,
+        "basketball_ncaab": 305,
+        "tennis_atp": 290,
+        "tennis_wta": 285,
+        "mma_mixed_martial_arts": 280,
+    }
+    active.sort(
+        key=lambda s: (
+            league_priority.get(str(s.get("key") or "").strip().lower(), 0),
+            str(s.get("title") or s.get("key") or "").strip().lower(),
+        ),
+        reverse=True,
+    )
+
+    dynamic_limit = max(1, _MAX_ODDS_SPORTS)
+    if isinstance(est_remaining, int):
+        usable = max(0, est_remaining - reserve)
+        dynamic_limit = max(1, min(dynamic_limit, usable))
+    if active:
+        active = active[:dynamic_limit]
+    if isinstance(est_remaining, int):
+        _log(f"[all-sports] querying odds for {len(active)} sports this cycle (dynamic cap={dynamic_limit})")
     today = _et_calendar_today()
     tomorrow = today + datetime.timedelta(days=1)
     allowed_dates = {today.isoformat(), tomorrow.isoformat()}
@@ -2942,6 +2988,7 @@ def _build_multi_sport_snapshot(force_refresh: bool = False) -> dict:
     snapshot["tournaments"] = tournaments
     snapshot["games"] = games
     snapshot["bets"] = sorted(bets, key=lambda x: (x.get("model_prob") or 0), reverse=True)
+    snapshot["odds_budget"] = budget
     _MULTI_SPORT_CACHE["snapshot"] = snapshot
     _MULTI_SPORT_CACHE["ts"] = now
     return snapshot
@@ -4275,7 +4322,14 @@ def api_prop_performance():
         current_only = current_only_raw in {"1", "true", "yes", "on"}
         target_date = _et_calendar_today() if current_only else None
         db_sport = None if _ACTIVE_SPORT == "all" else _ACTIVE_SPORT
-        return jsonify({"ok": True, "stats": get_prop_performance_stats(sport=db_sport, target_date=target_date)})
+        stats = get_prop_performance_stats(sport=db_sport, target_date=target_date)
+        rows = [r for r in (stats.get("by_prop_type") or []) if isinstance(r, dict)]
+        has_resolved = any((int(r.get("wins") or 0) + int(r.get("losses") or 0)) > 0 for r in rows)
+        if current_only and not has_resolved:
+            # Avoid empty hit-rate table on days where today's props are still pending.
+            stats = get_prop_performance_stats(sport=db_sport, days_back=21)
+            stats["fallback_window_days"] = 21
+        return jsonify({"ok": True, "stats": stats})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
 
@@ -5560,6 +5614,10 @@ def api_kalshi_resolve_ready():
             "combo_suggestions": combos,
             "server_cached": False,
         }
+        try:
+            _maybe_email_kalshi_matches(clean_bets, resolved.get("resolutions") or {}, source_tag="resolve-ready")
+        except Exception as _email_exc:
+            _log(f"[kalshi-email] resolve-ready alert step skipped: {_email_exc}")
         with _READY_RESOLVE_CACHE_LOCK:
             _READY_RESOLVE_CACHE["ts"] = time.time()
             _READY_RESOLVE_CACHE["sig"] = request_sig
@@ -6012,9 +6070,79 @@ _resolve_run_lock = threading.Lock()
 _last_resolve_started_ts = 0.0
 
 # ─── Kalshi availability monitor ─────────────────────────────────────────────
-_KALSHI_MONITOR_INTERVAL_SEC = 20 * 60   # check every 20 minutes
+_KALSHI_MONITOR_INTERVAL_SEC = max(120, int(os.getenv("KALSHI_MONITOR_INTERVAL_SEC", "300") or "300"))
 _kalshi_monitor_timer: threading.Timer | None = None
 _kalshi_monitor_last_statuses: dict[str, str] = {}   # bet_uid → last known status
+_kalshi_match_alert_lock = threading.Lock()
+_kalshi_match_alerted: dict[str, float] = {}
+_KALSHI_MATCH_ALERT_COOLDOWN_SEC = max(
+    300, int(os.getenv("KALSHI_MATCH_ALERT_COOLDOWN_SEC", "21600") or "21600")
+)
+
+
+def _prune_kalshi_match_alerts(now_ts: float | None = None) -> None:
+    now = float(now_ts or time.time())
+    cutoff = now - _KALSHI_MATCH_ALERT_COOLDOWN_SEC
+    stale = [k for k, ts in _kalshi_match_alerted.items() if float(ts or 0.0) < cutoff]
+    for key in stale:
+        _kalshi_match_alerted.pop(key, None)
+
+
+def _maybe_email_kalshi_matches(source_bets: list[dict], resolutions: dict, *, source_tag: str = "resolve-ready") -> int:
+    """Send a single email for newly matched bets, deduped by bet+ticker cooldown."""
+    if not isinstance(resolutions, dict) or not resolutions:
+        return 0
+    if not isinstance(source_bets, list) or not source_bets:
+        return 0
+
+    lookup: dict[str, dict] = {}
+    for idx, bet in enumerate(source_bets):
+        if not isinstance(bet, dict):
+            continue
+        uid = str(
+            bet.get("uid")
+            or bet.get("bet_uid")
+            or bet.get("prediction_uid")
+            or f"ready_{idx}"
+        ).strip()
+        if uid:
+            lookup[uid] = bet
+
+    newly_matched = []
+    now_ts = time.time()
+    with _kalshi_match_alert_lock:
+        _prune_kalshi_match_alerts(now_ts)
+        for uid, res in resolutions.items():
+            if not isinstance(res, dict):
+                continue
+            status = str(res.get("status") or "").strip().lower()
+            if status != "matched":
+                continue
+            ticker = str(res.get("market_ticker") or "").strip()
+            if not ticker:
+                continue
+            alert_key = f"{uid}|{ticker}"
+            if alert_key in _kalshi_match_alerted:
+                continue
+            _kalshi_match_alerted[alert_key] = now_ts
+            bet = lookup.get(str(uid).strip()) or {}
+            newly_matched.append({
+                "bet_uid": uid,
+                "bet": bet,
+                "pred": bet,
+                "resolution": res,
+            })
+
+    if not newly_matched:
+        return 0
+
+    try:
+        _send_kalshi_alert(newly_matched)
+        _log(f"[kalshi-email] Sent {len(newly_matched)} new match alert(s) from {source_tag}")
+        return len(newly_matched)
+    except Exception as exc:
+        _log(f"[kalshi-email] Failed to send match alerts from {source_tag}: {exc}")
+        return 0
 
 
 def _run_kalshi_monitor():
@@ -6022,19 +6150,28 @@ def _run_kalshi_monitor():
     When a bet transitions to 'matched', send an email alert.
     Runs every 20 minutes without hammering the Kalshi API.
     """
-    global _kalshi_monitor_last_statuses
     try:
         today_str = _et_calendar_today().isoformat()
-        from data.db import get_predictions_for_date
+        from data.db import get_predictions_for_date, get_prop_history
         from data.kalshi import resolve_ready_bets
-        from email_notify import send_email
 
         preds = []
         try:
             preds = get_predictions_for_date(today_str) or []
         except Exception:
             pass
-        if not preds:
+
+        props = []
+        try:
+            props = get_prop_history(
+                days=2,
+                outcome="PENDING",
+                sport=None if _ACTIVE_SPORT == "all" else _ACTIVE_SPORT,
+            ) or []
+        except Exception:
+            props = []
+
+        if not preds and not props:
             return
 
         # Build bet dicts compatible with resolve_ready_bets
@@ -6061,6 +6198,38 @@ def _run_kalshi_monitor():
                 "side_default": "no" if "under" in pick.lower() else "yes",
             })
 
+        for p in props:
+            stats_json = p.get("stats_json") if isinstance(p.get("stats_json"), dict) else {}
+            pick_label = " ".join(
+                [
+                    str(p.get("player_name") or p.get("name") or "").strip(),
+                    str(p.get("recommendation") or p.get("direction") or "").strip().upper(),
+                    str(p.get("line") if p.get("line") is not None else "").strip(),
+                    str(p.get("prop_type") or p.get("stat_type") or "").strip(),
+                ]
+            ).strip()
+            game_key = str(p.get("game_key") or stats_json.get("game_key") or stats_json.get("game") or "").strip()
+            ready_bets.append({
+                "bet_uid": p.get("bet_uid") or str(p.get("id") or ""),
+                "sport": p.get("sport") or "",
+                "kind": "player_prop",
+                "bet_type": "player_prop",
+                "pick": pick_label,
+                "label": pick_label,
+                "line": p.get("line"),
+                "game_date": str(p.get("game_date") or today_str),
+                "game_time": "",
+                "game": game_key,
+                "game_key": game_key,
+                "home_team": str(stats_json.get("home_team") or ""),
+                "away_team": str(stats_json.get("away_team") or ""),
+                "player_name": str(p.get("player_name") or ""),
+                "team": str(p.get("team") or ""),
+                "direction": _extract_direction(pick_label),
+                "prop_type": p.get("prop_type") or p.get("stat_type") or "",
+                "side_default": "no" if "under" in pick_label.lower() else "yes",
+            })
+
         if not ready_bets:
             return
 
@@ -6068,26 +6237,7 @@ def _run_kalshi_monitor():
         resolutions = resolved_payload.get("resolutions") if isinstance(resolved_payload, dict) else {}
         if not isinstance(resolutions, dict):
             resolutions = {}
-        newly_matched = []
-        for uid, res in resolutions.items():
-            if not isinstance(res, dict):
-                continue
-            status = str(res.get("status") or "")
-            prev = _kalshi_monitor_last_statuses.get(uid)
-            _kalshi_monitor_last_statuses[uid] = status
-            if status == "matched" and prev != "matched":
-                # Find the original bet details
-                bet = next((b for b in ready_bets if b.get("bet_uid") == uid), {})
-                pred = next((p for p in preds if (p.get("bet_uid") or str(p.get("id") or "")) == uid), {})
-                newly_matched.append({
-                    "bet_uid": uid,
-                    "bet": bet,
-                    "pred": pred,
-                    "resolution": res,
-                })
-
-        if newly_matched:
-            _send_kalshi_alert(newly_matched)
+        _maybe_email_kalshi_matches(ready_bets, resolutions, source_tag="monitor")
     except Exception as exc:
         print(f"[kalshi-monitor] Error: {exc}")
 
@@ -6229,11 +6379,11 @@ def _start_kalshi_monitor():
         _kalshi_monitor_timer.daemon = True
         _kalshi_monitor_timer.start()
 
-    # First check after 3 minutes (let startup complete)
-    _kalshi_monitor_timer = threading.Timer(180, _tick)
+    # First check after 90 seconds (let startup complete but alert quickly).
+    _kalshi_monitor_timer = threading.Timer(90, _tick)
     _kalshi_monitor_timer.daemon = True
     _kalshi_monitor_timer.start()
-    print(f"[kalshi-monitor] Started (every {_KALSHI_MONITOR_INTERVAL_SEC // 60} min)")
+    print(f"[kalshi-monitor] Started (every {max(1, _KALSHI_MONITOR_INTERVAL_SEC // 60)} min)")
 
 
 def _start_outcome_resolver():

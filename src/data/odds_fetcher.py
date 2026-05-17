@@ -17,6 +17,8 @@ Also provides:
 
 import os
 import sys
+import datetime
+import threading
 import requests
 import pandas as pd
 
@@ -24,6 +26,122 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from config import ODDS_API_KEY, ODDS_API_BASE, ODDS_REGIONS, et_today as _et_today
 
 _ODDS_API_DISABLED = False
+_ODDS_BUDGET_LOCK = threading.Lock()
+_ODDS_MONTHLY_LIMIT = max(1, int(os.getenv("ODDS_API_MONTHLY_CREDIT_LIMIT", "500") or "500"))
+_ODDS_MIN_CREDIT_RESERVE = max(0, int(os.getenv("ODDS_API_MIN_CREDIT_RESERVE", "35") or "35"))
+_ODDS_HARD_STOP_CREDITS = max(0, int(os.getenv("ODDS_API_HARD_STOP_CREDITS", "8") or "8"))
+_ODDS_BUDGET = {
+    "month": "",
+    "spent_estimate": 0,
+    "last_remaining": None,
+    "last_used": None,
+}
+_ODDS_BUDGET_BLOCKED_MONTH = None
+
+
+def _current_utc_month() -> str:
+    now = datetime.datetime.now(datetime.timezone.utc)
+    return f"{now.year:04d}-{now.month:02d}"
+
+
+def _reset_budget_if_new_month() -> None:
+    global _ODDS_BUDGET_BLOCKED_MONTH
+    month_key = _current_utc_month()
+    with _ODDS_BUDGET_LOCK:
+        if _ODDS_BUDGET.get("month") != month_key:
+            _ODDS_BUDGET["month"] = month_key
+            _ODDS_BUDGET["spent_estimate"] = 0
+            _ODDS_BUDGET["last_remaining"] = None
+            _ODDS_BUDGET["last_used"] = None
+            _ODDS_BUDGET_BLOCKED_MONTH = None
+
+
+def _to_int_or_none(value):
+    try:
+        if value is None:
+            return None
+        return int(str(value).strip())
+    except Exception:
+        return None
+
+
+def _sync_budget_from_response(resp: requests.Response | None, request_cost: int) -> None:
+    """Update monthly budget estimate from Odds API response headers."""
+    if resp is None:
+        return
+    _reset_budget_if_new_month()
+    remaining = _to_int_or_none(resp.headers.get("x-requests-remaining"))
+    used = _to_int_or_none(resp.headers.get("x-requests-used"))
+    with _ODDS_BUDGET_LOCK:
+        if used is not None:
+            _ODDS_BUDGET["last_used"] = max(0, used)
+            _ODDS_BUDGET["spent_estimate"] = max(_ODDS_BUDGET.get("spent_estimate") or 0, used)
+        else:
+            _ODDS_BUDGET["spent_estimate"] = max(0, int(_ODDS_BUDGET.get("spent_estimate") or 0) + max(0, int(request_cost or 0)))
+
+        if remaining is not None:
+            _ODDS_BUDGET["last_remaining"] = max(0, remaining)
+
+
+def _estimated_remaining_credits() -> int | None:
+    _reset_budget_if_new_month()
+    with _ODDS_BUDGET_LOCK:
+        last_remaining = _ODDS_BUDGET.get("last_remaining")
+        if isinstance(last_remaining, int):
+            return max(0, last_remaining)
+        spent = int(_ODDS_BUDGET.get("spent_estimate") or 0)
+    return max(0, _ODDS_MONTHLY_LIMIT - spent)
+
+
+def get_odds_budget_state() -> dict:
+    """Return current Odds API credit state for dashboard throttling/logging."""
+    remaining = _estimated_remaining_credits()
+    with _ODDS_BUDGET_LOCK:
+        month_key = _ODDS_BUDGET.get("month") or _current_utc_month()
+        spent_estimate = int(_ODDS_BUDGET.get("spent_estimate") or 0)
+        last_used = _ODDS_BUDGET.get("last_used")
+        last_remaining = _ODDS_BUDGET.get("last_remaining")
+    return {
+        "month": month_key,
+        "monthly_limit": _ODDS_MONTHLY_LIMIT,
+        "reserve": _ODDS_MIN_CREDIT_RESERVE,
+        "hard_stop": _ODDS_HARD_STOP_CREDITS,
+        "spent_estimate": spent_estimate,
+        "estimated_remaining": remaining,
+        "last_used": last_used,
+        "last_remaining": last_remaining,
+        "blocked_for_month": (_ODDS_BUDGET_BLOCKED_MONTH == month_key),
+        "resets": "1st of month 00:00 UTC",
+    }
+
+
+def _can_spend_credits(request_cost: int, context: str = "") -> bool:
+    """Guard requests so quota does not fully exhaust before monthly reset."""
+    global _ODDS_BUDGET_BLOCKED_MONTH
+
+    _reset_budget_if_new_month()
+    month_key = _current_utc_month()
+    if _ODDS_BUDGET_BLOCKED_MONTH == month_key:
+        return False
+
+    cost = max(0, int(request_cost or 0))
+    if cost <= 0:
+        return True
+
+    remaining = _estimated_remaining_credits()
+    if remaining is None:
+        return True
+
+    projected = remaining - cost
+    floor = max(_ODDS_MIN_CREDIT_RESERVE, _ODDS_HARD_STOP_CREDITS)
+    if projected < floor:
+        _ODDS_BUDGET_BLOCKED_MONTH = month_key
+        print(
+            "[odds_fetcher] skipping request to protect monthly credits "
+            f"(context={context or 'odds'}, remaining={remaining}, cost={cost}, reserve={floor})"
+        )
+        return False
+    return True
 
 
 def _disable_odds_api(reason: str):
@@ -33,16 +151,58 @@ def _disable_odds_api(reason: str):
     _ODDS_API_DISABLED = True
     print(f"[odds_fetcher] disabling odds provider for this process: {reason}")
 
-# Sports codes accepted by The Odds API
+# Sports/league aliases accepted by The Odds API
 SPORT_MAP = {
-    "mlb":      "baseball_mlb",
-    "mls":      "soccer_usa_mls",
-    "epl":      "soccer_epl",
-    "laliga":   "soccer_spain_la_liga",
+    # Baseball
+    "mlb": "baseball_mlb",
+    "baseball": "baseball_mlb",
+    "kbo": "baseball_kbo",
+    "npb": "baseball_npb",
+
+    # Basketball
+    "nba": "basketball_nba",
+    "wnba": "basketball_wnba",
+    "ncaab": "basketball_ncaab",
+    "euroleague": "basketball_euroleague",
+
+    # American football
+    "nfl": "americanfootball_nfl",
+    "ncaaf": "americanfootball_ncaaf",
+    "cfl": "americanfootball_cfl",
+    "xfl": "americanfootball_xfl",
+    "ufl": "americanfootball_ufl",
+
+    # Ice hockey
+    "nhl": "icehockey_nhl",
+
+    # Soccer major leagues and cups
+    "mls": "soccer_usa_mls",
+    "epl": "soccer_epl",
+    "laliga": "soccer_spain_la_liga",
     "bundesliga": "soccer_germany_bundesliga",
-    "seriea":   "soccer_italy_serie_a",
-    "ligue1":   "soccer_france_ligue_1",
-    "ucl":      "soccer_uefa_champs_league",
+    "seriea": "soccer_italy_serie_a",
+    "ligue1": "soccer_france_ligue_1",
+    "ucl": "soccer_uefa_champs_league",
+    "uefa_champions_league": "soccer_uefa_champs_league",
+    "europa": "soccer_uefa_europa_league",
+    "championship": "soccer_england_championship",
+    "eredivisie": "soccer_netherlands_eredivisie",
+    "primeira_liga": "soccer_portugal_primeira_liga",
+    "turkey_super_lig": "soccer_turkey_super_lig",
+    "brazil_serie_a": "soccer_brazil_campeonato",
+    "argentina_primera": "soccer_argentina_primera_division",
+    "mexico_ligamx": "soccer_mexico_ligamx",
+    "australia_aleague": "soccer_australia_aleague",
+    "japan_j_league": "soccer_japan_j_league",
+    "korea_kleague1": "soccer_korea_kleague1",
+    "saudi_pro_league": "soccer_saudi_arabia_pro_league",
+
+    # Other global sports
+    "mma": "mma_mixed_martial_arts",
+    "ufc": "mma_mixed_martial_arts",
+    "boxing": "boxing_boxing",
+    "tennis_atp": "tennis_atp",
+    "tennis_wta": "tennis_wta",
 }
 
 
@@ -66,6 +226,8 @@ def get_live_odds(sport_key: str = "mlb", markets: str = "h2h") -> list[dict]:
         return []
     if _ODDS_API_DISABLED:
         return []
+    if not _can_spend_credits(1, context=f"live_odds:{sport_key}"):
+        return []
 
     raw_sport = SPORT_MAP.get(sport_key.lower(), sport_key)
     url = f"{ODDS_API_BASE}/sports/{raw_sport}/odds"
@@ -77,6 +239,7 @@ def get_live_odds(sport_key: str = "mlb", markets: str = "h2h") -> list[dict]:
     }
     try:
         resp = requests.get(url, params=params, timeout=10)
+        _sync_budget_from_response(resp, request_cost=1)
         remaining = resp.headers.get("x-requests-remaining", "?")
         print(f"[odds_fetcher] Requests remaining this month: {remaining}")
         resp.raise_for_status()
@@ -85,6 +248,9 @@ def get_live_odds(sport_key: str = "mlb", markets: str = "h2h") -> list[dict]:
         code = getattr(resp, "status_code", "?")
         if code in (401, 403):
             _disable_odds_api(f"HTTP {code}")
+        elif code == 429:
+            global _ODDS_BUDGET_BLOCKED_MONTH
+            _ODDS_BUDGET_BLOCKED_MONTH = _current_utc_month()
         print(f"[odds_fetcher] fetch error: HTTP {code} for sport={raw_sport}")
         return []
     except Exception as e:
@@ -213,6 +379,7 @@ def get_available_sports() -> list[dict]:
     url = f"{ODDS_API_BASE}/sports"
     try:
         resp = requests.get(url, params={"apiKey": ODDS_API_KEY}, timeout=10)
+        _sync_budget_from_response(resp, request_cost=0)
         resp.raise_for_status()
         return resp.json()
     except requests.HTTPError:
@@ -245,6 +412,8 @@ def get_player_props_odds(
     if not ODDS_API_KEY or ODDS_API_KEY == "your_odds_api_key_here":
         print("[odds_fetcher] ODDS_API_KEY not set – skipping player props odds.")
         return []
+    if _ODDS_API_DISABLED:
+        return []
 
     raw_sport = SPORT_MAP.get(sport_key.lower(), sport_key)
     import datetime as _ods_dt
@@ -255,6 +424,7 @@ def get_player_props_odds(
     events_url = f"{ODDS_API_BASE}/sports/{raw_sport}/events"
     try:
         resp = requests.get(events_url, params={"apiKey": ODDS_API_KEY}, timeout=10)
+        _sync_budget_from_response(resp, request_cost=0)
         resp.raise_for_status()
         events = resp.json()
     except Exception as e:
@@ -284,7 +454,10 @@ def get_player_props_odds(
             "oddsFormat": "american",
         }
         try:
+            if not _can_spend_credits(1, context=f"player_props:{raw_sport}"):
+                break
             r = requests.get(url, params=params, timeout=10)
+            _sync_budget_from_response(r, request_cost=1)
             remaining = r.headers.get("x-requests-remaining", "?")
             print(f"[odds_fetcher] player props {away}@{home}: {remaining} API credits left")
             r.raise_for_status()
@@ -348,11 +521,23 @@ _SOCCER_PROP_MARKETS = (
 )
 
 _SOCCER_PROP_SPORT_KEYS = {
-    "EPL":      "soccer_epl",
-    "ESP":      "soccer_spain_la_liga",
-    "GER":      "soccer_germany_bundesliga",
-    "ITA":      "soccer_italy_serie_a",
-    "FRA":      "soccer_france_ligue_1",
+    "EPL": "soccer_epl",
+    "ESP": "soccer_spain_la_liga",
+    "GER": "soccer_germany_bundesliga",
+    "ITA": "soccer_italy_serie_a",
+    "FRA": "soccer_france_ligue_1",
+    "MLS": "soccer_usa_mls",
+    "NED": "soccer_netherlands_eredivisie",
+    "POR": "soccer_portugal_primeira_liga",
+    "TUR": "soccer_turkey_super_lig",
+    "MEX": "soccer_mexico_ligamx",
+    "BRA": "soccer_brazil_campeonato",
+    "ARG": "soccer_argentina_primera_division",
+    "AUS": "soccer_australia_aleague",
+    "JPN": "soccer_japan_j_league",
+    "KOR": "soccer_korea_kleague1",
+    "SPL": "soccer_saudi_arabia_pro_league",
+    "UCL": "soccer_uefa_champs_league",
 }
 
 # Map Odds API market key → our internal stat_type
@@ -395,6 +580,8 @@ def get_soccer_player_props_from_odds(
 
     if not ODDS_API_KEY or ODDS_API_KEY == "your_odds_api_key_here":
         return []
+    if _ODDS_API_DISABLED:
+        return []
 
     use_leagues = league_keys or list(_SOCCER_PROP_SPORT_KEYS.keys())
     _et_date   = _et_today()
@@ -411,6 +598,7 @@ def get_soccer_player_props_from_odds(
         events_url = f"{ODDS_API_BASE}/sports/{raw_sport}/events"
         try:
             resp = requests.get(events_url, params={"apiKey": ODDS_API_KEY}, timeout=10)
+            _sync_budget_from_response(resp, request_cost=0)
             resp.raise_for_status()
             events = resp.json()
         except Exception as e:
@@ -439,7 +627,10 @@ def get_soccer_player_props_from_odds(
                 "oddsFormat": "american",
             }
             try:
+                if not _can_spend_credits(1, context=f"soccer_props:{lk}"):
+                    break
                 r = requests.get(url, params=params, timeout=12)
+                _sync_budget_from_response(r, request_cost=1)
                 remaining = r.headers.get("x-requests-remaining", "?")
                 print(f"[odds_fetcher] soccer props {game_label} ({lk}): {remaining} credits left")
                 if r.status_code == 422:
