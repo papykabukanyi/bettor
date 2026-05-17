@@ -4285,6 +4285,7 @@ def api_predictions():
     days    = int(request.args.get("days", 30))
     outcome = request.args.get("outcome")
     try:
+        _maybe_trigger_tracking_sync()
         from data.db import get_predictions
         db_sport = None if _ACTIVE_SPORT == "all" else _ACTIVE_SPORT
         preds = get_predictions(days=days, outcome=outcome or None, sport=db_sport)
@@ -4292,6 +4293,7 @@ def api_predictions():
         if current_only_raw in {"1", "true", "yes", "on"}:
             today_iso = _et_calendar_today().isoformat()
             preds = [p for p in preds if str(p.get("game_date", ""))[:10] == today_iso]
+        preds = _annotate_tracking_phase(preds)
         return jsonify({"ok": True, "predictions": _clean(preds)})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e), "predictions": []})
@@ -4302,6 +4304,7 @@ def api_prop_history():
     days = int(request.args.get("days", 30))
     outcome = request.args.get("outcome")
     try:
+        _maybe_trigger_tracking_sync()
         from data.db import get_prop_history
 
         db_sport = None if _ACTIVE_SPORT == "all" else _ACTIVE_SPORT
@@ -4310,6 +4313,7 @@ def api_prop_history():
         if current_only_raw in {"1", "true", "yes", "on"}:
             today_iso = _et_calendar_today().isoformat()
             rows = [r for r in rows if str(r.get("game_date", ""))[:10] == today_iso]
+        rows = _annotate_tracking_phase(rows)
         return jsonify({"ok": True, "props": _clean(rows)})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e), "props": []})
@@ -4322,6 +4326,100 @@ def _match_status_bucket(status: str) -> str:
     if any(k in s for k in ("final", "finished", "completed")):
         return "finished"
     return "scheduled"
+
+
+_TRACKING_SYNC_MIN_INTERVAL_SEC = max(30, int(os.getenv("TRACKING_SYNC_MIN_INTERVAL_SEC", "75") or "75"))
+_last_tracking_sync_ts = 0.0
+_tracking_sync_lock = threading.Lock()
+
+
+def _tracking_sync_due() -> bool:
+    return (time.time() - float(_last_tracking_sync_ts or 0.0)) >= _TRACKING_SYNC_MIN_INTERVAL_SEC
+
+
+def _maybe_trigger_tracking_sync(force: bool = False):
+    """Kick off a background resolver pass so DB tracking states keep moving server-side."""
+    if not force and not _tracking_sync_due():
+        return
+    if not _tracking_sync_lock.acquire(blocking=False):
+        return
+
+    def _runner():
+        global _last_tracking_sync_ts
+        try:
+            _run_resolver_locked(days_back=5)
+        except Exception:
+            pass
+        finally:
+            _last_tracking_sync_ts = time.time()
+            try:
+                _tracking_sync_lock.release()
+            except Exception:
+                pass
+
+    threading.Thread(target=_runner, daemon=True).start()
+
+
+def _live_status_for_game_key(game_key: str) -> str:
+    key = str(game_key or "").strip().lower()
+    if not key:
+        return ""
+    prefix = _norm_gk(key.split("#", 1)[0])
+    with _lock:
+        live_scores = dict(_state.get("live_scores") or {})
+    for k, payload in live_scores.items():
+        kk = str(k or "").strip().lower()
+        if not kk:
+            continue
+        if kk == key:
+            return str((payload or {}).get("status") or "")
+        kk_prefix = _norm_gk(kk.split("#", 1)[0])
+        if prefix and kk_prefix == prefix:
+            return str((payload or {}).get("status") or "")
+    return ""
+
+
+def _tracking_phase_for_row(row: dict) -> str:
+    if not isinstance(row, dict):
+        return "upcoming"
+    outcome = str(row.get("outcome") or "PENDING").upper()
+    if outcome != "PENDING":
+        return "settled"
+    game_key = str(row.get("game_key") or row.get("game") or "")
+    bucket = _match_status_bucket(_live_status_for_game_key(game_key))
+    if bucket == "live":
+        return "live"
+    if bucket == "finished":
+        # Keep finished-but-unresolved rows out of upcoming while resolver catches up.
+        return "live"
+    return "upcoming"
+
+
+def _annotate_tracking_phase(rows: list[dict]) -> list[dict]:
+    out = []
+    for row in (rows or []):
+        if not isinstance(row, dict):
+            continue
+        item = dict(row)
+        item["tracking_phase"] = _tracking_phase_for_row(item)
+        out.append(item)
+    return out
+
+
+def _annotate_parlay_tracking(rows: list[dict]) -> list[dict]:
+    out = []
+    for row in (rows or []):
+        if not isinstance(row, dict):
+            continue
+        item = dict(row)
+        outcome = str(item.get("outcome") or "PENDING").upper()
+        if outcome != "PENDING":
+            item["tracking_phase"] = "settled"
+        else:
+            legs = [leg for leg in (item.get("legs_json") or []) if isinstance(leg, dict)]
+            item["tracking_phase"] = "live" if any(_tracking_phase_for_row(leg) == "live" for leg in legs) else "upcoming"
+        out.append(item)
+    return out
 
 
 @app.route("/api/tournaments")
@@ -5284,6 +5382,7 @@ def api_parlay_save():
 @app.route("/api/parlay/list")
 def api_parlay_list():
     try:
+        _maybe_trigger_tracking_sync()
         from data.db import get_tracked_parlays, prune_tracked_parlays_to_date
         inc = str(request.args.get("include_resolved", "1")).strip().lower()
         include_resolved = inc in {"1", "true", "yes", "on"}
@@ -5294,14 +5393,13 @@ def api_parlay_list():
             # Remove stale rows so old parlays cannot show up again in this tab.
             prune_tracked_parlays_to_date(target_date=target_date)
         db_sport = None if _ACTIVE_SPORT == "all" else _ACTIVE_SPORT
-        return jsonify({
-            "ok": True,
-            "parlays": _clean(get_tracked_parlays(
-                include_resolved=include_resolved,
-                target_date=target_date,
-                sport=db_sport,
-            )),
-        })
+        rows = get_tracked_parlays(
+            include_resolved=include_resolved,
+            target_date=target_date,
+            sport=db_sport,
+        )
+        rows = _annotate_parlay_tracking(rows)
+        return jsonify({"ok": True, "parlays": _clean(rows)})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e), "parlays": []})
 

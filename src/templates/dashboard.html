@@ -1422,6 +1422,9 @@ function _liveLookupSnapshot() {
 }
 
 function _rowPhaseLike(row, liveLookup) {
+  const serverPhase = String((row && row.tracking_phase) || '').toLowerCase();
+  if (serverPhase === 'live' || serverPhase === 'upcoming') return serverPhase;
+  if (serverPhase === 'settled') return 'settled';
   const lookup = liveLookup || _liveLookupSnapshot();
   const gameKey = (row && (row.game_key || row.game)) || '';
   if (gameKey && _isLiveFromSet(gameKey, lookup.liveKeys, lookup.liveArr)) return 'live';
@@ -1442,6 +1445,8 @@ function _defaultKalshiSide(row) {
 }
 
 function _parlayPendingBucket(parlay, liveLookup) {
+  const serverPhase = String((parlay && parlay.tracking_phase) || '').toLowerCase();
+  if (serverPhase === 'live' || serverPhase === 'upcoming') return serverPhase;
   const legs = _asArray(parlay && parlay.legs_json);
   if (!legs.length) return 'upcoming';
   return legs.some(leg => _rowPhaseLike(leg, liveLookup) === 'live') ? 'live' : 'upcoming';
@@ -4859,25 +4864,23 @@ function renderReadyBets() {
     }
   }
   const matchedRows = dedupedRows.filter(isMatched);
-  dedupedRows.sort((a, b) => {
-    const aMatched = isMatched(a) ? 1 : 0;
-    const bMatched = isMatched(b) ? 1 : 0;
-    if (aMatched !== bMatched) return bMatched - aMatched;
+  const bettableRows = matchedRows;
+  bettableRows.sort((a, b) => {
     const q = (Number(b.quality) || 0) - (Number(a.quality) || 0);
     if (Math.abs(q) > 1e-9) return q;
     return (Number(b.model_prob) || 0) - (Number(a.model_prob) || 0);
   });
   const groups = {
-    single: dedupedRows.filter(r => r.kind === 'single'),
-    team_prop: dedupedRows.filter(r => r.kind === 'team_prop'),
-    player_prop: dedupedRows.filter(r => r.kind === 'player_prop'),
-    combo: dedupedRows.filter(r => r.kind === 'combo'),
+    single: bettableRows.filter(r => r.kind === 'single'),
+    team_prop: bettableRows.filter(r => r.kind === 'team_prop'),
+    player_prop: bettableRows.filter(r => r.kind === 'player_prop'),
+    combo: bettableRows.filter(r => r.kind === 'combo'),
   };
   const nonCombo = groups.single.length + groups.team_prop.length + groups.player_prop.length;
   if (metaEl) {
     const pendingCount = Math.max(0, dedupedRows.length - matchedRows.length);
-    const bits = [`${matchedRows.length} matched now`, `${dedupedRows.length} visible candidates`, `${nonCombo} singles/props`, `${groups.combo.length} combos`];
-    if (pendingCount) bits.push(`${pendingCount} waiting for exact Kalshi ticker`);
+    const bits = [`${matchedRows.length} bettable now`, `${nonCombo} singles/props`, `${groups.combo.length} combos`];
+    if (pendingCount) bits.push(`${pendingCount} not bettable yet`);
     const sentCount = Math.max(0, allRows.length - openRows.length);
     if (sentCount) bits.push(`${sentCount} tracking on Kalshi`);
     if (READY_KALSHI_STATUS.loading) {
@@ -5079,7 +5082,7 @@ function renderReadyBets() {
       } else if (READY_KALSHI_STATUS.loading) {
         container.innerHTML = '<div class="no-games">Matching exact Kalshi singles and props right now…</div>';
       } else {
-        container.innerHTML = '<div class="no-games">No singles or props generated for the current window yet.</div>';
+        container.innerHTML = '<div class="no-games">No bettable singles or props right now. Non-matched markets are removed automatically.</div>';
       }
     } else {
       // Merge singles + team_prop together as "Game Bets"
