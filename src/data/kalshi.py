@@ -2635,6 +2635,19 @@ def suggest_combo_bets(
     if len(candidates) < min_legs:
         return []
 
+    # Hard cap candidate pool to keep combo search bounded under heavy ready-bet payloads.
+    # Without this, combinations(N, k) can explode and fail the whole resolve path.
+    max_candidates = max(8, int(os.getenv("KALSHI_COMBO_MAX_CANDIDATES", "26") or "26"))
+    if len(candidates) > max_candidates:
+        candidates.sort(
+            key=lambda c: (
+                not bool(c.get("_matched_ticker")),
+                -(float(c.get("single_ev") or 0.0)),
+                -(float(c.get("model_prob") or 0.0)),
+            )
+        )
+        candidates = candidates[:max_candidates]
+
     combos: list[dict[str, Any]] = []
     for n_legs in range(min_legs, min(max_legs + 1, len(candidates) + 1)):
         for leg_set in combinations(candidates, n_legs):

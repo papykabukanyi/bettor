@@ -2104,22 +2104,34 @@ def get_prop_performance_stats(sport: str | None = None, days_back: int | None =
         """, vals)
         row = cur.fetchone()
         stats = dict(row) if row else {}
-        # By prop type — include archived count for transparency
+        # Bucketed hit-rate rows requested by dashboard: OVER / UNDER / GAME PROP.
         cur.execute(cte + f"""
-            SELECT sport,
-                   prop_type,
-                   recommendation,
-                   COUNT(*) FILTER (WHERE outcome='WIN')      AS wins,
-                   COUNT(*) FILTER (WHERE outcome='LOSS')     AS losses,
-                   COUNT(*) FILTER (WHERE outcome='PUSH')     AS pushes,
-                   COUNT(*) FILTER (WHERE outcome='PENDING')  AS pending,
-                   COUNT(*) FILTER (WHERE outcome='ARCHIVED') AS unresolvable,
-                   COUNT(*) AS total,
-                   ROUND(AVG(CASE WHEN outcome='WIN' THEN 1.0
-                                  WHEN outcome='LOSS' THEN 0.0 END)*100, 1) AS hit_rate
-                        FROM dedup
-            GROUP BY sport, prop_type, recommendation
-            ORDER BY total DESC
+            SELECT
+                CASE
+                    WHEN lower(COALESCE(recommendation,'')) = 'over' THEN 'over'
+                    WHEN lower(COALESCE(recommendation,'')) = 'under' THEN 'under'
+                    ELSE 'game_prop'
+                END AS prop_type,
+                CASE
+                    WHEN lower(COALESCE(recommendation,'')) IN ('over','under')
+                        THEN upper(lower(COALESCE(recommendation,'')))
+                    ELSE '—'
+                END AS recommendation,
+                COUNT(*) FILTER (WHERE outcome='WIN')      AS wins,
+                COUNT(*) FILTER (WHERE outcome='LOSS')     AS losses,
+                COUNT(*) FILTER (WHERE outcome='PUSH')     AS pushes,
+                COUNT(*) FILTER (WHERE outcome='PENDING')  AS pending,
+                COUNT(*) FILTER (WHERE outcome='ARCHIVED') AS unresolvable,
+                COUNT(*) AS total,
+                ROUND(AVG(CASE WHEN outcome='WIN' THEN 1.0
+                               WHEN outcome='LOSS' THEN 0.0 END)*100, 1) AS hit_rate
+            FROM dedup
+            GROUP BY 1, 2
+            ORDER BY CASE
+                WHEN prop_type = 'over' THEN 1
+                WHEN prop_type = 'under' THEN 2
+                ELSE 3
+            END
         """, vals)
         stats["by_prop_type"] = [dict(r) for r in cur.fetchall()]
         # Daily trend

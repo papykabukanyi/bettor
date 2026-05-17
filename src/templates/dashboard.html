@@ -5810,6 +5810,16 @@ function loadPropPerformance() {
       const hr = wl > 0 ? Math.round((v.wins||0)/wl*100) : null;
       const hrColor = hr>=55?'var(--green)':hr>=45?'var(--yellow)':'var(--red)';
       const unresolvable = Number(v.unresolvable || 0);
+      const propBucket = String(v.prop_type || '').toLowerCase();
+      const propLabel = propBucket === 'game_prop'
+        ? 'Game Prop'
+        : propBucket === 'over'
+          ? 'Over'
+          : propBucket === 'under'
+            ? 'Under'
+            : String(v.prop_type || '').replace(/_/g,' ');
+      const dirLabel = propBucket === 'game_prop' ? '—' : (v.recommendation || '—');
+      const dirClass = dirLabel === 'OVER' ? 'badge-blue' : dirLabel === 'UNDER' ? 'badge-purple' : '';
       // Build the total cell — show unresolvable separately so it's clear these can't be tracked
       let totalCell = String(v.total||0);
       if ((v.pending||0) > 0) totalCell += ` · ${v.pending} pending`;
@@ -5817,8 +5827,8 @@ function loadPropPerformance() {
       if (unresolvable > 0) totalCell += ` · <span style="color:var(--muted);font-size:.78em" title="No ESPN data available for this stat type">${unresolvable} no data</span>`;
       const hrCell = hr!=null ? hr+'%' : (unresolvable > 0 && wl === 0 ? '<span style="color:var(--muted);font-size:.82em">no data</span>' : '—');
       return `<tr>
-        <td>${(v.prop_type||'').replace(/_/g,' ')}</td>
-        <td><span class="badge ${v.recommendation==='OVER'?'badge-blue':'badge-purple'}">${v.recommendation||'—'}</span></td>
+        <td>${propLabel}</td>
+        <td><span class="badge ${dirClass}">${dirLabel}</span></td>
         <td style="color:var(--green)">${v.wins||0}</td>
         <td style="color:var(--red)">${v.losses||0}</td>
         <td>${totalCell}</td>
