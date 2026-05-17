@@ -5762,28 +5762,89 @@ function loadPropPerformance() {
     fetch('/api/performance?current_only=1').then(r=>r.json()).catch(()=>({ok:false,stats:{}})),
     fetch('/api/prop-performance?current_only=1').then(r=>r.json()),
     fetch('/api/parlay/performance?current_only=1').then(r=>r.json()).catch(()=>({ok:false,stats:{}})),
-  ]).then(([g, d, pr])=>{
+    fetch('/api/parlay/list?include_resolved=1&current_only=1').then(r=>r.json()).catch(()=>({ok:false,parlays:[]})),
+    fetch('/api/predictions?days=21&current_only=1').then(r=>r.json()).catch(()=>({ok:false,predictions:[]})),
+    fetch('/api/prop-history?days=21&current_only=1').then(r=>r.json()).catch(()=>({ok:false,props:[]})),
+  ]).then(([g, d, pr, pl, pd, ph])=>{
     if (!g.ok || !d.ok) return;
     const gs = g.stats || {};
     if (!d.ok) return;
     const s = d.stats||{};
     const prs = (pr && pr.ok) ? (pr.stats || {}) : {};
 
-    const gameWins = Number(gs.wins || 0);
-    const gameLosses = Number(gs.losses || 0);
-    const gamePending = Number(gs.pending || 0);
-    const propWins = Number(s.wins || 0);
-    const propLosses = Number(s.losses || 0);
-    const propPending = Number(s.pending || 0);
-    const parlayWins = Number(prs.wins || 0);
-    const parlayLosses = Number(prs.losses || 0);
-    const parlayPending = Number(prs.pending || 0);
+    const todayIso = _etTodayIso();
+    const liveLookup = _liveLookupSnapshot();
 
-    const settledWins = gameWins + propWins + parlayWins;
-    const settledLosses = gameLosses + propLosses + parlayLosses;
+    const trackedParlays = (pl && pl.ok ? _asArray(pl.parlays) : []).filter(p => {
+      const createdDate = String(p && p.created_at ? p.created_at : '').slice(0, 10);
+      if (createdDate === todayIso) return true;
+      const legs = _asArray(p && p.legs_json);
+      return legs.some(leg => {
+        const gameDate = String(leg && (leg.game_date || leg.date || '')).slice(0, 10);
+        if (gameDate === todayIso) return true;
+        const scheduledStart = String(leg && (leg.scheduled_start || leg.game_datetime || '')).slice(0, 10);
+        return scheduledStart === todayIso;
+      });
+    });
+
+    const predRows = (pd && pd.ok ? _asArray(pd.predictions) : []).filter(r => String(r.game_date || '').slice(0, 10) === todayIso);
+    const propRows = (ph && ph.ok ? _asArray(ph.props).map(r => {
+      const stats = (r && typeof r.stats_json === 'object' && r.stats_json) ? r.stats_json : {};
+      const direction = String(r.recommendation || '').toUpperCase();
+      const propType = String(r.prop_type || 'player_prop').replace(/_/g, ' ');
+      const lineTxt = r.line != null && r.line !== '' ? ` ${r.line}` : '';
+      const pick = `${r.player_name || 'Player'} ${direction} ${lineTxt} ${propType}`.replace(/\s+/g, ' ').trim();
+      return {
+        ...r,
+        pick,
+        bet_type: 'player_prop',
+        game: r.game || stats.game || '',
+        game_key: r.game_key || stats.game_key || stats.game || '',
+      };
+    }).filter(r => String(r.game_date || '').slice(0, 10) === todayIso) : []);
+
+    const dedupe = new Map();
+    const mergeRow = (base, incoming) => {
+      const merged = { ...(base || {}) };
+      Object.entries(incoming || {}).forEach(([key, value]) => {
+        if (value == null || value === '') return;
+        if (merged[key] == null || merged[key] === '') merged[key] = value;
+      });
+      return merged;
+    };
+    [...predRows, ...propRows].forEach(r => {
+      if (!r || typeof r !== 'object') return;
+      const uid = String(r.bet_uid || [
+        r.game_key || '',
+        r.bet_type || '',
+        r.pick || '',
+        r.line != null ? r.line : '',
+        r.game_date || '',
+      ].join('|')).trim().toLowerCase();
+      if (!uid) return;
+      if (!dedupe.has(uid)) dedupe.set(uid, r);
+      else dedupe.set(uid, mergeRow(dedupe.get(uid), r));
+    });
+    const trackedSingles = Array.from(dedupe.values()).filter(r => {
+      const bt = String(r.bet_type || '').toLowerCase();
+      return bt !== 'parlay' && String(r.game_date || '').slice(0, 10) === todayIso;
+    });
+
+    const singleWins = trackedSingles.filter(r => String(r.outcome || '').toUpperCase() === 'WIN').length;
+    const singleLosses = trackedSingles.filter(r => String(r.outcome || '').toUpperCase() === 'LOSS').length;
+    const singlePending = trackedSingles.filter(r => String(r.outcome || 'PENDING').toUpperCase() === 'PENDING').length;
+    const singlePendingLive = trackedSingles.filter(r => String(r.outcome || 'PENDING').toUpperCase() === 'PENDING' && _rowPhaseLike(r, liveLookup) === 'live').length;
+
+    const parlayWins = trackedParlays.filter(p => String(p.outcome || '').toUpperCase() === 'WIN').length;
+    const parlayLosses = trackedParlays.filter(p => String(p.outcome || '').toUpperCase() === 'LOSS').length;
+    const parlayPending = trackedParlays.filter(p => String(p.outcome || 'PENDING').toUpperCase() === 'PENDING').length;
+    const parlayPendingLive = trackedParlays.filter(p => String(p.outcome || 'PENDING').toUpperCase() === 'PENDING' && _parlayPendingBucket(p, liveLookup) === 'live').length;
+
+    const settledWins = singleWins + parlayWins;
+    const settledLosses = singleLosses + parlayLosses;
     const settledTotal = settledWins + settledLosses;
-    const liveTracked = gamePending + propPending + parlayPending;
-    const totalTracked = Number(gs.total || 0) + Number(s.total || 0) + Number(prs.total || 0);
+    const liveTracked = singlePendingLive + parlayPendingLive;
+    const totalTracked = trackedSingles.length + trackedParlays.length;
     const overallHitRate = settledTotal > 0 ? Math.round((settledWins / settledTotal) * 100) : null;
     const overallColor = overallHitRate >= 55 ? 'var(--green)' : overallHitRate >= 45 ? 'var(--yellow)' : 'var(--red)';
     const candidateLegs = _comboCandidateLegs();
@@ -5796,12 +5857,12 @@ function loadPropPerformance() {
       : 0;
 
     document.getElementById('prop-perf-stats').innerHTML = `
-      <div class="perf-card"><div class="perf-val perf-pend">${liveTracked}</div><div class="perf-label">Live Tracked Bets</div><div class="perf-sub">Games ${gamePending} · Props ${propPending} · Parlays ${parlayPending}${liveOver ? ` · ${liveOver} in live games` : ''}</div></div>
+      <div class="perf-card"><div class="perf-val perf-pend">${liveTracked}</div><div class="perf-label">Live Tracked Bets</div><div class="perf-sub">Singles/Props ${singlePendingLive} · Parlays ${parlayPendingLive}${liveOver ? ` · ${liveOver} in live games` : ''}</div></div>
       <div class="perf-card"><div class="perf-val">${settledWins}-${settledLosses}</div><div class="perf-label">Settled W-L</div><div class="perf-sub">Games + Props + Parlays</div></div>
       <div class="perf-card"><div class="perf-val" style="color:${overallColor}">${overallHitRate!=null?overallHitRate+'%':'—'}</div><div class="perf-label">Overall Win Rate</div><div class="perf-sub">Settled bets only</div></div>
       <div class="perf-card"><div class="perf-val" style="font-size:1.2rem">${candidateLegs.length}</div><div class="perf-label">Qualified Legs</div><div class="perf-sub">Props ${propLegs} · Games ${gameLegs}</div></div>
       <div class="perf-card"><div class="perf-val" style="font-size:1.2rem">${autoComboCount}</div><div class="perf-label">Auto Combos</div><div class="perf-sub">Mixed props + game bets</div></div>
-      <div class="perf-card"><div class="perf-val" style="font-size:1.2rem">${totalTracked}</div><div class="perf-label">Total Tracked Bets</div><div class="perf-sub">Games ${gs.total||0} · Props ${s.total||0} · Parlays ${prs.total||0}</div></div>
+      <div class="perf-card"><div class="perf-val" style="font-size:1.2rem">${totalTracked}</div><div class="perf-label">Total Tracked Bets</div><div class="perf-sub">Singles/Props ${trackedSingles.length} · Parlays ${trackedParlays.length} · Pending ${singlePending + parlayPending}</div></div>
     `;
     const byType = s.by_prop_type||[];
     const tbody = document.getElementById('prop-type-tbody');

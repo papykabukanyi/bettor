@@ -5490,7 +5490,7 @@ def api_kalshi_resolve_ready():
         clean_bets = _clean_ready_bets_payload([bet for bet in bets if isinstance(bet, dict)])
         force_refresh = bool(data.get("force_refresh"))
         include_combo_suggestions = bool(data.get("include_combo_suggestions", True))
-        combo_max_input = max(30, int(os.getenv("KALSHI_COMBO_INPUT_LIMIT", "120") or "120"))
+        combo_max_input = max(30, int(os.getenv("KALSHI_COMBO_INPUT_LIMIT", "70") or "70"))
         if include_combo_suggestions and len(clean_bets) > combo_max_input:
             include_combo_suggestions = False
             _log(f"[kalshi] combo suggestions auto-disabled for large payload ({len(clean_bets)} bets > {combo_max_input})")

@@ -1298,7 +1298,8 @@ def _line_candidate_numbers(text: str, *, bet_num: float | None = None) -> list[
     max_diff = None
     if bet_num is not None:
         scale = abs(float(bet_num or 0.0))
-        max_diff = max(8.0, min(20.0, scale * 0.10))
+        # Wider tolerance helps map model lines to nearby listed Kalshi thresholds.
+        max_diff = max(10.0, min(40.0, scale * 0.25))
 
     for tok in _re.findall(r'\b\d+(?:[._]\d+)?\b', text):
         val = _as_float(tok.replace("_", "."))
@@ -1479,7 +1480,7 @@ def _score_event_group(bet: dict[str, Any], event_group: dict[str, Any]) -> floa
 
     if bet_kind == "player_prop":
         player_score = _entity_match_score(text, bet.get("player_name") or bet.get("name"))
-        if player_score < 2.5:
+        if player_score < 2.0:
             return 0.0
         score = player_score * 2.1
         score += max(
@@ -1942,7 +1943,7 @@ def _score_single_market(bet: dict[str, Any], market: dict[str, Any]) -> float:
 
     if bet_kind == "player_prop":
         player_score = _entity_match_score(text, bet.get("player_name") or bet.get("name"))
-        if player_score < 2.5:
+        if player_score < 2.0:
             return 0.0
         line_score = _line_match_score(text, bet.get("line"), allow_half_step_integer=True)
         if line_score <= 0.0:
@@ -2091,8 +2092,8 @@ def _resolve_single_bet(
 
     local_event_index = event_index or _build_event_index(markets)
     bet_kind = _bet_kind_tag(bet)
-    min_event_score = 6.8 if bet_kind == "player_prop" else 7.5
-    min_market_score = 7.2 if bet_kind == "player_prop" else 8.5
+    min_event_score = 5.8 if bet_kind == "player_prop" else 6.6
+    min_market_score = 6.2 if bet_kind == "player_prop" else 7.2
     scored_events: list[tuple[float, dict[str, Any]]] = []
     for event_group in local_event_index.values():
         score = _score_event_group(bet, event_group)
@@ -2111,7 +2112,7 @@ def _resolve_single_bet(
         top_event_score = scored_events[0][0]
         next_event_score = scored_events[1][0]
         event_ambiguity_gap = 0.8 if bet_kind == "moneyline" else 1.0
-        if next_event_score >= 7.0 and (top_event_score - next_event_score) < event_ambiguity_gap:
+        if next_event_score >= min_event_score and (top_event_score - next_event_score) < event_ambiguity_gap:
             return _single_resolution_payload(
                 "unavailable",
                 message="Kalshi event match is ambiguous; refusing to guess a ticker.",
@@ -2132,13 +2133,40 @@ def _resolve_single_bet(
             second_best_score = score
 
     if best_market is None or best_score < min_market_score:
+        # Relaxed fallback: use the best market within the best event when signal is
+        # still reasonably strong, to improve actionable coverage for near-threshold lines.
+        if scored_events and scored_events[0][0] >= 4.8:
+            relaxed_best = None
+            relaxed_score = 0.0
+            for market in candidate_markets:
+                score = _score_single_market(bet, market)
+                if score > relaxed_score:
+                    relaxed_score = score
+                    relaxed_best = market
+            if relaxed_best is not None and relaxed_score >= 5.2:
+                side = _resolve_market_side(bet, relaxed_best)
+                bet_line_val = _as_float(bet.get("line"))
+                market_text_for_line = _market_text(relaxed_best)
+                kalshi_line_val: float | None = None
+                if bet_line_val is not None:
+                    kalshi_line_val = _closest_num_in_text(market_text_for_line, bet_line_val)
+                return _single_resolution_payload(
+                    "matched",
+                    message="Matched to closest open Kalshi market.",
+                    scheduled_start=schedule.get("scheduled_start"),
+                    market=relaxed_best,
+                    side=side,
+                    score=relaxed_score,
+                    bet_line=bet_line_val,
+                    kalshi_line=kalshi_line_val,
+                )
         return _single_resolution_payload(
             "unavailable",
             message="No exact Kalshi market is open for this bet.",
             scheduled_start=schedule.get("scheduled_start"),
         )
 
-    if second_best_score >= 9.0 and (best_score - second_best_score) < 1.0:
+    if second_best_score >= (min_market_score + 1.0) and (best_score - second_best_score) < 0.7:
         return _single_resolution_payload(
             "unavailable",
             message="Kalshi market match is ambiguous within the event; refusing to guess.",
