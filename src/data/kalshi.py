@@ -156,6 +156,7 @@ _SPORTS_SERIES_TO_FETCH: list[str] = [
     "KXMLBHIT",    # hits only
     "KXMLBRBI",
     "KXMLBTOTAL",  # game run totals
+    "KXMLBF5",     # first-five winner
     "KXMLBF5TOTAL",
     "KXMLBF5SPREAD",
     "KXMLBTB",
@@ -200,7 +201,7 @@ _SERIES_STAT_HINTS: dict[str, list[str]] = {
     "MLBTOTAL": ["total", "run"],
 }
 
-_DISCOVERY_SUPPORTED_SPORTS = {"basketball", "baseball", "hockey"}
+_DISCOVERY_SUPPORTED_SPORTS = {"basketball", "baseball", "hockey", "football", "soccer"}
 _DISCOVERY_INCLUDE_TEXT = (
     "game",
     "match",
@@ -1075,6 +1076,108 @@ def _bet_identity(bet: dict[str, Any], index: int = 0) -> str:
         if value:
             return value
     return f"ready_{index}"
+
+
+def _split_matchup_teams(value: Any) -> tuple[str, str]:
+    raw = str(value or "").strip()
+    if not raw:
+        return "", ""
+    if "#" in raw:
+        raw = raw.split("#", 1)[0]
+    raw = raw.replace(" vs. ", " vs ")
+    for delim in ("@", " vs ", " v "):
+        if delim in raw:
+            parts = [p.strip() for p in raw.split(delim, 1)]
+            if len(parts) == 2:
+                away, home = parts[0], parts[1]
+                return away, home
+    return "", ""
+
+
+def _normalize_bet_type(value: Any, pick_text: str = "") -> str:
+    bt = _norm_text(value)
+    pick_norm = _norm_text(pick_text)
+    if any(token in bt for token in ("player prop", "prop")):
+        return "player_prop"
+    if any(token in bt for token in ("f5", "first 5", "first five")):
+        return "f5_moneyline" if "total" not in bt else "f5_total"
+    if any(token in bt for token in ("moneyline", "money line", "winner", "1x2", "match winner")):
+        return "moneyline"
+    if any(token in bt for token in ("run line", "spread", "handicap")):
+        return "spread"
+    if "team total" in bt:
+        if "home" in bt:
+            return "home_team_total"
+        if "away" in bt:
+            return "away_team_total"
+        return "team_total"
+    if any(token in bt for token in ("total", "over under", "goals o u", "btts")):
+        return "total"
+    if any(token in pick_norm for token in (" over ", " under ")):
+        return "total"
+    return bt.replace(" ", "_") if bt else "single"
+
+
+def _normalize_ready_bet(bet: dict[str, Any]) -> dict[str, Any]:
+    """Canonicalize a ready-bet row so matcher scoring is stable across sources."""
+    if not isinstance(bet, dict):
+        return {}
+
+    clean: dict[str, Any] = dict(bet)
+    for key in (
+        "uid", "bet_uid", "prediction_uid", "kind", "label", "pick", "game", "game_key",
+        "game_date", "game_time", "scheduled_start", "start_time", "game_datetime", "sport",
+        "bet_type", "raw_bet_type", "prop_type", "player_name", "name", "team", "home_team", "away_team",
+        "direction", "recommendation", "side_default",
+    ):
+        if key in clean and clean.get(key) is not None:
+            clean[key] = str(clean.get(key) or "").strip()
+
+    pick_text = str(clean.get("pick") or clean.get("label") or "")
+    clean["bet_type"] = _normalize_bet_type(clean.get("bet_type") or clean.get("raw_bet_type"), pick_text)
+
+    game_key = str(clean.get("game_key") or clean.get("game") or "")
+    away_from_game, home_from_game = _split_matchup_teams(game_key)
+    if not clean.get("away_team") and away_from_game:
+        clean["away_team"] = away_from_game
+    if not clean.get("home_team") and home_from_game:
+        clean["home_team"] = home_from_game
+
+    if not clean.get("team"):
+        picked = _picked_team_name(clean)
+        if picked:
+            clean["team"] = picked
+
+    if not clean.get("player_name"):
+        clean["player_name"] = str(clean.get("name") or "").strip()
+
+    if not clean.get("direction"):
+        dir_text = _norm_text(" ".join(
+            str(clean.get(k) or "")
+            for k in ("direction", "recommendation", "pick", "label")
+        ))
+        if "under" in dir_text:
+            clean["direction"] = "UNDER"
+        elif "over" in dir_text:
+            clean["direction"] = "OVER"
+
+    if clean.get("line") is not None:
+        line_num = _as_float(clean.get("line"))
+        clean["line"] = line_num if line_num is not None else clean.get("line")
+
+    if not clean.get("game") and clean.get("game_key"):
+        clean["game"] = clean.get("game_key")
+    if not clean.get("game_key") and clean.get("game"):
+        clean["game_key"] = clean.get("game")
+
+    if not clean.get("sport"):
+        clean["sport"] = _bet_sport_tag(clean)
+
+    side_default = str(clean.get("side_default") or "").lower()
+    if side_default not in {"yes", "no"}:
+        clean["side_default"] = "no" if "under" in _norm_text(pick_text) else "yes"
+
+    return clean
 
 
 def _bet_signature(bet: dict[str, Any]) -> str:
@@ -2418,17 +2521,20 @@ def resolve_ready_bets(
     for index, bet in enumerate(bets or []):
         if not isinstance(bet, dict):
             continue
-        uid = _bet_identity(bet, index)
-        if _bet_kind_tag(bet) == "combo":
-            result = _resolve_combo_bet(bet, markets, combo_markets, single_cache, event_index)
+        normalized_bet = _normalize_ready_bet(bet)
+        if not normalized_bet:
+            continue
+        uid = _bet_identity(normalized_bet, index)
+        if _bet_kind_tag(normalized_bet) == "combo":
+            result = _resolve_combo_bet(normalized_bet, markets, combo_markets, single_cache, event_index)
         else:
-            sig = _bet_signature(bet)
+            sig = _bet_signature(normalized_bet)
             if sig not in single_cache:
                 # Try module-level cache first (survives across requests)
                 if sig in _RESOLUTION_CACHE:
                     single_cache[sig] = _RESOLUTION_CACHE[sig]
                 else:
-                    single_cache[sig] = _resolve_single_bet(bet, markets, event_index)
+                    single_cache[sig] = _resolve_single_bet(normalized_bet, markets, event_index)
                     _RESOLUTION_CACHE[sig] = single_cache[sig]
             result = dict(single_cache[sig])
         resolutions[uid] = result

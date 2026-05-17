@@ -1004,32 +1004,6 @@ body.console-open main{padding-bottom:236px}
         <tbody id="prop-type-tbody"></tbody>
       </table>
     </div>
-
-    <!-- MODEL CALIBRATION -->
-    <div class="section-header" style="margin-top:32px">
-      <span class="section-title">&#127919; Model Calibration</span>
-      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-        <span id="ece-badge" style="font-size:.8rem;padding:4px 12px;border-radius:20px;
-          background:var(--card2);color:var(--text);font-weight:600">ECE: —</span>
-        <button class="btn btn-sm" onclick="triggerAutoImprove()">&#129302; Auto-Improve</button>
-      </div>
-    </div>
-    <div style="font-size:.78rem;color:var(--muted);margin-bottom:10px">
-      Expected Calibration Error (ECE): measures how well predicted probabilities match actual outcomes.
-      &lt;5% = excellent · 5-10% = acceptable · &gt;10% = triggers auto-retrain.
-    </div>
-    <div style="overflow-x:auto;border:1px solid var(--border);border-radius:var(--radius)">
-      <table class="by-type-table" id="calibration-table">
-        <thead><tr>
-          <th>Prob Bin</th><th>Samples</th><th>Avg Predicted</th><th>Avg Actual</th><th>Gap</th>
-        </tr></thead>
-        <tbody id="calibration-tbody">
-          <tr><td colspan="5" style="text-align:center;padding:20px;color:var(--muted)">
-            Calibration updates automatically after runs.
-          </td></tr>
-        </tbody>
-      </table>
-    </div>
   </div>
 
 </main>
@@ -2469,54 +2443,6 @@ function loadParlayPerformance() {
   }).catch(() => {
     targets.forEach(el => el.innerHTML = '<div class="no-games">Could not load parlay stats.</div>');
   });
-}
-
-// ── Calibration ───────────────────────────────────────────────────────────
-function loadCalibration() {
-  fetch('/api/calibration').then(r => r.json()).then(d => {
-    if (!d.ok) return;
-    const cal = d.calibration || {};
-    const ece = cal.ece;
-    const badge = document.getElementById('ece-badge');
-    if (badge) {
-      const c = ece == null ? 'var(--card2)' : ece < 0.05 ? 'var(--green)' : ece < 0.10 ? 'var(--yellow)' : 'var(--red)';
-      badge.textContent = `ECE: ${ece != null ? (ece * 100).toFixed(1) + '%' : '—'}`;
-      badge.style.background = c;
-      badge.style.color = ece == null ? 'var(--text)' : '#fff';
-    }
-    const tbody = document.getElementById('calibration-tbody');
-    if (!tbody) return;
-    const bins = cal.bins || [];
-    if (!bins.length) {
-      tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;padding:20px;color:var(--muted)">No resolved predictions yet.</td></tr>';
-      return;
-    }
-    tbody.innerHTML = bins.map(b => {
-      const gc = b.gap < 0.05 ? 'var(--green)' : b.gap < 0.10 ? 'var(--yellow)' : 'var(--red)';
-      return `<tr>
-        <td>${b.bin}</td>
-        <td>${b.n}</td>
-        <td>${(b.avg_pred * 100).toFixed(1)}%</td>
-        <td>${(b.avg_actual * 100).toFixed(1)}%</td>
-        <td style="color:${gc};font-weight:700">${(b.gap * 100).toFixed(1)}%</td>
-      </tr>`;
-    }).join('');
-  }).catch(() => {});
-}
-
-function triggerAutoImprove() {
-  toast('Triggering auto-improve check…', 'info');
-  fetch('/api/auto-improve', {method: 'POST'})
-    .then(r => r.json())
-    .then(d => {
-      if (d.retrained) {
-        toast('Model retrained! ECE was high — refreshing calibration…', 'success');
-      } else {
-        toast(d.msg || 'Auto-improve complete', 'info');
-      }
-      setTimeout(loadCalibration, 1500);
-    })
-    .catch(e => toast('Auto-improve error: ' + e, 'error'));
 }
 
 function triggerBackfill(days) {

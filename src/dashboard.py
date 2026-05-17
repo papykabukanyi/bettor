@@ -259,6 +259,36 @@ def _phase(idx, name=""):
         _state["phase_idx"] = idx
 
 
+_last_mandatory_calibration_date = None
+
+
+def _run_mandatory_daily_calibration(run_date: datetime.date, team_stats=None, min_resolved: int = 50) -> dict:
+    """Run one calibration check per ET day before archival/cleanup steps."""
+    global _last_mandatory_calibration_date
+
+    if _last_mandatory_calibration_date == run_date:
+        return {"ok": True, "skipped": True, "msg": "already-calibrated"}
+
+    try:
+        if team_stats is None:
+            from data.mlb_fetcher import fetch_team_stats
+
+            team_stats = fetch_team_stats(MLB_SEASONS)
+        from models.mlb_model import auto_improve
+
+        result = auto_improve(team_stats, min_resolved=min_resolved, verbose=False) or {}
+        _last_mandatory_calibration_date = run_date
+        _log(
+            "[calibration] "
+            f"{result.get('msg', 'daily calibration complete')} "
+            f"(ECE={result.get('ece')}, resolved={result.get('total_resolved')})"
+        )
+        return {"ok": True, **result}
+    except Exception as exc:
+        _log(f"[calibration] mandatory daily calibration failed: {exc}")
+        return {"ok": False, "msg": str(exc)}
+
+
 def _clean(obj):
     if isinstance(obj, list):
         return [_clean(x) for x in obj]
@@ -2810,6 +2840,9 @@ def _run_all_sports_analysis():
         _state["phase_idx"] = 0
 
     try:
+        today_date = _et_calendar_today()
+        _run_mandatory_daily_calibration(today_date)
+
         _phase(0)
         _log("[all-sports] Discovering online sportsbooks and events...")
         snapshot = _build_multi_sport_snapshot(force_refresh=True)
@@ -2837,8 +2870,8 @@ def _run_all_sports_analysis():
         if sentiment_prop_rows:
             _log(f"[all-sports] Sentiment player rows prepared: {len(sentiment_prop_rows)}")
 
-        today_str = _et_calendar_today().isoformat()
-        tomorrow_str = (_et_calendar_today() + datetime.timedelta(days=1)).isoformat()
+        today_str = today_date.isoformat()
+        tomorrow_str = (today_date + datetime.timedelta(days=1)).isoformat()
 
         _phase(2)
         today_games = [g for g in games if str(g.get("game_date") or "") == today_str]
@@ -2899,7 +2932,7 @@ def _run_all_sports_analysis():
 
         # ── Persist all-sports bets to DB so they survive server restarts ─────
         try:
-            from data.db import save_predictions
+            from data.db import save_predictions, save_prop_picks
             today_str_allsports = _et_calendar_today().isoformat()
             run_id_allsports = f"ALL-{today_str_allsports}"
             pred_rows_allsports = []
@@ -2926,6 +2959,43 @@ def _run_all_sports_analysis():
             if pred_rows_allsports:
                 save_predictions(pred_rows_allsports)
                 _log(f"[all-sports] Saved {len(pred_rows_allsports)} bets to DB")
+
+            props_rows_allsports = []
+            for p in table_rows or []:
+                player_name = str(p.get("name") or p.get("player") or "").strip()
+                if not player_name:
+                    continue
+                stat_type = str(p.get("stat_type") or p.get("prop_type") or p.get("bet_type") or "").strip()
+                if not stat_type:
+                    continue
+                rec = str(p.get("direction") or p.get("recommendation") or "OVER").strip().upper()
+                if rec not in {"OVER", "UNDER"}:
+                    rec = "OVER"
+                model_prob = float(p.get("model_prob") or 0.5)
+                over_prob = p.get("over_prob")
+                under_prob = p.get("under_prob")
+                if over_prob is None or under_prob is None:
+                    over_prob = model_prob if rec == "OVER" else 1.0 - model_prob
+                    under_prob = model_prob if rec == "UNDER" else 1.0 - model_prob
+
+                props_rows_allsports.append({
+                    "sport": p.get("sport") or "unknown",
+                    "name": player_name,
+                    "team": p.get("team") or "",
+                    "game": p.get("game") or p.get("game_key") or "",
+                    "game_key": p.get("game_key") or p.get("game") or "",
+                    "date": p.get("date") or p.get("game_date") or today_str_allsports,
+                    "stat_type": stat_type,
+                    "line": p.get("line"),
+                    "direction": rec,
+                    "over_pct": max(0.0, min(100.0, float(over_prob) * 100.0)),
+                    "under_pct": max(0.0, min(100.0, float(under_prob) * 100.0)),
+                    "run_id": run_id_allsports,
+                    "run_date": today_str_allsports,
+                })
+            if props_rows_allsports:
+                save_prop_picks(props_rows_allsports, game_date=today_str_allsports)
+                _log(f"[all-sports] Saved {len(props_rows_allsports)} prop picks to DB")
         except Exception as _db_exc:
             _log(f"[all-sports] DB save skipped: {_db_exc}")
 
@@ -2985,6 +3055,7 @@ def _run_soccer_analysis(lock_date: datetime.date | None = None):
         today_str = today_date.isoformat()
         tomorrow_str = (today_date + datetime.timedelta(days=1)).isoformat()
         run_id = f"SOCCER-{today_str}"
+        _run_mandatory_daily_calibration(today_date)
 
         need_preds = False
         need_props = False
@@ -3238,14 +3309,17 @@ def _run_analysis(lock_date: datetime.date | None = None):
         tomorrow_str = (today_date + datetime.timedelta(days=1)).isoformat()
         run_id = f"MLB-{today_str}"
 
-        # ── Step 0: Archive previous-day PENDING picks so lock check is fresh ──
+        # ── Step 0: Mandatory calibration before any archival/cleanup ─────────
         try:
             from data.db import archive_previous_day_data, upsert_daily_run
+            upsert_daily_run(run_id, today_date, status="RUNNING")
+
+            _run_mandatory_daily_calibration(today_date)
+
             arch = archive_previous_day_data(today_date)
             if arch.get("predictions_archived") or arch.get("props_archived"):
                 _log(f"[archive] Archived {arch.get('predictions_archived',0)} preds, "
                      f"{arch.get('props_archived',0)} props from prior days for training")
-            upsert_daily_run(run_id, today_date, status="RUNNING")
         except Exception as _ae:
             _log(f"[archive] Archive step skipped: {_ae}")
 
@@ -3665,12 +3739,10 @@ def _run_analysis(lock_date: datetime.date | None = None):
 
         # Auto-resolve outcomes for recent past predictions + props + tracked parlays
         try:
-            from models.mlb_predictor import (
-                resolve_game_outcomes, resolve_prop_outcomes, resolve_tracked_parlays
-            )
-            n_games  = resolve_game_outcomes(days_back=3)
-            n_props  = resolve_prop_outcomes(days_back=3)
-            n_parlay = resolve_tracked_parlays(days_back=3)
+            resolved = _resolve_all_sports_outcomes(days_back=3)
+            n_games = int(resolved.get("games", 0) or 0)
+            n_props = int(resolved.get("props", 0) or 0)
+            n_parlay = int(resolved.get("parlays", 0) or 0)
             _log(f"Auto-resolved: {n_games} game preds, {n_props} props, {n_parlay} parlays")
         except Exception as e:
             _log(f"Auto-resolve skipped: {e}")
@@ -3689,15 +3761,6 @@ def _run_analysis(lock_date: datetime.date | None = None):
                 _log("Elite parlay: no qualifying legs (need 80%+ prob + positive EV + ELITE)")
         except Exception as e:
             _log(f"Elite parlay skipped: {e}")
-
-        # Self-improvement: check calibration and retrain if needed
-        try:
-            from models.mlb_model import auto_improve
-            improve_result = auto_improve(team_stats, min_resolved=50, verbose=False)
-            _log(f"[calibration] {improve_result.get('msg', '')}  "
-                 f"(ECE={improve_result.get('ece')}, resolved={improve_result.get('total_resolved')})")
-        except Exception as e:
-            _log(f"Auto-improve skipped: {e}")
 
         _log(f"Analysis complete — {len(today_cards)} today (upcoming), "
              f"{len(tomorrow_cards)} tomorrow, {len(all_props_flat)} props")
@@ -3991,16 +4054,12 @@ def api_parlay_auto_resolve():
 
 @app.route("/api/auto-improve", methods=["POST"])
 def api_auto_improve():
-    """Trigger calibration check + conditional model retrain."""
-    try:
-        import pandas as pd
-        from data.mlb_fetcher import build_game_dataset
-        from models.mlb_model import auto_improve
-        team_stats = build_game_dataset(MLB_SEASONS[:3])
-        result = auto_improve(team_stats, min_resolved=50, verbose=True)
-        return jsonify({"ok": True, **result})
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)})
+    """Manual trigger is deprecated; calibration now runs automatically each ET day."""
+    return jsonify({
+        "ok": False,
+        "disabled": True,
+        "msg": "Manual auto-improve is disabled. Daily calibration now runs automatically before archival.",
+    }), 410
 
 
 @app.route("/api/backfill", methods=["POST"])
@@ -5343,8 +5402,12 @@ def api_kalshi_order():
 
         resolved_bet = None
         bet_payload = data.get("bet_payload")
-        if isinstance(bet_payload, dict):
-            resolved = resolve_ready_bets([bet_payload], force_refresh=True)
+        explicit_ticker = str(data.get("market_ticker") or data.get("ticker") or "").strip()
+
+        # Use caller-provided matched ticker when present to avoid order-time re-resolve drift.
+        # If no ticker is provided, resolve once from bet payload using cached catalog.
+        if isinstance(bet_payload, dict) and not explicit_ticker:
+            resolved = resolve_ready_bets([bet_payload], force_refresh=False)
             resolved_map = resolved.get("resolutions") or {}
             bet_uid = str(
                 bet_payload.get("uid")
@@ -5364,8 +5427,7 @@ def api_kalshi_order():
 
         ticker = str(
             (resolved_bet or {}).get("market_ticker")
-            or data.get("market_ticker")
-            or data.get("ticker")
+            or explicit_ticker
             or ""
         ).strip()
         if not ticker:
