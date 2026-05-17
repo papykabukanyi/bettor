@@ -459,10 +459,12 @@ main{padding:20px;max-width:1400px;margin:0 auto}
 .clr-num{width:18px;height:18px;border-radius:50%;background:rgba(124,58,237,.7);color:#fff;font-size:.65rem;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0}
 .clr-prob{color:var(--accent);font-weight:700;white-space:nowrap;font-size:.72rem}
 .ready-combo-item{border-color:rgba(124,58,237,.35) !important}
-.rb-tabs{display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap}
+.rb-tabs{display:none}
 .rb-tab{padding:6px 16px;border-radius:999px;border:1px solid var(--border);font-size:.78rem;cursor:pointer;background:var(--card2);color:var(--muted);transition:all .2s}
 .rb-tab.active{background:var(--accent);color:#fff;border-color:var(--accent)}
-.rb-panel{display:none}.rb-panel.active{display:block}
+.rb-panel{display:block;margin-bottom:12px}
+.rb-panel.active{display:block}
+#rb-log{display:none}
 @media (max-width:980px){
   .ready-actions{flex-wrap:wrap}
   .ready-match-chip,.ready-no-match-badge{width:100%;flex:unset}
@@ -933,20 +935,21 @@ body.console-open main{padding-bottom:236px}
       <div id="rb-ops-log-list" class="rb-ops-log-list" style="display:none"></div>
     </div>
 
-    <!-- ── Sub-tabs ── -->
-    <div class="rb-tabs">
-      <div class="rb-tab active" onclick="rbSwitchTab('rb-singles')">&#9989; Singles &amp; Props</div>
-      <div class="rb-tab" onclick="rbSwitchTab('rb-combos')">&#9889; Combo Bets</div>
-      <div class="rb-tab" onclick="rbSwitchTab('rb-log')">&#128221; Order Log</div>
-    </div>
+    <div class="section-meta" style="margin-bottom:10px">Auto-running with request thresholds. Singles/Props and Combo Bets stay open together.</div>
 
-    <!-- ── 1: Bot-Qualified Singles + Props (default active) ── -->
+    <!-- ── 1: Bot-Qualified Singles + Props (always visible) ── -->
     <div class="rb-panel active" id="rb-singles">
+      <div class="section-header" style="margin-bottom:8px">
+        <span class="section-title">&#9989; Singles &amp; Props</span>
+      </div>
       <div id="ready-bets-list"><div class="no-games">Loading…</div></div>
     </div>
 
-    <!-- ── 2: Auto Combo Bets ── -->
-    <div class="rb-panel" id="rb-combos">
+    <!-- ── 2: Auto Combo Bets (always visible) ── -->
+    <div class="rb-panel active" id="rb-combos">
+      <div class="section-header" style="margin-bottom:8px">
+        <span class="section-title">&#9889; Combo Bets</span>
+      </div>
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
         <span class="section-meta">Multi-leg combo bets ranked by EV. All-matched combos (&#9989;) can be placed on Kalshi.</span>
         <button class="btn btn-sm" onclick="studyCombos()" title="Deep-analyze all ready bets for best parlay combinations">&#128202; Study Combos</button>
@@ -956,7 +959,7 @@ body.console-open main{padding-bottom:236px}
       <div id="ready-combos-list"><div class="no-games">Run analysis or click &quot;Study Combos&quot; to generate combo suggestions.</div></div>
     </div>
 
-    <!-- ── 3: Order Log ── -->
+    <!-- ── 3: Order Log (hidden by default to keep focus on always-open bet panels) ── -->
     <div class="rb-panel" id="rb-log">
       <div class="section-header" style="margin-bottom:8px">
         <span class="section-title">&#128221; Order Log</span>
@@ -1086,7 +1089,7 @@ const READY_OPS_LOG_MAX = 150;
 let _lastKalshiResolveMs = 0;
 let _lastKalshiResolveKey = '';
 let _readyOrderSyncInFlight = false;
-const _KALSHI_RESOLVE_DEBOUNCE_MS = 600_000; // 10 min between auto-resolves (keeps matches stable)
+const _KALSHI_RESOLVE_DEBOUNCE_MS = 120_000; // 2 min between auto-resolves (live enough, avoids request storms)
 
 // Game-level bet types that come through the props pipeline but are NOT player props
 const GAME_LEVEL_BET_TYPES = new Set([
@@ -4647,8 +4650,7 @@ function resolveKalshiReadyBets(force) {
     count: READY_BETS.length,
   };
   renderReadyBets();
-  const combosTabActive = !!document.getElementById('rb-combos')?.classList.contains('active');
-  const includeComboSuggestions = combosTabActive;
+  const includeComboSuggestions = true;
   const betsToResolve = includeComboSuggestions ? READY_BETS : READY_BETS.filter(r => r && r.kind !== 'combo');
 
   return fetch('/api/kalshi/resolve-ready', {
@@ -4727,8 +4729,7 @@ function studyCombos() {
   if (metaEl) metaEl.textContent = 'Analyzing…';
   if (comboContainer) comboContainer.innerHTML = '<div class="no-games">&#128202; Studying combo opportunities…</div>';
 
-  // Switch to combos tab so user sees the result
-  rbSwitchTab('rb-combos');
+  // Combo panel is always visible; keep this idempotent when called from anywhere.
 
   fetch('/api/kalshi/combo-study', {
     method: 'POST',
@@ -4781,6 +4782,14 @@ function studyCombos() {
 function rbSwitchTab(id) {
   const panel = document.getElementById('panel-readybets');
   if (!panel) return;
+  if (id === 'rb-singles' || id === 'rb-combos') {
+    const singles = document.getElementById('rb-singles');
+    const combos = document.getElementById('rb-combos');
+    if (singles) singles.classList.add('active');
+    if (combos) combos.classList.add('active');
+    if (!READY_BETS.length) refreshReadyBets(false);
+    return;
+  }
   const tabIds = ['rb-singles','rb-combos','rb-log'];
   panel.querySelectorAll('.rb-tab').forEach((t, i) => t.classList.toggle('active', tabIds[i] === id));
   panel.querySelectorAll('.rb-panel').forEach(p => p.classList.toggle('active', p.id === id));

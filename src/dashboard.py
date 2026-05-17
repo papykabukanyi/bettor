@@ -31,6 +31,7 @@ import atexit
 import tempfile
 import re
 import math
+import time
 
 from flask import Flask, render_template, jsonify, request, Response
 
@@ -49,6 +50,45 @@ if _ACTIVE_SPORT not in {"mlb", "soccer", "all"}:
     _ACTIVE_SPORT = "all"
 
 app = Flask(__name__, template_folder="templates")
+
+_READY_RESOLVE_CACHE_LOCK = threading.Lock()
+_READY_RESOLVE_CACHE = {"ts": 0.0, "sig": "", "payload": None}
+_READY_RESOLVE_MIN_INTERVAL_SEC = max(
+    20, int(os.getenv("READY_RESOLVE_MIN_INTERVAL_SEC", "75") or "75")
+)
+
+
+def _ready_resolve_signature(bets: list[dict]) -> str:
+    """Stable signature for ready-bet resolve requests (order-insensitive)."""
+    rows = []
+    for idx, bet in enumerate(bets or []):
+        if not isinstance(bet, dict):
+            continue
+        rows.append(
+            {
+                "uid": str(
+                    bet.get("uid")
+                    or bet.get("bet_uid")
+                    or bet.get("prediction_uid")
+                    or f"ready_{idx}"
+                ).strip(),
+                "kind": str(bet.get("kind") or "").strip().lower(),
+                "sport": str(bet.get("sport") or "").strip().lower(),
+                "bet_type": str(bet.get("bet_type") or "").strip().lower(),
+                "pick": str(bet.get("pick") or bet.get("label") or "").strip().lower(),
+                "line": str(bet.get("line") if bet.get("line") is not None else "").strip(),
+                "game": str(bet.get("game") or bet.get("game_key") or "").strip().lower(),
+                "game_date": str(bet.get("game_date") or "").strip()[:10],
+                "start": str(
+                    bet.get("scheduled_start")
+                    or bet.get("game_datetime")
+                    or bet.get("start_time")
+                    or ""
+                ).strip(),
+            }
+        )
+    rows.sort(key=lambda r: (r.get("uid") or "", r.get("kind") or "", r.get("pick") or ""))
+    return json.dumps(rows, sort_keys=True, separators=(",", ":"))
 
 # ─── Gunicorn / production: init once per worker ─────────────────────────────
 _worker_initialized = False
@@ -5259,10 +5299,30 @@ def api_kalshi_resolve_ready():
         if not isinstance(bets, list):
             bets = []
         clean_bets = [bet for bet in bets if isinstance(bet, dict)]
-        include_combo_suggestions = bool(data.get("include_combo_suggestions"))
+        force_refresh = bool(data.get("force_refresh"))
+        include_combo_suggestions = bool(data.get("include_combo_suggestions", True))
+
+        request_sig = _ready_resolve_signature(clean_bets) + f"|combo={1 if include_combo_suggestions else 0}"
+        now = time.time()
+        if not force_refresh:
+            with _READY_RESOLVE_CACHE_LOCK:
+                cache_sig = str(_READY_RESOLVE_CACHE.get("sig") or "")
+                cache_ts = float(_READY_RESOLVE_CACHE.get("ts") or 0.0)
+                cache_payload = _READY_RESOLVE_CACHE.get("payload")
+            cache_age = now - cache_ts
+            if (
+                cache_payload
+                and cache_sig == request_sig
+                and cache_age < _READY_RESOLVE_MIN_INTERVAL_SEC
+            ):
+                payload = dict(cache_payload)
+                payload["cache_age_sec"] = max(float(payload.get("cache_age_sec") or 0.0), float(cache_age))
+                payload["server_cached"] = True
+                return jsonify({"ok": True, **_clean(payload)})
+
         resolved = resolve_ready_bets(
             clean_bets,
-            force_refresh=bool(data.get("force_refresh")),
+            force_refresh=force_refresh,
         )
         combos = []
         if include_combo_suggestions:
@@ -5299,7 +5359,16 @@ def api_kalshi_resolve_ready():
                         combos = hydrated_combos
             except Exception as combo_exc:
                 _log(f"[kalshi] combo suggestion skipped: {combo_exc}")
-        return jsonify({"ok": True, **_clean(resolved), "combo_suggestions": _clean(combos)})
+        response_payload = {
+            **resolved,
+            "combo_suggestions": combos,
+            "server_cached": False,
+        }
+        with _READY_RESOLVE_CACHE_LOCK:
+            _READY_RESOLVE_CACHE["ts"] = time.time()
+            _READY_RESOLVE_CACHE["sig"] = request_sig
+            _READY_RESOLVE_CACHE["payload"] = response_payload
+        return jsonify({"ok": True, **_clean(response_payload)})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e), "resolutions": {}, "summary": {}, "combo_suggestions": []})
 
