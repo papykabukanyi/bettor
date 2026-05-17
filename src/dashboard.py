@@ -4028,9 +4028,15 @@ def api_calibration():
 def api_parlay_performance():
     """Win/loss/ROI stats for all tracked parlays."""
     try:
-        from data.db import get_parlay_performance_stats
+        from data.db import get_parlay_performance_stats, prune_tracked_parlays_to_date
+        current_only_raw = str(request.args.get("current_only", "1")).strip().lower()
+        current_only = current_only_raw in {"1", "true", "yes", "on"}
+        target_date = _et_calendar_today() if current_only else None
+        if current_only:
+            # Keep tracked_parlays table aligned with the "today-only" parlay tab policy.
+            prune_tracked_parlays_to_date(target_date=target_date)
         db_sport = None if _ACTIVE_SPORT == "all" else _ACTIVE_SPORT
-        return jsonify({"ok": True, "stats": get_parlay_performance_stats(sport=db_sport)})
+        return jsonify({"ok": True, "stats": get_parlay_performance_stats(sport=db_sport, target_date=target_date)})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
 
@@ -5133,12 +5139,15 @@ def api_parlay_save():
 @app.route("/api/parlay/list")
 def api_parlay_list():
     try:
-        from data.db import get_tracked_parlays
+        from data.db import get_tracked_parlays, prune_tracked_parlays_to_date
         inc = str(request.args.get("include_resolved", "1")).strip().lower()
         include_resolved = inc in {"1", "true", "yes", "on"}
         current_only_raw = str(request.args.get("current_only", "1")).strip().lower()
         current_only = current_only_raw in {"1", "true", "yes", "on"}
         target_date = _et_calendar_today() if current_only else None
+        if current_only:
+            # Remove stale rows so old parlays cannot show up again in this tab.
+            prune_tracked_parlays_to_date(target_date=target_date)
         db_sport = None if _ACTIVE_SPORT == "all" else _ACTIVE_SPORT
         return jsonify({
             "ok": True,

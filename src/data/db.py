@@ -2406,8 +2406,35 @@ def get_tracked_parlays(include_resolved: bool = False, target_date=None,
         if not include_resolved:
             clauses.append("outcome = 'PENDING'")
         if target_date is not None:
-            clauses.append("DATE(created_at AT TIME ZONE 'America/New_York') = %s")
-            params.append(target_date)
+            target_iso = target_date.isoformat() if hasattr(target_date, "isoformat") else str(target_date)
+            clauses.append("""
+                (
+                    DATE(tp.created_at AT TIME ZONE 'America/New_York') = %s
+                    OR EXISTS (
+                        SELECT 1
+                        FROM jsonb_array_elements(
+                            CASE
+                                WHEN jsonb_typeof(tp.legs_json) = 'array' THEN tp.legs_json
+                                ELSE '[]'::jsonb
+                            END
+                        ) AS leg
+                        WHERE COALESCE(leg->>'game_date', '') ~ '^\\d{4}-\\d{2}-\\d{2}'
+                          AND substring(leg->>'game_date', 1, 10) = %s
+                    )
+                    OR EXISTS (
+                        SELECT 1
+                        FROM jsonb_array_elements(
+                            CASE
+                                WHEN jsonb_typeof(tp.legs_json) = 'array' THEN tp.legs_json
+                                ELSE '[]'::jsonb
+                            END
+                        ) AS leg
+                        WHERE COALESCE(leg->>'scheduled_start', '') ~ '^\\d{4}-\\d{2}-\\d{2}'
+                          AND substring(leg->>'scheduled_start', 1, 10) = %s
+                    )
+                )
+            """)
+            params.extend([target_date, target_iso, target_iso])
         if sport:
             clauses.append("""
                 EXISTS (
@@ -2440,6 +2467,57 @@ def get_tracked_parlays(include_resolved: bool = False, target_date=None,
         conn.close()
 
 
+def prune_tracked_parlays_to_date(target_date=None) -> int:
+    """Delete tracked parlays that are not for the target ET calendar date."""
+    conn = get_conn()
+    if conn is None:
+        return 0
+    try:
+        cur = conn.cursor()
+        keep_date = target_date if target_date is not None else _cache_date_default()
+        keep_iso = keep_date.isoformat() if hasattr(keep_date, "isoformat") else str(keep_date)
+        cur.execute(
+            """
+            DELETE FROM tracked_parlays tp
+            WHERE NOT (
+                DATE(tp.created_at AT TIME ZONE 'America/New_York') = %s
+                OR EXISTS (
+                    SELECT 1
+                    FROM jsonb_array_elements(
+                        CASE
+                            WHEN jsonb_typeof(tp.legs_json) = 'array' THEN tp.legs_json
+                            ELSE '[]'::jsonb
+                        END
+                    ) AS leg
+                    WHERE COALESCE(leg->>'game_date', '') ~ '^\\d{4}-\\d{2}-\\d{2}'
+                      AND substring(leg->>'game_date', 1, 10) = %s
+                )
+                OR EXISTS (
+                    SELECT 1
+                    FROM jsonb_array_elements(
+                        CASE
+                            WHEN jsonb_typeof(tp.legs_json) = 'array' THEN tp.legs_json
+                            ELSE '[]'::jsonb
+                        END
+                    ) AS leg
+                    WHERE COALESCE(leg->>'scheduled_start', '') ~ '^\\d{4}-\\d{2}-\\d{2}'
+                      AND substring(leg->>'scheduled_start', 1, 10) = %s
+                )
+            )
+            """,
+            (keep_date, keep_iso, keep_iso),
+        )
+        removed = int(cur.rowcount or 0)
+        conn.commit()
+        return removed
+    except Exception as e:
+        conn.rollback()
+        print(f"[db] prune_tracked_parlays_to_date error: {e}")
+        return 0
+    finally:
+        conn.close()
+
+
 def resolve_tracked_parlay(parlay_id: int, outcome: str, payout: float = 0):
     conn = get_conn()
     if conn is None:
@@ -2459,18 +2537,48 @@ def resolve_tracked_parlay(parlay_id: int, outcome: str, payout: float = 0):
         conn.close()
 
 
-def get_parlay_performance_stats(sport: str | None = None) -> dict:
+def get_parlay_performance_stats(sport: str | None = None, target_date=None) -> dict:
     """Win/loss/ROI stats for tracked parlays."""
     conn = get_conn()
     if conn is None:
         return {}
     try:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        where_sql = ""
+        clauses = []
         vals = []
+        if target_date is not None:
+            target_iso = target_date.isoformat() if hasattr(target_date, "isoformat") else str(target_date)
+            clauses.append("""
+                (
+                    DATE(tp.created_at AT TIME ZONE 'America/New_York') = %s
+                    OR EXISTS (
+                        SELECT 1
+                        FROM jsonb_array_elements(
+                            CASE
+                                WHEN jsonb_typeof(tp.legs_json) = 'array' THEN tp.legs_json
+                                ELSE '[]'::jsonb
+                            END
+                        ) AS leg
+                        WHERE COALESCE(leg->>'game_date', '') ~ '^\\d{4}-\\d{2}-\\d{2}'
+                          AND substring(leg->>'game_date', 1, 10) = %s
+                    )
+                    OR EXISTS (
+                        SELECT 1
+                        FROM jsonb_array_elements(
+                            CASE
+                                WHEN jsonb_typeof(tp.legs_json) = 'array' THEN tp.legs_json
+                                ELSE '[]'::jsonb
+                            END
+                        ) AS leg
+                        WHERE COALESCE(leg->>'scheduled_start', '') ~ '^\\d{4}-\\d{2}-\\d{2}'
+                          AND substring(leg->>'scheduled_start', 1, 10) = %s
+                    )
+                )
+            """)
+            vals.extend([target_date, target_iso, target_iso])
         if sport:
-            where_sql = """
-            WHERE EXISTS (
+            clauses.append("""
+            EXISTS (
                 SELECT 1
                 FROM jsonb_array_elements(
                     CASE
@@ -2481,7 +2589,9 @@ def get_parlay_performance_stats(sport: str | None = None) -> dict:
                 WHERE lower(COALESCE(leg->>'sport', '')) = %s
             )
             """
+            )
             vals.append(str(sport).lower())
+        where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         cur.execute(f"""
             SELECT
                 COUNT(*)                                           AS total,
