@@ -2416,7 +2416,7 @@ function loadParlayPerformance() {
     document.getElementById('parlay-perf-stats-perf')
   ].filter(Boolean);
   if (!targets.length) return;
-  fetch('/api/parlay/performance').then(r => r.json()).then(d => {
+  fetch('/api/parlay/performance?current_only=1').then(r => r.json()).then(d => {
     if (!d.ok) {
       targets.forEach(el => el.innerHTML = '<div class="no-games">Could not load parlay stats.</div>');
       return;
@@ -5404,7 +5404,18 @@ function loadTrackedParlays() {
     const el = document.getElementById('tracked-parlays-list');
     const metaEl = document.getElementById('tracked-parlay-meta');
     if (!el) return;
-    const rows = d.ok ? _asArray(d.parlays) : [];
+    const todayIso = _etTodayIso();
+    const rows = (d.ok ? _asArray(d.parlays) : []).filter(p => {
+      const createdDate = String(p && p.created_at ? p.created_at : '').slice(0, 10);
+      if (createdDate === todayIso) return true;
+      const legs = _asArray(p && p.legs_json);
+      return legs.some(leg => {
+        const gameDate = String(leg && (leg.game_date || leg.date || '')).slice(0, 10);
+        if (gameDate === todayIso) return true;
+        const scheduledStart = String(leg && (leg.scheduled_start || leg.game_datetime || '')).slice(0, 10);
+        return scheduledStart === todayIso;
+      });
+    });
     const liveLookup = _liveLookupSnapshot();
 
     const pending = rows.filter(p => (p.outcome || 'PENDING').toUpperCase() === 'PENDING');
@@ -5599,8 +5610,8 @@ function loadBotPerformance() {
   if (!el) return;
   Promise.all([
     fetch('/api/performance').then(r=>r.json()),
-    fetch('/api/prop-performance').then(r=>r.json()),
-    fetch('/api/parlay/performance').then(r=>r.json()),
+    fetch('/api/prop-performance?current_only=1').then(r=>r.json()),
+    fetch('/api/parlay/performance?current_only=1').then(r=>r.json()),
   ]).then(([g, p, pr]) => {
     if (!g.ok || !p.ok || !pr.ok) {
       el.innerHTML = '<div class="no-games">Could not load bot performance.</div>';
@@ -5650,8 +5661,8 @@ function loadPerformance() {
 
 function loadPropPerformance() {
   Promise.all([
-    fetch('/api/prop-performance').then(r=>r.json()),
-    fetch('/api/parlay/performance').then(r=>r.json()).catch(()=>({ok:false,stats:{}})),
+    fetch('/api/prop-performance?current_only=1').then(r=>r.json()),
+    fetch('/api/parlay/performance?current_only=1').then(r=>r.json()).catch(()=>({ok:false,stats:{}})),
   ]).then(([d, pr])=>{
     if (!d.ok) return;
     const s = d.stats||{};

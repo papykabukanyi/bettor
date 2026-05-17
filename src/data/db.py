@@ -2036,8 +2036,9 @@ def get_performance_stats(sport: str | None = None) -> dict:
         conn.close()
 
 
-def get_prop_performance_stats(sport: str | None = None, days_back: int | None = None) -> dict:
-    """Return prop stats for dashboard tracking (all-time by default)."""
+def get_prop_performance_stats(sport: str | None = None, days_back: int | None = None,
+                               target_date=None) -> dict:
+    """Return prop stats for dashboard tracking."""
     conn = get_conn()
     if conn is None:
         return {}
@@ -2049,9 +2050,13 @@ def get_prop_performance_stats(sport: str | None = None, days_back: int | None =
             sport_where = " AND sport = %s"
             vals.append(sport)
         # No recommendation filter — track all bet types across all sports.
-        # If days_back is provided (>0), limit to that trailing window; otherwise all-time.
+        # Prefer a current-day slice for the dashboard, falling back to a trailing window.
         date_filter = ""
-        if days_back is not None and int(days_back) > 0:
+        if target_date is not None:
+            target_iso = target_date.isoformat() if hasattr(target_date, "isoformat") else str(target_date)
+            date_filter = "AND game_date = %s"
+            vals.append(target_iso)
+        elif days_back is not None and int(days_back) > 0:
             date_filter = f"AND game_date >= CURRENT_DATE - ({int(days_back)} * INTERVAL '1 day')"
 
         # Overall prop stats
