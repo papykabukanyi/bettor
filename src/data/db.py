@@ -1972,7 +1972,7 @@ def get_prop_history(days: int = 30, outcome: str = None,
         conn.close()
 
 
-def get_performance_stats(sport: str | None = None) -> dict:
+def get_performance_stats(sport: str | None = None, target_date=None) -> dict:
     """Return win/loss/push counts and ROI for prediction tracking."""
     conn = get_conn()
     if conn is None:
@@ -1980,10 +1980,14 @@ def get_performance_stats(sport: str | None = None) -> dict:
     try:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         vals = []
-        sport_where = ""
+        where_parts = ["outcome != 'ARCHIVED'"]
         if sport:
-            sport_where = " AND sport = %s"
+            where_parts.append("sport = %s")
             vals.append(sport)
+        if target_date is not None:
+            where_parts.append("game_date = %s")
+            vals.append(target_date.isoformat() if hasattr(target_date, "isoformat") else str(target_date))
+        where_sql = " AND ".join(where_parts)
 
         cur.execute(f"""
             SELECT
@@ -1997,8 +2001,7 @@ def get_performance_stats(sport: str | None = None) -> dict:
                 ROUND(AVG(model_prob)*100, 1) AS avg_confidence,
                 COUNT(DISTINCT bet_type) AS bet_types_used
             FROM predictions
-            WHERE outcome != 'ARCHIVED'
-            {sport_where}
+            WHERE {where_sql}
         """, vals)
         row = cur.fetchone()
         stats = dict(row) if row else {}
@@ -2009,8 +2012,7 @@ def get_performance_stats(sport: str | None = None) -> dict:
                    COUNT(*) FILTER (WHERE outcome='LOSS') AS losses,
                    COUNT(*) AS total
             FROM predictions
-                        WHERE outcome != 'ARCHIVED'
-                            {sport_where}
+                        WHERE {where_sql}
               AND outcome IN ('WIN','LOSS')
             GROUP BY bet_type ORDER BY total DESC
         """, vals)
@@ -2021,9 +2023,8 @@ def get_performance_stats(sport: str | None = None) -> dict:
                    COUNT(*) FILTER (WHERE outcome='WIN')  AS wins,
                    COUNT(*) FILTER (WHERE outcome='LOSS') AS losses
             FROM predictions
-            WHERE game_date >= CURRENT_DATE - INTERVAL '30 days'
-                            AND outcome != 'ARCHIVED'
-              {sport_where}
+                        WHERE {where_sql}
+                            AND game_date >= CURRENT_DATE - INTERVAL '30 days'
               AND outcome IN ('WIN','LOSS')
             GROUP BY game_date ORDER BY game_date
         """, vals)
@@ -2045,22 +2046,49 @@ def get_prop_performance_stats(sport: str | None = None, days_back: int | None =
     try:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         vals: list = []
-        sport_where = ""
+        where_parts = []
         if sport:
-            sport_where = " AND sport = %s"
+            where_parts.append("sport = %s")
             vals.append(sport)
+        cols = _get_table_columns(conn, "prop_history")
+        has_bet_uid = "bet_uid" in cols
+        dedupe_key = (
+            "COALESCE(NULLIF(bet_uid, ''), "
+            "concat_ws('|', lower(COALESCE(sport,'')), COALESCE(game_date::text,''), "
+            "lower(COALESCE(player_name,'')), lower(COALESCE(team,'')), "
+            "lower(COALESCE(prop_type,'')), lower(COALESCE(recommendation,'')), COALESCE(line::text,'')))"
+            if has_bet_uid else
+            "concat_ws('|', lower(COALESCE(sport,'')), COALESCE(game_date::text,''), "
+            "lower(COALESCE(player_name,'')), lower(COALESCE(team,'')), "
+            "lower(COALESCE(prop_type,'')), lower(COALESCE(recommendation,'')), COALESCE(line::text,''))"
+        )
         # No recommendation filter — track all bet types across all sports.
         # Prefer a current-day slice for the dashboard, falling back to a trailing window.
         date_filter = ""
         if target_date is not None:
-            target_iso = target_date.isoformat() if hasattr(target_date, "isoformat") else str(target_date)
-            date_filter = "AND game_date = %s"
-            vals.append(target_iso)
+            where_parts.append("game_date = %s")
+            vals.append(target_date.isoformat() if hasattr(target_date, "isoformat") else str(target_date))
         elif days_back is not None and int(days_back) > 0:
-            date_filter = f"AND game_date >= CURRENT_DATE - ({int(days_back)} * INTERVAL '1 day')"
+            date_filter = f"game_date >= CURRENT_DATE - ({int(days_back)} * INTERVAL '1 day')"
+
+        if date_filter:
+            where_parts.append(date_filter)
+        where_sql = " AND ".join(where_parts) if where_parts else "TRUE"
+        cte = f"""
+            WITH filtered AS (
+                SELECT *, {dedupe_key} AS dedupe_key
+                FROM prop_history
+                WHERE {where_sql}
+            ),
+            dedup AS (
+                SELECT DISTINCT ON (dedupe_key) *
+                FROM filtered
+                ORDER BY dedupe_key, detected_at DESC, id DESC
+            )
+        """
 
         # Overall prop stats
-        cur.execute(f"""
+        cur.execute(cte + f"""
             SELECT
                 COUNT(*) FILTER (WHERE outcome='WIN')      AS wins,
                 COUNT(*) FILTER (WHERE outcome='LOSS')     AS losses,
@@ -2071,15 +2099,13 @@ def get_prop_performance_stats(sport: str | None = None, days_back: int | None =
                 COUNT(*) AS total,
                 ROUND(AVG(CASE WHEN outcome='WIN' THEN 1.0
                                WHEN outcome='LOSS' THEN 0.0 END)*100, 1) AS hit_rate
-            FROM prop_history
+                        FROM dedup
             WHERE outcome != 'ARCHIVED'
-              {date_filter}
-              {sport_where}
         """, vals)
         row = cur.fetchone()
         stats = dict(row) if row else {}
         # By prop type — include archived count for transparency
-        cur.execute(f"""
+        cur.execute(cte + f"""
             SELECT sport,
                    prop_type,
                    recommendation,
@@ -2091,24 +2117,19 @@ def get_prop_performance_stats(sport: str | None = None, days_back: int | None =
                    COUNT(*) AS total,
                    ROUND(AVG(CASE WHEN outcome='WIN' THEN 1.0
                                   WHEN outcome='LOSS' THEN 0.0 END)*100, 1) AS hit_rate
-            FROM prop_history
-            WHERE 1=1
-              {date_filter}
-              {sport_where}
+                        FROM dedup
             GROUP BY sport, prop_type, recommendation
             ORDER BY total DESC
         """, vals)
         stats["by_prop_type"] = [dict(r) for r in cur.fetchall()]
         # Daily trend
-        cur.execute(f"""
+        cur.execute(cte + f"""
             SELECT game_date::text AS date,
                    COUNT(*) FILTER (WHERE outcome='WIN')  AS wins,
                    COUNT(*) FILTER (WHERE outcome='LOSS') AS losses,
                    COUNT(*) FILTER (WHERE outcome='PENDING') AS pending
-            FROM prop_history
+                        FROM dedup
             WHERE outcome != 'ARCHIVED'
-              {date_filter}
-              {sport_where}
             GROUP BY game_date
             ORDER BY game_date DESC
             LIMIT 30

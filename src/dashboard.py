@@ -4142,8 +4142,11 @@ def api_backfill():
 def api_performance():
     try:
         from data.db import get_performance_stats
+        current_only_raw = str(request.args.get("current_only", "0")).strip().lower()
+        current_only = current_only_raw in {"1", "true", "yes", "on"}
+        target_date = _et_calendar_today() if current_only else None
         db_sport = None if _ACTIVE_SPORT == "all" else _ACTIVE_SPORT
-        return jsonify({"ok": True, "stats": get_performance_stats(sport=db_sport)})
+        return jsonify({"ok": True, "stats": get_performance_stats(sport=db_sport, target_date=target_date)})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
 

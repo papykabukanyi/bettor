@@ -1342,6 +1342,41 @@ function _etOffsetIso(offsetDays) {
   return `${p.year}-${_pad2(p.month)}-${_pad2(p.day)}`;
 }
 
+function _friendlyEtDay(dateLike) {
+  const raw = String(dateLike || '').trim();
+  if (!raw) return '—';
+  const m = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  let dt = null;
+  if (m) {
+    dt = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), 12, 0, 0);
+  } else {
+    const parsed = new Date(raw);
+    if (!Number.isNaN(parsed.getTime())) dt = parsed;
+  }
+  if (!dt) return raw.slice(0, 10) || raw;
+  return new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+  }).format(dt);
+}
+
+function _friendlyEtDateTime(dateLike) {
+  const raw = String(dateLike || '').trim();
+  if (!raw) return '—';
+  const parsed = new Date(raw);
+  if (Number.isNaN(parsed.getTime())) return _friendlyEtDay(raw);
+  return new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  }).format(parsed);
+}
+
 function _scheduledStartFromGameKey(gameKey) {
   const raw = String(gameKey || '').trim();
   if (!raw || raw.indexOf('#') < 0) return '';
@@ -5451,7 +5486,7 @@ function loadTrackedParlays() {
           <span class="tp-name">${p.name||'Parlay #'+p.id}</span>
           <span class="tp-outcome tp-${out}">${outcomeLabel(out, pendingBucket)}</span>
         </div>
-        <div class="tp-meta">x${combinedOdds.toFixed(2)} · $${stakeUsd.toFixed(2)} stake · ${p.created_at||''}</div>
+        <div class="tp-meta">x${combinedOdds.toFixed(2)} · $${stakeUsd.toFixed(2)} stake · ${_friendlyEtDateTime(p.created_at)}</div>
         <div class="tp-legs">${legs || '<div class="tp-leg">No legs recorded.</div>'}</div>
       </div>`;
     }).join('');
@@ -5553,9 +5588,8 @@ function loadTrackedSingles() {
       const out = String(r.outcome || 'PENDING').toUpperCase();
       const pendingBucket = out === 'PENDING' ? _rowPhaseLike(r, liveLookup) : '';
       const betType = String(r.bet_type || '').replace(/_/g, ' ').toUpperCase();
-      const uid = String(r.bet_uid || '').trim();
-      const uidShort = uid ? uid.slice(-12) : 'N/A';
       const gameDate = String(r.game_date || '').slice(0, 10);
+      const gameDateLabel = _friendlyEtDay(gameDate);
       const lineTxt = r.line != null && r.line !== '' ? ` · line ${r.line}` : '';
       const sentInfo = _readySentInfo(r, sentItems);
       const matchup = `${r.home_team || ''}${r.away_team ? ` vs ${r.away_team}` : ''}`.trim() || r.game || r.team || '—';
@@ -5573,8 +5607,7 @@ function loadTrackedSingles() {
             <div class="tracked-single-title">${r.pick || 'Bet'}</div>
             <div class="tracked-single-meta">
               <span>${betType || 'MARKET'}</span>
-              <span>${gameDate || '—'}</span>
-              <span>UID ${uidShort}</span>
+              <span>${gameDateLabel}</span>
               <span>${matchup}${lineTxt}</span>
               ${kalshiBits}
             </div>
@@ -5610,7 +5643,7 @@ function loadBotPerformance() {
   const el = document.getElementById('bot-perf-stats');
   if (!el) return;
   Promise.all([
-    fetch('/api/performance').then(r=>r.json()),
+    fetch('/api/performance?current_only=1').then(r=>r.json()),
     fetch('/api/prop-performance?current_only=1').then(r=>r.json()),
     fetch('/api/parlay/performance?current_only=1').then(r=>r.json()),
   ]).then(([g, p, pr]) => {
@@ -5662,13 +5695,19 @@ function loadPerformance() {
 
 function loadPropPerformance() {
   Promise.all([
+    fetch('/api/performance?current_only=1').then(r=>r.json()).catch(()=>({ok:false,stats:{}})),
     fetch('/api/prop-performance?current_only=1').then(r=>r.json()),
     fetch('/api/parlay/performance?current_only=1').then(r=>r.json()).catch(()=>({ok:false,stats:{}})),
-  ]).then(([d, pr])=>{
+  ]).then(([g, d, pr])=>{
+    if (!g.ok || !d.ok) return;
+    const gs = g.stats || {};
     if (!d.ok) return;
     const s = d.stats||{};
     const prs = (pr && pr.ok) ? (pr.stats || {}) : {};
 
+    const gameWins = Number(gs.wins || 0);
+    const gameLosses = Number(gs.losses || 0);
+    const gamePending = Number(gs.pending || 0);
     const propWins = Number(s.wins || 0);
     const propLosses = Number(s.losses || 0);
     const propPending = Number(s.pending || 0);
@@ -5676,11 +5715,11 @@ function loadPropPerformance() {
     const parlayLosses = Number(prs.losses || 0);
     const parlayPending = Number(prs.pending || 0);
 
-    const settledWins = propWins + parlayWins;
-    const settledLosses = propLosses + parlayLosses;
+    const settledWins = gameWins + propWins + parlayWins;
+    const settledLosses = gameLosses + propLosses + parlayLosses;
     const settledTotal = settledWins + settledLosses;
-    const liveTracked = propPending + parlayPending;
-    const totalTracked = Number(s.total || 0) + Number(prs.total || 0);
+    const liveTracked = gamePending + propPending + parlayPending;
+    const totalTracked = Number(gs.total || 0) + Number(s.total || 0) + Number(prs.total || 0);
     const overallHitRate = settledTotal > 0 ? Math.round((settledWins / settledTotal) * 100) : null;
     const overallColor = overallHitRate >= 55 ? 'var(--green)' : overallHitRate >= 45 ? 'var(--yellow)' : 'var(--red)';
     const candidateLegs = _comboCandidateLegs();
@@ -5693,12 +5732,12 @@ function loadPropPerformance() {
       : 0;
 
     document.getElementById('prop-perf-stats').innerHTML = `
-      <div class="perf-card"><div class="perf-val perf-pend">${liveTracked}</div><div class="perf-label">Live Tracked Bets</div><div class="perf-sub">Props ${propPending} · Parlays ${parlayPending}${liveOver ? ` · ${liveOver} in live games` : ''}</div></div>
-      <div class="perf-card"><div class="perf-val">${settledWins}-${settledLosses}</div><div class="perf-label">Settled W-L</div><div class="perf-sub">Props + Tracked Parlays</div></div>
+      <div class="perf-card"><div class="perf-val perf-pend">${liveTracked}</div><div class="perf-label">Live Tracked Bets</div><div class="perf-sub">Games ${gamePending} · Props ${propPending} · Parlays ${parlayPending}${liveOver ? ` · ${liveOver} in live games` : ''}</div></div>
+      <div class="perf-card"><div class="perf-val">${settledWins}-${settledLosses}</div><div class="perf-label">Settled W-L</div><div class="perf-sub">Games + Props + Parlays</div></div>
       <div class="perf-card"><div class="perf-val" style="color:${overallColor}">${overallHitRate!=null?overallHitRate+'%':'—'}</div><div class="perf-label">Overall Win Rate</div><div class="perf-sub">Settled bets only</div></div>
       <div class="perf-card"><div class="perf-val" style="font-size:1.2rem">${candidateLegs.length}</div><div class="perf-label">Qualified Legs</div><div class="perf-sub">Props ${propLegs} · Games ${gameLegs}</div></div>
       <div class="perf-card"><div class="perf-val" style="font-size:1.2rem">${autoComboCount}</div><div class="perf-label">Auto Combos</div><div class="perf-sub">Mixed props + game bets</div></div>
-      <div class="perf-card"><div class="perf-val" style="font-size:1.2rem">${totalTracked}</div><div class="perf-label">Total Tracked Bets</div><div class="perf-sub">Props ${s.total||0} · Parlays ${prs.total||0}</div></div>
+      <div class="perf-card"><div class="perf-val" style="font-size:1.2rem">${totalTracked}</div><div class="perf-label">Total Tracked Bets</div><div class="perf-sub">Games ${gs.total||0} · Props ${s.total||0} · Parlays ${prs.total||0}</div></div>
     `;
     const byType = s.by_prop_type||[];
     const tbody = document.getElementById('prop-type-tbody');
@@ -5761,7 +5800,7 @@ function loadHistory() {
       <div class="pred-row">
         <span class="pred-outcome pred-${p.outcome||'PENDING'}">${p.outcome||'PENDING'}</span>
         <span class="pred-pick">${p.pick||'—'}</span>
-        <span class="pred-meta">${p.bet_type||''} · ${p.game_date||''}</span>
+        <span class="pred-meta">${p.bet_type||''} · ${_friendlyEtDay(p.game_date||'')}</span>
         <span class="pred-meta">${p.confidence?p.confidence+'% conf':''}</span>
       </div>`
     ).join('');
