@@ -465,6 +465,13 @@ main{padding:20px;max-width:1400px;margin:0 auto}
 .rb-panel{display:block;margin-bottom:12px}
 .rb-panel.active{display:block}
 #rb-log{display:none}
+.rb-desktop-grid{display:block}
+@media (min-width:981px){
+  .rb-desktop-grid{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(0,1fr);gap:14px;align-items:start}
+  #rb-singles,#rb-combos{margin-bottom:0;background:linear-gradient(165deg, rgba(12,18,28,.98), rgba(8,13,22,.98));border:1px solid rgba(31,42,55,.95);border-radius:12px;padding:10px}
+  #rb-singles .section-header,#rb-combos .section-header{position:sticky;top:0;z-index:3;background:linear-gradient(180deg,rgba(12,18,28,.98),rgba(12,18,28,.86));padding-bottom:8px}
+  #rb-singles .ready-scroll,#rb-combos .ready-scroll{max-height:520px}
+}
 @media (max-width:980px){
   .ready-actions{flex-wrap:wrap}
   .ready-match-chip,.ready-no-match-badge{width:100%;flex:unset}
@@ -908,7 +915,6 @@ body.console-open main{padding-bottom:236px}
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
         <span class="section-meta" id="ready-bets-meta"></span>
         <button class="btn btn-sm" onclick="refreshReadyBets(true)">&#8635; Refresh Bets</button>
-        <button class="btn btn-sm" onclick="fetchKalshiTodayTickers()" title="Check what Kalshi has open now and upcoming (reverse match)">&#128270; Open Tickers</button>
       </div>
     </div>
 
@@ -937,6 +943,8 @@ body.console-open main{padding-bottom:236px}
 
     <div class="section-meta" style="margin-bottom:10px">Auto-running with request thresholds. Singles/Props and Combo Bets stay open together.</div>
 
+    <div class="rb-desktop-grid">
+
     <!-- ── 1: Bot-Qualified Singles + Props (always visible) ── -->
     <div class="rb-panel active" id="rb-singles">
       <div class="section-header" style="margin-bottom:8px">
@@ -951,12 +959,12 @@ body.console-open main{padding-bottom:236px}
         <span class="section-title">&#9889; Combo Bets</span>
       </div>
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
-        <span class="section-meta">Multi-leg combo bets ranked by EV. All-matched combos (&#9989;) can be placed on Kalshi.</span>
-        <button class="btn btn-sm" onclick="studyCombos()" title="Deep-analyze all ready bets for best parlay combinations">&#128202; Study Combos</button>
-        <button class="btn btn-sm" onclick="refreshReadyBets(true)" title="Refresh bets and re-generate combos">&#8635; Refresh</button>
+        <span class="section-meta">Auto-generated multi-leg combos ranked by EV. Matched combos (&#9989;) are ready to place.</span>
         <span class="section-meta" id="combo-study-meta"></span>
       </div>
-      <div id="ready-combos-list"><div class="no-games">Run analysis or click &quot;Study Combos&quot; to generate combo suggestions.</div></div>
+      <div id="ready-combos-list"><div class="no-games">Waiting for combo suggestions from the bot…</div></div>
+    </div>
+
     </div>
 
     <!-- ── 3: Order Log (hidden by default to keep focus on always-open bet panels) ── -->
@@ -1090,6 +1098,8 @@ let _lastKalshiResolveMs = 0;
 let _lastKalshiResolveKey = '';
 let _readyOrderSyncInFlight = false;
 const _KALSHI_RESOLVE_DEBOUNCE_MS = 120_000; // 2 min between auto-resolves (live enough, avoids request storms)
+let _lastKalshiTickerFetchMs = 0;
+const _KALSHI_TICKER_DEBOUNCE_MS = 180_000; // 3 min between auto ticker scans
 
 // Game-level bet types that come through the props pipeline but are NOT player props
 const GAME_LEVEL_BET_TYPES = new Set([
@@ -1142,7 +1152,12 @@ function _generateClientOrderId(uid, day) {
   return newId;
 }
 
-function fetchKalshiTodayTickers() {
+function fetchKalshiTodayTickers(force) {
+  const now = Date.now();
+  if (!force && _lastKalshiTickerFetchMs && (now - _lastKalshiTickerFetchMs) < _KALSHI_TICKER_DEBOUNCE_MS) {
+    return Promise.resolve(KALSHI_TODAY_DATA);
+  }
+  _lastKalshiTickerFetchMs = now;
   _logOp('info', 'Fetching Kalshi open and upcoming tickers (reverse match)…');
   return fetch('/api/kalshi/today-tickers')
     .then(r => r.json())
@@ -4818,19 +4833,41 @@ function renderReadyBets() {
   const seenSingles = new Set();
   const seenCombos = new Set();
   const dedupedRows = [];
-  for (const row of openRows.filter(isMatched)) {
+  for (const row of openRows) {
     if (row.kind === 'combo') {
-      if (!row.uid || seenCombos.has(row.uid)) continue;
-      seenCombos.add(row.uid);
+      const comboSig = [
+        String(row.uid || row.bet_uid || row.prediction_uid || ''),
+        _asArray(row.legs).map(l => String(l.uid || l.bet_uid || l.prediction_uid || l.label || '').trim()).sort().join(','),
+      ].join('|');
+      if (!comboSig || seenCombos.has(comboSig)) continue;
+      seenCombos.add(comboSig);
       dedupedRows.push(row);
     } else {
-      // Use bet_uid, prediction_uid, or fallback to uid
-      const sig = row.bet_uid || row.prediction_uid || row.uid;
+      const sig = [
+        String(row.bet_uid || row.prediction_uid || row.uid || '').trim(),
+        String(row.kind || '').trim(),
+        String(row.player_name || '').trim(),
+        String(row.prop_type || row.bet_type || '').trim(),
+        String(row.direction || '').trim(),
+        String(row.line ?? '').trim(),
+        String(row.game || row.game_key || '').trim(),
+        String(row.game_date || '').trim(),
+        String(row.label || row.pick || '').trim(),
+      ].join('|');
       if (!sig || seenSingles.has(sig)) continue;
       seenSingles.add(sig);
       dedupedRows.push(row);
     }
   }
+  const matchedRows = dedupedRows.filter(isMatched);
+  dedupedRows.sort((a, b) => {
+    const aMatched = isMatched(a) ? 1 : 0;
+    const bMatched = isMatched(b) ? 1 : 0;
+    if (aMatched !== bMatched) return bMatched - aMatched;
+    const q = (Number(b.quality) || 0) - (Number(a.quality) || 0);
+    if (Math.abs(q) > 1e-9) return q;
+    return (Number(b.model_prob) || 0) - (Number(a.model_prob) || 0);
+  });
   const groups = {
     single: dedupedRows.filter(r => r.kind === 'single'),
     team_prop: dedupedRows.filter(r => r.kind === 'team_prop'),
@@ -4839,9 +4876,9 @@ function renderReadyBets() {
   };
   const nonCombo = groups.single.length + groups.team_prop.length + groups.player_prop.length;
   if (metaEl) {
-    const hiddenUnmatched = Math.max(0, openRows.length - rows.length);
-    const bits = [`${rows.length} ready now`, `${openRows.length} open candidates`, `${nonCombo} singles/props`, `${groups.combo.length} combos`];
-    if (hiddenUnmatched) bits.push(`${hiddenUnmatched} waiting for exact Kalshi ticker`);
+    const pendingCount = Math.max(0, dedupedRows.length - matchedRows.length);
+    const bits = [`${matchedRows.length} matched now`, `${dedupedRows.length} visible candidates`, `${nonCombo} singles/props`, `${groups.combo.length} combos`];
+    if (pendingCount) bits.push(`${pendingCount} waiting for exact Kalshi ticker`);
     const sentCount = Math.max(0, allRows.length - openRows.length);
     if (sentCount) bits.push(`${sentCount} tracking on Kalshi`);
     if (READY_KALSHI_STATUS.loading) {
@@ -5041,9 +5078,9 @@ function renderReadyBets() {
       if (openRows.length === 0) {
         container.innerHTML = '<div class="no-games">All matched singles and props already moved to live tracking after send.</div>';
       } else if (READY_KALSHI_STATUS.loading) {
-        container.innerHTML = '<div class="no-games">Matching exact Kalshi singles and props right now… unmatched bets stay hidden until a live ticker exists.</div>';
+        container.innerHTML = '<div class="no-games">Matching exact Kalshi singles and props right now…</div>';
       } else {
-        container.innerHTML = '<div class="no-games">No exact Kalshi singles or props are ready now. Unmatched bets stay hidden until Kalshi lists the ticker.</div>';
+        container.innerHTML = '<div class="no-games">No singles or props generated for the current window yet.</div>';
       }
     } else {
       // Merge singles + team_prop together as "Game Bets"
@@ -5060,8 +5097,8 @@ function renderReadyBets() {
       comboContainer.innerHTML = '<div class="no-games">Run analysis to generate auto combo bets. Need at least 2 high-confidence predictions.</div>';
     } else if (!groups.combo.length) {
       comboContainer.innerHTML = READY_KALSHI_STATUS.loading
-        ? '<div class="no-games">Matching exact Kalshi combo legs right now… only fully matched combos are shown.</div>'
-        : '<div class="no-games">No fully matched Kalshi combos are ready now. Partial combos stay hidden until every leg has a ticker.</div>';
+        ? '<div class="no-games">Matching exact Kalshi combo legs right now…</div>'
+        : '<div class="no-games">No combo candidates generated from current bets yet.</div>';
     } else {
       comboContainer.innerHTML = groups.combo.map(renderComboItem).join('');
     }
@@ -5103,8 +5140,8 @@ function refreshReadyBets(forceKalshi) {
     };
   }
   renderReadyBets();
-  // Also fetch today's tickers in background for reverse-match insight
-  if (forceKalshi) fetchKalshiTodayTickers();
+  // Keep open market catalog fresh automatically (throttled)
+  fetchKalshiTodayTickers(!!forceKalshi);
   return resolveKalshiReadyBets(!!forceKalshi);
 }
 

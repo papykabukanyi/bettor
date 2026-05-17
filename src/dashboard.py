@@ -90,6 +90,64 @@ def _ready_resolve_signature(bets: list[dict]) -> str:
     rows.sort(key=lambda r: (r.get("uid") or "", r.get("kind") or "", r.get("pick") or ""))
     return json.dumps(rows, sort_keys=True, separators=(",", ":"))
 
+
+def _clean_ready_bets_payload(bets: list[dict]) -> list[dict]:
+    """Normalize and dedupe incoming ready-bet payloads before Kalshi matching."""
+    clean_rows: list[dict] = []
+    seen: set[str] = set()
+    for idx, raw in enumerate(bets or []):
+        if not isinstance(raw, dict):
+            continue
+        row = dict(raw)
+        uid = str(
+            row.get("uid")
+            or row.get("bet_uid")
+            or row.get("prediction_uid")
+            or f"ready_{idx}"
+        ).strip()
+        row["uid"] = uid
+        row["bet_uid"] = str(row.get("bet_uid") or uid).strip()
+        row["prediction_uid"] = str(row.get("prediction_uid") or row["bet_uid"]).strip()
+        row["kind"] = str(row.get("kind") or "single").strip().lower()
+        row["sport"] = str(row.get("sport") or "").strip().lower()
+        row["bet_type"] = str(row.get("bet_type") or row.get("prop_type") or "").strip().lower()
+        row["pick"] = str(row.get("pick") or row.get("label") or "").strip()
+        row["label"] = str(row.get("label") or row.get("pick") or "").strip()
+        row["game"] = str(row.get("game") or row.get("game_key") or "").strip()
+        row["game_key"] = str(row.get("game_key") or row.get("game") or "").strip()
+        row["game_date"] = str(row.get("game_date") or "").strip()[:10]
+        row["scheduled_start"] = str(
+            row.get("scheduled_start")
+            or row.get("game_datetime")
+            or row.get("start_time")
+            or row.get("game_time")
+            or ""
+        ).strip()
+        for num_key in ("line", "model_prob", "probability", "dec_odds", "decimal_odds", "ev", "quality"):
+            val = row.get(num_key)
+            try:
+                if val is not None and str(val).strip() != "":
+                    row[num_key] = float(val)
+            except Exception:
+                pass
+
+        sig = "|".join([
+            str(row.get("kind") or ""),
+            str(row.get("sport") or ""),
+            str(row.get("bet_type") or ""),
+            str(row.get("label") or row.get("pick") or ""),
+            str(row.get("player_name") or ""),
+            str(row.get("line") if row.get("line") is not None else ""),
+            str(row.get("direction") or ""),
+            str(row.get("game") or ""),
+            str(row.get("game_date") or ""),
+        ])
+        if sig in seen:
+            continue
+        seen.add(sig)
+        clean_rows.append(row)
+    return clean_rows
+
 # ─── Gunicorn / production: init once per worker ─────────────────────────────
 _worker_initialized = False
 _worker_init_lock   = threading.Lock()
@@ -223,7 +281,7 @@ def _env_flag(name: str, default: str = "0") -> bool:
 
 
 _ALL_SPORTS_SENTIMENT_MAX_GAMES = max(1, int(os.getenv("ALL_SPORTS_SENTIMENT_MAX_GAMES", "24")))
-_ALL_SPORTS_SENTIMENT_PLAYERS_PER_GAME = max(1, int(os.getenv("ALL_SPORTS_SENTIMENT_PLAYERS_PER_GAME", "8")))
+_ALL_SPORTS_SENTIMENT_PLAYERS_PER_GAME = max(1, int(os.getenv("ALL_SPORTS_SENTIMENT_PLAYERS_PER_GAME", "12")))
 _ALL_SPORTS_SENTIMENT_INCLUDE_NEWS = _env_flag("ALL_SPORTS_SENTIMENT_INCLUDE_NEWS", "0")
 _ALL_SPORTS_STRICT_SENTIMENT_ONLY = _env_flag("ALL_SPORTS_STRICT_SENTIMENT_ONLY", "0")
 
@@ -1816,7 +1874,7 @@ def _build_all_sport_sentiment_props(games: list[dict], bets: list[dict]) -> lis
 def _build_model_player_props_fallback(games: list[dict], max_per_game: int = 6) -> list[dict]:
     """Fallback player props from model/history sources when social mentions are sparse."""
     rows: list[dict] = []
-    max_per_game = max(1, min(int(max_per_game or 6), 12))
+    max_per_game = max(1, min(int(max_per_game or 6), 18))
     today_str = _et_calendar_today().isoformat()
     season = _et_calendar_today().year
 
@@ -2898,7 +2956,7 @@ def _run_all_sports_analysis():
         )
         if fallback_only:
             _log("[all-sports] Snapshot is fallback-only; using lightweight model player props")
-            sentiment_prop_rows = _build_model_player_props_fallback((games or [])[:12], max_per_game=2)
+            sentiment_prop_rows = _build_model_player_props_fallback((games or [])[:12], max_per_game=5)
         else:
             sentiment_prop_rows = _build_all_sport_sentiment_props(games, bets)
         table_rows = _merge_all_sports_table_rows(sentiment_prop_rows, best_bet_rows)
@@ -5298,7 +5356,7 @@ def api_kalshi_resolve_ready():
         bets = data.get("bets") or []
         if not isinstance(bets, list):
             bets = []
-        clean_bets = [bet for bet in bets if isinstance(bet, dict)]
+        clean_bets = _clean_ready_bets_payload([bet for bet in bets if isinstance(bet, dict)])
         force_refresh = bool(data.get("force_refresh"))
         include_combo_suggestions = bool(data.get("include_combo_suggestions", True))
 
@@ -5332,8 +5390,11 @@ def api_kalshi_resolve_ready():
                 combos = suggest_combo_bets(
                     clean_bets,
                     resolutions=resolved.get("resolutions") or {},
-                    max_legs=4,
+                    max_legs=5,
                     min_legs=2,
+                    min_combined_prob=0.12,
+                    min_ev=-0.20,
+                    max_combos=80,
                 )
                 if combos:
                     combo_resolved = resolve_ready_bets(combos, force_refresh=False)
@@ -5388,16 +5449,16 @@ def api_kalshi_combo_study():
         bets = data.get("bets") or []
         if not isinstance(bets, list):
             bets = []
-        clean_bets = [bet for bet in bets if isinstance(bet, dict)]
+        clean_bets = _clean_ready_bets_payload([bet for bet in bets if isinstance(bet, dict)])
 
         # Resolve individual bets first so combo legs show Kalshi tickers
         force = bool(data.get("force_refresh"))
         resolved = resolve_ready_bets(clean_bets, force_refresh=force)
 
-        max_legs = min(int(data.get("max_legs") or 4), 6)
+        max_legs = min(int(data.get("max_legs") or 5), 6)
         min_legs = max(2, int(data.get("min_legs") or 2))
-        min_prob = float(data.get("min_combined_prob") or 0.15)
-        min_ev = float(data.get("min_ev") or -0.10)
+        min_prob = float(data.get("min_combined_prob") or 0.12)
+        min_ev = float(data.get("min_ev") or -0.20)
 
         combos = suggest_combo_bets(
             clean_bets,
@@ -5406,7 +5467,7 @@ def api_kalshi_combo_study():
             min_legs=min_legs,
             min_combined_prob=min_prob,
             min_ev=min_ev,
-            max_combos=50,
+            max_combos=80,
         )
         if combos:
             combo_resolved = resolve_ready_bets(combos, force_refresh=False)
@@ -6354,7 +6415,7 @@ def _load_boot_schedule_fallback() -> bool:
             )
             if fallback_only:
                 _log("[boot] All-sports fallback snapshot is model-only; building lightweight model props")
-                boot_player_props = _build_model_player_props_fallback((all_games or [])[:10], max_per_game=2)
+                boot_player_props = _build_model_player_props_fallback((all_games or [])[:10], max_per_game=5)
             else:
                 boot_player_props = _build_all_sport_sentiment_props(all_games, all_bets)
             boot_best_bets = _multi_sport_best_bets_rows(all_bets)
