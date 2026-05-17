@@ -2518,19 +2518,38 @@ def resolve_ready_bets(
     }
     single_cache: dict[str, dict[str, Any]] = {}
 
+
+    # Deduplicate singles/props and combos by signature/uid before resolving
+    seen_singles = set()
+    seen_combos = set()
+    deduped_bets = []
     for index, bet in enumerate(bets or []):
         if not isinstance(bet, dict):
             continue
         normalized_bet = _normalize_ready_bet(bet)
         if not normalized_bet:
             continue
+        kind = _bet_kind_tag(normalized_bet)
+        if kind == "combo":
+            uid = str(normalized_bet.get("uid") or normalized_bet.get("bet_uid") or normalized_bet.get("prediction_uid") or f"combo_{index}")
+            if uid in seen_combos:
+                continue
+            seen_combos.add(uid)
+            deduped_bets.append((index, normalized_bet, uid, kind))
+        else:
+            sig = _bet_signature(normalized_bet)
+            if sig in seen_singles:
+                continue
+            seen_singles.add(sig)
+            deduped_bets.append((index, normalized_bet, sig, kind))
+
+    for index, normalized_bet, unique_id, kind in deduped_bets:
         uid = _bet_identity(normalized_bet, index)
-        if _bet_kind_tag(normalized_bet) == "combo":
+        if kind == "combo":
             result = _resolve_combo_bet(normalized_bet, markets, combo_markets, single_cache, event_index)
         else:
             sig = _bet_signature(normalized_bet)
             if sig not in single_cache:
-                # Try module-level cache first (survives across requests)
                 if sig in _RESOLUTION_CACHE:
                     single_cache[sig] = _RESOLUTION_CACHE[sig]
                 else:

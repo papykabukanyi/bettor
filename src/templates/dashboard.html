@@ -4814,12 +4814,28 @@ function renderReadyBets() {
     }
     return String(resolution?.status || '').toLowerCase() === 'matched' && !!resolution?.market_ticker;
   };
-  const rows = openRows.filter(isMatched);
+  // Deduplicate by bet signature (for singles/props) and combo UID (for combos)
+  const seenSingles = new Set();
+  const seenCombos = new Set();
+  const dedupedRows = [];
+  for (const row of openRows.filter(isMatched)) {
+    if (row.kind === 'combo') {
+      if (!row.uid || seenCombos.has(row.uid)) continue;
+      seenCombos.add(row.uid);
+      dedupedRows.push(row);
+    } else {
+      // Use bet_uid, prediction_uid, or fallback to uid
+      const sig = row.bet_uid || row.prediction_uid || row.uid;
+      if (!sig || seenSingles.has(sig)) continue;
+      seenSingles.add(sig);
+      dedupedRows.push(row);
+    }
+  }
   const groups = {
-    single: rows.filter(r => r.kind === 'single'),
-    team_prop: rows.filter(r => r.kind === 'team_prop'),
-    player_prop: rows.filter(r => r.kind === 'player_prop'),
-    combo: rows.filter(r => r.kind === 'combo'),
+    single: dedupedRows.filter(r => r.kind === 'single'),
+    team_prop: dedupedRows.filter(r => r.kind === 'team_prop'),
+    player_prop: dedupedRows.filter(r => r.kind === 'player_prop'),
+    combo: dedupedRows.filter(r => r.kind === 'combo'),
   };
   const nonCombo = groups.single.length + groups.team_prop.length + groups.player_prop.length;
   if (metaEl) {
