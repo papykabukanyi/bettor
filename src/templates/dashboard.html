@@ -5485,15 +5485,16 @@ function loadTrackedParlays() {
 
 function loadTrackedSingles() {
   Promise.all([
-    fetch('/api/predictions?days=21').then(r => r.json()).catch(() => ({ ok: false, predictions: [] })),
-    fetch('/api/prop-history?days=21').then(r => r.json()).catch(() => ({ ok: false, props: [] })),
+    fetch('/api/predictions?days=21&current_only=1').then(r => r.json()).catch(() => ({ ok: false, predictions: [] })),
+    fetch('/api/prop-history?days=21&current_only=1').then(r => r.json()).catch(() => ({ ok: false, props: [] })),
   ]).then(([d, p]) => {
     const el = document.getElementById('tracked-singles-list');
     const metaEl = document.getElementById('tracked-singles-meta');
     if (!el) return;
     const liveLookup = _liveLookupSnapshot();
     const sentItems = _readReadySentBets();
-    const rows = d.ok ? _asArray(d.predictions) : [];
+    const todayIso = _etTodayIso();
+    const rows = (d.ok ? _asArray(d.predictions) : []).filter(r => String(r.game_date || '').slice(0, 10) === todayIso);
     const propRows = p.ok ? _asArray(p.props).map(r => {
       const stats = (r && typeof r.stats_json === 'object' && r.stats_json) ? r.stats_json : {};
       const direction = String(r.recommendation || '').toUpperCase();
@@ -5508,7 +5509,7 @@ function loadTrackedSingles() {
         game_key: r.game_key || stats.game_key || stats.game || '',
         predicted_at: r.detected_at || '',
       };
-    }) : [];
+    }).filter(r => String(r.game_date || '').slice(0, 10) === todayIso) : [];
     const dedupe = new Map();
     const mergeRow = (base, incoming) => {
       const merged = { ...(base || {}) };
@@ -5534,7 +5535,7 @@ function loadTrackedSingles() {
 
     const singles = Array.from(dedupe.values()).filter(r => {
       const bt = String(r.bet_type || '').toLowerCase();
-      return bt !== 'parlay';
+      return bt !== 'parlay' && String(r.game_date || '').slice(0, 10) === todayIso;
     });
 
     const pending = singles.filter(r => String(r.outcome || 'PENDING').toUpperCase() === 'PENDING');

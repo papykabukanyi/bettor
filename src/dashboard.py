@@ -4169,6 +4169,10 @@ def api_predictions():
         from data.db import get_predictions
         db_sport = None if _ACTIVE_SPORT == "all" else _ACTIVE_SPORT
         preds = get_predictions(days=days, outcome=outcome or None, sport=db_sport)
+        current_only_raw = str(request.args.get("current_only", "0")).strip().lower()
+        if current_only_raw in {"1", "true", "yes", "on"}:
+            today_iso = _et_calendar_today().isoformat()
+            preds = [p for p in preds if str(p.get("game_date", ""))[:10] == today_iso]
         return jsonify({"ok": True, "predictions": _clean(preds)})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e), "predictions": []})
@@ -4183,6 +4187,10 @@ def api_prop_history():
 
         db_sport = None if _ACTIVE_SPORT == "all" else _ACTIVE_SPORT
         rows = get_prop_history(days=days, outcome=outcome or None, sport=db_sport)
+        current_only_raw = str(request.args.get("current_only", "0")).strip().lower()
+        if current_only_raw in {"1", "true", "yes", "on"}:
+            today_iso = _et_calendar_today().isoformat()
+            rows = [r for r in rows if str(r.get("game_date", ""))[:10] == today_iso]
         return jsonify({"ok": True, "props": _clean(rows)})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e), "props": []})
