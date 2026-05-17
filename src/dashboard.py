@@ -45,6 +45,7 @@ _DASH_MIN_EDGE = 0.02
 _DAILY_LOCK_HOUR_ET = int(os.getenv("DAILY_LOCK_HOUR_ET", "5"))
 _DAILY_LOCK_MINUTE_ET = int(os.getenv("DAILY_LOCK_MINUTE_ET", "0"))
 _AUTO_ANALYSIS_INTERVAL_MIN = int(os.getenv("AUTO_ANALYSIS_INTERVAL_MIN", "0"))
+_BOOT_FORCE_ANALYSIS = str(os.getenv("BOOT_FORCE_ANALYSIS", "0")).strip().lower() in {"1", "true", "yes", "on"}
 _ACTIVE_SPORT = str(CONFIG_SPORT or os.getenv("SPORT", "all") or "all").strip().lower()
 if _ACTIVE_SPORT not in {"mlb", "soccer", "all"}:
     _ACTIVE_SPORT = "all"
@@ -369,9 +370,26 @@ def _run_mandatory_daily_calibration(run_date: datetime.date, team_stats=None, m
 
     try:
         if team_stats is None:
-            from data.mlb_fetcher import fetch_team_stats
+            try:
+                from data.mlb_fetcher import fetch_team_stats
+                team_stats = fetch_team_stats(MLB_SEASONS)
+            except Exception:
+                # Backward/partial-deploy safe fallback when fetch_team_stats is absent.
+                from data.mlb_fetcher import get_team_batting_stats, get_team_pitching_stats
+                import pandas as _pd
 
-            team_stats = fetch_team_stats(MLB_SEASONS)
+                seasons = MLB_SEASONS if isinstance(MLB_SEASONS, (list, tuple)) else [int(MLB_SEASONS)]
+                frames = []
+                for season in seasons:
+                    bat = get_team_batting_stats(int(season))
+                    pit = get_team_pitching_stats(int(season))
+                    if bat is None or getattr(bat, "empty", True):
+                        continue
+                    if pit is None or getattr(pit, "empty", True):
+                        frames.append(bat)
+                    else:
+                        frames.append(_pd.merge(bat, pit, on=["team", "season"], how="inner"))
+                team_stats = _pd.concat(frames, ignore_index=True) if frames else _pd.DataFrame()
         from models.mlb_model import auto_improve
 
         result = auto_improve(team_stats, min_resolved=min_resolved, verbose=False) or {}
@@ -3837,7 +3855,7 @@ def _run_analysis(lock_date: datetime.date | None = None):
 
         # Auto-resolve outcomes for recent past predictions + props + tracked parlays
         try:
-            resolved = _resolve_all_sports_outcomes(days_back=3)
+            resolved = _run_resolver_locked(days_back=3)
             n_games = int(resolved.get("games", 0) or 0)
             n_props = int(resolved.get("props", 0) or 0)
             n_parlay = int(resolved.get("parlays", 0) or 0)
@@ -4144,7 +4162,7 @@ def api_parlay_auto_resolve():
     """Auto-resolve pending tracked parlays based on leg prediction outcomes."""
     try:
         # First run the universal resolver so game/prop outcomes are up-to-date
-        result   = _resolve_all_sports_outcomes(days_back=21)
+        result   = _run_resolver_locked(days_back=21)
         n_parlay = result.get("parlays", 0)
         n_other  = result.get("games", 0) + result.get("props", 0)
         return jsonify({
@@ -4630,6 +4648,21 @@ _ESPN_RESOLVE_CONFIGS = [
     ("soccer",     "esp.1",                     "soccer",          _SOCCER_STAT_MAP),
     ("soccer",     "ger.1",                     "soccer",          _SOCCER_STAT_MAP),
 ]
+
+
+def _run_resolver_locked(days_back: int = 3) -> dict:
+    """Run resolver with a non-blocking global lock to avoid overlap across threads."""
+    global _last_resolve_started_ts
+    if not _resolve_run_lock.acquire(blocking=False):
+        return {"games": 0, "props": 0, "parlays": 0, "skipped": True}
+    _last_resolve_started_ts = time.time()
+    try:
+        return _resolve_all_sports_outcomes(days_back=days_back)
+    finally:
+        try:
+            _resolve_run_lock.release()
+        except Exception:
+            pass
 
 
 def _resolve_all_sports_outcomes(days_back: int = 3) -> dict:
@@ -5119,7 +5152,7 @@ def _resolve_all_sports_outcomes(days_back: int = 3) -> dict:
 @app.route("/api/resolve-outcomes", methods=["POST"])
 def api_resolve_outcomes():
     try:
-        result = _resolve_all_sports_outcomes(days_back=21)
+        result = _run_resolver_locked(days_back=21)
         n_games  = result["games"]
         n_props  = result["props"]
         n_parlay = result["parlays"]
@@ -5871,7 +5904,10 @@ def _start_cache_poller():
 
 # Interval for the periodic background outcome resolver (5 minutes)
 _RESOLVE_INTERVAL = 5 * 60
+_PERIODIC_RESOLVE_DAYS_BACK = max(1, int(os.getenv("PERIODIC_RESOLVE_DAYS_BACK", "5") or "5"))
 _resolve_poller_timer: threading.Timer | None = None
+_resolve_run_lock = threading.Lock()
+_last_resolve_started_ts = 0.0
 
 # ─── Kalshi availability monitor ─────────────────────────────────────────────
 _KALSHI_MONITOR_INTERVAL_SEC = 20 * 60   # check every 20 minutes
@@ -6108,8 +6144,19 @@ def _start_outcome_resolver():
     def _tick():
         global _resolve_poller_timer
         try:
-            print("[auto-resolve] Running periodic all-sport resolver…")
-            _resolve_all_sports_outcomes(days_back=21)
+            global _last_resolve_started_ts
+            now_ts = time.time()
+            if (now_ts - _last_resolve_started_ts) < max(30.0, _RESOLVE_INTERVAL * 0.5):
+                print("[auto-resolve] Skipped periodic run (recent run already executed)")
+            elif _resolve_run_lock.acquire(blocking=False):
+                _last_resolve_started_ts = now_ts
+                try:
+                    print("[auto-resolve] Running periodic all-sport resolver…")
+                    _resolve_all_sports_outcomes(days_back=_PERIODIC_RESOLVE_DAYS_BACK)
+                finally:
+                    _resolve_run_lock.release()
+            else:
+                print("[auto-resolve] Skipped periodic run (resolver already in progress)")
         except Exception as exc:
             print(f"[auto-resolve] error: {exc}")
         _resolve_poller_timer = threading.Timer(_RESOLVE_INTERVAL, _tick)
@@ -6175,7 +6222,7 @@ def _poll_live_scores():
         if any(_is_final_status(g.get("status", "")) for g in raw):
             try:
                 # Universal resolver handles all sports (MLB statsapi path included)
-                res = _resolve_all_sports_outcomes(days_back=1)
+                res = _run_resolver_locked(days_back=1)
                 n_g = res.get("games", 0)
                 n_p = res.get("props", 0)
                 if n_g or n_p:
@@ -6495,10 +6542,12 @@ def _auto_boot_analysis():
                           f"(last updated: {cached.get('last_updated')})")
         except Exception as _boot_cache_exc:
             print(f"[boot] All-sports cache restore error: {_boot_cache_exc}")
-        # Always run fresh analysis in background (updates the cache once done)
+        # Run fresh analysis only when cache is missing/stale unless explicitly forced.
         if not restored_cache:
             _load_boot_schedule_fallback()
-        threading.Thread(target=_run_analysis, daemon=True).start()
+            threading.Thread(target=_run_analysis, daemon=True).start()
+        elif _BOOT_FORCE_ANALYSIS:
+            threading.Thread(target=_run_analysis, daemon=True).start()
         return
     try:
         from data.db import get_analysis_cache
@@ -6535,6 +6584,8 @@ def _auto_boot_analysis():
                 # If cached cards are empty (no games at all), still trigger a refresh
                 if n_today == 0 and n_tmrw == 0:
                     print("[boot] Cache has 0 games — triggering fresh analysis...")
+                    threading.Thread(target=_run_analysis, daemon=True).start()
+                elif _BOOT_FORCE_ANALYSIS:
                     threading.Thread(target=_run_analysis, daemon=True).start()
                 return
             else:

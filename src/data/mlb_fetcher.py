@@ -128,6 +128,39 @@ def get_team_pitching_stats(season: int) -> pd.DataFrame:
         return pd.DataFrame()
 
 
+def fetch_team_stats(seasons) -> pd.DataFrame:
+    """Return merged team batting+pitching stats across one or more seasons.
+
+    Compatible helper expected by dashboard calibration flow.
+    """
+    try:
+        if isinstance(seasons, (int, float, str)):
+            season_list = [int(seasons)]
+        else:
+            season_list = [int(s) for s in (seasons or [])]
+    except Exception:
+        season_list = []
+
+    rows = []
+    for season in season_list:
+        bat = get_team_batting_stats(season)
+        pit = get_team_pitching_stats(season)
+        if bat is None or bat.empty:
+            continue
+        if pit is None or pit.empty:
+            rows.append(bat)
+        else:
+            merged = pd.merge(bat, pit, on=["team", "season"], how="inner")
+            rows.append(merged)
+    if not rows:
+        return pd.DataFrame()
+    out = pd.concat(rows, ignore_index=True)
+    # Remove duplicate team-season rows if any provider returns duplicates.
+    if not out.empty and {"team", "season"}.issubset(out.columns):
+        out = out.drop_duplicates(subset=["team", "season"], keep="last")
+    return out
+
+
 def get_pitcher_stats(season: int, min_ip: float = 20.0) -> pd.DataFrame:
     """Return individual pitcher stats from Baseball Reference (no FanGraphs key needed)."""
     if not PYBASEBALL_OK:

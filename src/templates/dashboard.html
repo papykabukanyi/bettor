@@ -2175,7 +2175,6 @@ function switchTab(name) {
     loadTrackedSingles();
     loadPropPerformance();
     loadParlayPerformance();
-    resolveOutcomesSilent();
   }
   if (name === 'tournaments' && _isSoccerMode()) {
     loadTournamentData();
@@ -6019,9 +6018,7 @@ function stopConsolePoll() {
     if (e.key === 'Escape') closeGameDetailsModal();
   });
 
-  // Keep parlays and outcomes fully automatic without manual actions.
-  resolveOutcomesSilent();
-  setInterval(resolveOutcomesSilent, 2 * 60 * 1000);
+  // Outcome resolution runs on server background jobs; UI only refreshes views.
   setInterval(() => { syncReadyOrderTracking(); }, 60 * 1000);
   setInterval(() => {
     if (_isReadyBetsActive()) {
