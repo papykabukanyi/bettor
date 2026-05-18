@@ -4885,7 +4885,7 @@ function renderReadyBets() {
     }
   }
   const matchedRows = dedupedRows.filter(isMatched);
-  const bettableRows = matchedRows.filter(r => r.kind !== 'combo');
+  const bettableRows = dedupedRows.filter(r => r.kind !== 'combo');
   const comboRows = dedupedRows.filter(r => r.kind === 'combo');
   bettableRows.sort((a, b) => {
     const q = (Number(b.quality) || 0) - (Number(a.quality) || 0);
@@ -4900,7 +4900,7 @@ function renderReadyBets() {
   };
   const nonCombo = groups.single.length + groups.team_prop.length + groups.player_prop.length;
   if (metaEl) {
-    const pendingCount = Math.max(0, dedupedRows.filter(r => r.kind !== 'combo').length - bettableRows.length);
+    const pendingCount = Math.max(0, bettableRows.length - matchedRows.filter(r => r.kind !== 'combo').length);
     const bits = [`${matchedRows.length} bettable now`, `${nonCombo} singles/props`, `${groups.combo.length} combos`];
     if (pendingCount) bits.push(`${pendingCount} not bettable yet`);
     const sentCount = Math.max(0, allRows.length - openRows.length);
@@ -5098,7 +5098,7 @@ function renderReadyBets() {
   if (container) {
     if (!allRows.length) {
       container.innerHTML = '<div class="no-games">No bot-qualified bets for today\'s games yet. Run analysis first.</div>';
-    } else if (!nonCombo) {
+    } else if (!bettableRows.length) {
       if (openRows.length === 0) {
         container.innerHTML = '<div class="no-games">All matched singles and props already moved to live tracking after send.</div>';
       } else if (READY_KALSHI_STATUS.loading) {
