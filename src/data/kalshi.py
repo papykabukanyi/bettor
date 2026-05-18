@@ -117,6 +117,13 @@ _SERIES_SPORT_MAP: dict[str, str] = {
     "KXMLS": "soccer", "KXMLSGAME": "soccer", "KXMLSSPREAD": "soccer",
     "KXEPL": "soccer", "KXEPLSPREAD": "soccer", "KXFIFA": "soccer",
     "MSLWIN": "soccer", "MLSWIN": "soccer", "EPLWIN": "soccer", "UCLWIN": "soccer",
+    # ── Tennis / Combat / Motorsports / Golf (generic series families) ──
+    "KXTENNIS": "tennis", "ATP": "tennis", "WTA": "tennis", "TENNIS": "tennis",
+    "KXBOX": "boxing", "BOXING": "boxing",
+    "KXMMA": "mma", "MMA": "mma", "UFC": "mma", "PFL": "mma", "BELLATOR": "mma",
+    "KXF1": "motorsports", "F1": "motorsports", "FORMULA1": "motorsports", "NASCAR": "motorsports",
+    "KXGOLF": "golf", "GOLF": "golf", "PGA": "golf", "LPGA": "golf",
+    "KXCRICKET": "cricket", "CRICKET": "cricket",
 }
 
 # Confirmed live Kalshi sports series to fetch explicitly (bypasses pagination ordering issues).
@@ -177,6 +184,13 @@ _SPORTS_SERIES_TO_FETCH: list[str] = [
     "NFLWIN", "NFLOU", "NFLTD",
     # Soccer
     "KXMLS", "KXMLSGAME", "KXMLSSPREAD", "KXEPL", "KXEPLSPREAD", "KXFIFA", "MSLWIN", "MLSWIN", "EPLWIN", "UCLWIN",
+    # Tennis / Combat / Motorsports / Golf / Cricket (newer Kalshi sports families)
+    "KXTENNIS", "ATP", "WTA",
+    "KXBOX", "BOXING",
+    "KXMMA", "UFC", "PFL", "BELLATOR",
+    "KXF1", "F1", "NASCAR",
+    "KXGOLF", "PGA", "LPGA",
+    "KXCRICKET", "CRICKET",
 ]
 
 # Per-series stat-type hints used to disambiguate player prop events.
@@ -201,7 +215,10 @@ _SERIES_STAT_HINTS: dict[str, list[str]] = {
     "MLBTOTAL": ["total", "run"],
 }
 
-_DISCOVERY_SUPPORTED_SPORTS = {"basketball", "baseball", "hockey", "football", "soccer"}
+_DISCOVERY_SUPPORTED_SPORTS = {
+    "basketball", "baseball", "hockey", "football", "soccer",
+    "tennis", "boxing", "mma", "golf", "motorsports", "cricket",
+}
 _DISCOVERY_INCLUDE_TEXT = (
     "game",
     "match",
@@ -220,6 +237,17 @@ _DISCOVERY_INCLUDE_TEXT = (
     "home run",
     "goals",
     "goal",
+    "set",
+    "round",
+    "fight",
+    "knockout",
+    "submission",
+    "winner",
+    "pole",
+    "lap",
+    "birdie",
+    "bogey",
+    "wicket",
 )
 _DISCOVERY_INCLUDE_TICKER = (
     "GAME",
@@ -234,6 +262,21 @@ _DISCOVERY_INCLUDE_TICKER = (
     "RBI",
     "GOAL",
     "GLS",
+    "WIN",
+    "SET",
+    "ROUND",
+    "FIGHT",
+    "MMA",
+    "UFC",
+    "BOX",
+    "TENNIS",
+    "ATP",
+    "WTA",
+    "F1",
+    "NASCAR",
+    "GOLF",
+    "PGA",
+    "CRICKET",
 )
 _DISCOVERY_EXCLUDE_TEXT = (
     "draft",
@@ -279,7 +322,10 @@ _DISCOVERY_EXCLUDE_TICKER = (
     "WINS",
 )
 
-_VALID_SPORT_TAGS = {"baseball", "basketball", "football", "hockey", "soccer"}
+_VALID_SPORT_TAGS = {
+    "baseball", "basketball", "football", "hockey", "soccer",
+    "tennis", "boxing", "mma", "golf", "motorsports", "cricket",
+}
 _ACTIONABLE_SERIES_TICKER_INCLUDE = _DISCOVERY_INCLUDE_TICKER + (
     "WIN",
     "WINNER",
@@ -297,6 +343,13 @@ _ACTIONABLE_SERIES_TICKER_INCLUDE = _DISCOVERY_INCLUDE_TICKER + (
     "CORNER",
     "BTTS",
     "TB",
+    "KO",
+    "SUB",
+    "DECISION",
+    "MATCHWINNER",
+    "RACEWINNER",
+    "TOURNAMENT",
+    "OPEN",
 )
 _ACTIONABLE_SERIES_TICKER_EXCLUDE = _DISCOVERY_EXCLUDE_TICKER + (
     "POY",
@@ -400,6 +453,18 @@ def _detect_sport_from_series(series_ticker: str) -> str:
         return "football"
     if any(token in t for token in ("MLS", "EPL", "FIFA", "SOCCER", "UEFA", "LALIGA", "BUNDESLIGA", "LIGUE")):
         return "soccer"
+    if any(token in t for token in ("TENNIS", "ATP", "WTA", "WIMBLEDON", "ROLAND", "USOPEN", "AUSTRALIANOPEN")):
+        return "tennis"
+    if any(token in t for token in ("BOX", "BOXING")):
+        return "boxing"
+    if any(token in t for token in ("MMA", "UFC", "PFL", "BELLATOR")):
+        return "mma"
+    if any(token in t for token in ("GOLF", "PGA", "LPGA", "MASTERS", "RYDER")):
+        return "golf"
+    if any(token in t for token in ("F1", "FORMULA1", "FORMULA", "NASCAR", "INDYCAR", "MOTOGP")):
+        return "motorsports"
+    if any(token in t for token in ("CRICKET", "IPL", "T20", "ODI")):
+        return "cricket"
     return ""
 
 
@@ -429,6 +494,18 @@ def _detect_sport_from_series_row(series: dict[str, Any]) -> str:
         return "football"
     if any(token in text for token in ("soccer", "mls", "premier league", "epl", "uefa", "fifa", "liga", "bundesliga", "ligue", "cup")):
         return "soccer"
+    if any(token in text for token in ("tennis", "atp", "wta", "wimbledon", "us open", "australian open", "roland garros")):
+        return "tennis"
+    if any(token in text for token in ("boxing", "box", "heavyweight", "welterweight", "middleweight")):
+        return "boxing"
+    if any(token in text for token in ("mma", "ufc", "pfl", "bellator", "mixed martial arts", "octagon")):
+        return "mma"
+    if any(token in text for token in ("golf", "pga", "lpga", "masters", "open championship", "ryder cup")):
+        return "golf"
+    if any(token in text for token in ("formula 1", "f1", "nascar", "indycar", "moto gp", "motorsport", "motorsports")):
+        return "motorsports"
+    if any(token in text for token in ("cricket", "ipl", "test match", "t20", "odi")):
+        return "cricket"
     return _detect_sport_from_series(ticker)
 
 
@@ -555,6 +632,12 @@ _SPORT_DONE_HOURS = {
     "football": 4.5,
     "hockey": 3.25,
     "soccer": 2.5,
+    "tennis": 4.0,
+    "boxing": 3.0,
+    "mma": 3.0,
+    "golf": 10.0,
+    "motorsports": 5.0,
+    "cricket": 8.0,
 }
 _SPECIAL_ENTITY_ALIASES: dict[str, set[str]] = {
     # ── NBA ──────────────────────────────────────────────────────────────────
@@ -1633,6 +1716,18 @@ def _bet_sport_tag(bet: dict[str, Any]) -> str:
         return "hockey"
     if any(token in text for token in ("soccer", "mls", "premier", "bundesliga", "serie a", "laliga", "ligue 1", "uefa", "fifa", "1x2", "btts", "goals o u")):
         return "soccer"
+    if any(token in text for token in ("tennis", "atp", "wta", "set", "aces", "double fault")):
+        return "tennis"
+    if any(token in text for token in ("boxing", "box", "knockout", "ko", "decision", "round")):
+        return "boxing"
+    if any(token in text for token in ("mma", "ufc", "bellator", "pfl", "submission", "tko")):
+        return "mma"
+    if any(token in text for token in ("golf", "pga", "birdie", "bogey", "stroke")):
+        return "golf"
+    if any(token in text for token in ("f1", "formula", "nascar", "race", "lap", "qualifying", "pole")):
+        return "motorsports"
+    if any(token in text for token in ("cricket", "wicket", "innings", "run line", "t20", "odi")):
+        return "cricket"
     return ""
 
 
@@ -1781,6 +1876,18 @@ def _market_sport_tag(market: dict[str, Any]) -> str:
         return "hockey"
     if any(token in text for token in ("mslwin", "mlswin", "eplwin", "uclwin", "kxmls", "kxepl", "kxfifa", "soccer", "mls", "premier", "bundesliga", "serie a", "laliga", "ligue 1", "uefa", "fifa")):
         return "soccer"
+    if any(token in text for token in ("tennis", "atp", "wta", "wimbledon", "roland", "us open", "australian open")):
+        return "tennis"
+    if any(token in text for token in ("boxing", "box", "heavyweight", "welterweight", "middleweight")):
+        return "boxing"
+    if any(token in text for token in ("mma", "ufc", "pfl", "bellator", "mixed martial arts")):
+        return "mma"
+    if any(token in text for token in ("golf", "pga", "lpga", "masters", "open championship", "ryder cup")):
+        return "golf"
+    if any(token in text for token in ("f1", "formula", "nascar", "indycar", "motogp", "race winner", "pole")):
+        return "motorsports"
+    if any(token in text for token in ("cricket", "ipl", "t20", "odi", "test match")):
+        return "cricket"
     return ""
 
 

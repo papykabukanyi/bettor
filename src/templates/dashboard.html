@@ -3929,6 +3929,12 @@ function _legEv(prob, dec) {
   return (d - 1) * p - (1 - p);
 }
 
+function _propPlayerName(p) {
+  return String(
+    (p && (p.player_name || p.name || p.player || p.athlete_name || p.playerLabel || '')) || ''
+  ).trim();
+}
+
 function buildLegPool() {
   const map = new Map();
   const todayIso = _etTodayIso();
@@ -3960,7 +3966,8 @@ function buildLegPool() {
     const dec  = _legDec(p) || 1.9;
     const ev   = p.ev != null ? Number(p.ev) : _legEv(prob, dec);
     const label = plainEnglishPropText(p).text;
-    if (!label || !p.name) return;
+    const playerName = _propPlayerName(p);
+    if (!label || !playerName) return;
     addLeg({
       label,
       display_label: label,
@@ -3989,9 +3996,9 @@ function buildLegPool() {
       signal_hist_prob: Number(p.signal_hist_prob || 0),
       signal_sentiment: Number(p.signal_sentiment != null ? p.signal_sentiment : (p.sentiment_score != null ? p.sentiment_score : p.market_popularity || 0)),
       signal_rationale: p.signal_rationale || p.worth_reason || p.news_snippet || '',
-      player: p.name || '',
-      player_name: p.name || '',
-      name: p.name || '',
+      player: playerName,
+      player_name: playerName,
+      name: playerName,
       team: p.team || '',
       home_team: p.home_team || '',
       away_team: p.away_team || '',
@@ -3999,8 +4006,8 @@ function buildLegPool() {
       recommendation: p.direction || '',
       side_default: _defaultKalshiSide(p),
       line: p.line,
-      prop_label: p.prop_label || p.stat_type || '',
-      stat_type: p.stat_type || '',
+      prop_label: p.prop_label || p.prop_type || p.stat_type || '',
+      stat_type: p.stat_type || p.prop_type || '',
       prop_type: p.prop_type || p.stat_type || '',
     });
   });
@@ -4009,8 +4016,8 @@ function buildLegPool() {
   _asArray(ALL_PROPS || []).forEach(p => {
     const gd = String(p.game_date || p.date || '').slice(0, 10);
     if (gd && !allowedDates.has(gd)) return;
-    if (p.name) return; // player props already handled above
-    const rawBetType = String(p.bet_type || p.stat_type || '').toLowerCase().replace(/[\s-]+/g, '_');
+    if (_propPlayerName(p)) return; // player props already handled above
+    const rawBetType = String(p.bet_type || p.stat_type || p.prop_type || '').toLowerCase().replace(/[\s-]+/g, '_');
     if (!GAME_LEVEL_BET_TYPES.has(rawBetType) && !GAME_LEVEL_BET_TYPES.has(String(p.bet_type || '').toLowerCase())) return;
     const gameKey = p.game_key || p.game || '';
     const scheduledStart = p.scheduled_start || _scheduledStartFromGameKey(gameKey);
@@ -4427,9 +4434,10 @@ function _deriveReadyBets() {
     if (prob < 0.55 || ev < -0.03) return;
 
     const label = plainEnglishPropText(p).text;
+    const playerName = _propPlayerName(p);
     const uid = p.bet_uid || p.prediction_uid || _readyUid('prop', [
       p.game_key || p.game || '',
-      p.name || '',
+      playerName,
       p.stat_type || p.prop_type || '',
       p.direction || '',
       p.line != null ? p.line : '',
@@ -4437,8 +4445,8 @@ function _deriveReadyBets() {
     ]);
 
     // Classify: game-level bets from props pipeline → kind='single', true player props stay
-    const rawBetType = String(p.bet_type || p.stat_type || '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '');
-    const isGameLevelBet = GAME_LEVEL_BET_TYPES.has(rawBetType) || GAME_LEVEL_BET_TYPES.has(String(p.bet_type || '').toLowerCase());
+    const rawBetType = String(p.bet_type || p.stat_type || p.prop_type || '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '');
+    const isGameLevelBet = GAME_LEVEL_BET_TYPES.has(rawBetType) || GAME_LEVEL_BET_TYPES.has(String(p.bet_type || p.stat_type || p.prop_type || '').toLowerCase());
     const propKind = isGameLevelBet ? 'single' : 'player_prop';
 
     const row = {
@@ -4467,8 +4475,9 @@ function _deriveReadyBets() {
       team: p.team || '',
       home_team: p.home_team || '',
       away_team: p.away_team || '',
-      player_name: isGameLevelBet ? '' : (p.name || ''),
-      prop_type: p.stat_type || p.prop_type || '',
+      player_name: isGameLevelBet ? '' : playerName,
+      name: isGameLevelBet ? '' : playerName,
+      prop_type: p.prop_type || p.stat_type || '',
       line: p.line,
       direction: p.direction || '',
       scheduled_start: p.game_datetime || p.scheduled_start || null,

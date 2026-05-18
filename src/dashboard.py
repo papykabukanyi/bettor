@@ -112,8 +112,14 @@ def _clean_ready_bets_payload(bets: list[dict]) -> list[dict]:
         row["kind"] = str(row.get("kind") or "single").strip().lower()
         row["sport"] = str(row.get("sport") or "").strip().lower()
         row["bet_type"] = str(row.get("bet_type") or row.get("prop_type") or "").strip().lower()
+        row["prop_type"] = str(row.get("prop_type") or row.get("stat_type") or row.get("bet_type") or "").strip().lower()
         row["pick"] = str(row.get("pick") or row.get("label") or "").strip()
         row["label"] = str(row.get("label") or row.get("pick") or "").strip()
+        row["player_name"] = str(
+            row.get("player_name") or row.get("name") or row.get("player") or row.get("athlete_name") or ""
+        ).strip()
+        row["name"] = str(row.get("name") or row.get("player_name") or "").strip()
+        row["direction"] = str(row.get("direction") or row.get("recommendation") or "").strip().upper()
         row["game"] = str(row.get("game") or row.get("game_key") or "").strip()
         row["game_key"] = str(row.get("game_key") or row.get("game") or "").strip()
         row["game_date"] = str(row.get("game_date") or "").strip()[:10]
@@ -982,6 +988,11 @@ def _infer_sport_group(sport_key: str) -> str:
         "nhl": "icehockey",
         "tennis": "tennis",
         "mma": "mma",
+        "boxing": "boxing",
+        "combat": "mma",
+        "golf": "golf",
+        "motorsports": "motorsports",
+        "cricket": "cricket",
     }
     if token in exact:
         return exact[token]
@@ -1000,8 +1011,16 @@ def _infer_sport_group(sport_key: str) -> str:
         return "soccer"
     if any(k in token for k in ("tennis", "atp", "wta")):
         return "tennis"
+    if any(k in token for k in ("boxing", "box", "heavyweight", "welterweight", "middleweight")):
+        return "boxing"
     if any(k in token for k in ("mma", "ufc", "bellator", "pfl")):
         return "mma"
+    if any(k in token for k in ("golf", "pga", "lpga", "masters")):
+        return "golf"
+    if any(k in token for k in ("f1", "formula", "nascar", "indycar", "motogp", "motorsport")):
+        return "motorsports"
+    if any(k in token for k in ("cricket", "ipl", "t20", "odi", "test")):
+        return "cricket"
 
     return token or "other"
 
@@ -1249,6 +1268,7 @@ def _collect_fallback_games_for_all_sports(today: datetime.date, tomorrow: datet
                 ("tennis", "atp", "tennis", "ATP"),
                 ("tennis", "wta", "tennis", "WTA"),
                 ("mma", "ufc", "mma", "UFC"),
+                ("boxing", "boxing", "boxing", "Boxing"),
             ]
             for d in (today, tomorrow):
                 dates_token = d.strftime("%Y%m%d")
@@ -1339,6 +1359,10 @@ def _collect_fallback_games_for_all_sports(today: datetime.date, tomorrow: datet
                 ("American Football", "americanfootball"),
                 ("Tennis", "tennis"),
                 ("MMA", "mma"),
+                ("Boxing", "boxing"),
+                ("Golf", "golf"),
+                ("Motorsport", "motorsports"),
+                ("Cricket", "cricket"),
             ]
             for d in (today, tomorrow):
                 for tsdb_name, sport_group in tsdb_sports:
@@ -2827,6 +2851,12 @@ def _build_multi_sport_snapshot(force_refresh: bool = False) -> dict:
         "tennis_atp": 290,
         "tennis_wta": 285,
         "mma_mixed_martial_arts": 280,
+        "boxing_boxing": 275,
+        "golf_pga_championship_winner": 270,
+        "golf_us_open_winner": 268,
+        "motorsports_nascar_cup": 266,
+        "motorsports_formula_1": 264,
+        "cricket_ipl": 262,
     }
     active.sort(
         key=lambda s: (
@@ -5716,9 +5746,52 @@ def api_kalshi_resolve_ready():
         force_refresh = bool(data.get("force_refresh"))
         include_combo_suggestions = bool(data.get("include_combo_suggestions", True))
         combo_max_input = max(30, int(os.getenv("KALSHI_COMBO_INPUT_LIMIT", "70") or "70"))
-        if include_combo_suggestions and len(clean_bets) > combo_max_input:
-            include_combo_suggestions = False
-            _log(f"[kalshi] combo suggestions auto-disabled for large payload ({len(clean_bets)} bets > {combo_max_input})")
+        combo_source_bets = [
+            bet
+            for bet in clean_bets
+            if str(bet.get("kind") or "").strip().lower() != "combo"
+        ]
+        combo_input_bets = combo_source_bets
+        if include_combo_suggestions and len(combo_source_bets) > combo_max_input:
+            def _combo_score(row: dict) -> tuple[float, float, float]:
+                return (
+                    float(row.get("quality") or 0.0),
+                    float(row.get("model_prob") or row.get("probability") or 0.0),
+                    float(row.get("ev") or 0.0),
+                )
+
+            player_props = sorted(
+                [r for r in combo_source_bets if str(r.get("kind") or "").strip().lower() == "player_prop"],
+                key=_combo_score,
+                reverse=True,
+            )
+            non_player = sorted(
+                [r for r in combo_source_bets if str(r.get("kind") or "").strip().lower() != "player_prop"],
+                key=_combo_score,
+                reverse=True,
+            )
+
+            target_props = min(max(10, combo_max_input // 2), len(player_props))
+            combo_input_bets = player_props[:target_props]
+            remaining = max(0, combo_max_input - len(combo_input_bets))
+            combo_input_bets.extend(non_player[:remaining])
+
+            if len(combo_input_bets) < combo_max_input:
+                chosen_ids = {
+                    str(b.get("uid") or b.get("bet_uid") or b.get("prediction_uid") or "")
+                    for b in combo_input_bets
+                }
+                fillers = [
+                    b
+                    for b in sorted(combo_source_bets, key=_combo_score, reverse=True)
+                    if str(b.get("uid") or b.get("bet_uid") or b.get("prediction_uid") or "") not in chosen_ids
+                ]
+                combo_input_bets.extend(fillers[: combo_max_input - len(combo_input_bets)])
+
+            _log(
+                "[kalshi] combo suggestions bounded "
+                f"({len(combo_source_bets)} singles/props -> {len(combo_input_bets)} candidates, limit {combo_max_input})"
+            )
 
         request_sig = _ready_resolve_signature(clean_bets) + f"|combo={1 if include_combo_suggestions else 0}"
         now = time.time()
@@ -5748,7 +5821,7 @@ def api_kalshi_resolve_ready():
             # Never fail the whole resolve response if combo analysis crashes.
             try:
                 combos = suggest_combo_bets(
-                    clean_bets,
+                    combo_input_bets,
                     resolutions=resolved.get("resolutions") or {},
                     max_legs=5,
                     min_legs=2,

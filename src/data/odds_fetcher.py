@@ -200,9 +200,21 @@ SPORT_MAP = {
     # Other global sports
     "mma": "mma_mixed_martial_arts",
     "ufc": "mma_mixed_martial_arts",
+    "bellator": "mma_mixed_martial_arts",
+    "pfl": "mma_mixed_martial_arts",
     "boxing": "boxing_boxing",
+    "box": "boxing_boxing",
+    "tennis": "tennis_atp",
+    "atp": "tennis_atp",
+    "wta": "tennis_wta",
     "tennis_atp": "tennis_atp",
     "tennis_wta": "tennis_wta",
+    # Additional global markets (availability varies by plan/region)
+    "golf": "golf_pga_championship_winner",
+    "nascar": "motorsports_nascar_cup",
+    "f1": "motorsports_formula_1",
+    "formula1": "motorsports_formula_1",
+    "cricket": "cricket_ipl",
 }
 
 
