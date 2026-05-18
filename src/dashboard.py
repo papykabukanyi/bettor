@@ -2985,6 +2985,37 @@ def _build_multi_sport_snapshot(force_refresh: bool = False) -> dict:
         str(x.get("competition_name") or x.get("league") or ""),
     ))
 
+    # ── Data cleaning + deep enrichment ──────────────────────────────────────
+    try:
+        from data.enrichment import clean_snapshot, enrich_games_batch
+        snapshot_clean = clean_snapshot({"games": games, "bets": bets})
+        games = snapshot_clean["games"]
+        bets  = snapshot_clean["bets"]
+        _log(f"[all-sports] Data-clean pass: {len(games)} games, {len(bets)} bets")
+        # Enrich up to 30 games (rest days, venue history, coaching, weather)
+        _enrich_limit = max(1, min(30, int(os.getenv("ENRICH_MAX_GAMES", "30"))))
+        _include_weather  = str(os.getenv("ENRICH_WEATHER",  "1")).strip().lower() in {"1","true","yes"}
+        _include_coaching = str(os.getenv("ENRICH_COACHING", "1")).strip().lower() in {"1","true","yes"}
+        _include_h2h      = str(os.getenv("ENRICH_H2H",     "1")).strip().lower() in {"1","true","yes"}
+        games = enrich_games_batch(
+            games,
+            include_weather=_include_weather,
+            include_coaching=_include_coaching,
+            include_h2h=_include_h2h,
+            max_games=_enrich_limit,
+            throttle_sec=0.12,
+        )
+        _log(f"[all-sports] Enrichment complete for {len(games)} games")
+        # ── Persist enrichment signals to DB ────────────────────────────
+        try:
+            from data.db import save_game_enrichment
+            n_enrich = save_game_enrichment(games)
+            _log(f"[all-sports] Enrichment saved to DB: {n_enrich} rows")
+        except Exception as _db_enrich_err:
+            _log(f"[all-sports] DB enrichment persist skipped: {_db_enrich_err}")
+    except Exception as _enrich_exc:
+        _log(f"[all-sports] Enrichment step skipped: {_enrich_exc}")
+
     snapshot["tournaments"] = tournaments
     snapshot["games"] = games
     snapshot["bets"] = sorted(bets, key=lambda x: (x.get("model_prob") or 0), reverse=True)
@@ -3039,6 +3070,15 @@ def _run_all_sports_analysis():
         _phase(2)
         today_games = [g for g in games if str(g.get("game_date") or "") == today_str]
         tomorrow_games = [g for g in games if str(g.get("game_date") or "") == tomorrow_str]
+
+        # ── Enrich player props with recent form + fatigue ───────────────────
+        if card_prop_rows:
+            try:
+                from data.enrichment import enrich_props_batch
+                card_prop_rows = enrich_props_batch(card_prop_rows, max_props=60, throttle_sec=0.08)
+                _log(f"[all-sports] Props enrichment done: {len(card_prop_rows)} rows")
+            except Exception as _pe:
+                _log(f"[all-sports] Props enrichment skipped: {_pe}")
 
         _phase(3)
         today_cards = [_build_card(g, bets, card_prop_rows, "TODAY") for g in today_games]
@@ -3531,6 +3571,28 @@ def _run_analysis(lock_date: datetime.date | None = None):
         today_games    = [g for g in all_games if g.get("date", "") == today_str]
         tomorrow_games = [g for g in all_games if g.get("date", "") == tomorrow_str]
 
+        # ── Clean + enrich MLB schedule games ──────────────────────────────
+        try:
+            from data.enrichment import clean_game_row, enrich_games_batch
+            all_games = [clean_game_row(g) for g in all_games]
+            today_games    = [g for g in all_games if g.get("date", "") == today_str]
+            tomorrow_games = [g for g in all_games if g.get("date", "") == tomorrow_str]
+            _enrich_mlb_limit = max(1, min(30, int(os.getenv("ENRICH_MAX_GAMES", "30"))))
+            all_games_enriched = enrich_games_batch(
+                today_games + tomorrow_games,
+                include_weather=True,
+                include_coaching=True,
+                include_h2h=True,
+                max_games=_enrich_mlb_limit,
+                throttle_sec=0.12,
+            )
+            # Re-split after enrichment
+            today_games    = [g for g in all_games_enriched if g.get("date", "") == today_str]
+            tomorrow_games = [g for g in all_games_enriched if g.get("date", "") == tomorrow_str]
+            _log(f"[mlb] Schedule enriched: {len(today_games)} today, {len(tomorrow_games)} tomorrow")
+        except Exception as _enrich_err:
+            _log(f"[mlb] Enrichment skipped: {_enrich_err}")
+
         # Keep all calendar-today games visible on the Today tab, including finals,
         # until the next refresh/day boundary removes them naturally.
         display_today = today_games
@@ -3758,6 +3820,15 @@ def _run_analysis(lock_date: datetime.date | None = None):
             all_props = [p for p in all_props if _is_public_prop(p)]
             if len(all_props) != raw_props_count:
                 _log(f"Public props tracked: {len(all_props)}/{raw_props_count}")
+
+            # ── Enrich props: recent form, team fatigue ──────────────────
+            try:
+                from data.enrichment import enrich_props_batch, clean_prop_row
+                all_props = [clean_prop_row(p) for p in all_props]
+                all_props = enrich_props_batch(all_props, max_props=60, throttle_sec=0.08)
+                _log(f"[mlb] Props enriched: {len(all_props)}")
+            except Exception as _ep:
+                _log(f"[mlb] Props enrichment skipped: {_ep}")
         except Exception as e:
             _log(f"Props error: {e}")
 

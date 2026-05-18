@@ -544,6 +544,88 @@ WHERE parlay_uid IS NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS uq_prop_history_bet_uid ON prop_history(bet_uid);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_predictions_bet_uid ON predictions(bet_uid);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_tracked_parlays_uid ON tracked_parlays(parlay_uid);
+
+-- ── Deep enrichment: rest / venue / coaching / weather per game ──────────────
+CREATE TABLE IF NOT EXISTS game_enrichment (
+    id              SERIAL PRIMARY KEY,
+    sport           VARCHAR(20)   NOT NULL,
+    home_team       VARCHAR(100)  NOT NULL,
+    away_team       VARCHAR(100)  NOT NULL,
+    game_date       DATE          NOT NULL,
+    -- Rest & fatigue
+    home_rest_days      INTEGER,
+    away_rest_days      INTEGER,
+    home_back_to_back   BOOLEAN   DEFAULT FALSE,
+    away_back_to_back   BOOLEAN   DEFAULT FALSE,
+    home_games_last_7   INTEGER,
+    away_games_last_7   INTEGER,
+    home_fatigue        NUMERIC(4,3),
+    away_fatigue        NUMERIC(4,3),
+    away_travel_km      NUMERIC(8,1),
+    long_road_trip      BOOLEAN   DEFAULT FALSE,
+    -- Head-to-head summary
+    h2h_home_wins       INTEGER,
+    h2h_away_wins       INTEGER,
+    h2h_draws           INTEGER,
+    h2h_total           INTEGER,
+    h2h_avg_total       NUMERIC(5,2),
+    h2h_last_5          JSONB,
+    -- Venue history
+    venue_name          VARCHAR(200),
+    venue_home_wins     INTEGER,
+    venue_away_wins     INTEGER,
+    venue_draws         INTEGER,
+    venue_total_games   INTEGER,
+    venue_avg_total     NUMERIC(5,2),
+    -- Coaching
+    home_coach_name     VARCHAR(150),
+    home_coach_win_pct  NUMERIC(4,3),
+    away_coach_name     VARCHAR(150),
+    away_coach_win_pct  NUMERIC(4,3),
+    -- Weather (outdoor sports)
+    weather_condition   VARCHAR(50),
+    weather_temp_f      NUMERIC(5,1),
+    weather_wind_kph    NUMERIC(5,1),
+    weather_precip_mm   NUMERIC(5,2),
+    weather_humidity    NUMERIC(5,1),
+    -- Full enrichment JSON (all signals)
+    enrichment_json     JSONB,
+    fetched_at          TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(sport, home_team, away_team, game_date)
+);
+CREATE INDEX IF NOT EXISTS idx_game_enrich_date ON game_enrichment(sport, game_date);
+
+-- ── Player form cache (last-5 / last-10 rolling averages) ────────────────────
+CREATE TABLE IF NOT EXISTS player_form_cache (
+    id              SERIAL PRIMARY KEY,
+    sport           VARCHAR(20)   NOT NULL,
+    player_name     VARCHAR(150)  NOT NULL,
+    stat_type       VARCHAR(50)   NOT NULL,
+    avg_last_5      NUMERIC(6,3),
+    avg_last_10     NUMERIC(6,3),
+    trend_direction VARCHAR(10),  -- 'up', 'down', 'neutral'
+    games_collected INTEGER,
+    form_json       JSONB,
+    computed_date   DATE          NOT NULL DEFAULT CURRENT_DATE,
+    fetched_at      TIMESTAMPTZ   DEFAULT NOW(),
+    UNIQUE(sport, player_name, stat_type, computed_date)
+);
+CREATE INDEX IF NOT EXISTS idx_player_form_name ON player_form_cache(sport, player_name);
+
+-- ── Venue coordinates table (lat/lon for weather + travel) ───────────────────
+CREATE TABLE IF NOT EXISTS venue_coords (
+    id          SERIAL PRIMARY KEY,
+    team_name   VARCHAR(150) NOT NULL UNIQUE,
+    venue_name  VARCHAR(200),
+    sport       VARCHAR(20),
+    latitude    NUMERIC(9,6),
+    longitude   NUMERIC(9,6),
+    city        VARCHAR(100),
+    country     VARCHAR(60),
+    source      VARCHAR(50),
+    updated_at  TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_venue_coords_team ON venue_coords(team_name);
 """
 
 
@@ -1594,6 +1676,161 @@ def get_analysis_cache(max_age_hours: int = 22, cache_date=None,
     finally:
         conn.close()
 
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Enrichment persistence
+# ──────────────────────────────────────────────────────────────────────────────
+
+def save_game_enrichment(enriched_games: list) -> int:
+    """
+    Upsert game_enrichment rows from a list of enriched game dicts.
+    Each game dict must include 'enrichment' sub-dict produced by enrichment.enrich_game().
+    Returns the number of rows saved.
+    """
+    import json as _json
+    conn = get_conn()
+    if conn is None:
+        return 0
+    saved = 0
+    cur = conn.cursor()
+    for g in enriched_games:
+        enrich = g.get("enrichment") or {}
+        if not enrich:
+            continue
+        sport     = str(g.get("sport") or "").strip() or "unknown"
+        home_team = str(g.get("home_team") or "").strip()
+        away_team = str(g.get("away_team") or "").strip()
+        game_date = str(g.get("game_date") or g.get("date") or "").strip()
+        if not (home_team and away_team and game_date):
+            continue
+
+        hr = enrich.get("home_rest") or {}
+        ar = enrich.get("away_rest") or {}
+        h2h = enrich.get("h2h") or {}
+        vh  = enrich.get("venue_history") or {}
+        hc  = enrich.get("home_coach") or {}
+        ac  = enrich.get("away_coach") or {}
+        wt  = enrich.get("weather") or {}
+
+        try:
+            cur.execute("""
+                INSERT INTO game_enrichment (
+                    sport, home_team, away_team, game_date,
+                    home_rest_days, away_rest_days,
+                    home_back_to_back, away_back_to_back,
+                    home_games_last_7, away_games_last_7,
+                    home_fatigue, away_fatigue,
+                    away_travel_km, long_road_trip,
+                    h2h_home_wins, h2h_away_wins, h2h_draws, h2h_total,
+                    h2h_avg_total, h2h_last_5,
+                    venue_name, venue_home_wins, venue_away_wins, venue_draws,
+                    venue_total_games, venue_avg_total,
+                    home_coach_name, home_coach_win_pct,
+                    away_coach_name, away_coach_win_pct,
+                    weather_condition, weather_temp_f,
+                    weather_wind_kph, weather_precip_mm, weather_humidity,
+                    enrichment_json, fetched_at
+                ) VALUES (
+                    %s,%s,%s,%s,
+                    %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
+                    %s,%s,%s,%s,%s,%s,
+                    %s,%s,%s,%s,%s,%s,
+                    %s,%s,%s,%s,
+                    %s,%s,%s,%s,%s,
+                    %s, NOW()
+                )
+                ON CONFLICT (sport, home_team, away_team, game_date)
+                DO UPDATE SET
+                    home_rest_days    = EXCLUDED.home_rest_days,
+                    away_rest_days    = EXCLUDED.away_rest_days,
+                    home_back_to_back = EXCLUDED.home_back_to_back,
+                    away_back_to_back = EXCLUDED.away_back_to_back,
+                    home_fatigue      = EXCLUDED.home_fatigue,
+                    away_fatigue      = EXCLUDED.away_fatigue,
+                    away_travel_km    = EXCLUDED.away_travel_km,
+                    h2h_home_wins     = EXCLUDED.h2h_home_wins,
+                    h2h_last_5        = EXCLUDED.h2h_last_5,
+                    weather_condition = EXCLUDED.weather_condition,
+                    weather_temp_f    = EXCLUDED.weather_temp_f,
+                    enrichment_json   = EXCLUDED.enrichment_json,
+                    fetched_at        = NOW()
+            """, (
+                sport, home_team, away_team, game_date,
+                hr.get("rest_days"), ar.get("rest_days"),
+                bool(hr.get("back_to_back")), bool(ar.get("back_to_back")),
+                hr.get("games_in_last_7"), ar.get("games_in_last_7"),
+                enrich.get("home_fatigue"), enrich.get("away_fatigue"),
+                enrich.get("away_travel_km"), bool(enrich.get("long_road_trip")),
+                h2h.get("home_wins"), h2h.get("away_wins"), h2h.get("draws"), h2h.get("total"),
+                h2h.get("avg_total"), _json.dumps(h2h.get("last_5_results") or []),
+                vh.get("venue_name"), vh.get("home_wins"), vh.get("away_wins"), vh.get("draws"),
+                vh.get("total_games"), vh.get("avg_total_score"),
+                (hc.get("coach_name") or "").strip(), hc.get("win_pct"),
+                (ac.get("coach_name") or "").strip(), ac.get("win_pct"),
+                wt.get("condition"), wt.get("temp_f"),
+                wt.get("wind_kph"), wt.get("precip_mm"), wt.get("humidity_pct"),
+                _json.dumps(enrich),
+            ))
+            saved += 1
+        except Exception as _e:
+            conn.rollback()
+            print(f"[db:save_game_enrichment] {home_team} vs {away_team}: {_e}")
+            continue
+    try:
+        conn.commit()
+    except Exception:
+        pass
+    return saved
+
+
+def save_player_form(forms: list) -> int:
+    """
+    Upsert player_form_cache rows.
+    Each dict must have: sport, player_name, stat_type, avg_last_5, avg_last_10,
+    trend_direction, games_collected.
+    """
+    import json as _json
+    conn = get_conn()
+    if conn is None:
+        return 0
+    saved = 0
+    cur = conn.cursor()
+    today = __import__("datetime").date.today().isoformat()
+    for f in forms:
+        try:
+            cur.execute("""
+                INSERT INTO player_form_cache
+                    (sport, player_name, stat_type, avg_last_5, avg_last_10,
+                     trend_direction, games_collected, form_json, computed_date)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT (sport, player_name, stat_type, computed_date)
+                DO UPDATE SET
+                    avg_last_5      = EXCLUDED.avg_last_5,
+                    avg_last_10     = EXCLUDED.avg_last_10,
+                    trend_direction = EXCLUDED.trend_direction,
+                    games_collected = EXCLUDED.games_collected,
+                    form_json       = EXCLUDED.form_json,
+                    fetched_at      = NOW()
+            """, (
+                str(f.get("sport") or "").strip(),
+                str(f.get("player_name") or f.get("name") or "").strip(),
+                str(f.get("stat_type") or "").strip(),
+                f.get("avg_last_5"), f.get("avg_last_10"),
+                str(f.get("trend_direction") or "neutral"),
+                f.get("games_collected"),
+                _json.dumps(f),
+                today,
+            ))
+            saved += 1
+        except Exception as _e:
+            conn.rollback()
+            continue
+    try:
+        conn.commit()
+    except Exception:
+        pass
+    return saved
 
 
 # ──────────────────────────────────────────────────────────────────────────────

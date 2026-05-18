@@ -18,18 +18,35 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 _ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports"
 
 _ENDPOINTS = {
+    # Baseball
     "mlb":         f"{_ESPN_BASE}/baseball/mlb/injuries",
+    # Basketball
+    "nba":         f"{_ESPN_BASE}/basketball/nba/injuries",
+    "wnba":        f"{_ESPN_BASE}/basketball/wnba/injuries",
+    # American Football
+    "nfl":         f"{_ESPN_BASE}/football/nfl/injuries",
+    "ncaaf":       f"{_ESPN_BASE}/football/college-football/injuries",
+    # Ice Hockey
+    "nhl":         f"{_ESPN_BASE}/hockey/nhl/injuries",
+    # Soccer
     "epl":         f"{_ESPN_BASE}/soccer/eng.1/injuries",
     "laliga":      f"{_ESPN_BASE}/soccer/esp.1/injuries",
     "bundesliga":  f"{_ESPN_BASE}/soccer/ger.1/injuries",
     "serie_a":     f"{_ESPN_BASE}/soccer/ita.1/injuries",
     "ligue_1":     f"{_ESPN_BASE}/soccer/fra.1/injuries",
+    "mls":         f"{_ESPN_BASE}/soccer/usa.1/injuries",
+    "eredivisie":  f"{_ESPN_BASE}/soccer/ned.1/injuries",
+    "primeira":    f"{_ESPN_BASE}/soccer/por.1/injuries",
 }
 
 _SPORT_LABELS = {
     "mlb": "mlb",
-    "epl": "soccer", "laliga": "soccer",
-    "bundesliga": "soccer", "serie_a": "soccer", "ligue_1": "soccer",
+    "nba": "basketball", "wnba": "basketball",
+    "nfl": "americanfootball", "ncaaf": "americanfootball",
+    "nhl": "icehockey",
+    "epl": "soccer", "laliga": "soccer", "bundesliga": "soccer",
+    "serie_a": "soccer", "ligue_1": "soccer", "mls": "soccer",
+    "eredivisie": "soccer", "primeira": "soccer",
 }
 
 
