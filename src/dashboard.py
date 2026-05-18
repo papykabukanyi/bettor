@@ -3198,9 +3198,16 @@ def _run_all_sports_analysis():
                     "grade":                b.get("grade") or "X",
                     "investor_score":       float(b.get("investor_score") or 0),
                 })
-            if pred_rows_allsports:
-                save_predictions(pred_rows_allsports)
-                _log(f"[all-sports] Saved {len(pred_rows_allsports)} bets to DB")
+            pred_rows_today = [
+                row for row in pred_rows_allsports
+                if str(row.get("game_date") or "")[:10] == today_str_allsports
+            ]
+            if pred_rows_today:
+                save_predictions(pred_rows_today)
+                _log(
+                    f"[all-sports] Saved {len(pred_rows_today)} today bets to DB"
+                    f" (preview-only tomorrow bets: {max(0, len(pred_rows_allsports) - len(pred_rows_today))})"
+                )
 
             props_rows_allsports = []
             for p in table_rows or []:
@@ -3235,9 +3242,16 @@ def _run_all_sports_analysis():
                     "run_id": run_id_allsports,
                     "run_date": today_str_allsports,
                 })
-            if props_rows_allsports:
-                save_prop_picks(props_rows_allsports, game_date=today_str_allsports)
-                _log(f"[all-sports] Saved {len(props_rows_allsports)} prop picks to DB")
+            props_rows_today = [
+                row for row in props_rows_allsports
+                if str(row.get("date") or "")[:10] == today_str_allsports
+            ]
+            if props_rows_today:
+                save_prop_picks(props_rows_today, game_date=today_str_allsports)
+                _log(
+                    f"[all-sports] Saved {len(props_rows_today)} today prop picks to DB"
+                    f" (preview-only tomorrow props: {max(0, len(props_rows_allsports) - len(props_rows_today))})"
+                )
         except Exception as _db_exc:
             _log(f"[all-sports] DB save skipped: {_db_exc}")
 
