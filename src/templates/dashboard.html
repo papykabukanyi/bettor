@@ -1634,6 +1634,7 @@ function _connectSSE() {
     try {
       const d = JSON.parse(e.data);
       _applyLiveScores(d.scores || {}, {replace: true});
+      _silentRefreshPanels();
     } catch(err) {}
   });
 
@@ -2136,7 +2137,9 @@ function _silentRefreshPanels() {
   }, 1500);
 }
 
-// ── Periodic silent refresh every 5 minutes (covers SSE gaps) ───────────────
+const TRACKING_REFRESH_MS = 90 * 1000;
+
+// ── Periodic silent refresh every 90s (covers SSE gaps) ─────────────────────
 setInterval(() => {
   if (_isReadyBetsActive()) {
     refreshReadyBets(false);
@@ -2146,7 +2149,7 @@ setInterval(() => {
   loadTrackedParlays();
   loadTrackedSingles();
   autoGenParlaysFromProps();
-}, 5 * 60 * 1000);
+}, TRACKING_REFRESH_MS);
 
 setInterval(_refreshScheduledStatuses, 60 * 1000);
 
@@ -3860,7 +3863,15 @@ function _isLiveFromSet(gameKey, liveKeys, liveArr) {
 function sortAndRenderProps() {
   const tbody = document.getElementById('props-tbody');
   if (!tbody) return;
-  const sorted = [..._filteredProps].sort((a,b)=>{
+  const visibleProps = [..._filteredProps].filter(p => {
+    const statType = String((p && p.stat_type) || '').trim().toLowerCase();
+    const propLabel = String((p && p.prop_label) || '').trim().toLowerCase();
+    if (!statType) return false;
+    if (statType.endsWith('_sentiment')) return false;
+    if (propLabel.includes('sentiment edge')) return false;
+    return true;
+  });
+  const sorted = visibleProps.sort((a,b)=>{
     const va = a[propsSortKey]||''; const vb = b[propsSortKey]||'';
     const cmp = typeof va === 'number' ? va-vb : String(va).localeCompare(String(vb));
     return propsSortAsc ? cmp : -cmp;

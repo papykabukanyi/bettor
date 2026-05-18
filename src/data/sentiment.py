@@ -2178,6 +2178,14 @@ def get_player_prop_signal(player_name: str, stat_type: str, line: float,
     season_prob = last5_prob = last10_prob = matchup_prob = venue_prob = None
     season_avg_val = last5_avg_val = last10_avg_val = None
 
+    # Apply pitcher-handedness split only to baseball hitter/pitching props.
+    _mlb_pitch_props = {"strikeouts"}
+    _mlb_hit_props = {
+        "hits", "home_runs", "total_bases", "rbi", "runs",
+        "walks", "stolen_bases", "batter_strikeouts", "doubles",
+    }
+    _use_pitcher_split = stat_type in (_mlb_pitch_props | _mlb_hit_props)
+
     try:
         from data.db import get_player_trends
         cur_year   = datetime.date.today().year
@@ -2208,7 +2216,7 @@ def get_player_prop_signal(player_name: str, stat_type: str, line: float,
                 last10_avg_val = l10
                 last10_prob    = _over_prob_norm(l10, line, std_factor)
                 data_sources.append("last_10")
-            if pitcher_hand:
+            if _use_pitcher_split and pitcher_hand:
                 split_key = "vs_lefty" if pitcher_hand.upper() == "L" else "vs_righty"
                 sv = t.get(split_key)
                 if sv is not None:
@@ -2274,8 +2282,11 @@ def get_player_prop_signal(player_name: str, stat_type: str, line: float,
         rationale_parts.append(f"L10 {last10_avg_val:.1f}")
     if season_avg_val is not None and "season_avg" in data_sources:
         rationale_parts.append(f"season {season_avg_val:.1f}")
-    if matchup_prob is not None:
-        rationale_parts.append("vs LHP" if (pitcher_hand or "").upper() == "L" else "vs RHP")
+    if matchup_prob is not None and _use_pitcher_split:
+        if stat_type in _mlb_hit_props:
+            rationale_parts.append("AVG vs LHP" if (pitcher_hand or "").upper() == "L" else "AVG vs RHP")
+        else:
+            rationale_parts.append("vs LHP" if (pitcher_hand or "").upper() == "L" else "vs RHP")
     if abs(sentiment_score) > 0.10:
         buzz = "positive buzz" if sentiment_score > 0 else "negative buzz"
         rationale_parts.append(f"{buzz} ({sentiment_score:+.2f})")

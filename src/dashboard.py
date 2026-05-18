@@ -1763,6 +1763,17 @@ def _build_all_sport_sentiment_props(games: list[dict], bets: list[dict]) -> lis
     seen = set()
     include_news = _ALL_SPORTS_SENTIMENT_INCLUDE_NEWS and len(target_games) <= 12
 
+    def _is_real_prop_row(row: dict) -> bool:
+        """Keep only actionable prop/game markets, not generic sentiment placeholders."""
+        st = str(row.get("stat_type") or "").strip().lower()
+        label = str(row.get("prop_label") or "").strip().lower()
+        if not st:
+            return False
+        # Drop synthetic markets like "baseball_sentiment" + "Sentiment Edge".
+        if st.endswith("_sentiment") or "sentiment edge" in label:
+            return False
+        return True
+
     for g in target_games:
         home = str(g.get("home_team") or "").strip()
         away = str(g.get("away_team") or "").strip()
@@ -1811,6 +1822,8 @@ def _build_all_sport_sentiment_props(games: list[dict], bets: list[dict]) -> lis
 
         for r in per_game:
             row = dict(r)
+            if not _is_real_prop_row(row):
+                continue
             row["sport"] = _infer_sport_group(row.get("sport") or sport)
             row["league"] = row.get("league") or g.get("league") or g.get("competition_name")
             row["competition"] = row.get("competition") or g.get("competition")
@@ -4313,6 +4326,7 @@ def api_calibration():
 def api_parlay_performance():
     """Win/loss/ROI stats for all tracked parlays."""
     try:
+        _maybe_trigger_tracking_sync_sync()
         from data.db import get_parlay_performance_stats, prune_tracked_parlays_to_date
         current_only_raw = str(request.args.get("current_only", "1")).strip().lower()
         current_only = current_only_raw in {"1", "true", "yes", "on"}
@@ -4426,6 +4440,7 @@ def api_backfill():
 @app.route("/api/performance")
 def api_performance():
     try:
+        _maybe_trigger_tracking_sync_sync()
         from data.db import get_performance_stats
         current_only_raw = str(request.args.get("current_only", "0")).strip().lower()
         current_only = current_only_raw in {"1", "true", "yes", "on"}
@@ -4439,6 +4454,7 @@ def api_performance():
 @app.route("/api/prop-performance")
 def api_prop_performance():
     try:
+        _maybe_trigger_tracking_sync_sync()
         from data.db import get_prop_performance_stats
         current_only_raw = str(request.args.get("current_only", "1")).strip().lower()
         current_only = current_only_raw in {"1", "true", "yes", "on"}
@@ -4461,7 +4477,7 @@ def api_predictions():
     days    = int(request.args.get("days", 30))
     outcome = request.args.get("outcome")
     try:
-        _maybe_trigger_tracking_sync()
+        _maybe_trigger_tracking_sync_sync()
         from data.db import get_predictions
         db_sport = None if _ACTIVE_SPORT == "all" else _ACTIVE_SPORT
         preds = get_predictions(days=days, outcome=outcome or None, sport=db_sport)
@@ -4480,7 +4496,7 @@ def api_prop_history():
     days = int(request.args.get("days", 30))
     outcome = request.args.get("outcome")
     try:
-        _maybe_trigger_tracking_sync()
+        _maybe_trigger_tracking_sync_sync()
         from data.db import get_prop_history
 
         db_sport = None if _ACTIVE_SPORT == "all" else _ACTIVE_SPORT
@@ -4534,6 +4550,25 @@ def _maybe_trigger_tracking_sync(force: bool = False):
                 pass
 
     threading.Thread(target=_runner, daemon=True).start()
+
+
+def _maybe_trigger_tracking_sync_sync(force: bool = False):
+    """Run resolver inline (when due) so tracked API responses are fresh."""
+    global _last_tracking_sync_ts
+    if not force and not _tracking_sync_due():
+        return
+    if not _tracking_sync_lock.acquire(blocking=False):
+        return
+    try:
+        _run_resolver_locked(days_back=5)
+    except Exception:
+        pass
+    finally:
+        _last_tracking_sync_ts = time.time()
+        try:
+            _tracking_sync_lock.release()
+        except Exception:
+            pass
 
 
 def _live_status_for_game_key(game_key: str) -> str:
@@ -5558,7 +5593,7 @@ def api_parlay_save():
 @app.route("/api/parlay/list")
 def api_parlay_list():
     try:
-        _maybe_trigger_tracking_sync()
+        _maybe_trigger_tracking_sync_sync()
         from data.db import get_tracked_parlays, prune_tracked_parlays_to_date
         inc = str(request.args.get("include_resolved", "1")).strip().lower()
         include_resolved = inc in {"1", "true", "yes", "on"}
