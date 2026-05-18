@@ -67,33 +67,55 @@ def send_email(subject: str, html_body: str, plain_body: str = "") -> dict:
         return {"ok": False, "sent": 0, "failed": 0, "errors": [], "note": "No recipients in EMAIL_TO"}
 
     results = {"ok": False, "sent": 0, "failed": 0, "errors": []}
-    try:
-        use_ssl = bool(settings.get("use_ssl")) or int(settings.get("port") or 0) == 465
-        smtp_cls = smtplib.SMTP_SSL if use_ssl else smtplib.SMTP
-        with smtp_cls(settings["host"], settings["port"], timeout=20) as server:
-            server.ehlo()
-            if not use_ssl:
-                server.starttls()
+
+    def _send_via(host: str, port: int, use_ssl: bool) -> Exception | None:
+        """Attempt to send to all recipients via a specific host/port/ssl combo.
+        Returns None on success, the exception on failure."""
+        try:
+            smtp_cls = smtplib.SMTP_SSL if use_ssl else smtplib.SMTP
+            with smtp_cls(host, port, timeout=12) as server:
                 server.ehlo()
-            server.login(settings["user"], settings["password"])
-            for recipient in to_list:
-                try:
-                    msg = MIMEMultipart("alternative")
-                    msg["Subject"] = subject
-                    msg["From"]    = settings["user"]
-                    msg["To"]      = recipient
-                    if plain_body:
-                        msg.attach(MIMEText(plain_body, "plain"))
-                    msg.attach(MIMEText(html_body, "html"))
-                    server.sendmail(settings["user"], recipient, msg.as_string())
-                    results["sent"] += 1
-                    print(f"[email] Sent to {recipient}")
-                except Exception as exc:
-                    results["failed"] += 1
-                    results["errors"].append({"to": recipient, "error": str(exc)})
-    except Exception as exc:
-        results["failed"] += len(to_list)
-        results["errors"].append({"to": "smtp", "error": str(exc)})
+                if not use_ssl:
+                    server.starttls()
+                    server.ehlo()
+                server.login(settings["user"], settings["password"])
+                for recipient in to_list:
+                    try:
+                        msg = MIMEMultipart("alternative")
+                        msg["Subject"] = subject
+                        msg["From"]    = settings["user"]
+                        msg["To"]      = recipient
+                        if plain_body:
+                            msg.attach(MIMEText(plain_body, "plain"))
+                        msg.attach(MIMEText(html_body, "html"))
+                        server.sendmail(settings["user"], recipient, msg.as_string())
+                        results["sent"] += 1
+                        print(f"[email] Sent to {recipient} via {host}:{port}")
+                    except Exception as exc:
+                        results["failed"] += 1
+                        results["errors"].append({"to": recipient, "error": str(exc)})
+            return None
+        except Exception as exc:
+            return exc
+
+    cfg_port    = int(settings.get("port") or 587)
+    cfg_ssl     = bool(settings.get("use_ssl")) or cfg_port == 465
+    cfg_host    = settings["host"]
+
+    # Primary attempt — use whatever is configured
+    err = _send_via(cfg_host, cfg_port, cfg_ssl)
+    if err is not None:
+        primary_err = str(err)
+        # Fallback: if configured for STARTTLS (587) try SSL on 465, and vice versa
+        if cfg_port == 587 and not cfg_ssl:
+            fallback_err = _send_via(cfg_host, 465, True)
+        elif cfg_port == 465 and cfg_ssl:
+            fallback_err = _send_via(cfg_host, 587, False)
+        else:
+            fallback_err = err  # no sensible fallback
+        if fallback_err is not None:
+            results["failed"] += len(to_list)
+            results["errors"].append({"to": "smtp", "error": f"{primary_err} | fallback: {fallback_err}"})
 
     results["ok"] = results["sent"] > 0 and results["failed"] == 0
     return results

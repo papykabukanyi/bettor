@@ -3138,6 +3138,20 @@ def _run_all_sports_analysis():
             from data.db import save_predictions, save_prop_picks
             today_str_allsports = _et_calendar_today().isoformat()
             run_id_allsports = f"ALL-{today_str_allsports}"
+
+            # ── Kalshi ticker + investor grade enrichment ──────────────────────
+            try:
+                from data.kalshi import attach_kalshi_to_bets
+                bets = attach_kalshi_to_bets(bets)
+            except Exception as _ke:
+                _log(f"[all-sports] Kalshi enrichment skipped: {_ke}")
+            try:
+                from analysis.investor import investor_grade as _ig
+                for _b in bets:
+                    _b.update(_ig(_b))
+            except Exception:
+                pass
+
             pred_rows_allsports = []
             for b in bets:
                 pred_rows_allsports.append({
@@ -3158,6 +3172,18 @@ def _run_all_sports_analysis():
                     "home_team":    b.get("home_team") or "",
                     "away_team":    b.get("away_team") or "",
                     "bet_uid":      b.get("bet_uid") or "",
+                    "signal_type":    b.get("signal_type") or "neutral",
+                    "injury_flag":    bool(b.get("injury_flag")),
+                    "momentum_flag":  bool(b.get("momentum_flag")),
+                    "lineup_flag":    bool(b.get("lineup_flag")),
+                    "active_sources": ",".join(b.get("active_sources") or []),
+                    "kalshi_ticker":        b.get("kalshi_ticker") or "",
+                    "kalshi_event_ticker":  b.get("kalshi_event_ticker") or "",
+                    "kalshi_side":          b.get("kalshi_side") or "",
+                    "kalshi_price_cents":   int(b.get("kalshi_price_cents") or 0),
+                    "kalshi_status":        b.get("kalshi_status") or "unavailable",
+                    "grade":                b.get("grade") or "X",
+                    "investor_score":       float(b.get("investor_score") or 0),
                 })
             if pred_rows_allsports:
                 save_predictions(pred_rows_allsports)
@@ -3855,6 +3881,19 @@ def _run_analysis(lock_date: datetime.date | None = None):
             return str(val) if val is not None else ""
 
         try:
+            # ── Kalshi ticker + investor grade enrichment ────────────────────
+            try:
+                from data.kalshi import attach_kalshi_to_bets
+                all_bets = attach_kalshi_to_bets(all_bets)
+            except Exception as _ke:
+                _log(f"[mlb] Kalshi enrichment skipped: {_ke}")
+            try:
+                from analysis.investor import investor_grade as _ig
+                for _b in all_bets:
+                    _b.update(_ig(_b))
+            except Exception:
+                pass
+
             pred_rows = []
             for b in all_bets:
                 pred_rows.append({
@@ -3878,6 +3917,18 @@ def _run_analysis(lock_date: datetime.date | None = None):
                     "away_starter": b.get("away_starter", ""),
                     "sentiment_score": (sentiment_cache.get(b.get("match_key", ""), {}).get("home", {}) or {}).get("combined"),
                     "news_snippet": "",
+                    "signal_type":    b.get("signal_type", "neutral"),
+                    "injury_flag":    bool(b.get("injury_flag")),
+                    "momentum_flag":  bool(b.get("momentum_flag")),
+                    "lineup_flag":    bool(b.get("lineup_flag")),
+                    "active_sources": ",".join(b.get("active_sources") or []),
+                    "kalshi_ticker":        b.get("kalshi_ticker") or "",
+                    "kalshi_event_ticker":  b.get("kalshi_event_ticker") or "",
+                    "kalshi_side":          b.get("kalshi_side") or "",
+                    "kalshi_price_cents":   int(b.get("kalshi_price_cents") or 0),
+                    "kalshi_status":        b.get("kalshi_status") or "unavailable",
+                    "grade":                b.get("grade") or "X",
+                    "investor_score":       float(b.get("investor_score") or 0),
                 })
             for p in all_props:
                 game_str = p.get("game") or p.get("game_key") or ""
@@ -6557,6 +6608,8 @@ def _poll_live_scores():
         today_key = today.isoformat()
         all_today_final = bool(raw) and all(_is_final_status(g.get("status","")) for g in raw)
         if all_today_final and today_key not in _eod_email_sent_dates:
+            # Mark attempted immediately — never retry the same date even on failure
+            _eod_email_sent_dates.add(today_key)
             print(f"[live-scores] All today's games final — building EOD results email for {today_key}")
             try:
                 from data.db import get_conn
@@ -6625,10 +6678,11 @@ def _poll_live_scores():
                 from email_notify import send_daily_results
                 result = send_daily_results(results_payload)
                 if result.get("sent", 0) > 0:
-                    _eod_email_sent_dates.add(today_key)
                     print(f"[live-scores] EOD results email sent ({wins}W/{losses}L/{pushes}P)")
                 else:
                     print(f"[live-scores] EOD email failed: {result.get('errors')}")
+                    # Remove from sent set so a manual server restart can retry
+                    # (already added above to prevent per-poll retries)
             except Exception as _eod_e:
                 print(f"[live-scores] EOD email error: {_eod_e}")
     except Exception as exc:

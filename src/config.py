@@ -39,16 +39,21 @@ DISCORD_ENABLE_ATTACHMENT_OCR = _env_bool("DISCORD_ENABLE_ATTACHMENT_OCR", "true
 DISCORD_MAX_IMAGE_ATTACHMENTS = int(os.getenv("DISCORD_MAX_IMAGE_ATTACHMENTS", "40"))
 DISCORD_OCR_TIMEOUT_SECONDS = int(os.getenv("DISCORD_OCR_TIMEOUT_SECONDS", "10"))
 
-# TikTok + social player sentiment
-TIKTOK_ENABLED           = _env_bool("TIKTOK_ENABLED", "false")
-TIKTOK_HASHTAGS          = os.getenv("TIKTOK_HASHTAGS", "")
-TIKTOK_MAX_VIDEOS        = int(os.getenv("TIKTOK_MAX_VIDEOS", "40"))
-TIKTOK_MAX_COMMENTS      = int(os.getenv("TIKTOK_MAX_COMMENTS", "300"))
-TIKTOK_COMMENTS_PER_VIDEO = int(os.getenv("TIKTOK_COMMENTS_PER_VIDEO", "25"))
-TIKTOK_FETCH_COMMENTS    = _env_bool("TIKTOK_FETCH_COMMENTS", "true")
-TIKTOK_CACHE_MINUTES     = int(os.getenv("TIKTOK_CACHE_MINUTES", "20"))
+# newsdata.io (free tier: 200 req/day, no credit card)
+NEWSDATA_API_KEY         = os.getenv("NEWSDATA_API_KEY", "")
+
+# Social player sentiment settings
 SOCIAL_PLAYER_MIN_MENTIONS = int(os.getenv("SOCIAL_PLAYER_MIN_MENTIONS", "1"))
 SOCIAL_MAX_PLAYERS_PER_GAME = int(os.getenv("SOCIAL_MAX_PLAYERS_PER_GAME", "8"))
+
+# Deprecated TikTok config — kept for backward compat with existing .env files but not used
+TIKTOK_ENABLED           = False
+TIKTOK_HASHTAGS          = ""
+TIKTOK_MAX_VIDEOS        = 0
+TIKTOK_MAX_COMMENTS      = 0
+TIKTOK_COMMENTS_PER_VIDEO = 0
+TIKTOK_FETCH_COMMENTS    = False
+TIKTOK_CACHE_MINUTES     = 0
 
 # Strategy settings
 MIN_VALUE_EDGE = float(os.getenv("MIN_VALUE_EDGE", "0.05"))

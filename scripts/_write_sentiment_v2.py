@@ -1,4 +1,11 @@
-"""
+"""Writes the new sentiment.py to src/data/sentiment.py."""
+import os, sys
+import pathlib
+
+ROOT = pathlib.Path(__file__).parent.parent
+DEST = ROOT / "src" / "data" / "sentiment.py"
+
+CONTENT = r'''"""
 Sentiment Analysis Engine  —  Multi-Source, All Sports
 =======================================================
 Active sources (ordered by reliability / no-key preference):
@@ -2292,3 +2299,7 @@ def get_player_prop_signal(player_name: str, stat_type: str, line: float,
         "sentiment_score": round(sentiment_score, 4),
         "data_sources":    data_sources,
     }
+'''
+
+DEST.write_text(CONTENT, encoding="utf-8")
+print(f"Written: {DEST}  ({len(CONTENT.splitlines())} lines)")

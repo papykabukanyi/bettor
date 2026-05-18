@@ -134,13 +134,54 @@ def predict_game(home_team: str, away_team: str, team_stats: pd.DataFrame,
     hw_raw = float(pred.get("home_win_prob", 0.5))
     aw_raw = 1.0 - hw_raw
 
-    # Sentiment adjustment (max ±3% swing)
+    # Sentiment adjustment using full signal engine (combined score + signal flags)
+    _home_signal: dict = {}
+    _away_signal: dict = {}
     if sentiment:
-        home_sent = float((sentiment.get("home") or {}).get("combined", 0))
-        away_sent = float((sentiment.get("away") or {}).get("combined", 0))
-        adjust    = (home_sent - away_sent) * 0.03
-        hw_prob   = max(0.05, min(0.95, hw_raw + adjust))
-        aw_prob   = 1.0 - hw_prob
+        hs  = sentiment.get("home") or {}
+        as_ = sentiment.get("away") or {}
+        home_sent = float(hs.get("combined", 0))
+        away_sent = float(as_.get("combined", 0))
+        # Base combined-score swing (max ±3%)
+        adjust = (home_sent - away_sent) * 0.03
+        # Injury penalty: −3% per injured side
+        if hs.get("injury_flag"):
+            adjust -= 0.03
+        if as_.get("injury_flag"):
+            adjust += 0.03
+        # Momentum signal (multi-source confirmed = stronger boost)
+        h_srcs = len(hs.get("active_sources") or [])
+        a_srcs = len(as_.get("active_sources") or [])
+        if hs.get("signal_type") == "positive_momentum":
+            adjust += 0.02 * (1.5 if h_srcs >= 2 else 1.0)
+        elif hs.get("signal_type") == "negative_momentum":
+            adjust -= 0.02
+        if as_.get("signal_type") == "positive_momentum":
+            adjust -= 0.02 * (1.5 if a_srcs >= 2 else 1.0)
+        elif as_.get("signal_type") == "negative_momentum":
+            adjust += 0.02
+        # Lineup change: follow sentiment direction with small nudge
+        if hs.get("lineup_flag") and home_sent > 0:
+            adjust += 0.01
+        if as_.get("lineup_flag") and away_sent > 0:
+            adjust -= 0.01
+        hw_prob = max(0.05, min(0.95, hw_raw + adjust))
+        aw_prob = 1.0 - hw_prob
+        # Capture metadata for downstream bet / parlay tracking
+        _home_signal = {
+            "signal_type":    hs.get("signal_type", "neutral"),
+            "injury_flag":    bool(hs.get("injury_flag")),
+            "momentum_flag":  bool(hs.get("momentum_flag")),
+            "lineup_flag":    bool(hs.get("lineup_flag")),
+            "active_sources": list(hs.get("active_sources") or []),
+        }
+        _away_signal = {
+            "signal_type":    as_.get("signal_type", "neutral"),
+            "injury_flag":    bool(as_.get("injury_flag")),
+            "momentum_flag":  bool(as_.get("momentum_flag")),
+            "lineup_flag":    bool(as_.get("lineup_flag")),
+            "active_sources": list(as_.get("active_sources") or []),
+        }
     else:
         hw_prob, aw_prob = hw_raw, aw_raw
 
@@ -209,6 +250,9 @@ def predict_game(home_team: str, away_team: str, team_stats: pd.DataFrame,
         # Meta
         "sentiment":      sentiment or {},
         "inj_penalty":    round(inj_penalty, 3),
+        # Signal metadata for downstream bet / parlay enrichment
+        "home_signal":    _home_signal,
+        "away_signal":    _away_signal,
     }
 
 
@@ -366,6 +410,27 @@ def build_game_bets(game: dict, pred: dict, odds_row: dict = None) -> list[dict]
         bt        = f"{side}_team_total"
         b = _bet(bt, f"{team_name} OVER {t_line}", t_ov, 0.476, line=t_line)
         if b: bets.append(b)
+
+    # ── Attach sentiment signals from prediction to each bet ─────────────────
+    _hs = pred.get("home_signal") or {}
+    _as = pred.get("away_signal") or {}
+    _ht_tokens = set(ht.lower().split())
+    for _b in bets:
+        _pick_tokens = set(str(_b.get("pick", "")).lower().split())
+        _sig_src = _hs if (_pick_tokens & _ht_tokens) else _as
+        _b["signal_type"]    = _sig_src.get("signal_type", "neutral")
+        _b["injury_flag"]    = bool(_sig_src.get("injury_flag"))
+        _b["momentum_flag"]  = bool(_sig_src.get("momentum_flag"))
+        _b["lineup_flag"]    = bool(_sig_src.get("lineup_flag"))
+        _b["active_sources"] = _sig_src.get("active_sources") or []
+
+    # ── Apply investor grade to each bet ─────────────────────────────────
+    try:
+        from analysis.investor import investor_grade as _ig
+        for _b in bets:
+            _b.update(_ig(_b, BANKROLL))
+    except Exception:
+        pass
 
     return bets
 
@@ -598,6 +663,28 @@ def build_parlays(all_picks: list[dict], max_legs: int = 8, top_n: int = 5) -> l
             by_game[gk] = pick
 
     pool = sorted(by_game.values(), key=lambda x: x.get("safety", 0), reverse=True)[:20]
+    # Signal-aware safety adjustments: penalise injury concerns, reward confirmed momentum
+    adjusted_pool = []
+    for _p in pool:
+        _p = dict(_p)  # shallow copy — never mutate caller's data
+        _safety = float(_p.get("safety", 0.5))
+        _sig    = str(_p.get("signal_type") or "neutral")
+        _srcs   = len(_p.get("active_sources") or [])
+        if _p.get("injury_flag") or _sig == "injury_concern":
+            _safety *= 0.68  # heavy downrank — keep injury-risk legs out of parlays
+        elif _sig == "positive_momentum" and _srcs >= 2:
+            _safety = min(0.97, _safety * 1.08)  # multi-source momentum boost
+        elif _sig == "negative_momentum":
+            _safety *= 0.92
+        _p["safety"] = _safety
+        adjusted_pool.append(_p)
+    # Re-sort by investor_score when available; fall back to adjusted safety
+    if any("investor_score" in p for p in adjusted_pool):
+        pool = sorted(adjusted_pool,
+                      key=lambda x: float(x.get("investor_score") or 0),
+                      reverse=True)[:20]
+    else:
+        pool = sorted(adjusted_pool, key=lambda x: float(x.get("safety") or 0), reverse=True)[:20]
     if len(pool) < 2:
         return []
 
@@ -634,12 +721,16 @@ def build_parlays(all_picks: list[dict], max_legs: int = 8, top_n: int = 5) -> l
             best_combos.append({
                 "n_legs":        n,
                 "legs": [{
-                    "label":     c.get("pick") or f"{c.get('name','')} {c.get('direction','')} {c.get('line','')} {c.get('prop_label','')}".strip(),
-                    "bet_type":  c.get("bet_type", ""),
-                    "conf":      c.get("confidence", round(float(c.get("model_prob",0.5))*100)),
-                    "badge":     c.get("safety_label", "MODERATE"),
-                    "game":      c.get("game_key", c.get("game", "")),
-                    "dec_odds":  round(float(c.get("dec_odds", 2.0)), 2),
+                    "label":         c.get("pick") or f"{c.get('name','')} {c.get('direction','')} {c.get('line','')} {c.get('prop_label','')}".strip(),
+                    "bet_type":      c.get("bet_type", ""),
+                    "conf":          c.get("confidence", round(float(c.get("model_prob",0.5))*100)),
+                    "badge":         c.get("safety_label", "MODERATE"),
+                    "game":          c.get("game_key", c.get("game", "")),
+                    "dec_odds":      round(float(c.get("dec_odds", 2.0)), 2),
+                    "signal_type":   c.get("signal_type", "neutral"),
+                    "injury_flag":   bool(c.get("injury_flag")),
+                    "momentum_flag": bool(c.get("momentum_flag")),
+                    "active_sources": list(c.get("active_sources") or []),
                 } for c in combo],
                 "combined_prob": round(comb_p * 100, 1),
                 "combined_dec":  round(comb_d, 2),
@@ -685,6 +776,8 @@ def build_elite_parlay(
         if float(p.get("model_prob", 0)) >= min_prob
         and float(p.get("ev", -1))       > min_ev
         and float(p.get("safety",  0))   >= _ELITE_SAFETY_MIN
+        and not bool(p.get("injury_flag"))                          # never parlay injury-flagged picks
+        and p.get("signal_type", "neutral") != "injury_concern"
     ]
 
     if len(elite) < 2:
@@ -697,10 +790,18 @@ def build_elite_parlay(
         if gk not in by_game or p.get("safety", 0) > by_game[gk].get("safety", 0):
             by_game[gk] = p
 
-    # Sort by prob × ev score (strongest legs first)
+    # Soft A/A+ filter: prefer investor-graded elite picks if enough qualify
+    _elite_ag = [p for p in by_game.values() if p.get("grade") in ("A+", "A")]
+    if len(_elite_ag) >= 2:
+        by_game = {p.get("game_key", p.get("game", str(i))): p
+                   for i, p in enumerate(_elite_ag)}
+
+    # Sort by prob × ev score, with multi-source confirmation bonus
     pool = sorted(
         by_game.values(),
-        key=lambda x: float(x.get("model_prob", 0)) * float(x.get("ev", 0)),
+        key=lambda x: float(x.get("investor_score") or 0)
+            or float(x.get("model_prob", 0)) * float(x.get("ev", 0)) * (
+            1.10 if len(x.get("active_sources") or []) >= 2 else 1.0),
         reverse=True,
     )[:max_legs]
 
@@ -722,14 +823,17 @@ def build_elite_parlay(
         raw_label = (l.get("pick") or
                      f"{l.get('name','')} {l.get('direction','')} {l.get('line','')} {l.get('prop_label','')}".strip())
         leg_dicts.append({
-            "label":      raw_label,
-            "bet_type":   l.get("bet_type", ""),
-            "conf":       round(float(l.get("model_prob", 0.5)) * 100),
-            "badge":      "ELITE",
-            "game":       l.get("game_key", l.get("game", "")),
-            "dec_odds":   round(float(l.get("dec_odds", 2.0)), 2),
-            "model_prob": round(float(l.get("model_prob", 0.5)), 4),
-            "ev":         round(float(l.get("ev", 0)), 4),
+            "label":         raw_label,
+            "bet_type":      l.get("bet_type", ""),
+            "conf":          round(float(l.get("model_prob", 0.5)) * 100),
+            "badge":         "ELITE",
+            "game":          l.get("game_key", l.get("game", "")),
+            "dec_odds":      round(float(l.get("dec_odds", 2.0)), 2),
+            "model_prob":    round(float(l.get("model_prob", 0.5)), 4),
+            "ev":            round(float(l.get("ev", 0)), 4),
+            "signal_type":   l.get("signal_type", "neutral"),
+            "momentum_flag": bool(l.get("momentum_flag")),
+            "active_sources": list(l.get("active_sources") or []),
         })
 
     parlay = {

@@ -2775,6 +2775,53 @@ def get_today_kalshi_tickers() -> dict[str, Any]:
     }
 
 
+def attach_kalshi_to_bets(
+    bets: list[dict[str, Any]],
+    *,
+    force_refresh: bool = False,
+) -> list[dict[str, Any]]:
+    """
+    Enrich each bet dict with the best-matching Kalshi market info.
+
+    Every prediction the bot generates should have a Kalshi ticker so it can
+    be placed directly.  This function resolves the full catalog once (cached
+    for 10 min), then attaches per-bet:
+
+        kalshi_ticker        str — matched market ticker
+        kalshi_event_ticker  str — parent event ticker
+        kalshi_side          str — "yes" | "no"
+        kalshi_price_cents   int — ask price in cents (0-100) for the chosen side
+        kalshi_status        str — "matched" | "unavailable" | "started" | "done"
+
+    Returns a new list of dicts; originals are never mutated.
+    """
+    if not bets:
+        return bets
+    try:
+        result       = resolve_ready_bets(list(bets), force_refresh=force_refresh)
+        resolutions: dict[str, dict[str, Any]] = result.get("resolutions") or {}
+        enriched: list[dict[str, Any]] = []
+        for i, bet in enumerate(bets):
+            if not isinstance(bet, dict):
+                enriched.append(bet)
+                continue
+            # resolve_ready_bets keys resolutions by _bet_identity(normalized_bet, idx)
+            normalized = _normalize_ready_bet(bet) or {}
+            uid = _bet_identity(normalized, i) if normalized else _bet_identity(bet, i)
+            res = resolutions.get(uid) or {}
+            eb  = dict(bet)
+            eb["kalshi_ticker"]       = str(res.get("market_ticker") or "")
+            eb["kalshi_event_ticker"] = str(res.get("event_ticker")  or "")
+            eb["kalshi_side"]         = str(res.get("side")          or "")
+            eb["kalshi_price_cents"]  = int(res.get("price_cents")   or 0)
+            eb["kalshi_status"]       = str(res.get("status")        or "unavailable")
+            enriched.append(eb)
+        return enriched
+    except Exception as exc:
+        print(f"[kalshi] attach_kalshi_to_bets error: {exc}")
+        return [dict(b) if isinstance(b, dict) else b for b in bets]
+
+
 def get_balance() -> dict[str, Any]:
     """Get the authenticated user's Kalshi portfolio balance."""
     data = _request_json("GET", "/portfolio/balance", auth=True)

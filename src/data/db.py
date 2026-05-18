@@ -626,6 +626,32 @@ CREATE TABLE IF NOT EXISTS venue_coords (
     updated_at  TIMESTAMPTZ DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_venue_coords_team ON venue_coords(team_name);
+
+-- ── Idempotent migrations: sentiment signal columns ───────────────────────────
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_name='predictions' AND column_name='signal_type') THEN
+        ALTER TABLE predictions ADD COLUMN signal_type    VARCHAR(30);
+        ALTER TABLE predictions ADD COLUMN active_sources TEXT;
+        ALTER TABLE predictions ADD COLUMN injury_flag    BOOLEAN DEFAULT FALSE;
+        ALTER TABLE predictions ADD COLUMN momentum_flag  BOOLEAN DEFAULT FALSE;
+        ALTER TABLE predictions ADD COLUMN lineup_flag    BOOLEAN DEFAULT FALSE;
+    END IF;
+END $$;
+
+-- ── Idempotent migrations: Kalshi market link + investor grade ──────────────
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_name='predictions' AND column_name='kalshi_ticker') THEN
+        ALTER TABLE predictions ADD COLUMN kalshi_ticker        VARCHAR(120);
+        ALTER TABLE predictions ADD COLUMN kalshi_event_ticker  VARCHAR(120);
+        ALTER TABLE predictions ADD COLUMN kalshi_side          VARCHAR(10);
+        ALTER TABLE predictions ADD COLUMN kalshi_price_cents   INTEGER;
+        ALTER TABLE predictions ADD COLUMN kalshi_status        VARCHAR(20);
+        ALTER TABLE predictions ADD COLUMN grade                VARCHAR(2);
+        ALTER TABLE predictions ADD COLUMN investor_score       NUMERIC(5,2);
+    END IF;
+END $$;
 """
 
 
@@ -1851,9 +1877,12 @@ def save_predictions(predictions: list) -> int:
     try:
         cur = conn.cursor()
         cols = _get_table_columns(conn, "predictions")
-        has_bet_uid  = "bet_uid"  in cols
-        has_run_id   = "run_id"   in cols
-        has_run_date = "run_date" in cols
+        has_bet_uid      = "bet_uid"      in cols
+        has_run_id       = "run_id"       in cols
+        has_run_date     = "run_date"     in cols
+        has_signal_type  = "signal_type"  in cols
+        has_kalshi       = "kalshi_ticker" in cols
+        has_grade        = "grade"         in cols
         for p in predictions:
             try:
                 pred_uid = _prediction_uid(p)
@@ -1890,6 +1919,36 @@ def save_predictions(predictions: list) -> int:
                     extra_cols += ", run_date"
                     extra_ph   += ", %s"
                     extra_vals.append(p.get("run_date") or p.get("game_date"))
+                if has_signal_type:
+                    extra_cols += ", signal_type, active_sources, injury_flag, momentum_flag, lineup_flag"
+                    extra_ph   += ", %s, %s, %s, %s, %s"
+                    srcs = p.get("active_sources") or []
+                    if isinstance(srcs, list):
+                        srcs = ",".join(str(s) for s in srcs)
+                    extra_vals.extend([
+                        (p.get("signal_type") or "neutral")[:30],
+                        str(srcs)[:200],
+                        bool(p.get("injury_flag")),
+                        bool(p.get("momentum_flag")),
+                        bool(p.get("lineup_flag")),
+                    ])
+                if has_kalshi:
+                    extra_cols += ", kalshi_ticker, kalshi_event_ticker, kalshi_side, kalshi_price_cents, kalshi_status"
+                    extra_ph   += ", %s, %s, %s, %s, %s"
+                    extra_vals.extend([
+                        str(p.get("kalshi_ticker")       or "")[:120],
+                        str(p.get("kalshi_event_ticker") or "")[:120],
+                        str(p.get("kalshi_side")         or "")[:10],
+                        p.get("kalshi_price_cents"),
+                        str(p.get("kalshi_status")       or "unavailable")[:20],
+                    ])
+                if has_grade:
+                    extra_cols += ", grade, investor_score"
+                    extra_ph   += ", %s, %s"
+                    extra_vals.extend([
+                        str(p.get("grade") or "")[:2] or None,
+                        p.get("investor_score"),
+                    ])
                 conflict_sql = "ON CONFLICT (bet_uid) DO NOTHING" if has_bet_uid else "ON CONFLICT DO NOTHING"
                 cur.execute(f"""
                     INSERT INTO predictions

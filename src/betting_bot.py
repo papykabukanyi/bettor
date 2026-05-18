@@ -104,6 +104,21 @@ def _analyze_mlb():
         # Attach expected run total for over/under analysis
         from data.mlb_fetcher import estimate_game_total
         pred["predicted_total"]  = estimate_game_total(g["home_team"], g["away_team"], stats)
+        # Enrich with multi-source sentiment signals
+        try:
+            from data.sentiment import get_team_sentiment
+            home_s = get_team_sentiment(g["home_team"], "baseball")
+            away_s = get_team_sentiment(g["away_team"], "baseball")
+            pred["sentiment_score"] = home_s.get("combined", 0.0)
+            pred["signal_type"]     = home_s.get("signal_type") or away_s.get("signal_type") or "neutral"
+            pred["injury_flag"]     = bool(home_s.get("injury_flag") or away_s.get("injury_flag"))
+            pred["momentum_flag"]   = bool(home_s.get("momentum_flag") or away_s.get("momentum_flag"))
+            pred["lineup_flag"]     = bool(home_s.get("lineup_flag") or away_s.get("lineup_flag"))
+            pred["active_sources"]  = list(set(
+                (home_s.get("active_sources") or []) + (away_s.get("active_sources") or [])
+            ))
+        except Exception as _se:
+            print(f"[MLB] Sentiment fetch skipped: {_se}")
         predictions.append(pred)
         home_pct = pred.get('home_win_prob', 0.5)
         away_pct = pred.get('away_win_prob', 0.5)
@@ -320,6 +335,32 @@ def main():
     )
 
     parlays = build_parlay(value_bets + totals_bets)
+
+    # ── Kalshi ticker + investor grade enrichment ──────────────────────────
+    _all_bets = value_bets + totals_bets
+    try:
+        from data.kalshi import attach_kalshi_to_bets
+        _all_bets = attach_kalshi_to_bets(_all_bets)
+        value_bets  = _all_bets[:len(value_bets)]
+        totals_bets = _all_bets[len(value_bets):]
+    except Exception as _ke:
+        print(f"[main] Kalshi enrichment skipped: {_ke}")
+    try:
+        from analysis.investor import investor_grade, build_daily_portfolio
+        for _p in _all_bets:
+            _p.update(investor_grade(_p, args.bankroll))
+        portfolio = build_daily_portfolio(_all_bets, bankroll=args.bankroll)
+        _grade_counts: dict[str, int] = {}
+        for _p in _all_bets:
+            _g = _p.get("grade", "X")
+            _grade_counts[_g] = _grade_counts.get(_g, 0) + 1
+        if _grade_counts:
+            print(f"\n[GRADES] {_grade_counts}")
+        if portfolio:
+            print(f"[PORTFOLIO] {len(portfolio)} bets recommended today"
+                  f"  |  Total stake: ${sum(float(b.get('recommended_stake', 0)) for b in portfolio):.2f}")
+    except Exception as _ie:
+        print(f"[main] Investor grade skipped: {_ie}")
 
     print("\n" + summarise_suggestions(
         value_bets,
