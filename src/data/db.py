@@ -2423,11 +2423,11 @@ def get_prop_performance_stats(sport: str | None = None, days_back: int | None =
                                WHEN outcome='LOSS' THEN 0.0 END)*100, 1) AS hit_rate
             FROM dedup
             GROUP BY 1, 2
-            ORDER BY CASE
-                WHEN prop_type = 'over' THEN 1
-                WHEN prop_type = 'under' THEN 2
+            ORDER BY MIN(CASE
+                WHEN lower(COALESCE(recommendation,'')) = 'over' THEN 1
+                WHEN lower(COALESCE(recommendation,'')) = 'under' THEN 2
                 ELSE 3
-            END
+            END)
         """, vals)
         stats["by_prop_type"] = [dict(r) for r in cur.fetchall()]
         # Daily trend

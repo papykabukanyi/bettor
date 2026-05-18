@@ -1660,6 +1660,7 @@ function _connectSSE() {
       const d = JSON.parse(e.data);
       if (d.stats)        _renderBotPerf(d.stats);
       if (d.parlay_stats) _renderParlayPerf(d.parlay_stats);
+      _silentRefreshPanels();
     } catch(err) {}
   });
 
@@ -2129,10 +2130,10 @@ function _silentRefreshPanels() {
     if (_isReadyBetsActive()) {
       refreshReadyBets(false);
     }
-    if (!_isParlaysActive()) return;
-    loadPropPerformance();
     loadTrackedParlays();
     loadTrackedSingles();
+    loadPropPerformance();
+    if (!_isParlaysActive()) return;
     autoGenParlaysFromProps();
   }, 1500);
 }
@@ -2144,10 +2145,10 @@ setInterval(() => {
   if (_isReadyBetsActive()) {
     refreshReadyBets(false);
   }
-  if (!_isParlaysActive()) return;
-  loadPropPerformance();
   loadTrackedParlays();
   loadTrackedSingles();
+  loadPropPerformance();
+  if (!_isParlaysActive()) return;
   autoGenParlaysFromProps();
 }, TRACKING_REFRESH_MS);
 
@@ -5509,8 +5510,13 @@ function sendBuilderParlay() {
   sendParlayEmail({name, legs: parlayLegs, combined_odds: combined, stake_usd: stake});
 }
 
+function _fetchFreshJson(url) {
+  const sep = url.includes('?') ? '&' : '?';
+  return fetch(`${url}${sep}_ts=${Date.now()}`, { cache: 'no-store' }).then(r => r.json());
+}
+
 function loadTrackedParlays() {
-  fetch('/api/parlay/list?include_resolved=1&current_only=1').then(r=>r.json()).then(d=>{
+  _fetchFreshJson('/api/parlay/list?include_resolved=1&current_only=1').then(d=>{
     const el = document.getElementById('tracked-parlays-list');
     const metaEl = document.getElementById('tracked-parlay-meta');
     if (!el) return;
@@ -5595,8 +5601,8 @@ function loadTrackedParlays() {
 
 function loadTrackedSingles() {
   Promise.all([
-    fetch('/api/predictions?days=21&current_only=1').then(r => r.json()).catch(() => ({ ok: false, predictions: [] })),
-    fetch('/api/prop-history?days=21&current_only=1').then(r => r.json()).catch(() => ({ ok: false, props: [] })),
+    _fetchFreshJson('/api/predictions?days=21&current_only=1').catch(() => ({ ok: false, predictions: [] })),
+    _fetchFreshJson('/api/prop-history?days=21&current_only=1').catch(() => ({ ok: false, props: [] })),
   ]).then(([d, p]) => {
     const el = document.getElementById('tracked-singles-list');
     const metaEl = document.getElementById('tracked-singles-meta');
@@ -5718,9 +5724,9 @@ function loadBotPerformance() {
   const el = document.getElementById('bot-perf-stats');
   if (!el) return;
   Promise.all([
-    fetch('/api/performance?current_only=1').then(r=>r.json()),
-    fetch('/api/prop-performance?current_only=1').then(r=>r.json()),
-    fetch('/api/parlay/performance?current_only=1').then(r=>r.json()),
+    _fetchFreshJson('/api/performance?current_only=1'),
+    _fetchFreshJson('/api/prop-performance?current_only=1'),
+    _fetchFreshJson('/api/parlay/performance?current_only=1'),
   ]).then(([g, p, pr]) => {
     if (!g.ok || !p.ok || !pr.ok) {
       el.innerHTML = '<div class="no-games">Could not load bot performance.</div>';

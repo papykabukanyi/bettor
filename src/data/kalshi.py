@@ -1510,6 +1510,12 @@ def _score_event_group(bet: dict[str, Any], event_group: dict[str, Any]) -> floa
                     score -= 6.0   # wrong stat series → strong penalty
                 break
 
+        score += _series_hint_score(
+            bet,
+            str(event_group.get("series_ticker") or event_ticker_upper),
+            weight=1.15,
+        )
+
         return score
 
     home_score = _entity_match_score(text, bet.get("home_team"))
@@ -1534,6 +1540,7 @@ def _score_event_group(bet: dict[str, Any], event_group: dict[str, Any]) -> floa
     score += home_score + away_score
     score += pick_score * 1.2
     score += _token_overlap_score(text, bet.get("label"), bet.get("pick"), bet.get("bet_type"))
+    score += _series_hint_score(bet, str(event_group.get("series_ticker") or ""), weight=0.9)
 
     if bet_kind in {"spread", "total", "team_total"}:
         line_score = _line_match_score(text, bet.get("line"))
@@ -1641,6 +1648,96 @@ def _series_ticker_from_market(market: dict[str, Any]) -> str:
             return value.split("-", 1)[0].upper()
         return value.upper()
     return ""
+
+
+def _bet_series_hints(bet: dict[str, Any]) -> tuple[list[str], list[str]]:
+    """Return (preferred_series, avoid_series) hints for Kalshi matching."""
+    sport = _bet_sport_tag(bet)
+    bet_kind = _bet_kind_tag(bet)
+    bet_type = _norm_text(bet.get("bet_type") or "")
+    prop_type = _norm_text(bet.get("prop_type") or bet.get("stat_type") or "")
+    label = _norm_text(bet.get("label") or bet.get("pick") or "")
+    text = f"{bet_type} {prop_type} {label}"
+
+    preferred: list[str] = []
+    avoid: list[str] = []
+
+    def _set_family(pref: list[str], bad: list[str]):
+        preferred.extend(pref)
+        avoid.extend(bad)
+
+    if sport == "baseball":
+        if "f5" in bet_type or "first 5" in text or "first five" in text:
+            _set_family(["KXMLBF5"], ["KXMLBGAME", "KXMLBTOTAL", "KXMLBSPREAD"])
+        elif bet_kind == "moneyline":
+            _set_family(["KXMLBGAME", "MLBWIN"], ["KXMLBSPREAD", "KXMLBTOTAL"])
+        elif bet_kind == "spread":
+            _set_family(["KXMLBSPREAD"], ["KXMLBGAME", "KXMLBTOTAL"])
+        elif bet_kind in {"total", "team_total"}:
+            _set_family(["KXMLBTOTAL", "MLBOU"], ["KXMLBGAME", "KXMLBSPREAD"])
+        elif bet_kind == "player_prop":
+            if any(tok in prop_type for tok in ("hit",)):
+                _set_family(["KXMLBHIT", "MLBHITS"], ["KXMLBRBI", "KXMLBTB", "MLBHR"])
+            elif "rbi" in prop_type:
+                _set_family(["KXMLBRBI"], ["KXMLBHIT", "KXMLBTB", "MLBHR"])
+            elif any(tok in prop_type for tok in ("total_bases", "total base", "tb")):
+                _set_family(["KXMLBTB"], ["KXMLBHIT", "KXMLBRBI", "MLBHR"])
+            elif any(tok in prop_type for tok in ("home_run", "home run", "hr")):
+                _set_family(["MLBHR"], ["KXMLBHIT", "KXMLBRBI", "KXMLBTB"])
+            elif any(tok in prop_type for tok in ("strikeout", " k ")) or prop_type == "k":
+                _set_family(["MLBK"], ["KXMLBHIT", "KXMLBRBI", "KXMLBTB", "MLBHR"])
+            elif "run" in prop_type:
+                _set_family(["MLBRUNS", "KXMLBHRR"], ["KXMLBHIT", "KXMLBRBI", "KXMLBTB"])
+    elif sport == "basketball":
+        if bet_kind == "moneyline":
+            _set_family(["KXNBAGAME", "KXWNBAGAME"], ["KXNBASPREAD", "KXNBATOTAL", "KXNBATEAMTOTAL"])
+        elif bet_kind == "spread":
+            _set_family(["KXNBASPREAD", "KXWNBASPREAD"], ["KXNBAGAME", "KXNBATOTAL", "KXNBATEAMTOTAL"])
+        elif bet_kind == "team_total":
+            _set_family(["KXNBATEAMTOTAL"], ["KXNBAGAME", "KXNBASPREAD", "KXNBATOTAL"])
+        elif bet_kind == "total":
+            _set_family(["KXNBATOTAL", "KXWNBATOTAL"], ["KXNBAGAME", "KXNBASPREAD", "KXNBATEAMTOTAL"])
+        elif bet_kind == "player_prop":
+            if any(tok in prop_type for tok in ("point", "pts")):
+                _set_family(["KXNBAPTS", "KXWNBAPTS"], ["KXNBAREB", "KXNBAAST", "KXNBARA"])
+            elif any(tok in prop_type for tok in ("rebound", "reb")):
+                _set_family(["KXNBAREB", "KXWNBAREB"], ["KXNBAPTS", "KXNBAAST", "KXNBARA"])
+            elif any(tok in prop_type for tok in ("assist", "ast")):
+                _set_family(["KXNBAAST", "KXWNBAAST"], ["KXNBAPTS", "KXNBAREB", "KXNBARA"])
+    elif sport == "hockey":
+        if bet_kind == "moneyline":
+            _set_family(["NHLWIN", "KXAHLGAME"], ["KXNHLTOTAL", "KXNHLSPREAD"])
+        elif bet_kind == "spread":
+            _set_family(["KXNHLSPREAD"], ["NHLWIN", "KXNHLTOTAL"])
+        elif bet_kind == "total":
+            _set_family(["KXNHLTOTAL", "NHLOU"], ["NHLWIN", "KXNHLSPREAD"])
+        elif bet_kind == "player_prop":
+            if any(tok in prop_type for tok in ("assist", "ast")):
+                _set_family(["KXNHLAST"], ["KXNHLPTS", "KXNHLGOAL", "KXNHLANYGOAL"])
+            elif "goal" in prop_type:
+                _set_family(["KXNHLGOAL", "KXNHLANYGOAL"], ["KXNHLPTS", "KXNHLAST"])
+            elif any(tok in prop_type for tok in ("point", "pts")):
+                _set_family(["KXNHLPTS"], ["KXNHLAST", "KXNHLGOAL", "KXNHLANYGOAL"])
+
+    preferred = list(dict.fromkeys([p.upper() for p in preferred if p]))
+    avoid = [a.upper() for a in dict.fromkeys([a for a in avoid if a]) if a.upper() not in preferred]
+    return preferred, avoid
+
+
+def _series_hint_score(bet: dict[str, Any], series_ticker: str, *, weight: float = 1.0) -> float:
+    series_upper = str(series_ticker or "").upper()
+    if not series_upper:
+        return 0.0
+    preferred, avoid = _bet_series_hints(bet)
+    score = 0.0
+    if preferred:
+        if any(pref in series_upper for pref in preferred):
+            score += 3.8 * weight
+        elif _bet_sport_tag(bet):
+            score -= 1.3 * weight
+    if avoid and any(bad in series_upper for bad in avoid):
+        score -= 3.2 * weight
+    return score
 
 
 def _market_sport_tag(market: dict[str, Any]) -> str:
@@ -1936,6 +2033,7 @@ def _score_single_market(bet: dict[str, Any], market: dict[str, Any]) -> float:
     text = _market_text(market)
     if not text:
         return 0.0
+    series_upper = _series_ticker_from_market(market)
 
     time_score = _time_match_score(bet, market)
     if time_score < -1.5:
@@ -1964,6 +2062,7 @@ def _score_single_market(bet: dict[str, Any], market: dict[str, Any]) -> float:
         )
         score += line_score
         score += time_score
+        score += _series_hint_score(bet, series_upper, weight=1.0)
         return score
 
     pick_score = max(
@@ -1985,6 +2084,7 @@ def _score_single_market(bet: dict[str, Any], market: dict[str, Any]) -> float:
     else:
         score += max(home_score, away_score)
     score += _token_overlap_score(text, bet.get("label"), bet.get("pick"), bet.get("bet_type"))
+    score += _series_hint_score(bet, series_upper, weight=0.85)
 
     if bet_kind == "moneyline" and picked_team:
         selected_side_text = _market_selected_side_text(market)
@@ -2049,6 +2149,7 @@ def _single_resolution_payload(
                     market.get("title") or market.get("question") or market.get("ticker") or ""
                 ),
                 "event_ticker": str(market.get("event_ticker") or ""),
+                "series_ticker": _series_ticker_from_market(market),
                 "price_cents": _market_price_cents(market, side),
                 "close_time": str(market.get("close_time") or market.get("expiration_time") or ""),
             }
@@ -2812,6 +2913,7 @@ def attach_kalshi_to_bets(
             eb  = dict(bet)
             eb["kalshi_ticker"]       = str(res.get("market_ticker") or "")
             eb["kalshi_event_ticker"] = str(res.get("event_ticker")  or "")
+            eb["kalshi_series_ticker"] = str(res.get("series_ticker") or "")
             eb["kalshi_side"]         = str(res.get("side")          or "")
             eb["kalshi_price_cents"]  = int(res.get("price_cents")   or 0)
             eb["kalshi_status"]       = str(res.get("status")        or "unavailable")
