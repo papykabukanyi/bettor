@@ -17,11 +17,28 @@ papykabukanyi@gmail.com always receives all emails regardless of EMAIL_TO.
 import datetime
 import os
 import smtplib
+import time
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
 # Primary recipient — always gets all emails
 _PRIMARY_RECIPIENT = "papykabukanyi@gmail.com"
+_EMAIL_NETWORK_ERROR_BACKOFF_SEC = max(300, int(os.getenv("EMAIL_NETWORK_ERROR_BACKOFF_SEC", "1800") or "1800"))
+_EMAIL_DISABLED_UNTIL = 0.0
+
+
+def _is_network_error(exc: Exception | str) -> bool:
+    text = str(exc or "").lower()
+    return any(token in text for token in (
+        "network is unreachable",
+        "no route to host",
+        "name or service not known",
+        "temporary failure in name resolution",
+        "timed out",
+        "connection refused",
+        "connection reset",
+        "connection aborted",
+    ))
 
 
 def _email_settings() -> dict:
@@ -61,6 +78,18 @@ def send_email(subject: str, html_body: str, plain_body: str = "") -> dict:
         return {"ok": False, "sent": 0, "failed": 0, "errors": [], "note": "Email disabled (EMAIL_ENABLED=false)"}
     if not settings["user"] or not settings["password"]:
         return {"ok": False, "sent": 0, "failed": 0, "errors": ["EMAIL_USER or EMAIL_PASS not set"]}
+
+    global _EMAIL_DISABLED_UNTIL
+    now = time.time()
+    if _EMAIL_DISABLED_UNTIL and now < _EMAIL_DISABLED_UNTIL:
+        remaining = int(_EMAIL_DISABLED_UNTIL - now)
+        return {
+            "ok": False,
+            "sent": 0,
+            "failed": 0,
+            "errors": [],
+            "note": f"SMTP temporarily disabled after network error ({remaining}s left)",
+        }
 
     to_list = _recipients(settings)
     if not to_list:
@@ -114,8 +143,12 @@ def send_email(subject: str, html_body: str, plain_body: str = "") -> dict:
         else:
             fallback_err = err  # no sensible fallback
         if fallback_err is not None:
-            results["failed"] += len(to_list)
-            results["errors"].append({"to": "smtp", "error": f"{primary_err} | fallback: {fallback_err}"})
+            if _is_network_error(primary_err) or _is_network_error(fallback_err):
+                _EMAIL_DISABLED_UNTIL = time.time() + _EMAIL_NETWORK_ERROR_BACKOFF_SEC
+                results["note"] = f"SMTP temporarily disabled after network error ({_EMAIL_NETWORK_ERROR_BACKOFF_SEC}s backoff)"
+            else:
+                results["failed"] += len(to_list)
+                results["errors"].append({"to": "smtp", "error": f"{primary_err} | fallback: {fallback_err}"})
 
     results["ok"] = results["sent"] > 0 and results["failed"] == 0
     return results

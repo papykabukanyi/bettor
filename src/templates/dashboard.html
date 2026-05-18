@@ -4885,7 +4885,8 @@ function renderReadyBets() {
     }
   }
   const matchedRows = dedupedRows.filter(isMatched);
-  const bettableRows = matchedRows;
+  const bettableRows = matchedRows.filter(r => r.kind !== 'combo');
+  const comboRows = dedupedRows.filter(r => r.kind === 'combo');
   bettableRows.sort((a, b) => {
     const q = (Number(b.quality) || 0) - (Number(a.quality) || 0);
     if (Math.abs(q) > 1e-9) return q;
@@ -4895,11 +4896,11 @@ function renderReadyBets() {
     single: bettableRows.filter(r => r.kind === 'single'),
     team_prop: bettableRows.filter(r => r.kind === 'team_prop'),
     player_prop: bettableRows.filter(r => r.kind === 'player_prop'),
-    combo: bettableRows.filter(r => r.kind === 'combo'),
+    combo: comboRows,
   };
   const nonCombo = groups.single.length + groups.team_prop.length + groups.player_prop.length;
   if (metaEl) {
-    const pendingCount = Math.max(0, dedupedRows.length - matchedRows.length);
+    const pendingCount = Math.max(0, dedupedRows.filter(r => r.kind !== 'combo').length - bettableRows.length);
     const bits = [`${matchedRows.length} bettable now`, `${nonCombo} singles/props`, `${groups.combo.length} combos`];
     if (pendingCount) bits.push(`${pendingCount} not bettable yet`);
     const sentCount = Math.max(0, allRows.length - openRows.length);

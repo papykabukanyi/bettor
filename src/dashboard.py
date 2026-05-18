@@ -6602,7 +6602,11 @@ def _send_kalshi_alert(matched_bets: list[dict]):
         """
         plain_body = f"Kalshi Bets Available:\n{rows_plain}\nLog in to kalshi.com to place your bets."
         result = send_email(subject, html_body, plain_body)
-        print(f"[kalshi-monitor] Email alert sent: {result}")
+        if result.get("ok"):
+            print(f"[kalshi-monitor] Email alert sent: {result}")
+        else:
+            note = result.get("note") or result.get("error") or "email skipped"
+            print(f"[kalshi-monitor] Email alert skipped: {note}")
     except Exception as exc:
         print(f"[kalshi-monitor] Email send failed: {exc}")
 
