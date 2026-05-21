@@ -32,6 +32,7 @@ import tempfile
 import re
 import math
 import time
+from typing import Any
 
 from flask import Flask, render_template, jsonify, request, Response
 
@@ -3241,6 +3242,37 @@ def _run_all_sports_analysis():
             try:
                 from data.kalshi import attach_kalshi_to_bets
                 bets = attach_kalshi_to_bets(bets)
+
+                # Backend-side guarantee: if enrichment produced fresh Kalshi matches,
+                # emit alert emails even when /api/kalshi/resolve-ready was not called.
+                try:
+                    enriched_resolutions: dict[str, dict] = {}
+                    for _i, _b in enumerate(bets or []):
+                        if not isinstance(_b, dict):
+                            continue
+                        _status = str(_b.get("kalshi_status") or "").strip().lower()
+                        _ticker = str(_b.get("kalshi_ticker") or "").strip()
+                        if _status != "matched" or not _ticker:
+                            continue
+                        _uid = str(
+                            _b.get("uid")
+                            or _b.get("bet_uid")
+                            or _b.get("prediction_uid")
+                            or f"ready_{_i}"
+                        ).strip()
+                        enriched_resolutions[_uid] = {
+                            "status": "matched",
+                            "market_ticker": _ticker,
+                            "event_ticker": str(_b.get("kalshi_event_ticker") or ""),
+                            "series_ticker": str(_b.get("kalshi_series_ticker") or ""),
+                            "side": str(_b.get("kalshi_side") or ""),
+                            "price_cents": int(_b.get("kalshi_price_cents") or 0),
+                            "message": "Matched from backend enrichment.",
+                        }
+                    if enriched_resolutions:
+                        _maybe_email_kalshi_matches(bets, enriched_resolutions, source_tag="analysis-attach")
+                except Exception as _email_attach_exc:
+                    _log(f"[kalshi-email] analysis attach alert step skipped: {_email_attach_exc}")
             except Exception as _ke:
                 _log(f"[all-sports] Kalshi enrichment skipped: {_ke}")
             try:
