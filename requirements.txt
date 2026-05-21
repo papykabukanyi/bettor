@@ -40,3 +40,6 @@ praw
 # Cryptography (Kalshi RSA signing)
 cryptography
 
+# WebSocket client (Kalshi live connection)
+websockets>=12.0
+

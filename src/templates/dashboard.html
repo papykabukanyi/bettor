@@ -1664,6 +1664,24 @@ function _connectSSE() {
     } catch(err) {}
   });
 
+  // Live Kalshi ticker prices pushed from backend WebSocket feed (every 5 s)
+  _sse.addEventListener('kalshi_ticker', e => {
+    try {
+      const d = JSON.parse(e.data);
+      if (d && d.tickers && typeof d.tickers === 'object') {
+        // Merge into the cached ticker data so ready-bets panel stays fresh
+        if (!window.KALSHI_TODAY_DATA) window.KALSHI_TODAY_DATA = {};
+        if (!window.KALSHI_TODAY_DATA._live_cache) window.KALSHI_TODAY_DATA._live_cache = {};
+        Object.assign(window.KALSHI_TODAY_DATA._live_cache, d.tickers);
+        // Silently re-render the Kalshi ready-bets panel if it is visible
+        const panel = document.getElementById('kalshi-ready-bets-container');
+        if (panel && panel.offsetParent !== null) {
+          if (typeof renderReadyBets === 'function') renderReadyBets();
+        }
+      }
+    } catch(err) {}
+  });
+
   _sse.onerror = () => {
     _updateConnBadge(false);
     _sse.close();

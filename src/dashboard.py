@@ -228,6 +228,7 @@ def _init_worker():
         _start_live_scores()
         _start_outcome_resolver()
         _start_kalshi_monitor()
+        _start_kalshi_ws_client()
         _auto_boot_analysis()
     else:
         _scheduler = None
@@ -5955,13 +5956,52 @@ def api_kalshi_series_registry():
 
 @app.route("/api/kalshi/today-tickers", methods=["GET"])
 def api_kalshi_today_tickers():
-    """Reverse-match: return all open Kalshi sports markets for today, grouped by sport."""
+    """Reverse-match: return all open Kalshi sports markets for today, grouped by sport.
+
+    Serves from the live WebSocket ticker cache when available (instant, no
+    extra REST call).  Falls back to the REST implementation when the cache is
+    still cold (e.g. app just restarted).
+    """
     try:
-        from data.kalshi import get_today_kalshi_tickers
+        from data.kalshi import get_today_kalshi_tickers, get_live_tickers
+
+        # Check if the WS cache has data yet
+        live = get_live_tickers()
+        force_rest = request.args.get("force_rest", "").lower() in ("1", "true", "yes")
+
+        if live and not force_rest:
+            # The WS cache holds individual ticker dicts keyed by market_ticker.
+            # Pass them into get_today_kalshi_tickers as a pre-fetched supplement
+            # so it can skip the heavy REST pagination and just filter/group.
+            try:
+                result = get_today_kalshi_tickers(live_tickers=live)
+                return jsonify({"ok": True, "source": "websocket", **_clean(result)})
+            except TypeError:
+                # Older signature — fall through to normal REST call
+                pass
+
         result = get_today_kalshi_tickers()
-        return jsonify({"ok": True, **_clean(result)})
+        return jsonify({"ok": True, "source": "rest", **_clean(result)})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e), "sports": {}, "total": 0})
+
+
+@app.route("/api/kalshi/ws-status", methods=["GET"])
+def api_kalshi_ws_status():
+    """Debug endpoint: returns WebSocket connection status and cache size."""
+    try:
+        from data.kalshi import get_kalshi_ws_manager
+        mgr = get_kalshi_ws_manager()
+        if mgr is None:
+            return jsonify({"ok": True, "running": False, "connected": False, "cached_tickers": 0})
+        return jsonify({
+            "ok": True,
+            "running": mgr._running,
+            "connected": mgr.is_connected(),
+            "cached_tickers": len(mgr.get_tickers()),
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
 
 
 @app.route("/api/kalshi/balance")
@@ -6632,6 +6672,54 @@ def _start_kalshi_monitor():
     _kalshi_monitor_timer.daemon = True
     _kalshi_monitor_timer.start()
     print(f"[kalshi-monitor] Started (every {max(1, _KALSHI_MONITOR_INTERVAL_SEC // 60)} min)")
+
+
+def _start_kalshi_ws_client():
+    """Start the persistent Kalshi WebSocket connection (ticker feed).
+
+    Runs in a daemon thread via the KalshiWebSocketManager.  If Kalshi
+    credentials are missing the manager stops itself silently on first connect,
+    so this is always safe to call.
+    """
+    try:
+        from data.kalshi import start_kalshi_ws, get_live_tickers  # noqa: F401
+
+        mgr = start_kalshi_ws()
+
+        # Push a kalshi_ticker SSE event whenever new live prices arrive so the
+        # frontend can refresh without polling.
+        _ticker_sse_last: dict = {}
+
+        def _on_ticker(market_ticker: str, data: dict) -> None:  # noqa: WPS430
+            # Batch: only broadcast every 5 s to avoid SSE flood.
+            pass  # batching handled by a timer — see below
+
+        mgr.add_update_callback(_on_ticker)
+
+        # Periodic SSE broadcast of the full ticker snapshot (every 5 s)
+        def _broadcast_tickers() -> None:
+            global _ticker_broadcast_timer
+            try:
+                tickers = get_live_tickers()
+                if tickers:
+                    _sse_broadcast("kalshi_ticker", {"tickers": tickers})
+            except Exception as exc:
+                print(f"[kalshi-ws-sse] broadcast error: {exc}")
+            _ticker_broadcast_timer = threading.Timer(5, _broadcast_tickers)
+            _ticker_broadcast_timer.daemon = True
+            _ticker_broadcast_timer.start()
+
+        # First broadcast after 30 s (give WS time to accumulate data)
+        _ticker_broadcast_timer = threading.Timer(30, _broadcast_tickers)
+        _ticker_broadcast_timer.daemon = True
+        _ticker_broadcast_timer.start()
+
+        print("[kalshi-ws] WebSocket manager started (ticker feed)")
+    except Exception as exc:
+        print(f"[kalshi-ws] Failed to start WebSocket manager: {exc}")
+
+
+_ticker_broadcast_timer: "threading.Timer | None" = None
 
 
 def _start_outcome_resolver():

@@ -3078,3 +3078,213 @@ def get_order(order_id: str) -> dict[str, Any]:
         raise last_error
     raise RuntimeError("Kalshi order lookup failed")
 
+
+# ─── Kalshi WebSocket Manager ─────────────────────────────────────────────────
+# Maintains a single persistent WebSocket connection to Kalshi.
+# Subscribes to the 'ticker' channel so every open-market price update arrives
+# in real time.  The `websockets` library automatically responds to the 10 s
+# Kalshi ping (0x9 / body='heartbeat') with a pong, so no manual keep-alive is
+# required.  The manager runs its asyncio event-loop in a daemon thread so it
+# doesn't interfere with Flask's thread-based server.
+# ---------------------------------------------------------------------------
+
+import asyncio as _asyncio
+
+KALSHI_WS_URL = "wss://external-api-ws.kalshi.com/trade-api/ws/v2"
+_KALSHI_WS_SIGN_PATH = "/trade-api/ws/v2"
+
+
+class KalshiWebSocketManager:
+    """Persistent WebSocket client for the Kalshi ticker feed.
+
+    Usage::
+
+        mgr = KalshiWebSocketManager()
+        mgr.start()
+        # later …
+        tickers = mgr.get_tickers()   # {market_ticker: {yes_bid, yes_ask, …}}
+    """
+
+    def __init__(self, url: str = KALSHI_WS_URL) -> None:
+        self._url = url
+        self._loop: "_asyncio.AbstractEventLoop | None" = None
+        self._thread: "threading.Thread | None" = None
+        self._running = False
+        self._connected = False
+        self._ticker_cache: "dict[str, dict]" = {}
+        self._lock = threading.Lock()
+        self._msg_id = 0
+        # Callbacks called with (market_ticker: str, data: dict) on every update
+        self._on_update: "list" = []
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def start(self) -> None:
+        """Start the WebSocket manager in a background daemon thread."""
+        if self._running:
+            return
+        self._running = True
+        self._thread = threading.Thread(
+            target=self._run_loop,
+            name="kalshi-ws",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        """Signal the manager to shut down."""
+        self._running = False
+        if self._loop and self._loop.is_running():
+            self._loop.call_soon_threadsafe(self._loop.stop)
+
+    def get_tickers(self) -> "dict[str, dict]":
+        """Thread-safe snapshot of the current ticker cache."""
+        with self._lock:
+            return dict(self._ticker_cache)
+
+    def is_connected(self) -> bool:
+        return self._connected
+
+    def add_update_callback(self, fn: "callable") -> None:
+        """Register fn(market_ticker, data) to be called on every ticker msg."""
+        self._on_update.append(fn)
+
+    # ------------------------------------------------------------------
+    # Internal
+    # ------------------------------------------------------------------
+
+    def _run_loop(self) -> None:
+        self._loop = _asyncio.new_event_loop()
+        _asyncio.set_event_loop(self._loop)
+        try:
+            self._loop.run_until_complete(self._connect_loop())
+        except Exception as exc:
+            print(f"[kalshi-ws] Event-loop exited: {exc}")
+        finally:
+            self._loop.close()
+
+    async def _connect_loop(self) -> None:
+        """Outer reconnect loop with exponential back-off."""
+        delay = 3.0
+        while self._running:
+            try:
+                await self._connect_once()
+                delay = 3.0  # reset after clean disconnect
+            except Exception as exc:
+                print(f"[kalshi-ws] Connection error: {exc} — retry in {delay:.0f}s")
+                self._connected = False
+                if self._running:
+                    await _asyncio.sleep(delay)
+                delay = min(delay * 1.5, 60.0)
+
+    async def _connect_once(self) -> None:
+        """Open one WebSocket session and read until close/error."""
+        try:
+            import websockets  # type: ignore[import]
+        except ImportError:
+            print("[kalshi-ws] 'websockets' package not installed — stopping")
+            self._running = False
+            return
+
+        # Build signed auth headers (fresh timestamp for each connection)
+        try:
+            headers = _auth_headers("GET", _KALSHI_WS_SIGN_PATH)
+        except Exception as exc:
+            print(f"[kalshi-ws] Auth failed (no credentials?): {exc}")
+            self._running = False
+            return
+
+        print("[kalshi-ws] Connecting …")
+        async with websockets.connect(
+            self._url,
+            additional_headers=headers,
+            ping_interval=20,   # library sends WS-level pings every 20 s
+            ping_timeout=30,    # wait 30 s for pong before treating as dead
+            close_timeout=10,
+        ) as ws:
+            self._connected = True
+            print("[kalshi-ws] Connected — subscribing to ticker channel")
+
+            self._msg_id += 1
+            await ws.send(json.dumps({
+                "id": self._msg_id,
+                "cmd": "subscribe",
+                "params": {"channels": ["ticker"]},
+            }))
+
+            async for raw in ws:
+                if not self._running:
+                    break
+                try:
+                    self._handle_msg(json.loads(raw))
+                except Exception:
+                    pass
+
+        self._connected = False
+        print("[kalshi-ws] Disconnected")
+
+    def _handle_msg(self, msg: dict) -> None:
+        msg_type = msg.get("type", "")
+        data = msg.get("msg", {})
+
+        if msg_type == "ticker":
+            ticker = data.get("market_ticker", "")
+            if ticker:
+                with self._lock:
+                    self._ticker_cache[ticker] = data
+                for fn in self._on_update:
+                    try:
+                        fn(ticker, data)
+                    except Exception:
+                        pass
+
+        elif msg_type == "subscribed":
+            sid = msg.get("sid")
+            channel = data.get("channel")
+            print(f"[kalshi-ws] Subscribed sid={sid} channel={channel}")
+
+        elif msg_type == "error":
+            print(f"[kalshi-ws] Server error {data.get('code')}: {data.get('msg')}")
+
+
+# ------------------------------------------------------------------
+# Module-level singleton helpers
+# ------------------------------------------------------------------
+
+_kalshi_ws_manager: "KalshiWebSocketManager | None" = None
+
+
+def start_kalshi_ws(url: str = KALSHI_WS_URL) -> KalshiWebSocketManager:
+    """Ensure the singleton WebSocket manager is started and return it.
+
+    Safe to call multiple times — only starts once.
+    If the Kalshi credentials are absent the manager will detect this on
+    first connect and stop itself gracefully.
+    """
+    global _kalshi_ws_manager
+    if _kalshi_ws_manager is None:
+        _kalshi_ws_manager = KalshiWebSocketManager(url=url)
+    if not _kalshi_ws_manager._running:
+        _kalshi_ws_manager.start()
+    return _kalshi_ws_manager
+
+
+def get_kalshi_ws_manager() -> "KalshiWebSocketManager | None":
+    """Return the singleton manager (may be None if never started)."""
+    return _kalshi_ws_manager
+
+
+def get_live_tickers() -> "dict[str, dict]":
+    """Return a snapshot of the WebSocket ticker cache.
+
+    Returns an empty dict if the WS manager hasn't started or has no data yet.
+    The REST ``/api/kalshi/today-tickers`` endpoint falls back to REST when this
+    is empty so there is no user-visible disruption during cold-start.
+    """
+    mgr = _kalshi_ws_manager
+    if mgr is None:
+        return {}
+    return mgr.get_tickers()
+
