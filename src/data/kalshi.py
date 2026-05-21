@@ -17,6 +17,7 @@ import os
 import re
 import threading
 import time
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from itertools import combinations
 from typing import Any
@@ -787,6 +788,26 @@ _PROP_HINTS = {
     "corners",
 }
 
+_PROP_TYPE_ALIASES: dict[str, tuple[str, ...]] = {
+    "points": ("point", "points", "pts"),
+    "rebounds": ("rebound", "rebounds", "reb"),
+    "assists": ("assist", "assists", "ast"),
+    "pra": (
+        "pra",
+        "points rebounds assists",
+        "points rebounds and assists",
+        "rebounds assists",
+        "ra",
+    ),
+    "goals": ("goal", "goals", "anytime goal", "first goal"),
+    "hits": ("hit", "hits"),
+    "runs": ("run", "runs"),
+    "rbi": ("rbi", "rbis", "runs batted in"),
+    "total_bases": ("total base", "total bases", "tb"),
+    "home_runs": ("home run", "home runs", "hr", "hrs"),
+    "strikeouts": ("strikeout", "strikeouts", " k ", " ks ", " k+"),
+}
+
 _TICKER_MONTHS = {
     "JAN": 1,
     "FEB": 2,
@@ -1201,6 +1222,22 @@ def _normalize_bet_type(value: Any, pick_text: str = "") -> str:
     return bt.replace(" ", "_") if bt else "single"
 
 
+def _canonical_prop_type(*values: Any) -> str:
+    """Infer a canonical prop type token from free-form bet fields."""
+    text = " ".join(_norm_text(v) for v in values if str(v or "").strip())
+    if not text:
+        return ""
+    padded = f" {text} "
+    for canonical, aliases in _PROP_TYPE_ALIASES.items():
+        for alias in aliases:
+            alias_norm = _norm_text(alias)
+            if not alias_norm:
+                continue
+            if f" {alias_norm} " in padded or alias_norm in text:
+                return canonical
+    return ""
+
+
 def _normalize_ready_bet(bet: dict[str, Any]) -> dict[str, Any]:
     """Canonicalize a ready-bet row so matcher scoring is stable across sources."""
     if not isinstance(bet, dict):
@@ -1234,6 +1271,16 @@ def _normalize_ready_bet(bet: dict[str, Any]) -> dict[str, Any]:
     if not clean.get("player_name"):
         clean["player_name"] = str(clean.get("name") or "").strip()
 
+    prop_type = _canonical_prop_type(
+        clean.get("prop_type"),
+        clean.get("stat_type"),
+        clean.get("bet_type"),
+        clean.get("pick"),
+        clean.get("label"),
+    )
+    if prop_type:
+        clean["prop_type"] = prop_type
+
     if not clean.get("direction"):
         dir_text = _norm_text(" ".join(
             str(clean.get(k) or "")
@@ -1259,6 +1306,17 @@ def _normalize_ready_bet(bet: dict[str, Any]) -> dict[str, Any]:
     side_default = str(clean.get("side_default") or "").lower()
     if side_default not in {"yes", "no"}:
         clean["side_default"] = "no" if "under" in _norm_text(pick_text) else "yes"
+
+    # Ensure combo legs are normalized in backend before matching.
+    if _bet_kind_tag(clean) == "combo":
+        clean_legs: list[dict[str, Any]] = []
+        for leg in (clean.get("legs") or []):
+            if not isinstance(leg, dict):
+                continue
+            n_leg = _normalize_ready_bet(leg)
+            if n_leg:
+                clean_legs.append(n_leg)
+        clean["legs"] = clean_legs
 
     return clean
 
@@ -1465,6 +1523,26 @@ def _line_proximity_score(text: str, line: Any, *, direction: str = "") -> float
     return 0.0
 
 
+def _series_stat_alignment_score(
+    *,
+    series_hint_text: str,
+    prop_type: Any,
+    mismatch_penalty: float = -6.0,
+    match_bonus: float = 4.0,
+) -> float:
+    """Score whether a series/event ticker aligns with the player's stat type."""
+    hint_upper = str(series_hint_text or "").upper()
+    prop_type_norm = _norm_text(prop_type)
+    if not hint_upper or not prop_type_norm:
+        return 0.0
+    for series_suffix, prop_hints in _SERIES_STAT_HINTS.items():
+        if series_suffix in hint_upper:
+            if any(h in prop_type_norm for h in prop_hints):
+                return match_bonus
+            return mismatch_penalty
+    return 0.0
+
+
 def _combined_market_text(markets: list[dict[str, Any]]) -> str:
     return _norm_text(
         " ".join(
@@ -1584,14 +1662,15 @@ def _score_event_group(bet: dict[str, Any], event_group: dict[str, Any]) -> floa
         # Strongly prefer the event whose series ticker matches the bet's stat type.
         # This disambiguates KXNBAPTS vs KXNBAREB vs KXNBAAST for the same player.
         event_ticker_upper = str(event_group.get("event_ticker") or "").upper()
-        prop_type_norm = _norm_text(bet.get("prop_type") or "")
-        for series_suffix, prop_hints in _SERIES_STAT_HINTS.items():
-            if series_suffix in event_ticker_upper:
-                if any(h in prop_type_norm for h in prop_hints):
-                    score += 4.0   # correct stat series → strong bonus
-                else:
-                    score -= 6.0   # wrong stat series → strong penalty
-                break
+        stat_alignment = _series_stat_alignment_score(
+            series_hint_text=f"{event_ticker_upper} {event_group.get('series_ticker') or ''}",
+            prop_type=bet.get("prop_type"),
+            mismatch_penalty=-7.0,
+            match_bonus=4.2,
+        )
+        if stat_alignment <= -6.0:
+            return 0.0
+        score += stat_alignment
 
         score += _series_hint_score(
             bet,
@@ -2169,6 +2248,15 @@ def _score_single_market(bet: dict[str, Any], market: dict[str, Any]) -> float:
         )
         score += line_score
         score += time_score
+        stat_alignment = _series_stat_alignment_score(
+            series_hint_text=f"{series_upper} {market.get('event_ticker') or ''}",
+            prop_type=bet.get("prop_type"),
+            mismatch_penalty=-7.0,
+            match_bonus=4.0,
+        )
+        if stat_alignment <= -6.0:
+            return 0.0
+        score += stat_alignment
         score += _series_hint_score(bet, series_upper, weight=1.0)
         return score
 
@@ -2309,6 +2397,33 @@ def _resolve_single_bet(
             scored_events.append((score, event_group))
     scored_events.sort(key=lambda item: item[0], reverse=True)
 
+    if bet_kind == "player_prop" and scored_events:
+        preferred_series, avoid_series = _bet_series_hints(bet)
+        if preferred_series:
+            pref_hits = [
+                item
+                for item in scored_events
+                if any(
+                    pref in str(item[1].get("event_ticker") or "").upper()
+                    or pref in str(item[1].get("series_ticker") or "").upper()
+                    for pref in preferred_series
+                )
+            ]
+            if pref_hits:
+                scored_events = pref_hits
+        if avoid_series:
+            filtered_events = [
+                item
+                for item in scored_events
+                if not any(
+                    bad in str(item[1].get("event_ticker") or "").upper()
+                    or bad in str(item[1].get("series_ticker") or "").upper()
+                    for bad in avoid_series
+                )
+            ]
+            if filtered_events:
+                scored_events = filtered_events
+
     if not scored_events or scored_events[0][0] < min_event_score:
         return _single_resolution_payload(
             "unavailable",
@@ -2408,9 +2523,26 @@ def _resolve_combo_bet(
     single_cache: dict[str, dict[str, Any]],
     event_index: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    legs = [leg for leg in (bet.get("legs") or []) if isinstance(leg, dict)]
+    legs = [
+        _normalize_ready_bet(leg)
+        for leg in (bet.get("legs") or [])
+        if isinstance(leg, dict)
+    ]
+    legs = [leg for leg in legs if leg]
     if len(legs) < 2:
         return _single_resolution_payload("unavailable", message="Combo needs at least 2 legs.")
+
+    # Reject duplicated legs in a combo at backend level.
+    seen_leg_sigs: set[str] = set()
+    for leg in legs:
+        sig = _bet_signature(leg)
+        if sig in seen_leg_sigs:
+            return {
+                "status": "unavailable",
+                "message": "Combo blocked: duplicate legs detected.",
+                "legs": [],
+            }
+        seen_leg_sigs.add(sig)
 
     resolved_legs: list[dict[str, Any]] = []
     for leg in legs:
@@ -2432,25 +2564,25 @@ def _resolve_combo_bet(
                 "legs": resolved_legs,
             }
 
-    target_legs = {
+    target_legs = Counter(
         (
             str(leg.get("market_ticker") or ""),
             str(leg.get("side") or "yes").lower(),
         )
         for leg in resolved_legs
-    }
+    )
 
     exact_matches: list[dict[str, Any]] = []
     for market in combo_markets:
         selected = market.get("mve_selected_legs") or []
-        market_legs = {
+        market_legs = Counter(
             (
                 str(leg.get("market_ticker") or ""),
                 str(leg.get("side") or "yes").lower(),
             )
             for leg in selected
             if isinstance(leg, dict)
-        }
+        )
         if market_legs and market_legs == target_legs:
             exact_matches.append(market)
 
@@ -2891,6 +3023,20 @@ def suggest_combo_bets(
             game_keys = [str(l.get("game") or l.get("game_key") or "") for l in leg_set]
             distinct_games = len(set(g for g in game_keys if g))
 
+            # Precision guard: avoid duplicate player-prop legs on same player/stat/game.
+            prop_leg_keys = [
+                (
+                    _norm_text(l.get("player_name") or l.get("name") or ""),
+                    _norm_text(l.get("prop_type") or l.get("bet_type") or ""),
+                    _norm_text(l.get("game") or l.get("game_key") or ""),
+                    _norm_text(l.get("direction") or l.get("pick") or ""),
+                )
+                for l in leg_set
+                if _bet_kind_tag(l) == "player_prop"
+            ]
+            if len(prop_leg_keys) != len(set(prop_leg_keys)):
+                continue
+
             prob = 1.0
             dec = 1.0
             for leg in leg_set:
@@ -2910,6 +3056,10 @@ def suggest_combo_bets(
 
             all_matched = all(bool(l.get("_matched_ticker")) for l in leg_set)
             tickers = [l["_matched_ticker"] for l in leg_set if l.get("_matched_ticker")]
+
+            # Precision guard: if all legs are matched, market tickers should be unique.
+            if all_matched and len(set(tickers)) != len(tickers):
+                continue
 
             combo = {
                 "uid": "combo_" + "_".join(l["uid"][:8] for l in leg_set),

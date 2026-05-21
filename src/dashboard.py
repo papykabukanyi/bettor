@@ -94,6 +94,40 @@ def _ready_resolve_signature(bets: list[dict]) -> str:
 
 def _clean_ready_bets_payload(bets: list[dict]) -> list[dict]:
     """Normalize and dedupe incoming ready-bet payloads before Kalshi matching."""
+    def _normalize_leg(raw_leg: dict[str, Any]) -> dict[str, Any]:
+        leg = dict(raw_leg)
+        leg["kind"] = str(leg.get("kind") or "single").strip().lower()
+        leg["sport"] = str(leg.get("sport") or "").strip().lower()
+        leg["bet_type"] = str(leg.get("bet_type") or leg.get("prop_type") or "").strip().lower()
+        leg["prop_type"] = str(leg.get("prop_type") or leg.get("stat_type") or leg.get("bet_type") or "").strip().lower()
+        leg["pick"] = str(leg.get("pick") or leg.get("label") or "").strip()
+        leg["label"] = str(leg.get("label") or leg.get("pick") or "").strip()
+        leg["player_name"] = str(
+            leg.get("player_name") or leg.get("name") or leg.get("player") or leg.get("athlete_name") or ""
+        ).strip()
+        leg["name"] = str(leg.get("name") or leg.get("player_name") or "").strip()
+        leg["direction"] = str(leg.get("direction") or leg.get("recommendation") or "").strip().upper()
+        leg["game"] = str(leg.get("game") or leg.get("game_key") or "").strip()
+        leg["game_key"] = str(leg.get("game_key") or leg.get("game") or "").strip()
+        leg["game_date"] = str(leg.get("game_date") or "").strip()[:10]
+        leg["scheduled_start"] = str(
+            leg.get("scheduled_start")
+            or leg.get("game_datetime")
+            or leg.get("start_time")
+            or leg.get("game_time")
+            or ""
+        ).strip()
+        for trusted_key in (
+            "kalshi_ticker",
+            "kalshi_event_ticker",
+            "kalshi_series_ticker",
+            "kalshi_side",
+            "kalshi_status",
+            "kalshi_price_cents",
+        ):
+            leg.pop(trusted_key, None)
+        return leg
+
     clean_rows: list[dict] = []
     seen: set[str] = set()
     for idx, raw in enumerate(bets or []):
@@ -130,6 +164,26 @@ def _clean_ready_bets_payload(bets: list[dict]) -> list[dict]:
             or row.get("game_time")
             or ""
         ).strip()
+
+        # Backend is source-of-truth: ignore client-provided Kalshi matching fields.
+        for trusted_key in (
+            "kalshi_ticker",
+            "kalshi_event_ticker",
+            "kalshi_series_ticker",
+            "kalshi_side",
+            "kalshi_status",
+            "kalshi_price_cents",
+        ):
+            row.pop(trusted_key, None)
+
+        if row.get("kind") == "combo":
+            legs = row.get("legs") if isinstance(row.get("legs"), list) else []
+            row["legs"] = [
+                _normalize_leg(leg)
+                for leg in legs
+                if isinstance(leg, dict)
+            ]
+
         for num_key in ("line", "model_prob", "probability", "dec_odds", "decimal_odds", "ev", "quality"):
             val = row.get(num_key)
             try:
