@@ -652,6 +652,63 @@ DO $$ BEGIN
         ALTER TABLE predictions ADD COLUMN investor_score       NUMERIC(5,2);
     END IF;
 END $$;
+
+-- ── Unified multi-sport training history tables ───────────────────────────
+CREATE TABLE IF NOT EXISTS training_game_history (
+    id                 SERIAL PRIMARY KEY,
+    sport              VARCHAR(20)  NOT NULL,
+    league             VARCHAR(80),
+    season             INTEGER,
+    game_date          DATE         NOT NULL,
+    game_key           VARCHAR(220) NOT NULL,
+    home_team          VARCHAR(120) NOT NULL,
+    away_team          VARCHAR(120) NOT NULL,
+    home_score         INTEGER,
+    away_score         INTEGER,
+    status             VARCHAR(40),
+    source             VARCHAR(50),
+    raw_json           JSONB,
+    ingested_at        TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(sport, game_key, source)
+);
+
+CREATE TABLE IF NOT EXISTS training_player_history (
+    id                 SERIAL PRIMARY KEY,
+    sport              VARCHAR(20)  NOT NULL,
+    season             INTEGER,
+    game_date          DATE,
+    game_key           VARCHAR(220),
+    player_name        VARCHAR(160) NOT NULL,
+    team               VARCHAR(120),
+    stat_type          VARCHAR(60)  NOT NULL,
+    stat_value         NUMERIC(10,3),
+    source             VARCHAR(50),
+    raw_json           JSONB,
+    ingested_at        TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(sport, season, game_key, player_name, stat_type, source)
+);
+
+CREATE TABLE IF NOT EXISTS training_injury_history (
+    id                 SERIAL PRIMARY KEY,
+    sport              VARCHAR(20)  NOT NULL,
+    injury_date        DATE         NOT NULL,
+    team               VARCHAR(120),
+    player_name        VARCHAR(160) NOT NULL,
+    status             VARCHAR(80),
+    injury_type        VARCHAR(120),
+    detail             TEXT,
+    source             VARCHAR(50),
+    raw_json           JSONB,
+    ingested_at        TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(sport, injury_date, player_name, team, source)
+);
+
+CREATE INDEX IF NOT EXISTS idx_train_game_sport_date
+    ON training_game_history(sport, game_date);
+CREATE INDEX IF NOT EXISTS idx_train_player_sport_date
+    ON training_player_history(sport, game_date);
+CREATE INDEX IF NOT EXISTS idx_train_injury_sport_date
+    ON training_injury_history(sport, injury_date);
 """
 
 
@@ -900,6 +957,49 @@ def get_injuries(sport=None):
         return [dict(r) for r in cur.fetchall()]
     except Exception as e:
         print(f"[db] get_injuries error: {e}")
+        return []
+    finally:
+        conn.close()
+
+
+def get_injury_history(sport: str | None = None, days_back: int = 120) -> list[dict]:
+    """Return injury rows over a longer lookback window for training timelines."""
+    conn = get_conn()
+    if conn is None:
+        return []
+    try:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        days_back = max(1, int(days_back or 120))
+        if sport:
+            cur.execute(
+                """
+                SELECT sport, team, player_name, status, description, injury_type,
+                       source, fetched_at
+                FROM injury_reports
+                WHERE sport = %s
+                  AND fetched_at > NOW() - (INTERVAL '1 day' * %s)
+                ORDER BY fetched_at DESC
+                """,
+                (sport, days_back),
+            )
+        else:
+            cur.execute(
+                """
+                SELECT sport, team, player_name, status, description, injury_type,
+                       source, fetched_at
+                FROM injury_reports
+                WHERE fetched_at > NOW() - (INTERVAL '1 day' * %s)
+                ORDER BY fetched_at DESC
+                """,
+                (days_back,),
+            )
+        rows = [dict(r) for r in cur.fetchall()]
+        for r in rows:
+            if r.get("fetched_at"):
+                r["fetched_at"] = r["fetched_at"].isoformat()
+        return rows
+    except Exception as e:
+        print(f"[db] get_injury_history error: {e}")
         return []
     finally:
         conn.close()
@@ -1506,6 +1606,172 @@ def get_news_articles(sport: str = None, team: str = None,
         return []
     finally:
         conn.close()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Unified multi-sport training history
+# ──────────────────────────────────────────────────────────────────────────────
+
+def save_training_game_history(rows: list[dict]) -> int:
+    """Upsert normalized historical game outcomes for model training."""
+    if not rows:
+        return 0
+    conn = get_conn()
+    if conn is None:
+        return 0
+    saved = 0
+    try:
+        cur = conn.cursor()
+        for r in rows:
+            try:
+                cur.execute(
+                    """
+                    INSERT INTO training_game_history
+                        (sport, league, season, game_date, game_key,
+                         home_team, away_team, home_score, away_score,
+                         status, source, raw_json, ingested_at)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,NOW())
+                    ON CONFLICT (sport, game_key, source) DO UPDATE SET
+                        league      = COALESCE(EXCLUDED.league, training_game_history.league),
+                        season      = COALESCE(EXCLUDED.season, training_game_history.season),
+                        game_date   = COALESCE(EXCLUDED.game_date, training_game_history.game_date),
+                        home_team   = COALESCE(EXCLUDED.home_team, training_game_history.home_team),
+                        away_team   = COALESCE(EXCLUDED.away_team, training_game_history.away_team),
+                        home_score  = COALESCE(EXCLUDED.home_score, training_game_history.home_score),
+                        away_score  = COALESCE(EXCLUDED.away_score, training_game_history.away_score),
+                        status      = COALESCE(EXCLUDED.status, training_game_history.status),
+                        raw_json    = COALESCE(EXCLUDED.raw_json, training_game_history.raw_json),
+                        ingested_at = NOW()
+                    """,
+                    (
+                        r.get("sport"),
+                        r.get("league"),
+                        r.get("season"),
+                        r.get("game_date"),
+                        r.get("game_key"),
+                        r.get("home_team"),
+                        r.get("away_team"),
+                        r.get("home_score"),
+                        r.get("away_score"),
+                        r.get("status"),
+                        r.get("source"),
+                        json.dumps(r.get("raw_json") or {}),
+                    ),
+                )
+                saved += 1
+            except Exception:
+                pass
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        print(f"[db] save_training_game_history error: {e}")
+        return 0
+    finally:
+        conn.close()
+    return saved
+
+
+def save_training_player_history(rows: list[dict]) -> int:
+    """Upsert normalized historical player-level rows for model training."""
+    if not rows:
+        return 0
+    conn = get_conn()
+    if conn is None:
+        return 0
+    saved = 0
+    try:
+        cur = conn.cursor()
+        for r in rows:
+            try:
+                cur.execute(
+                    """
+                    INSERT INTO training_player_history
+                        (sport, season, game_date, game_key, player_name,
+                         team, stat_type, stat_value, source, raw_json, ingested_at)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,NOW())
+                    ON CONFLICT (sport, season, game_key, player_name, stat_type, source)
+                    DO UPDATE SET
+                        game_date   = COALESCE(EXCLUDED.game_date, training_player_history.game_date),
+                        team        = COALESCE(EXCLUDED.team, training_player_history.team),
+                        stat_value  = COALESCE(EXCLUDED.stat_value, training_player_history.stat_value),
+                        raw_json    = COALESCE(EXCLUDED.raw_json, training_player_history.raw_json),
+                        ingested_at = NOW()
+                    """,
+                    (
+                        r.get("sport"),
+                        r.get("season"),
+                        r.get("game_date"),
+                        r.get("game_key"),
+                        r.get("player_name"),
+                        r.get("team"),
+                        r.get("stat_type"),
+                        r.get("stat_value"),
+                        r.get("source"),
+                        json.dumps(r.get("raw_json") or {}),
+                    ),
+                )
+                saved += 1
+            except Exception:
+                pass
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        print(f"[db] save_training_player_history error: {e}")
+        return 0
+    finally:
+        conn.close()
+    return saved
+
+
+def save_training_injury_history(rows: list[dict]) -> int:
+    """Upsert normalized historical injury timeline rows for model training."""
+    if not rows:
+        return 0
+    conn = get_conn()
+    if conn is None:
+        return 0
+    saved = 0
+    try:
+        cur = conn.cursor()
+        for r in rows:
+            try:
+                cur.execute(
+                    """
+                    INSERT INTO training_injury_history
+                        (sport, injury_date, team, player_name, status,
+                         injury_type, detail, source, raw_json, ingested_at)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,NOW())
+                    ON CONFLICT (sport, injury_date, player_name, team, source)
+                    DO UPDATE SET
+                        status      = COALESCE(EXCLUDED.status, training_injury_history.status),
+                        injury_type = COALESCE(EXCLUDED.injury_type, training_injury_history.injury_type),
+                        detail      = COALESCE(EXCLUDED.detail, training_injury_history.detail),
+                        raw_json    = COALESCE(EXCLUDED.raw_json, training_injury_history.raw_json),
+                        ingested_at = NOW()
+                    """,
+                    (
+                        r.get("sport"),
+                        r.get("injury_date"),
+                        r.get("team"),
+                        r.get("player_name"),
+                        r.get("status"),
+                        r.get("injury_type"),
+                        r.get("detail"),
+                        r.get("source"),
+                        json.dumps(r.get("raw_json") or {}),
+                    ),
+                )
+                saved += 1
+            except Exception:
+                pass
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        print(f"[db] save_training_injury_history error: {e}")
+        return 0
+    finally:
+        conn.close()
+    return saved
 
 
 # ──────────────────────────────────────────────────────────────────────────────

@@ -47,6 +47,16 @@ _DAILY_LOCK_HOUR_ET = int(os.getenv("DAILY_LOCK_HOUR_ET", "5"))
 _DAILY_LOCK_MINUTE_ET = int(os.getenv("DAILY_LOCK_MINUTE_ET", "0"))
 _AUTO_ANALYSIS_INTERVAL_MIN = int(os.getenv("AUTO_ANALYSIS_INTERVAL_MIN", "0"))
 _BOOT_FORCE_ANALYSIS = str(os.getenv("BOOT_FORCE_ANALYSIS", "0")).strip().lower() in {"1", "true", "yes", "on"}
+_AUTO_BACKFILL_ENABLED = str(os.getenv("AUTO_BACKFILL_ENABLED", "1")).strip().lower() in {"1", "true", "yes", "on"}
+_AUTO_BACKFILL_HOUR_ET = int(os.getenv("AUTO_BACKFILL_HOUR_ET", "3"))
+_AUTO_BACKFILL_MINUTE_ET = int(os.getenv("AUTO_BACKFILL_MINUTE_ET", "35"))
+_AUTO_BACKFILL_DAYS = max(7, int(os.getenv("AUTO_BACKFILL_DAYS", "14") or "14"))
+_AUTO_BACKFILL_SPORTS = str(
+    os.getenv(
+        "AUTO_BACKFILL_SPORTS",
+        "nfl,nba,nhl,soccer,baseball,tennis,boxing,mma,golf,motorsports,cricket",
+    )
+).strip()
 _ACTIVE_SPORT = str(CONFIG_SPORT or os.getenv("SPORT", "all") or "all").strip().lower()
 if _ACTIVE_SPORT not in {"mlb", "soccer", "all"}:
     _ACTIVE_SPORT = "all"
@@ -369,6 +379,9 @@ _lock = threading.Lock()
 # ─── Server-Sent Events broadcast ────────────────────────────────────────────
 _sse_clients: list[queue.Queue] = []
 _sse_lock = threading.Lock()
+_backfill_lock = threading.Lock()
+_backfill_running = False
+_last_auto_backfill_date: str | None = None
 
 
 def _sse_broadcast(event: str, data: dict):
@@ -465,6 +478,178 @@ def _run_mandatory_daily_calibration(run_date: datetime.date, team_stats=None, m
     except Exception as exc:
         _log(f"[calibration] mandatory daily calibration failed: {exc}")
         return {"ok": False, "msg": str(exc)}
+
+
+def _backfill_thesportsdb_history(days_back: int = 30) -> int:
+    """Backfill multi-sport completed events from TheSportsDB into games table."""
+    from data.db import upsert_game
+    from data.thesportsdb_fetcher import get_events_by_date
+
+    sport_map = [
+        ("Soccer", "soccer"),
+        ("Baseball", "mlb"),
+        ("Basketball", "basketball"),
+        ("Ice Hockey", "hockey"),
+    ]
+    saved = 0
+    today = _et_calendar_today()
+
+    for offset in range(max(0, int(days_back)) + 1):
+        target_day = today - datetime.timedelta(days=offset)
+        for tsdb_sport, internal_sport in sport_map:
+            events = get_events_by_date(target_day, tsdb_sport) or []
+            for ev in events:
+                try:
+                    game_date = str(ev.get("dateEvent") or target_day.isoformat())[:10]
+                    hs_raw = ev.get("intHomeScore")
+                    as_raw = ev.get("intAwayScore")
+                    home_score = int(hs_raw) if hs_raw not in (None, "") else None
+                    away_score = int(as_raw) if as_raw not in (None, "") else None
+                    status = str(ev.get("strStatus") or "Scheduled")
+                    upsert_game(
+                        sport=internal_sport,
+                        league=str(ev.get("strLeague") or ""),
+                        home_team=str(ev.get("strHomeTeam") or ""),
+                        away_team=str(ev.get("strAwayTeam") or ""),
+                        game_date=game_date,
+                        status=status,
+                        home_score=home_score,
+                        away_score=away_score,
+                        external_id=str(ev.get("idEvent") or ""),
+                    )
+                    saved += 1
+                except Exception:
+                    continue
+    return saved
+
+
+def _run_prediction_preflight(mode: str) -> dict[str, Any]:
+    """Pre-prediction backend hygiene pipeline.
+
+    Runs before every prediction cycle:
+      1) ingest recent historical data,
+      2) refresh deep sentiment caches,
+      3) run a quick backtest/calibration check.
+    """
+    enabled = str(os.getenv("PRE_PREDICTION_PREFLIGHT_ENABLED", "1")).strip().lower() in {"1", "true", "yes", "on"}
+    if not enabled:
+        return {"ok": True, "skipped": True, "msg": "disabled"}
+
+    mode_norm = str(mode or "mlb").strip().lower()
+    hist_days = max(7, int(os.getenv("PRE_PREDICTION_HISTORY_DAYS", "45") or "45"))
+    gdelt_days = max(3, int(os.getenv("PRE_PREDICTION_GDELT_DAYS", "14") or "14"))
+    backtest_days = max(30, int(os.getenv("PRE_PREDICTION_BACKTEST_DAYS", "180") or "180"))
+    strict_backtest = str(os.getenv("PRE_PREDICTION_STRICT_BACKTEST", "0")).strip().lower() in {"1", "true", "yes", "on"}
+    max_ece = float(os.getenv("PRE_PREDICTION_MAX_ECE", "0.18") or "0.18")
+    run_multi_history = str(os.getenv("PRE_PREDICTION_MULTI_SPORT_HISTORY", "1")).strip().lower() in {"1", "true", "yes", "on"}
+
+    summary: dict[str, Any] = {
+        "ok": True,
+        "mode": mode_norm,
+        "history_days": hist_days,
+        "gdelt_days": gdelt_days,
+        "backtest_days": backtest_days,
+    }
+
+    _log(
+        f"[preflight] mode={mode_norm} hist={hist_days}d gdelt={gdelt_days}d "
+        f"backtest={backtest_days}d"
+    )
+
+    # 1) Historical ingestion
+    try:
+        if mode_norm in {"mlb", "all"}:
+            from data.history_ingest import backfill_news, backfill_injuries, backfill_game_results
+            summary["mlb_news_rows"] = backfill_news(days_back=hist_days)
+            summary["mlb_injury_rows"] = backfill_injuries(days_back=hist_days)
+            summary["mlb_game_rows"] = backfill_game_results(days_back=hist_days)
+
+        # TheSportsDB coverage for non-MLB leagues (soccer/basketball/hockey + baseball)
+        if mode_norm in {"soccer", "all", "mlb"}:
+            summary["thesportsdb_game_rows"] = _backfill_thesportsdb_history(days_back=min(hist_days, 60))
+
+        if run_multi_history:
+            from data.multi_sport_history import ingest_multi_sport_history
+
+            full_kalshi_sport_set = [
+                "nfl", "nba", "nhl", "soccer", "baseball",
+                "tennis", "boxing", "mma", "golf", "motorsports", "cricket",
+            ]
+
+            if mode_norm == "all":
+                history_sports = full_kalshi_sport_set
+            elif mode_norm == "soccer":
+                history_sports = ["soccer"]
+            elif mode_norm == "mlb":
+                # Keep broad background training tables warm even on MLB runs.
+                history_sports = full_kalshi_sport_set
+            else:
+                history_sports = full_kalshi_sport_set
+
+            history_result = ingest_multi_sport_history(
+                days_back=hist_days,
+                sports=history_sports,
+            )
+            summary["multi_sport_history"] = history_result
+            totals = history_result.get("totals") or {}
+            _log(
+                "[preflight] unified history saved "
+                f"games={totals.get('games', 0)} players={totals.get('players', 0)} injuries={totals.get('injuries', 0)}"
+            )
+    except Exception as hist_exc:
+        _log(f"[preflight] historical ingest warning: {hist_exc}")
+        summary["history_error"] = str(hist_exc)
+
+    # 2) Deep sentiment refresh/warm caches
+    try:
+        from data.gdelt_fetcher import fetch_gdelt_sentiment
+        summary["gdelt_articles"] = int(fetch_gdelt_sentiment(days_back=gdelt_days, verbose=False) or 0)
+    except Exception as gdelt_exc:
+        _log(f"[preflight] GDELT refresh warning: {gdelt_exc}")
+        summary["gdelt_error"] = str(gdelt_exc)
+
+    try:
+        if mode_norm in {"soccer", "all"}:
+            from data.soccer_news import get_soccer_news
+            soccer_news = get_soccer_news(query="soccer", max_results=120, max_age_hours=96)
+            summary["soccer_news_rows"] = len(soccer_news or [])
+    except Exception as soccer_news_exc:
+        _log(f"[preflight] soccer sentiment warmup warning: {soccer_news_exc}")
+        summary["soccer_news_error"] = str(soccer_news_exc)
+
+    # 3) Backtest gate (calibration snapshot)
+    try:
+        from data.db import get_calibration_data
+
+        cal = get_calibration_data(days_back=backtest_days) or {}
+        total_resolved = int(cal.get("total_resolved") or 0)
+        ece = cal.get("ece")
+        summary["backtest_total_resolved"] = total_resolved
+        summary["backtest_ece"] = ece
+
+        if total_resolved > 0:
+            _log(f"[preflight] backtest resolved={total_resolved}, ece={ece}")
+        else:
+            _log("[preflight] backtest skipped: no resolved outcomes yet")
+
+        if strict_backtest and total_resolved >= 80 and isinstance(ece, (int, float)) and float(ece) > max_ece:
+            raise RuntimeError(
+                f"Backtest gate failed: ECE {float(ece):.4f} > {max_ece:.4f}"
+            )
+    except Exception as backtest_exc:
+        summary["backtest_error"] = str(backtest_exc)
+        _log(f"[preflight] backtest warning: {backtest_exc}")
+        if strict_backtest:
+            raise
+
+    _log(
+        "[preflight] complete "
+        f"(mlb_news={summary.get('mlb_news_rows', 0)}, "
+        f"mlb_games={summary.get('mlb_game_rows', 0)}, "
+        f"thesportsdb={summary.get('thesportsdb_game_rows', 0)}, "
+        f"gdelt={summary.get('gdelt_articles', 0)})"
+    )
+    return summary
 
 
 def _clean(obj):
@@ -3135,6 +3320,7 @@ def _run_all_sports_analysis():
     try:
         today_date = _et_calendar_today()
         _run_mandatory_daily_calibration(today_date)
+        _run_prediction_preflight("all")
 
         _phase(0)
         _log("[all-sports] Discovering online sportsbooks and events...")
@@ -3155,6 +3341,21 @@ def _run_all_sports_analysis():
         else:
             sentiment_prop_rows = _build_all_sport_sentiment_props(games, bets)
         table_rows = _merge_all_sports_table_rows(sentiment_prop_rows, best_bet_rows)
+
+        # Always sanitize row payloads before they flow to scoring/DB/UI.
+        try:
+            from data.enrichment import clean_bet_row, clean_prop_row
+            bets = [clean_bet_row(b) for b in (bets or []) if isinstance(b, dict)]
+            sentiment_prop_rows = [
+                clean_prop_row(p) for p in (sentiment_prop_rows or []) if isinstance(p, dict)
+            ]
+            table_rows = [clean_prop_row(r) for r in (table_rows or []) if isinstance(r, dict)]
+            _log(
+                f"[all-sports] row-clean pass: bets={len(bets)} props={len(sentiment_prop_rows)}"
+            )
+        except Exception as _row_clean_exc:
+            _log(f"[all-sports] row-clean skipped: {_row_clean_exc}")
+
         _attach_tracking_uids(bets, table_rows)
         card_prop_rows = sentiment_prop_rows if sentiment_prop_rows else []
         _log(f"[all-sports] Pulled {len(games)} games and {len(bets)} ranked bets")
@@ -3429,6 +3630,7 @@ def _run_soccer_analysis(lock_date: datetime.date | None = None):
         tomorrow_str = (today_date + datetime.timedelta(days=1)).isoformat()
         run_id = f"SOCCER-{today_str}"
         _run_mandatory_daily_calibration(today_date)
+        _run_prediction_preflight("soccer")
 
         need_preds = False
         need_props = False
@@ -3500,6 +3702,15 @@ def _run_soccer_analysis(lock_date: datetime.date | None = None):
                 all_bets.append(_normalize_soccer_bet(g, bet, today_str))
             for prop in card.get("suggested_props", []) or []:
                 all_props.append(_normalize_soccer_prop(g, prop, today_str))
+
+        # Sanitize normalized rows before scoring/parlay/DB persistence.
+        try:
+            from data.enrichment import clean_bet_row, clean_prop_row
+            all_bets = [clean_bet_row(b) for b in all_bets if isinstance(b, dict)]
+            all_props = [clean_prop_row(p) for p in all_props if isinstance(p, dict)]
+            _log(f"[soccer] row-clean pass: bets={len(all_bets)} props={len(all_props)}")
+        except Exception as _row_clean_exc:
+            _log(f"[soccer] row-clean skipped: {_row_clean_exc}")
 
         _attach_tracking_uids(all_bets, all_props)
 
@@ -3696,6 +3907,8 @@ def _run_analysis(lock_date: datetime.date | None = None):
         except Exception as _ae:
             _log(f"[archive] Archive step skipped: {_ae}")
 
+        _run_prediction_preflight("mlb")
+
         # Decide whether this run should lock/save today's picks
         need_preds = False
         need_props = False
@@ -3720,18 +3933,6 @@ def _run_analysis(lock_date: datetime.date | None = None):
             need_preds = True
             need_props = True
 
-        # ── Auto-backfill 30 days of data and retrain model ──────────────────
-        _log("[backfill] Running 30-day backfill before analysis...")
-        try:
-            from data.history_ingest import backfill_news, backfill_injuries, backfill_game_results
-            n_news = backfill_news(days_back=30)
-            _log(f"[backfill] News rows: {n_news}")
-            n_inj = backfill_injuries(days_back=30)
-            _log(f"[backfill] Injury rows: {n_inj}")
-            n_games = backfill_game_results(days_back=30)
-            _log(f"[backfill] Game results saved: {n_games}")
-        except Exception as _bf_e:
-            _log(f"[backfill] Backfill error (continuing): {_bf_e}")
         # Retrain deferred to after team_stats is loaded (later in pipeline)
 
         _phase(0)
@@ -4001,6 +4202,14 @@ def _run_analysis(lock_date: datetime.date | None = None):
                 _log(f"[mlb] Props enrichment skipped: {_ep}")
         except Exception as e:
             _log(f"Props error: {e}")
+
+        try:
+            from data.enrichment import clean_bet_row, clean_prop_row
+            all_bets = [clean_bet_row(b) for b in (all_bets or []) if isinstance(b, dict)]
+            all_props = [clean_prop_row(p) for p in (all_props or []) if isinstance(p, dict)]
+            _log(f"[mlb] row-clean pass: bets={len(all_bets)} props={len(all_props)}")
+        except Exception as _row_clean_exc:
+            _log(f"[mlb] row-clean skipped: {_row_clean_exc}")
 
         _attach_tracking_uids(all_bets, all_props)
 
@@ -7111,15 +7320,83 @@ def _start_scheduler():
             max_instances=1,
             coalesce=True,
         )
+        if _AUTO_BACKFILL_ENABLED:
+            sched.add_job(
+                _scheduled_multi_sport_backfill,
+                CronTrigger(
+                    hour=_AUTO_BACKFILL_HOUR_ET,
+                    minute=_AUTO_BACKFILL_MINUTE_ET,
+                    timezone="America/New_York",
+                ),
+                id="daily_multi_sport_backfill",
+                max_instances=1,
+                coalesce=True,
+            )
+
         sched.start()
         if _AUTO_ANALYSIS_INTERVAL_MIN > 0:
             print(f"[scheduler] APScheduler started — analysis every {_AUTO_ANALYSIS_INTERVAL_MIN} minutes")
         else:
             print("[scheduler] APScheduler started — daily morning snapshot only")
+        if _AUTO_BACKFILL_ENABLED:
+            print(
+                "[scheduler] Daily multi-sport backfill scheduled "
+                f"at {_AUTO_BACKFILL_HOUR_ET:02d}:{_AUTO_BACKFILL_MINUTE_ET:02d} ET "
+                f"(days={_AUTO_BACKFILL_DAYS})"
+            )
         return sched
     except Exception as e:
         print(f"[scheduler] Could not start APScheduler: {e}")
         return None
+
+
+def _parse_backfill_sports_csv(csv_text: str) -> list[str]:
+    parts = [p.strip().lower() for p in str(csv_text or "").split(",") if p.strip()]
+    return parts or [
+        "nfl", "nba", "nhl", "soccer", "baseball",
+        "tennis", "boxing", "mma", "golf", "motorsports", "cricket",
+    ]
+
+
+def _scheduled_multi_sport_backfill(force: bool = False):
+    """Daily off-peak backfill for unified multi-sport history tables."""
+    global _backfill_running, _last_auto_backfill_date
+
+    run_date = _et_calendar_today().isoformat()
+    with _backfill_lock:
+        if _backfill_running:
+            _log("[backfill-auto] skipped: previous run still active")
+            return
+        if not force and _last_auto_backfill_date == run_date:
+            _log(f"[backfill-auto] skipped: already ran today ({run_date})")
+            return
+        _backfill_running = True
+
+    started = datetime.datetime.now()
+    sports = _parse_backfill_sports_csv(_AUTO_BACKFILL_SPORTS)
+    try:
+        _log(
+            "[backfill-auto] started "
+            f"days={_AUTO_BACKFILL_DAYS} sports={','.join(sports)}"
+        )
+        from data.multi_sport_history import ingest_multi_sport_history
+
+        result = ingest_multi_sport_history(days_back=_AUTO_BACKFILL_DAYS, sports=sports) or {}
+        totals = result.get("totals") or {}
+        elapsed = (datetime.datetime.now() - started).total_seconds()
+        _last_auto_backfill_date = run_date
+        _log(
+            "[backfill-auto] complete "
+            f"ok={result.get('ok', True)} "
+            f"games={totals.get('games', 0)} players={totals.get('players', 0)} "
+            f"injuries={totals.get('injuries', 0)} elapsed={elapsed:.1f}s"
+        )
+    except Exception as exc:
+        elapsed = (datetime.datetime.now() - started).total_seconds()
+        _log(f"[backfill-auto] failed after {elapsed:.1f}s: {exc}")
+    finally:
+        with _backfill_lock:
+            _backfill_running = False
 
 
 def _load_boot_schedule_fallback() -> bool:
