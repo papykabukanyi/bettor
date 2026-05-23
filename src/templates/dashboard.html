@@ -394,20 +394,21 @@ main{padding:20px;max-width:1400px;margin:0 auto}
 .ready-scroll{max-height:420px;overflow:auto;padding:10px}
 .ready-item{background:rgba(255,255,255,.03);border:1px solid var(--border);border-radius:10px;padding:10px;margin-bottom:10px}
 .ready-item:last-child{margin-bottom:0}
-.ready-item-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px}
+.ready-item-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;flex-wrap:wrap}
 .ready-item-title{font-size:.84rem;font-weight:700;line-height:1.25}
-.ready-item-sub{font-size:.72rem;color:var(--muted);margin-top:4px;display:flex;gap:8px;flex-wrap:wrap}
+.ready-item-sub{font-size:.72rem;color:var(--muted);margin-top:4px;display:flex;gap:8px;flex-wrap:wrap;line-height:1.35}
 .ready-kpis{display:flex;gap:7px;flex-wrap:wrap;margin-top:8px}
 .ready-pill{font-size:.67rem;padding:3px 7px;border-radius:999px;border:1px solid var(--border);color:var(--muted)}
 .ready-pill.good{border-color:rgba(22,163,74,.45);color:var(--green)}
 .ready-pill.warn{border-color:rgba(234,179,8,.45);color:var(--yellow)}
-.ready-actions{display:flex;align-items:center;gap:8px;margin-top:9px;flex-wrap:wrap}
+.ready-actions{display:flex;align-items:flex-start;gap:8px;margin-top:9px;flex-wrap:wrap}
 .ready-actions input[type=number]{width:90px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;background:var(--card);color:var(--text);font-size:.76rem;flex-shrink:0}
 .ready-actions button{white-space:nowrap;flex-shrink:0;padding:8px 18px;font-size:.82rem}
-.ready-match-chip{flex:1;min-width:160px;display:flex;align-items:center;gap:8px;background:#0f172a;border:1px solid var(--border);border-radius:8px;padding:6px 12px;font-size:.73rem;overflow:hidden}
+.ready-match-chip{flex:1;min-width:160px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;background:#0f172a;border:1px solid var(--border);border-radius:8px;padding:6px 12px;font-size:.73rem;overflow:hidden}
 .ready-match-chip .match-name{color:#e2e8f0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;font-weight:600}
 .ready-match-chip .match-ticker{color:var(--muted);font-family:monospace;font-size:.68rem;white-space:nowrap;flex-shrink:0}
 .ready-match-chip .match-icon{flex-shrink:0;color:var(--green)}
+.ready-match-chip .match-exchange{font-size:.6rem;text-transform:uppercase;letter-spacing:.08em;padding:2px 6px;border-radius:999px;border:1px solid rgba(148,163,184,.25);background:rgba(148,163,184,.08);color:#cbd5e1;white-space:nowrap}
 .ready-match-chip .match-line-note{display:block;width:100%;color:#f59e0b;font-size:.65rem;font-style:italic;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 
 .ready-side-badge{padding:5px 12px;border-radius:999px;font-size:.72rem;font-weight:700;white-space:nowrap;flex-shrink:0}
@@ -640,6 +641,13 @@ body.modal-open{overflow:hidden}
   .bet-row{grid-template-columns:1fr;gap:6px}
   .prop-row{grid-template-columns:1fr;gap:6px}
   .prop-right{justify-content:flex-start}
+  .ready-scroll{max-height:360px}
+  .ready-item{padding:9px 8px}
+  .ready-actions{gap:6px}
+  .ready-actions input[type=number]{width:74px;padding:7px 8px}
+  .ready-actions button{padding:7px 12px;font-size:.76rem}
+  .ready-match-chip,.ready-status-badge,.ready-no-match-badge{min-width:0;width:100%}
+  .ready-match-chip .match-name{white-space:normal}
 }
 @media(max-width:980px){
   .card-body-grid{grid-template-columns:1fr}
@@ -649,6 +657,8 @@ body.modal-open{overflow:hidden}
   .vs{display:none}
   .team-side{display:flex;align-items:center;justify-content:space-between}
   .team-side.away{text-align:left}
+  .ready-item-sub{gap:6px}
+  .ready-kpis{gap:5px}
 }
 
 /* ── Console panel ── */
@@ -1084,6 +1094,8 @@ let _tournamentFilterTimer = null;
 let READY_BETS = [];
 let READY_KALSHI_RESOLUTIONS = {};
 let READY_KALSHI_STATUS = { loading: false, matched: 0, started: 0, done: 0, unavailable: 0, count: 0, market_count: 0, error: '' };
+let READY_POLYMARKET_RESOLUTIONS = {};
+let READY_POLYMARKET_STATUS = { loading: false, matched: 0, started: 0, done: 0, unavailable: 0, count: 0, market_count: 0, error: '' };
 const READY_ORDER_LOG_MAX = 120;
 let READY_ORDER_LOG = [];
 const READY_ORDER_IDS_KEY = 'bettor_ready_order_ids_v1';
@@ -1096,8 +1108,11 @@ let READY_OPS_LOG = [];
 const READY_OPS_LOG_MAX = 150;
 let _lastKalshiResolveMs = 0;
 let _lastKalshiResolveKey = '';
+let _lastPolymarketResolveMs = 0;
+let _lastPolymarketResolveKey = '';
 let _readyOrderSyncInFlight = false;
 const _KALSHI_RESOLVE_DEBOUNCE_MS = 120_000; // 2 min between auto-resolves (live enough, avoids request storms)
+const _POLYMARKET_RESOLVE_DEBOUNCE_MS = 120_000;
 let _lastKalshiTickerFetchMs = 0;
 const _KALSHI_TICKER_DEBOUNCE_MS = 180_000; // 3 min between auto ticker scans
 
@@ -1125,6 +1140,32 @@ function _renderOpsConsole() {
     const cls = e.type === 'error' ? 'ops-err' : e.type === 'success' ? 'ops-ok' : e.type === 'warn' ? 'ops-warn' : 'ops-info';
     return `<div class="ops-entry ${cls}"><span class="ops-ts">${e.ts}</span><span class="ops-type">[${String(e.type).toUpperCase()}]</span><span class="ops-msg">${e.msg}</span></div>`;
   }).join('');
+}
+
+function _readyResolutionForRow(row) {
+  if (!row) return null;
+  return READY_KALSHI_RESOLUTIONS[row.uid]
+    || READY_KALSHI_RESOLUTIONS[row.bet_uid]
+    || READY_KALSHI_RESOLUTIONS[row.prediction_uid]
+    || READY_POLYMARKET_RESOLUTIONS[row.uid]
+    || READY_POLYMARKET_RESOLUTIONS[row.bet_uid]
+    || READY_POLYMARKET_RESOLUTIONS[row.prediction_uid]
+    || (row.market_ticker ? row : null);
+}
+
+function _readyResolutionExchange(row) {
+  const resolution = _readyResolutionForRow(row);
+  return String((resolution && resolution.exchange) || '').toLowerCase();
+}
+
+function _isReadyBetMatched(row) {
+  if (!row) return false;
+  const resolution = _readyResolutionForRow(row);
+  if (row.kind === 'combo') {
+    return String((resolution && resolution.status) || row.status || '').toLowerCase() === 'matched'
+      && !!String((resolution && resolution.market_ticker) || row.market_ticker || '').trim();
+  }
+  return String(resolution?.status || '').toLowerCase() === 'matched' && !!String(resolution?.market_ticker || '').trim();
 }
 
 function toggleOpsConsole() {
@@ -4863,15 +4904,6 @@ function renderReadyBets() {
   const sentItems = _readReadySentBets();
   const isSent = (row) => !!_readySentInfo(row, sentItems);
   const openRows = allRows.filter(row => !isSent(row));
-  const isMatched = (row) => {
-    if (!row) return false;
-    const resolution = READY_KALSHI_RESOLUTIONS[row.uid] || READY_KALSHI_RESOLUTIONS[row.bet_uid] || READY_KALSHI_RESOLUTIONS[row.prediction_uid] || (row.market_ticker ? row : null);
-    if (row.kind === 'combo') {
-      return String((resolution && resolution.status) || row.status || '').toLowerCase() === 'matched'
-        && !!String((resolution && resolution.market_ticker) || row.market_ticker || '').trim();
-    }
-    return String(resolution?.status || '').toLowerCase() === 'matched' && !!resolution?.market_ticker;
-  };
   // Deduplicate by bet signature (for singles/props) and combo UID (for combos)
   const seenSingles = new Set();
   const seenCombos = new Set();
@@ -4902,12 +4934,21 @@ function renderReadyBets() {
       dedupedRows.push(row);
     }
   }
-  const matchedRows = dedupedRows.filter(isMatched);
+  const matchedRows = dedupedRows.filter(_isReadyBetMatched);
   const bettableRows = dedupedRows.filter(r => r.kind !== 'combo');
   const comboRows = dedupedRows.filter(r => r.kind === 'combo');
   bettableRows.sort((a, b) => {
+    const am = _isReadyBetMatched(a) ? 1 : 0;
+    const bm = _isReadyBetMatched(b) ? 1 : 0;
+    if (am !== bm) return bm - am;
     const q = (Number(b.quality) || 0) - (Number(a.quality) || 0);
     if (Math.abs(q) > 1e-9) return q;
+    return (Number(b.model_prob) || 0) - (Number(a.model_prob) || 0);
+  });
+  comboRows.sort((a, b) => {
+    const am = _isReadyBetMatched(a) ? 1 : 0;
+    const bm = _isReadyBetMatched(b) ? 1 : 0;
+    if (am !== bm) return bm - am;
     return (Number(b.model_prob) || 0) - (Number(a.model_prob) || 0);
   });
   const groups = {
@@ -4933,6 +4974,15 @@ function renderReadyBets() {
       if (READY_KALSHI_STATUS.market_count) bits.push(`${READY_KALSHI_STATUS.market_count} markets scanned`);
     }
     if (READY_KALSHI_STATUS.error) bits.push(`Kalshi resolve failed: ${READY_KALSHI_STATUS.error}`);
+    if (READY_POLYMARKET_STATUS.loading) {
+      bits.push(`Polymarket resolving ${READY_POLYMARKET_STATUS.count || openRows.length} bets…`);
+    } else if (READY_POLYMARKET_STATUS.market_count || READY_POLYMARKET_STATUS.count) {
+      bits.push(`Polymarket ${READY_POLYMARKET_STATUS.matched || 0} matched`);
+      if (READY_POLYMARKET_STATUS.done) bits.push(`${READY_POLYMARKET_STATUS.done} done`);
+      if (READY_POLYMARKET_STATUS.unavailable) bits.push(`${READY_POLYMARKET_STATUS.unavailable} unavailable`);
+      if (READY_POLYMARKET_STATUS.market_count) bits.push(`${READY_POLYMARKET_STATUS.market_count} markets scanned`);
+    }
+    if (READY_POLYMARKET_STATUS.error) bits.push(`Polymarket resolve failed: ${READY_POLYMARKET_STATUS.error}`);
     if (KALSHI_TODAY_DATA) {
       const todaySports = Object.keys(KALSHI_TODAY_DATA.sports || {});
       if (todaySports.length) bits.push(`Open: ${KALSHI_TODAY_DATA.total || 0} Kalshi mkts (${todaySports.length} sports)`);
@@ -4943,11 +4993,12 @@ function renderReadyBets() {
   // ── shared: render action row for any ready bet ──
   const renderActionRow = (b) => {
     const uidDom = _safeDomId(b.uid);
-    const resolution = READY_KALSHI_RESOLUTIONS[b.uid] || READY_KALSHI_RESOLUTIONS[b.bet_uid] || READY_KALSHI_RESOLUTIONS[b.prediction_uid] || (b && b.market_ticker ? b : null);
+    const resolution = _readyResolutionForRow(b);
     const sentInfo = _readySentInfo(b, sentItems);
     const resolutionStatus = resolution
       ? String(resolution.status || '')
       : (String(b.status || '') || (READY_KALSHI_STATUS.loading ? 'loading' : 'pending'));
+    const matchedExchange = String((resolution && resolution.exchange) || '').toLowerCase();
     const autoTicker = resolutionStatus === 'matched' ? String((resolution && resolution.market_ticker) || b.market_ticker || '').trim() : '';
     const sideVal = resolutionStatus === 'matched'
       ? String((resolution && resolution.side) || b.side || 'yes').toLowerCase()
@@ -4972,10 +5023,11 @@ function renderReadyBets() {
           <span class="match-icon">📍</span>
           <span class="match-name">${chipTitle}</span>
           <span class="match-ticker">${autoTicker}</span>
+          ${matchedExchange ? `<span class="match-exchange">${matchedExchange === 'polymarket' ? 'Polymarket' : 'Kalshi'}</span>` : ''}
           ${lineNoteHtml}
         </div>`;
     } else if (resolutionStatus === 'loading' || resolutionStatus === 'pending') {
-      matchHtml = `<div class="ready-status-badge loading">⌛ Finding exact Kalshi market…</div>`;
+      matchHtml = `<div class="ready-status-badge loading">⌛ Finding exact market…</div>`;
       hintHtml = `<span class="ready-status-hint">Server is checking teams, start time, and combo legs.</span>`;
     } else {
       const stateClass = ['done', 'started'].includes(resolutionStatus) ? resolutionStatus : 'unavailable';
@@ -4985,17 +5037,18 @@ function renderReadyBets() {
             ? 'Game is done.'
             : resolutionStatus === 'started'
               ? 'Game already started.'
-              : 'No exact Kalshi market is open for this bet.');
+              : 'No exact market is open for this bet.');
       matchHtml = `<div class="ready-status-badge ${stateClass}">${stateText}</div>`;
       if (resolution && resolution.scheduled_start) {
         const when = String(resolution.scheduled_start).replace('T', ' ').replace('Z', ' UTC');
         hintHtml = `<span class="ready-status-hint">Scheduled start: ${when}</span>`;
       } else if (resolutionStatus === 'unavailable') {
-        hintHtml = `<span class="ready-status-hint">Not currently listed on Kalshi as an exact market.</span>`;
+        hintHtml = `<span class="ready-status-hint">Not currently listed as an exact market.</span>`;
       }
     }
 
     const hasMatch = !!autoTicker;
+    const canExecute = hasMatch && matchedExchange !== 'polymarket';
     const sideBadge = hasMatch ? `<span class="ready-side-badge ${sideVal}">${sideVal.toUpperCase()}</span>` : '';
 
     if (sentInfo) {
@@ -5013,10 +5066,10 @@ function renderReadyBets() {
     return `<div class="ready-actions" data-uid="${b.uid}" data-ticker="${autoTicker}" data-side="${sideVal}" data-price="${autoPrice}">
       ${matchHtml}
       ${sideBadge}
-      ${hasMatch
+      ${canExecute
         ? `<label class="ready-amt-wrap"><span class="ready-amt-sign">$</span><input id="ready-amt-${uidDom}" type="number" min="1" max="10000" step="1" value="" placeholder="Amount"></label>
            <button class="btn btn-primary" onclick="executeReadyBet('${b.uid}')">Place ▶</button>`
-        : hintHtml}
+        : (hasMatch ? `<span class="ready-status-hint">Matched on ${matchedExchange === 'polymarket' ? 'Polymarket' : 'Kalshi'}.</span>` : hintHtml)}
     </div>`;
   };
 
@@ -5161,16 +5214,25 @@ function refreshReadyBets(forceKalshi) {
     _lastKalshiResolveKey = '';
     READY_KALSHI_RESOLUTIONS = {};
     READY_KALSHI_STATUS = { loading: false, matched: 0, started: 0, done: 0, unavailable: 0, count: READY_BETS.length, market_count: 0, error: '' };
+    _lastPolymarketResolveMs = 0;
+    _lastPolymarketResolveKey = '';
+    READY_POLYMARKET_RESOLUTIONS = {};
+    READY_POLYMARKET_STATUS = { loading: false, matched: 0, started: 0, done: 0, unavailable: 0, count: READY_BETS.length, market_count: 0, error: '' };
   } else {
     // Auto-refresh: KEEP existing resolutions — prune UIDs no longer in the bet list.
     // This prevents the "0 matched" flash every time data auto-polls.
     const currentUids = new Set(READY_BETS.map(r => r.uid));
     const pruned = {};
+    const prunedPoly = {};
     let kept = 0;
     Object.entries(READY_KALSHI_RESOLUTIONS).forEach(([uid, res]) => {
       if (currentUids.has(uid)) { pruned[uid] = res; kept++; }
     });
+    Object.entries(READY_POLYMARKET_RESOLUTIONS).forEach(([uid, res]) => {
+      if (currentUids.has(uid)) { prunedPoly[uid] = res; kept++; }
+    });
     READY_KALSHI_RESOLUTIONS = pruned;
+    READY_POLYMARKET_RESOLUTIONS = prunedPoly;
     // Only reset status counters — don't wipe the resolved count display
     READY_KALSHI_STATUS = {
       ...READY_KALSHI_STATUS,
@@ -5180,11 +5242,92 @@ function refreshReadyBets(forceKalshi) {
       started: Object.values(pruned).filter(r => r.status === 'started').length,
       done: Object.values(pruned).filter(r => r.status === 'done').length,
     };
+    READY_POLYMARKET_STATUS = {
+      ...READY_POLYMARKET_STATUS,
+      count: READY_BETS.length,
+      matched: Object.values(prunedPoly).filter(r => r.status === 'matched').length,
+      unavailable: Object.values(prunedPoly).filter(r => r.status === 'unavailable').length,
+      started: Object.values(prunedPoly).filter(r => r.status === 'started').length,
+      done: Object.values(prunedPoly).filter(r => r.status === 'done').length,
+    };
   }
   renderReadyBets();
   // Keep open market catalog fresh automatically (throttled)
   fetchKalshiTodayTickers(!!forceKalshi);
-  return resolveKalshiReadyBets(!!forceKalshi);
+  return Promise.all([resolveKalshiReadyBets(!!forceKalshi), resolvePolymarketReadyBets(!!forceKalshi)]);
+}
+
+function resolvePolymarketReadyBets(force) {
+  if (!READY_BETS.length) {
+    READY_POLYMARKET_RESOLUTIONS = {};
+    READY_POLYMARKET_STATUS = { loading: false, matched: 0, started: 0, done: 0, unavailable: 0, count: 0, market_count: 0, error: '' };
+    _lastPolymarketResolveKey = '';
+    renderReadyBets();
+    return Promise.resolve({});
+  }
+
+  const now = Date.now();
+  const resolveKey = READY_BETS
+    .filter(r => r && r.kind !== 'combo')
+    .map(r => String(r.uid || r.bet_uid || r.prediction_uid || '').trim())
+    .filter(Boolean)
+    .sort()
+    .join('|');
+  if (!force && resolveKey && resolveKey === _lastPolymarketResolveKey && (now - _lastPolymarketResolveMs) < _POLYMARKET_RESOLVE_DEBOUNCE_MS && Object.keys(READY_POLYMARKET_RESOLUTIONS).length > 0) {
+    const ageSec = Math.round((now - _lastPolymarketResolveMs) / 1000);
+    _logOp('info', `Polymarket resolve skipped — using cache from ${ageSec}s ago (${Object.keys(READY_POLYMARKET_RESOLUTIONS).length} resolved).`);
+    return Promise.resolve(READY_POLYMARKET_RESOLUTIONS);
+  }
+
+  _logOp('info', `Starting Polymarket resolve for ${READY_BETS.length} bets…`);
+  READY_POLYMARKET_STATUS = {
+    ...READY_POLYMARKET_STATUS,
+    loading: true,
+    error: '',
+    count: READY_BETS.length,
+  };
+  renderReadyBets();
+
+  return fetch('/api/polymarket/resolve-ready', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      bets: READY_BETS.filter(r => r && r.kind !== 'combo'),
+      force_refresh: !!force,
+    }),
+  }).then(r => r.json()).then(d => {
+    if (!d.ok) {
+      throw new Error(d.error || 'Polymarket resolve failed');
+    }
+    READY_POLYMARKET_RESOLUTIONS = d.resolutions || {};
+    READY_POLYMARKET_STATUS = {
+      loading: false,
+      matched: Number(d.summary?.matched || 0),
+      started: Number(d.summary?.started || 0),
+      done: Number(d.summary?.done || 0),
+      unavailable: Number(d.summary?.unavailable || 0),
+      count: Number(d.summary?.count || READY_BETS.length || 0),
+      market_count: Number(d.market_count || d.summary?.market_count || 0),
+      error: '',
+    };
+    _lastPolymarketResolveMs = Date.now();
+    _lastPolymarketResolveKey = resolveKey;
+    const cacheAge = d.cache_age_sec ? ` (cache ${Math.round(d.cache_age_sec)}s old)` : '';
+    _logOp('success', `Polymarket resolved: ${READY_POLYMARKET_STATUS.matched} matched, ${READY_POLYMARKET_STATUS.done} done, ${READY_POLYMARKET_STATUS.unavailable} unavailable — ${READY_POLYMARKET_STATUS.market_count} markets scanned${cacheAge}`);
+    renderReadyBets();
+    return READY_POLYMARKET_RESOLUTIONS;
+  }).catch(err => {
+    READY_POLYMARKET_RESOLUTIONS = {};
+    READY_POLYMARKET_STATUS = {
+      ...READY_POLYMARKET_STATUS,
+      loading: false,
+      error: String(err),
+      market_count: 0,
+    };
+    _logOp('error', `Polymarket resolve failed: ${String(err)}`);
+    renderReadyBets();
+    return {};
+  });
 }
 
 function executeReadyBet(uid) {

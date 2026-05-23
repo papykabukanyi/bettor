@@ -6257,6 +6257,25 @@ def api_kalshi_resolve_ready():
         return jsonify({"ok": False, "error": str(e), "resolutions": {}, "summary": {}, "combo_suggestions": []})
 
 
+@app.route("/api/polymarket/resolve-ready", methods=["POST"])
+def api_polymarket_resolve_ready():
+    """Resolve dashboard Ready Bets to exact Polymarket markets on the server."""
+    data = request.get_json(force=True) or {}
+    try:
+        from data.polymarket import resolve_ready_bets
+
+        bets = data.get("bets") or []
+        if not isinstance(bets, list):
+            bets = []
+        clean_bets = _clean_ready_bets_payload([bet for bet in bets if isinstance(bet, dict)])
+        force_refresh = bool(data.get("force_refresh"))
+
+        resolved = resolve_ready_bets(clean_bets, force_refresh=force_refresh)
+        return jsonify({"ok": True, **_clean(resolved)})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e), "resolutions": {}, "summary": {}, "market_count": 0})
+
+
 @app.route("/api/kalshi/combo-study", methods=["POST"])
 def api_kalshi_combo_study():
     """Analyze a set of bets and return combo parlay suggestions with EV scores.
