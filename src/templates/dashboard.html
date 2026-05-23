@@ -670,6 +670,32 @@ body.modal-open{overflow:hidden}
   .ready-kpis{gap:5px}
 }
 
+/* ── Mobile performance mode ── */
+body.mobile-lite .modal-overlay{backdrop-filter:none}
+body.mobile-lite .game-card,
+body.mobile-lite .modal.game-details-modal,
+body.mobile-lite #loading-overlay,
+body.mobile-lite .xpanel{box-shadow:none !important}
+body.mobile-lite .game-card:hover{transform:none !important}
+body.mobile-lite .console-panel{height:180px}
+body.mobile-lite .ready-scroll{max-height:300px}
+body.mobile-lite .spinner,
+body.mobile-lite .live-dot,
+body.mobile-lite .when-LIVE,
+body.mobile-lite .game-card.in-progress,
+body.mobile-lite .prop-live-eye,
+body.mobile-lite .prop-live-eye::after,
+body.mobile-lite .live-eye,
+body.mobile-lite .live-eye::after,
+body.mobile-lite .combo-leg-track::after,
+body.mobile-lite .combo-odds-track::after,
+body.mobile-lite .leg-track::after,
+body.mobile-lite .console-dot{animation:none !important}
+
+@media (prefers-reduced-motion: reduce){
+  *{animation:none !important;transition:none !important}
+}
+
 /* ── Console panel ── */
 .console-panel{position:fixed;bottom:0;left:0;right:0;height:220px;z-index:400;
   background:#070c13;border-top:2px solid var(--border);
@@ -1133,6 +1159,8 @@ const READY_ORDER_IDS_KEY = 'bettor_ready_order_ids_v1';
 const READY_ORDER_LOG_KEY = 'bettor_ready_order_log_v1';
 const READY_SENT_BETS_KEY = 'bettor_ready_sent_bets_v1';
 let _orderConfirmResolver = null;
+let _readyRenderQueued = false;
+let _readyRenderLastMs = 0;
 
 // ── Ops Console ────────────────────────────────────────────────────────────
 let KALSHI_TODAY_DATA = null;  // cached result of fetchKalshiTodayTickers
@@ -1161,6 +1189,17 @@ function _logOp(type, msg) {
   READY_OPS_LOG.unshift({ ts, type: String(type || 'info'), msg: String(msg || '') });
   if (READY_OPS_LOG.length > READY_OPS_LOG_MAX) READY_OPS_LOG = READY_OPS_LOG.slice(0, READY_OPS_LOG_MAX);
   _renderOpsConsole();
+}
+
+function _isMobileLiteMode() {
+  const narrow = !!(window.matchMedia && window.matchMedia('(max-width: 760px)').matches);
+  const coarse = !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
+  return narrow || (coarse && (window.innerWidth || 0) <= 980);
+}
+
+function _applyMobileLiteMode() {
+  if (!document.body) return;
+  document.body.classList.toggle('mobile-lite', _isMobileLiteMode());
 }
 
 function _renderOpsConsole() {
@@ -1835,7 +1874,8 @@ function showOverlay(phase, pct) {
 /* Legacy polling kept for manual "Run" button fallback */
 function startPolling() {
   if (pollingId) return;
-  pollingId = setInterval(pollStatus, 2500);
+  const pollMs = _isMobileLiteMode() ? 3500 : 2500;
+  pollingId = setInterval(pollStatus, pollMs);
 }
 function stopPolling() {
   clearInterval(pollingId); pollingId = null;
@@ -2282,6 +2322,8 @@ const TRACKING_REFRESH_MS = 90 * 1000;
 
 // ── Periodic silent refresh every 90s (covers SSE gaps) ─────────────────────
 setInterval(() => {
+  if (document.hidden) return;
+  if (_isMobileLiteMode() && !_isReadyBetsActive() && !_isParlaysActive()) return;
   if (_isReadyBetsActive()) {
     refreshReadyBets(false);
   }
@@ -3545,8 +3587,13 @@ function _scheduleGameDetailsFit() {
 }
 
 window.addEventListener('resize', () => {
+  _applyMobileLiteMode();
   _scheduleGameDetailsFit();
-});
+}, { passive: true });
+window.addEventListener('orientationchange', () => {
+  _applyMobileLiteMode();
+  _scheduleGameDetailsFit();
+}, { passive: true });
 
 function openGameDetails(gameKey, matchKey) {
   const rawCard = _findDashboardCard(gameKey, matchKey);
@@ -5007,7 +5054,20 @@ function rbSwitchTab(id) {
   if (id === 'rb-combos' && !READY_BETS.length) refreshReadyBets(false);
 }
 
-function renderReadyBets() {
+function renderReadyBets(forceNow = false) {
+  const mobileLite = document.body && document.body.classList.contains('mobile-lite');
+  const now = Date.now();
+  if (!forceNow && mobileLite && (now - _readyRenderLastMs) < 140) {
+    if (_readyRenderQueued) return;
+    _readyRenderQueued = true;
+    requestAnimationFrame(() => {
+      _readyRenderQueued = false;
+      renderReadyBets(true);
+    });
+    return;
+  }
+  _readyRenderLastMs = now;
+
   const container = document.getElementById('ready-bets-list');
   const comboContainer = document.getElementById('ready-combos-list');
   const metaEl = document.getElementById('ready-bets-meta');
@@ -6585,8 +6645,10 @@ function refreshConsole() {
     const logs = d.logs || [];
     if (logs.length === _lastLogCount) return;
     _lastLogCount = logs.length;
+    const isMobileLite = document.body && document.body.classList.contains('mobile-lite');
+    const visibleLogs = isMobileLite ? logs.slice(-120) : logs;
     const body = document.getElementById('console-body');
-    body.innerHTML = logs.map(l => {
+    body.innerHTML = visibleLogs.map(l => {
       let cls = 'clog-info';
       const ll = l.toLowerCase();
       if (ll.includes('error')||ll.includes('failed')||ll.includes('exception')||ll.includes('traceback')) cls='clog-error';
@@ -6614,6 +6676,7 @@ function stopConsolePoll() {
 
 // ── Init ──────────────────────────────────────────────────────────────────────────
 (function init() {
+  _applyMobileLiteMode();
   // Show local cache immediately so page is not blank
   const local = loadLocalCache();
   if (local && (
@@ -6670,6 +6733,11 @@ function stopConsolePoll() {
   // Outcome resolution runs on server background jobs; UI only refreshes views.
   setInterval(() => { syncReadyOrderTracking(); }, 60 * 1000);
   setInterval(() => {
+    if (document.hidden) return;
+    if (_isMobileLiteMode() && !_isReadyBetsActive() && !_isParlaysActive()) {
+      syncReadyOrderTracking();
+      return;
+    }
     if (_isReadyBetsActive()) {
       refreshReadyBets(false);
     }
@@ -6679,7 +6747,7 @@ function stopConsolePoll() {
     loadTrackedSingles();
     loadPropPerformance();
     loadParlayPerformance();
-  }, 2 * 60 * 1000);
+  }, _isMobileLiteMode() ? 4 * 60 * 1000 : 2 * 60 * 1000);
 })();
 </script>
 </body>
