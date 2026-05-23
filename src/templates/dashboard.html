@@ -558,6 +558,13 @@ main{padding:20px;max-width:1400px;margin:0 auto}
   width:32px;height:32px;border-radius:50%;border:1px solid rgba(148,163,184,.3);
   background:rgba(2,6,23,.7);color:#dbe9f8;display:grid;place-items:center;z-index:3}
 .modal.game-details-modal .modal-close:hover{border-color:rgba(56,189,248,.55);color:#fff;background:rgba(15,23,42,.92)}
+.order-confirm-modal{width:min(540px,calc(100vw - 28px));padding:16px}
+.order-confirm-modal h2{margin-bottom:10px}
+.order-confirm-modal .confirm-lead{font-size:.84rem;color:var(--muted);margin-bottom:12px}
+.order-confirm-card{border:1px solid var(--border);border-radius:10px;padding:10px;background:rgba(15,23,42,.45)}
+.order-confirm-row{display:flex;justify-content:space-between;gap:10px;padding:4px 0;font-size:.82rem}
+.order-confirm-row span:first-child{color:var(--muted)}
+.order-confirm-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:14px}
 .game-details-head{padding:18px 54px 14px 18px;border-bottom:1px solid rgba(56,189,248,.16);
   background:
     radial-gradient(110% 130% at 4% 0%, rgba(20,184,166,.26), transparent 52%),
@@ -1052,6 +1059,20 @@ body.console-open main{padding-bottom:236px}
   </div>
 </div>
 
+<!-- Order confirmation modal -->
+<div class="modal-overlay hidden" id="order-confirm-modal" onclick="closeOrderConfirmModal(event)">
+  <div class="modal order-confirm-modal" onclick="event.stopPropagation()" role="dialog" aria-modal="true" aria-labelledby="order-confirm-title">
+    <button class="modal-close" onclick="closeOrderConfirmModal()">&times;</button>
+    <h2 id="order-confirm-title">Confirm Order</h2>
+    <p class="confirm-lead" id="order-confirm-lead">Please review your order details.</p>
+    <div class="order-confirm-card" id="order-confirm-card"></div>
+    <div class="order-confirm-actions">
+      <button class="btn" onclick="_resolveOrderConfirm(false)">Cancel</button>
+      <button class="btn btn-primary" id="order-confirm-submit" onclick="_resolveOrderConfirm(true)">Place Order</button>
+    </div>
+  </div>
+</div>
+
 <!-- Toast -->
 <div id="toast"></div>
 
@@ -1109,6 +1130,7 @@ let READY_ORDER_LOG = [];
 const READY_ORDER_IDS_KEY = 'bettor_ready_order_ids_v1';
 const READY_ORDER_LOG_KEY = 'bettor_ready_order_log_v1';
 const READY_SENT_BETS_KEY = 'bettor_ready_sent_bets_v1';
+let _orderConfirmResolver = null;
 
 // ── Ops Console ────────────────────────────────────────────────────────────
 let KALSHI_TODAY_DATA = null;  // cached result of fetchKalshiTodayTickers
@@ -5065,26 +5087,48 @@ function renderReadyBets() {
     const autoPrice = resolutionStatus === 'matched'
       ? Math.max(1, Math.min(99, Math.round(Number((resolution && resolution.price_cents) || b.price_cents || 50))))
       : 50;
+    const hasKalshiMatch = String(kalshiResolution?.status || '').toLowerCase() === 'matched' && !!String(kalshiResolution?.market_ticker || '').trim();
+    const hasPolyMatch = String(polyResolution?.status || '').toLowerCase() === 'matched' && !!String(polyResolution?.market_slug || '').trim();
 
-    let chipTitle = resolutionStatus === 'matched'
-      ? String(((resolution && resolution.market_title) || b.market_title || autoTicker || ''))
-      : '';
-    if (chipTitle.length > 55) chipTitle = chipTitle.slice(0, 52) + '…';
-
-    let matchHtml = '';
-    let hintHtml = '';
-    if (resolutionStatus === 'matched' && autoTicker) {
-      const lineNote = String(((resolution && resolution.line_note) || b.line_note || '')).trim();
+    const _renderMatchChip = (res, exchangeLabel) => {
+      if (!res || String(res.status || '').toLowerCase() !== 'matched') return '';
+      const ticker = String(res.market_ticker || res.market_slug || '').trim();
+      if (!ticker) return '';
+      let chipTitle = String(res.market_title || b.market_title || ticker || '');
+      if (chipTitle.length > 55) chipTitle = chipTitle.slice(0, 52) + '…';
+      const lineNote = String(res.line_note || b.line_note || '').trim();
       const lineNoteHtml = lineNote
         ? `<span class="match-line-note" title="${lineNote}">⚠ ${lineNote}</span>`
         : '';
-      matchHtml = `<div class="ready-match-chip" title="${autoTicker}">
+      const schedule = String((res.scheduled_start || res.market_start_date || res.market_end_date || '')).trim();
+      const eventTitle = String(res.market_event_title || '').trim();
+      const sportTag = String(res.market_sport || '').trim().toUpperCase();
+      const eventBits = [
+        schedule ? `Scheduled ${schedule.replace('T', ' ').replace('Z', ' UTC')}` : '',
+        eventTitle ? eventTitle : '',
+        sportTag,
+      ].filter(Boolean);
+      return `<div class="ready-match-chip" title="${ticker}">
           <span class="match-icon">📍</span>
           <span class="match-name">${chipTitle}</span>
-          <span class="match-ticker">${autoTicker}</span>
-          ${matchedExchange ? `<span class="match-exchange">${matchedExchange === 'polymarket' ? 'Polymarket' : 'Kalshi'}</span>` : ''}
+          <span class="match-ticker">${ticker}</span>
+          <span class="match-exchange">${exchangeLabel}</span>
           ${lineNoteHtml}
+          ${eventBits.length ? `<span class="ready-status-hint">${eventBits.join(' · ')}</span>` : ''}
         </div>`;
+    };
+
+    let matchHtml = '';
+    let hintHtml = '';
+    let matchMetaHtml = '';
+    if (resolutionStatus === 'matched' && (hasKalshiMatch || hasPolyMatch)) {
+      const chips = [];
+      if (hasKalshiMatch) chips.push(_renderMatchChip(kalshiResolution, 'Kalshi'));
+      if (hasPolyMatch) chips.push(_renderMatchChip(polyResolution, 'Polymarket'));
+      matchHtml = chips.filter(Boolean).join('');
+      if (hasKalshiMatch && hasPolyMatch) {
+        matchMetaHtml = `<span class="ready-status-hint">Both exchanges are available for this prediction.</span>`;
+      }
     } else if (resolutionStatus === 'loading' || resolutionStatus === 'pending') {
       matchHtml = `<div class="ready-status-badge loading">⌛ Finding exact market…</div>`;
       hintHtml = `<span class="ready-status-hint">Server is checking teams, start time, and combo legs.</span>`;
@@ -5106,8 +5150,6 @@ function renderReadyBets() {
       }
     }
 
-    const hasKalshiMatch = String(kalshiResolution?.status || '').toLowerCase() === 'matched' && !!String(kalshiResolution?.market_ticker || '').trim();
-    const hasPolyMatch = String(polyResolution?.status || '').toLowerCase() === 'matched' && (!!String(polyResolution?.token_id || '').trim() || !!String(polyResolution?.market_id || '').trim());
     const hasMatch = hasKalshiMatch || hasPolyMatch || !!autoTicker;
     const sideBadge = hasMatch ? `<span class="ready-side-badge ${sideVal}">${sideVal.toUpperCase()}</span>` : '';
 
@@ -5125,6 +5167,7 @@ function renderReadyBets() {
 
     return `<div class="ready-actions" data-uid="${b.uid}" data-ticker="${autoTicker}" data-side="${sideVal}" data-price="${autoPrice}">
       ${matchHtml}
+      ${matchMetaHtml}
       ${sideBadge}
       ${hasMatch
         ? `<label class="ready-amt-wrap"><span class="ready-amt-sign">$</span><input id="ready-amt-${uidDom}" type="number" min="1" max="10000" step="1" value="" placeholder="Amount"></label>
@@ -5392,7 +5435,67 @@ function resolvePolymarketReadyBets(force) {
   });
 }
 
-function executeReadyBet(uid) {
+function _escapeOrderConfirmText(value) {
+  return String(value == null ? '' : value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function _renderOrderConfirmRows(rows) {
+  return rows.map(row => `
+    <div class="order-confirm-row">
+      <span>${_escapeOrderConfirmText(row.label)}</span>
+      <strong>${_escapeOrderConfirmText(row.value)}</strong>
+    </div>
+  `).join('');
+}
+
+function _openOrderConfirmModal({ title, lead, rows, submitLabel }) {
+  const modal = document.getElementById('order-confirm-modal');
+  const titleEl = document.getElementById('order-confirm-title');
+  const leadEl = document.getElementById('order-confirm-lead');
+  const cardEl = document.getElementById('order-confirm-card');
+  const submitBtn = document.getElementById('order-confirm-submit');
+  if (!modal || !titleEl || !leadEl || !cardEl || !submitBtn) return Promise.resolve(true);
+
+  if (_orderConfirmResolver) {
+    _orderConfirmResolver(false);
+    _orderConfirmResolver = null;
+  }
+
+  titleEl.textContent = title || 'Confirm Order';
+  leadEl.textContent = lead || 'Please review your order details.';
+  cardEl.innerHTML = _renderOrderConfirmRows(Array.isArray(rows) ? rows : []);
+  submitBtn.textContent = submitLabel || 'Place Order';
+  modal.classList.remove('hidden');
+  document.body.classList.add('modal-open');
+
+  return new Promise(resolve => {
+    _orderConfirmResolver = resolve;
+  });
+}
+
+function _resolveOrderConfirm(confirmed) {
+  const modal = document.getElementById('order-confirm-modal');
+  if (modal) modal.classList.add('hidden');
+  document.body.classList.remove('modal-open');
+  if (_orderConfirmResolver) {
+    const resolve = _orderConfirmResolver;
+    _orderConfirmResolver = null;
+    resolve(!!confirmed);
+  }
+}
+
+function closeOrderConfirmModal(event) {
+  if (event && event.target !== event.currentTarget) return;
+  _resolveOrderConfirm(false);
+}
+
+function executeReadyBet(uid, options = {}) {
+  const skipConfirm = !!options.skipConfirm;
   const bet = READY_BETS.find(r => r.uid === uid);
   if (!bet) {
     toast('Ready bet no longer available. Refreshing…', 'info');
@@ -5424,6 +5527,28 @@ function executeReadyBet(uid) {
   const count = Math.max(1, Math.floor((amount * 100) / priceCents));
   const day = _localDayKey().replace(/-/g, '');
   const clientOrderId = _generateClientOrderId(uid, day);
+
+  if (!skipConfirm) {
+    return _openOrderConfirmModal({
+      title: 'Confirm Kalshi Order',
+      lead: 'This will submit a live order to Kalshi.',
+      rows: [
+        { label: 'Bet', value: bet.label || 'Ready Bet' },
+        { label: 'Ticker', value: ticker || '—' },
+        { label: 'Side', value: side.toUpperCase() },
+        { label: 'Amount', value: `$${amount}` },
+        { label: 'Limit Price', value: `${priceCents}¢` },
+        { label: 'Contracts', value: String(count) },
+      ],
+      submitLabel: 'Place Kalshi Order',
+    }).then(confirmed => {
+      if (!confirmed) {
+        toast('Kalshi order cancelled.', 'info');
+        return false;
+      }
+      return executeReadyBet(uid, { ...options, skipConfirm: true });
+    });
+  }
 
   const sentIds = _readReadyOrderIds();
   if (sentIds.has(clientOrderId)) {
@@ -5497,7 +5622,8 @@ function executeReadyBet(uid) {
   });
 }
 
-function executePolymarketBet(uid) {
+function executePolymarketBet(uid, options = {}) {
+  const skipConfirm = !!options.skipConfirm;
   const bet = READY_BETS.find(r => r.uid === uid);
   if (!bet) {
     toast('Ready bet no longer available. Refreshing…', 'info');
@@ -5525,6 +5651,27 @@ function executePolymarketBet(uid) {
   const marketSlug = String(resolution.market_slug || '').trim();
   const tokenId = String(resolution.token_id || '').trim();
   const marketId = String(resolution.market_id || resolution.market_ticker || '').trim();
+
+  if (!skipConfirm) {
+    return _openOrderConfirmModal({
+      title: 'Confirm Polymarket Order',
+      lead: 'This will submit a live order to Polymarket.',
+      rows: [
+        { label: 'Bet', value: bet.label || 'Ready Bet' },
+        { label: 'Market', value: marketSlug || marketId || '—' },
+        { label: 'Side', value: side.toUpperCase() },
+        { label: 'Amount', value: `$${amount}` },
+        { label: 'Type', value: 'MARKET (IOC)' },
+      ],
+      submitLabel: 'Place Polymarket Order',
+    }).then(confirmed => {
+      if (!confirmed) {
+        toast('Polymarket order cancelled.', 'info');
+        return false;
+      }
+      return executePolymarketBet(uid, { ...options, skipConfirm: true });
+    });
+  }
 
   _logOp('info', `Placing Polymarket order: ${bet.label} | Slug ${marketSlug || '—'} | ${side.toUpperCase()} | $${amount}`);
 
@@ -5570,16 +5717,53 @@ function executePolymarketBet(uid) {
 }
 
 function executeBothBets(uid) {
-  return executeReadyBet(uid).then(kalshiOk => {
-    return executePolymarketBet(uid).then(polyOk => {
-      if (kalshiOk && polyOk) {
-        toast('✓ Placed on Kalshi and Polymarket', 'success');
-      } else if (kalshiOk || polyOk) {
-        toast('Placed on one exchange. Check log for the other result.', 'info');
-      } else {
-        toast('Both exchange orders failed. Check order log.', 'error');
-      }
-      return kalshiOk && polyOk;
+  const bet = READY_BETS.find(r => r.uid === uid);
+  if (!bet) {
+    toast('Ready bet no longer available. Refreshing…', 'info');
+    refreshReadyBets(false);
+    return Promise.resolve(false);
+  }
+
+  const uidDom = _safeDomId(uid);
+  const amount = Number(document.getElementById(`ready-amt-${uidDom}`)?.value || 0);
+  if (!Number.isFinite(amount) || amount <= 0) {
+    toast('Enter an amount in dollars ($) before placing.', 'error');
+    document.getElementById(`ready-amt-${uidDom}`)?.focus();
+    return Promise.resolve(false);
+  }
+
+  const kalshiResolution = _readyResolutionForExchange(bet, 'kalshi') || {};
+  const polyResolution = _readyResolutionForExchange(bet, 'polymarket') || {};
+  const kalshiTicker = String(kalshiResolution.market_ticker || '').trim() || 'Not matched';
+  const polyMarket = String(polyResolution.market_slug || polyResolution.market_id || polyResolution.market_ticker || '').trim() || 'Not matched';
+
+  return _openOrderConfirmModal({
+    title: 'Confirm Dual Exchange Order',
+    lead: 'This will submit two live orders, one on each exchange.',
+    rows: [
+      { label: 'Bet', value: bet.label || 'Ready Bet' },
+      { label: 'Kalshi', value: kalshiTicker },
+      { label: 'Polymarket', value: polyMarket },
+      { label: 'Amount Per Exchange', value: `$${amount}` },
+      { label: 'Estimated Total', value: `$${(amount * 2).toFixed(2)}` },
+    ],
+    submitLabel: 'Place Both Orders',
+  }).then(confirmed => {
+    if (!confirmed) {
+      toast('Both-order submission cancelled.', 'info');
+      return false;
+    }
+    return executeReadyBet(uid, { skipConfirm: true }).then(kalshiOk => {
+      return executePolymarketBet(uid, { skipConfirm: true }).then(polyOk => {
+        if (kalshiOk && polyOk) {
+          toast('✓ Placed on Kalshi and Polymarket', 'success');
+        } else if (kalshiOk || polyOk) {
+          toast('Placed on one exchange. Check log for the other result.', 'info');
+        } else {
+          toast('Both exchange orders failed. Check order log.', 'error');
+        }
+        return kalshiOk && polyOk;
+      });
     });
   });
 }
@@ -6438,7 +6622,14 @@ function stopConsolePoll() {
   _refreshScheduledStatuses();
 
   document.addEventListener('keydown', e => {
-    if (e.key === 'Escape') closeGameDetailsModal();
+    if (e.key === 'Escape') {
+      const orderModal = document.getElementById('order-confirm-modal');
+      if (orderModal && !orderModal.classList.contains('hidden')) {
+        closeOrderConfirmModal();
+        return;
+      }
+      closeGameDetailsModal();
+    }
   });
 
   // Outcome resolution runs on server background jobs; UI only refreshes views.

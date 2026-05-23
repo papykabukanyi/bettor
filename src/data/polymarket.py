@@ -280,6 +280,8 @@ def _line_proximity_score(text: str, line: Any, *, direction: str = "") -> float
 
 
 def _market_text(market: dict[str, Any]) -> str:
+    event = market.get("events")
+    event_obj = event[0] if isinstance(event, list) and event and isinstance(event[0], dict) else (event if isinstance(event, dict) else {})
     parts = [
         market.get("title"),
         market.get("question"),
@@ -288,6 +290,12 @@ def _market_text(market: dict[str, Any]) -> str:
         market.get("event_slug"),
         market.get("slug"),
         market.get("category"),
+        market.get("endDateIso"),
+        market.get("endDate"),
+        market.get("start_date"),
+        event_obj.get("title") if isinstance(event_obj, dict) else None,
+        event_obj.get("slug") if isinstance(event_obj, dict) else None,
+        event_obj.get("description") if isinstance(event_obj, dict) else None,
     ]
     outcomes = market.get("outcomes")
     if isinstance(outcomes, list):
@@ -295,9 +303,50 @@ def _market_text(market: dict[str, Any]) -> str:
     return _norm_text(" ".join(str(part or "") for part in parts))
 
 
+def _market_event(market: dict[str, Any]) -> dict[str, Any]:
+    events = market.get("events")
+    if isinstance(events, list):
+        for event in events:
+            if isinstance(event, dict):
+                return event
+    if isinstance(events, dict):
+        return events
+    return {}
+
+
+def _market_sport_tag(market: dict[str, Any]) -> str:
+    text = _market_text(market)
+    if any(token in text for token in ("basketball", "nba", "wnba")):
+        return "basketball"
+    if any(token in text for token in ("baseball", "mlb")):
+        return "baseball"
+    if any(token in text for token in ("football", "nfl", "ncaaf", "american football")):
+        return "football"
+    if any(token in text for token in ("hockey", "nhl")):
+        return "hockey"
+    if any(token in text for token in ("soccer", "mls", "premier", "champions league", "1x2", "btts", "goals o u")):
+        return "soccer"
+    if any(token in text for token in ("tennis", "atp", "wta")):
+        return "tennis"
+    if any(token in text for token in ("boxing", "mma", "ufc", "fight", "submission", "knockout")):
+        return "combat"
+    if any(token in text for token in ("golf", "pga", "lpga")):
+        return "golf"
+    if any(token in text for token in ("f1", "nascar", "motorsport", "race")):
+        return "motorsports"
+    if any(token in text for token in ("cricket", "wicket", "innings")):
+        return "cricket"
+    return ""
+
+
 def _market_start_dt(market: dict[str, Any]) -> datetime.datetime | None:
-    for key in ("start_date", "close_time", "end_date", "created_at", "updated_at"):
+    event = _market_event(market)
+    for key in ("start_date", "startDateIso", "startDate", "close_time", "endDateIso", "end_date", "created_at", "updated_at"):
         dt = _parse_iso_dt(market.get(key))
+        if dt is not None:
+            return dt
+    for key in ("startDate", "endDate"):
+        dt = _parse_iso_dt(event.get(key))
         if dt is not None:
             return dt
     return None
@@ -354,9 +403,17 @@ def _score_market(bet: dict[str, Any], market: dict[str, Any]) -> float:
         return 0.0
 
     bet_sport = _bet_sport_tag(bet)
-    market_sport = _bet_sport_tag({"sport": market.get("category") or market.get("subtitle") or market.get("title") or ""})
+    market_sport = _market_sport_tag(market)
     if bet_sport and market_sport and bet_sport != market_sport:
         return 0.0
+
+    if not bet_sport and market_sport and market_sport in {"hockey", "basketball", "baseball", "football", "soccer", "tennis", "combat", "golf", "motorsports", "cricket"}:
+        if _bet_kind_tag(bet) in {"moneyline", "spread", "player_prop"}:
+            label_text = _norm_text(" ".join(str(bet.get(key) or "") for key in ("label", "pick", "team", "player_name", "name", "game")))
+            if market_sport == "hockey" and any(token in label_text for token in ("aces", "nba", "wnba", "basketball", "thunder", "knicks", "warriors", "celtics", "lakers")):
+                return 0.0
+            if market_sport == "basketball" and any(token in label_text for token in ("nhl", "hockey", "stanley", "goal", "goalie")):
+                return 0.0
 
     score = _time_score(bet, market)
 
@@ -392,11 +449,13 @@ def _score_market(bet: dict[str, Any], market: dict[str, Any]) -> float:
         _entity_match_score(market_text, bet.get("team")),
         _entity_match_score(market_text, picked),
     )
-    if team_score < 1.8 and kind in {"moneyline", "spread"}:
+    if team_score < 3.4 and kind in {"moneyline", "spread"}:
         return 0.0
     score += team_score * 1.4
     score += _token_overlap_score(market_text, bet.get("label"), bet.get("pick"), bet.get("bet_type"), bet.get("prop_type"))
     score += _line_match_score(market_text, bet.get("line")) or _line_proximity_score(market_text, bet.get("line"), direction=str(bet.get("direction") or bet.get("pick") or ""))
+    if kind in {"moneyline", "spread", "total"} and score < 4.0:
+        return 0.0
     return score
 
 
@@ -405,6 +464,7 @@ def _clean_market(market: dict[str, Any]) -> dict[str, Any]:
         return {}
     title = str(market.get("title") or market.get("question") or market.get("slug") or "").strip()
     identifier = _market_identifier(market)
+    event = _market_event(market)
     outcomes = [str(v or "").strip() for v in _parse_jsonish_list(market.get("outcomes"))]
     token_ids = [str(v or "").strip() for v in _parse_jsonish_list(market.get("clobTokenIds"))]
     outcome_prices_raw = _parse_jsonish_list(market.get("outcomePrices"))
@@ -445,7 +505,12 @@ def _clean_market(market: dict[str, Any]) -> dict[str, Any]:
         "question": str(market.get("question") or "").strip(),
         "exchange": "polymarket",
         "status": str(market.get("status") or "active").strip().lower(),
-        "start_date": str(market.get("start_date") or market.get("end_date") or "").strip(),
+        "start_date": str(market.get("startDateIso") or event.get("startDate") or market.get("start_date") or market.get("endDateIso") or market.get("end_date") or event.get("endDate") or "").strip(),
+        "market_start_date": str(market.get("startDateIso") or event.get("startDate") or market.get("start_date") or "").strip(),
+        "market_end_date": str(market.get("endDateIso") or market.get("end_date") or event.get("endDate") or "").strip(),
+        "market_event_title": str(event.get("title") or "").strip(),
+        "market_event_slug": str(event.get("slug") or "").strip(),
+        "market_sport": _market_sport_tag(market),
         "yes_token_id": yes_token_id,
         "no_token_id": no_token_id,
         "yes_price": yes_price,
@@ -534,6 +599,7 @@ def resolve_ready_bets(bets: list[dict[str, Any]], *, force_refresh: bool = Fals
             side = _market_side(bet, best_market)
             token_id = str(best_market.get("yes_token_id") if side == "yes" else best_market.get("no_token_id") or "").strip()
             price = _as_float(best_market.get("yes_price") if side == "yes" else best_market.get("no_price"))
+            scheduled_start = best_market.get("market_start_date") or best_market.get("start_date") or best_market.get("market_end_date") or ""
             resolutions[uid] = {
                 "uid": uid,
                 "status": "matched",
@@ -542,6 +608,9 @@ def resolve_ready_bets(bets: list[dict[str, Any]], *, force_refresh: bool = Fals
                 "market_title": best_market.get("market_title") or "",
                 "market_slug": best_market.get("market_slug") or "",
                 "market_id": best_market.get("market_id") or "",
+                "market_event_title": best_market.get("market_event_title") or "",
+                "market_event_slug": best_market.get("market_event_slug") or "",
+                "market_sport": best_market.get("market_sport") or "",
                 "side": side,
                 "token_id": token_id,
                 "yes_token_id": best_market.get("yes_token_id") or "",
@@ -549,6 +618,7 @@ def resolve_ready_bets(bets: list[dict[str, Any]], *, force_refresh: bool = Fals
                 "price": price,
                 "minimum_tick_size": best_market.get("minimum_tick_size") or 0.01,
                 "neg_risk": bool(best_market.get("neg_risk")),
+                "scheduled_start": scheduled_start,
                 "score": round(best_score, 3),
             }
             continue
@@ -570,6 +640,9 @@ def resolve_ready_bets(bets: list[dict[str, Any]], *, force_refresh: bool = Fals
             "market_title": "",
             "market_slug": "",
             "market_id": "",
+            "market_event_title": "",
+            "market_event_slug": "",
+            "market_sport": "",
             "side": "yes",
             "token_id": "",
             "message": message,
