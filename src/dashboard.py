@@ -6560,7 +6560,7 @@ def api_kalshi_order():
 
 @app.route("/api/polymarket/order", methods=["POST"])
 def api_polymarket_order():
-    """Execute a Polymarket order using CLOB credentials from environment variables."""
+    """Execute a Polymarket order using configured exchange credentials."""
     data = request.get_json(force=True) or {}
     try:
         from data.polymarket import place_order, resolve_ready_bets
@@ -6569,8 +6569,9 @@ def api_polymarket_order():
         bet_payload = data.get("bet_payload")
         explicit_token_id = str(data.get("token_id") or "").strip()
         explicit_market_id = str(data.get("market_id") or data.get("market_ticker") or "").strip()
+        explicit_market_slug = str(data.get("market_slug") or "").strip()
 
-        if isinstance(bet_payload, dict) and not explicit_token_id:
+        if isinstance(bet_payload, dict) and not explicit_market_slug:
             resolved = resolve_ready_bets([bet_payload], force_refresh=False)
             resolved_map = resolved.get("resolutions") or {}
             bet_uid = str(
@@ -6601,8 +6602,13 @@ def api_polymarket_order():
             else:
                 token_id = str((resolved_bet or {}).get("yes_token_id") or "").strip()
 
-        if not token_id:
-            return jsonify({"ok": False, "error": "token_id is required (no Polymarket token found for matched side)."}), 400
+        market_slug = str(
+            explicit_market_slug
+            or (resolved_bet or {}).get("market_slug")
+            or ""
+        ).strip()
+        if not market_slug:
+            return jsonify({"ok": False, "error": "market_slug is required (no Polymarket market slug found for matched bet)."}), 400
 
         side = str(data.get("side") or (resolved_bet or {}).get("side") or "yes").strip().lower()
         side = "yes" if side not in {"yes", "no"} else side
@@ -6623,17 +6629,18 @@ def api_polymarket_order():
             price = None
 
         placed = place_order(
-            token_id=token_id,
+            market_slug=market_slug,
             amount_usd=amount_usd,
             side=side,
             price=price,
-            order_type=str(data.get("order_type") or "FOK").upper(),
+            order_type=str(data.get("order_type") or "ORDER_TYPE_MARKET").upper(),
         )
 
         return jsonify({
             "ok": bool(placed.get("ok", True)),
             "exchange": "polymarket",
             "market_id": explicit_market_id or str((resolved_bet or {}).get("market_id") or ""),
+            "market_slug": market_slug,
             "market_ticker": str((resolved_bet or {}).get("market_ticker") or explicit_market_id or ""),
             "token_id": token_id,
             "side": side,

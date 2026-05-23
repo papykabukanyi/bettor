@@ -5506,7 +5506,7 @@ function executePolymarketBet(uid) {
   }
 
   const resolution = _readyResolutionForExchange(bet, 'polymarket') || null;
-  if (!resolution || String(resolution.status || '') !== 'matched' || !String(resolution.token_id || '').trim()) {
+  if (!resolution || String(resolution.status || '') !== 'matched' || !String(resolution.market_slug || '').trim()) {
     toast((resolution && resolution.message) || 'Polymarket market is not ready for this bet. Refreshing matches…', 'error');
     resolvePolymarketReadyBets(true);
     return Promise.resolve(false);
@@ -5522,21 +5522,23 @@ function executePolymarketBet(uid) {
 
   const side = String(resolution.side || 'yes').toLowerCase();
   const price = Number(resolution.price || 0.5);
+  const marketSlug = String(resolution.market_slug || '').trim();
   const tokenId = String(resolution.token_id || '').trim();
   const marketId = String(resolution.market_id || resolution.market_ticker || '').trim();
 
-  _logOp('info', `Placing Polymarket order: ${bet.label} | Market ${marketId || '—'} | token ${tokenId.slice(0, 8)}… | ${side.toUpperCase()} | $${amount}`);
+  _logOp('info', `Placing Polymarket order: ${bet.label} | Slug ${marketSlug || '—'} | ${side.toUpperCase()} | $${amount}`);
 
   return fetch('/api/polymarket/order', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({
       market_id: marketId,
+      market_slug: marketSlug,
       token_id: tokenId,
       amount_usd: amount,
       side,
       price,
-      order_type: 'FOK',
+      order_type: 'ORDER_TYPE_MARKET',
       bet_kind: bet.kind,
       bet_uid: bet.bet_uid || bet.uid,
       bet_label: bet.label,
@@ -5546,7 +5548,7 @@ function executePolymarketBet(uid) {
     if (d.ok) {
       const orderId = String((d.response && (d.response.orderID || d.response.id)) || '').trim();
       const orderStatus = String((d.response && (d.response.status || d.response.order_status)) || 'submitted').trim().toLowerCase();
-      _appendReadyOrderLog(true, bet.label, `Polymarket ${marketId || tokenId.slice(0, 12)} · ${side.toUpperCase()} · $${amount}${orderId ? ` · order ${orderId.slice(-10)}` : ''}`, {
+      _appendReadyOrderLog(true, bet.label, `Polymarket ${marketSlug || marketId || tokenId.slice(0, 12)} · ${side.toUpperCase()} · $${amount}${orderId ? ` · order ${orderId.slice(-10)}` : ''}`, {
         status: orderStatus || 'success',
         order_id: orderId,
       });

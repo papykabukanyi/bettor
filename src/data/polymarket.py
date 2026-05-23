@@ -8,15 +8,18 @@ when credentials are configured.
 from __future__ import annotations
 
 import datetime
+import json
 import os
 import re
 import threading
 import time
 from typing import Any
 
+from cryptography.hazmat.primitives.asymmetric import ed25519
 import requests
 
 POLYMARKET_BASE_URL = os.getenv("POLYMARKET_BASE_URL", "https://gamma-api.polymarket.com").rstrip("/")
+POLYMARKET_US_API_BASE = os.getenv("POLYMARKET_US_API_BASE", "https://api.polymarket.us").rstrip("/")
 POLYMARKET_CLOB_HOST = os.getenv("POLYMARKET_CLOB_HOST", "https://clob.polymarket.com").rstrip("/")
 POLYMARKET_CHAIN_ID = int(os.getenv("POLYMARKET_CHAIN_ID", "137") or "137")
 POLYMARKET_SIGNATURE_TYPE = int(os.getenv("POLYMARKET_SIGNATURE_TYPE", "1") or "1")
@@ -24,6 +27,8 @@ POLYMARKET_PRIVATE_KEY = str(os.getenv("POLYMARKET_PRIVATE_KEY", "") or "").stri
 POLYMARKET_FUNDER = str(os.getenv("POLYMARKET_FUNDER", "") or "").strip()
 POLYMARKET_API_KEY = str(os.getenv("POLYMARKET_API_KEY", "") or "").strip()
 POLYMARKET_API_SECRET = str(os.getenv("POLYMARKET_API_SECRET", "") or "").strip()
+POLYMARKET_KEY_ID = str(os.getenv("POLYMARKET_KEY_ID", "") or POLYMARKET_API_KEY).strip()
+POLYMARKET_SECRET_KEY = str(os.getenv("POLYMARKET_SECRET_KEY", "") or POLYMARKET_API_SECRET).strip()
 POLYMARKET_API_PASSPHRASE = str(os.getenv("POLYMARKET_API_PASSPHRASE", "") or "").strip()
 POLYMARKET_TIMEOUT_SEC = int(os.getenv("POLYMARKET_TIMEOUT_SEC", "15"))
 POLYMARKET_MARKET_CACHE_TTL_SEC = max(120, int(os.getenv("POLYMARKET_MARKET_CACHE_TTL_SEC", "900") or "900"))
@@ -63,6 +68,71 @@ def _as_float(value: Any) -> float | None:
         return float(value)
     except Exception:
         return None
+
+
+def _as_decimal_str(value: Any, *, default: str = "0") -> str:
+    num = _as_float(value)
+    if num is None:
+        return default
+    return f"{num:.8f}".rstrip("0").rstrip(".") or "0"
+
+
+def _has_us_api_creds() -> bool:
+    return bool(POLYMARKET_KEY_ID and POLYMARKET_SECRET_KEY)
+
+
+def _us_auth_headers(method: str, path: str) -> dict[str, str]:
+    if not _has_us_api_creds():
+        raise RuntimeError("POLYMARKET_KEY_ID and POLYMARKET_SECRET_KEY are required for Polymarket US authenticated API.")
+
+    try:
+        import base64
+
+        secret_bytes = base64.b64decode(POLYMARKET_SECRET_KEY)
+        # Docs show using first 32 bytes as Ed25519 private key bytes.
+        private_key = ed25519.Ed25519PrivateKey.from_private_bytes(secret_bytes[:32])
+    except Exception as exc:
+        raise RuntimeError("POLYMARKET_SECRET_KEY is invalid for Ed25519 signing.") from exc
+
+    ts = str(int(time.time() * 1000))
+    message = f"{ts}{str(method or '').upper()}{path}"
+    signature = base64.b64encode(private_key.sign(message.encode("utf-8"))).decode("utf-8")
+    return {
+        "X-PM-Access-Key": POLYMARKET_KEY_ID,
+        "X-PM-Timestamp": ts,
+        "X-PM-Signature": signature,
+        "Content-Type": "application/json",
+    }
+
+
+def _us_request(
+    method: str,
+    path: str,
+    *,
+    params: dict[str, Any] | None = None,
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    headers = _us_auth_headers(method, path)
+    resp = requests.request(
+        str(method or "GET").upper(),
+        f"{POLYMARKET_US_API_BASE}{path}",
+        headers=headers,
+        params=params or None,
+        data=(json.dumps(payload) if payload is not None else None),
+        timeout=POLYMARKET_TIMEOUT_SEC,
+    )
+    try:
+        data = resp.json() if resp.content else {}
+    except Exception:
+        data = {"raw": resp.text}
+
+    if not resp.ok:
+        msg = ""
+        if isinstance(data, dict):
+            msg = str(data.get("message") or data.get("error") or data.get("details") or data)
+        raise RuntimeError(f"Polymarket US API {resp.status_code}: {msg or resp.reason}")
+
+    return data if isinstance(data, dict) else {"raw": data}
 
 
 def _parse_iso_dt(value: Any) -> datetime.datetime | None:
@@ -563,7 +633,35 @@ def _coerce_usd(value: Any) -> float | None:
 
 
 def get_balance() -> dict[str, Any]:
-    """Return Polymarket collateral balance in USD when available."""
+    """Return Polymarket balance in USD.
+
+    Prefers Polymarket US authenticated API when key/secret are configured.
+    """
+    if _has_us_api_creds():
+        payload = _us_request("GET", "/v1/account/balances")
+        balances = payload.get("balances") if isinstance(payload, dict) else None
+        balances = balances if isinstance(balances, list) else []
+        usd_row = next(
+            (
+                row for row in balances
+                if isinstance(row, dict) and str(row.get("currency") or "").upper() == "USD"
+            ),
+            (balances[0] if balances and isinstance(balances[0], dict) else {}),
+        )
+        current_balance = float(_as_float((usd_row or {}).get("currentBalance")) or 0.0)
+        buying_power = float(_as_float((usd_row or {}).get("buyingPower")) or current_balance)
+        asset_notional = float(_as_float((usd_row or {}).get("assetNotional")) or 0.0)
+        portfolio_value = current_balance + asset_notional
+        return {
+            "ok": True,
+            "balance_usd": round(current_balance, 6),
+            "buying_power_usd": round(buying_power, 6),
+            "portfolio_usd": round(portfolio_value, 6),
+            "raw": payload,
+            "source": "polymarket_us",
+        }
+
+    # Legacy CLOB fallback path.
     client = _get_clob_client()
 
     candidates: list[Any] = []
@@ -619,21 +717,25 @@ def get_balance() -> dict[str, Any]:
         "balance_usd": round(float(balance_usd or 0.0), 6),
         "portfolio_usd": round(float(balance_usd or 0.0), 6),
         "raw": payload,
+        "source": "clob_legacy",
     }
 
 
 def place_order(
     *,
-    token_id: str,
+    market_slug: str,
     amount_usd: float,
     side: str = "yes",
     price: float | None = None,
-    order_type: str = "FOK",
+    order_type: str = "ORDER_TYPE_MARKET",
 ) -> dict[str, Any]:
-    """Place a Polymarket market order by dollar amount."""
-    token = str(token_id or "").strip()
-    if not token:
-        raise RuntimeError("token_id is required to place a Polymarket order.")
+    """Place a Polymarket order.
+
+    Uses Polymarket US authenticated API when key/secret are configured.
+    """
+    slug = str(market_slug or "").strip()
+    if not slug:
+        raise RuntimeError("market_slug is required to place a Polymarket order.")
 
     usd = float(amount_usd or 0.0)
     if usd <= 0:
@@ -644,6 +746,42 @@ def place_order(
     limit_price = float(price if price is not None else 0.50)
     limit_price = max(0.01, min(limit_price, 0.99))
 
+    if _has_us_api_creds():
+        req_type = str(order_type or "ORDER_TYPE_MARKET").strip().upper()
+        if req_type not in {"ORDER_TYPE_LIMIT", "ORDER_TYPE_MARKET"}:
+            req_type = "ORDER_TYPE_MARKET"
+
+        body: dict[str, Any] = {
+            "marketSlug": slug,
+            "type": req_type,
+            "manualOrderIndicator": "MANUAL_ORDER_INDICATOR_MANUAL",
+            "outcomeSide": "OUTCOME_SIDE_YES" if side_norm == "yes" else "OUTCOME_SIDE_NO",
+            "action": "ORDER_ACTION_BUY",
+        }
+        if req_type == "ORDER_TYPE_LIMIT":
+            body["price"] = {"value": _as_decimal_str(limit_price, default="0.50"), "currency": "USD"}
+            body["quantity"] = float(max(1.0, round(usd, 8)))
+            body["tif"] = "TIME_IN_FORCE_GOOD_TILL_CANCEL"
+        else:
+            body["cashOrderQty"] = {"value": _as_decimal_str(usd, default="1.00"), "currency": "USD"}
+            body["tif"] = "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL"
+
+        response = _us_request("POST", "/v1/orders", payload=body)
+        return {
+            "ok": True,
+            "exchange": "polymarket",
+            "market_slug": slug,
+            "side": side_norm,
+            "amount_usd": usd,
+            "limit_price": limit_price,
+            "response": response,
+            "source": "polymarket_us",
+        }
+
+    # Legacy CLOB fallback path.
+    token = str(os.getenv("POLYMARKET_TOKEN_ID", "") or "").strip()
+    if not token:
+        raise RuntimeError("POLYMARKET_TOKEN_ID is required for legacy CLOB order fallback.")
     client = _get_clob_client()
     try:
         from py_clob_client.clob_types import MarketOrderArgs, OrderType
@@ -667,9 +805,11 @@ def place_order(
     return {
         "ok": bool(response.get("success", True)),
         "exchange": "polymarket",
+        "market_slug": slug,
         "token_id": token,
         "side": side_norm,
         "amount_usd": usd,
         "limit_price": limit_price,
         "response": response,
+        "source": "clob_legacy",
     }
