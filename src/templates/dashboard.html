@@ -921,7 +921,7 @@ body.console-open main{padding-bottom:236px}
   <div class="tab-panel" id="panel-readybets">
     <!-- ── Header ── -->
     <div class="section-header" style="flex-wrap:wrap;gap:8px">
-      <span class="section-title">&#9989; Ready Bets &amp; Kalshi Execution</span>
+      <span class="section-title">&#9989; Ready Bets &amp; Exchange Execution</span>
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
         <span class="section-meta" id="ready-bets-meta"></span>
         <button class="btn btn-sm" onclick="refreshReadyBets(true)">&#8635; Refresh Bets</button>
@@ -931,15 +931,23 @@ body.console-open main{padding-bottom:236px}
     <!-- ── Live Balance Bar ── -->
     <div class="rb-balance-bar" id="rb-balance-bar">
       <div>
-        <div class="rb-balance-label">Available Cash</div>
+        <div class="rb-balance-label">Kalshi Cash</div>
         <div class="rb-balance-amount" id="rb-balance-cash">—</div>
       </div>
       <div>
-        <div class="rb-balance-label">Portfolio Value</div>
+        <div class="rb-balance-label">Kalshi Portfolio</div>
         <div class="rb-balance-port" id="rb-balance-port">—</div>
       </div>
+      <div>
+        <div class="rb-balance-label">Polymarket Cash</div>
+        <div class="rb-balance-amount" id="rb-poly-balance-cash">—</div>
+      </div>
+      <div>
+        <div class="rb-balance-label">Polymarket Portfolio</div>
+        <div class="rb-balance-port" id="rb-poly-balance-port">—</div>
+      </div>
       <div class="rb-balance-warn" id="rb-balance-warn" style="display:none">⚠ Real account. Orders execute immediately.</div>
-      <button class="btn btn-sm" onclick="fetchKalshiBalance()" title="Refresh balance">&#8635;</button>
+      <button class="btn btn-sm" onclick="refreshExchangeBalances()" title="Refresh balances">&#8635;</button>
     </div>
 
     <!-- ── Ops Console ── -->
@@ -1151,6 +1159,24 @@ function _readyResolutionForRow(row) {
     || READY_POLYMARKET_RESOLUTIONS[row.bet_uid]
     || READY_POLYMARKET_RESOLUTIONS[row.prediction_uid]
     || (row.market_ticker ? row : null);
+}
+
+function _readyResolutionForExchange(row, exchange) {
+  if (!row) return null;
+  const ex = String(exchange || '').toLowerCase();
+  if (ex === 'kalshi') {
+    return READY_KALSHI_RESOLUTIONS[row.uid]
+      || READY_KALSHI_RESOLUTIONS[row.bet_uid]
+      || READY_KALSHI_RESOLUTIONS[row.prediction_uid]
+      || null;
+  }
+  if (ex === 'polymarket') {
+    return READY_POLYMARKET_RESOLUTIONS[row.uid]
+      || READY_POLYMARKET_RESOLUTIONS[row.bet_uid]
+      || READY_POLYMARKET_RESOLUTIONS[row.prediction_uid]
+      || null;
+  }
+  return null;
 }
 
 function _readyResolutionExchange(row) {
@@ -2234,7 +2260,7 @@ function switchTab(name) {
     _schedulePropsRender(true);
   }
   if (name === 'readybets') {
-    fetchKalshiBalance();
+    refreshExchangeBalances();
     refreshReadyBets(false);
   }
   if (name === 'parlays')     {
@@ -2247,6 +2273,11 @@ function switchTab(name) {
   if (name === 'tournaments' && _isSoccerMode()) {
     loadTournamentData();
   }
+}
+
+function refreshExchangeBalances() {
+  fetchKalshiBalance();
+  fetchPolymarketBalance();
 }
 
 function debouncedTournamentData() {
@@ -4718,6 +4749,32 @@ function fetchKalshiBalance() {
     });
 }
 
+function fetchPolymarketBalance() {
+  const cashEl = document.getElementById('rb-poly-balance-cash');
+  const portEl = document.getElementById('rb-poly-balance-port');
+  if (cashEl) cashEl.textContent = '…';
+  if (portEl) portEl.textContent = '…';
+  _logOp('info', 'Fetching Polymarket balance…');
+  fetch('/api/polymarket/balance')
+    .then(r => r.json())
+    .then(d => {
+      if (d.ok) {
+        if (cashEl) cashEl.textContent = '$' + Number(d.balance_usd || 0).toFixed(2);
+        if (portEl) portEl.textContent = '$' + Number(d.portfolio_usd || 0).toFixed(2);
+        _logOp('success', `Polymarket balance: cash $${Number(d.balance_usd || 0).toFixed(2)} · portfolio $${Number(d.portfolio_usd || 0).toFixed(2)}`);
+      } else {
+        if (cashEl) cashEl.textContent = 'Error';
+        if (portEl) portEl.textContent = d.error || 'Check credentials';
+        _logOp('error', `Polymarket balance failed: ${d.error || 'Check Polymarket credentials'}`);
+      }
+    })
+    .catch(err => {
+      if (cashEl) cashEl.textContent = 'Error';
+      if (portEl) portEl.textContent = String(err);
+      _logOp('error', `Polymarket balance error: ${err}`);
+    });
+}
+
 function resolveKalshiReadyBets(force) {
   if (!READY_BETS.length) {
     READY_KALSHI_RESOLUTIONS = {};
@@ -4993,7 +5050,9 @@ function renderReadyBets() {
   // ── shared: render action row for any ready bet ──
   const renderActionRow = (b) => {
     const uidDom = _safeDomId(b.uid);
-    const resolution = _readyResolutionForRow(b);
+    const kalshiResolution = _readyResolutionForExchange(b, 'kalshi');
+    const polyResolution = _readyResolutionForExchange(b, 'polymarket');
+    const resolution = kalshiResolution || polyResolution || _readyResolutionForRow(b);
     const sentInfo = _readySentInfo(b, sentItems);
     const resolutionStatus = resolution
       ? String(resolution.status || '')
@@ -5047,8 +5106,9 @@ function renderReadyBets() {
       }
     }
 
-    const hasMatch = !!autoTicker;
-    const canExecute = hasMatch && matchedExchange !== 'polymarket';
+    const hasKalshiMatch = String(kalshiResolution?.status || '').toLowerCase() === 'matched' && !!String(kalshiResolution?.market_ticker || '').trim();
+    const hasPolyMatch = String(polyResolution?.status || '').toLowerCase() === 'matched' && (!!String(polyResolution?.token_id || '').trim() || !!String(polyResolution?.market_id || '').trim());
+    const hasMatch = hasKalshiMatch || hasPolyMatch || !!autoTicker;
     const sideBadge = hasMatch ? `<span class="ready-side-badge ${sideVal}">${sideVal.toUpperCase()}</span>` : '';
 
     if (sentInfo) {
@@ -5066,9 +5126,11 @@ function renderReadyBets() {
     return `<div class="ready-actions" data-uid="${b.uid}" data-ticker="${autoTicker}" data-side="${sideVal}" data-price="${autoPrice}">
       ${matchHtml}
       ${sideBadge}
-      ${canExecute
+      ${hasMatch
         ? `<label class="ready-amt-wrap"><span class="ready-amt-sign">$</span><input id="ready-amt-${uidDom}" type="number" min="1" max="10000" step="1" value="" placeholder="Amount"></label>
-           <button class="btn btn-primary" onclick="executeReadyBet('${b.uid}')">Place ▶</button>`
+           ${hasKalshiMatch ? `<button class="btn btn-primary" onclick="executeReadyBet('${b.uid}')">Kalshi ▶</button>` : ''}
+           ${hasPolyMatch ? `<button class="btn btn-primary" onclick="executePolymarketBet('${b.uid}')">Poly ▶</button>` : ''}
+           ${(hasKalshiMatch && hasPolyMatch) ? `<button class="btn btn-sm" onclick="executeBothBets('${b.uid}')">Both ▶</button>` : ''}`
         : (hasMatch ? `<span class="ready-status-hint">Matched on ${matchedExchange === 'polymarket' ? 'Polymarket' : 'Kalshi'}.</span>` : hintHtml)}
     </div>`;
   };
@@ -5335,14 +5397,14 @@ function executeReadyBet(uid) {
   if (!bet) {
     toast('Ready bet no longer available. Refreshing…', 'info');
     refreshReadyBets(false);
-    return;
+    return Promise.resolve(false);
   }
 
-  const resolution = READY_KALSHI_RESOLUTIONS[uid] || null;
+  const resolution = _readyResolutionForExchange(bet, 'kalshi') || null;
   if (!resolution || String(resolution.status || '') !== 'matched' || !resolution.market_ticker) {
     toast((resolution && resolution.message) || 'Kalshi market is not ready for this bet. Refreshing matches…', 'error');
     resolveKalshiReadyBets(true);
-    return;
+    return Promise.resolve(false);
   }
 
   const uidDom = _safeDomId(uid);
@@ -5353,7 +5415,7 @@ function executeReadyBet(uid) {
   if (!Number.isFinite(amount) || amount <= 0) {
     toast('Enter an amount in dollars ($) before placing.', 'error');
     document.getElementById(`ready-amt-${uidDom}`)?.focus();
-    return;
+    return Promise.resolve(false);
   }
 
   const side = String(resolution.side || (rowEl && rowEl.dataset.side) || 'yes').toLowerCase();
@@ -5366,7 +5428,7 @@ function executeReadyBet(uid) {
   const sentIds = _readReadyOrderIds();
   if (sentIds.has(clientOrderId)) {
     toast('This ready bet was already submitted today.', 'info');
-    return;
+    return Promise.resolve(false);
   }
 
   _logOp('info', `Placing order: ${bet.label} | Ticker ${ticker} | ${side.toUpperCase()} | $${amount} (${count}×${priceCents}¢) | ID ${clientOrderId}`);
@@ -5384,7 +5446,7 @@ function executeReadyBet(uid) {
     bet_payload: bet,
   };
 
-  fetch('/api/kalshi/order', {
+  return fetch('/api/kalshi/order', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify(payload),
@@ -5419,17 +5481,104 @@ function executeReadyBet(uid) {
       toast('✓ Kalshi order placed successfully!', 'success');
       renderReadyBets();
       loadTrackedSingles();
-      fetchKalshiBalance(); // refresh balance after order
+      refreshExchangeBalances(); // refresh balances after order
       syncReadyOrderTracking();
-      return;
+      return true;
     }
     _appendReadyOrderLog(false, bet.label, d.error || 'Kalshi order failed');
     _logOp('error', `Order failed: ${bet.label} | ${d.error || 'Kalshi order failed'}`);
     toast(d.error || 'Kalshi order failed', 'error');
+    return false;
   }).catch(err => {
     _appendReadyOrderLog(false, bet.label, String(err));
     _logOp('error', `Order error: ${bet.label} | ${err}`);
     toast('Kalshi order failed', 'error');
+    return false;
+  });
+}
+
+function executePolymarketBet(uid) {
+  const bet = READY_BETS.find(r => r.uid === uid);
+  if (!bet) {
+    toast('Ready bet no longer available. Refreshing…', 'info');
+    refreshReadyBets(false);
+    return Promise.resolve(false);
+  }
+
+  const resolution = _readyResolutionForExchange(bet, 'polymarket') || null;
+  if (!resolution || String(resolution.status || '') !== 'matched' || !String(resolution.token_id || '').trim()) {
+    toast((resolution && resolution.message) || 'Polymarket market is not ready for this bet. Refreshing matches…', 'error');
+    resolvePolymarketReadyBets(true);
+    return Promise.resolve(false);
+  }
+
+  const uidDom = _safeDomId(uid);
+  const amount = Number(document.getElementById(`ready-amt-${uidDom}`)?.value || 0);
+  if (!Number.isFinite(amount) || amount <= 0) {
+    toast('Enter an amount in dollars ($) before placing.', 'error');
+    document.getElementById(`ready-amt-${uidDom}`)?.focus();
+    return Promise.resolve(false);
+  }
+
+  const side = String(resolution.side || 'yes').toLowerCase();
+  const price = Number(resolution.price || 0.5);
+  const tokenId = String(resolution.token_id || '').trim();
+  const marketId = String(resolution.market_id || resolution.market_ticker || '').trim();
+
+  _logOp('info', `Placing Polymarket order: ${bet.label} | Market ${marketId || '—'} | token ${tokenId.slice(0, 8)}… | ${side.toUpperCase()} | $${amount}`);
+
+  return fetch('/api/polymarket/order', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      market_id: marketId,
+      token_id: tokenId,
+      amount_usd: amount,
+      side,
+      price,
+      order_type: 'FOK',
+      bet_kind: bet.kind,
+      bet_uid: bet.bet_uid || bet.uid,
+      bet_label: bet.label,
+      bet_payload: bet,
+    }),
+  }).then(r => r.json()).then(d => {
+    if (d.ok) {
+      const orderId = String((d.response && (d.response.orderID || d.response.id)) || '').trim();
+      const orderStatus = String((d.response && (d.response.status || d.response.order_status)) || 'submitted').trim().toLowerCase();
+      _appendReadyOrderLog(true, bet.label, `Polymarket ${marketId || tokenId.slice(0, 12)} · ${side.toUpperCase()} · $${amount}${orderId ? ` · order ${orderId.slice(-10)}` : ''}`, {
+        status: orderStatus || 'success',
+        order_id: orderId,
+      });
+      _logOp('success', `Polymarket order placed ✓ ${bet.label} | ${side.toUpperCase()} | $${amount}${orderId ? ` | ${orderId}` : ''}`);
+      toast('✓ Polymarket order placed successfully!', 'success');
+      refreshExchangeBalances();
+      return true;
+    }
+    _appendReadyOrderLog(false, bet.label, d.error || 'Polymarket order failed');
+    _logOp('error', `Polymarket order failed: ${bet.label} | ${d.error || 'Polymarket order failed'}`);
+    toast(d.error || 'Polymarket order failed', 'error');
+    return false;
+  }).catch(err => {
+    _appendReadyOrderLog(false, bet.label, String(err));
+    _logOp('error', `Polymarket order error: ${bet.label} | ${err}`);
+    toast('Polymarket order failed', 'error');
+    return false;
+  });
+}
+
+function executeBothBets(uid) {
+  return executeReadyBet(uid).then(kalshiOk => {
+    return executePolymarketBet(uid).then(polyOk => {
+      if (kalshiOk && polyOk) {
+        toast('✓ Placed on Kalshi and Polymarket', 'success');
+      } else if (kalshiOk || polyOk) {
+        toast('Placed on one exchange. Check log for the other result.', 'info');
+      } else {
+        toast('Both exchange orders failed. Check order log.', 'error');
+      }
+      return kalshiOk && polyOk;
+    });
   });
 }
 
@@ -6259,6 +6408,7 @@ function stopConsolePoll() {
   _renderReadyOrderLog();
   syncReadyOrderTracking();
   if (_isReadyBetsActive()) {
+    refreshExchangeBalances();
     refreshReadyBets(false);
   }
   _autoSelectDefaultTab();

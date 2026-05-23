@@ -6427,6 +6427,27 @@ def api_kalshi_balance():
         return jsonify({"ok": False, "error": str(e)})
 
 
+@app.route("/api/polymarket/balance")
+def api_polymarket_balance():
+    """Fetch current Polymarket collateral balance (authenticated)."""
+    try:
+        from data.polymarket import get_balance
+
+        data = get_balance()
+        if not data.get("ok"):
+            return jsonify({"ok": False, "error": "Polymarket balance unavailable.", "raw": _clean(data.get("raw") or {})})
+        balance_usd = float(data.get("balance_usd") or 0.0)
+        portfolio_usd = float(data.get("portfolio_usd") or balance_usd)
+        return jsonify({
+            "ok": True,
+            "balance_usd": round(balance_usd, 2),
+            "portfolio_usd": round(portfolio_usd, 2),
+            "raw": _clean(data.get("raw") or {}),
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
+
+
 @app.route("/api/kalshi/order", methods=["POST"])
 def api_kalshi_order():
     """Execute a Kalshi order using API credentials from environment variables."""
@@ -6532,6 +6553,93 @@ def api_kalshi_order():
             "resolution": _clean(resolved_bet) if isinstance(resolved_bet, dict) else None,
             "request": _clean(payload),
             "response": _clean(response),
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
+
+
+@app.route("/api/polymarket/order", methods=["POST"])
+def api_polymarket_order():
+    """Execute a Polymarket order using CLOB credentials from environment variables."""
+    data = request.get_json(force=True) or {}
+    try:
+        from data.polymarket import place_order, resolve_ready_bets
+
+        resolved_bet = None
+        bet_payload = data.get("bet_payload")
+        explicit_token_id = str(data.get("token_id") or "").strip()
+        explicit_market_id = str(data.get("market_id") or data.get("market_ticker") or "").strip()
+
+        if isinstance(bet_payload, dict) and not explicit_token_id:
+            resolved = resolve_ready_bets([bet_payload], force_refresh=False)
+            resolved_map = resolved.get("resolutions") or {}
+            bet_uid = str(
+                bet_payload.get("uid")
+                or bet_payload.get("bet_uid")
+                or bet_payload.get("prediction_uid")
+                or "ready_0"
+            )
+            resolved_bet = resolved_map.get(bet_uid) or resolved_map.get("ready_0")
+            if isinstance(resolved_bet, dict):
+                status = str(resolved_bet.get("status") or "")
+                if status and status != "matched":
+                    return jsonify({
+                        "ok": False,
+                        "error": resolved_bet.get("message") or "Polymarket market is not available for this bet.",
+                        "resolution": _clean(resolved_bet),
+                    }), 400
+
+        token_id = str(
+            explicit_token_id
+            or (resolved_bet or {}).get("token_id")
+            or ""
+        ).strip()
+        if not token_id:
+            side_from_payload = str(data.get("side") or (resolved_bet or {}).get("side") or "yes").strip().lower()
+            if side_from_payload == "no":
+                token_id = str((resolved_bet or {}).get("no_token_id") or "").strip()
+            else:
+                token_id = str((resolved_bet or {}).get("yes_token_id") or "").strip()
+
+        if not token_id:
+            return jsonify({"ok": False, "error": "token_id is required (no Polymarket token found for matched side)."}), 400
+
+        side = str(data.get("side") or (resolved_bet or {}).get("side") or "yes").strip().lower()
+        side = "yes" if side not in {"yes", "no"} else side
+
+        try:
+            amount_usd = float(data.get("amount_usd", 0) or 0)
+        except Exception:
+            amount_usd = 0.0
+        if amount_usd <= 0:
+            return jsonify({"ok": False, "error": "amount_usd must be greater than 0."}), 400
+
+        try:
+            px = data.get("price")
+            if px is None:
+                px = (resolved_bet or {}).get("price")
+            price = float(px) if px is not None else None
+        except Exception:
+            price = None
+
+        placed = place_order(
+            token_id=token_id,
+            amount_usd=amount_usd,
+            side=side,
+            price=price,
+            order_type=str(data.get("order_type") or "FOK").upper(),
+        )
+
+        return jsonify({
+            "ok": bool(placed.get("ok", True)),
+            "exchange": "polymarket",
+            "market_id": explicit_market_id or str((resolved_bet or {}).get("market_id") or ""),
+            "market_ticker": str((resolved_bet or {}).get("market_ticker") or explicit_market_id or ""),
+            "token_id": token_id,
+            "side": side,
+            "amount_usd": amount_usd,
+            "resolution": _clean(resolved_bet) if isinstance(resolved_bet, dict) else None,
+            "response": _clean(placed.get("response") if isinstance(placed, dict) else placed),
         })
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})

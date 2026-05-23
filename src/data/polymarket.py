@@ -1,7 +1,8 @@
-"""Polymarket market matching helpers.
+"""Polymarket market matching and execution helpers.
 
 This module resolves normalized ready-bet rows to open Polymarket markets using
-the public Gamma API. It is intentionally read-only and does not place orders.
+the public Gamma API and can optionally place orders through the CLOB client
+when credentials are configured.
 """
 
 from __future__ import annotations
@@ -16,6 +17,14 @@ from typing import Any
 import requests
 
 POLYMARKET_BASE_URL = os.getenv("POLYMARKET_BASE_URL", "https://gamma-api.polymarket.com").rstrip("/")
+POLYMARKET_CLOB_HOST = os.getenv("POLYMARKET_CLOB_HOST", "https://clob.polymarket.com").rstrip("/")
+POLYMARKET_CHAIN_ID = int(os.getenv("POLYMARKET_CHAIN_ID", "137") or "137")
+POLYMARKET_SIGNATURE_TYPE = int(os.getenv("POLYMARKET_SIGNATURE_TYPE", "1") or "1")
+POLYMARKET_PRIVATE_KEY = str(os.getenv("POLYMARKET_PRIVATE_KEY", "") or "").strip()
+POLYMARKET_FUNDER = str(os.getenv("POLYMARKET_FUNDER", "") or "").strip()
+POLYMARKET_API_KEY = str(os.getenv("POLYMARKET_API_KEY", "") or "").strip()
+POLYMARKET_API_SECRET = str(os.getenv("POLYMARKET_API_SECRET", "") or "").strip()
+POLYMARKET_API_PASSPHRASE = str(os.getenv("POLYMARKET_API_PASSPHRASE", "") or "").strip()
 POLYMARKET_TIMEOUT_SEC = int(os.getenv("POLYMARKET_TIMEOUT_SEC", "15"))
 POLYMARKET_MARKET_CACHE_TTL_SEC = max(120, int(os.getenv("POLYMARKET_MARKET_CACHE_TTL_SEC", "900") or "900"))
 POLYMARKET_MARKET_PAGES = max(1, min(int(os.getenv("POLYMARKET_MARKET_PAGES", "4") or "4"), 20))
@@ -27,6 +36,24 @@ _MARKET_CACHE: dict[str, Any] = {"ts": 0.0, "payload": None}
 
 def _norm_text(value: Any) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", str(value or "").lower())).strip()
+
+
+def _parse_jsonish_list(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return []
+        try:
+            parsed = __import__("json").loads(raw)
+            if isinstance(parsed, list):
+                return parsed
+        except Exception:
+            pass
+    return []
 
 
 def _as_float(value: Any) -> float | None:
@@ -308,6 +335,38 @@ def _clean_market(market: dict[str, Any]) -> dict[str, Any]:
         return {}
     title = str(market.get("title") or market.get("question") or market.get("slug") or "").strip()
     identifier = _market_identifier(market)
+    outcomes = [str(v or "").strip() for v in _parse_jsonish_list(market.get("outcomes"))]
+    token_ids = [str(v or "").strip() for v in _parse_jsonish_list(market.get("clobTokenIds"))]
+    outcome_prices_raw = _parse_jsonish_list(market.get("outcomePrices"))
+    outcome_prices: list[float | None] = []
+    for val in outcome_prices_raw:
+        outcome_prices.append(_as_float(val))
+
+    yes_token_id = ""
+    no_token_id = ""
+    yes_price = None
+    no_price = None
+
+    for idx, outcome in enumerate(outcomes):
+        token_id = token_ids[idx] if idx < len(token_ids) else ""
+        price = outcome_prices[idx] if idx < len(outcome_prices) else None
+        norm_outcome = _norm_text(outcome)
+        if norm_outcome in {"yes", "true", "up", "over"}:
+            yes_token_id = token_id or yes_token_id
+            yes_price = price if price is not None else yes_price
+        elif norm_outcome in {"no", "false", "down", "under"}:
+            no_token_id = token_id or no_token_id
+            no_price = price if price is not None else no_price
+
+    if not yes_token_id and token_ids:
+        yes_token_id = token_ids[0]
+    if not no_token_id and len(token_ids) > 1:
+        no_token_id = token_ids[1]
+    if yes_price is None and outcome_prices:
+        yes_price = outcome_prices[0]
+    if no_price is None and len(outcome_prices) > 1:
+        no_price = outcome_prices[1]
+
     return {
         "market_id": str(market.get("id") or identifier or title).strip(),
         "market_ticker": identifier or title,
@@ -317,6 +376,12 @@ def _clean_market(market: dict[str, Any]) -> dict[str, Any]:
         "exchange": "polymarket",
         "status": str(market.get("status") or "active").strip().lower(),
         "start_date": str(market.get("start_date") or market.get("end_date") or "").strip(),
+        "yes_token_id": yes_token_id,
+        "no_token_id": no_token_id,
+        "yes_price": yes_price,
+        "no_price": no_price,
+        "minimum_tick_size": _as_float(market.get("minimum_tick_size")) or 0.01,
+        "neg_risk": bool(market.get("neg_risk")),
     }
 
 
@@ -396,6 +461,9 @@ def resolve_ready_bets(bets: list[dict[str, Any]], *, force_refresh: bool = Fals
 
         if best_market and best_score >= 3.4:
             matched += 1
+            side = _market_side(bet, best_market)
+            token_id = str(best_market.get("yes_token_id") if side == "yes" else best_market.get("no_token_id") or "").strip()
+            price = _as_float(best_market.get("yes_price") if side == "yes" else best_market.get("no_price"))
             resolutions[uid] = {
                 "uid": uid,
                 "status": "matched",
@@ -404,7 +472,13 @@ def resolve_ready_bets(bets: list[dict[str, Any]], *, force_refresh: bool = Fals
                 "market_title": best_market.get("market_title") or "",
                 "market_slug": best_market.get("market_slug") or "",
                 "market_id": best_market.get("market_id") or "",
-                "side": _market_side(bet, best_market),
+                "side": side,
+                "token_id": token_id,
+                "yes_token_id": best_market.get("yes_token_id") or "",
+                "no_token_id": best_market.get("no_token_id") or "",
+                "price": price,
+                "minimum_tick_size": best_market.get("minimum_tick_size") or 0.01,
+                "neg_risk": bool(best_market.get("neg_risk")),
                 "score": round(best_score, 3),
             }
             continue
@@ -427,6 +501,7 @@ def resolve_ready_bets(bets: list[dict[str, Any]], *, force_refresh: bool = Fals
             "market_slug": "",
             "market_id": "",
             "side": "yes",
+            "token_id": "",
             "message": message,
         }
 
@@ -448,4 +523,153 @@ def resolve_ready_bets(bets: list[dict[str, Any]], *, force_refresh: bool = Fals
             "market_count": len(markets),
         },
         "resolutions": resolutions,
+    }
+
+
+def _get_clob_client():
+    if not POLYMARKET_PRIVATE_KEY:
+        raise RuntimeError(
+            "POLYMARKET_PRIVATE_KEY is not configured. "
+            "Polymarket order signing requires a wallet private key. "
+            "If you only have API key/secret, add POLYMARKET_API_PASSPHRASE and a signing wallet key/funder."
+        )
+    if POLYMARKET_SIGNATURE_TYPE in {1, 2, 3} and not POLYMARKET_FUNDER:
+        raise RuntimeError("POLYMARKET_FUNDER is required for signature types 1/2/3.")
+
+    try:
+        from py_clob_client.client import ClobClient
+    except Exception as exc:
+        raise RuntimeError("py-clob-client is not installed. Add it to requirements and install dependencies.") from exc
+
+    kwargs: dict[str, Any] = {
+        "key": POLYMARKET_PRIVATE_KEY,
+        "chain_id": POLYMARKET_CHAIN_ID,
+        "signature_type": POLYMARKET_SIGNATURE_TYPE,
+    }
+    if POLYMARKET_FUNDER:
+        kwargs["funder"] = POLYMARKET_FUNDER
+    client = ClobClient(POLYMARKET_CLOB_HOST, **kwargs)
+    client.set_api_creds(client.create_or_derive_api_creds())
+    return client
+
+
+def _coerce_usd(value: Any) -> float | None:
+    num = _as_float(value)
+    if num is None:
+        return None
+    if num > 1_000_000:
+        return num / 1_000_000.0
+    return num
+
+
+def get_balance() -> dict[str, Any]:
+    """Return Polymarket collateral balance in USD when available."""
+    client = _get_clob_client()
+
+    candidates: list[Any] = []
+    try:
+        if hasattr(client, "get_balance_allowance"):
+            try:
+                candidates.append(client.get_balance_allowance({"asset_type": "COLLATERAL"}))
+            except Exception:
+                candidates.append(client.get_balance_allowance())
+    except Exception:
+        pass
+
+    if hasattr(client, "get_balance"):
+        try:
+            candidates.append(client.get_balance())
+        except Exception:
+            pass
+
+    if hasattr(client, "get_collateral"):
+        try:
+            candidates.append(client.get_collateral())
+        except Exception:
+            pass
+
+    payload = next((c for c in candidates if c is not None), {})
+    if not isinstance(payload, dict):
+        payload = {"raw": payload}
+
+    balance_usd = None
+    for key in (
+        "balance",
+        "available",
+        "available_balance",
+        "availableBalance",
+        "collateral",
+        "total",
+        "amount",
+    ):
+        if key in payload:
+            balance_usd = _coerce_usd(payload.get(key))
+            if balance_usd is not None:
+                break
+
+    nested = payload.get("balance") if isinstance(payload.get("balance"), dict) else None
+    if balance_usd is None and isinstance(nested, dict):
+        for key in ("available", "total", "amount"):
+            balance_usd = _coerce_usd(nested.get(key))
+            if balance_usd is not None:
+                break
+
+    return {
+        "ok": balance_usd is not None,
+        "balance_usd": round(float(balance_usd or 0.0), 6),
+        "portfolio_usd": round(float(balance_usd or 0.0), 6),
+        "raw": payload,
+    }
+
+
+def place_order(
+    *,
+    token_id: str,
+    amount_usd: float,
+    side: str = "yes",
+    price: float | None = None,
+    order_type: str = "FOK",
+) -> dict[str, Any]:
+    """Place a Polymarket market order by dollar amount."""
+    token = str(token_id or "").strip()
+    if not token:
+        raise RuntimeError("token_id is required to place a Polymarket order.")
+
+    usd = float(amount_usd or 0.0)
+    if usd <= 0:
+        raise RuntimeError("amount_usd must be > 0.")
+
+    side_norm = str(side or "yes").strip().lower()
+    side_norm = "yes" if side_norm not in {"yes", "no"} else side_norm
+    limit_price = float(price if price is not None else 0.50)
+    limit_price = max(0.01, min(limit_price, 0.99))
+
+    client = _get_clob_client()
+    try:
+        from py_clob_client.clob_types import MarketOrderArgs, OrderType
+        from py_clob_client.order_builder.constants import BUY
+    except Exception as exc:
+        raise RuntimeError("py-clob-client order types are unavailable. Verify py-clob-client installation.") from exc
+
+    order_type_val = getattr(OrderType, str(order_type or "FOK").upper(), None) or OrderType.FOK
+    try:
+        mo = MarketOrderArgs(token_id=token, amount=float(usd), side=BUY, order_type=order_type_val, price=limit_price)
+    except TypeError:
+        try:
+            mo = MarketOrderArgs(token_id=token, amount=float(usd), side=BUY, order_type=order_type_val)
+        except TypeError:
+            mo = MarketOrderArgs(token_id=token, amount=float(usd), side=BUY)
+    signed = client.create_market_order(mo)
+    response = client.post_order(signed, order_type_val)
+    if not isinstance(response, dict):
+        response = {"raw": response}
+
+    return {
+        "ok": bool(response.get("success", True)),
+        "exchange": "polymarket",
+        "token_id": token,
+        "side": side_norm,
+        "amount_usd": usd,
+        "limit_price": limit_price,
+        "response": response,
     }
