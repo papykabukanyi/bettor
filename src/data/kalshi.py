@@ -1789,9 +1789,9 @@ def _bet_sport_tag(bet: dict[str, Any]) -> str:
         return "basketball"
     if any(token in text for token in ("baseball", "mlb")):
         return "baseball"
-    if any(token in text for token in ("football", "nfl")):
+    if any(token in text for token in ("football", "americanfootball", "american football", "nfl", "ncaaf", "cfl", "xfl", "ufl")):
         return "football"
-    if any(token in text for token in ("hockey", "nhl", "icehockey")):
+    if any(token in text for token in ("hockey", "nhl", "icehockey", "ice hockey", "ahl")):
         return "hockey"
     if any(token in text for token in ("soccer", "mls", "premier", "bundesliga", "serie a", "laliga", "ligue 1", "uefa", "fifa", "1x2", "btts", "goals o u")):
         return "soccer"
@@ -1892,6 +1892,37 @@ def _bet_series_hints(bet: dict[str, Any]) -> tuple[list[str], list[str]]:
                 _set_family(["KXNHLGOAL", "KXNHLANYGOAL"], ["KXNHLPTS", "KXNHLAST"])
             elif any(tok in prop_type for tok in ("point", "pts")):
                 _set_family(["KXNHLPTS"], ["KXNHLAST", "KXNHLGOAL", "KXNHLANYGOAL"])
+    elif sport == "football":
+        if bet_kind == "moneyline":
+            _set_family(["NFLWIN", "KXNFL"], ["NFLOU", "NFLTD"])
+        elif bet_kind == "spread":
+            _set_family(["KXNFL"], ["NFLWIN", "NFLOU"])
+        elif bet_kind in {"total", "team_total"}:
+            _set_family(["NFLOU", "KXNFL"], ["NFLWIN", "NFLTD"])
+        elif bet_kind == "player_prop":
+            if any(tok in prop_type for tok in ("touchdown", "td")):
+                _set_family(["NFLTD"], ["NFLWIN", "NFLOU"])
+            elif any(tok in prop_type for tok in ("yard", "passing", "rushing", "receiving", "reception")):
+                _set_family(["KXNFL", "NFLOU"], ["NFLWIN"])
+    elif sport == "soccer":
+        if bet_kind == "moneyline":
+            _set_family(["KXMLSGAME", "KXEPL", "MLSWIN", "EPLWIN", "UCLWIN"], ["KXMLSSPREAD"])
+        elif bet_kind == "spread":
+            _set_family(["KXMLSSPREAD", "KXEPLSPREAD"], ["KXMLSGAME", "MLSWIN", "EPLWIN"])
+        elif bet_kind in {"total", "team_total"}:
+            _set_family(["KXMLS", "KXEPL", "UCLWIN"], ["KXMLSGAME", "KXMLSSPREAD"])
+    elif sport == "tennis":
+        _set_family(["KXTENNIS", "ATP", "WTA"], [])
+    elif sport == "boxing":
+        _set_family(["KXBOX", "BOXING"], [])
+    elif sport == "mma":
+        _set_family(["KXMMA", "UFC", "PFL", "BELLATOR"], [])
+    elif sport == "golf":
+        _set_family(["KXGOLF", "PGA", "LPGA"], [])
+    elif sport == "motorsports":
+        _set_family(["KXF1", "F1", "NASCAR"], [])
+    elif sport == "cricket":
+        _set_family(["KXCRICKET", "CRICKET"], [])
 
     preferred = list(dict.fromkeys([p.upper() for p in preferred if p]))
     avoid = [a.upper() for a in dict.fromkeys([a for a in avoid if a]) if a.upper() not in preferred]
@@ -2239,7 +2270,11 @@ def _score_single_market(bet: dict[str, Any], market: dict[str, Any]) -> float:
             )
             line_score = _line_proximity_score(text, bet.get("line"), direction=direction_hint)
         score = player_score * 1.8
-        score += _entity_match_score(text, bet.get("team")) * 0.6
+        score += max(
+            _entity_match_score(text, bet.get("team")),
+            _entity_match_score(text, bet.get("home_team")),
+            _entity_match_score(text, bet.get("away_team")),
+        ) * 0.6
         score += _token_overlap_score(
             text,
             bet.get("prop_type"),
@@ -2397,7 +2432,7 @@ def _resolve_single_bet(
             scored_events.append((score, event_group))
     scored_events.sort(key=lambda item: item[0], reverse=True)
 
-    if bet_kind == "player_prop" and scored_events:
+    if scored_events:
         preferred_series, avoid_series = _bet_series_hints(bet)
         if preferred_series:
             pref_hits = [
@@ -2411,7 +2446,7 @@ def _resolve_single_bet(
             ]
             if pref_hits:
                 scored_events = pref_hits
-        if avoid_series:
+        if avoid_series and len(scored_events) > 1:
             filtered_events = [
                 item
                 for item in scored_events

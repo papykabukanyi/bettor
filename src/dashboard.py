@@ -382,6 +382,18 @@ _sse_lock = threading.Lock()
 _backfill_lock = threading.Lock()
 _backfill_running = False
 _last_auto_backfill_date: str | None = None
+_last_auto_backfill_info: dict[str, Any] = {
+    "running": False,
+    "last_run_date": None,
+    "started_at": None,
+    "finished_at": None,
+    "ok": None,
+    "error": None,
+    "elapsed_sec": None,
+    "days_back": _AUTO_BACKFILL_DAYS,
+    "sports": [s.strip().lower() for s in _AUTO_BACKFILL_SPORTS.split(",") if s.strip()],
+    "totals": {"games": 0, "players": 0, "injuries": 0},
+}
 
 
 def _sse_broadcast(event: str, data: dict):
@@ -3309,6 +3321,60 @@ def _build_multi_sport_snapshot(force_refresh: bool = False) -> dict:
     return snapshot
 
 
+def _sports_coverage_snapshot(force_refresh: bool = False) -> dict[str, Any]:
+    """Summarize sports coverage for today/tomorrow and overall snapshot support."""
+    today_str = _et_calendar_today().isoformat()
+    tomorrow_str = (_et_calendar_today() + datetime.timedelta(days=1)).isoformat()
+
+    supported_general = [
+        "baseball", "basketball", "football", "hockey", "soccer",
+        "tennis", "boxing", "mma", "golf", "motorsports", "cricket",
+    ]
+
+    snapshot = _build_multi_sport_snapshot(force_refresh=force_refresh)
+    games = snapshot.get("games") or []
+    tournaments = snapshot.get("tournaments") or []
+
+    today_sports: set[str] = set()
+    tomorrow_sports: set[str] = set()
+    all_seen: set[str] = set()
+    leagues_by_sport: dict[str, set[str]] = {}
+
+    for game in games:
+        if not isinstance(game, dict):
+            continue
+        sport = _infer_sport_group(game.get("sport") or game.get("competition") or game.get("league") or "")
+        if not sport or sport == "other":
+            continue
+        all_seen.add(sport)
+        gd = str(game.get("game_date") or game.get("date") or "").strip()
+        if gd == today_str:
+            today_sports.add(sport)
+        if gd == tomorrow_str:
+            tomorrow_sports.add(sport)
+        leagues_by_sport.setdefault(sport, set()).add(
+            str(game.get("competition_name") or game.get("league") or game.get("competition") or "")
+        )
+
+    for trn in tournaments:
+        if not isinstance(trn, dict):
+            continue
+        sport = _infer_sport_group(trn.get("type") or trn.get("code") or trn.get("name") or "")
+        if sport and sport != "other":
+            all_seen.add(sport)
+
+    return {
+        "today_date": today_str,
+        "tomorrow_date": tomorrow_str,
+        "today_sports": sorted(today_sports),
+        "tomorrow_sports": sorted(tomorrow_sports),
+        "all_seen_sports": sorted(all_seen),
+        "supported_general_sports": supported_general,
+        "league_count_by_sport": {k: len([v for v in vals if v]) for k, vals in leagues_by_sport.items()},
+        "game_count": len(games),
+    }
+
+
 def _run_all_sports_analysis():
     with _lock:
         _state["status"] = "running"
@@ -4487,8 +4553,32 @@ def api_run():
 @app.route("/api/status")
 def api_status():
     with _lock:
-        return jsonify({k: _state[k] for k in
-            ("status", "phase", "phase_idx", "phase_total", "last_updated", "error")})
+        status_payload = {k: _state[k] for k in
+            ("status", "phase", "phase_idx", "phase_total", "last_updated", "error")}
+    with _backfill_lock:
+        status_payload["auto_backfill"] = dict(_last_auto_backfill_info)
+        status_payload["auto_backfill"]["running"] = bool(_backfill_running)
+    return jsonify(status_payload)
+
+
+@app.route("/api/backfill/status")
+def api_backfill_status():
+    with _backfill_lock:
+        payload = dict(_last_auto_backfill_info)
+        payload["running"] = bool(_backfill_running)
+        payload["scheduler"] = {
+            "enabled": bool(_AUTO_BACKFILL_ENABLED),
+            "hour_et": int(_AUTO_BACKFILL_HOUR_ET),
+            "minute_et": int(_AUTO_BACKFILL_MINUTE_ET),
+        }
+    return jsonify({"ok": True, "backfill": payload})
+
+
+@app.route("/api/sports/coverage")
+def api_sports_coverage():
+    force = str(request.args.get("refresh", "0")).strip().lower() in {"1", "true", "yes", "on"}
+    coverage = _sports_coverage_snapshot(force_refresh=force)
+    return jsonify({"ok": True, "coverage": _clean(coverage)})
 
 
 @app.route("/api/cached-state")
@@ -7371,6 +7461,17 @@ def _scheduled_multi_sport_backfill(force: bool = False):
             _log(f"[backfill-auto] skipped: already ran today ({run_date})")
             return
         _backfill_running = True
+        _last_auto_backfill_info.update(
+            {
+                "running": True,
+                "started_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "finished_at": None,
+                "ok": None,
+                "error": None,
+                "days_back": _AUTO_BACKFILL_DAYS,
+                "sports": _parse_backfill_sports_csv(_AUTO_BACKFILL_SPORTS),
+            }
+        )
 
     started = datetime.datetime.now()
     sports = _parse_backfill_sports_csv(_AUTO_BACKFILL_SPORTS)
@@ -7385,6 +7486,22 @@ def _scheduled_multi_sport_backfill(force: bool = False):
         totals = result.get("totals") or {}
         elapsed = (datetime.datetime.now() - started).total_seconds()
         _last_auto_backfill_date = run_date
+        with _backfill_lock:
+            _last_auto_backfill_info.update(
+                {
+                    "running": False,
+                    "last_run_date": run_date,
+                    "finished_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "ok": bool(result.get("ok", True)),
+                    "error": None,
+                    "elapsed_sec": round(float(elapsed), 3),
+                    "totals": {
+                        "games": int(totals.get("games", 0) or 0),
+                        "players": int(totals.get("players", 0) or 0),
+                        "injuries": int(totals.get("injuries", 0) or 0),
+                    },
+                }
+            )
         _log(
             "[backfill-auto] complete "
             f"ok={result.get('ok', True)} "
@@ -7393,6 +7510,17 @@ def _scheduled_multi_sport_backfill(force: bool = False):
         )
     except Exception as exc:
         elapsed = (datetime.datetime.now() - started).total_seconds()
+        with _backfill_lock:
+            _last_auto_backfill_info.update(
+                {
+                    "running": False,
+                    "last_run_date": run_date,
+                    "finished_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "ok": False,
+                    "error": str(exc),
+                    "elapsed_sec": round(float(elapsed), 3),
+                }
+            )
         _log(f"[backfill-auto] failed after {elapsed:.1f}s: {exc}")
     finally:
         with _backfill_lock:
