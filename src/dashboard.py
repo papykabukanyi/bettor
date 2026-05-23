@@ -395,6 +395,300 @@ _last_auto_backfill_info: dict[str, Any] = {
     "totals": {"games": 0, "players": 0, "injuries": 0},
 }
 
+_POLY_TP_ENABLED = str(os.getenv("POLYMARKET_AUTO_TP_ENABLED", "1")).strip().lower() in {"1", "true", "yes", "on"}
+_POLY_TP_TARGET_PCT = max(1.0, float(os.getenv("POLYMARKET_AUTO_TP_TARGET_PCT", "90") or "90"))
+_POLY_TP_CHECK_SEC = max(20, int(os.getenv("POLYMARKET_AUTO_TP_CHECK_SEC", "45") or "45"))
+_POLY_TP_SLIPPAGE_BIPS = max(1, int(os.getenv("POLYMARKET_AUTO_TP_SLIPPAGE_BIPS", "50") or "50"))
+_POLY_TP_STATE_PATH = os.path.join(os.path.dirname(SRC_DIR), "data", "polymarket_order_manager.json")
+_poly_tp_lock = threading.Lock()
+_poly_tp_runtime = {
+    "enabled": _POLY_TP_ENABLED,
+    "target_pct": _POLY_TP_TARGET_PCT,
+}
+_poly_tp_state: dict[str, Any] = {
+    "updated_at": None,
+    "orders": {},
+}
+
+
+def _utc_now_iso() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+def _poly_tp_load_state() -> None:
+    os.makedirs(os.path.dirname(_POLY_TP_STATE_PATH), exist_ok=True)
+    payload: dict[str, Any] = {"updated_at": None, "orders": {}}
+    if os.path.exists(_POLY_TP_STATE_PATH):
+        try:
+            with open(_POLY_TP_STATE_PATH, "r", encoding="utf-8") as fh:
+                raw = json.load(fh)
+            if isinstance(raw, dict):
+                payload["updated_at"] = raw.get("updated_at")
+                orders = raw.get("orders")
+                if isinstance(orders, dict):
+                    payload["orders"] = orders
+        except Exception as exc:
+            _log(f"[polymarket-tp] failed to load state: {exc}")
+    with _poly_tp_lock:
+        _poly_tp_state.clear()
+        _poly_tp_state.update(payload)
+
+
+def _poly_tp_save_state() -> None:
+    with _poly_tp_lock:
+        _poly_tp_state["updated_at"] = _utc_now_iso()
+        payload = {
+            "updated_at": _poly_tp_state.get("updated_at"),
+            "orders": dict(_poly_tp_state.get("orders") or {}),
+        }
+    os.makedirs(os.path.dirname(_POLY_TP_STATE_PATH), exist_ok=True)
+    tmp_path = f"{_POLY_TP_STATE_PATH}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, indent=2, sort_keys=True)
+    os.replace(tmp_path, _POLY_TP_STATE_PATH)
+
+
+def _poly_tp_extract_order_id(order_response: Any) -> str:
+    if not isinstance(order_response, dict):
+        return ""
+    for key in ("id", "orderId", "order_id"):
+        value = str(order_response.get(key) or "").strip()
+        if value:
+            return value
+    nested = order_response.get("order")
+    if isinstance(nested, dict):
+        for key in ("id", "orderId", "order_id"):
+            value = str(nested.get(key) or "").strip()
+            if value:
+                return value
+    return ""
+
+
+def _poly_tp_extract_order_price(order_response: Any, fallback_price: Any = None) -> float | None:
+    candidates: list[Any] = []
+    if isinstance(order_response, dict):
+        candidates.append(order_response.get("price"))
+        candidates.append(order_response.get("avgPx"))
+        nested = order_response.get("order")
+        if isinstance(nested, dict):
+            candidates.append(nested.get("price"))
+            candidates.append(nested.get("avgPx"))
+    candidates.append(fallback_price)
+
+    for value in candidates:
+        if isinstance(value, dict):
+            value = value.get("value")
+        try:
+            px = float(value)
+            if px > 1.0 and px <= 100.0:
+                px = px / 100.0
+            if px > 0:
+                return px
+        except Exception:
+            continue
+    return None
+
+
+def _poly_tp_track_order(placed: dict[str, Any], resolved_bet: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    response = placed.get("response") if isinstance(placed, dict) else None
+    order_id = _poly_tp_extract_order_id(response)
+    if not order_id:
+        return None
+
+    resolved = resolved_bet if isinstance(resolved_bet, dict) else {}
+    market_slug = str(placed.get("market_slug") or resolved.get("market_slug") or "").strip()
+    side = str(placed.get("side") or resolved.get("side") or "yes").strip().lower()
+    side = "no" if side == "no" else "yes"
+    amount_usd = float(placed.get("amount_usd") or 0.0)
+    entry_price = _poly_tp_extract_order_price(response, fallback_price=placed.get("limit_price") or resolved.get("price"))
+
+    record = {
+        "order_id": order_id,
+        "market_slug": market_slug,
+        "side": side,
+        "amount_usd": amount_usd,
+        "entry_price": entry_price,
+        "status": "tracking",
+        "tracked_at": _utc_now_iso(),
+        "last_checked_at": None,
+        "last_order_state": None,
+        "last_mark_price": None,
+        "last_green_pct": None,
+        "last_error": None,
+        "target_pct": float(_poly_tp_runtime.get("target_pct") or _POLY_TP_TARGET_PCT),
+        "close_order_id": None,
+        "close_requested_at": None,
+    }
+    with _poly_tp_lock:
+        orders = _poly_tp_state.setdefault("orders", {})
+        orders[order_id] = record
+    _poly_tp_save_state()
+    return record
+
+
+def _poly_tp_mark_price(side: str, bbo: dict[str, Any]) -> float | None:
+    if not isinstance(bbo, dict):
+        return None
+    side_norm = "no" if str(side or "").strip().lower() == "no" else "yes"
+    current_px = bbo.get("current_px")
+    long_px = bbo.get("long_px")
+    short_px = bbo.get("short_px")
+    try:
+        current_px = float(current_px) if current_px is not None else None
+    except Exception:
+        current_px = None
+    try:
+        long_px = float(long_px) if long_px is not None else None
+    except Exception:
+        long_px = None
+    try:
+        short_px = float(short_px) if short_px is not None else None
+    except Exception:
+        short_px = None
+
+    if side_norm == "no":
+        if short_px is not None:
+            return short_px
+        if current_px is not None and 0 <= current_px <= 1:
+            return max(0.0, min(1.0, 1.0 - current_px))
+        return None
+
+    if long_px is not None:
+        return long_px
+    return current_px
+
+
+def _poly_tp_is_terminal_order_state(state: str) -> bool:
+    state_norm = str(state or "").strip().upper()
+    return state_norm in {
+        "ORDER_STATE_CANCELLED",
+        "ORDER_STATE_REJECTED",
+        "ORDER_STATE_EXPIRED",
+    }
+
+
+def run_polymarket_take_profit_cycle() -> dict[str, Any]:
+    """Check tracked Polymarket orders and auto-close positions at configured profit target."""
+    enabled = bool(_poly_tp_runtime.get("enabled", _POLY_TP_ENABLED))
+    target_pct = float(_poly_tp_runtime.get("target_pct") or _POLY_TP_TARGET_PCT)
+    if not enabled:
+        return {"ok": True, "enabled": False, "checked": 0, "triggered": 0}
+
+    try:
+        from data.polymarket import close_position_order, get_market_bbo, get_order
+    except Exception as exc:
+        return {"ok": False, "enabled": True, "checked": 0, "triggered": 0, "error": str(exc)}
+
+    with _poly_tp_lock:
+        tracked = [
+            dict(row)
+            for row in (_poly_tp_state.get("orders") or {}).values()
+            if isinstance(row, dict) and str(row.get("status") or "").strip().lower() == "tracking"
+        ]
+
+    checked = 0
+    triggered = 0
+    for row in tracked:
+        order_id = str(row.get("order_id") or "").strip()
+        if not order_id:
+            continue
+        checked += 1
+        now_iso = _utc_now_iso()
+
+        try:
+            order_payload = get_order(order_id)
+            order = order_payload.get("order") if isinstance(order_payload, dict) else {}
+            order = order if isinstance(order, dict) else {}
+            order_state = str(order.get("state") or "").strip()
+            market_slug = str(order.get("marketSlug") or row.get("market_slug") or "").strip()
+            entry_px = row.get("entry_price")
+            if entry_px is None:
+                entry_px = _poly_tp_extract_order_price(order_payload, fallback_price=row.get("entry_price"))
+
+            with _poly_tp_lock:
+                live = (_poly_tp_state.get("orders") or {}).get(order_id)
+                if isinstance(live, dict):
+                    live["last_checked_at"] = now_iso
+                    live["last_order_state"] = order_state
+                    live["market_slug"] = market_slug or live.get("market_slug")
+                    if entry_px is not None:
+                        live["entry_price"] = entry_px
+
+            if _poly_tp_is_terminal_order_state(order_state):
+                with _poly_tp_lock:
+                    live = (_poly_tp_state.get("orders") or {}).get(order_id)
+                    if isinstance(live, dict):
+                        live["status"] = "inactive"
+                        live["last_error"] = f"Terminal order state: {order_state}"
+                continue
+
+            if not market_slug:
+                with _poly_tp_lock:
+                    live = (_poly_tp_state.get("orders") or {}).get(order_id)
+                    if isinstance(live, dict):
+                        live["last_error"] = "Missing market slug; cannot check take-profit."
+                continue
+
+            bbo = get_market_bbo(market_slug)
+            side = str(row.get("side") or "yes").strip().lower()
+            mark_px = _poly_tp_mark_price(side, bbo)
+            try:
+                entry_num = float(entry_px) if entry_px is not None else None
+            except Exception:
+                entry_num = None
+
+            green_pct = None
+            if entry_num and entry_num > 0 and mark_px is not None:
+                green_pct = ((float(mark_px) - float(entry_num)) / float(entry_num)) * 100.0
+
+            with _poly_tp_lock:
+                live = (_poly_tp_state.get("orders") or {}).get(order_id)
+                if isinstance(live, dict):
+                    live["last_mark_price"] = mark_px
+                    live["last_green_pct"] = green_pct
+                    live["last_error"] = None
+
+            if green_pct is None or green_pct < target_pct:
+                continue
+
+            close_resp = close_position_order(
+                market_slug=market_slug,
+                synchronous_execution=False,
+                slippage_bips=_POLY_TP_SLIPPAGE_BIPS,
+            )
+            close_order_id = str(close_resp.get("close_order_id") or "").strip() or None
+            with _poly_tp_lock:
+                live = (_poly_tp_state.get("orders") or {}).get(order_id)
+                if isinstance(live, dict):
+                    live["status"] = "close_requested"
+                    live["close_order_id"] = close_order_id
+                    live["close_requested_at"] = now_iso
+                    live["close_response"] = close_resp.get("response") if isinstance(close_resp, dict) else close_resp
+            triggered += 1
+            _log(
+                "[polymarket-tp] close-position requested "
+                f"order_id={order_id} market={market_slug} green={green_pct:.2f}% target={target_pct:.2f}%"
+            )
+        except Exception as exc:
+            with _poly_tp_lock:
+                live = (_poly_tp_state.get("orders") or {}).get(order_id)
+                if isinstance(live, dict):
+                    live["last_checked_at"] = now_iso
+                    live["last_error"] = str(exc)
+
+    try:
+        _poly_tp_save_state()
+    except Exception as exc:
+        _log(f"[polymarket-tp] failed to save state: {exc}")
+
+    return {
+        "ok": True,
+        "enabled": True,
+        "checked": checked,
+        "triggered": triggered,
+        "target_pct": target_pct,
+    }
+
 
 def _sse_broadcast(event: str, data: dict):
     """Push an SSE message to every connected browser tab.
@@ -6635,6 +6929,7 @@ def api_polymarket_order():
             price=price,
             order_type=str(data.get("order_type") or "ORDER_TYPE_MARKET").upper(),
         )
+        tracking = _poly_tp_track_order(placed if isinstance(placed, dict) else {}, resolved_bet)
 
         return jsonify({
             "ok": bool(placed.get("ok", True)),
@@ -6646,8 +6941,59 @@ def api_polymarket_order():
             "side": side,
             "amount_usd": amount_usd,
             "resolution": _clean(resolved_bet) if isinstance(resolved_bet, dict) else None,
+            "manager_tracking": _clean(tracking) if isinstance(tracking, dict) else None,
             "response": _clean(placed.get("response") if isinstance(placed, dict) else placed),
         })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
+
+
+@app.route("/api/polymarket/order-manager/status")
+def api_polymarket_order_manager_status():
+    try:
+        with _poly_tp_lock:
+            rows = [row for row in (_poly_tp_state.get("orders") or {}).values() if isinstance(row, dict)]
+            rows.sort(key=lambda r: str(r.get("tracked_at") or ""), reverse=True)
+        return jsonify(
+            {
+                "ok": True,
+                "enabled": bool(_poly_tp_runtime.get("enabled", _POLY_TP_ENABLED)),
+                "target_pct": float(_poly_tp_runtime.get("target_pct") or _POLY_TP_TARGET_PCT),
+                "check_interval_sec": _POLY_TP_CHECK_SEC,
+                "count": len(rows),
+                "orders": _clean(rows[:300]),
+            }
+        )
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e), "orders": []})
+
+
+@app.route("/api/polymarket/order-manager/run", methods=["POST"])
+def api_polymarket_order_manager_run():
+    try:
+        result = run_polymarket_take_profit_cycle()
+        return jsonify(_clean(result))
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
+
+
+@app.route("/api/polymarket/order-manager/config", methods=["POST"])
+def api_polymarket_order_manager_config():
+    data = request.get_json(force=True) or {}
+    try:
+        with _poly_tp_lock:
+            if "enabled" in data:
+                _poly_tp_runtime["enabled"] = bool(data.get("enabled"))
+            if "target_pct" in data:
+                _poly_tp_runtime["target_pct"] = max(1.0, float(data.get("target_pct") or _POLY_TP_TARGET_PCT))
+            target = float(_poly_tp_runtime.get("target_pct") or _POLY_TP_TARGET_PCT)
+            enabled = bool(_poly_tp_runtime.get("enabled", _POLY_TP_ENABLED))
+            # Keep persisted rows aligned with runtime target.
+            for row in (_poly_tp_state.get("orders") or {}).values():
+                if isinstance(row, dict) and str(row.get("status") or "").strip().lower() == "tracking":
+                    row["target_pct"] = target
+        _poly_tp_save_state()
+        return jsonify({"ok": True, "enabled": enabled, "target_pct": target})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
 
@@ -7526,6 +7872,7 @@ def _start_scheduler():
         from apscheduler.schedulers.background import BackgroundScheduler
         from apscheduler.triggers.interval import IntervalTrigger
         from apscheduler.triggers.cron import CronTrigger
+        _poly_tp_load_state()
         sched = BackgroundScheduler(daemon=True)
         if _AUTO_ANALYSIS_INTERVAL_MIN > 0:
             sched.add_job(
@@ -7556,6 +7903,14 @@ def _start_scheduler():
                 max_instances=1,
                 coalesce=True,
             )
+        if _POLY_TP_CHECK_SEC > 0:
+            sched.add_job(
+                run_polymarket_take_profit_cycle,
+                IntervalTrigger(seconds=_POLY_TP_CHECK_SEC),
+                id="polymarket_auto_take_profit",
+                max_instances=1,
+                coalesce=True,
+            )
 
         sched.start()
         if _AUTO_ANALYSIS_INTERVAL_MIN > 0:
@@ -7568,6 +7923,12 @@ def _start_scheduler():
                 f"at {_AUTO_BACKFILL_HOUR_ET:02d}:{_AUTO_BACKFILL_MINUTE_ET:02d} ET "
                 f"(days={_AUTO_BACKFILL_DAYS})"
             )
+        print(
+            "[scheduler] Polymarket auto TP "
+            f"enabled={bool(_poly_tp_runtime.get('enabled', _POLY_TP_ENABLED))} "
+            f"target={float(_poly_tp_runtime.get('target_pct') or _POLY_TP_TARGET_PCT):.2f}% "
+            f"interval={_POLY_TP_CHECK_SEC}s"
+        )
         return sched
     except Exception as e:
         print(f"[scheduler] Could not start APScheduler: {e}")

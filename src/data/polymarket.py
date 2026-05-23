@@ -13,6 +13,7 @@ import os
 import re
 import threading
 import time
+import urllib.parse
 from typing import Any
 
 from cryptography.hazmat.primitives.asymmetric import ed25519
@@ -20,6 +21,7 @@ import requests
 
 POLYMARKET_BASE_URL = os.getenv("POLYMARKET_BASE_URL", "https://gamma-api.polymarket.com").rstrip("/")
 POLYMARKET_US_API_BASE = os.getenv("POLYMARKET_US_API_BASE", "https://api.polymarket.us").rstrip("/")
+POLYMARKET_GATEWAY_BASE = os.getenv("POLYMARKET_GATEWAY_BASE", "https://gateway.polymarket.us").rstrip("/")
 POLYMARKET_CLOB_HOST = os.getenv("POLYMARKET_CLOB_HOST", "https://clob.polymarket.com").rstrip("/")
 POLYMARKET_CHAIN_ID = int(os.getenv("POLYMARKET_CHAIN_ID", "137") or "137")
 POLYMARKET_SIGNATURE_TYPE = int(os.getenv("POLYMARKET_SIGNATURE_TYPE", "1") or "1")
@@ -703,6 +705,88 @@ def _coerce_usd(value: Any) -> float | None:
     if num > 1_000_000:
         return num / 1_000_000.0
     return num
+
+
+def _normalize_px_value(value: Any) -> float | None:
+    px = _as_float(value)
+    if px is None:
+        return None
+    if px > 1.0 and px <= 100.0:
+        return px / 100.0
+    return px
+
+
+def get_market_bbo(market_slug: str) -> dict[str, Any]:
+    """Fetch lightweight market price snapshot for a market slug."""
+    slug = str(market_slug or "").strip()
+    if not slug:
+        raise RuntimeError("market_slug is required.")
+
+    encoded_slug = urllib.parse.quote(slug, safe="")
+    resp = requests.get(f"{POLYMARKET_GATEWAY_BASE}/v1/markets/{encoded_slug}/bbo", timeout=POLYMARKET_TIMEOUT_SEC)
+    resp.raise_for_status()
+    payload = resp.json() if resp.content else {}
+    market_data = payload.get("marketData") if isinstance(payload, dict) else {}
+    market_data = market_data if isinstance(market_data, dict) else {}
+
+    current_px = _normalize_px_value(((market_data.get("currentPx") or {}).get("value") if isinstance(market_data.get("currentPx"), dict) else market_data.get("currentPx")))
+    best_bid = _normalize_px_value(((market_data.get("bestBid") or {}).get("value") if isinstance(market_data.get("bestBid"), dict) else market_data.get("bestBid")))
+    best_ask = _normalize_px_value(((market_data.get("bestAsk") or {}).get("value") if isinstance(market_data.get("bestAsk"), dict) else market_data.get("bestAsk")))
+    last_sample = market_data.get("lastPriceSample") if isinstance(market_data.get("lastPriceSample"), dict) else {}
+    long_px = _normalize_px_value(((last_sample.get("longPx") or {}).get("value") if isinstance(last_sample.get("longPx"), dict) else last_sample.get("longPx")))
+    short_px = _normalize_px_value(((last_sample.get("shortPx") or {}).get("value") if isinstance(last_sample.get("shortPx"), dict) else last_sample.get("shortPx")))
+
+    return {
+        "ok": True,
+        "market_slug": slug,
+        "current_px": current_px,
+        "best_bid": best_bid,
+        "best_ask": best_ask,
+        "long_px": long_px,
+        "short_px": short_px,
+        "raw": payload,
+    }
+
+
+def get_order(order_id: str) -> dict[str, Any]:
+    """Fetch a Polymarket order by exchange order id."""
+    oid = str(order_id or "").strip()
+    if not oid:
+        raise RuntimeError("order_id is required.")
+    payload = _us_request("GET", f"/v1/order/{oid}")
+    order = payload.get("order") if isinstance(payload, dict) and isinstance(payload.get("order"), dict) else {}
+    return {"ok": True, "order_id": oid, "order": order, "raw": payload}
+
+
+def close_position_order(
+    *,
+    market_slug: str,
+    synchronous_execution: bool = False,
+    max_block_time: int = 5,
+    slippage_bips: int = 50,
+) -> dict[str, Any]:
+    """Close an existing position in a market using Polymarket close-position API."""
+    slug = str(market_slug or "").strip()
+    if not slug:
+        raise RuntimeError("market_slug is required.")
+
+    body: dict[str, Any] = {
+        "marketSlug": slug,
+        "manualOrderIndicator": "MANUAL_ORDER_INDICATOR_AUTOMATIC",
+        "synchronousExecution": bool(synchronous_execution),
+    }
+    if synchronous_execution:
+        body["maxBlockTime"] = str(max(1, int(max_block_time or 5)))
+    if slippage_bips and int(slippage_bips) > 0:
+        body["slippageTolerance"] = {"bips": int(slippage_bips)}
+
+    response = _us_request("POST", "/v1/order/close-position", payload=body)
+    return {
+        "ok": True,
+        "market_slug": slug,
+        "close_order_id": str(response.get("id") or "").strip(),
+        "response": response,
+    }
 
 
 def get_balance() -> dict[str, Any]:
