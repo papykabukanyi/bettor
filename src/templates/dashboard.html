@@ -405,6 +405,8 @@ main{padding:20px;max-width:1400px;margin:0 auto}
 .ready-actions input[type=number]{width:90px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;background:var(--card);color:var(--text);font-size:.76rem;flex-shrink:0}
 .ready-actions button{white-space:nowrap;flex-shrink:0;padding:8px 18px;font-size:.82rem}
 .ready-match-chip{flex:1;min-width:160px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;background:#0f172a;border:1px solid var(--border);border-radius:8px;padding:6px 12px;font-size:.73rem;overflow:hidden}
+.ready-match-chip.clickable{cursor:pointer;transition:border-color .16s ease,background .16s ease}
+.ready-match-chip.clickable:hover{border-color:rgba(20,184,166,.55);background:rgba(15,23,42,.88)}
 .ready-match-chip .match-name{color:#e2e8f0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;font-weight:600}
 .ready-match-chip .match-ticker{color:var(--muted);font-family:monospace;font-size:.68rem;white-space:nowrap;flex-shrink:0}
 .ready-match-chip .match-icon{flex-shrink:0;color:var(--green)}
@@ -1204,6 +1206,37 @@ function _readyResolutionForExchange(row, exchange) {
 function _readyResolutionExchange(row) {
   const resolution = _readyResolutionForRow(row);
   return String((resolution && resolution.exchange) || '').toLowerCase();
+}
+
+function _readyMatchUrl(exchange, resolution) {
+  const ex = String(exchange || '').toLowerCase();
+  if (ex === 'polymarket') {
+    const slug = String(resolution?.market_slug || '').trim();
+    if (!slug) return '';
+    return `https://polymarket.com/event/${encodeURIComponent(slug)}`;
+  }
+  if (ex === 'kalshi') {
+    const ticker = String(resolution?.market_ticker || '').trim();
+    if (!ticker) return '';
+    return `https://kalshi.com/markets/${encodeURIComponent(ticker)}`;
+  }
+  return '';
+}
+
+function openReadyMatch(exchange, uid) {
+  const bet = READY_BETS.find(r => String(r.uid || '') === String(uid || ''));
+  if (!bet) {
+    toast('Ready bet no longer available. Refreshing…', 'info');
+    refreshReadyBets(false);
+    return;
+  }
+  const resolution = _readyResolutionForExchange(bet, exchange);
+  const url = _readyMatchUrl(exchange, resolution);
+  if (!url) {
+    toast(`${String(exchange || '').toUpperCase()} market link unavailable for this bet.`, 'info');
+    return;
+  }
+  window.open(url, '_blank', 'noopener,noreferrer');
 }
 
 function _isReadyBetMatched(row) {
@@ -5090,7 +5123,7 @@ function renderReadyBets() {
     const hasKalshiMatch = String(kalshiResolution?.status || '').toLowerCase() === 'matched' && !!String(kalshiResolution?.market_ticker || '').trim();
     const hasPolyMatch = String(polyResolution?.status || '').toLowerCase() === 'matched' && !!String(polyResolution?.market_slug || '').trim();
 
-    const _renderMatchChip = (res, exchangeLabel) => {
+    const _renderMatchChip = (res, exchangeLabel, exchangeKey) => {
       if (!res || String(res.status || '').toLowerCase() !== 'matched') return '';
       const ticker = String(res.market_ticker || res.market_slug || '').trim();
       if (!ticker) return '';
@@ -5108,7 +5141,9 @@ function renderReadyBets() {
         eventTitle ? eventTitle : '',
         sportTag,
       ].filter(Boolean);
-      return `<div class="ready-match-chip" title="${ticker}">
+      const clickAttr = exchangeKey ? ` onclick="openReadyMatch('${exchangeKey}','${b.uid}')"` : '';
+      const cls = exchangeKey ? 'ready-match-chip clickable' : 'ready-match-chip';
+      return `<div class="${cls}" title="${ticker}"${clickAttr}>
           <span class="match-icon">📍</span>
           <span class="match-name">${chipTitle}</span>
           <span class="match-ticker">${ticker}</span>
@@ -5123,8 +5158,8 @@ function renderReadyBets() {
     let matchMetaHtml = '';
     if (resolutionStatus === 'matched' && (hasKalshiMatch || hasPolyMatch)) {
       const chips = [];
-      if (hasKalshiMatch) chips.push(_renderMatchChip(kalshiResolution, 'Kalshi'));
-      if (hasPolyMatch) chips.push(_renderMatchChip(polyResolution, 'Polymarket'));
+      if (hasKalshiMatch) chips.push(_renderMatchChip(kalshiResolution, 'Kalshi', 'kalshi'));
+      if (hasPolyMatch) chips.push(_renderMatchChip(polyResolution, 'Polymarket', 'polymarket'));
       matchHtml = chips.filter(Boolean).join('');
       if (hasKalshiMatch && hasPolyMatch) {
         matchMetaHtml = `<span class="ready-status-hint">Both exchanges are available for this prediction.</span>`;
