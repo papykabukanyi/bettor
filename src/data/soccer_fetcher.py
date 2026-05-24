@@ -61,6 +61,9 @@ _CACHE_SQUAD  = 3600   # 1 h for squads
 _CACHE_STATIC = 86400  # 24 h for standings/scorers
 _cache: dict[str, tuple[Any, float]] = {}
 _PRIORITY_COMPETITIONS = ("WC", "CL", "PL", "BL1", "SA", "PD", "FL1")
+_FD_COOLDOWN_SEC = max(120, int(os.getenv("SOCCER_FD_COOLDOWN_SEC", "900") or "900"))
+_FD_COOLDOWN_UNTIL = 0.0
+_FD_LAST_COOLDOWN_LOG_TS = 0.0
 
 
 # ── All supported tournaments ─────────────────────────────────────────────────
@@ -183,7 +186,16 @@ TOURNAMENTS: dict[str, dict] = {
 # ── HTTP helpers ──────────────────────────────────────────────────────────────
 def _fd_get(path: str, params: dict | None = None) -> Any:
     """GET football-data.org, return parsed JSON or None."""
+    global _FD_COOLDOWN_UNTIL, _FD_LAST_COOLDOWN_LOG_TS
     if not _FD_KEY:
+        return None
+    now = time.time()
+    if now < _FD_COOLDOWN_UNTIL:
+        # Throttle repeated calls after 429 so the fallback path is used immediately.
+        if (now - _FD_LAST_COOLDOWN_LOG_TS) > 60:
+            left = int(max(0, _FD_COOLDOWN_UNTIL - now))
+            print(f"[soccer_fetcher] football-data cooldown active ({left}s left), using ESPN/static fallback")
+            _FD_LAST_COOLDOWN_LOG_TS = now
         return None
     url = f"{_FD_BASE}{path}"
     headers = {"X-Auth-Token": _FD_KEY}
@@ -195,8 +207,13 @@ def _fd_get(path: str, params: dict | None = None) -> Any:
                 retry_delay = max(1, int(float(retry_after)))
             except (TypeError, ValueError):
                 retry_delay = 12
-            time.sleep(retry_delay)
-            r = requests.get(url, headers=headers, params=params or {}, timeout=10)
+            cooldown_for = max(_FD_COOLDOWN_SEC, retry_delay)
+            _FD_COOLDOWN_UNTIL = time.time() + cooldown_for
+            _FD_LAST_COOLDOWN_LOG_TS = time.time()
+            print(
+                f"[soccer_fetcher] API 429 for {path}; pausing football-data requests for {cooldown_for}s"
+            )
+            return None
         if r.status_code == 200:
             return r.json()
         print(f"[soccer_fetcher] API {r.status_code} for {path}")

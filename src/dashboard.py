@@ -2830,6 +2830,28 @@ def _build_model_player_props_fallback(games: list[dict], max_per_game: int = 6)
             def _team_token(name: str) -> str:
                 return re.sub(r"[^a-z0-9]+", "", str(name or "").strip().lower())
 
+            def _team_parts(name: str) -> list[str]:
+                return [p for p in re.findall(r"[a-z0-9]+", str(name or "").lower()) if len(p) >= 2]
+
+            def _team_match(a: str, b: str) -> bool:
+                ta = _team_token(a)
+                tb = _team_token(b)
+                if not ta or not tb:
+                    return False
+                if ta == tb or ta in tb or tb in ta:
+                    return True
+                pa = set(_team_parts(a))
+                pb = set(_team_parts(b))
+                if not pa or not pb:
+                    return False
+                overlap = pa & pb
+                if len(overlap) >= 2:
+                    return True
+                # Nickname-only matches (e.g. "Aces" vs "Las Vegas Aces").
+                if len(overlap) == 1 and (len(pa) == 1 or len(pb) == 1):
+                    return True
+                return False
+
             def _b_poisson_over(rate: float, line: float) -> float:
                 lam = max(0.01, float(rate or 0.01))
                 target = int(math.floor(float(line or 0.5)) + 1)
@@ -2894,13 +2916,76 @@ def _build_model_player_props_fallback(games: list[dict], max_per_game: int = 6)
                         continue
                     home_c = next((c for c in competitors if str(c.get("homeAway") or "").lower() == "home"), competitors[0])
                     away_c = next((c for c in competitors if str(c.get("homeAway") or "").lower() == "away"), competitors[1] if len(competitors) > 1 else competitors[0])
-                    eh = _team_token((home_c.get("team") or {}).get("displayName") or "")
-                    ea = _team_token((away_c.get("team") or {}).get("displayName") or "")
+                    eh_name = (home_c.get("team") or {}).get("displayName") or ""
+                    ea_name = (away_c.get("team") or {}).get("displayName") or ""
+                    eh = _team_token(eh_name)
+                    ea = _team_token(ea_name)
                     if eh == home_tok and ea == away_tok:
                         return str(ev.get("id") or "").strip()
                     if eh == away_tok and ea == home_tok:
                         return str(ev.get("id") or "").strip()
+                    game_home = str(game.get("home_team") or "")
+                    game_away = str(game.get("away_team") or "")
+                    if _team_match(eh_name, game_home) and _team_match(ea_name, game_away):
+                        return str(ev.get("id") or "").strip()
+                    if _team_match(eh_name, game_away) and _team_match(ea_name, game_home):
+                        return str(ev.get("id") or "").strip()
                 return ""
+
+            def _mk_bball_team_total_row(game: dict, team_name: str, opp_name: str, slug: str, source: str) -> dict:
+                league_baseline = 111.5
+                if slug == "wnba":
+                    league_baseline = 82.5
+                elif "college" in slug:
+                    league_baseline = 73.5
+
+                team_score = _b_num(game.get("home_score") if str(game.get("home_team") or "") == team_name else game.get("away_score"))
+                opp_score = _b_num(game.get("away_score") if str(game.get("home_team") or "") == team_name else game.get("home_score"))
+                base_rate = league_baseline
+                if team_score is not None and opp_score is not None:
+                    base_rate = max(55.0, min(140.0, team_score + ((team_score - opp_score) * 0.25)))
+                line_val = max(58.5, round(base_rate * 0.95 * 2.0) / 2.0)
+                over_prob = _b_poisson_over(base_rate, line_val)
+                model_prob = max(0.53, min(0.82, over_prob))
+                odds_am = _prob_to_american(model_prob)
+                dec_odds = round((1 + (odds_am / 100.0)) if odds_am > 0 else (1 + (100.0 / abs(odds_am))), 4)
+                ev = (dec_odds - 1.0) * model_prob - (1.0 - model_prob)
+
+                home = str(game.get("home_team") or "").strip()
+                away = str(game.get("away_team") or "").strip()
+                game_date = str(game.get("game_date") or game.get("date") or today_str)
+                game_time = str(game.get("game_time") or "")
+                game_key = str(game.get("game_key") or _compose_game_key(away, home, game.get("game_datetime"), game_date, game_time))
+                match_key = _norm_gk(game.get("match_key") or f"{away}@{home}")
+
+                return {
+                    "sport": "basketball",
+                    "name": team_name,
+                    "team": team_name,
+                    "prop_label": "Projected Team Points",
+                    "stat_type": "team_points",
+                    "line": line_val,
+                    "direction": "OVER",
+                    "model_prob": round(model_prob, 4),
+                    "confidence": int(round(model_prob * 100)),
+                    "safety_label": _safety_label_from_prob(model_prob),
+                    "ev": round(ev, 4),
+                    "odds_am": odds_am,
+                    "dec_odds": dec_odds,
+                    "game": f"{away} @ {home}",
+                    "game_key": game_key,
+                    "match_key": match_key,
+                    "game_date": game_date,
+                    "game_time": game_time,
+                    "home_team": home,
+                    "away_team": away,
+                    "sentiment_score": 0.0,
+                    "sentiment_mentions": 0,
+                    "sentiment_sources": source,
+                    "worth_it": model_prob >= 0.56,
+                    "worth_score": round(model_prob * 100.0, 2),
+                    "worth_reason": f"{team_name} team-total fallback vs {opp_name}",
+                }
 
             def _mk_bball_row(game: dict, team_name: str, player_name: str, stat_name: str, raw_value: float, source: str) -> dict:
                 stat_type, stat_label, min_line = stat_meta.get(stat_name, ("points", "Points", 8.5))
@@ -2957,6 +3042,12 @@ def _build_model_player_props_fallback(games: list[dict], max_per_game: int = 6)
                 league_slug = _league_slug(g)
                 event_id = _resolve_event_id(g, league_slug)
                 if not event_id:
+                    # Keep WNBA/NBA coverage alive even when summary event IDs cannot be resolved.
+                    game_rows = [
+                        _mk_bball_team_total_row(g, home, away, league_slug, "espn_basketball_team_total_fallback"),
+                        _mk_bball_team_total_row(g, away, home, league_slug, "espn_basketball_team_total_fallback"),
+                    ]
+                    rows.extend(game_rows[:max_per_game])
                     continue
 
                 url = f"https://site.api.espn.com/apis/site/v2/sports/basketball/{league_slug}/summary"
@@ -3020,6 +3111,12 @@ def _build_model_player_props_fallback(games: list[dict], max_per_game: int = 6)
 
                         for stat_name, payload in top_by_stat.items():
                             game_rows.append(_mk_bball_row(g, team_name, payload[0], stat_name, payload[1], "espn_basketball_boxscore"))
+
+                if not game_rows:
+                    game_rows = [
+                        _mk_bball_team_total_row(g, home, away, league_slug, "espn_basketball_team_total_fallback"),
+                        _mk_bball_team_total_row(g, away, home, league_slug, "espn_basketball_team_total_fallback"),
+                    ]
 
                 deduped_game_rows: list[dict] = []
                 seen_game = set()
