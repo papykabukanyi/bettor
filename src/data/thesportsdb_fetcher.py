@@ -32,6 +32,8 @@ from src.config import THESPORTSDB_API_KEY
 
 _KEY  = THESPORTSDB_API_KEY or "1"
 _BASE = f"https://www.thesportsdb.com/api/v1/json/{_KEY}"
+_EVENTSDAY_BACKOFF_UNTIL = 0.0
+_EVENTSDAY_LOGGED = False
 
 _SOCCER_LEAGUES = {
     "premier_league": 4328,
@@ -51,14 +53,32 @@ _SPORT_TO_TSDB = {
 # ─── helpers ─────────────────────────────────────────────────────────────────
 
 def _get(endpoint: str, params: dict = None, timeout: int = 8):
+    global _EVENTSDAY_BACKOFF_UNTIL, _EVENTSDAY_LOGGED
+    now_ts = time.time()
+    if endpoint == "eventsday.php" and now_ts < float(_EVENTSDAY_BACKOFF_UNTIL or 0.0):
+        # Circuit-break noisy/unsupported endpoint for a cooldown window.
+        return None
+
     url = f"{_BASE}/{endpoint}"
     for attempt in range(3):
         try:
             resp = requests.get(url, params=params or {}, timeout=timeout)
+            if endpoint == "eventsday.php" and resp.status_code == 400:
+                # Free-tier endpoint can be unavailable; disable temporarily to avoid log storms.
+                _EVENTSDAY_BACKOFF_UNTIL = time.time() + 21600  # 6 hours
+                if not _EVENTSDAY_LOGGED:
+                    print(
+                        "[thesportsdb] eventsday.php returned 400; "
+                        "disabling eventsday calls for 6h to prevent log spam"
+                    )
+                    _EVENTSDAY_LOGGED = True
+                return None
             if resp.status_code == 429:
                 time.sleep(2 ** attempt)
                 continue
             resp.raise_for_status()
+            if endpoint == "eventsday.php":
+                _EVENTSDAY_LOGGED = False
             return resp.json()
         except requests.exceptions.Timeout:
             print(f"[thesportsdb] timeout {endpoint}")
@@ -75,10 +95,13 @@ def get_events_by_date(d: date = None, sport: str = "Soccer") -> list[dict]:
     """Return all events on a date for a given sport."""
     d = d or date.today()
     tsdb_sport = _SPORT_TO_TSDB.get(sport.lower(), sport)
-    # Try with sport filter first; fall back to date-only (free tier compat)
+    # Try with sport filter first.
     data = _get("eventsday.php", {"d": d.isoformat(), "s": tsdb_sport})
     events = (data or {}).get("events")
-    if not events:
+
+    # Date-only fallback can be expensive/noisy on plans where eventsday is disabled;
+    # use it only when caller asks for all sports.
+    if not events and str(sport or "").strip().lower() in {"", "all"}:
         data = _get("eventsday.php", {"d": d.isoformat()})
         events = (data or {}).get("events") or []
     if sport.lower() not in ("", "all"):
