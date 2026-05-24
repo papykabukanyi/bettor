@@ -2657,6 +2657,224 @@ def get_performance_stats(sport: str | None = None, target_date=None) -> dict:
         conn.close()
 
 
+def update_prediction_exchange_statuses(rows: list[dict]) -> int:
+    """Persist Kalshi/Polymarket resolution metadata for prediction rows by bet_uid."""
+    if not rows:
+        return 0
+    conn = get_conn()
+    if conn is None:
+        return 0
+    updated = 0
+    try:
+        cols = _get_table_columns(conn, "predictions")
+        if "bet_uid" not in cols:
+            return 0
+
+        has_kalshi_ticker = "kalshi_ticker" in cols
+        has_kalshi_event = "kalshi_event_ticker" in cols
+        has_kalshi_series = "kalshi_series_ticker" in cols
+        has_kalshi_side = "kalshi_side" in cols
+        has_kalshi_price = "kalshi_price_cents" in cols
+        has_kalshi_status = "kalshi_status" in cols
+
+        has_poly_ticker = "polymarket_ticker" in cols
+        has_poly_slug = "polymarket_market_slug" in cols
+        has_poly_event = "polymarket_event_slug" in cols
+        has_poly_series = "polymarket_series_ticker" in cols
+        has_poly_side = "polymarket_side" in cols
+        has_poly_price = "polymarket_price" in cols
+        has_poly_status = "polymarket_status" in cols
+
+        set_cols = []
+        if has_kalshi_ticker:
+            set_cols.append("kalshi_ticker = COALESCE(NULLIF(%s, ''), kalshi_ticker)")
+        if has_kalshi_event:
+            set_cols.append("kalshi_event_ticker = COALESCE(NULLIF(%s, ''), kalshi_event_ticker)")
+        if has_kalshi_series:
+            set_cols.append("kalshi_series_ticker = COALESCE(NULLIF(%s, ''), kalshi_series_ticker)")
+        if has_kalshi_side:
+            set_cols.append("kalshi_side = COALESCE(NULLIF(%s, ''), kalshi_side)")
+        if has_kalshi_price:
+            set_cols.append("kalshi_price_cents = COALESCE(%s, kalshi_price_cents)")
+        if has_kalshi_status:
+            set_cols.append("kalshi_status = COALESCE(NULLIF(%s, ''), kalshi_status)")
+
+        if has_poly_ticker:
+            set_cols.append("polymarket_ticker = COALESCE(NULLIF(%s, ''), polymarket_ticker)")
+        if has_poly_slug:
+            set_cols.append("polymarket_market_slug = COALESCE(NULLIF(%s, ''), polymarket_market_slug)")
+        if has_poly_event:
+            set_cols.append("polymarket_event_slug = COALESCE(NULLIF(%s, ''), polymarket_event_slug)")
+        if has_poly_series:
+            set_cols.append("polymarket_series_ticker = COALESCE(NULLIF(%s, ''), polymarket_series_ticker)")
+        if has_poly_side:
+            set_cols.append("polymarket_side = COALESCE(NULLIF(%s, ''), polymarket_side)")
+        if has_poly_price:
+            set_cols.append("polymarket_price = COALESCE(%s, polymarket_price)")
+        if has_poly_status:
+            set_cols.append("polymarket_status = COALESCE(NULLIF(%s, ''), polymarket_status)")
+
+        if not set_cols:
+            return 0
+
+        sql = (
+            "UPDATE predictions "
+            f"SET {', '.join(set_cols)} "
+            "WHERE bet_uid = %s"
+        )
+
+        cur = conn.cursor()
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            bet_uid = str(row.get("bet_uid") or "").strip()
+            if not bet_uid:
+                continue
+
+            vals = []
+            if has_kalshi_ticker:
+                vals.append(str(row.get("kalshi_ticker") or "")[:120])
+            if has_kalshi_event:
+                vals.append(str(row.get("kalshi_event_ticker") or "")[:120])
+            if has_kalshi_series:
+                vals.append(str(row.get("kalshi_series_ticker") or "")[:120])
+            if has_kalshi_side:
+                vals.append(str(row.get("kalshi_side") or "")[:10])
+            if has_kalshi_price:
+                vals.append(row.get("kalshi_price_cents"))
+            if has_kalshi_status:
+                vals.append(str(row.get("kalshi_status") or "")[:20])
+
+            if has_poly_ticker:
+                vals.append(str(row.get("polymarket_ticker") or "")[:160])
+            if has_poly_slug:
+                vals.append(str(row.get("polymarket_market_slug") or "")[:200])
+            if has_poly_event:
+                vals.append(str(row.get("polymarket_event_slug") or "")[:200])
+            if has_poly_series:
+                vals.append(str(row.get("polymarket_series_ticker") or "")[:120])
+            if has_poly_side:
+                vals.append(str(row.get("polymarket_side") or "")[:10])
+            if has_poly_price:
+                vals.append(row.get("polymarket_price"))
+            if has_poly_status:
+                vals.append(str(row.get("polymarket_status") or "")[:20])
+
+            vals.append(bet_uid)
+            try:
+                cur.execute(sql, vals)
+                updated += int(cur.rowcount or 0)
+            except Exception:
+                continue
+
+        conn.commit()
+        return updated
+    except Exception as e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        print(f"[db] update_prediction_exchange_statuses error: {e}")
+        return 0
+    finally:
+        conn.close()
+
+
+def get_settlement_summary(sport: str | None = None, target_date=None, stale_hours: int = 6) -> dict:
+    """Return settlement-health summary used by Tracking Summary UI/automation."""
+    conn = get_conn()
+    if conn is None:
+        return {}
+    try:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cols = _get_table_columns(conn, "predictions")
+
+        stale_hours = max(1, int(stale_hours or 6))
+        vals = []
+        where_parts = ["outcome != 'ARCHIVED'"]
+        if sport:
+            where_parts.append("sport = %s")
+            vals.append(sport)
+        if target_date is not None:
+            where_parts.append("game_date = %s")
+            vals.append(target_date.isoformat() if hasattr(target_date, "isoformat") else str(target_date))
+        where_sql = " AND ".join(where_parts)
+
+        has_kalshi_status = "kalshi_status" in cols
+        has_poly_status = "polymarket_status" in cols
+
+        kalshi_live_expr = "0::int"
+        if has_kalshi_status:
+            kalshi_live_expr = (
+                "COUNT(*) FILTER (WHERE outcome='PENDING' "
+                "AND LOWER(COALESCE(kalshi_status,'')) IN ('started','done'))"
+            )
+        poly_live_expr = "0::int"
+        if has_poly_status:
+            poly_live_expr = (
+                "COUNT(*) FILTER (WHERE outcome='PENDING' "
+                "AND LOWER(COALESCE(polymarket_status,'')) IN ('started','done','resolved','closed'))"
+            )
+
+        cur.execute(
+            f"""
+            SELECT
+                COUNT(*) AS total,
+                COUNT(*) FILTER (WHERE outcome='PENDING') AS pending,
+                COUNT(*) FILTER (WHERE outcome IN ('WIN','LOSS','PUSH')) AS settled,
+                COUNT(*) FILTER (
+                    WHERE outcome='PENDING'
+                      AND COALESCE(game_date::timestamp, predicted_at) < NOW() - (%s * INTERVAL '1 hour')
+                ) AS stale_pending,
+                {kalshi_live_expr} AS pending_with_kalshi_market_state,
+                {poly_live_expr} AS pending_with_polymarket_market_state
+            FROM predictions
+            WHERE {where_sql}
+            """,
+            [stale_hours, *vals],
+        )
+        pred = dict(cur.fetchone() or {})
+
+        prop_where_parts = ["outcome != 'ARCHIVED'"]
+        prop_vals = []
+        if sport:
+            prop_where_parts.append("sport = %s")
+            prop_vals.append(sport)
+        if target_date is not None:
+            prop_where_parts.append("game_date = %s")
+            prop_vals.append(target_date.isoformat() if hasattr(target_date, "isoformat") else str(target_date))
+        prop_where_sql = " AND ".join(prop_where_parts)
+
+        cur.execute(
+            f"""
+            SELECT
+                COUNT(*) AS total,
+                COUNT(*) FILTER (WHERE outcome='PENDING') AS pending,
+                COUNT(*) FILTER (WHERE outcome IN ('WIN','LOSS','PUSH')) AS settled,
+                COUNT(*) FILTER (
+                    WHERE outcome='PENDING'
+                      AND COALESCE(game_date::timestamp, detected_at) < NOW() - (%s * INTERVAL '1 hour')
+                ) AS stale_pending
+            FROM prop_history
+            WHERE {prop_where_sql}
+            """,
+            [stale_hours, *prop_vals],
+        )
+        props = dict(cur.fetchone() or {})
+
+        return {
+            "stale_hours": stale_hours,
+            "predictions": pred,
+            "props": props,
+            "needs_attention": int(pred.get("stale_pending") or 0) + int(props.get("stale_pending") or 0),
+        }
+    except Exception as e:
+        print(f"[db] get_settlement_summary error: {e}")
+        return {}
+    finally:
+        conn.close()
+
+
 def get_prop_performance_stats(sport: str | None = None, days_back: int | None = None,
                                target_date=None) -> dict:
     """Return prop stats for dashboard tracking."""

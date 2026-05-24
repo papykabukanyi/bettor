@@ -242,6 +242,144 @@ def _clean_ready_bets_payload(bets: list[dict]) -> list[dict]:
         clean_rows.append(row)
     return clean_rows
 
+
+def _prediction_to_ready_bet(pred: dict, today_str: str) -> dict:
+    """Convert DB prediction row to canonical ready-bet payload for exchange resolvers."""
+    pick = str(pred.get("pick") or "")
+    home_team = str(pred.get("home_team") or "")
+    away_team = str(pred.get("away_team") or "")
+    return {
+        "uid": str(pred.get("bet_uid") or pred.get("id") or "").strip(),
+        "bet_uid": str(pred.get("bet_uid") or pred.get("id") or "").strip(),
+        "sport": pred.get("sport") or "",
+        "bet_type": pred.get("bet_type") or "moneyline",
+        "pick": pick,
+        "label": pick,
+        "line": pred.get("line"),
+        "game_date": str(pred.get("game_date") or today_str),
+        "game_time": str(pred.get("game_time") or ""),
+        "game": str(pred.get("game") or pred.get("game_key") or ""),
+        "game_key": str(pred.get("game_key") or pred.get("game") or ""),
+        "home_team": home_team,
+        "away_team": away_team,
+        "player_name": _extract_player_name(pick),
+        "team": _extract_pick_team(pick, home_team, away_team),
+        "direction": _extract_direction(pick),
+        "prop_type": _extract_prop_type(pred.get("bet_type") or "", pick),
+        "side_default": "no" if "under" in pick.lower() else "yes",
+    }
+
+
+def _sync_exchange_resolution_statuses(days_back: int = 5, max_rows: int = 300) -> dict:
+    """Refresh pending prediction exchange metadata so tracking/settlement stays in sync."""
+    try:
+        from data.db import get_predictions, update_prediction_exchange_statuses
+        from data.kalshi import resolve_ready_bets as resolve_kalshi_ready_bets
+        from data.polymarket import resolve_ready_bets as resolve_polymarket_ready_bets
+    except Exception:
+        return {"scanned": 0, "db_updated": 0, "kalshi_hits": 0, "polymarket_hits": 0}
+
+    try:
+        db_sport = None if _ACTIVE_SPORT == "all" else _ACTIVE_SPORT
+        pending_preds = get_predictions(
+            days=max(2, int(days_back) + 2),
+            outcome="PENDING",
+            sport=db_sport,
+        ) or []
+        if not pending_preds:
+            return {"scanned": 0, "db_updated": 0, "kalshi_hits": 0, "polymarket_hits": 0}
+
+        today = _et_calendar_today()
+        min_date = today - datetime.timedelta(days=max(1, int(days_back) + 1))
+
+        picked: list[dict] = []
+        for pred in pending_preds:
+            if not isinstance(pred, dict):
+                continue
+            game_date_s = str(pred.get("game_date") or "")[:10]
+            try:
+                game_date = datetime.date.fromisoformat(game_date_s)
+            except Exception:
+                game_date = today
+            if game_date < min_date:
+                continue
+            if not str(pred.get("bet_uid") or pred.get("id") or "").strip():
+                continue
+            picked.append(pred)
+            if len(picked) >= max(50, int(max_rows)):
+                break
+
+        if not picked:
+            return {"scanned": 0, "db_updated": 0, "kalshi_hits": 0, "polymarket_hits": 0}
+
+        today_str = today.isoformat()
+        ready_bets = _clean_ready_bets_payload([_prediction_to_ready_bet(p, today_str) for p in picked])
+        if not ready_bets:
+            return {"scanned": 0, "db_updated": 0, "kalshi_hits": 0, "polymarket_hits": 0}
+
+        kalshi_payload = {}
+        polymarket_payload = {}
+        try:
+            kalshi_payload = resolve_kalshi_ready_bets(ready_bets) or {}
+        except Exception:
+            kalshi_payload = {}
+        try:
+            polymarket_payload = resolve_polymarket_ready_bets(ready_bets) or {}
+        except Exception:
+            polymarket_payload = {}
+
+        kalshi_res = kalshi_payload.get("resolutions") if isinstance(kalshi_payload, dict) else {}
+        poly_res = polymarket_payload.get("resolutions") if isinstance(polymarket_payload, dict) else {}
+        if not isinstance(kalshi_res, dict):
+            kalshi_res = {}
+        if not isinstance(poly_res, dict):
+            poly_res = {}
+
+        updates: list[dict] = []
+        kalshi_hits = 0
+        poly_hits = 0
+        for bet in ready_bets:
+            uid = str(bet.get("bet_uid") or bet.get("uid") or "").strip()
+            if not uid:
+                continue
+            k_row = kalshi_res.get(uid) if isinstance(kalshi_res.get(uid), dict) else {}
+            p_row = poly_res.get(uid) if isinstance(poly_res.get(uid), dict) else {}
+            row = {"bet_uid": uid}
+
+            if k_row:
+                row["kalshi_ticker"] = str(k_row.get("market_ticker") or "")
+                row["kalshi_event_ticker"] = str(k_row.get("event_ticker") or "")
+                row["kalshi_series_ticker"] = str(k_row.get("series_ticker") or "")
+                row["kalshi_side"] = str(k_row.get("side") or "")
+                row["kalshi_price_cents"] = k_row.get("price_cents")
+                row["kalshi_status"] = str(k_row.get("status") or "")
+                if row["kalshi_ticker"] or row["kalshi_status"]:
+                    kalshi_hits += 1
+
+            if p_row:
+                row["polymarket_ticker"] = str(p_row.get("market_ticker") or "")
+                row["polymarket_market_slug"] = str(p_row.get("market_slug") or "")
+                row["polymarket_event_slug"] = str(p_row.get("event_slug") or "")
+                row["polymarket_series_ticker"] = str(p_row.get("series_ticker") or "")
+                row["polymarket_side"] = str(p_row.get("side") or "")
+                row["polymarket_price"] = p_row.get("price")
+                row["polymarket_status"] = str(p_row.get("status") or "")
+                if row["polymarket_ticker"] or row["polymarket_status"]:
+                    poly_hits += 1
+
+            if len(row) > 1:
+                updates.append(row)
+
+        db_updated = update_prediction_exchange_statuses(updates)
+        return {
+            "scanned": len(ready_bets),
+            "db_updated": int(db_updated or 0),
+            "kalshi_hits": kalshi_hits,
+            "polymarket_hits": poly_hits,
+        }
+    except Exception:
+        return {"scanned": 0, "db_updated": 0, "kalshi_hits": 0, "polymarket_hits": 0}
+
 # ─── Gunicorn / production: init once per worker ─────────────────────────────
 _worker_initialized = False
 _worker_init_lock   = threading.Lock()
@@ -5643,12 +5781,22 @@ def api_backfill():
 def api_performance():
     try:
         _maybe_trigger_tracking_sync_sync()
-        from data.db import get_performance_stats
+        from data.db import get_performance_stats, get_settlement_summary
         current_only_raw = str(request.args.get("current_only", "0")).strip().lower()
         current_only = current_only_raw in {"1", "true", "yes", "on"}
         target_date = _et_calendar_today() if current_only else None
         db_sport = None if _ACTIVE_SPORT == "all" else _ACTIVE_SPORT
-        return jsonify({"ok": True, "stats": get_performance_stats(sport=db_sport, target_date=target_date)})
+        return jsonify(
+            {
+                "ok": True,
+                "stats": get_performance_stats(sport=db_sport, target_date=target_date),
+                "settlement_summary": get_settlement_summary(
+                    sport=db_sport,
+                    target_date=target_date,
+                    stale_hours=6,
+                ),
+            }
+        )
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
 
@@ -6209,6 +6357,7 @@ def _resolve_all_sports_outcomes(days_back: int = 3) -> dict:
     n_games      = 0
     n_props      = 0
     n_parlays    = 0
+    exchange_sync = _sync_exchange_resolution_statuses(days_back=max(3, days_back), max_rows=350)
 
     def _num(v):
         if v is None:
@@ -6666,7 +6815,12 @@ def _resolve_all_sports_outcomes(days_back: int = 3) -> dict:
         except Exception:
             pass
 
-    return {"games": n_games, "props": n_props, "parlays": n_parlays}
+    return {
+        "games": n_games,
+        "props": n_props,
+        "parlays": n_parlays,
+        "exchange_sync": exchange_sync,
+    }
 
 
 @app.route("/api/resolve-outcomes", methods=["POST"])
