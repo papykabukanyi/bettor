@@ -69,6 +69,7 @@ _TODAY_TOMORROW_MAX_UNDER_SHARE = max(
     0.0,
     min(float(os.getenv("TODAY_TOMORROW_MAX_UNDER_SHARE", "0.20") or "0.20"), 1.0),
 )
+_OVER_ONLY_PLAYER_PROPS = str(os.getenv("OVER_ONLY_PLAYER_PROPS", "1")).strip().lower() in {"1", "true", "yes", "on"}
 
 app = Flask(__name__, template_folder="templates")
 
@@ -1997,7 +1998,7 @@ def _collect_fallback_games_for_all_sports(today: datetime.date, tomorrow: datet
 
             start = today.isoformat()
             end = horizon_end.isoformat()
-            raw_codes = os.getenv("SOCCER_FALLBACK_COMPETITIONS", "PL,MLS,CL")
+            raw_codes = os.getenv("SOCCER_FALLBACK_COMPETITIONS", "PL,MLS,CL,EC,CLI,BL1,PD,SA,FL1,ELC")
             codes = [c.strip().upper() for c in str(raw_codes).split(",") if c.strip()]
             if not codes:
                 codes = ["PL", "MLS", "CL"]
@@ -2719,6 +2720,33 @@ def _merge_all_sports_table_rows(sentiment_rows: list[dict], best_bet_rows: list
         reverse=True,
     )
     return merged[:400]
+
+
+def _is_player_prop_style_row(row: dict) -> bool:
+    if not isinstance(row, dict):
+        return False
+    stat_type = str(row.get("stat_type") or row.get("prop_type") or row.get("bet_type") or "").strip().lower()
+    if not stat_type:
+        return False
+    if stat_type in {"moneyline", "spread", "total", "team_total", "best_bet", "1x2"}:
+        return False
+    if row.get("line") is None:
+        return False
+    return True
+
+
+def _enforce_over_only_player_props(rows: list[dict]) -> list[dict]:
+    if not _OVER_ONLY_PLAYER_PROPS:
+        return list(rows or [])
+    out: list[dict] = []
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        direction = str(row.get("direction") or "").strip().upper()
+        if _is_player_prop_style_row(row) and direction == "UNDER":
+            continue
+        out.append(row)
+    return out
 
 
 def _build_all_sport_sentiment_props(games: list[dict], bets: list[dict]) -> list[dict]:
@@ -4453,20 +4481,47 @@ def _build_multi_sport_snapshot(force_refresh: bool = False) -> dict:
         games = snapshot_clean["games"]
         bets  = snapshot_clean["bets"]
         _log(f"[all-sports] Data-clean pass: {len(games)} games, {len(bets)} bets")
-        # Enrich up to 30 games (rest days, venue history, coaching, weather)
-        _enrich_limit = max(1, min(30, int(os.getenv("ENRICH_MAX_GAMES", "30"))))
+        # Enrich a wider batch while preserving full horizon rows.
+        _enrich_limit = max(1, min(300, int(os.getenv("ENRICH_MAX_GAMES", "120"))))
         _include_weather  = str(os.getenv("ENRICH_WEATHER",  "1")).strip().lower() in {"1","true","yes"}
         _include_coaching = str(os.getenv("ENRICH_COACHING", "1")).strip().lower() in {"1","true","yes"}
         _include_h2h      = str(os.getenv("ENRICH_H2H",     "1")).strip().lower() in {"1","true","yes"}
-        games = enrich_games_batch(
-            games,
+        _games_before_enrich = list(games)
+        enriched_games = enrich_games_batch(
+            _games_before_enrich,
             include_weather=_include_weather,
             include_coaching=_include_coaching,
             include_h2h=_include_h2h,
             max_games=_enrich_limit,
             throttle_sec=0.12,
         )
-        _log(f"[all-sports] Enrichment complete for {len(games)} games")
+        # Keep full horizon rows; merge enrichment for only the subset that was processed.
+        if isinstance(enriched_games, list) and enriched_games:
+            by_key: dict[str, dict] = {}
+            for eg in enriched_games:
+                if not isinstance(eg, dict):
+                    continue
+                k = str(eg.get("game_key") or "").strip() or str(eg.get("match_key") or "").strip()
+                if k:
+                    by_key[k] = eg
+
+            merged_games: list[dict] = []
+            for g in _games_before_enrich:
+                if not isinstance(g, dict):
+                    continue
+                k = str(g.get("game_key") or "").strip() or str(g.get("match_key") or "").strip()
+                if k and k in by_key:
+                    merged_games.append({**g, **by_key[k]})
+                else:
+                    merged_games.append(g)
+            games = merged_games
+        else:
+            games = _games_before_enrich
+
+        _log(
+            f"[all-sports] Enrichment complete for {len(enriched_games or [])} games "
+            f"(retained horizon rows={len(games)})"
+        )
         # ── Persist enrichment signals to DB ────────────────────────────
         try:
             from data.db import save_game_enrichment
@@ -4653,7 +4708,9 @@ def _run_all_sports_analysis():
             sentiment_prop_rows = _build_model_player_props_fallback((games or [])[:12], max_per_game=5)
         else:
             sentiment_prop_rows = _build_all_sport_sentiment_props(games, bets)
+        sentiment_prop_rows = _enforce_over_only_player_props(sentiment_prop_rows)
         table_rows = _merge_all_sports_table_rows(sentiment_prop_rows, best_bet_rows)
+        table_rows = _enforce_over_only_player_props(table_rows)
         try:
             from models.all_sports_predictor import rank_best_bets
 
@@ -4919,6 +4976,8 @@ def _run_all_sports_analysis():
                 rec = str(p.get("direction") or p.get("recommendation") or "OVER").strip().upper()
                 if rec not in {"OVER", "UNDER"}:
                     rec = "OVER"
+                if _OVER_ONLY_PLAYER_PROPS and _is_player_prop_style_row(p) and rec == "UNDER":
+                    continue
                 model_prob = float(p.get("model_prob") or 0.5)
                 over_prob = p.get("over_prob")
                 under_prob = p.get("under_prob")
