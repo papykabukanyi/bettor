@@ -1201,7 +1201,6 @@ def _card_status_phase(status: str) -> str:
 def _normalize_card_list(cards, expected_date: str | None = None) -> list:
     out = []
     seen = set()
-    tomorrow_str = (_et_calendar_today() + datetime.timedelta(days=1)).isoformat() if expected_date else None
     for raw in cards or []:
         if not isinstance(raw, dict):
             continue
@@ -1209,10 +1208,12 @@ def _normalize_card_list(cards, expected_date: str | None = None) -> list:
         away = card.get("away_team", "")
         home = card.get("home_team", "")
         match_key = card.get("match_key") or _norm_gk(f"{away}@{home}")
+        if not card.get("game_time") and card.get("game_datetime"):
+            _, derived_time = _datetime_to_et_parts(str(card.get("game_datetime") or ""))
+            if derived_time:
+                card["game_time"] = derived_time
         game_date = card.get("game_date") or _card_date_from_iso(card.get("game_datetime"))
         if expected_date and game_date and game_date != expected_date:
-            continue
-        if expected_date and expected_date == tomorrow_str and _card_status_phase(card.get("status", "")) != "upcoming":
             continue
         card["match_key"] = match_key
         if game_date and not card.get("game_date"):
