@@ -1813,6 +1813,10 @@ def _time_hhmm(raw: str) -> str:
 def _collect_fallback_games_for_all_sports(today: datetime.date, tomorrow: datetime.date) -> list[dict]:
     rows: list[dict] = []
     horizon_end = today + datetime.timedelta(days=max(1, _SPORTS_HUB_FORECAST_DAYS - 1))
+    horizon_dates = [
+        today + datetime.timedelta(days=offset)
+        for offset in range((horizon_end - today).days + 1)
+    ]
     allowed_dates = {
         (today + datetime.timedelta(days=offset)).isoformat()
         for offset in range((horizon_end - today).days + 1)
@@ -1830,6 +1834,7 @@ def _collect_fallback_games_for_all_sports(today: datetime.date, tomorrow: datet
         game_time: str = "",
         game_datetime: str = "",
         status: str = "Scheduled",
+        source: str = "",
         home_score=None,
         away_score=None,
     ):
@@ -1853,6 +1858,7 @@ def _collect_fallback_games_for_all_sports(today: datetime.date, tomorrow: datet
             "game_time": gt,
             "game_datetime": game_datetime or "",
             "status": status or "Scheduled",
+            "source": str(source or "").strip().lower(),
             "home_score": home_score,
             "away_score": away_score,
             "match_key": match_key,
@@ -1895,6 +1901,25 @@ def _collect_fallback_games_for_all_sports(today: datetime.date, tomorrow: datet
             return None
         return round((wins + 0.5 * draws) / total, 4)
 
+    def _derive_event_matchup(event_payload: dict, default_label: str = "") -> tuple[str, str]:
+        """Derive home/away placeholders for event-based feeds without explicit team buckets."""
+        title = str(
+            event_payload.get("event_title")
+            or event_payload.get("strEvent")
+            or event_payload.get("name")
+            or default_label
+            or ""
+        ).strip()
+        if not title:
+            return "", ""
+        parts = re.split(r"\s+vs\.?\s+|\s+v\.?\s+|\s+@\s+|\s+-\s+", title, maxsplit=1, flags=re.IGNORECASE)
+        if len(parts) >= 2:
+            left = str(parts[0] or "").strip()
+            right = str(parts[1] or "").strip()
+            if left and right:
+                return left[:120], right[:120]
+        return title[:120], "Field"
+
     # 0) Prefer DB-cached schedule first for speed.
     has_mlb = False
     has_soccer = False
@@ -1921,6 +1946,7 @@ def _collect_fallback_games_for_all_sports(today: datetime.date, tomorrow: datet
                 game_time=str(g.get("game_time") or ""),
                 game_datetime=str(g.get("game_datetime") or ""),
                 status=str(g.get("status") or "Scheduled"),
+                source="db_cache",
                 home_score=g.get("home_score"),
                 away_score=g.get("away_score"),
             )
@@ -1944,6 +1970,7 @@ def _collect_fallback_games_for_all_sports(today: datetime.date, tomorrow: datet
                     game_time=str(g.get("game_time") or ""),
                     game_datetime=str(g.get("game_datetime") or ""),
                     status=str(g.get("status") or "Scheduled"),
+                    source="mlb_statsapi",
                     home_score=g.get("home_score"),
                     away_score=g.get("away_score"),
                 )
@@ -1956,7 +1983,7 @@ def _collect_fallback_games_for_all_sports(today: datetime.date, tomorrow: datet
             from data.soccer_fetcher import _fetch_matches_espn_range
 
             start = today.isoformat()
-            end = tomorrow.isoformat()
+            end = horizon_end.isoformat()
             raw_codes = os.getenv("SOCCER_FALLBACK_COMPETITIONS", "PL,MLS,CL")
             codes = [c.strip().upper() for c in str(raw_codes).split(",") if c.strip()]
             if not codes:
@@ -1977,6 +2004,7 @@ def _collect_fallback_games_for_all_sports(today: datetime.date, tomorrow: datet
                         game_time=str(g.get("game_time") or ""),
                         game_datetime=str(g.get("game_datetime") or ""),
                         status=str(g.get("status") or "Scheduled"),
+                        source="soccer_espn_range",
                         home_score=g.get("home_score"),
                         away_score=g.get("away_score"),
                     )
@@ -2001,8 +2029,12 @@ def _collect_fallback_games_for_all_sports(today: datetime.date, tomorrow: datet
                 ("tennis", "wta", "tennis", "WTA"),
                 ("mma", "ufc", "mma", "UFC"),
                 ("boxing", "boxing", "boxing", "Boxing"),
+                ("golf", "pga", "golf", "PGA"),
+                ("racing", "f1", "motorsports", "F1"),
+                ("racing", "nascar", "motorsports", "NASCAR"),
+                ("cricket", "icc", "cricket", "ICC"),
             ]
-            for d in (today, tomorrow):
+            for d in horizon_dates:
                 dates_token = d.strftime("%Y%m%d")
                 for sport_path, league_path, sport_group, league_label in espn_sources:
                     url = f"https://site.api.espn.com/apis/site/v2/sports/{sport_path}/{league_path}/scoreboard"
@@ -2056,6 +2088,7 @@ def _collect_fallback_games_for_all_sports(today: datetime.date, tomorrow: datet
                             game_time=game_time,
                             game_datetime=iso_dt,
                             status=status,
+                            source="espn",
                             home_score=_as_score_int(home_c.get("score")),
                             away_score=_as_score_int(away_c.get("score")),
                         )
@@ -2078,7 +2111,7 @@ def _collect_fallback_games_for_all_sports(today: datetime.date, tomorrow: datet
             _log(f"[all-sports] ESPN multi-sport fallback fetch failed: {e}")
 
     # 4) TheSportsDB (multi-sport free fixture feed) - opt-in due endpoint variability.
-    tsdb_enabled = str(os.getenv("ENABLE_TSDB_FALLBACK", "0")).strip().lower() in {"1", "true", "yes", "on"}
+    tsdb_enabled = str(os.getenv("ENABLE_TSDB_FALLBACK", "1")).strip().lower() in {"1", "true", "yes", "on"}
     if tsdb_enabled:
         try:
             from data.thesportsdb_fetcher import get_events_by_date
@@ -2095,13 +2128,19 @@ def _collect_fallback_games_for_all_sports(today: datetime.date, tomorrow: datet
                 ("Golf", "golf"),
                 ("Motorsport", "motorsports"),
                 ("Cricket", "cricket"),
+                ("Rugby", "rugby"),
+                ("Darts", "darts"),
+                ("Snooker", "snooker"),
+                ("Cycling", "cycling"),
             ]
-            for d in (today, tomorrow):
+            for d in horizon_dates:
                 for tsdb_name, sport_group in tsdb_sports:
                     events = get_events_by_date(d, sport=tsdb_name) or []
                     for ev in events:
                         home = str(ev.get("strHomeTeam") or "").strip()
                         away = str(ev.get("strAwayTeam") or "").strip()
+                        if not home or not away:
+                            home, away = _derive_event_matchup(ev, default_label=tsdb_name)
                         if not home or not away:
                             continue
                         league = str(ev.get("strLeague") or tsdb_name)
@@ -2124,6 +2163,7 @@ def _collect_fallback_games_for_all_sports(today: datetime.date, tomorrow: datet
                             game_time=str(ev.get("strTime") or ""),
                             game_datetime=str(ev.get("strTimestamp") or ""),
                             status=status,
+                            source="tsdb",
                             home_score=hs,
                             away_score=aw,
                         )
@@ -3977,6 +4017,7 @@ def _build_multi_sport_snapshot(force_refresh: bool = False) -> dict:
                 "game_time": game_time,
                 "game_datetime": game_datetime,
                 "status": status,
+                "source": "odds",
                 "match_key": match_key,
                 "game_key": game_key,
             })
@@ -4198,6 +4239,72 @@ def _sports_coverage_snapshot(force_refresh: bool = False) -> dict[str, Any]:
         "supported_general_sports": supported_general,
         "league_count_by_sport": {k: len([v for v in vals if v]) for k, vals in leagues_by_sport.items()},
         "game_count": len(games),
+    }
+
+
+def _infer_game_source(game: dict) -> str:
+    if not isinstance(game, dict):
+        return "unknown"
+    raw = str(game.get("source") or "").strip().lower()
+    if raw:
+        return raw
+    comp = str(game.get("competition") or "").strip().lower()
+    if comp.startswith("tsdb_"):
+        return "tsdb"
+    if comp.startswith("espn_"):
+        return "espn"
+    if comp.startswith("db_"):
+        return "db_cache"
+    if game.get("espn_event_id"):
+        return "espn"
+    return "unknown"
+
+
+def _sports_source_coverage_snapshot(force_refresh: bool = False) -> dict[str, Any]:
+    """Return per-sport source fill counts for current multi-sport snapshot."""
+    snapshot = _build_multi_sport_snapshot(force_refresh=force_refresh)
+    games = [g for g in (snapshot.get("games") or []) if isinstance(g, dict)]
+
+    by_sport: dict[str, dict[str, Any]] = {}
+    total_by_source: dict[str, int] = {}
+    per_day: dict[str, dict[str, int]] = {}
+    today_str = _et_calendar_today().isoformat()
+
+    for g in games:
+        sport = _infer_sport_group(g.get("sport") or g.get("competition") or g.get("league") or "")
+        if not sport:
+            sport = "other"
+        source = _infer_game_source(g)
+        gd = str(g.get("game_date") or g.get("date") or "").strip()[:10]
+
+        bucket = by_sport.setdefault(sport, {"total_games": 0, "by_source": {}, "by_date": {}})
+        bucket["total_games"] = int(bucket.get("total_games") or 0) + 1
+        src_map = bucket.setdefault("by_source", {})
+        src_map[source] = int(src_map.get(source) or 0) + 1
+        if gd:
+            day_map = bucket.setdefault("by_date", {}).setdefault(gd, {})
+            day_map[source] = int(day_map.get(source) or 0) + 1
+
+        total_by_source[source] = int(total_by_source.get(source) or 0) + 1
+        if gd:
+            day_total = per_day.setdefault(gd, {})
+            day_total[source] = int(day_total.get(source) or 0) + 1
+
+    sports_sorted = sorted(by_sport.keys())
+    for s in sports_sorted:
+        src_rows = by_sport[s].get("by_source") or {}
+        by_sport[s]["primary_source"] = max(src_rows, key=src_rows.get) if src_rows else "unknown"
+
+    return {
+        "generated_at": str(snapshot.get("generated_at") or ""),
+        "forecast_window": snapshot.get("forecast_window") or {},
+        "forecast_horizon_days": int(snapshot.get("forecast_horizon_days") or _SPORTS_HUB_FORECAST_DAYS),
+        "snapshot_game_count": len(games),
+        "today_date": today_str,
+        "total_by_source": dict(sorted(total_by_source.items(), key=lambda kv: kv[0])),
+        "by_date": dict(sorted(per_day.items(), key=lambda kv: kv[0])),
+        "sports": sports_sorted,
+        "by_sport": by_sport,
     }
 
 
@@ -5493,6 +5600,13 @@ def api_backfill_status():
 def api_sports_coverage():
     force = str(request.args.get("refresh", "0")).strip().lower() in {"1", "true", "yes", "on"}
     coverage = _sports_coverage_snapshot(force_refresh=force)
+    return jsonify({"ok": True, "coverage": _clean(coverage)})
+
+
+@app.route("/api/sports/coverage/sources")
+def api_sports_coverage_sources():
+    force = str(request.args.get("refresh", "0")).strip().lower() in {"1", "true", "yes", "on"}
+    coverage = _sports_source_coverage_snapshot(force_refresh=force)
     return jsonify({"ok": True, "coverage": _clean(coverage)})
 
 
