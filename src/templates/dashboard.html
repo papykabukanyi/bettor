@@ -3915,6 +3915,47 @@ function _autoTrackParlayCombos(combos) {
   });
 }
 
+function _serverParlayCombos() {
+  return _asArray(BEST_PARLAYS).map((p, idx) => {
+    const legs = _asArray(p.legs).map(l => {
+      const source = String(l.source || '').toLowerCase();
+      const inferredSource = source === 'prop' || String(l.bet_type || '').toLowerCase().includes('prop') ? 'prop' : 'game';
+      return {
+        source: inferredSource,
+        sport: l.sport || 'other',
+        label: l.label || l.pick || 'Leg',
+        pick: l.label || l.pick || 'Leg',
+        game_key: l.game || l.game_key || '',
+        game: l.game || l.game_key || '',
+        dec_odds: Number(l.dec_odds || 1.9) || 1.9,
+        model_prob: Math.max(0.01, Math.min(0.99, Number(l.model_prob || l.conf / 100 || 0.55))),
+        confidence: Number(l.conf || 55) || 55,
+        safety_label: l.badge || p.safety_label || 'SAFE',
+        quality_score: Number(l.quality_score || p.avg_safety || 0.7) || 0.7,
+      };
+    }).filter(Boolean);
+
+    if (!legs.length) return null;
+    const probRaw = Number(p.combined_prob || 0);
+    const prob = probRaw > 1 ? probRaw / 100 : (probRaw > 0 ? probRaw : legs.reduce((acc, l) => acc * _legProb(l), 1));
+    const dec = Number(p.combined_dec || 0) > 1 ? Number(p.combined_dec) : legs.reduce((acc, l) => acc * (_legDec(l) || 1.9), 1);
+    const sports = Array.from(new Set(legs.map(l => _sportMetaFromKey(l.sport || '').label)));
+    const sources = Array.from(new Set(legs.map(l => _legSourceGroup(l))));
+    return {
+      legs,
+      prob,
+      dec,
+      amer: dec >= 2 ? Math.round((dec - 1) * 100) : Math.round(-100 / Math.max(0.01, dec - 1)),
+      n: Number(p.n_legs || legs.length) || legs.length,
+      sports,
+      sources,
+      expected_roi: Number(p.expected_roi || _legEv(prob, dec)) || _legEv(prob, dec),
+      generatedBy: 'server',
+      serverRank: idx + 1,
+    };
+  }).filter(Boolean);
+}
+
 function autoGenParlaysFromProps() {
   const candidateLegs = _comboCandidateLegs();
   const propCount = candidateLegs.filter(leg => _legSourceGroup(leg) === 'prop').length;
@@ -3935,7 +3976,7 @@ function autoGenParlaysFromProps() {
   }
   if (empty) empty.classList.add('hidden');
 
-  const combos = [];
+  const combos = _serverParlayCombos();
   const maxLegs = Math.min(5, candidateLegs.length);
   for (let n = 2; n <= maxLegs; n++) {
     const legs = _buildMixedCombo(candidateLegs, n, n - 2);
@@ -3945,28 +3986,51 @@ function autoGenParlaysFromProps() {
       const amer = dec >= 2 ? Math.round((dec-1)*100) : Math.round(-100/(dec-1));
       const sports = Array.from(new Set(legs.map(l => _sportMetaFromKey(l.sport || '').label)));
       const sources = Array.from(new Set(legs.map(l => _legSourceGroup(l))));
-      combos.push({ legs, prob, dec, amer, n, sports, sources });
+      combos.push({ legs, prob, dec, amer, n, sports, sources, generatedBy: 'local' });
     }
   }
 
-  AUTO_PROP_PARLAY = combos[0] || null;
-  AUTO_PARLAY_COMBOS = combos;
+  const unique = new Map();
+  combos.forEach(c => {
+    const sig = _autoParlaySignature(c);
+    if (!sig) return;
+    const existing = unique.get(sig);
+    if (!existing) {
+      unique.set(sig, c);
+      return;
+    }
+    if ((c.generatedBy === 'server' && existing.generatedBy !== 'server') || (Number(c.prob || 0) > Number(existing.prob || 0))) {
+      unique.set(sig, c);
+    }
+  });
+  const finalCombos = Array.from(unique.values()).sort((a, b) => {
+    const aScore = Number(a.expected_roi || _legEv(a.prob || 0, a.dec || 0)) + Number(a.prob || 0);
+    const bScore = Number(b.expected_roi || _legEv(b.prob || 0, b.dec || 0)) + Number(b.prob || 0);
+    return bScore - aScore;
+  });
 
-  if (!combos.length) {
+  AUTO_PROP_PARLAY = finalCombos[0] || null;
+  AUTO_PARLAY_COMBOS = finalCombos;
+
+  if (!finalCombos.length) {
     grid.innerHTML = '<div class="no-games" style="grid-column:1/-1">Not enough qualified mixed legs to build combos yet.</div>';
     if (meta) meta.textContent = 'Need more high-confidence game bets and props to build mixed combos.';
     return;
   }
-  if (meta) meta.textContent = `${combos.length} auto-combo${combos.length>1?'s':''} from ${candidateLegs.length} legs · props ${propCount} · game picks ${gameCount}`;
-  grid.innerHTML = combos.map(c => parlayComboCard(c)).join('');
-  _autoTrackParlayCombos(combos);
+  if (meta) {
+    const serverCount = finalCombos.filter(c => c.generatedBy === 'server').length;
+    const localCount = finalCombos.length - serverCount;
+    meta.textContent = `${finalCombos.length} expert combo${finalCombos.length>1?'s':''} · server ${serverCount} · generated ${localCount} · from ${candidateLegs.length} legs`;
+  }
+  grid.innerHTML = finalCombos.map(c => parlayComboCard(c)).join('');
+  _autoTrackParlayCombos(finalCombos);
 }
 
 
 function parlayComboCard(c) {
   const probPct  = ((c.prob ?? 0) * 100).toFixed(1);
   const payout   = ((c.dec ?? 0) * 100).toFixed(0);
-  const evRaw    = _legEv(c.prob ?? 0, c.dec ?? 0);
+  const evRaw    = Number(c.expected_roi ?? _legEv(c.prob ?? 0, c.dec ?? 0));
   const evColor  = evRaw >= 0 ? 'var(--green)' : 'var(--yellow)';
   const legsHtml = c.legs.map(p => {
     const source = _legSourceGroup(p);
