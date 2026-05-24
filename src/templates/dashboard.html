@@ -1359,7 +1359,8 @@ const _SPORT_META = {
   americanfootball: { key: 'americanfootball', label: 'American Football', icon: '🏈', order: 40 },
   icehockey: { key: 'icehockey', label: 'Ice Hockey', icon: '🏒', order: 50 },
   tennis: { key: 'tennis', label: 'Tennis', icon: '🎾', order: 60 },
-  mma: { key: 'mma', label: 'MMA', icon: '🥊', order: 70 },
+  golf: { key: 'golf', label: 'Golf', icon: '⛳', order: 70 },
+  mma: { key: 'mma', label: 'MMA', icon: '🥊', order: 80 },
   other: { key: 'other', label: 'Other', icon: '🎯', order: 99 },
 };
 
@@ -1369,6 +1370,7 @@ function _sportMetaFromKey(rawKey) {
   if (_SPORT_META[key]) return _SPORT_META[key];
   if (key === 'mlb' || key === 'baseballmlb') return _SPORT_META.baseball;
   if (key === 'nhl' || key === 'hockey') return _SPORT_META.icehockey;
+  if (key === 'pga' || key === 'lpga' || key === 'golfpga') return _SPORT_META.golf;
   return _SPORT_META.other;
 }
 
@@ -1383,6 +1385,7 @@ function _sportMetaFromCard(card) {
   if (/basketball|\bnba\b|\bwnba\b|\bncaab\b|euroleague/.test(hay)) return _SPORT_META.basketball;
   if (/\bnhl\b|ice\s*hockey|icehockey|\bhockey\b/.test(hay)) return _SPORT_META.icehockey;
   if (/\btennis\b|\batp\b|\bwta\b/.test(hay)) return _SPORT_META.tennis;
+  if (/\bgolf\b|\bpga\b|\blpga\b|masters/.test(hay)) return _SPORT_META.golf;
   if (/\bmma\b|\bufc\b|bellator/.test(hay)) return _SPORT_META.mma;
   if (/soccer|premier|bundesliga|serie\s*a|la\s*liga|ligue|uefa|fifa|\bmls\b|eredivisie|primeira|libertadores|champions\s*league|\bfootball\b/.test(hay)) {
     return _SPORT_META.soccer;

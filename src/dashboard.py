@@ -139,6 +139,15 @@ def _clean_ready_bets_payload(bets: list[dict]) -> list[dict]:
             "kalshi_side",
             "kalshi_status",
             "kalshi_price_cents",
+            "polymarket_ticker",
+            "polymarket_market_slug",
+            "polymarket_event_slug",
+            "polymarket_series_ticker",
+            "polymarket_series_ticker_raw",
+            "polymarket_series_match",
+            "polymarket_side",
+            "polymarket_price",
+            "polymarket_status",
         ):
             leg.pop(trusted_key, None)
         return leg
@@ -188,6 +197,15 @@ def _clean_ready_bets_payload(bets: list[dict]) -> list[dict]:
             "kalshi_side",
             "kalshi_status",
             "kalshi_price_cents",
+            "polymarket_ticker",
+            "polymarket_market_slug",
+            "polymarket_event_slug",
+            "polymarket_series_ticker",
+            "polymarket_series_ticker_raw",
+            "polymarket_series_match",
+            "polymarket_side",
+            "polymarket_price",
+            "polymarket_status",
         ):
             row.pop(trusted_key, None)
 
@@ -2185,6 +2203,8 @@ def _multi_sport_best_bets_rows(bets: list[dict]) -> list[dict]:
                 team = home
             elif away and away.upper() in pick_up:
                 team = away
+            elif sport in {"golf", "tennis", "mma", "boxing", "motorsports"} and pick:
+                team = pick
             else:
                 team = str(b.get("competition_name") or b.get("league") or sport.upper() or "SPORT")
 
@@ -3239,6 +3259,255 @@ def _build_model_player_props_fallback(games: list[dict], max_per_game: int = 6)
     except Exception as e:
         _log(f"[all-sports] mlb player-prop fallback skipped: {e}")
 
+    # Golf tournament/player markets from outright + matchup odds.
+    try:
+        golf_games = [
+            g for g in (games or [])
+            if _infer_sport_group(g.get("sport") or g.get("competition") or g.get("league") or "") == "golf"
+        ]
+        if golf_games:
+            golf_market_types = {
+                "outrights": ("outright_winner", "Tournament Winner"),
+                "h2h": ("head_to_head", "Head-to-Head"),
+                "winner": ("winner", "Winner"),
+                "top_5": ("top_5_finish", "Top 5 Finish"),
+                "top_10": ("top_10_finish", "Top 10 Finish"),
+                "top_20": ("top_20_finish", "Top 20 Finish"),
+            }
+            comp_codes = []
+            for g in golf_games:
+                code = str(g.get("competition") or "").strip()
+                if code and code not in comp_codes:
+                    comp_codes.append(code)
+
+            max_events = max(2, min(16, len(golf_games) * 2))
+            for code in comp_codes[:8]:
+                try:
+                    events = get_live_odds(code, markets="outrights,h2h") or []
+                except Exception:
+                    continue
+                for ev in events[:max_events]:
+                    game_datetime = str(ev.get("commence_time") or "").strip()
+                    game_date, game_time = _datetime_to_et_parts(game_datetime)
+                    if game_date and game_date < today_str:
+                        continue
+
+                    event_title = str(
+                        ev.get("event_name")
+                        or ev.get("title")
+                        or ev.get("description")
+                        or code
+                    ).strip() or code
+                    home = event_title
+                    away = "Field"
+                    game_key = _compose_game_key(away, home, game_datetime, game_date, game_time)
+                    match_key = _norm_gk(f"{away}@{home}")
+
+                    books = ev.get("bookmakers") or []
+                    if not books:
+                        continue
+                    markets = books[0].get("markets") or []
+                    if not isinstance(markets, list):
+                        continue
+
+                    game_rows = []
+                    for market in markets:
+                        mk = str(market.get("key") or "").strip().lower()
+                        meta = golf_market_types.get(mk)
+                        if not meta:
+                            continue
+                        stat_type, prop_label = meta
+
+                        priced = []
+                        for out in (market.get("outcomes") or []):
+                            name = str(out.get("name") or out.get("description") or "").strip()
+                            implied = _prob_from_american(out.get("price"))
+                            if not name or implied is None:
+                                continue
+                            try:
+                                priced.append((name, int(float(out.get("price"))), float(implied), out))
+                            except Exception:
+                                continue
+                        if len(priced) < 2:
+                            continue
+
+                        vig = sum(x[2] for x in priced)
+                        normalized = []
+                        for name, odds_am, imp, out in priced:
+                            p = imp / vig if vig > 0 else imp
+                            normalized.append((name, odds_am, max(0.01, min(0.99, p)), out))
+
+                        top_n = 8 if mk in {"outrights", "winner", "top_5", "top_10", "top_20"} else 3
+                        for name, odds_am, model_prob, out in sorted(normalized, key=lambda x: x[2], reverse=True)[:top_n]:
+                            dec_odds = round((1 + (odds_am / 100.0)) if odds_am > 0 else (1 + (100.0 / abs(odds_am))), 4)
+                            ev = (dec_odds - 1.0) * model_prob - (1.0 - model_prob)
+                            game_rows.append({
+                                "sport": "golf",
+                                "name": name,
+                                "team": name,
+                                "prop_label": prop_label,
+                                "stat_type": stat_type,
+                                "line": (out.get("point") if isinstance(out, dict) else None),
+                                "direction": "OVER",
+                                "model_prob": round(model_prob, 4),
+                                "confidence": int(round(model_prob * 100)),
+                                "safety_label": _safety_label_from_prob(model_prob),
+                                "ev": round(ev, 4),
+                                "odds_am": odds_am,
+                                "dec_odds": dec_odds,
+                                "game": event_title,
+                                "game_key": game_key,
+                                "match_key": match_key,
+                                "game_date": game_date,
+                                "game_time": game_time,
+                                "home_team": home,
+                                "away_team": away,
+                                "league": code,
+                                "competition": code,
+                                "competition_name": code,
+                                "sentiment_score": 0.0,
+                                "sentiment_mentions": 0,
+                                "sentiment_sources": "golf_market_model",
+                                "worth_it": model_prob >= 0.08,
+                                "worth_score": round(model_prob * 100.0, 2),
+                                "worth_reason": f"No-vig golf {prop_label.lower()} market edge",
+                            })
+
+                    game_rows.sort(key=lambda x: float(x.get("model_prob") or 0.0), reverse=True)
+                    rows.extend(game_rows[:max_per_game])
+    except Exception as e:
+        _log(f"[all-sports] golf player-prop fallback skipped: {e}")
+
+    # Tennis/combat/single-person sports player-card style markets.
+    try:
+        single_games = [
+            g for g in (games or [])
+            if _infer_sport_group(g.get("sport") or g.get("competition") or g.get("league") or "")
+            in {"tennis", "mma", "boxing", "motorsports", "cricket"}
+        ]
+        if single_games:
+            market_profiles = {
+                "tennis": "h2h,spreads,totals,outrights",
+                "mma": "h2h,totals,outrights",
+                "boxing": "h2h,totals,outrights",
+                "motorsports": "h2h,outrights,winner,top_3,top_5,top_10",
+                "cricket": "h2h,spreads,totals,outrights",
+            }
+            market_type_map = {
+                "h2h": "match_winner",
+                "spreads": "handicap",
+                "totals": "total",
+                "outrights": "outright_winner",
+                "winner": "winner",
+                "top_3": "top_3_finish",
+                "top_5": "top_5_finish",
+                "top_10": "top_10_finish",
+            }
+            by_comp: dict[str, list[dict]] = {}
+            for g in single_games:
+                comp = str(g.get("competition") or "").strip()
+                if not comp:
+                    continue
+                by_comp.setdefault(comp, []).append(g)
+
+            for comp, comp_games in list(by_comp.items())[:12]:
+                sport_group = _infer_sport_group(comp_games[0].get("sport") or comp)
+                profile = market_profiles.get(sport_group, "h2h,outrights")
+                try:
+                    events = get_live_odds(comp, markets=profile) or []
+                except Exception:
+                    continue
+
+                max_events = max(2, min(20, len(comp_games) * 3))
+                for ev in events[:max_events]:
+                    game_datetime = str(ev.get("commence_time") or "").strip()
+                    game_date, game_time = _datetime_to_et_parts(game_datetime)
+                    if game_date and game_date < today_str:
+                        continue
+
+                    event_title = str(
+                        ev.get("event_name")
+                        or ev.get("title")
+                        or ev.get("description")
+                        or comp
+                    ).strip() or comp
+                    home = str(ev.get("home_team") or "").strip() or event_title
+                    away = str(ev.get("away_team") or "").strip() or "Field"
+                    game_key = _compose_game_key(away, home, game_datetime, game_date, game_time)
+                    match_key = _norm_gk(f"{away}@{home}")
+
+                    books = ev.get("bookmakers") or []
+                    if not books:
+                        continue
+                    markets = books[0].get("markets") or []
+                    if not isinstance(markets, list):
+                        continue
+
+                    game_rows = []
+                    for market in markets:
+                        mk = str(market.get("key") or "").strip().lower()
+                        outcomes = market.get("outcomes") or []
+                        priced = []
+                        for out in outcomes:
+                            name = str(out.get("name") or out.get("description") or "").strip()
+                            implied = _prob_from_american(out.get("price"))
+                            if not name or implied is None:
+                                continue
+                            try:
+                                priced.append((name, int(float(out.get("price"))), float(implied), out))
+                            except Exception:
+                                continue
+                        if len(priced) < 2:
+                            continue
+
+                        vig = sum(x[2] for x in priced)
+                        norm = []
+                        for name, odds_am, imp, out in priced:
+                            p = imp / vig if vig > 0 else imp
+                            norm.append((name, odds_am, max(0.01, min(0.99, p)), out))
+
+                        top_n = 8 if mk in {"outrights", "winner", "top_3", "top_5", "top_10"} else 3
+                        for name, odds_am, model_prob, out in sorted(norm, key=lambda x: x[2], reverse=True)[:top_n]:
+                            dec_odds = round((1 + (odds_am / 100.0)) if odds_am > 0 else (1 + (100.0 / abs(odds_am))), 4)
+                            ev = (dec_odds - 1.0) * model_prob - (1.0 - model_prob)
+                            prop_type = market_type_map.get(mk, mk or "match_winner")
+                            game_rows.append({
+                                "sport": sport_group,
+                                "name": name,
+                                "team": name,
+                                "prop_label": prop_type.replace("_", " ").title(),
+                                "stat_type": prop_type,
+                                "line": (out.get("point") if isinstance(out, dict) else None),
+                                "direction": "OVER",
+                                "model_prob": round(model_prob, 4),
+                                "confidence": int(round(model_prob * 100)),
+                                "safety_label": _safety_label_from_prob(model_prob),
+                                "ev": round(ev, 4),
+                                "odds_am": odds_am,
+                                "dec_odds": dec_odds,
+                                "game": event_title,
+                                "game_key": game_key,
+                                "match_key": match_key,
+                                "game_date": game_date,
+                                "game_time": game_time,
+                                "home_team": home,
+                                "away_team": away,
+                                "league": comp,
+                                "competition": comp,
+                                "competition_name": comp,
+                                "sentiment_score": 0.0,
+                                "sentiment_mentions": 0,
+                                "sentiment_sources": "single_sport_market_model",
+                                "worth_it": model_prob >= 0.08,
+                                "worth_score": round(model_prob * 100.0, 2),
+                                "worth_reason": f"No-vig {sport_group} {prop_type.replace('_', ' ')} market edge",
+                            })
+
+                    game_rows.sort(key=lambda x: float(x.get("model_prob") or 0.0), reverse=True)
+                    rows.extend(game_rows[:max_per_game])
+    except Exception as e:
+        _log(f"[all-sports] single-sport market fallback skipped: {e}")
+
     # Last-resort MLB starter props (does not require pybaseball dependencies).
     if not rows:
         try:
@@ -3376,10 +3645,12 @@ def _build_multi_sport_snapshot(force_refresh: bool = False) -> dict:
 
     active = []
     for s in sports:
-        if s.get("has_outrights"):
-            continue
         key = str(s.get("key") or "").strip()
         if not key:
+            continue
+        sport_group = _infer_sport_group(key)
+        # Keep outright markets for golf so player/tournament markets are ingested.
+        if s.get("has_outrights") and sport_group != "golf":
             continue
         active.append(s)
 
@@ -3432,14 +3703,65 @@ def _build_multi_sport_snapshot(force_refresh: bool = False) -> dict:
     games: list[dict] = []
     bets: list[dict] = []
 
+    golf_market_label = {
+        "outrights": "outright_winner",
+        "h2h": "head_to_head",
+        "winner": "winner",
+        "top_5": "top_5_finish",
+        "top_10": "top_10_finish",
+        "top_20": "top_20_finish",
+    }
+    single_person_sports = {"golf", "tennis", "boxing", "mma", "motorsports"}
+    sport_market_label_map: dict[str, dict[str, str]] = {
+        "golf": golf_market_label,
+        "tennis": {
+            "h2h": "match_winner",
+            "spreads": "match_handicap",
+            "totals": "match_total_games",
+            "outrights": "tournament_winner",
+        },
+        "boxing": {
+            "h2h": "fight_winner",
+            "outrights": "event_winner",
+            "totals": "round_total",
+        },
+        "mma": {
+            "h2h": "fight_winner",
+            "outrights": "event_winner",
+            "totals": "round_total",
+        },
+        "motorsports": {
+            "h2h": "race_head_to_head",
+            "outrights": "race_winner",
+            "winner": "race_winner",
+            "top_3": "top_3_finish",
+            "top_5": "top_5_finish",
+            "top_10": "top_10_finish",
+        },
+        "cricket": {
+            "h2h": "match_winner",
+            "spreads": "run_line",
+            "totals": "match_total_runs",
+            "outrights": "tournament_winner",
+        },
+    }
+
     for sport in active:
         sport_key = str(sport.get("key") or "").strip()
         title = str(sport.get("title") or sport_key)
         if not sport_key:
             continue
+        sport_group = _infer_sport_group(sport_key)
+        market_query = "outrights,h2h"
+        if sport_group in {"tennis", "boxing", "mma", "cricket"}:
+            market_query = "outrights,h2h,spreads,totals"
+        elif sport_group in {"motorsports", "golf"}:
+            market_query = "outrights,h2h"
+        elif sport_group not in single_person_sports:
+            market_query = "h2h"
 
         try:
-            events = get_live_odds(sport_key, markets="h2h") or []
+            events = get_live_odds(sport_key, markets=market_query) or []
         except Exception as e:
             _log(f"[all-sports] {sport_key} odds error: {e}")
             continue
@@ -3450,24 +3772,37 @@ def _build_multi_sport_snapshot(force_refresh: bool = False) -> dict:
         for ev in events:
             home = str(ev.get("home_team") or "").strip()
             away = str(ev.get("away_team") or "").strip()
-            if not home or not away:
-                continue
 
             game_datetime = str(ev.get("commence_time") or "").strip()
             game_date, game_time = _datetime_to_et_parts(game_datetime)
             if game_date and game_date not in allowed_dates:
                 continue
 
+            event_title = str(
+                ev.get("event_name")
+                or ev.get("title")
+                or ev.get("description")
+                or title
+            ).strip() or title
+
+            is_single_person_event = sport_group in single_person_sports
+            if is_single_person_event and (not home or not away):
+                home = event_title
+                away = "Field"
+
+            if not home or not away:
+                continue
+
             match_key = _norm_gk(f"{away}@{home}")
             game_key = _compose_game_key(away, home, game_datetime, game_date, game_time)
             status = str(ev.get("status") or "Scheduled")
-            sport_group = _infer_sport_group(sport_key)
 
             games.append({
                 "sport": sport_group,
                 "league": title,
                 "competition": sport_key,
                 "competition_name": title,
+                "event_title": event_title,
                 "home_team": home,
                 "away_team": away,
                 "date": game_date,
@@ -3482,59 +3817,80 @@ def _build_multi_sport_snapshot(force_refresh: bool = False) -> dict:
             books = ev.get("bookmakers") or []
             if not books:
                 continue
-            market = None
-            for m in (books[0].get("markets") or []):
-                if str(m.get("key") or "") == "h2h":
-                    market = m
-                    break
-            if not market:
+
+            markets = books[0].get("markets") or []
+            if not isinstance(markets, list):
                 continue
 
-            outcomes = market.get("outcomes") or []
-            priced = []
-            for out in outcomes:
-                name = str(out.get("name") or "").strip()
-                odds_am = out.get("price")
-                implied = _prob_from_american(odds_am)
-                if not name or implied is None:
+            for market in markets:
+                market_key = str(market.get("key") or "").strip().lower()
+                outcomes = market.get("outcomes") or []
+                priced = []
+                for out in outcomes:
+                    name = str(out.get("name") or out.get("description") or "").strip()
+                    odds_am = out.get("price")
+                    implied = _prob_from_american(odds_am)
+                    if not name or implied is None:
+                        continue
+                    try:
+                        priced.append((name, int(float(odds_am)), float(implied), out))
+                    except Exception:
+                        continue
+                if len(priced) < 2:
                     continue
-                priced.append((name, odds_am, implied))
-            if len(priced) < 2:
-                continue
 
-            total = sum(x[2] for x in priced)
-            norm = []
-            for name, odds_am, implied in priced:
-                true_prob = implied / total if total > 0 else implied
-                norm.append((name, odds_am, max(0.01, min(0.99, true_prob))))
+                total = sum(x[2] for x in priced)
+                norm = []
+                for name, odds_am, implied, out in priced:
+                    true_prob = implied / total if total > 0 else implied
+                    norm.append((name, odds_am, max(0.01, min(0.99, true_prob)), out))
 
-            pick_name, pick_odds, model_prob = max(norm, key=lambda x: x[2])
-            label = _rank_label(model_prob)
-            bet = {
-                "sport": sport_group,
-                "league": title,
-                "competition": sport_key,
-                "competition_name": title,
-                "bet_type": "moneyline",
-                "pick": pick_name,
-                "line": None,
-                "odds_am": int(float(pick_odds)),
-                "dec_odds": round((1 + (pick_odds / 100.0)) if float(pick_odds) > 0 else (1 + 100.0 / abs(float(pick_odds))), 4),
-                "model_prob": float(model_prob),
-                "confidence": int(round(model_prob * 100)),
-                "safety_label": label,
-                "safety": _safety_score_from_label(label),
-                "game_date": game_date,
-                "game_time": game_time,
-                "home_team": home,
-                "away_team": away,
-                "match_key": match_key,
-                "game_key": game_key,
-                "worth_it": model_prob >= 0.56,
-                "worth_score": round(model_prob * 100.0, 2),
-                "worth_reason": f"Best no-vig side from live h2h market ({title})",
-            }
-            bets.append(bet)
+                sport_market_map = sport_market_label_map.get(sport_group, {})
+                if market_key in {"outrights", "winner", "top_3", "top_5", "top_10", "top_20"}:
+                    top_n = 8 if is_single_person_event else 1
+                else:
+                    top_n = 3 if is_single_person_event else 1
+                top_rows = sorted(norm, key=lambda x: x[2], reverse=True)[:top_n]
+                for pick_name, pick_odds, model_prob, out in top_rows:
+                    label = _rank_label(model_prob)
+                    market_label = sport_market_map.get(market_key, market_key or "moneyline")
+                    bet_type = market_label if is_single_person_event else ("moneyline" if market_key == "h2h" else market_label)
+                    min_prob_gate = 0.08 if is_single_person_event else 0.56
+                    worth_it = model_prob >= min_prob_gate
+                    worth_reason = (
+                        f"Best no-vig side from live {market_key or 'h2h'} market ({title})"
+                        if not is_single_person_event
+                        else f"No-vig {sport_group} {market_label.replace('_', ' ')} edge ({title})"
+                    )
+                    line_val = out.get("point") if isinstance(out, dict) else None
+
+                    bet = {
+                        "sport": sport_group,
+                        "league": title,
+                        "competition": sport_key,
+                        "competition_name": title,
+                        "event_title": event_title,
+                        "bet_type": bet_type,
+                        "pick": pick_name,
+                        "team": pick_name if is_single_person_event else "",
+                        "line": line_val,
+                        "odds_am": int(float(pick_odds)),
+                        "dec_odds": round((1 + (pick_odds / 100.0)) if float(pick_odds) > 0 else (1 + 100.0 / abs(float(pick_odds))), 4),
+                        "model_prob": float(model_prob),
+                        "confidence": int(round(model_prob * 100)),
+                        "safety_label": label,
+                        "safety": _safety_score_from_label(label),
+                        "game_date": game_date,
+                        "game_time": game_time,
+                        "home_team": home,
+                        "away_team": away,
+                        "match_key": match_key,
+                        "game_key": game_key,
+                        "worth_it": worth_it,
+                        "worth_score": round(model_prob * 100.0, 2),
+                        "worth_reason": worth_reason,
+                    }
+                    bets.append(bet)
 
     # If odds feed failed, backfill games from free sources.
     if not games:
@@ -3728,11 +4084,19 @@ def _run_all_sports_analysis():
                 _q = float(_row.get("quality_score") or _row.get("quality") or 0.0)
                 _ev = float(_row.get("ev") or 0.0)
                 _p = float(_row.get("model_prob") or 0.0)
-                if _q < _PREDICTION_QUALITY_MIN:
+                _sport = str(_row.get("sport") or _row.get("sport_group") or "").strip().lower()
+                _min_q = _PREDICTION_QUALITY_MIN
+                _min_ev = _PREDICTION_EV_MIN
+                _min_p = _PREDICTION_PROB_MIN
+                if _sport in {"golf", "tennis", "mma", "boxing", "motorsports", "cricket"}:
+                    _min_q = min(_min_q, 0.45)
+                    _min_ev = min(_min_ev, -0.03)
+                    _min_p = min(_min_p, 0.08)
+                if _q < _min_q:
                     continue
-                if _ev < _PREDICTION_EV_MIN:
+                if _ev < _min_ev:
                     continue
-                if _p < _PREDICTION_PROB_MIN:
+                if _p < _min_p:
                     continue
                 gated_rows.append(_row)
             if gated_rows:
@@ -3891,6 +4255,11 @@ def _run_all_sports_analysis():
             except Exception as _ke:
                 _log(f"[all-sports] Kalshi enrichment skipped: {_ke}")
             try:
+                from data.polymarket import attach_polymarket_to_bets
+                bets = attach_polymarket_to_bets(bets)
+            except Exception as _pe:
+                _log(f"[all-sports] Polymarket enrichment skipped: {_pe}")
+            try:
                 from analysis.investor import investor_grade as _ig
                 for _b in bets:
                     _b.update(_ig(_b))
@@ -3924,9 +4293,17 @@ def _run_all_sports_analysis():
                     "active_sources": ",".join(b.get("active_sources") or []),
                     "kalshi_ticker":        b.get("kalshi_ticker") or "",
                     "kalshi_event_ticker":  b.get("kalshi_event_ticker") or "",
+                    "kalshi_series_ticker": b.get("kalshi_series_ticker") or "",
                     "kalshi_side":          b.get("kalshi_side") or "",
                     "kalshi_price_cents":   int(b.get("kalshi_price_cents") or 0),
                     "kalshi_status":        b.get("kalshi_status") or "unavailable",
+                    "polymarket_ticker":        b.get("polymarket_ticker") or "",
+                    "polymarket_market_slug":   b.get("polymarket_market_slug") or "",
+                    "polymarket_event_slug":    b.get("polymarket_event_slug") or "",
+                    "polymarket_series_ticker": b.get("polymarket_series_ticker") or "",
+                    "polymarket_side":          b.get("polymarket_side") or "",
+                    "polymarket_price":         b.get("polymarket_price"),
+                    "polymarket_status":        b.get("polymarket_status") or "unavailable",
                     "grade":                b.get("grade") or "X",
                     "investor_score":       float(b.get("investor_score") or 0),
                 })
@@ -4655,6 +5032,11 @@ def _run_analysis(lock_date: datetime.date | None = None):
             except Exception as _ke:
                 _log(f"[mlb] Kalshi enrichment skipped: {_ke}")
             try:
+                from data.polymarket import attach_polymarket_to_bets
+                all_bets = attach_polymarket_to_bets(all_bets)
+            except Exception as _pe:
+                _log(f"[mlb] Polymarket enrichment skipped: {_pe}")
+            try:
                 from analysis.investor import investor_grade as _ig
                 for _b in all_bets:
                     _b.update(_ig(_b))
@@ -4691,9 +5073,17 @@ def _run_analysis(lock_date: datetime.date | None = None):
                     "active_sources": ",".join(b.get("active_sources") or []),
                     "kalshi_ticker":        b.get("kalshi_ticker") or "",
                     "kalshi_event_ticker":  b.get("kalshi_event_ticker") or "",
+                    "kalshi_series_ticker": b.get("kalshi_series_ticker") or "",
                     "kalshi_side":          b.get("kalshi_side") or "",
                     "kalshi_price_cents":   int(b.get("kalshi_price_cents") or 0),
                     "kalshi_status":        b.get("kalshi_status") or "unavailable",
+                    "polymarket_ticker":        b.get("polymarket_ticker") or "",
+                    "polymarket_market_slug":   b.get("polymarket_market_slug") or "",
+                    "polymarket_event_slug":    b.get("polymarket_event_slug") or "",
+                    "polymarket_series_ticker": b.get("polymarket_series_ticker") or "",
+                    "polymarket_side":          b.get("polymarket_side") or "",
+                    "polymarket_price":         b.get("polymarket_price"),
+                    "polymarket_status":        b.get("polymarket_status") or "unavailable",
                     "grade":                b.get("grade") or "X",
                     "investor_score":       float(b.get("investor_score") or 0),
                 })

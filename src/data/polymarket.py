@@ -341,6 +341,150 @@ def _market_sport_tag(market: dict[str, Any]) -> str:
     return ""
 
 
+def _canonical_golf_series_ticker(value: Any) -> str:
+    text = _norm_text(value)
+    if not text:
+        return ""
+    if "lpga" in text or "womens open" in text or "solheim" in text or "chevron" in text:
+        return "LPGA"
+    if "masters" in text:
+        return "PGA_MASTERS"
+    if "us open" in text and "tennis" not in text:
+        return "PGA_US_OPEN"
+    if "open championship" in text or "british open" in text:
+        return "PGA_OPEN_CHAMPIONSHIP"
+    if "pga championship" in text:
+        return "PGA_CHAMPIONSHIP"
+    if "players championship" in text or "the players" in text:
+        return "PGA_PLAYERS"
+    if "ryder cup" in text:
+        return "PGA_RYDER_CUP"
+    if "golf" in text or "pga" in text:
+        return "PGA"
+    return ""
+
+
+def _canonical_tennis_series_ticker(value: Any) -> str:
+    text = _norm_text(value)
+    if not text:
+        return ""
+    if "wta" in text or "women" in text:
+        return "WTA"
+    if "atp" in text or "men" in text:
+        return "ATP"
+    if "wimbledon" in text:
+        return "TENNIS_WIMBLEDON"
+    if "roland" in text or "french open" in text:
+        return "TENNIS_ROLAND_GARROS"
+    if "us open" in text and "golf" not in text:
+        return "TENNIS_US_OPEN"
+    if "australian open" in text:
+        return "TENNIS_AUSTRALIAN_OPEN"
+    if "tennis" in text:
+        return "TENNIS"
+    return ""
+
+
+def _canonical_combat_series_ticker(value: Any) -> str:
+    text = _norm_text(value)
+    if not text:
+        return ""
+    if "ufc" in text:
+        return "UFC"
+    if "pfl" in text:
+        return "PFL"
+    if "bellator" in text:
+        return "BELLATOR"
+    if "boxing" in text or "box" in text:
+        return "BOXING"
+    if "mma" in text or "fight" in text:
+        return "MMA"
+    return ""
+
+
+def _market_series_ticker(market: dict[str, Any]) -> str:
+    sport = _market_sport_tag(market)
+    source_text = " ".join(
+        [
+            str(market.get("market_event_title") or ""),
+            str(market.get("market_event_slug") or ""),
+            str(market.get("market_title") or ""),
+            str(market.get("question") or ""),
+            str(market.get("market_slug") or ""),
+            str(market.get("event_slug") or ""),
+            str(market.get("slug") or ""),
+        ]
+    )
+    if sport == "golf":
+        canon = _canonical_golf_series_ticker(source_text)
+        if canon:
+            return canon
+        return "GOLF"
+    if sport == "tennis":
+        canon = _canonical_tennis_series_ticker(source_text)
+        if canon:
+            return canon
+        return "TENNIS"
+    if sport == "combat":
+        canon = _canonical_combat_series_ticker(source_text)
+        if canon:
+            return canon
+        return "MMA"
+
+    event = _market_event(market)
+    candidates = [
+        str(event.get("series_ticker") or "").strip(),
+        str(market.get("series_ticker") or "").strip(),
+        str(event.get("slug") or "").strip(),
+        str(market.get("event_slug") or "").strip(),
+    ]
+    for cand in candidates:
+        if cand:
+            return re.sub(r"[^A-Z0-9_]+", "_", cand.upper()).strip("_")[:120]
+    return ""
+
+
+def _golf_series_family(series_ticker: Any) -> str:
+    upper = str(series_ticker or "").strip().upper()
+    if not upper:
+        return ""
+    if "LPGA" in upper:
+        return "LPGA"
+    if any(token in upper for token in ("PGA", "GOLF", "MASTERS", "US_OPEN", "OPEN_CHAMPIONSHIP", "RYDER")):
+        return "PGA"
+    return ""
+
+
+def _tennis_series_family(series_ticker: Any) -> str:
+    upper = str(series_ticker or "").strip().upper()
+    if not upper:
+        return ""
+    if "WTA" in upper:
+        return "WTA"
+    if "ATP" in upper:
+        return "ATP"
+    if any(token in upper for token in ("TENNIS", "WIMBLEDON", "ROLAND", "AUSTRALIAN_OPEN", "US_OPEN")):
+        return "TENNIS"
+    return ""
+
+
+def _combat_series_family(series_ticker: Any) -> str:
+    upper = str(series_ticker or "").strip().upper()
+    if not upper:
+        return ""
+    if "UFC" in upper:
+        return "UFC"
+    if "PFL" in upper:
+        return "PFL"
+    if "BELLATOR" in upper:
+        return "BELLATOR"
+    if "BOX" in upper:
+        return "BOXING"
+    if "MMA" in upper or "FIGHT" in upper:
+        return "MMA"
+    return ""
+
+
 def _market_start_dt(market: dict[str, Any]) -> datetime.datetime | None:
     event = _market_event(market)
     for key in ("start_date", "startDateIso", "startDate", "close_time", "endDateIso", "end_date", "created_at", "updated_at"):
@@ -499,7 +643,7 @@ def _clean_market(market: dict[str, Any]) -> dict[str, Any]:
     if no_price is None and len(outcome_prices) > 1:
         no_price = outcome_prices[1]
 
-    return {
+    cleaned = {
         "market_id": str(market.get("id") or identifier or title).strip(),
         "market_ticker": identifier or title,
         "market_slug": str(market.get("slug") or "").strip(),
@@ -520,6 +664,8 @@ def _clean_market(market: dict[str, Any]) -> dict[str, Any]:
         "minimum_tick_size": _as_float(market.get("minimum_tick_size")) or 0.01,
         "neg_risk": bool(market.get("neg_risk")),
     }
+    cleaned["market_series_ticker"] = _market_series_ticker(cleaned)
+    return cleaned
 
 
 def _fetch_markets_page(offset: int) -> list[dict[str, Any]]:
@@ -613,6 +759,7 @@ def resolve_ready_bets(bets: list[dict[str, Any]], *, force_refresh: bool = Fals
                 "market_event_title": best_market.get("market_event_title") or "",
                 "market_event_slug": best_market.get("market_event_slug") or "",
                 "market_sport": best_market.get("market_sport") or "",
+                "series_ticker": best_market.get("market_series_ticker") or "",
                 "side": side,
                 "token_id": token_id,
                 "yes_token_id": best_market.get("yes_token_id") or "",
@@ -645,6 +792,7 @@ def resolve_ready_bets(bets: list[dict[str, Any]], *, force_refresh: bool = Fals
             "market_event_title": "",
             "market_event_slug": "",
             "market_sport": "",
+            "series_ticker": "",
             "side": "yes",
             "token_id": "",
             "message": message,
@@ -669,6 +817,87 @@ def resolve_ready_bets(bets: list[dict[str, Any]], *, force_refresh: bool = Fals
         },
         "resolutions": resolutions,
     }
+
+
+def attach_polymarket_to_bets(
+    bets: list[dict[str, Any]],
+    *,
+    force_refresh: bool = False,
+) -> list[dict[str, Any]]:
+    """Enrich bet rows with best-matching Polymarket market metadata."""
+    if not bets:
+        return bets
+    try:
+        result = resolve_ready_bets(list(bets), force_refresh=force_refresh)
+        resolutions: dict[str, dict[str, Any]] = result.get("resolutions") or {}
+        enriched: list[dict[str, Any]] = []
+        for i, bet in enumerate(bets):
+            if not isinstance(bet, dict):
+                enriched.append(bet)
+                continue
+            uid = str(
+                bet.get("uid")
+                or bet.get("bet_uid")
+                or bet.get("prediction_uid")
+                or f"ready_{i}"
+            ).strip()
+            res = resolutions.get(uid) or {}
+            eb = dict(bet)
+            raw_series = str(res.get("series_ticker") or "")
+            sport_tag = _bet_sport_tag(eb)
+            kalshi_series = str(eb.get("kalshi_series_ticker") or "")
+            aligned_series = raw_series
+            series_match = None
+            if sport_tag == "golf":
+                k_family = _golf_series_family(kalshi_series)
+                p_family = _golf_series_family(raw_series)
+                if k_family and p_family:
+                    series_match = k_family == p_family
+                    if not series_match:
+                        aligned_series = k_family
+                elif k_family and not p_family:
+                    aligned_series = k_family
+                    series_match = True
+                elif p_family:
+                    series_match = True
+            elif sport_tag == "tennis":
+                k_family = _tennis_series_family(kalshi_series)
+                p_family = _tennis_series_family(raw_series)
+                if k_family and p_family:
+                    series_match = k_family == p_family
+                    if not series_match:
+                        aligned_series = k_family
+                elif k_family and not p_family:
+                    aligned_series = k_family
+                    series_match = True
+                elif p_family:
+                    series_match = True
+            elif sport_tag == "combat":
+                k_family = _combat_series_family(kalshi_series)
+                p_family = _combat_series_family(raw_series)
+                if k_family and p_family:
+                    series_match = k_family == p_family
+                    if not series_match:
+                        aligned_series = k_family
+                elif k_family and not p_family:
+                    aligned_series = k_family
+                    series_match = True
+                elif p_family:
+                    series_match = True
+            eb["polymarket_ticker"] = str(res.get("market_ticker") or "")
+            eb["polymarket_market_slug"] = str(res.get("market_slug") or "")
+            eb["polymarket_event_slug"] = str(res.get("market_event_slug") or "")
+            eb["polymarket_series_ticker_raw"] = raw_series
+            eb["polymarket_series_ticker"] = aligned_series
+            if series_match is not None:
+                eb["polymarket_series_match"] = bool(series_match)
+            eb["polymarket_side"] = str(res.get("side") or "")
+            eb["polymarket_price"] = _as_float(res.get("price"))
+            eb["polymarket_status"] = str(res.get("status") or "unavailable")
+            enriched.append(eb)
+        return enriched
+    except Exception:
+        return [dict(b) if isinstance(b, dict) else b for b in bets]
 
 
 def _get_clob_client():

@@ -645,11 +645,47 @@ DO $$ BEGIN
                    WHERE table_name='predictions' AND column_name='kalshi_ticker') THEN
         ALTER TABLE predictions ADD COLUMN kalshi_ticker        VARCHAR(120);
         ALTER TABLE predictions ADD COLUMN kalshi_event_ticker  VARCHAR(120);
+        ALTER TABLE predictions ADD COLUMN kalshi_series_ticker VARCHAR(120);
         ALTER TABLE predictions ADD COLUMN kalshi_side          VARCHAR(10);
         ALTER TABLE predictions ADD COLUMN kalshi_price_cents   INTEGER;
         ALTER TABLE predictions ADD COLUMN kalshi_status        VARCHAR(20);
         ALTER TABLE predictions ADD COLUMN grade                VARCHAR(2);
         ALTER TABLE predictions ADD COLUMN investor_score       NUMERIC(5,2);
+    END IF;
+END $$;
+
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_name='predictions' AND column_name='kalshi_series_ticker') THEN
+        ALTER TABLE predictions ADD COLUMN kalshi_series_ticker VARCHAR(120);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_name='predictions' AND column_name='polymarket_ticker') THEN
+        ALTER TABLE predictions ADD COLUMN polymarket_ticker VARCHAR(160);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_name='predictions' AND column_name='polymarket_market_slug') THEN
+        ALTER TABLE predictions ADD COLUMN polymarket_market_slug VARCHAR(200);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_name='predictions' AND column_name='polymarket_event_slug') THEN
+        ALTER TABLE predictions ADD COLUMN polymarket_event_slug VARCHAR(200);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_name='predictions' AND column_name='polymarket_series_ticker') THEN
+        ALTER TABLE predictions ADD COLUMN polymarket_series_ticker VARCHAR(120);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_name='predictions' AND column_name='polymarket_side') THEN
+        ALTER TABLE predictions ADD COLUMN polymarket_side VARCHAR(10);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_name='predictions' AND column_name='polymarket_price') THEN
+        ALTER TABLE predictions ADD COLUMN polymarket_price NUMERIC(8,4);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_name='predictions' AND column_name='polymarket_status') THEN
+        ALTER TABLE predictions ADD COLUMN polymarket_status VARCHAR(20);
     END IF;
 END $$;
 
@@ -2148,6 +2184,8 @@ def save_predictions(predictions: list) -> int:
         has_run_date     = "run_date"     in cols
         has_signal_type  = "signal_type"  in cols
         has_kalshi       = "kalshi_ticker" in cols
+        has_kalshi_series = "kalshi_series_ticker" in cols
+        has_polymarket   = "polymarket_ticker" in cols
         has_grade        = "grade"         in cols
         for p in predictions:
             try:
@@ -2199,14 +2237,34 @@ def save_predictions(predictions: list) -> int:
                         bool(p.get("lineup_flag")),
                     ])
                 if has_kalshi:
-                    extra_cols += ", kalshi_ticker, kalshi_event_ticker, kalshi_side, kalshi_price_cents, kalshi_status"
-                    extra_ph   += ", %s, %s, %s, %s, %s"
+                    extra_cols += ", kalshi_ticker, kalshi_event_ticker"
+                    extra_ph   += ", %s, %s"
                     extra_vals.extend([
                         str(p.get("kalshi_ticker")       or "")[:120],
                         str(p.get("kalshi_event_ticker") or "")[:120],
+                    ])
+                    if has_kalshi_series:
+                        extra_cols += ", kalshi_series_ticker"
+                        extra_ph   += ", %s"
+                        extra_vals.append(str(p.get("kalshi_series_ticker") or "")[:120])
+                    extra_cols += ", kalshi_side, kalshi_price_cents, kalshi_status"
+                    extra_ph   += ", %s, %s, %s"
+                    extra_vals.extend([
                         str(p.get("kalshi_side")         or "")[:10],
                         p.get("kalshi_price_cents"),
                         str(p.get("kalshi_status")       or "unavailable")[:20],
+                    ])
+                if has_polymarket:
+                    extra_cols += ", polymarket_ticker, polymarket_market_slug, polymarket_event_slug, polymarket_series_ticker, polymarket_side, polymarket_price, polymarket_status"
+                    extra_ph   += ", %s, %s, %s, %s, %s, %s, %s"
+                    extra_vals.extend([
+                        str(p.get("polymarket_ticker") or "")[:160],
+                        str(p.get("polymarket_market_slug") or "")[:200],
+                        str(p.get("polymarket_event_slug") or "")[:200],
+                        str(p.get("polymarket_series_ticker") or "")[:120],
+                        str(p.get("polymarket_side") or "")[:10],
+                        p.get("polymarket_price"),
+                        str(p.get("polymarket_status") or "unavailable")[:20],
                     ])
                 if has_grade:
                     extra_cols += ", grade, investor_score"

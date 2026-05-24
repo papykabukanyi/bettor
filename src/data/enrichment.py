@@ -200,7 +200,7 @@ def _get_venue_coords(team_name: str) -> tuple[float, float] | None:
 
 
 # ─── 1. Weather ──────────────────────────────────────────────────────────────
-_OUTDOOR_SPORTS = {"baseball", "mlb", "americanfootball", "nfl", "ncaaf", "soccer", "cricket"}
+_OUTDOOR_SPORTS = {"baseball", "mlb", "americanfootball", "nfl", "ncaaf", "soccer", "cricket", "golf"}
 
 
 def _infer_sport_group_local(sport: str) -> str:
@@ -218,6 +218,8 @@ def _infer_sport_group_local(sport: str) -> str:
         return "soccer"
     if "tennis" in raw:
         return "tennis"
+    if any(k in raw for k in ("golf", "pga", "lpga", "masters")):
+        return "golf"
     if any(k in raw for k in ("mma", "ufc", "boxing")):
         return "mma"
     return raw or "other"

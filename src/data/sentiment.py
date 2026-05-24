@@ -322,6 +322,8 @@ def _infer_sport_group(sport: str) -> str:
         return "icehockey"
     if any(k in raw for k in ("soccer", "football")):
         return "soccer"
+    if any(k in raw for k in ("golf", "pga", "lpga", "masters")):
+        return "golf"
     if any(k in raw for k in ("mma", "ufc", "boxing")):
         return "mma"
     return raw or "all"
