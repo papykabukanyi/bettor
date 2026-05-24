@@ -1691,11 +1691,11 @@ def _score_event_group(bet: dict[str, Any], event_group: dict[str, Any]) -> floa
         _entity_match_score(text, bet.get("label")),
     )
 
-    if max(home_score, away_score, pick_score) < 1.9:
+    if max(home_score, away_score, pick_score) < 1.7:
         return 0.0
-    if bet_kind == "moneyline" and picked_team and picked_team_score < 2.2:
+    if bet_kind == "moneyline" and picked_team and picked_team_score < 2.0:
         return 0.0
-    if (bet.get("home_team") or bet.get("away_team")) and home_score < 1.7 and away_score < 1.7:
+    if (bet.get("home_team") or bet.get("away_team")) and home_score < 1.5 and away_score < 1.5:
         return 0.0
 
     score = time_score
@@ -2423,8 +2423,16 @@ def _resolve_single_bet(
 
     local_event_index = event_index or _build_event_index(markets)
     bet_kind = _bet_kind_tag(bet)
-    min_event_score = 5.8 if bet_kind == "player_prop" else 6.6
-    min_market_score = 6.2 if bet_kind == "player_prop" else 7.2
+    min_event_score = 5.4 if bet_kind == "player_prop" else 6.0
+    min_market_score = 5.9 if bet_kind == "player_prop" else 6.6
+
+    # Allow env-based tuning without code changes in production.
+    if bet_kind == "player_prop":
+        min_event_score = max(3.8, float(os.getenv("KALSHI_MIN_EVENT_SCORE_PROP", str(min_event_score)) or min_event_score))
+        min_market_score = max(4.0, float(os.getenv("KALSHI_MIN_MARKET_SCORE_PROP", str(min_market_score)) or min_market_score))
+    else:
+        min_event_score = max(4.2, float(os.getenv("KALSHI_MIN_EVENT_SCORE", str(min_event_score)) or min_event_score))
+        min_market_score = max(4.4, float(os.getenv("KALSHI_MIN_MARKET_SCORE", str(min_market_score)) or min_market_score))
     scored_events: list[tuple[float, dict[str, Any]]] = []
     for event_group in local_event_index.values():
         score = _score_event_group(bet, event_group)
@@ -2469,7 +2477,11 @@ def _resolve_single_bet(
     if len(scored_events) > 1:
         top_event_score = scored_events[0][0]
         next_event_score = scored_events[1][0]
-        event_ambiguity_gap = 0.8 if bet_kind == "moneyline" else 1.0
+        default_event_gap = 0.55 if bet_kind == "moneyline" else 0.75
+        event_ambiguity_gap = max(
+            0.2,
+            float(os.getenv("KALSHI_EVENT_AMBIGUITY_GAP", str(default_event_gap)) or default_event_gap),
+        )
         if next_event_score >= min_event_score and (top_event_score - next_event_score) < event_ambiguity_gap:
             return _single_resolution_payload(
                 "unavailable",
@@ -2524,7 +2536,11 @@ def _resolve_single_bet(
             scheduled_start=schedule.get("scheduled_start"),
         )
 
-    if second_best_score >= (min_market_score + 1.0) and (best_score - second_best_score) < 0.7:
+    market_ambiguity_gap = max(
+        0.2,
+        float(os.getenv("KALSHI_MARKET_AMBIGUITY_GAP", "0.5") or "0.5"),
+    )
+    if second_best_score >= (min_market_score + 1.0) and (best_score - second_best_score) < market_ambiguity_gap:
         return _single_resolution_payload(
             "unavailable",
             message="Kalshi market match is ambiguous within the event; refusing to guess.",

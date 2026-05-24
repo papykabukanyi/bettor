@@ -31,6 +31,7 @@ import atexit
 import tempfile
 import re
 import math
+import hashlib
 import time
 from typing import Any
 
@@ -2016,6 +2017,36 @@ def _collect_fallback_games_for_all_sports(today: datetime.date, tomorrow: datet
                         home_score=g.get("home_score"),
                         away_score=g.get("away_score"),
                     )
+
+            # Add tournament fixtures from the regular soccer fetcher for richer same-day depth.
+            try:
+                from data.soccer_fetcher import get_matches_today_all, get_matches_tomorrow_all
+
+                soccer_feed_games = (get_matches_today_all() or []) + (get_matches_tomorrow_all() or [])
+                for g in soccer_feed_games:
+                    home = str(g.get("home_team") or "").strip()
+                    away = str(g.get("away_team") or "").strip()
+                    if not home or not away:
+                        continue
+                    comp = str(g.get("competition") or "SOCCER").strip().upper()
+                    comp_name = str(g.get("competition_name") or g.get("comp_name") or g.get("league") or comp)
+                    _push_game(
+                        sport_group="soccer",
+                        league=comp_name,
+                        competition=comp,
+                        competition_name=comp_name,
+                        home=home,
+                        away=away,
+                        game_date=str(g.get("date") or g.get("game_date") or "").strip(),
+                        game_time=str(g.get("game_time") or ""),
+                        game_datetime=str(g.get("game_datetime") or ""),
+                        status=str(g.get("status") or "Scheduled"),
+                        source="soccer_fetcher",
+                        home_score=g.get("home_score"),
+                        away_score=g.get("away_score"),
+                    )
+            except Exception as soccer_feed_exc:
+                _log(f"[all-sports] Soccer fetcher fallback feed skipped: {soccer_feed_exc}")
         except Exception as e:
             _log(f"[all-sports] Soccer fallback fetch failed: {e}")
 
@@ -2248,11 +2279,13 @@ def _build_model_fallback_bets(games: list[dict]) -> list[dict]:
 
     def _estimate_home_prob(game: dict, sport: str) -> float:
         if sport == "soccer":
-            base = 0.45
+            base = 0.48
         elif sport in {"baseball", "mlb"}:
             base = 0.55
         else:
             base = 0.53
+
+        had_structured_signal = False
 
         hp = _to_float(game.get("home_record_pct"))
         ap = _to_float(game.get("away_record_pct"))
@@ -2264,6 +2297,7 @@ def _build_model_fallback_bets(games: list[dict]) -> list[dict]:
             base = 0.5 + ((hp - ap) * 0.75)
             if sport != "soccer":
                 base += 0.02  # modest home-edge prior
+            had_structured_signal = True
 
         hr = _to_int(game.get("home_rank"))
         ar = _to_int(game.get("away_rank"))
@@ -2271,6 +2305,7 @@ def _build_model_fallback_bets(games: list[dict]) -> list[dict]:
             # Lower rank number is stronger.
             rank_edge = (ar - hr) / max(10.0, float(ar + hr))
             base += max(-0.08, min(0.08, rank_edge * 0.6))
+            had_structured_signal = True
 
         hs = _to_int(game.get("home_score"))
         aw = _to_int(game.get("away_score"))
@@ -2285,6 +2320,21 @@ def _build_model_fallback_bets(games: list[dict]) -> list[dict]:
                 return 0.50
             if "progress" in status or "live" in status:
                 base += max(-0.22, min(0.22, diff * 0.035))
+                had_structured_signal = True
+
+        # If we have no standings/rank/live context, add a tiny deterministic spread
+        # so fallback confidence is not uniformly identical across every game.
+        if not had_structured_signal:
+            seed = "|".join([
+                str(game.get("home_team") or "").strip().lower(),
+                str(game.get("away_team") or "").strip().lower(),
+                str(game.get("game_date") or game.get("date") or "").strip(),
+                sport,
+            ])
+            digest = hashlib.md5(seed.encode("utf-8", errors="ignore")).digest()[0]
+            jitter = (digest / 255.0) - 0.5  # [-0.5, 0.5]
+            jitter_span = 0.06 if sport == "soccer" else 0.04
+            base += jitter * jitter_span
 
         return max(0.05, min(0.95, float(base)))
 
@@ -4382,6 +4432,10 @@ def _run_all_sports_analysis():
                     _min_q = min(_min_q, 0.45)
                     _min_ev = min(_min_ev, -0.03)
                     _min_p = min(_min_p, 0.08)
+                elif _sport in {"soccer", "basketball", "icehockey"}:
+                    _min_q = min(_min_q, 0.52)
+                    _min_ev = min(_min_ev, -0.03)
+                    _min_p = min(_min_p, 0.52)
                 if _q < _min_q:
                     continue
                 if _ev < _min_ev:
