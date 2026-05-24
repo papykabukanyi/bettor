@@ -61,6 +61,10 @@ _ACTIVE_SPORT = str(CONFIG_SPORT or os.getenv("SPORT", "all") or "all").strip().
 if _ACTIVE_SPORT not in {"mlb", "soccer", "all"}:
     _ACTIVE_SPORT = "all"
 
+_PREDICTION_QUALITY_MIN = max(0.35, min(float(os.getenv("PREDICTION_QUALITY_MIN", "0.62") or "0.62"), 0.98))
+_PREDICTION_EV_MIN = max(-0.10, min(float(os.getenv("PREDICTION_EV_MIN", "-0.01") or "-0.01"), 0.50))
+_PREDICTION_PROB_MIN = max(0.50, min(float(os.getenv("PREDICTION_PROB_MIN", "0.56") or "0.56"), 0.98))
+
 app = Flask(__name__, template_folder="templates")
 
 _READY_RESOLVE_CACHE_LOCK = threading.Lock()
@@ -3716,7 +3720,31 @@ def _run_all_sports_analysis():
             from models.all_sports_predictor import rank_best_bets
 
             table_rows = rank_best_bets(table_rows, raw_bets=bets)
+            before_gate = len(table_rows)
+            gated_rows = []
+            for _row in table_rows:
+                if not isinstance(_row, dict):
+                    continue
+                _q = float(_row.get("quality_score") or _row.get("quality") or 0.0)
+                _ev = float(_row.get("ev") or 0.0)
+                _p = float(_row.get("model_prob") or 0.0)
+                if _q < _PREDICTION_QUALITY_MIN:
+                    continue
+                if _ev < _PREDICTION_EV_MIN:
+                    continue
+                if _p < _PREDICTION_PROB_MIN:
+                    continue
+                gated_rows.append(_row)
+            if gated_rows:
+                table_rows = gated_rows
+            removed = max(0, before_gate - len(table_rows))
             _log(f"[all-sports] quality ranking applied: {len(table_rows)} rows")
+            if removed:
+                _log(
+                    "[all-sports] usefulness gate removed "
+                    f"{removed} low-quality rows "
+                    f"(min q={_PREDICTION_QUALITY_MIN:.2f}, p={_PREDICTION_PROB_MIN:.2f}, ev={_PREDICTION_EV_MIN:.2f})"
+                )
         except Exception as rank_exc:
             _log(f"[all-sports] quality ranking skipped: {rank_exc}")
 
@@ -3777,6 +3805,31 @@ def _run_all_sports_analysis():
             _log(f"[all-sports] expert parlays built: {len(best_parlays)} combos")
         except Exception as parlay_exc:
             _log(f"[all-sports] parlay builder skipped: {parlay_exc}")
+
+        # Persist generated parlays in backend so tracking keeps moving even when no UI tab is open.
+        if best_parlays:
+            try:
+                from data.db import save_tracked_parlay
+
+                saved_count = 0
+                for idx, combo in enumerate(best_parlays[:8], start=1):
+                    if not isinstance(combo, dict):
+                        continue
+                    legs = combo.get("legs") if isinstance(combo.get("legs"), list) else []
+                    if len(legs) < 2:
+                        continue
+                    save_tracked_parlay(
+                        name=f"Auto Expert {idx}-#{int(combo.get('n_legs') or len(legs))}",
+                        legs=legs,
+                        combined_odds=float(combo.get("combined_dec") or 0.0),
+                        stake_usd=10.0,
+                        dedupe_pending=True,
+                    )
+                    saved_count += 1
+                if saved_count:
+                    _log(f"[all-sports] tracked-parlays auto-saved: {saved_count}")
+            except Exception as parlay_save_exc:
+                _log(f"[all-sports] tracked-parlays auto-save skipped: {parlay_save_exc}")
 
         last_updated = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M")
 
@@ -5245,7 +5298,7 @@ def _match_status_bucket(status: str) -> str:
     return "scheduled"
 
 
-_TRACKING_SYNC_MIN_INTERVAL_SEC = max(30, int(os.getenv("TRACKING_SYNC_MIN_INTERVAL_SEC", "75") or "75"))
+_TRACKING_SYNC_MIN_INTERVAL_SEC = max(15, int(os.getenv("TRACKING_SYNC_MIN_INTERVAL_SEC", "35") or "35"))
 _last_tracking_sync_ts = 0.0
 _tracking_sync_lock = threading.Lock()
 
@@ -7212,9 +7265,10 @@ def _start_cache_poller():
     _tick()
 
 
-# Interval for the periodic background outcome resolver (5 minutes)
-_RESOLVE_INTERVAL = 5 * 60
+# Interval for the periodic background outcome resolver.
+_RESOLVE_INTERVAL = max(45, int(os.getenv("RESOLVE_INTERVAL_SEC", "90") or "90"))
 _PERIODIC_RESOLVE_DAYS_BACK = max(1, int(os.getenv("PERIODIC_RESOLVE_DAYS_BACK", "5") or "5"))
+_RESOLVE_START_DELAY_SEC = max(10, int(os.getenv("RESOLVE_START_DELAY_SEC", "30") or "30"))
 _resolve_poller_timer: threading.Timer | None = None
 _resolve_run_lock = threading.Lock()
 _last_resolve_started_ts = 0.0
@@ -7589,7 +7643,7 @@ _ticker_broadcast_timer: "threading.Timer | None" = None
 
 
 def _start_outcome_resolver():
-    """Periodically resolve pending bets for ALL sports every 5 minutes.
+    """Periodically resolve pending bets for ALL sports.
     Uses threading.Timer — no APScheduler needed."""
     global _resolve_poller_timer
     if _resolve_poller_timer is not None:
@@ -7617,11 +7671,14 @@ def _start_outcome_resolver():
         _resolve_poller_timer.daemon = True
         _resolve_poller_timer.start()
 
-    # First run after 2 minutes so startup completes first
-    _resolve_poller_timer = threading.Timer(120, _tick)
+    # First run shortly after startup.
+    _resolve_poller_timer = threading.Timer(_RESOLVE_START_DELAY_SEC, _tick)
     _resolve_poller_timer.daemon = True
     _resolve_poller_timer.start()
-    print(f"[auto-resolve] Periodic resolver started (every {_RESOLVE_INTERVAL // 60} min)")
+    print(
+        "[auto-resolve] Periodic resolver started "
+        f"(every {_RESOLVE_INTERVAL}s, first run in {_RESOLVE_START_DELAY_SEC}s)"
+    )
 
 
 def _start_live_scores():
@@ -7679,8 +7736,19 @@ def _poll_live_scores():
                 res = _run_resolver_locked(days_back=1)
                 n_g = res.get("games", 0)
                 n_p = res.get("props", 0)
-                if n_g or n_p:
-                    print(f"[live-scores] Auto-resolved {n_g} predictions, {n_p} props")
+                n_par = res.get("parlays", 0)
+                if n_g or n_p or n_par:
+                    print(f"[live-scores] Auto-resolved {n_g} predictions, {n_p} props, {n_par} parlays")
+                    try:
+                        from data.db import get_performance_stats, get_parlay_performance_stats
+
+                        db_sport = None if _ACTIVE_SPORT == "all" else _ACTIVE_SPORT
+                        _sse_broadcast("performance_update", {
+                            "stats": get_performance_stats(sport=db_sport),
+                            "parlay_stats": get_parlay_performance_stats(sport=db_sport),
+                        })
+                    except Exception:
+                        pass
             except Exception as exc:
                 print(f"[live-scores] resolve error: {exc}")
 

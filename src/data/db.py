@@ -2666,17 +2666,13 @@ def get_prop_performance_stats(sport: str | None = None, days_back: int | None =
         """, vals)
         row = cur.fetchone()
         stats = dict(row) if row else {}
-        # Bucketed hit-rate rows requested by dashboard: OVER / UNDER / GAME PROP.
+        # Detailed hit-rate rows by prop_type + direction so dashboard can show all markets.
         cur.execute(cte + f"""
             SELECT
+                COALESCE(NULLIF(lower(COALESCE(prop_type,'')), ''), 'unknown') AS prop_type,
                 CASE
-                    WHEN lower(COALESCE(recommendation,'')) = 'over' THEN 'over'
-                    WHEN lower(COALESCE(recommendation,'')) = 'under' THEN 'under'
-                    ELSE 'game_prop'
-                END AS prop_type,
-                CASE
-                    WHEN lower(COALESCE(recommendation,'')) IN ('over','under')
-                        THEN upper(lower(COALESCE(recommendation,'')))
+                    WHEN lower(COALESCE(recommendation,'')) IN ('over','under') THEN upper(lower(COALESCE(recommendation,'')))
+                    WHEN NULLIF(trim(COALESCE(recommendation,'')), '') IS NOT NULL THEN upper(trim(COALESCE(recommendation,'')))
                     ELSE '—'
                 END AS recommendation,
                 COUNT(*) FILTER (WHERE outcome='WIN')      AS wins,
@@ -2689,11 +2685,7 @@ def get_prop_performance_stats(sport: str | None = None, days_back: int | None =
                                WHEN outcome='LOSS' THEN 0.0 END)*100, 1) AS hit_rate
             FROM dedup
             GROUP BY 1, 2
-            ORDER BY MIN(CASE
-                WHEN lower(COALESCE(recommendation,'')) = 'over' THEN 1
-                WHEN lower(COALESCE(recommendation,'')) = 'under' THEN 2
-                ELSE 3
-            END)
+            ORDER BY total DESC, prop_type ASC, recommendation ASC
         """, vals)
         stats["by_prop_type"] = [dict(r) for r in cur.fetchall()]
         # Daily trend

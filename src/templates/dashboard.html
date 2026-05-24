@@ -2313,12 +2313,12 @@ function _silentRefreshPanels() {
     loadTrackedParlays();
     loadTrackedSingles();
     loadPropPerformance();
-    if (!_isParlaysActive()) return;
     autoGenParlaysFromProps();
+    loadParlayPerformance();
   }, 1500);
 }
 
-const TRACKING_REFRESH_MS = 90 * 1000;
+const TRACKING_REFRESH_MS = 25 * 1000;
 
 // ── Periodic silent refresh every 90s (covers SSE gaps) ─────────────────────
 setInterval(() => {
@@ -2330,8 +2330,8 @@ setInterval(() => {
   loadTrackedParlays();
   loadTrackedSingles();
   loadPropPerformance();
-  if (!_isParlaysActive()) return;
   autoGenParlaysFromProps();
+  loadParlayPerformance();
 }, TRACKING_REFRESH_MS);
 
 setInterval(_refreshScheduledStatuses, 60 * 1000);
@@ -4533,18 +4533,21 @@ function _readyEvidence(row) {
 function _readySelection(row, kind) {
   const metrics = _readyEvidence(row);
   const isProp = kind === 'player_prop';
-  // Thresholds calibrated to actual model output ranges:
-  // _readyQuality returns ~0.37-0.52 for MODERATE-safety bets with prob 0.54-0.65.
-  const minProb = isProp ? 0.56 : 0.54;
-  const minQuality = isProp ? 0.38 : 0.34;
-  const minEvidence = isProp ? 0.26 : 0.22;
-  const minSupport = isProp ? 2 : 1;
+  const aggressiveMode = true;
+  const minProb = isProp ? (aggressiveMode ? 0.61 : 0.56) : (aggressiveMode ? 0.59 : 0.54);
+  const minQuality = isProp ? (aggressiveMode ? 0.50 : 0.38) : (aggressiveMode ? 0.46 : 0.34);
+  const minEvidence = isProp ? (aggressiveMode ? 0.34 : 0.26) : (aggressiveMode ? 0.30 : 0.22);
+  const minSupport = isProp ? (aggressiveMode ? 3 : 2) : (aggressiveMode ? 2 : 1);
+  const minEv = aggressiveMode ? 0.0 : -0.02;
+  const minMarketReady = aggressiveMode ? 0.55 : 0.0;
+  const marketReady = Number(row && row.market_ready_score != null ? row.market_ready_score : 0) || 0;
 
   if (metrics.safetyLabel === 'RISKY') return { ...metrics, keep: false, reason: 'risky' };
   if (metrics.prob < minProb) return { ...metrics, keep: false, reason: 'probability' };
-  if (metrics.ev < -0.02) return { ...metrics, keep: false, reason: 'negative_ev' };
+  if (metrics.ev < minEv) return { ...metrics, keep: false, reason: 'negative_ev' };
   if (metrics.edge < -0.01) return { ...metrics, keep: false, reason: 'negative_edge' };
   if (metrics.quality < minQuality) return { ...metrics, keep: false, reason: 'quality' };
+  if (marketReady < minMarketReady) return { ...metrics, keep: false, reason: 'market_readiness' };
   if (!metrics.hasRationale && !metrics.worthIt && metrics.edge <= 0 && metrics.histProb > 0 && metrics.histProb < Math.max(0.50, metrics.prob - 0.10)) {
     return { ...metrics, keep: false, reason: 'weak_history' };
   }
@@ -6806,12 +6809,12 @@ function stopConsolePoll() {
       refreshReadyBets(false);
     }
     syncReadyOrderTracking();
-    if (!_isParlaysActive()) return;
     loadTrackedParlays();
     loadTrackedSingles();
     loadPropPerformance();
+    autoGenParlaysFromProps();
     loadParlayPerformance();
-  }, _isMobileLiteMode() ? 4 * 60 * 1000 : 2 * 60 * 1000);
+  }, _isMobileLiteMode() ? 90 * 1000 : 60 * 1000);
 })();
 </script>
 </body>
