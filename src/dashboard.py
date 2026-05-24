@@ -70,7 +70,7 @@ app = Flask(__name__, template_folder="templates")
 _READY_RESOLVE_CACHE_LOCK = threading.Lock()
 _READY_RESOLVE_CACHE = {"ts": 0.0, "sig": "", "payload": None}
 _READY_RESOLVE_MIN_INTERVAL_SEC = max(
-    20, int(os.getenv("READY_RESOLVE_MIN_INTERVAL_SEC", "75") or "75")
+    15, int(os.getenv("READY_RESOLVE_MIN_INTERVAL_SEC", "40") or "40")
 )
 
 
@@ -368,7 +368,9 @@ _MULTI_SPORT_CACHE = {
     "ts": 0.0,
 }
 _MULTI_SPORT_CACHE_TTL_SEC = int(os.getenv("MULTI_SPORT_CACHE_TTL_SEC", "180"))
-_MAX_ODDS_SPORTS = int(os.getenv("MAX_ODDS_SPORTS", "12"))
+_MAX_ODDS_SPORTS = int(os.getenv("MAX_ODDS_SPORTS", "24"))
+_MIN_ODDS_SPORTS = max(1, int(os.getenv("MIN_ODDS_SPORTS", "10")))
+_SPORTS_HUB_FORECAST_DAYS = max(2, min(21, int(os.getenv("SPORTS_HUB_FORECAST_DAYS", "14") or "14")))
 
 
 def _env_flag(name: str, default: str = "0") -> bool:
@@ -1626,6 +1628,25 @@ def _datetime_to_et_parts(iso_value: str) -> tuple[str, str]:
         return "", ""
 
 
+def _event_datetime_value(event_row: dict[str, Any]) -> str:
+    if not isinstance(event_row, dict):
+        return ""
+    for key in (
+        "commence_time",
+        "start_time",
+        "start_date",
+        "startDate",
+        "startDateIso",
+        "scheduled_start",
+        "event_start",
+        "close_time",
+    ):
+        raw = str(event_row.get(key) or "").strip()
+        if raw:
+            return raw
+    return ""
+
+
 def _rank_label(prob: float) -> str:
     if prob >= 0.72:
         return "ELITE"
@@ -1653,7 +1674,11 @@ def _time_hhmm(raw: str) -> str:
 
 def _collect_fallback_games_for_all_sports(today: datetime.date, tomorrow: datetime.date) -> list[dict]:
     rows: list[dict] = []
-    allowed_dates = {today.isoformat(), tomorrow.isoformat()}
+    horizon_end = today + datetime.timedelta(days=max(1, _SPORTS_HUB_FORECAST_DAYS - 1))
+    allowed_dates = {
+        (today + datetime.timedelta(days=offset)).isoformat()
+        for offset in range((horizon_end - today).days + 1)
+    }
 
     def _push_game(
         *,
@@ -3287,7 +3312,7 @@ def _build_model_player_props_fallback(games: list[dict], max_per_game: int = 6)
                 except Exception:
                     continue
                 for ev in events[:max_events]:
-                    game_datetime = str(ev.get("commence_time") or "").strip()
+                    game_datetime = _event_datetime_value(ev)
                     game_date, game_time = _datetime_to_et_parts(game_datetime)
                     if game_date and game_date < today_str:
                         continue
@@ -3420,7 +3445,7 @@ def _build_model_player_props_fallback(games: list[dict], max_per_game: int = 6)
 
                 max_events = max(2, min(20, len(comp_games) * 3))
                 for ev in events[:max_events]:
-                    game_datetime = str(ev.get("commence_time") or "").strip()
+                    game_datetime = _event_datetime_value(ev)
                     game_date, game_time = _datetime_to_et_parts(game_datetime)
                     if game_date and game_date < today_str:
                         continue
@@ -3691,14 +3716,18 @@ def _build_multi_sport_snapshot(force_refresh: bool = False) -> dict:
     dynamic_limit = max(1, _MAX_ODDS_SPORTS)
     if isinstance(est_remaining, int):
         usable = max(0, est_remaining - reserve)
-        dynamic_limit = max(1, min(dynamic_limit, usable))
+        dynamic_limit = max(min(_MIN_ODDS_SPORTS, _MAX_ODDS_SPORTS), min(dynamic_limit, max(1, usable)))
     if active:
         active = active[:dynamic_limit]
     if isinstance(est_remaining, int):
         _log(f"[all-sports] querying odds for {len(active)} sports this cycle (dynamic cap={dynamic_limit})")
     today = _et_calendar_today()
     tomorrow = today + datetime.timedelta(days=1)
-    allowed_dates = {today.isoformat(), tomorrow.isoformat()}
+    horizon_end = today + datetime.timedelta(days=max(1, _SPORTS_HUB_FORECAST_DAYS - 1))
+    allowed_dates = {
+        (today + datetime.timedelta(days=offset)).isoformat()
+        for offset in range((horizon_end - today).days + 1)
+    }
 
     games: list[dict] = []
     bets: list[dict] = []
@@ -3773,7 +3802,7 @@ def _build_multi_sport_snapshot(force_refresh: bool = False) -> dict:
             home = str(ev.get("home_team") or "").strip()
             away = str(ev.get("away_team") or "").strip()
 
-            game_datetime = str(ev.get("commence_time") or "").strip()
+            game_datetime = _event_datetime_value(ev)
             game_date, game_time = _datetime_to_et_parts(game_datetime)
             if game_date and game_date not in allowed_dates:
                 continue
@@ -3969,6 +3998,11 @@ def _build_multi_sport_snapshot(force_refresh: bool = False) -> dict:
     snapshot["tournaments"] = tournaments
     snapshot["games"] = games
     snapshot["bets"] = sorted(bets, key=lambda x: (x.get("model_prob") or 0), reverse=True)
+    snapshot["forecast_horizon_days"] = _SPORTS_HUB_FORECAST_DAYS
+    snapshot["forecast_window"] = {
+        "start": today.isoformat(),
+        "end": horizon_end.isoformat(),
+    }
     snapshot["odds_budget"] = budget
     _MULTI_SPORT_CACHE["snapshot"] = snapshot
     _MULTI_SPORT_CACHE["ts"] = now
@@ -5688,7 +5722,7 @@ def _match_status_bucket(status: str) -> str:
     return "scheduled"
 
 
-_TRACKING_SYNC_MIN_INTERVAL_SEC = max(15, int(os.getenv("TRACKING_SYNC_MIN_INTERVAL_SEC", "35") or "35"))
+_TRACKING_SYNC_MIN_INTERVAL_SEC = max(10, int(os.getenv("TRACKING_SYNC_MIN_INTERVAL_SEC", "20") or "20"))
 _last_tracking_sync_ts = 0.0
 _tracking_sync_lock = threading.Lock()
 
@@ -5770,6 +5804,15 @@ def _tracking_phase_for_row(row: dict) -> str:
         return "live"
     if bucket == "finished":
         # Keep finished-but-unresolved rows out of upcoming while resolver catches up.
+        return "live"
+
+    # Exchange-side readiness hints (Kalshi/Polymarket) help phase rows faster
+    # when public score feeds lag behind market start/final transitions.
+    kalshi_status = str(row.get("kalshi_status") or "").strip().lower()
+    poly_status = str(row.get("polymarket_status") or "").strip().lower()
+    if kalshi_status in {"started", "done"}:
+        return "live"
+    if poly_status in {"started", "done", "resolved", "closed"}:
         return "live"
     return "upcoming"
 
@@ -7591,7 +7634,7 @@ def api_live_scores():
 
 # ─── Live-score background watcher ───────────────────────────────────────────
 _live_score_timer = None
-_LIVE_SCORE_INTERVAL = 120  # seconds (2 min)
+_LIVE_SCORE_INTERVAL = max(30, int(os.getenv("LIVE_SCORE_INTERVAL_SEC", "60") or "60"))
 _eod_email_sent_dates: set = set()  # track which dates have had EOD results email sent
 _cache_poll_timer = None
 _CACHE_POLL_INTERVAL = int(os.getenv("CACHE_POLL_INTERVAL_SEC", "120"))
@@ -7656,9 +7699,9 @@ def _start_cache_poller():
 
 
 # Interval for the periodic background outcome resolver.
-_RESOLVE_INTERVAL = max(45, int(os.getenv("RESOLVE_INTERVAL_SEC", "90") or "90"))
+_RESOLVE_INTERVAL = max(30, int(os.getenv("RESOLVE_INTERVAL_SEC", "60") or "60"))
 _PERIODIC_RESOLVE_DAYS_BACK = max(1, int(os.getenv("PERIODIC_RESOLVE_DAYS_BACK", "5") or "5"))
-_RESOLVE_START_DELAY_SEC = max(10, int(os.getenv("RESOLVE_START_DELAY_SEC", "30") or "30"))
+_RESOLVE_START_DELAY_SEC = max(5, int(os.getenv("RESOLVE_START_DELAY_SEC", "15") or "15"))
 _resolve_poller_timer: threading.Timer | None = None
 _resolve_run_lock = threading.Lock()
 _last_resolve_started_ts = 0.0
