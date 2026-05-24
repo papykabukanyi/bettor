@@ -3336,21 +3336,19 @@ def get_tracked_parlays(include_resolved: bool = False, target_date=None,
 
 
 def prune_tracked_parlays_to_date(target_date=None) -> int:
-    """Delete tracked parlays that are not for the target ET calendar date."""
+    """Delete tracked parlays that are strictly older than the target ET calendar date."""
     conn = get_conn()
     if conn is None:
         return 0
     try:
         cur = conn.cursor()
         keep_date = target_date if target_date is not None else _cache_date_default()
-        keep_iso = keep_date.isoformat() if hasattr(keep_date, "isoformat") else str(keep_date)
         cur.execute(
             """
             DELETE FROM tracked_parlays tp
-            WHERE NOT (
-                DATE(tp.created_at AT TIME ZONE 'America/New_York') = %s
-                OR EXISTS (
-                    SELECT 1
+            WHERE COALESCE(
+                (
+                    SELECT MAX(substring(leg->>'game_date', 1, 10)::date)
                     FROM jsonb_array_elements(
                         CASE
                             WHEN jsonb_typeof(tp.legs_json) = 'array' THEN tp.legs_json
@@ -3358,10 +3356,9 @@ def prune_tracked_parlays_to_date(target_date=None) -> int:
                         END
                     ) AS leg
                     WHERE COALESCE(leg->>'game_date', '') ~ '^\\d{4}-\\d{2}-\\d{2}'
-                      AND substring(leg->>'game_date', 1, 10) = %s
-                )
-                OR EXISTS (
-                    SELECT 1
+                ),
+                (
+                    SELECT MAX(substring(leg->>'scheduled_start', 1, 10)::date)
                     FROM jsonb_array_elements(
                         CASE
                             WHEN jsonb_typeof(tp.legs_json) = 'array' THEN tp.legs_json
@@ -3369,11 +3366,11 @@ def prune_tracked_parlays_to_date(target_date=None) -> int:
                         END
                     ) AS leg
                     WHERE COALESCE(leg->>'scheduled_start', '') ~ '^\\d{4}-\\d{2}-\\d{2}'
-                      AND substring(leg->>'scheduled_start', 1, 10) = %s
-                )
-            )
+                ),
+                DATE(tp.created_at AT TIME ZONE 'America/New_York')
+            ) < %s
             """,
-            (keep_date, keep_iso, keep_iso),
+            (keep_date,),
         )
         removed = int(cur.rowcount or 0)
         conn.commit()

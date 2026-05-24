@@ -1901,7 +1901,7 @@ def _collect_fallback_games_for_all_sports(today: datetime.date, tomorrow: datet
     try:
         from data.db import get_upcoming_games
 
-        for g in (get_upcoming_games(days_ahead=2) or []):
+        for g in (get_upcoming_games(days_ahead=_SPORTS_HUB_FORECAST_DAYS) or []):
             sport_group = _infer_sport_group(g.get("sport") or "")
             league = str(g.get("league") or sport_group.upper() or "SPORT")
             comp_code = f"db_{_slug_token(sport_group)}_{_slug_token(league)}".upper()[:64]
@@ -1932,7 +1932,7 @@ def _collect_fallback_games_for_all_sports(today: datetime.date, tomorrow: datet
         try:
             from data.mlb_fetcher import get_schedule_range
 
-            for g in (get_schedule_range(days_ahead=2) or []):
+            for g in (get_schedule_range(days_ahead=_SPORTS_HUB_FORECAST_DAYS) or []):
                 _push_game(
                     sport_group="baseball",
                     league="MLB",
@@ -4479,15 +4479,19 @@ def _run_all_sports_analysis():
                     "grade":                b.get("grade") or "X",
                     "investor_score":       float(b.get("investor_score") or 0),
                 })
-            pred_rows_today = [
-                row for row in pred_rows_allsports
-                if str(row.get("game_date") or "")[:10] == today_str_allsports
+            horizon_end_str_allsports = (
+                _et_calendar_today() + datetime.timedelta(days=max(1, _SPORTS_HUB_FORECAST_DAYS - 1))
+            ).isoformat()
+            pred_rows_window = [
+                row
+                for row in pred_rows_allsports
+                if today_str_allsports <= str(row.get("game_date") or "")[:10] <= horizon_end_str_allsports
             ]
-            if pred_rows_today:
-                save_predictions(pred_rows_today)
+            if pred_rows_window:
+                save_predictions(pred_rows_window)
                 _log(
-                    f"[all-sports] Saved {len(pred_rows_today)} today bets to DB"
-                    f" (preview-only tomorrow bets: {max(0, len(pred_rows_allsports) - len(pred_rows_today))})"
+                    f"[all-sports] Saved {len(pred_rows_window)} forecast-window bets to DB"
+                    f" ({today_str_allsports}..{horizon_end_str_allsports})"
                 )
 
             props_rows_allsports = []
@@ -4523,15 +4527,16 @@ def _run_all_sports_analysis():
                     "run_id": run_id_allsports,
                     "run_date": today_str_allsports,
                 })
-            props_rows_today = [
-                row for row in props_rows_allsports
-                if str(row.get("date") or "")[:10] == today_str_allsports
+            props_rows_window = [
+                row
+                for row in props_rows_allsports
+                if today_str_allsports <= str(row.get("date") or "")[:10] <= horizon_end_str_allsports
             ]
-            if props_rows_today:
-                save_prop_picks(props_rows_today, game_date=today_str_allsports)
+            if props_rows_window:
+                save_prop_picks(props_rows_window, game_date=today_str_allsports)
                 _log(
-                    f"[all-sports] Saved {len(props_rows_today)} today prop picks to DB"
-                    f" (preview-only tomorrow props: {max(0, len(props_rows_allsports) - len(props_rows_today))})"
+                    f"[all-sports] Saved {len(props_rows_window)} forecast-window prop picks to DB"
+                    f" ({today_str_allsports}..{horizon_end_str_allsports})"
                 )
         except Exception as _db_exc:
             _log(f"[all-sports] DB save skipped: {_db_exc}")
