@@ -345,7 +345,7 @@ def get_wc_player_stats(player_name: str | None = None,
 def get_squad_props(nation: str, top_n: int = 6) -> list[dict]:
     """
     Generate player prop bets for a national team's top players.
-    Uses season historical rates and emits both OVER and UNDER directions.
+    Uses season historical rates and emits OVER-only player props.
     """
     players = get_wc_player_stats(nation=nation)
     if not players:
@@ -379,7 +379,6 @@ def get_squad_props(nation: str, top_n: int = 6) -> list[dict]:
         rationale: str,
     ):
         over_p = max(0.02, min(0.98, float(model_over_prob)))
-        under_p = max(0.02, min(0.98, 1.0 - over_p))
 
         base = {
             "name": name,
@@ -406,20 +405,7 @@ def get_squad_props(nation: str, top_n: int = 6) -> list[dict]:
                 "confidence": round(over_p * 100),
                 "safety_label": _prob_to_safety(over_p),
                 "over_pct": round(over_p * 100, 2),
-                "under_pct": round(100.0 - (over_p * 100), 2),
-                "odds_am": -110,
-                "dec_odds": 1.91,
-            }
-        )
-        props.append(
-            {
-                **base,
-                "direction": "UNDER",
-                "model_prob": round(under_p, 3),
-                "confidence": round(under_p * 100),
-                "safety_label": _prob_to_safety(under_p),
-                "over_pct": round(over_p * 100, 2),
-                "under_pct": round(under_p * 100, 2),
+                "under_pct": 0.0,
                 "odds_am": -110,
                 "dec_odds": 1.91,
             }

@@ -36,9 +36,13 @@ POLYMARKET_TIMEOUT_SEC = int(os.getenv("POLYMARKET_TIMEOUT_SEC", "15"))
 POLYMARKET_MARKET_CACHE_TTL_SEC = max(120, int(os.getenv("POLYMARKET_MARKET_CACHE_TTL_SEC", "900") or "900"))
 POLYMARKET_MARKET_PAGES = max(1, min(int(os.getenv("POLYMARKET_MARKET_PAGES", "4") or "4"), 20))
 POLYMARKET_PAGE_LIMIT = max(50, min(int(os.getenv("POLYMARKET_PAGE_LIMIT", "200") or "200"), 500))
+POLYMARKET_US_COOLDOWN_SEC = max(120, int(os.getenv("POLYMARKET_US_COOLDOWN_SEC", "900") or "900"))
 
 _MARKET_CACHE_LOCK = threading.Lock()
 _MARKET_CACHE: dict[str, Any] = {"ts": 0.0, "payload": None}
+_BALANCE_CACHE_LOCK = threading.Lock()
+_BALANCE_CACHE: dict[str, Any] = {"ts": 0.0, "payload": None}
+_BALANCE_COOLDOWN_UNTIL = 0.0
 
 
 def _norm_text(value: Any) -> str:
@@ -132,6 +136,14 @@ def _us_request(
         msg = ""
         if isinstance(data, dict):
             msg = str(data.get("message") or data.get("error") or data.get("details") or data)
+        if resp.status_code in {429, 403}:
+            raw_text = ""
+            if isinstance(data, dict):
+                raw_text = str(data.get("raw") or "")
+            if not raw_text and getattr(resp, "text", None):
+                raw_text = str(resp.text)
+            if any(token in raw_text.lower() for token in ("rate limited", "cloudflare", "error 1015", "enable cookies")):
+                raise RuntimeError(f"Polymarket US API {resp.status_code}: rate limited by Cloudflare")
         raise RuntimeError(f"Polymarket US API {resp.status_code}: {msg or resp.reason}")
 
     return data if isinstance(data, dict) else {"raw": data}
@@ -1023,29 +1035,69 @@ def get_balance() -> dict[str, Any]:
 
     Prefers Polymarket US authenticated API when key/secret are configured.
     """
+    global _BALANCE_COOLDOWN_UNTIL
+
+    now = time.time()
+    with _BALANCE_CACHE_LOCK:
+        cached_payload = dict(_BALANCE_CACHE.get("payload") or {})
+        cached_ts = float(_BALANCE_CACHE.get("ts") or 0.0)
+
+    if now < _BALANCE_COOLDOWN_UNTIL and cached_payload:
+        cached_payload["ok"] = False
+        cached_payload["source"] = "polymarket_us_cached"
+        cached_payload["cached"] = True
+        cached_payload["cooldown_active"] = True
+        cached_payload["cache_age_sec"] = round(now - cached_ts, 2)
+        return cached_payload
+
     if _has_us_api_creds():
-        payload = _us_request("GET", "/v1/account/balances")
-        balances = payload.get("balances") if isinstance(payload, dict) else None
-        balances = balances if isinstance(balances, list) else []
-        usd_row = next(
-            (
-                row for row in balances
-                if isinstance(row, dict) and str(row.get("currency") or "").upper() == "USD"
-            ),
-            (balances[0] if balances and isinstance(balances[0], dict) else {}),
-        )
-        current_balance = float(_as_float((usd_row or {}).get("currentBalance")) or 0.0)
-        buying_power = float(_as_float((usd_row or {}).get("buyingPower")) or current_balance)
-        asset_notional = float(_as_float((usd_row or {}).get("assetNotional")) or 0.0)
-        portfolio_value = current_balance + asset_notional
-        return {
-            "ok": True,
-            "balance_usd": round(current_balance, 6),
-            "buying_power_usd": round(buying_power, 6),
-            "portfolio_usd": round(portfolio_value, 6),
-            "raw": payload,
-            "source": "polymarket_us",
-        }
+        try:
+            payload = _us_request("GET", "/v1/account/balances")
+            balances = payload.get("balances") if isinstance(payload, dict) else None
+            balances = balances if isinstance(balances, list) else []
+            usd_row = next(
+                (
+                    row for row in balances
+                    if isinstance(row, dict) and str(row.get("currency") or "").upper() == "USD"
+                ),
+                (balances[0] if balances and isinstance(balances[0], dict) else {}),
+            )
+            current_balance = float(_as_float((usd_row or {}).get("currentBalance")) or 0.0)
+            buying_power = float(_as_float((usd_row or {}).get("buyingPower")) or current_balance)
+            asset_notional = float(_as_float((usd_row or {}).get("assetNotional")) or 0.0)
+            portfolio_value = current_balance + asset_notional
+            result = {
+                "ok": True,
+                "balance_usd": round(current_balance, 6),
+                "buying_power_usd": round(buying_power, 6),
+                "portfolio_usd": round(portfolio_value, 6),
+                "raw": payload,
+                "source": "polymarket_us",
+            }
+            with _BALANCE_CACHE_LOCK:
+                _BALANCE_CACHE["ts"] = time.time()
+                _BALANCE_CACHE["payload"] = dict(result)
+            return result
+        except Exception as exc:
+            msg = str(exc)
+            if any(token in msg.lower() for token in ("rate limited", "cloudflare", "error 1015", "429")):
+                _BALANCE_COOLDOWN_UNTIL = time.time() + POLYMARKET_US_COOLDOWN_SEC
+                fallback = {
+                    "ok": False,
+                    "balance_usd": float(cached_payload.get("balance_usd") or 0.0),
+                    "buying_power_usd": float(cached_payload.get("buying_power_usd") or cached_payload.get("balance_usd") or 0.0),
+                    "portfolio_usd": float(cached_payload.get("portfolio_usd") or cached_payload.get("balance_usd") or 0.0),
+                    "raw": {"error": msg},
+                    "source": "polymarket_us_cached",
+                    "cached": bool(cached_payload),
+                    "cooldown_active": True,
+                    "cooldown_sec": POLYMARKET_US_COOLDOWN_SEC,
+                    "message": "Polymarket US balance is rate limited; using cached balance if available.",
+                }
+                if cached_payload:
+                    fallback.update({k: v for k, v in cached_payload.items() if k not in {"ok", "raw", "source"}})
+                return fallback
+            raise
 
     # Legacy CLOB fallback path.
     client = _get_clob_client()

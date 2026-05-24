@@ -4981,7 +4981,10 @@ def _run_all_sports_analysis():
                 model_prob = float(p.get("model_prob") or 0.5)
                 over_prob = p.get("over_prob")
                 under_prob = p.get("under_prob")
-                if over_prob is None or under_prob is None:
+                if _OVER_ONLY_PLAYER_PROPS and _is_player_prop_style_row(p):
+                    over_prob = model_prob
+                    under_prob = 0.0
+                elif over_prob is None or under_prob is None:
                     over_prob = model_prob if rec == "OVER" else 1.0 - model_prob
                     under_prob = model_prob if rec == "UNDER" else 1.0 - model_prob
 
