@@ -86,12 +86,18 @@ celerybeat-schedule
 
 # Environments
 .env
+.env.local
+.env.production
 .venv
 env/
 venv/
 ENV/
 env.bak/
 venv.bak/
+
+# iOS/Firebase local app secrets
+GoogleService-Info.plist
+**/GoogleService-Info.plist
 
 # Spyder project settings
 .spyderproject

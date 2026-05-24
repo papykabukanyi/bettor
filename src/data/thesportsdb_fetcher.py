@@ -97,7 +97,7 @@ def get_events_by_date(d: date = None, sport: str = "Soccer") -> list[dict]:
     tsdb_sport = _SPORT_TO_TSDB.get(sport.lower(), sport)
     # Try with sport filter first.
     data = _get("eventsday.php", {"d": d.isoformat(), "s": tsdb_sport})
-    events = (data or {}).get("events")
+    events = (data or {}).get("events") or []
 
     # Date-only fallback can be expensive/noisy on plans where eventsday is disabled;
     # use it only when caller asks for all sports.

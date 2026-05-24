@@ -509,6 +509,13 @@ _MULTI_SPORT_CACHE_TTL_SEC = int(os.getenv("MULTI_SPORT_CACHE_TTL_SEC", "180"))
 _MAX_ODDS_SPORTS = int(os.getenv("MAX_ODDS_SPORTS", "24"))
 _MIN_ODDS_SPORTS = max(1, int(os.getenv("MIN_ODDS_SPORTS", "10")))
 _SPORTS_HUB_FORECAST_DAYS = max(2, min(21, int(os.getenv("SPORTS_HUB_FORECAST_DAYS", "14") or "14")))
+_ON_RAILWAY = any(
+    str(os.getenv(k, "")).strip()
+    for k in ("RAILWAY_ENVIRONMENT", "RAILWAY_PROJECT_ID", "RAILWAY_PUBLIC_DOMAIN")
+)
+_BILL_SAVER_MODE = str(
+    os.getenv("BILL_SAVER_MODE", "1" if _ON_RAILWAY else "0")
+).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _env_flag(name: str, default: str = "0") -> bool:
@@ -3894,7 +3901,10 @@ def _build_multi_sport_snapshot(force_refresh: bool = False) -> dict:
     dynamic_limit = max(1, _MAX_ODDS_SPORTS)
     if isinstance(est_remaining, int):
         usable = max(0, est_remaining - reserve)
-        dynamic_limit = max(min(_MIN_ODDS_SPORTS, _MAX_ODDS_SPORTS), min(dynamic_limit, max(1, usable)))
+        if usable <= 0:
+            dynamic_limit = 0
+        else:
+            dynamic_limit = max(min(_MIN_ODDS_SPORTS, _MAX_ODDS_SPORTS), min(dynamic_limit, usable))
     if active:
         active = active[:dynamic_limit]
     if isinstance(est_remaining, int):
@@ -5785,7 +5795,7 @@ def api_calibration():
 def api_parlay_performance():
     """Win/loss/ROI stats for all tracked parlays."""
     try:
-        _maybe_trigger_tracking_sync_sync()
+        _maybe_trigger_tracking_sync_on_read()
         from data.db import get_parlay_performance_stats, prune_tracked_parlays_to_date
         current_only_raw = str(request.args.get("current_only", "1")).strip().lower()
         current_only = current_only_raw in {"1", "true", "yes", "on"}
@@ -5899,7 +5909,7 @@ def api_backfill():
 @app.route("/api/performance")
 def api_performance():
     try:
-        _maybe_trigger_tracking_sync_sync()
+        _maybe_trigger_tracking_sync_on_read()
         from data.db import get_performance_stats, get_settlement_summary
         current_only_raw = str(request.args.get("current_only", "0")).strip().lower()
         current_only = current_only_raw in {"1", "true", "yes", "on"}
@@ -5923,7 +5933,7 @@ def api_performance():
 @app.route("/api/prop-performance")
 def api_prop_performance():
     try:
-        _maybe_trigger_tracking_sync_sync()
+        _maybe_trigger_tracking_sync_on_read()
         from data.db import get_prop_performance_stats
         current_only_raw = str(request.args.get("current_only", "1")).strip().lower()
         current_only = current_only_raw in {"1", "true", "yes", "on"}
@@ -5946,7 +5956,7 @@ def api_predictions():
     days    = int(request.args.get("days", 30))
     outcome = request.args.get("outcome")
     try:
-        _maybe_trigger_tracking_sync_sync()
+        _maybe_trigger_tracking_sync_on_read()
         from data.db import get_predictions
         db_sport = None if _ACTIVE_SPORT == "all" else _ACTIVE_SPORT
         preds = get_predictions(days=days, outcome=outcome or None, sport=db_sport)
@@ -5965,7 +5975,7 @@ def api_prop_history():
     days = int(request.args.get("days", 30))
     outcome = request.args.get("outcome")
     try:
-        _maybe_trigger_tracking_sync_sync()
+        _maybe_trigger_tracking_sync_on_read()
         from data.db import get_prop_history
 
         db_sport = None if _ACTIVE_SPORT == "all" else _ACTIVE_SPORT
@@ -5989,7 +5999,19 @@ def _match_status_bucket(status: str) -> str:
     return "scheduled"
 
 
-_TRACKING_SYNC_MIN_INTERVAL_SEC = max(10, int(os.getenv("TRACKING_SYNC_MIN_INTERVAL_SEC", "20") or "20"))
+_TRACKING_SYNC_MIN_INTERVAL_SEC = max(
+    10,
+    int(
+        os.getenv(
+            "TRACKING_SYNC_MIN_INTERVAL_SEC",
+            "180" if _BILL_SAVER_MODE else "20",
+        )
+        or ("180" if _BILL_SAVER_MODE else "20")
+    ),
+)
+_SYNC_ON_READ_ENABLED = str(
+    os.getenv("SYNC_ON_READ_ENABLED", "0" if _BILL_SAVER_MODE else "1")
+).strip().lower() in {"1", "true", "yes", "on"}
 _last_tracking_sync_ts = 0.0
 _tracking_sync_lock = threading.Lock()
 
@@ -6038,6 +6060,13 @@ def _maybe_trigger_tracking_sync_sync(force: bool = False):
             _tracking_sync_lock.release()
         except Exception:
             pass
+
+
+def _maybe_trigger_tracking_sync_on_read(force: bool = False):
+    """DB cost guard for read APIs; disable frequent resolver writes unless explicitly enabled."""
+    if not force and not _SYNC_ON_READ_ENABLED:
+        return
+    _maybe_trigger_tracking_sync_sync(force=force)
 
 
 def _live_status_for_game_key(game_key: str) -> str:
@@ -7077,7 +7106,7 @@ def api_parlay_save():
 @app.route("/api/parlay/list")
 def api_parlay_list():
     try:
-        _maybe_trigger_tracking_sync_sync()
+        _maybe_trigger_tracking_sync_on_read()
         from data.db import get_tracked_parlays, prune_tracked_parlays_to_date
         inc = str(request.args.get("include_resolved", "1")).strip().lower()
         include_resolved = inc in {"1", "true", "yes", "on"}
@@ -7972,7 +8001,10 @@ def _start_cache_poller():
 
 
 # Interval for the periodic background outcome resolver.
-_RESOLVE_INTERVAL = max(30, int(os.getenv("RESOLVE_INTERVAL_SEC", "60") or "60"))
+_RESOLVE_INTERVAL = max(
+    30,
+    int(os.getenv("RESOLVE_INTERVAL_SEC", "300" if _BILL_SAVER_MODE else "60") or ("300" if _BILL_SAVER_MODE else "60")),
+)
 _PERIODIC_RESOLVE_DAYS_BACK = max(1, int(os.getenv("PERIODIC_RESOLVE_DAYS_BACK", "5") or "5"))
 _RESOLVE_START_DELAY_SEC = max(5, int(os.getenv("RESOLVE_START_DELAY_SEC", "15") or "15"))
 _resolve_poller_timer: threading.Timer | None = None
@@ -7980,7 +8012,16 @@ _resolve_run_lock = threading.Lock()
 _last_resolve_started_ts = 0.0
 
 # ─── Kalshi availability monitor ─────────────────────────────────────────────
-_KALSHI_MONITOR_INTERVAL_SEC = max(120, int(os.getenv("KALSHI_MONITOR_INTERVAL_SEC", "300") or "300"))
+_KALSHI_MONITOR_INTERVAL_SEC = max(
+    120,
+    int(
+        os.getenv(
+            "KALSHI_MONITOR_INTERVAL_SEC",
+            "900" if _BILL_SAVER_MODE else "300",
+        )
+        or ("900" if _BILL_SAVER_MODE else "300")
+    ),
+)
 _kalshi_monitor_timer: threading.Timer | None = None
 _kalshi_monitor_last_statuses: dict[str, str] = {}   # bet_uid → last known status
 _kalshi_match_alert_lock = threading.Lock()
