@@ -26,6 +26,7 @@ Common league IDs:
 
 import requests
 import time
+import os
 from datetime import date, datetime
 
 from src.config import THESPORTSDB_API_KEY
@@ -34,6 +35,7 @@ _KEY  = THESPORTSDB_API_KEY or "1"
 _BASE = f"https://www.thesportsdb.com/api/v1/json/{_KEY}"
 _EVENTSDAY_BACKOFF_UNTIL = 0.0
 _EVENTSDAY_LOGGED = False
+_EVENTSDAY_BACKOFF_SEC = max(900, int(float(os.getenv("TSDB_EVENTSDAY_BACKOFF_SEC", "21600") or "21600")))
 
 _SOCCER_LEAGUES = {
     "premier_league": 4328,
@@ -65,11 +67,11 @@ def _get(endpoint: str, params: dict = None, timeout: int = 8):
             resp = requests.get(url, params=params or {}, timeout=timeout)
             if endpoint == "eventsday.php" and resp.status_code == 400:
                 # Free-tier endpoint can be unavailable; disable temporarily to avoid log storms.
-                _EVENTSDAY_BACKOFF_UNTIL = time.time() + 21600  # 6 hours
+                _EVENTSDAY_BACKOFF_UNTIL = time.time() + _EVENTSDAY_BACKOFF_SEC
                 if not _EVENTSDAY_LOGGED:
                     print(
-                        "[thesportsdb] eventsday.php returned 400; "
-                        "disabling eventsday calls for 6h to prevent log spam"
+                        "[thesportsdb] eventsday.php unavailable on current plan; "
+                        f"cooling down calls for {int(_EVENTSDAY_BACKOFF_SEC)}s"
                     )
                     _EVENTSDAY_LOGGED = True
                 return None

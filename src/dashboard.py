@@ -65,6 +65,10 @@ if _ACTIVE_SPORT not in {"mlb", "soccer", "all"}:
 _PREDICTION_QUALITY_MIN = max(0.35, min(float(os.getenv("PREDICTION_QUALITY_MIN", "0.62") or "0.62"), 0.98))
 _PREDICTION_EV_MIN = max(-0.10, min(float(os.getenv("PREDICTION_EV_MIN", "-0.01") or "-0.01"), 0.50))
 _PREDICTION_PROB_MIN = max(0.50, min(float(os.getenv("PREDICTION_PROB_MIN", "0.56") or "0.56"), 0.98))
+_TODAY_TOMORROW_MAX_UNDER_SHARE = max(
+    0.0,
+    min(float(os.getenv("TODAY_TOMORROW_MAX_UNDER_SHARE", "0.20") or "0.20"), 1.0),
+)
 
 app = Flask(__name__, template_folder="templates")
 
@@ -2235,6 +2239,7 @@ def _collect_fallback_games_for_all_sports(today: datetime.date, tomorrow: datet
 def _build_model_fallback_bets(games: list[dict]) -> list[dict]:
     bets: list[dict] = []
     today_str = _et_calendar_today().isoformat()
+    tomorrow_str = (_et_calendar_today() + datetime.timedelta(days=1)).isoformat()
 
     def _prob_to_american(prob: float) -> int:
         p = max(0.01, min(0.99, float(prob or 0.5)))
@@ -2276,6 +2281,63 @@ def _build_model_fallback_bets(games: list[dict]) -> list[dict]:
             return int(float(value))
         except Exception:
             return None
+
+    def _expected_total_and_over_prob(game: dict, sport: str) -> tuple[float, float]:
+        # Baseline totals by sport for fallback O/U generation.
+        sport_baseline = {
+            "soccer": 2.6,
+            "baseball": 8.6,
+            "mlb": 8.6,
+            "basketball": 222.5,
+            "icehockey": 6.1,
+            "americanfootball": 45.5,
+            "football": 45.5,
+            "tennis": 22.5,
+            "mma": 2.5,
+            "boxing": 8.5,
+            "golf": 141.5,
+            "motorsports": 199.5,
+            "cricket": 156.5,
+        }
+        baseline = float(sport_baseline.get(sport, 3.5))
+
+        home_rec_pct = _to_float(game.get("home_record_pct"))
+        away_rec_pct = _to_float(game.get("away_record_pct"))
+        if home_rec_pct is None:
+            home_rec_pct = _record_win_pct(game.get("home_record") or "")
+        if away_rec_pct is None:
+            away_rec_pct = _record_win_pct(game.get("away_record") or "")
+
+        pace_boost = 0.0
+        if home_rec_pct is not None and away_rec_pct is not None:
+            pace_boost += ((home_rec_pct + away_rec_pct) - 1.0) * 0.12
+
+        hs = _to_int(game.get("home_score"))
+        aw = _to_int(game.get("away_score"))
+        status = str(game.get("status") or "").strip().lower()
+        if hs is not None and aw is not None and ("progress" in status or "live" in status):
+            live_total = max(0.0, float(hs + aw))
+            baseline = max(baseline, live_total + max(0.5, baseline * 0.08))
+
+        expected_total = baseline * (1.0 + pace_boost)
+        expected_total = max(1.5, expected_total)
+
+        # Line near market key numbers with slight deterministic jitter per game.
+        seed = "|".join([
+            str(game.get("home_team") or "").strip().lower(),
+            str(game.get("away_team") or "").strip().lower(),
+            str(game.get("game_date") or game.get("date") or "").strip(),
+            f"totals:{sport}",
+        ])
+        digest = hashlib.md5(seed.encode("utf-8", errors="ignore")).digest()[0]
+        jitter = ((digest / 255.0) - 0.5) * 0.8
+        line = round((expected_total + jitter) * 2.0) / 2.0
+
+        # Logistic-ish mapping from expected edge to OVER probability.
+        edge = expected_total - line
+        over_prob = 0.5 + max(-0.18, min(0.18, edge * 0.11))
+        over_prob = max(0.52, min(0.72, over_prob))
+        return (line, over_prob)
 
     def _estimate_home_prob(game: dict, sport: str) -> float:
         if sport == "soccer":
@@ -2340,7 +2402,8 @@ def _build_model_fallback_bets(games: list[dict]) -> list[dict]:
 
     # Deterministic, zero-network fallback pick generation.
     # Used only when sportsbook/model feeds are unavailable.
-    for g in (games or [])[:120]:
+    max_games = max(120, min(int(os.getenv("ALL_SPORTS_FALLBACK_MAX_GAMES", "220") or "220"), 400))
+    for g in (games or [])[:max_games]:
         home = str(g.get("home_team") or "").strip()
         away = str(g.get("away_team") or "").strip()
         if not home or not away:
@@ -2399,6 +2462,38 @@ def _build_model_fallback_bets(games: list[dict]) -> list[dict]:
             "worth_score": round(pick_prob * 100.0, 2),
             "worth_reason": reason,
         })
+
+        # Add totals-focused fallback bet (OVER-biased) for today/tomorrow so the
+        # board remains active when paid odds credits are exhausted.
+        if str(game_date) in {today_str, tomorrow_str}:
+            total_line, over_prob = _expected_total_and_over_prob(g, sport)
+            over_odds_am = _prob_to_american(over_prob)
+            over_label = _rank_label(over_prob)
+            bets.append({
+                "sport": sport,
+                "league": g.get("league") or g.get("competition_name") or sport.upper(),
+                "competition": g.get("competition") or sport.upper(),
+                "competition_name": g.get("competition_name") or g.get("league") or sport.upper(),
+                "bet_type": "total",
+                "pick": f"OVER {total_line}",
+                "line": total_line,
+                "odds_am": over_odds_am,
+                "dec_odds": round((1 + (over_odds_am / 100.0)) if over_odds_am > 0 else (1 + (100.0 / abs(over_odds_am))), 4),
+                "model_prob": round(over_prob, 4),
+                "confidence": int(round(over_prob * 100)),
+                "safety_label": over_label,
+                "safety": _safety_score_from_label(over_label),
+                "game_date": game_date,
+                "game_time": g.get("game_time") or "",
+                "home_team": home,
+                "away_team": away,
+                "match_key": g.get("match_key") or _norm_gk(f"{away}@{home}"),
+                "game_key": game_key,
+                "worth_it": over_prob >= 0.54,
+                "worth_score": round(over_prob * 100.0, 2),
+                "worth_reason": "Fallback totals model (OVER-priority today/tomorrow)",
+                "direction": "OVER",
+            })
 
     # Dedupe similar bets.
     deduped: list[dict] = []
@@ -2519,7 +2614,57 @@ def _multi_sport_best_bets_rows(bets: list[dict]) -> list[dict]:
         seen.add(dedupe_key)
         rows.append(row)
 
-    rows.sort(key=lambda x: float(x.get("model_prob") or 0.0), reverse=True)
+    today = _et_calendar_today().isoformat()
+    tomorrow = (_et_calendar_today() + datetime.timedelta(days=1)).isoformat()
+
+    def _row_sort_key(row: dict) -> tuple[int, int, float, float]:
+        gdate = str(row.get("game_date") or "")[:10]
+        is_near = 1 if gdate in {today, tomorrow} else 0
+        direction = str(row.get("direction") or "").strip().upper()
+        over_bias = 1 if direction == "OVER" else 0
+        prob = float(row.get("model_prob") or 0.0)
+        ev = float(row.get("ev") or 0.0)
+        return (is_near, over_bias, prob, ev)
+
+    rows.sort(key=_row_sort_key, reverse=True)
+
+    # Hard-limit UNDER rows for today/tomorrow so near-date board stays OVER-heavy.
+    # Algebraic cap keeps UNDER share <= r: U <= (r/(1-r)) * O for r in [0, 1).
+    if _TODAY_TOMORROW_MAX_UNDER_SHARE < 1.0:
+        near_rows: list[dict] = []
+        far_rows: list[dict] = []
+        for row in rows:
+            gdate = str(row.get("game_date") or "")[:10]
+            if gdate in {today, tomorrow}:
+                near_rows.append(row)
+            else:
+                far_rows.append(row)
+
+        near_over = [
+            r for r in near_rows
+            if str(r.get("direction") or "").strip().upper() == "OVER"
+        ]
+        near_under = [
+            r for r in near_rows
+            if str(r.get("direction") or "").strip().upper() == "UNDER"
+        ]
+        near_other = [
+            r for r in near_rows
+            if str(r.get("direction") or "").strip().upper() not in {"OVER", "UNDER"}
+        ]
+
+        if near_under:
+            if not near_over:
+                allowed_under = 0
+            else:
+                ratio = _TODAY_TOMORROW_MAX_UNDER_SHARE / max(1e-9, (1.0 - _TODAY_TOMORROW_MAX_UNDER_SHARE))
+                allowed_under = int(math.floor(len(near_over) * ratio))
+            allowed_under = max(0, min(len(near_under), allowed_under))
+            near_rows = near_over + near_under[:allowed_under] + near_other
+            near_rows.sort(key=_row_sort_key, reverse=True)
+
+        rows = near_rows + far_rows
+
     return rows[:300]
 
 
