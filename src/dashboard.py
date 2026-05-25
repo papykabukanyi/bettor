@@ -334,6 +334,44 @@ def _sync_exchange_resolution_statuses(days_back: int = 5, max_rows: int = 300) 
         except Exception:
             polymarket_payload = {}
 
+        def _match_count(payload: dict) -> int:
+            if not isinstance(payload, dict):
+                return 0
+            try:
+                direct = int(payload.get("matched") or 0)
+            except Exception:
+                direct = 0
+            if direct > 0:
+                return direct
+            summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+            try:
+                summary_count = int(summary.get("matched") or 0)
+            except Exception:
+                summary_count = 0
+            if summary_count > 0:
+                return summary_count
+            resolutions = payload.get("resolutions") if isinstance(payload.get("resolutions"), dict) else {}
+            return sum(
+                1
+                for v in resolutions.values()
+                if isinstance(v, dict) and str(v.get("status") or "").lower() == "matched"
+            )
+
+        # Retry once with forced market-catalog refresh when first pass is weak.
+        k_initial = _match_count(kalshi_payload)
+        p_initial = _match_count(polymarket_payload)
+        if ready_bets and (k_initial == 0 or p_initial == 0):
+            if k_initial == 0:
+                try:
+                    kalshi_payload = resolve_kalshi_ready_bets(ready_bets, force_refresh=True) or kalshi_payload
+                except Exception:
+                    pass
+            if p_initial == 0:
+                try:
+                    polymarket_payload = resolve_polymarket_ready_bets(ready_bets, force_refresh=True) or polymarket_payload
+                except Exception:
+                    pass
+
         kalshi_res = kalshi_payload.get("resolutions") if isinstance(kalshi_payload, dict) else {}
         poly_res = polymarket_payload.get("resolutions") if isinstance(polymarket_payload, dict) else {}
         if not isinstance(kalshi_res, dict):

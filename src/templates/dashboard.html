@@ -49,6 +49,7 @@ a{color:inherit;text-decoration:none}
   display:flex;flex-direction:column;align-items:flex-start;justify-content:center;
   z-index:1000;gap:12px;padding:14px 16px;box-shadow:var(--shadow);pointer-events:none;
   transition:opacity .4s}
+#loading-overlay{display:none !important}
 #loading-overlay.hidden{opacity:0;pointer-events:none}
 .spinner{width:48px;height:48px;border:4px solid var(--border);
   border-top-color:var(--accent);border-radius:50%;animation:spin 1s linear infinite}
@@ -1863,12 +1864,10 @@ const PHASES = {{ phases|tojson }};
 let pollingId = null;
 
 function hideOverlay() {
-  document.getElementById('loading-overlay').classList.add('hidden');
+  return;
 }
 function showOverlay(phase, pct) {
-  document.getElementById('loading-overlay').classList.remove('hidden');
-  document.getElementById('load-phase').textContent = phase || 'Working…';
-  document.getElementById('progress-fill').style.width = (pct||5)+'%';
+  return;
 }
 
 /* Legacy polling kept for manual "Run" button fallback */

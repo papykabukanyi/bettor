@@ -748,13 +748,26 @@ def resolve_ready_bets(bets: list[dict[str, Any]], *, force_refresh: bool = Fals
 
         best_market: dict[str, Any] | None = None
         best_score = 0.0
+        second_best_score = 0.0
         for market in markets:
             score = _score_market(bet, market)
             if score > best_score:
+                second_best_score = best_score
                 best_score = score
                 best_market = market
+            elif score > second_best_score:
+                second_best_score = score
 
-        if best_market and best_score >= 3.4:
+        primary_threshold = 3.4
+        relaxed_threshold = 3.05
+        ambiguity_gap = 0.85
+        is_match = bool(best_market and best_score >= primary_threshold)
+        if not is_match and best_market and best_score >= relaxed_threshold:
+            # Guardrail: only relax when the top market is clearly better than runner-up.
+            if (best_score - second_best_score) >= ambiguity_gap:
+                is_match = True
+
+        if is_match:
             matched += 1
             side = _market_side(bet, best_market)
             token_id = str(best_market.get("yes_token_id") if side == "yes" else best_market.get("no_token_id") or "").strip()
