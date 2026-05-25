@@ -46,7 +46,7 @@ from config import BANKROLL, MIN_VALUE_EDGE, KELLY_FRACTION, MLB_SEASONS, et_tod
 _DASH_MIN_EDGE = 0.02
 _DAILY_LOCK_HOUR_ET = int(os.getenv("DAILY_LOCK_HOUR_ET", "5"))
 _DAILY_LOCK_MINUTE_ET = int(os.getenv("DAILY_LOCK_MINUTE_ET", "0"))
-_AUTO_ANALYSIS_INTERVAL_MIN = int(os.getenv("AUTO_ANALYSIS_INTERVAL_MIN", "0"))
+_AUTO_ANALYSIS_INTERVAL_MIN = int(os.getenv("AUTO_ANALYSIS_INTERVAL_MIN", "60"))
 _BOOT_FORCE_ANALYSIS = str(os.getenv("BOOT_FORCE_ANALYSIS", "0")).strip().lower() in {"1", "true", "yes", "on"}
 _AUTO_BACKFILL_ENABLED = str(os.getenv("AUTO_BACKFILL_ENABLED", "1")).strip().lower() in {"1", "true", "yes", "on"}
 _AUTO_BACKFILL_HOUR_ET = int(os.getenv("AUTO_BACKFILL_HOUR_ET", "3"))
@@ -471,6 +471,25 @@ def _lazy_init():
     """Triggered once per-worker on the very first request."""
     if not _worker_initialized:
         _init_worker()
+
+
+def _is_server_runtime() -> bool:
+    """Best-effort detection for long-lived web-server processes."""
+    server_software = str(os.getenv("SERVER_SOFTWARE", "")).strip().lower()
+    return any(
+        [
+            "gunicorn" in server_software,
+            bool(str(os.getenv("GUNICORN_CMD_ARGS", "")).strip()),
+            bool(str(os.getenv("RAILWAY_ENVIRONMENT", "")).strip()),
+            bool(str(os.getenv("PORT", "")).strip()),
+        ]
+    )
+
+
+_EAGER_WORKER_INIT = str(os.getenv("EAGER_WORKER_INIT", "1")).strip().lower() in {"1", "true", "yes", "on"}
+if _EAGER_WORKER_INIT and _is_server_runtime() and not _worker_initialized:
+    # Start autonomous background services even if no request hits the app yet.
+    threading.Thread(target=_init_worker, name="bettor-worker-init", daemon=True).start()
 
 _MLB_PHASES = [
     "Fetching MLB schedule",
@@ -9263,8 +9282,8 @@ def _load_boot_schedule_fallback() -> bool:
                 boot_player_props = _build_all_sport_sentiment_props(all_games, all_bets)
             boot_best_bets = _multi_sport_best_bets_rows(all_bets)
             boot_props = _merge_all_sports_table_rows(boot_player_props, boot_best_bets)
-            today_games = [g for g in all_games if str(g.get("game_date") or "") == today_str]
-            tomorrow_games = [g for g in all_games if str(g.get("game_date") or "") == tomorrow_str]
+            today_games = [g for g in all_games if _row_game_date(g) == today_str]
+            tomorrow_games = [g for g in all_games if _row_game_date(g) == tomorrow_str]
             today_cards = [_build_card(g, all_bets, boot_player_props, "TODAY") for g in today_games]
             tomorrow_cards = [_build_card(g, all_bets, boot_player_props, "TOMORROW") for g in tomorrow_games]
         elif _ACTIVE_SPORT == "soccer":
