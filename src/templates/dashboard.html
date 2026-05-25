@@ -313,7 +313,6 @@ main{padding:20px;max-width:1400px;margin:0 auto}
 /* Responsive expanded */
 @media(max-width:560px){
   .card-expand-strip{grid-template-columns:1fr 1fr}
-  .cx-stat:last-child{display:none}
   .cx-stat-val{font-size:1.1rem}
   .xbet-bar-label{font-size:.6rem}
   .modal-hero-grid{grid-template-columns:1fr}
@@ -663,7 +662,6 @@ body.modal-open{overflow:hidden}
 }
 @media(max-width:520px){
   .matchup{flex-direction:column;align-items:stretch}
-  .vs{display:none}
   .team-side{display:flex;align-items:center;justify-content:space-between}
   .team-side.away{text-align:left}
   .ready-item-sub{gap:6px}
@@ -1192,9 +1190,8 @@ function _logOp(type, msg) {
 }
 
 function _isMobileLiteMode() {
-  const narrow = !!(window.matchMedia && window.matchMedia('(max-width: 760px)').matches);
-  const coarse = !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
-  return narrow || (coarse && (window.innerWidth || 0) <= 980);
+  // Keep mobile behavior feature-parity with desktop by default.
+  return false;
 }
 
 function _applyMobileLiteMode() {
@@ -1877,8 +1874,7 @@ function showOverlay(phase, pct) {
 /* Legacy polling kept for manual "Run" button fallback */
 function startPolling() {
   if (pollingId) return;
-  const pollMs = _isMobileLiteMode() ? 3500 : 2500;
-  pollingId = setInterval(pollStatus, pollMs);
+  pollingId = setInterval(pollStatus, 2500);
 }
 function stopPolling() {
   clearInterval(pollingId); pollingId = null;
@@ -2326,7 +2322,6 @@ const TRACKING_REFRESH_MS = 25 * 1000;
 // ── Periodic silent refresh every 90s (covers SSE gaps) ─────────────────────
 setInterval(() => {
   if (document.hidden) return;
-  if (_isMobileLiteMode() && !_isReadyBetsActive() && !_isParlaysActive()) return;
   if (_isReadyBetsActive()) {
     refreshReadyBets(false);
   }
@@ -6715,8 +6710,7 @@ function refreshConsole() {
     const logs = d.logs || [];
     if (logs.length === _lastLogCount) return;
     _lastLogCount = logs.length;
-    const isMobileLite = document.body && document.body.classList.contains('mobile-lite');
-    const visibleLogs = isMobileLite ? logs.slice(-120) : logs;
+    const visibleLogs = logs;
     const body = document.getElementById('console-body');
     body.innerHTML = visibleLogs.map(l => {
       let cls = 'clog-info';
@@ -6804,10 +6798,6 @@ function stopConsolePoll() {
   setInterval(() => { syncReadyOrderTracking(); }, 60 * 1000);
   setInterval(() => {
     if (document.hidden) return;
-    if (_isMobileLiteMode() && !_isReadyBetsActive() && !_isParlaysActive()) {
-      syncReadyOrderTracking();
-      return;
-    }
     if (_isReadyBetsActive()) {
       refreshReadyBets(false);
     }
@@ -6817,7 +6807,7 @@ function stopConsolePoll() {
     loadPropPerformance();
     autoGenParlaysFromProps();
     loadParlayPerformance();
-  }, _isMobileLiteMode() ? 90 * 1000 : 60 * 1000);
+  }, 60 * 1000);
 })();
 </script>
 </body>

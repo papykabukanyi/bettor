@@ -476,9 +476,11 @@ def _lazy_init():
 def _is_server_runtime() -> bool:
     """Best-effort detection for long-lived web-server processes."""
     server_software = str(os.getenv("SERVER_SOFTWARE", "")).strip().lower()
+    argv_blob = " ".join(str(a or "") for a in sys.argv).lower()
     return any(
         [
             "gunicorn" in server_software,
+            "gunicorn" in argv_blob,
             bool(str(os.getenv("GUNICORN_CMD_ARGS", "")).strip()),
             bool(str(os.getenv("RAILWAY_ENVIRONMENT", "")).strip()),
             bool(str(os.getenv("PORT", "")).strip()),
