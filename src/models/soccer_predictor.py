@@ -14,6 +14,7 @@ Sentiment integration:
 from __future__ import annotations
 
 import datetime
+import os
 from typing import Any
 
 from models.soccer_model import predict as _model_predict, STAGE_MAP
@@ -52,6 +53,14 @@ except ImportError:
         }
     FD_TO_ODDS_SPORT = {}
     TOURNAMENTS = {}
+
+try:
+    from data.soccer_data_sources import build_soccer_prediction_context
+    _DS_CONTEXT_AVAILABLE = True
+except Exception:
+    _DS_CONTEXT_AVAILABLE = False
+    def build_soccer_prediction_context(home_team: str, away_team: str, *, league_hint: str = "EPL", match_date: str = "") -> dict:
+        return {}
 
 
 # ── Safety thresholds (same as MLB) ──────────────────────────────────────────
@@ -246,6 +255,56 @@ def predict_match(
         xg_for_a=xfa,      xg_ag_a=xaa,
         stage=stage_id,
     )
+
+    # ── Multi-source data context (Understat/Transfermarkt/API-Football) ──
+    if _DS_CONTEXT_AVAILABLE and str(os.getenv("SOCCER_MULTI_SOURCE_ENABLED", "1")).strip().lower() in {"1", "true", "yes", "on"}:
+        try:
+            ds_ctx = build_soccer_prediction_context(
+                home_team=home,
+                away_team=away,
+                league_hint=str(os.getenv("SOCCER_UNDERSTAT_LEAGUE", "EPL") or "EPL"),
+            )
+
+            hxg = float(ds_ctx.get("home_understat_xg") or 0.0)
+            axg = float(ds_ctx.get("away_understat_xg") or 0.0)
+            hxga = float(ds_ctx.get("home_understat_xga") or 0.0)
+            axga = float(ds_ctx.get("away_understat_xga") or 0.0)
+            home_inj = int(ds_ctx.get("home_transfermarkt_injuries") or 0)
+            away_inj = int(ds_ctx.get("away_transfermarkt_injuries") or 0)
+            lineups_confirmed = bool(ds_ctx.get("lineups_confirmed"))
+            api_home = ds_ctx.get("api_home_prob")
+            api_away = ds_ctx.get("api_away_prob")
+
+            # Small bounded shift from external context to avoid overfitting noisy feeds.
+            shift = 0.0
+            xg_delta = (hxg - axg) + (axga - hxga)
+            shift += max(-0.03, min(0.03, xg_delta * 0.012))
+            shift += max(-0.02, min(0.02, (away_inj - home_inj) * 0.006))
+            if lineups_confirmed:
+                shift += 0.004
+
+            if api_home is not None and api_away is not None:
+                api_delta = float(api_home) - float(api_away)
+                model_delta = float(probs.get("home_prob", 0.33)) - float(probs.get("away_prob", 0.33))
+                shift += max(-0.02, min(0.02, (api_delta - model_delta) * 0.35))
+
+            shift = max(-0.05, min(0.05, shift))
+            hp = float(probs.get("home_prob", 0.33)) + shift
+            ap = float(probs.get("away_prob", 0.33)) - shift
+            dp = float(probs.get("draw_prob", 0.34))
+            total = hp + dp + ap
+            if total > 0:
+                probs["home_prob"] = round(max(0.02, hp / total), 4)
+                probs["away_prob"] = round(max(0.02, ap / total), 4)
+                probs["draw_prob"] = round(max(0.02, dp / total), 4)
+
+            probs["context_shift"] = round(shift, 4)
+            probs["context_home_injuries"] = home_inj
+            probs["context_away_injuries"] = away_inj
+            probs["context_lineups_confirmed"] = lineups_confirmed
+            probs["context_sources"] = ds_ctx.get("sources") or {}
+        except Exception as e:
+            print(f"[soccer_predictor] Data-source context error: {e}")
 
     # ── Sentiment adjustment (coverage-aware nudge) ─────────────────────────
     if use_sentiment and _NEWS_AVAILABLE:

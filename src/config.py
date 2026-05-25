@@ -76,6 +76,21 @@ SPORT                 = os.getenv("SPORT", "all")   # "all", "mlb", or "soccer"
 WC_START_DATE         = "2026-06-11"
 WC_END_DATE           = "2026-07-19"
 
+# Soccer external data sources
+SOCCER_DS_CACHE_TTL_SEC = int(os.getenv("SOCCER_DS_CACHE_TTL_SEC", "900"))
+
+# API-Football (RapidAPI)
+API_FOOTBALL_KEY = os.getenv("API_FOOTBALL_KEY", "")
+API_FOOTBALL_HOST = os.getenv("API_FOOTBALL_HOST", "api-football-v1.p.rapidapi.com")
+API_FOOTBALL_BASE = os.getenv("API_FOOTBALL_BASE", "https://api-football-v1.p.rapidapi.com/v3")
+
+# BSD live odds endpoint (provider-specific)
+BSD_API_BASE = os.getenv("BSD_API_BASE", "")
+BSD_API_KEY = os.getenv("BSD_API_KEY", "")
+
+# Transfermarkt adapter endpoint (proxy/scraper service)
+TRANSFERMARKT_PROXY_URL = os.getenv("TRANSFERMARKT_PROXY_URL", "")
+
 # ---------------------------------------------------------------------------
 # Eastern-time date helper
 # ---------------------------------------------------------------------------
