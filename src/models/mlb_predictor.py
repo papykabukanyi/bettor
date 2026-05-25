@@ -38,6 +38,8 @@ sys.path.insert(0, SRC)
 
 from config import MIN_VALUE_EDGE, KELLY_FRACTION, BANKROLL, MLB_SEASONS, et_today
 
+_LOG_ZERO_RESOLUTIONS = False
+
 
 # ─── Safety helpers ──────────────────────────────────────────────────────────
 
@@ -1158,7 +1160,8 @@ def resolve_game_outcomes(days_back: int = 3) -> int:
                 conn.rollback()
             conn.close()
 
-    print(f"[mlb_predictor] Resolved {resolved} predictions")
+    if resolved > 0 or _LOG_ZERO_RESOLUTIONS:
+        print(f"[mlb_predictor] Resolved {resolved} predictions")
     return resolved
 
 
@@ -1329,6 +1332,7 @@ def resolve_prop_outcomes(days_back: int = 3) -> int:
                         pass
                 resolved += 1
 
-    print(f"[mlb_predictor] Resolved {resolved} prop outcomes")
+    if resolved > 0 or _LOG_ZERO_RESOLUTIONS:
+        print(f"[mlb_predictor] Resolved {resolved} prop outcomes")
     return resolved
 

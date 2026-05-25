@@ -65,11 +65,11 @@ if _ACTIVE_SPORT not in {"mlb", "soccer", "all"}:
 _PREDICTION_QUALITY_MIN = max(0.35, min(float(os.getenv("PREDICTION_QUALITY_MIN", "0.62") or "0.62"), 0.98))
 _PREDICTION_EV_MIN = max(-0.10, min(float(os.getenv("PREDICTION_EV_MIN", "-0.01") or "-0.01"), 0.50))
 _PREDICTION_PROB_MIN = max(0.50, min(float(os.getenv("PREDICTION_PROB_MIN", "0.56") or "0.56"), 0.98))
-_TODAY_TOMORROW_MAX_UNDER_SHARE = max(
-    0.0,
-    min(float(os.getenv("TODAY_TOMORROW_MAX_UNDER_SHARE", "0.20") or "0.20"), 1.0),
-)
-_OVER_ONLY_PLAYER_PROPS = str(os.getenv("OVER_ONLY_PLAYER_PROPS", "1")).strip().lower() in {"1", "true", "yes", "on"}
+# Strategy defaults are intentionally hardcoded to avoid env drift.
+_TODAY_TOMORROW_MAX_UNDER_SHARE = 0.20
+_OVER_ONLY_PLAYER_PROPS = True
+_OVER_ONLY_PROPS = True
+_SCHED_MISFIRE_GRACE_SEC = 45
 
 app = Flask(__name__, template_folder="templates")
 
@@ -1780,6 +1780,19 @@ def _datetime_to_et_parts(iso_value: str) -> tuple[str, str]:
         return "", ""
 
 
+def _row_game_date(row: dict[str, Any]) -> str:
+    if not isinstance(row, dict):
+        return ""
+    gd = str(row.get("game_date") or row.get("date") or "").strip()[:10]
+    if re.match(r"^\d{4}-\d{2}-\d{2}$", gd):
+        return gd
+    iso_dt = str(row.get("game_datetime") or row.get("scheduled_start") or "").strip()
+    if iso_dt:
+        et_date, _ = _datetime_to_et_parts(iso_dt)
+        return et_date or ""
+    return ""
+
+
 def _event_datetime_value(event_row: dict[str, Any]) -> str:
     if not isinstance(event_row, dict):
         return ""
@@ -2735,15 +2748,31 @@ def _is_player_prop_style_row(row: dict) -> bool:
     return True
 
 
+def _is_prop_style_row(row: dict) -> bool:
+    if not isinstance(row, dict):
+        return False
+    bet_type = str(row.get("bet_type") or "").strip().lower()
+    stat_type = str(row.get("stat_type") or row.get("prop_type") or "").strip().lower()
+    if bet_type in {"moneyline", "spread", "run_line", "1x2"}:
+        return False
+    if stat_type in {"moneyline", "spread", "run_line", "1x2", "best_bet"}:
+        return False
+    if row.get("line") is None:
+        return False
+    return _is_player_prop_style_row(row) or bet_type in {"total", "team_total", "f5_total"} or stat_type in {"total", "team_total"}
+
+
 def _enforce_over_only_player_props(rows: list[dict]) -> list[dict]:
-    if not _OVER_ONLY_PLAYER_PROPS:
+    if not (_OVER_ONLY_PLAYER_PROPS or _OVER_ONLY_PROPS):
         return list(rows or [])
     out: list[dict] = []
     for row in rows or []:
         if not isinstance(row, dict):
             continue
         direction = str(row.get("direction") or "").strip().upper()
-        if _is_player_prop_style_row(row) and direction == "UNDER":
+        if _OVER_ONLY_PROPS and _is_prop_style_row(row) and direction == "UNDER":
+            continue
+        if _OVER_ONLY_PLAYER_PROPS and _is_player_prop_style_row(row) and direction == "UNDER":
             continue
         out.append(row)
     return out
@@ -2764,7 +2793,7 @@ def _build_all_sport_sentiment_props(games: list[dict], bets: list[dict]) -> lis
     tomorrow_str = (_et_calendar_today() + datetime.timedelta(days=1)).isoformat()
     allowed = {today_str, tomorrow_str}
 
-    target_games = [g for g in (games or []) if str(g.get("game_date") or "") in allowed]
+    target_games = [g for g in (games or []) if _row_game_date(g) in allowed]
     target_games = target_games[:_ALL_SPORTS_SENTIMENT_MAX_GAMES]
     if not target_games:
         return []
@@ -3554,9 +3583,8 @@ def _build_model_player_props_fallback(games: list[dict], max_per_game: int = 6)
                     continue
 
                 over_p = float(p.get("over_prob") or 0.5)
-                under_p = float(p.get("under_prob") or (1.0 - over_p))
-                direction = "OVER" if over_p >= under_p else "UNDER"
-                model_prob = max(over_p, under_p)
+                direction = "OVER"
+                model_prob = over_p
                 model_prob = max(0.01, min(0.99, model_prob))
                 odds_am = _prob_to_american(model_prob)
                 dec_odds = round((1 + (odds_am / 100.0)) if odds_am > 0 else (1 + (100.0 / abs(odds_am))), 4)
@@ -4781,8 +4809,8 @@ def _run_all_sports_analysis():
         tomorrow_str = (today_date + datetime.timedelta(days=1)).isoformat()
 
         _phase(2)
-        today_games = [g for g in games if str(g.get("game_date") or "") == today_str]
-        tomorrow_games = [g for g in games if str(g.get("game_date") or "") == tomorrow_str]
+        today_games = [g for g in games if _row_game_date(g) == today_str]
+        tomorrow_games = [g for g in games if _row_game_date(g) == tomorrow_str]
 
         # ── Enrich player props with recent form + fatigue ───────────────────
         if card_prop_rows:
@@ -4976,12 +5004,14 @@ def _run_all_sports_analysis():
                 rec = str(p.get("direction") or p.get("recommendation") or "OVER").strip().upper()
                 if rec not in {"OVER", "UNDER"}:
                     rec = "OVER"
-                if _OVER_ONLY_PLAYER_PROPS and _is_player_prop_style_row(p) and rec == "UNDER":
+                if (_OVER_ONLY_PROPS and _is_prop_style_row(p) and rec == "UNDER") or (
+                    _OVER_ONLY_PLAYER_PROPS and _is_player_prop_style_row(p) and rec == "UNDER"
+                ):
                     continue
                 model_prob = float(p.get("model_prob") or 0.5)
                 over_prob = p.get("over_prob")
                 under_prob = p.get("under_prob")
-                if _OVER_ONLY_PLAYER_PROPS and _is_player_prop_style_row(p):
+                if (_OVER_ONLY_PROPS and _is_prop_style_row(p)) or (_OVER_ONLY_PLAYER_PROPS and _is_player_prop_style_row(p)):
                     over_prob = model_prob
                     under_prob = 0.0
                 elif over_prob is None or under_prob is None:
@@ -9056,6 +9086,7 @@ def _start_scheduler():
                 id="auto_analysis",
                 max_instances=1,
                 coalesce=True,
+                misfire_grace_time=_SCHED_MISFIRE_GRACE_SEC,
             )
         # Daily lock run (ET morning)
         sched.add_job(
@@ -9065,6 +9096,7 @@ def _start_scheduler():
             id="daily_lock",
             max_instances=1,
             coalesce=True,
+            misfire_grace_time=_SCHED_MISFIRE_GRACE_SEC,
         )
         if _AUTO_BACKFILL_ENABLED:
             sched.add_job(
@@ -9077,6 +9109,7 @@ def _start_scheduler():
                 id="daily_multi_sport_backfill",
                 max_instances=1,
                 coalesce=True,
+                misfire_grace_time=_SCHED_MISFIRE_GRACE_SEC,
             )
         if _POLY_TP_CHECK_SEC > 0:
             sched.add_job(
@@ -9085,6 +9118,7 @@ def _start_scheduler():
                 id="polymarket_auto_take_profit",
                 max_instances=1,
                 coalesce=True,
+                misfire_grace_time=_SCHED_MISFIRE_GRACE_SEC,
             )
 
         sched.start()
