@@ -334,9 +334,9 @@ def _market_sport_tag(market: dict[str, Any]) -> str:
         return "basketball"
     if any(token in text for token in ("baseball", "mlb")):
         return "baseball"
-    if any(token in text for token in ("football", "nfl", "ncaaf", "american football")):
+    if any(token in text for token in ("football", "nfl", "ncaaf", "american football", "americanfootball")):
         return "football"
-    if any(token in text for token in ("hockey", "nhl")):
+    if any(token in text for token in ("hockey", "nhl", "icehockey", "ice hockey")):
         return "hockey"
     if any(token in text for token in ("soccer", "mls", "premier", "champions league", "1x2", "btts", "goals o u")):
         return "soccer"
@@ -497,6 +497,54 @@ def _combat_series_family(series_ticker: Any) -> str:
     return ""
 
 
+def _bet_series_hints(bet: dict[str, Any]) -> list[str]:
+    hints: list[str] = []
+    explicit = [
+        bet.get("polymarket_series_ticker"),
+        bet.get("series_ticker"),
+        bet.get("kalshi_series_ticker"),
+    ]
+    for raw in explicit:
+        token = str(raw or "").strip().upper()
+        if not token:
+            continue
+        token = re.sub(r"[^A-Z0-9_]+", "_", token).strip("_")
+        if token:
+            hints.append(token)
+
+    league = _norm_text(bet.get("league") or bet.get("competition") or "")
+    if "wnba" in league:
+        hints.extend(["WNBA", "BASKETBALL"])
+    elif "nba" in league:
+        hints.extend(["NBA", "BASKETBALL"])
+    elif "mlb" in league:
+        hints.extend(["MLB", "BASEBALL"])
+    elif "nhl" in league:
+        hints.extend(["NHL", "HOCKEY"])
+    elif "nfl" in league:
+        hints.extend(["NFL", "FOOTBALL"])
+    elif any(tok in league for tok in ("epl", "premier", "mls", "champions", "uefa", "fifa")):
+        hints.extend(["SOCCER", "FOOTBALL"])
+
+    sport = _bet_sport_tag(bet)
+    if sport:
+        hints.append(sport.upper())
+
+    return list(dict.fromkeys([h for h in hints if h]))
+
+
+def _series_alignment_score(bet: dict[str, Any], market: dict[str, Any], market_text: str) -> float:
+    hints = _bet_series_hints(bet)
+    if not hints:
+        return 0.0
+
+    series = str(market.get("market_series_ticker") or _market_series_ticker(market) or "").upper()
+    search_space = f"{series} {market_text.upper()}"
+    if any(hint and hint in search_space for hint in hints):
+        return 2.0
+    return -0.8
+
+
 def _market_start_dt(market: dict[str, Any]) -> datetime.datetime | None:
     event = _market_event(market)
     for key in ("start_date", "startDateIso", "startDate", "close_time", "endDateIso", "end_date", "created_at", "updated_at"):
@@ -574,6 +622,7 @@ def _score_market(bet: dict[str, Any], market: dict[str, Any]) -> float:
                 return 0.0
 
     score = _time_score(bet, market)
+    score += _series_alignment_score(bet, market, market_text)
 
     kind = _bet_kind_tag(bet)
     market_kind = _market_kind_tag(market)

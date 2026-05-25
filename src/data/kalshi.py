@@ -1831,6 +1831,7 @@ def _bet_series_hints(bet: dict[str, Any]) -> tuple[list[str], list[str]]:
     bet_type = _norm_text(bet.get("bet_type") or "")
     prop_type = _norm_text(bet.get("prop_type") or bet.get("stat_type") or "")
     label = _norm_text(bet.get("label") or bet.get("pick") or "")
+    league = _norm_text(bet.get("league") or bet.get("competition") or "")
     text = f"{bet_type} {prop_type} {label}"
 
     preferred: list[str] = []
@@ -1839,6 +1840,33 @@ def _bet_series_hints(bet: dict[str, Any]) -> tuple[list[str], list[str]]:
     def _set_family(pref: list[str], bad: list[str]):
         preferred.extend(pref)
         avoid.extend(bad)
+
+    # Honor explicit series tickers from upstream payload first.
+    explicit_sources = [
+        bet.get("kalshi_series_ticker"),
+        bet.get("series_ticker"),
+    ]
+    for raw in explicit_sources:
+        token = str(raw or "").strip().upper()
+        if not token:
+            continue
+        token = re.sub(r"[^A-Z0-9_]+", "_", token).strip("_")
+        if token:
+            preferred.append(token)
+
+    if league:
+        if "wnba" in league:
+            preferred.extend(["KXWNBAGAME", "KXWNBASPREAD", "KXWNBATOTAL", "KXWNBAPTS", "KXWNBAREB", "KXWNBAAST"])
+        elif "nba" in league:
+            preferred.extend(["KXNBAGAME", "KXNBASPREAD", "KXNBATOTAL", "KXNBAPTS", "KXNBAREB", "KXNBAAST"])
+        elif "mlb" in league:
+            preferred.extend(["KXMLBGAME", "KXMLBSPREAD", "KXMLBTOTAL", "KXMLBF5", "MLBWIN", "MLBOU"])
+        elif "nhl" in league:
+            preferred.extend(["NHLWIN", "KXNHLSPREAD", "KXNHLTOTAL", "NHLOU"])
+        elif "nfl" in league:
+            preferred.extend(["NFLWIN", "KXNFL", "NFLOU", "NFLTD"])
+        elif any(tok in league for tok in ("epl", "premier", "mls", "champions league", "uefa", "fifa")):
+            preferred.extend(["KXEPL", "KXEPLSPREAD", "KXMLS", "KXMLSGAME", "KXMLSSPREAD", "EPLWIN", "MLSWIN", "UCLWIN"])
 
     if sport == "baseball":
         if "f5" in bet_type or "first 5" in text or "first five" in text:

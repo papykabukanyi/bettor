@@ -251,27 +251,90 @@ def _clean_ready_bets_payload(bets: list[dict]) -> list[dict]:
 
 def _prediction_to_ready_bet(pred: dict, today_str: str) -> dict:
     """Convert DB prediction row to canonical ready-bet payload for exchange resolvers."""
+    def _norm_exchange_sport(raw: str) -> str:
+        s = str(raw or "").strip().lower().replace("_", "")
+        if not s:
+            return ""
+        if s in {"icehockey", "nhl", "hockey"}:
+            return "hockey"
+        if s in {"americanfootball", "nfl", "football"}:
+            return "football"
+        if s in {"soccer", "mls", "epl"}:
+            return "soccer"
+        if s in {"basketball", "nba", "wnba"}:
+            return "basketball"
+        if s in {"baseball", "mlb"}:
+            return "baseball"
+        if s in {"boxing"}:
+            return "boxing"
+        if s in {"mma", "ufc", "pfl", "bellator"}:
+            return "mma"
+        if s in {"tennis", "atp", "wta"}:
+            return "tennis"
+        if s in {"golf", "pga", "lpga"}:
+            return "golf"
+        if s in {"motorsports", "f1", "nascar"}:
+            return "motorsports"
+        if s in {"cricket"}:
+            return "cricket"
+        return str(raw or "").strip().lower()
+
+    def _split_matchup_text(raw: str) -> tuple[str, str]:
+        text = str(raw or "").strip()
+        if not text:
+            return "", ""
+        normalized = re.sub(r"\s+", " ", text)
+        for sep in (" @ ", " vs ", " v ", " vs. "):
+            if sep in normalized.lower():
+                parts = re.split(re.escape(sep), normalized, flags=re.IGNORECASE)
+                if len(parts) == 2:
+                    away = str(parts[0] or "").strip()
+                    home = str(parts[1] or "").strip()
+                    return away, home
+        if "@" in normalized:
+            parts = normalized.split("@", 1)
+            if len(parts) == 2:
+                return str(parts[0] or "").strip(), str(parts[1] or "").strip()
+        return "", ""
+
     pick = str(pred.get("pick") or "")
-    home_team = str(pred.get("home_team") or "")
-    away_team = str(pred.get("away_team") or "")
+    game_text = str(pred.get("game") or pred.get("game_key") or "")
+    home_team = str(pred.get("home_team") or "").strip()
+    away_team = str(pred.get("away_team") or "").strip()
+    if not home_team or not away_team:
+        away_guess, home_guess = _split_matchup_text(game_text)
+        if not away_team and away_guess:
+            away_team = away_guess
+        if not home_team and home_guess:
+            home_team = home_guess
+
+    bet_type = str(pred.get("bet_type") or "moneyline").strip().lower()
+    kind = "player_prop" if ("player_prop" in bet_type or str(pred.get("prop_type") or "").strip()) else "single"
+    sport = _norm_exchange_sport(str(pred.get("sport") or ""))
+
     return {
         "uid": str(pred.get("bet_uid") or pred.get("id") or "").strip(),
         "bet_uid": str(pred.get("bet_uid") or pred.get("id") or "").strip(),
-        "sport": pred.get("sport") or "",
-        "bet_type": pred.get("bet_type") or "moneyline",
+        "kind": kind,
+        "sport": sport,
+        "bet_type": bet_type,
         "pick": pick,
         "label": pick,
         "line": pred.get("line"),
         "game_date": str(pred.get("game_date") or today_str),
         "game_time": str(pred.get("game_time") or ""),
-        "game": str(pred.get("game") or pred.get("game_key") or ""),
-        "game_key": str(pred.get("game_key") or pred.get("game") or ""),
+        "game": game_text,
+        "game_key": str(pred.get("game_key") or game_text),
         "home_team": home_team,
         "away_team": away_team,
         "player_name": _extract_player_name(pick),
         "team": _extract_pick_team(pick, home_team, away_team),
         "direction": _extract_direction(pick),
-        "prop_type": _extract_prop_type(pred.get("bet_type") or "", pick),
+        "prop_type": _extract_prop_type(bet_type, pick),
+        "league": str(pred.get("league") or pred.get("competition") or pred.get("competition_name") or ""),
+        "series_ticker": str(pred.get("kalshi_series_ticker") or pred.get("polymarket_series_ticker") or ""),
+        "kalshi_series_ticker": str(pred.get("kalshi_series_ticker") or ""),
+        "polymarket_series_ticker": str(pred.get("polymarket_series_ticker") or ""),
         "side_default": "no" if "under" in pick.lower() else "yes",
     }
 
@@ -8696,17 +8759,39 @@ def _extract_direction(pick_text: str) -> str:
 
 
 def _extract_prop_type(bet_type: str, pick_text: str) -> str:
-    if bet_type == "player_prop":
-        t = pick_text.lower()
-        if "point" in t or "pts" in t:
-            return "points"
-        if "rebound" in t or "reb" in t:
-            return "rebounds"
-        if "assist" in t or "ast" in t:
-            return "assists"
-        if "hit" in t:
-            return "hits"
-    return bet_type
+    bt = str(bet_type or "").strip().lower()
+    t = str(pick_text or "").lower()
+    if "point" in t or "pts" in t:
+        return "points"
+    if "rebound" in t or "reb" in t:
+        return "rebounds"
+    if "assist" in t or "ast" in t:
+        return "assists"
+    if "strikeout" in t or " k " in f" {t} ":
+        return "strikeouts"
+    if "home run" in t or " hr" in t:
+        return "home_runs"
+    if "rbi" in t:
+        return "rbis"
+    if "total base" in t or "tb" in t:
+        return "total_bases"
+    if "hit" in t:
+        return "hits"
+    if "goal" in t:
+        return "goals"
+    if "shot" in t:
+        return "shots"
+    if "touchdown" in t or " td" in t:
+        return "touchdowns"
+    if "passing" in t:
+        return "passing"
+    if "rushing" in t:
+        return "rushing"
+    if "receiving" in t:
+        return "receiving"
+    if bt == "player_prop":
+        return "player_prop"
+    return bt
 
 
 def _send_kalshi_alert(matched_bets: list[dict]):
