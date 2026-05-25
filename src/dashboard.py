@@ -6011,6 +6011,7 @@ def api_sports_coverage_sources():
 
 @app.route("/api/cached-state")
 def api_cached_state():
+    state_payload = None
     with _lock:
         if (
             _state.get("game_cards_today")
@@ -6031,7 +6032,7 @@ def api_cached_state():
                     cache_age_min = max(0, int((now - dt).total_seconds() / 60))
                 except Exception:
                     cache_age_min = None
-            return jsonify({
+            state_payload = {
                 "ok":                  True,
                 "sport":               _ACTIVE_SPORT,
                 "status":              _state["status"],
@@ -6043,7 +6044,9 @@ def api_cached_state():
                 "best_parlays":        _state["best_parlays"],
                 "player_props":        _state["player_props"],
                 "elite_parlay":        _state.get("elite_parlay"),
-            })
+            }
+            if today_cards or tomorrow_cards or _ACTIVE_SPORT != "all":
+                return jsonify(state_payload)
 
     if _ACTIVE_SPORT != "all":
         try:
@@ -6076,14 +6079,15 @@ def api_cached_state():
         if _ACTIVE_SPORT == "all":
             snap = _build_multi_sport_snapshot(force_refresh=False)
             all_games = snap.get("games") or []
-            today_games = [g for g in all_games if str(g.get("game_date") or "") == today_str]
-            tomorrow_games = [g for g in all_games if str(g.get("game_date") or "") == tomorrow_str]
+            today_games = [g for g in all_games if _row_game_date(g) == today_str]
+            tomorrow_games = [g for g in all_games if _row_game_date(g) == tomorrow_str]
             all_bets = snap.get("bets") or []
             fallback_player_props = _build_all_sport_sentiment_props(all_games, all_bets)
             fallback_best_bets = _multi_sport_best_bets_rows(all_bets)
             fallback_props = _merge_all_sports_table_rows(fallback_player_props, fallback_best_bets)
             fallback_today = [_build_card(g, all_bets, fallback_player_props, "TODAY") for g in today_games]
             fallback_tomorrow = [_build_card(g, all_bets, fallback_player_props, "TOMORROW") for g in tomorrow_games]
+            fallback_today, fallback_tomorrow = _normalize_dashboard_card_buckets(fallback_today, fallback_tomorrow)
         elif _ACTIVE_SPORT == "soccer":
             from data.soccer_fetcher import get_matches_today_all, get_matches_tomorrow_all
 
@@ -6091,6 +6095,7 @@ def api_cached_state():
             tomorrow_games = get_matches_tomorrow_all() or []
             fallback_today = [_build_card(g, [], [], "TODAY") for g in today_games]
             fallback_tomorrow = [_build_card(g, [], [], "TOMORROW") for g in tomorrow_games]
+            fallback_today, fallback_tomorrow = _normalize_dashboard_card_buckets(fallback_today, fallback_tomorrow)
         else:
             from data.mlb_fetcher import get_schedule_range
 
@@ -6099,8 +6104,13 @@ def api_cached_state():
             tomorrow_games = [g for g in all_games if g.get("date", "") == tomorrow_str]
             fallback_today = [_build_card(g, [], [], "TODAY") for g in today_games]
             fallback_tomorrow = [_build_card(g, [], [], "TOMORROW") for g in tomorrow_games]
+            fallback_today, fallback_tomorrow = _normalize_dashboard_card_buckets(fallback_today, fallback_tomorrow)
 
         if fallback_today or fallback_tomorrow:
+            if state_payload and _ACTIVE_SPORT == "all":
+                state_payload["game_cards_today"] = _clean(fallback_today)
+                state_payload["game_cards_tomorrow"] = _clean(fallback_tomorrow)
+                return jsonify(state_payload)
             return jsonify({
                 "ok": True,
                 "sport": _ACTIVE_SPORT,
