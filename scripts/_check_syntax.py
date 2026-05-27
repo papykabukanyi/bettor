@@ -2,6 +2,8 @@ import ast, os, sys
 
 files = [
     "src/data/sentiment.py",
+    "src/data/history_tennis.py",
+    "src/data/tennis_data_sources.py",
     "src/models/mlb_predictor.py",
     "src/dashboard.py",
     "src/templates/dashboard.html",

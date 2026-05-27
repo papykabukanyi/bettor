@@ -2975,10 +2975,25 @@ def _build_all_sport_sentiment_props(games: list[dict], bets: list[dict]) -> lis
     except Exception as e:
         _log(f"[all-sports] sentiment player extractor unavailable: {e}")
         return []
+    
+    def _derive_individual_matchup(label: str) -> tuple[str, str]:
+        """Parse event labels like 'Player A vs Player B' for individual sports."""
+        title = str(label or "").strip()
+        if not title:
+            return "", ""
+        parts = re.split(r"\s+vs\.?\s+|\s+v\.?\s+|\s+@\s+|\s+-\s+", title, maxsplit=1, flags=re.IGNORECASE)
+        if len(parts) >= 2:
+            left = str(parts[0] or "").strip()
+            right = str(parts[1] or "").strip()
+            if left and right:
+                return left[:120], right[:120]
+        return title[:120], ""
 
     if not games:
         return []
 
+    _TENNIS_TOP_OUTRIGHT_PICKS = max(4, min(int(os.getenv("TENNIS_TOP_OUTRIGHT_PICKS", "14") or "14"), 30))
+    _TENNIS_TOP_MARKET_PICKS = max(2, min(int(os.getenv("TENNIS_TOP_MARKET_PICKS", "6") or "6"), 20))
     today_str = _et_calendar_today().isoformat()
     tomorrow_str = (_et_calendar_today() + datetime.timedelta(days=1)).isoformat()
     allowed = {today_str, tomorrow_str}
@@ -4528,6 +4543,7 @@ def _build_multi_sport_snapshot(force_refresh: bool = False) -> dict:
         for ev in events:
             home = str(ev.get("home_team") or "").strip()
             away = str(ev.get("away_team") or "").strip()
+            books = ev.get("bookmakers") or []
 
             game_datetime = _event_datetime_value(ev)
             game_date, game_time = _datetime_to_et_parts(game_datetime)
@@ -4543,8 +4559,36 @@ def _build_multi_sport_snapshot(force_refresh: bool = False) -> dict:
 
             is_single_person_event = sport_group in single_person_sports
             if is_single_person_event and (not home or not away):
-                home = event_title
-                away = "Field"
+                left, right = _derive_individual_matchup(event_title)
+                if not home and left:
+                    home = left
+                if not away and right:
+                    away = right
+
+            if is_single_person_event and (not home or not away) and books:
+                try:
+                    markets_for_names = books[0].get("markets") or []
+                    outcome_names: list[str] = []
+                    for mk in markets_for_names:
+                        mk_key = str((mk or {}).get("key") or "").strip().lower()
+                        if mk_key not in {"h2h", "winner", "outrights"}:
+                            continue
+                        for out in (mk.get("outcomes") or []):
+                            nm = str((out or {}).get("name") or (out or {}).get("description") or "").strip()
+                            if nm and nm not in outcome_names:
+                                outcome_names.append(nm)
+                        if len(outcome_names) >= 2:
+                            break
+                    if not home and outcome_names:
+                        home = outcome_names[0]
+                    if not away and len(outcome_names) >= 2:
+                        away = outcome_names[1]
+                except Exception:
+                    pass
+
+            if is_single_person_event and (not home or not away):
+                home = home or event_title
+                away = away or "Field"
 
             if not home or not away:
                 continue
@@ -4604,9 +4648,15 @@ def _build_multi_sport_snapshot(force_refresh: bool = False) -> dict:
 
                 sport_market_map = sport_market_label_map.get(sport_group, {})
                 if market_key in {"outrights", "winner", "top_3", "top_5", "top_10", "top_20"}:
-                    top_n = 8 if is_single_person_event else 1
+                    if sport_group == "tennis":
+                        top_n = _TENNIS_TOP_OUTRIGHT_PICKS
+                    else:
+                        top_n = 8 if is_single_person_event else 1
                 else:
-                    top_n = 3 if is_single_person_event else 1
+                    if sport_group == "tennis":
+                        top_n = _TENNIS_TOP_MARKET_PICKS
+                    else:
+                        top_n = 3 if is_single_person_event else 1
                 top_rows = sorted(norm, key=lambda x: x[2], reverse=True)[:top_n]
                 for pick_name, pick_odds, model_prob, out in top_rows:
                     label = _rank_label(model_prob)
@@ -4747,6 +4797,38 @@ def _build_multi_sport_snapshot(force_refresh: bool = False) -> dict:
             _log(f"[all-sports] Enrichment saved to DB: {n_enrich} rows")
         except Exception as _db_enrich_err:
             _log(f"[all-sports] DB enrichment persist skipped: {_db_enrich_err}")
+
+        try:
+            tennis_games = [
+                g for g in games
+                if _infer_sport_group(g.get("sport") or g.get("competition") or g.get("league") or "") == "tennis"
+            ]
+            if tennis_games:
+                from data.tennis_data_sources import build_tennis_prediction_context, load_tennis_reference_rows
+
+                tennis_reference_rows = load_tennis_reference_rows()
+                enriched_tennis = 0
+                for g in tennis_games:
+                    ctx = build_tennis_prediction_context(
+                        home_player=str(g.get("home_team") or ""),
+                        away_player=str(g.get("away_team") or ""),
+                        surface=str(g.get("surface") or g.get("court_surface") or g.get("venue_surface") or ""),
+                        match_date=str(g.get("game_date") or g.get("date") or ""),
+                        reference_rows=tennis_reference_rows,
+                    )
+                    if ctx:
+                        g["tennis_context"] = ctx
+                        g.update({
+                            "surface": ctx.get("surface") or g.get("surface"),
+                            "rank_diff": ctx.get("rank_diff") if ctx.get("rank_diff") is not None else g.get("rank_diff"),
+                            "recent_form_gap": ctx.get("recent_form_gap"),
+                            "fatigue_home_days": ctx.get("fatigue_home_days"),
+                            "fatigue_away_days": ctx.get("fatigue_away_days"),
+                        })
+                        enriched_tennis += 1
+                _log(f"[all-sports] Tennis context enriched: {enriched_tennis} games")
+        except Exception as _tennis_enrich_err:
+            _log(f"[all-sports] Tennis enrichment skipped: {_tennis_enrich_err}")
     except Exception as _enrich_exc:
         _log(f"[all-sports] Enrichment step skipped: {_enrich_exc}")
 

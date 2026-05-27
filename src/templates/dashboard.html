@@ -2892,6 +2892,45 @@ function plainEnglishPropText(p, phase='upcoming') {
   return { text: _phaseVerb(phase, shortText, shortText, shortText), emoji: '&#9650;', color: 'var(--accent)' };
 }
 
+function _outcomeIcon(outcome) {
+  const value = String(outcome || '').trim().toUpperCase();
+  if (value === 'WIN') return { icon: '&#9989;', label: 'Correct', color: 'var(--green)' };
+  if (value === 'LOSS') return { icon: '&#10060;', label: 'Wrong', color: 'var(--red)' };
+  if (value === 'PUSH') return { icon: '&#11015;', label: 'Push', color: 'var(--yellow)' };
+  return { icon: '&#9898;', label: 'Pending', color: 'var(--muted)' };
+}
+
+function _primaryCardPrediction(card, phase) {
+  if (!card || typeof card !== 'object') return null;
+  const candidateKeys = ['moneyline','total','run_line','f5_moneyline','f5_total','home_team_total','away_team_total'];
+  const candidates = candidateKeys
+    .map(key => card[key])
+    .filter(bet => bet && bet.pick);
+  if (!candidates.length) return null;
+  const sorted = candidates.slice().sort((a, b) => {
+    const aScore = Number(a.model_prob || 0) + Number(a.edge || 0) + (String(a.safety_label || 'MODERATE').toUpperCase() === 'ELITE' ? 0.08 : String(a.safety_label || 'MODERATE').toUpperCase() === 'SAFE' ? 0.04 : 0);
+    const bScore = Number(b.model_prob || 0) + Number(b.edge || 0) + (String(b.safety_label || 'MODERATE').toUpperCase() === 'ELITE' ? 0.08 : String(b.safety_label || 'MODERATE').toUpperCase() === 'SAFE' ? 0.04 : 0);
+    return bScore - aScore;
+  });
+  const bet = sorted[0];
+  const pbt = plainEnglishBet(bet, card.home_team || '', card.away_team || '', phase);
+  const prob = Math.round((bet.model_prob || 0.5) * 100);
+  const icon = _outcomeIcon(bet.outcome || card.outcome || 'PENDING');
+  return {
+    bet,
+    label: pbt && pbt.text ? pbt.text : (bet.pick || 'Prediction'),
+    emoji: pbt && pbt.emoji ? pbt.emoji : '&#127919;',
+    color: pbt && pbt.color ? pbt.color : 'var(--text)',
+    prob,
+    odds: fmtOdds(bet.odds_am),
+    edgeHtml: fmtEdge(bet.edge),
+    safetyHtml: safetyBadge(bet.safety_label || 'MODERATE'),
+    outcomeIcon: icon,
+    outcome: String(bet.outcome || card.outcome || '').toUpperCase(),
+    cardClass: icon.label === 'Correct' ? 'pred-WIN' : icon.label === 'Wrong' ? 'pred-LOSS' : icon.label === 'Push' ? 'pred-PUSH' : 'pred-PENDING',
+  };
+}
+
 function gameCard(c) {
   const slBadge = safetyBadge(c.overall_safety_label || 'MODERATE');
   const sportMeta = _sportMetaFromCard(c);
@@ -2912,51 +2951,22 @@ function gameCard(c) {
     ? `${c.away_score} – ${c.home_score}`
     : '';
 
-  // Main WIN pick — big coloured headline
-  let mainPickHtml = '';
-  if (c.moneyline) {
-    const pbt  = plainEnglishBet(c.moneyline, c.home_team, c.away_team, phase);
-    const prob = Math.round((c.moneyline.model_prob||0.5)*100);
-    const probColor = prob >= 65 ? 'var(--green)' : prob >= 55 ? 'var(--accent)' : 'var(--yellow)';
-    mainPickHtml = `<div class="pick-card win-card">
-      <div class="pick-headline" style="color:${pbt.color}">${pbt.emoji} ${pbt.text}</div>
+  const primaryPick = _primaryCardPrediction(c, phase);
+  const mainPickHtml = primaryPick ? `<div class="pick-card win-card ${primaryPick.cardClass}">
+      <div class="pick-headline" style="color:${primaryPick.color}">${primaryPick.outcomeIcon.icon} ${primaryPick.emoji} ${primaryPick.label}</div>
       <div class="pick-conf">
-        <span style="color:${probColor};font-weight:700">${prob}% confident</span>
-        <span style="color:var(--muted)">&middot; ${fmtOdds(c.moneyline.odds_am)}</span>
-        ${fmtEdge(c.moneyline.edge)}
-        ${safetyBadge(c.moneyline.safety_label||'MODERATE')}
+        <span style="color:${primaryPick.outcomeIcon.color};font-weight:700">${primaryPick.outcomeIcon.icon} ${primaryPick.outcomeIcon.label}</span>
+        <span style="color:${primaryPick.prob >= 65 ? 'var(--green)' : primaryPick.prob >= 55 ? 'var(--accent)' : 'var(--yellow)'};font-weight:700">${primaryPick.prob}% confident</span>
+        <span style="color:var(--muted)">&middot; ${primaryPick.odds}</span>
+        ${primaryPick.edgeHtml}
+        ${primaryPick.safetyHtml}
       </div>
-    </div>`;
-  } else {
-    mainPickHtml = `<div class="pick-card" style="color:var(--muted);font-size:.82rem">No moneyline edge yet</div>`;
-  }
-
-  // Other predictions as plain-English chips
-  const otherBets = [];
-  for (const key of ['total','run_line','f5_moneyline','f5_total']) {
-    if (c[key]) {
-      const pbt  = plainEnglishBet(c[key], c.home_team, c.away_team, phase);
-      const prob = Math.round((c[key].model_prob||0.5)*100);
-      otherBets.push(`<div class="plain-bet-chip" style="color:${pbt.color}">${pbt.emoji} ${pbt.text} <span style="color:var(--muted);font-size:.72rem">(${prob}%)</span></div>`);
-    }
-  }
-  const otherHtml = otherBets.length ? `<div class="plain-bets-list">${otherBets.join('')}</div>` : '';
-
-  // Top prop picks preview — plain English, no chip clutter
-  const topProps = _publicOverProps([...(c.home_props||[]), ...(c.away_props||[])])
-    .sort((a,b) => (b.model_prob||0) - (a.model_prob||0))
-    .slice(0, 3);
-  const propsHtml = topProps.length ? `<div class="plain-props-preview">${topProps.map(p => {
-    const ppt = plainEnglishPropText(p, phase);
-    const pct = Math.round((p.model_prob||0.5)*100);
-    return `<div class="plain-prop-chip" style="color:${ppt.color}">${ppt.emoji} ${ppt.text} <span style="color:var(--muted);font-size:.7rem">${pct}%</span></div>`;
-  }).join('')}</div>` : '';
+    </div>` : `<div class="pick-card" style="color:var(--muted);font-size:.82rem">No strong prediction yet</div>`;
 
   const propCount = _publicOverProps([...(c.home_props||[]), ...(c.away_props||[])]).length;
 
   // Count all bets for expand button label
-  const allBetKeys = ['moneyline','run_line','total','f5_moneyline','f5_total','home_team_total','away_team_total'];
-  const betCount = allBetKeys.filter(k => c[k]).length;
+  const betCount = primaryPick ? 1 : 0;
 
   return `<div class="game-card" tabindex="0" role="button" aria-haspopup="dialog" aria-label="Open picks for ${c.away_team} versus ${c.home_team}" onclick="handleGameCardClick(event, this)" onkeydown="handleGameCardKeydown(event, this)" data-game-key="${c.game_key}" data-game-date="${c.game_date||''}" data-game-datetime="${c.game_datetime||''}"
     data-game-time="${c.game_time||''}" data-match-key="${c.match_key||''}" data-when-base="${baseWhen}" id="card-${c.game_key.replace(/[#@\s]/g,'_')}">
@@ -2983,12 +2993,10 @@ function gameCard(c) {
       </div>
     </div>
     ${mainPickHtml}
-    ${otherHtml}
-    ${propsHtml}
   </div>
   <button class="card-expand-btn" onclick="handleCardPrimaryAction(event, this.parentElement)">
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="flex-shrink:0"><path d="M9 18l6-6-6-6"/></svg>
-    <span>${betCount ? betCount+' Bet'+(betCount>1?'s':'') : 'Game Details'}${propCount?' · '+propCount+' Props':''}</span>
+    <span>${betCount ? '1 Prediction' : 'Game Details'}</span>
     <span class="expand-icon" style="margin-left:auto">&#9660;</span>
   </button>
   <div class="card-body">

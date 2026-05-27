@@ -98,6 +98,17 @@ WNBA_STATS_API_TIMEOUT_SEC = int(os.getenv("WNBA_STATS_API_TIMEOUT_SEC", "10"))
 WNBA_BREF_START_YEAR = int(os.getenv("WNBA_BREF_START_YEAR", "1997"))
 WNBA_KAGGLE_DATA_DIR = os.getenv("WNBA_KAGGLE_DATA_DIR", "")
 
+# Tennis data-source integration
+TENNIS_DATA_CACHE_TTL_SEC = int(os.getenv("TENNIS_DATA_CACHE_TTL_SEC", "300"))
+TENNIS_REFERENCE_YEARS = int(os.getenv("TENNIS_REFERENCE_YEARS", "8"))
+TENNIS_SACKMANN_START_YEAR = int(os.getenv("TENNIS_SACKMANN_START_YEAR", "2016"))
+TENNIS_SACKMANN_END_YEAR = int(os.getenv("TENNIS_SACKMANN_END_YEAR", "2026"))
+TENNIS_JEFF_SACKMANN_DIR = os.getenv("TENNIS_JEFF_SACKMANN_DIR", "")
+TENNIS_TENNIS_DATA_CO_UK_DIR = os.getenv("TENNIS_TENNIS_DATA_CO_UK_DIR", "")
+TENNIS_SLAM_POINTBYP_PBP_DIR = os.getenv("TENNIS_SLAM_POINTBYP_PBP_DIR", "")
+TENNIS_API_BASE = os.getenv("TENNIS_API_BASE", "")
+TENNIS_API_KEY = os.getenv("TENNIS_API_KEY", "")
+
 # ---------------------------------------------------------------------------
 # Eastern-time date helper
 # ---------------------------------------------------------------------------

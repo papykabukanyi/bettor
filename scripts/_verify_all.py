@@ -10,6 +10,7 @@ PYTHON = sys.executable
 CHECKS = [
     ("Syntax checks", ["scripts/_check_syntax.py"]),
     ("MLB time normalization regression", ["scripts/_test_mlb_time_normalization.py"]),
+    ("Tennis source smoke test", ["scripts/_test_tennis_sources.py"]),
 ]
 
 
