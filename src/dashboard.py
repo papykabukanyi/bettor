@@ -686,6 +686,8 @@ _MULTI_SPORT_CACHE = {
 _MULTI_SPORT_CACHE_TTL_SEC = int(os.getenv("MULTI_SPORT_CACHE_TTL_SEC", "180"))
 _MAX_ODDS_SPORTS = int(os.getenv("MAX_ODDS_SPORTS", "24"))
 _MIN_ODDS_SPORTS = max(1, int(os.getenv("MIN_ODDS_SPORTS", "10")))
+_TENNIS_TOP_OUTRIGHT_PICKS = max(4, min(int(os.getenv("TENNIS_TOP_OUTRIGHT_PICKS", "14") or "14"), 30))
+_TENNIS_TOP_MARKET_PICKS = max(2, min(int(os.getenv("TENNIS_TOP_MARKET_PICKS", "6") or "6"), 20))
 _SPORTS_HUB_FORECAST_DAYS = max(2, min(21, int(os.getenv("SPORTS_HUB_FORECAST_DAYS", "14") or "14")))
 _ON_RAILWAY = any(
     str(os.getenv(k, "")).strip()
@@ -1993,6 +1995,20 @@ def _event_datetime_value(event_row: dict[str, Any]) -> str:
     return ""
 
 
+def _derive_individual_matchup(label: str) -> tuple[str, str]:
+    """Parse event labels like 'Player A vs Player B' for individual sports."""
+    title = str(label or "").strip()
+    if not title:
+        return "", ""
+    parts = re.split(r"\s+vs\.?\s+|\s+v\.?\s+|\s+@\s+|\s+-\s+", title, maxsplit=1, flags=re.IGNORECASE)
+    if len(parts) >= 2:
+        left = str(parts[0] or "").strip()
+        right = str(parts[1] or "").strip()
+        if left and right:
+            return left[:120], right[:120]
+    return title[:120], ""
+
+
 def _rank_label(prob: float) -> str:
     if prob >= 0.72:
         return "ELITE"
@@ -2976,24 +2992,9 @@ def _build_all_sport_sentiment_props(games: list[dict], bets: list[dict]) -> lis
         _log(f"[all-sports] sentiment player extractor unavailable: {e}")
         return []
     
-    def _derive_individual_matchup(label: str) -> tuple[str, str]:
-        """Parse event labels like 'Player A vs Player B' for individual sports."""
-        title = str(label or "").strip()
-        if not title:
-            return "", ""
-        parts = re.split(r"\s+vs\.?\s+|\s+v\.?\s+|\s+@\s+|\s+-\s+", title, maxsplit=1, flags=re.IGNORECASE)
-        if len(parts) >= 2:
-            left = str(parts[0] or "").strip()
-            right = str(parts[1] or "").strip()
-            if left and right:
-                return left[:120], right[:120]
-        return title[:120], ""
-
     if not games:
         return []
 
-    _TENNIS_TOP_OUTRIGHT_PICKS = max(4, min(int(os.getenv("TENNIS_TOP_OUTRIGHT_PICKS", "14") or "14"), 30))
-    _TENNIS_TOP_MARKET_PICKS = max(2, min(int(os.getenv("TENNIS_TOP_MARKET_PICKS", "6") or "6"), 20))
     today_str = _et_calendar_today().isoformat()
     tomorrow_str = (_et_calendar_today() + datetime.timedelta(days=1)).isoformat()
     allowed = {today_str, tomorrow_str}
@@ -4138,7 +4139,8 @@ def _build_model_player_props_fallback(games: list[dict], max_per_game: int = 6)
                             })
 
                     game_rows.sort(key=lambda x: float(x.get("model_prob") or 0.0), reverse=True)
-                    rows.extend(game_rows[:max_per_game])
+                    golf_per_game_cap = max(max_per_game, min(18, max_per_game * 2))
+                    rows.extend(game_rows[:golf_per_game_cap])
     except Exception as e:
         _log(f"[all-sports] golf player-prop fallback skipped: {e}")
 
@@ -4829,6 +4831,47 @@ def _build_multi_sport_snapshot(force_refresh: bool = False) -> dict:
                 _log(f"[all-sports] Tennis context enriched: {enriched_tennis} games")
         except Exception as _tennis_enrich_err:
             _log(f"[all-sports] Tennis enrichment skipped: {_tennis_enrich_err}")
+
+        try:
+            golf_games = [
+                g for g in games
+                if _infer_sport_group(g.get("sport") or g.get("competition") or g.get("league") or "") == "golf"
+            ]
+            if golf_games:
+                from data.golf_data_sources import build_golf_prediction_context, load_golf_reference_rows
+
+                golf_reference_rows = load_golf_reference_rows()
+                enriched_golf = 0
+                for g in golf_games:
+                    player_name = str(g.get("home_team") or "").strip()
+                    if player_name.lower() in {"field", ""}:
+                        continue
+                    ctx = build_golf_prediction_context(
+                        player_name=player_name,
+                        event_name=str(g.get("competition_name") or g.get("league") or g.get("event_title") or ""),
+                        course_name=str(g.get("course_name") or g.get("venue") or ""),
+                        game_date=str(g.get("game_date") or g.get("date") or ""),
+                        weather=str(g.get("weather") or ""),
+                        reference_rows=golf_reference_rows,
+                    )
+                    if ctx:
+                        g["golf_context"] = ctx
+                        g.update({
+                            "sg_total": ctx.get("sg_total"),
+                            "sg_approach": ctx.get("sg_approach"),
+                            "sg_putting": ctx.get("sg_putting"),
+                            "course_fit": ctx.get("course_fit"),
+                            "course_type": ctx.get("course_type") or g.get("course_type"),
+                            "recent_form": ctx.get("recent_form"),
+                            "driving_distance": ctx.get("driving_distance"),
+                            "cut_streak": ctx.get("cut_streak"),
+                            "owgr_rank": ctx.get("owgr_rank"),
+                            "weather": ctx.get("weather") or g.get("weather"),
+                        })
+                        enriched_golf += 1
+                _log(f"[all-sports] Golf context enriched: {enriched_golf} games")
+        except Exception as _golf_enrich_err:
+            _log(f"[all-sports] Golf enrichment skipped: {_golf_enrich_err}")
     except Exception as _enrich_exc:
         _log(f"[all-sports] Enrichment step skipped: {_enrich_exc}")
 

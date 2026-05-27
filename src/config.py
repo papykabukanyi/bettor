@@ -109,6 +109,16 @@ TENNIS_SLAM_POINTBYP_PBP_DIR = os.getenv("TENNIS_SLAM_POINTBYP_PBP_DIR", "")
 TENNIS_API_BASE = os.getenv("TENNIS_API_BASE", "")
 TENNIS_API_KEY = os.getenv("TENNIS_API_KEY", "")
 
+# Golf data-source integration
+GOLF_DATA_CACHE_TTL_SEC = int(os.getenv("GOLF_DATA_CACHE_TTL_SEC", "300"))
+GOLF_REFERENCE_YEARS = int(os.getenv("GOLF_REFERENCE_YEARS", "8"))
+GOLF_DATAGOLF_API_BASE = os.getenv("GOLF_DATAGOLF_API_BASE", "")
+GOLF_DATAGOLF_API_KEY = os.getenv("GOLF_DATAGOLF_API_KEY", "")
+GOLF_PGA_STATDATA_BASE = os.getenv("GOLF_PGA_STATDATA_BASE", "")
+GOLF_GOLFAPI_BASE = os.getenv("GOLF_GOLFAPI_BASE", "")
+GOLF_GOLFAPI_KEY = os.getenv("GOLF_GOLFAPI_KEY", "")
+GOLF_KAGGLE_DATA_DIR = os.getenv("GOLF_KAGGLE_DATA_DIR", "")
+
 # ---------------------------------------------------------------------------
 # Eastern-time date helper
 # ---------------------------------------------------------------------------
