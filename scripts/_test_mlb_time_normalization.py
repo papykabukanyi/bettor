@@ -64,11 +64,33 @@ def test_compose_game_key_stable_for_utc_equivalents():
     _assert_equal(key_off, "A@B#2026-05-26T20:10", "ET-normalized key from offset")
 
 
+def test_timezone_aware_datetime_overrides_prefilled_tomorrow_date():
+    cards = [
+        {
+            "away_team": "A",
+            "home_team": "B",
+            "game_datetime": "2026-05-27T00:10:00Z",
+            "game_date": "2026-05-27",
+            "game_time": "00:10",
+            "status": "In Progress",
+            "sport": "mlb",
+        }
+    ]
+
+    today_bucket = _normalize_card_list(cards, expected_date="2026-05-26")
+    tomorrow_bucket = _normalize_card_list(cards, expected_date="2026-05-27")
+
+    _assert_equal(len(today_bucket), 1, "Aware game should be in today bucket")
+    _assert_equal(len(tomorrow_bucket), 0, "Aware game should not remain in tomorrow bucket")
+    _assert_equal(today_bucket[0].get("game_date"), "2026-05-26", "Aware date override")
+
+
 def main():
     test_datetime_to_et_parts()
     test_normalize_card_list_timezone_aware_overwrites_bad_time()
     test_normalize_card_list_naive_keeps_existing_time()
     test_compose_game_key_stable_for_utc_equivalents()
+    test_timezone_aware_datetime_overrides_prefilled_tomorrow_date()
     print("MLB time normalization regression checks passed.")
 
 

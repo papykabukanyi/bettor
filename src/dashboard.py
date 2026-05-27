@@ -1392,11 +1392,15 @@ def _normalize_card_list(cards, expected_date: str | None = None) -> list:
         if derived_time and (not card.get("game_time") or has_explicit_tz):
             card["game_time"] = derived_time
 
-        game_date = card.get("game_date") or derived_date or _card_date_from_iso(card.get("game_datetime"))
+        game_date = str(card.get("game_date") or "").strip()
+        if has_explicit_tz and derived_date:
+            game_date = derived_date
+        elif not game_date:
+            game_date = derived_date or _card_date_from_iso(card.get("game_datetime"))
         if expected_date and game_date and game_date != expected_date:
             continue
         card["match_key"] = match_key
-        if game_date and not card.get("game_date"):
+        if game_date and (has_explicit_tz or not card.get("game_date")):
             card["game_date"] = game_date
         card["game_key"] = _compose_game_key(
             away,
