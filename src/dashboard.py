@@ -1342,7 +1342,7 @@ def _compose_game_key(away_team: str, home_team: str,
             suffix = raw_dt
     if not suffix:
         gd = str(game_date or "").strip()
-        gt = str(game_time or "").strip()
+        gt = _time_hhmm(game_time)
         suffix = f"{gd}T{gt}".strip("T")
     return f"{match_key}#{suffix}" if suffix else match_key
 
@@ -1388,9 +1388,12 @@ def _normalize_card_list(cards, expected_date: str | None = None) -> list:
         raw_dt = str(card.get("game_datetime") or "").strip()
         has_explicit_tz = bool(re.search(r"(Z|[+-]\d{2}:\d{2})$", raw_dt, re.IGNORECASE))
         derived_date, derived_time = _datetime_to_et_parts(raw_dt) if raw_dt else ("", "")
+        normalized_time = _time_hhmm(card.get("game_time"))
 
-        if derived_time and (not card.get("game_time") or has_explicit_tz):
+        if derived_time and (has_explicit_tz or not normalized_time):
             card["game_time"] = derived_time
+        elif normalized_time:
+            card["game_time"] = normalized_time
 
         game_date = str(card.get("game_date") or "").strip()
         if has_explicit_tz and derived_date:
@@ -2009,10 +2012,19 @@ def _time_hhmm(raw: str) -> str:
     s = str(raw or "").strip()
     if not s:
         return ""
-    m = re.match(r"^(\d{1,2}):(\d{2})", s)
-    if not m:
-        return ""
-    return f"{int(m.group(1)):02d}:{m.group(2)}"
+    if any(token in s for token in ("T", "Z", "+", "-")) and re.search(r"\d{4}-\d{2}-\d{2}", s):
+        _, et_time = _datetime_to_et_parts(s)
+        if et_time:
+            return et_time
+    for fmt in ("%I:%M %p", "%I:%M%p", "%H:%M", "%H:%M:%S"):
+        try:
+            return datetime.datetime.strptime(s.upper().replace(".", ""), fmt).strftime("%H:%M")
+        except Exception:
+            pass
+    m = re.search(r"(\d{1,2}):(\d{2})", s)
+    if m:
+        return f"{int(m.group(1)):02d}:{m.group(2)}"
+    return ""
 
 
 def _collect_fallback_games_for_all_sports(today: datetime.date, tomorrow: datetime.date) -> list[dict]:
@@ -5830,7 +5842,7 @@ def _run_analysis(lock_date: datetime.date | None = None):
             scheduled_keys_by_match_day = {}
             for sg in today_games + tomorrow_games:
                 match_key = _norm_gk(f"{sg.get('away_team','')}@{sg.get('home_team','')}")
-                slot = (match_key, str(sg.get("date") or ""), str(sg.get("game_time") or "").strip())
+                slot = (match_key, str(sg.get("date") or ""), _time_hhmm(sg.get("game_time")))
                 unique_key = _compose_game_key(
                     sg.get("away_team", ""),
                     sg.get("home_team", ""),
@@ -5844,7 +5856,7 @@ def _run_analysis(lock_date: datetime.date | None = None):
             for raw_prop in raw_props:
                 game_str = _norm_gk(str(raw_prop.get("game") or ""))
                 raw_date = str(raw_prop.get("date") or "")
-                raw_time = str(raw_prop.get("game_time") or "").strip()
+                raw_time = _time_hhmm(raw_prop.get("game_time"))
                 unique_prop_key = scheduled_keys_by_slot.get((game_str, raw_date, raw_time))
                 if not unique_prop_key:
                     day_matches = scheduled_keys_by_match_day.get((game_str, raw_date), [])
