@@ -493,6 +493,11 @@ _worker_init_lock   = threading.Lock()
 _scheduler          = None
 _worker_boot_thread_started = False
 _worker_boot_lock = threading.Lock()
+_last_analysis_started_ts = 0.0
+_last_analysis_finished_ts = 0.0
+_last_analysis_ok: bool | None = None
+_last_analysis_error = ""
+_last_analysis_mode = ""
 
 _BG_LOCK_PATH = os.path.join(tempfile.gettempdir(), "bettor_bg.lock")
 _BG_LOCK_FD = None
@@ -1327,7 +1332,14 @@ def _compose_game_key(away_team: str, home_team: str,
                       game_datetime=None, game_date=None, game_time=None) -> str:
     """Build a stable unique key for a scheduled game instance."""
     match_key = _norm_gk(f"{away_team}@{home_team}")
-    suffix = str(game_datetime or "").strip()
+    suffix = ""
+    raw_dt = str(game_datetime or "").strip()
+    if raw_dt:
+        et_date, et_time = _datetime_to_et_parts(raw_dt)
+        if et_date or et_time:
+            suffix = f"{et_date}T{et_time}".strip("T")
+        else:
+            suffix = raw_dt
     if not suffix:
         gd = str(game_date or "").strip()
         gt = str(game_time or "").strip()
@@ -1340,16 +1352,8 @@ def _card_date_from_iso(game_datetime) -> str:
         raw = str(game_datetime or "").strip()
         if not raw:
             return ""
-        dt = datetime.datetime.fromisoformat(raw.replace("Z", "+00:00"))
-        if dt.tzinfo is None:
-            return dt.date().isoformat()
-        try:
-            import zoneinfo
-
-            eastern = zoneinfo.ZoneInfo("America/New_York")
-            return dt.astimezone(eastern).date().isoformat()
-        except Exception:
-            return dt.date().isoformat()
+        et_date, _ = _datetime_to_et_parts(raw)
+        return et_date or ""
     except Exception:
         return ""
 
@@ -1381,11 +1385,14 @@ def _normalize_card_list(cards, expected_date: str | None = None) -> list:
         away = card.get("away_team", "")
         home = card.get("home_team", "")
         match_key = card.get("match_key") or _norm_gk(f"{away}@{home}")
-        if not card.get("game_time") and card.get("game_datetime"):
-            _, derived_time = _datetime_to_et_parts(str(card.get("game_datetime") or ""))
-            if derived_time:
-                card["game_time"] = derived_time
-        game_date = card.get("game_date") or _card_date_from_iso(card.get("game_datetime"))
+        raw_dt = str(card.get("game_datetime") or "").strip()
+        has_explicit_tz = bool(re.search(r"(Z|[+-]\d{2}:\d{2})$", raw_dt, re.IGNORECASE))
+        derived_date, derived_time = _datetime_to_et_parts(raw_dt) if raw_dt else ("", "")
+
+        if derived_time and (not card.get("game_time") or has_explicit_tz):
+            card["game_time"] = derived_time
+
+        game_date = card.get("game_date") or derived_date or _card_date_from_iso(card.get("game_datetime"))
         if expected_date and game_date and game_date != expected_date:
             continue
         card["match_key"] = match_key
@@ -5513,10 +5520,42 @@ def _run_soccer_analysis(lock_date: datetime.date | None = None):
 
 
 def _run_analysis(lock_date: datetime.date | None = None):
+    global _last_analysis_started_ts, _last_analysis_finished_ts
+    global _last_analysis_ok, _last_analysis_error, _last_analysis_mode
+
+    _last_analysis_started_ts = time.time()
+    _last_analysis_mode = str(_ACTIVE_SPORT or "").strip().lower()
+    _last_analysis_ok = None
+    _last_analysis_error = ""
+
     if _ACTIVE_SPORT == "all":
-        return _run_all_sports_analysis()
+        try:
+            return _run_all_sports_analysis()
+        except Exception as exc:
+            _last_analysis_ok = False
+            _last_analysis_error = str(exc)
+            raise
+        finally:
+            _last_analysis_finished_ts = time.time()
+            if _last_analysis_ok is None:
+                with _lock:
+                    _last_analysis_ok = (_state.get("status") == "done")
+                    if _last_analysis_ok is False:
+                        _last_analysis_error = str(_state.get("error") or "")
     if _ACTIVE_SPORT == "soccer":
-        return _run_soccer_analysis(lock_date)
+        try:
+            return _run_soccer_analysis(lock_date)
+        except Exception as exc:
+            _last_analysis_ok = False
+            _last_analysis_error = str(exc)
+            raise
+        finally:
+            _last_analysis_finished_ts = time.time()
+            if _last_analysis_ok is None:
+                with _lock:
+                    _last_analysis_ok = (_state.get("status") == "done")
+                    if _last_analysis_ok is False:
+                        _last_analysis_error = str(_state.get("error") or "")
 
     warnings.filterwarnings("ignore")
     import pandas as pd
@@ -6103,6 +6142,15 @@ def _run_analysis(lock_date: datetime.date | None = None):
             _state["phase"]  = "Error"
             _state["error"]  = err
         _sse_broadcast("status", {"status": "error", "error": err[:300]})
+        _last_analysis_ok = False
+        _last_analysis_error = err[:4000]
+    finally:
+        _last_analysis_finished_ts = time.time()
+        if _last_analysis_ok is None:
+            with _lock:
+                _last_analysis_ok = (_state.get("status") == "done")
+                if _last_analysis_ok is False:
+                    _last_analysis_error = str(_state.get("error") or "")[:4000]
 
 
 @app.route("/")
@@ -7034,17 +7082,90 @@ _ESPN_RESOLVE_CONFIGS = [
 
 def _run_resolver_locked(days_back: int = 3) -> dict:
     """Run resolver with a non-blocking global lock to avoid overlap across threads."""
-    global _last_resolve_started_ts
+    global _last_resolve_started_ts, _last_resolve_finished_ts
+    global _last_resolve_ok, _last_resolve_error
     if not _resolve_run_lock.acquire(blocking=False):
         return {"games": 0, "props": 0, "parlays": 0, "skipped": True}
     _last_resolve_started_ts = time.time()
+    _last_resolve_ok = None
+    _last_resolve_error = ""
     try:
-        return _resolve_all_sports_outcomes(days_back=days_back)
+        result = _resolve_all_sports_outcomes(days_back=days_back)
+        _last_resolve_ok = True
+        return result
+    except Exception as exc:
+        _last_resolve_ok = False
+        _last_resolve_error = str(exc)
+        raise
     finally:
+        _last_resolve_finished_ts = time.time()
         try:
             _resolve_run_lock.release()
         except Exception:
             pass
+
+
+def _ts_to_iso(ts: float) -> str | None:
+    if not ts or ts <= 0:
+        return None
+    try:
+        return datetime.datetime.fromtimestamp(float(ts), tz=datetime.timezone.utc).isoformat()
+    except Exception:
+        return None
+
+
+@app.route("/api/backend/status")
+def api_backend_status():
+    scheduler_running = False
+    scheduler_detail = "disabled"
+    try:
+        sched = _scheduler
+        if sched is not None:
+            state = int(getattr(sched, "state", 0) or 0)
+            scheduler_running = state == 1
+            scheduler_detail = "running" if scheduler_running else f"state:{state}"
+    except Exception as exc:
+        scheduler_detail = f"error:{exc}"
+
+    with _lock:
+        state_status = str(_state.get("status") or "")
+        state_phase = str(_state.get("phase") or "")
+
+    payload = {
+        "ok": True,
+        "pid": int(os.getpid()),
+        "is_leader": bool(_BG_IS_LEADER),
+        "worker_initialized": bool(_worker_initialized),
+        "worker_boot_thread_active": bool(_worker_boot_thread_started),
+        "scheduler": {
+            "running": bool(scheduler_running),
+            "detail": scheduler_detail,
+            "auto_analysis_interval_min": int(_AUTO_ANALYSIS_INTERVAL_MIN),
+        },
+        "analysis": {
+            "mode": str(_last_analysis_mode or ""),
+            "last_started_at": _ts_to_iso(_last_analysis_started_ts),
+            "last_finished_at": _ts_to_iso(_last_analysis_finished_ts),
+            "last_ok": _last_analysis_ok,
+            "last_error": str(_last_analysis_error or "")[:600],
+            "current_state_status": state_status,
+            "current_phase": state_phase,
+        },
+        "resolver": {
+            "poll_interval_sec": int(_RESOLVE_INTERVAL),
+            "last_started_at": _ts_to_iso(_last_resolve_started_ts),
+            "last_finished_at": _ts_to_iso(_last_resolve_finished_ts),
+            "last_ok": _last_resolve_ok,
+            "last_error": str(_last_resolve_error or "")[:600],
+            "lock_held": bool(_resolve_run_lock.locked()),
+        },
+        "exchange_tracking": {
+            "kalshi_monitor_interval_sec": int(_KALSHI_MONITOR_INTERVAL_SEC),
+            "ready_resolve_min_interval_sec": int(_READY_RESOLVE_MIN_INTERVAL_SEC),
+        },
+        "server_time_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }
+    return jsonify(payload)
 
 
 def _resolve_all_sports_outcomes(days_back: int = 3) -> dict:
@@ -8576,6 +8697,9 @@ _RESOLVE_START_DELAY_SEC = max(5, int(os.getenv("RESOLVE_START_DELAY_SEC", "15")
 _resolve_poller_timer: threading.Timer | None = None
 _resolve_run_lock = threading.Lock()
 _last_resolve_started_ts = 0.0
+_last_resolve_finished_ts = 0.0
+_last_resolve_ok: bool | None = None
+_last_resolve_error = ""
 
 # ─── Kalshi availability monitor ─────────────────────────────────────────────
 _KALSHI_MONITOR_INTERVAL_SEC = max(
