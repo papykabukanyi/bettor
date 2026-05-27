@@ -72,6 +72,7 @@ def ingest_multi_sport_history(
     collectors = {
         "nfl": ("football", "data.history_nfl", "collect_nfl_history"),
         "nba": ("basketball", "data.history_nba", "collect_nba_history"),
+        "wnba": ("wnba", "data.history_wnba", "collect_wnba_history"),
         "nhl": ("hockey", "data.history_nhl", "collect_nhl_history"),
         "soccer": ("soccer", "data.history_soccer_deep", "collect_soccer_history"),
         "baseball": ("baseball", "data.history_baseball", "collect_baseball_history"),
@@ -85,6 +86,7 @@ def ingest_multi_sport_history(
         "football": ("football", "data.history_nfl", "collect_nfl_history"),
         "basketball": ("basketball", "data.history_nba", "collect_nba_history"),
         "hockey": ("hockey", "data.history_nhl", "collect_nhl_history"),
+        "women_basketball": ("wnba", "data.history_wnba", "collect_wnba_history"),
         "mlb": ("baseball", "data.history_baseball", "collect_baseball_history"),
     }
 

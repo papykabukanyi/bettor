@@ -91,6 +91,13 @@ BSD_API_KEY = os.getenv("BSD_API_KEY", "")
 # Transfermarkt adapter endpoint (proxy/scraper service)
 TRANSFERMARKT_PROXY_URL = os.getenv("TRANSFERMARKT_PROXY_URL", "")
 
+# WNBA data-source integration
+WNBA_DATA_CACHE_TTL_SEC = int(os.getenv("WNBA_DATA_CACHE_TTL_SEC", "300"))
+WNBA_STATS_API_BASE = os.getenv("WNBA_STATS_API_BASE", "https://stats.wnba.com/stats")
+WNBA_STATS_API_TIMEOUT_SEC = int(os.getenv("WNBA_STATS_API_TIMEOUT_SEC", "10"))
+WNBA_BREF_START_YEAR = int(os.getenv("WNBA_BREF_START_YEAR", "1997"))
+WNBA_KAGGLE_DATA_DIR = os.getenv("WNBA_KAGGLE_DATA_DIR", "")
+
 # ---------------------------------------------------------------------------
 # Eastern-time date helper
 # ---------------------------------------------------------------------------

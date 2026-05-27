@@ -491,6 +491,8 @@ def _sync_exchange_resolution_statuses(days_back: int = 5, max_rows: int = 300) 
 _worker_initialized = False
 _worker_init_lock   = threading.Lock()
 _scheduler          = None
+_worker_boot_thread_started = False
+_worker_boot_lock = threading.Lock()
 
 _BG_LOCK_PATH = os.path.join(tempfile.gettempdir(), "bettor_bg.lock")
 _BG_LOCK_FD = None
@@ -555,16 +557,59 @@ def _init_worker():
     except Exception as e:
         print(f"[worker-init] DB init: {e}")
     _BG_IS_LEADER = _acquire_bg_lock()
+    print(f"[worker-init] pid={os.getpid()} leader={_BG_IS_LEADER}")
     if _BG_IS_LEADER:
-        _scheduler = _start_scheduler()
-        _start_live_scores()
-        _start_outcome_resolver()
-        _start_kalshi_monitor()
-        _start_kalshi_ws_client()
-        _auto_boot_analysis()
+        try:
+            _scheduler = _start_scheduler()
+        except Exception as e:
+            _scheduler = None
+            print(f"[worker-init] scheduler start error: {e}")
+
+        for svc_name, svc_fn in (
+            ("live-scores", _start_live_scores),
+            ("outcome-resolver", _start_outcome_resolver),
+            ("kalshi-monitor", _start_kalshi_monitor),
+            ("kalshi-ws", _start_kalshi_ws_client),
+            ("auto-boot-analysis", _auto_boot_analysis),
+        ):
+            try:
+                svc_fn()
+            except Exception as e:
+                print(f"[worker-init] {svc_name} start error: {e}")
     else:
         _scheduler = None
-        _start_cache_poller()
+        try:
+            _start_cache_poller()
+        except Exception as e:
+            print(f"[worker-init] cache-poller start error: {e}")
+
+
+def _schedule_worker_boot(reason: str = "import") -> None:
+    """Schedule one asynchronous worker boot attempt for this process."""
+    global _worker_boot_thread_started
+    with _worker_boot_lock:
+        if _worker_initialized or _worker_boot_thread_started:
+            return
+        _worker_boot_thread_started = True
+
+    def _runner():
+        global _worker_boot_thread_started
+        try:
+            _init_worker()
+        finally:
+            with _worker_boot_lock:
+                _worker_boot_thread_started = False
+
+    try:
+        threading.Thread(
+            target=_runner,
+            name=f"bettor-worker-init-{reason}",
+            daemon=True,
+        ).start()
+    except Exception as e:
+        with _worker_boot_lock:
+            _worker_boot_thread_started = False
+        print(f"[worker-init] bootstrap scheduling error ({reason}): {e}")
 
 
 @app.before_request
@@ -590,9 +635,9 @@ def _is_server_runtime() -> bool:
 
 
 _EAGER_WORKER_INIT = str(os.getenv("EAGER_WORKER_INIT", "1")).strip().lower() in {"1", "true", "yes", "on"}
-if _EAGER_WORKER_INIT and _is_server_runtime() and not _worker_initialized:
-    # Start autonomous background services even if no request hits the app yet.
-    threading.Thread(target=_init_worker, name="bettor-worker-init", daemon=True).start()
+if _EAGER_WORKER_INIT and not _worker_initialized:
+    # Start autonomous background services even if no request ever hits the app.
+    _schedule_worker_boot("import")
 
 _MLB_PHASES = [
     "Fetching MLB schedule",
@@ -9546,20 +9591,6 @@ def _auto_boot_analysis():
 
 
 if __name__ == "__main__":
-    try:
-        from data.db import init_schema
-        init_schema()
-    except Exception as e:
-        print(f"[dashboard] DB init: {e}")
-    _BG_IS_LEADER = _acquire_bg_lock()
-    if _BG_IS_LEADER:
-        _scheduler = _start_scheduler()
-        _start_live_scores()
-        _start_outcome_resolver()
-        _start_kalshi_monitor()
-        _auto_boot_analysis()
-    else:
-        _scheduler = None
-        _start_cache_poller()
+    _init_worker()
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
