@@ -5051,6 +5051,17 @@ def _run_all_sports_analysis():
             sentiment_prop_rows = _build_model_player_props_fallback((games or [])[:12], max_per_game=5)
         else:
             sentiment_prop_rows = _build_all_sport_sentiment_props(games, bets)
+
+        has_player_predictions = any(
+            isinstance(r, dict)
+            and str(r.get("name") or r.get("player") or r.get("player_name") or "").strip()
+            for r in (sentiment_prop_rows or [])
+        )
+        if not has_player_predictions:
+            _log("[all-sports] No sentiment player predictions found; backfilling model player props")
+            fallback_prop_rows = _build_model_player_props_fallback((games or [])[:20], max_per_game=8)
+            sentiment_prop_rows = _merge_all_sports_table_rows(sentiment_prop_rows, fallback_prop_rows)
+
         sentiment_prop_rows = _enforce_over_only_player_props(sentiment_prop_rows)
         table_rows = _merge_all_sports_table_rows(sentiment_prop_rows, best_bet_rows)
         table_rows = _enforce_over_only_player_props(table_rows)
