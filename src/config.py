@@ -11,8 +11,29 @@ load_dotenv()
 def _env_bool(name: str, default: str = "false") -> bool:
     return str(os.getenv(name, default)).strip().lower() in {"1", "true", "yes", "on"}
 
+
+def _first_env(*names: str, default: str = "") -> str:
+    for name in names:
+        value = str(os.getenv(name, "") or "").strip()
+        if value:
+            return value
+    return default
+
+
+def _normalize_pg_url(url: str) -> str:
+    raw = str(url or "").strip()
+    if raw.startswith("postgres://"):
+        return "postgresql://" + raw[len("postgres://"):]
+    return raw
+
 # Database
-DATABASE_URL = os.getenv("DATABASE_URL", "")
+DATABASE_URL = _normalize_pg_url(_first_env(
+    "POSTGRES_URL",
+    "POSTGRES_PRISMA_URL",
+    "POSTGRES_URL_NON_POOLING",
+    "DATABASE_URL",
+    default="",
+))
 
 # API Keys
 ODDS_API_KEY       = os.getenv("ODDS_API_KEY", "")

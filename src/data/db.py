@@ -13,7 +13,17 @@ import hashlib
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-DATABASE_URL = os.getenv("DATABASE_URL", "")
+def _resolve_database_url() -> str:
+    for key in ("POSTGRES_URL", "POSTGRES_PRISMA_URL", "POSTGRES_URL_NON_POOLING", "DATABASE_URL"):
+        value = str(os.getenv(key, "") or "").strip()
+        if value:
+            if value.startswith("postgres://"):
+                return "postgresql://" + value[len("postgres://"):]
+            return value
+    return ""
+
+
+DATABASE_URL = _resolve_database_url()
 
 try:
     import psycopg2
@@ -31,7 +41,7 @@ def get_conn():
     if not PSYCOPG2_OK:
         print("[db] psycopg2 not available")
         return None
-    url = DATABASE_URL or os.getenv("DATABASE_URL", "")
+    url = DATABASE_URL or _resolve_database_url()
     if not url:
         print("[db] DATABASE_URL not set")
         return None
