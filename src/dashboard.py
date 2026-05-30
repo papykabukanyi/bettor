@@ -1404,6 +1404,10 @@ def _normalize_card_list(cards, expected_date: str | None = None) -> list:
             game_date = derived_date or _card_date_from_iso(card.get("game_datetime"))
         if expected_date and game_date and game_date != expected_date:
             continue
+        if expected_date and not game_date:
+            # If feed omitted a date entirely, pin card to the target bucket date
+            # so it cannot leak into both Today and Tomorrow.
+            game_date = expected_date
         card["match_key"] = match_key
         if game_date and (has_explicit_tz or not card.get("game_date")):
             card["game_date"] = game_date
@@ -1425,10 +1429,36 @@ def _normalize_card_list(cards, expected_date: str | None = None) -> list:
 def _normalize_dashboard_card_buckets(today_cards, tomorrow_cards) -> tuple[list, list]:
     today_str = _et_calendar_today().isoformat()
     tomorrow_str = (_et_calendar_today() + datetime.timedelta(days=1)).isoformat()
-    return (
-        _normalize_card_list(today_cards, expected_date=today_str),
-        _normalize_card_list(tomorrow_cards, expected_date=tomorrow_str),
-    )
+    today_norm = _normalize_card_list(today_cards, expected_date=today_str)
+    tomorrow_norm = _normalize_card_list(tomorrow_cards, expected_date=tomorrow_str)
+
+    def _card_base_key(card: dict) -> str:
+        if not isinstance(card, dict):
+            return ""
+        return _norm_gk(card.get("match_key") or card.get("game_key") or "")
+
+    today_index: set[str] = {_card_base_key(c) for c in today_norm if _card_base_key(c)}
+    promoted_live: list[dict] = []
+    tomorrow_clean: list[dict] = []
+
+    for card in tomorrow_norm:
+        phase = _card_status_phase(card.get("status") or "")
+        key = _card_base_key(card)
+        if phase in {"live", "final"}:
+            # Any in-progress or settled game belongs on Today's board only.
+            if key and key in today_index:
+                continue
+            today_index.add(key)
+            promoted_live.append(card)
+            continue
+        if key and key in today_index:
+            continue
+        tomorrow_clean.append(card)
+
+    if promoted_live:
+        today_norm.extend(promoted_live)
+
+    return (today_norm, tomorrow_clean)
 
 
 def _et_calendar_today() -> datetime.date:
@@ -1705,6 +1735,8 @@ def _build_card(game, bets, props, when):
         reverse=True,
     )
 
+    individual_sport_groups = {"tennis", "golf", "mma", "boxing", "motorsports", "cricket"}
+
     for p in props:
         prop_sport = _infer_sport_group(
             p.get("sport") or p.get("competition") or p.get("league") or ""
@@ -1726,9 +1758,27 @@ def _build_card(game, bets, props, when):
         is_home = team_token in home_aliases if team_token else False
         is_away = team_token in away_aliases if team_token else False
 
-        # Skip ambiguous/unmapped props instead of attaching to the wrong team.
+        # For team sports we skip ambiguous props to avoid wrong assignment.
+        # For individual sports, keep props by attaching them to a visible side.
         if is_home == is_away:
-            continue
+            if sport_group not in individual_sport_groups:
+                continue
+
+            pname_token = _team_token(p.get("name") or p.get("team") or "")
+            if pname_token:
+                if pname_token in home_aliases or (home_token and pname_token in home_token):
+                    is_home, is_away = True, False
+                elif pname_token in away_aliases or (away_token and pname_token in away_token):
+                    is_home, is_away = False, True
+
+            if is_home == is_away:
+                # Deterministic fallback for outrights/tournament style markets.
+                # This guarantees player predictions are present on the card.
+                if sport_group == "tennis":
+                    is_home = len(card["home_props"]) <= len(card["away_props"])
+                    is_away = not is_home
+                else:
+                    is_home, is_away = True, False
 
         if is_home:
             card["home_props"].append(p)
@@ -6318,8 +6368,10 @@ def index():
         state = dict(_state)
     today_str = _et_calendar_today().isoformat()
     tomorrow_str = (_et_calendar_today() + datetime.timedelta(days=1)).isoformat()
-    today_cards = _normalize_card_list(state.get("game_cards_today", []), expected_date=today_str)
-    tomorrow_cards = _normalize_card_list(state.get("game_cards_tomorrow", []), expected_date=tomorrow_str)
+    today_cards, tomorrow_cards = _normalize_dashboard_card_buckets(
+        state.get("game_cards_today", []),
+        state.get("game_cards_tomorrow", []),
+    )
     return render_template(
         "dashboard.html",
         state=state,
@@ -6395,8 +6447,10 @@ def api_cached_state():
         ):
             today_str = _et_calendar_today().isoformat()
             tomorrow_str = (_et_calendar_today() + datetime.timedelta(days=1)).isoformat()
-            today_cards = _normalize_card_list(_state.get("game_cards_today", []), expected_date=today_str)
-            tomorrow_cards = _normalize_card_list(_state.get("game_cards_tomorrow", []), expected_date=tomorrow_str)
+            today_cards, tomorrow_cards = _normalize_dashboard_card_buckets(
+                _state.get("game_cards_today", []),
+                _state.get("game_cards_tomorrow", []),
+            )
             cache_updated_at_iso = _state.get("last_updated_ts")
             cache_age_min = None
             if cache_updated_at_iso:
@@ -8797,8 +8851,10 @@ def _sync_state_from_cache(broadcast: bool = False) -> bool:
             return False
         today_str = _et_calendar_today().isoformat()
         tomorrow_str = (_et_calendar_today() + datetime.timedelta(days=1)).isoformat()
-        today_cards = _normalize_card_list(cached.get("game_cards_today", []), expected_date=today_str)
-        tomorrow_cards = _normalize_card_list(cached.get("game_cards_tomorrow", []), expected_date=tomorrow_str)
+        today_cards, tomorrow_cards = _normalize_dashboard_card_buckets(
+            cached.get("game_cards_today", []),
+            cached.get("game_cards_tomorrow", []),
+        )
         cache_iso = cached.get("cache_updated_at_iso")
         with _lock:
             if cache_iso and cache_iso == _state.get("last_updated_ts"):
