@@ -1,2 +1,32 @@
+[project]
+name = "bettor"
+version = "0.1.0"
+description = "Sports betting analysis dashboard"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+	"pandas",
+	"numpy",
+	"scipy",
+	"scikit-learn",
+	"joblib",
+	"requests",
+	"beautifulsoup4",
+	"pybaseball",
+	"MLB-StatsAPI",
+	"matplotlib",
+	"seaborn",
+	"python-dotenv",
+	"tabulate",
+	"flask",
+	"gunicorn",
+	"psycopg2-binary",
+	"pytz",
+	"APScheduler",
+	"praw",
+	"cryptography",
+	"websockets>=12.0",
+	"py-clob-client",
+]
+
 [tool.vercel]
 entrypoint = "src.dashboard:app"
