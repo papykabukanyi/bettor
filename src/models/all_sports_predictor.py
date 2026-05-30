@@ -276,7 +276,15 @@ def rank_best_bets(rows: list[dict[str, Any]], raw_bets: list[dict[str, Any]] | 
             market_ready = max(market_ready, 0.65)
 
         ev_norm = _clamp((ev + 0.10) / 0.35, 0.0, 1.0)
-        prob_norm = _clamp((prob - 0.50) / 0.40, 0.0, 1.0)
+        # For individual sports (golf/tennis/mma etc.) win probs are always <<0.50
+        # so the standard (prob-0.50)/0.40 formula always yields 0.  Use a
+        # relative scaling (prob*2) for those sports so quality scores reflect
+        # actual market signal rather than collapsing to the baseline noise floor.
+        _skey = _sport_key(item)
+        if _skey in {"golf", "tennis", "mma", "boxing", "motorsports", "cricket"}:
+            prob_norm = _clamp(prob * 2.0, 0.0, 1.0)
+        else:
+            prob_norm = _clamp((prob - 0.50) / 0.40, 0.0, 1.0)
         quality = (
             (0.47 * prob_norm)
             + (0.23 * ev_norm)
@@ -288,7 +296,7 @@ def rank_best_bets(rows: list[dict[str, Any]], raw_bets: list[dict[str, Any]] | 
         # Mild anti-longshot penalty keeps "hot" but unstable picks lower.
         if dec_odds >= 3.50:
             quality *= 0.93
-        if prob < 0.55:
+        if prob < 0.55 and _skey not in {"golf", "tennis", "mma", "boxing", "motorsports", "cricket"}:
             quality *= 0.95
 
         item["model_prob"] = round(prob, 4)

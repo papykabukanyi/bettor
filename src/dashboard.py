@@ -4149,7 +4149,7 @@ def _build_model_player_props_fallback(games: list[dict], max_per_game: int = 6)
         single_games = [
             g for g in (games or [])
             if _infer_sport_group(g.get("sport") or g.get("competition") or g.get("league") or "")
-            in {"tennis", "mma", "boxing", "motorsports", "cricket"}
+            in {"tennis", "mma", "boxing", "motorsports", "cricket", "golf"}
         ]
         if single_games:
             market_profiles = {
@@ -4158,6 +4158,7 @@ def _build_model_player_props_fallback(games: list[dict], max_per_game: int = 6)
                 "boxing": "h2h,totals,outrights",
                 "motorsports": "h2h,outrights,winner,top_3,top_5,top_10",
                 "cricket": "h2h,spreads,totals,outrights",
+                "golf": "outrights,h2h,winner,top_5,top_10,top_20",
             }
             market_type_map = {
                 "h2h": "match_winner",
@@ -4168,6 +4169,7 @@ def _build_model_player_props_fallback(games: list[dict], max_per_game: int = 6)
                 "top_3": "top_3_finish",
                 "top_5": "top_5_finish",
                 "top_10": "top_10_finish",
+                "top_20": "top_20_finish",
             }
             by_comp: dict[str, list[dict]] = {}
             for g in single_games:
@@ -4232,7 +4234,10 @@ def _build_model_player_props_fallback(games: list[dict], max_per_game: int = 6)
                             p = imp / vig if vig > 0 else imp
                             norm.append((name, odds_am, max(0.01, min(0.99, p)), out))
 
-                        top_n = 8 if mk in {"outrights", "winner", "top_3", "top_5", "top_10"} else 3
+                        top_n = 8 if mk in {"outrights", "winner", "top_3", "top_5", "top_10", "top_20"} else 3
+                        # Golf outrights often have 50+ players — raise cap so favourites don't crowd out value picks.
+                        if sport_group == "golf" and mk in {"outrights", "winner", "top_5", "top_10", "top_20"}:
+                            top_n = 16
                         for name, odds_am, model_prob, out in sorted(norm, key=lambda x: x[2], reverse=True)[:top_n]:
                             dec_odds = round((1 + (odds_am / 100.0)) if odds_am > 0 else (1 + (100.0 / abs(odds_am))), 4)
                             ev = (dec_odds - 1.0) * model_prob - (1.0 - model_prob)
@@ -4270,7 +4275,9 @@ def _build_model_player_props_fallback(games: list[dict], max_per_game: int = 6)
                             })
 
                     game_rows.sort(key=lambda x: float(x.get("model_prob") or 0.0), reverse=True)
-                    rows.extend(game_rows[:max_per_game])
+                    # Golf and outright-heavy sports need a higher per-event cap.
+                    per_event_cap = max(max_per_game, min(18, max_per_game * 2)) if sport_group == "golf" else max_per_game
+                    rows.extend(game_rows[:per_event_cap])
     except Exception as e:
         _log(f"[all-sports] single-sport market fallback skipped: {e}")
 
@@ -5082,9 +5089,9 @@ def _run_all_sports_analysis():
                 _min_ev = _PREDICTION_EV_MIN
                 _min_p = _PREDICTION_PROB_MIN
                 if _sport in {"golf", "tennis", "mma", "boxing", "motorsports", "cricket"}:
-                    _min_q = min(_min_q, 0.45)
-                    _min_ev = min(_min_ev, -0.03)
-                    _min_p = min(_min_p, 0.08)
+                    _min_q = min(_min_q, 0.20)
+                    _min_ev = min(_min_ev, -0.05)
+                    _min_p = min(_min_p, 0.05)
                 elif _sport in {"soccer", "basketball", "icehockey"}:
                     _min_q = min(_min_q, 0.52)
                     _min_ev = min(_min_ev, -0.03)
