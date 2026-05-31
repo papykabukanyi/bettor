@@ -2097,9 +2097,16 @@ def _time_hhmm(raw: str) -> str:
     return ""
 
 
-def _collect_fallback_games_for_all_sports(today: datetime.date, tomorrow: datetime.date) -> list[dict]:
+def _collect_fallback_games_for_all_sports(
+    today: datetime.date,
+    tomorrow: datetime.date,
+    forecast_days: int | None = None,
+) -> list[dict]:
     rows: list[dict] = []
-    horizon_end = today + datetime.timedelta(days=max(1, _SPORTS_HUB_FORECAST_DAYS - 1))
+    days_span = int(forecast_days or _SPORTS_HUB_FORECAST_DAYS or 2)
+    days_span = max(1, min(days_span, 14))
+    quick_mode = days_span <= 2
+    horizon_end = today + datetime.timedelta(days=max(1, days_span - 1))
     horizon_dates = [
         today + datetime.timedelta(days=offset)
         for offset in range((horizon_end - today).days + 1)
@@ -2351,12 +2358,24 @@ def _collect_fallback_games_for_all_sports(today: datetime.date, tomorrow: datet
                 ("racing", "nascar", "motorsports", "NASCAR"),
                 ("cricket", "icc", "cricket", "ICC"),
             ]
+            if quick_mode:
+                # Keep request-time fallback responsive while still covering key sports.
+                espn_sources = [
+                    ("basketball", "nba", "basketball", "NBA"),
+                    ("hockey", "nhl", "icehockey", "NHL"),
+                    ("football", "nfl", "americanfootball", "NFL"),
+                    ("tennis", "atp", "tennis", "ATP"),
+                    ("tennis", "wta", "tennis", "WTA"),
+                    ("golf", "pga", "golf", "PGA"),
+                    ("mma", "ufc", "mma", "UFC"),
+                    ("boxing", "boxing", "boxing", "Boxing"),
+                ]
             for d in horizon_dates:
                 dates_token = d.strftime("%Y%m%d")
                 for sport_path, league_path, sport_group, league_label in espn_sources:
                     url = f"https://site.api.espn.com/apis/site/v2/sports/{sport_path}/{league_path}/scoreboard"
                     try:
-                        resp = requests.get(url, params={"dates": dates_token, "limit": 200}, timeout=8)
+                        resp = requests.get(url, params={"dates": dates_token, "limit": 200}, timeout=3 if quick_mode else 8)
                         if resp.status_code != 200:
                             continue
                         data = resp.json() or {}
@@ -2427,8 +2446,111 @@ def _collect_fallback_games_for_all_sports(today: datetime.date, tomorrow: datet
         except Exception as e:
             _log(f"[all-sports] ESPN multi-sport fallback fetch failed: {e}")
 
+    # 3b) Direct tennis/golf live bundles as an additional free source.
+    # These endpoints return event payloads that may not always surface in generic scoreboard loops.
+    try:
+        from data.tennis_data_sources import fetch_espn_tennis_live_bundle
+
+        tennis_bundle = fetch_espn_tennis_live_bundle(today)
+        for item in (tennis_bundle.get("games") or []):
+            ev = item.get("event") or {}
+            comp = (ev.get("competitions") or [{}])[0]
+            competitors = comp.get("competitors") or []
+            home_c = {}
+            away_c = {}
+            if len(competitors) >= 2:
+                home_c = next((c for c in competitors if str(c.get("homeAway") or "").lower() == "home"), competitors[0])
+                away_c = next((c for c in competitors if str(c.get("homeAway") or "").lower() == "away"), competitors[1])
+                home = str(((home_c.get("athlete") or {}).get("displayName") or (home_c.get("team") or {}).get("displayName") or home_c.get("displayName") or "")).strip()
+                away = str(((away_c.get("athlete") or {}).get("displayName") or (away_c.get("team") or {}).get("displayName") or away_c.get("displayName") or "")).strip()
+            else:
+                # Tennis scoreboard may return tournament-level events without competitors.
+                # Keep a card so tennis still appears in all-sports fallback.
+                event_name = str(ev.get("shortName") or ev.get("name") or "Tennis Event").strip()
+                home = event_name[:120]
+                away = "Field"
+            if not home or not away:
+                continue
+            iso_dt = str(ev.get("date") or comp.get("date") or "").strip()
+            game_date, game_time = _datetime_to_et_parts(iso_dt)
+            status_desc = str((((ev.get("status") or {}).get("type") or {}).get("description")) or "").strip()
+            status_state = str((((ev.get("status") or {}).get("type") or {}).get("state")) or "").strip().lower()
+            status_low = status_desc.lower()
+            if status_state in {"post", "final", "finished"} or "final" in status_low:
+                status = "Final"
+            elif status_state in {"in", "in_progress", "live"} or "progress" in status_low:
+                status = "In Progress"
+            else:
+                status = "Scheduled"
+            if game_date not in allowed_dates:
+                game_date = today.isoformat()
+            _push_game(
+                sport_group="tennis",
+                league=str(item.get("league") or "Tennis"),
+                competition="espn_tennis_live",
+                competition_name=str(item.get("league") or "Tennis"),
+                home=home,
+                away=away,
+                game_date=game_date or today.isoformat(),
+                game_time=game_time,
+                game_datetime=iso_dt,
+                status=status,
+                source="espn_tennis_live",
+                home_score=_as_score_int(home_c.get("score")),
+                away_score=_as_score_int(away_c.get("score")),
+            )
+    except Exception as e:
+        _log(f"[all-sports] tennis live bundle fallback failed: {e}")
+
+    try:
+        from data.golf_data_sources import fetch_espn_golf_live_bundle
+
+        golf_bundle = fetch_espn_golf_live_bundle(today)
+        for ev in (golf_bundle.get("events") or []):
+            comp = (ev.get("competitions") or [{}])[0]
+            competitors = comp.get("competitors") or []
+            # Golf leaderboard rows are player-vs-field style; map top two into a card.
+            if len(competitors) < 2:
+                continue
+            c1 = competitors[0]
+            c2 = competitors[1]
+            home = str(((c1.get("athlete") or {}).get("displayName") or c1.get("displayName") or "")).strip()
+            away = str(((c2.get("athlete") or {}).get("displayName") or c2.get("displayName") or "")).strip()
+            if not home or not away:
+                continue
+            iso_dt = str(ev.get("date") or comp.get("date") or "").strip()
+            game_date, game_time = _datetime_to_et_parts(iso_dt)
+            status_desc = str((((ev.get("status") or {}).get("type") or {}).get("description")) or "").strip()
+            status_state = str((((ev.get("status") or {}).get("type") or {}).get("state")) or "").strip().lower()
+            status_low = status_desc.lower()
+            if status_state in {"post", "final", "finished"} or "final" in status_low:
+                status = "Final"
+            elif status_state in {"in", "in_progress", "live"} or "progress" in status_low:
+                status = "In Progress"
+            else:
+                status = "Scheduled"
+            if game_date not in allowed_dates:
+                game_date = today.isoformat()
+            _push_game(
+                sport_group="golf",
+                league="PGA",
+                competition="espn_golf_live",
+                competition_name="PGA",
+                home=home,
+                away=away,
+                game_date=game_date or today.isoformat(),
+                game_time=game_time,
+                game_datetime=iso_dt,
+                status=status,
+                source="espn_golf_live",
+                home_score=_as_score_int(c1.get("score")),
+                away_score=_as_score_int(c2.get("score")),
+            )
+    except Exception as e:
+        _log(f"[all-sports] golf live bundle fallback failed: {e}")
+
     # 4) TheSportsDB (multi-sport free fixture feed) - opt-in due endpoint variability.
-    tsdb_enabled = str(os.getenv("ENABLE_TSDB_FALLBACK", "1")).strip().lower() in {"1", "true", "yes", "on"}
+    tsdb_enabled = (not quick_mode) and str(os.getenv("ENABLE_TSDB_FALLBACK", "1")).strip().lower() in {"1", "true", "yes", "on"}
     if tsdb_enabled:
         try:
             from data.thesportsdb_fetcher import get_events_by_date
@@ -6512,12 +6634,44 @@ def api_cached_state():
             from data.db import get_upcoming_games
 
             all_games = get_upcoming_games(days_ahead=2) or []
+            sport_count = len({
+                _infer_sport_group(g.get("sport") or g.get("competition") or g.get("league") or "")
+                for g in (all_games or [])
+                if isinstance(g, dict)
+            })
+            if sport_count < 3 or len(all_games) < 10:
+                try:
+                    extra_games = _collect_fallback_games_for_all_sports(
+                        today_date,
+                        today_date + datetime.timedelta(days=1),
+                        forecast_days=2,
+                    )
+                except Exception:
+                    extra_games = []
+                if extra_games:
+                    merged: list[dict] = []
+                    seen = set()
+                    for g in list(all_games) + list(extra_games):
+                        if not isinstance(g, dict):
+                            continue
+                        key = str(g.get("game_key") or "").strip() or "|".join([
+                            str(g.get("sport") or g.get("competition") or ""),
+                            str(g.get("match_key") or _norm_gk(f"{g.get('away_team','')}@{g.get('home_team','')}")),
+                            str(g.get("game_date") or g.get("date") or ""),
+                            str(g.get("game_time") or ""),
+                        ])
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        merged.append(g)
+                    all_games = merged
+
+            all_bets = _build_model_fallback_bets(all_games)
             today_games = [g for g in all_games if _row_game_date(g) == today_str]
             tomorrow_games = [g for g in all_games if _row_game_date(g) == tomorrow_str]
-            all_bets = []
-            fallback_player_props = []
-            fallback_best_bets = []
-            fallback_props = []
+            fallback_player_props = _build_model_player_props_fallback(today_games + tomorrow_games, max_per_game=5)
+            fallback_best_bets = _multi_sport_best_bets_rows(all_bets)
+            fallback_props = _merge_all_sports_table_rows(fallback_player_props, fallback_best_bets)
             fallback_today = [_build_card(g, all_bets, fallback_player_props, "TODAY") for g in today_games]
             fallback_tomorrow = [_build_card(g, all_bets, fallback_player_props, "TOMORROW") for g in tomorrow_games]
             fallback_today, fallback_tomorrow = _normalize_dashboard_card_buckets(fallback_today, fallback_tomorrow)
@@ -9784,10 +9938,42 @@ def _load_boot_schedule_fallback() -> bool:
             from data.db import get_upcoming_games
 
             all_games = get_upcoming_games(days_ahead=2) or []
-            all_bets = []
-            boot_player_props = []
-            boot_best_bets = []
-            boot_props = []
+            sport_count = len({
+                _infer_sport_group(g.get("sport") or g.get("competition") or g.get("league") or "")
+                for g in (all_games or [])
+                if isinstance(g, dict)
+            })
+            if sport_count < 3 or len(all_games) < 10:
+                try:
+                    extra_games = _collect_fallback_games_for_all_sports(
+                        today_date,
+                        today_date + datetime.timedelta(days=1),
+                        forecast_days=2,
+                    )
+                except Exception:
+                    extra_games = []
+                if extra_games:
+                    merged: list[dict] = []
+                    seen = set()
+                    for g in list(all_games) + list(extra_games):
+                        if not isinstance(g, dict):
+                            continue
+                        key = str(g.get("game_key") or "").strip() or "|".join([
+                            str(g.get("sport") or g.get("competition") or ""),
+                            str(g.get("match_key") or _norm_gk(f"{g.get('away_team','')}@{g.get('home_team','')}")),
+                            str(g.get("game_date") or g.get("date") or ""),
+                            str(g.get("game_time") or ""),
+                        ])
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        merged.append(g)
+                    all_games = merged
+
+            all_bets = _build_model_fallback_bets(all_games)
+            boot_player_props = _build_model_player_props_fallback(all_games, max_per_game=5)
+            boot_best_bets = _multi_sport_best_bets_rows(all_bets)
+            boot_props = _merge_all_sports_table_rows(boot_player_props, boot_best_bets)
             today_games = [g for g in all_games if _row_game_date(g) == today_str]
             tomorrow_games = [g for g in all_games if _row_game_date(g) == tomorrow_str]
             today_cards = [_build_card(g, all_bets, boot_player_props, "TODAY") for g in today_games]
