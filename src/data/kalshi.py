@@ -822,6 +822,7 @@ _TICKER_MONTHS = {
     "NOV": 11,
     "DEC": 12,
 }
+_MONTH_ABBR_BY_NUM = {v: k for k, v in _TICKER_MONTHS.items()}
 
 
 def _load_private_key():
@@ -1172,6 +1173,36 @@ def _bet_start_dt(bet: dict[str, Any]) -> datetime.datetime | None:
         if dt is not None:
             return dt
     return None
+
+
+def _bet_date_ticker_tokens(bet: dict[str, Any]) -> list[str]:
+    """Build date-shaped tokens often present in Kalshi tickers/event ids."""
+    dt = _bet_start_dt(bet)
+    if dt is None:
+        return []
+    dt_utc = dt.astimezone(datetime.timezone.utc)
+    mon = _MONTH_ABBR_BY_NUM.get(int(dt_utc.month), "")
+    if not mon:
+        return []
+
+    yy = dt_utc.year % 100
+    tokens = [
+        f"{yy:02d}{mon}{dt_utc.day:02d}",
+        f"{mon}{dt_utc.day:02d}",
+        f"{dt_utc.year:04d}{dt_utc.month:02d}{dt_utc.day:02d}",
+    ]
+    if dt_utc.hour or dt_utc.minute:
+        tokens.append(f"{yy:02d}{mon}{dt_utc.day:02d}{dt_utc.hour:02d}{dt_utc.minute:02d}")
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for token in tokens:
+        t = str(token or "").strip().upper()
+        if not t or t in seen:
+            continue
+        seen.add(t)
+        out.append(t)
+    return out
 
 
 def _bet_identity(bet: dict[str, Any], index: int = 0) -> str:
@@ -1676,6 +1707,13 @@ def _score_event_group(bet: dict[str, Any], event_group: dict[str, Any]) -> floa
             bet,
             str(event_group.get("series_ticker") or event_ticker_upper),
             weight=1.15,
+            search_text=f"{event_group.get('event_ticker') or ''} {text}",
+        )
+        score += _date_hint_score(
+            bet,
+            event_group.get("event_ticker"),
+            event_group.get("series_ticker"),
+            text,
         )
 
         return score
@@ -1702,7 +1740,18 @@ def _score_event_group(bet: dict[str, Any], event_group: dict[str, Any]) -> floa
     score += home_score + away_score
     score += pick_score * 1.2
     score += _token_overlap_score(text, bet.get("label"), bet.get("pick"), bet.get("bet_type"))
-    score += _series_hint_score(bet, str(event_group.get("series_ticker") or ""), weight=0.9)
+    score += _series_hint_score(
+        bet,
+        str(event_group.get("series_ticker") or ""),
+        weight=0.9,
+        search_text=f"{event_group.get('event_ticker') or ''} {text}",
+    )
+    score += _date_hint_score(
+        bet,
+        event_group.get("event_ticker"),
+        event_group.get("series_ticker"),
+        text,
+    )
 
     if bet_kind in {"spread", "total", "team_total"}:
         line_score = _line_match_score(text, bet.get("line"))
@@ -1866,7 +1915,7 @@ def _bet_series_hints(bet: dict[str, Any]) -> tuple[list[str], list[str]]:
         elif "nfl" in league:
             preferred.extend(["NFLWIN", "KXNFL", "NFLOU", "NFLTD"])
         elif any(tok in league for tok in ("epl", "premier", "mls", "champions league", "uefa", "fifa")):
-            preferred.extend(["KXEPL", "KXEPLSPREAD", "KXMLS", "KXMLSGAME", "KXMLSSPREAD", "EPLWIN", "MLSWIN", "UCLWIN"])
+            preferred.extend(["KXEPL", "KXEPLSPREAD", "KXMLS", "KXMLSGAME", "KXMLSSPREAD", "EPLWIN", "MLSWIN", "UCLWIN", "SOCCER", "MATCH"])
 
     if sport == "baseball":
         if "f5" in bet_type or "first 5" in text or "first five" in text:
@@ -1940,25 +1989,34 @@ def _bet_series_hints(bet: dict[str, Any]) -> tuple[list[str], list[str]]:
         elif bet_kind in {"total", "team_total"}:
             _set_family(["KXMLS", "KXEPL", "UCLWIN"], ["KXMLSGAME", "KXMLSSPREAD"])
     elif sport == "tennis":
-        _set_family(["KXTENNIS", "ATP", "WTA"], [])
+        _set_family(["KXTENNIS", "ATP", "WTA", "TENNIS", "MATCH", "SET"], [])
     elif sport == "boxing":
-        _set_family(["KXBOX", "BOXING"], [])
+        _set_family(["KXBOX", "BOXING", "FIGHT", "ROUND"], [])
     elif sport == "mma":
-        _set_family(["KXMMA", "UFC", "PFL", "BELLATOR"], [])
+        _set_family(["KXMMA", "UFC", "PFL", "BELLATOR", "FIGHT", "ROUND"], [])
     elif sport == "golf":
-        _set_family(["KXGOLF", "PGA", "LPGA"], [])
+        _set_family(["KXGOLF", "PGA", "LPGA", "GOLF", "TOURNAMENT", "WINNER"], [])
     elif sport == "motorsports":
         _set_family(["KXF1", "F1", "NASCAR"], [])
     elif sport == "cricket":
         _set_family(["KXCRICKET", "CRICKET"], [])
 
     preferred = list(dict.fromkeys([p.upper() for p in preferred if p]))
+    for token in _bet_date_ticker_tokens(bet):
+        if token not in preferred:
+            preferred.append(token)
     avoid = [a.upper() for a in dict.fromkeys([a for a in avoid if a]) if a.upper() not in preferred]
     return preferred, avoid
 
 
-def _series_hint_score(bet: dict[str, Any], series_ticker: str, *, weight: float = 1.0) -> float:
-    series_upper = str(series_ticker or "").upper()
+def _series_hint_score(
+    bet: dict[str, Any],
+    series_ticker: str,
+    *,
+    weight: float = 1.0,
+    search_text: str = "",
+) -> float:
+    series_upper = f"{str(series_ticker or '').upper()} {str(search_text or '').upper()}"
     if not series_upper:
         return 0.0
     preferred, avoid = _bet_series_hints(bet)
@@ -1971,6 +2029,16 @@ def _series_hint_score(bet: dict[str, Any], series_ticker: str, *, weight: float
     if avoid and any(bad in series_upper for bad in avoid):
         score -= 3.2 * weight
     return score
+
+
+def _date_hint_score(bet: dict[str, Any], *texts: Any) -> float:
+    hints = _bet_date_ticker_tokens(bet)
+    if not hints:
+        return 0.0
+    hay = " ".join(str(value or "") for value in texts).upper()
+    if not hay:
+        return 0.0
+    return 1.7 if any(hint in hay for hint in hints) else 0.0
 
 
 def _market_sport_tag(market: dict[str, Any]) -> str:
@@ -2320,7 +2388,13 @@ def _score_single_market(bet: dict[str, Any], market: dict[str, Any]) -> float:
         if stat_alignment <= -6.0:
             return 0.0
         score += stat_alignment
-        score += _series_hint_score(bet, series_upper, weight=1.0)
+        score += _series_hint_score(
+            bet,
+            series_upper,
+            weight=1.0,
+            search_text=f"{market.get('event_ticker') or ''} {text}",
+        )
+        score += _date_hint_score(bet, market.get("event_ticker"), series_upper, text)
         return score
 
     pick_score = max(
@@ -2342,7 +2416,13 @@ def _score_single_market(bet: dict[str, Any], market: dict[str, Any]) -> float:
     else:
         score += max(home_score, away_score)
     score += _token_overlap_score(text, bet.get("label"), bet.get("pick"), bet.get("bet_type"))
-    score += _series_hint_score(bet, series_upper, weight=0.85)
+    score += _series_hint_score(
+        bet,
+        series_upper,
+        weight=0.85,
+        search_text=f"{market.get('event_ticker') or ''} {text}",
+    )
+    score += _date_hint_score(bet, market.get("event_ticker"), series_upper, text)
 
     if bet_kind == "moneyline" and picked_team:
         selected_side_text = _market_selected_side_text(market)
@@ -2451,6 +2531,7 @@ def _resolve_single_bet(
 
     local_event_index = event_index or _build_event_index(markets)
     bet_kind = _bet_kind_tag(bet)
+    sport_tag = _bet_sport_tag(bet)
     min_event_score = 5.4 if bet_kind == "player_prop" else 6.0
     min_market_score = 5.9 if bet_kind == "player_prop" else 6.6
 
@@ -2461,6 +2542,9 @@ def _resolve_single_bet(
     else:
         min_event_score = max(4.2, float(os.getenv("KALSHI_MIN_EVENT_SCORE", str(min_event_score)) or min_event_score))
         min_market_score = max(4.4, float(os.getenv("KALSHI_MIN_MARKET_SCORE", str(min_market_score)) or min_market_score))
+    if sport_tag in {"soccer", "tennis", "boxing", "mma", "golf", "motorsports", "cricket"}:
+        min_event_score = max(3.8, min_event_score - 0.85)
+        min_market_score = max(4.2, min_market_score - 0.95)
     scored_events: list[tuple[float, dict[str, Any]]] = []
     for event_group in local_event_index.values():
         score = _score_event_group(bet, event_group)
@@ -2506,6 +2590,8 @@ def _resolve_single_bet(
         top_event_score = scored_events[0][0]
         next_event_score = scored_events[1][0]
         default_event_gap = 0.55 if bet_kind == "moneyline" else 0.75
+        if sport_tag in {"soccer", "tennis", "boxing", "mma", "golf", "motorsports", "cricket"}:
+            default_event_gap = max(0.3, default_event_gap - 0.12)
         event_ambiguity_gap = max(
             0.2,
             float(os.getenv("KALSHI_EVENT_AMBIGUITY_GAP", str(default_event_gap)) or default_event_gap),
@@ -2568,6 +2654,8 @@ def _resolve_single_bet(
         0.2,
         float(os.getenv("KALSHI_MARKET_AMBIGUITY_GAP", "0.5") or "0.5"),
     )
+    if sport_tag in {"soccer", "tennis", "boxing", "mma", "golf", "motorsports", "cricket"}:
+        market_ambiguity_gap = max(0.25, market_ambiguity_gap - 0.1)
     if second_best_score >= (min_market_score + 1.0) and (best_score - second_best_score) < market_ambiguity_gap:
         return _single_resolution_payload(
             "unavailable",

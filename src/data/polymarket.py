@@ -186,6 +186,22 @@ def _bet_start_dt(bet: dict[str, Any]) -> datetime.datetime | None:
     return _parse_iso_dt(bet.get("game_date"))
 
 
+def _bet_date_hints(bet: dict[str, Any]) -> list[str]:
+    dt = _bet_start_dt(bet)
+    if dt is None:
+        return []
+    dt_utc = dt.astimezone(datetime.timezone.utc)
+    mmdd = f"{dt_utc.month:02d}{dt_utc.day:02d}"
+    yyyymmdd = f"{dt_utc.year:04d}{dt_utc.month:02d}{dt_utc.day:02d}"
+    yyyy_mm_dd = f"{dt_utc.year:04d}-{dt_utc.month:02d}-{dt_utc.day:02d}"
+    yy_mm_dd = f"{dt_utc.year % 100:02d}-{dt_utc.month:02d}-{dt_utc.day:02d}"
+    out: list[str] = []
+    for token in (mmdd, yyyymmdd, yyyy_mm_dd, yy_mm_dd):
+        if token and token not in out:
+            out.append(token)
+    return out
+
+
 def _bet_kind_tag(bet: dict[str, Any]) -> str:
     text = _norm_text(" ".join(str(bet.get(key) or "") for key in ("kind", "bet_type", "prop_type", "label", "pick")))
     if "combo" in text:
@@ -530,6 +546,9 @@ def _bet_series_hints(bet: dict[str, Any]) -> list[str]:
     if sport:
         hints.append(sport.upper())
 
+    for token in _bet_date_hints(bet):
+        hints.append(token.upper())
+
     return list(dict.fromkeys([h for h in hints if h]))
 
 
@@ -542,6 +561,11 @@ def _series_alignment_score(bet: dict[str, Any], market: dict[str, Any], market_
     search_space = f"{series} {market_text.upper()}"
     if any(hint and hint in search_space for hint in hints):
         return 2.0
+
+    date_hints = _bet_date_hints(bet)
+    if date_hints and any(hint.upper() in search_space for hint in date_hints):
+        return 1.2
+
     return -0.8
 
 
@@ -562,6 +586,10 @@ def _time_score(bet: dict[str, Any], market: dict[str, Any]) -> float:
     bet_dt = _bet_start_dt(bet)
     market_dt = _market_start_dt(market)
     if bet_dt is None or market_dt is None:
+        # If explicit datetimes are missing, still reward same-day date-token alignment.
+        search_space = _market_text(market).upper()
+        if any(hint.upper() in search_space for hint in _bet_date_hints(bet)):
+            return 0.8
         return 0.0
     delta_hours = abs((market_dt - bet_dt).total_seconds()) / 3600.0
     if delta_hours <= 3:
@@ -807,9 +835,14 @@ def resolve_ready_bets(bets: list[dict[str, Any]], *, force_refresh: bool = Fals
             elif score > second_best_score:
                 second_best_score = score
 
+        sport_tag = _bet_sport_tag(bet)
         primary_threshold = 3.4
         relaxed_threshold = 3.05
         ambiguity_gap = 0.85
+        if sport_tag in {"soccer", "tennis", "combat", "golf", "motorsports", "cricket"}:
+            primary_threshold = 3.15
+            relaxed_threshold = 2.85
+            ambiguity_gap = 0.75
         is_match = bool(best_market and best_score >= primary_threshold)
         if not is_match and best_market and best_score >= relaxed_threshold:
             # Guardrail: only relax when the top market is clearly better than runner-up.
