@@ -578,7 +578,11 @@ def _init_worker():
             ("auto-boot-analysis", _auto_boot_analysis),
         ):
             try:
-                svc_fn()
+                if svc_name == "auto-boot-analysis":
+                    # Never block request handling on boot analysis.
+                    threading.Thread(target=svc_fn, name="bettor-auto-boot", daemon=True).start()
+                else:
+                    svc_fn()
             except Exception as e:
                 print(f"[worker-init] {svc_name} start error: {e}")
     else:
@@ -6505,14 +6509,15 @@ def api_cached_state():
         today_str = today_date.isoformat()
         tomorrow_str = (today_date + datetime.timedelta(days=1)).isoformat()
         if _ACTIVE_SPORT == "all":
-            snap = _build_multi_sport_snapshot(force_refresh=False)
-            all_games = snap.get("games") or []
+            from data.db import get_upcoming_games
+
+            all_games = get_upcoming_games(days_ahead=2) or []
             today_games = [g for g in all_games if _row_game_date(g) == today_str]
             tomorrow_games = [g for g in all_games if _row_game_date(g) == tomorrow_str]
-            all_bets = snap.get("bets") or []
-            fallback_player_props = _build_all_sport_sentiment_props(all_games, all_bets)
-            fallback_best_bets = _multi_sport_best_bets_rows(all_bets)
-            fallback_props = _merge_all_sports_table_rows(fallback_player_props, fallback_best_bets)
+            all_bets = []
+            fallback_player_props = []
+            fallback_best_bets = []
+            fallback_props = []
             fallback_today = [_build_card(g, all_bets, fallback_player_props, "TODAY") for g in today_games]
             fallback_tomorrow = [_build_card(g, all_bets, fallback_player_props, "TOMORROW") for g in tomorrow_games]
             fallback_today, fallback_tomorrow = _normalize_dashboard_card_buckets(fallback_today, fallback_tomorrow)
@@ -9776,21 +9781,13 @@ def _load_boot_schedule_fallback() -> bool:
         today_str = today_date.isoformat()
         tomorrow_str = (today_date + datetime.timedelta(days=1)).isoformat()
         if _ACTIVE_SPORT == "all":
-            snap = _build_multi_sport_snapshot(force_refresh=False)
-            all_games = snap.get("games") or []
-            all_bets = snap.get("bets") or []
-            fallback_only = bool(all_bets) and all(
-                "fallback" in str(b.get("worth_reason") or "").lower()
-                for b in all_bets
-                if isinstance(b, dict)
-            )
-            if fallback_only:
-                _log("[boot] All-sports fallback snapshot is model-only; building lightweight model props")
-                boot_player_props = _build_model_player_props_fallback((all_games or [])[:10], max_per_game=5)
-            else:
-                boot_player_props = _build_all_sport_sentiment_props(all_games, all_bets)
-            boot_best_bets = _multi_sport_best_bets_rows(all_bets)
-            boot_props = _merge_all_sports_table_rows(boot_player_props, boot_best_bets)
+            from data.db import get_upcoming_games
+
+            all_games = get_upcoming_games(days_ahead=2) or []
+            all_bets = []
+            boot_player_props = []
+            boot_best_bets = []
+            boot_props = []
             today_games = [g for g in all_games if _row_game_date(g) == today_str]
             tomorrow_games = [g for g in all_games if _row_game_date(g) == tomorrow_str]
             today_cards = [_build_card(g, all_bets, boot_player_props, "TODAY") for g in today_games]
