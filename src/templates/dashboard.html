@@ -3644,7 +3644,7 @@ function _gameDetailsMarkup(card) {
   const bestPropProb = _detailsTopProps(card)[0] ? Math.round(Number(_detailsTopProps(card)[0].model_prob || 0.5) * 100) : null;
   const kickoffFriendly = card.game_datetime ? _friendlyEtDateTime(card.game_datetime) : [card.game_date || '', _fmtGameTime(card.game_time)].filter(Boolean).join(' · ');
   const statusClass = phase === 'live' ? 'live' : (phase === 'upcoming' ? 'warn' : '');
-  const scoreText = card.away_score != null && card.home_score != null ? `${card.away_score} - ${card.home_score}` : 'Pre-game';
+  const scoreLabel = card.away_score != null && card.home_score != null ? `${card.away_score} - ${card.home_score}` : 'Pre-game';
   const hotTag = phase === 'live' ? 'LIVE TRACKING' : (bestMarketProb != null && bestMarketProb >= 65 ? 'HIGH CONVICTION' : 'MODEL READY');
 
   return `<div class="game-details-head">
@@ -3652,7 +3652,7 @@ function _gameDetailsMarkup(card) {
     <h2 id="game-details-title" class="game-details-title">${card.away_team} vs ${card.home_team}</h2>
     <div class="game-details-meta">
       ${metaBits.map(bit => `<span class="game-details-chip">${bit}</span>`).join('')}
-      <span class="game-details-chip">Score: ${scoreText}</span>
+      <span class="game-details-chip">Score: ${scoreLabel}</span>
     </div>
   </div>
   <div class="game-details-shell">
@@ -3674,7 +3674,7 @@ function _gameDetailsMarkup(card) {
         <span class="details-nav-chip hot">${hotTag}</span>
         <span class="details-nav-chip">${marketCount} Game Picks</span>
         <span class="details-nav-chip">${propCount} Player Picks</span>
-        <span class="details-nav-chip">Score ${scoreText}</span>
+        <span class="details-nav-chip">Score ${scoreLabel}</span>
       </div>
       <div class="game-details-content">
         ${_expandedCardBody(card, phase)}
