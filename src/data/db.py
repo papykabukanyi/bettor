@@ -10,16 +10,36 @@ import sys
 import json
 import datetime
 import hashlib
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 def _resolve_database_url() -> str:
+    def _normalize(url: str) -> str:
+        raw = str(url or "").strip()
+        if raw.startswith("postgres://"):
+            raw = "postgresql://" + raw[len("postgres://"):]
+        if not raw:
+            return ""
+        try:
+            parts = urlsplit(raw)
+            if not parts.scheme.startswith("postgres"):
+                return raw
+            allowed = {
+                "sslmode", "connect_timeout", "application_name", "options",
+                "target_session_attrs", "keepalives", "keepalives_idle",
+                "keepalives_interval", "keepalives_count", "channel_binding",
+                "gssencmode", "krbsrvname", "service",
+            }
+            filtered_qs = [(k, v) for (k, v) in parse_qsl(parts.query, keep_blank_values=True) if k in allowed]
+            return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(filtered_qs), parts.fragment))
+        except Exception:
+            return raw
+
     for key in ("POSTGRES_URL", "POSTGRES_PRISMA_URL", "POSTGRES_URL_NON_POOLING", "DATABASE_URL"):
         value = str(os.getenv(key, "") or "").strip()
         if value:
-            if value.startswith("postgres://"):
-                return "postgresql://" + value[len("postgres://"):]
-            return value
+            return _normalize(value)
     return ""
 
 
@@ -172,6 +192,17 @@ def _parlay_uid(name: str, legs: list, created_date=None) -> str:
 # ──────────────────────────────────────────────────────────────────────────────
 
 _SCHEMA = """
+-- Supabase dashboard/CLI compatibility: some Supabase tools probe this
+-- relation and emit noisy errors when it is absent.
+CREATE SCHEMA IF NOT EXISTS supabase_migrations;
+
+CREATE TABLE IF NOT EXISTS supabase_migrations.schema_migrations (
+    version         TEXT PRIMARY KEY,
+    name            TEXT,
+    statements      TEXT[],
+    inserted_at     TIMESTAMPTZ DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS games (
     id              SERIAL PRIMARY KEY,
     sport           VARCHAR(20)  NOT NULL,
@@ -417,20 +448,24 @@ CREATE TABLE IF NOT EXISTS daily_runs (
 
 -- Idempotent migrations for run_date tracking
 DO $$ BEGIN
-    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
-                   WHERE table_name='predictions' AND column_name='run_date') THEN
+    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name='predictions')
+       AND NOT EXISTS (SELECT 1 FROM information_schema.columns
+                       WHERE table_name='predictions' AND column_name='run_date') THEN
         ALTER TABLE predictions ADD COLUMN run_date DATE;
     END IF;
-    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
-                   WHERE table_name='prop_history' AND column_name='run_date') THEN
+    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name='prop_history')
+       AND NOT EXISTS (SELECT 1 FROM information_schema.columns
+                       WHERE table_name='prop_history' AND column_name='run_date') THEN
         ALTER TABLE prop_history ADD COLUMN run_date DATE;
     END IF;
-    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
-                   WHERE table_name='predictions' AND column_name='run_id') THEN
+    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name='predictions')
+       AND NOT EXISTS (SELECT 1 FROM information_schema.columns
+                       WHERE table_name='predictions' AND column_name='run_id') THEN
         ALTER TABLE predictions ADD COLUMN run_id VARCHAR(50);
     END IF;
-    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
-                   WHERE table_name='prop_history' AND column_name='run_id') THEN
+    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name='prop_history')
+       AND NOT EXISTS (SELECT 1 FROM information_schema.columns
+                       WHERE table_name='prop_history' AND column_name='run_id') THEN
         ALTER TABLE prop_history ADD COLUMN run_id VARCHAR(50);
     END IF;
 END $$;

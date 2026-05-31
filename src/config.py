@@ -3,6 +3,7 @@ Configuration loader for the betting bot.
 Reads settings from .env file or environment variables.
 """
 import os
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -23,8 +24,23 @@ def _first_env(*names: str, default: str = "") -> str:
 def _normalize_pg_url(url: str) -> str:
     raw = str(url or "").strip()
     if raw.startswith("postgres://"):
-        return "postgresql://" + raw[len("postgres://"):]
-    return raw
+        raw = "postgresql://" + raw[len("postgres://"):]
+    if not raw:
+        return ""
+    try:
+        parts = urlsplit(raw)
+        if not parts.scheme.startswith("postgres"):
+            return raw
+        allowed = {
+            "sslmode", "connect_timeout", "application_name", "options",
+            "target_session_attrs", "keepalives", "keepalives_idle",
+            "keepalives_interval", "keepalives_count", "channel_binding",
+            "gssencmode", "krbsrvname", "service",
+        }
+        filtered_qs = [(k, v) for (k, v) in parse_qsl(parts.query, keep_blank_values=True) if k in allowed]
+        return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(filtered_qs), parts.fragment))
+    except Exception:
+        return raw
 
 # Database
 DATABASE_URL = _normalize_pg_url(_first_env(
