@@ -2362,11 +2362,15 @@ def _collect_fallback_games_for_all_sports(
                 # Keep request-time fallback responsive while still covering key sports.
                 espn_sources = [
                     ("basketball", "nba", "basketball", "NBA"),
+                    ("basketball", "wnba", "basketball", "WNBA"),
                     ("hockey", "nhl", "icehockey", "NHL"),
                     ("football", "nfl", "americanfootball", "NFL"),
                     ("tennis", "atp", "tennis", "ATP"),
                     ("tennis", "wta", "tennis", "WTA"),
                     ("golf", "pga", "golf", "PGA"),
+                    ("racing", "f1", "motorsports", "F1"),
+                    ("racing", "nascar", "motorsports", "NASCAR"),
+                    ("cricket", "icc", "cricket", "ICC"),
                     ("mma", "ufc", "mma", "UFC"),
                     ("boxing", "boxing", "boxing", "Boxing"),
                 ]
@@ -2735,6 +2739,39 @@ def _build_model_fallback_bets(games: list[dict]) -> list[dict]:
         over_prob = max(0.52, min(0.72, over_prob))
         return (line, over_prob)
 
+    def _expected_spread_and_cover_prob(
+        game: dict,
+        sport: str,
+        home_prob: float,
+    ) -> tuple[str, float, float]:
+        # Derive a reasonable spread from home-win edge with sport-specific bounds.
+        # Returns (pick_text, line_abs, cover_prob) where line_abs is positive.
+        spread_bounds = {
+            "soccer": (0.5, 1.5),
+            "baseball": (1.5, 2.5),
+            "mlb": (1.5, 2.5),
+            "basketball": (2.5, 10.5),
+            "icehockey": (0.5, 1.5),
+            "football": (1.5, 10.5),
+            "americanfootball": (1.5, 10.5),
+            "cricket": (1.5, 12.5),
+        }
+        lo, hi = spread_bounds.get(sport, (1.5, 6.5))
+        edge = abs(float(home_prob or 0.5) - 0.5)
+        line_abs = lo + (hi - lo) * min(1.0, edge / 0.22)
+        line_abs = round(line_abs * 2.0) / 2.0
+
+        home = str(game.get("home_team") or "").strip()
+        away = str(game.get("away_team") or "").strip()
+        favored_home = float(home_prob or 0.5) >= 0.5
+        side_team = home if favored_home else away
+        pick = f"{side_team} -{line_abs:g}"
+
+        # Keep spreads from being too overconfident in fallback mode.
+        cover_prob = 0.52 + min(0.18, edge * 0.9)
+        cover_prob = max(0.52, min(0.70, cover_prob))
+        return pick, line_abs, cover_prob
+
     def _estimate_home_prob(game: dict, sport: str) -> float:
         if sport == "soccer":
             base = 0.48
@@ -2890,6 +2927,36 @@ def _build_model_fallback_bets(games: list[dict]) -> list[dict]:
                 "worth_reason": "Fallback totals model (OVER-priority today/tomorrow)",
                 "direction": "OVER",
             })
+
+            # Add spread fallback for team-vs-team sports to improve market-type coverage.
+            if sport in {"soccer", "baseball", "mlb", "basketball", "icehockey", "football", "americanfootball", "cricket"}:
+                spread_pick, spread_line, spread_prob = _expected_spread_and_cover_prob(g, sport, home_prob)
+                spread_odds_am = _prob_to_american(spread_prob)
+                spread_label = _rank_label(spread_prob)
+                bets.append({
+                    "sport": sport,
+                    "league": g.get("league") or g.get("competition_name") or sport.upper(),
+                    "competition": g.get("competition") or sport.upper(),
+                    "competition_name": g.get("competition_name") or g.get("league") or sport.upper(),
+                    "bet_type": "spread",
+                    "pick": spread_pick,
+                    "line": spread_line,
+                    "odds_am": spread_odds_am,
+                    "dec_odds": round((1 + (spread_odds_am / 100.0)) if spread_odds_am > 0 else (1 + (100.0 / abs(spread_odds_am))), 4),
+                    "model_prob": round(spread_prob, 4),
+                    "confidence": int(round(spread_prob * 100)),
+                    "safety_label": spread_label,
+                    "safety": _safety_score_from_label(spread_label),
+                    "game_date": game_date,
+                    "game_time": g.get("game_time") or "",
+                    "home_team": home,
+                    "away_team": away,
+                    "match_key": g.get("match_key") or _norm_gk(f"{away}@{home}"),
+                    "game_key": game_key,
+                    "worth_it": spread_prob >= 0.54,
+                    "worth_score": round(spread_prob * 100.0, 2),
+                    "worth_reason": "Fallback spread model (today/tomorrow)",
+                })
 
     # Dedupe similar bets.
     deduped: list[dict] = []
@@ -5349,6 +5416,18 @@ def _run_all_sports_analysis():
             _log(f"[all-sports] expert parlays built: {len(best_parlays)} combos")
         except Exception as parlay_exc:
             _log(f"[all-sports] parlay builder skipped: {parlay_exc}")
+
+        if not best_parlays:
+            try:
+                # Keep combo coverage alive in degraded mode when the expert
+                # parlay scorer has too little structured signal.
+                from models.mlb_predictor import build_parlays as _build_generic_parlays
+
+                best_parlays = _build_generic_parlays(table_rows, max_legs=4, top_n=6)
+                if best_parlays:
+                    _log(f"[all-sports] fallback parlays built: {len(best_parlays)} combos")
+            except Exception as fallback_parlay_exc:
+                _log(f"[all-sports] fallback parlay builder skipped: {fallback_parlay_exc}")
 
         # Persist generated parlays in backend so tracking keeps moving even when no UI tab is open.
         if best_parlays:

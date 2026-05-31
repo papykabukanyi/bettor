@@ -239,7 +239,7 @@ def _bet_sport_tag(bet: dict[str, Any]) -> str:
         return "motorsports"
     if any(token in text for token in ("cricket", "wicket", "innings")):
         return "cricket"
-    return ""
+    return "other"
 
 
 def _picked_team_name(bet: dict[str, Any]) -> str:
@@ -346,27 +346,43 @@ def _market_event(market: dict[str, Any]) -> dict[str, Any]:
 
 def _market_sport_tag(market: dict[str, Any]) -> str:
     text = _market_text(market)
-    if any(token in text for token in ("basketball", "nba", "wnba")):
+    category = _norm_text(market.get("category") or market.get("market_category") or "")
+    tag = _norm_text(market.get("tag") or market.get("topic") or "")
+    search = f"{text} {category} {tag}"
+    if any(token in search for token in ("basketball", "nba", "wnba", "ncaab", "euroleague")):
         return "basketball"
-    if any(token in text for token in ("baseball", "mlb")):
+    if any(token in search for token in ("baseball", "mlb", "kbo", "npb")):
         return "baseball"
-    if any(token in text for token in ("football", "nfl", "ncaaf", "american football", "americanfootball")):
+    if any(token in search for token in ("football", "nfl", "ncaaf", "american football", "americanfootball", "super bowl", "college football")):
         return "football"
-    if any(token in text for token in ("hockey", "nhl", "icehockey", "ice hockey")):
+    if any(token in search for token in ("hockey", "nhl", "icehockey", "ice hockey", "stanley cup")):
         return "hockey"
-    if any(token in text for token in ("soccer", "mls", "premier", "champions league", "1x2", "btts", "goals o u")):
+    if any(token in search for token in ("soccer", "mls", "premier", "champions league", "1x2", "btts", "goals o u", "bundesliga", "la liga", "serie a", "ligue 1")):
         return "soccer"
-    if any(token in text for token in ("tennis", "atp", "wta")):
+    if any(token in search for token in ("tennis", "atp", "wta", "wimbledon", "roland garros", "us open", "australian open")):
         return "tennis"
-    if any(token in text for token in ("boxing", "mma", "ufc", "fight", "submission", "knockout")):
+    if any(token in search for token in ("boxing", "mma", "ufc", "fight", "submission", "knockout", "bellator", "pfl")):
         return "combat"
-    if any(token in text for token in ("golf", "pga", "lpga")):
+    if any(token in search for token in ("golf", "pga", "lpga", "masters", "open championship", "ryder cup")):
         return "golf"
-    if any(token in text for token in ("f1", "nascar", "motorsport", "race")):
+    if any(token in search for token in ("f1", "nascar", "motorsport", "race", "formula 1", "indycar")):
         return "motorsports"
-    if any(token in text for token in ("cricket", "wicket", "innings")):
+    if any(token in search for token in ("cricket", "wicket", "innings", "ipl", "world cup")):
         return "cricket"
-    return ""
+    # Non-sports domains to avoid "unknown" buckets and improve observability.
+    if any(token in search for token in ("election", "president", "senate", "house", "governor", "democrat", "republican", "trump", "biden", "politic")):
+        return "politics"
+    if any(token in search for token in ("bitcoin", "ethereum", "solana", "crypto", "token", "airdrop", "defi", "btc", "eth")):
+        return "crypto"
+    if any(token in search for token in ("cpi", "inflation", "fed", "interest rate", "gdp", "recession", "economy", "jobs report", "unemployment")):
+        return "macro"
+    if any(token in search for token in ("gta", "movie", "album", "music", "celebrity", "oscar", "grammy", "tv show", "netflix")):
+        return "entertainment"
+    if any(token in search for token in ("openai", "ai", "chatgpt", "tesla", "apple", "microsoft", "google", "meta")):
+        return "tech"
+    if any(token in search for token in ("china", "taiwan", "war", "israel", "ukraine", "nato", "geopolit")):
+        return "geopolitics"
+    return "other"
 
 
 def _canonical_golf_series_ticker(value: Any) -> str:
@@ -603,13 +619,15 @@ def _time_score(bet: dict[str, Any], market: dict[str, Any]) -> float:
 
 def _market_kind_tag(market: dict[str, Any]) -> str:
     text = _market_text(market)
-    if any(token in text for token in ("player prop", "points", "rebounds", "assists", "hits", "runs", "strikeouts", "goals", "cards", "corners")):
+    title = _norm_text(" ".join(str(market.get(k) or "") for k in ("market_title", "title", "question", "market_slug", "event_slug", "slug")))
+    search = f"{text} {title}"
+    if any(token in search for token in ("player prop", "points", "rebounds", "assists", "hits", "runs", "strikeouts", "shots", "saves", "goals", "cards", "corners", "to record")):
         return "player_prop"
-    if any(token in text for token in ("moneyline", "winner", "match winner", "1x2")):
+    if any(token in search for token in ("moneyline", "winner", "match winner", "1x2", "to win", "beats", "defeats", "champion")):
         return "moneyline"
-    if any(token in text for token in ("spread", "handicap")):
+    if any(token in search for token in ("spread", "handicap", "by more than", "by at least")):
         return "spread"
-    if any(token in text for token in ("total", "over under", "goals")):
+    if any(token in search for token in ("total", "over under", "over", "under", "goals")):
         return "total"
     return "single"
 
@@ -745,6 +763,7 @@ def _clean_market(market: dict[str, Any]) -> dict[str, Any]:
         "market_end_date": str(market.get("endDateIso") or market.get("end_date") or event.get("endDate") or "").strip(),
         "market_event_title": str(event.get("title") or "").strip(),
         "market_event_slug": str(event.get("slug") or "").strip(),
+        "market_category": str(market.get("category") or market.get("marketCategory") or "").strip(),
         "market_sport": _market_sport_tag(market),
         "yes_token_id": yes_token_id,
         "no_token_id": no_token_id,
