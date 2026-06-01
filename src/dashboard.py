@@ -3459,8 +3459,31 @@ def _build_model_player_props_fallback(games: list[dict], max_per_game: int = 6)
                 "points": ("points", "Points", 8.5),
                 "rebounds": ("rebounds", "Rebounds", 3.5),
                 "assists": ("assists", "Assists", 2.5),
+                "steals": ("steals", "Steals", 0.5),
+                "blocks": ("blocks", "Blocks", 0.5),
+                "three_pointers_made": ("three_pointers_made", "3PT Made", 0.5),
+            }
+            stat_aliases = {
+                "points": "points",
+                "point": "points",
+                "rebounds": "rebounds",
+                "rebound": "rebounds",
+                "totalrebounds": "rebounds",
+                "assists": "assists",
+                "assist": "assists",
+                "steals": "steals",
+                "steal": "steals",
+                "blocks": "blocks",
+                "block": "blocks",
+                "threepointfieldgoalsmade": "three_pointers_made",
+                "3ptfieldgoalsmade": "three_pointers_made",
+                "threepointersmade": "three_pointers_made",
+                "3ptmade": "three_pointers_made",
+                "threes": "three_pointers_made",
+                "3pm": "three_pointers_made",
             }
             scoreboard_cache: dict[tuple[str, str], list[dict]] = {}
+            _wnba_history_profiles: list[dict] | None = None
 
             def _b_num(value):
                 if value is None:
@@ -3529,6 +3552,118 @@ def _build_model_player_props_fallback(games: list[dict], max_per_game: int = 6)
                 if "nba" in comp or "nba" in league:
                     return "nba"
                 return "nba"
+
+            def _norm_stat_key(value: Any) -> str:
+                return re.sub(r"[^a-z0-9]+", "", str(value or "").strip().lower())
+
+            def _load_wnba_history_profiles() -> list[dict]:
+                nonlocal _wnba_history_profiles
+                if _wnba_history_profiles is not None:
+                    return _wnba_history_profiles
+                try:
+                    from data.history_wnba import collect_wnba_history
+
+                    hist = collect_wnba_history(days_back=365) or {}
+                    player_rows = hist.get("player_rows") or []
+                    buckets: dict[tuple[str, str, str], list[float]] = {}
+                    for row in player_rows:
+                        if not isinstance(row, dict):
+                            continue
+                        stat = str(row.get("stat_type") or "").strip().lower()
+                        if stat not in {"points", "rebounds", "assists", "steals", "blocks"}:
+                            continue
+                        team = str(row.get("team") or row.get("home_team") or "").strip()
+                        player = str(row.get("player_name") or row.get("name") or "").strip()
+                        val = _b_num(row.get("stat_value"))
+                        if not team or not player or val is None or val < 0:
+                            continue
+                        key = (team, player, stat)
+                        buckets.setdefault(key, []).append(float(val))
+
+                    profiles: list[dict] = []
+                    for (team, player, stat), values in buckets.items():
+                        if len(values) < 4:
+                            continue
+                        avg_val = sum(values) / max(1, len(values))
+                        profiles.append(
+                            {
+                                "team": team,
+                                "player": player,
+                                "stat": stat,
+                                "avg": avg_val,
+                                "samples": len(values),
+                            }
+                        )
+
+                    _wnba_history_profiles = profiles
+                    return profiles
+                except Exception:
+                    _wnba_history_profiles = []
+                    return []
+
+            def _wnba_recent_rows_for_game(game: dict) -> list[dict]:
+                profiles = _load_wnba_history_profiles()
+                if not profiles:
+                    return []
+
+                team_names = [
+                    str(game.get("home_team") or "").strip(),
+                    str(game.get("away_team") or "").strip(),
+                ]
+                rows_for_game: list[dict] = []
+
+                for team_name in team_names:
+                    if not team_name:
+                        continue
+                    team_profiles = [p for p in profiles if _team_match(str(p.get("team") or ""), team_name)]
+                    if not team_profiles:
+                        continue
+
+                    points_rank: dict[str, float] = {}
+                    for p in team_profiles:
+                        if str(p.get("stat") or "") == "points":
+                            points_rank[str(p.get("player") or "")] = float(p.get("avg") or 0.0)
+                    top_players = [
+                        name for name, _ in sorted(points_rank.items(), key=lambda x: x[1], reverse=True)[:6]
+                    ]
+                    if not top_players:
+                        continue
+
+                    for player in top_players:
+                        for p in team_profiles:
+                            if str(p.get("player") or "") != player:
+                                continue
+                            stat_name = str(p.get("stat") or "").strip().lower()
+                            avg_val = float(p.get("avg") or 0.0)
+                            if stat_name in {"steals", "blocks"} and avg_val < 0.6:
+                                continue
+                            if stat_name == "assists" and avg_val < 1.8:
+                                continue
+                            rows_for_game.append(
+                                _mk_bball_row(
+                                    game,
+                                    team_name,
+                                    player,
+                                    stat_name,
+                                    avg_val,
+                                    "wnba_recent_player_profile",
+                                )
+                            )
+
+                deduped_rows: list[dict] = []
+                seen_local = set()
+                for row in rows_for_game:
+                    key = (
+                        str(row.get("game_key") or ""),
+                        str(row.get("name") or "").strip().lower(),
+                        str(row.get("stat_type") or "").strip().lower(),
+                    )
+                    if key in seen_local:
+                        continue
+                    seen_local.add(key)
+                    deduped_rows.append(row)
+                deduped_rows.sort(key=lambda x: float(x.get("model_prob") or 0.0), reverse=True)
+                return deduped_rows
 
             def _scoreboard_events(slug: str, date_token: str) -> list[dict]:
                 key = (slug, date_token)
@@ -3691,14 +3826,19 @@ def _build_model_player_props_fallback(games: list[dict], max_per_game: int = 6)
                     continue
 
                 league_slug = _league_slug(g)
+                per_game_cap = max_per_game
+                if league_slug == "wnba":
+                    per_game_cap = max(max_per_game, min(18, max_per_game + 6))
                 event_id = _resolve_event_id(g, league_slug)
                 if not event_id:
                     # Keep WNBA/NBA coverage alive even when summary event IDs cannot be resolved.
-                    game_rows = [
-                        _mk_bball_team_total_row(g, home, away, league_slug, "espn_basketball_team_total_fallback"),
-                        _mk_bball_team_total_row(g, away, home, league_slug, "espn_basketball_team_total_fallback"),
-                    ]
-                    rows.extend(game_rows[:max_per_game])
+                    game_rows = _wnba_recent_rows_for_game(g) if league_slug == "wnba" else []
+                    if not game_rows:
+                        game_rows = [
+                            _mk_bball_team_total_row(g, home, away, league_slug, "espn_basketball_team_total_fallback"),
+                            _mk_bball_team_total_row(g, away, home, league_slug, "espn_basketball_team_total_fallback"),
+                        ]
+                    rows.extend(game_rows[:per_game_cap])
                     continue
 
                 url = f"https://site.api.espn.com/apis/site/v2/sports/basketball/{league_slug}/summary"
@@ -3715,7 +3855,7 @@ def _build_model_player_props_fallback(games: list[dict], max_per_game: int = 6)
                 for team_bucket in (summary.get("leaders") or []):
                     team_name = str(((team_bucket.get("team") or {}).get("displayName") or "")).strip()
                     for cat in (team_bucket.get("leaders") or []):
-                        stat_name = str(cat.get("name") or "").strip().lower()
+                        stat_name = stat_aliases.get(_norm_stat_key(cat.get("name")), "")
                         if stat_name not in stat_meta:
                             continue
                         leader_list = cat.get("leaders") or []
@@ -3749,8 +3889,19 @@ def _build_model_player_props_fallback(games: list[dict], max_per_game: int = 6)
                                 if not player_name:
                                     continue
                                 vals = arow.get("stats") or []
-                                for stat_name in stat_meta:
-                                    idx = key_idx.get(stat_name)
+                                for stat_name, aliases_to_try in {
+                                    "points": ["points"],
+                                    "rebounds": ["rebounds", "totalrebounds"],
+                                    "assists": ["assists"],
+                                    "steals": ["steals"],
+                                    "blocks": ["blocks"],
+                                    "three_pointers_made": ["threepointfieldgoalsmade", "threepointersmade", "3ptfieldgoalsmade", "3ptmade", "threes"],
+                                }.items():
+                                    idx = None
+                                    for alias in aliases_to_try:
+                                        idx = key_idx.get(alias)
+                                        if idx is not None:
+                                            break
                                     if idx is None or idx >= len(vals):
                                         continue
                                     raw_val = _b_num(vals[idx])
@@ -3762,6 +3913,9 @@ def _build_model_player_props_fallback(games: list[dict], max_per_game: int = 6)
 
                         for stat_name, payload in top_by_stat.items():
                             game_rows.append(_mk_bball_row(g, team_name, payload[0], stat_name, payload[1], "espn_basketball_boxscore"))
+
+                if not game_rows and league_slug == "wnba":
+                    game_rows = _wnba_recent_rows_for_game(g)
 
                 if not game_rows:
                     game_rows = [
@@ -3783,7 +3937,7 @@ def _build_model_player_props_fallback(games: list[dict], max_per_game: int = 6)
                     deduped_game_rows.append(row)
 
                 deduped_game_rows.sort(key=lambda x: float(x.get("model_prob") or 0.0), reverse=True)
-                rows.extend(deduped_game_rows[:max_per_game])
+                rows.extend(deduped_game_rows[:per_game_cap])
     except Exception as e:
         _log(f"[all-sports] basketball player-prop fallback skipped: {e}")
 

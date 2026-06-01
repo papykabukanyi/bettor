@@ -11,6 +11,7 @@ CHECKS = [
     ("Syntax checks", ["scripts/_check_syntax.py"]),
     ("MLB time normalization regression", ["scripts/_test_mlb_time_normalization.py"]),
     ("Dashboard card bucket regression", ["scripts/_test_dashboard_card_buckets.py"]),
+    ("WNBA tomorrow depth regression", ["scripts/_test_wnba_tomorrow_depth.py"]),
     ("Odds cooldown regression", ["scripts/_test_odds_cooldowns.py"]),
     ("Tennis source smoke test", ["scripts/_test_tennis_sources.py"]),
     ("Golf source smoke test", ["scripts/_test_golf_sources.py"]),
