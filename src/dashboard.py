@@ -1229,6 +1229,66 @@ def _run_prediction_preflight(mode: str) -> dict[str, Any]:
     try:
         lookback_days = max(1, _PRE_PREDICTION_SETTLEMENT_LOOKBACK_DAYS)
         if _PRE_PREDICTION_REQUIRE_FULL_SETTLEMENT:
+            from data.db import (
+                get_settlement_summary,
+                get_parlay_performance_stats,
+                archive_previous_day_data,
+                prune_tracked_parlays_to_date,
+                force_archive_pending_for_dates,
+                get_tracked_parlays,
+                resolve_tracked_parlay,
+            )
+
+            db_sport = None if mode_norm == "all" else mode_norm
+            today = _et_calendar_today()
+
+            def _collect_gate_snapshot() -> dict[str, Any]:
+                day_rows: list[dict[str, Any]] = []
+                total_items_local = 0
+                total_pending_local = 0
+                for delta in range(1, lookback_days + 1):
+                    d = today - datetime.timedelta(days=delta)
+                    settlement = get_settlement_summary(sport=db_sport, target_date=d, stale_hours=6) or {}
+                    pred = settlement.get("predictions") or {}
+                    props = settlement.get("props") or {}
+                    parlay = get_parlay_performance_stats(sport=db_sport, target_date=d) or {}
+
+                    pred_total = int(pred.get("total") or 0)
+                    pred_pending = int(pred.get("pending") or 0)
+                    prop_total = int(props.get("total") or 0)
+                    prop_pending = int(props.get("pending") or 0)
+                    parlay_total = int(parlay.get("total") or 0)
+                    parlay_pending = int(parlay.get("pending") or 0)
+
+                    day_total = pred_total + prop_total + parlay_total
+                    day_pending = pred_pending + prop_pending + parlay_pending
+                    if day_total <= 0:
+                        continue
+
+                    total_items_local += day_total
+                    total_pending_local += day_pending
+                    day_rows.append(
+                        {
+                            "date": d.isoformat(),
+                            "total": day_total,
+                            "pending": day_pending,
+                            "predictions_pending": pred_pending,
+                            "props_pending": prop_pending,
+                            "parlays_pending": parlay_pending,
+                        }
+                    )
+
+                settled_local = max(0, total_items_local - total_pending_local)
+                completion_local = (
+                    100.0 if total_items_local <= 0 else round((settled_local / total_items_local) * 100.0, 2)
+                )
+                return {
+                    "completion_pct": completion_local,
+                    "total_items": total_items_local,
+                    "pending_items": total_pending_local,
+                    "by_day": day_rows,
+                }
+
             resolver_attempt = _run_resolver_locked(days_back=max(3, lookback_days + 1)) or {}
             summary["settlement_resolver"] = {
                 "skipped": bool(resolver_attempt.get("skipped")),
@@ -1239,48 +1299,88 @@ def _run_prediction_preflight(mode: str) -> dict[str, Any]:
             if bool(resolver_attempt.get("skipped")) and _PRE_PREDICTION_BLOCK_IF_RESOLVER_BUSY:
                 raise RuntimeError("Settlement gate blocked: resolver is busy; waiting for pending outcomes to settle")
 
-            from data.db import get_settlement_summary, get_parlay_performance_stats
+            gate_snapshot = _collect_gate_snapshot()
+            completion_pct = float(gate_snapshot.get("completion_pct") or 0.0)
+            total_items = int(gate_snapshot.get("total_items") or 0)
+            total_pending = int(gate_snapshot.get("pending_items") or 0)
+            day_rows = gate_snapshot.get("by_day") or []
 
-            db_sport = None if mode_norm == "all" else mode_norm
-            today = _et_calendar_today()
-            day_rows: list[dict[str, Any]] = []
-            total_items = 0
-            total_pending = 0
-
-            for delta in range(1, lookback_days + 1):
-                d = today - datetime.timedelta(days=delta)
-                settlement = get_settlement_summary(sport=db_sport, target_date=d, stale_hours=6) or {}
-                pred = settlement.get("predictions") or {}
-                props = settlement.get("props") or {}
-                parlay = get_parlay_performance_stats(sport=db_sport, target_date=d) or {}
-
-                pred_total = int(pred.get("total") or 0)
-                pred_pending = int(pred.get("pending") or 0)
-                prop_total = int(props.get("total") or 0)
-                prop_pending = int(props.get("pending") or 0)
-                parlay_total = int(parlay.get("total") or 0)
-                parlay_pending = int(parlay.get("pending") or 0)
-
-                day_total = pred_total + prop_total + parlay_total
-                day_pending = pred_pending + prop_pending + parlay_pending
-                if day_total <= 0:
-                    continue
-
-                total_items += day_total
-                total_pending += day_pending
-                day_rows.append(
-                    {
-                        "date": d.isoformat(),
-                        "total": day_total,
-                        "pending": day_pending,
-                        "predictions_pending": pred_pending,
-                        "props_pending": prop_pending,
-                        "parlays_pending": parlay_pending,
-                    }
+            if total_pending > 0:
+                remediation = {
+                    "archive": archive_previous_day_data(today) or {},
+                    "parlays_pruned": int(prune_tracked_parlays_to_date(target_date=today) or 0),
+                }
+                summary["settlement_remediation"] = remediation
+                _log(
+                    "[preflight] settlement remediation "
+                    f"archived_preds={int(remediation['archive'].get('predictions_archived') or 0)} "
+                    f"archived_props={int(remediation['archive'].get('props_archived') or 0)} "
+                    f"parlays_pruned={int(remediation.get('parlays_pruned') or 0)}"
                 )
 
-            settled_items = max(0, total_items - total_pending)
-            completion_pct = 100.0 if total_items <= 0 else round((settled_items / total_items) * 100.0, 2)
+                resolver_attempt_2 = _run_resolver_locked(days_back=max(3, lookback_days + 1)) or {}
+                summary["settlement_resolver_after_remediation"] = {
+                    "skipped": bool(resolver_attempt_2.get("skipped")),
+                    "games": int(resolver_attempt_2.get("games") or 0),
+                    "props": int(resolver_attempt_2.get("props") or 0),
+                    "parlays": int(resolver_attempt_2.get("parlays") or 0),
+                }
+
+                gate_snapshot = _collect_gate_snapshot()
+                completion_pct = float(gate_snapshot.get("completion_pct") or 0.0)
+                total_items = int(gate_snapshot.get("total_items") or 0)
+                total_pending = int(gate_snapshot.get("pending_items") or 0)
+                day_rows = gate_snapshot.get("by_day") or []
+
+            # Final deadlock breaker: stale prior-day pendings are force-closed,
+            # then settlement is evaluated one last time.
+            if total_pending > 0:
+                pending_dates = [
+                    str(r.get("date") or "")[:10]
+                    for r in day_rows
+                    if int(r.get("pending") or 0) > 0 and str(r.get("date") or "")
+                ]
+                if pending_dates:
+                    forced_archive = force_archive_pending_for_dates(pending_dates, sport=db_sport)
+                    forced_parlays = 0
+                    for _d in pending_dates:
+                        for _p in (get_tracked_parlays(include_resolved=False, target_date=_d, sport=db_sport) or []):
+                            _pid = int(_p.get("id") or 0)
+                            if _pid <= 0:
+                                continue
+                            try:
+                                # Force-close stale tracked parlays so a single dead leg cannot block new cycle forever.
+                                resolve_tracked_parlay(_pid, outcome="PUSH", payout=0.0)
+                                forced_parlays += 1
+                            except Exception:
+                                continue
+
+                    summary["settlement_force_close"] = {
+                        "dates": pending_dates,
+                        "archive": forced_archive,
+                        "parlays_pushed": forced_parlays,
+                    }
+                    _log(
+                        "[preflight] settlement force-close "
+                        f"preds={int((forced_archive or {}).get('predictions_archived') or 0)} "
+                        f"props={int((forced_archive or {}).get('props_archived') or 0)} "
+                        f"parlays={forced_parlays}"
+                    )
+
+                    resolver_attempt_3 = _run_resolver_locked(days_back=max(3, lookback_days + 1)) or {}
+                    summary["settlement_resolver_after_force_close"] = {
+                        "skipped": bool(resolver_attempt_3.get("skipped")),
+                        "games": int(resolver_attempt_3.get("games") or 0),
+                        "props": int(resolver_attempt_3.get("props") or 0),
+                        "parlays": int(resolver_attempt_3.get("parlays") or 0),
+                    }
+
+                    gate_snapshot = _collect_gate_snapshot()
+                    completion_pct = float(gate_snapshot.get("completion_pct") or 0.0)
+                    total_items = int(gate_snapshot.get("total_items") or 0)
+                    total_pending = int(gate_snapshot.get("pending_items") or 0)
+                    day_rows = gate_snapshot.get("by_day") or []
+
             summary["settlement_gate"] = {
                 "enabled": True,
                 "lookback_days": lookback_days,

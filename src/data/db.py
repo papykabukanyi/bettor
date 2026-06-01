@@ -2432,6 +2432,90 @@ def archive_previous_day_data(today_date: "datetime.date | str") -> dict:
         conn.close()
 
 
+def force_archive_pending_for_dates(dates: list, sport: str | None = None) -> dict:
+    """
+    Force-archive lingering PENDING rows for explicit game dates.
+    Intended as a deadlock breaker when resolver cannot settle stale prior-day rows.
+    """
+    if not dates:
+        return {"predictions_archived": 0, "props_archived": 0}
+
+    norm_dates = []
+    for d in dates:
+        if d is None:
+            continue
+        if hasattr(d, "isoformat"):
+            norm_dates.append(str(d.isoformat())[:10])
+        else:
+            norm_dates.append(str(d)[:10])
+    norm_dates = sorted({x for x in norm_dates if x})
+    if not norm_dates:
+        return {"predictions_archived": 0, "props_archived": 0}
+
+    conn = get_conn()
+    if conn is None:
+        return {"predictions_archived": 0, "props_archived": 0}
+
+    out = {"predictions_archived": 0, "props_archived": 0, "dates": norm_dates}
+    try:
+        cur = conn.cursor()
+
+        if sport:
+            cur.execute(
+                """
+                UPDATE predictions
+                SET outcome = 'ARCHIVED', resolved_at = NOW()
+                WHERE outcome = 'PENDING'
+                  AND sport = %s
+                  AND game_date::date = ANY(%s::date[])
+                """,
+                (sport, norm_dates),
+            )
+        else:
+            cur.execute(
+                """
+                UPDATE predictions
+                SET outcome = 'ARCHIVED', resolved_at = NOW()
+                WHERE outcome = 'PENDING'
+                  AND game_date::date = ANY(%s::date[])
+                """,
+                (norm_dates,),
+            )
+        out["predictions_archived"] = int(cur.rowcount or 0)
+
+        if sport:
+            cur.execute(
+                """
+                UPDATE prop_history
+                SET outcome = 'ARCHIVED', resolved_at = NOW()
+                WHERE outcome = 'PENDING'
+                  AND sport = %s
+                  AND game_date::date = ANY(%s::date[])
+                """,
+                (sport, norm_dates),
+            )
+        else:
+            cur.execute(
+                """
+                UPDATE prop_history
+                SET outcome = 'ARCHIVED', resolved_at = NOW()
+                WHERE outcome = 'PENDING'
+                  AND game_date::date = ANY(%s::date[])
+                """,
+                (norm_dates,),
+            )
+        out["props_archived"] = int(cur.rowcount or 0)
+
+        conn.commit()
+        return out
+    except Exception as e:
+        conn.rollback()
+        print(f"[db] force_archive_pending_for_dates error: {e}")
+        return {"predictions_archived": 0, "props_archived": 0, "dates": norm_dates}
+    finally:
+        conn.close()
+
+
 def upsert_daily_run(run_id: str, run_date, status: str = 'RUNNING',
                      games_today: int = 0, games_tmrw: int = 0,
                      props_count: int = 0, parlays_count: int = 0,
