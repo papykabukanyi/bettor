@@ -259,6 +259,51 @@ def _clean_ready_bets_payload(bets: list[dict]) -> list[dict]:
     return clean_rows
 
 
+def _is_player_prediction_row(row: dict[str, Any]) -> bool:
+    if not isinstance(row, dict):
+        return False
+    kind = str(row.get("kind") or "").strip().lower()
+    if kind == "player_prop":
+        return True
+    player_name = str(
+        row.get("player_name")
+        or row.get("name")
+        or row.get("player")
+        or row.get("athlete_name")
+        or ""
+    ).strip()
+    return bool(player_name)
+
+
+def _team_only_ready_bets(bets: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep ready-bet payload focused on team/game markets.
+
+    - Drops singles that are player predictions.
+    - For combo rows, removes player legs and keeps combos with >=2 team legs.
+    """
+    out: list[dict[str, Any]] = []
+    for raw in bets or []:
+        if not isinstance(raw, dict):
+            continue
+        row = dict(raw)
+        kind = str(row.get("kind") or "").strip().lower()
+        if kind == "combo":
+            legs = [
+                dict(leg)
+                for leg in (row.get("legs") or [])
+                if isinstance(leg, dict) and not _is_player_prediction_row(leg)
+            ]
+            if len(legs) < 2:
+                continue
+            row["legs"] = legs
+            out.append(row)
+            continue
+        if _is_player_prediction_row(row):
+            continue
+        out.append(row)
+    return out
+
+
 def _prediction_to_ready_bet(pred: dict, today_str: str) -> dict:
     """Convert DB prediction row to canonical ready-bet payload for exchange resolvers."""
     def _norm_exchange_sport(raw: str) -> str:
@@ -9176,13 +9221,17 @@ def api_kalshi_resolve_ready():
         if not isinstance(bets, list):
             bets = []
         clean_bets = _clean_ready_bets_payload([bet for bet in bets if isinstance(bet, dict)])
+        clean_bets = _team_only_ready_bets(clean_bets)
         force_refresh = bool(data.get("force_refresh"))
         include_combo_suggestions = bool(data.get("include_combo_suggestions", True))
         combo_max_input = max(30, int(os.getenv("KALSHI_COMBO_INPUT_LIMIT", "70") or "70"))
         combo_source_bets = [
             bet
             for bet in clean_bets
-            if str(bet.get("kind") or "").strip().lower() != "combo"
+            if (
+                str(bet.get("kind") or "").strip().lower() != "combo"
+                and not _is_player_prediction_row(bet)
+            )
         ]
         combo_input_bets = combo_source_bets
         if include_combo_suggestions and len(combo_source_bets) > combo_max_input:
@@ -9193,21 +9242,7 @@ def api_kalshi_resolve_ready():
                     float(row.get("ev") or 0.0),
                 )
 
-            player_props = sorted(
-                [r for r in combo_source_bets if str(r.get("kind") or "").strip().lower() == "player_prop"],
-                key=_combo_score,
-                reverse=True,
-            )
-            non_player = sorted(
-                [r for r in combo_source_bets if str(r.get("kind") or "").strip().lower() != "player_prop"],
-                key=_combo_score,
-                reverse=True,
-            )
-
-            target_props = min(max(10, combo_max_input // 2), len(player_props))
-            combo_input_bets = player_props[:target_props]
-            remaining = max(0, combo_max_input - len(combo_input_bets))
-            combo_input_bets.extend(non_player[:remaining])
+            combo_input_bets = sorted(combo_source_bets, key=_combo_score, reverse=True)[:combo_max_input]
 
             if len(combo_input_bets) < combo_max_input:
                 chosen_ids = {
@@ -9223,7 +9258,7 @@ def api_kalshi_resolve_ready():
 
             _log(
                 "[kalshi] combo suggestions bounded "
-                f"({len(combo_source_bets)} singles/props -> {len(combo_input_bets)} candidates, limit {combo_max_input})"
+                f"({len(combo_source_bets)} team bets -> {len(combo_input_bets)} candidates, limit {combo_max_input})"
             )
 
         request_sig = _ready_resolve_signature(clean_bets) + f"|combo={1 if include_combo_suggestions else 0}"
@@ -9315,6 +9350,7 @@ def api_polymarket_resolve_ready():
         if not isinstance(bets, list):
             bets = []
         clean_bets = _clean_ready_bets_payload([bet for bet in bets if isinstance(bet, dict)])
+        clean_bets = _team_only_ready_bets(clean_bets)
         force_refresh = bool(data.get("force_refresh"))
 
         resolved = resolve_ready_bets(clean_bets, force_refresh=force_refresh)
@@ -9339,6 +9375,7 @@ def api_kalshi_combo_study():
         if not isinstance(bets, list):
             bets = []
         clean_bets = _clean_ready_bets_payload([bet for bet in bets if isinstance(bet, dict)])
+        clean_bets = _team_only_ready_bets(clean_bets)
 
         # Resolve individual bets first so combo legs show Kalshi tickers
         force = bool(data.get("force_refresh"))

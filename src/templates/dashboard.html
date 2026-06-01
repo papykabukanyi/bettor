@@ -3959,13 +3959,13 @@ function _legDisplayText(leg) {
 function _comboCandidateLegs() {
   const legs = buildLegPool().filter(leg => {
     const source = _legSourceGroup(leg);
-    if (source !== 'prop' && source !== 'game') return false;
-    const decision = _readySelection(leg, source === 'prop' ? 'player_prop' : 'single');
+    if (source !== 'game') return false;
+    const decision = _readySelection(leg, 'single');
     if (!decision.keep) return false;
-    const minProb = source === 'prop' ? 0.58 : 0.55;
+    const minProb = 0.55;
     // Game bets from non-baseball sports lack sentiment/hist signals so their evidenceScore
     // naturally runs ~0.38-0.42. Use a lower threshold (0.35) to include all sports.
-    const minEvidence = source === 'prop' ? 0.55 : 0.35;
+    const minEvidence = 0.35;
     return decision.prob >= minProb && decision.evidenceScore >= minEvidence;
   });
   legs.sort((a, b) => {
@@ -4951,7 +4951,8 @@ function _deriveReadyBets() {
     // Classify: game-level bets from props pipeline → kind='single', true player props stay
     const rawBetType = String(p.bet_type || p.stat_type || p.prop_type || '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '');
     const isGameLevelBet = GAME_LEVEL_BET_TYPES.has(rawBetType) || GAME_LEVEL_BET_TYPES.has(String(p.bet_type || p.stat_type || p.prop_type || '').toLowerCase());
-    const propKind = isGameLevelBet ? 'single' : 'player_prop';
+    if (!isGameLevelBet) return;
+    const propKind = 'single';
 
     const row = {
       uid,
@@ -5421,7 +5422,17 @@ function renderReadyBets(forceNow = false) {
   const matchedRows = dedupedRows.filter(_isReadyBetMatched);
   const bettableRows = dedupedRows.filter(r => r.kind !== 'combo');
   const comboRows = dedupedRows.filter(r => r.kind === 'combo');
+  const _isBothExchangeMatched = (row) => {
+    const k = _readyResolutionForExchange(row, 'kalshi');
+    const p = _readyResolutionForExchange(row, 'polymarket');
+    const kOk = String(k?.status || '').toLowerCase() === 'matched' && !!String(k?.market_ticker || '').trim();
+    const pOk = String(p?.status || '').toLowerCase() === 'matched' && !!String(p?.market_slug || p?.market_ticker || '').trim();
+    return kOk && pOk;
+  };
   bettableRows.sort((a, b) => {
+    const ab = _isBothExchangeMatched(a) ? 1 : 0;
+    const bb = _isBothExchangeMatched(b) ? 1 : 0;
+    if (ab !== bb) return bb - ab;
     const am = _isReadyBetMatched(a) ? 1 : 0;
     const bm = _isReadyBetMatched(b) ? 1 : 0;
     if (am !== bm) return bm - am;
@@ -5430,6 +5441,9 @@ function renderReadyBets(forceNow = false) {
     return (Number(b.model_prob) || 0) - (Number(a.model_prob) || 0);
   });
   comboRows.sort((a, b) => {
+    const ab = _isBothExchangeMatched(a) ? 1 : 0;
+    const bb = _isBothExchangeMatched(b) ? 1 : 0;
+    if (ab !== bb) return bb - ab;
     const am = _isReadyBetMatched(a) ? 1 : 0;
     const bm = _isReadyBetMatched(b) ? 1 : 0;
     if (am !== bm) return bm - am;
@@ -5438,10 +5452,9 @@ function renderReadyBets(forceNow = false) {
   const groups = {
     single: bettableRows.filter(r => r.kind === 'single'),
     team_prop: bettableRows.filter(r => r.kind === 'team_prop'),
-    player_prop: bettableRows.filter(r => r.kind === 'player_prop'),
     combo: comboRows,
   };
-  const nonCombo = groups.single.length + groups.team_prop.length + groups.player_prop.length;
+  const nonCombo = groups.single.length + groups.team_prop.length;
   if (metaEl) {
     const pendingCount = Math.max(0, bettableRows.length - matchedRows.filter(r => r.kind !== 'combo').length);
     const bits = [`${matchedRows.length} bettable now`, `${nonCombo} singles/props`, `${groups.combo.length} combos`];
@@ -5693,8 +5706,7 @@ function renderReadyBets(forceNow = false) {
       // Merge singles + team_prop together as "Game Bets"
       const gameBets = [...groups.single, ...groups.team_prop];
       container.innerHTML =
-        renderGroup('&#127942; Game Bets (Moneylines, Totals, Team Props)', gameBets, 'No exact Kalshi game bets are ready right now.', true, renderItem) +
-        renderGroup('&#129330; Player Props', groups.player_prop, 'No exact Kalshi player props are ready right now.', true, renderItem);
+        renderGroup('&#127942; Game Bets (Moneylines, Totals, Team Props)', gameBets, 'No exact Kalshi game bets are ready right now.', true, renderItem);
     }
   }
 
@@ -5717,8 +5729,7 @@ function refreshReadyBets(forceKalshi) {
   READY_BETS = _deriveReadyBets();
   const combos = READY_BETS.filter(r => r.kind === 'combo').length;
   const singles = READY_BETS.filter(r => r.kind === 'single' || r.kind === 'team_prop').length;
-  const props = READY_BETS.filter(r => r.kind === 'player_prop').length;
-  _logOp('info', `Derived ${READY_BETS.length} ready candidates: ${singles} game bets, ${props} player props, ${combos} combos`);
+  _logOp('info', `Derived ${READY_BETS.length} ready candidates: ${singles} game bets, ${combos} combos`);
 
   if (forceKalshi) {
     // Full reset on manual refresh
