@@ -1091,6 +1091,11 @@ body.console-open main{padding-bottom:236px}
       <span class="section-title">&#127919; Tracking Summary</span>
       <span style="font-size:.78rem;color:var(--muted)">Fewer cards, clearer view of live and settled bets</span>
     </div>
+    <div class="section-header" style="margin-top:12px;margin-bottom:8px">
+      <span class="section-title">&#128295; Backend Live Feed Health</span>
+      <span class="section-meta" id="backend-health-meta"></span>
+    </div>
+    <div class="perf-grid" id="backend-health-stats" style="margin-bottom:14px"></div>
     <div class="perf-grid" id="prop-perf-stats" style="margin-bottom:16px"></div>
     <h3 style="font-size:.9rem;font-weight:600;margin-bottom:10px">Hit Rate by Prop Type</h3>
     <div style="overflow-x:auto;border:1px solid var(--border);border-radius:var(--radius)">
@@ -2129,10 +2134,6 @@ function _parseGameStart(gameDate, gameTime, gameDateTime) {
 function _phaseFromSchedule(gameDate, gameTime, gameDateTime) {
   const start = _parseGameStart(gameDate, gameTime, gameDateTime);
   if (!start) return 'upcoming';
-  const now = Date.now();
-  const startMs = start.getTime();
-  const maxGameWindowMs = 6 * 60 * 60 * 1000;
-  if (now >= startMs + maxGameWindowMs) return 'final';
   return 'upcoming';
 }
 
@@ -2149,6 +2150,17 @@ function _isPublicProp(p) {
     if (Number.isFinite(lv) && lv <= 0.5) return false;
   }
   return true;
+}
+
+function _isTeamStyleProp(p) {
+  if (!p || typeof p !== 'object') return false;
+  const st = String(p.stat_type || p.prop_type || '').trim().toLowerCase();
+  const label = String(p.prop_label || '').trim().toLowerCase();
+  if (st === 'team_points' || st === 'team_total') return true;
+  if (label.includes('team points') || label.includes('team total') || label.includes('projected team points')) return true;
+  const name = String(p.name || p.player_name || '').trim().toLowerCase();
+  const team = String(p.team || '').trim().toLowerCase();
+  return Boolean(name && team && name === team);
 }
 
 function _dedupePropRows(list) {
@@ -2317,7 +2329,7 @@ function _applyLiveScores(scores, opts) {
       } else if (isLive) {
         nextStatus = '';
       } else {
-        nextStatus = _startLabel(gameTime);
+        nextStatus = _fmtGameTime(gameTime) || 'TBD';
       }
       if (statusEl.textContent !== nextStatus) statusEl.textContent = nextStatus;
       statusEl.style.display = nextStatus ? 'inline' : 'none';
@@ -2374,6 +2386,7 @@ function _silentRefreshPanels() {
     loadPropPerformance();
     autoGenParlaysFromProps();
     loadParlayPerformance();
+    loadBackendLiveFeedHealth();
   }, 1500);
 }
 
@@ -2390,6 +2403,7 @@ setInterval(() => {
   loadPropPerformance();
   autoGenParlaysFromProps();
   loadParlayPerformance();
+  loadBackendLiveFeedHealth();
 }, TRACKING_REFRESH_MS);
 
 setInterval(_refreshScheduledStatuses, 60 * 1000);
@@ -2401,9 +2415,10 @@ function _renderBotPerf(_stats) {
 }
 function _renderParlayPerf(_stats) {
   loadParlayPerformance();
+  loadBackendLiveFeedHealth();
 }
 function _fetchAndRenderPerf()     { loadPropPerformance(); }
-function _fetchAndRenderParlayPerf() { loadParlayPerformance(); }
+function _fetchAndRenderParlayPerf() { loadParlayPerformance(); loadBackendLiveFeedHealth(); }
 
 // ── Tab switching ─────────────────────────────────────────────────────────
 function switchTab(name) {
@@ -2424,6 +2439,7 @@ function switchTab(name) {
     loadTrackedSingles();
     loadPropPerformance();
     loadParlayPerformance();
+    loadBackendLiveFeedHealth();
   }
   if (name === 'tournaments' && _isSoccerMode()) {
     loadTournamentData();
@@ -2745,6 +2761,49 @@ function loadParlayPerformance() {
   });
 }
 
+function loadBackendLiveFeedHealth() {
+  const target = document.getElementById('backend-health-stats');
+  const meta = document.getElementById('backend-health-meta');
+  if (!target) return;
+
+  fetch('/api/backend/live-feed-health')
+    .then(r => r.json())
+    .then(d => {
+      if (!d || !d.ok || !d.report) {
+        target.innerHTML = '<div class="no-games">Could not load backend health report.</div>';
+        if (meta) meta.textContent = 'Unavailable';
+        return;
+      }
+      const rep = d.report || {};
+      const summary = rep.summary || {};
+      const today = rep.today || {};
+      const tomorrow = rep.tomorrow || {};
+      const total = Number(summary.cards_total || 0);
+      const updated = Number(summary.cards_live_feed_updated || 0);
+      const scheduledOnly = Number(summary.cards_scheduled_only || 0);
+      const coverage = total > 0 ? Math.round((updated / total) * 100) : 0;
+      const covColor = coverage >= 70 ? 'var(--green)' : (coverage >= 45 ? 'var(--yellow)' : 'var(--red)');
+
+      target.innerHTML = `
+        <div class="perf-card"><div class="perf-val" style="color:${covColor}">${coverage}%</div><div class="perf-label">Live Feed Coverage</div><div class="perf-sub">${updated}/${total} cards updated</div></div>
+        <div class="perf-card"><div class="perf-val perf-win">${summary.live || 0}</div><div class="perf-label">Live Cards</div><div class="perf-sub">Today ${today.live || 0} · Tomorrow ${tomorrow.live || 0}</div></div>
+        <div class="perf-card"><div class="perf-val">${summary.final || 0}</div><div class="perf-label">Final Cards</div><div class="perf-sub">Today ${today.final || 0} · Tomorrow ${tomorrow.final || 0}</div></div>
+        <div class="perf-card"><div class="perf-val perf-pend">${summary.upcoming || 0}</div><div class="perf-label">Upcoming Cards</div><div class="perf-sub">Scheduled + pregame</div></div>
+        <div class="perf-card"><div class="perf-val">${scheduledOnly}</div><div class="perf-label">Scheduled-Only</div><div class="perf-sub">No live-feed update yet</div></div>
+        <div class="perf-card"><div class="perf-val" style="font-size:1.15rem">${rep.poll_interval_sec || 0}s</div><div class="perf-label">Backend Poll Interval</div><div class="perf-sub">Server-driven refresh cycle</div></div>
+      `;
+
+      if (meta) {
+        const stamp = rep.last_polled_at || rep.generated_at || '';
+        meta.textContent = stamp ? `Last poll: ${new Date(stamp).toLocaleString()}` : 'Live feed poll status';
+      }
+    })
+    .catch(() => {
+      target.innerHTML = '<div class="no-games">Could not load backend health report.</div>';
+      if (meta) meta.textContent = 'Unavailable';
+    });
+}
+
 function triggerBackfill(days) {
   days = days || 3;
   toast(`Backfilling last ${days} days of data and retraining model…`, 'info');
@@ -3004,7 +3063,7 @@ function gameCard(c) {
     ? 'FINAL'
     : phase === 'live'
       ? ''
-      : _startLabel(c.game_time);
+      : (timeText || 'TBD');
   const initialStatusClass = phase === 'final' ? 'final' : phase === 'live' ? 'in-progress' : '';
   // Only show scores on the initial render when the game is already final/live —
   // never show a score on a future (upcoming) game or tomorrow's games.
@@ -3024,7 +3083,9 @@ function gameCard(c) {
       </div>
     </div>` : `<div class="pick-card" style="color:var(--muted);font-size:.82rem">No strong prediction yet</div>`;
 
-  const propCount = _publicOverProps([...(c.home_props||[]), ...(c.away_props||[])]).length;
+  const allCardProps = _publicOverProps([...(c.home_props||[]), ...(c.away_props||[])]);
+  const playerPropCount = allCardProps.filter(p => !_isTeamStyleProp(p)).length;
+  const teamPropCount = allCardProps.length - playerPropCount;
 
   const marketCount = (() => {
     const fixed = ['moneyline','run_line','total','f5_moneyline','f5_total','home_team_total','away_team_total']
@@ -3032,7 +3093,8 @@ function gameCard(c) {
     const suggested = _asArray(c.suggested_bets || c.bets || []).length;
     return Math.max(fixed, suggested, primaryPick ? 1 : 0);
   })();
-  const predictionSummary = `${marketCount} game prediction${marketCount !== 1 ? 's' : ''} · ${propCount} player prediction${propCount !== 1 ? 's' : ''}`;
+  const gamePredictionCount = marketCount + teamPropCount;
+  const predictionSummary = `${gamePredictionCount} game prediction${gamePredictionCount !== 1 ? 's' : ''} · ${playerPropCount} player prediction${playerPropCount !== 1 ? 's' : ''}`;
 
   return `<div class="game-card" tabindex="0" role="button" aria-haspopup="dialog" aria-label="Open picks for ${c.away_team} versus ${c.home_team}" onclick="handleGameCardClick(event, this)" onkeydown="handleGameCardKeydown(event, this)" data-game-key="${c.game_key}" data-game-date="${c.game_date||''}" data-game-datetime="${c.game_datetime||''}"
     data-game-time="${c.game_time||''}" data-match-key="${c.match_key||''}" data-when-base="${baseWhen}" id="card-${c.game_key.replace(/[#@\s]/g,'_')}">
@@ -3063,7 +3125,7 @@ function gameCard(c) {
   </div>
   <button class="card-expand-btn" onclick="handleCardPrimaryAction(event, this.parentElement)">
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="flex-shrink:0"><path d="M9 18l6-6-6-6"/></svg>
-    <span>${marketCount || propCount ? `${marketCount + propCount} Picks & Insights` : 'Game Details'}</span>
+    <span>${gamePredictionCount || playerPropCount ? `${gamePredictionCount + playerPropCount} Picks & Insights` : 'Game Details'}</span>
     <span class="expand-icon" style="margin-left:auto">&#9660;</span>
   </button>
   <div class="card-body">
@@ -3105,7 +3167,9 @@ function _expandedCardBody(c, phase) {
   const bestEdge = allBets.length ? Math.max(...allBets.map(b => b.edge||0)) : 0;
   const avgConf  = allBets.length ? Math.round(allBets.reduce((s,b)=>s+(b.model_prob||0.5),0)/allBets.length*100) : null;
   const stripColor = mlProb >= 65 ? 'var(--green)' : mlProb >= 55 ? 'var(--accent)' : 'var(--yellow)';
-  const topProps = _publicOverProps([...(c.home_props||[]), ...(c.away_props||[])])
+  const publicProps = _publicOverProps([...(c.home_props||[]), ...(c.away_props||[])]);
+  const teamProps = publicProps.filter(_isTeamStyleProp);
+  const topProps = publicProps.filter(p => !_isTeamStyleProp(p))
     .sort((a,b) => (b.model_prob||0) - (a.model_prob||0))
     .slice(0, 6);
 
@@ -3148,6 +3212,25 @@ function _expandedCardBody(c, phase) {
   BET_DEFS.forEach(def => addBetForModal(c[def.key], def));
   _asArray(c.suggested_bets || c.bets || []).forEach(b => {
     addBetForModal(b, _betTypeMeta(b.bet_type || 'market'));
+  });
+  teamProps.forEach(p => {
+    const teamNorm = _norm(p.team || p.name || '');
+    const homeNorm = _norm(c.home_team || '');
+    const awayNorm = _norm(c.away_team || '');
+    const sideIsHome = Boolean(teamNorm && homeNorm && teamNorm.includes(homeNorm));
+    const sideIsAway = Boolean(teamNorm && awayNorm && teamNorm.includes(awayNorm));
+    const betType = sideIsHome ? 'home_team_total' : (sideIsAway ? 'away_team_total' : 'team_total');
+    const synthetic = {
+      bet_type: betType,
+      pick: `${p.team || p.name || 'Team'} OVER ${p.line}`,
+      line: p.line,
+      odds_am: p.odds_am,
+      model_prob: p.model_prob,
+      confidence: p.confidence,
+      safety_label: p.safety_label,
+      edge: p.edge,
+    };
+    addBetForModal(synthetic, _betTypeMeta(betType));
   });
 
   allBetsForModal.sort((a, b) => Number(b.bet?.model_prob || 0) - Number(a.bet?.model_prob || 0));
@@ -3365,7 +3448,7 @@ function _impliedProb(oddsAm) {
 
 function _xPropsPanel(c, phase) {
   function qualifies(p) {
-    return _isPublicProp(p);
+    return _isPublicProp(p) && !_isTeamStyleProp(p);
   }
   const hp = (c.home_props||[]).filter(qualifies).sort((a,b)=>(b.model_prob||0)-(a.model_prob||0));
   const ap = (c.away_props||[]).filter(qualifies).sort((a,b)=>(b.model_prob||0)-(a.model_prob||0));
@@ -3600,8 +3683,16 @@ function _detailsTopMarkets(card) {
 
 function _detailsTopProps(card) {
   return _publicOverProps([...(card.home_props || []), ...(card.away_props || [])])
+    .filter(p => !_isTeamStyleProp(p))
     .sort((a, b) => Number(b.model_prob || 0) - Number(a.model_prob || 0))
     .slice(0, 8);
+}
+
+function _detailsTopTeamProps(card) {
+  return _publicOverProps([...(card.home_props || []), ...(card.away_props || [])])
+    .filter(_isTeamStyleProp)
+    .sort((a, b) => Number(b.model_prob || 0) - Number(a.model_prob || 0))
+    .slice(0, 4);
 }
 
 function _detailsSidebarPicks(card, phase) {
@@ -3612,6 +3703,13 @@ function _detailsSidebarPicks(card, phase) {
     return `<div class="details-side-pick"><div class="details-side-pick-type">Game Prediction</div><div class="details-side-pick-text">${text}</div><div class="details-side-pick-meta"><span>${prob}% model</span><span>${odds}</span></div></div>`;
   });
 
+  const teamPropPicks = _detailsTopTeamProps(card).slice(0, 2).map(p => {
+    const text = (plainEnglishPropText(p, phase) || {}).text || `${p.team || p.name || 'Team'} OVER ${p.line || ''}`;
+    const prob = Math.round(Number(p.model_prob || 0.5) * 100);
+    const stat = String(p.prop_label || p.stat_type || 'team prop').replace(/_/g, ' ');
+    return `<div class="details-side-pick"><div class="details-side-pick-type">Game Prediction</div><div class="details-side-pick-text">${text}</div><div class="details-side-pick-meta"><span>${prob}% model</span><span>${stat}</span></div></div>`;
+  });
+
   const propPicks = _detailsTopProps(card).slice(0, 3).map(p => {
     const text = (plainEnglishPropText(p, phase) || {}).text || `${p.name || 'Player'} ${p.direction || 'OVER'} ${p.line || ''}`;
     const prob = Math.round(Number(p.model_prob || 0.5) * 100);
@@ -3619,7 +3717,7 @@ function _detailsSidebarPicks(card, phase) {
     return `<div class="details-side-pick"><div class="details-side-pick-type">Player Prediction</div><div class="details-side-pick-text">${text}</div><div class="details-side-pick-meta"><span>${prob}% model</span><span>${stat}</span></div></div>`;
   });
 
-  return [...marketPicks, ...propPicks].slice(0, 6).join('') || '<div class="details-side-pick"><div class="details-side-pick-type">Waiting</div><div class="details-side-pick-text">No strong picks yet for this game.</div></div>';
+  return [...marketPicks, ...teamPropPicks, ...propPicks].slice(0, 6).join('') || '<div class="details-side-pick"><div class="details-side-pick-type">Waiting</div><div class="details-side-pick-text">No strong picks yet for this game.</div></div>';
 }
 
 function _gameDetailsMarkup(card) {
@@ -3643,7 +3741,7 @@ function _gameDetailsMarkup(card) {
     statusText,
   ].filter(Boolean);
 
-  const marketCount = _detailsTopMarkets(card).length;
+  const marketCount = _detailsTopMarkets(card).length + _detailsTopTeamProps(card).length;
   const propCount = _detailsTopProps(card).length;
   const bestMarketProb = _detailsTopMarkets(card)[0] ? Math.round(Number(_detailsTopMarkets(card)[0].model_prob || 0.5) * 100) : null;
   const bestPropProb = _detailsTopProps(card)[0] ? Math.round(Number(_detailsTopProps(card)[0].model_prob || 0.5) * 100) : null;
@@ -6956,6 +7054,7 @@ function stopConsolePoll() {
     loadPropPerformance();
     autoGenParlaysFromProps();
     loadParlayPerformance();
+    loadBackendLiveFeedHealth();
   }, 60 * 1000);
 })();
 </script>

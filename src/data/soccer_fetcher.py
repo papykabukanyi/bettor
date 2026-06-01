@@ -1,8 +1,7 @@
 """
 soccer_fetcher.py — Multi-tournament soccer data hub
-======================================================
-Supports ALL major competitions via football-data.org free tier.
-Falls back to static data when API is unavailable.
+=====================================================
+Live-first free soccer data with automatic source failover.
 
 Supported competitions (free tier):
   PL   Premier League (England)
@@ -20,9 +19,9 @@ Supported competitions (free tier):
   CLI  Copa Libertadores (South America)
 
 Data sources:
-  1. football-data.org (primary, needs FOOTBALL_DATA_API_KEY)
-  2. ESPN unofficial API (backup, no key)
-  3. Static embedded data (fallback, always available)
+    1. ESPN unofficial API (primary, no key)
+    2. TheSportsDB free API (backup, no key)
+    3. football-data.org (optional, disabled by default)
 """
 
 from __future__ import annotations
@@ -64,6 +63,7 @@ _PRIORITY_COMPETITIONS = ("WC", "CL", "PL", "BL1", "SA", "PD", "FL1")
 _FD_COOLDOWN_SEC = max(120, int(os.getenv("SOCCER_FD_COOLDOWN_SEC", "900") or "900"))
 _FD_COOLDOWN_UNTIL = 0.0
 _FD_LAST_COOLDOWN_LOG_TS = 0.0
+_SOCCER_USE_FD = str(os.getenv("SOCCER_USE_FD", "0") or "0").strip().lower() in {"1", "true", "yes", "on"}
 
 
 # ── All supported tournaments ─────────────────────────────────────────────────
@@ -187,6 +187,8 @@ TOURNAMENTS: dict[str, dict] = {
 def _fd_get(path: str, params: dict | None = None) -> Any:
     """GET football-data.org, return parsed JSON or None."""
     global _FD_COOLDOWN_UNTIL, _FD_LAST_COOLDOWN_LOG_TS
+    if not _SOCCER_USE_FD:
+        return None
     if not _FD_KEY:
         return None
     now = time.time()
@@ -225,6 +227,18 @@ def _fd_get(path: str, params: dict | None = None) -> Any:
 def _espn_get(path: str, params: dict | None = None) -> Any:
     """ESPN unofficial API (no auth required)."""
     base = "https://site.api.espn.com/apis/site/v2/sports/soccer"
+    try:
+        r = requests.get(f"{base}/{path}", params=params or {}, timeout=8)
+        if r.status_code == 200:
+            return r.json()
+    except Exception:
+        pass
+    return None
+
+
+def _sportsdb_get(path: str, params: dict | None = None) -> Any:
+    """TheSportsDB free API (key=1) fallback."""
+    base = "https://www.thesportsdb.com/api/v1/json/1"
     try:
         r = requests.get(f"{base}/{path}", params=params or {}, timeout=8)
         if r.status_code == 200:
@@ -297,6 +311,19 @@ def get_live_matches(competition_code: str | None = None) -> list[dict]:
                 continue
             if m.get("status") in ("In Progress", "Halftime"):
                 results.append(m)
+    if results:
+        return results
+
+    # Secondary free fallback when ESPN feed is temporarily unavailable.
+    data2 = _sportsdb_get("livescore.php", {"s": "Soccer"})
+    events = data2.get("events") if isinstance(data2, dict) else None
+    if isinstance(events, list):
+        for ev in events:
+            m = _normalize_sportsdb_event(ev, competition_code or "")
+            if not m:
+                continue
+            if m.get("status") in ("In Progress", "Halftime"):
+                results.append(m)
     return results
 
 
@@ -327,12 +354,23 @@ def get_all_today_matches(competition_codes: list[str] | None = None) -> dict[st
 
 def _fetch_matches_window(code: str, date_from: str, date_to: str) -> list[dict]:
     """Fetch matches from football-data.org for a date range."""
-    data = _fd_get(f"/competitions/{code}/matches",
-                   {"dateFrom": date_from, "dateTo": date_to,
-                    "status": "SCHEDULED,IN_PLAY,PAUSED,FINISHED,LIVE"})
-    if not data or "matches" not in data:
-        return _fetch_matches_espn_range(code, date_from, date_to)
-    return [_normalize_fd_match(m, code) for m in data.get("matches", [])]
+    espn_rows = _fetch_matches_espn_range(code, date_from, date_to)
+    if espn_rows:
+        return espn_rows
+
+    data = _fd_get(
+        f"/competitions/{code}/matches",
+        {
+            "dateFrom": date_from,
+            "dateTo": date_to,
+            "status": "SCHEDULED,IN_PLAY,PAUSED,FINISHED,LIVE",
+        },
+    )
+    if data and "matches" in data:
+        rows = [_normalize_fd_match(m, code) for m in data.get("matches", [])]
+        if rows:
+            return rows
+    return _fetch_matches_sportsdb_range(code, date_from, date_to)
 
 
 def _fetch_matches_espn_range(code: str, date_from: str, date_to: str) -> list[dict]:
@@ -366,8 +404,71 @@ def _fetch_matches_espn(code: str, date_str: str) -> list[dict]:
     dates_formatted = date_str.replace("-", "")
     data = _espn_get(f"{espn_league}/scoreboard", {"dates": dates_formatted})
     if not data:
+        return _fetch_matches_sportsdb(code, date_str)
+    rows = [_normalize_espn_event(e) for e in data.get("events", [])]
+    if rows:
+        return rows
+    return _fetch_matches_sportsdb(code, date_str)
+
+
+def _fetch_matches_sportsdb_range(code: str, date_from: str, date_to: str) -> list[dict]:
+    try:
+        start = datetime.date.fromisoformat(date_from)
+        end = datetime.date.fromisoformat(date_to)
+    except ValueError:
+        return _fetch_matches_sportsdb(code, date_from) or []
+
+    seen: set[str] = set()
+    matches: list[dict] = []
+    day = start
+    while day <= end:
+        for match in _fetch_matches_sportsdb(code, day.isoformat()) or []:
+            dedupe_key = str(match.get("match_id") or match.get("game_key") or "")
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            matches.append(match)
+        day += datetime.timedelta(days=1)
+    return matches
+
+
+def _fetch_matches_sportsdb(code: str, date_str: str) -> list[dict]:
+    data = _sportsdb_get("eventsday.php", {"d": date_str, "s": "Soccer"})
+    events = data.get("events") if isinstance(data, dict) else None
+    if not isinstance(events, list):
         return []
-    return [_normalize_espn_event(e) for e in data.get("events", [])]
+    wanted = _sportsdb_comp_keywords(code)
+    rows = []
+    for ev in events:
+        row = _normalize_sportsdb_event(ev, code)
+        if not row:
+            continue
+        if wanted:
+            league_text = str(ev.get("strLeague") or ev.get("strLeagueAlternate") or "").lower()
+            if not any(tok in league_text for tok in wanted):
+                continue
+        rows.append(row)
+    return rows
+
+
+def _sportsdb_comp_keywords(code: str) -> tuple[str, ...]:
+    mapping = {
+        "PL": ("premier league",),
+        "BL1": ("bundesliga",),
+        "SA": ("serie a",),
+        "PD": ("la liga",),
+        "FL1": ("ligue 1",),
+        "DED": ("eredivisie",),
+        "PPL": ("primeira liga",),
+        "CL": ("champions league",),
+        "ELC": ("championship",),
+        "BSA": ("brasileirao", "serie a brazil"),
+        "MLS": ("major league soccer", "mls"),
+        "EC": ("euro", "uefa european championship"),
+        "WC": ("world cup",),
+        "CLI": ("copa libertadores", "libertadores"),
+    }
+    return mapping.get(code, ())
 
 
 def _fd_to_espn_league(code: str) -> str:
@@ -381,9 +482,12 @@ def _fd_to_espn_league(code: str) -> str:
         "DED": "ned.1",
         "PPL": "por.1",
         "CL":  "uefa.champions",
+        "EC":  "uefa.euro",
+        "WC":  "fifa.world",
         "ELC": "eng.2",
         "BSA": "bra.1",
         "MLS": "usa.1",
+        "CLI": "conmebol.libertadores",
     }
     return mapping.get(code, "")
 
@@ -694,6 +798,62 @@ def _normalize_espn_event(e: dict) -> dict:
         "game_key":    f"{date_str}#{away}@{home}",
         "match_key":   f"{away.replace(' ','')[:3]}@{home.replace(' ','')[:3]}".upper(),
         "sport":       "soccer",
+    }
+
+
+def _normalize_sportsdb_event(event: dict, competition_code: str) -> dict:
+    home = _safe_team_name(event.get("strHomeTeam"))
+    away = _safe_team_name(event.get("strAwayTeam"))
+    if not home or not away:
+        return {}
+
+    date_str = str(event.get("dateEvent") or event.get("strTimestamp") or "")[:10]
+    time_str = str(event.get("strTime") or "")[:5]
+
+    status = str(event.get("strStatus") or "Scheduled").strip()
+    status_low = status.lower()
+    if any(tok in status_low for tok in ("ft", "aet", "pen", "final", "finished", "full time")):
+        norm_status = "Final"
+    elif any(tok in status_low for tok in ("live", "ht", "in progress", "1h", "2h")):
+        norm_status = "In Progress"
+    else:
+        norm_status = "Scheduled"
+
+    hs = event.get("intHomeScore")
+    aw = event.get("intAwayScore")
+    try:
+        home_score = int(hs) if hs is not None and str(hs).strip() != "" else None
+    except Exception:
+        home_score = None
+    try:
+        away_score = int(aw) if aw is not None and str(aw).strip() != "" else None
+    except Exception:
+        away_score = None
+
+    comp_name = TOURNAMENTS.get(competition_code, {}).get("name") or event.get("strLeague") or competition_code
+    comp_emoji = TOURNAMENTS.get(competition_code, {}).get("emoji", "⚽")
+
+    return {
+        "match_id": str(event.get("idEvent") or ""),
+        "competition": competition_code or "SPORTSDB",
+        "comp_name": comp_name,
+        "comp_emoji": comp_emoji,
+        "group": "",
+        "stage": "REGULAR_SEASON",
+        "date": date_str,
+        "game_date": date_str,
+        "game_time": time_str,
+        "home_team": home,
+        "away_team": away,
+        "home_crest": str(event.get("strHomeTeamBadge") or ""),
+        "away_crest": str(event.get("strAwayTeamBadge") or ""),
+        "venue": str(event.get("strVenue") or ""),
+        "status": norm_status,
+        "home_score": home_score,
+        "away_score": away_score,
+        "game_key": f"{date_str}#{away}@{home}",
+        "match_key": f"{away.replace(' ','')[:3]}@{home.replace(' ','')[:3]}".upper(),
+        "sport": "soccer",
     }
 
 

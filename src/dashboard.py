@@ -5789,6 +5789,30 @@ def _run_soccer_analysis(lock_date: datetime.date | None = None):
             _log(f"Parlay builder fallback: {parlay_exc}")
             best_parlays = []
 
+        if best_parlays:
+            try:
+                from data.db import save_tracked_parlay
+
+                saved_count = 0
+                for idx, combo in enumerate(best_parlays[:8], start=1):
+                    if not isinstance(combo, dict):
+                        continue
+                    legs = combo.get("legs") if isinstance(combo.get("legs"), list) else []
+                    if len(legs) < 2:
+                        continue
+                    save_tracked_parlay(
+                        name=f"Auto Soccer {idx}-#{int(combo.get('n_legs') or len(legs))}",
+                        legs=legs,
+                        combined_odds=float(combo.get("combined_dec") or 0.0),
+                        stake_usd=10.0,
+                        dedupe_pending=True,
+                    )
+                    saved_count += 1
+                if saved_count:
+                    _log(f"[soccer] tracked-parlays auto-saved: {saved_count}")
+            except Exception as parlay_save_exc:
+                _log(f"[soccer] tracked-parlays auto-save skipped: {parlay_save_exc}")
+
         _phase(4)
         _log("Saving soccer analysis and building cards...")
         from data.db import save_predictions, save_prop_picks, save_analysis_cache
@@ -6312,6 +6336,30 @@ def _run_analysis(lock_date: datetime.date | None = None):
         from models.mlb_predictor import build_parlays
         best_parlays = build_parlays(all_bets + all_props, max_legs=5, top_n=5)
         _log(f"Parlays built: {len(best_parlays)}")
+
+        if best_parlays:
+            try:
+                from data.db import save_tracked_parlay
+
+                saved_count = 0
+                for idx, combo in enumerate(best_parlays[:8], start=1):
+                    if not isinstance(combo, dict):
+                        continue
+                    legs = combo.get("legs") if isinstance(combo.get("legs"), list) else []
+                    if len(legs) < 2:
+                        continue
+                    save_tracked_parlay(
+                        name=f"Auto MLB {idx}-#{int(combo.get('n_legs') or len(legs))}",
+                        legs=legs,
+                        combined_odds=float(combo.get("combined_dec") or 0.0),
+                        stake_usd=10.0,
+                        dedupe_pending=True,
+                    )
+                    saved_count += 1
+                if saved_count:
+                    _log(f"[mlb] tracked-parlays auto-saved: {saved_count}")
+            except Exception as parlay_save_exc:
+                _log(f"[mlb] tracked-parlays auto-save skipped: {parlay_save_exc}")
 
         _phase(7)
         _log(f"Sentiment snapshot ready for {len(sentiment_cache)} matchups")
@@ -7565,6 +7613,76 @@ def _ts_to_iso(ts: float) -> str | None:
         return None
 
 
+def _build_live_feed_health_report(state_snapshot: dict[str, Any]) -> dict[str, Any]:
+    live_scores = state_snapshot.get("live_scores") if isinstance(state_snapshot, dict) else {}
+    today_cards = state_snapshot.get("game_cards_today") if isinstance(state_snapshot, dict) else []
+    tomorrow_cards = state_snapshot.get("game_cards_tomorrow") if isinstance(state_snapshot, dict) else []
+
+    live_by_game: dict[str, dict[str, Any]] = {}
+    live_by_match: dict[str, dict[str, Any]] = {}
+    for key, row in (live_scores or {}).items():
+        if not isinstance(row, dict):
+            continue
+        game_key = str(row.get("game_key") or key or "").strip()
+        if game_key:
+            live_by_game[game_key] = row
+        match_key = _norm_gk(str(row.get("match_key") or "").strip())
+        if not match_key and game_key:
+            match_key = _norm_gk(game_key.split("#", 1)[0])
+        if match_key:
+            live_by_match[match_key] = row
+
+    def _bucket(cards: list[dict[str, Any]]) -> dict[str, int]:
+        out = {
+            "total": 0,
+            "live_feed_updated": 0,
+            "scheduled_only": 0,
+            "upcoming": 0,
+            "live": 0,
+            "final": 0,
+        }
+        for card in cards or []:
+            if not isinstance(card, dict):
+                continue
+            out["total"] += 1
+            game_key = str(card.get("game_key") or "").strip()
+            match_key = _norm_gk(str(card.get("match_key") or "").strip())
+            live_row = None
+            if game_key:
+                live_row = live_by_game.get(game_key)
+            if live_row is None and match_key:
+                live_row = live_by_match.get(match_key)
+            if live_row is not None:
+                out["live_feed_updated"] += 1
+                phase = _card_status_phase(str(live_row.get("status") or card.get("status") or ""))
+            else:
+                out["scheduled_only"] += 1
+                phase = _card_status_phase(str(card.get("status") or ""))
+            if phase == "live":
+                out["live"] += 1
+            elif phase == "final":
+                out["final"] += 1
+            else:
+                out["upcoming"] += 1
+        return out
+
+    today_stats = _bucket(today_cards if isinstance(today_cards, list) else [])
+    tomorrow_stats = _bucket(tomorrow_cards if isinstance(tomorrow_cards, list) else [])
+
+    return {
+        "today": today_stats,
+        "tomorrow": tomorrow_stats,
+        "summary": {
+            "cards_total": int(today_stats["total"] + tomorrow_stats["total"]),
+            "cards_live_feed_updated": int(today_stats["live_feed_updated"] + tomorrow_stats["live_feed_updated"]),
+            "cards_scheduled_only": int(today_stats["scheduled_only"] + tomorrow_stats["scheduled_only"]),
+            "live": int(today_stats["live"] + tomorrow_stats["live"]),
+            "final": int(today_stats["final"] + tomorrow_stats["final"]),
+            "upcoming": int(today_stats["upcoming"] + tomorrow_stats["upcoming"]),
+        },
+    }
+
+
 @app.route("/api/backend/status")
 def api_backend_status():
     scheduler_running = False
@@ -7617,6 +7735,21 @@ def api_backend_status():
         "server_time_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     }
     return jsonify(payload)
+
+
+@app.route("/api/backend/live-feed-health")
+def api_backend_live_feed_health():
+    with _lock:
+        snapshot = {
+            "game_cards_today": list(_state.get("game_cards_today") or []),
+            "game_cards_tomorrow": list(_state.get("game_cards_tomorrow") or []),
+            "live_scores": dict(_state.get("live_scores") or {}),
+        }
+    report = _build_live_feed_health_report(snapshot)
+    report["poll_interval_sec"] = int(_LIVE_SCORE_INTERVAL)
+    report["last_polled_at"] = _ts_to_iso(_last_live_poll_ts)
+    report["generated_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    return jsonify({"ok": True, "report": report})
 
 
 def _resolve_all_sports_outcomes(days_back: int = 3) -> dict:
@@ -9075,6 +9208,7 @@ def api_live_scores():
 # ─── Live-score background watcher ───────────────────────────────────────────
 _live_score_timer = None
 _LIVE_SCORE_INTERVAL = max(30, int(os.getenv("LIVE_SCORE_INTERVAL_SEC", "60") or "60"))
+_last_live_poll_ts = 0.0
 _eod_email_sent_dates: set = set()  # track which dates have had EOD results email sent
 _cache_poll_timer = None
 _CACHE_POLL_INTERVAL = int(os.getenv("CACHE_POLL_INTERVAL_SEC", "120"))
@@ -9601,38 +9735,122 @@ def _start_live_scores():
 
 def _poll_live_scores():
     """Runs in background: updates live scores and auto-resolves completed games."""
-    global _live_score_timer
+    global _live_score_timer, _last_live_poll_ts
     try:
-        import statsapi as mlbstatsapi
-        from data.mlb_fetcher import _parse_mlb_game
-        # Use calendar ET date (no 10 PM cutover) to avoid dropping late live games.
-        today = _et_calendar_today()
-        today_str = today.strftime("%m/%d/%Y")
-        raw = mlbstatsapi.schedule(start_date=today_str, end_date=today_str) or []
+        import requests as _req
 
-        state_map = {}
-        for g in raw:
-            parsed = _parse_mlb_game(g, today.isoformat())
-            match_key = _norm_gk(f"{g.get('away_name','')}@{g.get('home_name','')}")
-            key = _compose_game_key(
-                g.get("away_name", ""),
-                g.get("home_name", ""),
-                parsed.get("game_datetime"),
-                parsed.get("date"),
-                parsed.get("game_time"),
-            )
-            state_map[key] = {
-                "game_pk":     g.get("game_id"),
-                "match_key":   match_key,
-                "game_key":    key,
-                "home_score":  g.get("home_score"),
-                "away_score":  g.get("away_score"),
-                "status":      g.get("status"),
-                "inning":      g.get("current_inning", ""),
-                "inning_half": g.get("inning_state", ""),
-            }
+        def _status_from_espn_event(ev: dict[str, Any]) -> tuple[str, str]:
+            st = (ev.get("status") or {}).get("type") or {}
+            desc = str(st.get("description") or "").strip()
+            state = str(st.get("state") or "").strip().lower()
+            short = str(st.get("shortDetail") or "").strip()
+            low = desc.lower()
+            if state in {"post", "final", "finished"} or "final" in low:
+                return "Final", short
+            if state in {"in", "in_progress", "live"} or "progress" in low or "halftime" in low:
+                return "In Progress", short
+            return "Scheduled", short
+
+        def _to_num(v):
+            try:
+                if v is None or str(v).strip() == "":
+                    return None
+                return int(float(v))
+            except Exception:
+                return None
+
+        today = _et_calendar_today()
+        tomorrow = today + datetime.timedelta(days=1)
+        state_map: dict[str, dict[str, Any]] = {}
+        raw = []
+
+        try:
+            import statsapi as mlbstatsapi
+            from data.mlb_fetcher import _parse_mlb_game
+
+            today_str = today.strftime("%m/%d/%Y")
+            raw = mlbstatsapi.schedule(start_date=today_str, end_date=today_str) or []
+            for g in raw:
+                parsed = _parse_mlb_game(g, today.isoformat())
+                match_key = _norm_gk(f"{g.get('away_name','')}@{g.get('home_name','')}")
+                key = _compose_game_key(
+                    g.get("away_name", ""),
+                    g.get("home_name", ""),
+                    parsed.get("game_datetime"),
+                    parsed.get("date"),
+                    parsed.get("game_time"),
+                )
+                state_map[key] = {
+                    "game_pk":     g.get("game_id"),
+                    "match_key":   match_key,
+                    "game_key":    key,
+                    "home_score":  g.get("home_score"),
+                    "away_score":  g.get("away_score"),
+                    "status":      g.get("status"),
+                    "inning":      g.get("current_inning", ""),
+                    "inning_half": g.get("inning_state", ""),
+                }
+        except Exception:
+            raw = []
+
+        # Multi-sport fallback keeps status/score tracking alive even when MLB statsapi
+        # is unavailable in the runtime environment.
+        try:
+            pairs = sorted({(sport_path, league_path) for sport_path, league_path, _sport_group, _map in _ESPN_RESOLVE_CONFIGS})
+            for day in (today, tomorrow):
+                token = day.strftime("%Y%m%d")
+                for sport_path, league_path in pairs:
+                    url = f"https://site.api.espn.com/apis/site/v2/sports/{sport_path}/{league_path}/scoreboard"
+                    try:
+                        resp = _req.get(url, params={"dates": token, "limit": 200}, timeout=8)
+                        if resp.status_code != 200:
+                            continue
+                        payload = resp.json() or {}
+                    except Exception:
+                        continue
+
+                    for ev in (payload.get("events") or []):
+                        comp = (ev.get("competitions") or [{}])[0]
+                        competitors = comp.get("competitors") or []
+                        if len(competitors) < 2:
+                            continue
+                        home_c = next((c for c in competitors if str(c.get("homeAway") or "").lower() == "home"), competitors[0])
+                        away_c = next((c for c in competitors if str(c.get("homeAway") or "").lower() == "away"), competitors[1] if len(competitors) > 1 else competitors[0])
+                        home = str(((home_c.get("team") or {}).get("displayName") or "")).strip()
+                        away = str(((away_c.get("team") or {}).get("displayName") or "")).strip()
+                        if not home or not away:
+                            continue
+
+                        game_dt = str(ev.get("date") or "").strip()
+                        game_date = game_dt[:10] if len(game_dt) >= 10 else day.isoformat()
+                        game_time = game_dt[11:16] if "T" in game_dt and len(game_dt) >= 16 else ""
+                        match_key = _norm_gk(f"{away}@{home}")
+                        key = _compose_game_key(away, home, game_dt, game_date, game_time)
+                        status, short = _status_from_espn_event(ev)
+                        score_home = _to_num(home_c.get("score"))
+                        score_away = _to_num(away_c.get("score"))
+
+                        existing = state_map.get(key)
+                        # Prefer live/final payloads over scheduled-only duplicates.
+                        if existing and status == "Scheduled" and str(existing.get("status") or "").lower() not in {"scheduled", ""}:
+                            continue
+
+                        state_map[key] = {
+                            "game_pk": str(ev.get("id") or ""),
+                            "match_key": match_key,
+                            "game_key": key,
+                            "home_score": score_home,
+                            "away_score": score_away,
+                            "status": status,
+                            "inning": short,
+                            "inning_half": "",
+                        }
+        except Exception:
+            pass
+
         with _lock:
             _state["live_scores"] = state_map
+            _last_live_poll_ts = time.time()
 
         # Broadcast full status map every poll (including empty) so clients can clear stale entries.
         _sse_broadcast("live_scores", {"scores": state_map})
@@ -9642,7 +9860,7 @@ def _poll_live_scores():
             s = (status or "").lower()
             return any(k in s for k in ("final", "game over", "completed"))
         
-        if any(_is_final_status(g.get("status", "")) for g in raw):
+        if any(_is_final_status(v.get("status", "")) for v in state_map.values()):
             try:
                 # Universal resolver handles all sports (MLB statsapi path included)
                 res = _run_resolver_locked(days_back=1)
