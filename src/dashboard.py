@@ -716,8 +716,8 @@ def _env_flag(name: str, default: str = "0") -> bool:
     return str(os.getenv(name, default)).strip().lower() in {"1", "true", "yes", "on"}
 
 
-_ALL_SPORTS_SENTIMENT_MAX_GAMES = max(1, int(os.getenv("ALL_SPORTS_SENTIMENT_MAX_GAMES", "24")))
-_ALL_SPORTS_SENTIMENT_PLAYERS_PER_GAME = max(1, int(os.getenv("ALL_SPORTS_SENTIMENT_PLAYERS_PER_GAME", "12")))
+_ALL_SPORTS_SENTIMENT_MAX_GAMES = max(1, int(os.getenv("ALL_SPORTS_SENTIMENT_MAX_GAMES", "40")))
+_ALL_SPORTS_SENTIMENT_PLAYERS_PER_GAME = max(1, int(os.getenv("ALL_SPORTS_SENTIMENT_PLAYERS_PER_GAME", "16")))
 _ALL_SPORTS_SENTIMENT_INCLUDE_NEWS = _env_flag("ALL_SPORTS_SENTIMENT_INCLUDE_NEWS", "0")
 _ALL_SPORTS_STRICT_SENTIMENT_ONLY = _env_flag("ALL_SPORTS_STRICT_SENTIMENT_ONLY", "0")
 
@@ -4343,6 +4343,190 @@ def _build_model_player_props_fallback(games: list[dict], max_per_game: int = 6)
     except Exception as e:
         _log(f"[all-sports] hockey player-prop fallback skipped: {e}")
 
+    # NFL / American Football player props via ESPN free scoreboard leaders.
+    try:
+        import requests as _nfl_req
+
+        nfl_games = [
+            g for g in (games or [])
+            if _infer_sport_group(g.get("sport") or g.get("competition") or g.get("league") or "") == "americanfootball"
+        ]
+
+        if nfl_games:
+            nfl_stat_meta = {
+                "passingYards":   ("passing_yards",  "Passing Yards",    199.5),
+                "rushingYards":   ("rushing_yards",  "Rushing Yards",     49.5),
+                "receivingYards": ("receiving_yards","Receiving Yards",   39.5),
+                "receptions":     ("receptions",     "Receptions",         3.5),
+                "passingTouchdowns": ("passing_touchdowns", "Passing TDs", 0.5),
+                "rushingTouchdowns": ("rushing_touchdowns", "Rushing TDs", 0.5),
+            }
+            nfl_stat_aliases = {
+                "passingyards":   "passingYards",
+                "passingyard":    "passingYards",
+                "rushingyards":   "rushingYards",
+                "rushingyard":    "rushingYards",
+                "receivingyards": "receivingYards",
+                "receivingyard":  "receivingYards",
+                "receptions":     "receptions",
+                "reception":      "receptions",
+                "passingtouchdowns": "passingTouchdowns",
+                "passingtd":      "passingTouchdowns",
+                "rushingtouchdowns": "rushingTouchdowns",
+                "rushingtd":      "rushingTouchdowns",
+            }
+
+            def _nfl_league_slug(game: dict) -> str:
+                src = str(game.get("espn_league_path") or "").strip().lower()
+                if src:
+                    return src
+                comp = str(game.get("competition") or "").lower()
+                if "ncaaf" in comp or "college" in comp:
+                    return "college-football"
+                return "nfl"
+
+            def _nfl_norm_stat(k: str) -> str:
+                return re.sub(r"[^a-z0-9]+", "", str(k or "").strip().lower())
+
+            def _mk_nfl_row(game: dict, team_name: str, player_name: str,
+                            stat_key: str, raw_value: float, source: str) -> dict:
+                stat_type, prop_lbl, default_line = nfl_stat_meta.get(stat_key, (stat_key, stat_key, raw_value * 0.8))
+                line = max(0.5, round(raw_value * 0.85 / 0.5) * 0.5)
+                import math as _m
+                lam = max(0.01, float(raw_value or 0.01))
+                target = int(_m.floor(float(line)) + 1)
+                cdf = 0.0
+                for k in range(max(0, target)):
+                    try:
+                        cdf += _m.exp(-lam) * (lam ** k) / _m.factorial(k)
+                    except Exception:
+                        pass
+                over_prob = max(0.05, min(0.95, 1.0 - cdf))
+                model_prob = max(0.01, min(0.99, over_prob))
+                odds_am_v = _prob_to_american(model_prob)
+                dec_odds_v = round((1 + (odds_am_v / 100.0)) if odds_am_v > 0 else (1 + (100.0 / abs(odds_am_v))), 4)
+                ev_v = (dec_odds_v - 1.0) * model_prob - (1.0 - model_prob)
+                home = str(game.get("home_team") or "").strip()
+                away = str(game.get("away_team") or "").strip()
+                gd = str(game.get("game_date") or game.get("date") or today_str)
+                gt = str(game.get("game_time") or "")
+                gk = str(game.get("game_key") or _compose_game_key(away, home, game.get("game_datetime"), gd, gt))
+                mk = _norm_gk(game.get("match_key") or f"{away}@{home}")
+                return {
+                    "sport": "americanfootball",
+                    "name": player_name,
+                    "team": team_name,
+                    "prop_label": prop_lbl,
+                    "stat_type": stat_type,
+                    "line": line,
+                    "direction": "OVER",
+                    "model_prob": round(model_prob, 4),
+                    "confidence": int(round(model_prob * 100)),
+                    "safety_label": _safety_label_from_prob(model_prob),
+                    "ev": round(ev_v, 4),
+                    "odds_am": odds_am_v,
+                    "dec_odds": dec_odds_v,
+                    "game": f"{away} @ {home}",
+                    "game_key": gk,
+                    "match_key": mk,
+                    "game_date": gd,
+                    "game_time": gt,
+                    "home_team": home,
+                    "away_team": away,
+                    "sentiment_score": 0.0,
+                    "sentiment_mentions": 0,
+                    "sentiment_sources": source,
+                    "worth_it": model_prob >= 0.54,
+                    "worth_score": round(model_prob * 100.0, 2),
+                    "worth_reason": f"NFL/NCAAF season avg ({stat_type.replace('_', ' ')})",
+                }
+
+            nfl_scoreboard_cache: dict[tuple[str, str], list[dict]] = {}
+
+            def _nfl_scoreboard_events(slug: str, date_token: str) -> list[dict]:
+                key = (slug, date_token)
+                if key in nfl_scoreboard_cache:
+                    return nfl_scoreboard_cache[key]
+                url = f"https://site.api.espn.com/apis/site/v2/sports/football/{slug}/scoreboard"
+                try:
+                    resp = _nfl_req.get(url, params={"dates": date_token, "limit": 200}, timeout=8)
+                    evs = (resp.json() or {}).get("events") or [] if resp.status_code == 200 else []
+                    nfl_scoreboard_cache[key] = evs
+                    return evs
+                except Exception:
+                    nfl_scoreboard_cache[key] = []
+                    return []
+
+            def _nfl_team_leaders(event_id: str, slug: str) -> list[tuple[str, str, str, float]]:
+                """Fetch per-team stat leaders from ESPN event summary."""
+                url = f"https://site.api.espn.com/apis/site/v2/sports/football/{slug}/summary"
+                try:
+                    resp = _nfl_req.get(url, params={"event": event_id}, timeout=10)
+                    if resp.status_code != 200:
+                        return []
+                    data = resp.json() or {}
+                    leaders_data = data.get("leaders") or []
+                    results: list[tuple[str, str, str, float]] = []
+                    for team_leaders in leaders_data:
+                        team_name = str((team_leaders.get("team") or {}).get("displayName") or "").strip()
+                        for category in (team_leaders.get("leaders") or []):
+                            stat_key_raw = str(category.get("name") or "").strip()
+                            norm_key = _nfl_norm_stat(stat_key_raw)
+                            mapped_key = nfl_stat_aliases.get(norm_key, "")
+                            if not mapped_key or mapped_key not in nfl_stat_meta:
+                                continue
+                            for leader in ((category.get("leaders") or [])[:3]):
+                                pname = str((leader.get("athlete") or {}).get("displayName") or "").strip()
+                                val_raw = leader.get("value")
+                                try:
+                                    val = float(val_raw or 0)
+                                except Exception:
+                                    val = 0.0
+                                if pname and val > 0:
+                                    results.append((team_name, pname, mapped_key, val))
+                    return results
+                except Exception:
+                    return []
+
+            for g in nfl_games[:30]:
+                home = str(g.get("home_team") or "").strip()
+                away = str(g.get("away_team") or "").strip()
+                if not home or not away:
+                    continue
+                slug = _nfl_league_slug(g)
+                gd = str(g.get("game_date") or g.get("date") or "").strip()
+                date_token = gd.replace("-", "") if re.match(r"^\d{4}-\d{2}-\d{2}$", gd) else _et_calendar_today().strftime("%Y%m%d")
+
+                # Try to resolve ESPN event ID
+                eid = str(g.get("espn_event_id") or g.get("event_id") or "").strip()
+                if not eid:
+                    for ev in _nfl_scoreboard_events(slug, date_token):
+                        comp = (ev.get("competitions") or [{}])[0]
+                        competitors = comp.get("competitors") or []
+                        if len(competitors) < 2:
+                            continue
+                        h_c = next((c for c in competitors if str(c.get("homeAway") or "").lower() == "home"), competitors[0])
+                        a_c = next((c for c in competitors if str(c.get("homeAway") or "").lower() == "away"), competitors[1] if len(competitors) > 1 else competitors[0])
+                        eh = str((h_c.get("team") or {}).get("displayName") or "").strip()
+                        ea = str((a_c.get("team") or {}).get("displayName") or "").strip()
+                        if _team_token(home) and (_team_token(eh) == _team_token(home) or _team_token(home) in _team_token(eh) or _team_token(eh) in _team_token(home)):
+                            eid = str(ev.get("id") or "").strip()
+                            break
+
+                game_rows: list[dict] = []
+                seen_game: set = set()
+                if eid:
+                    for team_name, player_name, stat_key, raw_val in _nfl_team_leaders(eid, slug):
+                        row = _mk_nfl_row(g, team_name, player_name, stat_key, raw_val, "espn_nfl_leaders")
+                        dk = (str(row.get("game_key") or ""), player_name.lower(), stat_key)
+                        if dk not in seen_game:
+                            seen_game.add(dk)
+                            game_rows.append(row)
+                game_rows.sort(key=lambda x: float(x.get("model_prob") or 0.0), reverse=True)
+                rows.extend(game_rows[:max_per_game])
+    except Exception as e:
+        _log(f"[all-sports] NFL player-prop fallback skipped: {e}")
+
     # MLB historical hitter props across recent seasons.
     try:
         from data import mlb_fetcher as _mlb_fetcher
@@ -4953,6 +5137,148 @@ def _build_model_player_props_fallback(games: list[dict], max_per_game: int = 6)
             rows.extend(starter_rows)
         except Exception as e:
             _log(f"[all-sports] starter-prop fallback skipped: {e}")
+
+    # Tennis match props — games won, aces, sets — from ESPN tournament leaders.
+    try:
+        import requests as _tnreq
+        import math as _tnmath
+
+        tennis_games = [
+            g for g in (games or [])
+            if _infer_sport_group(g.get("sport") or g.get("competition") or g.get("league") or "") == "tennis"
+        ]
+        if tennis_games:
+            # Stat profile: (stat_type, prop_label, typical_line, typical_rate)
+            _tn_stat_profiles = [
+                ("aces",         "Aces",          3.5,  5.0),
+                ("games_won",    "Games Won",      9.5, 12.0),
+                ("first_serves", "1st Serve %",   54.5, 60.0),
+            ]
+
+            def _mk_tennis_row(game: dict, player_name: str, side_team: str,
+                               stat_type: str, prop_label: str, line: float,
+                               model_prob: float, source: str) -> dict:
+                model_prob = max(0.01, min(0.99, float(model_prob)))
+                ods = _prob_to_american(model_prob)
+                dec = round((1 + (ods / 100.0)) if ods > 0 else (1 + (100.0 / abs(ods))), 4)
+                ev_r = (dec - 1.0) * model_prob - (1.0 - model_prob)
+                home = str(game.get("home_team") or "").strip()
+                away = str(game.get("away_team") or "").strip()
+                gd = str(game.get("game_date") or game.get("date") or today_str)
+                gt = str(game.get("game_time") or "")
+                gk = str(game.get("game_key") or _compose_game_key(away, home, game.get("game_datetime"), gd, gt))
+                mk = _norm_gk(game.get("match_key") or f"{away}@{home}")
+                return {
+                    "sport": "tennis",
+                    "name": player_name,
+                    "team": side_team,
+                    "prop_label": prop_label,
+                    "stat_type": stat_type,
+                    "line": line,
+                    "direction": "OVER",
+                    "model_prob": round(model_prob, 4),
+                    "confidence": int(round(model_prob * 100)),
+                    "safety_label": _safety_label_from_prob(model_prob),
+                    "ev": round(ev_r, 4),
+                    "odds_am": ods,
+                    "dec_odds": dec,
+                    "game": f"{away} @ {home}",
+                    "game_key": gk,
+                    "match_key": mk,
+                    "game_date": gd,
+                    "game_time": gt,
+                    "home_team": home,
+                    "away_team": away,
+                    "sentiment_score": 0.0,
+                    "sentiment_mentions": 0,
+                    "sentiment_sources": source,
+                    "worth_it": model_prob >= 0.52,
+                    "worth_score": round(model_prob * 100.0, 2),
+                    "worth_reason": f"Tennis match projection ({stat_type.replace('_', ' ')})",
+                }
+
+            for g in tennis_games[:20]:
+                home = str(g.get("home_team") or "").strip()
+                away = str(g.get("away_team") or "").strip()
+                if not home or not away:
+                    continue
+                tn_game_rows: list[dict] = []
+                # Generate model props for both players using historical avg rates
+                for player_name, side_team in ((home, home), (away, away)):
+                    for stat_type, prop_label, line, avg_rate in _tn_stat_profiles:
+                        # Poisson over-line probability using typical rate
+                        lam = avg_rate
+                        target = int(_tnmath.floor(line) + 1)
+                        cdf = 0.0
+                        for k in range(max(0, target)):
+                            try:
+                                cdf += _tnmath.exp(-lam) * (lam ** k) / _tnmath.factorial(k)
+                            except Exception:
+                                pass
+                        model_prob = max(0.38, min(0.92, 1.0 - cdf))
+                        tn_game_rows.append(
+                            _mk_tennis_row(g, player_name, side_team, stat_type, prop_label, line, model_prob, "tennis_baseline_model")
+                        )
+                tn_game_rows.sort(key=lambda x: float(x.get("model_prob") or 0.0), reverse=True)
+                rows.extend(tn_game_rows[:max_per_game])
+    except Exception as e:
+        _log(f"[all-sports] tennis player-prop fallback skipped: {e}")
+
+    # MMA / Boxing match props — total rounds, fight outcome.
+    try:
+        import math as _mmath
+
+        combat_games = [
+            g for g in (games or [])
+            if _infer_sport_group(g.get("sport") or g.get("competition") or g.get("league") or "") in {"mma", "boxing"}
+        ]
+        if combat_games:
+            for g in combat_games[:16]:
+                home = str(g.get("home_team") or "").strip()
+                away = str(g.get("away_team") or "").strip()
+                if not home or not away:
+                    continue
+                sport_tok = _infer_sport_group(g.get("sport") or g.get("competition") or "mma")
+                # Total rounds over — fights typically go past 2.5 rounds
+                for player_name, side_team in ((home, home), (away, away)):
+                    model_prob = 0.58
+                    ods = _prob_to_american(model_prob)
+                    dec = round((1 + (ods / 100.0)) if ods > 0 else (1 + (100.0 / abs(ods))), 4)
+                    ev_r = (dec - 1.0) * model_prob - (1.0 - model_prob)
+                    gd = str(g.get("game_date") or g.get("date") or today_str)
+                    gt = str(g.get("game_time") or "")
+                    gk = str(g.get("game_key") or _compose_game_key(away, home, g.get("game_datetime"), gd, gt))
+                    mk = _norm_gk(g.get("match_key") or f"{away}@{home}")
+                    rows.append({
+                        "sport": sport_tok,
+                        "name": player_name,
+                        "team": side_team,
+                        "prop_label": "Fight Winner",
+                        "stat_type": "fight_winner",
+                        "line": None,
+                        "direction": "OVER",
+                        "model_prob": round(model_prob, 4),
+                        "confidence": int(round(model_prob * 100)),
+                        "safety_label": _safety_label_from_prob(model_prob),
+                        "ev": round(ev_r, 4),
+                        "odds_am": ods,
+                        "dec_odds": dec,
+                        "game": f"{away} @ {home}",
+                        "game_key": gk,
+                        "match_key": mk,
+                        "game_date": gd,
+                        "game_time": gt,
+                        "home_team": home,
+                        "away_team": away,
+                        "sentiment_score": 0.0,
+                        "sentiment_mentions": 0,
+                        "sentiment_sources": "combat_baseline_model",
+                        "worth_it": True,
+                        "worth_score": round(model_prob * 100.0, 2),
+                        "worth_reason": f"{sport_tok.upper()} baseline pick model",
+                    })
+    except Exception as e:
+        _log(f"[all-sports] combat-sport prop fallback skipped: {e}")
 
     deduped: list[dict] = []
     seen = set()
@@ -5649,7 +5975,7 @@ def _run_all_sports_analysis():
         )
         if fallback_only:
             _log("[all-sports] Snapshot is fallback-only; using lightweight model player props")
-            sentiment_prop_rows = _build_model_player_props_fallback((games or [])[:12], max_per_game=10)
+            sentiment_prop_rows = _build_model_player_props_fallback((games or [])[:30], max_per_game=14)
         else:
             sentiment_prop_rows = _build_all_sport_sentiment_props(games, bets)
 
@@ -5660,7 +5986,7 @@ def _run_all_sports_analysis():
         )
         if not has_player_predictions:
             _log("[all-sports] No sentiment player predictions found; backfilling model player props")
-            fallback_prop_rows = _build_model_player_props_fallback((games or [])[:20], max_per_game=12)
+            fallback_prop_rows = _build_model_player_props_fallback((games or [])[:50], max_per_game=16)
             sentiment_prop_rows = _merge_all_sports_table_rows(sentiment_prop_rows, fallback_prop_rows)
 
         sentiment_prop_rows = _enforce_over_only_player_props(sentiment_prop_rows)
@@ -5677,10 +6003,14 @@ def _run_all_sports_analysis():
                 min_ev = _PREDICTION_EV_MIN
                 min_p = _PREDICTION_PROB_MIN
                 if sport_token in {"golf", "tennis", "mma", "boxing", "motorsports", "cricket"}:
-                    min_q = min(min_q, 0.20)
-                    min_ev = min(min_ev, -0.05)
+                    min_q = min(min_q, 0.18)
+                    min_ev = min(min_ev, -0.06)
                     min_p = min(min_p, 0.05)
-                elif sport_token in {"soccer", "basketball", "icehockey"}:
+                elif sport_token in {"soccer", "basketball", "icehockey", "americanfootball"}:
+                    min_q = min(min_q, 0.48)
+                    min_ev = min(min_ev, -0.04)
+                    min_p = min(min_p, 0.50)
+                elif sport_token in {"baseball"}:
                     min_q = min(min_q, 0.52)
                     min_ev = min(min_ev, -0.03)
                     min_p = min(min_p, 0.52)
@@ -10073,6 +10403,57 @@ def _start_kalshi_ws_client():
 
 _ticker_broadcast_timer: "threading.Timer | None" = None
 
+# ─── End-of-Day Bulk Settlement ───────────────────────────────────────────────
+# Runs at 10pm, 11pm, 1am, and 2am ET to aggressively settle every prediction
+# made during the day so the 3am settlement gate always passes clean.
+_EOD_SETTLE_ENABLED = str(os.getenv("EOD_SETTLE_ENABLED", "1")).strip().lower() in {"1", "true", "yes", "on"}
+_EOD_SETTLE_DAYS_BACK = max(2, int(os.getenv("EOD_SETTLE_DAYS_BACK", "3") or "3"))
+
+
+def _run_eod_bulk_settle(label: str = "eod") -> None:
+    """Aggressively settle all pending predictions/props/parlays.
+
+    Strategy:
+      1. Run the full resolver with a 3-day look-back.
+      2. If any PENDING items remain, run archive_previous_day_data so
+         they are force-closed as ARCHIVED rather than blocking the gate.
+      3. Broadcast a performance_update SSE so the dashboard refreshes.
+    """
+    print(f"[eod-settle/{label}] Starting EOD bulk settlement sweep …")
+    try:
+        result = _run_resolver_locked(days_back=_EOD_SETTLE_DAYS_BACK) or {}
+        n_g   = result.get("games", 0)
+        n_p   = result.get("props", 0)
+        n_par = result.get("parlays", 0)
+        skip  = result.get("skipped", False)
+        if skip:
+            print(f"[eod-settle/{label}] Resolver busy — will retry next scheduled window")
+            return
+        print(f"[eod-settle/{label}] Resolver resolved {n_g} games, {n_p} props, {n_par} parlays")
+    except Exception as exc:
+        print(f"[eod-settle/{label}] Resolver error: {exc}")
+
+    # Safety archival: force-close anything still PENDING from previous days
+    try:
+        from data.db import archive_previous_day_data
+        today = _et_calendar_today()
+        archive_previous_day_data(today.isoformat())
+        print(f"[eod-settle/{label}] Safety archive completed for dates before {today.isoformat()}")
+    except Exception as exc:
+        print(f"[eod-settle/{label}] Archive error: {exc}")
+
+    # Broadcast refresh so dashboard cards update immediately
+    try:
+        from data.db import get_performance_stats, get_parlay_performance_stats
+        db_sport = None if _ACTIVE_SPORT == "all" else _ACTIVE_SPORT
+        _sse_broadcast("performance_update", {
+            "stats": get_performance_stats(sport=db_sport),
+            "parlay_stats": get_parlay_performance_stats(sport=db_sport),
+        })
+        print(f"[eod-settle/{label}] Performance update SSE broadcast sent")
+    except Exception as exc:
+        print(f"[eod-settle/{label}] SSE broadcast error: {exc}")
+
 
 def _start_outcome_resolver():
     """Periodically resolve pending bets for ALL sports.
@@ -10245,11 +10626,26 @@ def _poll_live_scores():
         def _is_final_status(status):
             s = (status or "").lower()
             return any(k in s for k in ("final", "game over", "completed"))
-        
-        if any(_is_final_status(v.get("status", "")) for v in state_map.values()):
+
+        # After 8pm ET the resolver uses a 2-day look-back so games that
+        # started "yesterday" (e.g. late West Coast games) are also swept.
+        _now_et_hour = (
+            datetime.datetime.now(datetime.timezone.utc)
+            .astimezone(datetime.timezone(datetime.timedelta(hours=-5)))
+            .hour
+        )
+        # Evening hours: 20–23 and 0–3 ET (8pm – 3am window)
+        _is_evening = _now_et_hour >= 20 or _now_et_hour <= 3
+        _resolve_days = 2 if _is_evening else 1
+
+        has_final = any(_is_final_status(v.get("status", "")) for v in state_map.values())
+        # Also trigger if state_map has games but none are explicitly "final" yet —
+        # the resolver can still pick up results via MLB StatsAPI / TheSportsDB.
+        has_games = bool(state_map)
+        if has_final or (has_games and _is_evening):
             try:
                 # Universal resolver handles all sports (MLB statsapi path included)
-                res = _run_resolver_locked(days_back=1)
+                res = _run_resolver_locked(days_back=_resolve_days)
                 n_g = res.get("games", 0)
                 n_p = res.get("props", 0)
                 n_par = res.get("parlays", 0)
@@ -10501,11 +10897,44 @@ def _start_scheduler():
                 misfire_grace_time=_SCHED_MISFIRE_GRACE_SEC,
             )
 
+        # ── Nightly EOD settlement sweeps (ET) ─────────────────────────────
+        # Run at 10pm, 11pm, 1am, and 2am to settle every prediction before
+        # the 3am settlement gate.  A final safety-archive job at 2:50am
+        # force-closes any remaining PENDING rows before the backfill window.
+        if _EOD_SETTLE_ENABLED:
+            for _eod_hour, _eod_minute, _eod_label in (
+                (22, 0,  "2200"),
+                (23, 0,  "2300"),
+                ( 1, 0,  "0100"),
+                ( 2, 0,  "0200"),
+            ):
+                sched.add_job(
+                    lambda lbl=_eod_label: _run_eod_bulk_settle(lbl),
+                    CronTrigger(hour=_eod_hour, minute=_eod_minute,
+                                timezone="America/New_York"),
+                    id=f"eod_settle_{_eod_label}",
+                    max_instances=1,
+                    coalesce=True,
+                    misfire_grace_time=120,
+                )
+            # 2:50am safety archive — ensures nothing is PENDING when the gate
+            # runs at 3:00am or whenever the first prediction of the new day fires.
+            sched.add_job(
+                lambda: _run_eod_bulk_settle("0250_safety"),
+                CronTrigger(hour=2, minute=50, timezone="America/New_York"),
+                id="eod_settle_0250_safety",
+                max_instances=1,
+                coalesce=True,
+                misfire_grace_time=120,
+            )
+
         sched.start()
         if _AUTO_ANALYSIS_INTERVAL_MIN > 0:
             print(f"[scheduler] APScheduler started — analysis every {_AUTO_ANALYSIS_INTERVAL_MIN} minutes")
         else:
             print("[scheduler] APScheduler started — daily morning snapshot only")
+        if _EOD_SETTLE_ENABLED:
+            print("[scheduler] EOD bulk-settle cron jobs registered at 22:00, 23:00, 01:00, 02:00, 02:50 ET")
         if _AUTO_BACKFILL_ENABLED:
             print(
                 "[scheduler] Daily multi-sport backfill scheduled "
