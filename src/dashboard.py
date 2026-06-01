@@ -65,6 +65,16 @@ if _ACTIVE_SPORT not in {"mlb", "soccer", "all"}:
 _PREDICTION_QUALITY_MIN = max(0.35, min(float(os.getenv("PREDICTION_QUALITY_MIN", "0.62") or "0.62"), 0.98))
 _PREDICTION_EV_MIN = max(-0.10, min(float(os.getenv("PREDICTION_EV_MIN", "-0.01") or "-0.01"), 0.50))
 _PREDICTION_PROB_MIN = max(0.50, min(float(os.getenv("PREDICTION_PROB_MIN", "0.56") or "0.56"), 0.98))
+_PRE_PREDICTION_REQUIRE_FULL_SETTLEMENT = str(
+    os.getenv("PRE_PREDICTION_REQUIRE_FULL_SETTLEMENT", "1")
+).strip().lower() in {"1", "true", "yes", "on"}
+_PRE_PREDICTION_SETTLEMENT_LOOKBACK_DAYS = max(
+    1,
+    int(os.getenv("PRE_PREDICTION_SETTLEMENT_LOOKBACK_DAYS", "3") or "3"),
+)
+_PRE_PREDICTION_BLOCK_IF_RESOLVER_BUSY = str(
+    os.getenv("PRE_PREDICTION_BLOCK_IF_RESOLVER_BUSY", "1")
+).strip().lower() in {"1", "true", "yes", "on"}
 # Strategy defaults are intentionally hardcoded to avoid env drift.
 _TODAY_TOMORROW_MAX_UNDER_SHARE = 0.20
 _OVER_ONLY_PLAYER_PROPS = True
@@ -1214,6 +1224,91 @@ def _run_prediction_preflight(mode: str) -> dict[str, Any]:
         f"[preflight] mode={mode_norm} hist={hist_days}d gdelt={gdelt_days}d "
         f"backtest={backtest_days}d"
     )
+
+    # 0) Hard gate: prior-day prediction/parlay tracking must be fully settled.
+    try:
+        lookback_days = max(1, _PRE_PREDICTION_SETTLEMENT_LOOKBACK_DAYS)
+        if _PRE_PREDICTION_REQUIRE_FULL_SETTLEMENT:
+            resolver_attempt = _run_resolver_locked(days_back=max(3, lookback_days + 1)) or {}
+            summary["settlement_resolver"] = {
+                "skipped": bool(resolver_attempt.get("skipped")),
+                "games": int(resolver_attempt.get("games") or 0),
+                "props": int(resolver_attempt.get("props") or 0),
+                "parlays": int(resolver_attempt.get("parlays") or 0),
+            }
+            if bool(resolver_attempt.get("skipped")) and _PRE_PREDICTION_BLOCK_IF_RESOLVER_BUSY:
+                raise RuntimeError("Settlement gate blocked: resolver is busy; waiting for pending outcomes to settle")
+
+            from data.db import get_settlement_summary, get_parlay_performance_stats
+
+            db_sport = None if mode_norm == "all" else mode_norm
+            today = _et_calendar_today()
+            day_rows: list[dict[str, Any]] = []
+            total_items = 0
+            total_pending = 0
+
+            for delta in range(1, lookback_days + 1):
+                d = today - datetime.timedelta(days=delta)
+                settlement = get_settlement_summary(sport=db_sport, target_date=d, stale_hours=6) or {}
+                pred = settlement.get("predictions") or {}
+                props = settlement.get("props") or {}
+                parlay = get_parlay_performance_stats(sport=db_sport, target_date=d) or {}
+
+                pred_total = int(pred.get("total") or 0)
+                pred_pending = int(pred.get("pending") or 0)
+                prop_total = int(props.get("total") or 0)
+                prop_pending = int(props.get("pending") or 0)
+                parlay_total = int(parlay.get("total") or 0)
+                parlay_pending = int(parlay.get("pending") or 0)
+
+                day_total = pred_total + prop_total + parlay_total
+                day_pending = pred_pending + prop_pending + parlay_pending
+                if day_total <= 0:
+                    continue
+
+                total_items += day_total
+                total_pending += day_pending
+                day_rows.append(
+                    {
+                        "date": d.isoformat(),
+                        "total": day_total,
+                        "pending": day_pending,
+                        "predictions_pending": pred_pending,
+                        "props_pending": prop_pending,
+                        "parlays_pending": parlay_pending,
+                    }
+                )
+
+            settled_items = max(0, total_items - total_pending)
+            completion_pct = 100.0 if total_items <= 0 else round((settled_items / total_items) * 100.0, 2)
+            summary["settlement_gate"] = {
+                "enabled": True,
+                "lookback_days": lookback_days,
+                "sport": db_sport or "all",
+                "completion_pct": completion_pct,
+                "total_items": total_items,
+                "pending_items": total_pending,
+                "by_day": day_rows,
+            }
+            _log(
+                "[preflight] settlement gate "
+                f"completion={completion_pct:.2f}% pending={total_pending}"
+            )
+            if total_pending > 0:
+                raise RuntimeError(
+                    "Settlement gate failed: unresolved prior-day items remain in tracking/parlays tab "
+                    f"(pending={total_pending}, completion={completion_pct:.2f}%)"
+                )
+        else:
+            summary["settlement_gate"] = {
+                "enabled": False,
+                "lookback_days": _PRE_PREDICTION_SETTLEMENT_LOOKBACK_DAYS,
+            }
+    except Exception as settle_exc:
+        summary["settlement_gate_error"] = str(settle_exc)
+        _log(f"[preflight] settlement gate error: {settle_exc}")
+        if _PRE_PREDICTION_REQUIRE_FULL_SETTLEMENT:
+            raise
 
     # 1) Historical ingestion
     try:
@@ -5474,34 +5569,33 @@ def _run_all_sports_analysis():
         try:
             from models.all_sports_predictor import rank_best_bets
 
+            def _meets_sport_prediction_standard(row: dict) -> bool:
+                if not isinstance(row, dict):
+                    return False
+                sport_token = str(row.get("sport") or row.get("sport_group") or "").strip().lower()
+                min_q = _PREDICTION_QUALITY_MIN
+                min_ev = _PREDICTION_EV_MIN
+                min_p = _PREDICTION_PROB_MIN
+                if sport_token in {"golf", "tennis", "mma", "boxing", "motorsports", "cricket"}:
+                    min_q = min(min_q, 0.20)
+                    min_ev = min(min_ev, -0.05)
+                    min_p = min(min_p, 0.05)
+                elif sport_token in {"soccer", "basketball", "icehockey"}:
+                    min_q = min(min_q, 0.52)
+                    min_ev = min(min_ev, -0.03)
+                    min_p = min(min_p, 0.52)
+
+                q_val = float(row.get("quality_score") or row.get("quality") or 0.0)
+                ev_val = float(row.get("ev") or 0.0)
+                p_val = float(row.get("model_prob") or 0.0)
+                return (q_val >= min_q) and (ev_val >= min_ev) and (p_val >= min_p)
+
             table_rows = rank_best_bets(table_rows, raw_bets=bets)
             before_gate = len(table_rows)
             gated_rows = []
             for _row in table_rows:
-                if not isinstance(_row, dict):
-                    continue
-                _q = float(_row.get("quality_score") or _row.get("quality") or 0.0)
-                _ev = float(_row.get("ev") or 0.0)
-                _p = float(_row.get("model_prob") or 0.0)
-                _sport = str(_row.get("sport") or _row.get("sport_group") or "").strip().lower()
-                _min_q = _PREDICTION_QUALITY_MIN
-                _min_ev = _PREDICTION_EV_MIN
-                _min_p = _PREDICTION_PROB_MIN
-                if _sport in {"golf", "tennis", "mma", "boxing", "motorsports", "cricket"}:
-                    _min_q = min(_min_q, 0.20)
-                    _min_ev = min(_min_ev, -0.05)
-                    _min_p = min(_min_p, 0.05)
-                elif _sport in {"soccer", "basketball", "icehockey"}:
-                    _min_q = min(_min_q, 0.52)
-                    _min_ev = min(_min_ev, -0.03)
-                    _min_p = min(_min_p, 0.52)
-                if _q < _min_q:
-                    continue
-                if _ev < _min_ev:
-                    continue
-                if _p < _min_p:
-                    continue
-                gated_rows.append(_row)
+                if _meets_sport_prediction_standard(_row):
+                    gated_rows.append(_row)
             if gated_rows:
                 table_rows = gated_rows
             removed = max(0, before_gate - len(table_rows))
