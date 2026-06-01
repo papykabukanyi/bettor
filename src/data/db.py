@@ -2414,9 +2414,9 @@ def archive_previous_day_data(today_date: "datetime.date | str") -> dict:
         cur.execute(
             """
             DELETE FROM analysis_cache
-            WHERE cache_date < %s - INTERVAL '2 days'
+            WHERE cache_date < %s::date - INTERVAL '2 days'
             """,
-            (today_date,)
+            (str(today_date),)
         )
         results["cache_rows_deleted"] = cur.rowcount
         conn.commit()

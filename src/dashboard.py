@@ -1290,6 +1290,19 @@ def _run_prediction_preflight(mode: str) -> dict[str, Any]:
                 }
 
             resolver_attempt = _run_resolver_locked(days_back=max(3, lookback_days + 1)) or {}
+            # If the resolver lock was already held (e.g. by the EOD settle job),
+            # wait up to 90 s for it to finish then retry once before blocking.
+            if bool(resolver_attempt.get("skipped")):
+                _log("[preflight] Resolver busy — waiting up to 90s before retry")
+                _waited = 0
+                while _waited < 90 and not _resolve_run_lock.acquire(blocking=False):
+                    time.sleep(5)
+                    _waited += 5
+                if _waited < 90:
+                    # We acquired the lock ourselves — release it so the retry can use it
+                    _resolve_run_lock.release()
+                resolver_attempt = _run_resolver_locked(days_back=max(3, lookback_days + 1)) or {}
+                _log(f"[preflight] Resolver retry after wait: skipped={resolver_attempt.get('skipped')} games={resolver_attempt.get('games')} props={resolver_attempt.get('props')}")
             summary["settlement_resolver"] = {
                 "skipped": bool(resolver_attempt.get("skipped")),
                 "games": int(resolver_attempt.get("games") or 0),
