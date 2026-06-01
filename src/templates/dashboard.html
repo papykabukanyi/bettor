@@ -6428,23 +6428,30 @@ function _fetchFreshJson(url) {
   return fetch(`${url}${sep}_ts=${Date.now()}`, { cache: 'no-store' }).then(r => r.json());
 }
 
+function _fetchTrackedParlaysForUi() {
+  return _fetchFreshJson('/api/parlay/list?include_resolved=1&current_only=1')
+    .then(d => {
+      const todayRows = d && d.ok ? _asArray(d.parlays) : [];
+      if (todayRows.length) {
+        return { ok: true, parlays: todayRows, scope: 'today' };
+      }
+      return _fetchFreshJson('/api/parlay/list?include_resolved=1&current_only=0')
+        .then(fallback => ({
+          ok: !!(fallback && fallback.ok),
+          parlays: _asArray(fallback && fallback.parlays),
+          scope: 'all',
+        }))
+        .catch(() => ({ ok: false, parlays: [], scope: 'all' }));
+    })
+    .catch(() => ({ ok: false, parlays: [], scope: 'today' }));
+}
+
 function loadTrackedParlays() {
-  _fetchFreshJson('/api/parlay/list?include_resolved=1&current_only=1').then(d=>{
+  _fetchTrackedParlaysForUi().then(d=>{
     const el = document.getElementById('tracked-parlays-list');
     const metaEl = document.getElementById('tracked-parlay-meta');
     if (!el) return;
-    const todayIso = _etTodayIso();
-    const rows = (d.ok ? _asArray(d.parlays) : []).filter(p => {
-      const createdDate = String(p && p.created_at ? p.created_at : '').slice(0, 10);
-      if (createdDate === todayIso) return true;
-      const legs = _asArray(p && p.legs_json);
-      return legs.some(leg => {
-        const gameDate = String(leg && (leg.game_date || leg.date || '')).slice(0, 10);
-        if (gameDate === todayIso) return true;
-        const scheduledStart = String(leg && (leg.scheduled_start || leg.game_datetime || '')).slice(0, 10);
-        return scheduledStart === todayIso;
-      });
-    });
+    const rows = d.ok ? _asArray(d.parlays) : [];
     const liveLookup = _liveLookupSnapshot();
 
     const pending = rows.filter(p => (p.outcome || 'PENDING').toUpperCase() === 'PENDING');
@@ -6458,7 +6465,8 @@ function loadTrackedParlays() {
     });
 
     if (metaEl) {
-      metaEl.textContent = `Upcoming: ${pendingUpcoming.length} · Live: ${pendingLive.length} · Won: ${wins.length} · Lost: ${losses.length} · Total: ${rows.length}`;
+      const scopeLabel = d.scope === 'all' ? 'scope: all tracked' : 'scope: today';
+      metaEl.textContent = `Upcoming: ${pendingUpcoming.length} · Live: ${pendingLive.length} · Won: ${wins.length} · Lost: ${losses.length} · Total: ${rows.length} · ${scopeLabel}`;
     }
 
     const outcomeLabel = (v, pendingBucket) => {
@@ -6692,7 +6700,7 @@ function loadPropPerformance() {
     fetch('/api/performance?current_only=1').then(r=>r.json()).catch(()=>({ok:false,stats:{}})),
     fetch('/api/prop-performance?current_only=1').then(r=>r.json()),
     fetch('/api/parlay/performance?current_only=1').then(r=>r.json()).catch(()=>({ok:false,stats:{}})),
-    fetch('/api/parlay/list?include_resolved=1&current_only=1').then(r=>r.json()).catch(()=>({ok:false,parlays:[]})),
+    _fetchTrackedParlaysForUi(),
     fetch('/api/predictions?days=21&current_only=1').then(r=>r.json()).catch(()=>({ok:false,predictions:[]})),
     fetch('/api/prop-history?days=21&current_only=1').then(r=>r.json()).catch(()=>({ok:false,props:[]})),
   ]).then(([g, d, pr, pl, pd, ph])=>{
@@ -6702,20 +6710,10 @@ function loadPropPerformance() {
     const s = d.stats||{};
     const prs = (pr && pr.ok) ? (pr.stats || {}) : {};
 
-    const todayIso = _etTodayIso();
     const liveLookup = _liveLookupSnapshot();
 
-    const trackedParlays = (pl && pl.ok ? _asArray(pl.parlays) : []).filter(p => {
-      const createdDate = String(p && p.created_at ? p.created_at : '').slice(0, 10);
-      if (createdDate === todayIso) return true;
-      const legs = _asArray(p && p.legs_json);
-      return legs.some(leg => {
-        const gameDate = String(leg && (leg.game_date || leg.date || '')).slice(0, 10);
-        if (gameDate === todayIso) return true;
-        const scheduledStart = String(leg && (leg.scheduled_start || leg.game_datetime || '')).slice(0, 10);
-        return scheduledStart === todayIso;
-      });
-    });
+    const todayIso = _etTodayIso();
+    const trackedParlays = pl && pl.ok ? _asArray(pl.parlays) : [];
 
     const predRows = (pd && pd.ok ? _asArray(pd.predictions) : []).filter(r => String(r.game_date || '').slice(0, 10) === todayIso);
     const propRows = (ph && ph.ok ? _asArray(ph.props).map(r => {
