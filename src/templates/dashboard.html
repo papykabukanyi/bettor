@@ -1256,8 +1256,14 @@ function _logOp(type, msg) {
 }
 
 function _isMobileLiteMode() {
-  // Keep mobile behavior feature-parity with desktop by default.
-  return false;
+  try {
+    const compactViewport = window.matchMedia && window.matchMedia('(max-width: 920px)').matches;
+    const coarsePointer = window.matchMedia && window.matchMedia('(pointer: coarse)').matches;
+    const reducedMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    return !!(compactViewport || coarsePointer || reducedMotion);
+  } catch (_) {
+    return false;
+  }
 }
 
 function _applyMobileLiteMode() {
@@ -3720,67 +3726,73 @@ function _detailsSidebarPicks(card, phase) {
   return [...marketPicks, ...teamPropPicks, ...propPicks].slice(0, 6).join('') || '<div class="details-side-pick"><div class="details-side-pick-type">Waiting</div><div class="details-side-pick-text">No strong picks yet for this game.</div></div>';
 }
 
+function _playerPredictionsOnlyMarkup(card, phase) {
+  const props = _detailsTopProps(card);
+  if (!props.length) {
+    return `<div class="xpanel">
+      <div class="xpanel-head">
+        <span class="xpanel-title">Player Predictions</span>
+        <span class="xpanel-count">0</span>
+      </div>
+      <div class="no-games" style="padding:16px">No player predictions available for this matchup yet.</div>
+    </div>`;
+  }
+
+  const rows = props.map((p, idx) => {
+    const text = (plainEnglishPropText(p, phase) || {}).text
+      || `${p.name || 'Player'} ${p.direction || 'OVER'} ${p.line || ''}`;
+    const prob = Math.round(Number(p.model_prob || 0.5) * 100);
+    const ev = Number(p.ev || 0);
+    const evPct = `${(ev * 100).toFixed(1)}%`;
+    const stat = String(p.prop_label || p.stat_type || 'prop').replace(/_/g, ' ');
+    const team = String(p.team || '').trim();
+    return `<div class="xbet-row" style="margin-bottom:8px">
+      <div class="xbet-left">
+        <div class="xbet-icon">${idx + 1}</div>
+        <div>
+          <div class="xbet-title">${text}</div>
+          <div class="xbet-sub">${team ? `${team} · ` : ''}${stat}</div>
+        </div>
+      </div>
+      <div class="xbet-right" style="min-width:110px">
+        <div class="xbet-prob" style="color:${prob >= 60 ? 'var(--green)' : 'var(--accent)'}">${prob}%</div>
+        <div class="xbet-odds" style="color:${ev >= 0 ? 'var(--green)' : 'var(--muted)'}">EV ${evPct}</div>
+      </div>
+    </div>`;
+  }).join('');
+
+  return `<div class="xpanel">
+    <div class="xpanel-head">
+      <span class="xpanel-title">Player Predictions</span>
+      <span class="xpanel-count">${props.length}</span>
+    </div>
+    <div class="xbet-list">${rows}</div>
+  </div>`;
+}
+
 function _gameDetailsMarkup(card) {
   const phase = _phaseForCard(card.status || '', card.game_date || '', card.game_time || '', card.game_datetime || '');
-  const kickoff = [card.game_date || '', _fmtGameTime(card.game_time)].filter(Boolean).join(' · ');
-  const statusText = phase === 'live'
-    ? (card.status || 'LIVE')
-    : phase === 'final'
-      ? 'FINAL'
-      : (kickoff || 'Upcoming');
-  const scoreText = card.away_score != null && card.home_score != null
-    ? `${card.away_score} - ${card.home_score}`
-    : 'Pre-game';
-  const leagueFallback = _sportDisplayName();
-  const detailsLabel = _isAllSportsMode() ? 'Matchup Breakdown' : (_isSoccerMode() ? 'Soccer Match Breakdown' : 'Game Breakdown');
+  const kickoff = card.game_datetime
+    ? _friendlyEtDateTime(card.game_datetime)
+    : [card.game_date || '', _fmtGameTime(card.game_time)].filter(Boolean).join(' · ');
+  const detailsLabel = 'Player Predictions';
   const metaBits = [
-    card.league || card.competition_name || leagueFallback,
+    card.league || card.competition_name || _sportDisplayName(),
     kickoff,
-    card.away_starter ? `Away SP: ${card.away_starter}` : '',
-    card.home_starter ? `Home SP: ${card.home_starter}` : '',
-    statusText,
+    (phase || '').toUpperCase(),
   ].filter(Boolean);
-
-  const marketCount = _detailsTopMarkets(card).length + _detailsTopTeamProps(card).length;
-  const propCount = _detailsTopProps(card).length;
-  const bestMarketProb = _detailsTopMarkets(card)[0] ? Math.round(Number(_detailsTopMarkets(card)[0].model_prob || 0.5) * 100) : null;
-  const bestPropProb = _detailsTopProps(card)[0] ? Math.round(Number(_detailsTopProps(card)[0].model_prob || 0.5) * 100) : null;
-  const kickoffFriendly = card.game_datetime ? _friendlyEtDateTime(card.game_datetime) : [card.game_date || '', _fmtGameTime(card.game_time)].filter(Boolean).join(' · ');
-  const statusClass = phase === 'live' ? 'live' : (phase === 'upcoming' ? 'warn' : '');
-  const scoreLabel = card.away_score != null && card.home_score != null ? `${card.away_score} - ${card.home_score}` : 'Pre-game';
-  const hotTag = phase === 'live' ? 'LIVE TRACKING' : (bestMarketProb != null && bestMarketProb >= 65 ? 'HIGH CONVICTION' : 'MODEL READY');
 
   return `<div class="game-details-head">
     <div class="game-details-label">${detailsLabel}</div>
     <h2 id="game-details-title" class="game-details-title">${card.away_team} vs ${card.home_team}</h2>
     <div class="game-details-meta">
       ${metaBits.map(bit => `<span class="game-details-chip">${bit}</span>`).join('')}
-      <span class="game-details-chip">Score: ${scoreLabel}</span>
     </div>
   </div>
   <div class="game-details-shell">
-    <aside class="game-details-side">
-      <div class="details-side-title">Quick Intel</div>
-      <div class="details-kpi-grid">
-        <div class="details-kpi"><div class="details-kpi-label">Status</div><div class="details-kpi-val ${statusClass}">${phase.toUpperCase()}</div></div>
-        <div class="details-kpi"><div class="details-kpi-label">Kickoff (ET)</div><div class="details-kpi-val">${kickoffFriendly || 'TBD'}</div></div>
-        <div class="details-kpi"><div class="details-kpi-label">Game Predictions</div><div class="details-kpi-val good">${marketCount}</div></div>
-        <div class="details-kpi"><div class="details-kpi-label">Player Predictions</div><div class="details-kpi-val good">${propCount}</div></div>
-        <div class="details-kpi"><div class="details-kpi-label">Best Game Model</div><div class="details-kpi-val ${bestMarketProb != null && bestMarketProb >= 60 ? 'good' : 'warn'}">${bestMarketProb != null ? `${bestMarketProb}%` : '—'}</div></div>
-        <div class="details-kpi"><div class="details-kpi-label">Best Prop Model</div><div class="details-kpi-val ${bestPropProb != null && bestPropProb >= 60 ? 'good' : 'warn'}">${bestPropProb != null ? `${bestPropProb}%` : '—'}</div></div>
-      </div>
-      <div class="details-side-title" style="margin-top:12px">Top Picks</div>
-      <div class="details-side-picks">${_detailsSidebarPicks(card, phase)}</div>
-    </aside>
-    <section class="details-main">
-      <div class="details-nav">
-        <span class="details-nav-chip hot">${hotTag}</span>
-        <span class="details-nav-chip">${marketCount} Game Picks</span>
-        <span class="details-nav-chip">${propCount} Player Picks</span>
-        <span class="details-nav-chip">Score ${scoreLabel}</span>
-      </div>
+    <section class="details-main" style="padding:12px 16px 16px;max-width:100%;">
       <div class="game-details-content">
-        ${_expandedCardBody(card, phase)}
+        ${_playerPredictionsOnlyMarkup(card, phase)}
       </div>
     </section>
   </div>`;
@@ -3851,8 +3863,9 @@ function openGameDetails(gameKey, matchKey) {
   modal.classList.remove('hidden');
   document.body.classList.add('modal-open');
   _scheduleGameDetailsFit();
-  setTimeout(_scheduleGameDetailsFit, 60);
-  setTimeout(_scheduleGameDetailsFit, 180);
+  if (!_isMobileLiteMode()) {
+    setTimeout(_scheduleGameDetailsFit, 90);
+  }
 }
 
 function closeGameDetailsModal(event) {
