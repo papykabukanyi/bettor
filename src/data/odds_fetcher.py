@@ -19,6 +19,7 @@ import os
 import sys
 import datetime
 import threading
+import time
 import requests
 import pandas as pd
 
@@ -37,6 +38,10 @@ _ODDS_BUDGET = {
     "last_used": None,
 }
 _ODDS_BUDGET_BLOCKED_MONTH = None
+_ODDS_GLOBAL_COOLDOWN_UNTIL = 0.0
+_ODDS_SPORT_MARKET_COOLDOWNS: dict[str, float] = {}
+_ODDS_422_COOLDOWN_SEC = max(300, int(os.getenv("ODDS_API_422_COOLDOWN_SEC", "21600") or "21600"))
+_ODDS_429_COOLDOWN_SEC = max(30, int(os.getenv("ODDS_API_429_COOLDOWN_SEC", "180") or "180"))
 
 
 def _current_utc_month() -> str:
@@ -144,6 +149,36 @@ def _can_spend_credits(request_cost: int, context: str = "") -> bool:
     return True
 
 
+def _cooldown_key(raw_sport: str, markets: str) -> str:
+    sport = str(raw_sport or "").strip().lower()
+    mk = ",".join(sorted([m.strip().lower() for m in str(markets or "").split(",") if m.strip()]))
+    return f"{sport}|{mk}"
+
+
+def _is_request_cooled_down(raw_sport: str, markets: str) -> bool:
+    now = time.time()
+    if now < _ODDS_GLOBAL_COOLDOWN_UNTIL:
+        return True
+    key = _cooldown_key(raw_sport, markets)
+    until = float(_ODDS_SPORT_MARKET_COOLDOWNS.get(key) or 0.0)
+    return now < until
+
+
+def _mark_sport_market_cooldown(raw_sport: str, markets: str, seconds: int) -> None:
+    key = _cooldown_key(raw_sport, markets)
+    _ODDS_SPORT_MARKET_COOLDOWNS[key] = time.time() + max(30, int(seconds or _ODDS_422_COOLDOWN_SEC))
+
+
+def _mark_global_rate_limit(resp: requests.Response | None) -> None:
+    global _ODDS_GLOBAL_COOLDOWN_UNTIL
+    retry_after = None
+    if resp is not None:
+        retry_after = _to_int_or_none(resp.headers.get("Retry-After"))
+    wait_sec = max(_ODDS_429_COOLDOWN_SEC, int(retry_after or 0))
+    _ODDS_GLOBAL_COOLDOWN_UNTIL = time.time() + wait_sec
+    print(f"[odds_fetcher] API rate-limited (429); cooling down requests for {wait_sec}s")
+
+
 def _disable_odds_api(reason: str):
     global _ODDS_API_DISABLED
     if _ODDS_API_DISABLED:
@@ -242,32 +277,68 @@ def get_live_odds(sport_key: str = "mlb", markets: str = "h2h") -> list[dict]:
         return []
 
     raw_sport = SPORT_MAP.get(sport_key.lower(), sport_key)
+    if _is_request_cooled_down(raw_sport, markets):
+        return []
+
+    tokens = [m.strip().lower() for m in str(markets or "").split(",") if m.strip()]
+    attempts: list[str] = []
+    if tokens:
+        attempts.append(",".join(tokens))
+        if len(tokens) > 1:
+            if "h2h" in tokens:
+                attempts.append("h2h")
+            if "outrights" in tokens:
+                attempts.append("outrights")
+            first = tokens[0]
+            if first not in {"h2h", "outrights"}:
+                attempts.append(first)
+    if not attempts:
+        attempts = ["h2h"]
+
+    # Preserve order, remove duplicates.
+    seen_attempts = set()
+    dedup_attempts: list[str] = []
+    for mk in attempts:
+        if mk in seen_attempts:
+            continue
+        seen_attempts.add(mk)
+        dedup_attempts.append(mk)
+
     url = f"{ODDS_API_BASE}/sports/{raw_sport}/odds"
-    params = {
-        "apiKey": ODDS_API_KEY,
-        "regions": ODDS_REGIONS,
-        "markets": markets,
-        "oddsFormat": "american",
-    }
-    try:
-        resp = requests.get(url, params=params, timeout=10)
-        _sync_budget_from_response(resp, request_cost=1)
-        remaining = resp.headers.get("x-requests-remaining", "?")
-        print(f"[odds_fetcher] Requests remaining this month: {remaining}")
-        resp.raise_for_status()
-        return resp.json()
-    except requests.HTTPError:
-        code = getattr(resp, "status_code", "?")
-        if code in (401, 403):
-            _disable_odds_api(f"HTTP {code}")
-        elif code == 429:
-            global _ODDS_BUDGET_BLOCKED_MONTH
-            _ODDS_BUDGET_BLOCKED_MONTH = _current_utc_month()
-        print(f"[odds_fetcher] fetch error: HTTP {code} for sport={raw_sport}")
-        return []
-    except Exception as e:
-        print(f"[odds_fetcher] fetch error for sport={raw_sport}: {e.__class__.__name__}")
-        return []
+    for mk in dedup_attempts:
+        if _is_request_cooled_down(raw_sport, mk):
+            continue
+        params = {
+            "apiKey": ODDS_API_KEY,
+            "regions": ODDS_REGIONS,
+            "markets": mk,
+            "oddsFormat": "american",
+        }
+        try:
+            resp = requests.get(url, params=params, timeout=10)
+            _sync_budget_from_response(resp, request_cost=1)
+            remaining = resp.headers.get("x-requests-remaining", "?")
+            print(f"[odds_fetcher] Requests remaining this month: {remaining}")
+            resp.raise_for_status()
+            return resp.json()
+        except requests.HTTPError:
+            code = getattr(resp, "status_code", "?")
+            if code in (401, 403):
+                _disable_odds_api(f"HTTP {code}")
+                return []
+            if code == 429:
+                _mark_global_rate_limit(resp)
+                return []
+            if code == 422:
+                _mark_sport_market_cooldown(raw_sport, mk, _ODDS_422_COOLDOWN_SEC)
+                print(f"[odds_fetcher] fetch error: HTTP 422 for sport={raw_sport} markets={mk} (cooldown)")
+                continue
+            print(f"[odds_fetcher] fetch error: HTTP {code} for sport={raw_sport}")
+            return []
+        except Exception as e:
+            print(f"[odds_fetcher] fetch error for sport={raw_sport}: {e.__class__.__name__}")
+            return []
+    return []
 
 
 def odds_to_dataframe(games: list[dict], preferred_book: str = "draftkings") -> pd.DataFrame:

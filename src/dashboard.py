@@ -4777,7 +4777,9 @@ def _build_multi_sport_snapshot(force_refresh: bool = False) -> dict:
         sport_group = _infer_sport_group(sport_key)
         market_query = "outrights,h2h"
         if sport_group in {"tennis", "boxing", "mma", "cricket"}:
-            market_query = "outrights,h2h,spreads,totals"
+            # These sports frequently reject mixed market bundles (422).
+            # Start with the most broadly supported market to reduce wasted calls.
+            market_query = "h2h"
         elif sport_group in {"motorsports", "golf"}:
             market_query = "outrights,h2h"
         elif sport_group not in single_person_sports:
@@ -5298,7 +5300,7 @@ def _run_all_sports_analysis():
         )
         if fallback_only:
             _log("[all-sports] Snapshot is fallback-only; using lightweight model player props")
-            sentiment_prop_rows = _build_model_player_props_fallback((games or [])[:12], max_per_game=5)
+            sentiment_prop_rows = _build_model_player_props_fallback((games or [])[:12], max_per_game=10)
         else:
             sentiment_prop_rows = _build_all_sport_sentiment_props(games, bets)
 
@@ -5309,7 +5311,7 @@ def _run_all_sports_analysis():
         )
         if not has_player_predictions:
             _log("[all-sports] No sentiment player predictions found; backfilling model player props")
-            fallback_prop_rows = _build_model_player_props_fallback((games or [])[:20], max_per_game=8)
+            fallback_prop_rows = _build_model_player_props_fallback((games or [])[:20], max_per_game=12)
             sentiment_prop_rows = _merge_all_sports_table_rows(sentiment_prop_rows, fallback_prop_rows)
 
         sentiment_prop_rows = _enforce_over_only_player_props(sentiment_prop_rows)
@@ -6796,7 +6798,7 @@ def api_cached_state():
             all_bets = _build_model_fallback_bets(all_games)
             today_games = [g for g in all_games if _row_game_date(g) == today_str]
             tomorrow_games = [g for g in all_games if _row_game_date(g) == tomorrow_str]
-            fallback_player_props = _build_model_player_props_fallback(today_games + tomorrow_games, max_per_game=5)
+            fallback_player_props = _build_model_player_props_fallback(today_games + tomorrow_games, max_per_game=10)
             fallback_best_bets = _multi_sport_best_bets_rows(all_bets)
             fallback_props = _merge_all_sports_table_rows(fallback_player_props, fallback_best_bets)
             fallback_today = [_build_card(g, all_bets, fallback_player_props, "TODAY") for g in today_games]
@@ -9212,6 +9214,41 @@ _last_live_poll_ts = 0.0
 _eod_email_sent_dates: set = set()  # track which dates have had EOD results email sent
 _cache_poll_timer = None
 _CACHE_POLL_INTERVAL = int(os.getenv("CACHE_POLL_INTERVAL_SEC", "120"))
+_last_prediction_restudy_ts = 0.0
+
+
+def _maybe_schedule_day_roll_reanalysis(cache_iso: str | None, today_cards: list[dict], tomorrow_cards: list[dict]) -> None:
+    """Kick off a fresh all-sports analysis after midnight so tomorrow's slate is re-evaluated as today."""
+    global _last_prediction_restudy_ts
+    if _ACTIVE_SPORT != "all":
+        return
+    if not (today_cards or tomorrow_cards):
+        return
+    if _state.get("status") == "running":
+        return
+
+    try:
+        cache_dt = datetime.datetime.fromisoformat(str(cache_iso or "")) if cache_iso else None
+    except Exception:
+        cache_dt = None
+
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    today_date = _et_calendar_today()
+    should_refresh = False
+    if cache_dt is not None:
+        cache_day = cache_dt.date() if cache_dt.tzinfo else cache_dt.date()
+        if cache_day != today_date:
+            should_refresh = True
+
+    if not should_refresh:
+        return
+
+    if (time.time() - float(_last_prediction_restudy_ts or 0.0)) < 6 * 60 * 60:
+        return
+
+    _last_prediction_restudy_ts = time.time()
+    print(f"[cache-sync] Day rollover detected at {now_utc.isoformat()} — re-running analysis for today/tomorrow cards")
+    threading.Thread(target=_run_analysis, daemon=True).start()
 
 
 def _sync_state_from_cache(broadcast: bool = False) -> bool:
@@ -9243,6 +9280,7 @@ def _sync_state_from_cache(broadcast: bool = False) -> bool:
             })
             if cache_iso:
                 _state["last_updated_ts"] = cache_iso
+        _maybe_schedule_day_roll_reanalysis(cache_iso, today_cards, tomorrow_cards)
         if broadcast:
             _sse_broadcast("state_update", {
                 "status":              "done",
@@ -10268,7 +10306,7 @@ def _load_boot_schedule_fallback() -> bool:
                     all_games = merged
 
             all_bets = _build_model_fallback_bets(all_games)
-            boot_player_props = _build_model_player_props_fallback(all_games, max_per_game=5)
+            boot_player_props = _build_model_player_props_fallback(all_games, max_per_game=10)
             boot_best_bets = _multi_sport_best_bets_rows(all_bets)
             boot_props = _merge_all_sports_table_rows(boot_player_props, boot_best_bets)
             today_games = [g for g in all_games if _row_game_date(g) == today_str]

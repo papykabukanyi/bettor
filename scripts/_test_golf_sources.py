@@ -1,5 +1,6 @@
 import os
 import sys
+import math
 
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -33,8 +34,15 @@ def main() -> int:
     assert "sg_approach" in ctx
     assert "course_fit" in ctx
     assert "recent_form" in ctx
+    assert math.isfinite(float(ctx.get("sg_total") or 0.0))
+    assert math.isfinite(float(ctx.get("sg_approach") or 0.0))
     assert isinstance(history, dict)
     assert "game_rows" in history and "player_rows" in history and "injury_rows" in history
+    assert isinstance(history.get("game_rows") or [], list)
+    assert isinstance(history.get("player_rows") or [], list)
+    if refs:
+        first_ref = refs[0]
+        assert "game_key" in first_ref or "player_name" in first_ref
 
     print("Golf source smoke test passed.")
     return 0
