@@ -5491,6 +5491,40 @@ def _build_multi_sport_snapshot(force_refresh: bool = False) -> dict:
     games: list[dict] = []
     bets: list[dict] = []
 
+    # ── Pre-fetch ESPN tennis h2h matches (free, always run) ─────────────────
+    # These give us real player names for matches the Odds API doesn't have h2h for.
+    _espn_tennis_h2h: dict[str, dict] = {}  # match_key -> game dict
+    try:
+        from data.tennis_data_sources import fetch_espn_tennis_live_bundle
+        _espn_bundle = fetch_espn_tennis_live_bundle(today)
+        for item in (_espn_bundle.get("games") or []):
+            ev = item.get("event") or {}
+            comp = (ev.get("competitions") or [{}])[0]
+            competitors = comp.get("competitors") or []
+            if len(competitors) < 2:
+                continue
+            home_c = next((c for c in competitors if str(c.get("homeAway") or "").lower() == "home"), competitors[0])
+            away_c = next((c for c in competitors if str(c.get("homeAway") or "").lower() == "away"), competitors[1])
+            espn_home = str(((home_c.get("athlete") or {}).get("displayName") or (home_c.get("team") or {}).get("displayName") or home_c.get("displayName") or "")).strip()
+            espn_away = str(((away_c.get("athlete") or {}).get("displayName") or (away_c.get("team") or {}).get("displayName") or away_c.get("displayName") or "")).strip()
+            if not espn_home or not espn_away:
+                continue
+            espn_league = str(item.get("league") or "Tennis")
+            iso_dt = str(ev.get("date") or comp.get("date") or "").strip()
+            espn_date, espn_time = _datetime_to_et_parts(iso_dt)
+            mk = _norm_gk(f"{espn_away}@{espn_home}")
+            _espn_tennis_h2h[mk] = {
+                "home": espn_home, "away": espn_away,
+                "league": espn_league, "game_datetime": iso_dt,
+                "game_date": espn_date or today.isoformat(),
+                "game_time": espn_time,
+                "home_score": _as_score_int(home_c.get("score")),
+                "away_score": _as_score_int(away_c.get("score")),
+            }
+        _log(f"[all-sports] ESPN tennis pre-fetch: {len(_espn_tennis_h2h)} h2h matches")
+    except Exception as _espn_pre_err:
+        _log(f"[all-sports] ESPN tennis pre-fetch failed: {_espn_pre_err}")
+
     golf_market_label = {
         "outrights": "outright_winner",
         "h2h": "head_to_head",
@@ -5577,30 +5611,80 @@ def _build_multi_sport_snapshot(force_refresh: bool = False) -> dict:
             ).strip() or title
 
             is_single_person_event = sport_group in single_person_sports
-            if is_single_person_event and (not home or not away):
+            _is_field_val = lambda s: str(s or "").strip().lower() in {"field", "the field", ""}
+
+            # Detect when home_team IS the tournament name (outright market masquerading
+            # as a matchup). For WTA/ATP Challenger events the Odds API has no h2h data
+            # so returns tournament-winner outrights with home_team = tournament title.
+            _title_norm = re.sub(r"\s+", " ", title.strip().lower())
+            _home_norm = re.sub(r"\s+", " ", str(home or "").strip().lower())
+            _is_tournament_outright = (
+                sport_group == "tennis"
+                and (
+                    _is_field_val(away)
+                    or _home_norm == _title_norm
+                    or (len(_home_norm) > 6 and _home_norm in _title_norm)
+                    or (len(_title_norm) > 6 and _title_norm in _home_norm)
+                )
+            )
+
+            if _is_tournament_outright and books:
+                # Extract real player names ranked by highest implied probability.
+                _outright_players: list[tuple[str, int, float]] = []  # (name, odds_am, raw_prob)
+                for _mk in (books[0].get("markets") or []):
+                    _mk_key = str((_mk or {}).get("key") or "").strip().lower()
+                    if _mk_key not in {"outrights", "winner", "h2h"}:
+                        continue
+                    for _out in (_mk.get("outcomes") or []):
+                        _nm = str((_out or {}).get("name") or "").strip()
+                        _pr = _out.get("price")
+                        if not _nm or _pr is None:
+                            continue
+                        if _nm.lower() in {"field", "the field"} or re.sub(r"\s+", " ", _nm.lower()) == _title_norm:
+                            continue
+                        try:
+                            _ip = _prob_from_american(float(_pr))
+                            if _ip is not None:
+                                _outright_players.append((_nm, int(float(_pr)), float(_ip)))
+                        except Exception:
+                            continue
+                    if _outright_players:
+                        break
+                # Sort by probability (highest first) and pick top 2 for the "matchup" card.
+                _outright_players.sort(key=lambda x: x[2], reverse=True)
+                if len(_outright_players) >= 1:
+                    home = _outright_players[0][0]
+                if len(_outright_players) >= 2:
+                    away = _outright_players[1][0]
+                elif not _is_field_val(away) and not (_is_tournament_outright and _home_norm == _title_norm):
+                    pass  # away is already a real value
+                else:
+                    away = _outright_players[0][0] if _outright_players else away
+
+            elif is_single_person_event and (not home or not away or _is_field_val(home) or _is_field_val(away)):
                 left, right = _derive_individual_matchup(event_title)
-                if not home and left:
+                if (not home or _is_field_val(home)) and left:
                     home = left
-                if not away and right:
+                if (not away or _is_field_val(away)) and right:
                     away = right
 
-            if is_single_person_event and (not home or not away) and books:
+            if is_single_person_event and (not home or not away or _is_field_val(home) or _is_field_val(away)) and books:
                 try:
                     markets_for_names = books[0].get("markets") or []
                     outcome_names: list[str] = []
-                    for mk in markets_for_names:
-                        mk_key = str((mk or {}).get("key") or "").strip().lower()
-                        if mk_key not in {"h2h", "winner", "outrights"}:
+                    for mk_n in markets_for_names:
+                        mk_key_n = str((mk_n or {}).get("key") or "").strip().lower()
+                        if mk_key_n not in {"h2h", "winner", "outrights"}:
                             continue
-                        for out in (mk.get("outcomes") or []):
+                        for out in (mk_n.get("outcomes") or []):
                             nm = str((out or {}).get("name") or (out or {}).get("description") or "").strip()
-                            if nm and nm not in outcome_names:
+                            if nm and nm.lower() not in {"field", "the field"} and re.sub(r"\s+", " ", nm.lower()) != _title_norm and nm not in outcome_names:
                                 outcome_names.append(nm)
                         if len(outcome_names) >= 2:
                             break
-                    if not home and outcome_names:
+                    if (not home or _is_field_val(home)) and outcome_names:
                         home = outcome_names[0]
-                    if not away and len(outcome_names) >= 2:
+                    if (not away or _is_field_val(away)) and len(outcome_names) >= 2:
                         away = outcome_names[1]
                 except Exception:
                     pass
@@ -5718,6 +5802,39 @@ def _build_multi_sport_snapshot(force_refresh: bool = False) -> dict:
                     }
                     bets.append(bet)
 
+    # ── Merge ESPN tennis h2h matches that have no Odds API h2h equivalent ──
+    # This adds real player-vs-player matchups that the Odds API only covers as outrights.
+    _games_match_keys = {_norm_gk(str(g.get("match_key") or "")) for g in games}
+    _espn_added = 0
+    for _mk, _eg in _espn_tennis_h2h.items():
+        if _mk in _games_match_keys:
+            continue
+        if _eg.get("game_date") not in allowed_dates:
+            continue
+        _espn_gk = _compose_game_key(_eg["away"], _eg["home"], _eg.get("game_datetime"), _eg.get("game_date"), _eg.get("game_time"))
+        games.append({
+            "sport": "tennis",
+            "league": _eg.get("league") or "Tennis",
+            "competition": "espn_tennis_live",
+            "competition_name": _eg.get("league") or "Tennis",
+            "event_title": f"{_eg['away']} vs {_eg['home']}",
+            "home_team": _eg["home"],
+            "away_team": _eg["away"],
+            "date": _eg.get("game_date") or today.isoformat(),
+            "game_date": _eg.get("game_date") or today.isoformat(),
+            "game_time": _eg.get("game_time"),
+            "game_datetime": _eg.get("game_datetime"),
+            "status": "Scheduled",
+            "source": "espn_tennis_live",
+            "match_key": _mk,
+            "game_key": _espn_gk,
+            "home_score": _eg.get("home_score"),
+            "away_score": _eg.get("away_score"),
+        })
+        _espn_added += 1
+    if _espn_added:
+        _log(f"[all-sports] ESPN tennis added {_espn_added} h2h matches not in Odds feed")
+
     # If odds feed failed, backfill games from free sources.
     if not games:
         fallback_games = _collect_fallback_games_for_all_sports(today, tomorrow)
@@ -5823,28 +5940,114 @@ def _build_multi_sport_snapshot(force_refresh: bool = False) -> dict:
                 if _infer_sport_group(g.get("sport") or g.get("competition") or g.get("league") or "") == "tennis"
             ]
             if tennis_games:
-                from data.tennis_data_sources import build_tennis_prediction_context, load_tennis_reference_rows
+                from data.tennis_data_sources import (
+                    build_tennis_prediction_context,
+                    load_tennis_reference_rows,
+                    compute_player_elos,
+                    elo_win_probability,
+                    _DEFAULT_ELO,
+                )
 
                 tennis_reference_rows = load_tennis_reference_rows()
+
+                # Pre-compute global Elo table from all historical reference data.
+                _all_elos = compute_player_elos(tennis_reference_rows)
+
+                def _infer_surface_from_tournament(name: str) -> str:
+                    n = str(name or "").lower()
+                    if any(k in n for k in ("clay", "terre", "roland", "monte", "madrid", "rome", "barcelona", "hamburg", "brescia", "figueira", "itf", "open de")):
+                        return "clay"
+                    if any(k in n for k in ("wimbledon", "grass", "queens", "halle", "s-hertogenbosch", "eastbourne", "nottingham")):
+                        return "grass"
+                    if any(k in n for k in ("hard", "australian open", "us open", "indian wells", "miami", "canada", "cincinnati", "dubai", "doha")):
+                        return "hard"
+                    return ""
+
                 enriched_tennis = 0
                 for g in tennis_games:
+                    home_player = str(g.get("home_team") or "")
+                    away_player = str(g.get("away_team") or "")
+                    # Skip cards that still have no real player name
+                    if not home_player or not away_player:
+                        continue
+
+                    # Infer surface if not already known
+                    surface = str(g.get("surface") or g.get("court_surface") or g.get("venue_surface") or "").strip()
+                    if not surface:
+                        surface = _infer_surface_from_tournament(
+                            g.get("competition_name") or g.get("league") or g.get("event_title") or ""
+                        )
+
                     ctx = build_tennis_prediction_context(
-                        home_player=str(g.get("home_team") or ""),
-                        away_player=str(g.get("away_team") or ""),
-                        surface=str(g.get("surface") or g.get("court_surface") or g.get("venue_surface") or ""),
+                        home_player=home_player,
+                        away_player=away_player,
+                        surface=surface,
                         match_date=str(g.get("game_date") or g.get("date") or ""),
                         reference_rows=tennis_reference_rows,
                     )
                     if ctx:
                         g["tennis_context"] = ctx
                         g.update({
-                            "surface": ctx.get("surface") or g.get("surface"),
+                            "surface": ctx.get("surface") or surface or g.get("surface"),
                             "rank_diff": ctx.get("rank_diff") if ctx.get("rank_diff") is not None else g.get("rank_diff"),
                             "recent_form_gap": ctx.get("recent_form_gap"),
                             "fatigue_home_days": ctx.get("fatigue_home_days"),
                             "fatigue_away_days": ctx.get("fatigue_away_days"),
                         })
+
+                        # Re-score bets for this match using Elo-blended win probability.
+                        gk = str(g.get("game_key") or "").strip()
+                        home_p = _norm_gk(home_player.lower())
+                        away_p = _norm_gk(away_player.lower())
+                        win_prob_home = float(ctx.get("win_prob_home") or 0.5)
+                        win_prob_away = float(ctx.get("win_prob_away") or 0.5)
+                        for bet in bets:
+                            if _norm_gk(str(bet.get("game_key") or "").strip()) != gk:
+                                continue
+                            pick_n = _norm_gk(str(bet.get("pick") or "").lower())
+                            if pick_n and home_p and (pick_n == home_p or pick_n in home_p or home_p in pick_n):
+                                new_prob = round(max(0.50, min(0.98, win_prob_home)), 4)
+                            elif pick_n and away_p and (pick_n == away_p or pick_n in away_p or away_p in pick_n):
+                                new_prob = round(max(0.50, min(0.98, win_prob_away)), 4)
+                            else:
+                                continue
+                            bet["model_prob"] = new_prob
+                            bet["confidence"] = int(round(new_prob * 100))
+                            bet["safety_label"] = _safety_label_from_prob(new_prob)
+                            bet["safety"] = _safety_score_from_label(bet["safety_label"])
+
                         enriched_tennis += 1
+                    else:
+                        # No historical data — use raw Elo if available, else raw odds as-is.
+                        surf_key = (surface or "hard").strip().lower()
+                        if surf_key not in {"hard", "clay", "grass", "carpet"}:
+                            surf_key = "hard"
+                        home_norm_key = next((k for k in _all_elos if re.sub(r"\s+", "", k.lower()) == re.sub(r"\s+", "", home_player.lower())), None)
+                        away_norm_key = next((k for k in _all_elos if re.sub(r"\s+", "", k.lower()) == re.sub(r"\s+", "", away_player.lower())), None)
+                        if home_norm_key or away_norm_key:
+                            he = (_all_elos.get(home_norm_key or "") or {}).get(surf_key, _DEFAULT_ELO)
+                            ae = (_all_elos.get(away_norm_key or "") or {}).get(surf_key, _DEFAULT_ELO)
+                            elo_p_home = elo_win_probability(he, ae)
+                            minimal_ctx = {
+                                "surface": surface,
+                                "home_player": home_player,
+                                "away_player": away_player,
+                                "elo_home": he,
+                                "elo_away": ae,
+                                "elo_prob_home": elo_p_home,
+                                "elo_prob_away": round(1.0 - elo_p_home, 4),
+                                "win_prob_home": elo_p_home,
+                                "win_prob_away": round(1.0 - elo_p_home, 4),
+                                "surface_win_rate_home": 0.5,
+                                "surface_win_rate_away": 0.5,
+                                "recent_form_home": 0.5,
+                                "recent_form_away": 0.5,
+                                "h2h_record_surface_home": 0,
+                                "h2h_record_surface_away": 0,
+                            }
+                            g["tennis_context"] = minimal_ctx
+                            g.update({"surface": surface or g.get("surface")})
+
                 _log(f"[all-sports] Tennis context enriched: {enriched_tennis} games")
         except Exception as _tennis_enrich_err:
             _log(f"[all-sports] Tennis enrichment skipped: {_tennis_enrich_err}")

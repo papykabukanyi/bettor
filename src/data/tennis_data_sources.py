@@ -427,6 +427,28 @@ def build_tennis_prediction_context(
         if away in {_norm(r.get("winner_name") or r.get("home_team") or r.get("player_name")), _norm(r.get("loser_name") or r.get("away_team"))}
     ), None)
 
+    # ── Elo-based win probability (surface-specific) ─────────────────────────
+    elos = compute_player_elos(refs)
+    _home_elo_key = next((k for k in elos if _norm(k) == home), None)
+    _away_elo_key = next((k for k in elos if _norm(k) == away), None)
+
+    surf_key = surface_norm if surface_norm in _ELO_SURFACES else "hard"
+    home_elo_surf = elos.get(_home_elo_key or "", {}).get(surf_key, _DEFAULT_ELO) if _home_elo_key else _DEFAULT_ELO
+    away_elo_surf = elos.get(_away_elo_key or "", {}).get(surf_key, _DEFAULT_ELO) if _away_elo_key else _DEFAULT_ELO
+    home_elo_overall = elos.get(_home_elo_key or "", {}).get("overall", _DEFAULT_ELO) if _home_elo_key else _DEFAULT_ELO
+    away_elo_overall = elos.get(_away_elo_key or "", {}).get("overall", _DEFAULT_ELO) if _away_elo_key else _DEFAULT_ELO
+    home_elo_matches = int(elos.get(_home_elo_key or "", {}).get("matches", 0)) if _home_elo_key else 0
+    away_elo_matches = int(elos.get(_away_elo_key or "", {}).get("matches", 0)) if _away_elo_key else 0
+
+    elo_prob_home = elo_win_probability(home_elo_surf, away_elo_surf)
+
+    # Blend Elo (data-quality-weighted) with surface win rate for robustness.
+    # Weight Elo more heavily as we accumulate more historical matches.
+    data_confidence = min(1.0, (home_elo_matches + away_elo_matches) / 60.0)
+    elo_weight = 0.35 + 0.45 * data_confidence  # 0.35 → 0.80 as matches accumulate
+    win_prob_home = round(elo_weight * elo_prob_home + (1.0 - elo_weight) * home_surface_rate, 4)
+    win_prob_away = round(1.0 - win_prob_home, 4)
+
     return {
         "surface": surface_norm or surface,
         "home_player": home_player,
@@ -447,6 +469,17 @@ def build_tennis_prediction_context(
         "fatigue_home_days": _days_since(home_last_date),
         "fatigue_away_days": _days_since(away_last_date),
         "recent_form_gap": round(home_recent - away_recent, 4),
+        # Elo fields
+        "elo_home": home_elo_surf,
+        "elo_away": away_elo_surf,
+        "elo_home_overall": home_elo_overall,
+        "elo_away_overall": away_elo_overall,
+        "elo_matches_home": home_elo_matches,
+        "elo_matches_away": away_elo_matches,
+        "elo_prob_home": elo_prob_home,
+        "elo_prob_away": round(1.0 - elo_prob_home, 4),
+        "win_prob_home": win_prob_home,
+        "win_prob_away": win_prob_away,
     }
 
 
@@ -604,3 +637,81 @@ def build_tennis_history_rows(raw_rows: list[dict[str, Any]]) -> dict[str, list[
         pair_surface_wins[pair_key][0] += 1
 
     return {"game_rows": game_rows, "player_rows": player_rows}
+
+
+# ── Surface-specific Elo rating system ─────────────────────────────────────
+# Based on the well-established Elo method used by FiveThirtyEight for tennis.
+# K-factor adapts by experience; surface-specific ratings capture court preferences.
+
+_DEFAULT_ELO = 1500.0
+_ELO_K_BASE = 32.0          # K-factor for < 30 career matches (high learning rate)
+_ELO_K_EXPERIENCED = 24.0   # K-factor for 30+ matches (stable ratings)
+_ELO_SURFACES = ("hard", "clay", "grass", "carpet")
+
+
+def _elo_expected(rating_a: float, rating_b: float) -> float:
+    return 1.0 / (1.0 + 10.0 ** ((rating_b - rating_a) / 400.0))
+
+
+def elo_win_probability(elo_a: float, elo_b: float) -> float:
+    """Win probability for player A given their Elo vs player B's Elo."""
+    return round(_elo_expected(float(elo_a or _DEFAULT_ELO), float(elo_b or _DEFAULT_ELO)), 4)
+
+
+def compute_player_elos(
+    reference_rows: list[dict[str, Any]],
+) -> dict[str, dict[str, float]]:
+    """Compute surface-specific Elo ratings from historical match rows (chronological).
+
+    Returns {player_name: {overall, hard, clay, grass, carpet, matches}}.
+    """
+    elos: dict[str, dict[str, float]] = {}
+    match_counts: dict[str, dict[str, int]] = {}
+
+    def _get(player: str, surf: str) -> float:
+        return elos.setdefault(player, {}).get(surf, _DEFAULT_ELO)
+
+    def _set(player: str, surf: str, val: float) -> None:
+        elos.setdefault(player, {})[surf] = round(val, 2)
+
+    def _cnt(player: str, surf: str) -> int:
+        mc = match_counts.setdefault(player, {})
+        mc[surf] = mc.get(surf, 0) + 1
+        return mc[surf]
+
+    for row in reference_rows:
+        winner = str(row.get("winner_name") or row.get("home_team") or "").strip()
+        loser = str(row.get("loser_name") or row.get("away_team") or "").strip()
+        if not winner or not loser:
+            continue
+
+        surf = str(row.get("surface") or "").strip().lower()
+        if surf not in _ELO_SURFACES:
+            surf = "hard"
+
+        # Surface-specific Elo update
+        ew = _get(winner, surf)
+        el = _get(loser, surf)
+        exp_w = _elo_expected(ew, el)
+        wc = _cnt(winner, surf)
+        lc = _cnt(loser, surf)
+        k_w = _ELO_K_EXPERIENCED if wc > 30 else _ELO_K_BASE
+        k_l = _ELO_K_EXPERIENCED if lc > 30 else _ELO_K_BASE
+        _set(winner, surf, ew + k_w * (1.0 - exp_w))
+        _set(loser, surf, el + k_l * (0.0 - (1.0 - exp_w)))
+
+        # Overall cross-surface Elo
+        ew_ov = _get(winner, "overall")
+        el_ov = _get(loser, "overall")
+        exp_w_ov = _elo_expected(ew_ov, el_ov)
+        wc_ov = _cnt(winner, "overall")
+        lc_ov = _cnt(loser, "overall")
+        k_w_ov = _ELO_K_EXPERIENCED if wc_ov > 30 else _ELO_K_BASE
+        k_l_ov = _ELO_K_EXPERIENCED if lc_ov > 30 else _ELO_K_BASE
+        _set(winner, "overall", ew_ov + k_w_ov * (1.0 - exp_w_ov))
+        _set(loser, "overall", el_ov + k_l_ov * (0.0 - (1.0 - exp_w_ov)))
+
+    for player, surf_elos in elos.items():
+        surf_elos["matches"] = match_counts.get(player, {}).get("overall", 0)
+
+    return elos

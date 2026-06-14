@@ -3118,12 +3118,37 @@ function gameCard(c) {
     <div class="matchup">
       <div class="team-side">
         <div class="team-name">${c.away_team}</div>
-        <div class="team-starter">&#9918; ${c.away_starter||'TBD'}</div>
+        ${sportMeta.key === 'tennis'
+          ? (() => {
+              const rA = c.tennis_context?.rank_away;
+              const wpA = c.tennis_context?.win_prob_away;
+              const eloA = c.tennis_context?.elo_away;
+              const parts = [];
+              if (rA != null) parts.push('Rank #' + rA);
+              if (eloA != null) parts.push('Elo ' + Math.round(eloA));
+              if (wpA != null) parts.push(Math.round(wpA * 100) + '% win');
+              return `<div class="team-starter" style="color:${wpA != null && wpA >= 0.5 ? 'var(--green)' : 'var(--muted)'}">🎾 ${parts.length ? parts.join(' · ') : (c.surface ? c.surface.charAt(0).toUpperCase()+c.surface.slice(1) : 'Player')}</div>`;
+            })()
+          : `<div class="team-starter">&#9918; ${c.away_starter||'TBD'}</div>`}
       </div>
-      <div class="vs">vs</div>
+      <div class="vs">
+        <div>vs</div>
+        ${sportMeta.key === 'tennis' && c.surface ? `<div style="font-size:.62rem;color:var(--muted);margin-top:2px">${c.surface.charAt(0).toUpperCase()+c.surface.slice(1)}</div>` : ''}
+      </div>
       <div class="team-side away">
         <div class="team-name">${c.home_team}</div>
-        <div class="team-starter">&#9918; ${c.home_starter||'TBD'}</div>
+        ${sportMeta.key === 'tennis'
+          ? (() => {
+              const rH = c.tennis_context?.rank_home;
+              const wpH = c.tennis_context?.win_prob_home;
+              const eloH = c.tennis_context?.elo_home;
+              const parts = [];
+              if (rH != null) parts.push('Rank #' + rH);
+              if (eloH != null) parts.push('Elo ' + Math.round(eloH));
+              if (wpH != null) parts.push(Math.round(wpH * 100) + '% win');
+              return `<div class="team-starter" style="color:${wpH != null && wpH >= 0.5 ? 'var(--green)' : 'var(--muted)'}">🎾 ${parts.length ? parts.join(' · ') : (c.surface ? c.surface.charAt(0).toUpperCase()+c.surface.slice(1) : 'Player')}</div>`;
+            })()
+          : `<div class="team-starter">&#9918; ${c.home_starter||'TBD'}</div>`}
       </div>
     </div>
     <div class="card-statline">${predictionSummary}</div>
@@ -3178,8 +3203,20 @@ function _tennisInsightsPanel(c, phase) {
   }
 
   const ra = t.rank_away, rh = t.rank_home;
+  // Elo display helpers
+  const eloA = t.elo_away, eloH = t.elo_home;
+  const eloAov = t.elo_away_overall, eloHov = t.elo_home_overall;
+  const eloProbA = t.elo_prob_away != null ? Math.round(t.elo_prob_away * 100) : null;
+  const eloProbH = t.elo_prob_home != null ? Math.round(t.elo_prob_home * 100) : null;
+  const winProbA = t.win_prob_away != null ? Math.round(t.win_prob_away * 100) : null;
+  const winProbH = t.win_prob_home != null ? Math.round(t.win_prob_home * 100) : null;
+  const eloMatchesA = t.elo_matches_away, eloMatchesH = t.elo_matches_home;
+
   const rows = [
     row('Rank', ra != null ? '#' + ra : '—', rh != null ? '#' + rh : '—', ra, rh, 'low'),
+    row('Elo (' + surfaceLabel + ')', eloA != null ? Math.round(eloA) : '—', eloH != null ? Math.round(eloH) : '—', eloA, eloH, 'high'),
+    row('Elo (Overall)', eloAov != null ? Math.round(eloAov) : '—', eloHov != null ? Math.round(eloHov) : '—', eloAov, eloHov, 'high'),
+    row('Elo Win Prob', eloProbA != null ? eloProbA + '%' : '—', eloProbH != null ? eloProbH + '%' : '—', eloProbA, eloProbH, 'high'),
     row('Recent Form (L5)', _fmtPct01(t.recent_form_away), _fmtPct01(t.recent_form_home), t.recent_form_away, t.recent_form_home, 'high'),
     row(surfaceLabel + ' Win %', _fmtPct01(t.surface_win_rate_away), _fmtPct01(t.surface_win_rate_home), t.surface_win_rate_away, t.surface_win_rate_home, 'high'),
     row('Surface Matches', t.surface_matches_away != null ? t.surface_matches_away : '—', t.surface_matches_home != null ? t.surface_matches_home : '—', null, null, ''),
@@ -3190,14 +3227,30 @@ function _tennisInsightsPanel(c, phase) {
     row('Rest (days)', t.fatigue_away_days != null ? t.fatigue_away_days : '—', t.fatigue_home_days != null ? t.fatigue_home_days : '—', null, null, ''),
   ].join('');
 
-  // Model prediction / lean for the match
+  // Model prediction — prefer Elo-blended win prob, fall back to pick or lean
   const pick = _primaryCardPrediction(c, phase);
   let predHtml;
+  const blendedFavName = winProbH != null && winProbA != null
+    ? (winProbH >= winProbA ? homeName : awayName)
+    : null;
+  const blendedProb = winProbH != null && winProbA != null
+    ? Math.max(winProbH, winProbA) : null;
+
   if (pick) {
+    const eloNote = blendedProb != null
+      ? `<span style="color:var(--muted);font-size:.74rem"> · Elo model: ${blendedProb}% ${blendedFavName}</span>`
+      : '';
     predHtml = `<div style="padding:9px 11px;margin:8px;background:rgba(46,160,67,.07);border:1px solid rgba(46,160,67,.18);border-radius:8px">
-      <div style="font-size:.66rem;color:var(--muted);text-transform:uppercase;letter-spacing:.5px">Model Prediction</div>
+      <div style="font-size:.66rem;color:var(--muted);text-transform:uppercase;letter-spacing:.5px">Model Prediction · Elo + Form + Surface</div>
       <div style="font-weight:800;color:${pick.color};margin-top:2px">${pick.emoji} ${pick.label}</div>
-      <div style="font-size:.8rem;margin-top:2px;color:${pick.prob >= 60 ? 'var(--green)' : 'var(--accent)'}">${pick.prob}% confident &middot; ${pick.odds}</div>
+      <div style="font-size:.8rem;margin-top:2px;color:${pick.prob >= 60 ? 'var(--green)' : 'var(--accent)'}">${pick.prob}% confident &middot; ${pick.odds}${eloNote}</div>
+    </div>`;
+  } else if (blendedFavName && blendedProb != null) {
+    const color = blendedProb >= 65 ? 'var(--green)' : blendedProb >= 55 ? 'var(--accent)' : 'var(--yellow)';
+    predHtml = `<div style="padding:9px 11px;margin:8px;background:rgba(88,166,255,.06);border:1px solid rgba(88,166,255,.18);border-radius:8px">
+      <div style="font-size:.66rem;color:var(--muted);text-transform:uppercase;letter-spacing:.5px">Elo + Form + Surface Projection</div>
+      <div style="font-weight:800;color:${color};margin-top:2px">🎾 ${blendedFavName} — ${blendedProb}% win probability</div>
+      <div style="font-size:.78rem;margin-top:2px;color:var(--muted)">Based on surface Elo (${eloMatchesA != null && eloMatchesH != null ? Math.max(eloMatchesA,eloMatchesH) + ' career matches' : 'historical data'}), recent form &amp; H2H</div>
     </div>`;
   } else {
     const leanHome = Number(t.recent_form_gap || 0) + (t.rank_diff != null ? (Number(t.rank_diff) > 0 ? 0.05 : -0.05) : 0);
@@ -3205,7 +3258,7 @@ function _tennisInsightsPanel(c, phase) {
     predHtml = `<div style="padding:9px 11px;margin:8px;background:rgba(88,166,255,.06);border:1px solid rgba(88,166,255,.18);border-radius:8px">
       <div style="font-size:.66rem;color:var(--muted);text-transform:uppercase;letter-spacing:.5px">Model Lean</div>
       <div style="font-weight:800;color:var(--accent);margin-top:2px">🎾 ${favName} favored on form &amp; ranking</div>
-      <div style="font-size:.78rem;margin-top:2px;color:var(--muted)">Live odds pending — projection from historical context</div>
+      <div style="font-size:.78rem;margin-top:2px;color:var(--muted)">Elo ratings building — more historical data needed for full projection</div>
     </div>`;
   }
 
