@@ -11133,6 +11133,24 @@ def _scheduled_analysis(force: bool = False, lock_today: bool = False):
     threading.Thread(target=_run_analysis, args=(lock_date,), daemon=True).start()
 
 
+def _scheduled_hf_push():
+    """Daily job: sync all sport data from PostgreSQL → HuggingFace dataset repo."""
+    def _run():
+        print(f"[hf-push] Starting daily HuggingFace data sync at {datetime.datetime.now().strftime('%H:%M')}")
+        try:
+            from data.hf_uploader import HFUploader
+            up = HFUploader()
+            if not up._ok:
+                print("[hf-push] Uploader not ready (missing key or libs) — skipping")
+                return
+            up.sync_from_db()
+            up.flush_all()
+            print("[hf-push] Daily sync complete → https://huggingface.co/datasets/papylove/sportprediction")
+        except Exception as exc:
+            print(f"[hf-push] Error during daily sync: {exc}")
+    threading.Thread(target=_run, daemon=True, name="hf-daily-push").start()
+
+
 def _start_scheduler():
     try:
         from apscheduler.schedulers.background import BackgroundScheduler
@@ -11213,6 +11231,18 @@ def _start_scheduler():
                 misfire_grace_time=120,
             )
 
+        # ── Daily HuggingFace data push (4:15 AM ET) ───────────────────────
+        # Runs after all settlement and backfill jobs are done so the dataset
+        # always contains a complete, settled snapshot of the day's data.
+        sched.add_job(
+            _scheduled_hf_push,
+            CronTrigger(hour=4, minute=15, timezone="America/New_York"),
+            id="daily_hf_push",
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=_SCHED_MISFIRE_GRACE_SEC,
+        )
+
         sched.start()
         if _AUTO_ANALYSIS_INTERVAL_MIN > 0:
             print(f"[scheduler] APScheduler started — analysis every {_AUTO_ANALYSIS_INTERVAL_MIN} minutes")
@@ -11226,6 +11256,7 @@ def _start_scheduler():
                 f"at {_AUTO_BACKFILL_HOUR_ET:02d}:{_AUTO_BACKFILL_MINUTE_ET:02d} ET "
                 f"(days={_AUTO_BACKFILL_DAYS})"
             )
+        print("[scheduler] Daily HuggingFace push scheduled at 04:15 ET → papylove/sportprediction")
         print(
             "[scheduler] Polymarket auto TP "
             f"enabled={bool(_poly_tp_runtime.get('enabled', _POLY_TP_ENABLED))} "
