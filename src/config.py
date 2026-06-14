@@ -62,8 +62,9 @@ REDDIT_CLIENT_ID     = os.getenv("REDDIT_CLIENT_ID", "")
 REDDIT_CLIENT_SECRET = os.getenv("REDDIT_CLIENT_SECRET", "")
 REDDIT_USER_AGENT    = os.getenv("REDDIT_USER_AGENT", "bettor-bot/1.0")
 
-# Hugging Face (sentiment scoring via Inference API)
+# Hugging Face (sentiment scoring via Inference API + dataset hub)
 HF_API_KEY = os.getenv("HF_API_KEY", "")
+HF_DATASET_REPO = os.getenv("HF_DATASET_REPO", "sports-dataset")
 
 # Discord (sentiment)
 DISCORD_BOT_TOKEN      = os.getenv("DISCORD_BOT_TOKEN", "")

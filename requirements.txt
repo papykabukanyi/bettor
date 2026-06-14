@@ -46,3 +46,8 @@ websockets>=12.0
 # Polymarket CLOB trading client
 py-clob-client
 
+# Hugging Face dataset push / streaming
+huggingface_hub>=0.20.0
+datasets>=2.14.0
+pyarrow>=12.0.0
+
