@@ -56,6 +56,14 @@ LOG_PATH = os.path.join(ROOT_DIR, "data", "polymarket_autobet.log")
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 os.makedirs(os.path.join(ROOT_DIR, "data"), exist_ok=True)
+
+# Force UTF-8 on Windows stdout so box-drawing chars don't crash
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -65,6 +73,8 @@ logging.basicConfig(
     ],
 )
 log = logging.getLogger("autobet")
+
+DASHBOARD_PORT = int(os.getenv("PORT", "5000") or "5000")
 
 _shutdown = False
 
@@ -110,27 +120,71 @@ def _bet_key(market_slug: str, side: str) -> str:
 def _collect_predictions() -> list[dict[str, Any]]:
     """Gather today's predictions from the database, then normalise for Polymarket resolution."""
     raw: list[dict[str, Any]] = []
+    import datetime as _dt
+    today_iso = _dt.date.today().isoformat()
 
-    # Primary: DB layer — today's predictions
+    # 1. DB layer — today's predictions
     try:
         from data.db import get_predictions
-        import datetime as _dt
-        today_iso = _dt.date.today().isoformat()
         preds = get_predictions(days=1)
         for p in (preds or []):
             if not isinstance(p, dict):
                 continue
-            # Restrict to today
             if str(p.get("game_date") or "")[:10] < today_iso:
                 continue
             prob = float(p.get("model_prob") or p.get("probability") or 0.0)
             if prob * 100 >= AUTOBET_MIN_CONFIDENCE:
                 raw.append(p)
-        log.info(f"[predictions] Loaded {len(raw)} from DB (today, ≥{AUTOBET_MIN_CONFIDENCE}% conf)")
+        if raw:
+            log.info(f"[predictions] Loaded {len(raw)} from DB (today, >={AUTOBET_MIN_CONFIDENCE}% conf)")
     except Exception as e:
         log.warning(f"[predictions] DB load failed: {e}")
 
-    # Fallback: live dashboard state (if running in same process)
+    # 2. Dashboard HTTP API (when dashboard is running)
+    if not raw:
+        try:
+            import urllib.request
+            url = f"http://127.0.0.1:{DASHBOARD_PORT}/api/predictions?current_only=1&days=1"
+            req = urllib.request.Request(url, headers={"Accept": "application/json"})
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            for p in (data.get("predictions") or []):
+                if not isinstance(p, dict):
+                    continue
+                if str(p.get("game_date") or "")[:10] < today_iso:
+                    continue
+                prob = float(p.get("model_prob") or p.get("probability") or 0.0)
+                if prob * 100 >= AUTOBET_MIN_CONFIDENCE:
+                    raw.append(p)
+            if raw:
+                log.info(f"[predictions] Loaded {len(raw)} from dashboard HTTP API ({DASHBOARD_PORT})")
+        except Exception as e:
+            log.debug(f"[predictions] Dashboard HTTP API unavailable: {e}")
+
+    # 3. Dashboard cached-state API (game_cards_today bets)
+    if not raw:
+        try:
+            import urllib.request
+            url = f"http://127.0.0.1:{DASHBOARD_PORT}/api/cached-state"
+            req = urllib.request.Request(url, headers={"Accept": "application/json"})
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            cards = list(data.get("game_cards_today") or [])
+            for card in cards:
+                if not isinstance(card, dict):
+                    continue
+                for bet in (card.get("suggested_bets") or []):
+                    if not isinstance(bet, dict):
+                        continue
+                    prob = float(bet.get("model_prob") or 0.0)
+                    if prob * 100 >= AUTOBET_MIN_CONFIDENCE:
+                        raw.append({**card, **bet})
+            if raw:
+                log.info(f"[predictions] Loaded {len(raw)} from dashboard cached-state")
+        except Exception as e:
+            log.debug(f"[predictions] Dashboard cached-state unavailable: {e}")
+
+    # 4. In-process state if running as part of dashboard
     if not raw:
         try:
             from dashboard import _state  # type: ignore
@@ -144,9 +198,18 @@ def _collect_predictions() -> list[dict[str, Any]]:
                     prob = float(bet.get("model_prob") or 0.0)
                     if prob * 100 >= AUTOBET_MIN_CONFIDENCE:
                         raw.append({**card, **bet})
-            log.info(f"[predictions] Loaded {len(raw)} from dashboard state")
+            if raw:
+                log.info(f"[predictions] Loaded {len(raw)} from in-process dashboard state")
         except Exception as e:
-            log.debug(f"[predictions] Dashboard state unavailable: {e}")
+            log.debug(f"[predictions] In-process state unavailable: {e}")
+
+    if not raw:
+        log.warning(
+            "[predictions] No predictions found. "
+            "Start the dashboard (python src/dashboard.py) then trigger an analysis — "
+            "this engine will auto-pick them up next cycle."
+        )
+        return []
 
     if not raw:
         return []
@@ -177,7 +240,7 @@ def run_cycle(state: dict[str, Any]) -> dict[str, Any]:
 
     state["cycles"] = int(state.get("cycles") or 0) + 1
     cycle_num = state["cycles"]
-    log.info(f"━━━ Cycle #{cycle_num} ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    log.info(f"--- Cycle #{cycle_num} -------------------------------------------")
 
     # 1. Check balance
     try:
@@ -298,7 +361,7 @@ def run_cycle(state: dict[str, Any]) -> dict[str, Any]:
             total_spent_this_cycle += AUTOBET_AMOUNT_USD
             state["total_spent_usd"] = round(float(state.get("total_spent_usd") or 0.0) + AUTOBET_AMOUNT_USD, 4)
             log.info(
-                f"[autobet] {'[DRY RUN] ' if AUTOBET_DRY_RUN else ''}✅ Bet placed: "
+                f"[autobet] {'[DRY RUN] ' if AUTOBET_DRY_RUN else ''}[PLACED] "
                 f"${AUTOBET_AMOUNT_USD:.2f} {side.upper()} | total spent: ${state['total_spent_usd']:.2f}"
             )
         else:
@@ -324,7 +387,7 @@ def print_status(state: dict[str, Any]) -> None:
     placed = state.get("placed_bets") or {}
     total_spent = float(state.get("total_spent_usd") or 0.0)
     last_bal = state.get("last_balance_usd")
-    log.info("─── Auto-Bet Status ──────────────────────────────────────")
+    log.info("--- Auto-Bet Status ----------------------------------------------")
     log.info(f"  Total bets placed : {len(placed)}")
     log.info(f"  Total spent       : ${total_spent:.2f}")
     if last_bal is not None:
@@ -343,7 +406,7 @@ def print_status(state: dict[str, Any]) -> None:
                 f"${b.get('amount_usd',0):.2f} | {b.get('market_title','')[:50]} | "
                 f"{b.get('confidence',0)}% conf"
             )
-    log.info("──────────────────────────────────────────────────────────")
+    log.info("-----------------------------------------------------------------")
 
 
 def main() -> None:

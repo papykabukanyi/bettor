@@ -718,6 +718,13 @@ body.mobile-lite .xpanel{box-shadow:none !important}
 body.mobile-lite .game-card:hover{transform:none !important}
 body.mobile-lite .console-panel{height:180px}
 body.mobile-lite .ready-scroll{max-height:300px}
+
+/* ── Auto-bet tracker responsive ── */
+@media(max-width:640px){
+  #autobet-tracker > div:first-child{flex-direction:column;align-items:flex-start}
+  #autobet-tracker > div:first-child > div:last-child{gap:10px;font-size:11px}
+  #autobet-bets-list > div{font-size:11px}
+}
 body.mobile-lite .spinner,
 body.mobile-lite .live-dot,
 body.mobile-lite .when-LIVE,
@@ -1022,6 +1029,26 @@ body.console-open main{padding-bottom:236px}
       </div>
       <div class="rb-balance-warn" id="rb-balance-warn" style="display:none">⚠ Real account. Orders execute immediately.</div>
       <button class="btn btn-sm" onclick="refreshExchangeBalances()" title="Refresh balances">&#8635;</button>
+    </div>
+
+    <!-- ── Auto-Bet Tracker ── -->
+    <div id="autobet-tracker" style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:12px 14px;margin-bottom:10px">
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;cursor:pointer" onclick="toggleAutobetPanel()">
+        <div style="display:flex;align-items:center;gap:10px">
+          <span style="font-size:15px;font-weight:700;color:var(--accent)">&#x25B6; Auto-Bet Tracker</span>
+          <span id="autobet-live-badge" style="display:none;background:#22c55e;color:#000;font-size:10px;font-weight:700;padding:2px 7px;border-radius:20px">LIVE</span>
+        </div>
+        <div style="display:flex;gap:16px;flex-wrap:wrap;font-size:12px">
+          <span>Bets: <b id="autobet-total-bets">—</b></span>
+          <span>Spent: <b id="autobet-total-spent">—</b></span>
+          <span>Balance: <b id="autobet-balance">—</b></span>
+          <span>Last cycle: <b id="autobet-last-cycle">—</b></span>
+          <button class="btn btn-sm" onclick="event.stopPropagation();fetchAutobetStatus()" style="font-size:11px;padding:2px 8px">&#8635; Refresh</button>
+        </div>
+      </div>
+      <div id="autobet-panel" style="display:none;margin-top:10px">
+        <div id="autobet-bets-list" style="max-height:320px;overflow-y:auto;font-size:12px"></div>
+      </div>
     </div>
 
     <!-- ── Ops Console ── -->
@@ -5341,6 +5368,94 @@ function fetchPolymarketBalance() {
       _logOp('error', `Polymarket balance error: ${err}`);
     });
 }
+
+let _autobetPanelOpen = false;
+let _autobetLastBetCount = 0;
+let _autobetKnownKeys = new Set();
+
+function toggleAutobetPanel() {
+  _autobetPanelOpen = !_autobetPanelOpen;
+  const panel = document.getElementById('autobet-panel');
+  const label = document.querySelector('#autobet-tracker [onclick="toggleAutobetPanel()"] span:first-child');
+  if (panel) panel.style.display = _autobetPanelOpen ? 'block' : 'none';
+  if (label) label.textContent = (_autobetPanelOpen ? '\u25BC' : '\u25B6') + ' Auto-Bet Tracker';
+  if (_autobetPanelOpen) fetchAutobetStatus();
+}
+
+function fetchAutobetStatus() {
+  fetch('/api/polymarket/autobet-status')
+    .then(r => r.json())
+    .then(d => {
+      if (!d.ok) return;
+      const totalBets = document.getElementById('autobet-total-bets');
+      const totalSpent = document.getElementById('autobet-total-spent');
+      const balEl = document.getElementById('autobet-balance');
+      const cycleEl = document.getElementById('autobet-last-cycle');
+      const badge = document.getElementById('autobet-live-badge');
+
+      if (totalBets) totalBets.textContent = d.total_bets || 0;
+      if (totalSpent) totalSpent.textContent = '$' + Number(d.total_spent_usd || 0).toFixed(2);
+      if (balEl) balEl.textContent = d.last_balance_usd != null ? '$' + Number(d.last_balance_usd).toFixed(2) : '\u2014';
+      if (cycleEl && d.last_cycle_at) {
+        const ago = Math.round((Date.now() - new Date(d.last_cycle_at + 'Z').getTime()) / 60000);
+        cycleEl.textContent = ago < 2 ? 'just now' : ago + 'm ago';
+      }
+
+      // LIVE badge: engine ran in last 10 min
+      if (badge && d.last_cycle_at) {
+        const ageMin = (Date.now() - new Date(d.last_cycle_at + 'Z').getTime()) / 60000;
+        badge.style.display = ageMin < 10 ? 'inline-block' : 'none';
+      }
+
+      // Detect new bets and flash notification
+      const newBets = (d.bets || []).filter(b => !_autobetKnownKeys.has(b.key));
+      if (newBets.length > 0 && _autobetLastBetCount > 0) {
+        newBets.forEach(b => {
+          if (typeof showToast === 'function') {
+            showToast(`Bet placed: $${Number(b.amount_usd||0).toFixed(2)} ${(b.side||'').toUpperCase()} on ${b.market_title || b.market_slug}`, 'success');
+          }
+        });
+        // Auto-open panel on new bet
+        if (!_autobetPanelOpen) toggleAutobetPanel();
+      }
+      (d.bets || []).forEach(b => _autobetKnownKeys.add(b.key));
+      _autobetLastBetCount = d.total_bets || 0;
+
+      // Render bets table
+      const list = document.getElementById('autobet-bets-list');
+      if (list && Array.isArray(d.bets)) {
+        if (!d.bets.length) {
+          list.innerHTML = '<div style="color:var(--muted);padding:8px 0">No bets placed yet \u2014 engine is scanning markets every 5 min. Start the dashboard and run analysis to generate predictions.</div>';
+        } else {
+          const rows = d.bets.map((b, i) => {
+            const sideColor = b.side === 'yes' ? '#22c55e' : '#ef4444';
+            const dryTag = b.dry_run ? ' <span style="color:#f59e0b;font-size:10px">[DRY]</span>' : '';
+            const conf = Number(b.confidence || 0).toFixed(1);
+            const placed = b.placed_at ? b.placed_at.slice(0, 19).replace('T', ' ') + ' UTC' : '';
+            const isNew = newBets.some(nb => nb.key === b.key);
+            const newStyle = isNew ? 'background:rgba(34,197,94,0.08);border-color:#22c55e;' : '';
+            const link = b.market_slug
+              ? `<a href="https://polymarket.com/event/${encodeURIComponent(b.market_slug)}" target="_blank" style="color:var(--accent)">${b.market_title || b.market_slug}</a>`
+              : (b.market_title || '\u2014');
+            return `<div style="display:flex;gap:8px;align-items:flex-start;padding:7px 6px;border-bottom:1px solid var(--border);flex-wrap:wrap;border-radius:6px;${newStyle}">
+              <span style="color:${sideColor};font-weight:700;min-width:32px;font-size:12px">${(b.side||'').toUpperCase()}${dryTag}</span>
+              <span style="flex:1;min-width:130px;font-size:12px">${link}</span>
+              <span style="color:var(--muted);white-space:nowrap;font-size:11px">${b.sport ? b.sport.toUpperCase() : ''} ${b.game_date||''}</span>
+              <span style="white-space:nowrap;font-size:12px"><b>$${Number(b.amount_usd||0).toFixed(2)}</b> <span style="color:var(--accent)">${conf}%</span></span>
+              <span style="color:var(--muted);font-size:10px;white-space:nowrap">${placed}</span>
+            </div>`;
+          }).join('');
+          list.innerHTML = rows;
+        }
+      }
+    })
+    .catch(() => {});
+}
+
+// Poll every 30 seconds for fast bet tracking
+setInterval(fetchAutobetStatus, 30000);
+// Initial load 2s after page ready
+setTimeout(fetchAutobetStatus, 2000);
 
 function resolveKalshiReadyBets(force) {
   if (!READY_BETS.length) {

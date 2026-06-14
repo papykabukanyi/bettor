@@ -10023,6 +10023,51 @@ def api_polymarket_order_manager_config():
         return jsonify({"ok": False, "error": str(e)})
 
 
+_AUTOBET_STATE_PATH = os.path.join(os.path.dirname(SRC_DIR), "data", "polymarket_autobet_state.json")
+
+
+@app.route("/api/polymarket/autobet-status")
+def api_polymarket_autobet_status():
+    """Return the current state of the Polymarket auto-betting engine."""
+    try:
+        state: dict[str, Any] = {}
+        if os.path.exists(_AUTOBET_STATE_PATH):
+            with open(_AUTOBET_STATE_PATH, "r", encoding="utf-8") as fh:
+                state = json.load(fh)
+        placed = state.get("placed_bets") or {}
+        bets_list = []
+        for key, b in placed.items():
+            if isinstance(b, dict):
+                bets_list.append({
+                    "key": key,
+                    "market_title": b.get("market_title") or "",
+                    "market_slug": b.get("market_slug") or "",
+                    "side": b.get("side") or "",
+                    "amount_usd": b.get("amount_usd") or 0,
+                    "confidence": b.get("confidence") or 0,
+                    "pick": b.get("pick") or "",
+                    "sport": b.get("sport") or "",
+                    "game_date": b.get("game_date") or "",
+                    "placed_at": b.get("placed_at") or "",
+                    "dry_run": bool(b.get("dry_run")),
+                })
+        bets_list.sort(key=lambda x: str(x.get("placed_at") or ""), reverse=True)
+        return jsonify({
+            "ok": True,
+            "cycles": int(state.get("cycles") or 0),
+            "total_bets": len(bets_list),
+            "total_spent_usd": float(state.get("total_spent_usd") or 0.0),
+            "last_balance_usd": state.get("last_balance_usd"),
+            "last_portfolio_usd": state.get("last_portfolio_usd"),
+            "last_balance_check": state.get("last_balance_check"),
+            "last_cycle_at": state.get("last_cycle_at"),
+            "started_at": state.get("started_at"),
+            "bets": _clean(bets_list[:100]),
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e), "bets": [], "total_bets": 0})
+
+
 @app.route("/api/kalshi/order-statuses", methods=["POST"])
 def api_kalshi_order_statuses():
     """Fetch current Kalshi order status for one or more submitted orders."""

@@ -242,6 +242,216 @@ def _bet_sport_tag(bet: dict[str, Any]) -> str:
     return "other"
 
 
+
+# ── Team / player alias expansion ─────────────────────────────────────────────
+# Maps abbreviations, nicknames, city-only references → normalized full name tokens
+# Used to expand both bet picks and market text before matching.
+_ALIASES: dict[str, str] = {
+    # NBA
+    "gsw": "golden state warriors", "warriors": "golden state warriors",
+    "lal": "los angeles lakers", "lakers": "los angeles lakers",
+    "lac": "los angeles clippers", "clippers": "los angeles clippers",
+    "bos": "boston celtics", "celtics": "boston celtics",
+    "mia": "miami heat", "heat": "miami heat",
+    "nyk": "new york knicks", "knicks": "new york knicks",
+    "chi": "chicago bulls", "bulls": "chicago bulls",
+    "den": "denver nuggets", "nuggets": "denver nuggets",
+    "phx": "phoenix suns", "suns": "phoenix suns",
+    "mil": "milwaukee bucks", "bucks": "milwaukee bucks",
+    "okc": "oklahoma city thunder", "thunder": "oklahoma city thunder",
+    "ind": "indiana pacers", "pacers": "indiana pacers",
+    "min": "minnesota timberwolves", "wolves": "minnesota timberwolves",
+    "cle": "cleveland cavaliers", "cavs": "cleveland cavaliers",
+    "atl": "atlanta hawks", "hawks": "atlanta hawks",
+    "mem": "memphis grizzlies", "grizzlies": "memphis grizzlies",
+    "dal": "dallas mavericks", "mavs": "dallas mavericks",
+    "hou": "houston rockets", "rockets": "houston rockets",
+    "sas": "san antonio spurs", "spurs": "san antonio spurs",
+    "nop": "new orleans pelicans", "pelicans": "new orleans pelicans",
+    "por": "portland trail blazers", "blazers": "portland trail blazers",
+    "sac": "sacramento kings", "kings": "sacramento kings",
+    "uta": "utah jazz", "jazz": "utah jazz",
+    "tor": "toronto raptors", "raptors": "toronto raptors",
+    "cha": "charlotte hornets", "hornets": "charlotte hornets",
+    "det": "detroit pistons", "pistons": "detroit pistons",
+    "was": "washington wizards", "wizards": "washington wizards",
+    "orl": "orlando magic", "magic": "orlando magic",
+    "bkn": "brooklyn nets", "nets": "brooklyn nets",
+    # MLB
+    "nyy": "new york yankees", "yankees": "new york yankees",
+    "bos_mlb": "boston red sox", "red sox": "boston red sox",
+    "lad": "los angeles dodgers", "dodgers": "los angeles dodgers",
+    "hou_mlb": "houston astros", "astros": "houston astros",
+    "atl_mlb": "atlanta braves", "braves": "atlanta braves",
+    "chc": "chicago cubs", "cubs": "chicago cubs",
+    "cws": "chicago white sox", "white sox": "chicago white sox",
+    "stl": "st louis cardinals", "cardinals": "st louis cardinals",
+    "sf": "san francisco giants", "giants": "san francisco giants",
+    "sd": "san diego padres", "padres": "san diego padres",
+    "sea": "seattle mariners", "mariners": "seattle mariners",
+    "tex": "texas rangers", "rangers": "texas rangers",
+    "tor_mlb": "toronto blue jays", "blue jays": "toronto blue jays",
+    "min_mlb": "minnesota twins", "twins": "minnesota twins",
+    "cle_mlb": "cleveland guardians", "guardians": "cleveland guardians",
+    "det_mlb": "detroit tigers", "tigers": "detroit tigers",
+    "phi": "philadelphia phillies", "phillies": "philadelphia phillies",
+    "nym": "new york mets", "mets": "new york mets",
+    "mia_mlb": "miami marlins", "marlins": "miami marlins",
+    "mil_mlb": "milwaukee brewers", "brewers": "milwaukee brewers",
+    "cin": "cincinnati reds", "reds": "cincinnati reds",
+    "pit": "pittsburgh pirates", "pirates": "pittsburgh pirates",
+    "was_mlb": "washington nationals", "nationals": "washington nationals",
+    "col": "colorado rockies", "rockies": "colorado rockies",
+    "ari": "arizona diamondbacks", "dbacks": "arizona diamondbacks",
+    "oak": "oakland athletics", "athletics": "oakland athletics",
+    "kc": "kansas city royals", "royals": "kansas city royals",
+    "tb": "tampa bay rays", "rays": "tampa bay rays",
+    "bal": "baltimore orioles", "orioles": "baltimore orioles",
+    # NFL
+    "ne": "new england patriots", "patriots": "new england patriots",
+    "kc_nfl": "kansas city chiefs", "chiefs": "kansas city chiefs",
+    "sf_nfl": "san francisco 49ers", "49ers": "san francisco 49ers", "niners": "san francisco 49ers",
+    "dal_nfl": "dallas cowboys", "cowboys": "dallas cowboys",
+    "gb": "green bay packers", "packers": "green bay packers",
+    "buf": "buffalo bills", "bills": "buffalo bills",
+    "phi_nfl": "philadelphia eagles", "eagles": "philadelphia eagles",
+    "sea_nfl": "seattle seahawks", "seahawks": "seattle seahawks",
+    "lac_nfl": "los angeles chargers", "chargers": "los angeles chargers",
+    "lar": "los angeles rams", "rams": "los angeles rams",
+    "den_nfl": "denver broncos", "broncos": "denver broncos",
+    "min_nfl": "minnesota vikings", "vikings": "minnesota vikings",
+    "chi_nfl": "chicago bears", "bears": "chicago bears",
+    "det_nfl": "detroit lions", "lions": "detroit lions",
+    "bal_nfl": "baltimore ravens", "ravens": "baltimore ravens",
+    "cin_nfl": "cincinnati bengals", "bengals": "cincinnati bengals",
+    "pit_nfl": "pittsburgh steelers", "steelers": "pittsburgh steelers",
+    "cle_nfl": "cleveland browns", "browns": "cleveland browns",
+    "ten": "tennessee titans", "titans": "tennessee titans",
+    "ind_nfl": "indianapolis colts", "colts": "indianapolis colts",
+    "jax": "jacksonville jaguars", "jaguars": "jaguars",
+    "hou_nfl": "houston texans", "texans": "houston texans",
+    "nyg": "new york giants",
+    "nyj": "new york jets", "jets": "new york jets",
+    "mia_nfl": "miami dolphins", "dolphins": "miami dolphins",
+    "atl_nfl": "atlanta falcons", "falcons": "atlanta falcons",
+    "car": "carolina panthers", "panthers": "carolina panthers",
+    "no": "new orleans saints", "saints": "new orleans saints",
+    "tb_nfl": "tampa bay buccaneers", "buccaneers": "tampa bay buccaneers", "bucs": "tampa bay buccaneers",
+    "ari_nfl": "arizona cardinals",
+    "lar_nfl": "los angeles rams",
+    "lv": "las vegas raiders", "raiders": "las vegas raiders",
+    # NHL
+    "bos_nhl": "boston bruins", "bruins": "boston bruins",
+    "tor_nhl": "toronto maple leafs", "maple leafs": "toronto maple leafs", "leafs": "toronto maple leafs",
+    "mtl": "montreal canadiens", "canadiens": "montreal canadiens", "habs": "montreal canadiens",
+    "nyc": "new york rangers", "nyr": "new york rangers",
+    "nyi": "new york islanders", "islanders": "new york islanders",
+    "nj": "new jersey devils", "devils": "new jersey devils",
+    "phi_nhl": "philadelphia flyers", "flyers": "philadelphia flyers",
+    "pit_nhl": "pittsburgh penguins", "penguins": "pittsburgh penguins",
+    "was_nhl": "washington capitals", "capitals": "washington capitals", "caps": "washington capitals",
+    "car_nhl": "carolina hurricanes", "hurricanes": "carolina hurricanes",
+    "fla": "florida panthers",
+    "tb_nhl": "tampa bay lightning", "lightning": "tampa bay lightning",
+    "chi_nhl": "chicago blackhawks", "blackhawks": "chicago blackhawks",
+    "det_nhl": "detroit red wings", "red wings": "detroit red wings",
+    "stl_nhl": "st louis blues", "blues": "st louis blues",
+    "min_nhl": "minnesota wild", "wild": "minnesota wild",
+    "wpg": "winnipeg jets",
+    "col_nhl": "colorado avalanche", "avalanche": "colorado avalanche",
+    "edm": "edmonton oilers", "oilers": "edmonton oilers",
+    "cgy": "calgary flames", "flames": "calgary flames",
+    "van": "vancouver canucks", "canucks": "vancouver canucks",
+    "sea_nhl": "seattle kraken", "kraken": "seattle kraken",
+    "ari_nhl": "arizona coyotes", "coyotes": "arizona coyotes",
+    "lak": "los angeles kings",
+    "sjs": "san jose sharks", "sharks": "san jose sharks",
+    "ana": "anaheim ducks", "ducks": "anaheim ducks",
+    "dal_nhl": "dallas stars", "stars": "dallas stars",
+    "nsh": "nashville predators", "predators": "nashville predators",
+    "cbj": "columbus blue jackets",
+    "buf_nhl": "buffalo sabres", "sabres": "buffalo sabres",
+    "ott": "ottawa senators", "senators": "ottawa senators",
+}
+
+def _expand_aliases(text: str) -> str:
+    """Expand known abbreviations/nicknames in normalised text to full names."""
+    tokens = text.split()
+    expanded = []
+    i = 0
+    while i < len(tokens):
+        # try 2-token phrases first (e.g., "red sox", "white sox")
+        if i + 1 < len(tokens):
+            two = tokens[i] + " " + tokens[i + 1]
+            if two in _ALIASES:
+                expanded.append(_ALIASES[two])
+                i += 2
+                continue
+        tok = tokens[i]
+        expanded.append(_ALIASES.get(tok, tok))
+        i += 1
+    return " ".join(expanded)
+
+
+def _char_ngrams(text: str, n: int = 3) -> list[str]:
+    """Return character n-grams from text (no spaces)."""
+    t = text.replace(" ", "")
+    return [t[i:i+n] for i in range(len(t) - n + 1)] if len(t) >= n else [t] if t else []
+
+
+def _fuzzy_name_score(text: str, name: Any) -> float:
+    """
+    Multi-signal entity match: exact > all-tokens > last-name > token-ratio > trigram.
+    Returns a 0-5.5 score.
+    """
+    norm = _norm_text(name)
+    if not text or not norm:
+        return 0.0
+
+    # Expand aliases in both sides
+    text_exp = _expand_aliases(text)
+    norm_exp = _expand_aliases(norm)
+
+    # Exact substring match (after alias expansion)
+    if norm_exp in text_exp or norm in text:
+        return 5.5
+
+    tokens = [tok for tok in norm_exp.split() if len(tok) >= 3]
+    text_tokens = set(text_exp.split())
+
+    if not tokens:
+        return 0.0
+
+    # All tokens present
+    if all(tok in text_exp for tok in tokens):
+        return 4.2
+
+    # Last name only (common for tennis, combat, golf)
+    last = tokens[-1]
+    if len(last) >= 4 and last in text_exp:
+        return 3.8
+
+    # Token ratio
+    matched = sum(1 for tok in tokens if tok in text_exp)
+    ratio = matched / len(tokens)
+    if ratio >= 0.75:
+        return 3.5
+    if ratio >= 0.5:
+        return 2.8
+
+    # Character trigram similarity (Jaccard)
+    ng_name = set(_char_ngrams(norm_exp.replace(" ", ""), 3))
+    ng_text = set(_char_ngrams(text_exp.replace(" ", ""), 3))
+    if ng_name and ng_text:
+        jaccard = len(ng_name & ng_text) / len(ng_name | ng_text)
+        if jaccard >= 0.5:
+            return 2.5 * jaccard
+        if jaccard >= 0.3:
+            return 1.5 * jaccard
+
+    return 0.0
+
+
 def _picked_team_name(bet: dict[str, Any]) -> str:
     pick = _norm_text(" ".join(str(bet.get(key) or "") for key in ("pick", "label")))
     home = str(bet.get("home_team") or "").strip()
@@ -253,17 +463,18 @@ def _picked_team_name(bet: dict[str, Any]) -> str:
 
 
 def _entity_match_score(text: str, name: Any) -> float:
-    norm = _norm_text(name)
-    if not text or not norm:
-        return 0.0
-    if norm in text:
-        return 5.5
-    tokens = [tok for tok in norm.split() if len(tok) >= 3]
-    if tokens and all(tok in text for tok in tokens):
-        return 4.0
-    if tokens and any(tok in text for tok in tokens):
-        return 2.0
-    return 0.0
+    return _fuzzy_name_score(text, name)
+
+
+def _extract_vs_teams(market_text: str) -> tuple[str, str]:
+    """Extract 'Team A' and 'Team B' from patterns like 'team a vs team b' or 'team a beats team b'."""
+    for sep in (" vs ", " versus ", " v ", " beat ", " beats ", " defeats ", " at ", " host "):
+        idx = market_text.find(sep)
+        if idx > 0:
+            left = market_text[:idx].strip().split()[-4:]
+            right = market_text[idx + len(sep):].strip().split()[:4]
+            return " ".join(left), " ".join(right)
+    return "", ""
 
 
 def _token_overlap_score(text: str, *values: Any) -> float:
@@ -641,11 +852,42 @@ def _market_identifier(market: dict[str, Any]) -> str:
 
 
 def _market_side(bet: dict[str, Any], market: dict[str, Any]) -> str:
+    """Determine YES/NO side based on which team the bet picks, using market title parsing."""
     direction_text = _norm_text(" ".join(str(bet.get(key) or "") for key in ("direction", "pick", "label", "bet_type")))
+
+    # Player props: OVER = YES, UNDER = NO
     if _bet_kind_tag(bet) == "player_prop":
         return "no" if "under" in direction_text else "yes"
-    if any(token in direction_text for token in ("under", "against")):
+
+    # Totals
+    if "under" in direction_text and "over" not in direction_text:
         return "no"
+    if "against" in direction_text:
+        return "no"
+
+    # For moneyline: check if the picked team is the YES outcome in the market title
+    # Market titles like "Will the Warriors beat the Lakers?" → YES = Warriors
+    picked = _picked_team_name(bet)
+    if picked:
+        market_text = _market_text(market)
+        market_title = _norm_text(str(market.get("market_title") or market.get("title") or market.get("question") or ""))
+
+        # Extract the team in the YES position from "team_a vs team_b" or "will team_a beat team_b"
+        team_a, team_b = _extract_vs_teams(market_title)
+        if team_a and team_b:
+            picked_norm = _norm_text(picked)
+            # Check alias expansion
+            picked_exp = _expand_aliases(picked_norm)
+            team_a_exp = _expand_aliases(team_a)
+            team_b_exp = _expand_aliases(team_b)
+            # YES side is typically the first named team (home team in polymarket)
+            score_a = _fuzzy_name_score(team_a_exp, picked_exp)
+            score_b = _fuzzy_name_score(team_b_exp, picked_exp)
+            if score_a >= 2.0 and score_a > score_b:
+                return "yes"
+            if score_b >= 2.0 and score_b > score_a:
+                return "no"
+
     return "yes"
 
 
@@ -656,39 +898,48 @@ def _score_market(bet: dict[str, Any], market: dict[str, Any]) -> float:
 
     bet_sport = _bet_sport_tag(bet)
     market_sport = _market_sport_tag(market)
+
+    # Hard sport mismatch → immediate reject
     if bet_sport and market_sport and bet_sport != market_sport:
         return 0.0
 
-    if not bet_sport and market_sport and market_sport in {"hockey", "basketball", "baseball", "football", "soccer", "tennis", "combat", "golf", "motorsports", "cricket"}:
+    # Cross-sport sanity guard when bet sport is unknown
+    if not bet_sport and market_sport in {"hockey", "basketball", "baseball", "football", "soccer", "tennis", "combat", "golf", "motorsports", "cricket"}:
         if _bet_kind_tag(bet) in {"moneyline", "spread", "player_prop"}:
             label_text = _norm_text(" ".join(str(bet.get(key) or "") for key in ("label", "pick", "team", "player_name", "name", "game")))
-            if market_sport == "hockey" and any(token in label_text for token in ("aces", "nba", "wnba", "basketball", "thunder", "knicks", "warriors", "celtics", "lakers")):
+            if market_sport == "hockey" and any(t in label_text for t in ("nba", "wnba", "basketball", "thunder", "knicks", "warriors", "celtics", "lakers")):
                 return 0.0
-            if market_sport == "basketball" and any(token in label_text for token in ("nhl", "hockey", "stanley", "goal", "goalie")):
+            if market_sport == "basketball" and any(t in label_text for t in ("nhl", "hockey", "stanley", "goalie")):
                 return 0.0
+
+    # Build alias-expanded market text for matching
+    market_text_exp = _expand_aliases(market_text)
 
     score = _time_score(bet, market)
     score += _series_alignment_score(bet, market, market_text)
 
     kind = _bet_kind_tag(bet)
     market_kind = _market_kind_tag(market)
+
+    # ── Player prop ──────────────────────────────────────────────────────────
     if kind == "player_prop":
         if market_kind != "player_prop":
             return 0.0
-        player_score = _entity_match_score(market_text, bet.get("player_name") or bet.get("name"))
+        player_name = str(bet.get("player_name") or bet.get("name") or "")
+        player_score = _entity_match_score(market_text_exp, player_name)
         if player_score < 2.0:
             return 0.0
-        score += player_score * 2.0
+        score += player_score * 2.2
         score += max(
-            _entity_match_score(market_text, bet.get("team")),
-            _entity_match_score(market_text, bet.get("home_team")),
-            _entity_match_score(market_text, bet.get("away_team")),
+            _entity_match_score(market_text_exp, bet.get("team")),
+            _entity_match_score(market_text_exp, bet.get("home_team")),
+            _entity_match_score(market_text_exp, bet.get("away_team")),
         ) * 0.3
-        score += _token_overlap_score(market_text, bet.get("prop_type"), bet.get("bet_type"), bet.get("label"))
-        score += _line_match_score(market_text, bet.get("line")) or _line_proximity_score(market_text, bet.get("line"), direction=str(bet.get("direction") or bet.get("pick") or ""))
+        score += _token_overlap_score(market_text_exp, bet.get("prop_type"), bet.get("bet_type"), bet.get("label"))
+        score += _line_match_score(market_text_exp, bet.get("line")) or _line_proximity_score(market_text_exp, bet.get("line"), direction=str(bet.get("direction") or bet.get("pick") or ""))
         return score
 
-    picked = _picked_team_name(bet)
+    # ── Team-based bets ──────────────────────────────────────────────────────
     if kind == "moneyline" and market_kind not in {"moneyline", "single"}:
         return 0.0
     if kind == "spread" and market_kind not in {"spread", "single"}:
@@ -696,17 +947,46 @@ def _score_market(bet: dict[str, Any], market: dict[str, Any]) -> float:
     if kind == "total" and market_kind not in {"total", "single"}:
         return 0.0
 
+    picked = _picked_team_name(bet)
+
+    # Extract both teams from the market title for bidirectional matching
+    market_title_norm = _norm_text(str(market.get("market_title") or market.get("title") or market.get("question") or ""))
+    team_a, team_b = _extract_vs_teams(market_title_norm)
+
+    # Score each team candidate with alias expansion
+    candidates = [
+        bet.get("home_team"), bet.get("away_team"),
+        bet.get("team"), picked,
+    ]
     team_score = max(
-        _entity_match_score(market_text, bet.get("home_team")),
-        _entity_match_score(market_text, bet.get("away_team")),
-        _entity_match_score(market_text, bet.get("team")),
-        _entity_match_score(market_text, picked),
+        (_entity_match_score(market_text_exp, c) for c in candidates),
+        default=0.0,
     )
-    if team_score < 3.4 and kind in {"moneyline", "spread"}:
+
+    # Bonus: picked team matches one side of a vs-market exactly
+    if team_a and team_b and picked:
+        picked_exp = _expand_aliases(_norm_text(picked))
+        score_a = _fuzzy_name_score(_expand_aliases(team_a), picked_exp)
+        score_b = _fuzzy_name_score(_expand_aliases(team_b), picked_exp)
+        if max(score_a, score_b) >= 3.0:
+            team_score = max(team_score, max(score_a, score_b) + 0.8)
+
+    # Both teams in market (game integrity check)
+    if team_a and team_b:
+        home_in_market = max(
+            _entity_match_score(market_text_exp, bet.get("home_team")),
+            _entity_match_score(market_text_exp, bet.get("away_team")),
+        )
+        if home_in_market >= 3.0:
+            score += 1.2  # Both teams confirmed present
+
+    if team_score < 3.0 and kind in {"moneyline", "spread"}:
         return 0.0
-    score += team_score * 1.4
-    score += _token_overlap_score(market_text, bet.get("label"), bet.get("pick"), bet.get("bet_type"), bet.get("prop_type"))
-    score += _line_match_score(market_text, bet.get("line")) or _line_proximity_score(market_text, bet.get("line"), direction=str(bet.get("direction") or bet.get("pick") or ""))
+
+    score += team_score * 1.5
+    score += _token_overlap_score(market_text_exp, bet.get("label"), bet.get("pick"), bet.get("bet_type"), bet.get("prop_type"))
+    score += _line_match_score(market_text_exp, bet.get("line")) or _line_proximity_score(market_text_exp, bet.get("line"), direction=str(bet.get("direction") or bet.get("pick") or ""))
+
     if kind in {"moneyline", "spread", "total"} and score < 4.0:
         return 0.0
     return score
@@ -813,21 +1093,46 @@ def _fetch_markets(force_refresh: bool = False) -> list[dict[str, Any]]:
         if not force_refresh and payload and (now - cache_ts) < POLYMARKET_MARKET_CACHE_TTL_SEC:
             return list(payload)
 
-    rows: list[dict[str, Any]] = []
-    for page_idx in range(POLYMARKET_MARKET_PAGES):
-        page_rows = _fetch_markets_page(page_idx * POLYMARKET_PAGE_LIMIT)
-        if not page_rows:
-            break
-        rows.extend(page_rows)
-        if len(page_rows) < POLYMARKET_PAGE_LIMIT:
-            break
+    # Fetch all pages concurrently for speed
+    import concurrent.futures
+    offsets = [page_idx * POLYMARKET_PAGE_LIMIT for page_idx in range(POLYMARKET_MARKET_PAGES)]
+    all_rows: list[dict[str, Any]] = []
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(offsets), 6)) as ex:
+            futures = {ex.submit(_fetch_markets_page, off): off for off in offsets}
+            for fut in concurrent.futures.as_completed(futures):
+                try:
+                    page_rows = fut.result()
+                    all_rows.extend(page_rows)
+                except Exception:
+                    pass
+    except Exception:
+        # Fallback: sequential
+        for off in offsets:
+            try:
+                page_rows = _fetch_markets_page(off)
+                if page_rows:
+                    all_rows.extend(page_rows)
+            except Exception:
+                break
 
-    cleaned = [_clean_market(row) for row in rows]
+    cleaned = [_clean_market(row) for row in all_rows]
     cleaned = [row for row in cleaned if row.get("market_ticker") or row.get("market_title")]
+    # Deduplicate by market_id
+    seen_ids: set[str] = set()
+    deduped: list[dict[str, Any]] = []
+    for row in cleaned:
+        mid = str(row.get("market_id") or row.get("market_slug") or "")
+        if mid and mid in seen_ids:
+            continue
+        if mid:
+            seen_ids.add(mid)
+        deduped.append(row)
+
     with _MARKET_CACHE_LOCK:
         _MARKET_CACHE["ts"] = now
-        _MARKET_CACHE["payload"] = list(cleaned)
-    return cleaned
+        _MARKET_CACHE["payload"] = deduped
+    return deduped
 
 
 def resolve_ready_bets(bets: list[dict[str, Any]], *, force_refresh: bool = False) -> dict[str, Any]:
