@@ -1098,6 +1098,27 @@ def run_polymarket_take_profit_cycle() -> dict[str, Any]:
     }
 
 
+def _json_safe_default(obj):
+    """Fallback serializer for json.dumps so DB-derived values never crash SSE.
+
+    psycopg2 returns SQL NUMERIC/ROUND() columns as ``decimal.Decimal`` and date
+    columns as ``datetime`` objects, neither of which is JSON serializable by
+    default. Convert them to plain JSON-friendly primitives instead of raising.
+    """
+    import decimal
+
+    if isinstance(obj, decimal.Decimal):
+        # Preserve integer-ness where possible, else fall back to float.
+        return int(obj) if obj == obj.to_integral_value() else float(obj)
+    if isinstance(obj, (datetime.datetime, datetime.date, datetime.time)):
+        return obj.isoformat()
+    if isinstance(obj, (set, frozenset)):
+        return list(obj)
+    if isinstance(obj, bytes):
+        return obj.decode("utf-8", "replace")
+    return str(obj)
+
+
 def _sse_broadcast(event: str, data: dict):
     """Push an SSE message to every connected browser tab.
 
@@ -1117,9 +1138,9 @@ def _sse_broadcast(event: str, data: dict):
             "live_scores":    data.get("live_scores"),
         }
         # Strip Nones to keep the payload minimal
-        msg = f"event: {event}\ndata: {json.dumps({k: v for k, v in light.items() if v is not None})}\n\n"
+        msg = f"event: {event}\ndata: {json.dumps({k: v for k, v in light.items() if v is not None}, default=_json_safe_default)}\n\n"
     else:
-        msg = f"event: {event}\ndata: {json.dumps(data)}\n\n"
+        msg = f"event: {event}\ndata: {json.dumps(data, default=_json_safe_default)}\n\n"
     with _sse_lock:
         dead = []
         for q in _sse_clients:
@@ -2049,6 +2070,17 @@ def _build_card(game, bets, props, when):
     elif avg >= 0.60: card["overall_safety_label"] = "SAFE"
     elif avg >= 0.50: card["overall_safety_label"] = "MODERATE"
     else:             card["overall_safety_label"] = "RISKY"
+
+    # Expose tennis-specific match context (players, surface, ranks, form, H2H,
+    # serve stats, fatigue) so the dashboard can render a detailed insight panel.
+    if sport_group == "tennis":
+        tctx = game.get("tennis_context")
+        if isinstance(tctx, dict) and tctx:
+            card["tennis_context"] = tctx
+        for fld in ("surface", "rank_diff", "recent_form_gap",
+                    "fatigue_home_days", "fatigue_away_days"):
+            if game.get(fld) is not None:
+                card[fld] = game.get(fld)
 
     return card
 
@@ -10837,7 +10869,7 @@ def api_stream():
             "live_scores":         _state.get("live_scores", {}),
         }
     try:
-        q.put_nowait(f"event: state_update\ndata: {json.dumps(hello)}\n\n")
+        q.put_nowait(f"event: state_update\ndata: {json.dumps(hello, default=_json_safe_default)}\n\n")
     except queue.Full:
         pass
 

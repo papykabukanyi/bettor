@@ -3140,6 +3140,90 @@ function gameCard(c) {
 </div>`;
 }
 
+// ── Tennis matchup breakdown (players, surface, form, H2H, serve, fatigue) ──
+function _fmtPct01(v) {
+  const n = Number(v);
+  if (v == null || isNaN(n)) return '—';
+  return Math.round(n * 100) + '%';
+}
+
+function _tennisInsightsPanel(c, phase) {
+  if (!c || _sportMetaFromCard(c).key !== 'tennis') return '';
+  const t = c.tennis_context;
+  if (!t || typeof t !== 'object') return '';
+
+  // In the model context, *_home maps to c.home_team and *_away to c.away_team.
+  const awayName = String(c.away_team || t.away_player || 'Player A').trim();
+  const homeName = String(c.home_team || t.home_player || 'Player B').trim();
+  const surfaceRaw = String(c.surface || t.surface || '').trim();
+  const surfaceLabel = surfaceRaw
+    ? surfaceRaw.charAt(0).toUpperCase() + surfaceRaw.slice(1)
+    : 'Surface N/A';
+
+  const sAway = t.serve_stats_away || {};
+  const sHome = t.serve_stats_home || {};
+
+  // dir: 'high' = higher value is better, 'low' = lower is better, '' = neutral
+  function row(label, awayVal, homeVal, awayNum, homeNum, dir) {
+    let awayColor = 'var(--text)', homeColor = 'var(--text)';
+    if (dir && awayNum != null && homeNum != null && Number(awayNum) !== Number(homeNum)) {
+      const awayBetter = dir === 'high' ? Number(awayNum) > Number(homeNum) : Number(awayNum) < Number(homeNum);
+      if (awayBetter) awayColor = 'var(--green)'; else homeColor = 'var(--green)';
+    }
+    return `<div style="display:grid;grid-template-columns:1fr 1.5fr 1fr;align-items:center;gap:8px;padding:6px 10px;border-bottom:1px solid rgba(255,255,255,.05)">
+      <div style="text-align:left;font-weight:700;color:${awayColor}">${awayVal}</div>
+      <div style="text-align:center;font-size:.7rem;color:var(--muted);text-transform:uppercase;letter-spacing:.3px">${label}</div>
+      <div style="text-align:right;font-weight:700;color:${homeColor}">${homeVal}</div>
+    </div>`;
+  }
+
+  const ra = t.rank_away, rh = t.rank_home;
+  const rows = [
+    row('Rank', ra != null ? '#' + ra : '—', rh != null ? '#' + rh : '—', ra, rh, 'low'),
+    row('Recent Form (L5)', _fmtPct01(t.recent_form_away), _fmtPct01(t.recent_form_home), t.recent_form_away, t.recent_form_home, 'high'),
+    row(surfaceLabel + ' Win %', _fmtPct01(t.surface_win_rate_away), _fmtPct01(t.surface_win_rate_home), t.surface_win_rate_away, t.surface_win_rate_home, 'high'),
+    row('Surface Matches', t.surface_matches_away != null ? t.surface_matches_away : '—', t.surface_matches_home != null ? t.surface_matches_home : '—', null, null, ''),
+    row('H2H (surface)', t.h2h_record_surface_away != null ? t.h2h_record_surface_away : '—', t.h2h_record_surface_home != null ? t.h2h_record_surface_home : '—', t.h2h_record_surface_away, t.h2h_record_surface_home, 'high'),
+    row('Avg Aces', sAway.aces != null ? sAway.aces : '—', sHome.aces != null ? sHome.aces : '—', sAway.aces, sHome.aces, 'high'),
+    row('1st Serve In', _fmtPct01(sAway.first_serve_pct), _fmtPct01(sHome.first_serve_pct), sAway.first_serve_pct, sHome.first_serve_pct, 'high'),
+    row('Break Pts Saved', _fmtPct01(sAway.break_points_saved_pct), _fmtPct01(sHome.break_points_saved_pct), sAway.break_points_saved_pct, sHome.break_points_saved_pct, 'high'),
+    row('Rest (days)', t.fatigue_away_days != null ? t.fatigue_away_days : '—', t.fatigue_home_days != null ? t.fatigue_home_days : '—', null, null, ''),
+  ].join('');
+
+  // Model prediction / lean for the match
+  const pick = _primaryCardPrediction(c, phase);
+  let predHtml;
+  if (pick) {
+    predHtml = `<div style="padding:9px 11px;margin:8px;background:rgba(46,160,67,.07);border:1px solid rgba(46,160,67,.18);border-radius:8px">
+      <div style="font-size:.66rem;color:var(--muted);text-transform:uppercase;letter-spacing:.5px">Model Prediction</div>
+      <div style="font-weight:800;color:${pick.color};margin-top:2px">${pick.emoji} ${pick.label}</div>
+      <div style="font-size:.8rem;margin-top:2px;color:${pick.prob >= 60 ? 'var(--green)' : 'var(--accent)'}">${pick.prob}% confident &middot; ${pick.odds}</div>
+    </div>`;
+  } else {
+    const leanHome = Number(t.recent_form_gap || 0) + (t.rank_diff != null ? (Number(t.rank_diff) > 0 ? 0.05 : -0.05) : 0);
+    const favName = leanHome >= 0 ? homeName : awayName;
+    predHtml = `<div style="padding:9px 11px;margin:8px;background:rgba(88,166,255,.06);border:1px solid rgba(88,166,255,.18);border-radius:8px">
+      <div style="font-size:.66rem;color:var(--muted);text-transform:uppercase;letter-spacing:.5px">Model Lean</div>
+      <div style="font-weight:800;color:var(--accent);margin-top:2px">🎾 ${favName} favored on form &amp; ranking</div>
+      <div style="font-size:.78rem;margin-top:2px;color:var(--muted)">Live odds pending — projection from historical context</div>
+    </div>`;
+  }
+
+  return `<div class="xpanel">
+    <div class="xpanel-head">
+      <span class="xpanel-title">🎾 Tennis Matchup Breakdown</span>
+      <span class="xpanel-count">${surfaceLabel}</span>
+    </div>
+    ${predHtml}
+    <div style="display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:8px;padding:6px 10px 8px">
+      <div style="text-align:left;font-weight:800;color:var(--accent);font-size:.95rem">${awayName}</div>
+      <div style="color:var(--muted);font-size:.7rem">vs</div>
+      <div style="text-align:right;font-weight:800;color:var(--accent);font-size:.95rem">${homeName}</div>
+    </div>
+    <div>${rows}</div>
+  </div>`;
+}
+
 // ── Expanded card body builder ────────────────────────────────────────────
 function _expandedCardBody(c, phase) {
   const BET_DEFS = [
@@ -3198,6 +3282,7 @@ function _expandedCardBody(c, phase) {
 
   html += `<div class="card-body-inner">`;
   html += _modalHeroInsights(allBets, topProps, mlProb, avgConf, bestEdge);
+  html += _tennisInsightsPanel(c, phase);
 
   // ── Game Bets / Markets ──
   const allBetsForModal = [];
@@ -3792,6 +3877,7 @@ function _gameDetailsMarkup(card) {
   <div class="game-details-shell">
     <section class="details-main" style="padding:12px 16px 16px;max-width:100%;">
       <div class="game-details-content">
+        ${_tennisInsightsPanel(card, phase)}
         ${_playerPredictionsOnlyMarkup(card, phase)}
       </div>
     </section>
