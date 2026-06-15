@@ -10027,8 +10027,9 @@ _AUTOBET_STATE_PATH = os.path.join(os.path.dirname(SRC_DIR), "data", "polymarket
 
 
 @app.route("/api/polymarket/autobet-status")
+@app.route("/api/autobet-status")
 def api_polymarket_autobet_status():
-    """Return the current state of the Polymarket auto-betting engine."""
+    """Return the current state of the unified auto-betting engine (Polymarket + Kalshi)."""
     try:
         state: dict[str, Any] = {}
         if os.path.exists(_AUTOBET_STATE_PATH):
@@ -10038,10 +10039,13 @@ def api_polymarket_autobet_status():
         bets_list = []
         for key, b in placed.items():
             if isinstance(b, dict):
+                exchange = b.get("exchange") or ("kalshi" if "kalshi::" in key else "polymarket")
                 bets_list.append({
                     "key": key,
+                    "exchange": exchange,
                     "market_title": b.get("market_title") or "",
-                    "market_slug": b.get("market_slug") or "",
+                    "market_slug": b.get("market_slug") or b.get("market_id") or "",
+                    "market_ticker": b.get("market_ticker") or "",
                     "side": b.get("side") or "",
                     "amount_usd": b.get("amount_usd") or 0,
                     "confidence": b.get("confidence") or 0,
@@ -10052,16 +10056,27 @@ def api_polymarket_autobet_status():
                     "dry_run": bool(b.get("dry_run")),
                 })
         bets_list.sort(key=lambda x: str(x.get("placed_at") or ""), reverse=True)
+        by_exchange: dict[str, dict] = {}
+        for b in bets_list:
+            ex = b.get("exchange") or "unknown"
+            if ex not in by_exchange:
+                by_exchange[ex] = {"count": 0, "spent": 0.0}
+            by_exchange[ex]["count"] += 1
+            by_exchange[ex]["spent"] = round(by_exchange[ex]["spent"] + float(b.get("amount_usd") or 0), 4)
         return jsonify({
             "ok": True,
             "cycles": int(state.get("cycles") or 0),
             "total_bets": len(bets_list),
             "total_spent_usd": float(state.get("total_spent_usd") or 0.0),
+            "total_spent_polymarket": float(state.get("total_spent_polymarket") or 0.0),
+            "total_spent_kalshi": float(state.get("total_spent_kalshi") or 0.0),
             "last_balance_usd": state.get("last_balance_usd"),
-            "last_portfolio_usd": state.get("last_portfolio_usd"),
+            "last_balance_polymarket": state.get("last_balance_polymarket"),
+            "last_balance_kalshi": state.get("last_balance_kalshi"),
             "last_balance_check": state.get("last_balance_check"),
             "last_cycle_at": state.get("last_cycle_at"),
             "started_at": state.get("started_at"),
+            "by_exchange": by_exchange,
             "bets": _clean(bets_list[:100]),
         })
     except Exception as e:
@@ -11587,5 +11602,24 @@ def _auto_boot_analysis():
 
 if __name__ == "__main__":
     _init_worker()
+
+    # ── Auto-start the unified betting engine in the background ──────────────
+    def _start_autobet_engine():
+        import time as _time
+        _time.sleep(8)  # Let Flask finish binding before engine starts importing
+        try:
+            import importlib.util, sys as _sys
+            autobet_path = os.path.join(SRC_DIR, "polymarket_autobet.py")
+            spec = importlib.util.spec_from_file_location("polymarket_autobet", autobet_path)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            print("[autobet] Unified auto-bet engine started (Polymarket + Kalshi)")
+            mod.main()
+        except Exception as _e:
+            print(f"[autobet] Engine failed to start: {_e}")
+
+    threading.Thread(target=_start_autobet_engine, daemon=True, name="autobet-engine").start()
+    print("[boot] Auto-bet engine thread launched — will scan Polymarket + Kalshi every 5 min")
+
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)

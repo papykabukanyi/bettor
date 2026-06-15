@@ -1038,16 +1038,17 @@ body.console-open main{padding-bottom:236px}
           <span style="font-size:15px;font-weight:700;color:var(--accent)">&#x25B6; Auto-Bet Tracker</span>
           <span id="autobet-live-badge" style="display:none;background:#22c55e;color:#000;font-size:10px;font-weight:700;padding:2px 7px;border-radius:20px">LIVE</span>
         </div>
-        <div style="display:flex;gap:16px;flex-wrap:wrap;font-size:12px">
+        <div style="display:flex;gap:12px;flex-wrap:wrap;font-size:12px;align-items:center">
           <span>Bets: <b id="autobet-total-bets">—</b></span>
           <span>Spent: <b id="autobet-total-spent">—</b></span>
-          <span>Balance: <b id="autobet-balance">—</b></span>
+          <span id="autobet-poly-badge" style="display:none;background:#6366f1;color:#fff;font-size:10px;padding:2px 6px;border-radius:10px">PM: $<span id="autobet-poly-bal">—</span></span>
+          <span id="autobet-kalshi-badge" style="display:none;background:#0ea5e9;color:#fff;font-size:10px;padding:2px 6px;border-radius:10px">KA: $<span id="autobet-kalshi-bal">—</span></span>
           <span>Last cycle: <b id="autobet-last-cycle">—</b></span>
           <button class="btn btn-sm" onclick="event.stopPropagation();fetchAutobetStatus()" style="font-size:11px;padding:2px 8px">&#8635; Refresh</button>
         </div>
       </div>
       <div id="autobet-panel" style="display:none;margin-top:10px">
-        <div id="autobet-bets-list" style="max-height:320px;overflow-y:auto;font-size:12px"></div>
+        <div id="autobet-bets-list" style="max-height:360px;overflow-y:auto;font-size:12px"></div>
       </div>
     </div>
 
@@ -1060,33 +1061,9 @@ body.console-open main{padding-bottom:236px}
       <div id="rb-ops-log-list" class="rb-ops-log-list" style="display:none"></div>
     </div>
 
-    <div class="section-meta" style="margin-bottom:10px">Auto-running with request thresholds. Singles/Props and Combo Bets stay open together.</div>
+    <div class="section-meta" style="margin-bottom:10px;color:var(--accent)">&#9654; Auto-betting active — bets placed automatically on Polymarket &amp; Kalshi every 5 min.</div>
 
-    <div class="rb-desktop-grid">
-
-    <!-- ── 1: Bot-Qualified Singles + Props (always visible) ── -->
-    <div class="rb-panel active" id="rb-singles">
-      <div class="section-header" style="margin-bottom:8px">
-        <span class="section-title">&#9989; Singles &amp; Props</span>
-      </div>
-      <div id="ready-bets-list"><div class="no-games">Loading…</div></div>
-    </div>
-
-    <!-- ── 2: Auto Combo Bets (always visible) ── -->
-    <div class="rb-panel active" id="rb-combos">
-      <div class="section-header" style="margin-bottom:8px">
-        <span class="section-title">&#9889; Combo Bets</span>
-      </div>
-      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
-        <span class="section-meta">Auto-generated multi-leg combos ranked by EV. Matched combos (&#9989;) are ready to place.</span>
-        <span class="section-meta" id="combo-study-meta"></span>
-      </div>
-      <div id="ready-combos-list"><div class="no-games">Waiting for combo suggestions from the bot…</div></div>
-    </div>
-
-    </div>
-
-    <!-- ── 3: Order Log (hidden by default to keep focus on always-open bet panels) ── -->
+    <!-- ── Order Log ── -->
     <div class="rb-panel" id="rb-log">
       <div class="section-header" style="margin-bottom:8px">
         <span class="section-title">&#128221; Order Log</span>
@@ -5389,19 +5366,30 @@ function fetchAutobetStatus() {
       if (!d.ok) return;
       const totalBets = document.getElementById('autobet-total-bets');
       const totalSpent = document.getElementById('autobet-total-spent');
-      const balEl = document.getElementById('autobet-balance');
       const cycleEl = document.getElementById('autobet-last-cycle');
       const badge = document.getElementById('autobet-live-badge');
+      const polyBadge = document.getElementById('autobet-poly-badge');
+      const kaBadge = document.getElementById('autobet-kalshi-badge');
+      const polyBalEl = document.getElementById('autobet-poly-bal');
+      const kaBalEl = document.getElementById('autobet-kalshi-bal');
 
       if (totalBets) totalBets.textContent = d.total_bets || 0;
       if (totalSpent) totalSpent.textContent = '$' + Number(d.total_spent_usd || 0).toFixed(2);
-      if (balEl) balEl.textContent = d.last_balance_usd != null ? '$' + Number(d.last_balance_usd).toFixed(2) : '\u2014';
+
+      if (d.last_balance_polymarket != null) {
+        if (polyBadge) polyBadge.style.display = 'inline-block';
+        if (polyBalEl) polyBalEl.textContent = Number(d.last_balance_polymarket).toFixed(2);
+      }
+      if (d.last_balance_kalshi != null) {
+        if (kaBadge) kaBadge.style.display = 'inline-block';
+        if (kaBalEl) kaBalEl.textContent = Number(d.last_balance_kalshi).toFixed(2);
+      }
+
       if (cycleEl && d.last_cycle_at) {
         const ago = Math.round((Date.now() - new Date(d.last_cycle_at + 'Z').getTime()) / 60000);
         cycleEl.textContent = ago < 2 ? 'just now' : ago + 'm ago';
       }
 
-      // LIVE badge: engine ran in last 10 min
       if (badge && d.last_cycle_at) {
         const ageMin = (Date.now() - new Date(d.last_cycle_at + 'Z').getTime()) / 60000;
         badge.style.display = ageMin < 10 ? 'inline-block' : 'none';
@@ -5411,11 +5399,11 @@ function fetchAutobetStatus() {
       const newBets = (d.bets || []).filter(b => !_autobetKnownKeys.has(b.key));
       if (newBets.length > 0 && _autobetLastBetCount > 0) {
         newBets.forEach(b => {
+          const exTag = b.exchange ? `[${b.exchange.toUpperCase()}] ` : '';
           if (typeof showToast === 'function') {
-            showToast(`Bet placed: $${Number(b.amount_usd||0).toFixed(2)} ${(b.side||'').toUpperCase()} on ${b.market_title || b.market_slug}`, 'success');
+            showToast(`${exTag}Bet placed: $${Number(b.amount_usd||0).toFixed(2)} ${(b.side||'').toUpperCase()} on ${b.market_title || b.market_slug}`, 'success');
           }
         });
-        // Auto-open panel on new bet
         if (!_autobetPanelOpen) toggleAutobetPanel();
       }
       (d.bets || []).forEach(b => _autobetKnownKeys.add(b.key));
@@ -5425,8 +5413,17 @@ function fetchAutobetStatus() {
       const list = document.getElementById('autobet-bets-list');
       if (list && Array.isArray(d.bets)) {
         if (!d.bets.length) {
-          list.innerHTML = '<div style="color:var(--muted);padding:8px 0">No bets placed yet \u2014 engine is scanning markets every 5 min. Start the dashboard and run analysis to generate predictions.</div>';
+          list.innerHTML = '<div style="color:var(--muted);padding:8px 0">No bets placed yet \u2014 engine is scanning Polymarket + Kalshi every 5 min.</div>';
         } else {
+          // Exchange breakdown header
+          let exBreakdown = '';
+          if (d.by_exchange) {
+            const parts = Object.entries(d.by_exchange).map(([ex, info]) => {
+              const color = ex === 'polymarket' ? '#6366f1' : '#0ea5e9';
+              return `<span style="background:${color};color:#fff;font-size:10px;padding:2px 7px;border-radius:10px;font-weight:700">${ex.toUpperCase()}: ${info.count} bet${info.count===1?'':'s'} $${Number(info.spent||0).toFixed(2)}</span>`;
+            });
+            exBreakdown = `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">${parts.join('')}</div>`;
+          }
           const rows = d.bets.map((b, i) => {
             const sideColor = b.side === 'yes' ? '#22c55e' : '#ef4444';
             const dryTag = b.dry_run ? ' <span style="color:#f59e0b;font-size:10px">[DRY]</span>' : '';
@@ -5434,10 +5431,18 @@ function fetchAutobetStatus() {
             const placed = b.placed_at ? b.placed_at.slice(0, 19).replace('T', ' ') + ' UTC' : '';
             const isNew = newBets.some(nb => nb.key === b.key);
             const newStyle = isNew ? 'background:rgba(34,197,94,0.08);border-color:#22c55e;' : '';
-            const link = b.market_slug
-              ? `<a href="https://polymarket.com/event/${encodeURIComponent(b.market_slug)}" target="_blank" style="color:var(--accent)">${b.market_title || b.market_slug}</a>`
-              : (b.market_title || '\u2014');
+            const exColor = (b.exchange || '') === 'kalshi' ? '#0ea5e9' : '#6366f1';
+            const exBadge = b.exchange ? `<span style="background:${exColor};color:#fff;font-size:9px;padding:1px 5px;border-radius:8px;font-weight:700">${b.exchange.toUpperCase()}</span>` : '';
+            let link;
+            if (b.exchange === 'kalshi' && b.market_ticker) {
+              link = `<a href="https://kalshi.com/markets/${encodeURIComponent(b.market_ticker)}" target="_blank" style="color:var(--accent)">${b.market_title || b.market_ticker}</a>`;
+            } else if (b.market_slug) {
+              link = `<a href="https://polymarket.com/event/${encodeURIComponent(b.market_slug)}" target="_blank" style="color:var(--accent)">${b.market_title || b.market_slug}</a>`;
+            } else {
+              link = b.market_title || '\u2014';
+            }
             return `<div style="display:flex;gap:8px;align-items:flex-start;padding:7px 6px;border-bottom:1px solid var(--border);flex-wrap:wrap;border-radius:6px;${newStyle}">
+              ${exBadge}
               <span style="color:${sideColor};font-weight:700;min-width:32px;font-size:12px">${(b.side||'').toUpperCase()}${dryTag}</span>
               <span style="flex:1;min-width:130px;font-size:12px">${link}</span>
               <span style="color:var(--muted);white-space:nowrap;font-size:11px">${b.sport ? b.sport.toUpperCase() : ''} ${b.game_date||''}</span>
@@ -5445,7 +5450,7 @@ function fetchAutobetStatus() {
               <span style="color:var(--muted);font-size:10px;white-space:nowrap">${placed}</span>
             </div>`;
           }).join('');
-          list.innerHTML = rows;
+          list.innerHTML = exBreakdown + rows;
         }
       }
     })
@@ -5456,6 +5461,7 @@ function fetchAutobetStatus() {
 setInterval(fetchAutobetStatus, 30000);
 // Initial load 2s after page ready
 setTimeout(fetchAutobetStatus, 2000);
+
 
 function resolveKalshiReadyBets(force) {
   if (!READY_BETS.length) {
