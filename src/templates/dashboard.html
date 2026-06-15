@@ -2331,10 +2331,10 @@ function _silentRefreshPanels() {
     if (_isReadyBetsActive()) {
       refreshReadyBets(false);
     }
-    loadTrackedParlays();
-    loadTrackedSingles();
-    loadPropPerformance();
-    loadBackendLiveFeedHealth();
+    if (_isParlaysActive()) {
+      loadParlayOverview();
+      loadBackendLiveFeedHealth();
+    }
   }, 1500);
 }
 
@@ -2346,10 +2346,12 @@ setInterval(() => {
   if (_isReadyBetsActive()) {
     refreshReadyBets(false);
   }
-  loadTrackedParlays();
-  loadTrackedSingles();
-  loadPropPerformance();
-  loadBackendLiveFeedHealth();
+  // Only refresh the parlay/tracking tab when it is actually visible. This keeps
+  // mobile devices idle (no fetches, no heavy render) while on other tabs.
+  if (_isParlaysActive()) {
+    loadParlayOverview();
+    loadBackendLiveFeedHealth();
+  }
 }, TRACKING_REFRESH_MS);
 
 setInterval(_refreshScheduledStatuses, 60 * 1000);
@@ -2375,9 +2377,7 @@ function switchTab(name) {
     refreshReadyBets(false);
   }
   if (name === 'parlays')     {
-    loadTrackedParlays();
-    loadTrackedSingles();
-    loadPropPerformance();
+    loadParlayOverview({ force: true, immediate: true });
     loadBackendLiveFeedHealth();
   }
   if (name === 'tournaments' && _isSoccerMode()) {
@@ -6099,164 +6099,114 @@ function _fetchTrackedParlaysForUi() {
     .catch(() => ({ ok: false, parlays: [], scope: 'today' }));
 }
 
-function loadTrackedParlays() {
-  _fetchTrackedParlaysForUi().then(d=>{
-    const el = document.getElementById('tracked-parlays-list');
-    const metaEl = document.getElementById('tracked-parlay-meta');
-    if (!el) return;
-    const rows = d.ok ? _asArray(d.parlays) : [];
-    const liveLookup = _liveLookupSnapshot();
+// ── Consolidated parlay/tracking tab ───────────────────────────────────────
+// All heavy lifting (today-filter, prop normalization, dedupe/merge, live vs
+// settled bucketing, full accounting) happens server-side in one request so the
+// mobile frontend only renders. Every prediction the bot produces is counted.
+let _parlayOverviewTimer = null;
+let _parlayOverviewInFlight = false;
 
-    const pending = rows.filter(p => (p.outcome || 'PENDING').toUpperCase() === 'PENDING');
-    const pendingLive = pending.filter(p => _parlayPendingBucket(p, liveLookup) === 'live');
-    const pendingUpcoming = pending.filter(p => _parlayPendingBucket(p, liveLookup) !== 'live');
-    const wins = rows.filter(p => (p.outcome || '').toUpperCase() === 'WIN');
-    const losses = rows.filter(p => (p.outcome || '').toUpperCase() === 'LOSS');
-    const pushes = rows.filter(p => {
-      const out = (p.outcome || '').toUpperCase();
-      return out && out !== 'PENDING' && out !== 'WIN' && out !== 'LOSS';
-    });
-
-    if (metaEl) {
-      const scopeLabel = d.scope === 'all' ? 'scope: all tracked' : 'scope: today';
-      metaEl.textContent = `Upcoming: ${pendingUpcoming.length} · Live: ${pendingLive.length} · Won: ${wins.length} · Lost: ${losses.length} · Total: ${rows.length} · ${scopeLabel}`;
-    }
-
-    const outcomeLabel = (v, pendingBucket) => {
-      const out = (v || 'PENDING').toUpperCase();
-      if (out !== 'PENDING') return out;
-      return pendingBucket === 'live' ? 'LIVE TRACKING' : 'UPCOMING';
-    };
-
-    const renderList = (arr) => arr.map(p=>{
-      const legs = (p.legs_json||[]).map(l=>
-        `<div class="tp-leg">${l.label||JSON.stringify(l)}</div>`
-      ).join('');
-      const out = (p.outcome || 'PENDING').toUpperCase();
-      const pendingBucket = out === 'PENDING' ? _parlayPendingBucket(p, liveLookup) : '';
-      const combinedOdds = _num(p.combined_odds, 0);
-      const stakeUsd = _num(p.stake_usd, 0);
-      return `<div class="tracked-parlay">
-        <div class="tracked-parlay-header">
-          <span class="tp-name">${p.name||'Parlay #'+p.id}</span>
-          <span class="tp-outcome tp-${out}">${outcomeLabel(out, pendingBucket)}</span>
-        </div>
-        <div class="tp-meta">x${combinedOdds.toFixed(2)} · $${stakeUsd.toFixed(2)} stake · ${_friendlyEtDateTime(p.created_at)}</div>
-        <div class="tp-legs">${legs || '<div class="tp-leg">No legs recorded.</div>'}</div>
-      </div>`;
-    }).join('');
-
-    const renderGroup = (title, arr, emptyMsg, open) => `
-      <details class="tracked-group" ${open ? 'open' : ''}>
-        <summary>${title} (${arr.length})</summary>
-        <div class="tracked-scroll">
-          ${arr.length ? renderList(arr) : `<div class="no-games" style="padding:12px">${emptyMsg}</div>`}
-        </div>
-      </details>
-    `;
-
-    const intro = !d.ok
-      ? 'Could not load tracked parlays. Showing empty sections.'
-      : (rows.length ? 'All tracked bets are shown below.' : 'No tracked parlays yet. New tracked bets will appear below.');
-
-    el.innerHTML = `
-      <div class="section-meta" style="margin-bottom:8px">${intro}</div>
-      ${renderGroup('Upcoming', pendingUpcoming, 'No upcoming tracked parlays.', true)}
-      ${renderGroup('Live Tracking', pendingLive, 'No live tracked parlays.', false)}
-      ${renderGroup('Won', wins, 'No winning parlays yet.', false)}
-      ${renderGroup('Lost', losses, 'No losing parlays yet.', false)}
-      ${pushes.length ? renderGroup('Other', pushes, 'No other settled parlays.', false) : ''}
-    `;
-  }).catch(() => {
-    const el = document.getElementById('tracked-parlays-list');
-    if (el) el.innerHTML = '<div class="no-games" style="padding:12px">Could not load tracked parlays.</div>';
-  });
+function loadParlayOverview(opts) {
+  opts = opts || {};
+  // The parlay tab content is only visible on the parlays panel — skip otherwise.
+  if (!opts.force && !_isParlaysActive()) return;
+  clearTimeout(_parlayOverviewTimer);
+  _parlayOverviewTimer = setTimeout(_runParlayOverview, opts.immediate ? 0 : 120);
 }
 
-function loadTrackedSingles() {
-  Promise.all([
-    _fetchFreshJson('/api/predictions?days=21&current_only=1').catch(() => ({ ok: false, predictions: [] })),
-    _fetchFreshJson('/api/prop-history?days=21&current_only=1').catch(() => ({ ok: false, props: [] })),
-  ]).then(([d, p]) => {
-    const el = document.getElementById('tracked-singles-list');
-    const metaEl = document.getElementById('tracked-singles-meta');
-    if (!el) return;
-    const liveLookup = _liveLookupSnapshot();
-    const sentItems = _readReadySentBets();
-    const todayIso = _etTodayIso();
-    const rows = (d.ok ? _asArray(d.predictions) : []).filter(r => String(r.game_date || '').slice(0, 10) === todayIso);
-    const propRows = p.ok ? _asArray(p.props).map(r => {
-      const stats = (r && typeof r.stats_json === 'object' && r.stats_json) ? r.stats_json : {};
-      const direction = String(r.recommendation || '').toUpperCase();
-      const propType = String(r.prop_type || 'player_prop').replace(/_/g, ' ');
-      const lineTxt = r.line != null && r.line !== '' ? ` ${r.line}` : '';
-      const pick = `${r.player_name || 'Player'} ${direction} ${lineTxt} ${propType}`.replace(/\s+/g, ' ').trim();
-      return {
-        ...r,
-        pick,
-        bet_type: 'player_prop',
-        game: r.game || stats.game || '',
-        game_key: r.game_key || stats.game_key || stats.game || '',
-        predicted_at: r.detected_at || '',
-      };
-    }).filter(r => String(r.game_date || '').slice(0, 10) === todayIso) : [];
-    const dedupe = new Map();
-    const mergeRow = (base, incoming) => {
-      const merged = { ...(base || {}) };
-      Object.entries(incoming || {}).forEach(([key, value]) => {
-        if (value == null || value === '') return;
-        if (merged[key] == null || merged[key] === '') merged[key] = value;
-      });
-      return merged;
-    };
-    [...rows, ...propRows].forEach(r => {
-      if (!r || typeof r !== 'object') return;
-      const uid = String(r.bet_uid || [
-        r.game_key || '',
-        r.bet_type || '',
-        r.pick || '',
-        r.line != null ? r.line : '',
-        r.game_date || '',
-      ].join('|')).trim().toLowerCase();
-      if (!uid) return;
-      if (!dedupe.has(uid)) dedupe.set(uid, r);
-      else dedupe.set(uid, mergeRow(dedupe.get(uid), r));
-    });
+function _runParlayOverview() {
+  if (_parlayOverviewInFlight) return;
+  _parlayOverviewInFlight = true;
+  _fetchFreshJson('/api/parlay/tracking-overview')
+    .then(d => {
+      if (!d || !d.ok) { _renderParlayOverviewError(); return; }
+      _renderParlayList(d.parlays || {}, d.scope || 'today');
+      _renderSinglesList(d.singles || {});
+      _renderTrackingSummary(d.summary || {});
+    })
+    .catch(() => _renderParlayOverviewError())
+    .finally(() => { _parlayOverviewInFlight = false; });
+}
 
-    const singles = Array.from(dedupe.values()).filter(r => {
-      const bt = String(r.bet_type || '').toLowerCase();
-      return bt !== 'parlay' && String(r.game_date || '').slice(0, 10) === todayIso;
-    });
+function _renderParlayOverviewError() {
+  const pl = document.getElementById('tracked-parlays-list');
+  if (pl && !pl.dataset.loaded) pl.innerHTML = '<div class="no-games" style="padding:12px">Could not load tracked parlays.</div>';
+  const sl = document.getElementById('tracked-singles-list');
+  if (sl && !sl.dataset.loaded) sl.innerHTML = '<div class="no-games" style="padding:12px">Could not load tracked singles.</div>';
+}
 
-    const pending = singles.filter(r => String(r.outcome || 'PENDING').toUpperCase() === 'PENDING');
-    const pendingLive = pending.filter(r => _rowPhaseLike(r, liveLookup) === 'live');
-    const pendingUpcoming = pending.filter(r => _rowPhaseLike(r, liveLookup) !== 'live');
-    const wins = singles.filter(r => String(r.outcome || '').toUpperCase() === 'WIN');
-    const losses = singles.filter(r => String(r.outcome || '').toUpperCase() === 'LOSS');
-    const trackedOnKalshi = singles.filter(r => !!_readySentInfo(r, sentItems)).length;
+function _trackedGroupHtml(title, rows, emptyMsg, open, renderRow) {
+  const arr = _asArray(rows);
+  const body = arr.length ? arr.map(renderRow).join('') : `<div class="no-games" style="padding:12px">${emptyMsg}</div>`;
+  return `<details class="tracked-group" ${open ? 'open' : ''}>
+      <summary>${title} (${arr.length})</summary>
+      <div class="tracked-scroll">${body}</div>
+    </details>`;
+}
 
-    if (metaEl) {
-      metaEl.textContent = `Upcoming: ${pendingUpcoming.length} · Live: ${pendingLive.length} · Won: ${wins.length} · Lost: ${losses.length} · Kalshi Tracking: ${trackedOnKalshi} · Total: ${singles.length}`;
-    }
+function _renderParlayRow(p) {
+  const out = String(p.outcome || 'PENDING').toUpperCase();
+  const phase = String(p.tracking_phase || '').toLowerCase();
+  const label = out !== 'PENDING' ? out : (phase === 'live' ? 'LIVE TRACKING' : 'UPCOMING');
+  const legs = _asArray(p.legs_json).map(l => `<div class="tp-leg">${l.label || JSON.stringify(l)}</div>`).join('');
+  const combinedOdds = _num(p.combined_odds, 0);
+  const stakeUsd = _num(p.stake_usd, 0);
+  return `<div class="tracked-parlay">
+      <div class="tracked-parlay-header">
+        <span class="tp-name">${p.name || 'Parlay #' + p.id}</span>
+        <span class="tp-outcome tp-${out}">${label}</span>
+      </div>
+      <div class="tp-meta">x${combinedOdds.toFixed(2)} · $${stakeUsd.toFixed(2)} stake · ${_friendlyEtDateTime(p.created_at)}</div>
+      <div class="tp-legs">${legs || '<div class="tp-leg">No legs recorded.</div>'}</div>
+    </div>`;
+}
 
-    const renderRows = (arr) => arr.map(r => {
-      const out = String(r.outcome || 'PENDING').toUpperCase();
-      const pendingBucket = out === 'PENDING' ? _rowPhaseLike(r, liveLookup) : '';
-      const betType = String(r.bet_type || '').replace(/_/g, ' ').toUpperCase();
-      const gameDate = String(r.game_date || '').slice(0, 10);
-      const gameDateLabel = _friendlyEtDay(gameDate);
-      const lineTxt = r.line != null && r.line !== '' ? ` · line ${r.line}` : '';
-      const sentInfo = _readySentInfo(r, sentItems);
-      const matchup = `${r.home_team || ''}${r.away_team ? ` vs ${r.away_team}` : ''}`.trim() || r.game || r.team || '—';
-      const pendingLabel = pendingBucket === 'live' ? 'LIVE TRACKING' : (sentInfo ? 'TRACKING' : 'UPCOMING');
-      const kalshiBits = sentInfo ? [
-        sentInfo.ticker ? `<span>Kalshi ${sentInfo.ticker}</span>` : '',
-        sentInfo.order_status ? `<span>${String(sentInfo.order_status).toUpperCase()}</span>` : '',
-        sentInfo.side ? `<span>${String(sentInfo.side).toUpperCase()}</span>` : '',
-        sentInfo.count ? `<span>x${sentInfo.count}</span>` : '',
-        sentInfo.client_order_id ? `<span>ID ${String(sentInfo.client_order_id).slice(-10)}</span>` : '',
-      ].filter(Boolean).join('') : '';
-      return `<div class="tracked-single">
+function _renderParlayList(parlays, scope) {
+  const el = document.getElementById('tracked-parlays-list');
+  const metaEl = document.getElementById('tracked-parlay-meta');
+  if (!el) return;
+  const counts = parlays.counts || {};
+  const upcoming = _asArray(parlays.upcoming);
+  const live = _asArray(parlays.live);
+  const won = _asArray(parlays.won);
+  const lost = _asArray(parlays.lost);
+  const other = _asArray(parlays.other);
+  const total = (counts.total != null) ? counts.total : (upcoming.length + live.length + won.length + lost.length + other.length);
+  if (metaEl) {
+    const scopeLabel = scope === 'all' ? 'scope: all tracked' : 'scope: today';
+    metaEl.textContent = `Upcoming: ${upcoming.length} · Live: ${live.length} · Won: ${won.length} · Lost: ${lost.length} · Total: ${total} · ${scopeLabel}`;
+  }
+  const intro = total ? 'All tracked parlays are shown below.' : 'No tracked parlays yet. New tracked bets will appear below.';
+  el.innerHTML = `
+    <div class="section-meta" style="margin-bottom:8px">${intro}</div>
+    ${_trackedGroupHtml('Upcoming', upcoming, 'No upcoming tracked parlays.', true, _renderParlayRow)}
+    ${_trackedGroupHtml('Live Tracking', live, 'No live tracked parlays.', false, _renderParlayRow)}
+    ${_trackedGroupHtml('Won', won, 'No winning parlays yet.', false, _renderParlayRow)}
+    ${_trackedGroupHtml('Lost', lost, 'No losing parlays yet.', false, _renderParlayRow)}
+    ${other.length ? _trackedGroupHtml('Other', other, 'No other settled parlays.', false, _renderParlayRow) : ''}
+  `;
+  el.dataset.loaded = '1';
+}
+
+function _makeSingleRowRenderer(sentItems) {
+  return function (r) {
+    const out = String(r.outcome || 'PENDING').toUpperCase();
+    const phase = String(r.tracking_phase || '').toLowerCase();
+    const betType = String(r.bet_type || '').replace(/_/g, ' ').toUpperCase();
+    const gameDate = String(r.game_date || '').slice(0, 10);
+    const gameDateLabel = _friendlyEtDay(gameDate);
+    const lineTxt = r.line != null && r.line !== '' ? ` · line ${r.line}` : '';
+    const sentInfo = _readySentInfo(r, sentItems);
+    const matchup = `${r.home_team || ''}${r.away_team ? ` vs ${r.away_team}` : ''}`.trim() || r.game || r.team || '—';
+    const pendingLabel = phase === 'live' ? 'LIVE TRACKING' : (sentInfo ? 'TRACKING' : 'UPCOMING');
+    const kalshiBits = sentInfo ? [
+      sentInfo.ticker ? `<span>Kalshi ${sentInfo.ticker}</span>` : '',
+      sentInfo.order_status ? `<span>${String(sentInfo.order_status).toUpperCase()}</span>` : '',
+      sentInfo.side ? `<span>${String(sentInfo.side).toUpperCase()}</span>` : '',
+      sentInfo.count ? `<span>x${sentInfo.count}</span>` : '',
+      sentInfo.client_order_id ? `<span>ID ${String(sentInfo.client_order_id).slice(-10)}</span>` : '',
+    ].filter(Boolean).join('') : '';
+    return `<div class="tracked-single">
         <div class="tracked-single-top">
           <div>
             <div class="tracked-single-title">${r.pick || 'Bet'}</div>
@@ -6270,28 +6220,99 @@ function loadTrackedSingles() {
           <span class="tp-outcome tp-${out}">${out === 'PENDING' ? pendingLabel : out}</span>
         </div>
       </div>`;
-    }).join('');
-
-    const renderGroup = (title, arr, emptyMsg, open) => `
-      <details class="tracked-group" ${open ? 'open' : ''}>
-        <summary>${title} (${arr.length})</summary>
-        <div class="tracked-scroll">
-          ${arr.length ? renderRows(arr) : `<div class="no-games" style="padding:12px">${emptyMsg}</div>`}
-        </div>
-      </details>
-    `;
-
-    el.innerHTML = `
-      ${renderGroup('Upcoming', pendingUpcoming, 'No upcoming tracked singles/team props.', true)}
-      ${renderGroup('Live Tracking', pendingLive, 'No live tracked singles/team props.', false)}
-      ${renderGroup('Won', wins, 'No winning singles/team props yet.', false)}
-      ${renderGroup('Lost', losses, 'No losing singles/team props yet.', false)}
-    `;
-  }).catch(() => {
-    const el = document.getElementById('tracked-singles-list');
-    if (el) el.innerHTML = '<div class="no-games" style="padding:12px">Could not load tracked singles.</div>';
-  });
+  };
 }
+
+function _renderSinglesList(singles) {
+  const el = document.getElementById('tracked-singles-list');
+  const metaEl = document.getElementById('tracked-singles-meta');
+  if (!el) return;
+  const sentItems = _readReadySentBets();
+  const counts = singles.counts || {};
+  const upcoming = _asArray(singles.upcoming);
+  const live = _asArray(singles.live);
+  const won = _asArray(singles.won);
+  const lost = _asArray(singles.lost);
+  const total = (counts.total != null) ? counts.total : (upcoming.length + live.length + won.length + lost.length);
+  const renderRow = _makeSingleRowRenderer(sentItems);
+  const trackedOnKalshi = [...upcoming, ...live, ...won, ...lost].filter(r => !!_readySentInfo(r, sentItems)).length;
+  if (metaEl) {
+    metaEl.textContent = `Upcoming: ${upcoming.length} · Live: ${live.length} · Won: ${won.length} · Lost: ${lost.length} · Kalshi Tracking: ${trackedOnKalshi} · Total: ${total}`;
+  }
+  el.innerHTML = `
+    ${_trackedGroupHtml('Upcoming', upcoming, 'No upcoming tracked singles/team props.', true, renderRow)}
+    ${_trackedGroupHtml('Live Tracking', live, 'No live tracked singles/team props.', false, renderRow)}
+    ${_trackedGroupHtml('Won', won, 'No winning singles/team props yet.', false, renderRow)}
+    ${_trackedGroupHtml('Lost', lost, 'No losing singles/team props yet.', false, renderRow)}
+  `;
+  el.dataset.loaded = '1';
+}
+
+function _renderTrackingSummary(summary) {
+  const el = document.getElementById('prop-perf-stats');
+  if (el) {
+    const s = summary || {};
+    const sc = s.singles || {};
+    const pc = s.parlays || {};
+    const settledWins = s.settled_wins || 0;
+    const settledLosses = s.settled_losses || 0;
+    const winRate = s.win_rate;
+    const winColor = winRate == null ? 'var(--muted)' : (winRate >= 55 ? 'var(--green)' : winRate >= 45 ? 'var(--yellow)' : 'var(--red)');
+    const liveTracked = s.live_tracked || 0;
+    const totalTracked = s.total_tracked || 0;
+    const pending = s.pending || 0;
+    delete el.dataset.fallbackNote;
+    el.innerHTML = `
+      <div class="perf-card"><div class="perf-val perf-pend">${liveTracked}</div><div class="perf-label">Live Tracked Bets</div><div class="perf-sub">Singles/Props ${sc.live || 0} · Parlays ${pc.live || 0}</div></div>
+      <div class="perf-card"><div class="perf-val">${settledWins}-${settledLosses}</div><div class="perf-label">Settled W-L</div><div class="perf-sub">Games + Props + Parlays</div></div>
+      <div class="perf-card"><div class="perf-val" style="color:${winColor}">${winRate != null ? winRate + '%' : '—'}</div><div class="perf-label">Overall Win Rate</div><div class="perf-sub">Settled bets only</div></div>
+      <div class="perf-card"><div class="perf-val" style="font-size:1.2rem">${totalTracked}</div><div class="perf-label">Total Predictions Tracked</div><div class="perf-sub">Singles/Props ${sc.total || 0} · Parlays ${pc.total || 0} · Pending ${pending}</div></div>
+    `;
+    _renderPropTypeTable(s.by_prop_type || [], s.fallback_window_days || 0);
+  }
+}
+
+function _renderPropTypeTable(byType, fallbackDays) {
+  const tbody = document.getElementById('prop-type-tbody');
+  if (!tbody) return;
+  tbody.innerHTML = _asArray(byType).map(v => {
+    const wl = (v.wins || 0) + (v.losses || 0);
+    const hr = wl > 0 ? Math.round((v.wins || 0) / wl * 100) : null;
+    const hrColor = hr >= 55 ? 'var(--green)' : hr >= 45 ? 'var(--yellow)' : 'var(--red)';
+    const unresolvable = Number(v.unresolvable || 0);
+    const propBucket = String(v.prop_type || '').toLowerCase();
+    const propLabel = propBucket === 'game_prop' ? 'Game Prop' : propBucket === 'over' ? 'Over' : propBucket === 'under' ? 'Under' : String(v.prop_type || '').replace(/_/g, ' ');
+    const dirLabel = propBucket === 'game_prop' ? '—' : (v.recommendation || '—');
+    const dCls = dirLabel === 'OVER' ? 'badge-blue' : dirLabel === 'UNDER' ? 'badge-purple' : '';
+    let totalCell = String(v.total || 0);
+    if ((v.pending || 0) > 0) totalCell += ` · ${v.pending} pending`;
+    if ((v.pushes || 0) > 0) totalCell += ` · ${v.pushes} push`;
+    if (unresolvable > 0) totalCell += ` · <span style="color:var(--muted);font-size:.78em" title="No ESPN data available for this stat type">${unresolvable} no data</span>`;
+    const hrCell = hr != null ? hr + '%' : (unresolvable > 0 && wl === 0 ? '<span style="color:var(--muted);font-size:.82em">no data</span>' : '—');
+    return `<tr>
+        <td>${propLabel}</td>
+        <td><span class="badge ${dCls}">${dirLabel}</span></td>
+        <td style="color:var(--green)">${v.wins || 0}</td>
+        <td style="color:var(--red)">${v.losses || 0}</td>
+        <td>${totalCell}</td>
+        <td style="color:${hrColor};font-weight:700">${hrCell}</td>
+      </tr>`;
+  }).join('') || `<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:16px">No prop results yet${fallbackDays ? ` (last ${fallbackDays} days checked)` : ''} — runs automatically after games finish.</td></tr>`;
+
+  const perfStatsEl = document.getElementById('prop-perf-stats');
+  if (fallbackDays && perfStatsEl && !perfStatsEl.dataset.fallbackNote) {
+    perfStatsEl.dataset.fallbackNote = '1';
+    perfStatsEl.insertAdjacentHTML('beforeend', `<div class="perf-card" style="grid-column:1/-1"><div class="perf-sub" style="font-size:.78rem">Hit Rate by Prop Type is showing a rolling ${fallbackDays}-day fallback because today has no resolved prop outcomes yet.</div></div>`);
+  } else if (!fallbackDays && perfStatsEl) {
+    delete perfStatsEl.dataset.fallbackNote;
+  }
+}
+
+// Backwards-compatible delegators: every existing call site now triggers a single
+// consolidated (debounced) overview fetch instead of multiple heavy client passes.
+function loadTrackedParlays() { loadParlayOverview(); }
+
+function loadTrackedSingles() { loadParlayOverview(); }
 
 // ── Performance ───────────────────────────────────────────────────────────
 function loadBotPerformance() {
@@ -6348,144 +6369,7 @@ function loadPerformance() {
   });
 }
 
-function loadPropPerformance() {
-  Promise.all([
-    fetch('/api/performance?current_only=1').then(r=>r.json()).catch(()=>({ok:false,stats:{}})),
-    fetch('/api/prop-performance?current_only=1').then(r=>r.json()),
-    fetch('/api/parlay/performance?current_only=1').then(r=>r.json()).catch(()=>({ok:false,stats:{}})),
-    _fetchTrackedParlaysForUi(),
-    fetch('/api/predictions?days=21&current_only=1').then(r=>r.json()).catch(()=>({ok:false,predictions:[]})),
-    fetch('/api/prop-history?days=21&current_only=1').then(r=>r.json()).catch(()=>({ok:false,props:[]})),
-  ]).then(([g, d, pr, pl, pd, ph])=>{
-    if (!g.ok || !d.ok) return;
-    const gs = g.stats || {};
-    if (!d.ok) return;
-    const s = d.stats||{};
-    const prs = (pr && pr.ok) ? (pr.stats || {}) : {};
-
-    const liveLookup = _liveLookupSnapshot();
-
-    const todayIso = _etTodayIso();
-    const trackedParlays = pl && pl.ok ? _asArray(pl.parlays) : [];
-
-    const predRows = (pd && pd.ok ? _asArray(pd.predictions) : []).filter(r => String(r.game_date || '').slice(0, 10) === todayIso);
-    const propRows = (ph && ph.ok ? _asArray(ph.props).map(r => {
-      const stats = (r && typeof r.stats_json === 'object' && r.stats_json) ? r.stats_json : {};
-      const direction = String(r.recommendation || '').toUpperCase();
-      const propType = String(r.prop_type || 'player_prop').replace(/_/g, ' ');
-      const lineTxt = r.line != null && r.line !== '' ? ` ${r.line}` : '';
-      const pick = `${r.player_name || 'Player'} ${direction} ${lineTxt} ${propType}`.replace(/\s+/g, ' ').trim();
-      return {
-        ...r,
-        pick,
-        bet_type: 'player_prop',
-        game: r.game || stats.game || '',
-        game_key: r.game_key || stats.game_key || stats.game || '',
-      };
-    }).filter(r => String(r.game_date || '').slice(0, 10) === todayIso) : []);
-
-    const dedupe = new Map();
-    const mergeRow = (base, incoming) => {
-      const merged = { ...(base || {}) };
-      Object.entries(incoming || {}).forEach(([key, value]) => {
-        if (value == null || value === '') return;
-        if (merged[key] == null || merged[key] === '') merged[key] = value;
-      });
-      return merged;
-    };
-    [...predRows, ...propRows].forEach(r => {
-      if (!r || typeof r !== 'object') return;
-      const uid = String(r.bet_uid || [
-        r.game_key || '',
-        r.bet_type || '',
-        r.pick || '',
-        r.line != null ? r.line : '',
-        r.game_date || '',
-      ].join('|')).trim().toLowerCase();
-      if (!uid) return;
-      if (!dedupe.has(uid)) dedupe.set(uid, r);
-      else dedupe.set(uid, mergeRow(dedupe.get(uid), r));
-    });
-    const trackedSingles = Array.from(dedupe.values()).filter(r => {
-      const bt = String(r.bet_type || '').toLowerCase();
-      return bt !== 'parlay' && String(r.game_date || '').slice(0, 10) === todayIso;
-    });
-
-    const singleWins = trackedSingles.filter(r => String(r.outcome || '').toUpperCase() === 'WIN').length;
-    const singleLosses = trackedSingles.filter(r => String(r.outcome || '').toUpperCase() === 'LOSS').length;
-    const singlePending = trackedSingles.filter(r => String(r.outcome || 'PENDING').toUpperCase() === 'PENDING').length;
-    const singlePendingLive = trackedSingles.filter(r => String(r.outcome || 'PENDING').toUpperCase() === 'PENDING' && _rowPhaseLike(r, liveLookup) === 'live').length;
-
-    const parlayWins = trackedParlays.filter(p => String(p.outcome || '').toUpperCase() === 'WIN').length;
-    const parlayLosses = trackedParlays.filter(p => String(p.outcome || '').toUpperCase() === 'LOSS').length;
-    const parlayPending = trackedParlays.filter(p => String(p.outcome || 'PENDING').toUpperCase() === 'PENDING').length;
-    const parlayPendingLive = trackedParlays.filter(p => String(p.outcome || 'PENDING').toUpperCase() === 'PENDING' && _parlayPendingBucket(p, liveLookup) === 'live').length;
-
-    const settledWins = singleWins + parlayWins;
-    const settledLosses = singleLosses + parlayLosses;
-    const settledTotal = settledWins + settledLosses;
-    const liveTracked = singlePendingLive + parlayPendingLive;
-    const totalTracked = trackedSingles.length + trackedParlays.length;
-    const overallHitRate = settledTotal > 0 ? Math.round((settledWins / settledTotal) * 100) : null;
-    const overallColor = overallHitRate >= 55 ? 'var(--green)' : overallHitRate >= 45 ? 'var(--yellow)' : 'var(--red)';
-    const candidateLegs = _comboCandidateLegs();
-    const propLegs = candidateLegs.filter(leg => _legSourceGroup(leg) === 'prop').length;
-    const gameLegs = candidateLegs.filter(leg => _legSourceGroup(leg) === 'game').length;
-
-    const liveOver = Array.isArray(ALL_PROPS)
-      ? ALL_PROPS.filter(p => _isLiveGame(p.game_key||p.game||'')).length
-      : 0;
-
-    document.getElementById('prop-perf-stats').innerHTML = `
-      <div class="perf-card"><div class="perf-val perf-pend">${liveTracked}</div><div class="perf-label">Live Tracked Bets</div><div class="perf-sub">Singles/Props ${singlePendingLive} · Parlays ${parlayPendingLive}${liveOver ? ` · ${liveOver} in live games` : ''}</div></div>
-      <div class="perf-card"><div class="perf-val">${settledWins}-${settledLosses}</div><div class="perf-label">Settled W-L</div><div class="perf-sub">Games + Props + Parlays</div></div>
-      <div class="perf-card"><div class="perf-val" style="color:${overallColor}">${overallHitRate!=null?overallHitRate+'%':'—'}</div><div class="perf-label">Overall Win Rate</div><div class="perf-sub">Settled bets only</div></div>
-      <div class="perf-card"><div class="perf-val" style="font-size:1.2rem">${candidateLegs.length}</div><div class="perf-label">Qualified Legs</div><div class="perf-sub">Props ${propLegs} · Games ${gameLegs}</div></div>
-      <div class="perf-card"><div class="perf-val" style="font-size:1.2rem">${totalTracked}</div><div class="perf-label">Total Tracked Bets</div><div class="perf-sub">Singles/Props ${trackedSingles.length} · Parlays ${trackedParlays.length} · Pending ${singlePending + parlayPending}</div></div>
-    `;
-    const byType = s.by_prop_type||[];
-    const fallbackDays = Number(s.fallback_window_days || 0);
-    const tbody = document.getElementById('prop-type-tbody');
-    tbody.innerHTML = byType.map(v=>{
-      const wl = (v.wins||0) + (v.losses||0);
-      const hr = wl > 0 ? Math.round((v.wins||0)/wl*100) : null;
-      const hrColor = hr>=55?'var(--green)':hr>=45?'var(--yellow)':'var(--red)';
-      const unresolvable = Number(v.unresolvable || 0);
-      const propBucket = String(v.prop_type || '').toLowerCase();
-      const propLabel = propBucket === 'game_prop'
-        ? 'Game Prop'
-        : propBucket === 'over'
-          ? 'Over'
-          : propBucket === 'under'
-            ? 'Under'
-            : String(v.prop_type || '').replace(/_/g,' ');
-      const dirLabel = propBucket === 'game_prop' ? '—' : (v.recommendation || '—');
-      const dirClass = dirLabel === 'OVER' ? 'badge-blue' : dirLabel === 'UNDER' ? 'badge-purple' : '';
-      // Build the total cell — show unresolvable separately so it's clear these can't be tracked
-      let totalCell = String(v.total||0);
-      if ((v.pending||0) > 0) totalCell += ` · ${v.pending} pending`;
-      if ((v.pushes||0) > 0) totalCell += ` · ${v.pushes} push`;
-      if (unresolvable > 0) totalCell += ` · <span style="color:var(--muted);font-size:.78em" title="No ESPN data available for this stat type">${unresolvable} no data</span>`;
-      const hrCell = hr!=null ? hr+'%' : (unresolvable > 0 && wl === 0 ? '<span style="color:var(--muted);font-size:.82em">no data</span>' : '—');
-      return `<tr>
-        <td>${propLabel}</td>
-        <td><span class="badge ${dirClass}">${dirLabel}</span></td>
-        <td style="color:var(--green)">${v.wins||0}</td>
-        <td style="color:var(--red)">${v.losses||0}</td>
-        <td>${totalCell}</td>
-        <td style="color:${hrColor};font-weight:700">${hrCell}</td>
-      </tr>`;
-    }).join('') || `<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:16px">No prop results yet${fallbackDays ? ` (last ${fallbackDays} days checked)` : ''} — runs automatically after games finish.</td></tr>`;
-
-    const perfStatsEl = document.getElementById('prop-perf-stats');
-    if (fallbackDays && perfStatsEl && !perfStatsEl.dataset.fallbackNote) {
-      perfStatsEl.dataset.fallbackNote = '1';
-      perfStatsEl.insertAdjacentHTML('beforeend', `<div class="perf-card" style="grid-column:1/-1"><div class="perf-sub" style="font-size:.78rem">Hit Rate by Prop Type is showing a rolling ${fallbackDays}-day fallback because today has no resolved prop outcomes yet.</div></div>`);
-    } else if (!fallbackDays && perfStatsEl) {
-      delete perfStatsEl.dataset.fallbackNote;
-    }
-  });
-}
+function loadPropPerformance() { loadParlayOverview(); }
 
 let _resolveInFlight = false;
 function resolveOutcomesSilent() {

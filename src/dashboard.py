@@ -8226,6 +8226,92 @@ def _annotate_parlay_tracking(rows: list[dict]) -> list[dict]:
     return out
 
 
+def _normalize_prop_history_row_for_tracking(row: dict) -> dict:
+    """Shape a prop_history row into the single-bet schema the tracking UI renders."""
+    stats = row.get("stats_json") if isinstance(row.get("stats_json"), dict) else {}
+    direction = str(row.get("recommendation") or "").upper()
+    prop_type = str(row.get("prop_type") or "player_prop").replace("_", " ")
+    line = row.get("line")
+    line_txt = f" {line}" if (line is not None and line != "") else ""
+    pick = " ".join(
+        f"{row.get('player_name') or 'Player'} {direction}{line_txt} {prop_type}".split()
+    )
+    out = dict(row)
+    out["pick"] = pick
+    out["bet_type"] = "player_prop"
+    out["game"] = row.get("game") or stats.get("game") or ""
+    out["game_key"] = row.get("game_key") or stats.get("game_key") or stats.get("game") or ""
+    out["predicted_at"] = row.get("detected_at") or out.get("predicted_at") or ""
+    return out
+
+
+def _single_tracking_uid(row: dict) -> str:
+    """Deterministic dedupe key matching the prior client-side logic."""
+    uid = row.get("bet_uid")
+    if uid:
+        return str(uid).strip().lower()
+    parts = [
+        str(row.get("game_key") or ""),
+        str(row.get("bet_type") or ""),
+        str(row.get("pick") or ""),
+        ("" if row.get("line") is None else str(row.get("line"))),
+        str(row.get("game_date") or ""),
+    ]
+    return "|".join(parts).strip().lower()
+
+
+def _merge_tracking_row(base: dict, incoming: dict) -> dict:
+    merged = dict(base or {})
+    for key, value in (incoming or {}).items():
+        if value is None or value == "":
+            continue
+        if merged.get(key) in (None, ""):
+            merged[key] = value
+    return merged
+
+
+def _bucket_tracking_rows(rows: list[dict]) -> dict:
+    """Split annotated rows into upcoming/live/won/lost/other using outcome + tracking_phase."""
+    buckets = {"upcoming": [], "live": [], "won": [], "lost": [], "other": []}
+    for row in (rows or []):
+        if not isinstance(row, dict):
+            continue
+        outcome = str(row.get("outcome") or "PENDING").upper()
+        if outcome == "WIN":
+            buckets["won"].append(row)
+        elif outcome == "LOSS":
+            buckets["lost"].append(row)
+        elif outcome == "PENDING":
+            if str(row.get("tracking_phase") or "") == "live":
+                buckets["live"].append(row)
+            else:
+                buckets["upcoming"].append(row)
+        else:
+            buckets["other"].append(row)
+    return buckets
+
+
+def _tracking_bucket_counts(buckets: dict) -> dict:
+    won = len(buckets.get("won") or [])
+    lost = len(buckets.get("lost") or [])
+    live = len(buckets.get("live") or [])
+    upcoming = len(buckets.get("upcoming") or [])
+    other = len(buckets.get("other") or [])
+    pending = live + upcoming
+    settled = won + lost
+    return {
+        "won": won,
+        "lost": lost,
+        "live": live,
+        "upcoming": upcoming,
+        "other": other,
+        "pending": pending,
+        "settled": settled,
+        "total": won + lost + live + upcoming + other,
+        "win_rate": round(won / settled * 100) if settled else None,
+    }
+
+
 @app.route("/api/tournaments")
 def api_tournaments():
     if _ACTIVE_SPORT == "all":
@@ -9383,6 +9469,143 @@ def api_parlay_resolve():
             payout=float(data.get("payout", 0)),
         )
         return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
+
+
+@app.route("/api/parlay/tracking-overview")
+def api_parlay_tracking_overview():
+    """Single consolidated payload for the Parlays/Tracking tab.
+
+    Does ALL heavy lifting server-side (fetch, today-filter, prop normalization,
+    dedupe/merge, live/settled bucketing, full accounting) so the mobile frontend
+    only renders. Every prediction the bot produces — singles, props and parlays —
+    is counted here so nothing is silently dropped.
+    """
+    try:
+        _maybe_trigger_tracking_sync_on_read()
+        from data.db import (
+            get_predictions,
+            get_prop_history,
+            get_tracked_parlays,
+            prune_tracked_parlays_to_date,
+            get_prop_performance_stats,
+        )
+
+        db_sport = None if _ACTIVE_SPORT == "all" else _ACTIVE_SPORT
+        today = _et_calendar_today()
+        today_iso = today.isoformat()
+
+        # ── Parlays (prefer today, fall back to all tracked) ──────────────────
+        try:
+            prune_tracked_parlays_to_date(target_date=today)
+        except Exception:
+            pass
+        parlay_rows = get_tracked_parlays(
+            include_resolved=True, target_date=today, sport=db_sport
+        )
+        scope = "today"
+        if not parlay_rows:
+            parlay_rows = get_tracked_parlays(
+                include_resolved=True, target_date=None, sport=db_sport
+            )
+            scope = "all"
+        parlay_rows = _annotate_parlay_tracking(parlay_rows)
+        parlay_buckets = _bucket_tracking_rows(parlay_rows)
+        parlay_counts = _tracking_bucket_counts(parlay_buckets)
+
+        # ── Singles (game predictions) + player/team props for today ──────────
+        preds = [
+            p
+            for p in get_predictions(days=21, sport=db_sport)
+            if str(p.get("game_date", ""))[:10] == today_iso
+        ]
+        props = [
+            _normalize_prop_history_row_for_tracking(r)
+            for r in get_prop_history(days=21, sport=db_sport)
+            if str(r.get("game_date", ""))[:10] == today_iso
+        ]
+
+        dedupe: dict[str, dict] = {}
+        for row in [*preds, *props]:
+            if not isinstance(row, dict):
+                continue
+            uid = _single_tracking_uid(row)
+            if not uid:
+                continue
+            if uid not in dedupe:
+                dedupe[uid] = row
+            else:
+                dedupe[uid] = _merge_tracking_row(dedupe[uid], row)
+
+        singles = [
+            row
+            for row in dedupe.values()
+            if str(row.get("bet_type") or "").lower() != "parlay"
+            and str(row.get("game_date", ""))[:10] == today_iso
+        ]
+        singles = _annotate_tracking_phase(singles)
+        single_buckets = _bucket_tracking_rows(singles)
+        single_counts = _tracking_bucket_counts(single_buckets)
+
+        # ── Combined accounting (every prediction counted) ────────────────────
+        settled_wins = single_counts["won"] + parlay_counts["won"]
+        settled_losses = single_counts["lost"] + parlay_counts["lost"]
+        settled_total = settled_wins + settled_losses
+        live_tracked = single_counts["live"] + parlay_counts["live"]
+        pending_total = single_counts["pending"] + parlay_counts["pending"]
+        total_tracked = single_counts["total"] + parlay_counts["total"]
+
+        # ── Hit Rate by Prop Type (today, with trailing fallback) ─────────────
+        prop_stats = get_prop_performance_stats(sport=db_sport, target_date=today) or {}
+        by_prop_rows = [
+            r for r in (prop_stats.get("by_prop_type") or []) if isinstance(r, dict)
+        ]
+        has_resolved = any(
+            (int(r.get("wins") or 0) + int(r.get("losses") or 0)) > 0 for r in by_prop_rows
+        )
+        fallback_days = 0
+        if not has_resolved:
+            prop_stats = get_prop_performance_stats(sport=db_sport, days_back=21) or {}
+            fallback_days = 21
+
+        summary = {
+            "settled_wins": settled_wins,
+            "settled_losses": settled_losses,
+            "settled_total": settled_total,
+            "win_rate": round(settled_wins / settled_total * 100) if settled_total else None,
+            "live_tracked": live_tracked,
+            "pending": pending_total,
+            "total_tracked": total_tracked,
+            "singles": single_counts,
+            "parlays": parlay_counts,
+            "by_prop_type": prop_stats.get("by_prop_type") or [],
+            "fallback_window_days": fallback_days,
+        }
+
+        return jsonify({
+            "ok": True,
+            "scope": scope,
+            "today": today_iso,
+            "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "parlays": {
+                "upcoming": _clean(parlay_buckets["upcoming"]),
+                "live": _clean(parlay_buckets["live"]),
+                "won": _clean(parlay_buckets["won"]),
+                "lost": _clean(parlay_buckets["lost"]),
+                "other": _clean(parlay_buckets["other"]),
+                "counts": parlay_counts,
+            },
+            "singles": {
+                "upcoming": _clean(single_buckets["upcoming"]),
+                "live": _clean(single_buckets["live"]),
+                "won": _clean(single_buckets["won"]),
+                "lost": _clean(single_buckets["lost"]),
+                "other": _clean(single_buckets["other"]),
+                "counts": single_counts,
+            },
+            "summary": summary,
+        })
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
 
