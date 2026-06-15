@@ -6581,10 +6581,10 @@ function stopConsolePoll() {
       refreshReadyBets(false);
     }
     syncReadyOrderTracking();
-    loadTrackedParlays();
-    loadTrackedSingles();
-    loadPropPerformance();
-    loadBackendLiveFeedHealth();
+    if (_isParlaysActive()) {
+      loadParlayOverview();
+      loadBackendLiveFeedHealth();
+    }
   }, 60 * 1000);
 })();
 </script>
