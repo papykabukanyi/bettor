@@ -1099,7 +1099,29 @@ body.console-open main{padding-bottom:236px}
   <!-- PARLAYS -->
   <div class="tab-panel" id="panel-parlays">
 
+    <!-- AI-GENERATED PARLAY COMBOS -->
     <div class="section-header" style="margin-top:0">
+      <span class="section-title">&#127920; AI Parlay Combos</span>
+      <span class="section-meta" id="parlay-auto-meta">Building parlays&hellip;</span>
+    </div>
+    <div id="parlay-combos-empty" class="no-games hidden">No qualifying game bets or props yet &mdash; run analysis first.</div>
+    <div id="parlay-combos-grid" class="parlay-combo-grid"></div>
+
+    <!-- ELITE PARLAY -->
+    <div class="section-header" style="margin-top:20px">
+      <span class="section-title">&#9889; Elite Parlay</span>
+      <button class="btn btn-primary btn-sm" id="btn-elite-parlay" onclick="buildEliteParlay()">&#9889; Elite Parlay</button>
+    </div>
+    <div id="elite-parlay-result"></div>
+
+    <!-- PARLAY PERFORMANCE -->
+    <div class="section-header" style="margin-top:20px">
+      <span class="section-title">&#128200; Parlay Performance</span>
+      <span class="section-meta">Win / loss / ROI of tracked parlays</span>
+    </div>
+    <div class="perf-grid" id="parlay-perf-stats" style="margin-bottom:16px"><div class="no-games">Loading parlay stats&hellip;</div></div>
+
+    <div class="section-header" style="margin-top:20px">
       <span class="section-title">&#128204; Tracked Parlays (Live / Win / Loss)</span>
       <span class="section-meta" id="tracked-parlay-meta"></span>
     </div>
