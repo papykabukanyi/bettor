@@ -21,14 +21,10 @@ Integrates:
 
 import os
 import sys
-import math
 import datetime
-import json
 import warnings
 import re
-from typing import Optional
 
-import numpy as np
 import pandas as pd
 
 warnings.filterwarnings("ignore")
@@ -36,7 +32,7 @@ warnings.filterwarnings("ignore")
 SRC = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, SRC)
 
-from config import MIN_VALUE_EDGE, KELLY_FRACTION, BANKROLL, MLB_SEASONS, et_today
+from config import MIN_VALUE_EDGE, KELLY_FRACTION, BANKROLL, et_today
 
 _LOG_ZERO_RESOLUTIONS = False
 
@@ -408,7 +404,6 @@ def build_game_bets(game: dict, pred: dict, odds_row: dict = None) -> list[dict]
         team_name = ht if side == "home" else at
         t_line    = round(exp_r * 2) / 2
         t_ov      = _norm_sf(t_line, exp_r, 1.5)
-        t_un      = 1.0 - t_ov
         bt        = f"{side}_team_total"
         b = _bet(bt, f"{team_name} OVER {t_line}", t_ov, 0.476, line=t_line)
         if b: bets.append(b)
@@ -1214,7 +1209,6 @@ def resolve_prop_outcomes(days_back: int = 3) -> int:
         by_date[p["game_date"]].append(p)
 
     resolved = 0
-    today = et_today()
 
     for date_str, props in by_date.items():
         try:

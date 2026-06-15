@@ -1,10 +1,7 @@
 from __future__ import annotations
 
-import csv
 import datetime
-import io
 import json
-import os
 import re
 import time
 from typing import Any
@@ -15,8 +12,6 @@ from config import (
     API_FOOTBALL_BASE,
     API_FOOTBALL_HOST,
     API_FOOTBALL_KEY,
-    BSD_API_BASE,
-    BSD_API_KEY,
     SOCCER_DS_CACHE_TTL_SEC,
     TRANSFERMARKT_PROXY_URL,
 )
@@ -59,102 +54,6 @@ def _safe_get(url: str, *, headers: dict[str, str] | None = None, params: dict[s
         return r.text
     except Exception:
         return None
-
-
-def fetch_football_data_uk_history(
-    league_codes: list[str] | None = None,
-    season_codes: list[str] | None = None,
-) -> list[dict[str, Any]]:
-    """
-    Pull historical odds rows from football-data.co.uk CSV archives.
-    season code format: 2526, 2425, etc.
-    """
-    leagues = league_codes or ["E0", "SP1", "D1", "I1", "F1", "N1", "P1"]
-    seasons = season_codes or ["2526", "2425", "2324", "2223", "2122"]
-
-    rows: list[dict[str, Any]] = []
-    for season in seasons:
-        for code in leagues:
-            url = f"https://www.football-data.co.uk/mmz4281/{season}/{code}.csv"
-            text = _safe_get(url)
-            if not text or not isinstance(text, str):
-                continue
-            try:
-                reader = csv.DictReader(io.StringIO(text))
-                for row in reader:
-                    home = str(row.get("HomeTeam") or "").strip()
-                    away = str(row.get("AwayTeam") or "").strip()
-                    if not home or not away:
-                        continue
-                    rows.append(
-                        {
-                            "source": "football-data.co.uk",
-                            "league": code,
-                            "season": season,
-                            "date": str(row.get("Date") or "").strip(),
-                            "home_team": home,
-                            "away_team": away,
-                            "fthg": _as_float(row.get("FTHG")),
-                            "ftag": _as_float(row.get("FTAG")),
-                            "ftr": str(row.get("FTR") or "").strip(),
-                            "odds_home": _as_float(row.get("B365H") or row.get("PSH") or row.get("BWH")),
-                            "odds_draw": _as_float(row.get("B365D") or row.get("PSD") or row.get("BWD")),
-                            "odds_away": _as_float(row.get("B365A") or row.get("PSA") or row.get("BWA")),
-                            "odds_over25": _as_float(row.get("B365>2.5") or row.get("P>2.5")),
-                            "odds_under25": _as_float(row.get("B365<2.5") or row.get("P<2.5")),
-                        }
-                    )
-            except Exception:
-                continue
-    return rows
-
-
-def fetch_statsbomb_open_data(
-    competition_id: int | None = None,
-    season_id: int | None = None,
-    match_id: int | None = None,
-) -> dict[str, Any]:
-    """Fetch StatsBomb open-data slices from GitHub raw JSON."""
-    base = "https://raw.githubusercontent.com/statsbomb/open-data/master/data"
-    out: dict[str, Any] = {"competitions": [], "matches": [], "events": []}
-
-    competitions = _safe_get(f"{base}/competitions.json")
-    if isinstance(competitions, list):
-        out["competitions"] = competitions
-
-    if competition_id is not None and season_id is not None:
-        matches = _safe_get(f"{base}/matches/{competition_id}/{season_id}.json")
-        if isinstance(matches, list):
-            out["matches"] = matches
-
-    if match_id is not None:
-        events = _safe_get(f"{base}/events/{match_id}.json")
-        if isinstance(events, list):
-            out["events"] = events
-    return out
-
-
-def fetch_bsd_live_data(sport: str = "soccer") -> dict[str, Any]:
-    """Fetch live scores and multi-book odds from BSD API (provider-specific endpoint via env)."""
-    if not BSD_API_BASE:
-        return {"events": [], "odds": []}
-
-    headers: dict[str, str] = {}
-    if BSD_API_KEY:
-        headers["Authorization"] = f"Bearer {BSD_API_KEY}"
-        headers["X-API-Key"] = BSD_API_KEY
-
-    payload = _safe_get(
-        f"{BSD_API_BASE.rstrip('/')}/live",
-        headers=headers,
-        params={"sport": sport},
-    )
-    if not isinstance(payload, dict):
-        return {"events": [], "odds": []}
-    return {
-        "events": payload.get("events") or payload.get("matches") or [],
-        "odds": payload.get("odds") or payload.get("book_odds") or [],
-    }
 
 
 def fetch_understat_league_table(league: str, season: int) -> list[dict[str, Any]]:

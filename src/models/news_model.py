@@ -22,7 +22,6 @@ Public interface:
 import os
 import sys
 import time
-import json
 import hashlib
 import datetime
 import requests
@@ -277,19 +276,6 @@ _APIFOOTBALL_LEAGUE_IDS = {
     "ITA": 135, "FRA": 61, "MLS": 253,
 }
 
-def _apifootball_h2h(home_id: int, away_id: int, last: int = 5) -> list[dict]:
-    if not _RAPIDAPI_KEY:
-        return []
-    ck = f"h2h:{home_id}:{away_id}"
-    cached = _cache_get(ck)
-    if cached is not None:
-        return cached
-    data = _safe_get(f"{_APIFOOTBALL_BASE}/fixtures/headtohead",
-                     params={"h2h": f"{home_id}-{away_id}", "last": last},
-                     headers=_APIFOOTBALL_HEADERS())
-    results = (data or {}).get("response", [])
-    _cache_set(ck, results)
-    return results
 
 def _apifootball_standings(league: str) -> list[dict]:
     if not _RAPIDAPI_KEY:

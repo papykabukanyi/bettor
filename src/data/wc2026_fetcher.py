@@ -15,7 +15,6 @@ World Cup 2026 quick facts
 from __future__ import annotations
 
 import datetime
-import json
 import os
 import time
 from typing import Any
@@ -226,67 +225,6 @@ _WC_SCHEDULE_STATIC = [
 
 
 # ── Live match fetching (football-data.org) ───────────────────────────────────
-def get_wc_matches_live() -> list[dict]:
-    """Fetch live and upcoming WC 2026 matches from football-data.org."""
-    data = _fd_get(f"/competitions/{_WC_CODE}/matches",
-                   {"status": "LIVE,SCHEDULED,IN_PLAY,PAUSED"})
-    if not data or "matches" not in data:
-        return _get_wc_matches_static()
-    matches = []
-    for m in data.get("matches", []):
-        matches.append(_normalize_fd_match(m))
-    return matches or _get_wc_matches_static()
-
-
-def get_wc_matches_for_date(date_str: str) -> list[dict]:
-    """Matches for a specific date (YYYY-MM-DD). Falls back to static schedule."""
-    data = _fd_get(f"/competitions/{_WC_CODE}/matches",
-                   {"dateFrom": date_str, "dateTo": date_str})
-    if not data or "matches" not in data:
-        return [m for m in _WC_SCHEDULE_STATIC if m["date"] == date_str]
-    return [_normalize_fd_match(m) for m in data.get("matches", [])]
-
-
-def get_wc_standings() -> list[dict]:
-    """Group standings from football-data.org (or empty list)."""
-    data = _fd_get(f"/competitions/{_WC_CODE}/standings")
-    if not data:
-        return []
-    groups = []
-    for standing in data.get("standings", []):
-        stage = standing.get("stage", "")
-        group = standing.get("group", "")
-        table = []
-        for row in standing.get("table", []):
-            table.append({
-                "team":    row["team"]["name"],
-                "played":  row["playedGames"],
-                "won":     row["won"],
-                "drawn":   row["draw"],
-                "lost":    row["lost"],
-                "gf":      row["goalsFor"],
-                "ga":      row["goalsAgainst"],
-                "gd":      row["goalDifference"],
-                "pts":     row["points"],
-                "flag":    TEAM_FLAGS.get(row["team"]["name"], "🏳"),
-            })
-        groups.append({"stage": stage, "group": group, "table": table})
-    return groups
-
-
-def get_wc_team_roster(team_name: str) -> list[dict]:
-    """Fetch WC squad for a team from football-data.org."""
-    teams_data = _fd_get(f"/competitions/{_WC_CODE}/teams")
-    if not teams_data:
-        return []
-    for t in teams_data.get("teams", []):
-        if t.get("name","").lower() == team_name.lower() or \
-           t.get("shortName","").lower() == team_name.lower():
-            team_id = t["id"]
-            squad_data = _fd_get(f"/teams/{team_id}")
-            if squad_data:
-                return [_normalize_player(p) for p in squad_data.get("squad", [])]
-    return []
 
 
 # ── Odds (The Odds API, soccer_wc market) ────────────────────────────────────
@@ -313,23 +251,6 @@ def get_wc_odds(match_id: str | None = None) -> list[dict]:
 
 # ── Historical WC data (from openfootball project, no key needed) ─────────────
 _OPENFOOTBALL_BASE = "https://raw.githubusercontent.com/openfootball/world-cup/master"
-
-def get_historical_wc_results(year: int = 2022) -> list[dict]:
-    """Fetch historical WC results from openfootball GitHub (free, no auth)."""
-    key = f"openfootball_wc_{year}"
-    cached = _cache.get(key)
-    if cached:
-        val, ts = cached
-        if time.time() - ts < _STATIC_CACHE_SECS:
-            return val
-    url = f"{_OPENFOOTBALL_BASE}/{year}/"
-    # Try to get the match data (openfootball uses .txt format, parse what we can)
-    try:
-        r = requests.get(f"{url}README.md", timeout=8)
-        # Fall back to our embedded historical data
-    except Exception:
-        pass
-    return _get_embedded_wc_history()
 
 
 def _get_embedded_wc_history() -> list[dict]:
@@ -422,72 +343,3 @@ def _normalize_fd_match(m: dict) -> dict:
         "match_key":  f"{away.replace(' ','')[:3]}@{home.replace(' ','')[:3]}".upper(),
         "sport":      "soccer",
     }
-
-
-def _normalize_player(p: dict) -> dict:
-    return {
-        "id":         str(p.get("id", "")),
-        "name":       p.get("name", ""),
-        "position":   p.get("position", ""),
-        "nationality":p.get("nationality", ""),
-        "dob":        p.get("dateOfBirth", ""),
-        "shirt":      p.get("shirtNumber"),
-    }
-
-
-def _get_wc_matches_static() -> list[dict]:
-    """Return static schedule with Elo ratings attached (no API key needed)."""
-    result = []
-    for m in _WC_SCHEDULE_STATIC:
-        if m.get("home", "").startswith("TBD") or m.get("away", "").startswith("TBD"):
-            continue
-        result.append({
-            "match_id":   m["id"],
-            "group":      m["group"],
-            "stage":      "GROUP_STAGE",
-            "date":       m["date"],
-            "game_time":  "15:00",  # placeholder
-            "home_team":  m["home"],
-            "away_team":  m["away"],
-            "home_flag":  TEAM_FLAGS.get(m["home"], "🏳"),
-            "away_flag":  TEAM_FLAGS.get(m["away"], "🏳"),
-            "venue":      m.get("venue", ""),
-            "city":       m.get("city", ""),
-            "status":     "Scheduled",
-            "home_score": None,
-            "away_score": None,
-            "home_ht":    None,
-            "away_ht":    None,
-            "home_elo":   TEAM_ELO.get(m["home"], 1850.0),
-            "away_elo":   TEAM_ELO.get(m["away"], 1850.0),
-            "game_key":   f"{m['date']}#{m['away']}@{m['home']}",
-            "match_key":  f"{m['away'].replace(' ','')[:3]}@{m['home'].replace(' ','')[:3]}".upper(),
-            "sport":      "soccer",
-        })
-    return result
-
-
-def get_matches_today() -> list[dict]:
-    today = _et_calendar_today().isoformat()
-    return get_wc_matches_for_date(today) or _get_wc_matches_static_for_date(today)
-
-
-def get_matches_tomorrow() -> list[dict]:
-    tomorrow = (_et_calendar_today() + datetime.timedelta(days=1)).isoformat()
-    return get_wc_matches_for_date(tomorrow) or _get_wc_matches_static_for_date(tomorrow)
-
-
-def _get_wc_matches_static_for_date(date_str: str) -> list[dict]:
-    full = _get_wc_matches_static()
-    return [m for m in full if m["date"] == date_str]
-
-
-def get_team_elo(team: str) -> float:
-    return TEAM_ELO.get(team, 1850.0)
-
-
-def get_group_for_team(team: str) -> str | None:
-    for g, teams in WC_GROUPS.items():
-        if team in teams:
-            return g
-    return None

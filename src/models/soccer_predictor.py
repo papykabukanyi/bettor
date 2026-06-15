@@ -13,12 +13,11 @@ Sentiment integration:
 
 from __future__ import annotations
 
-import datetime
 import os
 from typing import Any
 
 from models.soccer_model import predict as _model_predict, STAGE_MAP
-from data.club_stats_fetcher import get_squad_props, get_wc_player_stats
+from data.club_stats_fetcher import get_squad_props
 from data.wc2026_fetcher import TEAM_ELO, get_wc_odds
 
 try:

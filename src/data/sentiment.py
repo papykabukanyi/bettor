@@ -36,7 +36,6 @@ import math
 import unicodedata
 import time
 from collections import Counter
-from typing import Any
 
 import requests
 

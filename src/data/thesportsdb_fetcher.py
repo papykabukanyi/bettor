@@ -27,7 +27,7 @@ Common league IDs:
 import requests
 import time
 import os
-from datetime import date, datetime
+from datetime import date
 
 from src.config import THESPORTSDB_API_KEY
 
@@ -112,11 +112,6 @@ def get_events_by_date(d: date = None, sport: str = "Soccer") -> list[dict]:
     return events
 
 
-def get_team_next_events(team_id: int) -> list[dict]:
-    data = _get("eventsnext.php", {"id": team_id})
-    return (data or {}).get("events") or []
-
-
 def get_team_last_events(team_id: int) -> list[dict]:
     data = _get("eventslast.php", {"id": team_id})
     return (data or {}).get("events") or []
@@ -135,15 +130,6 @@ def get_team_id(name: str) -> int | None:
 
 
 # ─── players ─────────────────────────────────────────────────────────────────
-
-def get_players_by_team(team_id: int) -> list[dict]:
-    data = _get("lookup_all_players.php", {"id": team_id})
-    return (data or {}).get("player") or []
-
-
-def search_player(name: str) -> list[dict]:
-    data = _get("searchplayers.php", {"p": name})
-    return (data or {}).get("player") or []
 
 
 # ─── standings ────────────────────────────────────────────────────────────────
@@ -165,7 +151,6 @@ def get_team_form(team_name: str) -> dict:
     form_chars = []
     for ev in events[:5]:
         home  = ev.get("strHomeTeam","")
-        away  = ev.get("strAwayTeam","")
         hs    = ev.get("intHomeScore")
         vs    = ev.get("intAwayScore")
         if hs is None or vs is None:

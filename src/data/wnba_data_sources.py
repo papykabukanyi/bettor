@@ -328,7 +328,6 @@ def load_kaggle_wnba_datasets(data_dir: str | None = None) -> dict[str, Any]:
     files = sorted(glob.glob(os.path.join(base_dir, "*.csv")))
 
     for fp in files:
-        name = os.path.basename(fp).lower()
         try:
             with open(fp, "r", encoding="utf-8", newline="") as fh:
                 reader = csv.DictReader(fh)

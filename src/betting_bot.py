@@ -26,7 +26,7 @@ warnings.filterwarnings("ignore")
 SRC_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SRC_DIR)
 
-from config import BANKROLL, MLB_SEASONS, FOOTBALL_DATA_UK_LEAGUES
+from config import BANKROLL, MLB_SEASONS
 
 # ------------------------------------------------------------------
 # Lazy imports (only load heavy libs when needed)
@@ -49,7 +49,7 @@ def _train_mlb():
 
 def _train_soccer(league_keys: list[str] | None = None):
     """Download soccer historical data and (re)train the Poisson+ML model."""
-    from data.soccer_fetcher import get_historical_matches, compute_team_strength
+    from data.soccer_fetcher import get_historical_matches
     from models.soccer_model import SoccerModel
 
     use_keys = league_keys or ["EPL", "ESP", "GER"]

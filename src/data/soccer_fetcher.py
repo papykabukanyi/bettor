@@ -280,17 +280,6 @@ def get_competition_info(code: str) -> dict:
 
 
 # ── Matches ───────────────────────────────────────────────────────────────────
-def get_upcoming_matches(competition_code: str, days_ahead: int = 7) -> list[dict]:
-    """Fetch upcoming matches for a competition over the next N days."""
-    today    = _et_calendar_today()
-    date_to  = (today + datetime.timedelta(days=days_ahead)).isoformat()
-    date_from = today.isoformat()
-    return get_matches_in_range(competition_code, date_from, date_to)
-
-
-def get_matches_for_date(competition_code: str, date_str: str) -> list[dict]:
-    """Matches for a specific date in a competition."""
-    return get_matches_in_range(competition_code, date_str, date_str)
 
 
 def get_matches_in_range(competition_code: str, date_from: str, date_to: str) -> list[dict]:
@@ -335,21 +324,6 @@ def get_matches_range_all(date_from: str, date_to: str,
     for code in codes:
         all_matches.extend(get_matches_in_range(code, date_from, date_to))
     return all_matches
-
-
-def get_all_today_matches(competition_codes: list[str] | None = None) -> dict[str, list[dict]]:
-    """
-    Get today's matches across all (or specified) competitions.
-    Returns dict of {competition_code: [matches]}.
-    """
-    today = _et_calendar_today().isoformat()
-    codes = competition_codes or list(TOURNAMENTS.keys())
-    result: dict[str, list[dict]] = {}
-    for code in codes:
-        matches = get_matches_for_date(code, today)
-        if matches:
-            result[code] = matches
-    return result
 
 
 def _fetch_matches_window(code: str, date_from: str, date_to: str) -> list[dict]:
@@ -589,66 +563,6 @@ def _fetch_scorers(code: str, limit: int) -> list[dict]:
 
 
 # ── Team squad / roster ───────────────────────────────────────────────────────
-def get_team_squad(team_id: int | None = None, team_name: str | None = None,
-                   competition_code: str | None = None) -> list[dict]:
-    """Fetch full squad for a team. Can lookup by team_id or team_name+competition."""
-    if not team_id and team_name and competition_code:
-        team_id = _find_team_id(team_name, competition_code)
-    if not team_id:
-        return []
-    key = f"squad_{team_id}"
-    return _cached(key, _CACHE_SQUAD, _fetch_squad, team_id) or []
-
-
-def _find_team_id(team_name: str, competition_code: str) -> int | None:
-    data = _fd_get(f"/competitions/{competition_code}/teams")
-    if not data:
-        return None
-    name_lower = team_name.lower()
-    for t in data.get("teams", []):
-        if (t.get("name","").lower() == name_lower or
-            t.get("shortName","").lower() == name_lower or
-            t.get("tla","").lower() == name_lower):
-            return t.get("id")
-    return None
-
-
-def _fetch_squad(team_id: int) -> list[dict]:
-    data = _fd_get(f"/teams/{team_id}")
-    if not data:
-        return []
-    squad = []
-    for p in data.get("squad", []):
-        squad.append({
-            "id":         str(p.get("id", "")),
-            "name":       p.get("name", ""),
-            "position":   p.get("position", ""),
-            "nationality":p.get("nationality", ""),
-            "dob":        p.get("dateOfBirth", ""),
-            "shirt":      p.get("shirtNumber"),
-        })
-    return squad
-
-
-def get_all_competition_teams(competition_code: str) -> list[dict]:
-    """All teams registered for a competition."""
-    key = f"teams_{competition_code}"
-    data = _cached(key, _CACHE_STATIC, _fd_get, f"/competitions/{competition_code}/teams")
-    if not data:
-        return []
-    return [
-        {
-            "id":        t.get("id"),
-            "name":      t.get("name",""),
-            "short":     t.get("shortName",""),
-            "tla":       t.get("tla",""),
-            "crest":     t.get("crest",""),
-            "country":   t.get("area",{}).get("name",""),
-            "venue":     t.get("venue",""),
-            "founded":   t.get("founded"),
-        }
-        for t in data.get("teams", [])
-    ]
 
 
 # ── Odds ─────────────────────────────────────────────────────────────────────
@@ -858,21 +772,6 @@ def _normalize_sportsdb_event(event: dict, competition_code: str) -> dict:
 
 
 # ── Daily refresh (call from scheduler) ──────────────────────────────────────
-def refresh_all_competitions() -> dict[str, list[dict]]:
-    """
-    Refresh upcoming matches across all competitions.
-    Called daily by APScheduler. Returns {competition_code: [matches]}.
-    """
-    results: dict[str, list[dict]] = {}
-    for code in TOURNAMENTS:
-        try:
-            matches = get_upcoming_matches(code, days_ahead=7)
-            if matches:
-                results[code] = matches
-                print(f"[soccer_fetcher] {code}: {len(matches)} upcoming matches")
-        except Exception as e:
-            print(f"[soccer_fetcher] Error refreshing {code}: {e}")
-    return results
 
 
 def get_matches_today_all() -> list[dict]:

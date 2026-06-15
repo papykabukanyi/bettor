@@ -13,8 +13,6 @@ Usage:
 import sys
 import os
 import pandas as pd
-import numpy as np
-from tabulate import tabulate
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from config import MIN_VALUE_EDGE, KELLY_FRACTION, BANKROLL
@@ -104,10 +102,6 @@ def find_value_bets(
         model_home = pred.get("home_win_prob") or pred.get("home_win") or 0
         model_away = pred.get("away_win_prob") or pred.get("away_win") or 0
         model_draw = pred.get("draw_prob") or pred.get("draw") or 0
-
-        edge_home = model_home - true_home
-        edge_away = model_away - true_away
-        edge_draw = model_draw - true_draw if true_draw > 0 else -1
 
         for side, model_p, book_p, odds_am in [
             ("HOME", model_home, true_home, home_odds_am),

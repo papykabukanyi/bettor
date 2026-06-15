@@ -33,7 +33,6 @@ from sklearn.calibration import CalibratedClassifierCV
 from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import Pipeline
 from sklearn.model_selection import cross_val_score
-from sklearn.metrics import log_loss
 
 warnings.filterwarnings("ignore")
 

@@ -183,5 +183,3 @@ def et_today() -> _dt.date:
     return now_et.date()
 
 
-def et_today_str() -> str:
-    return et_today().isoformat()

@@ -10,7 +10,6 @@ Data is saved to PostgreSQL and used to annotate game cards on the dashboard.
 
 import sys
 import os
-import datetime
 import requests
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -196,18 +195,3 @@ def fetch_all_injuries() -> dict[str, list[dict]]:
     return results
 
 
-def get_injuries_for_game(home_team: str, away_team: str,
-                           all_injuries: list[dict]) -> list[dict]:
-    """
-    Filter injury list to players on the two teams in a game.
-    Fuzzy match on team name (lowercase substring).
-    """
-    ht = home_team.lower()
-    at = away_team.lower()
-    matched = []
-    for inj in all_injuries:
-        team = (inj.get("team") or "").lower()
-        if any(word in team for word in ht.split() if len(word) > 3) or \
-           any(word in team for word in at.split() if len(word) > 3):
-            matched.append(inj)
-    return matched

@@ -490,7 +490,7 @@ def get_player_props_odds(
     Returns flat list of dicts:
       {player, market, line, over_odds, under_odds, game, sport}
     """
-    import datetime, time
+    import time
 
     if not ODDS_API_KEY or ODDS_API_KEY == "your_odds_api_key_here":
         print("[odds_fetcher] ODDS_API_KEY not set – skipping player props odds.")

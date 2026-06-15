@@ -20,7 +20,6 @@ import sys
 import csv
 import io
 import zipfile
-import datetime
 import time
 
 import requests

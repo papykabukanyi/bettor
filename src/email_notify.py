@@ -320,7 +320,6 @@ def format_daily_picks_html(state: dict) -> tuple[str, str]:
                 team  = p.get("team", "")
                 line  = p.get("line", "")
                 conf  = p.get("confidence") or p.get("conf") or round((p.get("model_prob",0.5))*100)
-                game  = p.get("game", "")
                 rationale = p.get("signal_rationale","")[:60] if p.get("signal_rationale") else ""
                 safety = p.get("safety_label","MODERATE")
                 html += (f'<tr>'
@@ -401,7 +400,6 @@ def format_results_html(results: dict) -> tuple[str, str]:
       parlays        — list of dicts: {name, outcome, legs, combined_dec}
     """
     date_str   = results.get("date_str", datetime.date.today().strftime("%A, %B %d, %Y"))
-    total      = int(results.get("total", 0))
     wins       = int(results.get("wins", 0))
     losses     = int(results.get("losses", 0))
     pushes     = int(results.get("pushes", 0))

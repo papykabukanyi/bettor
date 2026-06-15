@@ -3,7 +3,6 @@ from __future__ import annotations
 import csv
 import datetime
 import glob
-import io
 import os
 import re
 import time
@@ -13,13 +12,8 @@ from typing import Any
 import requests
 
 from config import (
-    GOLF_DATAGOLF_API_BASE,
-    GOLF_DATAGOLF_API_KEY,
     GOLF_DATA_CACHE_TTL_SEC,
-    GOLF_GOLFAPI_BASE,
-    GOLF_GOLFAPI_KEY,
     GOLF_KAGGLE_DATA_DIR,
-    GOLF_PGA_STATDATA_BASE,
     GOLF_REFERENCE_YEARS,
 )
 
@@ -114,41 +108,6 @@ def _read_local_csvs(base_dir: str, patterns: list[str]) -> list[dict[str, Any]]
     return rows
 
 
-def fetch_datagolf_bundle(player_name: str = "", event_date: str = "") -> dict[str, Any]:
-    """Fetch DataGolf strokes-gained and ranking context when configured."""
-    if not GOLF_DATAGOLF_API_BASE:
-        return {"players": [], "events": [], "stats": []}
-    headers: dict[str, str] = {}
-    if GOLF_DATAGOLF_API_KEY:
-        headers["Authorization"] = f"Bearer {GOLF_DATAGOLF_API_KEY}"
-        headers["X-API-Key"] = GOLF_DATAGOLF_API_KEY
-    payload = _safe_get(
-        f"{GOLF_DATAGOLF_API_BASE.rstrip('/')}/bundle",
-        headers=headers,
-        params={"player": player_name, "date": event_date},
-    )
-    if not isinstance(payload, dict):
-        return {"players": [], "events": [], "stats": []}
-    return {
-        "players": payload.get("players") or payload.get("player_stats") or [],
-        "events": payload.get("events") or payload.get("tournaments") or [],
-        "stats": payload.get("stats") or payload.get("strokes_gained") or [],
-    }
-
-
-def fetch_pga_statdata_rounds(event_id: str = "", event_date: str = "") -> list[dict[str, Any]]:
-    """Fetch PGA Tour statdata round-level rows when endpoint is configured."""
-    if not GOLF_PGA_STATDATA_BASE:
-        return []
-    payload = _safe_get(
-        f"{GOLF_PGA_STATDATA_BASE.rstrip('/')}/rounds",
-        params={"event_id": event_id, "date": event_date},
-    )
-    if isinstance(payload, dict):
-        return payload.get("rounds") or payload.get("results") or []
-    return []
-
-
 def fetch_espn_golf_live_bundle(game_date: datetime.date | str | None = None) -> dict[str, Any]:
     """Fetch ESPN golf leaderboard-style events for daily card context."""
     from data.history_boxscore_parsers import fetch_espn_scoreboard_events
@@ -163,24 +122,6 @@ def fetch_espn_golf_live_bundle(game_date: datetime.date | str | None = None) ->
 
     events = fetch_espn_scoreboard_events("golf/pga", date_obj) or []
     return {"events": events, "date": date_obj.isoformat()}
-
-
-def fetch_golfapi_course_details(course_name: str = "") -> dict[str, Any]:
-    """Fetch course metadata (par/yardage/layout) when GolfAPI endpoint is configured."""
-    if not GOLF_GOLFAPI_BASE:
-        return {}
-    headers: dict[str, str] = {}
-    if GOLF_GOLFAPI_KEY:
-        headers["Authorization"] = f"Bearer {GOLF_GOLFAPI_KEY}"
-        headers["X-API-Key"] = GOLF_GOLFAPI_KEY
-    payload = _safe_get(
-        f"{GOLF_GOLFAPI_BASE.rstrip('/')}/course",
-        headers=headers,
-        params={"name": course_name},
-    )
-    if isinstance(payload, dict):
-        return payload.get("course") or payload
-    return {}
 
 
 def fetch_kaggle_golf_history(data_dir: str | None = None) -> list[dict[str, Any]]:

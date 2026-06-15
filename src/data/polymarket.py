@@ -417,7 +417,6 @@ def _fuzzy_name_score(text: str, name: Any) -> float:
         return 5.5
 
     tokens = [tok for tok in norm_exp.split() if len(tok) >= 3]
-    text_tokens = set(text_exp.split())
 
     if not tokens:
         return 0.0
@@ -869,7 +868,6 @@ def _market_side(bet: dict[str, Any], market: dict[str, Any]) -> str:
     # Market titles like "Will the Warriors beat the Lakers?" → YES = Warriors
     picked = _picked_team_name(bet)
     if picked:
-        market_text = _market_text(market)
         market_title = _norm_text(str(market.get("market_title") or market.get("title") or market.get("question") or ""))
 
         # Extract the team in the YES position from "team_a vs team_b" or "will team_a beat team_b"

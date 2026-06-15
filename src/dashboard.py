@@ -39,7 +39,7 @@ from flask import Flask, render_template, jsonify, request, Response
 
 SRC_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SRC_DIR)
-from config import BANKROLL, MIN_VALUE_EDGE, KELLY_FRACTION, MLB_SEASONS, et_today, SPORT as CONFIG_SPORT
+from config import BANKROLL, MLB_SEASONS, SPORT as CONFIG_SPORT
 
 # Dashboard uses a lower edge threshold to show more picks
 # (bot tracks accuracy; high-edge filter is for real-money staking only)
@@ -674,28 +674,6 @@ def _schedule_worker_boot(reason: str = "import") -> None:
         with _worker_boot_lock:
             _worker_boot_thread_started = False
         print(f"[worker-init] bootstrap scheduling error ({reason}): {e}")
-
-
-@app.before_request
-def _lazy_init():
-    """Triggered once per-worker on the very first request."""
-    if not _worker_initialized:
-        _init_worker()
-
-
-def _is_server_runtime() -> bool:
-    """Best-effort detection for long-lived web-server processes."""
-    server_software = str(os.getenv("SERVER_SOFTWARE", "")).strip().lower()
-    argv_blob = " ".join(str(a or "") for a in sys.argv).lower()
-    return any(
-        [
-            "gunicorn" in server_software,
-            "gunicorn" in argv_blob,
-            bool(str(os.getenv("GUNICORN_CMD_ARGS", "")).strip()),
-            bool(str(os.getenv("RAILWAY_ENVIRONMENT", "")).strip()),
-            bool(str(os.getenv("PORT", "")).strip()),
-        ]
-    )
 
 
 _EAGER_WORKER_INIT = str(os.getenv("EAGER_WORKER_INIT", "1")).strip().lower() in {"1", "true", "yes", "on"}
@@ -1754,11 +1732,6 @@ def _et_calendar_today() -> datetime.date:
             return datetime.datetime.now(tz=eastern).date()
         except Exception:
             return datetime.date.today()
-
-
-def _team_words(full_name: str) -> list:
-    """Return meaningful words from a team name (skip short/common words)."""
-    return [w for w in full_name.lower().split() if len(w) > 3]
 
 
 def _line_value(val) -> float | None:
@@ -4596,9 +4569,7 @@ def _build_model_player_props_fallback(games: list[dict], max_per_game: int = 6)
                         if len(competitors) < 2:
                             continue
                         h_c = next((c for c in competitors if str(c.get("homeAway") or "").lower() == "home"), competitors[0])
-                        a_c = next((c for c in competitors if str(c.get("homeAway") or "").lower() == "away"), competitors[1] if len(competitors) > 1 else competitors[0])
                         eh = str((h_c.get("team") or {}).get("displayName") or "").strip()
-                        ea = str((a_c.get("team") or {}).get("displayName") or "").strip()
                         if _team_token(home) and (_team_token(eh) == _team_token(home) or _team_token(home) in _team_token(eh) or _team_token(eh) in _team_token(home)):
                             eid = str(ev.get("id") or "").strip()
                             break
@@ -5230,7 +5201,6 @@ def _build_model_player_props_fallback(games: list[dict], max_per_game: int = 6)
 
     # Tennis match props — games won, aces, sets — from ESPN tournament leaders.
     try:
-        import requests as _tnreq
         import math as _tnmath
 
         tennis_games = [
@@ -5316,7 +5286,6 @@ def _build_model_player_props_fallback(games: list[dict], max_per_game: int = 6)
 
     # MMA / Boxing match props — total rounds, fight outcome.
     try:
-        import math as _mmath
 
         combat_games = [
             g for g in (games or [])
@@ -6662,7 +6631,6 @@ def _run_soccer_analysis(lock_date: datetime.date | None = None):
     try:
         today_date = _et_calendar_today()
         today_str = today_date.isoformat()
-        tomorrow_str = (today_date + datetime.timedelta(days=1)).isoformat()
         run_id = f"SOCCER-{today_str}"
         _run_mandatory_daily_calibration(today_date)
         _run_prediction_preflight("soccer")
@@ -6969,7 +6937,6 @@ def _run_analysis(lock_date: datetime.date | None = None):
                         _last_analysis_error = str(_state.get("error") or "")
 
     warnings.filterwarnings("ignore")
-    import pandas as pd
 
     with _lock:
         _state["status"]    = "running"
@@ -7592,8 +7559,6 @@ def _run_analysis(lock_date: datetime.date | None = None):
 def index():
     with _lock:
         state = dict(_state)
-    today_str = _et_calendar_today().isoformat()
-    tomorrow_str = (_et_calendar_today() + datetime.timedelta(days=1)).isoformat()
     today_cards, tomorrow_cards = _normalize_dashboard_card_buckets(
         state.get("game_cards_today", []),
         state.get("game_cards_tomorrow", []),
@@ -7834,7 +7799,6 @@ def api_logs():
 def api_parlay_build_elite():
     """Build and save one elite parlay from the current in-memory state."""
     with _lock:
-        all_bets  = list(_state.get("best_parlays", []))   # fallback
         all_props = list(_state.get("player_props", []))
         # Reconstruct from game cards for bet-level picks
         raw_picks = []
@@ -7970,7 +7934,6 @@ def api_backfill():
 
             # Retrain
             try:
-                import pandas as pd
                 from data.mlb_fetcher import build_game_dataset
                 from models.mlb_model import retrain_with_history
                 team_stats = build_game_dataset(MLB_SEASONS[:3])
@@ -8104,29 +8067,6 @@ _tracking_sync_lock = threading.Lock()
 
 def _tracking_sync_due() -> bool:
     return (time.time() - float(_last_tracking_sync_ts or 0.0)) >= _TRACKING_SYNC_MIN_INTERVAL_SEC
-
-
-def _maybe_trigger_tracking_sync(force: bool = False):
-    """Kick off a background resolver pass so DB tracking states keep moving server-side."""
-    if not force and not _tracking_sync_due():
-        return
-    if not _tracking_sync_lock.acquire(blocking=False):
-        return
-
-    def _runner():
-        global _last_tracking_sync_ts
-        try:
-            _run_resolver_locked(days_back=5)
-        except Exception:
-            pass
-        finally:
-            _last_tracking_sync_ts = time.time()
-            try:
-                _tracking_sync_lock.release()
-            except Exception:
-                pass
-
-    threading.Thread(target=_runner, daemon=True).start()
 
 
 def _maybe_trigger_tracking_sync_sync(force: bool = False):
@@ -8825,7 +8765,6 @@ def _resolve_all_sports_outcomes(days_back: int = 3) -> dict:
     try:
         from data.db import (
             get_conn, get_pending_props, update_prop_outcome,
-            get_tracked_parlays, resolve_tracked_parlay,
         )
         import psycopg2.extras as _dba
     except Exception:
@@ -9489,7 +9428,6 @@ def api_parlay_tracking_overview():
             get_prop_history,
             get_tracked_parlays,
             prune_tracked_parlays_to_date,
-            get_prop_performance_stats,
         )
 
         db_sport = None if _ACTIVE_SPORT == "all" else _ACTIVE_SPORT
@@ -9556,19 +9494,7 @@ def api_parlay_tracking_overview():
         pending_total = single_counts["pending"] + parlay_counts["pending"]
         total_tracked = single_counts["total"] + parlay_counts["total"]
 
-        # ── Hit Rate by Prop Type (today, with trailing fallback) ─────────────
-        prop_stats = get_prop_performance_stats(sport=db_sport, target_date=today) or {}
-        by_prop_rows = [
-            r for r in (prop_stats.get("by_prop_type") or []) if isinstance(r, dict)
-        ]
-        has_resolved = any(
-            (int(r.get("wins") or 0) + int(r.get("losses") or 0)) > 0 for r in by_prop_rows
-        )
-        fallback_days = 0
-        if not has_resolved:
-            prop_stats = get_prop_performance_stats(sport=db_sport, days_back=21) or {}
-            fallback_days = 21
-
+        # Compact, always-available summary — the only thing the tab renders.
         summary = {
             "settled_wins": settled_wins,
             "settled_losses": settled_losses,
@@ -9577,10 +9503,6 @@ def api_parlay_tracking_overview():
             "live_tracked": live_tracked,
             "pending": pending_total,
             "total_tracked": total_tracked,
-            "singles": single_counts,
-            "parlays": parlay_counts,
-            "by_prop_type": prop_stats.get("by_prop_type") or [],
-            "fallback_window_days": fallback_days,
         }
 
         return jsonify({
@@ -9588,22 +9510,6 @@ def api_parlay_tracking_overview():
             "scope": scope,
             "today": today_iso,
             "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-            "parlays": {
-                "upcoming": _clean(parlay_buckets["upcoming"]),
-                "live": _clean(parlay_buckets["live"]),
-                "won": _clean(parlay_buckets["won"]),
-                "lost": _clean(parlay_buckets["lost"]),
-                "other": _clean(parlay_buckets["other"]),
-                "counts": parlay_counts,
-            },
-            "singles": {
-                "upcoming": _clean(single_buckets["upcoming"]),
-                "live": _clean(single_buckets["live"]),
-                "won": _clean(single_buckets["won"]),
-                "lost": _clean(single_buckets["lost"]),
-                "other": _clean(single_buckets["other"]),
-                "counts": single_counts,
-            },
             "summary": summary,
         })
     except Exception as e:
@@ -10504,8 +10410,6 @@ def _sync_state_from_cache(broadcast: bool = False) -> bool:
         cached = get_analysis_cache(max_age_hours=22)
         if not cached:
             return False
-        today_str = _et_calendar_today().isoformat()
-        tomorrow_str = (_et_calendar_today() + datetime.timedelta(days=1)).isoformat()
         today_cards, tomorrow_cards = _normalize_dashboard_card_buckets(
             cached.get("game_cards_today", []),
             cached.get("game_cards_tomorrow", []),
@@ -11831,7 +11735,7 @@ if __name__ == "__main__":
         import time as _time
         _time.sleep(8)  # Let Flask finish binding before engine starts importing
         try:
-            import importlib.util, sys as _sys
+            import importlib.util
             autobet_path = os.path.join(SRC_DIR, "polymarket_autobet.py")
             spec = importlib.util.spec_from_file_location("polymarket_autobet", autobet_path)
             mod = importlib.util.module_from_spec(spec)

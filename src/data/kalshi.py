@@ -2849,14 +2849,12 @@ def get_open_market_catalog(
     now = time.time()
     cached_markets: list[dict[str, Any]] = []
     cached_combo_markets: list[dict[str, Any]] = []
-    cached_count = 0
     markets_cache_fresh = False
     combo_cache_fresh = False
     with _KALSHI_MARKET_CACHE_LOCK:
         age = now - float(_KALSHI_MARKET_CACHE.get("ts") or 0.0)
         cached_markets = list(_KALSHI_MARKET_CACHE.get("markets") or [])
         cached_combo_markets = list(_KALSHI_MARKET_CACHE.get("combo_markets") or [])
-        cached_count = int(_KALSHI_MARKET_CACHE.get("count") or 0)
         markets_cache_fresh = bool(
             not force_refresh
             and cached_markets

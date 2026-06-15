@@ -2050,7 +2050,6 @@ def get_analysis_cache(max_age_hours: int = 22, cache_date=None,
         conn.close()
 
 
-
 # ──────────────────────────────────────────────────────────────────────────────
 # Enrichment persistence
 # ──────────────────────────────────────────────────────────────────────────────
@@ -2149,55 +2148,6 @@ def save_game_enrichment(enriched_games: list) -> int:
         except Exception as _e:
             conn.rollback()
             print(f"[db:save_game_enrichment] {home_team} vs {away_team}: {_e}")
-            continue
-    try:
-        conn.commit()
-    except Exception:
-        pass
-    return saved
-
-
-def save_player_form(forms: list) -> int:
-    """
-    Upsert player_form_cache rows.
-    Each dict must have: sport, player_name, stat_type, avg_last_5, avg_last_10,
-    trend_direction, games_collected.
-    """
-    import json as _json
-    conn = get_conn()
-    if conn is None:
-        return 0
-    saved = 0
-    cur = conn.cursor()
-    today = __import__("datetime").date.today().isoformat()
-    for f in forms:
-        try:
-            cur.execute("""
-                INSERT INTO player_form_cache
-                    (sport, player_name, stat_type, avg_last_5, avg_last_10,
-                     trend_direction, games_collected, form_json, computed_date)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                ON CONFLICT (sport, player_name, stat_type, computed_date)
-                DO UPDATE SET
-                    avg_last_5      = EXCLUDED.avg_last_5,
-                    avg_last_10     = EXCLUDED.avg_last_10,
-                    trend_direction = EXCLUDED.trend_direction,
-                    games_collected = EXCLUDED.games_collected,
-                    form_json       = EXCLUDED.form_json,
-                    fetched_at      = NOW()
-            """, (
-                str(f.get("sport") or "").strip(),
-                str(f.get("player_name") or f.get("name") or "").strip(),
-                str(f.get("stat_type") or "").strip(),
-                f.get("avg_last_5"), f.get("avg_last_10"),
-                str(f.get("trend_direction") or "neutral"),
-                f.get("games_collected"),
-                _json.dumps(f),
-                today,
-            ))
-            saved += 1
-        except Exception as _e:
-            conn.rollback()
             continue
     try:
         conn.commit()

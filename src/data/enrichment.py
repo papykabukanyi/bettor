@@ -28,7 +28,6 @@ All enrichment is non-blocking: every signal gracefully degrades to None / 0.
 from __future__ import annotations
 
 import datetime
-import hashlib
 import math
 import os
 import re
@@ -913,21 +912,6 @@ def compute_travel_km(away_team: str, home_team: str) -> float | None:
 
 
 # ─── 10. Referee / Umpire tendencies ────────────────────────────────────────
-def get_official_tendencies(official_name: str, sport: str = "soccer") -> dict:
-    """
-    Return aggregated tendencies for a referee/umpire:
-      - avg_cards_per_game (soccer)
-      - avg_called_strikes / called_ball_pct (MLB)
-      - avg_fouls_per_game (NBA)
-    All sourced from public ESPN match data; very limited for baseball.
-    Currently best-effort for soccer.
-    """
-    default = {"official_name": official_name, "sport": sport,
-               "avg_cards_per_game": None, "avg_fouls_per_game": None,
-               "avg_ks_per_game": None}
-
-    # Future: parse ESPN official details once per-game endpoints are stable
-    return default
 
 
 # ─── Data Cleaning Pipeline ─────────────────────────────────────────────────

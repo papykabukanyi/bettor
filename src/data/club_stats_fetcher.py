@@ -13,13 +13,10 @@ Usage:
 
 from __future__ import annotations
 
-import json
 import math
-import os
 import time
 from typing import Any
 
-import requests
 
 _cache: dict[str, Any] = {}
 _CACHE_TTL = 3600 * 6  # 6 h
@@ -122,75 +119,9 @@ def _load_fbref_stats(leagues: list[str] | None = None, season: str = CURRENT_SE
 
 
 # ── Understat (xG, xA per match) ─────────────────────────────────────────────
-def _load_understat_stats(league: str = "La liga", season: int = 2025) -> list[dict]:
-    """
-    Load xG/xA stats from understat.com (free, no key).
-    league options: 'EPL', 'La liga', 'Bundesliga', 'Serie A', 'Ligue 1'
-    """
-    try:
-        import asyncio
-        import understat  # pip install understat
-
-        async def _fetch():
-            async with understat.Understat() as u:
-                players = await u.get_league_players(league, season)
-                return players
-
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_closed():
-                loop = asyncio.new_event_loop()
-            players = loop.run_until_complete(_fetch())
-        except RuntimeError:
-            players = asyncio.run(_fetch())
-
-        result = []
-        for p in (players or []):
-            try:
-                result.append({
-                    "name":     p.get("player_name", p.get("name", "")),
-                    "team":     p.get("team_title", ""),
-                    "xg":       float(p.get("xG", 0)),
-                    "xa":       float(p.get("xA", 0)),
-                    "goals":    int(p.get("goals", 0)),
-                    "assists":  int(p.get("assists", 0)),
-                    "shots":    int(p.get("shots", 0)),
-                    "minutes":  int(p.get("time", 0)),
-                    "source":   "understat",
-                    "league":   league,
-                })
-            except Exception:
-                pass
-        return result
-    except ImportError:
-        print("[club_stats] understat not installed — pip install understat")
-    except Exception as e:
-        print(f"[club_stats] understat error: {e}")
-    return []
 
 
 # ── ESPN unofficial player lookup ─────────────────────────────────────────────
-def _espn_player_search(name: str) -> dict | None:
-    """Search ESPN for a player (unofficial endpoint, no key)."""
-    try:
-        url = f"https://site.api.espn.com/apis/common/v3/search"
-        r = requests.get(url, params={"query": name, "limit": 3, "type": "player",
-                                       "sport": "soccer"}, timeout=6)
-        if r.status_code == 200:
-            data = r.json()
-            items = data.get("items", [])
-            if items:
-                p = items[0]
-                return {
-                    "name":     p.get("displayName", name),
-                    "team":     p.get("teamName", ""),
-                    "position": p.get("position", ""),
-                    "nationality": p.get("citizenship", ""),
-                    "espn_id":  p.get("id", ""),
-                }
-    except Exception:
-        pass
-    return None
 
 
 # ── Embedded top WC player stats (season averages, May 2026 estimates) ───────

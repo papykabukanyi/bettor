@@ -10,55 +10,6 @@ def iter_lookback_days(days_back: int) -> list[datetime.date]:
     return [today - datetime.timedelta(days=i) for i in range(days)]
 
 
-def season_from_date(d: datetime.date | str | None) -> int | None:
-    if d is None:
-        return None
-    if isinstance(d, datetime.date):
-        return int(d.year)
-    raw = str(d or "")[:4]
-    try:
-        return int(raw)
-    except Exception:
-        return None
-
-
-def normalize_tsdb_event(event: dict[str, Any], *, sport: str, league_fallback: str, source: str) -> dict[str, Any] | None:
-    if not isinstance(event, dict):
-        return None
-    home = str(event.get("strHomeTeam") or "").strip()
-    away = str(event.get("strAwayTeam") or "").strip()
-    game_date = str(event.get("dateEvent") or "").strip()
-    if not home or not away or not game_date:
-        return None
-
-    hs_raw = event.get("intHomeScore")
-    as_raw = event.get("intAwayScore")
-    try:
-        home_score = int(hs_raw) if hs_raw not in (None, "") else None
-    except Exception:
-        home_score = None
-    try:
-        away_score = int(as_raw) if as_raw not in (None, "") else None
-    except Exception:
-        away_score = None
-
-    game_key = str(event.get("idEvent") or f"{away}@{home}#{game_date}")
-    return {
-        "sport": sport,
-        "league": str(event.get("strLeague") or league_fallback),
-        "season": season_from_date(game_date),
-        "game_date": game_date[:10],
-        "game_key": game_key,
-        "home_team": home,
-        "away_team": away,
-        "home_score": home_score,
-        "away_score": away_score,
-        "status": str(event.get("strStatus") or "Scheduled"),
-        "source": source,
-        "raw_json": event,
-    }
-
-
 def build_player_rows_from_season_stats(
     *,
     sport: str,

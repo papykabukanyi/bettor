@@ -32,7 +32,6 @@ Stream any subset from Python:
 """
 
 import io
-import json
 import os
 import sys
 import datetime
@@ -53,7 +52,7 @@ except ImportError:
     _PA_OK = False
 
 try:
-    from huggingface_hub import HfApi, CommitOperationAdd, DatasetCard
+    from huggingface_hub import HfApi
     _HF_OK = True
 except ImportError:
     _HF_OK = False

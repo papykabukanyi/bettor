@@ -9,10 +9,9 @@ SportsData.io uses sport-specific base URLs:
 Auth:    ?key=<api_key>  OR  Ocp-Apim-Subscription-Key header
 """
 
-import os
 import time
 import requests
-from datetime import date, datetime
+from datetime import date
 
 from src.config import SPORTSDATA_API_KEY
 
@@ -55,11 +54,6 @@ def _get(sport: str, path: str, timeout: int = 10):
 
 # ─── MLB ─────────────────────────────────────────────────────────────────────
 
-def get_mlb_games_by_date(d: date = None) -> list[dict]:
-    d = d or date.today()
-    data = _get("mlb", f"/scores/json/GamesByDate/{d.strftime('%Y-%b-%d').upper()}")
-    return data or []
-
 
 def get_mlb_standings(season: int = None) -> list[dict]:
     season = season or date.today().year
@@ -83,19 +77,7 @@ def get_mlb_teams() -> list[dict]:
     return data or []
 
 
-def get_mlb_player_props_by_date(d: date = None) -> list[dict]:
-    d = d or date.today()
-    data = _get("mlb", f"/projections/json/DfsSlatesByDate/{d.strftime('%Y-%b-%d').upper()}")
-    return data or []
-
-
 # ─── Soccer ──────────────────────────────────────────────────────────────────
-
-def get_soccer_games_by_date(d: date = None, competition: int = None) -> list[dict]:
-    d = d or date.today()
-    comp = competition or 5  # 5=Premier League default
-    data = _get("soccer", f"/scores/json/GamesByDate/{comp}/{d.strftime('%Y-%b-%d').upper()}")
-    return data or []
 
 
 def get_soccer_standings(competition: int = None, season: int = None) -> list[dict]:
@@ -222,11 +204,3 @@ def populate_soccer(competition: int = 5, season: int = None):
         print(f"[sportsdata] soccer injuries: {len(inj_list)} saved")
 
 
-def populate_all():
-    """Run MLB + Soccer population."""
-    populate_mlb()
-    for comp in [5, 12, 10, 11, 8]:   # EPL, Ligue 1, Bundesliga, Serie A, La Liga
-        try:
-            populate_soccer(competition=comp)
-        except Exception as e:
-            print(f"[sportsdata] soccer comp {comp} error: {e}")

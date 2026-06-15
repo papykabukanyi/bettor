@@ -14,7 +14,6 @@ Provides:
 """
 
 import pandas as pd
-import numpy as np
 import datetime
 import sys
 import os
@@ -401,7 +400,6 @@ def get_player_prop_stats(player_name: str, season: int) -> dict:
     if not PYBASEBALL_OK:
         return {}
 
-    import datetime
     current_year = _et_today().year
     fallback_seasons = sorted({season, current_year - 1, current_year - 2}, reverse=True)
 
@@ -757,7 +755,6 @@ def get_hitter_props_batch(games: list[dict], season: int) -> list[dict]:
     Returns props for Hits, Home Runs, Total Bases.
     """
     from scipy import stats as scipy_stats
-    import datetime
     if not games:
         return []
 
@@ -928,7 +925,6 @@ def get_starters_props_batch(games: list[dict], season: int) -> list[dict]:
       3. Official MLB Stats API per-player (always has current season)
     """
     from scipy import stats as scipy_stats
-    import datetime
 
     if not games:
         return []

@@ -4,7 +4,6 @@ import csv
 import datetime
 import glob
 import io
-import json
 import os
 import re
 import time
@@ -14,8 +13,6 @@ from typing import Any
 import requests
 
 from config import (
-    TENNIS_API_BASE,
-    TENNIS_API_KEY,
     TENNIS_DATA_CACHE_TTL_SEC,
     TENNIS_JEFF_SACKMANN_DIR,
     TENNIS_SACKMANN_END_YEAR,
@@ -243,40 +240,6 @@ def fetch_slam_pointbypoint_history(data_dir: str | None = None) -> list[dict[st
         return []
 
     return _cached(f"tennis_slam_pbp::{base_dir or 'none'}", ttl, _pull) or []
-
-
-def fetch_api_tennis_bundle(
-    *,
-    home_player: str,
-    away_player: str,
-    match_date: str = "",
-    surface: str = "",
-) -> dict[str, Any]:
-    """Fetch tennis live/news/ranking bundle from an optional API-Tennis compatible endpoint."""
-    if not TENNIS_API_BASE:
-        return {"events": [], "rankings": [], "news": [], "h2h": []}
-
-    headers: dict[str, str] = {}
-    if TENNIS_API_KEY:
-        headers["Authorization"] = f"Bearer {TENNIS_API_KEY}"
-        headers["X-API-Key"] = TENNIS_API_KEY
-
-    params = {
-        "home_player": home_player,
-        "away_player": away_player,
-        "match_date": match_date,
-        "surface": surface,
-    }
-    payload = _safe_get(f"{TENNIS_API_BASE.rstrip('/')}/bundle", headers=headers, params=params)
-    if not isinstance(payload, dict):
-        return {"events": [], "rankings": [], "news": [], "h2h": []}
-    return {
-        "events": payload.get("events") or payload.get("matches") or [],
-        "rankings": payload.get("rankings") or [],
-        "news": payload.get("news") or [],
-        "h2h": payload.get("h2h") or payload.get("head_to_head") or [],
-        "injuries": payload.get("injuries") or [],
-    }
 
 
 def fetch_espn_tennis_live_bundle(game_date: datetime.date | str | None = None) -> dict[str, Any]:
