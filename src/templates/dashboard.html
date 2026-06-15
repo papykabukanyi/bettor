@@ -346,43 +346,6 @@ main{padding:20px;max-width:1560px;margin:0 auto}
 }
 .parlay-save-btn:hover{background:rgba(124,58,237,.3)}
 
-/* Parlay builder */
-.parlay-builder{background:var(--card);border:1px solid var(--border);
-  border-radius:var(--radius);padding:16px;margin-bottom:20px}
-.parlay-builder h3{font-size:.9rem;font-weight:600;margin-bottom:12px}
-#parlay-legs-list{min-height:40px;margin-bottom:12px}
-.parlay-leg-item{display:flex;align-items:center;justify-content:space-between;
-  padding:6px 8px;background:var(--card2);border-radius:6px;margin-bottom:6px;font-size:.82rem}
-.remove-leg{padding:2px 6px;background:none;border:1px solid var(--border);
-  color:var(--red);border-radius:4px;cursor:pointer;font-size:.7rem}
-.remove-leg:hover{background:rgba(220,38,38,.15)}
-.parlay-builder-actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
-#parlay-combined-odds{font-size:.9rem;color:var(--purple);font-weight:700}
-
-/* Best legs */
-.best-legs-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px;margin-bottom:16px}
-.best-leg-card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:12px}
-.best-leg-title{font-size:.82rem;font-weight:600;line-height:1.3}
-.best-leg-meta{display:flex;flex-wrap:wrap;gap:8px;margin-top:6px;font-size:.72rem;color:var(--muted)}
-.best-leg-actions{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:10px}
-.best-leg-ev{font-size:.72rem;font-weight:700}
-.best-leg-type{font-size:.62rem;padding:2px 6px;border-radius:999px;font-weight:700;letter-spacing:.04em}
-.best-leg-type.prop{background:rgba(16,185,129,.15);color:var(--green)}
-.best-leg-type.game{background:rgba(59,130,246,.15);color:#60a5fa}
-.best-leg-type.parlay{background:rgba(124,58,237,.18);color:var(--purple)}
-
-/* Parlay mixer */
-.parlay-mixer{background:linear-gradient(135deg,rgba(16,185,129,.14),rgba(59,130,246,.10));
-  border:1px solid rgba(16,185,129,.4);border-radius:var(--radius);padding:16px 20px;margin-bottom:18px}
-.parlay-mixer-header{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px}
-.parlay-mixer-title{font-size:.95rem;font-weight:700;color:var(--green)}
-.parlay-mixer-actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
-.parlay-mixer-preview{font-size:.78rem;color:var(--muted);margin-top:8px}
-.auto-mix-card{border:1px solid var(--border);border-radius:var(--radius);padding:14px;background:var(--card)}
-.auto-mix-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px}
-.auto-mix-title{font-size:.85rem;font-weight:700;color:var(--accent)}
-.auto-mix-meta{font-size:.72rem;color:var(--muted)}
-
 /* Tracked parlays */
 .tracked-parlay{background:var(--card2);border:1px solid var(--border);
   border-radius:var(--radius);padding:14px;margin-bottom:10px}
@@ -531,9 +494,6 @@ main{padding:20px;max-width:1560px;margin:0 auto}
 .live-eye{width:16px;height:8px;border:1px solid rgba(226,232,240,.6);border-radius:999px;display:inline-flex;
   align-items:center;justify-content:center;margin-right:6px;position:relative;vertical-align:middle;animation:eyeBlink 4s infinite}
 .live-eye::after{content:'';width:4px;height:4px;border-radius:50%;background:var(--accent);animation:eyePulse 2.4s infinite}
-.parlay-leg,.combo-leg{position:relative;overflow:hidden}
-.parlay-leg::after,.combo-leg::after{content:'';position:absolute;inset:0;background:linear-gradient(120deg,transparent,rgba(124,58,237,.14),transparent);
-  transform:translateX(-120%);animation:legSweep 3.4s infinite;pointer-events:none}
 
 /* ── Performance ── */
 .perf-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:14px;margin-bottom:24px}
@@ -801,16 +761,6 @@ body.console-open main{padding-bottom:236px}
 .plain-bet-chip{font-size:.82rem;font-weight:600;padding:3px 0}
 .plain-props-preview{display:flex;flex-direction:column;gap:3px;margin-top:4px;padding:4px 0}
 .plain-prop-chip{font-size:.78rem;font-weight:600;padding:2px 0}
-/* ── Auto parlay combo grid ── */
-.parlay-combo-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(290px,1fr));gap:16px;margin-bottom:20px}
-.parlay-combo-card{background:linear-gradient(135deg,rgba(20,184,166,.08),rgba(168,85,247,.05),var(--card));border:1px solid rgba(20,184,166,.4);border-radius:var(--radius);padding:16px;display:flex;flex-direction:column;gap:12px}
-.combo-header{display:flex;justify-content:space-between;align-items:flex-start;gap:10px}
-.combo-title{font-size:.95rem;font-weight:800;color:var(--accent)}
-.combo-prob{font-size:.73rem;color:var(--muted);margin-top:2px}
-.combo-odds{font-size:1.3rem;font-weight:800}
-.combo-legs{display:flex;flex-direction:column;gap:8px}
-.combo-leg{padding:8px 10px;background:rgba(255,255,255,.04);border-radius:8px;font-size:.82rem}
-.combo-actions{display:flex;gap:8px;margin-top:4px}
 
 /* ── Tournament hub ── */
 .tournament-grid{display:grid;grid-template-columns:1.2fr 1fr .9fr;gap:14px;align-items:start}
@@ -1199,21 +1149,13 @@ let TOMORROW_CARDS = {{ tomorrow_cards|tojson }};
 let BEST_PARLAYS   = {{ best_parlays|tojson }};
 let ALL_PROPS      = (function(v){ return Array.isArray(v) ? v : []; })({{ all_props|tojson }});
 const ACTIVE_SPORT = {{ (active_sport or 'mlb')|tojson }};
-let AUTO_PROP_PARLAY = null;
-let AUTO_PARLAY_COMBOS = [];
-let BEST_LEGS      = [];
-let AUTO_MIX_LEGS  = [];
-let parlayLegs     = [];
-let _parlayTouched = false;
 let propsSortKey   = 'model_prob';
 let propsSortAsc   = false;
 const LOCAL_CACHE_KEY = 'bettor_last_session';
-const AUTO_TRACKED_PARLAYS_KEY = 'bettor_auto_tracked_parlays_v1';
 let _cacheUpdatedAtMs = null;
 let _autoRefreshInFlight = false;
 const _gameStartCache = new Map();
 let _lastLiveScoresDigest = '';
-const _autoTrackInflight = new Set();
 let TOURNAMENTS = [];
 let TOURNAMENT_DATA = null;
 let _tournamentFilterTimer = null;
@@ -1819,28 +1761,6 @@ function _markReadyBetSent(row, info) {
   return record;
 }
 
-function _readAutoTrackedSignatures() {
-  try {
-    const raw = localStorage.getItem(AUTO_TRACKED_PARLAYS_KEY);
-    const day = _localDayKey();
-    if (!raw) return new Set();
-    const parsed = JSON.parse(raw);
-    if (!parsed || parsed.day !== day || !Array.isArray(parsed.keys)) return new Set();
-    return new Set(parsed.keys.map(v => String(v)));
-  } catch (e) {
-    return new Set();
-  }
-}
-
-function _writeAutoTrackedSignatures(sigSet) {
-  try {
-    localStorage.setItem(AUTO_TRACKED_PARLAYS_KEY, JSON.stringify({
-      day: _localDayKey(),
-      keys: Array.from(sigSet),
-    }));
-  } catch (e) {}
-}
-
 // ── SSE live connection ────────────────────────────────────────────────────
 let _sse = null;
 let _sseReconnectDelay = 3000;
@@ -1917,7 +1837,6 @@ function _connectSSE() {
     try {
       const d = JSON.parse(e.data);
       if (d.stats)        _renderBotPerf(d.stats);
-      if (d.parlay_stats) _renderParlayPerf(d.parlay_stats);
       _silentRefreshPanels();
     } catch(err) {}
   });
@@ -2415,8 +2334,6 @@ function _silentRefreshPanels() {
     loadTrackedParlays();
     loadTrackedSingles();
     loadPropPerformance();
-    autoGenParlaysFromProps();
-    loadParlayPerformance();
     loadBackendLiveFeedHealth();
   }, 1500);
 }
@@ -2432,8 +2349,6 @@ setInterval(() => {
   loadTrackedParlays();
   loadTrackedSingles();
   loadPropPerformance();
-  autoGenParlaysFromProps();
-  loadParlayPerformance();
   loadBackendLiveFeedHealth();
 }, TRACKING_REFRESH_MS);
 
@@ -2444,12 +2359,7 @@ function _renderBotPerf(_stats) {
   // Stats from SSE; just re-fetch to keep rendering in sync with existing code
   loadPropPerformance();
 }
-function _renderParlayPerf(_stats) {
-  loadParlayPerformance();
-  loadBackendLiveFeedHealth();
-}
 function _fetchAndRenderPerf()     { loadPropPerformance(); }
-function _fetchAndRenderParlayPerf() { loadParlayPerformance(); loadBackendLiveFeedHealth(); }
 
 // ── Tab switching ─────────────────────────────────────────────────────────
 function switchTab(name) {
@@ -2465,11 +2375,9 @@ function switchTab(name) {
     refreshReadyBets(false);
   }
   if (name === 'parlays')     {
-    autoGenParlaysFromProps();
     loadTrackedParlays();
     loadTrackedSingles();
     loadPropPerformance();
-    loadParlayPerformance();
     loadBackendLiveFeedHealth();
   }
   if (name === 'tournaments' && _isSoccerMode()) {
@@ -2714,84 +2622,6 @@ function loadTournamentData(force) {
     });
 }
 
-// ── Elite Parlay ──────────────────────────────────────────────────────────
-function buildEliteParlay() {
-  const btn = document.getElementById('btn-elite-parlay');
-  if (btn) { btn.disabled = true; btn.textContent = '⚡ Building…'; }
-  fetch('/api/parlay/build-elite', {method: 'POST'})
-    .then(r => r.json())
-    .then(d => {
-      if (btn) { btn.disabled = false; btn.innerHTML = '&#9889; Elite Parlay'; }
-      const el = document.getElementById('elite-parlay-result');
-      if (!d.ok || !d.parlay) {
-        el.innerHTML = `<div class="no-games" style="color:var(--yellow);margin:8px 0">
-          &#9888; ${d.msg || d.error || 'No elite picks available right now'}</div>`;
-        return;
-      }
-      const p = d.parlay;
-      const evColor = (p.combined_ev || 0) > 0 ? 'var(--green)' : 'var(--red)';
-      const legs = (p.legs || []).map(l =>
-        `<div style="display:flex;align-items:center;gap:8px;padding:7px 0;
-              border-bottom:1px solid var(--border);font-size:.82rem">
-          <span class="safety-badge badge-ELITE" style="font-size:.65rem;padding:2px 6px">ELITE</span>
-          <span style="flex:1">${l.label || l.pick || ''}</span>
-          <span style="color:var(--accent);font-weight:600">${((l.model_prob||0)*100).toFixed(1)}%</span>
-          <span style="color:var(--muted)">x${l.dec_odds||'?'}</span>
-        </div>`
-      ).join('');
-      el.innerHTML = `<div style="border:1px solid var(--green);border-radius:var(--radius);
-            background:rgba(16,185,129,.08);padding:14px;margin-top:6px">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
-          <span style="font-weight:700;color:var(--green)">&#9889; ${p.name || 'Elite Parlay'}</span>
-          <div style="text-align:right">
-            <div style="font-size:1.1rem;font-weight:700">x${p.combined_dec}</div>
-            <div style="font-size:.78rem;color:${evColor}">EV ${((p.combined_ev||0)*100).toFixed(1)}%</div>
-          </div>
-        </div>
-        ${legs}
-        <div style="font-size:.75rem;color:var(--muted);margin-top:10px">
-          ${p.n_legs} legs · ${p.combined_prob}% combined · $100 → $${p.payout_100} · ✅ Auto-saved to Tracked Parlays
-        </div>
-      </div>`;
-      toast('Elite parlay built & auto-saved!', 'success');
-      setTimeout(() => { loadTrackedParlays(); loadParlayPerformance(); }, 800);
-    })
-    .catch(e => {
-      if (btn) { btn.disabled = false; btn.innerHTML = '&#9889; Elite Parlay'; }
-      toast('Error: ' + e, 'error');
-    });
-}
-
-// ── Parlay Performance ────────────────────────────────────────────────────
-function loadParlayPerformance() {
-  const targets = [
-    document.getElementById('parlay-perf-stats'),
-    document.getElementById('parlay-perf-stats-perf')
-  ].filter(Boolean);
-  if (!targets.length) return;
-  fetch('/api/parlay/performance?current_only=1').then(r => r.json()).then(d => {
-    if (!d.ok) {
-      targets.forEach(el => el.innerHTML = '<div class="no-games">Could not load parlay stats.</div>');
-      return;
-    }
-    const s = d.stats || {};
-    const hr = s.hit_rate != null ? s.hit_rate + '%' : '—';
-    const roi = s.roi != null ? s.roi + '%' : '—';
-    const hrC  = s.hit_rate >= 55 ? 'var(--green)' : s.hit_rate >= 45 ? 'var(--yellow)' : 'var(--red)';
-    const roiC = (s.roi || 0) >= 0 ? 'var(--green)' : 'var(--red)';
-    const html = `
-      <div class="perf-card"><div class="perf-val perf-win">${s.wins||0}</div><div class="perf-label">Parlay Wins</div></div>
-      <div class="perf-card"><div class="perf-val perf-loss">${s.losses||0}</div><div class="perf-label">Parlay Losses</div></div>
-      <div class="perf-card"><div class="perf-val" style="color:var(--yellow)">${s.pending||0}</div><div class="perf-label">Pending</div></div>
-      <div class="perf-card"><div class="perf-val" style="color:${hrC}">${hr}</div><div class="perf-label">Hit Rate</div></div>
-      <div class="perf-card"><div class="perf-val" style="color:${roiC}">${roi}</div><div class="perf-label">ROI</div></div>
-      <div class="perf-card"><div class="perf-val">${s.total||0}</div><div class="perf-label">Total Parlays</div></div>`;
-    targets.forEach(el => { el.innerHTML = html; });
-  }).catch(() => {
-    targets.forEach(el => el.innerHTML = '<div class="no-games">Could not load parlay stats.</div>');
-  });
-}
-
 function loadBackendLiveFeedHealth() {
   const target = document.getElementById('backend-health-stats');
   const meta = document.getElementById('backend-health-meta');
@@ -2914,7 +2744,6 @@ function renderAll() {
   if (_isSoccerMode() && TOURNAMENTS.length && !TOURNAMENT_DATA) {
     loadTournamentData();
   }
-  if (_isParlaysActive()) autoGenParlaysFromProps();
 }
 
 // ── Game cards ────────────────────────────────────────────────────────────
@@ -4262,264 +4091,6 @@ function _buildMixedCombo(candidates, legCount, seed) {
     if (selectedSports.size < Math.min(2, availableSports.size, legCount)) return null;
   }
   return selected;
-}
-
-function _autoParlayPayload(c) {
-  return {
-    name: `Auto ${c.n}-Leg Mixed Parlay`,
-    legs: _asArray(c.legs).map(p => {
-      const gameKey = p.game_key || p.game || '';
-      const betType = p.bet_type || (_legSourceGroup(p) === 'prop' ? 'player_prop' : 'game_pick');
-      const scheduledStart = p.scheduled_start || _scheduledStartFromGameKey(gameKey);
-      const legUid = p.prediction_uid || p.bet_uid || p.uid || '';
-      return {
-        uid: legUid,
-        label: _legDisplayText(p),
-        pick: p.pick || _legDisplayText(p),
-        kind: p.kind || (_legSourceGroup(p) === 'prop' ? 'player_prop' : 'single'),
-        bet_type: betType,
-        raw_bet_type: p.raw_bet_type || betType,
-        game: gameKey,
-        game_key: gameKey,
-        game_date: p.game_date || p.date || '',
-        game_time: p.game_time || '',
-        scheduled_start: scheduledStart,
-        dec_odds: _legDec(p) || 1.9,
-        conf: Math.round(_legProb(p) * 100),
-        badge: p.badge || p.safety_label || 'MODERATE',
-        source: _legSourceGroup(p),
-        sport: p.sport || '',
-        prediction_uid: legUid,
-        bet_uid: legUid,
-        player_name: p.player_name || p.player || p.name || '',
-        name: p.name || p.player_name || '',
-        team: p.team || '',
-        home_team: p.home_team || '',
-        away_team: p.away_team || '',
-        prop_type: p.prop_type || p.stat_type || '',
-        stat_type: p.stat_type || p.prop_type || '',
-        line: p.line,
-        recommendation: (p.recommendation || p.direction || '').toUpperCase(),
-        direction: (p.direction || p.recommendation || '').toUpperCase(),
-        side_default: p.side_default || _defaultKalshiSide(p),
-      };
-    }),
-    combined_odds: c.dec ?? 0,
-    stake_usd: 10,
-  };
-}
-
-function _autoParlaySignature(c) {
-  const parts = _asArray(c.legs).map(p => {
-    const source = _legSourceGroup(p);
-    const sport = String(p.sport || '').trim().toLowerCase();
-    const label = _legDisplayText(p).trim().toLowerCase();
-    const dir = (p.direction || '').trim().toUpperCase();
-    const line = String(p.line ?? '');
-    const game = (p.game_key || p.game || '').trim().toLowerCase();
-    return `${source}|${sport}|${label}|${dir}|${line}|${game}`;
-  });
-  return `${c.n || parts.length}:${parts.join('||')}`;
-}
-
-function _autoTrackParlayCombos(combos) {
-  const list = _asArray(combos);
-  if (!list.length) return;
-  const tracked = _readAutoTrackedSignatures();
-  const jobs = [];
-  list.forEach(c => {
-    const sig = _autoParlaySignature(c);
-    if (!sig || tracked.has(sig) || _autoTrackInflight.has(sig)) return;
-    _autoTrackInflight.add(sig);
-    jobs.push({ sig, payload: _autoParlayPayload(c) });
-  });
-  if (!jobs.length) return;
-
-  Promise.all(jobs.map(job => {
-    return fetch('/api/parlay/save', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ ...job.payload, dedupe_pending: true }),
-    }).then(r => r.json())
-      .then(d => {
-        if (d && d.ok) {
-          tracked.add(job.sig);
-          return true;
-        }
-        return false;
-      })
-      .catch(() => false)
-      .finally(() => { _autoTrackInflight.delete(job.sig); });
-  })).then(results => {
-    const savedCount = results.filter(Boolean).length;
-    if (!savedCount) return;
-    _writeAutoTrackedSignatures(tracked);
-    if (_isParlaysActive()) {
-      loadTrackedParlays();
-      loadPropPerformance();
-      loadParlayPerformance();
-    }
-  });
-}
-
-function _serverParlayCombos() {
-  return _asArray(BEST_PARLAYS).map((p, idx) => {
-    const legs = _asArray(p.legs).map(l => {
-      const source = String(l.source || '').toLowerCase();
-      const inferredSource = source === 'prop' || String(l.bet_type || '').toLowerCase().includes('prop') ? 'prop' : 'game';
-      return {
-        source: inferredSource,
-        sport: l.sport || 'other',
-        label: l.label || l.pick || 'Leg',
-        pick: l.label || l.pick || 'Leg',
-        game_key: l.game || l.game_key || '',
-        game: l.game || l.game_key || '',
-        dec_odds: Number(l.dec_odds || 1.9) || 1.9,
-        model_prob: Math.max(0.01, Math.min(0.99, Number(l.model_prob || l.conf / 100 || 0.55))),
-        confidence: Number(l.conf || 55) || 55,
-        safety_label: l.badge || p.safety_label || 'SAFE',
-        quality_score: Number(l.quality_score || p.avg_safety || 0.7) || 0.7,
-      };
-    }).filter(Boolean);
-
-    if (!legs.length) return null;
-    const probRaw = Number(p.combined_prob || 0);
-    const prob = probRaw > 1 ? probRaw / 100 : (probRaw > 0 ? probRaw : legs.reduce((acc, l) => acc * _legProb(l), 1));
-    const dec = Number(p.combined_dec || 0) > 1 ? Number(p.combined_dec) : legs.reduce((acc, l) => acc * (_legDec(l) || 1.9), 1);
-    const sports = Array.from(new Set(legs.map(l => _sportMetaFromKey(l.sport || '').label)));
-    const sources = Array.from(new Set(legs.map(l => _legSourceGroup(l))));
-    return {
-      legs,
-      prob,
-      dec,
-      amer: dec >= 2 ? Math.round((dec - 1) * 100) : Math.round(-100 / Math.max(0.01, dec - 1)),
-      n: Number(p.n_legs || legs.length) || legs.length,
-      sports,
-      sources,
-      expected_roi: Number(p.expected_roi || _legEv(prob, dec)) || _legEv(prob, dec),
-      generatedBy: 'server',
-      serverRank: idx + 1,
-    };
-  }).filter(Boolean);
-}
-
-function autoGenParlaysFromProps() {
-  const candidateLegs = _comboCandidateLegs();
-  const propCount = candidateLegs.filter(leg => _legSourceGroup(leg) === 'prop').length;
-  const gameCount = candidateLegs.filter(leg => _legSourceGroup(leg) === 'game').length;
-
-  const grid  = document.getElementById('parlay-combos-grid');
-  const empty = document.getElementById('parlay-combos-empty');
-  const meta  = document.getElementById('parlay-auto-meta');
-  if (!grid) return;
-
-  if (!candidateLegs.length) {
-    AUTO_PROP_PARLAY = null;
-    AUTO_PARLAY_COMBOS = [];
-    grid.innerHTML = '';
-    if (empty) empty.classList.remove('hidden');
-    if (meta) meta.textContent = 'No qualifying game bets or props yet — run analysis first.';
-    return;
-  }
-  if (empty) empty.classList.add('hidden');
-
-  const combos = _serverParlayCombos();
-  const maxLegs = Math.min(5, candidateLegs.length);
-  for (let n = 2; n <= maxLegs; n++) {
-    const legs = _buildMixedCombo(candidateLegs, n, n - 2);
-    if (legs && legs.length === n) {
-      const prob = legs.reduce((acc,l) => acc * _legProb(l), 1);
-      const dec  = legs.reduce((acc,l) => acc * (l.dec_odds || 1.9), 1);
-      const amer = dec >= 2 ? Math.round((dec-1)*100) : Math.round(-100/(dec-1));
-      const sports = Array.from(new Set(legs.map(l => _sportMetaFromKey(l.sport || '').label)));
-      const sources = Array.from(new Set(legs.map(l => _legSourceGroup(l))));
-      combos.push({ legs, prob, dec, amer, n, sports, sources, generatedBy: 'local' });
-    }
-  }
-
-  const unique = new Map();
-  combos.forEach(c => {
-    const sig = _autoParlaySignature(c);
-    if (!sig) return;
-    const existing = unique.get(sig);
-    if (!existing) {
-      unique.set(sig, c);
-      return;
-    }
-    if ((c.generatedBy === 'server' && existing.generatedBy !== 'server') || (Number(c.prob || 0) > Number(existing.prob || 0))) {
-      unique.set(sig, c);
-    }
-  });
-  const finalCombos = Array.from(unique.values()).sort((a, b) => {
-    const aScore = Number(a.expected_roi || _legEv(a.prob || 0, a.dec || 0)) + Number(a.prob || 0);
-    const bScore = Number(b.expected_roi || _legEv(b.prob || 0, b.dec || 0)) + Number(b.prob || 0);
-    return bScore - aScore;
-  });
-
-  AUTO_PROP_PARLAY = finalCombos[0] || null;
-  AUTO_PARLAY_COMBOS = finalCombos;
-
-  if (!finalCombos.length) {
-    grid.innerHTML = '<div class="no-games" style="grid-column:1/-1">Not enough qualified mixed legs to build combos yet.</div>';
-    if (meta) meta.textContent = 'Need more high-confidence game bets and props to build mixed combos.';
-    return;
-  }
-  if (meta) {
-    const serverCount = finalCombos.filter(c => c.generatedBy === 'server').length;
-    const localCount = finalCombos.length - serverCount;
-    meta.textContent = `${finalCombos.length} expert combo${finalCombos.length>1?'s':''} · server ${serverCount} · generated ${localCount} · from ${candidateLegs.length} legs`;
-  }
-  grid.innerHTML = finalCombos.map(c => parlayComboCard(c)).join('');
-  _autoTrackParlayCombos(finalCombos);
-}
-
-
-function parlayComboCard(c) {
-  const probPct  = ((c.prob ?? 0) * 100).toFixed(1);
-  const payout   = ((c.dec ?? 0) * 100).toFixed(0);
-  const evRaw    = Number(c.expected_roi ?? _legEv(c.prob ?? 0, c.dec ?? 0));
-  const evColor  = evRaw >= 0 ? 'var(--green)' : 'var(--yellow)';
-  const legsHtml = c.legs.map(p => {
-    const source = _legSourceGroup(p);
-    const text = _legDisplayText(p);
-    const sportMeta = _sportMetaFromKey(p.sport || 'other');
-    const color = source === 'prop' ? plainEnglishPropText(p).color : 'var(--accent)';
-    const sourceLabel = source === 'prop' ? 'Player Prop' : source === 'game' ? 'Game Pick' : 'Combo Leg';
-    const pct = (_legProb(p) * 100).toFixed(1);
-    const dec = (_legDec(p) || 1.9).toFixed(2);
-    return `<div class="combo-leg">
-      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
-        <span style="color:${color};font-weight:600">${text}</span>
-        <span style="color:var(--muted);font-size:.72rem;white-space:nowrap">${pct}% &middot; x${dec}</span>
-      </div>
-      <div style="margin-top:4px;font-size:.68rem;color:var(--muted)">${sportMeta.icon} ${sportMeta.label} &middot; ${sourceLabel}</div>
-    </div>`;
-  }).join('');
-  const comboMix = `${(c.sports || []).length} sport${(c.sports || []).length !== 1 ? 's' : ''} · ${(c.sources || []).map(v => v === 'prop' ? 'props' : v === 'game' ? 'games' : 'combos').join(' + ')}`;
-  const emailData = JSON.stringify(_autoParlayPayload(c)).replace(/"/g,'&quot;');
-  return `<div class="parlay-combo-card">
-  <div class="combo-header">
-    <div>
-      <div class="combo-title">&#9650; ${c.n}-Leg ${_isAllSportsMode() ? 'Best Bets' : (_isSoccerMode() ? 'Props' : 'OVER')} Parlay</div>
-      <div class="combo-prob">Hit chance: ${probPct}% &middot; <span style="color:${evColor}">EV ${(evRaw*100).toFixed(1)}%</span> &middot; ${comboMix}</div>
-    </div>
-    <div style="text-align:right">
-      <div class="combo-odds">x${(c.dec ?? 0).toFixed(2)}</div>
-      <div style="font-size:.75rem;color:var(--muted)">$100 &#8594; $${payout}</div>
-    </div>
-  </div>
-  <div class="combo-legs">${legsHtml}</div>
-  <div class="combo-actions">
-    <span class="section-meta" style="flex:1;display:flex;align-items:center">Auto-tracked in Tracked Parlays</span>
-    <button class="btn btn-sm" style="flex:1" onclick="sendParlayEmail(${emailData})">&#9993; Email</button>
-  </div>
-</div>`;
-}
-
-// Legacy renderParlays (no-op, parlays now come from props only)
-function renderParlays(parlays) {
-  BEST_PARLAYS = parlays || [];
-  autoGenParlaysFromProps();
 }
 
 function _getLiveGameKeySet() {
@@ -6505,254 +6076,6 @@ function executeBothBets(uid) {
   });
 }
 
-function renderTopProps(legs) {
-  const grid  = document.getElementById('top-props-grid');
-  const empty = document.getElementById('top-props-empty');
-  const meta  = document.getElementById('top-props-meta');
-  if (!grid) return;
-  const allProps = (legs || []).filter(l => l.source === 'prop');
-  const props = allProps.slice(0, 24);
-  if (!allProps.length) {
-    grid.innerHTML = '';
-    if (empty) empty.classList.remove('hidden');
-    if (meta) meta.textContent = '';
-    return;
-  }
-  if (empty) empty.classList.add('hidden');
-  if (meta) meta.textContent = allProps.length > props.length ? `${props.length} of ${allProps.length} props` : `${allProps.length} props`;
-  grid.innerHTML = props.map(l => _renderLegCard(l)).join('');
-}
-
-function renderBestLegs(legs) {
-  BEST_LEGS = legs || [];
-  const grid  = document.getElementById('best-legs-grid');
-  const empty = document.getElementById('best-legs-empty');
-  const meta  = document.getElementById('best-legs-meta');
-  if (!grid) return;
-  const best = BEST_LEGS.slice(0, 36);
-  if (!BEST_LEGS.length) {
-    grid.innerHTML = '';
-    if (empty) empty.classList.remove('hidden');
-    if (meta) meta.textContent = '';
-    return;
-  }
-  if (empty) empty.classList.add('hidden');
-  if (meta) meta.textContent = BEST_LEGS.length > best.length ? `${best.length} of ${BEST_LEGS.length} legs` : `${BEST_LEGS.length} legs`;
-  grid.innerHTML = best.map(l => _renderLegCard(l)).join('');
-}
-
-function _renderLegCard(l) {
-  const probPct = l.model_prob ? (l.model_prob * 100).toFixed(1) + '%' : (l.conf || '?') + '%';
-  const evPct   = (l.ev * 100).toFixed(1) + '%';
-  const evColor = l.ev >= 0 ? 'var(--green)' : 'var(--red)';
-  const typeCls = l.source === 'prop' ? 'prop' : l.source === 'game' ? 'game' : 'parlay';
-  const typeLbl = l.source === 'prop' ? 'PROP' : l.source === 'game' ? 'GAME' : 'AUTO';
-  const addKey  = JSON.stringify({
-    label: l.label,
-    pick: l.pick || l.label,
-    bet_type: l.bet_type,
-    game: l.game,
-    game_key: l.game,
-    game_date: l.game_date || '',
-    dec_odds: l.dec_odds,
-    conf: l.conf,
-    badge: l.badge || 'MODERATE',
-    source: l.source || '',
-    sport: l.sport || '',
-    prediction_uid: l.prediction_uid || l.bet_uid || '',
-    player_name: l.player_name || l.player || l.name || '',
-    name: l.name || l.player_name || '',
-    team: l.team || '',
-    prop_type: l.prop_type || l.stat_type || '',
-    stat_type: l.stat_type || l.prop_type || '',
-    line: l.line,
-    recommendation: (l.recommendation || l.direction || '').toUpperCase(),
-    direction: (l.direction || l.recommendation || '').toUpperCase(),
-  }).replace(/"/g,'&quot;');
-  return `<div class="best-leg-card">
-    <div class="best-leg-title">${l.label}</div>
-    <div class="best-leg-meta">
-      <span class="best-leg-type ${typeCls}">${typeLbl}</span>
-      <span>${l.game || '—'}</span>
-      <span style="color:var(--accent)">${probPct}</span>
-      <span class="best-leg-ev" style="color:${evColor}">EV ${evPct}</span>
-      <span>x${(l.dec_odds||2).toFixed(2)}</span>
-    </div>
-    <div class="best-leg-actions">
-      ${safetyBadge(l.badge || 'MODERATE')}
-      <button class="bet-add" onclick="addToParlay(${addKey})">+</button>
-    </div>
-  </div>`;
-}
-
-function buildAutoMix(legs, count) {
-  const primary = _buildMixedCombo((legs || []).filter(l => {
-    const source = _legSourceGroup(l);
-    return source === 'prop' || source === 'game';
-  }), count, 0);
-  if (primary && primary.length) return primary;
-  return (legs || []).slice(0, count);
-}
-
-function renderAutoMixCard(mix) {
-  const el = document.getElementById('auto-mix-card');
-  const empty = document.getElementById('auto-mix-empty');
-  if (!el) return;
-  if (!mix.length) {
-    el.innerHTML = '';
-    if (empty) empty.classList.remove('hidden');
-    return;
-  }
-  if (empty) empty.classList.add('hidden');
-  const combinedProb = mix.reduce((acc,l)=>acc*_legProb(l), 1);
-  const combinedDec  = mix.reduce((acc,l)=>acc*_legDec(l), 1);
-  const combinedEv   = _legEv(combinedProb, combinedDec);
-  const evColor = combinedEv >= 0 ? 'var(--green)' : 'var(--red)';
-  const legsHtml = mix.map(l => {
-    const probPct = l.model_prob ? (l.model_prob * 100).toFixed(1) + '%' : (l.conf || '?') + '%';
-    return `<div class="parlay-leg">
-      <div class="leg-dot" style="background:var(--green)"></div>
-      <span class="leg-text">${l.label}</span>
-      <span class="leg-conf">${probPct} · x${(l.dec_odds||2).toFixed(2)}</span>
-    </div>`;
-  }).join('');
-  el.innerHTML = `
-    <div class="auto-mix-card">
-      <div class="auto-mix-head">
-        <div>
-          <div class="auto-mix-title">Best Mix · ${mix.length} legs</div>
-          <div class="auto-mix-meta">Hit: ${(combinedProb*100).toFixed(1)}% · EV ${((combinedEv||0)*100).toFixed(1)}%</div>
-        </div>
-        <div style="text-align:right">
-          <div style="font-size:1.1rem;font-weight:700">x${combinedDec.toFixed(2)}</div>
-          <div style="font-size:.78rem;color:${evColor}">$100 → $${(combinedDec*100).toFixed(0)}</div>
-        </div>
-      </div>
-      ${legsHtml}
-    </div>
-  `;
-}
-
-function refreshAutoMix(force) {
-  const count = parseInt(document.getElementById('auto-mix-count').value, 10) || 4;
-  const mix = buildAutoMix(BEST_LEGS, count);
-  AUTO_MIX_LEGS = mix;
-  if (!mix.length) {
-    renderAutoMixCard([]);
-    return;
-  }
-  if (force || !_parlayTouched || !parlayLegs.length) {
-    parlayLegs = mix.map(l => ({
-      label: l.label,
-      bet_type: l.bet_type,
-      game: l.game,
-      dec_odds: l.dec_odds,
-      conf: l.conf,
-      badge: l.badge || 'MODERATE',
-    }));
-    renderParlayBuilder();
-    const nameEl = document.getElementById('parlay-name');
-    if (nameEl) nameEl.value = `Auto Mix ${parlayLegs.length}-Leg`;
-  }
-  renderAutoMixCard(mix);
-}
-
-function saveAutoMixParlay() {
-  if (!AUTO_MIX_LEGS.length) { toast('No auto-mix yet','info'); return; }
-  const combined = AUTO_MIX_LEGS.reduce((acc,l)=>acc*(_legDec(l)||2),1);
-  const name = `Auto Mix ${AUTO_MIX_LEGS.length}-Leg`;
-  fetch('/api/parlay/save',{
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({name, legs:AUTO_MIX_LEGS, combined_odds:combined, stake_usd:10})
-  }).then(r=>r.json()).then(d=>{
-    if(d.ok){toast('Auto-mix saved!','success');loadTrackedParlays();}
-    else toast(d.error||'Error saving','error');
-  });
-}
-
-function sendAutoMixEmail() {
-  if (!AUTO_MIX_LEGS.length) { toast('No auto-mix yet','info'); return; }
-  const combined = AUTO_MIX_LEGS.reduce((acc,l)=>acc*(_legDec(l)||2),1);
-  const name = `Auto Mix ${AUTO_MIX_LEGS.length}-Leg`;
-  sendParlayEmail({name, legs: AUTO_MIX_LEGS, combined_odds: combined, stake_usd: 10});
-}
-
-// Legacy renderParlays — now delegates to auto-combo generator
-function renderParlays(parlays) {
-  BEST_PARLAYS = parlays || [];
-  autoGenParlaysFromProps();
-}
-
-// Parlay builder
-function addToParlay(leg) {
-  if (parlayLegs.length >= 12) { toast('Max 12 legs','info'); return; }
-  if (parlayLegs.find(l=>l.label===leg.label)) { toast('Already added','info'); return; }
-  _parlayTouched = true;
-  parlayLegs.push(leg);
-  renderParlayBuilder();
-  toast(`Added: ${leg.label}`,'success');
-}
-
-function renderParlayBuilder() {
-  const list = document.getElementById('parlay-legs-list');
-  const odds = document.getElementById('parlay-combined-odds');
-  if (!parlayLegs.length) {
-    list.innerHTML = '<div style="color:var(--muted);font-size:.82rem">No legs added yet.</div>';
-    odds.textContent = '';
-    return;
-  }
-  list.innerHTML = parlayLegs.map((l,i)=>
-    `<div class="parlay-leg-item">
-      <span>${l.label||'—'} <span style="color:var(--muted);font-size:.72rem">x${(l.dec_odds||2).toFixed(2)}</span></span>
-      <button class="remove-leg" onclick="removeLeg(${i})">✕</button>
-    </div>`
-  ).join('');
-  const combined = parlayLegs.reduce((acc,l)=>acc*(l.dec_odds||2), 1);
-  odds.textContent = `Combined: x${combined.toFixed(2)}`;
-}
-
-function removeLeg(i) {
-  _parlayTouched = true;
-  parlayLegs.splice(i, 1);
-  renderParlayBuilder();
-}
-function clearParlay() { _parlayTouched = true; parlayLegs=[]; renderParlayBuilder(); }
-
-function saveParlay() {
-  if (!parlayLegs.length) { toast('Add legs first','error'); return; }
-  const combined = parlayLegs.reduce((acc,l)=>acc*(l.dec_odds||2),1);
-  const name  = document.getElementById('parlay-name').value.trim() || 'My Parlay';
-  const stake = parseFloat(document.getElementById('parlay-stake').value) || 0;
-  fetch('/api/parlay/save',{
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({name, legs:parlayLegs, combined_odds:combined, stake_usd:stake})
-  }).then(r=>r.json()).then(d=>{
-    if(d.ok){toast('Parlay saved!','success');clearParlay();loadTrackedParlays();}
-    else toast(d.error||'Error saving','error');
-  });
-}
-
-function sendParlayEmail(data) {
-  fetch('/api/email/send-parlay',{
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify(data)
-  }).then(r=>r.json()).then(d=>{
-    if (d.ok) toast(`Email sent (${d.sent||0} delivered)`, 'success');
-    else toast(d.error||'Error sending email','error');
-  });
-}
-
-function sendBuilderParlay() {
-  if (!parlayLegs.length) { toast('Add legs first','error'); return; }
-  const combined = parlayLegs.reduce((acc,l)=>acc*(l.dec_odds||2),1);
-  const name  = document.getElementById('parlay-name').value.trim() || 'My Parlay';
-  const stake = parseFloat(document.getElementById('parlay-stake').value) || 0;
-  sendParlayEmail({name, legs: parlayLegs, combined_odds: combined, stake_usd: stake});
-}
-
 function _fetchFreshJson(url) {
   const sep = url.includes('?') ? '&' : '?';
   return fetch(`${url}${sep}_ts=${Date.now()}`, { cache: 'no-store' }).then(r => r.json());
@@ -7108,7 +6431,6 @@ function loadPropPerformance() {
     const candidateLegs = _comboCandidateLegs();
     const propLegs = candidateLegs.filter(leg => _legSourceGroup(leg) === 'prop').length;
     const gameLegs = candidateLegs.filter(leg => _legSourceGroup(leg) === 'game').length;
-    const autoComboCount = _asArray(AUTO_PARLAY_COMBOS).length;
 
     const liveOver = Array.isArray(ALL_PROPS)
       ? ALL_PROPS.filter(p => _isLiveGame(p.game_key||p.game||'')).length
@@ -7119,7 +6441,6 @@ function loadPropPerformance() {
       <div class="perf-card"><div class="perf-val">${settledWins}-${settledLosses}</div><div class="perf-label">Settled W-L</div><div class="perf-sub">Games + Props + Parlays</div></div>
       <div class="perf-card"><div class="perf-val" style="color:${overallColor}">${overallHitRate!=null?overallHitRate+'%':'—'}</div><div class="perf-label">Overall Win Rate</div><div class="perf-sub">Settled bets only</div></div>
       <div class="perf-card"><div class="perf-val" style="font-size:1.2rem">${candidateLegs.length}</div><div class="perf-label">Qualified Legs</div><div class="perf-sub">Props ${propLegs} · Games ${gameLegs}</div></div>
-      <div class="perf-card"><div class="perf-val" style="font-size:1.2rem">${autoComboCount}</div><div class="perf-label">Auto Combos</div><div class="perf-sub">Mixed props + game bets</div></div>
       <div class="perf-card"><div class="perf-val" style="font-size:1.2rem">${totalTracked}</div><div class="perf-label">Total Tracked Bets</div><div class="perf-sub">Singles/Props ${trackedSingles.length} · Parlays ${trackedParlays.length} · Pending ${singlePending + parlayPending}</div></div>
     `;
     const byType = s.by_prop_type||[];
@@ -7175,7 +6496,6 @@ function resolveOutcomesSilent() {
     .then(() => {
       loadTrackedParlays();
       loadPropPerformance();
-      loadParlayPerformance();
       loadPerformance();
     })
     .catch(() => {})
@@ -7380,8 +6700,6 @@ function stopConsolePoll() {
     loadTrackedParlays();
     loadTrackedSingles();
     loadPropPerformance();
-    autoGenParlaysFromProps();
-    loadParlayPerformance();
     loadBackendLiveFeedHealth();
   }, 60 * 1000);
 })();
