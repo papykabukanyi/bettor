@@ -1919,22 +1919,24 @@ def _build_card(game, bets, props, when):
         return re.sub(r"[^a-z0-9]+", "", str(name or "").strip().lower())
 
     def _team_aliases(name: str) -> set[str]:
-        words = [w for w in re.findall(r"[a-z0-9]+", str(name or "").lower()) if w]
-        aliases: set[str] = set()
-        full = "".join(words)
-        if full:
-            aliases.add(full)
-        if words:
-            aliases.add(words[-1])
-            aliases.add("".join(w[0] for w in words))
-        if len(words) >= 2:
-            aliases.add("".join(words[-2:]))
-        return {a for a in aliases if len(a) >= 2}
+        return _participant_aliases(name)
 
     home_token = _team_token(ht)
     away_token = _team_token(at)
     home_aliases = _team_aliases(ht)
     away_aliases = _team_aliases(at)
+    participant_aliases = home_aliases | away_aliases
+
+    def _matches_participant(value: str) -> bool:
+        token = _team_token(value)
+        if not token:
+            return False
+        if token in participant_aliases:
+            return True
+        for alias in participant_aliases:
+            if len(alias) >= 4 and (token in alias or alias in token):
+                return True
+        return False
 
     def _same_matchup(row: dict) -> bool:
         rh = _team_token(row.get("home_team") or "")
@@ -2004,6 +2006,17 @@ def _build_card(game, bets, props, when):
         key_match = _key_matches(pk) or _key_matches(pm)
         if not key_match and not _same_matchup(p):
             continue
+
+        prop_name = str(p.get("name") or p.get("player_name") or "").strip()
+        if not prop_name:
+            continue
+        if not str(p.get("stat_type") or p.get("prop_type") or p.get("prop_label") or "").strip():
+            continue
+        if sport_group in {"tennis", "golf"}:
+            if _is_placeholder_participant(prop_name, game.get("event_title") or competition_name):
+                continue
+            if not (_matches_participant(prop_name) or _matches_participant(str(p.get("team") or ""))):
+                continue
 
         team_token = _team_token(p.get("team") or "")
         is_home = team_token in home_aliases if team_token else False
@@ -2319,6 +2332,70 @@ def _derive_individual_matchup(label: str) -> tuple[str, str]:
         if left and right:
             return left[:120], right[:120]
     return title[:120], ""
+
+
+def _participant_aliases(name: str) -> set[str]:
+    words = [w for w in re.findall(r"[a-z0-9]+", str(name or "").lower()) if w]
+    aliases: set[str] = set()
+    full = "".join(words)
+    if full:
+        aliases.add(full)
+    if words:
+        aliases.add(words[-1])
+        aliases.add("".join(w[0] for w in words if w))
+    if len(words) >= 2:
+        aliases.add("".join(words[-2:]))
+    return {a for a in aliases if len(a) >= 2}
+
+
+def _is_placeholder_participant(name: str, event_title: str = "") -> bool:
+    token = re.sub(r"[^a-z0-9]+", "", str(name or "").strip().lower())
+    if not token:
+        return True
+    if token in {
+        "field",
+        "thefield",
+        "tbd",
+        "unknown",
+        "opponent",
+        "player",
+        "contestant",
+        "bye",
+    }:
+        return True
+    event_token = re.sub(r"[^a-z0-9]+", "", str(event_title or "").strip().lower())
+    if event_token and len(event_token) >= 8 and token == event_token:
+        return True
+    return False
+
+
+def _is_actionable_individual_matchup(home: str, away: str, event_title: str = "") -> bool:
+    home_token = re.sub(r"[^a-z0-9]+", "", str(home or "").strip().lower())
+    away_token = re.sub(r"[^a-z0-9]+", "", str(away or "").strip().lower())
+    if not home_token or not away_token or home_token == away_token:
+        return False
+    if _is_placeholder_participant(home, event_title) or _is_placeholder_participant(away, event_title):
+        return False
+    return True
+
+
+def _is_actionable_prop_row(row: dict) -> bool:
+    if not isinstance(row, dict):
+        return False
+    name = str(row.get("name") or row.get("player_name") or "").strip()
+    if not name:
+        return False
+    stat_type = str(row.get("stat_type") or row.get("prop_type") or "").strip()
+    prop_label = str(row.get("prop_label") or "").strip()
+    if not stat_type and not prop_label:
+        return False
+    sport_group = _infer_sport_group(
+        row.get("sport") or row.get("competition") or row.get("league") or ""
+    )
+    event_title = str(row.get("game") or row.get("event_title") or "").strip()
+    if sport_group in {"tennis", "golf"} and _is_placeholder_participant(name, event_title):
+        return False
+    return True
 
 
 def _rank_label(prob: float) -> str:
@@ -2726,11 +2803,9 @@ def _collect_fallback_games_for_all_sports(
                 home = str(((home_c.get("athlete") or {}).get("displayName") or (home_c.get("team") or {}).get("displayName") or home_c.get("displayName") or "")).strip()
                 away = str(((away_c.get("athlete") or {}).get("displayName") or (away_c.get("team") or {}).get("displayName") or away_c.get("displayName") or "")).strip()
             else:
-                # Tennis scoreboard may return tournament-level events without competitors.
-                # Keep a card so tennis still appears in all-sports fallback.
-                event_name = str(ev.get("shortName") or ev.get("name") or "Tennis Event").strip()
-                home = event_name[:120]
-                away = "Field"
+                # Tournament-level events without competitors are not actionable for
+                # player predictions and lead to empty tennis popups.
+                continue
             if not home or not away:
                 continue
             iso_dt = str(ev.get("date") or comp.get("date") or "").strip()
@@ -4900,10 +4975,6 @@ def _build_model_player_props_fallback(games: list[dict], max_per_game: int = 6)
                         or ev.get("description")
                         or code
                     ).strip() or code
-                    home = event_title
-                    away = "Field"
-                    game_key = _compose_game_key(away, home, game_datetime, game_date, game_time)
-                    match_key = _norm_gk(f"{away}@{home}")
 
                     books = ev.get("bookmakers") or []
                     if not books:
@@ -4911,6 +4982,30 @@ def _build_model_player_props_fallback(games: list[dict], max_per_game: int = 6)
                     markets = books[0].get("markets") or []
                     if not isinstance(markets, list):
                         continue
+
+                    home = str(ev.get("home_team") or "").strip()
+                    away = str(ev.get("away_team") or "").strip()
+                    if not _is_actionable_individual_matchup(home, away, event_title):
+                        candidate_names: list[str] = []
+                        for mk_probe in markets:
+                            mk_key_probe = str((mk_probe or {}).get("key") or "").strip().lower()
+                            if mk_key_probe not in {"h2h", "winner", "outrights", "top_5", "top_10", "top_20"}:
+                                continue
+                            for out_probe in (mk_probe.get("outcomes") or []):
+                                nm = str((out_probe or {}).get("name") or (out_probe or {}).get("description") or "").strip()
+                                if not nm or _is_placeholder_participant(nm, event_title):
+                                    continue
+                                if nm not in candidate_names:
+                                    candidate_names.append(nm)
+                            if len(candidate_names) >= 2:
+                                break
+                        if len(candidate_names) >= 2:
+                            home, away = candidate_names[0], candidate_names[1]
+                    if not _is_actionable_individual_matchup(home, away, event_title):
+                        continue
+
+                    game_key = _compose_game_key(away, home, game_datetime, game_date, game_time)
+                    match_key = _norm_gk(f"{away}@{home}")
 
                     game_rows = []
                     for market in markets:
@@ -5036,10 +5131,8 @@ def _build_model_player_props_fallback(games: list[dict], max_per_game: int = 6)
                         or ev.get("description")
                         or comp
                     ).strip() or comp
-                    home = str(ev.get("home_team") or "").strip() or event_title
-                    away = str(ev.get("away_team") or "").strip() or "Field"
-                    game_key = _compose_game_key(away, home, game_datetime, game_date, game_time)
-                    match_key = _norm_gk(f"{away}@{home}")
+                    home = str(ev.get("home_team") or "").strip()
+                    away = str(ev.get("away_team") or "").strip()
 
                     books = ev.get("bookmakers") or []
                     if not books:
@@ -5047,6 +5140,32 @@ def _build_model_player_props_fallback(games: list[dict], max_per_game: int = 6)
                     markets = books[0].get("markets") or []
                     if not isinstance(markets, list):
                         continue
+                    if sport_group in {"tennis", "golf", "mma", "boxing", "motorsports", "cricket"} and not _is_actionable_individual_matchup(home, away, event_title):
+                        left, right = _derive_individual_matchup(event_title)
+                        if left and right:
+                            home, away = left, right
+                    if sport_group in {"tennis", "golf", "mma", "boxing", "motorsports", "cricket"} and not _is_actionable_individual_matchup(home, away, event_title):
+                        outcome_names: list[str] = []
+                        for mk_probe in markets:
+                            mk_key_probe = str((mk_probe or {}).get("key") or "").strip().lower()
+                            if mk_key_probe not in {"h2h", "winner", "outrights", "top_3", "top_5", "top_10", "top_20"}:
+                                continue
+                            for out_probe in (mk_probe.get("outcomes") or []):
+                                nm = str((out_probe or {}).get("name") or (out_probe or {}).get("description") or "").strip()
+                                if not nm or _is_placeholder_participant(nm, event_title):
+                                    continue
+                                if nm not in outcome_names:
+                                    outcome_names.append(nm)
+                            if len(outcome_names) >= 2:
+                                break
+                        if len(outcome_names) >= 2:
+                            home, away = outcome_names[0], outcome_names[1]
+                    if sport_group in {"tennis", "golf", "mma", "boxing", "motorsports", "cricket"} and not _is_actionable_individual_matchup(home, away, event_title):
+                        continue
+                    home = home or event_title
+                    away = away or "Field"
+                    game_key = _compose_game_key(away, home, game_datetime, game_date, game_time)
+                    match_key = _norm_gk(f"{away}@{home}")
 
                     game_rows = []
                     for market in markets:
@@ -5658,9 +5777,8 @@ def _build_multi_sport_snapshot(force_refresh: bool = False) -> dict:
                 except Exception:
                     pass
 
-            if is_single_person_event and (not home or not away):
-                home = home or event_title
-                away = away or "Field"
+            if is_single_person_event and not _is_actionable_individual_matchup(home, away, event_title):
+                continue
 
             if not home or not away:
                 continue
@@ -6309,6 +6427,8 @@ def _run_all_sports_analysis():
                 clean_prop_row(p) for p in (sentiment_prop_rows or []) if isinstance(p, dict)
             ]
             table_rows = [clean_prop_row(r) for r in (table_rows or []) if isinstance(r, dict)]
+            sentiment_prop_rows = [p for p in sentiment_prop_rows if _is_actionable_prop_row(p)]
+            table_rows = [r for r in table_rows if _is_actionable_prop_row(r)]
             _log(
                 f"[all-sports] row-clean pass: bets={len(bets)} props={len(sentiment_prop_rows)}"
             )
