@@ -8,17 +8,22 @@ Pipeline:
   2. [ANALYZE] Fetch today's games + live odds → generate predictions
   3. [REPORT]  Find value bets (edge > threshold) → Kelly stake sizes
   4. [PROPS]   MLB player prop edge checker
+  5. [HF]      HF-first mode: bootstrap dataset, append daily results,
+               retrain/publish model, and run HF-based inference
 
 Run modes:
   python src/betting_bot.py              # full daily run (step 2-3-4)
   python src/betting_bot.py --train      # re-train models (step 1, slow)
   python src/betting_bot.py --props "Aaron Judge" 0.5 hits
+  python src/betting_bot.py --hf-bootstrap --hf-retrain-publish
 """
 
 import sys
 import os
 import argparse
 import warnings
+import json
+import datetime
 
 warnings.filterwarnings("ignore")
 
@@ -251,6 +256,161 @@ def _check_player_props(player_name: str, line: float, stat_type: str, season: i
     print(f"  Recommendation      : {result['recommendation']}")
 
 
+def _norm_team_token(name: str) -> str:
+    return "".join(ch for ch in str(name or "").lower() if ch.isalnum())
+
+
+def _norm_matchup_key(home_team: str, away_team: str) -> str:
+    return f"{_norm_team_token(away_team)}@{_norm_team_token(home_team)}"
+
+
+def _build_prediction_index(predictions: list[dict]) -> dict[str, dict]:
+    out: dict[str, dict] = {}
+    for pred in predictions or []:
+        home = str(pred.get("home_team") or "").strip()
+        away = str(pred.get("away_team") or "").strip()
+        if not home or not away:
+            continue
+        out[_norm_matchup_key(home, away)] = pred
+    return out
+
+
+def _combined_feature_vector(pred: dict | None, bet: dict) -> dict:
+    pred = pred or {}
+    model_prob = float(bet.get("model_prob") or 0.0)
+    book_prob = float(bet.get("book_prob") or 0.0)
+    edge = float(bet.get("edge") or 0.0)
+    ev = float(bet.get("ev") or 0.0)
+    sentiment = float(pred.get("sentiment_score") or 0.0)
+    injury_penalty = 0.10 if pred.get("injury_flag") else 0.0
+    lineup_boost = 0.04 if pred.get("lineup_flag") else 0.0
+    momentum_boost = 0.05 if pred.get("momentum_flag") else 0.0
+    source_count = len(pred.get("active_sources") or [])
+
+    signal_score = (
+        0.52 * model_prob
+        + 0.22 * max(edge, 0.0)
+        + 0.16 * max(sentiment, 0.0)
+        + 0.06 * min(max(ev, 0.0), 1.0)
+        + lineup_boost
+        + momentum_boost
+        - injury_penalty
+    )
+    signal_score = max(0.0, min(1.0, signal_score))
+
+    return {
+        "model_prob": round(model_prob, 4),
+        "book_prob": round(book_prob, 4),
+        "edge": round(edge, 4),
+        "ev": round(ev, 4),
+        "sentiment": round(sentiment, 4),
+        "injury_flag": bool(pred.get("injury_flag")),
+        "lineup_flag": bool(pred.get("lineup_flag")),
+        "momentum_flag": bool(pred.get("momentum_flag")),
+        "source_count": source_count,
+        "signal_score": round(signal_score, 4),
+    }
+
+
+def _attach_pipeline_features(bets: list[dict], prediction_index: dict[str, dict]) -> list[dict]:
+    enriched: list[dict] = []
+    for bet in bets or []:
+        matchup = str(bet.get("matchup") or "").strip()
+        parts = matchup.split(" vs ")
+        home = parts[0].strip() if len(parts) == 2 else ""
+        away = parts[1].strip() if len(parts) == 2 else ""
+        pred = prediction_index.get(_norm_matchup_key(home, away)) if home and away else None
+        vector = _combined_feature_vector(pred, bet)
+        item = dict(bet)
+        item["combined_features"] = vector
+        item["signal_score"] = vector["signal_score"]
+        item["data_sources"] = sorted(set((pred or {}).get("active_sources") or []) | {"odds"})
+        enriched.append(item)
+    return enriched
+
+
+def _ev_signal_filter(bets: list[dict], min_ev: float, min_signal: float) -> list[dict]:
+    return [
+        b for b in (bets or [])
+        if float(b.get("ev") or 0.0) >= min_ev
+        and float(b.get("signal_score") or 0.0) >= min_signal
+    ]
+
+
+def _export_signal_log(path: str, bets: list[dict]) -> None:
+    payload = {
+        "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "count": len(bets or []),
+        "signals": bets or [],
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+
+
+def _run_hf_pipeline_mode(args) -> bool:
+    hf_mode = any([
+        args.hf_bootstrap,
+        args.hf_append_daily,
+        args.hf_retrain_publish,
+        bool(args.hf_predict_matchup),
+    ])
+    if not hf_mode:
+        return False
+
+    from data.hf_pipeline import HFDirectPipeline
+    from config import HF_INFERENCE_ENDPOINT, HF_INFERENCE_MODEL
+
+    pipeline = HFDirectPipeline(
+        dataset_repo=args.hf_dataset_repo,
+        model_repo=args.hf_model_repo,
+    )
+    if not pipeline.ok:
+        print("[HF] Pipeline is not configured. Set HF_API_KEY and retry.")
+        return True
+
+    print(f"[HF] Dataset repo: {pipeline.dataset_repo_id}")
+    print(f"[HF] Model repo:   {pipeline.model_repo_id}")
+
+    if args.hf_bootstrap:
+        result = pipeline.bootstrap_one_year_history(days_back=args.hf_days_back)
+        print("[HF][BOOTSTRAP]", json.dumps(result, indent=2))
+
+    if args.hf_append_daily:
+        result = pipeline.append_daily_results()
+        print("[HF][APPEND]", json.dumps(result, indent=2))
+
+    if args.hf_retrain_publish:
+        summary = pipeline.train_and_publish_best_model(min_rows=args.hf_min_train_rows)
+        print(
+            "[HF][TRAIN] "
+            f"rows={summary.rows} best={summary.best_model} "
+            f"cv_roc_auc={summary.cv_roc_auc:.4f} repo={summary.repo_id}"
+        )
+
+    if args.hf_predict_matchup:
+        home_team, away_team = args.hf_predict_matchup
+        if args.hf_predict_via_api:
+            endpoint = args.hf_endpoint_url or HF_INFERENCE_ENDPOINT or ""
+            model_id = args.hf_inference_model or HF_INFERENCE_MODEL or pipeline.model_repo_id
+            result = pipeline.predict_via_hf_api(
+                home_team=home_team,
+                away_team=away_team,
+                season=args.hf_predict_season,
+                model_id=model_id,
+                endpoint_url=endpoint,
+            )
+            print("[HF][PREDICT_API]", json.dumps(result, indent=2))
+        else:
+            result = pipeline.predict_from_model_repo(
+                home_team=home_team,
+                away_team=away_team,
+                season=args.hf_predict_season,
+            )
+            print("[HF][PREDICT_MODEL]", json.dumps(result, indent=2))
+
+    return True
+
+
 # ------------------------------------------------------------------
 # Main
 # ------------------------------------------------------------------
@@ -264,11 +424,44 @@ def main():
     parser.add_argument("--leagues", nargs="+", default=["EPL", "ESP", "GER"],
                         help="Soccer leagues to analyze")
     parser.add_argument("--bankroll", type=float, default=BANKROLL)
+    parser.add_argument("--min-ev", type=float, default=0.0,
+                        help="Minimum EV threshold for final signals")
+    parser.add_argument("--min-signal", type=float, default=0.52,
+                        help="Minimum combined signal score (0-1)")
+    parser.add_argument("--signal-log", default=os.path.join("data", "latest_signal_log.json"),
+                        help="Path to write combined feature/signal log JSON")
+    parser.add_argument("--hf-bootstrap", action="store_true",
+                        help="One-time load ~1 year of completed games to HF dataset")
+    parser.add_argument("--hf-append-daily", action="store_true",
+                        help="Append latest completed game results to HF dataset")
+    parser.add_argument("--hf-retrain-publish", action="store_true",
+                        help="Retrain best model from HF dataset and publish to HF model repo")
+    parser.add_argument("--hf-days-back", type=int, default=365,
+                        help="Historical lookback for HF bootstrap")
+    parser.add_argument("--hf-min-train-rows", type=int, default=200,
+                        help="Minimum rows required before HF retrain")
+    parser.add_argument("--hf-dataset-repo", default="",
+                        help="Override HF dataset repo name/id")
+    parser.add_argument("--hf-model-repo", default="",
+                        help="Override HF model repo name/id")
+    parser.add_argument("--hf-predict-matchup", nargs=2, metavar=("HOME_TEAM", "AWAY_TEAM"),
+                        help="Predict one matchup from HF model")
+    parser.add_argument("--hf-predict-season", type=int, default=0,
+                        help="Season/year feature for HF matchup prediction")
+    parser.add_argument("--hf-predict-via-api", action="store_true",
+                        help="Call HF inference API instead of downloading model artifact")
+    parser.add_argument("--hf-endpoint-url", default="",
+                        help="Custom HF inference endpoint URL")
+    parser.add_argument("--hf-inference-model", default="",
+                        help="HF model id for API inference calls (optional model swap)")
     args = parser.parse_args()
 
     print("=" * 60)
     print("  MLB + SOCCER VALUE BET BOT")
     print("=" * 60)
+
+    if _run_hf_pipeline_mode(args):
+        return
 
     # --- Props mode ------------------------------------------------
     if args.props:
@@ -334,7 +527,20 @@ def main():
       + find_totals_bets(soccer_preds, soccer_tot_df, sport="soccer")
     )
 
+    prediction_index = _build_prediction_index(all_predictions)
+    total_candidates = len(value_bets) + len(totals_bets)
+    value_bets = _attach_pipeline_features(value_bets, prediction_index)
+    totals_bets = _attach_pipeline_features(totals_bets, prediction_index)
+    value_bets = _ev_signal_filter(value_bets, min_ev=args.min_ev, min_signal=args.min_signal)
+    totals_bets = _ev_signal_filter(totals_bets, min_ev=args.min_ev, min_signal=args.min_signal)
+    combined_bets = value_bets + totals_bets
+
     parlays = build_parlay(value_bets + totals_bets)
+    os.makedirs(os.path.dirname(args.signal_log) or ".", exist_ok=True)
+    _export_signal_log(args.signal_log, combined_bets)
+    print(f"[PIPELINE] Signals kept: {len(combined_bets)}/{total_candidates}"
+          f"  |  min_ev={args.min_ev:.3f} min_signal={args.min_signal:.2f}")
+    print(f"[PIPELINE] Signal log: {args.signal_log}")
 
     # ── Kalshi ticker + investor grade enrichment ──────────────────────────
     _all_bets = value_bets + totals_bets

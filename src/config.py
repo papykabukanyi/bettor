@@ -65,6 +65,9 @@ REDDIT_USER_AGENT    = os.getenv("REDDIT_USER_AGENT", "bettor-bot/1.0")
 # Hugging Face (sentiment scoring via Inference API + dataset hub)
 HF_API_KEY = os.getenv("HF_API_KEY", "")
 HF_DATASET_REPO = os.getenv("HF_DATASET_REPO", "sportprediction")
+HF_MODEL_REPO = os.getenv("HF_MODEL_REPO", "sports-win-model")
+HF_INFERENCE_MODEL = os.getenv("HF_INFERENCE_MODEL", "")
+HF_INFERENCE_ENDPOINT = os.getenv("HF_INFERENCE_ENDPOINT", "")
 
 # Discord (sentiment)
 DISCORD_BOT_TOKEN      = os.getenv("DISCORD_BOT_TOKEN", "")
@@ -181,5 +184,4 @@ def et_today() -> _dt.date:
     if now_et.hour >= 22:
         return (now_et + _dt.timedelta(days=1)).date()
     return now_et.date()
-
 
