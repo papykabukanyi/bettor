@@ -352,6 +352,7 @@ def _run_hf_pipeline_mode(args) -> bool:
         args.hf_bootstrap,
         args.hf_append_daily,
         args.hf_retrain_publish,
+        args.hf_daily_run,
         bool(args.hf_predict_matchup),
     ])
     if not hf_mode:
@@ -380,12 +381,28 @@ def _run_hf_pipeline_mode(args) -> bool:
         print("[HF][APPEND]", json.dumps(result, indent=2))
 
     if args.hf_retrain_publish:
-        summary = pipeline.train_and_publish_best_model(min_rows=args.hf_min_train_rows)
+        summary = pipeline.train_and_publish_best_model(
+            min_rows=args.hf_min_train_rows,
+            forced_model=args.hf_custom_model,
+        )
         print(
             "[HF][TRAIN] "
             f"rows={summary.rows} best={summary.best_model} "
             f"cv_roc_auc={summary.cv_roc_auc:.4f} repo={summary.repo_id}"
         )
+
+    if args.hf_daily_run:
+        endpoint = args.hf_endpoint_url or HF_INFERENCE_ENDPOINT or ""
+        model_id = args.hf_inference_model or HF_INFERENCE_MODEL or pipeline.model_repo_id
+        daily = pipeline.run_daily_pipeline(
+            custom_model=args.hf_custom_model,
+            min_rows=args.hf_min_train_rows,
+            predictions_output_path=args.hf_predictions_output,
+            via_api=bool(args.hf_predict_via_api),
+            model_id=model_id,
+            endpoint_url=endpoint,
+        )
+        print("[HF][DAILY]", json.dumps(daily, indent=2))
 
     if args.hf_predict_matchup:
         home_team, away_team = args.hf_predict_matchup
@@ -436,14 +453,21 @@ def main():
                         help="Append latest completed game results to HF dataset")
     parser.add_argument("--hf-retrain-publish", action="store_true",
                         help="Retrain best model from HF dataset and publish to HF model repo")
+    parser.add_argument("--hf-daily-run", action="store_true",
+                        help="Run daily clean+append, retrain custom model, and generate daily predictions")
     parser.add_argument("--hf-days-back", type=int, default=365,
                         help="Historical lookback for HF bootstrap")
     parser.add_argument("--hf-min-train-rows", type=int, default=200,
                         help="Minimum rows required before HF retrain")
+    parser.add_argument("--hf-custom-model", default="auto",
+                        choices=["auto", "gradient_boosting", "random_forest", "logistic_regression"],
+                        help="Custom model choice for HF retraining")
     parser.add_argument("--hf-dataset-repo", default="",
                         help="Override HF dataset repo name/id")
     parser.add_argument("--hf-model-repo", default="",
                         help="Override HF model repo name/id")
+    parser.add_argument("--hf-predictions-output", default=os.path.join("data", "hf_daily_predictions.json"),
+                        help="File path for generated daily HF predictions JSON")
     parser.add_argument("--hf-predict-matchup", nargs=2, metavar=("HOME_TEAM", "AWAY_TEAM"),
                         help="Predict one matchup from HF model")
     parser.add_argument("--hf-predict-season", type=int, default=0,

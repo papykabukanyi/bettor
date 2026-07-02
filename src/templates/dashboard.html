@@ -795,6 +795,11 @@ body.console-open main{padding-bottom:236px}
 .live-status.in-progress{background:rgba(22,163,74,.18);color:var(--green)}
 .live-status.final{background:rgba(124,58,237,.18);color:var(--purple)}
 #conn-badge{font-size:.7rem;font-weight:700;letter-spacing:.5px}
+.ops-strip{display:grid;grid-template-columns:repeat(4,minmax(140px,1fr));gap:10px;padding:10px 16px;border-bottom:1px solid var(--border);background:var(--surface)}
+.ops-chip{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:8px 10px;display:flex;flex-direction:column;gap:4px}
+.ops-chip-label{font-size:.68rem;color:var(--muted);text-transform:uppercase;letter-spacing:.4px}
+.ops-chip-value{font-size:.86rem;font-weight:700}
+@media (max-width:900px){.ops-strip{grid-template-columns:repeat(2,minmax(140px,1fr));padding:8px 10px}}
 </style>
 
 </head>
@@ -820,6 +825,13 @@ body.console-open main{padding-bottom:236px}
     <button class="btn" id="console-btn" onclick="toggleConsole()" title="Toggle live console">&#128187; Console</button>
   </div>
 </header>
+
+<section class="ops-strip" id="ops-strip">
+  <div class="ops-chip"><span class="ops-chip-label">Analysis</span><span class="ops-chip-value" id="ops-analysis-status">Loading…</span></div>
+  <div class="ops-chip"><span class="ops-chip-label">HF Pipeline</span><span class="ops-chip-value" id="ops-hf-step">Not run</span></div>
+  <div class="ops-chip"><span class="ops-chip-label">Custom Model</span><span class="ops-chip-value" id="ops-hf-model">—</span></div>
+  <div class="ops-chip"><span class="ops-chip-label">Daily Predictions</span><span class="ops-chip-value" id="ops-hf-preds">0</span></div>
+</section>
 
 <!-- Tabs -->
 <div class="tabs" id="tabs">
@@ -1836,6 +1848,35 @@ function _updateConnBadge(live) {
   if (!el) return;
   el.textContent = live ? '● LIVE' : '○ offline';
   el.style.color = live ? 'var(--green)' : 'var(--red)';
+}
+
+function _setText(id, value){
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.textContent = value;
+}
+
+function loadBotOpsStatus() {
+  Promise.all([
+    fetch('/api/status').then(r=>r.json()).catch(()=>null),
+    fetch('/api/hf/pipeline-status').then(r=>r.json()).catch(()=>null),
+  ]).then(([status, hf]) => {
+    if (status) {
+      const label = status.status === 'running'
+        ? `Running · ${status.phase || ''}`
+        : status.status === 'done'
+          ? `Done · ${status.last_updated || ''}`
+          : (status.status || 'idle');
+      _setText('ops-analysis-status', label);
+    }
+    if (hf) {
+      _setText('ops-hf-step', hf.last_step || 'not_run');
+      _setText('ops-hf-model', hf.best_model || '—');
+      const preds = Number(hf.prediction_count || 0);
+      const errs = Number(hf.prediction_errors || 0);
+      _setText('ops-hf-preds', errs > 0 ? `${preds} (${errs} err)` : String(preds));
+    }
+  }).catch(()=>{});
 }
 
 // ── Loading / status overlay ───────────────────────────────────────────────
@@ -5921,6 +5962,7 @@ function stopConsolePoll() {
   }).catch(()=>{});
 
   _refreshScheduledStatuses();
+  loadBotOpsStatus();
 
   document.addEventListener('keydown', e => {
     if (e.key === 'Escape') {
@@ -5937,6 +5979,7 @@ function stopConsolePoll() {
   setInterval(() => { syncReadyOrderTracking(); }, 60 * 1000);
   setInterval(() => {
     if (document.hidden) return;
+    loadBotOpsStatus();
     if (_isReadyBetsActive()) {
       refreshReadyBets(false);
     }

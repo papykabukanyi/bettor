@@ -80,6 +80,19 @@ _TODAY_TOMORROW_MAX_UNDER_SHARE = 0.20
 _OVER_ONLY_PLAYER_PROPS = True
 _OVER_ONLY_PROPS = True
 _SCHED_MISFIRE_GRACE_SEC = 45
+_DATA_DIR = os.path.join(os.path.dirname(SRC_DIR), "data")
+_HF_PIPELINE_STATUS_FILE = os.getenv(
+    "HF_PIPELINE_STATUS_FILE",
+    os.path.join(_DATA_DIR, "hf_pipeline_status.json"),
+)
+_HF_DAILY_PREDICTIONS_FILE = os.getenv(
+    "HF_DAILY_PREDICTIONS_FILE",
+    os.path.join(_DATA_DIR, "hf_daily_predictions.json"),
+)
+_HF_SIGNAL_LOG_FILE = os.getenv(
+    "HF_SIGNAL_LOG_FILE",
+    os.path.join(_DATA_DIR, "latest_signal_log.json"),
+)
 
 app = Flask(__name__, template_folder="templates")
 
@@ -1579,6 +1592,18 @@ def _clean(obj):
     if isinstance(obj, (datetime.date, datetime.datetime)):
         return obj.isoformat()
     return obj
+
+
+def _read_json_file(path: str) -> dict:
+    try:
+        p = str(path or "").strip()
+        if not p or not os.path.exists(p):
+            return {}
+        with open(p, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
 
 
 def _norm_gk(s: str) -> str:
@@ -7717,6 +7742,35 @@ def api_status():
         status_payload["auto_backfill"] = dict(_last_auto_backfill_info)
         status_payload["auto_backfill"]["running"] = bool(_backfill_running)
     return jsonify(status_payload)
+
+
+@app.route("/api/hf/pipeline-status")
+def api_hf_pipeline_status():
+    pipeline = _read_json_file(_HF_PIPELINE_STATUS_FILE)
+    daily_preds = _read_json_file(_HF_DAILY_PREDICTIONS_FILE)
+    signal_log = _read_json_file(_HF_SIGNAL_LOG_FILE)
+
+    preds = daily_preds.get("predictions") if isinstance(daily_preds.get("predictions"), list) else []
+    pred_errors = len([p for p in preds if isinstance(p, dict) and p.get("error")])
+    payload = {
+        "ok": bool(pipeline),
+        "last_step": str(pipeline.get("last_step") or "not_run"),
+        "updated_at": str(pipeline.get("updated_at") or ""),
+        "dataset_repo": str(pipeline.get("dataset_repo") or ""),
+        "model_repo": str(pipeline.get("model_repo") or ""),
+        "best_model": str(pipeline.get("best_model") or ""),
+        "cv_roc_auc": pipeline.get("cv_roc_auc"),
+        "trained_rows": pipeline.get("trained_rows"),
+        "append_records": pipeline.get("append_records"),
+        "append_date": str(pipeline.get("append_date") or ""),
+        "prediction_count": int(pipeline.get("prediction_count") or len(preds) or 0),
+        "prediction_date": str(pipeline.get("prediction_date") or daily_preds.get("date") or ""),
+        "prediction_errors": pred_errors,
+        "signal_count": int(signal_log.get("count") or 0),
+        "signal_generated_at": str(signal_log.get("generated_at") or ""),
+        "prediction_file": str(pipeline.get("prediction_file") or _HF_DAILY_PREDICTIONS_FILE),
+    }
+    return jsonify(payload)
 
 
 @app.route("/api/backfill/status")
