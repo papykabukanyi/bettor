@@ -60,7 +60,7 @@ def find_value_bets(
     """
     Cross-reference model predictions with live odds to find value bets.
 
-    predictions : list of dicts from mlb_model.predict_game() or soccer_model.predict()
+    predictions : list of model prediction dicts (including HF pipeline output)
       Each must have: home_team, away_team, home_win_prob (or home_win), away_win_prob (or away_win)
       Soccer also includes: draw_prob (or draw)
 
@@ -461,4 +461,3 @@ def summarise_suggestions(
     out.append(_line("═"))
 
     return "\n".join(out)
-
