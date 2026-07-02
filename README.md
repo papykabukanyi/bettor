@@ -18,6 +18,12 @@ This project now supports a direct Hugging Face workflow:
   - `HF_PIPELINE_STATUS_FILE`
   - `HF_DAILY_PREDICTIONS_FILE`
   - `HF_SIGNAL_LOG_FILE`
+  - `HF_AUTORUN_ON_DEPLOY=1` (run HF pipeline automatically on deployment/start)
+  - `HF_AUTORUN_DELAY_SEC=30`
+  - `HF_DAILY_RUN_HOUR_ET=4`
+  - `HF_DAILY_RUN_MINUTE_ET=15`
+  - `HF_DAILY_CUSTOM_MODEL=gradient_boosting`
+  - `HF_DAILY_MIN_TRAIN_ROWS=200`
 
 ## Core CLI commands
 

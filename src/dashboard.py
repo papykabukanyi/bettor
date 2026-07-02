@@ -93,6 +93,13 @@ _HF_SIGNAL_LOG_FILE = os.getenv(
     "HF_SIGNAL_LOG_FILE",
     os.path.join(_DATA_DIR, "latest_signal_log.json"),
 )
+_HF_DAILY_RUN_HOUR_ET = int(os.getenv("HF_DAILY_RUN_HOUR_ET", "4") or "4")
+_HF_DAILY_RUN_MINUTE_ET = int(os.getenv("HF_DAILY_RUN_MINUTE_ET", "15") or "15")
+_HF_DAILY_CUSTOM_MODEL = str(os.getenv("HF_DAILY_CUSTOM_MODEL", "gradient_boosting") or "gradient_boosting").strip().lower()
+_HF_DAILY_MIN_TRAIN_ROWS = max(50, int(os.getenv("HF_DAILY_MIN_TRAIN_ROWS", "200") or "200"))
+_HF_DAILY_USE_INFERENCE_API = str(os.getenv("HF_DAILY_USE_INFERENCE_API", "0")).strip().lower() in {"1", "true", "yes", "on"}
+_HF_AUTORUN_ON_DEPLOY = str(os.getenv("HF_AUTORUN_ON_DEPLOY", "1")).strip().lower() in {"1", "true", "yes", "on"}
+_HF_AUTORUN_DELAY_SEC = max(0, int(os.getenv("HF_AUTORUN_DELAY_SEC", "30") or "30"))
 
 app = Flask(__name__, template_folder="templates")
 
@@ -644,6 +651,7 @@ def _init_worker():
             ("kalshi-monitor", _start_kalshi_monitor),
             ("kalshi-ws", _start_kalshi_ws_client),
             ("auto-boot-analysis", _auto_boot_analysis),
+            ("hf-deploy-autorun", _autorun_hf_pipeline_on_deploy),
         ):
             try:
                 if svc_name == "auto-boot-analysis":
@@ -11495,21 +11503,48 @@ def _scheduled_analysis(force: bool = False, lock_today: bool = False):
 
 
 def _scheduled_hf_push():
-    """Daily job: sync all sport data from PostgreSQL → HuggingFace dataset repo."""
+    """Daily job: run full HF-first daily pipeline."""
     def _run():
-        print(f"[hf-push] Starting daily HuggingFace data sync at {datetime.datetime.now().strftime('%H:%M')}")
+        print(f"[hf-pipeline] Starting daily HF pipeline at {datetime.datetime.now().strftime('%H:%M')}")
         try:
-            from data.hf_uploader import HFUploader
-            up = HFUploader()
-            if not up._ok:
-                print("[hf-push] Uploader not ready (missing key or libs) — skipping")
+            from data.hf_pipeline import HFDirectPipeline
+
+            pipe = HFDirectPipeline()
+            if not pipe.ok:
+                print("[hf-pipeline] Pipeline not ready (missing key/libs) — skipping")
                 return
-            up.sync_from_db()
-            up.flush_all()
-            print("[hf-push] Daily sync complete → https://huggingface.co/datasets/papylove/sportprediction")
+
+            result = pipe.run_daily_pipeline(
+                custom_model=_HF_DAILY_CUSTOM_MODEL,
+                min_rows=_HF_DAILY_MIN_TRAIN_ROWS,
+                predictions_output_path=_HF_DAILY_PREDICTIONS_FILE,
+                via_api=_HF_DAILY_USE_INFERENCE_API,
+            )
+            pred_count = int(((result.get("predictions") or {}).get("prediction_count")) or 0)
+            print(
+                "[hf-pipeline] Daily pipeline complete "
+                f"(model={_HF_DAILY_CUSTOM_MODEL}, preds={pred_count})"
+            )
         except Exception as exc:
-            print(f"[hf-push] Error during daily sync: {exc}")
-    threading.Thread(target=_run, daemon=True, name="hf-daily-push").start()
+            print(f"[hf-pipeline] Error during daily run: {exc}")
+    threading.Thread(target=_run, daemon=True, name="hf-daily-run").start()
+
+
+def _autorun_hf_pipeline_on_deploy():
+    """Run HF pipeline once shortly after deploy/startup."""
+    if not _HF_AUTORUN_ON_DEPLOY:
+        return
+
+    def _run():
+        try:
+            if _HF_AUTORUN_DELAY_SEC > 0:
+                time.sleep(_HF_AUTORUN_DELAY_SEC)
+            print("[hf-pipeline] Deployment autorun triggered")
+            _scheduled_hf_push()
+        except Exception as exc:
+            print(f"[hf-pipeline] Deployment autorun error: {exc}")
+
+    threading.Thread(target=_run, daemon=True, name="hf-deploy-autorun").start()
 
 
 def _start_scheduler():
@@ -11592,12 +11627,11 @@ def _start_scheduler():
                 misfire_grace_time=120,
             )
 
-        # ── Daily HuggingFace data push (4:15 AM ET) ───────────────────────
-        # Runs after all settlement and backfill jobs are done so the dataset
-        # always contains a complete, settled snapshot of the day's data.
+        # ── Daily HuggingFace full pipeline (default 04:15 AM ET) ──────────
+        # Runs append -> train -> predictions so model/data stay fresh daily.
         sched.add_job(
             _scheduled_hf_push,
-            CronTrigger(hour=4, minute=15, timezone="America/New_York"),
+            CronTrigger(hour=_HF_DAILY_RUN_HOUR_ET, minute=_HF_DAILY_RUN_MINUTE_ET, timezone="America/New_York"),
             id="daily_hf_push",
             max_instances=1,
             coalesce=True,
@@ -11617,7 +11651,11 @@ def _start_scheduler():
                 f"at {_AUTO_BACKFILL_HOUR_ET:02d}:{_AUTO_BACKFILL_MINUTE_ET:02d} ET "
                 f"(days={_AUTO_BACKFILL_DAYS})"
             )
-        print("[scheduler] Daily HuggingFace push scheduled at 04:15 ET → papylove/sportprediction")
+        print(
+            "[scheduler] Daily HF pipeline scheduled at "
+            f"{_HF_DAILY_RUN_HOUR_ET:02d}:{_HF_DAILY_RUN_MINUTE_ET:02d} ET "
+            f"(model={_HF_DAILY_CUSTOM_MODEL}, deploy_autorun={_HF_AUTORUN_ON_DEPLOY})"
+        )
         print(
             "[scheduler] Polymarket auto TP "
             f"enabled={bool(_poly_tp_runtime.get('enabled', _POLY_TP_ENABLED))} "
