@@ -70,6 +70,7 @@ def _build_schemas():
         return
     SCHEMAS["games"] = pa.schema([
         pa.field("game_id",          pa.string()),
+        pa.field("record_id",        pa.string()),
         pa.field("sport",            pa.string()),
         pa.field("league",           pa.string()),
         pa.field("game_date",        pa.string()),

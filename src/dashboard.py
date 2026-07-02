@@ -7781,6 +7781,82 @@ def api_hf_pipeline_status():
     return jsonify(payload)
 
 
+@app.route("/api/hf/predictions")
+def api_hf_predictions():
+    """Return HF model predictions for a given date (default: today)."""
+    import datetime as _dt
+    date_param = request.args.get("date", "").strip()
+    if date_param == "tomorrow":
+        target_date = (_dt.date.today() + _dt.timedelta(days=1)).isoformat()
+    elif date_param and date_param != "today":
+        target_date = date_param[:10]
+    else:
+        target_date = _dt.date.today().isoformat()
+    daily_preds = _read_json_file(_HF_DAILY_PREDICTIONS_FILE)
+    preds = [
+        p for p in (daily_preds.get("predictions") or [])
+        if isinstance(p, dict) and str(p.get("game_date") or "").startswith(target_date)
+        and not p.get("error")
+    ]
+    return jsonify({
+        "ok": True,
+        "date": target_date,
+        "prediction_count": len(preds),
+        "generated_at": daily_preds.get("generated_at", ""),
+        "model_version": daily_preds.get("model_version", ""),
+        "model_type": daily_preds.get("model_type", ""),
+        "model_auc": daily_preds.get("model_auc", 0),
+        "predictions": preds,
+    })
+
+
+@app.route("/api/hf/dataset-stats")
+def api_hf_dataset_stats():
+    """Return HF dataset statistics from pipeline status file."""
+    pipeline = _read_json_file(_HF_PIPELINE_STATUS_FILE)
+    return jsonify({
+        "ok": bool(pipeline),
+        "dataset_repo": pipeline.get("dataset_repo", ""),
+        "bootstrap_records": pipeline.get("bootstrap_records"),
+        "bootstrap_sports": pipeline.get("bootstrap_sports", []),
+        "bootstrap_date_range": pipeline.get("bootstrap_date_range", ""),
+        "bootstrap_completed_at": pipeline.get("bootstrap_completed_at", ""),
+        "last_append_records": pipeline.get("append_records"),
+        "last_append_date": pipeline.get("append_date", ""),
+        "last_append_sports": pipeline.get("append_sports", []),
+        "last_append_completed_at": pipeline.get("append_completed_at", ""),
+        "updated_at": pipeline.get("updated_at", ""),
+    })
+
+
+@app.route("/api/hf/model-history")
+def api_hf_model_history():
+    """Return model training history."""
+    _history_file = os.path.join(_DATA_DIR, "training_history.json")
+    history = []
+    try:
+        if os.path.exists(_history_file):
+            with open(_history_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    history = data
+    except Exception:
+        history = []
+    pipeline = _read_json_file(_HF_PIPELINE_STATUS_FILE)
+    return jsonify({
+        "ok": True,
+        "model_repo": pipeline.get("model_repo", ""),
+        "current_version": pipeline.get("model_version", ""),
+        "current_model": pipeline.get("best_model", ""),
+        "current_auc": pipeline.get("cv_roc_auc"),
+        "trained_rows": pipeline.get("trained_rows"),
+        "sports_covered": pipeline.get("sports_covered", []),
+        "last_trained_at": pipeline.get("trained_at", ""),
+        "history_count": len(history),
+        "history": history[-20:],  # last 20 runs
+    })
+
+
 @app.route("/api/backfill/status")
 def api_backfill_status():
     with _backfill_lock:

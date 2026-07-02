@@ -1,22 +1,41 @@
 """
-HF-first pipeline (no DB dependency):
-1) One-time bootstrap of historical game results -> HF dataset
-2) Daily append of new results -> same HF dataset
-3) Daily retrain on full HF dataset -> HF model repo
-4) Predict from HF model artifact or HF inference API
+HF-first pipeline: automatic multi-sport predictions via HuggingFace.
+
+Pipeline stages (all automatic from deployment):
+  1. bootstrap_one_year_history() — One-time: load 1yr MLB/NBA/NHL/Soccer -> HF Dataset
+  2. append_daily_results()       — Daily: append completed games -> HF Dataset
+  3. train_and_publish_best_model() — Daily: retrain on full dataset -> HF Model Hub
+  4. predict_daily_schedule()     — Daily: generate today+tomorrow predictions
+  5. run_daily_pipeline()         — Orchestrates steps 2-4
+
+Record IDs: every game record gets a UUID4 `record_id`.
+Prediction IDs: every prediction gets a UUID4 `prediction_id`.
+Sports: MLB (statsapi.mlb.com free), NBA (balldontlie.io free),
+        NHL (api-web.nhle.com free), Soccer (thesportsdb free key "1").
+Features: home_team, away_team, sport, season, month, day_of_week.
 """
 
 from __future__ import annotations
 
 import datetime
+import io
 import json
+import logging
 import os
 import tempfile
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
+from uuid import uuid4
 
 import requests
 
 from data.hf_uploader import HFUploader
+
+logger = logging.getLogger(__name__)
+
+
+def _now_utc() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
 
 @dataclass
@@ -26,13 +45,29 @@ class TrainSummary:
     best_model: str
     cv_roc_auc: float
     trained_at: str
+    version: str = ""
+    features: list = field(default_factory=list)
+    sports_covered: list = field(default_factory=list)
 
 
 class HFDirectPipeline:
-    FINAL_STATES = {"Final", "Game Over", "Completed Early", "Completed"}
-    UPCOMING_STATES = {"Preview", "Pre-Game", "Scheduled", "Warmup"}
+    FINAL_STATES = frozenset(
+        {"Final", "Game Over", "Completed Early", "Completed", "F", "STATUS_FINAL", "OFF", "FINAL", "OVER"}
+    )
+    UPCOMING_STATES = frozenset(
+        {"Preview", "Pre-Game", "Scheduled", "Warmup", "Pre-game", "Sched", "FUT", "NS", "Pre-Preview"}
+    )
+    _CONFIDENCE_TIERS = [(0.70, "elite"), (0.60, "solid"), (0.55, "lean"), (0.0, "uncertain")]
+    _TRAIN_FEATURES = ["home_team", "away_team", "sport", "season", "month", "day_of_week"]
+    _CAT_FEATURES = ["home_team", "away_team", "sport"]
+    _NUM_FEATURES = ["season", "month", "day_of_week"]
 
-    def __init__(self, token: str | None = None, dataset_repo: str | None = None, model_repo: str | None = None):
+    def __init__(
+        self,
+        token: str | None = None,
+        dataset_repo: str | None = None,
+        model_repo: str | None = None,
+    ):
         try:
             from config import HF_API_KEY, HF_DATASET_REPO, HF_MODEL_REPO
         except Exception:
@@ -45,11 +80,18 @@ class HFDirectPipeline:
         self.dataset_repo_id = getattr(self.uploader, "_repo_id", "")
         self.model_repo_name = str(model_repo or HF_MODEL_REPO or "sports-win-model").strip()
         self.model_repo_id = self.model_repo_name
-        self._data_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data")
+        self._data_dir = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data"
+        )
         self._status_file = os.getenv(
             "HF_PIPELINE_STATUS_FILE",
             os.path.join(self._data_dir, "hf_pipeline_status.json"),
         )
+        self._predictions_file = os.getenv(
+            "HF_DAILY_PREDICTIONS_FILE",
+            os.path.join(self._data_dir, "hf_daily_predictions.json"),
+        )
+        self._training_history_file = os.path.join(self._data_dir, "training_history.json")
         self._api = None
         self._ok = bool(self.token and self.uploader and getattr(self.uploader, "_ok", False))
 
@@ -61,39 +103,64 @@ class HFDirectPipeline:
                 user = str(who.get("name") or "").strip()
                 if user and "/" not in self.model_repo_id:
                     self.model_repo_id = f"{user}/{self.model_repo_id}"
-            except Exception:
+            except Exception as exc:
+                logger.warning("[hf_pipeline] HF API init failed: %s", exc)
                 self._ok = False
 
     @property
     def ok(self) -> bool:
         return self._ok
 
+    # ──────────────────────────────────────────────────────────
+    # Public pipeline methods
+    # ──────────────────────────────────────────────────────────
+
     def bootstrap_one_year_history(self, days_back: int = 365) -> dict:
+        """One-time: fetch and upload ~1yr of multi-sport game data to HF Dataset."""
         end = datetime.date.today()
         start = end - datetime.timedelta(days=max(1, int(days_back)))
+        logger.info("[hf_pipeline] Bootstrapping %d days (%s to %s)", days_back, start, end)
         records = self._clean_game_records(self._fetch_completed_games(start, end))
         if not records:
-            self._write_status({"last_step": "bootstrap", "ok": False, "message": "No historical records found"})
+            self._write_status({"last_step": "bootstrap", "ok": False, "message": "No records found"})
             return {"ok": False, "msg": "No historical records found", "records": 0}
         self.uploader.push_records("games", records)
         self.uploader.flush_all()
-        result = {"ok": True, "msg": "Historical data uploaded", "records": len(records), "dataset_repo": self.dataset_repo_id}
-        self._write_status({"last_step": "bootstrap", "ok": True, "historical_records": len(records), "dataset_repo": self.dataset_repo_id})
-        return result
+        sports = sorted({r.get("sport", "") for r in records})
+        self._write_status({
+            "last_step": "bootstrap",
+            "ok": True,
+            "bootstrap_records": len(records),
+            "bootstrap_sports": sports,
+            "bootstrap_date_range": f"{start} to {end}",
+            "bootstrap_completed_at": _now_utc(),
+        })
+        logger.info("[hf_pipeline] Bootstrap done: %d records, sports=%s", len(records), sports)
+        return {"ok": True, "records": len(records), "sports": sports, "date_range": f"{start} to {end}"}
 
     def append_daily_results(self, day: datetime.date | None = None) -> dict:
+        """Daily: append completed games for `day` to HF Dataset."""
         target = day or datetime.date.today()
+        logger.info("[hf_pipeline] Appending daily results for %s", target)
         records = self._clean_game_records(self._fetch_completed_games(target, target))
         if not records:
-            self._write_status({"last_step": "append_daily", "ok": True, "append_records": 0, "append_date": target.isoformat()})
-            return {"ok": True, "msg": "No completed games yet for day", "records": 0, "date": target.isoformat()}
+            self._write_status({
+                "last_step": "append_daily", "ok": True,
+                "append_records": 0, "append_date": target.isoformat(), "append_sports": [],
+            })
+            return {"ok": True, "records": 0, "date": target.isoformat()}
         self.uploader.push_records("games", records)
         self.uploader.flush_all()
-        result = {"ok": True, "msg": "Daily results appended", "records": len(records), "date": target.isoformat()}
-        self._write_status({"last_step": "append_daily", "ok": True, "append_records": len(records), "append_date": target.isoformat()})
-        return result
+        sports = sorted({r.get("sport", "") for r in records})
+        self._write_status({
+            "last_step": "append_daily", "ok": True,
+            "append_records": len(records), "append_date": target.isoformat(),
+            "append_sports": sports, "append_completed_at": _now_utc(),
+        })
+        return {"ok": True, "records": len(records), "date": target.isoformat(), "sports": sports}
 
     def train_and_publish_best_model(self, min_rows: int = 200, forced_model: str = "auto") -> TrainSummary:
+        """Daily: train best classifier on full HF dataset and publish to HF Model Hub."""
         from datasets import load_dataset
         import joblib
         import pandas as pd
@@ -105,68 +172,65 @@ class HFDirectPipeline:
         from sklearn.preprocessing import OneHotEncoder
 
         if not self._ok or not self._api:
-            raise RuntimeError("HF pipeline is not configured. Set HF_API_KEY.")
+            raise RuntimeError("HF pipeline not configured. Set HF_API_KEY.")
+
+        logger.info("[hf_pipeline] Loading dataset from %s", self.dataset_repo_id)
         ds = load_dataset(self.dataset_repo_id, "games", split="train")
         df = ds.to_pandas()
-
         if df.empty:
-            raise RuntimeError("HF dataset has no rows in games/train")
+            raise RuntimeError("HF dataset has no rows in games/train split")
 
-        for col in ("home_score", "away_score"):
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-        df = df.dropna(subset=["home_team", "away_team", "home_score", "away_score"])
-        df = df[df["home_score"] != df["away_score"]].copy()
+        df = self._build_training_df(df)
         if len(df) < min_rows:
-            raise RuntimeError(f"Not enough rows to train: {len(df)} < {min_rows}")
+            raise RuntimeError(f"Not enough rows: {len(df)} < {min_rows}")
 
-        df["season"] = pd.to_numeric(df.get("season"), errors="coerce").fillna(0).astype(int)
         y = (df["home_score"] > df["away_score"]).astype(int)
-        X = df[["home_team", "away_team", "season"]].copy()
+        X = df[self._TRAIN_FEATURES].copy()
+        sports_covered = sorted(df["sport"].dropna().astype(str).unique().tolist())
 
         pre = ColumnTransformer(
             transformers=[
-                ("teams", OneHotEncoder(handle_unknown="ignore"), ["home_team", "away_team"]),
-                ("season", "passthrough", ["season"]),
+                ("cats", OneHotEncoder(handle_unknown="ignore"), self._CAT_FEATURES),
+                ("nums", "passthrough", self._NUM_FEATURES),
             ]
         )
         candidates = {
-            "logistic_regression": LogisticRegression(max_iter=2000),
-            "random_forest": RandomForestClassifier(n_estimators=300, random_state=42),
-            "gradient_boosting": GradientBoostingClassifier(random_state=42),
+            "logistic_regression": LogisticRegression(max_iter=2000, random_state=42),
+            "random_forest": RandomForestClassifier(n_estimators=300, random_state=42, n_jobs=-1),
+            "gradient_boosting": GradientBoostingClassifier(n_estimators=200, random_state=42),
         }
         forced_key = str(forced_model or "auto").strip().lower()
-        if forced_key and forced_key != "auto":
-            if forced_key not in candidates:
-                raise RuntimeError(f"Unknown custom model: {forced_key}")
+        if forced_key and forced_key != "auto" and forced_key in candidates:
             candidates = {forced_key: candidates[forced_key]}
-        cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
 
-        best_name = ""
-        best_score = -1.0
-        best_pipeline = None
+        cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+        best_name, best_score, best_pipeline = "", -1.0, None
         for name, model in candidates.items():
             pipe = Pipeline([("pre", pre), ("model", model)])
-            scores = cross_val_score(pipe, X, y, cv=cv, scoring="roc_auc")
-            mean_score = float(scores.mean())
-            if mean_score > best_score:
-                best_score = mean_score
-                best_name = name
-                best_pipeline = pipe
+            try:
+                scores = cross_val_score(pipe, X, y, cv=cv, scoring="roc_auc")
+                score = float(scores.mean())
+                logger.info("[hf_pipeline] %s CV AUC=%.4f", name, score)
+                if score > best_score:
+                    best_score, best_name, best_pipeline = score, name, pipe
+            except Exception as exc:
+                logger.warning("[hf_pipeline] %s failed: %s", name, exc)
 
         if best_pipeline is None:
-            raise RuntimeError("Could not select a model candidate")
+            raise RuntimeError("No model candidate succeeded")
         best_pipeline.fit(X, y)
 
-        trained_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        trained_at = _now_utc()
+        version = trained_at[:19].replace(":", "-").replace("T", "_")
         metadata = {
-            "trained_at": trained_at,
-            "rows": int(len(df)),
-            "best_model": best_name,
+            "version": version, "trained_at": trained_at,
+            "rows": int(len(df)), "best_model": best_name,
             "cv_roc_auc": round(best_score, 6),
             "dataset_repo": self.dataset_repo_id,
-            "features": ["home_team", "away_team", "season"],
-            "target": "home_win",
-            "forced_model": forced_key if forced_key != "auto" else "",
+            "features": self._TRAIN_FEATURES,
+            "categorical_features": self._CAT_FEATURES,
+            "numerical_features": self._NUM_FEATURES,
+            "target": "home_win", "sports_covered": sports_covered,
         }
 
         with tempfile.TemporaryDirectory(prefix="hf_model_") as td:
@@ -176,77 +240,43 @@ class HFDirectPipeline:
             joblib.dump(best_pipeline, model_path)
             with open(meta_path, "w", encoding="utf-8") as f:
                 json.dump(metadata, f, indent=2)
+            readme_content = (
+                "# Sports Win Prediction Model\n\n"
+                f"Auto-trained {trained_at[:10]} by bettor HF pipeline.\n\n"
+                "| Field | Value |\n|---|---|\n"
+                f"| best_model | {best_name} |\n"
+                f"| cv_roc_auc | {best_score:.4f} |\n"
+                f"| rows | {len(df):,} |\n"
+                f"| sports | {', '.join(sports_covered)} |\n"
+                f"| version | {version} |\n"
+            )
             with open(readme_path, "w", encoding="utf-8") as f:
-                f.write(
-                    "# Sports Win Model\n\n"
-                    f"- best_model: {best_name}\n"
-                    f"- cv_roc_auc: {best_score:.4f}\n"
-                    f"- rows: {len(df)}\n"
-                    f"- trained_at: {trained_at}\n"
-                )
-
+                f.write(readme_content)
             self._api.create_repo(repo_id=self.model_repo_id, repo_type="model", exist_ok=True, private=False)
-            self._api.upload_file(
-                path_or_fileobj=model_path,
-                path_in_repo="model.joblib",
-                repo_id=self.model_repo_id,
-                repo_type="model",
-                commit_message=f"Update model ({best_name})",
-            )
-            self._api.upload_file(
-                path_or_fileobj=meta_path,
-                path_in_repo="metadata.json",
-                repo_id=self.model_repo_id,
-                repo_type="model",
-                commit_message="Update model metadata",
-            )
-            self._api.upload_file(
-                path_or_fileobj=readme_path,
-                path_in_repo="README.md",
-                repo_id=self.model_repo_id,
-                repo_type="model",
-                commit_message="Update model card",
-            )
+            for fname, fpath in [("model.joblib", model_path), ("metadata.json", meta_path), ("README.md", readme_path)]:
+                self._api.upload_file(
+                    path_or_fileobj=fpath, path_in_repo=fname,
+                    repo_id=self.model_repo_id, repo_type="model",
+                    commit_message=f"v{version}: update {fname}",
+                )
+        logger.info("[hf_pipeline] Published model v%s to %s (AUC=%.4f)", version, self.model_repo_id, best_score)
 
         summary = TrainSummary(
-            repo_id=self.model_repo_id,
-            rows=int(len(df)),
-            best_model=best_name,
-            cv_roc_auc=float(best_score),
-            trained_at=trained_at,
+            repo_id=self.model_repo_id, rows=int(len(df)),
+            best_model=best_name, cv_roc_auc=float(best_score),
+            trained_at=trained_at, version=version,
+            features=self._TRAIN_FEATURES, sports_covered=sports_covered,
         )
-        self._write_status(
-            {
-                "last_step": "train_publish",
-                "ok": True,
-                "trained_rows": int(len(df)),
-                "best_model": best_name,
-                "cv_roc_auc": round(float(best_score), 6),
-                "model_repo": self.model_repo_id,
-                "trained_at": trained_at,
-            }
-        )
-        return summary
-
-    def predict_from_model_repo(self, home_team: str, away_team: str, season: int | None = None) -> dict:
-        import joblib
-        import pandas as pd
-        from huggingface_hub import hf_hub_download
-
-        season_val = int(season or datetime.date.today().year)
-        model_path = hf_hub_download(repo_id=self.model_repo_id, filename="model.joblib", repo_type="model", token=self.token)
-        model = joblib.load(model_path)
-        row = pd.DataFrame([{"home_team": home_team, "away_team": away_team, "season": season_val}])
-        probs = model.predict_proba(row)[0]
-        home_prob = float(probs[1])
-        return {
-            "home_team": home_team,
-            "away_team": away_team,
-            "season": season_val,
-            "home_win_prob": round(home_prob, 4),
-            "away_win_prob": round(1.0 - home_prob, 4),
+        self._append_training_history(summary)
+        self._write_status({
+            "last_step": "train_publish", "ok": True,
+            "trained_rows": int(len(df)), "best_model": best_name,
+            "cv_roc_auc": round(float(best_score), 6),
             "model_repo": self.model_repo_id,
-        }
+            "trained_at": trained_at, "model_version": version,
+            "sports_covered": sports_covered, "train_completed_at": _now_utc(),
+        })
+        return summary
 
     def predict_daily_schedule(
         self,
@@ -256,61 +286,97 @@ class HFDirectPipeline:
         model_id: str | None = None,
         endpoint_url: str | None = None,
     ) -> dict:
-        target = day or datetime.date.today()
-        games = self._fetch_upcoming_games(target)
-        predictions: list[dict] = []
-        for g in games:
-            home_team = str(g.get("home_team") or "").strip()
-            away_team = str(g.get("away_team") or "").strip()
-            if not home_team or not away_team:
-                continue
-            try:
-                if via_api:
-                    pred = self.predict_via_hf_api(
-                        home_team=home_team,
-                        away_team=away_team,
-                        season=int(target.year),
-                        model_id=model_id,
-                        endpoint_url=endpoint_url,
-                    )
-                    pred_payload = {"home_team": home_team, "away_team": away_team, "api_response": pred.get("response")}
-                else:
-                    pred_payload = self.predict_from_model_repo(home_team=home_team, away_team=away_team, season=target.year)
-                pred_payload["game_date"] = target.isoformat()
-                pred_payload["game_time"] = str(g.get("game_time") or "")
-                pred_payload["status"] = str(g.get("status") or "")
-                predictions.append(pred_payload)
-            except Exception as exc:
-                predictions.append(
-                    {
+        """Daily: generate predictions for today and tomorrow, save to JSON."""
+        today = day or datetime.date.today()
+        tomorrow = today + datetime.timedelta(days=1)
+        meta = self._get_model_metadata()
+        model_version = meta.get("version", "unknown")
+        model_type = meta.get("best_model", "unknown")
+        model_auc = float(meta.get("cv_roc_auc") or 0.0)
+
+        all_predictions: list[dict] = []
+        for target_date in [today, tomorrow]:
+            games = self._fetch_upcoming_games(target_date)
+            for g in games:
+                home_team = str(g.get("home_team") or "").strip()
+                away_team = str(g.get("away_team") or "").strip()
+                if not home_team or not away_team:
+                    continue
+                sport = str(g.get("sport") or "mlb")
+                league = str(g.get("league") or sport.upper())
+                game_date = str(g.get("game_date") or target_date.isoformat())
+                game_time = str(g.get("game_time") or "")
+                game_id = str(g.get("game_id") or "")
+                try:
+                    if via_api:
+                        resp = self.predict_via_hf_api(home_team, away_team, target_date.year, model_id, endpoint_url)
+                        api_resp = resp.get("response") or {}
+                        home_prob = float(api_resp[0].get("score", 0.5) if isinstance(api_resp, list) else 0.5)
+                        away_prob = 1.0 - home_prob
+                    else:
+                        pred = self.predict_from_model_repo(
+                            home_team=home_team, away_team=away_team,
+                            sport=sport, season=target_date.year,
+                        )
+                        home_prob = float(pred.get("home_win_prob", 0.5))
+                        away_prob = float(pred.get("away_win_prob", 0.5))
+                    confidence = max(home_prob, away_prob)
+                    tier = self._confidence_tier(confidence)
+                    all_predictions.append({
+                        "prediction_id": str(uuid4()),
+                        "game_id": game_id,
+                        "sport": sport,
+                        "league": league,
                         "home_team": home_team,
                         "away_team": away_team,
-                        "game_date": target.isoformat(),
-                        "error": str(exc),
-                    }
-                )
+                        "game_date": game_date,
+                        "game_time": game_time,
+                        "home_win_prob": round(home_prob, 4),
+                        "away_win_prob": round(away_prob, 4),
+                        "confidence": round(confidence, 4),
+                        "confidence_tier": tier,
+                        "model_version": model_version,
+                        "model_type": model_type,
+                        "model_auc": model_auc,
+                        "predicted_at": _now_utc(),
+                        "predict_mode": "api" if via_api else "artifact",
+                    })
+                except Exception as exc:
+                    logger.warning("[hf_pipeline] predict error %s vs %s: %s", home_team, away_team, exc)
+                    all_predictions.append({
+                        "prediction_id": str(uuid4()),
+                        "game_id": game_id, "sport": sport, "league": league,
+                        "home_team": home_team, "away_team": away_team,
+                        "game_date": game_date, "game_time": game_time,
+                        "error": str(exc), "predicted_at": _now_utc(),
+                    })
 
-        out_path = output_path or os.path.join(self._data_dir, "hf_daily_predictions.json")
+        out_path = output_path or self._predictions_file
         os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        good = [p for p in all_predictions if not p.get("error")]
         payload = {
-            "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-            "date": target.isoformat(),
-            "prediction_count": len(predictions),
-            "predictions": predictions,
+            "generated_at": _now_utc(),
+            "today": today.isoformat(),
+            "tomorrow": tomorrow.isoformat(),
+            "prediction_count": len(good),
+            "error_count": len(all_predictions) - len(good),
+            "model_version": model_version,
+            "model_type": model_type,
+            "model_auc": model_auc,
+            "predictions": all_predictions,
         }
         with open(out_path, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)
-        self._write_status(
-            {
-                "last_step": "predict_daily",
-                "ok": True,
-                "prediction_date": target.isoformat(),
-                "prediction_count": len(predictions),
-                "prediction_file": out_path,
-                "predict_mode": "api" if via_api else "model_artifact",
-            }
-        )
-        return {"ok": True, "prediction_count": len(predictions), "output_file": out_path, "date": target.isoformat()}
+        self._write_status({
+            "last_step": "predict_daily", "ok": True,
+            "prediction_date": today.isoformat(),
+            "prediction_count": len(good),
+            "prediction_file": out_path,
+            "model_version": model_version,
+            "predict_completed_at": _now_utc(),
+        })
+        logger.info("[hf_pipeline] %d predictions generated (%s + %s)", len(good), today, tomorrow)
+        return {"ok": True, "prediction_count": len(good), "output_file": out_path, "date": today.isoformat()}
 
     def run_daily_pipeline(
         self,
@@ -321,33 +387,75 @@ class HFDirectPipeline:
         model_id: str | None = None,
         endpoint_url: str | None = None,
     ) -> dict:
+        """Orchestrate full daily pipeline: append results -> train -> predict."""
+        logger.info("[hf_pipeline] Starting daily pipeline")
+        self._write_status({"last_step": "daily_pipeline_started", "ok": True, "started_at": _now_utc()})
         yesterday = datetime.date.today() - datetime.timedelta(days=1)
         today = datetime.date.today()
         append_y = self.append_daily_results(yesterday)
         append_t = self.append_daily_results(today)
-        summary = self.train_and_publish_best_model(min_rows=min_rows, forced_model=custom_model)
+        try:
+            summary = self.train_and_publish_best_model(min_rows=min_rows, forced_model=custom_model)
+            train_result = {
+                "ok": True, "repo_id": summary.repo_id, "rows": summary.rows,
+                "best_model": summary.best_model, "cv_roc_auc": summary.cv_roc_auc,
+                "trained_at": summary.trained_at, "version": summary.version,
+                "sports_covered": summary.sports_covered,
+            }
+        except Exception as exc:
+            logger.warning("[hf_pipeline] Training failed: %s", exc)
+            train_result = {"ok": False, "error": str(exc)}
         preds = self.predict_daily_schedule(
-            day=today,
             output_path=predictions_output_path,
-            via_api=via_api,
-            model_id=model_id,
-            endpoint_url=endpoint_url,
+            via_api=via_api, model_id=model_id, endpoint_url=endpoint_url,
         )
         result = {
             "ok": True,
-            "append_yesterday": append_y,
-            "append_today": append_t,
-            "train": {
-                "repo_id": summary.repo_id,
-                "rows": summary.rows,
-                "best_model": summary.best_model,
-                "cv_roc_auc": summary.cv_roc_auc,
-                "trained_at": summary.trained_at,
-            },
-            "predictions": preds,
+            "append_yesterday": append_y, "append_today": append_t,
+            "train": train_result, "predictions": preds,
+            "completed_at": _now_utc(),
         }
-        self._write_status({"last_step": "daily_pipeline", "ok": True, "daily_result": result})
+        self._write_status({"last_step": "daily_pipeline", "ok": True, "daily_completed_at": _now_utc()})
+        logger.info("[hf_pipeline] Daily pipeline complete")
         return result
+
+    def predict_from_model_repo(
+        self,
+        home_team: str,
+        away_team: str,
+        sport: str = "mlb",
+        season: int | None = None,
+    ) -> dict:
+        """Download model artifact from HF Hub and return win probabilities."""
+        import joblib
+        import pandas as pd
+        from huggingface_hub import hf_hub_download
+
+        today = datetime.date.today()
+        model_path = hf_hub_download(
+            repo_id=self.model_repo_id, filename="model.joblib",
+            repo_type="model", token=self.token,
+        )
+        model = joblib.load(model_path)
+        row = pd.DataFrame([{
+            "home_team": home_team,
+            "away_team": away_team,
+            "sport": str(sport).lower(),
+            "season": int(season or today.year),
+            "month": today.month,
+            "day_of_week": today.weekday(),
+        }])
+        probs = model.predict_proba(row)[0]
+        home_prob = float(probs[1])
+        meta = self._get_model_metadata()
+        return {
+            "home_team": home_team, "away_team": away_team,
+            "sport": sport, "season": int(season or today.year),
+            "home_win_prob": round(home_prob, 4),
+            "away_win_prob": round(1.0 - home_prob, 4),
+            "model_repo": self.model_repo_id,
+            "model_version": meta.get("version", ""),
+        }
 
     def predict_via_hf_api(
         self,
@@ -357,27 +465,32 @@ class HFDirectPipeline:
         model_id: str | None = None,
         endpoint_url: str | None = None,
     ) -> dict:
+        """Call HF Inference API or custom endpoint."""
         url = str(endpoint_url or "").strip()
         if not url:
-            model_ref = str(model_id or self.model_repo_id).strip()
-            url = f"https://api-inference.huggingface.co/models/{model_ref}"
-
+            url = f"https://api-inference.huggingface.co/models/{str(model_id or self.model_repo_id).strip()}"
         headers = {"Content-Type": "application/json"}
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
-        payload = {
-            "inputs": {
-                "home_team": home_team,
-                "away_team": away_team,
-                "season": int(season or datetime.date.today().year),
-            }
-        }
+        payload = {"inputs": {"home_team": home_team, "away_team": away_team,
+                               "season": int(season or datetime.date.today().year)}}
         resp = requests.post(url, headers=headers, json=payload, timeout=60)
         resp.raise_for_status()
-        data = resp.json()
-        return {"url": url, "response": data}
+        return {"url": url, "response": resp.json()}
+
+    # ──────────────────────────────────────────────────────────
+    # Private sport-specific completed game fetchers
+    # ──────────────────────────────────────────────────────────
 
     def _fetch_completed_games(self, start: datetime.date, end: datetime.date) -> list[dict]:
+        rows: list[dict] = []
+        rows += self._fetch_mlb_games(start, end)
+        rows += self._fetch_nba_games(start, end)
+        rows += self._fetch_nhl_games(start, end)
+        rows += self._fetch_soccer_games(start, end)
+        return rows
+
+    def _fetch_mlb_games(self, start: datetime.date, end: datetime.date) -> list[dict]:
         rows: list[dict] = []
         current = start
         while current <= end:
@@ -386,16 +499,15 @@ class HFDirectPipeline:
                 resp = requests.get(
                     "https://statsapi.mlb.com/api/v1/schedule",
                     params={"sportId": 1, "date": day, "hydrate": "linescore", "gameType": "R"},
-                    timeout=25,
+                    timeout=20,
                 )
                 resp.raise_for_status()
                 payload = resp.json() or {}
-                for date_entry in payload.get("dates", []):
-                    for game in date_entry.get("games", []):
+                for de in payload.get("dates", []):
+                    for game in de.get("games", []):
                         status = str(
-                            (game.get("status", {}) or {}).get("detailedState")
-                            or (game.get("status", {}) or {}).get("abstractGameState")
-                            or ""
+                            (game.get("status") or {}).get("detailedState")
+                            or (game.get("status") or {}).get("abstractGameState") or ""
                         )
                         if status not in self.FINAL_STATES:
                             continue
@@ -408,96 +520,272 @@ class HFDirectPipeline:
                         away_score = away.get("score")
                         if not home_team or not away_team or home_score is None or away_score is None:
                             continue
-                        rows.append(
-                            {
-                                "game_id": str(game.get("gamePk") or ""),
-                                "sport": "mlb",
-                                "league": "MLB",
-                                "game_date": day,
-                                "game_datetime": str(game.get("gameDate") or ""),
-                                "status": status,
-                                "home_team": home_team,
-                                "away_team": away_team,
-                                "home_score": float(home_score),
-                                "away_score": float(away_score),
-                                "home_starter": "",
-                                "away_starter": "",
-                                "season": int(day[:4]),
-                                "metadata": "{}",
-                                "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                            }
-                        )
-            except Exception:
-                pass
+                        rows.append(self._make_game_record(
+                            game_id=str(game.get("gamePk") or ""),
+                            sport="mlb", league="MLB", game_date=day,
+                            game_datetime=str(game.get("gameDate") or ""),
+                            status=status, home_team=home_team, away_team=away_team,
+                            home_score=float(home_score), away_score=float(away_score),
+                            season=int(day[:4]),
+                        ))
+            except Exception as exc:
+                logger.debug("[hf_pipeline] MLB %s: %s", day, exc)
             current += datetime.timedelta(days=1)
         return rows
 
+    def _fetch_nba_games(self, start: datetime.date, end: datetime.date) -> list[dict]:
+        rows: list[dict] = []
+        current = start
+        while current <= end:
+            day = current.isoformat()
+            try:
+                resp = requests.get(
+                    "https://www.balldontlie.io/api/v1/games",
+                    params={"start_date": day, "end_date": day, "per_page": 100},
+                    timeout=20,
+                )
+                resp.raise_for_status()
+                for g in (resp.json() or {}).get("data", []):
+                    if str(g.get("status") or "").strip() != "Final":
+                        continue
+                    home_team = str((g.get("home_team") or {}).get("full_name") or "").strip()
+                    away_team = str((g.get("visitor_team") or {}).get("full_name") or "").strip()
+                    hs = g.get("home_team_score")
+                    as_ = g.get("visitor_team_score")
+                    if not home_team or not away_team or hs is None or as_ is None:
+                        continue
+                    gd = str(g.get("date") or day)[:10]
+                    rows.append(self._make_game_record(
+                        game_id=str(g.get("id") or ""), sport="nba", league="NBA",
+                        game_date=gd, game_datetime=str(g.get("date") or ""),
+                        status="Final", home_team=home_team, away_team=away_team,
+                        home_score=float(hs), away_score=float(as_), season=int(gd[:4]),
+                    ))
+                time.sleep(0.25)
+            except Exception as exc:
+                logger.debug("[hf_pipeline] NBA %s: %s", day, exc)
+            current += datetime.timedelta(days=1)
+        return rows
+
+    def _fetch_nhl_games(self, start: datetime.date, end: datetime.date) -> list[dict]:
+        rows: list[dict] = []
+        current = start
+        while current <= end:
+            day = current.isoformat()
+            try:
+                resp = requests.get(f"https://api-web.nhle.com/v1/schedule/{day}", timeout=20)
+                resp.raise_for_status()
+                for week in (resp.json() or {}).get("gameWeek", []):
+                    for game in week.get("games", []):
+                        state = str(game.get("gameState") or "")
+                        if state not in ("OFF", "FINAL", "OVER"):
+                            continue
+                        hd = game.get("homeTeam") or {}
+                        ad = game.get("awayTeam") or {}
+                        ht = str((hd.get("commonName") or {}).get("default") or hd.get("abbrev") or "").strip()
+                        at = str((ad.get("commonName") or {}).get("default") or ad.get("abbrev") or "").strip()
+                        hs = hd.get("score")
+                        as_ = ad.get("score")
+                        if not ht or not at or hs is None or as_ is None:
+                            continue
+                        gd = str(game.get("gameDate") or day)[:10]
+                        rows.append(self._make_game_record(
+                            game_id=str(game.get("id") or ""), sport="nhl", league="NHL",
+                            game_date=gd, game_datetime=str(game.get("startTimeUTC") or ""),
+                            status="Final", home_team=ht, away_team=at,
+                            home_score=float(hs), away_score=float(as_), season=int(gd[:4]),
+                        ))
+            except Exception as exc:
+                logger.debug("[hf_pipeline] NHL %s: %s", day, exc)
+            current += datetime.timedelta(days=1)
+        return rows
+
+    def _fetch_soccer_games(self, start: datetime.date, end: datetime.date) -> list[dict]:
+        rows: list[dict] = []
+        current = start
+        while current <= end:
+            day = current.isoformat()
+            try:
+                resp = requests.get(
+                    "https://www.thesportsdb.com/api/v1/json/1/eventsday.php",
+                    params={"d": day, "s": "Soccer"}, timeout=20,
+                )
+                resp.raise_for_status()
+                for ev in ((resp.json() or {}).get("events") or []):
+                    hs = ev.get("intHomeScore")
+                    as_ = ev.get("intAwayScore")
+                    if hs is None or as_ is None:
+                        continue
+                    ht = str(ev.get("strHomeTeam") or "").strip()
+                    at = str(ev.get("strAwayTeam") or "").strip()
+                    if not ht or not at:
+                        continue
+                    rows.append(self._make_game_record(
+                        game_id=str(ev.get("idEvent") or ""), sport="soccer",
+                        league=str(ev.get("strLeague") or "Soccer"),
+                        game_date=day, game_datetime=day, status="Final",
+                        home_team=ht, away_team=at,
+                        home_score=float(hs), away_score=float(as_), season=current.year,
+                    ))
+            except Exception as exc:
+                logger.debug("[hf_pipeline] Soccer %s: %s", day, exc)
+            current += datetime.timedelta(days=1)
+        return rows
+
+    # ──────────────────────────────────────────────────────────
+    # Private sport-specific upcoming fetchers
+    # ──────────────────────────────────────────────────────────
+
     def _fetch_upcoming_games(self, day: datetime.date) -> list[dict]:
+        rows: list[dict] = []
+        rows += self._fetch_mlb_upcoming(day)
+        rows += self._fetch_nba_upcoming(day)
+        rows += self._fetch_nhl_upcoming(day)
+        rows += self._fetch_soccer_upcoming(day)
+        return rows
+
+    def _fetch_mlb_upcoming(self, day: datetime.date) -> list[dict]:
         rows: list[dict] = []
         try:
             resp = requests.get(
                 "https://statsapi.mlb.com/api/v1/schedule",
-                params={"sportId": 1, "date": day.isoformat(), "gameType": "R"},
-                timeout=25,
+                params={"sportId": 1, "date": day.isoformat(), "gameType": "R"}, timeout=20,
             )
             resp.raise_for_status()
-            payload = resp.json() or {}
-            for date_entry in payload.get("dates", []):
-                for game in date_entry.get("games", []):
-                    status = str(
-                        (game.get("status", {}) or {}).get("detailedState")
-                        or (game.get("status", {}) or {}).get("abstractGameState")
-                        or ""
-                    )
-                    if status not in self.UPCOMING_STATES:
-                        continue
+            for de in (resp.json() or {}).get("dates", []):
+                for game in de.get("games", []):
                     teams = game.get("teams") or {}
-                    home_team = str((((teams.get("home") or {}).get("team") or {}).get("name") or "")).strip()
-                    away_team = str((((teams.get("away") or {}).get("team") or {}).get("name") or "")).strip()
-                    if not home_team or not away_team:
+                    ht = str((((teams.get("home") or {}).get("team") or {}).get("name") or "")).strip()
+                    at = str((((teams.get("away") or {}).get("team") or {}).get("name") or "")).strip()
+                    if not ht or not at:
                         continue
-                    rows.append(
-                        {
-                            "home_team": home_team,
-                            "away_team": away_team,
-                            "status": status,
-                            "game_time": str(game.get("gameDate") or ""),
-                        }
-                    )
+                    rows.append({"sport": "mlb", "league": "MLB", "home_team": ht, "away_team": at,
+                                 "game_date": day.isoformat(), "game_time": str(game.get("gameDate") or ""),
+                                 "game_id": str(game.get("gamePk") or "")})
         except Exception:
             pass
         return rows
 
+    def _fetch_nba_upcoming(self, day: datetime.date) -> list[dict]:
+        rows: list[dict] = []
+        try:
+            resp = requests.get(
+                "https://www.balldontlie.io/api/v1/games",
+                params={"start_date": day.isoformat(), "end_date": day.isoformat(), "per_page": 100},
+                timeout=20,
+            )
+            resp.raise_for_status()
+            for g in (resp.json() or {}).get("data", []):
+                ht = str((g.get("home_team") or {}).get("full_name") or "").strip()
+                at = str((g.get("visitor_team") or {}).get("full_name") or "").strip()
+                if not ht or not at:
+                    continue
+                rows.append({"sport": "nba", "league": "NBA", "home_team": ht, "away_team": at,
+                             "game_date": day.isoformat(), "game_time": str(g.get("date") or ""),
+                             "game_id": str(g.get("id") or "")})
+        except Exception:
+            pass
+        return rows
+
+    def _fetch_nhl_upcoming(self, day: datetime.date) -> list[dict]:
+        rows: list[dict] = []
+        try:
+            resp = requests.get(f"https://api-web.nhle.com/v1/schedule/{day.isoformat()}", timeout=20)
+            resp.raise_for_status()
+            for week in (resp.json() or {}).get("gameWeek", []):
+                for game in week.get("games", []):
+                    hd = game.get("homeTeam") or {}
+                    ad = game.get("awayTeam") or {}
+                    ht = str((hd.get("commonName") or {}).get("default") or hd.get("abbrev") or "").strip()
+                    at = str((ad.get("commonName") or {}).get("default") or ad.get("abbrev") or "").strip()
+                    if not ht or not at:
+                        continue
+                    rows.append({"sport": "nhl", "league": "NHL", "home_team": ht, "away_team": at,
+                                 "game_date": str(game.get("gameDate") or day.isoformat()),
+                                 "game_time": str(game.get("startTimeUTC") or ""),
+                                 "game_id": str(game.get("id") or "")})
+        except Exception:
+            pass
+        return rows
+
+    def _fetch_soccer_upcoming(self, day: datetime.date) -> list[dict]:
+        rows: list[dict] = []
+        try:
+            resp = requests.get(
+                "https://www.thesportsdb.com/api/v1/json/1/eventsday.php",
+                params={"d": day.isoformat(), "s": "Soccer"}, timeout=20,
+            )
+            resp.raise_for_status()
+            for ev in ((resp.json() or {}).get("events") or []):
+                if ev.get("intHomeScore") is not None:
+                    continue
+                ht = str(ev.get("strHomeTeam") or "").strip()
+                at = str(ev.get("strAwayTeam") or "").strip()
+                if not ht or not at:
+                    continue
+                rows.append({"sport": "soccer", "league": str(ev.get("strLeague") or "Soccer"),
+                             "home_team": ht, "away_team": at,
+                             "game_date": day.isoformat(), "game_time": str(ev.get("strTime") or ""),
+                             "game_id": str(ev.get("idEvent") or "")})
+        except Exception:
+            pass
+        return rows
+
+    # ──────────────────────────────────────────────────────────
+    # Private helpers
+    # ──────────────────────────────────────────────────────────
+
+    def _make_game_record(self, **kwargs) -> dict:
+        now = _now_utc()
+        record = {
+            "record_id": str(uuid4()),
+            "game_id": "", "sport": "mlb", "league": "",
+            "game_date": "", "game_datetime": "", "status": "",
+            "home_team": "", "away_team": "",
+            "home_score": 0.0, "away_score": 0.0,
+            "home_starter": "", "away_starter": "",
+            "season": datetime.date.today().year,
+            "metadata": "{}", "created_at": now,
+        }
+        record.update(kwargs)
+        return record
+
+    def _confidence_tier(self, prob: float) -> str:
+        for threshold, tier in self._CONFIDENCE_TIERS:
+            if prob >= threshold:
+                return tier
+        return "uncertain"
+
     def _clean_game_records(self, records: list[dict]) -> list[dict]:
         cleaned: list[dict] = []
         seen: set[str] = set()
-        for raw in records or []:
+        for raw in (records or []):
             if not isinstance(raw, dict):
                 continue
             game_id = str(raw.get("game_id") or "").strip()
-            home_team = " ".join(str(raw.get("home_team") or "").strip().split())
-            away_team = " ".join(str(raw.get("away_team") or "").strip().split())
-            game_date = str(raw.get("game_date") or "").strip()
-            if not home_team or not away_team or not game_date:
+            ht = " ".join(str(raw.get("home_team") or "").strip().split())
+            at = " ".join(str(raw.get("away_team") or "").strip().split())
+            gd = str(raw.get("game_date") or "").strip()
+            if not ht or not at or not gd:
                 continue
-            if home_team.lower() == away_team.lower():
+            if ht.lower() == at.lower():
                 continue
-            dedupe_key = game_id or f"{game_date}|{away_team}|{home_team}"
-            if dedupe_key in seen:
+            key = game_id or f"{gd}|{raw.get('sport','?')}|{at}|{ht}"
+            if key in seen:
                 continue
-            seen.add(dedupe_key)
+            seen.add(key)
             row = dict(raw)
-            row["game_id"] = game_id
-            row["home_team"] = home_team[:120]
-            row["away_team"] = away_team[:120]
-            row["league"] = str(row.get("league") or "MLB").strip()[:80]
+            row["record_id"] = str(row.get("record_id") or uuid4())
+            row["home_team"] = ht[:120]
+            row["away_team"] = at[:120]
+            row["league"] = str(row.get("league") or "").strip()[:80]
             row["sport"] = str(row.get("sport") or "mlb").strip().lower()[:32]
             row["status"] = str(row.get("status") or "").strip()[:80]
-            row["game_date"] = game_date[:10]
+            row["game_date"] = gd[:10]
             row["game_datetime"] = str(row.get("game_datetime") or "").strip()[:40]
-            row["season"] = int(str(row.get("season") or game_date[:4] or datetime.date.today().year))
+            row["season"] = int(str(row.get("season") or gd[:4] or datetime.date.today().year))
             row["metadata"] = str(row.get("metadata") or "{}")
-            row["created_at"] = str(row.get("created_at") or datetime.datetime.now(datetime.timezone.utc).isoformat())
+            row["created_at"] = str(row.get("created_at") or _now_utc())
             try:
                 row["home_score"] = float(row.get("home_score"))
                 row["away_score"] = float(row.get("away_score"))
@@ -506,9 +794,28 @@ class HFDirectPipeline:
             cleaned.append(row)
         return cleaned
 
+    def _build_training_df(self, df):
+        import pandas as pd
+        for col in ("home_score", "away_score"):
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        df = df.dropna(subset=["home_team", "away_team", "home_score", "away_score"])
+        df = df[df["home_score"] != df["away_score"]].copy()
+        if "sport" not in df.columns:
+            df["sport"] = "mlb"
+        df["sport"] = df["sport"].fillna("mlb").astype(str)
+        df["season"] = pd.to_numeric(df.get("season"), errors="coerce").fillna(0).astype(int)
+        if "game_date" in df.columns:
+            gd = pd.to_datetime(df["game_date"], errors="coerce")
+            df["month"] = gd.dt.month.fillna(6).astype(int)
+            df["day_of_week"] = gd.dt.dayofweek.fillna(0).astype(int)
+        else:
+            df["month"] = 6
+            df["day_of_week"] = 0
+        return df
+
     def _write_status(self, patch: dict) -> None:
         os.makedirs(os.path.dirname(self._status_file), exist_ok=True)
-        base = {}
+        base: dict = {}
         try:
             if os.path.exists(self._status_file):
                 with open(self._status_file, "r", encoding="utf-8") as f:
@@ -516,8 +823,56 @@ class HFDirectPipeline:
         except Exception:
             base = {}
         base.update(patch or {})
-        base["updated_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        base["updated_at"] = _now_utc()
         base["dataset_repo"] = self.dataset_repo_id
         base["model_repo"] = self.model_repo_id
         with open(self._status_file, "w", encoding="utf-8") as f:
             json.dump(base, f, indent=2)
+
+    def _append_training_history(self, summary: TrainSummary) -> None:
+        os.makedirs(os.path.dirname(self._training_history_file), exist_ok=True)
+        history: list[dict] = []
+        try:
+            if os.path.exists(self._training_history_file):
+                with open(self._training_history_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if isinstance(data, list):
+                        history = data
+        except Exception:
+            history = []
+        history.append({
+            "version": summary.version,
+            "trained_at": summary.trained_at,
+            "rows": summary.rows,
+            "best_model": summary.best_model,
+            "cv_roc_auc": summary.cv_roc_auc,
+            "sports_covered": summary.sports_covered,
+            "repo_id": summary.repo_id,
+        })
+        history = history[-100:]
+        with open(self._training_history_file, "w", encoding="utf-8") as f:
+            json.dump(history, f, indent=2)
+        if self._ok and self._api:
+            try:
+                buf = io.BytesIO(json.dumps(history, indent=2).encode("utf-8"))
+                self._api.upload_file(
+                    path_or_fileobj=buf, path_in_repo="training_history.json",
+                    repo_id=self.model_repo_id, repo_type="model",
+                    commit_message=f"v{summary.version}: update training history",
+                )
+            except Exception as exc:
+                logger.debug("[hf_pipeline] training_history push: %s", exc)
+
+    def _get_model_metadata(self) -> dict:
+        if not self._ok or not self._api:
+            return {}
+        try:
+            from huggingface_hub import hf_hub_download
+            path = hf_hub_download(
+                repo_id=self.model_repo_id, filename="metadata.json",
+                repo_type="model", token=self.token,
+            )
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f) or {}
+        except Exception:
+            return {}
