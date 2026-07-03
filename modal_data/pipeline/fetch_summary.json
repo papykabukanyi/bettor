@@ -1,14 +1,14 @@
 {
   "ok": true,
-  "started_at": "2026-07-03T02:23:51.180108+00:00",
+  "started_at": "2026-07-03T02:31:26.333334+00:00",
   "fetched_window": {
-    "start": "2026-06-30",
+    "start": "2026-06-29",
     "end": "2026-07-02"
   },
   "completed_games_added": 0,
   "completed_games_total": 3982,
   "completed_sport_counts": {
-    "mlb": 35,
+    "mlb": 48,
     "nba": 0,
     "nhl": 0,
     "soccer": 0
@@ -29,5 +29,5 @@
       "soccer": 0
     }
   },
-  "updated_at": "2026-07-03T02:23:51.180108+00:00"
+  "updated_at": "2026-07-03T02:31:26.333372+00:00"
 }

@@ -1,12 +1,12 @@
 {
   "ok": true,
-  "generated_at": "2026-07-03T02:25:28.205004+00:00",
+  "generated_at": "2026-07-03T02:31:39.548454+00:00",
   "today": "2026-07-02",
   "tomorrow": "2026-07-03",
   "prediction_count": 22,
-  "model_version": "2026-07-03_02-25-15",
-  "model_name": "random_forest",
-  "model_score": 0.537268,
+  "model_version": "2026-07-03_02-31-38",
+  "model_name": "logistic_regression",
+  "model_score": 0.547338,
   "predictions": [
     {
       "prediction_id": "mlb::823442::2026-07-02",
@@ -18,20 +18,20 @@
       "game_date": "2026-07-02",
       "game_time": "2026-07-02T16:35:00Z",
       "scheduled_start": "2026-07-02T16:35:00Z",
-      "home_win_prob": 0.2752,
-      "away_win_prob": 0.7248,
-      "confidence": 0.7248,
-      "confidence_tier": "Elite",
-      "predicted_team": "Pittsburgh Pirates",
+      "home_win_prob": 0.6453,
+      "away_win_prob": 0.3547,
+      "confidence": 0.6453,
+      "confidence_tier": "Solid",
+      "predicted_team": "Philadelphia Phillies",
       "prediction_breakdown": {
-        "home": 0.2752,
-        "away": 0.7248,
-        "spread_from_coin_flip": 0.2248
+        "home": 0.6453,
+        "away": 0.3547,
+        "spread_from_coin_flip": 0.1453
       },
-      "model_version": "2026-07-03_02-25-15",
-      "model_name": "random_forest",
-      "model_score": 0.537268,
-      "predicted_at": "2026-07-03T02:25:19.816636+00:00",
+      "model_version": "2026-07-03_02-31-38",
+      "model_name": "logistic_regression",
+      "model_score": 0.547338,
+      "predicted_at": "2026-07-03T02:31:38.621632+00:00",
       "polymarket": {
         "status": "skipped",
         "market_slug": "",
@@ -39,7 +39,7 @@
         "amount_usd": 25.0,
         "price": 0.5,
         "order_id": "",
-        "reason": "no_open_polymarket_match"
+        "reason": "already_submitted"
       }
     },
     {
@@ -52,20 +52,20 @@
       "game_date": "2026-07-02",
       "game_time": "2026-07-02T18:10:00Z",
       "scheduled_start": "2026-07-02T18:10:00Z",
-      "home_win_prob": 0.2686,
-      "away_win_prob": 0.7314,
-      "confidence": 0.7314,
-      "confidence_tier": "Elite",
-      "predicted_team": "Cincinnati Reds",
+      "home_win_prob": 0.6311,
+      "away_win_prob": 0.3689,
+      "confidence": 0.6311,
+      "confidence_tier": "Solid",
+      "predicted_team": "Milwaukee Brewers",
       "prediction_breakdown": {
-        "home": 0.2686,
-        "away": 0.7314,
-        "spread_from_coin_flip": 0.2314
+        "home": 0.6311,
+        "away": 0.3689,
+        "spread_from_coin_flip": 0.1311
       },
-      "model_version": "2026-07-03_02-25-15",
-      "model_name": "random_forest",
-      "model_score": 0.537268,
-      "predicted_at": "2026-07-03T02:25:19.995721+00:00",
+      "model_version": "2026-07-03_02-31-38",
+      "model_name": "logistic_regression",
+      "model_score": 0.547338,
+      "predicted_at": "2026-07-03T02:31:38.629661+00:00",
       "polymarket": {
         "status": "skipped",
         "market_slug": "",
@@ -73,7 +73,7 @@
         "amount_usd": 25.0,
         "price": 0.5,
         "order_id": "",
-        "reason": "no_open_polymarket_match"
+        "reason": "already_submitted"
       }
     },
     {
@@ -86,28 +86,28 @@
       "game_date": "2026-07-02",
       "game_time": "2026-07-02T19:10:00Z",
       "scheduled_start": "2026-07-02T19:10:00Z",
-      "home_win_prob": 0.8457,
-      "away_win_prob": 0.1543,
-      "confidence": 0.8457,
-      "confidence_tier": "Elite",
-      "predicted_team": "Colorado Rockies",
+      "home_win_prob": 0.4598,
+      "away_win_prob": 0.5402,
+      "confidence": 0.5402,
+      "confidence_tier": "Watch",
+      "predicted_team": "Miami Marlins",
       "prediction_breakdown": {
-        "home": 0.8457,
-        "away": 0.1543,
-        "spread_from_coin_flip": 0.3457
+        "home": 0.4598,
+        "away": 0.5402,
+        "spread_from_coin_flip": 0.0402
       },
-      "model_version": "2026-07-03_02-25-15",
-      "model_name": "random_forest",
-      "model_score": 0.537268,
-      "predicted_at": "2026-07-03T02:25:20.170953+00:00",
+      "model_version": "2026-07-03_02-31-38",
+      "model_name": "logistic_regression",
+      "model_score": 0.547338,
+      "predicted_at": "2026-07-03T02:31:38.637608+00:00",
       "polymarket": {
         "status": "skipped",
         "market_slug": "",
         "side": "yes",
-        "amount_usd": 25.0,
+        "amount_usd": 20.1,
         "price": 0.5,
         "order_id": "",
-        "reason": "no_open_polymarket_match"
+        "reason": "already_submitted"
       }
     },
     {
@@ -120,20 +120,20 @@
       "game_date": "2026-07-02",
       "game_time": "2026-07-02T22:40:00Z",
       "scheduled_start": "2026-07-02T22:40:00Z",
-      "home_win_prob": 0.9,
-      "away_win_prob": 0.1,
-      "confidence": 0.9,
-      "confidence_tier": "Elite",
+      "home_win_prob": 0.5986,
+      "away_win_prob": 0.4014,
+      "confidence": 0.5986,
+      "confidence_tier": "Lean",
       "predicted_team": "Cleveland Guardians",
       "prediction_breakdown": {
-        "home": 0.9,
-        "away": 0.1,
-        "spread_from_coin_flip": 0.4
+        "home": 0.5986,
+        "away": 0.4014,
+        "spread_from_coin_flip": 0.0986
       },
-      "model_version": "2026-07-03_02-25-15",
-      "model_name": "random_forest",
-      "model_score": 0.537268,
-      "predicted_at": "2026-07-03T02:25:20.391386+00:00",
+      "model_version": "2026-07-03_02-31-38",
+      "model_name": "logistic_regression",
+      "model_score": 0.547338,
+      "predicted_at": "2026-07-03T02:31:38.645461+00:00",
       "polymarket": {
         "status": "skipped",
         "market_slug": "",
@@ -141,7 +141,7 @@
         "amount_usd": 25.0,
         "price": 0.5,
         "order_id": "",
-        "reason": "no_open_polymarket_match"
+        "reason": "already_submitted"
       }
     },
     {
@@ -154,28 +154,28 @@
       "game_date": "2026-07-02",
       "game_time": "2026-07-02T23:15:00Z",
       "scheduled_start": "2026-07-02T23:15:00Z",
-      "home_win_prob": 0.2152,
-      "away_win_prob": 0.7848,
-      "confidence": 0.7848,
-      "confidence_tier": "Elite",
-      "predicted_team": "St. Louis Cardinals",
+      "home_win_prob": 0.5285,
+      "away_win_prob": 0.4715,
+      "confidence": 0.5285,
+      "confidence_tier": "Watch",
+      "predicted_team": "Atlanta Braves",
       "prediction_breakdown": {
-        "home": 0.2152,
-        "away": 0.7848,
-        "spread_from_coin_flip": 0.2848
+        "home": 0.5285,
+        "away": 0.4715,
+        "spread_from_coin_flip": 0.0285
       },
-      "model_version": "2026-07-03_02-25-15",
-      "model_name": "random_forest",
-      "model_score": 0.537268,
-      "predicted_at": "2026-07-03T02:25:20.521421+00:00",
+      "model_version": "2026-07-03_02-31-38",
+      "model_name": "logistic_regression",
+      "model_score": 0.547338,
+      "predicted_at": "2026-07-03T02:31:38.653127+00:00",
       "polymarket": {
         "status": "skipped",
         "market_slug": "",
         "side": "yes",
-        "amount_usd": 25.0,
+        "amount_usd": 14.25,
         "price": 0.5,
         "order_id": "",
-        "reason": "no_open_polymarket_match"
+        "reason": "already_submitted"
       }
     },
     {
@@ -188,20 +188,20 @@
       "game_date": "2026-07-02",
       "game_time": "2026-07-02T23:40:00Z",
       "scheduled_start": "2026-07-02T23:40:00Z",
-      "home_win_prob": 0.08,
-      "away_win_prob": 0.92,
-      "confidence": 0.92,
-      "confidence_tier": "Elite",
-      "predicted_team": "Tampa Bay Rays",
+      "home_win_prob": 0.5742,
+      "away_win_prob": 0.4258,
+      "confidence": 0.5742,
+      "confidence_tier": "Lean",
+      "predicted_team": "Kansas City Royals",
       "prediction_breakdown": {
-        "home": 0.08,
-        "away": 0.92,
-        "spread_from_coin_flip": 0.42
+        "home": 0.5742,
+        "away": 0.4258,
+        "spread_from_coin_flip": 0.0742
       },
-      "model_version": "2026-07-03_02-25-15",
-      "model_name": "random_forest",
-      "model_score": 0.537268,
-      "predicted_at": "2026-07-03T02:25:20.620162+00:00",
+      "model_version": "2026-07-03_02-31-38",
+      "model_name": "logistic_regression",
+      "model_score": 0.547338,
+      "predicted_at": "2026-07-03T02:31:38.660745+00:00",
       "polymarket": {
         "status": "skipped",
         "market_slug": "",
@@ -209,7 +209,7 @@
         "amount_usd": 25.0,
         "price": 0.5,
         "order_id": "",
-        "reason": "no_open_polymarket_match"
+        "reason": "already_submitted"
       }
     },
     {
@@ -222,20 +222,20 @@
       "game_date": "2026-07-02",
       "game_time": "2026-07-03T00:05:00Z",
       "scheduled_start": "2026-07-03T00:05:00Z",
-      "home_win_prob": 0.6571,
-      "away_win_prob": 0.3429,
-      "confidence": 0.6571,
+      "home_win_prob": 0.6557,
+      "away_win_prob": 0.3443,
+      "confidence": 0.6557,
       "confidence_tier": "Solid",
       "predicted_team": "Texas Rangers",
       "prediction_breakdown": {
-        "home": 0.6571,
-        "away": 0.3429,
-        "spread_from_coin_flip": 0.1571
+        "home": 0.6557,
+        "away": 0.3443,
+        "spread_from_coin_flip": 0.1557
       },
-      "model_version": "2026-07-03_02-25-15",
-      "model_name": "random_forest",
-      "model_score": 0.537268,
-      "predicted_at": "2026-07-03T02:25:20.709970+00:00",
+      "model_version": "2026-07-03_02-31-38",
+      "model_name": "logistic_regression",
+      "model_score": 0.547338,
+      "predicted_at": "2026-07-03T02:31:38.668488+00:00",
       "polymarket": {
         "status": "skipped",
         "market_slug": "",
@@ -243,7 +243,7 @@
         "amount_usd": 25.0,
         "price": 0.5,
         "order_id": "",
-        "reason": "no_open_polymarket_match"
+        "reason": "already_submitted"
       }
     },
     {
@@ -256,20 +256,20 @@
       "game_date": "2026-07-02",
       "game_time": "2026-07-03T01:40:00Z",
       "scheduled_start": "2026-07-03T01:40:00Z",
-      "home_win_prob": 0.8829,
-      "away_win_prob": 0.1171,
-      "confidence": 0.8829,
+      "home_win_prob": 0.7623,
+      "away_win_prob": 0.2377,
+      "confidence": 0.7623,
       "confidence_tier": "Elite",
       "predicted_team": "Seattle Mariners",
       "prediction_breakdown": {
-        "home": 0.8829,
-        "away": 0.1171,
-        "spread_from_coin_flip": 0.3829
+        "home": 0.7623,
+        "away": 0.2377,
+        "spread_from_coin_flip": 0.2623
       },
-      "model_version": "2026-07-03_02-25-15",
-      "model_name": "random_forest",
-      "model_score": 0.537268,
-      "predicted_at": "2026-07-03T02:25:20.838925+00:00",
+      "model_version": "2026-07-03_02-31-38",
+      "model_name": "logistic_regression",
+      "model_score": 0.547338,
+      "predicted_at": "2026-07-03T02:31:38.676050+00:00",
       "polymarket": {
         "status": "skipped",
         "market_slug": "",
@@ -277,7 +277,7 @@
         "amount_usd": 25.0,
         "price": 0.5,
         "order_id": "",
-        "reason": "no_open_polymarket_match"
+        "reason": "already_submitted"
       }
     },
     {
@@ -290,20 +290,20 @@
       "game_date": "2026-07-02",
       "game_time": "2026-07-03T02:10:00Z",
       "scheduled_start": "2026-07-03T02:10:00Z",
-      "home_win_prob": 0.8171,
-      "away_win_prob": 0.1829,
-      "confidence": 0.8171,
-      "confidence_tier": "Elite",
+      "home_win_prob": 0.5859,
+      "away_win_prob": 0.4141,
+      "confidence": 0.5859,
+      "confidence_tier": "Lean",
       "predicted_team": "Los Angeles Dodgers",
       "prediction_breakdown": {
-        "home": 0.8171,
-        "away": 0.1829,
-        "spread_from_coin_flip": 0.3171
+        "home": 0.5859,
+        "away": 0.4141,
+        "spread_from_coin_flip": 0.0859
       },
-      "model_version": "2026-07-03_02-25-15",
-      "model_name": "random_forest",
-      "model_score": 0.537268,
-      "predicted_at": "2026-07-03T02:25:20.937053+00:00",
+      "model_version": "2026-07-03_02-31-38",
+      "model_name": "logistic_regression",
+      "model_score": 0.547338,
+      "predicted_at": "2026-07-03T02:31:38.683719+00:00",
       "polymarket": {
         "status": "skipped",
         "market_slug": "",
@@ -311,7 +311,7 @@
         "amount_usd": 25.0,
         "price": 0.5,
         "order_id": "",
-        "reason": "no_open_polymarket_match"
+        "reason": "already_submitted"
       }
     },
     {
@@ -324,20 +324,20 @@
       "game_date": "2026-07-03",
       "game_time": "2026-07-03T20:05:00Z",
       "scheduled_start": "2026-07-03T20:05:00Z",
-      "home_win_prob": 0.7614,
-      "away_win_prob": 0.2386,
-      "confidence": 0.7614,
-      "confidence_tier": "Elite",
+      "home_win_prob": 0.6136,
+      "away_win_prob": 0.3864,
+      "confidence": 0.6136,
+      "confidence_tier": "Solid",
       "predicted_team": "Chicago Cubs",
       "prediction_breakdown": {
-        "home": 0.7614,
-        "away": 0.2386,
-        "spread_from_coin_flip": 0.2614
+        "home": 0.6136,
+        "away": 0.3864,
+        "spread_from_coin_flip": 0.1136
       },
-      "model_version": "2026-07-03_02-25-15",
-      "model_name": "random_forest",
-      "model_score": 0.537268,
-      "predicted_at": "2026-07-03T02:25:21.025526+00:00",
+      "model_version": "2026-07-03_02-31-38",
+      "model_name": "logistic_regression",
+      "model_score": 0.547338,
+      "predicted_at": "2026-07-03T02:31:38.691228+00:00",
       "polymarket": {
         "status": "skipped",
         "market_slug": "",
@@ -345,7 +345,7 @@
         "amount_usd": 25.0,
         "price": 0.5,
         "order_id": "",
-        "reason": "no_open_polymarket_match"
+        "reason": "already_submitted"
       }
     },
     {
@@ -358,28 +358,28 @@
       "game_date": "2026-07-03",
       "game_time": "2026-07-03T22:45:00Z",
       "scheduled_start": "2026-07-03T22:45:00Z",
-      "home_win_prob": 0.4762,
-      "away_win_prob": 0.5238,
-      "confidence": 0.5238,
+      "home_win_prob": 0.4524,
+      "away_win_prob": 0.5476,
+      "confidence": 0.5476,
       "confidence_tier": "Watch",
       "predicted_team": "Pittsburgh Pirates",
       "prediction_breakdown": {
-        "home": 0.4762,
-        "away": 0.5238,
-        "spread_from_coin_flip": 0.0238
+        "home": 0.4524,
+        "away": 0.5476,
+        "spread_from_coin_flip": 0.0476
       },
-      "model_version": "2026-07-03_02-25-15",
-      "model_name": "random_forest",
-      "model_score": 0.537268,
-      "predicted_at": "2026-07-03T02:25:21.121865+00:00",
+      "model_version": "2026-07-03_02-31-38",
+      "model_name": "logistic_regression",
+      "model_score": 0.547338,
+      "predicted_at": "2026-07-03T02:31:38.698761+00:00",
       "polymarket": {
         "status": "skipped",
         "market_slug": "",
         "side": "yes",
-        "amount_usd": 11.9,
+        "amount_usd": 23.8,
         "price": 0.5,
         "order_id": "",
-        "reason": "confidence_below_solid"
+        "reason": "already_submitted"
       }
     },
     {
@@ -392,28 +392,28 @@
       "game_date": "2026-07-03",
       "game_time": "2026-07-03T23:05:00Z",
       "scheduled_start": "2026-07-03T23:05:00Z",
-      "home_win_prob": 0.5114,
-      "away_win_prob": 0.4886,
-      "confidence": 0.5114,
-      "confidence_tier": "Watch",
+      "home_win_prob": 0.608,
+      "away_win_prob": 0.392,
+      "confidence": 0.608,
+      "confidence_tier": "Solid",
       "predicted_team": "New York Yankees",
       "prediction_breakdown": {
-        "home": 0.5114,
-        "away": 0.4886,
-        "spread_from_coin_flip": 0.0114
+        "home": 0.608,
+        "away": 0.392,
+        "spread_from_coin_flip": 0.108
       },
-      "model_version": "2026-07-03_02-25-15",
-      "model_name": "random_forest",
-      "model_score": 0.537268,
-      "predicted_at": "2026-07-03T02:25:21.213459+00:00",
+      "model_version": "2026-07-03_02-31-38",
+      "model_name": "logistic_regression",
+      "model_score": 0.547338,
+      "predicted_at": "2026-07-03T02:31:38.706427+00:00",
       "polymarket": {
         "status": "skipped",
         "market_slug": "",
         "side": "yes",
-        "amount_usd": 5.7,
+        "amount_usd": 25.0,
         "price": 0.5,
         "order_id": "",
-        "reason": "confidence_below_solid"
+        "reason": "already_submitted"
       }
     },
     {
@@ -426,28 +426,28 @@
       "game_date": "2026-07-03",
       "game_time": "2026-07-03T23:10:00Z",
       "scheduled_start": "2026-07-03T23:10:00Z",
-      "home_win_prob": 0.4686,
-      "away_win_prob": 0.5314,
-      "confidence": 0.5314,
+      "home_win_prob": 0.5114,
+      "away_win_prob": 0.4886,
+      "confidence": 0.5114,
       "confidence_tier": "Watch",
-      "predicted_team": "Baltimore Orioles",
+      "predicted_team": "Cincinnati Reds",
       "prediction_breakdown": {
-        "home": 0.4686,
-        "away": 0.5314,
-        "spread_from_coin_flip": 0.0314
+        "home": 0.5114,
+        "away": 0.4886,
+        "spread_from_coin_flip": 0.0114
       },
-      "model_version": "2026-07-03_02-25-15",
-      "model_name": "random_forest",
-      "model_score": 0.537268,
-      "predicted_at": "2026-07-03T02:25:21.310349+00:00",
+      "model_version": "2026-07-03_02-31-38",
+      "model_name": "logistic_regression",
+      "model_score": 0.547338,
+      "predicted_at": "2026-07-03T02:31:38.713432+00:00",
       "polymarket": {
         "status": "skipped",
         "market_slug": "",
         "side": "yes",
-        "amount_usd": 15.7,
+        "amount_usd": 5.7,
         "price": 0.5,
         "order_id": "",
-        "reason": "confidence_below_solid"
+        "reason": "already_submitted"
       }
     },
     {
@@ -460,20 +460,20 @@
       "game_date": "2026-07-03",
       "game_time": "2026-07-03T23:10:00Z",
       "scheduled_start": "2026-07-03T23:10:00Z",
-      "home_win_prob": 0.8057,
-      "away_win_prob": 0.1943,
-      "confidence": 0.8057,
-      "confidence_tier": "Elite",
+      "home_win_prob": 0.5955,
+      "away_win_prob": 0.4045,
+      "confidence": 0.5955,
+      "confidence_tier": "Lean",
       "predicted_team": "Cleveland Guardians",
       "prediction_breakdown": {
-        "home": 0.8057,
-        "away": 0.1943,
-        "spread_from_coin_flip": 0.3057
+        "home": 0.5955,
+        "away": 0.4045,
+        "spread_from_coin_flip": 0.0955
       },
-      "model_version": "2026-07-03_02-25-15",
-      "model_name": "random_forest",
-      "model_score": 0.537268,
-      "predicted_at": "2026-07-03T02:25:21.410380+00:00",
+      "model_version": "2026-07-03_02-31-38",
+      "model_name": "logistic_regression",
+      "model_score": 0.547338,
+      "predicted_at": "2026-07-03T02:31:38.719450+00:00",
       "polymarket": {
         "status": "skipped",
         "market_slug": "",
@@ -481,7 +481,7 @@
         "amount_usd": 25.0,
         "price": 0.5,
         "order_id": "",
-        "reason": "no_open_polymarket_match"
+        "reason": "already_submitted"
       }
     },
     {
@@ -494,20 +494,20 @@
       "game_date": "2026-07-03",
       "game_time": "2026-07-03T23:15:00Z",
       "scheduled_start": "2026-07-03T23:15:00Z",
-      "home_win_prob": 0.3686,
-      "away_win_prob": 0.6314,
-      "confidence": 0.6314,
-      "confidence_tier": "Solid",
-      "predicted_team": "New York Mets",
+      "home_win_prob": 0.5864,
+      "away_win_prob": 0.4136,
+      "confidence": 0.5864,
+      "confidence_tier": "Lean",
+      "predicted_team": "Atlanta Braves",
       "prediction_breakdown": {
-        "home": 0.3686,
-        "away": 0.6314,
-        "spread_from_coin_flip": 0.1314
+        "home": 0.5864,
+        "away": 0.4136,
+        "spread_from_coin_flip": 0.0864
       },
-      "model_version": "2026-07-03_02-25-15",
-      "model_name": "random_forest",
-      "model_score": 0.537268,
-      "predicted_at": "2026-07-03T02:25:21.520914+00:00",
+      "model_version": "2026-07-03_02-31-38",
+      "model_name": "logistic_regression",
+      "model_score": 0.547338,
+      "predicted_at": "2026-07-03T02:31:38.725440+00:00",
       "polymarket": {
         "status": "skipped",
         "market_slug": "",
@@ -515,7 +515,7 @@
         "amount_usd": 25.0,
         "price": 0.5,
         "order_id": "",
-        "reason": "no_open_polymarket_match"
+        "reason": "already_submitted"
       }
     },
     {
@@ -528,28 +528,28 @@
       "game_date": "2026-07-03",
       "game_time": "2026-07-04T00:10:00Z",
       "scheduled_start": "2026-07-04T00:10:00Z",
-      "home_win_prob": 0.7029,
-      "away_win_prob": 0.2971,
-      "confidence": 0.7029,
-      "confidence_tier": "Elite",
-      "predicted_team": "Colorado Rockies",
+      "home_win_prob": 0.4539,
+      "away_win_prob": 0.5461,
+      "confidence": 0.5461,
+      "confidence_tier": "Watch",
+      "predicted_team": "San Francisco Giants",
       "prediction_breakdown": {
-        "home": 0.7029,
-        "away": 0.2971,
-        "spread_from_coin_flip": 0.2029
+        "home": 0.4539,
+        "away": 0.5461,
+        "spread_from_coin_flip": 0.0461
       },
-      "model_version": "2026-07-03_02-25-15",
-      "model_name": "random_forest",
-      "model_score": 0.537268,
-      "predicted_at": "2026-07-03T02:25:21.592100+00:00",
+      "model_version": "2026-07-03_02-31-38",
+      "model_name": "logistic_regression",
+      "model_score": 0.547338,
+      "predicted_at": "2026-07-03T02:31:38.731676+00:00",
       "polymarket": {
         "status": "skipped",
         "market_slug": "",
         "side": "yes",
-        "amount_usd": 25.0,
+        "amount_usd": 23.05,
         "price": 0.5,
         "order_id": "",
-        "reason": "no_open_polymarket_match"
+        "reason": "already_submitted"
       }
     },
     {
@@ -562,28 +562,28 @@
       "game_date": "2026-07-03",
       "game_time": "2026-07-04T00:15:00Z",
       "scheduled_start": "2026-07-04T00:15:00Z",
-      "home_win_prob": 0.4571,
-      "away_win_prob": 0.5429,
-      "confidence": 0.5429,
+      "home_win_prob": 0.4966,
+      "away_win_prob": 0.5034,
+      "confidence": 0.5034,
       "confidence_tier": "Watch",
       "predicted_team": "Tampa Bay Rays",
       "prediction_breakdown": {
-        "home": 0.4571,
-        "away": 0.5429,
-        "spread_from_coin_flip": 0.0429
+        "home": 0.4966,
+        "away": 0.5034,
+        "spread_from_coin_flip": 0.0034
       },
-      "model_version": "2026-07-03_02-25-15",
-      "model_name": "random_forest",
-      "model_score": 0.537268,
-      "predicted_at": "2026-07-03T02:25:21.675531+00:00",
+      "model_version": "2026-07-03_02-31-38",
+      "model_name": "logistic_regression",
+      "model_score": 0.547338,
+      "predicted_at": "2026-07-03T02:31:38.737614+00:00",
       "polymarket": {
         "status": "skipped",
         "market_slug": "",
         "side": "yes",
-        "amount_usd": 21.45,
+        "amount_usd": 1.7,
         "price": 0.5,
         "order_id": "",
-        "reason": "confidence_below_solid"
+        "reason": "already_submitted"
       }
     },
     {
@@ -596,20 +596,20 @@
       "game_date": "2026-07-03",
       "game_time": "2026-07-04T01:38:00Z",
       "scheduled_start": "2026-07-04T01:38:00Z",
-      "home_win_prob": 0.5571,
-      "away_win_prob": 0.4429,
-      "confidence": 0.5571,
-      "confidence_tier": "Lean",
-      "predicted_team": "Los Angeles Angels",
+      "home_win_prob": 0.3966,
+      "away_win_prob": 0.6034,
+      "confidence": 0.6034,
+      "confidence_tier": "Solid",
+      "predicted_team": "Boston Red Sox",
       "prediction_breakdown": {
-        "home": 0.5571,
-        "away": 0.4429,
-        "spread_from_coin_flip": 0.0571
+        "home": 0.3966,
+        "away": 0.6034,
+        "spread_from_coin_flip": 0.1034
       },
-      "model_version": "2026-07-03_02-25-15",
-      "model_name": "random_forest",
-      "model_score": 0.537268,
-      "predicted_at": "2026-07-03T02:25:21.774874+00:00",
+      "model_version": "2026-07-03_02-31-38",
+      "model_name": "logistic_regression",
+      "model_score": 0.547338,
+      "predicted_at": "2026-07-03T02:31:38.743591+00:00",
       "polymarket": {
         "status": "skipped",
         "market_slug": "",
@@ -617,7 +617,7 @@
         "amount_usd": 25.0,
         "price": 0.5,
         "order_id": "",
-        "reason": "confidence_below_solid"
+        "reason": "already_submitted"
       }
     },
     {
@@ -630,28 +630,28 @@
       "game_date": "2026-07-03",
       "game_time": "2026-07-04T01:40:00Z",
       "scheduled_start": "2026-07-04T01:40:00Z",
-      "home_win_prob": 0.5486,
-      "away_win_prob": 0.4514,
-      "confidence": 0.5486,
+      "home_win_prob": 0.4769,
+      "away_win_prob": 0.5231,
+      "confidence": 0.5231,
       "confidence_tier": "Watch",
-      "predicted_team": "Athletics",
+      "predicted_team": "Miami Marlins",
       "prediction_breakdown": {
-        "home": 0.5486,
-        "away": 0.4514,
-        "spread_from_coin_flip": 0.0486
+        "home": 0.4769,
+        "away": 0.5231,
+        "spread_from_coin_flip": 0.0231
       },
-      "model_version": "2026-07-03_02-25-15",
-      "model_name": "random_forest",
-      "model_score": 0.537268,
-      "predicted_at": "2026-07-03T02:25:21.892473+00:00",
+      "model_version": "2026-07-03_02-31-38",
+      "model_name": "logistic_regression",
+      "model_score": 0.547338,
+      "predicted_at": "2026-07-03T02:31:38.749640+00:00",
       "polymarket": {
         "status": "skipped",
         "market_slug": "",
         "side": "yes",
-        "amount_usd": 24.3,
+        "amount_usd": 11.55,
         "price": 0.5,
         "order_id": "",
-        "reason": "confidence_below_solid"
+        "reason": "already_submitted"
       }
     },
     {
@@ -664,20 +664,20 @@
       "game_date": "2026-07-03",
       "game_time": "2026-07-04T01:45:00Z",
       "scheduled_start": "2026-07-04T01:45:00Z",
-      "home_win_prob": 0.3467,
-      "away_win_prob": 0.6533,
-      "confidence": 0.6533,
-      "confidence_tier": "Solid",
+      "home_win_prob": 0.4189,
+      "away_win_prob": 0.5811,
+      "confidence": 0.5811,
+      "confidence_tier": "Lean",
       "predicted_team": "Milwaukee Brewers",
       "prediction_breakdown": {
-        "home": 0.3467,
-        "away": 0.6533,
-        "spread_from_coin_flip": 0.1533
+        "home": 0.4189,
+        "away": 0.5811,
+        "spread_from_coin_flip": 0.0811
       },
-      "model_version": "2026-07-03_02-25-15",
-      "model_name": "random_forest",
-      "model_score": 0.537268,
-      "predicted_at": "2026-07-03T02:25:22.010577+00:00",
+      "model_version": "2026-07-03_02-31-38",
+      "model_name": "logistic_regression",
+      "model_score": 0.547338,
+      "predicted_at": "2026-07-03T02:31:38.755703+00:00",
       "polymarket": {
         "status": "skipped",
         "market_slug": "",
@@ -685,7 +685,7 @@
         "amount_usd": 25.0,
         "price": 0.5,
         "order_id": "",
-        "reason": "no_open_polymarket_match"
+        "reason": "already_submitted"
       }
     },
     {
@@ -698,20 +698,20 @@
       "game_date": "2026-07-03",
       "game_time": "2026-07-04T02:10:00Z",
       "scheduled_start": "2026-07-04T02:10:00Z",
-      "home_win_prob": 0.8171,
-      "away_win_prob": 0.1829,
-      "confidence": 0.8171,
-      "confidence_tier": "Elite",
+      "home_win_prob": 0.5827,
+      "away_win_prob": 0.4173,
+      "confidence": 0.5827,
+      "confidence_tier": "Lean",
       "predicted_team": "Los Angeles Dodgers",
       "prediction_breakdown": {
-        "home": 0.8171,
-        "away": 0.1829,
-        "spread_from_coin_flip": 0.3171
+        "home": 0.5827,
+        "away": 0.4173,
+        "spread_from_coin_flip": 0.0827
       },
-      "model_version": "2026-07-03_02-25-15",
-      "model_name": "random_forest",
-      "model_score": 0.537268,
-      "predicted_at": "2026-07-03T02:25:22.113008+00:00",
+      "model_version": "2026-07-03_02-31-38",
+      "model_name": "logistic_regression",
+      "model_score": 0.547338,
+      "predicted_at": "2026-07-03T02:31:38.761612+00:00",
       "polymarket": {
         "status": "skipped",
         "market_slug": "",
@@ -719,7 +719,7 @@
         "amount_usd": 25.0,
         "price": 0.5,
         "order_id": "",
-        "reason": "no_open_polymarket_match"
+        "reason": "already_submitted"
       }
     },
     {
@@ -732,28 +732,28 @@
       "game_date": "2026-07-03",
       "game_time": "2026-07-04T02:10:00Z",
       "scheduled_start": "2026-07-04T02:10:00Z",
-      "home_win_prob": 0.5229,
-      "away_win_prob": 0.4771,
-      "confidence": 0.5229,
-      "confidence_tier": "Watch",
+      "home_win_prob": 0.629,
+      "away_win_prob": 0.371,
+      "confidence": 0.629,
+      "confidence_tier": "Solid",
       "predicted_team": "Seattle Mariners",
       "prediction_breakdown": {
-        "home": 0.5229,
-        "away": 0.4771,
-        "spread_from_coin_flip": 0.0229
+        "home": 0.629,
+        "away": 0.371,
+        "spread_from_coin_flip": 0.129
       },
-      "model_version": "2026-07-03_02-25-15",
-      "model_name": "random_forest",
-      "model_score": 0.537268,
-      "predicted_at": "2026-07-03T02:25:22.322378+00:00",
+      "model_version": "2026-07-03_02-31-38",
+      "model_name": "logistic_regression",
+      "model_score": 0.547338,
+      "predicted_at": "2026-07-03T02:31:38.767547+00:00",
       "polymarket": {
         "status": "skipped",
         "market_slug": "",
         "side": "yes",
-        "amount_usd": 11.45,
+        "amount_usd": 25.0,
         "price": 0.5,
         "order_id": "",
-        "reason": "confidence_below_solid"
+        "reason": "already_submitted"
       }
     }
   ],

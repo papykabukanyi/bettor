@@ -1,11 +1,11 @@
 {
   "ok": true,
-  "generated_at": "2026-07-03T02:25:28.205004+00:00",
+  "generated_at": "2026-07-03T02:31:39.548454+00:00",
   "today": "2026-07-02",
   "tomorrow": "2026-07-03",
   "prediction_count": 22,
-  "model_version": "2026-07-03_02-25-15",
-  "model_name": "random_forest",
+  "model_version": "2026-07-03_02-31-38",
+  "model_name": "logistic_regression",
   "submission_summary": {
     "evaluated": 22,
     "placed": 0,

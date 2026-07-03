@@ -1,5 +1,5 @@
 {
-  "updated_at": "2026-07-03T02:23:51.177991+00:00",
+  "updated_at": "2026-07-03T02:31:26.331855+00:00",
   "today": "2026-07-02",
   "tomorrow": "2026-07-03",
   "today_games": [
@@ -16,7 +16,7 @@
       "home_score": null,
       "away_score": null,
       "season": 2026,
-      "fetched_at": "2026-07-03T02:23:45.453035+00:00"
+      "fetched_at": "2026-07-03T02:31:25.414002+00:00"
     },
     {
       "game_id": "823765",
@@ -31,7 +31,7 @@
       "home_score": null,
       "away_score": null,
       "season": 2026,
-      "fetched_at": "2026-07-03T02:23:45.453035+00:00"
+      "fetched_at": "2026-07-03T02:31:25.414018+00:00"
     },
     {
       "game_id": "824335",
@@ -46,7 +46,7 @@
       "home_score": null,
       "away_score": null,
       "season": 2026,
-      "fetched_at": "2026-07-03T02:23:45.453035+00:00"
+      "fetched_at": "2026-07-03T02:31:25.414026+00:00"
     },
     {
       "game_id": "824416",
@@ -61,7 +61,7 @@
       "home_score": null,
       "away_score": null,
       "season": 2026,
-      "fetched_at": "2026-07-03T02:23:45.453035+00:00"
+      "fetched_at": "2026-07-03T02:31:25.414032+00:00"
     },
     {
       "game_id": "824906",
@@ -76,7 +76,7 @@
       "home_score": null,
       "away_score": null,
       "season": 2026,
-      "fetched_at": "2026-07-03T02:23:45.453035+00:00"
+      "fetched_at": "2026-07-03T02:31:25.414038+00:00"
     },
     {
       "game_id": "824093",
@@ -91,7 +91,7 @@
       "home_score": null,
       "away_score": null,
       "season": 2026,
-      "fetched_at": "2026-07-03T02:23:45.454033+00:00"
+      "fetched_at": "2026-07-03T02:31:25.414045+00:00"
     },
     {
       "game_id": "822884",
@@ -106,7 +106,7 @@
       "home_score": null,
       "away_score": null,
       "season": 2026,
-      "fetched_at": "2026-07-03T02:23:45.454033+00:00"
+      "fetched_at": "2026-07-03T02:31:25.414051+00:00"
     },
     {
       "game_id": "823119",
@@ -121,7 +121,7 @@
       "home_score": null,
       "away_score": null,
       "season": 2026,
-      "fetched_at": "2026-07-03T02:23:45.454033+00:00"
+      "fetched_at": "2026-07-03T02:31:25.414061+00:00"
     },
     {
       "game_id": "823935",
@@ -136,7 +136,7 @@
       "home_score": null,
       "away_score": null,
       "season": 2026,
-      "fetched_at": "2026-07-03T02:23:45.454033+00:00"
+      "fetched_at": "2026-07-03T02:31:25.414067+00:00"
     }
   ],
   "tomorrow_games": [
@@ -153,7 +153,7 @@
       "home_score": null,
       "away_score": null,
       "season": 2026,
-      "fetched_at": "2026-07-03T02:23:48.665355+00:00"
+      "fetched_at": "2026-07-03T02:31:25.910500+00:00"
     },
     {
       "game_id": "822714",
@@ -168,7 +168,7 @@
       "home_score": null,
       "away_score": null,
       "season": 2026,
-      "fetched_at": "2026-07-03T02:23:48.665355+00:00"
+      "fetched_at": "2026-07-03T02:31:25.910519+00:00"
     },
     {
       "game_id": "823527",
@@ -183,7 +183,7 @@
       "home_score": null,
       "away_score": null,
       "season": 2026,
-      "fetched_at": "2026-07-03T02:23:48.665355+00:00"
+      "fetched_at": "2026-07-03T02:31:25.910527+00:00"
     },
     {
       "game_id": "824498",
@@ -198,7 +198,7 @@
       "home_score": null,
       "away_score": null,
       "season": 2026,
-      "fetched_at": "2026-07-03T02:23:48.665355+00:00"
+      "fetched_at": "2026-07-03T02:31:25.910534+00:00"
     },
     {
       "game_id": "824417",
@@ -213,7 +213,7 @@
       "home_score": null,
       "away_score": null,
       "season": 2026,
-      "fetched_at": "2026-07-03T02:23:48.665355+00:00"
+      "fetched_at": "2026-07-03T02:31:25.910540+00:00"
     },
     {
       "game_id": "824904",
@@ -228,7 +228,7 @@
       "home_score": null,
       "away_score": null,
       "season": 2026,
-      "fetched_at": "2026-07-03T02:23:48.665355+00:00"
+      "fetched_at": "2026-07-03T02:31:25.910547+00:00"
     },
     {
       "game_id": "824336",
@@ -243,7 +243,7 @@
       "home_score": null,
       "away_score": null,
       "season": 2026,
-      "fetched_at": "2026-07-03T02:23:48.665355+00:00"
+      "fetched_at": "2026-07-03T02:31:25.910553+00:00"
     },
     {
       "game_id": "824173",
@@ -258,7 +258,7 @@
       "home_score": null,
       "away_score": null,
       "season": 2026,
-      "fetched_at": "2026-07-03T02:23:48.665355+00:00"
+      "fetched_at": "2026-07-03T02:31:25.910560+00:00"
     },
     {
       "game_id": "824013",
@@ -273,7 +273,7 @@
       "home_score": null,
       "away_score": null,
       "season": 2026,
-      "fetched_at": "2026-07-03T02:23:48.665355+00:00"
+      "fetched_at": "2026-07-03T02:31:25.910567+00:00"
     },
     {
       "game_id": "824982",
@@ -288,7 +288,7 @@
       "home_score": null,
       "away_score": null,
       "season": 2026,
-      "fetched_at": "2026-07-03T02:23:48.665355+00:00"
+      "fetched_at": "2026-07-03T02:31:25.910573+00:00"
     },
     {
       "game_id": "825062",
@@ -303,7 +303,7 @@
       "home_score": null,
       "away_score": null,
       "season": 2026,
-      "fetched_at": "2026-07-03T02:23:48.665355+00:00"
+      "fetched_at": "2026-07-03T02:31:25.910579+00:00"
     },
     {
       "game_id": "823933",
@@ -318,7 +318,7 @@
       "home_score": null,
       "away_score": null,
       "season": 2026,
-      "fetched_at": "2026-07-03T02:23:48.665355+00:00"
+      "fetched_at": "2026-07-03T02:31:25.910585+00:00"
     },
     {
       "game_id": "823120",
@@ -333,7 +333,7 @@
       "home_score": null,
       "away_score": null,
       "season": 2026,
-      "fetched_at": "2026-07-03T02:23:48.665355+00:00"
+      "fetched_at": "2026-07-03T02:31:25.910592+00:00"
     }
   ],
   "counts": {
