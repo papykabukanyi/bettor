@@ -1,0 +1,11 @@
+modal
+pandas
+numpy
+scikit-learn
+joblib
+requests
+pytz
+flask
+python-dotenv
+cryptography
+py-clob-client

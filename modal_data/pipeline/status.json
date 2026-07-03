@@ -1,0 +1,92 @@
+{
+  "fetch": {
+    "ok": true,
+    "started_at": "2026-07-03T02:23:51.180108+00:00",
+    "fetched_window": {
+      "start": "2026-06-30",
+      "end": "2026-07-02"
+    },
+    "completed_games_added": 0,
+    "completed_games_total": 3982,
+    "completed_sport_counts": {
+      "mlb": 35,
+      "nba": 0,
+      "nhl": 0,
+      "soccer": 0
+    },
+    "today_schedule_count": 9,
+    "tomorrow_schedule_count": 13,
+    "schedule_counts": {
+      "today": {
+        "mlb": 9,
+        "nba": 0,
+        "nhl": 0,
+        "soccer": 0
+      },
+      "tomorrow": {
+        "mlb": 13,
+        "nba": 0,
+        "nhl": 0,
+        "soccer": 0
+      }
+    },
+    "updated_at": "2026-07-03T02:23:51.180108+00:00"
+  },
+  "updated_at": "2026-07-03T02:25:28.237992+00:00",
+  "train": {
+    "ok": true,
+    "trained_at": "2026-07-03T02:25:15.978335+00:00",
+    "version": "2026-07-03_02-25-15",
+    "rows": 3982,
+    "best_model": "random_forest",
+    "best_score": 0.537268,
+    "candidate_scores": {
+      "logistic_regression": 0.527082,
+      "random_forest": 0.537268,
+      "gradient_boosting": 0.528447
+    },
+    "candidate_count": 3,
+    "sports_covered": [
+      "mlb",
+      "nhl"
+    ],
+    "features": [
+      "home_team",
+      "away_team",
+      "sport",
+      "league",
+      "season",
+      "month",
+      "day_of_week"
+    ],
+    "cv_folds": 5,
+    "updated_at": "2026-07-03T02:25:17.134398+00:00"
+  },
+  "polymarket": {
+    "ok": true,
+    "updated_at": "2026-07-03T02:25:28.174013+00:00",
+    "evaluated": 22,
+    "placed": 0,
+    "dry_run": 0,
+    "failed": 0,
+    "skipped": 22,
+    "available_buying_power_usd": 1000.0
+  },
+  "predict": {
+    "ok": true,
+    "generated_at": "2026-07-03T02:25:28.205004+00:00",
+    "today": "2026-07-02",
+    "tomorrow": "2026-07-03",
+    "prediction_count": 22,
+    "model_version": "2026-07-03_02-25-15",
+    "model_name": "random_forest",
+    "submission_summary": {
+      "evaluated": 22,
+      "placed": 0,
+      "dry_run": 0,
+      "failed": 0,
+      "skipped": 22,
+      "available_buying_power_usd": 1000.0
+    }
+  }
+}

@@ -1,0 +1,68 @@
+name: Free Daily Prediction Pipeline
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "10 7 * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run pipeline (fetch -> train -> predict)
+        env:
+          BALLDONTLIE_API_KEY: ${{ secrets.BALLDONTLIE_API_KEY }}
+          THESPORTSDB_API_KEY: ${{ secrets.THESPORTSDB_API_KEY }}
+          POLYMARKET_KEY_ID: ${{ secrets.POLYMARKET_KEY_ID }}
+          POLYMARKET_SECRET_KEY: ${{ secrets.POLYMARKET_SECRET_KEY }}
+          POLYMARKET_API_PASSPHRASE: ${{ secrets.POLYMARKET_API_PASSPHRASE }}
+          POLYMARKET_PRIVATE_KEY: ${{ secrets.POLYMARKET_PRIVATE_KEY }}
+          POLYMARKET_FUNDER: ${{ secrets.POLYMARKET_FUNDER }}
+          POLYMARKET_DRY_RUN: ${{ secrets.POLYMARKET_DRY_RUN }}
+          MODAL_BOOTSTRAP_DAYS: "120"
+          MODAL_DAILY_BACKFILL_DAYS: "3"
+        run: |
+          python scripts/run_free_pipeline.py
+
+      - name: Commit refreshed dashboard snapshots
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          shopt -s nullglob
+          SNAPSHOT_FILES=(
+            modal_data/pipeline/status.json
+            modal_data/pipeline/fetch_summary.json
+            modal_data/pipeline/train_summary.json
+            modal_data/pipeline/predict_summary.json
+            modal_data/models/model_stats.json
+            modal_data/models/training_history.json
+            modal_data/predictions/latest.json
+            modal_data/polymarket/submissions.json
+            modal_data/polymarket/positions.json
+            modal_data/raw/games_history.jsonl
+            modal_data/schedules/upcoming.json
+          )
+          for file in "${SNAPSHOT_FILES[@]}"; do
+            if [[ -f "$file" ]]; then
+              git add -f "$file"
+            fi
+          done
+          git diff --cached --quiet && echo "No snapshot changes" || git commit -m "chore: refresh daily prediction snapshots"
+          git push

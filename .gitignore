@@ -29,8 +29,6 @@ wheels/
 MANIFEST
 
 # PyInstaller
-#  Usually these files are written by a python script from a template
-#  before PyInstaller builds the exe, so as to inject date/other infos into it.
 *.manifest
 *.spec
 
@@ -119,3 +117,23 @@ data/*.csv
 data/*.json
 models/*.pkl
 models/*.joblib
+modal_data/
+!modal_data/
+!modal_data/.gitkeep
+!modal_data/pipeline/
+!modal_data/pipeline/status.json
+!modal_data/pipeline/fetch_summary.json
+!modal_data/pipeline/train_summary.json
+!modal_data/pipeline/predict_summary.json
+!modal_data/models/
+!modal_data/models/model_stats.json
+!modal_data/models/training_history.json
+!modal_data/predictions/
+!modal_data/predictions/latest.json
+!modal_data/polymarket/
+!modal_data/polymarket/submissions.json
+!modal_data/polymarket/positions.json
+!modal_data/raw/
+!modal_data/raw/games_history.jsonl
+!modal_data/schedules/
+!modal_data/schedules/upcoming.json

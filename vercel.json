@@ -13,6 +13,7 @@
     }
   ],
   "env": {
-    "PYTHON_VERSION": "3.11"
+    "PYTHON_VERSION": "3.11",
+    "PREDICTIONS_API_URL": "@predictions_api_url"
   }
 }

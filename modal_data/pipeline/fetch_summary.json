@@ -1,0 +1,33 @@
+{
+  "ok": true,
+  "started_at": "2026-07-03T02:23:51.180108+00:00",
+  "fetched_window": {
+    "start": "2026-06-30",
+    "end": "2026-07-02"
+  },
+  "completed_games_added": 0,
+  "completed_games_total": 3982,
+  "completed_sport_counts": {
+    "mlb": 35,
+    "nba": 0,
+    "nhl": 0,
+    "soccer": 0
+  },
+  "today_schedule_count": 9,
+  "tomorrow_schedule_count": 13,
+  "schedule_counts": {
+    "today": {
+      "mlb": 9,
+      "nba": 0,
+      "nhl": 0,
+      "soccer": 0
+    },
+    "tomorrow": {
+      "mlb": 13,
+      "nba": 0,
+      "nhl": 0,
+      "soccer": 0
+    }
+  },
+  "updated_at": "2026-07-03T02:23:51.180108+00:00"
+}

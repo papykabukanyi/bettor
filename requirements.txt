@@ -20,6 +20,7 @@ seaborn
 # Utilities
 python-dotenv
 tabulate
+modal
 
 # Web dashboard
 flask
@@ -50,4 +51,3 @@ py-clob-client
 huggingface_hub>=0.20.0
 datasets>=2.14.0
 pyarrow>=12.0.0
-

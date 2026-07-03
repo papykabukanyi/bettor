@@ -1,79 +1,68 @@
-# Bettor HF-First Pipeline Commands
+# Bettor Free Daily ML Pipeline
 
-This project now supports a direct Hugging Face workflow:
+Production-ready sports prediction stack with a free daily pipeline, a Flask/Vercel dashboard, and optional Polymarket auto-submission.
 
-1. One-time historical load -> HF Dataset  
-2. Daily clean append -> HF Dataset  
-3. Daily retrain (custom model) -> HF Model Hub  
-4. Daily predictions -> JSON + dashboard status strip
+## Architecture
 
-## Required environment variables
+```text
+GitHub Actions (free scheduler)
+├── 02:10 ET equivalent: run_free_pipeline.py -> fetch -> train -> predict
+├── Commits fresh JSON snapshots to modal_data/
+└── Vercel auto-redeploys with new predictions
 
-- `HF_API_KEY`
-- `HF_DATASET_REPO` (example: `yourname/sportprediction-data` or `sportprediction-data`)
-- `HF_MODEL_REPO` (example: `yourname/sportprediction-model` or `sportprediction-model`)
-- Optional:
-  - `HF_INFERENCE_MODEL`
-  - `HF_INFERENCE_ENDPOINT`
-  - `HF_PIPELINE_STATUS_FILE`
-  - `HF_DAILY_PREDICTIONS_FILE`
-  - `HF_SIGNAL_LOG_FILE`
-  - `HF_AUTORUN_ON_DEPLOY=1` (run HF pipeline automatically on deployment/start)
-  - `HF_AUTORUN_DELAY_SEC=30`
-  - `HF_DAILY_RUN_HOUR_ET=4`
-  - `HF_DAILY_RUN_MINUTE_ET=15`
-  - `HF_DAILY_CUSTOM_MODEL=gradient_boosting`
-  - `HF_DAILY_MIN_TRAIN_ROWS=200`
-
-## Core CLI commands
-
-### One-time bootstrap + train custom model
-
-```powershell
-python src\betting_bot.py --hf-bootstrap --hf-days-back 365 --hf-retrain-publish --hf-custom-model gradient_boosting
+Vercel / Flask dashboard
+└── src/dashboard.py + src/templates/dashboard.html
+    -> reads free local snapshots by default
+    -> can proxy an optional provider API
+    -> renders glassmorphism dashboard
+    -> surfaces prediction + Polymarket status
 ```
 
-### Daily clean + feed + retrain + predict
+## Quick start
 
-```powershell
-python src\betting_bot.py --hf-daily-run --hf-custom-model gradient_boosting --hf-min-train-rows 200 --hf-predictions-output data\hf_daily_predictions.json
-```
+1. Install dependencies:
+   ```powershell
+   pip install -r requirements.txt
+   ```
+2. Copy `.env.example` to `.env` and fill in API + Polymarket credentials.
+3. Seed local data:
+   ```powershell
+   python scripts\run_free_pipeline.py
+   ```
+4. Start the dashboard locally:
+   ```powershell
+   python src\dashboard.py
+   ```
+5. Open `http://127.0.0.1:5000`.
 
-### Daily run using HF inference API
+## Daily automation (free)
 
-```powershell
-python src\betting_bot.py --hf-daily-run --hf-custom-model gradient_boosting --hf-predict-via-api --hf-inference-model yourname/sportprediction-model
-```
+Workflow file: `.github/workflows/free-daily-pipeline.yml`
 
-### Predict one matchup from custom model artifact
+- Runs every day on GitHub-hosted runner
+- Updates:
+  - `modal_data/pipeline/*.json`
+  - `modal_data/models/*.json`
+  - `modal_data/predictions/latest.json`
+  - `modal_data/polymarket/*.json`
+- Commits snapshots so Vercel serves fresh predictions without paid infrastructure
 
-```powershell
-python src\betting_bot.py --hf-predict-matchup "New York Yankees" "Boston Red Sox" --hf-predict-season 2026
-```
+Detailed deployment instructions live in [`README_MODAL.md`](README_MODAL.md).
 
-### Predict one matchup via HF API (model swap supported)
+## Dashboard API
 
-```powershell
-python src\betting_bot.py --hf-predict-matchup "New York Yankees" "Boston Red Sox" --hf-predict-via-api --hf-inference-model yourname/alternate-model
-```
+The dashboard now proxies Modal endpoints:
 
-## Windows helper scripts
+- `GET /api/predictions/status`
+- `GET /api/predictions/today`
+- `GET /api/predictions/tomorrow`
+- `GET /api/model/stats`
+- `GET /api/polymarket/status`
+- `GET /api/polymarket/submissions`
+- `GET /api/polymarket/positions`
 
-- `scripts\run_hf_bootstrap.ps1`
-- `scripts\run_hf_daily.ps1`
+## Notes
 
-Examples:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\run_hf_bootstrap.ps1 -CustomModel gradient_boosting
-powershell -ExecutionPolicy Bypass -File scripts\run_hf_daily.ps1 -CustomModel gradient_boosting
-```
-
-## Dashboard
-
-The dashboard now shows a simple bot-ops strip with:
-
-- analysis status
-- HF pipeline last step
-- selected custom model
-- daily prediction count (and error count if any)
+- Local `modal run ...` commands write to `modal_data\` for easy iteration.
+- Remote Modal deployments write to the mounted Modal Volume.
+- Polymarket defaults to dry-run mode until `POLYMARKET_DRY_RUN=false`.

@@ -1,0 +1,28 @@
+{
+  "ok": true,
+  "trained_at": "2026-07-03T02:25:15.978335+00:00",
+  "version": "2026-07-03_02-25-15",
+  "rows": 3982,
+  "best_model": "random_forest",
+  "best_score": 0.537268,
+  "candidate_scores": {
+    "logistic_regression": 0.527082,
+    "random_forest": 0.537268,
+    "gradient_boosting": 0.528447
+  },
+  "candidate_count": 3,
+  "sports_covered": [
+    "mlb",
+    "nhl"
+  ],
+  "features": [
+    "home_team",
+    "away_team",
+    "sport",
+    "league",
+    "season",
+    "month",
+    "day_of_week"
+  ],
+  "cv_folds": 5
+}
