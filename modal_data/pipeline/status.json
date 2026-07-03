@@ -1,49 +1,49 @@
 {
   "fetch": {
     "ok": true,
-    "started_at": "2026-07-03T02:31:26.333334+00:00",
+    "started_at": "2026-07-03T08:14:16.761082+00:00",
     "fetched_window": {
       "start": "2026-06-29",
-      "end": "2026-07-02"
+      "end": "2026-07-03"
     },
-    "completed_games_added": 0,
-    "completed_games_total": 3982,
+    "completed_games_added": 3,
+    "completed_games_total": 3985,
     "completed_sport_counts": {
-      "mlb": 48,
+      "mlb": 51,
       "nba": 0,
       "nhl": 0,
       "soccer": 0
     },
-    "today_schedule_count": 9,
-    "tomorrow_schedule_count": 13,
+    "today_schedule_count": 13,
+    "tomorrow_schedule_count": 15,
     "schedule_counts": {
       "today": {
-        "mlb": 9,
+        "mlb": 13,
         "nba": 0,
         "nhl": 0,
         "soccer": 0
       },
       "tomorrow": {
-        "mlb": 13,
+        "mlb": 15,
         "nba": 0,
         "nhl": 0,
         "soccer": 0
       }
     },
-    "updated_at": "2026-07-03T02:31:26.333372+00:00"
+    "updated_at": "2026-07-03T08:14:16.761162+00:00"
   },
-  "updated_at": "2026-07-03T02:31:39.550413+00:00",
+  "updated_at": "2026-07-03T08:14:30.446110+00:00",
   "train": {
     "ok": true,
-    "trained_at": "2026-07-03T02:31:38.602101+00:00",
-    "version": "2026-07-03_02-31-38",
-    "rows": 3982,
+    "trained_at": "2026-07-03T08:14:29.522851+00:00",
+    "version": "2026-07-03_08-14-29",
+    "rows": 3985,
     "best_model": "logistic_regression",
-    "best_score": 0.547338,
+    "best_score": 0.544176,
     "candidate_scores": {
-      "logistic_regression": 0.547338,
-      "random_forest": 0.537268,
-      "gradient_boosting": 0.529749
+      "logistic_regression": 0.544176,
+      "random_forest": 0.53685,
+      "gradient_boosting": 0.522853
     },
     "candidate_count": 3,
     "sports_covered": [
@@ -60,32 +60,32 @@
       "day_of_week"
     ],
     "cv_folds": 5,
-    "updated_at": "2026-07-03T02:31:38.605960+00:00"
+    "updated_at": "2026-07-03T08:14:29.527559+00:00"
   },
   "polymarket": {
     "ok": true,
-    "updated_at": "2026-07-03T02:31:39.547713+00:00",
-    "evaluated": 22,
+    "updated_at": "2026-07-03T08:14:30.444229+00:00",
+    "evaluated": 28,
     "placed": 0,
     "dry_run": 0,
     "failed": 0,
-    "skipped": 22,
+    "skipped": 28,
     "available_buying_power_usd": 1000.0
   },
   "predict": {
     "ok": true,
-    "generated_at": "2026-07-03T02:31:39.548454+00:00",
-    "today": "2026-07-02",
-    "tomorrow": "2026-07-03",
-    "prediction_count": 22,
-    "model_version": "2026-07-03_02-31-38",
+    "generated_at": "2026-07-03T08:14:30.444719+00:00",
+    "today": "2026-07-03",
+    "tomorrow": "2026-07-04",
+    "prediction_count": 28,
+    "model_version": "2026-07-03_08-14-29",
     "model_name": "logistic_regression",
     "submission_summary": {
-      "evaluated": 22,
+      "evaluated": 28,
       "placed": 0,
       "dry_run": 0,
       "failed": 0,
-      "skipped": 22,
+      "skipped": 28,
       "available_buying_power_usd": 1000.0
     }
   }

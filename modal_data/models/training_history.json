@@ -54,5 +54,33 @@
       "day_of_week"
     ],
     "cv_folds": 5
+  },
+  {
+    "ok": true,
+    "trained_at": "2026-07-03T08:14:29.522851+00:00",
+    "version": "2026-07-03_08-14-29",
+    "rows": 3985,
+    "best_model": "logistic_regression",
+    "best_score": 0.544176,
+    "candidate_scores": {
+      "logistic_regression": 0.544176,
+      "random_forest": 0.53685,
+      "gradient_boosting": 0.522853
+    },
+    "candidate_count": 3,
+    "sports_covered": [
+      "mlb",
+      "nhl"
+    ],
+    "features": [
+      "home_team",
+      "away_team",
+      "sport",
+      "league",
+      "season",
+      "month",
+      "day_of_week"
+    ],
+    "cv_folds": 5
   }
 ]

@@ -1,145 +1,8 @@
 {
-  "updated_at": "2026-07-03T02:31:26.331855+00:00",
-  "today": "2026-07-02",
-  "tomorrow": "2026-07-03",
+  "updated_at": "2026-07-03T08:14:16.759699+00:00",
+  "today": "2026-07-03",
+  "tomorrow": "2026-07-04",
   "today_games": [
-    {
-      "game_id": "823442",
-      "sport": "mlb",
-      "league": "MLB",
-      "game_date": "2026-07-02",
-      "game_time": "2026-07-02T16:35:00Z",
-      "scheduled_start": "2026-07-02T16:35:00Z",
-      "status": "Scheduled",
-      "home_team": "Philadelphia Phillies",
-      "away_team": "Pittsburgh Pirates",
-      "home_score": null,
-      "away_score": null,
-      "season": 2026,
-      "fetched_at": "2026-07-03T02:31:25.414002+00:00"
-    },
-    {
-      "game_id": "823765",
-      "sport": "mlb",
-      "league": "MLB",
-      "game_date": "2026-07-02",
-      "game_time": "2026-07-02T18:10:00Z",
-      "scheduled_start": "2026-07-02T18:10:00Z",
-      "status": "Scheduled",
-      "home_team": "Milwaukee Brewers",
-      "away_team": "Cincinnati Reds",
-      "home_score": null,
-      "away_score": null,
-      "season": 2026,
-      "fetched_at": "2026-07-03T02:31:25.414018+00:00"
-    },
-    {
-      "game_id": "824335",
-      "sport": "mlb",
-      "league": "MLB",
-      "game_date": "2026-07-02",
-      "game_time": "2026-07-02T19:10:00Z",
-      "scheduled_start": "2026-07-02T19:10:00Z",
-      "status": "Scheduled",
-      "home_team": "Colorado Rockies",
-      "away_team": "Miami Marlins",
-      "home_score": null,
-      "away_score": null,
-      "season": 2026,
-      "fetched_at": "2026-07-03T02:31:25.414026+00:00"
-    },
-    {
-      "game_id": "824416",
-      "sport": "mlb",
-      "league": "MLB",
-      "game_date": "2026-07-02",
-      "game_time": "2026-07-02T22:40:00Z",
-      "scheduled_start": "2026-07-02T22:40:00Z",
-      "status": "Scheduled",
-      "home_team": "Cleveland Guardians",
-      "away_team": "Chicago White Sox",
-      "home_score": null,
-      "away_score": null,
-      "season": 2026,
-      "fetched_at": "2026-07-03T02:31:25.414032+00:00"
-    },
-    {
-      "game_id": "824906",
-      "sport": "mlb",
-      "league": "MLB",
-      "game_date": "2026-07-02",
-      "game_time": "2026-07-02T23:15:00Z",
-      "scheduled_start": "2026-07-02T23:15:00Z",
-      "status": "Scheduled",
-      "home_team": "Atlanta Braves",
-      "away_team": "St. Louis Cardinals",
-      "home_score": null,
-      "away_score": null,
-      "season": 2026,
-      "fetched_at": "2026-07-03T02:31:25.414038+00:00"
-    },
-    {
-      "game_id": "824093",
-      "sport": "mlb",
-      "league": "MLB",
-      "game_date": "2026-07-02",
-      "game_time": "2026-07-02T23:40:00Z",
-      "scheduled_start": "2026-07-02T23:40:00Z",
-      "status": "Scheduled",
-      "home_team": "Kansas City Royals",
-      "away_team": "Tampa Bay Rays",
-      "home_score": null,
-      "away_score": null,
-      "season": 2026,
-      "fetched_at": "2026-07-03T02:31:25.414045+00:00"
-    },
-    {
-      "game_id": "822884",
-      "sport": "mlb",
-      "league": "MLB",
-      "game_date": "2026-07-02",
-      "game_time": "2026-07-03T00:05:00Z",
-      "scheduled_start": "2026-07-03T00:05:00Z",
-      "status": "Scheduled",
-      "home_team": "Texas Rangers",
-      "away_team": "Detroit Tigers",
-      "home_score": null,
-      "away_score": null,
-      "season": 2026,
-      "fetched_at": "2026-07-03T02:31:25.414051+00:00"
-    },
-    {
-      "game_id": "823119",
-      "sport": "mlb",
-      "league": "MLB",
-      "game_date": "2026-07-02",
-      "game_time": "2026-07-03T01:40:00Z",
-      "scheduled_start": "2026-07-03T01:40:00Z",
-      "status": "Scheduled",
-      "home_team": "Seattle Mariners",
-      "away_team": "Los Angeles Angels",
-      "home_score": null,
-      "away_score": null,
-      "season": 2026,
-      "fetched_at": "2026-07-03T02:31:25.414061+00:00"
-    },
-    {
-      "game_id": "823935",
-      "sport": "mlb",
-      "league": "MLB",
-      "game_date": "2026-07-02",
-      "game_time": "2026-07-03T02:10:00Z",
-      "scheduled_start": "2026-07-03T02:10:00Z",
-      "status": "Scheduled",
-      "home_team": "Los Angeles Dodgers",
-      "away_team": "San Diego Padres",
-      "home_score": null,
-      "away_score": null,
-      "season": 2026,
-      "fetched_at": "2026-07-03T02:31:25.414067+00:00"
-    }
-  ],
-  "tomorrow_games": [
     {
       "game_id": "824659",
       "sport": "mlb",
@@ -153,7 +16,7 @@
       "home_score": null,
       "away_score": null,
       "season": 2026,
-      "fetched_at": "2026-07-03T02:31:25.910500+00:00"
+      "fetched_at": "2026-07-03T08:14:15.805864+00:00"
     },
     {
       "game_id": "822714",
@@ -168,7 +31,7 @@
       "home_score": null,
       "away_score": null,
       "season": 2026,
-      "fetched_at": "2026-07-03T02:31:25.910519+00:00"
+      "fetched_at": "2026-07-03T08:14:15.805883+00:00"
     },
     {
       "game_id": "823527",
@@ -183,7 +46,7 @@
       "home_score": null,
       "away_score": null,
       "season": 2026,
-      "fetched_at": "2026-07-03T02:31:25.910527+00:00"
+      "fetched_at": "2026-07-03T08:14:15.805894+00:00"
     },
     {
       "game_id": "824498",
@@ -198,7 +61,7 @@
       "home_score": null,
       "away_score": null,
       "season": 2026,
-      "fetched_at": "2026-07-03T02:31:25.910534+00:00"
+      "fetched_at": "2026-07-03T08:14:15.805903+00:00"
     },
     {
       "game_id": "824417",
@@ -213,7 +76,7 @@
       "home_score": null,
       "away_score": null,
       "season": 2026,
-      "fetched_at": "2026-07-03T02:31:25.910540+00:00"
+      "fetched_at": "2026-07-03T08:14:15.805913+00:00"
     },
     {
       "game_id": "824904",
@@ -228,7 +91,7 @@
       "home_score": null,
       "away_score": null,
       "season": 2026,
-      "fetched_at": "2026-07-03T02:31:25.910547+00:00"
+      "fetched_at": "2026-07-03T08:14:15.805922+00:00"
     },
     {
       "game_id": "824336",
@@ -243,7 +106,7 @@
       "home_score": null,
       "away_score": null,
       "season": 2026,
-      "fetched_at": "2026-07-03T02:31:25.910553+00:00"
+      "fetched_at": "2026-07-03T08:14:15.805930+00:00"
     },
     {
       "game_id": "824173",
@@ -258,7 +121,7 @@
       "home_score": null,
       "away_score": null,
       "season": 2026,
-      "fetched_at": "2026-07-03T02:31:25.910560+00:00"
+      "fetched_at": "2026-07-03T08:14:15.805943+00:00"
     },
     {
       "game_id": "824013",
@@ -273,7 +136,7 @@
       "home_score": null,
       "away_score": null,
       "season": 2026,
-      "fetched_at": "2026-07-03T02:31:25.910567+00:00"
+      "fetched_at": "2026-07-03T08:14:15.805952+00:00"
     },
     {
       "game_id": "824982",
@@ -288,7 +151,7 @@
       "home_score": null,
       "away_score": null,
       "season": 2026,
-      "fetched_at": "2026-07-03T02:31:25.910573+00:00"
+      "fetched_at": "2026-07-03T08:14:15.805959+00:00"
     },
     {
       "game_id": "825062",
@@ -303,7 +166,7 @@
       "home_score": null,
       "away_score": null,
       "season": 2026,
-      "fetched_at": "2026-07-03T02:31:25.910579+00:00"
+      "fetched_at": "2026-07-03T08:14:15.805968+00:00"
     },
     {
       "game_id": "823933",
@@ -318,7 +181,7 @@
       "home_score": null,
       "away_score": null,
       "season": 2026,
-      "fetched_at": "2026-07-03T02:31:25.910585+00:00"
+      "fetched_at": "2026-07-03T08:14:15.805975+00:00"
     },
     {
       "game_id": "823120",
@@ -333,18 +196,245 @@
       "home_score": null,
       "away_score": null,
       "season": 2026,
-      "fetched_at": "2026-07-03T02:31:25.910592+00:00"
+      "fetched_at": "2026-07-03T08:14:15.805982+00:00"
+    }
+  ],
+  "tomorrow_games": [
+    {
+      "game_id": "822716",
+      "sport": "mlb",
+      "league": "MLB",
+      "game_date": "2026-07-04",
+      "game_time": "2026-07-04T15:05:00Z",
+      "scheduled_start": "2026-07-04T15:05:00Z",
+      "status": "Scheduled",
+      "home_team": "Washington Nationals",
+      "away_team": "Pittsburgh Pirates",
+      "home_score": null,
+      "away_score": null,
+      "season": 2026,
+      "fetched_at": "2026-07-03T08:14:16.343924+00:00"
+    },
+    {
+      "game_id": "823526",
+      "sport": "mlb",
+      "league": "MLB",
+      "game_date": "2026-07-04",
+      "game_time": "2026-07-04T17:35:00Z",
+      "scheduled_start": "2026-07-04T17:35:00Z",
+      "status": "Scheduled",
+      "home_team": "New York Yankees",
+      "away_team": "Minnesota Twins",
+      "home_score": null,
+      "away_score": null,
+      "season": 2026,
+      "fetched_at": "2026-07-03T08:14:16.343949+00:00"
+    },
+    {
+      "game_id": "822882",
+      "sport": "mlb",
+      "league": "MLB",
+      "game_date": "2026-07-04",
+      "game_time": "2026-07-04T20:05:00Z",
+      "scheduled_start": "2026-07-04T20:05:00Z",
+      "status": "Scheduled",
+      "home_team": "Texas Rangers",
+      "away_team": "Detroit Tigers",
+      "home_score": null,
+      "away_score": null,
+      "season": 2026,
+      "fetched_at": "2026-07-03T08:14:16.343958+00:00"
+    },
+    {
+      "game_id": "823118",
+      "sport": "mlb",
+      "league": "MLB",
+      "game_date": "2026-07-04",
+      "game_time": "2026-07-04T20:10:00Z",
+      "scheduled_start": "2026-07-04T20:10:00Z",
+      "status": "Scheduled",
+      "home_team": "Seattle Mariners",
+      "away_team": "Toronto Blue Jays",
+      "home_score": null,
+      "away_score": null,
+      "season": 2026,
+      "fetched_at": "2026-07-03T08:14:16.343967+00:00"
+    },
+    {
+      "game_id": "824499",
+      "sport": "mlb",
+      "league": "MLB",
+      "game_date": "2026-07-04",
+      "game_time": "2026-07-04T23:10:00Z",
+      "scheduled_start": "2026-07-04T23:10:00Z",
+      "status": "Scheduled",
+      "home_team": "Cincinnati Reds",
+      "away_team": "Baltimore Orioles",
+      "home_score": null,
+      "away_score": null,
+      "season": 2026,
+      "fetched_at": "2026-07-03T08:14:16.343976+00:00"
+    },
+    {
+      "game_id": "824171",
+      "sport": "mlb",
+      "league": "MLB",
+      "game_date": "2026-07-04",
+      "game_time": "2026-07-04T23:10:00Z",
+      "scheduled_start": "2026-07-04T23:10:00Z",
+      "status": "Scheduled",
+      "home_team": "Houston Astros",
+      "away_team": "Tampa Bay Rays",
+      "home_score": null,
+      "away_score": null,
+      "season": 2026,
+      "fetched_at": "2026-07-03T08:14:16.343984+00:00"
+    },
+    {
+      "game_id": "824415",
+      "sport": "mlb",
+      "league": "MLB",
+      "game_date": "2026-07-04",
+      "game_time": "2026-07-04T23:10:00Z",
+      "scheduled_start": "2026-07-04T23:10:00Z",
+      "status": "Scheduled",
+      "home_team": "Cleveland Guardians",
+      "away_team": "Chicago White Sox",
+      "home_score": null,
+      "away_score": null,
+      "season": 2026,
+      "fetched_at": "2026-07-03T08:14:16.343992+00:00"
+    },
+    {
+      "game_id": "824658",
+      "sport": "mlb",
+      "league": "MLB",
+      "game_date": "2026-07-04",
+      "game_time": "2026-07-05T00:08:00Z",
+      "scheduled_start": "2026-07-05T00:08:00Z",
+      "status": "Scheduled",
+      "home_team": "Chicago Cubs",
+      "away_team": "St. Louis Cardinals",
+      "home_score": null,
+      "away_score": null,
+      "season": 2026,
+      "fetched_at": "2026-07-03T08:14:16.344000+00:00"
+    },
+    {
+      "game_id": "824903",
+      "sport": "mlb",
+      "league": "MLB",
+      "game_date": "2026-07-04",
+      "game_time": "2026-07-05T00:08:00Z",
+      "scheduled_start": "2026-07-05T00:08:00Z",
+      "status": "Scheduled",
+      "home_team": "Atlanta Braves",
+      "away_team": "New York Mets",
+      "home_score": null,
+      "away_score": null,
+      "season": 2026,
+      "fetched_at": "2026-07-03T08:14:16.344008+00:00"
+    },
+    {
+      "game_id": "824334",
+      "sport": "mlb",
+      "league": "MLB",
+      "game_date": "2026-07-04",
+      "game_time": "2026-07-05T00:10:00Z",
+      "scheduled_start": "2026-07-05T00:10:00Z",
+      "status": "Scheduled",
+      "home_team": "Colorado Rockies",
+      "away_team": "San Francisco Giants",
+      "home_score": null,
+      "away_score": null,
+      "season": 2026,
+      "fetched_at": "2026-07-03T08:14:16.344016+00:00"
+    },
+    {
+      "game_id": "824092",
+      "sport": "mlb",
+      "league": "MLB",
+      "game_date": "2026-07-04",
+      "game_time": "2026-07-05T00:10:00Z",
+      "scheduled_start": "2026-07-05T00:10:00Z",
+      "status": "Scheduled",
+      "home_team": "Kansas City Royals",
+      "away_team": "Philadelphia Phillies",
+      "home_score": null,
+      "away_score": null,
+      "season": 2026,
+      "fetched_at": "2026-07-03T08:14:16.344023+00:00"
+    },
+    {
+      "game_id": "824012",
+      "sport": "mlb",
+      "league": "MLB",
+      "game_date": "2026-07-04",
+      "game_time": "2026-07-05T01:38:00Z",
+      "scheduled_start": "2026-07-05T01:38:00Z",
+      "status": "Scheduled",
+      "home_team": "Los Angeles Angels",
+      "away_team": "Boston Red Sox",
+      "home_score": null,
+      "away_score": null,
+      "season": 2026,
+      "fetched_at": "2026-07-03T08:14:16.344032+00:00"
+    },
+    {
+      "game_id": "824983",
+      "sport": "mlb",
+      "league": "MLB",
+      "game_date": "2026-07-04",
+      "game_time": "2026-07-05T01:40:00Z",
+      "scheduled_start": "2026-07-05T01:40:00Z",
+      "status": "Scheduled",
+      "home_team": "Athletics",
+      "away_team": "Miami Marlins",
+      "home_score": null,
+      "away_score": null,
+      "season": 2026,
+      "fetched_at": "2026-07-03T08:14:16.344040+00:00"
+    },
+    {
+      "game_id": "825063",
+      "sport": "mlb",
+      "league": "MLB",
+      "game_date": "2026-07-04",
+      "game_time": "2026-07-05T01:40:00Z",
+      "scheduled_start": "2026-07-05T01:40:00Z",
+      "status": "Scheduled",
+      "home_team": "Arizona Diamondbacks",
+      "away_team": "Milwaukee Brewers",
+      "home_score": null,
+      "away_score": null,
+      "season": 2026,
+      "fetched_at": "2026-07-03T08:14:16.344048+00:00"
+    },
+    {
+      "game_id": "823932",
+      "sport": "mlb",
+      "league": "MLB",
+      "game_date": "2026-07-04",
+      "game_time": "2026-07-05T02:10:00Z",
+      "scheduled_start": "2026-07-05T02:10:00Z",
+      "status": "Scheduled",
+      "home_team": "Los Angeles Dodgers",
+      "away_team": "San Diego Padres",
+      "home_score": null,
+      "away_score": null,
+      "season": 2026,
+      "fetched_at": "2026-07-03T08:14:16.344056+00:00"
     }
   ],
   "counts": {
     "today": {
-      "mlb": 9,
+      "mlb": 13,
       "nba": 0,
       "nhl": 0,
       "soccer": 0
     },
     "tomorrow": {
-      "mlb": 13,
+      "mlb": 15,
       "nba": 0,
       "nhl": 0,
       "soccer": 0

@@ -1,17 +1,17 @@
 {
   "ok": true,
-  "generated_at": "2026-07-03T02:31:39.548454+00:00",
-  "today": "2026-07-02",
-  "tomorrow": "2026-07-03",
-  "prediction_count": 22,
-  "model_version": "2026-07-03_02-31-38",
+  "generated_at": "2026-07-03T08:14:30.444719+00:00",
+  "today": "2026-07-03",
+  "tomorrow": "2026-07-04",
+  "prediction_count": 28,
+  "model_version": "2026-07-03_08-14-29",
   "model_name": "logistic_regression",
   "submission_summary": {
-    "evaluated": 22,
+    "evaluated": 28,
     "placed": 0,
     "dry_run": 0,
     "failed": 0,
-    "skipped": 22,
+    "skipped": 28,
     "available_buying_power_usd": 1000.0
   }
 }
