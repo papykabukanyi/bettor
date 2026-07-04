@@ -3,10 +3,11 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-  <title>Bettor Modal Dashboard</title>
+  <title>Bettor HF Dashboard</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
   <style>
     :root {
       --primary: #3b82f6;
@@ -110,6 +111,20 @@
     .modal-close { border: none; background: rgba(148,163,184,0.12); color: white; border-radius: 12px; padding: 10px 12px; cursor: pointer; }
     pre { white-space: pre-wrap; word-break: break-word; font-size: 0.9rem; color: #cbd5e1; background: rgba(2, 6, 23, 0.65); padding: 14px; border-radius: 18px; border: 1px solid rgba(148,163,184,0.12); }
     .footer-note { margin-top: 18px; text-align: center; color: var(--muted); font-size: 0.88rem; }
+    .sort-card { padding: 14px 16px; margin-bottom: 14px; }
+    .sort-row { display: grid; grid-template-columns: repeat(1, minmax(0,1fr)); gap: 10px; }
+    .form-select, .form-control {
+      background: rgba(15,23,42,0.75);
+      color: var(--ink);
+      border: 1px solid rgba(148,163,184,0.22);
+    }
+    .form-select:focus, .form-control:focus {
+      border-color: rgba(59,130,246,0.65);
+      box-shadow: 0 0 0 .2rem rgba(59,130,246,0.18);
+      background: rgba(15,23,42,0.9);
+      color: var(--ink);
+    }
+    .label-mini { font-size: .75rem; text-transform: uppercase; letter-spacing: .14em; color: var(--muted); margin-bottom: 6px; display: block; }
     @media (min-width: 760px) {
       .page { padding: 34px 24px 80px; }
       .hero-metrics { grid-template-columns: repeat(4, minmax(0, 1fr)); }
@@ -117,6 +132,7 @@
       .overview-grid { grid-template-columns: 1.1fr .9fr; }
       .prediction-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .polymarket-grid { grid-template-columns: 0.95fr 1.05fr; }
+      .sort-row { grid-template-columns: 1.1fr .9fr .9fr; }
     }
     @media (min-width: 1120px) { .prediction-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
   </style>
@@ -154,8 +170,62 @@
       </div>
     </section>
 
-    <section class="panel" id="panel-today"><div class="prediction-grid" id="today-grid"></div></section>
-    <section class="panel" id="panel-tomorrow"><div class="prediction-grid" id="tomorrow-grid"></div></section>
+    <section class="panel" id="panel-today">
+      <div class="card glass sort-card">
+        <div class="sort-row">
+          <div>
+            <label class="label-mini" for="today-sort">Sort by</label>
+            <select id="today-sort" class="form-select form-select-sm">
+              <option value="confidence_desc">Confidence (High to Low)</option>
+              <option value="confidence_asc">Confidence (Low to High)</option>
+              <option value="time_asc">Game Time (Earliest)</option>
+              <option value="time_desc">Game Time (Latest)</option>
+              <option value="sport_asc">Sport (A to Z)</option>
+              <option value="pick_asc">Pick Team (A to Z)</option>
+            </select>
+          </div>
+          <div>
+            <label class="label-mini" for="today-sport-filter">Sport filter</label>
+            <select id="today-sport-filter" class="form-select form-select-sm">
+              <option value="all">All Sports</option>
+            </select>
+          </div>
+          <div>
+            <label class="label-mini" for="today-search">Search team</label>
+            <input id="today-search" class="form-control form-control-sm" placeholder="Type team name">
+          </div>
+        </div>
+      </div>
+      <div class="prediction-grid" id="today-grid"></div>
+    </section>
+    <section class="panel" id="panel-tomorrow">
+      <div class="card glass sort-card">
+        <div class="sort-row">
+          <div>
+            <label class="label-mini" for="tomorrow-sort">Sort by</label>
+            <select id="tomorrow-sort" class="form-select form-select-sm">
+              <option value="confidence_desc">Confidence (High to Low)</option>
+              <option value="confidence_asc">Confidence (Low to High)</option>
+              <option value="time_asc">Game Time (Earliest)</option>
+              <option value="time_desc">Game Time (Latest)</option>
+              <option value="sport_asc">Sport (A to Z)</option>
+              <option value="pick_asc">Pick Team (A to Z)</option>
+            </select>
+          </div>
+          <div>
+            <label class="label-mini" for="tomorrow-sport-filter">Sport filter</label>
+            <select id="tomorrow-sport-filter" class="form-select form-select-sm">
+              <option value="all">All Sports</option>
+            </select>
+          </div>
+          <div>
+            <label class="label-mini" for="tomorrow-search">Search team</label>
+            <input id="tomorrow-search" class="form-control form-control-sm" placeholder="Type team name">
+          </div>
+        </div>
+      </div>
+      <div class="prediction-grid" id="tomorrow-grid"></div>
+    </section>
     <section class="panel" id="panel-history"><div class="table-shell glass" id="history-shell"></div></section>
     <section class="panel" id="panel-polymarket">
       <div class="polymarket-grid">
@@ -194,6 +264,40 @@
     const sportIcon = (sport) => sportIcons[String(sport || '').toLowerCase()] || sportIcons.default;
     const tierClass = (tier) => confidenceClasses[String(tier || '').toLowerCase()] || 'bad';
     const stateClass = (status) => statusClasses[String(status || '').toLowerCase()] || 'neutral';
+    const safeSortDate = (row) => new Date(`${row.game_date || ''} ${row.game_time || row.scheduled_start || ''}`).getTime() || 0;
+
+    function sortPredictions(rows, mode) {
+      const list = [...rows];
+      const byConfidence = (a, b) => Number(b.confidence || 0) - Number(a.confidence || 0);
+      switch (mode) {
+        case 'confidence_asc': return list.sort((a, b) => Number(a.confidence || 0) - Number(b.confidence || 0));
+        case 'time_asc': return list.sort((a, b) => safeSortDate(a) - safeSortDate(b));
+        case 'time_desc': return list.sort((a, b) => safeSortDate(b) - safeSortDate(a));
+        case 'sport_asc': return list.sort((a, b) => String(a.sport || '').localeCompare(String(b.sport || '')));
+        case 'pick_asc': return list.sort((a, b) => String(a.predicted_team || '').localeCompare(String(b.predicted_team || '')));
+        case 'confidence_desc':
+        default: return list.sort(byConfidence);
+      }
+    }
+
+    function applyPredictionFilters(rows, prefix) {
+      const sportFilter = document.getElementById(`${prefix}-sport-filter`)?.value || 'all';
+      const query = String(document.getElementById(`${prefix}-search`)?.value || '').trim().toLowerCase();
+      let filtered = [...rows];
+      if (sportFilter !== 'all') filtered = filtered.filter(r => String(r.sport || '').toLowerCase() === sportFilter);
+      if (query) filtered = filtered.filter(r => `${r.home_team || ''} ${r.away_team || ''} ${r.predicted_team || ''}`.toLowerCase().includes(query));
+      const sortMode = document.getElementById(`${prefix}-sort`)?.value || 'confidence_desc';
+      return sortPredictions(filtered, sortMode);
+    }
+
+    function hydrateSportFilter(prefix, rows) {
+      const select = document.getElementById(`${prefix}-sport-filter`);
+      if (!select) return;
+      const current = select.value || 'all';
+      const sports = Array.from(new Set((rows || []).map(r => String(r.sport || '').toLowerCase()).filter(Boolean))).sort();
+      select.innerHTML = `<option value="all">All Sports</option>${sports.map(s => `<option value="${esc(s)}">${esc(s.toUpperCase())}</option>`).join('')}`;
+      if (sports.includes(current)) select.value = current;
+    }
 
     function toast(message, tone = 'neutral') {
       const stack = document.getElementById('toast-stack');
@@ -244,8 +348,10 @@
       const submissionState = String(polymarket.status || 'pending').toLowerCase();
       return `<article class="card glass prediction-card" data-prediction='${esc(JSON.stringify(prediction))}'><div class="prediction-header"><div><div class="sport-line"><span class="sport-icon">${sportIcon(prediction.sport)}</span><span>${esc(prediction.sport || 'sport')}</span></div><div class="matchup">${esc(prediction.away_team || 'Away')} @ ${esc(prediction.home_team || 'Home')}</div><div class="match-meta">${esc(prediction.game_date || '')} • ${esc(prediction.game_time || prediction.scheduled_start || 'TBD')}</div></div><span class="confidence-badge ${tierClass(confidenceTier)}">${esc(prediction.confidence_tier || 'Watch')}</span></div><div class="bar-wrap"><div class="bar-row"><div class="bar-label"><span>${esc(prediction.home_team || 'Home')}</span><strong>${esc(pct(prediction.home_win_prob))}</strong></div><div class="bar-track"><div class="bar-fill" style="width:${Math.max(2, Math.min(100, Number(prediction.home_win_prob || 0) * 100))}%"></div></div></div><div class="bar-row"><div class="bar-label"><span>${esc(prediction.away_team || 'Away')}</span><strong>${esc(pct(prediction.away_win_prob))}</strong></div><div class="bar-track"><div class="bar-fill" style="width:${Math.max(2, Math.min(100, Number(prediction.away_win_prob || 0) * 100))}%"></div></div></div></div><div class="prediction-footer"><div class="prediction-meta"><span class="status-badge ${stateClass(submissionState)}">${esc(submissionState.replace('_', ' '))}</span><span class="subtle">Pick: <strong style="color:var(--ink)">${esc(prediction.predicted_team || 'n/a')}</strong></span></div><div class="subtle">Model ${esc(prediction.model_name || '—')}</div></div></article>`;
     }
-    function renderPredictionGrid(containerId, payload) {
-      const predictions = Array.isArray(payload.predictions) ? payload.predictions : [];
+    function renderPredictionGrid(containerId, payload, prefix) {
+      const raw = Array.isArray(payload.predictions) ? payload.predictions : [];
+      hydrateSportFilter(prefix, raw);
+      const predictions = applyPredictionFilters(raw, prefix);
       const container = document.getElementById(containerId);
       if (!predictions.length) { container.innerHTML = '<div class="empty-state">No predictions available for this window.</div>'; return; }
       container.innerHTML = predictions.map(predictionCard).join('');
@@ -269,7 +375,7 @@
     }
     function openModal(prediction) { document.getElementById('modal-subtitle').textContent = `${prediction.away_team || 'Away'} @ ${prediction.home_team || 'Home'} • ${prediction.game_date || ''}`; document.getElementById('modal-json').textContent = JSON.stringify(prediction, null, 2); document.getElementById('modal-backdrop').classList.add('open'); }
     function closeModal() { document.getElementById('modal-backdrop').classList.remove('open'); }
-    function renderAll() { renderHeroMetrics(); renderPipeline(); renderPredictionGrid('today-grid', state.today || {}); renderPredictionGrid('tomorrow-grid', state.tomorrow || {}); renderHistory(); renderPolymarket(); document.getElementById('live-status').textContent = `Live refresh • ${new Date().toLocaleTimeString()}`; document.getElementById('live-source').textContent = `Source: ${(state.status.source || 'local').toUpperCase()}`; }
+    function renderAll() { renderHeroMetrics(); renderPipeline(); renderPredictionGrid('today-grid', state.today || {}, 'today'); renderPredictionGrid('tomorrow-grid', state.tomorrow || {}, 'tomorrow'); renderHistory(); renderPolymarket(); document.getElementById('live-status').textContent = `Live refresh • ${new Date().toLocaleTimeString()}`; document.getElementById('live-source').textContent = `Source: ${(state.status.source || 'local').toUpperCase()}`; }
     async function refreshAll() {
       try {
         const [status, today, tomorrow, model, polymarketStatus] = await Promise.all([fetchJson('/api/predictions/status'), fetchJson('/api/predictions/today'), fetchJson('/api/predictions/tomorrow'), fetchJson('/api/model/stats'), fetchJson('/api/polymarket/status')]);
@@ -284,9 +390,18 @@
       }
     }
     function initTabs() { const tabs = Array.from(document.querySelectorAll('.tab')); tabs.forEach(tab => tab.addEventListener('click', () => { tabs.forEach(item => item.classList.toggle('active', item === tab)); document.querySelectorAll('.panel').forEach(panel => panel.classList.remove('active')); document.getElementById(`panel-${tab.dataset.tab}`).classList.add('active'); })); }
+    function initSortControls() {
+      ['today-sort','today-sport-filter','today-search','tomorrow-sort','tomorrow-sport-filter','tomorrow-search'].forEach(id => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        el.addEventListener('input', renderAll);
+        el.addEventListener('change', renderAll);
+      });
+    }
     document.getElementById('modal-close').addEventListener('click', closeModal);
     document.getElementById('modal-backdrop').addEventListener('click', (event) => { if (event.target.id === 'modal-backdrop') closeModal(); });
-    initTabs(); setLoading(); refreshAll(); setInterval(refreshAll, 30000);
+    initTabs(); initSortControls(); setLoading(); refreshAll(); setInterval(refreshAll, 30000);
   </script>
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 </body>
 </html>
