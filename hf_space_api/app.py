@@ -34,6 +34,8 @@ HF_DAILY_RUN_MINUTE_ET = int(os.getenv("HF_DAILY_RUN_MINUTE_ET", "15") or "15")
 HF_DAILY_CUSTOM_MODEL = str(os.getenv("HF_DAILY_CUSTOM_MODEL", "auto") or "auto").strip().lower()
 HF_DAILY_MIN_TRAIN_ROWS = int(os.getenv("HF_DAILY_MIN_TRAIN_ROWS", "200") or "200")
 HF_ATTACH_POLYMARKET = str(os.getenv("HF_ATTACH_POLYMARKET", "1")).strip().lower() in {"1", "true", "yes", "on"}
+HF_BOOTSTRAP_ON_EMPTY = str(os.getenv("HF_BOOTSTRAP_ON_EMPTY", "1")).strip().lower() in {"1", "true", "yes", "on"}
+HF_BOOTSTRAP_DAYS = int(os.getenv("HF_BOOTSTRAP_DAYS", "365") or "365")
 
 app = FastAPI(title="Bettor HF Space API", version="1.0.0")
 scheduler = BackgroundScheduler(timezone="America/New_York")
@@ -53,6 +55,10 @@ def _run_hf_daily_pipeline() -> dict[str, Any]:
     pipeline = HFDirectPipeline()
     if not pipeline.ok:
         raise RuntimeError("HF pipeline not configured. Set HF_API_KEY, HF_DATASET_REPO, HF_MODEL_REPO.")
+    status_payload = _load_json(STATUS_FILE, {})
+    if HF_BOOTSTRAP_ON_EMPTY and not status_payload.get("bootstrap_completed_at"):
+        logger.info("HF bootstrap on empty status (days=%s)", HF_BOOTSTRAP_DAYS)
+        pipeline.bootstrap_one_year_history(days_back=HF_BOOTSTRAP_DAYS)
     result = pipeline.run_daily_pipeline(
         custom_model=HF_DAILY_CUSTOM_MODEL,
         min_rows=HF_DAILY_MIN_TRAIN_ROWS,
@@ -141,6 +147,25 @@ def _startup() -> None:
 @app.get("/health")
 def health() -> dict[str, Any]:
     return {"ok": True, "time": dt.datetime.now(dt.timezone.utc).isoformat()}
+
+
+@app.get("/")
+def root() -> dict[str, Any]:
+    return {
+        "ok": True,
+        "service": "bettor-hf-space-api",
+        "routes": [
+            "/health",
+            "/status",
+            "/predictions/today",
+            "/predictions/tomorrow",
+            "/model/stats",
+            "/polymarket/submissions",
+            "/polymarket/positions",
+            "/run/bootstrap",
+            "/run/daily",
+        ],
+    }
 
 
 @app.get("/status")
