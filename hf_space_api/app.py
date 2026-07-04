@@ -36,6 +36,7 @@ HF_DAILY_MIN_TRAIN_ROWS = int(os.getenv("HF_DAILY_MIN_TRAIN_ROWS", "200") or "20
 HF_ATTACH_POLYMARKET = str(os.getenv("HF_ATTACH_POLYMARKET", "1")).strip().lower() in {"1", "true", "yes", "on"}
 HF_BOOTSTRAP_ON_EMPTY = str(os.getenv("HF_BOOTSTRAP_ON_EMPTY", "1")).strip().lower() in {"1", "true", "yes", "on"}
 HF_BOOTSTRAP_DAYS = int(os.getenv("HF_BOOTSTRAP_DAYS", "365") or "365")
+HF_ACTIVE_SCAN_MINUTES = int(os.getenv("HF_ACTIVE_SCAN_MINUTES", "30") or "30")
 
 app = FastAPI(title="Bettor HF Space API", version="1.0.0")
 scheduler = BackgroundScheduler(timezone="America/New_York")
@@ -71,6 +72,34 @@ def _run_hf_daily_pipeline() -> dict[str, Any]:
             output_path=str(DATA_DIR / "hf_daily_prediction_markets.json"),
         )
     return result
+
+
+def _run_hf_active_cycle() -> dict[str, Any]:
+    pipeline = HFDirectPipeline()
+    if not pipeline.ok:
+        raise RuntimeError("HF pipeline not configured. Set HF_API_KEY, HF_DATASET_REPO, HF_MODEL_REPO.")
+    today = dt.date.today()
+    yesterday = today - dt.timedelta(days=1)
+    append_y = pipeline.append_daily_results(yesterday)
+    append_t = pipeline.append_daily_results(today)
+    try:
+        meta = pipeline._get_model_metadata()  # noqa: SLF001
+    except Exception:
+        meta = {}
+    if not meta.get("version"):
+        pipeline.train_and_publish_best_model(
+            min_rows=HF_DAILY_MIN_TRAIN_ROWS,
+            forced_model=HF_DAILY_CUSTOM_MODEL,
+        )
+    preds = pipeline.predict_daily_schedule()
+    if HF_ATTACH_POLYMARKET:
+        from betting_bot import _attach_market_context
+
+        _attach_market_context(
+            predictions_path=str(PRED_FILE),
+            output_path=str(DATA_DIR / "hf_daily_prediction_markets.json"),
+        )
+    return {"ok": True, "append_yesterday": append_y, "append_today": append_t, "predictions": preds}
 
 
 def _predictions_for_date(payload: dict[str, Any], date_value: str) -> dict[str, Any]:
@@ -123,6 +152,13 @@ def _startup() -> None:
             return
         if not scheduler.running:
             scheduler.add_job(
+                _run_hf_active_cycle,
+                "interval",
+                minutes=max(5, HF_ACTIVE_SCAN_MINUTES),
+                id="hf_active_cycle",
+                replace_existing=True,
+            )
+            scheduler.add_job(
                 _run_hf_daily_pipeline,
                 "cron",
                 hour=HF_DAILY_RUN_HOUR_ET,
@@ -131,14 +167,19 @@ def _startup() -> None:
                 replace_existing=True,
             )
             scheduler.start()
-            logger.info("HF scheduler started at %02d:%02d ET", HF_DAILY_RUN_HOUR_ET, HF_DAILY_RUN_MINUTE_ET)
+            logger.info(
+                "HF scheduler started: active every %d min, daily at %02d:%02d ET",
+                max(5, HF_ACTIVE_SCAN_MINUTES),
+                HF_DAILY_RUN_HOUR_ET,
+                HF_DAILY_RUN_MINUTE_ET,
+            )
         if HF_AUTORUN_ON_STARTUP:
             def _runner() -> None:
                 try:
-                    _run_hf_daily_pipeline()
-                    logger.info("HF startup autorun completed")
+                    _run_hf_active_cycle()
+                    logger.info("HF startup active cycle completed")
                 except Exception as exc:
-                    logger.exception("HF startup autorun failed: %s", exc)
+                    logger.exception("HF startup active cycle failed: %s", exc)
 
             threading.Thread(target=_runner, daemon=True, name="hf-startup-autorun").start()
         _startup_done = True
@@ -164,6 +205,7 @@ def root() -> dict[str, Any]:
             "/polymarket/positions",
             "/run/bootstrap",
             "/run/daily",
+            "/run/active",
         ],
     }
 
@@ -250,5 +292,13 @@ def run_bootstrap(days_back: int = 365) -> dict[str, Any]:
 def run_daily() -> dict[str, Any]:
     try:
         return _run_hf_daily_pipeline()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/run/active")
+def run_active() -> dict[str, Any]:
+    try:
+        return _run_hf_active_cycle()
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc

@@ -41,6 +41,7 @@ Recommended:
 - `HF_BOOTSTRAP_DAYS=365`
 - `HF_DAILY_RUN_HOUR_ET=4`
 - `HF_DAILY_RUN_MINUTE_ET=15`
+- `HF_ACTIVE_SCAN_MINUTES=30`
 - `HF_DAILY_CUSTOM_MODEL=auto`
 - `HF_DAILY_MIN_TRAIN_ROWS=200`
 - `POLYMARKET_DRY_RUN=true`
@@ -56,9 +57,11 @@ Recommended:
 - `GET /polymarket/positions`
 - `POST /run/bootstrap?days_back=365`
 - `POST /run/daily`
+- `POST /run/active`
 
 ## Notes
 
-- Daily scheduling is done inside `app.py` via APScheduler.
+- Active scheduling is done inside `app.py` via APScheduler interval job.
+- Full retrain scheduling is done daily via cron job.
 - Startup autorun is enabled by default and will create/push dataset + model artifacts when empty.
 - Use this Space URL as `HF_SPACE_API_URL` in Vercel so dashboard reads live predictions.

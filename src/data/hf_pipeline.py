@@ -22,6 +22,7 @@ import io
 import json
 import logging
 import os
+import re
 import tempfile
 import time
 from dataclasses import dataclass, field
@@ -61,6 +62,18 @@ class HFDirectPipeline:
     _TRAIN_FEATURES = ["home_team", "away_team", "sport", "season", "month", "day_of_week"]
     _CAT_FEATURES = ["home_team", "away_team", "sport"]
     _NUM_FEATURES = ["season", "month", "day_of_week"]
+    _POLYMARKET_SPORT_ALIASES = {
+        "baseball": "mlb",
+        "mlb": "mlb",
+        "basketball": "nba",
+        "nba": "nba",
+        "hockey": "nhl",
+        "nhl": "nhl",
+        "soccer": "soccer",
+        "football": "soccer",
+        "tennis": "tennis",
+        "golf": "golf",
+    }
 
     def __init__(
         self,
@@ -702,7 +715,22 @@ class HFDirectPipeline:
         rows += self._fetch_nba_upcoming(day)
         rows += self._fetch_nhl_upcoming(day)
         rows += self._fetch_soccer_upcoming(day)
-        return rows
+        rows += self._fetch_polymarket_upcoming(day)
+
+        deduped = []
+        seen = set()
+        for row in rows:
+            key = (
+                str(row.get("sport") or "").lower(),
+                str(row.get("game_date") or ""),
+                str(row.get("away_team") or "").lower(),
+                str(row.get("home_team") or "").lower(),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(row)
+        return deduped
 
     def _fetch_mlb_upcoming(self, day: datetime.date) -> list[dict]:
         rows: list[dict] = []
@@ -883,6 +911,74 @@ class HFDirectPipeline:
             except Exception as exc:
                 logger.debug("[hf_pipeline] Jeff Sackmann %s: %s", year, exc)
         return rows
+
+    def _fetch_polymarket_upcoming(self, day: datetime.date) -> list[dict]:
+        rows: list[dict] = []
+        try:
+            resp = requests.get(
+                "https://gamma-api.polymarket.com/markets",
+                params={"active": "true", "closed": "false", "limit": 300},
+                timeout=25,
+            )
+            resp.raise_for_status()
+            markets = resp.json() or []
+        except Exception as exc:
+            logger.debug("[hf_pipeline] polymarket upcoming fetch failed: %s", exc)
+            return rows
+
+        for m in markets:
+            if not isinstance(m, dict):
+                continue
+            event_iso = str(m.get("startDate") or m.get("endDate") or "").strip()
+            if not event_iso:
+                continue
+            event_day = event_iso[:10]
+            if event_day != day.isoformat():
+                continue
+            home, away = self._parse_polymarket_matchup(str(m.get("question") or m.get("title") or ""))
+            if not home or not away:
+                continue
+            sport_raw = str(m.get("sport") or m.get("category") or "").strip().lower()
+            sport = self._POLYMARKET_SPORT_ALIASES.get(sport_raw, "")
+            if not sport:
+                for k, v in self._POLYMARKET_SPORT_ALIASES.items():
+                    if k in sport_raw:
+                        sport = v
+                        break
+            if not sport:
+                continue
+            rows.append(
+                {
+                    "sport": sport,
+                    "league": str(m.get("seriesTicker") or m.get("eventSlug") or "Polymarket"),
+                    "home_team": home,
+                    "away_team": away,
+                    "game_date": event_day,
+                    "game_time": event_iso,
+                    "game_id": str(m.get("id") or m.get("slug") or ""),
+                }
+            )
+        return rows
+
+    def _parse_polymarket_matchup(self, text: str) -> tuple[str, str]:
+        raw = " ".join(str(text or "").split())
+        if not raw:
+            return "", ""
+        patterns = [
+            r"(?P<a>.+?)\s+vs\.?\s+(?P<b>.+)",
+            r"(?P<a>.+?)\s+v\.?\s+(?P<b>.+)",
+            r"(?P<a>.+?)\s+@\s+(?P<b>.+)",
+            r"(?P<a>.+?)\s+at\s+(?P<b>.+)",
+        ]
+        for pat in patterns:
+            m = re.search(pat, raw, flags=re.IGNORECASE)
+            if not m:
+                continue
+            a = str(m.group("a") or "").strip(" ?!,:;")
+            b = str(m.group("b") or "").strip(" ?!,:;")
+            if a and b and a.lower() != b.lower():
+                return b, a
+        return "", ""
 
     # ──────────────────────────────────────────────────────────
     # Private helpers
