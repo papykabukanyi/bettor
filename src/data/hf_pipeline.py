@@ -171,7 +171,6 @@ class HFDirectPipeline:
 
     def train_and_publish_best_model(self, min_rows: int = 200, forced_model: str = "auto") -> TrainSummary:
         """Daily: train best classifier on full HF dataset and publish to HF Model Hub."""
-        from datasets import load_dataset
         import joblib
         import pandas as pd
         from sklearn.compose import ColumnTransformer
@@ -184,9 +183,8 @@ class HFDirectPipeline:
         if not self._ok or not self._api:
             raise RuntimeError("HF pipeline not configured. Set HF_API_KEY.")
 
-        logger.info("[hf_pipeline] Loading dataset from %s", self.dataset_repo_id)
-        ds = load_dataset(self.dataset_repo_id, "games", split="train")
-        df = ds.to_pandas()
+        logger.info("[hf_pipeline] Loading games parquet shards from %s", self.dataset_repo_id)
+        df = self._load_games_dataframe_from_hub()
         if df.empty:
             raise RuntimeError("HF dataset has no rows in games/train split")
 
@@ -966,6 +964,41 @@ class HFDirectPipeline:
         else:
             df["month"] = 6
             df["day_of_week"] = 0
+        return df
+
+    def _load_games_dataframe_from_hub(self):
+        import pandas as pd
+        from huggingface_hub import hf_hub_download
+
+        if not self._ok or not self._api:
+            return pd.DataFrame()
+
+        try:
+            files = self._api.list_repo_files(repo_id=self.dataset_repo_id, repo_type="dataset")
+        except Exception as exc:
+            logger.warning("[hf_pipeline] list_repo_files failed: %s", exc)
+            return pd.DataFrame()
+
+        game_files = [f for f in files if str(f).startswith("data/games/") and str(f).endswith(".parquet")]
+        if not game_files:
+            return pd.DataFrame()
+
+        frames = []
+        for path_in_repo in game_files:
+            try:
+                local_path = hf_hub_download(
+                    repo_id=self.dataset_repo_id,
+                    repo_type="dataset",
+                    filename=path_in_repo,
+                    token=self.token,
+                )
+                frames.append(pd.read_parquet(local_path))
+            except Exception as exc:
+                logger.debug("[hf_pipeline] parquet read failed for %s: %s", path_in_repo, exc)
+                continue
+        if not frames:
+            return pd.DataFrame()
+        df = pd.concat(frames, ignore_index=True, sort=False)
         return df
 
     def _write_status(self, patch: dict) -> None:

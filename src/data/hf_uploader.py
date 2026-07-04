@@ -223,7 +223,17 @@ class HFUploader:
             self._ok = False
             return
 
-        self._repo_id = f"{self._username}/{_repo_name}"
+        repo_raw = str(_repo_name or "").strip().strip("/")
+        if "/" in repo_raw:
+            owner, name = (repo_raw.split("/", 1) + [""])[:2]
+            owner = owner.strip()
+            name = name.strip()
+            if not owner or not name:
+                self._repo_id = f"{self._username}/{name or owner}"
+            else:
+                self._repo_id = f"{owner}/{name}"
+        else:
+            self._repo_id = f"{self._username}/{repo_raw}"
         self._buffers: dict[str, list[dict]] = {s: [] for s in self.VALID_SUBSETS}
         self._ok = True
 
