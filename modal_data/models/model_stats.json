@@ -1,14 +1,14 @@
 {
   "ok": true,
-  "trained_at": "2026-07-03T08:14:29.522851+00:00",
-  "version": "2026-07-03_08-14-29",
-  "rows": 3985,
+  "trained_at": "2026-07-04T08:06:37.089356+00:00",
+  "version": "2026-07-04_08-06-37",
+  "rows": 3998,
   "best_model": "logistic_regression",
-  "best_score": 0.544176,
+  "best_score": 0.548137,
   "candidate_scores": {
-    "logistic_regression": 0.544176,
-    "random_forest": 0.53685,
-    "gradient_boosting": 0.522853
+    "logistic_regression": 0.548137,
+    "random_forest": 0.539065,
+    "gradient_boosting": 0.542874
   },
   "candidate_count": 3,
   "sports_covered": [
