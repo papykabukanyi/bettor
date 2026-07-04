@@ -13,7 +13,6 @@
     }
   ],
   "env": {
-    "PYTHON_VERSION": "3.11",
-    "HF_SPACE_API_URL": "@hf_space_api_url"
+    "PYTHON_VERSION": "3.11"
   }
 }
