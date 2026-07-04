@@ -1,21 +1,26 @@
-# Bettor Free Daily ML Pipeline
+# Bettor HF-First Zero-Cost Pipeline
 
-Production-ready sports prediction stack with a free daily pipeline, a Flask/Vercel dashboard, and optional Polymarket auto-submission.
+Production-ready sports prediction stack using Hugging Face for dataset/model storage, HF Space API inference, and a Vercel dashboard.
+
+## Cost Plan ($0 target)
+
+| Component | Tool | Cost |
+|---|---|---|
+| Dataset storage | HF Dataset Hub | Free (up to 5GB) |
+| Model storage | HF Model Hub | Free |
+| Training GPU | HF Spaces T4 | Free tier |
+| Inference API | HF Spaces FastAPI | Free tier minutes |
+| Data sources | MLB API, football-data.org, Jeff Sackmann | Free |
 
 ## Architecture
 
 ```text
-GitHub Actions (free scheduler)
-├── 02:10 ET equivalent: run_free_pipeline.py -> fetch -> train -> predict
-├── Commits fresh JSON snapshots to modal_data/
-└── Vercel auto-redeploys with new predictions
-
-Vercel / Flask dashboard
-└── src/dashboard.py + src/templates/dashboard.html
-    -> reads free local snapshots by default
-    -> can proxy an optional provider API
-    -> renders glassmorphism dashboard
-    -> surfaces prediction + Polymarket status
+One-time: bootstrap 1 year history -> HF Dataset Hub
+Daily: append new results -> same HF Dataset
+Daily: retrain best model -> HF Model Hub
+Anytime: call HF Space FastAPI inference endpoint
+Dashboard: Vercel Flask UI -> proxies HF Space API or local HF artifacts
+Execution: Polymarket (Kalshi removed from active flow)
 ```
 
 ## Quick start
@@ -24,34 +29,30 @@ Vercel / Flask dashboard
    ```powershell
    pip install -r requirements.txt
    ```
-2. Copy `.env.example` to `.env` and fill in API + Polymarket credentials.
-3. Seed local data:
+2. Copy `.env.example` to `.env` and set at least:
+   - `HF_API_KEY`
+   - `HF_DATASET_REPO`
+   - `HF_MODEL_REPO`
+   - `FOOTBALL_DATA_API_KEY`
+   - Polymarket credentials
+3. Run pipeline:
    ```powershell
-   python scripts\run_free_pipeline.py
+   python src\betting_bot.py --hf-bootstrap --hf-days-back 365
+   python src\betting_bot.py --hf-daily-run --hf-attach-markets
    ```
-4. Start the dashboard locally:
+4. Start dashboard:
    ```powershell
    python src\dashboard.py
    ```
-5. Open `http://127.0.0.1:5000`.
 
-## Daily automation (free)
+## Automation (without GitHub Actions dependency)
 
-Workflow file: `.github/workflows/free-daily-pipeline.yml`
-
-- Runs every day on GitHub-hosted runner
-- Updates:
-  - `modal_data/pipeline/*.json`
-  - `modal_data/models/*.json`
-  - `modal_data/predictions/latest.json`
-  - `modal_data/polymarket/*.json`
-- Commits snapshots so Vercel serves fresh predictions without paid infrastructure
-
-Detailed deployment instructions live in [`README_MODAL.md`](README_MODAL.md).
+- Use HF Space FastAPI app (`hf_space_api/app.py`) with startup autorun + daily schedule.
+- Set `HF_SPACE_API_URL` in Vercel to your deployed Space endpoint.
 
 ## Dashboard API
 
-The dashboard now proxies Modal endpoints:
+The dashboard proxies provider endpoints:
 
 - `GET /api/predictions/status`
 - `GET /api/predictions/today`
@@ -63,6 +64,5 @@ The dashboard now proxies Modal endpoints:
 
 ## Notes
 
-- Local `modal run ...` commands write to `modal_data\` for easy iteration.
-- Remote Modal deployments write to the mounted Modal Volume.
 - Polymarket defaults to dry-run mode until `POLYMARKET_DRY_RUN=false`.
+- HF artifacts are written to `data/hf_pipeline_status.json`, `data/hf_daily_predictions.json`, and `data/training_history.json`.

@@ -1,16 +1,14 @@
-﻿"""
-Unified Auto-Betting Engine — Polymarket + Kalshi
-==================================================
-Continuously scans BOTH Polymarket and Kalshi for markets matching the
-bot's predictions, places $2 bets on each newly matched market, and tracks
-every placed bet in real time.
+"""
+Unified Auto-Betting Engine — Polymarket
+========================================
+Continuously scans Polymarket for markets matching the bot's predictions,
+places bets, and tracks every placed bet in real time.
 
 How it works:
   1. Every AUTOBET_POLL_SEC, collect today's high-confidence predictions
-  2. Resolve them against BOTH exchanges simultaneously (parallel)
+  2. Resolve them against Polymarket
   3. For each prediction matched on Polymarket  → place $2 market order
-  4. For each prediction matched on Kalshi      → place $2 limit order
-  5. Skip any market already bet; skip if balance < $2
+  4. Skip any market already bet; skip if balance < $2
   6. Save state to data/polymarket_autobet_state.json after every cycle
   7. Dashboard /api/polymarket/autobet-status serves live bet history
 
@@ -23,7 +21,7 @@ Environment overrides (.env or shell):
     AUTOBET_MIN_CONFIDENCE     = 52     (min model confidence %, 50-98)
     AUTOBET_DRY_RUN            = 0      (1 = simulate, no real orders)
     AUTOBET_MAX_BETS_PER_CYCLE = 10     (max new bets per cycle total)
-    AUTOBET_EXCHANGES          = polymarket,kalshi  (comma-separated, order = priority)
+    AUTOBET_EXCHANGES          = polymarket
 """
 
 from __future__ import annotations
@@ -55,7 +53,7 @@ AUTOBET_POLL_SEC           = max(30, int(os.getenv("AUTOBET_POLL_SEC", "300") or
 AUTOBET_MIN_CONFIDENCE     = max(50, min(98, int(os.getenv("AUTOBET_MIN_CONFIDENCE", "52") or "52")))
 AUTOBET_DRY_RUN            = str(os.getenv("AUTOBET_DRY_RUN", "0")).strip().lower() in {"1", "true", "yes"}
 AUTOBET_MAX_BETS_PER_CYCLE = max(1, int(os.getenv("AUTOBET_MAX_BETS_PER_CYCLE", "10") or "10"))
-AUTOBET_EXCHANGES          = [e.strip().lower() for e in os.getenv("AUTOBET_EXCHANGES", "polymarket,kalshi").split(",") if e.strip()]
+AUTOBET_EXCHANGES          = [e.strip().lower() for e in os.getenv("AUTOBET_EXCHANGES", "polymarket").split(",") if e.strip()]
 DASHBOARD_PORT             = int(os.getenv("PORT", "5000") or "5000")
 
 STATE_PATH = os.path.join(ROOT_DIR, "data", "polymarket_autobet_state.json")

@@ -20,11 +20,12 @@ seaborn
 # Utilities
 python-dotenv
 tabulate
-modal
 
 # Web dashboard
 flask
 gunicorn
+fastapi
+uvicorn
 
 # Database
 psycopg2-binary
@@ -38,11 +39,8 @@ APScheduler
 # Reddit API (sentiment)
 praw
 
-# Cryptography (Kalshi RSA signing)
+# Cryptography (Polymarket signing)
 cryptography
-
-# WebSocket client (Kalshi live connection)
-websockets>=12.0
 
 # Polymarket CLOB trading client
 py-clob-client

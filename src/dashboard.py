@@ -1,4 +1,4 @@
-"""Modal-backed web dashboard."""
+"""HF-backed web dashboard with optional HF Space API proxy."""
 
 from __future__ import annotations
 
@@ -13,9 +13,17 @@ import requests
 from flask import Flask, jsonify, render_template
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
-LOCAL_MODAL_DATA = ROOT_DIR / "modal_data"
-PROVIDER_API_URL = str(os.getenv("PREDICTIONS_API_URL", "") or os.getenv("MODAL_API_URL", "") or "").strip().rstrip("/")
-REQUEST_TIMEOUT = int(os.getenv("MODAL_PROXY_TIMEOUT", "12") or "12")
+DATA_DIR = ROOT_DIR / "data"
+HF_STATUS_FILE = DATA_DIR / "hf_pipeline_status.json"
+HF_PREDICTIONS_FILE = DATA_DIR / "hf_daily_predictions.json"
+HF_HISTORY_FILE = DATA_DIR / "training_history.json"
+HF_MARKETS_FILE = DATA_DIR / "hf_daily_prediction_markets.json"
+PROVIDER_API_URL = str(
+    os.getenv("HF_SPACE_API_URL", "")
+    or os.getenv("PREDICTIONS_API_URL", "")
+    or ""
+).strip().rstrip("/")
+REQUEST_TIMEOUT = int(os.getenv("HF_PROXY_TIMEOUT", "15") or "15")
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
@@ -30,7 +38,7 @@ def _load_json(path: Path, default: Any) -> Any:
         return default
 
 
-def _modal_or_local(path: str, local_file: Path, *, default: Any) -> tuple[Any, bool, str]:
+def _provider_or_local(path: str, local_file: Path, *, default: Any) -> tuple[Any, bool, str]:
     error = ""
     if PROVIDER_API_URL:
         try:
@@ -39,22 +47,32 @@ def _modal_or_local(path: str, local_file: Path, *, default: Any) -> tuple[Any, 
             return response.json(), True, ""
         except Exception as exc:
             error = str(exc)
-            logger.warning("Modal proxy failed for %s: %s", path, exc)
+            logger.warning("Provider proxy failed for %s: %s", path, exc)
     if local_file.exists():
         return _load_json(local_file, default), False, error
-    return default, False, error or "No provider API URL is configured and no local prediction snapshot exists."
+    return default, False, error or "HF provider API URL is not configured and no local HF snapshot exists."
 
 
 def _envelope(payload: Any, source_live: bool, error: str = "") -> dict[str, Any]:
-    if isinstance(payload, dict):
-        wrapped = dict(payload)
-    else:
-        wrapped = {"data": payload}
+    wrapped = dict(payload) if isinstance(payload, dict) else {"data": payload}
     wrapped.setdefault("ok", not bool(error))
-    wrapped.setdefault("source", "modal" if source_live else "local")
+    wrapped.setdefault("source", "provider" if source_live else "local")
     if error:
         wrapped.setdefault("warning", error)
     return wrapped
+
+
+def _predictions_for_date(payload: dict[str, Any], target_date: str) -> dict[str, Any]:
+    rows = [p for p in (payload.get("predictions") or []) if str((p or {}).get("game_date") or "") == target_date]
+    return {
+        "ok": True,
+        "date": target_date,
+        "generated_at": payload.get("generated_at", ""),
+        "prediction_count": len(rows),
+        "model_version": payload.get("model_version", ""),
+        "model_name": payload.get("model_type", ""),
+        "predictions": rows,
+    }
 
 
 @app.route("/")
@@ -64,109 +82,154 @@ def index():
 
 @app.route("/api/predictions/status")
 def predictions_status():
-    payload, source_live, error = _modal_or_local("/status", LOCAL_MODAL_DATA / "pipeline" / "status.json", default={})
-    if not isinstance(payload, dict) or "metrics" not in payload:
-        pipeline = payload if isinstance(payload, dict) else {}
-        payload = {
-            "ok": bool(pipeline),
-            "updated_at": pipeline.get("updated_at", "") if isinstance(pipeline, dict) else "",
-            "pipeline": pipeline,
-            "metrics": {},
-            "model": _load_json(LOCAL_MODAL_DATA / "models" / "model_stats.json", {}),
-            "polymarket": {
-                "submissions": (_load_json(LOCAL_MODAL_DATA / "polymarket" / "submissions.json", {}) or {}).get("summary", {}),
-                "positions": (_load_json(LOCAL_MODAL_DATA / "polymarket" / "positions.json", {}) or {}).get("summary", {}),
+    payload, source_live, error = _provider_or_local("/status", HF_STATUS_FILE, default={})
+    if isinstance(payload, dict) and "pipeline" in payload and "metrics" in payload:
+        return jsonify(_envelope(payload, source_live, error))
+
+    status = payload if isinstance(payload, dict) else {}
+    preds = _load_json(HF_PREDICTIONS_FILE, {})
+    model = {
+        "best_model": status.get("best_model", ""),
+        "version": status.get("model_version", ""),
+        "best_score": status.get("cv_roc_auc", 0),
+        "rows": status.get("trained_rows", 0),
+        "sports_covered": status.get("sports_covered", []),
+    }
+    transformed = {
+        "ok": bool(status),
+        "updated_at": status.get("updated_at", ""),
+        "pipeline": {
+            "fetch": {
+                "ok": status.get("ok", False),
+                "updated_at": status.get("append_completed_at", ""),
+                "completed_games_total": status.get("append_records", 0),
             },
-        }
-    return jsonify(_envelope(payload, source_live, error))
+            "train": {
+                "ok": bool(status.get("best_model")),
+                "trained_at": status.get("trained_at", ""),
+                "rows": status.get("trained_rows", 0),
+                "best_model": status.get("best_model", ""),
+            },
+            "predict": {
+                "ok": status.get("prediction_count", 0) >= 0,
+                "generated_at": status.get("predict_completed_at", ""),
+                "prediction_count": status.get("prediction_count", 0),
+            },
+            "polymarket": {"ok": True},
+        },
+        "metrics": {
+            "total_predictions": int(preds.get("prediction_count") or 0),
+            "today_predictions": len([p for p in (preds.get("predictions") or []) if p.get("game_date") == preds.get("today")]),
+            "tomorrow_predictions": len([p for p in (preds.get("predictions") or []) if p.get("game_date") == preds.get("tomorrow")]),
+            "active_models": 1 if model.get("best_model") else 0,
+            "win_rate": float(model.get("best_score") or 0),
+        },
+        "model": model,
+        "polymarket": {"submissions": {}, "positions": {}},
+    }
+    return jsonify(_envelope(transformed, source_live, error))
 
 
 @app.route("/api/predictions/today")
 def predictions_today():
-    payload, source_live, error = _modal_or_local("/predictions/today", LOCAL_MODAL_DATA / "predictions" / "latest.json", default={})
-    if isinstance(payload, dict) and "predictions" in payload and "date" not in payload:
-        target_date = str(payload.get("today") or "")
-        payload = {
-            "ok": True,
-            "date": target_date,
-            "generated_at": payload.get("generated_at", ""),
-            "prediction_count": len([p for p in payload.get("predictions", []) if str((p or {}).get("game_date") or "") == target_date]),
-            "model_version": payload.get("model_version", ""),
-            "model_name": payload.get("model_name", ""),
-            "predictions": [p for p in payload.get("predictions", []) if str((p or {}).get("game_date") or "") == target_date],
-        }
-    return jsonify(_envelope(payload, source_live, error))
+    payload, source_live, error = _provider_or_local("/predictions/today", HF_PREDICTIONS_FILE, default={})
+    if isinstance(payload, dict) and "date" in payload and "predictions" in payload:
+        return jsonify(_envelope(payload, source_live, error))
+    if not isinstance(payload, dict):
+        return jsonify(_envelope({}, source_live, error))
+    return jsonify(_envelope(_predictions_for_date(payload, str(payload.get("today") or "")), source_live, error))
 
 
 @app.route("/api/predictions/tomorrow")
 def predictions_tomorrow():
-    payload, source_live, error = _modal_or_local("/predictions/tomorrow", LOCAL_MODAL_DATA / "predictions" / "latest.json", default={})
-    if isinstance(payload, dict) and "predictions" in payload and "date" not in payload:
-        target_date = str(payload.get("tomorrow") or "")
-        payload = {
-            "ok": True,
-            "date": target_date,
-            "generated_at": payload.get("generated_at", ""),
-            "prediction_count": len([p for p in payload.get("predictions", []) if str((p or {}).get("game_date") or "") == target_date]),
-            "model_version": payload.get("model_version", ""),
-            "model_name": payload.get("model_name", ""),
-            "predictions": [p for p in payload.get("predictions", []) if str((p or {}).get("game_date") or "") == target_date],
-        }
-    return jsonify(_envelope(payload, source_live, error))
+    payload, source_live, error = _provider_or_local("/predictions/tomorrow", HF_PREDICTIONS_FILE, default={})
+    if isinstance(payload, dict) and "date" in payload and "predictions" in payload:
+        return jsonify(_envelope(payload, source_live, error))
+    if not isinstance(payload, dict):
+        return jsonify(_envelope({}, source_live, error))
+    return jsonify(_envelope(_predictions_for_date(payload, str(payload.get("tomorrow") or "")), source_live, error))
 
 
 @app.route("/api/model/stats")
 def model_stats():
-    payload, source_live, error = _modal_or_local("/model/stats", LOCAL_MODAL_DATA / "models" / "model_stats.json", default={})
-    if isinstance(payload, dict) and "current_model" not in payload:
-        payload = {
-            "ok": bool(payload),
-            "updated_at": payload.get("trained_at", "") if isinstance(payload, dict) else "",
-            "current_model": payload if isinstance(payload, dict) else {},
-            "history": _load_json(LOCAL_MODAL_DATA / "models" / "training_history.json", []),
-        }
-    return jsonify(_envelope(payload, source_live, error))
+    payload, source_live, error = _provider_or_local("/model/stats", HF_STATUS_FILE, default={})
+    if isinstance(payload, dict) and "current_model" in payload:
+        return jsonify(_envelope(payload, source_live, error))
+    status = payload if isinstance(payload, dict) else {}
+    transformed = {
+        "ok": bool(status),
+        "updated_at": status.get("trained_at", ""),
+        "current_model": {
+            "best_model": status.get("best_model", ""),
+            "version": status.get("model_version", ""),
+            "best_score": status.get("cv_roc_auc", 0),
+            "rows": status.get("trained_rows", 0),
+            "sports_covered": status.get("sports_covered", []),
+            "candidate_count": 3,
+        },
+        "history": _load_json(HF_HISTORY_FILE, []),
+    }
+    return jsonify(_envelope(transformed, source_live, error))
+
+
+def _local_submissions_payload() -> dict[str, Any]:
+    markets = _load_json(HF_MARKETS_FILE, {})
+    rows = []
+    summary = {"evaluated": 0, "placed": 0, "dry_run": 0, "failed": 0, "skipped": 0, "available_buying_power_usd": 0.0}
+    for market in (markets.get("markets") or []):
+        if not isinstance(market, dict):
+            continue
+        status = str(market.get("polymarket_status") or "unavailable").strip().lower()
+        rows.append(
+            {
+                "submitted_at": market.get("detected_at") or "",
+                "game": market.get("game") or "",
+                "pick": market.get("pick") or "",
+                "status": status or "unavailable",
+                "price": market.get("polymarket_price"),
+                "amount_usd": market.get("stake_usd") or 0,
+                "reason": market.get("polymarket_message") or "",
+            }
+        )
+        summary["evaluated"] += 1
+        if status == "matched":
+            summary["placed"] += 1
+        elif status in {"unavailable", "done"}:
+            summary["skipped"] += 1
+        elif status in {"error", "failed"}:
+            summary["failed"] += 1
+    return {"ok": True, "updated_at": markets.get("generated_at", ""), "summary": summary, "submissions": rows}
 
 
 @app.route("/api/polymarket/submissions")
 def polymarket_submissions():
-    payload, source_live, error = _modal_or_local("/polymarket/submissions", LOCAL_MODAL_DATA / "polymarket" / "submissions.json", default={})
-    return jsonify(_envelope(payload, source_live, error))
+    payload, source_live, error = _provider_or_local("/polymarket/submissions", HF_MARKETS_FILE, default={})
+    if isinstance(payload, dict) and "summary" in payload and "submissions" in payload:
+        return jsonify(_envelope(payload, source_live, error))
+    return jsonify(_envelope(_local_submissions_payload(), source_live, error))
 
 
 @app.route("/api/polymarket/positions")
 def polymarket_positions():
-    payload, source_live, error = _modal_or_local("/polymarket/positions", LOCAL_MODAL_DATA / "polymarket" / "positions.json", default={})
-    return jsonify(_envelope(payload, source_live, error))
+    payload, source_live, error = _provider_or_local("/polymarket/positions", HF_MARKETS_FILE, default={})
+    if isinstance(payload, dict) and "summary" in payload and "positions" in payload:
+        return jsonify(_envelope(payload, source_live, error))
+    local = {"ok": True, "updated_at": "", "summary": {"active_positions": 0, "open_notional_usd": 0, "estimated_pnl_usd": 0}, "positions": []}
+    return jsonify(_envelope(local, source_live, error))
 
 
 @app.route("/api/polymarket/status")
 def polymarket_status():
-    submissions = _load_json(LOCAL_MODAL_DATA / "polymarket" / "submissions.json", {})
-    positions = _load_json(LOCAL_MODAL_DATA / "polymarket" / "positions.json", {})
-    if PROVIDER_API_URL:
-        try:
-            sub_resp = requests.get(urljoin(PROVIDER_API_URL + "/", "polymarket/submissions"), timeout=REQUEST_TIMEOUT)
-            pos_resp = requests.get(urljoin(PROVIDER_API_URL + "/", "polymarket/positions"), timeout=REQUEST_TIMEOUT)
-            sub_resp.raise_for_status()
-            pos_resp.raise_for_status()
-            submissions = sub_resp.json()
-            positions = pos_resp.json()
-            source = "modal"
-            warning = ""
-        except Exception as exc:
-            source = "local"
-            warning = str(exc)
-    else:
-        source = "local"
-        warning = ""
+    sub = polymarket_submissions().get_json(silent=True) or {}
+    pos = polymarket_positions().get_json(silent=True) or {}
+    source = "provider" if (sub.get("source") == "provider" or pos.get("source") == "provider") else "local"
     payload = {
         "ok": True,
         "source": source,
-        "warning": warning,
-        "updated_at": (submissions or {}).get("updated_at") or (positions or {}).get("updated_at") or "",
-        "submissions": submissions,
-        "positions": positions,
+        "warning": sub.get("warning") or pos.get("warning") or "",
+        "updated_at": (sub.get("updated_at") or pos.get("updated_at") or ""),
+        "submissions": sub,
+        "positions": pos,
     }
     return jsonify(payload)
 

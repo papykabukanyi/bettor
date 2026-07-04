@@ -76,15 +76,7 @@ def _attach_market_context(predictions_path: str, output_path: str) -> dict[str,
         result = {"ok": True, "count": 0, "markets": []}
     else:
         enriched = list(candidates)
-        kalshi_error = ""
         polymarket_error = ""
-        try:
-            from data.kalshi import attach_kalshi_to_bets
-
-            enriched = attach_kalshi_to_bets(enriched)
-        except Exception as exc:
-            kalshi_error = str(exc)
-            print(f"[HF][MARKETS] Kalshi enrichment skipped: {exc}")
         try:
             from data.polymarket import attach_polymarket_to_bets
 
@@ -95,7 +87,6 @@ def _attach_market_context(predictions_path: str, output_path: str) -> dict[str,
         result = {
             "ok": True,
             "count": len(enriched),
-            "kalshi_error": kalshi_error,
             "polymarket_error": polymarket_error,
             "markets": enriched,
         }
@@ -213,12 +204,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--hf-attach-markets",
         action="store_true",
-        help="Attach Kalshi and Polymarket market context after an HF daily run",
+        help="Attach Polymarket market context after an HF daily run",
     )
     parser.add_argument(
         "--hf-markets-output",
         default=DEFAULT_MARKETS_OUTPUT,
-        help="File path for Kalshi and Polymarket enrichment output",
+        help="File path for Polymarket enrichment output",
     )
     return parser
 

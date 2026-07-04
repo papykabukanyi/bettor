@@ -69,13 +69,23 @@ class HFDirectPipeline:
         model_repo: str | None = None,
     ):
         try:
-            from config import HF_API_KEY, HF_DATASET_REPO, HF_MODEL_REPO
+            from config import (
+                HF_API_KEY,
+                HF_DATASET_REPO,
+                HF_MODEL_REPO,
+                FOOTBALL_DATA_API_KEY,
+                TENNIS_JEFF_SACKMANN_DIR,
+            )
         except Exception:
             HF_API_KEY = os.getenv("HF_API_KEY", "")
             HF_DATASET_REPO = os.getenv("HF_DATASET_REPO", "sportprediction")
             HF_MODEL_REPO = os.getenv("HF_MODEL_REPO", "sports-win-model")
+            FOOTBALL_DATA_API_KEY = os.getenv("FOOTBALL_DATA_API_KEY", "")
+            TENNIS_JEFF_SACKMANN_DIR = os.getenv("TENNIS_JEFF_SACKMANN_DIR", "")
 
         self.token = str(token or HF_API_KEY or "").strip()
+        self.football_data_api_key = str(FOOTBALL_DATA_API_KEY or "").strip()
+        self.tennis_sackmann_dir = str(TENNIS_JEFF_SACKMANN_DIR or "").strip()
         self.uploader = HFUploader(token=self.token, repo_name=dataset_repo or HF_DATASET_REPO)
         self.dataset_repo_id = getattr(self.uploader, "_repo_id", "")
         self.model_repo_name = str(model_repo or HF_MODEL_REPO or "sports-win-model").strip()
@@ -488,6 +498,7 @@ class HFDirectPipeline:
         rows += self._fetch_nba_games(start, end)
         rows += self._fetch_nhl_games(start, end)
         rows += self._fetch_soccer_games(start, end)
+        rows += self._fetch_tennis_games_jeff_sackmann(start, end)
         return rows
 
     def _fetch_mlb_games(self, start: datetime.date, end: datetime.date) -> list[dict]:
@@ -601,6 +612,57 @@ class HFDirectPipeline:
         return rows
 
     def _fetch_soccer_games(self, start: datetime.date, end: datetime.date) -> list[dict]:
+        rows = self._fetch_soccer_games_football_data(start, end)
+        if rows:
+            return rows
+        return self._fetch_soccer_games_thesportsdb(start, end)
+
+    def _fetch_soccer_games_football_data(self, start: datetime.date, end: datetime.date) -> list[dict]:
+        rows: list[dict] = []
+        if not self.football_data_api_key:
+            return rows
+        headers = {"X-Auth-Token": self.football_data_api_key}
+        competitions = ("PL", "PD", "SA", "BL1", "FL1", "PPL")
+        for comp in competitions:
+            try:
+                resp = requests.get(
+                    f"https://api.football-data.org/v4/competitions/{comp}/matches",
+                    params={"dateFrom": start.isoformat(), "dateTo": end.isoformat(), "status": "FINISHED"},
+                    headers=headers,
+                    timeout=25,
+                )
+                resp.raise_for_status()
+                for m in (resp.json() or {}).get("matches", []):
+                    score = m.get("score") or {}
+                    full = score.get("fullTime") or {}
+                    hs = full.get("home")
+                    as_ = full.get("away")
+                    ht = str(((m.get("homeTeam") or {}).get("name")) or "").strip()
+                    at = str(((m.get("awayTeam") or {}).get("name")) or "").strip()
+                    gd = str(m.get("utcDate") or "")[:10]
+                    if hs is None or as_ is None or not ht or not at or not gd:
+                        continue
+                    rows.append(
+                        self._make_game_record(
+                            game_id=str(m.get("id") or ""),
+                            sport="soccer",
+                            league=str((m.get("competition") or {}).get("name") or comp),
+                            game_date=gd,
+                            game_datetime=str(m.get("utcDate") or ""),
+                            status="Final",
+                            home_team=ht,
+                            away_team=at,
+                            home_score=float(hs),
+                            away_score=float(as_),
+                            season=int(gd[:4]),
+                        )
+                    )
+                time.sleep(0.2)
+            except Exception as exc:
+                logger.debug("[hf_pipeline] football-data %s: %s", comp, exc)
+        return rows
+
+    def _fetch_soccer_games_thesportsdb(self, start: datetime.date, end: datetime.date) -> list[dict]:
         rows: list[dict] = []
         current = start
         while current <= end:
@@ -709,6 +771,48 @@ class HFDirectPipeline:
         return rows
 
     def _fetch_soccer_upcoming(self, day: datetime.date) -> list[dict]:
+        rows = self._fetch_soccer_upcoming_football_data(day)
+        if rows:
+            return rows
+        return self._fetch_soccer_upcoming_thesportsdb(day)
+
+    def _fetch_soccer_upcoming_football_data(self, day: datetime.date) -> list[dict]:
+        rows: list[dict] = []
+        if not self.football_data_api_key:
+            return rows
+        headers = {"X-Auth-Token": self.football_data_api_key}
+        competitions = ("PL", "PD", "SA", "BL1", "FL1", "PPL")
+        for comp in competitions:
+            try:
+                resp = requests.get(
+                    f"https://api.football-data.org/v4/competitions/{comp}/matches",
+                    params={"dateFrom": day.isoformat(), "dateTo": day.isoformat(), "status": "SCHEDULED"},
+                    headers=headers,
+                    timeout=25,
+                )
+                resp.raise_for_status()
+                for m in (resp.json() or {}).get("matches", []):
+                    ht = str(((m.get("homeTeam") or {}).get("name")) or "").strip()
+                    at = str(((m.get("awayTeam") or {}).get("name")) or "").strip()
+                    if not ht or not at:
+                        continue
+                    rows.append(
+                        {
+                            "sport": "soccer",
+                            "league": str((m.get("competition") or {}).get("name") or comp),
+                            "home_team": ht,
+                            "away_team": at,
+                            "game_date": day.isoformat(),
+                            "game_time": str(m.get("utcDate") or ""),
+                            "game_id": str(m.get("id") or ""),
+                        }
+                    )
+                time.sleep(0.2)
+            except Exception as exc:
+                logger.debug("[hf_pipeline] football-data upcoming %s: %s", comp, exc)
+        return rows
+
+    def _fetch_soccer_upcoming_thesportsdb(self, day: datetime.date) -> list[dict]:
         rows: list[dict] = []
         try:
             resp = requests.get(
@@ -729,6 +833,57 @@ class HFDirectPipeline:
                              "game_id": str(ev.get("idEvent") or "")})
         except Exception:
             pass
+        return rows
+
+    def _fetch_tennis_games_jeff_sackmann(self, start: datetime.date, end: datetime.date) -> list[dict]:
+        rows: list[dict] = []
+        base_dir = str(self.tennis_sackmann_dir or "").strip()
+        if not base_dir or not os.path.isdir(base_dir):
+            return rows
+        try:
+            import csv
+        except Exception:
+            return rows
+
+        for year in range(start.year, end.year + 1):
+            csv_path = os.path.join(base_dir, f"atp_matches_{year}.csv")
+            if not os.path.exists(csv_path):
+                continue
+            try:
+                with open(csv_path, "r", encoding="utf-8", newline="") as handle:
+                    reader = csv.DictReader(handle)
+                    for row in reader:
+                        date_raw = str(row.get("tourney_date") or "").strip()
+                        if len(date_raw) != 8 or not date_raw.isdigit():
+                            continue
+                        game_date = f"{date_raw[:4]}-{date_raw[4:6]}-{date_raw[6:8]}"
+                        try:
+                            parsed = datetime.date.fromisoformat(game_date)
+                        except Exception:
+                            continue
+                        if parsed < start or parsed > end:
+                            continue
+                        winner = str(row.get("winner_name") or "").strip()
+                        loser = str(row.get("loser_name") or "").strip()
+                        if not winner or not loser:
+                            continue
+                        rows.append(
+                            self._make_game_record(
+                                game_id=str(row.get("match_num") or f"{year}-{winner}-{loser}-{game_date}"),
+                                sport="tennis",
+                                league=str(row.get("tourney_name") or "ATP"),
+                                game_date=game_date,
+                                game_datetime=game_date,
+                                status="Final",
+                                home_team=winner,
+                                away_team=loser,
+                                home_score=1.0,
+                                away_score=0.0,
+                                season=parsed.year,
+                            )
+                        )
+            except Exception as exc:
+                logger.debug("[hf_pipeline] Jeff Sackmann %s: %s", year, exc)
         return rows
 
     # ──────────────────────────────────────────────────────────

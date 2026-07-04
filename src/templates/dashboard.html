@@ -127,9 +127,9 @@
     <section class="hero glass">
       <div class="hero-top">
         <div class="hero-copy">
-          <div class="pill"><span class="live-dot"></span><span id="live-status">Connecting to prediction pipeline…</span></div>
-          <h1>Prediction Command Center</h1>
-          <p>Daily multi-sport predictions, automated model retraining, and Polymarket execution status in one live glassmorphism cockpit.</p>
+          <div class="pill"><span class="live-dot"></span><span id="live-status">Connecting to Hugging Face pipeline…</span></div>
+          <h1>Hugging Face Command Center</h1>
+          <p>HF Dataset + HF Model + HF Space inference with automated multi-sport predictions and Polymarket execution status.</p>
         </div>
         <div class="pill" id="live-source">Source: loading</div>
       </div>
@@ -235,7 +235,7 @@
       const sections = [['Fetch', pipeline.fetch || {}, '2:00 AM ET'], ['Train', pipeline.train || {}, '3:00 AM ET'], ['Predict', pipeline.predict || {}, '4:00 AM ET'], ['Polymarket', pipeline.polymarket || {}, 'Post-predict']];
       document.getElementById('stage-grid').innerHTML = sections.map(([title, info, schedule]) => { const ok = info.ok !== false; return `<article class="card glass"><div style="display:flex;justify-content:space-between;gap:12px;align-items:center"><h3>${esc(title)}</h3><span class="stage-badge ${ok ? 'good' : 'bad'}">${ok ? 'healthy' : 'attention'}</span></div><div class="kvs"><div class="kv"><span>Schedule</span><strong>${esc(schedule)}</strong></div><div class="kv"><span>Updated</span><strong>${esc(stamp(info.updated_at || info.generated_at || info.trained_at))}</strong></div><div class="kv"><span>Summary</span><strong>${esc(info.prediction_count || info.completed_games_total || info.rows || info.placed || 0)}</strong></div></div></article>`; }).join('');
       const model = state.model.current_model || {};
-      document.getElementById('pipeline-overview').innerHTML = `<h3>Pipeline health</h3><p class="subtle" style="margin:10px 0 0">Live orchestration status for the free daily pipeline snapshots.</p><div class="kvs"><div class="kv"><span>Last refresh</span><strong>${esc(stamp(state.status.updated_at))}</strong></div><div class="kv"><span>Today predictions</span><strong>${esc(num((state.today || {}).prediction_count || 0))}</strong></div><div class="kv"><span>Tomorrow predictions</span><strong>${esc(num((state.tomorrow || {}).prediction_count || 0))}</strong></div><div class="kv"><span>Submissions placed</span><strong>${esc(num(((state.polymarketStatus.submissions || {}).summary || {}).placed || 0))}</strong></div><div class="kv"><span>Source</span><strong>${esc(state.status.source || 'local')}</strong></div></div>`;
+      document.getElementById('pipeline-overview').innerHTML = `<h3>Pipeline health</h3><p class="subtle" style="margin:10px 0 0">Live orchestration status for HF Dataset + Model publishing and Space inference.</p><div class="kvs"><div class="kv"><span>Last refresh</span><strong>${esc(stamp(state.status.updated_at))}</strong></div><div class="kv"><span>Today predictions</span><strong>${esc(num((state.today || {}).prediction_count || 0))}</strong></div><div class="kv"><span>Tomorrow predictions</span><strong>${esc(num((state.tomorrow || {}).prediction_count || 0))}</strong></div><div class="kv"><span>Submissions placed</span><strong>${esc(num(((state.polymarketStatus.submissions || {}).summary || {}).placed || 0))}</strong></div><div class="kv"><span>Source</span><strong>${esc(state.status.source || 'local')}</strong></div></div>`;
       document.getElementById('model-overview').innerHTML = `<h3>Model snapshot</h3><p class="subtle" style="margin:10px 0 0">Best estimator chosen from 5-fold cross-validation each day.</p><div class="kvs"><div class="kv"><span>Model</span><strong>${esc(model.best_model || '—')}</strong></div><div class="kv"><span>Version</span><strong>${esc(model.version || '—')}</strong></div><div class="kv"><span>Rows trained</span><strong>${esc(num(model.rows || 0))}</strong></div><div class="kv"><span>Score</span><strong>${esc(pct(model.best_score || 0))}</strong></div><div class="kv"><span>Sports</span><strong>${esc((model.sports_covered || []).join(', ') || '—')}</strong></div></div>`;
     }
     function predictionCard(prediction) {
