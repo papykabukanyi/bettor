@@ -12,6 +12,12 @@
       "dest": "src/dashboard.py"
     }
   ],
+  "crons": [
+    {
+      "path": "/api/kalshi/automation/tick",
+      "schedule": "*/5 * * * *"
+    }
+  ],
   "env": {
     "PYTHON_VERSION": "3.11"
   }

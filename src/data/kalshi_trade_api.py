@@ -299,6 +299,126 @@ def submit_prediction_orders(
     }
 
 
+def build_combo_suggestions_from_predictions(
+    predictions_payload: dict[str, Any],
+    *,
+    max_combos: int = 20,
+) -> list[dict[str, Any]]:
+    """Build and resolve combo suggestions derived from current predictions."""
+    from betting_bot import _prediction_to_market_candidate
+    from data.kalshi import resolve_ready_bets, suggest_combo_bets
+
+    predictions = (predictions_payload or {}).get("predictions") or []
+    if not isinstance(predictions, list):
+        return []
+    candidates = [row for row in (_prediction_to_market_candidate(p) for p in predictions) if row]
+    if not candidates:
+        return []
+
+    for row in candidates:
+        prob = max(0.01, min(0.99, _as_float(row.get("model_prob"), _as_float(row.get("confidence"), 0.5))))
+        row["model_prob"] = prob
+        row["dec_odds"] = round(1.0 / prob, 3)
+
+    single_res = resolve_ready_bets(candidates, force_refresh=True)
+    combo_suggestions = suggest_combo_bets(
+        candidates,
+        resolutions=(single_res.get("resolutions") or {}),
+        max_combos=max(1, int(max_combos)),
+    )
+    if not combo_suggestions:
+        return []
+    combo_res = resolve_ready_bets(combo_suggestions, force_refresh=False)
+    by_uid = combo_res.get("resolutions") or {}
+    enriched: list[dict[str, Any]] = []
+    for combo in combo_suggestions:
+        uid = str(combo.get("uid") or "")
+        res = by_uid.get(uid) or {}
+        enriched.append(
+            {
+                **combo,
+                "kalshi_status": str(res.get("status") or "unavailable"),
+                "kalshi_message": str(res.get("message") or ""),
+                "kalshi_ticker": str(res.get("market_ticker") or ""),
+                "kalshi_side": str(res.get("side") or "yes").lower(),
+                "kalshi_price_cents": int(_as_float(res.get("price_cents"), 0)),
+            }
+        )
+    return enriched
+
+
+def submit_combo_orders(
+    combo_suggestions: list[dict[str, Any]],
+    *,
+    stake_usd: float = 1.0,
+    max_orders: int = 1,
+    dry_run: bool = True,
+) -> dict[str, Any]:
+    """Submit Kalshi combo orders for matched combo suggestions."""
+    target_stake = max(0.01, float(stake_usd))
+    limit = max(1, int(max_orders))
+    matched = [
+        combo
+        for combo in (combo_suggestions or [])
+        if isinstance(combo, dict)
+        and str(combo.get("kalshi_status") or "").strip().lower() == "matched"
+        and str(combo.get("kalshi_ticker") or "").strip()
+        and int(_as_float(combo.get("kalshi_price_cents"), 0)) > 0
+    ]
+    selected = matched[:limit]
+    submitted: list[dict[str, Any]] = []
+    for combo in selected:
+        side = str(combo.get("kalshi_side") or "yes").strip().lower()
+        price_cents = int(_as_float(combo.get("kalshi_price_cents"), 0))
+        ticker = str(combo.get("kalshi_ticker") or "").strip()
+        count = _count_for_target_notional(target_stake, price_cents)
+        payload = {
+            "ticker": ticker,
+            "client_order_id": str(uuid.uuid4()),
+            "side": _book_side_for_outcome(side),
+            "count": f"{count:.2f}",
+            "price": f"{_v2_yes_leg_price(side, price_cents):.4f}",
+            "time_in_force": "good_till_canceled",
+            "self_trade_prevention_type": "taker_at_cross",
+            "post_only": False,
+            "cancel_order_on_pause": False,
+            "reduce_only": False,
+            "exchange_index": 0,
+        }
+        result = {
+            "combo_uid": str(combo.get("uid") or ""),
+            "label": str(combo.get("label") or ""),
+            "ticker": ticker,
+            "outcome_side": side,
+            "outcome_price_cents": price_cents,
+            "book_side": payload["side"],
+            "order_price_dollars": payload["price"],
+            "count": payload["count"],
+            "target_stake_usd": round(target_stake, 2),
+            "dry_run": bool(dry_run),
+            "combo": combo,
+        }
+        if dry_run:
+            result["preview_order_payload"] = payload
+            submitted.append(result)
+            continue
+        order_result = create_order_v2(payload)
+        result["order_response"] = order_result
+        submitted.append(result)
+    return {
+        "ok": True,
+        "updated_at": dt.datetime.now(tz=dt.timezone.utc).isoformat(),
+        "dry_run": bool(dry_run),
+        "stake_usd": round(target_stake, 2),
+        "max_orders": limit,
+        "suggested_count": len(combo_suggestions or []),
+        "matched_count": len(matched),
+        "selected_count": len(selected),
+        "submitted_count": len(submitted),
+        "submitted": submitted,
+    }
+
+
 def build_live_snapshot() -> dict[str, Any]:
     exchange = get_exchange_status()
     balance = get_balance()
