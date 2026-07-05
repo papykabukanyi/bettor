@@ -11,7 +11,6 @@ from typing import Any
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 SRC_DIR = ROOT_DIR / "src"
@@ -19,7 +18,6 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from data.hf_pipeline import HFDirectPipeline  # noqa: E402
-from data.kalshi_trade_api import build_live_snapshot, submit_prediction_orders  # noqa: E402
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("hf_space_api")
@@ -48,23 +46,12 @@ _startup_lock = threading.Lock()
 _startup_done = False
 
 
-class KalshiOrderRequest(BaseModel):
-    dry_run: bool = True
-    stake_usd: float = 1.0
-    max_orders: int = 1
-
-
 def _load_json(path: Path, default: Any) -> Any:
     try:
         with path.open("r", encoding="utf-8") as handle:
             return json.load(handle)
     except Exception:
         return default
-
-
-def _env_flag(name: str, default: bool = False) -> bool:
-    raw = str(os.getenv(name, "1" if default else "0") or "").strip().lower()
-    return raw in {"1", "true", "yes", "on"}
 
 
 def _run_hf_daily_pipeline() -> dict[str, Any]:
@@ -200,28 +187,6 @@ def _local_submissions_payload() -> dict[str, Any]:
     return {"ok": True, "updated_at": markets.get("generated_at", ""), "summary": summary, "submissions": rows}
 
 
-def _live_kalshi_snapshot() -> dict[str, Any]:
-    try:
-        return build_live_snapshot()
-    except Exception as exc:
-        return {
-            "ok": False,
-            "updated_at": "",
-            "error": str(exc),
-            "balance": {
-                "balance_cents": 0,
-                "balance_usd": 0.0,
-                "balance_dollars": "0",
-                "portfolio_value_cents": 0,
-                "portfolio_value_usd": 0.0,
-                "updated_ts": None,
-            },
-            "open_orders": [],
-            "open_orders_count": 0,
-            "open_notional_usd": 0.0,
-        }
-
-
 @app.on_event("startup")
 def _startup() -> None:
     global _startup_done
@@ -281,7 +246,6 @@ def root() -> dict[str, Any]:
             "/model/stats",
             "/kalshi/submissions",
             "/kalshi/positions",
-            "/kalshi/live",
             "/run/bootstrap",
             "/run/daily",
             "/run/active",
@@ -363,68 +327,12 @@ def model_stats() -> dict[str, Any]:
 
 @app.get("/kalshi/submissions")
 def kalshi_submissions() -> dict[str, Any]:
-    base = _local_submissions_payload()
-    live = _live_kalshi_snapshot()
-    if live.get("ok"):
-        summary = base.get("summary") or {}
-        summary["available_buying_power_usd"] = float((live.get("balance") or {}).get("balance_usd") or 0.0)
-        base["summary"] = summary
-    base["live"] = live
-    return base
+    return _local_submissions_payload()
 
 
 @app.get("/kalshi/positions")
 def kalshi_positions() -> dict[str, Any]:
-    live = _live_kalshi_snapshot()
-    if not live.get("ok"):
-        return {
-            "ok": False,
-            "updated_at": "",
-            "summary": {"active_positions": 0, "open_notional_usd": 0, "estimated_pnl_usd": 0},
-            "positions": [],
-            "balance": {},
-            "live": live,
-        }
-    return {
-        "ok": True,
-        "updated_at": live.get("updated_at") or "",
-        "summary": {
-            "active_positions": int(live.get("open_orders_count") or 0),
-            "open_notional_usd": float(live.get("open_notional_usd") or 0.0),
-            "estimated_pnl_usd": 0.0,
-            "available_buying_power_usd": float((live.get("balance") or {}).get("balance_usd") or 0.0),
-            "portfolio_value_usd": float((live.get("balance") or {}).get("portfolio_value_usd") or 0.0),
-        },
-        "positions": live.get("open_orders") or [],
-        "balance": live.get("balance") or {},
-        "live": live,
-    }
-
-
-@app.get("/kalshi/live")
-def kalshi_live() -> dict[str, Any]:
-    return _live_kalshi_snapshot()
-
-
-@app.post("/kalshi/place-from-predictions")
-def kalshi_place_from_predictions(body: KalshiOrderRequest) -> dict[str, Any]:
-    if not body.dry_run and not _env_flag("KALSHI_LIVE_TRADING_ENABLED", default=False):
-        raise HTTPException(
-            status_code=400,
-            detail="Live trading is disabled. Set KALSHI_LIVE_TRADING_ENABLED=1 to allow order placement.",
-        )
-    payload = _load_json(PRED_FILE, {})
-    if not isinstance(payload, dict) or not isinstance(payload.get("predictions"), list):
-        raise HTTPException(status_code=400, detail="Prediction data unavailable.")
-    try:
-        return submit_prediction_orders(
-            payload,
-            stake_usd=body.stake_usd,
-            max_orders=body.max_orders,
-            dry_run=body.dry_run,
-        )
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {"ok": True, "updated_at": "", "summary": {"active_positions": 0, "open_notional_usd": 0, "estimated_pnl_usd": 0}, "positions": []}
 
 
 @app.post("/run/bootstrap")
