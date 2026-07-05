@@ -309,6 +309,7 @@ class HFDirectPipeline:
             "random_forest": RandomForestClassifier(n_estimators=300, random_state=42, n_jobs=-1),
             "gradient_boosting": GradientBoostingClassifier(n_estimators=200, random_state=42),
             "extra_trees": ExtraTreesClassifier(n_estimators=400, random_state=42, n_jobs=-1),
+            # HistGradientBoosting needs dense input — use a separate pre with sparse=False
             "hist_gradient_boosting": HistGradientBoostingClassifier(random_state=42),
         }
         forced_key = str(forced_model or "auto").strip().lower()
@@ -318,7 +319,18 @@ class HFDirectPipeline:
         cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
         best_name, best_score, best_pipeline = "", -1.0, None
         for name, model in candidates.items():
-            pipe = Pipeline([("pre", pre), ("model", model)])
+            # HistGradientBoosting needs dense arrays — use separate pre with sparse_output=False
+            if name == "hist_gradient_boosting":
+                from sklearn.preprocessing import OneHotEncoder as _OHE
+                _pre_dense = ColumnTransformer(
+                    transformers=[
+                        ("cats", _OHE(handle_unknown="ignore", sparse_output=False), self._CAT_FEATURES),
+                        ("nums", "passthrough", self._NUM_FEATURES),
+                    ]
+                )
+                pipe = Pipeline([("pre", _pre_dense), ("model", model)])
+            else:
+                pipe = Pipeline([("pre", pre), ("model", model)])
             try:
                 scores = cross_val_score(pipe, X, y, cv=cv, scoring="roc_auc")
                 score = float(scores.mean())
@@ -957,10 +969,95 @@ class HFDirectPipeline:
         return rows
 
     def _fetch_soccer_games(self, start: datetime.date, end: datetime.date) -> list[dict]:
-        rows = self._fetch_soccer_games_football_data(start, end)
-        if rows:
-            return rows
-        return self._fetch_soccer_games_thesportsdb(start, end)
+        """Aggregate completed soccer games from all free sources."""
+        rows: list[dict] = []
+        rows += self._fetch_soccer_games_football_data(start, end)
+        rows += self._fetch_soccer_games_thesportsdb(start, end)
+        rows += self._fetch_soccer_games_espn(start, end)
+        # dedupe by (home, away, date)
+        seen: set[tuple] = set()
+        deduped: list[dict] = []
+        for r in rows:
+            k = (
+                str(r.get("home_team") or "").lower().strip(),
+                str(r.get("away_team") or "").lower().strip(),
+                str(r.get("game_date") or ""),
+            )
+            if k[0] and k[1] and k not in seen:
+                seen.add(k)
+                deduped.append(r)
+        return deduped
+
+    def _fetch_soccer_games_espn(self, start: datetime.date, end: datetime.date) -> list[dict]:
+        """Fetch completed soccer results from ESPN public API (no key, no auth)."""
+        rows: list[dict] = []
+        leagues = [
+            ("fifa.world", "FIFA World Cup 2026"),
+            ("usa.1", "MLS"),
+            ("eng.1", "Premier League"),
+            ("esp.1", "La Liga"),
+            ("ger.1", "Bundesliga"),
+            ("ita.1", "Serie A"),
+            ("fra.1", "Ligue 1"),
+            ("uefa.champions", "Champions League"),
+            ("conmebol.copa", "Copa Libertadores"),
+        ]
+        current = start
+        while current <= end:
+            date_str = current.strftime("%Y%m%d")
+            for espn_slug, league_name in leagues:
+                try:
+                    r = requests.get(
+                        f"https://site.api.espn.com/apis/site/v2/sports/soccer/{espn_slug}/scoreboard",
+                        params={"dates": date_str},
+                        timeout=15,
+                        headers={"User-Agent": "Mozilla/5.0"},
+                    )
+                    if r.status_code != 200:
+                        continue
+                    for event in (r.json() or {}).get("events") or []:
+                        for comp in (event.get("competitions") or []):
+                            status_name = str(((event.get("status") or {}).get("type") or {}).get("name") or "")
+                            if status_name not in ("STATUS_FINAL", "STATUS_FULL_TIME", "STATUS_END_PERIOD"):
+                                continue
+                            competitors = comp.get("competitors") or []
+                            home = next((c for c in competitors if c.get("homeAway") == "home"), None)
+                            away = next((c for c in competitors if c.get("homeAway") == "away"), None)
+                            if not home or not away:
+                                if len(competitors) == 2:
+                                    home, away = competitors[0], competitors[1]
+                                else:
+                                    continue
+                            ht = str((home.get("team") or {}).get("displayName") or "").strip()
+                            at = str((away.get("team") or {}).get("displayName") or "").strip()
+                            hs = home.get("score")
+                            as_ = away.get("score")
+                            if not ht or not at or hs is None or as_ is None:
+                                continue
+                            try:
+                                hs_f = float(hs)
+                                as_f = float(as_)
+                            except Exception:
+                                continue
+                            gdt = str(event.get("date") or comp.get("date") or current.isoformat())
+                            rows.append(self._make_game_record(
+                                game_id=f"espn_{event.get('id', '')}",
+                                sport="soccer",
+                                league=league_name,
+                                game_date=gdt[:10],
+                                game_datetime=gdt,
+                                status="Final",
+                                home_team=ht,
+                                away_team=at,
+                                home_score=hs_f,
+                                away_score=as_f,
+                                season=current.year,
+                            ))
+                    time.sleep(0.15)
+                except Exception as exc:
+                    logger.debug("[hf_pipeline] ESPN soccer %s %s: %s", espn_slug, current, exc)
+            current += datetime.timedelta(days=1)
+        return rows
 
     def _fetch_soccer_games_football_data(self, start: datetime.date, end: datetime.date) -> list[dict]:
         rows: list[dict] = []
@@ -1284,10 +1381,221 @@ class HFDirectPipeline:
         return rows
 
     def _fetch_soccer_upcoming(self, day: datetime.date) -> list[dict]:
-        rows = self._fetch_soccer_upcoming_football_data(day)
-        if rows:
+        """Aggregate upcoming soccer from all free sources; never short-circuit."""
+        rows: list[dict] = []
+        rows += self._fetch_soccer_upcoming_football_data(day)
+        rows += self._fetch_soccer_upcoming_thesportsdb(day)
+        rows += self._fetch_soccer_upcoming_openligadb(day)
+        rows += self._fetch_soccer_upcoming_wc2026(day)
+        # dedupe by (home, away, date)
+        seen: set[tuple] = set()
+        deduped: list[dict] = []
+        for r in rows:
+            k = (
+                str(r.get("home_team") or "").lower().strip(),
+                str(r.get("away_team") or "").lower().strip(),
+                str(r.get("game_date") or ""),
+            )
+            if k[0] and k[1] and k not in seen:
+                seen.add(k)
+                deduped.append(r)
+        return deduped
+
+    def _fetch_soccer_upcoming_openligadb(self, day: datetime.date) -> list[dict]:
+        """Fetch from open-ligadb.de (free, no key, German leagues + international)."""
+        rows: list[dict] = []
+        # openligadb league short-names available without auth
+        league_slugs = [
+            ("bl1", 2026, "Bundesliga"),
+            ("bl2", 2026, "2. Bundesliga"),
+            ("ucl_24_25", 2025, "Champions League"),
+        ]
+        for slug, season, league_name in league_slugs:
+            try:
+                resp = requests.get(
+                    f"https://api.openligadb.de/getmatchdata/{slug}/{season}",
+                    timeout=15,
+                )
+                if resp.status_code != 200:
+                    continue
+                for m in (resp.json() or []):
+                    dt_raw = str(m.get("matchDateTime") or m.get("matchDateTimeUTC") or "")
+                    if not dt_raw:
+                        continue
+                    try:
+                        match_date = datetime.date.fromisoformat(dt_raw[:10])
+                    except Exception:
+                        continue
+                    if match_date != day:
+                        continue
+                    t1 = (m.get("team1") or {})
+                    t2 = (m.get("team2") or {})
+                    ht = str(t1.get("teamName") or t1.get("shortName") or "").strip()
+                    at = str(t2.get("teamName") or t2.get("shortName") or "").strip()
+                    if not ht or not at:
+                        continue
+                    match_id = str(m.get("matchID") or "")
+                    rows.append({
+                        "sport": "soccer",
+                        "league": league_name,
+                        "home_team": ht,
+                        "away_team": at,
+                        "game_date": day.isoformat(),
+                        "game_time": dt_raw if "T" in dt_raw else f"{dt_raw}T00:00:00Z",
+                        "game_id": f"openliga_{match_id}",
+                    })
+            except Exception as exc:
+                logger.debug("[hf_pipeline] openligadb %s: %s", slug, exc)
+        return rows
+
+    def _fetch_soccer_upcoming_wc2026(self, day: datetime.date) -> list[dict]:
+        """Fetch FIFA World Cup 2026 schedule from public JSON feeds (no API key)."""
+        rows: list[dict] = []
+        wc_start = datetime.date(2026, 6, 11)
+        wc_end = datetime.date(2026, 7, 19)
+        if not (wc_start <= day <= wc_end):
             return rows
-        return self._fetch_soccer_upcoming_thesportsdb(day)
+        # Primary: try scoreboard/schedule APIs that serve WC 2026 data freely
+        sources = [
+            # ESPN public API (no auth, CORS-open)
+            "https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scoreboard",
+            # SofaScore public API proxy
+            "https://api.sofascore.com/api/v1/sport/football/scheduled-events/" + day.isoformat(),
+        ]
+        # Try ESPN
+        try:
+            r = requests.get(
+                "https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scoreboard",
+                params={"dates": day.strftime("%Y%m%d")},
+                timeout=15,
+                headers={"User-Agent": "Mozilla/5.0"},
+            )
+            if r.status_code == 200:
+                data = r.json()
+                for event in (data.get("events") or []):
+                    comps = event.get("competitions") or []
+                    for comp in comps:
+                        competitors = comp.get("competitors") or []
+                        home = next((c for c in competitors if c.get("homeAway") == "home"), None)
+                        away = next((c for c in competitors if c.get("homeAway") == "away"), None)
+                        if not home or not away:
+                            if len(competitors) == 2:
+                                home, away = competitors[0], competitors[1]
+                            else:
+                                continue
+                        ht = str((home.get("team") or {}).get("displayName") or home.get("team", {}).get("name") or "").strip()
+                        at = str((away.get("team") or {}).get("displayName") or away.get("team", {}).get("name") or "").strip()
+                        if not ht or not at:
+                            continue
+                        game_time = str(event.get("date") or comp.get("date") or "")
+                        eid = str(event.get("id") or comp.get("id") or "")
+                        status_type = str(((event.get("status") or {}).get("type") or {}).get("name") or "")
+                        # only upcoming / scheduled
+                        if status_type in ("STATUS_FINAL", "STATUS_FULL_TIME"):
+                            continue
+                        rows.append({
+                            "sport": "soccer",
+                            "league": "FIFA World Cup 2026",
+                            "home_team": ht,
+                            "away_team": at,
+                            "game_date": day.isoformat(),
+                            "game_time": game_time,
+                            "game_id": f"espn_wc_{eid}",
+                        })
+        except Exception as exc:
+            logger.debug("[hf_pipeline] ESPN WC 2026: %s", exc)
+        # Try SofaScore
+        if not rows:
+            try:
+                r2 = requests.get(
+                    f"https://api.sofascore.com/api/v1/sport/football/scheduled-events/{day.isoformat()}",
+                    timeout=15,
+                    headers={"User-Agent": "Mozilla/5.0"},
+                )
+                if r2.status_code == 200:
+                    for ev in (r2.json() or {}).get("events") or []:
+                        tournament = (ev.get("tournament") or {})
+                        cat = str((tournament.get("category") or {}).get("name") or "").lower()
+                        tname = str(tournament.get("name") or "").lower()
+                        # filter to soccer internationals / major leagues
+                        is_relevant = any(kw in tname or kw in cat for kw in (
+                            "world cup", "copa", "euro", "nations league",
+                            "premier league", "la liga", "serie a", "bundesliga",
+                            "ligue 1", "mls", "champions league", "europa",
+                        ))
+                        if not is_relevant:
+                            continue
+                        ht = str((ev.get("homeTeam") or {}).get("name") or "").strip()
+                        at = str((ev.get("awayTeam") or {}).get("name") or "").strip()
+                        if not ht or not at:
+                            continue
+                        start_ts = ev.get("startTimestamp")
+                        game_time = ""
+                        if start_ts:
+                            try:
+                                game_time = datetime.datetime.utcfromtimestamp(start_ts).strftime("%Y-%m-%dT%H:%M:%SZ")
+                            except Exception:
+                                pass
+                        rows.append({
+                            "sport": "soccer",
+                            "league": str(tournament.get("name") or "Soccer"),
+                            "home_team": ht,
+                            "away_team": at,
+                            "game_date": day.isoformat(),
+                            "game_time": game_time,
+                            "game_id": f"sofa_{ev.get('id','')}",
+                        })
+            except Exception as exc:
+                logger.debug("[hf_pipeline] SofaScore WC 2026: %s", exc)
+        # Hard-coded WC 2026 quarter/semi/final schedule as final fallback
+        if not rows:
+            rows += self._wc2026_static_schedule(day)
+        return rows
+
+    def _wc2026_static_schedule(self, day: datetime.date) -> list[dict]:
+        """
+        Static FIFA World Cup 2026 schedule (knockout stage fixtures).
+        Used as last-resort fallback when all APIs fail.
+        Dates and times in UTC. Teams listed by slot (filled as tournament progresses).
+        """
+        # Round of 16, QF, SF, Final schedule (UTC)
+        fixtures = [
+            # Round of 16 (June 29 - July 3)
+            ("2026-06-29", "22:00", "WC R16 Match 1", "WC Group A Winner", "WC Group B Runner-up"),
+            ("2026-06-30", "18:00", "WC R16 Match 2", "WC Group C Winner", "WC Group D Runner-up"),
+            ("2026-06-30", "22:00", "WC R16 Match 3", "WC Group E Winner", "WC Group F Runner-up"),
+            ("2026-07-01", "18:00", "WC R16 Match 4", "WC Group B Winner", "WC Group A Runner-up"),
+            ("2026-07-01", "22:00", "WC R16 Match 5", "WC Group D Winner", "WC Group C Runner-up"),
+            ("2026-07-02", "18:00", "WC R16 Match 6", "WC Group F Winner", "WC Group E Runner-up"),
+            ("2026-07-02", "22:00", "WC R16 Match 7", "WC Group G Winner", "WC Group H Runner-up"),
+            ("2026-07-03", "18:00", "WC R16 Match 8", "WC Group H Winner", "WC Group G Runner-up"),
+            # Quarter-Finals (July 5-6)
+            ("2026-07-04", "22:00", "WC QF 1", "WC R16 M1 Winner", "WC R16 M2 Winner"),
+            ("2026-07-05", "18:00", "WC QF 2", "WC R16 M3 Winner", "WC R16 M4 Winner"),
+            ("2026-07-05", "22:00", "WC QF 3", "WC R16 M5 Winner", "WC R16 M6 Winner"),
+            ("2026-07-06", "22:00", "WC QF 4", "WC R16 M7 Winner", "WC R16 M8 Winner"),
+            # Semi-Finals (July 9-10)
+            ("2026-07-09", "22:00", "WC SF 1", "WC QF1 Winner", "WC QF2 Winner"),
+            ("2026-07-10", "22:00", "WC SF 2", "WC QF3 Winner", "WC QF4 Winner"),
+            # Third-place (July 14)
+            ("2026-07-14", "22:00", "WC 3rd Place", "WC SF1 Loser", "WC SF2 Loser"),
+            # Final (July 19)
+            ("2026-07-19", "22:00", "FIFA World Cup 2026 Final", "WC SF1 Winner", "WC SF2 Winner"),
+        ]
+        rows = []
+        for date_str, time_str, match_name, home, away in fixtures:
+            if date_str != day.isoformat():
+                continue
+            rows.append({
+                "sport": "soccer",
+                "league": "FIFA World Cup 2026",
+                "home_team": home,
+                "away_team": away,
+                "game_date": day.isoformat(),
+                "game_time": f"{date_str}T{time_str}:00Z",
+                "game_id": f"wc2026_{date_str}_{home[:8]}",
+            })
+        return rows
 
     def _fetch_soccer_upcoming_football_data(self, day: datetime.date) -> list[dict]:
         rows: list[dict] = []
