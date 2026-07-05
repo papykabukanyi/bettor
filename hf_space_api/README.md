@@ -45,6 +45,11 @@ Recommended:
 - `HF_DAILY_CUSTOM_MODEL=auto`
 - `HF_DAILY_MIN_TRAIN_ROWS=200`
 - `KALSHI_LIVE_TRADING_ENABLED=0`
+- `KALSHI_AUTOBET_ENABLED=1`
+- `KALSHI_AUTOBET_STAKE_USD=1.0`
+- `KALSHI_AUTOBET_MAX_SINGLE_ORDERS=1`
+- `KALSHI_AUTOBET_MAX_COMBO_ORDERS=1`
+- `AUTOBET_DRY_RUN=1` (set `0` for live placement)
 
 ## API endpoints
 
@@ -66,4 +71,5 @@ Recommended:
 - Active scheduling is done inside `app.py` via APScheduler interval job.
 - Full retrain scheduling is done daily via cron job.
 - Startup autorun is enabled by default and will create/push dataset + model artifacts when empty.
+- Combo suggestions are generated from HF predictions and published to `artifacts/hf_daily_prediction_combos.json`.
 - Use this Space URL as `HF_SPACE_API_URL` in Vercel so dashboard reads live predictions.

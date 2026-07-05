@@ -240,6 +240,8 @@ def submit_prediction_orders(
     stake_usd: float = 1.0,
     max_orders: int = 1,
     dry_run: bool = True,
+    include_combos: bool = False,
+    max_combos: int = 0,
 ) -> dict[str, Any]:
     """Submit Kalshi orders for matched predictions with a fixed USD stake per order."""
     target_stake = max(0.01, float(stake_usd))
@@ -286,7 +288,7 @@ def submit_prediction_orders(
         order_result = create_order_v2(payload)
         base_result["order_response"] = order_result
         submitted.append(base_result)
-    return {
+    result: dict[str, Any] = {
         "ok": True,
         "updated_at": dt.datetime.now(tz=dt.timezone.utc).isoformat(),
         "dry_run": bool(dry_run),
@@ -297,6 +299,32 @@ def submit_prediction_orders(
         "submitted_count": len(submitted),
         "submitted": submitted,
     }
+    if include_combos and int(max_combos or 0) > 0:
+        combo_suggestions = build_combo_suggestions_from_predictions(
+            predictions_payload,
+            max_combos=max(1, int(max_combos) * 5),
+        )
+        combo_orders = submit_combo_orders(
+            combo_suggestions,
+            stake_usd=target_stake,
+            max_orders=max(1, int(max_combos)),
+            dry_run=dry_run,
+        )
+        result["combo_enabled"] = True
+        result["combo_orders"] = combo_orders
+    else:
+        result["combo_enabled"] = False
+        result["combo_orders"] = {
+            "ok": True,
+            "updated_at": dt.datetime.now(tz=dt.timezone.utc).isoformat(),
+            "dry_run": bool(dry_run),
+            "suggested_count": 0,
+            "matched_count": 0,
+            "selected_count": 0,
+            "submitted_count": 0,
+            "submitted": [],
+        }
+    return result
 
 
 def build_combo_suggestions_from_predictions(

@@ -468,6 +468,8 @@ def kalshi_place_from_predictions():
     dry_run = bool(body.get("dry_run", True))
     stake_usd = float(body.get("stake_usd", 1.0) or 1.0)
     max_orders = int(body.get("max_orders", 1) or 1)
+    include_combos = bool(body.get("include_combos", _env_flag("KALSHI_AUTO_CREATE_COMBOS", default=True)))
+    max_combos = int(body.get("max_combos", _env_int("KALSHI_AUTOBET_MAX_COMBO_ORDERS", 1)) or 1)
     if not dry_run and not _env_flag("KALSHI_LIVE_TRADING_ENABLED", default=False):
         return jsonify(
             {
@@ -487,6 +489,8 @@ def kalshi_place_from_predictions():
             stake_usd=stake_usd,
             max_orders=max_orders,
             dry_run=dry_run,
+            include_combos=include_combos,
+            max_combos=max(0, max_combos),
         )
         return jsonify(result)
     except Exception as exc:

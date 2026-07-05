@@ -3044,6 +3044,7 @@ class HFDirectPipeline:
             "artifacts/hf_daily_predictions.json": self._predictions_file,
             "artifacts/training_history.json": self._training_history_file,
             "artifacts/hf_daily_prediction_markets.json": os.path.join(self._data_dir, "hf_daily_prediction_markets.json"),
+            "artifacts/hf_daily_prediction_combos.json": os.path.join(self._data_dir, "hf_daily_prediction_combos.json"),
         }
         uploaded = 0
         for repo_path, local_path in artifacts.items():

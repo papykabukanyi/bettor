@@ -29,6 +29,7 @@ STATUS_FILE = DATA_DIR / "hf_pipeline_status.json"
 PRED_FILE = DATA_DIR / "hf_daily_predictions.json"
 HISTORY_FILE = DATA_DIR / "training_history.json"
 MARKETS_FILE = DATA_DIR / "hf_daily_prediction_markets.json"
+COMBOS_FILE = DATA_DIR / "hf_daily_prediction_combos.json"
 
 HF_AUTORUN_ON_STARTUP = str(os.getenv("HF_AUTORUN_ON_STARTUP", "1")).strip().lower() in {"1", "true", "yes", "on"}
 HF_DAILY_RUN_HOUR_ET = int(os.getenv("HF_DAILY_RUN_HOUR_ET", "4") or "4")
@@ -46,6 +47,7 @@ KALSHI_AUTOBET_DRY_RUN = str(os.getenv("AUTOBET_DRY_RUN", "1")).strip().lower() 
 KALSHI_AUTOBET_STAKE_USD = float(os.getenv("KALSHI_AUTOBET_STAKE_USD", "1.0") or "1.0")
 KALSHI_AUTOBET_MAX_SINGLE_ORDERS = int(os.getenv("KALSHI_AUTOBET_MAX_SINGLE_ORDERS", "1") or "1")
 KALSHI_AUTOBET_MAX_COMBO_ORDERS = int(os.getenv("KALSHI_AUTOBET_MAX_COMBO_ORDERS", "1") or "1")
+KALSHI_COMBO_ARTIFACT_MAX = int(os.getenv("KALSHI_COMBO_ARTIFACT_MAX", "50") or "50")
 
 app = FastAPI(title="Bettor HF Space API", version="1.0.0")
 scheduler = BackgroundScheduler(timezone="America/New_York")
@@ -57,6 +59,8 @@ class KalshiOrderRequest(BaseModel):
     dry_run: bool = True
     stake_usd: float = 1.0
     max_orders: int = 1
+    include_combos: bool = True
+    max_combo_orders: int = 1
 
 
 def _load_json(path: Path, default: Any) -> Any:
@@ -67,9 +71,48 @@ def _load_json(path: Path, default: Any) -> Any:
         return default
 
 
+def _save_json(path: Path, payload: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2)
+
+
 def _env_flag(name: str, default: bool = False) -> bool:
     raw = str(os.getenv(name, "1" if default else "0") or "").strip().lower()
     return raw in {"1", "true", "yes", "on"}
+
+
+def _refresh_combo_artifact(predictions_payload: dict[str, Any]) -> dict[str, Any]:
+    from data.kalshi_trade_api import build_combo_suggestions_from_predictions
+
+    combos = build_combo_suggestions_from_predictions(
+        predictions_payload,
+        max_combos=max(1, KALSHI_COMBO_ARTIFACT_MAX),
+    )
+    payload = {
+        "ok": True,
+        "updated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "combo_count": len(combos),
+        "combos": combos,
+    }
+    _save_json(COMBOS_FILE, payload)
+    return payload
+
+
+def _auto_place_kalshi_from_predictions(predictions_payload: dict[str, Any]) -> dict[str, Any] | None:
+    if not KALSHI_AUTOBET_ENABLED:
+        return None
+    try:
+        return submit_prediction_orders(
+            predictions_payload,
+            dry_run=KALSHI_AUTOBET_DRY_RUN,
+            stake_usd=max(1.0, KALSHI_AUTOBET_STAKE_USD),
+            max_orders=max(1, KALSHI_AUTOBET_MAX_SINGLE_ORDERS),
+            include_combos=True,
+            max_combos=max(0, KALSHI_AUTOBET_MAX_COMBO_ORDERS),
+        )
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
 
 
 def _run_hf_daily_pipeline() -> dict[str, Any]:
@@ -91,6 +134,14 @@ def _run_hf_daily_pipeline() -> dict[str, Any]:
             predictions_path=str(PRED_FILE),
             output_path=str(DATA_DIR / "hf_daily_prediction_markets.json"),
         )
+    predictions_payload = _load_json(PRED_FILE, {})
+    combo_artifact = {"ok": False, "combo_count": 0, "combos": []}
+    if isinstance(predictions_payload, dict) and isinstance(predictions_payload.get("predictions"), list):
+        combo_artifact = _refresh_combo_artifact(predictions_payload)
+    kalshi_placement = _auto_place_kalshi_from_predictions(predictions_payload)
+    if isinstance(result, dict):
+        result["kalshi_combo_artifact"] = combo_artifact
+        result["kalshi_placement"] = kalshi_placement
     return result
 
 
@@ -136,18 +187,11 @@ def _run_hf_active_cycle() -> dict[str, Any]:
             predictions_path=str(PRED_FILE),
             output_path=str(DATA_DIR / "hf_daily_prediction_markets.json"),
         )
-    kalshi_placement: dict[str, Any] | None = None
-    if KALSHI_AUTOBET_ENABLED:
-        try:
-            kalshi_placement = submit_prediction_orders(
-                dry_run=KALSHI_AUTOBET_DRY_RUN,
-                stake_usd=max(1.0, KALSHI_AUTOBET_STAKE_USD),
-                max_orders=max(1, KALSHI_AUTOBET_MAX_SINGLE_ORDERS),
-                include_combos=True,
-                max_combos=max(0, KALSHI_AUTOBET_MAX_COMBO_ORDERS),
-            )
-        except Exception as exc:
-            kalshi_placement = {"ok": False, "error": str(exc)}
+    predictions_payload = _load_json(PRED_FILE, {})
+    combo_artifact = {"ok": False, "combo_count": 0, "combos": []}
+    if isinstance(predictions_payload, dict) and isinstance(predictions_payload.get("predictions"), list):
+        combo_artifact = _refresh_combo_artifact(predictions_payload)
+    kalshi_placement = _auto_place_kalshi_from_predictions(predictions_payload)
     pipeline.publish_runtime_artifacts()
     return {
         "ok": True,
@@ -157,6 +201,7 @@ def _run_hf_active_cycle() -> dict[str, Any]:
         "new_records_total": new_records_total,
         "retrained": retrain_needed,
         "predictions": preds,
+        "kalshi_combo_artifact": combo_artifact,
         "kalshi_placement": kalshi_placement,
     }
 
@@ -440,6 +485,8 @@ def kalshi_place_from_predictions(body: KalshiOrderRequest) -> dict[str, Any]:
             stake_usd=body.stake_usd,
             max_orders=body.max_orders,
             dry_run=body.dry_run,
+            include_combos=body.include_combos,
+            max_combos=body.max_combo_orders,
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc

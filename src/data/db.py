@@ -704,34 +704,6 @@ DO $$ BEGIN
                    WHERE table_name='predictions' AND column_name='kalshi_series_ticker') THEN
         ALTER TABLE predictions ADD COLUMN kalshi_series_ticker VARCHAR(120);
     END IF;
-    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
-                   WHERE table_name='predictions' AND column_name='polymarket_ticker') THEN
-        ALTER TABLE predictions ADD COLUMN polymarket_ticker VARCHAR(160);
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
-                   WHERE table_name='predictions' AND column_name='polymarket_market_slug') THEN
-        ALTER TABLE predictions ADD COLUMN polymarket_market_slug VARCHAR(200);
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
-                   WHERE table_name='predictions' AND column_name='polymarket_event_slug') THEN
-        ALTER TABLE predictions ADD COLUMN polymarket_event_slug VARCHAR(200);
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
-                   WHERE table_name='predictions' AND column_name='polymarket_series_ticker') THEN
-        ALTER TABLE predictions ADD COLUMN polymarket_series_ticker VARCHAR(120);
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
-                   WHERE table_name='predictions' AND column_name='polymarket_side') THEN
-        ALTER TABLE predictions ADD COLUMN polymarket_side VARCHAR(10);
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
-                   WHERE table_name='predictions' AND column_name='polymarket_price') THEN
-        ALTER TABLE predictions ADD COLUMN polymarket_price NUMERIC(8,4);
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
-                   WHERE table_name='predictions' AND column_name='polymarket_status') THEN
-        ALTER TABLE predictions ADD COLUMN polymarket_status VARCHAR(20);
-    END IF;
 END $$;
 
 -- ── Unified multi-sport training history tables ───────────────────────────
@@ -2180,7 +2152,6 @@ def save_predictions(predictions: list) -> int:
         has_signal_type  = "signal_type"  in cols
         has_kalshi       = "kalshi_ticker" in cols
         has_kalshi_series = "kalshi_series_ticker" in cols
-        has_polymarket   = "polymarket_ticker" in cols
         has_grade        = "grade"         in cols
         for p in predictions:
             try:
@@ -2248,18 +2219,6 @@ def save_predictions(predictions: list) -> int:
                         str(p.get("kalshi_side")         or "")[:10],
                         p.get("kalshi_price_cents"),
                         str(p.get("kalshi_status")       or "unavailable")[:20],
-                    ])
-                if has_polymarket:
-                    extra_cols += ", polymarket_ticker, polymarket_market_slug, polymarket_event_slug, polymarket_series_ticker, polymarket_side, polymarket_price, polymarket_status"
-                    extra_ph   += ", %s, %s, %s, %s, %s, %s, %s"
-                    extra_vals.extend([
-                        str(p.get("polymarket_ticker") or "")[:160],
-                        str(p.get("polymarket_market_slug") or "")[:200],
-                        str(p.get("polymarket_event_slug") or "")[:200],
-                        str(p.get("polymarket_series_ticker") or "")[:120],
-                        str(p.get("polymarket_side") or "")[:10],
-                        p.get("polymarket_price"),
-                        str(p.get("polymarket_status") or "unavailable")[:20],
                     ])
                 if has_grade:
                     extra_cols += ", grade, investor_score"
@@ -2737,7 +2696,7 @@ def get_performance_stats(sport: str | None = None, target_date=None) -> dict:
 
 
 def update_prediction_exchange_statuses(rows: list[dict]) -> int:
-    """Persist Kalshi/Polymarket resolution metadata for prediction rows by bet_uid."""
+    """Persist Kalshi resolution metadata for prediction rows by bet_uid."""
     if not rows:
         return 0
     conn = get_conn()
@@ -2756,14 +2715,6 @@ def update_prediction_exchange_statuses(rows: list[dict]) -> int:
         has_kalshi_price = "kalshi_price_cents" in cols
         has_kalshi_status = "kalshi_status" in cols
 
-        has_poly_ticker = "polymarket_ticker" in cols
-        has_poly_slug = "polymarket_market_slug" in cols
-        has_poly_event = "polymarket_event_slug" in cols
-        has_poly_series = "polymarket_series_ticker" in cols
-        has_poly_side = "polymarket_side" in cols
-        has_poly_price = "polymarket_price" in cols
-        has_poly_status = "polymarket_status" in cols
-
         set_cols = []
         if has_kalshi_ticker:
             set_cols.append("kalshi_ticker = COALESCE(NULLIF(%s, ''), kalshi_ticker)")
@@ -2777,21 +2728,6 @@ def update_prediction_exchange_statuses(rows: list[dict]) -> int:
             set_cols.append("kalshi_price_cents = COALESCE(%s, kalshi_price_cents)")
         if has_kalshi_status:
             set_cols.append("kalshi_status = COALESCE(NULLIF(%s, ''), kalshi_status)")
-
-        if has_poly_ticker:
-            set_cols.append("polymarket_ticker = COALESCE(NULLIF(%s, ''), polymarket_ticker)")
-        if has_poly_slug:
-            set_cols.append("polymarket_market_slug = COALESCE(NULLIF(%s, ''), polymarket_market_slug)")
-        if has_poly_event:
-            set_cols.append("polymarket_event_slug = COALESCE(NULLIF(%s, ''), polymarket_event_slug)")
-        if has_poly_series:
-            set_cols.append("polymarket_series_ticker = COALESCE(NULLIF(%s, ''), polymarket_series_ticker)")
-        if has_poly_side:
-            set_cols.append("polymarket_side = COALESCE(NULLIF(%s, ''), polymarket_side)")
-        if has_poly_price:
-            set_cols.append("polymarket_price = COALESCE(%s, polymarket_price)")
-        if has_poly_status:
-            set_cols.append("polymarket_status = COALESCE(NULLIF(%s, ''), polymarket_status)")
 
         if not set_cols:
             return 0
@@ -2823,21 +2759,6 @@ def update_prediction_exchange_statuses(rows: list[dict]) -> int:
                 vals.append(row.get("kalshi_price_cents"))
             if has_kalshi_status:
                 vals.append(str(row.get("kalshi_status") or "")[:20])
-
-            if has_poly_ticker:
-                vals.append(str(row.get("polymarket_ticker") or "")[:160])
-            if has_poly_slug:
-                vals.append(str(row.get("polymarket_market_slug") or "")[:200])
-            if has_poly_event:
-                vals.append(str(row.get("polymarket_event_slug") or "")[:200])
-            if has_poly_series:
-                vals.append(str(row.get("polymarket_series_ticker") or "")[:120])
-            if has_poly_side:
-                vals.append(str(row.get("polymarket_side") or "")[:10])
-            if has_poly_price:
-                vals.append(row.get("polymarket_price"))
-            if has_poly_status:
-                vals.append(str(row.get("polymarket_status") or "")[:20])
 
             vals.append(bet_uid)
             try:
@@ -2880,19 +2801,11 @@ def get_settlement_summary(sport: str | None = None, target_date=None, stale_hou
         where_sql = " AND ".join(where_parts)
 
         has_kalshi_status = "kalshi_status" in cols
-        has_poly_status = "polymarket_status" in cols
-
         kalshi_live_expr = "0::int"
         if has_kalshi_status:
             kalshi_live_expr = (
                 "COUNT(*) FILTER (WHERE outcome='PENDING' "
                 "AND LOWER(COALESCE(kalshi_status,'')) IN ('started','done'))"
-            )
-        poly_live_expr = "0::int"
-        if has_poly_status:
-            poly_live_expr = (
-                "COUNT(*) FILTER (WHERE outcome='PENDING' "
-                "AND LOWER(COALESCE(polymarket_status,'')) IN ('started','done','resolved','closed'))"
             )
 
         cur.execute(
@@ -2905,8 +2818,7 @@ def get_settlement_summary(sport: str | None = None, target_date=None, stale_hou
                     WHERE outcome='PENDING'
                       AND COALESCE(game_date::timestamp, predicted_at) < NOW() - (%s * INTERVAL '1 hour')
                 ) AS stale_pending,
-                {kalshi_live_expr} AS pending_with_kalshi_market_state,
-                {poly_live_expr} AS pending_with_polymarket_market_state
+                {kalshi_live_expr} AS pending_with_kalshi_market_state
             FROM predictions
             WHERE {where_sql}
             """,
@@ -3700,4 +3612,3 @@ def get_completed_games_for_training(sport: str = "mlb",
         return []
     finally:
         conn.close()
-
