@@ -138,6 +138,14 @@
       .sort-row { grid-template-columns: 1.1fr .9fr .9fr; }
     }
     @media (min-width: 1120px) { .prediction-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+    .comparator-shell { display: grid; gap: 16px; }
+    .comparator-card { padding: 18px; border-radius: 20px; background: rgba(15, 23, 42, 0.62); border: 1px solid rgba(148,163,184,0.2); }
+    .comparator-title { font-size: 1.05rem; font-weight: 800; letter-spacing: -0.02em; color: var(--ink); }
+    .comparator-meta { margin-top: 6px; color: #dbeafe; font-size: 0.9rem; }
+    .comparator-list { margin-top: 12px; display: grid; gap: 8px; }
+    .comparator-row { display: grid; grid-template-columns: 1fr auto auto; gap: 10px; align-items: center; padding: 10px 12px; border-radius: 12px; background: rgba(30, 41, 59, 0.72); }
+    .comparator-pick { color: var(--ink); font-weight: 700; font-size: 0.9rem; }
+    .comparator-score { color: #93c5fd; font-weight: 700; font-size: 0.85rem; white-space: nowrap; }
   </style>
 </head>
 <body>
@@ -159,6 +167,7 @@
       <button class="tab active" data-tab="pipeline">Pipeline</button>
       <button class="tab" data-tab="today">Today</button>
       <button class="tab" data-tab="tomorrow">Tomorrow</button>
+      <button class="tab" data-tab="comparator">Comparator</button>
       <button class="tab" data-tab="history">History</button>
       <button class="tab" data-tab="polymarket">Polymarket</button>
     </nav>
@@ -228,6 +237,13 @@
         </div>
       </div>
       <div class="prediction-grid" id="tomorrow-grid"></div>
+    </section>
+    <section class="panel" id="panel-comparator">
+      <div class="card glass">
+        <h3 style="margin:0">Prop Comparator</h3>
+        <p class="subtle" style="margin:10px 0 0">Same-game prop stack ranked by confidence and edge so you can spot the best options quickly.</p>
+      </div>
+      <div class="comparator-shell" id="comparator-shell" style="margin-top:14px"></div>
     </section>
     <section class="panel" id="panel-history"><div class="table-shell glass" id="history-shell"></div></section>
     <section class="panel" id="panel-polymarket">
@@ -377,6 +393,45 @@
       container.innerHTML = predictions.map(predictionCard).join('');
       Array.from(container.querySelectorAll('.prediction-card')).forEach(card => card.addEventListener('click', () => openModal(JSON.parse(card.dataset.prediction))));
     }
+    function propConfidence(row) {
+      const isPlayerProp = String(row.prediction_scope || '') === 'player_prop';
+      if (isPlayerProp) return Number(Math.max(Number(row.over_prob || 0), Number(row.under_prob || 0)));
+      return Number(row.confidence || 0);
+    }
+    function propEdge(row) {
+      const c = propConfidence(row);
+      return Math.max(0, c - 0.5);
+    }
+    function renderComparator() {
+      const rows = [...(state.today.predictions || []), ...(state.tomorrow.predictions || [])];
+      const shell = document.getElementById('comparator-shell');
+      if (!rows.length) { shell.innerHTML = '<div class="empty-state">No props available to compare yet.</div>'; return; }
+      const byGame = new Map();
+      for (const row of rows) {
+        const key = `${row.sport || ''}|${row.game_date || ''}|${row.away_team || ''}|${row.home_team || ''}`;
+        if (!byGame.has(key)) byGame.set(key, []);
+        byGame.get(key).push(row);
+      }
+      const cards = Array.from(byGame.entries()).map(([key, gameRows]) => {
+        const [sport, gameDate, away, home] = key.split('|');
+        const sorted = [...gameRows].sort((a, b) => {
+          const ca = propConfidence(a); const cb = propConfidence(b);
+          if (cb !== ca) return cb - ca;
+          return propEdge(b) - propEdge(a);
+        }).slice(0, 6);
+        const top = sorted[0];
+        const listHtml = sorted.map(r => {
+          const pick = r.predicted_label || r.predicted_team || r.predicted_outcome || 'n/a';
+          const market = r.market_name || r.market_type || 'Prop';
+          const player = r.player_name ? ` • ${r.player_name}` : '';
+          const conf = propConfidence(r);
+          const edge = propEdge(r);
+          return `<div class="comparator-row"><div><div class="comparator-pick">${esc(market)}${esc(player)}</div><div class="subtle">${esc(pick)}</div></div><div class="comparator-score">${esc(pct(conf))}</div><div class="comparator-score">edge ${esc((edge*100).toFixed(1))}%</div></div>`;
+        }).join('');
+        return { score: propConfidence(top), html: `<article class="comparator-card"><div class="comparator-title">${esc(away || 'Away')} @ ${esc(home || 'Home')}</div><div class="comparator-meta">${esc(String(sport || '').toUpperCase())} • ${esc(gameDate || '—')} • ${esc(formatGameTime(top || {}))}</div><div class="comparator-list">${listHtml}</div></article>` };
+      }).sort((a, b) => b.score - a.score).slice(0, 18);
+      shell.innerHTML = cards.map(c => c.html).join('');
+    }
     function renderHistory() {
       const rows = [...(state.today.predictions || []), ...(state.tomorrow.predictions || [])].sort((a, b) => `${a.game_date || ''} ${a.game_time || ''}`.localeCompare(`${b.game_date || ''} ${b.game_time || ''}`));
       if (!rows.length) { document.getElementById('history-shell').innerHTML = '<div class="empty-state">No prediction history yet.</div>'; return; }
@@ -395,7 +450,7 @@
     }
     function openModal(prediction) { document.getElementById('modal-subtitle').textContent = `${prediction.away_team || 'Away'} @ ${prediction.home_team || 'Home'} • ${formatGameTime(prediction)}`; document.getElementById('modal-json').textContent = JSON.stringify(prediction, null, 2); document.getElementById('modal-backdrop').classList.add('open'); }
     function closeModal() { document.getElementById('modal-backdrop').classList.remove('open'); }
-    function renderAll() { renderHeroMetrics(); renderPipeline(); renderPredictionGrid('today-grid', state.today || {}, 'today'); renderPredictionGrid('tomorrow-grid', state.tomorrow || {}, 'tomorrow'); renderHistory(); renderPolymarket(); document.getElementById('live-status').textContent = `Live refresh • ${new Date().toLocaleTimeString()}`; document.getElementById('live-source').textContent = `Source: ${(state.status.source || 'local').toUpperCase()}`; }
+    function renderAll() { renderHeroMetrics(); renderPipeline(); renderPredictionGrid('today-grid', state.today || {}, 'today'); renderPredictionGrid('tomorrow-grid', state.tomorrow || {}, 'tomorrow'); renderComparator(); renderHistory(); renderPolymarket(); document.getElementById('live-status').textContent = `Live refresh • ${new Date().toLocaleTimeString()}`; document.getElementById('live-source').textContent = `Source: ${(state.status.source || 'local').toUpperCase()}`; }
     async function refreshAll() {
       try {
         const settled = await Promise.allSettled([fetchJson('/api/predictions/status'), fetchJson('/api/predictions/today'), fetchJson('/api/predictions/tomorrow'), fetchJson('/api/model/stats'), fetchJson('/api/polymarket/status')]);
