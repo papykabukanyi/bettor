@@ -1,6 +1,6 @@
 # Bettor HF-First Zero-Cost Pipeline
 
-Production-ready sports prediction stack using Hugging Face for dataset/model storage, HF Space API inference, and a Vercel dashboard.
+Production-ready sports prediction stack using Hugging Face for dataset/model storage, HF Space API inference, a Render backend, and a Cloudflare Pages dashboard.
 
 ## Cost Plan ($0 target)
 
@@ -21,7 +21,8 @@ Daily: collect multi-sport news signals (team/player/game impact) -> same HF Dat
 Daily: retrain best model -> HF Model Hub
 Daily: retrain news-impact text classifier -> HF Model Hub
 Anytime: call HF Space FastAPI inference endpoint
-Dashboard: Vercel Flask UI -> proxies HF Space API or local HF artifacts
+Backend: Render Flask UI -> proxies HF Space API or local HF artifacts
+Frontend: Cloudflare Pages static dashboard -> proxies /api/* to Render
 Execution: Kalshi (single + combo order routing)
 ```
 
@@ -48,10 +49,17 @@ Execution: Kalshi (single + combo order routing)
    python src\dashboard.py
    ```
 
+## Cloudflare Pages frontend
+
+- Build the static dashboard with `python scripts/build_cloudflare_pages.py`.
+- Deploy the `public/` output to Cloudflare Pages.
+- Set `BACKEND_BASE_URL` in Cloudflare Pages to your Render backend URL.
+- Pages proxies `/api/*` to the backend through a Pages Function.
+
 ## Automation (without GitHub Actions dependency)
 
 - Use HF Space FastAPI app (`hf_space_api/app.py`) with startup autorun + daily schedule.
-- Set `HF_SPACE_API_URL` in Vercel to your deployed Space endpoint.
+- Set `HF_SPACE_API_URL` in your Render environment to your deployed Space endpoint.
 - Use `HF_ACTIVE_SCAN_MINUTES` (default `30`) to continuously refresh append/predict cycles.
 - Use `HF_ACTIVE_APPEND_DAYS` (default `3`) to keep recent results synced for all supported sports.
 - Use `HF_RETRAIN_INTERVAL_MINUTES` (default `180`) to auto-retrain frequently without waiting for daily cron.

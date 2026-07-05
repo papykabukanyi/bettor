@@ -204,9 +204,9 @@ Deploy `hf_space_api/app.py` to HF Spaces
 Create `.github/workflows/daily-pipeline.yml` with cron trigger
 ✅ Free tier eligible | ⚠️ Requires setup
 
-### Option 4: Vercel Cron
-Use Vercel's `/cron` endpoints
-✅ Integrated with dashboard | ⚠️ Requires Vercel pro for cron
+### Option 4: Render Cron
+Use Render cron jobs to hit `/api/kalshi/automation/tick`
+✅ Integrated with dashboard | ⚠️ Requires Render cron configuration
 
 ---
 

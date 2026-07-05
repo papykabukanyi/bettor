@@ -20,6 +20,3 @@ dependencies = [
 	"websockets>=12.0",
 	"py-clob-client",
 ]
-
-[tool.vercel]
-entrypoint = "src.dashboard:app"

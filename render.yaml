@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: bettor-dashboard
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn src.dashboard:app --bind 0.0.0.0:$PORT
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+
+  - type: cron
+    name: bettor-kalshi-automation
+    env: python
+    schedule: "*/5 * * * *"
+    buildCommand: pip install -r requirements.txt
+    startCommand: python scripts/run_render_kalshi_tick.py
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0

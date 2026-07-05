@@ -517,12 +517,8 @@ def kalshi_automation_status():
     )
 
 
-@app.route("/api/kalshi/automation/tick", methods=["GET", "POST"])
-def kalshi_automation_tick():
-    if not _is_cron_authorized():
-        return jsonify({"ok": False, "error": "Unauthorized"}), 401
-
-    body = request.get_json(silent=True) or {}
+def run_kalshi_automation_cycle(body: dict[str, Any] | None = None) -> dict[str, Any]:
+    body = body or {}
     stake_usd = float(body.get("stake_usd") or _env_float("KALSHI_AUTOBET_STAKE_USD", 1.0))
     max_single_orders = int(body.get("max_single_orders") or _env_int("KALSHI_AUTOBET_MAX_SINGLE_ORDERS", 1))
     max_combo_orders = int(body.get("max_combo_orders") or _env_int("KALSHI_AUTOBET_MAX_COMBO_ORDERS", 1))
@@ -536,53 +532,68 @@ def kalshi_automation_tick():
     if not isinstance(payload, dict) or not isinstance(payload.get("predictions"), list):
         payload = _load_json(HF_PREDICTIONS_FILE, {})
     if not isinstance(payload, dict) or not isinstance(payload.get("predictions"), list):
-        return jsonify({"ok": False, "error": "Prediction data unavailable."}), 400
+        raise ValueError("Prediction data unavailable.")
+
+    single_orders = submit_prediction_orders(
+        payload,
+        stake_usd=stake_usd,
+        max_orders=max_single_orders,
+        dry_run=dry_run,
+    )
+
+    combo_result: dict[str, Any] = {
+        "ok": True,
+        "combo_enabled": combo_enabled,
+        "submitted_count": 0,
+        "suggested_count": 0,
+        "matched_count": 0,
+        "submitted": [],
+        "suggestions": [],
+    }
+    if combo_enabled:
+        from data.kalshi_trade_api import build_combo_suggestions_from_predictions, submit_combo_orders
+
+        combo_suggestions = build_combo_suggestions_from_predictions(payload, max_combos=max(5, max_combo_orders * 5))
+        combo_result["suggestions"] = combo_suggestions
+        combo_result["suggested_count"] = len(combo_suggestions)
+        combo_result["matched_count"] = sum(
+            1 for combo in combo_suggestions if str(combo.get("kalshi_status") or "").strip().lower() == "matched"
+        )
+        combo_orders = submit_combo_orders(
+            combo_suggestions,
+            stake_usd=stake_usd,
+            max_orders=max_combo_orders,
+            dry_run=(dry_run or (not combo_live_enabled)),
+        )
+        combo_result.update(combo_orders)
+
+    state = {
+        "ok": True,
+        "updated_at": single_orders.get("updated_at"),
+        "dry_run": dry_run,
+        "live_enabled": live_enabled,
+        "stake_usd": stake_usd,
+        "single_orders": single_orders,
+        "combo_orders": combo_result,
+    }
+    _save_json(KALSHI_AUTOMATION_STATE_FILE, state)
+    return state
+
+
+@app.route("/api/kalshi/automation/tick", methods=["GET", "POST"])
+def kalshi_automation_tick():
+    if not _is_cron_authorized():
+        return jsonify({"ok": False, "error": "Unauthorized"}), 401
+
+    body = request.get_json(silent=True) or {}
 
     try:
-        single_orders = submit_prediction_orders(
-            payload,
-            stake_usd=stake_usd,
-            max_orders=max_single_orders,
-            dry_run=dry_run,
-        )
-
-        combo_result: dict[str, Any] = {
-            "ok": True,
-            "combo_enabled": combo_enabled,
-            "submitted_count": 0,
-            "suggested_count": 0,
-            "matched_count": 0,
-            "submitted": [],
-            "suggestions": [],
-        }
-        if combo_enabled:
-            from data.kalshi_trade_api import build_combo_suggestions_from_predictions, submit_combo_orders
-
-            combo_suggestions = build_combo_suggestions_from_predictions(payload, max_combos=max(5, max_combo_orders * 5))
-            combo_result["suggestions"] = combo_suggestions
-            combo_result["suggested_count"] = len(combo_suggestions)
-            combo_result["matched_count"] = sum(
-                1 for combo in combo_suggestions if str(combo.get("kalshi_status") or "").strip().lower() == "matched"
-            )
-            combo_orders = submit_combo_orders(
-                combo_suggestions,
-                stake_usd=stake_usd,
-                max_orders=max_combo_orders,
-                dry_run=(dry_run or (not combo_live_enabled)),
-            )
-            combo_result.update(combo_orders)
-
-        state = {
-            "ok": True,
-            "updated_at": single_orders.get("updated_at"),
-            "dry_run": dry_run,
-            "live_enabled": live_enabled,
-            "stake_usd": stake_usd,
-            "single_orders": single_orders,
-            "combo_orders": combo_result,
-        }
-        _save_json(KALSHI_AUTOMATION_STATE_FILE, state)
+        state = run_kalshi_automation_cycle(body)
         return jsonify(state)
+    except ValueError as exc:
+        state = {"ok": False, "updated_at": "", "error": str(exc)}
+        _save_json(KALSHI_AUTOMATION_STATE_FILE, state)
+        return jsonify(state), 400
     except Exception as exc:
         state = {"ok": False, "updated_at": "", "error": str(exc)}
         _save_json(KALSHI_AUTOMATION_STATE_FILE, state)

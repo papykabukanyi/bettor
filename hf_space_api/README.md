@@ -72,4 +72,4 @@ Recommended:
 - Full retrain scheduling is done daily via cron job.
 - Startup autorun is enabled by default and will create/push dataset + model artifacts when empty.
 - Combo suggestions are generated from HF predictions and published to `artifacts/hf_daily_prediction_combos.json`.
-- Use this Space URL as `HF_SPACE_API_URL` in Vercel so dashboard reads live predictions.
+- Use this Space URL as `HF_SPACE_API_URL` in Render so the dashboard reads live predictions.
