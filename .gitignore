@@ -119,5 +119,4 @@ models/*.pkl
 models/*.joblib
 modal_data/
 .kalshi/
-public/
 .wrangler/
