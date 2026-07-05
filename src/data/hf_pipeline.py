@@ -118,6 +118,18 @@ class HFDirectPipeline:
         "nfl": [("anytime_td", "Anytime Touchdown", 0.60), ("rushing_yards_over", "Player Rushing Yards Over", 0.56)],
         "tennis": [("wins_set_1", "Player To Win Set 1", 0.62)],
     }
+    _PLAYER_PROP_BASELINES = {
+        "hit_recorded": {"line": 0.5, "unit": "hits", "scale": 2.1},
+        "rbi_recorded": {"line": 0.5, "unit": "rbi", "scale": 1.6},
+        "points_20_plus": {"line": 19.5, "unit": "points", "scale": 38.0},
+        "assists_5_plus": {"line": 4.5, "unit": "assists", "scale": 10.0},
+        "anytime_goal": {"line": 0.5, "unit": "goals", "scale": 1.3},
+        "point_recorded": {"line": 0.5, "unit": "points", "scale": 1.9},
+        "assist_recorded": {"line": 0.5, "unit": "assists", "scale": 1.5},
+        "anytime_td": {"line": 0.5, "unit": "touchdowns", "scale": 1.4},
+        "rushing_yards_over": {"line": 59.5, "unit": "yards", "scale": 120.0},
+        "wins_set_1": {"line": 0.5, "unit": "sets", "scale": 1.0},
+    }
     _SPORT_ALIASES = {
         "baseball": "mlb",
         "mlb": "mlb",
@@ -572,8 +584,17 @@ class HFDirectPipeline:
                 p_yes = 0.5 + (float(team_prob) - 0.5) * float(weight)
                 p_yes = max(0.05, min(0.95, p_yes))
                 p_no = 1.0 - p_yes
-                predicted_outcome = "YES" if p_yes >= p_no else "NO"
+                predicted_outcome = "OVER" if p_yes >= p_no else "UNDER"
                 confidence = max(p_yes, p_no)
+                details = self._player_prop_details(prop_type, p_yes)
+                line_value = float(details.get("line", 0.5))
+                projection = float(details.get("projection", 0.5))
+                unit = str(details.get("unit", "stat"))
+                predicted_label = (
+                    f"{predicted_outcome} {line_value:.1f} {unit}"
+                    if line_value < 10
+                    else f"{predicted_outcome} {line_value:.1f}"
+                )
                 rows.append(
                     {
                         "prediction_id": str(uuid4()),
@@ -589,6 +610,13 @@ class HFDirectPipeline:
                         "player_team": team_name,
                         "market_type": prop_type,
                         "market_name": prop_name,
+                        "prop_line": round(line_value, 2),
+                        "prop_unit": unit,
+                        "projected_value": round(projection, 2),
+                        "over_prob": round(p_yes, 4),
+                        "under_prob": round(p_no, 4),
+                        "predicted_side": predicted_outcome.lower(),
+                        "predicted_label": predicted_label,
                         "predicted_outcome": predicted_outcome,
                         "predicted_team": team_name,
                         "home_win_prob": round(p_yes, 4),
@@ -604,6 +632,14 @@ class HFDirectPipeline:
                     }
                 )
         return rows
+
+    def _player_prop_details(self, prop_type: str, p_yes: float) -> dict:
+        base = self._PLAYER_PROP_BASELINES.get(str(prop_type or "").strip().lower(), {"line": 0.5, "unit": "stat", "scale": 1.0})
+        line = float(base.get("line", 0.5))
+        unit = str(base.get("unit", "stat"))
+        scale = float(base.get("scale", max(1.0, line * 2.0)))
+        projection = max(0.0, min(scale, p_yes * scale))
+        return {"line": line, "unit": unit, "projection": projection}
 
     def _expand_market_predictions(
         self,
