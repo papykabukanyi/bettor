@@ -18,16 +18,64 @@ HF_STATUS_FILE = DATA_DIR / "hf_pipeline_status.json"
 HF_PREDICTIONS_FILE = DATA_DIR / "hf_daily_predictions.json"
 HF_HISTORY_FILE = DATA_DIR / "training_history.json"
 HF_MARKETS_FILE = DATA_DIR / "hf_daily_prediction_markets.json"
-PROVIDER_API_URL = str(
-    os.getenv("HF_SPACE_API_URL", "")
-    or os.getenv("PREDICTIONS_API_URL", "")
-    or ""
-).strip().rstrip("/")
 REQUEST_TIMEOUT = int(os.getenv("HF_PROXY_TIMEOUT", "15") or "15")
+DISCOVERY_TIMEOUT = int(os.getenv("HF_PROXY_DISCOVERY_TIMEOUT", "4") or "4")
+HF_MODEL_REPO = str(os.getenv("HF_MODEL_REPO", "papylove/sportprediction") or "").strip()
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
 app = Flask(__name__, template_folder="templates")
+
+
+def _space_repo_to_url(repo_id: str) -> str:
+    value = str(repo_id or "").strip().strip("/")
+    if not value:
+        return ""
+    if value.startswith("http://") or value.startswith("https://"):
+        return value.rstrip("/")
+    if "/" not in value:
+        return ""
+    owner, space = value.split("/", 1)
+    owner = owner.strip()
+    space = space.strip()
+    if not owner or not space:
+        return ""
+    return f"https://{owner}-{space}.hf.space"
+
+
+def _discover_provider_api_url() -> tuple[str, str]:
+    explicit = str(os.getenv("HF_SPACE_API_URL", "") or os.getenv("PREDICTIONS_API_URL", "")).strip().rstrip("/")
+    if explicit:
+        return explicit, "explicit_env"
+
+    candidates: list[tuple[str, str]] = []
+    for env_name in ("HF_SPACE_REPO", "HF_SPACE_ID", "SPACE_ID", "HF_MODEL_REPO", "HF_DATASET_REPO"):
+        raw = str(os.getenv(env_name, "") or "").strip()
+        url = _space_repo_to_url(raw)
+        if url:
+            candidates.append((url.rstrip("/"), env_name))
+
+    seen: set[str] = set()
+    for base_url, source in candidates:
+        if base_url in seen:
+            continue
+        seen.add(base_url)
+        try:
+            health = requests.get(urljoin(base_url + "/", "health"), timeout=DISCOVERY_TIMEOUT)
+            if health.ok:
+                return base_url, f"auto:{source}"
+        except Exception:
+            pass
+        try:
+            status = requests.get(urljoin(base_url + "/", "status"), timeout=DISCOVERY_TIMEOUT)
+            if status.ok:
+                return base_url, f"auto:{source}"
+        except Exception:
+            pass
+    return "", "none"
+
+
+PROVIDER_API_URL, PROVIDER_API_SOURCE = _discover_provider_api_url()
 
 
 def _load_json(path: Path, default: Any) -> Any:
@@ -38,29 +86,69 @@ def _load_json(path: Path, default: Any) -> Any:
         return default
 
 
-def _provider_or_local(path: str, local_file: Path, *, default: Any) -> tuple[Any, bool, str]:
+def _normalize_hf_repo_id(value: str) -> str:
+    raw = str(value or "").strip().strip("/")
+    if not raw or "/" not in raw:
+        return ""
+    owner, name = raw.split("/", 1)
+    owner = owner.strip()
+    name = name.strip()
+    if not owner or not name:
+        return ""
+    return f"{owner}/{name}"
+
+
+def _fetch_hf_model_artifact_json(path_in_repo: str) -> Any:
+    repo_id = _normalize_hf_repo_id(HF_MODEL_REPO)
+    if not repo_id:
+        return None
+    url = f"https://huggingface.co/{repo_id}/resolve/main/{path_in_repo.lstrip('/')}"
+    try:
+        response = requests.get(url, timeout=REQUEST_TIMEOUT)
+        response.raise_for_status()
+        return response.json()
+    except Exception:
+        return None
+
+
+def _provider_or_local(path: str, local_file: Path, *, default: Any) -> tuple[Any, str, str]:
     error = ""
     if PROVIDER_API_URL:
         try:
             response = requests.get(urljoin(PROVIDER_API_URL + "/", path.lstrip("/")), timeout=REQUEST_TIMEOUT)
             response.raise_for_status()
-            return response.json(), True, ""
+            return response.json(), "hf_space_auto" if PROVIDER_API_SOURCE.startswith("auto:") else "hf_space", ""
         except Exception as exc:
             error = str(exc)
             logger.warning("Provider proxy failed for %s: %s", path, exc)
+
+    hub_artifact_map = {
+        "/status": "artifacts/hf_pipeline_status.json",
+        "/predictions/today": "artifacts/hf_daily_predictions.json",
+        "/predictions/tomorrow": "artifacts/hf_daily_predictions.json",
+        "/model/stats": "artifacts/hf_pipeline_status.json",
+        "/polymarket/submissions": "artifacts/hf_daily_prediction_markets.json",
+        "/polymarket/positions": "artifacts/hf_daily_prediction_markets.json",
+    }
+    artifact_path = hub_artifact_map.get(path)
+    if artifact_path:
+        payload = _fetch_hf_model_artifact_json(artifact_path)
+        if isinstance(payload, dict) and payload:
+            return payload, "hf_hub_artifact", error
+
     if local_file.exists():
-        return _load_json(local_file, default), False, error
-    return default, False, error or "HF provider API URL is not configured and no local HF snapshot exists."
+        return _load_json(local_file, default), "hf_local_snapshot", error
+    return default, "hf_local_snapshot_no_space_url", error or "HF provider API URL is not configured and no local HF snapshot exists."
 
 
-def _envelope(payload: Any, source_live: bool, error: str = "") -> dict[str, Any]:
+def _envelope(payload: Any, source: str, error: str = "") -> dict[str, Any]:
     wrapped = dict(payload) if isinstance(payload, dict) else {"data": payload}
     wrapped.setdefault("ok", not bool(error))
-    source = "hf_space" if source_live else "hf_local_snapshot"
-    if not source_live and not PROVIDER_API_URL:
-        source = "hf_local_snapshot_no_space_url"
     wrapped.setdefault("source", source)
-    wrapped.setdefault("provider_configured", bool(PROVIDER_API_URL))
+    wrapped.setdefault("provider_configured", bool(PROVIDER_API_URL) or bool(_normalize_hf_repo_id(HF_MODEL_REPO)))
+    wrapped.setdefault("provider_url", PROVIDER_API_URL)
+    wrapped.setdefault("provider_source", PROVIDER_API_SOURCE)
+    wrapped.setdefault("hf_model_repo", _normalize_hf_repo_id(HF_MODEL_REPO))
     if error:
         wrapped.setdefault("warning", error)
     return wrapped
@@ -86,9 +174,9 @@ def index():
 
 @app.route("/api/predictions/status")
 def predictions_status():
-    payload, source_live, error = _provider_or_local("/status", HF_STATUS_FILE, default={})
+    payload, source, error = _provider_or_local("/status", HF_STATUS_FILE, default={})
     if isinstance(payload, dict) and "pipeline" in payload and "metrics" in payload:
-        return jsonify(_envelope(payload, source_live, error))
+        return jsonify(_envelope(payload, source, error))
 
     status = payload if isinstance(payload, dict) else {}
     preds = _load_json(HF_PREDICTIONS_FILE, {})
@@ -131,34 +219,34 @@ def predictions_status():
         "model": model,
         "polymarket": {"submissions": {}, "positions": {}},
     }
-    return jsonify(_envelope(transformed, source_live, error))
+    return jsonify(_envelope(transformed, source, error))
 
 
 @app.route("/api/predictions/today")
 def predictions_today():
-    payload, source_live, error = _provider_or_local("/predictions/today", HF_PREDICTIONS_FILE, default={})
+    payload, source, error = _provider_or_local("/predictions/today", HF_PREDICTIONS_FILE, default={})
     if isinstance(payload, dict) and "date" in payload and "predictions" in payload:
-        return jsonify(_envelope(payload, source_live, error))
+        return jsonify(_envelope(payload, source, error))
     if not isinstance(payload, dict):
-        return jsonify(_envelope({}, source_live, error))
-    return jsonify(_envelope(_predictions_for_date(payload, str(payload.get("today") or "")), source_live, error))
+        return jsonify(_envelope({}, source, error))
+    return jsonify(_envelope(_predictions_for_date(payload, str(payload.get("today") or "")), source, error))
 
 
 @app.route("/api/predictions/tomorrow")
 def predictions_tomorrow():
-    payload, source_live, error = _provider_or_local("/predictions/tomorrow", HF_PREDICTIONS_FILE, default={})
+    payload, source, error = _provider_or_local("/predictions/tomorrow", HF_PREDICTIONS_FILE, default={})
     if isinstance(payload, dict) and "date" in payload and "predictions" in payload:
-        return jsonify(_envelope(payload, source_live, error))
+        return jsonify(_envelope(payload, source, error))
     if not isinstance(payload, dict):
-        return jsonify(_envelope({}, source_live, error))
-    return jsonify(_envelope(_predictions_for_date(payload, str(payload.get("tomorrow") or "")), source_live, error))
+        return jsonify(_envelope({}, source, error))
+    return jsonify(_envelope(_predictions_for_date(payload, str(payload.get("tomorrow") or "")), source, error))
 
 
 @app.route("/api/model/stats")
 def model_stats():
-    payload, source_live, error = _provider_or_local("/model/stats", HF_STATUS_FILE, default={})
+    payload, source, error = _provider_or_local("/model/stats", HF_STATUS_FILE, default={})
     if isinstance(payload, dict) and "current_model" in payload:
-        return jsonify(_envelope(payload, source_live, error))
+        return jsonify(_envelope(payload, source, error))
     status = payload if isinstance(payload, dict) else {}
     transformed = {
         "ok": bool(status),
@@ -173,7 +261,7 @@ def model_stats():
         },
         "history": _load_json(HF_HISTORY_FILE, []),
     }
-    return jsonify(_envelope(transformed, source_live, error))
+    return jsonify(_envelope(transformed, source, error))
 
 
 def _local_submissions_payload() -> dict[str, Any]:
@@ -207,30 +295,37 @@ def _local_submissions_payload() -> dict[str, Any]:
 
 @app.route("/api/polymarket/submissions")
 def polymarket_submissions():
-    payload, source_live, error = _provider_or_local("/polymarket/submissions", HF_MARKETS_FILE, default={})
+    payload, source, error = _provider_or_local("/polymarket/submissions", HF_MARKETS_FILE, default={})
     if isinstance(payload, dict) and "summary" in payload and "submissions" in payload:
-        return jsonify(_envelope(payload, source_live, error))
-    return jsonify(_envelope(_local_submissions_payload(), source_live, error))
+        return jsonify(_envelope(payload, source, error))
+    return jsonify(_envelope(_local_submissions_payload(), source, error))
 
 
 @app.route("/api/polymarket/positions")
 def polymarket_positions():
-    payload, source_live, error = _provider_or_local("/polymarket/positions", HF_MARKETS_FILE, default={})
+    payload, source, error = _provider_or_local("/polymarket/positions", HF_MARKETS_FILE, default={})
     if isinstance(payload, dict) and "summary" in payload and "positions" in payload:
-        return jsonify(_envelope(payload, source_live, error))
+        return jsonify(_envelope(payload, source, error))
     local = {"ok": True, "updated_at": "", "summary": {"active_positions": 0, "open_notional_usd": 0, "estimated_pnl_usd": 0}, "positions": []}
-    return jsonify(_envelope(local, source_live, error))
+    return jsonify(_envelope(local, source, error))
 
 
 @app.route("/api/polymarket/status")
 def polymarket_status():
     sub = polymarket_submissions().get_json(silent=True) or {}
     pos = polymarket_positions().get_json(silent=True) or {}
-    source = "hf_space" if (sub.get("source") == "hf_space" or pos.get("source") == "hf_space") else "hf_local_snapshot"
+    if (sub.get("source") in {"hf_space", "hf_space_auto"} or pos.get("source") in {"hf_space", "hf_space_auto"}):
+        source = "hf_space"
+    elif (sub.get("source") == "hf_hub_artifact" or pos.get("source") == "hf_hub_artifact"):
+        source = "hf_hub_artifact"
+    else:
+        source = "hf_local_snapshot"
     payload = {
         "ok": True,
         "source": source,
         "provider_configured": bool(PROVIDER_API_URL),
+        "provider_url": PROVIDER_API_URL,
+        "provider_source": PROVIDER_API_SOURCE,
         "warning": sub.get("warning") or pos.get("warning") or "",
         "updated_at": (sub.get("updated_at") or pos.get("updated_at") or ""),
         "submissions": sub,

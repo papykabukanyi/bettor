@@ -207,7 +207,7 @@ class HFUploader:
             from src.config import HF_API_KEY, HF_DATASET_REPO
         except ImportError:
             HF_API_KEY = os.getenv("HF_API_KEY", "")
-            HF_DATASET_REPO = os.getenv("HF_DATASET_REPO", "sports-dataset")
+            HF_DATASET_REPO = os.getenv("HF_DATASET_REPO", "papylove/sportprediction")
 
         self._token = token or HF_API_KEY
         _repo_name = repo_name or HF_DATASET_REPO

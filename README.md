@@ -50,6 +50,8 @@ Execution: Polymarket (Kalshi removed from active flow)
 - Use HF Space FastAPI app (`hf_space_api/app.py`) with startup autorun + daily schedule.
 - Set `HF_SPACE_API_URL` in Vercel to your deployed Space endpoint.
 - Use `HF_ACTIVE_SCAN_MINUTES` (default `30`) to continuously refresh append/predict cycles.
+- If `HF_SPACE_API_URL` is omitted, dashboard auto-discovers Space URL from `HF_SPACE_REPO` (or `HF_MODEL_REPO` / `HF_DATASET_REPO` when in `owner/repo` format).
+- If Space is unavailable, dashboard falls back to HF model-repo artifacts at `artifacts/hf_daily_predictions.json` and `artifacts/hf_pipeline_status.json`.
 
 ## Recommended free data providers by sport
 

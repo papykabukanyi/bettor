@@ -111,8 +111,8 @@ class HFDirectPipeline:
             )
         except Exception:
             HF_API_KEY = os.getenv("HF_API_KEY", "")
-            HF_DATASET_REPO = os.getenv("HF_DATASET_REPO", "sportprediction")
-            HF_MODEL_REPO = os.getenv("HF_MODEL_REPO", "sports-win-model")
+            HF_DATASET_REPO = os.getenv("HF_DATASET_REPO", "papylove/sportprediction")
+            HF_MODEL_REPO = os.getenv("HF_MODEL_REPO", "papylove/sportprediction")
             FOOTBALL_DATA_API_KEY = os.getenv("FOOTBALL_DATA_API_KEY", "")
             TENNIS_JEFF_SACKMANN_DIR = os.getenv("TENNIS_JEFF_SACKMANN_DIR", "")
 
@@ -493,6 +493,7 @@ class HFDirectPipeline:
             "train": train_result, "predictions": preds,
             "completed_at": _now_utc(),
         }
+        self.publish_runtime_artifacts()
         self._write_status({"last_step": "daily_pipeline", "ok": True, "daily_completed_at": _now_utc()})
         logger.info("[hf_pipeline] Daily pipeline complete")
         return result
@@ -1264,6 +1265,35 @@ class HFDirectPipeline:
                 )
             except Exception as exc:
                 logger.debug("[hf_pipeline] training_history push: %s", exc)
+
+    def publish_runtime_artifacts(self) -> dict:
+        """Publish latest runtime JSON artifacts to model repo for dashboard fallback."""
+        if not self._ok or not self._api:
+            return {"ok": False, "uploaded": 0, "reason": "hf_not_configured"}
+
+        artifacts = {
+            "artifacts/hf_pipeline_status.json": self._status_file,
+            "artifacts/hf_daily_predictions.json": self._predictions_file,
+            "artifacts/training_history.json": self._training_history_file,
+            "artifacts/hf_daily_prediction_markets.json": os.path.join(self._data_dir, "hf_daily_prediction_markets.json"),
+        }
+        uploaded = 0
+        for repo_path, local_path in artifacts.items():
+            if not os.path.exists(local_path):
+                continue
+            try:
+                with open(local_path, "rb") as f:
+                    self._api.upload_file(
+                        path_or_fileobj=f.read(),
+                        path_in_repo=repo_path,
+                        repo_id=self.model_repo_id,
+                        repo_type="model",
+                        commit_message=f"Update {repo_path}",
+                    )
+                uploaded += 1
+            except Exception as exc:
+                logger.debug("[hf_pipeline] publish artifact failed %s: %s", repo_path, exc)
+        return {"ok": True, "uploaded": uploaded}
 
     def _get_model_metadata(self) -> dict:
         if not self._ok or not self._api:

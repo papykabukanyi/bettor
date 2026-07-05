@@ -100,6 +100,7 @@ def _run_hf_active_cycle() -> dict[str, Any]:
             predictions_path=str(PRED_FILE),
             output_path=str(DATA_DIR / "hf_daily_prediction_markets.json"),
         )
+    pipeline.publish_runtime_artifacts()
     return {"ok": True, "append_yesterday": append_y, "append_today": append_t, "predictions": preds}
 
 
