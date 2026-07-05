@@ -77,16 +77,46 @@ class HFDirectPipeline:
         "golf": "golf",
     }
     _SPORT_MARKET_PROFILES = {
-        "mlb": [("moneyline", "Game Winner", 1.0), ("first_5_innings", "First 5 Innings Winner", 0.72)],
-        "nba": [("moneyline", "Game Winner", 1.0), ("first_half", "First Half Winner", 0.74)],
-        "nhl": [("moneyline", "Game Winner", 1.0), ("first_period", "First Period Winner", 0.66)],
-        "soccer": [("moneyline", "Full Time Winner", 1.0), ("first_half", "First Half Winner", 0.70)],
-        "tennis": [("match_winner", "Match Winner", 1.0), ("set_1_winner", "Set 1 Winner", 0.76)],
+        "mlb": [
+            ("moneyline", "Game Winner", 1.0),
+            ("first_3_innings", "First 3 Innings Winner", 0.67),
+            ("first_5_innings", "First 5 Innings Winner", 0.72),
+            ("first_7_innings", "First 7 Innings Winner", 0.80),
+        ],
+        "nba": [
+            ("moneyline", "Game Winner", 1.0),
+            ("first_quarter", "First Quarter Winner", 0.63),
+            ("first_half", "First Half Winner", 0.74),
+            ("third_quarter", "Third Quarter Winner", 0.66),
+        ],
+        "nhl": [
+            ("moneyline", "Game Winner", 1.0),
+            ("first_period", "First Period Winner", 0.66),
+            ("second_period", "Second Period Winner", 0.70),
+        ],
+        "soccer": [
+            ("moneyline", "Full Time Winner", 1.0),
+            ("first_half", "First Half Winner", 0.70),
+            ("second_half", "Second Half Winner", 0.73),
+        ],
+        "tennis": [
+            ("match_winner", "Match Winner", 1.0),
+            ("set_1_winner", "Set 1 Winner", 0.76),
+            ("set_2_winner", "Set 2 Winner", 0.74),
+        ],
         "golf": [("winner", "Tournament Leader", 1.0)],
         "boxing": [("winner", "Fight Winner", 1.0)],
         "mma": [("winner", "Fight Winner", 1.0)],
         "cricket": [("moneyline", "Match Winner", 1.0), ("first_innings", "First Innings Winner", 0.74)],
-        "nfl": [("moneyline", "Game Winner", 1.0), ("first_half", "First Half Winner", 0.73)],
+        "nfl": [("moneyline", "Game Winner", 1.0), ("first_quarter", "First Quarter Winner", 0.64), ("first_half", "First Half Winner", 0.73)],
+    }
+    _PLAYER_PROP_PROFILES = {
+        "mlb": [("hit_recorded", "Player To Record A Hit", 0.66), ("rbi_recorded", "Player To Record RBI", 0.58)],
+        "nba": [("points_20_plus", "Player 20+ Points", 0.64), ("assists_5_plus", "Player 5+ Assists", 0.60)],
+        "nhl": [("anytime_goal", "Anytime Goal Scorer", 0.58), ("point_recorded", "Player To Record A Point", 0.63)],
+        "soccer": [("anytime_goal", "Anytime Goal Scorer", 0.57), ("assist_recorded", "Player To Record Assist", 0.54)],
+        "nfl": [("anytime_td", "Anytime Touchdown", 0.60), ("rushing_yards_over", "Player Rushing Yards Over", 0.56)],
+        "tennis": [("wins_set_1", "Player To Win Set 1", 0.62)],
     }
     _SPORT_ALIASES = {
         "baseball": "mlb",
@@ -390,6 +420,8 @@ class HFDirectPipeline:
         model_auc = float(meta.get("cv_roc_auc") or 0.0)
 
         all_predictions: list[dict] = []
+        player_cache: dict[str, list[str]] = {}
+        sports_seen: set[str] = set()
         for target_date in [today, tomorrow]:
             games = self._fetch_upcoming_games(target_date)
             for g in games:
@@ -398,10 +430,15 @@ class HFDirectPipeline:
                 if not home_team or not away_team:
                     continue
                 sport = str(g.get("sport") or "mlb")
+                sports_seen.add(self._normalize_sport(sport))
                 league = str(g.get("league") or sport.upper())
                 game_date = str(g.get("game_date") or target_date.isoformat())
                 game_time = str(g.get("game_time") or "")
                 game_id = str(g.get("game_id") or "")
+                home_starter = str(g.get("home_starter") or "").strip()
+                away_starter = str(g.get("away_starter") or "").strip()
+                home_team_id = str(g.get("home_team_id") or "").strip()
+                away_team_id = str(g.get("away_team_id") or "").strip()
                 try:
                     if via_api:
                         resp = self.predict_via_hf_api(home_team, away_team, target_date.year, model_id, endpoint_url)
@@ -431,6 +468,28 @@ class HFDirectPipeline:
                         via_api=via_api,
                     )
                     all_predictions.extend(market_rows)
+                    all_predictions.extend(
+                        self._expand_player_prop_predictions(
+                            sport=sport,
+                            league=league,
+                            game_id=game_id,
+                            game_date=game_date,
+                            game_time=game_time,
+                            home_team=home_team,
+                            away_team=away_team,
+                            home_prob=home_prob,
+                            away_prob=away_prob,
+                            model_version=model_version,
+                            model_type=model_type,
+                            model_auc=model_auc,
+                            via_api=via_api,
+                            player_cache=player_cache,
+                            home_starter=home_starter,
+                            away_starter=away_starter,
+                            home_team_id=home_team_id,
+                            away_team_id=away_team_id,
+                        )
+                    )
                 except Exception as exc:
                     logger.warning("[hf_pipeline] predict error %s vs %s: %s", home_team, away_team, exc)
                     all_predictions.append({
@@ -461,12 +520,90 @@ class HFDirectPipeline:
             "last_step": "predict_daily", "ok": True,
             "prediction_date": today.isoformat(),
             "prediction_count": len(good),
+            "prediction_sports": sorted(sports_seen),
             "prediction_file": out_path,
             "model_version": model_version,
             "predict_completed_at": _now_utc(),
         })
         logger.info("[hf_pipeline] %d predictions generated (%s + %s)", len(good), today, tomorrow)
         return {"ok": True, "prediction_count": len(good), "output_file": out_path, "date": today.isoformat()}
+
+    def _expand_player_prop_predictions(
+        self,
+        *,
+        sport: str,
+        league: str,
+        game_id: str,
+        game_date: str,
+        game_time: str,
+        home_team: str,
+        away_team: str,
+        home_prob: float,
+        away_prob: float,
+        model_version: str,
+        model_type: str,
+        model_auc: float,
+        via_api: bool,
+        player_cache: dict[str, list[str]],
+        home_starter: str = "",
+        away_starter: str = "",
+        home_team_id: str = "",
+        away_team_id: str = "",
+    ) -> list[dict]:
+        normalized_sport = self._normalize_sport(sport)
+        profile = self._PLAYER_PROP_PROFILES.get(normalized_sport) or []
+        if not profile:
+            return []
+
+        home_players = ([home_starter] if home_starter else []) + self._fetch_team_players_thesportsdb(home_team, normalized_sport, player_cache)
+        away_players = ([away_starter] if away_starter else []) + self._fetch_team_players_thesportsdb(away_team, normalized_sport, player_cache)
+        if normalized_sport == "mlb":
+            if not home_players and home_team_id:
+                home_players = self._fetch_mlb_team_players(home_team_id, player_cache)
+            if not away_players and away_team_id:
+                away_players = self._fetch_mlb_team_players(away_team_id, player_cache)
+        if not home_players and not away_players:
+            return []
+
+        rows: list[dict] = []
+        candidate_players = [(home_team, p, home_prob) for p in home_players[:2]] + [(away_team, p, away_prob) for p in away_players[:2]]
+        for team_name, player_name, team_prob in candidate_players:
+            for prop_type, prop_name, weight in profile:
+                p_yes = 0.5 + (float(team_prob) - 0.5) * float(weight)
+                p_yes = max(0.05, min(0.95, p_yes))
+                p_no = 1.0 - p_yes
+                predicted_outcome = "YES" if p_yes >= p_no else "NO"
+                confidence = max(p_yes, p_no)
+                rows.append(
+                    {
+                        "prediction_id": str(uuid4()),
+                        "game_id": game_id,
+                        "sport": normalized_sport,
+                        "league": league,
+                        "home_team": home_team,
+                        "away_team": away_team,
+                        "game_date": game_date,
+                        "game_time": game_time,
+                        "prediction_scope": "player_prop",
+                        "player_name": player_name,
+                        "player_team": team_name,
+                        "market_type": prop_type,
+                        "market_name": prop_name,
+                        "predicted_outcome": predicted_outcome,
+                        "predicted_team": team_name,
+                        "home_win_prob": round(p_yes, 4),
+                        "away_win_prob": round(p_no, 4),
+                        "confidence": round(confidence, 4),
+                        "confidence_tier": self._confidence_tier(confidence),
+                        "model_version": model_version,
+                        "model_type": model_type,
+                        "model_name": model_type,
+                        "model_auc": model_auc,
+                        "predicted_at": _now_utc(),
+                        "predict_mode": "api" if via_api else "artifact",
+                    }
+                )
+        return rows
 
     def _expand_market_predictions(
         self,
@@ -965,14 +1102,52 @@ class HFDirectPipeline:
                     teams = game.get("teams") or {}
                     ht = str((((teams.get("home") or {}).get("team") or {}).get("name") or "")).strip()
                     at = str((((teams.get("away") or {}).get("team") or {}).get("name") or "")).strip()
+                    home_team_id = str((((teams.get("home") or {}).get("team") or {}).get("id") or "")).strip()
+                    away_team_id = str((((teams.get("away") or {}).get("team") or {}).get("id") or "")).strip()
                     if not ht or not at:
                         continue
+                    home_starter = str((((teams.get("home") or {}).get("probablePitcher") or {}).get("fullName") or "")).strip()
+                    away_starter = str((((teams.get("away") or {}).get("probablePitcher") or {}).get("fullName") or "")).strip()
                     rows.append({"sport": "mlb", "league": "MLB", "home_team": ht, "away_team": at,
                                  "game_date": day.isoformat(), "game_time": str(game.get("gameDate") or ""),
-                                 "game_id": str(game.get("gamePk") or "")})
+                                 "game_id": str(game.get("gamePk") or ""),
+                                 "home_starter": home_starter, "away_starter": away_starter,
+                                 "home_team_id": home_team_id, "away_team_id": away_team_id})
         except Exception:
             pass
         return rows
+
+    def _fetch_mlb_team_players(self, team_id: str, cache: dict[str, list[str]]) -> list[str]:
+        key = f"mlb_team|{str(team_id or '').strip()}"
+        if key in cache:
+            return cache[key]
+        rows: list[str] = []
+        if not str(team_id or "").strip():
+            cache[key] = rows
+            return rows
+        try:
+            resp = requests.get(
+                f"https://statsapi.mlb.com/api/v1/teams/{team_id}/roster",
+                params={"rosterType": "active"},
+                timeout=20,
+            )
+            resp.raise_for_status()
+            for entry in ((resp.json() or {}).get("roster") or []):
+                name = str(((entry.get("person") or {}).get("fullName")) or "").strip()
+                if name:
+                    rows.append(name)
+        except Exception:
+            rows = []
+        deduped = []
+        seen = set()
+        for name in rows:
+            k = name.lower()
+            if k in seen:
+                continue
+            seen.add(k)
+            deduped.append(name)
+        cache[key] = deduped
+        return deduped
 
     def _fetch_nba_upcoming(self, day: datetime.date) -> list[dict]:
         rows: list[dict] = []
@@ -1027,7 +1202,12 @@ class HFDirectPipeline:
         if not self.football_data_api_key:
             return rows
         headers = {"X-Auth-Token": self.football_data_api_key}
-        competitions = ("PL", "PD", "SA", "BL1", "FL1", "PPL")
+        competitions = (
+            "PL", "PD", "SA", "BL1", "FL1", "PPL",  # Europe
+            "ELC", "DED", "BSA", "CL", "EL", "EC",  # Europe extended
+            "MLS", "BSA", "CLI",  # Americas
+            "WC", "ASC", "AFR",  # global tournaments when available
+        )
         for comp in competitions:
             try:
                 resp = requests.get(
@@ -1057,6 +1237,41 @@ class HFDirectPipeline:
             except Exception as exc:
                 logger.debug("[hf_pipeline] football-data upcoming %s: %s", comp, exc)
         return rows
+
+    def _fetch_team_players_thesportsdb(self, team_name: str, sport: str, cache: dict[str, list[str]]) -> list[str]:
+        key = f"{self._normalize_sport(sport)}|{str(team_name or '').strip().lower()}"
+        if not key.strip("|"):
+            return []
+        if key in cache:
+            return cache[key]
+        players: list[str] = []
+        try:
+            resp = requests.get(
+                "https://www.thesportsdb.com/api/v1/json/1/searchplayers.php",
+                params={"t": str(team_name or "").strip()},
+                timeout=20,
+            )
+            resp.raise_for_status()
+            for p in ((resp.json() or {}).get("player") or []):
+                name = str(p.get("strPlayer") or "").strip()
+                sport_name = str(p.get("strSport") or "").strip().lower()
+                if not name:
+                    continue
+                if sport_name and self._normalize_sport(sport_name) != self._normalize_sport(sport):
+                    continue
+                players.append(name)
+        except Exception:
+            players = []
+        deduped = []
+        seen = set()
+        for name in players:
+            k = name.lower()
+            if k in seen:
+                continue
+            seen.add(k)
+            deduped.append(name)
+        cache[key] = deduped
+        return deduped
 
     def _fetch_soccer_upcoming_thesportsdb(self, day: datetime.date) -> list[dict]:
         rows: list[dict] = []
