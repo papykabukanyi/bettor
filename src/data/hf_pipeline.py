@@ -150,6 +150,15 @@ class HFDirectPipeline:
         "boxing": "boxing",
         "cricket": "cricket",
     }
+    _NEWS_IMPACT_KEYWORDS = {
+        "injury_concern": ("injury", "injured", "out", "doubtful", "questionable", "suspended", "ruled out", "hamstring", "ankle", "knee"),
+        "lineup_change": ("starting", "starter", "lineup", "bench", "rotation", "activated", "returns", "called up", "debut"),
+        "transfer_update": ("trade", "traded", "signed", "waived", "released", "loan", "extension", "contract"),
+        "positive_momentum": ("dominant", "hot streak", "in form", "wins", "winning", "breakout", "career high"),
+        "negative_momentum": ("slump", "cold streak", "struggling", "losing", "setback", "poor form"),
+    }
+    _NEWS_SENTIMENT_POS = ("win", "winning", "dominant", "returns", "healthy", "breakout", "strong", "surge")
+    _NEWS_SENTIMENT_NEG = ("injury", "injured", "out", "suspended", "slump", "struggle", "doubtful", "setback")
 
     def __init__(
         self,
@@ -164,6 +173,7 @@ class HFDirectPipeline:
                 HF_MODEL_REPO,
                 FOOTBALL_DATA_API_KEY,
                 TENNIS_JEFF_SACKMANN_DIR,
+                NEWSDATA_API_KEY,
             )
         except Exception:
             HF_API_KEY = os.getenv("HF_API_KEY", "")
@@ -171,10 +181,12 @@ class HFDirectPipeline:
             HF_MODEL_REPO = os.getenv("HF_MODEL_REPO", "papylove/sportprediction")
             FOOTBALL_DATA_API_KEY = os.getenv("FOOTBALL_DATA_API_KEY", "")
             TENNIS_JEFF_SACKMANN_DIR = os.getenv("TENNIS_JEFF_SACKMANN_DIR", "")
+            NEWSDATA_API_KEY = os.getenv("NEWSDATA_API_KEY", "")
 
         self.token = str(token or HF_API_KEY or "").strip()
         self.football_data_api_key = str(FOOTBALL_DATA_API_KEY or "").strip()
         self.tennis_sackmann_dir = str(TENNIS_JEFF_SACKMANN_DIR or "").strip()
+        self.newsdata_api_key = str(NEWSDATA_API_KEY or "").strip()
         self.uploader = HFUploader(token=self.token, repo_name=dataset_repo or HF_DATASET_REPO)
         self.dataset_repo_id = getattr(self.uploader, "_repo_id", "")
         self.model_repo_name = str(model_repo or HF_MODEL_REPO or "sports-win-model").strip()
@@ -333,18 +345,33 @@ class HFDirectPipeline:
             "target": "home_win", "sports_covered": sports_covered,
         }
 
+        news_train_summary: dict[str, object] = {"ok": False, "reason": "not_run"}
         with tempfile.TemporaryDirectory(prefix="hf_model_") as td:
             model_path = os.path.join(td, "model.joblib")
             meta_path = os.path.join(td, "metadata.json")
             readme_path = os.path.join(td, "README.md")
             joblib.dump(best_pipeline, model_path)
+            news_train_summary = self._train_news_impact_model(output_dir=td)
+            metadata["news_impact_model"] = {
+                "enabled": bool(news_train_summary.get("ok")),
+                "rows": int(news_train_summary.get("rows") or 0),
+                "classes": list(news_train_summary.get("classes") or []),
+                "cv_f1_macro": float(news_train_summary.get("cv_f1_macro") or 0.0),
+            }
             with open(meta_path, "w", encoding="utf-8") as f:
                 json.dump(metadata, f, indent=2)
             readme_content = self._build_model_card_readme(metadata)
             with open(readme_path, "w", encoding="utf-8") as f:
                 f.write(readme_content)
             self._api.create_repo(repo_id=self.model_repo_id, repo_type="model", exist_ok=True, private=False)
-            for fname, fpath in [("model.joblib", model_path), ("metadata.json", meta_path), ("README.md", readme_path)]:
+            upload_pairs = [("model.joblib", model_path), ("metadata.json", meta_path), ("README.md", readme_path)]
+            news_model_path = os.path.join(td, "news_impact_model.joblib")
+            news_meta_path = os.path.join(td, "news_impact_metadata.json")
+            if os.path.exists(news_model_path):
+                upload_pairs.append(("news_impact_model.joblib", news_model_path))
+            if os.path.exists(news_meta_path):
+                upload_pairs.append(("news_impact_metadata.json", news_meta_path))
+            for fname, fpath in upload_pairs:
                 self._api.upload_file(
                     path_or_fileobj=fpath, path_in_repo=fname,
                     repo_id=self.model_repo_id, repo_type="model",
@@ -365,7 +392,13 @@ class HFDirectPipeline:
             "cv_roc_auc": round(float(best_score), 6),
             "model_repo": self.model_repo_id,
             "trained_at": trained_at, "model_version": version,
-            "sports_covered": sports_covered, "train_completed_at": _now_utc(),
+            "sports_covered": sports_covered,
+            "news_impact_model": {
+                "enabled": bool(news_train_summary.get("ok")),
+                "rows": int(news_train_summary.get("rows") or 0),
+                "cv_f1_macro": float(news_train_summary.get("cv_f1_macro") or 0.0),
+            },
+            "train_completed_at": _now_utc(),
         })
         return summary
 
@@ -710,6 +743,7 @@ class HFDirectPipeline:
         today = datetime.date.today()
         append_y = self.append_daily_results(yesterday)
         append_t = self.append_daily_results(today)
+        news_signals = self.collect_news_signals(days=[today, today + datetime.timedelta(days=1)])
         try:
             summary = self.train_and_publish_best_model(min_rows=min_rows, forced_model=custom_model)
             train_result = {
@@ -729,6 +763,7 @@ class HFDirectPipeline:
         result = {
             "ok": True,
             "append_yesterday": append_y, "append_today": append_t,
+            "news_signals": news_signals,
             "train": train_result, "predictions": preds,
             "completed_at": _now_utc(),
         }
@@ -1494,6 +1529,400 @@ class HFDirectPipeline:
             if key in raw:
                 return normalized
         return ""
+
+    def collect_news_signals(
+        self,
+        *,
+        days: list[datetime.date] | None = None,
+        max_games: int = 120,
+        max_players_per_team: int = 6,
+    ) -> dict:
+        """Fetch and push structured news-impact rows to HF dataset."""
+        target_days = list(days or [])
+        if not target_days:
+            today = datetime.date.today()
+            target_days = [today, today + datetime.timedelta(days=1)]
+
+        games: list[dict] = []
+        for day in target_days:
+            games.extend(self._fetch_upcoming_games(day))
+
+        deduped_games: list[dict] = []
+        seen_games: set[tuple[str, str, str, str]] = set()
+        for g in games:
+            key = (
+                self._normalize_sport(str(g.get("sport") or "")),
+                str(g.get("game_date") or ""),
+                str(g.get("away_team") or "").strip().lower(),
+                str(g.get("home_team") or "").strip().lower(),
+            )
+            if key in seen_games:
+                continue
+            seen_games.add(key)
+            deduped_games.append(g)
+            if len(deduped_games) >= max_games:
+                break
+
+        player_cache: dict[str, list[str]] = {}
+        rows: list[dict] = []
+        for game in deduped_games:
+            sport = self._normalize_sport(str(game.get("sport") or ""))
+            home_team = str(game.get("home_team") or "").strip()
+            away_team = str(game.get("away_team") or "").strip()
+            if not home_team or not away_team:
+                continue
+            home_players = self._fetch_team_players_thesportsdb(home_team, sport, player_cache)[:max_players_per_team]
+            away_players = self._fetch_team_players_thesportsdb(away_team, sport, player_cache)[:max_players_per_team]
+            players = home_players + away_players
+            articles = self._fetch_news_articles_for_game(home_team, away_team, sport=sport)
+            if not articles:
+                continue
+            for article in articles:
+                rows.extend(
+                    self._expand_article_to_news_rows(
+                        article=article,
+                        game=game,
+                        sport=sport,
+                        players=players,
+                    )
+                )
+
+        rows = self._dedupe_news_rows(rows)
+        if rows:
+            self.uploader.push_records("news_signals", rows)
+            self.uploader.flush_all()
+        self._write_status(
+            {
+                "last_step": "news_signals",
+                "ok": True,
+                "news_signal_rows": len(rows),
+                "news_signal_games": len(deduped_games),
+                "news_signal_updated_at": _now_utc(),
+            }
+        )
+        return {"ok": True, "rows": len(rows), "games": len(deduped_games)}
+
+    def _fetch_news_articles_for_game(self, home_team: str, away_team: str, *, sport: str) -> list[dict]:
+        query = f"{home_team} OR {away_team}"
+        rows: list[dict] = []
+
+        # newsdata.io (if configured)
+        if self.newsdata_api_key:
+            try:
+                resp = requests.get(
+                    "https://newsdata.io/api/1/news",
+                    params={
+                        "apikey": self.newsdata_api_key,
+                        "q": query,
+                        "language": "en",
+                        "category": "sports",
+                        "size": 30,
+                    },
+                    timeout=15,
+                )
+                if resp.status_code == 200:
+                    for item in (resp.json() or {}).get("results") or []:
+                        rows.append(
+                            {
+                                "title": str(item.get("title") or "").strip(),
+                                "description": str(item.get("description") or "").strip(),
+                                "url": str(item.get("link") or "").strip(),
+                                "source": str(item.get("source_id") or "newsdata").strip(),
+                                "published": str(item.get("pubDate") or "").strip(),
+                            }
+                        )
+            except Exception as exc:
+                logger.debug("[hf_pipeline] newsdata fetch failed: %s", exc)
+
+        # GDELT free fallback
+        try:
+            resp = requests.get(
+                "https://api.gdeltproject.org/api/v2/doc/doc",
+                params={
+                    "query": f"({query}) {sport}",
+                    "mode": "artlist",
+                    "maxrecords": 20,
+                    "format": "json",
+                    "sourcelang": "english",
+                    "sort": "datedesc",
+                },
+                timeout=15,
+            )
+            if resp.status_code == 200:
+                for item in (resp.json() or {}).get("articles") or []:
+                    rows.append(
+                        {
+                            "title": str(item.get("title") or "").strip(),
+                            "description": "",
+                            "url": str(item.get("url") or "").strip(),
+                            "source": str(item.get("domain") or "gdelt").strip(),
+                            "published": str(item.get("seendate") or "").strip(),
+                        }
+                    )
+        except Exception as exc:
+            logger.debug("[hf_pipeline] gdelt fetch failed: %s", exc)
+
+        # Google News RSS fallback
+        try:
+            from urllib.parse import quote
+            import xml.etree.ElementTree as ET
+
+            rss_url = f"https://news.google.com/rss/search?q={quote(query + ' ' + sport)}&hl=en-US&gl=US&ceid=US:en"
+            resp = requests.get(rss_url, timeout=15)
+            if resp.status_code == 200:
+                root = ET.fromstring(resp.content)
+                for item in root.findall(".//item"):
+                    rows.append(
+                        {
+                            "title": str(item.findtext("title") or "").strip(),
+                            "description": str(item.findtext("description") or "").strip(),
+                            "url": str(item.findtext("link") or "").strip(),
+                            "source": "google_news_rss",
+                            "published": str(item.findtext("pubDate") or "").strip(),
+                        }
+                    )
+        except Exception as exc:
+            logger.debug("[hf_pipeline] google rss fetch failed: %s", exc)
+
+        deduped: list[dict] = []
+        seen: set[str] = set()
+        for row in rows:
+            title = str(row.get("title") or "").strip()
+            url = str(row.get("url") or "").strip().lower()
+            if not title:
+                continue
+            key = f"{title.lower()[:180]}|{url[:220]}"
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(row)
+            if len(deduped) >= 45:
+                break
+        return deduped
+
+    def _expand_article_to_news_rows(self, *, article: dict, game: dict, sport: str, players: list[str]) -> list[dict]:
+        now = _now_utc()
+        headline = str(article.get("title") or "").strip()
+        description = str(article.get("description") or "").strip()
+        if not headline:
+            return []
+        home_team = str(game.get("home_team") or "").strip()
+        away_team = str(game.get("away_team") or "").strip()
+        text_norm = self._news_norm_text(f"{headline} {description}")
+        impact_type = self._classify_news_impact(text_norm)
+        sentiment_score = self._news_sentiment_score(text_norm)
+        impact_score = min(1.0, max(0.0, abs(sentiment_score) + (0.25 if impact_type in {"injury_concern", "lineup_change"} else 0.1)))
+
+        team_hits: list[str] = []
+        for team in (home_team, away_team):
+            if team and self._news_contains_name(text_norm, team):
+                team_hits.append(team)
+
+        player_hits: list[str] = []
+        for player in players or []:
+            if player and self._news_contains_name(text_norm, player):
+                player_hits.append(player)
+            if len(player_hits) >= 2:
+                break
+
+        rows: list[dict] = []
+        base = {
+            "news_id": str(uuid4()),
+            "sport": sport,
+            "league": str(game.get("league") or sport.upper())[:80],
+            "game_id": str(game.get("game_id") or ""),
+            "game_date": str(game.get("game_date") or "")[:10],
+            "game_time": str(game.get("game_time") or "")[:40],
+            "home_team": home_team[:120],
+            "away_team": away_team[:120],
+            "impact_type": impact_type,
+            "impact_scope": "game",
+            "headline": headline[:400],
+            "description": description[:1000],
+            "article_url": str(article.get("url") or "")[:500],
+            "source_name": str(article.get("source") or "unknown")[:100],
+            "published_at": str(article.get("published") or "")[:40],
+            "sentiment_score": round(sentiment_score, 4),
+            "impact_score": round(impact_score, 4),
+            "metadata": json.dumps({"team_hits": team_hits, "player_hits": player_hits}, ensure_ascii=True),
+            "created_at": now,
+        }
+        for player in player_hits:
+            rows.append(
+                {
+                    **base,
+                    "news_id": str(uuid4()),
+                    "entity_type": "player",
+                    "entity_name": player[:120],
+                    "entity_team": self._infer_player_team(player, home_team, away_team)[:120],
+                    "impact_scope": "player",
+                }
+            )
+        for team in team_hits:
+            rows.append(
+                {
+                    **base,
+                    "news_id": str(uuid4()),
+                    "entity_type": "team",
+                    "entity_name": team[:120],
+                    "entity_team": team[:120],
+                    "impact_scope": "team",
+                }
+            )
+        if not rows:
+            rows.append(
+                {
+                    **base,
+                    "entity_type": "game",
+                    "entity_name": f"{away_team} @ {home_team}"[:120],
+                    "entity_team": "",
+                }
+            )
+        return rows
+
+    def _infer_player_team(self, player_name: str, home_team: str, away_team: str) -> str:
+        player_tokens = set(self._news_norm_text(player_name).split())
+        home_tokens = set(self._news_norm_text(home_team).split())
+        away_tokens = set(self._news_norm_text(away_team).split())
+        if player_tokens & home_tokens:
+            return home_team
+        if player_tokens & away_tokens:
+            return away_team
+        return home_team
+
+    def _news_norm_text(self, value: str) -> str:
+        return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", str(value or "").lower())).strip()
+
+    def _news_contains_name(self, text_norm: str, name: str) -> bool:
+        tokenized = self._news_norm_text(name)
+        if not tokenized:
+            return False
+        needle = f" {tokenized} "
+        haystack = f" {text_norm} "
+        if needle in haystack:
+            return True
+        compact = tokenized.replace(" ", "")
+        return bool(compact and compact in haystack.replace(" ", ""))
+
+    def _classify_news_impact(self, text_norm: str) -> str:
+        for impact_type, keywords in self._NEWS_IMPACT_KEYWORDS.items():
+            if any(keyword in text_norm for keyword in keywords):
+                return impact_type
+        return "general_update"
+
+    def _news_sentiment_score(self, text_norm: str) -> float:
+        pos = sum(1 for term in self._NEWS_SENTIMENT_POS if term in text_norm)
+        neg = sum(1 for term in self._NEWS_SENTIMENT_NEG if term in text_norm)
+        total = pos + neg
+        if total <= 0:
+            return 0.0
+        return max(-1.0, min(1.0, (pos - neg) / float(total)))
+
+    def _dedupe_news_rows(self, rows: list[dict]) -> list[dict]:
+        deduped: list[dict] = []
+        seen: set[str] = set()
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            key = "|".join(
+                [
+                    str(row.get("sport") or ""),
+                    str(row.get("game_date") or ""),
+                    str(row.get("entity_type") or ""),
+                    str(row.get("entity_name") or "").lower(),
+                    str(row.get("headline") or "").lower()[:160],
+                    str(row.get("source_name") or "").lower(),
+                ]
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(row)
+        return deduped
+
+    def _load_news_signals_dataframe_from_hub(self):
+        import pandas as pd
+        from huggingface_hub import hf_hub_download
+
+        if not self._ok or not self._api:
+            return pd.DataFrame()
+        try:
+            files = self._api.list_repo_files(repo_id=self.dataset_repo_id, repo_type="dataset")
+        except Exception:
+            return pd.DataFrame()
+        shard_paths = [f for f in files if str(f).startswith("data/news_signals/") and str(f).endswith(".parquet")]
+        if not shard_paths:
+            return pd.DataFrame()
+        frames: list[pd.DataFrame] = []
+        for path_in_repo in shard_paths:
+            try:
+                local_path = hf_hub_download(
+                    repo_id=self.dataset_repo_id,
+                    repo_type="dataset",
+                    filename=path_in_repo,
+                    token=self.token,
+                )
+                frames.append(pd.read_parquet(local_path))
+            except Exception:
+                continue
+        if not frames:
+            return pd.DataFrame()
+        return pd.concat(frames, ignore_index=True, sort=False)
+
+    def _train_news_impact_model(self, *, output_dir: str) -> dict[str, object]:
+        import joblib
+        import pandas as pd
+        from sklearn.feature_extraction.text import TfidfVectorizer
+        from sklearn.linear_model import LogisticRegression
+        from sklearn.model_selection import StratifiedKFold, cross_val_score
+        from sklearn.pipeline import Pipeline
+
+        news_df = self._load_news_signals_dataframe_from_hub()
+        if news_df.empty:
+            return {"ok": False, "reason": "no_news_rows", "rows": 0}
+
+        cols_needed = {"headline", "description", "impact_type"}
+        if not cols_needed.issubset(set(news_df.columns)):
+            return {"ok": False, "reason": "missing_columns", "rows": len(news_df)}
+
+        work = news_df.copy()
+        work["impact_type"] = work["impact_type"].fillna("").astype(str).str.strip().replace("", "general_update")
+        work["headline"] = work["headline"].fillna("").astype(str)
+        work["description"] = work["description"].fillna("").astype(str)
+        work["text"] = (work["headline"] + " " + work["description"]).str.strip()
+        work = work[work["text"] != ""].copy()
+        if len(work) < 80:
+            return {"ok": False, "reason": "insufficient_news_rows", "rows": len(work)}
+
+        class_counts = work["impact_type"].value_counts()
+        valid_classes = class_counts[class_counts >= 8].index.tolist()
+        work = work[work["impact_type"].isin(valid_classes)].copy()
+        if len(work) < 80 or work["impact_type"].nunique() < 2:
+            return {"ok": False, "reason": "insufficient_class_balance", "rows": len(work)}
+
+        model = Pipeline(
+            [
+                ("tfidf", TfidfVectorizer(ngram_range=(1, 2), min_df=2, max_features=12000)),
+                ("clf", LogisticRegression(max_iter=2000, multi_class="auto")),
+            ]
+        )
+        cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+        scores = cross_val_score(model, work["text"], work["impact_type"], cv=cv, scoring="f1_macro")
+        model.fit(work["text"], work["impact_type"])
+
+        model_path = os.path.join(output_dir, "news_impact_model.joblib")
+        metadata_path = os.path.join(output_dir, "news_impact_metadata.json")
+        joblib.dump(model, model_path)
+        metadata = {
+            "trained_at": _now_utc(),
+            "rows": int(len(work)),
+            "classes": sorted(work["impact_type"].astype(str).unique().tolist()),
+            "cv_f1_macro": round(float(scores.mean()), 6),
+            "dataset_repo": self.dataset_repo_id,
+        }
+        with open(metadata_path, "w", encoding="utf-8") as handle:
+            json.dump(metadata, handle, indent=2)
+        return {"ok": True, **metadata}
 
     # ──────────────────────────────────────────────────────────
     # Private helpers

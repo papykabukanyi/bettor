@@ -10,14 +10,16 @@ Production-ready sports prediction stack using Hugging Face for dataset/model st
 | Model storage | HF Model Hub | Free |
 | Training GPU | HF Spaces T4 | Free tier |
 | Inference API | HF Spaces FastAPI | Free tier minutes |
-| Data sources | MLB Stats API, NHL API, football-data.org, TheSportsDB, balldontlie, Jeff Sackmann, Polymarket Gamma | Free |
+| Data sources | MLB Stats API, NHL API, football-data.org, TheSportsDB, balldontlie, Jeff Sackmann, Polymarket Gamma, NewsData.io/GDELT/Google News RSS | Free |
 
 ## Architecture
 
 ```text
 One-time: bootstrap 1 year history -> HF Dataset Hub
 Daily: append new results -> same HF Dataset
+Daily: collect multi-sport news signals (team/player/game impact) -> same HF Dataset
 Daily: retrain best model -> HF Model Hub
+Daily: retrain news-impact text classifier -> HF Model Hub
 Anytime: call HF Space FastAPI inference endpoint
 Dashboard: Vercel Flask UI -> proxies HF Space API or local HF artifacts
 Execution: Polymarket (Kalshi removed from active flow)
@@ -34,6 +36,7 @@ Execution: Polymarket (Kalshi removed from active flow)
    - `HF_DATASET_REPO`
    - `HF_MODEL_REPO`
    - `FOOTBALL_DATA_API_KEY`
+   - `NEWSDATA_API_KEY` (recommended for richer player/team news coverage)
    - Polymarket credentials
 3. Run pipeline:
    ```powershell
