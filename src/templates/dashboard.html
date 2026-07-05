@@ -137,6 +137,19 @@
     .comparator-row { display: grid; grid-template-columns: 1fr auto auto; gap: 10px; align-items: center; padding: 10px 12px; border-radius: 12px; background: rgba(30, 41, 59, 0.72); }
     .comparator-pick { color: var(--ink); font-weight: 700; font-size: 0.9rem; }
     .comparator-score { color: #93c5fd; font-weight: 700; font-size: 0.85rem; white-space: nowrap; }
+    .action-row { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 14px; }
+    .action-btn {
+      border: 1px solid rgba(148,163,184,0.2);
+      background: rgba(15,23,42,0.72);
+      color: var(--ink);
+      border-radius: 14px;
+      padding: 10px 14px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .action-btn.primary { background: linear-gradient(135deg, rgba(59,130,246,0.92), rgba(29,78,216,0.88)); }
+    .action-btn.warn { background: linear-gradient(135deg, rgba(245,158,11,0.92), rgba(217,119,6,0.86)); }
+    .action-btn:disabled { opacity: 0.6; cursor: progress; }
     @media (min-width: 760px) {
       .page { padding: 34px 24px 80px; }
       .hero-metrics { grid-template-columns: repeat(4, minmax(0, 1fr)); }
@@ -256,6 +269,7 @@
     <section class="panel" id="panel-history"><div class="table-shell glass" id="history-shell"></div></section>
 
     <section class="panel" id="panel-kalshi">
+      <div class="card glass" id="kalshi-actions"></div>
       <div class="market-grid">
         <div class="card glass" id="kalshi-summary"></div>
         <div class="card glass" id="kalshi-positions"></div>
@@ -284,7 +298,7 @@
     const state = {
       status: {}, today: { predictions: [] }, tomorrow: { predictions: [] },
       model: { current_model: {}, history: [] },
-      kalshiStatus: { ok: true, source: 'cached', submissions: { summary: {} }, positions: { summary: {}, positions: [] }, live: {} },
+      kalshiStatus: { ok: true, source: 'cached', submissions: { summary: {} }, positions: { summary: {}, positions: [] }, live: {}, account: {} },
       lastHash: '', firstRefresh: true,
       activeTab: 'pipeline',
       tabLoaded: {},
@@ -537,20 +551,52 @@
       const submissions = state.kalshiStatus.submissions || {};
       const positions = state.kalshiStatus.positions || {};
       const live = state.kalshiStatus.live || {};
-      const bal = live.balance || positions.balance || {};
+      const account = live.account || live.balance || positions.account || positions.balance || {};
       const ss = submissions.summary || {};
       const ps = positions.summary || {};
       const source = state.kalshiStatus.source || 'cached';
       const warning = kalshiWarningText(state.kalshiStatus.warning);
-      const connection = source === 'kalshi_live' ? 'connected' : (source === 'hf_space' || source === 'hf_space_auto' || source === 'hf_hub_artifact' ? 'synced' : 'cached');
+      const connection = live.ok ? 'connected' : (source === 'hf_space' || source === 'hf_space_auto' || source === 'hf_hub_artifact' ? 'synced' : 'cached');
       const summaryNote = source === 'kalshi_live'
         ? 'Live authenticated Kalshi account snapshot.'
         : `Cached Kalshi snapshot from ${esc(source)}${warning ? ` • ${esc(warning)}` : ''}`;
-      document.getElementById('kalshi-summary').innerHTML = `<h3>Account summary</h3><p class="subtle" style="margin:10px 0 0">${summaryNote}</p><div class="kvs"><div class="kv"><span>Buying power</span><strong>${esc(money(bal.balance_usd||ss.available_buying_power_usd||0))}</strong></div><div class="kv"><span>Portfolio value</span><strong>${esc(money(bal.portfolio_value_usd||0))}</strong></div><div class="kv"><span>Open orders</span><strong>${esc(num(ps.active_positions||live.open_orders_count||0))}</strong></div><div class="kv"><span>Open notional</span><strong>${esc(money(ps.open_notional_usd||live.open_notional_usd||0))}</strong></div><div class="kv"><span>Last balance update</span><strong>${esc(stamp(bal.updated_ts||''))}</strong></div></div>`;
-      document.getElementById('kalshi-positions').innerHTML = `<h3>Order status</h3><p class="subtle" style="margin:10px 0 0">Connection + open orders fetched via signed API requests.</p><div class="kvs"><div class="kv"><span>Connection</span><strong>${esc(connection)}</strong></div><div class="kv"><span>Evaluated predictions</span><strong>${esc(num(ss.evaluated||0))}</strong></div><div class="kv"><span>Placed</span><strong>${esc(num(ss.placed||0))}</strong></div><div class="kv"><span>Failed</span><strong>${esc(num(ss.failed||0))}</strong></div><div class="kv"><span>Updated</span><strong>${esc(stamp(positions.updated_at||live.updated_at||''))}</strong></div></div>`;
-      const rows = Array.isArray(positions.positions) ? positions.positions.slice().slice(0, 40) : [];
-      if (!rows.length) { document.getElementById('submission-shell').innerHTML = `<div class="empty-state">No open Kalshi orders${warning ? ` • ${esc(warning)}` : ''}</div>`; return; }
-      document.getElementById('submission-shell').innerHTML = `<table><thead><tr><th>Created</th><th>Ticker</th><th>Status</th><th>Side</th><th>Yes Price</th><th>No Price</th><th>Remaining</th><th>Order ID</th></tr></thead><tbody>${rows.map(r => `<tr><td>${esc(stamp(r.created_time||r.last_update_time||''))}</td><td>${esc(r.ticker||'—')}</td><td>${esc(r.status||'—')}</td><td>${esc(String(r.side||'').toUpperCase()||'—')}</td><td>${esc(money(r.yes_price_dollars||0))}</td><td>${esc(money(r.no_price_dollars||0))}</td><td>${esc(r.remaining_count_fp||'0')}</td><td>${esc(r.order_id||'')}</td></tr>`).join('')}</tbody></table>`;
+      const positionRows = Array.isArray(positions.positions)
+        ? positions.positions.slice(0, 40)
+        : (Array.isArray(live.positions) ? live.positions.slice(0, 40) : []);
+      document.getElementById('kalshi-actions').innerHTML = `<h3>Kalshi placement</h3><p class="subtle" style="margin:10px 0 0">Preview or place a single prediction, or place singles + combos together.</p><div class="action-row"><button class="action-btn" data-kalshi-action="preview-single" type="button">Preview single</button><button class="action-btn" data-kalshi-action="preview-combo" type="button">Preview single + combo</button><button class="action-btn warn" data-kalshi-action="place-single" type="button">Place live single</button><button class="action-btn primary" data-kalshi-action="place-combo" type="button">Place live single + combo</button><button class="action-btn" data-kalshi-action="refresh" type="button">Refresh status</button></div>`;
+      document.getElementById('kalshi-summary').innerHTML = `<h3>Account summary</h3><p class="subtle" style="margin:10px 0 0">${summaryNote}</p><div class="kvs"><div class="kv"><span>Buying power</span><strong>${esc(money(account.balance_usd||ss.available_buying_power_usd||0))}</strong></div><div class="kv"><span>Portfolio value</span><strong>${esc(money(account.portfolio_value_usd||0))}</strong></div><div class="kv"><span>Open orders</span><strong>${esc(num(ps.active_positions||live.open_orders_count||0))}</strong></div><div class="kv"><span>Open notional</span><strong>${esc(money(ps.open_notional_usd||live.open_notional_usd||0))}</strong></div><div class="kv"><span>Last balance update</span><strong>${esc(stamp(account.updated_ts||''))}</strong></div></div>`;
+      document.getElementById('kalshi-positions').innerHTML = `<h3>Order status</h3><p class="subtle" style="margin:10px 0 0">Connection + positions fetched via signed API requests.</p><div class="kvs"><div class="kv"><span>Connection</span><strong>${esc(connection)}</strong></div><div class="kv"><span>Evaluated predictions</span><strong>${esc(num(ss.evaluated||0))}</strong></div><div class="kv"><span>Placed</span><strong>${esc(num(ss.placed||0))}</strong></div><div class="kv"><span>Failed</span><strong>${esc(num(ss.failed||0))}</strong></div><div class="kv"><span>Updated</span><strong>${esc(stamp(positions.updated_at||live.updated_at||''))}</strong></div></div>`;
+      if (!positionRows.length) { document.getElementById('submission-shell').innerHTML = `<div class="empty-state">No open Kalshi orders${warning ? ` • ${esc(warning)}` : ''}</div>`; return; }
+      document.getElementById('submission-shell').innerHTML = `<table><thead><tr><th>Created</th><th>Ticker</th><th>Status</th><th>Side</th><th>Yes Price</th><th>No Price</th><th>Remaining</th><th>Order ID</th></tr></thead><tbody>${positionRows.map(r => `<tr><td>${esc(stamp(r.created_time||r.last_update_time||''))}</td><td>${esc(r.ticker||'—')}</td><td>${esc(r.status||'—')}</td><td>${esc(String(r.side||'').toUpperCase()||'—')}</td><td>${esc(money(r.yes_price_dollars||0))}</td><td>${esc(money(r.no_price_dollars||0))}</td><td>${esc(r.remaining_count_fp||'0')}</td><td>${esc(r.order_id||'')}</td></tr>`).join('')}</tbody></table>`;
+    }
+
+    async function placeKalshiOrders({ dryRun = true, includeCombos = false } = {}) {
+      const btns = document.querySelectorAll('[data-kalshi-action]');
+      btns.forEach(btn => btn.disabled = true);
+      try {
+        const response = await fetch('/api/kalshi/place-from-predictions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            dry_run: dryRun,
+            include_combos: includeCombos,
+            max_orders: 1,
+            max_combos: includeCombos ? 1 : 0,
+            stake_usd: 1.0,
+          }),
+        });
+        const payload = await response.json();
+        if (!response.ok || payload.ok === false) {
+          throw new Error(payload.error || payload.detail || `HTTP ${response.status}`);
+        }
+        toast(`${dryRun ? 'Previewed' : 'Placed'} ${payload.submitted_count || 0} single order(s)${includeCombos ? ` and ${payload.combo_orders?.submitted_count || 0} combo order(s)` : ''}.`, 'good');
+        await fetchKalshi();
+        renderActiveTab();
+      } catch (err) {
+        toast(`Kalshi placement failed: ${err.message}`, 'bad');
+      } finally {
+        btns.forEach(btn => btn.disabled = false);
+      }
     }
 
     function openModal(prediction) {
@@ -603,6 +649,7 @@
           warning: err.message,
           submissions: { summary: {} },
           positions: { summary: {}, positions: [] },
+          account: {},
           live: {},
         };
       }
@@ -656,7 +703,7 @@
         if (settled[1].status === 'fulfilled') state.today = settled[1].value || { predictions: [] };
         if (settled[2].status === 'fulfilled') state.tomorrow = settled[2].value || { predictions: [] };
         if (settled[3].status === 'fulfilled') state.model = settled[3].value || { current_model: {}, history: [] };
-        if (settled[4].status === 'fulfilled') state.kalshiStatus = settled[4].value || { submissions: {}, positions: {} };
+        if (settled[4].status === 'fulfilled') state.kalshiStatus = settled[4].value || { submissions: {}, positions: {}, account: {} };
         ['pipeline','today','tomorrow','kalshi'].forEach(t => state.tabLoaded[t] = true);
         const failed = settled.filter(r => r.status === 'rejected').length;
         if (failed > 0) toast(`Partial refresh: ${failed} endpoint(s) failed.`, 'warn');
@@ -693,6 +740,19 @@
         if (!el) return;
         el.addEventListener('input', renderActiveTab);
         el.addEventListener('change', renderActiveTab);
+      });
+      document.addEventListener('click', e => {
+        const btn = e.target.closest('[data-kalshi-action]');
+        if (!btn) return;
+        const action = btn.dataset.kalshiAction;
+        if (action === 'refresh') {
+          fetchKalshi().then(() => renderActiveTab());
+          return;
+        }
+        if (action === 'preview-single') return placeKalshiOrders({ dryRun: true, includeCombos: false });
+        if (action === 'preview-combo') return placeKalshiOrders({ dryRun: true, includeCombos: true });
+        if (action === 'place-single') return placeKalshiOrders({ dryRun: false, includeCombos: false });
+        if (action === 'place-combo') return placeKalshiOrders({ dryRun: false, includeCombos: true });
       });
     }
 

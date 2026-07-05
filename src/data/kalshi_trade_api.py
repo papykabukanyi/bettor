@@ -442,9 +442,25 @@ def submit_combo_orders(
 
 
 def build_live_snapshot() -> dict[str, Any]:
-    exchange = get_exchange_status()
-    balance = get_balance()
-    open_orders = get_open_orders()
+    exchange: dict[str, Any] = {}
+    balance: dict[str, Any] = {}
+    open_orders: list[dict[str, Any]] = []
+    errors: list[str] = []
+
+    try:
+        exchange = get_exchange_status()
+    except Exception as exc:
+        errors.append(f"exchange: {exc}")
+
+    try:
+        balance = get_balance()
+    except Exception as exc:
+        errors.append(f"balance: {exc}")
+
+    try:
+        open_orders = get_open_orders()
+    except Exception as exc:
+        errors.append(f"orders: {exc}")
 
     notional = 0.0
     normalized_orders: list[dict[str, Any]] = []
@@ -469,21 +485,28 @@ def build_live_snapshot() -> dict[str, Any]:
             }
         )
 
-    balance_cents = int(_to_float(balance.get("balance"), 0.0))
-    portfolio_cents = int(_to_float(balance.get("portfolio_value"), 0.0))
+    balance_cents = int(_to_float(balance.get("balance") or balance.get("balance_cents") or balance.get("cash_balance"), 0.0))
+    portfolio_cents = int(_to_float(balance.get("portfolio_value") or balance.get("portfolio_value_cents"), 0.0))
+    live_ok = bool(exchange or balance or normalized_orders)
+    account = {
+        "balance_cents": balance_cents,
+        "balance_usd": balance_cents / 100.0,
+        "balance_dollars": balance.get("balance_dollars") or balance.get("balance"),
+        "portfolio_value_cents": portfolio_cents,
+        "portfolio_value_usd": portfolio_cents / 100.0,
+        "updated_ts": balance.get("updated_ts") or balance.get("updated_time") or "",
+        "raw": balance,
+    }
     return {
-        "ok": True,
+        "ok": live_ok,
         "updated_at": dt.datetime.now(tz=dt.timezone.utc).isoformat(),
         "exchange": exchange,
-        "balance": {
-            "balance_cents": balance_cents,
-            "balance_usd": balance_cents / 100.0,
-            "balance_dollars": balance.get("balance_dollars"),
-            "portfolio_value_cents": portfolio_cents,
-            "portfolio_value_usd": portfolio_cents / 100.0,
-            "updated_ts": balance.get("updated_ts"),
-        },
+        "account": account,
+        "balance": account,
         "open_orders": normalized_orders,
+        "positions": normalized_orders,
         "open_orders_count": len(normalized_orders),
         "open_notional_usd": round(notional, 2),
+        "errors": errors,
+        "error": "; ".join(errors),
     }

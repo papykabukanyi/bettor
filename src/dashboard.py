@@ -401,7 +401,8 @@ def kalshi_submissions():
     live = _live_kalshi_snapshot()
     if live.get("ok"):
         base_summary = base.get("summary") or {}
-        base_summary["available_buying_power_usd"] = float((live.get("balance") or {}).get("balance_usd") or 0.0)
+        account = live.get("account") or live.get("balance") or {}
+        base_summary["available_buying_power_usd"] = float((account or {}).get("balance_usd") or 0.0)
         base["summary"] = base_summary
     wrapped = _envelope(base, source, error or str(live.get("error") or ""))
     wrapped["live"] = live
@@ -413,18 +414,21 @@ def kalshi_positions():
     payload, source, error = _provider_or_local("/kalshi/positions", HF_MARKETS_FILE, default={})
     live = _live_kalshi_snapshot()
     if live.get("ok"):
+        account = live.get("account") or live.get("balance") or {}
+        positions = live.get("positions") or live.get("open_orders") or []
         transformed = {
-            "ok": True,
-            "updated_at": live.get("updated_at") or "",
-            "summary": {
-                "active_positions": int(live.get("open_orders_count") or 0),
-                "open_notional_usd": float(live.get("open_notional_usd") or 0.0),
-                "estimated_pnl_usd": 0.0,
-                "available_buying_power_usd": float((live.get("balance") or {}).get("balance_usd") or 0.0),
-                "portfolio_value_usd": float((live.get("balance") or {}).get("portfolio_value_usd") or 0.0),
-            },
-            "positions": live.get("open_orders") or [],
-            "balance": live.get("balance") or {},
+        "ok": True,
+        "updated_at": live.get("updated_at") or "",
+        "summary": {
+            "active_positions": int(live.get("open_orders_count") or 0),
+            "open_notional_usd": float(live.get("open_notional_usd") or 0.0),
+            "estimated_pnl_usd": 0.0,
+            "available_buying_power_usd": float((account or {}).get("balance_usd") or 0.0),
+            "portfolio_value_usd": float((account or {}).get("portfolio_value_usd") or 0.0),
+        },
+        "positions": positions,
+        "balance": account,
+        "account": account,
         }
         wrapped = _envelope(transformed, "kalshi_live", error)
         wrapped["live"] = live
@@ -433,7 +437,7 @@ def kalshi_positions():
         wrapped = _envelope(payload, source, error or str(live.get("error") or ""))
         wrapped["live"] = live
         return jsonify(wrapped)
-    local = {"ok": False, "updated_at": "", "summary": {"active_positions": 0, "open_notional_usd": 0, "estimated_pnl_usd": 0}, "positions": [], "balance": {}}
+    local = {"ok": False, "updated_at": "", "summary": {"active_positions": 0, "open_notional_usd": 0, "estimated_pnl_usd": 0}, "positions": [], "balance": {}, "account": {}}
     wrapped = _envelope(local, source, error or str(live.get("error") or ""))
     wrapped["live"] = live
     return jsonify(wrapped)

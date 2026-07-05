@@ -443,7 +443,8 @@ def kalshi_submissions() -> dict[str, Any]:
     live = _live_kalshi_snapshot()
     if live.get("ok"):
         summary = base.get("summary") or {}
-        summary["available_buying_power_usd"] = float((live.get("balance") or {}).get("balance_usd") or 0.0)
+        account = live.get("account") or live.get("balance") or {}
+        summary["available_buying_power_usd"] = float((account or {}).get("balance_usd") or 0.0)
         base["summary"] = summary
     base["live"] = live
     return base
@@ -459,8 +460,11 @@ def kalshi_positions() -> dict[str, Any]:
             "summary": {"active_positions": 0, "open_notional_usd": 0, "estimated_pnl_usd": 0},
             "positions": [],
             "balance": {},
+            "account": {},
             "live": live,
         }
+    account = live.get("account") or live.get("balance") or {}
+    positions = live.get("positions") or live.get("open_orders") or []
     return {
         "ok": True,
         "updated_at": live.get("updated_at") or "",
@@ -468,11 +472,12 @@ def kalshi_positions() -> dict[str, Any]:
             "active_positions": int(live.get("open_orders_count") or 0),
             "open_notional_usd": float(live.get("open_notional_usd") or 0.0),
             "estimated_pnl_usd": 0.0,
-            "available_buying_power_usd": float((live.get("balance") or {}).get("balance_usd") or 0.0),
-            "portfolio_value_usd": float((live.get("balance") or {}).get("portfolio_value_usd") or 0.0),
+            "available_buying_power_usd": float((account or {}).get("balance_usd") or 0.0),
+            "portfolio_value_usd": float((account or {}).get("portfolio_value_usd") or 0.0),
         },
-        "positions": live.get("open_orders") or [],
-        "balance": live.get("balance") or {},
+        "positions": positions,
+        "balance": account,
+        "account": account,
         "live": live,
     }
 
