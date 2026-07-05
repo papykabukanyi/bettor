@@ -2,14 +2,14 @@
   "version": 2,
   "builds": [
     {
-      "src": "src/dashboard.py",
+      "src": "api/index.py",
       "use": "@vercel/python"
     }
   ],
   "routes": [
     {
       "src": "/(.*)",
-      "dest": "src/dashboard.py"
+      "dest": "api/index.py"
     }
   ],
   "crons": [
