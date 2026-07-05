@@ -95,9 +95,33 @@ class HFDirectPipeline:
             ("second_period", "Second Period Winner", 0.70),
         ],
         "soccer": [
-            ("moneyline", "Full Time Winner", 1.0),
-            ("first_half", "First Half Winner", 0.70),
-            ("second_half", "Second Half Winner", 0.73),
+            # Full-time result (1X2) — draw is real soccer outcome
+            ("full_time_result",  "Full Time Result (1X2)",        1.00),
+            ("moneyline",         "Match Winner (excl. draw)",     0.90),
+            # Half-time markets
+            ("first_half_result", "First Half Result (1X2)",       0.72),
+            ("first_half_winner", "First Half Winner",             0.70),
+            ("second_half_result","Second Half Result (1X2)",      0.74),
+            # Total goals
+            ("total_goals_over_2_5",   "Total Goals Over 2.5",    0.68),
+            ("total_goals_under_2_5",  "Total Goals Under 2.5",   0.68),
+            ("total_goals_over_1_5",   "Total Goals Over 1.5",    0.72),
+            ("both_teams_to_score",    "Both Teams To Score",     0.70),
+            # Team-specific totals
+            ("home_team_over_0_5_goals","Home Team Over 0.5 Goals", 0.74),
+            ("away_team_over_0_5_goals","Away Team Over 0.5 Goals", 0.72),
+            # Double chance
+            ("double_chance_home_draw","Double Chance: Home or Draw", 0.85),
+            ("double_chance_away_draw","Double Chance: Away or Draw", 0.82),
+            # Clean sheet
+            ("home_clean_sheet", "Home Team Clean Sheet",          0.65),
+            ("away_clean_sheet", "Away Team Clean Sheet",          0.62),
+            # Asian handicap proxies
+            ("asian_handicap_home", "Asian Handicap -0.5 Home",   0.88),
+            ("asian_handicap_away", "Asian Handicap -0.5 Away",   0.85),
+            # Corners / cards (volume stats)
+            ("over_9_5_corners",  "Over 9.5 Match Corners",       0.60),
+            ("over_3_5_cards",    "Over 3.5 Match Cards",         0.60),
         ],
         "tennis": [
             ("match_winner", "Match Winner", 1.0),
@@ -114,21 +138,71 @@ class HFDirectPipeline:
         "mlb": [("hit_recorded", "Player To Record A Hit", 0.66), ("rbi_recorded", "Player To Record RBI", 0.58)],
         "nba": [("points_20_plus", "Player 20+ Points", 0.64), ("assists_5_plus", "Player 5+ Assists", 0.60)],
         "nhl": [("anytime_goal", "Anytime Goal Scorer", 0.58), ("point_recorded", "Player To Record A Point", 0.63)],
-        "soccer": [("anytime_goal", "Anytime Goal Scorer", 0.57), ("assist_recorded", "Player To Record Assist", 0.54)],
+        "soccer": [
+            # Goals
+            ("anytime_goal",         "Anytime Goal Scorer",              0.57),
+            ("first_goal_scorer",    "First Goal Scorer",                0.42),
+            ("last_goal_scorer",     "Last Goal Scorer",                 0.42),
+            ("brace_or_more",        "To Score 2+ Goals",                0.35),
+            # Assists
+            ("assist_recorded",      "Player To Record An Assist",       0.54),
+            ("key_pass_recorded",    "Player Key Pass Recorded",         0.60),
+            # Shots
+            ("shot_on_target",       "Player Shot On Target",            0.65),
+            ("shot_over_1_5",        "Player Over 1.5 Shots",            0.58),
+            # Discipline
+            ("yellow_card",          "Player To Receive Yellow Card",    0.52),
+            ("to_be_carded",         "Player To Be Carded",              0.54),
+            # Defensive / GK
+            ("save_recorded",        "Goalkeeper Save Recorded",         0.72),
+            ("saves_over_2_5",       "Goalkeeper Over 2.5 Saves",        0.60),
+            ("clean_sheet_player",   "Player Keeps Clean Sheet",         0.55),
+            # Involvement
+            ("man_of_the_match",     "Man Of The Match",                 0.38),
+            ("dribble_completed",    "Player Dribble Completed",         0.60),
+            ("foul_committed",       "Player Foul Committed",            0.62),
+            ("tackle_won",           "Player Tackle Won",                0.61),
+        ],
         "nfl": [("anytime_td", "Anytime Touchdown", 0.60), ("rushing_yards_over", "Player Rushing Yards Over", 0.56)],
         "tennis": [("wins_set_1", "Player To Win Set 1", 0.62)],
     }
     _PLAYER_PROP_BASELINES = {
-        "hit_recorded": {"line": 0.5, "unit": "hits", "scale": 2.1},
-        "rbi_recorded": {"line": 0.5, "unit": "rbi", "scale": 1.6},
-        "points_20_plus": {"line": 19.5, "unit": "points", "scale": 38.0},
-        "assists_5_plus": {"line": 4.5, "unit": "assists", "scale": 10.0},
-        "anytime_goal": {"line": 0.5, "unit": "goals", "scale": 1.3},
-        "point_recorded": {"line": 0.5, "unit": "points", "scale": 1.9},
-        "assist_recorded": {"line": 0.5, "unit": "assists", "scale": 1.5},
-        "anytime_td": {"line": 0.5, "unit": "touchdowns", "scale": 1.4},
-        "rushing_yards_over": {"line": 59.5, "unit": "yards", "scale": 120.0},
-        "wins_set_1": {"line": 0.5, "unit": "sets", "scale": 1.0},
+        # MLB
+        "hit_recorded":        {"line": 0.5,  "unit": "hits",        "scale": 2.1},
+        "rbi_recorded":        {"line": 0.5,  "unit": "rbi",         "scale": 1.6},
+        # NBA
+        "points_20_plus":      {"line": 19.5, "unit": "points",      "scale": 38.0},
+        "assists_5_plus":      {"line": 4.5,  "unit": "assists",     "scale": 10.0},
+        # NHL
+        "anytime_goal":        {"line": 0.5,  "unit": "goals",       "scale": 1.3},
+        "point_recorded":      {"line": 0.5,  "unit": "points",      "scale": 1.9},
+        # Soccer — goals
+        "first_goal_scorer":   {"line": 0.5,  "unit": "goals",       "scale": 1.0},
+        "last_goal_scorer":    {"line": 0.5,  "unit": "goals",       "scale": 1.0},
+        "brace_or_more":       {"line": 1.5,  "unit": "goals",       "scale": 3.0},
+        # Soccer — assists / passes
+        "assist_recorded":     {"line": 0.5,  "unit": "assists",     "scale": 1.5},
+        "key_pass_recorded":   {"line": 0.5,  "unit": "key passes",  "scale": 2.5},
+        # Soccer — shots
+        "shot_on_target":      {"line": 0.5,  "unit": "shots on tgt","scale": 2.5},
+        "shot_over_1_5":       {"line": 1.5,  "unit": "shots",       "scale": 4.0},
+        # Soccer — discipline
+        "yellow_card":         {"line": 0.5,  "unit": "cards",       "scale": 1.0},
+        "to_be_carded":        {"line": 0.5,  "unit": "cards",       "scale": 1.0},
+        # Soccer — goalkeeper
+        "save_recorded":       {"line": 0.5,  "unit": "saves",       "scale": 5.0},
+        "saves_over_2_5":      {"line": 2.5,  "unit": "saves",       "scale": 6.0},
+        "clean_sheet_player":  {"line": 0.5,  "unit": "clean sheets","scale": 1.0},
+        # Soccer — involvement
+        "man_of_the_match":    {"line": 0.5,  "unit": "awards",      "scale": 1.0},
+        "dribble_completed":   {"line": 0.5,  "unit": "dribbles",    "scale": 3.0},
+        "foul_committed":      {"line": 0.5,  "unit": "fouls",       "scale": 2.5},
+        "tackle_won":          {"line": 0.5,  "unit": "tackles",     "scale": 3.0},
+        # NFL
+        "anytime_td":          {"line": 0.5,  "unit": "touchdowns",  "scale": 1.4},
+        "rushing_yards_over":  {"line": 59.5, "unit": "yards",       "scale": 120.0},
+        # Tennis
+        "wins_set_1":          {"line": 0.5,  "unit": "sets",        "scale": 1.0},
     }
     _SPORT_ALIASES = {
         "baseball": "mlb",
@@ -619,11 +693,21 @@ class HFDirectPipeline:
                 home_players = self._fetch_mlb_team_players(home_team_id, player_cache)
             if not away_players and away_team_id:
                 away_players = self._fetch_mlb_team_players(away_team_id, player_cache)
+        if normalized_sport == "soccer":
+            if not home_players:
+                home_players = self._fetch_soccer_squad_espn(home_team, player_cache)
+            if not away_players:
+                away_players = self._fetch_soccer_squad_espn(away_team, player_cache)
         if not home_players and not away_players:
             return []
 
+        # Soccer: use more players per team for richer prop coverage (attackers, GKs)
+        max_players = 4 if normalized_sport == "soccer" else 2
         rows: list[dict] = []
-        candidate_players = [(home_team, p, home_prob) for p in home_players[:2]] + [(away_team, p, away_prob) for p in away_players[:2]]
+        candidate_players = (
+            [(home_team, p, home_prob) for p in home_players[:max_players]] +
+            [(away_team, p, away_prob) for p in away_players[:max_players]]
+        )
         for team_name, player_name, team_prob in candidate_players:
             for prop_type, prop_name, weight in profile:
                 p_yes = 0.5 + (float(team_prob) - 0.5) * float(weight)
@@ -706,38 +790,352 @@ class HFDirectPipeline:
         rows: list[dict] = []
         normalized_sport = self._normalize_sport(sport)
         profile = self._SPORT_MARKET_PROFILES.get(normalized_sport) or [("moneyline", "Game Winner", 1.0)]
+
+        # For soccer, derive a 3-way distribution (home/draw/away).
+        # Draw probability estimated from strength differential: closer = more draw-likely.
+        draw_prob = 0.0
+        if normalized_sport == "soccer":
+            strength_diff = abs(float(home_prob) - float(away_prob))
+            # draw ranges from ~35% (even) to ~8% (dominant favourite)
+            draw_prob = max(0.08, 0.35 - strength_diff * 0.60)
+            draw_prob = min(0.35, draw_prob)
+            scale = 1.0 - draw_prob
+            home_prob_3way = float(home_prob) * scale
+            away_prob_3way = float(away_prob) * scale
+        else:
+            home_prob_3way = float(home_prob)
+            away_prob_3way = float(away_prob)
+
         for market_type, market_name, compression in profile:
+            # ── Soccer: compute market-specific probabilities ──
+            if normalized_sport == "soccer":
+                row = self._build_soccer_market_row(
+                    game_id=game_id, league=league, home_team=home_team, away_team=away_team,
+                    game_date=game_date, game_time=game_time,
+                    home_prob=home_prob_3way, away_prob=away_prob_3way, draw_prob=draw_prob,
+                    market_type=market_type, market_name=market_name, compression=compression,
+                    model_version=model_version, model_type=model_type, model_auc=model_auc,
+                    via_api=via_api,
+                )
+                if row:
+                    rows.append(row)
+                continue
+
+            # ── Non-soccer: binary home/away ──
             adjusted_home = 0.5 + (float(home_prob) - 0.5) * float(compression)
             adjusted_home = max(0.01, min(0.99, adjusted_home))
             adjusted_away = max(0.01, min(0.99, 1.0 - adjusted_home))
             predicted_team = home_team if adjusted_home >= adjusted_away else away_team
             confidence = max(adjusted_home, adjusted_away)
-            rows.append(
-                {
-                    "prediction_id": str(uuid4()),
-                    "game_id": game_id,
-                    "sport": normalized_sport,
-                    "league": league,
-                    "home_team": home_team,
-                    "away_team": away_team,
-                    "game_date": game_date,
-                    "game_time": game_time,
-                    "market_type": market_type,
-                    "market_name": market_name,
-                    "predicted_team": predicted_team,
-                    "home_win_prob": round(adjusted_home, 4),
-                    "away_win_prob": round(adjusted_away, 4),
-                    "confidence": round(confidence, 4),
-                    "confidence_tier": self._confidence_tier(confidence),
-                    "model_version": model_version,
-                    "model_type": model_type,
-                    "model_name": model_type,
-                    "model_auc": model_auc,
-                    "predicted_at": _now_utc(),
-                    "predict_mode": "api" if via_api else "artifact",
-                }
-            )
+            rows.append({
+                "prediction_id": str(uuid4()),
+                "game_id": game_id,
+                "sport": normalized_sport,
+                "league": league,
+                "home_team": home_team,
+                "away_team": away_team,
+                "game_date": game_date,
+                "game_time": game_time,
+                "market_type": market_type,
+                "market_name": market_name,
+                "predicted_team": predicted_team,
+                "home_win_prob": round(adjusted_home, 4),
+                "away_win_prob": round(adjusted_away, 4),
+                "confidence": round(confidence, 4),
+                "confidence_tier": self._confidence_tier(confidence),
+                "model_version": model_version,
+                "model_type": model_type,
+                "model_name": model_type,
+                "model_auc": model_auc,
+                "predicted_at": _now_utc(),
+                "predict_mode": "api" if via_api else "artifact",
+            })
         return rows
+
+    def _build_soccer_market_row(
+        self,
+        *,
+        game_id: str,
+        league: str,
+        home_team: str,
+        away_team: str,
+        game_date: str,
+        game_time: str,
+        home_prob: float,
+        away_prob: float,
+        draw_prob: float,
+        market_type: str,
+        market_name: str,
+        compression: float,
+        model_version: str,
+        model_type: str,
+        model_auc: float,
+        via_api: bool,
+    ) -> dict | None:
+        """Build a single soccer prediction row with draw-aware logic."""
+        c = float(compression)
+        h = float(home_prob)
+        a = float(away_prob)
+        d = float(draw_prob)
+
+        # --- Full-time 1X2 ---
+        if market_type == "full_time_result":
+            # Re-normalise to 3-way
+            total = h + d + a
+            hp = round(h / total, 4) if total else round(h, 4)
+            dp = round(d / total, 4) if total else round(d, 4)
+            ap = round(a / total, 4) if total else round(a, 4)
+            if hp >= dp and hp >= ap:
+                pick, conf = home_team, hp
+            elif ap >= hp and ap >= dp:
+                pick, conf = away_team, ap
+            else:
+                pick, conf = "Draw", dp
+            return {
+                "prediction_id": str(uuid4()), "game_id": game_id,
+                "sport": "soccer", "league": league,
+                "home_team": home_team, "away_team": away_team,
+                "game_date": game_date, "game_time": game_time,
+                "market_type": market_type, "market_name": market_name,
+                "predicted_team": pick,
+                "home_win_prob": hp, "away_win_prob": ap, "draw_prob": dp,
+                "confidence": round(conf, 4),
+                "confidence_tier": self._confidence_tier(conf),
+                "model_version": model_version, "model_type": model_type,
+                "model_name": model_type, "model_auc": model_auc,
+                "predicted_at": _now_utc(),
+                "predict_mode": "api" if via_api else "artifact",
+            }
+
+        # --- Moneyline (exclude draw — 2-way) ---
+        if market_type == "moneyline":
+            total_no_draw = h + a or 1.0
+            hp2 = round(h / total_no_draw * c + (1 - c) * 0.5, 4)
+            ap2 = round(1.0 - hp2, 4)
+            pick = home_team if hp2 >= ap2 else away_team
+            conf = max(hp2, ap2)
+            return {
+                "prediction_id": str(uuid4()), "game_id": game_id,
+                "sport": "soccer", "league": league,
+                "home_team": home_team, "away_team": away_team,
+                "game_date": game_date, "game_time": game_time,
+                "market_type": market_type, "market_name": market_name,
+                "predicted_team": pick,
+                "home_win_prob": hp2, "away_win_prob": ap2,
+                "confidence": round(conf, 4),
+                "confidence_tier": self._confidence_tier(conf),
+                "model_version": model_version, "model_type": model_type,
+                "model_name": model_type, "model_auc": model_auc,
+                "predicted_at": _now_utc(),
+                "predict_mode": "api" if via_api else "artifact",
+            }
+
+        # --- First / second half result (1X2 compressed) ---
+        if market_type in ("first_half_result", "second_half_result"):
+            half_draw = d * 1.3  # draws more common in halves
+            half_h = h * c
+            half_a = a * c
+            t = half_h + half_draw + half_a or 1.0
+            hp3 = round(half_h / t, 4)
+            dp3 = round(half_draw / t, 4)
+            ap3 = round(half_a / t, 4)
+            if hp3 >= dp3 and hp3 >= ap3:
+                pick, conf = home_team, hp3
+            elif ap3 >= hp3 and ap3 >= dp3:
+                pick, conf = away_team, ap3
+            else:
+                pick, conf = "Draw", dp3
+            return {
+                "prediction_id": str(uuid4()), "game_id": game_id,
+                "sport": "soccer", "league": league,
+                "home_team": home_team, "away_team": away_team,
+                "game_date": game_date, "game_time": game_time,
+                "market_type": market_type, "market_name": market_name,
+                "predicted_team": pick,
+                "home_win_prob": hp3, "away_win_prob": ap3, "draw_prob": dp3,
+                "confidence": round(conf, 4),
+                "confidence_tier": self._confidence_tier(conf),
+                "model_version": model_version, "model_type": model_type,
+                "model_name": model_type, "model_auc": model_auc,
+                "predicted_at": _now_utc(),
+                "predict_mode": "api" if via_api else "artifact",
+            }
+
+        # --- Binary totals / BTTS / corners / cards ---
+        # These are independent of home/away; derive from match strength
+        if market_type in (
+            "total_goals_over_2_5", "total_goals_under_2_5",
+            "total_goals_over_1_5", "both_teams_to_score",
+            "over_9_5_corners", "over_3_5_cards",
+        ):
+            dominance = max(h, a)  # how one-sided the game is
+            if market_type == "total_goals_over_2_5":
+                # more goals in balanced games + strong favourites scoring freely
+                p_yes = 0.52 + (1.0 - abs(h - a)) * 0.12
+            elif market_type == "total_goals_under_2_5":
+                p_yes = 1.0 - (0.52 + (1.0 - abs(h - a)) * 0.12)
+            elif market_type == "total_goals_over_1_5":
+                p_yes = 0.72 + (1.0 - abs(h - a)) * 0.10
+            elif market_type == "both_teams_to_score":
+                p_yes = 0.55 - (dominance - 0.5) * 0.25  # dominant team = lower BTTS
+            elif market_type == "over_9_5_corners":
+                p_yes = 0.50 + (1.0 - abs(h - a)) * 0.10
+            else:  # over_3_5_cards
+                p_yes = 0.48 + (1.0 - abs(h - a)) * 0.08
+            p_yes = round(max(0.15, min(0.85, p_yes)), 4)
+            p_no = round(1.0 - p_yes, 4)
+            pred = "Yes" if p_yes >= p_no else "No"
+            conf = max(p_yes, p_no)
+            return {
+                "prediction_id": str(uuid4()), "game_id": game_id,
+                "sport": "soccer", "league": league,
+                "home_team": home_team, "away_team": away_team,
+                "game_date": game_date, "game_time": game_time,
+                "market_type": market_type, "market_name": market_name,
+                "predicted_team": pred,
+                "home_win_prob": p_yes, "away_win_prob": p_no,
+                "over_prob": p_yes, "under_prob": p_no,
+                "confidence": round(conf, 4),
+                "confidence_tier": self._confidence_tier(conf),
+                "model_version": model_version, "model_type": model_type,
+                "model_name": model_type, "model_auc": model_auc,
+                "predicted_at": _now_utc(),
+                "predict_mode": "api" if via_api else "artifact",
+            }
+
+        # --- Team goal totals (home / away team to score) ---
+        if market_type in ("home_team_over_0_5_goals", "away_team_over_0_5_goals"):
+            base_prob = h if "home" in market_type else a
+            p_yes = round(max(0.30, min(0.90, 0.60 + (base_prob - 0.40) * 0.80)), 4)
+            p_no = round(1.0 - p_yes, 4)
+            pred = "Yes" if p_yes >= p_no else "No"
+            conf = max(p_yes, p_no)
+            return {
+                "prediction_id": str(uuid4()), "game_id": game_id,
+                "sport": "soccer", "league": league,
+                "home_team": home_team, "away_team": away_team,
+                "game_date": game_date, "game_time": game_time,
+                "market_type": market_type, "market_name": market_name,
+                "predicted_team": pred,
+                "home_win_prob": p_yes, "away_win_prob": p_no,
+                "over_prob": p_yes, "under_prob": p_no,
+                "confidence": round(conf, 4),
+                "confidence_tier": self._confidence_tier(conf),
+                "model_version": model_version, "model_type": model_type,
+                "model_name": model_type, "model_auc": model_auc,
+                "predicted_at": _now_utc(),
+                "predict_mode": "api" if via_api else "artifact",
+            }
+
+        # --- Double chance ---
+        if market_type in ("double_chance_home_draw", "double_chance_away_draw"):
+            p_yes = round(min(0.95, (h + d) if "home" in market_type else (a + d)), 4)
+            p_no = round(1.0 - p_yes, 4)
+            conf = max(p_yes, p_no)
+            return {
+                "prediction_id": str(uuid4()), "game_id": game_id,
+                "sport": "soccer", "league": league,
+                "home_team": home_team, "away_team": away_team,
+                "game_date": game_date, "game_time": game_time,
+                "market_type": market_type, "market_name": market_name,
+                "predicted_team": "Yes" if p_yes >= p_no else "No",
+                "home_win_prob": p_yes, "away_win_prob": p_no,
+                "confidence": round(conf, 4),
+                "confidence_tier": self._confidence_tier(conf),
+                "model_version": model_version, "model_type": model_type,
+                "model_name": model_type, "model_auc": model_auc,
+                "predicted_at": _now_utc(),
+                "predict_mode": "api" if via_api else "artifact",
+            }
+
+        # --- Clean sheet ---
+        if market_type in ("home_clean_sheet", "away_clean_sheet"):
+            defender_strength = h if "home" in market_type else a
+            attacker_strength = a if "home" in market_type else h
+            p_yes = round(max(0.10, min(0.70, 0.30 + (defender_strength - attacker_strength) * 0.60)), 4)
+            p_no = round(1.0 - p_yes, 4)
+            conf = max(p_yes, p_no)
+            return {
+                "prediction_id": str(uuid4()), "game_id": game_id,
+                "sport": "soccer", "league": league,
+                "home_team": home_team, "away_team": away_team,
+                "game_date": game_date, "game_time": game_time,
+                "market_type": market_type, "market_name": market_name,
+                "predicted_team": "Yes" if p_yes >= p_no else "No",
+                "home_win_prob": p_yes, "away_win_prob": p_no,
+                "confidence": round(conf, 4),
+                "confidence_tier": self._confidence_tier(conf),
+                "model_version": model_version, "model_type": model_type,
+                "model_name": model_type, "model_auc": model_auc,
+                "predicted_at": _now_utc(),
+                "predict_mode": "api" if via_api else "artifact",
+            }
+
+        # --- Asian handicap ---
+        if market_type in ("asian_handicap_home", "asian_handicap_away"):
+            fav_prob = h if "home" in market_type else a
+            p_cover = round(max(0.20, min(0.80, fav_prob * 1.1)), 4)
+            p_no = round(1.0 - p_cover, 4)
+            conf = max(p_cover, p_no)
+            team = home_team if "home" in market_type else away_team
+            return {
+                "prediction_id": str(uuid4()), "game_id": game_id,
+                "sport": "soccer", "league": league,
+                "home_team": home_team, "away_team": away_team,
+                "game_date": game_date, "game_time": game_time,
+                "market_type": market_type, "market_name": market_name,
+                "predicted_team": team,
+                "home_win_prob": p_cover, "away_win_prob": p_no,
+                "confidence": round(conf, 4),
+                "confidence_tier": self._confidence_tier(conf),
+                "model_version": model_version, "model_type": model_type,
+                "model_name": model_type, "model_auc": model_auc,
+                "predicted_at": _now_utc(),
+                "predict_mode": "api" if via_api else "artifact",
+            }
+
+        # --- First / second half winner (2-way, no draw) ---
+        if market_type in ("first_half_winner", "second_half_winner"):
+            adj_h = round(max(0.15, min(0.85, 0.5 + (h - a) * c)), 4)
+            adj_a = round(1.0 - adj_h, 4)
+            pick = home_team if adj_h >= adj_a else away_team
+            conf = max(adj_h, adj_a)
+            return {
+                "prediction_id": str(uuid4()), "game_id": game_id,
+                "sport": "soccer", "league": league,
+                "home_team": home_team, "away_team": away_team,
+                "game_date": game_date, "game_time": game_time,
+                "market_type": market_type, "market_name": market_name,
+                "predicted_team": pick,
+                "home_win_prob": adj_h, "away_win_prob": adj_a,
+                "confidence": round(conf, 4),
+                "confidence_tier": self._confidence_tier(conf),
+                "model_version": model_version, "model_type": model_type,
+                "model_name": model_type, "model_auc": model_auc,
+                "predicted_at": _now_utc(),
+                "predict_mode": "api" if via_api else "artifact",
+            }
+
+        # --- Default fallback (treat as binary) ---
+        adj_h = round(max(0.01, min(0.99, 0.5 + (h - a) * c)), 4)
+        adj_a = round(1.0 - adj_h, 4)
+        pick = home_team if adj_h >= adj_a else away_team
+        conf = max(adj_h, adj_a)
+        return {
+            "prediction_id": str(uuid4()), "game_id": game_id,
+            "sport": "soccer", "league": league,
+            "home_team": home_team, "away_team": away_team,
+            "game_date": game_date, "game_time": game_time,
+            "market_type": market_type, "market_name": market_name,
+            "predicted_team": pick,
+            "home_win_prob": adj_h, "away_win_prob": adj_a,
+            "confidence": round(conf, 4),
+            "confidence_tier": self._confidence_tier(conf),
+            "model_version": model_version, "model_type": model_type,
+            "model_name": model_type, "model_auc": model_auc,
+            "predicted_at": _now_utc(),
+            "predict_mode": "api" if via_api else "artifact",
+        }
 
     def run_daily_pipeline(
         self,
@@ -1337,6 +1735,97 @@ class HFDirectPipeline:
             deduped.append(name)
         cache[key] = deduped
         return deduped
+
+    def _fetch_soccer_squad_espn(self, team_name: str, cache: dict[str, list[str]]) -> list[str]:
+        """
+        Fetch soccer squad from ESPN team roster API (free, no auth).
+        Falls back to a curated WC 2026 starter list if ESPN fails.
+        Returns a list of player full names for the given team.
+        """
+        key = f"soccer_squad|{str(team_name or '').strip().lower()}"
+        if key in cache:
+            return cache[key]
+        players: list[str] = []
+
+        # Attempt ESPN team search → roster
+        try:
+            # Step 1: search for team ID
+            r = requests.get(
+                "https://site.api.espn.com/apis/site/v2/sports/soccer/all/teams",
+                timeout=15,
+                headers={"User-Agent": "Mozilla/5.0"},
+            )
+            if r.status_code == 200:
+                for team in (r.json() or {}).get("sports", [{}])[0].get("leagues", [{}])[0].get("teams", []):
+                    t = team.get("team") or {}
+                    dn = str(t.get("displayName") or t.get("name") or "").lower()
+                    if dn and (dn in team_name.lower() or team_name.lower() in dn):
+                        team_id = str(t.get("id") or "")
+                        if team_id:
+                            # Step 2: fetch roster
+                            r2 = requests.get(
+                                f"https://site.api.espn.com/apis/site/v2/sports/soccer/all/teams/{team_id}/roster",
+                                timeout=15,
+                                headers={"User-Agent": "Mozilla/5.0"},
+                            )
+                            if r2.status_code == 200:
+                                for athlete in (r2.json() or {}).get("athletes", []):
+                                    name = str(athlete.get("fullName") or athlete.get("displayName") or "").strip()
+                                    if name:
+                                        players.append(name)
+                        break
+        except Exception as exc:
+            logger.debug("[hf_pipeline] ESPN squad %s: %s", team_name, exc)
+
+        # Fallback: curated WC 2026 key players per nation
+        if not players:
+            players = self._wc2026_squad_fallback(team_name)
+
+        # Dedupe and cache
+        seen: set[str] = set()
+        deduped: list[str] = []
+        for name in players:
+            k = name.lower()
+            if k not in seen:
+                seen.add(k)
+                deduped.append(name)
+        cache[key] = deduped
+        return deduped
+
+    def _wc2026_squad_fallback(self, team_name: str) -> list[str]:
+        """Curated key players for WC 2026 nations. Used when ESPN roster fails."""
+        name_lower = str(team_name or "").lower()
+        # mapping: (keywords) -> key players
+        squads: dict[tuple, list[str]] = {
+            ("brazil",): ["Vinicius Jr", "Rodrygo", "Raphinha", "Endrick", "Alisson Becker"],
+            ("argentina",): ["Lionel Messi", "Julian Alvarez", "Lautaro Martinez", "Enzo Fernandez", "Emiliano Martinez"],
+            ("france",): ["Kylian Mbappe", "Antoine Griezmann", "Olivier Giroud", "Ousmane Dembele", "Mike Maignan"],
+            ("england",): ["Harry Kane", "Jude Bellingham", "Phil Foden", "Bukayo Saka", "Jordan Pickford"],
+            ("germany",): ["Jamal Musiala", "Florian Wirtz", "Kai Havertz", "Thomas Muller", "Manuel Neuer"],
+            ("spain",): ["Pedri", "Gavi", "Alvaro Morata", "Rodri", "Unai Simon"],
+            ("portugal",): ["Cristiano Ronaldo", "Bruno Fernandes", "Rafael Leao", "Joao Felix", "Diogo Costa"],
+            ("netherlands", "holland",): ["Virgil van Dijk", "Memphis Depay", "Cody Gakpo", "Xavi Simons", "Bart Verbruggen"],
+            ("italy",): ["Federico Chiesa", "Gianluigi Donnarumma", "Nicolo Barella", "Ciro Immobile", "Sandro Tonali"],
+            ("belgium",): ["Kevin De Bruyne", "Romelu Lukaku", "Eden Hazard", "Alexis Saelemaekers", "Thibaut Courtois"],
+            ("morocco",): ["Achraf Hakimi", "Hakim Ziyech", "Youssef En-Nesyri", "Sofyan Amrabat", "Bono"],
+            ("usa", "united states",): ["Christian Pulisic", "Weston McKennie", "Gio Reyna", "Matt Turner", "Tim Weah"],
+            ("mexico",): ["Hirving Lozano", "Raul Jimenez", "Edson Alvarez", "Guillermo Ochoa", "Henry Martin"],
+            ("canada",): ["Alphonso Davies", "Jonathan David", "Cyle Larin", "Milan Borjan", "Tajon Buchanan"],
+            ("norway",): ["Erling Haaland", "Martin Odegaard", "Alexander Sorloth", "Sander Berge", "Jorgen Strand Larsen"],
+            ("japan",): ["Takumi Minamino", "Hiroki Sakai", "Daichi Kamada", "Shuichi Gonda", "Takefusa Kubo"],
+            ("australia",): ["Mathew Leckie", "Martin Boyle", "Ajdin Hrustic", "Mat Ryan", "Aaron Mooy"],
+            ("senegal",): ["Sadio Mane", "Edouard Mendy", "Kalidou Koulibaly", "Idrissa Gueye", "Ismaila Sarr"],
+            ("croatia",): ["Luka Modric", "Mateo Kovacic", "Ivan Perisic", "Ante Budimir", "Dominik Livakovic"],
+            ("sweden",): ["Zlatan Ibrahimovic", "Victor Lindelof", "Dejan Kulusevski", "Alexander Isak", "Robin Olsen"],
+            ("denmark",): ["Christian Eriksen", "Pierre-Emile Hojbjerg", "Jonas Wind", "Kasper Schmeichel", "Mikkel Damsgaard"],
+            ("switzerland",): ["Granit Xhaka", "Xherdan Shaqiri", "Breel Embolo", "Yann Sommer", "Denis Zakaria"],
+            ("colombia",): ["James Rodriguez", "Radamel Falcao", "Luis Diaz", "David Ospina", "Juan Cuadrado"],
+            ("uruguay",): ["Luis Suarez", "Edinson Cavani", "Federico Valverde", "Darwin Nunez", "Fernando Muslera"],
+        }
+        for keywords, players in squads.items():
+            if any(kw in name_lower for kw in keywords):
+                return players
+        return []
 
     def _fetch_nba_upcoming(self, day: datetime.date) -> list[dict]:
         rows: list[dict] = []

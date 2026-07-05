@@ -358,6 +358,93 @@ def polymarket_status():
     return jsonify(payload)
 
 
+@app.route("/api/parlay/tracking-overview")
+def parlay_tracking_overview():
+    """Single endpoint that returns every prediction bucketed + summarised for the Parlay tab."""
+    import datetime
+
+    payload, source, error = _provider_or_local("/predictions/today", HF_PREDICTIONS_FILE, default={})
+    if not isinstance(payload, dict):
+        payload = {}
+
+    all_preds: list[dict] = list(payload.get("predictions") or [])
+    today_str: str = str(payload.get("today") or datetime.date.today().isoformat())
+    tomorrow_str: str = str(payload.get("tomorrow") or (datetime.date.today() + datetime.timedelta(days=1)).isoformat())
+
+    by_sport: dict[str, dict] = {}
+    by_market: dict[str, dict] = {}
+    tier_counts: dict[str, int] = {"elite": 0, "solid": 0, "lean": 0, "watch": 0}
+    total_game = total_prop = total_poly = 0
+
+    enriched: list[dict] = []
+    for pred in all_preds:
+        gd = str(pred.get("game_date") or "")
+        scope = str(pred.get("prediction_scope") or "game_prediction")
+        sport = str(pred.get("sport") or "unknown").lower()
+        market = str(pred.get("market_type") or pred.get("market_name") or "game_winner")
+        tier = str(pred.get("confidence_tier") or "watch").lower()
+
+        if gd == today_str:
+            phase = "today"
+        elif gd == tomorrow_str:
+            phase = "tomorrow"
+        elif gd > today_str:
+            phase = "upcoming"
+        else:
+            phase = "past"
+
+        if scope == "player_prop":
+            total_prop += 1
+        else:
+            total_game += 1
+
+        if tier in tier_counts:
+            tier_counts[tier] += 1
+
+        sport_row = by_sport.setdefault(sport, {"count": 0, "elite": 0, "solid": 0, "lean": 0})
+        sport_row["count"] += 1
+        if tier in sport_row:
+            sport_row[tier] += 1
+
+        market_label = market.replace("_", " ").title()
+        mkt_row = by_market.setdefault(market_label, {"count": 0, "elite": 0})
+        mkt_row["count"] += 1
+        if tier == "elite":
+            mkt_row["elite"] += 1
+
+        poly_status = str((pred.get("polymarket") or {}).get("status") or "")
+        if poly_status in {"matched", "placed", "filled", "submitted"}:
+            total_poly += 1
+
+        enriched.append({**pred, "_phase": phase})
+
+    # Sort by game_date desc, then confidence desc
+    enriched.sort(key=lambda r: (r.get("game_date") or "", -(float(r.get("confidence") or 0))), reverse=False)
+    enriched.sort(key=lambda r: r.get("game_date") or "", reverse=True)
+
+    top_markets = dict(sorted(by_market.items(), key=lambda x: -x[1]["count"])[:20])
+
+    summary = {
+        "total": len(all_preds),
+        "game_predictions": total_game,
+        "player_props": total_prop,
+        "polymarket_matched": total_poly,
+        "high_confidence": tier_counts["elite"] + tier_counts["solid"],
+        "by_tier": tier_counts,
+        "by_sport": by_sport,
+        "by_market": top_markets,
+    }
+
+    return jsonify(_envelope({
+        "ok": True,
+        "summary": summary,
+        "predictions": enriched,
+        "generated_at": payload.get("generated_at", ""),
+        "today": today_str,
+        "tomorrow": tomorrow_str,
+    }, source, error))
+
+
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "5000") or "5000")
     app.run(host="0.0.0.0", port=port, debug=False)
