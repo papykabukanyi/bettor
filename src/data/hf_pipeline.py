@@ -62,7 +62,7 @@ class HFDirectPipeline:
     _TRAIN_FEATURES = ["home_team", "away_team", "sport", "season", "month", "day_of_week"]
     _CAT_FEATURES = ["home_team", "away_team", "sport"]
     _NUM_FEATURES = ["season", "month", "day_of_week"]
-    _MARKET_SPORT_ALIASES = {
+    _POLYMARKET_SPORT_ALIASES = {
         "baseball": "mlb",
         "mlb": "mlb",
         "basketball": "nba",
@@ -1566,7 +1566,7 @@ class HFDirectPipeline:
         rows += self._fetch_nhl_upcoming(day)
         rows += self._fetch_soccer_upcoming(day)
         rows += self._fetch_additional_sportsdb_upcoming(day)
-        rows += self._fetch_kalshi_upcoming(day)
+        rows += self._fetch_polymarket_upcoming(day)
 
         deduped = []
         seen = set()
@@ -2252,41 +2252,45 @@ class HFDirectPipeline:
                 logger.debug("[hf_pipeline] Jeff Sackmann %s: %s", year, exc)
         return rows
 
-    def _fetch_kalshi_upcoming(self, day: datetime.date) -> list[dict]:
+    def _fetch_polymarket_upcoming(self, day: datetime.date) -> list[dict]:
         rows: list[dict] = []
         try:
-            from data.kalshi import get_open_market_catalog
-
-            markets = (get_open_market_catalog().get("markets") or [])
+            resp = requests.get(
+                "https://gamma-api.polymarket.com/markets",
+                params={"active": "true", "closed": "false", "limit": 300},
+                timeout=25,
+            )
+            resp.raise_for_status()
+            markets = resp.json() or []
         except Exception as exc:
-            logger.debug("[hf_pipeline] Kalshi upcoming fetch failed: %s", exc)
+            logger.debug("[hf_pipeline] polymarket upcoming fetch failed: %s", exc)
             return rows
 
         for m in markets:
             if not isinstance(m, dict):
                 continue
-            event_iso = str(m.get("close_time") or m.get("open_time") or "").strip()
+            event_iso = str(m.get("startDate") or m.get("endDate") or "").strip()
             if not event_iso:
                 continue
             event_day = event_iso[:10]
             if event_day != day.isoformat():
                 continue
-            home, away = self._parse_market_matchup(str(m.get("question") or m.get("title") or ""))
+            home, away = self._parse_polymarket_matchup(str(m.get("question") or m.get("title") or ""))
             if not home or not away:
                 continue
             text_blob = " ".join(
                 [
                     str(m.get("sport") or ""),
                     str(m.get("category") or ""),
-                    str(m.get("series_ticker") or ""),
+                    str(m.get("groupItemTitle") or ""),
                     str(m.get("question") or ""),
                     str(m.get("title") or ""),
                 ]
             ).strip().lower()
             sport_raw = str(m.get("sport") or m.get("category") or "").strip().lower()
-            sport = self._MARKET_SPORT_ALIASES.get(sport_raw, "")
+            sport = self._POLYMARKET_SPORT_ALIASES.get(sport_raw, "")
             if not sport:
-                for k, v in self._MARKET_SPORT_ALIASES.items():
+                for k, v in self._POLYMARKET_SPORT_ALIASES.items():
                     if k in sport_raw:
                         sport = v
                         break
@@ -2297,17 +2301,17 @@ class HFDirectPipeline:
             rows.append(
                 {
                     "sport": sport,
-                    "league": str(m.get("series_ticker") or m.get("event_ticker") or "Kalshi"),
+                    "league": str(m.get("seriesTicker") or m.get("eventSlug") or "Polymarket"),
                     "home_team": home,
                     "away_team": away,
                     "game_date": event_day,
                     "game_time": event_iso,
-                    "game_id": str(m.get("event_ticker") or m.get("ticker") or ""),
+                    "game_id": str(m.get("id") or m.get("slug") or ""),
                 }
             )
         return rows
 
-    def _parse_market_matchup(self, text: str) -> tuple[str, str]:
+    def _parse_polymarket_matchup(self, text: str) -> tuple[str, str]:
         raw = " ".join(str(text or "").split())
         if not raw:
             return "", ""

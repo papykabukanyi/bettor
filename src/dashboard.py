@@ -135,8 +135,8 @@ def _provider_or_local(path: str, local_file: Path, *, default: Any) -> tuple[An
         "/predictions/today": ["artifacts/hf_daily_predictions.json", "hf_daily_predictions.json"],
         "/predictions/tomorrow": ["artifacts/hf_daily_predictions.json", "hf_daily_predictions.json"],
         "/model/stats": ["artifacts/hf_pipeline_status.json", "hf_pipeline_status.json"],
-        "/kalshi/submissions": ["artifacts/hf_daily_prediction_markets.json", "hf_daily_prediction_markets.json"],
-        "/kalshi/positions": ["artifacts/hf_daily_prediction_markets.json", "hf_daily_prediction_markets.json"],
+        "/polymarket/submissions": ["artifacts/hf_daily_prediction_markets.json", "hf_daily_prediction_markets.json"],
+        "/polymarket/positions": ["artifacts/hf_daily_prediction_markets.json", "hf_daily_prediction_markets.json"],
     }
     artifact_paths = hub_artifact_map.get(path)
     if artifact_paths:
@@ -231,7 +231,7 @@ def predictions_status():
                 "generated_at": status.get("predict_completed_at", ""),
                 "prediction_count": status.get("prediction_count", 0),
             },
-            "kalshi": {"ok": True},
+            "polymarket": {"ok": True},
         },
         "metrics": {
             "total_predictions": total_predictions,
@@ -241,7 +241,7 @@ def predictions_status():
             "win_rate": float(model.get("best_score") or 0),
         },
         "model": model,
-        "kalshi": {"submissions": {}, "positions": {}},
+        "polymarket": {"submissions": {}, "positions": {}},
     }
     return jsonify(_envelope(transformed, source, error))
 
@@ -295,17 +295,16 @@ def _local_submissions_payload() -> dict[str, Any]:
     for market in (markets.get("markets") or []):
         if not isinstance(market, dict):
             continue
-        status = str(market.get("kalshi_status") or "unavailable").strip().lower()
+        status = str(market.get("polymarket_status") or "unavailable").strip().lower()
         rows.append(
             {
                 "submitted_at": market.get("detected_at") or "",
                 "game": market.get("game") or "",
                 "pick": market.get("pick") or "",
                 "status": status or "unavailable",
-                "price": market.get("kalshi_price_cents"),
+                "price": market.get("polymarket_price"),
                 "amount_usd": market.get("stake_usd") or 0,
-                "reason": market.get("kalshi_message") or "",
-                "ticker": market.get("kalshi_ticker") or "",
+                "reason": market.get("polymarket_message") or "",
             }
         )
         summary["evaluated"] += 1
@@ -318,27 +317,27 @@ def _local_submissions_payload() -> dict[str, Any]:
     return {"ok": True, "updated_at": markets.get("generated_at", ""), "summary": summary, "submissions": rows}
 
 
-@app.route("/api/kalshi/submissions")
-def kalshi_submissions():
-    payload, source, error = _provider_or_local("/kalshi/submissions", HF_MARKETS_FILE, default={})
+@app.route("/api/polymarket/submissions")
+def polymarket_submissions():
+    payload, source, error = _provider_or_local("/polymarket/submissions", HF_MARKETS_FILE, default={})
     if isinstance(payload, dict) and "summary" in payload and "submissions" in payload:
         return jsonify(_envelope(payload, source, error))
     return jsonify(_envelope(_local_submissions_payload(), source, error))
 
 
-@app.route("/api/kalshi/positions")
-def kalshi_positions():
-    payload, source, error = _provider_or_local("/kalshi/positions", HF_MARKETS_FILE, default={})
+@app.route("/api/polymarket/positions")
+def polymarket_positions():
+    payload, source, error = _provider_or_local("/polymarket/positions", HF_MARKETS_FILE, default={})
     if isinstance(payload, dict) and "summary" in payload and "positions" in payload:
         return jsonify(_envelope(payload, source, error))
     local = {"ok": True, "updated_at": "", "summary": {"active_positions": 0, "open_notional_usd": 0, "estimated_pnl_usd": 0}, "positions": []}
     return jsonify(_envelope(local, source, error))
 
 
-@app.route("/api/kalshi/status")
-def kalshi_status():
-    sub = kalshi_submissions().get_json(silent=True) or {}
-    pos = kalshi_positions().get_json(silent=True) or {}
+@app.route("/api/polymarket/status")
+def polymarket_status():
+    sub = polymarket_submissions().get_json(silent=True) or {}
+    pos = polymarket_positions().get_json(silent=True) or {}
     if (sub.get("source") in {"hf_space", "hf_space_auto"} or pos.get("source") in {"hf_space", "hf_space_auto"}):
         source = "hf_space"
     elif (sub.get("source") == "hf_hub_artifact" or pos.get("source") == "hf_hub_artifact"):
