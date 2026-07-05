@@ -10,7 +10,9 @@ from typing import Any
 from urllib.parse import urljoin
 
 import requests
-from flask import Flask, jsonify, render_template
+from flask import Flask, jsonify, render_template, request
+
+from data.kalshi_trade_api import build_live_snapshot, submit_prediction_orders
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = ROOT_DIR / "data"
@@ -25,6 +27,11 @@ HF_MODEL_REPO = str(os.getenv("HF_MODEL_REPO", "papylove/sportprediction") or ""
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
 app = Flask(__name__, template_folder="templates")
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = str(os.getenv(name, "1" if default else "0") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
 
 
 def _space_repo_to_url(repo_id: str) -> str:
@@ -318,45 +325,136 @@ def _local_submissions_payload() -> dict[str, Any]:
     return {"ok": True, "updated_at": markets.get("generated_at", ""), "summary": summary, "submissions": rows}
 
 
+def _live_kalshi_snapshot() -> dict[str, Any]:
+    try:
+        return build_live_snapshot()
+    except Exception as exc:
+        return {
+            "ok": False,
+            "updated_at": "",
+            "error": str(exc),
+            "balance": {
+                "balance_cents": 0,
+                "balance_usd": 0.0,
+                "balance_dollars": "0",
+                "portfolio_value_cents": 0,
+                "portfolio_value_usd": 0.0,
+                "updated_ts": None,
+            },
+            "open_orders": [],
+            "open_orders_count": 0,
+            "open_notional_usd": 0.0,
+        }
+
+
 @app.route("/api/kalshi/submissions")
 def kalshi_submissions():
     payload, source, error = _provider_or_local("/kalshi/submissions", HF_MARKETS_FILE, default={})
-    if isinstance(payload, dict) and "summary" in payload and "submissions" in payload:
-        return jsonify(_envelope(payload, source, error))
-    return jsonify(_envelope(_local_submissions_payload(), source, error))
+    base = payload if isinstance(payload, dict) and "summary" in payload and "submissions" in payload else _local_submissions_payload()
+    live = _live_kalshi_snapshot()
+    if live.get("ok"):
+        base_summary = base.get("summary") or {}
+        base_summary["available_buying_power_usd"] = float((live.get("balance") or {}).get("balance_usd") or 0.0)
+        base["summary"] = base_summary
+    wrapped = _envelope(base, source, error or str(live.get("error") or ""))
+    wrapped["live"] = live
+    return jsonify(wrapped)
 
 
 @app.route("/api/kalshi/positions")
 def kalshi_positions():
     payload, source, error = _provider_or_local("/kalshi/positions", HF_MARKETS_FILE, default={})
+    live = _live_kalshi_snapshot()
+    if live.get("ok"):
+        transformed = {
+            "ok": True,
+            "updated_at": live.get("updated_at") or "",
+            "summary": {
+                "active_positions": int(live.get("open_orders_count") or 0),
+                "open_notional_usd": float(live.get("open_notional_usd") or 0.0),
+                "estimated_pnl_usd": 0.0,
+                "available_buying_power_usd": float((live.get("balance") or {}).get("balance_usd") or 0.0),
+                "portfolio_value_usd": float((live.get("balance") or {}).get("portfolio_value_usd") or 0.0),
+            },
+            "positions": live.get("open_orders") or [],
+            "balance": live.get("balance") or {},
+        }
+        wrapped = _envelope(transformed, "kalshi_live", error)
+        wrapped["live"] = live
+        return jsonify(wrapped)
     if isinstance(payload, dict) and "summary" in payload and "positions" in payload:
-        return jsonify(_envelope(payload, source, error))
-    local = {"ok": True, "updated_at": "", "summary": {"active_positions": 0, "open_notional_usd": 0, "estimated_pnl_usd": 0}, "positions": []}
-    return jsonify(_envelope(local, source, error))
+        wrapped = _envelope(payload, source, error or str(live.get("error") or ""))
+        wrapped["live"] = live
+        return jsonify(wrapped)
+    local = {"ok": False, "updated_at": "", "summary": {"active_positions": 0, "open_notional_usd": 0, "estimated_pnl_usd": 0}, "positions": [], "balance": {}}
+    wrapped = _envelope(local, source, error or str(live.get("error") or ""))
+    wrapped["live"] = live
+    return jsonify(wrapped)
 
 
 @app.route("/api/kalshi/status")
 def kalshi_status():
     sub = kalshi_submissions().get_json(silent=True) or {}
     pos = kalshi_positions().get_json(silent=True) or {}
+    live = pos.get("live") or sub.get("live") or _live_kalshi_snapshot()
     if (sub.get("source") in {"hf_space", "hf_space_auto"} or pos.get("source") in {"hf_space", "hf_space_auto"}):
         source = "hf_space"
     elif (sub.get("source") == "hf_hub_artifact" or pos.get("source") == "hf_hub_artifact"):
         source = "hf_hub_artifact"
+    elif pos.get("source") == "kalshi_live":
+        source = "kalshi_live"
     else:
         source = "hf_local_snapshot"
     payload = {
-        "ok": True,
+        "ok": bool(live.get("ok") or sub.get("ok") or pos.get("ok")),
         "source": source,
         "provider_configured": bool(PROVIDER_API_URL),
         "provider_url": PROVIDER_API_URL,
         "provider_source": PROVIDER_API_SOURCE,
-        "warning": sub.get("warning") or pos.get("warning") or "",
+        "warning": sub.get("warning") or pos.get("warning") or str(live.get("error") or ""),
         "updated_at": (sub.get("updated_at") or pos.get("updated_at") or ""),
         "submissions": sub,
         "positions": pos,
+        "live": live,
     }
     return jsonify(payload)
+
+
+@app.route("/api/kalshi/live")
+def kalshi_live():
+    live = _live_kalshi_snapshot()
+    return jsonify(live)
+
+
+@app.route("/api/kalshi/place-from-predictions", methods=["POST"])
+def kalshi_place_from_predictions():
+    body = request.get_json(silent=True) or {}
+    dry_run = bool(body.get("dry_run", True))
+    stake_usd = float(body.get("stake_usd", 1.0) or 1.0)
+    max_orders = int(body.get("max_orders", 1) or 1)
+    if not dry_run and not _env_flag("KALSHI_LIVE_TRADING_ENABLED", default=False):
+        return jsonify(
+            {
+                "ok": False,
+                "error": "Live trading is disabled. Set KALSHI_LIVE_TRADING_ENABLED=1 to allow order placement.",
+            }
+        ), 400
+
+    payload, _, _ = _provider_or_local("/predictions/today", HF_PREDICTIONS_FILE, default={})
+    if not isinstance(payload, dict) or not isinstance(payload.get("predictions"), list):
+        payload = _load_json(HF_PREDICTIONS_FILE, {})
+    if not isinstance(payload, dict) or not isinstance(payload.get("predictions"), list):
+        return jsonify({"ok": False, "error": "Prediction data unavailable."}), 400
+    try:
+        result = submit_prediction_orders(
+            payload,
+            stake_usd=stake_usd,
+            max_orders=max_orders,
+            dry_run=dry_run,
+        )
+        return jsonify(result)
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
 
 
 if __name__ == "__main__":
