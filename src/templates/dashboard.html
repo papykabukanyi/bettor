@@ -129,16 +129,6 @@
       color: var(--ink);
     }
     .label-mini { font-size: .75rem; text-transform: uppercase; letter-spacing: .14em; color: var(--muted); margin-bottom: 6px; display: block; }
-    /* Parlay tracking panel */
-    .tracking-summary { display: grid; gap: 14px; grid-template-columns: repeat(2, minmax(0,1fr)); margin-bottom: 20px; }
-    .tracking-stat { padding: 16px 18px; border-radius: 18px; background: rgba(15,23,42,0.52); border: 1px solid rgba(148,163,184,0.16); }
-    .tracking-stat-label { font-size: 0.72rem; letter-spacing: 0.18em; text-transform: uppercase; color: var(--muted); display: block; }
-    .tracking-stat-value { display: block; font-size: 1.5rem; font-weight: 800; letter-spacing: -0.03em; color: var(--ink); margin-top: 6px; }
-    .phase-badge { display: inline-block; padding: 3px 9px; border-radius: 8px; font-size: 0.72rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.1em; }
-    .phase-today { background: rgba(16,185,129,0.18); color: #6ee7b7; }
-    .phase-tomorrow { background: rgba(59,130,246,0.18); color: #93c5fd; }
-    .phase-upcoming { background: rgba(148,163,184,0.14); color: #94a3b8; }
-    .phase-past { background: rgba(100,100,100,0.14); color: #6b7280; }
     .comparator-shell { display: grid; gap: 16px; }
     .comparator-card { padding: 18px; border-radius: 20px; background: rgba(15, 23, 42, 0.62); border: 1px solid rgba(148,163,184,0.2); }
     .comparator-title { font-size: 1.05rem; font-weight: 800; letter-spacing: -0.02em; color: var(--ink); }
@@ -155,7 +145,6 @@
       .prediction-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .polymarket-grid { grid-template-columns: 0.95fr 1.05fr; }
       .sort-row { grid-template-columns: 1.1fr .9fr .9fr; }
-      .tracking-summary { grid-template-columns: repeat(4, minmax(0,1fr)); }
     }
     @media (min-width: 1120px) { .prediction-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
   </style>
@@ -180,7 +169,6 @@
       <button class="tab" data-tab="today">Today</button>
       <button class="tab" data-tab="tomorrow">Tomorrow</button>
       <button class="tab" data-tab="comparator">Comparator</button>
-      <button class="tab" data-tab="parlay">Parlay</button>
       <button class="tab" data-tab="history">History</button>
       <button class="tab" data-tab="polymarket">Polymarket</button>
     </nav>
@@ -261,46 +249,6 @@
       <div class="comparator-shell" id="comparator-shell" style="margin-top:14px"></div>
     </section>
 
-    <!-- PARLAY TAB: full prediction ledger, every prediction accounted for -->
-    <section class="panel" id="panel-parlay">
-      <div class="card glass" style="margin-bottom:18px">
-        <h3>Prediction Ledger</h3>
-        <p class="subtle" style="margin:10px 0 0">Every prediction the model produces — game props, player props, all sports. Nothing is hidden.</p>
-      </div>
-      <div class="tracking-summary" id="tracking-summary"></div>
-      <div class="card glass sort-card" style="margin-bottom:14px">
-        <div class="sort-row">
-          <div>
-            <label class="label-mini" for="parlay-sport-filter">Sport</label>
-            <select id="parlay-sport-filter" class="form-select form-select-sm"><option value="all">All Sports</option></select>
-          </div>
-          <div>
-            <label class="label-mini" for="parlay-scope-filter">Type</label>
-            <select id="parlay-scope-filter" class="form-select form-select-sm">
-              <option value="all">All Types</option>
-              <option value="game_prediction">Game Predictions</option>
-              <option value="player_prop">Player Props</option>
-            </select>
-          </div>
-          <div>
-            <label class="label-mini" for="parlay-tier-filter">Tier</label>
-            <select id="parlay-tier-filter" class="form-select form-select-sm">
-              <option value="all">All Tiers</option>
-              <option value="elite">Elite</option>
-              <option value="solid">Solid</option>
-              <option value="lean">Lean</option>
-              <option value="watch">Watch</option>
-            </select>
-          </div>
-        </div>
-      </div>
-      <div class="overview-grid" style="margin-bottom:18px">
-        <div class="table-shell glass" id="parlay-sport-table"></div>
-        <div class="table-shell glass" id="parlay-market-table"></div>
-      </div>
-      <div class="table-shell glass" id="parlay-ledger-table"></div>
-    </section>
-
     <section class="panel" id="panel-history"><div class="table-shell glass" id="history-shell"></div></section>
 
     <section class="panel" id="panel-polymarket">
@@ -333,7 +281,6 @@
       status: {}, today: { predictions: [] }, tomorrow: { predictions: [] },
       model: { current_model: {}, history: [] },
       polymarketStatus: { submissions: {}, positions: {} },
-      parlay: { summary: {}, predictions: [] },
       lastHash: '', firstRefresh: true,
       activeTab: 'pipeline',
       tabLoaded: {},
@@ -553,90 +500,6 @@
       shell.innerHTML = cards.map(c => c.html).join('');
     }
 
-    // ─── Parlay / Prediction Ledger ──────────────────────────────────────────
-    function renderParlay() {
-      const s = state.parlay.summary || {};
-      const preds = state.parlay.predictions || [];
-      const tierCounts = s.by_tier || {};
-
-      // Summary stat cards
-      const statCards = [
-        { label: 'Total Predictions', value: num(s.total || 0) },
-        { label: 'Game Predictions', value: num(s.game_predictions || 0) },
-        { label: 'Player Props', value: num(s.player_props || 0) },
-        { label: 'Elite + Solid', value: num(s.high_confidence || 0) },
-        { label: 'Polymarket Matched', value: num(s.polymarket_matched || 0) },
-        { label: 'Elite Picks', value: num(tierCounts.elite || 0) },
-        { label: 'Solid Picks', value: num(tierCounts.solid || 0) },
-        { label: 'Lean / Watch', value: num((tierCounts.lean || 0) + (tierCounts.watch || 0)) },
-      ];
-      document.getElementById('tracking-summary').innerHTML = statCards.map(c =>
-        `<div class="tracking-stat"><span class="tracking-stat-label">${esc(c.label)}</span><span class="tracking-stat-value">${esc(c.value)}</span></div>`
-      ).join('');
-
-      // By-sport table
-      const bySport = s.by_sport || {};
-      document.getElementById('parlay-sport-table').innerHTML = Object.keys(bySport).length
-        ? `<table><thead><tr><th>Sport</th><th>Total</th><th>Elite</th><th>Solid</th><th>Lean</th></tr></thead><tbody>${
-            Object.entries(bySport).sort((a,b) => b[1].count - a[1].count).map(([sport, d]) =>
-              `<tr><td>${esc(sport.toUpperCase())}</td><td>${esc(num(d.count))}</td><td><span class="confidence-badge good" style="padding:4px 8px;font-size:.7rem">${esc(num(d.elite||0))}</span></td><td><span class="confidence-badge neutral" style="padding:4px 8px;font-size:.7rem">${esc(num(d.solid||0))}</span></td><td><span class="confidence-badge warn" style="padding:4px 8px;font-size:.7rem">${esc(num(d.lean||0))}</span></td></tr>`
-            ).join('')
-          }</tbody></table>`
-        : '<div class="empty-state">No sport breakdown yet.</div>';
-
-      // By-market table
-      const byMarket = s.by_market || {};
-      document.getElementById('parlay-market-table').innerHTML = Object.keys(byMarket).length
-        ? `<table><thead><tr><th>Market Type</th><th>Count</th><th>Elite</th></tr></thead><tbody>${
-            Object.entries(byMarket).map(([market, d]) =>
-              `<tr><td>${esc(market)}</td><td>${esc(num(d.count))}</td><td>${esc(num(d.elite||0))}</td></tr>`
-            ).join('')
-          }</tbody></table>`
-        : '<div class="empty-state">No market breakdown yet.</div>';
-
-      // Apply parlay filters
-      const sportFilter = document.getElementById('parlay-sport-filter')?.value || 'all';
-      const scopeFilter = document.getElementById('parlay-scope-filter')?.value || 'all';
-      const tierFilter = document.getElementById('parlay-tier-filter')?.value || 'all';
-
-      // Hydrate sport filter
-      const parlaySelect = document.getElementById('parlay-sport-filter');
-      if (parlaySelect) {
-        const curr = parlaySelect.value;
-        const sports = Array.from(new Set(preds.map(r => String(r.sport||'').toLowerCase()).filter(Boolean))).sort();
-        parlaySelect.innerHTML = `<option value="all">All Sports</option>${sports.map(s => `<option value="${esc(s)}">${esc(s.toUpperCase())}</option>`).join('')}`;
-        if (sports.includes(curr)) parlaySelect.value = curr;
-      }
-
-      let filtered = [...preds];
-      if (sportFilter !== 'all') filtered = filtered.filter(r => String(r.sport||'').toLowerCase() === sportFilter);
-      if (scopeFilter !== 'all') filtered = filtered.filter(r => String(r.prediction_scope||'game_prediction') === scopeFilter);
-      if (tierFilter !== 'all') filtered = filtered.filter(r => String(r.confidence_tier||'watch').toLowerCase() === tierFilter);
-
-      const phaseLabel = p => {
-        const map = { today: '<span class="phase-badge phase-today">Today</span>', tomorrow: '<span class="phase-badge phase-tomorrow">Tomorrow</span>', upcoming: '<span class="phase-badge phase-upcoming">Upcoming</span>', past: '<span class="phase-badge phase-past">Past</span>' };
-        return map[p] || `<span class="phase-badge phase-past">${esc(p)}</span>`;
-      };
-
-      document.getElementById('parlay-ledger-table').innerHTML = filtered.length
-        ? `<table><thead><tr><th>Date</th><th>Phase</th><th>Sport</th><th>Matchup</th><th>Market</th><th>Player</th><th>Pick</th><th>Confidence</th><th>Tier</th></tr></thead><tbody>${
-            filtered.map(r =>
-              `<tr>
-                <td>${esc(r.game_date||'—')}</td>
-                <td>${phaseLabel(r._phase||'unknown')}</td>
-                <td>${sportIcon(r.sport)} ${esc((r.sport||'').toUpperCase())}</td>
-                <td>${esc(r.away_team||'Away')} @ ${esc(r.home_team||'Home')}</td>
-                <td>${esc(r.market_name||r.market_type||'Game Winner')}</td>
-                <td>${esc(r.player_name||'—')}</td>
-                <td><strong>${esc(r.predicted_label||r.predicted_team||r.predicted_outcome||'—')}</strong></td>
-                <td>${esc(pct(r.confidence||0))}</td>
-                <td><span class="confidence-badge ${tierClass(r.confidence_tier||'watch')}" style="padding:4px 9px;font-size:.7rem">${esc(r.confidence_tier||'watch')}</span></td>
-              </tr>`
-            ).join('')
-          }</tbody></table>`
-        : '<div class="empty-state">No predictions match the current filters.</div>';
-    }
-
     function renderHistory() {
       const rows = [...(state.today.predictions || []), ...(state.tomorrow.predictions || [])].sort((a, b) => `${a.game_date||''} ${a.game_time||''}`.localeCompare(`${b.game_date||''} ${b.game_time||''}`));
       if (!rows.length) { document.getElementById('history-shell').innerHTML = '<div class="empty-state">No prediction history yet.</div>'; return; }
@@ -672,7 +535,6 @@
         case 'today':     renderPredictionGrid('today-grid', state.today || {}, 'today'); break;
         case 'tomorrow':  renderPredictionGrid('tomorrow-grid', state.tomorrow || {}, 'tomorrow'); break;
         case 'comparator':renderComparator(); break;
-        case 'parlay':    renderParlay(); break;
         case 'history':   renderHistory(); break;
         case 'polymarket':renderPolymarket(); break;
       }
@@ -700,11 +562,6 @@
       state.polymarketStatus = res || { submissions: {}, positions: {} };
     }
 
-    async function fetchParlay() {
-      const res = await fetchJson('/api/parlay/tracking-overview');
-      state.parlay = res || { summary: {}, predictions: [] };
-    }
-
     // ─── Smart tab-aware refresh ──────────────────────────────────────────────
     async function refreshForTab(tabName) {
       try {
@@ -725,9 +582,6 @@
           case 'history':
             if (!state.tabLoaded['today']) await fetchToday();
             if (!state.tabLoaded['tomorrow']) await fetchTomorrow();
-            break;
-          case 'parlay':
-            await fetchParlay();
             break;
           case 'polymarket':
             await fetchPolymarket();
@@ -792,11 +646,6 @@
         if (!el) return;
         el.addEventListener('input', renderActiveTab);
         el.addEventListener('change', renderActiveTab);
-      });
-      ['parlay-sport-filter','parlay-scope-filter','parlay-tier-filter'].forEach(id => {
-        const el = document.getElementById(id);
-        if (!el) return;
-        el.addEventListener('change', renderParlay);
       });
     }
 
