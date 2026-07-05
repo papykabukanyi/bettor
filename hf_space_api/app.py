@@ -6,6 +6,7 @@ import logging
 import os
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -55,6 +56,10 @@ app = FastAPI(title="Bettor HF Space API", version="1.0.0")
 scheduler = BackgroundScheduler(timezone="America/New_York")
 _startup_lock = threading.Lock()
 _startup_done = False
+_KALSHI_LIVE_CACHE: dict[str, Any] = {}
+_KALSHI_LIVE_CACHE_TS = 0.0
+_KALSHI_LIVE_CACHE_LOCK = threading.Lock()
+_KALSHI_LIVE_CACHE_TTL_SEC = max(5, int(os.getenv("KALSHI_LIVE_CACHE_TTL_SEC", "20") or "20"))
 
 
 class KalshiOrderRequest(BaseModel):
@@ -268,10 +273,15 @@ def _local_submissions_payload() -> dict[str, Any]:
 
 
 def _live_kalshi_snapshot() -> dict[str, Any]:
+    global _KALSHI_LIVE_CACHE_TS, _KALSHI_LIVE_CACHE
+    now = time.monotonic()
+    with _KALSHI_LIVE_CACHE_LOCK:
+        if _KALSHI_LIVE_CACHE and (now - _KALSHI_LIVE_CACHE_TS) < _KALSHI_LIVE_CACHE_TTL_SEC:
+            return dict(_KALSHI_LIVE_CACHE)
     try:
-        return build_live_snapshot()
+        snapshot = build_live_snapshot()
     except Exception as exc:
-        return {
+        snapshot = {
             "ok": False,
             "updated_at": "",
             "error": str(exc),
@@ -287,6 +297,10 @@ def _live_kalshi_snapshot() -> dict[str, Any]:
             "open_orders_count": 0,
             "open_notional_usd": 0.0,
         }
+    with _KALSHI_LIVE_CACHE_LOCK:
+        _KALSHI_LIVE_CACHE = dict(snapshot)
+        _KALSHI_LIVE_CACHE_TS = time.monotonic()
+    return snapshot
 
 
 @app.on_event("startup")

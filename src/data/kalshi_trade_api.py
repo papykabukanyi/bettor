@@ -11,6 +11,7 @@ import datetime as dt
 import json
 import os
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 from urllib.parse import urlencode, urlparse
 
@@ -471,25 +472,32 @@ def build_live_snapshot() -> dict[str, Any]:
     positions_payload: dict[str, Any] = {}
     errors: list[str] = []
 
-    try:
-        exchange = get_exchange_status()
-    except Exception as exc:
-        errors.append(f"exchange: {exc}")
+    def _capture(key: str, fn, *args, **kwargs):
+        try:
+            return key, fn(*args, **kwargs), ""
+        except Exception as exc:
+            return key, None, str(exc)
 
-    try:
-        balance = get_balance()
-    except Exception as exc:
-        errors.append(f"balance: {exc}")
-
-    try:
-        open_orders = get_open_orders()
-    except Exception as exc:
-        errors.append(f"orders: {exc}")
-
-    try:
-        positions_payload = get_positions(count_filter="position,total_traded")
-    except Exception as exc:
-        errors.append(f"positions: {exc}")
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = [
+            executor.submit(_capture, "exchange", get_exchange_status),
+            executor.submit(_capture, "balance", get_balance),
+            executor.submit(_capture, "orders", get_open_orders, max_pages=max(1, int(os.getenv("KALSHI_SNAP_MAX_PAGES", "2") or "2")), page_limit=200),
+            executor.submit(_capture, "positions", get_positions, count_filter="position,total_traded"),
+        ]
+        for future in as_completed(futures):
+            key, value, err = future.result()
+            if err:
+                errors.append(f"{key}: {err}")
+                continue
+            if key == "exchange" and isinstance(value, dict):
+                exchange = value
+            elif key == "balance" and isinstance(value, dict):
+                balance = value
+            elif key == "orders" and isinstance(value, list):
+                open_orders = value
+            elif key == "positions" and isinstance(value, dict):
+                positions_payload = value
 
     notional = 0.0
     normalized_orders: list[dict[str, Any]] = []
@@ -547,7 +555,7 @@ def build_live_snapshot() -> dict[str, Any]:
 
     balance_cents = int(_to_float(balance.get("balance") or balance.get("balance_cents") or balance.get("cash_balance"), 0.0))
     portfolio_cents = int(_to_float(balance.get("portfolio_value") or balance.get("portfolio_value_cents"), 0.0))
-    live_ok = bool(exchange or balance or normalized_orders)
+    live_ok = bool(exchange or balance or normalized_orders or market_positions or event_positions)
     account = {
         "balance_cents": balance_cents,
         "balance_usd": balance_cents / 100.0,

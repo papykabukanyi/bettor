@@ -6,6 +6,8 @@ import json
 import logging
 import os
 import sys
+import threading
+import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin
@@ -34,6 +36,10 @@ HF_MODEL_REPO = str(os.getenv("HF_MODEL_REPO", "papylove/sportprediction") or ""
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
 app = Flask(__name__, template_folder="templates")
+_KALSHI_LIVE_CACHE: dict[str, Any] = {}
+_KALSHI_LIVE_CACHE_TS = 0.0
+_KALSHI_LIVE_CACHE_LOCK = threading.Lock()
+_KALSHI_LIVE_CACHE_TTL_SEC = max(5, int(os.getenv("KALSHI_LIVE_CACHE_TTL_SEC", "20") or "20"))
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -373,10 +379,15 @@ def _local_submissions_payload() -> dict[str, Any]:
 
 
 def _live_kalshi_snapshot() -> dict[str, Any]:
+    global _KALSHI_LIVE_CACHE_TS, _KALSHI_LIVE_CACHE
+    now = time.monotonic()
+    with _KALSHI_LIVE_CACHE_LOCK:
+        if _KALSHI_LIVE_CACHE and (now - _KALSHI_LIVE_CACHE_TS) < _KALSHI_LIVE_CACHE_TTL_SEC:
+            return dict(_KALSHI_LIVE_CACHE)
     try:
-        return build_live_snapshot()
+        snapshot = build_live_snapshot()
     except Exception as exc:
-        return {
+        snapshot = {
             "ok": False,
             "updated_at": "",
             "error": str(exc),
@@ -392,6 +403,10 @@ def _live_kalshi_snapshot() -> dict[str, Any]:
             "open_orders_count": 0,
             "open_notional_usd": 0.0,
         }
+    with _KALSHI_LIVE_CACHE_LOCK:
+        _KALSHI_LIVE_CACHE = dict(snapshot)
+        _KALSHI_LIVE_CACHE_TS = time.monotonic()
+    return snapshot
 
 
 @app.route("/api/kalshi/submissions")
@@ -445,27 +460,41 @@ def kalshi_positions():
 
 @app.route("/api/kalshi/status")
 def kalshi_status():
-    sub = kalshi_submissions().get_json(silent=True) or {}
-    pos = kalshi_positions().get_json(silent=True) or {}
-    live = pos.get("live") or sub.get("live") or _live_kalshi_snapshot()
+    live = _live_kalshi_snapshot()
+    submissions = _local_submissions_payload()
+    positions = {
+        "ok": bool(live.get("ok")),
+        "updated_at": live.get("updated_at") or "",
+        "summary": {
+            "active_positions": int(live.get("position_count") or 0),
+            "open_notional_usd": float(live.get("open_notional_usd") or 0.0),
+            "estimated_pnl_usd": sum(
+                float((row or {}).get("realized_pnl_dollars") or 0.0)
+                for row in (live.get("market_positions") or [])
+                if isinstance(row, dict)
+            ),
+            "available_buying_power_usd": float(((live.get("account") or live.get("balance") or {}).get("balance_usd") or 0.0)),
+            "portfolio_value_usd": float(((live.get("account") or live.get("balance") or {}).get("portfolio_value_usd") or 0.0)),
+        },
+        "positions": live.get("market_positions") or live.get("positions") or [],
+        "balance": live.get("account") or live.get("balance") or {},
+        "account": live.get("account") or live.get("balance") or {},
+        "live": live,
+    }
     if live.get("ok"):
-        source = "kalshi_live"
-    elif (sub.get("source") in {"hf_space", "hf_space_auto"} or pos.get("source") in {"hf_space", "hf_space_auto"}):
-        source = "hf_space"
-    elif (sub.get("source") == "hf_hub_artifact" or pos.get("source") == "hf_hub_artifact"):
-        source = "hf_hub_artifact"
-    else:
-        source = "hf_local_snapshot"
+        account = live.get("account") or live.get("balance") or {}
+        submissions["summary"]["available_buying_power_usd"] = float((account or {}).get("balance_usd") or 0.0)
+    source = "kalshi_live" if live.get("ok") else "hf_local_snapshot"
     payload = {
-        "ok": bool(live.get("ok") or sub.get("ok") or pos.get("ok")),
+        "ok": bool(live.get("ok")),
         "source": source,
         "provider_configured": bool(PROVIDER_API_URL),
         "provider_url": PROVIDER_API_URL,
         "provider_source": PROVIDER_API_SOURCE,
-        "warning": _sanitize_kalshi_warning(sub.get("warning") or pos.get("warning") or str(live.get("error") or "")),
-        "updated_at": (sub.get("updated_at") or pos.get("updated_at") or ""),
-        "submissions": sub,
-        "positions": pos,
+        "warning": _sanitize_kalshi_warning(str(live.get("error") or "")),
+        "updated_at": live.get("updated_at") or "",
+        "submissions": submissions,
+        "positions": positions,
         "live": live,
     }
     return jsonify(payload)
