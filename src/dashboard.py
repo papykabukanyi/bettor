@@ -17,13 +17,7 @@ SRC_DIR = Path(__file__).resolve().parent
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-try:
-    from src.data.kalshi_trade_api import (  # type: ignore
-        build_live_snapshot,
-        submit_prediction_orders,
-    )
-except Exception:
-    from data.kalshi_trade_api import build_live_snapshot, submit_prediction_orders
+from data.kalshi_trade_api import build_live_snapshot, submit_prediction_orders
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = ROOT_DIR / "data"
