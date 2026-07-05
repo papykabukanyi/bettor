@@ -55,6 +55,7 @@ Execution: Kalshi (single + combo order routing)
 - Deploy the `public/` output to Cloudflare Pages.
 - Preferred deploy command: `npm run deploy:pages`
 - The script builds `public/` first, then uploads it with Wrangler.
+- If the Cloudflare project is still using a custom deploy command, switch it to the Pages deploy script above.
 - Set `BACKEND_BASE_URL` in Cloudflare Pages to your Render backend URL.
 - Pages proxies `/api/*` to the backend through a Pages Function.
 
