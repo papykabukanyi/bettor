@@ -464,14 +464,14 @@ def kalshi_positions() -> dict[str, Any]:
             "live": live,
         }
     account = live.get("account") or live.get("balance") or {}
-    positions = live.get("positions") or live.get("open_orders") or []
+    positions = live.get("market_positions") or live.get("positions") or live.get("open_orders") or []
     return {
         "ok": True,
         "updated_at": live.get("updated_at") or "",
         "summary": {
-            "active_positions": int(live.get("open_orders_count") or 0),
+            "active_positions": int(live.get("position_count") or 0),
             "open_notional_usd": float(live.get("open_notional_usd") or 0.0),
-            "estimated_pnl_usd": 0.0,
+            "estimated_pnl_usd": sum(float((row or {}).get("realized_pnl_dollars") or 0.0) for row in positions if isinstance(row, dict)),
             "available_buying_power_usd": float((account or {}).get("balance_usd") or 0.0),
             "portfolio_value_usd": float((account or {}).get("portfolio_value_usd") or 0.0),
         },

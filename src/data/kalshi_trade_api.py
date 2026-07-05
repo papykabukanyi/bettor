@@ -146,6 +146,29 @@ def get_open_orders(*, max_pages: int = 10, page_limit: int = 200) -> list[dict[
     return orders
 
 
+def get_positions(
+    *,
+    limit: int = 100,
+    cursor: str | None = None,
+    count_filter: str | None = None,
+    ticker: str | None = None,
+    event_ticker: str | None = None,
+    subaccount: int | None = None,
+) -> dict[str, Any]:
+    params: dict[str, Any] = {"limit": max(1, min(int(limit), 1000))}
+    if cursor:
+        params["cursor"] = str(cursor)
+    if count_filter:
+        params["count_filter"] = str(count_filter)
+    if ticker:
+        params["ticker"] = str(ticker)
+    if event_ticker:
+        params["event_ticker"] = str(event_ticker)
+    if subaccount is not None:
+        params["subaccount"] = int(subaccount)
+    return _request_json("GET", "/portfolio/positions", params=params, auth=True)
+
+
 def create_order_v2(order_payload: dict[str, Any]) -> dict[str, Any]:
     """Place an authenticated order via Kalshi V2 endpoint."""
     return _request_json("POST", "/portfolio/events/orders", payload=order_payload, auth=True)
@@ -445,6 +468,7 @@ def build_live_snapshot() -> dict[str, Any]:
     exchange: dict[str, Any] = {}
     balance: dict[str, Any] = {}
     open_orders: list[dict[str, Any]] = []
+    positions_payload: dict[str, Any] = {}
     errors: list[str] = []
 
     try:
@@ -461,6 +485,11 @@ def build_live_snapshot() -> dict[str, Any]:
         open_orders = get_open_orders()
     except Exception as exc:
         errors.append(f"orders: {exc}")
+
+    try:
+        positions_payload = get_positions(count_filter="position,total_traded")
+    except Exception as exc:
+        errors.append(f"positions: {exc}")
 
     notional = 0.0
     normalized_orders: list[dict[str, Any]] = []
@@ -485,6 +514,37 @@ def build_live_snapshot() -> dict[str, Any]:
             }
         )
 
+    market_positions = []
+    for row in positions_payload.get("market_positions") or []:
+        if not isinstance(row, dict):
+            continue
+        market_positions.append(
+            {
+                "ticker": str(row.get("ticker") or ""),
+                "position_fp": str(row.get("position_fp") or "0"),
+                "total_traded_dollars": _to_float(row.get("total_traded_dollars"), 0.0),
+                "market_exposure_dollars": _to_float(row.get("market_exposure_dollars"), 0.0),
+                "realized_pnl_dollars": _to_float(row.get("realized_pnl_dollars"), 0.0),
+                "fees_paid_dollars": _to_float(row.get("fees_paid_dollars"), 0.0),
+                "last_updated_ts": row.get("last_updated_ts") or "",
+            }
+        )
+
+    event_positions = []
+    for row in positions_payload.get("event_positions") or []:
+        if not isinstance(row, dict):
+            continue
+        event_positions.append(
+            {
+                "event_ticker": str(row.get("event_ticker") or ""),
+                "total_cost_dollars": _to_float(row.get("total_cost_dollars"), 0.0),
+                "total_cost_shares_fp": str(row.get("total_cost_shares_fp") or "0"),
+                "event_exposure_dollars": _to_float(row.get("event_exposure_dollars"), 0.0),
+                "realized_pnl_dollars": _to_float(row.get("realized_pnl_dollars"), 0.0),
+                "fees_paid_dollars": _to_float(row.get("fees_paid_dollars"), 0.0),
+            }
+        )
+
     balance_cents = int(_to_float(balance.get("balance") or balance.get("balance_cents") or balance.get("cash_balance"), 0.0))
     portfolio_cents = int(_to_float(balance.get("portfolio_value") or balance.get("portfolio_value_cents"), 0.0))
     live_ok = bool(exchange or balance or normalized_orders)
@@ -495,6 +555,7 @@ def build_live_snapshot() -> dict[str, Any]:
         "portfolio_value_cents": portfolio_cents,
         "portfolio_value_usd": portfolio_cents / 100.0,
         "updated_ts": balance.get("updated_ts") or balance.get("updated_time") or "",
+        "balance_breakdown": balance.get("balance_breakdown") or [],
         "raw": balance,
     }
     return {
@@ -503,9 +564,13 @@ def build_live_snapshot() -> dict[str, Any]:
         "exchange": exchange,
         "account": account,
         "balance": account,
+        "positions_payload": positions_payload,
+        "market_positions": market_positions,
+        "event_positions": event_positions,
         "open_orders": normalized_orders,
         "positions": normalized_orders,
         "open_orders_count": len(normalized_orders),
+        "position_count": len(market_positions),
         "open_notional_usd": round(notional, 2),
         "errors": errors,
         "error": "; ".join(errors),

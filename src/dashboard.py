@@ -404,7 +404,7 @@ def kalshi_submissions():
         account = live.get("account") or live.get("balance") or {}
         base_summary["available_buying_power_usd"] = float((account or {}).get("balance_usd") or 0.0)
         base["summary"] = base_summary
-    wrapped = _envelope(base, source, error or str(live.get("error") or ""))
+    wrapped = _envelope(base, "kalshi_live" if live.get("ok") else source, error or str(live.get("error") or ""))
     wrapped["live"] = live
     return jsonify(wrapped)
 
@@ -415,20 +415,20 @@ def kalshi_positions():
     live = _live_kalshi_snapshot()
     if live.get("ok"):
         account = live.get("account") or live.get("balance") or {}
-        positions = live.get("positions") or live.get("open_orders") or []
+        positions = live.get("market_positions") or live.get("positions") or live.get("open_orders") or []
         transformed = {
-        "ok": True,
-        "updated_at": live.get("updated_at") or "",
-        "summary": {
-            "active_positions": int(live.get("open_orders_count") or 0),
-            "open_notional_usd": float(live.get("open_notional_usd") or 0.0),
-            "estimated_pnl_usd": 0.0,
-            "available_buying_power_usd": float((account or {}).get("balance_usd") or 0.0),
-            "portfolio_value_usd": float((account or {}).get("portfolio_value_usd") or 0.0),
-        },
-        "positions": positions,
-        "balance": account,
-        "account": account,
+            "ok": True,
+            "updated_at": live.get("updated_at") or "",
+            "summary": {
+                "active_positions": int(live.get("position_count") or 0),
+                "open_notional_usd": float(live.get("open_notional_usd") or 0.0),
+                "estimated_pnl_usd": sum(float((row or {}).get("realized_pnl_dollars") or 0.0) for row in positions if isinstance(row, dict)),
+                "available_buying_power_usd": float((account or {}).get("balance_usd") or 0.0),
+                "portfolio_value_usd": float((account or {}).get("portfolio_value_usd") or 0.0),
+            },
+            "positions": positions,
+            "balance": account,
+            "account": account,
         }
         wrapped = _envelope(transformed, "kalshi_live", error)
         wrapped["live"] = live
@@ -448,12 +448,12 @@ def kalshi_status():
     sub = kalshi_submissions().get_json(silent=True) or {}
     pos = kalshi_positions().get_json(silent=True) or {}
     live = pos.get("live") or sub.get("live") or _live_kalshi_snapshot()
-    if (sub.get("source") in {"hf_space", "hf_space_auto"} or pos.get("source") in {"hf_space", "hf_space_auto"}):
+    if live.get("ok"):
+        source = "kalshi_live"
+    elif (sub.get("source") in {"hf_space", "hf_space_auto"} or pos.get("source") in {"hf_space", "hf_space_auto"}):
         source = "hf_space"
     elif (sub.get("source") == "hf_hub_artifact" or pos.get("source") == "hf_hub_artifact"):
         source = "hf_hub_artifact"
-    elif pos.get("source") == "kalshi_live":
-        source = "kalshi_live"
     else:
         source = "hf_local_snapshot"
     payload = {
