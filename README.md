@@ -10,7 +10,7 @@ Production-ready sports prediction stack using Hugging Face for dataset/model st
 | Model storage | HF Model Hub | Free |
 | Training GPU | HF Spaces T4 | Free tier |
 | Inference API | HF Spaces FastAPI | Free tier minutes |
-| Data sources | MLB API, football-data.org, Jeff Sackmann | Free |
+| Data sources | MLB Stats API, NHL API, football-data.org, TheSportsDB, balldontlie, Jeff Sackmann, Polymarket Gamma | Free |
 
 ## Architecture
 
@@ -49,6 +49,19 @@ Execution: Polymarket (Kalshi removed from active flow)
 
 - Use HF Space FastAPI app (`hf_space_api/app.py`) with startup autorun + daily schedule.
 - Set `HF_SPACE_API_URL` in Vercel to your deployed Space endpoint.
+- Use `HF_ACTIVE_SCAN_MINUTES` (default `30`) to continuously refresh append/predict cycles.
+
+## Recommended free data providers by sport
+
+| Sport | Primary free source | Fallback free source | Status in pipeline |
+|---|---|---|---|
+| MLB | MLB Stats API (`statsapi.mlb.com`) | Polymarket market schedule extraction | Enabled |
+| NHL | NHL API (`api-web.nhle.com`) | Polymarket market schedule extraction | Enabled |
+| NBA | balldontlie (free tier) | Polymarket market schedule extraction | Enabled |
+| Soccer | football-data.org (free key) | TheSportsDB public key `1` | Enabled |
+| Tennis | Jeff Sackmann historical CSVs | Polymarket market schedule extraction | Enabled |
+| Golf | Polymarket market schedule extraction | TheSportsDB events | Partial (upcoming via Polymarket) |
+| MMA/Boxing/Cricket | Polymarket market schedule extraction | TheSportsDB events | Partial (upcoming via Polymarket) |
 
 ## Dashboard API
 

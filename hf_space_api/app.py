@@ -91,6 +91,7 @@ def _run_hf_active_cycle() -> dict[str, Any]:
             min_rows=HF_DAILY_MIN_TRAIN_ROWS,
             forced_model=HF_DAILY_CUSTOM_MODEL,
         )
+    pipeline.ensure_model_card_metadata()
     preds = pipeline.predict_daily_schedule()
     if HF_ATTACH_POLYMARKET:
         from betting_bot import _attach_market_context
@@ -103,10 +104,24 @@ def _run_hf_active_cycle() -> dict[str, Any]:
 
 
 def _predictions_for_date(payload: dict[str, Any], date_value: str) -> dict[str, Any]:
-    rows = [p for p in (payload.get("predictions") or []) if str((p or {}).get("game_date") or "") == date_value]
+    all_rows = payload.get("predictions") or []
+    rows = [p for p in all_rows if str((p or {}).get("game_date") or "") == date_value]
+    effective_date = date_value
+    if not rows:
+        future_dates = sorted(
+            {
+                str((p or {}).get("game_date") or "")
+                for p in all_rows
+                if str((p or {}).get("game_date") or "") >= str(date_value or "")
+            }
+        )
+        if future_dates:
+            effective_date = future_dates[0]
+            rows = [p for p in all_rows if str((p or {}).get("game_date") or "") == effective_date]
     return {
         "ok": True,
-        "date": date_value,
+        "date": effective_date,
+        "requested_date": date_value,
         "generated_at": payload.get("generated_at", ""),
         "prediction_count": len(rows),
         "model_version": payload.get("model_version", ""),
@@ -240,7 +255,13 @@ def status() -> dict[str, Any]:
 def predictions_today() -> dict[str, Any]:
     payload = _load_json(PRED_FILE, {})
     if not isinstance(payload, dict) or not payload:
-        return {"ok": True, "date": "", "prediction_count": 0, "predictions": []}
+        try:
+            _run_hf_active_cycle()
+            payload = _load_json(PRED_FILE, {})
+        except Exception:
+            payload = {}
+    if not isinstance(payload, dict) or not payload:
+        return {"ok": True, "date": "", "requested_date": "", "prediction_count": 0, "predictions": []}
     return _predictions_for_date(payload, str(payload.get("today") or ""))
 
 
@@ -248,7 +269,13 @@ def predictions_today() -> dict[str, Any]:
 def predictions_tomorrow() -> dict[str, Any]:
     payload = _load_json(PRED_FILE, {})
     if not isinstance(payload, dict) or not payload:
-        return {"ok": True, "date": "", "prediction_count": 0, "predictions": []}
+        try:
+            _run_hf_active_cycle()
+            payload = _load_json(PRED_FILE, {})
+        except Exception:
+            payload = {}
+    if not isinstance(payload, dict) or not payload:
+        return {"ok": True, "date": "", "requested_date": "", "prediction_count": 0, "predictions": []}
     return _predictions_for_date(payload, str(payload.get("tomorrow") or ""))
 
 

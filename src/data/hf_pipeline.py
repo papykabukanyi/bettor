@@ -74,6 +74,26 @@ class HFDirectPipeline:
         "tennis": "tennis",
         "golf": "golf",
     }
+    _SPORT_ALIASES = {
+        "baseball": "mlb",
+        "mlb": "mlb",
+        "basketball": "nba",
+        "nba": "nba",
+        "hockey": "nhl",
+        "nhl": "nhl",
+        "soccer": "soccer",
+        "football": "soccer",
+        "epl": "soccer",
+        "la liga": "soccer",
+        "serie a": "soccer",
+        "bundesliga": "soccer",
+        "ligue 1": "soccer",
+        "tennis": "tennis",
+        "golf": "golf",
+        "mma": "mma",
+        "boxing": "boxing",
+        "cricket": "cricket",
+    }
 
     def __init__(
         self,
@@ -261,30 +281,7 @@ class HFDirectPipeline:
             joblib.dump(best_pipeline, model_path)
             with open(meta_path, "w", encoding="utf-8") as f:
                 json.dump(metadata, f, indent=2)
-            readme_content = (
-                "---\n"
-                "license: mit\n"
-                "library_name: scikit-learn\n"
-                "pipeline_tag: tabular-classification\n"
-                "tags:\n"
-                "- sports\n"
-                "- betting\n"
-                "- scikit-learn\n"
-                "- auto-training\n"
-                "metrics:\n"
-                "- roc_auc\n"
-                "datasets:\n"
-                f"- {self.dataset_repo_id}\n"
-                "---\n\n"
-                "# Sports Win Prediction Model\n\n"
-                f"Auto-trained {trained_at[:10]} by bettor HF pipeline.\n\n"
-                "| Field | Value |\n|---|---|\n"
-                f"| best_model | {best_name} |\n"
-                f"| cv_roc_auc | {best_score:.4f} |\n"
-                f"| rows | {len(df):,} |\n"
-                f"| sports | {', '.join(sports_covered)} |\n"
-                f"| version | {version} |\n"
-            )
+            readme_content = self._build_model_card_readme(metadata)
             with open(readme_path, "w", encoding="utf-8") as f:
                 f.write(readme_content)
             self._api.create_repo(repo_id=self.model_repo_id, repo_type="model", exist_ok=True, private=False)
@@ -312,6 +309,52 @@ class HFDirectPipeline:
             "sports_covered": sports_covered, "train_completed_at": _now_utc(),
         })
         return summary
+
+    def ensure_model_card_metadata(self) -> dict:
+        """Ensure model repo README has valid YAML metadata frontmatter."""
+        from huggingface_hub import hf_hub_download
+
+        if not self._ok or not self._api:
+            return {"ok": False, "updated": False, "reason": "hf_not_configured"}
+        try:
+            metadata_path = hf_hub_download(
+                repo_id=self.model_repo_id,
+                repo_type="model",
+                filename="metadata.json",
+                token=self.token,
+            )
+            with open(metadata_path, "r", encoding="utf-8") as f:
+                metadata = json.load(f) or {}
+        except Exception as exc:
+            return {"ok": False, "updated": False, "reason": f"missing_metadata:{exc}"}
+
+        needs_update = True
+        try:
+            readme_path = hf_hub_download(
+                repo_id=self.model_repo_id,
+                repo_type="model",
+                filename="README.md",
+                token=self.token,
+            )
+            with open(readme_path, "r", encoding="utf-8") as f:
+                existing = f.read()
+            if existing.lstrip().startswith("---"):
+                needs_update = False
+        except Exception:
+            needs_update = True
+
+        if not needs_update:
+            return {"ok": True, "updated": False}
+
+        content = self._build_model_card_readme(metadata)
+        self._api.upload_file(
+            path_or_fileobj=io.BytesIO(content.encode("utf-8")),
+            path_in_repo="README.md",
+            repo_id=self.model_repo_id,
+            repo_type="model",
+            commit_message="Add model card metadata",
+        )
+        return {"ok": True, "updated": True}
 
     def predict_daily_schedule(
         self,
@@ -998,6 +1041,62 @@ class HFDirectPipeline:
     # Private helpers
     # ──────────────────────────────────────────────────────────
 
+    def _normalize_sport(self, value: str) -> str:
+        raw = str(value or "").strip().lower()
+        if not raw:
+            return "mlb"
+        if raw in self._SPORT_ALIASES:
+            return self._SPORT_ALIASES[raw]
+        for key, normalized in self._SPORT_ALIASES.items():
+            if key in raw:
+                return normalized
+        return raw[:32]
+
+    def _normalize_game_date(self, raw_date: str, raw_datetime: str) -> str:
+        for candidate in (str(raw_date or "").strip(), str(raw_datetime or "").strip()):
+            if not candidate:
+                continue
+            try:
+                return datetime.datetime.fromisoformat(candidate.replace("Z", "+00:00")).date().isoformat()
+            except Exception:
+                pass
+            if len(candidate) >= 10:
+                return candidate[:10]
+        return ""
+
+    def _build_model_card_readme(self, metadata: dict) -> str:
+        best_model = str(metadata.get("best_model") or "unknown")
+        score = float(metadata.get("cv_roc_auc") or 0.0)
+        rows = int(metadata.get("rows") or 0)
+        version = str(metadata.get("version") or "")
+        trained_at = str(metadata.get("trained_at") or _now_utc())
+        sports = [str(s).strip() for s in (metadata.get("sports_covered") or []) if str(s).strip()]
+        sports_text = ", ".join(sports) if sports else "unknown"
+        return (
+            "---\n"
+            "license: mit\n"
+            "library_name: scikit-learn\n"
+            "pipeline_tag: tabular-classification\n"
+            "tags:\n"
+            "- sports\n"
+            "- betting\n"
+            "- scikit-learn\n"
+            "- auto-training\n"
+            "metrics:\n"
+            "- roc_auc\n"
+            "datasets:\n"
+            f"- {self.dataset_repo_id}\n"
+            "---\n\n"
+            "# Sports Win Prediction Model\n\n"
+            f"Auto-trained {trained_at[:10]} by bettor HF pipeline.\n\n"
+            "| Field | Value |\n|---|---|\n"
+            f"| best_model | {best_model} |\n"
+            f"| cv_roc_auc | {score:.4f} |\n"
+            f"| rows | {rows:,} |\n"
+            f"| sports | {sports_text} |\n"
+            f"| version | {version} |\n"
+        )
+
     def _make_game_record(self, **kwargs) -> dict:
         now = _now_utc()
         record = {
@@ -1042,16 +1141,21 @@ class HFDirectPipeline:
             row["home_team"] = ht[:120]
             row["away_team"] = at[:120]
             row["league"] = str(row.get("league") or "").strip()[:80]
-            row["sport"] = str(row.get("sport") or "mlb").strip().lower()[:32]
+            row["sport"] = self._normalize_sport(str(row.get("sport") or "mlb"))
             row["status"] = str(row.get("status") or "").strip()[:80]
-            row["game_date"] = gd[:10]
+            normalized_date = self._normalize_game_date(gd, str(row.get("game_datetime") or ""))
+            if not normalized_date:
+                continue
+            row["game_date"] = normalized_date
             row["game_datetime"] = str(row.get("game_datetime") or "").strip()[:40]
-            row["season"] = int(str(row.get("season") or gd[:4] or datetime.date.today().year))
+            row["season"] = int(str(row.get("season") or normalized_date[:4] or datetime.date.today().year))
             row["metadata"] = str(row.get("metadata") or "{}")
             row["created_at"] = str(row.get("created_at") or _now_utc())
             try:
                 row["home_score"] = float(row.get("home_score"))
                 row["away_score"] = float(row.get("away_score"))
+                if row["home_score"] < 0 or row["away_score"] < 0:
+                    continue
             except Exception:
                 continue
             cleaned.append(row)
