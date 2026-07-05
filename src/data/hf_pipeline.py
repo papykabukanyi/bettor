@@ -186,6 +186,7 @@ class HFDirectPipeline:
         target = day or datetime.date.today()
         logger.info("[hf_pipeline] Appending daily results for %s", target)
         records = self._clean_game_records(self._fetch_completed_games(target, target))
+        records = self._filter_records_not_in_hub(records)
         if not records:
             self._write_status({
                 "last_step": "append_daily", "ok": True,
@@ -207,7 +208,7 @@ class HFDirectPipeline:
         import joblib
         import pandas as pd
         from sklearn.compose import ColumnTransformer
-        from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
+        from sklearn.ensemble import ExtraTreesClassifier, GradientBoostingClassifier, HistGradientBoostingClassifier, RandomForestClassifier
         from sklearn.linear_model import LogisticRegression
         from sklearn.model_selection import StratifiedKFold, cross_val_score
         from sklearn.pipeline import Pipeline
@@ -239,6 +240,8 @@ class HFDirectPipeline:
             "logistic_regression": LogisticRegression(max_iter=2000, random_state=42),
             "random_forest": RandomForestClassifier(n_estimators=300, random_state=42, n_jobs=-1),
             "gradient_boosting": GradientBoostingClassifier(n_estimators=200, random_state=42),
+            "extra_trees": ExtraTreesClassifier(n_estimators=400, random_state=42, n_jobs=-1),
+            "hist_gradient_boosting": HistGradientBoostingClassifier(random_state=42),
         }
         forced_key = str(forced_model or "auto").strip().lower()
         if forced_key and forced_key != "auto" and forced_key in candidates:
@@ -487,6 +490,7 @@ class HFDirectPipeline:
             output_path=predictions_output_path,
             via_api=via_api, model_id=model_id, endpoint_url=endpoint_url,
         )
+        self.ensure_model_card_metadata()
         result = {
             "ok": True,
             "append_yesterday": append_y, "append_today": append_t,
@@ -568,6 +572,8 @@ class HFDirectPipeline:
         rows += self._fetch_nhl_games(start, end)
         rows += self._fetch_soccer_games(start, end)
         rows += self._fetch_tennis_games_jeff_sackmann(start, end)
+        if (end - start).days <= 7:
+            rows += self._fetch_additional_sportsdb_completed(start, end)
         return rows
 
     def _fetch_mlb_games(self, start: datetime.date, end: datetime.date) -> list[dict]:
@@ -773,6 +779,7 @@ class HFDirectPipeline:
         rows += self._fetch_nba_upcoming(day)
         rows += self._fetch_nhl_upcoming(day)
         rows += self._fetch_soccer_upcoming(day)
+        rows += self._fetch_additional_sportsdb_upcoming(day)
         rows += self._fetch_polymarket_upcoming(day)
 
         deduped = []
@@ -789,6 +796,97 @@ class HFDirectPipeline:
             seen.add(key)
             deduped.append(row)
         return deduped
+
+    def _fetch_additional_sportsdb_completed(self, start: datetime.date, end: datetime.date) -> list[dict]:
+        rows: list[dict] = []
+        sport_map = {
+            "Basketball": "nba",
+            "Ice Hockey": "nhl",
+            "Tennis": "tennis",
+            "Boxing": "boxing",
+            "Mixed Martial Arts": "mma",
+            "Cricket": "cricket",
+        }
+        current = start
+        while current <= end:
+            day = current.isoformat()
+            for src_sport, dst_sport in sport_map.items():
+                try:
+                    resp = requests.get(
+                        "https://www.thesportsdb.com/api/v1/json/1/eventsday.php",
+                        params={"d": day, "s": src_sport},
+                        timeout=20,
+                    )
+                    resp.raise_for_status()
+                    for ev in ((resp.json() or {}).get("events") or []):
+                        hs = ev.get("intHomeScore")
+                        as_ = ev.get("intAwayScore")
+                        if hs is None or as_ is None:
+                            continue
+                        ht = str(ev.get("strHomeTeam") or "").strip()
+                        at = str(ev.get("strAwayTeam") or "").strip()
+                        if not ht or not at:
+                            continue
+                        game_iso = str(ev.get("strTimestamp") or f"{day}T00:00:00Z")
+                        rows.append(
+                            self._make_game_record(
+                                game_id=str(ev.get("idEvent") or ""),
+                                sport=dst_sport,
+                                league=str(ev.get("strLeague") or src_sport),
+                                game_date=day,
+                                game_datetime=game_iso,
+                                status="Final",
+                                home_team=ht,
+                                away_team=at,
+                                home_score=float(hs),
+                                away_score=float(as_),
+                                season=int(day[:4]),
+                            )
+                        )
+                except Exception as exc:
+                    logger.debug("[hf_pipeline] SportsDB %s %s: %s", src_sport, day, exc)
+            current += datetime.timedelta(days=1)
+        return rows
+
+    def _fetch_additional_sportsdb_upcoming(self, day: datetime.date) -> list[dict]:
+        rows: list[dict] = []
+        sport_map = {
+            "Basketball": "nba",
+            "Ice Hockey": "nhl",
+            "Soccer": "soccer",
+            "Tennis": "tennis",
+            "Golf": "golf",
+            "Boxing": "boxing",
+            "Mixed Martial Arts": "mma",
+            "Cricket": "cricket",
+        }
+        for src_sport, dst_sport in sport_map.items():
+            try:
+                resp = requests.get(
+                    "https://www.thesportsdb.com/api/v1/json/1/eventsday.php",
+                    params={"d": day.isoformat(), "s": src_sport},
+                    timeout=20,
+                )
+                resp.raise_for_status()
+                for ev in ((resp.json() or {}).get("events") or []):
+                    ht = str(ev.get("strHomeTeam") or "").strip()
+                    at = str(ev.get("strAwayTeam") or "").strip()
+                    if not ht or not at:
+                        continue
+                    rows.append(
+                        {
+                            "sport": dst_sport,
+                            "league": str(ev.get("strLeague") or src_sport),
+                            "home_team": ht,
+                            "away_team": at,
+                            "game_date": day.isoformat(),
+                            "game_time": str(ev.get("strTimestamp") or ""),
+                            "game_id": str(ev.get("idEvent") or ""),
+                        }
+                    )
+            except Exception as exc:
+                logger.debug("[hf_pipeline] SportsDB upcoming %s %s: %s", src_sport, day, exc)
+        return rows
 
     def _fetch_mlb_upcoming(self, day: datetime.date) -> list[dict]:
         rows: list[dict] = []
@@ -1053,6 +1151,16 @@ class HFDirectPipeline:
                 return normalized
         return raw[:32]
 
+    def _record_dedupe_key(self, row: dict) -> str:
+        gid = str((row or {}).get("game_id") or "").strip().lower()
+        sport = self._normalize_sport(str((row or {}).get("sport") or ""))
+        day = str((row or {}).get("game_date") or "").strip()[:10]
+        home = " ".join(str((row or {}).get("home_team") or "").strip().lower().split())
+        away = " ".join(str((row or {}).get("away_team") or "").strip().lower().split())
+        if gid:
+            return f"id:{gid}"
+        return f"{sport}|{day}|{away}|{home}"
+
     def _normalize_game_date(self, raw_date: str, raw_datetime: str) -> str:
         for candidate in (str(raw_date or "").strip(), str(raw_datetime or "").strip()):
             if not candidate:
@@ -1133,7 +1241,7 @@ class HFDirectPipeline:
                 continue
             if ht.lower() == at.lower():
                 continue
-            key = game_id or f"{gd}|{raw.get('sport','?')}|{at}|{ht}"
+            key = self._record_dedupe_key(raw)
             if key in seen:
                 continue
             seen.add(key)
@@ -1170,7 +1278,24 @@ class HFDirectPipeline:
         df = df[df["home_score"] != df["away_score"]].copy()
         if "sport" not in df.columns:
             df["sport"] = "mlb"
-        df["sport"] = df["sport"].fillna("mlb").astype(str)
+        df["sport"] = df["sport"].fillna("mlb").astype(str).map(self._normalize_sport)
+        if "game_id" not in df.columns:
+            df["game_id"] = ""
+        if "game_date" not in df.columns:
+            df["game_date"] = ""
+        dedupe_key = (
+            df["game_id"].fillna("").astype(str).str.lower().str.strip().replace("", pd.NA)
+            .fillna(
+                df["sport"].fillna("").astype(str).str.lower().str.strip()
+                + "|"
+                + df["game_date"].fillna("").astype(str).str[:10]
+                + "|"
+                + df["away_team"].fillna("").astype(str).str.lower().str.strip()
+                + "|"
+                + df["home_team"].fillna("").astype(str).str.lower().str.strip()
+            )
+        )
+        df = df.assign(_dedupe_key=dedupe_key).drop_duplicates(subset=["_dedupe_key"], keep="last").drop(columns=["_dedupe_key"])
         df["season"] = pd.to_numeric(df.get("season"), errors="coerce").fillna(0).astype(int)
         if "game_date" in df.columns:
             gd = pd.to_datetime(df["game_date"], errors="coerce")
@@ -1180,6 +1305,26 @@ class HFDirectPipeline:
             df["month"] = 6
             df["day_of_week"] = 0
         return df
+
+    def _filter_records_not_in_hub(self, records: list[dict]) -> list[dict]:
+        if not records:
+            return []
+        if not self._ok or not self._api:
+            return records
+        try:
+            existing_df = self._load_games_dataframe_from_hub()
+        except Exception:
+            return records
+        if existing_df is None or getattr(existing_df, "empty", True):
+            return records
+
+        existing_records = existing_df.to_dict("records")
+        existing_keys = {self._record_dedupe_key(r) for r in existing_records}
+        filtered = [r for r in records if self._record_dedupe_key(r) not in existing_keys]
+        dropped = len(records) - len(filtered)
+        if dropped > 0:
+            logger.info("[hf_pipeline] Filtered %d duplicate records before HF upload", dropped)
+        return filtered
 
     def _load_games_dataframe_from_hub(self):
         import pandas as pd

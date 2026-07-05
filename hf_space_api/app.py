@@ -37,6 +37,8 @@ HF_ATTACH_POLYMARKET = str(os.getenv("HF_ATTACH_POLYMARKET", "1")).strip().lower
 HF_BOOTSTRAP_ON_EMPTY = str(os.getenv("HF_BOOTSTRAP_ON_EMPTY", "1")).strip().lower() in {"1", "true", "yes", "on"}
 HF_BOOTSTRAP_DAYS = int(os.getenv("HF_BOOTSTRAP_DAYS", "365") or "365")
 HF_ACTIVE_SCAN_MINUTES = int(os.getenv("HF_ACTIVE_SCAN_MINUTES", "30") or "30")
+HF_ACTIVE_APPEND_DAYS = int(os.getenv("HF_ACTIVE_APPEND_DAYS", "3") or "3")
+HF_RETRAIN_INTERVAL_MINUTES = int(os.getenv("HF_RETRAIN_INTERVAL_MINUTES", "180") or "180")
 
 app = FastAPI(title="Bettor HF Space API", version="1.0.0")
 scheduler = BackgroundScheduler(timezone="America/New_York")
@@ -79,14 +81,30 @@ def _run_hf_active_cycle() -> dict[str, Any]:
     if not pipeline.ok:
         raise RuntimeError("HF pipeline not configured. Set HF_API_KEY, HF_DATASET_REPO, HF_MODEL_REPO.")
     today = dt.date.today()
-    yesterday = today - dt.timedelta(days=1)
-    append_y = pipeline.append_daily_results(yesterday)
-    append_t = pipeline.append_daily_results(today)
+    append_runs: list[dict[str, Any]] = []
+    for offset in range(max(1, HF_ACTIVE_APPEND_DAYS)):
+        target_day = today - dt.timedelta(days=offset)
+        append_runs.append(pipeline.append_daily_results(target_day))
+    append_y = append_runs[1] if len(append_runs) > 1 else {"ok": True, "records": 0}
+    append_t = append_runs[0] if append_runs else {"ok": True, "records": 0}
+    new_records_total = sum(int(r.get("records") or 0) for r in append_runs)
     try:
         meta = pipeline._get_model_metadata()  # noqa: SLF001
     except Exception:
         meta = {}
-    if not meta.get("version"):
+    retrain_needed = not meta.get("version")
+    trained_at = str(meta.get("trained_at") or "").strip()
+    if trained_at:
+        try:
+            trained_dt = dt.datetime.fromisoformat(trained_at.replace("Z", "+00:00"))
+            elapsed_min = (dt.datetime.now(dt.timezone.utc) - trained_dt).total_seconds() / 60.0
+            if elapsed_min >= max(15, HF_RETRAIN_INTERVAL_MINUTES):
+                retrain_needed = True
+        except Exception:
+            retrain_needed = True
+    if new_records_total > 0 and HF_RETRAIN_INTERVAL_MINUTES <= 60:
+        retrain_needed = True
+    if retrain_needed:
         pipeline.train_and_publish_best_model(
             min_rows=HF_DAILY_MIN_TRAIN_ROWS,
             forced_model=HF_DAILY_CUSTOM_MODEL,
@@ -101,7 +119,15 @@ def _run_hf_active_cycle() -> dict[str, Any]:
             output_path=str(DATA_DIR / "hf_daily_prediction_markets.json"),
         )
     pipeline.publish_runtime_artifacts()
-    return {"ok": True, "append_yesterday": append_y, "append_today": append_t, "predictions": preds}
+    return {
+        "ok": True,
+        "append_yesterday": append_y,
+        "append_today": append_t,
+        "append_runs": append_runs,
+        "new_records_total": new_records_total,
+        "retrained": retrain_needed,
+        "predictions": preds,
+    }
 
 
 def _predictions_for_date(payload: dict[str, Any], date_value: str) -> dict[str, Any]:
