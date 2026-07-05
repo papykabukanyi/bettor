@@ -313,8 +313,8 @@ python src/dashboard.py
    - No manual runs needed
    - Free tier eligible
 
-3. **Connect Polymarket** (30 min setup)
-   - Add Polymarket credentials to `.env`
+3. **Connect Kalshi** (30 min setup)
+   - Add Kalshi credentials to `.env`
    - Dashboard matches predictions to live markets
    - Auto-bet module ready (dry-run by default)
 

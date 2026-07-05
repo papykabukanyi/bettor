@@ -10,7 +10,7 @@ Production-ready sports prediction stack using Hugging Face for dataset/model st
 | Model storage | HF Model Hub | Free |
 | Training GPU | HF Spaces T4 | Free tier |
 | Inference API | HF Spaces FastAPI | Free tier minutes |
-| Data sources | MLB Stats API, NHL API, football-data.org, TheSportsDB, balldontlie, Jeff Sackmann, Polymarket Gamma, NewsData.io/GDELT/Google News RSS | Free |
+| Data sources | MLB Stats API, NHL API, football-data.org, TheSportsDB, balldontlie, Jeff Sackmann, Kalshi, NewsData.io/GDELT/Google News RSS | Free |
 
 ## Architecture
 
@@ -22,7 +22,7 @@ Daily: retrain best model -> HF Model Hub
 Daily: retrain news-impact text classifier -> HF Model Hub
 Anytime: call HF Space FastAPI inference endpoint
 Dashboard: Vercel Flask UI -> proxies HF Space API or local HF artifacts
-Execution: Polymarket (Kalshi removed from active flow)
+Execution: Kalshi (single + combo order routing)
 ```
 
 ## Quick start
@@ -37,7 +37,7 @@ Execution: Polymarket (Kalshi removed from active flow)
    - `HF_MODEL_REPO` → Your HF model repo (same or different, e.g., `papylove/sportprediction`)
    - `FOOTBALL_DATA_API_KEY` → Free key from https://www.football-data.org/
    - `NEWSDATA_API_KEY` → Free key from https://newsdata.io/ (recommended for richer player/team news)
-   - Polymarket credentials (if running auto-bets)
+   - Kalshi credentials (if running auto-bets)
 3. Run pipeline:
    ```powershell
    python src\betting_bot.py --hf-bootstrap --hf-days-back 365
@@ -62,13 +62,13 @@ Execution: Polymarket (Kalshi removed from active flow)
 
 | Sport | Primary free source | Fallback free source | Status in pipeline |
 |---|---|---|---|
-| MLB | MLB Stats API (`statsapi.mlb.com`) | Polymarket market schedule extraction | Enabled |
-| NHL | NHL API (`api-web.nhle.com`) | Polymarket market schedule extraction | Enabled |
-| NBA | balldontlie (free tier) | Polymarket market schedule extraction | Enabled |
+| MLB | MLB Stats API (`statsapi.mlb.com`) | Kalshi market schedule extraction | Enabled |
+| NHL | NHL API (`api-web.nhle.com`) | Kalshi market schedule extraction | Enabled |
+| NBA | balldontlie (free tier) | Kalshi market schedule extraction | Enabled |
 | Soccer | football-data.org (free key) | TheSportsDB public key `1` | Enabled |
-| Tennis | Jeff Sackmann historical CSVs | Polymarket market schedule extraction | Enabled |
-| Golf | Polymarket market schedule extraction | TheSportsDB events | Partial (upcoming via Polymarket) |
-| MMA/Boxing/Cricket | Polymarket market schedule extraction | TheSportsDB events | Partial (upcoming via Polymarket) |
+| Tennis | Jeff Sackmann historical CSVs | Kalshi market schedule extraction | Enabled |
+| Golf | Kalshi market schedule extraction | TheSportsDB events | Partial (upcoming via Kalshi) |
+| MMA/Boxing/Cricket | Kalshi market schedule extraction | TheSportsDB events | Partial (upcoming via Kalshi) |
 
 ## Soccer Data: football-data.org Integration
 
@@ -129,7 +129,7 @@ For each competition, the pipeline collects:
 4. **Predictions**:
    - Daily predictions for all upcoming soccer matches
    - Confidence scores per prop
-   - Matched against Polymarket available markets
+   - Matched against Kalshi available markets
 
 ### Example: Running Soccer Pipeline Only
 
@@ -180,11 +180,13 @@ The dashboard proxies provider endpoints:
 - `GET /api/predictions/today`
 - `GET /api/predictions/tomorrow`
 - `GET /api/model/stats`
-- `GET /api/polymarket/status`
-- `GET /api/polymarket/submissions`
-- `GET /api/polymarket/positions`
+- `GET /api/kalshi/status`
+- `GET /api/kalshi/submissions`
+- `GET /api/kalshi/positions`
+- `GET /api/kalshi/live`
+- `POST /api/kalshi/place-from-predictions`
 
 ## Notes
 
-- Polymarket defaults to dry-run mode until `POLYMARKET_DRY_RUN=false`.
+- Kalshi defaults to dry-run mode unless live trading is enabled in env.
 - HF artifacts are written to `data/hf_pipeline_status.json`, `data/hf_daily_predictions.json`, and `data/training_history.json`.

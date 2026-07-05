@@ -16,7 +16,7 @@ This Space runs the bettor Hugging Face pipeline automatically:
 2. Append daily results
 3. Retrain and publish the latest model to **HF Model Hub**
 4. Generate daily predictions
-5. Expose API endpoints for dashboard + Polymarket status
+5. Expose API endpoints for dashboard + Kalshi status
 
 ## Required Space files (exact)
 
@@ -31,8 +31,8 @@ This Space runs the bettor Hugging Face pipeline automatically:
 - `HF_DATASET_REPO` (ex: `yourname/sportprediction`)
 - `HF_MODEL_REPO` (ex: `yourname/sports-win-model`)
 - `FOOTBALL_DATA_API_KEY`
-- `POLYMARKET_KEY_ID`
-- `POLYMARKET_SECRET_KEY`
+- `KALSHI_API_KEY`
+- `KALSHI_PRIVATE_KEY` (or `KALSHI_PRIVATE_KEY_FILE`)
 
 Recommended:
 
@@ -44,7 +44,7 @@ Recommended:
 - `HF_ACTIVE_SCAN_MINUTES=30`
 - `HF_DAILY_CUSTOM_MODEL=auto`
 - `HF_DAILY_MIN_TRAIN_ROWS=200`
-- `POLYMARKET_DRY_RUN=true`
+- `KALSHI_LIVE_TRADING_ENABLED=0`
 
 ## API endpoints
 
@@ -53,8 +53,10 @@ Recommended:
 - `GET /predictions/today`
 - `GET /predictions/tomorrow`
 - `GET /model/stats`
-- `GET /polymarket/submissions`
-- `GET /polymarket/positions`
+- `GET /kalshi/submissions`
+- `GET /kalshi/positions`
+- `GET /kalshi/live`
+- `POST /kalshi/place-from-predictions`
 - `POST /run/bootstrap?days_back=365`
 - `POST /run/daily`
 - `POST /run/active`

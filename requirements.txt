@@ -39,11 +39,8 @@ APScheduler
 # Reddit API (sentiment)
 praw
 
-# Cryptography (Polymarket signing)
+# Cryptography (Kalshi signing)
 cryptography
-
-# Polymarket CLOB trading client
-py-clob-client
 
 # Hugging Face dataset push / streaming
 huggingface_hub>=0.20.0

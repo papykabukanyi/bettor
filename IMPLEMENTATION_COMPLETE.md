@@ -105,7 +105,7 @@ Dashboard: http://localhost:5000
 ### Upcoming Features (Already Built)
 - ✅ Player props (generated from TeamsportsDB player rosters)
 - ✅ News signals (injury, lineup changes - requires NEWSDATA_API_KEY)
-- ✅ Polymarket market matching (dashboard finds best matched markets)
+- ✅ Kalshi market matching (dashboard finds best matched markets)
 - ✅ Parlay tracking (complete prediction history)
 - ✅ Mobile-optimized UI (responsive dashboard)
 
@@ -239,10 +239,10 @@ Use Vercel's `/cron` endpoints
    - Set .env in Space secrets
    - Result: Predictions auto-generate every 30 minutes
 
-3. **Connect Polymarket** (for auto-betting)
-   - Add Polymarket credentials to `.env`
+3. **Connect Kalshi** (for auto-betting)
+   - Add Kalshi credentials to `.env`
    - Dashboard will match predictions to live markets
-   - Auto-bet module ready (set `POLYMARKET_DRY_RUN=false` to go live)
+   - Auto-bet module ready (enable live Kalshi trading in env to go live)
 
 4. **Monitor Model**
    - Dashboard shows live ROC-AUC

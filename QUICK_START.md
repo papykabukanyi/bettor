@@ -236,13 +236,13 @@ A: Yes: `src/data/hf_pipeline.py` (main pipeline), `src/dashboard.py` (UI)
 ### Short-term (This Week)
 - [ ] Add `NEWSDATA_API_KEY` for news signals (optional)
 - [ ] Deploy to HF Spaces for automation (recommended)
-- [ ] Connect Polymarket credentials for auto-betting (optional)
+- [ ] Connect Kalshi credentials for auto-betting (optional)
 
 ### Long-term (This Month)
 - [ ] Accumulate 30+ days of prediction history
 - [ ] Monitor model ROC-AUC (should normalize to 0.55-0.65)
 - [ ] Add more sports/competitions as needed
-- [ ] Fine-tune betting strategy based on live Polymarket data
+- [ ] Fine-tune betting strategy based on live Kalshi data
 
 ---
 

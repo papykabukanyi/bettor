@@ -132,14 +132,14 @@ def _attach_market_context(predictions_path: str, output_path: str) -> dict[str,
         result = {"ok": True, "count": 0, "markets": []}
     else:
         enriched = list(candidates)
-        polymarket_error = ""
+        kalshi_error = ""
         try:
-            from data.polymarket import attach_polymarket_to_bets
+            from data.kalshi import attach_kalshi_to_bets
 
-            enriched = attach_polymarket_to_bets(enriched, force_refresh=True)
+            enriched = attach_kalshi_to_bets(enriched, force_refresh=True)
         except Exception as exc:
-            polymarket_error = str(exc)
-            print(f"[HF][MARKETS] Polymarket enrichment skipped: {exc}")
+            kalshi_error = str(exc)
+            print(f"[HF][MARKETS] Kalshi enrichment skipped: {exc}")
         by_uid = {
             str(row.get("prediction_uid") or row.get("uid") or ""): row
             for row in enriched
@@ -150,15 +150,13 @@ def _attach_market_context(predictions_path: str, output_path: str) -> dict[str,
             row = dict(pred) if isinstance(pred, dict) else {}
             uid = str(row.get("prediction_id") or "")
             linked = by_uid.get(uid) or {}
-            row["polymarket"] = {
-                "status": str(linked.get("polymarket_status") or "unavailable"),
-                "ticker": str(linked.get("polymarket_ticker") or ""),
-                "market_slug": str(linked.get("polymarket_market_slug") or ""),
-                "event_slug": str(linked.get("polymarket_event_slug") or ""),
-                "side": str(linked.get("polymarket_side") or ""),
-                "price": linked.get("polymarket_price"),
-                "series_ticker": str(linked.get("polymarket_series_ticker") or ""),
-                "series_match": bool(linked.get("polymarket_series_match")) if "polymarket_series_match" in linked else None,
+            row["kalshi"] = {
+                "status": str(linked.get("kalshi_status") or "unavailable"),
+                "ticker": str(linked.get("kalshi_ticker") or ""),
+                "event_ticker": str(linked.get("kalshi_event_ticker") or ""),
+                "side": str(linked.get("kalshi_side") or ""),
+                "price_cents": linked.get("kalshi_price_cents"),
+                "series_ticker": str(linked.get("kalshi_series_ticker") or ""),
             }
             updated_predictions.append(row)
         if isinstance(payload, dict):
@@ -168,7 +166,7 @@ def _attach_market_context(predictions_path: str, output_path: str) -> dict[str,
         result = {
             "ok": True,
             "count": len(enriched),
-            "polymarket_error": polymarket_error,
+            "kalshi_error": kalshi_error,
             "markets": enriched,
         }
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
@@ -285,12 +283,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--hf-attach-markets",
         action="store_true",
-        help="Attach Polymarket market context after an HF daily run",
+        help="Attach Kalshi market context after an HF daily run",
     )
     parser.add_argument(
         "--hf-markets-output",
         default=DEFAULT_MARKETS_OUTPUT,
-        help="File path for Polymarket enrichment output",
+        help="File path for Kalshi enrichment output",
     )
     return parser
 

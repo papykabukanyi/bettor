@@ -41,6 +41,11 @@ HF_BOOTSTRAP_DAYS = int(os.getenv("HF_BOOTSTRAP_DAYS", "365") or "365")
 HF_ACTIVE_SCAN_MINUTES = int(os.getenv("HF_ACTIVE_SCAN_MINUTES", "30") or "30")
 HF_ACTIVE_APPEND_DAYS = int(os.getenv("HF_ACTIVE_APPEND_DAYS", "3") or "3")
 HF_RETRAIN_INTERVAL_MINUTES = int(os.getenv("HF_RETRAIN_INTERVAL_MINUTES", "180") or "180")
+KALSHI_AUTOBET_ENABLED = str(os.getenv("KALSHI_AUTOBET_ENABLED", "1")).strip().lower() in {"1", "true", "yes", "on"}
+KALSHI_AUTOBET_DRY_RUN = str(os.getenv("AUTOBET_DRY_RUN", "1")).strip().lower() in {"1", "true", "yes", "on"}
+KALSHI_AUTOBET_STAKE_USD = float(os.getenv("KALSHI_AUTOBET_STAKE_USD", "1.0") or "1.0")
+KALSHI_AUTOBET_MAX_SINGLE_ORDERS = int(os.getenv("KALSHI_AUTOBET_MAX_SINGLE_ORDERS", "1") or "1")
+KALSHI_AUTOBET_MAX_COMBO_ORDERS = int(os.getenv("KALSHI_AUTOBET_MAX_COMBO_ORDERS", "1") or "1")
 
 app = FastAPI(title="Bettor HF Space API", version="1.0.0")
 scheduler = BackgroundScheduler(timezone="America/New_York")
@@ -131,6 +136,18 @@ def _run_hf_active_cycle() -> dict[str, Any]:
             predictions_path=str(PRED_FILE),
             output_path=str(DATA_DIR / "hf_daily_prediction_markets.json"),
         )
+    kalshi_placement: dict[str, Any] | None = None
+    if KALSHI_AUTOBET_ENABLED:
+        try:
+            kalshi_placement = submit_prediction_orders(
+                dry_run=KALSHI_AUTOBET_DRY_RUN,
+                stake_usd=max(1.0, KALSHI_AUTOBET_STAKE_USD),
+                max_orders=max(1, KALSHI_AUTOBET_MAX_SINGLE_ORDERS),
+                include_combos=True,
+                max_combos=max(0, KALSHI_AUTOBET_MAX_COMBO_ORDERS),
+            )
+        except Exception as exc:
+            kalshi_placement = {"ok": False, "error": str(exc)}
     pipeline.publish_runtime_artifacts()
     return {
         "ok": True,
@@ -140,6 +157,7 @@ def _run_hf_active_cycle() -> dict[str, Any]:
         "new_records_total": new_records_total,
         "retrained": retrain_needed,
         "predictions": preds,
+        "kalshi_placement": kalshi_placement,
     }
 
 

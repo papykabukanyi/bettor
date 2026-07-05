@@ -322,8 +322,8 @@ python src/betting_bot.py --hf-append-daily
    - Predictions update every 30 minutes
    - Fully free tier eligible
 
-3. **Connect to Polymarket** (optional):
-   - Set Polymarket credentials in `.env`
+3. **Connect to Kalshi** (optional):
+   - Set Kalshi credentials in `.env`
    - Dashboard will match predictions to live markets
    - Auto-bet module ready (dry-run by default)
 
