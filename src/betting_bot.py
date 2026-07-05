@@ -35,6 +35,15 @@ def _load_json(path: str, default: Any) -> Any:
         return default
 
 
+def _as_float(value: Any, default: float = 0.0) -> float:
+    try:
+        if value is None or value == "":
+            return float(default)
+        return float(value)
+    except Exception:
+        return float(default)
+
+
 
 def _prediction_to_market_candidate(prediction: dict[str, Any]) -> dict[str, Any] | None:
     if not isinstance(prediction, dict) or prediction.get("error"):
@@ -43,25 +52,72 @@ def _prediction_to_market_candidate(prediction: dict[str, Any]) -> dict[str, Any
     away_team = str(prediction.get("away_team") or "").strip()
     if not home_team or not away_team:
         return None
-    home_prob = float(prediction.get("home_win_prob") or 0.5)
-    away_prob = float(prediction.get("away_win_prob") or 0.5)
+    home_prob = _as_float(prediction.get("home_win_prob"), 0.5)
+    away_prob = _as_float(prediction.get("away_win_prob"), 0.5)
+    scope = str(prediction.get("prediction_scope") or "game_prop").strip().lower()
+    market_type = str(prediction.get("market_type") or "").strip().lower()
+    market_name = str(prediction.get("market_name") or "").strip()
+    player_name = str(prediction.get("player_name") or "").strip()
+    player_team = str(prediction.get("player_team") or "").strip()
+    prop_line = prediction.get("prop_line")
+    predicted_side = str(prediction.get("predicted_side") or "").strip().lower()
+
+    if scope == "player_prop":
+        pick = str(prediction.get("predicted_label") or prediction.get("predicted_outcome") or "over").strip()
+        label = market_name or market_type or "player prop"
+        direction = predicted_side or ("under" if "under" in pick.lower() else "over")
+        return {
+            "uid": str(prediction.get("prediction_id") or f"{away_team}@{home_team}:{player_name}:{market_type}"),
+            "prediction_uid": str(prediction.get("prediction_id") or f"{away_team}@{home_team}:{player_name}:{market_type}"),
+            "kind": "player_prop",
+            "sport": str(prediction.get("sport") or "").strip().lower(),
+            "bet_type": market_type or "player_prop",
+            "prop_type": market_type or "player_prop",
+            "line": (_as_float(prop_line, 0.0) if prop_line not in {None, ""} else None),
+            "direction": direction,
+            "pick": pick,
+            "label": f"{player_name} {label}".strip(),
+            "name": player_name,
+            "player_name": player_name,
+            "team": player_team or (home_team if home_prob >= away_prob else away_team),
+            "game": f"{away_team} @ {home_team}",
+            "home_team": home_team,
+            "away_team": away_team,
+            "league": str(prediction.get("league") or "").strip(),
+            "market_name": market_name,
+            "game_date": str(prediction.get("game_date") or "").strip(),
+            "game_time": str(prediction.get("game_time") or "").strip(),
+            "scheduled_start": str(prediction.get("scheduled_start") or prediction.get("game_time") or "").strip(),
+            "model_prob": max(_as_float(prediction.get("over_prob"), 0.0), _as_float(prediction.get("under_prob"), 0.0), _as_float(prediction.get("confidence"), 0.0)),
+            "confidence": _as_float(prediction.get("confidence"), 0.0),
+            "model_version": prediction.get("model_version"),
+            "model_type": prediction.get("model_type"),
+        }
+
     pick = home_team if home_prob >= away_prob else away_team
+    bet_type = "moneyline"
+    if any(token in market_type for token in ("total", "over_under")):
+        bet_type = "total"
+    elif any(token in market_type for token in ("spread", "handicap")):
+        bet_type = "spread"
     return {
         "uid": str(prediction.get("prediction_id") or f"{away_team}@{home_team}"),
         "prediction_uid": str(prediction.get("prediction_id") or f"{away_team}@{home_team}"),
         "kind": "single",
         "sport": str(prediction.get("sport") or "").strip().lower(),
-        "bet_type": "moneyline",
+        "bet_type": bet_type,
         "pick": pick,
-        "label": f"{pick} moneyline",
+        "label": market_name or f"{pick} {bet_type}",
         "game": f"{away_team} @ {home_team}",
         "home_team": home_team,
         "away_team": away_team,
+        "league": str(prediction.get("league") or "").strip(),
+        "market_name": market_name,
         "game_date": str(prediction.get("game_date") or "").strip(),
         "game_time": str(prediction.get("game_time") or "").strip(),
-        "scheduled_start": str(prediction.get("scheduled_start") or "").strip(),
+        "scheduled_start": str(prediction.get("scheduled_start") or prediction.get("game_time") or "").strip(),
         "model_prob": max(home_prob, away_prob),
-        "confidence": float(prediction.get("confidence") or max(home_prob, away_prob)),
+        "confidence": _as_float(prediction.get("confidence"), max(home_prob, away_prob)),
         "model_version": prediction.get("model_version"),
         "model_type": prediction.get("model_type"),
     }
@@ -80,10 +136,35 @@ def _attach_market_context(predictions_path: str, output_path: str) -> dict[str,
         try:
             from data.polymarket import attach_polymarket_to_bets
 
-            enriched = attach_polymarket_to_bets(enriched)
+            enriched = attach_polymarket_to_bets(enriched, force_refresh=True)
         except Exception as exc:
             polymarket_error = str(exc)
             print(f"[HF][MARKETS] Polymarket enrichment skipped: {exc}")
+        by_uid = {
+            str(row.get("prediction_uid") or row.get("uid") or ""): row
+            for row in enriched
+            if isinstance(row, dict)
+        }
+        updated_predictions: list[dict[str, Any]] = []
+        for pred in predictions:
+            row = dict(pred) if isinstance(pred, dict) else {}
+            uid = str(row.get("prediction_id") or "")
+            linked = by_uid.get(uid) or {}
+            row["polymarket"] = {
+                "status": str(linked.get("polymarket_status") or "unavailable"),
+                "ticker": str(linked.get("polymarket_ticker") or ""),
+                "market_slug": str(linked.get("polymarket_market_slug") or ""),
+                "event_slug": str(linked.get("polymarket_event_slug") or ""),
+                "side": str(linked.get("polymarket_side") or ""),
+                "price": linked.get("polymarket_price"),
+                "series_ticker": str(linked.get("polymarket_series_ticker") or ""),
+                "series_match": bool(linked.get("polymarket_series_match")) if "polymarket_series_match" in linked else None,
+            }
+            updated_predictions.append(row)
+        if isinstance(payload, dict):
+            payload["predictions"] = updated_predictions
+            with open(predictions_path, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, indent=2)
         result = {
             "ok": True,
             "count": len(enriched),
