@@ -33,7 +33,7 @@ HF_DAILY_RUN_HOUR_ET = int(os.getenv("HF_DAILY_RUN_HOUR_ET", "4") or "4")
 HF_DAILY_RUN_MINUTE_ET = int(os.getenv("HF_DAILY_RUN_MINUTE_ET", "15") or "15")
 HF_DAILY_CUSTOM_MODEL = str(os.getenv("HF_DAILY_CUSTOM_MODEL", "auto") or "auto").strip().lower()
 HF_DAILY_MIN_TRAIN_ROWS = int(os.getenv("HF_DAILY_MIN_TRAIN_ROWS", "200") or "200")
-HF_ATTACH_POLYMARKET = str(os.getenv("HF_ATTACH_POLYMARKET", "1")).strip().lower() in {"1", "true", "yes", "on"}
+HF_ATTACH_KALSHI = str(os.getenv("HF_ATTACH_KALSHI", "1")).strip().lower() in {"1", "true", "yes", "on"}
 HF_BOOTSTRAP_ON_EMPTY = str(os.getenv("HF_BOOTSTRAP_ON_EMPTY", "1")).strip().lower() in {"1", "true", "yes", "on"}
 HF_BOOTSTRAP_DAYS = int(os.getenv("HF_BOOTSTRAP_DAYS", "365") or "365")
 HF_ACTIVE_SCAN_MINUTES = int(os.getenv("HF_ACTIVE_SCAN_MINUTES", "30") or "30")
@@ -66,7 +66,7 @@ def _run_hf_daily_pipeline() -> dict[str, Any]:
         custom_model=HF_DAILY_CUSTOM_MODEL,
         min_rows=HF_DAILY_MIN_TRAIN_ROWS,
     )
-    if HF_ATTACH_POLYMARKET:
+    if HF_ATTACH_KALSHI:
         from betting_bot import _attach_market_context  # local import to avoid startup import side effects
 
         _attach_market_context(
@@ -111,7 +111,7 @@ def _run_hf_active_cycle() -> dict[str, Any]:
         )
     pipeline.ensure_model_card_metadata()
     preds = pipeline.predict_daily_schedule()
-    if HF_ATTACH_POLYMARKET:
+    if HF_ATTACH_KALSHI:
         from betting_bot import _attach_market_context
 
         _attach_market_context(
@@ -164,16 +164,17 @@ def _local_submissions_payload() -> dict[str, Any]:
     for market in (markets.get("markets") or []):
         if not isinstance(market, dict):
             continue
-        status = str(market.get("polymarket_status") or "unavailable").strip().lower()
+        status = str(market.get("kalshi_status") or "unavailable").strip().lower()
         rows.append(
             {
                 "submitted_at": market.get("detected_at") or "",
                 "game": market.get("game") or "",
                 "pick": market.get("pick") or "",
                 "status": status or "unavailable",
-                "price": market.get("polymarket_price"),
+                "price": market.get("kalshi_price_cents"),
                 "amount_usd": market.get("stake_usd") or 0,
-                "reason": market.get("polymarket_message") or "",
+                "reason": market.get("kalshi_message") or "",
+                "ticker": market.get("kalshi_ticker") or "",
             }
         )
         summary["evaluated"] += 1
@@ -243,8 +244,8 @@ def root() -> dict[str, Any]:
             "/predictions/today",
             "/predictions/tomorrow",
             "/model/stats",
-            "/polymarket/submissions",
-            "/polymarket/positions",
+            "/kalshi/submissions",
+            "/kalshi/positions",
             "/run/bootstrap",
             "/run/daily",
             "/run/active",
@@ -324,13 +325,13 @@ def model_stats() -> dict[str, Any]:
     }
 
 
-@app.get("/polymarket/submissions")
-def polymarket_submissions() -> dict[str, Any]:
+@app.get("/kalshi/submissions")
+def kalshi_submissions() -> dict[str, Any]:
     return _local_submissions_payload()
 
 
-@app.get("/polymarket/positions")
-def polymarket_positions() -> dict[str, Any]:
+@app.get("/kalshi/positions")
+def kalshi_positions() -> dict[str, Any]:
     return {"ok": True, "updated_at": "", "summary": {"active_positions": 0, "open_notional_usd": 0, "estimated_pnl_usd": 0}, "positions": []}
 
 

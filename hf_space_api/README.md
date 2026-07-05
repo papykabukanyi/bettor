@@ -1,67 +1,66 @@
 ---
 title: Bettor HF Auto Pipeline API
-emoji: ⚽
+emoji: "🚀"
 colorFrom: blue
-colorTo: indigo
+colorTo: purple
 sdk: docker
 pinned: false
 license: mit
 ---
 
-# Bettor HF Auto Pipeline API (Space Entrypoint)
+# Bettor HF Control Hub
 
-This Space runs the bettor Hugging Face pipeline automatically:
+One Space. Full cycle automation:
 
-1. Bootstrap historical data to **HF Dataset Hub** (first run only)
-2. Append daily results
-3. Retrain and publish the latest model to **HF Model Hub**
-4. Generate daily predictions
-5. Expose API endpoints for dashboard + Polymarket status
+- ingest fresh sports data
+- keep HF dataset updated
+- retrain and publish best model
+- generate daily predictions
+- expose API for dashboard + Kalshi execution status
 
-## Required Space files (exact)
+## What runs automatically
 
-- `README.md` (this file with YAML frontmatter)
-- `Dockerfile`
-- `app.py` (FastAPI entrypoint, must expose `app`)
-- `requirements.txt`
+1. **Bootstrap (first run)** -> historical load to HF Dataset
+2. **Active cycle (interval)** -> append recent outcomes + refresh predictions
+3. **Daily cycle (cron)** -> full retrain + publish + predict
 
-## Required Space Secrets / Variables
+## Required secrets
 
-- `HF_API_KEY` (write token)
-- `HF_DATASET_REPO` (ex: `yourname/sportprediction`)
-- `HF_MODEL_REPO` (ex: `yourname/sports-win-model`)
+- `HF_API_KEY`
+- `HF_DATASET_REPO`
+- `HF_MODEL_REPO`
 - `FOOTBALL_DATA_API_KEY`
-- `POLYMARKET_KEY_ID`
-- `POLYMARKET_SECRET_KEY`
+- `KALSHI_API_KEY`
+- `KALSHI_PRIVATE_KEY` (or `KALSHI_PRIVATE_KEY_FILE`)
 
-Recommended:
+## Recommended runtime config
 
 - `HF_AUTORUN_ON_STARTUP=1`
 - `HF_BOOTSTRAP_ON_EMPTY=1`
 - `HF_BOOTSTRAP_DAYS=365`
+- `HF_ACTIVE_SCAN_MINUTES=30`
+- `HF_RETRAIN_INTERVAL_MINUTES=180`
 - `HF_DAILY_RUN_HOUR_ET=4`
 - `HF_DAILY_RUN_MINUTE_ET=15`
-- `HF_ACTIVE_SCAN_MINUTES=30`
 - `HF_DAILY_CUSTOM_MODEL=auto`
 - `HF_DAILY_MIN_TRAIN_ROWS=200`
-- `POLYMARKET_DRY_RUN=true`
+- `HF_ATTACH_KALSHI=1`
 
-## API endpoints
+## API surface
 
 - `GET /health`
 - `GET /status`
 - `GET /predictions/today`
 - `GET /predictions/tomorrow`
 - `GET /model/stats`
-- `GET /polymarket/submissions`
-- `GET /polymarket/positions`
+- `GET /kalshi/submissions`
+- `GET /kalshi/positions`
 - `POST /run/bootstrap?days_back=365`
 - `POST /run/daily`
 - `POST /run/active`
 
-## Notes
+## Deploy notes
 
-- Active scheduling is done inside `app.py` via APScheduler interval job.
-- Full retrain scheduling is done daily via cron job.
-- Startup autorun is enabled by default and will create/push dataset + model artifacts when empty.
-- Use this Space URL as `HF_SPACE_API_URL` in Vercel so dashboard reads live predictions.
+- `app.py` is the FastAPI entrypoint.
+- Scheduler is APScheduler in-process.
+- Point dashboard to this Space using `HF_SPACE_API_URL`.
