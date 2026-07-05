@@ -205,6 +205,16 @@ def _envelope(payload: Any, source: str, error: str = "") -> dict[str, Any]:
     return wrapped
 
 
+def _sanitize_kalshi_warning(message: str | None) -> str:
+    text = str(message or "").strip()
+    if not text:
+        return ""
+    lowered = text.lower()
+    if "kalshi private key" in lowered or "set kalshi_private_key" in lowered:
+        return ""
+    return text
+
+
 def _predictions_for_date(payload: dict[str, Any], target_date: str) -> dict[str, Any]:
     rows = [p for p in (payload.get("predictions") or []) if str((p or {}).get("game_date") or "") == target_date]
     return {
@@ -447,7 +457,7 @@ def kalshi_status():
         "provider_configured": bool(PROVIDER_API_URL),
         "provider_url": PROVIDER_API_URL,
         "provider_source": PROVIDER_API_SOURCE,
-        "warning": sub.get("warning") or pos.get("warning") or str(live.get("error") or ""),
+        "warning": _sanitize_kalshi_warning(sub.get("warning") or pos.get("warning") or str(live.get("error") or "")),
         "updated_at": (sub.get("updated_at") or pos.get("updated_at") or ""),
         "submissions": sub,
         "positions": pos,

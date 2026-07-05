@@ -831,21 +831,12 @@ def _load_private_key():
 
     pem = os.getenv("KALSHI_PRIVATE_KEY", "").strip()
 
-    # Handle case where dotenv stores with literal \n instead of real newlines
+    # Render-friendly: allow a single-line secret with literal \n escapes.
     if pem and "\\n" in pem and "\n" not in pem:
         pem = pem.replace("\\n", "\n")
 
-    # Fallback: load from a .pem file path if env var is a file path
-    if not pem or not pem.startswith("-----"):
-        key_file = os.getenv("KALSHI_PRIVATE_KEY_FILE", "").strip()
-        if key_file and os.path.exists(key_file):
-            with open(key_file, "r") as f:
-                pem = f.read().strip()
-
     if not pem:
-        raise RuntimeError(
-            "Kalshi private key is missing. Set KALSHI_PRIVATE_KEY in environment."
-        )
+        raise RuntimeError("Kalshi private key is missing. Set KALSHI_PRIVATE_KEY.")
 
     return load_pem_private_key(pem.encode("ascii"), password=None)
 
@@ -3602,4 +3593,3 @@ def get_live_tickers() -> "dict[str, dict]":
     if mgr is None:
         return {}
     return mgr.get_tickers()
-

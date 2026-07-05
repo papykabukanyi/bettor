@@ -37,14 +37,8 @@ def _to_float(value: Any, default: float = 0.0) -> float:
 def _load_private_key_pem() -> bytes:
     inline = str(os.getenv("KALSHI_PRIVATE_KEY", "") or "").strip()
     if inline:
-        return inline.encode("utf-8")
-    key_path = str(os.getenv("KALSHI_PRIVATE_KEY_FILE", "") or "").strip()
-    if not key_path:
-        raise RuntimeError(
-            "Kalshi private key missing. Set KALSHI_PRIVATE_KEY or KALSHI_PRIVATE_KEY_FILE."
-        )
-    with open(key_path, "rb") as handle:
-        return handle.read()
+        return inline.replace("\\n", "\n").encode("utf-8")
+    raise RuntimeError("Kalshi private key missing. Set KALSHI_PRIVATE_KEY.")
 
 
 def _load_private_key():

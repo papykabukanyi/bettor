@@ -32,7 +32,7 @@ This Space runs the bettor Hugging Face pipeline automatically:
 - `HF_MODEL_REPO` (ex: `yourname/sports-win-model`)
 - `FOOTBALL_DATA_API_KEY`
 - `KALSHI_API_KEY`
-- `KALSHI_PRIVATE_KEY` (or `KALSHI_PRIVATE_KEY_FILE`)
+- `KALSHI_PRIVATE_KEY` (PEM on one line with `\n` escapes)
 
 Recommended:
 

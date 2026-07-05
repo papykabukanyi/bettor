@@ -305,6 +305,13 @@
     const sportIcon = s => sportIcons[String(s || '').toLowerCase()] || sportIcons.default;
     const tierClass = t => confidenceClasses[String(t || '').toLowerCase()] || 'bad';
     const stateClass = s => statusClasses[String(s || '').toLowerCase()] || 'neutral';
+    const kalshiWarningText = v => {
+      const text = String(v || '').trim();
+      if (!text) return '';
+      const lowered = text.toLowerCase();
+      if (lowered.includes('kalshi private key') || lowered.includes('set kalshi_private_key')) return '';
+      return text;
+    };
     const safeSortDate = r => new Date(`${r.game_date || ''} ${r.game_time || r.scheduled_start || ''}`).getTime() || 0;
 
     function formatGameTime(prediction) {
@@ -534,15 +541,15 @@
       const ss = submissions.summary || {};
       const ps = positions.summary || {};
       const source = state.kalshiStatus.source || 'cached';
-      const warning = state.kalshiStatus.warning ? ` • ${esc(state.kalshiStatus.warning)}` : '';
+      const warning = kalshiWarningText(state.kalshiStatus.warning);
       const connection = source === 'kalshi_live' ? 'connected' : (source === 'hf_space' || source === 'hf_space_auto' || source === 'hf_hub_artifact' ? 'synced' : 'cached');
       const summaryNote = source === 'kalshi_live'
         ? 'Live authenticated Kalshi account snapshot.'
-        : `Cached Kalshi snapshot from ${esc(source)}${warning}`;
+        : `Cached Kalshi snapshot from ${esc(source)}${warning ? ` • ${esc(warning)}` : ''}`;
       document.getElementById('kalshi-summary').innerHTML = `<h3>Account summary</h3><p class="subtle" style="margin:10px 0 0">${summaryNote}</p><div class="kvs"><div class="kv"><span>Buying power</span><strong>${esc(money(bal.balance_usd||ss.available_buying_power_usd||0))}</strong></div><div class="kv"><span>Portfolio value</span><strong>${esc(money(bal.portfolio_value_usd||0))}</strong></div><div class="kv"><span>Open orders</span><strong>${esc(num(ps.active_positions||live.open_orders_count||0))}</strong></div><div class="kv"><span>Open notional</span><strong>${esc(money(ps.open_notional_usd||live.open_notional_usd||0))}</strong></div><div class="kv"><span>Last balance update</span><strong>${esc(stamp(bal.updated_ts||''))}</strong></div></div>`;
       document.getElementById('kalshi-positions').innerHTML = `<h3>Order status</h3><p class="subtle" style="margin:10px 0 0">Connection + open orders fetched via signed API requests.</p><div class="kvs"><div class="kv"><span>Connection</span><strong>${esc(connection)}</strong></div><div class="kv"><span>Evaluated predictions</span><strong>${esc(num(ss.evaluated||0))}</strong></div><div class="kv"><span>Placed</span><strong>${esc(num(ss.placed||0))}</strong></div><div class="kv"><span>Failed</span><strong>${esc(num(ss.failed||0))}</strong></div><div class="kv"><span>Updated</span><strong>${esc(stamp(positions.updated_at||live.updated_at||''))}</strong></div></div>`;
       const rows = Array.isArray(positions.positions) ? positions.positions.slice().slice(0, 40) : [];
-      if (!rows.length) { document.getElementById('submission-shell').innerHTML = `<div class="empty-state">No open Kalshi orders${state.kalshiStatus.warning ? ` • ${esc(state.kalshiStatus.warning)}` : ''}</div>`; return; }
+      if (!rows.length) { document.getElementById('submission-shell').innerHTML = `<div class="empty-state">No open Kalshi orders${warning ? ` • ${esc(warning)}` : ''}</div>`; return; }
       document.getElementById('submission-shell').innerHTML = `<table><thead><tr><th>Created</th><th>Ticker</th><th>Status</th><th>Side</th><th>Yes Price</th><th>No Price</th><th>Remaining</th><th>Order ID</th></tr></thead><tbody>${rows.map(r => `<tr><td>${esc(stamp(r.created_time||r.last_update_time||''))}</td><td>${esc(r.ticker||'—')}</td><td>${esc(r.status||'—')}</td><td>${esc(String(r.side||'').toUpperCase()||'—')}</td><td>${esc(money(r.yes_price_dollars||0))}</td><td>${esc(money(r.no_price_dollars||0))}</td><td>${esc(r.remaining_count_fp||'0')}</td><td>${esc(r.order_id||'')}</td></tr>`).join('')}</tbody></table>`;
     }
 

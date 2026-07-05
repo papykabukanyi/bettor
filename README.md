@@ -38,7 +38,7 @@ Execution: Kalshi (single + combo order routing)
    - `HF_MODEL_REPO` → Your HF model repo (same or different, e.g., `papylove/sportprediction`)
    - `FOOTBALL_DATA_API_KEY` → Free key from https://www.football-data.org/
    - `NEWSDATA_API_KEY` → Free key from https://newsdata.io/ (recommended for richer player/team news)
-   - Kalshi credentials (if running auto-bets)
+   - Kalshi credentials (if running auto-bets); paste `KALSHI_PRIVATE_KEY` as a single line with `\n` escapes
 3. Run pipeline:
    ```powershell
    python src\betting_bot.py --hf-bootstrap --hf-days-back 365
