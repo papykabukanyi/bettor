@@ -74,6 +74,18 @@ class HFDirectPipeline:
         "tennis": "tennis",
         "golf": "golf",
     }
+    _SPORT_MARKET_PROFILES = {
+        "mlb": [("moneyline", "Game Winner", 1.0), ("first_5_innings", "First 5 Innings Winner", 0.72)],
+        "nba": [("moneyline", "Game Winner", 1.0), ("first_half", "First Half Winner", 0.74)],
+        "nhl": [("moneyline", "Game Winner", 1.0), ("first_period", "First Period Winner", 0.66)],
+        "soccer": [("moneyline", "Full Time Winner", 1.0), ("first_half", "First Half Winner", 0.70)],
+        "tennis": [("match_winner", "Match Winner", 1.0), ("set_1_winner", "Set 1 Winner", 0.76)],
+        "golf": [("winner", "Tournament Leader", 1.0)],
+        "boxing": [("winner", "Fight Winner", 1.0)],
+        "mma": [("winner", "Fight Winner", 1.0)],
+        "cricket": [("moneyline", "Match Winner", 1.0), ("first_innings", "First Innings Winner", 0.74)],
+        "nfl": [("moneyline", "Game Winner", 1.0), ("first_half", "First Half Winner", 0.73)],
+    }
     _SPORT_ALIASES = {
         "baseball": "mlb",
         "mlb": "mlb",
@@ -401,27 +413,22 @@ class HFDirectPipeline:
                         )
                         home_prob = float(pred.get("home_win_prob", 0.5))
                         away_prob = float(pred.get("away_win_prob", 0.5))
-                    confidence = max(home_prob, away_prob)
-                    tier = self._confidence_tier(confidence)
-                    all_predictions.append({
-                        "prediction_id": str(uuid4()),
-                        "game_id": game_id,
-                        "sport": sport,
-                        "league": league,
-                        "home_team": home_team,
-                        "away_team": away_team,
-                        "game_date": game_date,
-                        "game_time": game_time,
-                        "home_win_prob": round(home_prob, 4),
-                        "away_win_prob": round(away_prob, 4),
-                        "confidence": round(confidence, 4),
-                        "confidence_tier": tier,
-                        "model_version": model_version,
-                        "model_type": model_type,
-                        "model_auc": model_auc,
-                        "predicted_at": _now_utc(),
-                        "predict_mode": "api" if via_api else "artifact",
-                    })
+                    market_rows = self._expand_market_predictions(
+                        game_id=game_id,
+                        sport=sport,
+                        league=league,
+                        home_team=home_team,
+                        away_team=away_team,
+                        game_date=game_date,
+                        game_time=game_time,
+                        home_prob=home_prob,
+                        away_prob=away_prob,
+                        model_version=model_version,
+                        model_type=model_type,
+                        model_auc=model_auc,
+                        via_api=via_api,
+                    )
+                    all_predictions.extend(market_rows)
                 except Exception as exc:
                     logger.warning("[hf_pipeline] predict error %s vs %s: %s", home_team, away_team, exc)
                     all_predictions.append({
@@ -458,6 +465,59 @@ class HFDirectPipeline:
         })
         logger.info("[hf_pipeline] %d predictions generated (%s + %s)", len(good), today, tomorrow)
         return {"ok": True, "prediction_count": len(good), "output_file": out_path, "date": today.isoformat()}
+
+    def _expand_market_predictions(
+        self,
+        *,
+        game_id: str,
+        sport: str,
+        league: str,
+        home_team: str,
+        away_team: str,
+        game_date: str,
+        game_time: str,
+        home_prob: float,
+        away_prob: float,
+        model_version: str,
+        model_type: str,
+        model_auc: float,
+        via_api: bool,
+    ) -> list[dict]:
+        rows: list[dict] = []
+        normalized_sport = self._normalize_sport(sport)
+        profile = self._SPORT_MARKET_PROFILES.get(normalized_sport) or [("moneyline", "Game Winner", 1.0)]
+        for market_type, market_name, compression in profile:
+            adjusted_home = 0.5 + (float(home_prob) - 0.5) * float(compression)
+            adjusted_home = max(0.01, min(0.99, adjusted_home))
+            adjusted_away = max(0.01, min(0.99, 1.0 - adjusted_home))
+            predicted_team = home_team if adjusted_home >= adjusted_away else away_team
+            confidence = max(adjusted_home, adjusted_away)
+            rows.append(
+                {
+                    "prediction_id": str(uuid4()),
+                    "game_id": game_id,
+                    "sport": normalized_sport,
+                    "league": league,
+                    "home_team": home_team,
+                    "away_team": away_team,
+                    "game_date": game_date,
+                    "game_time": game_time,
+                    "market_type": market_type,
+                    "market_name": market_name,
+                    "predicted_team": predicted_team,
+                    "home_win_prob": round(adjusted_home, 4),
+                    "away_win_prob": round(adjusted_away, 4),
+                    "confidence": round(confidence, 4),
+                    "confidence_tier": self._confidence_tier(confidence),
+                    "model_version": model_version,
+                    "model_type": model_type,
+                    "model_name": model_type,
+                    "model_auc": model_auc,
+                    "predicted_at": _now_utc(),
+                    "predict_mode": "api" if via_api else "artifact",
+                }
+            )
+        return rows
 
     def run_daily_pipeline(
         self,
@@ -802,6 +862,7 @@ class HFDirectPipeline:
         sport_map = {
             "Basketball": "nba",
             "Ice Hockey": "nhl",
+            "American Football": "nfl",
             "Tennis": "tennis",
             "Boxing": "boxing",
             "Mixed Martial Arts": "mma",
@@ -853,6 +914,7 @@ class HFDirectPipeline:
         sport_map = {
             "Basketball": "nba",
             "Ice Hockey": "nhl",
+            "American Football": "nfl",
             "Soccer": "soccer",
             "Tennis": "tennis",
             "Golf": "golf",

@@ -14,8 +14,8 @@
       --success: #10b981;
       --warning: #f59e0b;
       --danger: #ef4444;
-      --ink: #e2e8f0;
-      --muted: #94a3b8;
+      --ink: #f8fafc;
+      --muted: #cbd5e1;
       --glass: rgba(15, 23, 42, 0.58);
       --border: rgba(148, 163, 184, 0.18);
       --shadow: 0 24px 80px rgba(2, 6, 23, 0.45);
@@ -63,7 +63,7 @@
     .metric-value { display: block; margin-top: 14px; font-size: 1.7rem; font-weight: 800; letter-spacing: -0.03em; }
     .metric-note { display: block; margin-top: 8px; color: var(--muted); font-size: 0.92rem; }
     .tabs { margin-top: 22px; display: flex; flex-wrap: wrap; gap: 12px; animation: fadeUp .7s ease both; }
-    .tab { border: 1px solid rgba(148,163,184,0.16); background: rgba(15,23,42,0.5); color: var(--muted); padding: 12px 16px; border-radius: 16px; cursor: pointer; transition: all .2s ease; font-weight: 700; }
+    .tab { border: 1px solid rgba(148,163,184,0.22); background: rgba(15,23,42,0.68); color: #e2e8f0; padding: 12px 16px; border-radius: 16px; cursor: pointer; transition: all .2s ease; font-weight: 700; }
     .tab:hover, .tab.active { color: white; border-color: rgba(59,130,246,0.5); background: linear-gradient(135deg, rgba(59,130,246,0.88), rgba(29,78,216,0.82)); transform: translateY(-1px); }
     .panel { display: none; margin-top: 22px; animation: fadeUp .35s ease both; }
     .panel.active { display: block; }
@@ -94,10 +94,11 @@
     .bar-fill { position: absolute; inset: 0 auto 0 0; border-radius: inherit; background: linear-gradient(90deg, rgba(59,130,246,0.78), rgba(16,185,129,0.78)); }
     .prediction-footer { margin-top: 18px; display: flex; flex-wrap: wrap; gap: 10px; justify-content: space-between; align-items: center; }
     .prediction-meta { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
-    .table-shell { overflow: auto; border-radius: 24px; border: 1px solid rgba(148,163,184,0.16); background: rgba(15,23,42,0.48); }
+    .table-shell { overflow: auto; border-radius: 24px; border: 1px solid rgba(148,163,184,0.22); background: rgba(15,23,42,0.62); }
     table { width: 100%; min-width: 720px; border-collapse: collapse; }
     th, td { padding: 16px; text-align: left; border-bottom: 1px solid rgba(148,163,184,0.1); }
-    th { color: var(--muted); font-size: 0.74rem; letter-spacing: 0.18em; text-transform: uppercase; background: rgba(15,23,42,0.72); }
+    th { color: #e2e8f0; font-size: 0.74rem; letter-spacing: 0.18em; text-transform: uppercase; background: rgba(15,23,42,0.82); }
+    td { color: var(--ink); }
     tr:last-child td { border-bottom: none; }
     .toast-stack { position: fixed; right: 18px; top: 18px; z-index: 40; display: grid; gap: 12px; width: min(360px, calc(100vw - 36px)); }
     .toast { padding: 16px 18px; border-radius: 18px; background: rgba(15,23,42,0.85); border: 1px solid rgba(148,163,184,0.18); box-shadow: var(--shadow); animation: fadeUp .25s ease both; }
@@ -118,6 +119,7 @@
       color: var(--ink);
       border: 1px solid rgba(148,163,184,0.22);
     }
+    .form-control::placeholder { color: #cbd5e1; opacity: 0.95; }
     .form-select:focus, .form-control:focus {
       border-color: rgba(59,130,246,0.65);
       box-shadow: 0 0 0 .2rem rgba(59,130,246,0.18);
@@ -253,7 +255,7 @@
 
   <script>
     const state = { status: {}, today: { predictions: [] }, tomorrow: { predictions: [] }, model: { current_model: {}, history: [] }, polymarketStatus: { submissions: {}, positions: {} }, lastHash: '', firstRefresh: true };
-    const sportIcons = { mlb: '⚾', nba: '🏀', nhl: '🏒', soccer: '⚽', default: '🏈' };
+    const sportIcons = { mlb: '⚾', nba: '🏀', nhl: '🏒', soccer: '⚽', tennis: '🎾', golf: '⛳', boxing: '🥊', mma: '🥋', cricket: '🏏', nfl: '🏈', default: '🏈' };
     const statusClasses = { submitted: 'good', filled: 'good', dry_run: 'neutral', pending: 'warn', skipped: 'warn', failed: 'bad', cancelled: 'bad' };
     const confidenceClasses = { elite: 'good', solid: 'neutral', lean: 'warn', watch: 'bad' };
     const esc = (value) => String(value ?? '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
@@ -346,7 +348,7 @@
       const polymarket = prediction.polymarket || {};
       const confidenceTier = String(prediction.confidence_tier || 'Watch').toLowerCase();
       const submissionState = String(polymarket.status || 'pending').toLowerCase();
-      return `<article class="card glass prediction-card" data-prediction='${esc(JSON.stringify(prediction))}'><div class="prediction-header"><div><div class="sport-line"><span class="sport-icon">${sportIcon(prediction.sport)}</span><span>${esc(prediction.sport || 'sport')}</span></div><div class="matchup">${esc(prediction.away_team || 'Away')} @ ${esc(prediction.home_team || 'Home')}</div><div class="match-meta">${esc(prediction.game_date || '')} • ${esc(prediction.game_time || prediction.scheduled_start || 'TBD')}</div></div><span class="confidence-badge ${tierClass(confidenceTier)}">${esc(prediction.confidence_tier || 'Watch')}</span></div><div class="bar-wrap"><div class="bar-row"><div class="bar-label"><span>${esc(prediction.home_team || 'Home')}</span><strong>${esc(pct(prediction.home_win_prob))}</strong></div><div class="bar-track"><div class="bar-fill" style="width:${Math.max(2, Math.min(100, Number(prediction.home_win_prob || 0) * 100))}%"></div></div></div><div class="bar-row"><div class="bar-label"><span>${esc(prediction.away_team || 'Away')}</span><strong>${esc(pct(prediction.away_win_prob))}</strong></div><div class="bar-track"><div class="bar-fill" style="width:${Math.max(2, Math.min(100, Number(prediction.away_win_prob || 0) * 100))}%"></div></div></div></div><div class="prediction-footer"><div class="prediction-meta"><span class="status-badge ${stateClass(submissionState)}">${esc(submissionState.replace('_', ' '))}</span><span class="subtle">Pick: <strong style="color:var(--ink)">${esc(prediction.predicted_team || 'n/a')}</strong></span></div><div class="subtle">Model ${esc(prediction.model_name || '—')}</div></div></article>`;
+      return `<article class="card glass prediction-card" data-prediction='${esc(JSON.stringify(prediction))}'><div class="prediction-header"><div><div class="sport-line"><span class="sport-icon">${sportIcon(prediction.sport)}</span><span>${esc(prediction.sport || 'sport')}</span></div><div class="matchup">${esc(prediction.away_team || 'Away')} @ ${esc(prediction.home_team || 'Home')}</div><div class="match-meta">${esc(prediction.game_date || '')} • ${esc(prediction.game_time || prediction.scheduled_start || 'TBD')} • ${esc(prediction.market_name || prediction.market_type || 'Game Winner')}</div></div><span class="confidence-badge ${tierClass(confidenceTier)}">${esc(prediction.confidence_tier || 'Watch')}</span></div><div class="bar-wrap"><div class="bar-row"><div class="bar-label"><span>${esc(prediction.home_team || 'Home')}</span><strong>${esc(pct(prediction.home_win_prob))}</strong></div><div class="bar-track"><div class="bar-fill" style="width:${Math.max(2, Math.min(100, Number(prediction.home_win_prob || 0) * 100))}%"></div></div></div><div class="bar-row"><div class="bar-label"><span>${esc(prediction.away_team || 'Away')}</span><strong>${esc(pct(prediction.away_win_prob))}</strong></div><div class="bar-track"><div class="bar-fill" style="width:${Math.max(2, Math.min(100, Number(prediction.away_win_prob || 0) * 100))}%"></div></div></div></div><div class="prediction-footer"><div class="prediction-meta"><span class="status-badge ${stateClass(submissionState)}">${esc(submissionState.replace('_', ' '))}</span><span class="subtle">Pick: <strong style="color:var(--ink)">${esc(prediction.predicted_team || 'n/a')}</strong></span></div><div class="subtle">Model ${esc(prediction.model_name || prediction.model_type || '—')}</div></div></article>`;
     }
     function renderPredictionGrid(containerId, payload, prefix) {
       const raw = Array.isArray(payload.predictions) ? payload.predictions : [];
@@ -360,7 +362,7 @@
     function renderHistory() {
       const rows = [...(state.today.predictions || []), ...(state.tomorrow.predictions || [])].sort((a, b) => `${a.game_date || ''} ${a.game_time || ''}`.localeCompare(`${b.game_date || ''} ${b.game_time || ''}`));
       if (!rows.length) { document.getElementById('history-shell').innerHTML = '<div class="empty-state">No prediction history yet.</div>'; return; }
-      document.getElementById('history-shell').innerHTML = `<table><thead><tr><th>Date</th><th>Sport</th><th>Matchup</th><th>Pick</th><th>Confidence</th><th>Submission</th></tr></thead><tbody>${rows.map(row => `<tr><td>${esc(row.game_date || '—')}</td><td>${esc(row.sport || '—')}</td><td>${esc(row.away_team || 'Away')} @ ${esc(row.home_team || 'Home')}</td><td>${esc(row.predicted_team || '—')}</td><td>${esc(pct(row.confidence || 0))}</td><td>${esc((row.polymarket || {}).status || 'pending')}</td></tr>`).join('')}</tbody></table>`;
+      document.getElementById('history-shell').innerHTML = `<table><thead><tr><th>Date</th><th>Sport</th><th>Market</th><th>Matchup</th><th>Pick</th><th>Confidence</th><th>Submission</th></tr></thead><tbody>${rows.map(row => `<tr><td>${esc(row.game_date || '—')}</td><td>${esc(row.sport || '—')}</td><td>${esc(row.market_name || row.market_type || 'Game Winner')}</td><td>${esc(row.away_team || 'Away')} @ ${esc(row.home_team || 'Home')}</td><td>${esc(row.predicted_team || '—')}</td><td>${esc(pct(row.confidence || 0))}</td><td>${esc((row.polymarket || {}).status || 'pending')}</td></tr>`).join('')}</tbody></table>`;
     }
     function renderPolymarket() {
       const submissions = state.polymarketStatus.submissions || {};
@@ -378,8 +380,15 @@
     function renderAll() { renderHeroMetrics(); renderPipeline(); renderPredictionGrid('today-grid', state.today || {}, 'today'); renderPredictionGrid('tomorrow-grid', state.tomorrow || {}, 'tomorrow'); renderHistory(); renderPolymarket(); document.getElementById('live-status').textContent = `Live refresh • ${new Date().toLocaleTimeString()}`; document.getElementById('live-source').textContent = `Source: ${(state.status.source || 'local').toUpperCase()}`; }
     async function refreshAll() {
       try {
-        const [status, today, tomorrow, model, polymarketStatus] = await Promise.all([fetchJson('/api/predictions/status'), fetchJson('/api/predictions/today'), fetchJson('/api/predictions/tomorrow'), fetchJson('/api/model/stats'), fetchJson('/api/polymarket/status')]);
+        const settled = await Promise.allSettled([fetchJson('/api/predictions/status'), fetchJson('/api/predictions/today'), fetchJson('/api/predictions/tomorrow'), fetchJson('/api/model/stats'), fetchJson('/api/polymarket/status')]);
+        const status = settled[0].status === 'fulfilled' ? settled[0].value : state.status;
+        const today = settled[1].status === 'fulfilled' ? settled[1].value : state.today;
+        const tomorrow = settled[2].status === 'fulfilled' ? settled[2].value : state.tomorrow;
+        const model = settled[3].status === 'fulfilled' ? settled[3].value : state.model;
+        const polymarketStatus = settled[4].status === 'fulfilled' ? settled[4].value : state.polymarketStatus;
         state.status = status || {}; state.today = today || { predictions: [] }; state.tomorrow = tomorrow || { predictions: [] }; state.model = model || { current_model: {}, history: [] }; state.polymarketStatus = polymarketStatus || { submissions: {}, positions: {} };
+        const failedCalls = settled.filter(r => r.status === 'rejected').length;
+        if (failedCalls > 0) toast(`Partial refresh: ${failedCalls} endpoint(s) failed.`, 'warn');
         const nextHash = JSON.stringify({ generated_at: today.generated_at, today_count: today.prediction_count, placed: (((polymarketStatus || {}).submissions || {}).summary || {}).placed || 0 });
         if (!state.firstRefresh && nextHash !== state.lastHash) toast('Dashboard refreshed with new prediction state.', 'neutral');
         if (status.warning) toast(`Status warning: ${status.warning}`, 'warn');
