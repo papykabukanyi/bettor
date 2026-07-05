@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import sys
+import importlib.util
 from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin
@@ -17,13 +18,21 @@ SRC_DIR = Path(__file__).resolve().parent
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-try:
-    from src.data.kalshi_trade_api import (  # type: ignore
-        build_live_snapshot,
-        submit_prediction_orders,
-    )
-except Exception:
-    from data.kalshi_trade_api import build_live_snapshot, submit_prediction_orders
+
+def _load_kalshi_trade_api_module():
+    module_path = SRC_DIR / "data" / "kalshi_trade_api.py"
+    if module_path.exists():
+        spec = importlib.util.spec_from_file_location("kalshi_trade_api_local", module_path)
+        if spec and spec.loader:
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            return module
+    try:
+        import data.kalshi_trade_api as module  # type: ignore
+        return module
+    except Exception:
+        import src.data.kalshi_trade_api as module  # type: ignore
+        return module
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = ROOT_DIR / "data"
@@ -369,7 +378,8 @@ def _local_submissions_payload() -> dict[str, Any]:
 
 def _live_kalshi_snapshot() -> dict[str, Any]:
     try:
-        return build_live_snapshot()
+        kalshi_api = _load_kalshi_trade_api_module()
+        return kalshi_api.build_live_snapshot()
     except Exception as exc:
         return {
             "ok": False,
@@ -488,7 +498,8 @@ def kalshi_place_from_predictions():
     if not isinstance(payload, dict) or not isinstance(payload.get("predictions"), list):
         return jsonify({"ok": False, "error": "Prediction data unavailable."}), 400
     try:
-        result = submit_prediction_orders(
+        kalshi_api = _load_kalshi_trade_api_module()
+        result = kalshi_api.submit_prediction_orders(
             payload,
             stake_usd=stake_usd,
             max_orders=max_orders,
@@ -541,7 +552,8 @@ def kalshi_automation_tick():
         return jsonify({"ok": False, "error": "Prediction data unavailable."}), 400
 
     try:
-        single_orders = submit_prediction_orders(
+        kalshi_api = _load_kalshi_trade_api_module()
+        single_orders = kalshi_api.submit_prediction_orders(
             payload,
             stake_usd=stake_usd,
             max_orders=max_single_orders,
@@ -558,15 +570,15 @@ def kalshi_automation_tick():
             "suggestions": [],
         }
         if combo_enabled:
-            from data.kalshi_trade_api import build_combo_suggestions_from_predictions, submit_combo_orders
-
-            combo_suggestions = build_combo_suggestions_from_predictions(payload, max_combos=max(5, max_combo_orders * 5))
+            combo_suggestions = kalshi_api.build_combo_suggestions_from_predictions(
+                payload, max_combos=max(5, max_combo_orders * 5)
+            )
             combo_result["suggestions"] = combo_suggestions
             combo_result["suggested_count"] = len(combo_suggestions)
             combo_result["matched_count"] = sum(
                 1 for combo in combo_suggestions if str(combo.get("kalshi_status") or "").strip().lower() == "matched"
             )
-            combo_orders = submit_combo_orders(
+            combo_orders = kalshi_api.submit_combo_orders(
                 combo_suggestions,
                 stake_usd=stake_usd,
                 max_orders=max_combo_orders,
