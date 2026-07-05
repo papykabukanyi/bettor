@@ -5,17 +5,12 @@ from __future__ import annotations
 import json
 import logging
 import os
-import sys
 from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin
 
 import requests
 from flask import Flask, jsonify, render_template, request
-
-SRC_DIR = Path(__file__).resolve().parent
-if str(SRC_DIR) not in sys.path:
-    sys.path.insert(0, str(SRC_DIR))
 
 from data.kalshi_trade_api import build_live_snapshot, submit_prediction_orders
 
@@ -25,7 +20,6 @@ HF_STATUS_FILE = DATA_DIR / "hf_pipeline_status.json"
 HF_PREDICTIONS_FILE = DATA_DIR / "hf_daily_predictions.json"
 HF_HISTORY_FILE = DATA_DIR / "training_history.json"
 HF_MARKETS_FILE = DATA_DIR / "hf_daily_prediction_markets.json"
-KALSHI_AUTOMATION_STATE_FILE = DATA_DIR / "kalshi_automation_status.json"
 REQUEST_TIMEOUT = int(os.getenv("HF_PROXY_TIMEOUT", "15") or "15")
 DISCOVERY_TIMEOUT = int(os.getenv("HF_PROXY_DISCOVERY_TIMEOUT", "4") or "4")
 HF_MODEL_REPO = str(os.getenv("HF_MODEL_REPO", "papylove/sportprediction") or "").strip()
@@ -38,30 +32,6 @@ app = Flask(__name__, template_folder="templates")
 def _env_flag(name: str, default: bool = False) -> bool:
     raw = str(os.getenv(name, "1" if default else "0") or "").strip().lower()
     return raw in {"1", "true", "yes", "on"}
-
-
-def _env_float(name: str, default: float) -> float:
-    try:
-        raw = str(os.getenv(name, str(default)) or str(default)).strip()
-        return float(raw)
-    except Exception:
-        return float(default)
-
-
-def _env_int(name: str, default: int) -> int:
-    try:
-        raw = str(os.getenv(name, str(default)) or str(default)).strip()
-        return int(raw)
-    except Exception:
-        return int(default)
-
-
-def _is_cron_authorized() -> bool:
-    secret = str(os.getenv("CRON_SECRET", "") or "").strip()
-    if not secret:
-        return True
-    auth = str(request.headers.get("authorization") or "")
-    return auth == f"Bearer {secret}"
 
 
 def _space_repo_to_url(repo_id: str) -> str:
@@ -121,12 +91,6 @@ def _load_json(path: Path, default: Any) -> Any:
             return json.load(handle)
     except Exception:
         return default
-
-
-def _save_json(path: Path, payload: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as handle:
-        json.dump(payload, handle, indent=2)
 
 
 def _normalize_hf_repo_id(value: str) -> str:
@@ -491,98 +455,6 @@ def kalshi_place_from_predictions():
         return jsonify(result)
     except Exception as exc:
         return jsonify({"ok": False, "error": str(exc)}), 500
-
-
-@app.route("/api/kalshi/automation/status")
-def kalshi_automation_status():
-    state = _load_json(KALSHI_AUTOMATION_STATE_FILE, {})
-    if not isinstance(state, dict):
-        state = {}
-    return jsonify(
-        {
-            "ok": True,
-            "automation": state,
-            "settings": {
-                "stake_usd": _env_float("KALSHI_AUTOBET_STAKE_USD", 1.0),
-                "max_single_orders": _env_int("KALSHI_AUTOBET_MAX_SINGLE_ORDERS", 1),
-                "max_combo_orders": _env_int("KALSHI_AUTOBET_MAX_COMBO_ORDERS", 1),
-                "combo_enabled": _env_flag("KALSHI_AUTO_CREATE_COMBOS", default=True),
-                "combo_live_enabled": _env_flag("KALSHI_AUTO_PLACE_COMBOS", default=True),
-            },
-        }
-    )
-
-
-@app.route("/api/kalshi/automation/tick", methods=["GET", "POST"])
-def kalshi_automation_tick():
-    if not _is_cron_authorized():
-        return jsonify({"ok": False, "error": "Unauthorized"}), 401
-
-    body = request.get_json(silent=True) or {}
-    stake_usd = float(body.get("stake_usd") or _env_float("KALSHI_AUTOBET_STAKE_USD", 1.0))
-    max_single_orders = int(body.get("max_single_orders") or _env_int("KALSHI_AUTOBET_MAX_SINGLE_ORDERS", 1))
-    max_combo_orders = int(body.get("max_combo_orders") or _env_int("KALSHI_AUTOBET_MAX_COMBO_ORDERS", 1))
-    combo_enabled = bool(body.get("combo_enabled", _env_flag("KALSHI_AUTO_CREATE_COMBOS", default=True)))
-    combo_live_enabled = bool(body.get("combo_live_enabled", _env_flag("KALSHI_AUTO_PLACE_COMBOS", default=True)))
-
-    live_enabled = _env_flag("KALSHI_LIVE_TRADING_ENABLED", default=False)
-    dry_run = not live_enabled
-
-    payload, _, _ = _provider_or_local("/predictions/today", HF_PREDICTIONS_FILE, default={})
-    if not isinstance(payload, dict) or not isinstance(payload.get("predictions"), list):
-        payload = _load_json(HF_PREDICTIONS_FILE, {})
-    if not isinstance(payload, dict) or not isinstance(payload.get("predictions"), list):
-        return jsonify({"ok": False, "error": "Prediction data unavailable."}), 400
-
-    try:
-        single_orders = submit_prediction_orders(
-            payload,
-            stake_usd=stake_usd,
-            max_orders=max_single_orders,
-            dry_run=dry_run,
-        )
-
-        combo_result: dict[str, Any] = {
-            "ok": True,
-            "combo_enabled": combo_enabled,
-            "submitted_count": 0,
-            "suggested_count": 0,
-            "matched_count": 0,
-            "submitted": [],
-            "suggestions": [],
-        }
-        if combo_enabled:
-            from data.kalshi_trade_api import build_combo_suggestions_from_predictions, submit_combo_orders
-
-            combo_suggestions = build_combo_suggestions_from_predictions(payload, max_combos=max(5, max_combo_orders * 5))
-            combo_result["suggestions"] = combo_suggestions
-            combo_result["suggested_count"] = len(combo_suggestions)
-            combo_result["matched_count"] = sum(
-                1 for combo in combo_suggestions if str(combo.get("kalshi_status") or "").strip().lower() == "matched"
-            )
-            combo_orders = submit_combo_orders(
-                combo_suggestions,
-                stake_usd=stake_usd,
-                max_orders=max_combo_orders,
-                dry_run=(dry_run or (not combo_live_enabled)),
-            )
-            combo_result.update(combo_orders)
-
-        state = {
-            "ok": True,
-            "updated_at": single_orders.get("updated_at"),
-            "dry_run": dry_run,
-            "live_enabled": live_enabled,
-            "stake_usd": stake_usd,
-            "single_orders": single_orders,
-            "combo_orders": combo_result,
-        }
-        _save_json(KALSHI_AUTOMATION_STATE_FILE, state)
-        return jsonify(state)
-    except Exception as exc:
-        state = {"ok": False, "updated_at": "", "error": str(exc)}
-        _save_json(KALSHI_AUTOMATION_STATE_FILE, state)
-        return jsonify(state), 500
 
 
 if __name__ == "__main__":
