@@ -32,12 +32,12 @@ Execution: Polymarket (Kalshi removed from active flow)
    pip install -r requirements.txt
    ```
 2. Copy `.env.example` to `.env` and set at least:
-   - `HF_API_KEY`
-   - `HF_DATASET_REPO`
-   - `HF_MODEL_REPO`
-   - `FOOTBALL_DATA_API_KEY`
-   - `NEWSDATA_API_KEY` (recommended for richer player/team news coverage)
-   - Polymarket credentials
+   - `HF_API_KEY` → Your HF write token (generate at https://huggingface.co/settings/tokens)
+   - `HF_DATASET_REPO` → Your HF dataset repo (e.g., `papylove/sportprediction`)
+   - `HF_MODEL_REPO` → Your HF model repo (same or different, e.g., `papylove/sportprediction`)
+   - `FOOTBALL_DATA_API_KEY` → Free key from https://www.football-data.org/
+   - `NEWSDATA_API_KEY` → Free key from https://newsdata.io/ (recommended for richer player/team news)
+   - Polymarket credentials (if running auto-bets)
 3. Run pipeline:
    ```powershell
    python src\betting_bot.py --hf-bootstrap --hf-days-back 365
@@ -69,6 +69,108 @@ Execution: Polymarket (Kalshi removed from active flow)
 | Tennis | Jeff Sackmann historical CSVs | Polymarket market schedule extraction | Enabled |
 | Golf | Polymarket market schedule extraction | TheSportsDB events | Partial (upcoming via Polymarket) |
 | MMA/Boxing/Cricket | Polymarket market schedule extraction | TheSportsDB events | Partial (upcoming via Polymarket) |
+
+## Soccer Data: football-data.org Integration
+
+The pipeline automatically collects comprehensive soccer data from **football-data.org** and pushes it to your HF dataset.
+
+### Supported Competitions
+
+The pipeline fetches data from these football-data.org competition codes:
+
+**Europe (Top 5 Leagues + Cups):**
+- `PL` - English Premier League
+- `PD` - La Liga (Spain)
+- `SA` - Serie A (Italy)
+- `BL1` - Bundesliga (Germany)
+- `FL1` - Ligue 1 (France)
+- `PPL` - Portuguese Liga
+- `ELC` - English Championship (League 2)
+- `DED` - Dutch Eredivisie
+- `CL` - UEFA Champions League
+- `EL` - UEFA Europa League
+
+**Americas:**
+- `MLS` - Major League Soccer (US/Canada)
+- `CLI` - Copa Libertadores
+
+**Global Tournaments:**
+- `WC` - FIFA World Cup (when in progress)
+- `ASC` - Asian Cup
+- `AFR` - Africa Cup of Nations
+
+### What Gets Collected
+
+For each competition, the pipeline collects:
+1. **Completed games** (scores, teams, dates, odds when available)
+2. **Upcoming matches** (schedules for next predictions)
+3. **Team stats** (form, goals scored/conceded, etc.)
+4. **Player props** (scored, assists, shots on target, etc.)
+
+### How It Works
+
+1. **Daily append** (active every 30 minutes):
+   - Fetches completed matches from last 3 days
+   - Extracts odds from football-data.org
+   - Pushes to HF dataset `games` subset
+
+2. **Player prop generation**:
+   - For soccer, generates standard props:
+     - Win/Draw/Loss (moneyline)
+     - First Half Winner
+     - Second Half Winner
+     - Match Odds (if available from football-data.org)
+
+3. **Model training**:
+   - Uses all soccer games + props as training data
+   - Includes team form, league, season, day-of-week features
+   - News signals (injury/suspension alerts) for enhanced predictions
+
+4. **Predictions**:
+   - Daily predictions for all upcoming soccer matches
+   - Confidence scores per prop
+   - Matched against Polymarket available markets
+
+### Example: Running Soccer Pipeline Only
+
+```powershell
+# Bootstrap 30 days of soccer data
+python src/betting_bot.py --hf-bootstrap --hf-days-back 30
+
+# Run daily pipeline (all sports including soccer)
+python src/betting_bot.py --hf-daily-run --hf-attach-markets
+
+# View predictions in dashboard
+python src/dashboard.py
+# Open http://localhost:5000
+```
+
+### Free Tier Limits
+
+football-data.org free tier:
+- **10 requests per minute** (sufficient for 14+ competitions)
+- **Up to 10 competitions per request** (pipeline fetches individually with 0.2s delays to stay well within limit)
+- Historical data available
+
+### Example Prediction
+
+```json
+{
+  "prediction_id": "uuid-1234",
+  "sport": "soccer",
+  "league": "Premier League",
+  "home_team": "Manchester City",
+  "away_team": "Liverpool",
+  "game_date": "2026-07-15",
+  "home_win_prob": 0.58,
+  "away_win_prob": 0.35,
+  "draw_prob": 0.07,
+  "market_type": "moneyline",
+  "confidence": "elite",
+  "model": "random_forest",
+  "news_signals": ["injury_concern: Liverpool midfielder out"]
+}
+```
 
 ## Dashboard API
 

@@ -967,7 +967,17 @@ class HFDirectPipeline:
         if not self.football_data_api_key:
             return rows
         headers = {"X-Auth-Token": self.football_data_api_key}
-        competitions = ("PL", "PD", "SA", "BL1", "FL1", "PPL")
+        # Expanded competition codes for maximum soccer coverage
+        competitions = (
+            # Europe top 5 leagues
+            "PL", "PD", "SA", "BL1", "FL1", "PPL",
+            # Europe second tier & cups
+            "ELC", "DED", "BSA", "CL", "EL", "EC",
+            # Americas
+            "MLS", "CLI", "BSA",
+            # Other major regions when available
+            "WC", "ASC", "AFR", "OC",
+        )
         for comp in competitions:
             try:
                 resp = requests.get(
@@ -987,6 +997,16 @@ class HFDirectPipeline:
                     gd = str(m.get("utcDate") or "")[:10]
                     if hs is None or as_ is None or not ht or not at or not gd:
                         continue
+                    # Extract additional match details for enrichment
+                    match_stats = {}
+                    if m.get("odds"):
+                        odds = m.get("odds") or {}
+                        if odds.get("homeWin"):
+                            match_stats["odds_home_win"] = float(odds.get("homeWin") or 0)
+                        if odds.get("awayWin"):
+                            match_stats["odds_away_win"] = float(odds.get("awayWin") or 0)
+                        if odds.get("draw"):
+                            match_stats["odds_draw"] = float(odds.get("draw") or 0)
                     rows.append(
                         self._make_game_record(
                             game_id=str(m.get("id") or ""),
@@ -1000,6 +1020,7 @@ class HFDirectPipeline:
                             home_score=float(hs),
                             away_score=float(as_),
                             season=int(gd[:4]),
+                            extra_data=match_stats if match_stats else None,
                         )
                     )
                 time.sleep(0.2)
@@ -1273,11 +1294,16 @@ class HFDirectPipeline:
         if not self.football_data_api_key:
             return rows
         headers = {"X-Auth-Token": self.football_data_api_key}
+        # Expanded competition codes for maximum soccer coverage
         competitions = (
-            "PL", "PD", "SA", "BL1", "FL1", "PPL",  # Europe
-            "ELC", "DED", "BSA", "CL", "EL", "EC",  # Europe extended
-            "MLS", "BSA", "CLI",  # Americas
-            "WC", "ASC", "AFR",  # global tournaments when available
+            # Europe top 5 leagues
+            "PL", "PD", "SA", "BL1", "FL1", "PPL",
+            # Europe second tier & cups
+            "ELC", "DED", "BSA", "CL", "EL", "EC",
+            # Americas
+            "MLS", "CLI", "BSA",
+            # Other major regions when available
+            "WC", "ASC", "AFR", "OC",
         )
         for comp in competitions:
             try:
@@ -1293,6 +1319,16 @@ class HFDirectPipeline:
                     at = str(((m.get("awayTeam") or {}).get("name")) or "").strip()
                     if not ht or not at:
                         continue
+                    # Extract odds if available
+                    odds_data = {}
+                    if m.get("odds"):
+                        odds = m.get("odds") or {}
+                        if odds.get("homeWin"):
+                            odds_data["odds_home_win"] = float(odds.get("homeWin") or 0)
+                        if odds.get("awayWin"):
+                            odds_data["odds_away_win"] = float(odds.get("awayWin") or 0)
+                        if odds.get("draw"):
+                            odds_data["odds_draw"] = float(odds.get("draw") or 0)
                     rows.append(
                         {
                             "sport": "soccer",
@@ -1302,6 +1338,7 @@ class HFDirectPipeline:
                             "game_date": day.isoformat(),
                             "game_time": str(m.get("utcDate") or ""),
                             "game_id": str(m.get("id") or ""),
+                            "odds": odds_data if odds_data else None,
                         }
                     )
                 time.sleep(0.2)
