@@ -69,7 +69,7 @@
     .panel.active { display: block; }
     .section-grid, .stage-grid, .prediction-grid, .overview-grid, .polymarket-grid { display: grid; gap: 18px; }
     .stage-grid, .prediction-grid, .overview-grid, .polymarket-grid { grid-template-columns: repeat(1, minmax(0, 1fr)); }
-    .card { padding: 20px; border-radius: 24px; background: rgba(15, 23, 42, 0.56); border: 1px solid rgba(148,163,184,0.16); box-shadow: var(--shadow); }
+    .card { padding: 20px; border-radius: 24px; background: rgba(15, 23, 42, 0.56); border: 1px solid rgba(148,163,184,0.16); box-shadow: var(--shadow); color: var(--ink); }
     .card h3, .card h4 { margin: 0; letter-spacing: -0.03em; }
     .subtle { color: var(--muted); }
     .kvs { margin-top: 16px; display: grid; gap: 12px; }
@@ -85,11 +85,12 @@
     .prediction-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; }
     .sport-line { display: inline-flex; align-items: center; gap: 10px; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.16em; color: var(--muted); }
     .sport-icon { font-size: 1.3rem; }
-    .matchup { margin-top: 10px; font-size: 1.15rem; font-weight: 800; letter-spacing: -0.03em; }
-    .match-meta { margin-top: 6px; color: var(--muted); font-size: 0.92rem; }
+    .matchup { margin-top: 10px; font-size: 1.15rem; font-weight: 800; letter-spacing: -0.03em; color: var(--ink); }
+    .match-meta { margin-top: 6px; color: #dbeafe; font-size: 0.92rem; }
     .bar-wrap { margin-top: 16px; display: grid; gap: 10px; }
     .bar-row { display: grid; gap: 7px; }
-    .bar-label { display: flex; justify-content: space-between; gap: 12px; font-size: 0.9rem; }
+    .bar-label { display: flex; justify-content: space-between; gap: 12px; font-size: 0.9rem; color: var(--ink); }
+    .bar-label strong { color: var(--ink); }
     .bar-track { position: relative; height: 10px; border-radius: 999px; overflow: hidden; background: rgba(148,163,184,0.12); }
     .bar-fill { position: absolute; inset: 0 auto 0 0; border-radius: inherit; background: linear-gradient(90deg, rgba(59,130,246,0.78), rgba(16,185,129,0.78)); }
     .prediction-footer { margin-top: 18px; display: flex; flex-wrap: wrap; gap: 10px; justify-content: space-between; align-items: center; }
@@ -263,6 +264,16 @@
     const num = (value) => Number.isFinite(Number(value)) ? Number(value).toLocaleString() : '—';
     const money = (value) => Number.isFinite(Number(value)) ? `$${Number(value).toFixed(2)}` : '—';
     const stamp = (value) => { if (!value) return '—'; const parsed = new Date(value); return Number.isNaN(parsed.getTime()) ? String(value) : parsed.toLocaleString(); };
+    function formatGameTime(prediction) {
+      const iso = String(prediction?.game_time || prediction?.scheduled_start || '').trim();
+      if (!iso) return 'Time TBD';
+      const parsed = new Date(iso);
+      if (Number.isNaN(parsed.getTime())) return iso;
+      const etDate = parsed.toLocaleDateString(undefined, { month: 'short', day: '2-digit', timeZone: 'America/New_York' });
+      const etTime = parsed.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', hour12: true, timeZone: 'America/New_York' });
+      const utcTime = parsed.toISOString().slice(11, 16);
+      return `${etDate} ${etTime} ET (${utcTime} UTC)`;
+    }
     const sportIcon = (sport) => sportIcons[String(sport || '').toLowerCase()] || sportIcons.default;
     const tierClass = (tier) => confidenceClasses[String(tier || '').toLowerCase()] || 'bad';
     const stateClass = (status) => statusClasses[String(status || '').toLowerCase()] || 'neutral';
@@ -348,7 +359,7 @@
       const polymarket = prediction.polymarket || {};
       const confidenceTier = String(prediction.confidence_tier || 'Watch').toLowerCase();
       const submissionState = String(polymarket.status || 'pending').toLowerCase();
-      return `<article class="card glass prediction-card" data-prediction='${esc(JSON.stringify(prediction))}'><div class="prediction-header"><div><div class="sport-line"><span class="sport-icon">${sportIcon(prediction.sport)}</span><span>${esc(prediction.sport || 'sport')}</span></div><div class="matchup">${esc(prediction.away_team || 'Away')} @ ${esc(prediction.home_team || 'Home')}</div><div class="match-meta">${esc(prediction.game_date || '')} • ${esc(prediction.game_time || prediction.scheduled_start || 'TBD')} • ${esc(prediction.market_name || prediction.market_type || 'Game Winner')}</div></div><span class="confidence-badge ${tierClass(confidenceTier)}">${esc(prediction.confidence_tier || 'Watch')}</span></div><div class="bar-wrap"><div class="bar-row"><div class="bar-label"><span>${esc(prediction.home_team || 'Home')}</span><strong>${esc(pct(prediction.home_win_prob))}</strong></div><div class="bar-track"><div class="bar-fill" style="width:${Math.max(2, Math.min(100, Number(prediction.home_win_prob || 0) * 100))}%"></div></div></div><div class="bar-row"><div class="bar-label"><span>${esc(prediction.away_team || 'Away')}</span><strong>${esc(pct(prediction.away_win_prob))}</strong></div><div class="bar-track"><div class="bar-fill" style="width:${Math.max(2, Math.min(100, Number(prediction.away_win_prob || 0) * 100))}%"></div></div></div></div><div class="prediction-footer"><div class="prediction-meta"><span class="status-badge ${stateClass(submissionState)}">${esc(submissionState.replace('_', ' '))}</span><span class="subtle">Pick: <strong style="color:var(--ink)">${esc(prediction.predicted_team || 'n/a')}</strong></span></div><div class="subtle">Model ${esc(prediction.model_name || prediction.model_type || '—')}</div></div></article>`;
+      return `<article class="card glass prediction-card" data-prediction='${esc(JSON.stringify(prediction))}'><div class="prediction-header"><div><div class="sport-line"><span class="sport-icon">${sportIcon(prediction.sport)}</span><span>${esc(prediction.sport || 'sport')}</span></div><div class="matchup">${esc(prediction.away_team || 'Away')} @ ${esc(prediction.home_team || 'Home')}</div><div class="match-meta">${esc(formatGameTime(prediction))} • ${esc(prediction.market_name || prediction.market_type || 'Game Winner')}</div></div><span class="confidence-badge ${tierClass(confidenceTier)}">${esc(prediction.confidence_tier || 'Watch')}</span></div><div class="bar-wrap"><div class="bar-row"><div class="bar-label"><span>${esc(prediction.home_team || 'Home')}</span><strong>${esc(pct(prediction.home_win_prob))}</strong></div><div class="bar-track"><div class="bar-fill" style="width:${Math.max(2, Math.min(100, Number(prediction.home_win_prob || 0) * 100))}%"></div></div></div><div class="bar-row"><div class="bar-label"><span>${esc(prediction.away_team || 'Away')}</span><strong>${esc(pct(prediction.away_win_prob))}</strong></div><div class="bar-track"><div class="bar-fill" style="width:${Math.max(2, Math.min(100, Number(prediction.away_win_prob || 0) * 100))}%"></div></div></div></div><div class="prediction-footer"><div class="prediction-meta"><span class="status-badge ${stateClass(submissionState)}">${esc(submissionState.replace('_', ' '))}</span><span class="subtle">Pick: <strong style="color:var(--ink)">${esc(prediction.predicted_team || 'n/a')}</strong></span></div><div class="subtle">Model ${esc(prediction.model_name || prediction.model_type || '—')}</div></div></article>`;
     }
     function renderPredictionGrid(containerId, payload, prefix) {
       const raw = Array.isArray(payload.predictions) ? payload.predictions : [];
@@ -375,7 +386,7 @@
       if (!rows.length) { document.getElementById('submission-shell').innerHTML = '<div class="empty-state">No Polymarket submissions yet.</div>'; return; }
       document.getElementById('submission-shell').innerHTML = `<table><thead><tr><th>Submitted</th><th>Game</th><th>Pick</th><th>Status</th><th>Price</th><th>Stake</th><th>Reason</th></tr></thead><tbody>${rows.map(row => `<tr><td>${esc(stamp(row.submitted_at))}</td><td>${esc(row.game || '—')}</td><td>${esc(row.pick || '—')}</td><td>${esc(row.status || '—')}</td><td>${esc(pct(row.price || 0))}</td><td>${esc(money(row.amount_usd || 0))}</td><td>${esc(row.reason || '')}</td></tr>`).join('')}</tbody></table>`;
     }
-    function openModal(prediction) { document.getElementById('modal-subtitle').textContent = `${prediction.away_team || 'Away'} @ ${prediction.home_team || 'Home'} • ${prediction.game_date || ''}`; document.getElementById('modal-json').textContent = JSON.stringify(prediction, null, 2); document.getElementById('modal-backdrop').classList.add('open'); }
+    function openModal(prediction) { document.getElementById('modal-subtitle').textContent = `${prediction.away_team || 'Away'} @ ${prediction.home_team || 'Home'} • ${formatGameTime(prediction)}`; document.getElementById('modal-json').textContent = JSON.stringify(prediction, null, 2); document.getElementById('modal-backdrop').classList.add('open'); }
     function closeModal() { document.getElementById('modal-backdrop').classList.remove('open'); }
     function renderAll() { renderHeroMetrics(); renderPipeline(); renderPredictionGrid('today-grid', state.today || {}, 'today'); renderPredictionGrid('tomorrow-grid', state.tomorrow || {}, 'tomorrow'); renderHistory(); renderPolymarket(); document.getElementById('live-status').textContent = `Live refresh • ${new Date().toLocaleTimeString()}`; document.getElementById('live-source').textContent = `Source: ${(state.status.source || 'local').toUpperCase()}`; }
     async function refreshAll() {

@@ -67,6 +67,8 @@ class HFDirectPipeline:
         "mlb": "mlb",
         "basketball": "nba",
         "nba": "nba",
+        "american football": "nfl",
+        "nfl": "nfl",
         "hockey": "nhl",
         "nhl": "nhl",
         "soccer": "soccer",
@@ -1156,6 +1158,15 @@ class HFDirectPipeline:
             home, away = self._parse_polymarket_matchup(str(m.get("question") or m.get("title") or ""))
             if not home or not away:
                 continue
+            text_blob = " ".join(
+                [
+                    str(m.get("sport") or ""),
+                    str(m.get("category") or ""),
+                    str(m.get("groupItemTitle") or ""),
+                    str(m.get("question") or ""),
+                    str(m.get("title") or ""),
+                ]
+            ).strip().lower()
             sport_raw = str(m.get("sport") or m.get("category") or "").strip().lower()
             sport = self._POLYMARKET_SPORT_ALIASES.get(sport_raw, "")
             if not sport:
@@ -1163,6 +1174,8 @@ class HFDirectPipeline:
                     if k in sport_raw:
                         sport = v
                         break
+            if not sport:
+                sport = self._infer_sport_from_text(text_blob)
             if not sport:
                 continue
             rows.append(
@@ -1183,6 +1196,8 @@ class HFDirectPipeline:
         if not raw:
             return "", ""
         patterns = [
+            r"will\s+(?P<a>.+?)\s+beat\s+(?P<b>.+)",
+            r"(?P<a>.+?)\s+to\s+beat\s+(?P<b>.+)",
             r"(?P<a>.+?)\s+vs\.?\s+(?P<b>.+)",
             r"(?P<a>.+?)\s+v\.?\s+(?P<b>.+)",
             r"(?P<a>.+?)\s+@\s+(?P<b>.+)",
@@ -1197,6 +1212,37 @@ class HFDirectPipeline:
             if a and b and a.lower() != b.lower():
                 return b, a
         return "", ""
+
+    def _infer_sport_from_text(self, text: str) -> str:
+        raw = str(text or "").strip().lower()
+        if not raw:
+            return ""
+        keyword_map = {
+            "world series": "mlb",
+            "mlb": "mlb",
+            "nba": "nba",
+            "wnba": "nba",
+            "nfl": "nfl",
+            "super bowl": "nfl",
+            "nhl": "nhl",
+            "premier league": "soccer",
+            "la liga": "soccer",
+            "uefa": "soccer",
+            "soccer": "soccer",
+            "tennis": "tennis",
+            "atp": "tennis",
+            "wta": "tennis",
+            "pga": "golf",
+            "golf": "golf",
+            "boxing": "boxing",
+            "ufc": "mma",
+            "mma": "mma",
+            "cricket": "cricket",
+        }
+        for key, normalized in keyword_map.items():
+            if key in raw:
+                return normalized
+        return ""
 
     # ──────────────────────────────────────────────────────────
     # Private helpers
