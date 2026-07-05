@@ -111,6 +111,14 @@ def _fetch_hf_model_artifact_json(path_in_repo: str) -> Any:
         return None
 
 
+def _fetch_first_hf_json(paths_in_repo: list[str]) -> Any:
+    for candidate in paths_in_repo:
+        payload = _fetch_hf_model_artifact_json(candidate)
+        if isinstance(payload, dict) and payload:
+            return payload
+    return None
+
+
 def _provider_or_local(path: str, local_file: Path, *, default: Any) -> tuple[Any, str, str]:
     error = ""
     if PROVIDER_API_URL:
@@ -123,16 +131,16 @@ def _provider_or_local(path: str, local_file: Path, *, default: Any) -> tuple[An
             logger.warning("Provider proxy failed for %s: %s", path, exc)
 
     hub_artifact_map = {
-        "/status": "artifacts/hf_pipeline_status.json",
-        "/predictions/today": "artifacts/hf_daily_predictions.json",
-        "/predictions/tomorrow": "artifacts/hf_daily_predictions.json",
-        "/model/stats": "artifacts/hf_pipeline_status.json",
-        "/polymarket/submissions": "artifacts/hf_daily_prediction_markets.json",
-        "/polymarket/positions": "artifacts/hf_daily_prediction_markets.json",
+        "/status": ["artifacts/hf_pipeline_status.json", "hf_pipeline_status.json"],
+        "/predictions/today": ["artifacts/hf_daily_predictions.json", "hf_daily_predictions.json"],
+        "/predictions/tomorrow": ["artifacts/hf_daily_predictions.json", "hf_daily_predictions.json"],
+        "/model/stats": ["artifacts/hf_pipeline_status.json", "hf_pipeline_status.json"],
+        "/polymarket/submissions": ["artifacts/hf_daily_prediction_markets.json", "hf_daily_prediction_markets.json"],
+        "/polymarket/positions": ["artifacts/hf_daily_prediction_markets.json", "hf_daily_prediction_markets.json"],
     }
-    artifact_path = hub_artifact_map.get(path)
-    if artifact_path:
-        payload = _fetch_hf_model_artifact_json(artifact_path)
+    artifact_paths = hub_artifact_map.get(path)
+    if artifact_paths:
+        payload = _fetch_first_hf_json(artifact_paths)
         if isinstance(payload, dict) and payload:
             return payload, "hf_hub_artifact", error
 
@@ -167,6 +175,15 @@ def _predictions_for_date(payload: dict[str, Any], target_date: str) -> dict[str
     }
 
 
+def _prediction_counts_for_metrics() -> tuple[int, int, int]:
+    today_payload, _, _ = _provider_or_local("/predictions/today", HF_PREDICTIONS_FILE, default={})
+    tomorrow_payload, _, _ = _provider_or_local("/predictions/tomorrow", HF_PREDICTIONS_FILE, default={})
+
+    today_count = int((today_payload or {}).get("prediction_count") or 0) if isinstance(today_payload, dict) else 0
+    tomorrow_count = int((tomorrow_payload or {}).get("prediction_count") or 0) if isinstance(tomorrow_payload, dict) else 0
+    return today_count + tomorrow_count, today_count, tomorrow_count
+
+
 @app.route("/")
 def index():
     return render_template("dashboard.html")
@@ -176,10 +193,17 @@ def index():
 def predictions_status():
     payload, source, error = _provider_or_local("/status", HF_STATUS_FILE, default={})
     if isinstance(payload, dict) and "pipeline" in payload and "metrics" in payload:
+        metrics = payload.get("metrics") or {}
+        if not int(metrics.get("total_predictions") or 0):
+            total_predictions, today_predictions, tomorrow_predictions = _prediction_counts_for_metrics()
+            metrics["total_predictions"] = total_predictions
+            metrics["today_predictions"] = today_predictions
+            metrics["tomorrow_predictions"] = tomorrow_predictions
+            payload["metrics"] = metrics
         return jsonify(_envelope(payload, source, error))
 
     status = payload if isinstance(payload, dict) else {}
-    preds = _load_json(HF_PREDICTIONS_FILE, {})
+    total_predictions, today_predictions, tomorrow_predictions = _prediction_counts_for_metrics()
     model = {
         "best_model": status.get("best_model", ""),
         "version": status.get("model_version", ""),
@@ -210,9 +234,9 @@ def predictions_status():
             "polymarket": {"ok": True},
         },
         "metrics": {
-            "total_predictions": int(preds.get("prediction_count") or 0),
-            "today_predictions": len([p for p in (preds.get("predictions") or []) if p.get("game_date") == preds.get("today")]),
-            "tomorrow_predictions": len([p for p in (preds.get("predictions") or []) if p.get("game_date") == preds.get("tomorrow")]),
+            "total_predictions": total_predictions,
+            "today_predictions": today_predictions,
+            "tomorrow_predictions": tomorrow_predictions,
             "active_models": 1 if model.get("best_model") else 0,
             "win_rate": float(model.get("best_score") or 0),
         },
