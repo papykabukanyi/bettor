@@ -53,8 +53,8 @@ Execution: Kalshi (single + combo order routing)
 
 - Build the static dashboard with `python scripts/build_cloudflare_pages.py`.
 - Deploy the `public/` output to Cloudflare Pages.
-- Preferred deploy command: `npx wrangler pages deploy public --project-name=bettor-pages`
-- Or use `npm run deploy:pages` after installing Node dependencies.
+- Preferred deploy command: `npm run deploy:pages`
+- The script builds `public/` first, then uploads it with Wrangler.
 - Set `BACKEND_BASE_URL` in Cloudflare Pages to your Render backend URL.
 - Pages proxies `/api/*` to the backend through a Pages Function.
 

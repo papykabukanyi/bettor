@@ -1,8 +1,10 @@
 {
   "name": "bettor-pages",
+  "type": "module",
   "private": true,
   "scripts": {
     "build:pages": "python scripts/build_cloudflare_pages.py",
-    "deploy:pages": "npx wrangler pages deploy public --project-name=bettor-pages"
+    "build": "npm run build:pages",
+    "deploy:pages": "npm run build:pages && npx wrangler pages deploy public --project-name=bettor-pages"
   }
 }
