@@ -262,6 +262,20 @@ class HFDirectPipeline:
             with open(meta_path, "w", encoding="utf-8") as f:
                 json.dump(metadata, f, indent=2)
             readme_content = (
+                "---\n"
+                "license: mit\n"
+                "library_name: scikit-learn\n"
+                "pipeline_tag: tabular-classification\n"
+                "tags:\n"
+                "- sports\n"
+                "- betting\n"
+                "- scikit-learn\n"
+                "- auto-training\n"
+                "metrics:\n"
+                "- roc_auc\n"
+                "datasets:\n"
+                f"- {self.dataset_repo_id}\n"
+                "---\n\n"
                 "# Sports Win Prediction Model\n\n"
                 f"Auto-trained {trained_at[:10]} by bettor HF pipeline.\n\n"
                 "| Field | Value |\n|---|---|\n"

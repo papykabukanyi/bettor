@@ -56,7 +56,11 @@ def _provider_or_local(path: str, local_file: Path, *, default: Any) -> tuple[An
 def _envelope(payload: Any, source_live: bool, error: str = "") -> dict[str, Any]:
     wrapped = dict(payload) if isinstance(payload, dict) else {"data": payload}
     wrapped.setdefault("ok", not bool(error))
-    wrapped.setdefault("source", "provider" if source_live else "local")
+    source = "hf_space" if source_live else "hf_local_snapshot"
+    if not source_live and not PROVIDER_API_URL:
+        source = "hf_local_snapshot_no_space_url"
+    wrapped.setdefault("source", source)
+    wrapped.setdefault("provider_configured", bool(PROVIDER_API_URL))
     if error:
         wrapped.setdefault("warning", error)
     return wrapped
@@ -222,10 +226,11 @@ def polymarket_positions():
 def polymarket_status():
     sub = polymarket_submissions().get_json(silent=True) or {}
     pos = polymarket_positions().get_json(silent=True) or {}
-    source = "provider" if (sub.get("source") == "provider" or pos.get("source") == "provider") else "local"
+    source = "hf_space" if (sub.get("source") == "hf_space" or pos.get("source") == "hf_space") else "hf_local_snapshot"
     payload = {
         "ok": True,
         "source": source,
+        "provider_configured": bool(PROVIDER_API_URL),
         "warning": sub.get("warning") or pos.get("warning") or "",
         "updated_at": (sub.get("updated_at") or pos.get("updated_at") or ""),
         "submissions": sub,
