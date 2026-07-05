@@ -67,8 +67,8 @@
     .tab:hover, .tab.active { color: white; border-color: rgba(59,130,246,0.5); background: linear-gradient(135deg, rgba(59,130,246,0.88), rgba(29,78,216,0.82)); transform: translateY(-1px); }
     .panel { display: none; margin-top: 22px; animation: fadeUp .35s ease both; }
     .panel.active { display: block; }
-    .section-grid, .stage-grid, .prediction-grid, .overview-grid, .polymarket-grid { display: grid; gap: 18px; }
-    .stage-grid, .prediction-grid, .overview-grid, .polymarket-grid { grid-template-columns: repeat(1, minmax(0, 1fr)); }
+    .section-grid, .stage-grid, .prediction-grid, .overview-grid, .market-grid { display: grid; gap: 18px; }
+    .stage-grid, .prediction-grid, .overview-grid, .market-grid { grid-template-columns: repeat(1, minmax(0, 1fr)); }
     .card { padding: 20px; border-radius: 24px; background: rgba(15, 23, 42, 0.56); border: 1px solid rgba(148,163,184,0.16); box-shadow: var(--shadow); color: var(--ink); }
     .card h3, .card h4 { margin: 0; letter-spacing: -0.03em; color: var(--ink); }
     .subtle { color: var(--muted); }
@@ -143,7 +143,7 @@
       .stage-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
       .overview-grid { grid-template-columns: 1.1fr .9fr; }
       .prediction-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-      .polymarket-grid { grid-template-columns: 0.95fr 1.05fr; }
+      .market-grid { grid-template-columns: 0.95fr 1.05fr; }
       .sort-row { grid-template-columns: 1.1fr .9fr .9fr; }
     }
     @media (min-width: 1120px) { .prediction-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
@@ -157,7 +157,7 @@
         <div class="hero-copy">
           <div class="pill"><span class="live-dot"></span><span id="live-status">Connecting to Hugging Face pipeline…</span></div>
           <h1>Hugging Face Command Center</h1>
-          <p>HF Dataset + HF Model + HF Space inference with automated multi-sport predictions and Polymarket execution status.</p>
+          <p>HF Dataset + HF Model + HF Space inference with automated multi-sport predictions and Kalshi execution status.</p>
         </div>
         <div class="pill" id="live-source">Source: loading</div>
       </div>
@@ -170,7 +170,7 @@
       <button class="tab" data-tab="tomorrow">Tomorrow</button>
       <button class="tab" data-tab="comparator">Comparator</button>
       <button class="tab" data-tab="history">History</button>
-      <button class="tab" data-tab="polymarket">Polymarket</button>
+      <button class="tab" data-tab="kalshi">Kalshi</button>
     </nav>
 
     <section class="panel active" id="panel-pipeline">
@@ -189,6 +189,8 @@
           <div>
             <label class="label-mini" for="today-sort">Sort by</label>
             <select id="today-sort" class="form-select form-select-sm">
+              <option value="matchup_player" selected>Matchup + Player Props</option>
+              <option value="props_first">Player Props First</option>
               <option value="confidence_desc">Confidence (High to Low)</option>
               <option value="confidence_asc">Confidence (Low to High)</option>
               <option value="time_asc">Game Time (Earliest)</option>
@@ -204,8 +206,8 @@
             </select>
           </div>
           <div>
-            <label class="label-mini" for="today-search">Search team</label>
-            <input id="today-search" class="form-control form-control-sm" placeholder="Type team name">
+            <label class="label-mini" for="today-search">Search team/player</label>
+            <input id="today-search" class="form-control form-control-sm" placeholder="Type team or player">
           </div>
         </div>
       </div>
@@ -218,6 +220,8 @@
           <div>
             <label class="label-mini" for="tomorrow-sort">Sort by</label>
             <select id="tomorrow-sort" class="form-select form-select-sm">
+              <option value="matchup_player" selected>Matchup + Player Props</option>
+              <option value="props_first">Player Props First</option>
               <option value="confidence_desc">Confidence (High to Low)</option>
               <option value="confidence_asc">Confidence (Low to High)</option>
               <option value="time_asc">Game Time (Earliest)</option>
@@ -233,8 +237,8 @@
             </select>
           </div>
           <div>
-            <label class="label-mini" for="tomorrow-search">Search team</label>
-            <input id="tomorrow-search" class="form-control form-control-sm" placeholder="Type team name">
+            <label class="label-mini" for="tomorrow-search">Search team/player</label>
+            <input id="tomorrow-search" class="form-control form-control-sm" placeholder="Type team or player">
           </div>
         </div>
       </div>
@@ -251,10 +255,10 @@
 
     <section class="panel" id="panel-history"><div class="table-shell glass" id="history-shell"></div></section>
 
-    <section class="panel" id="panel-polymarket">
-      <div class="polymarket-grid">
-        <div class="card glass" id="polymarket-summary"></div>
-        <div class="card glass" id="polymarket-positions"></div>
+    <section class="panel" id="panel-kalshi">
+      <div class="market-grid">
+        <div class="card glass" id="kalshi-summary"></div>
+        <div class="card glass" id="kalshi-positions"></div>
       </div>
       <div class="table-shell glass" id="submission-shell" style="margin-top:18px"></div>
     </section>
@@ -280,7 +284,7 @@
     const state = {
       status: {}, today: { predictions: [] }, tomorrow: { predictions: [] },
       model: { current_model: {}, history: [] },
-      polymarketStatus: { submissions: {}, positions: {} },
+      kalshiStatus: { submissions: {}, positions: {} },
       lastHash: '', firstRefresh: true,
       activeTab: 'pipeline',
       tabLoaded: {},
@@ -288,12 +292,13 @@
 
     // ─── Constants ───────────────────────────────────────────────────────────
     const sportIcons = { mlb: '⚾', nba: '🏀', nhl: '🏒', soccer: '⚽', tennis: '🎾', golf: '⛳', boxing: '🥊', mma: '🥋', cricket: '🏏', nfl: '🏈', default: '🏈' };
-    const statusClasses = { submitted: 'good', filled: 'good', dry_run: 'neutral', pending: 'warn', skipped: 'warn', failed: 'bad', cancelled: 'bad' };
+    const statusClasses = { matched: 'good', submitted: 'good', filled: 'good', dry_run: 'neutral', pending: 'warn', skipped: 'warn', unavailable: 'warn', started: 'warn', done: 'warn', failed: 'bad', cancelled: 'bad' };
     const confidenceClasses = { elite: 'good', solid: 'neutral', lean: 'warn', watch: 'bad' };
 
     // ─── Utilities ───────────────────────────────────────────────────────────
     const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
     const pct = v => Number.isFinite(Number(v)) ? `${(Number(v) * 100).toFixed(1)}%` : '—';
+    const cents = v => Number.isFinite(Number(v)) ? `${Math.round(Number(v))}¢` : '—';
     const num = v => Number.isFinite(Number(v)) ? Number(v).toLocaleString() : '—';
     const money = v => Number.isFinite(Number(v)) ? `$${Number(v).toFixed(2)}` : '—';
     const stamp = v => { if (!v) return '—'; const d = new Date(v); return isNaN(d) ? String(v) : d.toLocaleString(); };
@@ -315,7 +320,22 @@
 
     function sortPredictions(rows, mode) {
       const list = [...rows];
+      const matchupKey = row => `${String(row.sport || '').toLowerCase()}|${String(row.game_date || '')}|${String(row.away_team || '').toLowerCase()}|${String(row.home_team || '').toLowerCase()}|${safeSortDate(row)}`;
+      const isPlayerProp = row => String(row.prediction_scope || '') === 'player_prop';
       switch (mode) {
+        case 'matchup_player':
+          return list.sort((a, b) => {
+            const ka = matchupKey(a);
+            const kb = matchupKey(b);
+            if (ka !== kb) return ka.localeCompare(kb);
+            if (isPlayerProp(a) !== isPlayerProp(b)) return isPlayerProp(a) ? -1 : 1;
+            return String(a.player_name || '').localeCompare(String(b.player_name || '')) || Number(b.confidence || 0) - Number(a.confidence || 0);
+          });
+        case 'props_first':
+          return list.sort((a, b) => {
+            if (isPlayerProp(a) !== isPlayerProp(b)) return isPlayerProp(a) ? -1 : 1;
+            return Number(b.confidence || 0) - Number(a.confidence || 0);
+          });
         case 'confidence_asc': return list.sort((a, b) => Number(a.confidence || 0) - Number(b.confidence || 0));
         case 'time_asc': return list.sort((a, b) => safeSortDate(a) - safeSortDate(b));
         case 'time_desc': return list.sort((a, b) => safeSortDate(b) - safeSortDate(a));
@@ -330,7 +350,7 @@
       const query = String(document.getElementById(`${prefix}-search`)?.value || '').trim().toLowerCase();
       let filtered = [...rows];
       if (sportFilter !== 'all') filtered = filtered.filter(r => String(r.sport || '').toLowerCase() === sportFilter);
-      if (query) filtered = filtered.filter(r => `${r.home_team || ''} ${r.away_team || ''} ${r.predicted_team || ''}`.toLowerCase().includes(query));
+      if (query) filtered = filtered.filter(r => `${r.home_team || ''} ${r.away_team || ''} ${r.predicted_team || ''} ${r.player_name || ''} ${r.player_team || ''} ${r.market_name || ''} ${r.predicted_label || ''}`.toLowerCase().includes(query));
       const sortMode = document.getElementById(`${prefix}-sort`)?.value || 'confidence_desc';
       return sortPredictions(filtered, sortMode);
     }
@@ -363,8 +383,8 @@
       document.getElementById('today-grid').innerHTML = sk3;
       document.getElementById('tomorrow-grid').innerHTML = sk3;
       document.getElementById('history-shell').innerHTML = '<div class="empty-state">Loading prediction history…</div>';
-      document.getElementById('polymarket-summary').innerHTML = '<div class="loading-line"></div>'.repeat(3);
-      document.getElementById('polymarket-positions').innerHTML = '<div class="loading-line"></div>'.repeat(3);
+      document.getElementById('kalshi-summary').innerHTML = '<div class="loading-line"></div>'.repeat(3);
+      document.getElementById('kalshi-positions').innerHTML = '<div class="loading-line"></div>'.repeat(3);
       document.getElementById('submission-shell').innerHTML = '<div class="empty-state">Loading submissions…</div>';
     }
 
@@ -382,7 +402,7 @@
       const cards = [
         { label: 'Total Predictions', value: num(metrics.total_predictions || 0), note: `${num(metrics.today_predictions || 0)} today • ${num(metrics.tomorrow_predictions || 0)} tomorrow` },
         { label: 'Win Rate', value: pct(metrics.win_rate || m.best_score || 0), note: `Cross-validation ROC AUC • ${esc(m.best_model || 'Awaiting train')}` },
-        { label: 'Polymarket Bets', value: num((state.polymarketStatus.submissions || {}).summary?.placed || 0), note: `${num((state.polymarketStatus.positions || {}).summary?.active_positions || 0)} active positions` },
+        { label: 'Kalshi Bets', value: num((state.kalshiStatus.submissions || {}).summary?.placed || 0), note: `${num((state.kalshiStatus.positions || {}).summary?.active_positions || 0)} active positions` },
         { label: 'Active Models', value: num(metrics.active_models || m.candidate_count || 0), note: `Version ${esc(m.version || 'n/a')}` },
       ];
       document.getElementById('hero-metrics').innerHTML = cards.map(c =>
@@ -392,18 +412,18 @@
 
     function renderPipeline() {
       const pipeline = state.status.pipeline || {};
-      const sections = [['Fetch', pipeline.fetch || {}, '2:00 AM ET'], ['Train', pipeline.train || {}, '3:00 AM ET'], ['Predict', pipeline.predict || {}, '4:00 AM ET'], ['Polymarket', pipeline.polymarket || {}, 'Post-predict']];
+      const sections = [['Fetch', pipeline.fetch || {}, '2:00 AM ET'], ['Train', pipeline.train || {}, '3:00 AM ET'], ['Predict', pipeline.predict || {}, '4:00 AM ET'], ['Kalshi', pipeline.kalshi || {}, 'Post-predict']];
       document.getElementById('stage-grid').innerHTML = sections.map(([title, info, schedule]) => {
         const ok = info.ok !== false;
         return `<article class="card glass"><div style="display:flex;justify-content:space-between;gap:12px;align-items:center"><h3>${esc(title)}</h3><span class="stage-badge ${ok ? 'good' : 'bad'}">${ok ? 'healthy' : 'attention'}</span></div><div class="kvs"><div class="kv"><span>Schedule</span><strong>${esc(schedule)}</strong></div><div class="kv"><span>Updated</span><strong>${esc(stamp(info.updated_at || info.generated_at || info.trained_at))}</strong></div><div class="kv"><span>Summary</span><strong>${esc(info.prediction_count || info.completed_games_total || info.rows || info.placed || 0)}</strong></div></div></article>`;
       }).join('');
       const model = state.model.current_model || {};
-      document.getElementById('pipeline-overview').innerHTML = `<h3>Pipeline health</h3><p class="subtle" style="margin:10px 0 0">Live orchestration status for HF Dataset + Model publishing and Space inference.</p><div class="kvs"><div class="kv"><span>Last refresh</span><strong>${esc(stamp(state.status.updated_at))}</strong></div><div class="kv"><span>Today predictions</span><strong>${esc(num((state.today || {}).prediction_count || 0))}</strong></div><div class="kv"><span>Tomorrow predictions</span><strong>${esc(num((state.tomorrow || {}).prediction_count || 0))}</strong></div><div class="kv"><span>Submissions placed</span><strong>${esc(num(((state.polymarketStatus.submissions || {}).summary || {}).placed || 0))}</strong></div><div class="kv"><span>Source</span><strong>${esc(state.status.source || 'local')}</strong></div></div>`;
+      document.getElementById('pipeline-overview').innerHTML = `<h3>Pipeline health</h3><p class="subtle" style="margin:10px 0 0">Live orchestration status for HF Dataset + Model publishing and Space inference.</p><div class="kvs"><div class="kv"><span>Last refresh</span><strong>${esc(stamp(state.status.updated_at))}</strong></div><div class="kv"><span>Today predictions</span><strong>${esc(num((state.today || {}).prediction_count || 0))}</strong></div><div class="kv"><span>Tomorrow predictions</span><strong>${esc(num((state.tomorrow || {}).prediction_count || 0))}</strong></div><div class="kv"><span>Submissions placed</span><strong>${esc(num(((state.kalshiStatus.submissions || {}).summary || {}).placed || 0))}</strong></div><div class="kv"><span>Source</span><strong>${esc(state.status.source || 'local')}</strong></div></div>`;
       document.getElementById('model-overview').innerHTML = `<h3>Model snapshot</h3><p class="subtle" style="margin:10px 0 0">Best estimator chosen from 5-fold cross-validation each day.</p><div class="kvs"><div class="kv"><span>Model</span><strong>${esc(model.best_model || '—')}</strong></div><div class="kv"><span>Version</span><strong>${esc(model.version || '—')}</strong></div><div class="kv"><span>Rows trained</span><strong>${esc(num(model.rows || 0))}</strong></div><div class="kv"><span>Score</span><strong>${esc(pct(model.best_score || 0))}</strong></div><div class="kv"><span>Sports</span><strong>${esc((model.sports_covered || []).join(', ') || '—')}</strong></div></div>`;
     }
 
     function predictionCard(prediction) {
-      const poly = prediction.polymarket || {};
+      const poly = prediction.kalshi || {};
       const tier = String(prediction.confidence_tier || 'Watch').toLowerCase();
       const polyState = String(poly.status || 'pending').toLowerCase();
       const isPlayerProp = String(prediction.prediction_scope || '') === 'player_prop';
@@ -503,19 +523,21 @@
     function renderHistory() {
       const rows = [...(state.today.predictions || []), ...(state.tomorrow.predictions || [])].sort((a, b) => `${a.game_date||''} ${a.game_time||''}`.localeCompare(`${b.game_date||''} ${b.game_time||''}`));
       if (!rows.length) { document.getElementById('history-shell').innerHTML = '<div class="empty-state">No prediction history yet.</div>'; return; }
-      document.getElementById('history-shell').innerHTML = `<table><thead><tr><th>Date</th><th>Sport</th><th>Market</th><th>Player</th><th>Line</th><th>Projection</th><th>Matchup</th><th>Pick</th><th>Confidence</th><th>Submission</th></tr></thead><tbody>${rows.map(r => `<tr><td>${esc(r.game_date||'—')}</td><td>${esc(r.sport||'—')}</td><td>${esc(r.market_name||r.market_type||'Game Winner')}</td><td>${esc(r.player_name||'—')}</td><td>${esc(r.prop_line??'—')} ${esc(r.prop_unit||'')}</td><td>${esc(r.projected_value??'—')} ${esc(r.prop_unit||'')}</td><td>${esc(r.away_team||'Away')} @ ${esc(r.home_team||'Home')}</td><td>${esc(r.predicted_label||r.predicted_team||r.predicted_outcome||'—')}</td><td>${esc(pct(r.confidence||0))}</td><td>${esc((r.polymarket||{}).status||'pending')}</td></tr>`).join('')}</tbody></table>`;
+      document.getElementById('history-shell').innerHTML = `<table><thead><tr><th>Date</th><th>Sport</th><th>Market</th><th>Player</th><th>Line</th><th>Projection</th><th>Matchup</th><th>Pick</th><th>Confidence</th><th>Submission</th></tr></thead><tbody>${rows.map(r => `<tr><td>${esc(r.game_date||'—')}</td><td>${esc(r.sport||'—')}</td><td>${esc(r.market_name||r.market_type||'Game Winner')}</td><td>${esc(r.player_name||'—')}</td><td>${esc(r.prop_line??'—')} ${esc(r.prop_unit||'')}</td><td>${esc(r.projected_value??'—')} ${esc(r.prop_unit||'')}</td><td>${esc(r.away_team||'Away')} @ ${esc(r.home_team||'Home')}</td><td>${esc(r.predicted_label||r.predicted_team||r.predicted_outcome||'—')}</td><td>${esc(pct(r.confidence||0))}</td><td>${esc((r.kalshi||{}).status||'pending')}</td></tr>`).join('')}</tbody></table>`;
     }
 
-    function renderPolymarket() {
-      const submissions = state.polymarketStatus.submissions || {};
-      const positions = state.polymarketStatus.positions || {};
+    function renderKalshi() {
+      const submissions = state.kalshiStatus.submissions || {};
+      const positions = state.kalshiStatus.positions || {};
+      const live = state.kalshiStatus.live || {};
+      const bal = live.balance || positions.balance || {};
       const ss = submissions.summary || {};
       const ps = positions.summary || {};
-      document.getElementById('polymarket-summary').innerHTML = `<h3>Submission summary</h3><p class="subtle" style="margin:10px 0 0">Auto-submission filters solid + elite picks, matches live markets, then sizes bets with Kelly.</p><div class="kvs"><div class="kv"><span>Evaluated</span><strong>${esc(num(ss.evaluated||0))}</strong></div><div class="kv"><span>Placed</span><strong>${esc(num(ss.placed||0))}</strong></div><div class="kv"><span>Dry-run</span><strong>${esc(num(ss.dry_run||0))}</strong></div><div class="kv"><span>Failed</span><strong>${esc(num(ss.failed||0))}</strong></div><div class="kv"><span>Skipped</span><strong>${esc(num(ss.skipped||0))}</strong></div><div class="kv"><span>Buying power</span><strong>${esc(money(ss.available_buying_power_usd||0))}</strong></div></div>`;
-      document.getElementById('polymarket-positions').innerHTML = `<h3>Position overview</h3><p class="subtle" style="margin:10px 0 0">Snapshot of active orders and estimated P&amp;L from the latest submission log.</p><div class="kvs"><div class="kv"><span>Active positions</span><strong>${esc(num(ps.active_positions||0))}</strong></div><div class="kv"><span>Open notional</span><strong>${esc(money(ps.open_notional_usd||0))}</strong></div><div class="kv"><span>Estimated P&amp;L</span><strong>${esc(money(ps.estimated_pnl_usd||0))}</strong></div><div class="kv"><span>Updated</span><strong>${esc(stamp(positions.updated_at))}</strong></div></div>`;
-      const rows = Array.isArray(submissions.submissions) ? submissions.submissions.slice().reverse().slice(0, 20) : [];
-      if (!rows.length) { document.getElementById('submission-shell').innerHTML = '<div class="empty-state">No Polymarket submissions yet.</div>'; return; }
-      document.getElementById('submission-shell').innerHTML = `<table><thead><tr><th>Submitted</th><th>Game</th><th>Pick</th><th>Status</th><th>Price</th><th>Stake</th><th>Reason</th></tr></thead><tbody>${rows.map(r => `<tr><td>${esc(stamp(r.submitted_at))}</td><td>${esc(r.game||'—')}</td><td>${esc(r.pick||'—')}</td><td>${esc(r.status||'—')}</td><td>${esc(pct(r.price||0))}</td><td>${esc(money(r.amount_usd||0))}</td><td>${esc(r.reason||'')}</td></tr>`).join('')}</tbody></table>`;
+      document.getElementById('kalshi-summary').innerHTML = `<h3>Account summary</h3><p class="subtle" style="margin:10px 0 0">Live authenticated Kalshi account snapshot.</p><div class="kvs"><div class="kv"><span>Buying power</span><strong>${esc(money(bal.balance_usd||ss.available_buying_power_usd||0))}</strong></div><div class="kv"><span>Portfolio value</span><strong>${esc(money(bal.portfolio_value_usd||0))}</strong></div><div class="kv"><span>Open orders</span><strong>${esc(num(ps.active_positions||live.open_orders_count||0))}</strong></div><div class="kv"><span>Open notional</span><strong>${esc(money(ps.open_notional_usd||live.open_notional_usd||0))}</strong></div><div class="kv"><span>Last balance update</span><strong>${esc(stamp(bal.updated_ts||''))}</strong></div></div>`;
+      document.getElementById('kalshi-positions').innerHTML = `<h3>Order status</h3><p class="subtle" style="margin:10px 0 0">Connection + open orders fetched via signed API requests.</p><div class="kvs"><div class="kv"><span>Connection</span><strong>${esc(state.kalshiStatus.ok ? 'connected' : 'error')}</strong></div><div class="kv"><span>Evaluated predictions</span><strong>${esc(num(ss.evaluated||0))}</strong></div><div class="kv"><span>Placed</span><strong>${esc(num(ss.placed||0))}</strong></div><div class="kv"><span>Failed</span><strong>${esc(num(ss.failed||0))}</strong></div><div class="kv"><span>Updated</span><strong>${esc(stamp(positions.updated_at||live.updated_at||''))}</strong></div></div>`;
+      const rows = Array.isArray(positions.positions) ? positions.positions.slice().slice(0, 40) : [];
+      if (!rows.length) { document.getElementById('submission-shell').innerHTML = `<div class="empty-state">No open Kalshi orders${state.kalshiStatus.warning ? ` • ${esc(state.kalshiStatus.warning)}` : ''}</div>`; return; }
+      document.getElementById('submission-shell').innerHTML = `<table><thead><tr><th>Created</th><th>Ticker</th><th>Status</th><th>Side</th><th>Yes Price</th><th>No Price</th><th>Remaining</th><th>Order ID</th></tr></thead><tbody>${rows.map(r => `<tr><td>${esc(stamp(r.created_time||r.last_update_time||''))}</td><td>${esc(r.ticker||'—')}</td><td>${esc(r.status||'—')}</td><td>${esc(String(r.side||'').toUpperCase()||'—')}</td><td>${esc(money(r.yes_price_dollars||0))}</td><td>${esc(money(r.no_price_dollars||0))}</td><td>${esc(r.remaining_count_fp||'0')}</td><td>${esc(r.order_id||'')}</td></tr>`).join('')}</tbody></table>`;
     }
 
     function openModal(prediction) {
@@ -536,7 +558,7 @@
         case 'tomorrow':  renderPredictionGrid('tomorrow-grid', state.tomorrow || {}, 'tomorrow'); break;
         case 'comparator':renderComparator(); break;
         case 'history':   renderHistory(); break;
-        case 'polymarket':renderPolymarket(); break;
+        case 'kalshi':renderKalshi(); break;
       }
     }
 
@@ -557,9 +579,9 @@
       state.tomorrow = res || { predictions: [] };
     }
 
-    async function fetchPolymarket() {
-      const res = await fetchJson('/api/polymarket/status');
-      state.polymarketStatus = res || { submissions: {}, positions: {} };
+    async function fetchKalshi() {
+      const res = await fetchJson('/api/kalshi/status');
+      state.kalshiStatus = res || { submissions: {}, positions: {} };
     }
 
     // ─── Smart tab-aware refresh ──────────────────────────────────────────────
@@ -568,7 +590,7 @@
         switch (tabName) {
           case 'pipeline':
             await fetchPipeline();
-            await fetchPolymarket(); // hero metrics need poly
+            await fetchKalshi(); // hero metrics need market status
             break;
           case 'today':
             await fetchToday();
@@ -583,8 +605,8 @@
             if (!state.tabLoaded['today']) await fetchToday();
             if (!state.tabLoaded['tomorrow']) await fetchTomorrow();
             break;
-          case 'polymarket':
-            await fetchPolymarket();
+          case 'kalshi':
+            await fetchKalshi();
             break;
         }
         state.tabLoaded[tabName] = true;
@@ -603,14 +625,14 @@
           fetchJson('/api/predictions/today'),
           fetchJson('/api/predictions/tomorrow'),
           fetchJson('/api/model/stats'),
-          fetchJson('/api/polymarket/status'),
+          fetchJson('/api/kalshi/status'),
         ]);
         if (settled[0].status === 'fulfilled') state.status = settled[0].value || {};
         if (settled[1].status === 'fulfilled') state.today = settled[1].value || { predictions: [] };
         if (settled[2].status === 'fulfilled') state.tomorrow = settled[2].value || { predictions: [] };
         if (settled[3].status === 'fulfilled') state.model = settled[3].value || { current_model: {}, history: [] };
-        if (settled[4].status === 'fulfilled') state.polymarketStatus = settled[4].value || { submissions: {}, positions: {} };
-        ['pipeline','today','tomorrow','polymarket'].forEach(t => state.tabLoaded[t] = true);
+        if (settled[4].status === 'fulfilled') state.kalshiStatus = settled[4].value || { submissions: {}, positions: {} };
+        ['pipeline','today','tomorrow','kalshi'].forEach(t => state.tabLoaded[t] = true);
         const failed = settled.filter(r => r.status === 'rejected').length;
         if (failed > 0) toast(`Partial refresh: ${failed} endpoint(s) failed.`, 'warn');
         if (state.status.warning) toast(`Status warning: ${state.status.warning}`, 'warn');
@@ -669,493 +691,6 @@
     document.getElementById('modal-close').addEventListener('click', closeModal);
     document.getElementById('modal-backdrop').addEventListener('click', e => { if (e.target.id === 'modal-backdrop') closeModal(); });
     initTabs(); initSortControls(); setLoading(); refreshAll(); startInterval();
-  </script>
-  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
-</body>
-</html>
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-  <title>Bettor HF Dashboard</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
-  <style>
-    :root {
-      --primary: #3b82f6;
-      --success: #10b981;
-      --warning: #f59e0b;
-      --danger: #ef4444;
-      --ink: #f8fafc;
-      --muted: #cbd5e1;
-      --glass: rgba(15, 23, 42, 0.58);
-      --border: rgba(148, 163, 184, 0.18);
-      --shadow: 0 24px 80px rgba(2, 6, 23, 0.45);
-      --radius: 24px;
-    }
-    * { box-sizing: border-box; }
-    html, body { min-height: 100%; }
-    body {
-      margin: 0;
-      font-family: 'Inter', system-ui, sans-serif;
-      color: var(--ink);
-      background:
-        radial-gradient(circle at 15% 15%, rgba(59, 130, 246, 0.28), transparent 28%),
-        radial-gradient(circle at 85% 20%, rgba(16, 185, 129, 0.18), transparent 24%),
-        radial-gradient(circle at 75% 80%, rgba(245, 158, 11, 0.18), transparent 26%),
-        linear-gradient(135deg, #0f172a 0%, #111827 38%, #1e293b 100%);
-      overflow-x: hidden;
-    }
-    body::before {
-      content: '';
-      position: fixed;
-      inset: -20%;
-      background: conic-gradient(from 90deg at 50% 50%, rgba(59, 130, 246, 0.09), rgba(16, 185, 129, 0.08), rgba(245, 158, 11, 0.08), rgba(59, 130, 246, 0.09));
-      animation: swirl 18s linear infinite;
-      pointer-events: none;
-      filter: blur(80px);
-      z-index: 0;
-    }
-    @keyframes swirl { to { transform: rotate(360deg); } }
-    @keyframes fadeUp { from { opacity: 0; transform: translateY(18px); } to { opacity: 1; transform: translateY(0); } }
-    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.55; } }
-    @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
-    .page { position: relative; z-index: 1; max-width: 1380px; margin: 0 auto; padding: 28px 16px 72px; }
-    .glass { background: var(--glass); backdrop-filter: blur(24px); border: 1px solid var(--border); box-shadow: var(--shadow); border-radius: var(--radius); }
-    .hero { padding: 28px; position: relative; overflow: hidden; animation: fadeUp .6s ease both; }
-    .hero::after { content: ''; position: absolute; inset: 0; background: linear-gradient(120deg, rgba(59,130,246,0.16), transparent 38%, rgba(16,185,129,0.12)); pointer-events: none; }
-    .hero-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; flex-wrap: wrap; position: relative; z-index: 1; }
-    h1 { margin: 0; font-size: clamp(2rem, 5vw, 3.35rem); line-height: 1; letter-spacing: -0.04em; }
-    .hero-copy p { margin: 12px 0 0; max-width: 720px; color: var(--muted); font-size: 1rem; line-height: 1.7; }
-    .pill { display: inline-flex; align-items: center; gap: 10px; padding: 12px 16px; border-radius: 999px; border: 1px solid rgba(148,163,184,0.2); background: rgba(15,23,42,0.55); color: var(--ink); font-weight: 600; }
-    .live-dot { width: 10px; height: 10px; border-radius: 999px; background: var(--success); box-shadow: 0 0 0 0 rgba(16,185,129,0.6); animation: pulse 1.8s infinite; }
-    .hero-metrics { position: relative; z-index: 1; margin-top: 28px; display: grid; grid-template-columns: repeat(1, minmax(0, 1fr)); gap: 16px; }
-    .metric { padding: 18px; border-radius: 22px; background: rgba(15, 23, 42, 0.42); border: 1px solid rgba(148, 163, 184, 0.16); min-height: 118px; }
-    .metric-label { display: inline-flex; align-items: center; gap: 8px; font-size: 0.78rem; letter-spacing: 0.18em; text-transform: uppercase; color: var(--muted); }
-    .metric-value { display: block; margin-top: 14px; font-size: 1.7rem; font-weight: 800; letter-spacing: -0.03em; }
-    .metric-note { display: block; margin-top: 8px; color: var(--muted); font-size: 0.92rem; }
-    .tabs { margin-top: 22px; display: flex; flex-wrap: wrap; gap: 12px; animation: fadeUp .7s ease both; }
-    .tab { border: 1px solid rgba(148,163,184,0.22); background: rgba(15,23,42,0.68); color: #e2e8f0; padding: 12px 16px; border-radius: 16px; cursor: pointer; transition: all .2s ease; font-weight: 700; }
-    .tab:hover, .tab.active { color: white; border-color: rgba(59,130,246,0.5); background: linear-gradient(135deg, rgba(59,130,246,0.88), rgba(29,78,216,0.82)); transform: translateY(-1px); }
-    .panel { display: none; margin-top: 22px; animation: fadeUp .35s ease both; }
-    .panel.active { display: block; }
-    .section-grid, .stage-grid, .prediction-grid, .overview-grid, .polymarket-grid { display: grid; gap: 18px; }
-    .stage-grid, .prediction-grid, .overview-grid, .polymarket-grid { grid-template-columns: repeat(1, minmax(0, 1fr)); }
-    .card { padding: 20px; border-radius: 24px; background: rgba(15, 23, 42, 0.56); border: 1px solid rgba(148,163,184,0.16); box-shadow: var(--shadow); color: var(--ink); }
-    .card h3, .card h4 { margin: 0; letter-spacing: -0.03em; }
-    .subtle { color: var(--muted); }
-    .kvs { margin-top: 16px; display: grid; gap: 12px; }
-    .kv { display: flex; justify-content: space-between; gap: 12px; color: var(--ink); }
-    .kv span:first-child { color: var(--muted); }
-    .stage-badge, .status-badge, .confidence-badge { display: inline-flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: 999px; font-size: 0.78rem; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; }
-    .good { background: rgba(16,185,129,0.16); color: #6ee7b7; }
-    .warn { background: rgba(245,158,11,0.16); color: #fbbf24; }
-    .bad { background: rgba(239,68,68,0.16); color: #fca5a5; }
-    .neutral { background: rgba(59,130,246,0.16); color: #93c5fd; }
-    .prediction-card { cursor: pointer; transition: transform .18s ease, border-color .18s ease; }
-    .prediction-card:hover { transform: translateY(-3px); border-color: rgba(59,130,246,0.5); }
-    .prediction-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; }
-    .sport-line { display: inline-flex; align-items: center; gap: 10px; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.16em; color: var(--muted); }
-    .sport-icon { font-size: 1.3rem; }
-    .matchup { margin-top: 10px; font-size: 1.15rem; font-weight: 800; letter-spacing: -0.03em; color: var(--ink); }
-    .match-meta { margin-top: 6px; color: #dbeafe; font-size: 0.92rem; }
-    .bar-wrap { margin-top: 16px; display: grid; gap: 10px; }
-    .bar-row { display: grid; gap: 7px; }
-    .bar-label { display: flex; justify-content: space-between; gap: 12px; font-size: 0.9rem; color: var(--ink); }
-    .bar-label strong { color: var(--ink); }
-    .bar-track { position: relative; height: 10px; border-radius: 999px; overflow: hidden; background: rgba(148,163,184,0.12); }
-    .bar-fill { position: absolute; inset: 0 auto 0 0; border-radius: inherit; background: linear-gradient(90deg, rgba(59,130,246,0.78), rgba(16,185,129,0.78)); }
-    .prediction-footer { margin-top: 18px; display: flex; flex-wrap: wrap; gap: 10px; justify-content: space-between; align-items: center; }
-    .prediction-meta { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
-    .table-shell { overflow: auto; border-radius: 24px; border: 1px solid rgba(148,163,184,0.22); background: rgba(15,23,42,0.62); }
-    table { width: 100%; min-width: 720px; border-collapse: collapse; }
-    th, td { padding: 16px; text-align: left; border-bottom: 1px solid rgba(148,163,184,0.1); }
-    th { color: #e2e8f0; font-size: 0.74rem; letter-spacing: 0.18em; text-transform: uppercase; background: rgba(15,23,42,0.82); }
-    td { color: var(--ink); }
-    tr:last-child td { border-bottom: none; }
-    .toast-stack { position: fixed; right: 18px; top: 18px; z-index: 40; display: grid; gap: 12px; width: min(360px, calc(100vw - 36px)); }
-    .toast { padding: 16px 18px; border-radius: 18px; background: rgba(15,23,42,0.85); border: 1px solid rgba(148,163,184,0.18); box-shadow: var(--shadow); animation: fadeUp .25s ease both; }
-    .loading-card, .loading-line { border-radius: 16px; background: linear-gradient(90deg, rgba(148,163,184,0.08) 25%, rgba(226,232,240,0.18) 50%, rgba(148,163,184,0.08) 75%); background-size: 200% 100%; animation: shimmer 1.5s linear infinite; }
-    .loading-card { min-height: 220px; }
-    .loading-line { height: 14px; margin-top: 12px; }
-    .empty-state { padding: 34px 22px; text-align: center; color: var(--muted); border: 1px dashed rgba(148,163,184,0.16); border-radius: 24px; background: rgba(15,23,42,0.35); }
-    .modal-backdrop { position: fixed; inset: 0; background: rgba(2, 6, 23, 0.72); backdrop-filter: blur(8px); display: none; align-items: center; justify-content: center; padding: 18px; z-index: 50; }
-    .modal-backdrop.open { display: flex; }
-    .modal-panel { width: min(820px, 100%); max-height: 90vh; overflow: auto; padding: 22px; border-radius: 26px; background: rgba(15,23,42,0.95); border: 1px solid rgba(148,163,184,0.2); box-shadow: var(--shadow); }
-    .modal-close { border: none; background: rgba(148,163,184,0.12); color: white; border-radius: 12px; padding: 10px 12px; cursor: pointer; }
-    pre { white-space: pre-wrap; word-break: break-word; font-size: 0.9rem; color: #cbd5e1; background: rgba(2, 6, 23, 0.65); padding: 14px; border-radius: 18px; border: 1px solid rgba(148,163,184,0.12); }
-    .footer-note { margin-top: 18px; text-align: center; color: var(--muted); font-size: 0.88rem; }
-    .sort-card { padding: 14px 16px; margin-bottom: 14px; }
-    .sort-row { display: grid; grid-template-columns: repeat(1, minmax(0,1fr)); gap: 10px; }
-    .form-select, .form-control {
-      background: rgba(15,23,42,0.75);
-      color: var(--ink);
-      border: 1px solid rgba(148,163,184,0.22);
-    }
-    .form-control::placeholder { color: #cbd5e1; opacity: 0.95; }
-    .form-select:focus, .form-control:focus {
-      border-color: rgba(59,130,246,0.65);
-      box-shadow: 0 0 0 .2rem rgba(59,130,246,0.18);
-      background: rgba(15,23,42,0.9);
-      color: var(--ink);
-    }
-    .label-mini { font-size: .75rem; text-transform: uppercase; letter-spacing: .14em; color: var(--muted); margin-bottom: 6px; display: block; }
-    @media (min-width: 760px) {
-      .page { padding: 34px 24px 80px; }
-      .hero-metrics { grid-template-columns: repeat(4, minmax(0, 1fr)); }
-      .stage-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
-      .overview-grid { grid-template-columns: 1.1fr .9fr; }
-      .prediction-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-      .polymarket-grid { grid-template-columns: 0.95fr 1.05fr; }
-      .sort-row { grid-template-columns: 1.1fr .9fr .9fr; }
-    }
-    @media (min-width: 1120px) { .prediction-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
-    .comparator-shell { display: grid; gap: 16px; }
-    .comparator-card { padding: 18px; border-radius: 20px; background: rgba(15, 23, 42, 0.62); border: 1px solid rgba(148,163,184,0.2); }
-    .comparator-title { font-size: 1.05rem; font-weight: 800; letter-spacing: -0.02em; color: var(--ink); }
-    .comparator-meta { margin-top: 6px; color: #dbeafe; font-size: 0.9rem; }
-    .comparator-list { margin-top: 12px; display: grid; gap: 8px; }
-    .comparator-row { display: grid; grid-template-columns: 1fr auto auto; gap: 10px; align-items: center; padding: 10px 12px; border-radius: 12px; background: rgba(30, 41, 59, 0.72); }
-    .comparator-pick { color: var(--ink); font-weight: 700; font-size: 0.9rem; }
-    .comparator-score { color: #93c5fd; font-weight: 700; font-size: 0.85rem; white-space: nowrap; }
-  </style>
-</head>
-<body>
-  <div class="toast-stack" id="toast-stack"></div>
-  <div class="page">
-    <section class="hero glass">
-      <div class="hero-top">
-        <div class="hero-copy">
-          <div class="pill"><span class="live-dot"></span><span id="live-status">Connecting to Hugging Face pipeline…</span></div>
-          <h1>Hugging Face Command Center</h1>
-          <p>HF Dataset + HF Model + HF Space inference with automated multi-sport predictions and Polymarket execution status.</p>
-        </div>
-        <div class="pill" id="live-source">Source: loading</div>
-      </div>
-      <div class="hero-metrics" id="hero-metrics"></div>
-    </section>
-
-    <nav class="tabs" aria-label="Dashboard tabs">
-      <button class="tab active" data-tab="pipeline">Pipeline</button>
-      <button class="tab" data-tab="today">Today</button>
-      <button class="tab" data-tab="tomorrow">Tomorrow</button>
-      <button class="tab" data-tab="comparator">Comparator</button>
-      <button class="tab" data-tab="history">History</button>
-      <button class="tab" data-tab="polymarket">Polymarket</button>
-    </nav>
-
-    <section class="panel active" id="panel-pipeline">
-      <div class="section-grid">
-        <div class="stage-grid" id="stage-grid"></div>
-        <div class="overview-grid">
-          <div class="card glass" id="pipeline-overview"></div>
-          <div class="card glass" id="model-overview"></div>
-        </div>
-      </div>
-    </section>
-
-    <section class="panel" id="panel-today">
-      <div class="card glass sort-card">
-        <div class="sort-row">
-          <div>
-            <label class="label-mini" for="today-sort">Sort by</label>
-            <select id="today-sort" class="form-select form-select-sm">
-              <option value="confidence_desc">Confidence (High to Low)</option>
-              <option value="confidence_asc">Confidence (Low to High)</option>
-              <option value="time_asc">Game Time (Earliest)</option>
-              <option value="time_desc">Game Time (Latest)</option>
-              <option value="sport_asc">Sport (A to Z)</option>
-              <option value="pick_asc">Pick Team (A to Z)</option>
-            </select>
-          </div>
-          <div>
-            <label class="label-mini" for="today-sport-filter">Sport filter</label>
-            <select id="today-sport-filter" class="form-select form-select-sm">
-              <option value="all">All Sports</option>
-            </select>
-          </div>
-          <div>
-            <label class="label-mini" for="today-search">Search team</label>
-            <input id="today-search" class="form-control form-control-sm" placeholder="Type team name">
-          </div>
-        </div>
-      </div>
-      <div class="prediction-grid" id="today-grid"></div>
-    </section>
-    <section class="panel" id="panel-tomorrow">
-      <div class="card glass sort-card">
-        <div class="sort-row">
-          <div>
-            <label class="label-mini" for="tomorrow-sort">Sort by</label>
-            <select id="tomorrow-sort" class="form-select form-select-sm">
-              <option value="confidence_desc">Confidence (High to Low)</option>
-              <option value="confidence_asc">Confidence (Low to High)</option>
-              <option value="time_asc">Game Time (Earliest)</option>
-              <option value="time_desc">Game Time (Latest)</option>
-              <option value="sport_asc">Sport (A to Z)</option>
-              <option value="pick_asc">Pick Team (A to Z)</option>
-            </select>
-          </div>
-          <div>
-            <label class="label-mini" for="tomorrow-sport-filter">Sport filter</label>
-            <select id="tomorrow-sport-filter" class="form-select form-select-sm">
-              <option value="all">All Sports</option>
-            </select>
-          </div>
-          <div>
-            <label class="label-mini" for="tomorrow-search">Search team</label>
-            <input id="tomorrow-search" class="form-control form-control-sm" placeholder="Type team name">
-          </div>
-        </div>
-      </div>
-      <div class="prediction-grid" id="tomorrow-grid"></div>
-    </section>
-    <section class="panel" id="panel-comparator">
-      <div class="card glass">
-        <h3 style="margin:0">Prop Comparator</h3>
-        <p class="subtle" style="margin:10px 0 0">Same-game prop stack ranked by confidence and edge so you can spot the best options quickly.</p>
-      </div>
-      <div class="comparator-shell" id="comparator-shell" style="margin-top:14px"></div>
-    </section>
-    <section class="panel" id="panel-history"><div class="table-shell glass" id="history-shell"></div></section>
-    <section class="panel" id="panel-polymarket">
-      <div class="polymarket-grid">
-        <div class="card glass" id="polymarket-summary"></div>
-        <div class="card glass" id="polymarket-positions"></div>
-      </div>
-      <div class="table-shell glass" id="submission-shell" style="margin-top:18px"></div>
-    </section>
-
-    <div class="footer-note">Auto-refresh every 30 seconds • click any prediction card for the full breakdown</div>
-  </div>
-
-  <div class="modal-backdrop" id="modal-backdrop" aria-hidden="true">
-    <div class="modal-panel">
-      <div style="display:flex;justify-content:space-between;gap:12px;align-items:center">
-        <div>
-          <h3 style="margin:0">Prediction breakdown</h3>
-          <p class="subtle" id="modal-subtitle" style="margin:8px 0 0"></p>
-        </div>
-        <button class="modal-close" id="modal-close" type="button">Close</button>
-      </div>
-      <pre id="modal-json" style="margin-top:18px"></pre>
-    </div>
-  </div>
-
-  <script>
-    const state = { status: {}, today: { predictions: [] }, tomorrow: { predictions: [] }, model: { current_model: {}, history: [] }, polymarketStatus: { submissions: {}, positions: {} }, lastHash: '', firstRefresh: true };
-    const sportIcons = { mlb: '⚾', nba: '🏀', nhl: '🏒', soccer: '⚽', tennis: '🎾', golf: '⛳', boxing: '🥊', mma: '🥋', cricket: '🏏', nfl: '🏈', default: '🏈' };
-    const statusClasses = { submitted: 'good', filled: 'good', dry_run: 'neutral', pending: 'warn', skipped: 'warn', failed: 'bad', cancelled: 'bad' };
-    const confidenceClasses = { elite: 'good', solid: 'neutral', lean: 'warn', watch: 'bad' };
-    const esc = (value) => String(value ?? '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
-    const pct = (value) => Number.isFinite(Number(value)) ? `${(Number(value) * 100).toFixed(1)}%` : '—';
-    const num = (value) => Number.isFinite(Number(value)) ? Number(value).toLocaleString() : '—';
-    const money = (value) => Number.isFinite(Number(value)) ? `$${Number(value).toFixed(2)}` : '—';
-    const stamp = (value) => { if (!value) return '—'; const parsed = new Date(value); return Number.isNaN(parsed.getTime()) ? String(value) : parsed.toLocaleString(); };
-    function formatGameTime(prediction) {
-      const iso = String(prediction?.game_time || prediction?.scheduled_start || '').trim();
-      if (!iso) return 'Time TBD';
-      const parsed = new Date(iso);
-      if (Number.isNaN(parsed.getTime())) return iso;
-      const etDate = parsed.toLocaleDateString(undefined, { month: 'short', day: '2-digit', timeZone: 'America/New_York' });
-      const etTime = parsed.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', hour12: true, timeZone: 'America/New_York' });
-      const utcTime = parsed.toISOString().slice(11, 16);
-      return `${etDate} ${etTime} ET (${utcTime} UTC)`;
-    }
-    const sportIcon = (sport) => sportIcons[String(sport || '').toLowerCase()] || sportIcons.default;
-    const tierClass = (tier) => confidenceClasses[String(tier || '').toLowerCase()] || 'bad';
-    const stateClass = (status) => statusClasses[String(status || '').toLowerCase()] || 'neutral';
-    const safeSortDate = (row) => new Date(`${row.game_date || ''} ${row.game_time || row.scheduled_start || ''}`).getTime() || 0;
-
-    function sortPredictions(rows, mode) {
-      const list = [...rows];
-      const byConfidence = (a, b) => Number(b.confidence || 0) - Number(a.confidence || 0);
-      switch (mode) {
-        case 'confidence_asc': return list.sort((a, b) => Number(a.confidence || 0) - Number(b.confidence || 0));
-        case 'time_asc': return list.sort((a, b) => safeSortDate(a) - safeSortDate(b));
-        case 'time_desc': return list.sort((a, b) => safeSortDate(b) - safeSortDate(a));
-        case 'sport_asc': return list.sort((a, b) => String(a.sport || '').localeCompare(String(b.sport || '')));
-        case 'pick_asc': return list.sort((a, b) => String(a.predicted_team || '').localeCompare(String(b.predicted_team || '')));
-        case 'confidence_desc':
-        default: return list.sort(byConfidence);
-      }
-    }
-
-    function applyPredictionFilters(rows, prefix) {
-      const sportFilter = document.getElementById(`${prefix}-sport-filter`)?.value || 'all';
-      const query = String(document.getElementById(`${prefix}-search`)?.value || '').trim().toLowerCase();
-      let filtered = [...rows];
-      if (sportFilter !== 'all') filtered = filtered.filter(r => String(r.sport || '').toLowerCase() === sportFilter);
-      if (query) filtered = filtered.filter(r => `${r.home_team || ''} ${r.away_team || ''} ${r.predicted_team || ''}`.toLowerCase().includes(query));
-      const sortMode = document.getElementById(`${prefix}-sort`)?.value || 'confidence_desc';
-      return sortPredictions(filtered, sortMode);
-    }
-
-    function hydrateSportFilter(prefix, rows) {
-      const select = document.getElementById(`${prefix}-sport-filter`);
-      if (!select) return;
-      const current = select.value || 'all';
-      const sports = Array.from(new Set((rows || []).map(r => String(r.sport || '').toLowerCase()).filter(Boolean))).sort();
-      select.innerHTML = `<option value="all">All Sports</option>${sports.map(s => `<option value="${esc(s)}">${esc(s.toUpperCase())}</option>`).join('')}`;
-      if (sports.includes(current)) select.value = current;
-    }
-
-    function toast(message, tone = 'neutral') {
-      const stack = document.getElementById('toast-stack');
-      const node = document.createElement('div');
-      node.className = `toast ${tone}`;
-      node.innerHTML = `<strong>${esc(message)}</strong>`;
-      stack.appendChild(node);
-      setTimeout(() => node.remove(), 3200);
-    }
-
-    function setLoading() {
-      const skeleton = '<div class="card glass loading-card"></div>'.repeat(3);
-      document.getElementById('hero-metrics').innerHTML = '<div class="metric loading-card"></div>'.repeat(4);
-      document.getElementById('stage-grid').innerHTML = '<div class="card glass loading-card"></div>'.repeat(4);
-      document.getElementById('pipeline-overview').innerHTML = '<div class="loading-line"></div><div class="loading-line"></div><div class="loading-line"></div>';
-      document.getElementById('model-overview').innerHTML = '<div class="loading-line"></div><div class="loading-line"></div><div class="loading-line"></div>';
-      document.getElementById('today-grid').innerHTML = skeleton;
-      document.getElementById('tomorrow-grid').innerHTML = skeleton;
-      document.getElementById('history-shell').innerHTML = '<div class="empty-state">Loading prediction history…</div>';
-      document.getElementById('polymarket-summary').innerHTML = '<div class="loading-line"></div><div class="loading-line"></div><div class="loading-line"></div>';
-      document.getElementById('polymarket-positions').innerHTML = '<div class="loading-line"></div><div class="loading-line"></div><div class="loading-line"></div>';
-      document.getElementById('submission-shell').innerHTML = '<div class="empty-state">Loading submissions…</div>';
-    }
-
-    async function fetchJson(url) { const response = await fetch(url, { cache: 'no-store' }); if (!response.ok) throw new Error(`${url} -> ${response.status}`); return response.json(); }
-    function renderHeroMetrics() {
-      const metrics = state.status.metrics || {};
-      const currentModel = state.model.current_model || {};
-      const cards = [
-        { label: 'Total Predictions', value: num(metrics.total_predictions || 0), note: `${num(metrics.today_predictions || 0)} today • ${num(metrics.tomorrow_predictions || 0)} tomorrow` },
-        { label: 'Win Rate', value: pct(metrics.win_rate || currentModel.best_score || 0), note: `Cross-validation ROC AUC • ${esc(currentModel.best_model || 'Awaiting train')}` },
-        { label: 'Polymarket Bets', value: num((state.polymarketStatus.submissions || {}).summary?.placed || 0), note: `${num((state.polymarketStatus.positions || {}).summary?.active_positions || 0)} active positions` },
-        { label: 'Active Models', value: num(metrics.active_models || currentModel.candidate_count || 0), note: `Version ${esc(currentModel.version || 'n/a')}` },
-      ];
-      document.getElementById('hero-metrics').innerHTML = cards.map(card => `<article class="metric"><span class="metric-label">${esc(card.label)}</span><span class="metric-value">${esc(card.value)}</span><span class="metric-note">${esc(card.note)}</span></article>`).join('');
-    }
-    function renderPipeline() {
-      const pipeline = state.status.pipeline || {};
-      const sections = [['Fetch', pipeline.fetch || {}, '2:00 AM ET'], ['Train', pipeline.train || {}, '3:00 AM ET'], ['Predict', pipeline.predict || {}, '4:00 AM ET'], ['Polymarket', pipeline.polymarket || {}, 'Post-predict']];
-      document.getElementById('stage-grid').innerHTML = sections.map(([title, info, schedule]) => { const ok = info.ok !== false; return `<article class="card glass"><div style="display:flex;justify-content:space-between;gap:12px;align-items:center"><h3>${esc(title)}</h3><span class="stage-badge ${ok ? 'good' : 'bad'}">${ok ? 'healthy' : 'attention'}</span></div><div class="kvs"><div class="kv"><span>Schedule</span><strong>${esc(schedule)}</strong></div><div class="kv"><span>Updated</span><strong>${esc(stamp(info.updated_at || info.generated_at || info.trained_at))}</strong></div><div class="kv"><span>Summary</span><strong>${esc(info.prediction_count || info.completed_games_total || info.rows || info.placed || 0)}</strong></div></div></article>`; }).join('');
-      const model = state.model.current_model || {};
-      document.getElementById('pipeline-overview').innerHTML = `<h3>Pipeline health</h3><p class="subtle" style="margin:10px 0 0">Live orchestration status for HF Dataset + Model publishing and Space inference.</p><div class="kvs"><div class="kv"><span>Last refresh</span><strong>${esc(stamp(state.status.updated_at))}</strong></div><div class="kv"><span>Today predictions</span><strong>${esc(num((state.today || {}).prediction_count || 0))}</strong></div><div class="kv"><span>Tomorrow predictions</span><strong>${esc(num((state.tomorrow || {}).prediction_count || 0))}</strong></div><div class="kv"><span>Submissions placed</span><strong>${esc(num(((state.polymarketStatus.submissions || {}).summary || {}).placed || 0))}</strong></div><div class="kv"><span>Source</span><strong>${esc(state.status.source || 'local')}</strong></div></div>`;
-      document.getElementById('model-overview').innerHTML = `<h3>Model snapshot</h3><p class="subtle" style="margin:10px 0 0">Best estimator chosen from 5-fold cross-validation each day.</p><div class="kvs"><div class="kv"><span>Model</span><strong>${esc(model.best_model || '—')}</strong></div><div class="kv"><span>Version</span><strong>${esc(model.version || '—')}</strong></div><div class="kv"><span>Rows trained</span><strong>${esc(num(model.rows || 0))}</strong></div><div class="kv"><span>Score</span><strong>${esc(pct(model.best_score || 0))}</strong></div><div class="kv"><span>Sports</span><strong>${esc((model.sports_covered || []).join(', ') || '—')}</strong></div></div>`;
-    }
-    function predictionCard(prediction) {
-      const polymarket = prediction.polymarket || {};
-      const confidenceTier = String(prediction.confidence_tier || 'Watch').toLowerCase();
-      const submissionState = String(polymarket.status || 'pending').toLowerCase();
-      const playerLine = prediction.player_name ? `<div class="match-meta">Player: ${esc(prediction.player_name)} (${esc(prediction.player_team || 'team')})</div>` : '';
-      const isPlayerProp = String(prediction.prediction_scope || '') === 'player_prop';
-      const leftLabel = isPlayerProp ? `Over ${esc(prediction.prop_line ?? '0.5')}` : esc(prediction.home_team || 'Home');
-      const rightLabel = isPlayerProp ? `Under ${esc(prediction.prop_line ?? '0.5')}` : esc(prediction.away_team || 'Away');
-      const leftProb = isPlayerProp ? Number(prediction.over_prob ?? prediction.home_win_prob ?? 0) : Number(prediction.home_win_prob ?? 0);
-      const rightProb = isPlayerProp ? Number(prediction.under_prob ?? prediction.away_win_prob ?? 0) : Number(prediction.away_win_prob ?? 0);
-      const propProjection = isPlayerProp ? `<div class="match-meta">Line ${esc(prediction.prop_line ?? '0.5')} ${esc(prediction.prop_unit || '')} • Projected ${esc(String(prediction.projected_value ?? '—'))} ${esc(prediction.prop_unit || '')}</div>` : '';
-      return `<article class="card glass prediction-card" data-prediction='${esc(JSON.stringify(prediction))}'><div class="prediction-header"><div><div class="sport-line"><span class="sport-icon">${sportIcon(prediction.sport)}</span><span>${esc(prediction.sport || 'sport')}</span></div><div class="matchup">${esc(prediction.away_team || 'Away')} @ ${esc(prediction.home_team || 'Home')}</div><div class="match-meta">${esc(formatGameTime(prediction))} • ${esc(prediction.market_name || prediction.market_type || 'Game Winner')}</div>${playerLine}${propProjection}</div><span class="confidence-badge ${tierClass(confidenceTier)}">${esc(prediction.confidence_tier || 'Watch')}</span></div><div class="bar-wrap"><div class="bar-row"><div class="bar-label"><span>${leftLabel}</span><strong>${esc(pct(leftProb))}</strong></div><div class="bar-track"><div class="bar-fill" style="width:${Math.max(2, Math.min(100, leftProb * 100))}%"></div></div></div><div class="bar-row"><div class="bar-label"><span>${rightLabel}</span><strong>${esc(pct(rightProb))}</strong></div><div class="bar-track"><div class="bar-fill" style="width:${Math.max(2, Math.min(100, rightProb * 100))}%"></div></div></div></div><div class="prediction-footer"><div class="prediction-meta"><span class="status-badge ${stateClass(submissionState)}">${esc(submissionState.replace('_', ' '))}</span><span class="subtle">Pick: <strong style="color:var(--ink)">${esc(prediction.predicted_label || prediction.predicted_team || prediction.predicted_outcome || 'n/a')}</strong></span></div><div class="subtle">Model ${esc(prediction.model_name || prediction.model_type || '—')}</div></div></article>`;
-    }
-    function renderPredictionGrid(containerId, payload, prefix) {
-      const raw = Array.isArray(payload.predictions) ? payload.predictions : [];
-      hydrateSportFilter(prefix, raw);
-      const predictions = applyPredictionFilters(raw, prefix);
-      const container = document.getElementById(containerId);
-      if (!predictions.length) { container.innerHTML = '<div class="empty-state">No predictions available for this window.</div>'; return; }
-      container.innerHTML = predictions.map(predictionCard).join('');
-      Array.from(container.querySelectorAll('.prediction-card')).forEach(card => card.addEventListener('click', () => openModal(JSON.parse(card.dataset.prediction))));
-    }
-    function propConfidence(row) {
-      const isPlayerProp = String(row.prediction_scope || '') === 'player_prop';
-      if (isPlayerProp) return Number(Math.max(Number(row.over_prob || 0), Number(row.under_prob || 0)));
-      return Number(row.confidence || 0);
-    }
-    function propEdge(row) {
-      const c = propConfidence(row);
-      return Math.max(0, c - 0.5);
-    }
-    function renderComparator() {
-      const rows = [...(state.today.predictions || []), ...(state.tomorrow.predictions || [])];
-      const shell = document.getElementById('comparator-shell');
-      if (!rows.length) { shell.innerHTML = '<div class="empty-state">No props available to compare yet.</div>'; return; }
-      const byGame = new Map();
-      for (const row of rows) {
-        const key = `${row.sport || ''}|${row.game_date || ''}|${row.away_team || ''}|${row.home_team || ''}`;
-        if (!byGame.has(key)) byGame.set(key, []);
-        byGame.get(key).push(row);
-      }
-      const cards = Array.from(byGame.entries()).map(([key, gameRows]) => {
-        const [sport, gameDate, away, home] = key.split('|');
-        const sorted = [...gameRows].sort((a, b) => {
-          const ca = propConfidence(a); const cb = propConfidence(b);
-          if (cb !== ca) return cb - ca;
-          return propEdge(b) - propEdge(a);
-        }).slice(0, 6);
-        const top = sorted[0];
-        const listHtml = sorted.map(r => {
-          const pick = r.predicted_label || r.predicted_team || r.predicted_outcome || 'n/a';
-          const market = r.market_name || r.market_type || 'Prop';
-          const player = r.player_name ? ` • ${r.player_name}` : '';
-          const conf = propConfidence(r);
-          const edge = propEdge(r);
-          return `<div class="comparator-row"><div><div class="comparator-pick">${esc(market)}${esc(player)}</div><div class="subtle">${esc(pick)}</div></div><div class="comparator-score">${esc(pct(conf))}</div><div class="comparator-score">edge ${esc((edge*100).toFixed(1))}%</div></div>`;
-        }).join('');
-        return { score: propConfidence(top), html: `<article class="comparator-card"><div class="comparator-title">${esc(away || 'Away')} @ ${esc(home || 'Home')}</div><div class="comparator-meta">${esc(String(sport || '').toUpperCase())} • ${esc(gameDate || '—')} • ${esc(formatGameTime(top || {}))}</div><div class="comparator-list">${listHtml}</div></article>` };
-      }).sort((a, b) => b.score - a.score).slice(0, 18);
-      shell.innerHTML = cards.map(c => c.html).join('');
-    }
-    function renderHistory() {
-      const rows = [...(state.today.predictions || []), ...(state.tomorrow.predictions || [])].sort((a, b) => `${a.game_date || ''} ${a.game_time || ''}`.localeCompare(`${b.game_date || ''} ${b.game_time || ''}`));
-      if (!rows.length) { document.getElementById('history-shell').innerHTML = '<div class="empty-state">No prediction history yet.</div>'; return; }
-      document.getElementById('history-shell').innerHTML = `<table><thead><tr><th>Date</th><th>Sport</th><th>Market</th><th>Player</th><th>Line</th><th>Projection</th><th>Matchup</th><th>Pick</th><th>Confidence</th><th>Submission</th></tr></thead><tbody>${rows.map(row => `<tr><td>${esc(row.game_date || '—')}</td><td>${esc(row.sport || '—')}</td><td>${esc(row.market_name || row.market_type || 'Game Winner')}</td><td>${esc(row.player_name || '—')}</td><td>${esc(row.prop_line ?? '—')} ${esc(row.prop_unit || '')}</td><td>${esc(row.projected_value ?? '—')} ${esc(row.prop_unit || '')}</td><td>${esc(row.away_team || 'Away')} @ ${esc(row.home_team || 'Home')}</td><td>${esc(row.predicted_label || row.predicted_team || row.predicted_outcome || '—')}</td><td>${esc(pct(row.confidence || 0))}</td><td>${esc((row.polymarket || {}).status || 'pending')}</td></tr>`).join('')}</tbody></table>`;
-    }
-    function renderPolymarket() {
-      const submissions = state.polymarketStatus.submissions || {};
-      const positions = state.polymarketStatus.positions || {};
-      const submissionSummary = submissions.summary || {};
-      const positionSummary = positions.summary || {};
-      document.getElementById('polymarket-summary').innerHTML = `<h3>Submission summary</h3><p class="subtle" style="margin:10px 0 0">Auto-submission filters solid + elite picks, matches live markets, then sizes bets with Kelly.</p><div class="kvs"><div class="kv"><span>Evaluated</span><strong>${esc(num(submissionSummary.evaluated || 0))}</strong></div><div class="kv"><span>Placed</span><strong>${esc(num(submissionSummary.placed || 0))}</strong></div><div class="kv"><span>Dry-run</span><strong>${esc(num(submissionSummary.dry_run || 0))}</strong></div><div class="kv"><span>Failed</span><strong>${esc(num(submissionSummary.failed || 0))}</strong></div><div class="kv"><span>Skipped</span><strong>${esc(num(submissionSummary.skipped || 0))}</strong></div><div class="kv"><span>Buying power</span><strong>${esc(money(submissionSummary.available_buying_power_usd || 0))}</strong></div></div>`;
-      document.getElementById('polymarket-positions').innerHTML = `<h3>Position overview</h3><p class="subtle" style="margin:10px 0 0">Snapshot of active orders and estimated P&amp;L from the latest submission log.</p><div class="kvs"><div class="kv"><span>Active positions</span><strong>${esc(num(positionSummary.active_positions || 0))}</strong></div><div class="kv"><span>Open notional</span><strong>${esc(money(positionSummary.open_notional_usd || 0))}</strong></div><div class="kv"><span>Estimated P&amp;L</span><strong>${esc(money(positionSummary.estimated_pnl_usd || 0))}</strong></div><div class="kv"><span>Updated</span><strong>${esc(stamp(positions.updated_at))}</strong></div></div>`;
-      const rows = Array.isArray(submissions.submissions) ? submissions.submissions.slice().reverse().slice(0, 20) : [];
-      if (!rows.length) { document.getElementById('submission-shell').innerHTML = '<div class="empty-state">No Polymarket submissions yet.</div>'; return; }
-      document.getElementById('submission-shell').innerHTML = `<table><thead><tr><th>Submitted</th><th>Game</th><th>Pick</th><th>Status</th><th>Price</th><th>Stake</th><th>Reason</th></tr></thead><tbody>${rows.map(row => `<tr><td>${esc(stamp(row.submitted_at))}</td><td>${esc(row.game || '—')}</td><td>${esc(row.pick || '—')}</td><td>${esc(row.status || '—')}</td><td>${esc(pct(row.price || 0))}</td><td>${esc(money(row.amount_usd || 0))}</td><td>${esc(row.reason || '')}</td></tr>`).join('')}</tbody></table>`;
-    }
-    function openModal(prediction) { document.getElementById('modal-subtitle').textContent = `${prediction.away_team || 'Away'} @ ${prediction.home_team || 'Home'} • ${formatGameTime(prediction)}`; document.getElementById('modal-json').textContent = JSON.stringify(prediction, null, 2); document.getElementById('modal-backdrop').classList.add('open'); }
-    function closeModal() { document.getElementById('modal-backdrop').classList.remove('open'); }
-    function renderAll() { renderHeroMetrics(); renderPipeline(); renderPredictionGrid('today-grid', state.today || {}, 'today'); renderPredictionGrid('tomorrow-grid', state.tomorrow || {}, 'tomorrow'); renderComparator(); renderHistory(); renderPolymarket(); document.getElementById('live-status').textContent = `Live refresh • ${new Date().toLocaleTimeString()}`; document.getElementById('live-source').textContent = `Source: ${(state.status.source || 'local').toUpperCase()}`; }
-    async function refreshAll() {
-      try {
-        const settled = await Promise.allSettled([fetchJson('/api/predictions/status'), fetchJson('/api/predictions/today'), fetchJson('/api/predictions/tomorrow'), fetchJson('/api/model/stats'), fetchJson('/api/polymarket/status')]);
-        const status = settled[0].status === 'fulfilled' ? settled[0].value : state.status;
-        const today = settled[1].status === 'fulfilled' ? settled[1].value : state.today;
-        const tomorrow = settled[2].status === 'fulfilled' ? settled[2].value : state.tomorrow;
-        const model = settled[3].status === 'fulfilled' ? settled[3].value : state.model;
-        const polymarketStatus = settled[4].status === 'fulfilled' ? settled[4].value : state.polymarketStatus;
-        state.status = status || {}; state.today = today || { predictions: [] }; state.tomorrow = tomorrow || { predictions: [] }; state.model = model || { current_model: {}, history: [] }; state.polymarketStatus = polymarketStatus || { submissions: {}, positions: {} };
-        const failedCalls = settled.filter(r => r.status === 'rejected').length;
-        if (failedCalls > 0) toast(`Partial refresh: ${failedCalls} endpoint(s) failed.`, 'warn');
-        const nextHash = JSON.stringify({ generated_at: today.generated_at, today_count: today.prediction_count, placed: (((polymarketStatus || {}).submissions || {}).summary || {}).placed || 0 });
-        if (!state.firstRefresh && nextHash !== state.lastHash) toast('Dashboard refreshed with new prediction state.', 'neutral');
-        if (status.warning) toast(`Status warning: ${status.warning}`, 'warn');
-        state.lastHash = nextHash; state.firstRefresh = false; renderAll();
-      } catch (error) {
-        document.getElementById('live-status').textContent = `Refresh failed • ${error.message}`;
-        toast(`Refresh failed: ${error.message}`, 'bad');
-      }
-    }
-    function initTabs() { const tabs = Array.from(document.querySelectorAll('.tab')); tabs.forEach(tab => tab.addEventListener('click', () => { tabs.forEach(item => item.classList.toggle('active', item === tab)); document.querySelectorAll('.panel').forEach(panel => panel.classList.remove('active')); document.getElementById(`panel-${tab.dataset.tab}`).classList.add('active'); })); }
-    function initSortControls() {
-      ['today-sort','today-sport-filter','today-search','tomorrow-sort','tomorrow-sport-filter','tomorrow-search'].forEach(id => {
-        const el = document.getElementById(id);
-        if (!el) return;
-        el.addEventListener('input', renderAll);
-        el.addEventListener('change', renderAll);
-      });
-    }
-    document.getElementById('modal-close').addEventListener('click', closeModal);
-    document.getElementById('modal-backdrop').addEventListener('click', (event) => { if (event.target.id === 'modal-backdrop') closeModal(); });
-    initTabs(); initSortControls(); setLoading(); refreshAll(); setInterval(refreshAll, 30000);
   </script>
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 </body>
