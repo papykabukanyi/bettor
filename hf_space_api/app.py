@@ -19,6 +19,7 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from data.hf_pipeline import HFDirectPipeline  # noqa: E402
+from data.pregame_timing import run_pregame_timing_cycle, sync_pregame_schedule  # noqa: E402
 from data.kalshi_trade_api import build_live_snapshot, submit_prediction_orders  # noqa: E402
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
@@ -42,6 +43,7 @@ HF_BOOTSTRAP_DAYS = int(os.getenv("HF_BOOTSTRAP_DAYS", "365") or "365")
 HF_ACTIVE_SCAN_MINUTES = int(os.getenv("HF_ACTIVE_SCAN_MINUTES", "30") or "30")
 HF_ACTIVE_APPEND_DAYS = int(os.getenv("HF_ACTIVE_APPEND_DAYS", "3") or "3")
 HF_RETRAIN_INTERVAL_MINUTES = int(os.getenv("HF_RETRAIN_INTERVAL_MINUTES", "180") or "180")
+PREGAME_TIMING_MINUTES = int(os.getenv("PREGAME_TIMING_MINUTES", "5") or "5")
 KALSHI_AUTOBET_ENABLED = str(os.getenv("KALSHI_AUTOBET_ENABLED", "1")).strip().lower() in {"1", "true", "yes", "on"}
 KALSHI_AUTOBET_DRY_RUN = str(os.getenv("AUTOBET_DRY_RUN", "1")).strip().lower() in {"1", "true", "yes", "on"}
 KALSHI_AUTOBET_STAKE_USD = float(os.getenv("KALSHI_AUTOBET_STAKE_USD", "1.0") or "1.0")
@@ -135,6 +137,7 @@ def _run_hf_daily_pipeline() -> dict[str, Any]:
             output_path=str(DATA_DIR / "hf_daily_prediction_markets.json"),
         )
     predictions_payload = _load_json(PRED_FILE, {})
+    sync_pregame_schedule(predictions_payload if isinstance(predictions_payload, dict) else {})
     combo_artifact = {"ok": False, "combo_count": 0, "combos": []}
     if isinstance(predictions_payload, dict) and isinstance(predictions_payload.get("predictions"), list):
         combo_artifact = _refresh_combo_artifact(predictions_payload)
@@ -188,6 +191,7 @@ def _run_hf_active_cycle() -> dict[str, Any]:
             output_path=str(DATA_DIR / "hf_daily_prediction_markets.json"),
         )
     predictions_payload = _load_json(PRED_FILE, {})
+    sync_pregame_schedule(predictions_payload if isinstance(predictions_payload, dict) else {})
     combo_artifact = {"ok": False, "combo_count": 0, "combos": []}
     if isinstance(predictions_payload, dict) and isinstance(predictions_payload.get("predictions"), list):
         combo_artifact = _refresh_combo_artifact(predictions_payload)
@@ -307,10 +311,18 @@ def _startup() -> None:
                 id="hf_daily_pipeline",
                 replace_existing=True,
             )
+            scheduler.add_job(
+                run_pregame_timing_cycle,
+                "interval",
+                minutes=max(1, PREGAME_TIMING_MINUTES),
+                id="pregame_timing_cycle",
+                replace_existing=True,
+            )
             scheduler.start()
             logger.info(
-                "HF scheduler started: active every %d min, daily at %02d:%02d ET",
+                "HF scheduler started: active every %d min, pregames every %d min, daily at %02d:%02d ET",
                 max(5, HF_ACTIVE_SCAN_MINUTES),
+                max(1, PREGAME_TIMING_MINUTES),
                 HF_DAILY_RUN_HOUR_ET,
                 HF_DAILY_RUN_MINUTE_ET,
             )
@@ -348,6 +360,7 @@ def root() -> dict[str, Any]:
             "/run/bootstrap",
             "/run/daily",
             "/run/active",
+            "/pregame/tick",
         ],
     }
 
@@ -512,5 +525,13 @@ def run_daily() -> dict[str, Any]:
 def run_active() -> dict[str, Any]:
     try:
         return _run_hf_active_cycle()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/pregame/tick")
+def pregame_tick() -> dict[str, Any]:
+    try:
+        return run_pregame_timing_cycle()
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc

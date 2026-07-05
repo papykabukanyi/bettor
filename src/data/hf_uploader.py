@@ -151,6 +151,33 @@ def _build_schemas():
         pa.field("metadata",          pa.string()),
         pa.field("created_at",        pa.string()),
     ])
+    SCHEMAS["pregame_schedule"] = pa.schema([
+        pa.field("schedule_uid",      pa.string()),
+        pa.field("game_key",          pa.string()),
+        pa.field("sport",             pa.string()),
+        pa.field("league",            pa.string()),
+        pa.field("home_team",         pa.string()),
+        pa.field("away_team",         pa.string()),
+        pa.field("game_date",         pa.string()),
+        pa.field("game_time",         pa.string()),
+        pa.field("scheduled_start",   pa.string()),
+        pa.field("analysis_at",       pa.string()),
+        pa.field("bet_at",            pa.string()),
+        pa.field("confidence",        pa.float64()),
+        pa.field("confidence_tier",   pa.string()),
+        pa.field("model_version",     pa.string()),
+        pa.field("model_type",        pa.string()),
+        pa.field("prediction_count",  pa.int32()),
+        pa.field("predictions_json",  pa.string()),
+        pa.field("analysis_state",    pa.string()),
+        pa.field("bet_state",         pa.string()),
+        pa.field("analysis_payload",  pa.string()),
+        pa.field("bet_payload",       pa.string()),
+        pa.field("last_analysis_at",  pa.string()),
+        pa.field("last_bet_at",       pa.string()),
+        pa.field("source",            pa.string()),
+        pa.field("created_at",        pa.string()),
+    ])
 
 _build_schemas()
 
@@ -185,6 +212,8 @@ configs:
   data_files: data/predictions/*.parquet
 - config_name: news_signals
   data_files: data/news_signals/*.parquet
+- config_name: pregame_schedule
+  data_files: data/pregame_schedule/*.parquet
 ---
 
 # Sports Dataset
@@ -220,7 +249,7 @@ for row in ds["train"]:
 class HFUploader:
     """Push sports data records to a HuggingFace dataset repo as Parquet."""
 
-    VALID_SUBSETS = {"games", "odds", "injuries", "predictions", "news_signals"}
+    VALID_SUBSETS = {"games", "odds", "injuries", "predictions", "news_signals", "pregame_schedule"}
     # Flush buffer to HF when it reaches this many records
     FLUSH_THRESHOLD = 500
 

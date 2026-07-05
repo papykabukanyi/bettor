@@ -647,6 +647,12 @@ class HFDirectPipeline:
         }
         with open(out_path, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)
+        try:
+            from data.db import save_predictions
+
+            save_predictions(good)
+        except Exception as exc:
+            logger.debug("[hf_pipeline] prediction DB save skipped: %s", exc)
         self._write_status({
             "last_step": "predict_daily", "ok": True,
             "prediction_date": today.isoformat(),

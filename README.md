@@ -39,6 +39,7 @@ Execution: Kalshi (single + combo order routing)
    - `FOOTBALL_DATA_API_KEY` → Free key from https://www.football-data.org/
    - `NEWSDATA_API_KEY` → Free key from https://newsdata.io/ (recommended for richer player/team news)
    - Kalshi credentials (if running auto-bets); paste `KALSHI_PRIVATE_KEY` as a single line with `\n` escapes
+       - `PREGAME_ANALYSIS_LEAD_MINUTES=90`, `PREGAME_BET_LEAD_MINUTES=60`, `PREGAME_TIMING_MINUTES=5`
 3. Run pipeline:
    ```powershell
    python src\betting_bot.py --hf-bootstrap --hf-days-back 365
