@@ -68,6 +68,42 @@ _KALSHI_LIVE_CACHE_LOCK = threading.Lock()
 _KALSHI_LIVE_CACHE_TTL_SEC = max(5, int(os.getenv("KALSHI_LIVE_CACHE_TTL_SEC", "20") or "20"))
 
 
+def _bootstrap_env_from_dotenv() -> None:
+    env_path = ROOT_DIR / ".env"
+    if not env_path.exists():
+        return
+    try:
+        lines = env_path.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return
+    idx = 0
+    while idx < len(lines):
+        raw = lines[idx].strip()
+        idx += 1
+        if not raw or raw.startswith("#") or "=" not in raw:
+            continue
+        key, value = raw.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if not key:
+            continue
+        if key == "KALSHI_PRIVATE_KEY" and "BEGIN RSA PRIVATE KEY" in value and "END RSA PRIVATE KEY" not in value:
+            chunks = [value]
+            while idx < len(lines):
+                part = lines[idx].rstrip("\r")
+                chunks.append(part)
+                idx += 1
+                if "END RSA PRIVATE KEY" in part:
+                    break
+            value = "\n".join(chunks)
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        os.environ.setdefault(key, value)
+
+
+_bootstrap_env_from_dotenv()
+
+
 def _env_flag(name: str, default: bool = False) -> bool:
     raw = str(os.getenv(name, "1" if default else "0") or "").strip().lower()
     return raw in {"1", "true", "yes", "on"}

@@ -870,7 +870,38 @@ def _load_private_key():
                 continue
         return ""
 
-    pem = _clean_secret_value(os.getenv("KALSHI_PRIVATE_KEY", ""))
+    def _read_dotenv_value(name: str) -> str:
+        env_path = Path(__file__).resolve().parents[2] / ".env"
+        if not env_path.exists():
+            return ""
+        try:
+            lines = env_path.read_text(encoding="utf-8").splitlines()
+        except Exception:
+            return ""
+        idx = 0
+        while idx < len(lines):
+            raw = lines[idx].strip()
+            idx += 1
+            if not raw or raw.startswith("#") or "=" not in raw:
+                continue
+            key, value = raw.split("=", 1)
+            key = key.strip()
+            value = value.strip()
+            if key != name:
+                continue
+            if key == "KALSHI_PRIVATE_KEY" and "BEGIN RSA PRIVATE KEY" in value and "END RSA PRIVATE KEY" not in value:
+                chunks = [value]
+                while idx < len(lines):
+                    part = lines[idx].rstrip("\r")
+                    chunks.append(part)
+                    idx += 1
+                    if "END RSA PRIVATE KEY" in part:
+                        break
+                value = "\n".join(chunks)
+            return _clean_secret_value(value)
+        return ""
+
+    pem = _clean_secret_value(os.getenv("KALSHI_PRIVATE_KEY", "")) or _read_dotenv_value("KALSHI_PRIVATE_KEY")
     if pem and not _looks_like_pem(pem):
         maybe_decoded = _decode_base64_pem(pem)
         if maybe_decoded:
@@ -894,7 +925,23 @@ def _auth_headers(method: str, path: str) -> dict[str, str]:
     from cryptography.hazmat.primitives import hashes
     from cryptography.hazmat.primitives.asymmetric import padding
 
-    api_key_id = os.getenv("KALSHI_API_KEY", "").strip().strip("'\"")
+    def _read_dotenv_api_key() -> str:
+        env_path = Path(__file__).resolve().parents[2] / ".env"
+        if not env_path.exists():
+            return ""
+        try:
+            for raw in env_path.read_text(encoding="utf-8").splitlines():
+                line = raw.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                if key.strip() == "KALSHI_API_KEY":
+                    return value.strip().strip("'\"")
+        except Exception:
+            return ""
+        return ""
+
+    api_key_id = os.getenv("KALSHI_API_KEY", "").strip().strip("'\"") or _read_dotenv_api_key()
     if not api_key_id:
         raise RuntimeError(
             "Kalshi API key ID is missing. Set KALSHI_API_KEY in environment."
