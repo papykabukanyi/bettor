@@ -67,6 +67,8 @@ app = Flask(__name__, template_folder="templates")
 scheduler = BackgroundScheduler(timezone="America/New_York")
 _startup_lock = threading.Lock()
 _startup_done = False
+_prediction_refresh_lock = threading.Lock()
+_prediction_refresh_last_ts = 0.0
 _KALSHI_LIVE_CACHE: dict[str, Any] = {}
 _KALSHI_LIVE_CACHE_TS = 0.0
 _KALSHI_LIVE_CACHE_LOCK = threading.Lock()
@@ -523,6 +525,50 @@ def _predictions_for_date(payload: dict[str, Any], target_date: str) -> dict[str
     }
 
 
+def _prediction_sports(payload: dict[str, Any]) -> set[str]:
+    sports: set[str] = set()
+    for row in (payload.get("predictions") or []):
+        if not isinstance(row, dict):
+            continue
+        sport = str(row.get("sport") or "").strip().lower()
+        if sport:
+            sports.add(sport)
+    return sports
+
+
+def _maybe_refresh_predictions_multisport(payload: dict[str, Any]) -> dict[str, Any]:
+    global _prediction_refresh_last_ts
+    if not isinstance(payload, dict):
+        return payload
+    rows = payload.get("predictions") or []
+    if not isinstance(rows, list):
+        return payload
+    sports = _prediction_sports(payload)
+    needs_refresh = (not rows) or (sports and sports.issubset({"cricket"}))
+    if not needs_refresh:
+        return payload
+    now_ts = time.time()
+    refresh_cooldown = max(120, int(os.getenv("HF_PREDICTION_REFRESH_COOLDOWN_SEC", "300") or "300"))
+    if (now_ts - _prediction_refresh_last_ts) < refresh_cooldown:
+        return payload
+    with _prediction_refresh_lock:
+        now_ts = time.time()
+        if (now_ts - _prediction_refresh_last_ts) < refresh_cooldown:
+            return payload
+        _prediction_refresh_last_ts = now_ts
+        try:
+            pipeline = HFDirectPipeline()
+            if not pipeline.ok:
+                return payload
+            pipeline.predict_daily_schedule(output_path=str(HF_PREDICTIONS_FILE))
+            refreshed = _load_json(HF_PREDICTIONS_FILE, payload)
+            if isinstance(refreshed, dict) and isinstance(refreshed.get("predictions"), list):
+                return refreshed
+        except Exception as exc:
+            logger.warning("Prediction self-refresh skipped: %s", exc)
+    return payload
+
+
 def _extract_prediction_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
     if not isinstance(payload, dict):
         return []
@@ -535,6 +581,10 @@ def _extract_prediction_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
 def _prediction_metrics() -> tuple[int, int, int, dict[str, int], list[str]]:
     today_payload, _, _ = _provider_or_local("/predictions/today", HF_PREDICTIONS_FILE, default={})
     tomorrow_payload, _, _ = _provider_or_local("/predictions/tomorrow", HF_PREDICTIONS_FILE, default={})
+    if isinstance(today_payload, dict):
+        today_payload = _maybe_refresh_predictions_multisport(today_payload)
+    if isinstance(tomorrow_payload, dict):
+        tomorrow_payload = _maybe_refresh_predictions_multisport(tomorrow_payload)
 
     today_count = int((today_payload or {}).get("prediction_count") or 0) if isinstance(today_payload, dict) else 0
     tomorrow_count = int((tomorrow_payload or {}).get("prediction_count") or 0) if isinstance(tomorrow_payload, dict) else 0
@@ -621,6 +671,8 @@ def predictions_status():
 @app.route("/api/predictions/today")
 def predictions_today():
     payload, source, error = _provider_or_local("/predictions/today", HF_PREDICTIONS_FILE, default={})
+    if isinstance(payload, dict):
+        payload = _maybe_refresh_predictions_multisport(payload)
     if isinstance(payload, dict) and "date" in payload and "predictions" in payload:
         return jsonify(_envelope(payload, source, error))
     if not isinstance(payload, dict):
@@ -631,6 +683,8 @@ def predictions_today():
 @app.route("/api/predictions/tomorrow")
 def predictions_tomorrow():
     payload, source, error = _provider_or_local("/predictions/tomorrow", HF_PREDICTIONS_FILE, default={})
+    if isinstance(payload, dict):
+        payload = _maybe_refresh_predictions_multisport(payload)
     if isinstance(payload, dict) and "date" in payload and "predictions" in payload:
         return jsonify(_envelope(payload, source, error))
     if not isinstance(payload, dict):
