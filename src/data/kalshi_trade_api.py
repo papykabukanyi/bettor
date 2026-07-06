@@ -82,8 +82,6 @@ def _request_json(
     headers: dict[str, str] = {}
     if auth:
         sign_path = f"{_BASE_PATH}{clean_path}"
-        if params:
-            sign_path = f"{sign_path}?{urlencode(params, doseq=True)}"
         headers.update(_signed_headers(method, sign_path))
     if payload is not None:
         headers["Content-Type"] = "application/json"
@@ -113,6 +111,10 @@ def get_balance(subaccount: int | None = None) -> dict[str, Any]:
     if subaccount is not None:
         params["subaccount"] = int(subaccount)
     return _request_json("GET", "/portfolio/balance", params=params, auth=True)
+
+
+def get_all_subaccount_balances() -> dict[str, Any]:
+    return _request_json("GET", "/portfolio/subaccounts/balances", auth=True)
 
 
 def get_orders(
@@ -473,6 +475,7 @@ def submit_combo_orders(
 def build_live_snapshot() -> dict[str, Any]:
     exchange: dict[str, Any] = {}
     balance: dict[str, Any] = {}
+    subaccount_balances: dict[str, Any] = {}
     open_orders: list[dict[str, Any]] = []
     positions_payload: dict[str, Any] = {}
     errors: list[str] = []
@@ -487,6 +490,7 @@ def build_live_snapshot() -> dict[str, Any]:
         futures = [
             executor.submit(_capture, "exchange", get_exchange_status),
             executor.submit(_capture, "balance", get_balance),
+            executor.submit(_capture, "subaccount_balances", get_all_subaccount_balances),
             executor.submit(_capture, "orders", get_open_orders, max_pages=max(1, int(os.getenv("KALSHI_SNAP_MAX_PAGES", "2") or "2")), page_limit=200),
             executor.submit(_capture, "positions", get_positions, count_filter="position,total_traded"),
         ]
@@ -499,6 +503,8 @@ def build_live_snapshot() -> dict[str, Any]:
                 exchange = value
             elif key == "balance" and isinstance(value, dict):
                 balance = value
+            elif key == "subaccount_balances" and isinstance(value, dict):
+                subaccount_balances = value
             elif key == "orders" and isinstance(value, list):
                 open_orders = value
             elif key == "positions" and isinstance(value, dict):
@@ -527,19 +533,24 @@ def build_live_snapshot() -> dict[str, Any]:
             }
         )
 
+    market_notional = 0.0
+    event_notional = 0.0
     market_positions = []
     for row in positions_payload.get("market_positions") or []:
         if not isinstance(row, dict):
             continue
+        exposure = _to_float(row.get("market_exposure_dollars"), 0.0)
+        market_notional += abs(exposure)
         market_positions.append(
             {
                 "ticker": str(row.get("ticker") or ""),
                 "position_fp": str(row.get("position_fp") or "0"),
                 "total_traded_dollars": _to_float(row.get("total_traded_dollars"), 0.0),
-                "market_exposure_dollars": _to_float(row.get("market_exposure_dollars"), 0.0),
+                "market_exposure_dollars": exposure,
                 "realized_pnl_dollars": _to_float(row.get("realized_pnl_dollars"), 0.0),
                 "fees_paid_dollars": _to_float(row.get("fees_paid_dollars"), 0.0),
                 "last_updated_ts": row.get("last_updated_ts") or "",
+                "position_type": "market",
             }
         )
 
@@ -547,29 +558,61 @@ def build_live_snapshot() -> dict[str, Any]:
     for row in positions_payload.get("event_positions") or []:
         if not isinstance(row, dict):
             continue
+        exposure = _to_float(row.get("event_exposure_dollars"), 0.0)
+        event_notional += abs(exposure)
         event_positions.append(
             {
                 "event_ticker": str(row.get("event_ticker") or ""),
-                "total_cost_dollars": _to_float(row.get("total_cost_dollars"), 0.0),
-                "total_cost_shares_fp": str(row.get("total_cost_shares_fp") or "0"),
-                "event_exposure_dollars": _to_float(row.get("event_exposure_dollars"), 0.0),
+                "ticker": str(row.get("event_ticker") or ""),
+                "position_fp": str(row.get("total_cost_shares_fp") or "0"),
+                "total_traded_dollars": _to_float(row.get("total_cost_dollars"), 0.0),
+                "market_exposure_dollars": exposure,
                 "realized_pnl_dollars": _to_float(row.get("realized_pnl_dollars"), 0.0),
                 "fees_paid_dollars": _to_float(row.get("fees_paid_dollars"), 0.0),
+                "last_updated_ts": row.get("last_updated_ts") or "",
+                "position_type": "event",
+                "total_cost_dollars": _to_float(row.get("total_cost_dollars"), 0.0),
+                "total_cost_shares_fp": str(row.get("total_cost_shares_fp") or "0"),
+                "event_exposure_dollars": exposure,
             }
         )
 
-    balance_cents = int(_to_float(balance.get("balance") or balance.get("balance_cents") or balance.get("cash_balance"), 0.0))
-    portfolio_cents = int(_to_float(balance.get("portfolio_value") or balance.get("portfolio_value_cents"), 0.0))
-    live_ok = bool(exchange or balance or normalized_orders or market_positions or event_positions)
+    all_balances = subaccount_balances.get("subaccount_balances") or []
+    aggregated_balance_usd = 0.0
+    aggregated_updated_ts = ""
+    if isinstance(all_balances, list) and all_balances:
+        for row in all_balances:
+            if not isinstance(row, dict):
+                continue
+            aggregated_balance_usd += _to_float(row.get("balance"), 0.0)
+            updated_ts = row.get("updated_ts")
+            if updated_ts and (not aggregated_updated_ts or str(updated_ts) > aggregated_updated_ts):
+                aggregated_updated_ts = str(updated_ts)
+
+    primary_balance_usd = _to_float(balance.get("balance_dollars"), 0.0)
+    if primary_balance_usd <= 0.0:
+        primary_balance_usd = _to_float(balance.get("balance"), 0.0) / 100.0
+    if primary_balance_usd <= 0.0 and aggregated_balance_usd > 0.0:
+        primary_balance_usd = aggregated_balance_usd
+
+    balance_cents = int(round(max(primary_balance_usd, 0.0) * 100))
+    portfolio_cents = int(round(max(
+        _to_float(balance.get("portfolio_value"), 0.0) / 100.0 if _to_float(balance.get("portfolio_value"), 0.0) > 1000 else _to_float(balance.get("portfolio_value"), 0.0),
+        _to_float(balance.get("portfolio_value_cents"), 0.0) / 100.0,
+    ) * 100))
+    live_ok = bool(exchange or balance or subaccount_balances or normalized_orders or market_positions or event_positions)
+    all_positions = [*market_positions, *event_positions]
+    open_position_notional = round(market_notional + event_notional, 2)
     account = {
         "balance_cents": balance_cents,
         "balance_usd": balance_cents / 100.0,
         "balance_dollars": balance.get("balance_dollars") or balance.get("balance"),
         "portfolio_value_cents": portfolio_cents,
         "portfolio_value_usd": portfolio_cents / 100.0,
-        "updated_ts": balance.get("updated_ts") or balance.get("updated_time") or "",
+        "updated_ts": balance.get("updated_ts") or subaccount_balances.get("updated_ts") or aggregated_updated_ts or balance.get("updated_time") or "",
         "balance_breakdown": balance.get("balance_breakdown") or [],
         "raw": balance,
+        "subaccount_balances": all_balances,
     }
     return {
         "ok": live_ok,
@@ -580,11 +623,12 @@ def build_live_snapshot() -> dict[str, Any]:
         "positions_payload": positions_payload,
         "market_positions": market_positions,
         "event_positions": event_positions,
+        "all_positions": all_positions,
         "open_orders": normalized_orders,
-        "positions": normalized_orders,
+        "positions": all_positions or normalized_orders,
         "open_orders_count": len(normalized_orders),
-        "position_count": len(market_positions),
-        "open_notional_usd": round(notional, 2),
+        "position_count": len(all_positions),
+        "open_notional_usd": round(notional + open_position_notional, 2),
         "errors": errors,
         "error": "; ".join(errors),
     }
