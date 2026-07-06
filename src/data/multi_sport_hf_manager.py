@@ -56,6 +56,7 @@ import logging
 import os
 from typing import Any
 from pathlib import Path
+import requests
 
 logger = logging.getLogger(__name__)
 
@@ -114,10 +115,60 @@ class MultiSportHFDataManager:
     def _save_seasons_tracker(self) -> None:
         """Save seasons tracker."""
         try:
+            self.seasons_loaded_file.parent.mkdir(parents=True, exist_ok=True)
             with open(self.seasons_loaded_file, "w") as f:
                 json.dump(self.loaded_seasons, f, indent=2)
         except Exception as e:
             logger.error(f"Failed to save seasons tracker: {e}")
+
+    def _default_cricsheet_zip_path(self) -> Path:
+        return self.cache_dir / "cricket" / "all_json.zip"
+
+    def _download_cricsheet_once(self) -> Path:
+        """
+        Ensure a local Cricsheet archive exists (one-time download).
+        Returns the zip path.
+        """
+        configured = str(os.getenv("CRICKET_CRICSHEET_DIR", "") or "").strip()
+        zip_path = Path(configured) if configured else self._default_cricsheet_zip_path()
+        if not zip_path.is_absolute():
+            zip_path = Path.cwd() / zip_path
+        zip_path.parent.mkdir(parents=True, exist_ok=True)
+        if zip_path.exists() and zip_path.stat().st_size > 1024:
+            logger.info("Cricsheet archive already present: %s", zip_path)
+            return zip_path
+
+        url = str(os.getenv("CRICKET_CRICSHEET_URL", "https://cricsheet.org/downloads/all_json.zip") or "").strip()
+        logger.info("Downloading Cricsheet archive from %s", url)
+        resp = requests.get(url, timeout=180, stream=True)
+        resp.raise_for_status()
+        with open(zip_path, "wb") as handle:
+            for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                if chunk:
+                    handle.write(chunk)
+        logger.info("Cricsheet archive downloaded to %s", zip_path)
+        return zip_path
+
+    def _bootstrap_cricket_from_cricsheet(self, seasons: list[int]) -> list[dict[str, Any]]:
+        """
+        Parse cricket historical rows from Cricsheet archive for requested seasons.
+        """
+        zip_path = self._download_cricsheet_once()
+        os.environ["CRICKET_CRICSHEET_DIR"] = str(zip_path)
+        from .hf_pipeline import HFDirectPipeline
+
+        pipeline = HFDirectPipeline()
+        rows: list[dict[str, Any]] = []
+        for season in seasons:
+            start = dt.date(season, 1, 1)
+            end = dt.date(season, 12, 31)
+            try:
+                season_rows = pipeline._fetch_cricket_games_cricsheet(start, end)  # noqa: SLF001
+                if season_rows:
+                    rows.extend(season_rows)
+            except Exception as exc:
+                logger.warning("Failed parsing Cricsheet season %s: %s", season, exc)
+        return rows
 
     def bootstrap_cricket_historical(self, seasons: list[int] | None = None) -> dict[str, Any]:
         """
@@ -140,39 +191,27 @@ class MultiSportHFDataManager:
             already_loaded = self.loaded_seasons.get("cricket", [])
             new_seasons = [s for s in seasons if s not in already_loaded]
             
-            if not new_seasons:
+            force = str(os.getenv("CRICKET_FORCE_BOOTSTRAP", "0") or "0").strip().lower() in {"1", "true", "yes", "on"}
+            if not new_seasons and not force:
                 logger.info("Cricket seasons already loaded, skipping bootstrap")
                 return {"ok": True, "loaded_count": 0, "message": "already_loaded"}
-            
-            games_to_push = []
-            now = dt.datetime.now(dt.timezone.utc)
-            
-            # Fetch cricket games for each season
-            # For now, use a mock since we don't have a full cricket history API
-            # In production, this would fetch from Cricsheet or similar
-            for season in new_seasons:
-                try:
-                    # Example: For IPL 2025, create records with proper dates
-                    if season == now.year:
-                        # Ongoing season - fetch from live API
-                        logger.info(f"Cricket {season}: Fetching live season data")
-                        # Would fetch from live API here
-                    else:
-                        # Past season - use historical data
-                        logger.info(f"Cricket {season}: Using historical data")
-                        # Would fetch from Cricsheet or historical API
-                    
-                    # Mark season as loaded
-                    if season not in self.loaded_seasons["cricket"]:
-                        self.loaded_seasons["cricket"].append(season)
-                
-                except Exception as e:
-                    logger.warning(f"Failed to load cricket season {season}: {e}")
-                    continue
-            
+            if force and not new_seasons:
+                new_seasons = seasons[:]
+             
+            games_to_push = self._bootstrap_cricket_from_cricsheet(new_seasons)
+            logger.info("Cricket bootstrap rows from Cricsheet: %d", len(games_to_push))
+             
             if games_to_push and self.uploader:
                 self.uploader.push_records("games", games_to_push)
-            
+                self.uploader.flush_all()
+
+            if games_to_push:
+                for season in new_seasons:
+                    if season not in self.loaded_seasons["cricket"]:
+                        self.loaded_seasons["cricket"].append(season)
+            else:
+                logger.warning("No cricket rows parsed from Cricsheet; seasons will not be marked loaded")
+             
             self._save_seasons_tracker()
             
             return {

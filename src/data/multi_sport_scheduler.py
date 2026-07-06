@@ -19,7 +19,7 @@ from .multi_sport_hf_manager import get_multi_sport_manager, bootstrap_all_sport
 
 logger = logging.getLogger(__name__)
 
-ROOT_DIR = Path(__file__).resolve().parents[3]
+ROOT_DIR = Path(__file__).resolve().parents[2]
 DATA_DIR = ROOT_DIR / "data"
 BOOTSTRAP_STATE_FILE = DATA_DIR / "multi_sport_bootstrap.json"
 
@@ -40,6 +40,7 @@ def _save_bootstrap_state(state: dict[str, Any]) -> None:
     """Save bootstrap state."""
     import json
     try:
+        BOOTSTRAP_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
         with open(BOOTSTRAP_STATE_FILE, "w") as f:
             json.dump(state, f, indent=2)
     except Exception as e:
@@ -62,7 +63,16 @@ def run_multi_sport_bootstrap() -> dict[str, Any]:
     logger.info("Starting multi-sport bootstrap...")
     
     try:
-        result = bootstrap_all_sports()
+        cricket_only = str(os.getenv("CRICKET_ONLY_BOOTSTRAP", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
+        if cricket_only:
+            manager = get_multi_sport_manager()
+            result = {
+                "cricket": manager.bootstrap_cricket_historical(),
+                "baseball": {"ok": True, "loaded_count": 0, "message": "skipped_cricket_only"},
+                "soccer": {"ok": True, "loaded_count": 0, "message": "skipped_cricket_only"},
+            }
+        else:
+            result = bootstrap_all_sports()
         
         # Save state
         state = {
