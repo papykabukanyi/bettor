@@ -220,11 +220,14 @@ def build_order_candidates_from_predictions(
         return []
     enriched = attach_kalshi_to_bets(candidates, force_refresh=force_refresh)
     matched: list[dict[str, Any]] = []
-    by_uid = {
-        str(p.get("prediction_id") or ""): p
-        for p in predictions
-        if isinstance(p, dict)
-    }
+    by_uid: dict[str, dict[str, Any]] = {}
+    for p in predictions:
+        if not isinstance(p, dict):
+            continue
+        for key in ("prediction_id", "prediction_uid", "uid", "bet_uid"):
+            value = str(p.get(key) or "").strip()
+            if value and value not in by_uid:
+                by_uid[value] = p
     for row in enriched:
         if not isinstance(row, dict):
             continue
@@ -374,7 +377,9 @@ def build_combo_suggestions_from_predictions(
     )
     if not combo_suggestions:
         return []
-    combo_res = resolve_ready_bets(combo_suggestions, force_refresh=False)
+    # Re-resolve combos against a fresh catalog so newly-open combo markets
+    # are not missed when the single pass already succeeded.
+    combo_res = resolve_ready_bets(combo_suggestions, force_refresh=True)
     by_uid = combo_res.get("resolutions") or {}
     enriched: list[dict[str, Any]] = []
     for combo in combo_suggestions:
