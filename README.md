@@ -10,7 +10,7 @@ Production-ready sports prediction stack using Hugging Face for dataset/model st
 | Model storage | HF Model Hub | Free |
 | Training GPU | HF Spaces T4 | Free tier |
 | Inference API | HF Spaces FastAPI | Free tier minutes |
-| Data sources | MLB Stats API, NHL API, football-data.org, TheSportsDB, balldontlie, Jeff Sackmann, Kalshi, NewsData.io/GDELT/Google News RSS | Free |
+| Data sources | MLB Stats API, NHL API, football-data.org, TheSportsDB, balldontlie, Jeff Sackmann, Cricsheet, CricAPI, RapidAPI cricket free tier, Kalshi, NewsData.io/GDELT/Google News RSS | Free |
 
 ## Architecture
 
@@ -38,7 +38,7 @@ Execution: Kalshi (single + combo order routing)
    - `HF_MODEL_REPO` → Your HF model repo (same or different, e.g., `papylove/sportprediction`)
    - `FOOTBALL_DATA_API_KEY` → Free key from https://www.football-data.org/
    - `NEWSDATA_API_KEY` → Free key from https://newsdata.io/ (recommended for richer player/team news)
-   - Kalshi credentials (if running auto-bets); paste `KALSHI_PRIVATE_KEY` as a single line with `\n` escapes
+   - Kalshi credentials (if running auto-bets); `KALSHI_PRIVATE_KEY` supports both one-line `\n` format and full multiline PEM
        - `PREGAME_ANALYSIS_LEAD_MINUTES=90`, `PREGAME_BET_LEAD_MINUTES=60`, `PREGAME_TIMING_MINUTES=5`
 3. Run pipeline:
    ```powershell
@@ -80,7 +80,15 @@ Execution: Kalshi (single + combo order routing)
 | Soccer | football-data.org (free key) | TheSportsDB public key `1` | Enabled |
 | Tennis | Jeff Sackmann historical CSVs | Kalshi market schedule extraction | Enabled |
 | Golf | Kalshi market schedule extraction | TheSportsDB events | Partial (upcoming via Kalshi) |
-| MMA/Boxing/Cricket | Kalshi market schedule extraction | TheSportsDB events | Partial (upcoming via Kalshi) |
+| Cricket | Cricsheet + CricAPI + RapidAPI cricket | TheSportsDB events | Enabled (historical + upcoming + player props) |
+| MMA/Boxing | Kalshi market schedule extraction | TheSportsDB events | Partial (upcoming via Kalshi) |
+
+## Cricket data plan (free)
+
+- Historical training (bulk): `CRICKET_CRICSHEET_DIR` (ball-by-ball archives) + `CRICKET_KAGGLE_DATA_DIR` (pre-cleaned CSVs)
+- Live schedule/results: `CRICAPI_KEY` and/or `CRICKET_RAPIDAPI_KEY`
+- Player props: generated for cricket fixtures (`batter runs`, `sixes`, `bowler wickets`, `50+ runs`)
+- News/sentiment: existing NewsData/GDELT/Google News path (with ESPN Cricinfo RSS URL configurable via `ESPN_CRICKET_NEWS_RSS_URL`)
 
 ## Soccer Data: football-data.org Integration
 

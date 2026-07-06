@@ -4,9 +4,43 @@ Reads settings from .env file or environment variables.
 """
 import os
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
-from dotenv import load_dotenv
 
-load_dotenv()
+
+def _bootstrap_env_from_dotenv() -> None:
+    env_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env")
+    if not os.path.exists(env_path):
+        return
+    try:
+        with open(env_path, "r", encoding="utf-8") as handle:
+            lines = handle.read().splitlines()
+    except Exception:
+        return
+    idx = 0
+    while idx < len(lines):
+        raw = lines[idx].strip()
+        idx += 1
+        if not raw or raw.startswith("#") or "=" not in raw:
+            continue
+        key, value = raw.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if not key:
+            continue
+        if key == "KALSHI_PRIVATE_KEY" and "BEGIN RSA PRIVATE KEY" in value and "END RSA PRIVATE KEY" not in value:
+            chunks = [value]
+            while idx < len(lines):
+                part = lines[idx].rstrip("\r")
+                chunks.append(part)
+                idx += 1
+                if "END RSA PRIVATE KEY" in part:
+                    break
+            value = "\n".join(chunks)
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        os.environ.setdefault(key, value)
+
+
+_bootstrap_env_from_dotenv()
 
 
 def _env_bool(name: str, default: str = "false") -> bool:
@@ -160,6 +194,18 @@ GOLF_PGA_STATDATA_BASE = os.getenv("GOLF_PGA_STATDATA_BASE", "")
 GOLF_GOLFAPI_BASE = os.getenv("GOLF_GOLFAPI_BASE", "")
 GOLF_GOLFAPI_KEY = os.getenv("GOLF_GOLFAPI_KEY", "")
 GOLF_KAGGLE_DATA_DIR = os.getenv("GOLF_KAGGLE_DATA_DIR", "")
+
+# Cricket data-source integration
+CRICKET_CRICSHEET_DIR = os.getenv("CRICKET_CRICSHEET_DIR", "")
+CRICKET_KAGGLE_DATA_DIR = os.getenv("CRICKET_KAGGLE_DATA_DIR", "")
+CRICAPI_BASE_URL = os.getenv("CRICAPI_BASE_URL", "https://api.cricapi.com/v1")
+CRICAPI_KEY = os.getenv("CRICAPI_KEY", "")
+CRICKET_RAPIDAPI_BASE_URL = os.getenv("CRICKET_RAPIDAPI_BASE_URL", "https://cricket-live-data.p.rapidapi.com")
+CRICKET_RAPIDAPI_HOST = os.getenv("CRICKET_RAPIDAPI_HOST", "cricket-live-data.p.rapidapi.com")
+CRICKET_RAPIDAPI_KEY = os.getenv("CRICKET_RAPIDAPI_KEY", "")
+CRICKET_STATSGURU_BASE_URL = os.getenv("CRICKET_STATSGURU_BASE_URL", "https://stats.espncricinfo.com")
+CRICKET_ARCHIVE_BASE_URL = os.getenv("CRICKET_ARCHIVE_BASE_URL", "https://cricketarchive.com")
+ESPN_CRICKET_NEWS_RSS_URL = os.getenv("ESPN_CRICKET_NEWS_RSS_URL", "https://www.espncricinfo.com/rss/content/story/feeds/0.xml")
 
 # ---------------------------------------------------------------------------
 # Eastern-time date helper

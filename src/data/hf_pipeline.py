@@ -18,6 +18,7 @@ Features: home_team, away_team, sport, season, month, day_of_week.
 from __future__ import annotations
 
 import datetime
+import csv
 import io
 import json
 import logging
@@ -25,6 +26,7 @@ import os
 import re
 import tempfile
 import time
+import zipfile
 from dataclasses import dataclass, field
 from uuid import uuid4
 
@@ -75,6 +77,7 @@ class HFDirectPipeline:
         "football": "soccer",
         "tennis": "tennis",
         "golf": "golf",
+        "cricket": "cricket",
     }
     _SPORT_MARKET_PROFILES = {
         "mlb": [
@@ -165,6 +168,12 @@ class HFDirectPipeline:
         ],
         "nfl": [("anytime_td", "Anytime Touchdown", 0.60), ("rushing_yards_over", "Player Rushing Yards Over", 0.56)],
         "tennis": [("wins_set_1", "Player To Win Set 1", 0.62)],
+        "cricket": [
+            ("batter_runs_over_24_5", "Batter Runs Over 24.5", 0.64),
+            ("batter_sixes_over_1_5", "Batter Sixes Over 1.5", 0.57),
+            ("bowler_wickets_over_1_5", "Bowler Wickets Over 1.5", 0.60),
+            ("player_to_score_50", "Player To Score 50+", 0.48),
+        ],
     }
     _PLAYER_PROP_BASELINES = {
         # MLB
@@ -203,6 +212,11 @@ class HFDirectPipeline:
         "rushing_yards_over":  {"line": 59.5, "unit": "yards",       "scale": 120.0},
         # Tennis
         "wins_set_1":          {"line": 0.5,  "unit": "sets",        "scale": 1.0},
+        # Cricket
+        "batter_runs_over_24_5": {"line": 24.5, "unit": "runs",      "scale": 80.0},
+        "batter_sixes_over_1_5": {"line": 1.5,  "unit": "sixes",     "scale": 6.0},
+        "bowler_wickets_over_1_5": {"line": 1.5, "unit": "wickets",  "scale": 5.0},
+        "player_to_score_50": {"line": 49.5, "unit": "runs",         "scale": 100.0},
     }
     _SPORT_ALIASES = {
         "baseball": "mlb",
@@ -248,6 +262,13 @@ class HFDirectPipeline:
                 FOOTBALL_DATA_API_KEY,
                 TENNIS_JEFF_SACKMANN_DIR,
                 NEWSDATA_API_KEY,
+                CRICKET_CRICSHEET_DIR,
+                CRICKET_KAGGLE_DATA_DIR,
+                CRICAPI_BASE_URL,
+                CRICAPI_KEY,
+                CRICKET_RAPIDAPI_BASE_URL,
+                CRICKET_RAPIDAPI_HOST,
+                CRICKET_RAPIDAPI_KEY,
             )
         except Exception:
             HF_API_KEY = os.getenv("HF_API_KEY", "")
@@ -256,11 +277,25 @@ class HFDirectPipeline:
             FOOTBALL_DATA_API_KEY = os.getenv("FOOTBALL_DATA_API_KEY", "")
             TENNIS_JEFF_SACKMANN_DIR = os.getenv("TENNIS_JEFF_SACKMANN_DIR", "")
             NEWSDATA_API_KEY = os.getenv("NEWSDATA_API_KEY", "")
+            CRICKET_CRICSHEET_DIR = os.getenv("CRICKET_CRICSHEET_DIR", "")
+            CRICKET_KAGGLE_DATA_DIR = os.getenv("CRICKET_KAGGLE_DATA_DIR", "")
+            CRICAPI_BASE_URL = os.getenv("CRICAPI_BASE_URL", "https://api.cricapi.com/v1")
+            CRICAPI_KEY = os.getenv("CRICAPI_KEY", "")
+            CRICKET_RAPIDAPI_BASE_URL = os.getenv("CRICKET_RAPIDAPI_BASE_URL", "https://cricket-live-data.p.rapidapi.com")
+            CRICKET_RAPIDAPI_HOST = os.getenv("CRICKET_RAPIDAPI_HOST", "cricket-live-data.p.rapidapi.com")
+            CRICKET_RAPIDAPI_KEY = os.getenv("CRICKET_RAPIDAPI_KEY", "")
 
         self.token = str(token or HF_API_KEY or "").strip()
         self.football_data_api_key = str(FOOTBALL_DATA_API_KEY or "").strip()
         self.tennis_sackmann_dir = str(TENNIS_JEFF_SACKMANN_DIR or "").strip()
         self.newsdata_api_key = str(NEWSDATA_API_KEY or "").strip()
+        self.cricsheet_dir = str(CRICKET_CRICSHEET_DIR or "").strip()
+        self.cricket_kaggle_dir = str(CRICKET_KAGGLE_DATA_DIR or "").strip()
+        self.cricapi_base_url = str(CRICAPI_BASE_URL or "https://api.cricapi.com/v1").strip().rstrip("/")
+        self.cricapi_key = str(CRICAPI_KEY or "").strip()
+        self.cricket_rapidapi_base_url = str(CRICKET_RAPIDAPI_BASE_URL or "https://cricket-live-data.p.rapidapi.com").strip().rstrip("/")
+        self.cricket_rapidapi_host = str(CRICKET_RAPIDAPI_HOST or "cricket-live-data.p.rapidapi.com").strip()
+        self.cricket_rapidapi_key = str(CRICKET_RAPIDAPI_KEY or "").strip()
         self.uploader = HFUploader(token=self.token, repo_name=dataset_repo or HF_DATASET_REPO)
         self.dataset_repo_id = getattr(self.uploader, "_repo_id", "")
         self.model_repo_name = str(model_repo or HF_MODEL_REPO or "sports-win-model").strip()
@@ -704,11 +739,19 @@ class HFDirectPipeline:
                 home_players = self._fetch_soccer_squad_espn(home_team, player_cache)
             if not away_players:
                 away_players = self._fetch_soccer_squad_espn(away_team, player_cache)
+        if not home_players and normalized_sport == "cricket":
+            home_players = self._fetch_cricket_players_cricapi(home_team, player_cache)
+        if not away_players and normalized_sport == "cricket":
+            away_players = self._fetch_cricket_players_cricapi(away_team, player_cache)
         if not home_players and not away_players:
             return []
 
-        # Soccer: use more players per team for richer prop coverage (attackers, GKs)
-        max_players = 4 if normalized_sport == "soccer" else 2
+        # Soccer/cricket: use more players per team for richer prop coverage.
+        max_players = 2
+        if normalized_sport == "soccer":
+            max_players = 4
+        elif normalized_sport == "cricket":
+            max_players = 3
         rows: list[dict] = []
         candidate_players = (
             [(home_team, p, home_prob) for p in home_players[:max_players]] +
@@ -1257,6 +1300,7 @@ class HFDirectPipeline:
         rows += self._fetch_nba_games(start, end)
         rows += self._fetch_nhl_games(start, end)
         rows += self._fetch_soccer_games(start, end)
+        rows += self._fetch_cricket_games(start, end)
         rows += self._fetch_tennis_games_jeff_sackmann(start, end)
         if (end - start).days <= 7:
             rows += self._fetch_additional_sportsdb_completed(start, end)
@@ -1561,6 +1605,313 @@ class HFDirectPipeline:
             current += datetime.timedelta(days=1)
         return rows
 
+    def _fetch_cricket_games(self, start: datetime.date, end: datetime.date) -> list[dict]:
+        rows: list[dict] = []
+        rows += self._fetch_cricket_games_cricsheet(start, end)
+        rows += self._fetch_cricket_games_kaggle(start, end)
+        rows += self._fetch_cricket_games_cricapi(start, end)
+        rows += self._fetch_cricket_games_rapidapi(start, end)
+        rows += self._fetch_cricket_games_thesportsdb(start, end)
+        return rows
+
+    def _fetch_cricket_games_thesportsdb(self, start: datetime.date, end: datetime.date) -> list[dict]:
+        rows: list[dict] = []
+        current = start
+        while current <= end:
+            day = current.isoformat()
+            try:
+                resp = requests.get(
+                    "https://www.thesportsdb.com/api/v1/json/1/eventsday.php",
+                    params={"d": day, "s": "Cricket"},
+                    timeout=20,
+                )
+                resp.raise_for_status()
+                for ev in ((resp.json() or {}).get("events") or []):
+                    hs = ev.get("intHomeScore")
+                    as_ = ev.get("intAwayScore")
+                    if hs is None or as_ is None:
+                        continue
+                    ht = str(ev.get("strHomeTeam") or "").strip()
+                    at = str(ev.get("strAwayTeam") or "").strip()
+                    if not ht or not at:
+                        continue
+                    rows.append(
+                        self._make_game_record(
+                            game_id=str(ev.get("idEvent") or ""),
+                            sport="cricket",
+                            league=str(ev.get("strLeague") or "Cricket"),
+                            game_date=day,
+                            game_datetime=str(ev.get("strTimestamp") or day),
+                            status="Final",
+                            home_team=ht,
+                            away_team=at,
+                            home_score=float(hs),
+                            away_score=float(as_),
+                            season=current.year,
+                        )
+                    )
+            except Exception as exc:
+                logger.debug("[hf_pipeline] Cricket SportsDB %s: %s", day, exc)
+            current += datetime.timedelta(days=1)
+        return rows
+
+    def _fetch_cricket_games_cricsheet(self, start: datetime.date, end: datetime.date) -> list[dict]:
+        rows: list[dict] = []
+        base_dir = str(self.cricsheet_dir or "").strip()
+        if not base_dir:
+            return rows
+        path = os.path.abspath(base_dir)
+        if not os.path.exists(path):
+            return rows
+
+        def _append_payload(payload: dict, source_name: str) -> None:
+            info = payload.get("info") if isinstance(payload.get("info"), dict) else {}
+            dates = info.get("dates") if isinstance(info.get("dates"), list) else []
+            game_date = self._normalize_game_date(str(dates[0] if dates else ""), "")
+            if not game_date:
+                game_date = self._normalize_game_date(str(info.get("date") or ""), "")
+            if not game_date:
+                return
+            try:
+                game_dt = datetime.date.fromisoformat(game_date)
+            except Exception:
+                return
+            if game_dt < start or game_dt > end:
+                return
+            teams = info.get("teams") if isinstance(info.get("teams"), list) else []
+            if len(teams) < 2:
+                return
+            home_team = str(teams[0] or "").strip()
+            away_team = str(teams[1] or "").strip()
+            if not home_team or not away_team:
+                return
+            outcome = info.get("outcome") if isinstance(info.get("outcome"), dict) else {}
+            winner = str(outcome.get("winner") or "").strip().lower()
+            hs = 1.0 if winner and winner == home_team.lower() else (0.0 if winner and winner == away_team.lower() else 0.5)
+            as_ = 1.0 - hs if hs in {0.0, 1.0} else 0.5
+            league = str(((info.get("event") or {}).get("name")) or info.get("match_type") or "Cricket").strip()
+            metadata = {
+                "source": "cricsheet",
+                "winner": str(outcome.get("winner") or ""),
+                "match_type": str(info.get("match_type") or ""),
+                "venue": str(info.get("venue") or ""),
+            }
+            rows.append(
+                self._make_game_record(
+                    game_id=f"cricsheet_{source_name}",
+                    sport="cricket",
+                    league=league[:80] or "Cricket",
+                    game_date=game_date,
+                    game_datetime=f"{game_date}T00:00:00Z",
+                    status="Final",
+                    home_team=home_team,
+                    away_team=away_team,
+                    home_score=hs,
+                    away_score=as_,
+                    season=int(game_date[:4]),
+                    metadata=json.dumps(metadata, ensure_ascii=True),
+                )
+            )
+
+        if os.path.isdir(path):
+            json_files = [os.path.join(path, f) for f in os.listdir(path) if f.lower().endswith(".json")]
+            zip_files = [os.path.join(path, f) for f in os.listdir(path) if f.lower().endswith(".zip")]
+        else:
+            json_files = [path] if path.lower().endswith(".json") else []
+            zip_files = [path] if path.lower().endswith(".zip") else []
+
+        for json_path in json_files:
+            try:
+                with open(json_path, "r", encoding="utf-8") as handle:
+                    payload = json.load(handle)
+                if isinstance(payload, dict):
+                    _append_payload(payload, os.path.basename(json_path))
+            except Exception:
+                continue
+
+        for zip_path in zip_files:
+            try:
+                with zipfile.ZipFile(zip_path, "r") as archive:
+                    for member in archive.namelist():
+                        if not member.lower().endswith(".json"):
+                            continue
+                        try:
+                            payload = json.loads(archive.read(member).decode("utf-8"))
+                        except Exception:
+                            continue
+                        if isinstance(payload, dict):
+                            _append_payload(payload, member)
+            except Exception:
+                continue
+        return rows
+
+    def _fetch_cricket_games_kaggle(self, start: datetime.date, end: datetime.date) -> list[dict]:
+        rows: list[dict] = []
+        base_dir = str(self.cricket_kaggle_dir or "").strip()
+        if not base_dir or not os.path.isdir(base_dir):
+            return rows
+        for root, _, files in os.walk(base_dir):
+            for file_name in files:
+                if not file_name.lower().endswith(".csv"):
+                    continue
+                csv_path = os.path.join(root, file_name)
+                try:
+                    with open(csv_path, "r", encoding="utf-8", newline="") as handle:
+                        reader = csv.DictReader(handle)
+                        field_map = {str(f or "").strip().lower(): f for f in (reader.fieldnames or [])}
+                        date_key = field_map.get("date") or field_map.get("match_date")
+                        home_key = field_map.get("team1") or field_map.get("home_team")
+                        away_key = field_map.get("team2") or field_map.get("away_team")
+                        winner_key = field_map.get("winner")
+                        league_key = field_map.get("tournament") or field_map.get("series") or field_map.get("league")
+                        if not date_key or not home_key or not away_key:
+                            continue
+                        for row in reader:
+                            gd = self._normalize_game_date(str(row.get(date_key) or ""), "")
+                            if not gd:
+                                continue
+                            try:
+                                game_dt = datetime.date.fromisoformat(gd)
+                            except Exception:
+                                continue
+                            if game_dt < start or game_dt > end:
+                                continue
+                            ht = str(row.get(home_key) or "").strip()
+                            at = str(row.get(away_key) or "").strip()
+                            if not ht or not at:
+                                continue
+                            winner = str(row.get(winner_key) or "").strip().lower() if winner_key else ""
+                            hs = 1.0 if winner and winner == ht.lower() else (0.0 if winner and winner == at.lower() else 0.5)
+                            as_ = 1.0 - hs if hs in {0.0, 1.0} else 0.5
+                            league = str(row.get(league_key) or "Cricket").strip() if league_key else "Cricket"
+                            rows.append(
+                                self._make_game_record(
+                                    game_id=f"kaggle_{file_name}_{gd}_{ht}_{at}",
+                                    sport="cricket",
+                                    league=league[:80] or "Cricket",
+                                    game_date=gd,
+                                    game_datetime=f"{gd}T00:00:00Z",
+                                    status="Final",
+                                    home_team=ht,
+                                    away_team=at,
+                                    home_score=hs,
+                                    away_score=as_,
+                                    season=int(gd[:4]),
+                                    metadata=json.dumps({"source": "kaggle", "winner": winner}, ensure_ascii=True),
+                                )
+                            )
+                except Exception as exc:
+                    logger.debug("[hf_pipeline] Cricket Kaggle %s: %s", csv_path, exc)
+        return rows
+
+    def _fetch_cricket_games_cricapi(self, start: datetime.date, end: datetime.date) -> list[dict]:
+        rows: list[dict] = []
+        if not self.cricapi_key:
+            return rows
+        current = start
+        while current <= end:
+            day = current.isoformat()
+            try:
+                resp = requests.get(
+                    f"{self.cricapi_base_url}/matches",
+                    params={"apikey": self.cricapi_key, "offset": 0, "date": day},
+                    timeout=20,
+                )
+                if resp.status_code != 200:
+                    current += datetime.timedelta(days=1)
+                    continue
+                for m in (resp.json() or {}).get("data") or []:
+                    status = str(m.get("status") or "").lower()
+                    if not any(token in status for token in ("result", "won", "draw", "tie", "completed", "final")):
+                        continue
+                    ht = str(m.get("teamInfo", [{}])[0].get("name") if isinstance(m.get("teamInfo"), list) and len(m.get("teamInfo")) > 0 else m.get("t1") or "").strip()
+                    at = str(m.get("teamInfo", [{}, {}])[1].get("name") if isinstance(m.get("teamInfo"), list) and len(m.get("teamInfo")) > 1 else m.get("t2") or "").strip()
+                    if not ht or not at:
+                        continue
+                    winner = str(m.get("matchWinner") or "").strip().lower()
+                    hs = 1.0 if winner and winner == ht.lower() else (0.0 if winner and winner == at.lower() else 0.5)
+                    as_ = 1.0 - hs if hs in {0.0, 1.0} else 0.5
+                    game_time = str(m.get("dateTimeGMT") or f"{day}T00:00:00Z")
+                    rows.append(
+                        self._make_game_record(
+                            game_id=str(m.get("id") or f"cricapi_{day}_{ht}_{at}"),
+                            sport="cricket",
+                            league=str(m.get("series") or m.get("matchType") or "Cricket"),
+                            game_date=day,
+                            game_datetime=game_time,
+                            status="Final",
+                            home_team=ht,
+                            away_team=at,
+                            home_score=hs,
+                            away_score=as_,
+                            season=int(day[:4]),
+                            metadata=json.dumps({"source": "cricapi", "status": m.get("status"), "winner": m.get("matchWinner")}, ensure_ascii=True),
+                        )
+                    )
+            except Exception as exc:
+                logger.debug("[hf_pipeline] CricAPI completed %s: %s", day, exc)
+            current += datetime.timedelta(days=1)
+        return rows
+
+    def _fetch_cricket_games_rapidapi(self, start: datetime.date, end: datetime.date) -> list[dict]:
+        rows: list[dict] = []
+        if not self.cricket_rapidapi_key:
+            return rows
+        headers = {
+            "X-RapidAPI-Key": self.cricket_rapidapi_key,
+            "X-RapidAPI-Host": self.cricket_rapidapi_host,
+        }
+        current = start
+        while current <= end:
+            day = current.isoformat()
+            try:
+                resp = requests.get(
+                    f"{self.cricket_rapidapi_base_url}/fixtures-by-date/{day}",
+                    headers=headers,
+                    timeout=20,
+                )
+                if resp.status_code != 200:
+                    current += datetime.timedelta(days=1)
+                    continue
+                payload = resp.json() or {}
+                fixture_rows = payload.get("results") if isinstance(payload.get("results"), list) else payload.get("data")
+                if not isinstance(fixture_rows, list):
+                    current += datetime.timedelta(days=1)
+                    continue
+                for m in fixture_rows:
+                    if not isinstance(m, dict):
+                        continue
+                    status = str(m.get("status") or m.get("match_status") or "").lower()
+                    if not any(token in status for token in ("result", "won", "draw", "tie", "complete", "final")):
+                        continue
+                    ht = str(m.get("home") or m.get("home_team") or m.get("team1") or "").strip()
+                    at = str(m.get("away") or m.get("away_team") or m.get("team2") or "").strip()
+                    if not ht or not at:
+                        continue
+                    winner = str(m.get("winner") or "").strip().lower()
+                    hs = 1.0 if winner and winner == ht.lower() else (0.0 if winner and winner == at.lower() else 0.5)
+                    as_ = 1.0 - hs if hs in {0.0, 1.0} else 0.5
+                    rows.append(
+                        self._make_game_record(
+                            game_id=str(m.get("id") or f"rapidapi_{day}_{ht}_{at}"),
+                            sport="cricket",
+                            league=str(m.get("series_name") or m.get("league") or "Cricket"),
+                            game_date=day,
+                            game_datetime=str(m.get("date") or m.get("start_time") or f"{day}T00:00:00Z"),
+                            status="Final",
+                            home_team=ht,
+                            away_team=at,
+                            home_score=hs,
+                            away_score=as_,
+                            season=int(day[:4]),
+                            metadata=json.dumps({"source": "rapidapi", "winner": m.get("winner"), "status": m.get("status")}, ensure_ascii=True),
+                        )
+                    )
+            except Exception as exc:
+                logger.debug("[hf_pipeline] RapidAPI cricket completed %s: %s", day, exc)
+            current += datetime.timedelta(days=1)
+        return rows
+
     # ──────────────────────────────────────────────────────────
     # Private sport-specific upcoming fetchers
     # ──────────────────────────────────────────────────────────
@@ -1571,6 +1922,7 @@ class HFDirectPipeline:
         rows += self._fetch_nba_upcoming(day)
         rows += self._fetch_nhl_upcoming(day)
         rows += self._fetch_soccer_upcoming(day)
+        rows += self._fetch_cricket_upcoming(day)
         rows += self._fetch_additional_sportsdb_upcoming(day)
         rows += self._fetch_kalshi_upcoming(day)
 
@@ -1680,6 +2032,108 @@ class HFDirectPipeline:
                     )
             except Exception as exc:
                 logger.debug("[hf_pipeline] SportsDB upcoming %s %s: %s", src_sport, day, exc)
+        return rows
+
+    def _fetch_cricket_upcoming(self, day: datetime.date) -> list[dict]:
+        rows: list[dict] = []
+        rows += self._fetch_cricket_upcoming_cricapi(day)
+        rows += self._fetch_cricket_upcoming_rapidapi(day)
+        # dedupe by home/away/date
+        deduped: list[dict] = []
+        seen: set[tuple[str, str, str]] = set()
+        for row in rows:
+            key = (
+                str(row.get("home_team") or "").strip().lower(),
+                str(row.get("away_team") or "").strip().lower(),
+                str(row.get("game_date") or "").strip(),
+            )
+            if not key[0] or not key[1] or key in seen:
+                continue
+            seen.add(key)
+            deduped.append(row)
+        return deduped
+
+    def _fetch_cricket_upcoming_cricapi(self, day: datetime.date) -> list[dict]:
+        rows: list[dict] = []
+        if not self.cricapi_key:
+            return rows
+        try:
+            resp = requests.get(
+                f"{self.cricapi_base_url}/matches",
+                params={"apikey": self.cricapi_key, "offset": 0, "date": day.isoformat()},
+                timeout=20,
+            )
+            if resp.status_code != 200:
+                return rows
+            for m in (resp.json() or {}).get("data") or []:
+                if not isinstance(m, dict):
+                    continue
+                status = str(m.get("status") or "").lower()
+                if any(token in status for token in ("result", "won", "draw", "tie", "complete", "final")):
+                    continue
+                team_info = m.get("teamInfo") if isinstance(m.get("teamInfo"), list) else []
+                ht = str((team_info[0].get("name") if len(team_info) > 0 and isinstance(team_info[0], dict) else m.get("t1")) or "").strip()
+                at = str((team_info[1].get("name") if len(team_info) > 1 and isinstance(team_info[1], dict) else m.get("t2")) or "").strip()
+                if not ht or not at:
+                    continue
+                rows.append(
+                    {
+                        "sport": "cricket",
+                        "league": str(m.get("series") or m.get("matchType") or "Cricket"),
+                        "home_team": ht,
+                        "away_team": at,
+                        "game_date": day.isoformat(),
+                        "game_time": str(m.get("dateTimeGMT") or f"{day.isoformat()}T00:00:00Z"),
+                        "game_id": str(m.get("id") or f"cricapi_{day.isoformat()}_{ht}_{at}"),
+                    }
+                )
+        except Exception as exc:
+            logger.debug("[hf_pipeline] CricAPI upcoming %s: %s", day, exc)
+        return rows
+
+    def _fetch_cricket_upcoming_rapidapi(self, day: datetime.date) -> list[dict]:
+        rows: list[dict] = []
+        if not self.cricket_rapidapi_key:
+            return rows
+        try:
+            headers = {
+                "X-RapidAPI-Key": self.cricket_rapidapi_key,
+                "X-RapidAPI-Host": self.cricket_rapidapi_host,
+            }
+            resp = requests.get(
+                f"{self.cricket_rapidapi_base_url}/fixtures-by-date/{day.isoformat()}",
+                headers=headers,
+                timeout=20,
+            )
+            if resp.status_code != 200:
+                return rows
+            payload = resp.json() or {}
+            fixture_rows = payload.get("results") if isinstance(payload.get("results"), list) else payload.get("data")
+            if not isinstance(fixture_rows, list):
+                return rows
+            for m in fixture_rows:
+                if not isinstance(m, dict):
+                    continue
+                status = str(m.get("status") or m.get("match_status") or "").lower()
+                if any(token in status for token in ("result", "won", "draw", "tie", "complete", "final")):
+                    continue
+                ht = str(m.get("home") or m.get("home_team") or m.get("team1") or "").strip()
+                at = str(m.get("away") or m.get("away_team") or m.get("team2") or "").strip()
+                if not ht or not at:
+                    continue
+                rows.append(
+                    {
+                        "sport": "cricket",
+                        "league": str(m.get("series_name") or m.get("league") or "Cricket"),
+                        "home_team": ht,
+                        "away_team": at,
+                        "game_date": day.isoformat(),
+                        "game_time": str(m.get("date") or m.get("start_time") or f"{day.isoformat()}T00:00:00Z"),
+                        "game_id": str(m.get("id") or f"rapidapi_{day.isoformat()}_{ht}_{at}"),
+                    }
+                )
+        except Exception as exc:
+            logger.debug("[hf_pipeline] RapidAPI cricket upcoming %s: %s", day, exc)
         return rows
 
     def _fetch_mlb_upcoming(self, day: datetime.date) -> list[dict]:
@@ -2173,6 +2627,8 @@ class HFDirectPipeline:
                 players.append(name)
         except Exception:
             players = []
+        if not players and self._normalize_sport(sport) == "cricket":
+            players = self._fetch_cricket_players_cricapi(team_name, cache)
         deduped = []
         seen = set()
         for name in players:
@@ -2183,6 +2639,42 @@ class HFDirectPipeline:
             deduped.append(name)
         cache[key] = deduped
         return deduped
+
+    def _fetch_cricket_players_cricapi(self, team_name: str, cache: dict[str, list[str]]) -> list[str]:
+        key = f"cricket_players|{str(team_name or '').strip().lower()}"
+        if key in cache:
+            return cache[key]
+        rows: list[str] = []
+        if self.cricapi_key:
+            try:
+                resp = requests.get(
+                    f"{self.cricapi_base_url}/players",
+                    params={"apikey": self.cricapi_key, "offset": 0, "search": str(team_name or "").strip()},
+                    timeout=20,
+                )
+                if resp.status_code == 200:
+                    for p in (resp.json() or {}).get("data") or []:
+                        if not isinstance(p, dict):
+                            continue
+                        name = str(p.get("name") or "").strip()
+                        country = str(p.get("country") or p.get("teamName") or "").strip().lower()
+                        if not name:
+                            continue
+                        if country and str(team_name or "").strip().lower() not in country:
+                            continue
+                        rows.append(name)
+                        if len(rows) >= 8:
+                            break
+            except Exception as exc:
+                logger.debug("[hf_pipeline] CricAPI players %s: %s", team_name, exc)
+        if not rows:
+            rows = [
+                f"{team_name} Top Batter".strip(),
+                f"{team_name} Top Bowler".strip(),
+                f"{team_name} Strike All-Rounder".strip(),
+            ]
+        cache[key] = rows
+        return rows
 
     def _fetch_soccer_upcoming_thesportsdb(self, day: datetime.date) -> list[dict]:
         rows: list[dict] = []
