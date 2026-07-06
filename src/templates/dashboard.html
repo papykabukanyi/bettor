@@ -298,6 +298,7 @@
       status: {}, today: { predictions: [] }, tomorrow: { predictions: [] },
       model: { current_model: {}, history: [] },
       kalshiStatus: { ok: true, source: 'cached', submissions: { summary: {} }, positions: { summary: {}, positions: [] }, live: {}, account: {} },
+      kalshiAutomation: { ok: true, automation: {}, settings: {} },
       lastHash: '', firstRefresh: true,
       activeTab: 'pipeline',
       tabLoaded: {},
@@ -550,6 +551,8 @@
       const submissions = state.kalshiStatus.submissions || {};
       const positions = state.kalshiStatus.positions || {};
       const live = state.kalshiStatus.live || {};
+      const automationWrap = state.kalshiAutomation || {};
+      const automation = automationWrap.automation || {};
       const account = live.account || live.balance || positions.account || positions.balance || {};
       const ss = submissions.summary || {};
       const ps = positions.summary || {};
@@ -562,12 +565,15 @@
       const positionRows = Array.isArray(positions.positions)
         ? positions.positions.slice(0, 40)
         : (Array.isArray(live.market_positions) ? live.market_positions.slice(0, 40) : (Array.isArray(live.positions) ? live.positions.slice(0, 40) : []));
-      const buyingPower = account.balance_usd ?? (account.balance_cents != null ? Number(account.balance_cents) / 100 : undefined) ?? ss.available_buying_power_usd ?? 0;
+      const buyingPower = account.buying_power_usd ?? account.balance_usd ?? (account.balance_cents != null ? Number(account.balance_cents) / 100 : undefined) ?? ss.available_buying_power_usd ?? 0;
       const portfolioValue = account.portfolio_value_usd ?? (account.portfolio_value_cents != null ? Number(account.portfolio_value_cents) / 100 : undefined) ?? 0;
       const openPositions = ps.active_positions ?? live.position_count ?? positionRows.length ?? 0;
       const openNotional = ps.open_notional_usd ?? live.open_notional_usd ?? 0;
       const lastUpdated = account.updated_ts || live.updated_at || positions.updated_at || '';
-      document.getElementById('kalshi-automation').innerHTML = `<h3>Kalshi automation</h3><p class="subtle" style="margin:10px 0 0">Automatic only. The backend decides when to place singles and combos.</p><div class="status-row"><span class="status-chip">Mode: automatic</span><span class="status-chip">Singles: backend</span><span class="status-chip">Combos: backend</span><span class="status-chip">Live: ${esc(connection)}</span></div>`;
+      const bets = automation.bets || {};
+      const feed = automation.predictions_feed || {};
+      const dryRun = ((automation.timing || {}).effective_dry_run === true) || (bets.dry_run === true);
+      document.getElementById('kalshi-automation').innerHTML = `<h3>Kalshi automation</h3><p class="subtle" style="margin:10px 0 0">Automatic only. The backend decides when to place singles and combos.</p><div class="status-row"><span class="status-chip">Mode: automatic</span><span class="status-chip">Singles: backend</span><span class="status-chip">Combos: backend</span><span class="status-chip">Live: ${esc(connection)}</span><span class="status-chip">Dry run: ${dryRun ? 'on' : 'off'}</span><span class="status-chip">Last placed: ${esc(num(bets.placed || 0))}</span><span class="status-chip">Feed rows: ${esc(num(feed.prediction_count || 0))}</span></div>`;
       document.getElementById('kalshi-summary').innerHTML = `<h3>Account summary</h3><p class="subtle" style="margin:10px 0 0">${summaryNote}</p><div class="kvs"><div class="kv"><span>Buying power</span><strong>${live.ok ? esc(money(buyingPower)) : '—'}</strong></div><div class="kv"><span>Portfolio value</span><strong>${live.ok ? esc(money(portfolioValue)) : '—'}</strong></div><div class="kv"><span>Open positions</span><strong>${esc(num(openPositions))}</strong></div><div class="kv"><span>Open notional</span><strong>${esc(money(openNotional))}</strong></div><div class="kv"><span>Last balance update</span><strong>${esc(stamp(lastUpdated))}</strong></div></div>`;
       document.getElementById('kalshi-positions').innerHTML = `<h3>Position status</h3><p class="subtle" style="margin:10px 0 0">Current positions pulled from Kalshi account APIs.</p><div class="kvs"><div class="kv"><span>Connection</span><strong>${esc(connection)}</strong></div><div class="kv"><span>Evaluated predictions</span><strong>${esc(num(ss.evaluated||0))}</strong></div><div class="kv"><span>Placed</span><strong>${esc(num(ss.placed||0))}</strong></div><div class="kv"><span>Failed</span><strong>${esc(num(ss.failed||0))}</strong></div><div class="kv"><span>Updated</span><strong>${esc(stamp(positions.updated_at||live.updated_at||''))}</strong></div></div>`;
       if (!positionRows.length) { document.getElementById('submission-shell').innerHTML = `<div class="empty-state">No open positions${warning ? ` • ${esc(warning)}` : ''}</div>`; return; }
@@ -615,8 +621,12 @@
 
     async function fetchKalshi() {
       try {
-        const res = await fetchJson('/api/kalshi/status');
-        state.kalshiStatus = res || state.kalshiStatus;
+        const [statusRes, automationRes] = await Promise.allSettled([
+          fetchJson('/api/kalshi/status'),
+          fetchJson('/api/kalshi/automation/status'),
+        ]);
+        if (statusRes.status === 'fulfilled') state.kalshiStatus = statusRes.value || state.kalshiStatus;
+        if (automationRes.status === 'fulfilled') state.kalshiAutomation = automationRes.value || state.kalshiAutomation;
       } catch (err) {
         state.kalshiStatus = {
           ok: false,
@@ -627,6 +637,7 @@
           account: {},
           live: {},
         };
+        state.kalshiAutomation = { ok: false, automation: {}, settings: {}, warning: err.message };
       }
       return state.kalshiStatus;
     }

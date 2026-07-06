@@ -35,6 +35,104 @@ def _to_float(value: Any, default: float = 0.0) -> float:
         return float(default)
 
 
+def _extract_first_numeric(payload: dict[str, Any], keys: list[str]) -> float | None:
+    for key in keys:
+        if key in payload and payload.get(key) not in (None, ""):
+            return _to_float(payload.get(key), 0.0)
+    return None
+
+
+def _is_integer_like(value: Any) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    if text.startswith(("+", "-")):
+        text = text[1:]
+    return text.isdigit()
+
+
+def _normalize_balance_usd(balance: dict[str, Any], aggregated_balance_usd: float) -> float:
+    direct_usd = _extract_first_numeric(
+        balance,
+        [
+            "available_buying_power_dollars",
+            "available_balance_dollars",
+            "buying_power_dollars",
+            "cash_balance_dollars",
+            "balance_dollars",
+            "balance_usd",
+        ],
+    )
+    if direct_usd is not None and direct_usd > 0:
+        return round(direct_usd, 2)
+
+    cents_value = _extract_first_numeric(
+        balance,
+        [
+            "available_buying_power_cents",
+            "available_balance_cents",
+            "buying_power_cents",
+            "balance_cents",
+        ],
+    )
+    if cents_value is not None and cents_value > 0:
+        return round(cents_value / 100.0, 2)
+
+    raw_balance = balance.get("balance")
+    if raw_balance not in (None, ""):
+        numeric = _to_float(raw_balance, 0.0)
+        if numeric > 0:
+            if _is_integer_like(raw_balance):
+                as_cents = round(numeric / 100.0, 2)
+                if aggregated_balance_usd > 0:
+                    cents_gap = abs(as_cents - aggregated_balance_usd)
+                    dollars_gap = abs(numeric - aggregated_balance_usd)
+                    return as_cents if cents_gap <= dollars_gap else round(numeric, 2)
+                return as_cents
+            return round(numeric, 2)
+
+    if aggregated_balance_usd > 0:
+        return round(aggregated_balance_usd, 2)
+    return 0.0
+
+
+def _normalize_portfolio_value_usd(balance: dict[str, Any], fallback_balance_usd: float) -> float:
+    direct_usd = _extract_first_numeric(
+        balance,
+        [
+            "portfolio_value_dollars",
+            "portfolio_value_usd",
+            "account_value_dollars",
+            "account_value_usd",
+            "nav_dollars",
+            "nav_usd",
+        ],
+    )
+    if direct_usd is not None and direct_usd > 0:
+        return round(direct_usd, 2)
+
+    cents_value = _extract_first_numeric(
+        balance,
+        [
+            "portfolio_value_cents",
+            "account_value_cents",
+            "nav_cents",
+        ],
+    )
+    if cents_value is not None and cents_value > 0:
+        return round(cents_value / 100.0, 2)
+
+    raw = balance.get("portfolio_value")
+    if raw not in (None, ""):
+        numeric = _to_float(raw, 0.0)
+        if numeric > 0:
+            if _is_integer_like(raw) and numeric >= 100000:
+                return round(numeric / 100.0, 2)
+            return round(numeric, 2)
+
+    return round(max(fallback_balance_usd, 0.0), 2)
+
+
 def _load_private_key_pem() -> bytes:
     inline = str(os.getenv("KALSHI_PRIVATE_KEY", "") or "").strip()
     if inline:
@@ -589,23 +687,18 @@ def build_live_snapshot() -> dict[str, Any]:
             if updated_ts and (not aggregated_updated_ts or str(updated_ts) > aggregated_updated_ts):
                 aggregated_updated_ts = str(updated_ts)
 
-    primary_balance_usd = _to_float(balance.get("balance_dollars"), 0.0)
-    if primary_balance_usd <= 0.0:
-        primary_balance_usd = _to_float(balance.get("balance"), 0.0) / 100.0
-    if primary_balance_usd <= 0.0 and aggregated_balance_usd > 0.0:
-        primary_balance_usd = aggregated_balance_usd
+    primary_balance_usd = _normalize_balance_usd(balance, aggregated_balance_usd)
 
     balance_cents = int(round(max(primary_balance_usd, 0.0) * 100))
-    portfolio_cents = int(round(max(
-        _to_float(balance.get("portfolio_value"), 0.0) / 100.0 if _to_float(balance.get("portfolio_value"), 0.0) > 1000 else _to_float(balance.get("portfolio_value"), 0.0),
-        _to_float(balance.get("portfolio_value_cents"), 0.0) / 100.0,
-    ) * 100))
+    portfolio_value_usd = _normalize_portfolio_value_usd(balance, primary_balance_usd)
+    portfolio_cents = int(round(max(portfolio_value_usd, 0.0) * 100))
     live_ok = bool(exchange or balance or subaccount_balances or normalized_orders or market_positions or event_positions)
     all_positions = [*market_positions, *event_positions]
     open_position_notional = round(market_notional + event_notional, 2)
     account = {
         "balance_cents": balance_cents,
         "balance_usd": balance_cents / 100.0,
+        "buying_power_usd": balance_cents / 100.0,
         "balance_dollars": balance.get("balance_dollars") or balance.get("balance"),
         "portfolio_value_cents": portfolio_cents,
         "portfolio_value_usd": portfolio_cents / 100.0,

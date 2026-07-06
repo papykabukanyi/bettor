@@ -288,11 +288,17 @@ def _analysis_due(rows: list[dict[str, Any]], now: dt.datetime) -> list[dict[str
     return due
 
 
-def _bet_due(rows: list[dict[str, Any]], now: dt.datetime) -> list[dict[str, Any]]:
+def _bet_due(rows: list[dict[str, Any]], now: dt.datetime, *, allow_retry_after_dry_run: bool = False) -> list[dict[str, Any]]:
     due: list[dict[str, Any]] = []
     for row in rows:
-        if str(row.get("bet_state") or "").lower() in {"done", "skipped"}:
+        bet_state = str(row.get("bet_state") or "").lower()
+        if bet_state == "skipped":
             continue
+        if bet_state == "done":
+            payload = row.get("bet_payload") if isinstance(row.get("bet_payload"), dict) else {}
+            row_was_dry_run = bool(payload.get("dry_run"))
+            if not (allow_retry_after_dry_run and row_was_dry_run):
+                continue
         bet_at = _parse_dt(str(row.get("game_date") or ""), str(row.get("bet_at") or ""))
         if bet_at and bet_at <= now:
             due.append(row)
@@ -375,8 +381,16 @@ def _place_due_games(rows: list[dict[str, Any]], *, dry_run: bool, stake_usd: fl
     return {"ok": True, "placed": placed, "skipped": skipped, "failed": failed, "submitted": submitted}
 
 
-def run_pregame_timing_cycle(*, dry_run: bool | None = None, stake_usd: float | None = None, max_single_orders: int | None = None, max_combo_orders: int | None = None, include_combos: bool | None = None) -> dict[str, Any]:
-    sync = sync_pregame_schedule()
+def run_pregame_timing_cycle(
+    *,
+    dry_run: bool | None = None,
+    stake_usd: float | None = None,
+    max_single_orders: int | None = None,
+    max_combo_orders: int | None = None,
+    include_combos: bool | None = None,
+    predictions_payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    sync = sync_pregame_schedule(predictions_payload if isinstance(predictions_payload, dict) else None)
     cache = _load_schedule_cache()
     rows = cache.get("rows") or []
     now = _now_utc()
@@ -391,7 +405,7 @@ def run_pregame_timing_cycle(*, dry_run: bool | None = None, stake_usd: float | 
         effective_dry_run = True
 
     analysis_rows = _analysis_due(rows, now)
-    bet_rows = _bet_due(rows, now)
+    bet_rows = _bet_due(rows, now, allow_retry_after_dry_run=not effective_dry_run)
 
     by_uid = {str(row.get("schedule_uid") or ""): dict(row) for row in rows if isinstance(row, dict)}
     analysis_changed_rows: list[dict[str, Any]] = []
@@ -454,5 +468,7 @@ def run_pregame_timing_cycle(*, dry_run: bool | None = None, stake_usd: float | 
             "analysis_lead_minutes": ANALYSIS_LEAD_MINUTES,
             "bet_lead_minutes": BET_LEAD_MINUTES,
             "interval_minutes": TIMING_MINUTES,
+            "effective_dry_run": bool(effective_dry_run),
+            "live_trading_enabled": bool(live_enabled),
         },
     }

@@ -137,6 +137,18 @@
     .comparator-row { display: grid; grid-template-columns: 1fr auto auto; gap: 10px; align-items: center; padding: 10px 12px; border-radius: 12px; background: rgba(30, 41, 59, 0.72); }
     .comparator-pick { color: var(--ink); font-weight: 700; font-size: 0.9rem; }
     .comparator-score { color: #93c5fd; font-weight: 700; font-size: 0.85rem; white-space: nowrap; }
+    .status-row { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 14px; }
+    .status-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      border: 1px solid rgba(148,163,184,0.2);
+      background: rgba(15,23,42,0.72);
+      color: var(--ink);
+      border-radius: 999px;
+      padding: 10px 14px;
+      font-weight: 700;
+    }
     @media (min-width: 760px) {
       .page { padding: 34px 24px 80px; }
       .hero-metrics { grid-template-columns: repeat(4, minmax(0, 1fr)); }
@@ -256,6 +268,7 @@
     <section class="panel" id="panel-history"><div class="table-shell glass" id="history-shell"></div></section>
 
     <section class="panel" id="panel-kalshi">
+      <div class="card glass" id="kalshi-automation"></div>
       <div class="market-grid">
         <div class="card glass" id="kalshi-summary"></div>
         <div class="card glass" id="kalshi-positions"></div>
@@ -284,7 +297,8 @@
     const state = {
       status: {}, today: { predictions: [] }, tomorrow: { predictions: [] },
       model: { current_model: {}, history: [] },
-      kalshiStatus: { submissions: {}, positions: {} },
+      kalshiStatus: { ok: true, source: 'cached', submissions: { summary: {} }, positions: { summary: {}, positions: [] }, live: {}, account: {} },
+      kalshiAutomation: { ok: true, automation: {}, settings: {} },
       lastHash: '', firstRefresh: true,
       activeTab: 'pipeline',
       tabLoaded: {},
@@ -305,6 +319,13 @@
     const sportIcon = s => sportIcons[String(s || '').toLowerCase()] || sportIcons.default;
     const tierClass = t => confidenceClasses[String(t || '').toLowerCase()] || 'bad';
     const stateClass = s => statusClasses[String(s || '').toLowerCase()] || 'neutral';
+    const kalshiWarningText = v => {
+      const text = String(v || '').trim();
+      if (!text) return '';
+      const lowered = text.toLowerCase();
+      if (lowered.includes('kalshi private key') || lowered.includes('set kalshi_private_key')) return '';
+      return text;
+    };
     const safeSortDate = r => new Date(`${r.game_date || ''} ${r.game_time || r.scheduled_start || ''}`).getTime() || 0;
 
     function formatGameTime(prediction) {
@@ -530,23 +551,33 @@
       const submissions = state.kalshiStatus.submissions || {};
       const positions = state.kalshiStatus.positions || {};
       const live = state.kalshiStatus.live || {};
+      const automationWrap = state.kalshiAutomation || {};
+      const automation = automationWrap.automation || {};
       const account = live.account || live.balance || positions.account || positions.balance || {};
       const ss = submissions.summary || {};
       const ps = positions.summary || {};
       const source = state.kalshiStatus.source || 'cached';
-      const liveOk = !!live.ok;
-      const warning = String(state.kalshiStatus.warning || '').trim();
-      const buyingPower = account.balance_usd ?? (account.balance_cents != null ? Number(account.balance_cents) / 100 : undefined) ?? ss.available_buying_power_usd ?? 0;
+      const warning = kalshiWarningText(state.kalshiStatus.warning);
+      const connection = live.ok ? 'connected' : (source === 'hf_space' || source === 'hf_space_auto' || source === 'hf_hub_artifact' ? 'synced' : 'cached');
+      const summaryNote = live.ok
+        ? 'Live authenticated Kalshi account snapshot.'
+        : `Live account unavailable${warning ? ` • ${esc(warning)}` : ''}`;
+      const positionRows = Array.isArray(positions.positions)
+        ? positions.positions.slice(0, 40)
+        : (Array.isArray(live.market_positions) ? live.market_positions.slice(0, 40) : (Array.isArray(live.positions) ? live.positions.slice(0, 40) : []));
+      const buyingPower = account.buying_power_usd ?? account.balance_usd ?? (account.balance_cents != null ? Number(account.balance_cents) / 100 : undefined) ?? ss.available_buying_power_usd ?? 0;
       const portfolioValue = account.portfolio_value_usd ?? (account.portfolio_value_cents != null ? Number(account.portfolio_value_cents) / 100 : undefined) ?? 0;
-      const openPositions = ps.active_positions ?? live.position_count ?? (Array.isArray(positions.positions) ? positions.positions.length : 0) ?? 0;
+      const openPositions = ps.active_positions ?? live.position_count ?? positionRows.length ?? 0;
       const openNotional = ps.open_notional_usd ?? live.open_notional_usd ?? 0;
-      const positionRows = Array.isArray(positions.positions) ? positions.positions.slice(0, 40) : (Array.isArray(live.market_positions) ? live.market_positions.slice(0, 40) : []);
-      const statusText = liveOk ? 'Live authenticated Kalshi account snapshot.' : `Kalshi live data unavailable${warning ? ` • ${esc(warning)}` : ''}`;
       const lastUpdated = account.updated_ts || live.updated_at || positions.updated_at || '';
-      document.getElementById('kalshi-summary').innerHTML = `<h3>Account summary</h3><p class="subtle" style="margin:10px 0 0">${statusText}</p><div class="kvs"><div class="kv"><span>Buying power</span><strong>${esc(money(buyingPower))}</strong></div><div class="kv"><span>Portfolio value</span><strong>${esc(money(portfolioValue))}</strong></div><div class="kv"><span>Open positions</span><strong>${esc(num(openPositions))}</strong></div><div class="kv"><span>Open notional</span><strong>${esc(money(openNotional))}</strong></div><div class="kv"><span>Last balance update</span><strong>${esc(stamp(lastUpdated))}</strong></div></div>`;
-      document.getElementById('kalshi-positions').innerHTML = `<h3>Order status</h3><p class="subtle" style="margin:10px 0 0">Connection + positions fetched via signed API requests.</p><div class="kvs"><div class="kv"><span>Connection</span><strong>${esc(liveOk ? 'connected' : (source === 'hf_space' || source === 'hf_space_auto' || source === 'hf_hub_artifact' ? 'synced' : 'cached'))}</strong></div><div class="kv"><span>Evaluated predictions</span><strong>${esc(num(ss.evaluated||0))}</strong></div><div class="kv"><span>Placed</span><strong>${esc(num(ss.placed||0))}</strong></div><div class="kv"><span>Failed</span><strong>${esc(num(ss.failed||0))}</strong></div><div class="kv"><span>Updated</span><strong>${esc(stamp(lastUpdated))}</strong></div></div>`;
+      const bets = automation.bets || {};
+      const feed = automation.predictions_feed || {};
+      const dryRun = ((automation.timing || {}).effective_dry_run === true) || (bets.dry_run === true);
+      document.getElementById('kalshi-automation').innerHTML = `<h3>Kalshi automation</h3><p class="subtle" style="margin:10px 0 0">Automatic only. The backend decides when to place singles and combos.</p><div class="status-row"><span class="status-chip">Mode: automatic</span><span class="status-chip">Singles: backend</span><span class="status-chip">Combos: backend</span><span class="status-chip">Live: ${esc(connection)}</span><span class="status-chip">Dry run: ${dryRun ? 'on' : 'off'}</span><span class="status-chip">Last placed: ${esc(num(bets.placed || 0))}</span><span class="status-chip">Feed rows: ${esc(num(feed.prediction_count || 0))}</span></div>`;
+      document.getElementById('kalshi-summary').innerHTML = `<h3>Account summary</h3><p class="subtle" style="margin:10px 0 0">${summaryNote}</p><div class="kvs"><div class="kv"><span>Buying power</span><strong>${live.ok ? esc(money(buyingPower)) : '—'}</strong></div><div class="kv"><span>Portfolio value</span><strong>${live.ok ? esc(money(portfolioValue)) : '—'}</strong></div><div class="kv"><span>Open positions</span><strong>${esc(num(openPositions))}</strong></div><div class="kv"><span>Open notional</span><strong>${esc(money(openNotional))}</strong></div><div class="kv"><span>Last balance update</span><strong>${esc(stamp(lastUpdated))}</strong></div></div>`;
+      document.getElementById('kalshi-positions').innerHTML = `<h3>Position status</h3><p class="subtle" style="margin:10px 0 0">Current positions pulled from Kalshi account APIs.</p><div class="kvs"><div class="kv"><span>Connection</span><strong>${esc(connection)}</strong></div><div class="kv"><span>Evaluated predictions</span><strong>${esc(num(ss.evaluated||0))}</strong></div><div class="kv"><span>Placed</span><strong>${esc(num(ss.placed||0))}</strong></div><div class="kv"><span>Failed</span><strong>${esc(num(ss.failed||0))}</strong></div><div class="kv"><span>Updated</span><strong>${esc(stamp(positions.updated_at||live.updated_at||''))}</strong></div></div>`;
       if (!positionRows.length) { document.getElementById('submission-shell').innerHTML = `<div class="empty-state">No open positions${warning ? ` • ${esc(warning)}` : ''}</div>`; return; }
-      document.getElementById('submission-shell').innerHTML = `<table><thead><tr><th>Ticker</th><th>Position</th><th>Traded</th><th>Exposure</th><th>Realized PnL</th><th>Fees</th><th>Updated</th></tr></thead><tbody>${positionRows.map(r => `<tr><td>${esc(r.ticker||r.event_ticker||'—')}</td><td>${esc(r.position_fp||r.total_cost_shares_fp||'0')}</td><td>${esc(money(r.total_traded_dollars||r.total_cost_dollars||0))}</td><td>${esc(money(r.market_exposure_dollars||r.event_exposure_dollars||0))}</td><td>${esc(money(r.realized_pnl_dollars||0))}</td><td>${esc(money(r.fees_paid_dollars||0))}</td><td>${esc(stamp(r.last_updated_ts||''))}</td></tr>`).join('')}</tbody></table>`;
+      document.getElementById('submission-shell').innerHTML = `<table><thead><tr><th>Ticker</th><th>Position</th><th>Traded</th><th>Exposure</th><th>Realized PnL</th><th>Fees</th><th>Updated</th></tr></thead><tbody>${positionRows.map(r => `<tr><td>${esc(r.ticker||'—')}</td><td>${esc(r.position_fp||'0')}</td><td>${esc(money(r.total_traded_dollars||0))}</td><td>${esc(money(r.market_exposure_dollars||0))}</td><td>${esc(money(r.realized_pnl_dollars||0))}</td><td>${esc(money(r.fees_paid_dollars||0))}</td><td>${esc(stamp(r.last_updated_ts||''))}</td></tr>`).join('')}</tbody></table>`;
     }
 
     function openModal(prediction) {
@@ -589,8 +620,26 @@
     }
 
     async function fetchKalshi() {
-      const res = await fetchJson('/api/kalshi/status');
-      state.kalshiStatus = res || { submissions: {}, positions: {} };
+      try {
+        const [statusRes, automationRes] = await Promise.allSettled([
+          fetchJson('/api/kalshi/status'),
+          fetchJson('/api/kalshi/automation/status'),
+        ]);
+        if (statusRes.status === 'fulfilled') state.kalshiStatus = statusRes.value || state.kalshiStatus;
+        if (automationRes.status === 'fulfilled') state.kalshiAutomation = automationRes.value || state.kalshiAutomation;
+      } catch (err) {
+        state.kalshiStatus = {
+          ok: false,
+          source: 'cached',
+          warning: err.message,
+          submissions: { summary: {} },
+          positions: { summary: {}, positions: [] },
+          account: {},
+          live: {},
+        };
+        state.kalshiAutomation = { ok: false, automation: {}, settings: {}, warning: err.message };
+      }
+      return state.kalshiStatus;
     }
 
     // ─── Smart tab-aware refresh ──────────────────────────────────────────────
@@ -634,13 +683,13 @@
           fetchJson('/api/predictions/today'),
           fetchJson('/api/predictions/tomorrow'),
           fetchJson('/api/model/stats'),
-          fetchJson('/api/kalshi/status'),
+          fetchKalshi(),
         ]);
         if (settled[0].status === 'fulfilled') state.status = settled[0].value || {};
         if (settled[1].status === 'fulfilled') state.today = settled[1].value || { predictions: [] };
         if (settled[2].status === 'fulfilled') state.tomorrow = settled[2].value || { predictions: [] };
         if (settled[3].status === 'fulfilled') state.model = settled[3].value || { current_model: {}, history: [] };
-        if (settled[4].status === 'fulfilled') state.kalshiStatus = settled[4].value || { submissions: {}, positions: {} };
+        if (settled[4].status === 'fulfilled') state.kalshiStatus = settled[4].value || { submissions: {}, positions: {}, account: {} };
         ['pipeline','today','tomorrow','kalshi'].forEach(t => state.tabLoaded[t] = true);
         const failed = settled.filter(r => r.status === 'rejected').length;
         if (failed > 0) toast(`Partial refresh: ${failed} endpoint(s) failed.`, 'warn');
@@ -685,7 +734,7 @@
     function startInterval() {
       if (refreshInterval) clearInterval(refreshInterval);
       refreshInterval = setInterval(() => {
-        if (document.visibilityState === 'hidden') return; // pause when backgrounded
+        if (document.visibilityState === 'hidden') return;
         refreshForTab(state.activeTab);
       }, 30000);
     }

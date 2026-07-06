@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import logging
 import os
@@ -604,6 +605,57 @@ def _local_submissions_payload() -> dict[str, Any]:
     return {"ok": True, "updated_at": markets.get("generated_at", ""), "summary": summary, "submissions": rows}
 
 
+def _merge_prediction_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        row_id = str(row.get("prediction_id") or row.get("prediction_uid") or "").strip()
+        if not row_id:
+            row_id = "|".join(
+                [
+                    str(row.get("sport") or ""),
+                    str(row.get("game_date") or ""),
+                    str(row.get("game_time") or ""),
+                    str(row.get("home_team") or ""),
+                    str(row.get("away_team") or ""),
+                    str(row.get("market_type") or ""),
+                    str(row.get("predicted_team") or row.get("predicted_label") or row.get("predicted_outcome") or ""),
+                ]
+            )
+        if row_id in seen:
+            continue
+        seen.add(row_id)
+        merged.append(row)
+    return merged
+
+
+def _automation_predictions_payload() -> dict[str, Any]:
+    local_payload = _load_json(HF_PREDICTIONS_FILE, {})
+    today_payload, _, _ = _provider_or_local("/predictions/today", HF_PREDICTIONS_FILE, default={})
+    tomorrow_payload, _, _ = _provider_or_local("/predictions/tomorrow", HF_PREDICTIONS_FILE, default={})
+    rows: list[dict[str, Any]] = []
+    for payload in (today_payload, tomorrow_payload, local_payload):
+        if isinstance(payload, dict):
+            rows.extend([row for row in (payload.get("predictions") or []) if isinstance(row, dict)])
+    merged = _merge_prediction_rows(rows)
+    model_version = ""
+    for payload in (today_payload, tomorrow_payload, local_payload):
+        if isinstance(payload, dict):
+            candidate = str(payload.get("model_version") or "").strip()
+            if candidate:
+                model_version = candidate
+                break
+    return {
+        "ok": True,
+        "source": "automation_merged",
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "model_version": model_version,
+        "predictions": merged,
+    }
+
+
 def _live_kalshi_snapshot() -> dict[str, Any]:
     global _KALSHI_LIVE_CACHE_TS, _KALSHI_LIVE_CACHE
     now = time.monotonic()
@@ -791,13 +843,20 @@ def kalshi_automation_status():
 
 def run_kalshi_automation_cycle(body: dict[str, Any] | None = None) -> dict[str, Any]:
     body = body or {}
+    predictions_payload = _automation_predictions_payload()
     result = run_pregame_timing_cycle(
         dry_run=body.get("dry_run"),
         stake_usd=body.get("stake_usd"),
         max_single_orders=body.get("max_single_orders"),
         max_combo_orders=body.get("max_combo_orders"),
         include_combos=body.get("include_combos"),
+        predictions_payload=predictions_payload,
     )
+    result["predictions_feed"] = {
+        "source": str(predictions_payload.get("source") or ""),
+        "prediction_count": len(predictions_payload.get("predictions") or []),
+        "model_version": str(predictions_payload.get("model_version") or ""),
+    }
     _save_json(KALSHI_AUTOMATION_STATE_FILE, result)
     return result
 
