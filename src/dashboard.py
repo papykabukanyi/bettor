@@ -187,6 +187,7 @@ def _discover_provider_api_url() -> tuple[str, str]:
 
 
 PROVIDER_API_URL, PROVIDER_API_SOURCE = _discover_provider_api_url()
+HF_PREFER_LOCAL_SNAPSHOT = str(os.getenv("HF_PREFER_LOCAL_SNAPSHOT", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _load_json(path: Path, default: Any) -> Any:
@@ -238,6 +239,10 @@ def _fetch_first_hf_json(paths_in_repo: list[str]) -> Any:
 
 def _provider_or_local(path: str, local_file: Path, *, default: Any) -> tuple[Any, str, str]:
     error = ""
+    if HF_PREFER_LOCAL_SNAPSHOT and local_file.exists():
+        local_payload = _load_json(local_file, default)
+        if isinstance(local_payload, dict) and local_payload:
+            return local_payload, "hf_local_snapshot", ""
     if PROVIDER_API_URL:
         try:
             response = requests.get(urljoin(PROVIDER_API_URL + "/", path.lstrip("/")), timeout=REQUEST_TIMEOUT)
@@ -518,13 +523,32 @@ def _predictions_for_date(payload: dict[str, Any], target_date: str) -> dict[str
     }
 
 
-def _prediction_counts_for_metrics() -> tuple[int, int, int]:
+def _extract_prediction_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return []
+    rows = payload.get("predictions")
+    if not isinstance(rows, list):
+        return []
+    return [row for row in rows if isinstance(row, dict)]
+
+
+def _prediction_metrics() -> tuple[int, int, int, dict[str, int], list[str]]:
     today_payload, _, _ = _provider_or_local("/predictions/today", HF_PREDICTIONS_FILE, default={})
     tomorrow_payload, _, _ = _provider_or_local("/predictions/tomorrow", HF_PREDICTIONS_FILE, default={})
 
     today_count = int((today_payload or {}).get("prediction_count") or 0) if isinstance(today_payload, dict) else 0
     tomorrow_count = int((tomorrow_payload or {}).get("prediction_count") or 0) if isinstance(tomorrow_payload, dict) else 0
-    return today_count + tomorrow_count, today_count, tomorrow_count
+    all_rows = _extract_prediction_rows(today_payload if isinstance(today_payload, dict) else {})
+    all_rows += _extract_prediction_rows(tomorrow_payload if isinstance(tomorrow_payload, dict) else {})
+
+    sport_counts: dict[str, int] = {}
+    for row in all_rows:
+        sport = str(row.get("sport") or "").strip().lower()
+        if not sport:
+            continue
+        sport_counts[sport] = sport_counts.get(sport, 0) + 1
+    sports = sorted(sport_counts.keys())
+    return today_count + tomorrow_count, today_count, tomorrow_count, sport_counts, sports
 
 
 @app.route("/")
@@ -537,22 +561,26 @@ def predictions_status():
     payload, source, error = _provider_or_local("/status", HF_STATUS_FILE, default={})
     if isinstance(payload, dict) and "pipeline" in payload and "metrics" in payload:
         metrics = payload.get("metrics") or {}
-        if not int(metrics.get("total_predictions") or 0):
-            total_predictions, today_predictions, tomorrow_predictions = _prediction_counts_for_metrics()
-            metrics["total_predictions"] = total_predictions
-            metrics["today_predictions"] = today_predictions
-            metrics["tomorrow_predictions"] = tomorrow_predictions
-            payload["metrics"] = metrics
+        total_predictions, today_predictions, tomorrow_predictions, sport_counts, sports = _prediction_metrics()
+        metrics["total_predictions"] = int(metrics.get("total_predictions") or total_predictions)
+        metrics["today_predictions"] = int(metrics.get("today_predictions") or today_predictions)
+        metrics["tomorrow_predictions"] = int(metrics.get("tomorrow_predictions") or tomorrow_predictions)
+        metrics["sport_breakdown"] = sport_counts
+        payload["metrics"] = metrics
+        model_payload = payload.get("model") or {}
+        if isinstance(model_payload, dict):
+            model_payload["sports_covered"] = model_payload.get("sports_covered") or sports
+            payload["model"] = model_payload
         return jsonify(_envelope(payload, source, error))
 
     status = payload if isinstance(payload, dict) else {}
-    total_predictions, today_predictions, tomorrow_predictions = _prediction_counts_for_metrics()
+    total_predictions, today_predictions, tomorrow_predictions, sport_counts, sports = _prediction_metrics()
     model = {
         "best_model": status.get("best_model", ""),
         "version": status.get("model_version", ""),
         "best_score": status.get("cv_roc_auc", 0),
         "rows": status.get("trained_rows", 0),
-        "sports_covered": status.get("sports_covered", []),
+        "sports_covered": status.get("sports_covered", []) or sports,
     }
     transformed = {
         "ok": bool(status),
@@ -582,6 +610,7 @@ def predictions_status():
             "tomorrow_predictions": tomorrow_predictions,
             "active_models": 1 if model.get("best_model") else 0,
             "win_rate": float(model.get("best_score") or 0),
+            "sport_breakdown": sport_counts,
         },
         "model": model,
         "kalshi": {"submissions": {}, "positions": {}},

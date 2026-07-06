@@ -326,8 +326,8 @@ class MultiSportHFDataManager:
                         "game_date": self._parse_date(game.get("scheduled_start") or game.get("start_date") or ""),
                         "game_datetime": self._parse_datetime(game.get("scheduled_start") or game.get("start_date") or ""),
                         "status": str(game.get("status") or "scheduled").lower(),
-                        "home_team": str(game.get("team1") or game.get("home_team") or ""),
-                        "away_team": str(game.get("team2") or game.get("away_team") or ""),
+                        "home_team": str(game.get("home_team") or game.get("team1") or ((game.get("teams") or ["", ""])[0]) or ""),
+                        "away_team": str(game.get("away_team") or game.get("team2") or ((game.get("teams") or ["", ""])[1]) or ""),
                         "home_score": 0.0,
                         "away_score": 0.0,
                         "home_starter": "",
@@ -367,11 +367,11 @@ class MultiSportHFDataManager:
                         "record_id": f"mlb_{game.get('game_id')}_{now.timestamp()}",
                         "sport": "baseball",
                         "league": "mlb",
-                        "game_date": self._parse_date(game.get("game_date") or game.get("game_time") or ""),
-                        "game_datetime": self._parse_datetime(game.get("game_time") or game.get("game_date") or ""),
+                        "game_date": self._parse_date(game.get("game_date") or game.get("game_datetime") or game.get("game_time") or ""),
+                        "game_datetime": self._parse_datetime(game.get("game_datetime") or game.get("game_time") or game.get("game_date") or ""),
                         "status": str(game.get("status") or "scheduled").lower(),
-                        "home_team": str(game.get("home_team") or ""),
-                        "away_team": str(game.get("away_team") or ""),
+                        "home_team": str(game.get("home_team") or ((game.get("teams") or ["", ""])[1]) or ""),
+                        "away_team": str(game.get("away_team") or ((game.get("teams") or ["", ""])[0]) or ""),
                         "home_score": float(game.get("home_score") or 0),
                         "away_score": float(game.get("away_score") or 0),
                         "home_starter": str(game.get("home_starter") or ""),
@@ -406,15 +406,15 @@ class MultiSportHFDataManager:
             for game in soccer_games:
                 try:
                     record = {
-                        "game_id": str(game.get("id") or game.get("game_id") or ""),
-                        "record_id": f"soccer_{game.get('id')}_{now.timestamp()}",
+                        "game_id": str(game.get("match_id") or game.get("id") or game.get("game_id") or ""),
+                        "record_id": f"soccer_{game.get('match_id') or game.get('id')}_{now.timestamp()}",
                         "sport": "soccer",
                         "league": str(game.get("league") or game.get("competition") or ""),
-                        "game_date": self._parse_date(game.get("utcDate") or game.get("game_date") or ""),
-                        "game_datetime": self._parse_datetime(game.get("utcDate") or game.get("game_time") or ""),
+                        "game_date": self._parse_date(game.get("utcDate") or game.get("utc_date") or game.get("game_date") or ""),
+                        "game_datetime": self._parse_datetime(game.get("utcDate") or game.get("utc_date") or game.get("game_time") or ""),
                         "status": str(game.get("status") or "scheduled").lower(),
-                        "home_team": str(game.get("home_team") or game.get("homeTeam", {}).get("name") or ""),
-                        "away_team": str(game.get("away_team") or game.get("awayTeam", {}).get("name") or ""),
+                        "home_team": str(game.get("home_team") or game.get("homeTeam", {}).get("name") or ((game.get("teams") or ["", ""])[1]) or ""),
+                        "away_team": str(game.get("away_team") or game.get("awayTeam", {}).get("name") or ((game.get("teams") or ["", ""])[0]) or ""),
                         "home_score": float(game.get("home_score") or game.get("score", {}).get("fullTime", {}).get("home") or 0),
                         "away_score": float(game.get("away_score") or game.get("score", {}).get("fullTime", {}).get("away") or 0),
                         "home_starter": "",
@@ -440,6 +440,12 @@ class MultiSportHFDataManager:
         except Exception as e:
             logger.error(f"Soccer live fetch error: {e}")
             result["soccer"]["error"] = str(e)
+        
+        if self.uploader:
+            try:
+                self.uploader.flush_all()
+            except Exception as e:
+                logger.warning(f"Failed to flush HF uploader buffers: {e}")
         
         return result
 

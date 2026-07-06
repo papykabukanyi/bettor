@@ -75,17 +75,23 @@ class UnifiedSportFetcher:
 
             for item in items:
                 try:
+                    team1 = str(item.get("team1", "") or "")
+                    team2 = str(item.get("team2", "") or "")
+                    start_iso = str(item.get("dateTimeGMT", "") or item.get("match_time", "") or "")
                     match = {
                         "sport": "cricket",
                         "match_id": str(item.get("match_id", "") or ""),
-                        "teams": [
-                            str(item.get("team1", "") or ""),
-                            str(item.get("team2", "") or ""),
-                        ],
+                        "teams": [team1, team2],
+                        "home_team": team1,
+                        "away_team": team2,
+                        "team1": team1,
+                        "team2": team2,
                         "format": str(item.get("format", "t20") or "t20").lower(),
                         "status": str(item.get("status", "live") or "live").lower(),
                         "score_team1": str(item.get("score1", "") or ""),
                         "score_team2": str(item.get("score2", "") or ""),
+                        "start_date": start_iso,
+                        "scheduled_start": start_iso,
                         "venue": str(item.get("venue", "") or ""),
                         "fetched_at": dt.datetime.now(dt.timezone.utc).isoformat(),
                         "source": "rapidapi_cricket_live_line",
@@ -118,36 +124,41 @@ class UnifiedSportFetcher:
         Status: No authentication required
         """
         try:
-            # Get live games for today
-            url = "https://statsapi.mlb.com/api/v1/schedule?sportId=1&startDate=2026-07-06&endDate=2026-07-07"
+            today = dt.date.today()
+            tomorrow = today + dt.timedelta(days=1)
+            url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&startDate={today.isoformat()}&endDate={tomorrow.isoformat()}"
             
             resp = self.session.get(url, timeout=10)
             resp.raise_for_status()
             data = resp.json()
 
             games = []
-            for game in data.get("games", []):
-                try:
-                    game_info = {
-                        "sport": "mlb",
-                        "game_id": str(game.get("gamePk", "") or ""),
-                        "teams": [
-                            str(game.get("teams", {}).get("away", {}).get("team", {}).get("name", "") or ""),
-                            str(game.get("teams", {}).get("home", {}).get("team", {}).get("name", "") or ""),
-                        ],
-                        "status": str(game.get("status", {}).get("abstractGameState", "").lower() or "scheduled"),
-                        "venue": str(game.get("venue", {}).get("name", "") or ""),
-                        "game_datetime": str(game.get("gameDateTime", "") or ""),
-                        "away_score": int(game.get("teams", {}).get("away", {}).get("score", 0) or 0),
-                        "home_score": int(game.get("teams", {}).get("home", {}).get("score", 0) or 0),
-                        "fetched_at": dt.datetime.now(dt.timezone.utc).isoformat(),
-                        "source": "mlb_statsapi",
-                    }
-                    if game_info["game_id"] and len(game_info["teams"]) == 2:
-                        games.append(game_info)
-                except Exception as e:
-                    logger.debug(f"Failed to parse MLB game: {e}")
-                    continue
+            for date_entry in data.get("dates", []):
+                for game in date_entry.get("games", []):
+                    try:
+                        away = str(game.get("teams", {}).get("away", {}).get("team", {}).get("name", "") or "")
+                        home = str(game.get("teams", {}).get("home", {}).get("team", {}).get("name", "") or "")
+                        game_dt = str(game.get("gameDate", "") or "")
+                        game_info = {
+                            "sport": "mlb",
+                            "game_id": str(game.get("gamePk", "") or ""),
+                            "teams": [away, home],
+                            "away_team": away,
+                            "home_team": home,
+                            "status": str(game.get("status", {}).get("abstractGameState", "").lower() or "scheduled"),
+                            "venue": str(game.get("venue", {}).get("name", "") or ""),
+                            "game_datetime": game_dt,
+                            "game_date": game_dt[:10] if game_dt else today.isoformat(),
+                            "away_score": int(game.get("teams", {}).get("away", {}).get("score", 0) or 0),
+                            "home_score": int(game.get("teams", {}).get("home", {}).get("score", 0) or 0),
+                            "fetched_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+                            "source": "mlb_statsapi",
+                        }
+                        if game_info["game_id"] and game_info["away_team"] and game_info["home_team"]:
+                            games.append(game_info)
+                    except Exception as e:
+                        logger.debug(f"Failed to parse MLB game: {e}")
+                        continue
 
             logger.info(f"[MLB] Fetched {len(games)} live games from Stats API")
             return games
@@ -175,8 +186,9 @@ class UnifiedSportFetcher:
             return []
 
         try:
-            # Get live matches
-            url = "https://api.football-data.org/v4/matches?status=LIVE"
+            today = dt.date.today()
+            tomorrow = today + dt.timedelta(days=1)
+            url = f"https://api.football-data.org/v4/matches?dateFrom={today.isoformat()}&dateTo={tomorrow.isoformat()}"
             headers = {"X-Auth-Token": FOOTBALL_DATA_API_KEY}
 
             resp = self.session.get(url, headers=headers, timeout=10)
@@ -186,23 +198,30 @@ class UnifiedSportFetcher:
             matches = []
             for match in data.get("matches", []):
                 try:
+                    status = str(match.get("status", "").upper() or "SCHEDULED")
+                    if status in {"FINISHED", "POSTPONED", "CANCELLED", "SUSPENDED"}:
+                        continue
+                    away = str(match.get("awayTeam", {}).get("name", "") or "")
+                    home = str(match.get("homeTeam", {}).get("name", "") or "")
+                    utc_date = str(match.get("utcDate", "") or "")
+                    full_time = match.get("score", {}).get("fullTime", {}) if isinstance(match.get("score"), dict) else {}
                     match_info = {
                         "sport": "soccer",
                         "match_id": str(match.get("id", "") or ""),
-                        "teams": [
-                            str(match.get("awayTeam", {}).get("name", "") or ""),
-                            str(match.get("homeTeam", {}).get("name", "") or ""),
-                        ],
-                        "status": str(match.get("status", "").lower() or "live"),
+                        "teams": [away, home],
+                        "away_team": away,
+                        "home_team": home,
+                        "status": status.lower(),
                         "league": str(match.get("competition", {}).get("name", "") or ""),
-                        "away_score": int(match.get("score", {}).get("away", 0) or 0),
-                        "home_score": int(match.get("score", {}).get("home", 0) or 0),
-                        "utc_date": str(match.get("utcDate", "") or ""),
+                        "away_score": int(full_time.get("away") or 0),
+                        "home_score": int(full_time.get("home") or 0),
+                        "utc_date": utc_date,
+                        "utcDate": utc_date,
                         "venue": str(match.get("venue", "") or ""),
                         "fetched_at": dt.datetime.now(dt.timezone.utc).isoformat(),
                         "source": "football_data_api",
                     }
-                    if match_info["match_id"] and len(match_info["teams"]) == 2:
+                    if match_info["match_id"] and match_info["away_team"] and match_info["home_team"]:
                         matches.append(match_info)
                 except Exception as e:
                     logger.debug(f"Failed to parse soccer match: {e}")
