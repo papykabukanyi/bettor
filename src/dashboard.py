@@ -47,7 +47,8 @@ HF_ACTIVE_APPEND_DAYS = int(os.getenv("HF_ACTIVE_APPEND_DAYS", "3") or "3")
 HF_RETRAIN_INTERVAL_MINUTES = int(os.getenv("HF_RETRAIN_INTERVAL_MINUTES", "180") or "180")
 HF_ATTACH_KALSHI = str(os.getenv("HF_ATTACH_KALSHI", "1")).strip().lower() in {"1", "true", "yes", "on"}
 KALSHI_AUTOBET_ENABLED = str(os.getenv("KALSHI_AUTOBET_ENABLED", "1")).strip().lower() in {"1", "true", "yes", "on"}
-KALSHI_AUTOBET_DRY_RUN = str(os.getenv("AUTOBET_DRY_RUN", "1")).strip().lower() in {"1", "true", "yes", "on"}
+KALSHI_LIVE_TRADING_ENABLED = str(os.getenv("KALSHI_LIVE_TRADING_ENABLED", "0")).strip().lower() in {"1", "true", "yes", "on"}
+KALSHI_AUTOBET_DRY_RUN = str(os.getenv("AUTOBET_DRY_RUN", "1" if not KALSHI_LIVE_TRADING_ENABLED else "0")).strip().lower() in {"1", "true", "yes", "on"}
 KALSHI_AUTOBET_STAKE_USD = float(os.getenv("KALSHI_AUTOBET_STAKE_USD", "1.0") or "1.0")
 KALSHI_AUTOBET_MAX_SINGLE_ORDERS = int(os.getenv("KALSHI_AUTOBET_MAX_SINGLE_ORDERS", "1") or "1")
 KALSHI_AUTOBET_MAX_COMBO_ORDERS = int(os.getenv("KALSHI_AUTOBET_MAX_COMBO_ORDERS", "1") or "1")
@@ -380,7 +381,9 @@ def _run_hf_active_cycle() -> dict[str, Any]:
 
 
 def _run_kalshi_automation_background() -> dict[str, Any]:
-    return run_kalshi_automation_cycle({})
+    result = run_kalshi_automation_cycle({})
+    _save_json(KALSHI_AUTOMATION_STATE_FILE, result)
+    return result
 
 
 def _ensure_background_jobs_started() -> None:
@@ -388,8 +391,6 @@ def _ensure_background_jobs_started() -> None:
     if _startup_done:
         return
     if not DASHBOARD_LOCAL_AUTORUN:
-        return
-    if PROVIDER_API_URL and not _env_flag("DASHBOARD_FORCE_LOCAL_AUTORUN", default=False):
         return
     with _startup_lock:
         if _startup_done:
@@ -432,6 +433,11 @@ def _ensure_background_jobs_started() -> None:
                     logger.info("Dashboard startup active cycle completed")
                 except Exception as exc:
                     logger.exception("Dashboard startup active cycle failed: %s", exc)
+                try:
+                    _run_kalshi_automation_background()
+                    logger.info("Dashboard startup Kalshi automation cycle completed")
+                except Exception as exc:
+                    logger.exception("Dashboard startup Kalshi automation cycle failed: %s", exc)
 
             threading.Thread(target=_runner, daemon=True, name="dashboard-hf-startup-autorun").start()
         _startup_done = True

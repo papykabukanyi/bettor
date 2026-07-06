@@ -385,7 +385,7 @@ def run_pregame_timing_cycle(*, dry_run: bool | None = None, stake_usd: float | 
 
     pipeline = HFDirectPipeline()
     live_enabled = _env_flag("KALSHI_LIVE_TRADING_ENABLED", default=False)
-    env_dry_run = _env_flag("AUTOBET_DRY_RUN", default=True)
+    env_dry_run = _env_flag("AUTOBET_DRY_RUN", default=not live_enabled)
     effective_dry_run = env_dry_run if dry_run is None else bool(dry_run)
     if not live_enabled:
         effective_dry_run = True
