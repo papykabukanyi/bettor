@@ -24,6 +24,11 @@ if str(SRC_DIR) not in sys.path:
 from data.hf_pipeline import HFDirectPipeline
 from data.kalshi_trade_api import build_live_snapshot, submit_prediction_orders
 from data.pregame_timing import run_pregame_timing_cycle
+from data.multi_sport_scheduler import (
+    run_multi_sport_bootstrap,
+    run_multi_sport_live_fetch,
+    get_multi_sport_scheduler_status,
+)
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = ROOT_DIR / "data"
@@ -455,9 +460,17 @@ def _ensure_background_jobs_started() -> None:
                 id="kalshi_automation_cycle",
                 replace_existing=True,
             )
+            # Multi-sport data pipeline: fetch live games every 30 minutes
+            scheduler.add_job(
+                run_multi_sport_live_fetch,
+                "interval",
+                minutes=30,
+                id="multi_sport_live_fetch",
+                replace_existing=True,
+            )
             scheduler.start()
             logger.info(
-                "Dashboard scheduler started: active every %d min, pregames every %d min, daily at %02d:%02d ET",
+                "Dashboard scheduler started: active every %d min, pregames every %d min, daily at %02d:%02d ET, multi-sport every 30 min",
                 max(5, HF_ACTIVE_SCAN_MINUTES),
                 max(1, PREGAME_TIMING_MINUTES),
                 HF_DAILY_RUN_HOUR_ET,
@@ -465,6 +478,13 @@ def _ensure_background_jobs_started() -> None:
             )
         if HF_AUTORUN_ON_STARTUP:
             def _runner() -> None:
+                # Bootstrap multi-sport data on startup (one-time)
+                try:
+                    run_multi_sport_bootstrap()
+                    logger.info("Dashboard startup multi-sport bootstrap completed")
+                except Exception as exc:
+                    logger.warning("Dashboard startup multi-sport bootstrap: %s", exc)
+                
                 try:
                     _run_hf_active_cycle()
                     logger.info("Dashboard startup active cycle completed")

@@ -14,8 +14,7 @@
 - [x] Create and Run Task <!-- Summary: Created and ran task to execute the betting bot. -->
 
 - [x] Launch the Project <!-- Summary: Project can be launched using the run task or python src/betting_bot.py. -->
-
-- [x] Ensure Documentation is Complete <!-- Summary: README.md and copilot-instructions.md exist and contain current project information. HTML comments removed. -->
+- always push on github
 
 - Work through each checklist item systematically.
 - Keep communication concise and focused.

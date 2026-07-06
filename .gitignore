@@ -115,6 +115,7 @@ dmypy.json
 # Data files
 data/*.csv
 data/*.json
+data/cricket/*.zip
 models/*.pkl
 models/*.joblib
 modal_data/
