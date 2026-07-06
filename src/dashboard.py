@@ -243,8 +243,8 @@ def _sanitize_kalshi_warning(message: str | None) -> str:
     if not text:
         return ""
     lowered = text.lower()
-    if "kalshi private key" in lowered or "set kalshi_private_key" in lowered:
-        return ""
+    if "kalshi private key" in lowered or "set kalshi_private_key" in lowered or "kalshi api key" in lowered:
+        return "Kalshi credentials are not loading on the server."
     return text
 
 

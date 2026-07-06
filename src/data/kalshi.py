@@ -20,6 +20,7 @@ import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from itertools import combinations
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
@@ -829,16 +830,58 @@ def _load_private_key():
     """Load and cache the RSA private key from environment."""
     from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
-    pem = os.getenv("KALSHI_PRIVATE_KEY", "").strip()
+    def _clean_secret_value(raw: str | None) -> str:
+        value = str(raw or "").strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1].strip()
+        return value.replace("\r\n", "\n").replace("\\n", "\n").strip()
 
-    # Render-friendly: allow a single-line secret with literal \n escapes.
-    if pem and "\\n" in pem and "\n" not in pem:
-        pem = pem.replace("\\n", "\n")
+    def _looks_like_pem(value: str) -> bool:
+        text = str(value or "")
+        return "BEGIN" in text and "PRIVATE KEY" in text and "END" in text
 
+    def _decode_base64_pem(value: str) -> str:
+        try:
+            decoded = base64.b64decode(value, validate=True).decode("utf-8")
+        except Exception:
+            return ""
+        decoded = decoded.replace("\r\n", "\n").strip()
+        return decoded if _looks_like_pem(decoded) else ""
+
+    def _read_private_key_file(path_value: str) -> str:
+        if not path_value:
+            return ""
+        raw_path = Path(path_value)
+        candidates = [raw_path]
+        if not raw_path.is_absolute():
+            candidates.append(Path.cwd() / raw_path)
+            candidates.append(Path(__file__).resolve().parents[2] / raw_path)
+        for candidate in candidates:
+            try:
+                if not candidate.exists():
+                    continue
+                content = _clean_secret_value(candidate.read_text(encoding="utf-8"))
+                if _looks_like_pem(content):
+                    return content
+                decoded = _decode_base64_pem(content)
+                if decoded:
+                    return decoded
+            except Exception:
+                continue
+        return ""
+
+    pem = _clean_secret_value(os.getenv("KALSHI_PRIVATE_KEY", ""))
+    if pem and not _looks_like_pem(pem):
+        maybe_decoded = _decode_base64_pem(pem)
+        if maybe_decoded:
+            pem = maybe_decoded
     if not pem:
-        raise RuntimeError("Kalshi private key is missing. Set KALSHI_PRIVATE_KEY.")
-
-    return load_pem_private_key(pem.encode("ascii"), password=None)
+        pem = _read_private_key_file(_clean_secret_value(os.getenv("KALSHI_PRIVATE_KEY_FILE", "")))
+    if not pem:
+        raise RuntimeError("Kalshi credentials missing. Set KALSHI_API_KEY and KALSHI_PRIVATE_KEY.")
+    if not _looks_like_pem(pem):
+        raise RuntimeError("Kalshi private key format invalid in KALSHI_PRIVATE_KEY.")
+    return load_pem_private_key(pem.encode("utf-8"), password=None)
 
 
 def _auth_headers(method: str, path: str) -> dict[str, str]:
@@ -851,7 +894,7 @@ def _auth_headers(method: str, path: str) -> dict[str, str]:
     from cryptography.hazmat.primitives import hashes
     from cryptography.hazmat.primitives.asymmetric import padding
 
-    api_key_id = os.getenv("KALSHI_API_KEY", "").strip()
+    api_key_id = os.getenv("KALSHI_API_KEY", "").strip().strip("'\"")
     if not api_key_id:
         raise RuntimeError(
             "Kalshi API key ID is missing. Set KALSHI_API_KEY in environment."

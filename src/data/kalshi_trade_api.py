@@ -12,6 +12,7 @@ import json
 import os
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode, urlparse
 
@@ -251,11 +252,64 @@ def _row_balance_usd(row: dict[str, Any]) -> float:
     return 0.0
 
 
+def _clean_secret_value(raw: str | None) -> str:
+    value = str(raw or "").strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        value = value[1:-1].strip()
+    return value.replace("\r\n", "\n").replace("\\n", "\n").strip()
+
+
+def _looks_like_pem(value: str) -> bool:
+    text = str(value or "")
+    return "BEGIN" in text and "PRIVATE KEY" in text and "END" in text
+
+
+def _decode_base64_pem(value: str) -> str:
+    try:
+        decoded = base64.b64decode(value, validate=True).decode("utf-8")
+    except Exception:
+        return ""
+    decoded = decoded.replace("\r\n", "\n").strip()
+    return decoded if _looks_like_pem(decoded) else ""
+
+
+def _read_private_key_file(path_value: str) -> str:
+    if not path_value:
+        return ""
+    raw_path = Path(path_value)
+    candidates = [raw_path]
+    if not raw_path.is_absolute():
+        candidates.append(Path.cwd() / raw_path)
+        candidates.append(Path(__file__).resolve().parents[2] / raw_path)
+    for candidate in candidates:
+        try:
+            if not candidate.exists():
+                continue
+            content = _clean_secret_value(candidate.read_text(encoding="utf-8"))
+            if _looks_like_pem(content):
+                return content
+            decoded = _decode_base64_pem(content)
+            if decoded:
+                return decoded
+        except Exception:
+            continue
+    return ""
+
+
 def _load_private_key_pem() -> bytes:
-    inline = str(os.getenv("KALSHI_PRIVATE_KEY", "") or "").strip()
+    inline = _clean_secret_value(os.getenv("KALSHI_PRIVATE_KEY", ""))
     if inline:
-        return inline.replace("\\n", "\n").encode("utf-8")
-    raise RuntimeError("Kalshi private key missing. Set KALSHI_PRIVATE_KEY.")
+        if _looks_like_pem(inline):
+            return inline.encode("utf-8")
+        decoded = _decode_base64_pem(inline)
+        if decoded:
+            return decoded.encode("utf-8")
+        raise RuntimeError("Kalshi private key format invalid in KALSHI_PRIVATE_KEY.")
+
+    from_file = _read_private_key_file(_clean_secret_value(os.getenv("KALSHI_PRIVATE_KEY_FILE", "")))
+    if from_file:
+        return from_file.encode("utf-8")
+    raise RuntimeError("Kalshi credentials missing. Set KALSHI_API_KEY and KALSHI_PRIVATE_KEY.")
 
 
 def _load_private_key():
@@ -264,7 +318,7 @@ def _load_private_key():
 
 
 def _signed_headers(method: str, sign_path: str) -> dict[str, str]:
-    api_key = str(os.getenv("KALSHI_API_KEY", "") or "").strip()
+    api_key = _clean_secret_value(os.getenv("KALSHI_API_KEY", ""))
     if not api_key:
         raise RuntimeError("Kalshi API key missing. Set KALSHI_API_KEY.")
     ts_ms = str(int(dt.datetime.now(tz=dt.timezone.utc).timestamp() * 1000))
