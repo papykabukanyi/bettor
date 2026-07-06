@@ -2038,6 +2038,7 @@ class HFDirectPipeline:
         rows: list[dict] = []
         rows += self._fetch_cricket_upcoming_cricapi(day)
         rows += self._fetch_cricket_upcoming_rapidapi(day)
+        rows += self._fetch_cricket_games_thesportsdb(day, day)
         # dedupe by home/away/date
         deduped: list[dict] = []
         seen: set[tuple[str, str, str]] = set()

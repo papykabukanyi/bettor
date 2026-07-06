@@ -259,6 +259,88 @@ def _row_balance_usd(row: dict[str, Any]) -> float:
     return 0.0
 
 
+def _timestamp_to_epoch_seconds(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, (int, float)):
+        numeric = float(value)
+    else:
+        text = str(value).strip()
+        if not text:
+            return None
+        if text.isdigit() or (text.startswith("-") and text[1:].isdigit()):
+            numeric = float(text)
+        else:
+            parsed: dt.datetime | None = None
+            try:
+                parsed = dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
+            except ValueError:
+                try:
+                    parsed = parsedate_to_datetime(text)
+                except Exception:
+                    parsed = None
+            if parsed is None:
+                return None
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=dt.timezone.utc)
+            return parsed.timestamp()
+    abs_numeric = abs(numeric)
+    if abs_numeric >= 10**18:
+        return numeric / 1_000_000_000.0
+    if abs_numeric >= 10**15:
+        return numeric / 1_000_000.0
+    if abs_numeric >= 10**12:
+        return numeric / 1_000.0
+    return numeric
+
+
+def _normalize_timestamp_iso(value: Any) -> str:
+    epoch_seconds = _timestamp_to_epoch_seconds(value)
+    if epoch_seconds is None:
+        return ""
+    try:
+        return dt.datetime.fromtimestamp(epoch_seconds, tz=dt.timezone.utc).isoformat()
+    except Exception:
+        return ""
+
+
+def _position_identity_key(row: dict[str, Any]) -> str:
+    return "|".join(
+        [
+            str(row.get("ticker") or "").strip(),
+            str(row.get("position_fp") or "").strip(),
+            str(round(_to_float(row.get("total_traded_dollars"), 0.0), 6)),
+            str(round(_to_float(row.get("market_exposure_dollars"), 0.0), 6)),
+            str(round(_to_float(row.get("realized_pnl_dollars"), 0.0), 6)),
+            str(round(_to_float(row.get("fees_paid_dollars"), 0.0), 6)),
+        ]
+    )
+
+
+def _position_sort_score(row: dict[str, Any]) -> tuple[float, str]:
+    ts = _timestamp_to_epoch_seconds(row.get("last_updated_ts")) or 0.0
+    return (ts, str(row.get("ticker") or ""))
+
+
+def _dedupe_and_sort_positions(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    best_by_key: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        key = _position_identity_key(row)
+        current = best_by_key.get(key)
+        if current is None:
+            best_by_key[key] = row
+            continue
+        current_score = _position_sort_score(current)
+        candidate_score = _position_sort_score(row)
+        if candidate_score > current_score:
+            best_by_key[key] = row
+    deduped = list(best_by_key.values())
+    deduped.sort(key=_position_sort_score, reverse=True)
+    return deduped
+
+
 def _clean_secret_value(raw: str | None) -> str:
     value = str(raw or "").strip()
     if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
@@ -897,6 +979,9 @@ def build_live_snapshot() -> dict[str, Any]:
             continue
         exposure = _to_float(row.get("market_exposure_dollars"), 0.0)
         market_notional += abs(exposure)
+        normalized_last_updated = _normalize_timestamp_iso(
+            row.get("last_updated_ts") or row.get("updated_ts") or row.get("updated_time")
+        )
         normalized_market_positions.append(
             {
                 "ticker": str(row.get("ticker") or ""),
@@ -905,7 +990,7 @@ def build_live_snapshot() -> dict[str, Any]:
                 "market_exposure_dollars": exposure,
                 "realized_pnl_dollars": _to_float(row.get("realized_pnl_dollars"), 0.0),
                 "fees_paid_dollars": _to_float(row.get("fees_paid_dollars"), 0.0),
-                "last_updated_ts": row.get("last_updated_ts") or "",
+                "last_updated_ts": normalized_last_updated,
                 "position_type": "market",
             }
         )
@@ -918,6 +1003,9 @@ def build_live_snapshot() -> dict[str, Any]:
             _to_float(row.get("market_exposure_dollars"), 0.0),
         )
         event_notional += abs(exposure)
+        normalized_last_updated = _normalize_timestamp_iso(
+            row.get("last_updated_ts") or row.get("updated_ts") or row.get("updated_time")
+        )
         normalized_event_positions.append(
             {
                 "event_ticker": str(row.get("event_ticker") or ""),
@@ -927,7 +1015,7 @@ def build_live_snapshot() -> dict[str, Any]:
                 "market_exposure_dollars": exposure,
                 "realized_pnl_dollars": _to_float(row.get("realized_pnl_dollars"), 0.0),
                 "fees_paid_dollars": _to_float(row.get("fees_paid_dollars"), 0.0),
-                "last_updated_ts": row.get("last_updated_ts") or "",
+                "last_updated_ts": normalized_last_updated,
                 "position_type": "event",
                 "total_cost_dollars": _to_float(row.get("total_cost_dollars"), 0.0),
                 "total_cost_shares_fp": str(row.get("total_cost_shares_fp") or "0"),
@@ -937,14 +1025,18 @@ def build_live_snapshot() -> dict[str, Any]:
 
     aggregated_balance_usd = 0.0
     aggregated_updated_ts = ""
+    aggregated_updated_epoch = 0.0
     if isinstance(all_balances, list) and all_balances:
         for row in all_balances:
             if not isinstance(row, dict):
                 continue
             aggregated_balance_usd += _row_balance_usd(row)
-            updated_ts = row.get("updated_ts")
-            if updated_ts and (not aggregated_updated_ts or str(updated_ts) > aggregated_updated_ts):
-                aggregated_updated_ts = str(updated_ts)
+            candidate_epoch = _timestamp_to_epoch_seconds(
+                row.get("updated_ts") or row.get("last_updated_ts") or row.get("updated_time")
+            )
+            if candidate_epoch is not None and candidate_epoch > aggregated_updated_epoch:
+                aggregated_updated_epoch = candidate_epoch
+                aggregated_updated_ts = _normalize_timestamp_iso(candidate_epoch)
 
     primary_balance_usd = _normalize_balance_usd(balance, aggregated_balance_usd)
 
@@ -954,8 +1046,14 @@ def build_live_snapshot() -> dict[str, Any]:
     has_authenticated_account = bool(balance or all_balances)
     has_positions_or_orders = bool(normalized_orders or normalized_market_positions or normalized_event_positions)
     live_ok = bool(has_authenticated_account or has_positions_or_orders)
-    all_positions = [*normalized_market_positions, *normalized_event_positions]
+    all_positions = _dedupe_and_sort_positions([*normalized_market_positions, *normalized_event_positions])
     open_position_notional = round(market_notional + event_notional, 2)
+    account_updated_ts = _normalize_timestamp_iso(
+        balance.get("updated_ts")
+        or subaccount_balances.get("updated_ts")
+        or aggregated_updated_ts
+        or balance.get("updated_time")
+    )
     account = {
         "balance_cents": balance_cents,
         "balance_usd": balance_cents / 100.0,
@@ -963,7 +1061,7 @@ def build_live_snapshot() -> dict[str, Any]:
         "balance_dollars": balance.get("balance_dollars") or balance.get("balance"),
         "portfolio_value_cents": portfolio_cents,
         "portfolio_value_usd": portfolio_cents / 100.0,
-        "updated_ts": balance.get("updated_ts") or subaccount_balances.get("updated_ts") or aggregated_updated_ts or balance.get("updated_time") or "",
+        "updated_ts": account_updated_ts,
         "balance_breakdown": balance.get("balance_breakdown") or [],
         "raw": balance,
         "subaccount_balances": all_balances,

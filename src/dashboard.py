@@ -862,10 +862,26 @@ def kalshi_automation_status():
     state = _load_json(KALSHI_AUTOMATION_STATE_FILE, {})
     if not isinstance(state, dict):
         state = {}
+    current_feed_payload = _automation_predictions_payload()
+    current_feed = {
+        "source": str(current_feed_payload.get("source") or ""),
+        "prediction_count": len(current_feed_payload.get("predictions") or []),
+        "model_version": str(current_feed_payload.get("model_version") or ""),
+    }
+    state_feed = state.get("predictions_feed")
+    if not isinstance(state_feed, dict):
+        state_feed = {}
+    state_count = int(state_feed.get("prediction_count") or 0)
+    current_count = int(current_feed.get("prediction_count") or 0)
+    effective_feed = dict(state_feed)
+    if current_count >= state_count:
+        effective_feed.update(current_feed)
+    state["predictions_feed"] = effective_feed
     return jsonify(
         {
             "ok": True,
             "automation": state,
+            "predictions_feed": effective_feed,
             "settings": {
                 "analysis_lead_minutes": _env_int("PREGAME_ANALYSIS_LEAD_MINUTES", 90),
                 "bet_lead_minutes": _env_int("PREGAME_BET_LEAD_MINUTES", 60),
