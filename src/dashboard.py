@@ -695,7 +695,7 @@ def kalshi_submissions():
     if live.get("ok"):
         base_summary = base.get("summary") or {}
         account = live.get("account") or live.get("balance") or {}
-        base_summary["available_buying_power_usd"] = float((account or {}).get("balance_usd") or 0.0)
+        base_summary["available_buying_power_usd"] = float((account or {}).get("buying_power_usd") or (account or {}).get("balance_usd") or 0.0)
         base["summary"] = base_summary
     wrapped = _envelope(base, "kalshi_live" if live.get("ok") else source, error or str(live.get("error") or ""))
     wrapped["live"] = live
@@ -716,7 +716,7 @@ def kalshi_positions():
                 "active_positions": int(live.get("position_count") or 0),
                 "open_notional_usd": float(live.get("open_notional_usd") or 0.0),
                 "estimated_pnl_usd": sum(float((row or {}).get("realized_pnl_dollars") or 0.0) for row in positions if isinstance(row, dict)),
-                "available_buying_power_usd": float((account or {}).get("balance_usd") or 0.0),
+                "available_buying_power_usd": float((account or {}).get("buying_power_usd") or (account or {}).get("balance_usd") or 0.0),
                 "portfolio_value_usd": float((account or {}).get("portfolio_value_usd") or 0.0),
             },
             "positions": positions,
@@ -741,6 +741,7 @@ def kalshi_status():
     live = _live_kalshi_snapshot()
     submissions = _local_submissions_payload()
     all_positions = live.get("all_positions") or live.get("positions") or live.get("market_positions") or []
+    account_snapshot = live.get("account") or live.get("balance") or {}
     positions = {
         "ok": bool(live.get("ok")),
         "updated_at": live.get("updated_at") or "",
@@ -752,17 +753,17 @@ def kalshi_status():
                 for row in all_positions
                 if isinstance(row, dict)
             ),
-            "available_buying_power_usd": float(((live.get("account") or live.get("balance") or {}).get("balance_usd") or 0.0)),
-            "portfolio_value_usd": float(((live.get("account") or live.get("balance") or {}).get("portfolio_value_usd") or 0.0)),
+            "available_buying_power_usd": float((account_snapshot or {}).get("buying_power_usd") or (account_snapshot or {}).get("balance_usd") or 0.0),
+            "portfolio_value_usd": float((account_snapshot or {}).get("portfolio_value_usd") or 0.0),
         },
         "positions": all_positions,
-        "balance": live.get("account") or live.get("balance") or {},
-        "account": live.get("account") or live.get("balance") or {},
+        "balance": account_snapshot,
+        "account": account_snapshot,
         "live": live,
     }
     if live.get("ok"):
         account = live.get("account") or live.get("balance") or {}
-        submissions["summary"]["available_buying_power_usd"] = float((account or {}).get("balance_usd") or 0.0)
+        submissions["summary"]["available_buying_power_usd"] = float((account or {}).get("buying_power_usd") or (account or {}).get("balance_usd") or 0.0)
     source = "kalshi_live" if live.get("ok") else "hf_local_snapshot"
     payload = {
         "ok": bool(live.get("ok")),

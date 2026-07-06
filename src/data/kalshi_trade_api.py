@@ -133,6 +133,124 @@ def _normalize_portfolio_value_usd(balance: dict[str, Any], fallback_balance_usd
     return round(max(fallback_balance_usd, 0.0), 2)
 
 
+def _coerce_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _coerce_list(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
+def _pick_balance_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    base = _coerce_dict(payload)
+    nested = _coerce_dict(base.get("balance"))
+    if nested:
+        merged = dict(base)
+        merged.update(nested)
+        return merged
+    for key in ("account", "portfolio", "data", "result"):
+        node = _coerce_dict(base.get(key))
+        if node:
+            merged = dict(base)
+            merged.update(node)
+            return merged
+    return base
+
+
+def _extract_subaccount_rows(payload: dict[str, Any]) -> tuple[list[dict[str, Any]], str]:
+    base = _coerce_dict(payload)
+    for key in ("subaccount_balances", "balances", "subaccounts", "accounts", "rows", "data"):
+        rows = base.get(key)
+        if isinstance(rows, list):
+            return [row for row in rows if isinstance(row, dict)], key
+        if isinstance(rows, dict):
+            nested_rows, nested_source = _extract_subaccount_rows(rows)
+            if nested_rows:
+                return nested_rows, f"{key}.{nested_source}"
+    return [], ""
+
+
+def _extract_positions(positions_payload: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    payload = _coerce_dict(positions_payload)
+    market_positions = [row for row in _coerce_list(payload.get("market_positions")) if isinstance(row, dict)]
+    event_positions = [row for row in _coerce_list(payload.get("event_positions")) if isinstance(row, dict)]
+    if market_positions or event_positions:
+        return market_positions, event_positions
+
+    generic_rows = []
+    for key in ("positions", "open_positions", "rows", "data"):
+        rows = payload.get(key)
+        if isinstance(rows, list):
+            generic_rows = [row for row in rows if isinstance(row, dict)]
+            if generic_rows:
+                break
+        if isinstance(rows, dict):
+            for nested_key in ("positions", "open_positions", "rows", "data"):
+                nested = rows.get(nested_key)
+                if isinstance(nested, list):
+                    generic_rows = [row for row in nested if isinstance(row, dict)]
+                    if generic_rows:
+                        break
+            if generic_rows:
+                break
+
+    for row in generic_rows:
+        ticker = str(row.get("ticker") or row.get("market_ticker") or "").strip()
+        if ticker:
+            row.setdefault("ticker", ticker)
+        event_ticker = str(row.get("event_ticker") or row.get("event") or "").strip()
+        if event_ticker:
+            row.setdefault("event_ticker", event_ticker)
+        if "market_exposure_dollars" not in row:
+            if row.get("event_exposure_dollars") is not None:
+                row["market_exposure_dollars"] = row.get("event_exposure_dollars")
+            elif row.get("exposure_dollars") is not None:
+                row["market_exposure_dollars"] = row.get("exposure_dollars")
+            elif row.get("exposure") is not None:
+                row["market_exposure_dollars"] = row.get("exposure")
+
+    market_like = [row for row in generic_rows if str(row.get("ticker") or "").strip()]
+    event_like = [row for row in generic_rows if str(row.get("event_ticker") or "").strip()]
+    return market_like, event_like
+
+
+def _row_balance_usd(row: dict[str, Any]) -> float:
+    if not isinstance(row, dict):
+        return 0.0
+    direct_usd = _extract_first_numeric(
+        row,
+        [
+            "available_buying_power_dollars",
+            "available_balance_dollars",
+            "buying_power_dollars",
+            "cash_balance_dollars",
+            "balance_dollars",
+            "balance_usd",
+        ],
+    )
+    if direct_usd is not None and direct_usd > 0:
+        return float(direct_usd)
+    cents_value = _extract_first_numeric(
+        row,
+        [
+            "available_buying_power_cents",
+            "available_balance_cents",
+            "buying_power_cents",
+            "balance_cents",
+        ],
+    )
+    if cents_value is not None and cents_value > 0:
+        return float(cents_value) / 100.0
+    raw_balance = row.get("balance")
+    if raw_balance not in (None, ""):
+        numeric = _to_float(raw_balance, 0.0)
+        if numeric > 0:
+            if _is_integer_like(raw_balance):
+                return float(numeric) / 100.0
+            return float(numeric)
+    return 0.0
+
+
 def _load_private_key_pem() -> bytes:
     inline = str(os.getenv("KALSHI_PRIVATE_KEY", "") or "").strip()
     if inline:
@@ -608,6 +726,9 @@ def build_live_snapshot() -> dict[str, Any]:
             elif key == "positions" and isinstance(value, dict):
                 positions_payload = value
 
+    balance = _pick_balance_payload(balance)
+    all_balances, subaccount_balance_source = _extract_subaccount_rows(subaccount_balances)
+
     notional = 0.0
     normalized_orders: list[dict[str, Any]] = []
     for order in open_orders:
@@ -633,13 +754,15 @@ def build_live_snapshot() -> dict[str, Any]:
 
     market_notional = 0.0
     event_notional = 0.0
-    market_positions = []
-    for row in positions_payload.get("market_positions") or []:
+    normalized_market_positions: list[dict[str, Any]] = []
+    normalized_event_positions: list[dict[str, Any]] = []
+    market_positions, event_positions = _extract_positions(positions_payload)
+    for row in market_positions:
         if not isinstance(row, dict):
             continue
         exposure = _to_float(row.get("market_exposure_dollars"), 0.0)
         market_notional += abs(exposure)
-        market_positions.append(
+        normalized_market_positions.append(
             {
                 "ticker": str(row.get("ticker") or ""),
                 "position_fp": str(row.get("position_fp") or "0"),
@@ -652,18 +775,20 @@ def build_live_snapshot() -> dict[str, Any]:
             }
         )
 
-    event_positions = []
-    for row in positions_payload.get("event_positions") or []:
+    for row in event_positions:
         if not isinstance(row, dict):
             continue
-        exposure = _to_float(row.get("event_exposure_dollars"), 0.0)
+        exposure = _to_float(
+            row.get("event_exposure_dollars"),
+            _to_float(row.get("market_exposure_dollars"), 0.0),
+        )
         event_notional += abs(exposure)
-        event_positions.append(
+        normalized_event_positions.append(
             {
                 "event_ticker": str(row.get("event_ticker") or ""),
-                "ticker": str(row.get("event_ticker") or ""),
-                "position_fp": str(row.get("total_cost_shares_fp") or "0"),
-                "total_traded_dollars": _to_float(row.get("total_cost_dollars"), 0.0),
+                "ticker": str(row.get("event_ticker") or row.get("ticker") or ""),
+                "position_fp": str(row.get("total_cost_shares_fp") or row.get("position_fp") or "0"),
+                "total_traded_dollars": _to_float(row.get("total_cost_dollars"), _to_float(row.get("total_traded_dollars"), 0.0)),
                 "market_exposure_dollars": exposure,
                 "realized_pnl_dollars": _to_float(row.get("realized_pnl_dollars"), 0.0),
                 "fees_paid_dollars": _to_float(row.get("fees_paid_dollars"), 0.0),
@@ -675,14 +800,13 @@ def build_live_snapshot() -> dict[str, Any]:
             }
         )
 
-    all_balances = subaccount_balances.get("subaccount_balances") or []
     aggregated_balance_usd = 0.0
     aggregated_updated_ts = ""
     if isinstance(all_balances, list) and all_balances:
         for row in all_balances:
             if not isinstance(row, dict):
                 continue
-            aggregated_balance_usd += _to_float(row.get("balance"), 0.0)
+            aggregated_balance_usd += _row_balance_usd(row)
             updated_ts = row.get("updated_ts")
             if updated_ts and (not aggregated_updated_ts or str(updated_ts) > aggregated_updated_ts):
                 aggregated_updated_ts = str(updated_ts)
@@ -692,8 +816,10 @@ def build_live_snapshot() -> dict[str, Any]:
     balance_cents = int(round(max(primary_balance_usd, 0.0) * 100))
     portfolio_value_usd = _normalize_portfolio_value_usd(balance, primary_balance_usd)
     portfolio_cents = int(round(max(portfolio_value_usd, 0.0) * 100))
-    live_ok = bool(exchange or balance or subaccount_balances or normalized_orders or market_positions or event_positions)
-    all_positions = [*market_positions, *event_positions]
+    has_authenticated_account = bool(balance or all_balances)
+    has_positions_or_orders = bool(normalized_orders or normalized_market_positions or normalized_event_positions)
+    live_ok = bool(has_authenticated_account or has_positions_or_orders)
+    all_positions = [*normalized_market_positions, *normalized_event_positions]
     open_position_notional = round(market_notional + event_notional, 2)
     account = {
         "balance_cents": balance_cents,
@@ -706,6 +832,7 @@ def build_live_snapshot() -> dict[str, Any]:
         "balance_breakdown": balance.get("balance_breakdown") or [],
         "raw": balance,
         "subaccount_balances": all_balances,
+        "subaccount_balance_source": subaccount_balance_source,
     }
     return {
         "ok": live_ok,
@@ -714,8 +841,8 @@ def build_live_snapshot() -> dict[str, Any]:
         "account": account,
         "balance": account,
         "positions_payload": positions_payload,
-        "market_positions": market_positions,
-        "event_positions": event_positions,
+        "market_positions": normalized_market_positions,
+        "event_positions": normalized_event_positions,
         "all_positions": all_positions,
         "open_orders": normalized_orders,
         "positions": all_positions or normalized_orders,
