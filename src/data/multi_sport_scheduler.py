@@ -54,16 +54,28 @@ def run_multi_sport_bootstrap() -> dict[str, Any]:
     
     Returns bootstrap result with sport-by-sport status.
     """
+    def _needs_multisport_rebootstrap(existing_state: dict[str, Any]) -> bool:
+        result = existing_state.get("result") if isinstance(existing_state, dict) else {}
+        if not isinstance(result, dict):
+            return True
+        for sport_key in ("baseball", "soccer"):
+            sport_result = result.get(sport_key) or {}
+            message = str((sport_result.get("message") if isinstance(sport_result, dict) else "") or "").strip().lower()
+            loaded_count = int((sport_result.get("loaded_count") if isinstance(sport_result, dict) else 0) or 0)
+            if message == "skipped_cricket_only" or loaded_count <= 0:
+                return True
+        return False
+
     # Check if already done
     state = _load_bootstrap_state()
-    if state.get("completed"):
+    if state.get("completed") and not _needs_multisport_rebootstrap(state):
         logger.info("Multi-sport bootstrap already completed")
         return {"ok": True, "message": "already_completed", "state": state}
     
     logger.info("Starting multi-sport bootstrap...")
     
     try:
-        cricket_only = str(os.getenv("CRICKET_ONLY_BOOTSTRAP", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
+        cricket_only = str(os.getenv("CRICKET_ONLY_BOOTSTRAP", "0") or "0").strip().lower() in {"1", "true", "yes", "on"}
         if cricket_only:
             manager = get_multi_sport_manager()
             result = {

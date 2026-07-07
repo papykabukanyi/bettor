@@ -258,16 +258,87 @@ def _provider_or_local(path: str, local_file: Path, *, default: Any) -> tuple[An
                 sports.add(sport)
         return count, len(sports)
 
-    def _pick_best_prediction_payload(candidates: list[tuple[Any, str]]) -> tuple[Any, str]:
+    def _merge_prediction_payloads(candidates: list[tuple[Any, str]]) -> tuple[Any, str]:
         if not candidates:
             return default, "hf_local_snapshot_no_space_url"
-        best_payload, best_source = candidates[0]
-        best_score = _rows_and_sports(best_payload)
-        for payload, source in candidates[1:]:
+
+        merged_rows: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+        selected_source = ""
+        selected_score = (-1, -1)
+        today_value = ""
+        tomorrow_value = ""
+        model_version = ""
+        model_type = ""
+        model_auc = 0.0
+        generated_at = ""
+
+        for payload, source in candidates:
+            if not isinstance(payload, dict):
+                continue
             score = _rows_and_sports(payload)
-            if score[1] > best_score[1] or (score[1] == best_score[1] and score[0] > best_score[0]):
-                best_payload, best_source, best_score = payload, source, score
-        return best_payload, best_source
+            if score[1] > selected_score[1] or (score[1] == selected_score[1] and score[0] > selected_score[0]):
+                selected_source = source
+                selected_score = score
+            if not today_value:
+                today_value = str(payload.get("today") or "").strip()
+            if not tomorrow_value:
+                tomorrow_value = str(payload.get("tomorrow") or "").strip()
+            if not generated_at:
+                generated_at = str(payload.get("generated_at") or "").strip()
+            if not model_version:
+                model_version = str(payload.get("model_version") or "").strip()
+            if not model_type:
+                model_type = str(payload.get("model_type") or payload.get("model_name") or "").strip()
+            if not model_auc:
+                try:
+                    model_auc = float(payload.get("model_auc") or 0.0)
+                except Exception:
+                    model_auc = 0.0
+
+            for row in (payload.get("predictions") or []):
+                if not isinstance(row, dict):
+                    continue
+                row_id = str(row.get("prediction_id") or row.get("prediction_uid") or "").strip()
+                if not row_id:
+                    row_id = "|".join(
+                        [
+                            str(row.get("sport") or "").strip().lower(),
+                            str(row.get("league") or "").strip().lower(),
+                            str(row.get("game_date") or "").strip(),
+                            str(row.get("game_time") or "").strip(),
+                            str(row.get("away_team") or "").strip().lower(),
+                            str(row.get("home_team") or "").strip().lower(),
+                            str(row.get("market_type") or "").strip().lower(),
+                            str(row.get("player_name") or "").strip().lower(),
+                            str(row.get("predicted_team") or row.get("predicted_label") or row.get("predicted_outcome") or "").strip().lower(),
+                        ]
+                    )
+                if row_id in seen_ids:
+                    continue
+                seen_ids.add(row_id)
+                merged_rows.append(row)
+
+        if not merged_rows:
+            return default, "hf_local_snapshot_no_space_url"
+
+        if not today_value:
+            today_value = dt.date.today().isoformat()
+        if not tomorrow_value:
+            tomorrow_value = (dt.date.today() + dt.timedelta(days=1)).isoformat()
+
+        merged_payload = {
+            "ok": True,
+            "generated_at": generated_at,
+            "today": today_value,
+            "tomorrow": tomorrow_value,
+            "prediction_count": len([row for row in merged_rows if not row.get("error")]),
+            "model_version": model_version,
+            "model_type": model_type,
+            "model_auc": model_auc,
+            "predictions": merged_rows,
+        }
+        return merged_payload, (selected_source or "merged_sources")
 
     error = ""
     is_prediction_path = path in {"/predictions/today", "/predictions/tomorrow"}
@@ -312,8 +383,8 @@ def _provider_or_local(path: str, local_file: Path, *, default: Any) -> tuple[An
                 return payload, "hf_hub_artifact", error
 
     if is_prediction_path and prediction_candidates:
-        best_payload, best_source = _pick_best_prediction_payload(prediction_candidates)
-        return best_payload, best_source, error
+        merged_payload, merged_source = _merge_prediction_payloads(prediction_candidates)
+        return merged_payload, merged_source, error
 
     if local_file.exists():
         return _load_json(local_file, default), "hf_local_snapshot", error
