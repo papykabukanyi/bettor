@@ -522,12 +522,14 @@ def _ensure_background_jobs_started() -> None:
         if _startup_done:
             return
         if not scheduler.running:
+            _first_active = dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=5)
             scheduler.add_job(
                 _run_hf_active_cycle,
                 "interval",
                 minutes=max(5, HF_ACTIVE_SCAN_MINUTES),
                 id="hf_active_cycle",
                 replace_existing=True,
+                next_run_time=_first_active,
             )
             scheduler.add_job(
                 _run_hf_daily_pipeline,

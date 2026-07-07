@@ -312,6 +312,8 @@ class HFDirectPipeline:
             os.path.join(self._data_dir, "hf_daily_predictions.json"),
         )
         self._training_history_file = os.path.join(self._data_dir, "training_history.json")
+        self._cached_model: object = None
+        self._cached_model_version: str = ""
         self._api = None
         self._ok = bool(self.token and self.uploader and getattr(self.uploader, "_ok", False))
 
@@ -370,8 +372,10 @@ class HFDirectPipeline:
                 "append_records": 0, "append_date": target.isoformat(), "append_sports": [],
             })
             return {"ok": True, "records": 0, "date": target.isoformat()}
+        new_keys = [self._record_dedupe_key(r) for r in records]
         self.uploader.push_records("games", records)
         self.uploader.flush_all()
+        self._update_local_dedupe_index(new_keys)
         sports = sorted({r.get("sport", "") for r in records})
         self._write_status({
             "last_step": "append_daily", "ok": True,
@@ -389,7 +393,7 @@ class HFDirectPipeline:
         from sklearn.linear_model import LogisticRegression
         from sklearn.model_selection import StratifiedKFold, cross_val_score
         from sklearn.pipeline import Pipeline
-        from sklearn.preprocessing import OneHotEncoder
+        from sklearn.preprocessing import FunctionTransformer, OneHotEncoder
 
         if not self._ok or not self._api:
             raise RuntimeError("HF pipeline not configured. Set HF_API_KEY.")
@@ -410,7 +414,7 @@ class HFDirectPipeline:
         pre = ColumnTransformer(
             transformers=[
                 ("cats", OneHotEncoder(handle_unknown="ignore"), self._CAT_FEATURES),
-                ("nums", "passthrough", self._NUM_FEATURES),
+                ("nums", FunctionTransformer(), self._NUM_FEATURES),
             ]
         )
         candidates = {
@@ -434,7 +438,7 @@ class HFDirectPipeline:
                 _pre_dense = ColumnTransformer(
                     transformers=[
                         ("cats", _OHE(handle_unknown="ignore", sparse_output=False), self._CAT_FEATURES),
-                        ("nums", "passthrough", self._NUM_FEATURES),
+                        ("nums", FunctionTransformer(), self._NUM_FEATURES),
                     ]
                 )
                 pipe = Pipeline([("pre", _pre_dense), ("model", model)])
@@ -1238,17 +1242,32 @@ class HFDirectPipeline:
         sport: str = "mlb",
         season: int | None = None,
     ) -> dict:
-        """Download model artifact from HF Hub and return win probabilities."""
+        """Load model from HF Hub (cached in memory) and return win probabilities."""
         import joblib
         import pandas as pd
-        from huggingface_hub import hf_hub_download
 
         today = datetime.date.today()
-        model_path = hf_hub_download(
-            repo_id=self.model_repo_id, filename="model.joblib",
-            repo_type="model", token=self.token,
-        )
-        model = joblib.load(model_path)
+        meta = self._get_model_metadata()
+        current_version = meta.get("version", "")
+
+        if self._cached_model is None or self._cached_model_version != current_version:
+            from huggingface_hub import hf_hub_download
+            logger.info("[hf_pipeline] Loading model from HF Hub (version=%s)", current_version)
+            try:
+                model_path = hf_hub_download(
+                    repo_id=self.model_repo_id, filename="model.joblib",
+                    repo_type="model", token=self.token,
+                )
+                self._cached_model = joblib.load(model_path)
+                self._cached_model_version = current_version
+                logger.info("[hf_pipeline] Model cached successfully (version=%s)", current_version)
+            except Exception as exc:
+                logger.error("[hf_pipeline] Model load failed: %s", exc)
+                raise
+        else:
+            logger.debug("[hf_pipeline] Reusing cached model (version=%s)", current_version)
+
+        model = self._cached_model
         row = pd.DataFrame([{
             "home_team": home_team,
             "away_team": away_team,
@@ -1257,16 +1276,21 @@ class HFDirectPipeline:
             "month": today.month,
             "day_of_week": today.weekday(),
         }])
-        probs = model.predict_proba(row)[0]
+        try:
+            probs = model.predict_proba(row)[0]
+        except Exception as exc:
+            logger.warning("[hf_pipeline] predict_proba failed (%s) — model may be stale, clearing cache", exc)
+            self._cached_model = None
+            self._cached_model_version = ""
+            raise
         home_prob = float(probs[1])
-        meta = self._get_model_metadata()
         return {
             "home_team": home_team, "away_team": away_team,
             "sport": sport, "season": int(season or today.year),
             "home_win_prob": round(home_prob, 4),
             "away_win_prob": round(1.0 - home_prob, 4),
             "model_repo": self.model_repo_id,
-            "model_version": meta.get("version", ""),
+            "model_version": current_version,
         }
 
     def predict_via_hf_api(
@@ -3238,7 +3262,7 @@ class HFDirectPipeline:
         model = Pipeline(
             [
                 ("tfidf", TfidfVectorizer(ngram_range=(1, 2), min_df=2, max_features=12000)),
-                ("clf", LogisticRegression(max_iter=2000, multi_class="auto")),
+                ("clf", LogisticRegression(max_iter=2000)),
             ]
         )
         cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
@@ -3430,24 +3454,42 @@ class HFDirectPipeline:
         return df
 
     def _filter_records_not_in_hub(self, records: list[dict]) -> list[dict]:
+        """Filter records already in HF using a local dedup index (no shard downloads)."""
         if not records:
             return []
-        if not self._ok or not self._api:
-            return records
-        try:
-            existing_df = self._load_games_dataframe_from_hub()
-        except Exception:
-            return records
-        if existing_df is None or getattr(existing_df, "empty", True):
-            return records
-
-        existing_records = existing_df.to_dict("records")
-        existing_keys = {self._record_dedupe_key(r) for r in existing_records}
+        existing_keys = self._load_local_dedupe_index()
         filtered = [r for r in records if self._record_dedupe_key(r) not in existing_keys]
         dropped = len(records) - len(filtered)
         if dropped > 0:
-            logger.info("[hf_pipeline] Filtered %d duplicate records before HF upload", dropped)
+            logger.info("[hf_pipeline] Filtered %d duplicate records via local index", dropped)
         return filtered
+
+    def _local_dedupe_index_path(self) -> str:
+        return os.path.join(self._data_dir, "pushed_record_keys.json")
+
+    def _load_local_dedupe_index(self) -> set:
+        path = self._local_dedupe_index_path()
+        try:
+            if os.path.exists(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    return set(json.load(f))
+        except Exception:
+            pass
+        return set()
+
+    def _update_local_dedupe_index(self, new_keys: list[str]) -> None:
+        if not new_keys:
+            return
+        path = self._local_dedupe_index_path()
+        existing = self._load_local_dedupe_index()
+        existing.update(new_keys)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(sorted(existing), f)
+            logger.debug("[hf_pipeline] Dedupe index updated: %d total keys", len(existing))
+        except Exception as exc:
+            logger.warning("[hf_pipeline] Failed to update dedupe index: %s", exc)
 
     def _load_games_dataframe_from_hub(self):
         import pandas as pd
