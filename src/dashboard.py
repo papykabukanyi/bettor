@@ -25,7 +25,6 @@ from data.hf_pipeline import HFDirectPipeline
 from data.kalshi_trade_api import build_live_snapshot, submit_prediction_orders
 from data.pregame_timing import run_pregame_timing_cycle
 from data.multi_sport_scheduler import (
-    run_multi_sport_bootstrap,
     run_multi_sport_live_fetch,
     get_multi_sport_scheduler_status,
 )
@@ -39,9 +38,8 @@ HF_MARKETS_FILE = DATA_DIR / "hf_daily_prediction_markets.json"
 KALSHI_AUTOMATION_STATE_FILE = DATA_DIR / "kalshi_automation_status.json"
 KALSHI_SCHEDULE_STATE_FILE = DATA_DIR / "pregame_schedule.json"
 REQUEST_TIMEOUT = int(os.getenv("HF_PROXY_TIMEOUT", "15") or "15")
-DISCOVERY_TIMEOUT = int(os.getenv("HF_PROXY_DISCOVERY_TIMEOUT", "4") or "4")
 HF_MODEL_REPO = str(os.getenv("HF_MODEL_REPO", "papylove/sportprediction") or "").strip()
-HF_AUTORUN_ON_STARTUP = str(os.getenv("HF_AUTORUN_ON_STARTUP", "1")).strip().lower() in {"1", "true", "yes", "on"}
+HF_AUTORUN_ON_STARTUP = str(os.getenv("HF_AUTORUN_ON_STARTUP", "0")).strip().lower() in {"1", "true", "yes", "on"}
 HF_DAILY_RUN_HOUR_ET = int(os.getenv("HF_DAILY_RUN_HOUR_ET", "4") or "4")
 HF_DAILY_RUN_MINUTE_ET = int(os.getenv("HF_DAILY_RUN_MINUTE_ET", "15") or "15")
 HF_DAILY_CUSTOM_MODEL = str(os.getenv("HF_DAILY_CUSTOM_MODEL", "auto") or "auto").strip().lower()
@@ -141,51 +139,13 @@ def _is_cron_authorized() -> bool:
     return auth == f"Bearer {secret}"
 
 
-def _space_repo_to_url(repo_id: str) -> str:
-    value = str(repo_id or "").strip().strip("/")
-    if not value:
-        return ""
-    if value.startswith("http://") or value.startswith("https://"):
-        return value.rstrip("/")
-    if "/" not in value:
-        return ""
-    owner, space = value.split("/", 1)
-    owner = owner.strip()
-    space = space.strip()
-    if not owner or not space:
-        return ""
-    return f"https://{owner}-{space}.hf.space"
 
 
 def _discover_provider_api_url() -> tuple[str, str]:
+    # Only use an explicitly-configured provider URL; no auto-probing HF Spaces.
     explicit = str(os.getenv("HF_SPACE_API_URL", "") or os.getenv("PREDICTIONS_API_URL", "")).strip().rstrip("/")
     if explicit:
         return explicit, "explicit_env"
-
-    candidates: list[tuple[str, str]] = []
-    for env_name in ("HF_SPACE_REPO", "HF_SPACE_ID", "SPACE_ID", "HF_MODEL_REPO", "HF_DATASET_REPO"):
-        raw = str(os.getenv(env_name, "") or "").strip()
-        url = _space_repo_to_url(raw)
-        if url:
-            candidates.append((url.rstrip("/"), env_name))
-
-    seen: set[str] = set()
-    for base_url, source in candidates:
-        if base_url in seen:
-            continue
-        seen.add(base_url)
-        try:
-            health = requests.get(urljoin(base_url + "/", "health"), timeout=DISCOVERY_TIMEOUT)
-            if health.ok:
-                return base_url, f"auto:{source}"
-        except Exception:
-            pass
-        try:
-            status = requests.get(urljoin(base_url + "/", "status"), timeout=DISCOVERY_TIMEOUT)
-            if status.ok:
-                return base_url, f"auto:{source}"
-        except Exception:
-            pass
     return "", "none"
 
 
@@ -367,12 +327,11 @@ def _provider_or_local(path: str, local_file: Path, *, default: Any) -> tuple[An
 
     hub_artifact_map = {
         "/status": ["artifacts/hf_pipeline_status.json", "hf_pipeline_status.json"],
-        "/predictions/today": ["artifacts/hf_daily_predictions.json", "hf_daily_predictions.json"],
-        "/predictions/tomorrow": ["artifacts/hf_daily_predictions.json", "hf_daily_predictions.json"],
         "/model/stats": ["artifacts/hf_pipeline_status.json", "hf_pipeline_status.json"],
         "/kalshi/submissions": ["artifacts/hf_daily_prediction_markets.json", "hf_daily_prediction_markets.json"],
         "/kalshi/positions": ["artifacts/hf_daily_prediction_markets.json", "hf_daily_prediction_markets.json"],
     }
+    # Prediction paths use ONLY local file (scheduler updates it; HF artifact is stale)
     artifact_paths = hub_artifact_map.get(path)
     if artifact_paths:
         payload = _fetch_first_hf_json(artifact_paths)
@@ -601,15 +560,23 @@ def _ensure_background_jobs_started() -> None:
                 HF_DAILY_RUN_HOUR_ET,
                 HF_DAILY_RUN_MINUTE_ET,
             )
+
+            # Always run a lightweight predictions refresh on startup (no training, no HF push).
+            # This ensures the predictions file is fresh for all sports without risking OOM.
+            def _startup_predict_only() -> None:
+                try:
+                    pipeline = HFDirectPipeline()
+                    if pipeline.ok:
+                        pipeline.predict_daily_schedule()
+                        logger.info("Dashboard startup predictions generated")
+                except Exception as exc:
+                    logger.warning("Dashboard startup predictions failed: %s", exc)
+
+            threading.Thread(target=_startup_predict_only, daemon=True, name="dashboard-startup-predict").start()
+
         if HF_AUTORUN_ON_STARTUP:
             def _runner() -> None:
-                # Bootstrap multi-sport data on startup (one-time)
-                try:
-                    run_multi_sport_bootstrap()
-                    logger.info("Dashboard startup multi-sport bootstrap completed")
-                except Exception as exc:
-                    logger.warning("Dashboard startup multi-sport bootstrap: %s", exc)
-                
+                # Full active cycle (append + train + predict + Kalshi) — only if explicitly enabled
                 try:
                     _run_hf_active_cycle()
                     logger.info("Dashboard startup active cycle completed")

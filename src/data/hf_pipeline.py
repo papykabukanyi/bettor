@@ -1999,6 +1999,7 @@ class HFDirectPipeline:
             "Basketball": "nba",
             "Ice Hockey": "nhl",
             "American Football": "nfl",
+            "Baseball": "mlb",
             "Soccer": "soccer",
             "Tennis": "tennis",
             "Golf": "golf",
@@ -3461,9 +3462,15 @@ class HFDirectPipeline:
             logger.warning("[hf_pipeline] list_repo_files failed: %s", exc)
             return pd.DataFrame()
 
-        game_files = [f for f in files if str(f).startswith("data/games/") and str(f).endswith(".parquet")]
+        game_files = sorted([f for f in files if str(f).startswith("data/games/") and str(f).endswith(".parquet")])
         if not game_files:
             return pd.DataFrame()
+
+        # Limit to most recent N shards to prevent OOM on Render (shard names embed timestamp)
+        max_shards = int(os.getenv("HF_MAX_TRAINING_SHARDS", "10"))
+        if len(game_files) > max_shards:
+            logger.info("[hf_pipeline] Limiting training data to last %d of %d shards", max_shards, len(game_files))
+            game_files = game_files[-max_shards:]
 
         frames = []
         for path_in_repo in game_files:
