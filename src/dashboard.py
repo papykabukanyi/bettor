@@ -67,6 +67,9 @@ app = Flask(__name__, template_folder="templates")
 scheduler = BackgroundScheduler(timezone="America/New_York")
 _startup_lock = threading.Lock()
 _startup_done = False
+_prediction_refresh_lock = threading.Lock()
+_prediction_refresh_last_ts = 0.0
+_prediction_refresh_running = False
 _KALSHI_LIVE_CACHE: dict[str, Any] = {}
 _KALSHI_LIVE_CACHE_TS = 0.0
 _KALSHI_LIVE_CACHE_LOCK = threading.Lock()
@@ -578,6 +581,53 @@ def _extract_prediction_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return [row for row in rows if isinstance(row, dict)]
 
 
+def _prediction_sports(payload: dict[str, Any]) -> set[str]:
+    sports: set[str] = set()
+    for row in _extract_prediction_rows(payload):
+        sport = str(row.get("sport") or "").strip().lower()
+        if sport:
+            sports.add(sport)
+    return sports
+
+
+def _prediction_payload_needs_multisport_refresh(payload: dict[str, Any]) -> bool:
+    rows = _extract_prediction_rows(payload)
+    if not rows:
+        return True
+    sports = _prediction_sports(payload)
+    return bool(sports) and sports.issubset({"cricket"})
+
+
+def _trigger_background_multisport_refresh_if_needed(payload: dict[str, Any], *, reason: str) -> None:
+    global _prediction_refresh_last_ts, _prediction_refresh_running
+    if not isinstance(payload, dict):
+        return
+    if not _prediction_payload_needs_multisport_refresh(payload):
+        return
+    now_ts = time.time()
+    refresh_cooldown = max(120, int(os.getenv("HF_PREDICTION_REFRESH_COOLDOWN_SEC", "300") or "300"))
+    with _prediction_refresh_lock:
+        if _prediction_refresh_running:
+            return
+        if (now_ts - _prediction_refresh_last_ts) < refresh_cooldown:
+            return
+        _prediction_refresh_last_ts = now_ts
+        _prediction_refresh_running = True
+
+    def _runner() -> None:
+        global _prediction_refresh_running
+        try:
+            _run_hf_active_cycle()
+            logger.info("Triggered background multi-sport refresh (%s)", reason)
+        except Exception as exc:
+            logger.warning("Background multi-sport refresh failed (%s): %s", reason, exc)
+        finally:
+            with _prediction_refresh_lock:
+                _prediction_refresh_running = False
+
+    threading.Thread(target=_runner, daemon=True, name="dashboard-multisport-refresh").start()
+
+
 def _prediction_metrics() -> tuple[int, int, int, dict[str, int], list[str]]:
     today_payload, _, _ = _provider_or_local("/predictions/today", HF_PREDICTIONS_FILE, default={})
     tomorrow_payload, _, _ = _provider_or_local("/predictions/tomorrow", HF_PREDICTIONS_FILE, default={})
@@ -667,6 +717,8 @@ def predictions_status():
 @app.route("/api/predictions/today")
 def predictions_today():
     payload, source, error = _provider_or_local("/predictions/today", HF_PREDICTIONS_FILE, default={})
+    if isinstance(payload, dict):
+        _trigger_background_multisport_refresh_if_needed(payload, reason="api/predictions/today")
     if isinstance(payload, dict) and "date" in payload and "predictions" in payload:
         return jsonify(_envelope(payload, source, error))
     if not isinstance(payload, dict):
@@ -677,6 +729,8 @@ def predictions_today():
 @app.route("/api/predictions/tomorrow")
 def predictions_tomorrow():
     payload, source, error = _provider_or_local("/predictions/tomorrow", HF_PREDICTIONS_FILE, default={})
+    if isinstance(payload, dict):
+        _trigger_background_multisport_refresh_if_needed(payload, reason="api/predictions/tomorrow")
     if isinstance(payload, dict) and "date" in payload and "predictions" in payload:
         return jsonify(_envelope(payload, source, error))
     if not isinstance(payload, dict):
