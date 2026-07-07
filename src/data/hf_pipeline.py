@@ -64,6 +64,8 @@ class HFDirectPipeline:
     _TRAIN_FEATURES = ["home_team", "away_team", "sport", "season", "month", "day_of_week"]
     _CAT_FEATURES = ["home_team", "away_team", "sport"]
     _NUM_FEATURES = ["season", "month", "day_of_week"]
+    # Versions of model.joblib that failed predict_proba — skip reloading until new model is published
+    _broken_model_versions: set = set()
     _MARKET_SPORT_ALIASES = {
         "baseball": "mlb",
         "mlb": "mlb",
@@ -396,16 +398,22 @@ class HFDirectPipeline:
         from sklearn.preprocessing import FunctionTransformer, OneHotEncoder
 
         if not self._ok or not self._api:
-            raise RuntimeError("HF pipeline not configured. Set HF_API_KEY.")
+            logger.warning("[hf_pipeline] train_and_publish_best_model: HF not configured, skipping")
+            return TrainSummary(repo_id="", rows=0, best_model="skipped", cv_roc_auc=0.0,
+                                trained_at=_now_utc(), version="", sports_covered=[])
 
         logger.info("[hf_pipeline] Loading games parquet shards from %s", self.dataset_repo_id)
         df = self._load_games_dataframe_from_hub()
         if df.empty:
-            raise RuntimeError("HF dataset has no rows in games/train split")
+            logger.warning("[hf_pipeline] train: HF dataset has no rows, skipping training")
+            return TrainSummary(repo_id=self.dataset_repo_id, rows=0, best_model="skipped",
+                                cv_roc_auc=0.0, trained_at=_now_utc(), version="", sports_covered=[])
 
         df = self._build_training_df(df)
         if len(df) < min_rows:
-            raise RuntimeError(f"Not enough rows: {len(df)} < {min_rows}")
+            logger.warning("[hf_pipeline] train: Not enough rows (%d < %d), skipping training", len(df), min_rows)
+            return TrainSummary(repo_id=self.dataset_repo_id, rows=len(df), best_model="skipped",
+                                cv_roc_auc=0.0, trained_at=_now_utc(), version="", sports_covered=[])
 
         y = (df["home_score"] > df["away_score"]).astype(int)
         X = df[self._TRAIN_FEATURES].copy()
@@ -1250,6 +1258,13 @@ class HFDirectPipeline:
         meta = self._get_model_metadata()
         current_version = meta.get("version", "")
 
+        # If this model version is already known-broken, fail fast without re-downloading
+        if current_version and current_version in HFDirectPipeline._broken_model_versions:
+            raise RuntimeError(
+                f"Model version {current_version} is known-broken (sklearn incompatibility). "
+                "Awaiting retrain."
+            )
+
         if self._cached_model is None or self._cached_model_version != current_version:
             from huggingface_hub import hf_hub_download
             logger.info("[hf_pipeline] Loading model from HF Hub (version=%s)", current_version)
@@ -1279,7 +1294,13 @@ class HFDirectPipeline:
         try:
             probs = model.predict_proba(row)[0]
         except Exception as exc:
-            logger.warning("[hf_pipeline] predict_proba failed (%s) — model may be stale, clearing cache", exc)
+            logger.warning(
+                "[hf_pipeline] predict_proba failed (version=%s): %s — marking version broken, will retry after retrain",
+                current_version, exc,
+            )
+            # Mark this model version as broken so all future games in this cycle skip the download
+            if current_version:
+                HFDirectPipeline._broken_model_versions.add(current_version)
             self._cached_model = None
             self._cached_model_version = ""
             raise
@@ -3509,7 +3530,8 @@ class HFDirectPipeline:
             return pd.DataFrame()
 
         # Limit to most recent N shards to prevent OOM on Render (shard names embed timestamp)
-        max_shards = int(os.getenv("HF_MAX_TRAINING_SHARDS", "10"))
+        # Default 30 shards — enough to get 200+ rows for training from small per-day shards
+        max_shards = int(os.getenv("HF_MAX_TRAINING_SHARDS", "30"))
         if len(game_files) > max_shards:
             logger.info("[hf_pipeline] Limiting training data to last %d of %d shards", max_shards, len(game_files))
             game_files = game_files[-max_shards:]

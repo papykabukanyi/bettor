@@ -72,6 +72,7 @@ _KALSHI_LIVE_CACHE: dict[str, Any] = {}
 _KALSHI_LIVE_CACHE_TS = 0.0
 _KALSHI_LIVE_CACHE_LOCK = threading.Lock()
 _KALSHI_LIVE_CACHE_TTL_SEC = max(5, int(os.getenv("KALSHI_LIVE_CACHE_TTL_SEC", "20") or "20"))
+_active_cycle_lock = threading.Lock()  # Prevents concurrent active-cycle runs within the same worker process
 
 
 def _bootstrap_env_from_dotenv() -> None:
@@ -441,6 +442,17 @@ def _run_hf_daily_pipeline() -> dict[str, Any]:
 
 
 def _run_hf_active_cycle() -> dict[str, Any]:
+    # Prevent multiple threads/scheduler workers from running this concurrently in the same process
+    if not _active_cycle_lock.acquire(blocking=False):
+        logger.info("[active_cycle] Already running in another thread — skipping this invocation")
+        return {"ok": False, "skipped": True, "reason": "lock_busy"}
+    try:
+        return _run_hf_active_cycle_inner()
+    finally:
+        _active_cycle_lock.release()
+
+
+def _run_hf_active_cycle_inner() -> dict[str, Any]:
     pipeline = HFDirectPipeline()
     if not pipeline.ok:
         raise RuntimeError("HF pipeline not configured. Set HF_API_KEY, HF_DATASET_REPO, HF_MODEL_REPO.")
@@ -471,11 +483,23 @@ def _run_hf_active_cycle() -> dict[str, Any]:
             retrain_needed = True
     if new_records_total > 0 and HF_RETRAIN_INTERVAL_MINUTES <= 60:
         retrain_needed = True
+
+    train_result = {"skipped": True, "reason": "not_needed"}
     if retrain_needed:
-        pipeline.train_and_publish_best_model(
-            min_rows=HF_DAILY_MIN_TRAIN_ROWS,
-            forced_model=HF_DAILY_CUSTOM_MODEL,
-        )
+        try:
+            summary = pipeline.train_and_publish_best_model(
+                min_rows=HF_DAILY_MIN_TRAIN_ROWS,
+                forced_model=HF_DAILY_CUSTOM_MODEL,
+            )
+            train_result = {"skipped": summary.best_model == "skipped", "rows": summary.rows,
+                            "model": summary.best_model, "version": summary.version}
+            # Clear broken-version cache so next predict attempt tries the new model
+            if summary.best_model != "skipped" and summary.version:
+                HFDirectPipeline._broken_model_versions.discard(summary.version)
+                HFDirectPipeline._broken_model_versions.clear()
+        except Exception as train_exc:
+            logger.warning("[active_cycle] Training failed (non-fatal): %s", train_exc)
+            train_result = {"skipped": True, "error": str(train_exc)}
 
     pipeline.ensure_model_card_metadata()
     preds = pipeline.predict_daily_schedule()
@@ -500,6 +524,7 @@ def _run_hf_active_cycle() -> dict[str, Any]:
         "append_runs": append_runs,
         "new_records_total": new_records_total,
         "retrained": retrain_needed,
+        "train_result": train_result,
         "predictions": preds,
         "kalshi_combo_artifact": combo_artifact,
         "kalshi_placement": kalshi_placement,
@@ -530,6 +555,8 @@ def _ensure_background_jobs_started() -> None:
                 id="hf_active_cycle",
                 replace_existing=True,
                 next_run_time=_first_active,
+                max_instances=1,  # Never run concurrent instances of the active cycle
+                coalesce=True,    # If missed, run once (not multiple catch-up runs)
             )
             scheduler.add_job(
                 _run_hf_daily_pipeline,
@@ -538,6 +565,8 @@ def _ensure_background_jobs_started() -> None:
                 minute=HF_DAILY_RUN_MINUTE_ET,
                 id="hf_daily_pipeline",
                 replace_existing=True,
+                max_instances=1,
+                coalesce=True,
             )
             scheduler.add_job(
                 _run_kalshi_automation_background,
@@ -545,6 +574,8 @@ def _ensure_background_jobs_started() -> None:
                 minutes=max(1, PREGAME_TIMING_MINUTES),
                 id="kalshi_automation_cycle",
                 replace_existing=True,
+                max_instances=1,
+                coalesce=True,
             )
             # Multi-sport data pipeline: fetch live games every 30 minutes
             scheduler.add_job(
@@ -553,6 +584,8 @@ def _ensure_background_jobs_started() -> None:
                 minutes=30,
                 id="multi_sport_live_fetch",
                 replace_existing=True,
+                max_instances=1,
+                coalesce=True,
             )
             scheduler.start()
             logger.info(
@@ -1121,6 +1154,44 @@ def kalshi_automation_tick():
         state = {"ok": False, "updated_at": "", "error": str(exc)}
         _save_json(KALSHI_AUTOMATION_STATE_FILE, state)
         return jsonify(state), 500
+
+
+@app.route("/api/admin/force-active-cycle", methods=["POST"])
+def admin_force_active_cycle():
+    """Manually trigger the full active cycle (append + train + predict + Kalshi)."""
+    if not _is_cron_authorized():
+        return jsonify({"ok": False, "error": "Unauthorized"}), 401
+    def _run():
+        try:
+            result = _run_hf_active_cycle()
+            logger.info("[admin] Force active cycle result: ok=%s retrained=%s", result.get("ok"), result.get("retrained"))
+        except Exception as exc:
+            logger.exception("[admin] Force active cycle failed: %s", exc)
+    threading.Thread(target=_run, daemon=True, name="admin-force-active-cycle").start()
+    return jsonify({"ok": True, "message": "Active cycle started in background"})
+
+
+@app.route("/api/admin/force-retrain", methods=["POST"])
+def admin_force_retrain():
+    """Manually trigger model retraining and publish to HF."""
+    if not _is_cron_authorized():
+        return jsonify({"ok": False, "error": "Unauthorized"}), 401
+    def _run():
+        try:
+            pipeline = HFDirectPipeline()
+            if not pipeline.ok:
+                logger.warning("[admin] force-retrain: HF pipeline not configured")
+                return
+            # Clear broken-version cache so the new model gets tried immediately
+            HFDirectPipeline._broken_model_versions.clear()
+            summary = pipeline.train_and_publish_best_model(
+                min_rows=int(os.getenv("HF_DAILY_MIN_TRAIN_ROWS", "200") or "200"),
+            )
+            logger.info("[admin] Retrain complete: rows=%d model=%s version=%s", summary.rows, summary.best_model, summary.version)
+        except Exception as exc:
+            logger.exception("[admin] Force retrain failed: %s", exc)
+    threading.Thread(target=_run, daemon=True, name="admin-force-retrain").start()
+    return jsonify({"ok": True, "message": "Retrain started in background"})
 
 
 if __name__ == "__main__":
