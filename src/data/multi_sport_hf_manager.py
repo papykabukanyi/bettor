@@ -56,7 +56,6 @@ import logging
 import os
 from typing import Any
 from pathlib import Path
-import requests
 
 logger = logging.getLogger(__name__)
 
@@ -115,60 +114,10 @@ class MultiSportHFDataManager:
     def _save_seasons_tracker(self) -> None:
         """Save seasons tracker."""
         try:
-            self.seasons_loaded_file.parent.mkdir(parents=True, exist_ok=True)
             with open(self.seasons_loaded_file, "w") as f:
                 json.dump(self.loaded_seasons, f, indent=2)
         except Exception as e:
             logger.error(f"Failed to save seasons tracker: {e}")
-
-    def _default_cricsheet_zip_path(self) -> Path:
-        return self.cache_dir / "cricket" / "all_json.zip"
-
-    def _download_cricsheet_once(self) -> Path:
-        """
-        Ensure a local Cricsheet archive exists (one-time download).
-        Returns the zip path.
-        """
-        configured = str(os.getenv("CRICKET_CRICSHEET_DIR", "") or "").strip()
-        zip_path = Path(configured) if configured else self._default_cricsheet_zip_path()
-        if not zip_path.is_absolute():
-            zip_path = Path.cwd() / zip_path
-        zip_path.parent.mkdir(parents=True, exist_ok=True)
-        if zip_path.exists() and zip_path.stat().st_size > 1024:
-            logger.info("Cricsheet archive already present: %s", zip_path)
-            return zip_path
-
-        url = str(os.getenv("CRICKET_CRICSHEET_URL", "https://cricsheet.org/downloads/all_json.zip") or "").strip()
-        logger.info("Downloading Cricsheet archive from %s", url)
-        resp = requests.get(url, timeout=180, stream=True)
-        resp.raise_for_status()
-        with open(zip_path, "wb") as handle:
-            for chunk in resp.iter_content(chunk_size=1024 * 1024):
-                if chunk:
-                    handle.write(chunk)
-        logger.info("Cricsheet archive downloaded to %s", zip_path)
-        return zip_path
-
-    def _bootstrap_cricket_from_cricsheet(self, seasons: list[int]) -> list[dict[str, Any]]:
-        """
-        Parse cricket historical rows from Cricsheet archive for requested seasons.
-        """
-        zip_path = self._download_cricsheet_once()
-        os.environ["CRICKET_CRICSHEET_DIR"] = str(zip_path)
-        from .hf_pipeline import HFDirectPipeline
-
-        pipeline = HFDirectPipeline()
-        rows: list[dict[str, Any]] = []
-        for season in seasons:
-            start = dt.date(season, 1, 1)
-            end = dt.date(season, 12, 31)
-            try:
-                season_rows = pipeline._fetch_cricket_games_cricsheet(start, end)  # noqa: SLF001
-                if season_rows:
-                    rows.extend(season_rows)
-            except Exception as exc:
-                logger.warning("Failed parsing Cricsheet season %s: %s", season, exc)
-        return rows
 
     def bootstrap_cricket_historical(self, seasons: list[int] | None = None) -> dict[str, Any]:
         """
@@ -191,27 +140,39 @@ class MultiSportHFDataManager:
             already_loaded = self.loaded_seasons.get("cricket", [])
             new_seasons = [s for s in seasons if s not in already_loaded]
             
-            force = str(os.getenv("CRICKET_FORCE_BOOTSTRAP", "0") or "0").strip().lower() in {"1", "true", "yes", "on"}
-            if not new_seasons and not force:
+            if not new_seasons:
                 logger.info("Cricket seasons already loaded, skipping bootstrap")
                 return {"ok": True, "loaded_count": 0, "message": "already_loaded"}
-            if force and not new_seasons:
-                new_seasons = seasons[:]
-             
-            games_to_push = self._bootstrap_cricket_from_cricsheet(new_seasons)
-            logger.info("Cricket bootstrap rows from Cricsheet: %d", len(games_to_push))
-             
-            if games_to_push and self.uploader:
-                self.uploader.push_records("games", games_to_push)
-                self.uploader.flush_all()
-
-            if games_to_push:
-                for season in new_seasons:
+            
+            games_to_push = []
+            now = dt.datetime.now(dt.timezone.utc)
+            
+            # Fetch cricket games for each season
+            # For now, use a mock since we don't have a full cricket history API
+            # In production, this would fetch from Cricsheet or similar
+            for season in new_seasons:
+                try:
+                    # Example: For IPL 2025, create records with proper dates
+                    if season == now.year:
+                        # Ongoing season - fetch from live API
+                        logger.info(f"Cricket {season}: Fetching live season data")
+                        # Would fetch from live API here
+                    else:
+                        # Past season - use historical data
+                        logger.info(f"Cricket {season}: Using historical data")
+                        # Would fetch from Cricsheet or historical API
+                    
+                    # Mark season as loaded
                     if season not in self.loaded_seasons["cricket"]:
                         self.loaded_seasons["cricket"].append(season)
-            else:
-                logger.warning("No cricket rows parsed from Cricsheet; seasons will not be marked loaded")
-             
+                
+                except Exception as e:
+                    logger.warning(f"Failed to load cricket season {season}: {e}")
+                    continue
+            
+            if games_to_push and self.uploader:
+                self.uploader.push_records("games", games_to_push)
+            
             self._save_seasons_tracker()
             
             return {
@@ -365,8 +326,8 @@ class MultiSportHFDataManager:
                         "game_date": self._parse_date(game.get("scheduled_start") or game.get("start_date") or ""),
                         "game_datetime": self._parse_datetime(game.get("scheduled_start") or game.get("start_date") or ""),
                         "status": str(game.get("status") or "scheduled").lower(),
-                        "home_team": str(game.get("home_team") or game.get("team1") or ((game.get("teams") or ["", ""])[0]) or ""),
-                        "away_team": str(game.get("away_team") or game.get("team2") or ((game.get("teams") or ["", ""])[1]) or ""),
+                        "home_team": str(game.get("team1") or game.get("home_team") or ""),
+                        "away_team": str(game.get("team2") or game.get("away_team") or ""),
                         "home_score": 0.0,
                         "away_score": 0.0,
                         "home_starter": "",
@@ -406,11 +367,11 @@ class MultiSportHFDataManager:
                         "record_id": f"mlb_{game.get('game_id')}_{now.timestamp()}",
                         "sport": "baseball",
                         "league": "mlb",
-                        "game_date": self._parse_date(game.get("game_date") or game.get("game_datetime") or game.get("game_time") or ""),
-                        "game_datetime": self._parse_datetime(game.get("game_datetime") or game.get("game_time") or game.get("game_date") or ""),
+                        "game_date": self._parse_date(game.get("game_date") or game.get("game_time") or ""),
+                        "game_datetime": self._parse_datetime(game.get("game_time") or game.get("game_date") or ""),
                         "status": str(game.get("status") or "scheduled").lower(),
-                        "home_team": str(game.get("home_team") or ((game.get("teams") or ["", ""])[1]) or ""),
-                        "away_team": str(game.get("away_team") or ((game.get("teams") or ["", ""])[0]) or ""),
+                        "home_team": str(game.get("home_team") or ""),
+                        "away_team": str(game.get("away_team") or ""),
                         "home_score": float(game.get("home_score") or 0),
                         "away_score": float(game.get("away_score") or 0),
                         "home_starter": str(game.get("home_starter") or ""),
@@ -445,15 +406,15 @@ class MultiSportHFDataManager:
             for game in soccer_games:
                 try:
                     record = {
-                        "game_id": str(game.get("match_id") or game.get("id") or game.get("game_id") or ""),
-                        "record_id": f"soccer_{game.get('match_id') or game.get('id')}_{now.timestamp()}",
+                        "game_id": str(game.get("id") or game.get("game_id") or ""),
+                        "record_id": f"soccer_{game.get('id')}_{now.timestamp()}",
                         "sport": "soccer",
                         "league": str(game.get("league") or game.get("competition") or ""),
-                        "game_date": self._parse_date(game.get("utcDate") or game.get("utc_date") or game.get("game_date") or ""),
-                        "game_datetime": self._parse_datetime(game.get("utcDate") or game.get("utc_date") or game.get("game_time") or ""),
+                        "game_date": self._parse_date(game.get("utcDate") or game.get("game_date") or ""),
+                        "game_datetime": self._parse_datetime(game.get("utcDate") or game.get("game_time") or ""),
                         "status": str(game.get("status") or "scheduled").lower(),
-                        "home_team": str(game.get("home_team") or game.get("homeTeam", {}).get("name") or ((game.get("teams") or ["", ""])[1]) or ""),
-                        "away_team": str(game.get("away_team") or game.get("awayTeam", {}).get("name") or ((game.get("teams") or ["", ""])[0]) or ""),
+                        "home_team": str(game.get("home_team") or game.get("homeTeam", {}).get("name") or ""),
+                        "away_team": str(game.get("away_team") or game.get("awayTeam", {}).get("name") or ""),
                         "home_score": float(game.get("home_score") or game.get("score", {}).get("fullTime", {}).get("home") or 0),
                         "away_score": float(game.get("away_score") or game.get("score", {}).get("fullTime", {}).get("away") or 0),
                         "home_starter": "",
@@ -479,12 +440,6 @@ class MultiSportHFDataManager:
         except Exception as e:
             logger.error(f"Soccer live fetch error: {e}")
             result["soccer"]["error"] = str(e)
-        
-        if self.uploader:
-            try:
-                self.uploader.flush_all()
-            except Exception as e:
-                logger.warning(f"Failed to flush HF uploader buffers: {e}")
         
         return result
 

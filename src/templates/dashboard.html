@@ -420,18 +420,11 @@
     function renderHeroMetrics() {
       const metrics = state.status.metrics || {};
       const m = state.model.current_model || {};
-      const sportBreakdown = metrics.sport_breakdown || {};
-      const sportLabelMap = { mlb: 'Baseball', baseball: 'Baseball', soccer: 'Soccer', cricket: 'Cricket' };
-      const sportSummary = Object.entries(sportBreakdown)
-        .sort((a, b) => Number(b[1] || 0) - Number(a[1] || 0))
-        .map(([sport, count]) => `${sportLabelMap[String(sport).toLowerCase()] || String(sport).toUpperCase()}: ${num(count)}`)
-        .join(' • ') || 'No sport breakdown yet';
       const cards = [
         { label: 'Total Predictions', value: num(metrics.total_predictions || 0), note: `${num(metrics.today_predictions || 0)} today • ${num(metrics.tomorrow_predictions || 0)} tomorrow` },
         { label: 'Win Rate', value: pct(metrics.win_rate || m.best_score || 0), note: `Cross-validation ROC AUC • ${esc(m.best_model || 'Awaiting train')}` },
         { label: 'Kalshi Bets', value: num((state.kalshiStatus.submissions || {}).summary?.placed || 0), note: `${num((state.kalshiStatus.positions || {}).summary?.active_positions || 0)} active positions` },
         { label: 'Active Models', value: num(metrics.active_models || m.candidate_count || 0), note: `Version ${esc(m.version || 'n/a')}` },
-        { label: 'Sports Feed', value: num(Object.keys(sportBreakdown).length || 0), note: sportSummary },
       ];
       document.getElementById('hero-metrics').innerHTML = cards.map(c =>
         `<article class="metric"><span class="metric-label">${esc(c.label)}</span><span class="metric-value">${esc(c.value)}</span><span class="metric-note">${esc(c.note)}</span></article>`
@@ -446,9 +439,7 @@
         return `<article class="card glass"><div style="display:flex;justify-content:space-between;gap:12px;align-items:center"><h3>${esc(title)}</h3><span class="stage-badge ${ok ? 'good' : 'bad'}">${ok ? 'healthy' : 'attention'}</span></div><div class="kvs"><div class="kv"><span>Schedule</span><strong>${esc(schedule)}</strong></div><div class="kv"><span>Updated</span><strong>${esc(stamp(info.updated_at || info.generated_at || info.trained_at))}</strong></div><div class="kv"><span>Summary</span><strong>${esc(info.prediction_count || info.completed_games_total || info.rows || info.placed || 0)}</strong></div></div></article>`;
       }).join('');
       const model = state.model.current_model || {};
-      const sportBreakdown = state.status.metrics?.sport_breakdown || {};
-      const sportsLine = Object.entries(sportBreakdown).map(([s, c]) => `${String(s).toUpperCase()}:${num(c)}`).join(' • ') || '—';
-      document.getElementById('pipeline-overview').innerHTML = `<h3>Pipeline health</h3><p class="subtle" style="margin:10px 0 0">Simple backend status: fetch, train, predict, and Kalshi execution.</p><div class="kvs"><div class="kv"><span>Last refresh</span><strong>${esc(stamp(state.status.updated_at))}</strong></div><div class="kv"><span>Today predictions</span><strong>${esc(num((state.today || {}).prediction_count || 0))}</strong></div><div class="kv"><span>Tomorrow predictions</span><strong>${esc(num((state.tomorrow || {}).prediction_count || 0))}</strong></div><div class="kv"><span>Sports count</span><strong>${esc(num(Object.keys(sportBreakdown).length || 0))}</strong></div><div class="kv"><span>Sports mix</span><strong>${esc(sportsLine)}</strong></div><div class="kv"><span>Source</span><strong>${esc(state.status.source || 'local')}</strong></div></div>`;
+      document.getElementById('pipeline-overview').innerHTML = `<h3>Pipeline health</h3><p class="subtle" style="margin:10px 0 0">Live orchestration status for HF Dataset + Model publishing and Space inference.</p><div class="kvs"><div class="kv"><span>Last refresh</span><strong>${esc(stamp(state.status.updated_at))}</strong></div><div class="kv"><span>Today predictions</span><strong>${esc(num((state.today || {}).prediction_count || 0))}</strong></div><div class="kv"><span>Tomorrow predictions</span><strong>${esc(num((state.tomorrow || {}).prediction_count || 0))}</strong></div><div class="kv"><span>Submissions placed</span><strong>${esc(num(((state.kalshiStatus.submissions || {}).summary || {}).placed || 0))}</strong></div><div class="kv"><span>Source</span><strong>${esc(state.status.source || 'local')}</strong></div></div>`;
       document.getElementById('model-overview').innerHTML = `<h3>Model snapshot</h3><p class="subtle" style="margin:10px 0 0">Best estimator chosen from 5-fold cross-validation each day.</p><div class="kvs"><div class="kv"><span>Model</span><strong>${esc(model.best_model || '—')}</strong></div><div class="kv"><span>Version</span><strong>${esc(model.version || '—')}</strong></div><div class="kv"><span>Rows trained</span><strong>${esc(num(model.rows || 0))}</strong></div><div class="kv"><span>Score</span><strong>${esc(pct(model.best_score || 0))}</strong></div><div class="kv"><span>Sports</span><strong>${esc((model.sports_covered || []).join(', ') || '—')}</strong></div></div>`;
     }
 

@@ -25,6 +25,7 @@ from data.hf_pipeline import HFDirectPipeline
 from data.kalshi_trade_api import build_live_snapshot, submit_prediction_orders
 from data.pregame_timing import run_pregame_timing_cycle
 from data.multi_sport_scheduler import (
+    run_multi_sport_bootstrap,
     run_multi_sport_live_fetch,
     get_multi_sport_scheduler_status,
 )
@@ -38,8 +39,9 @@ HF_MARKETS_FILE = DATA_DIR / "hf_daily_prediction_markets.json"
 KALSHI_AUTOMATION_STATE_FILE = DATA_DIR / "kalshi_automation_status.json"
 KALSHI_SCHEDULE_STATE_FILE = DATA_DIR / "pregame_schedule.json"
 REQUEST_TIMEOUT = int(os.getenv("HF_PROXY_TIMEOUT", "15") or "15")
+DISCOVERY_TIMEOUT = int(os.getenv("HF_PROXY_DISCOVERY_TIMEOUT", "4") or "4")
 HF_MODEL_REPO = str(os.getenv("HF_MODEL_REPO", "papylove/sportprediction") or "").strip()
-HF_AUTORUN_ON_STARTUP = str(os.getenv("HF_AUTORUN_ON_STARTUP", "0")).strip().lower() in {"1", "true", "yes", "on"}
+HF_AUTORUN_ON_STARTUP = str(os.getenv("HF_AUTORUN_ON_STARTUP", "1")).strip().lower() in {"1", "true", "yes", "on"}
 HF_DAILY_RUN_HOUR_ET = int(os.getenv("HF_DAILY_RUN_HOUR_ET", "4") or "4")
 HF_DAILY_RUN_MINUTE_ET = int(os.getenv("HF_DAILY_RUN_MINUTE_ET", "15") or "15")
 HF_DAILY_CUSTOM_MODEL = str(os.getenv("HF_DAILY_CUSTOM_MODEL", "auto") or "auto").strip().lower()
@@ -65,14 +67,10 @@ app = Flask(__name__, template_folder="templates")
 scheduler = BackgroundScheduler(timezone="America/New_York")
 _startup_lock = threading.Lock()
 _startup_done = False
-_prediction_refresh_lock = threading.Lock()
-_prediction_refresh_last_ts = 0.0
-_prediction_refresh_running = False
 _KALSHI_LIVE_CACHE: dict[str, Any] = {}
 _KALSHI_LIVE_CACHE_TS = 0.0
 _KALSHI_LIVE_CACHE_LOCK = threading.Lock()
 _KALSHI_LIVE_CACHE_TTL_SEC = max(5, int(os.getenv("KALSHI_LIVE_CACHE_TTL_SEC", "20") or "20"))
-_active_cycle_lock = threading.Lock()  # Prevents concurrent active-cycle runs within the same worker process
 
 
 def _bootstrap_env_from_dotenv() -> None:
@@ -140,18 +138,55 @@ def _is_cron_authorized() -> bool:
     return auth == f"Bearer {secret}"
 
 
+def _space_repo_to_url(repo_id: str) -> str:
+    value = str(repo_id or "").strip().strip("/")
+    if not value:
+        return ""
+    if value.startswith("http://") or value.startswith("https://"):
+        return value.rstrip("/")
+    if "/" not in value:
+        return ""
+    owner, space = value.split("/", 1)
+    owner = owner.strip()
+    space = space.strip()
+    if not owner or not space:
+        return ""
+    return f"https://{owner}-{space}.hf.space"
 
 
 def _discover_provider_api_url() -> tuple[str, str]:
-    # Only use an explicitly-configured provider URL; no auto-probing HF Spaces.
     explicit = str(os.getenv("HF_SPACE_API_URL", "") or os.getenv("PREDICTIONS_API_URL", "")).strip().rstrip("/")
     if explicit:
         return explicit, "explicit_env"
+
+    candidates: list[tuple[str, str]] = []
+    for env_name in ("HF_SPACE_REPO", "HF_SPACE_ID", "SPACE_ID", "HF_MODEL_REPO", "HF_DATASET_REPO"):
+        raw = str(os.getenv(env_name, "") or "").strip()
+        url = _space_repo_to_url(raw)
+        if url:
+            candidates.append((url.rstrip("/"), env_name))
+
+    seen: set[str] = set()
+    for base_url, source in candidates:
+        if base_url in seen:
+            continue
+        seen.add(base_url)
+        try:
+            health = requests.get(urljoin(base_url + "/", "health"), timeout=DISCOVERY_TIMEOUT)
+            if health.ok:
+                return base_url, f"auto:{source}"
+        except Exception:
+            pass
+        try:
+            status = requests.get(urljoin(base_url + "/", "status"), timeout=DISCOVERY_TIMEOUT)
+            if status.ok:
+                return base_url, f"auto:{source}"
+        except Exception:
+            pass
     return "", "none"
 
 
 PROVIDER_API_URL, PROVIDER_API_SOURCE = _discover_provider_api_url()
-HF_PREFER_LOCAL_SNAPSHOT = str(os.getenv("HF_PREFER_LOCAL_SNAPSHOT", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _load_json(path: Path, default: Any) -> Any:
@@ -202,149 +237,29 @@ def _fetch_first_hf_json(paths_in_repo: list[str]) -> Any:
 
 
 def _provider_or_local(path: str, local_file: Path, *, default: Any) -> tuple[Any, str, str]:
-    def _rows_and_sports(payload: Any) -> tuple[int, int]:
-        if not isinstance(payload, dict):
-            return 0, 0
-        rows = payload.get("predictions")
-        if not isinstance(rows, list):
-            return 0, 0
-        sports: set[str] = set()
-        count = 0
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            count += 1
-            sport = str(row.get("sport") or "").strip().lower()
-            if sport:
-                sports.add(sport)
-        return count, len(sports)
-
-    def _merge_prediction_payloads(candidates: list[tuple[Any, str]]) -> tuple[Any, str]:
-        if not candidates:
-            return default, "hf_local_snapshot_no_space_url"
-
-        merged_rows: list[dict[str, Any]] = []
-        seen_ids: set[str] = set()
-        selected_source = ""
-        selected_score = (-1, -1)
-        today_value = ""
-        tomorrow_value = ""
-        model_version = ""
-        model_type = ""
-        model_auc = 0.0
-        generated_at = ""
-
-        for payload, source in candidates:
-            if not isinstance(payload, dict):
-                continue
-            score = _rows_and_sports(payload)
-            if score[1] > selected_score[1] or (score[1] == selected_score[1] and score[0] > selected_score[0]):
-                selected_source = source
-                selected_score = score
-            if not today_value:
-                today_value = str(payload.get("today") or "").strip()
-            if not tomorrow_value:
-                tomorrow_value = str(payload.get("tomorrow") or "").strip()
-            if not generated_at:
-                generated_at = str(payload.get("generated_at") or "").strip()
-            if not model_version:
-                model_version = str(payload.get("model_version") or "").strip()
-            if not model_type:
-                model_type = str(payload.get("model_type") or payload.get("model_name") or "").strip()
-            if not model_auc:
-                try:
-                    model_auc = float(payload.get("model_auc") or 0.0)
-                except Exception:
-                    model_auc = 0.0
-
-            for row in (payload.get("predictions") or []):
-                if not isinstance(row, dict):
-                    continue
-                row_id = str(row.get("prediction_id") or row.get("prediction_uid") or "").strip()
-                if not row_id:
-                    row_id = "|".join(
-                        [
-                            str(row.get("sport") or "").strip().lower(),
-                            str(row.get("league") or "").strip().lower(),
-                            str(row.get("game_date") or "").strip(),
-                            str(row.get("game_time") or "").strip(),
-                            str(row.get("away_team") or "").strip().lower(),
-                            str(row.get("home_team") or "").strip().lower(),
-                            str(row.get("market_type") or "").strip().lower(),
-                            str(row.get("player_name") or "").strip().lower(),
-                            str(row.get("predicted_team") or row.get("predicted_label") or row.get("predicted_outcome") or "").strip().lower(),
-                        ]
-                    )
-                if row_id in seen_ids:
-                    continue
-                seen_ids.add(row_id)
-                merged_rows.append(row)
-
-        if not merged_rows:
-            return default, "hf_local_snapshot_no_space_url"
-
-        if not today_value:
-            today_value = dt.date.today().isoformat()
-        if not tomorrow_value:
-            tomorrow_value = (dt.date.today() + dt.timedelta(days=1)).isoformat()
-
-        merged_payload = {
-            "ok": True,
-            "generated_at": generated_at,
-            "today": today_value,
-            "tomorrow": tomorrow_value,
-            "prediction_count": len([row for row in merged_rows if not row.get("error")]),
-            "model_version": model_version,
-            "model_type": model_type,
-            "model_auc": model_auc,
-            "predictions": merged_rows,
-        }
-        return merged_payload, (selected_source or "merged_sources")
-
     error = ""
-    is_prediction_path = path in {"/predictions/today", "/predictions/tomorrow"}
-    prediction_candidates: list[tuple[Any, str]] = []
-
-    if local_file.exists():
-        local_payload = _load_json(local_file, default)
-        if isinstance(local_payload, dict) and local_payload:
-            if HF_PREFER_LOCAL_SNAPSHOT and not is_prediction_path:
-                return local_payload, "hf_local_snapshot", ""
-            if is_prediction_path:
-                prediction_candidates.append((local_payload, "hf_local_snapshot"))
     if PROVIDER_API_URL:
         try:
             response = requests.get(urljoin(PROVIDER_API_URL + "/", path.lstrip("/")), timeout=REQUEST_TIMEOUT)
             response.raise_for_status()
-            provider_source = "hf_space_auto" if PROVIDER_API_SOURCE.startswith("auto:") else "hf_space"
-            provider_payload = response.json()
-            if is_prediction_path and isinstance(provider_payload, dict) and provider_payload:
-                prediction_candidates.append((provider_payload, provider_source))
-            else:
-                return provider_payload, provider_source, ""
+            return response.json(), "hf_space_auto" if PROVIDER_API_SOURCE.startswith("auto:") else "hf_space", ""
         except Exception as exc:
             error = str(exc)
             logger.warning("Provider proxy failed for %s: %s", path, exc)
 
     hub_artifact_map = {
         "/status": ["artifacts/hf_pipeline_status.json", "hf_pipeline_status.json"],
+        "/predictions/today": ["artifacts/hf_daily_predictions.json", "hf_daily_predictions.json"],
+        "/predictions/tomorrow": ["artifacts/hf_daily_predictions.json", "hf_daily_predictions.json"],
         "/model/stats": ["artifacts/hf_pipeline_status.json", "hf_pipeline_status.json"],
         "/kalshi/submissions": ["artifacts/hf_daily_prediction_markets.json", "hf_daily_prediction_markets.json"],
         "/kalshi/positions": ["artifacts/hf_daily_prediction_markets.json", "hf_daily_prediction_markets.json"],
     }
-    # Prediction paths use ONLY local file (scheduler updates it; HF artifact is stale)
     artifact_paths = hub_artifact_map.get(path)
     if artifact_paths:
         payload = _fetch_first_hf_json(artifact_paths)
         if isinstance(payload, dict) and payload:
-            if is_prediction_path:
-                prediction_candidates.append((payload, "hf_hub_artifact"))
-            else:
-                return payload, "hf_hub_artifact", error
-
-    if is_prediction_path and prediction_candidates:
-        merged_payload, merged_source = _merge_prediction_payloads(prediction_candidates)
-        return merged_payload, merged_source, error
+            return payload, "hf_hub_artifact", error
 
     if local_file.exists():
         return _load_json(local_file, default), "hf_local_snapshot", error
@@ -442,17 +357,6 @@ def _run_hf_daily_pipeline() -> dict[str, Any]:
 
 
 def _run_hf_active_cycle() -> dict[str, Any]:
-    # Prevent multiple threads/scheduler workers from running this concurrently in the same process
-    if not _active_cycle_lock.acquire(blocking=False):
-        logger.info("[active_cycle] Already running in another thread — skipping this invocation")
-        return {"ok": False, "skipped": True, "reason": "lock_busy"}
-    try:
-        return _run_hf_active_cycle_inner()
-    finally:
-        _active_cycle_lock.release()
-
-
-def _run_hf_active_cycle_inner() -> dict[str, Any]:
     pipeline = HFDirectPipeline()
     if not pipeline.ok:
         raise RuntimeError("HF pipeline not configured. Set HF_API_KEY, HF_DATASET_REPO, HF_MODEL_REPO.")
@@ -483,23 +387,11 @@ def _run_hf_active_cycle_inner() -> dict[str, Any]:
             retrain_needed = True
     if new_records_total > 0 and HF_RETRAIN_INTERVAL_MINUTES <= 60:
         retrain_needed = True
-
-    train_result = {"skipped": True, "reason": "not_needed"}
     if retrain_needed:
-        try:
-            summary = pipeline.train_and_publish_best_model(
-                min_rows=HF_DAILY_MIN_TRAIN_ROWS,
-                forced_model=HF_DAILY_CUSTOM_MODEL,
-            )
-            train_result = {"skipped": summary.best_model == "skipped", "rows": summary.rows,
-                            "model": summary.best_model, "version": summary.version}
-            # Clear broken-version cache so next predict attempt tries the new model
-            if summary.best_model != "skipped" and summary.version:
-                HFDirectPipeline._broken_model_versions.discard(summary.version)
-                HFDirectPipeline._broken_model_versions.clear()
-        except Exception as train_exc:
-            logger.warning("[active_cycle] Training failed (non-fatal): %s", train_exc)
-            train_result = {"skipped": True, "error": str(train_exc)}
+        pipeline.train_and_publish_best_model(
+            min_rows=HF_DAILY_MIN_TRAIN_ROWS,
+            forced_model=HF_DAILY_CUSTOM_MODEL,
+        )
 
     pipeline.ensure_model_card_metadata()
     preds = pipeline.predict_daily_schedule()
@@ -524,7 +416,6 @@ def _run_hf_active_cycle_inner() -> dict[str, Any]:
         "append_runs": append_runs,
         "new_records_total": new_records_total,
         "retrained": retrain_needed,
-        "train_result": train_result,
         "predictions": preds,
         "kalshi_combo_artifact": combo_artifact,
         "kalshi_placement": kalshi_placement,
@@ -547,16 +438,12 @@ def _ensure_background_jobs_started() -> None:
         if _startup_done:
             return
         if not scheduler.running:
-            _first_active = dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=5)
             scheduler.add_job(
                 _run_hf_active_cycle,
                 "interval",
                 minutes=max(5, HF_ACTIVE_SCAN_MINUTES),
                 id="hf_active_cycle",
                 replace_existing=True,
-                next_run_time=_first_active,
-                max_instances=1,  # Never run concurrent instances of the active cycle
-                coalesce=True,    # If missed, run once (not multiple catch-up runs)
             )
             scheduler.add_job(
                 _run_hf_daily_pipeline,
@@ -565,8 +452,6 @@ def _ensure_background_jobs_started() -> None:
                 minute=HF_DAILY_RUN_MINUTE_ET,
                 id="hf_daily_pipeline",
                 replace_existing=True,
-                max_instances=1,
-                coalesce=True,
             )
             scheduler.add_job(
                 _run_kalshi_automation_background,
@@ -574,8 +459,6 @@ def _ensure_background_jobs_started() -> None:
                 minutes=max(1, PREGAME_TIMING_MINUTES),
                 id="kalshi_automation_cycle",
                 replace_existing=True,
-                max_instances=1,
-                coalesce=True,
             )
             # Multi-sport data pipeline: fetch live games every 30 minutes
             scheduler.add_job(
@@ -584,8 +467,6 @@ def _ensure_background_jobs_started() -> None:
                 minutes=30,
                 id="multi_sport_live_fetch",
                 replace_existing=True,
-                max_instances=1,
-                coalesce=True,
             )
             scheduler.start()
             logger.info(
@@ -595,23 +476,15 @@ def _ensure_background_jobs_started() -> None:
                 HF_DAILY_RUN_HOUR_ET,
                 HF_DAILY_RUN_MINUTE_ET,
             )
-
-            # Always run a lightweight predictions refresh on startup (no training, no HF push).
-            # This ensures the predictions file is fresh for all sports without risking OOM.
-            def _startup_predict_only() -> None:
-                try:
-                    pipeline = HFDirectPipeline()
-                    if pipeline.ok:
-                        pipeline.predict_daily_schedule()
-                        logger.info("Dashboard startup predictions generated")
-                except Exception as exc:
-                    logger.warning("Dashboard startup predictions failed: %s", exc)
-
-            threading.Thread(target=_startup_predict_only, daemon=True, name="dashboard-startup-predict").start()
-
         if HF_AUTORUN_ON_STARTUP:
             def _runner() -> None:
-                # Full active cycle (append + train + predict + Kalshi) — only if explicitly enabled
+                # Bootstrap multi-sport data on startup (one-time)
+                try:
+                    run_multi_sport_bootstrap()
+                    logger.info("Dashboard startup multi-sport bootstrap completed")
+                except Exception as exc:
+                    logger.warning("Dashboard startup multi-sport bootstrap: %s", exc)
+                
                 try:
                     _run_hf_active_cycle()
                     logger.info("Dashboard startup active cycle completed")
@@ -645,79 +518,13 @@ def _predictions_for_date(payload: dict[str, Any], target_date: str) -> dict[str
     }
 
 
-def _extract_prediction_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
-    if not isinstance(payload, dict):
-        return []
-    rows = payload.get("predictions")
-    if not isinstance(rows, list):
-        return []
-    return [row for row in rows if isinstance(row, dict)]
-
-
-def _prediction_sports(payload: dict[str, Any]) -> set[str]:
-    sports: set[str] = set()
-    for row in _extract_prediction_rows(payload):
-        sport = str(row.get("sport") or "").strip().lower()
-        if sport:
-            sports.add(sport)
-    return sports
-
-
-def _prediction_payload_needs_multisport_refresh(payload: dict[str, Any]) -> bool:
-    rows = _extract_prediction_rows(payload)
-    if not rows:
-        return True
-    sports = _prediction_sports(payload)
-    return bool(sports) and sports.issubset({"cricket"})
-
-
-def _trigger_background_multisport_refresh_if_needed(payload: dict[str, Any], *, reason: str) -> None:
-    global _prediction_refresh_last_ts, _prediction_refresh_running
-    if not isinstance(payload, dict):
-        return
-    if not _prediction_payload_needs_multisport_refresh(payload):
-        return
-    now_ts = time.time()
-    refresh_cooldown = max(120, int(os.getenv("HF_PREDICTION_REFRESH_COOLDOWN_SEC", "300") or "300"))
-    with _prediction_refresh_lock:
-        if _prediction_refresh_running:
-            return
-        if (now_ts - _prediction_refresh_last_ts) < refresh_cooldown:
-            return
-        _prediction_refresh_last_ts = now_ts
-        _prediction_refresh_running = True
-
-    def _runner() -> None:
-        global _prediction_refresh_running
-        try:
-            _run_hf_active_cycle()
-            logger.info("Triggered background multi-sport refresh (%s)", reason)
-        except Exception as exc:
-            logger.warning("Background multi-sport refresh failed (%s): %s", reason, exc)
-        finally:
-            with _prediction_refresh_lock:
-                _prediction_refresh_running = False
-
-    threading.Thread(target=_runner, daemon=True, name="dashboard-multisport-refresh").start()
-
-
-def _prediction_metrics() -> tuple[int, int, int, dict[str, int], list[str]]:
+def _prediction_counts_for_metrics() -> tuple[int, int, int]:
     today_payload, _, _ = _provider_or_local("/predictions/today", HF_PREDICTIONS_FILE, default={})
     tomorrow_payload, _, _ = _provider_or_local("/predictions/tomorrow", HF_PREDICTIONS_FILE, default={})
 
     today_count = int((today_payload or {}).get("prediction_count") or 0) if isinstance(today_payload, dict) else 0
     tomorrow_count = int((tomorrow_payload or {}).get("prediction_count") or 0) if isinstance(tomorrow_payload, dict) else 0
-    all_rows = _extract_prediction_rows(today_payload if isinstance(today_payload, dict) else {})
-    all_rows += _extract_prediction_rows(tomorrow_payload if isinstance(tomorrow_payload, dict) else {})
-
-    sport_counts: dict[str, int] = {}
-    for row in all_rows:
-        sport = str(row.get("sport") or "").strip().lower()
-        if not sport:
-            continue
-        sport_counts[sport] = sport_counts.get(sport, 0) + 1
-    sports = sorted(sport_counts.keys())
-    return today_count + tomorrow_count, today_count, tomorrow_count, sport_counts, sports
+    return today_count + tomorrow_count, today_count, tomorrow_count
 
 
 @app.route("/")
@@ -730,26 +537,22 @@ def predictions_status():
     payload, source, error = _provider_or_local("/status", HF_STATUS_FILE, default={})
     if isinstance(payload, dict) and "pipeline" in payload and "metrics" in payload:
         metrics = payload.get("metrics") or {}
-        total_predictions, today_predictions, tomorrow_predictions, sport_counts, sports = _prediction_metrics()
-        metrics["total_predictions"] = int(metrics.get("total_predictions") or total_predictions)
-        metrics["today_predictions"] = int(metrics.get("today_predictions") or today_predictions)
-        metrics["tomorrow_predictions"] = int(metrics.get("tomorrow_predictions") or tomorrow_predictions)
-        metrics["sport_breakdown"] = sport_counts
-        payload["metrics"] = metrics
-        model_payload = payload.get("model") or {}
-        if isinstance(model_payload, dict):
-            model_payload["sports_covered"] = model_payload.get("sports_covered") or sports
-            payload["model"] = model_payload
+        if not int(metrics.get("total_predictions") or 0):
+            total_predictions, today_predictions, tomorrow_predictions = _prediction_counts_for_metrics()
+            metrics["total_predictions"] = total_predictions
+            metrics["today_predictions"] = today_predictions
+            metrics["tomorrow_predictions"] = tomorrow_predictions
+            payload["metrics"] = metrics
         return jsonify(_envelope(payload, source, error))
 
     status = payload if isinstance(payload, dict) else {}
-    total_predictions, today_predictions, tomorrow_predictions, sport_counts, sports = _prediction_metrics()
+    total_predictions, today_predictions, tomorrow_predictions = _prediction_counts_for_metrics()
     model = {
         "best_model": status.get("best_model", ""),
         "version": status.get("model_version", ""),
         "best_score": status.get("cv_roc_auc", 0),
         "rows": status.get("trained_rows", 0),
-        "sports_covered": status.get("sports_covered", []) or sports,
+        "sports_covered": status.get("sports_covered", []),
     }
     transformed = {
         "ok": bool(status),
@@ -779,7 +582,6 @@ def predictions_status():
             "tomorrow_predictions": tomorrow_predictions,
             "active_models": 1 if model.get("best_model") else 0,
             "win_rate": float(model.get("best_score") or 0),
-            "sport_breakdown": sport_counts,
         },
         "model": model,
         "kalshi": {"submissions": {}, "positions": {}},
@@ -790,8 +592,6 @@ def predictions_status():
 @app.route("/api/predictions/today")
 def predictions_today():
     payload, source, error = _provider_or_local("/predictions/today", HF_PREDICTIONS_FILE, default={})
-    if isinstance(payload, dict):
-        _trigger_background_multisport_refresh_if_needed(payload, reason="api/predictions/today")
     if isinstance(payload, dict) and "date" in payload and "predictions" in payload:
         return jsonify(_envelope(payload, source, error))
     if not isinstance(payload, dict):
@@ -802,8 +602,6 @@ def predictions_today():
 @app.route("/api/predictions/tomorrow")
 def predictions_tomorrow():
     payload, source, error = _provider_or_local("/predictions/tomorrow", HF_PREDICTIONS_FILE, default={})
-    if isinstance(payload, dict):
-        _trigger_background_multisport_refresh_if_needed(payload, reason="api/predictions/tomorrow")
     if isinstance(payload, dict) and "date" in payload and "predictions" in payload:
         return jsonify(_envelope(payload, source, error))
     if not isinstance(payload, dict):
@@ -1154,44 +952,6 @@ def kalshi_automation_tick():
         state = {"ok": False, "updated_at": "", "error": str(exc)}
         _save_json(KALSHI_AUTOMATION_STATE_FILE, state)
         return jsonify(state), 500
-
-
-@app.route("/api/admin/force-active-cycle", methods=["POST"])
-def admin_force_active_cycle():
-    """Manually trigger the full active cycle (append + train + predict + Kalshi)."""
-    if not _is_cron_authorized():
-        return jsonify({"ok": False, "error": "Unauthorized"}), 401
-    def _run():
-        try:
-            result = _run_hf_active_cycle()
-            logger.info("[admin] Force active cycle result: ok=%s retrained=%s", result.get("ok"), result.get("retrained"))
-        except Exception as exc:
-            logger.exception("[admin] Force active cycle failed: %s", exc)
-    threading.Thread(target=_run, daemon=True, name="admin-force-active-cycle").start()
-    return jsonify({"ok": True, "message": "Active cycle started in background"})
-
-
-@app.route("/api/admin/force-retrain", methods=["POST"])
-def admin_force_retrain():
-    """Manually trigger model retraining and publish to HF."""
-    if not _is_cron_authorized():
-        return jsonify({"ok": False, "error": "Unauthorized"}), 401
-    def _run():
-        try:
-            pipeline = HFDirectPipeline()
-            if not pipeline.ok:
-                logger.warning("[admin] force-retrain: HF pipeline not configured")
-                return
-            # Clear broken-version cache so the new model gets tried immediately
-            HFDirectPipeline._broken_model_versions.clear()
-            summary = pipeline.train_and_publish_best_model(
-                min_rows=int(os.getenv("HF_DAILY_MIN_TRAIN_ROWS", "200") or "200"),
-            )
-            logger.info("[admin] Retrain complete: rows=%d model=%s version=%s", summary.rows, summary.best_model, summary.version)
-        except Exception as exc:
-            logger.exception("[admin] Force retrain failed: %s", exc)
-    threading.Thread(target=_run, daemon=True, name="admin-force-retrain").start()
-    return jsonify({"ok": True, "message": "Retrain started in background"})
 
 
 if __name__ == "__main__":
