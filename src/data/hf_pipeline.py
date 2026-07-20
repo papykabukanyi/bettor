@@ -5,15 +5,11 @@ import io
 import json
 import logging
 import os
-import tempfile
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
-from uuid import uuid4
 
-import requests
-
-from data.hf_uploader import HFUploader
+from src.data.hf_uploader import HFUploader
 
 logger = logging.getLogger(__name__)
 
@@ -40,11 +36,8 @@ class HFDirectPipeline:
     _whoami_cache_lock = threading.Lock()
     _whoami_cache_name: str = ""
     _whoami_cache_token: str = ""
-    _broken_model_versions: set[str] = set()
 
     _TRAIN_FEATURES = ["home_team", "away_team", "sport", "season", "month", "day_of_week"]
-    _CAT_FEATURES = ["home_team", "away_team", "sport"]
-    _NUM_FEATURES = ["season", "month", "day_of_week"]
 
     def __init__(self, token: str | None = None, dataset_repo: str | None = None, model_repo: str | None = None):
         hf_api_key = str(os.getenv("HF_API_KEY", "")).strip()
@@ -63,8 +56,6 @@ class HFDirectPipeline:
         self._training_history_file = self._data_dir / "training_history.json"
 
         self._api = None
-        self._cached_model = None
-        self._cached_model_version = ""
         self._ok = bool(self.token and getattr(self.uploader, "_ok", False))
 
         if self._ok:
@@ -98,6 +89,7 @@ class HFDirectPipeline:
     def append_daily_results(self, day: datetime.date | None = None) -> dict:
         target = day or datetime.date.today()
         target_key = target.isoformat()
+
         with HFDirectPipeline._append_lock:
             if target_key in HFDirectPipeline._append_inflight_days:
                 logger.info("[hf_pipeline] append_daily_results skipped; already running for %s", target_key)
@@ -123,18 +115,8 @@ class HFDirectPipeline:
                 HFDirectPipeline._append_inflight_days.discard(target_key)
 
     def train_and_publish_best_model(self, min_rows: int = 200, forced_model: str = "auto") -> TrainSummary:
-        if not self._ok or not self._api:
-            return TrainSummary(
-                repo_id="",
-                rows=0,
-                best_model="skipped",
-                cv_roc_auc=0.0,
-                trained_at=_now_utc(),
-                version="",
-                sports_covered=[],
-            )
         return TrainSummary(
-            repo_id=self.model_repo_id,
+            repo_id=self.model_repo_id if self._ok else "",
             rows=0,
             best_model="skipped",
             cv_roc_auc=0.0,
@@ -154,6 +136,7 @@ class HFDirectPipeline:
     ) -> dict:
         today = day or datetime.date.today()
         tomorrow = today + datetime.timedelta(days=1)
+
         payload = {
             "generated_at": _now_utc(),
             "today": today.isoformat(),
@@ -165,9 +148,11 @@ class HFDirectPipeline:
             "model_auc": 0.0,
             "predictions": [],
         }
+
         out_path = Path(output_path or str(self._predictions_file))
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
         self._write_status(
             {
                 "last_step": "predict_daily",
@@ -197,6 +182,7 @@ class HFDirectPipeline:
         preds = self.predict_daily_schedule(
             output_path=predictions_output_path, via_api=via_api, model_id=model_id, endpoint_url=endpoint_url
         )
+
         return {
             "ok": True,
             "append_yesterday": append_y,
@@ -215,6 +201,27 @@ class HFDirectPipeline:
             "completed_at": _now_utc(),
         }
 
+    def ensure_model_card_metadata(self) -> dict:
+        if not self._ok or not self._api:
+            return {"ok": False, "updated": False, "reason": "hf_not_configured"}
+        return {"ok": True, "updated": False}
+
+    def _get_model_metadata(self) -> dict:
+        if not self._ok or not self._api:
+            return {}
+        try:
+            from huggingface_hub import hf_hub_download
+
+            path = hf_hub_download(
+                repo_id=self.model_repo_id,
+                filename="metadata.json",
+                repo_type="model",
+                token=self.token,
+            )
+            return json.loads(Path(path).read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+
     def publish_runtime_artifacts(self) -> dict:
         if not self._ok or not self._api:
             return {"ok": False, "uploaded": 0, "reason": "hf_not_configured"}
@@ -224,6 +231,7 @@ class HFDirectPipeline:
             "artifacts/hf_daily_predictions.json": self._predictions_file,
             "artifacts/training_history.json": self._training_history_file,
         }
+
         uploaded = 0
         for repo_path, local_path in artifacts.items():
             if not Path(local_path).exists():
@@ -250,6 +258,7 @@ class HFDirectPipeline:
                 base = json.loads(self._status_file.read_text(encoding="utf-8"))
         except Exception:
             base = {}
+
         base.update(patch or {})
         base["updated_at"] = _now_utc()
         base["dataset_repo"] = self.dataset_repo_id
