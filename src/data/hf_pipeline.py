@@ -852,23 +852,33 @@ class HFDirectPipeline:
         today_rows = [p for p in good if str(p.get("game_date") or "")[:10] == today.isoformat()]
         tomorrow_rows = [p for p in good if str(p.get("game_date") or "")[:10] == tomorrow.isoformat()]
 
-        drift_summary = self._compare_with_snapshot(today, today_rows)
-        if drift_summary is not None:
-            drift_path = os.path.join(self._drift_dir(), f"{today.isoformat()}.json")
-            try:
-                with open(drift_path, "w", encoding="utf-8") as f:
-                    json.dump(drift_summary, f, indent=2)
-            except Exception as exc:
-                logger.debug("[hf_pipeline] drift write skipped: %s", exc)
-            logger.info(
-                "[hf_pipeline] Prediction drift vs yesterday's forecast for %s: %d matched, %d flips, avg |delta|=%.4f",
-                today, drift_summary["matched_count"], drift_summary["pick_flips"], drift_summary["avg_abs_prob_delta"],
-            )
-        # Yesterday's snapshot for this date is consumed (compared or unavailable) -- discard it
-        # regardless, and store today's fresh preliminary look at tomorrow for the next run.
-        self._delete_snapshot(today)
-        self._save_snapshot(tomorrow, tomorrow_rows)
-        self._cleanup_stale_snapshots(today)
+        # The day-over-day comparison is a nice-to-have on top of the core
+        # deliverable below (the fresh predictions file) -- any failure here
+        # (malformed snapshot data, disk issue, etc.) must never prevent today's
+        # predictions from being written, so it's fully isolated in its own
+        # try/except rather than left to bubble up and abort the whole run.
+        drift_summary = None
+        try:
+            drift_summary = self._compare_with_snapshot(today, today_rows)
+            if drift_summary is not None:
+                drift_path = os.path.join(self._drift_dir(), f"{today.isoformat()}.json")
+                try:
+                    with open(drift_path, "w", encoding="utf-8") as f:
+                        json.dump(drift_summary, f, indent=2)
+                except Exception as exc:
+                    logger.debug("[hf_pipeline] drift write skipped: %s", exc)
+                logger.info(
+                    "[hf_pipeline] Prediction drift vs yesterday's forecast for %s: %d matched, %d flips, avg |delta|=%.4f",
+                    today, drift_summary["matched_count"], drift_summary["pick_flips"], drift_summary["avg_abs_prob_delta"],
+                )
+            # Yesterday's snapshot for this date is consumed (compared or unavailable) --
+            # discard it regardless, and store today's fresh preliminary look at
+            # tomorrow for the next run.
+            self._delete_snapshot(today)
+            self._save_snapshot(tomorrow, tomorrow_rows)
+            self._cleanup_stale_snapshots(today)
+        except Exception as exc:
+            logger.warning("[hf_pipeline] prediction drift/snapshot step failed, continuing without it: %s", exc)
 
         out_path = output_path or self._predictions_file
         os.makedirs(os.path.dirname(out_path), exist_ok=True)

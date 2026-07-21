@@ -187,11 +187,19 @@ def _run_hf_active_cycle() -> dict[str, Any]:
             retrain_needed = True
     if new_records_total > 0 and HF_RETRAIN_INTERVAL_MINUTES <= 60:
         retrain_needed = True
+    train_result: dict[str, Any] = {"ok": True, "skipped": True}
     if retrain_needed:
-        pipeline.train_and_publish_best_model(
-            min_rows=HF_DAILY_MIN_TRAIN_ROWS,
-            forced_model=HF_DAILY_CUSTOM_MODEL,
-        )
+        # See dashboard.py's _run_hf_active_cycle for why this must not be
+        # allowed to block predict_daily_schedule() below.
+        try:
+            pipeline.train_and_publish_best_model(
+                min_rows=HF_DAILY_MIN_TRAIN_ROWS,
+                forced_model=HF_DAILY_CUSTOM_MODEL,
+            )
+            train_result = {"ok": True}
+        except Exception as exc:
+            logger.exception("[hf_space_api] active-cycle retrain failed, continuing with existing model: %s", exc)
+            train_result = {"ok": False, "error": str(exc)}
     pipeline.ensure_model_card_metadata()
     preds = pipeline.predict_daily_schedule()
     if HF_ATTACH_KALSHI:
@@ -214,7 +222,8 @@ def _run_hf_active_cycle() -> dict[str, Any]:
         "append_today": append_t,
         "append_runs": append_runs,
         "new_records_total": new_records_total,
-        "retrained": retrain_needed,
+        "retrain_needed": retrain_needed,
+        "train_result": train_result,
         "predictions": preds,
         "kalshi_combo_artifact": combo_artifact,
         "kalshi_placement": kalshi_placement,

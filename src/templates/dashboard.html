@@ -108,6 +108,7 @@
     .loading-card { min-height: 220px; }
     .loading-line { height: 14px; margin-top: 12px; }
     .empty-state { padding: 34px 22px; text-align: center; color: var(--muted); border: 1px dashed rgba(148,163,184,0.16); border-radius: 24px; background: rgba(15,23,42,0.35); }
+    .stale-banner { margin: -8px 0 18px; padding: 14px 18px; border-radius: 16px; background: rgba(217, 119, 6, 0.16); border: 1px solid rgba(217, 119, 6, 0.4); color: #fbbf24; font-weight: 600; font-size: 0.92rem; }
     .modal-backdrop { position: fixed; inset: 0; background: rgba(2, 6, 23, 0.72); backdrop-filter: blur(8px); display: none; align-items: center; justify-content: center; padding: 18px; z-index: 50; }
     .modal-backdrop.open { display: flex; }
     .modal-panel { width: min(820px, 100%); max-height: 90vh; overflow: auto; padding: 22px; border-radius: 26px; background: rgba(15,23,42,0.95); border: 1px solid rgba(148,163,184,0.2); box-shadow: var(--shadow); }
@@ -167,6 +168,8 @@
       </div>
       <div class="hero-metrics" id="hero-metrics"></div>
     </section>
+
+    <div id="stale-banner" class="stale-banner" style="display:none"></div>
 
     <nav class="tabs" aria-label="Dashboard tabs">
       <button class="tab active" data-tab="pipeline">Pipeline</button>
@@ -545,9 +548,32 @@
     }
     function closeModal() { document.getElementById('modal-backdrop').classList.remove('open'); }
 
+    // Warn visibly when the backend pipeline hasn't completed a fresh cycle in
+    // a while, instead of silently showing old games/predictions with no signal
+    // beyond a small timestamp buried in a stat card.
+    const STALE_THRESHOLD_MIN = 240; // 4h -- above the ~3h retrain interval + 30min active-cycle cadence
+    function updateStaleBanner() {
+      const banner = document.getElementById('stale-banner');
+      const updatedAt = state.status.updated_at || (state.today || {}).generated_at || '';
+      if (!updatedAt) { banner.style.display = 'none'; return; }
+      const updatedDate = new Date(updatedAt);
+      if (isNaN(updatedDate)) { banner.style.display = 'none'; return; }
+      const ageMin = (Date.now() - updatedDate.getTime()) / 60000;
+      const todayDate = (state.today || {}).date || '';
+      const todayIsPast = todayDate && todayDate < new Date().toISOString().slice(0, 10);
+      if (ageMin > STALE_THRESHOLD_MIN || todayIsPast) {
+        const ageLabel = ageMin >= 60 ? `${(ageMin / 60).toFixed(1)}h` : `${Math.round(ageMin)}m`;
+        banner.style.display = 'block';
+        banner.textContent = `Predictions last refreshed ${ageLabel} ago${todayIsPast ? ` (backend "today" is ${esc(todayDate)}, in the past)` : ''} — the backend pipeline may be stuck. Check server logs.`;
+      } else {
+        banner.style.display = 'none';
+      }
+    }
+
     // Only render what the active tab needs (mobile speed: skip inactive tabs)
     function renderActiveTab() {
       renderHeroMetrics();
+      updateStaleBanner();
       document.getElementById('live-status').textContent = `Live refresh • ${new Date().toLocaleTimeString()}`;
       document.getElementById('live-source').textContent = `Source: ${(state.status.source || 'local').toUpperCase()}`;
       switch (state.activeTab) {
