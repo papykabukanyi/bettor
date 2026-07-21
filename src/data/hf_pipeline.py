@@ -383,6 +383,17 @@ class HFDirectPipeline:
         self._training_history_file = os.path.join(self._data_dir, "training_history.json")
         self._api = None
         self._model_cache: dict[str, Any] = {}
+        # A single active-cycle run (append -> train -> predict) independently
+        # downloaded the FULL games and news_signals datasets from HF Hub up to
+        # ~4x and ~3x respectively (append dedupe check, training, feature
+        # engineering, form/news snapshots each re-fetched from scratch). Every
+        # shard listing + download is its own HF API request, and this was a
+        # major contributor to exhausting HF's rate limit within one cycle.
+        # Cache both for the span of one cycle so repeated calls reuse the same
+        # in-memory copy instead of re-downloading everything each time.
+        self._games_df_cache: tuple[float, Any] | None = None
+        self._news_df_cache: tuple[float, Any] | None = None
+        self._df_cache_ttl_sec = float(os.getenv("HF_PIPELINE_DF_CACHE_TTL_SEC", "600") or "600")
         self._ok = bool(self.token and self.uploader and getattr(self.uploader, "_ok", False))
 
         if self._ok:
@@ -3563,6 +3574,11 @@ class HFDirectPipeline:
         import pandas as pd
         from huggingface_hub import hf_hub_download
 
+        if self._news_df_cache is not None:
+            cached_ts, cached_df = self._news_df_cache
+            if (time.time() - cached_ts) < self._df_cache_ttl_sec:
+                return cached_df.copy()
+
         if not self._ok or not self._api:
             return pd.DataFrame()
         try:
@@ -3586,7 +3602,9 @@ class HFDirectPipeline:
                 continue
         if not frames:
             return pd.DataFrame()
-        return pd.concat(frames, ignore_index=True, sort=False)
+        result = pd.concat(frames, ignore_index=True, sort=False)
+        self._news_df_cache = (time.time(), result)
+        return result.copy()
 
     def _train_news_impact_model(self, *, output_dir: str) -> dict[str, object]:
         import joblib
@@ -4252,6 +4270,11 @@ class HFDirectPipeline:
         import pandas as pd
         from huggingface_hub import hf_hub_download
 
+        if self._games_df_cache is not None:
+            cached_ts, cached_df = self._games_df_cache
+            if (time.time() - cached_ts) < self._df_cache_ttl_sec:
+                return cached_df.copy()
+
         if not self._ok or not self._api:
             return pd.DataFrame()
 
@@ -4281,7 +4304,8 @@ class HFDirectPipeline:
         if not frames:
             return pd.DataFrame()
         df = pd.concat(frames, ignore_index=True, sort=False)
-        return df
+        self._games_df_cache = (time.time(), df)
+        return df.copy()
 
     def _write_status(self, patch: dict) -> None:
         os.makedirs(os.path.dirname(self._status_file), exist_ok=True)

@@ -242,13 +242,38 @@ def _fetch_first_hf_json(paths_in_repo: list[str]) -> Any:
     return None
 
 
+_PREDICTIONS_STALE_THRESHOLD_DAYS = int(os.getenv("PREDICTIONS_STALE_THRESHOLD_DAYS", "2") or "2")
+_STALE_CHECKED_PATHS = {"/predictions/today", "/predictions/tomorrow"}
+
+
+def _is_predictions_payload_stale(path: str, payload: Any) -> bool:
+    """A predictions payload whose own "today" field is definitively in the past
+    (by more than a couple of days) means the pipeline hasn't completed a fresh
+    cycle in a long time -- serving it as if current just shows old games with
+    no indication anything is wrong. Treat it as unavailable instead."""
+    if path not in _STALE_CHECKED_PATHS or not isinstance(payload, dict):
+        return False
+    today_str = str(payload.get("today") or "").strip()[:10]
+    if not today_str:
+        return False
+    try:
+        payload_date = dt.date.fromisoformat(today_str)
+    except Exception:
+        return False
+    return (et_today() - payload_date).days > _PREDICTIONS_STALE_THRESHOLD_DAYS
+
+
 def _provider_or_local(path: str, local_file: Path, *, default: Any) -> tuple[Any, str, str]:
     error = ""
     if PROVIDER_API_URL:
         try:
             response = requests.get(urljoin(PROVIDER_API_URL + "/", path.lstrip("/")), timeout=REQUEST_TIMEOUT)
             response.raise_for_status()
-            return response.json(), "hf_space_auto" if PROVIDER_API_SOURCE.startswith("auto:") else "hf_space", ""
+            payload = response.json()
+            if not _is_predictions_payload_stale(path, payload):
+                return payload, "hf_space_auto" if PROVIDER_API_SOURCE.startswith("auto:") else "hf_space", ""
+            error = "Provider returned stale predictions (backend pipeline hasn't refreshed recently)."
+            logger.warning("Provider payload for %s is stale, falling back: %s", path, error)
         except Exception as exc:
             error = str(exc)
             logger.warning("Provider proxy failed for %s: %s", path, exc)
@@ -265,10 +290,17 @@ def _provider_or_local(path: str, local_file: Path, *, default: Any) -> tuple[An
     if artifact_paths:
         payload = _fetch_first_hf_json(artifact_paths)
         if isinstance(payload, dict) and payload:
-            return payload, "hf_hub_artifact", error
+            if not _is_predictions_payload_stale(path, payload):
+                return payload, "hf_hub_artifact", error
+            error = error or "Hub artifact is stale (backend pipeline hasn't refreshed recently)."
 
     if local_file.exists():
-        return _load_json(local_file, default), "hf_local_snapshot", error
+        local_payload = _load_json(local_file, default)
+        if not _is_predictions_payload_stale(path, local_payload):
+            return local_payload, "hf_local_snapshot", error
+        error = error or "Local snapshot is stale (backend pipeline hasn't refreshed recently)."
+    if path in _STALE_CHECKED_PATHS and error:
+        return default, "stale_data_suppressed", error
     return default, "hf_local_snapshot_no_space_url", error or "HF provider API URL is not configured and no local HF snapshot exists."
 
 
@@ -996,6 +1028,22 @@ def kalshi_automation_tick():
         state = {"ok": False, "updated_at": "", "error": str(exc)}
         _save_json(KALSHI_AUTOMATION_STATE_FILE, state)
         return jsonify(state), 500
+
+
+@app.route("/api/hf/active-cycle/tick", methods=["GET", "POST"])
+def hf_active_cycle_tick():
+    """Manually force an immediate fetch/train/predict cycle instead of waiting
+    for the next scheduled interval (up to HF_ACTIVE_SCAN_MINUTES away) -- useful
+    right after a deploy that fixes a stuck pipeline, to confirm it recovered
+    without waiting."""
+    if not _is_cron_authorized():
+        return jsonify({"ok": False, "error": "Unauthorized"}), 401
+    try:
+        result = _run_hf_active_cycle()
+        return jsonify(result)
+    except Exception as exc:
+        logger.exception("[dashboard] manual active-cycle tick failed: %s", exc)
+        return jsonify({"ok": False, "error": str(exc)}), 500
 
 
 if __name__ == "__main__":
