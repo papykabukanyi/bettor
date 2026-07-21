@@ -34,12 +34,35 @@ Stream any subset from Python:
 import io
 import os
 import sys
+import time
 import datetime
 import logging
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 logger = logging.getLogger(__name__)
+
+# HF's /api/whoami-v2 endpoint is deliberately rate-limited. Every HFUploader/
+# HFDirectPipeline construction used to call it unconditionally (even when the
+# repo id already has an explicit owner and the username was never needed),
+# which trips the rate limit under any repeated/concurrent construction and
+# previously took the whole pipeline down with it. Cache the resolved username
+# process-wide, keyed by token, so it's looked up at most once per TTL.
+_HF_WHOAMI_CACHE: dict[str, tuple[str, float]] = {}
+_HF_WHOAMI_CACHE_TTL_SEC = 6 * 3600
+
+
+def _cached_hf_username(api: "HfApi", token: str) -> str:
+    cache_key = str(token or "")[-16:] or "no-token"
+    cached = _HF_WHOAMI_CACHE.get(cache_key)
+    now = time.time()
+    if cached and (now - cached[1]) < _HF_WHOAMI_CACHE_TTL_SEC:
+        return cached[0]
+    info = api.whoami() or {}
+    user = str(info.get("name") or "").strip()
+    if user:
+        _HF_WHOAMI_CACHE[cache_key] = (user, now)
+    return user
 
 # ---------------------------------------------------------------------------
 # Lazy imports so the rest of the bot still works when HF libs are absent
@@ -274,21 +297,27 @@ class HFUploader:
             return
 
         self._api = HfApi(token=self._token)
-        self._username = self._resolve_username()
-        if not self._username:
-            self._ok = False
-            return
 
+        # Only resolve the username when the repo id doesn't already have an
+        # explicit owner -- the common case (HF_DATASET_REPO="owner/repo")
+        # never needs whoami() at all, so it never risks the rate limit.
         repo_raw = str(_repo_name or "").strip().strip("/")
         if "/" in repo_raw:
             owner, name = (repo_raw.split("/", 1) + [""])[:2]
             owner = owner.strip()
             name = name.strip()
+            self._username = owner
             if not owner or not name:
+                self._username = self._username or self._resolve_username()
                 self._repo_id = f"{self._username}/{name or owner}"
             else:
                 self._repo_id = f"{owner}/{name}"
         else:
+            self._username = self._resolve_username()
+            if not self._username:
+                logger.error("[hf_uploader] repo '%s' has no owner and username lookup failed — skipping", repo_raw)
+                self._ok = False
+                return
             self._repo_id = f"{self._username}/{repo_raw}"
         self._buffers: dict[str, list[dict]] = {s: [] for s in self.VALID_SUBSETS}
         self._ok = True
@@ -354,8 +383,7 @@ class HFUploader:
 
     def _resolve_username(self) -> str:
         try:
-            info = self._api.whoami()
-            return info.get("name", "")
+            return _cached_hf_username(self._api, self._token)
         except Exception as e:
             logger.error("[hf_uploader] cannot resolve HF username: %s", e)
             return ""

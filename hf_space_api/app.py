@@ -23,6 +23,12 @@ from data.hf_pipeline import HFDirectPipeline  # noqa: E402
 from data.pregame_timing import run_pregame_timing_cycle, sync_pregame_schedule  # noqa: E402
 from data.kalshi_trade_api import build_live_snapshot, submit_prediction_orders  # noqa: E402
 
+try:
+    from config import et_today
+except Exception:
+    def et_today() -> dt.date:
+        return dt.date.today()
+
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("hf_space_api")
 
@@ -157,7 +163,7 @@ def _run_hf_active_cycle() -> dict[str, Any]:
     pipeline = HFDirectPipeline()
     if not pipeline.ok:
         raise RuntimeError("HF pipeline not configured. Set HF_API_KEY, HF_DATASET_REPO, HF_MODEL_REPO.")
-    today = dt.date.today()
+    today = et_today()
     append_runs: list[dict[str, Any]] = []
     for offset in range(max(1, HF_ACTIVE_APPEND_DAYS)):
         target_day = today - dt.timedelta(days=offset)

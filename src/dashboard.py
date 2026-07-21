@@ -30,6 +30,12 @@ from data.multi_sport_scheduler import (
     get_multi_sport_scheduler_status,
 )
 
+try:
+    from config import et_today
+except Exception:
+    def et_today() -> dt.date:
+        return dt.date.today()
+
 ROOT_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = ROOT_DIR / "data"
 HF_STATUS_FILE = DATA_DIR / "hf_pipeline_status.json"
@@ -361,7 +367,7 @@ def _run_hf_active_cycle() -> dict[str, Any]:
     if not pipeline.ok:
         raise RuntimeError("HF pipeline not configured. Set HF_API_KEY, HF_DATASET_REPO, HF_MODEL_REPO.")
 
-    today = dt.date.today()
+    today = et_today()
     append_runs: list[dict[str, Any]] = []
     for offset in range(max(1, HF_ACTIVE_APPEND_DAYS)):
         target_day = today - dt.timedelta(days=offset)
@@ -547,13 +553,24 @@ def predictions_status():
 
     status = payload if isinstance(payload, dict) else {}
     total_predictions, today_predictions, tomorrow_predictions = _prediction_counts_for_metrics()
+    per_sport = status.get("per_sport") or {}
     model = {
         "best_model": status.get("best_model", ""),
         "version": status.get("model_version", ""),
         "best_score": status.get("cv_roc_auc", 0),
         "rows": status.get("trained_rows", 0),
         "sports_covered": status.get("sports_covered", []),
+        "per_sport": per_sport,
     }
+
+    automation_state = _load_json(KALSHI_AUTOMATION_STATE_FILE, {})
+    if not isinstance(automation_state, dict):
+        automation_state = {}
+    bets_state = automation_state.get("bets") or {}
+    # No automation run yet is not the same as a failed run -- default to
+    # healthy so a fresh deployment doesn't show a false "kalshi: down".
+    kalshi_ok = bool(automation_state.get("ok", True))
+
     transformed = {
         "ok": bool(status),
         "updated_at": status.get("updated_at", ""),
@@ -568,13 +585,21 @@ def predictions_status():
                 "trained_at": status.get("trained_at", ""),
                 "rows": status.get("trained_rows", 0),
                 "best_model": status.get("best_model", ""),
+                "individual_model_count": len(per_sport) if isinstance(per_sport, dict) else 0,
             },
             "predict": {
                 "ok": status.get("prediction_count", 0) >= 0,
                 "generated_at": status.get("predict_completed_at", ""),
                 "prediction_count": status.get("prediction_count", 0),
+                "drift": status.get("prediction_drift_summary"),
             },
-            "kalshi": {"ok": True},
+            "kalshi": {
+                "ok": kalshi_ok,
+                "placed": int(bets_state.get("placed") or 0),
+                "deferred_for_capital": int(bets_state.get("deferred") or 0),
+                "available_capital_usd": bets_state.get("available_capital_usd"),
+                "updated_at": automation_state.get("updated_at", ""),
+            },
         },
         "metrics": {
             "total_predictions": total_predictions,
@@ -615,6 +640,7 @@ def model_stats():
     if isinstance(payload, dict) and "current_model" in payload:
         return jsonify(_envelope(payload, source, error))
     status = payload if isinstance(payload, dict) else {}
+    per_sport = status.get("per_sport") or {}
     transformed = {
         "ok": bool(status),
         "updated_at": status.get("trained_at", ""),
@@ -624,8 +650,13 @@ def model_stats():
             "best_score": status.get("cv_roc_auc", 0),
             "rows": status.get("trained_rows", 0),
             "sports_covered": status.get("sports_covered", []),
-            "candidate_count": 3,
+            "candidate_count": 5,
         },
+        # Individual per-sport models (each sport gets its own model once it has
+        # enough rows; sports_covered without an entry here are still served by
+        # the combined model above as a fallback).
+        "per_sport_models": per_sport,
+        "individual_model_count": len(per_sport) if isinstance(per_sport, dict) else 0,
         "history": _load_json(HF_HISTORY_FILE, []),
     }
     return jsonify(_envelope(transformed, source, error))

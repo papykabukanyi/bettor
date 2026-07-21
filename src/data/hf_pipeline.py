@@ -389,13 +389,24 @@ class HFDirectPipeline:
             try:
                 from huggingface_hub import HfApi
                 self._api = HfApi(token=self.token)
-                who = self._api.whoami() or {}
-                user = str(who.get("name") or "").strip()
-                if user and "/" not in self.model_repo_id:
-                    self.model_repo_id = f"{user}/{self.model_repo_id}"
             except Exception as exc:
                 logger.warning("[hf_pipeline] HF API init failed: %s", exc)
                 self._ok = False
+            else:
+                # Only resolve the username when model_repo_id doesn't already have
+                # an explicit owner. This is the common case (HF_MODEL_REPO=
+                # "owner/repo") and skips whoami() entirely, avoiding HF's strict
+                # rate limit on that endpoint. A whoami failure is not fatal to the
+                # pipeline -- it just means the repo id stays unprefixed.
+                if "/" not in self.model_repo_id:
+                    try:
+                        from data.hf_uploader import _cached_hf_username
+
+                        user = _cached_hf_username(self._api, self.token)
+                        if user:
+                            self.model_repo_id = f"{user}/{self.model_repo_id}"
+                    except Exception as exc:
+                        logger.warning("[hf_pipeline] HF username resolution skipped: %s", exc)
 
     @property
     def ok(self) -> bool:
