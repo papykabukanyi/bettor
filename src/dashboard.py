@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import functools
 import json
 import logging
 import os
@@ -65,6 +66,15 @@ KALSHI_AUTOBET_STAKE_USD = float(os.getenv("KALSHI_AUTOBET_STAKE_USD", "1.0") or
 KALSHI_AUTOBET_MAX_SINGLE_ORDERS = int(os.getenv("KALSHI_AUTOBET_MAX_SINGLE_ORDERS", "1") or "1")
 KALSHI_AUTOBET_MAX_COMBO_ORDERS = int(os.getenv("KALSHI_AUTOBET_MAX_COMBO_ORDERS", "1") or "1")
 PREGAME_TIMING_MINUTES = int(os.getenv("PREGAME_TIMING_MINUTES", "5") or "5")
+# render.yaml also defines a STANDALONE "bettor-kalshi-automation" cron service
+# that runs the exact same Kalshi automation cycle on the same ~5min cadence,
+# on a separate machine with its own filesystem (a local lock here can't see
+# it). Running both means every cycle -- including live order placement --
+# fires twice, independently, uncoordinated. Default OFF: rely on the
+# standalone cron service. Only enable this if that cron service is removed.
+ENABLE_INTERNAL_KALSHI_SCHEDULER = str(
+    os.getenv("ENABLE_INTERNAL_KALSHI_SCHEDULER", "0") or "0"
+).strip().lower() in {"1", "true", "yes", "on"}
 DASHBOARD_LOCAL_AUTORUN = str(os.getenv("DASHBOARD_LOCAL_AUTORUN", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
@@ -77,6 +87,116 @@ _KALSHI_LIVE_CACHE: dict[str, Any] = {}
 _KALSHI_LIVE_CACHE_TS = 0.0
 _KALSHI_LIVE_CACHE_LOCK = threading.Lock()
 _KALSHI_LIVE_CACHE_TTL_SEC = max(5, int(os.getenv("KALSHI_LIVE_CACHE_TTL_SEC", "20") or "20"))
+
+# ---------------------------------------------------------------------------
+# Cross-process job lock + run history
+# ---------------------------------------------------------------------------
+# --workers 1 in the Procfile should mean exactly one process ever runs this
+# app, but a file lock is cheap defense-in-depth against any future change to
+# that (extra workers, a stray manual tick overlapping a scheduled one, etc.)
+# actually placing duplicate Kalshi orders. Each locked job also appends a
+# short record to a rolling history file so the dashboard can show real
+# "what's the server actually doing" status instead of only a last-updated
+# timestamp.
+JOB_LOCK_DIR = DATA_DIR / "locks"
+JOB_HISTORY_FILE = DATA_DIR / "job_run_history.json"
+JOB_HISTORY_MAX = 100
+
+
+def _append_job_history(name: str, record: dict[str, Any]) -> None:
+    try:
+        history = _load_json(JOB_HISTORY_FILE, [])
+        if not isinstance(history, list):
+            history = []
+        history.append({"job": name, **record})
+        history = history[-JOB_HISTORY_MAX:]
+        _save_json(JOB_HISTORY_FILE, history)
+    except Exception as exc:
+        logger.debug("job history append failed for %s: %s", name, exc)
+
+
+def _locked_job(name: str, stale_after_sec: int = 1200):
+    """Decorator: only one process-wide caller of this job runs at a time.
+    A second caller while the lock is held skips immediately (recorded as
+    "skipped_concurrent") rather than blocking or running in parallel. A lock
+    older than stale_after_sec is assumed to belong to a crashed run and is
+    taken over rather than permanently blocking the job.
+    """
+    def decorator(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            JOB_LOCK_DIR.mkdir(parents=True, exist_ok=True)
+            lock_path = JOB_LOCK_DIR / f"{name}.lock"
+            acquired = False
+            try:
+                fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.write(fd, f"{os.getpid()}:{time.time()}".encode("utf-8"))
+                os.close(fd)
+                acquired = True
+            except FileExistsError:
+                try:
+                    age = time.time() - lock_path.stat().st_mtime
+                except Exception:
+                    age = 0.0
+                if age > stale_after_sec:
+                    try:
+                        lock_path.unlink()
+                        fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                        os.write(fd, f"{os.getpid()}:{time.time()}".encode("utf-8"))
+                        os.close(fd)
+                        acquired = True
+                    except Exception:
+                        acquired = False
+                else:
+                    acquired = False
+
+            if not acquired:
+                logger.warning("[lock] %s already running elsewhere, skipping this call", name)
+                _append_job_history(name, {
+                    "status": "skipped_concurrent",
+                    "started_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+                })
+                return {"ok": True, "skipped": True, "reason": "already_running"}
+
+            started = dt.datetime.now(dt.timezone.utc)
+            try:
+                result = fn(*args, **kwargs)
+                finished = dt.datetime.now(dt.timezone.utc)
+                _append_job_history(name, {
+                    "status": "ok" if (not isinstance(result, dict) or result.get("ok", True)) else "failed",
+                    "started_at": started.isoformat(),
+                    "finished_at": finished.isoformat(),
+                    "duration_sec": round((finished - started).total_seconds(), 1),
+                    "summary": _summarize_job_result(result),
+                })
+                return result
+            except Exception as exc:
+                finished = dt.datetime.now(dt.timezone.utc)
+                _append_job_history(name, {
+                    "status": "error",
+                    "started_at": started.isoformat(),
+                    "finished_at": finished.isoformat(),
+                    "duration_sec": round((finished - started).total_seconds(), 1),
+                    "error": str(exc),
+                })
+                raise
+            finally:
+                try:
+                    lock_path.unlink()
+                except Exception:
+                    pass
+        return wrapper
+    return decorator
+
+
+def _summarize_job_result(result: Any) -> dict[str, Any]:
+    if not isinstance(result, dict):
+        return {}
+    keys = (
+        "records", "new_records_total", "prediction_count", "placed", "skipped",
+        "failed", "deferred", "retrain_needed",
+    )
+    return {k: result[k] for k in keys if k in result}
 
 
 def _bootstrap_env_from_dotenv() -> None:
@@ -360,6 +480,7 @@ def _auto_place_kalshi_from_predictions(predictions_payload: dict[str, Any]) -> 
         return {"ok": False, "error": str(exc)}
 
 
+@_locked_job("hf_daily_pipeline", stale_after_sec=1800)
 def _run_hf_daily_pipeline() -> dict[str, Any]:
     pipeline = HFDirectPipeline()
     if not pipeline.ok:
@@ -394,6 +515,7 @@ def _run_hf_daily_pipeline() -> dict[str, Any]:
     return result
 
 
+@_locked_job("hf_active_cycle", stale_after_sec=1200)
 def _run_hf_active_cycle() -> dict[str, Any]:
     pipeline = HFDirectPipeline()
     if not pipeline.ok:
@@ -504,13 +626,14 @@ def _ensure_background_jobs_started() -> None:
                 id="hf_daily_pipeline",
                 replace_existing=True,
             )
-            scheduler.add_job(
-                _run_kalshi_automation_background,
-                "interval",
-                minutes=max(1, PREGAME_TIMING_MINUTES),
-                id="kalshi_automation_cycle",
-                replace_existing=True,
-            )
+            if ENABLE_INTERNAL_KALSHI_SCHEDULER:
+                scheduler.add_job(
+                    _run_kalshi_automation_background,
+                    "interval",
+                    minutes=max(1, PREGAME_TIMING_MINUTES),
+                    id="kalshi_automation_cycle",
+                    replace_existing=True,
+                )
             # Multi-sport data pipeline: fetch live games every 30 minutes
             scheduler.add_job(
                 run_multi_sport_live_fetch,
@@ -521,11 +644,12 @@ def _ensure_background_jobs_started() -> None:
             )
             scheduler.start()
             logger.info(
-                "Dashboard scheduler started: active every %d min, pregames every %d min, daily at %02d:%02d ET, multi-sport every 30 min",
+                "Dashboard scheduler started: active every %d min, daily at %02d:%02d ET, multi-sport every 30 min, "
+                "internal Kalshi scheduler %s (standalone cron service handles it otherwise)",
                 max(5, HF_ACTIVE_SCAN_MINUTES),
-                max(1, PREGAME_TIMING_MINUTES),
                 HF_DAILY_RUN_HOUR_ET,
                 HF_DAILY_RUN_MINUTE_ET,
+                "ENABLED" if ENABLE_INTERNAL_KALSHI_SCHEDULER else "disabled",
             )
         if HF_AUTORUN_ON_STARTUP:
             def _runner() -> None:
@@ -535,17 +659,18 @@ def _ensure_background_jobs_started() -> None:
                     logger.info("Dashboard startup multi-sport bootstrap completed")
                 except Exception as exc:
                     logger.warning("Dashboard startup multi-sport bootstrap: %s", exc)
-                
+
                 try:
                     _run_hf_active_cycle()
                     logger.info("Dashboard startup active cycle completed")
                 except Exception as exc:
                     logger.exception("Dashboard startup active cycle failed: %s", exc)
-                try:
-                    _run_kalshi_automation_background()
-                    logger.info("Dashboard startup Kalshi automation cycle completed")
-                except Exception as exc:
-                    logger.exception("Dashboard startup Kalshi automation cycle failed: %s", exc)
+                if ENABLE_INTERNAL_KALSHI_SCHEDULER:
+                    try:
+                        _run_kalshi_automation_background()
+                        logger.info("Dashboard startup Kalshi automation cycle completed")
+                    except Exception as exc:
+                        logger.exception("Dashboard startup Kalshi automation cycle failed: %s", exc)
 
             threading.Thread(target=_runner, daemon=True, name="dashboard-hf-startup-autorun").start()
         _startup_done = True
@@ -990,6 +1115,7 @@ def kalshi_automation_status():
     )
 
 
+@_locked_job("kalshi_automation_cycle", stale_after_sec=300)
 def run_kalshi_automation_cycle(body: dict[str, Any] | None = None) -> dict[str, Any]:
     body = body or {}
     predictions_payload = _automation_predictions_payload()
@@ -1044,6 +1170,61 @@ def hf_active_cycle_tick():
     except Exception as exc:
         logger.exception("[dashboard] manual active-cycle tick failed: %s", exc)
         return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+_JOB_LABELS = {
+    "hf_active_cycle": "Fetch + Train + Predict (every 30 min)",
+    "hf_daily_pipeline": "Full daily pipeline (04:15 ET)",
+    "kalshi_automation_cycle": "Kalshi order placement",
+}
+
+
+@app.route("/api/server/activity")
+def server_activity():
+    """Real backend activity feed: recent job runs (ok/error/skipped-concurrent),
+    how long each took, and whether any job is currently mid-run -- so the
+    dashboard can show what the server is actually doing instead of only a
+    last-updated timestamp."""
+    history = _load_json(JOB_HISTORY_FILE, [])
+    if not isinstance(history, list):
+        history = []
+    recent = list(reversed(history[-40:]))
+
+    running_now: list[dict[str, Any]] = []
+    try:
+        for lock_file in sorted(JOB_LOCK_DIR.glob("*.lock")):
+            job_name = lock_file.stem
+            try:
+                raw = lock_file.read_text(encoding="utf-8")
+                pid_str, _, ts_str = raw.partition(":")
+                started_ts = float(ts_str) if ts_str else 0.0
+            except Exception:
+                started_ts = 0.0
+            running_now.append({
+                "job": job_name,
+                "label": _JOB_LABELS.get(job_name, job_name),
+                "running_for_sec": round(time.time() - started_ts, 1) if started_ts else None,
+            })
+    except FileNotFoundError:
+        pass
+
+    last_by_job: dict[str, dict[str, Any]] = {}
+    for rec in recent:
+        job = rec.get("job")
+        if job and job not in last_by_job:
+            last_by_job[job] = rec
+
+    for rec in recent:
+        rec["label"] = _JOB_LABELS.get(rec.get("job"), rec.get("job"))
+
+    return jsonify({
+        "ok": True,
+        "now": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "running_now": running_now,
+        "last_by_job": last_by_job,
+        "recent": recent,
+        "internal_kalshi_scheduler_enabled": ENABLE_INTERNAL_KALSHI_SCHEDULER,
+    })
 
 
 if __name__ == "__main__":

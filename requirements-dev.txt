@@ -1,0 +1,4 @@
+# Only needed to run the test suite locally/in CI -- not part of the
+# deployed app (see requirements.txt for that).
+-r requirements.txt
+pytest

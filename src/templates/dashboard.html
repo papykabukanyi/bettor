@@ -179,6 +179,7 @@
     </nav>
 
     <section class="panel active" id="panel-pipeline">
+      <div class="card glass" id="server-activity" style="margin-bottom:18px"></div>
       <div class="section-grid">
         <div class="stage-grid" id="stage-grid"></div>
         <div class="overview-grid">
@@ -280,6 +281,7 @@
     const state = {
       status: {}, today: { predictions: [] }, tomorrow: { predictions: [] },
       model: { current_model: {}, history: [] },
+      activity: { recent: [], running_now: [], last_by_job: {} },
       kalshiStatus: { ok: true, source: 'cached', submissions: { summary: {} }, positions: { summary: {}, positions: [] }, live: {}, account: {} },
       kalshiAutomation: { ok: true, automation: {}, settings: {} },
       lastHash: '', firstRefresh: true,
@@ -411,6 +413,56 @@
       document.getElementById('hero-metrics').innerHTML = cards.map(c =>
         `<article class="metric"><span class="metric-label">${esc(c.label)}</span><span class="metric-value">${esc(c.value)}</span><span class="metric-note">${esc(c.note)}</span></article>`
       ).join('');
+    }
+
+    function timeAgo(iso) {
+      if (!iso) return '—';
+      const d = new Date(iso);
+      if (isNaN(d)) return '—';
+      const sec = Math.max(0, (Date.now() - d.getTime()) / 1000);
+      if (sec < 60) return `${Math.round(sec)}s ago`;
+      if (sec < 3600) return `${Math.round(sec / 60)}m ago`;
+      if (sec < 86400) return `${(sec / 3600).toFixed(1)}h ago`;
+      return `${(sec / 86400).toFixed(1)}d ago`;
+    }
+
+    function renderServerActivity() {
+      const activity = state.activity || {};
+      const running = activity.running_now || [];
+      const recent = activity.recent || [];
+      const el = document.getElementById('server-activity');
+
+      const runningHtml = running.length
+        ? running.map(r => `<span class="status-chip good">Running now: ${esc(r.label || r.job)} (${esc(num(r.running_for_sec || 0))}s)</span>`).join('')
+        : `<span class="status-chip">No job currently running</span>`;
+
+      const schedulerNote = activity.internal_kalshi_scheduler_enabled
+        ? 'Internal Kalshi scheduler: ENABLED (make sure the standalone cron service is NOT also enabled, or bets can double-place)'
+        : 'Kalshi automation runs from the standalone cron service (internal scheduler disabled to avoid duplicate bets)';
+
+      const rowsHtml = recent.length
+        ? recent.slice(0, 15).map(r => {
+            const statusClass = r.status === 'ok' ? 'good' : (r.status === 'skipped_concurrent' ? 'warn' : 'bad');
+            const summaryBits = Object.entries(r.summary || {}).map(([k, v]) => `${k}=${v}`).join(', ');
+            return `<tr>
+              <td>${esc(r.label || r.job)}</td>
+              <td><span class="status-chip ${statusClass}">${esc(r.status)}</span></td>
+              <td>${esc(timeAgo(r.started_at))}</td>
+              <td>${r.duration_sec != null ? esc(r.duration_sec) + 's' : '—'}</td>
+              <td>${esc(r.error || summaryBits || '—')}</td>
+            </tr>`;
+          }).join('')
+        : `<tr><td colspan="5" class="empty-state">No job runs recorded yet.</td></tr>`;
+
+      el.innerHTML = `
+        <h3>Server Activity</h3>
+        <p class="subtle" style="margin:10px 0 0">What the backend is actually doing right now, and its recent job history.</p>
+        <div class="status-row" style="margin-top:12px">${runningHtml}</div>
+        <p class="subtle" style="margin:10px 0 0;font-size:0.82rem">${esc(schedulerNote)}</p>
+        <div class="table-shell glass" style="margin-top:14px;overflow-x:auto">
+          <table><thead><tr><th>Job</th><th>Status</th><th>Started</th><th>Duration</th><th>Details</th></tr></thead>
+          <tbody>${rowsHtml}</tbody></table>
+        </div>`;
     }
 
     function renderPipeline() {
@@ -577,7 +629,7 @@
       document.getElementById('live-status').textContent = `Live refresh • ${new Date().toLocaleTimeString()}`;
       document.getElementById('live-source').textContent = `Source: ${(state.status.source || 'local').toUpperCase()}`;
       switch (state.activeTab) {
-        case 'pipeline':  renderPipeline(); break;
+        case 'pipeline':  renderPipeline(); renderServerActivity(); break;
         case 'today':     renderPredictionGrid('today-grid', state.today || {}, 'today'); break;
         case 'tomorrow':  renderPredictionGrid('tomorrow-grid', state.tomorrow || {}, 'tomorrow'); break;
         case 'kalshi':renderKalshi(); break;
@@ -586,9 +638,12 @@
 
     // ─── Data fetchers ────────────────────────────────────────────────────────
     async function fetchPipeline() {
-      const [statusRes, modelRes] = await Promise.allSettled([fetchJson('/api/predictions/status'), fetchJson('/api/model/stats')]);
+      const [statusRes, modelRes, activityRes] = await Promise.allSettled([
+        fetchJson('/api/predictions/status'), fetchJson('/api/model/stats'), fetchJson('/api/server/activity'),
+      ]);
       if (statusRes.status === 'fulfilled') state.status = statusRes.value || {};
       if (modelRes.status === 'fulfilled') state.model = modelRes.value || { current_model: {}, history: [] };
+      if (activityRes.status === 'fulfilled') state.activity = activityRes.value || { recent: [], running_now: [] };
     }
 
     async function fetchToday() {

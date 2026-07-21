@@ -20,3 +20,7 @@ dependencies = [
 	"websockets>=12.0",
 	"py-clob-client",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

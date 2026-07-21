@@ -4,7 +4,13 @@ services:
     env: python
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn --chdir src dashboard:app --bind 0.0.0.0:$PORT
+    # --workers 1 is deliberate: this app runs its own in-process background
+    # scheduler (APScheduler) for the data/train/predict/Kalshi cycles. Running
+    # more than one worker means every scheduled job -- including live Kalshi
+    # order placement -- fires once per worker, independently and concurrently,
+    # which risks duplicate bets. Do not raise this without adding proper
+    # cross-worker coordination first.
+    startCommand: gunicorn --chdir src dashboard:app --bind 0.0.0.0:$PORT --workers 1 --threads 1
     autoDeploy: true
     envVars:
       - key: PYTHON_VERSION
