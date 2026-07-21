@@ -34,6 +34,12 @@ import requests
 
 from data.hf_uploader import HFUploader
 
+try:
+    from config import et_today
+except Exception:
+    def et_today() -> datetime.date:
+        return datetime.date.today()
+
 logger = logging.getLogger(__name__)
 
 
@@ -51,6 +57,7 @@ class TrainSummary:
     version: str = ""
     features: list = field(default_factory=list)
     sports_covered: list = field(default_factory=list)
+    per_sport: dict = field(default_factory=dict)
 
 
 class HFDirectPipeline:
@@ -61,12 +68,26 @@ class HFDirectPipeline:
         {"Preview", "Pre-Game", "Scheduled", "Warmup", "Pre-game", "Sched", "FUT", "NS", "Pre-Preview"}
     )
     _CONFIDENCE_TIERS = [(0.70, "elite"), (0.60, "solid"), (0.55, "lean"), (0.0, "uncertain")]
-    _TRAIN_FEATURES = ["home_team", "away_team", "sport", "season", "month", "day_of_week"]
     _CAT_FEATURES = ["home_team", "away_team", "sport"]
-    _NUM_FEATURES = ["season", "month", "day_of_week"]
+    _FORM_FEATURES = [
+        "home_recent_win_rate", "away_recent_win_rate",
+        "home_rest_days", "away_rest_days",
+        "h2h_home_win_rate",
+    ]
+    _NEWS_FEATURES = [
+        "home_news_sentiment", "away_news_sentiment",
+        "home_negative_news_flag", "away_negative_news_flag",
+    ]
+    _NEWS_LOOKBACK_DAYS = 3
+    _NUM_FEATURES = ["season", "month", "day_of_week"] + _FORM_FEATURES + _NEWS_FEATURES
+    _TRAIN_FEATURES = _CAT_FEATURES + _NUM_FEATURES
+    _MIN_ROWS_PER_SPORT = 60
     _MARKET_SPORT_ALIASES = {
         "baseball": "mlb",
         "mlb": "mlb",
+        "wnba": "wnba",
+        "women's basketball": "wnba",
+        "womens basketball": "wnba",
         "basketball": "nba",
         "nba": "nba",
         "american football": "nfl",
@@ -76,6 +97,7 @@ class HFDirectPipeline:
         "soccer": "soccer",
         "football": "soccer",
         "tennis": "tennis",
+        "lpga": "golf",
         "golf": "golf",
         "cricket": "cricket",
     }
@@ -87,6 +109,12 @@ class HFDirectPipeline:
             ("first_7_innings", "First 7 Innings Winner", 0.80),
         ],
         "nba": [
+            ("moneyline", "Game Winner", 1.0),
+            ("first_quarter", "First Quarter Winner", 0.63),
+            ("first_half", "First Half Winner", 0.74),
+            ("third_quarter", "Third Quarter Winner", 0.66),
+        ],
+        "wnba": [
             ("moneyline", "Game Winner", 1.0),
             ("first_quarter", "First Quarter Winner", 0.63),
             ("first_half", "First Half Winner", 0.74),
@@ -140,6 +168,7 @@ class HFDirectPipeline:
     _PLAYER_PROP_PROFILES = {
         "mlb": [("hit_recorded", "Player To Record A Hit", 0.66), ("rbi_recorded", "Player To Record RBI", 0.58)],
         "nba": [("points_20_plus", "Player 20+ Points", 0.64), ("assists_5_plus", "Player 5+ Assists", 0.60)],
+        "wnba": [("points_15_plus", "Player 15+ Points", 0.64), ("assists_4_plus", "Player 4+ Assists", 0.60)],
         "nhl": [("anytime_goal", "Anytime Goal Scorer", 0.58), ("point_recorded", "Player To Record A Point", 0.63)],
         "soccer": [
             # Goals
@@ -182,6 +211,9 @@ class HFDirectPipeline:
         # NBA
         "points_20_plus":      {"line": 19.5, "unit": "points",      "scale": 38.0},
         "assists_5_plus":      {"line": 4.5,  "unit": "assists",     "scale": 10.0},
+        # WNBA
+        "points_15_plus":      {"line": 14.5, "unit": "points",      "scale": 30.0},
+        "assists_4_plus":      {"line": 3.5,  "unit": "assists",     "scale": 8.0},
         # NHL
         "anytime_goal":        {"line": 0.5,  "unit": "goals",       "scale": 1.3},
         "point_recorded":      {"line": 0.5,  "unit": "points",      "scale": 1.9},
@@ -221,6 +253,9 @@ class HFDirectPipeline:
     _SPORT_ALIASES = {
         "baseball": "mlb",
         "mlb": "mlb",
+        "wnba": "wnba",
+        "women's basketball": "wnba",
+        "womens basketball": "wnba",
         "basketball": "nba",
         "nba": "nba",
         "hockey": "nhl",
@@ -233,6 +268,7 @@ class HFDirectPipeline:
         "bundesliga": "soccer",
         "ligue 1": "soccer",
         "tennis": "tennis",
+        "lpga": "golf",
         "golf": "golf",
         "mma": "mma",
         "boxing": "boxing",
@@ -247,6 +283,36 @@ class HFDirectPipeline:
     }
     _NEWS_SENTIMENT_POS = ("win", "winning", "dominant", "returns", "healthy", "breakout", "strong", "surge")
     _NEWS_SENTIMENT_NEG = ("injury", "injured", "out", "suspended", "slump", "struggle", "doubtful", "setback")
+    _NEWS_NEGATIVE_IMPACT_TYPES = frozenset({"injury_concern", "suspension", "lineup_change", "negative_momentum"})
+    _NEWS_ADJUSTMENT = 0.04
+    # ESPN's public scoreboard API (no key, no auth) supports these slugs directly.
+    # Shared between the completed-results fetcher and the upcoming-schedule fetcher
+    # so both see the same league breadth. Includes women's competitions.
+    _SOCCER_ESPN_LEAGUES = [
+        ("fifa.world", "FIFA World Cup 2026"),
+        ("usa.1", "MLS"),
+        ("eng.1", "Premier League"),
+        ("eng.2", "EFL Championship"),
+        ("esp.1", "La Liga"),
+        ("ger.1", "Bundesliga"),
+        ("ita.1", "Serie A"),
+        ("fra.1", "Ligue 1"),
+        ("ned.1", "Eredivisie"),
+        ("por.1", "Primeira Liga"),
+        ("sco.1", "Scottish Premiership"),
+        ("tur.1", "Super Lig"),
+        ("mex.1", "Liga MX"),
+        ("arg.1", "Argentine Primera Division"),
+        ("bra.1", "Brasileirao"),
+        ("uefa.champions", "Champions League"),
+        ("uefa.europa", "Europa League"),
+        ("uefa.euro", "European Championship"),
+        ("conmebol.copa", "Copa Libertadores"),
+        # Women's soccer
+        ("usa.nwsl", "NWSL (Women)"),
+        ("eng.w.1", "FA Women's Super League"),
+        ("uefa.wchampions", "UEFA Women's Champions League"),
+    ]
 
     def __init__(
         self,
@@ -269,6 +335,7 @@ class HFDirectPipeline:
                 CRICKET_RAPIDAPI_BASE_URL,
                 CRICKET_RAPIDAPI_HOST,
                 CRICKET_RAPIDAPI_KEY,
+                THESPORTSDB_API_KEY,
             )
         except Exception:
             HF_API_KEY = os.getenv("HF_API_KEY", "")
@@ -284,8 +351,10 @@ class HFDirectPipeline:
             CRICKET_RAPIDAPI_BASE_URL = os.getenv("CRICKET_RAPIDAPI_BASE_URL", "https://cricket-live-data.p.rapidapi.com")
             CRICKET_RAPIDAPI_HOST = os.getenv("CRICKET_RAPIDAPI_HOST", "cricket-live-data.p.rapidapi.com")
             CRICKET_RAPIDAPI_KEY = os.getenv("CRICKET_RAPIDAPI_KEY", "")
+            THESPORTSDB_API_KEY = os.getenv("THESPORTSDB_API_KEY", "3")
 
         self.token = str(token or HF_API_KEY or "").strip()
+        self.thesportsdb_api_key = str(THESPORTSDB_API_KEY or "3").strip() or "3"
         self.football_data_api_key = str(FOOTBALL_DATA_API_KEY or "").strip()
         self.tennis_sackmann_dir = str(TENNIS_JEFF_SACKMANN_DIR or "").strip()
         self.newsdata_api_key = str(NEWSDATA_API_KEY or "").strip()
@@ -313,6 +382,7 @@ class HFDirectPipeline:
         )
         self._training_history_file = os.path.join(self._data_dir, "training_history.json")
         self._api = None
+        self._model_cache: dict[str, Any] = {}
         self._ok = bool(self.token and self.uploader and getattr(self.uploader, "_ok", False))
 
         if self._ok:
@@ -337,7 +407,7 @@ class HFDirectPipeline:
 
     def bootstrap_one_year_history(self, days_back: int = 365) -> dict:
         """One-time: fetch and upload ~1yr of multi-sport game data to HF Dataset."""
-        end = datetime.date.today()
+        end = et_today()
         start = end - datetime.timedelta(days=max(1, int(days_back)))
         logger.info("[hf_pipeline] Bootstrapping %d days (%s to %s)", days_back, start, end)
         records = self._clean_game_records(self._fetch_completed_games(start, end))
@@ -360,7 +430,7 @@ class HFDirectPipeline:
 
     def append_daily_results(self, day: datetime.date | None = None) -> dict:
         """Daily: append completed games for `day` to HF Dataset."""
-        target = day or datetime.date.today()
+        target = day or et_today()
         logger.info("[hf_pipeline] Appending daily results for %s", target)
         records = self._clean_game_records(self._fetch_completed_games(target, target))
         records = self._filter_records_not_in_hub(records)
@@ -380,32 +450,17 @@ class HFDirectPipeline:
         })
         return {"ok": True, "records": len(records), "date": target.isoformat(), "sports": sports}
 
-    def train_and_publish_best_model(self, min_rows: int = 200, forced_model: str = "auto") -> TrainSummary:
-        """Daily: train best classifier on full HF dataset and publish to HF Model Hub."""
-        import joblib
-        import pandas as pd
+    def _fit_best_model(self, X, y, forced_model: str = "auto") -> tuple[str, float, object]:
+        """Cross-validate the candidate classifiers on (X, y) and fit the best one
+        on the full data. Shared by the global model and every per-sport model so
+        selection logic can't drift between them.
+        """
         from sklearn.compose import ColumnTransformer
         from sklearn.ensemble import ExtraTreesClassifier, GradientBoostingClassifier, HistGradientBoostingClassifier, RandomForestClassifier
         from sklearn.linear_model import LogisticRegression
         from sklearn.model_selection import StratifiedKFold, cross_val_score
         from sklearn.pipeline import Pipeline
         from sklearn.preprocessing import OneHotEncoder
-
-        if not self._ok or not self._api:
-            raise RuntimeError("HF pipeline not configured. Set HF_API_KEY.")
-
-        logger.info("[hf_pipeline] Loading games parquet shards from %s", self.dataset_repo_id)
-        df = self._load_games_dataframe_from_hub()
-        if df.empty:
-            raise RuntimeError("HF dataset has no rows in games/train split")
-
-        df = self._build_training_df(df)
-        if len(df) < min_rows:
-            raise RuntimeError(f"Not enough rows: {len(df)} < {min_rows}")
-
-        y = (df["home_score"] > df["away_score"]).astype(int)
-        X = df[self._TRAIN_FEATURES].copy()
-        sports_covered = sorted(df["sport"].dropna().astype(str).unique().tolist())
 
         pre = ColumnTransformer(
             transformers=[
@@ -425,7 +480,10 @@ class HFDirectPipeline:
         if forced_key and forced_key != "auto" and forced_key in candidates:
             candidates = {forced_key: candidates[forced_key]}
 
-        cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+        n_splits = min(5, int(y.value_counts().min())) if hasattr(y, "value_counts") else 5
+        if n_splits < 2:
+            raise RuntimeError("Not enough class diversity to cross-validate (need both winners and losers)")
+        cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
         best_name, best_score, best_pipeline = "", -1.0, None
         for name, model in candidates.items():
             # HistGradientBoosting needs dense arrays — use separate pre with sparse_output=False
@@ -452,9 +510,69 @@ class HFDirectPipeline:
         if best_pipeline is None:
             raise RuntimeError("No model candidate succeeded")
         best_pipeline.fit(X, y)
+        return best_name, best_score, best_pipeline
+
+    def train_and_publish_best_model(self, min_rows: int = 200, forced_model: str = "auto") -> TrainSummary:
+        """Daily: train an INDIVIDUAL classifier per sport (model_{sport}.joblib)
+        plus one combined model.joblib as a fallback for sports without enough
+        rows yet, and publish all of them to HF Model Hub.
+        """
+        import joblib
+
+        if not self._ok or not self._api:
+            raise RuntimeError("HF pipeline not configured. Set HF_API_KEY.")
+
+        logger.info("[hf_pipeline] Loading games parquet shards from %s", self.dataset_repo_id)
+        df = self._load_games_dataframe_from_hub()
+        if df.empty:
+            raise RuntimeError("HF dataset has no rows in games/train split")
+
+        df = self._build_training_df(df)
+        if len(df) < min_rows:
+            raise RuntimeError(f"Not enough rows: {len(df)} < {min_rows}")
+
+        y_all = (df["home_score"] > df["away_score"]).astype(int)
+        X_all = df[self._TRAIN_FEATURES].copy()
+        sports_covered = sorted(df["sport"].dropna().astype(str).unique().tolist())
+
+        # Global model: trained across every sport combined. Always published as
+        # model.joblib -- the fallback for any sport that doesn't (yet) have
+        # enough rows of its own, and for callers on an older deployment that
+        # only knows about a single model file.
+        best_name, best_score, best_pipeline = self._fit_best_model(X_all, y_all, forced_model)
+
+        # Individual per-sport models: each sport learns its own scoring
+        # dynamics instead of being blended into one global average.
+        per_sport_models: dict[str, tuple[str, float, object, int]] = {}
+        for sport in sports_covered:
+            sport_df = df[df["sport"] == sport]
+            if len(sport_df) < self._MIN_ROWS_PER_SPORT:
+                logger.info(
+                    "[hf_pipeline] Skipping individual model for %s: %d rows < min %d (falls back to global model)",
+                    sport, len(sport_df), self._MIN_ROWS_PER_SPORT,
+                )
+                continue
+            y_sport = (sport_df["home_score"] > sport_df["away_score"]).astype(int)
+            if y_sport.nunique() < 2:
+                logger.info("[hf_pipeline] Skipping individual model for %s: only one outcome class present", sport)
+                continue
+            X_sport = sport_df[self._TRAIN_FEATURES].copy()
+            try:
+                s_name, s_score, s_pipeline = self._fit_best_model(X_sport, y_sport, forced_model)
+                per_sport_models[sport] = (s_name, s_score, s_pipeline, len(sport_df))
+                logger.info("[hf_pipeline] %s individual model: %s CV AUC=%.4f (%d rows)", sport, s_name, s_score, len(sport_df))
+            except Exception as exc:
+                logger.warning("[hf_pipeline] Individual model for %s failed, will use global fallback: %s", sport, exc)
 
         trained_at = _now_utc()
         version = trained_at[:19].replace(":", "-").replace("T", "_")
+        per_sport_meta = {
+            sport: {
+                "best_model": s_name, "cv_roc_auc": round(s_score, 6), "rows": s_rows,
+                "model_file": f"model_{sport}.joblib",
+            }
+            for sport, (s_name, s_score, s_pipeline, s_rows) in per_sport_models.items()
+        }
         metadata = {
             "version": version, "trained_at": trained_at,
             "rows": int(len(df)), "best_model": best_name,
@@ -464,6 +582,8 @@ class HFDirectPipeline:
             "categorical_features": self._CAT_FEATURES,
             "numerical_features": self._NUM_FEATURES,
             "target": "home_win", "sports_covered": sports_covered,
+            "per_sport": per_sport_meta,
+            "min_rows_per_sport": self._MIN_ROWS_PER_SPORT,
         }
 
         news_train_summary: dict[str, object] = {"ok": False, "reason": "not_run"}
@@ -472,6 +592,12 @@ class HFDirectPipeline:
             meta_path = os.path.join(td, "metadata.json")
             readme_path = os.path.join(td, "README.md")
             joblib.dump(best_pipeline, model_path)
+            upload_pairs = [("model.joblib", model_path), ("metadata.json", meta_path), ("README.md", readme_path)]
+            for sport, (s_name, s_score, s_pipeline, s_rows) in per_sport_models.items():
+                sport_model_path = os.path.join(td, f"model_{sport}.joblib")
+                joblib.dump(s_pipeline, sport_model_path)
+                upload_pairs.append((f"model_{sport}.joblib", sport_model_path))
+
             news_train_summary = self._train_news_impact_model(output_dir=td)
             metadata["news_impact_model"] = {
                 "enabled": bool(news_train_summary.get("ok")),
@@ -485,7 +611,6 @@ class HFDirectPipeline:
             with open(readme_path, "w", encoding="utf-8") as f:
                 f.write(readme_content)
             self._api.create_repo(repo_id=self.model_repo_id, repo_type="model", exist_ok=True, private=False)
-            upload_pairs = [("model.joblib", model_path), ("metadata.json", meta_path), ("README.md", readme_path)]
             news_model_path = os.path.join(td, "news_impact_model.joblib")
             news_meta_path = os.path.join(td, "news_impact_metadata.json")
             if os.path.exists(news_model_path):
@@ -498,13 +623,23 @@ class HFDirectPipeline:
                     repo_id=self.model_repo_id, repo_type="model",
                     commit_message=f"v{version}: update {fname}",
                 )
-        logger.info("[hf_pipeline] Published model v%s to %s (AUC=%.4f)", version, self.model_repo_id, best_score)
+        logger.info(
+            "[hf_pipeline] Published model v%s to %s (global AUC=%.4f, %d individual sport models)",
+            version, self.model_repo_id, best_score, len(per_sport_models),
+        )
+
+        # Individual models fall back to the combined-dataset model's AUC in
+        # sports_covered summaries below; self._model_cache is invalidated so the
+        # next prediction run downloads today's freshly published files instead
+        # of whatever was cached from a previous version.
+        self._model_cache = {}
 
         summary = TrainSummary(
             repo_id=self.model_repo_id, rows=int(len(df)),
             best_model=best_name, cv_roc_auc=float(best_score),
             trained_at=trained_at, version=version,
             features=self._TRAIN_FEATURES, sports_covered=sports_covered,
+            per_sport=per_sport_meta,
         )
         self._append_training_history(summary)
         self._write_status({
@@ -514,6 +649,7 @@ class HFDirectPipeline:
             "model_repo": self.model_repo_id,
             "trained_at": trained_at, "model_version": version,
             "sports_covered": sports_covered,
+            "per_sport": per_sport_meta,
             "news_impact_model": {
                 "enabled": bool(news_train_summary.get("ok")),
                 "rows": int(news_train_summary.get("rows") or 0),
@@ -577,18 +713,41 @@ class HFDirectPipeline:
         model_id: str | None = None,
         endpoint_url: str | None = None,
     ) -> dict:
-        """Daily: generate predictions for today and tomorrow, save to JSON."""
-        today = day or datetime.date.today()
+        """Daily: generate predictions for today and tomorrow, save to JSON.
+
+        Today gets the in-depth pass (freshest same-day injury/lineup news folds
+        into the probability); tomorrow gets the standard pass and is snapshotted
+        so tomorrow's run can compare its own in-depth today-prediction against
+        what was foreseen for it a day earlier.
+        """
+        today = day or et_today()
         tomorrow = today + datetime.timedelta(days=1)
         meta = self._get_model_metadata()
         model_version = meta.get("version", "unknown")
         model_type = meta.get("best_model", "unknown")
         model_auc = float(meta.get("cv_roc_auc") or 0.0)
 
+        team_stats, h2h_stats = self._build_form_snapshot()
+        news_stats = self._build_news_snapshot()
+
+        today_negative_teams: set[str] = set()
+        if not via_api:
+            try:
+                news_result = self.collect_news_signals(days=[today], return_rows=True)
+                for sig in news_result.get("signals") or []:
+                    impact = str(sig.get("impact_type") or "")
+                    team = str(sig.get("entity_team") or "").strip().lower()
+                    if team and impact in self._NEWS_NEGATIVE_IMPACT_TYPES:
+                        today_negative_teams.add(team)
+            except Exception as exc:
+                logger.debug("[hf_pipeline] today news adjustment skipped: %s", exc)
+
         all_predictions: list[dict] = []
         player_cache: dict[str, list[str]] = {}
         sports_seen: set[str] = set()
         for target_date in [today, tomorrow]:
+            is_today = target_date == today
+            depth_tag = "deep" if is_today else "standard"
             games = self._fetch_upcoming_games(target_date)
             for g in games:
                 home_team = str(g.get("home_team") or "").strip()
@@ -615,9 +774,17 @@ class HFDirectPipeline:
                         pred = self.predict_from_model_repo(
                             home_team=home_team, away_team=away_team,
                             sport=sport, season=target_date.year,
+                            team_stats=team_stats, h2h_stats=h2h_stats,
+                            news_stats=news_stats,
                         )
                         home_prob = float(pred.get("home_win_prob", 0.5))
                         away_prob = float(pred.get("away_win_prob", 0.5))
+                        if is_today and today_negative_teams:
+                            home_prob, away_prob = self._apply_news_adjustment(
+                                home_prob, away_prob,
+                                home_team.strip().lower() in today_negative_teams,
+                                away_team.strip().lower() in today_negative_teams,
+                            )
                     market_rows = self._expand_market_predictions(
                         game_id=game_id,
                         sport=sport,
@@ -633,29 +800,33 @@ class HFDirectPipeline:
                         model_auc=model_auc,
                         via_api=via_api,
                     )
-                    all_predictions.extend(market_rows)
-                    all_predictions.extend(
-                        self._expand_player_prop_predictions(
-                            sport=sport,
-                            league=league,
-                            game_id=game_id,
-                            game_date=game_date,
-                            game_time=game_time,
-                            home_team=home_team,
-                            away_team=away_team,
-                            home_prob=home_prob,
-                            away_prob=away_prob,
-                            model_version=model_version,
-                            model_type=model_type,
-                            model_auc=model_auc,
-                            via_api=via_api,
-                            player_cache=player_cache,
-                            home_starter=home_starter,
-                            away_starter=away_starter,
-                            home_team_id=home_team_id,
-                            away_team_id=away_team_id,
-                        )
+                    prop_rows = self._expand_player_prop_predictions(
+                        sport=sport,
+                        league=league,
+                        game_id=game_id,
+                        game_date=game_date,
+                        game_time=game_time,
+                        home_team=home_team,
+                        away_team=away_team,
+                        home_prob=home_prob,
+                        away_prob=away_prob,
+                        model_version=model_version,
+                        model_type=model_type,
+                        model_auc=model_auc,
+                        via_api=via_api,
+                        player_cache=player_cache,
+                        home_starter=home_starter,
+                        away_starter=away_starter,
+                        home_team_id=home_team_id,
+                        away_team_id=away_team_id,
+                        team_stats=team_stats,
                     )
+                    for r in market_rows:
+                        r["analysis_depth"] = depth_tag
+                    for r in prop_rows:
+                        r["analysis_depth"] = depth_tag
+                    all_predictions.extend(market_rows)
+                    all_predictions.extend(prop_rows)
                 except Exception as exc:
                     logger.warning("[hf_pipeline] predict error %s vs %s: %s", home_team, away_team, exc)
                     all_predictions.append({
@@ -666,9 +837,30 @@ class HFDirectPipeline:
                         "error": str(exc), "predicted_at": _now_utc(),
                     })
 
+        good = [p for p in all_predictions if not p.get("error")]
+        today_rows = [p for p in good if str(p.get("game_date") or "")[:10] == today.isoformat()]
+        tomorrow_rows = [p for p in good if str(p.get("game_date") or "")[:10] == tomorrow.isoformat()]
+
+        drift_summary = self._compare_with_snapshot(today, today_rows)
+        if drift_summary is not None:
+            drift_path = os.path.join(self._drift_dir(), f"{today.isoformat()}.json")
+            try:
+                with open(drift_path, "w", encoding="utf-8") as f:
+                    json.dump(drift_summary, f, indent=2)
+            except Exception as exc:
+                logger.debug("[hf_pipeline] drift write skipped: %s", exc)
+            logger.info(
+                "[hf_pipeline] Prediction drift vs yesterday's forecast for %s: %d matched, %d flips, avg |delta|=%.4f",
+                today, drift_summary["matched_count"], drift_summary["pick_flips"], drift_summary["avg_abs_prob_delta"],
+            )
+        # Yesterday's snapshot for this date is consumed (compared or unavailable) -- discard it
+        # regardless, and store today's fresh preliminary look at tomorrow for the next run.
+        self._delete_snapshot(today)
+        self._save_snapshot(tomorrow, tomorrow_rows)
+        self._cleanup_stale_snapshots(today)
+
         out_path = output_path or self._predictions_file
         os.makedirs(os.path.dirname(out_path), exist_ok=True)
-        good = [p for p in all_predictions if not p.get("error")]
         payload = {
             "generated_at": _now_utc(),
             "today": today.isoformat(),
@@ -678,6 +870,7 @@ class HFDirectPipeline:
             "model_version": model_version,
             "model_type": model_type,
             "model_auc": model_auc,
+            "prediction_drift": drift_summary,
             "predictions": all_predictions,
         }
         with open(out_path, "w", encoding="utf-8") as f:
@@ -692,9 +885,20 @@ class HFDirectPipeline:
             "last_step": "predict_daily", "ok": True,
             "prediction_date": today.isoformat(),
             "prediction_count": len(good),
+            "today_count": len(today_rows),
+            "tomorrow_count": len(tomorrow_rows),
             "prediction_sports": sorted(sports_seen),
             "prediction_file": out_path,
             "model_version": model_version,
+            "prediction_drift_summary": (
+                {
+                    "matched_count": drift_summary["matched_count"],
+                    "pick_flips": drift_summary["pick_flips"],
+                    "avg_abs_prob_delta": drift_summary["avg_abs_prob_delta"],
+                }
+                if drift_summary
+                else None
+            ),
             "predict_completed_at": _now_utc(),
         })
         logger.info("[hf_pipeline] %d predictions generated (%s + %s)", len(good), today, tomorrow)
@@ -721,6 +925,7 @@ class HFDirectPipeline:
         away_starter: str = "",
         home_team_id: str = "",
         away_team_id: str = "",
+        team_stats: dict | None = None,
     ) -> list[dict]:
         normalized_sport = self._normalize_sport(sport)
         profile = self._PLAYER_PROP_PROFILES.get(normalized_sport) or []
@@ -758,8 +963,14 @@ class HFDirectPipeline:
             [(away_team, p, away_prob) for p in away_players[:max_players]]
         )
         for team_name, player_name, team_prob in candidate_players:
+            team_form = (team_stats or {}).get((normalized_sport, str(team_name).strip().lower())) or {}
+            recent_win_rate = float(team_form.get("recent_win_rate", 0.5))
+            # Blend the matchup win probability with the player's own team's recent
+            # form so a player on a hot/cold streak shifts prop confidence, not just
+            # the head-to-head odds.
+            blended_prob = 0.7 * float(team_prob) + 0.3 * recent_win_rate
             for prop_type, prop_name, weight in profile:
-                p_yes = 0.5 + (float(team_prob) - 0.5) * float(weight)
+                p_yes = 0.5 + (blended_prob - 0.5) * float(weight)
                 p_yes = max(0.05, min(0.95, p_yes))
                 p_no = 1.0 - p_yes
                 predicted_outcome = "OVER" if p_yes >= p_no else "UNDER"
@@ -1198,8 +1409,16 @@ class HFDirectPipeline:
         """Orchestrate full daily pipeline: append results -> train -> predict."""
         logger.info("[hf_pipeline] Starting daily pipeline")
         self._write_status({"last_step": "daily_pipeline_started", "ok": True, "started_at": _now_utc()})
-        yesterday = datetime.date.today() - datetime.timedelta(days=1)
-        today = datetime.date.today()
+        yesterday = et_today() - datetime.timedelta(days=1)
+        today = et_today()
+        try:
+            from data.db import archive_previous_day_data
+
+            archived = archive_previous_day_data(today)
+            logger.info("[hf_pipeline] Archived stale prior-day rows: %s", archived)
+        except Exception as exc:
+            logger.debug("[hf_pipeline] archive_previous_day_data skipped: %s", exc)
+        self._cleanup_stale_snapshots(today)
         append_y = self.append_daily_results(yesterday)
         append_t = self.append_daily_results(today)
         news_signals = self.collect_news_signals(days=[today, today + datetime.timedelta(days=1)])
@@ -1231,24 +1450,79 @@ class HFDirectPipeline:
         logger.info("[hf_pipeline] Daily pipeline complete")
         return result
 
+    def _load_global_model(self) -> tuple[object, str, bool]:
+        import joblib
+        from huggingface_hub import hf_hub_download
+
+        cached = self._model_cache.get("global")
+        if cached is not None:
+            return cached
+        model_path = hf_hub_download(
+            repo_id=self.model_repo_id, filename="model.joblib",
+            repo_type="model", token=self.token,
+        )
+        result = (joblib.load(model_path), "model.joblib", False)
+        self._model_cache["global"] = result
+        return result
+
+    def _load_sport_model(self, sport: str, meta: dict) -> tuple[object, str, bool]:
+        """Load (and cache in-process) the individual model for `sport` if the
+        published metadata says one exists; otherwise fall back to the combined
+        global model.joblib. Returns (model, model_file, is_individual).
+        """
+        import joblib
+        from huggingface_hub import hf_hub_download
+
+        sport_key = self._normalize_sport(str(sport or "mlb"))
+        per_sport = meta.get("per_sport") or {}
+        has_individual = isinstance(per_sport, dict) and sport_key in per_sport
+        if not has_individual:
+            return self._load_global_model()
+
+        cache_key = f"sport:{sport_key}"
+        cached = self._model_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        filename = f"model_{sport_key}.joblib"
+        try:
+            model_path = hf_hub_download(
+                repo_id=self.model_repo_id, filename=filename,
+                repo_type="model", token=self.token,
+            )
+            result = (joblib.load(model_path), filename, True)
+        except Exception as exc:
+            logger.warning("[hf_pipeline] Individual model %s unavailable (%s), falling back to global", filename, exc)
+            return self._load_global_model()
+        self._model_cache[cache_key] = result
+        return result
+
     def predict_from_model_repo(
         self,
         home_team: str,
         away_team: str,
         sport: str = "mlb",
         season: int | None = None,
+        team_stats: dict | None = None,
+        h2h_stats: dict | None = None,
+        news_stats: dict | None = None,
     ) -> dict:
-        """Download model artifact from HF Hub and return win probabilities."""
-        import joblib
-        import pandas as pd
-        from huggingface_hub import hf_hub_download
+        """Return win probabilities using the sport's own individual model when
+        one has been published (model_{sport}.joblib), falling back to the
+        combined global model.joblib for sports without enough training rows yet.
 
-        today = datetime.date.today()
-        model_path = hf_hub_download(
-            repo_id=self.model_repo_id, filename="model.joblib",
-            repo_type="model", token=self.token,
-        )
-        model = joblib.load(model_path)
+        `team_stats`/`h2h_stats`/`news_stats` are the pre-computed snapshot
+        lookups built once per prediction run (`_build_form_snapshot()` /
+        `_build_news_snapshot()`), not per matchup. When omitted, neutral
+        defaults are used, so this stays usable for standalone single-matchup
+        calls (e.g. the CLI).
+        """
+        import pandas as pd
+
+        today = et_today()
+        meta = self._get_model_metadata()
+        model, model_file, is_individual = self._load_sport_model(sport, meta)
+        form = self._form_features_for_matchup(home_team, away_team, sport, team_stats, h2h_stats)
+        news = self._news_features_for_matchup(home_team, away_team, sport, news_stats)
         row = pd.DataFrame([{
             "home_team": home_team,
             "away_team": away_team,
@@ -1256,10 +1530,13 @@ class HFDirectPipeline:
             "season": int(season or today.year),
             "month": today.month,
             "day_of_week": today.weekday(),
+            **form,
+            **news,
         }])
         probs = model.predict_proba(row)[0]
         home_prob = float(probs[1])
-        meta = self._get_model_metadata()
+        sport_key = self._normalize_sport(str(sport or "mlb"))
+        sport_meta = (meta.get("per_sport") or {}).get(sport_key) or {}
         return {
             "home_team": home_team, "away_team": away_team,
             "sport": sport, "season": int(season or today.year),
@@ -1267,6 +1544,10 @@ class HFDirectPipeline:
             "away_win_prob": round(1.0 - home_prob, 4),
             "model_repo": self.model_repo_id,
             "model_version": meta.get("version", ""),
+            "model_file": model_file,
+            "model_scope": "individual" if is_individual else "global",
+            "model_type": sport_meta.get("best_model") if is_individual else meta.get("best_model"),
+            "model_auc": sport_meta.get("cv_roc_auc") if is_individual else meta.get("cv_roc_auc"),
         }
 
     def predict_via_hf_api(
@@ -1439,17 +1720,7 @@ class HFDirectPipeline:
     def _fetch_soccer_games_espn(self, start: datetime.date, end: datetime.date) -> list[dict]:
         """Fetch completed soccer results from ESPN public API (no key, no auth)."""
         rows: list[dict] = []
-        leagues = [
-            ("fifa.world", "FIFA World Cup 2026"),
-            ("usa.1", "MLS"),
-            ("eng.1", "Premier League"),
-            ("esp.1", "La Liga"),
-            ("ger.1", "Bundesliga"),
-            ("ita.1", "Serie A"),
-            ("fra.1", "Ligue 1"),
-            ("uefa.champions", "Champions League"),
-            ("conmebol.copa", "Copa Libertadores"),
-        ]
+        leagues = self._SOCCER_ESPN_LEAGUES
         current = start
         while current <= end:
             date_str = current.strftime("%Y%m%d")
@@ -1505,6 +1776,56 @@ class HFDirectPipeline:
                 except Exception as exc:
                     logger.debug("[hf_pipeline] ESPN soccer %s %s: %s", espn_slug, current, exc)
             current += datetime.timedelta(days=1)
+        return rows
+
+    def _fetch_soccer_upcoming_espn(self, day: datetime.date) -> list[dict]:
+        """Upcoming-schedule counterpart to _fetch_soccer_games_espn -- same
+        league breadth (including women's competitions) so today/tomorrow
+        predictions can actually be generated for every league we collect
+        historical results for, not just the football-data.org subset.
+        """
+        rows: list[dict] = []
+        date_str = day.strftime("%Y%m%d")
+        for espn_slug, league_name in self._SOCCER_ESPN_LEAGUES:
+            try:
+                r = requests.get(
+                    f"https://site.api.espn.com/apis/site/v2/sports/soccer/{espn_slug}/scoreboard",
+                    params={"dates": date_str},
+                    timeout=15,
+                    headers={"User-Agent": "Mozilla/5.0"},
+                )
+                if r.status_code != 200:
+                    continue
+                for event in (r.json() or {}).get("events") or []:
+                    for comp in (event.get("competitions") or []):
+                        status_name = str(((event.get("status") or {}).get("type") or {}).get("name") or "")
+                        if status_name in ("STATUS_FINAL", "STATUS_FULL_TIME", "STATUS_END_PERIOD"):
+                            continue
+                        competitors = comp.get("competitors") or []
+                        home = next((c for c in competitors if c.get("homeAway") == "home"), None)
+                        away = next((c for c in competitors if c.get("homeAway") == "away"), None)
+                        if not home or not away:
+                            if len(competitors) == 2:
+                                home, away = competitors[0], competitors[1]
+                            else:
+                                continue
+                        ht = str((home.get("team") or {}).get("displayName") or "").strip()
+                        at = str((away.get("team") or {}).get("displayName") or "").strip()
+                        if not ht or not at:
+                            continue
+                        gdt = str(event.get("date") or comp.get("date") or day.isoformat())
+                        rows.append({
+                            "sport": "soccer",
+                            "league": league_name,
+                            "home_team": ht,
+                            "away_team": at,
+                            "game_date": gdt[:10],
+                            "game_time": gdt,
+                            "game_id": f"espn_{event.get('id', '')}",
+                        })
+                time.sleep(0.15)
+            except Exception as exc:
+                logger.debug("[hf_pipeline] ESPN soccer upcoming %s %s: %s", espn_slug, day, exc)
         return rows
 
     def _fetch_soccer_games_football_data(self, start: datetime.date, end: datetime.date) -> list[dict]:
@@ -1580,7 +1901,7 @@ class HFDirectPipeline:
             day = current.isoformat()
             try:
                 resp = requests.get(
-                    "https://www.thesportsdb.com/api/v1/json/1/eventsday.php",
+                    f"https://www.thesportsdb.com/api/v1/json/{self.thesportsdb_api_key}/eventsday.php",
                     params={"d": day, "s": "Soccer"}, timeout=20,
                 )
                 resp.raise_for_status()
@@ -1621,7 +1942,7 @@ class HFDirectPipeline:
             day = current.isoformat()
             try:
                 resp = requests.get(
-                    "https://www.thesportsdb.com/api/v1/json/1/eventsday.php",
+                    f"https://www.thesportsdb.com/api/v1/json/{self.thesportsdb_api_key}/eventsday.php",
                     params={"d": day, "s": "Cricket"},
                     timeout=20,
                 )
@@ -1941,6 +2262,17 @@ class HFDirectPipeline:
             deduped.append(row)
         return deduped
 
+    def _disambiguate_sportsdb_sport(self, dst_sport: str, league_name: str) -> str:
+        """TheSportsDB's broad category query (e.g. s=Basketball) mixes multiple
+        leagues together. Route by the event's actual league name so WNBA games
+        don't get silently folded into the NBA bucket."""
+        if dst_sport != "nba":
+            return dst_sport
+        league_l = str(league_name or "").strip().lower()
+        if "wnba" in league_l or "women" in league_l:
+            return "wnba"
+        return dst_sport
+
     def _fetch_additional_sportsdb_completed(self, start: datetime.date, end: datetime.date) -> list[dict]:
         rows: list[dict] = []
         sport_map = {
@@ -1958,7 +2290,7 @@ class HFDirectPipeline:
             for src_sport, dst_sport in sport_map.items():
                 try:
                     resp = requests.get(
-                        "https://www.thesportsdb.com/api/v1/json/1/eventsday.php",
+                        f"https://www.thesportsdb.com/api/v1/json/{self.thesportsdb_api_key}/eventsday.php",
                         params={"d": day, "s": src_sport},
                         timeout=20,
                     )
@@ -1973,11 +2305,12 @@ class HFDirectPipeline:
                         if not ht or not at:
                             continue
                         game_iso = str(ev.get("strTimestamp") or f"{day}T00:00:00Z")
+                        league_name = str(ev.get("strLeague") or src_sport)
                         rows.append(
                             self._make_game_record(
                                 game_id=str(ev.get("idEvent") or ""),
-                                sport=dst_sport,
-                                league=str(ev.get("strLeague") or src_sport),
+                                sport=self._disambiguate_sportsdb_sport(dst_sport, league_name),
+                                league=league_name,
                                 game_date=day,
                                 game_datetime=game_iso,
                                 status="Final",
@@ -2009,7 +2342,7 @@ class HFDirectPipeline:
         for src_sport, dst_sport in sport_map.items():
             try:
                 resp = requests.get(
-                    "https://www.thesportsdb.com/api/v1/json/1/eventsday.php",
+                    f"https://www.thesportsdb.com/api/v1/json/{self.thesportsdb_api_key}/eventsday.php",
                     params={"d": day.isoformat(), "s": src_sport},
                     timeout=20,
                 )
@@ -2019,10 +2352,11 @@ class HFDirectPipeline:
                     at = str(ev.get("strAwayTeam") or "").strip()
                     if not ht or not at:
                         continue
+                    league_name = str(ev.get("strLeague") or src_sport)
                     rows.append(
                         {
-                            "sport": dst_sport,
-                            "league": str(ev.get("strLeague") or src_sport),
+                            "sport": self._disambiguate_sportsdb_sport(dst_sport, league_name),
+                            "league": league_name,
                             "home_team": ht,
                             "away_team": at,
                             "game_date": day.isoformat(),
@@ -2337,6 +2671,7 @@ class HFDirectPipeline:
         rows += self._fetch_soccer_upcoming_thesportsdb(day)
         rows += self._fetch_soccer_upcoming_openligadb(day)
         rows += self._fetch_soccer_upcoming_wc2026(day)
+        rows += self._fetch_soccer_upcoming_espn(day)
         # dedupe by (home, away, date)
         seen: set[tuple] = set()
         deduped: list[dict] = []
@@ -2612,20 +2947,39 @@ class HFDirectPipeline:
             return cache[key]
         players: list[str] = []
         try:
-            resp = requests.get(
-                "https://www.thesportsdb.com/api/v1/json/1/searchplayers.php",
+            # searchplayers.php is premium-gated even under the free test key; go via
+            # searchteams.php -> lookup_all_players.php by team ID instead, which
+            # still works on the free tier.
+            team_resp = requests.get(
+                f"https://www.thesportsdb.com/api/v1/json/{self.thesportsdb_api_key}/searchteams.php",
                 params={"t": str(team_name or "").strip()},
                 timeout=20,
             )
-            resp.raise_for_status()
-            for p in ((resp.json() or {}).get("player") or []):
-                name = str(p.get("strPlayer") or "").strip()
-                sport_name = str(p.get("strSport") or "").strip().lower()
-                if not name:
+            team_resp.raise_for_status()
+            team_id = ""
+            wanted_sport = self._normalize_sport(sport)
+            for t in ((team_resp.json() or {}).get("teams") or []):
+                t_sport = self._normalize_sport(str(t.get("strSport") or ""))
+                # TheSportsDB's own strSport field is a broad category (e.g. "Basketball"
+                # covers both NBA and WNBA teams) so it can't distinguish nba vs wnba --
+                # only reject on a genuine cross-sport mismatch, not this ambiguity.
+                same_broad_basketball = {t_sport, wanted_sport} <= {"nba", "wnba"}
+                if t_sport and t_sport != wanted_sport and not same_broad_basketball:
                     continue
-                if sport_name and self._normalize_sport(sport_name) != self._normalize_sport(sport):
-                    continue
-                players.append(name)
+                team_id = str(t.get("idTeam") or "").strip()
+                if team_id:
+                    break
+            if team_id:
+                roster_resp = requests.get(
+                    f"https://www.thesportsdb.com/api/v1/json/{self.thesportsdb_api_key}/lookup_all_players.php",
+                    params={"id": team_id},
+                    timeout=20,
+                )
+                roster_resp.raise_for_status()
+                for p in ((roster_resp.json() or {}).get("player") or []):
+                    name = str(p.get("strPlayer") or "").strip()
+                    if name:
+                        players.append(name)
         except Exception:
             players = []
         if not players and self._normalize_sport(sport) == "cricket":
@@ -2681,7 +3035,7 @@ class HFDirectPipeline:
         rows: list[dict] = []
         try:
             resp = requests.get(
-                "https://www.thesportsdb.com/api/v1/json/1/eventsday.php",
+                f"https://www.thesportsdb.com/api/v1/json/{self.thesportsdb_api_key}/eventsday.php",
                 params={"d": day.isoformat(), "s": "Soccer"}, timeout=20,
             )
             resp.raise_for_status()
@@ -2840,8 +3194,8 @@ class HFDirectPipeline:
         keyword_map = {
             "world series": "mlb",
             "mlb": "mlb",
+            "wnba": "wnba",
             "nba": "nba",
-            "wnba": "nba",
             "nfl": "nfl",
             "super bowl": "nfl",
             "nhl": "nhl",
@@ -2852,6 +3206,7 @@ class HFDirectPipeline:
             "tennis": "tennis",
             "atp": "tennis",
             "wta": "tennis",
+            "lpga": "golf",
             "pga": "golf",
             "golf": "golf",
             "boxing": "boxing",
@@ -2870,11 +3225,17 @@ class HFDirectPipeline:
         days: list[datetime.date] | None = None,
         max_games: int = 120,
         max_players_per_team: int = 6,
+        return_rows: bool = False,
     ) -> dict:
-        """Fetch and push structured news-impact rows to HF dataset."""
+        """Fetch and push structured news-impact rows to HF dataset.
+
+        When `return_rows` is set, the in-memory rows are also included under
+        the "signals" key so a caller (e.g. the same-day in-depth prediction
+        pass) can react to them without a second push/fetch cycle.
+        """
         target_days = list(days or [])
         if not target_days:
-            today = datetime.date.today()
+            today = et_today()
             target_days = [today, today + datetime.timedelta(days=1)]
 
         games: list[dict] = []
@@ -2934,7 +3295,10 @@ class HFDirectPipeline:
                 "news_signal_updated_at": _now_utc(),
             }
         )
-        return {"ok": True, "rows": len(rows), "games": len(deduped_games)}
+        result = {"ok": True, "rows": len(rows), "games": len(deduped_games)}
+        if return_rows:
+            result["signals"] = rows
+        return result
 
     def _fetch_news_articles_for_game(self, home_team: str, away_team: str, *, sport: str) -> list[dict]:
         query = f"{home_team} OR {away_team}"
@@ -3426,7 +3790,422 @@ class HFDirectPipeline:
         else:
             df["month"] = 6
             df["day_of_week"] = 0
+        df = self._add_form_features(df)
+        df = self._add_news_features(df)
         return df
+
+    def _add_form_features(self, df):
+        """Add leakage-free team-form features: recent win rate, rest days, head-to-head.
+
+        Each row only uses information available strictly BEFORE that game (games
+        are processed in chronological order and every stat is shifted by one), so
+        training never sees the future.
+        """
+        import numpy as np
+        import pandas as pd
+
+        df = df.copy()
+        df["_game_date_dt"] = pd.to_datetime(df["game_date"], errors="coerce")
+        df["_orig_order"] = range(len(df))
+        df = df.sort_values("_game_date_dt", kind="mergesort").reset_index(drop=True)
+
+        wins = (df["home_score"] > df["away_score"]).astype(int)
+
+        home_long = pd.DataFrame({
+            "orig_index": df.index, "sport": df["sport"], "team": df["home_team"],
+            "game_date_dt": df["_game_date_dt"], "is_home": True, "win": wins,
+        })
+        away_long = pd.DataFrame({
+            "orig_index": df.index, "sport": df["sport"], "team": df["away_team"],
+            "game_date_dt": df["_game_date_dt"], "is_home": False, "win": 1 - wins,
+        })
+        long_df = pd.concat([home_long, away_long], ignore_index=True)
+        long_df = long_df.sort_values(["sport", "team", "game_date_dt"], kind="mergesort")
+
+        grp = long_df.groupby(["sport", "team"], sort=False)
+        long_df["recent_win_rate"] = grp["win"].transform(
+            lambda s: s.shift(1).rolling(window=10, min_periods=1).mean()
+        )
+        long_df["rest_days"] = grp["game_date_dt"].transform(lambda s: s.diff().dt.days)
+
+        long_df["recent_win_rate"] = long_df["recent_win_rate"].fillna(0.5)
+        long_df["rest_days"] = long_df["rest_days"].fillna(3.0).clip(lower=0, upper=30)
+
+        home_feats = long_df[long_df["is_home"]].set_index("orig_index")
+        away_feats = long_df[~long_df["is_home"]].set_index("orig_index")
+        df["home_recent_win_rate"] = home_feats["recent_win_rate"].reindex(df.index).fillna(0.5)
+        df["away_recent_win_rate"] = away_feats["recent_win_rate"].reindex(df.index).fillna(0.5)
+        df["home_rest_days"] = home_feats["rest_days"].reindex(df.index).fillna(3.0)
+        df["away_rest_days"] = away_feats["rest_days"].reindex(df.index).fillna(3.0)
+
+        # Head-to-head: home team's historical win rate in this matchup, prior meetings only.
+        h2h_win: list[float] = []
+        pair_history: dict[str, list[str]] = {}
+        for _, row in df.iterrows():
+            home_l = str(row["home_team"]).strip().lower()
+            away_l = str(row["away_team"]).strip().lower()
+            key = f"{row['sport']}|" + "|".join(sorted([home_l, away_l]))
+            history = pair_history.get(key, [])
+            if history:
+                h2h_win.append(sum(1 for w in history if w == home_l) / len(history))
+            else:
+                h2h_win.append(0.5)
+            winner = home_l if row["home_score"] > row["away_score"] else away_l
+            history.append(winner)
+            pair_history[key] = history
+        df["h2h_home_win_rate"] = h2h_win
+
+        df = df.sort_values("_orig_order", kind="mergesort").reset_index(drop=True)
+        df = df.drop(columns=["_game_date_dt", "_orig_order"], errors="ignore")
+        return df
+
+    def _add_news_features(self, df):
+        """Add leakage-free news-sentiment features per team: mean sentiment and a
+        negative-signal flag over the _NEWS_LOOKBACK_DAYS strictly before each
+        game's date. Missing/unavailable news data defaults to neutral (0.0),
+        never blocks training.
+        """
+        import pandas as pd
+
+        for col in self._NEWS_FEATURES:
+            df[col] = 0.0
+        try:
+            news_df = self._load_news_signals_dataframe_from_hub()
+        except Exception as exc:
+            logger.debug("[hf_pipeline] news feature join skipped: %s", exc)
+            return df
+        if news_df is None or news_df.empty:
+            return df
+
+        news_df = news_df.copy()
+        news_df["_news_date"] = pd.to_datetime(news_df.get("game_date"), errors="coerce")
+        news_df["_entity"] = news_df.get("entity_team").fillna("").astype(str).str.strip().str.lower()
+        news_df["_sport"] = news_df.get("sport").fillna("").astype(str).str.strip().str.lower().map(self._normalize_sport)
+        news_df["_sentiment"] = pd.to_numeric(news_df.get("sentiment_score"), errors="coerce").fillna(0.0)
+        news_df["_negative"] = news_df.get("impact_type").isin(self._NEWS_NEGATIVE_IMPACT_TYPES).astype(float)
+        news_df = news_df.dropna(subset=["_news_date"])
+        news_df = news_df[news_df["_entity"] != ""]
+        if news_df.empty:
+            return df
+
+        news_by_key: dict[tuple[str, str], "pd.DataFrame"] = {
+            key: sub.sort_values("_news_date")
+            for key, sub in news_df.groupby(["_sport", "_entity"])
+        }
+
+        def _lookup(team: str, sport: str, game_date) -> tuple[float, float]:
+            if pd.isna(game_date):
+                return 0.0, 0.0
+            key = (str(sport).strip().lower(), str(team).strip().lower())
+            sub = news_by_key.get(key)
+            if sub is None or sub.empty:
+                return 0.0, 0.0
+            window_start = game_date - pd.Timedelta(days=self._NEWS_LOOKBACK_DAYS)
+            windowed = sub[(sub["_news_date"] >= window_start) & (sub["_news_date"] < game_date)]
+            if windowed.empty:
+                return 0.0, 0.0
+            return float(windowed["_sentiment"].mean()), float(windowed["_negative"].max())
+
+        game_dates = pd.to_datetime(df["game_date"], errors="coerce")
+        home_sent: list[float] = []
+        away_sent: list[float] = []
+        home_neg: list[float] = []
+        away_neg: list[float] = []
+        for i, row in df.iterrows():
+            gdate = game_dates.loc[i]
+            hs, hn = _lookup(row["home_team"], row["sport"], gdate)
+            as_, an = _lookup(row["away_team"], row["sport"], gdate)
+            home_sent.append(hs)
+            away_sent.append(as_)
+            home_neg.append(hn)
+            away_neg.append(an)
+
+        df["home_news_sentiment"] = home_sent
+        df["away_news_sentiment"] = away_sent
+        df["home_negative_news_flag"] = home_neg
+        df["away_negative_news_flag"] = away_neg
+        return df
+
+    def _build_form_snapshot(self) -> tuple[dict, dict]:
+        """Compute current (as-of-today) team form + head-to-head lookups for prediction time.
+
+        Returns (team_stats, h2h_stats):
+          team_stats[(sport, team_lower)] = {"recent_win_rate": float, "rest_days": float}
+          h2h_stats["sport|team_a|team_b" (sorted)] = home-team-name win rate in that pairing
+        """
+        team_stats: dict[tuple[str, str], dict[str, float]] = {}
+        h2h_stats: dict[str, float] = {}
+        try:
+            df = self._load_games_dataframe_from_hub()
+            if df is None or df.empty:
+                return team_stats, h2h_stats
+            import pandas as pd
+
+            for col in ("home_score", "away_score"):
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+            df = df.dropna(subset=["home_team", "away_team", "home_score", "away_score"])
+            df = df[df["home_score"] != df["away_score"]].copy()
+            if "sport" not in df.columns:
+                df["sport"] = "mlb"
+            df["sport"] = df["sport"].fillna("mlb").astype(str).map(self._normalize_sport)
+            df["_game_date_dt"] = pd.to_datetime(df.get("game_date"), errors="coerce")
+            df = df.dropna(subset=["_game_date_dt"]).sort_values("_game_date_dt", kind="mergesort")
+            if df.empty:
+                return team_stats, h2h_stats
+
+            today_ts = pd.Timestamp(et_today())
+            wins = (df["home_score"] > df["away_score"]).astype(int)
+            home_long = pd.DataFrame({
+                "sport": df["sport"], "team": df["home_team"],
+                "game_date_dt": df["_game_date_dt"], "win": wins,
+            })
+            away_long = pd.DataFrame({
+                "sport": df["sport"], "team": df["away_team"],
+                "game_date_dt": df["_game_date_dt"], "win": 1 - wins,
+            })
+            long_df = pd.concat([home_long, away_long], ignore_index=True)
+            long_df["team_key"] = long_df["team"].astype(str).str.strip().str.lower()
+            long_df = long_df.sort_values(["sport", "team_key", "game_date_dt"], kind="mergesort")
+            for (sport, team_key), g in long_df.groupby(["sport", "team_key"], sort=False):
+                recent = g["win"].tail(10).mean()
+                last_date = g["game_date_dt"].iloc[-1]
+                rest = float((today_ts - last_date).days)
+                rest = max(0.0, min(30.0, rest))
+                team_stats[(sport, team_key)] = {
+                    "recent_win_rate": float(recent) if pd.notna(recent) else 0.5,
+                    "rest_days": rest,
+                }
+
+            for sport, g in df.groupby("sport", sort=False):
+                pair_win: dict[str, list[str]] = {}
+                for _, row in g.iterrows():
+                    home_l = str(row["home_team"]).strip().lower()
+                    away_l = str(row["away_team"]).strip().lower()
+                    key = f"{sport}|" + "|".join(sorted([home_l, away_l]))
+                    winner = home_l if row["home_score"] > row["away_score"] else away_l
+                    pair_win.setdefault(key, []).append(winner)
+                for key, winners in pair_win.items():
+                    parts = key.split("|")
+                    team_a = parts[1]
+                    h2h_stats[key] = sum(1 for w in winners if w == team_a) / len(winners)
+        except Exception as exc:
+            logger.debug("[hf_pipeline] form snapshot build skipped: %s", exc)
+        return team_stats, h2h_stats
+
+    def _form_features_for_matchup(
+        self,
+        home_team: str,
+        away_team: str,
+        sport: str,
+        team_stats: dict | None,
+        h2h_stats: dict | None,
+    ) -> dict:
+        sport_key = self._normalize_sport(str(sport or "mlb"))
+        home_key = str(home_team or "").strip().lower()
+        away_key = str(away_team or "").strip().lower()
+        home_s = (team_stats or {}).get((sport_key, home_key)) or {}
+        away_s = (team_stats or {}).get((sport_key, away_key)) or {}
+        pair_key = f"{sport_key}|" + "|".join(sorted([home_key, away_key]))
+        h2h_raw = (h2h_stats or {}).get(pair_key)
+        if h2h_raw is None:
+            h2h_home = 0.5
+        else:
+            # h2h_stats is keyed by the sorted pair; re-orient to home_team's perspective.
+            sorted_first = sorted([home_key, away_key])[0]
+            h2h_home = h2h_raw if sorted_first == home_key else (1.0 - h2h_raw)
+        return {
+            "home_recent_win_rate": float(home_s.get("recent_win_rate", 0.5)),
+            "away_recent_win_rate": float(away_s.get("recent_win_rate", 0.5)),
+            "home_rest_days": float(home_s.get("rest_days", 3.0)),
+            "away_rest_days": float(away_s.get("rest_days", 3.0)),
+            "h2h_home_win_rate": float(h2h_home),
+        }
+
+    def _build_news_snapshot(self) -> dict:
+        """As-of-now news lookup for prediction time, mirroring _add_news_features'
+        lookback window so training and inference see the same feature semantics.
+        Returns {(sport, team_lower): {"sentiment": float, "negative_flag": float}}.
+        """
+        news_stats: dict[tuple[str, str], dict[str, float]] = {}
+        try:
+            news_df = self._load_news_signals_dataframe_from_hub()
+            if news_df is None or news_df.empty:
+                return news_stats
+            import pandas as pd
+
+            news_df = news_df.copy()
+            news_df["_news_date"] = pd.to_datetime(news_df.get("game_date"), errors="coerce")
+            news_df["_entity"] = news_df.get("entity_team").fillna("").astype(str).str.strip().str.lower()
+            news_df["_sport"] = news_df.get("sport").fillna("").astype(str).str.strip().str.lower().map(self._normalize_sport)
+            news_df["_sentiment"] = pd.to_numeric(news_df.get("sentiment_score"), errors="coerce").fillna(0.0)
+            news_df["_negative"] = news_df.get("impact_type").isin(self._NEWS_NEGATIVE_IMPACT_TYPES).astype(float)
+            news_df = news_df.dropna(subset=["_news_date"])
+            news_df = news_df[news_df["_entity"] != ""]
+            if news_df.empty:
+                return news_stats
+
+            today_ts = pd.Timestamp(et_today())
+            window_start = today_ts - pd.Timedelta(days=self._NEWS_LOOKBACK_DAYS)
+            recent = news_df[(news_df["_news_date"] >= window_start) & (news_df["_news_date"] <= today_ts)]
+            for (sport, entity), sub in recent.groupby(["_sport", "_entity"]):
+                news_stats[(sport, entity)] = {
+                    "sentiment": float(sub["_sentiment"].mean()),
+                    "negative_flag": float(sub["_negative"].max()),
+                }
+        except Exception as exc:
+            logger.debug("[hf_pipeline] news snapshot build skipped: %s", exc)
+        return news_stats
+
+    def _news_features_for_matchup(
+        self, home_team: str, away_team: str, sport: str, news_stats: dict | None
+    ) -> dict:
+        sport_key = self._normalize_sport(str(sport or "mlb"))
+        home_key = str(home_team or "").strip().lower()
+        away_key = str(away_team or "").strip().lower()
+        home_s = (news_stats or {}).get((sport_key, home_key)) or {}
+        away_s = (news_stats or {}).get((sport_key, away_key)) or {}
+        return {
+            "home_news_sentiment": float(home_s.get("sentiment", 0.0)),
+            "away_news_sentiment": float(away_s.get("sentiment", 0.0)),
+            "home_negative_news_flag": float(home_s.get("negative_flag", 0.0)),
+            "away_negative_news_flag": float(away_s.get("negative_flag", 0.0)),
+        }
+
+    def _apply_news_adjustment(
+        self, home_prob: float, away_prob: float, home_flagged: bool, away_flagged: bool
+    ) -> tuple[float, float]:
+        """Nudge win probability toward the team WITHOUT a same-day negative signal.
+
+        Bounded (+/-0.04) and cancels out when both sides are flagged, so it can
+        never flip a strong pick on its own -- it only sharpens close games using
+        same-day injury/lineup/suspension news that the base model can't see.
+        """
+        if home_flagged == away_flagged:
+            return home_prob, away_prob
+        delta = self._NEWS_ADJUSTMENT if away_flagged else -self._NEWS_ADJUSTMENT
+        adjusted_home = min(0.95, max(0.05, home_prob + delta))
+        return adjusted_home, round(1.0 - adjusted_home, 4)
+
+    # ──────────────────────────────────────────────────────────
+    # Today/tomorrow snapshot persistence + day-over-day comparison
+    # ──────────────────────────────────────────────────────────
+
+    def _snapshot_dir(self) -> str:
+        d = os.path.join(self._data_dir, "prediction_snapshots")
+        os.makedirs(d, exist_ok=True)
+        return d
+
+    def _drift_dir(self) -> str:
+        d = os.path.join(self._data_dir, "prediction_drift")
+        os.makedirs(d, exist_ok=True)
+        return d
+
+    def _save_snapshot(self, target_date: datetime.date, rows: list[dict]) -> None:
+        path = os.path.join(self._snapshot_dir(), f"{target_date.isoformat()}.json")
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"date": target_date.isoformat(), "saved_at": _now_utc(), "predictions": rows}, f)
+        except Exception as exc:
+            logger.debug("[hf_pipeline] snapshot save skipped for %s: %s", target_date, exc)
+
+    def _load_snapshot(self, target_date: datetime.date) -> dict | None:
+        path = os.path.join(self._snapshot_dir(), f"{target_date.isoformat()}.json")
+        if not os.path.exists(path):
+            return None
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return None
+
+    def _delete_snapshot(self, target_date: datetime.date) -> None:
+        path = os.path.join(self._snapshot_dir(), f"{target_date.isoformat()}.json")
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _row_identity(row: dict) -> str:
+        return "|".join([
+            str(row.get("sport") or "").strip().lower(),
+            str(row.get("home_team") or "").strip().lower(),
+            str(row.get("away_team") or "").strip().lower(),
+            str(row.get("market_type") or "").strip().lower(),
+            str(row.get("player_name") or "").strip().lower(),
+            str(row.get("prop_line") or ""),
+        ])
+
+    def _compare_with_snapshot(self, target_date: datetime.date, fresh_rows: list[dict]) -> dict | None:
+        """Compare today's freshly (in-depth) generated rows against the
+        preliminary 'tomorrow' snapshot saved for this same date yesterday."""
+        snapshot = self._load_snapshot(target_date)
+        if not snapshot:
+            return None
+        prev_rows = {
+            self._row_identity(r): r for r in (snapshot.get("predictions") or []) if isinstance(r, dict)
+        }
+        if not prev_rows:
+            return None
+        diffs: list[dict] = []
+        flips = 0
+        total_abs_delta = 0.0
+        matched = 0
+        for row in fresh_rows:
+            prev = prev_rows.get(self._row_identity(row))
+            if not prev:
+                continue
+            matched += 1
+            prev_prob = float(prev.get("home_win_prob") if prev.get("home_win_prob") is not None else prev.get("confidence") or 0.0)
+            new_prob = float(row.get("home_win_prob") if row.get("home_win_prob") is not None else row.get("confidence") or 0.0)
+            delta = round(new_prob - prev_prob, 4)
+            total_abs_delta += abs(delta)
+            prev_pick = str(prev.get("predicted_team") or "")
+            new_pick = str(row.get("predicted_team") or "")
+            flipped = bool(prev_pick and new_pick and prev_pick != new_pick)
+            if flipped:
+                flips += 1
+            diffs.append({
+                "game": f"{row.get('away_team')} @ {row.get('home_team')}",
+                "market_type": row.get("market_type"),
+                "player_name": row.get("player_name") or None,
+                "prior_prob": round(prev_prob, 4),
+                "fresh_prob": round(new_prob, 4),
+                "prob_delta": delta,
+                "pick_flipped": flipped,
+            })
+        return {
+            "date": target_date.isoformat(),
+            "compared_at": _now_utc(),
+            "prior_snapshot_saved_at": snapshot.get("saved_at"),
+            "matched_count": matched,
+            "pick_flips": flips,
+            "avg_abs_prob_delta": round(total_abs_delta / matched, 4) if matched else 0.0,
+            "details": diffs[:200],
+        }
+
+    def _cleanup_stale_snapshots(self, today: datetime.date) -> None:
+        """Delete any snapshot/drift artifact dated before today -- the day
+        after a date passes, its snapshot has either already been consumed by
+        `_compare_with_snapshot` + `_delete_snapshot`, or was never matched
+        (e.g. a skipped run) and is now stale and safe to discard."""
+        for d in (self._snapshot_dir(), self._drift_dir()):
+            try:
+                for fname in os.listdir(d):
+                    if not fname.endswith(".json"):
+                        continue
+                    try:
+                        file_date = datetime.date.fromisoformat(fname[:-5])
+                    except ValueError:
+                        continue
+                    if file_date < today:
+                        try:
+                            os.remove(os.path.join(d, fname))
+                        except OSError:
+                            pass
+            except FileNotFoundError:
+                continue
 
     def _filter_records_not_in_hub(self, records: list[dict]) -> list[dict]:
         if not records:

@@ -317,11 +317,32 @@ def _place_due_games(rows: list[dict[str, Any]], *, dry_run: bool, stake_usd: fl
     placed = 0
     skipped = 0
     failed = 0
+    deferred = 0
     submitted: list[dict[str, Any]] = []
     cache = _load_schedule_cache()
     current_rows = cache.get("rows") or []
     by_uid = {str(row.get("schedule_uid") or ""): dict(row) for row in current_rows if isinstance(row, dict)}
     changed_rows: list[dict[str, Any]] = []
+
+    # Bankroll pacing: live orders are gated against ACTUAL available buying
+    # power (re-fetched fresh every cycle), not just placed and left to fail at
+    # the exchange. Once capital is tied up in open positions, remaining due
+    # games are deferred (not skipped) so they're retried automatically on a
+    # later cycle -- as soon as a position settles and buying power frees up,
+    # the next cycle sees it and resumes placing bets. Dry-run isn't gated
+    # since no real capital is at risk.
+    available_capital: float | None = None
+    if not dry_run:
+        try:
+            from data.kalshi_trade_api import get_available_buying_power_usd
+
+            available_capital = get_available_buying_power_usd()
+        except Exception:
+            available_capital = 0.0
+    reserved = 0.0
+    per_row_cost = max(0.01, float(stake_usd or 1.0)) * (
+        max(1, int(max_single_orders or 1)) + (max(0, int(max_combo_orders or 0)) if include_combos else 0)
+    )
 
     for row in rows:
         schedule_uid = str(row.get("schedule_uid") or "").strip()
@@ -340,6 +361,23 @@ def _place_due_games(rows: list[dict[str, Any]], *, dry_run: bool, stake_usd: fl
             by_uid[schedule_uid] = updated
             changed_rows.append(updated)
             skipped += 1
+            continue
+        if available_capital is not None and (available_capital - reserved) < per_row_cost:
+            updated = _updated_row(
+                row,
+                bet_state="waiting_capital",
+                last_bet_at=_now_utc().isoformat(),
+                bet_payload={
+                    "ok": True,
+                    "deferred": True,
+                    "reason": "insufficient_buying_power",
+                    "available_usd": round(available_capital, 2),
+                    "required_usd": round(per_row_cost, 2),
+                },
+            )
+            by_uid[schedule_uid] = updated
+            changed_rows.append(updated)
+            deferred += 1
             continue
         try:
             result = submit_prediction_orders(
@@ -362,6 +400,7 @@ def _place_due_games(rows: list[dict[str, Any]], *, dry_run: bool, stake_usd: fl
             if ok:
                 placed += 1
                 submitted.append(result)
+                reserved += per_row_cost
             else:
                 failed += 1
         except Exception as exc:
@@ -378,7 +417,15 @@ def _place_due_games(rows: list[dict[str, Any]], *, dry_run: bool, stake_usd: fl
     merged_rows = sorted(by_uid.values(), key=lambda r: str(r.get("scheduled_start") or ""))
     _save_schedule_cache(merged_rows)
     _push_schedule_rows(changed_rows)
-    return {"ok": True, "placed": placed, "skipped": skipped, "failed": failed, "submitted": submitted}
+    return {
+        "ok": True,
+        "placed": placed,
+        "skipped": skipped,
+        "failed": failed,
+        "deferred": deferred,
+        "submitted": submitted,
+        "available_capital_usd": round(available_capital, 2) if available_capital is not None else None,
+    }
 
 
 def run_pregame_timing_cycle(

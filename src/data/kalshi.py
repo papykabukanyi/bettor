@@ -2597,6 +2597,18 @@ def _resolve_single_bet(
     event_index: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     schedule = _bet_schedule_state(bet)
+    if schedule["state"] == "unknown":
+        # No parseable game_date/game_time on the bet at all -- the time-proximity
+        # safety net in _score_event_group/_time_match_score is disabled in this
+        # case (it degrades to neutral instead of rejecting), which would let a
+        # team/player name match alone pick a market for the WRONG occurrence of
+        # a matchup (e.g. a team playing the same opponent days apart). Refuse
+        # rather than guess when real capital is on the line.
+        return _single_resolution_payload(
+            "unavailable",
+            message="Bet has no parseable game date/time; refusing to match without a verified date.",
+            scheduled_start=None,
+        )
     if schedule["state"] == "done":
         return _single_resolution_payload(
             "done",
@@ -3189,21 +3201,22 @@ def suggest_combo_bets(
     bets: list[dict[str, Any]],
     *,
     resolutions: dict[str, dict[str, Any]] | None = None,
-    max_legs: int = 4,
+    max_legs: int = 2,
     min_legs: int = 2,
     min_combined_prob: float = 0.20,
-    min_ev: float = -0.10,
+    min_ev: float = 0.0,
     max_combos: int = 30,
 ) -> list[dict[str, Any]]:
-    """Analyze a set of ready bets and suggest the best multi-leg combo parlays.
+    """Analyze a set of ready bets and suggest the best 2-leg combo parlays.
 
     Args:
         bets:              List of ready-bet dicts (same format sent to resolve_ready_bets).
         resolutions:       Optional pre-computed Kalshi resolution map {uid: resolution}.
-        max_legs:          Maximum legs per combo (default 4).
+        max_legs:          Maximum legs per combo (default 2 -- combos are 2-leg only by design).
         min_legs:          Minimum legs (default 2).
         min_combined_prob: Minimum parlay hit probability to include (default 20%).
-        min_ev:            Minimum expected value (default -10% — allows slightly -EV to learn).
+        min_ev:            Minimum expected value (default 0.0 -- real capital is at risk, no
+                            negative-EV combos are placed).
         max_combos:        Cap on returned suggestions (sorted by EV descending).
 
     Returns:

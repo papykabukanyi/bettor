@@ -547,6 +547,25 @@ def get_balance(subaccount: int | None = None) -> dict[str, Any]:
     return _request_json("GET", "/portfolio/balance", params=params, auth=True)
 
 
+def get_available_buying_power_usd() -> float:
+    """Single lightweight balance call for pre-order capital checks.
+
+    Used to gate live order submission against actual available capital instead
+    of the heavier 5-endpoint build_live_snapshot(). Fails closed (returns 0.0
+    on any error) so a transient API hiccup pauses betting rather than risking
+    an order the account can't actually cover.
+    """
+    try:
+        raw = get_balance()
+    except Exception:
+        return 0.0
+    balance = _pick_balance_payload(raw if isinstance(raw, dict) else {})
+    try:
+        return max(0.0, _normalize_balance_usd(balance, 0.0))
+    except Exception:
+        return 0.0
+
+
 def get_all_subaccount_balances() -> dict[str, Any]:
     return _request_json("GET", "/portfolio/subaccounts/balances", auth=True)
 

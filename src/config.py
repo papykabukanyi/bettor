@@ -89,7 +89,11 @@ DATABASE_URL = _normalize_pg_url(_first_env(
 ODDS_API_KEY       = os.getenv("ODDS_API_KEY", "")
 NEWS_API_KEY       = os.getenv("NEWS_API_KEY", "")
 SPORTSDATA_API_KEY = os.getenv("SPORTSDATA_API_KEY", "")
-THESPORTSDB_API_KEY = os.getenv("THESPORTSDB_API_KEY", "1")
+# NOTE: TheSportsDB retired the old "1" public test key (it now returns
+# "Invalid Premium API key" on every real data endpoint). "3" is the current
+# working free test key as of 2026-07; override with a real registered key via
+# THESPORTSDB_API_KEY if TheSportsDB tightens this further.
+THESPORTSDB_API_KEY = os.getenv("THESPORTSDB_API_KEY", "3")
 
 # Reddit API (sentiment analysis)
 REDDIT_CLIENT_ID     = os.getenv("REDDIT_CLIENT_ID", "")
