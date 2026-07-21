@@ -64,6 +64,20 @@ def _cached_hf_username(api: "HfApi", token: str) -> str:
         _HF_WHOAMI_CACHE[cache_key] = (user, now)
     return user
 
+
+# Same problem, different endpoint: _ensure_repo() used to call repo_info() +
+# create_repo() on every single HFUploader construction (i.e. every pipeline
+# construction, every ~5min cron tick), unconditionally. A repo that has existed
+# and been used continuously for months does not need to be re-verified that
+# often, and a transient failure/rate-limit on this check is not evidence the
+# repo is actually missing -- it's just noise that used to take the whole
+# pipeline down with it. Cache both outcomes: a long TTL once verified/created,
+# a short TTL after a failed check so we still retry soon without hammering HF.
+_HF_REPO_VERIFIED_CACHE: dict[str, float] = {}
+_HF_REPO_VERIFIED_TTL_SEC = 24 * 3600
+_HF_REPO_UNVERIFIED_RETRY_SEC = 300
+
+
 # ---------------------------------------------------------------------------
 # Lazy imports so the rest of the bot still works when HF libs are absent
 # ---------------------------------------------------------------------------
@@ -389,11 +403,20 @@ class HFUploader:
             return ""
 
     def _ensure_repo(self):
+        cache_key = f"dataset:{self._repo_id}"
+        now = time.time()
+        last_checked = _HF_REPO_VERIFIED_CACHE.get(cache_key)
+        if last_checked is not None:
+            ttl = _HF_REPO_VERIFIED_TTL_SEC if last_checked > 0 else _HF_REPO_UNVERIFIED_RETRY_SEC
+            if (now - abs(last_checked)) < ttl:
+                return
+
         try:
             self._api.repo_info(repo_id=self._repo_id, repo_type="dataset")
             logger.info("[hf_uploader] repo exists: %s", self._repo_id)
-        except Exception:
-            logger.info("[hf_uploader] creating dataset repo: %s", self._repo_id)
+            _HF_REPO_VERIFIED_CACHE[cache_key] = now
+        except Exception as exc:
+            logger.info("[hf_uploader] repo_info failed (%s), attempting create_repo(exist_ok=True): %s", self._repo_id, exc)
             try:
                 self._api.create_repo(
                     repo_id=self._repo_id,
@@ -402,9 +425,15 @@ class HFUploader:
                     exist_ok=True,
                 )
                 self._push_dataset_card()
+                _HF_REPO_VERIFIED_CACHE[cache_key] = now
             except Exception as e:
-                logger.error("[hf_uploader] failed to create repo: %s", e)
-                self._ok = False
+                # Almost certainly a transient/rate-limit failure on a repo that
+                # already exists (this dataset has been in continuous use), not
+                # proof the repo is actually missing -- don't take the whole
+                # pipeline down over a failed nice-to-have verification. Retry
+                # again after the short backoff window instead of every call.
+                logger.warning("[hf_uploader] could not verify/create repo '%s' (assuming it already exists): %s", self._repo_id, e)
+                _HF_REPO_VERIFIED_CACHE[cache_key] = -now
 
     def _push_dataset_card(self):
         card_content = _DATASET_CARD.replace("{repo_id}", self._repo_id)
