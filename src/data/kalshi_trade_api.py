@@ -27,6 +27,7 @@ KALSHI_BASE_URL = str(
     os.getenv("KALSHI_BASE_URL", "https://external-api.kalshi.com/trade-api/v2")
 ).rstrip("/")
 KALSHI_TIMEOUT_SEC = int(os.getenv("KALSHI_TIMEOUT_SEC", "15") or "15")
+MIN_VALUE_EDGE = float(os.getenv("MIN_VALUE_EDGE", "0.05") or "0.05")
 _BASE_PATH = urlparse(KALSHI_BASE_URL).path.rstrip("/")
 _TS_OFFSET_MS = 0
 _TS_OFFSET_LOCK = threading.Lock()
@@ -642,8 +643,15 @@ def build_order_candidates_from_predictions(
     predictions_payload: dict[str, Any],
     *,
     force_refresh: bool = True,
+    min_edge: float = MIN_VALUE_EDGE,
 ) -> list[dict[str, Any]]:
-    """Resolve Kalshi market matches for prediction rows and return matched candidates."""
+    """Resolve Kalshi market matches for prediction rows and return matched candidates.
+
+    Only candidates where the model's probability beats the Kalshi market's
+    implied probability by at least ``min_edge`` are returned, so downstream
+    order placement never bets blind on confidence alone against a price
+    that already has no edge.
+    """
     from betting_bot import _prediction_to_market_candidate
     from data.kalshi import attach_kalshi_to_bets
 
@@ -675,6 +683,15 @@ def build_order_candidates_from_predictions(
         if not ticker or side not in {"yes", "no"} or price_cents <= 0:
             continue
         original = by_uid.get(uid) or {}
+        confidence = _as_float(original.get("confidence"), _as_float(row.get("confidence"), 0.0))
+        model_prob = _as_float(row.get("model_prob"), confidence)
+        model_prob = max(0.0, min(1.0, model_prob))
+        implied_prob = _v2_yes_leg_price(side, price_cents)
+        edge = round(model_prob - implied_prob, 4)
+        if edge < min_edge:
+            continue
+        dec_odds = round(1.0 / max(0.01, implied_prob), 4)
+        ev = round(model_prob * (dec_odds - 1.0) - (1.0 - model_prob), 4)
         matched.append(
             {
                 "prediction_uid": uid,
@@ -683,10 +700,14 @@ def build_order_candidates_from_predictions(
                 "ticker": ticker,
                 "outcome_side": side,
                 "outcome_price_cents": price_cents,
-                "confidence": _as_float(original.get("confidence"), _as_float(row.get("confidence"), 0.0)),
+                "confidence": confidence,
+                "model_prob": round(model_prob, 4),
+                "implied_prob": round(implied_prob, 4),
+                "edge": edge,
+                "ev": ev,
             }
         )
-    matched.sort(key=lambda x: x.get("confidence") or 0.0, reverse=True)
+    matched.sort(key=lambda x: x.get("edge") or 0.0, reverse=True)
     return matched
 
 
@@ -698,11 +719,19 @@ def submit_prediction_orders(
     dry_run: bool = True,
     include_combos: bool = False,
     max_combos: int = 0,
+    min_edge: float = MIN_VALUE_EDGE,
 ) -> dict[str, Any]:
-    """Submit Kalshi orders for matched predictions with a fixed USD stake per order."""
+    """Submit Kalshi orders for matched predictions with a fixed USD stake per order.
+
+    Candidates are pre-filtered by ``build_order_candidates_from_predictions`` to
+    require at least ``min_edge`` of model-probability-over-market-price edge, so
+    only positive-EV matches reach the order payload.
+    """
     target_stake = max(0.01, float(stake_usd))
     limit = max(1, int(max_orders))
-    candidates = build_order_candidates_from_predictions(predictions_payload, force_refresh=True)
+    candidates = build_order_candidates_from_predictions(
+        predictions_payload, force_refresh=True, min_edge=min_edge
+    )
     selected = candidates[:limit]
     submitted: list[dict[str, Any]] = []
     for cand in selected:
@@ -733,6 +762,10 @@ def submit_prediction_orders(
             "count": payload["count"],
             "target_stake_usd": round(target_stake, 2),
             "confidence": cand.get("confidence") or 0.0,
+            "model_prob": cand.get("model_prob") or 0.0,
+            "implied_prob": cand.get("implied_prob") or 0.0,
+            "edge": cand.get("edge") or 0.0,
+            "ev": cand.get("ev") or 0.0,
             "prediction": cand.get("prediction") or {},
             "market": cand.get("market") or {},
             "dry_run": bool(dry_run),
@@ -750,6 +783,7 @@ def submit_prediction_orders(
         "dry_run": bool(dry_run),
         "stake_usd": round(target_stake, 2),
         "max_orders": limit,
+        "min_edge": round(float(min_edge), 4),
         "matched_count": len(candidates),
         "selected_count": len(selected),
         "submitted_count": len(submitted),

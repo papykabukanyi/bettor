@@ -2,15 +2,6 @@
 	"version": "2.0.0",
 	"tasks": [
 		{
-			"label": "Verify Project",
-			"type": "shell",
-			"command": "python",
-			"args": [
-				"scripts/_verify_all.py"
-			],
-			"group": "test"
-		},
-		{
 			"label": "Run Betting Bot",
 			"type": "shell",
 			"command": "python",
