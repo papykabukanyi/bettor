@@ -1,34 +1,16 @@
-# Core data science
+# Core data science / model training
 pandas
 numpy
-scipy
 scikit-learn
 joblib
+pyarrow>=12.0.0
 
-# HTTP / scraping
+# HTTP (Kalshi API + free news RSS/JSON feeds)
 requests
-beautifulsoup4
-
-# MLB data (free)
-pybaseball
-MLB-StatsAPI
-
-# Visualization
-matplotlib
-seaborn
-
-# Utilities
-python-dotenv
-tabulate
 
 # Web dashboard
 flask
 gunicorn
-fastapi
-uvicorn
-
-# Database
-psycopg2-binary
 
 # Timezone
 pytz
@@ -36,13 +18,8 @@ pytz
 # Scheduled jobs
 APScheduler
 
-# Reddit API (sentiment)
-praw
-
-# Cryptography (Kalshi signing)
+# Cryptography (Kalshi RSA-PSS request signing)
 cryptography
 
-# Hugging Face dataset push / streaming
+# Hugging Face dataset + model hub storage
 huggingface_hub>=0.20.0
-datasets>=2.14.0
-pyarrow>=12.0.0

@@ -5,23 +5,13 @@ services:
     plan: free
     buildCommand: pip install -r requirements.txt
     # --workers 1 is deliberate: this app runs its own in-process background
-    # scheduler (APScheduler) for the data/train/predict/Kalshi cycles. Running
-    # more than one worker means every scheduled job -- including live Kalshi
-    # order placement -- fires once per worker, independently and concurrently,
-    # which risks duplicate bets. Do not raise this without adding proper
-    # cross-worker coordination first.
+    # scheduler (APScheduler) for the perps data-collect / train / trading
+    # cycles. Running more than one worker means every scheduled job --
+    # including live Kalshi order placement -- fires once per worker,
+    # independently and concurrently, which risks duplicate orders. Do not
+    # raise this without adding proper cross-worker coordination first.
     startCommand: gunicorn --chdir src dashboard:app --bind 0.0.0.0:$PORT --workers 1 --threads 1
     autoDeploy: true
-    envVars:
-      - key: PYTHON_VERSION
-        value: 3.11.0
-
-  - type: cron
-    name: bettor-kalshi-automation
-    env: python
-    schedule: "*/5 * * * *"
-    buildCommand: pip install -r requirements.txt
-    startCommand: python scripts/run_render_kalshi_tick.py
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.0

@@ -112,12 +112,13 @@ GoogleService-Info.plist
 .dmypy.json
 dmypy.json
 
-# Data files
-data/*.csv
-data/*.json
-data/cricket/*.zip
+# Data files -- all runtime state (collected market data, trained models,
+# job locks/history, position state) is regenerated per-deployment and never
+# committed. Anchored to the root /data dir only -- an unanchored "data/"
+# also matches src/data/, which would silently hide real source modules from
+# git status/add.
+/data/
 models/*.pkl
 models/*.joblib
-modal_data/
 .kalshi/
 .wrangler/

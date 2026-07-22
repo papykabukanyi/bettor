@@ -1,13 +1,14 @@
 # Test suite
 
-Real regression tests for the specific production incidents this bot has hit:
-rate-limit cascades that silently froze predictions for two weeks, duplicate
-concurrent pipeline runs that risked placing the same Kalshi bet twice,
-leakage in the engineered training features, and the bankroll/combo-leg rules
-that protect real money.
+Regression tests for the Kalshi Perps trading bot's safety properties: the
+strategy must never place a real order outside dry-run without an explicit
+opt-in, must never open more than one position at a time, must respect the
+daily loss cap, and its engineered features must never leak future price
+information into training rows. Job locking must prevent the same scheduled
+job (including one that can place real orders) from running twice at once.
 
-None of these tests touch the network. Hugging Face Hub and Kalshi are
-mocked; sports-data fetchers are monkeypatched to return synthetic rows.
+None of these tests touch the network. Kalshi, Hugging Face Hub, and news
+feeds are all mocked or monkeypatched with synthetic data.
 
 ## Running
 
@@ -19,20 +20,17 @@ pytest
 Run a single file while iterating:
 
 ```bash
-pytest tests/test_hf_pipeline_features.py -v
+pytest tests/test_perps_strategy.py -v
 ```
 
 ## What's covered
 
 | File | What it guards against |
 |---|---|
-| `test_hf_uploader_resilience.py` | HF `whoami`/`repo_info`/`create_repo` rate-limiting taking the whole pipeline down (the actual cause of predictions freezing for two weeks) |
-| `test_hf_pipeline_features.py` | Engineered form/rest/H2H/news features leaking future results into training rows |
-| `test_hf_pipeline_training.py` | Per-sport model split respecting the min-rows threshold + fallback to the combined model; redundant HF dataset downloads within one cycle |
-| `test_hf_pipeline_predict_resilience.py` | A crash in the day-over-day drift comparison blocking the actual predictions file write; same-day news adjustment staying bounded |
-| `test_kalshi_rules.py` | Combos exceeding 2 legs or going negative-EV; a bet with no parseable date being matched by name similarity alone |
-| `test_pregame_bankroll.py` | Placing orders the account can't cover instead of deferring to the next cycle; dry-run being incorrectly capital-gated |
-| `test_dashboard_jobs.py` | Duplicate concurrent execution of the same scheduled job (the "Dashboard scheduler started" x2 bug); stale (days-old) predictions being served as if current |
+| `test_perps_strategy.py` | Real orders placed outside dry-run; the daily loss cap not blocking new entries; opening a second position while one is already open; the direction model failing to override (or correctly deferring to) the technical scalper signal |
+| `test_perps_data.py` | Leakage in the engineered multi-timeframe features (a label that peeks at its own future window); the live-instrument watchlist not falling back to a known list when Kalshi's listing call fails |
+| `test_perps_model.py` | Training silently "succeeding" on too little data; a trained model failing to produce a usable prediction from a live feature row |
+| `test_dashboard_jobs.py` | Duplicate concurrent execution of the same scheduled job; a stale (crashed-process) lock permanently wedging a job |
 
 ## Adding a new test
 
