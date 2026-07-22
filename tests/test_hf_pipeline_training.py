@@ -26,10 +26,17 @@ class FakeApi:
 
 
 @pytest.fixture
-def pipeline():
+def pipeline(tmp_path):
+    import os
     p = HFDirectPipeline()
     p._ok = True
     p._api = FakeApi()
+    # Redirect all on-disk writes into the throwaway dir so training tests never
+    # clobber the real repo data/hf_pipeline_status.json or training_history.json.
+    p._data_dir = str(tmp_path)
+    p._status_file = os.path.join(str(tmp_path), "status.json")
+    p._training_history_file = os.path.join(str(tmp_path), "training_history.json")
+    p._predictions_file = os.path.join(str(tmp_path), "preds.json")
     return p
 
 

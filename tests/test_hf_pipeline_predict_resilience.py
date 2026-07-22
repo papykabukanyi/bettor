@@ -19,6 +19,11 @@ def pipeline(tmp_path):
     p._ok = False
     p._data_dir = str(tmp_path)
     p._predictions_file = os.path.join(str(tmp_path), "preds.json")
+    # Also redirect the status + training-history files, which are computed from
+    # _data_dir at construction time -- otherwise _write_status() clobbers the
+    # real repo data/hf_pipeline_status.json during the test.
+    p._status_file = os.path.join(str(tmp_path), "status.json")
+    p._training_history_file = os.path.join(str(tmp_path), "training_history.json")
     p._fetch_upcoming_games = lambda day: []  # no games -> exercise the drift/snapshot path with an empty schedule
     p._build_form_snapshot = lambda: ({}, {})
     p._build_news_snapshot = lambda: {}

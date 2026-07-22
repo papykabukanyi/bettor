@@ -153,6 +153,16 @@ MLB_SEASONS = [2026, 2025, 2024, 2023]
 # ---------------------------------------------------------------------------
 FOOTBALL_DATA_API_KEY = os.getenv("FOOTBALL_DATA_API_KEY", "")
 SPORT                 = os.getenv("SPORT", "all")   # "all", "mlb", or "soccer"
+
+# ---------------------------------------------------------------------------
+# NBA (balldontlie)
+# ---------------------------------------------------------------------------
+# balldontlie moved its live API to api.balldontlie.io and now requires an
+# Authorization header even on the free tier -- the old www.balldontlie.io/v1
+# path now serves their marketing website (HTML, not JSON) instead of 404ing,
+# so a stale integration fails silently rather than with an obvious error.
+BALLDONTLIE_API_KEY = os.getenv("BALLDONTLIE_API_KEY", "")
+BALLDONTLIE_BASE_URL = os.getenv("BALLDONTLIE_BASE_URL", "https://api.balldontlie.io/v1")
 WC_START_DATE         = "2026-06-11"
 WC_END_DATE           = "2026-07-19"
 

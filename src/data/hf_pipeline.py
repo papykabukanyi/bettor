@@ -336,6 +336,8 @@ class HFDirectPipeline:
                 CRICKET_RAPIDAPI_HOST,
                 CRICKET_RAPIDAPI_KEY,
                 THESPORTSDB_API_KEY,
+                BALLDONTLIE_API_KEY,
+                BALLDONTLIE_BASE_URL,
             )
         except Exception:
             HF_API_KEY = os.getenv("HF_API_KEY", "")
@@ -352,9 +354,13 @@ class HFDirectPipeline:
             CRICKET_RAPIDAPI_HOST = os.getenv("CRICKET_RAPIDAPI_HOST", "cricket-live-data.p.rapidapi.com")
             CRICKET_RAPIDAPI_KEY = os.getenv("CRICKET_RAPIDAPI_KEY", "")
             THESPORTSDB_API_KEY = os.getenv("THESPORTSDB_API_KEY", "3")
+            BALLDONTLIE_API_KEY = os.getenv("BALLDONTLIE_API_KEY", "")
+            BALLDONTLIE_BASE_URL = os.getenv("BALLDONTLIE_BASE_URL", "https://api.balldontlie.io/v1")
 
         self.token = str(token or HF_API_KEY or "").strip()
         self.thesportsdb_api_key = str(THESPORTSDB_API_KEY or "3").strip() or "3"
+        self.balldontlie_api_key = str(BALLDONTLIE_API_KEY or "").strip()
+        self.balldontlie_base_url = str(BALLDONTLIE_BASE_URL or "https://api.balldontlie.io/v1").strip().rstrip("/")
         self.football_data_api_key = str(FOOTBALL_DATA_API_KEY or "").strip()
         self.tennis_sackmann_dir = str(TENNIS_JEFF_SACKMANN_DIR or "").strip()
         self.newsdata_api_key = str(NEWSDATA_API_KEY or "").strip()
@@ -1664,13 +1670,17 @@ class HFDirectPipeline:
 
     def _fetch_nba_games(self, start: datetime.date, end: datetime.date) -> list[dict]:
         rows: list[dict] = []
+        if not self.balldontlie_api_key:
+            logger.debug("[hf_pipeline] NBA fetch skipped: BALLDONTLIE_API_KEY not set")
+            return rows
         current = start
         while current <= end:
             day = current.isoformat()
             try:
                 resp = requests.get(
-                    "https://www.balldontlie.io/api/v1/games",
+                    f"{self.balldontlie_base_url}/games",
                     params={"start_date": day, "end_date": day, "per_page": 100},
+                    headers={"Authorization": self.balldontlie_api_key},
                     timeout=20,
                 )
                 resp.raise_for_status()
@@ -2527,8 +2537,8 @@ class HFDirectPipeline:
                                  "game_id": str(game.get("gamePk") or ""),
                                  "home_starter": home_starter, "away_starter": away_starter,
                                  "home_team_id": home_team_id, "away_team_id": away_team_id})
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("[hf_pipeline] MLB upcoming fetch failed for %s: %s", day, exc)
         return rows
 
     def _fetch_mlb_team_players(self, team_id: str, cache: dict[str, list[str]]) -> list[str]:
@@ -2656,10 +2666,14 @@ class HFDirectPipeline:
 
     def _fetch_nba_upcoming(self, day: datetime.date) -> list[dict]:
         rows: list[dict] = []
+        if not self.balldontlie_api_key:
+            logger.debug("[hf_pipeline] NBA upcoming skipped: BALLDONTLIE_API_KEY not set")
+            return rows
         try:
             resp = requests.get(
-                "https://www.balldontlie.io/api/v1/games",
+                f"{self.balldontlie_base_url}/games",
                 params={"start_date": day.isoformat(), "end_date": day.isoformat(), "per_page": 100},
+                headers={"Authorization": self.balldontlie_api_key},
                 timeout=20,
             )
             resp.raise_for_status()
@@ -2671,8 +2685,8 @@ class HFDirectPipeline:
                 rows.append({"sport": "nba", "league": "NBA", "home_team": ht, "away_team": at,
                              "game_date": day.isoformat(), "game_time": str(g.get("date") or ""),
                              "game_id": str(g.get("id") or "")})
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("[hf_pipeline] NBA upcoming fetch failed for %s: %s", day, exc)
         return rows
 
     def _fetch_nhl_upcoming(self, day: datetime.date) -> list[dict]:
@@ -2692,8 +2706,8 @@ class HFDirectPipeline:
                                  "game_date": str(game.get("gameDate") or day.isoformat()),
                                  "game_time": str(game.get("startTimeUTC") or ""),
                                  "game_id": str(game.get("id") or "")})
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("[hf_pipeline] NHL upcoming fetch failed for %s: %s", day, exc)
         return rows
 
     def _fetch_soccer_upcoming(self, day: datetime.date) -> list[dict]:
@@ -3082,8 +3096,8 @@ class HFDirectPipeline:
                              "home_team": ht, "away_team": at,
                              "game_date": day.isoformat(), "game_time": str(ev.get("strTime") or ""),
                              "game_id": str(ev.get("idEvent") or "")})
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("[hf_pipeline] soccer TheSportsDB upcoming fetch failed for %s: %s", day, exc)
         return rows
 
     def _fetch_tennis_games_jeff_sackmann(self, start: datetime.date, end: datetime.date) -> list[dict]:
