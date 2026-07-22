@@ -58,7 +58,13 @@ def main() -> int:
     print(json.dumps(result, indent=2, default=str))
     print("\n--- Summary ---")
     print(f"Live trading enabled: {LIVE_TRADING_ENABLED}")
-    print(f"Action taken: {result.get('action')}")
+    position_result = result.get("position_management") or {}
+    entry_result = result.get("entry_scan") or {}
+    open_count = position_result.get("open_position_count", 0 if position_result.get("action") == "no_position" else "?")
+    print(f"Position management: {position_result.get('action')} (open positions: {open_count})")
+    print(f"Entry scan: {entry_result.get('action')}")
+    for opened in entry_result.get("opened") or []:
+        print(f"  -> {opened.get('ticker')}: {opened.get('action')}")
     if not result.get("ok", True):
         return 1
     return 0

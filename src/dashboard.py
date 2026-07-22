@@ -3,16 +3,30 @@
 Single purpose: watch all Kalshi perp instruments (BTC, ETH, SOL, XRP, DOGE,
 LTC, BCH, LINK, SUI, NEAR, DOT, HBAR, HYPE, kSHIB, XLM, ZEC), collect their
 multi-timeframe price history + news sentiment to a Hugging Face dataset,
-train a direction classifier on that history, and run a scalping strategy
-that opens small dry-run-by-default positions when the technical signal and
-the model agree, taking a small profit and repeating.
+train a direction classifier on that history, and run a growth strategy that
+splits the account into up to MAX_CONCURRENT_POSITIONS portions (each sized
+at POSITION_SIZE_PCT of current balance, using each market's own embedded
+leverage), opens dry-run-by-default positions when the technical signal and
+the model agree, and takes profit per portion -- compounding as it grows.
 
-Three background jobs, each cross-process locked (see `_locked_job`) so a
+Four background jobs, each cross-process locked (see `_locked_job`) so a
 single `--workers 1` gunicorn process never runs a job twice concurrently:
-  - perps_cycle       every PERPS_CYCLE_MINUTES    -- the actual trading loop
-  - perps_data_collect every PERPS_DATA_COLLECT_MINUTES -- archive fresh
+  - perps_fast_check    every PERPS_FAST_CHECK_SECONDS  -- ONLY manages an
+                                                            existing position
+                                                            (exit check incl.
+                                                            velocity-based
+                                                            quick-profit); the
+                                                            "take profit fast
+                                                            on a quick move"
+                                                            loop
+  - perps_entry_scan    every PERPS_CYCLE_MINUTES        -- full 16-instrument
+                                                            scan for a NEW
+                                                            entry (skips if a
+                                                            position is
+                                                            already open)
+  - perps_data_collect  every PERPS_DATA_COLLECT_MINUTES -- archive fresh
                                                             candles + news to HF
-  - perps_train       daily at PERPS_TRAIN_HOUR_ET:00 ET  -- retrain the model
+  - perps_train         daily at PERPS_TRAIN_HOUR_ET:00 ET -- retrain the model
 """
 from __future__ import annotations
 
@@ -43,6 +57,7 @@ DATA_DIR = ROOT_DIR / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 PERPS_CYCLE_MINUTES = max(1, int(os.getenv("PERPS_CYCLE_MINUTES", "2") or "2"))
+PERPS_FAST_CHECK_SECONDS = max(5, int(os.getenv("PERPS_FAST_CHECK_SECONDS", "20") or "20"))
 PERPS_DATA_COLLECT_MINUTES = max(5, int(os.getenv("PERPS_DATA_COLLECT_MINUTES", "15") or "15"))
 PERPS_TRAIN_HOUR_ET = int(os.getenv("PERPS_TRAIN_HOUR_ET", "3") or "3")
 # Dry-run is always the hard default regardless of this flag (see
@@ -66,6 +81,7 @@ JOB_LOCK_DIR = DATA_DIR / "locks"
 JOB_HISTORY_FILE = DATA_DIR / "job_run_history.json"
 JOB_HISTORY_MAX = 200
 LATEST_CYCLE_FILE = DATA_DIR / "perps_latest_cycle.json"
+LATEST_POSITION_CHECK_FILE = DATA_DIR / "perps_latest_position_check.json"
 
 
 def _load_json(path: Path, default: Any) -> Any:
@@ -183,10 +199,29 @@ def _is_cron_authorized() -> bool:
 # ---------------------------------------------------------------------------
 # Background jobs
 # ---------------------------------------------------------------------------
-@_locked_job("perps_cycle", stale_after_sec=300)
-def _run_perps_cycle() -> dict[str, Any]:
-    result = perps_strategy.run_cycle()
+@_locked_job("perps_fast_check", stale_after_sec=60)
+def _run_perps_fast_check() -> dict[str, Any]:
+    result = perps_strategy.manage_open_positions()
+    if result.get("action") != "no_position":
+        _save_json(LATEST_POSITION_CHECK_FILE, result)
+    return result
+
+
+@_locked_job("perps_entry_scan", stale_after_sec=300)
+def _run_perps_entry_scan() -> dict[str, Any]:
+    result = perps_strategy.scan_and_enter()
     _save_json(LATEST_CYCLE_FILE, result)
+    return result
+
+
+@_locked_job("perps_manual_cycle", stale_after_sec=300)
+def _run_perps_manual_cycle() -> dict[str, Any]:
+    """Manual/legacy full cycle (fast check + entry scan in one call) for
+    the manual tick endpoint and scripts/run_perps_cycle.py -- production
+    scheduling always uses the split fast/slow jobs above instead."""
+    result = perps_strategy.run_cycle()
+    _save_json(LATEST_POSITION_CHECK_FILE, result.get("position_management") or {})
+    _save_json(LATEST_CYCLE_FILE, result.get("entry_scan") or {})
     return result
 
 
@@ -223,13 +258,18 @@ def _ensure_background_jobs_started() -> None:
             )
             if ENABLE_PERPS_SCHEDULER:
                 scheduler.add_job(
-                    _run_perps_cycle, "interval", minutes=PERPS_CYCLE_MINUTES,
-                    id="perps_cycle", replace_existing=True,
+                    _run_perps_fast_check, "interval", seconds=PERPS_FAST_CHECK_SECONDS,
+                    id="perps_fast_check", replace_existing=True,
+                )
+                scheduler.add_job(
+                    _run_perps_entry_scan, "interval", minutes=PERPS_CYCLE_MINUTES,
+                    id="perps_entry_scan", replace_existing=True,
                 )
             scheduler.start()
             logger.info(
-                "Perps scheduler started: cycle every %d min (%s), data collect every %d min, train daily at %02d:00 ET, live_trading=%s",
-                PERPS_CYCLE_MINUTES, "ENABLED" if ENABLE_PERPS_SCHEDULER else "disabled",
+                "Perps scheduler started: fast exit check every %ds, entry scan every %d min (%s), "
+                "data collect every %d min, train daily at %02d:00 ET, live_trading=%s",
+                PERPS_FAST_CHECK_SECONDS, PERPS_CYCLE_MINUTES, "ENABLED" if ENABLE_PERPS_SCHEDULER else "disabled",
                 PERPS_DATA_COLLECT_MINUTES, PERPS_TRAIN_HOUR_ET, perps_strategy.LIVE_TRADING_ENABLED,
             )
 
@@ -246,10 +286,10 @@ def _ensure_background_jobs_started() -> None:
                 logger.warning("Startup train failed: %s", exc)
             if ENABLE_PERPS_SCHEDULER:
                 try:
-                    _run_perps_cycle()
-                    logger.info("Startup perps cycle completed")
+                    _run_perps_entry_scan()
+                    logger.info("Startup entry scan completed")
                 except Exception as exc:
-                    logger.exception("Startup perps cycle failed: %s", exc)
+                    logger.exception("Startup entry scan failed: %s", exc)
 
         threading.Thread(target=_runner, daemon=True, name="dashboard-perps-startup-autorun").start()
         _startup_done = True
@@ -273,6 +313,7 @@ def api_status():
     state = perps_strategy._load_state()  # noqa: SLF001
     _, meta = perps_model.load_model()
     latest_cycle = _load_json(LATEST_CYCLE_FILE, {})
+    latest_position_check = _load_json(LATEST_POSITION_CHECK_FILE, {})
 
     account_ok = True
     balance_usd = 0.0
@@ -298,6 +339,7 @@ def api_status():
 
     realized_pnl_by_date = state.get("realized_pnl_by_date") or {}
     total_realized_pnl = round(sum(float(v) for v in realized_pnl_by_date.values()), 6)
+    positions = state.get("positions") or []
 
     return jsonify({
         "ok": True,
@@ -309,7 +351,9 @@ def api_status():
             "exchange_active": exchange_active,
             "available_balance_usd": balance_usd,
         },
-        "position": state.get("position"),
+        "positions": positions,
+        "open_position_count": len(positions),
+        "max_concurrent_positions": perps_strategy.MAX_CONCURRENT_POSITIONS,
         "today_realized_pnl_usd": float(realized_pnl_by_date.get(et_today().isoformat(), 0.0)),
         "total_realized_pnl_usd": total_realized_pnl,
         "trade_count": len(state.get("trade_log") or []),
@@ -321,14 +365,20 @@ def api_status():
             "scores": (meta or {}).get("scores"),
         },
         "latest_cycle": latest_cycle,
+        "latest_position_check": latest_position_check,
         "watchlist": perps_data.get_watchlist(),
         "params": {
-            "trade_size_contracts": perps_strategy.TRADE_SIZE_CONTRACTS,
+            "position_size_pct": perps_strategy.POSITION_SIZE_PCT,
+            "max_concurrent_positions": perps_strategy.MAX_CONCURRENT_POSITIONS,
             "take_profit_pct": perps_strategy.TAKE_PROFIT_PCT,
             "stop_loss_pct": perps_strategy.STOP_LOSS_PCT,
+            "quick_profit_pct": perps_strategy.QUICK_PROFIT_PCT,
+            "quick_profit_velocity_pct_per_min": perps_strategy.QUICK_PROFIT_VELOCITY_PCT_PER_MIN,
             "max_hold_minutes": perps_strategy.MAX_HOLD_MINUTES,
-            "daily_loss_cap_usd": perps_strategy.DAILY_LOSS_CAP_USD,
+            "daily_loss_cap_pct": perps_strategy.DAILY_LOSS_CAP_PCT,
             "model_confidence_min": perps_strategy.MODEL_CONFIDENCE_MIN,
+            "fast_check_seconds": PERPS_FAST_CHECK_SECONDS,
+            "entry_scan_minutes": PERPS_CYCLE_MINUTES,
         },
     })
 
@@ -356,15 +406,28 @@ def api_positions():
 
 @app.route("/api/perps/tick", methods=["GET", "POST"])
 def api_perps_tick():
-    """Manually force an immediate strategy cycle instead of waiting for the
-    next scheduled interval."""
+    """Manually force an immediate full cycle (fast exit check, then entry
+    scan if nothing was open) instead of waiting for the next scheduled
+    interval."""
     if not _is_cron_authorized():
         return jsonify({"ok": False, "error": "Unauthorized"}), 401
     try:
-        result = _run_perps_cycle()
+        result = _run_perps_manual_cycle()
         return jsonify(result)
     except Exception as exc:
         logger.exception("[dashboard] manual perps tick failed: %s", exc)
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+@app.route("/api/perps/fast-check", methods=["GET", "POST"])
+def api_perps_fast_check():
+    """Manually force an immediate position exit check only (what the fast
+    loop does every PERPS_FAST_CHECK_SECONDS)."""
+    if not _is_cron_authorized():
+        return jsonify({"ok": False, "error": "Unauthorized"}), 401
+    try:
+        return jsonify(_run_perps_fast_check())
+    except Exception as exc:
         return jsonify({"ok": False, "error": str(exc)}), 500
 
 
@@ -389,7 +452,9 @@ def api_perps_train():
 
 
 _JOB_LABELS = {
-    "perps_cycle": f"Trading cycle (every {PERPS_CYCLE_MINUTES} min)",
+    "perps_fast_check": f"Fast exit check (every {PERPS_FAST_CHECK_SECONDS}s)",
+    "perps_entry_scan": f"Entry scan -- all instruments (every {PERPS_CYCLE_MINUTES} min)",
+    "perps_manual_cycle": "Manual full cycle",
     "perps_data_collect": f"Data collection -> HF (every {PERPS_DATA_COLLECT_MINUTES} min)",
     "perps_train": f"Model retrain (daily {PERPS_TRAIN_HOUR_ET:02d}:00 ET)",
 }
