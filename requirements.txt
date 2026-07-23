@@ -18,8 +18,11 @@ pytz
 # Scheduled jobs
 APScheduler
 
-# Cryptography (Kalshi RSA-PSS request signing)
-cryptography
+# Cryptography (Kalshi RSA-PSS request signing). Pinned below 44: the very
+# latest releases don't always have a prebuilt wheel yet for every platform,
+# which forces pip to compile the Rust extension from source (slow, and can
+# fail on a nearly-full disk since it briefly needs real build space).
+cryptography>=42,<44
 
 # Hugging Face dataset + model hub storage
 huggingface_hub>=0.20.0

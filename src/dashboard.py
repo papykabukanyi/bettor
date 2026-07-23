@@ -74,6 +74,56 @@ scheduler = BackgroundScheduler(timezone="America/New_York")
 _startup_lock = threading.Lock()
 _startup_done = False
 
+# `/api/status` used to make 3 sequential blocking Kalshi calls on every
+# dashboard poll (every 10s from the browser). Worst case (each near its own
+# timeout) that adds up to more than gunicorn's default 30s worker timeout,
+# which kills and restarts the ONE worker -- which re-runs the whole startup
+# sequence (scheduler re-added, jobs re-registered) and is exactly what made
+# the dashboard appear to "lose everything" and stutter. A short cache
+# means only one real request per window actually hits Kalshi.
+_ACCOUNT_SNAPSHOT_CACHE: dict[str, Any] = {}
+_ACCOUNT_SNAPSHOT_CACHE_TS = 0.0
+_ACCOUNT_SNAPSHOT_CACHE_LOCK = threading.Lock()
+_ACCOUNT_SNAPSHOT_CACHE_TTL_SEC = max(5, int(os.getenv("ACCOUNT_SNAPSHOT_CACHE_TTL_SEC", "12") or "12"))
+
+
+def _cached_account_snapshot() -> dict[str, Any]:
+    global _ACCOUNT_SNAPSHOT_CACHE, _ACCOUNT_SNAPSHOT_CACHE_TS
+    now = time.monotonic()
+    with _ACCOUNT_SNAPSHOT_CACHE_LOCK:
+        if _ACCOUNT_SNAPSHOT_CACHE and (now - _ACCOUNT_SNAPSHOT_CACHE_TS) < _ACCOUNT_SNAPSHOT_CACHE_TTL_SEC:
+            return dict(_ACCOUNT_SNAPSHOT_CACHE)
+
+    account_ok = True
+    balance_usd = 0.0
+    margin_enabled = None
+    exchange_active = None
+    try:
+        margin_enabled = bool(get_margin_enabled().get("enabled"))
+    except Exception as exc:
+        account_ok = False
+        logger.debug("margin_enabled check failed: %s", exc)
+    try:
+        exchange_active = bool(get_margin_exchange_status().get("exchange_active"))
+    except Exception as exc:
+        logger.debug("exchange_status check failed: %s", exc)
+    try:
+        balance = get_margin_balance(compute_available_balance=True)
+        for sub in (balance.get("subaccount_balances") or []):
+            balance_usd = max(balance_usd, float(sub.get("available_balance") or 0.0))
+    except Exception as exc:
+        account_ok = False
+        logger.debug("balance check failed: %s", exc)
+
+    snapshot = {
+        "ok": account_ok, "margin_enabled": margin_enabled,
+        "exchange_active": exchange_active, "available_balance_usd": balance_usd,
+    }
+    with _ACCOUNT_SNAPSHOT_CACHE_LOCK:
+        _ACCOUNT_SNAPSHOT_CACHE = dict(snapshot)
+        _ACCOUNT_SNAPSHOT_CACHE_TS = time.monotonic()
+    return snapshot
+
 # ---------------------------------------------------------------------------
 # Cross-process job lock + run history
 # ---------------------------------------------------------------------------
@@ -314,28 +364,7 @@ def api_status():
     _, meta = perps_model.load_model()
     latest_cycle = _load_json(LATEST_CYCLE_FILE, {})
     latest_position_check = _load_json(LATEST_POSITION_CHECK_FILE, {})
-
-    account_ok = True
-    balance_usd = 0.0
-    margin_enabled = None
-    exchange_active = None
-    try:
-        margin_enabled = bool(get_margin_enabled().get("enabled"))
-    except Exception as exc:
-        account_ok = False
-        margin_enabled = None
-        logger.debug("margin_enabled check failed: %s", exc)
-    try:
-        exchange_active = bool(get_margin_exchange_status().get("exchange_active"))
-    except Exception:
-        exchange_active = None
-    try:
-        balance = get_margin_balance(compute_available_balance=True)
-        for sub in (balance.get("subaccount_balances") or []):
-            balance_usd = max(balance_usd, float(sub.get("available_balance") or 0.0))
-    except Exception as exc:
-        account_ok = False
-        logger.debug("balance check failed: %s", exc)
+    account = _cached_account_snapshot()
 
     realized_pnl_by_date = state.get("realized_pnl_by_date") or {}
     total_realized_pnl = round(sum(float(v) for v in realized_pnl_by_date.values()), 6)
@@ -345,12 +374,7 @@ def api_status():
         "ok": True,
         "now": dt.datetime.now(dt.timezone.utc).isoformat(),
         "live_trading_enabled": perps_strategy.LIVE_TRADING_ENABLED,
-        "account": {
-            "ok": account_ok,
-            "margin_enabled": margin_enabled,
-            "exchange_active": exchange_active,
-            "available_balance_usd": balance_usd,
-        },
+        "account": account,
         "positions": positions,
         "open_position_count": len(positions),
         "max_concurrent_positions": perps_strategy.MAX_CONCURRENT_POSITIONS,

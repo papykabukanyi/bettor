@@ -122,7 +122,20 @@ MAX_HOLD_MINUTES = _env_int("PERPS_MAX_HOLD_MINUTES", 30)
 ENTRY_DIP_PCT = _env_float("PERPS_ENTRY_DIP_PCT", 0.0015)      # 0.15% below short MA triggers interest
 SHORT_MA_MINUTES = _env_int("PERPS_SHORT_MA_MINUTES", 15)
 TREND_FILTER_DOWN_PCT = _env_float("PERPS_TREND_FILTER_DOWN_PCT", 0.02)  # skip entries if down >2%
-MODEL_CONFIDENCE_MIN = _env_float("PERPS_MODEL_CONFIDENCE_MIN", 0.55)
+# Tuned via src/data/perps_backtest.py against the full real historical
+# archive (13 instruments, ~7 weeks, 504k rows, 2026-06-03 -> 2026-07-22,
+# walk-forward: fit on the first 70% chronologically, simulate the held-out
+# last 30%). At the previous default (0.55) the backtest fired only ~36
+# trades/day; loosening to 0.52 (leaving the technical dip/trend filters
+# untouched -- deliberately NOT loosening those, since values much below the
+# current ENTRY_DIP_PCT start firing on every 1-minute wiggle rather than a
+# real dip) increased that to ~600 trades/day at a 54.15% win rate and a
+# backtested +25.8% return over the 11.68-day test window, vs. 58.0%
+# win rate / +4.2% at the old default. Known backtest limitation: no Kalshi
+# trading fees or bid-ask slippage are modeled, so treat the absolute return
+# figures as optimistic -- the frequency/win-rate comparison across settings
+# is the more trustworthy signal from this exercise.
+MODEL_CONFIDENCE_MIN = _env_float("PERPS_MODEL_CONFIDENCE_MIN", 0.52)
 # Daily loss cap as a PERCENTAGE of the balance measured at the start of the
 # day (not a fixed dollar figure) so it scales sensibly as the account grows.
 DAILY_LOSS_CAP_PCT = _env_float("PERPS_DAILY_LOSS_CAP_PCT", 0.15)

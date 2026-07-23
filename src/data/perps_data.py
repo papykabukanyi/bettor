@@ -82,7 +82,13 @@ def _candles_to_frame(candles: list[dict[str, Any]]) -> pd.DataFrame:
             continue
         rows.append({"ts": int(ts), "close": float(close)})
     if not rows:
-        return pd.DataFrame(columns=["ts", "close"])
+        # Explicit numeric dtypes even when empty -- a bare
+        # pd.DataFrame(columns=[...]) defaults every column to "object",
+        # which silently upcasts an entire pd.concat() to object dtype the
+        # moment ANY chunk in a chained fetch (e.g. fetch_extended_candles
+        # asking further back than a newly-listed ticker's history) comes
+        # back empty, breaking pd.merge_asof downstream with a dtype error.
+        return pd.DataFrame({"ts": pd.Series(dtype="int64"), "close": pd.Series(dtype="float64")})
     return pd.DataFrame(rows).drop_duplicates(subset="ts").sort_values("ts").reset_index(drop=True)
 
 
@@ -280,31 +286,53 @@ def push_dataset_snapshot(df: pd.DataFrame) -> dict[str, Any]:
 
 
 def load_training_dataset(*, max_shards: int = 90) -> pd.DataFrame:
-    """Prefer local shards (fast, no network); fall back to downloading every
-    shard from the HF dataset repo when local history is thin (fresh machine,
-    or local `data/` was wiped) -- this is the actual "download from
-    Hugging Face" path."""
+    """ALWAYS merges local shards with the full HF dataset archive (deduped
+    on ticker+ts) rather than treating HF as only a cold-start fallback --
+    a long-running deployment accumulates its own local shards from its
+    rolling ~72h collection window and would otherwise never pick up the
+    deeper history archived to HF, training on a much thinner slice of data
+    than actually exists. This is the "download from Hugging Face" step the
+    model actually trains on."""
     shard_dir = DATA_DIR / "perps_dataset"
     local_files = sorted(shard_dir.glob("*.parquet")) if shard_dir.exists() else []
-    if len(local_files) >= 2:
-        frames = [pd.read_parquet(f) for f in local_files[-max_shards:]]
-        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
-
-    if not HF_API_KEY:
-        return pd.concat([pd.read_parquet(f) for f in local_files], ignore_index=True) if local_files else pd.DataFrame()
-
-    try:
-        from huggingface_hub import HfApi, hf_hub_download
-        api = HfApi(token=HF_API_KEY)
-        files = [f for f in api.list_repo_files(repo_id=HF_DATASET_REPO, repo_type="dataset") if f.endswith(".parquet")]
-        files = sorted(files)[-max_shards:]
-        frames = []
-        for f in files:
-            local_path = hf_hub_download(repo_id=HF_DATASET_REPO, filename=f, repo_type="dataset", token=HF_API_KEY)
-            frames.append(pd.read_parquet(local_path))
-        for f in local_files:
+    frames = []
+    for f in local_files:
+        try:
             frames.append(pd.read_parquet(f))
-        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
-    except Exception as exc:
-        logger.warning("[perps_data] HF dataset download failed: %s", exc)
-        return pd.concat([pd.read_parquet(f) for f in local_files], ignore_index=True) if local_files else pd.DataFrame()
+        except Exception as exc:
+            logger.warning("[perps_data] failed to read local shard %s: %s", f, exc)
+
+    if HF_API_KEY:
+        try:
+            from huggingface_hub import HfApi, hf_hub_download
+            api = HfApi(token=HF_API_KEY)
+            # Scoped to the "data/" prefix this module actually writes to --
+            # an unscoped ".parquet" suffix match would also pull in any
+            # unrelated parquet files sitting in the same repo (e.g. if
+            # HF_DATASET_REPO is ever pointed at a repo shared with another
+            # pipeline), silently corrupting training with rows that don't
+            # even share this schema.
+            hf_files = [
+                f for f in api.list_repo_files(repo_id=HF_DATASET_REPO, repo_type="dataset")
+                if f.startswith("data/") and f.endswith(".parquet")
+            ]
+            hf_files = sorted(hf_files)[-max_shards:]
+            for f in hf_files:
+                try:
+                    local_path = hf_hub_download(repo_id=HF_DATASET_REPO, filename=f, repo_type="dataset", token=HF_API_KEY)
+                    shard = pd.read_parquet(local_path)
+                    if "ticker" in shard.columns and "ts" in shard.columns:
+                        frames.append(shard)
+                    else:
+                        logger.warning("[perps_data] skipping HF shard with unexpected schema: %s", f)
+                except Exception as exc:
+                    logger.warning("[perps_data] failed to read HF shard %s: %s", f, exc)
+        except Exception as exc:
+            logger.warning("[perps_data] HF dataset listing failed: %s", exc)
+
+    if not frames:
+        return pd.DataFrame()
+    combined = pd.concat(frames, ignore_index=True)
+    if "ticker" in combined.columns and "ts" in combined.columns:
+        combined = combined.drop_duplicates(subset=["ticker", "ts"])
+    return combined

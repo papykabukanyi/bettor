@@ -76,8 +76,9 @@ def fetch_extended_candles(ticker: str, *, days: int, period_interval: int) -> p
             break
         window_end = window_start
         remaining -= span
+    frames = [f for f in frames if not f.empty]  # e.g. windows before a newly-listed ticker's launch date
     if not frames:
-        return pd.DataFrame(columns=["ts", "close"])
+        return pd.DataFrame({"ts": pd.Series(dtype="int64"), "close": pd.Series(dtype="float64")})
     combined = pd.concat(frames, ignore_index=True)
     return combined.drop_duplicates(subset="ts").sort_values("ts").reset_index(drop=True)
 
@@ -97,7 +98,7 @@ def build_ticker_frame(ticker: str, *, days: int) -> pd.DataFrame:
 _CANDIDATES = {
     "logistic_regression": lambda: LogisticRegression(max_iter=1000, class_weight="balanced"),
     "random_forest": lambda: RandomForestClassifier(
-        n_estimators=200, max_depth=6, min_samples_leaf=20, class_weight="balanced", random_state=42,
+        n_estimators=200, max_depth=6, min_samples_leaf=20, class_weight="balanced", random_state=42, n_jobs=-1,
     ),
     "gradient_boosting": lambda: GradientBoostingClassifier(
         n_estimators=150, max_depth=3, learning_rate=0.05, random_state=42,
@@ -191,6 +192,7 @@ def simulate(
     entry_dip_pct: float | None = None,
     trend_filter_down_pct: float | None = None,
     model_confidence_min: float | None = None,
+    daily_loss_cap_pct: float | None = None,
 ) -> dict[str, Any]:
     """Walk forward through `test_df` (all tickers, sorted by ts) replaying
     the real strategy functions. Every strategy parameter can be overridden
@@ -207,6 +209,7 @@ def simulate(
     entry_dip_pct = strat.ENTRY_DIP_PCT if entry_dip_pct is None else entry_dip_pct
     trend_filter_down_pct = strat.TREND_FILTER_DOWN_PCT if trend_filter_down_pct is None else trend_filter_down_pct
     model_confidence_min = strat.MODEL_CONFIDENCE_MIN if model_confidence_min is None else model_confidence_min
+    daily_loss_cap_pct = strat.DAILY_LOSS_CAP_PCT if daily_loss_cap_pct is None else daily_loss_cap_pct
 
     df = test_df.sort_values("ts").reset_index(drop=True)
     if "model_probability_up" not in df.columns:
@@ -215,10 +218,15 @@ def simulate(
     balance = starting_balance
     open_positions: dict[str, dict[str, Any]] = {}
     trades: list[dict[str, Any]] = []
+    daily_pnl: dict[str, float] = {}
+    daily_reference_balance: dict[str, float] = {}
 
     for row in df.itertuples(index=False):
         ticker = row.ticker
         price = float(row.close)
+        date_str = pd.Timestamp(row.ts, unit="s", tz="UTC").strftime("%Y-%m-%d")
+        if date_str not in daily_reference_balance:
+            daily_reference_balance[date_str] = balance
 
         # -- manage an existing position on this ticker first --
         pos = open_positions.get(ticker)
@@ -238,7 +246,13 @@ def simulate(
             should_exit, reason = strat.decide_exit(pos, price, velocity_pct_per_min=velocity)
             if should_exit:
                 realized = round((price - pos["entry_price"]) * pos["count"], 6)
-                balance += realized + pos["margin_committed_usd"]  # release margin + realized pnl
+                # `balance` is total equity throughout (only realized P&L ever
+                # changes it); margin_committed_usd was NEVER subtracted from
+                # it at open time -- it only ever reduced `available` via the
+                # running sum below. Adding it back here too would manufacture
+                # money out of nothing on every single trade.
+                balance += realized
+                daily_pnl[date_str] = daily_pnl.get(date_str, 0.0) + realized
                 trades.append({
                     "ticker": ticker, "entry_price": pos["entry_price"], "exit_price": price,
                     "count": pos["count"], "realized_pnl_usd": realized, "reason": reason,
@@ -251,6 +265,10 @@ def simulate(
         # -- otherwise, consider a new entry on this ticker --
         if ticker in open_positions or len(open_positions) >= max_concurrent_positions:
             continue
+
+        reference_balance = daily_reference_balance[date_str]
+        if reference_balance > 0 and daily_pnl.get(date_str, 0.0) <= -abs(daily_loss_cap_pct) * reference_balance:
+            continue  # daily loss cap breached -- exits still happen above, only new entries are blocked
 
         # short_ma reconstructed from dist_to_ma_15 (= (close - ma_15) / ma_15),
         # matching exactly what decide_entry_technical compares against live.

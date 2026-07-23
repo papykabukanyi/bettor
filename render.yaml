@@ -10,7 +10,13 @@ services:
     # including live Kalshi order placement -- fires once per worker,
     # independently and concurrently, which risks duplicate orders. Do not
     # raise this without adding proper cross-worker coordination first.
-    startCommand: gunicorn --chdir src dashboard:app --bind 0.0.0.0:$PORT --workers 1 --threads 1
+    # --timeout 60 (gunicorn default is 30s): a slow Kalshi API response on
+    # /api/status used to be able to exceed the default and get the single
+    # worker killed + restarted by gunicorn's arbiter, which re-ran the
+    # whole startup sequence (scheduler rebuilt from scratch) and showed up
+    # as the dashboard "losing everything" every so often. Caching in
+    # dashboard.py fixes the underlying slowness; this is defense-in-depth.
+    startCommand: gunicorn --chdir src dashboard:app --bind 0.0.0.0:$PORT --workers 1 --threads 1 --timeout 60
     autoDeploy: true
     envVars:
       - key: PYTHON_VERSION

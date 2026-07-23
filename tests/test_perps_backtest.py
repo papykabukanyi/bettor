@@ -104,3 +104,24 @@ def test_fetch_extended_candles_chains_multiple_calls_beyond_the_cap(monkeypatch
     # 10 days of 1-minute candles needs more than one 5000-candle (~3.47 day) call.
     bt.fetch_extended_candles("KXBTCPERP", days=10, period_interval=1)
     assert len(calls) >= 3
+
+
+def test_fetch_extended_candles_handles_a_newly_listed_ticker(monkeypatch):
+    """A ticker that only has, say, 20 days of real history returns empty
+    candlesticks for the older chained windows a 50-day request would ask
+    for. That must not raise (the dtype bug this guards against) and must
+    still return the real data from the populated windows."""
+    call_count = [0]
+
+    def fake_candlesticks(ticker, *, start_ts, end_ts, period_interval):
+        call_count[0] += 1
+        # Only the most recent window (the last call, since we chain
+        # backward from now) has any real data.
+        if call_count[0] == 1:
+            return {"candlesticks": [{"end_period_ts": end_ts, "price": {"close": 100.0}}]}
+        return {"candlesticks": []}
+
+    monkeypatch.setattr(bt, "get_margin_candlesticks", fake_candlesticks)
+    result = bt.fetch_extended_candles("KXNEWPERP", days=50, period_interval=1)
+    assert len(result) == 1
+    assert str(result["ts"].dtype) == "int64"
