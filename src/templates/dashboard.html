@@ -61,8 +61,8 @@
   <h3>Open Positions</h3>
   <div class="scroll-x">
     <table>
-      <thead><tr><th>Ticker</th><th>Entry</th><th>Contracts</th><th>Opened</th><th>Velocity</th></tr></thead>
-      <tbody id="positions-body"><tr><td colspan="5" class="empty">No open positions</td></tr></tbody>
+      <thead><tr><th>Ticker</th><th>Side</th><th>Entry</th><th>Contracts</th><th>Opened</th><th>Velocity</th></tr></thead>
+      <tbody id="positions-body"><tr><td colspan="6" class="empty">No open positions</td></tr></tbody>
     </table>
   </div>
 </section>
@@ -81,8 +81,8 @@
   <h3>Recent Trades</h3>
   <div class="scroll-x">
     <table>
-      <thead><tr><th>Closed</th><th>Ticker</th><th>Entry</th><th>Exit</th><th>Count</th><th>P&amp;L</th><th>Reason</th></tr></thead>
-      <tbody id="trades-body"><tr><td colspan="7" class="empty">No trades yet</td></tr></tbody>
+      <thead><tr><th>Closed</th><th>Ticker</th><th>Side</th><th>Entry</th><th>Exit</th><th>Count</th><th>P&amp;L</th><th>Reason</th></tr></thead>
+      <tbody id="trades-body"><tr><td colspan="8" class="empty">No trades yet</td></tr></tbody>
     </table>
   </div>
 </section>
@@ -142,9 +142,11 @@ async function refreshStatus() {
       posBody.innerHTML = positions.map(p => {
         const check = checksByTicker[p.ticker];
         const v = check && check.velocity_pct_per_min;
+        const side = p.side || "long";
         return `
         <tr>
           <td><strong>${p.ticker}</strong></td>
+          <td><span class="tag ${side === "short" ? "no" : "yes"}">${side}</span></td>
           <td>${fmtUsd(p.entry_price)}</td>
           <td>${p.count}</td>
           <td>${timeAgo(p.opened_at)}</td>
@@ -152,7 +154,7 @@ async function refreshStatus() {
         </tr>`;
       }).join("");
     } else {
-      posBody.innerHTML = '<tr><td colspan="5" class="empty">No open positions</td></tr>';
+      posBody.innerHTML = '<tr><td colspan="6" class="empty">No open positions</td></tr>';
     }
 
     const todayPnl = data.today_realized_pnl_usd || 0;
@@ -180,7 +182,7 @@ async function refreshStatus() {
           <td><span class="tag ${c.technical_ok ? "yes" : "no"}">${c.technical_ok ? "dip" : "none"}</span></td>
           <td><span class="tag ${c.model_ok ? "yes" : "wait"}">${c.model_ok ? c.model_direction : "n/a"}</span></td>
           <td>${c.model_ok ? (c.probability_up * 100).toFixed(1) + "%" : "--"}</td>
-          <td><span class="tag ${c.should_enter ? "yes" : "no"}">${c.should_enter ? "YES" : "no"}</span></td>
+          <td><span class="tag ${c.should_enter ? "yes" : "no"}">${c.should_enter ? "YES (" + (c.side || "long") + ")" : "no"}</span></td>
           <td class="sub">${c.reason || ""}</td>
         </tr>`).join("");
     } else {
@@ -200,6 +202,7 @@ async function refreshTrades() {
         <tr>
           <td>${timeAgo(t.closed_at)}</td>
           <td><strong>${t.ticker}</strong></td>
+          <td><span class="tag ${t.side === "short" ? "no" : "yes"}">${t.side || "long"}</span></td>
           <td>${fmtUsd(t.entry_price)}</td>
           <td>${fmtUsd(t.exit_price)}</td>
           <td>${t.count}</td>
@@ -207,7 +210,7 @@ async function refreshTrades() {
           <td class="sub">${t.reason || ""}</td>
         </tr>`).join("");
     } else {
-      tbody.innerHTML = '<tr><td colspan="7" class="empty">No trades yet</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="8" class="empty">No trades yet</td></tr>';
     }
   } catch (e) { console.error("trades refresh failed", e); }
 }

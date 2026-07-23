@@ -157,6 +157,19 @@ QUICK_PROFIT_WINDOW_SECONDS = _env_int("PERPS_QUICK_PROFIT_WINDOW_SECONDS", 90)
 # safety check against entering on a stale or erroneous Kalshi tick.
 MAX_ENTRY_PRICE_DEVIATION_PCT = _env_float("PERPS_MAX_ENTRY_PRICE_DEVIATION_PCT", 0.02)
 
+# Default OFF: the strategy has only ever gone long in production. Shorting
+# is a materially different risk shape (a short loses on a RISING price
+# instead of a falling one) that has never run live on this account, so it
+# gets its own explicit opt-in rather than turning on the moment this code
+# ships -- same "start conservative, prove it out, then enable" posture as
+# LIVE_TRADING_ENABLED itself. When on, entries can go either direction:
+# LONG on a small dip + model predicting up, SHORT on a small rally + model
+# predicting down (mirrored technical + model gate, see decide_entry_technical
+# and evaluate_candidate). Every take-profit/stop-loss/quick-profit/max-hold
+# exit rule applies symmetrically to both, just measuring gain/loss in the
+# direction that's actually favorable for that position's side.
+ENABLE_SHORTS = _env_flag("PERPS_ENABLE_SHORTS", default=False)
+
 
 def _load_state() -> dict[str, Any]:
     try:
@@ -226,10 +239,28 @@ def compute_leveraged_count(available_balance_usd: float, market: dict[str, Any]
     return count, detail
 
 
-def decide_entry_technical(row: dict[str, Any]) -> tuple[bool, str]:
-    """The scalper filter alone: trend + local dip. `row` needs
+def decide_entry_technical(row: dict[str, Any], side: str = "long") -> tuple[bool, str]:
+    """The scalper filter alone: trend + local dip/rally. `row` needs
     current_price, short_ma, trend_pct (as returned by
-    perps_data.latest_feature_row / perps_model.predict_direction)."""
+    perps_data.latest_feature_row / perps_model.predict_direction).
+
+    `side="long"` (default, and the only mode ever run live to date): skip
+    entries in a strong downtrend, then look for price sitting a bit BELOW
+    the short moving average (a small dip -- contrarian, expecting a bounce).
+
+    `side="short"`: the mirror image -- skip entries in a strong uptrend,
+    then look for price sitting a bit ABOVE the short moving average (a
+    small rally -- contrarian, expecting a pullback). dip_pct and rally_pct
+    have opposite signs off the same MA, so long and short conditions can
+    never both be true at once for the same row."""
+    if side == "short":
+        if row["trend_pct"] > TREND_FILTER_DOWN_PCT:
+            return False, f"trend filter: up {row['trend_pct']:.2%}, skipping short entries"
+        rally_pct = (row["current_price"] - row["short_ma"]) / row["short_ma"] if row["short_ma"] > 0 else 0.0
+        if rally_pct >= ENTRY_DIP_PCT:
+            return True, f"price {rally_pct:.3%} above {SHORT_MA_MINUTES}-min average -- small rally"
+        return False, f"no rally signal (price {rally_pct:+.3%} vs short MA)"
+
     if row["trend_pct"] < -TREND_FILTER_DOWN_PCT:
         return False, f"trend filter: down {row['trend_pct']:.2%}, skipping entries"
     dip_pct = (row["short_ma"] - row["current_price"]) / row["short_ma"] if row["short_ma"] > 0 else 0.0
@@ -240,45 +271,65 @@ def decide_entry_technical(row: dict[str, Any]) -> tuple[bool, str]:
 
 def evaluate_candidate(ticker: str) -> dict[str, Any]:
     """Combine the technical scalper filter with the direction model for one
-    ticker. `should_enter` requires the technical dip signal; if a trained
-    model exists it must ALSO predict "up" with enough confidence. If no
-    model exists yet, the technical signal alone decides (clearly flagged)."""
+    ticker, considering a LONG entry (dip + model predicts up) and, if
+    ENABLE_SHORTS is on, a SHORT entry (rally + model predicts down) --
+    mutually exclusive by construction (see decide_entry_technical), so at
+    most one can qualify. If no trained model exists yet, the technical
+    signal alone decides (clearly flagged) -- long side only, since shorting
+    without any model confirmation at all is a materially different risk to
+    take on unconfirmed technicals."""
     row = latest_feature_row(ticker)
     if row is None:
-        return {"ticker": ticker, "should_enter": False, "reason": "no_feature_data", "model_ok": False}
+        return {"ticker": ticker, "should_enter": False, "reason": "no_feature_data", "model_ok": False, "technical_ok": False}
 
-    technical_ok, technical_reason = decide_entry_technical(row)
     prediction = predict_direction(ticker)
     model_ok = bool(prediction.get("model_ok"))
 
     result: dict[str, Any] = {
         "ticker": ticker, "current_price": row["current_price"], "short_ma": row["short_ma"],
-        "trend_pct": row["trend_pct"], "technical_ok": technical_ok, "technical_reason": technical_reason,
-        "model_ok": model_ok,
+        "trend_pct": row["trend_pct"], "model_ok": model_ok, "technical_ok": False,
     }
     if model_ok:
         result["probability_up"] = prediction["probability_up"]
         result["model_direction"] = prediction["direction"]
 
-    if not technical_ok:
-        result["should_enter"] = False
-        result["reason"] = technical_reason
-        return result
+    reasons = []
+    for side in (("long", "short") if ENABLE_SHORTS else ("long",)):
+        technical_ok, technical_reason = decide_entry_technical(row, side=side)
+        result[f"{side}_technical_ok"] = technical_ok
+        # Set as soon as EITHER side's filter passes, before any early
+        # return below -- the dashboard reads this flat field directly, and
+        # it must reflect reality regardless of which branch returns.
+        if technical_ok:
+            result["technical_ok"] = True
+        if not technical_ok:
+            reasons.append(technical_reason)
+            continue
 
-    if not model_ok:
-        result["should_enter"] = True
-        result["reason"] = f"{technical_reason} (model not trained yet -- technical-only fallback)"
-        result["score"] = ENTRY_DIP_PCT + (row["short_ma"] - row["current_price"]) / row["short_ma"]
-        return result
+        if not model_ok:
+            if side == "short":
+                # Shorting on technicals alone (no model to confirm the
+                # direction at all yet) is not a risk worth taking.
+                reasons.append(f"{technical_reason} (model not trained yet -- shorts require model confirmation)")
+                continue
+            result["should_enter"] = True
+            result["side"] = side
+            result["reason"] = f"{technical_reason} (model not trained yet -- technical-only fallback)"
+            result["score"] = ENTRY_DIP_PCT + (row["short_ma"] - row["current_price"]) / row["short_ma"]
+            return result
 
-    if prediction["direction"] == "up" and prediction["probability_up"] >= MODEL_CONFIDENCE_MIN:
-        result["should_enter"] = True
-        result["reason"] = f"{technical_reason}; model predicts up (p={prediction['probability_up']:.2f})"
-        result["score"] = prediction["probability_up"]
-        return result
+        wanted_direction = "up" if side == "long" else "down"
+        confidence = prediction["probability_up"] if side == "long" else (1.0 - prediction["probability_up"])
+        if prediction["direction"] == wanted_direction and confidence >= MODEL_CONFIDENCE_MIN:
+            result["should_enter"] = True
+            result["side"] = side
+            result["reason"] = f"{technical_reason}; model predicts {wanted_direction} (p={confidence:.2f})"
+            result["score"] = confidence
+            return result
+        reasons.append(f"{technical_reason}, but model predicts {prediction['direction']} (p_up={prediction['probability_up']:.2f})")
 
     result["should_enter"] = False
-    result["reason"] = f"{technical_reason}, but model predicts {prediction['direction']} (p_up={prediction['probability_up']:.2f})"
+    result["reason"] = " | ".join(reasons) if reasons else "no dip or rally signal"
     return result
 
 
@@ -331,13 +382,30 @@ def decide_exit(
     Kraken, see crypto_prices.py) and can ALSO trigger quick-profit -- since
     Kalshi's own perp quote can lag a deep, liquid spot venue by a tick or
     two, the external reading is sometimes the first place a fast move
-    actually shows up."""
+    actually shows up.
+
+    `position["side"]` defaults to "long" (every position before shorts
+    existed, and every position from a deployment with ENABLE_SHORTS off,
+    has no `side` key at all). For a short, a FALLING price is the
+    favorable direction, so change_pct and the velocity readings are both
+    sign-flipped before applying the exact same thresholds -- the take-
+    profit/stop-loss/quick-profit/max-hold RULES are identical for both
+    sides, only which price direction counts as "favorable" differs."""
     entry_price = float(position["entry_price"])
-    change_pct = (current_price - entry_price) / entry_price if entry_price > 0 else 0.0
+    is_short = position.get("side") == "short"
+    if is_short:
+        change_pct = (entry_price - current_price) / entry_price if entry_price > 0 else 0.0
+        favorable_velocity = -velocity_pct_per_min if velocity_pct_per_min is not None else None
+        favorable_external_velocity = -external_velocity_pct_per_min if external_velocity_pct_per_min is not None else None
+    else:
+        change_pct = (current_price - entry_price) / entry_price if entry_price > 0 else 0.0
+        favorable_velocity = velocity_pct_per_min
+        favorable_external_velocity = external_velocity_pct_per_min
+
     if change_pct >= QUICK_PROFIT_PCT:
-        if velocity_pct_per_min is not None and velocity_pct_per_min >= QUICK_PROFIT_VELOCITY_PCT_PER_MIN:
+        if favorable_velocity is not None and favorable_velocity >= QUICK_PROFIT_VELOCITY_PCT_PER_MIN:
             return True, f"quick_profit (velocity {velocity_pct_per_min:+.2%}/min, gain {change_pct:+.3%})"
-        if external_velocity_pct_per_min is not None and external_velocity_pct_per_min >= QUICK_PROFIT_VELOCITY_PCT_PER_MIN:
+        if favorable_external_velocity is not None and favorable_external_velocity >= QUICK_PROFIT_VELOCITY_PCT_PER_MIN:
             return True, f"quick_profit (external velocity {external_velocity_pct_per_min:+.2%}/min, gain {change_pct:+.3%})"
     if change_pct >= TAKE_PROFIT_PCT:
         return True, f"take_profit ({change_pct:+.3%})"
@@ -374,7 +442,7 @@ def _daily_loss_cap_breached(state: dict[str, Any], reference_balance: float | N
     return today_pnl <= -abs(DAILY_LOSS_CAP_PCT) * reference_balance
 
 
-def _real_open_positions_by_ticker() -> dict[str, dict[str, float]] | None:
+def _real_open_positions_by_ticker() -> dict[str, dict[str, Any]] | None:
     """Ground truth from Kalshi's own GET /margin/positions -- local
     bookkeeping only ever records an order having been PLACED, never
     confirms it actually FILLED. Confirmed live on this account: repeated
@@ -383,21 +451,29 @@ def _real_open_positions_by_ticker() -> dict[str, dict[str, float]] | None:
     local state that assumed success still added/removed a position as if
     it had. Returns None (never an empty dict) on a failed API call so
     callers can tell "confirmed no real positions" apart from "couldn't
-    check" and avoid wiping out tracking on a transient error."""
+    check" and avoid wiping out tracking on a transient error.
+
+    Per Kalshi's own OpenAPI spec, `position` is a SIGNED quantity (negative
+    = short, positive = long) with no separate direction field -- direction
+    is derived from the sign here, once, so nothing downstream has to
+    re-derive it."""
     try:
         data = get_margin_positions()
     except Exception as exc:
         logger.warning("[perps_strategy] could not fetch real positions for reconciliation: %s", exc)
         return None
-    result: dict[str, dict[str, float]] = {}
+    result: dict[str, dict[str, Any]] = {}
     for p in data.get("positions") or []:
         if not p.get("is_portfolio"):
             continue  # non-portfolio subaccount rows observed at 0 size; not real tradable exposure
-        count = abs(float(p.get("position") or 0.0))
+        raw_count = float(p.get("position") or 0.0)
         ticker = p.get("market_ticker")
-        if count <= 0 or not ticker:
+        if raw_count == 0 or not ticker:
             continue
-        result[ticker] = {"count": count, "entry_price": float(p.get("entry_price") or 0.0)}
+        result[ticker] = {
+            "count": abs(raw_count), "entry_price": float(p.get("entry_price") or 0.0),
+            "side": "short" if raw_count < 0 else "long",
+        }
     return result
 
 
@@ -427,22 +503,29 @@ def _reconcile_positions_with_exchange(state: dict[str, Any]) -> list[dict[str, 
         local = local_by_ticker.get(ticker)
         if local is None:
             logger.warning(
-                "[perps_strategy] adopting untracked real position: %s x%.2f @ %.4f",
-                ticker, real_pos["count"], real_pos["entry_price"],
+                "[perps_strategy] adopting untracked real position: %s %s x%.2f @ %.4f",
+                real_pos["side"], ticker, real_pos["count"], real_pos["entry_price"],
             )
             reconciled.append({
                 "ticker": ticker, "entry_price": real_pos["entry_price"], "count": real_pos["count"],
+                "side": real_pos["side"],
                 "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(), "dry_run": False,
                 "sizing": {"note": "adopted_from_exchange_reconciliation"},
             })
             continue
-        if abs(float(local["count"]) - real_pos["count"]) > 1e-9 or abs(float(local["entry_price"]) - real_pos["entry_price"]) > 1e-6:
+        if (
+            abs(float(local["count"]) - real_pos["count"]) > 1e-9
+            or abs(float(local["entry_price"]) - real_pos["entry_price"]) > 1e-6
+            or local.get("side", "long") != real_pos["side"]
+        ):
             logger.warning(
-                "[perps_strategy] correcting local position for %s: count %.2f->%.2f, entry %.4f->%.4f",
+                "[perps_strategy] correcting local position for %s: count %.2f->%.2f, entry %.4f->%.4f, side %s->%s",
                 ticker, float(local["count"]), real_pos["count"], float(local["entry_price"]), real_pos["entry_price"],
+                local.get("side", "long"), real_pos["side"],
             )
         local["count"] = real_pos["count"]
         local["entry_price"] = real_pos["entry_price"]
+        local["side"] = real_pos["side"]
         reconciled.append(local)
 
     for ticker in set(local_by_ticker) - set(real):
@@ -515,13 +598,17 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                 continue
 
             count = float(position["count"])
+            side = position.get("side", "long")
             exit_price = _round_price(current_price, tick_size)
             entry_price = float(position["entry_price"])
             order_result = None
             closed_count = count
             if not effective_dry_run:
+                # Closing a long means selling (ask); closing a short means
+                # buying back (bid) -- both reduce_only so it can only ever
+                # shrink/close this exact position, never open a new one.
                 order_result = create_margin_order(
-                    ticker=ticker, side="ask", count=count, price=exit_price,
+                    ticker=ticker, side=("ask" if side == "long" else "bid"), count=count, price=exit_price,
                     client_order_id=str(uuid.uuid4()), time_in_force="immediate_or_cancel", reduce_only=True,
                 )
                 # An immediate_or_cancel order can fill zero, partially, or
@@ -548,13 +635,18 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
             # Each market's quoted "price" IS the per-contract dollar value
             # already (e.g. KXBTCPERP's "0.0001 BTC" contract priced ~$6.63
             # when BTC ~$66,300), so P&L is simply the price delta times
-            # contract count -- no separate multiplier needed.
-            realized_pnl = round((exit_price - entry_price) * closed_count, 6)
+            # contract count -- no separate multiplier needed. A short
+            # profits when price FALLS, so the delta is entry-minus-exit
+            # instead of exit-minus-entry.
+            if side == "short":
+                realized_pnl = round((entry_price - exit_price) * closed_count, 6)
+            else:
+                realized_pnl = round((exit_price - entry_price) * closed_count, 6)
             by_date = state.setdefault("realized_pnl_by_date", {})
             by_date[_today_str()] = round(float(by_date.get(_today_str(), 0.0)) + realized_pnl, 6)
             trade = {
                 "closed_at": dt.datetime.now(dt.timezone.utc).isoformat(),
-                "ticker": ticker, "entry_price": entry_price, "exit_price": exit_price,
+                "ticker": ticker, "side": side, "entry_price": entry_price, "exit_price": exit_price,
                 "count": closed_count, "realized_pnl_usd": realized_pnl, "reason": reason, "dry_run": effective_dry_run,
             }
             state.setdefault("trade_log", []).append(trade)
@@ -672,12 +764,16 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
             })
             continue
 
+        side = candidate.get("side", "long")
         order_result = None
         actual_count: float = float(count)
         actual_entry_price = entry_price
         if not effective_dry_run:
+            # Opening a long means buying (bid); opening a short means
+            # selling (ask) with reduce_only NOT set, since this is a new
+            # position, not closing an existing long.
             order_result = create_margin_order(
-                ticker=ticker, side="bid", count=float(count), price=entry_price,
+                ticker=ticker, side=("bid" if side == "long" else "ask"), count=float(count), price=entry_price,
                 client_order_id=str(uuid.uuid4()), time_in_force="immediate_or_cancel",
             )
             # An immediate_or_cancel order can fill zero, partially, or
@@ -726,17 +822,19 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
                 merged = dict(positions[existing_idx])
                 merged["count"] = float(actual_count)
                 merged["entry_price"] = actual_entry_price
+                merged["side"] = side
                 positions[existing_idx] = merged
             else:
                 positions.append({
                     "ticker": ticker, "entry_price": actual_entry_price, "count": float(actual_count),
+                    "side": side,
                     "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(), "dry_run": effective_dry_run,
                     "sizing": sizing_detail,
                 })
             state["positions"] = positions
             _save_state(state)
         opened.append({
-            "ticker": ticker, "ok": True, "action": "opened", "entry_price": actual_entry_price,
+            "ticker": ticker, "ok": True, "action": "opened", "side": side, "entry_price": actual_entry_price,
             "count": actual_count, "reason": candidate["reason"], "sizing": sizing_detail, "order_result": order_result,
         })
 

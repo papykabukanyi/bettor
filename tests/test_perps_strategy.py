@@ -47,9 +47,12 @@ def test_negligible_move_does_not_trigger_technical_entry():
     assert not should_enter
 
 
-def _position(entry_price=6.60, minutes_ago=0, ticker="KXBTCPERP", count=1.0):
+def _position(entry_price=6.60, minutes_ago=0, ticker="KXBTCPERP", count=1.0, side=None):
     opened = dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=minutes_ago)
-    return {"ticker": ticker, "entry_price": entry_price, "count": count, "opened_at": opened.isoformat()}
+    pos = {"ticker": ticker, "entry_price": entry_price, "count": count, "opened_at": opened.isoformat()}
+    if side is not None:
+        pos["side"] = side
+    return pos
 
 
 def test_take_profit_exit():
@@ -107,6 +110,214 @@ def test_update_velocity_returns_none_until_two_samples_span_time():
     assert v2 > 0  # price rose over the window -> positive velocity
 
 
+# ── Bidirectional (short) trading -- gated behind ENABLE_SHORTS ─────────────
+
+def _rally_row(**overrides):
+    # Mirror of _row(): price sits ABOVE the short MA (a small rally).
+    base = {"ticker": "KXBTCPERP", "current_price": 6.63, "short_ma": 6.60, "trend_pct": 0.0}
+    base.update(overrides)
+    return base
+
+
+def test_rally_in_flat_trend_triggers_short_technical_entry():
+    should_enter, reason = strat.decide_entry_technical(_rally_row(), side="short")
+    assert should_enter
+    assert "rally" in reason
+
+
+def test_rally_in_strong_uptrend_is_filtered_out_for_shorts():
+    should_enter, reason = strat.decide_entry_technical(_rally_row(trend_pct=0.05), side="short")
+    assert not should_enter
+    assert "trend filter" in reason
+
+
+def test_dip_and_rally_conditions_are_mutually_exclusive_on_the_same_row():
+    """A dip signal for longs and a rally signal for shorts can never both
+    fire on the same price/MA snapshot -- they're mirror images of the same
+    comparison."""
+    row = _row()  # price below short MA -- a dip
+    long_ok, _ = strat.decide_entry_technical(row, side="long")
+    short_ok, _ = strat.decide_entry_technical(row, side="short")
+    assert long_ok and not short_ok
+
+
+def test_evaluate_candidate_ignores_shorts_when_disabled(monkeypatch):
+    monkeypatch.setattr(strat, "ENABLE_SHORTS", False)
+    monkeypatch.setattr(strat, "latest_feature_row", lambda ticker: _rally_row())
+    monkeypatch.setattr(strat, "predict_direction", lambda ticker: {
+        "model_ok": True, "ticker": ticker, "direction": "down", "probability_up": 0.1,
+    })
+    result = strat.evaluate_candidate("KXBTCPERP")
+    # A rally + confident down-prediction would qualify as a SHORT, but the
+    # feature is off -- must not enter at all (must never silently go long
+    # on a signal that was actually a short setup).
+    assert result["should_enter"] is False
+
+
+def test_evaluate_candidate_enters_short_on_rally_and_confident_down_prediction(monkeypatch):
+    monkeypatch.setattr(strat, "ENABLE_SHORTS", True)
+    monkeypatch.setattr(strat, "latest_feature_row", lambda ticker: _rally_row())
+    monkeypatch.setattr(strat, "predict_direction", lambda ticker: {
+        "model_ok": True, "ticker": ticker, "direction": "down", "probability_up": 0.1,
+    })
+    result = strat.evaluate_candidate("KXBTCPERP")
+    assert result["should_enter"] is True
+    assert result["side"] == "short"
+    assert result["score"] == pytest.approx(0.9)  # confidence = 1 - probability_up
+
+
+def test_evaluate_candidate_does_not_short_on_technicals_alone_without_a_model(monkeypatch):
+    """Shorting without any model confirmation at all is a materially
+    different risk than the existing long-side technical-only fallback --
+    must not enter."""
+    monkeypatch.setattr(strat, "ENABLE_SHORTS", True)
+    monkeypatch.setattr(strat, "latest_feature_row", lambda ticker: _rally_row())
+    monkeypatch.setattr(strat, "predict_direction", lambda ticker: {"model_ok": False, "ticker": ticker})
+    result = strat.evaluate_candidate("KXBTCPERP")
+    assert result["should_enter"] is False
+
+
+def test_evaluate_candidate_rejects_short_when_model_predicts_up(monkeypatch):
+    monkeypatch.setattr(strat, "ENABLE_SHORTS", True)
+    monkeypatch.setattr(strat, "latest_feature_row", lambda ticker: _rally_row())
+    monkeypatch.setattr(strat, "predict_direction", lambda ticker: {
+        "model_ok": True, "ticker": ticker, "direction": "up", "probability_up": 0.9,
+    })
+    result = strat.evaluate_candidate("KXBTCPERP")
+    assert result["should_enter"] is False
+
+
+def test_short_take_profit_exit_on_falling_price():
+    pos = _position(side="short")
+    # Price fell below entry by more than TAKE_PROFIT_PCT -- profitable for a short.
+    should_exit, reason = strat.decide_exit(pos, 6.60 * (1 - strat.TAKE_PROFIT_PCT - 0.001))
+    assert should_exit and "take_profit" in reason
+
+
+def test_short_stop_loss_exit_on_rising_price():
+    pos = _position(side="short")
+    # Price rose above entry by more than STOP_LOSS_PCT -- a loss for a short.
+    should_exit, reason = strat.decide_exit(pos, 6.60 * (1 + strat.STOP_LOSS_PCT + 0.001))
+    assert should_exit and "stop_loss" in reason
+
+
+def test_short_holds_when_price_barely_moves():
+    pos = _position(side="short", minutes_ago=1)
+    should_exit, reason = strat.decide_exit(pos, 6.595)
+    assert not should_exit
+    assert "holding" in reason
+
+
+def test_short_quick_profit_requires_favorable_falling_velocity():
+    pos = _position(side="short")
+    price = 6.60 * (1 - strat.QUICK_PROFIT_PCT - 0.0002)  # profitable-for-a-short gain
+    # A RISING raw velocity is UNFAVORABLE for a short -- must not trigger quick-profit.
+    should_exit, reason = strat.decide_exit(pos, price, velocity_pct_per_min=strat.QUICK_PROFIT_VELOCITY_PCT_PER_MIN + 0.001)
+    assert not should_exit
+
+    # A FALLING raw velocity (price dropping fast) IS favorable for a short.
+    should_exit, reason = strat.decide_exit(pos, price, velocity_pct_per_min=-(strat.QUICK_PROFIT_VELOCITY_PCT_PER_MIN + 0.001))
+    assert should_exit and "quick_profit" in reason
+
+
+def _real_short_position(ticker, count, entry_price):
+    return {"market_ticker": ticker, "position": str(-abs(float(count))), "entry_price": str(entry_price), "is_portfolio": True}
+
+
+def test_real_open_positions_by_ticker_derives_short_side_from_negative_sign(monkeypatch):
+    monkeypatch.setattr(strat, "get_margin_positions", lambda: {"positions": [
+        _real_short_position("KXETHPERP", "10.00", "50.0000"),
+    ]})
+    result = strat._real_open_positions_by_ticker()  # noqa: SLF001
+    assert result == {"KXETHPERP": {"count": 10.0, "entry_price": 50.0, "side": "short"}}
+
+
+def test_reconcile_adopts_untracked_real_short_position(monkeypatch):
+    monkeypatch.setattr(strat, "get_margin_positions", lambda: {"positions": [
+        _real_short_position("KXETHPERP", "10.00", "50.0000"),
+    ]})
+    reconciled = strat._reconcile_positions_with_exchange({"positions": []})  # noqa: SLF001
+    assert len(reconciled) == 1
+    assert reconciled[0]["side"] == "short"
+    assert reconciled[0]["count"] == 10.0
+
+
+def test_manage_open_positions_closes_short_by_buying_back(monkeypatch, tmp_path):
+    """Closing a short must place a BID (buy-back) order, never an ASK --
+    an ASK reduce_only on a short position would be nonsensical (it would
+    try to sell MORE of something already sold short)."""
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", True)
+    strat._save_state({
+        "positions": [_position(ticker="KXETHPERP", entry_price=50.0, count=10.0, side="short")],
+        "realized_pnl_by_date": {}, "trade_log": [], "daily_reference_balance": {},
+    })
+    # First call is the pre-decision reconciliation (must match local state
+    # exactly -- still 10 short); second call is the post-order fill
+    # verification, after the buy-back fully closed it.
+    calls = {"n": 0}
+
+    def fake_positions():
+        calls["n"] += 1
+        count = "10.00" if calls["n"] == 1 else "0.00"
+        return {"positions": [_real_short_position("KXETHPERP", count, "50.0000")] if float(count) > 0 else []}
+
+    monkeypatch.setattr(strat, "get_margin_positions", fake_positions)
+    # Price fell -- profitable for a short, should trigger take-profit.
+    monkeypatch.setattr(strat, "get_margin_market", lambda ticker: _market_response(price=50.0 * (1 - strat.TAKE_PROFIT_PCT - 0.001)))
+
+    captured_orders = []
+
+    def fake_create_order(**kwargs):
+        captured_orders.append(kwargs)
+        return {"order": {"fill_count": str(kwargs["count"])}}
+
+    monkeypatch.setattr(strat, "create_margin_order", fake_create_order)
+
+    result = strat.manage_open_positions(dry_run=False)
+    assert result["action"] == "closed"
+    assert len(captured_orders) == 1
+    assert captured_orders[0]["side"] == "bid"
+    assert captured_orders[0]["reduce_only"] is True
+    # Price fell and it's a short -- must be a GAIN, not a loss.
+    assert result["closed"][0]["realized_pnl_usd"] > 0
+
+
+def test_scan_and_enter_opens_short_with_an_ask_order(monkeypatch, tmp_path):
+    """Opening a short must place an ASK order with reduce_only NOT set --
+    this is a brand new position, not closing an existing long."""
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", True)
+    monkeypatch.setattr(strat, "ENABLE_SHORTS", True)
+    monkeypatch.setattr(strat, "get_margin_market", lambda ticker: _market_response())
+    monkeypatch.setattr(strat, "_available_balance_usd", lambda: 10.0)
+    monkeypatch.setattr(
+        strat, "scan_for_entries",
+        lambda tickers=None, exclude=None: (
+            [{"ticker": "KXETHPERP", "current_price": 6.60, "reason": "test rally", "score": 0.9, "side": "short"}], [],
+        ),
+    )
+    captured_orders = []
+
+    def fake_create_order(**kwargs):
+        captured_orders.append(kwargs)
+        return {"order": {"fill_count": str(kwargs["count"])}}
+
+    monkeypatch.setattr(strat, "create_margin_order", fake_create_order)
+    monkeypatch.setattr(strat, "get_margin_positions", lambda: {"positions": [
+        _real_short_position("KXETHPERP", "6.00", "6.60"),
+    ]})
+
+    result = strat.scan_and_enter(dry_run=False)
+    assert result["opened"][0]["action"] == "opened"
+    assert result["opened"][0]["side"] == "short"
+    assert len(captured_orders) == 1
+    assert captured_orders[0]["side"] == "ask"
+    assert captured_orders[0].get("reduce_only", False) is False
+    state = strat._load_state()  # noqa: SLF001
+    assert state["positions"][0]["side"] == "short"
+
+
 def test_evaluate_candidate_falls_back_to_technical_when_model_not_trained(monkeypatch):
     monkeypatch.setattr(strat, "latest_feature_row", lambda ticker: _row())
     monkeypatch.setattr(strat, "predict_direction", lambda ticker: {"model_ok": False, "ticker": ticker})
@@ -134,6 +345,20 @@ def test_evaluate_candidate_model_confirms_entry_with_high_confidence(monkeypatc
     result = strat.evaluate_candidate("KXBTCPERP")
     assert result["should_enter"] is True
     assert result["score"] == 0.9
+
+
+def test_evaluate_candidate_sets_flat_technical_ok_on_a_qualifying_entry(monkeypatch):
+    """The dashboard reads `technical_ok` as a flat top-level field (see
+    dashboard.html's candidates table) -- it must be True whenever a
+    qualifying entry actually fired on a real technical signal, not just on
+    the non-qualifying fallback path."""
+    monkeypatch.setattr(strat, "latest_feature_row", lambda ticker: _row())
+    monkeypatch.setattr(strat, "predict_direction", lambda ticker: {
+        "model_ok": True, "ticker": ticker, "direction": "up", "probability_up": 0.9,
+    })
+    result = strat.evaluate_candidate("KXBTCPERP")
+    assert result["should_enter"] is True
+    assert result["technical_ok"] is True
 
 
 def test_scan_for_entries_excludes_already_held_tickers(monkeypatch):
@@ -434,7 +659,7 @@ def test_real_open_positions_by_ticker_ignores_non_portfolio_and_zero_rows(monke
         _real_position("KXNEARPERP", "0.00", "0.0000"),
     ]})
     result = strat._real_open_positions_by_ticker()  # noqa: SLF001
-    assert result == {"KXSOLPERP": {"count": 4.0, "entry_price": 7.7572}}
+    assert result == {"KXSOLPERP": {"count": 4.0, "entry_price": 7.7572, "side": "long"}}
 
 
 def test_real_open_positions_by_ticker_returns_none_on_api_failure(monkeypatch):
