@@ -251,7 +251,13 @@ def _is_cron_authorized() -> bool:
 # ---------------------------------------------------------------------------
 @_locked_job("perps_fast_check", stale_after_sec=60)
 def _run_perps_fast_check() -> dict[str, Any]:
-    result = perps_strategy.manage_open_positions()
+    # dry_run=False here does NOT itself enable live orders --
+    # perps_strategy's hard safety floor forces dry-run regardless of this
+    # value unless KALSHI_PERPS_LIVE_TRADING_ENABLED=1 is ALSO set. Passing
+    # False here just means that when that env var IS set, this actual
+    # production loop honors it instead of silently staying dry-run forever
+    # (which a caller-side default of None/True would otherwise do).
+    result = perps_strategy.manage_open_positions(dry_run=False)
     if result.get("action") != "no_position":
         _save_json(LATEST_POSITION_CHECK_FILE, result)
     return result
@@ -259,7 +265,7 @@ def _run_perps_fast_check() -> dict[str, Any]:
 
 @_locked_job("perps_entry_scan", stale_after_sec=300)
 def _run_perps_entry_scan() -> dict[str, Any]:
-    result = perps_strategy.scan_and_enter()
+    result = perps_strategy.scan_and_enter(dry_run=False)  # see _run_perps_fast_check
     _save_json(LATEST_CYCLE_FILE, result)
     return result
 
@@ -269,7 +275,7 @@ def _run_perps_manual_cycle() -> dict[str, Any]:
     """Manual/legacy full cycle (fast check + entry scan in one call) for
     the manual tick endpoint and scripts/run_perps_cycle.py -- production
     scheduling always uses the split fast/slow jobs above instead."""
-    result = perps_strategy.run_cycle()
+    result = perps_strategy.run_cycle(dry_run=False)  # see _run_perps_fast_check
     _save_json(LATEST_POSITION_CHECK_FILE, result.get("position_management") or {})
     _save_json(LATEST_CYCLE_FILE, result.get("entry_scan") or {})
     return result

@@ -1,8 +1,10 @@
 """Run one Kalshi Perps strategy cycle manually (scans all instruments).
 
-Dry-run unless KALSHI_PERPS_LIVE_TRADING_ENABLED=1 is set in the environment
-AND dry_run=False is passed here. Safe to run repeatedly to watch what the
-strategy would decide before ever enabling live trading.
+Deliberately ALWAYS dry-run, regardless of KALSHI_PERPS_LIVE_TRADING_ENABLED --
+this is the one guaranteed-safe way to inspect "what would the strategy do
+right now" without any risk of a real order, even after live trading has
+been enabled for the actual production scheduler (see dashboard.py's
+scheduled jobs and the /api/perps/tick endpoint, which honor that env var).
 
 Usage:
     python scripts/run_perps_cycle.py

@@ -84,3 +84,26 @@ def test_locked_job_records_error_and_releases_lock():
     assert history[-1]["status"] == "error"
     assert "boom" in history[-1]["error"]
     assert not (dashboard.JOB_LOCK_DIR / "test_job.lock").exists()
+
+
+def test_production_jobs_actually_honor_the_live_trading_flag(monkeypatch):
+    """perps_strategy's dry_run default is safe-by-default (None -> True)
+    specifically so ad-hoc/manual callers never go live by accident -- but
+    that means the REAL production scheduler must explicitly pass
+    dry_run=False, or KALSHI_PERPS_LIVE_TRADING_ENABLED=1 would silently do
+    nothing forever. Lock in that the three production entry points
+    (the two scheduled jobs + the manual tick handler) all pass it."""
+    from data import perps_strategy as strat
+
+    captured = {}
+    monkeypatch.setattr(strat, "manage_open_positions", lambda **kw: captured.setdefault("fast_check", kw) or {"action": "no_position"})
+    monkeypatch.setattr(strat, "scan_and_enter", lambda **kw: captured.setdefault("entry_scan", kw) or {"action": "none"})
+    monkeypatch.setattr(strat, "run_cycle", lambda **kw: captured.setdefault("manual_cycle", kw) or {})
+
+    dashboard._run_perps_fast_check.__wrapped__()  # noqa: SLF001
+    dashboard._run_perps_entry_scan.__wrapped__()  # noqa: SLF001
+    dashboard._run_perps_manual_cycle.__wrapped__()  # noqa: SLF001
+
+    assert captured["fast_check"].get("dry_run") is False
+    assert captured["entry_scan"].get("dry_run") is False
+    assert captured["manual_cycle"].get("dry_run") is False
