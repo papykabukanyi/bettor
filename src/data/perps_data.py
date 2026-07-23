@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -40,6 +41,9 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 HF_API_KEY = os.getenv("HF_API_KEY", "")
 HF_DATASET_REPO = os.getenv("HF_DATASET_REPO", "papylove/kalshi-perps-data")
+
+# Exact shape of the paths push_dataset_snapshot() writes: "data/YYYY-MM-DD.parquet".
+_DATE_SHARD_RE = re.compile(r"^data/\d{4}-\d{2}-\d{2}\.parquet$")
 
 # How much 1-minute history to pull per collection cycle. Kept well under the
 # 5000-candle-per-call cap (a 3-day window is ~4320 one-minute candles).
@@ -306,15 +310,16 @@ def load_training_dataset(*, max_shards: int = 90) -> pd.DataFrame:
         try:
             from huggingface_hub import HfApi, hf_hub_download
             api = HfApi(token=HF_API_KEY)
-            # Scoped to the "data/" prefix this module actually writes to --
-            # an unscoped ".parquet" suffix match would also pull in any
-            # unrelated parquet files sitting in the same repo (e.g. if
-            # HF_DATASET_REPO is ever pointed at a repo shared with another
-            # pipeline), silently corrupting training with rows that don't
-            # even share this schema.
+            # Matched against the EXACT pattern push_dataset_snapshot() writes
+            # ("data/YYYY-MM-DD.parquet") -- a bare "data/" prefix isn't
+            # actually unique: a previous, unrelated pipeline that once wrote
+            # to this same HF account archived its own files under
+            # "data/pregame_schedule/*.parquet", which also starts with
+            # "data/" and would otherwise get fully DOWNLOADED (not just
+            # flagged) before the post-download schema check ever caught it.
             hf_files = [
                 f for f in api.list_repo_files(repo_id=HF_DATASET_REPO, repo_type="dataset")
-                if f.startswith("data/") and f.endswith(".parquet")
+                if _DATE_SHARD_RE.match(f)
             ]
             hf_files = sorted(hf_files)[-max_shards:]
             for f in hf_files:

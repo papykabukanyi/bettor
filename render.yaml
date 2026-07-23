@@ -21,3 +21,15 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.0
+      # Pinned here (not left to manual dashboard config) after this service
+      # ran for a while still pointed at an old repo from before this project
+      # became perps-only -- Render's Blueprint sync keeps these enforced on
+      # every deploy instead of depending on someone clicking through the
+      # dashboard correctly. Secrets (KALSHI_API_KEY, KALSHI_PRIVATE_KEY,
+      # HF_API_KEY, KALSHI_PERPS_LIVE_TRADING_ENABLED, ...) stay manually set
+      # in the Render dashboard's Environment tab -- never put secrets or the
+      # live-trading toggle in a git-tracked file.
+      - key: HF_DATASET_REPO
+        value: papylove/kalshi-perps-data
+      - key: HF_MODEL_REPO
+        value: papylove/kalshi-perps-model

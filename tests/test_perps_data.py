@@ -148,3 +148,44 @@ def test_load_training_dataset_merges_local_and_hf_not_just_fallback(monkeypatch
     # just because 2 local shards already existed, and the unrelated-prefix
     # file was correctly excluded (only one HF file matched "data/").
     assert sorted(result["ts"].tolist()) == [1, 100, 200]
+
+
+def test_load_training_dataset_excludes_lookalike_paths_from_another_pipeline(monkeypatch, tmp_path):
+    """A previously-used HF account had an UNRELATED pipeline that also
+    wrote parquet files under a "data/" prefix (e.g.
+    "data/pregame_schedule/shard_....parquet") -- a bare "data/" prefix
+    match isn't unique enough to exclude those, and they'd get fully
+    downloaded (not just flagged after the fact) before any schema check
+    ever ran. Only the exact "data/YYYY-MM-DD.parquet" shape this module
+    itself writes should ever be fetched."""
+    monkeypatch.setattr(perps_data, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(perps_data, "HF_API_KEY", "fake-token")
+    monkeypatch.setattr(perps_data, "HF_DATASET_REPO", "someuser/kalshi-perps-data")
+
+    hf_df = pd.DataFrame({"ticker": ["KXBTCPERP"], "ts": [1], "close": [0.5]})
+    hf_shard_path = tmp_path / "hf_shard.parquet"
+    hf_df.to_parquet(hf_shard_path, index=False)
+
+    downloaded = []
+
+    class FakeApi:
+        def __init__(self, token=None):
+            pass
+
+        def list_repo_files(self, repo_id, repo_type):
+            return [
+                "data/2026-06-01.parquet",
+                "data/pregame_schedule/shard_20260713_084300.parquet",
+                "data/pregame_schedule/shard_20260720_023912.parquet",
+            ]
+
+    def fake_hf_hub_download(repo_id, filename, repo_type, token):
+        downloaded.append(filename)
+        return str(hf_shard_path)
+
+    import huggingface_hub
+    monkeypatch.setattr(huggingface_hub, "HfApi", FakeApi)
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", fake_hf_hub_download)
+
+    perps_data.load_training_dataset()
+    assert downloaded == ["data/2026-06-01.parquet"]
