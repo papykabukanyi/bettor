@@ -705,20 +705,34 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
             continue
 
         with _STATE_LOCK:
-            # Re-read + re-check on every entry: the fast loop runs
-            # concurrently and slots can close in between iterations of
-            # this loop.
+            # Re-read: the fast loop's own reconciliation runs concurrently
+            # and can have adopted/updated this EXACT ticker in the interim
+            # (e.g. a stray earlier fill it just discovered). We already
+            # verified real money actually filled above (actual_count > 0)
+            # -- if a tracked entry for this ticker already exists, MERGE
+            # this fill into it (real_after/actual_* already reflect
+            # Kalshi's own up-to-date TOTAL for the ticker, not just this
+            # order's delta) rather than silently discarding a confirmed
+            # real fill via "skipped_slot_taken", which would leave more
+            # real contracts open than local state tracks -- the exact
+            # under-tracked-position failure this whole fix exists to close.
             state = _load_state()
             positions = state.get("positions") or []
-            if len(positions) >= MAX_CONCURRENT_POSITIONS or any(p["ticker"] == ticker for p in positions):
+            existing_idx = next((i for i, p in enumerate(positions) if p["ticker"] == ticker), None)
+            if existing_idx is None and len(positions) >= MAX_CONCURRENT_POSITIONS:
                 opened.append({"ticker": ticker, "ok": True, "action": "skipped_slot_taken"})
                 continue
-            new_position = {
-                "ticker": ticker, "entry_price": actual_entry_price, "count": float(actual_count),
-                "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(), "dry_run": effective_dry_run,
-                "sizing": sizing_detail,
-            }
-            positions.append(new_position)
+            if existing_idx is not None:
+                merged = dict(positions[existing_idx])
+                merged["count"] = float(actual_count)
+                merged["entry_price"] = actual_entry_price
+                positions[existing_idx] = merged
+            else:
+                positions.append({
+                    "ticker": ticker, "entry_price": actual_entry_price, "count": float(actual_count),
+                    "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(), "dry_run": effective_dry_run,
+                    "sizing": sizing_detail,
+                })
             state["positions"] = positions
             _save_state(state)
         opened.append({

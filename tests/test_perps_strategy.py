@@ -640,6 +640,46 @@ def test_scan_and_enter_records_actual_filled_count_not_requested_count(monkeypa
     assert state["positions"][0]["entry_price"] == 1.9998
 
 
+def test_scan_and_enter_merges_a_confirmed_fill_into_a_concurrently_adopted_position(monkeypatch, tmp_path):
+    """A real bug an adversarial review caught: if the fast loop's own
+    reconciliation adopts a position for this exact ticker WHILE this order
+    is in flight (unlocked, network-bound), the old code's final
+    'already held' check would discard the just-confirmed real fill as
+    "skipped_slot_taken" -- silently losing track of real contracts that
+    genuinely executed. It must be merged into the existing entry instead."""
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", True)
+    monkeypatch.setattr(strat, "get_margin_market", lambda ticker: _market_response())
+    monkeypatch.setattr(strat, "_available_balance_usd", lambda: 10.0)
+    monkeypatch.setattr(
+        strat, "scan_for_entries",
+        lambda tickers=None, exclude=None: (
+            [{"ticker": "KXSOLPERP", "current_price": 6.60, "reason": "test dip", "score": 0.9}], [],
+        ),
+    )
+    monkeypatch.setattr(strat, "create_margin_order", lambda **kwargs: {"order": {"fill_count": "4.00"}})
+    monkeypatch.setattr(strat, "get_margin_positions", lambda: {"positions": [
+        _real_position("KXSOLPERP", "4.00", "1.9998"),
+    ]})
+
+    # Simulate the race: between the pre-scan reconciliation (empty) and the
+    # final lock-protected write, the OTHER loop already wrote this exact
+    # ticker into local state (as if its own reconciliation had adopted it).
+    strat._save_state({
+        "positions": [_position(ticker="KXSOLPERP", entry_price=1.9998, count=4.0)],
+        "realized_pnl_by_date": {}, "trade_log": [], "daily_reference_balance": {},
+    })
+
+    result = strat.scan_and_enter(dry_run=False)
+    assert result["opened"][0]["action"] != "skipped_slot_taken"
+    state = strat._load_state()  # noqa: SLF001
+    # Exactly one tracked position for this ticker, reflecting Kalshi's own
+    # confirmed total -- not silently dropped, not duplicated.
+    matching = [p for p in state["positions"] if p["ticker"] == "KXSOLPERP"]
+    assert len(matching) == 1
+    assert matching[0]["count"] == 4.0
+
+
 def test_run_cycle_manages_positions_then_scans_for_entries(monkeypatch, tmp_path):
     monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "state.json")
     monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", False)
