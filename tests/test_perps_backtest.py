@@ -92,6 +92,69 @@ def test_simulate_reuses_precomputed_predictions_when_present(monkeypatch):
     assert "trade_count" in result
 
 
+# ── Bidirectional (short) simulation ─────────────────────────────────────────
+
+def _rally_then_crash_df(n: int = 100) -> pd.DataFrame:
+    ts = np.arange(n) * 60
+    # Contract-scale price (~$2, like a real Kalshi perp contract) so the
+    # default 20%-of-$20-balance / 1x-leverage sizing can actually afford a
+    # contract -- a $100-scale price would size to zero contracts and no
+    # entry would ever fire, regardless of the signal.
+    # dist_to_ma_15 is an independent synthetic column here (not literally
+    # derived from `close`'s own rolling window, same simplification the
+    # other synthetic fixtures in this file use) -- held constantly
+    # "rallying" so the short entry signal is live from row 0, then `close`
+    # falls steadily from the start, profitable for a short entered early.
+    close = 2.05 - np.arange(n) * 0.002
+    dist_to_ma_15 = np.full(n, 0.01)
+    return pd.DataFrame({
+        "ticker": "KXBTCPERP", "ts": ts, "close": close, "dist_to_ma_15": dist_to_ma_15,
+        "dist_to_ma_30": dist_to_ma_15 * 0.5, "trend_pct": np.zeros(n),
+        "ret_1m": np.zeros(n), "ret_5m": np.zeros(n), "ret_15m": np.zeros(n),
+        "volatility_15": np.full(n, 0.001), "sentiment_score": 0.0,
+    })
+
+
+class _AlwaysDownModel:
+    def predict_proba(self, x):
+        return np.tile([0.9, 0.1], (len(x), 1))  # [p_down, p_up] -- p_up = 0.1
+
+
+def _down_fitted():
+    return {
+        "model": _AlwaysDownModel(), "model_type": "fake",
+        "feature_cols": bt.FEATURE_COLUMNS + ["ticker_code"], "ticker_categories": ["KXBTCPERP"],
+    }
+
+
+def test_simulate_opens_and_profits_from_short_positions_when_enabled():
+    df = _rally_then_crash_df()
+    result = bt.simulate(
+        df, _down_fitted(), starting_balance=20.0, leverage_by_ticker={"KXBTCPERP": 1.0},
+        entry_dip_pct=0.005, trend_filter_down_pct=0.02, model_confidence_min=0.5,
+        enable_shorts=True,
+    )
+    assert result["trade_count"] >= 1
+    short_trades = [t for t in result["trades"] if t["side"] == "short"]
+    assert short_trades
+    # The synthetic price crashes after entry -- must be a real GAIN for a short.
+    assert short_trades[0]["realized_pnl_usd"] > 0
+
+
+def test_simulate_never_opens_shorts_when_the_feature_is_off():
+    """Default posture: even with a strong rally + confident down-prediction
+    (a textbook short setup), no position should open at all when
+    enable_shorts is off -- must not silently go long on a short-only
+    signal instead."""
+    df = _rally_then_crash_df()
+    result = bt.simulate(
+        df, _down_fitted(), starting_balance=20.0, leverage_by_ticker={"KXBTCPERP": 1.0},
+        entry_dip_pct=0.005, trend_filter_down_pct=0.02, model_confidence_min=0.5,
+        enable_shorts=False,
+    )
+    assert result["trade_count"] == 0
+
+
 def test_fetch_extended_candles_chains_multiple_calls_beyond_the_cap(monkeypatch):
     calls = []
 

@@ -193,6 +193,7 @@ def simulate(
     trend_filter_down_pct: float | None = None,
     model_confidence_min: float | None = None,
     daily_loss_cap_pct: float | None = None,
+    enable_shorts: bool | None = None,
 ) -> dict[str, Any]:
     """Walk forward through `test_df` (all tickers, sorted by ts) replaying
     the real strategy functions. Every strategy parameter can be overridden
@@ -210,6 +211,7 @@ def simulate(
     trend_filter_down_pct = strat.TREND_FILTER_DOWN_PCT if trend_filter_down_pct is None else trend_filter_down_pct
     model_confidence_min = strat.MODEL_CONFIDENCE_MIN if model_confidence_min is None else model_confidence_min
     daily_loss_cap_pct = strat.DAILY_LOSS_CAP_PCT if daily_loss_cap_pct is None else daily_loss_cap_pct
+    enable_shorts = strat.ENABLE_SHORTS if enable_shorts is None else enable_shorts
 
     df = test_df.sort_values("ts").reset_index(drop=True)
     if "model_probability_up" not in df.columns:
@@ -245,7 +247,10 @@ def simulate(
 
             should_exit, reason = strat.decide_exit(pos, price, velocity_pct_per_min=velocity)
             if should_exit:
-                realized = round((price - pos["entry_price"]) * pos["count"], 6)
+                if pos.get("side") == "short":
+                    realized = round((pos["entry_price"] - price) * pos["count"], 6)  # profits on a FALLING price
+                else:
+                    realized = round((price - pos["entry_price"]) * pos["count"], 6)
                 # `balance` is total equity throughout (only realized P&L ever
                 # changes it); margin_committed_usd was NEVER subtracted from
                 # it at open time -- it only ever reduced `available` via the
@@ -254,7 +259,7 @@ def simulate(
                 balance += realized
                 daily_pnl[date_str] = daily_pnl.get(date_str, 0.0) + realized
                 trades.append({
-                    "ticker": ticker, "entry_price": pos["entry_price"], "exit_price": price,
+                    "ticker": ticker, "side": pos.get("side", "long"), "entry_price": pos["entry_price"], "exit_price": price,
                     "count": pos["count"], "realized_pnl_usd": realized, "reason": reason,
                     "opened_ts": pos["opened_ts"], "closed_ts": row.ts,
                     "held_minutes": (row.ts - pos["opened_ts"]) / 60.0,
@@ -272,18 +277,29 @@ def simulate(
 
         # short_ma reconstructed from dist_to_ma_15 (= (close - ma_15) / ma_15),
         # matching exactly what decide_entry_technical compares against live.
+        # rally_pct is exactly -dip_pct (same MA, opposite-signed comparison),
+        # mirroring decide_entry_technical's side="short" branch.
         dist_to_ma_15 = row.dist_to_ma_15
         short_ma = price / (1 + dist_to_ma_15) if (1 + dist_to_ma_15) != 0 else price
         dip_pct = (short_ma - price) / short_ma if short_ma > 0 else 0.0
-        technical_ok = row.trend_pct >= -trend_filter_down_pct and dip_pct >= entry_dip_pct
-        if not technical_ok:
-            continue
+        rally_pct = -dip_pct
 
         proba_up = row.model_probability_up
-        if proba_up == proba_up:  # not NaN -> a model exists
-            if not (proba_up >= 0.5 and proba_up >= model_confidence_min):
-                continue
-        # else (NaN): technical-only fallback, same as the live strategy during cold-start
+        model_ok = proba_up == proba_up  # not NaN -> a model exists
+
+        chosen_side = None
+        if row.trend_pct >= -trend_filter_down_pct and dip_pct >= entry_dip_pct:
+            # technical-only fallback (no model yet) is long-only, same as live.
+            if not model_ok or (proba_up >= 0.5 and proba_up >= model_confidence_min):
+                chosen_side = "long"
+        if (
+            chosen_side is None and enable_shorts
+            and row.trend_pct <= trend_filter_down_pct and rally_pct >= entry_dip_pct
+            and model_ok and proba_up < 0.5 and (1.0 - proba_up) >= model_confidence_min
+        ):
+            chosen_side = "short"
+        if chosen_side is None:
+            continue
 
         committed = sum(p["margin_committed_usd"] for p in open_positions.values())
         available = balance - committed
@@ -298,7 +314,7 @@ def simulate(
             continue
 
         open_positions[ticker] = {
-            "ticker": ticker, "entry_price": price, "count": float(count),
+            "ticker": ticker, "entry_price": price, "count": float(count), "side": chosen_side,
             "opened_at": pd.Timestamp(row.ts, unit="s", tz="UTC").isoformat(),
             "opened_ts": row.ts, "margin_committed_usd": margin_committed, "_samples": [],
         }
