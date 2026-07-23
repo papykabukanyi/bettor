@@ -46,13 +46,19 @@ MODEL_CACHE_TTL_SEC = int(os.getenv("PERPS_MODEL_CACHE_TTL_SEC", "1800") or "180
 
 _model_cache: dict[str, Any] = {"model": None, "meta": None, "loaded_at": 0.0}
 
+# n_jobs=1 (not -1) is deliberate: this trains inside a 512MB-capped Render
+# web dyno, not a dedicated training box. RandomForest's default joblib
+# backend forks a separate OS process per worker, each holding its own copy
+# of the training arrays -- on a memory-constrained container that trades
+# speed for a multiple of peak memory, which is the wrong trade here. Lower
+# estimator counts for the same reason (fewer trees held in memory at once).
 _CANDIDATES = {
     "logistic_regression": lambda: LogisticRegression(max_iter=1000, class_weight="balanced"),
     "random_forest": lambda: RandomForestClassifier(
-        n_estimators=200, max_depth=6, min_samples_leaf=20, class_weight="balanced", random_state=42, n_jobs=-1,
+        n_estimators=100, max_depth=6, min_samples_leaf=20, class_weight="balanced", random_state=42, n_jobs=1,
     ),
     "gradient_boosting": lambda: GradientBoostingClassifier(
-        n_estimators=150, max_depth=3, learning_rate=0.05, random_state=42,
+        n_estimators=100, max_depth=3, learning_rate=0.05, random_state=42,
     ),
 }
 

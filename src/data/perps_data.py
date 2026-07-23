@@ -51,6 +51,14 @@ CANDLE_1M_LOOKBACK_HOURS = int(os.getenv("PERPS_CANDLE_1M_LOOKBACK_HOURS", "72")
 CANDLE_60M_LOOKBACK_HOURS = int(os.getenv("PERPS_CANDLE_60M_LOOKBACK_HOURS", "720") or "720")  # 30 days
 LABEL_HORIZON_MINUTES = int(os.getenv("PERPS_LABEL_HORIZON_MINUTES", "30") or "30")
 
+# The HF archive grows every day forever; without a cap, load_training_dataset()
+# would eventually load an unbounded number of rows into memory on every train
+# run. Render's free tier caps the whole process at 512MB, and this dataset's
+# ticker column (kept as Python string objects until capped/typed below) is
+# the single biggest memory cost of loading it -- bounding row count bounds
+# memory regardless of how much history accumulates over time.
+MAX_TRAIN_ROWS = int(os.getenv("PERPS_MAX_TRAIN_ROWS", "150000") or "150000")
+
 _TICKER_TO_COIN = {
     "KXBTCPERP": "BTC", "KXETHPERP": "ETH", "KXSOLPERP": "SOL", "KXXRPPERP": "XRP",
     "KXDOGEPERP": "DOGE", "KXLTCPERP": "LTC", "KXBCHPERP": "BCH", "KXLINKPERP": "LINK",
@@ -289,14 +297,20 @@ def push_dataset_snapshot(df: pd.DataFrame) -> dict[str, Any]:
     return result
 
 
-def load_training_dataset(*, max_shards: int = 90) -> pd.DataFrame:
+def load_training_dataset(*, max_shards: int = 90, max_rows: int | None = None) -> pd.DataFrame:
     """ALWAYS merges local shards with the full HF dataset archive (deduped
     on ticker+ts) rather than treating HF as only a cold-start fallback --
     a long-running deployment accumulates its own local shards from its
     rolling ~72h collection window and would otherwise never pick up the
     deeper history archived to HF, training on a much thinner slice of data
     than actually exists. This is the "download from Hugging Face" step the
-    model actually trains on."""
+    model actually trains on.
+
+    The result is capped to the most recent `max_rows` rows (default
+    MAX_TRAIN_ROWS) -- the HF archive grows every day forever, so without a
+    cap this would eventually load more data than fits in Render's 512MB
+    memory ceiling. Training on the most recent slice also naturally favors
+    current market regime over stale history."""
     shard_dir = DATA_DIR / "perps_dataset"
     local_files = sorted(shard_dir.glob("*.parquet")) if shard_dir.exists() else []
     frames = []
@@ -338,6 +352,11 @@ def load_training_dataset(*, max_shards: int = 90) -> pd.DataFrame:
     if not frames:
         return pd.DataFrame()
     combined = pd.concat(frames, ignore_index=True)
+    del frames  # the individual shard frames are redundant with `combined`; drop the reference before the next copy-making step
     if "ticker" in combined.columns and "ts" in combined.columns:
         combined = combined.drop_duplicates(subset=["ticker", "ts"])
+        combined["ticker"] = combined["ticker"].astype("category")  # object-dtype strings are the single biggest memory cost of this frame
+        cap = MAX_TRAIN_ROWS if max_rows is None else max_rows
+        if cap and len(combined) > cap:
+            combined = combined.sort_values("ts").tail(cap).reset_index(drop=True)
     return combined

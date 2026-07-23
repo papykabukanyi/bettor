@@ -335,9 +335,19 @@ def _ensure_background_jobs_started() -> None:
                 logger.info("Startup data collect completed")
             except Exception as exc:
                 logger.warning("Startup data collect failed: %s", exc)
+            # Full training (load the whole capped dataset + fit 3 candidate
+            # models) is the heaviest thing this process does. Only run it at
+            # boot on a genuine cold start (no model cached locally or on HF
+            # yet) -- otherwise every restart (including one caused BY an OOM)
+            # would immediately retrigger the heaviest operation again,
+            # turning a single OOM into a self-sustaining crash loop. The
+            # daily cron job still retrains on schedule regardless.
             try:
-                train_result = _run_perps_train()
-                logger.info("Startup train attempt: %s", train_result.get("reason", "ok"))
+                if perps_model.load_model()[0] is None:
+                    train_result = _run_perps_train()
+                    logger.info("Startup train attempt (cold start): %s", train_result.get("reason", "ok"))
+                else:
+                    logger.info("Startup train skipped: model already cached, daily cron will retrain")
             except Exception as exc:
                 logger.warning("Startup train failed: %s", exc)
             if ENABLE_PERPS_SCHEDULER:

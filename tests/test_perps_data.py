@@ -150,6 +150,28 @@ def test_load_training_dataset_merges_local_and_hf_not_just_fallback(monkeypatch
     assert sorted(result["ts"].tolist()) == [1, 100, 200]
 
 
+def test_load_training_dataset_caps_to_max_rows_keeping_most_recent(monkeypatch, tmp_path):
+    """The HF archive grows every day forever; without a cap this would
+    eventually load more data into memory than a memory-constrained
+    deployment can hold. The cap must keep the MOST RECENT rows (by ts),
+    not an arbitrary slice."""
+    monkeypatch.setattr(perps_data, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(perps_data, "HF_API_KEY", "")
+
+    shard_dir = tmp_path / "perps_dataset"
+    shard_dir.mkdir()
+    local_df = pd.DataFrame({
+        "ticker": ["KXBTCPERP"] * 10,
+        "ts": list(range(10)),
+        "close": [float(i) for i in range(10)],
+    })
+    local_df.to_parquet(shard_dir / "2026-07-22.parquet", index=False)
+
+    result = perps_data.load_training_dataset(max_rows=4)
+    assert len(result) == 4
+    assert sorted(result["ts"].tolist()) == [6, 7, 8, 9]
+
+
 def test_load_training_dataset_excludes_lookalike_paths_from_another_pipeline(monkeypatch, tmp_path):
     """A previously-used HF account had an UNRELATED pipeline that also
     wrote parquet files under a "data/" prefix (e.g.
