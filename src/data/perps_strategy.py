@@ -78,7 +78,9 @@ from pathlib import Path
 from typing import Any
 
 from data.crypto_prices import get_fast_price
-from data.kalshi_perps import cancel_margin_order, create_margin_order, get_margin_balance, get_margin_market
+from data.kalshi_perps import (
+    cancel_margin_order, create_margin_order, get_margin_balance, get_margin_market, get_margin_positions,
+)
 from data.perps_data import coin_for_ticker, get_watchlist, latest_feature_row
 from data.perps_model import predict_direction
 
@@ -372,6 +374,83 @@ def _daily_loss_cap_breached(state: dict[str, Any], reference_balance: float | N
     return today_pnl <= -abs(DAILY_LOSS_CAP_PCT) * reference_balance
 
 
+def _real_open_positions_by_ticker() -> dict[str, dict[str, float]] | None:
+    """Ground truth from Kalshi's own GET /margin/positions -- local
+    bookkeeping only ever records an order having been PLACED, never
+    confirms it actually FILLED. Confirmed live on this account: repeated
+    entry/exit orders placed as `time_in_force=immediate_or_cancel` came
+    back with `fill_count: 0.00` (canceled, nothing executed), yet the
+    local state that assumed success still added/removed a position as if
+    it had. Returns None (never an empty dict) on a failed API call so
+    callers can tell "confirmed no real positions" apart from "couldn't
+    check" and avoid wiping out tracking on a transient error."""
+    try:
+        data = get_margin_positions()
+    except Exception as exc:
+        logger.warning("[perps_strategy] could not fetch real positions for reconciliation: %s", exc)
+        return None
+    result: dict[str, dict[str, float]] = {}
+    for p in data.get("positions") or []:
+        if not p.get("is_portfolio"):
+            continue  # non-portfolio subaccount rows observed at 0 size; not real tradable exposure
+        count = abs(float(p.get("position") or 0.0))
+        ticker = p.get("market_ticker")
+        if count <= 0 or not ticker:
+            continue
+        result[ticker] = {"count": count, "entry_price": float(p.get("entry_price") or 0.0)}
+    return result
+
+
+def _reconcile_positions_with_exchange(state: dict[str, Any]) -> list[dict[str, Any]]:
+    """Make local `state["positions"]` match what Kalshi's own account
+    actually holds before any exit/entry decision is made. Handles all
+    three ways local bookkeeping can have drifted from reality:
+      - a real position exists that local state never recorded (a prior
+        entry attempt's fill was never verified) -> ADOPT it, so it starts
+        being monitored for take-profit/stop-loss instead of sitting with
+        no coverage at all;
+      - a local position's count/entry_price doesn't match the real one
+        (partial fills accumulated differently than assumed) -> CORRECT it;
+      - a local position has no real counterpart at all (the entry order
+        never actually filled) -> DROP it without recording a fake trade.
+    Only ever called when live trading is actually active (see callers) --
+    in dry-run, local positions are simulated and deliberately have no
+    real-exchange counterpart, so reconciling would just erase them."""
+    local_positions = state.get("positions") or []
+    real = _real_open_positions_by_ticker()
+    if real is None:
+        return local_positions
+
+    local_by_ticker = {p["ticker"]: p for p in local_positions}
+    reconciled: list[dict[str, Any]] = []
+    for ticker, real_pos in real.items():
+        local = local_by_ticker.get(ticker)
+        if local is None:
+            logger.warning(
+                "[perps_strategy] adopting untracked real position: %s x%.2f @ %.4f",
+                ticker, real_pos["count"], real_pos["entry_price"],
+            )
+            reconciled.append({
+                "ticker": ticker, "entry_price": real_pos["entry_price"], "count": real_pos["count"],
+                "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(), "dry_run": False,
+                "sizing": {"note": "adopted_from_exchange_reconciliation"},
+            })
+            continue
+        if abs(float(local["count"]) - real_pos["count"]) > 1e-9 or abs(float(local["entry_price"]) - real_pos["entry_price"]) > 1e-6:
+            logger.warning(
+                "[perps_strategy] correcting local position for %s: count %.2f->%.2f, entry %.4f->%.4f",
+                ticker, float(local["count"]), real_pos["count"], float(local["entry_price"]), real_pos["entry_price"],
+            )
+        local["count"] = real_pos["count"]
+        local["entry_price"] = real_pos["entry_price"]
+        reconciled.append(local)
+
+    for ticker in set(local_by_ticker) - set(real):
+        logger.warning("[perps_strategy] dropping phantom local position (no matching real fill): %s", ticker)
+
+    return reconciled
+
+
 def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
     """Fast loop: ONLY checks/exits existing open positions, one cheap price
     call per position. Meant to run every 15-30 seconds so a quick,
@@ -381,6 +460,13 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
     effective_dry_run = True if not LIVE_TRADING_ENABLED else bool(dry_run if dry_run is not None else True)
     with _STATE_LOCK:
         state = _load_state()
+        if not effective_dry_run:
+            # Ground-truth check first, before deciding anything -- see
+            # _reconcile_positions_with_exchange. Dry-run positions are
+            # simulated and have no real counterpart, so this only ever
+            # runs when orders are actually being placed.
+            state["positions"] = _reconcile_positions_with_exchange(state)
+            _save_state(state)
         positions = state.get("positions") or []
         if not positions:
             return {"ok": True, "dry_run": effective_dry_run, "action": "no_position"}
@@ -430,27 +516,56 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
 
             count = float(position["count"])
             exit_price = _round_price(current_price, tick_size)
+            entry_price = float(position["entry_price"])
             order_result = None
+            closed_count = count
             if not effective_dry_run:
                 order_result = create_margin_order(
                     ticker=ticker, side="ask", count=count, price=exit_price,
                     client_order_id=str(uuid.uuid4()), time_in_force="immediate_or_cancel", reduce_only=True,
                 )
-            entry_price = float(position["entry_price"])
+                # An immediate_or_cancel order can fill zero, partially, or
+                # fully -- confirmed live on this account (repeated exit
+                # attempts came back fill_count 0.00, i.e. fully canceled).
+                # Re-check the real position size right after to find out
+                # what actually happened before touching bookkeeping/P&L.
+                real_after = _real_open_positions_by_ticker()
+                if real_after is not None:
+                    closed_count = round(max(0.0, count - real_after.get(ticker, {}).get("count", 0.0)), 6)
+                else:
+                    logger.warning(
+                        "[perps_strategy] could not verify exit fill for %s after placing order -- "
+                        "assuming full close (order_result=%s)", ticker, order_result,
+                    )
+
+            if closed_count <= 0:
+                # Nothing actually closed -- position is unchanged on the
+                # exchange, keep tracking it as-is and retry next cycle.
+                remaining.append(position)
+                checks[-1]["exit_order_not_filled"] = True
+                continue
+
             # Each market's quoted "price" IS the per-contract dollar value
             # already (e.g. KXBTCPERP's "0.0001 BTC" contract priced ~$6.63
             # when BTC ~$66,300), so P&L is simply the price delta times
             # contract count -- no separate multiplier needed.
-            realized_pnl = round((exit_price - entry_price) * count, 6)
+            realized_pnl = round((exit_price - entry_price) * closed_count, 6)
             by_date = state.setdefault("realized_pnl_by_date", {})
             by_date[_today_str()] = round(float(by_date.get(_today_str(), 0.0)) + realized_pnl, 6)
             trade = {
                 "closed_at": dt.datetime.now(dt.timezone.utc).isoformat(),
                 "ticker": ticker, "entry_price": entry_price, "exit_price": exit_price,
-                "count": count, "realized_pnl_usd": realized_pnl, "reason": reason, "dry_run": effective_dry_run,
+                "count": closed_count, "realized_pnl_usd": realized_pnl, "reason": reason, "dry_run": effective_dry_run,
             }
             state.setdefault("trade_log", []).append(trade)
             closed.append(trade)
+
+            if closed_count < count:
+                # Partial fill -- the remainder is still genuinely open on
+                # the exchange, keep monitoring it rather than dropping it.
+                remainder = dict(position)
+                remainder["count"] = round(count - closed_count, 6)
+                remaining.append(remainder)
 
         state["positions"] = remaining
         _save_state(state)
@@ -472,6 +587,13 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
     effective_dry_run = True if not LIVE_TRADING_ENABLED else bool(dry_run if dry_run is not None else True)
     with _STATE_LOCK:
         state = _load_state()
+        if not effective_dry_run:
+            # Same ground-truth check as manage_open_positions() -- makes
+            # sure `held_tickers` below (which decides what NOT to
+            # re-enter) reflects reality even if the fast loop hasn't
+            # ticked yet (e.g. right after a fresh deploy).
+            state["positions"] = _reconcile_positions_with_exchange(state)
+            _save_state(state)
         positions = state.get("positions") or []
         open_slots = MAX_CONCURRENT_POSITIONS - len(positions)
         if open_slots <= 0:
@@ -551,11 +673,36 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
             continue
 
         order_result = None
+        actual_count: float = float(count)
+        actual_entry_price = entry_price
         if not effective_dry_run:
             order_result = create_margin_order(
                 ticker=ticker, side="bid", count=float(count), price=entry_price,
                 client_order_id=str(uuid.uuid4()), time_in_force="immediate_or_cancel",
             )
+            # An immediate_or_cancel order can fill zero, partially, or
+            # fully -- confirmed live on this account (several buy attempts
+            # came back fill_count 0.00; others partially filled less than
+            # requested). Never record a position based on the REQUESTED
+            # count; verify what actually landed on the exchange first.
+            real_after = _real_open_positions_by_ticker()
+            if real_after is not None:
+                real_pos = real_after.get(ticker)
+                actual_count = real_pos["count"] if real_pos else 0.0
+                if real_pos and real_pos["entry_price"] > 0:
+                    actual_entry_price = real_pos["entry_price"]
+            else:
+                logger.warning(
+                    "[perps_strategy] could not verify entry fill for %s after placing order -- "
+                    "assuming full fill (order_result=%s)", ticker, order_result,
+                )
+
+        if actual_count <= 0:
+            opened.append({
+                "ticker": ticker, "ok": True, "action": "skipped_entry_not_filled",
+                "reason": candidate["reason"], "order_result": order_result,
+            })
+            continue
 
         with _STATE_LOCK:
             # Re-read + re-check on every entry: the fast loop runs
@@ -567,7 +714,7 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
                 opened.append({"ticker": ticker, "ok": True, "action": "skipped_slot_taken"})
                 continue
             new_position = {
-                "ticker": ticker, "entry_price": entry_price, "count": float(count),
+                "ticker": ticker, "entry_price": actual_entry_price, "count": float(actual_count),
                 "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(), "dry_run": effective_dry_run,
                 "sizing": sizing_detail,
             }
@@ -575,8 +722,8 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
             state["positions"] = positions
             _save_state(state)
         opened.append({
-            "ticker": ticker, "ok": True, "action": "opened", "entry_price": entry_price,
-            "count": count, "reason": candidate["reason"], "sizing": sizing_detail, "order_result": order_result,
+            "ticker": ticker, "ok": True, "action": "opened", "entry_price": actual_entry_price,
+            "count": actual_count, "reason": candidate["reason"], "sizing": sizing_detail, "order_result": order_result,
         })
 
     result["opened"] = opened

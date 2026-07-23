@@ -412,6 +412,234 @@ def test_daily_loss_cap_is_a_percentage_of_the_days_starting_balance(monkeypatch
     assert result["action"] != "skipped_daily_loss_cap"
 
 
+# ── Exchange reconciliation + real-fill verification ─────────────────────────
+# Confirmed live on the real account: immediate_or_cancel orders repeatedly
+# came back fill_count 0.00 (fully canceled, nothing executed) while the old
+# code unconditionally trusted the requested count -- creating phantom local
+# positions the dashboard showed as "open" with nothing actually held, an
+# untracked real position (no local record at all, so no take-profit/
+# stop-loss coverage), and a local position undercounting a real one that
+# had partially filled across multiple attempts. These tests lock down the
+# fix: never trust a requested count, always verify against Kalshi's own
+# GET /margin/positions.
+
+def _real_position(ticker, count, entry_price, is_portfolio=True):
+    return {"market_ticker": ticker, "position": str(count), "entry_price": str(entry_price), "is_portfolio": is_portfolio}
+
+
+def test_real_open_positions_by_ticker_ignores_non_portfolio_and_zero_rows(monkeypatch):
+    monkeypatch.setattr(strat, "get_margin_positions", lambda: {"positions": [
+        _real_position("KXBCHPERP", "0.00", "0.0000", is_portfolio=False),
+        _real_position("KXSOLPERP", "4.00", "7.7572"),
+        _real_position("KXNEARPERP", "0.00", "0.0000"),
+    ]})
+    result = strat._real_open_positions_by_ticker()  # noqa: SLF001
+    assert result == {"KXSOLPERP": {"count": 4.0, "entry_price": 7.7572}}
+
+
+def test_real_open_positions_by_ticker_returns_none_on_api_failure(monkeypatch):
+    def fail():
+        raise RuntimeError("network down")
+    monkeypatch.setattr(strat, "get_margin_positions", fail)
+    assert strat._real_open_positions_by_ticker() is None  # noqa: SLF001
+
+
+def test_reconcile_adopts_untracked_real_position(monkeypatch):
+    """A real position exists on Kalshi (e.g. from a prior entry whose fill
+    was never verified) that local state never recorded at all -- it must
+    be adopted so it starts getting monitored for exit, instead of sitting
+    with zero take-profit/stop-loss coverage forever."""
+    monkeypatch.setattr(strat, "get_margin_positions", lambda: {"positions": [
+        _real_position("KXSOLPERP", "4.00", "7.7572"),
+    ]})
+    reconciled = strat._reconcile_positions_with_exchange({"positions": []})  # noqa: SLF001
+    assert len(reconciled) == 1
+    assert reconciled[0]["ticker"] == "KXSOLPERP"
+    assert reconciled[0]["count"] == 4.0
+    assert reconciled[0]["entry_price"] == 7.7572
+
+
+def test_reconcile_corrects_mismatched_count_and_entry_price(monkeypatch):
+    """Local state thought KXBCHPERP was 7 contracts @ 2.1848; the real
+    account had accumulated 74 contracts @ 2.1823 across several partial
+    fills the old code never verified. Reconciliation must correct both."""
+    monkeypatch.setattr(strat, "get_margin_positions", lambda: {"positions": [
+        _real_position("KXBCHPERP", "74.00", "2.1823"),
+    ]})
+    local_state = {"positions": [_position(ticker="KXBCHPERP", entry_price=2.1848, count=7.0)]}
+    reconciled = strat._reconcile_positions_with_exchange(local_state)  # noqa: SLF001
+    assert len(reconciled) == 1
+    assert reconciled[0]["count"] == 74.0
+    assert reconciled[0]["entry_price"] == 2.1823
+
+
+def test_reconcile_drops_phantom_position_with_no_real_fill(monkeypatch):
+    """Local state recorded an open KXXRPPERP position, but the entry order
+    actually had fill_count 0.00 on Kalshi's side -- nothing was ever really
+    bought. Reconciliation must drop it, not leave a phantom position
+    showing on the dashboard forever."""
+    monkeypatch.setattr(strat, "get_margin_positions", lambda: {"positions": []})
+    local_state = {"positions": [_position(ticker="KXXRPPERP", entry_price=1.1338, count=1.0)]}
+    reconciled = strat._reconcile_positions_with_exchange(local_state)  # noqa: SLF001
+    assert reconciled == []
+
+
+def test_reconcile_leaves_local_state_untouched_when_real_positions_check_fails(monkeypatch):
+    """A transient API error while checking real positions must never be
+    treated as "confirmed nothing is open" -- that would wipe out tracking
+    on every ticker on a mere network hiccup."""
+    def fail():
+        raise RuntimeError("network down")
+    monkeypatch.setattr(strat, "get_margin_positions", fail)
+    local_state = {"positions": [_position(ticker="KXBCHPERP")]}
+    reconciled = strat._reconcile_positions_with_exchange(local_state)  # noqa: SLF001
+    assert len(reconciled) == 1
+    assert reconciled[0]["ticker"] == "KXBCHPERP"
+
+
+def test_manage_open_positions_reconciles_before_deciding_exits(monkeypatch, tmp_path):
+    """With live trading on, manage_open_positions must pull in a real
+    position local state never knew about (here: KXSOLPERP) so it actually
+    gets a take-profit/stop-loss check instead of sitting unmonitored."""
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", True)
+    strat._save_state({"positions": [], "realized_pnl_by_date": {}, "trade_log": [], "daily_reference_balance": {}})
+    monkeypatch.setattr(strat, "get_margin_positions", lambda: {"positions": [
+        _real_position("KXSOLPERP", "4.00", "7.7572"),
+    ]})
+    # Price barely moved -- should just be adopted and held, not exited.
+    monkeypatch.setattr(strat, "get_margin_market", lambda ticker: _market_response(price=7.758))
+
+    result = strat.manage_open_positions(dry_run=False)
+    assert result["action"] == "none"
+    state = strat._load_state()  # noqa: SLF001
+    tickers = [p["ticker"] for p in state["positions"]]
+    assert tickers == ["KXSOLPERP"]
+
+
+def test_manage_open_positions_keeps_position_when_exit_order_does_not_fill(monkeypatch, tmp_path):
+    """A stop-loss/take-profit exit order placed as immediate_or_cancel can
+    come back with fill_count 0 (nothing executed) -- the old code removed
+    the position from local state regardless, making the dashboard show
+    "closed" while the real position was still fully open on Kalshi. Must
+    keep monitoring it instead."""
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", True)
+    strat._save_state({
+        "positions": [_position(ticker="KXBCHPERP", entry_price=2.1823, count=74.0)],
+        "realized_pnl_by_date": {}, "trade_log": [], "daily_reference_balance": {},
+    })
+    # Reconciliation before the exit decision reports the position unchanged.
+    monkeypatch.setattr(strat, "get_margin_positions", lambda: {"positions": [
+        _real_position("KXBCHPERP", "74.00", "2.1823"),
+    ]})
+    # Price triggers take-profit...
+    monkeypatch.setattr(strat, "get_margin_market", lambda ticker: _market_response(price=2.1823 * (1 + strat.TAKE_PROFIT_PCT + 0.001)))
+    # ...but the exit order itself never fills.
+    monkeypatch.setattr(strat, "create_margin_order", lambda **kwargs: {"order": {"fill_count": "0.00"}})
+
+    result = strat.manage_open_positions(dry_run=False)
+    assert result["action"] == "none"
+    assert result["checks"][0].get("exit_order_not_filled") is True
+    state = strat._load_state()  # noqa: SLF001
+    assert len(state["positions"]) == 1
+    assert state["positions"][0]["count"] == 74.0
+    assert state["trade_log"] == []  # no fake trade recorded
+
+
+def test_manage_open_positions_keeps_remainder_on_partial_exit_fill(monkeypatch, tmp_path):
+    """The exit order fills only part of the position -- the filled portion
+    should be recorded as a real closed trade, and the rest must stay open
+    and continue being monitored, not vanish."""
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", True)
+    strat._save_state({
+        "positions": [_position(ticker="KXBCHPERP", entry_price=2.1823, count=74.0)],
+        "realized_pnl_by_date": {}, "trade_log": [], "daily_reference_balance": {},
+    })
+    # First call is the pre-decision reconciliation (must match local state
+    # exactly, or this test would be exercising reconciliation-correction
+    # instead of partial-fill handling); second call is the post-order
+    # verification, after the exit order has closed 24 of the 74.
+    calls = {"n": 0}
+
+    def fake_positions():
+        calls["n"] += 1
+        count = "74.00" if calls["n"] == 1 else "50.00"
+        return {"positions": [_real_position("KXBCHPERP", count, "2.1823")]}
+
+    monkeypatch.setattr(strat, "get_margin_positions", fake_positions)
+    monkeypatch.setattr(strat, "get_margin_market", lambda ticker: _market_response(price=2.1823 * (1 + strat.TAKE_PROFIT_PCT + 0.001)))
+    monkeypatch.setattr(strat, "create_margin_order", lambda **kwargs: {"order": {"fill_count": "24.00"}})
+
+    result = strat.manage_open_positions(dry_run=False)
+    assert result["action"] == "closed"
+    assert result["closed"][0]["count"] == 24.0
+    state = strat._load_state()  # noqa: SLF001
+    assert len(state["positions"]) == 1
+    assert state["positions"][0]["count"] == 50.0
+
+
+def test_scan_and_enter_skips_recording_a_position_when_entry_order_does_not_fill(monkeypatch, tmp_path):
+    """The entry buy order comes back fill_count 0 (fully canceled) --
+    confirmed live behavior for immediate_or_cancel orders that miss the
+    market. Must not record a phantom position that was never actually
+    bought."""
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", True)
+    monkeypatch.setattr(strat, "get_margin_market", lambda ticker: _market_response())
+    monkeypatch.setattr(strat, "_available_balance_usd", lambda: 10.0)
+    monkeypatch.setattr(
+        strat, "scan_for_entries",
+        lambda tickers=None, exclude=None: (
+            [{"ticker": "KXXRPPERP", "current_price": 6.60, "reason": "test dip", "score": 0.9}], [],
+        ),
+    )
+    monkeypatch.setattr(strat, "create_margin_order", lambda **kwargs: {"order": {"fill_count": "0.00"}})
+    monkeypatch.setattr(strat, "get_margin_positions", lambda: {"positions": []})
+
+    result = strat.scan_and_enter(dry_run=False)
+    assert result["opened"][0]["action"] == "skipped_entry_not_filled"
+    state = strat._load_state()  # noqa: SLF001
+    assert state.get("positions") == []
+
+
+def test_scan_and_enter_records_actual_filled_count_not_requested_count(monkeypatch, tmp_path):
+    """Requested 6 contracts, only 4 actually filled (confirmed live
+    pattern: several partial fills smaller than requested) -- local state
+    must reflect what was ACTUALLY bought, using Kalshi's own entry price,
+    not the requested count/price."""
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", True)
+    monkeypatch.setattr(strat, "get_margin_market", lambda ticker: _market_response(price=2.0, leverage_estimate=6.0))
+    monkeypatch.setattr(strat, "_available_balance_usd", lambda: 10.0)  # sizes to 6 contracts, see sizing test above
+    monkeypatch.setattr(
+        strat, "scan_for_entries",
+        lambda tickers=None, exclude=None: (
+            [{"ticker": "KXSOLPERP", "current_price": 2.0, "reason": "test dip", "score": 0.9}], [],
+        ),
+    )
+    monkeypatch.setattr(strat, "create_margin_order", lambda **kwargs: {"order": {"fill_count": "4.00"}})
+    # First call is the pre-scan reconciliation (nothing real held yet);
+    # second call is the post-order verification, after the buy filled 4.
+    calls = {"n": 0}
+
+    def fake_positions():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {"positions": []}
+        return {"positions": [_real_position("KXSOLPERP", "4.00", "1.9998")]}
+
+    monkeypatch.setattr(strat, "get_margin_positions", fake_positions)
+
+    result = strat.scan_and_enter(dry_run=False)
+    assert result["opened"][0]["action"] == "opened"
+    assert result["opened"][0]["count"] == 4.0
+    state = strat._load_state()  # noqa: SLF001
+    assert state["positions"][0]["count"] == 4.0
+    assert state["positions"][0]["entry_price"] == 1.9998
+
+
 def test_run_cycle_manages_positions_then_scans_for_entries(monkeypatch, tmp_path):
     monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "state.json")
     monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", False)
