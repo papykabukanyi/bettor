@@ -60,6 +60,22 @@ PERPS_CYCLE_MINUTES = max(1, int(os.getenv("PERPS_CYCLE_MINUTES", "2") or "2"))
 PERPS_FAST_CHECK_SECONDS = max(5, int(os.getenv("PERPS_FAST_CHECK_SECONDS", "20") or "20"))
 PERPS_DATA_COLLECT_MINUTES = max(5, int(os.getenv("PERPS_DATA_COLLECT_MINUTES", "15") or "15"))
 PERPS_TRAIN_HOUR_ET = int(os.getenv("PERPS_TRAIN_HOUR_ET", "3") or "3")
+# Render's rolling (zero-downtime) deploy briefly runs the OLD and NEW
+# instance of this service at once -- the new one passes its health check
+# and starts serving before the old one receives SIGTERM. Since this app's
+# background scheduler runs independently of HTTP traffic, BOTH instances'
+# schedulers are live during that overlap. Confirmed live in production
+# logs: two full "Perps scheduler started" + "Startup entry scan completed"
+# sequences firing within 3 seconds of each other on one deploy -- meaning
+# two independent processes could each place a REAL entry order for the
+# same signal. This delay makes a freshly-booted instance wait before its
+# first entry-scan tick, giving the overlap window (observed as roughly
+# 10-30s) time to resolve so only one live instance is actually opening new
+# positions at a time. Exits (perps_fast_check) are NOT delayed -- closing
+# a position redundantly from two instances is safe (the second reduce_only
+# attempt just finds nothing left to close), so there's no reason to slow
+# down stop-loss/take-profit coverage.
+PERPS_STARTUP_GRACE_SECONDS = max(0, int(os.getenv("PERPS_STARTUP_GRACE_SECONDS", "45") or "45"))
 # Dry-run is always the hard default regardless of this flag (see
 # perps_strategy.LIVE_TRADING_ENABLED) -- this only controls whether the
 # scheduler runs the loop AT ALL. Default ON: the whole point of this bot is
@@ -320,13 +336,14 @@ def _ensure_background_jobs_started() -> None:
                 scheduler.add_job(
                     _run_perps_entry_scan, "interval", minutes=PERPS_CYCLE_MINUTES,
                     id="perps_entry_scan", replace_existing=True,
+                    next_run_time=dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=PERPS_STARTUP_GRACE_SECONDS),
                 )
             scheduler.start()
             logger.info(
-                "Perps scheduler started: fast exit check every %ds, entry scan every %d min (%s), "
+                "Perps scheduler started: fast exit check every %ds, entry scan every %d min (%s, first run in %ds), "
                 "data collect every %d min, train daily at %02d:00 ET, live_trading=%s",
                 PERPS_FAST_CHECK_SECONDS, PERPS_CYCLE_MINUTES, "ENABLED" if ENABLE_PERPS_SCHEDULER else "disabled",
-                PERPS_DATA_COLLECT_MINUTES, PERPS_TRAIN_HOUR_ET, perps_strategy.LIVE_TRADING_ENABLED,
+                PERPS_STARTUP_GRACE_SECONDS, PERPS_DATA_COLLECT_MINUTES, PERPS_TRAIN_HOUR_ET, perps_strategy.LIVE_TRADING_ENABLED,
             )
 
         def _runner() -> None:
@@ -350,12 +367,16 @@ def _ensure_background_jobs_started() -> None:
                     logger.info("Startup train skipped: model already cached, daily cron will retrain")
             except Exception as exc:
                 logger.warning("Startup train failed: %s", exc)
-            if ENABLE_PERPS_SCHEDULER:
-                try:
-                    _run_perps_entry_scan()
-                    logger.info("Startup entry scan completed")
-                except Exception as exc:
-                    logger.exception("Startup entry scan failed: %s", exc)
+            # No immediate startup entry scan here (deliberately removed) --
+            # confirmed live on this account: a fresh instance calling this
+            # the instant it boots, during Render's rolling-deploy overlap
+            # window, meant the OLD and NEW instance could each place a REAL
+            # duplicate entry order for the same signal within seconds of
+            # each other. The scheduled perps_entry_scan job (see
+            # PERPS_STARTUP_GRACE_SECONDS above) already covers this on its
+            # own delayed first tick -- this redundant immediate call only
+            # ever made the collision window worse, never faster in any way
+            # that mattered (2 minutes vs waiting for the grace period).
 
         threading.Thread(target=_runner, daemon=True, name="dashboard-perps-startup-autorun").start()
         _startup_done = True

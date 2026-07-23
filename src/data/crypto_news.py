@@ -61,6 +61,14 @@ _general_feed_cache: dict[str, tuple[list[str], float]] = {}
 CRYPTOPANIC_API_KEY = os.getenv("CRYPTOPANIC_API_KEY", "")
 NEWSDATA_API_KEY = os.getenv("NEWSDATA_API_KEY", "")
 
+# Confirmed live: with 16 tickers each checked roughly every 10 minutes,
+# newsdata.io's free-tier daily quota gets exhausted fast, and every
+# subsequent call for the rest of the day also 429s -- retrying every cache
+# refresh just spams the log with the same already-known failure. Once a
+# 429 is seen, skip this source entirely for a real cooldown instead.
+_NEWSDATA_COOLDOWN_SEC = 3600
+_newsdata_cooldown_until = 0.0
+
 _POSITIVE_WORDS = {
     "surge", "rally", "bullish", "gain", "gains", "soar", "soars", "high", "highs",
     "adopt", "adoption", "approve", "approval", "partnership", "breakout", "record",
@@ -163,7 +171,11 @@ def _fetch_newsdata_io(coin_symbol: str) -> list[str]:
     for how to get a free token -- skipped silently otherwise. Their
     `sentiment`/`ai_*` fields are paid-plan-only (confirmed live), so this
     only uses the free `title` field, same as every other source here."""
+    global _newsdata_cooldown_until
     if not NEWSDATA_API_KEY:
+        return []
+    now = time.time()
+    if now < _newsdata_cooldown_until:
         return []
     query = _COIN_QUERIES.get(coin_symbol, coin_symbol.lower())
     try:
@@ -172,6 +184,13 @@ def _fetch_newsdata_io(coin_symbol: str) -> list[str]:
             params={"apikey": NEWSDATA_API_KEY, "q": query, "language": "en"},
             timeout=_TIMEOUT_SEC,
         )
+        if resp.status_code == 429:
+            _newsdata_cooldown_until = now + _NEWSDATA_COOLDOWN_SEC
+            logger.warning(
+                "[crypto_news] newsdata.io rate-limited (429) -- pausing this source for %d min",
+                _NEWSDATA_COOLDOWN_SEC // 60,
+            )
+            return []
         resp.raise_for_status()
         results = resp.json().get("results") or []
         return [r.get("title", "") for r in results if r.get("title")]
