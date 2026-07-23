@@ -28,7 +28,7 @@ from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, roc_auc_score
 
-from data.perps_data import FEATURE_COLUMNS, latest_feature_row, load_training_dataset
+from data.perps_data import FEATURE_COLUMNS, latest_feature_row, load_training_dataset, retry_on_rate_limit
 
 logger = logging.getLogger(__name__)
 
@@ -144,14 +144,14 @@ def _push_model_to_hf() -> None:
             api.repo_info(repo_id=HF_MODEL_REPO, repo_type="model")
         except Exception:
             api.create_repo(repo_id=HF_MODEL_REPO, repo_type="model", exist_ok=True, private=False)
-        api.upload_file(
+        retry_on_rate_limit(lambda: api.upload_file(
             path_or_fileobj=str(MODEL_PATH), path_in_repo="perps_model.joblib",
             repo_id=HF_MODEL_REPO, repo_type="model", commit_message="update perps direction model",
-        )
-        api.upload_file(
+        ))
+        retry_on_rate_limit(lambda: api.upload_file(
             path_or_fileobj=str(MODEL_META_PATH), path_in_repo="perps_model_meta.json",
             repo_id=HF_MODEL_REPO, repo_type="model", commit_message="update perps model metadata",
-        )
+        ))
     except Exception as exc:
         logger.warning("[perps_model] HF model push failed: %s", exc)
 

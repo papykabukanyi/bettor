@@ -20,6 +20,13 @@ https://cryptopanic.com/developers/api/ (free tier, no credit card) and set
 CRYPTOPANIC_API_KEY. Without it, this source is simply skipped (not
 required -- the four free sources above already cover it).
 
+Optional additional source: newsdata.io's `/api/1/latest` endpoint (confirmed
+live 2026-07-22 with a free key), general news filtered by a per-coin query --
+their free tier is a few hundred requests/day account-wide, shared across
+every coin this bot watches, so treat it as a bonus signal that may go quiet
+once the day's quota is used, not a required source. Sign up free at
+https://newsdata.io and set NEWSDATA_API_KEY. Skipped silently without it.
+
 Produces a simple keyword-polarity sentiment score in [-1, 1] plus a headline
 volume count. This is intentionally lightweight (no ML sentiment model) --
 just enough signal to feed as one more feature into the direction classifier,
@@ -42,7 +49,17 @@ _TIMEOUT_SEC = 8
 _CACHE_TTL_SEC = 600
 _cache: dict[str, tuple[dict[str, Any], float]] = {}
 
+# The three BTC-only general newsroom feeds below are a single shared feed
+# (not per-coin), so they're cached separately with a longer TTL -- cuts
+# their call rate ~3x versus riding the per-coin 600s cache, after CryptoSlate
+# started returning 429 (Too Many Requests) under normal traffic. Render's
+# outbound IPs are shared across many unrelated apps, so this is about being
+# a lighter neighbor, not a bug in our own request volume.
+_GENERAL_FEED_CACHE_TTL_SEC = 1800
+_general_feed_cache: dict[str, tuple[list[str], float]] = {}
+
 CRYPTOPANIC_API_KEY = os.getenv("CRYPTOPANIC_API_KEY", "")
+NEWSDATA_API_KEY = os.getenv("NEWSDATA_API_KEY", "")
 
 _POSITIVE_WORDS = {
     "surge", "rally", "bullish", "gain", "gains", "soar", "soars", "high", "highs",
@@ -83,6 +100,19 @@ def _score_headlines(headlines: list[str]) -> tuple[float, int]:
     if scored == 0:
         return 0.0, len(headlines)
     return max(-1.0, min(1.0, total / scored)), len(headlines)
+
+
+def _fetch_rss_titles_cached(url: str, *, source_name: str, limit: int = 40) -> list[str]:
+    """Same as _fetch_rss_titles but with its own longer-lived cache -- for
+    the shared (not per-coin) general newsroom feeds only."""
+    now = time.time()
+    cached = _general_feed_cache.get(source_name)
+    if cached and (now - cached[1]) < _GENERAL_FEED_CACHE_TTL_SEC:
+        return cached[0]
+    titles = _fetch_rss_titles(url, source_name=source_name, limit=limit)
+    if titles:  # don't cache a transient failure's empty result over a good one
+        _general_feed_cache[source_name] = (titles, now)
+    return titles
 
 
 def _fetch_rss_titles(url: str, *, source_name: str, limit: int = 40, headers: dict[str, str] | None = None) -> list[str]:
@@ -128,6 +158,28 @@ def _fetch_cryptopanic(coin_symbol: str) -> list[str]:
         return []
 
 
+def _fetch_newsdata_io(coin_symbol: str) -> list[str]:
+    """Optional: only runs if NEWSDATA_API_KEY is set. See module docstring
+    for how to get a free token -- skipped silently otherwise. Their
+    `sentiment`/`ai_*` fields are paid-plan-only (confirmed live), so this
+    only uses the free `title` field, same as every other source here."""
+    if not NEWSDATA_API_KEY:
+        return []
+    query = _COIN_QUERIES.get(coin_symbol, coin_symbol.lower())
+    try:
+        resp = requests.get(
+            "https://newsdata.io/api/1/latest",
+            params={"apikey": NEWSDATA_API_KEY, "q": query, "language": "en"},
+            timeout=_TIMEOUT_SEC,
+        )
+        resp.raise_for_status()
+        results = resp.json().get("results") or []
+        return [r.get("title", "") for r in results if r.get("title")]
+    except Exception as exc:
+        logger.warning("[crypto_news] newsdata.io fetch failed for %s: %s", coin_symbol, exc)
+        return []
+
+
 def get_sentiment(coin_symbol: str) -> dict[str, Any]:
     """Sentiment for one coin symbol (e.g. "BTC"). Cached per-coin for
     _CACHE_TTL_SEC since news doesn't meaningfully change minute to minute."""
@@ -141,10 +193,11 @@ def get_sentiment(coin_symbol: str) -> dict[str, Any]:
     headlines: list[str] = []
     headlines.extend(_fetch_google_news_rss(query))
     headlines.extend(_fetch_cryptopanic(symbol))
+    headlines.extend(_fetch_newsdata_io(symbol))
     if symbol == "BTC":
-        headlines.extend(_fetch_rss_titles("https://cointelegraph.com/rss", source_name="cointelegraph"))
-        headlines.extend(_fetch_rss_titles("https://cryptoslate.com/feed/", source_name="cryptoslate"))
-        headlines.extend(_fetch_rss_titles("https://decrypt.co/feed", source_name="decrypt"))
+        headlines.extend(_fetch_rss_titles_cached("https://cointelegraph.com/rss", source_name="cointelegraph"))
+        headlines.extend(_fetch_rss_titles_cached("https://cryptoslate.com/feed/", source_name="cryptoslate"))
+        headlines.extend(_fetch_rss_titles_cached("https://decrypt.co/feed", source_name="decrypt"))
 
     score, volume = _score_headlines(headlines)
     result = {

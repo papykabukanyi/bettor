@@ -254,6 +254,29 @@ def _ensure_dataset_repo() -> bool:
         return False
 
 
+def _is_rate_limit_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return "429" in text or "rate limit" in text
+
+
+def retry_on_rate_limit(fn, *, attempts: int = 3, backoff_sec: float = 5.0):
+    """HF's commit/upload endpoints have a stricter, separate rate limit
+    from general API reads -- confirmed live (a 429 with "943/1000 requests
+    remaining" in THIS 300s window, i.e. the commit endpoint's own limit,
+    not the general one). A 429 there is transient; retry with backoff
+    instead of dropping the push for that whole cycle."""
+    last_exc: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            return fn()
+        except Exception as exc:
+            last_exc = exc
+            if not _is_rate_limit_error(exc) or attempt == attempts - 1:
+                raise
+            time.sleep(backoff_sec * (attempt + 1))
+    raise last_exc  # unreachable given the loop above always returns or raises
+
+
 def push_dataset_snapshot(df: pd.DataFrame) -> dict[str, Any]:
     """Merge new rows into today's parquet shard and upload it to HF. Local
     shard files under data/perps_dataset/ are the source of truth for the
@@ -282,13 +305,13 @@ def push_dataset_snapshot(df: pd.DataFrame) -> dict[str, Any]:
     try:
         from huggingface_hub import HfApi
         api = HfApi(token=HF_API_KEY)
-        api.upload_file(
+        retry_on_rate_limit(lambda: api.upload_file(
             path_or_fileobj=str(shard_path),
             path_in_repo=f"data/{today}.parquet",
             repo_id=HF_DATASET_REPO,
             repo_type="dataset",
             commit_message=f"perps data {today}",
-        )
+        ))
         result["hf_uploaded"] = True
     except Exception as exc:
         logger.warning("[perps_data] HF upload failed: %s", exc)

@@ -194,7 +194,13 @@ def _request_json(
     url = f"{KALSHI_BASE_URL}{clean_path}"
     body_text = ""
     response = None
-    for attempt in range(2):
+    # 3 attempts: covers a 401 timestamp-expired retry AND a short backoff
+    # retry on 429 (confirmed live -- a burst of candle/market calls across
+    # 16 tickers in one collection cycle can trip Kalshi's own rate limit).
+    # A 429 is transient by definition, so a brief wait-and-retry is the
+    # correct response, not an immediate hard failure.
+    max_attempts = 3
+    for attempt in range(max_attempts):
         headers: dict[str, str] = {}
         if auth:
             sign_path = f"{_BASE_PATH}{clean_path}"
@@ -216,9 +222,12 @@ def _request_json(
             auth
             and response.status_code == 401
             and "header_timestamp_expired" in body_text.lower()
-            and attempt == 0
+            and attempt < max_attempts - 1
         ):
             _refresh_timestamp_offset(force=True)
+            continue
+        if response.status_code == 429 and attempt < max_attempts - 1:
+            time.sleep(1.5 * (attempt + 1))
             continue
         raise RuntimeError(f"Kalshi API error {response.status_code}: {body_text}")
     if response is None:
