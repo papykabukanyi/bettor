@@ -233,7 +233,7 @@ def _ensure_dataset_repo() -> bool:
         try:
             api.repo_info(repo_id=HF_DATASET_REPO, repo_type="dataset")
         except Exception:
-            api.create_repo(repo_id=HF_DATASET_REPO, repo_type="dataset", exist_ok=True, private=True)
+            api.create_repo(repo_id=HF_DATASET_REPO, repo_type="dataset", exist_ok=True, private=False)
         _HF_REPO_VERIFIED_CACHE[HF_DATASET_REPO] = (True, now)
         return True
     except Exception as exc:

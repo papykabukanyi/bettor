@@ -137,7 +137,7 @@ def _push_model_to_hf() -> None:
         try:
             api.repo_info(repo_id=HF_MODEL_REPO, repo_type="model")
         except Exception:
-            api.create_repo(repo_id=HF_MODEL_REPO, repo_type="model", exist_ok=True, private=True)
+            api.create_repo(repo_id=HF_MODEL_REPO, repo_type="model", exist_ok=True, private=False)
         api.upload_file(
             path_or_fileobj=str(MODEL_PATH), path_in_repo="perps_model.joblib",
             repo_id=HF_MODEL_REPO, repo_type="model", commit_message="update perps direction model",
