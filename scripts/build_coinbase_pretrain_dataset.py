@@ -53,7 +53,12 @@ logger = logging.getLogger("build_coinbase_pretrain_dataset")
 
 HOURLY_DAYS = 1460  # ~4 years
 MINUTE_DAYS = 180
-TICKERS_PER_COMMIT = 4
+# Lowered from 4 after a real failure on this machine: writing 4 tickers'
+# temp parquet files at once (each ~250k rows) ran the local disk out of
+# space entirely mid-write ("No space left on device") -- this machine has
+# been hitting a disk-space crisis all session. 2 is a compromise between
+# that and HF's 128-commits/hour cap.
+TICKERS_PER_COMMIT = 2
 
 
 def _ensure_repo() -> None:
