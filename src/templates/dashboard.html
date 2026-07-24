@@ -61,8 +61,8 @@
   <h3>Open Positions</h3>
   <div class="scroll-x">
     <table>
-      <thead><tr><th>Ticker</th><th>Side</th><th>Entry</th><th>Contracts</th><th>Opened</th><th>Velocity</th></tr></thead>
-      <tbody id="positions-body"><tr><td colspan="6" class="empty">No open positions</td></tr></tbody>
+      <thead><tr><th>Ticker</th><th>Side</th><th>Entry</th><th>Contracts</th><th>Take Profit</th><th>Stop Loss</th><th>Opened</th><th>Velocity</th></tr></thead>
+      <tbody id="positions-body"><tr><td colspan="8" class="empty">No open positions</td></tr></tbody>
     </table>
   </div>
 </section>
@@ -149,12 +149,14 @@ async function refreshStatus() {
           <td><span class="tag ${side === "short" ? "no" : "yes"}">${side}</span></td>
           <td>${fmtUsd(p.entry_price)}</td>
           <td>${p.count}</td>
+          <td class="stat pos" style="font-size:13px;">${fmtUsd(p.take_profit_price)}</td>
+          <td class="stat neg" style="font-size:13px;">${fmtUsd(p.stop_loss_price)}</td>
           <td>${timeAgo(p.opened_at)}</td>
           <td>${(v !== null && v !== undefined) ? (v * 100).toFixed(2) + "%/min" : "--"}</td>
         </tr>`;
       }).join("");
     } else {
-      posBody.innerHTML = '<tr><td colspan="6" class="empty">No open positions</td></tr>';
+      posBody.innerHTML = '<tr><td colspan="8" class="empty">No open positions</td></tr>';
     }
 
     const todayPnl = data.today_realized_pnl_usd || 0;

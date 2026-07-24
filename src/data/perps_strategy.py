@@ -545,6 +545,23 @@ def decide_exit(
     return False, f"holding ({change_pct:+.3%}, {held_minutes:.0f}min)"
 
 
+def position_exit_levels(position: dict[str, Any]) -> dict[str, float]:
+    """The actual take-profit/stop-loss/quick-profit PRICE levels for a
+    position, derived from the same percentages decide_exit() applies --
+    exists so callers (the dashboard) can show, per open position, PROOF
+    that it has real exit levels defined, rather than just trusting the
+    global percentage config exists somewhere. Side-aware: a short's
+    take-profit is BELOW entry (profits on a falling price) and its
+    stop-loss is ABOVE entry, the mirror image of a long."""
+    entry_price = float(position["entry_price"])
+    sign = -1.0 if position.get("side") == "short" else 1.0
+    return {
+        "take_profit_price": round(entry_price * (1 + sign * TAKE_PROFIT_PCT), 6),
+        "stop_loss_price": round(entry_price * (1 - sign * STOP_LOSS_PCT), 6),
+        "quick_profit_price": round(entry_price * (1 + sign * QUICK_PROFIT_PCT), 6),
+    }
+
+
 def _reference_balance_for_today(state: dict[str, Any], available_balance_usd: float | None) -> float | None:
     """The daily loss cap is a percentage of the balance as it stood at the
     start of the day, not of whatever the balance happens to be right now

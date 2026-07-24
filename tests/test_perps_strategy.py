@@ -187,6 +187,25 @@ def test_evaluate_candidate_rejects_short_when_model_predicts_up(monkeypatch):
     assert result["should_enter"] is False
 
 
+def test_position_exit_levels_for_a_long():
+    pos = _position(entry_price=100.0)
+    levels = strat.position_exit_levels(pos)
+    assert levels["take_profit_price"] == round(100.0 * (1 + strat.TAKE_PROFIT_PCT), 6)
+    assert levels["stop_loss_price"] == round(100.0 * (1 - strat.STOP_LOSS_PCT), 6)
+    assert levels["quick_profit_price"] == round(100.0 * (1 + strat.QUICK_PROFIT_PCT), 6)
+    # Take-profit above entry, stop-loss below -- as it must be for a long.
+    assert levels["take_profit_price"] > 100.0 > levels["stop_loss_price"]
+
+
+def test_position_exit_levels_for_a_short_are_mirrored():
+    pos = _position(entry_price=100.0, side="short")
+    levels = strat.position_exit_levels(pos)
+    assert levels["take_profit_price"] == round(100.0 * (1 - strat.TAKE_PROFIT_PCT), 6)
+    assert levels["stop_loss_price"] == round(100.0 * (1 + strat.STOP_LOSS_PCT), 6)
+    # Take-profit BELOW entry, stop-loss ABOVE -- the mirror image of a long.
+    assert levels["take_profit_price"] < 100.0 < levels["stop_loss_price"]
+
+
 def test_short_take_profit_exit_on_falling_price():
     pos = _position(side="short")
     # Price fell below entry by more than TAKE_PROFIT_PCT -- profitable for a short.

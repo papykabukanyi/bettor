@@ -405,7 +405,14 @@ def api_status():
 
     realized_pnl_by_date = state.get("realized_pnl_by_date") or {}
     total_realized_pnl = round(sum(float(v) for v in realized_pnl_by_date.values()), 6)
-    positions = state.get("positions") or []
+    # Every open position gets its actual take-profit/stop-loss/quick-profit
+    # PRICE levels attached here -- makes it visible/auditable on the
+    # dashboard that each one really has exit levels defined, not just that
+    # the global percentage config exists somewhere.
+    positions = [
+        {**p, **perps_strategy.position_exit_levels(p)}
+        for p in (state.get("positions") or [])
+    ]
 
     return jsonify({
         "ok": True,
@@ -435,9 +442,12 @@ def api_status():
             "stop_loss_pct": perps_strategy.STOP_LOSS_PCT,
             "quick_profit_pct": perps_strategy.QUICK_PROFIT_PCT,
             "quick_profit_velocity_pct_per_min": perps_strategy.QUICK_PROFIT_VELOCITY_PCT_PER_MIN,
+            "high_volatility_threshold": perps_strategy.HIGH_VOLATILITY_THRESHOLD,
+            "volatility_quick_profit_pct": perps_strategy.VOLATILITY_QUICK_PROFIT_PCT,
             "max_hold_minutes": perps_strategy.MAX_HOLD_MINUTES,
             "daily_loss_cap_pct": perps_strategy.DAILY_LOSS_CAP_PCT,
             "model_confidence_min": perps_strategy.MODEL_CONFIDENCE_MIN,
+            "shorts_enabled": perps_strategy.ENABLE_SHORTS,
             "fast_check_seconds": PERPS_FAST_CHECK_SECONDS,
             "entry_scan_minutes": PERPS_CYCLE_MINUTES,
         },
