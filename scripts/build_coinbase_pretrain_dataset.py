@@ -20,16 +20,22 @@ perps_backtest.py: there's no free historical news-sentiment archive to
 pull from years back, so this tests/trains the technical signal honestly
 rather than faking sentiment history.
 
-Streams one ticker at a time straight to HF and discards the local frame
-immediately after, so local disk usage never holds more than one ticker's
-data at once regardless of how many tickers this covers.
+Uploads in BATCHES of TICKERS_PER_COMMIT tickers per HF commit (not one
+commit per ticker) -- confirmed live: HF enforces a 128-commits/hour cap
+per repo, and 16 individual commits back-to-back (on top of any other
+recent activity on the same repo, e.g. the archive-recompute script) blows
+through it. Each batch still discards its local temp files immediately
+after that batch's commit, so local disk never holds more than
+TICKERS_PER_COMMIT tickers' worth of data at once.
 
 Usage: python scripts/build_coinbase_pretrain_dataset.py
 """
 from __future__ import annotations
 
 import logging
+import os
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -47,6 +53,7 @@ logger = logging.getLogger("build_coinbase_pretrain_dataset")
 
 HOURLY_DAYS = 1460  # ~4 years
 MINUTE_DAYS = 180
+TICKERS_PER_COMMIT = 4
 
 
 def _ensure_repo() -> None:
@@ -58,24 +65,31 @@ def _ensure_repo() -> None:
         api.create_repo(repo_id=HF_DATASET_REPO, repo_type="dataset", exist_ok=True, private=False)
 
 
-def _push_ticker_frame(ticker: str, df) -> None:
-    import tempfile
-    import os
-    from huggingface_hub import HfApi
+def _commit_batch(batch: list[tuple[str, "pd.DataFrame"]]) -> None:  # noqa: F821
+    from huggingface_hub import CommitOperationAdd, HfApi
 
     api = HfApi(token=HF_API_KEY)
-    with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as tmp:
-        df.to_parquet(tmp.name, index=False)
-        tmp_path = tmp.name
+    operations = []
+    tmp_paths = []
     try:
-        api.upload_file(
-            path_or_fileobj=tmp_path,
-            path_in_repo=f"external/coinbase_pretrain_{ticker}.parquet",
-            repo_id=HF_DATASET_REPO, repo_type="dataset",
-            commit_message=f"coinbase pretraining data for {ticker}",
+        for ticker, df in batch:
+            with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as tmp:
+                df.to_parquet(tmp.name, index=False)
+                tmp_paths.append(tmp.name)
+                operations.append(CommitOperationAdd(
+                    path_in_repo=f"external/coinbase_pretrain_{ticker}.parquet", path_or_fileobj=tmp.name,
+                ))
+        tickers_str = ", ".join(t for t, _ in batch)
+        api.create_commit(
+            repo_id=HF_DATASET_REPO, repo_type="dataset", operations=operations,
+            commit_message=f"coinbase pretraining data for {tickers_str}",
         )
     finally:
-        os.unlink(tmp_path)
+        for p in tmp_paths:
+            try:
+                os.unlink(p)
+            except OSError:
+                pass
 
 
 def main() -> None:
@@ -85,6 +99,7 @@ def main() -> None:
     _ensure_repo()
 
     total_rows = 0
+    pending_batch = []
     for ticker in KNOWN_PERP_TICKERS:
         coin = coin_for_ticker(ticker)
         product_id = COINBASE_PRODUCT_BY_COIN.get(coin)
@@ -120,12 +135,18 @@ def main() -> None:
         feats.insert(0, "ticker", ticker)
         feats.insert(1, "source", "coinbase")
 
-        _push_ticker_frame(ticker, feats)
+        pending_batch.append((ticker, feats))
         total_rows += len(feats)
-        logger.info(
-            "[%s] pushed %d engineered rows to HF in %.1fs (running total: %d rows)",
-            ticker, len(feats), time.time() - t0, total_rows,
-        )
+        logger.info("[%s] engineered %d rows in %.1fs (running total: %d rows)", ticker, len(feats), time.time() - t0, total_rows)
+
+        if len(pending_batch) >= TICKERS_PER_COMMIT:
+            _commit_batch(pending_batch)
+            logger.info("committed batch of %d tickers to HF", len(pending_batch))
+            pending_batch = []
+
+    if pending_batch:
+        _commit_batch(pending_batch)
+        logger.info("committed final batch of %d tickers to HF", len(pending_batch))
 
     logger.info("DONE. Total engineered rows pushed across all tickers: %d", total_rows)
 

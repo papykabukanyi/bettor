@@ -1,6 +1,7 @@
 """Direction classifier: given current multi-timeframe technical features +
 news sentiment for a perp instrument, predict whether its price will be
-higher or lower `PERPS_LABEL_HORIZON_MINUTES` (default 30) from now.
+higher or lower `PERPS_LABEL_HORIZON_MINUTES` (default 1, see perps_data.py)
+from now.
 
 Training data comes from `perps_data.load_training_dataset()` (local shards,
 falling back to downloading the full history from the HF dataset repo).
@@ -28,7 +29,7 @@ from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, roc_auc_score
 
-from data.perps_data import FEATURE_COLUMNS, latest_feature_row, load_training_dataset, retry_on_rate_limit
+from data.perps_data import FEATURE_COLUMNS, LABEL_HORIZON_MINUTES, latest_feature_row, load_training_dataset, retry_on_rate_limit
 
 logger = logging.getLogger(__name__)
 
@@ -123,7 +124,7 @@ def train_model(df: pd.DataFrame | None = None) -> dict[str, Any]:
         "rows": len(labeled),
         "feature_columns": feature_cols,
         "ticker_categories": ticker_categories,
-        "label_horizon_minutes": int(os.getenv("PERPS_LABEL_HORIZON_MINUTES", "30") or "30"),
+        "label_horizon_minutes": LABEL_HORIZON_MINUTES,
     }
 
     joblib.dump(best_model, MODEL_PATH)
