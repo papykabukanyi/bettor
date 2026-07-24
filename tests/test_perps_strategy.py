@@ -220,6 +220,46 @@ def test_short_quick_profit_requires_favorable_falling_velocity():
     assert should_exit and "quick_profit" in reason
 
 
+# ── Volatility-aware quick profit ────────────────────────────────────────────
+
+def test_sample_volatility_needs_at_least_three_samples():
+    assert strat._sample_volatility([[0, 100.0], [1, 100.1]]) is None  # noqa: SLF001
+
+
+def test_sample_volatility_is_higher_for_choppier_samples():
+    calm = strat._sample_volatility([[0, 100.0], [1, 100.01], [2, 100.02], [3, 100.03]])  # noqa: SLF001
+    choppy = strat._sample_volatility([[0, 100.0], [1, 102.0], [2, 99.0], [3, 103.0]])  # noqa: SLF001
+    assert calm is not None and choppy is not None
+    assert choppy > calm
+
+
+def test_high_volatility_triggers_profit_at_a_smaller_gain_than_normal():
+    pos = _position()
+    # Below the standard TAKE_PROFIT_PCT and QUICK_PROFIT_PCT, but at/above
+    # the volatility-specific (smaller) threshold.
+    price = 6.60 * (1 + strat.VOLATILITY_QUICK_PROFIT_PCT + 0.0001)
+    assert price < 6.60 * (1 + strat.QUICK_PROFIT_PCT)
+
+    should_exit, reason = strat.decide_exit(pos, price, current_volatility=0.0)
+    assert not should_exit  # calm market -- not enough gain yet for the normal path
+
+    should_exit, reason = strat.decide_exit(pos, price, current_volatility=strat.HIGH_VOLATILITY_THRESHOLD + 0.001)
+    assert should_exit and "volatility_quick_profit" in reason
+
+
+def test_high_volatility_alone_does_not_trigger_without_any_gain():
+    pos = _position()
+    should_exit, reason = strat.decide_exit(pos, 6.60, current_volatility=strat.HIGH_VOLATILITY_THRESHOLD + 0.01)
+    assert not should_exit
+
+
+def test_volatility_quick_profit_applies_symmetrically_to_shorts():
+    pos = _position(side="short")
+    price = 6.60 * (1 - strat.VOLATILITY_QUICK_PROFIT_PCT - 0.0001)  # price fell -- a gain for a short
+    should_exit, reason = strat.decide_exit(pos, price, current_volatility=strat.HIGH_VOLATILITY_THRESHOLD + 0.001)
+    assert should_exit and "volatility_quick_profit" in reason
+
+
 def _real_short_position(ticker, count, entry_price):
     return {"market_ticker": ticker, "position": str(-abs(float(count))), "entry_price": str(entry_price), "is_portfolio": True}
 

@@ -27,8 +27,14 @@ def _synthetic_test_df(n_per_ticker: int = 200, tickers: tuple[str, ...] = ("KXB
         frames.append(pd.DataFrame({
             "ticker": ticker, "ts": ts, "close": close, "dist_to_ma_15": dist_to_ma_15,
             "dist_to_ma_30": dist_to_ma_15 * 0.5, "trend_pct": trend_pct,
-            "ret_1m": rng.normal(0, 0.001, n_per_ticker), "ret_5m": rng.normal(0, 0.002, n_per_ticker),
-            "ret_15m": rng.normal(0, 0.003, n_per_ticker), "volatility_15": np.abs(rng.normal(0.001, 0.0002, n_per_ticker)),
+            "ret_1m": rng.normal(0, 0.001, n_per_ticker), "ret_3m": rng.normal(0, 0.0015, n_per_ticker),
+            "ret_5m": rng.normal(0, 0.002, n_per_ticker), "ret_10m": rng.normal(0, 0.0025, n_per_ticker),
+            "ret_15m": rng.normal(0, 0.003, n_per_ticker), "ret_30m": rng.normal(0, 0.004, n_per_ticker),
+            "trend_1h": rng.normal(0, 0.006, n_per_ticker), "trend_2h": rng.normal(0, 0.008, n_per_ticker),
+            "trend_3h": rng.normal(0, 0.009, n_per_ticker), "trend_4h": rng.normal(0, 0.01, n_per_ticker),
+            "volatility_5": np.abs(rng.normal(0.0008, 0.0002, n_per_ticker)),
+            "volatility_15": np.abs(rng.normal(0.001, 0.0002, n_per_ticker)),
+            "volatility_30": np.abs(rng.normal(0.0012, 0.0003, n_per_ticker)),
             "sentiment_score": 0.0,
         }))
     return pd.concat(frames, ignore_index=True)
@@ -110,8 +116,11 @@ def _rally_then_crash_df(n: int = 100) -> pd.DataFrame:
     return pd.DataFrame({
         "ticker": "KXBTCPERP", "ts": ts, "close": close, "dist_to_ma_15": dist_to_ma_15,
         "dist_to_ma_30": dist_to_ma_15 * 0.5, "trend_pct": np.zeros(n),
-        "ret_1m": np.zeros(n), "ret_5m": np.zeros(n), "ret_15m": np.zeros(n),
-        "volatility_15": np.full(n, 0.001), "sentiment_score": 0.0,
+        "ret_1m": np.zeros(n), "ret_3m": np.zeros(n), "ret_5m": np.zeros(n),
+        "ret_10m": np.zeros(n), "ret_15m": np.zeros(n), "ret_30m": np.zeros(n),
+        "trend_1h": np.zeros(n), "trend_2h": np.zeros(n), "trend_3h": np.zeros(n), "trend_4h": np.zeros(n),
+        "volatility_5": np.full(n, 0.001), "volatility_15": np.full(n, 0.001), "volatility_30": np.full(n, 0.001),
+        "sentiment_score": 0.0,
     })
 
 

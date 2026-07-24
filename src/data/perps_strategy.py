@@ -72,6 +72,7 @@ import datetime as dt
 import json
 import logging
 import os
+import statistics
 import tempfile
 import threading
 import time
@@ -173,6 +174,15 @@ LIVE_TRADING_ENABLED = _env_flag("KALSHI_PERPS_LIVE_TRADING_ENABLED", default=Fa
 QUICK_PROFIT_PCT = _env_float("PERPS_QUICK_PROFIT_PCT", 0.0015)
 QUICK_PROFIT_VELOCITY_PCT_PER_MIN = _env_float("PERPS_QUICK_PROFIT_VELOCITY_PCT_PER_MIN", 0.006)
 QUICK_PROFIT_WINDOW_SECONDS = _env_int("PERPS_QUICK_PROFIT_WINDOW_SECONDS", 90)
+
+# "When it's choppy/fast, take the smaller sure thing": if the position's
+# OWN recent price samples (the same ones _update_velocity already tracks --
+# no extra API call) show stdev-of-returns above this threshold, the market
+# is currently volatile, and a volatile move can reverse just as fast as it
+# arrived. In that regime, take profit at a SMALLER gain than the normal
+# quick-profit level rather than holding out for the full TAKE_PROFIT_PCT.
+HIGH_VOLATILITY_THRESHOLD = _env_float("PERPS_HIGH_VOLATILITY_THRESHOLD", 0.002)
+VOLATILITY_QUICK_PROFIT_PCT = _env_float("PERPS_VOLATILITY_QUICK_PROFIT_PCT", 0.001)
 
 # Reject a new entry if Kalshi's quote and an independent live exchange price
 # (Coinbase/Kraken, see crypto_prices.py) disagree by more than this -- a
@@ -460,9 +470,28 @@ def _update_velocity(
     return ((current_price - oldest_price) / oldest_price) / elapsed_min
 
 
+def _sample_volatility(samples: list[list[float]]) -> float | None:
+    """Stdev of consecutive-sample percent changes within the position's own
+    existing rolling price-sample window (see _update_velocity) -- reuses
+    data already being collected rather than an extra API call or a heavier
+    latest_feature_row() fetch, which would defeat the point of the fast
+    loop being cheap. None until there are at least 3 samples (2 changes)."""
+    if len(samples) < 3:
+        return None
+    prices = [p for _, p in samples]
+    changes = [
+        (prices[i] - prices[i - 1]) / prices[i - 1]
+        for i in range(1, len(prices)) if prices[i - 1] > 0
+    ]
+    if len(changes) < 2:
+        return None
+    return statistics.stdev(changes)
+
+
 def decide_exit(
     position: dict[str, Any], current_price: float, *,
     velocity_pct_per_min: float | None = None, external_velocity_pct_per_min: float | None = None,
+    current_volatility: float | None = None,
 ) -> tuple[bool, str]:
     """`current_price` is always Kalshi's own tradable quote -- that's what
     the gain/loss threshold and the actual exit order use. `velocity` is
@@ -479,7 +508,11 @@ def decide_exit(
     favorable direction, so change_pct and the velocity readings are both
     sign-flipped before applying the exact same thresholds -- the take-
     profit/stop-loss/quick-profit/max-hold RULES are identical for both
-    sides, only which price direction counts as "favorable" differs."""
+    sides, only which price direction counts as "favorable" differs.
+
+    `current_volatility` (see _sample_volatility) is direction-agnostic --
+    change_pct is already side-aware, so "the market is choppy right now"
+    means the same thing regardless of which way this position is facing."""
     entry_price = float(position["entry_price"])
     is_short = position.get("side") == "short"
     if is_short:
@@ -496,6 +529,11 @@ def decide_exit(
             return True, f"quick_profit (velocity {velocity_pct_per_min:+.2%}/min, gain {change_pct:+.3%})"
         if favorable_external_velocity is not None and favorable_external_velocity >= QUICK_PROFIT_VELOCITY_PCT_PER_MIN:
             return True, f"quick_profit (external velocity {external_velocity_pct_per_min:+.2%}/min, gain {change_pct:+.3%})"
+    if (
+        current_volatility is not None and current_volatility >= HIGH_VOLATILITY_THRESHOLD
+        and change_pct >= VOLATILITY_QUICK_PROFIT_PCT
+    ):
+        return True, f"volatility_quick_profit (volatility {current_volatility:.4f}, gain {change_pct:+.3%})"
     if change_pct >= TAKE_PROFIT_PCT:
         return True, f"take_profit ({change_pct:+.3%})"
     if change_pct <= -STOP_LOSS_PCT:
@@ -661,6 +699,7 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
 
             now = dt.datetime.now(dt.timezone.utc)
             velocity = _update_velocity(position, current_price, now)
+            current_volatility = _sample_volatility(position.get("price_samples") or [])
 
             external_velocity = None
             external_quote = None
@@ -675,10 +714,11 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
 
             should_exit, reason = decide_exit(
                 position, current_price, velocity_pct_per_min=velocity, external_velocity_pct_per_min=external_velocity,
+                current_volatility=current_volatility,
             )
             checks.append({
                 "ticker": ticker, "ok": True, "exit_check": reason, "velocity_pct_per_min": velocity,
-                "external_velocity_pct_per_min": external_velocity,
+                "external_velocity_pct_per_min": external_velocity, "current_volatility": current_volatility,
                 "external_source": (external_quote or {}).get("source"),
             })
 

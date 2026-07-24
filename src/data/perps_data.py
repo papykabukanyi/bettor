@@ -49,7 +49,13 @@ _DATE_SHARD_RE = re.compile(r"^data/\d{4}-\d{2}-\d{2}\.parquet$")
 # 5000-candle-per-call cap (a 3-day window is ~4320 one-minute candles).
 CANDLE_1M_LOOKBACK_HOURS = int(os.getenv("PERPS_CANDLE_1M_LOOKBACK_HOURS", "72") or "72")
 CANDLE_60M_LOOKBACK_HOURS = int(os.getenv("PERPS_CANDLE_60M_LOOKBACK_HOURS", "720") or "720")  # 30 days
-LABEL_HORIZON_MINUTES = int(os.getenv("PERPS_LABEL_HORIZON_MINUTES", "30") or "30")
+# 1 minute (not 30) -- matches how this strategy actually holds a position:
+# take-profit/quick-profit/stop-loss are all evaluated every
+# PERPS_FAST_CHECK_SECONDS (20s), so a model trained to predict "up or down
+# 30 minutes from now" was answering a materially different question than
+# the one the strategy actually needs ("what happens in the next
+# candle-or-two"). A 1-minute-ahead label is a much closer match.
+LABEL_HORIZON_MINUTES = int(os.getenv("PERPS_LABEL_HORIZON_MINUTES", "1") or "1")
 
 # The HF archive grows every day forever; without a cap, load_training_dataset()
 # would eventually load an unbounded number of rows into memory on every train
@@ -131,23 +137,49 @@ def fetch_candle_frames(ticker: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     return one_min_df, hourly_df
 
 
+
+# The candlestick API's ONLY native resolutions are 1-minute, 60-minute, and
+# 1440-minute (daily) -- there is no sub-minute data available at all, from
+# Kalshi or otherwise, for a product that only started trading 2026-06-04.
+# Every timeframe from 1 minute up is derived directly from the 1-minute
+# close series below (pct_change/rolling over N minutes) rather than
+# needing a separate fetch per timeframe -- a "4-hour trend" is just
+# close.pct_change(240) on the same series already being pulled for
+# everything else.
+MIN_ONE_MIN_ROWS_FOR_FEATURES = 245  # the 240-minute (4h) window + a small buffer
+
+
 def engineer_features(one_min_df: pd.DataFrame, hourly_df: pd.DataFrame, *, sentiment_score: float) -> pd.DataFrame:
     """Leakage-free technical features computed only from data up to and
     including each row's own timestamp -- every rolling/shift operation looks
-    backward only, never forward."""
-    if one_min_df.empty or len(one_min_df) < 35:
+    backward only, never forward. Spans 1/3/5/10/15/30-minute and
+    1/2/3/4-hour timeframes (see MIN_ONE_MIN_ROWS_FOR_FEATURES above for why
+    only these and not anything finer)."""
+    if one_min_df.empty or len(one_min_df) < MIN_ONE_MIN_ROWS_FOR_FEATURES:
         return pd.DataFrame()
 
     df = one_min_df.copy()
     df["ret_1m"] = df["close"].pct_change(1)
+    df["ret_3m"] = df["close"].pct_change(3)
     df["ret_5m"] = df["close"].pct_change(5)
+    df["ret_10m"] = df["close"].pct_change(10)
     df["ret_15m"] = df["close"].pct_change(15)
+    df["ret_30m"] = df["close"].pct_change(30)
+    df["trend_1h"] = df["close"].pct_change(60)
+    df["trend_2h"] = df["close"].pct_change(120)
+    df["trend_3h"] = df["close"].pct_change(180)
+    df["trend_4h"] = df["close"].pct_change(240)
     df["ma_5"] = df["close"].rolling(5).mean()
     df["ma_15"] = df["close"].rolling(15).mean()
     df["ma_30"] = df["close"].rolling(30).mean()
     df["dist_to_ma_15"] = (df["close"] - df["ma_15"]) / df["ma_15"]
     df["dist_to_ma_30"] = (df["close"] - df["ma_30"]) / df["ma_30"]
+    # Volatility at three scales -- short (5min) catches an immediate spike,
+    # medium (15min, the original) and 30min give the strategy a read on
+    # whether the CURRENT move is unusual relative to recent choppiness.
+    df["volatility_5"] = df["ret_1m"].rolling(5).std()
     df["volatility_15"] = df["ret_1m"].rolling(15).std()
+    df["volatility_30"] = df["ret_1m"].rolling(30).std()
 
     if not hourly_df.empty and len(hourly_df) >= 2:
         hourly_sorted = hourly_df.sort_values("ts")
@@ -168,12 +200,15 @@ def engineer_features(one_min_df: pd.DataFrame, hourly_df: pd.DataFrame, *, sent
     df["label_up"] = (df["future_close"] > df["close"]).astype("Int64")
     df.loc[df["future_close"].isna(), "label_up"] = pd.NA
 
-    return df.dropna(subset=["ma_30", "volatility_15", "trend_pct"]).reset_index(drop=True)
+    return df.dropna(subset=FEATURE_COLUMNS).reset_index(drop=True)
 
 
 FEATURE_COLUMNS = [
-    "ret_1m", "ret_5m", "ret_15m", "dist_to_ma_15", "dist_to_ma_30",
-    "volatility_15", "trend_pct", "sentiment_score",
+    "ret_1m", "ret_3m", "ret_5m", "ret_10m", "ret_15m", "ret_30m",
+    "trend_1h", "trend_2h", "trend_3h", "trend_4h",
+    "dist_to_ma_15", "dist_to_ma_30",
+    "volatility_5", "volatility_15", "volatility_30",
+    "trend_pct", "sentiment_score",
 ]
 
 

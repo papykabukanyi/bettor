@@ -57,8 +57,9 @@ def test_candles_to_frame_empty_result_has_numeric_dtypes():
 
 
 def test_engineer_features_label_is_nan_for_recent_rows():
-    # 60 rows of steadily rising price, well past the minimum window (35).
-    prices = [100.0 + i * 0.1 for i in range(60)]
+    # 300 rows of steadily rising price, well past the minimum window (245 --
+    # the 4-hour/240-minute lookback feature is the longest one).
+    prices = [100.0 + i * 0.01 for i in range(300)]
     one_min_df = perps_data._candles_to_frame(_make_candles(prices))  # noqa: SLF001
     hourly_df = perps_data._candles_to_frame(_make_hourly_before(1_700_000_000))  # noqa: SLF001
 
@@ -78,7 +79,9 @@ def test_engineer_features_label_is_nan_for_recent_rows():
 
 def test_engineer_features_label_matches_future_direction():
     # Construct prices where the "future" close is deterministically higher.
-    prices = [100.0] * 40 + [200.0] * 40  # sharp jump partway through
+    # Sharp jump well past the 245-row minimum window so the row right
+    # before the jump still has valid (non-NaN) features.
+    prices = [100.0] * 280 + [200.0] * 20
     one_min_df = perps_data._candles_to_frame(_make_candles(prices))  # noqa: SLF001
     hourly_df = perps_data._candles_to_frame(_make_hourly_before(1_700_000_000))  # noqa: SLF001
 

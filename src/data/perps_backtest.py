@@ -244,8 +244,9 @@ def simulate(
                 elapsed_min = (row.ts - oldest_ts) / 60.0
                 if elapsed_min > 0 and oldest_price > 0:
                     velocity = ((price - oldest_price) / oldest_price) / elapsed_min
+            current_volatility = strat._sample_volatility(trimmed)  # noqa: SLF001 -- same rolling samples, no extra data needed
 
-            should_exit, reason = strat.decide_exit(pos, price, velocity_pct_per_min=velocity)
+            should_exit, reason = strat.decide_exit(pos, price, velocity_pct_per_min=velocity, current_volatility=current_volatility)
             if should_exit:
                 if pos.get("side") == "short":
                     realized = round((pos["entry_price"] - price) * pos["count"], 6)  # profits on a FALLING price
