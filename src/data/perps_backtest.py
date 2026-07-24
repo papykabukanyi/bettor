@@ -194,6 +194,7 @@ def simulate(
     model_confidence_min: float | None = None,
     daily_loss_cap_pct: float | None = None,
     enable_shorts: bool | None = None,
+    min_entry_volatility: float | None = None,
 ) -> dict[str, Any]:
     """Walk forward through `test_df` (all tickers, sorted by ts) replaying
     the real strategy functions. Every strategy parameter can be overridden
@@ -212,6 +213,7 @@ def simulate(
     model_confidence_min = strat.MODEL_CONFIDENCE_MIN if model_confidence_min is None else model_confidence_min
     daily_loss_cap_pct = strat.DAILY_LOSS_CAP_PCT if daily_loss_cap_pct is None else daily_loss_cap_pct
     enable_shorts = strat.ENABLE_SHORTS if enable_shorts is None else enable_shorts
+    min_entry_volatility = strat.MIN_ENTRY_VOLATILITY if min_entry_volatility is None else min_entry_volatility
 
     df = test_df.sort_values("ts").reset_index(drop=True)
     if "model_probability_up" not in df.columns:
@@ -246,7 +248,19 @@ def simulate(
                     velocity = ((price - oldest_price) / oldest_price) / elapsed_min
             current_volatility = strat._sample_volatility(trimmed)  # noqa: SLF001 -- same rolling samples, no extra data needed
 
-            should_exit, reason = strat.decide_exit(pos, price, velocity_pct_per_min=velocity, current_volatility=current_volatility)
+            # Real bug found and fixed here: decide_exit()'s max_hold_time
+            # check used to default to the REAL wall-clock time regardless
+            # of caller. Since a backtest replays historical rows (often
+            # weeks/months before the date this script actually runs on),
+            # that made held_minutes enormous and forced max_hold_time on
+            # almost every position's very first tick after opening --
+            # confirmed live: 99.7% of simulated exits were max_hold_time
+            # before this fix. `now` must be the SIMULATED current time
+            # (this row's own timestamp), not real wall-clock time.
+            sim_now = pd.Timestamp(row.ts, unit="s", tz="UTC").to_pydatetime()
+            should_exit, reason = strat.decide_exit(
+                pos, price, velocity_pct_per_min=velocity, current_volatility=current_volatility, now=sim_now,
+            )
             if should_exit:
                 if pos.get("side") == "short":
                     realized = round((pos["entry_price"] - price) * pos["count"], 6)  # profits on a FALLING price
@@ -288,13 +302,19 @@ def simulate(
         proba_up = row.model_probability_up
         model_ok = proba_up == proba_up  # not NaN -> a model exists
 
+        # Only enter where a fast exit is actually plausible -- mirrors
+        # perps_strategy.py's MIN_ENTRY_VOLATILITY gate (confirmed live: a
+        # real share of exits were max_hold_time timeouts in a market that
+        # just wasn't moving, not a clean take-profit/quick-profit).
+        volatility_ok = row.volatility_5 >= min_entry_volatility
+
         chosen_side = None
-        if row.trend_pct >= -trend_filter_down_pct and dip_pct >= entry_dip_pct:
+        if volatility_ok and row.trend_pct >= -trend_filter_down_pct and dip_pct >= entry_dip_pct:
             # technical-only fallback (no model yet) is long-only, same as live.
             if not model_ok or (proba_up >= 0.5 and proba_up >= model_confidence_min):
                 chosen_side = "long"
         if (
-            chosen_side is None and enable_shorts
+            chosen_side is None and enable_shorts and volatility_ok
             and row.trend_pct <= trend_filter_down_pct and rally_pct >= entry_dip_pct
             and model_ok and proba_up < 0.5 and (1.0 - proba_up) >= model_confidence_min
         ):

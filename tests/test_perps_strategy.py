@@ -25,7 +25,13 @@ def _no_external_price_network_calls(monkeypatch):
 
 
 def _row(**overrides):
-    base = {"ticker": "KXBTCPERP", "current_price": 6.60, "short_ma": 6.63, "trend_pct": 0.0}
+    # volatility_5 defaults comfortably above MIN_ENTRY_VOLATILITY so
+    # existing entry tests reflect a normally-active market by default;
+    # tests specifically targeting the low-volatility gate override it.
+    base = {
+        "ticker": "KXBTCPERP", "current_price": 6.60, "short_ma": 6.63, "trend_pct": 0.0,
+        "volatility_5": 0.002,
+    }
     base.update(overrides)
     return base
 
@@ -80,6 +86,43 @@ def test_holds_when_nothing_triggered():
     assert "holding" in reason
 
 
+def test_decide_exit_uses_real_wall_clock_time_by_default():
+    """Live trading correctness: without an explicit `now`, max_hold_time
+    must be judged against the REAL current time, matching production
+    behavior exactly."""
+    pos = _position(minutes_ago=strat.MAX_HOLD_MINUTES + 1)
+    should_exit, reason = strat.decide_exit(pos, 6.601)
+    assert should_exit and "max_hold_time" in reason
+
+
+def test_decide_exit_respects_an_explicit_simulated_now():
+    """A real bug this locks in: a backtest replays historical rows, often
+    opened weeks/months before the real date the backtest happens to run
+    on. Without an explicit `now` override, held_minutes would be computed
+    against the REAL wall-clock time, making it enormous and forcing
+    max_hold_time on virtually every simulated position's first tick after
+    opening regardless of price movement -- confirmed live: 99.7% of
+    simulated exits were max_hold_time before this fix."""
+    long_ago = dt.datetime(2020, 1, 1, tzinfo=dt.timezone.utc)
+    pos = {
+        "ticker": "KXBTCPERP", "entry_price": 6.60, "count": 1.0,
+        "opened_at": long_ago.isoformat(),
+    }
+    # Simulated "now" is only 1 minute after the position opened --
+    # nowhere near MAX_HOLD_MINUTES -- even though the REAL current time is
+    # years later.
+    sim_now = long_ago + dt.timedelta(minutes=1)
+    should_exit, reason = strat.decide_exit(pos, 6.601, now=sim_now)
+    assert not should_exit
+    assert "holding" in reason
+
+    # And it DOES fire once the SIMULATED clock passes MAX_HOLD_MINUTES,
+    # not the real one.
+    sim_now_later = long_ago + dt.timedelta(minutes=strat.MAX_HOLD_MINUTES + 1)
+    should_exit, reason = strat.decide_exit(pos, 6.601, now=sim_now_later)
+    assert should_exit and "max_hold_time" in reason
+
+
 def test_quick_profit_exit_triggers_on_fast_favorable_velocity():
     pos = _position()
     # Gain is above QUICK_PROFIT_PCT but below the standard TAKE_PROFIT_PCT --
@@ -114,7 +157,10 @@ def test_update_velocity_returns_none_until_two_samples_span_time():
 
 def _rally_row(**overrides):
     # Mirror of _row(): price sits ABOVE the short MA (a small rally).
-    base = {"ticker": "KXBTCPERP", "current_price": 6.63, "short_ma": 6.60, "trend_pct": 0.0}
+    base = {
+        "ticker": "KXBTCPERP", "current_price": 6.63, "short_ma": 6.60, "trend_pct": 0.0,
+        "volatility_5": 0.002,
+    }
     base.update(overrides)
     return base
 
@@ -375,6 +421,29 @@ def test_scan_and_enter_opens_short_with_an_ask_order(monkeypatch, tmp_path):
     assert captured_orders[0].get("reduce_only", False) is False
     state = strat._load_state()  # noqa: SLF001
     assert state["positions"][0]["side"] == "short"
+
+
+def test_evaluate_candidate_blocks_entry_when_volatility_too_low(monkeypatch):
+    """Confirmed live: a real share of exits were max_hold_time timeouts in
+    a market that just wasn't moving. A dip signal + confident model in an
+    otherwise-calm market must not enter -- there's no reason to expect a
+    fast exit there."""
+    monkeypatch.setattr(strat, "latest_feature_row", lambda ticker: _row(volatility_5=strat.MIN_ENTRY_VOLATILITY - 0.0001))
+    monkeypatch.setattr(strat, "predict_direction", lambda ticker: {
+        "model_ok": True, "ticker": ticker, "direction": "up", "probability_up": 0.9,
+    })
+    result = strat.evaluate_candidate("KXBTCPERP")
+    assert result["should_enter"] is False
+    assert "volatility" in result["reason"]
+
+
+def test_evaluate_candidate_enters_when_volatility_meets_the_bar(monkeypatch):
+    monkeypatch.setattr(strat, "latest_feature_row", lambda ticker: _row(volatility_5=strat.MIN_ENTRY_VOLATILITY + 0.0001))
+    monkeypatch.setattr(strat, "predict_direction", lambda ticker: {
+        "model_ok": True, "ticker": ticker, "direction": "up", "probability_up": 0.9,
+    })
+    result = strat.evaluate_candidate("KXBTCPERP")
+    assert result["should_enter"] is True
 
 
 def test_evaluate_candidate_falls_back_to_technical_when_model_not_trained(monkeypatch):

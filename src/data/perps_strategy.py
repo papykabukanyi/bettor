@@ -184,6 +184,20 @@ QUICK_PROFIT_WINDOW_SECONDS = _env_int("PERPS_QUICK_PROFIT_WINDOW_SECONDS", 90)
 HIGH_VOLATILITY_THRESHOLD = _env_float("PERPS_HIGH_VOLATILITY_THRESHOLD", 0.002)
 VOLATILITY_QUICK_PROFIT_PCT = _env_float("PERPS_VOLATILITY_QUICK_PROFIT_PCT", 0.001)
 
+# "Only enter when it can get out fast": confirmed live on the real account
+# -- a real slice of exits are max_hold_time timeouts (sat the full 30
+# minutes going nowhere, sometimes closing at a small loss) instead of a
+# clean take-profit/quick-profit, meaning the entry fired in a market that
+# wasn't actually moving enough for the fast-exit machinery to ever engage.
+# Gating entries on the market's OWN current volatility_5 feature (already
+# computed by engineer_features, no extra API call) means a position only
+# ever opens somewhere plausibly volatile enough to swing into profit and
+# get closed quickly -- repeatedly, many times a day -- rather than sitting
+# and waiting on a calm one. Set below HIGH_VOLATILITY_THRESHOLD (the
+# EXIT-side "market is choppy" bar) since requiring the exit-side bar just
+# to enter would be overly restrictive.
+MIN_ENTRY_VOLATILITY = _env_float("PERPS_MIN_ENTRY_VOLATILITY", 0.0008)
+
 # Reject a new entry if Kalshi's quote and an independent live exchange price
 # (Coinbase/Kraken, see crypto_prices.py) disagree by more than this -- a
 # safety check against entering on a stale or erroneous Kalshi tick.
@@ -405,6 +419,19 @@ def evaluate_candidate(ticker: str) -> dict[str, Any]:
             reasons.append(technical_reason)
             continue
 
+        # Only enter where a fast exit is actually plausible -- confirmed
+        # live on the real account: a real share of exits were max_hold_time
+        # timeouts (sat the full 30 minutes going nowhere, sometimes closing
+        # at a small loss) rather than a clean take-profit/quick-profit,
+        # meaning the entry fired somewhere that just wasn't moving. Applies
+        # to both sides equally (a calm market is equally uninteresting
+        # whichever direction the dip/rally pointed).
+        current_volatility = row.get("volatility_5")
+        result[f"{side}_volatility"] = current_volatility
+        if current_volatility is None or current_volatility < MIN_ENTRY_VOLATILITY:
+            reasons.append(f"{technical_reason}, but volatility too low for a fast exit ({current_volatility})")
+            continue
+
         if not model_ok:
             if side == "short":
                 # Shorting on technicals alone (no model to confirm the
@@ -491,7 +518,7 @@ def _sample_volatility(samples: list[list[float]]) -> float | None:
 def decide_exit(
     position: dict[str, Any], current_price: float, *,
     velocity_pct_per_min: float | None = None, external_velocity_pct_per_min: float | None = None,
-    current_volatility: float | None = None,
+    current_volatility: float | None = None, now: dt.datetime | None = None,
 ) -> tuple[bool, str]:
     """`current_price` is always Kalshi's own tradable quote -- that's what
     the gain/loss threshold and the actual exit order use. `velocity` is
@@ -512,7 +539,18 @@ def decide_exit(
 
     `current_volatility` (see _sample_volatility) is direction-agnostic --
     change_pct is already side-aware, so "the market is choppy right now"
-    means the same thing regardless of which way this position is facing."""
+    means the same thing regardless of which way this position is facing.
+
+    `now` defaults to the real wall-clock time (correct for live trading,
+    where "now" really is now). A backtest replaying HISTORICAL rows must
+    pass its own simulated current timestamp here instead -- confirmed as a
+    real bug: without this, held_minutes was computed against the real
+    date this backtest happens to be RUN on minus a position opened weeks
+    or months in the past, producing an enormous number that blew past
+    MAX_HOLD_MINUTES on virtually every position's very first tick after
+    opening, regardless of price movement (measured live: 99.7% of
+    simulated exits were max_hold_time before this fix, vs a healthy mix of
+    take-profit/stop-loss/max_hold in real production trades)."""
     entry_price = float(position["entry_price"])
     is_short = position.get("side") == "short"
     if is_short:
@@ -539,7 +577,8 @@ def decide_exit(
     if change_pct <= -STOP_LOSS_PCT:
         return True, f"stop_loss ({change_pct:+.3%})"
     opened_at = dt.datetime.fromisoformat(position["opened_at"])
-    held_minutes = (dt.datetime.now(dt.timezone.utc) - opened_at).total_seconds() / 60.0
+    now = now if now is not None else dt.datetime.now(dt.timezone.utc)
+    held_minutes = (now - opened_at).total_seconds() / 60.0
     if held_minutes >= MAX_HOLD_MINUTES:
         return True, f"max_hold_time ({held_minutes:.0f}min, {change_pct:+.3%})"
     return False, f"holding ({change_pct:+.3%}, {held_minutes:.0f}min)"
@@ -731,7 +770,7 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
 
             should_exit, reason = decide_exit(
                 position, current_price, velocity_pct_per_min=velocity, external_velocity_pct_per_min=external_velocity,
-                current_volatility=current_volatility,
+                current_volatility=current_volatility, now=now,
             )
             checks.append({
                 "ticker": ticker, "ok": True, "exit_check": reason, "velocity_pct_per_min": velocity,
