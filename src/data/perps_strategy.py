@@ -72,7 +72,9 @@ import datetime as dt
 import json
 import logging
 import os
+import tempfile
 import threading
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -90,6 +92,26 @@ ROOT_DIR = Path(__file__).resolve().parents[2]
 DATA_DIR = ROOT_DIR / "data"
 STATE_FILE = Path(os.getenv("PERPS_STATE_FILE", str(DATA_DIR / "perps_state.json")))
 _STATE_LOCK = threading.Lock()
+
+# Render's free web service plan has NO persistent disk -- every restart
+# (a redeploy, a platform-triggered restart, anything) boots from a
+# completely fresh filesystem, wiping STATE_FILE entirely. Open positions
+# survive this fine (see _reconcile_positions_with_exchange -- Kalshi's own
+# /margin/positions is ground truth), but trade_log/realized_pnl_by_date/
+# daily_reference_balance have no such ground truth to recover from: without
+# a backup, a restart silently resets today's realized P&L to zero AND
+# resets the daily loss cap's reference point to whatever the balance
+# happens to be post-restart -- meaning a real loss already taken before a
+# restart could be forgotten, letting cumulative same-day losses exceed the
+# intended DAILY_LOSS_CAP_PCT after multiple restarts. These fields get
+# mirrored to the HF model repo (small JSON, not the market dataset) and
+# pulled back on a cold start, same durability pattern already used for the
+# trained model itself.
+HF_API_KEY = os.getenv("HF_API_KEY", "")
+HF_MODEL_REPO = os.getenv("HF_MODEL_REPO", "papylove/kalshi-perps-model")
+_DURABLE_STATE_HF_FILENAME = "perps_durable_state.json"
+_DURABLE_PUSH_MIN_INTERVAL_SEC = 30  # avoid HF's stricter per-commit rate limit on back-to-back pushes
+_last_durable_push_ts = 0.0
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -171,12 +193,68 @@ MAX_ENTRY_PRICE_DEVIATION_PCT = _env_float("PERPS_MAX_ENTRY_PRICE_DEVIATION_PCT"
 ENABLE_SHORTS = _env_flag("PERPS_ENABLE_SHORTS", default=False)
 
 
+def _durable_state_slice(state: dict[str, Any]) -> dict[str, Any]:
+    """The parts of state that can't be recovered from Kalshi's own account
+    (open positions can -- see _reconcile_positions_with_exchange)."""
+    return {
+        "trade_log": state.get("trade_log") or [],
+        "realized_pnl_by_date": state.get("realized_pnl_by_date") or {},
+        "daily_reference_balance": state.get("daily_reference_balance") or {},
+    }
+
+
+def _push_durable_state_to_hf(state: dict[str, Any]) -> None:
+    if not HF_API_KEY:
+        return
+    try:
+        from huggingface_hub import HfApi
+        api = HfApi(token=HF_API_KEY)
+        payload = json.dumps(_durable_state_slice(state), indent=2)
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as tmp:
+            tmp.write(payload)
+            tmp_path = tmp.name
+        try:
+            api.upload_file(
+                path_or_fileobj=tmp_path, path_in_repo=_DURABLE_STATE_HF_FILENAME,
+                repo_id=HF_MODEL_REPO, repo_type="model", commit_message="update perps durable state",
+            )
+        finally:
+            os.unlink(tmp_path)
+    except Exception as exc:
+        logger.warning("[perps_strategy] durable state push to HF failed: %s", exc)
+
+
+def _pull_durable_state_from_hf() -> dict[str, Any] | None:
+    if not HF_API_KEY:
+        return None
+    try:
+        from huggingface_hub import hf_hub_download
+        path = hf_hub_download(
+            repo_id=HF_MODEL_REPO, filename=_DURABLE_STATE_HF_FILENAME, repo_type="model", token=HF_API_KEY,
+        )
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.info("[perps_strategy] no durable state on HF yet (or fetch failed): %s", exc)
+        return None
+
+
 def _load_state() -> dict[str, Any]:
     try:
         with open(STATE_FILE, "r", encoding="utf-8") as f:
             state = json.load(f)
     except Exception:
-        return {"positions": [], "trade_log": [], "realized_pnl_by_date": {}, "daily_reference_balance": {}}
+        # No local file -- either a genuine cold start or (far more likely
+        # on Render's free tier, which has no persistent disk) a fresh
+        # instance after any restart. Recover trade history / today's
+        # realized P&L / the daily loss cap's reference balance from HF
+        # rather than silently starting them all at zero -- see the module-
+        # level comment above HF_API_KEY for why that matters.
+        base = {"positions": [], "trade_log": [], "realized_pnl_by_date": {}, "daily_reference_balance": {}}
+        durable = _pull_durable_state_from_hf()
+        if durable:
+            base.update(durable)
+            logger.info("[perps_strategy] recovered durable state from HF after local state was missing")
+        return base
 
     # Migrate the old single-position schema ({"position": {...} | None}) to
     # the current multi-position list transparently, so an existing local
@@ -190,10 +268,21 @@ def _load_state() -> dict[str, Any]:
     return state
 
 
-def _save_state(state: dict[str, Any]) -> None:
+def _save_state(state: dict[str, Any], *, push_durable: bool = False) -> None:
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(state, f, indent=2)
+    if not push_durable:
+        return
+    # Throttled, not on every call -- push_durable is only ever passed True
+    # on genuinely infrequent events (a trade just closed, or a new day's
+    # reference balance was just captured), but the guard is cheap insurance
+    # against HF's stricter per-commit rate limit if those ever coincide.
+    global _last_durable_push_ts
+    now = time.time()
+    if now - _last_durable_push_ts >= _DURABLE_PUSH_MIN_INTERVAL_SEC:
+        _last_durable_push_ts = now
+        _push_durable_state_to_hf(state)
 
 
 def _today_str() -> str:
@@ -660,7 +749,10 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                 remaining.append(remainder)
 
         state["positions"] = remaining
-        _save_state(state)
+        # push_durable only when a trade actually closed this cycle (real
+        # money moved, realized_pnl_by_date changed) -- not on every 20s
+        # tick just because positions/velocity samples were touched.
+        _save_state(state, push_durable=bool(closed))
         return {
             "ok": ok, "dry_run": effective_dry_run,
             "action": "closed" if closed else ("none" if remaining else "no_position"),
@@ -696,10 +788,15 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
         except Exception as exc:
             available_balance_usd = None
             logger.debug("[perps_strategy] balance read for daily reference failed: %s", exc)
+        reference_was_just_set = _today_str() not in (state.get("daily_reference_balance") or {})
         reference_balance = _reference_balance_for_today(state, available_balance_usd)
         loss_cap_breached = _daily_loss_cap_breached(state, reference_balance)
         held_tickers = {p["ticker"] for p in positions}
-        _save_state(state)  # persist any newly-set daily reference balance
+        # push_durable only on the (once-daily) event a fresh reference
+        # balance gets captured -- this is the value a restart must not be
+        # allowed to silently lose, see the module-level comment above
+        # HF_API_KEY.
+        _save_state(state, push_durable=reference_was_just_set)
         if loss_cap_breached:
             return {"ok": True, "dry_run": effective_dry_run, "action": "skipped_daily_loss_cap"}
 
@@ -719,6 +816,15 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
             market_resp = get_margin_market(ticker)
             market = market_resp.get("market") or {}
             tick_size = float(market.get("tick_size") or 0.0001)
+            # candidate["current_price"] came from latest_feature_row(), which
+            # is fine for DECIDING whether to enter (a dip/rally signal
+            # doesn't need sub-second freshness) but is backed by a 45-second
+            # candle cache -- not fresh enough to actually PRICE a real
+            # order. get_margin_market() above is never cached, so its own
+            # "price" field is what the order and the price-sanity check
+            # below should both use. Falls back to the candidate price only
+            # if the fresh quote is somehow missing.
+            fresh_price = float(market.get("price") or 0.0) or candidate["current_price"]
         except Exception as exc:
             opened.append({"ticker": ticker, "ok": False, "action": "skipped_market_fetch_failed", "error": str(exc)})
             continue
@@ -737,7 +843,7 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
             external_quote = None
         contract_size = float(market.get("contract_size") or 0.0)
         if external_quote and not external_quote.get("delayed") and contract_size > 0:
-            implied_spot_price = candidate["current_price"] / contract_size
+            implied_spot_price = fresh_price / contract_size
             deviation_pct = abs(implied_spot_price - external_quote["price"]) / external_quote["price"]
             if deviation_pct > MAX_ENTRY_PRICE_DEVIATION_PCT:
                 opened.append({
@@ -753,7 +859,7 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
             opened.append({"ticker": ticker, "ok": False, "action": "skipped_balance_check_failed", "error": str(exc)})
             continue
 
-        entry_price = _round_price(candidate["current_price"], tick_size)
+        entry_price = _round_price(fresh_price, tick_size)
         sizing_market = dict(market)
         sizing_market["price"] = entry_price
         count, sizing_detail = compute_leveraged_count(available_balance_usd, sizing_market)

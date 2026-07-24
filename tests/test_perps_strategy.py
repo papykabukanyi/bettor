@@ -905,6 +905,110 @@ def test_scan_and_enter_merges_a_confirmed_fill_into_a_concurrently_adopted_posi
     assert matching[0]["count"] == 4.0
 
 
+# ── Durable state survives Render's ephemeral (no persistent disk) restarts ──
+# Confirmed: this app's free-tier Render plan has no attached disk, so any
+# restart boots from a fresh filesystem. Open positions recover fine via
+# exchange reconciliation, but trade_log/realized_pnl_by_date/
+# daily_reference_balance have no such ground truth -- without a backup, a
+# restart could silently reset the daily loss cap's reference point and
+# forget a loss already taken earlier the same day.
+
+def _durable_state(trade_log=None, realized_pnl_by_date=None, daily_reference_balance=None):
+    return {
+        "positions": [], "trade_log": trade_log or [],
+        "realized_pnl_by_date": realized_pnl_by_date or {}, "daily_reference_balance": daily_reference_balance or {},
+    }
+
+
+def test_save_state_does_not_push_to_hf_by_default(monkeypatch, tmp_path):
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(strat, "HF_API_KEY", "fake-key")
+
+    def fail_if_called(state):
+        raise AssertionError("must not push to HF unless push_durable=True")
+
+    monkeypatch.setattr(strat, "_push_durable_state_to_hf", fail_if_called)
+    strat._save_state(_durable_state())  # noqa: SLF001
+
+
+def test_save_state_pushes_only_the_durable_slice_when_requested(monkeypatch, tmp_path):
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(strat, "HF_API_KEY", "fake-key")
+    monkeypatch.setattr(strat, "_last_durable_push_ts", 0.0)
+    pushed = []
+    monkeypatch.setattr(strat, "_push_durable_state_to_hf", lambda state: pushed.append(state))
+
+    state = {
+        "positions": [_position(ticker="KXBTCPERP")],  # must NOT end up needed in the pushed slice
+        "trade_log": [{"ticker": "KXBTCPERP", "realized_pnl_usd": 1.0}],
+        "realized_pnl_by_date": {"2026-07-23": 1.0}, "daily_reference_balance": {"2026-07-23": 20.0},
+    }
+    strat._save_state(state, push_durable=True)  # noqa: SLF001
+    assert len(pushed) == 1
+    slice_ = strat._durable_state_slice(pushed[0])  # noqa: SLF001
+    assert slice_["trade_log"] == state["trade_log"]
+    assert slice_["realized_pnl_by_date"] == state["realized_pnl_by_date"]
+    assert slice_["daily_reference_balance"] == state["daily_reference_balance"]
+
+
+def test_save_state_throttles_rapid_back_to_back_durable_pushes(monkeypatch, tmp_path):
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(strat, "HF_API_KEY", "fake-key")
+    monkeypatch.setattr(strat, "_last_durable_push_ts", 0.0)
+    calls = {"n": 0}
+    monkeypatch.setattr(strat, "_push_durable_state_to_hf", lambda state: calls.__setitem__("n", calls["n"] + 1))
+
+    strat._save_state(_durable_state(), push_durable=True)  # noqa: SLF001
+    strat._save_state(_durable_state(), push_durable=True)  # noqa: SLF001 -- immediately after, same instant
+    assert calls["n"] == 1
+
+
+def test_load_state_recovers_durable_state_from_hf_when_local_file_is_missing(monkeypatch, tmp_path):
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "does_not_exist" / "state.json")
+    monkeypatch.setattr(strat, "HF_API_KEY", "fake-key")
+    recovered = {
+        "trade_log": [{"ticker": "KXETHPERP", "realized_pnl_usd": 2.5}],
+        "realized_pnl_by_date": {"2026-07-23": 2.5}, "daily_reference_balance": {"2026-07-23": 42.97},
+    }
+    monkeypatch.setattr(strat, "_pull_durable_state_from_hf", lambda: recovered)
+
+    state = strat._load_state()  # noqa: SLF001
+    assert state["positions"] == []  # positions are NOT recovered this way -- reconciliation's job
+    assert state["trade_log"] == recovered["trade_log"]
+    assert state["realized_pnl_by_date"] == recovered["realized_pnl_by_date"]
+    assert state["daily_reference_balance"] == recovered["daily_reference_balance"]
+
+
+def test_load_state_defaults_cleanly_when_hf_recovery_also_fails(monkeypatch, tmp_path):
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "does_not_exist" / "state.json")
+    monkeypatch.setattr(strat, "HF_API_KEY", "")  # no key at all -- can't even try
+    state = strat._load_state()  # noqa: SLF001
+    assert state == {"positions": [], "trade_log": [], "realized_pnl_by_date": {}, "daily_reference_balance": {}}
+
+
+def test_manage_open_positions_pushes_durable_state_only_when_a_trade_closes(monkeypatch, tmp_path):
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", False)
+    monkeypatch.setattr(strat, "HF_API_KEY", "fake-key")
+    monkeypatch.setattr(strat, "_last_durable_push_ts", 0.0)
+    pushed = {"n": 0}
+    monkeypatch.setattr(strat, "_push_durable_state_to_hf", lambda state: pushed.__setitem__("n", pushed["n"] + 1))
+
+    # Price barely moves -- nothing should exit, nothing should push.
+    monkeypatch.setattr(strat, "get_margin_market", lambda ticker: _market_response(price=6.605))
+    strat._save_state({
+        "positions": [_position(ticker="KXBTCPERP", entry_price=6.60)],
+        "realized_pnl_by_date": {}, "trade_log": [], "daily_reference_balance": {},
+    })
+    strat.manage_open_positions()
+    assert pushed["n"] == 0
+
+    # Now a big favorable move -- take-profit fires, a trade closes.
+    monkeypatch.setattr(strat, "get_margin_market", lambda ticker: _market_response(price=6.60 * (1 + strat.TAKE_PROFIT_PCT + 0.001)))
+    strat.manage_open_positions()
+    assert pushed["n"] == 1
+
+
 def test_run_cycle_manages_positions_then_scans_for_entries(monkeypatch, tmp_path):
     monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "state.json")
     monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", False)
