@@ -8,9 +8,10 @@ Kalshi's own (currently ~7-week-old) archive.
 Fetches, per coin:
   - ~4 years of 60-minute candles (cheap: ~117 API calls) for the
     longer-scale trend/volatility features (trend_1h..trend_4h, trend_pct).
-  - ~180 days of 1-minute candles (~864 API calls) for the tighter
-    intraday features (ret_1m..ret_30m, volatility_5/15/30) and the
-    1-minute-ahead label.
+  - ~90 days of 1-minute candles for the tighter intraday features
+    (ret_1m..ret_30m, volatility_5/15/30) and the 1-minute-ahead label
+    (originally 180 days; halved after repeated local disk-exhaustion
+    crashes writing the larger files -- see MINUTE_DAYS below).
 Newer coins (HYPE, SUI, NEAR...) simply won't have 4 years of real history
 -- the fetcher stops early at each coin's actual listing date rather than
 erroring or fabricating data.
@@ -20,13 +21,12 @@ perps_backtest.py: there's no free historical news-sentiment archive to
 pull from years back, so this tests/trains the technical signal honestly
 rather than faking sentiment history.
 
-Uploads in BATCHES of TICKERS_PER_COMMIT tickers per HF commit (not one
-commit per ticker) -- confirmed live: HF enforces a 128-commits/hour cap
-per repo, and 16 individual commits back-to-back (on top of any other
-recent activity on the same repo, e.g. the archive-recompute script) blows
-through it. Each batch still discards its local temp files immediately
-after that batch's commit, so local disk never holds more than
-TICKERS_PER_COMMIT tickers' worth of data at once.
+Resumable: skips any ticker whose file already exists on HF (see
+_already_uploaded_tickers) -- this job has crashed and been restarted
+several times on this machine (disk exhaustion, HF's 128-commits/hour cap),
+and re-fetching ~7 minutes of API calls for an already-saved ticker would
+be pure waste. Re-run this script as many times as needed; it always picks
+up where it left off.
 
 Usage: python scripts/build_coinbase_pretrain_dataset.py
 """
@@ -52,13 +52,15 @@ logging.basicConfig(level="INFO", format="%(asctime)s %(levelname)s %(message)s"
 logger = logging.getLogger("build_coinbase_pretrain_dataset")
 
 HOURLY_DAYS = 1460  # ~4 years
-MINUTE_DAYS = 180
-# Lowered from 4 after a real failure on this machine: writing 4 tickers'
-# temp parquet files at once (each ~250k rows) ran the local disk out of
-# space entirely mid-write ("No space left on device") -- this machine has
-# been hitting a disk-space crisis all session. 2 is a compromise between
-# that and HF's 128-commits/hour cap.
-TICKERS_PER_COMMIT = 2
+# Lowered from 180 after repeated disk-exhaustion crashes on this machine
+# ("No space left on device" mid-write, twice) -- halving the largest part
+# of each ticker's data roughly halves its temp-file size.
+MINUTE_DAYS = 90
+# Lowered to 1 (was 4, then 2): even 2 tickers' temp parquet files at once
+# (~35MB each) was enough to exhaust local disk a second time. By now well
+# over an hour has passed since the initial commit burst, so HF's rolling
+# 128/hour window should have real headroom again even at 1 commit/ticker.
+TICKERS_PER_COMMIT = 1
 
 
 def _ensure_repo() -> None:
@@ -68,6 +70,22 @@ def _ensure_repo() -> None:
         api.repo_info(repo_id=HF_DATASET_REPO, repo_type="dataset")
     except Exception:
         api.create_repo(repo_id=HF_DATASET_REPO, repo_type="dataset", exist_ok=True, private=False)
+
+
+def _already_uploaded_tickers() -> set[str]:
+    """Resume support -- this job has crashed and been restarted several
+    times (disk exhaustion, HF rate limits); skip tickers whose file is
+    already on HF instead of re-fetching ~7 minutes of API calls for
+    nothing."""
+    from huggingface_hub import HfApi
+    api = HfApi(token=HF_API_KEY)
+    try:
+        files = api.list_repo_files(repo_id=HF_DATASET_REPO, repo_type="dataset")
+    except Exception as exc:
+        logger.warning("could not list existing files for resume check: %s", exc)
+        return set()
+    prefix, suffix = "external/coinbase_pretrain_", ".parquet"
+    return {f[len(prefix):-len(suffix)] for f in files if f.startswith(prefix) and f.endswith(suffix)}
 
 
 def _commit_batch(batch: list[tuple[str, "pd.DataFrame"]]) -> None:  # noqa: F821
@@ -102,10 +120,15 @@ def main() -> None:
         logger.error("HF_API_KEY not set -- cannot push results, aborting")
         return
     _ensure_repo()
+    already_done = _already_uploaded_tickers()
+    if already_done:
+        logger.info("resuming: %d tickers already on HF, skipping: %s", len(already_done), sorted(already_done))
 
     total_rows = 0
     pending_batch = []
     for ticker in KNOWN_PERP_TICKERS:
+        if ticker in already_done:
+            continue
         coin = coin_for_ticker(ticker)
         product_id = COINBASE_PRODUCT_BY_COIN.get(coin)
         if not product_id:
