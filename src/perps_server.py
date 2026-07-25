@@ -46,7 +46,7 @@ from pathlib import Path
 from typing import Any
 
 from apscheduler.schedulers.background import BackgroundScheduler
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, jsonify, redirect, render_template, request
 
 SRC_DIR = Path(__file__).resolve().parent
 if str(SRC_DIR) not in sys.path:
@@ -309,9 +309,29 @@ def _bootstrap_background_jobs() -> None:
 # Routes
 # ---------------------------------------------------------------------------
 @app.route("/")
+def hub():
+    """A link hub, not the perps dashboard itself -- this domain is the
+    first thing anyone hits, and now that Schwab is a separate server on
+    its own domain, "/" needs to point both places rather than silently
+    assuming perps. See hub.html; /perps below is the actual dashboard."""
+    return render_template("hub.html", schwab_url=SCHWAB_SERVER_URL)
+
+
 @app.route("/perps")
 def index():
     return render_template("dashboard.html", schwab_url=SCHWAB_SERVER_URL)
+
+
+@app.route("/schwab")
+def schwab_redirect():
+    """This domain hasn't served /schwab directly since the split into two
+    servers -- confirmed live this used to just 404 with no explanation.
+    Redirect to the real Schwab service if it's been deployed and
+    SCHWAB_SERVER_URL is configured; otherwise send back to the hub, which
+    explains that it isn't deployed yet instead of a bare dead link."""
+    if SCHWAB_SERVER_URL and SCHWAB_SERVER_URL != "#":
+        return redirect(f"{SCHWAB_SERVER_URL.rstrip('/')}/schwab")
+    return redirect("/")
 
 
 @app.route("/api/status")

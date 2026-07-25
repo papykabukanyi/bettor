@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Bettor -- Trading Bots</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg: #0a0c11; --surface: #12151c; --surface2: #191d27; --border: #232838;
+    --text: #e7ecf5; --muted: #8792a8; --green: #22c55e; --gdim: #12291a;
+    --red: #ef4444; --rdim: #2a1414; --yellow: #eab308; --blue: #3b82f6; --r: 10px;
+  }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    padding: 40px 20px; max-width: 900px; margin: 0 auto;
+  }
+  h1 { font-size: 26px; font-weight: 700; letter-spacing: -0.01em; margin-bottom: 6px; }
+  .sub { color: var(--muted); font-size: 14px; margin-bottom: 32px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
+  .card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: var(--r);
+    padding: 24px; display: flex; flex-direction: column; gap: 10px;
+  }
+  .card h2 { font-size: 18px; font-weight: 700; }
+  .card p { color: var(--muted); font-size: 13px; line-height: 1.5; flex-grow: 1; }
+  .badge { display: inline-block; padding: 3px 10px; border-radius: 999px; font-size: 11px; font-weight: 600; width: fit-content; }
+  .badge.ready { background: var(--gdim); color: var(--green); }
+  .badge.pending { background: #2a2510; color: var(--yellow); }
+  .btn {
+    display: inline-block; text-align: center; padding: 10px 16px; border-radius: 8px;
+    background: var(--blue); color: #fff; font-weight: 600; font-size: 13px;
+    text-decoration: none; margin-top: 4px;
+  }
+  .btn.disabled { background: var(--surface2); color: var(--muted); pointer-events: none; }
+  footer { color: var(--muted); font-size: 12px; text-align: center; margin-top: 32px; }
+  a { color: var(--blue); }
+</style>
+</head>
+<body>
+<h1>&#128200; Bettor</h1>
+<div class="sub">Two independent trading bots, two independent servers. Pick a dashboard.</div>
+
+<div class="grid">
+  <div class="card">
+    <span class="badge ready">LIVE</span>
+    <h2>&#8383; Kalshi Perps</h2>
+    <p>Crypto perpetual futures on Kalshi -- multi-timeframe technical signal + a trained direction model, bidirectional (long &amp; short), compounding position sizing.</p>
+    <a class="btn" href="/perps">Open Perps Dashboard &rarr;</a>
+  </div>
+
+  <div class="card">
+    {% if schwab_url and schwab_url != "#" %}
+    <span class="badge ready">LIVE</span>
+    <h2>&#128200; Schwab Stocks</h2>
+    <p>US equities/ETFs via Charles Schwab -- pro technical indicators, a scalper strategy, $100 simulate mode, off-hours intensive training and backtesting.</p>
+    <a class="btn" href="{{ schwab_url }}">Open Schwab Dashboard &rarr;</a>
+    {% else %}
+    <span class="badge pending">NOT DEPLOYED YET</span>
+    <h2>&#128200; Schwab Stocks</h2>
+    <p>US equities/ETFs via Charles Schwab -- pro technical indicators, a scalper strategy, $100 simulate mode, off-hours intensive training and backtesting.</p>
+    <p style="color:var(--yellow);">This runs as its own separate Render service (schwab_server.py) that hasn't been created yet, so there's no live URL to link to. Once it exists, set SCHWAB_SERVER_URL on this service to its public URL.</p>
+    <span class="btn disabled">Not available yet</span>
+    {% endif %}
+  </div>
+</div>
+
+<footer>Kalshi Perps and Schwab Stocks run as two fully independent servers -- a problem on one cannot affect the other.</footer>
+</body>
+</html>
