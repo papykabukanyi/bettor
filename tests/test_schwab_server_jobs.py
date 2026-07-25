@@ -1,6 +1,6 @@
 """Schwab-server-specific job wiring, scheduler shutdown behavior, and the
 off-hours historical-backfill job (schwab_server.py's own addition, with no
-perps_server.py equivalent -- it fulfills the "max historical dataset sent
+app_kalshi.py equivalent -- it fulfills the "max historical dataset sent
 to Hugging Face" requirement). Generic job-locking mechanics are covered in
 test_server_common.py instead."""
 from __future__ import annotations

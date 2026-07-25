@@ -1184,7 +1184,7 @@ def run_cycle(*, dry_run: bool | None = None) -> dict[str, Any]:
     then the entry scan (which cheaply no-ops itself if every slot is
     already full, with no network calls). Production scheduling calls
     `manage_open_positions` and `scan_and_enter` on their own separate
-    cadences instead -- see perps_server.py."""
+    cadences instead -- see app_kalshi.py."""
     position_result = manage_open_positions(dry_run=dry_run)
     entry_result = scan_and_enter(dry_run=dry_run)
     return {

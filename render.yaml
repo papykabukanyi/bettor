@@ -4,10 +4,17 @@ services:
   # UNCHANGED on purpose: Render's Blueprint sync matches services by
   # `name`, and this one already has a real public URL
   # (bettor-00di.onrender.com) that real money / the Kalshi OAuth-adjacent
-  # config depends on. Only startCommand changed, from the old combined
-  # dashboard:app to the new perps-only perps_server:app -- same process
-  # shape (one gunicorn worker, one in-process APScheduler), just pointed
-  # at the extracted module.
+  # config depends on.
+  #
+  # NOTE: Render's ACTUAL Start Command for this specific service is set
+  # manually in the Render dashboard (`gunicorn app:app`), independent of
+  # this file -- confirmed live when a rename briefly broke that exact
+  # module and this startCommand here did NOT protect against it. All the
+  # real logic lives in app_kalshi.py (repo root); app.py is a one-line
+  # shim re-exporting it under the name the dashboard's Start Command
+  # expects. This file's startCommand is kept correct/equivalent for when
+  # that manual override is eventually cleared, and for anyone who forks
+  # this repo onto a fresh Render Blueprint deploy.
   # --------------------------------------------------------------------
   - type: web
     name: bettor-dashboard
@@ -25,8 +32,8 @@ services:
     # worker killed + restarted by gunicorn's arbiter, which re-ran the
     # whole startup sequence (scheduler rebuilt from scratch) and showed up
     # as the dashboard "losing everything" every so often. Caching in
-    # perps_server.py fixes the underlying slowness; this is defense-in-depth.
-    startCommand: gunicorn --chdir src perps_server:app --bind 0.0.0.0:$PORT --workers 1 --threads 1 --timeout 60
+    # app_kalshi.py fixes the underlying slowness; this is defense-in-depth.
+    startCommand: gunicorn app_kalshi:app --bind 0.0.0.0:$PORT --workers 1 --threads 1 --timeout 60
     autoDeploy: true
     envVars:
       - key: PYTHON_VERSION

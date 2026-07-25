@@ -1,19 +1,12 @@
-"""Root-level WSGI entrypoint that Render's ACTUAL configured Start Command
-for the bettor-dashboard service uses: `gunicorn app:app` (a setting made
-directly in the Render dashboard, independent of render.yaml's own
-startCommand -- confirmed live after removing this file broke production
-with `ModuleNotFoundError: No module named 'app'`). Must keep re-exporting
-the Kalshi Perps app under this exact filename/name until that dashboard
-setting is changed to match render.yaml. app_kalshi.py is the same thing
-under a clearer name for anything that isn't locked to this one."""
-from __future__ import annotations
+"""Render's ACTUAL configured Start Command for the bettor-dashboard
+service is `gunicorn app:app` (set directly in the Render dashboard's
+Settings, independent of render.yaml's own startCommand) -- confirmed live
+when this file didn't exist under this exact name and production broke
+with `ModuleNotFoundError: No module named 'app'`.
 
-import sys
-from pathlib import Path
-
-ROOT_DIR = Path(__file__).resolve().parent
-SRC_DIR = ROOT_DIR / "src"
-if str(SRC_DIR) not in sys.path:
-    sys.path.insert(0, str(SRC_DIR))
-
-from perps_server import app
+All the real Kalshi Perps logic lives in app_kalshi.py (repo root) --
+this file must keep re-exporting its `app` under the name "app" so that
+Start Command keeps working. Do not remove this file unless the Render
+dashboard's Start Command is also changed to point at app_kalshi:app
+first."""
+from app_kalshi import app

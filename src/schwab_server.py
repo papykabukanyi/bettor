@@ -1,6 +1,6 @@
 """Charles Schwab stock trading bot -- its OWN web dashboard + background
 scheduler, running as its own named server/process (schwab_stocks_server),
-completely separate from perps_server.py. Nothing in this file imports
+completely separate from app_kalshi.py. Nothing in this file imports
 perps_* or knows the Kalshi perps bot exists.
 
 Background jobs, each cross-process locked (see server_common.py):
@@ -87,7 +87,7 @@ SCHWAB_LATEST_SWEEP_FILE = DATA_DIR / "schwab_latest_sweep.json"
 SCHWAB_LATEST_BACKFILL_FILE = DATA_DIR / "schwab_latest_backfill.json"
 
 
-# Same reasoning as perps_server.py's own copy of this: on SIGTERM,
+# Same reasoning as app_kalshi.py's own copy of this: on SIGTERM,
 # APScheduler's background thread can still be mid-cycle when the
 # interpreter starts tearing down, raising "cannot schedule new futures
 # after interpreter shutdown". atexit runs before that race can occur.
@@ -100,7 +100,7 @@ def _shutdown_scheduler() -> None:
         logger.exception("[schwab_server] error shutting down scheduler at exit")
 
 
-# Same reasoning as perps_server.py's account-snapshot cache: the dashboard
+# Same reasoning as app_kalshi.py's account-snapshot cache: the dashboard
 # polls /api/schwab/status every 10s, and get_market_session() can make a
 # real Schwab API call. Market session doesn't change within any given
 # minute, so a short cache keeps that poll cheap regardless of refresh rate
@@ -303,7 +303,7 @@ def _ensure_background_jobs_started() -> None:
                 logger.info("Startup schwab data collect completed")
             except Exception as exc:
                 logger.warning("Startup schwab data collect failed: %s", exc)
-            # Same cold-start-only guard as perps_server.py's own copy of
+            # Same cold-start-only guard as app_kalshi.py's own copy of
             # this: only train immediately if nothing is cached yet, so a
             # crash-triggered restart can't turn into a self-sustaining
             # retrain loop. This is a BRAND NEW service with no scheduled
@@ -318,7 +318,7 @@ def _ensure_background_jobs_started() -> None:
             except Exception as exc:
                 logger.warning("Startup schwab train failed: %s", exc)
             # No immediate startup entry scan here -- same rolling-deploy
-            # collision reasoning as perps_server.py (see
+            # collision reasoning as app_kalshi.py (see
             # PERPS_STARTUP_GRACE_SECONDS's comment there): the scheduled
             # schwab_entry_scan job's own delayed first tick already covers
             # this safely.

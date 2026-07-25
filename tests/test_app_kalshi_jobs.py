@@ -1,7 +1,7 @@
 """Perps-server-specific job wiring + scheduler shutdown behavior. Generic
 job-locking mechanics (shared with schwab_server.py) are covered in
 test_server_common.py instead -- this file only tests things that are
-actually specific to perps_server.py: that its production job functions
+actually specific to app_kalshi.py: that its production job functions
 honor the live-trading dry_run gate, that its data-collect job refreshes the
 volatility-ranking cache off the request path, and that its scheduler
 shutdown handler is safe."""
@@ -10,7 +10,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-import perps_server
+import app_kalshi
 
 
 def test_production_jobs_actually_honor_the_live_trading_flag(monkeypatch):
@@ -27,9 +27,9 @@ def test_production_jobs_actually_honor_the_live_trading_flag(monkeypatch):
     monkeypatch.setattr(strat, "scan_and_enter", lambda **kw: captured.setdefault("entry_scan", kw) or {"action": "none"})
     monkeypatch.setattr(strat, "run_cycle", lambda **kw: captured.setdefault("manual_cycle", kw) or {})
 
-    perps_server._run_perps_fast_check.__wrapped__()  # noqa: SLF001
-    perps_server._run_perps_entry_scan.__wrapped__()  # noqa: SLF001
-    perps_server._run_perps_manual_cycle.__wrapped__()  # noqa: SLF001
+    app_kalshi._run_perps_fast_check.__wrapped__()  # noqa: SLF001
+    app_kalshi._run_perps_entry_scan.__wrapped__()  # noqa: SLF001
+    app_kalshi._run_perps_manual_cycle.__wrapped__()  # noqa: SLF001
 
     assert captured["fast_check"].get("dry_run") is False
     assert captured["entry_scan"].get("dry_run") is False
@@ -48,7 +48,7 @@ def test_data_collect_job_refreshes_ticker_activity_cache_off_the_request_path(m
     monkeypatch.setattr(perps_data, "refresh_ticker_activity_cache", lambda **kw: calls.append(kw))
     monkeypatch.setattr(perps_data, "collect_dataset_rows", lambda: pd.DataFrame())
 
-    perps_server._run_perps_data_collect.__wrapped__()  # noqa: SLF001
+    app_kalshi._run_perps_data_collect.__wrapped__()  # noqa: SLF001
 
     assert len(calls) == 1
 
@@ -63,7 +63,7 @@ def test_data_collect_job_still_collects_if_cache_refresh_fails(monkeypatch):
     monkeypatch.setattr(perps_data, "refresh_ticker_activity_cache", fail)
     monkeypatch.setattr(perps_data, "collect_dataset_rows", lambda: collected.append(1) or pd.DataFrame())
 
-    perps_server._run_perps_data_collect.__wrapped__()  # noqa: SLF001
+    app_kalshi._run_perps_data_collect.__wrapped__()  # noqa: SLF001
 
     assert collected == [1]
 
@@ -84,8 +84,8 @@ def test_shutdown_scheduler_stops_a_running_scheduler(monkeypatch):
     "cannot schedule new futures after interpreter shutdown". Shutting the
     scheduler down at exit prevents that race."""
     calls = []
-    monkeypatch.setattr(perps_server, "scheduler", _FakeScheduler(True, lambda **kw: calls.append(kw)))
-    perps_server._shutdown_scheduler()
+    monkeypatch.setattr(app_kalshi, "scheduler", _FakeScheduler(True, lambda **kw: calls.append(kw)))
+    app_kalshi._shutdown_scheduler()
     assert calls == [{"wait": False}]
 
 
@@ -93,8 +93,8 @@ def test_shutdown_scheduler_is_a_noop_when_not_running(monkeypatch):
     def fail_if_called(**kw):
         raise AssertionError("must not call shutdown() on a scheduler that isn't running")
 
-    monkeypatch.setattr(perps_server, "scheduler", _FakeScheduler(False, fail_if_called))
-    perps_server._shutdown_scheduler()  # must not raise
+    monkeypatch.setattr(app_kalshi, "scheduler", _FakeScheduler(False, fail_if_called))
+    app_kalshi._shutdown_scheduler()  # must not raise
 
 
 def test_shutdown_scheduler_swallows_errors(monkeypatch):
@@ -103,5 +103,5 @@ def test_shutdown_scheduler_swallows_errors(monkeypatch):
     def raise_error(**kw):
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(perps_server, "scheduler", _FakeScheduler(True, raise_error))
-    perps_server._shutdown_scheduler()  # must not raise
+    monkeypatch.setattr(app_kalshi, "scheduler", _FakeScheduler(True, raise_error))
+    app_kalshi._shutdown_scheduler()  # must not raise

@@ -1,10 +1,10 @@
-"""Generic job-locking + run-history behavior shared by BOTH perps_server.py
+"""Generic job-locking + run-history behavior shared by BOTH app_kalshi.py
 and schwab_server.py via server_common.make_job_lock. This is the safety net
 against duplicate concurrent execution of a job that can place real orders --
 a second caller while the lock is held must skip immediately rather than run
 in parallel, and a stale lock (crashed process) must not permanently wedge
 the job. Server-specific job wiring is covered separately in
-test_perps_server_jobs.py / test_schwab_server_jobs.py."""
+test_app_kalshi_jobs.py / test_schwab_server_jobs.py."""
 from __future__ import annotations
 
 import os
