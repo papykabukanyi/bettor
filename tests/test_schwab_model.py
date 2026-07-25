@@ -47,6 +47,7 @@ def _synthetic_training_frame(n: int = 500, seed: int = 42) -> pd.DataFrame:
         "bb_bandwidth": np.abs(rng.normal(0.01, 0.003, n)),
         "atr_pct": np.abs(rng.normal(0.001, 0.0003, n)),
         "stoch_k": np.clip(rng.normal(0.5, 0.2, n), 0.0, 1.0),
+        "time_of_day_pct": np.clip(rng.normal(0.5, 0.3, n), -0.2, 1.2),
         "label_up": label,
     })
 
@@ -91,6 +92,7 @@ def test_predict_direction_uses_trained_model(monkeypatch):
         "volatility_5": 0.001, "volatility_15": 0.001, "volatility_30": 0.001,
         "volume_ratio_5": 1.0, "volume_ratio_15": 1.0, "dollar_volume_z": 0.0,
         "rsi_14": 0.5, "macd_hist_pct": 0.0, "bb_pct_b": 0.5, "bb_bandwidth": 0.01, "atr_pct": 0.001, "stoch_k": 0.5,
+        "time_of_day_pct": 0.5,
     })
     prediction = schwab_model.predict_direction("AAPL")
     assert prediction["model_ok"] is True

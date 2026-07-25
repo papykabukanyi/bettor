@@ -44,6 +44,61 @@ HF_API_KEY = os.getenv("HF_API_KEY", "")
 HF_STOCK_DATASET_REPO = os.getenv("HF_STOCK_DATASET_REPO", "papylove/schwab-data")
 
 _TIMEOUT_SEC = 15
+_SESSION_NAME_MAP = {"preMarket": "pre_market", "regularMarket": "regular", "postMarket": "post_market"}
+
+
+def _now_et() -> dt.datetime:
+    try:
+        import zoneinfo
+        eastern = zoneinfo.ZoneInfo("America/New_York")
+    except Exception:
+        import pytz
+        eastern = pytz.timezone("America/New_York")
+    return dt.datetime.now(tz=eastern)
+
+
+def _fallback_market_session() -> dict[str, Any]:
+    """Hand-computed ET time-window check -- doesn't know about market
+    holidays (Schwab's own endpoint does), but works before OAuth login is
+    even complete and needs no network call at all."""
+    now_et = _now_et()
+    if now_et.weekday() >= 5:  # Saturday=5, Sunday=6
+        return {"session": "closed", "is_open": False, "source": "fallback"}
+    t = now_et.time()
+    if dt.time(4, 0) <= t < dt.time(9, 30):
+        return {"session": "pre_market", "is_open": False, "source": "fallback"}
+    if dt.time(9, 30) <= t < dt.time(16, 0):
+        return {"session": "regular", "is_open": True, "source": "fallback"}
+    if dt.time(16, 0) <= t < dt.time(20, 0):
+        return {"session": "post_market", "is_open": False, "source": "fallback"}
+    return {"session": "closed", "is_open": False, "source": "fallback"}
+
+
+def get_market_session() -> dict[str, Any]:
+    """{"session": "closed"|"pre_market"|"regular"|"post_market", "is_open":
+    bool, "source": "schwab"|"fallback"}. Tries Schwab's own authoritative
+    market-hours endpoint first (correctly accounts for holidays); falls
+    back to a hand-computed ET check (doesn't know about holidays, but
+    needs no login and never fails) if that call doesn't work -- this must
+    never raise, since the scheduler uses it to decide whether to run
+    intensive off-hours training vs. live trading checks."""
+    try:
+        data = schwab_client.get("/marketdata/v1/markets", params={"markets": "equity"})
+        equity_markets = data.get("equity") or {}
+        equity = equity_markets.get("EQ") or next(iter(equity_markets.values()), {})
+        is_open = bool(equity.get("isOpen"))
+        session_hours = equity.get("sessionHours") or {}
+        now = dt.datetime.now(dt.timezone.utc)
+        for raw_name, mapped_name in _SESSION_NAME_MAP.items():
+            for window in session_hours.get(raw_name) or []:
+                start = dt.datetime.fromisoformat(window["start"])
+                end = dt.datetime.fromisoformat(window["end"])
+                if start <= now <= end:
+                    return {"session": mapped_name, "is_open": is_open, "source": "schwab"}
+        return {"session": "closed", "is_open": is_open, "source": "schwab"}
+    except Exception as exc:
+        logger.info("[schwab_data] market-hours lookup failed, using ET fallback: %s", exc)
+        return _fallback_market_session()
 _NASDAQ_LISTED_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
 _OTHER_LISTED_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
 _UNIVERSE_CACHE_TTL_SEC = 24 * 3600
@@ -149,8 +204,22 @@ FEATURE_COLUMNS = [
     "volatility_5", "volatility_15", "volatility_30",
     "volume_ratio_5", "volume_ratio_15", "dollar_volume_z",
     "rsi_14", "macd_hist_pct", "bb_pct_b", "bb_bandwidth", "atr_pct", "stoch_k",
+    "time_of_day_pct",
 ]
 MIN_ROWS_FOR_FEATURES = 65  # the 60-minute return window + a small buffer
+
+
+def _time_of_day_pct(ts_series: pd.Series) -> pd.Series:
+    """0.0 at the 9:30am ET regular-session open, 1.0 at the 4:00pm ET
+    close -- negative during pre-market, >1 during post-market. Stocks have
+    a well-known intraday U-shape (highest volume/volatility right after
+    open and right before close, quiet through the middle), so this lets
+    the model learn "is this a normally-active TIME of day for this
+    pattern" directly, rather than treating every minute as interchangeable."""
+    et = pd.to_datetime(ts_series, unit="s", utc=True).dt.tz_convert("America/New_York")
+    market_open = et.dt.normalize() + pd.Timedelta(hours=9, minutes=30)
+    minutes_since_open = (et - market_open).dt.total_seconds() / 60.0
+    return minutes_since_open / 390.0  # 390min = the 6.5-hour regular session
 
 
 def engineer_features(one_min_df: pd.DataFrame) -> pd.DataFrame:
@@ -224,6 +293,8 @@ def engineer_features(one_min_df: pd.DataFrame) -> pd.DataFrame:
     high_14 = df["high"].rolling(14).max()
     stoch_range = (high_14 - low_14).replace(0, float("nan"))
     df["stoch_k"] = (df["close"] - low_14) / stoch_range
+
+    df["time_of_day_pct"] = _time_of_day_pct(df["ts"])
 
     horizon = 1
     df["future_close"] = df["close"].shift(-horizon)

@@ -199,3 +199,55 @@ def simulate(
         "span_days": round(span_days, 2),
         "trades": trades,
     }
+
+
+# A small, deliberately bounded grid -- this runs as a recurring BACKGROUND
+# job on the same memory-constrained dyno as live trading, potentially many
+# times over a single off-hours window, not as a one-off offline script
+# (see the Kalshi perps bot's own much larger, one-time 450-combo sweep
+# for contrast). Widening this list trades more thorough coverage for more
+# CPU/memory per run -- keep it modest.
+_SWEEP_GRID = [
+    {"take_profit_pct": 0.01, "stop_loss_pct": 0.008, "max_hold_minutes": 120},
+    {"take_profit_pct": 0.02, "stop_loss_pct": 0.015, "max_hold_minutes": 240},
+    {"take_profit_pct": 0.015, "stop_loss_pct": 0.01, "max_hold_minutes": 60},
+    {"take_profit_pct": 0.008, "stop_loss_pct": 0.006, "max_hold_minutes": 30},
+]
+
+
+def run_config_sweep(
+    test_with_preds: pd.DataFrame, *, starting_balance: float = 100.0, min_trades: int = 5,
+) -> dict[str, Any]:
+    """Tries _SWEEP_GRID's small set of take-profit/stop-loss/max-hold
+    combinations against the SAME fitted-model predictions (cheap -- no
+    re-fitting per config), ranked by return_pct among configs that fired
+    at least `min_trades` (avoids crowning a config that "won" on 1-2 lucky
+    trades). Reports findings only -- never applies a new config to the
+    live strategy itself; that stays a deliberate, reviewed decision.
+
+    Restores schwab_strategy's real (env-configured) parameters before
+    returning, no matter what -- each grid entry temporarily overwrites
+    those SAME module-level globals to reuse simulate()'s real decide_exit
+    logic, and leaving the last grid entry's values in place would mean
+    live trading silently runs on leftover sweep parameters instead of its
+    actual configured ones."""
+    original = {
+        "take_profit_pct": strat.TAKE_PROFIT_PCT, "stop_loss_pct": strat.STOP_LOSS_PCT,
+        "max_hold_minutes": strat.MAX_HOLD_MINUTES,
+    }
+    try:
+        results = []
+        for config in _SWEEP_GRID:
+            strat.TAKE_PROFIT_PCT = config["take_profit_pct"]
+            strat.STOP_LOSS_PCT = config["stop_loss_pct"]
+            strat.MAX_HOLD_MINUTES = config["max_hold_minutes"]
+            result = simulate(test_with_preds, fitted=None, starting_balance=starting_balance)
+            results.append({**config, "trade_count": result["trade_count"], "win_rate": result["win_rate"], "return_pct": result["return_pct"]})
+    finally:
+        strat.TAKE_PROFIT_PCT = original["take_profit_pct"]
+        strat.STOP_LOSS_PCT = original["stop_loss_pct"]
+        strat.MAX_HOLD_MINUTES = original["max_hold_minutes"]
+
+    qualified = [r for r in results if r["trade_count"] >= min_trades]
+    ranked = sorted(qualified or results, key=lambda r: -r["return_pct"])
+    return {"all_configs": results, "ranked": ranked, "best": ranked[0] if ranked else None}

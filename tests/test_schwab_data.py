@@ -76,6 +76,90 @@ def test_get_us_stock_universe_survives_one_exchange_failing(monkeypatch):
     assert universe == ["A"]
 
 
+# ---------------------------------------------------------------------------
+# Market session detection -- gates when off-hours intensive training runs
+# vs. live trading checks, so this must never raise (a failure here would
+# otherwise stall the scheduler entirely).
+# ---------------------------------------------------------------------------
+def _schwab_hours_response(is_open, pre=None, regular=None, post=None):
+    session_hours = {}
+    if pre:
+        session_hours["preMarket"] = [{"start": pre[0], "end": pre[1]}]
+    if regular:
+        session_hours["regularMarket"] = [{"start": regular[0], "end": regular[1]}]
+    if post:
+        session_hours["postMarket"] = [{"start": post[0], "end": post[1]}]
+    return {"equity": {"EQ": {"isOpen": is_open, "sessionHours": session_hours}}}
+
+
+def test_get_market_session_regular_hours_from_schwab(monkeypatch):
+    now = schwab_data.dt.datetime.now(schwab_data.dt.timezone.utc)
+    start = (now - schwab_data.dt.timedelta(hours=1)).isoformat()
+    end = (now + schwab_data.dt.timedelta(hours=1)).isoformat()
+    monkeypatch.setattr(
+        schwab_data.schwab_client, "get",
+        lambda path, params=None: _schwab_hours_response(True, regular=(start, end)),
+    )
+    result = schwab_data.get_market_session()
+    assert result == {"session": "regular", "is_open": True, "source": "schwab"}
+
+
+def test_get_market_session_outside_any_window_is_closed(monkeypatch):
+    now = schwab_data.dt.datetime.now(schwab_data.dt.timezone.utc)
+    start = (now - schwab_data.dt.timedelta(hours=10)).isoformat()
+    end = (now - schwab_data.dt.timedelta(hours=8)).isoformat()
+    monkeypatch.setattr(
+        schwab_data.schwab_client, "get",
+        lambda path, params=None: _schwab_hours_response(False, regular=(start, end)),
+    )
+    result = schwab_data.get_market_session()
+    assert result == {"session": "closed", "is_open": False, "source": "schwab"}
+
+
+def test_get_market_session_falls_back_when_schwab_call_fails(monkeypatch):
+    def fail(path, params=None):
+        raise RuntimeError("not logged in")
+
+    monkeypatch.setattr(schwab_data.schwab_client, "get", fail)
+    result = schwab_data.get_market_session()
+    assert result["source"] == "fallback"
+    assert result["session"] in {"closed", "pre_market", "regular", "post_market"}
+
+
+def test_fallback_market_session_weekend_is_closed(monkeypatch):
+    saturday = schwab_data.dt.datetime(2026, 7, 25, 12, 0)  # a real Saturday
+    assert saturday.weekday() == 5
+    monkeypatch.setattr(schwab_data, "_now_et", lambda: saturday)
+    result = schwab_data._fallback_market_session()  # noqa: SLF001
+    assert result == {"session": "closed", "is_open": False, "source": "fallback"}
+
+
+def test_fallback_market_session_weekday_regular_hours():
+    tuesday_at_noon = schwab_data.dt.datetime(2026, 7, 21, 12, 0)  # a real Tuesday
+    assert tuesday_at_noon.weekday() == 1
+
+    import unittest.mock
+    with unittest.mock.patch.object(schwab_data, "_now_et", return_value=tuesday_at_noon):
+        result = schwab_data._fallback_market_session()  # noqa: SLF001
+    assert result == {"session": "regular", "is_open": True, "source": "fallback"}
+
+
+def test_fallback_market_session_weekday_pre_market():
+    tuesday_early = schwab_data.dt.datetime(2026, 7, 21, 6, 0)
+    import unittest.mock
+    with unittest.mock.patch.object(schwab_data, "_now_et", return_value=tuesday_early):
+        result = schwab_data._fallback_market_session()  # noqa: SLF001
+    assert result == {"session": "pre_market", "is_open": False, "source": "fallback"}
+
+
+def test_fallback_market_session_weekday_late_night_is_closed():
+    tuesday_midnight = schwab_data.dt.datetime(2026, 7, 21, 2, 0)
+    import unittest.mock
+    with unittest.mock.patch.object(schwab_data, "_now_et", return_value=tuesday_midnight):
+        result = schwab_data._fallback_market_session()  # noqa: SLF001
+    assert result == {"session": "closed", "is_open": False, "source": "fallback"}
+
+
 def _make_daily_candles(closes, start_ms=1_700_000_000_000, step_ms=86_400_000):
     return [
         {"datetime": start_ms + i * step_ms, "open": c, "high": c, "low": c, "close": c, "volume": 1000.0}
@@ -160,6 +244,31 @@ def test_engineer_features_all_columns_present_in_feature_columns():
     feats = schwab_data.engineer_features(df)
     for col in schwab_data.FEATURE_COLUMNS:
         assert col in feats.columns
+
+
+def test_time_of_day_pct_is_zero_at_open_and_one_at_close():
+    import zoneinfo
+    eastern = zoneinfo.ZoneInfo("America/New_York")
+    # A real Tuesday -- open/close times are unambiguous (no DST edge, no holiday).
+    open_ts = int(schwab_data.dt.datetime(2026, 7, 21, 9, 30, tzinfo=eastern).timestamp())
+    close_ts = int(schwab_data.dt.datetime(2026, 7, 21, 16, 0, tzinfo=eastern).timestamp())
+    midday_ts = int(schwab_data.dt.datetime(2026, 7, 21, 12, 45, tzinfo=eastern).timestamp())  # halfway
+
+    result = schwab_data._time_of_day_pct(pd.Series([open_ts, close_ts, midday_ts]))  # noqa: SLF001
+    assert abs(result.iloc[0] - 0.0) < 1e-9
+    assert abs(result.iloc[1] - 1.0) < 1e-9
+    assert abs(result.iloc[2] - 0.5) < 1e-9
+
+
+def test_time_of_day_pct_is_negative_pre_market_and_above_one_post_market():
+    import zoneinfo
+    eastern = zoneinfo.ZoneInfo("America/New_York")
+    pre_market_ts = int(schwab_data.dt.datetime(2026, 7, 21, 7, 30, tzinfo=eastern).timestamp())
+    post_market_ts = int(schwab_data.dt.datetime(2026, 7, 21, 18, 0, tzinfo=eastern).timestamp())
+
+    result = schwab_data._time_of_day_pct(pd.Series([pre_market_ts, post_market_ts]))  # noqa: SLF001
+    assert result.iloc[0] < 0
+    assert result.iloc[1] > 1
 
 
 def _activity_df(rows):

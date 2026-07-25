@@ -103,7 +103,7 @@
   </div>
 </section>
 
-<footer>Auto-refreshes every 10s.</footer>
+<footer>Auto-refreshes every 10s. <span id="connection-status"></span></footer>
 
 <script>
 // Real money (balance, P&L) -- always standard 2-decimal currency, never
@@ -187,10 +187,34 @@ function patchTable(tbody, items, keyFn, rowHtmlFn, emptyColspan, emptyMessage) 
   });
 }
 
+// Staleness detection: a full patchTable-based refresh can silently leave
+// the LAST successfully-rendered state on screen forever if fetches start
+// failing (server restart, network blip) -- nothing about that failure is
+// otherwise visible, since there's no full-page reload to notice it's
+// stuck. Tracks the last time /api/status genuinely succeeded and surfaces
+// it once that gets too old, independent of any specific fetch's own
+// try/catch (a rendering bug downstream must not mask a truly successful
+// fetch, so this is set the moment the response is parsed).
+let lastStatusSuccessMs = Date.now();
+const STALE_AFTER_MS = 30000; // 3x the 10s poll interval
+
+function updateConnectionStatus() {
+  const el = document.getElementById("connection-status");
+  if (!el) return;
+  const secAgo = Math.round((Date.now() - lastStatusSuccessMs) / 1000);
+  if (secAgo * 1000 < STALE_AFTER_MS) {
+    el.textContent = "";
+  } else {
+    el.textContent = `⚠ no update in ${secAgo}s`;
+    el.style.color = "var(--red)";
+  }
+}
+
 async function refreshStatus() {
   try {
     const res = await fetch("/api/status");
     const data = await res.json();
+    lastStatusSuccessMs = Date.now();
 
     const modeBadge = document.getElementById("mode-badge");
     if (data.live_trading_enabled) {
@@ -294,6 +318,7 @@ async function refreshActivity() {
 function refreshAll() { refreshStatus(); refreshTrades(); refreshActivity(); }
 refreshAll();
 setInterval(refreshAll, 10000);
+setInterval(updateConnectionStatus, 1000);
 </script>
 </body>
 </html>

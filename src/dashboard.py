@@ -52,7 +52,9 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from config import et_today
-from data import perps_data, perps_model, perps_strategy, schwab_client, schwab_data, schwab_model, schwab_strategy
+from data import (
+    perps_data, perps_model, perps_strategy, schwab_backtest, schwab_client, schwab_data, schwab_model, schwab_strategy,
+)
 from data.kalshi_perps import get_margin_balance, get_margin_enabled, get_margin_exchange_status, get_margin_positions
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -96,6 +98,10 @@ SCHWAB_DATA_COLLECT_MINUTES = max(5, int(os.getenv("SCHWAB_DATA_COLLECT_MINUTES"
 # operations this process does don't both land in the same memory-pressure
 # window on a 512MB dyno.
 SCHWAB_TRAIN_HOUR_ET = int(os.getenv("SCHWAB_TRAIN_HOUR_ET", "4") or "4")
+# Checked every 30 min so it picks up the fully-closed window promptly
+# (nights + weekends) -- a no-op the rest of the time (see
+# _run_schwab_intensive_training's own docstring for why).
+SCHWAB_INTENSIVE_TRAINING_MINUTES = max(10, int(os.getenv("SCHWAB_INTENSIVE_TRAINING_MINUTES", "30") or "30"))
 ENABLE_SCHWAB_SCHEDULER = str(os.getenv("ENABLE_SCHWAB_SCHEDULER", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
@@ -173,6 +179,31 @@ def _cached_account_snapshot() -> dict[str, Any]:
         _ACCOUNT_SNAPSHOT_CACHE_TS = time.monotonic()
     return snapshot
 
+
+# Same reasoning as _cached_account_snapshot -- the dashboard polls
+# /api/schwab/status every 10s, and get_market_session() can make a real
+# Schwab API call. Market session doesn't change within any given minute,
+# so a short cache keeps that poll cheap regardless of refresh rate
+# (confirmed live elsewhere this session: an uncached expensive call
+# inline in a status endpoint caused a real Render OOM for the perps bot).
+_MARKET_SESSION_CACHE: dict[str, Any] = {}
+_MARKET_SESSION_CACHE_TS = 0.0
+_MARKET_SESSION_CACHE_LOCK = threading.Lock()
+_MARKET_SESSION_CACHE_TTL_SEC = 60
+
+
+def _cached_market_session() -> dict[str, Any]:
+    global _MARKET_SESSION_CACHE, _MARKET_SESSION_CACHE_TS
+    now = time.monotonic()
+    with _MARKET_SESSION_CACHE_LOCK:
+        if _MARKET_SESSION_CACHE and (now - _MARKET_SESSION_CACHE_TS) < _MARKET_SESSION_CACHE_TTL_SEC:
+            return dict(_MARKET_SESSION_CACHE)
+    session = schwab_data.get_market_session()
+    with _MARKET_SESSION_CACHE_LOCK:
+        _MARKET_SESSION_CACHE = dict(session)
+        _MARKET_SESSION_CACHE_TS = time.monotonic()
+    return session
+
 # ---------------------------------------------------------------------------
 # Cross-process job lock + run history
 # ---------------------------------------------------------------------------
@@ -183,6 +214,7 @@ LATEST_CYCLE_FILE = DATA_DIR / "perps_latest_cycle.json"
 LATEST_POSITION_CHECK_FILE = DATA_DIR / "perps_latest_position_check.json"
 SCHWAB_LATEST_CYCLE_FILE = DATA_DIR / "schwab_latest_cycle.json"
 SCHWAB_LATEST_POSITION_CHECK_FILE = DATA_DIR / "schwab_latest_position_check.json"
+SCHWAB_LATEST_SWEEP_FILE = DATA_DIR / "schwab_latest_sweep.json"
 
 
 def _load_json(path: Path, default: Any) -> Any:
@@ -390,6 +422,40 @@ def _run_schwab_train() -> dict[str, Any]:
     return schwab_model.train_model()
 
 
+@_locked_job("schwab_intensive_training", stale_after_sec=1800)
+def _run_schwab_intensive_training() -> dict[str, Any]:
+    """Off-hours-only: while the market is fully closed (nights, weekends),
+    use the idle time to retrain + run a small backtest sweep over recent
+    real data, so a well-tuned strategy is ready to go the moment the
+    market reopens, instead of that heavy lifting only ever happening once
+    a day or competing with live trading checks. A no-op (not an error)
+    whenever the market isn't fully closed -- scheduled frequently on
+    purpose so it picks up the closed window promptly, not just once."""
+    session = schwab_data.get_market_session()
+    if session["session"] != "closed":
+        return {"ok": True, "skipped": True, "reason": "market_not_closed", "session": session["session"]}
+
+    train_result = schwab_model.train_model()
+
+    sweep_result = None
+    try:
+        df = schwab_data.load_training_dataset()
+        if not df.empty:
+            cutoff_ts = df["ts"].quantile(0.7)
+            train_df = df[df["ts"] < cutoff_ts]
+            test_df = df[df["ts"] >= cutoff_ts]
+            fitted = schwab_backtest.fit_backtest_model(train_df)
+            test_with_preds = schwab_backtest.add_model_predictions(test_df, fitted)
+            sweep_result = schwab_backtest.run_config_sweep(
+                test_with_preds, starting_balance=schwab_strategy.SIMULATE_STARTING_BALANCE,
+            )
+            _save_json(SCHWAB_LATEST_SWEEP_FILE, sweep_result)
+    except Exception as exc:
+        logger.warning("[dashboard] schwab intensive backtest sweep failed: %s", exc)
+
+    return {"ok": True, "train_result": train_result, "sweep_result": sweep_result}
+
+
 def _ensure_background_jobs_started() -> None:
     global _startup_done
     if _startup_done:
@@ -426,6 +492,10 @@ def _ensure_background_jobs_started() -> None:
                 scheduler.add_job(
                     _run_schwab_train, "cron", hour=SCHWAB_TRAIN_HOUR_ET, minute=0,
                     id="schwab_train", replace_existing=True,
+                )
+                scheduler.add_job(
+                    _run_schwab_intensive_training, "interval", minutes=SCHWAB_INTENSIVE_TRAINING_MINUTES,
+                    id="schwab_intensive_training", replace_existing=True,
                 )
                 scheduler.add_job(
                     _run_schwab_fast_check, "interval", seconds=SCHWAB_FAST_CHECK_SECONDS,
@@ -493,7 +563,11 @@ def _bootstrap_background_jobs() -> None:
 # Routes
 # ---------------------------------------------------------------------------
 @app.route("/")
+@app.route("/perps")
 def index():
+    """Both "/" and "/perps" serve the same perps dashboard -- "/" stays as
+    a stable default landing page, "/perps" exists so it's reachable by the
+    same naming convention as "/schwab" rather than only implicitly."""
     return render_template("dashboard.html")
 
 
@@ -647,6 +721,11 @@ def api_schwab_status():
     _, meta = schwab_model.load_model()
     latest_cycle = _load_json(SCHWAB_LATEST_CYCLE_FILE, {})
     latest_position_check = _load_json(SCHWAB_LATEST_POSITION_CHECK_FILE, {})
+    latest_sweep = _load_json(SCHWAB_LATEST_SWEEP_FILE, {})
+    try:
+        market_session = _cached_market_session()
+    except Exception:
+        market_session = {"session": "unknown", "is_open": False, "source": "error"}
 
     realized_pnl_by_date = state.get("realized_pnl_by_date") or {}
     total_realized_pnl = round(sum(float(v) for v in realized_pnl_by_date.values()), 6)
@@ -683,6 +762,8 @@ def api_schwab_status():
         },
         "latest_cycle": latest_cycle,
         "latest_position_check": latest_position_check,
+        "latest_sweep": latest_sweep,
+        "market_session": market_session,
         "params": {
             "position_size_pct": schwab_strategy.POSITION_SIZE_PCT,
             "max_concurrent_positions": schwab_strategy.MAX_CONCURRENT_POSITIONS,
@@ -739,6 +820,7 @@ _JOB_LABELS = {
     "perps_train": f"Model retrain (daily {PERPS_TRAIN_HOUR_ET:02d}:00 ET)",
     "schwab_data_collect": f"Schwab stock data collection -> HF (every {SCHWAB_DATA_COLLECT_MINUTES} min)",
     "schwab_train": f"Schwab model retrain (daily {SCHWAB_TRAIN_HOUR_ET:02d}:00 ET)",
+    "schwab_intensive_training": f"Schwab off-hours intensive training + sweep (checked every {SCHWAB_INTENSIVE_TRAINING_MINUTES} min, runs only while market is closed)",
     "schwab_fast_check": f"Schwab fast exit check (every {SCHWAB_FAST_CHECK_SECONDS}s)",
     "schwab_entry_scan": f"Schwab entry scan (every {SCHWAB_CYCLE_MINUTES} min)",
 }

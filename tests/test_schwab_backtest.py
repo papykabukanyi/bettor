@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from data import schwab_backtest as bt
 from data import schwab_strategy as strat
@@ -29,6 +30,7 @@ def _synthetic_test_df(n: int = 200, symbol: str = "AAPL") -> pd.DataFrame:
         "dollar_volume_z": np.full(n, 2.0),  # always "unusual volume" so entries can fire deterministically
         "rsi_14": np.full(n, 0.5), "macd_hist_pct": np.zeros(n), "bb_pct_b": np.full(n, 0.5),
         "bb_bandwidth": np.full(n, 0.01), "atr_pct": np.full(n, 0.001), "stoch_k": np.full(n, 0.5),
+        "time_of_day_pct": np.full(n, 0.5),
     })
 
 
@@ -95,3 +97,69 @@ def test_simulate_deducts_no_fee_since_schwab_is_commission_free():
     for t in result["trades"]:
         assert "fee_usd" not in t
         assert t["realized_pnl_usd"] == round((t["exit_price"] - t["entry_price"]) * t["count"], 6)
+
+
+def test_run_config_sweep_tries_every_grid_entry_and_ranks_by_return(monkeypatch):
+    df = _synthetic_test_df(n=300)
+    monkeypatch.setattr(bt, "_SWEEP_GRID", [
+        {"take_profit_pct": 0.01, "stop_loss_pct": 0.008, "max_hold_minutes": 120},
+        {"take_profit_pct": 0.02, "stop_loss_pct": 0.015, "max_hold_minutes": 60},
+    ])
+    result = bt.run_config_sweep(df, starting_balance=10_000.0, min_trades=0)
+    assert len(result["all_configs"]) == 2
+    assert result["best"] is not None
+    assert result["ranked"][0]["return_pct"] >= result["ranked"][-1]["return_pct"]
+
+
+def test_run_config_sweep_excludes_configs_below_the_min_trade_count(monkeypatch):
+    df = _synthetic_test_df(n=300)
+    # An absurdly high take-profit that will never realistically fire in
+    # this tiny synthetic window -- must be excluded from "ranked" (it
+    # would otherwise "win" on a trivial low-trade-count technicality).
+    monkeypatch.setattr(bt, "_SWEEP_GRID", [
+        {"take_profit_pct": 0.5, "stop_loss_pct": 0.4, "max_hold_minutes": 5},
+    ])
+    result = bt.run_config_sweep(df, starting_balance=10_000.0, min_trades=1000)
+    assert result["all_configs"][0]["trade_count"] < 1000
+    assert result["best"] is not None  # falls back to the unqualified list rather than crashing
+    assert result["ranked"] == result["all_configs"]
+
+
+def test_run_config_sweep_restores_the_real_strategy_parameters_afterward(monkeypatch):
+    """Each grid entry temporarily overwrites schwab_strategy's real
+    module-level TAKE_PROFIT_PCT/STOP_LOSS_PCT/MAX_HOLD_MINUTES to reuse
+    simulate()'s real decide_exit logic -- leaving the LAST grid entry's
+    values in place afterward would mean live trading silently runs on
+    leftover sweep parameters instead of its actually configured ones."""
+    monkeypatch.setattr(strat, "TAKE_PROFIT_PCT", 0.0123)
+    monkeypatch.setattr(strat, "STOP_LOSS_PCT", 0.0099)
+    monkeypatch.setattr(strat, "MAX_HOLD_MINUTES", 77)
+    monkeypatch.setattr(bt, "_SWEEP_GRID", [
+        {"take_profit_pct": 0.5, "stop_loss_pct": 0.4, "max_hold_minutes": 999},
+    ])
+
+    df = _synthetic_test_df(n=300)
+    bt.run_config_sweep(df, starting_balance=10_000.0, min_trades=0)
+
+    assert strat.TAKE_PROFIT_PCT == 0.0123
+    assert strat.STOP_LOSS_PCT == 0.0099
+    assert strat.MAX_HOLD_MINUTES == 77
+
+
+def test_run_config_sweep_restores_parameters_even_if_simulate_raises(monkeypatch):
+    monkeypatch.setattr(strat, "TAKE_PROFIT_PCT", 0.0123)
+    monkeypatch.setattr(strat, "STOP_LOSS_PCT", 0.0099)
+    monkeypatch.setattr(strat, "MAX_HOLD_MINUTES", 77)
+    monkeypatch.setattr(bt, "_SWEEP_GRID", [{"take_profit_pct": 0.5, "stop_loss_pct": 0.4, "max_hold_minutes": 999}])
+
+    def fail(*a, **k):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(bt, "simulate", fail)
+    df = _synthetic_test_df(n=300)
+    with pytest.raises(RuntimeError):
+        bt.run_config_sweep(df, starting_balance=10_000.0, min_trades=0)
+
+    assert strat.TAKE_PROFIT_PCT == 0.0123
+    assert strat.STOP_LOSS_PCT == 0.0099
+    assert strat.MAX_HOLD_MINUTES == 77
