@@ -52,7 +52,7 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from config import et_today
-from data import perps_data, perps_model, perps_strategy, schwab_client, schwab_data, schwab_model
+from data import perps_data, perps_model, perps_strategy, schwab_client, schwab_data, schwab_model, schwab_strategy
 from data.kalshi_perps import get_margin_balance, get_margin_enabled, get_margin_exchange_status, get_margin_positions
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -89,6 +89,8 @@ DASHBOARD_LOCAL_AUTORUN = str(os.getenv("DASHBOARD_LOCAL_AUTORUN", "1") or "1").
 # --- Schwab stock pipeline scheduler -- entirely separate from the perps
 # jobs above; a failure here (e.g. OAuth login not completed yet) must
 # never affect perps scheduling. ---
+SCHWAB_CYCLE_MINUTES = max(1, int(os.getenv("SCHWAB_CYCLE_MINUTES", "2") or "2"))
+SCHWAB_FAST_CHECK_SECONDS = max(5, int(os.getenv("SCHWAB_FAST_CHECK_SECONDS", "20") or "20"))
 SCHWAB_DATA_COLLECT_MINUTES = max(5, int(os.getenv("SCHWAB_DATA_COLLECT_MINUTES", "15") or "15"))
 # One hour after the perps train job (3am ET default) so the two heaviest
 # operations this process does don't both land in the same memory-pressure
@@ -179,6 +181,8 @@ JOB_HISTORY_FILE = DATA_DIR / "job_run_history.json"
 JOB_HISTORY_MAX = 200
 LATEST_CYCLE_FILE = DATA_DIR / "perps_latest_cycle.json"
 LATEST_POSITION_CHECK_FILE = DATA_DIR / "perps_latest_position_check.json"
+SCHWAB_LATEST_CYCLE_FILE = DATA_DIR / "schwab_latest_cycle.json"
+SCHWAB_LATEST_POSITION_CHECK_FILE = DATA_DIR / "schwab_latest_position_check.json"
 
 
 def _load_json(path: Path, default: Any) -> Any:
@@ -347,6 +351,21 @@ def _run_perps_train() -> dict[str, Any]:
     return perps_model.train_model()
 
 
+@_locked_job("schwab_fast_check", stale_after_sec=60)
+def _run_schwab_fast_check() -> dict[str, Any]:
+    result = schwab_strategy.manage_open_positions()
+    if result.get("action") != "no_position":
+        _save_json(SCHWAB_LATEST_POSITION_CHECK_FILE, result)
+    return result
+
+
+@_locked_job("schwab_entry_scan", stale_after_sec=300)
+def _run_schwab_entry_scan() -> dict[str, Any]:
+    result = schwab_strategy.scan_and_enter()
+    _save_json(SCHWAB_LATEST_CYCLE_FILE, result)
+    return result
+
+
 @_locked_job("schwab_data_collect", stale_after_sec=600)
 def _run_schwab_data_collect() -> dict[str, Any]:
     """Collects the live watchlist (top symbols by real recent volume +
@@ -408,6 +427,19 @@ def _ensure_background_jobs_started() -> None:
                     _run_schwab_train, "cron", hour=SCHWAB_TRAIN_HOUR_ET, minute=0,
                     id="schwab_train", replace_existing=True,
                 )
+                scheduler.add_job(
+                    _run_schwab_fast_check, "interval", seconds=SCHWAB_FAST_CHECK_SECONDS,
+                    id="schwab_fast_check", replace_existing=True,
+                )
+                # Same rolling-deploy collision guard as perps_entry_scan --
+                # see PERPS_STARTUP_GRACE_SECONDS's own comment for why a
+                # freshly-booted instance must not scan for a new entry the
+                # instant it starts.
+                scheduler.add_job(
+                    _run_schwab_entry_scan, "interval", minutes=SCHWAB_CYCLE_MINUTES,
+                    id="schwab_entry_scan", replace_existing=True,
+                    next_run_time=dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=PERPS_STARTUP_GRACE_SECONDS),
+                )
             scheduler.start()
             logger.info(
                 "Perps scheduler started: fast exit check every %ds, entry scan every %d min (%s, first run in %ds), "
@@ -463,6 +495,14 @@ def _bootstrap_background_jobs() -> None:
 @app.route("/")
 def index():
     return render_template("dashboard.html")
+
+
+@app.route("/schwab")
+def schwab_dashboard():
+    """Separate dashboard page for the Schwab stock pipeline -- deliberately
+    its own template/route rather than a tab on the perps page, per the
+    explicit ask for two independent dashboards."""
+    return render_template("schwab_dashboard.html")
 
 
 @app.route("/schwab/authorize")
@@ -601,6 +641,76 @@ def api_perps_fast_check():
         return jsonify({"ok": False, "error": str(exc)}), 500
 
 
+@app.route("/api/schwab/status")
+def api_schwab_status():
+    state = schwab_strategy._load_state()  # noqa: SLF001
+    _, meta = schwab_model.load_model()
+    latest_cycle = _load_json(SCHWAB_LATEST_CYCLE_FILE, {})
+    latest_position_check = _load_json(SCHWAB_LATEST_POSITION_CHECK_FILE, {})
+
+    realized_pnl_by_date = state.get("realized_pnl_by_date") or {}
+    total_realized_pnl = round(sum(float(v) for v in realized_pnl_by_date.values()), 6)
+    positions = [
+        {**p, **schwab_strategy.position_exit_levels(p)}
+        for p in (state.get("positions") or [])
+    ]
+    logged_in = False
+    try:
+        logged_in = schwab_client.get_valid_access_token() is not None
+    except Exception:
+        logged_in = False
+
+    return jsonify({
+        "ok": True,
+        "now": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "mode": schwab_strategy.MODE,
+        "live_trading_enabled": schwab_strategy.LIVE_TRADING_ENABLED,
+        "schwab_logged_in": logged_in,
+        "balance": state.get("balance", schwab_strategy.SIMULATE_STARTING_BALANCE),
+        "available_balance": schwab_strategy.get_available_balance() if schwab_strategy.MODE == "simulate" else None,
+        "positions": positions,
+        "open_position_count": len(positions),
+        "max_concurrent_positions": schwab_strategy.MAX_CONCURRENT_POSITIONS,
+        "today_realized_pnl_usd": float(realized_pnl_by_date.get(et_today().isoformat(), 0.0)),
+        "total_realized_pnl_usd": total_realized_pnl,
+        "trade_count": len(state.get("trade_log") or []),
+        "model": {
+            "trained": meta is not None,
+            "model_type": (meta or {}).get("model_type"),
+            "trained_at": (meta or {}).get("trained_at"),
+            "rows": (meta or {}).get("rows"),
+            "scores": (meta or {}).get("scores"),
+        },
+        "latest_cycle": latest_cycle,
+        "latest_position_check": latest_position_check,
+        "params": {
+            "position_size_pct": schwab_strategy.POSITION_SIZE_PCT,
+            "max_concurrent_positions": schwab_strategy.MAX_CONCURRENT_POSITIONS,
+            "take_profit_pct": schwab_strategy.TAKE_PROFIT_PCT,
+            "stop_loss_pct": schwab_strategy.STOP_LOSS_PCT,
+            "max_hold_minutes": schwab_strategy.MAX_HOLD_MINUTES,
+            "daily_loss_cap_pct": schwab_strategy.DAILY_LOSS_CAP_PCT,
+            "model_confidence_min": schwab_strategy.MODEL_CONFIDENCE_MIN,
+            "min_volume_z": schwab_strategy.MIN_VOLUME_Z,
+            "min_volatility_ratio": schwab_strategy.MIN_VOLATILITY_RATIO,
+            "fast_check_seconds": SCHWAB_FAST_CHECK_SECONDS,
+            "entry_scan_minutes": SCHWAB_CYCLE_MINUTES,
+        },
+    })
+
+
+@app.route("/api/schwab/trades")
+def api_schwab_trades():
+    state = schwab_strategy._load_state()  # noqa: SLF001
+    trade_log = list(reversed(state.get("trade_log") or []))
+    return jsonify({
+        "ok": True,
+        "trade_count": len(trade_log),
+        "realized_pnl_by_date": state.get("realized_pnl_by_date") or {},
+        "trades": trade_log[:200],
+    })
+
+
 @app.route("/api/perps/collect", methods=["GET", "POST"])
 def api_perps_collect():
     if not _is_cron_authorized():
@@ -629,6 +739,8 @@ _JOB_LABELS = {
     "perps_train": f"Model retrain (daily {PERPS_TRAIN_HOUR_ET:02d}:00 ET)",
     "schwab_data_collect": f"Schwab stock data collection -> HF (every {SCHWAB_DATA_COLLECT_MINUTES} min)",
     "schwab_train": f"Schwab model retrain (daily {SCHWAB_TRAIN_HOUR_ET:02d}:00 ET)",
+    "schwab_fast_check": f"Schwab fast exit check (every {SCHWAB_FAST_CHECK_SECONDS}s)",
+    "schwab_entry_scan": f"Schwab entry scan (every {SCHWAB_CYCLE_MINUTES} min)",
 }
 
 

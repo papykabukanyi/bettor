@@ -128,3 +128,165 @@ def test_get_sends_bearer_auth_header(monkeypatch):
     assert captured["url"] == f"{schwab_client.API_BASE_URL}/marketdata/v1/pricehistory"
     assert captured["headers"]["Authorization"] == "Bearer at-1"
     assert captured["params"] == {"symbol": "AAPL"}
+
+
+def _authenticate():
+    schwab_client._token_cache.update({  # noqa: SLF001
+        "access_token": "at-1", "refresh_token": "rt-1",
+        "obtained_at": schwab_client.time.time(), "expires_at": schwab_client.time.time() + 1000,
+    })
+
+
+class _FakePostResponse:
+    def __init__(self, location, status_code=201):
+        self.headers = {"Location": location}
+        self.status_code = status_code
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
+
+
+def test_build_bracket_order_shape_for_a_long():
+    order = schwab_client.build_bracket_order(
+        symbol="AAPL", quantity=10, entry_instruction="BUY", exit_instruction="SELL",
+        take_profit_price=101.0, stop_loss_price=98.0,
+    )
+    assert order["orderType"] == "MARKET"
+    assert order["orderStrategyType"] == "TRIGGER"
+    assert order["orderLegCollection"][0]["instruction"] == "BUY"
+    assert order["orderLegCollection"][0]["instrument"]["symbol"] == "AAPL"
+
+    oco = order["childOrderStrategies"][0]
+    assert oco["orderStrategyType"] == "OCO"
+    tp, sl = oco["childOrderStrategies"]
+    assert tp["orderType"] == "LIMIT" and tp["price"] == "101.00"
+    assert sl["orderType"] == "STOP" and sl["stopPrice"] == "98.00"
+    assert tp["orderLegCollection"][0]["instruction"] == "SELL"
+    assert sl["orderLegCollection"][0]["instruction"] == "SELL"
+
+
+def test_build_bracket_order_uses_limit_entry_when_a_price_is_given():
+    order = schwab_client.build_bracket_order(
+        symbol="AAPL", quantity=10, entry_instruction="BUY", exit_instruction="SELL",
+        take_profit_price=101.0, stop_loss_price=98.0, entry_price=99.5,
+    )
+    assert order["orderType"] == "LIMIT"
+    assert order["price"] == "99.50"
+
+
+def test_get_account_hash_fetches_and_caches(monkeypatch):
+    _authenticate()
+    monkeypatch.setattr(schwab_client, "_account_hash_cache", {"hash": None, "computed_at": 0.0})
+    calls = {"n": 0}
+
+    def fake_get(path, *, params=None):
+        calls["n"] += 1
+        assert path == "/trader/v1/accounts/accountNumbers"
+        return [{"accountNumber": "123", "hashValue": "hash-abc"}]
+
+    monkeypatch.setattr(schwab_client, "get", fake_get)
+    assert schwab_client.get_account_hash() == "hash-abc"
+    assert schwab_client.get_account_hash() == "hash-abc"
+    assert calls["n"] == 1  # second call served from cache
+
+
+def test_get_account_hash_selects_the_configured_account_number(monkeypatch):
+    _authenticate()
+    monkeypatch.setattr(schwab_client, "_account_hash_cache", {"hash": None, "computed_at": 0.0})
+    monkeypatch.setattr(schwab_client, "SCHWAB_ACCOUNT_NUMBER", "456")
+    monkeypatch.setattr(schwab_client, "get", lambda path, params=None: [
+        {"accountNumber": "123", "hashValue": "hash-first"},
+        {"accountNumber": "456", "hashValue": "hash-chosen"},
+    ])
+    assert schwab_client.get_account_hash() == "hash-chosen"
+
+
+def test_get_account_hash_raises_with_no_linked_accounts(monkeypatch):
+    _authenticate()
+    monkeypatch.setattr(schwab_client, "_account_hash_cache", {"hash": None, "computed_at": 0.0})
+    monkeypatch.setattr(schwab_client, "get", lambda path, params=None: [])
+    with pytest.raises(RuntimeError, match="no linked accounts"):
+        schwab_client.get_account_hash()
+
+
+def test_place_order_extracts_order_id_from_location_header(monkeypatch):
+    _authenticate()
+    monkeypatch.setattr(schwab_client, "_account_hash_cache", {"hash": "hash-abc", "computed_at": schwab_client.time.time()})
+    captured = {}
+
+    def fake_post(url, *, headers, json, timeout):
+        captured["url"] = url
+        captured["json"] = json
+        return _FakePostResponse("https://api.schwabapi.com/trader/v1/accounts/hash-abc/orders/9999")
+
+    monkeypatch.setattr(schwab_client.requests, "post", fake_post)
+    order_id = schwab_client.place_order({"orderType": "MARKET"})
+
+    assert order_id == "9999"
+    assert captured["url"] == f"{schwab_client.API_BASE_URL}/trader/v1/accounts/hash-abc/orders"
+    assert captured["json"] == {"orderType": "MARKET"}
+
+
+def test_place_order_raises_if_no_order_id_in_location(monkeypatch):
+    _authenticate()
+    monkeypatch.setattr(schwab_client, "_account_hash_cache", {"hash": "hash-abc", "computed_at": schwab_client.time.time()})
+    monkeypatch.setattr(schwab_client.requests, "post", lambda url, **kw: _FakePostResponse(""))
+    with pytest.raises(RuntimeError, match="no order ID"):
+        schwab_client.place_order({"orderType": "MARKET"})
+
+
+def test_get_order_and_cancel_order_use_the_account_hash(monkeypatch):
+    _authenticate()
+    monkeypatch.setattr(schwab_client, "_account_hash_cache", {"hash": "hash-abc", "computed_at": schwab_client.time.time()})
+    captured = {}
+
+    def fake_get(url, *, headers, params, timeout):
+        captured["get_url"] = url
+        return _FakeResponse({"status": "FILLED"})
+
+    def fake_delete(url, *, headers, timeout):
+        captured["delete_url"] = url
+        return _FakePostResponse("", status_code=200)
+
+    monkeypatch.setattr(schwab_client.requests, "get", fake_get)
+    monkeypatch.setattr(schwab_client.requests, "delete", fake_delete)
+
+    order = schwab_client.get_order("555")
+    assert order == {"status": "FILLED"}
+    assert captured["get_url"] == f"{schwab_client.API_BASE_URL}/trader/v1/accounts/hash-abc/orders/555"
+
+    schwab_client.cancel_order("555")
+    assert captured["delete_url"] == f"{schwab_client.API_BASE_URL}/trader/v1/accounts/hash-abc/orders/555"
+
+
+def test_get_quote_unwraps_the_symbols_own_quote_object(monkeypatch):
+    _authenticate()
+
+    def fake_get(url, *, headers, params, timeout):
+        return _FakeResponse({"AAPL": {"quote": {"lastPrice": 150.25}}})
+
+    monkeypatch.setattr(schwab_client.requests, "get", fake_get)
+    quote = schwab_client.get_quote("AAPL")
+    assert quote == {"lastPrice": 150.25}
+
+
+def test_get_quote_returns_empty_dict_for_an_unknown_symbol(monkeypatch):
+    _authenticate()
+    monkeypatch.setattr(schwab_client.requests, "get", lambda url, **kw: _FakeResponse({}))
+    assert schwab_client.get_quote("ZZZZ") == {}
+
+
+def test_get_account_balance_uses_the_account_hash(monkeypatch):
+    _authenticate()
+    monkeypatch.setattr(schwab_client, "_account_hash_cache", {"hash": "hash-abc", "computed_at": schwab_client.time.time()})
+    captured = {}
+
+    def fake_get(url, *, headers, params, timeout):
+        captured["url"] = url
+        return _FakeResponse({"securitiesAccount": {"currentBalances": {"cashBalance": 100.0}}})
+
+    monkeypatch.setattr(schwab_client.requests, "get", fake_get)
+    balance = schwab_client.get_account_balance()
+    assert balance == {"cashBalance": 100.0}
+    assert captured["url"] == f"{schwab_client.API_BASE_URL}/trader/v1/accounts/hash-abc"

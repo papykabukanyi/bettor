@@ -122,10 +122,11 @@ def test_fetch_minute_bars_chains_calls_to_cover_the_full_window(monkeypatch):
 
 
 def _synthetic_one_min_df(n=100, base=100.0, vol_base=1000.0):
+    closes = [base + i * 0.01 for i in range(n)]
     return pd.DataFrame({
         "ts": range(n),
-        "open": [base] * n, "high": [base] * n, "low": [base] * n,
-        "close": [base + i * 0.01 for i in range(n)],
+        "open": closes, "high": [c + 0.05 for c in closes], "low": [c - 0.05 for c in closes],
+        "close": closes,
         "volume": [vol_base] * n,
     })
 

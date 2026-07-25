@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-<title>Kalshi Perps Bot</title>
+<title>Schwab Stocks Bot</title>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   :root {
@@ -21,6 +21,7 @@
   .badge { display: inline-block; padding: 4px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; }
   .badge.dry { background: var(--gdim); color: var(--green); }
   .badge.live { background: var(--rdim); color: var(--red); }
+  .badge.warn { background: #2a2510; color: var(--yellow); }
   .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-bottom: 16px; }
   .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r); padding: 14px 16px; }
   .card h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin-bottom: 8px; font-weight: 600; }
@@ -45,19 +46,22 @@
   tbody tr.row-exit { opacity: 0; }
   footer { color: var(--muted); font-size: 12px; text-align: center; margin-top: 24px; }
   a { color: var(--blue); }
+  .navlink { font-size: 12px; color: var(--muted); }
+  .navlink a { margin-left: 8px; }
 </style>
 </head>
 <body>
 <header>
-  <h1>&#8383; Kalshi Perps</h1>
+  <h1>&#128200; Schwab Stocks</h1>
   <div style="display:flex; align-items:center; gap:10px;">
+    <span id="login-badge" class="badge warn">&nbsp;</span>
     <span id="mode-badge" class="badge dry">&nbsp;</span>
-    <span style="font-size:12px; color:var(--muted);"><a href="/schwab" style="margin-left:8px; color:var(--blue);">Schwab dashboard &rarr;</a></span>
+    <span class="navlink"><a href="/">&larr; Perps dashboard</a></span>
   </div>
 </header>
 
 <div class="grid">
-  <div class="card"><h2>Available Balance</h2><div id="balance" class="stat">--</div><div class="sub" id="exchange-sub">--</div></div>
+  <div class="card"><h2>Balance</h2><div id="balance" class="stat">--</div><div class="sub" id="balance-sub">--</div></div>
   <div class="card"><h2>Positions</h2><div id="position-count" class="stat">--</div><div class="sub" id="position-sub">--</div></div>
   <div class="card"><h2>Today's P&amp;L</h2><div id="today-pnl" class="stat">--</div><div class="sub" id="total-pnl-sub">--</div></div>
   <div class="card"><h2>Direction Model</h2><div id="model-status" class="stat">--</div><div class="sub" id="model-sub">--</div></div>
@@ -67,18 +71,18 @@
   <h3>Open Positions</h3>
   <div class="scroll-x">
     <table>
-      <thead><tr><th>Ticker</th><th>Side</th><th>Entry</th><th>Contracts</th><th>Take Profit</th><th>Stop Loss</th><th>Opened</th><th>Velocity</th></tr></thead>
-      <tbody id="positions-body"><tr><td colspan="8" class="empty">No open positions</td></tr></tbody>
+      <thead><tr><th>Symbol</th><th>Entry</th><th>Shares</th><th>Take Profit</th><th>Stop Loss</th><th>Opened</th><th>Order</th></tr></thead>
+      <tbody id="positions-body"><tr><td colspan="7" class="empty">No open positions</td></tr></tbody>
     </table>
   </div>
 </section>
 
 <section>
-  <h3>Watchlist &mdash; last scan</h3>
+  <h3>Last Entry Scan</h3>
   <div class="scroll-x">
     <table>
-      <thead><tr><th>Ticker</th><th>Price</th><th>Short MA</th><th>Trend</th><th>Technical</th><th>Model</th><th>P(up)</th><th>Enter?</th><th>Reason</th></tr></thead>
-      <tbody id="candidates-body"><tr><td colspan="9" class="empty">Waiting for first scan...</td></tr></tbody>
+      <thead><tr><th>Symbol</th><th>Action</th><th>Entry</th><th>Shares</th><th>Reason</th></tr></thead>
+      <tbody id="candidates-body"><tr><td colspan="5" class="empty">Waiting for first scan...</td></tr></tbody>
     </table>
   </div>
 </section>
@@ -87,8 +91,8 @@
   <h3>Recent Trades</h3>
   <div class="scroll-x">
     <table>
-      <thead><tr><th>Closed</th><th>Ticker</th><th>Side</th><th>Entry</th><th>Exit</th><th>Count</th><th>Fee</th><th>Net P&amp;L</th><th>Reason</th></tr></thead>
-      <tbody id="trades-body"><tr><td colspan="9" class="empty">No trades yet</td></tr></tbody>
+      <thead><tr><th>Closed</th><th>Symbol</th><th>Entry</th><th>Exit</th><th>Shares</th><th>Net P&amp;L</th><th>Reason</th></tr></thead>
+      <tbody id="trades-body"><tr><td colspan="7" class="empty">No trades yet</td></tr></tbody>
     </table>
   </div>
 </section>
@@ -103,22 +107,16 @@
   </div>
 </section>
 
-<footer>Auto-refreshes every 10s.</footer>
+<footer>Auto-refreshes every 10s. Separate system from the Kalshi perps bot -- own balance, own positions, own model.</footer>
 
 <script>
-// Real money (balance, P&L) -- always standard 2-decimal currency, never
-// the raw 4+ decimal precision the backend computes with internally.
 const fmtUsd = (v) => (v === null || v === undefined || isNaN(v)) ? "--" : "$" + Number(v).toFixed(2);
-// Asset/contract prices span cents (KSHIB, DOGE) to tens of thousands (BTC)
-// -- a flat 2 decimals would round a sub-cent price straight to "$0.00", so
-// this keeps more decimals only for genuinely small values.
 const fmtPrice = (v) => {
   if (v === null || v === undefined || isNaN(v)) return "--";
   const n = Number(v);
   const decimals = Math.abs(n) >= 1 ? 2 : Math.abs(n) >= 0.01 ? 4 : 6;
   return "$" + n.toFixed(decimals);
 };
-const fmtPct = (v) => (v === null || v === undefined || isNaN(v)) ? "--" : (Number(v) * 100).toFixed(3) + "%";
 const timeAgo = (iso) => {
   if (!iso) return "--";
   const sec = (Date.now() - new Date(iso).getTime()) / 1000;
@@ -128,16 +126,9 @@ const timeAgo = (iso) => {
   return Math.round(sec / 86400) + "d ago";
 };
 
-// Keyed diff-patch for a <tbody> instead of a wholesale innerHTML replace on
-// every 10s poll -- a full replace tears down and rebuilds every row even
-// when nothing changed, which is what made "Open Positions" look like it
-// was flickering in and out on every refresh. This keeps each row's actual
-// DOM node stable across polls (patching its cells in place), only ever
-// creating a node for a genuinely NEW key (e.g. a new position opening) and
-// only ever removing one when its key genuinely disappears (a position
-// closing into a trade, or a candidate leaving the watchlist) -- so a row
-// that's still open just sits there being updated smoothly, not
-// disappearing and reappearing.
+// Keyed diff-patch -- same pattern as the perps dashboard (see its own
+// comment for why): rows update/enter/exit in place instead of a full
+// innerHTML replace tearing everything down on every 10s poll.
 function patchTable(tbody, items, keyFn, rowHtmlFn, emptyColspan, emptyMessage) {
   if (!items || !items.length) {
     if (tbody.childElementCount !== 1 || !tbody.dataset.empty) {
@@ -189,45 +180,47 @@ function patchTable(tbody, items, keyFn, rowHtmlFn, emptyColspan, emptyMessage) 
 
 async function refreshStatus() {
   try {
-    const res = await fetch("/api/status");
+    const res = await fetch("/api/schwab/status");
     const data = await res.json();
 
-    const modeBadge = document.getElementById("mode-badge");
-    if (data.live_trading_enabled) {
-      modeBadge.textContent = "LIVE";
-      modeBadge.className = "badge live";
+    const loginBadge = document.getElementById("login-badge");
+    if (data.schwab_logged_in) {
+      loginBadge.textContent = "LINKED";
+      loginBadge.className = "badge dry";
     } else {
-      modeBadge.textContent = "SIMULATED";
+      loginBadge.textContent = "NOT LINKED";
+      loginBadge.className = "badge warn";
+    }
+
+    const modeBadge = document.getElementById("mode-badge");
+    if (data.mode === "live") {
+      modeBadge.textContent = data.live_trading_enabled ? "LIVE" : "LIVE (armed off)";
+      modeBadge.className = data.live_trading_enabled ? "badge live" : "badge warn";
+    } else {
+      modeBadge.textContent = "SIMULATE";
       modeBadge.className = "badge dry";
     }
 
-    document.getElementById("balance").textContent = fmtUsd(data.account?.available_balance_usd);
-    document.getElementById("exchange-sub").textContent =
-      `margin ${data.account?.margin_enabled ? "enabled" : "off"} · exchange ${data.account?.exchange_active ? "open" : "closed"}`;
+    document.getElementById("balance").textContent = fmtUsd(data.balance);
+    document.getElementById("balance-sub").textContent = data.mode === "simulate"
+      ? `available ${fmtUsd(data.available_balance)} · paper trading`
+      : "real Schwab account balance";
 
     const positions = data.positions || [];
     document.getElementById("position-count").textContent = `${positions.length} / ${data.max_concurrent_positions ?? "--"}`;
     document.getElementById("position-sub").textContent = positions.length
-      ? positions.map(p => p.ticker).join(", ")
+      ? positions.map(p => p.symbol).join(", ")
       : "scanning watchlist for entries";
 
-    const checksByTicker = {};
-    ((data.latest_position_check && data.latest_position_check.checks) || []).forEach(c => { checksByTicker[c.ticker] = c; });
     const posBody = document.getElementById("positions-body");
-    patchTable(posBody, positions, p => p.ticker, p => {
-      const check = checksByTicker[p.ticker];
-      const v = check && check.velocity_pct_per_min;
-      const side = p.side || "long";
-      return `
-        <td><strong>${p.ticker}</strong></td>
-        <td><span class="tag ${side === "short" ? "no" : "yes"}">${side}</span></td>
+    patchTable(posBody, positions, p => p.symbol, p => `
+        <td><strong>${p.symbol}</strong></td>
         <td>${fmtPrice(p.entry_price)}</td>
         <td>${p.count}</td>
         <td class="stat pos" style="font-size:13px;">${fmtPrice(p.take_profit_price)}</td>
         <td class="stat neg" style="font-size:13px;">${fmtPrice(p.stop_loss_price)}</td>
         <td>${timeAgo(p.opened_at)}</td>
-        <td>${(v !== null && v !== undefined) ? (v * 100).toFixed(2) + "%/min" : "--"}</td>`;
-    }, 8, "No open positions");
+        <td class="sub">${p.order_id || "paper"}</td>`, 7, "No open positions");
 
     const todayPnl = data.today_realized_pnl_usd || 0;
     const todayEl = document.getElementById("today-pnl");
@@ -242,37 +235,31 @@ async function refreshStatus() {
       ? `${model.model_type} · ${model.rows} rows · ${timeAgo(new Date(model.trained_at * 1000).toISOString())}`
       : "gathering history — technical signal active";
 
-    const candidates = (data.latest_cycle && data.latest_cycle.candidates) || [];
+    const cycle = (data.latest_cycle && data.latest_cycle.opened) || [];
     const cbody = document.getElementById("candidates-body");
-    patchTable(cbody, candidates, c => c.ticker, c => `
-        <td><strong>${c.ticker}</strong></td>
-        <td>${fmtPrice(c.current_price)}</td>
-        <td>${fmtPrice(c.short_ma)}</td>
-        <td>${fmtPct(c.trend_pct)}</td>
-        <td><span class="tag ${c.technical_ok ? "yes" : "no"}">${c.technical_ok ? "dip" : "none"}</span></td>
-        <td><span class="tag ${c.model_ok ? "yes" : "wait"}">${c.model_ok ? c.model_direction : "n/a"}</span></td>
-        <td>${c.model_ok ? (c.probability_up * 100).toFixed(1) + "%" : "--"}</td>
-        <td><span class="tag ${c.should_enter ? "yes" : "no"}">${c.should_enter ? "YES (" + (c.side || "long") + ")" : "no"}</span></td>
-        <td class="sub">${c.reason || ""}</td>`, 9, "Waiting for first scan...");
+    patchTable(cbody, cycle, (c, idx) => `${c.symbol}_${idx}`, c => `
+        <td><strong>${c.symbol}</strong></td>
+        <td><span class="tag ${c.action === "opened" ? "yes" : c.ok === false ? "no" : "wait"}">${c.action || "--"}</span></td>
+        <td>${c.entry_price !== undefined ? fmtPrice(c.entry_price) : "--"}</td>
+        <td>${c.count !== undefined ? c.count : "--"}</td>
+        <td class="sub">${c.reason || c.error || ""}</td>`, 5, "Waiting for first scan...");
   } catch (e) { console.error("status refresh failed", e); }
 }
 
 async function refreshTrades() {
   try {
-    const res = await fetch("/api/trades");
+    const res = await fetch("/api/schwab/trades");
     const data = await res.json();
     const tbody = document.getElementById("trades-body");
     const trades = (data.trades || []).slice(0, 30);
-    patchTable(tbody, trades, t => `${t.ticker}_${t.closed_at}`, t => `
+    patchTable(tbody, trades, t => `${t.symbol}_${t.closed_at}`, t => `
         <td>${timeAgo(t.closed_at)}</td>
-        <td><strong>${t.ticker}</strong></td>
-        <td><span class="tag ${t.side === "short" ? "no" : "yes"}">${t.side || "long"}</span></td>
+        <td><strong>${t.symbol}</strong></td>
         <td>${fmtPrice(t.entry_price)}</td>
         <td>${fmtPrice(t.exit_price)}</td>
         <td>${t.count}</td>
-        <td class="sub">${t.fee_usd ? fmtUsd(t.fee_usd) : "--"}</td>
         <td class="${t.realized_pnl_usd > 0 ? "stat pos" : t.realized_pnl_usd < 0 ? "stat neg" : ""}" style="font-size:13px;font-weight:600;">${fmtUsd(t.realized_pnl_usd)}</td>
-        <td class="sub">${t.reason || ""}</td>`, 9, "No trades yet");
+        <td class="sub">${t.reason || ""}</td>`, 7, "No trades yet");
   } catch (e) { console.error("trades refresh failed", e); }
 }
 
@@ -281,7 +268,7 @@ async function refreshActivity() {
     const res = await fetch("/api/server/activity");
     const data = await res.json();
     const tbody = document.getElementById("activity-body");
-    const recent = (data.recent || []).slice(0, 20);
+    const recent = ((data.recent || []).filter(r => (r.job || "").startsWith("schwab_"))).slice(0, 20);
     patchTable(tbody, recent, r => `${r.job}_${r.started_at}`, r => `
         <td>${r.label || r.job}</td>
         <td><span class="tag ${r.status === "ok" ? "yes" : r.status === "error" ? "no" : "wait"}">${r.status}</span></td>

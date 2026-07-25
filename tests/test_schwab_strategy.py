@@ -1,11 +1,15 @@
 """Schwab equities strategy decision logic -- separate from and parallel to
 test_perps_strategy.py. Pure-function tests: volume/volatility entry gate,
-take-profit/stop-loss/max-hold exits, position sizing."""
+take-profit/stop-loss/max-hold exits, position sizing, and the simulate/
+live position-lifecycle engine (state persistence, entry, exit)."""
 from __future__ import annotations
 
 import datetime as dt
 
-from data import schwab_strategy as strat
+import pandas as pd
+import pytest
+
+from data import schwab_client, schwab_data, schwab_model, schwab_strategy as strat
 
 
 def _row(**overrides):
@@ -115,3 +119,208 @@ def test_compute_position_size_floors_to_whole_shares():
 
 def test_compute_position_size_zero_at_zero_price():
     assert strat.compute_position_size(1000.0, 0.0) == 0
+
+
+# ---------------------------------------------------------------------------
+# Simulate/live position lifecycle -- state persistence, entry, exit.
+# ---------------------------------------------------------------------------
+@pytest.fixture(autouse=True)
+def _isolated_state(tmp_path, monkeypatch):
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "schwab_state.json")
+    monkeypatch.setattr(strat, "HF_API_KEY", "")  # no real network for the HF durable-state mirror by default
+    monkeypatch.setattr(strat, "MODE", "simulate")
+    yield
+
+
+def test_load_state_defaults_to_the_simulate_starting_balance():
+    state = strat._load_state()  # noqa: SLF001
+    assert state["balance"] == strat.SIMULATE_STARTING_BALANCE
+    assert state["positions"] == []
+
+
+def test_get_available_balance_subtracts_committed_positions(monkeypatch):
+    strat._save_state({  # noqa: SLF001
+        "balance": 100.0, "positions": [{"symbol": "AAPL", "entry_price": 50.0, "count": 1.0}],
+        "trade_log": [], "realized_pnl_by_date": {},
+    })
+    assert strat.get_available_balance() == 50.0
+
+
+def test_get_current_price_reads_last_price_from_a_real_time_quote(monkeypatch):
+    monkeypatch.setattr(schwab_client, "get_quote", lambda symbol: {"lastPrice": 123.45})
+    assert strat.get_current_price("AAPL") == 123.45
+
+
+def test_get_current_price_returns_none_on_a_failed_quote(monkeypatch):
+    def fail(symbol):
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(schwab_client, "get_quote", fail)
+    assert strat.get_current_price("AAPL") is None
+
+
+def _entry_row(**overrides):
+    # A $100 simulate balance at the default 10% position size is a $10
+    # budget -- current_price must be affordable in whole shares (real
+    # constraint: a $100 account literally cannot buy a single $100+ stock
+    # at this sizing, which is exactly why the watchlist should favor
+    # lower-priced, liquid, volatile names for a small account).
+    base = {
+        "symbol": "AAPL", "current_price": 5.0, "short_ma": 5.015,
+        "dollar_volume_z": 2.0, "volatility_5": 0.002, "volatility_30": 0.001,
+    }
+    base.update(overrides)
+    return base
+
+
+def test_scan_and_enter_simulate_mode_opens_a_paper_position_without_any_real_order(monkeypatch):
+    monkeypatch.setattr(schwab_data, "get_stock_watchlist", lambda recent: ["AAPL"])
+    monkeypatch.setattr(schwab_data, "load_training_dataset", lambda **kw: pd.DataFrame())
+    monkeypatch.setattr(schwab_data, "latest_feature_row", lambda symbol: _entry_row())
+    monkeypatch.setattr(schwab_model, "predict_direction", lambda symbol: {"model_ok": False})
+
+    def fail_if_called(*a, **k):
+        raise AssertionError("simulate mode must never place a real order")
+
+    monkeypatch.setattr(schwab_client, "place_order", fail_if_called)
+
+    result = strat.scan_and_enter()
+    assert result["opened"][0]["action"] == "opened"
+    assert result["opened"][0]["dry_run"] is True
+
+    state = strat._load_state()  # noqa: SLF001
+    assert len(state["positions"]) == 1
+    assert state["positions"][0]["symbol"] == "AAPL"
+    assert state["positions"][0]["order_id"] is None
+
+
+def test_scan_and_enter_skips_a_symbol_already_held(monkeypatch):
+    strat._save_state({  # noqa: SLF001
+        "balance": 100.0, "positions": [{"symbol": "AAPL", "entry_price": 100.0, "count": 1.0}],
+        "trade_log": [], "realized_pnl_by_date": {},
+    })
+    monkeypatch.setattr(schwab_data, "get_stock_watchlist", lambda recent: ["AAPL"])
+    monkeypatch.setattr(schwab_data, "load_training_dataset", lambda **kw: pd.DataFrame())
+
+    def fail_if_called(symbol):
+        raise AssertionError("must not re-evaluate a symbol that's already held")
+
+    monkeypatch.setattr(schwab_data, "latest_feature_row", fail_if_called)
+
+    result = strat.scan_and_enter()
+    assert result["opened"] == []
+
+
+def test_scan_and_enter_respects_the_daily_loss_cap(monkeypatch):
+    today = strat._today_str()  # noqa: SLF001
+    strat._save_state({  # noqa: SLF001
+        "balance": 100.0, "positions": [], "trade_log": [],
+        "realized_pnl_by_date": {today: -20.0},  # -20% of $100, breaches the 10% default cap
+    })
+    result = strat.scan_and_enter()
+    assert result["action"] == "daily_loss_cap_breached"
+
+
+def test_scan_and_enter_one_symbol_failing_does_not_block_the_others(monkeypatch):
+    monkeypatch.setattr(schwab_data, "get_stock_watchlist", lambda recent: ["BAD", "AAPL"])
+    monkeypatch.setattr(schwab_data, "load_training_dataset", lambda **kw: pd.DataFrame())
+
+    def fake_feature_row(symbol):
+        if symbol == "BAD":
+            raise RuntimeError("data fetch failed")
+        return _entry_row(symbol=symbol)
+
+    monkeypatch.setattr(schwab_data, "latest_feature_row", fake_feature_row)
+    monkeypatch.setattr(schwab_model, "predict_direction", lambda symbol: {"model_ok": False})
+
+    result = strat.scan_and_enter()
+    outcomes = {o["symbol"]: o for o in result["opened"]}
+    assert outcomes["BAD"]["ok"] is False
+    assert outcomes["AAPL"]["ok"] is True and outcomes["AAPL"]["action"] == "opened"
+
+
+def test_manage_open_positions_returns_no_position_without_any_state():
+    result = strat.manage_open_positions()
+    assert result["action"] == "no_position"
+
+
+def test_manage_open_positions_simulate_mode_closes_on_take_profit_and_updates_virtual_balance(monkeypatch):
+    strat._save_state({  # noqa: SLF001
+        "balance": 100.0, "positions": [{
+            "symbol": "AAPL", "entry_price": 100.0, "count": 1.0,
+            "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(), "order_id": None,
+        }],
+        "trade_log": [], "realized_pnl_by_date": {},
+    })
+    take_profit_price = 100.0 * (1 + strat.TAKE_PROFIT_PCT + 0.001)
+    monkeypatch.setattr(schwab_client, "get_quote", lambda symbol: {"lastPrice": take_profit_price})
+
+    result = strat.manage_open_positions()
+    assert result["action"] == "closed"
+    assert "take_profit" in result["closed"][0]["reason"]
+
+    state = strat._load_state()  # noqa: SLF001
+    assert state["positions"] == []
+    expected_gain = round(take_profit_price - 100.0, 6)
+    assert state["balance"] == round(100.0 + expected_gain, 6)
+    assert state["trade_log"][0]["realized_pnl_usd"] == expected_gain
+
+
+def test_manage_open_positions_leaves_position_open_when_nothing_triggers(monkeypatch):
+    strat._save_state({  # noqa: SLF001
+        "balance": 100.0, "positions": [{
+            "symbol": "AAPL", "entry_price": 100.0, "count": 1.0,
+            "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(), "order_id": None,
+        }],
+        "trade_log": [], "realized_pnl_by_date": {},
+    })
+    monkeypatch.setattr(schwab_client, "get_quote", lambda symbol: {"lastPrice": 100.05})
+    result = strat.manage_open_positions()
+    assert result["action"] == "no_change"
+    state = strat._load_state()  # noqa: SLF001
+    assert len(state["positions"]) == 1
+
+
+def test_manage_open_positions_one_bad_quote_does_not_block_the_others(monkeypatch):
+    strat._save_state({  # noqa: SLF001
+        "balance": 100.0,
+        "positions": [
+            {"symbol": "BAD", "entry_price": 100.0, "count": 1.0, "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(), "order_id": None},
+            {"symbol": "AAPL", "entry_price": 100.0, "count": 1.0, "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(), "order_id": None},
+        ],
+        "trade_log": [], "realized_pnl_by_date": {},
+    })
+    take_profit_price = 100.0 * (1 + strat.TAKE_PROFIT_PCT + 0.001)
+
+    def fake_quote(symbol):
+        if symbol == "BAD":
+            raise RuntimeError("quote service down")
+        return {"lastPrice": take_profit_price}
+
+    monkeypatch.setattr(schwab_client, "get_quote", fake_quote)
+    result = strat.manage_open_positions()
+    assert any(c["symbol"] == "BAD" and c["ok"] is False for c in result["checks"])
+    assert any(t["symbol"] == "AAPL" for t in result["closed"])
+    state = strat._load_state()  # noqa: SLF001
+    assert [p["symbol"] for p in state["positions"]] == ["BAD"]  # AAPL closed, BAD stayed open
+
+
+def test_manage_open_positions_never_places_a_real_order_in_simulate_mode(monkeypatch):
+    strat._save_state({  # noqa: SLF001
+        "balance": 100.0, "positions": [{
+            "symbol": "AAPL", "entry_price": 100.0, "count": 1.0,
+            "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(), "order_id": None,
+        }],
+        "trade_log": [], "realized_pnl_by_date": {},
+    })
+    take_profit_price = 100.0 * (1 + strat.TAKE_PROFIT_PCT + 0.001)
+    monkeypatch.setattr(schwab_client, "get_quote", lambda symbol: {"lastPrice": take_profit_price})
+
+    def fail_if_called(*a, **k):
+        raise AssertionError("simulate mode must never place or cancel a real order")
+
+    monkeypatch.setattr(schwab_client, "place_order", fail_if_called)
+    monkeypatch.setattr(schwab_client, "cancel_order", fail_if_called)
+
+    result = strat.manage_open_positions()
+    assert result["action"] == "closed"

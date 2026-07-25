@@ -164,18 +164,166 @@ def get_valid_access_token() -> str | None:
             return None
 
 
-def get(path: str, *, params: dict[str, Any] | None = None) -> Any:
-    """Authenticated GET against the Schwab API. `path` is relative to
-    API_BASE_URL (e.g. "/marketdata/v1/pricehistory")."""
+def _auth_headers() -> dict[str, str]:
     token = get_valid_access_token()
     if not token:
         raise RuntimeError(
             "No valid Schwab access token -- complete the interactive login first "
             "(see get_authorization_url())."
         )
+    return {"Authorization": f"Bearer {token}"}
+
+
+def get(path: str, *, params: dict[str, Any] | None = None) -> Any:
+    """Authenticated GET against the Schwab API. `path` is relative to
+    API_BASE_URL (e.g. "/marketdata/v1/pricehistory")."""
     resp = requests.get(
-        f"{API_BASE_URL}{path}", headers={"Authorization": f"Bearer {token}"},
-        params=params or {}, timeout=TIMEOUT_SEC,
+        f"{API_BASE_URL}{path}", headers=_auth_headers(), params=params or {}, timeout=TIMEOUT_SEC,
     )
     resp.raise_for_status()
     return resp.json()
+
+
+def post(path: str, *, json_body: dict[str, Any]) -> requests.Response:
+    """Authenticated POST -- returns the raw response (not .json()) since
+    order placement responses carry the new order's ID in the Location
+    header, not a JSON body (confirmed Schwab/TDA-inherited API behavior)."""
+    resp = requests.post(
+        f"{API_BASE_URL}{path}", headers={**_auth_headers(), "Content-Type": "application/json"},
+        json=json_body, timeout=TIMEOUT_SEC,
+    )
+    resp.raise_for_status()
+    return resp
+
+
+def delete(path: str) -> requests.Response:
+    resp = requests.delete(f"{API_BASE_URL}{path}", headers=_auth_headers(), timeout=TIMEOUT_SEC)
+    resp.raise_for_status()
+    return resp
+
+
+_account_hash_cache: dict[str, Any] = {"hash": None, "computed_at": 0.0}
+_ACCOUNT_HASH_CACHE_TTL_SEC = 24 * 3600
+SCHWAB_ACCOUNT_NUMBER = os.getenv("SCHWAB_ACCOUNT_NUMBER", "")
+
+
+def get_account_hash() -> str:
+    """The encrypted account hash every /accounts/{accountHash}/... call
+    needs in place of the real account number -- fetched once from
+    /accounts/accountNumbers and cached (it doesn't change). If
+    SCHWAB_ACCOUNT_NUMBER is set (useful when the login has access to more
+    than one account), that specific account's hash is used; otherwise the
+    first (and normally only) account returned is used."""
+    now = time.time()
+    if _account_hash_cache["hash"] and (now - _account_hash_cache["computed_at"]) < _ACCOUNT_HASH_CACHE_TTL_SEC:
+        return _account_hash_cache["hash"]
+    accounts = get("/trader/v1/accounts/accountNumbers")
+    if not accounts:
+        raise RuntimeError("Schwab returned no linked accounts for this login.")
+    chosen = accounts[0]
+    if SCHWAB_ACCOUNT_NUMBER:
+        chosen = next((a for a in accounts if a.get("accountNumber") == SCHWAB_ACCOUNT_NUMBER), accounts[0])
+    account_hash = chosen["hashValue"]
+    _account_hash_cache.update({"hash": account_hash, "computed_at": now})
+    return account_hash
+
+
+# ---------------------------------------------------------------------------
+# Order placement + tracking. Confirmed via Schwab's own API + the
+# (community, but schema-accurate) schwab-py client: orderStrategyType
+# TRIGGER + a nested OCO child is how a single order submission places an
+# entry that, once filled, automatically arms a linked take-profit (LIMIT)
+# / stop-loss (STOP) pair where either one filling cancels the other --
+# Schwab tracks and executes the exit itself, unlike Kalshi (which forced
+# a manual poll-and-place-a-new-order loop for every exit). This is a
+# materially safer mechanism: the stop-loss is live on the exchange the
+# INSTANT the entry fills, not only whenever this process's own next
+# scheduled tick happens to run.
+# ---------------------------------------------------------------------------
+def _equity_leg(instruction: str, symbol: str, quantity: float) -> dict[str, Any]:
+    return {
+        "instruction": instruction, "quantity": quantity,
+        "instrument": {"symbol": symbol, "assetType": "EQUITY"},
+    }
+
+
+def build_bracket_order(
+    *, symbol: str, quantity: float, entry_instruction: str, exit_instruction: str,
+    take_profit_price: float, stop_loss_price: float, entry_price: float | None = None,
+) -> dict[str, Any]:
+    """entry_instruction/exit_instruction: "BUY"/"SELL" for a long (buy to
+    open, sell to close); a short would use "SELL_SHORT"/"BUY_TO_COVER".
+    entry_price=None places the entry as a MARKET order; a value places it
+    as a LIMIT order at that price."""
+    entry_order: dict[str, Any] = {
+        "orderType": "MARKET" if entry_price is None else "LIMIT",
+        "session": "NORMAL", "duration": "DAY", "orderStrategyType": "TRIGGER",
+        "orderLegCollection": [_equity_leg(entry_instruction, symbol, quantity)],
+        "childOrderStrategies": [{
+            "orderStrategyType": "OCO",
+            "childOrderStrategies": [
+                {
+                    "orderType": "LIMIT", "session": "NORMAL", "duration": "GOOD_TILL_CANCEL",
+                    "orderStrategyType": "SINGLE", "price": f"{take_profit_price:.2f}",
+                    "orderLegCollection": [_equity_leg(exit_instruction, symbol, quantity)],
+                },
+                {
+                    "orderType": "STOP", "session": "NORMAL", "duration": "GOOD_TILL_CANCEL",
+                    "orderStrategyType": "SINGLE", "stopPrice": f"{stop_loss_price:.2f}",
+                    "orderLegCollection": [_equity_leg(exit_instruction, symbol, quantity)],
+                },
+            ],
+        }],
+    }
+    if entry_price is not None:
+        entry_order["price"] = f"{entry_price:.2f}"
+    return entry_order
+
+
+def place_order(order_spec: dict[str, Any]) -> str:
+    """Places a real order and returns its order ID (extracted from the
+    response's Location header -- Schwab/TDA-inherited APIs return no JSON
+    body on a successful order placement)."""
+    account_hash = get_account_hash()
+    resp = post(f"/trader/v1/accounts/{account_hash}/orders", json_body=order_spec)
+    location = resp.headers.get("Location", "")
+    order_id = location.rstrip("/").rsplit("/", 1)[-1]
+    if not order_id:
+        raise RuntimeError(f"Order placed but no order ID found in response (Location={location!r})")
+    return order_id
+
+
+def get_order(order_id: str) -> dict[str, Any]:
+    account_hash = get_account_hash()
+    return get(f"/trader/v1/accounts/{account_hash}/orders/{order_id}")
+
+
+def get_orders(*, max_results: int = 50, status: str | None = None) -> list[dict[str, Any]]:
+    account_hash = get_account_hash()
+    params: dict[str, Any] = {"maxResults": max_results}
+    if status:
+        params["status"] = status
+    result = get(f"/trader/v1/accounts/{account_hash}/orders", params=params)
+    return result if isinstance(result, list) else []
+
+
+def cancel_order(order_id: str) -> None:
+    account_hash = get_account_hash()
+    delete(f"/trader/v1/accounts/{account_hash}/orders/{order_id}")
+
+
+def get_quote(symbol: str) -> dict[str, Any]:
+    """A single real-time quote -- much lighter than pulling 35 days of
+    minute bars just to read the current price, used by the fast
+    position-management poll."""
+    data = get(f"/marketdata/v1/{symbol}/quotes")
+    return (data.get(symbol) or {}).get("quote") or {}
+
+
+def get_account_balance() -> dict[str, Any]:
+    """Real cash + equity balances for the linked account -- used only in
+    "live" mode; "simulate" mode tracks its own virtual balance in local
+    state instead (see schwab_strategy.py)."""
+    account_hash = get_account_hash()
+    data = get(f"/trader/v1/accounts/{account_hash}", params={"fields": "positions"})
+    return (data.get("securitiesAccount") or {}).get("currentBalances") or {}

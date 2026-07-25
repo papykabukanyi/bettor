@@ -21,8 +21,16 @@ shape in perps_strategy.py.
 from __future__ import annotations
 
 import datetime as dt
+import json
+import logging
 import os
+import tempfile
+import threading
+import time
+from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 def _env_float(name: str, default: float) -> float:
@@ -150,3 +158,299 @@ def compute_position_size(available_balance_usd: float, price: float) -> int:
         return 0
     budget = available_balance_usd * POSITION_SIZE_PCT
     return int(budget // price)
+
+
+# ---------------------------------------------------------------------------
+# Two modes, one codebase:
+#   "simulate" (default) -- paper trading against a tracked VIRTUAL balance
+#     (SCHWAB_SIMULATE_STARTING_BALANCE, $100 by default per the explicit
+#     ask). No real order ever gets placed; real market DATA (quotes,
+#     candles) is still used so the simulation reflects real conditions.
+#   "live" -- real bracket orders via schwab_client (still gated by
+#     LIVE_TRADING_ENABLED, same dual-gate safety posture as the perps bot:
+#     MODE=live alone does nothing until that flag is ALSO set).
+# `balance` is total tracked equity throughout (only realized P&L ever
+# changes it, same convention as perps_backtest.py) -- available capital
+# for a NEW position is balance minus whatever's already committed to open
+# positions, not balance itself.
+# ---------------------------------------------------------------------------
+MODE = os.getenv("SCHWAB_MODE", "simulate").strip().lower()
+SIMULATE_STARTING_BALANCE = _env_float("SCHWAB_SIMULATE_STARTING_BALANCE", 100.0)
+
+ROOT_DIR = Path(__file__).resolve().parents[2]
+DATA_DIR = ROOT_DIR / "data"
+STATE_FILE = Path(os.getenv("SCHWAB_STATE_FILE", str(DATA_DIR / "schwab_state.json")))
+_STATE_LOCK = threading.RLock()
+
+HF_API_KEY = os.getenv("HF_API_KEY", "")
+HF_STOCK_MODEL_REPO = os.getenv("HF_STOCK_MODEL_REPO", "papylove/schwab-model")
+_DURABLE_STATE_HF_FILENAME = "schwab_durable_state.json"
+_DURABLE_PUSH_MIN_INTERVAL_SEC = 30
+_last_durable_push_ts = 0.0
+
+
+def _today_str() -> str:
+    return dt.datetime.now(dt.timezone.utc).date().isoformat()
+
+
+def _durable_state_slice(state: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "balance": state.get("balance", SIMULATE_STARTING_BALANCE),
+        "positions": state.get("positions") or [],
+        "trade_log": state.get("trade_log") or [],
+        "realized_pnl_by_date": state.get("realized_pnl_by_date") or {},
+    }
+
+
+def _push_durable_state_to_hf(state: dict[str, Any]) -> None:
+    if not HF_API_KEY:
+        return
+    try:
+        from huggingface_hub import HfApi
+        api = HfApi(token=HF_API_KEY)
+        payload = json.dumps(_durable_state_slice(state), indent=2)
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as tmp:
+            tmp.write(payload)
+            tmp_path = tmp.name
+        try:
+            api.upload_file(
+                path_or_fileobj=tmp_path, path_in_repo=_DURABLE_STATE_HF_FILENAME,
+                repo_id=HF_STOCK_MODEL_REPO, repo_type="model", commit_message="update schwab durable state",
+            )
+        finally:
+            os.unlink(tmp_path)
+    except Exception as exc:
+        logger.warning("[schwab_strategy] durable state push to HF failed: %s", exc)
+
+
+def _pull_durable_state_from_hf() -> dict[str, Any] | None:
+    if not HF_API_KEY:
+        return None
+    try:
+        from huggingface_hub import hf_hub_download
+        path = hf_hub_download(
+            repo_id=HF_STOCK_MODEL_REPO, filename=_DURABLE_STATE_HF_FILENAME, repo_type="model", token=HF_API_KEY,
+        )
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.info("[schwab_strategy] no durable state on HF yet (or fetch failed): %s", exc)
+        return None
+
+
+def _load_state() -> dict[str, Any]:
+    try:
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            state = json.load(f)
+    except Exception:
+        base = {
+            "balance": SIMULATE_STARTING_BALANCE, "positions": [], "trade_log": [], "realized_pnl_by_date": {},
+        }
+        durable = _pull_durable_state_from_hf()
+        if durable:
+            base.update(durable)
+            logger.info("[schwab_strategy] recovered durable state from HF after local state was missing")
+        return base
+    state.setdefault("balance", SIMULATE_STARTING_BALANCE)
+    state.setdefault("positions", [])
+    state.setdefault("trade_log", [])
+    state.setdefault("realized_pnl_by_date", {})
+    return state
+
+
+def _save_state(state: dict[str, Any], *, push_durable: bool = False) -> None:
+    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump(state, f, indent=2)
+    if not push_durable:
+        return
+    global _last_durable_push_ts
+    now = time.time()
+    if now - _last_durable_push_ts >= _DURABLE_PUSH_MIN_INTERVAL_SEC:
+        _last_durable_push_ts = now
+        _push_durable_state_to_hf(state)
+
+
+def get_available_balance() -> float:
+    """simulate mode: tracked virtual balance minus whatever's already
+    committed to open positions. live mode: the real Schwab cash balance
+    (no "committed" subtraction needed there -- Schwab's own balance
+    already reflects real open positions)."""
+    if MODE == "live":
+        from data import schwab_client
+        balance = schwab_client.get_account_balance()
+        return float(balance.get("cashAvailableForTrading") or balance.get("cashBalance") or 0.0)
+    state = _load_state()
+    committed = sum(float(p["entry_price"]) * float(p["count"]) for p in (state.get("positions") or []))
+    return max(0.0, float(state.get("balance", SIMULATE_STARTING_BALANCE)) - committed)
+
+
+def get_current_price(symbol: str) -> float | None:
+    """live mode: a real-time quote (cheap, no candle history needed).
+    simulate mode ALSO uses the real quote -- "simulate" means no real
+    orders are placed, not that market data is faked."""
+    from data import schwab_client
+    try:
+        quote = schwab_client.get_quote(symbol)
+        price = quote.get("lastPrice") or quote.get("mark")
+        return float(price) if price else None
+    except Exception as exc:
+        logger.warning("[schwab_strategy] quote fetch failed for %s: %s", symbol, exc)
+        return None
+
+
+def scan_and_enter(watchlist: list[str] | None = None, *, dry_run: bool | None = None) -> dict[str, Any]:
+    """Evaluates each watchlist symbol for a new entry. "simulate" mode
+    always paper-trades (dry_run is irrelevant there); "live" mode places a
+    real bracket order (entry + linked take-profit/stop-loss OCO) UNLESS
+    dry_run resolves True, in which case it only reports what it would have
+    done -- same dual-gate posture as perps_strategy.py."""
+    from data.schwab_data import get_stock_watchlist, latest_feature_row, load_training_dataset
+    from data.schwab_model import predict_direction
+
+    effective_dry_run = (not LIVE_TRADING_ENABLED) if dry_run is None else dry_run
+    if watchlist is None:
+        try:
+            recent = load_training_dataset(max_rows=20_000)
+        except Exception:
+            recent = None
+        watchlist = get_stock_watchlist(recent if recent is not None and not recent.empty else None)
+
+    opened: list[dict[str, Any]] = []
+    with _STATE_LOCK:
+        state = _load_state()
+        existing_symbols = {p["symbol"] for p in (state.get("positions") or [])}
+        open_count = len(state.get("positions") or [])
+        reference_balance = float(state.get("balance", SIMULATE_STARTING_BALANCE))
+        today_pnl = float((state.get("realized_pnl_by_date") or {}).get(_today_str(), 0.0))
+    if reference_balance > 0 and today_pnl <= -abs(DAILY_LOSS_CAP_PCT) * reference_balance:
+        return {"opened": [], "action": "daily_loss_cap_breached"}
+
+    for symbol in watchlist:
+        try:
+            if symbol in existing_symbols:
+                continue
+            if open_count >= MAX_CONCURRENT_POSITIONS:
+                opened.append({"symbol": symbol, "ok": True, "action": "skipped_slot_taken"})
+                continue
+
+            row = latest_feature_row(symbol)
+            if row is None:
+                continue
+            model_prediction = predict_direction(symbol)
+            candidate = evaluate_candidate(row, model_prediction)
+            if not candidate["should_enter"]:
+                opened.append({"symbol": symbol, "ok": True, "action": "skipped", "reason": candidate["reason"]})
+                continue
+
+            available_balance = get_available_balance()
+            entry_price = row["current_price"]
+            count = compute_position_size(available_balance, entry_price)
+            if count < 1:
+                opened.append({"symbol": symbol, "ok": True, "action": "skipped_insufficient_budget"})
+                continue
+
+            levels = position_exit_levels({"entry_price": entry_price})
+            order_id = None
+            if MODE == "live" and not effective_dry_run:
+                from data import schwab_client
+                order_spec = schwab_client.build_bracket_order(
+                    symbol=symbol, quantity=count, entry_instruction="BUY", exit_instruction="SELL",
+                    take_profit_price=levels["take_profit_price"], stop_loss_price=levels["stop_loss_price"],
+                )
+                order_id = schwab_client.place_order(order_spec)
+
+            position = {
+                "symbol": symbol, "entry_price": entry_price, "count": float(count),
+                "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+                "order_id": order_id, **levels,
+            }
+            with _STATE_LOCK:
+                state = _load_state()
+                positions = state.get("positions") or []
+                if any(p["symbol"] == symbol for p in positions) or len(positions) >= MAX_CONCURRENT_POSITIONS:
+                    opened.append({"symbol": symbol, "ok": True, "action": "skipped_slot_taken"})
+                    continue
+                positions.append(position)
+                state["positions"] = positions
+                _save_state(state)
+                existing_symbols.add(symbol)
+                open_count = len(positions)
+            opened.append({
+                "symbol": symbol, "ok": True, "action": "opened", "entry_price": entry_price,
+                "count": count, "dry_run": effective_dry_run if MODE == "live" else True,
+            })
+        except Exception as exc:
+            opened.append({"symbol": symbol, "ok": False, "action": "entry_failed", "error": str(exc)})
+
+    return {"opened": opened}
+
+
+def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
+    """Checks every open position for an exit. In "live" mode, the
+    take-profit/stop-loss are ALREADY live on the exchange as a bracket
+    order the instant the entry filled (see scan_and_enter) -- this loop's
+    live-mode job is mainly to catch max_hold_time (which Schwab's bracket
+    order has no native concept of) and cancel+flatten in that case; a
+    normal TP/SL fill is reconciled here by simply noticing the position's
+    order is no longer open."""
+    effective_dry_run = (not LIVE_TRADING_ENABLED) if dry_run is None else dry_run
+    with _STATE_LOCK:
+        state = _load_state()
+        positions = list(state.get("positions") or [])
+    if not positions:
+        return {"action": "no_position", "checks": []}
+
+    closed: list[dict[str, Any]] = []
+    checks: list[dict[str, Any]] = []
+    remaining_symbols = {p["symbol"] for p in positions}
+
+    for position in positions:
+        symbol = position["symbol"]
+        try:
+            current_price = get_current_price(symbol)
+            if current_price is None:
+                checks.append({"symbol": symbol, "ok": False, "error": "no_quote_available"})
+                continue
+
+            should_exit, reason = decide_exit(position, current_price)
+            if not should_exit:
+                checks.append({"symbol": symbol, "ok": True, "exit_check": reason})
+                continue
+
+            if MODE == "live" and not effective_dry_run and position.get("order_id"):
+                from data import schwab_client
+                try:
+                    schwab_client.cancel_order(position["order_id"])
+                except Exception as exc:
+                    logger.warning("[schwab_strategy] cancel of bracket order failed for %s (may have already filled): %s", symbol, exc)
+                schwab_client.place_order({
+                    "orderType": "MARKET", "session": "NORMAL", "duration": "DAY", "orderStrategyType": "SINGLE",
+                    "orderLegCollection": [{
+                        "instruction": "SELL", "quantity": position["count"],
+                        "instrument": {"symbol": symbol, "assetType": "EQUITY"},
+                    }],
+                })
+
+            gross = round((current_price - float(position["entry_price"])) * float(position["count"]), 6)
+            with _STATE_LOCK:
+                state = _load_state()
+                state["balance"] = round(float(state.get("balance", SIMULATE_STARTING_BALANCE)) + gross, 6)
+                by_date = state.setdefault("realized_pnl_by_date", {})
+                today = _today_str()
+                by_date[today] = round(float(by_date.get(today, 0.0)) + gross, 6)
+                trade = {
+                    "closed_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+                    "symbol": symbol, "entry_price": position["entry_price"], "exit_price": current_price,
+                    "count": position["count"], "realized_pnl_usd": gross, "reason": reason,
+                    "dry_run": effective_dry_run if MODE == "live" else True,
+                }
+                state.setdefault("trade_log", []).append(trade)
+                state["positions"] = [p for p in (state.get("positions") or []) if p["symbol"] != symbol]
+                _save_state(state, push_durable=True)
+            remaining_symbols.discard(symbol)
+            closed.append(trade)
+        except Exception as exc:
+            logger.warning("[schwab_strategy] could not process position for %s -- leaving untouched this cycle: %s", symbol, exc)
+            checks.append({"symbol": symbol, "ok": False, "error": str(exc)})
+
+    return {"action": "closed" if closed else "no_change", "closed": closed, "checks": checks}

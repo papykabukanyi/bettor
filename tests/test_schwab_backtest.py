@@ -27,6 +27,8 @@ def _synthetic_test_df(n: int = 200, symbol: str = "AAPL") -> pd.DataFrame:
         "volume_ratio_5": np.abs(rng.normal(1.0, 0.2, n)),
         "volume_ratio_15": np.abs(rng.normal(1.0, 0.15, n)),
         "dollar_volume_z": np.full(n, 2.0),  # always "unusual volume" so entries can fire deterministically
+        "rsi_14": np.full(n, 0.5), "macd_hist_pct": np.zeros(n), "bb_pct_b": np.full(n, 0.5),
+        "bb_bandwidth": np.full(n, 0.01), "atr_pct": np.full(n, 0.001), "stoch_k": np.full(n, 0.5),
     })
 
 

@@ -148,6 +148,7 @@ FEATURE_COLUMNS = [
     "dist_to_ma_15", "dist_to_ma_30",
     "volatility_5", "volatility_15", "volatility_30",
     "volume_ratio_5", "volume_ratio_15", "dollar_volume_z",
+    "rsi_14", "macd_hist_pct", "bb_pct_b", "bb_bandwidth", "atr_pct", "stoch_k",
 ]
 MIN_ROWS_FOR_FEATURES = 65  # the 60-minute return window + a small buffer
 
@@ -186,6 +187,43 @@ def engineer_features(one_min_df: pd.DataFrame) -> pd.DataFrame:
     dv_mean_60 = dollar_volume.rolling(60).mean()
     dv_std_60 = dollar_volume.rolling(60).std().replace(0, float("nan"))
     df["dollar_volume_z"] = (dollar_volume - dv_mean_60) / dv_std_60
+
+    # "Pro indicators" -- classic technical analysis, all backward-looking
+    # only (leakage-free), normalized to roughly the same 0-1-or-small-
+    # decimal scale as the features above. Identical formulas to
+    # perps_data.py's indicator block; duplicated rather than shared since
+    # the two pipelines are deliberately independent (see this module's own
+    # docstring) and must never import from each other.
+    delta = df["close"].diff()
+    avg_gain = delta.clip(lower=0).rolling(14).mean()
+    avg_loss = (-delta.clip(upper=0)).rolling(14).mean()
+    rs = avg_gain / avg_loss.replace(0, float("nan"))
+    rsi_raw = 100 - (100 / (1 + rs))
+    rsi_raw = rsi_raw.mask((avg_loss == 0) & (avg_gain > 0), 100.0)
+    df["rsi_14"] = rsi_raw / 100.0
+
+    ema_12 = df["close"].ewm(span=12, adjust=False).mean()
+    ema_26 = df["close"].ewm(span=26, adjust=False).mean()
+    macd_line = ema_12 - ema_26
+    macd_signal = macd_line.ewm(span=9, adjust=False).mean()
+    df["macd_hist_pct"] = (macd_line - macd_signal) / df["close"]
+
+    bb_mid = df["close"].rolling(20).mean()
+    bb_std = df["close"].rolling(20).std()
+    bb_range = (4 * bb_std).replace(0, float("nan"))
+    df["bb_pct_b"] = (df["close"] - (bb_mid - 2 * bb_std)) / bb_range
+    df["bb_bandwidth"] = (4 * bb_std) / bb_mid
+
+    prev_close = df["close"].shift(1)
+    true_range = pd.concat([
+        df["high"] - df["low"], (df["high"] - prev_close).abs(), (df["low"] - prev_close).abs(),
+    ], axis=1).max(axis=1)
+    df["atr_pct"] = true_range.rolling(14).mean() / df["close"]
+
+    low_14 = df["low"].rolling(14).min()
+    high_14 = df["high"].rolling(14).max()
+    stoch_range = (high_14 - low_14).replace(0, float("nan"))
+    df["stoch_k"] = (df["close"] - low_14) / stoch_range
 
     horizon = 1
     df["future_close"] = df["close"].shift(-horizon)
