@@ -1,7 +1,9 @@
 """Kalshi Perps trading bot -- web dashboard + background scheduler.
 
-Single purpose: watch all Kalshi perp instruments (BTC, ETH, SOL, XRP, DOGE,
-LTC, BCH, LINK, SUI, NEAR, DOT, HBAR, HYPE, kSHIB, XLM, ZEC), collect their
+Single purpose: watch Kalshi's most active AND most volatile perp
+instruments (see perps_data.get_watchlist() -- ranked live by 24h volume +
+recent volatility, out of all 16 it lists: BTC, ETH, SOL, XRP, DOGE, LTC,
+BCH, LINK, SUI, NEAR, DOT, HBAR, HYPE, kSHIB, XLM, ZEC), collect their
 multi-timeframe price history + news sentiment to a Hugging Face dataset,
 train a direction classifier on that history, and run a growth strategy that
 splits the account into up to MAX_CONCURRENT_POSITIONS portions (each sized

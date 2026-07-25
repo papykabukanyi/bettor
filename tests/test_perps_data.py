@@ -125,6 +125,24 @@ def test_retry_on_rate_limit_does_not_retry_non_rate_limit_errors(monkeypatch):
     assert calls["n"] == 1
 
 
+def _market(ticker, *, status="active", volume_24h_usd=1000.0):
+    return {
+        "ticker": ticker, "status": status,
+        "volume_24h_notional_value_dollars": str(volume_24h_usd),
+    }
+
+
+@pytest.fixture(autouse=True)
+def _no_volatility_ranking_network_calls(monkeypatch):
+    """_rank_tickers_by_volume_and_volatility() needs the archive for its
+    volatility half -- every watchlist test here defaults it to "no data"
+    so ranking falls back to volume alone (deterministic, no network) and
+    the suite never touches HF; tests targeting volatility specifically
+    override this explicitly."""
+    monkeypatch.setattr(perps_data, "_recent_volatility_by_ticker", lambda: {})
+    monkeypatch.setattr(perps_data, "_TICKER_ACTIVITY_CACHE", {"volatility_by_ticker": None, "computed_at": 0.0})
+
+
 def test_get_watchlist_falls_back_to_known_list_on_failure(monkeypatch):
     def _raise():
         raise RuntimeError("network down")
@@ -135,9 +153,78 @@ def test_get_watchlist_falls_back_to_known_list_on_failure(monkeypatch):
 
 
 def test_get_watchlist_uses_live_listing_when_available(monkeypatch):
-    monkeypatch.setattr(perps_data, "list_margin_markets", lambda: [{"ticker": "KXBTCPERP"}, {"ticker": "KXETHPERP"}])
+    monkeypatch.setattr(perps_data, "WATCHLIST_TOP_N", 0)  # no top-N narrowing for this test
+    monkeypatch.setattr(perps_data, "list_margin_markets", lambda: [_market("KXBTCPERP"), _market("KXETHPERP")])
     watchlist = perps_data.get_watchlist()
     assert watchlist == ["KXBTCPERP", "KXETHPERP"]
+
+
+def test_get_watchlist_excludes_inactive_instruments(monkeypatch):
+    """Confirmed live: 3 of Kalshi's 16 listed perps are status=inactive
+    with zero volume -- every scan cycle was wasting API calls on them."""
+    monkeypatch.setattr(perps_data, "WATCHLIST_TOP_N", 0)
+    monkeypatch.setattr(perps_data, "list_margin_markets", lambda: [
+        _market("KXBTCPERP"), _market("KXDOTPERP", status="inactive", volume_24h_usd=0.0),
+    ])
+    watchlist = perps_data.get_watchlist()
+    assert watchlist == ["KXBTCPERP"]
+
+
+def test_get_watchlist_narrows_to_top_n_by_volume(monkeypatch):
+    monkeypatch.setattr(perps_data, "WATCHLIST_TOP_N", 2)
+    monkeypatch.setattr(perps_data, "list_margin_markets", lambda: [
+        _market("KXBTCPERP", volume_24h_usd=100.0),
+        _market("KXETHPERP", volume_24h_usd=50.0),
+        _market("KXDOGEPERP", volume_24h_usd=1.0),
+    ])
+    watchlist = perps_data.get_watchlist()
+    assert watchlist == ["KXBTCPERP", "KXETHPERP"]  # KXDOGEPERP dropped -- lowest volume, out of the top 2
+
+
+def test_get_watchlist_combines_volume_and_volatility_rank(monkeypatch):
+    """Confirmed live: volume and volatility are almost inversely
+    correlated (the highest-volume instruments are the LEAST volatile).
+    Here KXETHPERP and KXZECPERP have the SAME volume, so only volatility
+    can separate them -- KXZECPERP is far more volatile and must make the
+    top-2 cut ahead of KXETHPERP, even though pure volume alone would
+    leave them tied."""
+    monkeypatch.setattr(perps_data, "WATCHLIST_TOP_N", 2)
+    monkeypatch.setattr(perps_data, "_recent_volatility_by_ticker", lambda: {
+        "KXBTCPERP": 0.0001, "KXETHPERP": 0.0001, "KXZECPERP": 0.01,
+    })
+    monkeypatch.setattr(perps_data, "list_margin_markets", lambda: [
+        _market("KXBTCPERP", volume_24h_usd=10_000.0),  # highest volume by far
+        _market("KXETHPERP", volume_24h_usd=100.0),      # same volume as ZEC, but flat
+        _market("KXZECPERP", volume_24h_usd=100.0),       # same volume as ETH, but far more volatile
+    ])
+    watchlist = perps_data.get_watchlist()
+    assert watchlist == ["KXBTCPERP", "KXZECPERP"]  # KXETHPERP loses the tiebreak on volatility
+
+
+def test_get_active_tickers_includes_everything_active_unnarrowed(monkeypatch):
+    """Data collection must keep archiving history for every active coin,
+    not just today's top-N watchlist -- otherwise a coin left out of the
+    watchlist could never accumulate the data needed to prove it deserves
+    a spot later (get_watchlist()'s own ranking depends on this archive)."""
+    monkeypatch.setattr(perps_data, "list_margin_markets", lambda: [
+        _market("KXBTCPERP", volume_24h_usd=10_000.0),
+        _market("KXDOGEPERP", volume_24h_usd=1.0),  # would be dropped by get_watchlist()'s top-N
+        _market("KXDOTPERP", status="inactive", volume_24h_usd=0.0),
+    ])
+    tickers = perps_data.get_active_tickers()
+    assert tickers == ["KXBTCPERP", "KXDOGEPERP"]  # inactive excluded, but nothing narrowed by rank
+
+
+def test_collect_dataset_rows_uses_active_tickers_not_the_narrowed_watchlist(monkeypatch):
+    monkeypatch.setattr(perps_data, "get_active_tickers", lambda: ["KXBTCPERP", "KXDOGEPERP"])
+
+    def fail_if_called():
+        raise AssertionError("collect_dataset_rows must use get_active_tickers(), not the narrowed get_watchlist()")
+
+    monkeypatch.setattr(perps_data, "get_watchlist", fail_if_called)
+    monkeypatch.setattr(perps_data, "fetch_candle_frames", lambda ticker: (pd.DataFrame(), pd.DataFrame()))
+    result = perps_data.collect_dataset_rows()
+    assert result.empty  # no real data faked here -- just confirming which ticker source got called
 
 
 def test_load_training_dataset_merges_local_and_hf_not_just_fallback(monkeypatch, tmp_path):

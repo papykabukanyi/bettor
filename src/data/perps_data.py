@@ -77,14 +77,103 @@ def coin_for_ticker(ticker: str) -> str:
     return _TICKER_TO_COIN.get(ticker, ticker.replace("KX", "").replace("PERP", ""))
 
 
-def get_watchlist() -> list[str]:
-    """All perp instruments Kalshi currently lists, live -- falls back to the
-    known snapshot if the listing call fails (e.g. transient network issue)."""
+# Confirmed live: 3 of Kalshi's 16 listed perp instruments (DOT, HBAR, XLM)
+# are status="inactive" with zero volume/open interest -- every scan cycle
+# was wasting API calls and getting no usable data back from them.
+#
+# Among the 13 ACTIVE instruments, volume and volatility are almost
+# INVERSELY correlated: BTC/ETH carry by far the most 24h volume but are
+# the LEAST volatile of the set, while ZEC/LINK/NEAR/kSHIB/LTC have much
+# less volume but are meaningfully more volatile. A single-metric filter
+# misses real opportunity either way, so both get ranked and combined.
+WATCHLIST_TOP_N = int(os.getenv("PERPS_WATCHLIST_TOP_N", "8") or "8")
+_TICKER_ACTIVITY_CACHE: dict[str, Any] = {"volatility_by_ticker": None, "computed_at": 0.0}
+_TICKER_ACTIVITY_CACHE_TTL_SEC = int(os.getenv("PERPS_WATCHLIST_REFRESH_SEC", str(6 * 3600)) or str(6 * 3600))
+
+
+def _recent_volatility_by_ticker() -> dict[str, float]:
+    """Average volatility_15 per ticker over load_training_dataset()'s own
+    (already memory-safe, most-recent-rows-only) default window -- reuses
+    the existing row cap rather than loading the full archive, since this
+    only needs each ticker's CURRENT price character, not its whole
+    history. Refreshed at most once per _TICKER_ACTIVITY_CACHE_TTL_SEC
+    (see _rank_tickers_by_volume_and_volatility) since this needs an HF
+    archive download and volatility character doesn't meaningfully shift
+    minute to minute."""
+    try:
+        df = load_training_dataset()
+    except Exception as exc:
+        logger.warning("[perps_data] could not load archive for volatility ranking: %s", exc)
+        return {}
+    if df.empty or "volatility_15" not in df.columns:
+        return {}
+    return df.groupby("ticker")["volatility_15"].mean().to_dict()
+
+
+def _rank_tickers_by_volume_and_volatility(markets: list[dict[str, Any]]) -> list[str]:
+    """Active tickers only, ranked by combining a live-volume rank (free --
+    already in the same market listing response) with a periodically
+    refreshed volatility rank. Lower combined rank = more active AND more
+    volatile; returned best-first."""
+    now = time.time()
+    if (
+        _TICKER_ACTIVITY_CACHE["volatility_by_ticker"] is None
+        or (now - _TICKER_ACTIVITY_CACHE["computed_at"]) >= _TICKER_ACTIVITY_CACHE_TTL_SEC
+    ):
+        _TICKER_ACTIVITY_CACHE["volatility_by_ticker"] = _recent_volatility_by_ticker()
+        _TICKER_ACTIVITY_CACHE["computed_at"] = now
+    volatility_by_ticker = _TICKER_ACTIVITY_CACHE["volatility_by_ticker"] or {}
+
+    active = [m for m in markets if m.get("status") == "active" and m.get("ticker")]
+    if not active:
+        return []
+
+    by_volume = sorted(active, key=lambda m: -float(m.get("volume_24h_notional_value_dollars") or 0.0))
+    volume_rank = {m["ticker"]: i for i, m in enumerate(by_volume)}
+
+    by_volatility = sorted(active, key=lambda m: -volatility_by_ticker.get(m["ticker"], 0.0))
+    volatility_rank = {m["ticker"]: i for i, m in enumerate(by_volatility)}
+
+    fallback_rank = len(active)
+    return sorted(
+        (m["ticker"] for m in active),
+        key=lambda t: volume_rank.get(t, fallback_rank) + volatility_rank.get(t, fallback_rank),
+    )
+
+
+def get_active_tickers() -> list[str]:
+    """EVERY active (non-inactive) perp instrument, unnarrowed -- used for
+    data collection specifically, which must keep archiving history for
+    every coin, not just today's top WATCHLIST_TOP_N. get_watchlist()'s
+    own volatility ranking depends on this same archive: if collection
+    only ever fed the narrowed list back into itself, a coin left out
+    today could never accumulate the data needed to prove it deserves a
+    spot later -- a self-reinforcing bias where only whatever ranks well
+    RIGHT NOW ever gets considered again."""
     try:
         markets = list_margin_markets()
-        tickers = [m["ticker"] for m in markets if m.get("ticker")]
-        if tickers:
-            return sorted(tickers)
+        active = sorted(m["ticker"] for m in markets if m.get("status") == "active" and m.get("ticker"))
+        if active:
+            return active
+    except Exception as exc:
+        logger.warning("[perps_data] list_margin_markets failed, using known list: %s", exc)
+    return list(KNOWN_PERP_TICKERS)
+
+
+def get_watchlist() -> list[str]:
+    """The most active AND most volatile perp instruments Kalshi currently
+    lists, live -- falls back to the known snapshot if the listing call
+    fails (e.g. transient network issue). Excludes inactive-status
+    instruments entirely, and narrows down to the top WATCHLIST_TOP_N
+    (default 8) by combined volume+volatility rank rather than watching
+    every active instrument regardless of how quiet or illiquid it is."""
+    try:
+        markets = list_margin_markets()
+        ranked = _rank_tickers_by_volume_and_volatility(markets)
+        if ranked:
+            if WATCHLIST_TOP_N > 0:
+                ranked = ranked[:WATCHLIST_TOP_N]
+            return sorted(ranked)
     except Exception as exc:
         logger.warning("[perps_data] list_margin_markets failed, using known list: %s", exc)
     return list(KNOWN_PERP_TICKERS)
@@ -213,10 +302,11 @@ FEATURE_COLUMNS = [
 
 
 def collect_dataset_rows(tickers: list[str] | None = None) -> pd.DataFrame:
-    """Fetch + engineer features for every ticker in the watchlist. Returns a
-    single concatenated DataFrame with a `ticker` column, ready to push to HF
-    or feed straight into training."""
-    watchlist = tickers or get_watchlist()
+    """Fetch + engineer features for every ACTIVE ticker (not narrowed to
+    today's top-N watchlist -- see get_active_tickers()). Returns a single
+    concatenated DataFrame with a `ticker` column, ready to push to HF or
+    feed straight into training."""
+    watchlist = tickers or get_active_tickers()
     frames = []
     for ticker in watchlist:
         try:
