@@ -107,3 +107,42 @@ def test_production_jobs_actually_honor_the_live_trading_flag(monkeypatch):
     assert captured["fast_check"].get("dry_run") is False
     assert captured["entry_scan"].get("dry_run") is False
     assert captured["manual_cycle"].get("dry_run") is False
+
+
+class _FakeScheduler:
+    def __init__(self, running, shutdown_fn=None):
+        self.running = running
+        self._shutdown_fn = shutdown_fn or (lambda **kw: None)
+
+    def shutdown(self, **kw):
+        return self._shutdown_fn(**kw)
+
+
+def test_shutdown_scheduler_stops_a_running_scheduler(monkeypatch):
+    """Confirmed live: on SIGTERM (a normal restart/redeploy), APScheduler's
+    own background thread could still be mid-cycle and try to submit a job
+    to its thread pool right as the interpreter tears it down, raising
+    "cannot schedule new futures after interpreter shutdown". Shutting the
+    scheduler down at exit prevents that race."""
+    calls = []
+    monkeypatch.setattr(dashboard, "scheduler", _FakeScheduler(True, lambda **kw: calls.append(kw)))
+    dashboard._shutdown_scheduler()
+    assert calls == [{"wait": False}]
+
+
+def test_shutdown_scheduler_is_a_noop_when_not_running(monkeypatch):
+    def fail_if_called(**kw):
+        raise AssertionError("must not call shutdown() on a scheduler that isn't running")
+
+    monkeypatch.setattr(dashboard, "scheduler", _FakeScheduler(False, fail_if_called))
+    dashboard._shutdown_scheduler()  # must not raise
+
+
+def test_shutdown_scheduler_swallows_errors(monkeypatch):
+    """This runs at interpreter shutdown -- it must never itself raise and
+    block/interfere with the process actually exiting."""
+    def raise_error(**kw):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(dashboard, "scheduler", _FakeScheduler(True, raise_error))
+    dashboard._shutdown_scheduler()  # must not raise

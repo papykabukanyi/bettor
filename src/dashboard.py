@@ -30,6 +30,7 @@ single `--workers 1` gunicorn process never runs a job twice concurrently:
 """
 from __future__ import annotations
 
+import atexit
 import datetime as dt
 import functools
 import json
@@ -89,6 +90,24 @@ app = Flask(__name__, template_folder="templates")
 scheduler = BackgroundScheduler(timezone="America/New_York")
 _startup_lock = threading.Lock()
 _startup_done = False
+
+# Confirmed live: on SIGTERM (a normal restart/redeploy), gunicorn's worker
+# begins interpreter shutdown while APScheduler's own background thread --
+# independent of the request-handling thread gunicorn manages -- can still
+# be mid-cycle and try to submit a job to its thread pool executor right as
+# that pool is being torn down, raising "RuntimeError: cannot schedule new
+# futures after interpreter shutdown" (visible in production logs). A raw
+# SIGTERM signal handler would risk overriding gunicorn's own graceful
+# worker shutdown; atexit runs earlier in the SAME interpreter shutdown
+# sequence without touching signal disposition at all, so telling the
+# scheduler to stop here reliably happens before that race can occur.
+@atexit.register
+def _shutdown_scheduler() -> None:
+    try:
+        if scheduler.running:
+            scheduler.shutdown(wait=False)
+    except Exception:
+        logger.exception("[dashboard] error shutting down scheduler at exit")
 
 # `/api/status` used to make 3 sequential blocking Kalshi calls on every
 # dashboard poll (every 10s from the browser). Worst case (each near its own
