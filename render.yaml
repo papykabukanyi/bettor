@@ -33,3 +33,10 @@ services:
         value: papylove/kalshi-perps-data
       - key: HF_MODEL_REPO
         value: papylove/kalshi-perps-model
+      # Bidirectional (long+short) trading. Backtested twice on the fixed
+      # (simulation-clock-corrected) engine, on two different archive sizes --
+      # both times bidirectional beat long-only by a wide margin (+37.9% vs
+      # +14.2% return on the most recent run) at a comparable win rate, so
+      # this graduated from dry-run-only to the deployed default.
+      - key: PERPS_ENABLE_SHORTS
+        value: "1"
