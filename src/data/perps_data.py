@@ -503,13 +503,30 @@ def load_training_dataset(*, max_shards: int = 90, max_rows: int | None = None) 
                 f for f in api.list_repo_files(repo_id=HF_DATASET_REPO, repo_type="dataset")
                 if _DATE_SHARD_RE.match(f)
             ]
-            hf_files = sorted(hf_files)[-max_shards:]
+            # Most-recent-first, and stop once enough rows are already in
+            # hand to satisfy the row cap below -- the archive grows every
+            # day forever, so downloading and parsing EVERY shard (up to
+            # max_shards) just to immediately truncate most of it away was
+            # wasted work that got worse every single day. Confirmed live:
+            # this was the recurring/worsening Render OOM source -- with
+            # ~52 days archived, a plain (uncapped) load_training_dataset()
+            # call downloaded and held all 52 days in memory before ever
+            # truncating to the most recent MAX_TRAIN_ROWS. A small safety
+            # margin (1.5x the cap) covers the rows that drop_duplicates
+            # below will remove on any local/HF overlap.
+            hf_files = sorted(hf_files, reverse=True)[:max_shards]
+            cap = MAX_TRAIN_ROWS if max_rows is None else max_rows
+            stop_after_rows = int(cap * 1.5) if cap else None
+            accumulated_rows = sum(len(fr) for fr in frames)
             for f in hf_files:
+                if stop_after_rows and accumulated_rows >= stop_after_rows:
+                    break
                 try:
                     local_path = hf_hub_download(repo_id=HF_DATASET_REPO, filename=f, repo_type="dataset", token=HF_API_KEY)
                     shard = pd.read_parquet(local_path)
                     if "ticker" in shard.columns and "ts" in shard.columns:
                         frames.append(shard)
+                        accumulated_rows += len(shard)
                     else:
                         logger.warning("[perps_data] skipping HF shard with unexpected schema: %s", f)
                 except Exception as exc:

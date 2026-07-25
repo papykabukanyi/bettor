@@ -401,6 +401,51 @@ def test_load_training_dataset_caps_to_max_rows_keeping_most_recent(monkeypatch,
     assert sorted(result["ts"].tolist()) == [6, 7, 8, 9]
 
 
+def test_load_training_dataset_stops_downloading_hf_shards_once_the_cap_is_covered(monkeypatch, tmp_path):
+    """Confirmed live: downloading and parsing EVERY available HF shard just
+    to truncate most of it away afterward got more expensive every single
+    day as the archive grew -- eventually a real Render OOM. Most-recent-
+    first with an early stop must download only as many shards as needed to
+    cover max_rows (plus a small safety margin), never all of them."""
+    monkeypatch.setattr(perps_data, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(perps_data, "HF_API_KEY", "fake-token")
+    monkeypatch.setattr(perps_data, "HF_DATASET_REPO", "someuser/kalshi-perps-data")
+
+    # 10 daily shards of 100 rows each = 1000 rows total, but max_rows=150
+    # only needs 2 (with the 1.5x safety margin, 225 rows -> 3 shards).
+    shard_names = [f"data/2026-07-{10 + i:02d}.parquet" for i in range(10)]
+    downloaded = []
+
+    class FakeApi:
+        def __init__(self, token=None):
+            pass
+
+        def list_repo_files(self, repo_id, repo_type):
+            return shard_names
+
+    def fake_hf_hub_download(repo_id, filename, repo_type, token):
+        downloaded.append(filename)
+        idx = shard_names.index(filename)
+        day_df = pd.DataFrame({
+            "ticker": ["KXBTCPERP"] * 100,
+            "ts": [idx * 1000 + i for i in range(100)],
+            "close": [1.0] * 100,
+        })
+        path = tmp_path / f"shard_{idx}.parquet"
+        day_df.to_parquet(path, index=False)
+        return str(path)
+
+    import huggingface_hub
+    monkeypatch.setattr(huggingface_hub, "HfApi", FakeApi)
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", fake_hf_hub_download)
+
+    result = perps_data.load_training_dataset(max_rows=150)
+    assert len(result) == 150
+    assert len(downloaded) < len(shard_names)  # must NOT have downloaded every shard
+    # Must have pulled the MOST RECENT shards (highest index), not the oldest.
+    assert "data/2026-07-19.parquet" in downloaded  # the last (most recent) shard
+
+
 def test_load_training_dataset_excludes_lookalike_paths_from_another_pipeline(monkeypatch, tmp_path):
     """A previously-used HF account had an UNRELATED pipeline that also
     wrote parquet files under a "data/" prefix (e.g.
