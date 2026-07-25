@@ -103,7 +103,18 @@
 <footer>Auto-refreshes every 10s.</footer>
 
 <script>
-const fmtUsd = (v) => (v === null || v === undefined || isNaN(v)) ? "--" : "$" + Number(v).toFixed(4);
+// Real money (balance, P&L) -- always standard 2-decimal currency, never
+// the raw 4+ decimal precision the backend computes with internally.
+const fmtUsd = (v) => (v === null || v === undefined || isNaN(v)) ? "--" : "$" + Number(v).toFixed(2);
+// Asset/contract prices span cents (KSHIB, DOGE) to tens of thousands (BTC)
+// -- a flat 2 decimals would round a sub-cent price straight to "$0.00", so
+// this keeps more decimals only for genuinely small values.
+const fmtPrice = (v) => {
+  if (v === null || v === undefined || isNaN(v)) return "--";
+  const n = Number(v);
+  const decimals = Math.abs(n) >= 1 ? 2 : Math.abs(n) >= 0.01 ? 4 : 6;
+  return "$" + n.toFixed(decimals);
+};
 const fmtPct = (v) => (v === null || v === undefined || isNaN(v)) ? "--" : (Number(v) * 100).toFixed(3) + "%";
 const timeAgo = (iso) => {
   if (!iso) return "--";
@@ -207,10 +218,10 @@ async function refreshStatus() {
       return `
         <td><strong>${p.ticker}</strong></td>
         <td><span class="tag ${side === "short" ? "no" : "yes"}">${side}</span></td>
-        <td>${fmtUsd(p.entry_price)}</td>
+        <td>${fmtPrice(p.entry_price)}</td>
         <td>${p.count}</td>
-        <td class="stat pos" style="font-size:13px;">${fmtUsd(p.take_profit_price)}</td>
-        <td class="stat neg" style="font-size:13px;">${fmtUsd(p.stop_loss_price)}</td>
+        <td class="stat pos" style="font-size:13px;">${fmtPrice(p.take_profit_price)}</td>
+        <td class="stat neg" style="font-size:13px;">${fmtPrice(p.stop_loss_price)}</td>
         <td>${timeAgo(p.opened_at)}</td>
         <td>${(v !== null && v !== undefined) ? (v * 100).toFixed(2) + "%/min" : "--"}</td>`;
     }, 8, "No open positions");
@@ -232,8 +243,8 @@ async function refreshStatus() {
     const cbody = document.getElementById("candidates-body");
     patchTable(cbody, candidates, c => c.ticker, c => `
         <td><strong>${c.ticker}</strong></td>
-        <td>${fmtUsd(c.current_price)}</td>
-        <td>${fmtUsd(c.short_ma)}</td>
+        <td>${fmtPrice(c.current_price)}</td>
+        <td>${fmtPrice(c.short_ma)}</td>
         <td>${fmtPct(c.trend_pct)}</td>
         <td><span class="tag ${c.technical_ok ? "yes" : "no"}">${c.technical_ok ? "dip" : "none"}</span></td>
         <td><span class="tag ${c.model_ok ? "yes" : "wait"}">${c.model_ok ? c.model_direction : "n/a"}</span></td>
@@ -253,8 +264,8 @@ async function refreshTrades() {
         <td>${timeAgo(t.closed_at)}</td>
         <td><strong>${t.ticker}</strong></td>
         <td><span class="tag ${t.side === "short" ? "no" : "yes"}">${t.side || "long"}</span></td>
-        <td>${fmtUsd(t.entry_price)}</td>
-        <td>${fmtUsd(t.exit_price)}</td>
+        <td>${fmtPrice(t.entry_price)}</td>
+        <td>${fmtPrice(t.exit_price)}</td>
         <td>${t.count}</td>
         <td class="${t.realized_pnl_usd > 0 ? "stat pos" : t.realized_pnl_usd < 0 ? "stat neg" : ""}" style="font-size:13px;font-weight:600;">${fmtUsd(t.realized_pnl_usd)}</td>
         <td class="sub">${t.reason || ""}</td>`, 8, "No trades yet");
