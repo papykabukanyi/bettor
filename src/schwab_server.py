@@ -266,9 +266,16 @@ def _ensure_background_jobs_started() -> None:
         if _startup_done:
             return
         if not scheduler.running and ENABLE_SCHWAB_SCHEDULER:
+            # next_run_time delayed a full interval -- see the identical fix
+            # and its comment in app_kalshi.py's own perps_data_collect
+            # registration: without this, APScheduler fires an interval job's
+            # FIRST run immediately on scheduler.start(), duplicating the
+            # _runner() thread's own direct startup call to this same
+            # function right below.
             scheduler.add_job(
                 _run_schwab_data_collect, "interval", minutes=SCHWAB_DATA_COLLECT_MINUTES,
                 id="schwab_data_collect", replace_existing=True,
+                next_run_time=dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=SCHWAB_DATA_COLLECT_MINUTES),
             )
             scheduler.add_job(
                 _run_schwab_train, "cron", hour=SCHWAB_TRAIN_HOUR_ET, minute=0,

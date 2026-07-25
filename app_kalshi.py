@@ -252,9 +252,19 @@ def _ensure_background_jobs_started() -> None:
         if _startup_done:
             return
         if not scheduler.running:
+            # next_run_time delayed a full interval: without this, APScheduler
+            # fires an interval job's FIRST run immediately on scheduler.start()
+            # -- meaning every restart ran this (the heaviest thing besides
+            # training: live candle+news fetch across every active ticker,
+            # feature engineering, an HF upload) TWICE back to back, once here
+            # and once via _runner()'s own direct startup call below. Confirmed
+            # live: instance restarts happening every ~2 minutes, right around
+            # an HF upload -- this redundant doubling made every boot heavier
+            # than it needed to be at exactly the moment memory is tightest.
             scheduler.add_job(
                 _run_perps_data_collect, "interval", minutes=PERPS_DATA_COLLECT_MINUTES,
                 id="perps_data_collect", replace_existing=True,
+                next_run_time=dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=PERPS_DATA_COLLECT_MINUTES),
             )
             scheduler.add_job(
                 _run_perps_train, "cron", hour=PERPS_TRAIN_HOUR_ET, minute=0,
