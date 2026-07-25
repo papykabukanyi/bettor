@@ -377,3 +377,115 @@ def test_load_training_dataset_stops_once_the_cap_is_covered(monkeypatch):
     result = schwab_data.load_training_dataset(max_rows=150)
     assert len(result) == 150
     assert len(downloaded) < len(shard_names)
+
+
+# ---------------------------------------------------------------------------
+# push_minute_snapshot -- must MERGE with whatever's already in today's HF
+# shard, never overwrite it. Real bug found and fixed: a straight overwrite
+# meant a symbol collected in an EARLIER cycle but no longer on the
+# (periodically re-ranked) watchlist would have its rows for today silently
+# destroyed by the next cycle's upload.
+# ---------------------------------------------------------------------------
+class _FakeHfApi:
+    """_upload_shard imports HfApi locally from huggingface_hub each call
+    (not via a schwab_data-level name) -- patch huggingface_hub.HfApi
+    itself, not schwab_data.HfApi (which the real code never reads)."""
+    captured_upload: dict = {}
+
+    def __init__(self, token=None):
+        pass
+
+    def upload_file(self, *, path_or_fileobj, path_in_repo, repo_id, repo_type, commit_message):
+        _FakeHfApi.captured_upload["df"] = pd.read_parquet(path_or_fileobj)
+        _FakeHfApi.captured_upload["path_in_repo"] = path_in_repo
+
+
+def test_push_minute_snapshot_merges_with_the_existing_shard(monkeypatch):
+    monkeypatch.setattr(schwab_data, "HF_API_KEY", "fake-token")
+    existing_df = pd.DataFrame({"symbol": ["AAPL"], "ts": [100], "close": [150.0]})
+
+    import tempfile
+    existing_path = tempfile.NamedTemporaryFile(suffix=".parquet", delete=False).name
+    existing_df.to_parquet(existing_path, index=False)
+
+    import huggingface_hub
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", lambda **kw: existing_path)
+    _FakeHfApi.captured_upload = {}
+    monkeypatch.setattr(huggingface_hub, "HfApi", _FakeHfApi)
+
+    new_df = pd.DataFrame({"symbol": ["MSFT"], "ts": [200], "close": [400.0]})
+    result = schwab_data.push_minute_snapshot(new_df)
+
+    assert result["ok"] is True
+    merged = _FakeHfApi.captured_upload["df"]
+    assert set(merged["symbol"]) == {"AAPL", "MSFT"}  # the symbol from the EARLIER cycle must survive
+
+
+def test_push_minute_snapshot_dedupes_overlapping_rows(monkeypatch):
+    monkeypatch.setattr(schwab_data, "HF_API_KEY", "fake-token")
+    existing_df = pd.DataFrame({"symbol": ["AAPL"], "ts": [100], "close": [150.0]})
+
+    import tempfile
+    existing_path = tempfile.NamedTemporaryFile(suffix=".parquet", delete=False).name
+    existing_df.to_parquet(existing_path, index=False)
+
+    import huggingface_hub
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", lambda **kw: existing_path)
+    _FakeHfApi.captured_upload = {}
+    monkeypatch.setattr(huggingface_hub, "HfApi", _FakeHfApi)
+
+    duplicate_df = pd.DataFrame({"symbol": ["AAPL"], "ts": [100], "close": [151.0]})  # same (symbol, ts) as existing
+    schwab_data.push_minute_snapshot(duplicate_df)
+
+    assert len(_FakeHfApi.captured_upload["df"]) == 1  # deduped, not doubled
+
+
+def test_push_minute_snapshot_starts_fresh_when_no_shard_exists_yet(monkeypatch):
+    monkeypatch.setattr(schwab_data, "HF_API_KEY", "fake-token")
+
+    import huggingface_hub
+
+    def fail(**kw):
+        raise RuntimeError("404 not found")
+
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", fail)
+    _FakeHfApi.captured_upload = {}
+    monkeypatch.setattr(huggingface_hub, "HfApi", _FakeHfApi)
+
+    new_df = pd.DataFrame({"symbol": ["AAPL"], "ts": [100], "close": [150.0]})
+    result = schwab_data.push_minute_snapshot(new_df)
+
+    assert result["ok"] is True
+    assert list(_FakeHfApi.captured_upload["df"]["symbol"]) == ["AAPL"]
+
+
+def test_push_minute_snapshot_returns_ok_false_without_an_hf_key(monkeypatch):
+    monkeypatch.setattr(schwab_data, "HF_API_KEY", "")
+    result = schwab_data.push_minute_snapshot(pd.DataFrame({"symbol": ["AAPL"], "ts": [1], "close": [1.0]}))
+    assert result == {"ok": False, "reason": "no_hf_api_key"}
+
+
+def test_push_minute_snapshot_returns_ok_false_for_an_empty_frame():
+    result = schwab_data.push_minute_snapshot(pd.DataFrame())
+    assert result == {"ok": False, "reason": "no_rows"}
+
+
+def test_get_symbols_with_daily_bars_lists_existing_daily_shards(monkeypatch):
+    monkeypatch.setattr(schwab_data, "HF_API_KEY", "fake-token")
+
+    class FakeApi:
+        def __init__(self, token=None):
+            pass
+
+        def list_repo_files(self, repo_id, repo_type):
+            return ["daily/AAPL.parquet", "daily/MSFT.parquet", "minute/2026-07-25.parquet", "README.md"]
+
+    import huggingface_hub
+    monkeypatch.setattr(huggingface_hub, "HfApi", FakeApi)
+    result = schwab_data.get_symbols_with_daily_bars()
+    assert result == {"AAPL", "MSFT"}
+
+
+def test_get_symbols_with_daily_bars_returns_empty_set_without_an_hf_key(monkeypatch):
+    monkeypatch.setattr(schwab_data, "HF_API_KEY", "")
+    assert schwab_data.get_symbols_with_daily_bars() == set()

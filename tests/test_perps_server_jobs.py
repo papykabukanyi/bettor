@@ -1,0 +1,107 @@
+"""Perps-server-specific job wiring + scheduler shutdown behavior. Generic
+job-locking mechanics (shared with schwab_server.py) are covered in
+test_server_common.py instead -- this file only tests things that are
+actually specific to perps_server.py: that its production job functions
+honor the live-trading dry_run gate, that its data-collect job refreshes the
+volatility-ranking cache off the request path, and that its scheduler
+shutdown handler is safe."""
+from __future__ import annotations
+
+import pandas as pd
+import pytest
+
+import perps_server
+
+
+def test_production_jobs_actually_honor_the_live_trading_flag(monkeypatch):
+    """perps_strategy's dry_run default is safe-by-default (None -> True)
+    specifically so ad-hoc/manual callers never go live by accident -- but
+    that means the REAL production scheduler must explicitly pass
+    dry_run=False, or KALSHI_PERPS_LIVE_TRADING_ENABLED=1 would silently do
+    nothing forever. Lock in that the three production entry points
+    (the two scheduled jobs + the manual tick handler) all pass it."""
+    from data import perps_strategy as strat
+
+    captured = {}
+    monkeypatch.setattr(strat, "manage_open_positions", lambda **kw: captured.setdefault("fast_check", kw) or {"action": "no_position"})
+    monkeypatch.setattr(strat, "scan_and_enter", lambda **kw: captured.setdefault("entry_scan", kw) or {"action": "none"})
+    monkeypatch.setattr(strat, "run_cycle", lambda **kw: captured.setdefault("manual_cycle", kw) or {})
+
+    perps_server._run_perps_fast_check.__wrapped__()  # noqa: SLF001
+    perps_server._run_perps_entry_scan.__wrapped__()  # noqa: SLF001
+    perps_server._run_perps_manual_cycle.__wrapped__()  # noqa: SLF001
+
+    assert captured["fast_check"].get("dry_run") is False
+    assert captured["entry_scan"].get("dry_run") is False
+    assert captured["manual_cycle"].get("dry_run") is False
+
+
+def test_data_collect_job_refreshes_ticker_activity_cache_off_the_request_path(monkeypatch):
+    """The volatility-ranking cache must only ever be refreshed from here
+    (a scheduled background job) -- confirmed live that refreshing it
+    inline from /api/status caused a fresh Render OOM, since that request
+    path could run concurrently with the startup training thread's own
+    full-size archive load right when memory is already tightest."""
+    from data import perps_data
+
+    calls = []
+    monkeypatch.setattr(perps_data, "refresh_ticker_activity_cache", lambda **kw: calls.append(kw))
+    monkeypatch.setattr(perps_data, "collect_dataset_rows", lambda: pd.DataFrame())
+
+    perps_server._run_perps_data_collect.__wrapped__()  # noqa: SLF001
+
+    assert len(calls) == 1
+
+
+def test_data_collect_job_still_collects_if_cache_refresh_fails(monkeypatch):
+    from data import perps_data
+
+    def fail():
+        raise RuntimeError("HF archive listing failed")
+
+    collected = []
+    monkeypatch.setattr(perps_data, "refresh_ticker_activity_cache", fail)
+    monkeypatch.setattr(perps_data, "collect_dataset_rows", lambda: collected.append(1) or pd.DataFrame())
+
+    perps_server._run_perps_data_collect.__wrapped__()  # noqa: SLF001
+
+    assert collected == [1]
+
+
+class _FakeScheduler:
+    def __init__(self, running, shutdown_fn=None):
+        self.running = running
+        self._shutdown_fn = shutdown_fn or (lambda **kw: None)
+
+    def shutdown(self, **kw):
+        return self._shutdown_fn(**kw)
+
+
+def test_shutdown_scheduler_stops_a_running_scheduler(monkeypatch):
+    """Confirmed live: on SIGTERM (a normal restart/redeploy), APScheduler's
+    own background thread could still be mid-cycle and try to submit a job
+    to its thread pool right as the interpreter tears it down, raising
+    "cannot schedule new futures after interpreter shutdown". Shutting the
+    scheduler down at exit prevents that race."""
+    calls = []
+    monkeypatch.setattr(perps_server, "scheduler", _FakeScheduler(True, lambda **kw: calls.append(kw)))
+    perps_server._shutdown_scheduler()
+    assert calls == [{"wait": False}]
+
+
+def test_shutdown_scheduler_is_a_noop_when_not_running(monkeypatch):
+    def fail_if_called(**kw):
+        raise AssertionError("must not call shutdown() on a scheduler that isn't running")
+
+    monkeypatch.setattr(perps_server, "scheduler", _FakeScheduler(False, fail_if_called))
+    perps_server._shutdown_scheduler()  # must not raise
+
+
+def test_shutdown_scheduler_swallows_errors(monkeypatch):
+    """This runs at interpreter shutdown -- it must never itself raise and
+    block/interfere with the process actually exiting."""
+    def raise_error(**kw):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(perps_server, "scheduler", _FakeScheduler(True, raise_error))
+    perps_server._shutdown_scheduler()  # must not raise

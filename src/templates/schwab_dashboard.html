@@ -57,7 +57,7 @@
     <span id="login-badge" class="badge warn">&nbsp;</span>
     <span id="mode-badge" class="badge dry">&nbsp;</span>
     <span id="session-badge" class="badge warn">&nbsp;</span>
-    <span class="navlink"><a href="/perps">&larr; Perps dashboard</a></span>
+    <span class="navlink"><a href="{{ perps_url }}">&larr; Perps dashboard</a></span>
   </div>
 </header>
 
@@ -105,6 +105,14 @@
       <thead><tr><th>Take Profit</th><th>Stop Loss</th><th>Max Hold</th><th>Trades</th><th>Win Rate</th><th>Return</th></tr></thead>
       <tbody id="sweep-body"><tr><td colspan="6" class="empty">No sweep yet -- runs automatically once the market is fully closed</td></tr></tbody>
     </table>
+  </div>
+</section>
+
+<section>
+  <h3>Historical Backfill &mdash; Full US Equity Universe (up to 20yr daily bars &rarr; Hugging Face)</h3>
+  <div class="grid" style="margin-bottom:0;">
+    <div class="card"><h2>Progress</h2><div id="backfill-progress" class="stat">--</div><div class="sub" id="backfill-sub">--</div></div>
+    <div class="card"><h2>Last Batch</h2><div id="backfill-batch" class="stat">--</div><div class="sub" id="backfill-batch-sub">--</div></div>
   </div>
 </section>
 
@@ -294,6 +302,20 @@ async function refreshStatus() {
         <td>${(r.win_rate * 100).toFixed(1)}%</td>
         <td class="${r.return_pct > 0 ? "stat pos" : r.return_pct < 0 ? "stat neg" : ""}" style="font-size:13px;font-weight:600;">${(r.return_pct * 100).toFixed(2)}%</td>`,
       6, "No sweep yet -- runs automatically once the market is fully closed");
+
+    const backfill = data.latest_backfill || {};
+    const doneCount = backfill.already_done;
+    const universeSize = backfill.universe_size;
+    document.getElementById("backfill-progress").textContent =
+      (doneCount !== undefined && universeSize) ? `${doneCount} / ${universeSize}` : "--";
+    document.getElementById("backfill-sub").textContent =
+      universeSize ? `${((doneCount / universeSize) * 100).toFixed(1)}% of full US equity universe archived` : "not started yet";
+    document.getElementById("backfill-batch").textContent =
+      backfill.action === "backfill_complete" ? "Complete" : (backfill.pushed !== undefined ? `+${backfill.pushed} symbols` : "--");
+    document.getElementById("backfill-batch-sub").textContent =
+      backfill.action === "backfill_complete" ? "full universe archived -- refreshing periodically"
+      : backfill.pushed !== undefined ? `${backfill.failed || 0} failed this batch · runs off-hours only`
+      : "runs automatically once the market is fully closed";
   } catch (e) { console.error("status refresh failed", e); }
 }
 

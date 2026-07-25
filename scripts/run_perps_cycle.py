@@ -3,7 +3,7 @@
 Deliberately ALWAYS dry-run, regardless of KALSHI_PERPS_LIVE_TRADING_ENABLED --
 this is the one guaranteed-safe way to inspect "what would the strategy do
 right now" without any risk of a real order, even after live trading has
-been enabled for the actual production scheduler (see dashboard.py's
+been enabled for the actual production scheduler (see perps_server.py's
 scheduled jobs and the /api/perps/tick endpoint, which honor that env var).
 
 Usage:

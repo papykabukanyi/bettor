@@ -1,4 +1,7 @@
-"""Kalshi Perps trading bot -- web dashboard + background scheduler.
+"""Kalshi Perps trading bot -- its OWN web dashboard + background scheduler,
+running as its own named server/process (kalshi_perps_server), completely
+separate from schwab_server.py. Nothing in this file imports schwab_* or
+knows Schwab exists.
 
 Single purpose: watch Kalshi's most active AND most volatile perp
 instruments (see perps_data.get_watchlist() -- ranked live by 24h volume +
@@ -11,7 +14,7 @@ at POSITION_SIZE_PCT of current balance, using each market's own embedded
 leverage), opens dry-run-by-default positions when the technical signal and
 the model agree, and takes profit per portion -- compounding as it grows.
 
-Four background jobs, each cross-process locked (see `_locked_job`) so a
+Four background jobs, each cross-process locked (see server_common.py) so a
 single `--workers 1` gunicorn process never runs a job twice concurrently:
   - perps_fast_check    every PERPS_FAST_CHECK_SECONDS  -- ONLY manages an
                                                             existing position
@@ -21,7 +24,7 @@ single `--workers 1` gunicorn process never runs a job twice concurrently:
                                                             "take profit fast
                                                             on a quick move"
                                                             loop
-  - perps_entry_scan    every PERPS_CYCLE_MINUTES        -- full 16-instrument
+  - perps_entry_scan    every PERPS_CYCLE_MINUTES        -- full watchlist
                                                             scan for a NEW
                                                             entry (skips if a
                                                             position is
@@ -34,8 +37,6 @@ from __future__ import annotations
 
 import atexit
 import datetime as dt
-import functools
-import json
 import logging
 import os
 import sys
@@ -45,21 +46,16 @@ from pathlib import Path
 from typing import Any
 
 from apscheduler.schedulers.background import BackgroundScheduler
-from flask import Flask, jsonify, redirect, render_template, request
+from flask import Flask, jsonify, render_template, request
 
 SRC_DIR = Path(__file__).resolve().parent
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from config import et_today
-from data import (
-    perps_data, perps_model, perps_strategy, schwab_backtest, schwab_client, schwab_data, schwab_model, schwab_strategy,
-)
+from data import perps_data, perps_model, perps_strategy
 from data.kalshi_perps import get_margin_balance, get_margin_enabled, get_margin_exchange_status, get_margin_positions
-
-ROOT_DIR = Path(__file__).resolve().parents[1]
-DATA_DIR = ROOT_DIR / "data"
-DATA_DIR.mkdir(parents=True, exist_ok=True)
+from server_common import DATA_DIR, is_cron_authorized, load_json, make_job_lock, save_json
 
 PERPS_CYCLE_MINUTES = max(1, int(os.getenv("PERPS_CYCLE_MINUTES", "2") or "2"))
 PERPS_FAST_CHECK_SECONDS = max(5, int(os.getenv("PERPS_FAST_CHECK_SECONDS", "20") or "20"))
@@ -87,29 +83,20 @@ PERPS_STARTUP_GRACE_SECONDS = max(0, int(os.getenv("PERPS_STARTUP_GRACE_SECONDS"
 # to run continuously, and dry-run cycles place no real orders.
 ENABLE_PERPS_SCHEDULER = str(os.getenv("ENABLE_PERPS_SCHEDULER", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
 DASHBOARD_LOCAL_AUTORUN = str(os.getenv("DASHBOARD_LOCAL_AUTORUN", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
-
-# --- Schwab stock pipeline scheduler -- entirely separate from the perps
-# jobs above; a failure here (e.g. OAuth login not completed yet) must
-# never affect perps scheduling. ---
-SCHWAB_CYCLE_MINUTES = max(1, int(os.getenv("SCHWAB_CYCLE_MINUTES", "2") or "2"))
-SCHWAB_FAST_CHECK_SECONDS = max(5, int(os.getenv("SCHWAB_FAST_CHECK_SECONDS", "20") or "20"))
-SCHWAB_DATA_COLLECT_MINUTES = max(5, int(os.getenv("SCHWAB_DATA_COLLECT_MINUTES", "15") or "15"))
-# One hour after the perps train job (3am ET default) so the two heaviest
-# operations this process does don't both land in the same memory-pressure
-# window on a 512MB dyno.
-SCHWAB_TRAIN_HOUR_ET = int(os.getenv("SCHWAB_TRAIN_HOUR_ET", "4") or "4")
-# Checked every 30 min so it picks up the fully-closed window promptly
-# (nights + weekends) -- a no-op the rest of the time (see
-# _run_schwab_intensive_training's own docstring for why).
-SCHWAB_INTENSIVE_TRAINING_MINUTES = max(10, int(os.getenv("SCHWAB_INTENSIVE_TRAINING_MINUTES", "30") or "30"))
-ENABLE_SCHWAB_SCHEDULER = str(os.getenv("ENABLE_SCHWAB_SCHEDULER", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
+# Cross-link to the separately-deployed Schwab server -- unknown at build
+# time (a different Render service gets its own generated hostname), so
+# this is filled in via an env var once that service exists rather than
+# hardcoded. Falls back to "#" (dead link, not a guess) if unset.
+SCHWAB_SERVER_URL = os.getenv("SCHWAB_SERVER_URL", "#")
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
-app = Flask(__name__, template_folder="templates")
+app = Flask("kalshi_perps_server", template_folder="templates")
 scheduler = BackgroundScheduler(timezone="America/New_York")
 _startup_lock = threading.Lock()
 _startup_done = False
+
+_locked_job = make_job_lock(DATA_DIR / "perps_job_run_history.json", DATA_DIR / "perps_locks")
 
 # Confirmed live: on SIGTERM (a normal restart/redeploy), gunicorn's worker
 # begins interpreter shutdown while APScheduler's own background thread --
@@ -127,7 +114,8 @@ def _shutdown_scheduler() -> None:
         if scheduler.running:
             scheduler.shutdown(wait=False)
     except Exception:
-        logger.exception("[dashboard] error shutting down scheduler at exit")
+        logger.exception("[perps_server] error shutting down scheduler at exit")
+
 
 # `/api/status` used to make 3 sequential blocking Kalshi calls on every
 # dashboard poll (every 10s from the browser). Worst case (each near its own
@@ -180,153 +168,10 @@ def _cached_account_snapshot() -> dict[str, Any]:
     return snapshot
 
 
-# Same reasoning as _cached_account_snapshot -- the dashboard polls
-# /api/schwab/status every 10s, and get_market_session() can make a real
-# Schwab API call. Market session doesn't change within any given minute,
-# so a short cache keeps that poll cheap regardless of refresh rate
-# (confirmed live elsewhere this session: an uncached expensive call
-# inline in a status endpoint caused a real Render OOM for the perps bot).
-_MARKET_SESSION_CACHE: dict[str, Any] = {}
-_MARKET_SESSION_CACHE_TS = 0.0
-_MARKET_SESSION_CACHE_LOCK = threading.Lock()
-_MARKET_SESSION_CACHE_TTL_SEC = 60
-
-
-def _cached_market_session() -> dict[str, Any]:
-    global _MARKET_SESSION_CACHE, _MARKET_SESSION_CACHE_TS
-    now = time.monotonic()
-    with _MARKET_SESSION_CACHE_LOCK:
-        if _MARKET_SESSION_CACHE and (now - _MARKET_SESSION_CACHE_TS) < _MARKET_SESSION_CACHE_TTL_SEC:
-            return dict(_MARKET_SESSION_CACHE)
-    session = schwab_data.get_market_session()
-    with _MARKET_SESSION_CACHE_LOCK:
-        _MARKET_SESSION_CACHE = dict(session)
-        _MARKET_SESSION_CACHE_TS = time.monotonic()
-    return session
-
-# ---------------------------------------------------------------------------
-# Cross-process job lock + run history
-# ---------------------------------------------------------------------------
-JOB_LOCK_DIR = DATA_DIR / "locks"
-JOB_HISTORY_FILE = DATA_DIR / "job_run_history.json"
-JOB_HISTORY_MAX = 200
+JOB_HISTORY_FILE = DATA_DIR / "perps_job_run_history.json"
 LATEST_CYCLE_FILE = DATA_DIR / "perps_latest_cycle.json"
 LATEST_POSITION_CHECK_FILE = DATA_DIR / "perps_latest_position_check.json"
-SCHWAB_LATEST_CYCLE_FILE = DATA_DIR / "schwab_latest_cycle.json"
-SCHWAB_LATEST_POSITION_CHECK_FILE = DATA_DIR / "schwab_latest_position_check.json"
-SCHWAB_LATEST_SWEEP_FILE = DATA_DIR / "schwab_latest_sweep.json"
-
-
-def _load_json(path: Path, default: Any) -> Any:
-    try:
-        with path.open("r", encoding="utf-8") as handle:
-            return json.load(handle)
-    except Exception:
-        return default
-
-
-def _save_json(path: Path, payload: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as handle:
-        json.dump(payload, handle, indent=2, default=str)
-
-
-def _append_job_history(name: str, record: dict[str, Any]) -> None:
-    try:
-        history = _load_json(JOB_HISTORY_FILE, [])
-        if not isinstance(history, list):
-            history = []
-        history.append({"job": name, **record})
-        history = history[-JOB_HISTORY_MAX:]
-        _save_json(JOB_HISTORY_FILE, history)
-    except Exception as exc:
-        logger.debug("job history append failed for %s: %s", name, exc)
-
-
-def _summarize_job_result(result: Any) -> dict[str, Any]:
-    if not isinstance(result, dict):
-        return {}
-    keys = ("action", "ticker", "realized_pnl_usd", "rows_written", "hf_uploaded", "rows", "model_type")
-    return {k: result[k] for k in keys if k in result}
-
-
-def _locked_job(name: str, stale_after_sec: int = 600):
-    """Only one process-wide caller of this job runs at a time. A second
-    caller while the lock is held skips immediately rather than blocking or
-    running in parallel -- important once this job can place real orders."""
-    def decorator(fn):
-        @functools.wraps(fn)
-        def wrapper(*args, **kwargs):
-            JOB_LOCK_DIR.mkdir(parents=True, exist_ok=True)
-            lock_path = JOB_LOCK_DIR / f"{name}.lock"
-            acquired = False
-            try:
-                fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                os.write(fd, f"{os.getpid()}:{time.time()}".encode("utf-8"))
-                os.close(fd)
-                acquired = True
-            except FileExistsError:
-                try:
-                    age = time.time() - lock_path.stat().st_mtime
-                except Exception:
-                    age = 0.0
-                if age > stale_after_sec:
-                    try:
-                        lock_path.unlink()
-                        fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                        os.write(fd, f"{os.getpid()}:{time.time()}".encode("utf-8"))
-                        os.close(fd)
-                        acquired = True
-                    except Exception:
-                        acquired = False
-                else:
-                    acquired = False
-
-            if not acquired:
-                logger.warning("[lock] %s already running elsewhere, skipping this call", name)
-                _append_job_history(name, {
-                    "status": "skipped_concurrent",
-                    "started_at": dt.datetime.now(dt.timezone.utc).isoformat(),
-                })
-                return {"ok": True, "skipped": True, "reason": "already_running"}
-
-            started = dt.datetime.now(dt.timezone.utc)
-            try:
-                result = fn(*args, **kwargs)
-                finished = dt.datetime.now(dt.timezone.utc)
-                _append_job_history(name, {
-                    "status": "ok" if (not isinstance(result, dict) or result.get("ok", True)) else "failed",
-                    "started_at": started.isoformat(),
-                    "finished_at": finished.isoformat(),
-                    "duration_sec": round((finished - started).total_seconds(), 1),
-                    "summary": _summarize_job_result(result),
-                })
-                return result
-            except Exception as exc:
-                finished = dt.datetime.now(dt.timezone.utc)
-                _append_job_history(name, {
-                    "status": "error",
-                    "started_at": started.isoformat(),
-                    "finished_at": finished.isoformat(),
-                    "duration_sec": round((finished - started).total_seconds(), 1),
-                    "error": str(exc),
-                })
-                raise
-            finally:
-                try:
-                    lock_path.unlink()
-                except Exception:
-                    pass
-        return wrapper
-    return decorator
-
-
-def _is_cron_authorized() -> bool:
-    secret = str(os.getenv("CRON_SECRET", "") or "").strip()
-    if not secret:
-        return True
-    auth = str(request.headers.get("authorization") or "")
-    return auth == f"Bearer {secret}"
+JOB_LOCK_DIR = DATA_DIR / "perps_locks"
 
 
 # ---------------------------------------------------------------------------
@@ -342,14 +187,14 @@ def _run_perps_fast_check() -> dict[str, Any]:
     # (which a caller-side default of None/True would otherwise do).
     result = perps_strategy.manage_open_positions(dry_run=False)
     if result.get("action") != "no_position":
-        _save_json(LATEST_POSITION_CHECK_FILE, result)
+        save_json(LATEST_POSITION_CHECK_FILE, result)
     return result
 
 
 @_locked_job("perps_entry_scan", stale_after_sec=300)
 def _run_perps_entry_scan() -> dict[str, Any]:
     result = perps_strategy.scan_and_enter(dry_run=False)  # see _run_perps_fast_check
-    _save_json(LATEST_CYCLE_FILE, result)
+    save_json(LATEST_CYCLE_FILE, result)
     return result
 
 
@@ -359,8 +204,8 @@ def _run_perps_manual_cycle() -> dict[str, Any]:
     the manual tick endpoint and scripts/run_perps_cycle.py -- production
     scheduling always uses the split fast/slow jobs above instead."""
     result = perps_strategy.run_cycle(dry_run=False)  # see _run_perps_fast_check
-    _save_json(LATEST_POSITION_CHECK_FILE, result.get("position_management") or {})
-    _save_json(LATEST_CYCLE_FILE, result.get("entry_scan") or {})
+    save_json(LATEST_POSITION_CHECK_FILE, result.get("position_management") or {})
+    save_json(LATEST_CYCLE_FILE, result.get("entry_scan") or {})
     return result
 
 
@@ -371,7 +216,7 @@ def _run_perps_data_collect() -> dict[str, Any]:
     try:
         perps_data.refresh_ticker_activity_cache()
     except Exception:
-        logger.exception("[dashboard] ticker activity cache refresh failed")
+        logger.exception("[perps_server] ticker activity cache refresh failed")
     df = perps_data.collect_dataset_rows()
     if df.empty:
         return {"ok": False, "reason": "no_rows_collected"}
@@ -381,79 +226,6 @@ def _run_perps_data_collect() -> dict[str, Any]:
 @_locked_job("perps_train", stale_after_sec=1800)
 def _run_perps_train() -> dict[str, Any]:
     return perps_model.train_model()
-
-
-@_locked_job("schwab_fast_check", stale_after_sec=60)
-def _run_schwab_fast_check() -> dict[str, Any]:
-    result = schwab_strategy.manage_open_positions()
-    if result.get("action") != "no_position":
-        _save_json(SCHWAB_LATEST_POSITION_CHECK_FILE, result)
-    return result
-
-
-@_locked_job("schwab_entry_scan", stale_after_sec=300)
-def _run_schwab_entry_scan() -> dict[str, Any]:
-    result = schwab_strategy.scan_and_enter()
-    _save_json(SCHWAB_LATEST_CYCLE_FILE, result)
-    return result
-
-
-@_locked_job("schwab_data_collect", stale_after_sec=600)
-def _run_schwab_data_collect() -> dict[str, Any]:
-    """Collects the live watchlist (top symbols by real recent volume +
-    volatility -- see schwab_data.get_stock_watchlist) every
-    SCHWAB_DATA_COLLECT_MINUTES. Entirely separate from perps_data_collect;
-    a failure here (e.g. Schwab OAuth login not completed yet) is caught
-    and reported, never allowed to affect the perps jobs."""
-    try:
-        recent = schwab_data.load_training_dataset(max_rows=20_000)
-        watchlist = schwab_data.get_stock_watchlist(recent if not recent.empty else None)
-        df = schwab_data.collect_dataset_rows(watchlist)
-        if df.empty:
-            return {"ok": False, "reason": "no_rows_collected"}
-        return schwab_data.push_minute_snapshot(df)
-    except Exception as exc:
-        logger.warning("[dashboard] schwab data collect failed: %s", exc)
-        return {"ok": False, "error": str(exc)}
-
-
-@_locked_job("schwab_train", stale_after_sec=1800)
-def _run_schwab_train() -> dict[str, Any]:
-    return schwab_model.train_model()
-
-
-@_locked_job("schwab_intensive_training", stale_after_sec=1800)
-def _run_schwab_intensive_training() -> dict[str, Any]:
-    """Off-hours-only: while the market is fully closed (nights, weekends),
-    use the idle time to retrain + run a small backtest sweep over recent
-    real data, so a well-tuned strategy is ready to go the moment the
-    market reopens, instead of that heavy lifting only ever happening once
-    a day or competing with live trading checks. A no-op (not an error)
-    whenever the market isn't fully closed -- scheduled frequently on
-    purpose so it picks up the closed window promptly, not just once."""
-    session = schwab_data.get_market_session()
-    if session["session"] != "closed":
-        return {"ok": True, "skipped": True, "reason": "market_not_closed", "session": session["session"]}
-
-    train_result = schwab_model.train_model()
-
-    sweep_result = None
-    try:
-        df = schwab_data.load_training_dataset()
-        if not df.empty:
-            cutoff_ts = df["ts"].quantile(0.7)
-            train_df = df[df["ts"] < cutoff_ts]
-            test_df = df[df["ts"] >= cutoff_ts]
-            fitted = schwab_backtest.fit_backtest_model(train_df)
-            test_with_preds = schwab_backtest.add_model_predictions(test_df, fitted)
-            sweep_result = schwab_backtest.run_config_sweep(
-                test_with_preds, starting_balance=schwab_strategy.SIMULATE_STARTING_BALANCE,
-            )
-            _save_json(SCHWAB_LATEST_SWEEP_FILE, sweep_result)
-    except Exception as exc:
-        logger.warning("[dashboard] schwab intensive backtest sweep failed: %s", exc)
-
-    return {"ok": True, "train_result": train_result, "sweep_result": sweep_result}
 
 
 def _ensure_background_jobs_started() -> None:
@@ -482,32 +254,6 @@ def _ensure_background_jobs_started() -> None:
                 scheduler.add_job(
                     _run_perps_entry_scan, "interval", minutes=PERPS_CYCLE_MINUTES,
                     id="perps_entry_scan", replace_existing=True,
-                    next_run_time=dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=PERPS_STARTUP_GRACE_SECONDS),
-                )
-            if ENABLE_SCHWAB_SCHEDULER:
-                scheduler.add_job(
-                    _run_schwab_data_collect, "interval", minutes=SCHWAB_DATA_COLLECT_MINUTES,
-                    id="schwab_data_collect", replace_existing=True,
-                )
-                scheduler.add_job(
-                    _run_schwab_train, "cron", hour=SCHWAB_TRAIN_HOUR_ET, minute=0,
-                    id="schwab_train", replace_existing=True,
-                )
-                scheduler.add_job(
-                    _run_schwab_intensive_training, "interval", minutes=SCHWAB_INTENSIVE_TRAINING_MINUTES,
-                    id="schwab_intensive_training", replace_existing=True,
-                )
-                scheduler.add_job(
-                    _run_schwab_fast_check, "interval", seconds=SCHWAB_FAST_CHECK_SECONDS,
-                    id="schwab_fast_check", replace_existing=True,
-                )
-                # Same rolling-deploy collision guard as perps_entry_scan --
-                # see PERPS_STARTUP_GRACE_SECONDS's own comment for why a
-                # freshly-booted instance must not scan for a new entry the
-                # instant it starts.
-                scheduler.add_job(
-                    _run_schwab_entry_scan, "interval", minutes=SCHWAB_CYCLE_MINUTES,
-                    id="schwab_entry_scan", replace_existing=True,
                     next_run_time=dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=PERPS_STARTUP_GRACE_SECONDS),
                 )
             scheduler.start()
@@ -550,7 +296,7 @@ def _ensure_background_jobs_started() -> None:
             # ever made the collision window worse, never faster in any way
             # that mattered (2 minutes vs waiting for the grace period).
 
-        threading.Thread(target=_runner, daemon=True, name="dashboard-perps-startup-autorun").start()
+        threading.Thread(target=_runner, daemon=True, name="perps-server-startup-autorun").start()
         _startup_done = True
 
 
@@ -565,55 +311,15 @@ def _bootstrap_background_jobs() -> None:
 @app.route("/")
 @app.route("/perps")
 def index():
-    """Both "/" and "/perps" serve the same perps dashboard -- "/" stays as
-    a stable default landing page, "/perps" exists so it's reachable by the
-    same naming convention as "/schwab" rather than only implicitly."""
-    return render_template("dashboard.html")
-
-
-@app.route("/schwab")
-def schwab_dashboard():
-    """Separate dashboard page for the Schwab stock pipeline -- deliberately
-    its own template/route rather than a tab on the perps page, per the
-    explicit ask for two independent dashboards."""
-    return render_template("schwab_dashboard.html")
-
-
-@app.route("/schwab/authorize")
-def schwab_authorize():
-    """Convenience redirect to Schwab's own login page -- the actual
-    authorization step is a real interactive Schwab login (with 2FA) that
-    nothing here can do on the account owner's behalf."""
-    return redirect(schwab_client.get_authorization_url())
-
-
-@app.route("/schcallback")
-def schwab_callback():
-    """Registered as this Schwab app's OAuth redirect_uri. Schwab lands the
-    browser here with ?code=... right after a successful interactive login;
-    exchanged immediately for an access+refresh token pair, which are then
-    mirrored to HF (see schwab_client.py) so a Render restart doesn't lose
-    them and force a fresh login."""
-    error = request.args.get("error")
-    if error:
-        return jsonify({"ok": False, "error": error}), 400
-    code = request.args.get("code")
-    if not code:
-        return jsonify({"ok": False, "error": "missing_code"}), 400
-    try:
-        schwab_client.exchange_code_for_tokens(code)
-    except Exception as exc:
-        logger.exception("[dashboard] schwab token exchange failed")
-        return jsonify({"ok": False, "error": str(exc)}), 500
-    return jsonify({"ok": True, "message": "Schwab account linked. You can close this tab."})
+    return render_template("dashboard.html", schwab_url=SCHWAB_SERVER_URL)
 
 
 @app.route("/api/status")
 def api_status():
     state = perps_strategy._load_state()  # noqa: SLF001
     _, meta = perps_model.load_model()
-    latest_cycle = _load_json(LATEST_CYCLE_FILE, {})
-    latest_position_check = _load_json(LATEST_POSITION_CHECK_FILE, {})
+    latest_cycle = load_json(LATEST_CYCLE_FILE, {})
+    latest_position_check = load_json(LATEST_POSITION_CHECK_FILE, {})
     account = _cached_account_snapshot()
 
     realized_pnl_by_date = state.get("realized_pnl_by_date") or {}
@@ -693,13 +399,13 @@ def api_perps_tick():
     """Manually force an immediate full cycle (fast exit check, then entry
     scan if nothing was open) instead of waiting for the next scheduled
     interval."""
-    if not _is_cron_authorized():
+    if not is_cron_authorized(request):
         return jsonify({"ok": False, "error": "Unauthorized"}), 401
     try:
         result = _run_perps_manual_cycle()
         return jsonify(result)
     except Exception as exc:
-        logger.exception("[dashboard] manual perps tick failed: %s", exc)
+        logger.exception("[perps_server] manual perps tick failed: %s", exc)
         return jsonify({"ok": False, "error": str(exc)}), 500
 
 
@@ -707,7 +413,7 @@ def api_perps_tick():
 def api_perps_fast_check():
     """Manually force an immediate position exit check only (what the fast
     loop does every PERPS_FAST_CHECK_SECONDS)."""
-    if not _is_cron_authorized():
+    if not is_cron_authorized(request):
         return jsonify({"ok": False, "error": "Unauthorized"}), 401
     try:
         return jsonify(_run_perps_fast_check())
@@ -715,86 +421,9 @@ def api_perps_fast_check():
         return jsonify({"ok": False, "error": str(exc)}), 500
 
 
-@app.route("/api/schwab/status")
-def api_schwab_status():
-    state = schwab_strategy._load_state()  # noqa: SLF001
-    _, meta = schwab_model.load_model()
-    latest_cycle = _load_json(SCHWAB_LATEST_CYCLE_FILE, {})
-    latest_position_check = _load_json(SCHWAB_LATEST_POSITION_CHECK_FILE, {})
-    latest_sweep = _load_json(SCHWAB_LATEST_SWEEP_FILE, {})
-    try:
-        market_session = _cached_market_session()
-    except Exception:
-        market_session = {"session": "unknown", "is_open": False, "source": "error"}
-
-    realized_pnl_by_date = state.get("realized_pnl_by_date") or {}
-    total_realized_pnl = round(sum(float(v) for v in realized_pnl_by_date.values()), 6)
-    positions = [
-        {**p, **schwab_strategy.position_exit_levels(p)}
-        for p in (state.get("positions") or [])
-    ]
-    logged_in = False
-    try:
-        logged_in = schwab_client.get_valid_access_token() is not None
-    except Exception:
-        logged_in = False
-
-    return jsonify({
-        "ok": True,
-        "now": dt.datetime.now(dt.timezone.utc).isoformat(),
-        "mode": schwab_strategy.MODE,
-        "live_trading_enabled": schwab_strategy.LIVE_TRADING_ENABLED,
-        "schwab_logged_in": logged_in,
-        "balance": state.get("balance", schwab_strategy.SIMULATE_STARTING_BALANCE),
-        "available_balance": schwab_strategy.get_available_balance() if schwab_strategy.MODE == "simulate" else None,
-        "positions": positions,
-        "open_position_count": len(positions),
-        "max_concurrent_positions": schwab_strategy.MAX_CONCURRENT_POSITIONS,
-        "today_realized_pnl_usd": float(realized_pnl_by_date.get(et_today().isoformat(), 0.0)),
-        "total_realized_pnl_usd": total_realized_pnl,
-        "trade_count": len(state.get("trade_log") or []),
-        "model": {
-            "trained": meta is not None,
-            "model_type": (meta or {}).get("model_type"),
-            "trained_at": (meta or {}).get("trained_at"),
-            "rows": (meta or {}).get("rows"),
-            "scores": (meta or {}).get("scores"),
-        },
-        "latest_cycle": latest_cycle,
-        "latest_position_check": latest_position_check,
-        "latest_sweep": latest_sweep,
-        "market_session": market_session,
-        "params": {
-            "position_size_pct": schwab_strategy.POSITION_SIZE_PCT,
-            "max_concurrent_positions": schwab_strategy.MAX_CONCURRENT_POSITIONS,
-            "take_profit_pct": schwab_strategy.TAKE_PROFIT_PCT,
-            "stop_loss_pct": schwab_strategy.STOP_LOSS_PCT,
-            "max_hold_minutes": schwab_strategy.MAX_HOLD_MINUTES,
-            "daily_loss_cap_pct": schwab_strategy.DAILY_LOSS_CAP_PCT,
-            "model_confidence_min": schwab_strategy.MODEL_CONFIDENCE_MIN,
-            "min_volume_z": schwab_strategy.MIN_VOLUME_Z,
-            "min_volatility_ratio": schwab_strategy.MIN_VOLATILITY_RATIO,
-            "fast_check_seconds": SCHWAB_FAST_CHECK_SECONDS,
-            "entry_scan_minutes": SCHWAB_CYCLE_MINUTES,
-        },
-    })
-
-
-@app.route("/api/schwab/trades")
-def api_schwab_trades():
-    state = schwab_strategy._load_state()  # noqa: SLF001
-    trade_log = list(reversed(state.get("trade_log") or []))
-    return jsonify({
-        "ok": True,
-        "trade_count": len(trade_log),
-        "realized_pnl_by_date": state.get("realized_pnl_by_date") or {},
-        "trades": trade_log[:200],
-    })
-
-
 @app.route("/api/perps/collect", methods=["GET", "POST"])
 def api_perps_collect():
-    if not _is_cron_authorized():
+    if not is_cron_authorized(request):
         return jsonify({"ok": False, "error": "Unauthorized"}), 401
     try:
         return jsonify(_run_perps_data_collect())
@@ -804,7 +433,7 @@ def api_perps_collect():
 
 @app.route("/api/perps/train", methods=["GET", "POST"])
 def api_perps_train():
-    if not _is_cron_authorized():
+    if not is_cron_authorized(request):
         return jsonify({"ok": False, "error": "Unauthorized"}), 401
     try:
         return jsonify(_run_perps_train())
@@ -818,17 +447,12 @@ _JOB_LABELS = {
     "perps_manual_cycle": "Manual full cycle",
     "perps_data_collect": f"Data collection -> HF (every {PERPS_DATA_COLLECT_MINUTES} min)",
     "perps_train": f"Model retrain (daily {PERPS_TRAIN_HOUR_ET:02d}:00 ET)",
-    "schwab_data_collect": f"Schwab stock data collection -> HF (every {SCHWAB_DATA_COLLECT_MINUTES} min)",
-    "schwab_train": f"Schwab model retrain (daily {SCHWAB_TRAIN_HOUR_ET:02d}:00 ET)",
-    "schwab_intensive_training": f"Schwab off-hours intensive training + sweep (checked every {SCHWAB_INTENSIVE_TRAINING_MINUTES} min, runs only while market is closed)",
-    "schwab_fast_check": f"Schwab fast exit check (every {SCHWAB_FAST_CHECK_SECONDS}s)",
-    "schwab_entry_scan": f"Schwab entry scan (every {SCHWAB_CYCLE_MINUTES} min)",
 }
 
 
 @app.route("/api/server/activity")
 def server_activity():
-    history = _load_json(JOB_HISTORY_FILE, [])
+    history = load_json(JOB_HISTORY_FILE, [])
     if not isinstance(history, list):
         history = []
     recent = list(reversed(history[-60:]))

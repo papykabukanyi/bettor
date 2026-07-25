@@ -19,7 +19,7 @@ if str(SRC_DIR) not in sys.path:
 
 
 def _load_dotenv() -> None:
-    """Minimal .env loader (mirrors dashboard.py's) so this script works
+    """Minimal .env loader (mirrors perps_server.py's) so this script works
     standalone without needing the full dashboard import."""
     import os
 

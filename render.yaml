@@ -1,4 +1,14 @@
 services:
+  # --------------------------------------------------------------------
+  # Kalshi Perps -- the ORIGINAL, still-live service. Its name is left
+  # UNCHANGED on purpose: Render's Blueprint sync matches services by
+  # `name`, and this one already has a real public URL
+  # (bettor-00di.onrender.com) that real money / the Kalshi OAuth-adjacent
+  # config depends on. Only startCommand changed, from the old combined
+  # dashboard:app to the new perps-only perps_server:app -- same process
+  # shape (one gunicorn worker, one in-process APScheduler), just pointed
+  # at the extracted module.
+  # --------------------------------------------------------------------
   - type: web
     name: bettor-dashboard
     env: python
@@ -15,8 +25,8 @@ services:
     # worker killed + restarted by gunicorn's arbiter, which re-ran the
     # whole startup sequence (scheduler rebuilt from scratch) and showed up
     # as the dashboard "losing everything" every so often. Caching in
-    # dashboard.py fixes the underlying slowness; this is defense-in-depth.
-    startCommand: gunicorn --chdir src dashboard:app --bind 0.0.0.0:$PORT --workers 1 --threads 1 --timeout 60
+    # perps_server.py fixes the underlying slowness; this is defense-in-depth.
+    startCommand: gunicorn --chdir src perps_server:app --bind 0.0.0.0:$PORT --workers 1 --threads 1 --timeout 60
     autoDeploy: true
     envVars:
       - key: PYTHON_VERSION
@@ -40,3 +50,52 @@ services:
       # this graduated from dry-run-only to the deployed default.
       - key: PERPS_ENABLE_SHORTS
         value: "1"
+      # Cross-link to the Schwab service's dashboard, shown as a nav link
+      # on this one. Render doesn't expose a way to reference ANOTHER
+      # service's public URL from within a blueprint, so this has to be
+      # filled in manually (Render dashboard -> this service -> Environment)
+      # once bettor-schwab's real onrender.com URL is known -- it doesn't
+      # exist until that service's first deploy completes. Left unset here
+      # (falls back to a dead "#" link) rather than guessed at.
+      - key: SCHWAB_SERVER_URL
+        sync: false
+
+  # --------------------------------------------------------------------
+  # Charles Schwab stocks -- a BRAND NEW service, deliberately separate
+  # from bettor-dashboard above: its own process, own gunicorn worker, own
+  # APScheduler, own public URL. This is what makes the two bots
+  # genuinely independent servers rather than routes sharing one process
+  # (a crash, OOM, or redeploy on one side can no longer take the other
+  # down with it).
+  # --------------------------------------------------------------------
+  - type: web
+    name: bettor-schwab
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    # Same single-worker reasoning as bettor-dashboard: this process places
+    # real Schwab orders via its own in-process scheduler, so more than one
+    # worker would mean duplicate order placement.
+    startCommand: gunicorn --chdir src schwab_server:app --bind 0.0.0.0:$PORT --workers 1 --threads 1 --timeout 60
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: HF_STOCK_DATASET_REPO
+        value: papylove/schwab-data
+      - key: HF_STOCK_MODEL_REPO
+        value: papylove/schwab-model
+      # Cross-link to the Perps service's dashboard (nav link the other
+      # direction). Same manual-fill caveat as SCHWAB_SERVER_URL above --
+      # bettor-dashboard's URL is already known (bettor-00di.onrender.com)
+      # so this can actually be set right away.
+      - key: PERPS_SERVER_URL
+        sync: false
+      # Secrets (SCHWAB_CLIENT_ID, SCHWAB_CLIENT_SECRET, SCHWAB_REDIRECT_URI,
+      # HF_API_KEY, SCHWAB_LIVE_TRADING_ENABLED, ...) stay manually set in
+      # the Render dashboard's Environment tab -- never put secrets or the
+      # live-trading toggle in a git-tracked file. SCHWAB_REDIRECT_URI in
+      # particular MUST be updated (here AND in Schwab's own developer
+      # portal app registration) to point at THIS service's own
+      # /schcallback once its public URL is known -- it cannot reuse
+      # bettor-dashboard's callback URL.

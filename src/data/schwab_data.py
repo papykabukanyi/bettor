@@ -339,15 +339,56 @@ def push_daily_snapshot(symbol: str, df: pd.DataFrame) -> dict[str, Any]:
     return _upload_shard(df, path_in_repo=f"daily/{symbol}.parquet", commit_message=f"update daily bars: {symbol}")
 
 
+def get_symbols_with_daily_bars() -> set[str]:
+    """Symbols that already have a daily-bar parquet on HF -- makes the full-
+    universe historical backfill resumable across restarts/deploys/off-hours
+    windows instead of re-fetching every symbol from scratch each run."""
+    if not HF_API_KEY:
+        return set()
+    try:
+        from huggingface_hub import HfApi
+        api = HfApi(token=HF_API_KEY)
+        files = api.list_repo_files(repo_id=HF_STOCK_DATASET_REPO, repo_type="dataset")
+        return {f[len("daily/"):-len(".parquet")] for f in files if f.startswith("daily/") and f.endswith(".parquet")}
+    except Exception as exc:
+        logger.warning("[schwab_data] could not list existing daily shards: %s", exc)
+        return set()
+
+
 def push_minute_snapshot(df: pd.DataFrame) -> dict[str, Any]:
     """Minute bars are sharded by calendar day across ALL symbols in one
     file (matching the Kalshi perps archive's data/YYYY-MM-DD.parquet
     convention) -- there are far more of these than daily bars, and today's
-    shard is what a live collection job appends/dedupes into repeatedly."""
+    shard is what a live collection job appends/dedupes into repeatedly.
+
+    Real bug fixed here: this used to upload `df` directly, OVERWRITING
+    today's whole shard with only the current cycle's watchlist -- any
+    symbol that was in an EARLIER cycle's watchlist but has since dropped
+    out (the ranking refreshes periodically) would have its already-
+    collected rows for today silently destroyed by the next cycle's
+    upload. Now downloads whatever's already there first and merges/dedupes
+    (same discipline as perps_data.push_dataset_snapshot), so today's shard
+    is a genuinely cumulative record of every symbol collected today, not
+    just whichever ones happened to be on the watchlist most recently."""
     if df.empty:
         return {"ok": False, "reason": "no_rows"}
+    if not HF_API_KEY:
+        return {"ok": False, "reason": "no_hf_api_key"}
+
     today = dt.datetime.now(dt.timezone.utc).date().isoformat()
-    return _upload_shard(df, path_in_repo=f"minute/{today}.parquet", commit_message=f"append minute bars: {today}")
+    path_in_repo = f"minute/{today}.parquet"
+    combined = df
+    try:
+        from huggingface_hub import hf_hub_download
+        existing_path = hf_hub_download(repo_id=HF_STOCK_DATASET_REPO, filename=path_in_repo, repo_type="dataset", token=HF_API_KEY)
+        existing = pd.read_parquet(existing_path)
+        combined = pd.concat([existing, df], ignore_index=True)
+    except Exception as exc:
+        logger.info("[schwab_data] no existing minute shard for %s yet (or fetch failed), starting fresh: %s", today, exc)
+
+    if "symbol" in combined.columns and "ts" in combined.columns:
+        combined = combined.drop_duplicates(subset=["symbol", "ts"]).sort_values(["symbol", "ts"]).reset_index(drop=True)
+    return _upload_shard(combined, path_in_repo=path_in_repo, commit_message=f"append minute bars: {today}")
 
 
 # ---------------------------------------------------------------------------
