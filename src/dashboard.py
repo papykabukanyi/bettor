@@ -45,14 +45,14 @@ from pathlib import Path
 from typing import Any
 
 from apscheduler.schedulers.background import BackgroundScheduler
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, jsonify, redirect, render_template, request
 
 SRC_DIR = Path(__file__).resolve().parent
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from config import et_today
-from data import perps_data, perps_model, perps_strategy
+from data import perps_data, perps_model, perps_strategy, schwab_client, schwab_data, schwab_model
 from data.kalshi_perps import get_margin_balance, get_margin_enabled, get_margin_exchange_status, get_margin_positions
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -85,6 +85,16 @@ PERPS_STARTUP_GRACE_SECONDS = max(0, int(os.getenv("PERPS_STARTUP_GRACE_SECONDS"
 # to run continuously, and dry-run cycles place no real orders.
 ENABLE_PERPS_SCHEDULER = str(os.getenv("ENABLE_PERPS_SCHEDULER", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
 DASHBOARD_LOCAL_AUTORUN = str(os.getenv("DASHBOARD_LOCAL_AUTORUN", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
+
+# --- Schwab stock pipeline scheduler -- entirely separate from the perps
+# jobs above; a failure here (e.g. OAuth login not completed yet) must
+# never affect perps scheduling. ---
+SCHWAB_DATA_COLLECT_MINUTES = max(5, int(os.getenv("SCHWAB_DATA_COLLECT_MINUTES", "15") or "15"))
+# One hour after the perps train job (3am ET default) so the two heaviest
+# operations this process does don't both land in the same memory-pressure
+# window on a 512MB dyno.
+SCHWAB_TRAIN_HOUR_ET = int(os.getenv("SCHWAB_TRAIN_HOUR_ET", "4") or "4")
+ENABLE_SCHWAB_SCHEDULER = str(os.getenv("ENABLE_SCHWAB_SCHEDULER", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
@@ -337,6 +347,30 @@ def _run_perps_train() -> dict[str, Any]:
     return perps_model.train_model()
 
 
+@_locked_job("schwab_data_collect", stale_after_sec=600)
+def _run_schwab_data_collect() -> dict[str, Any]:
+    """Collects the live watchlist (top symbols by real recent volume +
+    volatility -- see schwab_data.get_stock_watchlist) every
+    SCHWAB_DATA_COLLECT_MINUTES. Entirely separate from perps_data_collect;
+    a failure here (e.g. Schwab OAuth login not completed yet) is caught
+    and reported, never allowed to affect the perps jobs."""
+    try:
+        recent = schwab_data.load_training_dataset(max_rows=20_000)
+        watchlist = schwab_data.get_stock_watchlist(recent if not recent.empty else None)
+        df = schwab_data.collect_dataset_rows(watchlist)
+        if df.empty:
+            return {"ok": False, "reason": "no_rows_collected"}
+        return schwab_data.push_minute_snapshot(df)
+    except Exception as exc:
+        logger.warning("[dashboard] schwab data collect failed: %s", exc)
+        return {"ok": False, "error": str(exc)}
+
+
+@_locked_job("schwab_train", stale_after_sec=1800)
+def _run_schwab_train() -> dict[str, Any]:
+    return schwab_model.train_model()
+
+
 def _ensure_background_jobs_started() -> None:
     global _startup_done
     if _startup_done:
@@ -364,6 +398,15 @@ def _ensure_background_jobs_started() -> None:
                     _run_perps_entry_scan, "interval", minutes=PERPS_CYCLE_MINUTES,
                     id="perps_entry_scan", replace_existing=True,
                     next_run_time=dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=PERPS_STARTUP_GRACE_SECONDS),
+                )
+            if ENABLE_SCHWAB_SCHEDULER:
+                scheduler.add_job(
+                    _run_schwab_data_collect, "interval", minutes=SCHWAB_DATA_COLLECT_MINUTES,
+                    id="schwab_data_collect", replace_existing=True,
+                )
+                scheduler.add_job(
+                    _run_schwab_train, "cron", hour=SCHWAB_TRAIN_HOUR_ET, minute=0,
+                    id="schwab_train", replace_existing=True,
                 )
             scheduler.start()
             logger.info(
@@ -420,6 +463,35 @@ def _bootstrap_background_jobs() -> None:
 @app.route("/")
 def index():
     return render_template("dashboard.html")
+
+
+@app.route("/schwab/authorize")
+def schwab_authorize():
+    """Convenience redirect to Schwab's own login page -- the actual
+    authorization step is a real interactive Schwab login (with 2FA) that
+    nothing here can do on the account owner's behalf."""
+    return redirect(schwab_client.get_authorization_url())
+
+
+@app.route("/schcallback")
+def schwab_callback():
+    """Registered as this Schwab app's OAuth redirect_uri. Schwab lands the
+    browser here with ?code=... right after a successful interactive login;
+    exchanged immediately for an access+refresh token pair, which are then
+    mirrored to HF (see schwab_client.py) so a Render restart doesn't lose
+    them and force a fresh login."""
+    error = request.args.get("error")
+    if error:
+        return jsonify({"ok": False, "error": error}), 400
+    code = request.args.get("code")
+    if not code:
+        return jsonify({"ok": False, "error": "missing_code"}), 400
+    try:
+        schwab_client.exchange_code_for_tokens(code)
+    except Exception as exc:
+        logger.exception("[dashboard] schwab token exchange failed")
+        return jsonify({"ok": False, "error": str(exc)}), 500
+    return jsonify({"ok": True, "message": "Schwab account linked. You can close this tab."})
 
 
 @app.route("/api/status")
@@ -555,6 +627,8 @@ _JOB_LABELS = {
     "perps_manual_cycle": "Manual full cycle",
     "perps_data_collect": f"Data collection -> HF (every {PERPS_DATA_COLLECT_MINUTES} min)",
     "perps_train": f"Model retrain (daily {PERPS_TRAIN_HOUR_ET:02d}:00 ET)",
+    "schwab_data_collect": f"Schwab stock data collection -> HF (every {SCHWAB_DATA_COLLECT_MINUTES} min)",
+    "schwab_train": f"Schwab model retrain (daily {SCHWAB_TRAIN_HOUR_ET:02d}:00 ET)",
 }
 
 
