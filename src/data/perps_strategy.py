@@ -82,7 +82,8 @@ from typing import Any
 
 from data.crypto_prices import get_fast_price
 from data.kalshi_perps import (
-    cancel_margin_order, create_margin_order, get_margin_balance, get_margin_market, get_margin_positions,
+    cancel_margin_order, create_margin_order, get_margin_balance, get_margin_fee_tiers, get_margin_market,
+    get_margin_positions,
 )
 from data.perps_data import coin_for_ticker, get_watchlist, latest_feature_row
 from data.perps_model import predict_direction
@@ -134,6 +135,44 @@ def _env_int(name: str, default: int) -> int:
         return int(default)
 
 
+# Real transaction cost -- confirmed live via GET /margin/fee_tiers on this
+# account: taker=0.008 (80 bps), maker=0.0005 (5 bps), flat across every
+# ticker. Every entry/exit order this bot places uses time_in_force=
+# immediate_or_cancel (a taker fill -- see the create_margin_order calls
+# below), so a ROUND TRIP (entry + exit) costs ~1.6% of notional regardless
+# of direction or outcome. Confirmed live: a real NEAR trade showed a gross
+# gain of +$0.0608 book as a NET loss of -$0.1701 once real fees applied --
+# every profit target below must clear this cost with real margin, or the
+# strategy loses money even when its predictions are RIGHT.
+_FEE_RATE_CACHE: dict[str, Any] = {"rates": None, "computed_at": 0.0}
+_FEE_RATE_CACHE_TTL_SEC = 24 * 3600  # fee schedules don't change minute to minute
+DEFAULT_TAKER_FEE_RATE = _env_float("PERPS_TAKER_FEE_RATE", 0.008)
+
+
+def _taker_fee_rate(ticker: str) -> float:
+    """Real per-leg taker fee rate for this ticker (decimal fraction of
+    notional) -- falls back to DEFAULT_TAKER_FEE_RATE (the confirmed-live
+    flat rate) if the live /margin/fee_tiers call fails or doesn't list
+    this ticker."""
+    now = time.time()
+    if _FEE_RATE_CACHE["rates"] is None or (now - _FEE_RATE_CACHE["computed_at"]) >= _FEE_RATE_CACHE_TTL_SEC:
+        try:
+            _FEE_RATE_CACHE["rates"] = get_margin_fee_tiers().get("taker_fee_rates") or {}
+        except Exception as exc:
+            logger.warning("[perps_strategy] could not refresh fee tiers, using default taker rate: %s", exc)
+            _FEE_RATE_CACHE["rates"] = {}
+        _FEE_RATE_CACHE["computed_at"] = now
+    return float((_FEE_RATE_CACHE["rates"] or {}).get(ticker, DEFAULT_TAKER_FEE_RATE))
+
+
+def round_trip_fee_usd(ticker: str, entry_price: float, exit_price: float, count: float) -> float:
+    """Real dollar cost of a taker-taker round trip on this ticker -- entry
+    and exit are each their own fill, each charged the taker rate on its
+    own notional."""
+    rate = _taker_fee_rate(ticker)
+    return round((entry_price + exit_price) * count * rate, 6)
+
+
 # ── Tunable parameters (all overridable via env) ────────────────────────────
 # "Break the total balance into portions and grow it": each new position is
 # sized at this fraction of CURRENT available balance (so it compounds), and
@@ -156,10 +195,11 @@ TREND_FILTER_DOWN_PCT = _env_float("PERPS_TREND_FILTER_DOWN_PCT", 0.02)  # skip 
 # current ENTRY_DIP_PCT start firing on every 1-minute wiggle rather than a
 # real dip) increased that to ~600 trades/day at a 54.15% win rate and a
 # backtested +25.8% return over the 11.68-day test window, vs. 58.0%
-# win rate / +4.2% at the old default. Known backtest limitation: no Kalshi
-# trading fees or bid-ask slippage are modeled, so treat the absolute return
-# figures as optimistic -- the frequency/win-rate comparison across settings
-# is the more trustworthy signal from this exercise.
+# win rate / +4.2% at the old default. At the time of this specific tuning
+# exercise, no Kalshi trading fees were modeled, so treat these particular
+# absolute return figures as optimistic (fees are now modeled -- see
+# round_trip_fee_usd / DEFAULT_TAKER_FEE_RATE above and perps_backtest.py's
+# simulate() -- any NEW backtest run reflects real net-of-fee returns).
 MODEL_CONFIDENCE_MIN = _env_float("PERPS_MODEL_CONFIDENCE_MIN", 0.52)
 # Daily loss cap as a PERCENTAGE of the balance measured at the start of the
 # day (not a fixed dollar figure) so it scales sensibly as the account grows.
@@ -894,15 +934,22 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                 # profits when price FALLS, so the delta is entry-minus-exit
                 # instead of exit-minus-entry.
                 if side == "short":
-                    realized_pnl = round((entry_price - exit_price) * closed_count, 6)
+                    gross_pnl = round((entry_price - exit_price) * closed_count, 6)
                 else:
-                    realized_pnl = round((exit_price - entry_price) * closed_count, 6)
+                    gross_pnl = round((exit_price - entry_price) * closed_count, 6)
+                # realized_pnl_usd is the NET figure (what Kalshi's own account
+                # balance actually reflects) -- confirmed live that the gross
+                # price-delta alone systematically overstates real performance
+                # by the taker round-trip cost (see round_trip_fee_usd above).
+                fee_usd = round_trip_fee_usd(ticker, entry_price, exit_price, closed_count) if not effective_dry_run else 0.0
+                realized_pnl = round(gross_pnl - fee_usd, 6)
                 by_date = state.setdefault("realized_pnl_by_date", {})
                 by_date[_today_str()] = round(float(by_date.get(_today_str(), 0.0)) + realized_pnl, 6)
                 trade = {
                     "closed_at": dt.datetime.now(dt.timezone.utc).isoformat(),
                     "ticker": ticker, "side": side, "entry_price": entry_price, "exit_price": exit_price,
-                    "count": closed_count, "realized_pnl_usd": realized_pnl, "reason": reason, "dry_run": effective_dry_run,
+                    "count": closed_count, "gross_pnl_usd": gross_pnl, "fee_usd": fee_usd,
+                    "realized_pnl_usd": realized_pnl, "reason": reason, "dry_run": effective_dry_run,
                 }
                 state.setdefault("trade_log", []).append(trade)
                 closed.append(trade)

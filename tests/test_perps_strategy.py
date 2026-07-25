@@ -24,6 +24,45 @@ def _no_external_price_network_calls(monkeypatch):
     monkeypatch.setattr(strat, "get_fast_price", lambda coin: None)
 
 
+@pytest.fixture(autouse=True)
+def _deterministic_fee_rate(monkeypatch):
+    """round_trip_fee_usd() would otherwise hit the real GET /margin/fee_tiers
+    endpoint on a cache miss -- every test here gets a fixed, pre-populated
+    cache (falls back to the confirmed-live 0.008 taker rate per ticker) so
+    fee deduction is deterministic and the suite never touches the network
+    for this."""
+    monkeypatch.setattr(strat, "_FEE_RATE_CACHE", {"rates": {}, "computed_at": strat.time.time()})
+
+
+def test_taker_fee_rate_falls_back_to_default_on_a_missing_ticker(monkeypatch):
+    monkeypatch.setattr(strat, "_FEE_RATE_CACHE", {"rates": {"KXBTCPERP": 0.002}, "computed_at": strat.time.time()})
+    assert strat._taker_fee_rate("KXBTCPERP") == 0.002  # noqa: SLF001
+    assert strat._taker_fee_rate("KXZECPERP") == strat.DEFAULT_TAKER_FEE_RATE  # noqa: SLF001
+
+
+def test_taker_fee_rate_refreshes_from_the_live_endpoint_on_a_cold_cache(monkeypatch):
+    monkeypatch.setattr(strat, "_FEE_RATE_CACHE", {"rates": None, "computed_at": 0.0})
+    monkeypatch.setattr(strat, "get_margin_fee_tiers", lambda: {"taker_fee_rates": {"KXBTCPERP": 0.008}})
+    assert strat._taker_fee_rate("KXBTCPERP") == 0.008  # noqa: SLF001
+
+
+def test_taker_fee_rate_falls_back_to_default_when_the_live_call_fails(monkeypatch):
+    monkeypatch.setattr(strat, "_FEE_RATE_CACHE", {"rates": None, "computed_at": 0.0})
+
+    def fail():
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(strat, "get_margin_fee_tiers", fail)
+    assert strat._taker_fee_rate("KXBTCPERP") == strat.DEFAULT_TAKER_FEE_RATE  # noqa: SLF001
+
+
+def test_round_trip_fee_usd_charges_both_legs():
+    # Confirmed live: a real NEAR trade (8 contracts, ~$1.80 entry) paid a fee
+    # consistent with the confirmed-live 0.008 taker rate on EACH leg.
+    fee = strat.round_trip_fee_usd("KXNEARPERP", entry_price=1.80, exit_price=1.7927, count=8.0)
+    assert fee == round((1.80 + 1.7927) * 8.0 * strat.DEFAULT_TAKER_FEE_RATE, 6)
+
+
 def _row(**overrides):
     # volatility_5 defaults comfortably above MIN_ENTRY_VOLATILITY so
     # existing entry tests reflect a normally-active market by default;
@@ -368,8 +407,10 @@ def test_manage_open_positions_closes_short_by_buying_back(monkeypatch, tmp_path
         return {"positions": [_real_short_position("KXETHPERP", count, "50.0000")] if float(count) > 0 else []}
 
     monkeypatch.setattr(strat, "get_margin_positions", fake_positions)
-    # Price fell -- profitable for a short, should trigger take-profit.
-    monkeypatch.setattr(strat, "get_margin_market", lambda ticker: _market_response(price=50.0 * (1 - strat.TAKE_PROFIT_PCT - 0.001)))
+    # Price fell 5% -- profitable for a short and comfortably clears the
+    # real ~1.6% round-trip taker fee, so it should trigger take-profit AND
+    # remain a net gain (not just a gross one).
+    monkeypatch.setattr(strat, "get_margin_market", lambda ticker: _market_response(price=50.0 * 0.95))
 
     captured_orders = []
 
@@ -386,6 +427,52 @@ def test_manage_open_positions_closes_short_by_buying_back(monkeypatch, tmp_path
     assert captured_orders[0]["reduce_only"] is True
     # Price fell and it's a short -- must be a GAIN, not a loss.
     assert result["closed"][0]["realized_pnl_usd"] > 0
+
+
+def test_manage_open_positions_deducts_the_real_round_trip_fee_from_realized_pnl(monkeypatch, tmp_path):
+    """realized_pnl_usd must be NET (what the real Kalshi account balance
+    actually reflects), not the gross price-delta alone -- confirmed live
+    that gross-only tracking systematically overstated performance by the
+    real taker round-trip fee (a real NEAR trade: +$0.0608 gross booked as
+    -$0.1701 net)."""
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", True)
+    strat._save_state({
+        "positions": [_position(ticker="KXETHPERP", entry_price=50.0, count=10.0, side="long")],
+        "realized_pnl_by_date": {}, "trade_log": [], "daily_reference_balance": {},
+    })
+    calls = {"n": 0}
+
+    def fake_positions():
+        calls["n"] += 1
+        count = "10.00" if calls["n"] == 1 else "0.00"
+        return {"positions": [_real_position("KXETHPERP", count, "50.0000")] if float(count) > 0 else []}
+
+    monkeypatch.setattr(strat, "get_margin_positions", fake_positions)
+    exit_price = 50.0 * 1.05  # +5% -- a real gain for a long
+    monkeypatch.setattr(strat, "get_margin_market", lambda ticker: _market_response(price=exit_price))
+    monkeypatch.setattr(strat, "create_margin_order", lambda **kwargs: {"order": {"fill_count": str(kwargs["count"])}})
+
+    result = strat.manage_open_positions(dry_run=False)
+    trade = result["closed"][0]
+    expected_fee = strat.round_trip_fee_usd("KXETHPERP", 50.0, trade["exit_price"], 10.0)
+    assert trade["fee_usd"] == expected_fee
+    assert trade["gross_pnl_usd"] > 0  # price rose -- a real gross gain for a long
+    assert trade["realized_pnl_usd"] == round(trade["gross_pnl_usd"] - trade["fee_usd"], 6)
+
+
+def test_manage_open_positions_dry_run_trades_pay_no_fee(monkeypatch, tmp_path):
+    """A dry-run trade never touches the real exchange, so it must not book
+    a fee that was never actually charged."""
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "state.json")
+    strat._save_state({
+        "positions": [_position(ticker="KXETHPERP", entry_price=50.0, count=10.0, side="long")],
+        "realized_pnl_by_date": {}, "trade_log": [], "daily_reference_balance": {},
+    })
+    monkeypatch.setattr(strat, "get_margin_market", lambda ticker: _market_response(price=50.0 * 1.05))
+
+    result = strat.manage_open_positions(dry_run=True)
+    assert result["closed"][0]["fee_usd"] == 0.0
 
 
 def test_scan_and_enter_opens_short_with_an_ask_order(monkeypatch, tmp_path):

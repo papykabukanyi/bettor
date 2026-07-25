@@ -99,6 +99,17 @@ def get_margin_positions(*, subaccount: int | None = None, ticker: str | None = 
     return _request_json("GET", "/margin/positions", params=params or None, auth=True)
 
 
+def get_margin_fee_tiers() -> dict[str, Any]:
+    """{"maker_fee_rates": {ticker: rate}, "taker_fee_rates": {ticker: rate}}
+    -- rates are decimal fractions of notional (e.g. 0.008 = 0.8%), multiply
+    by price*count to get the dollar fee. Confirmed live on this account:
+    taker=0.008 (80 bps), maker=0.0005 (5 bps) flat across every ticker --
+    every entry/exit order this bot places is time_in_force=
+    immediate_or_cancel (a taker fill), so the 0.8%-per-leg / 1.6%-round-trip
+    rate is the one that actually applies to every trade."""
+    return _request_json("GET", "/margin/fee_tiers", auth=True)
+
+
 def list_margin_markets(*, status: str | None = None) -> list[dict[str, Any]]:
     """All perp instruments Kalshi currently lists (ticker, price, bid/ask,
     tick_size, contract_size, leverage_estimate, status, ...). This is the

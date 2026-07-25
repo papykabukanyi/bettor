@@ -84,8 +84,8 @@
   <h3>Recent Trades</h3>
   <div class="scroll-x">
     <table>
-      <thead><tr><th>Closed</th><th>Ticker</th><th>Side</th><th>Entry</th><th>Exit</th><th>Count</th><th>P&amp;L</th><th>Reason</th></tr></thead>
-      <tbody id="trades-body"><tr><td colspan="8" class="empty">No trades yet</td></tr></tbody>
+      <thead><tr><th>Closed</th><th>Ticker</th><th>Side</th><th>Entry</th><th>Exit</th><th>Count</th><th>Fee</th><th>Net P&amp;L</th><th>Reason</th></tr></thead>
+      <tbody id="trades-body"><tr><td colspan="9" class="empty">No trades yet</td></tr></tbody>
     </table>
   </div>
 </section>
@@ -267,8 +267,9 @@ async function refreshTrades() {
         <td>${fmtPrice(t.entry_price)}</td>
         <td>${fmtPrice(t.exit_price)}</td>
         <td>${t.count}</td>
+        <td class="sub">${t.fee_usd ? fmtUsd(t.fee_usd) : "--"}</td>
         <td class="${t.realized_pnl_usd > 0 ? "stat pos" : t.realized_pnl_usd < 0 ? "stat neg" : ""}" style="font-size:13px;font-weight:600;">${fmtUsd(t.realized_pnl_usd)}</td>
-        <td class="sub">${t.reason || ""}</td>`, 8, "No trades yet");
+        <td class="sub">${t.reason || ""}</td>`, 9, "No trades yet");
   } catch (e) { console.error("trades refresh failed", e); }
 }
 

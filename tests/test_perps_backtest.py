@@ -111,7 +111,12 @@ def _rally_then_crash_df(n: int = 100) -> pd.DataFrame:
     # other synthetic fixtures in this file use) -- held constantly
     # "rallying" so the short entry signal is live from row 0, then `close`
     # falls steadily from the start, profitable for a short entered early.
-    close = 2.05 - np.arange(n) * 0.002
+    # A CONSTANT 4%/minute relative decline (not a fixed absolute step) so
+    # every trade -- including the very first, at the highest price -- clears
+    # the real ~1.6% round-trip taker fee with real margin, not just a gross
+    # gain; a fixed dollar step would shrink as a fraction of a falling
+    # price and understate the move on the earliest (highest-price) trades.
+    close = 2.05 * (0.96 ** np.arange(n))
     dist_to_ma_15 = np.full(n, 0.01)
     return pd.DataFrame({
         "ticker": "KXBTCPERP", "ts": ts, "close": close, "dist_to_ma_15": dist_to_ma_15,
@@ -148,6 +153,24 @@ def test_simulate_opens_and_profits_from_short_positions_when_enabled():
     assert short_trades
     # The synthetic price crashes after entry -- must be a real GAIN for a short.
     assert short_trades[0]["realized_pnl_usd"] > 0
+
+
+def test_simulate_deducts_the_real_taker_round_trip_fee_by_default():
+    """A prior version of this backtest modeled NO fees at all -- confirmed
+    live via GET /margin/fee_tiers that every order this bot places is a
+    taker fill at 0.008 (80 bps) per leg. Comparing a zero-fee run against
+    the default locks in that the fee actually reduces reported P&L."""
+    df = _rally_then_crash_df()
+    kwargs = dict(
+        fitted=_down_fitted(), starting_balance=20.0, leverage_by_ticker={"KXBTCPERP": 1.0},
+        entry_dip_pct=0.005, trend_filter_down_pct=0.02, model_confidence_min=0.5, enable_shorts=True,
+    )
+    zero_fee = bt.simulate(df, taker_fee_rate=0.0, **kwargs)
+    with_fee = bt.simulate(df, taker_fee_rate=strat.DEFAULT_TAKER_FEE_RATE, **kwargs)
+    assert zero_fee["trade_count"] == with_fee["trade_count"]
+    assert zero_fee["total_realized_pnl_usd"] > with_fee["total_realized_pnl_usd"]
+    assert with_fee["total_fees_usd"] > 0
+    assert zero_fee["total_fees_usd"] == 0
 
 
 def test_simulate_never_opens_shorts_when_the_feature_is_off():

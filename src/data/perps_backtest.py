@@ -196,6 +196,7 @@ def simulate(
     enable_shorts: bool | None = None,
     min_entry_volatility: float | None = None,
     min_entry_relative_volatility_ratio: float | None = None,
+    taker_fee_rate: float | None = None,
 ) -> dict[str, Any]:
     """Walk forward through `test_df` (all tickers, sorted by ts) replaying
     the real strategy functions. Every strategy parameter can be overridden
@@ -219,6 +220,13 @@ def simulate(
         strat.MIN_ENTRY_RELATIVE_VOLATILITY_RATIO if min_entry_relative_volatility_ratio is None
         else min_entry_relative_volatility_ratio
     )
+    # Confirmed live via GET /margin/fee_tiers: every entry/exit order this
+    # bot places is a taker fill (time_in_force=immediate_or_cancel), at
+    # 0.008 (80 bps) per leg -- a prior version of this backtest modeled NO
+    # fees at all, which is why its return figures used to be called
+    # "optimistic." A real NEAR trade on this account showed a gross gain of
+    # +$0.0608 book as a NET loss of -$0.1701 once this cost applied.
+    taker_fee_rate = strat.DEFAULT_TAKER_FEE_RATE if taker_fee_rate is None else taker_fee_rate
 
     df = test_df.sort_values("ts").reset_index(drop=True)
     if "model_probability_up" not in df.columns:
@@ -268,9 +276,11 @@ def simulate(
             )
             if should_exit:
                 if pos.get("side") == "short":
-                    realized = round((pos["entry_price"] - price) * pos["count"], 6)  # profits on a FALLING price
+                    gross = round((pos["entry_price"] - price) * pos["count"], 6)  # profits on a FALLING price
                 else:
-                    realized = round((price - pos["entry_price"]) * pos["count"], 6)
+                    gross = round((price - pos["entry_price"]) * pos["count"], 6)
+                fee = round((pos["entry_price"] + price) * pos["count"] * taker_fee_rate, 6)
+                realized = round(gross - fee, 6)
                 # `balance` is total equity throughout (only realized P&L ever
                 # changes it); margin_committed_usd was NEVER subtracted from
                 # it at open time -- it only ever reduced `available` via the
@@ -280,7 +290,7 @@ def simulate(
                 daily_pnl[date_str] = daily_pnl.get(date_str, 0.0) + realized
                 trades.append({
                     "ticker": ticker, "side": pos.get("side", "long"), "entry_price": pos["entry_price"], "exit_price": price,
-                    "count": pos["count"], "realized_pnl_usd": realized, "reason": reason,
+                    "count": pos["count"], "gross_pnl_usd": gross, "fee_usd": fee, "realized_pnl_usd": realized, "reason": reason,
                     "opened_ts": pos["opened_ts"], "closed_ts": row.ts,
                     "held_minutes": (row.ts - pos["opened_ts"]) / 60.0,
                 })
@@ -355,6 +365,7 @@ def simulate(
     open_at_end = len(open_positions)
 
     total_pnl = sum(t["realized_pnl_usd"] for t in trades)
+    total_fees = sum(t.get("fee_usd", 0.0) for t in trades)
     wins = [t for t in trades if t["realized_pnl_usd"] > 0]
     span_days = max(1e-9, (df["ts"].max() - df["ts"].min()) / 86400.0) if not df.empty else 1.0
 
@@ -362,6 +373,7 @@ def simulate(
         "starting_balance": starting_balance,
         "ending_balance_realized": round(starting_balance + total_pnl, 6),
         "total_realized_pnl_usd": round(total_pnl, 6),
+        "total_fees_usd": round(total_fees, 6),
         "return_pct": round(total_pnl / starting_balance, 6) if starting_balance else 0.0,
         "trade_count": len(trades),
         "win_count": len(wins),
