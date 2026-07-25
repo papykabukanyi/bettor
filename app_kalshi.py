@@ -1,8 +1,9 @@
 """Root-level WSGI entrypoint for the Kalshi Perps service specifically
-(bettor-dashboard on Render) -- kept for any host/tool that expects an
-app.py at the repo root rather than render.yaml's explicit
-`--chdir src perps_server:app` startCommand. The Schwab service
-(bettor-schwab) has its own equivalent, app_schwab.py."""
+(bettor-dashboard on Render) -- the Kalshi equivalent of app_schwab.py,
+which serves the Schwab stocks service instead. render.yaml's own explicit
+`--chdir src perps_server:app` startCommand is what Render actually uses;
+this exists for any host/tool that expects an app.py-style entrypoint at
+the repo root."""
 from __future__ import annotations
 
 import sys

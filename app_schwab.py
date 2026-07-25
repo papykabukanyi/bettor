@@ -1,6 +1,6 @@
 """Root-level WSGI entrypoint for the Schwab stocks service specifically
-(bettor-schwab on Render) -- the Schwab equivalent of app.py, which serves
-the Kalshi Perps service instead. render.yaml's own explicit
+(bettor-schwab on Render) -- the Schwab equivalent of app_kalshi.py, which
+serves the Kalshi Perps service instead. render.yaml's own explicit
 `--chdir src schwab_server:app` startCommand is what Render actually uses;
 this exists for any host/tool that expects an app.py-style entrypoint at
 the repo root."""
