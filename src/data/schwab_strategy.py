@@ -66,8 +66,17 @@ MAX_HOLD_MINUTES = _env_int("SCHWAB_MAX_HOLD_MINUTES", 120)
 
 MODEL_CONFIDENCE_MIN = _env_float("SCHWAB_MODEL_CONFIDENCE_MIN", 0.55)
 
-POSITION_SIZE_PCT = _env_float("SCHWAB_POSITION_SIZE_PCT", 0.10)
-MAX_CONCURRENT_POSITIONS = max(1, _env_int("SCHWAB_MAX_CONCURRENT_POSITIONS", 5))
+# Confirmed live (via test data, not yet a real trade): at the perps-style
+# default of 10% per slot across 5 slots, a $100 account gets a $10-20
+# budget per position -- not enough to buy even ONE share of most liquid,
+# well-known stocks (a $100+ share price is completely ordinary). Real
+# diversification across 5 positions needs real capital; at $100, spreading
+# thin just means most "positions" silently can't afford a single share.
+# Concentrating into fewer, larger slots is the only way a small account
+# can actually hold real, liquid names -- "safe" here comes from the tight
+# stop-loss on each position, not from spreading a tiny balance thinner.
+POSITION_SIZE_PCT = _env_float("SCHWAB_POSITION_SIZE_PCT", 0.45)
+MAX_CONCURRENT_POSITIONS = max(1, _env_int("SCHWAB_MAX_CONCURRENT_POSITIONS", 2))
 DAILY_LOSS_CAP_PCT = _env_float("SCHWAB_DAILY_LOSS_CAP_PCT", 0.10)
 
 LIVE_TRADING_ENABLED = str(os.getenv("SCHWAB_LIVE_TRADING_ENABLED", "")).strip().lower() in {"1", "true", "yes"}
