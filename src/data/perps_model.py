@@ -53,13 +53,18 @@ _model_cache: dict[str, Any] = {"model": None, "meta": None, "loaded_at": 0.0}
 # of the training arrays -- on a memory-constrained container that trades
 # speed for a multiple of peak memory, which is the wrong trade here. Lower
 # estimator counts for the same reason (fewer trees held in memory at once).
+# Trimmed further (100 -> 80 estimators each) alongside MAX_TRAIN_ROWS after
+# a real OOM crash following this session's feature additions (~1.4x more
+# columns with no matching adjustment) -- the model's AUC is already only
+# marginally above random, so this costs negligible quality for real
+# memory headroom.
 _CANDIDATES = {
     "logistic_regression": lambda: LogisticRegression(max_iter=1000, class_weight="balanced"),
     "random_forest": lambda: RandomForestClassifier(
-        n_estimators=100, max_depth=6, min_samples_leaf=20, class_weight="balanced", random_state=42, n_jobs=1,
+        n_estimators=80, max_depth=6, min_samples_leaf=20, class_weight="balanced", random_state=42, n_jobs=1,
     ),
     "gradient_boosting": lambda: GradientBoostingClassifier(
-        n_estimators=100, max_depth=3, learning_rate=0.05, random_state=42,
+        n_estimators=80, max_depth=3, learning_rate=0.05, random_state=42,
     ),
 }
 
@@ -112,6 +117,13 @@ def train_model(df: pd.DataFrame | None = None) -> dict[str, Any]:
 
     if best_model is None:
         return {"ok": False, "reason": "all_candidates_failed"}
+
+    # Free the train/test split arrays before allocating the full-data refit
+    # array below -- without this, both live in memory simultaneously right
+    # at the single heaviest moment of this function, on top of `labeled`
+    # itself and whichever loser models the loop above hasn't been able to
+    # garbage-collect yet.
+    del x_train, x_test, y_train, y_test
 
     # Refit the winner on the full labeled dataset before shipping it.
     best_model.fit(labeled[feature_cols].values, labeled["label_up"].values)

@@ -60,11 +60,21 @@ LABEL_HORIZON_MINUTES = int(os.getenv("PERPS_LABEL_HORIZON_MINUTES", "1") or "1"
 
 # The HF archive grows every day forever; without a cap, load_training_dataset()
 # would eventually load an unbounded number of rows into memory on every train
-# run. Render's free tier caps the whole process at 512MB, and this dataset's
-# ticker column (kept as Python string objects until capped/typed below) is
-# the single biggest memory cost of loading it -- bounding row count bounds
-# memory regardless of how much history accumulates over time.
-MAX_TRAIN_ROWS = int(os.getenv("PERPS_MAX_TRAIN_ROWS", "150000") or "150000")
+# run. Render's Starter plan caps the whole process at 512MB, and this
+# dataset's ticker column (kept as Python string objects until capped/typed
+# below) is the single biggest memory cost of loading it -- bounding row
+# count bounds memory regardless of how much history accumulates over time.
+#
+# Confirmed live: 150,000 was sized for the ORIGINAL ~22-column feature set.
+# Adding the volume/open-interest/spread/time-of-day features (this session)
+# grew that to ~31 columns (~1.4x) with no matching cap adjustment, and a
+# real production retrain then OOM-killed the service outright ("Ran out of
+# memory (used over 512MB)"). Lowered well below the naive 150000/1.4≈106000
+# parity point for real headroom, not just a wash -- train_model() also
+# briefly holds the train/test split arrays AND a final full-data refit
+# simultaneously, so the actual peak is higher than the row count alone
+# suggests.
+MAX_TRAIN_ROWS = int(os.getenv("PERPS_MAX_TRAIN_ROWS", "80000") or "80000")
 
 _TICKER_TO_COIN = {
     "KXBTCPERP": "BTC", "KXETHPERP": "ETH", "KXSOLPERP": "SOL", "KXXRPPERP": "XRP",
