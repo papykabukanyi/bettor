@@ -780,7 +780,7 @@ def _real_position(ticker, count, entry_price, is_portfolio=True):
     return {"market_ticker": ticker, "position": str(count), "entry_price": str(entry_price), "is_portfolio": is_portfolio}
 
 
-def test_real_open_positions_by_ticker_ignores_non_portfolio_and_zero_rows(monkeypatch):
+def test_real_open_positions_by_ticker_ignores_only_zero_count_rows(monkeypatch):
     monkeypatch.setattr(strat, "get_margin_positions", lambda: {"positions": [
         _real_position("KXBCHPERP", "0.00", "0.0000", is_portfolio=False),
         _real_position("KXSOLPERP", "4.00", "7.7572"),
@@ -788,6 +788,34 @@ def test_real_open_positions_by_ticker_ignores_non_portfolio_and_zero_rows(monke
     ]})
     result = strat._real_open_positions_by_ticker()  # noqa: SLF001
     assert result == {"KXSOLPERP": {"count": 4.0, "entry_price": 7.7572, "side": "long"}}
+
+
+def test_real_open_positions_by_ticker_includes_non_portfolio_nonzero_rows(monkeypatch):
+    """Real bug found live: `is_portfolio` distinguishes portfolio- vs
+    isolated-margined positions, NOT "real vs not real" -- a real, non-zero,
+    real-money HYPE position with is_portfolio=False was silently excluded
+    by an earlier version of this filter, left with zero stop-loss/
+    take-profit coverage. Must be included regardless of is_portfolio."""
+    monkeypatch.setattr(strat, "get_margin_positions", lambda: {"positions": [
+        _real_position("KXHYPEPERP", "8.00", "5.8773", is_portfolio=False),
+    ]})
+    result = strat._real_open_positions_by_ticker()  # noqa: SLF001
+    assert result == {"KXHYPEPERP": {"count": 8.0, "entry_price": 5.8773, "side": "long"}}
+
+
+def test_real_open_positions_by_ticker_aggregates_multiple_rows_for_the_same_ticker(monkeypatch):
+    """Kalshi can return multiple rows for the same ticker across margin
+    modes/subaccounts -- must sum signed counts and weight-average the
+    entry price rather than letting one row silently overwrite another."""
+    monkeypatch.setattr(strat, "get_margin_positions", lambda: {"positions": [
+        _real_position("KXHYPEPERP", "8.00", "5.00", is_portfolio=False),
+        _real_position("KXHYPEPERP", "2.00", "8.00", is_portfolio=True),
+    ]})
+    result = strat._real_open_positions_by_ticker()  # noqa: SLF001
+    assert result["KXHYPEPERP"]["count"] == 10.0
+    # Weighted average: (8*5.00 + 2*8.00) / 10 = 5.60
+    assert result["KXHYPEPERP"]["entry_price"] == pytest.approx(5.60)
+    assert result["KXHYPEPERP"]["side"] == "long"
 
 
 def test_real_open_positions_by_ticker_returns_none_on_api_failure(monkeypatch):

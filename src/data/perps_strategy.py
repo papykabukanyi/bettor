@@ -639,23 +639,44 @@ def _real_open_positions_by_ticker() -> dict[str, dict[str, Any]] | None:
     Per Kalshi's own OpenAPI spec, `position` is a SIGNED quantity (negative
     = short, positive = long) with no separate direction field -- direction
     is derived from the sign here, once, so nothing downstream has to
-    re-derive it."""
+    re-derive it.
+
+    Does NOT filter on `is_portfolio` -- confirmed live and a real bug in an
+    earlier version of this function: `is_portfolio` distinguishes
+    portfolio- vs isolated-margined positions (rows without it are simply
+    missing a `margin_used`/`roe` field), NOT "real vs not real" as
+    originally assumed. A real, non-zero, real-money HYPE position with
+    is_portfolio=False was silently excluded by that filter -- adopted by
+    nothing, monitored by nothing, sitting with zero stop-loss/take-profit
+    coverage while it lost money. Kalshi can return multiple rows for the
+    same ticker across margin modes/subaccounts, so this sums signed counts
+    and uses a count-weighted average entry price per ticker rather than
+    letting one row silently overwrite another."""
     try:
         data = get_margin_positions()
     except Exception as exc:
         logger.warning("[perps_strategy] could not fetch real positions for reconciliation: %s", exc)
         return None
-    result: dict[str, dict[str, Any]] = {}
+    totals: dict[str, dict[str, float]] = {}
     for p in data.get("positions") or []:
-        if not p.get("is_portfolio"):
-            continue  # non-portfolio subaccount rows observed at 0 size; not real tradable exposure
-        raw_count = float(p.get("position") or 0.0)
         ticker = p.get("market_ticker")
-        if raw_count == 0 or not ticker:
+        raw_count = float(p.get("position") or 0.0)
+        if not ticker or raw_count == 0:
+            continue
+        entry_price = float(p.get("entry_price") or 0.0)
+        agg = totals.setdefault(ticker, {"signed_count": 0.0, "weighted_entry_sum": 0.0, "abs_count_sum": 0.0})
+        agg["signed_count"] += raw_count
+        agg["weighted_entry_sum"] += entry_price * abs(raw_count)
+        agg["abs_count_sum"] += abs(raw_count)
+
+    result: dict[str, dict[str, Any]] = {}
+    for ticker, agg in totals.items():
+        if agg["signed_count"] == 0 or agg["abs_count_sum"] == 0:
             continue
         result[ticker] = {
-            "count": abs(raw_count), "entry_price": float(p.get("entry_price") or 0.0),
-            "side": "short" if raw_count < 0 else "long",
+            "count": abs(agg["signed_count"]),
+            "entry_price": agg["weighted_entry_sum"] / agg["abs_count_sum"],
+            "side": "short" if agg["signed_count"] < 0 else "long",
         }
     return result
 
