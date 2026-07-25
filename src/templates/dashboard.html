@@ -40,6 +40,9 @@
   .tag.wait { background: #2a2510; color: var(--yellow); }
   .empty { color: var(--muted); padding: 14px; text-align: center; }
   .scroll-x { overflow-x: auto; }
+  tbody tr { transition: opacity .35s ease, background-color .6s ease; }
+  tbody tr.row-enter { opacity: 0; background-color: rgba(59,130,246,.12); }
+  tbody tr.row-exit { opacity: 0; }
   footer { color: var(--muted); font-size: 12px; text-align: center; margin-top: 24px; }
   a { color: var(--blue); }
 </style>
@@ -111,6 +114,65 @@ const timeAgo = (iso) => {
   return Math.round(sec / 86400) + "d ago";
 };
 
+// Keyed diff-patch for a <tbody> instead of a wholesale innerHTML replace on
+// every 10s poll -- a full replace tears down and rebuilds every row even
+// when nothing changed, which is what made "Open Positions" look like it
+// was flickering in and out on every refresh. This keeps each row's actual
+// DOM node stable across polls (patching its cells in place), only ever
+// creating a node for a genuinely NEW key (e.g. a new position opening) and
+// only ever removing one when its key genuinely disappears (a position
+// closing into a trade, or a candidate leaving the watchlist) -- so a row
+// that's still open just sits there being updated smoothly, not
+// disappearing and reappearing.
+function patchTable(tbody, items, keyFn, rowHtmlFn, emptyColspan, emptyMessage) {
+  if (!items || !items.length) {
+    if (tbody.childElementCount !== 1 || !tbody.dataset.empty) {
+      tbody.innerHTML = `<tr><td colspan="${emptyColspan}" class="empty">${emptyMessage}</td></tr>`;
+      tbody.dataset.empty = "1";
+    }
+    return;
+  }
+  if (tbody.dataset.empty) {
+    tbody.innerHTML = "";
+    delete tbody.dataset.empty;
+  }
+
+  const existing = new Map();
+  tbody.querySelectorAll("tr[data-key]").forEach(tr => existing.set(tr.dataset.key, tr));
+  const seen = new Set();
+  let prevEl = null;
+
+  items.forEach((item, idx) => {
+    const key = String(keyFn(item, idx));
+    seen.add(key);
+    const html = rowHtmlFn(item, idx);
+    let tr = existing.get(key);
+    if (!tr) {
+      tr = document.createElement("tr");
+      tr.dataset.key = key;
+      tr.innerHTML = html;
+      tr.dataset.html = html;
+      tr.classList.add("row-enter");
+      requestAnimationFrame(() => requestAnimationFrame(() => tr.classList.remove("row-enter")));
+    } else if (tr.dataset.html !== html) {
+      tr.innerHTML = html;
+      tr.dataset.html = html;
+    }
+    const wantsPosition = prevEl ? prevEl.nextElementSibling : tbody.firstElementChild;
+    if (wantsPosition !== tr) {
+      tbody.insertBefore(tr, wantsPosition || null);
+    }
+    prevEl = tr;
+  });
+
+  existing.forEach((tr, key) => {
+    if (!seen.has(key)) {
+      tr.classList.add("row-exit");
+      setTimeout(() => tr.remove(), 350);
+    }
+  });
+}
+
 async function refreshStatus() {
   try {
     const res = await fetch("/api/status");
@@ -138,26 +200,20 @@ async function refreshStatus() {
     const checksByTicker = {};
     ((data.latest_position_check && data.latest_position_check.checks) || []).forEach(c => { checksByTicker[c.ticker] = c; });
     const posBody = document.getElementById("positions-body");
-    if (positions.length) {
-      posBody.innerHTML = positions.map(p => {
-        const check = checksByTicker[p.ticker];
-        const v = check && check.velocity_pct_per_min;
-        const side = p.side || "long";
-        return `
-        <tr>
-          <td><strong>${p.ticker}</strong></td>
-          <td><span class="tag ${side === "short" ? "no" : "yes"}">${side}</span></td>
-          <td>${fmtUsd(p.entry_price)}</td>
-          <td>${p.count}</td>
-          <td class="stat pos" style="font-size:13px;">${fmtUsd(p.take_profit_price)}</td>
-          <td class="stat neg" style="font-size:13px;">${fmtUsd(p.stop_loss_price)}</td>
-          <td>${timeAgo(p.opened_at)}</td>
-          <td>${(v !== null && v !== undefined) ? (v * 100).toFixed(2) + "%/min" : "--"}</td>
-        </tr>`;
-      }).join("");
-    } else {
-      posBody.innerHTML = '<tr><td colspan="8" class="empty">No open positions</td></tr>';
-    }
+    patchTable(posBody, positions, p => p.ticker, p => {
+      const check = checksByTicker[p.ticker];
+      const v = check && check.velocity_pct_per_min;
+      const side = p.side || "long";
+      return `
+        <td><strong>${p.ticker}</strong></td>
+        <td><span class="tag ${side === "short" ? "no" : "yes"}">${side}</span></td>
+        <td>${fmtUsd(p.entry_price)}</td>
+        <td>${p.count}</td>
+        <td class="stat pos" style="font-size:13px;">${fmtUsd(p.take_profit_price)}</td>
+        <td class="stat neg" style="font-size:13px;">${fmtUsd(p.stop_loss_price)}</td>
+        <td>${timeAgo(p.opened_at)}</td>
+        <td>${(v !== null && v !== undefined) ? (v * 100).toFixed(2) + "%/min" : "--"}</td>`;
+    }, 8, "No open positions");
 
     const todayPnl = data.today_realized_pnl_usd || 0;
     const todayEl = document.getElementById("today-pnl");
@@ -174,22 +230,16 @@ async function refreshStatus() {
 
     const candidates = (data.latest_cycle && data.latest_cycle.candidates) || [];
     const cbody = document.getElementById("candidates-body");
-    if (candidates.length) {
-      cbody.innerHTML = candidates.map(c => `
-        <tr>
-          <td><strong>${c.ticker}</strong></td>
-          <td>${fmtUsd(c.current_price)}</td>
-          <td>${fmtUsd(c.short_ma)}</td>
-          <td>${fmtPct(c.trend_pct)}</td>
-          <td><span class="tag ${c.technical_ok ? "yes" : "no"}">${c.technical_ok ? "dip" : "none"}</span></td>
-          <td><span class="tag ${c.model_ok ? "yes" : "wait"}">${c.model_ok ? c.model_direction : "n/a"}</span></td>
-          <td>${c.model_ok ? (c.probability_up * 100).toFixed(1) + "%" : "--"}</td>
-          <td><span class="tag ${c.should_enter ? "yes" : "no"}">${c.should_enter ? "YES (" + (c.side || "long") + ")" : "no"}</span></td>
-          <td class="sub">${c.reason || ""}</td>
-        </tr>`).join("");
-    } else {
-      cbody.innerHTML = '<tr><td colspan="9" class="empty">Waiting for first scan...</td></tr>';
-    }
+    patchTable(cbody, candidates, c => c.ticker, c => `
+        <td><strong>${c.ticker}</strong></td>
+        <td>${fmtUsd(c.current_price)}</td>
+        <td>${fmtUsd(c.short_ma)}</td>
+        <td>${fmtPct(c.trend_pct)}</td>
+        <td><span class="tag ${c.technical_ok ? "yes" : "no"}">${c.technical_ok ? "dip" : "none"}</span></td>
+        <td><span class="tag ${c.model_ok ? "yes" : "wait"}">${c.model_ok ? c.model_direction : "n/a"}</span></td>
+        <td>${c.model_ok ? (c.probability_up * 100).toFixed(1) + "%" : "--"}</td>
+        <td><span class="tag ${c.should_enter ? "yes" : "no"}">${c.should_enter ? "YES (" + (c.side || "long") + ")" : "no"}</span></td>
+        <td class="sub">${c.reason || ""}</td>`, 9, "Waiting for first scan...");
   } catch (e) { console.error("status refresh failed", e); }
 }
 
@@ -198,22 +248,16 @@ async function refreshTrades() {
     const res = await fetch("/api/trades");
     const data = await res.json();
     const tbody = document.getElementById("trades-body");
-    const trades = data.trades || [];
-    if (trades.length) {
-      tbody.innerHTML = trades.slice(0, 30).map(t => `
-        <tr>
-          <td>${timeAgo(t.closed_at)}</td>
-          <td><strong>${t.ticker}</strong></td>
-          <td><span class="tag ${t.side === "short" ? "no" : "yes"}">${t.side || "long"}</span></td>
-          <td>${fmtUsd(t.entry_price)}</td>
-          <td>${fmtUsd(t.exit_price)}</td>
-          <td>${t.count}</td>
-          <td class="${t.realized_pnl_usd > 0 ? "stat pos" : t.realized_pnl_usd < 0 ? "stat neg" : ""}" style="font-size:13px;font-weight:600;">${fmtUsd(t.realized_pnl_usd)}</td>
-          <td class="sub">${t.reason || ""}</td>
-        </tr>`).join("");
-    } else {
-      tbody.innerHTML = '<tr><td colspan="8" class="empty">No trades yet</td></tr>';
-    }
+    const trades = (data.trades || []).slice(0, 30);
+    patchTable(tbody, trades, t => `${t.ticker}_${t.closed_at}`, t => `
+        <td>${timeAgo(t.closed_at)}</td>
+        <td><strong>${t.ticker}</strong></td>
+        <td><span class="tag ${t.side === "short" ? "no" : "yes"}">${t.side || "long"}</span></td>
+        <td>${fmtUsd(t.entry_price)}</td>
+        <td>${fmtUsd(t.exit_price)}</td>
+        <td>${t.count}</td>
+        <td class="${t.realized_pnl_usd > 0 ? "stat pos" : t.realized_pnl_usd < 0 ? "stat neg" : ""}" style="font-size:13px;font-weight:600;">${fmtUsd(t.realized_pnl_usd)}</td>
+        <td class="sub">${t.reason || ""}</td>`, 8, "No trades yet");
   } catch (e) { console.error("trades refresh failed", e); }
 }
 
@@ -222,19 +266,13 @@ async function refreshActivity() {
     const res = await fetch("/api/server/activity");
     const data = await res.json();
     const tbody = document.getElementById("activity-body");
-    const recent = data.recent || [];
-    if (recent.length) {
-      tbody.innerHTML = recent.slice(0, 20).map(r => `
-        <tr>
-          <td>${r.label || r.job}</td>
-          <td><span class="tag ${r.status === "ok" ? "yes" : r.status === "error" ? "no" : "wait"}">${r.status}</span></td>
-          <td>${timeAgo(r.started_at)}</td>
-          <td>${r.duration_sec ? r.duration_sec + "s" : "--"}</td>
-          <td class="sub">${JSON.stringify(r.summary || r.error || {})}</td>
-        </tr>`).join("");
-    } else {
-      tbody.innerHTML = '<tr><td colspan="5" class="empty">No job history yet</td></tr>';
-    }
+    const recent = (data.recent || []).slice(0, 20);
+    patchTable(tbody, recent, r => `${r.job}_${r.started_at}`, r => `
+        <td>${r.label || r.job}</td>
+        <td><span class="tag ${r.status === "ok" ? "yes" : r.status === "error" ? "no" : "wait"}">${r.status}</span></td>
+        <td>${timeAgo(r.started_at)}</td>
+        <td>${r.duration_sec ? r.duration_sec + "s" : "--"}</td>
+        <td class="sub">${JSON.stringify(r.summary || r.error || {})}</td>`, 5, "No job history yet");
   } catch (e) { console.error("activity refresh failed", e); }
 }
 
