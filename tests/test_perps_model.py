@@ -44,6 +44,12 @@ def _synthetic_training_frame(n: int = 500, seed: int = 42) -> pd.DataFrame:
         "volatility_5": np.abs(rng.normal(0.0008, 0.0003, n)),
         "volatility_15": np.abs(rng.normal(0.001, 0.0005, n)),
         "volatility_30": np.abs(rng.normal(0.0012, 0.0006, n)),
+        "rsi_14": np.clip(rng.normal(0.5, 0.15, n), 0.0, 1.0),
+        "macd_hist_pct": rng.normal(0, 0.001, n),
+        "bb_pct_b": np.clip(rng.normal(0.5, 0.2, n), 0.0, 1.0),
+        "bb_bandwidth": np.abs(rng.normal(0.01, 0.003, n)),
+        "atr_pct": np.abs(rng.normal(0.001, 0.0003, n)),
+        "stoch_k": np.clip(rng.normal(0.5, 0.2, n), 0.0, 1.0),
         "trend_pct": rng.normal(0, 0.01, n),
         "sentiment_score": rng.normal(0, 0.2, n),
         "label_up": label,
@@ -88,7 +94,9 @@ def test_predict_direction_uses_trained_model(monkeypatch):
         "ret_1m": 0.0, "ret_3m": 0.0, "ret_5m": 0.0, "ret_10m": 0.0, "ret_15m": 0.0, "ret_30m": 0.0,
         "trend_1h": 0.0, "trend_2h": 0.0, "trend_3h": 0.0, "trend_4h": 0.0,
         "dist_to_ma_15": 0.03, "dist_to_ma_30": 0.015,
-        "volatility_5": 0.001, "volatility_15": 0.001, "volatility_30": 0.001, "sentiment_score": 0.0,
+        "volatility_5": 0.001, "volatility_15": 0.001, "volatility_30": 0.001,
+        "rsi_14": 0.5, "macd_hist_pct": 0.0, "bb_pct_b": 0.5, "bb_bandwidth": 0.01, "atr_pct": 0.001, "stoch_k": 0.5,
+        "sentiment_score": 0.0,
     })
     prediction = perps_model.predict_direction("KXBTCPERP")
     assert prediction["model_ok"] is True

@@ -35,6 +35,8 @@ def _synthetic_test_df(n_per_ticker: int = 200, tickers: tuple[str, ...] = ("KXB
             "volatility_5": np.abs(rng.normal(0.0008, 0.0002, n_per_ticker)),
             "volatility_15": np.abs(rng.normal(0.001, 0.0002, n_per_ticker)),
             "volatility_30": np.abs(rng.normal(0.0012, 0.0003, n_per_ticker)),
+            "rsi_14": 0.5, "macd_hist_pct": 0.0, "bb_pct_b": 0.5, "bb_bandwidth": 0.01,
+            "atr_pct": 0.001, "stoch_k": 0.5,
             "sentiment_score": 0.0,
         }))
     return pd.concat(frames, ignore_index=True)
@@ -125,6 +127,8 @@ def _rally_then_crash_df(n: int = 100) -> pd.DataFrame:
         "ret_10m": np.zeros(n), "ret_15m": np.zeros(n), "ret_30m": np.zeros(n),
         "trend_1h": np.zeros(n), "trend_2h": np.zeros(n), "trend_3h": np.zeros(n), "trend_4h": np.zeros(n),
         "volatility_5": np.full(n, 0.001), "volatility_15": np.full(n, 0.001), "volatility_30": np.full(n, 0.001),
+        "rsi_14": np.full(n, 0.5), "macd_hist_pct": np.zeros(n), "bb_pct_b": np.full(n, 0.5),
+        "bb_bandwidth": np.full(n, 0.01), "atr_pct": np.full(n, 0.001), "stoch_k": np.full(n, 0.5),
         "sentiment_score": 0.0,
     })
 

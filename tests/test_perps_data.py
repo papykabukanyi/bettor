@@ -95,6 +95,99 @@ def test_engineer_features_label_matches_future_direction():
         assert (jump_crossing["label_up"] == 1).any()
 
 
+def _make_candles_with_range(closes: list[float], spread: float = 0.5, start_ts: int = 1_700_000_000, step: int = 60):
+    """Like _make_candles but with real (non-degenerate) high/low around
+    each close, needed to exercise ATR/Stochastic -- which use the real
+    high/low range, not just close."""
+    return [
+        {"end_period_ts": start_ts + i * step, "price": {"close": c, "high": c + spread, "low": c - spread}}
+        for i, c in enumerate(closes)
+    ]
+
+
+def test_candles_to_frame_captures_real_high_and_low():
+    candles = _make_candles_with_range([100.0, 101.0], spread=0.5)
+    df = perps_data._candles_to_frame(candles)  # noqa: SLF001
+    assert list(df["high"]) == [100.5, 101.5]
+    assert list(df["low"]) == [99.5, 100.5]
+
+
+def test_candles_to_frame_falls_back_to_close_when_high_low_missing():
+    candles = _make_candles([100.0, 101.0])  # no "high"/"low" keys at all
+    df = perps_data._candles_to_frame(candles)  # noqa: SLF001
+    assert list(df["high"]) == [100.0, 101.0]
+    assert list(df["low"]) == [100.0, 101.0]
+
+
+def test_rsi_is_high_for_a_strict_uptrend_and_low_for_a_strict_downtrend():
+    hourly_df = perps_data._candles_to_frame(_make_hourly_before(1_700_000_000))  # noqa: SLF001
+
+    up_prices = [100.0 + i * 0.05 for i in range(280)]
+    up_feats = perps_data.engineer_features(
+        perps_data._candles_to_frame(_make_candles(up_prices)), hourly_df, sentiment_score=0.0,  # noqa: SLF001
+    )
+    assert up_feats["rsi_14"].iloc[-1] > 0.8  # overbought
+
+    down_prices = [100.0 - i * 0.05 for i in range(280)]
+    down_feats = perps_data.engineer_features(
+        perps_data._candles_to_frame(_make_candles(down_prices)), hourly_df, sentiment_score=0.0,  # noqa: SLF001
+    )
+    assert down_feats["rsi_14"].iloc[-1] < 0.2  # oversold
+
+
+def test_bollinger_pct_b_is_near_one_at_a_fresh_high():
+    hourly_df = perps_data._candles_to_frame(_make_hourly_before(1_700_000_000))  # noqa: SLF001
+    # Flat, then a sharp recent rise well past the 245-row minimum -- the
+    # last row is a fresh high relative to its own trailing 20-period band.
+    prices = [100.0] * 260 + [100.0 + i * 0.3 for i in range(1, 21)]
+    feats = perps_data.engineer_features(
+        perps_data._candles_to_frame(_make_candles(prices)), hourly_df, sentiment_score=0.0,  # noqa: SLF001
+    )
+    assert feats["bb_pct_b"].iloc[-1] > 0.9
+
+
+def test_atr_pct_reflects_the_real_high_low_range_not_just_close():
+    """Two tickers with an IDENTICAL close series but very different
+    high/low ranges must get very different ATR -- a close-only
+    approximation would show them as identical."""
+    hourly_df = perps_data._candles_to_frame(_make_hourly_before(1_700_000_000))  # noqa: SLF001
+    # A tiny alternating wiggle (not a perfectly flat close) so RSI/Bollinger
+    # stay well-defined -- this test isolates the high/low SPREAD as the
+    # only real difference between the two series.
+    closes = [100.0 + (0.01 if i % 2 == 0 else -0.01) for i in range(250)]
+
+    tight = perps_data.engineer_features(
+        perps_data._candles_to_frame(_make_candles_with_range(closes, spread=0.01)), hourly_df, sentiment_score=0.0,  # noqa: SLF001
+    )
+    wide = perps_data.engineer_features(
+        perps_data._candles_to_frame(_make_candles_with_range(closes, spread=2.0)), hourly_df, sentiment_score=0.0,  # noqa: SLF001
+    )
+    assert wide["atr_pct"].iloc[-1] > tight["atr_pct"].iloc[-1]
+
+
+def test_stochastic_k_is_near_one_at_the_top_of_its_recent_range():
+    hourly_df = perps_data._candles_to_frame(_make_hourly_before(1_700_000_000))  # noqa: SLF001
+    closes = [100.0] * 260 + [100.0 + i * 0.3 for i in range(1, 21)]
+    feats = perps_data.engineer_features(
+        perps_data._candles_to_frame(_make_candles_with_range(closes, spread=0.1)), hourly_df, sentiment_score=0.0,  # noqa: SLF001
+    )
+    assert feats["stoch_k"].iloc[-1] > 0.9
+
+
+def test_macd_hist_is_positive_after_a_sustained_rally():
+    hourly_df = perps_data._candles_to_frame(_make_hourly_before(1_700_000_000))  # noqa: SLF001
+    prices = [100.0 + i * 0.05 for i in range(280)]
+    feats = perps_data.engineer_features(
+        perps_data._candles_to_frame(_make_candles(prices)), hourly_df, sentiment_score=0.0,  # noqa: SLF001
+    )
+    assert feats["macd_hist_pct"].iloc[-1] > 0
+
+
+def test_new_indicators_are_all_in_feature_columns():
+    for col in ["rsi_14", "macd_hist_pct", "bb_pct_b", "bb_bandwidth", "atr_pct", "stoch_k"]:
+        assert col in perps_data.FEATURE_COLUMNS
+
+
 def test_retry_on_rate_limit_retries_then_succeeds(monkeypatch):
     monkeypatch.setattr(perps_data.time, "sleep", lambda s: None)
     calls = {"n": 0}

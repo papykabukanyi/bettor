@@ -203,7 +203,18 @@ def _candles_to_frame(candles: list[dict[str, Any]]) -> pd.DataFrame:
         ts = c.get("end_period_ts")
         if close is None or ts is None:
             continue
-        rows.append({"ts": int(ts), "close": float(close)})
+        # high/low (confirmed live in every candle's own "price" sub-object,
+        # alongside close) enable real ATR/Stochastic indicators below rather
+        # than a close-only approximation -- falls back to close itself if
+        # either is ever missing so a partial/malformed candle can't produce
+        # a nonsensical (e.g. negative) range.
+        high = price.get("high")
+        low = price.get("low")
+        rows.append({
+            "ts": int(ts), "close": float(close),
+            "high": float(high) if high is not None else float(close),
+            "low": float(low) if low is not None else float(close),
+        })
     if not rows:
         # Explicit numeric dtypes even when empty -- a bare
         # pd.DataFrame(columns=[...]) defaults every column to "object",
@@ -211,7 +222,10 @@ def _candles_to_frame(candles: list[dict[str, Any]]) -> pd.DataFrame:
         # moment ANY chunk in a chained fetch (e.g. fetch_extended_candles
         # asking further back than a newly-listed ticker's history) comes
         # back empty, breaking pd.merge_asof downstream with a dtype error.
-        return pd.DataFrame({"ts": pd.Series(dtype="int64"), "close": pd.Series(dtype="float64")})
+        return pd.DataFrame({
+            "ts": pd.Series(dtype="int64"), "close": pd.Series(dtype="float64"),
+            "high": pd.Series(dtype="float64"), "low": pd.Series(dtype="float64"),
+        })
     return pd.DataFrame(rows).drop_duplicates(subset="ts").sort_values("ts").reset_index(drop=True)
 
 
@@ -220,10 +234,10 @@ _candle_cache: dict[str, tuple[pd.DataFrame, pd.DataFrame, float]] = {}
 
 
 def fetch_candle_frames(ticker: str) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Returns (one_minute_df, hourly_df) each with columns [ts, close].
-    Short TTL cache so a strategy scan across many tickers and a dashboard
-    status check landing in the same window don't double the Kalshi API
-    calls for the same ticker."""
+    """Returns (one_minute_df, hourly_df) each with columns [ts, close, high,
+    low]. Short TTL cache so a strategy scan across many tickers and a
+    dashboard status check landing in the same window don't double the
+    Kalshi API calls for the same ticker."""
     cached = _candle_cache.get(ticker)
     now_mono = time.monotonic()
     if cached and (now_mono - cached[2]) < _CANDLE_CACHE_TTL_SEC:
@@ -286,6 +300,48 @@ def engineer_features(one_min_df: pd.DataFrame, hourly_df: pd.DataFrame, *, sent
     df["volatility_15"] = df["ret_1m"].rolling(15).std()
     df["volatility_30"] = df["ret_1m"].rolling(30).std()
 
+    # Classic technical indicators, all backward-looking only (leakage-free).
+    # Normalized to roughly the same 0-1-or-small-decimal scale as the
+    # features above (RSI/100, ATR and MACD as a % of price) rather than
+    # their traditional raw scales, so no single feature dominates a
+    # LogisticRegression fit purely by having a much bigger native range.
+    delta = df["close"].diff()
+    avg_gain = delta.clip(lower=0).rolling(14).mean()
+    avg_loss = (-delta.clip(upper=0)).rolling(14).mean()
+    rs = avg_gain / avg_loss.replace(0, float("nan"))
+    rsi_raw = 100 - (100 / (1 + rs))
+    # A zero-loss window (e.g. a strict uptrend) makes `rs` NaN via the
+    # replace(0, nan) above (guarding against a literal 0/0 divide) -- but
+    # that's a real, common case that should resolve to exactly 100
+    # (maximally overbought), not NaN. Restore it specifically; a truly
+    # FLAT window (zero gains AND zero losses) correctly stays NaN and
+    # drops out via dropna below.
+    rsi_raw = rsi_raw.mask((avg_loss == 0) & (avg_gain > 0), 100.0)
+    df["rsi_14"] = rsi_raw / 100.0
+
+    ema_12 = df["close"].ewm(span=12, adjust=False).mean()
+    ema_26 = df["close"].ewm(span=26, adjust=False).mean()
+    macd_line = ema_12 - ema_26
+    macd_signal = macd_line.ewm(span=9, adjust=False).mean()
+    df["macd_hist_pct"] = (macd_line - macd_signal) / df["close"]
+
+    bb_mid = df["close"].rolling(20).mean()
+    bb_std = df["close"].rolling(20).std()
+    bb_range = (4 * bb_std).replace(0, float("nan"))  # upper(+2std) - lower(-2std)
+    df["bb_pct_b"] = (df["close"] - (bb_mid - 2 * bb_std)) / bb_range
+    df["bb_bandwidth"] = (4 * bb_std) / bb_mid
+
+    prev_close = df["close"].shift(1)
+    true_range = pd.concat([
+        df["high"] - df["low"], (df["high"] - prev_close).abs(), (df["low"] - prev_close).abs(),
+    ], axis=1).max(axis=1)
+    df["atr_pct"] = true_range.rolling(14).mean() / df["close"]
+
+    low_14 = df["low"].rolling(14).min()
+    high_14 = df["high"].rolling(14).max()
+    stoch_range = (high_14 - low_14).replace(0, float("nan"))
+    df["stoch_k"] = (df["close"] - low_14) / stoch_range
+
     if not hourly_df.empty and len(hourly_df) >= 2:
         hourly_sorted = hourly_df.sort_values("ts")
         hourly_sorted["trend_pct"] = hourly_sorted["close"].pct_change(
@@ -313,6 +369,7 @@ FEATURE_COLUMNS = [
     "trend_1h", "trend_2h", "trend_3h", "trend_4h",
     "dist_to_ma_15", "dist_to_ma_30",
     "volatility_5", "volatility_15", "volatility_30",
+    "rsi_14", "macd_hist_pct", "bb_pct_b", "bb_bandwidth", "atr_pct", "stoch_k",
     "trend_pct", "sentiment_score",
 ]
 
