@@ -83,7 +83,7 @@ from typing import Any
 from data.crypto_prices import get_fast_price
 from data.kalshi_perps import (
     cancel_margin_order, create_margin_order, get_margin_balance, get_margin_fee_tiers, get_margin_market,
-    get_margin_positions,
+    get_margin_order, get_margin_positions,
 )
 from data.perps_data import coin_for_ticker, get_watchlist, latest_feature_row
 from data.perps_model import predict_direction
@@ -165,12 +165,144 @@ def _taker_fee_rate(ticker: str) -> float:
     return float((_FEE_RATE_CACHE["rates"] or {}).get(ticker, DEFAULT_TAKER_FEE_RATE))
 
 
-def round_trip_fee_usd(ticker: str, entry_price: float, exit_price: float, count: float) -> float:
-    """Real dollar cost of a taker-taker round trip on this ticker -- entry
-    and exit are each their own fill, each charged the taker rate on its
-    own notional."""
-    rate = _taker_fee_rate(ticker)
-    return round((entry_price + exit_price) * count * rate, 6)
+def round_trip_fee_usd(
+    ticker: str, entry_price: float, exit_price: float, count: float, *,
+    entry_is_maker: bool = False, exit_is_maker: bool = False,
+) -> float:
+    """Real dollar cost of the round trip -- entry and exit are each their
+    own fill, each charged whichever rate that specific fill actually was
+    (maker or taker), not both assumed taker. A leg that was PARTIALLY a
+    maker fill before falling back to taker for the remainder is simply
+    counted as taker for this estimate -- Kalshi's own account balance is
+    the real, authoritative ledger regardless; this figure only drives the
+    bot's OWN trade-log display, so a mild taker-leaning approximation in
+    the rare mixed-fill case is an acceptable, conservative simplification."""
+    entry_rate = _maker_fee_rate(ticker) if entry_is_maker else _taker_fee_rate(ticker)
+    exit_rate = _maker_fee_rate(ticker) if exit_is_maker else _taker_fee_rate(ticker)
+    return round(entry_price * count * entry_rate + exit_price * count * exit_rate, 6)
+
+
+# ── Maker (post_only) order placement, with a taker fallback ───────────────
+# Confirmed via GET /margin/fee_tiers: maker fills cost 0.05% (5bps) per leg
+# vs taker's 0.8% (80bps) -- a 16x difference. A backtest across 14 days of
+# real Kalshi history (with fee-aware exit thresholds already tuned) found
+# NO taker-fee parameter combination that was net profitable: every config
+# lost money, and losses shrank monotonically as trade FREQUENCY was
+# reduced, converging toward "don't trade at all" as the best taker-fee
+# outcome. Placing a post_only maker order first -- falling back to a real
+# taker fill only when reliability matters more than the fee savings (a
+# stop-loss or max-hold exit) -- is the single highest-leverage lever
+# available without touching the underlying entry/exit signal at all.
+DEFAULT_MAKER_FEE_RATE = _env_float("PERPS_MAKER_FEE_RATE", 0.0005)
+_MAKER_FEE_RATE_CACHE: dict[str, Any] = {"rates": None, "computed_at": 0.0}
+# Default OFF: this changes HOW every real order is placed (a resting limit
+# order that might not fill at all, instead of an immediate market-like
+# fill) -- same "start conservative, prove it out, then enable" posture as
+# LIVE_TRADING_ENABLED/ENABLE_SHORTS. Only flip on after reviewing a
+# backtest run with this enabled.
+ENABLE_MAKER_ORDERS = _env_flag("PERPS_ENABLE_MAKER_ORDERS", default=False)
+MAKER_FILL_WAIT_SECONDS = _env_int("PERPS_MAKER_FILL_WAIT_SECONDS", 12)
+MAKER_FILL_POLL_INTERVAL_SEC = _env_float("PERPS_MAKER_FILL_POLL_INTERVAL_SEC", 2.0)
+
+
+def _maker_fee_rate(ticker: str) -> float:
+    """Real per-leg MAKER fee rate for this ticker -- mirrors
+    _taker_fee_rate's own live-fetch-then-cache pattern, just reading the
+    "maker_fee_rates" side of the same /margin/fee_tiers response."""
+    now = time.time()
+    if _MAKER_FEE_RATE_CACHE["rates"] is None or (now - _MAKER_FEE_RATE_CACHE["computed_at"]) >= _FEE_RATE_CACHE_TTL_SEC:
+        try:
+            _MAKER_FEE_RATE_CACHE["rates"] = get_margin_fee_tiers().get("maker_fee_rates") or {}
+        except Exception as exc:
+            logger.warning("[perps_strategy] could not refresh maker fee tiers, using default: %s", exc)
+            _MAKER_FEE_RATE_CACHE["rates"] = {}
+        _MAKER_FEE_RATE_CACHE["computed_at"] = now
+    return float((_MAKER_FEE_RATE_CACHE["rates"] or {}).get(ticker, DEFAULT_MAKER_FEE_RATE))
+
+
+def _maker_price(order_side: str, market: dict[str, Any], tick_size: float) -> float | None:
+    """The maker-safe price for a new post_only order -- joining the
+    current best bid (a "bid"/buy order) or best ask (an "ask"/sell order)
+    never crosses the spread, so the exchange won't reject it as an
+    immediate cross. None if the market snapshot didn't carry a usable
+    bid/ask (falls back to a plain taker order entirely in that case)."""
+    raw = market.get("bid") if order_side == "bid" else market.get("ask")
+    try:
+        price = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if price <= 0:
+        return None
+    return _round_price(price, tick_size)
+
+
+def _place_order_maker_then_fallback(
+    *, ticker: str, order_side: str, count: float, maker_price: float, fallback_price: float,
+    reduce_only: bool, urgent: bool,
+) -> tuple[dict[str, Any] | None, str]:
+    """Places a post_only (good_till_canceled) maker order first, to
+    capture the far lower maker fee. Polls briefly for a fill; on timeout,
+    cancels whatever's left resting. `urgent` callers (a stop-loss or
+    max-hold exit, where a guaranteed exit matters more than the fee
+    savings) get an immediate real taker fallback for the unfilled
+    remainder. Non-urgent callers (a new entry, a take-profit/quick-profit
+    exit) just get back whatever DID fill (possibly nothing) -- the
+    existing caller-side "verify the real exchange position afterward"
+    logic already treats a zero-fill result as "retry next cycle", so no
+    special-casing is needed there.
+
+    Returns (order_result_or_None, fill_type) where fill_type is "maker"
+    (fully filled by the resting order), "taker_fallback" (the urgent
+    fallback fired, with or without a partial maker fill first), or
+    "unfilled" (non-urgent, nothing filled at all)."""
+    order_result = create_margin_order(
+        ticker=ticker, side=order_side, count=count, price=maker_price,
+        client_order_id=str(uuid.uuid4()), time_in_force="good_till_canceled",
+        post_only=True, reduce_only=reduce_only,
+    )
+    order = order_result.get("order") or order_result
+    order_id = order.get("order_id")
+    filled_count = 0.0
+    remaining = count
+    if order_id:
+        deadline = time.monotonic() + MAKER_FILL_WAIT_SECONDS
+        while time.monotonic() < deadline:
+            time.sleep(MAKER_FILL_POLL_INTERVAL_SEC)
+            try:
+                status = get_margin_order(order_id).get("order") or {}
+            except Exception as exc:
+                logger.warning("[perps_strategy] could not poll maker order %s for %s: %s", order_id, ticker, exc)
+                break
+            filled_count = float(status.get("fill_count") or 0.0)
+            remaining = float(status.get("remaining_count") or 0.0)
+            if remaining <= 0:
+                break
+            if status.get("last_update_reason") == "PostOnlyCrossCancel":
+                # Rejected outright -- the bid/ask snapshot used to price it
+                # was already stale by the time it reached the exchange. No
+                # point continuing to poll an order that no longer exists.
+                break
+        if remaining > 0:
+            try:
+                cancel_margin_order(order_id)
+            except Exception as exc:
+                logger.debug(
+                    "[perps_strategy] cancel of unfilled/partial maker order %s failed "
+                    "(may have just filled): %s", order_id, exc,
+                )
+    else:
+        logger.warning("[perps_strategy] maker order for %s returned no order_id -- cannot poll for a fill", ticker)
+
+    if remaining <= 0:
+        return order_result, "maker"
+    if not urgent:
+        return (order_result if filled_count > 0 else None), "unfilled"
+
+    fallback_result = create_margin_order(
+        ticker=ticker, side=order_side, count=remaining, price=fallback_price,
+        client_order_id=str(uuid.uuid4()), time_in_force="immediate_or_cancel", reduce_only=reduce_only,
+    )
+    return fallback_result, "taker_fallback"
 
 
 # ── Tunable parameters (all overridable via env) ────────────────────────────
@@ -897,15 +1029,33 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                 continue
             try:
                 order_result = None
+                exit_fill_type = "taker_fallback"
                 closed_count = count
                 if not effective_dry_run:
                     # Closing a long means selling (ask); closing a short means
                     # buying back (bid) -- both reduce_only so it can only ever
                     # shrink/close this exact position, never open a new one.
-                    order_result = create_margin_order(
-                        ticker=ticker, side=("ask" if side == "long" else "bid"), count=count, price=exit_price,
-                        client_order_id=str(uuid.uuid4()), time_in_force="immediate_or_cancel", reduce_only=True,
-                    )
+                    exit_order_side = "ask" if side == "long" else "bid"
+                    # stop_loss/max_hold_time exits need a GUARANTEED close --
+                    # a resting maker order that never fills while the price
+                    # keeps moving against the position defeats the whole
+                    # point of a stop-loss. take_profit/quick_profit exits are
+                    # discretionary (missing one just means re-evaluating next
+                    # 20s cycle), so they're worth a real shot at the much
+                    # cheaper maker fee first.
+                    urgent = reason.startswith("stop_loss") or reason.startswith("max_hold_time")
+                    maker_px = _maker_price(exit_order_side, market.get("market") or {}, tick_size) if ENABLE_MAKER_ORDERS else None
+                    if maker_px is not None:
+                        order_result, exit_fill_type = _place_order_maker_then_fallback(
+                            ticker=ticker, order_side=exit_order_side, count=count,
+                            maker_price=maker_px, fallback_price=exit_price,
+                            reduce_only=True, urgent=urgent,
+                        )
+                    else:
+                        order_result = create_margin_order(
+                            ticker=ticker, side=exit_order_side, count=count, price=exit_price,
+                            client_order_id=str(uuid.uuid4()), time_in_force="immediate_or_cancel", reduce_only=True,
+                        )
                     # An immediate_or_cancel order can fill zero, partially, or
                     # fully -- confirmed live on this account (repeated exit
                     # attempts came back fill_count 0.00, i.e. fully canceled).
@@ -941,7 +1091,11 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                 # balance actually reflects) -- confirmed live that the gross
                 # price-delta alone systematically overstates real performance
                 # by the taker round-trip cost (see round_trip_fee_usd above).
-                fee_usd = round_trip_fee_usd(ticker, entry_price, exit_price, closed_count) if not effective_dry_run else 0.0
+                fee_usd = round_trip_fee_usd(
+                    ticker, entry_price, exit_price, closed_count,
+                    entry_is_maker=(position.get("entry_fill_type") == "maker"),
+                    exit_is_maker=(exit_fill_type == "maker"),
+                ) if not effective_dry_run else 0.0
                 realized_pnl = round(gross_pnl - fee_usd, 6)
                 by_date = state.setdefault("realized_pnl_by_date", {})
                 by_date[_today_str()] = round(float(by_date.get(_today_str(), 0.0)) + realized_pnl, 6)
@@ -950,6 +1104,7 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                     "ticker": ticker, "side": side, "entry_price": entry_price, "exit_price": exit_price,
                     "count": closed_count, "gross_pnl_usd": gross_pnl, "fee_usd": fee_usd,
                     "realized_pnl_usd": realized_pnl, "reason": reason, "dry_run": effective_dry_run,
+                    "entry_fill_type": position.get("entry_fill_type", "taker_fallback"), "exit_fill_type": exit_fill_type,
                 }
                 state.setdefault("trade_log", []).append(trade)
                 closed.append(trade)
@@ -1096,16 +1251,31 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
         side = candidate.get("side", "long")
         try:
             order_result = None
+            entry_fill_type = "taker_fallback"
             actual_count: float = float(count)
             actual_entry_price = entry_price
             if not effective_dry_run:
                 # Opening a long means buying (bid); opening a short means
                 # selling (ask) with reduce_only NOT set, since this is a new
                 # position, not closing an existing long.
-                order_result = create_margin_order(
-                    ticker=ticker, side=("bid" if side == "long" else "ask"), count=float(count), price=entry_price,
-                    client_order_id=str(uuid.uuid4()), time_in_force="immediate_or_cancel",
-                )
+                entry_order_side = "bid" if side == "long" else "ask"
+                # A new entry is always discretionary -- never "urgent" (there
+                # is no requirement to open a position this exact cycle), so
+                # an unfilled maker attempt just means skipping this ticker
+                # and letting the next scan re-evaluate, rather than forcing
+                # a worse (taker) fill just to guarantee an entry happens.
+                maker_px = _maker_price(entry_order_side, market, tick_size) if ENABLE_MAKER_ORDERS else None
+                if maker_px is not None:
+                    order_result, entry_fill_type = _place_order_maker_then_fallback(
+                        ticker=ticker, order_side=entry_order_side, count=float(count),
+                        maker_price=maker_px, fallback_price=entry_price,
+                        reduce_only=False, urgent=False,
+                    )
+                else:
+                    order_result = create_margin_order(
+                        ticker=ticker, side=entry_order_side, count=float(count), price=entry_price,
+                        client_order_id=str(uuid.uuid4()), time_in_force="immediate_or_cancel",
+                    )
                 # An immediate_or_cancel order can fill zero, partially, or
                 # fully -- confirmed live on this account (several buy attempts
                 # came back fill_count 0.00; others partially filled less than
@@ -1153,11 +1323,12 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
                     merged["count"] = float(actual_count)
                     merged["entry_price"] = actual_entry_price
                     merged["side"] = side
+                    merged["entry_fill_type"] = entry_fill_type
                     positions[existing_idx] = merged
                 else:
                     positions.append({
                         "ticker": ticker, "entry_price": actual_entry_price, "count": float(actual_count),
-                        "side": side,
+                        "side": side, "entry_fill_type": entry_fill_type,
                         "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(), "dry_run": effective_dry_run,
                         "sizing": sizing_detail,
                     })
@@ -1166,6 +1337,7 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
             opened.append({
                 "ticker": ticker, "ok": True, "action": "opened", "side": side, "entry_price": actual_entry_price,
                 "count": actual_count, "reason": candidate["reason"], "sizing": sizing_detail, "order_result": order_result,
+                "entry_fill_type": entry_fill_type,
             })
         except Exception as exc:
             # Placing the real entry order (or booking its result) failed

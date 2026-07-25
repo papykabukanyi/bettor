@@ -187,6 +187,18 @@ def cancel_margin_order(order_id: str) -> dict[str, Any]:
     return _request_json("DELETE", f"/margin/orders/{order_id}", auth=True)
 
 
+def get_margin_order(order_id: str) -> dict[str, Any]:
+    """Confirmed via Kalshi's own API docs (GET /margin/orders/{order_id}):
+    the returned MarginOrder has `fill_count`/`remaining_count` (fixed-point
+    contract counts) rather than a single "status" enum -- used to poll a
+    resting post_only (maker) order for a fill without needing to infer it
+    from a before/after account-position diff. `last_update_reason` of
+    "PostOnlyCrossCancel" specifically means the order was rejected for
+    would-be-immediately-crossed the spread (a stale bid/ask snapshot at
+    order placement time)."""
+    return _request_json("GET", f"/margin/orders/{order_id}", auth=True)
+
+
 def run_connectivity_check() -> dict[str, Any]:
     """Read-only, zero-order connectivity + eligibility check against the real
     account. Answers: is margin enabled, is the margin exchange open, what's

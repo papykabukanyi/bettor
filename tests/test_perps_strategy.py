@@ -30,8 +30,9 @@ def _deterministic_fee_rate(monkeypatch):
     endpoint on a cache miss -- every test here gets a fixed, pre-populated
     cache (falls back to the confirmed-live 0.008 taker rate per ticker) so
     fee deduction is deterministic and the suite never touches the network
-    for this."""
+    for this. Same for the maker side (0.05% confirmed-live rate)."""
     monkeypatch.setattr(strat, "_FEE_RATE_CACHE", {"rates": {}, "computed_at": strat.time.time()})
+    monkeypatch.setattr(strat, "_MAKER_FEE_RATE_CACHE", {"rates": {}, "computed_at": strat.time.time()})
 
 
 def test_taker_fee_rate_falls_back_to_default_on_a_missing_ticker(monkeypatch):
@@ -653,10 +654,15 @@ def test_compute_leveraged_count_returns_zero_when_budget_too_small():
 
 # ── Multi-position management ────────────────────────────────────────────────
 
-def _market_response(price=6.60, tick_size=0.0001, leverage_estimate=6.0, contract_size=0.0001):
-    return {"market": {
+def _market_response(price=6.60, tick_size=0.0001, leverage_estimate=6.0, contract_size=0.0001, bid=None, ask=None):
+    market = {
         "price": price, "tick_size": tick_size, "leverage_estimate": leverage_estimate, "contract_size": contract_size,
-    }}
+    }
+    if bid is not None:
+        market["bid"] = bid
+    if ask is not None:
+        market["ask"] = ask
+    return {"market": market}
 
 
 def test_manage_open_positions_returns_no_position_without_touching_the_network(monkeypatch, tmp_path):
@@ -1378,3 +1384,341 @@ def test_run_cycle_manages_positions_then_scans_for_entries(monkeypatch, tmp_pat
     result = strat.run_cycle()
     assert "position_management" in result and "entry_scan" in result
     assert result["position_management"]["action"] in ("none", "closed")
+
+
+# ── Maker (post_only) order placement, with a taker fallback ───────────────
+# Confirmed via a real 14-day backtest: at Kalshi's 0.8%/leg taker rate, no
+# threshold combination tested was net profitable. Maker fills cost 16x less
+# (0.05%/leg) -- these lock down the placement/fallback/fee-accounting logic
+# that captures that saving without weakening a stop-loss's guarantee of
+# actually closing the position.
+@pytest.fixture(autouse=True)
+def _no_real_sleep_in_maker_poll(monkeypatch):
+    """The real poll loop sleeps MAKER_FILL_POLL_INTERVAL_SEC between checks
+    -- tiny windows here so tests run instantly regardless."""
+    monkeypatch.setattr(strat, "MAKER_FILL_WAIT_SECONDS", 0.05)
+    monkeypatch.setattr(strat, "MAKER_FILL_POLL_INTERVAL_SEC", 0.01)
+
+
+def test_maker_price_uses_bid_for_a_buy_order():
+    market = _market_response(bid=6.50, ask=6.52)["market"]
+    assert strat._maker_price("bid", market, tick_size=0.0001) == 6.50  # noqa: SLF001
+
+
+def test_maker_price_uses_ask_for_a_sell_order():
+    market = _market_response(bid=6.50, ask=6.52)["market"]
+    assert strat._maker_price("ask", market, tick_size=0.0001) == 6.52  # noqa: SLF001
+
+
+def test_maker_price_returns_none_when_bid_ask_missing():
+    market = _market_response()["market"]  # no bid/ask set
+    assert strat._maker_price("bid", market, tick_size=0.0001) is None  # noqa: SLF001
+
+
+def test_maker_price_returns_none_for_a_non_positive_quote():
+    market = _market_response(bid=0.0, ask=-1.0)["market"]
+    assert strat._maker_price("bid", market, tick_size=0.0001) is None  # noqa: SLF001
+    assert strat._maker_price("ask", market, tick_size=0.0001) is None  # noqa: SLF001
+
+
+def test_maker_fee_rate_uses_ticker_specific_rate_from_cache(monkeypatch):
+    monkeypatch.setattr(strat, "_MAKER_FEE_RATE_CACHE", {"rates": {"KXBTCPERP": 0.0003}, "computed_at": strat.time.time()})
+    assert strat._maker_fee_rate("KXBTCPERP") == 0.0003  # noqa: SLF001
+    assert strat._maker_fee_rate("KXZECPERP") == strat.DEFAULT_MAKER_FEE_RATE  # noqa: SLF001
+
+
+def test_maker_fee_rate_refreshes_from_the_live_endpoint_on_a_cold_cache(monkeypatch):
+    monkeypatch.setattr(strat, "_MAKER_FEE_RATE_CACHE", {"rates": None, "computed_at": 0.0})
+    monkeypatch.setattr(strat, "get_margin_fee_tiers", lambda: {"maker_fee_rates": {"KXBTCPERP": 0.0005}})
+    assert strat._maker_fee_rate("KXBTCPERP") == 0.0005  # noqa: SLF001
+
+
+def test_round_trip_fee_usd_defaults_to_taker_both_legs():
+    fee = strat.round_trip_fee_usd("KXNEARPERP", entry_price=1.80, exit_price=1.79, count=8.0)
+    assert fee == round((1.80 + 1.79) * 8.0 * strat.DEFAULT_TAKER_FEE_RATE, 6)
+
+
+def test_round_trip_fee_usd_uses_maker_rate_only_for_the_maker_leg(monkeypatch):
+    monkeypatch.setattr(strat, "_MAKER_FEE_RATE_CACHE", {"rates": {"KXNEARPERP": 0.0005}, "computed_at": strat.time.time()})
+    monkeypatch.setattr(strat, "_FEE_RATE_CACHE", {"rates": {"KXNEARPERP": 0.008}, "computed_at": strat.time.time()})
+    fee = strat.round_trip_fee_usd("KXNEARPERP", entry_price=1.80, exit_price=1.79, count=8.0, entry_is_maker=True)
+    expected = round(1.80 * 8.0 * 0.0005 + 1.79 * 8.0 * 0.008, 6)
+    assert fee == expected
+    assert fee < strat.round_trip_fee_usd("KXNEARPERP", entry_price=1.80, exit_price=1.79, count=8.0)
+
+
+def test_round_trip_fee_usd_both_legs_maker_is_far_cheaper_than_both_taker(monkeypatch):
+    monkeypatch.setattr(strat, "_MAKER_FEE_RATE_CACHE", {"rates": {}, "computed_at": strat.time.time()})
+    monkeypatch.setattr(strat, "_FEE_RATE_CACHE", {"rates": {}, "computed_at": strat.time.time()})
+    maker_fee = strat.round_trip_fee_usd(
+        "KXBTCPERP", entry_price=6.60, exit_price=6.65, count=2.0, entry_is_maker=True, exit_is_maker=True,
+    )
+    taker_fee = strat.round_trip_fee_usd("KXBTCPERP", entry_price=6.60, exit_price=6.65, count=2.0)
+    assert maker_fee < taker_fee / 10  # confirmed-live rates are a 16x difference
+
+
+def _order_response(order_id="ord-1"):
+    return {"order": {"order_id": order_id}}
+
+
+def test_maker_order_fills_fully_within_poll_window_no_fallback(monkeypatch):
+    placed = []
+
+    def fake_create(**kwargs):
+        placed.append(kwargs)
+        return _order_response()
+
+    monkeypatch.setattr(strat, "create_margin_order", fake_create)
+    monkeypatch.setattr(strat, "get_margin_order", lambda order_id: {"order": {"fill_count": 5.0, "remaining_count": 0.0}})
+    monkeypatch.setattr(strat, "cancel_margin_order", lambda order_id: (_ for _ in ()).throw(AssertionError("must not cancel a fully-filled order")))
+
+    result, fill_type = strat._place_order_maker_then_fallback(  # noqa: SLF001
+        ticker="KXBTCPERP", order_side="bid", count=5.0, maker_price=6.60, fallback_price=6.61,
+        reduce_only=False, urgent=False,
+    )
+    assert fill_type == "maker"
+    assert len(placed) == 1  # only the maker order -- no taker fallback call
+    assert placed[0]["time_in_force"] == "good_till_canceled"
+    assert placed[0]["post_only"] is True
+
+
+def test_maker_order_unfilled_urgent_falls_back_to_taker(monkeypatch):
+    placed = []
+
+    def fake_create(**kwargs):
+        placed.append(kwargs)
+        return _order_response()
+
+    monkeypatch.setattr(strat, "create_margin_order", fake_create)
+    monkeypatch.setattr(strat, "get_margin_order", lambda order_id: {"order": {"fill_count": 0.0, "remaining_count": 5.0}})
+    canceled = []
+    monkeypatch.setattr(strat, "cancel_margin_order", lambda order_id: canceled.append(order_id))
+
+    result, fill_type = strat._place_order_maker_then_fallback(  # noqa: SLF001
+        ticker="KXBTCPERP", order_side="ask", count=5.0, maker_price=6.65, fallback_price=6.60,
+        reduce_only=True, urgent=True,
+    )
+    assert fill_type == "taker_fallback"
+    assert len(canceled) == 1  # the unfilled maker order was canceled first
+    assert len(placed) == 2  # maker attempt + taker fallback
+    assert placed[1]["time_in_force"] == "immediate_or_cancel"
+    assert placed[1]["count"] == 5.0  # the FULL remaining count, none of it filled
+    assert placed[1]["price"] == 6.60  # the fallback (marketable) price, not the maker price
+
+
+def test_maker_order_unfilled_non_urgent_returns_none_no_fallback(monkeypatch):
+    placed = []
+    monkeypatch.setattr(strat, "create_margin_order", lambda **kwargs: placed.append(kwargs) or _order_response())
+    monkeypatch.setattr(strat, "get_margin_order", lambda order_id: {"order": {"fill_count": 0.0, "remaining_count": 5.0}})
+    monkeypatch.setattr(strat, "cancel_margin_order", lambda order_id: None)
+
+    result, fill_type = strat._place_order_maker_then_fallback(  # noqa: SLF001
+        ticker="KXBTCPERP", order_side="bid", count=5.0, maker_price=6.60, fallback_price=6.61,
+        reduce_only=False, urgent=False,
+    )
+    assert result is None
+    assert fill_type == "unfilled"
+    assert len(placed) == 1  # never placed a taker fallback
+
+
+def test_maker_order_partial_fill_urgent_falls_back_for_remainder_only(monkeypatch):
+    placed = []
+    monkeypatch.setattr(strat, "create_margin_order", lambda **kwargs: placed.append(kwargs) or _order_response())
+    monkeypatch.setattr(strat, "get_margin_order", lambda order_id: {"order": {"fill_count": 3.0, "remaining_count": 2.0}})
+    monkeypatch.setattr(strat, "cancel_margin_order", lambda order_id: None)
+
+    result, fill_type = strat._place_order_maker_then_fallback(  # noqa: SLF001
+        ticker="KXBTCPERP", order_side="ask", count=5.0, maker_price=6.65, fallback_price=6.60,
+        reduce_only=True, urgent=True,
+    )
+    assert fill_type == "taker_fallback"
+    assert len(placed) == 2
+    assert placed[1]["count"] == 2.0  # only the unfilled remainder, not the original 5.0
+
+
+def test_maker_order_partial_fill_non_urgent_keeps_partial_no_fallback(monkeypatch):
+    placed = []
+    monkeypatch.setattr(strat, "create_margin_order", lambda **kwargs: placed.append(kwargs) or _order_response())
+    monkeypatch.setattr(strat, "get_margin_order", lambda order_id: {"order": {"fill_count": 3.0, "remaining_count": 2.0}})
+    monkeypatch.setattr(strat, "cancel_margin_order", lambda order_id: None)
+
+    result, fill_type = strat._place_order_maker_then_fallback(  # noqa: SLF001
+        ticker="KXBTCPERP", order_side="bid", count=5.0, maker_price=6.60, fallback_price=6.61,
+        reduce_only=False, urgent=False,
+    )
+    assert result is not None  # some of it filled -- caller verifies the real amount via the exchange itself
+    assert fill_type == "unfilled"
+    assert len(placed) == 1
+
+
+def test_maker_order_post_only_cross_cancel_stops_polling_early(monkeypatch):
+    """A stale bid/ask snapshot at placement time can make the exchange
+    reject the post_only order outright as an immediate cross -- polling
+    must recognize this and stop immediately rather than waiting out the
+    full window on an order that no longer exists."""
+    poll_calls = []
+
+    def fake_get_order(order_id):
+        poll_calls.append(order_id)
+        return {"order": {"fill_count": 0.0, "remaining_count": 5.0, "last_update_reason": "PostOnlyCrossCancel"}}
+
+    monkeypatch.setattr(strat, "create_margin_order", lambda **kwargs: _order_response())
+    monkeypatch.setattr(strat, "get_margin_order", fake_get_order)
+    monkeypatch.setattr(strat, "cancel_margin_order", lambda order_id: None)
+    # A much longer window than the test should actually take if early-exit works.
+    monkeypatch.setattr(strat, "MAKER_FILL_WAIT_SECONDS", 5.0)
+    monkeypatch.setattr(strat, "MAKER_FILL_POLL_INTERVAL_SEC", 0.01)
+
+    strat._place_order_maker_then_fallback(  # noqa: SLF001
+        ticker="KXBTCPERP", order_side="bid", count=5.0, maker_price=6.60, fallback_price=6.61,
+        reduce_only=False, urgent=False,
+    )
+    assert len(poll_calls) == 1  # stopped after the very first poll, not several seconds of retries
+
+
+def test_maker_order_missing_order_id_treated_as_fully_unfilled(monkeypatch):
+    monkeypatch.setattr(strat, "create_margin_order", lambda **kwargs: {"order": {}})  # no order_id at all
+
+    def fail_if_polled(order_id):
+        raise AssertionError("must not poll for a fill without a real order_id")
+
+    monkeypatch.setattr(strat, "get_margin_order", fail_if_polled)
+    placed_fallback = []
+    monkeypatch.setattr(strat, "cancel_margin_order", lambda order_id: None)
+
+    def fake_create_order_side_effect(**kwargs):
+        placed_fallback.append(kwargs)
+        return {"order": {}}
+
+    result, fill_type = strat._place_order_maker_then_fallback(  # noqa: SLF001
+        ticker="KXBTCPERP", order_side="ask", count=5.0, maker_price=6.65, fallback_price=6.60,
+        reduce_only=True, urgent=True,
+    )
+    assert fill_type == "taker_fallback"
+
+
+def test_manage_open_positions_take_profit_tries_maker_order_when_enabled(monkeypatch, tmp_path):
+    """Non-urgent exits (take-profit) should attempt the far cheaper maker
+    fee first."""
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", True)
+    monkeypatch.setattr(strat, "ENABLE_MAKER_ORDERS", True)
+    strat._save_state({
+        "positions": [_position(ticker="KXBTCPERP", entry_price=6.60, count=5.0, side="long")],
+        "realized_pnl_by_date": {}, "trade_log": [], "daily_reference_balance": {},
+    })
+    exit_price = 6.60 * (1 + strat.TAKE_PROFIT_PCT + 0.001)
+    monkeypatch.setattr(strat, "get_margin_market", lambda ticker: _market_response(price=exit_price, bid=exit_price - 0.001, ask=exit_price))
+    calls = {"n": 0}
+
+    def fake_positions():
+        calls["n"] += 1
+        count = "5.00" if calls["n"] == 1 else "0.00"
+        return {"positions": [_real_position("KXBTCPERP", count, "6.60")] if float(count) > 0 else []}
+
+    monkeypatch.setattr(strat, "get_margin_positions", fake_positions)
+
+    placed = []
+
+    def fake_create(**kwargs):
+        placed.append(kwargs)
+        return _order_response()
+
+    monkeypatch.setattr(strat, "create_margin_order", fake_create)
+    monkeypatch.setattr(strat, "get_margin_order", lambda order_id: {"order": {"fill_count": 5.0, "remaining_count": 0.0}})
+
+    result = strat.manage_open_positions(dry_run=False)
+    assert result["action"] == "closed"
+    assert len(placed) == 1  # filled by the maker order -- no taker fallback needed
+    assert placed[0]["post_only"] is True
+    assert result["closed"][0]["exit_fill_type"] == "maker"
+
+
+def test_manage_open_positions_stop_loss_falls_back_to_taker_when_maker_unfilled(monkeypatch, tmp_path):
+    """A stop-loss is urgent -- it must not sit waiting on a maker fill that
+    never comes while the price keeps moving against the position."""
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", True)
+    monkeypatch.setattr(strat, "ENABLE_MAKER_ORDERS", True)
+    strat._save_state({
+        "positions": [_position(ticker="KXBTCPERP", entry_price=6.60, count=5.0, side="long")],
+        "realized_pnl_by_date": {}, "trade_log": [], "daily_reference_balance": {},
+    })
+    exit_price = 6.60 * (1 - strat.STOP_LOSS_PCT - 0.001)
+    monkeypatch.setattr(strat, "get_margin_market", lambda ticker: _market_response(price=exit_price, bid=exit_price, ask=exit_price + 0.001))
+    calls = {"n": 0}
+
+    def fake_positions():
+        calls["n"] += 1
+        count = "5.00" if calls["n"] == 1 else "0.00"
+        return {"positions": [_real_position("KXBTCPERP", count, "6.60")] if float(count) > 0 else []}
+
+    monkeypatch.setattr(strat, "get_margin_positions", fake_positions)
+
+    placed = []
+    monkeypatch.setattr(strat, "create_margin_order", lambda **kwargs: placed.append(kwargs) or _order_response())
+    monkeypatch.setattr(strat, "get_margin_order", lambda order_id: {"order": {"fill_count": 0.0, "remaining_count": 5.0}})
+    monkeypatch.setattr(strat, "cancel_margin_order", lambda order_id: None)
+
+    result = strat.manage_open_positions(dry_run=False)
+    assert result["action"] == "closed"
+    assert len(placed) == 2  # maker attempt, then the guaranteed taker fallback
+    assert placed[1]["time_in_force"] == "immediate_or_cancel"
+    assert result["closed"][0]["exit_fill_type"] == "taker_fallback"
+
+
+def test_manage_open_positions_falls_back_to_taker_when_no_bid_ask_even_if_maker_enabled(monkeypatch, tmp_path):
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", True)
+    monkeypatch.setattr(strat, "ENABLE_MAKER_ORDERS", True)
+    strat._save_state({
+        "positions": [_position(ticker="KXBTCPERP", entry_price=6.60, count=5.0, side="long")],
+        "realized_pnl_by_date": {}, "trade_log": [], "daily_reference_balance": {},
+    })
+    exit_price = 6.60 * (1 + strat.TAKE_PROFIT_PCT + 0.001)
+    # No bid/ask in this market response -- _maker_price must return None.
+    monkeypatch.setattr(strat, "get_margin_market", lambda ticker: _market_response(price=exit_price))
+    calls = {"n": 0}
+
+    def fake_positions():
+        calls["n"] += 1
+        count = "5.00" if calls["n"] == 1 else "0.00"
+        return {"positions": [_real_position("KXBTCPERP", count, "6.60")] if float(count) > 0 else []}
+
+    monkeypatch.setattr(strat, "get_margin_positions", fake_positions)
+
+    placed = []
+    monkeypatch.setattr(strat, "create_margin_order", lambda **kwargs: placed.append(kwargs) or _order_response())
+
+    result = strat.manage_open_positions(dry_run=False)
+    assert result["action"] == "closed"
+    assert len(placed) == 1
+    assert placed[0]["time_in_force"] == "immediate_or_cancel"
+    assert placed[0].get("post_only", False) is False  # plain taker call -- post_only never set
+
+
+def test_scan_and_enter_tries_maker_order_for_a_new_entry_when_enabled(monkeypatch, tmp_path):
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", True)
+    monkeypatch.setattr(strat, "ENABLE_MAKER_ORDERS", True)
+    strat._save_state({"positions": [], "realized_pnl_by_date": {}, "trade_log": [], "daily_reference_balance": {}})
+    monkeypatch.setattr(strat, "_available_balance_usd", lambda: 100.0)
+    monkeypatch.setattr(
+        strat, "scan_for_entries",
+        lambda exclude=None: (
+            [{"ticker": "KXBTCPERP", "current_price": 6.60, "reason": "dip", "side": "long"}],
+            [{"ticker": "KXBTCPERP", "should_enter": True, "reason": "dip"}],
+        ),
+    )
+    monkeypatch.setattr(strat, "get_margin_market", lambda ticker: _market_response(price=6.60, bid=6.595, ask=6.60))
+    monkeypatch.setattr(strat, "get_margin_positions", lambda: {"positions": [_real_position("KXBTCPERP", "5.00", "6.595")]})
+
+    placed = []
+    monkeypatch.setattr(strat, "create_margin_order", lambda **kwargs: placed.append(kwargs) or _order_response())
+    monkeypatch.setattr(strat, "get_margin_order", lambda order_id: {"order": {"fill_count": 5.0, "remaining_count": 0.0}})
+
+    result = strat.scan_and_enter(dry_run=False)
+    assert result["opened"][0]["action"] == "opened"
+    assert result["opened"][0]["entry_fill_type"] == "maker"
+    assert placed[0]["post_only"] is True
+    assert placed[0]["side"] == "bid"

@@ -28,6 +28,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from data.crypto_news import get_sentiment
@@ -210,10 +211,24 @@ def _candles_to_frame(candles: list[dict[str, Any]]) -> pd.DataFrame:
         # a nonsensical (e.g. negative) range.
         high = price.get("high")
         low = price.get("low")
+        # Confirmed live: every candle Kalshi returns ALSO carries real
+        # volume, dollar volume, open interest, and a bid/ask sub-object --
+        # previously fetched and immediately thrown away. These enable real
+        # volume-spike and open-interest-based features below (see
+        # engineer_features) instead of only ever looking at price.
+        bid = c.get("bid") or {}
+        ask = c.get("ask") or {}
+        bid_close = bid.get("close")
+        ask_close = ask.get("close")
         rows.append({
             "ts": int(ts), "close": float(close),
             "high": float(high) if high is not None else float(close),
             "low": float(low) if low is not None else float(close),
+            "volume": float(c.get("volume") or 0.0),
+            "volume_notional": float(c.get("volume_notional_value_dollars") or 0.0),
+            "open_interest": float(c["open_interest"]) if c.get("open_interest") is not None else float("nan"),
+            "bid_close": float(bid_close) if bid_close is not None else float(close),
+            "ask_close": float(ask_close) if ask_close is not None else float(close),
         })
     if not rows:
         # Explicit numeric dtypes even when empty -- a bare
@@ -225,6 +240,9 @@ def _candles_to_frame(candles: list[dict[str, Any]]) -> pd.DataFrame:
         return pd.DataFrame({
             "ts": pd.Series(dtype="int64"), "close": pd.Series(dtype="float64"),
             "high": pd.Series(dtype="float64"), "low": pd.Series(dtype="float64"),
+            "volume": pd.Series(dtype="float64"), "volume_notional": pd.Series(dtype="float64"),
+            "open_interest": pd.Series(dtype="float64"),
+            "bid_close": pd.Series(dtype="float64"), "ask_close": pd.Series(dtype="float64"),
         })
     return pd.DataFrame(rows).drop_duplicates(subset="ts").sort_values("ts").reset_index(drop=True)
 
@@ -342,6 +360,53 @@ def engineer_features(one_min_df: pd.DataFrame, hourly_df: pd.DataFrame, *, sent
     stoch_range = (high_14 - low_14).replace(0, float("nan"))
     df["stoch_k"] = (df["close"] - low_14) / stoch_range
 
+    # Volume: is RIGHT NOW unusually busy for THIS coin, relative to its OWN
+    # recent baseline -- not an absolute threshold, since BTC's raw volume
+    # dwarfs kSHIB's ("study each currency", same philosophy as the
+    # volatility features above). Previously unused despite Kalshi returning
+    # real volume on every candle already being fetched.
+    # .fillna(0.0) on all three: a genuinely illiquid stretch (or open
+    # interest briefly missing from Kalshi's own response) should degrade to
+    # "no detected signal" rather than NaN-ing out (and dropna()-dropping)
+    # the ENTIRE row over one ancillary field -- every other feature on that
+    # row is still perfectly valid and shouldn't be thrown away with it.
+    vol_ma_5 = df["volume"].rolling(5).mean()
+    vol_ma_15 = df["volume"].rolling(15).mean()
+    vol_ma_60 = df["volume"].rolling(60).mean().replace(0, float("nan"))
+    df["volume_ratio_5"] = (vol_ma_5 / vol_ma_60).fillna(0.0)
+    df["volume_ratio_15"] = (vol_ma_15 / vol_ma_60).fillna(0.0)
+    dv_mean_60 = df["volume_notional"].rolling(60).mean()
+    dv_std_60 = df["volume_notional"].rolling(60).std().replace(0, float("nan"))
+    df["dollar_volume_z"] = ((df["volume_notional"] - dv_mean_60) / dv_std_60).fillna(0.0)
+
+    # Open interest: a genuinely perp/futures-specific signal with no
+    # equities equivalent -- rising OI alongside a rising price means fresh
+    # money is entering long (real conviction, not just existing longs
+    # trading among themselves); rising OI with a falling price means fresh
+    # shorts; falling OI means positions are being closed/unwound (low
+    # conviction either direction). Also previously fetched and discarded.
+    df["oi_change_pct"] = df["open_interest"].ffill().pct_change(15).fillna(0.0)
+
+    # Bid-ask spread as a % of the mid price -- a liquidity/microstructure
+    # read: a wide spread means a real fill costs more than the last-trade
+    # price suggests, stacking on top of the already-confirmed 1.6%
+    # round-trip taker fee.
+    mid = (df["bid_close"] + df["ask_close"]) / 2.0
+    df["spread_pct"] = (df["ask_close"] - df["bid_close"]) / mid.replace(0, float("nan"))
+
+    # Time-of-day / day-of-week: crypto perps trade 24/7 (no open/close like
+    # equities), but volume and volatility still show a real daily pattern
+    # (US/Asia/Europe session overlaps) and a real weekly one (thinner
+    # weekend liquidity) -- cyclical sin/cos encoding since hour 23 and hour
+    # 0 are adjacent on a clock, not 23 apart on a raw linear scale.
+    ts_utc = pd.to_datetime(df["ts"], unit="s", utc=True)
+    hour_frac = ts_utc.dt.hour + ts_utc.dt.minute / 60.0
+    df["hour_sin"] = np.sin(2 * np.pi * hour_frac / 24.0)
+    df["hour_cos"] = np.cos(2 * np.pi * hour_frac / 24.0)
+    dow = ts_utc.dt.dayofweek
+    df["dow_sin"] = np.sin(2 * np.pi * dow / 7.0)
+    df["dow_cos"] = np.cos(2 * np.pi * dow / 7.0)
+
     if not hourly_df.empty and len(hourly_df) >= 2:
         hourly_sorted = hourly_df.sort_values("ts")
         hourly_sorted["trend_pct"] = hourly_sorted["close"].pct_change(
@@ -370,6 +435,8 @@ FEATURE_COLUMNS = [
     "dist_to_ma_15", "dist_to_ma_30",
     "volatility_5", "volatility_15", "volatility_30",
     "rsi_14", "macd_hist_pct", "bb_pct_b", "bb_bandwidth", "atr_pct", "stoch_k",
+    "volume_ratio_5", "volume_ratio_15", "dollar_volume_z", "oi_change_pct", "spread_pct",
+    "hour_sin", "hour_cos", "dow_sin", "dow_cos",
     "trend_pct", "sentiment_score",
 ]
 
@@ -497,7 +564,17 @@ def push_dataset_snapshot(df: pd.DataFrame) -> dict[str, Any]:
         combined = pd.concat([existing, df], ignore_index=True)
     else:
         combined = df
-    combined = combined.drop_duplicates(subset=["ticker", "ts"]).sort_values(["ticker", "ts"])
+    # keep="last": `df` (this cycle's freshly re-fetched rows) is concatenated
+    # AFTER `existing`, so when the same (ticker, ts) already exists in
+    # today's shard, the NEWEST computed version wins. This matters
+    # concretely whenever engineer_features gains new columns (e.g. the
+    # volume/open-interest/time-of-day features added this session): the
+    # CANDLE_1M_LOOKBACK_HOURS rolling window keeps re-fetching and
+    # re-computing the last ~72h on every collection cycle, so a row
+    # archived under an older schema gets naturally upgraded to the fuller
+    # one within one more cycle instead of staying stuck with the columns
+    # that existed the day it was first written.
+    combined = combined.drop_duplicates(subset=["ticker", "ts"], keep="last").sort_values(["ticker", "ts"])
     combined.to_parquet(shard_path, index=False)
 
     result: dict[str, Any] = {"ok": True, "rows_written": len(combined), "shard": str(shard_path)}
