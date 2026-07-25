@@ -6,6 +6,13 @@ Free, no-key sources (live-tested 2026-07-22, all return real content):
   3. CryptoSlate RSS   -- crypto-specific newsroom (general feed)
   4. Decrypt RSS       -- crypto-specific newsroom (general feed)
 
+The three newsroom feeds are general (not per-coin) but free and unlimited,
+so every coin gets its OWN individual slice of them: each feed is fetched
+ONCE (shared, long-TTL cache) and its headlines are matched against each
+coin's own keyword terms (see _COIN_MATCH_TERMS) -- not just dumped onto
+BTC by default. A quieter altcoin will genuinely get fewer matches than
+BTC/ETH; that's an honest reflection of real news coverage, not a bug.
+
 Reddit's JSON API (r/CryptoCurrency, r/Bitcoin) used to be a source here but
 now returns HTTP 403 on every request -- confirmed from multiple networks,
 not just this server, so it's a deliberate block rather than a transient
@@ -23,8 +30,15 @@ required -- the four free sources above already cover it).
 Optional additional source: newsdata.io's `/api/1/latest` endpoint (confirmed
 live 2026-07-22 with a free key), general news filtered by a per-coin query --
 their free tier is a few hundred requests/day account-wide, shared across
-every coin this bot watches, so treat it as a bonus signal that may go quiet
-once the day's quota is used, not a required source. Sign up free at
+every coin this bot watches. Confirmed live: with every active ticker polled
+every ~10 minutes, this quota is gone within the first hour or two of any
+given day, and every later call that same day also 429s -- so a 429 is
+treated as "today's quota is gone," not a transient blip (see
+_NEWSDATA_COOLDOWN_SEC). CryptoPanic and this source are also both gated to
+ONLY the coins currently in get_watchlist() (top volume+volatility) via
+get_sentiment()'s use_limited_sources flag -- the limited/quota-constrained
+sources are worth spending on the coins actually being traded right now, not
+spread thin across every active-but-untraded instrument. Sign up free at
 https://newsdata.io and set NEWSDATA_API_KEY. Skipped silently without it.
 
 Produces a simple keyword-polarity sentiment score in [-1, 1] plus a headline
@@ -61,12 +75,14 @@ _general_feed_cache: dict[str, tuple[list[str], float]] = {}
 CRYPTOPANIC_API_KEY = os.getenv("CRYPTOPANIC_API_KEY", "")
 NEWSDATA_API_KEY = os.getenv("NEWSDATA_API_KEY", "")
 
-# Confirmed live: with 16 tickers each checked roughly every 10 minutes,
-# newsdata.io's free-tier daily quota gets exhausted fast, and every
-# subsequent call for the rest of the day also 429s -- retrying every cache
-# refresh just spams the log with the same already-known failure. Once a
-# 429 is seen, skip this source entirely for a real cooldown instead.
-_NEWSDATA_COOLDOWN_SEC = 3600
+# Confirmed live: with every active ticker each checked roughly every 10
+# minutes, newsdata.io's free-tier DAILY quota gets exhausted within the
+# first hour or two, and every subsequent call for the REST OF THAT DAY also
+# 429s. A 1-hour cooldown used to just retry-and-fail once an hour for the
+# rest of the day, spamming the log with an already-known outcome -- a 429
+# means the daily budget is gone, so the cooldown needs to cover roughly a
+# day, not an hour.
+_NEWSDATA_COOLDOWN_SEC = 24 * 3600
 _newsdata_cooldown_until = 0.0
 
 _POSITIVE_WORDS = {
@@ -92,6 +108,30 @@ _COIN_QUERIES = {
 }
 # CryptoPanic currency-tag codes differ slightly from Kalshi's coin symbols.
 _CRYPTOPANIC_CODES = {"KSHIB": "SHIB"}
+
+# Used to match each coin's own headlines out of the SHARED general
+# newsroom feeds (CoinTelegraph/CryptoSlate/Decrypt cover all of crypto, not
+# one coin). Deliberately full names/distinctive phrases rather than bare
+# tickers for the short/ambiguous symbols (near/link/dot/sui are all common
+# English words or substrings -- "near" would match almost any headline,
+# "link" matches any article that merely links to something) -- a false
+# match here would inject noise into that coin's sentiment score, not signal.
+_COIN_MATCH_TERMS = {
+    "BTC": ["bitcoin"], "ETH": ["ethereum"], "SOL": ["solana"],
+    "XRP": ["xrp", "ripple"], "DOGE": ["dogecoin"], "LTC": ["litecoin"],
+    "BCH": ["bitcoin cash"], "LINK": ["chainlink"], "SUI": ["sui network", "sui blockchain", "$sui"],
+    "NEAR": ["near protocol", "$near"], "DOT": ["polkadot"], "HBAR": ["hedera"],
+    "HYPE": ["hyperliquid"], "KSHIB": ["shiba inu"], "XLM": ["stellar", "lumens"],
+    "ZEC": ["zcash"],
+}
+
+
+def _match_headlines_for_coin(headlines: list[str], symbol: str) -> list[str]:
+    """Filters a batch of general (not coin-specific) headlines down to the
+    ones actually about this coin, using safe/distinctive terms rather than
+    the bare ticker (see _COIN_MATCH_TERMS)."""
+    terms = _COIN_MATCH_TERMS.get(symbol) or [_COIN_QUERIES.get(symbol, symbol.lower())]
+    return [h for h in headlines if any(term in h.lower() for term in terms)]
 
 
 def _score_headlines(headlines: list[str]) -> tuple[float, int]:
@@ -187,8 +227,9 @@ def _fetch_newsdata_io(coin_symbol: str) -> list[str]:
         if resp.status_code == 429:
             _newsdata_cooldown_until = now + _NEWSDATA_COOLDOWN_SEC
             logger.warning(
-                "[crypto_news] newsdata.io rate-limited (429) -- pausing this source for %d min",
-                _NEWSDATA_COOLDOWN_SEC // 60,
+                "[crypto_news] newsdata.io rate-limited (429) -- daily quota likely exhausted, "
+                "pausing this source for %.1f hours",
+                _NEWSDATA_COOLDOWN_SEC / 3600,
             )
             return []
         resp.raise_for_status()
@@ -199,9 +240,16 @@ def _fetch_newsdata_io(coin_symbol: str) -> list[str]:
         return []
 
 
-def get_sentiment(coin_symbol: str) -> dict[str, Any]:
+def get_sentiment(coin_symbol: str, *, use_limited_sources: bool = True) -> dict[str, Any]:
     """Sentiment for one coin symbol (e.g. "BTC"). Cached per-coin for
-    _CACHE_TTL_SEC since news doesn't meaningfully change minute to minute."""
+    _CACHE_TTL_SEC since news doesn't meaningfully change minute to minute.
+
+    use_limited_sources gates CryptoPanic + newsdata.io -- both quota/
+    quality-constrained, unlike the free/unlimited RSS sources below. Callers
+    should set this False for coins outside the current watchlist (see
+    perps_data.get_watchlist()) so the limited quota is spent on the coins
+    actually meeting the volume+volatility bar right now, not spread across
+    every active-but-untraded instrument."""
     symbol = str(coin_symbol or "").upper().strip()
     cached = _cache.get(symbol)
     now = time.time()
@@ -211,12 +259,20 @@ def get_sentiment(coin_symbol: str) -> dict[str, Any]:
     query = _COIN_QUERIES.get(symbol, symbol.lower())
     headlines: list[str] = []
     headlines.extend(_fetch_google_news_rss(query))
-    headlines.extend(_fetch_cryptopanic(symbol))
-    headlines.extend(_fetch_newsdata_io(symbol))
-    if symbol == "BTC":
-        headlines.extend(_fetch_rss_titles_cached("https://cointelegraph.com/rss", source_name="cointelegraph"))
-        headlines.extend(_fetch_rss_titles_cached("https://cryptoslate.com/feed/", source_name="cryptoslate"))
-        headlines.extend(_fetch_rss_titles_cached("https://decrypt.co/feed", source_name="decrypt"))
+    if use_limited_sources:
+        headlines.extend(_fetch_cryptopanic(symbol))
+        headlines.extend(_fetch_newsdata_io(symbol))
+
+    # These three feeds cover all of crypto, not one coin -- fetched once
+    # (shared, long-TTL cache) regardless of which coin asked, then matched
+    # down to headlines actually about THIS coin. Runs for every coin, not
+    # just BTC, so altcoins get real individual coverage from these free,
+    # unlimited sources too.
+    general_feed_headlines: list[str] = []
+    general_feed_headlines.extend(_fetch_rss_titles_cached("https://cointelegraph.com/rss", source_name="cointelegraph"))
+    general_feed_headlines.extend(_fetch_rss_titles_cached("https://cryptoslate.com/feed/", source_name="cryptoslate"))
+    general_feed_headlines.extend(_fetch_rss_titles_cached("https://decrypt.co/feed", source_name="decrypt"))
+    headlines.extend(_match_headlines_for_coin(general_feed_headlines, symbol))
 
     score, volume = _score_headlines(headlines)
     result = {

@@ -2,6 +2,8 @@
 basic response parsing for the optional API-key-gated sources."""
 from __future__ import annotations
 
+import pytest
+
 from data import crypto_news as news
 
 
@@ -112,3 +114,88 @@ def test_fetch_rss_titles_cached_does_not_cache_a_transient_empty_failure(monkey
     result = news._fetch_rss_titles_cached("https://example.com/feed", source_name="test_source")  # noqa: SLF001
     assert result == []
     assert "test_source" not in news._general_feed_cache
+
+
+def test_newsdata_cooldown_is_roughly_a_day():
+    """Confirmed live: with every active ticker polled every ~10 minutes,
+    newsdata.io's free-tier DAILY quota is gone within the first hour or
+    two, so every later call that same day also 429s. A short (1-hour)
+    cooldown used to just retry-and-fail once an hour for the rest of the
+    day; it must now cover roughly a full day instead."""
+    assert news._NEWSDATA_COOLDOWN_SEC >= 20 * 3600  # noqa: SLF001
+
+
+def test_match_headlines_for_coin_matches_distinctive_terms(monkeypatch):
+    headlines = [
+        "Bitcoin surges past resistance", "Ethereum gas fees drop", "Random unrelated headline",
+    ]
+    assert news._match_headlines_for_coin(headlines, "BTC") == ["Bitcoin surges past resistance"]  # noqa: SLF001
+    assert news._match_headlines_for_coin(headlines, "ETH") == ["Ethereum gas fees drop"]  # noqa: SLF001
+
+
+def test_match_headlines_for_coin_avoids_false_positives_on_common_words():
+    """NEAR/LINK/DOT/SUI are all common English words or substrings -- a bare
+    substring match would inject noise (e.g. "near" matching almost any
+    headline) into that coin's sentiment score instead of real signal."""
+    headlines = [
+        "Prices climb near a new high", "Read more: link in bio", "Fed to dot the i's on policy",
+        "Analysts suit up for earnings season",
+    ]
+    assert news._match_headlines_for_coin(headlines, "NEAR") == []  # noqa: SLF001
+    assert news._match_headlines_for_coin(headlines, "LINK") == []  # noqa: SLF001
+    assert news._match_headlines_for_coin(headlines, "DOT") == []  # noqa: SLF001
+    assert news._match_headlines_for_coin(headlines, "SUI") == []  # noqa: SLF001
+    assert news._match_headlines_for_coin(["NEAR Protocol launches new upgrade"], "NEAR") == [
+        "NEAR Protocol launches new upgrade"
+    ]
+
+
+@pytest.fixture
+def _isolated_sentiment_caches(monkeypatch):
+    """NOT autouse -- only the get_sentiment() tests below need this; the
+    _fetch_rss_titles_cached-specific tests above test that function's real
+    caching behavior and must not have it stubbed out from under them."""
+    monkeypatch.setattr(news, "_cache", {})
+    monkeypatch.setattr(news, "_general_feed_cache", {})
+    monkeypatch.setattr(news, "_fetch_google_news_rss", lambda query: [])
+    monkeypatch.setattr(news, "_fetch_rss_titles_cached", lambda url, *, source_name, limit=40: [])
+    yield
+
+
+def test_get_sentiment_skips_limited_sources_when_disabled(monkeypatch, _isolated_sentiment_caches):
+    def fail_if_called(*a, **k):
+        raise AssertionError("must not call a quota-limited source when use_limited_sources=False")
+
+    monkeypatch.setattr(news, "_fetch_cryptopanic", fail_if_called)
+    monkeypatch.setattr(news, "_fetch_newsdata_io", fail_if_called)
+    result = news.get_sentiment("ZEC", use_limited_sources=False)
+    assert result["coin"] == "ZEC"
+
+
+def test_get_sentiment_uses_limited_sources_by_default(monkeypatch, _isolated_sentiment_caches):
+    calls = {"cryptopanic": 0, "newsdata": 0}
+    monkeypatch.setattr(news, "_fetch_cryptopanic", lambda symbol: calls.__setitem__("cryptopanic", calls["cryptopanic"] + 1) or [])
+    monkeypatch.setattr(news, "_fetch_newsdata_io", lambda symbol: calls.__setitem__("newsdata", calls["newsdata"] + 1) or [])
+    news.get_sentiment("BTC")
+    assert calls == {"cryptopanic": 1, "newsdata": 1}
+
+
+def test_get_sentiment_matches_general_feed_headlines_for_any_coin_not_just_btc(monkeypatch, _isolated_sentiment_caches):
+    """The three newsroom feeds used to only ever get attached to BTC's
+    sentiment -- every other coin got zero coverage from them. They're
+    general (cover all of crypto), free, and shared/cached, so every coin
+    should get its own matched slice."""
+    monkeypatch.setattr(news, "_fetch_cryptopanic", lambda symbol: [])
+    monkeypatch.setattr(news, "_fetch_newsdata_io", lambda symbol: [])
+
+    def fake_fetch(url, *, source_name, limit=40):
+        # Only one of the three (real) feeds happens to carry the story --
+        # distinguishing by source_name mimics that instead of tripling the
+        # same headlines across all three shared-feed calls.
+        if source_name == "cointelegraph":
+            return ["Zcash privacy upgrade ships", "Unrelated headline"]
+        return []
+
+    monkeypatch.setattr(news, "_fetch_rss_titles_cached", fake_fetch)
+    result = news.get_sentiment("ZEC")
+    assert result["headline_volume"] == 1  # only the ZEC-relevant headline matched

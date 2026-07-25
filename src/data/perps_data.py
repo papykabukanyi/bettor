@@ -322,12 +322,16 @@ def collect_dataset_rows(tickers: list[str] | None = None) -> pd.DataFrame:
     today's top-N watchlist -- see get_active_tickers()). Returns a single
     concatenated DataFrame with a `ticker` column, ready to push to HF or
     feed straight into training."""
-    watchlist = tickers or get_active_tickers()
+    active_tickers = tickers or get_active_tickers()
+    # The quota-limited sentiment sources (CryptoPanic/newsdata.io) are
+    # gated to watchlist tickers only -- see get_sentiment()'s
+    # use_limited_sources docstring for why.
+    watchlist_tickers = set(get_watchlist())
     frames = []
-    for ticker in watchlist:
+    for ticker in active_tickers:
         try:
             one_min_df, hourly_df = fetch_candle_frames(ticker)
-            sentiment = get_sentiment(coin_for_ticker(ticker))
+            sentiment = get_sentiment(coin_for_ticker(ticker), use_limited_sources=ticker in watchlist_tickers)
             feats = engineer_features(one_min_df, hourly_df, sentiment_score=sentiment["sentiment_score"])
             if feats.empty:
                 continue
@@ -346,7 +350,7 @@ def latest_feature_row(ticker: str) -> dict[str, Any] | None:
     expected and fine, we only need the feature columns here."""
     try:
         one_min_df, hourly_df = fetch_candle_frames(ticker)
-        sentiment = get_sentiment(coin_for_ticker(ticker))
+        sentiment = get_sentiment(coin_for_ticker(ticker), use_limited_sources=ticker in get_watchlist())
         feats = engineer_features(one_min_df, hourly_df, sentiment_score=sentiment["sentiment_score"])
         if feats.empty:
             return None

@@ -280,15 +280,60 @@ def test_get_active_tickers_includes_everything_active_unnarrowed(monkeypatch):
 
 
 def test_collect_dataset_rows_uses_active_tickers_not_the_narrowed_watchlist(monkeypatch):
+    """collect_dataset_rows must archive history for every ACTIVE ticker, not
+    narrow to today's top-N watchlist -- get_watchlist() may still be
+    consulted for other purposes (gating which coins use the quota-limited
+    sentiment sources, see the test below), but must not determine WHICH
+    tickers get collected."""
     monkeypatch.setattr(perps_data, "get_active_tickers", lambda: ["KXBTCPERP", "KXDOGEPERP"])
+    monkeypatch.setattr(perps_data, "get_watchlist", lambda: ["KXBTCPERP"])  # deliberately narrower
 
-    def fail_if_called():
-        raise AssertionError("collect_dataset_rows must use get_active_tickers(), not the narrowed get_watchlist()")
-
-    monkeypatch.setattr(perps_data, "get_watchlist", fail_if_called)
-    monkeypatch.setattr(perps_data, "fetch_candle_frames", lambda ticker: (pd.DataFrame(), pd.DataFrame()))
+    fetched = []
+    monkeypatch.setattr(
+        perps_data, "fetch_candle_frames",
+        lambda ticker: fetched.append(ticker) or (pd.DataFrame(), pd.DataFrame()),
+    )
     result = perps_data.collect_dataset_rows()
-    assert result.empty  # no real data faked here -- just confirming which ticker source got called
+    assert result.empty  # no real data faked here -- just confirming which tickers got processed
+    assert fetched == ["KXBTCPERP", "KXDOGEPERP"]  # BOTH active tickers, not narrowed to the watchlist
+
+
+def test_collect_dataset_rows_only_uses_limited_sentiment_sources_for_watchlist_tickers(monkeypatch):
+    """The quota-limited sentiment sources (CryptoPanic/newsdata.io) should
+    be reserved for coins actually meeting the volume+volatility bar right
+    now, not spent on every active-but-untraded instrument."""
+    monkeypatch.setattr(perps_data, "get_active_tickers", lambda: ["KXBTCPERP", "KXDOGEPERP"])
+    monkeypatch.setattr(perps_data, "get_watchlist", lambda: ["KXBTCPERP"])
+    monkeypatch.setattr(perps_data, "fetch_candle_frames", lambda ticker: (pd.DataFrame(), pd.DataFrame()))
+
+    captured = {}
+
+    def fake_get_sentiment(coin, *, use_limited_sources=True):
+        captured[coin] = use_limited_sources
+        return {"sentiment_score": 0.0}
+
+    monkeypatch.setattr(perps_data, "get_sentiment", fake_get_sentiment)
+    perps_data.collect_dataset_rows()
+    assert captured["BTC"] is True   # KXBTCPERP is in the watchlist
+    assert captured["DOGE"] is False  # KXDOGEPERP is active but not in the watchlist
+
+
+def test_latest_feature_row_gates_limited_sentiment_sources_by_watchlist_membership(monkeypatch):
+    monkeypatch.setattr(perps_data, "get_watchlist", lambda: ["KXBTCPERP"])
+    monkeypatch.setattr(perps_data, "fetch_candle_frames", lambda ticker: (pd.DataFrame(), pd.DataFrame()))
+
+    captured = {}
+
+    def fake_get_sentiment(coin, *, use_limited_sources=True):
+        captured["use_limited_sources"] = use_limited_sources
+        return {"sentiment_score": 0.0}
+
+    monkeypatch.setattr(perps_data, "get_sentiment", fake_get_sentiment)
+    perps_data.latest_feature_row("KXDOGEPERP")  # not in the watchlist
+    assert captured["use_limited_sources"] is False
+
+    perps_data.latest_feature_row("KXBTCPERP")  # in the watchlist
+    assert captured["use_limited_sources"] is True
 
 
 def test_load_training_dataset_merges_local_and_hf_not_just_fallback(monkeypatch, tmp_path):
