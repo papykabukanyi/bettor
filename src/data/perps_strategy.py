@@ -791,107 +791,138 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
         checks: list[dict[str, Any]] = []
         ok = True
         for position in positions:
-            ticker = position["ticker"]
+            # ticker via .get(), not position["ticker"] -- this whole body
+            # is one try/except below specifically so a single malformed or
+            # unexpected-schema position (e.g. adopted from a real account
+            # position, or left over from an older deployed version with a
+            # different position-dict shape) can never raise out of this
+            # loop and block the exit check for every OTHER real, healthy
+            # position in the same cycle. Confirmed live: reconciliation
+            # correctly ADOPTS untracked real positions regardless of which
+            # process/version last touched local state -- this is the
+            # matching guarantee on the exit-management side, so a position
+            # this code doesn't fully recognize gets logged and retried
+            # next cycle instead of taking the whole cycle down.
+            ticker = position.get("ticker", "<unknown>")
             try:
                 market = get_margin_market(ticker)
                 current_price = float((market.get("market") or {}).get("price") or 0.0)
                 tick_size = float((market.get("market") or {}).get("tick_size") or 0.0001)
+
+                now = dt.datetime.now(dt.timezone.utc)
+                velocity = _update_velocity(position, current_price, now)
+                current_volatility = _sample_volatility(position.get("price_samples") or [])
+
+                external_velocity = None
+                external_quote = None
+                try:
+                    external_quote = get_fast_price(coin_for_ticker(ticker))
+                except Exception as exc:
+                    logger.debug("[perps_strategy] external price check failed for %s: %s", ticker, exc)
+                if external_quote and not external_quote.get("delayed"):
+                    external_velocity = _update_velocity(
+                        position, float(external_quote["price"]), now, samples_key="external_price_samples",
+                    )
+
+                should_exit, reason = decide_exit(
+                    position, current_price, velocity_pct_per_min=velocity, external_velocity_pct_per_min=external_velocity,
+                    current_volatility=current_volatility, now=now,
+                )
+                checks.append({
+                    "ticker": ticker, "ok": True, "exit_check": reason, "velocity_pct_per_min": velocity,
+                    "external_velocity_pct_per_min": external_velocity, "current_volatility": current_volatility,
+                    "external_source": (external_quote or {}).get("source"),
+                })
             except Exception as exc:
                 ok = False
+                logger.warning("[perps_strategy] could not process position for %s -- leaving untouched this cycle: %s", ticker, exc)
                 checks.append({"ticker": ticker, "ok": False, "error": str(exc)})
                 remaining.append(position)  # leave it untouched, retry next cycle
                 continue
-
-            now = dt.datetime.now(dt.timezone.utc)
-            velocity = _update_velocity(position, current_price, now)
-            current_volatility = _sample_volatility(position.get("price_samples") or [])
-
-            external_velocity = None
-            external_quote = None
-            try:
-                external_quote = get_fast_price(coin_for_ticker(ticker))
-            except Exception as exc:
-                logger.debug("[perps_strategy] external price check failed for %s: %s", ticker, exc)
-            if external_quote and not external_quote.get("delayed"):
-                external_velocity = _update_velocity(
-                    position, float(external_quote["price"]), now, samples_key="external_price_samples",
-                )
-
-            should_exit, reason = decide_exit(
-                position, current_price, velocity_pct_per_min=velocity, external_velocity_pct_per_min=external_velocity,
-                current_volatility=current_volatility, now=now,
-            )
-            checks.append({
-                "ticker": ticker, "ok": True, "exit_check": reason, "velocity_pct_per_min": velocity,
-                "external_velocity_pct_per_min": external_velocity, "current_volatility": current_volatility,
-                "external_source": (external_quote or {}).get("source"),
-            })
 
             if not should_exit:
                 remaining.append(position)
                 continue
 
-            count = float(position["count"])
-            side = position.get("side", "long")
-            exit_price = _round_price(current_price, tick_size)
-            entry_price = float(position["entry_price"])
-            order_result = None
-            closed_count = count
-            if not effective_dry_run:
-                # Closing a long means selling (ask); closing a short means
-                # buying back (bid) -- both reduce_only so it can only ever
-                # shrink/close this exact position, never open a new one.
-                order_result = create_margin_order(
-                    ticker=ticker, side=("ask" if side == "long" else "bid"), count=count, price=exit_price,
-                    client_order_id=str(uuid.uuid4()), time_in_force="immediate_or_cancel", reduce_only=True,
-                )
-                # An immediate_or_cancel order can fill zero, partially, or
-                # fully -- confirmed live on this account (repeated exit
-                # attempts came back fill_count 0.00, i.e. fully canceled).
-                # Re-check the real position size right after to find out
-                # what actually happened before touching bookkeeping/P&L.
-                real_after = _real_open_positions_by_ticker()
-                if real_after is not None:
-                    closed_count = round(max(0.0, count - real_after.get(ticker, {}).get("count", 0.0)), 6)
-                else:
-                    logger.warning(
-                        "[perps_strategy] could not verify exit fill for %s after placing order -- "
-                        "assuming full close (order_result=%s)", ticker, order_result,
-                    )
-
-            if closed_count <= 0:
-                # Nothing actually closed -- position is unchanged on the
-                # exchange, keep tracking it as-is and retry next cycle.
+            try:
+                count = float(position["count"])
+                side = position.get("side", "long")
+                exit_price = _round_price(current_price, tick_size)
+                entry_price = float(position["entry_price"])
+            except Exception as exc:
+                ok = False
+                logger.warning("[perps_strategy] could not read count/entry_price for %s -- leaving untouched this cycle: %s", ticker, exc)
+                checks[-1]["error"] = str(exc)
                 remaining.append(position)
-                checks[-1]["exit_order_not_filled"] = True
                 continue
+            try:
+                order_result = None
+                closed_count = count
+                if not effective_dry_run:
+                    # Closing a long means selling (ask); closing a short means
+                    # buying back (bid) -- both reduce_only so it can only ever
+                    # shrink/close this exact position, never open a new one.
+                    order_result = create_margin_order(
+                        ticker=ticker, side=("ask" if side == "long" else "bid"), count=count, price=exit_price,
+                        client_order_id=str(uuid.uuid4()), time_in_force="immediate_or_cancel", reduce_only=True,
+                    )
+                    # An immediate_or_cancel order can fill zero, partially, or
+                    # fully -- confirmed live on this account (repeated exit
+                    # attempts came back fill_count 0.00, i.e. fully canceled).
+                    # Re-check the real position size right after to find out
+                    # what actually happened before touching bookkeeping/P&L.
+                    real_after = _real_open_positions_by_ticker()
+                    if real_after is not None:
+                        closed_count = round(max(0.0, count - real_after.get(ticker, {}).get("count", 0.0)), 6)
+                    else:
+                        logger.warning(
+                            "[perps_strategy] could not verify exit fill for %s after placing order -- "
+                            "assuming full close (order_result=%s)", ticker, order_result,
+                        )
 
-            # Each market's quoted "price" IS the per-contract dollar value
-            # already (e.g. KXBTCPERP's "0.0001 BTC" contract priced ~$6.63
-            # when BTC ~$66,300), so P&L is simply the price delta times
-            # contract count -- no separate multiplier needed. A short
-            # profits when price FALLS, so the delta is entry-minus-exit
-            # instead of exit-minus-entry.
-            if side == "short":
-                realized_pnl = round((entry_price - exit_price) * closed_count, 6)
-            else:
-                realized_pnl = round((exit_price - entry_price) * closed_count, 6)
-            by_date = state.setdefault("realized_pnl_by_date", {})
-            by_date[_today_str()] = round(float(by_date.get(_today_str(), 0.0)) + realized_pnl, 6)
-            trade = {
-                "closed_at": dt.datetime.now(dt.timezone.utc).isoformat(),
-                "ticker": ticker, "side": side, "entry_price": entry_price, "exit_price": exit_price,
-                "count": closed_count, "realized_pnl_usd": realized_pnl, "reason": reason, "dry_run": effective_dry_run,
-            }
-            state.setdefault("trade_log", []).append(trade)
-            closed.append(trade)
+                if closed_count <= 0:
+                    # Nothing actually closed -- position is unchanged on the
+                    # exchange, keep tracking it as-is and retry next cycle.
+                    remaining.append(position)
+                    checks[-1]["exit_order_not_filled"] = True
+                    continue
 
-            if closed_count < count:
-                # Partial fill -- the remainder is still genuinely open on
-                # the exchange, keep monitoring it rather than dropping it.
-                remainder = dict(position)
-                remainder["count"] = round(count - closed_count, 6)
-                remaining.append(remainder)
+                # Each market's quoted "price" IS the per-contract dollar value
+                # already (e.g. KXBTCPERP's "0.0001 BTC" contract priced ~$6.63
+                # when BTC ~$66,300), so P&L is simply the price delta times
+                # contract count -- no separate multiplier needed. A short
+                # profits when price FALLS, so the delta is entry-minus-exit
+                # instead of exit-minus-entry.
+                if side == "short":
+                    realized_pnl = round((entry_price - exit_price) * closed_count, 6)
+                else:
+                    realized_pnl = round((exit_price - entry_price) * closed_count, 6)
+                by_date = state.setdefault("realized_pnl_by_date", {})
+                by_date[_today_str()] = round(float(by_date.get(_today_str(), 0.0)) + realized_pnl, 6)
+                trade = {
+                    "closed_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+                    "ticker": ticker, "side": side, "entry_price": entry_price, "exit_price": exit_price,
+                    "count": closed_count, "realized_pnl_usd": realized_pnl, "reason": reason, "dry_run": effective_dry_run,
+                }
+                state.setdefault("trade_log", []).append(trade)
+                closed.append(trade)
+
+                if closed_count < count:
+                    # Partial fill -- the remainder is still genuinely open on
+                    # the exchange, keep monitoring it rather than dropping it.
+                    remainder = dict(position)
+                    remainder["count"] = round(count - closed_count, 6)
+                    remaining.append(remainder)
+            except Exception as exc:
+                # Placing the real exit order (or booking its result) failed
+                # unexpectedly -- must not abort monitoring for every OTHER
+                # open position in this same cycle. Nothing in this block
+                # commits local state until the very end, so the position is
+                # safely un-mutated either way; keep it as-is and retry.
+                ok = False
+                logger.exception("[perps_strategy] exit order/booking failed for %s -- leaving untouched this cycle", ticker)
+                checks[-1]["error"] = str(exc)
+                remaining.append(position)
 
         state["positions"] = remaining
         # push_durable only when a trade actually closed this cycle (real
@@ -1016,78 +1047,85 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
             continue
 
         side = candidate.get("side", "long")
-        order_result = None
-        actual_count: float = float(count)
-        actual_entry_price = entry_price
-        if not effective_dry_run:
-            # Opening a long means buying (bid); opening a short means
-            # selling (ask) with reduce_only NOT set, since this is a new
-            # position, not closing an existing long.
-            order_result = create_margin_order(
-                ticker=ticker, side=("bid" if side == "long" else "ask"), count=float(count), price=entry_price,
-                client_order_id=str(uuid.uuid4()), time_in_force="immediate_or_cancel",
-            )
-            # An immediate_or_cancel order can fill zero, partially, or
-            # fully -- confirmed live on this account (several buy attempts
-            # came back fill_count 0.00; others partially filled less than
-            # requested). Never record a position based on the REQUESTED
-            # count; verify what actually landed on the exchange first.
-            real_after = _real_open_positions_by_ticker()
-            if real_after is not None:
-                real_pos = real_after.get(ticker)
-                actual_count = real_pos["count"] if real_pos else 0.0
-                if real_pos and real_pos["entry_price"] > 0:
-                    actual_entry_price = real_pos["entry_price"]
-            else:
-                logger.warning(
-                    "[perps_strategy] could not verify entry fill for %s after placing order -- "
-                    "assuming full fill (order_result=%s)", ticker, order_result,
+        try:
+            order_result = None
+            actual_count: float = float(count)
+            actual_entry_price = entry_price
+            if not effective_dry_run:
+                # Opening a long means buying (bid); opening a short means
+                # selling (ask) with reduce_only NOT set, since this is a new
+                # position, not closing an existing long.
+                order_result = create_margin_order(
+                    ticker=ticker, side=("bid" if side == "long" else "ask"), count=float(count), price=entry_price,
+                    client_order_id=str(uuid.uuid4()), time_in_force="immediate_or_cancel",
                 )
+                # An immediate_or_cancel order can fill zero, partially, or
+                # fully -- confirmed live on this account (several buy attempts
+                # came back fill_count 0.00; others partially filled less than
+                # requested). Never record a position based on the REQUESTED
+                # count; verify what actually landed on the exchange first.
+                real_after = _real_open_positions_by_ticker()
+                if real_after is not None:
+                    real_pos = real_after.get(ticker)
+                    actual_count = real_pos["count"] if real_pos else 0.0
+                    if real_pos and real_pos["entry_price"] > 0:
+                        actual_entry_price = real_pos["entry_price"]
+                else:
+                    logger.warning(
+                        "[perps_strategy] could not verify entry fill for %s after placing order -- "
+                        "assuming full fill (order_result=%s)", ticker, order_result,
+                    )
 
-        if actual_count <= 0:
-            opened.append({
-                "ticker": ticker, "ok": True, "action": "skipped_entry_not_filled",
-                "reason": candidate["reason"], "order_result": order_result,
-            })
-            continue
-
-        with _STATE_LOCK:
-            # Re-read: the fast loop's own reconciliation runs concurrently
-            # and can have adopted/updated this EXACT ticker in the interim
-            # (e.g. a stray earlier fill it just discovered). We already
-            # verified real money actually filled above (actual_count > 0)
-            # -- if a tracked entry for this ticker already exists, MERGE
-            # this fill into it (real_after/actual_* already reflect
-            # Kalshi's own up-to-date TOTAL for the ticker, not just this
-            # order's delta) rather than silently discarding a confirmed
-            # real fill via "skipped_slot_taken", which would leave more
-            # real contracts open than local state tracks -- the exact
-            # under-tracked-position failure this whole fix exists to close.
-            state = _load_state()
-            positions = state.get("positions") or []
-            existing_idx = next((i for i, p in enumerate(positions) if p["ticker"] == ticker), None)
-            if existing_idx is None and len(positions) >= MAX_CONCURRENT_POSITIONS:
-                opened.append({"ticker": ticker, "ok": True, "action": "skipped_slot_taken"})
-                continue
-            if existing_idx is not None:
-                merged = dict(positions[existing_idx])
-                merged["count"] = float(actual_count)
-                merged["entry_price"] = actual_entry_price
-                merged["side"] = side
-                positions[existing_idx] = merged
-            else:
-                positions.append({
-                    "ticker": ticker, "entry_price": actual_entry_price, "count": float(actual_count),
-                    "side": side,
-                    "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(), "dry_run": effective_dry_run,
-                    "sizing": sizing_detail,
+            if actual_count <= 0:
+                opened.append({
+                    "ticker": ticker, "ok": True, "action": "skipped_entry_not_filled",
+                    "reason": candidate["reason"], "order_result": order_result,
                 })
-            state["positions"] = positions
-            _save_state(state)
-        opened.append({
-            "ticker": ticker, "ok": True, "action": "opened", "side": side, "entry_price": actual_entry_price,
-            "count": actual_count, "reason": candidate["reason"], "sizing": sizing_detail, "order_result": order_result,
-        })
+                continue
+
+            with _STATE_LOCK:
+                # Re-read: the fast loop's own reconciliation runs concurrently
+                # and can have adopted/updated this EXACT ticker in the interim
+                # (e.g. a stray earlier fill it just discovered). We already
+                # verified real money actually filled above (actual_count > 0)
+                # -- if a tracked entry for this ticker already exists, MERGE
+                # this fill into it (real_after/actual_* already reflect
+                # Kalshi's own up-to-date TOTAL for the ticker, not just this
+                # order's delta) rather than silently discarding a confirmed
+                # real fill via "skipped_slot_taken", which would leave more
+                # real contracts open than local state tracks -- the exact
+                # under-tracked-position failure this whole fix exists to close.
+                state = _load_state()
+                positions = state.get("positions") or []
+                existing_idx = next((i for i, p in enumerate(positions) if p["ticker"] == ticker), None)
+                if existing_idx is None and len(positions) >= MAX_CONCURRENT_POSITIONS:
+                    opened.append({"ticker": ticker, "ok": True, "action": "skipped_slot_taken"})
+                    continue
+                if existing_idx is not None:
+                    merged = dict(positions[existing_idx])
+                    merged["count"] = float(actual_count)
+                    merged["entry_price"] = actual_entry_price
+                    merged["side"] = side
+                    positions[existing_idx] = merged
+                else:
+                    positions.append({
+                        "ticker": ticker, "entry_price": actual_entry_price, "count": float(actual_count),
+                        "side": side,
+                        "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(), "dry_run": effective_dry_run,
+                        "sizing": sizing_detail,
+                    })
+                state["positions"] = positions
+                _save_state(state)
+            opened.append({
+                "ticker": ticker, "ok": True, "action": "opened", "side": side, "entry_price": actual_entry_price,
+                "count": actual_count, "reason": candidate["reason"], "sizing": sizing_detail, "order_result": order_result,
+            })
+        except Exception as exc:
+            # Placing the real entry order (or booking its result) failed
+            # unexpectedly -- must not abort scanning/entering for every
+            # OTHER qualifying candidate in this same cycle.
+            logger.exception("[perps_strategy] entry order/booking failed for %s", ticker)
+            opened.append({"ticker": ticker, "ok": False, "action": "entry_failed", "error": str(exc)})
 
     result["opened"] = opened
     result["action"] = "opened" if any(o.get("action") == "opened" for o in opened) else "none"

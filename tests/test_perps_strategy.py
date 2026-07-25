@@ -628,6 +628,42 @@ def test_manage_open_positions_handles_each_position_independently(monkeypatch, 
     assert remaining_tickers == ["KXETHPERP"]
 
 
+def test_manage_open_positions_one_malformed_position_does_not_block_the_others(monkeypatch, tmp_path):
+    """A position dict this code doesn't fully recognize -- e.g. adopted
+    from the real account, or left over from an older deployed version with
+    a different schema -- must never take down monitoring for every OTHER
+    healthy open position in the same cycle. It should be logged, left
+    untouched for retry, and every other position still gets its exit
+    check."""
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", False)
+
+    def fake_market(ticker):
+        if ticker == "KXBTCPERP":
+            return _market_response(price=6.60 * (1 + strat.TAKE_PROFIT_PCT + 0.001))
+        return _market_response(price=100.001)
+
+    monkeypatch.setattr(strat, "get_margin_market", fake_market)
+    malformed = {"ticker": "KXWEIRDPERP"}  # missing entry_price/count/opened_at entirely
+    strat._save_state({
+        "positions": [
+            malformed,
+            _position(ticker="KXBTCPERP", entry_price=6.60),
+            _position(ticker="KXETHPERP", entry_price=100.0),
+        ],
+        "realized_pnl_by_date": {}, "trade_log": [], "daily_reference_balance": {},
+    })
+
+    result = strat.manage_open_positions()
+    assert result["ok"] is False  # flagged, but did not raise/crash
+    assert result["action"] == "closed"
+    assert result["closed"][0]["ticker"] == "KXBTCPERP"  # the healthy position still got closed
+
+    state = strat._load_state()  # noqa: SLF001
+    remaining_tickers = [p["ticker"] for p in state["positions"]]
+    assert set(remaining_tickers) == {"KXWEIRDPERP", "KXETHPERP"}  # malformed one retained as-is for retry
+
+
 def test_manage_open_positions_uses_external_velocity_as_an_early_quick_profit_trigger(monkeypatch, tmp_path):
     """Kalshi's own price barely moved (no velocity signal there), but an
     independent live exchange shows a fast favorable move -- that alone
@@ -1099,6 +1135,43 @@ def test_scan_and_enter_merges_a_confirmed_fill_into_a_concurrently_adopted_posi
     matching = [p for p in state["positions"] if p["ticker"] == "KXSOLPERP"]
     assert len(matching) == 1
     assert matching[0]["count"] == 4.0
+
+
+def test_scan_and_enter_one_failed_entry_does_not_block_the_others(monkeypatch, tmp_path):
+    """An unexpected failure placing/booking one candidate's real entry
+    order (network error, API error, anything) must not abort scanning for
+    every OTHER qualifying candidate in the same cycle."""
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", True)
+    monkeypatch.setattr(strat, "get_margin_market", lambda ticker: _market_response())
+    monkeypatch.setattr(strat, "_available_balance_usd", lambda: 10.0)
+    monkeypatch.setattr(
+        strat, "scan_for_entries",
+        lambda tickers=None, exclude=None: (
+            [
+                {"ticker": "KXBTCPERP", "current_price": 6.60, "reason": "test dip", "score": 0.95},
+                {"ticker": "KXETHPERP", "current_price": 6.60, "reason": "test dip", "score": 0.9},
+            ],
+            [],
+        ),
+    )
+
+    def flaky_create_order(**kwargs):
+        if kwargs["ticker"] == "KXBTCPERP":
+            raise RuntimeError("network blew up placing this one order")
+        return {"order": {"fill_count": str(kwargs["count"])}}
+
+    monkeypatch.setattr(strat, "create_margin_order", flaky_create_order)
+    monkeypatch.setattr(strat, "get_margin_positions", lambda: {"positions": [
+        _real_position("KXETHPERP", "6.00", "6.60"),
+    ]})
+
+    result = strat.scan_and_enter(dry_run=False)
+    by_ticker = {o["ticker"]: o for o in result["opened"]}
+    assert by_ticker["KXBTCPERP"]["action"] == "entry_failed"
+    assert by_ticker["KXETHPERP"]["action"] == "opened"  # the healthy candidate still got entered
+    state = strat._load_state()  # noqa: SLF001
+    assert [p["ticker"] for p in state["positions"]] == ["KXETHPERP"]
 
 
 # ── Durable state survives Render's ephemeral (no persistent disk) restarts ──
