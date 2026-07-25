@@ -320,6 +320,12 @@ def _run_perps_manual_cycle() -> dict[str, Any]:
 
 @_locked_job("perps_data_collect", stale_after_sec=600)
 def _run_perps_data_collect() -> dict[str, Any]:
+    # Off the request path on purpose -- see refresh_ticker_activity_cache's
+    # own docstring for why this must never be triggered from /api/status.
+    try:
+        perps_data.refresh_ticker_activity_cache()
+    except Exception:
+        logger.exception("[dashboard] ticker activity cache refresh failed")
     df = perps_data.collect_dataset_rows()
     if df.empty:
         return {"ok": False, "reason": "no_rows_collected"}

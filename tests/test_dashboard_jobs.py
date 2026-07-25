@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 import time
 
+import pandas as pd
 import pytest
 
 import dashboard
@@ -107,6 +108,38 @@ def test_production_jobs_actually_honor_the_live_trading_flag(monkeypatch):
     assert captured["fast_check"].get("dry_run") is False
     assert captured["entry_scan"].get("dry_run") is False
     assert captured["manual_cycle"].get("dry_run") is False
+
+
+def test_data_collect_job_refreshes_ticker_activity_cache_off_the_request_path(monkeypatch):
+    """The volatility-ranking cache must only ever be refreshed from here
+    (a scheduled background job) -- confirmed live that refreshing it
+    inline from /api/status caused a fresh Render OOM, since that request
+    path could run concurrently with the startup training thread's own
+    full-size archive load right when memory is already tightest."""
+    from data import perps_data
+
+    calls = []
+    monkeypatch.setattr(perps_data, "refresh_ticker_activity_cache", lambda **kw: calls.append(kw))
+    monkeypatch.setattr(perps_data, "collect_dataset_rows", lambda: pd.DataFrame())
+
+    dashboard._run_perps_data_collect.__wrapped__()  # noqa: SLF001
+
+    assert len(calls) == 1
+
+
+def test_data_collect_job_still_collects_if_cache_refresh_fails(monkeypatch):
+    from data import perps_data
+
+    def fail():
+        raise RuntimeError("HF archive listing failed")
+
+    collected = []
+    monkeypatch.setattr(perps_data, "refresh_ticker_activity_cache", fail)
+    monkeypatch.setattr(perps_data, "collect_dataset_rows", lambda: collected.append(1) or pd.DataFrame())
+
+    dashboard._run_perps_data_collect.__wrapped__()  # noqa: SLF001
+
+    assert collected == [1]
 
 
 class _FakeScheduler:

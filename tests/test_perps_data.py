@@ -192,6 +192,7 @@ def test_get_watchlist_combines_volume_and_volatility_rank(monkeypatch):
     monkeypatch.setattr(perps_data, "_recent_volatility_by_ticker", lambda: {
         "KXBTCPERP": 0.0001, "KXETHPERP": 0.0001, "KXZECPERP": 0.01,
     })
+    perps_data.refresh_ticker_activity_cache(force=True)  # populates the cache get_watchlist() reads
     monkeypatch.setattr(perps_data, "list_margin_markets", lambda: [
         _market("KXBTCPERP", volume_24h_usd=10_000.0),  # highest volume by far
         _market("KXETHPERP", volume_24h_usd=100.0),      # same volume as ZEC, but flat
@@ -199,6 +200,69 @@ def test_get_watchlist_combines_volume_and_volatility_rank(monkeypatch):
     ])
     watchlist = perps_data.get_watchlist()
     assert watchlist == ["KXBTCPERP", "KXZECPERP"]  # KXETHPERP loses the tiebreak on volatility
+
+
+def test_get_watchlist_never_triggers_a_synchronous_archive_load(monkeypatch):
+    """Confirmed live root cause of a fresh Render OOM: get_watchlist() is
+    called inline from /api/status on every dashboard poll. It used to
+    trigger a full archive download+load itself whenever the volatility
+    cache was empty/stale, which could run concurrently with the startup
+    training thread's own full-size archive load right after a cold start --
+    doubling the heaviest operation this process does at the moment memory
+    is already tightest. Now it must only ever read whatever's cached."""
+    def fail_if_called():
+        raise AssertionError("get_watchlist() must never call _recent_volatility_by_ticker itself")
+
+    monkeypatch.setattr(perps_data, "_recent_volatility_by_ticker", fail_if_called)
+    monkeypatch.setattr(perps_data, "WATCHLIST_TOP_N", 0)
+    monkeypatch.setattr(perps_data, "list_margin_markets", lambda: [_market("KXBTCPERP")])
+    watchlist = perps_data.get_watchlist()  # cache is empty (autouse fixture) -- must fall back, not load
+    assert watchlist == ["KXBTCPERP"]
+
+
+def test_refresh_ticker_activity_cache_skips_when_fresh(monkeypatch):
+    calls = {"n": 0}
+
+    def _fake():
+        calls["n"] += 1
+        return {"KXBTCPERP": 0.001}
+
+    monkeypatch.setattr(perps_data, "_recent_volatility_by_ticker", _fake)
+    perps_data.refresh_ticker_activity_cache(force=True)
+    assert calls["n"] == 1
+    perps_data.refresh_ticker_activity_cache()  # still fresh -- should skip
+    assert calls["n"] == 1
+
+
+def test_refresh_ticker_activity_cache_force_always_recomputes(monkeypatch):
+    calls = {"n": 0}
+
+    def _fake():
+        calls["n"] += 1
+        return {"KXBTCPERP": 0.001}
+
+    monkeypatch.setattr(perps_data, "_recent_volatility_by_ticker", _fake)
+    perps_data.refresh_ticker_activity_cache(force=True)
+    perps_data.refresh_ticker_activity_cache(force=True)
+    assert calls["n"] == 2
+
+
+def test_recent_volatility_by_ticker_bounds_the_archive_load(monkeypatch):
+    """Deliberately far smaller than load_training_dataset()'s training-grade
+    default (90 shards / MAX_TRAIN_ROWS rows) -- see this function's own
+    docstring for why an unbounded load here caused a live OOM."""
+    monkeypatch.undo()  # this test targets the REAL _recent_volatility_by_ticker, not the autouse fixture's stub
+    captured = {}
+
+    def _fake_load(*, max_shards=90, max_rows=None):
+        captured["max_shards"] = max_shards
+        captured["max_rows"] = max_rows
+        return pd.DataFrame()
+
+    monkeypatch.setattr(perps_data, "load_training_dataset", _fake_load)
+    perps_data._recent_volatility_by_ticker()
+    assert captured["max_shards"] <= 5
+    assert captured["max_rows"] <= 5000
 
 
 def test_get_active_tickers_includes_everything_active_unnarrowed(monkeypatch):

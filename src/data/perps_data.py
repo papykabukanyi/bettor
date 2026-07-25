@@ -92,16 +92,17 @@ _TICKER_ACTIVITY_CACHE_TTL_SEC = int(os.getenv("PERPS_WATCHLIST_REFRESH_SEC", st
 
 
 def _recent_volatility_by_ticker() -> dict[str, float]:
-    """Average volatility_15 per ticker over load_training_dataset()'s own
-    (already memory-safe, most-recent-rows-only) default window -- reuses
-    the existing row cap rather than loading the full archive, since this
-    only needs each ticker's CURRENT price character, not its whole
-    history. Refreshed at most once per _TICKER_ACTIVITY_CACHE_TTL_SEC
-    (see _rank_tickers_by_volume_and_volatility) since this needs an HF
-    archive download and volatility character doesn't meaningfully shift
-    minute to minute."""
+    """Average volatility_15 per ticker over a SMALL recent slice of the
+    archive -- a handful of shards/rows is plenty to characterize each
+    ticker's current volatility, and deliberately far below
+    load_training_dataset()'s training-grade default (90 shards / up to
+    MAX_TRAIN_ROWS rows). Confirmed live: calling that full-size default
+    from here caused a fresh Render OOM, because it could run concurrently
+    with the startup training thread's OWN full-size load of the same
+    archive -- the single heaviest operation this process does, doubled,
+    right at the moment memory is already tightest."""
     try:
-        df = load_training_dataset()
+        df = load_training_dataset(max_shards=5, max_rows=5000)
     except Exception as exc:
         logger.warning("[perps_data] could not load archive for volatility ranking: %s", exc)
         return {}
@@ -110,18 +111,33 @@ def _recent_volatility_by_ticker() -> dict[str, float]:
     return df.groupby("ticker")["volatility_15"].mean().to_dict()
 
 
+def refresh_ticker_activity_cache(*, force: bool = False) -> None:
+    """Recomputes the cached per-ticker volatility used by watchlist
+    ranking. Called ONLY from the periodic perps_data_collect job (off the
+    request path) -- never from get_watchlist()/_rank_tickers_by_volume_
+    and_volatility() directly, since those run inline inside /api/status on
+    every dashboard poll, and this needs an HF archive download. Skips the
+    refresh unless the cache is empty, forced, or past its TTL."""
+    now = time.time()
+    if (
+        not force
+        and _TICKER_ACTIVITY_CACHE["volatility_by_ticker"] is not None
+        and (now - _TICKER_ACTIVITY_CACHE["computed_at"]) < _TICKER_ACTIVITY_CACHE_TTL_SEC
+    ):
+        return
+    _TICKER_ACTIVITY_CACHE["volatility_by_ticker"] = _recent_volatility_by_ticker()
+    _TICKER_ACTIVITY_CACHE["computed_at"] = now
+
+
 def _rank_tickers_by_volume_and_volatility(markets: list[dict[str, Any]]) -> list[str]:
     """Active tickers only, ranked by combining a live-volume rank (free --
     already in the same market listing response) with a periodically
-    refreshed volatility rank. Lower combined rank = more active AND more
-    volatile; returned best-first."""
-    now = time.time()
-    if (
-        _TICKER_ACTIVITY_CACHE["volatility_by_ticker"] is None
-        or (now - _TICKER_ACTIVITY_CACHE["computed_at"]) >= _TICKER_ACTIVITY_CACHE_TTL_SEC
-    ):
-        _TICKER_ACTIVITY_CACHE["volatility_by_ticker"] = _recent_volatility_by_ticker()
-        _TICKER_ACTIVITY_CACHE["computed_at"] = now
+    refreshed volatility rank (see refresh_ticker_activity_cache). Reads
+    whatever is cached ONLY -- never triggers an archive load itself, so
+    calling this (via get_watchlist()) from a request handler is always
+    cheap. Before the cache is first populated (e.g. right after a cold
+    start), this falls back to volume-only ranking. Lower combined rank =
+    more active AND more volatile; returned best-first."""
     volatility_by_ticker = _TICKER_ACTIVITY_CACHE["volatility_by_ticker"] or {}
 
     active = [m for m in markets if m.get("status") == "active" and m.get("ticker")]
