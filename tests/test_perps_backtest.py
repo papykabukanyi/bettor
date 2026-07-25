@@ -164,6 +164,21 @@ def test_simulate_never_opens_shorts_when_the_feature_is_off():
     assert result["trade_count"] == 0
 
 
+def test_simulate_blocks_entries_calm_relative_to_the_coins_own_baseline():
+    """"Study each currency": volatility_5 clears the absolute floor but is
+    well below this coin's own recent (volatility_30) baseline -- must not
+    enter even though the technical + model signal otherwise qualifies."""
+    df = _rally_then_crash_df()
+    df["volatility_5"] = 0.001
+    df["volatility_30"] = 0.005  # 5x calmer relative reading than baseline
+    result = bt.simulate(
+        df, _down_fitted(), starting_balance=20.0, leverage_by_ticker={"KXBTCPERP": 1.0},
+        entry_dip_pct=0.005, trend_filter_down_pct=0.02, model_confidence_min=0.5,
+        enable_shorts=True, min_entry_volatility=0.0008, min_entry_relative_volatility_ratio=1.0,
+    )
+    assert result["trade_count"] == 0
+
+
 def test_fetch_extended_candles_chains_multiple_calls_beyond_the_cap(monkeypatch):
     calls = []
 

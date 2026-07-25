@@ -195,6 +195,7 @@ def simulate(
     daily_loss_cap_pct: float | None = None,
     enable_shorts: bool | None = None,
     min_entry_volatility: float | None = None,
+    min_entry_relative_volatility_ratio: float | None = None,
 ) -> dict[str, Any]:
     """Walk forward through `test_df` (all tickers, sorted by ts) replaying
     the real strategy functions. Every strategy parameter can be overridden
@@ -214,6 +215,10 @@ def simulate(
     daily_loss_cap_pct = strat.DAILY_LOSS_CAP_PCT if daily_loss_cap_pct is None else daily_loss_cap_pct
     enable_shorts = strat.ENABLE_SHORTS if enable_shorts is None else enable_shorts
     min_entry_volatility = strat.MIN_ENTRY_VOLATILITY if min_entry_volatility is None else min_entry_volatility
+    min_entry_relative_volatility_ratio = (
+        strat.MIN_ENTRY_RELATIVE_VOLATILITY_RATIO if min_entry_relative_volatility_ratio is None
+        else min_entry_relative_volatility_ratio
+    )
 
     df = test_df.sort_values("ts").reset_index(drop=True)
     if "model_probability_up" not in df.columns:
@@ -305,8 +310,14 @@ def simulate(
         # Only enter where a fast exit is actually plausible -- mirrors
         # perps_strategy.py's MIN_ENTRY_VOLATILITY gate (confirmed live: a
         # real share of exits were max_hold_time timeouts in a market that
-        # just wasn't moving, not a clean take-profit/quick-profit).
+        # just wasn't moving, not a clean take-profit/quick-profit). Also
+        # requires THIS coin to be active relative to its OWN 30-min
+        # baseline ("study each currency" -- a fixed absolute number alone
+        # can't tell "quiet for BTC" from "quiet for a naturally choppy
+        # small-cap"), on top of (not instead of) the absolute floor.
         volatility_ok = row.volatility_5 >= min_entry_volatility
+        if volatility_ok and row.volatility_30 > 0:
+            volatility_ok = (row.volatility_5 / row.volatility_30) >= min_entry_relative_volatility_ratio
 
         chosen_side = None
         if volatility_ok and row.trend_pct >= -trend_filter_down_pct and dip_pct >= entry_dip_pct:

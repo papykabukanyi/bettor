@@ -198,6 +198,21 @@ VOLATILITY_QUICK_PROFIT_PCT = _env_float("PERPS_VOLATILITY_QUICK_PROFIT_PCT", 0.
 # to enter would be overly restrictive.
 MIN_ENTRY_VOLATILITY = _env_float("PERPS_MIN_ENTRY_VOLATILITY", 0.0008)
 
+# "Study each currency": MIN_ENTRY_VOLATILITY above is one fixed number
+# applied identically to all 16 instruments, but a coin's own NORMAL
+# volatility varies a lot by instrument -- a level that's unremarkable for
+# a naturally choppy small-cap could be a genuine spike for a calmer major.
+# volatility_30 (engineer_features' own longer rolling window) is each
+# ticker's OWN recent baseline, recomputed fresh every time from that same
+# ticker's own data -- requiring volatility_5 (right now) to be at least
+# this many TIMES that ticker's own volatility_30 means the gate adapts
+# per-currency automatically, without needing a separate per-ticker
+# historical-percentile system. Applied ALONGSIDE (not instead of)
+# MIN_ENTRY_VOLATILITY -- the absolute floor still guards against entering
+# anywhere when the whole market is dead, this catches "calm FOR THIS COIN
+# specifically, even if technically above the absolute floor."
+MIN_ENTRY_RELATIVE_VOLATILITY_RATIO = _env_float("PERPS_MIN_ENTRY_RELATIVE_VOLATILITY_RATIO", 1.0)
+
 # Reject a new entry if Kalshi's quote and an independent live exchange price
 # (Coinbase/Kraken, see crypto_prices.py) disagree by more than this -- a
 # safety check against entering on a stale or erroneous Kalshi tick.
@@ -431,6 +446,19 @@ def evaluate_candidate(ticker: str) -> dict[str, Any]:
         if current_volatility is None or current_volatility < MIN_ENTRY_VOLATILITY:
             reasons.append(f"{technical_reason}, but volatility too low for a fast exit ({current_volatility})")
             continue
+
+        # Per-currency relative check: is THIS coin currently more active
+        # than ITS OWN recent (30-min) baseline, not just above the global
+        # absolute floor above.
+        own_baseline = row.get("volatility_30")
+        if own_baseline and own_baseline > 0:
+            relative_ratio = current_volatility / own_baseline
+            if relative_ratio < MIN_ENTRY_RELATIVE_VOLATILITY_RATIO:
+                reasons.append(
+                    f"{technical_reason}, but calm relative to this coin's own baseline "
+                    f"({relative_ratio:.2f}x < {MIN_ENTRY_RELATIVE_VOLATILITY_RATIO}x)"
+                )
+                continue
 
         if not model_ok:
             if side == "short":

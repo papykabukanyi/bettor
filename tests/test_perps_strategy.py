@@ -446,6 +446,46 @@ def test_evaluate_candidate_enters_when_volatility_meets_the_bar(monkeypatch):
     assert result["should_enter"] is True
 
 
+def test_evaluate_candidate_blocks_entry_when_calm_relative_to_own_baseline(monkeypatch):
+    """"Study each currency": a fixed absolute volatility floor alone can't
+    tell "quiet for BTC" from "quiet for a naturally choppy small-cap".
+    Here volatility_5 clears the absolute floor but is well below this
+    coin's OWN recent (30-min) baseline -- must not enter."""
+    monkeypatch.setattr(strat, "latest_feature_row", lambda ticker: _row(
+        volatility_5=strat.MIN_ENTRY_VOLATILITY + 0.0001, volatility_30=(strat.MIN_ENTRY_VOLATILITY + 0.0001) * 5,
+    ))
+    monkeypatch.setattr(strat, "predict_direction", lambda ticker: {
+        "model_ok": True, "ticker": ticker, "direction": "up", "probability_up": 0.9,
+    })
+    result = strat.evaluate_candidate("KXBTCPERP")
+    assert result["should_enter"] is False
+    assert "baseline" in result["reason"]
+
+
+def test_evaluate_candidate_enters_when_active_relative_to_own_baseline(monkeypatch):
+    monkeypatch.setattr(strat, "latest_feature_row", lambda ticker: _row(
+        volatility_5=strat.MIN_ENTRY_VOLATILITY + 0.0001, volatility_30=(strat.MIN_ENTRY_VOLATILITY + 0.0001) * 0.5,
+    ))
+    monkeypatch.setattr(strat, "predict_direction", lambda ticker: {
+        "model_ok": True, "ticker": ticker, "direction": "up", "probability_up": 0.9,
+    })
+    result = strat.evaluate_candidate("KXBTCPERP")
+    assert result["should_enter"] is True
+
+
+def test_evaluate_candidate_skips_relative_check_without_a_baseline(monkeypatch):
+    """No volatility_30 available (e.g. not enough history yet) -- must not
+    block on the relative check, only the absolute floor still applies."""
+    monkeypatch.setattr(strat, "latest_feature_row", lambda ticker: _row(
+        volatility_5=strat.MIN_ENTRY_VOLATILITY + 0.0001, volatility_30=0.0,
+    ))
+    monkeypatch.setattr(strat, "predict_direction", lambda ticker: {
+        "model_ok": True, "ticker": ticker, "direction": "up", "probability_up": 0.9,
+    })
+    result = strat.evaluate_candidate("KXBTCPERP")
+    assert result["should_enter"] is True
+
+
 def test_evaluate_candidate_falls_back_to_technical_when_model_not_trained(monkeypatch):
     monkeypatch.setattr(strat, "latest_feature_row", lambda ticker: _row())
     monkeypatch.setattr(strat, "predict_direction", lambda ticker: {"model_ok": False, "ticker": ticker})
