@@ -359,6 +359,11 @@ def simulate(
             "ticker": ticker, "entry_price": price, "count": float(count), "side": chosen_side,
             "opened_at": pd.Timestamp(row.ts, unit="s", tz="UTC").isoformat(),
             "opened_ts": row.ts, "margin_committed_usd": margin_committed, "_samples": [],
+            # This ticker's OWN volatility_30 at entry -- decide_exit() (the
+            # REAL, shared function, not reimplemented here) uses this to
+            # customize the take-profit/stop-loss to this specific currency
+            # instead of one flat percentage for every coin.
+            "entry_volatility_30": row.volatility_30,
         }
 
     # Mark-to-market any still-open positions at the last known price for reporting.

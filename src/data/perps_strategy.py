@@ -71,6 +71,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import logging
+import math
 import os
 import statistics
 import tempfile
@@ -631,6 +632,12 @@ def evaluate_candidate(ticker: str) -> dict[str, Any]:
     result: dict[str, Any] = {
         "ticker": ticker, "current_price": row["current_price"], "short_ma": row["short_ma"],
         "trend_pct": row["trend_pct"], "model_ok": model_ok, "technical_ok": False,
+        # This coin's OWN recent volatility at the moment of evaluation --
+        # carried through to the eventual position dict (see scan_and_enter)
+        # so decide_exit/position_exit_levels can customize this position's
+        # take-profit/stop-loss to THIS specific currency (see
+        # adaptive_exit_pcts) instead of one flat percentage for every coin.
+        "volatility_30": row.get("volatility_30"),
     }
     if model_ok:
         result["probability_up"] = prediction["probability_up"]
@@ -758,6 +765,65 @@ def _sample_volatility(samples: list[list[float]]) -> float | None:
     return statistics.stdev(changes)
 
 
+# "Study each currency" applied to EXITS, not just entry selectivity.
+# Confirmed via a per-ticker backtest breakdown this session: BTC's mean
+# volatility_30 (~0.037%/min) is roughly 4x LOWER than kSHIB's (~0.156%/min)
+# -- a flat 2%/1.5% take-profit/stop-loss applied identically to both means
+# BTC (which rarely moves that much) almost never reaches its target,
+# while a genuinely volatile small-cap's target may be too conservative
+# either way. Instead, each position's EFFECTIVE take-profit/stop-loss/
+# quick-profit is derived from THAT SPECIFIC ticker's own volatility_30 at
+# the moment it was entered, scaled by sqrt(MAX_HOLD_MINUTES) (volatility
+# scales with the square root of time under a random-walk assumption, so
+# this is an estimate of the coin's own typical move size over the actual
+# hold window, not an arbitrary flat number).
+# Tuned via a pooled sweep on the same real 14-day/8-coin history: tried
+# (tp_mult, sl_mult) in {(1.0,0.7), (1.0,0.9), (1.2,0.9), (1.2,1.1), (1.5,1.0),
+# (1.5,1.2), (2.0,1.5)} -- results consistently ranked "wider" combos above
+# "tighter" ones (best: 1.5/1.0 at -26.2% pooled return; worst: 1.0/0.9 at
+# -27.5%), so a too-tight per-currency stop-loss was clipping winners early
+# more than it was saving losers, same pattern as this session's earlier
+# hold-time sweep (more room outperformed less room, though nothing tested
+# flipped the strategy net-profitable at the taker fee rate).
+TAKE_PROFIT_VOL_MULTIPLE = _env_float("PERPS_TAKE_PROFIT_VOL_MULTIPLE", 1.5)
+STOP_LOSS_VOL_MULTIPLE = _env_float("PERPS_STOP_LOSS_VOL_MULTIPLE", 1.0)
+# Floors/ceilings guard against a pathological per-currency estimate (a
+# coin with almost no recorded volatility yet shouldn't get a near-zero
+# target that fires on pure noise; a wildly volatile one shouldn't get an
+# unreasonably huge target that never fires either).
+MIN_TAKE_PROFIT_PCT = _env_float("PERPS_MIN_TAKE_PROFIT_PCT", 0.012)
+MAX_TAKE_PROFIT_PCT = _env_float("PERPS_MAX_TAKE_PROFIT_PCT", 0.05)
+MIN_STOP_LOSS_PCT = _env_float("PERPS_MIN_STOP_LOSS_PCT", 0.01)
+MAX_STOP_LOSS_PCT = _env_float("PERPS_MAX_STOP_LOSS_PCT", 0.04)
+
+
+def adaptive_exit_pcts(entry_volatility_30: float | None) -> dict[str, float]:
+    """Take-profit/stop-loss/quick-profit percentages customized to ONE
+    specific currency's own volatility at entry time. Falls back to the
+    flat global TAKE_PROFIT_PCT/STOP_LOSS_PCT/etc. defaults if no
+    volatility was captured (e.g. a position opened before this field
+    existed, or a technical-only entry where the value was unavailable) --
+    same value every position used before this change, so nothing regresses
+    for positions that predate it."""
+    if not entry_volatility_30 or entry_volatility_30 <= 0:
+        return {
+            "take_profit_pct": TAKE_PROFIT_PCT, "stop_loss_pct": STOP_LOSS_PCT,
+            "quick_profit_pct": QUICK_PROFIT_PCT, "volatility_quick_profit_pct": VOLATILITY_QUICK_PROFIT_PCT,
+        }
+    horizon_scale = math.sqrt(max(1, MAX_HOLD_MINUTES))
+    take_profit = min(MAX_TAKE_PROFIT_PCT, max(MIN_TAKE_PROFIT_PCT, TAKE_PROFIT_VOL_MULTIPLE * entry_volatility_30 * horizon_scale))
+    stop_loss = min(MAX_STOP_LOSS_PCT, max(MIN_STOP_LOSS_PCT, STOP_LOSS_VOL_MULTIPLE * entry_volatility_30 * horizon_scale))
+    return {
+        "take_profit_pct": take_profit,
+        "stop_loss_pct": stop_loss,
+        # Quick-profit levels stay a fraction of the (now per-currency)
+        # take-profit target -- same "smaller than the full target" shape
+        # as the old flat constants, just scaled with everything else.
+        "quick_profit_pct": take_profit * 0.9,
+        "volatility_quick_profit_pct": take_profit * 0.8,
+    }
+
+
 def decide_exit(
     position: dict[str, Any], current_price: float, *,
     velocity_pct_per_min: float | None = None, external_velocity_pct_per_min: float | None = None,
@@ -796,6 +862,11 @@ def decide_exit(
     take-profit/stop-loss/max_hold in real production trades)."""
     entry_price = float(position["entry_price"])
     is_short = position.get("side") == "short"
+    exit_pcts = adaptive_exit_pcts(position.get("entry_volatility_30"))
+    take_profit_pct = exit_pcts["take_profit_pct"]
+    stop_loss_pct = exit_pcts["stop_loss_pct"]
+    quick_profit_pct = exit_pcts["quick_profit_pct"]
+    volatility_quick_profit_pct = exit_pcts["volatility_quick_profit_pct"]
     if is_short:
         change_pct = (entry_price - current_price) / entry_price if entry_price > 0 else 0.0
         favorable_velocity = -velocity_pct_per_min if velocity_pct_per_min is not None else None
@@ -805,20 +876,20 @@ def decide_exit(
         favorable_velocity = velocity_pct_per_min
         favorable_external_velocity = external_velocity_pct_per_min
 
-    if change_pct >= QUICK_PROFIT_PCT:
+    if change_pct >= quick_profit_pct:
         if favorable_velocity is not None and favorable_velocity >= QUICK_PROFIT_VELOCITY_PCT_PER_MIN:
             return True, f"quick_profit (velocity {velocity_pct_per_min:+.2%}/min, gain {change_pct:+.3%})"
         if favorable_external_velocity is not None and favorable_external_velocity >= QUICK_PROFIT_VELOCITY_PCT_PER_MIN:
             return True, f"quick_profit (external velocity {external_velocity_pct_per_min:+.2%}/min, gain {change_pct:+.3%})"
     if (
         current_volatility is not None and current_volatility >= HIGH_VOLATILITY_THRESHOLD
-        and change_pct >= VOLATILITY_QUICK_PROFIT_PCT
+        and change_pct >= volatility_quick_profit_pct
     ):
         return True, f"volatility_quick_profit (volatility {current_volatility:.4f}, gain {change_pct:+.3%})"
-    if change_pct >= TAKE_PROFIT_PCT:
-        return True, f"take_profit ({change_pct:+.3%})"
-    if change_pct <= -STOP_LOSS_PCT:
-        return True, f"stop_loss ({change_pct:+.3%})"
+    if change_pct >= take_profit_pct:
+        return True, f"take_profit ({change_pct:+.3%}, target {take_profit_pct:.2%})"
+    if change_pct <= -stop_loss_pct:
+        return True, f"stop_loss ({change_pct:+.3%}, target {stop_loss_pct:.2%})"
     opened_at = dt.datetime.fromisoformat(position["opened_at"])
     now = now if now is not None else dt.datetime.now(dt.timezone.utc)
     held_minutes = (now - opened_at).total_seconds() / 60.0
@@ -829,18 +900,20 @@ def decide_exit(
 
 def position_exit_levels(position: dict[str, Any]) -> dict[str, float]:
     """The actual take-profit/stop-loss/quick-profit PRICE levels for a
-    position, derived from the same percentages decide_exit() applies --
-    exists so callers (the dashboard) can show, per open position, PROOF
-    that it has real exit levels defined, rather than just trusting the
-    global percentage config exists somewhere. Side-aware: a short's
-    take-profit is BELOW entry (profits on a falling price) and its
-    stop-loss is ABOVE entry, the mirror image of a long."""
+    position, derived from the SAME per-currency-adaptive percentages
+    decide_exit() applies (see adaptive_exit_pcts) -- exists so callers
+    (the dashboard) can show, per open position, PROOF that it has real
+    exit levels defined, rather than just trusting the config exists
+    somewhere. Side-aware: a short's take-profit is BELOW entry (profits
+    on a falling price) and its stop-loss is ABOVE entry, the mirror image
+    of a long."""
     entry_price = float(position["entry_price"])
     sign = -1.0 if position.get("side") == "short" else 1.0
+    exit_pcts = adaptive_exit_pcts(position.get("entry_volatility_30"))
     return {
-        "take_profit_price": round(entry_price * (1 + sign * TAKE_PROFIT_PCT), 6),
-        "stop_loss_price": round(entry_price * (1 - sign * STOP_LOSS_PCT), 6),
-        "quick_profit_price": round(entry_price * (1 + sign * QUICK_PROFIT_PCT), 6),
+        "take_profit_price": round(entry_price * (1 + sign * exit_pcts["take_profit_pct"]), 6),
+        "stop_loss_price": round(entry_price * (1 - sign * exit_pcts["stop_loss_pct"]), 6),
+        "quick_profit_price": round(entry_price * (1 + sign * exit_pcts["quick_profit_pct"]), 6),
     }
 
 
@@ -1367,11 +1440,13 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
                     merged["entry_price"] = actual_entry_price
                     merged["side"] = side
                     merged["entry_fill_type"] = entry_fill_type
+                    merged["entry_volatility_30"] = candidate.get("volatility_30")
                     positions[existing_idx] = merged
                 else:
                     positions.append({
                         "ticker": ticker, "entry_price": actual_entry_price, "count": float(actual_count),
                         "side": side, "entry_fill_type": entry_fill_type,
+                        "entry_volatility_30": candidate.get("volatility_30"),
                         "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(), "dry_run": effective_dry_run,
                         "sizing": sizing_detail,
                     })

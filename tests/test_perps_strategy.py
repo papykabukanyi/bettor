@@ -93,11 +93,13 @@ def test_negligible_move_does_not_trigger_technical_entry():
     assert not should_enter
 
 
-def _position(entry_price=6.60, minutes_ago=0, ticker="KXBTCPERP", count=1.0, side=None):
+def _position(entry_price=6.60, minutes_ago=0, ticker="KXBTCPERP", count=1.0, side=None, entry_volatility_30=None):
     opened = dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=minutes_ago)
     pos = {"ticker": ticker, "entry_price": entry_price, "count": count, "opened_at": opened.isoformat()}
     if side is not None:
         pos["side"] = side
+    if entry_volatility_30 is not None:
+        pos["entry_volatility_30"] = entry_volatility_30
     return pos
 
 
@@ -124,6 +126,85 @@ def test_holds_when_nothing_triggered():
     should_exit, reason = strat.decide_exit(pos, 6.605)
     assert not should_exit
     assert "holding" in reason
+
+
+# ── Per-currency adaptive exit thresholds ───────────────────────────────────
+# Confirmed via a per-ticker backtest breakdown: BTC's own volatility_30 is
+# roughly 4x lower than kSHIB's -- these lock down that each position's
+# actual take-profit/stop-loss is customized to THAT specific currency
+# rather than one flat percentage for every coin.
+def test_adaptive_exit_pcts_falls_back_to_flat_global_without_volatility():
+    result = strat.adaptive_exit_pcts(None)
+    assert result == {
+        "take_profit_pct": strat.TAKE_PROFIT_PCT, "stop_loss_pct": strat.STOP_LOSS_PCT,
+        "quick_profit_pct": strat.QUICK_PROFIT_PCT, "volatility_quick_profit_pct": strat.VOLATILITY_QUICK_PROFIT_PCT,
+    }
+    assert strat.adaptive_exit_pcts(0.0) == result
+    assert strat.adaptive_exit_pcts(-0.001) == result
+
+
+def test_adaptive_exit_pcts_scales_up_for_a_more_volatile_currency():
+    calm = strat.adaptive_exit_pcts(0.0004)   # roughly BTC's own real mean volatility_30
+    volatile = strat.adaptive_exit_pcts(0.0016)  # roughly kSHIB's -- ~4x higher
+    assert volatile["take_profit_pct"] > calm["take_profit_pct"]
+    assert volatile["stop_loss_pct"] > calm["stop_loss_pct"]
+
+
+def test_adaptive_exit_pcts_respects_the_floor_for_a_near_zero_volatility_coin():
+    result = strat.adaptive_exit_pcts(0.00001)  # would compute to well under the floor unscaled
+    assert result["take_profit_pct"] == strat.MIN_TAKE_PROFIT_PCT
+    assert result["stop_loss_pct"] == strat.MIN_STOP_LOSS_PCT
+
+
+def test_adaptive_exit_pcts_respects_the_ceiling_for_an_extremely_volatile_coin():
+    result = strat.adaptive_exit_pcts(1.0)  # absurdly high, must clamp rather than explode
+    assert result["take_profit_pct"] == strat.MAX_TAKE_PROFIT_PCT
+    assert result["stop_loss_pct"] == strat.MAX_STOP_LOSS_PCT
+
+
+def test_adaptive_exit_pcts_quick_profit_levels_are_a_fraction_of_take_profit():
+    result = strat.adaptive_exit_pcts(0.0008)
+    assert result["quick_profit_pct"] == pytest.approx(result["take_profit_pct"] * 0.9)
+    assert result["volatility_quick_profit_pct"] == pytest.approx(result["take_profit_pct"] * 0.8)
+    assert result["quick_profit_pct"] < result["take_profit_pct"]
+    assert result["volatility_quick_profit_pct"] < result["quick_profit_pct"]
+
+
+def test_decide_exit_uses_a_wider_take_profit_for_a_more_volatile_currency():
+    """The SAME percentage gain should NOT trigger take_profit for a highly
+    volatile coin's position if it's still under THAT coin's own (wider)
+    adaptive target, even though it would for a calm coin with a tighter one."""
+    calm_pos = _position(entry_price=6.60, minutes_ago=1, entry_volatility_30=0.0004)
+    volatile_pos = _position(entry_price=6.60, minutes_ago=1, entry_volatility_30=0.0016)
+    calm_target = strat.adaptive_exit_pcts(0.0004)["take_profit_pct"]
+    volatile_target = strat.adaptive_exit_pcts(0.0016)["take_profit_pct"]
+    # A gain between the two targets: clears the calm coin's tighter target
+    # but not the volatile coin's wider one.
+    mid_gain_price = 6.60 * (1 + (calm_target + volatile_target) / 2)
+
+    calm_exit, calm_reason = strat.decide_exit(calm_pos, mid_gain_price)
+    volatile_exit, volatile_reason = strat.decide_exit(volatile_pos, mid_gain_price)
+    assert calm_exit and "take_profit" in calm_reason
+    assert not volatile_exit
+
+
+def test_position_exit_levels_uses_the_adaptive_percentage_not_the_flat_global():
+    pos = _position(entry_price=100.0, entry_volatility_30=0.0016)  # well above BTC-like calm
+    levels = strat.position_exit_levels(pos)
+    adaptive = strat.adaptive_exit_pcts(0.0016)
+    assert levels["take_profit_price"] == round(100.0 * (1 + adaptive["take_profit_pct"]), 6)
+    # Must differ from what the flat global would have produced, proving
+    # the adaptive value (not TAKE_PROFIT_PCT) is what's actually used.
+    assert adaptive["take_profit_pct"] != strat.TAKE_PROFIT_PCT
+    assert levels["take_profit_price"] != round(100.0 * (1 + strat.TAKE_PROFIT_PCT), 6)
+
+
+def test_position_exit_levels_falls_back_to_flat_global_without_stored_volatility():
+    """An older position from before this field existed must keep working
+    exactly as before, not error out or silently use a wrong value."""
+    pos = _position(entry_price=100.0)  # no entry_volatility_30 at all
+    levels = strat.position_exit_levels(pos)
+    assert levels["take_profit_price"] == round(100.0 * (1 + strat.TAKE_PROFIT_PCT), 6)
 
 
 def test_decide_exit_uses_real_wall_clock_time_by_default():
