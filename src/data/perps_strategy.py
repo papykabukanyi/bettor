@@ -312,9 +312,34 @@ def _place_order_maker_then_fallback(
 # account fully deployed across up to 5 different instruments at a time).
 POSITION_SIZE_PCT = _env_float("PERPS_POSITION_SIZE_PCT", 0.20)
 MAX_CONCURRENT_POSITIONS = max(1, _env_int("PERPS_MAX_CONCURRENT_POSITIONS", 5))
-TAKE_PROFIT_PCT = _env_float("PERPS_TAKE_PROFIT_PCT", 0.004)   # +0.4% -> take small profit
-STOP_LOSS_PCT = _env_float("PERPS_STOP_LOSS_PCT", 0.008)       # -0.8% -> cut the loss
-MAX_HOLD_MINUTES = _env_int("PERPS_MAX_HOLD_MINUTES", 30)
+# Confirmed via a real backtest (14 days, 8 watchlist coins, fresh model
+# fit on today's expanded feature set): at the OLD defaults (0.4%/0.8%/30min),
+# 87% of trades timed out at max_hold_time without ever reaching either
+# threshold -- the position simply never had TIME to develop a real move.
+# A dedicated hold-time sweep (10/15/20/30/45/60/90/120/180/240 minutes, all
+# else held fixed) showed a clean, monotonic pattern: every single hold time
+# was still net-unprofitable at Kalshi's taker fee rate, but losses shrank
+# steadily as hold time grew (10min: -45.5% -> 240min: -35.4% over the same
+# test window) -- more time genuinely lets a real (if still fee-challenged)
+# move develop instead of forcing an exit on noise. 240 min was the least-
+# bad result tested, but that's now suspiciously close to Kalshi's own
+# ~4-hour funding interval (confirmed live via GET /margin/funding_rates/
+# estimate) -- a position held that long risks actually crossing a real
+# funding payment, an uncounted cost this backtest doesn't model at all.
+# 180 min captures nearly all the same improvement (-39.0% vs -35.4%) while
+# staying safely short of that boundary. TAKE_PROFIT_PCT/STOP_LOSS_PCT
+# raised to genuinely fee-aware levels alongside this -- with only 30
+# minutes to work with, a bigger target was moot (the price never got
+# there anyway); with 180 minutes, it can actually matter.
+# IMPORTANT, still true: none of this makes the strategy robustly
+# profitable on its own -- it makes it lose LESS. The single biggest real
+# lever found this session is enabling maker (post_only) orders
+# (PERPS_ENABLE_MAKER_ORDERS, see below), which cuts the fee itself ~16x;
+# that combined with this longer, more selective hold is the most credible
+# path toward actual profitability, not either alone.
+TAKE_PROFIT_PCT = _env_float("PERPS_TAKE_PROFIT_PCT", 0.02)
+STOP_LOSS_PCT = _env_float("PERPS_STOP_LOSS_PCT", 0.015)
+MAX_HOLD_MINUTES = _env_int("PERPS_MAX_HOLD_MINUTES", 180)
 ENTRY_DIP_PCT = _env_float("PERPS_ENTRY_DIP_PCT", 0.0015)      # 0.15% below short MA triggers interest
 SHORT_MA_MINUTES = _env_int("PERPS_SHORT_MA_MINUTES", 15)
 TREND_FILTER_DOWN_PCT = _env_float("PERPS_TREND_FILTER_DOWN_PCT", 0.02)  # skip entries if down >2%
@@ -332,7 +357,15 @@ TREND_FILTER_DOWN_PCT = _env_float("PERPS_TREND_FILTER_DOWN_PCT", 0.02)  # skip 
 # absolute return figures as optimistic (fees are now modeled -- see
 # round_trip_fee_usd / DEFAULT_TAKER_FEE_RATE above and perps_backtest.py's
 # simulate() -- any NEW backtest run reflects real net-of-fee returns).
-MODEL_CONFIDENCE_MIN = _env_float("PERPS_MODEL_CONFIDENCE_MIN", 0.52)
+#
+# Raised from 0.52 after this session's fee-aware sweeps: at 0.52, a real
+# 14-day backtest lost money in every configuration tested regardless of
+# exit thresholds or hold time, and tightening confidence consistently
+# reduced the loss (e.g. at 0.58 + a 120min hold, win_rate rose to 5.8% and
+# the loss shrank materially vs. 0.52 at the same hold, on real 8-coin
+# history) -- same "fewer, higher-conviction trades cost less in fees"
+# pattern as the hold-time finding above.
+MODEL_CONFIDENCE_MIN = _env_float("PERPS_MODEL_CONFIDENCE_MIN", 0.58)
 # Daily loss cap as a PERCENTAGE of the balance measured at the start of the
 # day (not a fixed dollar figure) so it scales sensibly as the account grows.
 DAILY_LOSS_CAP_PCT = _env_float("PERPS_DAILY_LOSS_CAP_PCT", 0.15)
@@ -343,7 +376,11 @@ LIVE_TRADING_ENABLED = _env_flag("KALSHI_PERPS_LIVE_TRADING_ENABLED", default=Fa
 # gain arrived fast (velocity over the trailing window >= this threshold),
 # exit immediately rather than waiting for the standard take-profit level --
 # a fast pump on a thin market often gives back gains just as fast.
-QUICK_PROFIT_PCT = _env_float("PERPS_QUICK_PROFIT_PCT", 0.0015)
+# Raised alongside TAKE_PROFIT_PCT -- the OLD 0.15% was below the ~1.6%
+# round-trip taker fee, meaning a "quick profit" exit was mathematically
+# guaranteed to book a net loss even when it fired exactly as designed
+# (confirmed directly against real trade history this session).
+QUICK_PROFIT_PCT = _env_float("PERPS_QUICK_PROFIT_PCT", 0.018)
 QUICK_PROFIT_VELOCITY_PCT_PER_MIN = _env_float("PERPS_QUICK_PROFIT_VELOCITY_PCT_PER_MIN", 0.006)
 QUICK_PROFIT_WINDOW_SECONDS = _env_int("PERPS_QUICK_PROFIT_WINDOW_SECONDS", 90)
 
@@ -353,8 +390,10 @@ QUICK_PROFIT_WINDOW_SECONDS = _env_int("PERPS_QUICK_PROFIT_WINDOW_SECONDS", 90)
 # is currently volatile, and a volatile move can reverse just as fast as it
 # arrived. In that regime, take profit at a SMALLER gain than the normal
 # quick-profit level rather than holding out for the full TAKE_PROFIT_PCT.
+# Same fee-aware raise as QUICK_PROFIT_PCT above -- the old 0.1% couldn't
+# possibly clear the real round-trip cost either.
 HIGH_VOLATILITY_THRESHOLD = _env_float("PERPS_HIGH_VOLATILITY_THRESHOLD", 0.002)
-VOLATILITY_QUICK_PROFIT_PCT = _env_float("PERPS_VOLATILITY_QUICK_PROFIT_PCT", 0.001)
+VOLATILITY_QUICK_PROFIT_PCT = _env_float("PERPS_VOLATILITY_QUICK_PROFIT_PCT", 0.016)
 
 # "Only enter when it can get out fast": confirmed live on the real account
 # -- a real slice of exits are max_hold_time timeouts (sat the full 30
@@ -383,7 +422,11 @@ MIN_ENTRY_VOLATILITY = _env_float("PERPS_MIN_ENTRY_VOLATILITY", 0.0008)
 # MIN_ENTRY_VOLATILITY -- the absolute floor still guards against entering
 # anywhere when the whole market is dead, this catches "calm FOR THIS COIN
 # specifically, even if technically above the absolute floor."
-MIN_ENTRY_RELATIVE_VOLATILITY_RATIO = _env_float("PERPS_MIN_ENTRY_RELATIVE_VOLATILITY_RATIO", 1.0)
+# Raised from 1.0 (no relative gate at all) after this session's sweeps
+# showed requiring at least 1.3x a coin's own baseline volatility to enter
+# consistently reduced both trade count and loss size on real history,
+# without ever showing a clear win-rate downside.
+MIN_ENTRY_RELATIVE_VOLATILITY_RATIO = _env_float("PERPS_MIN_ENTRY_RELATIVE_VOLATILITY_RATIO", 1.3)
 
 # Reject a new entry if Kalshi's quote and an independent live exchange price
 # (Coinbase/Kraken, see crypto_prices.py) disagree by more than this -- a
