@@ -74,7 +74,20 @@ LABEL_HORIZON_MINUTES = int(os.getenv("PERPS_LABEL_HORIZON_MINUTES", "1") or "1"
 # briefly holds the train/test split arrays AND a final full-data refit
 # simultaneously, so the actual peak is higher than the row count alone
 # suggests.
-MAX_TRAIN_ROWS = int(os.getenv("PERPS_MAX_TRAIN_ROWS", "80000") or "80000")
+# Lowered AGAIN (80000 -> 40000) after that 80000 cap still wasn't enough:
+# confirmed live via Render's own event log, a second real OOM (this time a
+# container-level kill, "oomKilled: memoryLimit 512Mi") plus a separate
+# worker SIGKILL specifically during the daily cron retrain. Isolated local
+# profiling at the 80000 cap (real archived data, only 67941 rows currently
+# available) still peaked at ~341MB in a FRESH process with nothing else
+# loaded -- on the real server, train_model() runs inside the SAME
+# long-lived worker that also holds a loaded live model, per-ticker candle
+# caches, and every imported library's own baseline footprint, so the true
+# peak there is higher than this isolated number. This is now paired with
+# freeing `frame` before the final refit (see train_model()) and an atomic
+# local-shard write (see push_dataset_snapshot()) so a crash mid-write can
+# no longer corrupt that day's archive.
+MAX_TRAIN_ROWS = int(os.getenv("PERPS_MAX_TRAIN_ROWS", "40000") or "40000")
 
 _TICKER_TO_COIN = {
     "KXBTCPERP": "BTC", "KXETHPERP": "ETH", "KXSOLPERP": "SOL", "KXXRPPERP": "XRP",
@@ -585,7 +598,15 @@ def push_dataset_snapshot(df: pd.DataFrame) -> dict[str, Any]:
     # one within one more cycle instead of staying stuck with the columns
     # that existed the day it was first written.
     combined = combined.drop_duplicates(subset=["ticker", "ts"], keep="last").sort_values(["ticker", "ts"])
-    combined.to_parquet(shard_path, index=False)
+    # Write to a temp file THEN atomically rename into place (os.replace is
+    # atomic on POSIX) -- confirmed live: a plain to_parquet(shard_path)
+    # direct write left a truncated, corrupted shard ("Parquet magic bytes
+    # not found in footer") after the process got OOM-killed mid-write.
+    # This way a crash mid-write either leaves the OLD file fully intact or
+    # the NEW file fully written -- never a partial one.
+    tmp_path = shard_path.with_suffix(".parquet.tmp")
+    combined.to_parquet(tmp_path, index=False)
+    os.replace(tmp_path, shard_path)
 
     result: dict[str, Any] = {"ok": True, "rows_written": len(combined), "shard": str(shard_path)}
     if not _ensure_dataset_repo():

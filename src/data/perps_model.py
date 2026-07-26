@@ -58,13 +58,16 @@ _model_cache: dict[str, Any] = {"model": None, "meta": None, "loaded_at": 0.0}
 # columns with no matching adjustment) -- the model's AUC is already only
 # marginally above random, so this costs negligible quality for real
 # memory headroom.
+# Trimmed AGAIN (80 -> 60) alongside MAX_TRAIN_ROWS's second cut after that
+# fix still wasn't enough -- confirmed live via a real container-level OOM
+# kill and a separate worker SIGKILL during the daily cron retrain.
 _CANDIDATES = {
     "logistic_regression": lambda: LogisticRegression(max_iter=1000, class_weight="balanced"),
     "random_forest": lambda: RandomForestClassifier(
-        n_estimators=80, max_depth=6, min_samples_leaf=20, class_weight="balanced", random_state=42, n_jobs=1,
+        n_estimators=60, max_depth=6, min_samples_leaf=20, class_weight="balanced", random_state=42, n_jobs=1,
     ),
     "gradient_boosting": lambda: GradientBoostingClassifier(
-        n_estimators=80, max_depth=3, learning_rate=0.05, random_state=42,
+        n_estimators=60, max_depth=3, learning_rate=0.05, random_state=42,
     ),
 }
 
@@ -86,6 +89,12 @@ def train_model(df: pd.DataFrame | None = None) -> dict[str, Any]:
         return {"ok": False, "reason": "no_data"}
 
     labeled = _prepare_training_frame(frame)
+    # _prepare_training_frame() already .copy()'d everything it needs into
+    # `labeled` -- `frame` itself is 100% dead weight from here on, and
+    # freeing it now (rather than letting it ride until the function
+    # returns) matters on a 512MB-capped container that has ALSO already
+    # crashed from this exact function's own peak memory once this session.
+    del frame
     if len(labeled) < MIN_TRAIN_ROWS:
         return {"ok": False, "reason": "insufficient_rows", "rows": len(labeled), "need": MIN_TRAIN_ROWS}
 
