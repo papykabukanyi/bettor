@@ -15,7 +15,13 @@ Data flow (mirrors perps_data.py's shape, adapted for stocks):
   fetch_minute_bars(symbol)    -> the ~30-35 days of 1-minute OHLCV Schwab
                                    actually retains (chained calls -- a
                                    single periodType=day call caps at 10
-                                   days per Schwab's own period enum)
+                                   days per Schwab's own period enum). Used
+                                   for a one-time/rare full backfill only.
+  fetch_recent_minute_bars(symbol) -> a short (LIVE_LOOKBACK_DAYS), cached
+                                   window for repeated live scanning/
+                                   collection -- see its own docstring for
+                                   why the full 35-day fetch was a real
+                                   rate-limit problem here.
   engineer_features(df)        -> leakage-free volume/volatility/return
                                    features, same backward-only discipline
                                    as the perps pipeline
@@ -196,6 +202,45 @@ def fetch_minute_bars(symbol: str, *, days: int = 35) -> pd.DataFrame:
     if not frames:
         return _candles_to_df([])
     return pd.concat(frames, ignore_index=True).drop_duplicates(subset="ts").sort_values("ts").reset_index(drop=True)
+
+
+# "Live" lookback for scanning/collection -- deliberately much shorter than
+# fetch_minute_bars' full 35-day retained window. engineer_features' longest
+# rolling window is ~90 minutes, and push_minute_snapshot already merges/
+# dedupes against existing shards, so nothing is lost by not re-pulling 35
+# days on every call; a few recent days is more than enough buffer for
+# weekends/holidays. LIVE_LOOKBACK_DAYS <= 10 fits Schwab's periodType=day
+# single-call cap, so this is ALSO a single API call per symbol instead of
+# fetch_minute_bars(days=35)'s ~4 chained calls.
+LIVE_LOOKBACK_DAYS = int(os.getenv("SCHWAB_LIVE_LOOKBACK_DAYS", "5") or "5")
+_MINUTE_BAR_CACHE_TTL_SEC = int(os.getenv("SCHWAB_MINUTE_BAR_CACHE_TTL_SEC", "90") or "90")
+_minute_bar_cache: dict[str, tuple[pd.DataFrame, float]] = {}
+
+
+def fetch_recent_minute_bars(symbol: str, *, days: int = LIVE_LOOKBACK_DAYS) -> pd.DataFrame:
+    """Short-window, short-TTL-cached minute-bar fetch for LIVE feature
+    computation (latest_feature_row / the periodic dataset-collection job)
+    -- NOT fetch_minute_bars' full deep-history chain, which is for a rare
+    full backfill, not something to repeat on every scan.
+
+    Real bug found and fixed here: scan_and_enter's per-symbol loop calls
+    latest_feature_row(symbol) directly AND predict_direction(symbol) calls
+    it AGAIN internally, and a separate 15-minute data-collect cycle fetches
+    the SAME watchlist symbols too. Before this cache/window existed, all
+    three call sites used fetch_minute_bars(symbol, days=35) (chained ~4
+    calls per symbol) with zero rate-limit awareness -- at
+    WATCHLIST_TOP_N=100, one 2-minute entry-scan cycle alone could issue up
+    to ~800 Schwab API calls, more than 6x Schwab's own 120 req/min limit,
+    which would have silently 429'd most of the watchlist on every cycle
+    the moment a real login made this code path actually run."""
+    cache_key = f"{symbol}:{days}"
+    cached = _minute_bar_cache.get(cache_key)
+    now_mono = time.monotonic()
+    if cached and (now_mono - cached[1]) < _MINUTE_BAR_CACHE_TTL_SEC:
+        return cached[0]
+    df = fetch_minute_bars(symbol, days=days)
+    _minute_bar_cache[cache_key] = (df, now_mono)
+    return df
 
 
 FEATURE_COLUMNS = [
@@ -454,7 +499,7 @@ def collect_dataset_rows(symbols: list[str] | None = None) -> pd.DataFrame:
     frames = []
     for symbol in target_symbols:
         try:
-            one_min_df = fetch_minute_bars(symbol, days=35)
+            one_min_df = fetch_recent_minute_bars(symbol)
             feats = engineer_features(one_min_df)
             if feats.empty:
                 continue
@@ -472,7 +517,7 @@ def latest_feature_row(symbol: str) -> dict[str, Any] | None:
     prediction. Its label is always NaN (the future outcome hasn't
     happened yet) -- expected, we only need the feature columns here."""
     try:
-        one_min_df = fetch_minute_bars(symbol, days=35)
+        one_min_df = fetch_recent_minute_bars(symbol)
         feats = engineer_features(one_min_df)
         if feats.empty:
             return None

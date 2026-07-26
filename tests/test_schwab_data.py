@@ -38,6 +38,11 @@ def _isolated_universe_cache(monkeypatch):
     monkeypatch.setattr(schwab_data, "_universe_cache", {"symbols": None, "computed_at": 0.0})
 
 
+@pytest.fixture(autouse=True)
+def _isolated_minute_bar_cache(monkeypatch):
+    monkeypatch.setattr(schwab_data, "_minute_bar_cache", {})
+
+
 def test_get_us_stock_universe_merges_both_exchanges_and_excludes_test_issues(monkeypatch):
     def fake_get(url, timeout):
         if url == schwab_data._NASDAQ_LISTED_URL:  # noqa: SLF001
@@ -205,6 +210,68 @@ def test_fetch_minute_bars_chains_calls_to_cover_the_full_window(monkeypatch):
         assert c["frequencyType"] == "minute"
 
 
+# ── fetch_recent_minute_bars: the live-scan/collection rate-limit fix ──────
+# Real bug found and fixed this session: scan_and_enter's per-symbol loop
+# calls latest_feature_row(symbol) directly AND predict_direction(symbol)
+# calls it again internally, and a separate 15-minute data-collect cycle
+# fetches the same watchlist symbols too -- all via fetch_minute_bars'
+# 35-day (~4 chained calls/symbol) fetch with zero caching, which at
+# WATCHLIST_TOP_N=100 could burn up to ~800 Schwab API calls in a single
+# 2-minute entry-scan cycle alone (6x+ Schwab's own 120 req/min limit).
+def test_fetch_recent_minute_bars_uses_a_short_single_call_window(monkeypatch):
+    calls = []
+
+    def fake_get(path, *, params):
+        calls.append(params)
+        return {"candles": _make_daily_candles([1.0], start_ms=params["startDate"], step_ms=60_000)}
+
+    monkeypatch.setattr(schwab_data.schwab_client, "get", fake_get)
+    schwab_data.fetch_recent_minute_bars("AAPL")
+    assert len(calls) == 1  # LIVE_LOOKBACK_DAYS (5) fits Schwab's period<=10 single-call cap
+    assert calls[0]["periodType"] == "day"
+
+
+def test_fetch_recent_minute_bars_caches_within_the_ttl_window(monkeypatch):
+    calls = []
+
+    def fake_get(path, *, params):
+        calls.append(params)
+        return {"candles": _make_daily_candles([1.0], start_ms=params["startDate"], step_ms=60_000)}
+
+    monkeypatch.setattr(schwab_data.schwab_client, "get", fake_get)
+    first = schwab_data.fetch_recent_minute_bars("AAPL")
+    second = schwab_data.fetch_recent_minute_bars("AAPL")
+    assert len(calls) == 1  # second call served from cache, no new network call
+    pd.testing.assert_frame_equal(first, second)
+
+
+def test_fetch_recent_minute_bars_refetches_once_the_ttl_expires(monkeypatch):
+    calls = []
+
+    def fake_get(path, *, params):
+        calls.append(params)
+        return {"candles": _make_daily_candles([1.0], start_ms=params["startDate"], step_ms=60_000)}
+
+    monkeypatch.setattr(schwab_data.schwab_client, "get", fake_get)
+    monkeypatch.setattr(schwab_data, "_MINUTE_BAR_CACHE_TTL_SEC", 0)
+    schwab_data.fetch_recent_minute_bars("AAPL")
+    schwab_data.fetch_recent_minute_bars("AAPL")
+    assert len(calls) == 2
+
+
+def test_fetch_recent_minute_bars_caches_each_symbol_independently(monkeypatch):
+    calls = []
+
+    def fake_get(path, *, params):
+        calls.append(params)
+        return {"candles": _make_daily_candles([1.0], start_ms=params["startDate"], step_ms=60_000)}
+
+    monkeypatch.setattr(schwab_data.schwab_client, "get", fake_get)
+    schwab_data.fetch_recent_minute_bars("AAPL")
+    schwab_data.fetch_recent_minute_bars("MSFT")
+    assert len(calls) == 2
+
+
 def _synthetic_one_min_df(n=100, base=100.0, vol_base=1000.0):
     closes = [base + i * 0.01 for i in range(n)]
     return pd.DataFrame({
@@ -340,6 +407,23 @@ def test_latest_feature_row_returns_feature_columns_plus_symbol_and_price(monkey
     assert "short_ma" in row
     for col in schwab_data.FEATURE_COLUMNS:
         assert col in row
+
+
+def test_collect_dataset_rows_uses_the_cached_short_window_fetch_not_the_full_chain(monkeypatch):
+    """Guards against silently reverting to fetch_minute_bars(days=35)
+    directly -- collect_dataset_rows MUST go through fetch_recent_minute_bars
+    so the cache/short-window rate-limit fix actually applies here."""
+    called = []
+    monkeypatch.setattr(schwab_data, "fetch_recent_minute_bars", lambda symbol: called.append(symbol) or pd.DataFrame())
+    schwab_data.collect_dataset_rows(["AAPL"])
+    assert called == ["AAPL"]
+
+
+def test_latest_feature_row_uses_the_cached_short_window_fetch_not_the_full_chain(monkeypatch):
+    called = []
+    monkeypatch.setattr(schwab_data, "fetch_recent_minute_bars", lambda symbol: called.append(symbol) or _synthetic_one_min_df(n=100))
+    schwab_data.latest_feature_row("AAPL")
+    assert called == ["AAPL"]
 
 
 def test_load_training_dataset_returns_empty_frame_without_an_hf_key(monkeypatch):

@@ -10,9 +10,10 @@ from data import schwab_client
 
 
 class _FakeResponse:
-    def __init__(self, json_body, status_code=200):
+    def __init__(self, json_body, status_code=200, headers=None):
         self._json_body = json_body
         self.status_code = status_code
+        self.headers = headers or {}
 
     def json(self):
         return self._json_body
@@ -128,6 +129,70 @@ def test_get_sends_bearer_auth_header(monkeypatch):
     assert captured["url"] == f"{schwab_client.API_BASE_URL}/marketdata/v1/pricehistory"
     assert captured["headers"]["Authorization"] == "Bearer at-1"
     assert captured["params"] == {"symbol": "AAPL"}
+
+
+# ── 429 retry/backoff -- Schwab enforces a real 120 req/min ceiling, and a
+# 429 there is expected occasionally under normal load, not just a bug
+# symptom, so `get()` retries with backoff instead of failing the caller
+# outright the first time it happens.
+def test_get_retries_after_a_429_and_succeeds(monkeypatch):
+    schwab_client._token_cache.update({  # noqa: SLF001
+        "access_token": "at-1", "refresh_token": "rt-1",
+        "obtained_at": schwab_client.time.time(), "expires_at": schwab_client.time.time() + 1000,
+    })
+    monkeypatch.setattr(schwab_client, "_RATE_LIMIT_RETRY_BACKOFF_SEC", 0.0)
+    monkeypatch.setattr(schwab_client.time, "sleep", lambda _s: None)
+    calls = []
+
+    def fake_get(url, *, headers, params, timeout):
+        calls.append(1)
+        if len(calls) == 1:
+            return _FakeResponse({}, status_code=429)
+        return _FakeResponse({"candles": []}, status_code=200)
+
+    monkeypatch.setattr(schwab_client.requests, "get", fake_get)
+    result = schwab_client.get("/marketdata/v1/pricehistory", params={"symbol": "AAPL"})
+    assert result == {"candles": []}
+    assert len(calls) == 2
+
+
+def test_get_respects_retry_after_header(monkeypatch):
+    schwab_client._token_cache.update({  # noqa: SLF001
+        "access_token": "at-1", "refresh_token": "rt-1",
+        "obtained_at": schwab_client.time.time(), "expires_at": schwab_client.time.time() + 1000,
+    })
+    slept = []
+    monkeypatch.setattr(schwab_client.time, "sleep", lambda s: slept.append(s))
+    calls = []
+
+    def fake_get(url, *, headers, params, timeout):
+        calls.append(1)
+        if len(calls) == 1:
+            return _FakeResponse({}, status_code=429, headers={"Retry-After": "7"})
+        return _FakeResponse({"candles": []}, status_code=200)
+
+    monkeypatch.setattr(schwab_client.requests, "get", fake_get)
+    schwab_client.get("/marketdata/v1/pricehistory")
+    assert slept == [7.0]
+
+
+def test_get_raises_after_exhausting_retries_on_persistent_429(monkeypatch):
+    schwab_client._token_cache.update({  # noqa: SLF001
+        "access_token": "at-1", "refresh_token": "rt-1",
+        "obtained_at": schwab_client.time.time(), "expires_at": schwab_client.time.time() + 1000,
+    })
+    monkeypatch.setattr(schwab_client, "_RATE_LIMIT_RETRY_BACKOFF_SEC", 0.0)
+    monkeypatch.setattr(schwab_client.time, "sleep", lambda _s: None)
+    calls = []
+
+    def fake_get(url, *, headers, params, timeout):
+        calls.append(1)
+        return _FakeResponse({}, status_code=429)
+
+    monkeypatch.setattr(schwab_client.requests, "get", fake_get)
+    with pytest.raises(RuntimeError, match="HTTP 429"):
+        schwab_client.get("/marketdata/v1/pricehistory")
+    assert len(calls) == schwab_client._RATE_LIMIT_RETRY_ATTEMPTS  # noqa: SLF001
 
 
 def _authenticate():

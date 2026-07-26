@@ -174,12 +174,34 @@ def _auth_headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
+# Schwab enforces a real 120 req/min ceiling (its own docs) -- a 429 here is
+# expected to happen occasionally under normal load (not just a bug symptom),
+# so it's worth a short retry instead of failing the whole caller outright.
+# Respects Retry-After when Schwab sends one; otherwise backs off a fixed
+# short interval.
+_RATE_LIMIT_RETRY_ATTEMPTS = int(os.getenv("SCHWAB_RATE_LIMIT_RETRY_ATTEMPTS", "3") or "3")
+_RATE_LIMIT_RETRY_BACKOFF_SEC = float(os.getenv("SCHWAB_RATE_LIMIT_RETRY_BACKOFF_SEC", "2.0") or "2.0")
+
+
+def _get_with_retry(url: str, *, headers: dict[str, str], params: dict[str, Any]) -> requests.Response:
+    last_resp: requests.Response | None = None
+    for attempt in range(_RATE_LIMIT_RETRY_ATTEMPTS):
+        resp = requests.get(url, headers=headers, params=params, timeout=TIMEOUT_SEC)
+        if resp.status_code != 429:
+            return resp
+        last_resp = resp
+        if attempt == _RATE_LIMIT_RETRY_ATTEMPTS - 1:
+            break
+        retry_after = resp.headers.get("Retry-After")
+        wait_sec = float(retry_after) if retry_after and retry_after.isdigit() else _RATE_LIMIT_RETRY_BACKOFF_SEC * (attempt + 1)
+        time.sleep(wait_sec)
+    return last_resp
+
+
 def get(path: str, *, params: dict[str, Any] | None = None) -> Any:
     """Authenticated GET against the Schwab API. `path` is relative to
     API_BASE_URL (e.g. "/marketdata/v1/pricehistory")."""
-    resp = requests.get(
-        f"{API_BASE_URL}{path}", headers=_auth_headers(), params=params or {}, timeout=TIMEOUT_SEC,
-    )
+    resp = _get_with_retry(f"{API_BASE_URL}{path}", headers=_auth_headers(), params=params or {})
     resp.raise_for_status()
     return resp.json()
 
