@@ -45,6 +45,19 @@
   tbody tr.row-exit { opacity: 0; }
   footer { color: var(--muted); font-size: 12px; text-align: center; margin-top: 24px; }
   a { color: var(--blue); }
+  .toggle-btn {
+    display: inline-flex; align-items: center; gap: 6px; padding: 6px 14px; border-radius: 999px;
+    background: var(--surface2); border: 1px solid var(--border); color: var(--text);
+    text-decoration: none; font-size: 12px; font-weight: 600; transition: background-color .15s ease;
+  }
+  .toggle-btn:hover { background: var(--border); }
+  .config-grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 6px 16px;
+    background: var(--surface); border: 1px solid var(--border); border-radius: var(--r); padding: 14px 16px;
+  }
+  .config-grid div { display: flex; justify-content: space-between; font-size: 12px; padding: 3px 0; }
+  .config-grid .k { color: var(--muted); }
+  .config-grid .v { font-weight: 600; }
 </style>
 </head>
 <body>
@@ -52,7 +65,7 @@
   <h1>&#8383; Kalshi Perps</h1>
   <div style="display:flex; align-items:center; gap:10px;">
     <span id="mode-badge" class="badge dry">&nbsp;</span>
-    <span style="font-size:12px; color:var(--muted);"><a href="{{ schwab_url }}" style="margin-left:8px; color:var(--blue);">Schwab dashboard &rarr;</a></span>
+    <a href="{{ schwab_url }}" class="toggle-btn">&#8646; Switch to Schwab</a>
   </div>
 </header>
 
@@ -62,6 +75,24 @@
   <div class="card"><h2>Today's P&amp;L</h2><div id="today-pnl" class="stat">--</div><div class="sub" id="total-pnl-sub">--</div></div>
   <div class="card"><h2>Direction Model</h2><div id="model-status" class="stat">--</div><div class="sub" id="model-sub">--</div></div>
 </div>
+
+<section>
+  <h3>Strategy &amp; Server Config &mdash; everything currently active</h3>
+  <div class="config-grid" id="config-grid">
+    <div><span class="k">Live trading</span><span class="v" id="cfg-live">--</span></div>
+    <div><span class="k">Maker orders</span><span class="v" id="cfg-maker">--</span></div>
+    <div><span class="k">Shorts</span><span class="v" id="cfg-shorts">--</span></div>
+    <div><span class="k">Position size</span><span class="v" id="cfg-size">--</span></div>
+    <div><span class="k">Max concurrent</span><span class="v" id="cfg-maxpos">--</span></div>
+    <div><span class="k">Take profit / Stop loss</span><span class="v" id="cfg-tpsl">--</span></div>
+    <div><span class="k">Max hold time</span><span class="v" id="cfg-maxhold">--</span></div>
+    <div><span class="k">Daily loss cap</span><span class="v" id="cfg-losscap">--</span></div>
+    <div><span class="k">Model confidence min</span><span class="v" id="cfg-conf">--</span></div>
+    <div><span class="k">Fast check / Entry scan</span><span class="v" id="cfg-cadence">--</span></div>
+    <div><span class="k">Data collect every</span><span class="v" id="cfg-collect">--</span></div>
+    <div><span class="k">Next model retrain</span><span class="v" id="cfg-retrain">--</span></div>
+  </div>
+</section>
 
 <section>
   <h3>Open Positions</h3>
@@ -210,12 +241,40 @@ function updateConnectionStatus() {
   }
 }
 
+// Current ET wall-clock hour:minute via Intl, no external timezone library
+// needed -- used to compute a live "next retrain in Xh Ym" countdown from
+// the server's own train_hour_et config.
+function nextRetrainText(trainHourEt) {
+  if (trainHourEt === null || trainHourEt === undefined) return "--";
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York", hour: "numeric", minute: "numeric", hour12: false,
+  }).formatToParts(new Date());
+  const hour = parseInt(parts.find(p => p.type === "hour").value, 10) % 24;
+  const minute = parseInt(parts.find(p => p.type === "minute").value, 10);
+  const diffMin = (((trainHourEt * 60) - (hour * 60 + minute)) % 1440 + 1440) % 1440;
+  if (diffMin === 0) return "running now";
+  return `${Math.floor(diffMin / 60)}h ${diffMin % 60}m (${String(trainHourEt).padStart(2, "0")}:00 ET)`;
+}
+
+// Each section below is its OWN try/catch -- a bug rendering ONE part (say,
+// a future new field on one card) must not blank out every other part of
+// the page. Previously a single try/catch wrapped this whole function, so
+// one throwing line silently froze the ENTIRE dashboard on every poll
+// (visible in the console, but nothing on screen told you WHY nothing was
+// updating -- confirmed live as a real, hard-to-diagnose "the dashboard
+// isn't showing anything" complaint even though the API itself was fine).
 async function refreshStatus() {
+  let data;
   try {
     const res = await fetch("/api/status");
-    const data = await res.json();
+    data = await res.json();
     lastStatusSuccessMs = Date.now();
+  } catch (e) {
+    console.error("status fetch failed", e);
+    return;
+  }
 
+  try {
     const modeBadge = document.getElementById("mode-badge");
     if (data.live_trading_enabled) {
       modeBadge.textContent = "LIVE";
@@ -224,12 +283,14 @@ async function refreshStatus() {
       modeBadge.textContent = "SIMULATED";
       modeBadge.className = "badge dry";
     }
-
     document.getElementById("balance").textContent = fmtUsd(data.account?.available_balance_usd);
     document.getElementById("exchange-sub").textContent =
       `margin ${data.account?.margin_enabled ? "enabled" : "off"} · exchange ${data.account?.exchange_active ? "open" : "closed"}`;
+  } catch (e) { console.error("balance card render failed", e); }
 
-    const positions = data.positions || [];
+  let positions = [];
+  try {
+    positions = data.positions || [];
     document.getElementById("position-count").textContent = `${positions.length} / ${data.max_concurrent_positions ?? "--"}`;
     document.getElementById("position-sub").textContent = positions.length
       ? positions.map(p => p.ticker).join(", ")
@@ -252,20 +313,47 @@ async function refreshStatus() {
         <td>${timeAgo(p.opened_at)}</td>
         <td>${(v !== null && v !== undefined) ? (v * 100).toFixed(2) + "%/min" : "--"}</td>`;
     }, 8, "No open positions");
+  } catch (e) { console.error("positions render failed", e); }
 
+  try {
     const todayPnl = data.today_realized_pnl_usd || 0;
     const todayEl = document.getElementById("today-pnl");
     todayEl.textContent = fmtUsd(todayPnl);
     todayEl.className = "stat " + (todayPnl > 0 ? "pos" : todayPnl < 0 ? "neg" : "");
     document.getElementById("total-pnl-sub").textContent =
       `all-time ${fmtUsd(data.total_realized_pnl_usd)} · ${data.trade_count || 0} trades`;
+  } catch (e) { console.error("pnl card render failed", e); }
 
+  let params = {};
+  try {
     const model = data.model || {};
+    params = data.params || {};
     document.getElementById("model-status").textContent = model.trained ? "Trained" : "Learning";
     document.getElementById("model-sub").textContent = model.trained
       ? `${model.model_type} · ${model.rows} rows · ${timeAgo(new Date(model.trained_at * 1000).toISOString())}`
       : "gathering history — technical signal active";
+  } catch (e) { console.error("model card render failed", e); }
 
+  try {
+    document.getElementById("cfg-live").textContent = data.live_trading_enabled ? "ON (real orders)" : "OFF (dry-run)";
+    document.getElementById("cfg-maker").textContent = params.maker_orders_enabled ? "ON" : "OFF (taker only)";
+    document.getElementById("cfg-shorts").textContent = params.shorts_enabled ? "enabled" : "disabled";
+    document.getElementById("cfg-size").textContent = params.position_size_pct != null ? (params.position_size_pct * 100).toFixed(0) + "% of balance" : "--";
+    document.getElementById("cfg-maxpos").textContent = params.max_concurrent_positions ?? "--";
+    document.getElementById("cfg-tpsl").textContent =
+      (params.take_profit_pct != null ? (params.take_profit_pct * 100).toFixed(2) + "%" : "--") + " / " +
+      (params.stop_loss_pct != null ? (params.stop_loss_pct * 100).toFixed(2) + "%" : "--");
+    document.getElementById("cfg-maxhold").textContent = params.max_hold_minutes != null ? params.max_hold_minutes + " min" : "--";
+    document.getElementById("cfg-losscap").textContent = params.daily_loss_cap_pct != null ? (params.daily_loss_cap_pct * 100).toFixed(0) + "% of balance" : "--";
+    document.getElementById("cfg-conf").textContent = params.model_confidence_min != null ? (params.model_confidence_min * 100).toFixed(0) + "%" : "--";
+    document.getElementById("cfg-cadence").textContent =
+      (params.fast_check_seconds != null ? params.fast_check_seconds + "s" : "--") + " / " +
+      (params.entry_scan_minutes != null ? params.entry_scan_minutes + "min" : "--");
+    document.getElementById("cfg-collect").textContent = params.data_collect_minutes != null ? params.data_collect_minutes + " min" : "--";
+    document.getElementById("cfg-retrain").textContent = nextRetrainText(params.train_hour_et);
+  } catch (e) { console.error("config grid render failed", e); }
+
+  try {
     const candidates = (data.latest_cycle && data.latest_cycle.candidates) || [];
     const cbody = document.getElementById("candidates-body");
     patchTable(cbody, candidates, c => c.ticker, c => `
@@ -278,7 +366,7 @@ async function refreshStatus() {
         <td>${c.model_ok ? (c.probability_up * 100).toFixed(1) + "%" : "--"}</td>
         <td><span class="tag ${c.should_enter ? "yes" : "no"}">${c.should_enter ? "YES (" + (c.side || "long") + ")" : "no"}</span></td>
         <td class="sub">${c.reason || ""}</td>`, 9, "Waiting for first scan...");
-  } catch (e) { console.error("status refresh failed", e); }
+  } catch (e) { console.error("candidates render failed", e); }
 }
 
 async function refreshTrades() {

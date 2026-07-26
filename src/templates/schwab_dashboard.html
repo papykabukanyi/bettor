@@ -46,8 +46,19 @@
   tbody tr.row-exit { opacity: 0; }
   footer { color: var(--muted); font-size: 12px; text-align: center; margin-top: 24px; }
   a { color: var(--blue); }
-  .navlink { font-size: 12px; color: var(--muted); }
-  .navlink a { margin-left: 8px; }
+  .toggle-btn {
+    display: inline-flex; align-items: center; gap: 6px; padding: 6px 14px; border-radius: 999px;
+    background: var(--surface2); border: 1px solid var(--border); color: var(--text);
+    text-decoration: none; font-size: 12px; font-weight: 600; transition: background-color .15s ease;
+  }
+  .toggle-btn:hover { background: var(--border); }
+  .config-grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 6px 16px;
+    background: var(--surface); border: 1px solid var(--border); border-radius: var(--r); padding: 14px 16px;
+  }
+  .config-grid div { display: flex; justify-content: space-between; font-size: 12px; padding: 3px 0; }
+  .config-grid .k { color: var(--muted); }
+  .config-grid .v { font-weight: 600; }
 </style>
 </head>
 <body>
@@ -57,7 +68,7 @@
     <span id="login-badge" class="badge warn">&nbsp;</span>
     <span id="mode-badge" class="badge dry">&nbsp;</span>
     <span id="session-badge" class="badge warn">&nbsp;</span>
-    <span class="navlink"><a href="{{ perps_url }}">&larr; Perps dashboard</a></span>
+    <a href="{{ perps_url }}" class="toggle-btn">&#8646; Switch to Perps</a>
   </div>
 </header>
 
@@ -67,6 +78,24 @@
   <div class="card"><h2>Today's P&amp;L</h2><div id="today-pnl" class="stat">--</div><div class="sub" id="total-pnl-sub">--</div></div>
   <div class="card"><h2>Direction Model</h2><div id="model-status" class="stat">--</div><div class="sub" id="model-sub">--</div></div>
 </div>
+
+<section>
+  <h3>Strategy &amp; Server Config &mdash; everything currently active</h3>
+  <div class="config-grid" id="config-grid">
+    <div><span class="k">Mode</span><span class="v" id="cfg-mode">--</span></div>
+    <div><span class="k">Live trading</span><span class="v" id="cfg-live">--</span></div>
+    <div><span class="k">Position size</span><span class="v" id="cfg-size">--</span></div>
+    <div><span class="k">Max concurrent</span><span class="v" id="cfg-maxpos">--</span></div>
+    <div><span class="k">Take profit / Stop loss</span><span class="v" id="cfg-tpsl">--</span></div>
+    <div><span class="k">Max hold time</span><span class="v" id="cfg-maxhold">--</span></div>
+    <div><span class="k">Daily loss cap</span><span class="v" id="cfg-losscap">--</span></div>
+    <div><span class="k">Model confidence min</span><span class="v" id="cfg-conf">--</span></div>
+    <div><span class="k">Min volume z / vol ratio</span><span class="v" id="cfg-volgate">--</span></div>
+    <div><span class="k">Fast check / Entry scan</span><span class="v" id="cfg-cadence">--</span></div>
+    <div><span class="k">Data collect every</span><span class="v" id="cfg-collect">--</span></div>
+    <div><span class="k">Next model retrain</span><span class="v" id="cfg-retrain">--</span></div>
+  </div>
+</section>
 
 <section>
   <h3>Open Positions</h3>
@@ -216,12 +245,38 @@ function updateConnectionStatus() {
   }
 }
 
+// Current ET wall-clock hour:minute via Intl -- used to compute a live
+// "next retrain in Xh Ym" countdown from the server's own train_hour_et
+// config (the daily baseline retrain -- off-hours intensive training ALSO
+// runs independently whenever the market is fully closed, see its own
+// section below).
+function nextRetrainText(trainHourEt) {
+  if (trainHourEt === null || trainHourEt === undefined) return "--";
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York", hour: "numeric", minute: "numeric", hour12: false,
+  }).formatToParts(new Date());
+  const hour = parseInt(parts.find(p => p.type === "hour").value, 10) % 24;
+  const minute = parseInt(parts.find(p => p.type === "minute").value, 10);
+  const diffMin = (((trainHourEt * 60) - (hour * 60 + minute)) % 1440 + 1440) % 1440;
+  if (diffMin === 0) return "running now";
+  return `${Math.floor(diffMin / 60)}h ${diffMin % 60}m (${String(trainHourEt).padStart(2, "0")}:00 ET)`;
+}
+
+// Each section below is its OWN try/catch -- same rationale as the perps
+// dashboard's own copy of this fix: one bug rendering ONE part must not
+// silently blank the whole page with no visible sign of why.
 async function refreshStatus() {
+  let data;
   try {
     const res = await fetch("/api/schwab/status");
-    const data = await res.json();
+    data = await res.json();
     lastStatusSuccessMs = Date.now();
+  } catch (e) {
+    console.error("status fetch failed", e);
+    return;
+  }
 
+  try {
     const loginBadge = document.getElementById("login-badge");
     if (data.schwab_logged_in) {
       loginBadge.textContent = "LINKED";
@@ -248,7 +303,9 @@ async function refreshStatus() {
     const sessionBadge = document.getElementById("session-badge");
     sessionBadge.textContent = sessionLabel;
     sessionBadge.className = session === "regular" ? "badge dry" : session === "closed" ? "badge warn" : "badge live";
+  } catch (e) { console.error("badges render failed", e); }
 
+  try {
     document.getElementById("balance").textContent = fmtUsd(data.balance);
     document.getElementById("balance-sub").textContent = data.mode === "simulate"
       ? `available ${fmtUsd(data.available_balance)} · paper trading`
@@ -269,20 +326,49 @@ async function refreshStatus() {
         <td class="stat neg" style="font-size:13px;">${fmtPrice(p.stop_loss_price)}</td>
         <td>${timeAgo(p.opened_at)}</td>
         <td class="sub">${p.order_id || "paper"}</td>`, 7, "No open positions");
+  } catch (e) { console.error("positions render failed", e); }
 
+  try {
     const todayPnl = data.today_realized_pnl_usd || 0;
     const todayEl = document.getElementById("today-pnl");
     todayEl.textContent = fmtUsd(todayPnl);
     todayEl.className = "stat " + (todayPnl > 0 ? "pos" : todayPnl < 0 ? "neg" : "");
     document.getElementById("total-pnl-sub").textContent =
       `all-time ${fmtUsd(data.total_realized_pnl_usd)} · ${data.trade_count || 0} trades`;
+  } catch (e) { console.error("pnl card render failed", e); }
 
+  let params = {};
+  try {
     const model = data.model || {};
+    params = data.params || {};
     document.getElementById("model-status").textContent = model.trained ? "Trained" : "Learning";
     document.getElementById("model-sub").textContent = model.trained
       ? `${model.model_type} · ${model.rows} rows · ${timeAgo(new Date(model.trained_at * 1000).toISOString())}`
       : "gathering history — technical signal active";
+  } catch (e) { console.error("model card render failed", e); }
 
+  try {
+    document.getElementById("cfg-mode").textContent = data.mode === "live" ? "live" : "simulate ($100 paper)";
+    document.getElementById("cfg-live").textContent = data.live_trading_enabled ? "ON (real orders)" : "OFF";
+    document.getElementById("cfg-size").textContent = params.position_size_pct != null ? (params.position_size_pct * 100).toFixed(0) + "% of balance" : "--";
+    document.getElementById("cfg-maxpos").textContent = params.max_concurrent_positions ?? "--";
+    document.getElementById("cfg-tpsl").textContent =
+      (params.take_profit_pct != null ? (params.take_profit_pct * 100).toFixed(2) + "%" : "--") + " / " +
+      (params.stop_loss_pct != null ? (params.stop_loss_pct * 100).toFixed(2) + "%" : "--");
+    document.getElementById("cfg-maxhold").textContent = params.max_hold_minutes != null ? params.max_hold_minutes + " min" : "--";
+    document.getElementById("cfg-losscap").textContent = params.daily_loss_cap_pct != null ? (params.daily_loss_cap_pct * 100).toFixed(0) + "% of balance" : "--";
+    document.getElementById("cfg-conf").textContent = params.model_confidence_min != null ? (params.model_confidence_min * 100).toFixed(0) + "%" : "--";
+    document.getElementById("cfg-volgate").textContent =
+      (params.min_volume_z != null ? params.min_volume_z + "z" : "--") + " / " +
+      (params.min_volatility_ratio != null ? params.min_volatility_ratio + "x" : "--");
+    document.getElementById("cfg-cadence").textContent =
+      (params.fast_check_seconds != null ? params.fast_check_seconds + "s" : "--") + " / " +
+      (params.entry_scan_minutes != null ? params.entry_scan_minutes + "min" : "--");
+    document.getElementById("cfg-collect").textContent = params.data_collect_minutes != null ? params.data_collect_minutes + " min" : "--";
+    document.getElementById("cfg-retrain").textContent = nextRetrainText(params.train_hour_et);
+  } catch (e) { console.error("config grid render failed", e); }
+
+  try {
     const cycle = (data.latest_cycle && data.latest_cycle.opened) || [];
     const cbody = document.getElementById("candidates-body");
     patchTable(cbody, cycle, (c, idx) => `${c.symbol}_${idx}`, c => `
@@ -291,7 +377,9 @@ async function refreshStatus() {
         <td>${c.entry_price !== undefined ? fmtPrice(c.entry_price) : "--"}</td>
         <td>${c.count !== undefined ? c.count : "--"}</td>
         <td class="sub">${c.reason || c.error || ""}</td>`, 5, "Waiting for first scan...");
+  } catch (e) { console.error("candidates render failed", e); }
 
+  try {
     const sweepRows = (data.latest_sweep && data.latest_sweep.ranked) || [];
     const sbody = document.getElementById("sweep-body");
     patchTable(sbody, sweepRows, (r, idx) => idx, r => `
@@ -302,7 +390,9 @@ async function refreshStatus() {
         <td>${(r.win_rate * 100).toFixed(1)}%</td>
         <td class="${r.return_pct > 0 ? "stat pos" : r.return_pct < 0 ? "stat neg" : ""}" style="font-size:13px;font-weight:600;">${(r.return_pct * 100).toFixed(2)}%</td>`,
       6, "No sweep yet -- runs automatically once the market is fully closed");
+  } catch (e) { console.error("sweep render failed", e); }
 
+  try {
     const backfill = data.latest_backfill || {};
     const doneCount = backfill.already_done;
     const universeSize = backfill.universe_size;
@@ -316,7 +406,7 @@ async function refreshStatus() {
       backfill.action === "backfill_complete" ? "full universe archived -- refreshing periodically"
       : backfill.pushed !== undefined ? `${backfill.failed || 0} failed this batch · runs off-hours only`
       : "runs automatically once the market is fully closed";
-  } catch (e) { console.error("status refresh failed", e); }
+  } catch (e) { console.error("backfill render failed", e); }
 }
 
 async function refreshTrades() {

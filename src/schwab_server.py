@@ -439,6 +439,8 @@ def api_schwab_status():
             "min_volatility_ratio": schwab_strategy.MIN_VOLATILITY_RATIO,
             "fast_check_seconds": SCHWAB_FAST_CHECK_SECONDS,
             "entry_scan_minutes": SCHWAB_CYCLE_MINUTES,
+            "data_collect_minutes": SCHWAB_DATA_COLLECT_MINUTES,
+            "train_hour_et": SCHWAB_TRAIN_HOUR_ET,
         },
     })
 

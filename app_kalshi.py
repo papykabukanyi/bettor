@@ -411,8 +411,11 @@ def api_status():
             "daily_loss_cap_pct": perps_strategy.DAILY_LOSS_CAP_PCT,
             "model_confidence_min": perps_strategy.MODEL_CONFIDENCE_MIN,
             "shorts_enabled": perps_strategy.ENABLE_SHORTS,
+            "maker_orders_enabled": perps_strategy.ENABLE_MAKER_ORDERS,
             "fast_check_seconds": PERPS_FAST_CHECK_SECONDS,
             "entry_scan_minutes": PERPS_CYCLE_MINUTES,
+            "data_collect_minutes": PERPS_DATA_COLLECT_MINUTES,
+            "train_hour_et": PERPS_TRAIN_HOUR_ET,
         },
     })
 
