@@ -339,6 +339,17 @@ def _bootstrap_background_jobs() -> None:
     _ensure_background_jobs_started()
 
 
+# Same real bug found and fixed on the perps side (app_kalshi.py): under
+# gunicorn this file's ACTUAL production entrypoint never runs the
+# `if __name__ == "__main__"` block below, so without this call the
+# scheduler was only reachable via the before_request hook above -- meaning
+# it wouldn't start until the first real HTTP request arrived, not on
+# process boot. Calling it here means data collection/trading starts the
+# instant the worker boots, with no dependency on anyone visiting the
+# dashboard.
+_ensure_background_jobs_started()
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------

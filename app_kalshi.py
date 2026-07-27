@@ -329,6 +329,24 @@ def _bootstrap_background_jobs() -> None:
     _ensure_background_jobs_started()
 
 
+# Real bug found and fixed here: under gunicorn (`gunicorn app:app`, this
+# process's ACTUAL production entrypoint), nothing calls `if __name__ ==
+# "__main__"` -- that block only runs when this file is executed directly
+# (`python app_kalshi.py`), never on a plain import. That left
+# _ensure_background_jobs_started() reachable ONLY via the before_request
+# hook above, meaning the scheduler (and therefore all live trading/data
+# collection) would not start until the very first real HTTP request
+# arrived -- confirmed live: Render's own deploy-readiness check is a raw
+# port probe, not a Flask request, so after any restart the bot sat
+# completely idle until a human (or a monitoring script) happened to load
+# the dashboard or hit an API route. Calling it here, at module import
+# time, means the worker process starts trading/collecting the instant it
+# boots, with no dependency on anyone visiting the dashboard. The
+# before_request hook above is kept as a harmless no-op safety net (it
+# short-circuits immediately once _startup_done is set).
+_ensure_background_jobs_started()
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
