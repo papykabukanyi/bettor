@@ -60,7 +60,18 @@ _DATE_SHARD_RE = re.compile(r"^data/\d{4}-\d{2}-\d{2}\.parquet$")
 # a shorter per-cycle fetch loses nothing: only the newest rows since the
 # last cycle are actually new, everything older just gets deduped away
 # after costing memory/CPU to re-fetch and re-engineer for no benefit.
-CANDLE_1M_LOOKBACK_HOURS = int(os.getenv("PERPS_CANDLE_1M_LOOKBACK_HOURS", "8") or "8")
+# Raised back up slightly (8 -> 20) after the OOM fix went live and
+# revealed a real side effect: confirmed empirically that Kalshi's own
+# candlestick response has genuine gaps for quieter/lower-liquidity perp
+# instruments (e.g. KXLINKPERP returned only 139 usable 1-min rows in an
+# 8h window, well under MIN_ONE_MIN_ROWS_FOR_FEATURES=245), silently
+# dropping 5 of 13 active tickers from the archive entirely every cycle.
+# 20h gives every tested quiet ticker a real margin above that floor
+# (KXLINKPERP: 315 rows) while still being ~3.6x smaller than the original
+# 72h -- re-profiled at this setting and confirmed peak memory barely
+# moved (246MB vs 236MB at 8h), nowhere near the level that caused the
+# original crash loop.
+CANDLE_1M_LOOKBACK_HOURS = int(os.getenv("PERPS_CANDLE_1M_LOOKBACK_HOURS", "20") or "20")
 CANDLE_60M_LOOKBACK_HOURS = int(os.getenv("PERPS_CANDLE_60M_LOOKBACK_HOURS", "24") or "24")
 # 1 minute (not 30) -- matches how this strategy actually holds a position:
 # take-profit/quick-profit/stop-loss are all evaluated every
