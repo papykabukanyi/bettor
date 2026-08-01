@@ -48,8 +48,20 @@ _DATE_SHARD_RE = re.compile(r"^data/\d{4}-\d{2}-\d{2}\.parquet$")
 
 # How much 1-minute history to pull per collection cycle. Kept well under the
 # 5000-candle-per-call cap (a 3-day window is ~4320 one-minute candles).
-CANDLE_1M_LOOKBACK_HOURS = int(os.getenv("PERPS_CANDLE_1M_LOOKBACK_HOURS", "72") or "72")
-CANDLE_60M_LOOKBACK_HOURS = int(os.getenv("PERPS_CANDLE_60M_LOOKBACK_HOURS", "720") or "720")  # 30 days
+# Lowered (72 -> 8, 720 -> 24) after a real production incident: confirmed
+# live via Render's own event log that _run_perps_data_collect was OOM-
+# killing the container on almost exactly its own 15-minute schedule, for
+# 13+ hours straight -- a genuine 15-minute-interval crash loop, not a rare
+# one-off. engineer_features' longest ACTUAL rolling window is trend_4h
+# (pct_change(240), 4 hours of 1-min data) and trend_pct's 6-period
+# pct_change on hourly data (6 hours) -- the old 72h/720h(30-day) windows
+# were 9x/30x bigger than anything a single feature computation needs.
+# push_dataset_snapshot()'s merge/dedup against the existing archive means
+# a shorter per-cycle fetch loses nothing: only the newest rows since the
+# last cycle are actually new, everything older just gets deduped away
+# after costing memory/CPU to re-fetch and re-engineer for no benefit.
+CANDLE_1M_LOOKBACK_HOURS = int(os.getenv("PERPS_CANDLE_1M_LOOKBACK_HOURS", "8") or "8")
+CANDLE_60M_LOOKBACK_HOURS = int(os.getenv("PERPS_CANDLE_60M_LOOKBACK_HOURS", "24") or "24")
 # 1 minute (not 30) -- matches how this strategy actually holds a position:
 # take-profit/quick-profit/stop-loss are all evaluated every
 # PERPS_FAST_CHECK_SECONDS (20s), so a model trained to predict "up or down
@@ -585,15 +597,23 @@ def push_dataset_snapshot(df: pd.DataFrame) -> dict[str, Any]:
     if shard_path.exists():
         existing = pd.read_parquet(shard_path)
         combined = pd.concat([existing, df], ignore_index=True)
+        # `existing` and `df` are now fully redundant with `combined` (a
+        # concat is always a copy, never a view) -- freeing them here
+        # matters because this whole merge-dedupe-rewrite step runs EVERY
+        # 15-minute cycle against the WHOLE day's accumulated shard, which
+        # only grows as the day goes on. Confirmed live: this function
+        # (plus the collect step feeding it) was OOM-killing the container
+        # on almost exactly its own 15-minute schedule for 13+ hours
+        # straight before this fix.
+        del existing, df
     else:
         combined = df
-    # keep="last": `df` (this cycle's freshly re-fetched rows) is concatenated
-    # AFTER `existing`, so when the same (ticker, ts) already exists in
-    # today's shard, the NEWEST computed version wins. This matters
-    # concretely whenever engineer_features gains new columns (e.g. the
-    # volume/open-interest/time-of-day features added this session): the
+    # keep="last": this cycle's freshly re-fetched rows are concatenated
+    # AFTER the existing shard, so when the same (ticker, ts) already
+    # exists in today's shard, the NEWEST computed version wins. This
+    # matters whenever engineer_features gains new columns: the
     # CANDLE_1M_LOOKBACK_HOURS rolling window keeps re-fetching and
-    # re-computing the last ~72h on every collection cycle, so a row
+    # re-computing the last few hours on every collection cycle, so a row
     # archived under an older schema gets naturally upgraded to the fuller
     # one within one more cycle instead of staying stuck with the columns
     # that existed the day it was first written.
