@@ -122,6 +122,47 @@ def test_post_trade_entry_never_raises_on_api_failure(monkeypatch):
     assert result is False
 
 
+def test_post_restart_notice_posts_the_default_message(monkeypatch):
+    _set_all_credentials(monkeypatch)
+    fake = _FakeClient()
+    monkeypatch.setattr(x_post, "_get_client", lambda: fake)
+    result = x_post.post_restart_notice()
+    assert result is True
+    assert fake.tweets == ["MMM has Restarted"]
+
+
+def test_post_restart_notice_accepts_a_custom_message(monkeypatch):
+    _set_all_credentials(monkeypatch)
+    fake = _FakeClient()
+    monkeypatch.setattr(x_post, "_get_client", lambda: fake)
+    x_post.post_restart_notice("custom restart message")
+    assert fake.tweets == ["custom restart message"]
+
+
+def test_post_restart_notice_skips_silently_without_credentials(monkeypatch):
+    monkeypatch.setattr(x_post, "TWITTER_ACCESS_TOKEN", "")
+    monkeypatch.setattr(x_post, "TWITTER_ACCESS_TOKEN_SECRET", "")
+    _reset_client_cache()
+    assert x_post.post_restart_notice() is False
+
+
+def test_post_restart_notice_respects_the_disable_flag(monkeypatch):
+    _set_all_credentials(monkeypatch)
+    monkeypatch.setattr(x_post, "TWITTER_POST_ENABLED", False)
+    fake = _FakeClient()
+    monkeypatch.setattr(x_post, "_get_client", lambda: fake)
+    assert x_post.post_restart_notice() is False
+    assert fake.tweets == []
+
+
+def test_post_restart_notice_never_raises_on_api_failure(monkeypatch):
+    _set_all_credentials(monkeypatch)
+    fake = _FakeClient()
+    fake.raise_on_create = True
+    monkeypatch.setattr(x_post, "_get_client", lambda: fake)
+    assert x_post.post_restart_notice() is False
+
+
 def test_get_client_caches_after_first_check(monkeypatch):
     _set_all_credentials(monkeypatch)
     _reset_client_cache()

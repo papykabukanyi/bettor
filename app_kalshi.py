@@ -290,6 +290,10 @@ def _ensure_background_jobs_started() -> None:
 
         def _runner() -> None:
             try:
+                x_post.post_restart_notice()
+            except Exception:
+                logger.warning("Startup X restart notice failed", exc_info=True)
+            try:
                 _run_perps_data_collect()
                 logger.info("Startup data collect completed")
             except Exception as exc:

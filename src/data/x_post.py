@@ -112,3 +112,24 @@ def post_trade_entry(
     except Exception as exc:
         logger.warning("[x_post] failed to post trade entry for %s: %s", ticker, exc)
         return False
+
+
+def post_restart_notice(message: str = "MMM has Restarted") -> bool:
+    """Posts a short note once per process boot -- called from the SAME
+    once-per-boot startup path that already logs "Startup data collect
+    completed" (see app_kalshi.py's `_ensure_background_jobs_started`), so
+    this fires once per real deploy AND once per crash-triggered restart
+    (the process itself has no way to distinguish the two from the inside --
+    Render's own event log is the only thing that actually knows which).
+    Same best-effort, never-raise contract as post_trade_entry()."""
+    if not TWITTER_POST_ENABLED:
+        return False
+    client = _get_client()
+    if client is None:
+        return False
+    try:
+        client.create_tweet(text=message[:_TWEET_MAX_CHARS])
+        return True
+    except Exception as exc:
+        logger.warning("[x_post] failed to post restart notice: %s", exc)
+        return False
