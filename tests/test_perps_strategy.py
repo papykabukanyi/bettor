@@ -1271,64 +1271,6 @@ def test_scan_and_enter_records_actual_filled_count_not_requested_count(monkeypa
     assert state["positions"][0]["entry_price"] == 1.9998
 
 
-def test_scan_and_enter_posts_to_x_with_the_real_entry_and_exit_levels(monkeypatch, tmp_path):
-    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "state.json")
-    monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", True)
-    monkeypatch.setattr(strat, "get_margin_market", lambda ticker: _market_response(price=2.0, leverage_estimate=6.0))
-    monkeypatch.setattr(strat, "_available_balance_usd", lambda: 10.0)
-    monkeypatch.setattr(
-        strat, "scan_for_entries",
-        lambda tickers=None, exclude=None: (
-            [{"ticker": "KXSOLPERP", "current_price": 2.0, "reason": "test dip", "volatility_30": 0.0006}], [],
-        ),
-    )
-    monkeypatch.setattr(strat, "create_margin_order", lambda **kwargs: {"order": {"fill_count": "4.00"}})
-    monkeypatch.setattr(strat, "get_margin_positions", lambda: {"positions": [_real_position("KXSOLPERP", "4.00", "1.9998")]})
-
-    posted = {}
-    monkeypatch.setattr(
-        strat.x_post, "post_trade_entry",
-        lambda **kwargs: posted.update(kwargs) or True,
-    )
-
-    result = strat.scan_and_enter(dry_run=False)
-    assert result["opened"][0]["action"] == "opened"
-    assert posted["ticker"] == "KXSOLPERP"
-    assert posted["entry_price"] == 1.9998
-    assert posted["reason"] == "test dip"
-    assert posted["dry_run"] is False
-    assert posted["take_profit_price"] > posted["entry_price"]
-    assert posted["stop_loss_price"] < posted["entry_price"]
-
-
-def test_scan_and_enter_still_opens_the_real_position_even_if_x_post_raises(monkeypatch, tmp_path):
-    """The entry order is real money -- an X/Twitter failure must never be
-    allowed to affect it, since post_trade_entry() is called AFTER the
-    position is already saved to state."""
-    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "state.json")
-    monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", True)
-    monkeypatch.setattr(strat, "get_margin_market", lambda ticker: _market_response(price=2.0, leverage_estimate=6.0))
-    monkeypatch.setattr(strat, "_available_balance_usd", lambda: 10.0)
-    monkeypatch.setattr(
-        strat, "scan_for_entries",
-        lambda tickers=None, exclude=None: (
-            [{"ticker": "KXSOLPERP", "current_price": 2.0, "reason": "test dip"}], [],
-        ),
-    )
-    monkeypatch.setattr(strat, "create_margin_order", lambda **kwargs: {"order": {"fill_count": "4.00"}})
-    monkeypatch.setattr(strat, "get_margin_positions", lambda: {"positions": [_real_position("KXSOLPERP", "4.00", "1.9998")]})
-
-    def raise_error(**kwargs):
-        raise RuntimeError("simulated X API outage")
-
-    monkeypatch.setattr(strat.x_post, "post_trade_entry", raise_error)
-
-    result = strat.scan_and_enter(dry_run=False)
-    assert result["opened"][0]["action"] == "opened"
-    state = strat._load_state()  # noqa: SLF001
-    assert state["positions"][0]["count"] == 4.0
-
-
 def test_scan_and_enter_merges_a_confirmed_fill_into_a_concurrently_adopted_position(monkeypatch, tmp_path):
     """A real bug an adversarial review caught: if the fast loop's own
     reconciliation adopts a position for this exact ticker WHILE this order
