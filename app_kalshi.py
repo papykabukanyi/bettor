@@ -67,7 +67,7 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from config import et_today
-from data import perps_data, perps_model, perps_strategy
+from data import perps_data, perps_model, perps_strategy, x_post
 from data.kalshi_perps import get_margin_balance, get_margin_enabled, get_margin_exchange_status, get_margin_positions
 from server_common import DATA_DIR, is_cron_authorized, load_json, make_job_lock, save_json
 
@@ -430,6 +430,7 @@ def api_status():
             "model_confidence_min": perps_strategy.MODEL_CONFIDENCE_MIN,
             "shorts_enabled": perps_strategy.ENABLE_SHORTS,
             "maker_orders_enabled": perps_strategy.ENABLE_MAKER_ORDERS,
+            "x_post_configured": x_post.is_configured(),
             "fast_check_seconds": PERPS_FAST_CHECK_SECONDS,
             "entry_scan_minutes": PERPS_CYCLE_MINUTES,
             "data_collect_minutes": PERPS_DATA_COLLECT_MINUTES,
