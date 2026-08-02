@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import atexit
 import datetime as dt
+import gc
 import logging
 import os
 import sys
@@ -192,7 +193,12 @@ def _run_alpaca_data_collect() -> dict[str, Any]:
     archive prediction/training/backtesting reads from. push_minute_snapshot
     merges into today's existing HF shard rather than overwriting it, so a
     symbol that drops off the watchlist between cycles doesn't lose its
-    earlier rows for today."""
+    earlier rows for today.
+
+    Confirmed real recurring OOM on this exact service (512MB, running
+    the stock AND crypto pipelines in the same process) -- the explicit
+    `finally: gc.collect()` here mirrors the same real fix perps_data.py's
+    own heaviest job already needed."""
     try:
         recent = alpaca_data.load_training_dataset(max_rows=20_000)
         watchlist = alpaca_data.get_stock_watchlist(recent if not recent.empty else None)
@@ -203,6 +209,8 @@ def _run_alpaca_data_collect() -> dict[str, Any]:
     except Exception as exc:
         logger.warning("[alpaca_server] data collect failed: %s", exc)
         return {"ok": False, "error": str(exc)}
+    finally:
+        gc.collect()
 
 
 @_locked_job("alpaca_train", stale_after_sec=1800)
@@ -231,6 +239,9 @@ def _run_alpaca_crypto_entry_scan() -> dict[str, Any]:
 
 @_locked_job("alpaca_crypto_data_collect", stale_after_sec=600)
 def _run_alpaca_crypto_data_collect() -> dict[str, Any]:
+    """Confirmed real recurring OOM on this exact service (512MB, running
+    the stock AND crypto pipelines in the same process) -- see
+    _run_alpaca_data_collect's own comment for the full story."""
     try:
         df = alpaca_crypto_data.collect_dataset_rows()
         if df.empty:
@@ -239,6 +250,8 @@ def _run_alpaca_crypto_data_collect() -> dict[str, Any]:
     except Exception as exc:
         logger.warning("[alpaca_server] crypto data collect failed: %s", exc)
         return {"ok": False, "error": str(exc)}
+    finally:
+        gc.collect()
 
 
 @_locked_job("alpaca_crypto_train", stale_after_sec=1800)
@@ -315,12 +328,22 @@ def _run_alpaca_intensive_training() -> dict[str, Any]:
     backfill by one batch -- so a well-tuned strategy AND the maximum
     available historical dataset are both progressing without ever
     competing with live trading checks. A no-op (not an error) whenever
-    the market isn't fully closed."""
+    the market isn't fully closed.
+
+    Confirmed real recurring OOM on this exact service (512MB, running
+    the stock AND crypto pipelines in the same process): this is the
+    single heaviest job in the whole system -- it loads the full training
+    dataset TWICE (once inside train_model(), again here for the sweep),
+    trains up to 6 model candidates total, then a 4-config sweep, then a
+    historical-bar backfill batch, all in one call with nothing freed in
+    between. Explicit `del` + gc.collect() after each heavy step mirrors
+    the same real fix perps_data.py's own heaviest job already needed."""
     session = alpaca_data.get_market_session()
     if session["session"] != "closed":
         return {"ok": True, "skipped": True, "reason": "market_not_closed", "session": session["session"]}
 
     train_result = alpaca_model.train_model()
+    gc.collect()
 
     sweep_result = None
     try:
@@ -335,14 +358,21 @@ def _run_alpaca_intensive_training() -> dict[str, Any]:
                 test_with_preds, starting_balance=alpaca_strategy.SIMULATE_STARTING_BALANCE,
             )
             save_json(ALPACA_LATEST_SWEEP_FILE, sweep_result)
+            del df, train_df, test_df, test_with_preds, fitted
+        else:
+            del df
     except Exception as exc:
         logger.warning("[alpaca_server] intensive backtest sweep failed: %s", exc)
+    finally:
+        gc.collect()
 
     backfill_result = None
     try:
         backfill_result = _advance_historical_backfill()
     except Exception as exc:
         logger.warning("[alpaca_server] historical backfill batch failed: %s", exc)
+    finally:
+        gc.collect()
 
     return {"ok": True, "train_result": train_result, "sweep_result": sweep_result, "backfill_result": backfill_result}
 

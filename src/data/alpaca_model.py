@@ -7,6 +7,7 @@ perps state or files.
 """
 from __future__ import annotations
 
+import gc
 import json
 import logging
 import os
@@ -133,6 +134,13 @@ def train_model(df: pd.DataFrame | None = None) -> dict[str, Any]:
     _model_cache.update({"model": best_model, "meta": meta, "loaded_at": time.time()})
 
     _push_model_to_hf()
+    # Confirmed real recurring OOM on this exact service (512MB, running
+    # this training job for BOTH the stock and crypto strategies in the
+    # same process) -- freeing the training frame/arrays and forcing a
+    # collection here mirrors the same real fix already proven on the
+    # perps side, not a guess.
+    del frame, labeled, train_df, test_df, x_train, x_test
+    gc.collect()
     return {"ok": True, **meta}
 
 
