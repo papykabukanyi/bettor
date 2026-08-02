@@ -21,6 +21,7 @@ since accumulated HF history is what gives the model real depth over time.
 """
 from __future__ import annotations
 
+import gc
 import logging
 import os
 import re
@@ -638,8 +639,19 @@ def push_dataset_snapshot(df: pd.DataFrame) -> dict[str, Any]:
     tmp_path = shard_path.with_suffix(".parquet.tmp")
     combined.to_parquet(tmp_path, index=False)
     os.replace(tmp_path, shard_path)
+    rows_written = len(combined)
+    # The upload below reads straight from shard_path on disk, not from this
+    # object -- free the biggest thing this function ever holds (the full
+    # cumulative day's shard) before it, rather than let it ride until the
+    # function returns. Confirmed live: this exact function was the
+    # dominant remaining memory driver in an isolated profile even after
+    # the CANDLE_1M_LOOKBACK_HOURS fix, and a residual (much rarer, but
+    # real) OOM still recurred here after that fix -- gc.collect() is a
+    # small additional margin, not a full fix on its own.
+    del combined
+    gc.collect()
 
-    result: dict[str, Any] = {"ok": True, "rows_written": len(combined), "shard": str(shard_path)}
+    result: dict[str, Any] = {"ok": True, "rows_written": rows_written, "shard": str(shard_path)}
     if not _ensure_dataset_repo():
         result["hf_uploaded"] = False
         return result
@@ -658,6 +670,7 @@ def push_dataset_snapshot(df: pd.DataFrame) -> dict[str, Any]:
         logger.warning("[perps_data] HF upload failed: %s", exc)
         result["hf_uploaded"] = False
         result["hf_error"] = str(exc)
+    gc.collect()
     return result
 
 

@@ -15,6 +15,7 @@ immediately instead of needing to retrain from zero first.
 """
 from __future__ import annotations
 
+import gc
 import json
 import logging
 import os
@@ -306,6 +307,14 @@ def train_model(df: pd.DataFrame | None = None) -> dict[str, Any]:
     _model_cache.update({"model": best_model, "meta": meta, "loaded_at": time.time()})
 
     _push_model_to_hf()
+    # The walk-forward loop above fits up to 4 folds x 3 candidates (12
+    # models total) in sequence -- most go out of scope naturally, but an
+    # explicit collect() here helps CPython consolidate/reuse that churn's
+    # freed memory sooner rather than later, on the SAME 512MB-capped
+    # container that has already had two real OOM incidents this session.
+    # A real, if modest, additional safety margin -- not a substitute for
+    # the row-cap/estimator-count/lookback-window fixes already in place.
+    gc.collect()
     return {"ok": True, **meta}
 
 
