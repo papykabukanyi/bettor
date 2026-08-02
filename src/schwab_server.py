@@ -47,6 +47,26 @@ from config import et_today
 from data import schwab_backtest, schwab_client, schwab_data, schwab_model, schwab_strategy
 from server_common import DATA_DIR, is_cron_authorized, load_json, make_job_lock, save_json
 
+# Real production bug found and fixed here: every schwab_*.py module does
+# its OWN lazy `from huggingface_hub import ...` inside function bodies
+# (a real, if small, startup-time saving when a code path never actually
+# runs). But that means the FIRST import of huggingface_hub can happen
+# from EITHER the single-threaded gunicorn request handler OR one of
+# APScheduler's own background job threads -- two separate threads in the
+# SAME process. Python's import machinery serializes concurrent imports of
+# the SAME not-yet-loaded module via a per-module lock; if one thread's
+# import is slow (huggingface_hub is a large package) while another thread
+# blocks waiting for that same lock, the blocked thread can genuinely hang
+# past gunicorn's own --timeout, which is confirmed live: a "WORKER TIMEOUT"
+# killed a worker mid-request, with the traceback pointing squarely at
+# `from huggingface_hub import hf_hub_download` blocked inside Python's own
+# `importlib._bootstrap._lock_unlock_module`. Importing it ONCE here, at
+# module load time (single-threaded, before the scheduler or Flask starts
+# handling anything), means every later lazy import anywhere else in this
+# process is just a cheap sys.modules cache hit -- no lock contention
+# possible after this point.
+import huggingface_hub  # noqa: F401
+
 SCHWAB_CYCLE_MINUTES = max(1, int(os.getenv("SCHWAB_CYCLE_MINUTES", "2") or "2"))
 SCHWAB_FAST_CHECK_SECONDS = max(5, int(os.getenv("SCHWAB_FAST_CHECK_SECONDS", "20") or "20"))
 SCHWAB_DATA_COLLECT_MINUTES = max(5, int(os.getenv("SCHWAB_DATA_COLLECT_MINUTES", "15") or "15"))

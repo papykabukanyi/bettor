@@ -68,6 +68,17 @@ if str(SRC_DIR) not in sys.path:
 
 from config import et_today
 from data import perps_data, perps_model, perps_strategy, threads_client, threads_post
+
+# Real production bug found and fixed on the Schwab side (schwab_server.py,
+# same comment there in full): every perps_*.py module does its own lazy
+# `from huggingface_hub import ...` inside function bodies, which can race
+# between the gunicorn request-handling thread and an APScheduler
+# background job thread both importing it for the first time at once --
+# confirmed live on Schwab as a real "WORKER TIMEOUT" stuck inside Python's
+# own import lock. Importing it ONCE here, eagerly, at module load time
+# (single-threaded, before the scheduler or Flask starts handling
+# anything) closes the same latent race here too, proactively.
+import huggingface_hub  # noqa: F401
 from data.kalshi_perps import get_margin_balance, get_margin_enabled, get_margin_exchange_status, get_margin_positions
 from server_common import DATA_DIR, is_cron_authorized, load_json, make_job_lock, save_json
 
