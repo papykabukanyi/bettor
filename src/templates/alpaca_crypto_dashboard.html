@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-<title>Alpaca Stocks Bot</title>
+<title>Alpaca Crypto Bot</title>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   :root {
@@ -63,13 +63,12 @@
 </head>
 <body>
 <header>
-  <h1>&#128200; Alpaca Stocks</h1>
+  <h1>&#8383; Alpaca Crypto</h1>
   <div style="display:flex; align-items:center; gap:10px;">
     <span id="config-badge" class="badge warn">&nbsp;</span>
     <span id="mode-badge" class="badge dry">&nbsp;</span>
-    <span id="session-badge" class="badge warn">&nbsp;</span>
     <a href="{{ perps_url }}" class="toggle-btn">&#8646; Perps</a>
-    <a href="{{ crypto_url }}" class="toggle-btn">&#8646; Crypto</a>
+    <a href="{{ stocks_url }}" class="toggle-btn">&#8646; Stocks</a>
   </div>
 </header>
 
@@ -102,7 +101,7 @@
   <h3>Open Positions</h3>
   <div class="scroll-x">
     <table>
-      <thead><tr><th>Symbol</th><th>Entry</th><th>Shares</th><th>Take Profit</th><th>Stop Loss</th><th>Opened</th><th>Order</th></tr></thead>
+      <thead><tr><th>Pair</th><th>Entry</th><th>Coins</th><th>Take Profit</th><th>Stop Loss</th><th>Opened</th><th>Order</th></tr></thead>
       <tbody id="positions-body"><tr><td colspan="7" class="empty">No open positions</td></tr></tbody>
     </table>
   </div>
@@ -112,7 +111,7 @@
   <h3>Last Entry Scan</h3>
   <div class="scroll-x">
     <table>
-      <thead><tr><th>Symbol</th><th>Action</th><th>Entry</th><th>Shares</th><th>Reason</th></tr></thead>
+      <thead><tr><th>Pair</th><th>Action</th><th>Entry</th><th>Notional</th><th>Reason</th></tr></thead>
       <tbody id="candidates-body"><tr><td colspan="5" class="empty">Waiting for first scan...</td></tr></tbody>
     </table>
   </div>
@@ -122,27 +121,9 @@
   <h3>Recent Trades</h3>
   <div class="scroll-x">
     <table>
-      <thead><tr><th>Closed</th><th>Symbol</th><th>Entry</th><th>Exit</th><th>Shares</th><th>Net P&amp;L</th><th>Reason</th></tr></thead>
+      <thead><tr><th>Closed</th><th>Pair</th><th>Entry</th><th>Exit</th><th>Coins</th><th>Net P&amp;L</th><th>Reason</th></tr></thead>
       <tbody id="trades-body"><tr><td colspan="7" class="empty">No trades yet</td></tr></tbody>
     </table>
-  </div>
-</section>
-
-<section>
-  <h3>Off-Hours Intensive Training &mdash; Latest Sweep</h3>
-  <div class="scroll-x">
-    <table>
-      <thead><tr><th>Take Profit</th><th>Stop Loss</th><th>Max Hold</th><th>Trades</th><th>Win Rate</th><th>Return</th></tr></thead>
-      <tbody id="sweep-body"><tr><td colspan="6" class="empty">No sweep yet -- runs automatically once the market is fully closed</td></tr></tbody>
-    </table>
-  </div>
-</section>
-
-<section>
-  <h3>Historical Backfill &mdash; Full US Equity Universe (up to 20yr daily bars &rarr; Hugging Face)</h3>
-  <div class="grid" style="margin-bottom:0;">
-    <div class="card"><h2>Progress</h2><div id="backfill-progress" class="stat">--</div><div class="sub" id="backfill-sub">--</div></div>
-    <div class="card"><h2>Last Batch</h2><div id="backfill-batch" class="stat">--</div><div class="sub" id="backfill-batch-sub">--</div></div>
   </div>
 </section>
 
@@ -156,7 +137,7 @@
   </div>
 </section>
 
-<footer>Auto-refreshes every 10s. Separate system from the Kalshi perps bot -- own balance, own positions, own model. <span id="connection-status"></span></footer>
+<footer>Auto-refreshes every 10s. Trades 24/7 -- separate service from Kalshi perps and Alpaca stocks. <span id="connection-status"></span></footer>
 
 <script>
 const fmtUsd = (v) => (v === null || v === undefined || isNaN(v)) ? "--" : "$" + Number(v).toFixed(2);
@@ -166,6 +147,7 @@ const fmtPrice = (v) => {
   const decimals = Math.abs(n) >= 1 ? 2 : Math.abs(n) >= 0.01 ? 4 : 6;
   return "$" + n.toFixed(decimals);
 };
+const fmtCoins = (v) => (v === null || v === undefined || isNaN(v)) ? "--" : Number(v).toFixed(6);
 const timeAgo = (iso) => {
   if (!iso) return "--";
   const sec = (Date.now() - new Date(iso).getTime()) / 1000;
@@ -175,9 +157,6 @@ const timeAgo = (iso) => {
   return Math.round(sec / 86400) + "d ago";
 };
 
-// Keyed diff-patch -- same pattern as the perps dashboard (see its own
-// comment for why): rows update/enter/exit in place instead of a full
-// innerHTML replace tearing everything down on every 10s poll.
 function patchTable(tbody, items, keyFn, rowHtmlFn, emptyColspan, emptyMessage) {
   if (!items || !items.length) {
     if (tbody.childElementCount !== 1 || !tbody.dataset.empty) {
@@ -227,12 +206,8 @@ function patchTable(tbody, items, keyFn, rowHtmlFn, emptyColspan, emptyMessage) 
   });
 }
 
-// Staleness detection -- same rationale as the perps dashboard's own copy
-// of this: a silently-failing fetch would otherwise leave the last
-// successfully-rendered state on screen forever with no visible sign
-// anything's wrong.
 let lastStatusSuccessMs = Date.now();
-const STALE_AFTER_MS = 30000; // 3x the 10s poll interval
+const STALE_AFTER_MS = 30000;
 
 function updateConnectionStatus() {
   const el = document.getElementById("connection-status");
@@ -246,11 +221,6 @@ function updateConnectionStatus() {
   }
 }
 
-// Current ET wall-clock hour:minute via Intl -- used to compute a live
-// "next retrain in Xh Ym" countdown from the server's own train_hour_et
-// config (the daily baseline retrain -- off-hours intensive training ALSO
-// runs independently whenever the market is fully closed, see its own
-// section below).
 function nextRetrainText(trainHourEt) {
   if (trainHourEt === null || trainHourEt === undefined) return "--";
   const parts = new Intl.DateTimeFormat("en-US", {
@@ -263,13 +233,10 @@ function nextRetrainText(trainHourEt) {
   return `${Math.floor(diffMin / 60)}h ${diffMin % 60}m (${String(trainHourEt).padStart(2, "0")}:00 ET)`;
 }
 
-// Each section below is its OWN try/catch -- same rationale as the perps
-// dashboard's own copy of this fix: one bug rendering ONE part must not
-// silently blank the whole page with no visible sign of why.
 async function refreshStatus() {
   let data;
   try {
-    const res = await fetch("/api/alpaca/status");
+    const res = await fetch("/api/alpaca/crypto/status");
     data = await res.json();
     lastStatusSuccessMs = Date.now();
   } catch (e) {
@@ -286,7 +253,6 @@ async function refreshStatus() {
       configBadge.textContent = "NOT CONFIGURED";
       configBadge.className = "badge warn";
     }
-
     const modeBadge = document.getElementById("mode-badge");
     if (data.mode === "live") {
       modeBadge.textContent = data.live_trading_enabled ? "LIVE" : "LIVE (armed off)";
@@ -295,15 +261,6 @@ async function refreshStatus() {
       modeBadge.textContent = "SIMULATE";
       modeBadge.className = "badge dry";
     }
-
-    const session = (data.market_session && data.market_session.session) || "unknown";
-    const sessionLabel = {
-      regular: "MARKET OPEN", pre_market: "PRE-MARKET", post_market: "AFTER HOURS",
-      closed: "CLOSED — intensive training", unknown: "SESSION UNKNOWN",
-    }[session] || session.toUpperCase();
-    const sessionBadge = document.getElementById("session-badge");
-    sessionBadge.textContent = sessionLabel;
-    sessionBadge.className = session === "regular" ? "badge dry" : session === "closed" ? "badge warn" : "badge live";
   } catch (e) { console.error("badges render failed", e); }
 
   try {
@@ -316,13 +273,13 @@ async function refreshStatus() {
     document.getElementById("position-count").textContent = `${positions.length} / ${data.max_concurrent_positions ?? "--"}`;
     document.getElementById("position-sub").textContent = positions.length
       ? positions.map(p => p.symbol).join(", ")
-      : "scanning watchlist for entries";
+      : "scanning crypto universe for entries";
 
     const posBody = document.getElementById("positions-body");
     patchTable(posBody, positions, p => p.symbol, p => `
         <td><strong>${p.symbol}</strong></td>
         <td>${fmtPrice(p.entry_price)}</td>
-        <td>${p.count}</td>
+        <td>${fmtCoins(p.count)}</td>
         <td class="stat pos" style="font-size:13px;">${fmtPrice(p.take_profit_price)}</td>
         <td class="stat neg" style="font-size:13px;">${fmtPrice(p.stop_loss_price)}</td>
         <td>${timeAgo(p.opened_at)}</td>
@@ -349,7 +306,7 @@ async function refreshStatus() {
   } catch (e) { console.error("model card render failed", e); }
 
   try {
-    document.getElementById("cfg-mode").textContent = data.mode === "live" ? "live" : "simulate ($100 paper)";
+    document.getElementById("cfg-mode").textContent = data.mode === "live" ? "live" : "simulate ($500 paper)";
     document.getElementById("cfg-live").textContent = data.live_trading_enabled ? "ON (real orders)" : "OFF";
     document.getElementById("cfg-size").textContent = params.position_size_pct != null ? (params.position_size_pct * 100).toFixed(0) + "% of balance" : "--";
     document.getElementById("cfg-maxpos").textContent = params.max_concurrent_positions ?? "--";
@@ -376,43 +333,14 @@ async function refreshStatus() {
         <td><strong>${c.symbol}</strong></td>
         <td><span class="tag ${c.action === "opened" ? "yes" : c.ok === false ? "no" : "wait"}">${c.action || "--"}</span></td>
         <td>${c.entry_price !== undefined ? fmtPrice(c.entry_price) : "--"}</td>
-        <td>${c.count !== undefined ? c.count : "--"}</td>
+        <td>${c.notional !== undefined ? fmtUsd(c.notional) : "--"}</td>
         <td class="sub">${c.reason || c.error || ""}</td>`, 5, "Waiting for first scan...");
   } catch (e) { console.error("candidates render failed", e); }
-
-  try {
-    const sweepRows = (data.latest_sweep && data.latest_sweep.ranked) || [];
-    const sbody = document.getElementById("sweep-body");
-    patchTable(sbody, sweepRows, (r, idx) => idx, r => `
-        <td>${(r.take_profit_pct * 100).toFixed(2)}%</td>
-        <td>${(r.stop_loss_pct * 100).toFixed(2)}%</td>
-        <td>${r.max_hold_minutes}min</td>
-        <td>${r.trade_count}</td>
-        <td>${(r.win_rate * 100).toFixed(1)}%</td>
-        <td class="${r.return_pct > 0 ? "stat pos" : r.return_pct < 0 ? "stat neg" : ""}" style="font-size:13px;font-weight:600;">${(r.return_pct * 100).toFixed(2)}%</td>`,
-      6, "No sweep yet -- runs automatically once the market is fully closed");
-  } catch (e) { console.error("sweep render failed", e); }
-
-  try {
-    const backfill = data.latest_backfill || {};
-    const doneCount = backfill.already_done;
-    const universeSize = backfill.universe_size;
-    document.getElementById("backfill-progress").textContent =
-      (doneCount !== undefined && universeSize) ? `${doneCount} / ${universeSize}` : "--";
-    document.getElementById("backfill-sub").textContent =
-      universeSize ? `${((doneCount / universeSize) * 100).toFixed(1)}% of full US equity universe archived` : "not started yet";
-    document.getElementById("backfill-batch").textContent =
-      backfill.action === "backfill_complete" ? "Complete" : (backfill.pushed !== undefined ? `+${backfill.pushed} symbols` : "--");
-    document.getElementById("backfill-batch-sub").textContent =
-      backfill.action === "backfill_complete" ? "full universe archived -- refreshing periodically"
-      : backfill.pushed !== undefined ? `${backfill.failed || 0} failed this batch · runs off-hours only`
-      : "runs automatically once the market is fully closed";
-  } catch (e) { console.error("backfill render failed", e); }
 }
 
 async function refreshTrades() {
   try {
-    const res = await fetch("/api/alpaca/trades");
+    const res = await fetch("/api/alpaca/crypto/trades");
     const data = await res.json();
     const tbody = document.getElementById("trades-body");
     const trades = (data.trades || []).slice(0, 30);
@@ -421,7 +349,7 @@ async function refreshTrades() {
         <td><strong>${t.symbol}</strong></td>
         <td>${fmtPrice(t.entry_price)}</td>
         <td>${fmtPrice(t.exit_price)}</td>
-        <td>${t.count}</td>
+        <td>${fmtCoins(t.count)}</td>
         <td class="${t.realized_pnl_usd > 0 ? "stat pos" : t.realized_pnl_usd < 0 ? "stat neg" : ""}" style="font-size:13px;font-weight:600;">${fmtUsd(t.realized_pnl_usd)}</td>
         <td class="sub">${t.reason || ""}</td>`, 7, "No trades yet");
   } catch (e) { console.error("trades refresh failed", e); }
@@ -432,7 +360,7 @@ async function refreshActivity() {
     const res = await fetch("/api/server/activity");
     const data = await res.json();
     const tbody = document.getElementById("activity-body");
-    const recent = ((data.recent || []).filter(r => (r.job || "").startsWith("alpaca_"))).slice(0, 20);
+    const recent = ((data.recent || []).filter(r => (r.job || "").startsWith("alpaca_crypto"))).slice(0, 20);
     patchTable(tbody, recent, r => `${r.job}_${r.started_at}`, r => `
         <td>${r.label || r.job}</td>
         <td><span class="tag ${r.status === "ok" ? "yes" : r.status === "error" ? "no" : "wait"}">${r.status}</span></td>

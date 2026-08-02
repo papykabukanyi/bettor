@@ -57,13 +57,15 @@ services:
       # this graduated from dry-run-only to the deployed default.
       - key: PERPS_ENABLE_SHORTS
         value: "1"
-      # Cross-link to the Alpaca service's dashboard, shown as a nav link
+      # Cross-links to the Alpaca services' dashboards, shown as nav links
       # on this one. Render doesn't expose a way to reference ANOTHER
-      # service's public URL from within a blueprint, so this has to be
+      # service's public URL from within a blueprint, so these have to be
       # filled in manually (Render dashboard -> this service -> Environment)
-      # once the Alpaca service's real onrender.com URL is known. Left
+      # once each Alpaca service's real onrender.com URL is known. Left
       # unset here (falls back to a dead "#" link) rather than guessed at.
       - key: ALPACA_SERVER_URL
+        sync: false
+      - key: ALPACA_CRYPTO_SERVER_URL
         sync: false
 
   # --------------------------------------------------------------------
@@ -102,17 +104,14 @@ services:
         value: papylove/alpaca-data
       - key: HF_ALPACA_MODEL_REPO
         value: papylove/alpaca-model
-      # Separate crypto strategy, same Alpaca account/credentials --
-      # see alpaca_crypto_strategy.py's own docstring.
-      - key: HF_ALPACA_CRYPTO_DATASET_REPO
-        value: papylove/alpaca-crypto-data
-      - key: HF_ALPACA_CRYPTO_MODEL_REPO
-        value: papylove/alpaca-crypto-model
-      # Cross-link to the Perps service's dashboard (nav link the other
-      # direction). Same manual-fill caveat as ALPACA_SERVER_URL above --
-      # bettor-dashboard's URL is already known (bettor-00di.onrender.com)
-      # so this can actually be set right away.
+      # Cross-links to the Perps and Alpaca-crypto services' dashboards
+      # (nav links). Same manual-fill caveat as above -- bettor-dashboard's
+      # URL is already known (bettor-00di.onrender.com) so that one can be
+      # set right away; the crypto service's URL isn't known until it's
+      # deployed.
       - key: PERPS_SERVER_URL
+        sync: false
+      - key: ALPACA_CRYPTO_SERVER_URL
         sync: false
       # Secrets (ALPACA_API_KEY_ID, ALPACA_API_SECRET_KEY, HF_API_KEY,
       # ALPACA_LIVE_TRADING_ENABLED, ...) stay manually set in the Render
@@ -121,3 +120,41 @@ services:
       # needs no OAuth callback URL -- a static key/secret pair is the
       # whole auth story, so there's no equivalent of SCHWAB_REDIRECT_URI
       # to keep in sync with a developer-portal app registration.
+
+  # --------------------------------------------------------------------
+  # Alpaca CRYPTO -- split out into its own service after a real, confirmed
+  # OOM crash loop from running it in the SAME process as the equities
+  # strategy on a 512MB plan (Render's own event log showed oomKilled
+  # restarts within seconds of every boot). Same Alpaca account/
+  # credentials as bettor-schwab above, own process/worker/scheduler/
+  # public URL -- the exact reasoning that already justified splitting
+  # perps from equities, just applied one asset class later. See
+  # src/alpaca_crypto_server.py's own docstring for the full incident.
+  # --------------------------------------------------------------------
+  - type: web
+    name: bettor-alpaca-crypto
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    # Same single-worker reasoning as every other service here: this
+    # process places real Alpaca crypto orders via its own in-process
+    # scheduler, so more than one worker would mean duplicate order
+    # placement.
+    startCommand: gunicorn --chdir src alpaca_crypto_server:app --bind 0.0.0.0:$PORT --workers 1 --threads 1 --timeout 60
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: HF_ALPACA_CRYPTO_DATASET_REPO
+        value: papylove/alpaca-crypto-data
+      - key: HF_ALPACA_CRYPTO_MODEL_REPO
+        value: papylove/alpaca-crypto-model
+      # Cross-links to the Perps and Alpaca-stocks services' dashboards.
+      - key: PERPS_SERVER_URL
+        sync: false
+      - key: ALPACA_STOCKS_SERVER_URL
+        sync: false
+      # Secrets (ALPACA_API_KEY_ID, ALPACA_API_SECRET_KEY, HF_API_KEY,
+      # ALPACA_CRYPTO_LIVE_TRADING_ENABLED, ...) stay manually set in the
+      # Render dashboard's Environment tab -- SAME Alpaca account/key pair
+      # as bettor-schwab (equities), just a different strategy/process.

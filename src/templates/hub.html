@@ -40,7 +40,7 @@
 </head>
 <body>
 <h1>&#128200; Bettor</h1>
-<div class="sub">Two independent trading bots, two independent servers. Pick a dashboard.</div>
+<div class="sub">Independent trading bots, independent servers. Pick a dashboard.</div>
 
 <div class="grid">
   <div class="card">
@@ -54,18 +54,33 @@
     {% if alpaca_url and alpaca_url != "#" %}
     <span class="badge ready">LIVE</span>
     <h2>&#128200; Alpaca Stocks</h2>
-    <p>US equities/ETFs via Alpaca (paper trading) -- pro technical indicators, a scalper strategy, $100 simulate mode, off-hours intensive training and backtesting.</p>
+    <p>US equities/ETFs via Alpaca (paper trading) -- pro technical indicators, a scalper strategy, $500 simulate mode, off-hours intensive training and backtesting.</p>
     <a class="btn" href="{{ alpaca_url }}">Open Alpaca Dashboard &rarr;</a>
     {% else %}
     <span class="badge pending">NOT DEPLOYED YET</span>
     <h2>&#128200; Alpaca Stocks</h2>
-    <p>US equities/ETFs via Alpaca (paper trading) -- pro technical indicators, a scalper strategy, $100 simulate mode, off-hours intensive training and backtesting.</p>
+    <p>US equities/ETFs via Alpaca (paper trading) -- pro technical indicators, a scalper strategy, $500 simulate mode, off-hours intensive training and backtesting.</p>
     <p style="color:var(--yellow);">This runs as its own separate Render service (alpaca_server.py) that hasn't been created yet, so there's no live URL to link to. Once it exists, set ALPACA_SERVER_URL on this service to its public URL.</p>
+    <span class="btn disabled">Not available yet</span>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    {% if alpaca_crypto_url and alpaca_crypto_url != "#" %}
+    <span class="badge ready">LIVE</span>
+    <h2>&#8383; Alpaca Crypto</h2>
+    <p>Crypto pairs (BTC/USD, ETH/USD, ...) via Alpaca (paper trading), 24/7 -- same technical indicators + real crypto news sentiment as the perps bot, its own trained model. Split into its own service after a real OOM incident sharing a process with the stock strategy.</p>
+    <a class="btn" href="{{ alpaca_crypto_url }}">Open Alpaca Crypto Dashboard &rarr;</a>
+    {% else %}
+    <span class="badge pending">NOT DEPLOYED YET</span>
+    <h2>&#8383; Alpaca Crypto</h2>
+    <p>Crypto pairs (BTC/USD, ETH/USD, ...) via Alpaca (paper trading), 24/7 -- same technical indicators + real crypto news sentiment as the perps bot, its own trained model.</p>
+    <p style="color:var(--yellow);">This runs as its own separate Render service (alpaca_crypto_server.py) that hasn't been created yet, so there's no live URL to link to. Once it exists, set ALPACA_CRYPTO_SERVER_URL on this service to its public URL.</p>
     <span class="btn disabled">Not available yet</span>
     {% endif %}
   </div>
 </div>
 
-<footer>Kalshi Perps and Alpaca Stocks run as two fully independent servers -- a problem on one cannot affect the other.</footer>
+<footer>Kalshi Perps, Alpaca Stocks, and Alpaca Crypto run as fully independent servers -- a problem on one cannot affect the others.</footer>
 </body>
 </html>

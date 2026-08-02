@@ -118,11 +118,13 @@ PERPS_STARTUP_GRACE_SECONDS = max(0, int(os.getenv("PERPS_STARTUP_GRACE_SECONDS"
 # to run continuously, and dry-run cycles place no real orders.
 ENABLE_PERPS_SCHEDULER = str(os.getenv("ENABLE_PERPS_SCHEDULER", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
 DASHBOARD_LOCAL_AUTORUN = str(os.getenv("DASHBOARD_LOCAL_AUTORUN", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
-# Cross-link to the separately-deployed Alpaca stocks server -- unknown at
-# build time (a different Render service gets its own generated hostname),
-# so this is filled in via an env var once that service exists rather than
-# hardcoded. Falls back to "#" (dead link, not a guess) if unset.
+# Cross-links to the separately-deployed Alpaca stocks and Alpaca crypto
+# servers -- unknown at build time (each Render service gets its own
+# generated hostname), so these are filled in via env vars once each
+# service exists rather than hardcoded. Fall back to "#" (dead link, not a
+# guess) if unset.
 ALPACA_SERVER_URL = os.getenv("ALPACA_SERVER_URL", "#")
+ALPACA_CRYPTO_SERVER_URL = os.getenv("ALPACA_CRYPTO_SERVER_URL", "#")
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
@@ -428,27 +430,37 @@ _ensure_background_jobs_started()
 @app.route("/")
 def hub():
     """A link hub, not the perps dashboard itself -- this domain is the
-    first thing anyone hits, and now that the Alpaca stocks bot is a
-    separate server on its own domain, "/" needs to point both places
-    rather than silently assuming perps. See hub.html; /perps below is the
-    actual dashboard."""
-    return render_template("hub.html", alpaca_url=ALPACA_SERVER_URL)
+    first thing anyone hits, and now that the Alpaca stocks and Alpaca
+    crypto bots are each their own separate server on their own domain,
+    "/" needs to point to all of them rather than silently assuming perps.
+    See hub.html; /perps below is the actual dashboard."""
+    return render_template("hub.html", alpaca_url=ALPACA_SERVER_URL, alpaca_crypto_url=ALPACA_CRYPTO_SERVER_URL)
 
 
 @app.route("/perps")
 def index():
-    return render_template("dashboard.html", alpaca_url=ALPACA_SERVER_URL)
+    return render_template("dashboard.html", alpaca_url=ALPACA_SERVER_URL, alpaca_crypto_url=ALPACA_CRYPTO_SERVER_URL)
 
 
 @app.route("/alpaca")
 def alpaca_redirect():
-    """This domain hasn't served /alpaca directly since the split into two
-    servers -- confirmed live this used to just 404 with no explanation.
-    Redirect to the real Alpaca service if it's been deployed and
-    ALPACA_SERVER_URL is configured; otherwise send back to the hub, which
-    explains that it isn't deployed yet instead of a bare dead link."""
+    """This domain hasn't served /alpaca directly since the split into
+    separate servers -- confirmed live this used to just 404 with no
+    explanation. Redirect to the real Alpaca service if it's been
+    deployed and ALPACA_SERVER_URL is configured; otherwise send back to
+    the hub, which explains that it isn't deployed yet instead of a bare
+    dead link."""
     if ALPACA_SERVER_URL and ALPACA_SERVER_URL != "#":
         return redirect(f"{ALPACA_SERVER_URL.rstrip('/')}/alpaca")
+    return redirect("/")
+
+
+@app.route("/alpaca-crypto")
+def alpaca_crypto_redirect():
+    """Same convenience redirect as /alpaca above, for the separate
+    Alpaca crypto service."""
+    if ALPACA_CRYPTO_SERVER_URL and ALPACA_CRYPTO_SERVER_URL != "#":
+        return redirect(f"{ALPACA_CRYPTO_SERVER_URL.rstrip('/')}/alpaca-crypto")
     return redirect("/")
 
 
