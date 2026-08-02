@@ -93,6 +93,9 @@ ALPACA_INTENSIVE_TRAINING_MINUTES = max(10, int(os.getenv("ALPACA_INTENSIVE_TRAI
 # See _advance_historical_backfill.
 ALPACA_BACKFILL_BATCH_SIZE = max(1, int(os.getenv("ALPACA_BACKFILL_BATCH_SIZE", "50") or "50"))
 ENABLE_ALPACA_SCHEDULER = str(os.getenv("ENABLE_ALPACA_SCHEDULER", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
+# Independent kill switch for the crypto strategy -- see its own comment
+# at the crypto job-registration call site for why this exists.
+ENABLE_ALPACA_CRYPTO_SCHEDULER = str(os.getenv("ENABLE_ALPACA_CRYPTO_SCHEDULER", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
 DASHBOARD_LOCAL_AUTORUN = str(os.getenv("DASHBOARD_LOCAL_AUTORUN", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
 # Cross-link to the separately-deployed perps server -- unknown at build
 # time (a different Render service gets its own generated hostname), so
@@ -419,24 +422,34 @@ def _ensure_background_jobs_started() -> None:
                 _run_alpaca_threads_trending_news, "interval", minutes=30,
                 id="alpaca_threads_trending_news", replace_existing=True,
             )
-            scheduler.add_job(
-                _run_alpaca_crypto_data_collect, "interval", minutes=ALPACA_CRYPTO_DATA_COLLECT_MINUTES,
-                id="alpaca_crypto_data_collect", replace_existing=True,
-                next_run_time=dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=ALPACA_CRYPTO_DATA_COLLECT_MINUTES),
-            )
-            scheduler.add_job(
-                _run_alpaca_crypto_train, "cron", hour=ALPACA_CRYPTO_TRAIN_HOUR_ET, minute=0,
-                id="alpaca_crypto_train", replace_existing=True,
-            )
-            scheduler.add_job(
-                _run_alpaca_crypto_fast_check, "interval", seconds=ALPACA_CRYPTO_FAST_CHECK_SECONDS,
-                id="alpaca_crypto_fast_check", replace_existing=True,
-            )
-            scheduler.add_job(
-                _run_alpaca_crypto_entry_scan, "interval", minutes=ALPACA_CRYPTO_CYCLE_MINUTES,
-                id="alpaca_crypto_entry_scan", replace_existing=True,
-                next_run_time=dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=ALPACA_CRYPTO_STARTUP_GRACE_SECONDS),
-            )
+            # Independent kill switch: confirmed live that adding the crypto
+            # pipeline on top of the equities one pushed this 512MB service
+            # into a self-sustaining OOM crash loop (the crypto model has
+            # never trained successfully yet, so every crash-triggered
+            # restart re-attempts the same expensive cold-start train,
+            # which OOMs again before it can ever finish and get cached).
+            # This lets crypto be turned off independently of the proven
+            # equities/perps functionality while that gets root-caused
+            # properly, instead of the whole service being held hostage.
+            if ENABLE_ALPACA_CRYPTO_SCHEDULER:
+                scheduler.add_job(
+                    _run_alpaca_crypto_data_collect, "interval", minutes=ALPACA_CRYPTO_DATA_COLLECT_MINUTES,
+                    id="alpaca_crypto_data_collect", replace_existing=True,
+                    next_run_time=dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=ALPACA_CRYPTO_DATA_COLLECT_MINUTES),
+                )
+                scheduler.add_job(
+                    _run_alpaca_crypto_train, "cron", hour=ALPACA_CRYPTO_TRAIN_HOUR_ET, minute=0,
+                    id="alpaca_crypto_train", replace_existing=True,
+                )
+                scheduler.add_job(
+                    _run_alpaca_crypto_fast_check, "interval", seconds=ALPACA_CRYPTO_FAST_CHECK_SECONDS,
+                    id="alpaca_crypto_fast_check", replace_existing=True,
+                )
+                scheduler.add_job(
+                    _run_alpaca_crypto_entry_scan, "interval", minutes=ALPACA_CRYPTO_CYCLE_MINUTES,
+                    id="alpaca_crypto_entry_scan", replace_existing=True,
+                    next_run_time=dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=ALPACA_CRYPTO_STARTUP_GRACE_SECONDS),
+                )
             scheduler.start()
             logger.info(
                 "Alpaca scheduler started: fast exit check every %ds, entry scan every %d min (first run in %ds), "
@@ -473,19 +486,20 @@ def _ensure_background_jobs_started() -> None:
             # collision reasoning as app_kalshi.py: the scheduled
             # alpaca_entry_scan job's own delayed first tick already covers
             # this safely.
-            try:
-                _run_alpaca_crypto_data_collect()
-                logger.info("Startup alpaca crypto data collect completed")
-            except Exception as exc:
-                logger.warning("Startup alpaca crypto data collect failed: %s", exc)
-            try:
-                if alpaca_crypto_model.load_model()[0] is None:
-                    train_result = _run_alpaca_crypto_train()
-                    logger.info("Startup alpaca crypto train attempt (cold start): %s", train_result.get("reason", "ok"))
-                else:
-                    logger.info("Startup alpaca crypto train skipped: model already cached, daily cron will retrain")
-            except Exception as exc:
-                logger.warning("Startup alpaca crypto train failed: %s", exc)
+            if ENABLE_ALPACA_CRYPTO_SCHEDULER:
+                try:
+                    _run_alpaca_crypto_data_collect()
+                    logger.info("Startup alpaca crypto data collect completed")
+                except Exception as exc:
+                    logger.warning("Startup alpaca crypto data collect failed: %s", exc)
+                try:
+                    if alpaca_crypto_model.load_model()[0] is None:
+                        train_result = _run_alpaca_crypto_train()
+                        logger.info("Startup alpaca crypto train attempt (cold start): %s", train_result.get("reason", "ok"))
+                    else:
+                        logger.info("Startup alpaca crypto train skipped: model already cached, daily cron will retrain")
+                except Exception as exc:
+                    logger.warning("Startup alpaca crypto train failed: %s", exc)
 
         threading.Thread(target=_runner, daemon=True, name="alpaca-server-startup-autorun").start()
         _startup_done = True
