@@ -1,7 +1,7 @@
 """Kalshi Perps trading bot -- its OWN web dashboard + background scheduler,
 running as its own named server/process (kalshi_perps_server), completely
-separate from src/schwab_server.py. Nothing in this file imports schwab_*
-or knows Schwab exists. This is the single, canonical, complete file for
+separate from src/alpaca_server.py. Nothing in this file imports alpaca_*
+or knows the Alpaca stocks bot exists. This is the single, canonical, complete file for
 the Kalshi Perps server -- not a stub that imports the real logic from
 somewhere else, specifically so nothing here can be silently broken by an
 unrelated rename/move elsewhere in the repo (see the "ModuleNotFoundError:
@@ -69,13 +69,14 @@ if str(SRC_DIR) not in sys.path:
 from config import et_today
 from data import perps_data, perps_model, perps_strategy, threads_client, threads_post
 
-# Real production bug found and fixed on the Schwab side (schwab_server.py,
-# same comment there in full): every perps_*.py module does its own lazy
-# `from huggingface_hub import ...` inside function bodies, which can race
-# between the gunicorn request-handling thread and an APScheduler
-# background job thread both importing it for the first time at once --
-# confirmed live on Schwab as a real "WORKER TIMEOUT" stuck inside Python's
-# own import lock. Importing it ONCE here, eagerly, at module load time
+# Real production bug found and fixed on the sibling stocks server (now
+# alpaca_server.py, same comment there in full): every perps_*.py module
+# does its own lazy `from huggingface_hub import ...` inside function
+# bodies, which can race between the gunicorn request-handling thread and
+# an APScheduler background job thread both importing it for the first
+# time at once -- confirmed live there as a real "WORKER TIMEOUT" stuck
+# inside Python's own import lock. Importing it ONCE here, eagerly, at
+# module load time
 # (single-threaded, before the scheduler or Flask starts handling
 # anything) closes the same latent race here too, proactively.
 import huggingface_hub  # noqa: F401
@@ -108,11 +109,11 @@ PERPS_STARTUP_GRACE_SECONDS = max(0, int(os.getenv("PERPS_STARTUP_GRACE_SECONDS"
 # to run continuously, and dry-run cycles place no real orders.
 ENABLE_PERPS_SCHEDULER = str(os.getenv("ENABLE_PERPS_SCHEDULER", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
 DASHBOARD_LOCAL_AUTORUN = str(os.getenv("DASHBOARD_LOCAL_AUTORUN", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
-# Cross-link to the separately-deployed Schwab server -- unknown at build
-# time (a different Render service gets its own generated hostname), so
-# this is filled in via an env var once that service exists rather than
+# Cross-link to the separately-deployed Alpaca stocks server -- unknown at
+# build time (a different Render service gets its own generated hostname),
+# so this is filled in via an env var once that service exists rather than
 # hardcoded. Falls back to "#" (dead link, not a guess) if unset.
-SCHWAB_SERVER_URL = os.getenv("SCHWAB_SERVER_URL", "#")
+ALPACA_SERVER_URL = os.getenv("ALPACA_SERVER_URL", "#")
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
@@ -398,26 +399,27 @@ _ensure_background_jobs_started()
 @app.route("/")
 def hub():
     """A link hub, not the perps dashboard itself -- this domain is the
-    first thing anyone hits, and now that Schwab is a separate server on
-    its own domain, "/" needs to point both places rather than silently
-    assuming perps. See hub.html; /perps below is the actual dashboard."""
-    return render_template("hub.html", schwab_url=SCHWAB_SERVER_URL)
+    first thing anyone hits, and now that the Alpaca stocks bot is a
+    separate server on its own domain, "/" needs to point both places
+    rather than silently assuming perps. See hub.html; /perps below is the
+    actual dashboard."""
+    return render_template("hub.html", alpaca_url=ALPACA_SERVER_URL)
 
 
 @app.route("/perps")
 def index():
-    return render_template("dashboard.html", schwab_url=SCHWAB_SERVER_URL)
+    return render_template("dashboard.html", alpaca_url=ALPACA_SERVER_URL)
 
 
-@app.route("/schwab")
-def schwab_redirect():
-    """This domain hasn't served /schwab directly since the split into two
+@app.route("/alpaca")
+def alpaca_redirect():
+    """This domain hasn't served /alpaca directly since the split into two
     servers -- confirmed live this used to just 404 with no explanation.
-    Redirect to the real Schwab service if it's been deployed and
-    SCHWAB_SERVER_URL is configured; otherwise send back to the hub, which
+    Redirect to the real Alpaca service if it's been deployed and
+    ALPACA_SERVER_URL is configured; otherwise send back to the hub, which
     explains that it isn't deployed yet instead of a bare dead link."""
-    if SCHWAB_SERVER_URL and SCHWAB_SERVER_URL != "#":
-        return redirect(f"{SCHWAB_SERVER_URL.rstrip('/')}/schwab")
+    if ALPACA_SERVER_URL and ALPACA_SERVER_URL != "#":
+        return redirect(f"{ALPACA_SERVER_URL.rstrip('/')}/alpaca")
     return redirect("/")
 
 

@@ -57,23 +57,33 @@ services:
       # this graduated from dry-run-only to the deployed default.
       - key: PERPS_ENABLE_SHORTS
         value: "1"
-      # Cross-link to the Schwab service's dashboard, shown as a nav link
+      # Cross-link to the Alpaca service's dashboard, shown as a nav link
       # on this one. Render doesn't expose a way to reference ANOTHER
       # service's public URL from within a blueprint, so this has to be
       # filled in manually (Render dashboard -> this service -> Environment)
-      # once bettor-schwab's real onrender.com URL is known -- it doesn't
-      # exist until that service's first deploy completes. Left unset here
-      # (falls back to a dead "#" link) rather than guessed at.
-      - key: SCHWAB_SERVER_URL
+      # once the Alpaca service's real onrender.com URL is known. Left
+      # unset here (falls back to a dead "#" link) rather than guessed at.
+      - key: ALPACA_SERVER_URL
         sync: false
 
   # --------------------------------------------------------------------
-  # Charles Schwab stocks -- a BRAND NEW service, deliberately separate
-  # from bettor-dashboard above: its own process, own gunicorn worker, own
-  # APScheduler, own public URL. This is what makes the two bots
-  # genuinely independent servers rather than routes sharing one process
-  # (a crash, OOM, or redeploy on one side can no longer take the other
-  # down with it).
+  # Alpaca stocks -- replaced the former Charles Schwab integration (which
+  # never completed its interactive OAuth login and never traded) with a
+  # paper-trading Alpaca account: simple API-key/secret auth instead of
+  # OAuth, real market data, same long-only scalper strategy shape. Kept
+  # as a deliberately separate service from bettor-dashboard above: its
+  # own process, own gunicorn worker, own APScheduler, own public URL --
+  # what makes the two bots genuinely independent servers rather than
+  # routes sharing one process (a crash, OOM, or redeploy on one side can
+  # no longer take the other down with it).
+  #
+  # NOTE: this service's Render `name` is still `bettor-schwab` -- Render
+  # does not support renaming a service's name/slug after creation (see
+  # the comment on bettor-dashboard above re: Blueprint sync matching by
+  # `name`; changing it here would create a brand-new service rather than
+  # updating this one). The service's actual startCommand/env vars below
+  # are fully Alpaca now; only this cosmetic Render-side identifier is a
+  # legacy leftover.
   # --------------------------------------------------------------------
   - type: web
     name: bettor-schwab
@@ -81,28 +91,27 @@ services:
     plan: free
     buildCommand: pip install -r requirements.txt
     # Same single-worker reasoning as bettor-dashboard: this process places
-    # real Schwab orders via its own in-process scheduler, so more than one
+    # real Alpaca orders via its own in-process scheduler, so more than one
     # worker would mean duplicate order placement.
-    startCommand: gunicorn --chdir src schwab_server:app --bind 0.0.0.0:$PORT --workers 1 --threads 1 --timeout 60
+    startCommand: gunicorn --chdir src alpaca_server:app --bind 0.0.0.0:$PORT --workers 1 --threads 1 --timeout 60
     autoDeploy: true
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.0
-      - key: HF_STOCK_DATASET_REPO
-        value: papylove/schwab-data
-      - key: HF_STOCK_MODEL_REPO
-        value: papylove/schwab-model
+      - key: HF_ALPACA_DATASET_REPO
+        value: papylove/alpaca-data
+      - key: HF_ALPACA_MODEL_REPO
+        value: papylove/alpaca-model
       # Cross-link to the Perps service's dashboard (nav link the other
-      # direction). Same manual-fill caveat as SCHWAB_SERVER_URL above --
+      # direction). Same manual-fill caveat as ALPACA_SERVER_URL above --
       # bettor-dashboard's URL is already known (bettor-00di.onrender.com)
       # so this can actually be set right away.
       - key: PERPS_SERVER_URL
         sync: false
-      # Secrets (SCHWAB_CLIENT_ID, SCHWAB_CLIENT_SECRET, SCHWAB_REDIRECT_URI,
-      # HF_API_KEY, SCHWAB_LIVE_TRADING_ENABLED, ...) stay manually set in
-      # the Render dashboard's Environment tab -- never put secrets or the
-      # live-trading toggle in a git-tracked file. SCHWAB_REDIRECT_URI in
-      # particular MUST be updated (here AND in Schwab's own developer
-      # portal app registration) to point at THIS service's own
-      # /schcallback once its public URL is known -- it cannot reuse
-      # bettor-dashboard's callback URL.
+      # Secrets (ALPACA_API_KEY_ID, ALPACA_API_SECRET_KEY, HF_API_KEY,
+      # ALPACA_LIVE_TRADING_ENABLED, ...) stay manually set in the Render
+      # dashboard's Environment tab -- never put secrets or the
+      # live-trading toggle in a git-tracked file. Unlike Schwab, Alpaca
+      # needs no OAuth callback URL -- a static key/secret pair is the
+      # whole auth story, so there's no equivalent of SCHWAB_REDIRECT_URI
+      # to keep in sync with a developer-portal app registration.

@@ -1,20 +1,20 @@
 """Meta Threads API -- OAuth 2.0 (authorization code grant) client, used to
-post a note to Threads every time the perps bot enters a real trade.
+post a note to Threads every time the perps bot (or the Alpaca stocks bot)
+enters a real trade.
 
-Like Schwab (see schwab_client.py), the App ID/Secret alone cannot post
-anything -- a human has to visit the authorize URL, log into their actual
-Threads/Instagram account, and get redirected back to this app's registered
-callback URL (THREADS_REDIRECT_URI) with a one-time code. That code is
-exchanged here for a short-lived access token, immediately exchanged again
-for a long-lived one (~60 days), refreshable indefinitely thereafter
-without another interactive login (unlike Schwab's 7-day refresh window --
-Threads' long-lived token just needs a periodic refresh call, not a fresh
-login, as long as it's refreshed before it actually expires).
+The App ID/Secret alone cannot post anything -- a human has to visit the
+authorize URL, log into their actual Threads/Instagram account, and get
+redirected back to this app's registered callback URL
+(THREADS_REDIRECT_URI) with a one-time code. That code is exchanged here
+for a short-lived access token, immediately exchanged again for a
+long-lived one (~60 days), refreshable indefinitely thereafter without
+another interactive login, as long as it's refreshed before it actually
+expires.
 
 Tokens are mirrored to HF_MODEL_REPO (same durable-state pattern already
-used for the Kalshi bot's own state and for Schwab's own tokens) since
-Render's disk is ephemeral -- otherwise every restart would lose the
-refresh-able token and force a fresh interactive login.
+used for the Kalshi bot's own state) since Render's disk is ephemeral --
+otherwise every restart would lose the refresh-able token and force a
+fresh interactive login.
 """
 from __future__ import annotations
 

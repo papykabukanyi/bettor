@@ -1,5 +1,5 @@
 """Perps-server-specific job wiring + scheduler shutdown behavior. Generic
-job-locking mechanics (shared with schwab_server.py) are covered in
+job-locking mechanics (shared with alpaca_server.py) are covered in
 test_server_common.py instead -- this file only tests things that are
 actually specific to app_kalshi.py: that its production job functions
 honor the live-trading dry_run gate, that its data-collect job refreshes the

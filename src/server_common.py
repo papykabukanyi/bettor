@@ -1,6 +1,6 @@
 """Shared, brand-agnostic web-server plumbing used by BOTH app_kalshi.py
-and schwab_server.py -- job locking/history and small JSON helpers. Nothing
-in this module knows anything about Kalshi or Schwab specifically; each
+and alpaca_server.py -- job locking/history and small JSON helpers. Nothing
+in this module knows anything about Kalshi or Alpaca specifically; each
 server keeps its own job-lock directory and history file (see DATA_DIR
 usage at each call site) so the two processes never contend over the same
 files even when run side by side locally.
@@ -47,7 +47,7 @@ def _summarize_job_result(result: Any) -> dict[str, Any]:
 def make_job_lock(job_history_file: Path, job_lock_dir: Path, job_history_max: int = 200):
     """Returns a `_locked_job(name, stale_after_sec=600)` decorator bound to
     the given history file / lock directory -- each server calls this once
-    with its OWN paths, so app_kalshi.py and schwab_server.py never share a
+    with its OWN paths, so app_kalshi.py and alpaca_server.py never share a
     lock directory or history file even though the locking LOGIC is
     identical."""
 

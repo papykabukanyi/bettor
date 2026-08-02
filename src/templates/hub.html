@@ -51,21 +51,21 @@
   </div>
 
   <div class="card">
-    {% if schwab_url and schwab_url != "#" %}
+    {% if alpaca_url and alpaca_url != "#" %}
     <span class="badge ready">LIVE</span>
-    <h2>&#128200; Schwab Stocks</h2>
-    <p>US equities/ETFs via Charles Schwab -- pro technical indicators, a scalper strategy, $100 simulate mode, off-hours intensive training and backtesting.</p>
-    <a class="btn" href="{{ schwab_url }}">Open Schwab Dashboard &rarr;</a>
+    <h2>&#128200; Alpaca Stocks</h2>
+    <p>US equities/ETFs via Alpaca (paper trading) -- pro technical indicators, a scalper strategy, $100 simulate mode, off-hours intensive training and backtesting.</p>
+    <a class="btn" href="{{ alpaca_url }}">Open Alpaca Dashboard &rarr;</a>
     {% else %}
     <span class="badge pending">NOT DEPLOYED YET</span>
-    <h2>&#128200; Schwab Stocks</h2>
-    <p>US equities/ETFs via Charles Schwab -- pro technical indicators, a scalper strategy, $100 simulate mode, off-hours intensive training and backtesting.</p>
-    <p style="color:var(--yellow);">This runs as its own separate Render service (schwab_server.py) that hasn't been created yet, so there's no live URL to link to. Once it exists, set SCHWAB_SERVER_URL on this service to its public URL.</p>
+    <h2>&#128200; Alpaca Stocks</h2>
+    <p>US equities/ETFs via Alpaca (paper trading) -- pro technical indicators, a scalper strategy, $100 simulate mode, off-hours intensive training and backtesting.</p>
+    <p style="color:var(--yellow);">This runs as its own separate Render service (alpaca_server.py) that hasn't been created yet, so there's no live URL to link to. Once it exists, set ALPACA_SERVER_URL on this service to its public URL.</p>
     <span class="btn disabled">Not available yet</span>
     {% endif %}
   </div>
 </div>
 
-<footer>Kalshi Perps and Schwab Stocks run as two fully independent servers -- a problem on one cannot affect the other.</footer>
+<footer>Kalshi Perps and Alpaca Stocks run as two fully independent servers -- a problem on one cannot affect the other.</footer>
 </body>
 </html>
