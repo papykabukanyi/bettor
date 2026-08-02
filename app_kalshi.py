@@ -67,7 +67,7 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from config import et_today
-from data import perps_data, perps_model, perps_strategy
+from data import perps_data, perps_model, perps_strategy, threads_client, threads_post
 from data.kalshi_perps import get_margin_balance, get_margin_enabled, get_margin_exchange_status, get_margin_positions
 from server_common import DATA_DIR, is_cron_authorized, load_json, make_job_lock, save_json
 
@@ -290,6 +290,10 @@ def _ensure_background_jobs_started() -> None:
 
         def _runner() -> None:
             try:
+                threads_post.post_restart_notice()
+            except Exception:
+                logger.warning("Startup Threads restart notice failed", exc_info=True)
+            try:
                 _run_perps_data_collect()
                 logger.info("Startup data collect completed")
             except Exception as exc:
@@ -376,6 +380,33 @@ def schwab_redirect():
     return redirect("/")
 
 
+@app.route("/threads/authorize")
+def threads_authorize():
+    """Convenience redirect to Threads' own login page -- the actual
+    authorization step is a real interactive Threads/Instagram login that
+    nothing here can do on the account owner's behalf."""
+    return redirect(threads_client.get_authorization_url())
+
+
+@app.route("/threadscallback")
+def threads_callback():
+    """Registered as this Threads app's OAuth redirect_uri -- MUST exactly
+    match THREADS_REDIRECT_URI and the callback URL registered on Meta's
+    developer portal for this app."""
+    error = request.args.get("error")
+    if error:
+        return jsonify({"ok": False, "error": error}), 400
+    code = request.args.get("code")
+    if not code:
+        return jsonify({"ok": False, "error": "missing_code"}), 400
+    try:
+        threads_client.exchange_code_for_tokens(code)
+    except Exception as exc:
+        logger.exception("[app_kalshi] threads token exchange failed")
+        return jsonify({"ok": False, "error": str(exc)}), 500
+    return jsonify({"ok": True, "message": "Threads account linked. You can close this tab."})
+
+
 @app.route("/api/status")
 def api_status():
     state = perps_strategy._load_state()  # noqa: SLF001
@@ -430,6 +461,7 @@ def api_status():
             "model_confidence_min": perps_strategy.MODEL_CONFIDENCE_MIN,
             "shorts_enabled": perps_strategy.ENABLE_SHORTS,
             "maker_orders_enabled": perps_strategy.ENABLE_MAKER_ORDERS,
+            "threads_post_configured": threads_post.is_configured(),
             "fast_check_seconds": PERPS_FAST_CHECK_SECONDS,
             "entry_scan_minutes": PERPS_CYCLE_MINUTES,
             "data_collect_minutes": PERPS_DATA_COLLECT_MINUTES,

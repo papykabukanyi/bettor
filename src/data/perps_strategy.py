@@ -88,6 +88,7 @@ from data.kalshi_perps import (
 )
 from data.perps_data import coin_for_ticker, get_watchlist, latest_feature_row
 from data.perps_model import predict_direction
+from data import threads_post
 
 logger = logging.getLogger(__name__)
 
@@ -1457,6 +1458,18 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
                 "count": actual_count, "reason": candidate["reason"], "sizing": sizing_detail, "order_result": order_result,
                 "entry_fill_type": entry_fill_type,
             })
+            # Best-effort only -- see threads_post.py's own docstring. Never
+            # allow a Threads failure (or it simply not being configured
+            # yet) to affect the real entry that already happened above.
+            try:
+                levels = position_exit_levels(positions[existing_idx] if existing_idx is not None else positions[-1])
+                threads_post.post_trade_entry(
+                    ticker=ticker, side=side, entry_price=actual_entry_price,
+                    take_profit_price=levels["take_profit_price"], stop_loss_price=levels["stop_loss_price"],
+                    reason=candidate["reason"], dry_run=effective_dry_run,
+                )
+            except Exception:
+                logger.warning("[perps_strategy] Threads post for %s entry failed", ticker, exc_info=True)
         except Exception as exc:
             # Placing the real entry order (or booking its result) failed
             # unexpectedly -- must not abort scanning/entering for every
