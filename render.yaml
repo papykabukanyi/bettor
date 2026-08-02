@@ -67,6 +67,8 @@ services:
         sync: false
       - key: ALPACA_CRYPTO_SERVER_URL
         sync: false
+      - key: ALPACA_OPTIONS_SERVER_URL
+        sync: false
 
   # --------------------------------------------------------------------
   # Alpaca stocks -- replaced the former Charles Schwab integration (which
@@ -113,6 +115,8 @@ services:
         sync: false
       - key: ALPACA_CRYPTO_SERVER_URL
         sync: false
+      - key: ALPACA_OPTIONS_SERVER_URL
+        sync: false
       # Secrets (ALPACA_API_KEY_ID, ALPACA_API_SECRET_KEY, HF_API_KEY,
       # ALPACA_LIVE_TRADING_ENABLED, ...) stay manually set in the Render
       # dashboard's Environment tab -- never put secrets or the
@@ -154,7 +158,53 @@ services:
         sync: false
       - key: ALPACA_STOCKS_SERVER_URL
         sync: false
+      - key: ALPACA_OPTIONS_SERVER_URL
+        sync: false
       # Secrets (ALPACA_API_KEY_ID, ALPACA_API_SECRET_KEY, HF_API_KEY,
       # ALPACA_CRYPTO_LIVE_TRADING_ENABLED, ...) stay manually set in the
       # Render dashboard's Environment tab -- SAME Alpaca account/key pair
       # as bettor-schwab (equities), just a different strategy/process.
+
+  # --------------------------------------------------------------------
+  # Alpaca OPTIONS (stocks/equity options, buy-only calls/puts) -- its own
+  # service from the start, following the exact same "split into separate
+  # services" reasoning already forced onto crypto by a real OOM incident:
+  # a crash, OOM, or redeploy on one asset class can no longer take any of
+  # the others down with it. Same Alpaca account/credentials as
+  # bettor-schwab (equities) and bettor-alpaca-crypto -- options trading
+  # just needs the account's options trading level enabled. See
+  # src/alpaca_options_server.py's own docstring for the full design.
+  # --------------------------------------------------------------------
+  - type: web
+    name: bettor-alpaca-options
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    # Same single-worker reasoning as every other service here: this
+    # process places real Alpaca options orders via its own in-process
+    # scheduler, so more than one worker would mean duplicate order
+    # placement.
+    startCommand: gunicorn --chdir src alpaca_options_server:app --bind 0.0.0.0:$PORT --workers 1 --threads 1 --timeout 60
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: HF_ALPACA_OPTIONS_DATASET_REPO
+        value: papylove/alpaca-options-data
+      - key: HF_ALPACA_OPTIONS_MODEL_REPO
+        value: papylove/alpaca-options-model
+      # Cross-links to the Perps, Alpaca-stocks, and Alpaca-crypto
+      # services' dashboards.
+      - key: PERPS_SERVER_URL
+        sync: false
+      - key: ALPACA_STOCKS_SERVER_URL
+        sync: false
+      - key: ALPACA_CRYPTO_SERVER_URL
+        sync: false
+      # Secrets (ALPACA_API_KEY_ID, ALPACA_API_SECRET_KEY, HF_API_KEY,
+      # ALPACA_OPTIONS_LIVE_TRADING_ENABLED, ...) stay manually set in the
+      # Render dashboard's Environment tab -- SAME Alpaca account/key pair
+      # as bettor-schwab/bettor-alpaca-crypto, just a different strategy/
+      # process. Requires the account's options trading level (2+) to be
+      # approved on Alpaca's side before ALPACA_OPTIONS_LIVE_TRADING_ENABLED
+      # is ever turned on -- simulate mode needs no such approval.

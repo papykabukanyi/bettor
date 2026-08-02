@@ -252,6 +252,70 @@ def get_crypto_latest_quote(symbol: str) -> dict[str, Any]:
     return (data.get("quotes") or {}).get(symbol) or {}
 
 
+# ---------------------------------------------------------------------------
+# Options -- a third, again genuinely different API surface: option
+# contracts are looked up (not just quoted) via /v2/options/contracts,
+# priced via a separate v1beta1 options market-data path, and OCC-style
+# symbols (e.g. "AAPL250620C00100000") rather than a plain ticker or
+# "BTC/USD" pair. Order placement itself reuses the SAME /v2/orders
+# endpoint as stocks/crypto (per Alpaca's own docs), just with an options
+# contract symbol, whole-number qty (no notional), and time_in_force
+# restricted to day/gtc.
+# ---------------------------------------------------------------------------
+def get_option_contracts(
+    *, underlying_symbols: list[str], expiration_date_gte: str | None = None,
+    expiration_date_lte: str | None = None, option_type: str | None = None,
+    strike_price_gte: float | None = None, strike_price_lte: float | None = None,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    """The tradable option contracts for one or more underlyings, optionally
+    narrowed by expiration window / strike range / call-or-put -- the
+    "option chain" this account can actually trade. Paginates internally
+    the same way get_bars()/get_crypto_bars() do."""
+    params: dict[str, Any] = {"underlying_symbols": ",".join(underlying_symbols), "status": "active", "limit": limit}
+    if expiration_date_gte:
+        params["expiration_date_gte"] = expiration_date_gte
+    if expiration_date_lte:
+        params["expiration_date_lte"] = expiration_date_lte
+    if option_type:
+        params["type"] = option_type
+    if strike_price_gte is not None:
+        params["strike_price_gte"] = strike_price_gte
+    if strike_price_lte is not None:
+        params["strike_price_lte"] = strike_price_lte
+
+    contracts: list[dict[str, Any]] = []
+    page_token = None
+    for _ in range(_MAX_BAR_PAGES):
+        if page_token:
+            params["page_token"] = page_token
+        data = _trading_get("/v2/options/contracts", params=params)
+        contracts.extend(data.get("option_contracts") or [])
+        page_token = data.get("next_page_token")
+        if not page_token:
+            break
+    return contracts
+
+
+def get_option_latest_quote(symbol: str) -> dict[str, Any]:
+    """A single real-time-ish bid/ask quote for one option contract."""
+    data = _data_get("/v1beta1/options/quotes/latest", params={"symbols": symbol})
+    return (data.get("quotes") or {}).get(symbol) or {}
+
+
+def build_option_order(*, symbol: str, side: str, qty: int) -> dict[str, Any]:
+    """A plain market order for one option contract. `qty` must be a whole
+    number of contracts (confirmed via Alpaca's own docs -- `notional` is
+    explicitly rejected for options), `time_in_force` restricted to day/gtc
+    (using "day", matching how the equities strategy already places its
+    entries). Not a bracket order -- Alpaca's docs don't address
+    order_class for options at all, which this codebase treats as "assume
+    unsupported until proven otherwise" -- so take-profit/stop-loss/
+    max-hold here are managed by the caller's own poll-and-close loop, the
+    same pattern already proven for crypto."""
+    return {"symbol": symbol, "qty": str(int(qty)), "side": side, "type": "market", "time_in_force": "day"}
+
+
 def build_crypto_order(*, symbol: str, side: str, notional: float | None = None, qty: float | None = None) -> dict[str, Any]:
     """A plain market order for one crypto pair. Deliberately NOT a bracket
     order -- Alpaca crypto orders don't support order_class=bracket or

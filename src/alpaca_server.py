@@ -101,6 +101,9 @@ PERPS_SERVER_URL = os.getenv("PERPS_SERVER_URL", "#")
 # running both strategies in one 512MB service -- see alpaca_crypto_server.py's
 # own docstring for the full story).
 ALPACA_CRYPTO_SERVER_URL = os.getenv("ALPACA_CRYPTO_SERVER_URL", "#")
+# Cross-link to the separately-deployed Alpaca OPTIONS service (its own
+# service from the start -- see alpaca_options_server.py's own docstring).
+ALPACA_OPTIONS_SERVER_URL = os.getenv("ALPACA_OPTIONS_SERVER_URL", "#")
 # Same rolling-deploy collision guard as the perps server's own entry-scan
 # grace period -- see that file's comment for the full story.
 ALPACA_STARTUP_GRACE_SECONDS = max(0, int(os.getenv("ALPACA_STARTUP_GRACE_SECONDS", "45") or "45"))
@@ -428,7 +431,10 @@ _ensure_background_jobs_started()
 @app.route("/")
 @app.route("/alpaca")
 def alpaca_dashboard():
-    return render_template("alpaca_dashboard.html", perps_url=PERPS_SERVER_URL, crypto_url=ALPACA_CRYPTO_SERVER_URL)
+    return render_template(
+        "alpaca_dashboard.html", perps_url=PERPS_SERVER_URL, crypto_url=ALPACA_CRYPTO_SERVER_URL,
+        options_url=ALPACA_OPTIONS_SERVER_URL,
+    )
 
 
 @app.route("/api/alpaca/status")

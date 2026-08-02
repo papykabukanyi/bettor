@@ -244,6 +244,51 @@ def test_build_crypto_order_uses_qty_when_notional_not_given():
     assert "notional" not in order
 
 
+def test_get_option_contracts_filters_by_underlying_and_expiration(monkeypatch):
+    captured = {}
+
+    def fake_get(url, *, headers, params, timeout):
+        captured["url"] = url
+        captured["params"] = dict(params)
+        return _FakeResponse({"option_contracts": [{"symbol": "AAPL250620C00100000"}], "next_page_token": None})
+
+    monkeypatch.setattr(alpaca_client.requests, "get", fake_get)
+    contracts = alpaca_client.get_option_contracts(
+        underlying_symbols=["AAPL"], expiration_date_gte="2025-06-01", expiration_date_lte="2025-06-30", option_type="call",
+    )
+    assert contracts == [{"symbol": "AAPL250620C00100000"}]
+    assert captured["url"] == f"{alpaca_client.TRADING_BASE_URL}/v2/options/contracts"
+    assert captured["params"]["underlying_symbols"] == "AAPL"
+    assert captured["params"]["type"] == "call"
+    assert captured["params"]["expiration_date_gte"] == "2025-06-01"
+
+
+def test_get_option_contracts_paginates(monkeypatch):
+    calls = []
+
+    def fake_get(url, *, headers, params, timeout):
+        calls.append(dict(params))
+        if "page_token" not in params:
+            return _FakeResponse({"option_contracts": [{"symbol": "A"}], "next_page_token": "tok-2"})
+        return _FakeResponse({"option_contracts": [{"symbol": "B"}], "next_page_token": None})
+
+    monkeypatch.setattr(alpaca_client.requests, "get", fake_get)
+    contracts = alpaca_client.get_option_contracts(underlying_symbols=["AAPL"])
+    assert contracts == [{"symbol": "A"}, {"symbol": "B"}]
+    assert len(calls) == 2
+
+
+def test_get_option_latest_quote_unwraps_the_symbol(monkeypatch):
+    monkeypatch.setattr(alpaca_client.requests, "get", lambda url, **kw: _FakeResponse({"quotes": {"AAPL250620C00100000": {"ap": 2.5, "bp": 2.3}}}))
+    quote = alpaca_client.get_option_latest_quote("AAPL250620C00100000")
+    assert quote == {"ap": 2.5, "bp": 2.3}
+
+
+def test_build_option_order_shape():
+    order = alpaca_client.build_option_order(symbol="AAPL250620C00100000", side="buy", qty=2)
+    assert order == {"symbol": "AAPL250620C00100000", "qty": "2", "side": "buy", "type": "market", "time_in_force": "day"}
+
+
 def test_build_bracket_order_shape_for_a_buy():
     order = alpaca_client.build_bracket_order(
         symbol="AAPL", quantity=10, side="buy", take_profit_price=101.0, stop_loss_price=98.0,

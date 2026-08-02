@@ -125,6 +125,7 @@ DASHBOARD_LOCAL_AUTORUN = str(os.getenv("DASHBOARD_LOCAL_AUTORUN", "1") or "1").
 # guess) if unset.
 ALPACA_SERVER_URL = os.getenv("ALPACA_SERVER_URL", "#")
 ALPACA_CRYPTO_SERVER_URL = os.getenv("ALPACA_CRYPTO_SERVER_URL", "#")
+ALPACA_OPTIONS_SERVER_URL = os.getenv("ALPACA_OPTIONS_SERVER_URL", "#")
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
@@ -434,12 +435,18 @@ def hub():
     crypto bots are each their own separate server on their own domain,
     "/" needs to point to all of them rather than silently assuming perps.
     See hub.html; /perps below is the actual dashboard."""
-    return render_template("hub.html", alpaca_url=ALPACA_SERVER_URL, alpaca_crypto_url=ALPACA_CRYPTO_SERVER_URL)
+    return render_template(
+        "hub.html", alpaca_url=ALPACA_SERVER_URL, alpaca_crypto_url=ALPACA_CRYPTO_SERVER_URL,
+        alpaca_options_url=ALPACA_OPTIONS_SERVER_URL,
+    )
 
 
 @app.route("/perps")
 def index():
-    return render_template("dashboard.html", alpaca_url=ALPACA_SERVER_URL, alpaca_crypto_url=ALPACA_CRYPTO_SERVER_URL)
+    return render_template(
+        "dashboard.html", alpaca_url=ALPACA_SERVER_URL, alpaca_crypto_url=ALPACA_CRYPTO_SERVER_URL,
+        alpaca_options_url=ALPACA_OPTIONS_SERVER_URL,
+    )
 
 
 @app.route("/alpaca")
@@ -461,6 +468,15 @@ def alpaca_crypto_redirect():
     Alpaca crypto service."""
     if ALPACA_CRYPTO_SERVER_URL and ALPACA_CRYPTO_SERVER_URL != "#":
         return redirect(f"{ALPACA_CRYPTO_SERVER_URL.rstrip('/')}/alpaca-crypto")
+    return redirect("/")
+
+
+@app.route("/alpaca-options")
+def alpaca_options_redirect():
+    """Same convenience redirect as /alpaca above, for the separate
+    Alpaca options service."""
+    if ALPACA_OPTIONS_SERVER_URL and ALPACA_OPTIONS_SERVER_URL != "#":
+        return redirect(f"{ALPACA_OPTIONS_SERVER_URL.rstrip('/')}/alpaca-options")
     return redirect("/")
 
 

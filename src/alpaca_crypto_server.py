@@ -64,6 +64,7 @@ DASHBOARD_LOCAL_AUTORUN = str(os.getenv("DASHBOARD_LOCAL_AUTORUN", "1") or "1").
 # exists. Fall back to "#" (dead link, not a guess) if unset.
 PERPS_SERVER_URL = os.getenv("PERPS_SERVER_URL", "#")
 ALPACA_STOCKS_SERVER_URL = os.getenv("ALPACA_STOCKS_SERVER_URL", "#")
+ALPACA_OPTIONS_SERVER_URL = os.getenv("ALPACA_OPTIONS_SERVER_URL", "#")
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
@@ -245,6 +246,7 @@ _ensure_background_jobs_started()
 def alpaca_crypto_dashboard():
     return render_template(
         "alpaca_crypto_dashboard.html", perps_url=PERPS_SERVER_URL, stocks_url=ALPACA_STOCKS_SERVER_URL,
+        options_url=ALPACA_OPTIONS_SERVER_URL,
     )
 
 
