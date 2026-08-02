@@ -315,6 +315,7 @@ def scan_and_enter(watchlist: list[str] | None = None, *, dry_run: bool | None =
     done -- same dual-gate posture as perps_strategy.py."""
     from data.schwab_data import get_stock_watchlist, latest_feature_row, load_training_dataset
     from data.schwab_model import predict_direction
+    from data import threads_post
 
     effective_dry_run = (not LIVE_TRADING_ENABLED) if dry_run is None else dry_run
     if watchlist is None:
@@ -384,10 +385,24 @@ def scan_and_enter(watchlist: list[str] | None = None, *, dry_run: bool | None =
                 _save_state(state)
                 existing_symbols.add(symbol)
                 open_count = len(positions)
+            trade_dry_run = effective_dry_run if MODE == "live" else True
             opened.append({
                 "symbol": symbol, "ok": True, "action": "opened", "entry_price": entry_price,
-                "count": count, "dry_run": effective_dry_run if MODE == "live" else True,
+                "count": count, "dry_run": trade_dry_run,
             })
+            # Best-effort only -- see threads_post.py's own docstring. Never
+            # allow a Threads failure (or it simply not being configured
+            # yet) to affect the real/simulated entry that already happened
+            # above. Schwab is long-only (see decide_exit's own docstring),
+            # so side is always "long" here.
+            try:
+                threads_post.post_trade_entry(
+                    ticker=symbol, side="long", entry_price=entry_price,
+                    take_profit_price=levels["take_profit_price"], stop_loss_price=levels["stop_loss_price"],
+                    reason=candidate["reason"], dry_run=trade_dry_run,
+                )
+            except Exception:
+                logger.warning("[schwab_strategy] Threads post for %s entry failed", symbol, exc_info=True)
         except Exception as exc:
             opened.append({"symbol": symbol, "ok": False, "action": "entry_failed", "error": str(exc)})
 

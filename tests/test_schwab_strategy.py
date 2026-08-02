@@ -9,7 +9,7 @@ import datetime as dt
 import pandas as pd
 import pytest
 
-from data import schwab_client, schwab_data, schwab_model, schwab_strategy as strat
+from data import schwab_client, schwab_data, schwab_model, threads_post, schwab_strategy as strat
 
 
 def _row(**overrides):
@@ -219,6 +219,44 @@ def test_scan_and_enter_respects_the_daily_loss_cap(monkeypatch):
     })
     result = strat.scan_and_enter()
     assert result["action"] == "daily_loss_cap_breached"
+
+
+def test_scan_and_enter_posts_to_threads_on_a_simulated_entry(monkeypatch):
+    monkeypatch.setattr(schwab_data, "get_stock_watchlist", lambda recent: ["AAPL"])
+    monkeypatch.setattr(schwab_data, "load_training_dataset", lambda **kw: pd.DataFrame())
+    monkeypatch.setattr(schwab_data, "latest_feature_row", lambda symbol: _entry_row())
+    monkeypatch.setattr(schwab_model, "predict_direction", lambda symbol: {"model_ok": False})
+
+    posted = {}
+    monkeypatch.setattr(threads_post, "post_trade_entry", lambda **kw: posted.update(kw) or True)
+
+    result = strat.scan_and_enter()
+    assert result["opened"][0]["action"] == "opened"
+    assert posted["ticker"] == "AAPL"
+    assert posted["side"] == "long"
+    assert posted["dry_run"] is True  # simulate mode -- must be flagged [SIMULATED]
+    assert posted["take_profit_price"] > posted["entry_price"]
+    assert posted["stop_loss_price"] < posted["entry_price"]
+
+
+def test_scan_and_enter_still_opens_the_position_even_if_threads_post_raises(monkeypatch):
+    """A Threads failure must never be allowed to affect a real/simulated
+    entry, since post_trade_entry() is called AFTER the position is
+    already saved to state."""
+    monkeypatch.setattr(schwab_data, "get_stock_watchlist", lambda recent: ["AAPL"])
+    monkeypatch.setattr(schwab_data, "load_training_dataset", lambda **kw: pd.DataFrame())
+    monkeypatch.setattr(schwab_data, "latest_feature_row", lambda symbol: _entry_row())
+    monkeypatch.setattr(schwab_model, "predict_direction", lambda symbol: {"model_ok": False})
+
+    def raise_error(**kwargs):
+        raise RuntimeError("simulated Threads API outage")
+
+    monkeypatch.setattr(threads_post, "post_trade_entry", raise_error)
+
+    result = strat.scan_and_enter()
+    assert result["opened"][0]["action"] == "opened"
+    state = strat._load_state()  # noqa: SLF001
+    assert len(state["positions"]) == 1
 
 
 def test_scan_and_enter_one_symbol_failing_does_not_block_the_others(monkeypatch):
