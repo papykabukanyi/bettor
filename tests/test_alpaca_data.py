@@ -12,12 +12,24 @@ from data import alpaca_data
 
 @pytest.fixture(autouse=True)
 def _isolated_universe_cache(monkeypatch):
-    monkeypatch.setattr(alpaca_data, "_universe_cache", {"symbols": None, "computed_at": 0.0})
+    monkeypatch.setattr(alpaca_data, "_universe_cache", {"symbols": None, "names": {}, "computed_at": 0.0})
 
 
 @pytest.fixture(autouse=True)
 def _isolated_minute_bar_cache(monkeypatch):
     monkeypatch.setattr(alpaca_data, "_minute_bar_cache", {})
+
+
+@pytest.fixture(autouse=True)
+def _no_real_sentiment_network_calls(monkeypatch):
+    """collect_dataset_rows/latest_feature_row call get_sentiment() (real
+    Google News RSS) and get_company_name() (which can trigger a real
+    /v2/assets call on a cold cache) internally -- stub both to neutral,
+    no-network defaults so the whole suite never depends on network access
+    or real credentials (whatever happens to be in .env). Tests that care
+    about sentiment specifically override these per-test."""
+    monkeypatch.setattr(alpaca_data, "get_sentiment", lambda symbol, **kw: {"symbol": symbol, "sentiment_score": 0.0, "headline_volume": 0})
+    monkeypatch.setattr(alpaca_data, "get_company_name", lambda symbol: None)
 
 
 def test_get_us_stock_universe_uses_tradable_active_assets(monkeypatch):
@@ -378,6 +390,9 @@ class _FakeHfApi:
     def __init__(self, token=None):
         pass
 
+    def repo_info(self, *, repo_id, repo_type):
+        return {"id": repo_id}  # repo already exists -- create_repo fallback not exercised here
+
     def upload_file(self, *, path_or_fileobj, path_in_repo, repo_id, repo_type, commit_message):
         _FakeHfApi.captured_upload["df"] = pd.read_parquet(path_or_fileobj)
         _FakeHfApi.captured_upload["path_in_repo"] = path_in_repo
@@ -439,6 +454,39 @@ def test_push_minute_snapshot_starts_fresh_when_no_shard_exists_yet(monkeypatch)
     result = alpaca_data.push_minute_snapshot(new_df)
 
     assert result["ok"] is True
+
+
+def test_upload_shard_creates_the_dataset_repo_if_it_does_not_exist_yet(monkeypatch):
+    """Real bug found and fixed: unlike the model-repo push (which already
+    falls back to create_repo), this upload used to assume the dataset repo
+    already existed -- a brand-new HF_ALPACA_DATASET_REPO name would fail
+    silently on every single push until a human created it by hand."""
+    monkeypatch.setattr(alpaca_data, "HF_API_KEY", "fake-token")
+
+    import huggingface_hub
+
+    created = []
+
+    class _FakeApiRepoMissing:
+        def __init__(self, token=None):
+            pass
+
+        def repo_info(self, *, repo_id, repo_type):
+            raise RuntimeError("404 repo not found")
+
+        def create_repo(self, *, repo_id, repo_type, exist_ok, private):
+            created.append((repo_id, repo_type))
+
+        def upload_file(self, *, path_or_fileobj, path_in_repo, repo_id, repo_type, commit_message):
+            pass
+
+    monkeypatch.setattr(huggingface_hub, "HfApi", _FakeApiRepoMissing)
+    result = alpaca_data._upload_shard(  # noqa: SLF001
+        pd.DataFrame({"symbol": ["AAPL"], "ts": [1], "close": [1.0]}),
+        path_in_repo="daily/AAPL.parquet", commit_message="test",
+    )
+    assert result["ok"] is True
+    assert created == [(alpaca_data.HF_ALPACA_DATASET_REPO, "dataset")]
     assert list(_FakeHfApi.captured_upload["df"]["symbol"]) == ["AAPL"]
 
 

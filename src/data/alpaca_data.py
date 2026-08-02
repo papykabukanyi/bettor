@@ -40,6 +40,7 @@ from typing import Any
 import pandas as pd
 
 from data import alpaca_client
+from data.stock_news import get_sentiment
 
 logger = logging.getLogger(__name__)
 
@@ -97,27 +98,44 @@ def get_market_session() -> dict[str, Any]:
 
 
 _UNIVERSE_CACHE_TTL_SEC = 24 * 3600
-_universe_cache: dict[str, Any] = {"symbols": None, "computed_at": 0.0}
+_universe_cache: dict[str, Any] = {"symbols": None, "names": {}, "computed_at": 0.0}
 
 
 def get_us_stock_universe(*, force: bool = False) -> list[str]:
     """Every tradable US equity/ETF symbol on this Alpaca account, straight
     from /v2/assets. Cached for _UNIVERSE_CACHE_TTL_SEC since the tradable
-    universe barely changes day to day."""
+    universe barely changes day to day. Also populates the symbol->company
+    name cache (see get_company_name()) as a side effect, at zero extra
+    API-call cost -- /v2/assets already returns both in one response."""
     now = time.time()
     if not force and _universe_cache["symbols"] is not None and (now - _universe_cache["computed_at"]) < _UNIVERSE_CACHE_TTL_SEC:
         return _universe_cache["symbols"]
 
     try:
         assets = alpaca_client.get_assets(status="active", asset_class="us_equity")
-        symbols = sorted({a["symbol"] for a in assets if a.get("tradable") and a.get("symbol")})
+        tradable = [a for a in assets if a.get("tradable") and a.get("symbol")]
+        symbols = sorted({a["symbol"] for a in tradable})
+        names = {a["symbol"]: a.get("name", "") for a in tradable}
     except Exception as exc:
         logger.warning("[alpaca_data] failed to fetch asset universe: %s", exc)
         symbols = _universe_cache["symbols"] or []
+        names = _universe_cache["names"] or {}
 
     _universe_cache["symbols"] = symbols
+    _universe_cache["names"] = names
     _universe_cache["computed_at"] = now
     return symbols
+
+
+def get_company_name(symbol: str) -> str | None:
+    """The company name Alpaca's own /v2/assets has on file for `symbol`
+    (e.g. "Apple Inc. Common Stock" for AAPL) -- used to build a real,
+    distinctive news-search query for stock_news.get_sentiment() instead of
+    an ambiguous bare ticker. None if the universe hasn't been fetched yet
+    or the symbol isn't in it; callers fall back to the ticker itself."""
+    if _universe_cache["symbols"] is None:
+        get_us_stock_universe()
+    return _universe_cache["names"].get(symbol.upper())
 
 
 def _bars_to_df(bars: list[dict[str, Any]]) -> pd.DataFrame:
@@ -202,7 +220,7 @@ FEATURE_COLUMNS = [
     "volatility_5", "volatility_15", "volatility_30",
     "volume_ratio_5", "volume_ratio_15", "dollar_volume_z",
     "rsi_14", "macd_hist_pct", "bb_pct_b", "bb_bandwidth", "atr_pct", "stoch_k",
-    "time_of_day_pct",
+    "time_of_day_pct", "sentiment_score",
 ]
 MIN_ROWS_FOR_FEATURES = 65  # the 60-minute return window + a small buffer
 
@@ -220,10 +238,13 @@ def _time_of_day_pct(ts_series: pd.Series) -> pd.Series:
     return minutes_since_open / 390.0  # 390min = the 6.5-hour regular session
 
 
-def engineer_features(one_min_df: pd.DataFrame) -> pd.DataFrame:
+def engineer_features(one_min_df: pd.DataFrame, *, sentiment_score: float = 0.0) -> pd.DataFrame:
     """Leakage-free volume + volatility + return features from 1-minute
     bars -- every rolling/shift operation looks backward only, mirroring
-    perps_data.engineer_features()'s discipline exactly."""
+    perps_data.engineer_features()'s discipline exactly. sentiment_score
+    (from stock_news.get_sentiment(), see collect_dataset_rows/
+    latest_feature_row) is broadcast as a constant column across the whole
+    batch, same as perps_data.py's own sentiment_score wiring."""
     if one_min_df.empty or len(one_min_df) < MIN_ROWS_FOR_FEATURES:
         return pd.DataFrame()
 
@@ -293,6 +314,7 @@ def engineer_features(one_min_df: pd.DataFrame) -> pd.DataFrame:
     df["stoch_k"] = (df["close"] - low_14) / stoch_range
 
     df["time_of_day_pct"] = _time_of_day_pct(df["ts"])
+    df["sentiment_score"] = float(sentiment_score)
 
     horizon = 1
     df["future_close"] = df["close"].shift(-horizon)
@@ -310,6 +332,17 @@ def _upload_shard(df: pd.DataFrame, *, path_in_repo: str, commit_message: str) -
 
     try:
         api = HfApi(token=HF_API_KEY)
+        # Real bug found and fixed: unlike _push_model_to_hf() (which already
+        # falls back to create_repo when the model repo doesn't exist yet),
+        # this upload assumed the dataset repo already existed -- silently
+        # failing every push with a RepositoryNotFoundError until a human
+        # created it by hand. A brand-new HF_ALPACA_DATASET_REPO name (as
+        # opposed to reusing an already-existing repo) hits this on the very
+        # first push.
+        try:
+            api.repo_info(repo_id=HF_ALPACA_DATASET_REPO, repo_type="dataset")
+        except Exception:
+            api.create_repo(repo_id=HF_ALPACA_DATASET_REPO, repo_type="dataset", exist_ok=True, private=False)
         with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as tmp:
             df.to_parquet(tmp.name, index=False)
             tmp_path = tmp.name
@@ -446,7 +479,8 @@ def collect_dataset_rows(symbols: list[str] | None = None) -> pd.DataFrame:
     for symbol in target_symbols:
         try:
             one_min_df = fetch_recent_minute_bars(symbol)
-            feats = engineer_features(one_min_df)
+            sentiment = get_sentiment(symbol, company_name=get_company_name(symbol))
+            feats = engineer_features(one_min_df, sentiment_score=sentiment["sentiment_score"])
             if feats.empty:
                 continue
             feats.insert(0, "symbol", symbol)
@@ -464,7 +498,8 @@ def latest_feature_row(symbol: str) -> dict[str, Any] | None:
     happened yet) -- expected, we only need the feature columns here."""
     try:
         one_min_df = fetch_recent_minute_bars(symbol)
-        feats = engineer_features(one_min_df)
+        sentiment = get_sentiment(symbol, company_name=get_company_name(symbol))
+        feats = engineer_features(one_min_df, sentiment_score=sentiment["sentiment_score"])
         if feats.empty:
             return None
         last = feats.iloc[-1]
