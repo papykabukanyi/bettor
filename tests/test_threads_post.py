@@ -112,3 +112,68 @@ def test_post_restart_notice_never_raises_on_api_failure(monkeypatch):
 
     monkeypatch.setattr(threads_post.threads_client, "create_and_publish_post", raise_error)
     assert threads_post.post_restart_notice() is False
+
+
+def test_hourly_status_reports_flat_with_no_open_positions(monkeypatch):
+    posted = []
+    monkeypatch.setattr(threads_post.threads_client, "create_and_publish_post", lambda text: posted.append(text))
+    result = threads_post.post_hourly_status(positions=[], today_realized_pnl_usd=0.0)
+    assert result is True
+    assert "flat" in posted[0].lower()
+    assert "Today's P&L: +0.00" in posted[0]
+
+
+def test_hourly_status_lists_every_open_position(monkeypatch):
+    posted = []
+    monkeypatch.setattr(threads_post.threads_client, "create_and_publish_post", lambda text: posted.append(text))
+    positions = [
+        {
+            "ticker": "KXBTCPERP", "side": "long", "entry_price": 6.5, "held_minutes": 42.3,
+            "take_profit_price": 6.63, "stop_loss_price": 6.4,
+        },
+        {
+            "ticker": "KXETHPERP", "side": "short", "entry_price": 3.2, "held_minutes": 5.0,
+            "take_profit_price": 3.1, "stop_loss_price": 3.28,
+        },
+    ]
+    threads_post.post_hourly_status(positions=positions, today_realized_pnl_usd=-1.25)
+    text = posted[0]
+    assert "2 open positions" in text
+    assert "LONG KXBTCPERP" in text
+    assert "SHORT KXETHPERP" in text
+    assert "held 42min" in text
+    assert "Today's P&L: -1.25" in text
+
+
+def test_hourly_status_singular_wording_for_one_position(monkeypatch):
+    posted = []
+    monkeypatch.setattr(threads_post.threads_client, "create_and_publish_post", lambda text: posted.append(text))
+    threads_post.post_hourly_status(
+        positions=[{"ticker": "KXBTCPERP", "side": "long", "entry_price": 6.5, "held_minutes": 1.0,
+                    "take_profit_price": 6.6, "stop_loss_price": 6.4}],
+    )
+    assert "1 open position" in posted[0]
+    assert "1 open positions" not in posted[0]
+
+
+def test_hourly_status_omits_pnl_line_when_not_provided(monkeypatch):
+    posted = []
+    monkeypatch.setattr(threads_post.threads_client, "create_and_publish_post", lambda text: posted.append(text))
+    threads_post.post_hourly_status(positions=[])
+    assert "P&L" not in posted[0]
+
+
+def test_hourly_status_respects_the_disable_flag(monkeypatch):
+    monkeypatch.setattr(threads_post, "THREADS_POST_ENABLED", False)
+    posted = []
+    monkeypatch.setattr(threads_post.threads_client, "create_and_publish_post", lambda text: posted.append(text))
+    assert threads_post.post_hourly_status(positions=[]) is False
+    assert posted == []
+
+
+def test_hourly_status_never_raises_on_api_failure(monkeypatch):
+    def raise_error(text):
+        raise RuntimeError("simulated Threads API failure")
+
+    monkeypatch.setattr(threads_post.threads_client, "create_and_publish_post", raise_error)
+    assert threads_post.post_hourly_status(positions=[]) is False

@@ -1,7 +1,8 @@
 """Posts a real-time note to Meta Threads every time the Kalshi Perps bot
 enters a real trade -- ticker, side, entry price, take-profit/stop-loss
 targets, and why the model/technical signal triggered the entry. Also
-posts a short notice on every process boot.
+posts a short notice on every process boot, and an hourly status update
+(open positions, or "flat", plus today's realized P&L).
 
 Best-effort only, by design: a failure here must NEVER block or delay real
 trade execution, mirroring how a failed news-sentiment fetch never blocks
@@ -83,4 +84,45 @@ def post_restart_notice(message: str = "Money Bot has restarted!") -> bool:
         return True
     except Exception as exc:
         logger.warning("[threads_post] failed to post restart notice: %s", exc)
+        return False
+
+
+def _format_hourly_status_text(*, positions: list[dict], today_realized_pnl_usd: float | None) -> str:
+    if not positions:
+        text = "Hourly status: flat (no open positions) -- scanning for the next trade."
+    else:
+        count = len(positions)
+        lines = [f"Hourly status: {count} open position{'s' if count != 1 else ''}"]
+        for p in positions:
+            direction = "SHORT" if p.get("side") == "short" else "LONG"
+            held_minutes = p.get("held_minutes")
+            held_str = f"{held_minutes:.0f}min" if held_minutes is not None else "?"
+            entry_price = p.get("entry_price", 0.0)
+            take_profit_price = p.get("take_profit_price", entry_price)
+            stop_loss_price = p.get("stop_loss_price", entry_price)
+            lines.append(
+                f"{direction} {p.get('ticker', '?')} @ {entry_price:.4f} (held {held_str}) "
+                f"TP {take_profit_price:.4f} / SL {stop_loss_price:.4f}"
+            )
+        text = "\n".join(lines)
+    if today_realized_pnl_usd is not None:
+        text += f"\nToday's P&L: {today_realized_pnl_usd:+.2f}"
+    if len(text) > _THREADS_POST_MAX_CHARS:
+        text = text[: _THREADS_POST_MAX_CHARS - 1] + "…"
+    return text
+
+
+def post_hourly_status(*, positions: list[dict], today_realized_pnl_usd: float | None = None) -> bool:
+    """Posts a status update every hour regardless of whether a trade
+    happened -- what position(s) the bot is currently holding (or that
+    it's flat), plus today's realized P&L. Same best-effort, never-raise
+    contract as the other posts here."""
+    if not THREADS_POST_ENABLED:
+        return False
+    text = _format_hourly_status_text(positions=positions, today_realized_pnl_usd=today_realized_pnl_usd)
+    try:
+        threads_client.create_and_publish_post(text)
+        return True
+    except Exception as exc:
+        logger.warning("[threads_post] failed to post hourly status: %s", exc)
         return False

@@ -242,6 +242,32 @@ def _run_perps_train() -> dict[str, Any]:
     return perps_model.train_model()
 
 
+@_locked_job("perps_threads_hourly_status", stale_after_sec=300)
+def _run_perps_threads_hourly_status() -> dict[str, Any]:
+    """Posts a status update every hour regardless of whether a trade
+    happened -- what position(s) the bot is currently holding (or that
+    it's flat) plus today's realized P&L. Best-effort, on top of (not
+    instead of) the real-time trade-entry/restart posts -- never allowed
+    to affect trading logic, which is why this reads state read-only and
+    never touches order placement."""
+    try:
+        state = perps_strategy._load_state()  # noqa: SLF001
+        now = dt.datetime.now(dt.timezone.utc)
+        positions = []
+        for p in (state.get("positions") or []):
+            levels = perps_strategy.position_exit_levels(p)
+            opened_at = dt.datetime.fromisoformat(p["opened_at"])
+            held_minutes = (now - opened_at).total_seconds() / 60.0
+            positions.append({**p, **levels, "held_minutes": held_minutes})
+        realized_pnl_by_date = state.get("realized_pnl_by_date") or {}
+        today_pnl = float(realized_pnl_by_date.get(et_today().isoformat(), 0.0))
+        posted = threads_post.post_hourly_status(positions=positions, today_realized_pnl_usd=today_pnl)
+        return {"ok": True, "posted": posted, "open_position_count": len(positions)}
+    except Exception as exc:
+        logger.warning("[app_kalshi] Threads hourly status post failed: %s", exc)
+        return {"ok": False, "error": str(exc)}
+
+
 def _ensure_background_jobs_started() -> None:
     global _startup_done
     if _startup_done:
@@ -270,6 +296,10 @@ def _ensure_background_jobs_started() -> None:
                 _run_perps_train, "cron", hour=PERPS_TRAIN_HOUR_ET, minute=0,
                 id="perps_train", replace_existing=True,
             )
+            scheduler.add_job(
+                _run_perps_threads_hourly_status, "interval", hours=1,
+                id="perps_threads_hourly_status", replace_existing=True,
+            )
             if ENABLE_PERPS_SCHEDULER:
                 scheduler.add_job(
                     _run_perps_fast_check, "interval", seconds=PERPS_FAST_CHECK_SECONDS,
@@ -283,7 +313,7 @@ def _ensure_background_jobs_started() -> None:
             scheduler.start()
             logger.info(
                 "Perps scheduler started: fast exit check every %ds, entry scan every %d min (%s, first run in %ds), "
-                "data collect every %d min, train daily at %02d:00 ET, live_trading=%s",
+                "data collect every %d min, train daily at %02d:00 ET, Threads hourly status post every 1h, live_trading=%s",
                 PERPS_FAST_CHECK_SECONDS, PERPS_CYCLE_MINUTES, "ENABLED" if ENABLE_PERPS_SCHEDULER else "disabled",
                 PERPS_STARTUP_GRACE_SECONDS, PERPS_DATA_COLLECT_MINUTES, PERPS_TRAIN_HOUR_ET, perps_strategy.LIVE_TRADING_ENABLED,
             )
@@ -552,6 +582,7 @@ _JOB_LABELS = {
     "perps_manual_cycle": "Manual full cycle",
     "perps_data_collect": f"Data collection -> HF (every {PERPS_DATA_COLLECT_MINUTES} min)",
     "perps_train": f"Model retrain (daily {PERPS_TRAIN_HOUR_ET:02d}:00 ET)",
+    "perps_threads_hourly_status": "Threads hourly status post",
 }
 
 

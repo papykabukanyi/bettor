@@ -68,6 +68,53 @@ def test_data_collect_job_still_collects_if_cache_refresh_fails(monkeypatch):
     assert collected == [1]
 
 
+def test_threads_hourly_status_job_reports_open_positions_with_held_minutes(monkeypatch):
+    import datetime as dt
+    from data import perps_strategy as strat, threads_post
+
+    opened_at = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=30)).isoformat()
+    monkeypatch.setattr(strat, "_load_state", lambda: {
+        "positions": [{"ticker": "KXBTCPERP", "side": "long", "entry_price": 6.5, "opened_at": opened_at}],
+        "realized_pnl_by_date": {},
+    })
+    monkeypatch.setattr(strat, "position_exit_levels", lambda p: {"take_profit_price": 6.6, "stop_loss_price": 6.4})
+    captured = {}
+    monkeypatch.setattr(threads_post, "post_hourly_status", lambda **kw: captured.update(kw) or True)
+
+    result = app_kalshi._run_perps_threads_hourly_status.__wrapped__()  # noqa: SLF001
+
+    assert result["ok"] is True
+    assert result["open_position_count"] == 1
+    assert captured["positions"][0]["ticker"] == "KXBTCPERP"
+    assert captured["positions"][0]["take_profit_price"] == 6.6
+    assert captured["positions"][0]["held_minutes"] == pytest.approx(30.0, abs=1.0)
+
+
+def test_threads_hourly_status_job_reports_flat_with_no_positions(monkeypatch):
+    from data import perps_strategy as strat, threads_post
+
+    monkeypatch.setattr(strat, "_load_state", lambda: {"positions": [], "realized_pnl_by_date": {}})
+    captured = {}
+    monkeypatch.setattr(threads_post, "post_hourly_status", lambda **kw: captured.update(kw) or True)
+
+    result = app_kalshi._run_perps_threads_hourly_status.__wrapped__()  # noqa: SLF001
+
+    assert result["ok"] is True
+    assert result["open_position_count"] == 0
+    assert captured["positions"] == []
+
+
+def test_threads_hourly_status_job_never_raises_on_failure(monkeypatch):
+    from data import perps_strategy as strat
+
+    def raise_error():
+        raise RuntimeError("state file corrupted")
+
+    monkeypatch.setattr(strat, "_load_state", raise_error)
+    result = app_kalshi._run_perps_threads_hourly_status.__wrapped__()  # noqa: SLF001
+    assert result["ok"] is False
+
+
 class _FakeScheduler:
     def __init__(self, running, shutdown_fn=None):
         self.running = running
