@@ -72,7 +72,7 @@ def post_trade_entry(
         return False
 
 
-def post_restart_notice(message: str = "MMM has Restarted") -> bool:
+def post_restart_notice(message: str = "Money Bot has restarted!") -> bool:
     """Posts a short note once per process boot -- see app_kalshi.py's
     `_ensure_background_jobs_started` for the once-per-boot call site. Same
     best-effort, never-raise contract as post_trade_entry()."""

@@ -88,7 +88,7 @@ def test_post_restart_notice_posts_the_default_message(monkeypatch):
     monkeypatch.setattr(threads_post.threads_client, "create_and_publish_post", lambda text: posted.append(text))
     result = threads_post.post_restart_notice()
     assert result is True
-    assert posted == ["MMM has Restarted"]
+    assert posted == ["Money Bot has restarted!"]
 
 
 def test_post_restart_notice_accepts_a_custom_message(monkeypatch):
