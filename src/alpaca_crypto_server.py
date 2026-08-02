@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import Any
 
 from apscheduler.schedulers.background import BackgroundScheduler
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, jsonify, render_template, request, send_from_directory
 
 SRC_DIR = Path(__file__).resolve().parent
 if str(SRC_DIR) not in sys.path:
@@ -261,6 +261,15 @@ def alpaca_crypto_dashboard():
         "alpaca_crypto_dashboard.html", perps_url=PERPS_SERVER_URL, stocks_url=ALPACA_STOCKS_SERVER_URL,
         options_url=ALPACA_OPTIONS_SERVER_URL,
     )
+
+
+@app.route("/chart/<path:filename>")
+def chart_snapshot_image(filename):
+    """Serves a chart-snapshot PNG publicly -- see app_kalshi.py's own
+    copy of this route for the full rationale (Threads fetches the image
+    itself from this URL, no raw-upload step exists)."""
+    from data import chart_snapshot
+    return send_from_directory(chart_snapshot.CHARTS_DIR, filename)
 
 
 @app.route("/api/alpaca/crypto/status")

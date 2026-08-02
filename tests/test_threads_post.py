@@ -265,6 +265,93 @@ def test_hourly_status_never_raises_on_api_failure(monkeypatch):
     assert threads_post.post_hourly_status(positions=[]) is False
 
 
+def _closes(n=60, base=100.0):
+    return [base + (i % 7) * 0.3 - 1.0 for i in range(n)]
+
+
+def test_maybe_post_trade_entry_chart_skips_when_the_random_roll_misses(monkeypatch):
+    monkeypatch.setattr(threads_post, "CHART_SNAPSHOT_PROBABILITY", 0.0)
+    result = threads_post.maybe_post_trade_entry_chart(
+        ticker="AAPL", market="stocks", closes=_closes(), entry_price=100.0,
+        take_profit_price=101.0, stop_loss_price=99.0, dry_run=False,
+    )
+    assert result is False
+
+
+def test_maybe_post_trade_entry_chart_respects_the_disable_flag(monkeypatch):
+    monkeypatch.setattr(threads_post, "THREADS_POST_ENABLED", False)
+    monkeypatch.setattr(threads_post, "CHART_SNAPSHOT_PROBABILITY", 1.0)
+    result = threads_post.maybe_post_trade_entry_chart(
+        ticker="AAPL", market="stocks", closes=_closes(), entry_price=100.0,
+        take_profit_price=101.0, stop_loss_price=99.0, dry_run=False,
+    )
+    assert result is False
+
+
+def test_maybe_post_trade_entry_chart_skips_without_enough_price_history(monkeypatch):
+    monkeypatch.setattr(threads_post, "CHART_SNAPSHOT_PROBABILITY", 1.0)
+    result = threads_post.maybe_post_trade_entry_chart(
+        ticker="AAPL", market="stocks", closes=[100.0, 100.5], entry_price=100.5,
+        take_profit_price=101.0, stop_loss_price=99.0, dry_run=False,
+    )
+    assert result is False
+
+
+def test_maybe_post_trade_entry_chart_skips_without_a_known_public_url(monkeypatch, tmp_path):
+    from data import chart_snapshot
+
+    monkeypatch.setattr(threads_post, "CHART_SNAPSHOT_PROBABILITY", 1.0)
+    monkeypatch.setattr(chart_snapshot, "CHARTS_DIR", tmp_path / "charts")
+    monkeypatch.delenv("RENDER_EXTERNAL_URL", raising=False)
+    result = threads_post.maybe_post_trade_entry_chart(
+        ticker="AAPL", market="stocks", closes=_closes(), entry_price=100.0,
+        take_profit_price=101.0, stop_loss_price=99.0, dry_run=False,
+    )
+    assert result is False
+
+
+def test_maybe_post_trade_entry_chart_posts_the_image_when_everything_lines_up(monkeypatch, tmp_path):
+    from data import chart_snapshot
+
+    monkeypatch.setattr(threads_post, "CHART_SNAPSHOT_PROBABILITY", 1.0)
+    monkeypatch.setattr(chart_snapshot, "CHARTS_DIR", tmp_path / "charts")
+    monkeypatch.setenv("RENDER_EXTERNAL_URL", "https://bettor-schwab.onrender.com")
+
+    captured = {}
+    monkeypatch.setattr(
+        threads_post.threads_client, "create_and_publish_image_post",
+        lambda image_url, text="": captured.update(image_url=image_url, text=text) or "post-1",
+    )
+
+    result = threads_post.maybe_post_trade_entry_chart(
+        ticker="AAPL", market="stocks", closes=_closes(), entry_price=100.0,
+        take_profit_price=101.0, stop_loss_price=99.0, side="long", dry_run=False,
+    )
+    assert result is True
+    assert captured["image_url"].startswith("https://bettor-schwab.onrender.com/chart/")
+    assert "Alpaca Stocks" in captured["text"]
+    assert "AAPL" in captured["text"]
+    assert "#StockMarket" in captured["text"]
+
+
+def test_maybe_post_trade_entry_chart_never_raises_on_api_failure(monkeypatch, tmp_path):
+    from data import chart_snapshot
+
+    monkeypatch.setattr(threads_post, "CHART_SNAPSHOT_PROBABILITY", 1.0)
+    monkeypatch.setattr(chart_snapshot, "CHARTS_DIR", tmp_path / "charts")
+    monkeypatch.setenv("RENDER_EXTERNAL_URL", "https://bettor-schwab.onrender.com")
+
+    def raise_error(image_url, text=""):
+        raise RuntimeError("simulated Threads API failure")
+
+    monkeypatch.setattr(threads_post.threads_client, "create_and_publish_image_post", raise_error)
+    result = threads_post.maybe_post_trade_entry_chart(
+        ticker="AAPL", market="stocks", closes=_closes(), entry_price=100.0,
+        take_profit_price=101.0, stop_loss_price=99.0, dry_run=False,
+    )
+    assert result is False
+
+
 def test_trending_news_reports_nothing_notable_with_no_headlines(monkeypatch):
     posted = []
     monkeypatch.setattr(threads_post.threads_client, "create_and_publish_post", lambda text: posted.append(text))

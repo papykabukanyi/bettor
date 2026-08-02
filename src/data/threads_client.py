@@ -247,3 +247,35 @@ def create_and_publish_post(text: str) -> str:
     )
     publish_resp.raise_for_status()
     return publish_resp.json()["id"]
+
+
+def create_and_publish_image_post(image_url: str, text: str = "") -> str:
+    """Same create-container-then-publish flow as create_and_publish_post,
+    but media_type=IMAGE with a publicly-fetchable image_url -- Threads'
+    own servers fetch the image from that URL themselves (there is no raw
+    binary upload step in this API), which is why chart_snapshot.py's
+    public_url_for() needs this service's own public onrender.com URL, not
+    a local file path. Raises on any failure, same contract as
+    create_and_publish_post -- callers must catch and log."""
+    token = get_valid_access_token()
+    user_id = get_user_id()
+    if not token or not user_id:
+        raise RuntimeError(
+            "No valid Threads access token/user id -- complete the interactive login first "
+            "(see get_authorization_url())."
+        )
+    create_resp = requests.post(
+        f"{API_BASE_URL}/{API_VERSION}/{user_id}/threads",
+        params={"media_type": "IMAGE", "image_url": image_url, "text": text, "access_token": token},
+        timeout=TIMEOUT_SEC,
+    )
+    create_resp.raise_for_status()
+    creation_id = create_resp.json()["id"]
+
+    publish_resp = requests.post(
+        f"{API_BASE_URL}/{API_VERSION}/{user_id}/threads_publish",
+        params={"creation_id": creation_id, "access_token": token},
+        timeout=TIMEOUT_SEC,
+    )
+    publish_resp.raise_for_status()
+    return publish_resp.json()["id"]

@@ -383,9 +383,19 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
                     ticker=contract_symbol, side="long",
                     entry_price=contract_price, take_profit_price=levels["take_profit_price"],
                     stop_loss_price=levels["stop_loss_price"], reason=candidate["reason"], dry_run=trade_dry_run,
+                    market="options",
                 )
             except Exception:
                 logger.warning("[alpaca_options_strategy] Threads post for %s entry failed", contract_symbol, exc_info=True)
+            # No chart-snapshot post here, unlike the other three strategies:
+            # there's no historical option-PREMIUM series to chart on the
+            # same scale as entry/take-profit/stop-loss (those are premium
+            # dollars, not the underlying's price) -- this pipeline doesn't
+            # record option-quote history over time, only point-in-time
+            # quotes at scan time. Charting the underlying's own price
+            # series instead would put a strike-price reference line next
+            # to numbers on a completely different scale, which would be
+            # confusing rather than informative.
         except Exception as exc:
             opened.append({"symbol": symbol, "ok": False, "action": "entry_failed", "error": str(exc)})
 

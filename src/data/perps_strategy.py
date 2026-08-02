@@ -86,7 +86,7 @@ from data.kalshi_perps import (
     cancel_margin_order, create_margin_order, get_margin_balance, get_margin_fee_tiers, get_margin_market,
     get_margin_order, get_margin_positions,
 )
-from data.perps_data import coin_for_ticker, get_watchlist, latest_feature_row
+from data.perps_data import coin_for_ticker, fetch_candle_frames, get_watchlist, latest_feature_row
 from data.perps_model import predict_direction
 from data import threads_post
 
@@ -1485,6 +1485,15 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
                 )
             except Exception:
                 logger.warning("[perps_strategy] Threads post for %s entry failed", ticker, exc_info=True)
+            try:
+                one_min_df, _ = fetch_candle_frames(ticker)
+                threads_post.maybe_post_trade_entry_chart(
+                    ticker=ticker, market="perps", closes=list(one_min_df["close"].tail(90)),
+                    entry_price=actual_entry_price, take_profit_price=levels["take_profit_price"],
+                    stop_loss_price=levels["stop_loss_price"], side=side, dry_run=effective_dry_run,
+                )
+            except Exception:
+                logger.warning("[perps_strategy] Threads chart post for %s entry failed", ticker, exc_info=True)
         except Exception as exc:
             # Placing the real entry order (or booking its result) failed
             # unexpectedly -- must not abort scanning/entering for every

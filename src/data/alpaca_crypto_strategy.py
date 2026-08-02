@@ -290,7 +290,7 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
     (notional-sized) UNLESS dry_run resolves True -- same dual-gate
     posture as every other strategy here. No market-hours gating: crypto
     trades 24/7."""
-    from data.alpaca_crypto_data import get_crypto_universe, latest_feature_row
+    from data.alpaca_crypto_data import fetch_recent_crypto_bars, get_crypto_universe, latest_feature_row
     from data.alpaca_crypto_model import predict_direction
     from data import threads_post
 
@@ -369,6 +369,15 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
                 )
             except Exception:
                 logger.warning("[alpaca_crypto_strategy] Threads post for %s entry failed", symbol, exc_info=True)
+            try:
+                one_min_df = fetch_recent_crypto_bars(symbol)
+                threads_post.maybe_post_trade_entry_chart(
+                    ticker=symbol, market="crypto", closes=list(one_min_df["close"].tail(90)),
+                    entry_price=entry_price, take_profit_price=levels["take_profit_price"],
+                    stop_loss_price=levels["stop_loss_price"], side="long", dry_run=trade_dry_run,
+                )
+            except Exception:
+                logger.warning("[alpaca_crypto_strategy] Threads chart post for %s entry failed", symbol, exc_info=True)
         except Exception as exc:
             opened.append({"symbol": symbol, "ok": False, "action": "entry_failed", "error": str(exc)})
 

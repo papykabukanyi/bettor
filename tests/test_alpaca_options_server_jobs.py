@@ -94,6 +94,28 @@ def test_api_alpaca_options_status_reports_configured_flag(monkeypatch):
         assert resp.get_json()["alpaca_configured"] is True
 
 
+def test_chart_snapshot_route_serves_a_real_saved_png(monkeypatch, tmp_path):
+    from data import chart_snapshot
+
+    monkeypatch.setattr(chart_snapshot, "CHARTS_DIR", tmp_path / "charts")
+    path = chart_snapshot.generate_entry_chart(
+        ticker="AAPL", market="options", closes=[100.0 + i * 0.1 for i in range(30)],
+        entry_price=101.0, take_profit_price=102.0, stop_loss_price=100.0,
+    )
+    assert path is not None
+
+    with alpaca_options_server.app.test_client() as client:
+        resp = client.get(f"/chart/{path.name}")
+        assert resp.status_code == 200
+        assert resp.data[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_chart_snapshot_route_404s_for_a_missing_file():
+    with alpaca_options_server.app.test_client() as client:
+        resp = client.get("/chart/does-not-exist.png")
+        assert resp.status_code == 404
+
+
 class _FakeScheduler:
     def __init__(self, running, shutdown_fn=None):
         self.running = running

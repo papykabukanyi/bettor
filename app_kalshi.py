@@ -53,7 +53,7 @@ from pathlib import Path
 from typing import Any
 
 from apscheduler.schedulers.background import BackgroundScheduler
-from flask import Flask, jsonify, redirect, render_template, request
+from flask import Flask, jsonify, redirect, render_template, request, send_from_directory
 
 # This file lives at the REPO ROOT (not inside src/), unlike every module it
 # imports below -- SRC_DIR must be computed from here explicitly rather than
@@ -486,6 +486,17 @@ def privacy_policy():
     Threads API scopes -- this is that page, registered in the Threads app
     settings as this service's privacy policy URL."""
     return render_template("privacy_policy.html", updated_at=dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d"))
+
+
+@app.route("/chart/<path:filename>")
+def chart_snapshot_image(filename):
+    """Serves a chart-snapshot PNG (see chart_snapshot.py) publicly --
+    Threads' media-container API fetches the image itself from a URL it's
+    given, there is no raw-upload step, so this route is what makes
+    threads_post.maybe_post_trade_entry_chart() actually work.
+    send_from_directory guards against path traversal on its own."""
+    from data import chart_snapshot
+    return send_from_directory(chart_snapshot.CHARTS_DIR, filename)
 
 
 @app.route("/threads/authorize")

@@ -320,7 +320,7 @@ def scan_and_enter(watchlist: list[str] | None = None, *, dry_run: bool | None =
     real bracket order (entry + linked take-profit/stop-loss) UNLESS
     dry_run resolves True, in which case it only reports what it would have
     done -- same dual-gate posture as perps_strategy.py."""
-    from data.alpaca_data import get_stock_watchlist, latest_feature_row, load_training_dataset
+    from data.alpaca_data import fetch_recent_minute_bars, get_stock_watchlist, latest_feature_row, load_training_dataset
     from data.alpaca_model import predict_direction
     from data import threads_post
 
@@ -410,6 +410,15 @@ def scan_and_enter(watchlist: list[str] | None = None, *, dry_run: bool | None =
                 )
             except Exception:
                 logger.warning("[alpaca_strategy] Threads post for %s entry failed", symbol, exc_info=True)
+            try:
+                one_min_df = fetch_recent_minute_bars(symbol)
+                threads_post.maybe_post_trade_entry_chart(
+                    ticker=symbol, market="stocks", closes=list(one_min_df["close"].tail(90)),
+                    entry_price=entry_price, take_profit_price=levels["take_profit_price"],
+                    stop_loss_price=levels["stop_loss_price"], side="long", dry_run=trade_dry_run,
+                )
+            except Exception:
+                logger.warning("[alpaca_strategy] Threads chart post for %s entry failed", symbol, exc_info=True)
         except Exception as exc:
             opened.append({"symbol": symbol, "ok": False, "action": "entry_failed", "error": str(exc)})
 

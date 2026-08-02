@@ -169,3 +169,32 @@ def test_create_and_publish_post_does_the_container_then_publish_round_trip(monk
     assert captured[0]["params"]["text"] == "hello world"
     assert captured[1]["url"] == f"{threads_client.API_BASE_URL}/{threads_client.API_VERSION}/user-42/threads_publish"
     assert captured[1]["params"]["creation_id"] == "creation-123"
+
+
+def test_create_and_publish_image_post_raises_without_a_valid_token():
+    with pytest.raises(RuntimeError, match="No valid Threads access token"):
+        threads_client.create_and_publish_image_post("https://example.com/chart.png", "caption")
+
+
+def test_create_and_publish_image_post_does_the_container_then_publish_round_trip(monkeypatch):
+    threads_client._token_cache.update({  # noqa: SLF001
+        "access_token": "at-1", "user_id": "user-42",
+        "obtained_at": threads_client.time.time(), "expires_at": threads_client.time.time() + 1000000,
+    })
+    captured = []
+
+    def fake_post(url, *, params, timeout):
+        captured.append({"url": url, "params": params})
+        if "threads_publish" in url:
+            return _FakeResponse({"id": "post-999"})
+        return _FakeResponse({"id": "creation-123"})
+
+    monkeypatch.setattr(threads_client.requests, "post", fake_post)
+    post_id = threads_client.create_and_publish_image_post("https://example.com/chart.png", "caption text")
+
+    assert post_id == "post-999"
+    assert captured[0]["url"] == f"{threads_client.API_BASE_URL}/{threads_client.API_VERSION}/user-42/threads"
+    assert captured[0]["params"]["media_type"] == "IMAGE"
+    assert captured[0]["params"]["image_url"] == "https://example.com/chart.png"
+    assert captured[0]["params"]["text"] == "caption text"
+    assert captured[1]["params"]["creation_id"] == "creation-123"
