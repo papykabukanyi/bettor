@@ -108,3 +108,42 @@ def test_get_sentiment_is_cached_within_the_ttl(monkeypatch, _isolated_sentiment
     second = news.get_sentiment("AAPL", company_name="Apple Inc.")
     assert first == second
     assert calls["n"] == 1
+
+
+@pytest.fixture
+def _isolated_trending_cache(monkeypatch):
+    monkeypatch.setattr(news, "_trending_cache", None)
+    yield
+
+
+def test_get_trending_headlines_queries_the_general_market(monkeypatch, _isolated_trending_cache):
+    captured = {}
+
+    def fake_fetch(query):
+        captured["query"] = query
+        return ["Market rallies broadly", "Fed signals rate cuts", "Tech leads gains", "extra", "another", "one more"]
+
+    monkeypatch.setattr(news, "_fetch_google_news_rss", fake_fetch)
+    headlines = news.get_trending_headlines(limit=3)
+    assert captured["query"] == news._TRENDING_QUERY  # noqa: SLF001
+    assert len(headlines) == 3
+
+
+def test_get_trending_headlines_is_cached_within_the_ttl(monkeypatch, _isolated_trending_cache):
+    calls = {"n": 0}
+
+    def fake_fetch(query):
+        calls["n"] += 1
+        return ["headline"]
+
+    monkeypatch.setattr(news, "_fetch_google_news_rss", fake_fetch)
+    news.get_trending_headlines()
+    news.get_trending_headlines()
+    assert calls["n"] == 1
+
+
+def test_get_trending_headlines_does_not_cache_a_transient_empty_failure(monkeypatch, _isolated_trending_cache):
+    monkeypatch.setattr(news, "_fetch_google_news_rss", lambda query: [])
+    result = news.get_trending_headlines()
+    assert result == []
+    assert news._trending_cache is None  # noqa: SLF001

@@ -4,7 +4,7 @@ feeds crypto_news.get_sentiment() into its own feature frame (a single
 `sentiment_score` column, broadcast as a constant across the batch that was
 fetched together).
 
-Only source: Google News RSS, free and unlimited, queried per symbol.
+Primary source: Google News RSS, free and unlimited, queried per symbol.
 Unlike crypto (a small, hand-curated list of ~15 coins with hardcoded
 match terms), the Alpaca watchlist can be any of thousands of US equities
 chosen dynamically each cycle -- a hardcoded per-symbol keyword dict the
@@ -19,8 +19,14 @@ Deliberately does NOT add newsdata.io here: NEWSDATA_API_KEY's daily quota
 is shared with crypto_news.py, which already exhausts it within an hour or
 two on crypto tickers alone (see that module's own docstring) -- adding
 stock tickers on the same key would just guarantee both sides run dry
-sooner, for no net signal gain. If a stock-specific news source is wanted
-later, give it its own separate API key rather than contending for this one.
+sooner, for no net signal gain.
+
+Optional additional source: SerpApi's Google News engine (serpapi_client.py),
+gated to watchlist symbols only via get_sentiment()'s use_limited_sources
+flag -- same discipline as crypto_news.py, since its 250-searches/month
+free tier is shared across BOTH sentiment modules and the 30-minute
+trending-news Threads post. Set SERPAPI_API_KEY to enable; skipped silently
+without it.
 
 Same lightweight keyword-polarity approach as crypto_news.py (no ML model) --
 just enough signal to feed the direction classifier one more feature.
@@ -34,6 +40,8 @@ import xml.etree.ElementTree as ET
 from typing import Any
 
 import requests
+
+from data import news_sources, serpapi_client
 
 logger = logging.getLogger(__name__)
 
@@ -104,10 +112,16 @@ def _clean_company_query(symbol: str, company_name: str | None) -> str:
     return f"{cleaned or symbol} stock"
 
 
-def get_sentiment(symbol: str, *, company_name: str | None = None) -> dict[str, Any]:
+def get_sentiment(symbol: str, *, company_name: str | None = None, use_limited_sources: bool = True) -> dict[str, Any]:
     """Sentiment for one equity symbol. Cached per-symbol for
     _CACHE_TTL_SEC since news doesn't meaningfully change minute to minute --
-    same TTL as crypto_news.get_sentiment()."""
+    same TTL as crypto_news.get_sentiment().
+
+    use_limited_sources gates SerpApi -- its 250-searches/month free tier is
+    shared with crypto_news.py and the 30-minute trending-news Threads post
+    (see serpapi_client.py's own cooldown). Callers should set this False
+    for symbols outside the current watchlist, same discipline as
+    crypto_news.get_sentiment()'s identical flag."""
     symbol = str(symbol or "").upper().strip()
     cached = _cache.get(symbol)
     now = time.time()
@@ -116,6 +130,9 @@ def get_sentiment(symbol: str, *, company_name: str | None = None) -> dict[str, 
 
     query = _clean_company_query(symbol, company_name)
     headlines = _fetch_google_news_rss(query)
+    if use_limited_sources:
+        headlines.extend(serpapi_client.search_news(query))
+        headlines.extend(news_sources.fetch_all(query))
     score, volume = _score_headlines(headlines)
     result = {
         "symbol": symbol, "sentiment_score": score, "headline_volume": volume,
@@ -123,3 +140,25 @@ def get_sentiment(symbol: str, *, company_name: str | None = None) -> dict[str, 
     }
     _cache[symbol] = (result, now)
     return result
+
+
+# General "what's happening in the stock market right now" query -- NOT
+# per-symbol, so it's fetched once and cached on its own longer TTL, same
+# shared-general-feed discipline as crypto_news.py's newsroom feeds.
+_TRENDING_QUERY = "stock market"
+_TRENDING_CACHE_TTL_SEC = 1800
+_trending_cache: tuple[list[str], float] | None = None
+
+
+def get_trending_headlines(*, limit: int = 5) -> list[str]:
+    """General stock-market trending headlines -- NOT one symbol's own
+    sentiment feed, just "what's happening in the market right now."
+    Powers the 30-minute Threads trending-news post (see threads_post.py)."""
+    global _trending_cache
+    now = time.time()
+    if _trending_cache and (now - _trending_cache[1]) < _TRENDING_CACHE_TTL_SEC:
+        return _trending_cache[0][:limit]
+    headlines = _fetch_google_news_rss(_TRENDING_QUERY)
+    if headlines:  # don't cache a transient failure's empty result over a good one
+        _trending_cache = (headlines, now)
+    return headlines[:limit]

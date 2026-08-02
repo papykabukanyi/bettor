@@ -44,7 +44,7 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from config import et_today
-from data import alpaca_backtest, alpaca_client, alpaca_data, alpaca_model, alpaca_strategy
+from data import alpaca_backtest, alpaca_client, alpaca_data, alpaca_model, alpaca_strategy, stock_news, threads_post
 from server_common import DATA_DIR, is_cron_authorized, load_json, make_job_lock, save_json
 
 # Real production bug found and fixed on the Schwab side of this same
@@ -187,6 +187,22 @@ def _run_alpaca_train() -> dict[str, Any]:
     return alpaca_model.train_model()
 
 
+@_locked_job("alpaca_threads_trending_news", stale_after_sec=300)
+def _run_alpaca_threads_trending_news() -> dict[str, Any]:
+    """Posts a digest of what's currently trending in stock-market news
+    every 30 minutes -- the same general-market headlines sentiment_score
+    is already built from, surfaced so the news potentially influencing
+    the model's own decisions is visible rather than an invisible input.
+    Read-only, never touches order placement."""
+    try:
+        headlines = stock_news.get_trending_headlines(limit=5)
+        posted = threads_post.post_trending_news(headlines, market="stocks")
+        return {"ok": True, "posted": posted, "headline_count": len(headlines)}
+    except Exception as exc:
+        logger.warning("[alpaca_server] Threads trending-news post failed: %s", exc)
+        return {"ok": False, "error": str(exc)}
+
+
 def _advance_historical_backfill() -> dict[str, Any]:
     """Sends up to ALPACA_BACKFILL_BATCH_SIZE more symbols' worth of the
     MAXIMUM available daily-bar history (up to 20 years) to HF. Resumable
@@ -310,6 +326,10 @@ def _ensure_background_jobs_started() -> None:
                 id="alpaca_entry_scan", replace_existing=True,
                 next_run_time=dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=ALPACA_STARTUP_GRACE_SECONDS),
             )
+            scheduler.add_job(
+                _run_alpaca_threads_trending_news, "interval", minutes=30,
+                id="alpaca_threads_trending_news", replace_existing=True,
+            )
             scheduler.start()
             logger.info(
                 "Alpaca scheduler started: fast exit check every %ds, entry scan every %d min (first run in %ds), "
@@ -415,6 +435,7 @@ def api_alpaca_status():
             "trained_at": (meta or {}).get("trained_at"),
             "rows": (meta or {}).get("rows"),
             "scores": (meta or {}).get("scores"),
+            "feature_importances": (meta or {}).get("feature_importances"),
         },
         "latest_cycle": latest_cycle,
         "latest_position_check": latest_position_check,
@@ -493,6 +514,7 @@ _JOB_LABELS = {
     ),
     "alpaca_fast_check": f"Alpaca fast exit check (every {ALPACA_FAST_CHECK_SECONDS}s)",
     "alpaca_entry_scan": f"Alpaca entry scan (every {ALPACA_CYCLE_MINUTES} min)",
+    "alpaca_threads_trending_news": "Threads trending-news post (every 30 min)",
 }
 
 

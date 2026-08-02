@@ -1,8 +1,11 @@
 """Posts a real-time note to Meta Threads every time the Kalshi Perps bot
-enters a real trade -- ticker, side, entry price, take-profit/stop-loss
-targets, and why the model/technical signal triggered the entry. Also
-posts a short notice on every process boot, and an hourly status update
-(open positions, or "flat", plus today's realized P&L).
+(or the Alpaca stocks bot) enters a real trade -- ticker, side, entry
+price, take-profit/stop-loss targets, and why the model/technical signal
+triggered the entry. Also posts a short notice on every process boot, an
+hourly status update (open positions, or "flat", plus today's realized
+P&L), and a 30-minute trending-news digest (see post_trending_news) meant
+to surface whatever news might be influencing the bot's own decisions
+right now, not just report positions after the fact.
 
 Best-effort only, by design: a failure here must NEVER block or delay real
 trade execution, mirroring how a failed news-sentiment fetch never blocks
@@ -125,4 +128,36 @@ def post_hourly_status(*, positions: list[dict], today_realized_pnl_usd: float |
         return True
     except Exception as exc:
         logger.warning("[threads_post] failed to post hourly status: %s", exc)
+        return False
+
+
+def _format_trending_news_text(*, headlines: list[str], market: str) -> str:
+    label = "Crypto" if market == "crypto" else "Stocks"
+    if not headlines:
+        text = f"{label} trending news: nothing notable right now."
+    else:
+        lines = [f"{label} trending news (may be influencing current decisions):"]
+        lines.extend(f"- {h}" for h in headlines)
+        text = "\n".join(lines)
+    if len(text) > _THREADS_POST_MAX_CHARS:
+        text = text[: _THREADS_POST_MAX_CHARS - 1] + "…"
+    return text
+
+
+def post_trending_news(headlines: list[str], *, market: str) -> bool:
+    """Posts a digest of what's currently trending in crypto or stock news
+    -- the same headlines (or general-market equivalent) feeding into
+    sentiment_score for the direction models, made visible rather than
+    staying an invisible input nobody can see. Runs every 30 minutes (see
+    app_kalshi.py's/alpaca_server.py's own scheduled job) independent of
+    whether any trade happened. Same best-effort, never-raise contract as
+    every other post here."""
+    if not THREADS_POST_ENABLED:
+        return False
+    text = _format_trending_news_text(headlines=headlines, market=market)
+    try:
+        threads_client.create_and_publish_post(text)
+        return True
+    except Exception as exc:
+        logger.warning("[threads_post] failed to post trending news: %s", exc)
         return False

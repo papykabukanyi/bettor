@@ -199,3 +199,18 @@ def test_get_sentiment_matches_general_feed_headlines_for_any_coin_not_just_btc(
     monkeypatch.setattr(news, "_fetch_rss_titles_cached", fake_fetch)
     result = news.get_sentiment("ZEC")
     assert result["headline_volume"] == 1  # only the ZEC-relevant headline matched
+
+
+def test_get_trending_headlines_combines_the_general_feeds_and_respects_the_limit(monkeypatch):
+    def fake_fetch(url, *, source_name, limit=40):
+        return {"cointelegraph": ["a", "b"], "cryptoslate": ["c"], "decrypt": ["d", "e"]}.get(source_name, [])
+
+    monkeypatch.setattr(news, "_fetch_rss_titles_cached", fake_fetch)
+    result = news.get_trending_headlines(limit=3)
+    assert len(result) == 3
+
+
+def test_get_trending_headlines_drops_empty_titles(monkeypatch):
+    monkeypatch.setattr(news, "_fetch_rss_titles_cached", lambda url, *, source_name, limit=40: ["real headline", "", None] if source_name == "cointelegraph" else [])
+    result = news.get_trending_headlines()
+    assert result == ["real headline"]

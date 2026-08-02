@@ -41,6 +41,14 @@ sources are worth spending on the coins actually being traded right now, not
 spread thin across every active-but-untraded instrument. Sign up free at
 https://newsdata.io and set NEWSDATA_API_KEY. Skipped silently without it.
 
+Optional additional source: SerpApi's Google News engine (serpapi_client.py),
+gated the same watchlist-only way as CryptoPanic/newsdata.io above. Its own
+250-searches/month free tier is shared with stock_news.py and the 30-minute
+trending-news Threads post, so serpapi_client.py enforces a real cooldown
+between ANY two calls across all of them -- see that module's own docstring
+for the exact budget math. Set SERPAPI_API_KEY to enable; skipped silently
+without it.
+
 Produces a simple keyword-polarity sentiment score in [-1, 1] plus a headline
 volume count. This is intentionally lightweight (no ML sentiment model) --
 just enough signal to feed as one more feature into the direction classifier,
@@ -56,6 +64,8 @@ import xml.etree.ElementTree as ET
 from typing import Any
 
 import requests
+
+from data import news_sources, serpapi_client
 
 logger = logging.getLogger(__name__)
 
@@ -240,16 +250,25 @@ def _fetch_newsdata_io(coin_symbol: str) -> list[str]:
         return []
 
 
+def _fetch_serpapi(coin_symbol: str) -> list[str]:
+    """Optional: only runs if SERPAPI_API_KEY is set (see serpapi_client.py
+    for the shared 250/month-budget cooldown every caller of that module
+    respects). Gated the same way as CryptoPanic/newsdata.io -- a paid,
+    quota-constrained source reserved for watchlist coins."""
+    query = _COIN_QUERIES.get(coin_symbol, coin_symbol.lower())
+    return serpapi_client.search_news(query)
+
+
 def get_sentiment(coin_symbol: str, *, use_limited_sources: bool = True) -> dict[str, Any]:
     """Sentiment for one coin symbol (e.g. "BTC"). Cached per-coin for
     _CACHE_TTL_SEC since news doesn't meaningfully change minute to minute.
 
-    use_limited_sources gates CryptoPanic + newsdata.io -- both quota/
-    quality-constrained, unlike the free/unlimited RSS sources below. Callers
-    should set this False for coins outside the current watchlist (see
-    perps_data.get_watchlist()) so the limited quota is spent on the coins
-    actually meeting the volume+volatility bar right now, not spread across
-    every active-but-untraded instrument."""
+    use_limited_sources gates CryptoPanic + newsdata.io + SerpApi -- all
+    quota/quality-constrained, unlike the free/unlimited RSS sources below.
+    Callers should set this False for coins outside the current watchlist
+    (see perps_data.get_watchlist()) so the limited quota is spent on the
+    coins actually meeting the volume+volatility bar right now, not spread
+    across every active-but-untraded instrument."""
     symbol = str(coin_symbol or "").upper().strip()
     cached = _cache.get(symbol)
     now = time.time()
@@ -262,6 +281,8 @@ def get_sentiment(coin_symbol: str, *, use_limited_sources: bool = True) -> dict
     if use_limited_sources:
         headlines.extend(_fetch_cryptopanic(symbol))
         headlines.extend(_fetch_newsdata_io(symbol))
+        headlines.extend(_fetch_serpapi(symbol))
+        headlines.extend(news_sources.fetch_all(query))
 
     # These three feeds cover all of crypto, not one coin -- fetched once
     # (shared, long-TTL cache) regardless of which coin asked, then matched
@@ -281,3 +302,17 @@ def get_sentiment(coin_symbol: str, *, use_limited_sources: bool = True) -> dict
     }
     _cache[symbol] = (result, now)
     return result
+
+
+def get_trending_headlines(*, limit: int = 5) -> list[str]:
+    """General crypto-market trending headlines -- NOT one coin's own
+    sentiment feed, just "what's happening in crypto right now." Powers
+    the 30-minute Threads trending-news post (see threads_post.py). Reuses
+    the same free/unlimited general newsroom feeds get_sentiment() already
+    shares across every coin, so this costs zero extra real network calls
+    beyond their own long (30-min) TTL cache."""
+    headlines: list[str] = []
+    headlines.extend(_fetch_rss_titles_cached("https://cointelegraph.com/rss", source_name="cointelegraph"))
+    headlines.extend(_fetch_rss_titles_cached("https://cryptoslate.com/feed/", source_name="cryptoslate"))
+    headlines.extend(_fetch_rss_titles_cached("https://decrypt.co/feed", source_name="decrypt"))
+    return [h for h in headlines if h][:limit]

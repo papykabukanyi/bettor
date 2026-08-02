@@ -53,6 +53,23 @@ _CANDIDATES = {
 }
 
 
+def _feature_importance_map(model: Any, feature_cols: list[str]) -> dict[str, float] | None:
+    """Surfaces which features the trained model actually leaned on --
+    e.g. how much weight sentiment_score carried relative to the technical
+    features -- via /api/alpaca/status's model.feature_importances, rather
+    than sentiment_score just being one more opaque input nobody can
+    verify is doing anything. Same helper already proven on the perps
+    side (perps_model.py)."""
+    try:
+        if hasattr(model, "feature_importances_"):
+            return dict(zip(feature_cols, model.feature_importances_.tolist()))
+        if hasattr(model, "coef_"):
+            return dict(zip(feature_cols, model.coef_[0].tolist()))
+    except Exception:
+        pass
+    return None
+
+
 def _prepare_training_frame(df: pd.DataFrame) -> pd.DataFrame:
     labeled = df.dropna(subset=["label_up"] + FEATURE_COLUMNS).copy()
     labeled["label_up"] = labeled["label_up"].astype(int)
@@ -108,6 +125,7 @@ def train_model(df: pd.DataFrame | None = None) -> dict[str, Any]:
     meta = {
         "trained_at": time.time(), "model_type": best_name, "scores": scores,
         "rows": len(labeled), "feature_columns": feature_cols, "symbol_categories": symbol_categories,
+        "feature_importances": _feature_importance_map(best_model, feature_cols),
     }
 
     joblib.dump(best_model, MODEL_PATH)

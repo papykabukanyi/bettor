@@ -177,3 +177,44 @@ def test_hourly_status_never_raises_on_api_failure(monkeypatch):
 
     monkeypatch.setattr(threads_post.threads_client, "create_and_publish_post", raise_error)
     assert threads_post.post_hourly_status(positions=[]) is False
+
+
+def test_trending_news_reports_nothing_notable_with_no_headlines(monkeypatch):
+    posted = []
+    monkeypatch.setattr(threads_post.threads_client, "create_and_publish_post", lambda text: posted.append(text))
+    result = threads_post.post_trending_news([], market="crypto")
+    assert result is True
+    assert "nothing notable" in posted[0].lower()
+
+
+def test_trending_news_lists_every_headline_and_labels_the_market(monkeypatch):
+    posted = []
+    monkeypatch.setattr(threads_post.threads_client, "create_and_publish_post", lambda text: posted.append(text))
+    threads_post.post_trending_news(["Bitcoin surges past resistance", "ETF inflows accelerate"], market="crypto")
+    text = posted[0]
+    assert "Crypto trending news" in text
+    assert "Bitcoin surges past resistance" in text
+    assert "ETF inflows accelerate" in text
+
+
+def test_trending_news_labels_stocks_market(monkeypatch):
+    posted = []
+    monkeypatch.setattr(threads_post.threads_client, "create_and_publish_post", lambda text: posted.append(text))
+    threads_post.post_trending_news(["Markets rally on rate cut hopes"], market="stocks")
+    assert "Stocks trending news" in posted[0]
+
+
+def test_trending_news_respects_the_disable_flag(monkeypatch):
+    monkeypatch.setattr(threads_post, "THREADS_POST_ENABLED", False)
+    posted = []
+    monkeypatch.setattr(threads_post.threads_client, "create_and_publish_post", lambda text: posted.append(text))
+    assert threads_post.post_trending_news(["headline"], market="crypto") is False
+    assert posted == []
+
+
+def test_trending_news_never_raises_on_api_failure(monkeypatch):
+    def raise_error(text):
+        raise RuntimeError("simulated Threads API failure")
+
+    monkeypatch.setattr(threads_post.threads_client, "create_and_publish_post", raise_error)
+    assert threads_post.post_trending_news(["headline"], market="crypto") is False

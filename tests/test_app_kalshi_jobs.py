@@ -115,6 +115,31 @@ def test_threads_hourly_status_job_never_raises_on_failure(monkeypatch):
     assert result["ok"] is False
 
 
+def test_threads_trending_news_job_posts_the_fetched_headlines(monkeypatch):
+    from data import crypto_news, threads_post
+
+    monkeypatch.setattr(crypto_news, "get_trending_headlines", lambda limit=5: ["Bitcoin rallies", "ETF inflows rise"])
+    captured = {}
+    monkeypatch.setattr(threads_post, "post_trending_news", lambda headlines, *, market: captured.update(headlines=headlines, market=market) or True)
+
+    result = app_kalshi._run_perps_threads_trending_news.__wrapped__()  # noqa: SLF001
+
+    assert result == {"ok": True, "posted": True, "headline_count": 2}
+    assert captured["market"] == "crypto"
+    assert captured["headlines"] == ["Bitcoin rallies", "ETF inflows rise"]
+
+
+def test_threads_trending_news_job_never_raises_on_failure(monkeypatch):
+    from data import crypto_news
+
+    def raise_error(limit=5):
+        raise RuntimeError("rss down")
+
+    monkeypatch.setattr(crypto_news, "get_trending_headlines", raise_error)
+    result = app_kalshi._run_perps_threads_trending_news.__wrapped__()  # noqa: SLF001
+    assert result["ok"] is False
+
+
 class _FakeScheduler:
     def __init__(self, running, shutdown_fn=None):
         self.running = running

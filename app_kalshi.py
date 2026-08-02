@@ -67,7 +67,7 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from config import et_today
-from data import perps_data, perps_model, perps_strategy, threads_client, threads_post
+from data import crypto_news, perps_data, perps_model, perps_strategy, threads_client, threads_post
 
 # Real production bug found and fixed on the sibling stocks server (now
 # alpaca_server.py, same comment there in full): every perps_*.py module
@@ -280,6 +280,22 @@ def _run_perps_threads_hourly_status() -> dict[str, Any]:
         return {"ok": False, "error": str(exc)}
 
 
+@_locked_job("perps_threads_trending_news", stale_after_sec=300)
+def _run_perps_threads_trending_news() -> dict[str, Any]:
+    """Posts a digest of what's currently trending in crypto news every 30
+    minutes -- the same general-newsroom headlines sentiment_score is
+    already built from, surfaced so the news potentially influencing the
+    model's own decisions is visible rather than an invisible input.
+    Read-only, never touches order placement."""
+    try:
+        headlines = crypto_news.get_trending_headlines(limit=5)
+        posted = threads_post.post_trending_news(headlines, market="crypto")
+        return {"ok": True, "posted": posted, "headline_count": len(headlines)}
+    except Exception as exc:
+        logger.warning("[app_kalshi] Threads trending-news post failed: %s", exc)
+        return {"ok": False, "error": str(exc)}
+
+
 def _ensure_background_jobs_started() -> None:
     global _startup_done
     if _startup_done:
@@ -311,6 +327,10 @@ def _ensure_background_jobs_started() -> None:
             scheduler.add_job(
                 _run_perps_threads_hourly_status, "interval", hours=1,
                 id="perps_threads_hourly_status", replace_existing=True,
+            )
+            scheduler.add_job(
+                _run_perps_threads_trending_news, "interval", minutes=30,
+                id="perps_threads_trending_news", replace_existing=True,
             )
             if ENABLE_PERPS_SCHEDULER:
                 scheduler.add_job(
@@ -596,6 +616,7 @@ _JOB_LABELS = {
     "perps_data_collect": f"Data collection -> HF (every {PERPS_DATA_COLLECT_MINUTES} min)",
     "perps_train": f"Model retrain (daily {PERPS_TRAIN_HOUR_ET:02d}:00 ET)",
     "perps_threads_hourly_status": "Threads hourly status post",
+    "perps_threads_trending_news": "Threads trending-news post (every 30 min)",
 }
 
 

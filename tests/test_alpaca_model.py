@@ -76,6 +76,27 @@ def test_train_model_succeeds_with_enough_signal_rows():
     assert alpaca_model.MODEL_META_PATH.exists()
 
 
+def test_train_model_surfaces_sentiment_scores_feature_importance():
+    """sentiment_score must be a real, verifiable input to the trained
+    model -- not just fed in and hoped to help -- so its learned weight
+    shows up in meta.feature_importances the same as every other feature."""
+    df = _synthetic_training_frame(n=500)
+    result = alpaca_model.train_model(df=df)
+    assert result["ok"] is True
+    importances = result["feature_importances"]
+    assert importances is not None
+    assert "sentiment_score" in importances
+
+
+def test_feature_importance_map_uses_coef_for_logistic_regression():
+    from sklearn.linear_model import LogisticRegression
+    import numpy as np
+
+    model = LogisticRegression().fit(np.array([[0.0, 1.0], [1.0, 0.0], [0.0, 0.0], [1.0, 1.0]]), [0, 1, 0, 1])
+    importances = alpaca_model._feature_importance_map(model, ["a", "b"])  # noqa: SLF001
+    assert set(importances.keys()) == {"a", "b"}
+
+
 def test_predict_direction_reports_model_ok_false_without_a_trained_model():
     result = alpaca_model.predict_direction("AAPL")
     assert result["model_ok"] is False
