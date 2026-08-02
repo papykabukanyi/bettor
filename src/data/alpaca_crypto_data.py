@@ -1,0 +1,370 @@
+"""Alpaca crypto market data -- a new, separate pipeline from alpaca_data.py
+(equities), built the same way the user asked: "the same recipe as perps"
+(perps_data.py's technical-indicator + real news-sentiment approach), but
+trading crypto pairs THROUGH Alpaca instead of Kalshi perpetual futures.
+
+Genuinely different from alpaca_data.py in a few ways, not just a renamed
+copy:
+  - Crypto trades 24/7 -- no market session, no time_of_day_pct (which was
+    anchored to the 9:30-4:00 equity session). Uses perps_data.py's own
+    hour_sin/hour_cos/dow_sin/dow_cos cyclical time encoding instead, which
+    makes sense for a market with no daily open/close.
+  - Sentiment reuses crypto_news.py directly (already coin-mapped, already
+    proven for perps) rather than stock_news.py -- "BTC/USD" maps to the
+    coin "BTC" crypto_news.get_sentiment() already knows how to fetch.
+  - The tradable universe is small (~20ish coins, not thousands of
+    equities), so there's no watchlist-ranking-from-a-huge-universe step --
+    every tradable USD-quoted pair is just directly tracked, same as
+    perps_data.py's own small fixed KNOWN_PERP_TICKERS list.
+
+Data flow (mirrors alpaca_data.py's shape):
+  get_crypto_universe()        -> tradable USD-quoted crypto pairs, from
+                                   Alpaca's own /v2/assets (asset_class=crypto)
+  fetch_recent_crypto_bars(symbol) -> a short, cached window for live
+                                   scanning/collection
+  engineer_features(df)        -> leakage-free technical features + real
+                                   crypto sentiment, same backward-only
+                                   discipline as every other pipeline here
+  push_minute_snapshot(df)     -> append/dedupe into today's parquet shard,
+                                   upload to HF_ALPACA_CRYPTO_DATASET_REPO
+"""
+from __future__ import annotations
+
+import datetime as dt
+import logging
+import os
+import re
+import time
+from typing import Any
+
+import numpy as np
+import pandas as pd
+
+from data import alpaca_client
+from data.crypto_news import get_sentiment
+
+logger = logging.getLogger(__name__)
+
+HF_API_KEY = os.getenv("HF_API_KEY", "")
+HF_ALPACA_CRYPTO_DATASET_REPO = os.getenv("HF_ALPACA_CRYPTO_DATASET_REPO", "papylove/alpaca-crypto-data")
+
+
+def symbol_to_coin(symbol: str) -> str:
+    """"BTC/USD" -> "BTC" -- the coin code crypto_news.get_sentiment() and
+    its _COIN_QUERIES dict already key off of."""
+    return symbol.split("/")[0].upper()
+
+
+_UNIVERSE_CACHE_TTL_SEC = 24 * 3600
+_universe_cache: dict[str, Any] = {"symbols": None, "computed_at": 0.0}
+
+
+def get_crypto_universe(*, force: bool = False) -> list[str]:
+    """Every tradable USD-quoted crypto pair on this Alpaca account
+    (BTC/USD, ETH/USD, ...) -- non-USD-quoted pairs (BTC-quoted, USDC-
+    quoted, USDT-quoted) are skipped for now to keep P&L in a single,
+    unambiguous currency. Cached for _UNIVERSE_CACHE_TTL_SEC, same as
+    alpaca_data.py's equity universe."""
+    now = time.time()
+    if not force and _universe_cache["symbols"] is not None and (now - _universe_cache["computed_at"]) < _UNIVERSE_CACHE_TTL_SEC:
+        return _universe_cache["symbols"]
+
+    try:
+        assets = alpaca_client.get_assets(status="active", asset_class="crypto")
+        symbols = sorted({
+            a["symbol"] for a in assets
+            if a.get("tradable") and a.get("symbol", "").endswith("/USD")
+        })
+    except Exception as exc:
+        logger.warning("[alpaca_crypto_data] failed to fetch crypto asset universe: %s", exc)
+        symbols = _universe_cache["symbols"] or []
+
+    _universe_cache["symbols"] = symbols
+    _universe_cache["computed_at"] = now
+    return symbols
+
+
+def _bars_to_df(bars: list[dict[str, Any]]) -> pd.DataFrame:
+    if not bars:
+        return pd.DataFrame({
+            "ts": pd.Series(dtype="int64"), "open": pd.Series(dtype="float64"),
+            "high": pd.Series(dtype="float64"), "low": pd.Series(dtype="float64"),
+            "close": pd.Series(dtype="float64"), "volume": pd.Series(dtype="float64"),
+        })
+    rows = [{
+        "ts": int(pd.Timestamp(b["t"]).timestamp()),
+        "open": float(b["o"]), "high": float(b["h"]), "low": float(b["l"]),
+        "close": float(b["c"]), "volume": float(b.get("v") or 0.0),
+    } for b in bars]
+    return pd.DataFrame(rows).drop_duplicates(subset="ts").sort_values("ts").reset_index(drop=True)
+
+
+LIVE_LOOKBACK_DAYS = int(os.getenv("ALPACA_CRYPTO_LIVE_LOOKBACK_DAYS", "5") or "5")
+_MINUTE_BAR_CACHE_TTL_SEC = int(os.getenv("ALPACA_CRYPTO_MINUTE_BAR_CACHE_TTL_SEC", "90") or "90")
+_minute_bar_cache: dict[str, tuple[pd.DataFrame, float]] = {}
+
+
+def fetch_crypto_bars(symbol: str, *, days: int = LIVE_LOOKBACK_DAYS) -> pd.DataFrame:
+    """Minute OHLCV for one crypto pair over the given lookback window --
+    a single call (alpaca_client.get_crypto_bars paginates internally)."""
+    end = dt.datetime.now(dt.timezone.utc)
+    start = end - dt.timedelta(days=days)
+    try:
+        bars = alpaca_client.get_crypto_bars([symbol], timeframe="1Min", start=start.isoformat(), end=end.isoformat()).get(symbol, [])
+    except Exception as exc:
+        logger.warning("[alpaca_crypto_data] bar fetch failed for %s: %s", symbol, exc)
+        return _bars_to_df([])
+    return _bars_to_df(bars)
+
+
+def fetch_recent_crypto_bars(symbol: str, *, days: int = LIVE_LOOKBACK_DAYS) -> pd.DataFrame:
+    """Short-window, short-TTL-cached fetch for live feature computation --
+    same rate-limit-conscious caching discipline as alpaca_data.py's
+    fetch_recent_minute_bars."""
+    cache_key = f"{symbol}:{days}"
+    cached = _minute_bar_cache.get(cache_key)
+    now_mono = time.monotonic()
+    if cached and (now_mono - cached[1]) < _MINUTE_BAR_CACHE_TTL_SEC:
+        return cached[0]
+    df = fetch_crypto_bars(symbol, days=days)
+    _minute_bar_cache[cache_key] = (df, now_mono)
+    return df
+
+
+FEATURE_COLUMNS = [
+    "ret_1m", "ret_5m", "ret_15m", "ret_30m", "ret_60m",
+    "dist_to_ma_15", "dist_to_ma_30",
+    "volatility_5", "volatility_15", "volatility_30",
+    "volume_ratio_5", "volume_ratio_15", "dollar_volume_z",
+    "rsi_14", "macd_hist_pct", "bb_pct_b", "bb_bandwidth", "atr_pct", "stoch_k",
+    "hour_sin", "hour_cos", "dow_sin", "dow_cos", "sentiment_score",
+]
+MIN_ROWS_FOR_FEATURES = 65  # the 60-minute return window + a small buffer
+
+
+def engineer_features(one_min_df: pd.DataFrame, *, sentiment_score: float = 0.0) -> pd.DataFrame:
+    """Leakage-free volume + volatility + return features from 1-minute
+    bars -- identical technical-indicator formulas to alpaca_data.py's own
+    engineer_features (RSI/MACD/Bollinger/ATR/stochastic/volume ratios),
+    with hour/day-of-week cyclical encoding in place of time_of_day_pct
+    (crypto has no market session to anchor that feature to) and real
+    sentiment_score from crypto_news.get_sentiment(), broadcast as a
+    constant across the batch same as every other pipeline here."""
+    if one_min_df.empty or len(one_min_df) < MIN_ROWS_FOR_FEATURES:
+        return pd.DataFrame()
+
+    df = one_min_df.copy()
+    df["ret_1m"] = df["close"].pct_change(1)
+    df["ret_5m"] = df["close"].pct_change(5)
+    df["ret_15m"] = df["close"].pct_change(15)
+    df["ret_30m"] = df["close"].pct_change(30)
+    df["ret_60m"] = df["close"].pct_change(60)
+    df["ma_15"] = df["close"].rolling(15).mean()
+    df["ma_30"] = df["close"].rolling(30).mean()
+    df["dist_to_ma_15"] = (df["close"] - df["ma_15"]) / df["ma_15"]
+    df["dist_to_ma_30"] = (df["close"] - df["ma_30"]) / df["ma_30"]
+    df["volatility_5"] = df["ret_1m"].rolling(5).std()
+    df["volatility_15"] = df["ret_1m"].rolling(15).std()
+    df["volatility_30"] = df["ret_1m"].rolling(30).std()
+
+    vol_ma_5 = df["volume"].rolling(5).mean()
+    vol_ma_15 = df["volume"].rolling(15).mean()
+    vol_ma_60 = df["volume"].rolling(60).mean().replace(0, float("nan"))
+    df["volume_ratio_5"] = vol_ma_5 / vol_ma_60
+    df["volume_ratio_15"] = vol_ma_15 / vol_ma_60
+    dollar_volume = df["close"] * df["volume"]
+    dv_mean_60 = dollar_volume.rolling(60).mean()
+    dv_std_60 = dollar_volume.rolling(60).std().replace(0, float("nan"))
+    df["dollar_volume_z"] = (dollar_volume - dv_mean_60) / dv_std_60
+
+    delta = df["close"].diff()
+    avg_gain = delta.clip(lower=0).rolling(14).mean()
+    avg_loss = (-delta.clip(upper=0)).rolling(14).mean()
+    rs = avg_gain / avg_loss.replace(0, float("nan"))
+    rsi_raw = 100 - (100 / (1 + rs))
+    rsi_raw = rsi_raw.mask((avg_loss == 0) & (avg_gain > 0), 100.0)
+    df["rsi_14"] = rsi_raw / 100.0
+
+    ema_12 = df["close"].ewm(span=12, adjust=False).mean()
+    ema_26 = df["close"].ewm(span=26, adjust=False).mean()
+    macd_line = ema_12 - ema_26
+    macd_signal = macd_line.ewm(span=9, adjust=False).mean()
+    df["macd_hist_pct"] = (macd_line - macd_signal) / df["close"]
+
+    bb_mid = df["close"].rolling(20).mean()
+    bb_std = df["close"].rolling(20).std()
+    bb_range = (4 * bb_std).replace(0, float("nan"))
+    df["bb_pct_b"] = (df["close"] - (bb_mid - 2 * bb_std)) / bb_range
+    df["bb_bandwidth"] = (4 * bb_std) / bb_mid
+
+    prev_close = df["close"].shift(1)
+    true_range = pd.concat([
+        df["high"] - df["low"], (df["high"] - prev_close).abs(), (df["low"] - prev_close).abs(),
+    ], axis=1).max(axis=1)
+    df["atr_pct"] = true_range.rolling(14).mean() / df["close"]
+
+    low_14 = df["low"].rolling(14).min()
+    high_14 = df["high"].rolling(14).max()
+    stoch_range = (high_14 - low_14).replace(0, float("nan"))
+    df["stoch_k"] = (df["close"] - low_14) / stoch_range
+
+    ts_utc = pd.to_datetime(df["ts"], unit="s", utc=True)
+    hour_frac = ts_utc.dt.hour + ts_utc.dt.minute / 60.0
+    df["hour_sin"] = np.sin(2 * np.pi * hour_frac / 24.0)
+    df["hour_cos"] = np.cos(2 * np.pi * hour_frac / 24.0)
+    dow = ts_utc.dt.dayofweek
+    df["dow_sin"] = np.sin(2 * np.pi * dow / 7.0)
+    df["dow_cos"] = np.cos(2 * np.pi * dow / 7.0)
+
+    df["sentiment_score"] = float(sentiment_score)
+
+    horizon = 1
+    df["future_close"] = df["close"].shift(-horizon)
+    df["label_up"] = (df["future_close"] > df["close"]).astype("Int64")
+    df.loc[df["future_close"].isna(), "label_up"] = pd.NA
+
+    return df.dropna(subset=FEATURE_COLUMNS).reset_index(drop=True)
+
+
+def _upload_shard(df: pd.DataFrame, *, path_in_repo: str, commit_message: str) -> dict[str, Any]:
+    if not HF_API_KEY:
+        return {"ok": False, "reason": "no_hf_api_key"}
+    import tempfile
+    from huggingface_hub import HfApi
+
+    try:
+        api = HfApi(token=HF_API_KEY)
+        try:
+            api.repo_info(repo_id=HF_ALPACA_CRYPTO_DATASET_REPO, repo_type="dataset")
+        except Exception:
+            api.create_repo(repo_id=HF_ALPACA_CRYPTO_DATASET_REPO, repo_type="dataset", exist_ok=True, private=False)
+        with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as tmp:
+            df.to_parquet(tmp.name, index=False)
+            tmp_path = tmp.name
+        try:
+            api.upload_file(
+                path_or_fileobj=tmp_path, path_in_repo=path_in_repo,
+                repo_id=HF_ALPACA_CRYPTO_DATASET_REPO, repo_type="dataset", commit_message=commit_message,
+            )
+        finally:
+            os.unlink(tmp_path)
+        return {"ok": True, "rows": len(df), "path": path_in_repo}
+    except Exception as exc:
+        logger.warning("[alpaca_crypto_data] HF upload failed for %s: %s", path_in_repo, exc)
+        return {"ok": False, "error": str(exc)}
+
+
+_DATE_SHARD_RE = re.compile(r"^minute/\d{4}-\d{2}-\d{2}\.parquet$")
+
+
+def push_minute_snapshot(df: pd.DataFrame) -> dict[str, Any]:
+    """Minute bars sharded by calendar day across ALL crypto pairs -- same
+    merge-not-overwrite discipline as alpaca_data.py's own push_minute_snapshot."""
+    if df.empty:
+        return {"ok": False, "reason": "no_rows"}
+    if not HF_API_KEY:
+        return {"ok": False, "reason": "no_hf_api_key"}
+
+    today = dt.datetime.now(dt.timezone.utc).date().isoformat()
+    path_in_repo = f"minute/{today}.parquet"
+    combined = df
+    try:
+        from huggingface_hub import hf_hub_download
+        existing_path = hf_hub_download(repo_id=HF_ALPACA_CRYPTO_DATASET_REPO, filename=path_in_repo, repo_type="dataset", token=HF_API_KEY)
+        existing = pd.read_parquet(existing_path)
+        combined = pd.concat([existing, df], ignore_index=True)
+    except Exception as exc:
+        logger.info("[alpaca_crypto_data] no existing minute shard for %s yet (or fetch failed), starting fresh: %s", today, exc)
+
+    if "symbol" in combined.columns and "ts" in combined.columns:
+        combined = combined.drop_duplicates(subset=["symbol", "ts"]).sort_values(["symbol", "ts"]).reset_index(drop=True)
+    return _upload_shard(combined, path_in_repo=path_in_repo, commit_message=f"append crypto minute bars: {today}")
+
+
+MAX_TRAIN_ROWS = int(os.getenv("ALPACA_CRYPTO_MAX_TRAIN_ROWS", "150000") or "150000")
+
+
+def collect_dataset_rows(symbols: list[str] | None = None) -> pd.DataFrame:
+    """Fetch + engineer features for the given crypto pairs (default: the
+    full tradable universe -- small enough, unlike equities, that there's
+    no need to narrow to a ranked top-N watchlist first)."""
+    target_symbols = symbols if symbols is not None else get_crypto_universe()
+    frames = []
+    for symbol in target_symbols:
+        try:
+            one_min_df = fetch_recent_crypto_bars(symbol)
+            sentiment = get_sentiment(symbol_to_coin(symbol))
+            feats = engineer_features(one_min_df, sentiment_score=sentiment["sentiment_score"])
+            if feats.empty:
+                continue
+            feats.insert(0, "symbol", symbol)
+            frames.append(feats)
+        except Exception as exc:
+            logger.warning("[alpaca_crypto_data] collect failed for %s: %s", symbol, exc)
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True)
+
+
+def latest_feature_row(symbol: str) -> dict[str, Any] | None:
+    """The single most-recent feature row for one crypto pair, for live
+    prediction. Its label is always NaN (the future outcome hasn't
+    happened yet) -- expected, we only need the feature columns here."""
+    try:
+        one_min_df = fetch_recent_crypto_bars(symbol)
+        sentiment = get_sentiment(symbol_to_coin(symbol))
+        feats = engineer_features(one_min_df, sentiment_score=sentiment["sentiment_score"])
+        if feats.empty:
+            return None
+        last = feats.iloc[-1]
+        row = {col: float(last[col]) for col in FEATURE_COLUMNS}
+        row["symbol"] = symbol
+        row["current_price"] = float(one_min_df["close"].iloc[-1])
+        row["short_ma"] = float(last["ma_15"])
+        return row
+    except Exception as exc:
+        logger.warning("[alpaca_crypto_data] latest_feature_row failed for %s: %s", symbol, exc)
+        return None
+
+
+def load_training_dataset(*, max_shards: int = 90, max_rows: int | None = None) -> pd.DataFrame:
+    """Downloads minute-bar shards from HF_ALPACA_CRYPTO_DATASET_REPO,
+    most-recent-first, stopping once enough rows are in hand to cover the
+    cap -- same discipline as every other load_training_dataset here."""
+    if not HF_API_KEY:
+        return pd.DataFrame()
+    cap = MAX_TRAIN_ROWS if max_rows is None else max_rows
+    stop_after_rows = int(cap * 1.5) if cap else None
+    frames: list[pd.DataFrame] = []
+    accumulated_rows = 0
+    try:
+        from huggingface_hub import HfApi, hf_hub_download
+        api = HfApi(token=HF_API_KEY)
+        hf_files = [f for f in api.list_repo_files(repo_id=HF_ALPACA_CRYPTO_DATASET_REPO, repo_type="dataset") if _DATE_SHARD_RE.match(f)]
+        hf_files = sorted(hf_files, reverse=True)[:max_shards]
+        for f in hf_files:
+            if stop_after_rows and accumulated_rows >= stop_after_rows:
+                break
+            try:
+                local_path = hf_hub_download(repo_id=HF_ALPACA_CRYPTO_DATASET_REPO, filename=f, repo_type="dataset", token=HF_API_KEY)
+                shard = pd.read_parquet(local_path)
+                if "symbol" in shard.columns and "ts" in shard.columns:
+                    frames.append(shard)
+                    accumulated_rows += len(shard)
+                else:
+                    logger.warning("[alpaca_crypto_data] skipping shard with unexpected schema: %s", f)
+            except Exception as exc:
+                logger.warning("[alpaca_crypto_data] failed to read shard %s: %s", f, exc)
+    except Exception as exc:
+        logger.warning("[alpaca_crypto_data] HF dataset listing failed: %s", exc)
+
+    if not frames:
+        return pd.DataFrame()
+    combined = pd.concat(frames, ignore_index=True)
+    del frames
+    if "symbol" in combined.columns and "ts" in combined.columns:
+        combined = combined.drop_duplicates(subset=["symbol", "ts"])
+        combined["symbol"] = combined["symbol"].astype("category")
+        if cap and len(combined) > cap:
+            combined = combined.sort_values("ts").tail(cap).reset_index(drop=True)
+    return combined

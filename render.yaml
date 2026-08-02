@@ -102,6 +102,12 @@ services:
         value: papylove/alpaca-data
       - key: HF_ALPACA_MODEL_REPO
         value: papylove/alpaca-model
+      # Separate crypto strategy, same Alpaca account/credentials --
+      # see alpaca_crypto_strategy.py's own docstring.
+      - key: HF_ALPACA_CRYPTO_DATASET_REPO
+        value: papylove/alpaca-crypto-data
+      - key: HF_ALPACA_CRYPTO_MODEL_REPO
+        value: papylove/alpaca-crypto-model
       # Cross-link to the Perps service's dashboard (nav link the other
       # direction). Same manual-fill caveat as ALPACA_SERVER_URL above --
       # bettor-dashboard's URL is already known (bettor-00di.onrender.com)

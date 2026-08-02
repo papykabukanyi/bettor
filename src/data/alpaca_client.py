@@ -203,6 +203,75 @@ def get_latest_quote(symbol: str) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Crypto market data -- a genuinely different API surface from stocks, not
+# just a parameter tweak: different versioned path (v1beta3, not v2),
+# different base concept (a `{loc}` liquidity-location parameter, "us" here),
+# and crypto pairs use a "BTC/USD"-style symbol with a slash. Trading orders
+# themselves (place_order/get_order/cancel_order above) ARE shared with
+# stocks -- crypto and equities use the same /v2/orders endpoint, just with
+# a different symbol format and no bracket/stop order support for crypto
+# (see build_crypto_order's own docstring).
+# ---------------------------------------------------------------------------
+_CRYPTO_LOC = os.getenv("ALPACA_CRYPTO_LOC", "us")
+
+
+def get_crypto_bars(
+    symbols: list[str], *, timeframe: str = "1Min", start: str | None = None,
+    end: str | None = None, limit: int = 10000,
+) -> dict[str, list[dict[str, Any]]]:
+    """Historical OHLCV bars for one or more crypto pairs (e.g. "BTC/USD")
+    in a single call -- same multi-symbol-in-one-call advantage as
+    get_bars(), same internal pagination. No `feed` param here -- unlike
+    stocks, Alpaca crypto data has no separate paid/free feed tiers."""
+    params: dict[str, Any] = {"symbols": ",".join(symbols), "timeframe": timeframe, "limit": limit}
+    if start:
+        params["start"] = start
+    if end:
+        params["end"] = end
+
+    bars_by_symbol: dict[str, list[dict[str, Any]]] = {}
+    page_token = None
+    for _ in range(_MAX_BAR_PAGES):
+        if page_token:
+            params["page_token"] = page_token
+        data = _data_get(f"/v1beta3/crypto/{_CRYPTO_LOC}/bars", params=params)
+        for symbol, bars in (data.get("bars") or {}).items():
+            bars_by_symbol.setdefault(symbol, []).extend(bars)
+        page_token = data.get("next_page_token")
+        if not page_token:
+            break
+    return bars_by_symbol
+
+
+def get_crypto_latest_quote(symbol: str) -> dict[str, Any]:
+    """A single real-time-ish bid/ask quote for one crypto pair -- this
+    endpoint is confirmed public (no auth required by Alpaca), but auth
+    headers are sent anyway since every other call here needs them and it
+    costs nothing extra."""
+    data = _data_get(f"/v1beta3/crypto/{_CRYPTO_LOC}/latest/quotes", params={"symbols": symbol})
+    return (data.get("quotes") or {}).get(symbol) or {}
+
+
+def build_crypto_order(*, symbol: str, side: str, notional: float | None = None, qty: float | None = None) -> dict[str, Any]:
+    """A plain market order for one crypto pair. Deliberately NOT a bracket
+    order -- Alpaca crypto orders don't support order_class=bracket or
+    stop orders at all (confirmed via Alpaca's own docs: crypto is
+    restricted to market/limit/stop-limit, time_in_force gtc/ioc only), so
+    take-profit/stop-loss/max-hold here must be managed by the caller's
+    own poll-and-close loop (see alpaca_crypto_strategy.py), the same way
+    Kalshi perps already has to since Kalshi has no broker-native bracket
+    order either. `notional` (a dollar amount) is preferred over `qty` for
+    entries -- crypto supports fractional sizing down to 1e-9, so a small
+    account is never blocked the way whole-share equity sizing can be."""
+    order: dict[str, Any] = {"symbol": symbol, "side": side, "type": "market", "time_in_force": "gtc"}
+    if notional is not None:
+        order["notional"] = f"{notional:.2f}"
+    else:
+        order["qty"] = f"{qty:.9f}"
+    return order
+
+
+# ---------------------------------------------------------------------------
 # Order placement. Alpaca supports bracket orders NATIVELY in a single
 # order submission (order_class="bracket") -- simpler than Schwab's
 # TRIGGER+OCO nested child-order structure, and Alpaca itself keeps the

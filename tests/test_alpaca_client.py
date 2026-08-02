@@ -182,6 +182,68 @@ def test_get_latest_quote_returns_empty_dict_when_absent(monkeypatch):
     assert alpaca_client.get_latest_quote("ZZZZ") == {}
 
 
+def test_get_crypto_bars_uses_the_v1beta3_crypto_path(monkeypatch):
+    captured = {}
+
+    def fake_get(url, *, headers, params, timeout):
+        captured["url"] = url
+        captured["params"] = dict(params)
+        return _FakeResponse({"bars": {"BTC/USD": [{"t": "2024-01-01T00:00:00Z", "o": 1, "h": 1, "l": 1, "c": 1, "v": 1}]}, "next_page_token": None})
+
+    monkeypatch.setattr(alpaca_client.requests, "get", fake_get)
+    bars = alpaca_client.get_crypto_bars(["BTC/USD"], timeframe="1Min")
+    assert captured["url"] == f"{alpaca_client.DATA_BASE_URL}/v1beta3/crypto/us/bars"
+    assert captured["params"]["symbols"] == "BTC/USD"
+    assert "feed" not in captured["params"]  # crypto has no separate feed tiers, unlike stocks
+    assert len(bars["BTC/USD"]) == 1
+
+
+def test_get_crypto_bars_paginates(monkeypatch):
+    calls = []
+
+    def fake_get(url, *, headers, params, timeout):
+        calls.append(dict(params))
+        if "page_token" not in params:
+            return _FakeResponse({"bars": {"BTC/USD": [{"t": "2024-01-01T00:00:00Z", "o": 1, "h": 1, "l": 1, "c": 1, "v": 1}]}, "next_page_token": "tok-2"})
+        return _FakeResponse({"bars": {"BTC/USD": [{"t": "2024-01-02T00:00:00Z", "o": 2, "h": 2, "l": 2, "c": 2, "v": 2}]}, "next_page_token": None})
+
+    monkeypatch.setattr(alpaca_client.requests, "get", fake_get)
+    bars = alpaca_client.get_crypto_bars(["BTC/USD"])
+    assert len(bars["BTC/USD"]) == 2
+    assert len(calls) == 2
+
+
+def test_get_crypto_latest_quote_unwraps_the_symbol(monkeypatch):
+    captured = {}
+
+    def fake_get(url, *, headers, params, timeout):
+        captured["url"] = url
+        captured["params"] = params
+        return _FakeResponse({"quotes": {"BTC/USD": {"ap": 65000.5, "bp": 64999.0}}})
+
+    monkeypatch.setattr(alpaca_client.requests, "get", fake_get)
+    quote = alpaca_client.get_crypto_latest_quote("BTC/USD")
+    assert quote == {"ap": 65000.5, "bp": 64999.0}
+    assert captured["url"] == f"{alpaca_client.DATA_BASE_URL}/v1beta3/crypto/us/latest/quotes"
+    assert captured["params"]["symbols"] == "BTC/USD"
+
+
+def test_get_crypto_latest_quote_returns_empty_dict_when_absent(monkeypatch):
+    monkeypatch.setattr(alpaca_client.requests, "get", lambda url, **kw: _FakeResponse({"quotes": {}}))
+    assert alpaca_client.get_crypto_latest_quote("ZZZ/USD") == {}
+
+
+def test_build_crypto_order_uses_notional_by_default():
+    order = alpaca_client.build_crypto_order(symbol="BTC/USD", side="buy", notional=50.0)
+    assert order == {"symbol": "BTC/USD", "side": "buy", "type": "market", "time_in_force": "gtc", "notional": "50.00"}
+
+
+def test_build_crypto_order_uses_qty_when_notional_not_given():
+    order = alpaca_client.build_crypto_order(symbol="BTC/USD", side="sell", qty=0.001234567)
+    assert order["qty"] == "0.001234567"
+    assert "notional" not in order
+
+
 def test_build_bracket_order_shape_for_a_buy():
     order = alpaca_client.build_bracket_order(
         symbol="AAPL", quantity=10, side="buy", take_profit_price=101.0, stop_loss_price=98.0,

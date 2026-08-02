@@ -282,3 +282,66 @@ def test_api_alpaca_status_reports_configured_flag(monkeypatch):
         resp = client.get("/api/alpaca/status")
         assert resp.status_code == 200
         assert resp.get_json()["alpaca_configured"] is True
+
+
+# ---------------------------------------------------------------------------
+# Crypto strategy job wiring -- separate from the equities jobs above, no
+# market-hours gating.
+# ---------------------------------------------------------------------------
+def test_crypto_fast_check_job_calls_manage_open_positions(monkeypatch):
+    from data import alpaca_crypto_strategy as strat
+
+    monkeypatch.setattr(strat, "manage_open_positions", lambda: {"action": "no_position", "checks": []})
+    result = alpaca_server._run_alpaca_crypto_fast_check.__wrapped__()  # noqa: SLF001
+    assert result == {"action": "no_position", "checks": []}
+
+
+def test_crypto_entry_scan_job_calls_scan_and_enter(monkeypatch):
+    from data import alpaca_crypto_strategy as strat
+
+    monkeypatch.setattr(strat, "scan_and_enter", lambda: {"opened": [{"symbol": "BTC/USD", "action": "opened"}]})
+    result = alpaca_server._run_alpaca_crypto_entry_scan.__wrapped__()  # noqa: SLF001
+    assert result["opened"][0]["symbol"] == "BTC/USD"
+
+
+def test_crypto_data_collect_job_returns_no_rows_when_nothing_collected(monkeypatch):
+    from data import alpaca_crypto_data
+
+    monkeypatch.setattr(alpaca_crypto_data, "collect_dataset_rows", lambda: pd.DataFrame())
+    result = alpaca_server._run_alpaca_crypto_data_collect.__wrapped__()  # noqa: SLF001
+    assert result == {"ok": False, "reason": "no_rows_collected"}
+
+
+def test_crypto_data_collect_job_pushes_collected_rows(monkeypatch):
+    from data import alpaca_crypto_data
+
+    df = pd.DataFrame({"symbol": ["BTC/USD"], "ts": [1]})
+    monkeypatch.setattr(alpaca_crypto_data, "collect_dataset_rows", lambda: df)
+    pushed = {}
+
+    def fake_push(d):
+        pushed["df"] = d
+        return {"ok": True}
+
+    monkeypatch.setattr(alpaca_crypto_data, "push_minute_snapshot", fake_push)
+    result = alpaca_server._run_alpaca_crypto_data_collect.__wrapped__()  # noqa: SLF001
+    assert result == {"ok": True}
+    assert list(pushed["df"]["symbol"]) == ["BTC/USD"]
+
+
+def test_crypto_train_job_calls_train_model(monkeypatch):
+    from data import alpaca_crypto_model
+
+    monkeypatch.setattr(alpaca_crypto_model, "train_model", lambda: {"ok": True, "rows": 500})
+    result = alpaca_server._run_alpaca_crypto_train.__wrapped__()  # noqa: SLF001
+    assert result == {"ok": True, "rows": 500}
+
+
+def test_api_alpaca_crypto_status_reports_configured_flag(monkeypatch):
+    from data import alpaca_client
+
+    monkeypatch.setattr(alpaca_client, "is_configured", lambda: True)
+    with alpaca_server.app.test_client() as client:
+        resp = client.get("/api/alpaca/crypto/status")
+        assert resp.status_code == 200
+        assert resp.get_json()["alpaca_configured"] is True

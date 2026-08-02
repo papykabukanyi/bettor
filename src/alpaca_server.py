@@ -44,7 +44,10 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from config import et_today
-from data import alpaca_backtest, alpaca_client, alpaca_data, alpaca_model, alpaca_strategy, stock_news, threads_post
+from data import (
+    alpaca_backtest, alpaca_client, alpaca_crypto_data, alpaca_crypto_model, alpaca_crypto_strategy,
+    alpaca_data, alpaca_model, alpaca_strategy, stock_news, threads_post,
+)
 from server_common import DATA_DIR, is_cron_authorized, load_json, make_job_lock, save_json
 
 # Real production bug found and fixed on the Schwab side of this same
@@ -99,6 +102,15 @@ PERPS_SERVER_URL = os.getenv("PERPS_SERVER_URL", "#")
 # grace period -- see that file's comment for the full story.
 ALPACA_STARTUP_GRACE_SECONDS = max(0, int(os.getenv("ALPACA_STARTUP_GRACE_SECONDS", "45") or "45"))
 
+# Crypto strategy -- separate cadence from equities since crypto trades
+# 24/7 (no market-hours gating at all, unlike ALPACA_INTENSIVE_TRAINING_MINUTES's
+# closed-market check).
+ALPACA_CRYPTO_CYCLE_MINUTES = max(1, int(os.getenv("ALPACA_CRYPTO_CYCLE_MINUTES", "2") or "2"))
+ALPACA_CRYPTO_FAST_CHECK_SECONDS = max(5, int(os.getenv("ALPACA_CRYPTO_FAST_CHECK_SECONDS", "20") or "20"))
+ALPACA_CRYPTO_DATA_COLLECT_MINUTES = max(5, int(os.getenv("ALPACA_CRYPTO_DATA_COLLECT_MINUTES", "15") or "15"))
+ALPACA_CRYPTO_TRAIN_HOUR_ET = int(os.getenv("ALPACA_CRYPTO_TRAIN_HOUR_ET", "5") or "5")
+ALPACA_CRYPTO_STARTUP_GRACE_SECONDS = max(0, int(os.getenv("ALPACA_CRYPTO_STARTUP_GRACE_SECONDS", "60") or "60"))
+
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
 app = Flask("alpaca_stocks_server", template_folder="templates")
@@ -114,6 +126,8 @@ ALPACA_LATEST_CYCLE_FILE = DATA_DIR / "alpaca_latest_cycle.json"
 ALPACA_LATEST_POSITION_CHECK_FILE = DATA_DIR / "alpaca_latest_position_check.json"
 ALPACA_LATEST_SWEEP_FILE = DATA_DIR / "alpaca_latest_sweep.json"
 ALPACA_LATEST_BACKFILL_FILE = DATA_DIR / "alpaca_latest_backfill.json"
+ALPACA_CRYPTO_LATEST_CYCLE_FILE = DATA_DIR / "alpaca_crypto_latest_cycle.json"
+ALPACA_CRYPTO_LATEST_POSITION_CHECK_FILE = DATA_DIR / "alpaca_crypto_latest_position_check.json"
 
 
 # Same reasoning as app_kalshi.py's own copy of this: on SIGTERM,
@@ -194,6 +208,42 @@ def _run_alpaca_data_collect() -> dict[str, Any]:
 @_locked_job("alpaca_train", stale_after_sec=1800)
 def _run_alpaca_train() -> dict[str, Any]:
     return alpaca_model.train_model()
+
+
+# ---------------------------------------------------------------------------
+# Crypto strategy jobs -- separate from the equities jobs above, no
+# market-hours gating (crypto trades 24/7).
+# ---------------------------------------------------------------------------
+@_locked_job("alpaca_crypto_fast_check", stale_after_sec=60)
+def _run_alpaca_crypto_fast_check() -> dict[str, Any]:
+    result = alpaca_crypto_strategy.manage_open_positions()
+    if result.get("action") != "no_position":
+        save_json(ALPACA_CRYPTO_LATEST_POSITION_CHECK_FILE, result)
+    return result
+
+
+@_locked_job("alpaca_crypto_entry_scan", stale_after_sec=300)
+def _run_alpaca_crypto_entry_scan() -> dict[str, Any]:
+    result = alpaca_crypto_strategy.scan_and_enter()
+    save_json(ALPACA_CRYPTO_LATEST_CYCLE_FILE, result)
+    return result
+
+
+@_locked_job("alpaca_crypto_data_collect", stale_after_sec=600)
+def _run_alpaca_crypto_data_collect() -> dict[str, Any]:
+    try:
+        df = alpaca_crypto_data.collect_dataset_rows()
+        if df.empty:
+            return {"ok": False, "reason": "no_rows_collected"}
+        return alpaca_crypto_data.push_minute_snapshot(df)
+    except Exception as exc:
+        logger.warning("[alpaca_server] crypto data collect failed: %s", exc)
+        return {"ok": False, "error": str(exc)}
+
+
+@_locked_job("alpaca_crypto_train", stale_after_sec=1800)
+def _run_alpaca_crypto_train() -> dict[str, Any]:
+    return alpaca_crypto_model.train_model()
 
 
 @_locked_job("alpaca_threads_trending_news", stale_after_sec=300)
@@ -339,14 +389,36 @@ def _ensure_background_jobs_started() -> None:
                 _run_alpaca_threads_trending_news, "interval", minutes=30,
                 id="alpaca_threads_trending_news", replace_existing=True,
             )
+            scheduler.add_job(
+                _run_alpaca_crypto_data_collect, "interval", minutes=ALPACA_CRYPTO_DATA_COLLECT_MINUTES,
+                id="alpaca_crypto_data_collect", replace_existing=True,
+                next_run_time=dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=ALPACA_CRYPTO_DATA_COLLECT_MINUTES),
+            )
+            scheduler.add_job(
+                _run_alpaca_crypto_train, "cron", hour=ALPACA_CRYPTO_TRAIN_HOUR_ET, minute=0,
+                id="alpaca_crypto_train", replace_existing=True,
+            )
+            scheduler.add_job(
+                _run_alpaca_crypto_fast_check, "interval", seconds=ALPACA_CRYPTO_FAST_CHECK_SECONDS,
+                id="alpaca_crypto_fast_check", replace_existing=True,
+            )
+            scheduler.add_job(
+                _run_alpaca_crypto_entry_scan, "interval", minutes=ALPACA_CRYPTO_CYCLE_MINUTES,
+                id="alpaca_crypto_entry_scan", replace_existing=True,
+                next_run_time=dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=ALPACA_CRYPTO_STARTUP_GRACE_SECONDS),
+            )
             scheduler.start()
             logger.info(
                 "Alpaca scheduler started: fast exit check every %ds, entry scan every %d min (first run in %ds), "
                 "data collect every %d min, train daily at %02d:00 ET, intensive training checked every %d min, "
-                "mode=%s live_trading=%s",
+                "mode=%s live_trading=%s -- crypto: fast check every %ds, entry scan every %d min, "
+                "data collect every %d min, train daily at %02d:00 ET, mode=%s live_trading=%s",
                 ALPACA_FAST_CHECK_SECONDS, ALPACA_CYCLE_MINUTES, ALPACA_STARTUP_GRACE_SECONDS,
                 ALPACA_DATA_COLLECT_MINUTES, ALPACA_TRAIN_HOUR_ET, ALPACA_INTENSIVE_TRAINING_MINUTES,
                 alpaca_strategy.MODE, alpaca_strategy.LIVE_TRADING_ENABLED,
+                ALPACA_CRYPTO_FAST_CHECK_SECONDS, ALPACA_CRYPTO_CYCLE_MINUTES,
+                ALPACA_CRYPTO_DATA_COLLECT_MINUTES, ALPACA_CRYPTO_TRAIN_HOUR_ET,
+                alpaca_crypto_strategy.MODE, alpaca_crypto_strategy.LIVE_TRADING_ENABLED,
             )
 
         def _runner() -> None:
@@ -371,6 +443,19 @@ def _ensure_background_jobs_started() -> None:
             # collision reasoning as app_kalshi.py: the scheduled
             # alpaca_entry_scan job's own delayed first tick already covers
             # this safely.
+            try:
+                _run_alpaca_crypto_data_collect()
+                logger.info("Startup alpaca crypto data collect completed")
+            except Exception as exc:
+                logger.warning("Startup alpaca crypto data collect failed: %s", exc)
+            try:
+                if alpaca_crypto_model.load_model()[0] is None:
+                    train_result = _run_alpaca_crypto_train()
+                    logger.info("Startup alpaca crypto train attempt (cold start): %s", train_result.get("reason", "ok"))
+                else:
+                    logger.info("Startup alpaca crypto train skipped: model already cached, daily cron will retrain")
+            except Exception as exc:
+                logger.warning("Startup alpaca crypto train failed: %s", exc)
 
         threading.Thread(target=_runner, daemon=True, name="alpaca-server-startup-autorun").start()
         _startup_done = True
@@ -481,6 +566,74 @@ def api_alpaca_trades():
     })
 
 
+@app.route("/api/alpaca/crypto/status")
+def api_alpaca_crypto_status():
+    state = alpaca_crypto_strategy._load_state()  # noqa: SLF001
+    _, meta = alpaca_crypto_model.load_model()
+    latest_cycle = load_json(ALPACA_CRYPTO_LATEST_CYCLE_FILE, {})
+    latest_position_check = load_json(ALPACA_CRYPTO_LATEST_POSITION_CHECK_FILE, {})
+
+    realized_pnl_by_date = state.get("realized_pnl_by_date") or {}
+    total_realized_pnl = round(sum(float(v) for v in realized_pnl_by_date.values()), 6)
+    positions = [
+        {**p, **alpaca_crypto_strategy.position_exit_levels(p)}
+        for p in (state.get("positions") or [])
+    ]
+
+    return jsonify({
+        "ok": True,
+        "now": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "mode": alpaca_crypto_strategy.MODE,
+        "live_trading_enabled": alpaca_crypto_strategy.LIVE_TRADING_ENABLED,
+        "alpaca_configured": alpaca_client.is_configured(),
+        "balance": state.get("balance", alpaca_crypto_strategy.SIMULATE_STARTING_BALANCE),
+        "available_balance": alpaca_crypto_strategy.get_available_balance() if alpaca_crypto_strategy.MODE == "simulate" else None,
+        "positions": positions,
+        "open_position_count": len(positions),
+        "max_concurrent_positions": alpaca_crypto_strategy.MAX_CONCURRENT_POSITIONS,
+        "today_realized_pnl_usd": float(realized_pnl_by_date.get(et_today().isoformat(), 0.0)),
+        "total_realized_pnl_usd": total_realized_pnl,
+        "trade_count": len(state.get("trade_log") or []),
+        "model": {
+            "trained": meta is not None,
+            "model_type": (meta or {}).get("model_type"),
+            "trained_at": (meta or {}).get("trained_at"),
+            "rows": (meta or {}).get("rows"),
+            "scores": (meta or {}).get("scores"),
+            "feature_importances": (meta or {}).get("feature_importances"),
+        },
+        "latest_cycle": latest_cycle,
+        "latest_position_check": latest_position_check,
+        "params": {
+            "position_size_pct": alpaca_crypto_strategy.POSITION_SIZE_PCT,
+            "max_concurrent_positions": alpaca_crypto_strategy.MAX_CONCURRENT_POSITIONS,
+            "take_profit_pct": alpaca_crypto_strategy.TAKE_PROFIT_PCT,
+            "stop_loss_pct": alpaca_crypto_strategy.STOP_LOSS_PCT,
+            "max_hold_minutes": alpaca_crypto_strategy.MAX_HOLD_MINUTES,
+            "daily_loss_cap_pct": alpaca_crypto_strategy.DAILY_LOSS_CAP_PCT,
+            "model_confidence_min": alpaca_crypto_strategy.MODEL_CONFIDENCE_MIN,
+            "min_volume_z": alpaca_crypto_strategy.MIN_VOLUME_Z,
+            "min_volatility_ratio": alpaca_crypto_strategy.MIN_VOLATILITY_RATIO,
+            "fast_check_seconds": ALPACA_CRYPTO_FAST_CHECK_SECONDS,
+            "entry_scan_minutes": ALPACA_CRYPTO_CYCLE_MINUTES,
+            "data_collect_minutes": ALPACA_CRYPTO_DATA_COLLECT_MINUTES,
+            "train_hour_et": ALPACA_CRYPTO_TRAIN_HOUR_ET,
+        },
+    })
+
+
+@app.route("/api/alpaca/crypto/trades")
+def api_alpaca_crypto_trades():
+    state = alpaca_crypto_strategy._load_state()  # noqa: SLF001
+    trade_log = list(reversed(state.get("trade_log") or []))
+    return jsonify({
+        "ok": True,
+        "trade_count": len(trade_log),
+        "realized_pnl_by_date": state.get("realized_pnl_by_date") or {},
+        "trades": trade_log[:200],
+    })
+
+
 @app.route("/api/alpaca/tick", methods=["GET", "POST"])
 def api_alpaca_tick():
     if not is_cron_authorized(request):
@@ -514,6 +667,39 @@ def api_alpaca_train():
         return jsonify({"ok": False, "error": str(exc)}), 500
 
 
+@app.route("/api/alpaca/crypto/tick", methods=["GET", "POST"])
+def api_alpaca_crypto_tick():
+    if not is_cron_authorized(request):
+        return jsonify({"ok": False, "error": "Unauthorized"}), 401
+    try:
+        fast = _run_alpaca_crypto_fast_check()
+        scan = _run_alpaca_crypto_entry_scan()
+        return jsonify({"ok": True, "fast_check": fast, "entry_scan": scan})
+    except Exception as exc:
+        logger.exception("[alpaca_server] manual alpaca crypto tick failed: %s", exc)
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+@app.route("/api/alpaca/crypto/collect", methods=["GET", "POST"])
+def api_alpaca_crypto_collect():
+    if not is_cron_authorized(request):
+        return jsonify({"ok": False, "error": "Unauthorized"}), 401
+    try:
+        return jsonify(_run_alpaca_crypto_data_collect())
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+@app.route("/api/alpaca/crypto/train", methods=["GET", "POST"])
+def api_alpaca_crypto_train():
+    if not is_cron_authorized(request):
+        return jsonify({"ok": False, "error": "Unauthorized"}), 401
+    try:
+        return jsonify(_run_alpaca_crypto_train())
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
 _JOB_LABELS = {
     "alpaca_data_collect": f"Alpaca stock data collection -> HF (every {ALPACA_DATA_COLLECT_MINUTES} min)",
     "alpaca_train": f"Alpaca model retrain (daily {ALPACA_TRAIN_HOUR_ET:02d}:00 ET)",
@@ -524,6 +710,10 @@ _JOB_LABELS = {
     "alpaca_fast_check": f"Alpaca fast exit check (every {ALPACA_FAST_CHECK_SECONDS}s)",
     "alpaca_entry_scan": f"Alpaca entry scan (every {ALPACA_CYCLE_MINUTES} min)",
     "alpaca_threads_trending_news": "Threads trending-news post (every 30 min)",
+    "alpaca_crypto_data_collect": f"Alpaca crypto data collection -> HF (every {ALPACA_CRYPTO_DATA_COLLECT_MINUTES} min)",
+    "alpaca_crypto_train": f"Alpaca crypto model retrain (daily {ALPACA_CRYPTO_TRAIN_HOUR_ET:02d}:00 ET)",
+    "alpaca_crypto_fast_check": f"Alpaca crypto fast exit check (every {ALPACA_CRYPTO_FAST_CHECK_SECONDS}s)",
+    "alpaca_crypto_entry_scan": f"Alpaca crypto entry scan (every {ALPACA_CRYPTO_CYCLE_MINUTES} min, 24/7)",
 }
 
 
