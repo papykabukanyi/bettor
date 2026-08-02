@@ -1,38 +1,36 @@
-"""Charles Schwab stock market data -- separate from and independent of the
-Kalshi perps bot (different broker, different asset class, different HF
-repos: HF_STOCK_DATASET_REPO / HF_STOCK_MODEL_REPO). This pipeline is used
-ONLY for trading equities/ETFs via the Schwab account; it never reads or
-writes any Kalshi perps state.
+"""Alpaca stock market data -- separate from and independent of the Kalshi
+perps bot (different broker, different asset class, different HF repos:
+HF_ALPACA_DATASET_REPO / HF_ALPACA_MODEL_REPO). This pipeline is used ONLY
+for trading equities/ETFs via the Alpaca paper (or, eventually, live)
+account; it never reads or writes any Kalshi perps state.
 
-Data flow (mirrors perps_data.py's shape, adapted for stocks):
-  get_us_stock_universe()      -> the full list of US-listed symbols, from
-                                   NASDAQ's own free public symbol directory
-                                   (broker APIs don't offer a bulk "list
-                                   every listed symbol" endpoint)
-  fetch_daily_bars(symbol)     -> up to 20 years of daily OHLCV (single
-                                   Schwab call -- period=20 is a valid
-                                   periodType=year value)
-  fetch_minute_bars(symbol)    -> the ~30-35 days of 1-minute OHLCV Schwab
-                                   actually retains (chained calls -- a
-                                   single periodType=day call caps at 10
-                                   days per Schwab's own period enum). Used
-                                   for a one-time/rare full backfill only.
+Data flow (mirrors perps_data.py's/the former schwab_data.py's shape):
+  get_us_stock_universe()      -> the tradable symbol universe, straight
+                                   from Alpaca's own /v2/assets -- Alpaca IS
+                                   the authoritative source here (unlike
+                                   Schwab, which had no bulk listing
+                                   endpoint and needed NASDAQ's own public
+                                   symbol directory as a workaround)
+  fetch_daily_bars(symbol)      -> up to 20 years of daily OHLCV
+  fetch_minute_bars(symbol)     -> minute OHLCV over a given lookback --
+                                   Alpaca has no ~35-day retention ceiling
+                                   the way Schwab did, and alpaca_client's
+                                   own get_bars() already paginates
+                                   internally, so no manual day-windowed
+                                   chaining loop is needed here
   fetch_recent_minute_bars(symbol) -> a short (LIVE_LOOKBACK_DAYS), cached
                                    window for repeated live scanning/
-                                   collection -- see its own docstring for
-                                   why the full 35-day fetch was a real
-                                   rate-limit problem here.
+                                   collection
   engineer_features(df)        -> leakage-free volume/volatility/return
                                    features, same backward-only discipline
                                    as the perps pipeline
   push_daily_snapshot(df) /
   push_minute_snapshot(df)     -> append/dedupe into today's parquet shard,
-                                   upload to HF_STOCK_DATASET_REPO
+                                   upload to HF_ALPACA_DATASET_REPO
 """
 from __future__ import annotations
 
 import datetime as dt
-import io
 import logging
 import os
 import re
@@ -40,16 +38,14 @@ import time
 from typing import Any
 
 import pandas as pd
-import requests
 
-from data import schwab_client
+from data import alpaca_client
 
 logger = logging.getLogger(__name__)
 
 HF_API_KEY = os.getenv("HF_API_KEY", "")
-HF_STOCK_DATASET_REPO = os.getenv("HF_STOCK_DATASET_REPO", "papylove/schwab-data")
+HF_ALPACA_DATASET_REPO = os.getenv("HF_ALPACA_DATASET_REPO", "papylove/alpaca-data")
 
-_TIMEOUT_SEC = 15
 _SESSION_NAME_MAP = {"preMarket": "pre_market", "regularMarket": "regular", "postMarket": "post_market"}
 
 
@@ -65,8 +61,8 @@ def _now_et() -> dt.datetime:
 
 def _fallback_market_session() -> dict[str, Any]:
     """Hand-computed ET time-window check -- doesn't know about market
-    holidays (Schwab's own endpoint does), but works before OAuth login is
-    even complete and needs no network call at all."""
+    holidays (Alpaca's own /v2/clock does), but works with zero
+    credentials/network call at all."""
     now_et = _now_et()
     if now_et.weekday() >= 5:  # Saturday=5, Sunday=6
         return {"session": "closed", "is_open": False, "source": "fallback"}
@@ -82,157 +78,114 @@ def _fallback_market_session() -> dict[str, Any]:
 
 def get_market_session() -> dict[str, Any]:
     """{"session": "closed"|"pre_market"|"regular"|"post_market", "is_open":
-    bool, "source": "schwab"|"fallback"}. Tries Schwab's own authoritative
-    market-hours endpoint first (correctly accounts for holidays); falls
-    back to a hand-computed ET check (doesn't know about holidays, but
-    needs no login and never fails) if that call doesn't work -- this must
-    never raise, since the scheduler uses it to decide whether to run
-    intensive off-hours training vs. live trading checks."""
+    bool, "source": "alpaca"|"fallback"}. Alpaca's /v2/clock is
+    authoritative for the regular-session open/closed boundary (accounts
+    for holidays correctly); it doesn't itself distinguish pre/post-market,
+    so the hand-computed ET fallback is reused for THAT distinction only
+    when the regular session is confirmed closed. Must never raise -- the
+    scheduler uses this to decide whether to run intensive off-hours
+    training vs. live trading checks."""
     try:
-        data = schwab_client.get("/marketdata/v1/markets", params={"markets": "equity"})
-        equity_markets = data.get("equity") or {}
-        equity = equity_markets.get("EQ") or next(iter(equity_markets.values()), {})
-        is_open = bool(equity.get("isOpen"))
-        session_hours = equity.get("sessionHours") or {}
-        now = dt.datetime.now(dt.timezone.utc)
-        for raw_name, mapped_name in _SESSION_NAME_MAP.items():
-            for window in session_hours.get(raw_name) or []:
-                start = dt.datetime.fromisoformat(window["start"])
-                end = dt.datetime.fromisoformat(window["end"])
-                if start <= now <= end:
-                    return {"session": mapped_name, "is_open": is_open, "source": "schwab"}
-        return {"session": "closed", "is_open": is_open, "source": "schwab"}
+        clock = alpaca_client.get_clock()
+        if bool(clock.get("is_open")):
+            return {"session": "regular", "is_open": True, "source": "alpaca"}
+        fallback = _fallback_market_session()
+        return {"session": fallback["session"], "is_open": False, "source": "alpaca"}
     except Exception as exc:
-        logger.info("[schwab_data] market-hours lookup failed, using ET fallback: %s", exc)
+        logger.info("[alpaca_data] clock lookup failed, using ET fallback: %s", exc)
         return _fallback_market_session()
-_NASDAQ_LISTED_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
-_OTHER_LISTED_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
+
+
 _UNIVERSE_CACHE_TTL_SEC = 24 * 3600
 _universe_cache: dict[str, Any] = {"symbols": None, "computed_at": 0.0}
 
 
 def get_us_stock_universe(*, force: bool = False) -> list[str]:
-    """Every US-listed equity/ETF symbol, from NASDAQ's own free public
-    symbol directory (updated daily, no auth needed) -- Schwab's own API
-    only supports looking up symbols you already know, not listing the
-    whole market. Cached for _UNIVERSE_CACHE_TTL_SEC since the listed-symbol
+    """Every tradable US equity/ETF symbol on this Alpaca account, straight
+    from /v2/assets. Cached for _UNIVERSE_CACHE_TTL_SEC since the tradable
     universe barely changes day to day."""
     now = time.time()
     if not force and _universe_cache["symbols"] is not None and (now - _universe_cache["computed_at"]) < _UNIVERSE_CACHE_TTL_SEC:
         return _universe_cache["symbols"]
 
-    symbols: set[str] = set()
-    for url, symbol_col in [(_NASDAQ_LISTED_URL, "Symbol"), (_OTHER_LISTED_URL, "ACT Symbol")]:
-        try:
-            resp = requests.get(url, timeout=_TIMEOUT_SEC)
-            resp.raise_for_status()
-            # Last line of both files is a "File Creation Time" footer, not
-            # a real row -- confirmed live it can have the SAME field count
-            # as the header (just short/blank values), so pandas doesn't
-            # treat it as a parse error to skip; it must be dropped by
-            # content before parsing, not relied on to fail structurally.
-            lines = [ln for ln in resp.text.splitlines() if not ln.startswith("File Creation Time")]
-            df = pd.read_csv(io.StringIO("\n".join(lines)), sep="|", on_bad_lines="skip")
-            test_col = "Test Issue"
-            if test_col in df.columns:
-                df = df[df[test_col] != "Y"]
-            symbols.update(str(s).strip() for s in df[symbol_col].dropna() if str(s).strip())
-        except Exception as exc:
-            logger.warning("[schwab_data] failed to fetch symbol directory %s: %s", url, exc)
+    try:
+        assets = alpaca_client.get_assets(status="active", asset_class="us_equity")
+        symbols = sorted({a["symbol"] for a in assets if a.get("tradable") and a.get("symbol")})
+    except Exception as exc:
+        logger.warning("[alpaca_data] failed to fetch asset universe: %s", exc)
+        symbols = _universe_cache["symbols"] or []
 
-    result = sorted(symbols)
-    _universe_cache["symbols"] = result
+    _universe_cache["symbols"] = symbols
     _universe_cache["computed_at"] = now
-    return result
+    return symbols
 
 
-def _candles_to_df(candles: list[dict[str, Any]]) -> pd.DataFrame:
-    if not candles:
+def _bars_to_df(bars: list[dict[str, Any]]) -> pd.DataFrame:
+    if not bars:
         return pd.DataFrame({
             "ts": pd.Series(dtype="int64"), "open": pd.Series(dtype="float64"),
             "high": pd.Series(dtype="float64"), "low": pd.Series(dtype="float64"),
             "close": pd.Series(dtype="float64"), "volume": pd.Series(dtype="float64"),
         })
     rows = [{
-        "ts": int(c["datetime"]) // 1000,  # Schwab candles use epoch MILLISECONDS
-        "open": float(c["open"]), "high": float(c["high"]), "low": float(c["low"]),
-        "close": float(c["close"]), "volume": float(c.get("volume") or 0.0),
-    } for c in candles]
+        "ts": int(pd.Timestamp(b["t"]).timestamp()),  # Alpaca bars use an RFC-3339 UTC timestamp string
+        "open": float(b["o"]), "high": float(b["h"]), "low": float(b["l"]),
+        "close": float(b["c"]), "volume": float(b.get("v") or 0.0),
+    } for b in bars]
     return pd.DataFrame(rows).drop_duplicates(subset="ts").sort_values("ts").reset_index(drop=True)
 
 
 def fetch_daily_bars(symbol: str, *, years: int = 20) -> pd.DataFrame:
-    """Up to `years` of daily OHLCV -- a single call, since Schwab's own
-    periodType=year enum directly supports up to 20 (the docs list valid
-    year periods as 1/2/3/5/10/15/20)."""
+    """Up to `years` of daily OHLCV -- a single call (alpaca_client.get_bars
+    paginates internally if the range needs more than one page)."""
     years = min(20, max(1, years))
-    data = schwab_client.get("/marketdata/v1/pricehistory", params={
-        "symbol": symbol, "periodType": "year", "period": years,
-        "frequencyType": "daily", "frequency": 1, "needExtendedHoursData": False,
-    })
-    return _candles_to_df(data.get("candles") or [])
+    end = dt.datetime.now(dt.timezone.utc)
+    start = end - dt.timedelta(days=365 * years)
+    bars = alpaca_client.get_bars(
+        [symbol], timeframe="1Day", start=start.date().isoformat(), end=end.date().isoformat(),
+    ).get(symbol, [])
+    return _bars_to_df(bars)
 
 
 def fetch_minute_bars(symbol: str, *, days: int = 35) -> pd.DataFrame:
-    """The full ~30-35 days of 1-minute OHLCV Schwab actually retains.
-    periodType=day caps at period=10 per call (Schwab's own enum), so this
-    chains backward in 10-day windows via explicit startDate/endDate rather
-    than relying on period alone -- same "chain calls to cover more than
-    one request allows" shape as the Kalshi perps candle fetcher."""
-    frames = []
-    now = dt.datetime.now(dt.timezone.utc)
-    window_end = now
-    remaining_days = days
-    while remaining_days > 0:
-        span_days = min(10, remaining_days)
-        window_start = window_end - dt.timedelta(days=span_days)
-        try:
-            data = schwab_client.get("/marketdata/v1/pricehistory", params={
-                "symbol": symbol, "periodType": "day", "frequencyType": "minute", "frequency": 1,
-                "startDate": int(window_start.timestamp() * 1000), "endDate": int(window_end.timestamp() * 1000),
-                "needExtendedHoursData": False,
-            })
-            frames.append(_candles_to_df(data.get("candles") or []))
-        except Exception as exc:
-            logger.warning("[schwab_data] minute-bar chunk fetch failed for %s: %s", symbol, exc)
-            break
-        window_end = window_start
-        remaining_days -= span_days
-    frames = [f for f in frames if not f.empty]
-    if not frames:
-        return _candles_to_df([])
-    return pd.concat(frames, ignore_index=True).drop_duplicates(subset="ts").sort_values("ts").reset_index(drop=True)
+    """Minute OHLCV over the given lookback window. Unlike Schwab (which
+    capped at 10 days per call and needed an explicit chained-window loop
+    to cover more), a single alpaca_client.get_bars call covers the whole
+    range -- its own page_token loop already handles pagination."""
+    end = dt.datetime.now(dt.timezone.utc)
+    start = end - dt.timedelta(days=days)
+    try:
+        bars = alpaca_client.get_bars(
+            [symbol], timeframe="1Min", start=start.isoformat(), end=end.isoformat(),
+        ).get(symbol, [])
+    except Exception as exc:
+        logger.warning("[alpaca_data] minute-bar fetch failed for %s: %s", symbol, exc)
+        return _bars_to_df([])
+    return _bars_to_df(bars)
 
 
-# "Live" lookback for scanning/collection -- deliberately much shorter than
-# fetch_minute_bars' full 35-day retained window. engineer_features' longest
-# rolling window is ~90 minutes, and push_minute_snapshot already merges/
-# dedupes against existing shards, so nothing is lost by not re-pulling 35
-# days on every call; a few recent days is more than enough buffer for
-# weekends/holidays. LIVE_LOOKBACK_DAYS <= 10 fits Schwab's periodType=day
-# single-call cap, so this is ALSO a single API call per symbol instead of
-# fetch_minute_bars(days=35)'s ~4 chained calls.
-LIVE_LOOKBACK_DAYS = int(os.getenv("SCHWAB_LIVE_LOOKBACK_DAYS", "5") or "5")
-_MINUTE_BAR_CACHE_TTL_SEC = int(os.getenv("SCHWAB_MINUTE_BAR_CACHE_TTL_SEC", "90") or "90")
+# "Live" lookback for scanning/collection -- deliberately short. Alpaca has
+# no ~35-day retention ceiling the way Schwab did, but engineer_features'
+# longest rolling window is ~90 minutes, and push_minute_snapshot already
+# merges/dedupes against existing shards, so nothing is lost by not
+# re-pulling a long window on every call.
+LIVE_LOOKBACK_DAYS = int(os.getenv("ALPACA_LIVE_LOOKBACK_DAYS", "5") or "5")
+_MINUTE_BAR_CACHE_TTL_SEC = int(os.getenv("ALPACA_MINUTE_BAR_CACHE_TTL_SEC", "90") or "90")
 _minute_bar_cache: dict[str, tuple[pd.DataFrame, float]] = {}
 
 
 def fetch_recent_minute_bars(symbol: str, *, days: int = LIVE_LOOKBACK_DAYS) -> pd.DataFrame:
     """Short-window, short-TTL-cached minute-bar fetch for LIVE feature
     computation (latest_feature_row / the periodic dataset-collection job)
-    -- NOT fetch_minute_bars' full deep-history chain, which is for a rare
-    full backfill, not something to repeat on every scan.
+    -- NOT fetch_minute_bars' deeper-history call, which is for a rare full
+    backfill, not something to repeat on every scan.
 
-    Real bug found and fixed here: scan_and_enter's per-symbol loop calls
-    latest_feature_row(symbol) directly AND predict_direction(symbol) calls
-    it AGAIN internally, and a separate 15-minute data-collect cycle fetches
-    the SAME watchlist symbols too. Before this cache/window existed, all
-    three call sites used fetch_minute_bars(symbol, days=35) (chained ~4
-    calls per symbol) with zero rate-limit awareness -- at
-    WATCHLIST_TOP_N=100, one 2-minute entry-scan cycle alone could issue up
-    to ~800 Schwab API calls, more than 6x Schwab's own 120 req/min limit,
-    which would have silently 429'd most of the watchlist on every cycle
-    the moment a real login made this code path actually run."""
+    Same real bug this cache/window fixed on the Schwab side: scan_and_enter's
+    per-symbol loop calls latest_feature_row(symbol) directly AND
+    predict_direction(symbol) calls it AGAIN internally, and a separate
+    periodic data-collect cycle fetches the SAME watchlist symbols too.
+    Without this cache, one entry-scan cycle across a top-N watchlist could
+    issue several times more API calls than necessary every cycle."""
     cache_key = f"{symbol}:{days}"
     cached = _minute_bar_cache.get(cache_key)
     now_mono = time.monotonic()
@@ -363,13 +316,13 @@ def _upload_shard(df: pd.DataFrame, *, path_in_repo: str, commit_message: str) -
         try:
             api.upload_file(
                 path_or_fileobj=tmp_path, path_in_repo=path_in_repo,
-                repo_id=HF_STOCK_DATASET_REPO, repo_type="dataset", commit_message=commit_message,
+                repo_id=HF_ALPACA_DATASET_REPO, repo_type="dataset", commit_message=commit_message,
             )
         finally:
             os.unlink(tmp_path)
         return {"ok": True, "rows": len(df), "path": path_in_repo}
     except Exception as exc:
-        logger.warning("[schwab_data] HF upload failed for %s: %s", path_in_repo, exc)
+        logger.warning("[alpaca_data] HF upload failed for %s: %s", path_in_repo, exc)
         return {"ok": False, "error": str(exc)}
 
 
@@ -393,28 +346,21 @@ def get_symbols_with_daily_bars() -> set[str]:
     try:
         from huggingface_hub import HfApi
         api = HfApi(token=HF_API_KEY)
-        files = api.list_repo_files(repo_id=HF_STOCK_DATASET_REPO, repo_type="dataset")
+        files = api.list_repo_files(repo_id=HF_ALPACA_DATASET_REPO, repo_type="dataset")
         return {f[len("daily/"):-len(".parquet")] for f in files if f.startswith("daily/") and f.endswith(".parquet")}
     except Exception as exc:
-        logger.warning("[schwab_data] could not list existing daily shards: %s", exc)
+        logger.warning("[alpaca_data] could not list existing daily shards: %s", exc)
         return set()
 
 
 def push_minute_snapshot(df: pd.DataFrame) -> dict[str, Any]:
     """Minute bars are sharded by calendar day across ALL symbols in one
     file (matching the Kalshi perps archive's data/YYYY-MM-DD.parquet
-    convention) -- there are far more of these than daily bars, and today's
-    shard is what a live collection job appends/dedupes into repeatedly.
-
-    Real bug fixed here: this used to upload `df` directly, OVERWRITING
-    today's whole shard with only the current cycle's watchlist -- any
-    symbol that was in an EARLIER cycle's watchlist but has since dropped
-    out (the ranking refreshes periodically) would have its already-
-    collected rows for today silently destroyed by the next cycle's
-    upload. Now downloads whatever's already there first and merges/dedupes
-    (same discipline as perps_data.push_dataset_snapshot), so today's shard
-    is a genuinely cumulative record of every symbol collected today, not
-    just whichever ones happened to be on the watchlist most recently."""
+    convention). Downloads whatever's already there first and merges/
+    dedupes (same discipline as perps_data.push_dataset_snapshot), so
+    today's shard is a genuinely cumulative record of every symbol
+    collected today, not just whichever ones happened to be on the
+    watchlist most recently."""
     if df.empty:
         return {"ok": False, "reason": "no_rows"}
     if not HF_API_KEY:
@@ -425,11 +371,11 @@ def push_minute_snapshot(df: pd.DataFrame) -> dict[str, Any]:
     combined = df
     try:
         from huggingface_hub import hf_hub_download
-        existing_path = hf_hub_download(repo_id=HF_STOCK_DATASET_REPO, filename=path_in_repo, repo_type="dataset", token=HF_API_KEY)
+        existing_path = hf_hub_download(repo_id=HF_ALPACA_DATASET_REPO, filename=path_in_repo, repo_type="dataset", token=HF_API_KEY)
         existing = pd.read_parquet(existing_path)
         combined = pd.concat([existing, df], ignore_index=True)
     except Exception as exc:
-        logger.info("[schwab_data] no existing minute shard for %s yet (or fetch failed), starting fresh: %s", today, exc)
+        logger.info("[alpaca_data] no existing minute shard for %s yet (or fetch failed), starting fresh: %s", today, exc)
 
     if "symbol" in combined.columns and "ts" in combined.columns:
         combined = combined.drop_duplicates(subset=["symbol", "ts"]).sort_values(["symbol", "ts"]).reset_index(drop=True)
@@ -437,16 +383,16 @@ def push_minute_snapshot(df: pd.DataFrame) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Watchlist: Schwab's 120 req/min rate limit makes truly continuous
-# minute-level refresh impossible across the full ~12,000-symbol US equity
-# universe (a single full pass alone takes ~100 minutes) -- exactly the
-# same "broad archive, narrow live watchlist" split already proven out for
-# the Kalshi perps bot (get_active_tickers() vs get_watchlist()). The full
-# universe still gets periodic (not per-minute) daily+minute backfills;
-# only the ranked top-N watchlist gets refreshed on a fast, live cadence.
+# Watchlist: even at Alpaca's more generous 200 req/min free-tier ceiling,
+# truly continuous minute-level refresh across the full tradable equity
+# universe isn't practical -- same "broad archive, narrow live watchlist"
+# split already proven out for the Kalshi perps bot and the former Schwab
+# pipeline. The full universe still gets periodic (not per-minute) daily+
+# minute backfills; only the ranked top-N watchlist gets refreshed on a
+# fast, live cadence.
 # ---------------------------------------------------------------------------
-WATCHLIST_TOP_N = int(os.getenv("SCHWAB_WATCHLIST_TOP_N", "100") or "100")
-MAX_TRAIN_ROWS = int(os.getenv("SCHWAB_MAX_TRAIN_ROWS", "150000") or "150000")
+WATCHLIST_TOP_N = int(os.getenv("ALPACA_WATCHLIST_TOP_N", "100") or "100")
+MAX_TRAIN_ROWS = int(os.getenv("ALPACA_MAX_TRAIN_ROWS", "150000") or "150000")
 _DATE_SHARD_RE = re.compile(r"^minute/\d{4}-\d{2}-\d{2}\.parquet$")
 
 
@@ -487,14 +433,14 @@ def get_stock_watchlist(recent_df: pd.DataFrame | None = None) -> list[str]:
         )
         return sorted(ranked[:WATCHLIST_TOP_N]) or fallback
     except Exception as exc:
-        logger.warning("[schwab_data] watchlist ranking failed, using fallback: %s", exc)
+        logger.warning("[alpaca_data] watchlist ranking failed, using fallback: %s", exc)
         return fallback
 
 
 def collect_dataset_rows(symbols: list[str] | None = None) -> pd.DataFrame:
     """Fetch + engineer features for the given symbols (default: the live
     watchlist -- NOT the full universe, which is handled by a separate,
-    slower periodic backfill job given the rate limit)."""
+    slower periodic backfill job)."""
     target_symbols = symbols if symbols is not None else get_stock_watchlist()
     frames = []
     for symbol in target_symbols:
@@ -506,7 +452,7 @@ def collect_dataset_rows(symbols: list[str] | None = None) -> pd.DataFrame:
             feats.insert(0, "symbol", symbol)
             frames.append(feats)
         except Exception as exc:
-            logger.warning("[schwab_data] collect failed for %s: %s", symbol, exc)
+            logger.warning("[alpaca_data] collect failed for %s: %s", symbol, exc)
     if not frames:
         return pd.DataFrame()
     return pd.concat(frames, ignore_index=True)
@@ -528,16 +474,14 @@ def latest_feature_row(symbol: str) -> dict[str, Any] | None:
         row["short_ma"] = float(last["ma_15"])
         return row
     except Exception as exc:
-        logger.warning("[schwab_data] latest_feature_row failed for %s: %s", symbol, exc)
+        logger.warning("[alpaca_data] latest_feature_row failed for %s: %s", symbol, exc)
         return None
 
 
 def load_training_dataset(*, max_shards: int = 90, max_rows: int | None = None) -> pd.DataFrame:
-    """Downloads minute-bar shards from HF_STOCK_DATASET_REPO, most-recent-
+    """Downloads minute-bar shards from HF_ALPACA_DATASET_REPO, most-recent-
     first, stopping once enough rows are in hand to cover the cap (with a
-    safety margin for dedup) -- built this way from day one, unlike the
-    Kalshi perps archive which had to learn this the hard way after a real
-    OOM (see perps_data.load_training_dataset's own history)."""
+    safety margin for dedup)."""
     if not HF_API_KEY:
         return pd.DataFrame()
     cap = MAX_TRAIN_ROWS if max_rows is None else max_rows
@@ -547,23 +491,23 @@ def load_training_dataset(*, max_shards: int = 90, max_rows: int | None = None) 
     try:
         from huggingface_hub import HfApi, hf_hub_download
         api = HfApi(token=HF_API_KEY)
-        hf_files = [f for f in api.list_repo_files(repo_id=HF_STOCK_DATASET_REPO, repo_type="dataset") if _DATE_SHARD_RE.match(f)]
+        hf_files = [f for f in api.list_repo_files(repo_id=HF_ALPACA_DATASET_REPO, repo_type="dataset") if _DATE_SHARD_RE.match(f)]
         hf_files = sorted(hf_files, reverse=True)[:max_shards]
         for f in hf_files:
             if stop_after_rows and accumulated_rows >= stop_after_rows:
                 break
             try:
-                local_path = hf_hub_download(repo_id=HF_STOCK_DATASET_REPO, filename=f, repo_type="dataset", token=HF_API_KEY)
+                local_path = hf_hub_download(repo_id=HF_ALPACA_DATASET_REPO, filename=f, repo_type="dataset", token=HF_API_KEY)
                 shard = pd.read_parquet(local_path)
                 if "symbol" in shard.columns and "ts" in shard.columns:
                     frames.append(shard)
                     accumulated_rows += len(shard)
                 else:
-                    logger.warning("[schwab_data] skipping shard with unexpected schema: %s", f)
+                    logger.warning("[alpaca_data] skipping shard with unexpected schema: %s", f)
             except Exception as exc:
-                logger.warning("[schwab_data] failed to read shard %s: %s", f, exc)
+                logger.warning("[alpaca_data] failed to read shard %s: %s", f, exc)
     except Exception as exc:
-        logger.warning("[schwab_data] HF dataset listing failed: %s", exc)
+        logger.warning("[alpaca_data] HF dataset listing failed: %s", exc)
 
     if not frames:
         return pd.DataFrame()

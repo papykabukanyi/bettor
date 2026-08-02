@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-<title>Schwab Stocks Bot</title>
+<title>Alpaca Stocks Bot</title>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   :root {
@@ -63,9 +63,9 @@
 </head>
 <body>
 <header>
-  <h1>&#128200; Schwab Stocks</h1>
+  <h1>&#128200; Alpaca Stocks</h1>
   <div style="display:flex; align-items:center; gap:10px;">
-    <span id="login-badge" class="badge warn">&nbsp;</span>
+    <span id="config-badge" class="badge warn">&nbsp;</span>
     <span id="mode-badge" class="badge dry">&nbsp;</span>
     <span id="session-badge" class="badge warn">&nbsp;</span>
     <a href="{{ perps_url }}" class="toggle-btn">&#8646; Switch to Perps</a>
@@ -268,7 +268,7 @@ function nextRetrainText(trainHourEt) {
 async function refreshStatus() {
   let data;
   try {
-    const res = await fetch("/api/schwab/status");
+    const res = await fetch("/api/alpaca/status");
     data = await res.json();
     lastStatusSuccessMs = Date.now();
   } catch (e) {
@@ -277,13 +277,13 @@ async function refreshStatus() {
   }
 
   try {
-    const loginBadge = document.getElementById("login-badge");
-    if (data.schwab_logged_in) {
-      loginBadge.textContent = "LINKED";
-      loginBadge.className = "badge dry";
+    const configBadge = document.getElementById("config-badge");
+    if (data.alpaca_configured) {
+      configBadge.textContent = "CONFIGURED";
+      configBadge.className = "badge dry";
     } else {
-      loginBadge.textContent = "NOT LINKED";
-      loginBadge.className = "badge warn";
+      configBadge.textContent = "NOT CONFIGURED";
+      configBadge.className = "badge warn";
     }
 
     const modeBadge = document.getElementById("mode-badge");
@@ -309,7 +309,7 @@ async function refreshStatus() {
     document.getElementById("balance").textContent = fmtUsd(data.balance);
     document.getElementById("balance-sub").textContent = data.mode === "simulate"
       ? `available ${fmtUsd(data.available_balance)} · paper trading`
-      : "real Schwab account balance";
+      : "real Alpaca account balance";
 
     const positions = data.positions || [];
     document.getElementById("position-count").textContent = `${positions.length} / ${data.max_concurrent_positions ?? "--"}`;
@@ -411,7 +411,7 @@ async function refreshStatus() {
 
 async function refreshTrades() {
   try {
-    const res = await fetch("/api/schwab/trades");
+    const res = await fetch("/api/alpaca/trades");
     const data = await res.json();
     const tbody = document.getElementById("trades-body");
     const trades = (data.trades || []).slice(0, 30);
@@ -431,7 +431,7 @@ async function refreshActivity() {
     const res = await fetch("/api/server/activity");
     const data = await res.json();
     const tbody = document.getElementById("activity-body");
-    const recent = ((data.recent || []).filter(r => (r.job || "").startsWith("schwab_"))).slice(0, 20);
+    const recent = ((data.recent || []).filter(r => (r.job || "").startsWith("alpaca_"))).slice(0, 20);
     patchTable(tbody, recent, r => `${r.job}_${r.started_at}`, r => `
         <td>${r.label || r.job}</td>
         <td><span class="tag ${r.status === "ok" ? "yes" : r.status === "error" ? "no" : "wait"}">${r.status}</span></td>

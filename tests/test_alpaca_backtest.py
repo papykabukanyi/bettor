@@ -1,6 +1,6 @@
-"""Schwab equities backtest engine -- synthetic price data only, never
+"""Alpaca equities backtest engine -- synthetic price data only, never
 touches the network. Verifies the simulation correctly reuses the REAL
-schwab_strategy decide functions, respects the concurrency cap, and that
+alpaca_strategy decide functions, respects the concurrency cap, and that
 batch-predicting the model once matches predicting per-row."""
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from data import schwab_backtest as bt
-from data import schwab_strategy as strat
+from data import alpaca_backtest as bt
+from data import alpaca_strategy as strat
 
 
 def _synthetic_test_df(n: int = 200, symbol: str = "AAPL") -> pd.DataFrame:
@@ -88,9 +88,9 @@ def test_simulate_blocks_entries_when_volume_is_not_unusual():
     assert result["trade_count"] == 0
 
 
-def test_simulate_deducts_no_fee_since_schwab_is_commission_free():
+def test_simulate_deducts_no_fee_since_alpaca_is_commission_free():
     """Unlike the Kalshi perps backtest (which has to model a real 1.6%
-    round-trip taker fee), a Schwab equity trade's realized P&L is exactly
+    round-trip taker fee), an Alpaca equity trade's realized P&L is exactly
     the gross price delta -- no fee_usd field, no deduction."""
     df = _synthetic_test_df(n=300)
     result = bt.simulate(df, fitted=None, starting_balance=10_000.0, min_volume_z=0.0, min_volatility_ratio=0.0, entry_dip_pct=0.0001)
@@ -113,9 +113,6 @@ def test_run_config_sweep_tries_every_grid_entry_and_ranks_by_return(monkeypatch
 
 def test_run_config_sweep_excludes_configs_below_the_min_trade_count(monkeypatch):
     df = _synthetic_test_df(n=300)
-    # An absurdly high take-profit that will never realistically fire in
-    # this tiny synthetic window -- must be excluded from "ranked" (it
-    # would otherwise "win" on a trivial low-trade-count technicality).
     monkeypatch.setattr(bt, "_SWEEP_GRID", [
         {"take_profit_pct": 0.5, "stop_loss_pct": 0.4, "max_hold_minutes": 5},
     ])
@@ -126,7 +123,7 @@ def test_run_config_sweep_excludes_configs_below_the_min_trade_count(monkeypatch
 
 
 def test_run_config_sweep_restores_the_real_strategy_parameters_afterward(monkeypatch):
-    """Each grid entry temporarily overwrites schwab_strategy's real
+    """Each grid entry temporarily overwrites alpaca_strategy's real
     module-level TAKE_PROFIT_PCT/STOP_LOSS_PCT/MAX_HOLD_MINUTES to reuse
     simulate()'s real decide_exit logic -- leaving the LAST grid entry's
     values in place afterward would mean live trading silently runs on

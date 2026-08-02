@@ -1,10 +1,10 @@
-"""Walk-forward backtest for the Schwab equities strategy -- structurally
+"""Walk-forward backtest for the Alpaca equities strategy -- structurally
 mirrors perps_backtest.py (reuses the REAL decide_entry_technical/
-decide_exit functions from schwab_strategy.py, chronological train/test
+decide_exit functions from alpaca_strategy.py, chronological train/test
 split, never a random shuffle) but simplified for a cash equities account:
-no leverage, no shorts, no per-trade fee model (Schwab charges $0
-commission on online equity/ETF trades). Completely separate from and
-never touches perps_backtest.py or any Kalshi state.
+no leverage, no shorts, no per-trade fee model (Alpaca charges $0
+commission on equity/ETF trades). Completely separate from and never
+touches perps_backtest.py or any Kalshi state.
 """
 from __future__ import annotations
 
@@ -17,8 +17,8 @@ from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, roc_auc_score
 
-from data import schwab_strategy as strat
-from data.schwab_data import FEATURE_COLUMNS
+from data import alpaca_strategy as strat
+from data.alpaca_data import FEATURE_COLUMNS
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +64,7 @@ def fit_backtest_model(train_df: pd.DataFrame, *, min_rows: int = 300) -> dict[s
             if combined > best_score:
                 best_name, best_model, best_score = name, model, combined
         except Exception as exc:
-            logger.warning("[schwab_backtest] candidate %s failed to fit: %s", name, exc)
+            logger.warning("[alpaca_backtest] candidate %s failed to fit: %s", name, exc)
     if best_model is None:
         return None
     best_model.fit(labeled[feature_cols].values, labeled["label_up"].values)
@@ -100,7 +100,7 @@ def simulate(
     daily_loss_cap_pct: float | None = None,
 ) -> dict[str, Any]:
     """Walk forward through `test_df` (all symbols, sorted by ts) replaying
-    the real schwab_strategy decision functions. Every strategy parameter
+    the real alpaca_strategy decision functions. Every strategy parameter
     can be overridden per-call for a parameter sweep without touching
     process-wide env vars between runs."""
     position_size_pct = strat.POSITION_SIZE_PCT if position_size_pct is None else position_size_pct
@@ -134,7 +134,7 @@ def simulate(
             should_exit, reason = strat.decide_exit(pos, price, now=sim_now)
             if should_exit:
                 gross = round((price - pos["entry_price"]) * pos["count"], 6)
-                realized = gross  # no per-trade fee model -- Schwab is commission-free on equities/ETFs
+                realized = gross  # no per-trade fee model -- Alpaca is commission-free on equities/ETFs
                 balance += realized
                 daily_pnl[date_str] = daily_pnl.get(date_str, 0.0) + realized
                 trades.append({
@@ -225,7 +225,7 @@ def run_config_sweep(
     trades). Reports findings only -- never applies a new config to the
     live strategy itself; that stays a deliberate, reviewed decision.
 
-    Restores schwab_strategy's real (env-configured) parameters before
+    Restores alpaca_strategy's real (env-configured) parameters before
     returning, no matter what -- each grid entry temporarily overwrites
     those SAME module-level globals to reuse simulate()'s real decide_exit
     logic, and leaving the last grid entry's values in place would mean

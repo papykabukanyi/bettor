@@ -1,7 +1,7 @@
-"""Direction classifier for Schwab-traded equities/ETFs -- separate from
+"""Direction classifier for Alpaca-traded equities/ETFs -- separate from
 and structurally identical to perps_model.py (same chronological-holdout-
 never-random-shuffle discipline, same candidate comparison), but trained
-on schwab_data's stock features/labels and persisted to HF_STOCK_MODEL_REPO
+on alpaca_data's stock features/labels and persisted to HF_ALPACA_MODEL_REPO
 instead of the Kalshi perps bot's own model repo. Never touches any Kalshi
 perps state or files.
 """
@@ -21,21 +21,21 @@ from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, roc_auc_score
 
-from data.schwab_data import FEATURE_COLUMNS, latest_feature_row, load_training_dataset
+from data.alpaca_data import FEATURE_COLUMNS, latest_feature_row, load_training_dataset
 
 logger = logging.getLogger(__name__)
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 DATA_DIR = ROOT_DIR / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
-MODEL_PATH = DATA_DIR / "schwab_model.joblib"
-MODEL_META_PATH = DATA_DIR / "schwab_model_meta.json"
+MODEL_PATH = DATA_DIR / "alpaca_model.joblib"
+MODEL_META_PATH = DATA_DIR / "alpaca_model_meta.json"
 
 HF_API_KEY = os.getenv("HF_API_KEY", "")
-HF_STOCK_MODEL_REPO = os.getenv("HF_STOCK_MODEL_REPO", "papylove/schwab-model")
+HF_ALPACA_MODEL_REPO = os.getenv("HF_ALPACA_MODEL_REPO", "papylove/alpaca-model")
 
-MIN_TRAIN_ROWS = int(os.getenv("SCHWAB_MIN_TRAIN_ROWS", "300") or "300")
-MODEL_CACHE_TTL_SEC = int(os.getenv("SCHWAB_MODEL_CACHE_TTL_SEC", "1800") or "1800")
+MIN_TRAIN_ROWS = int(os.getenv("ALPACA_MIN_TRAIN_ROWS", "300") or "300")
+MODEL_CACHE_TTL_SEC = int(os.getenv("ALPACA_MODEL_CACHE_TTL_SEC", "1800") or "1800")
 
 _model_cache: dict[str, Any] = {"model": None, "meta": None, "loaded_at": 0.0}
 
@@ -62,7 +62,7 @@ def _prepare_training_frame(df: pd.DataFrame) -> pd.DataFrame:
 
 def train_model(df: pd.DataFrame | None = None) -> dict[str, Any]:
     """Train, compare candidates on a chronological holdout, keep the best,
-    persist locally + to HF_STOCK_MODEL_REPO. Never raises on ordinary
+    persist locally + to HF_ALPACA_MODEL_REPO. Never raises on ordinary
     "not enough data yet" conditions -- expected during the first days of
     stock data collection."""
     frame = df if df is not None else load_training_dataset()
@@ -97,7 +97,7 @@ def train_model(df: pd.DataFrame | None = None) -> dict[str, Any]:
             if combined > best_score:
                 best_name, best_model, best_score = name, model, combined
         except Exception as exc:
-            logger.warning("[schwab_model] candidate %s failed: %s", name, exc)
+            logger.warning("[alpaca_model] candidate %s failed: %s", name, exc)
 
     if best_model is None:
         return {"ok": False, "reason": "all_candidates_failed"}
@@ -125,19 +125,19 @@ def _push_model_to_hf() -> None:
         from huggingface_hub import HfApi
         api = HfApi(token=HF_API_KEY)
         try:
-            api.repo_info(repo_id=HF_STOCK_MODEL_REPO, repo_type="model")
+            api.repo_info(repo_id=HF_ALPACA_MODEL_REPO, repo_type="model")
         except Exception:
-            api.create_repo(repo_id=HF_STOCK_MODEL_REPO, repo_type="model", exist_ok=True, private=False)
+            api.create_repo(repo_id=HF_ALPACA_MODEL_REPO, repo_type="model", exist_ok=True, private=False)
         api.upload_file(
-            path_or_fileobj=str(MODEL_PATH), path_in_repo="schwab_model.joblib",
-            repo_id=HF_STOCK_MODEL_REPO, repo_type="model", commit_message="update schwab direction model",
+            path_or_fileobj=str(MODEL_PATH), path_in_repo="alpaca_model.joblib",
+            repo_id=HF_ALPACA_MODEL_REPO, repo_type="model", commit_message="update alpaca direction model",
         )
         api.upload_file(
-            path_or_fileobj=str(MODEL_META_PATH), path_in_repo="schwab_model_meta.json",
-            repo_id=HF_STOCK_MODEL_REPO, repo_type="model", commit_message="update schwab model metadata",
+            path_or_fileobj=str(MODEL_META_PATH), path_in_repo="alpaca_model_meta.json",
+            repo_id=HF_ALPACA_MODEL_REPO, repo_type="model", commit_message="update alpaca model metadata",
         )
     except Exception as exc:
-        logger.warning("[schwab_model] HF model push failed: %s", exc)
+        logger.warning("[alpaca_model] HF model push failed: %s", exc)
 
 
 def _download_model_from_hf() -> bool:
@@ -146,16 +146,16 @@ def _download_model_from_hf() -> bool:
     try:
         from huggingface_hub import hf_hub_download
         model_path = hf_hub_download(
-            repo_id=HF_STOCK_MODEL_REPO, filename="schwab_model.joblib", repo_type="model", token=HF_API_KEY,
+            repo_id=HF_ALPACA_MODEL_REPO, filename="alpaca_model.joblib", repo_type="model", token=HF_API_KEY,
         )
         meta_path = hf_hub_download(
-            repo_id=HF_STOCK_MODEL_REPO, filename="schwab_model_meta.json", repo_type="model", token=HF_API_KEY,
+            repo_id=HF_ALPACA_MODEL_REPO, filename="alpaca_model_meta.json", repo_type="model", token=HF_API_KEY,
         )
         MODEL_PATH.write_bytes(Path(model_path).read_bytes())
         MODEL_META_PATH.write_text(Path(meta_path).read_text(encoding="utf-8"), encoding="utf-8")
         return True
     except Exception as exc:
-        logger.info("[schwab_model] no model available on HF yet: %s", exc)
+        logger.info("[alpaca_model] no model available on HF yet: %s", exc)
         return False
 
 
@@ -176,7 +176,7 @@ def load_model() -> tuple[Any | None, dict[str, Any] | None]:
         _model_cache.update({"model": model, "meta": meta, "loaded_at": now})
         return model, meta
     except Exception as exc:
-        logger.warning("[schwab_model] failed to load cached model: %s", exc)
+        logger.warning("[alpaca_model] failed to load cached model: %s", exc)
         return None, None
 
 

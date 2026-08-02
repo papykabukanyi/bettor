@@ -1,6 +1,6 @@
-"""Schwab stock direction-classifier training + prediction -- structurally
-identical tests to test_perps_model.py, but for the separate Schwab
-pipeline. Synthetic feature data only; never touches Schwab, HF, or the
+"""Alpaca stock direction-classifier training + prediction -- structurally
+identical tests to test_perps_model.py, but for the separate Alpaca
+pipeline. Synthetic feature data only; never touches Alpaca, HF, or the
 network."""
 from __future__ import annotations
 
@@ -8,17 +8,17 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from data import schwab_model
+from data import alpaca_model
 
 
 @pytest.fixture(autouse=True)
 def _isolated_model_cache(tmp_path, monkeypatch):
-    monkeypatch.setattr(schwab_model, "MODEL_PATH", tmp_path / "model.joblib")
-    monkeypatch.setattr(schwab_model, "MODEL_META_PATH", tmp_path / "model_meta.json")
-    monkeypatch.setattr(schwab_model, "HF_API_KEY", "")
-    schwab_model._model_cache.update({"model": None, "meta": None, "loaded_at": 0.0})  # noqa: SLF001
+    monkeypatch.setattr(alpaca_model, "MODEL_PATH", tmp_path / "model.joblib")
+    monkeypatch.setattr(alpaca_model, "MODEL_META_PATH", tmp_path / "model_meta.json")
+    monkeypatch.setattr(alpaca_model, "HF_API_KEY", "")
+    alpaca_model._model_cache.update({"model": None, "meta": None, "loaded_at": 0.0})  # noqa: SLF001
     yield
-    schwab_model._model_cache.update({"model": None, "meta": None, "loaded_at": 0.0})  # noqa: SLF001
+    alpaca_model._model_cache.update({"model": None, "meta": None, "loaded_at": 0.0})  # noqa: SLF001
 
 
 def _synthetic_training_frame(n: int = 500, seed: int = 42) -> pd.DataFrame:
@@ -53,39 +53,39 @@ def _synthetic_training_frame(n: int = 500, seed: int = 42) -> pd.DataFrame:
 
 
 def test_train_model_with_no_data_returns_not_ok():
-    result = schwab_model.train_model(df=pd.DataFrame())
+    result = alpaca_model.train_model(df=pd.DataFrame())
     assert result["ok"] is False
     assert result["reason"] == "no_data"
 
 
 def test_train_model_with_too_few_rows_returns_not_ok():
     small_df = _synthetic_training_frame(n=20)
-    result = schwab_model.train_model(df=small_df)
+    result = alpaca_model.train_model(df=small_df)
     assert result["ok"] is False
     assert result["reason"] == "insufficient_rows"
 
 
 def test_train_model_succeeds_with_enough_signal_rows():
     df = _synthetic_training_frame(n=500)
-    result = schwab_model.train_model(df=df)
+    result = alpaca_model.train_model(df=df)
     assert result["ok"] is True
     assert result["rows"] > 0
     assert result["model_type"] in {"logistic_regression", "random_forest", "gradient_boosting"}
-    assert schwab_model.MODEL_PATH.exists()
-    assert schwab_model.MODEL_META_PATH.exists()
+    assert alpaca_model.MODEL_PATH.exists()
+    assert alpaca_model.MODEL_META_PATH.exists()
 
 
 def test_predict_direction_reports_model_ok_false_without_a_trained_model():
-    result = schwab_model.predict_direction("AAPL")
+    result = alpaca_model.predict_direction("AAPL")
     assert result["model_ok"] is False
 
 
 def test_predict_direction_uses_trained_model(monkeypatch):
     df = _synthetic_training_frame(n=500)
-    train_result = schwab_model.train_model(df=df)
+    train_result = alpaca_model.train_model(df=df)
     assert train_result["ok"] is True
 
-    monkeypatch.setattr(schwab_model, "latest_feature_row", lambda symbol: {
+    monkeypatch.setattr(alpaca_model, "latest_feature_row", lambda symbol: {
         "symbol": symbol, "current_price": 100.0, "short_ma": 99.0,
         "ret_1m": 0.0, "ret_5m": 0.0, "ret_15m": 0.0, "ret_30m": 0.0, "ret_60m": 0.0,
         "dist_to_ma_15": 0.03, "dist_to_ma_30": 0.015,
@@ -94,7 +94,7 @@ def test_predict_direction_uses_trained_model(monkeypatch):
         "rsi_14": 0.5, "macd_hist_pct": 0.0, "bb_pct_b": 0.5, "bb_bandwidth": 0.01, "atr_pct": 0.001, "stoch_k": 0.5,
         "time_of_day_pct": 0.5,
     })
-    prediction = schwab_model.predict_direction("AAPL")
+    prediction = alpaca_model.predict_direction("AAPL")
     assert prediction["model_ok"] is True
     assert prediction["direction"] in {"up", "down"}
     assert 0.0 <= prediction["probability_up"] <= 1.0

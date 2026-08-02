@@ -1,16 +1,13 @@
-"""Schwab equities/ETF trading strategy -- separate from and independent of
+"""Alpaca equities/ETF trading strategy -- separate from and independent of
 the Kalshi perps bot's strategy module. Long-only to start (matching the
 same "start conservative, prove it out, then extend" posture the perps bot
 used before enabling shorts) -- short-selling stocks needs margin approval
 and carries materially different risk that hasn't been asked for here.
 
-Unlike Kalshi Perps (0.8% taker fee per leg, ~1.6% round trip -- the single
-biggest lesson from that bot this session), Schwab has charged $0 commission
-on online equity/ETF trades since 2019 -- a real, structural difference that
-means this strategy isn't fighting the same uphill battle against fees. The
+Alpaca charges $0 commission on equity/ETF trades (same as Schwab) -- the
 real (small) costs here are the bid-ask spread and tiny regulatory fees
 (SEC fee on sells, FINRA TAF), not modeled explicitly since they're a
-rounding error next to Kalshi's 1.6%.
+rounding error next to Kalshi Perps' 1.6% round-trip taker fee.
 
 Entry: a volume/volatility "something is happening right now" signal
 (dollar_volume_z spike + volatility above the symbol's own recent baseline)
@@ -53,33 +50,33 @@ def _env_int(name: str, default: int) -> int:
 # interest, not just noise. Combined with the volatility ratio so a
 # volume spike accompanied by real price movement (not just a quiet block
 # trade) is what actually qualifies.
-MIN_VOLUME_Z = _env_float("SCHWAB_MIN_VOLUME_Z", 1.5)
-MIN_VOLATILITY_RATIO = _env_float("SCHWAB_MIN_VOLATILITY_RATIO", 1.3)  # volatility_5 / volatility_30
+MIN_VOLUME_Z = _env_float("ALPACA_MIN_VOLUME_Z", 1.5)
+MIN_VOLATILITY_RATIO = _env_float("ALPACA_MIN_VOLATILITY_RATIO", 1.3)  # volatility_5 / volatility_30
 
 # "Enter on a small pullback in an otherwise-active name, not a random tick"
-ENTRY_DIP_PCT = _env_float("SCHWAB_ENTRY_DIP_PCT", 0.002)
-SHORT_MA_MINUTES = _env_int("SCHWAB_SHORT_MA_MINUTES", 15)
+ENTRY_DIP_PCT = _env_float("ALPACA_ENTRY_DIP_PCT", 0.002)
+SHORT_MA_MINUTES = _env_int("ALPACA_SHORT_MA_MINUTES", 15)
 
-TAKE_PROFIT_PCT = _env_float("SCHWAB_TAKE_PROFIT_PCT", 0.01)
-STOP_LOSS_PCT = _env_float("SCHWAB_STOP_LOSS_PCT", 0.008)
-MAX_HOLD_MINUTES = _env_int("SCHWAB_MAX_HOLD_MINUTES", 120)
+TAKE_PROFIT_PCT = _env_float("ALPACA_TAKE_PROFIT_PCT", 0.01)
+STOP_LOSS_PCT = _env_float("ALPACA_STOP_LOSS_PCT", 0.008)
+MAX_HOLD_MINUTES = _env_int("ALPACA_MAX_HOLD_MINUTES", 120)
 
-MODEL_CONFIDENCE_MIN = _env_float("SCHWAB_MODEL_CONFIDENCE_MIN", 0.55)
+MODEL_CONFIDENCE_MIN = _env_float("ALPACA_MODEL_CONFIDENCE_MIN", 0.55)
 
-# Confirmed live (via test data, not yet a real trade): at the perps-style
-# default of 10% per slot across 5 slots, a $100 account gets a $10-20
-# budget per position -- not enough to buy even ONE share of most liquid,
-# well-known stocks (a $100+ share price is completely ordinary). Real
-# diversification across 5 positions needs real capital; at $100, spreading
-# thin just means most "positions" silently can't afford a single share.
-# Concentrating into fewer, larger slots is the only way a small account
-# can actually hold real, liquid names -- "safe" here comes from the tight
-# stop-loss on each position, not from spreading a tiny balance thinner.
-POSITION_SIZE_PCT = _env_float("SCHWAB_POSITION_SIZE_PCT", 0.45)
-MAX_CONCURRENT_POSITIONS = max(1, _env_int("SCHWAB_MAX_CONCURRENT_POSITIONS", 2))
-DAILY_LOSS_CAP_PCT = _env_float("SCHWAB_DAILY_LOSS_CAP_PCT", 0.10)
+# At the perps-style default of 10% per slot across 5 slots, a $100 account
+# gets a $10-20 budget per position -- not enough to buy even ONE share of
+# most liquid, well-known stocks (a $100+ share price is completely
+# ordinary). Real diversification across 5 positions needs real capital;
+# at $100, spreading thin just means most "positions" silently can't afford
+# a single share. Concentrating into fewer, larger slots is the only way a
+# small account can actually hold real, liquid names -- "safe" here comes
+# from the tight stop-loss on each position, not from spreading a tiny
+# balance thinner.
+POSITION_SIZE_PCT = _env_float("ALPACA_POSITION_SIZE_PCT", 0.45)
+MAX_CONCURRENT_POSITIONS = max(1, _env_int("ALPACA_MAX_CONCURRENT_POSITIONS", 2))
+DAILY_LOSS_CAP_PCT = _env_float("ALPACA_DAILY_LOSS_CAP_PCT", 0.10)
 
-LIVE_TRADING_ENABLED = str(os.getenv("SCHWAB_LIVE_TRADING_ENABLED", "")).strip().lower() in {"1", "true", "yes"}
+LIVE_TRADING_ENABLED = str(os.getenv("ALPACA_LIVE_TRADING_ENABLED", "")).strip().lower() in {"1", "true", "yes"}
 
 
 def decide_entry_technical(row: dict[str, Any]) -> tuple[bool, str]:
@@ -161,8 +158,10 @@ def position_exit_levels(position: dict[str, Any]) -> dict[str, float]:
 
 
 def compute_position_size(available_balance_usd: float, price: float) -> int:
-    """Whole shares only (no fractional-share assumption) -- floor division
-    of the position's dollar budget by price."""
+    """Whole shares only. Alpaca supports fractional shares on plain
+    market/day orders, but NOT on bracket/OCO orders (which this strategy
+    relies on for the take-profit/stop-loss pair) -- so integer sizing here
+    isn't just conservative, it's a real requirement."""
     if price <= 0:
         return 0
     budget = available_balance_usd * POSITION_SIZE_PCT
@@ -172,28 +171,33 @@ def compute_position_size(available_balance_usd: float, price: float) -> int:
 # ---------------------------------------------------------------------------
 # Two modes, one codebase:
 #   "simulate" (default) -- paper trading against a tracked VIRTUAL balance
-#     (SCHWAB_SIMULATE_STARTING_BALANCE, $100 by default per the explicit
-#     ask). No real order ever gets placed; real market DATA (quotes,
-#     candles) is still used so the simulation reflects real conditions.
-#   "live" -- real bracket orders via schwab_client (still gated by
+#     (ALPACA_SIMULATE_STARTING_BALANCE, $100 by default). No real order
+#     ever gets placed; real market DATA (quotes, bars) is still used so
+#     the simulation reflects real conditions. This is independent of
+#     Alpaca's OWN paper-trading account (ALPACA_TRADING_BASE_URL pointed
+#     at paper-api.alpaca.markets) -- "simulate" mode here doesn't call the
+#     Alpaca trading endpoints at all, live or paper.
+#   "live" -- real bracket orders via alpaca_client, sent to whichever
+#     account ALPACA_TRADING_BASE_URL points at (paper or, once switched
+#     over with a live key pair, real money) -- still gated by
 #     LIVE_TRADING_ENABLED, same dual-gate safety posture as the perps bot:
-#     MODE=live alone does nothing until that flag is ALSO set).
+#     MODE=live alone does nothing until that flag is ALSO set.
 # `balance` is total tracked equity throughout (only realized P&L ever
 # changes it, same convention as perps_backtest.py) -- available capital
 # for a NEW position is balance minus whatever's already committed to open
 # positions, not balance itself.
 # ---------------------------------------------------------------------------
-MODE = os.getenv("SCHWAB_MODE", "simulate").strip().lower()
-SIMULATE_STARTING_BALANCE = _env_float("SCHWAB_SIMULATE_STARTING_BALANCE", 100.0)
+MODE = os.getenv("ALPACA_MODE", "simulate").strip().lower()
+SIMULATE_STARTING_BALANCE = _env_float("ALPACA_SIMULATE_STARTING_BALANCE", 100.0)
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 DATA_DIR = ROOT_DIR / "data"
-STATE_FILE = Path(os.getenv("SCHWAB_STATE_FILE", str(DATA_DIR / "schwab_state.json")))
+STATE_FILE = Path(os.getenv("ALPACA_STATE_FILE", str(DATA_DIR / "alpaca_state.json")))
 _STATE_LOCK = threading.RLock()
 
 HF_API_KEY = os.getenv("HF_API_KEY", "")
-HF_STOCK_MODEL_REPO = os.getenv("HF_STOCK_MODEL_REPO", "papylove/schwab-model")
-_DURABLE_STATE_HF_FILENAME = "schwab_durable_state.json"
+HF_ALPACA_MODEL_REPO = os.getenv("HF_ALPACA_MODEL_REPO", "papylove/alpaca-model")
+_DURABLE_STATE_HF_FILENAME = "alpaca_durable_state.json"
 _DURABLE_PUSH_MIN_INTERVAL_SEC = 30
 _last_durable_push_ts = 0.0
 
@@ -224,12 +228,12 @@ def _push_durable_state_to_hf(state: dict[str, Any]) -> None:
         try:
             api.upload_file(
                 path_or_fileobj=tmp_path, path_in_repo=_DURABLE_STATE_HF_FILENAME,
-                repo_id=HF_STOCK_MODEL_REPO, repo_type="model", commit_message="update schwab durable state",
+                repo_id=HF_ALPACA_MODEL_REPO, repo_type="model", commit_message="update alpaca durable state",
             )
         finally:
             os.unlink(tmp_path)
     except Exception as exc:
-        logger.warning("[schwab_strategy] durable state push to HF failed: %s", exc)
+        logger.warning("[alpaca_strategy] durable state push to HF failed: %s", exc)
 
 
 def _pull_durable_state_from_hf() -> dict[str, Any] | None:
@@ -238,11 +242,11 @@ def _pull_durable_state_from_hf() -> dict[str, Any] | None:
     try:
         from huggingface_hub import hf_hub_download
         path = hf_hub_download(
-            repo_id=HF_STOCK_MODEL_REPO, filename=_DURABLE_STATE_HF_FILENAME, repo_type="model", token=HF_API_KEY,
+            repo_id=HF_ALPACA_MODEL_REPO, filename=_DURABLE_STATE_HF_FILENAME, repo_type="model", token=HF_API_KEY,
         )
         return json.loads(Path(path).read_text(encoding="utf-8"))
     except Exception as exc:
-        logger.info("[schwab_strategy] no durable state on HF yet (or fetch failed): %s", exc)
+        logger.info("[alpaca_strategy] no durable state on HF yet (or fetch failed): %s", exc)
         return None
 
 
@@ -257,7 +261,7 @@ def _load_state() -> dict[str, Any]:
         durable = _pull_durable_state_from_hf()
         if durable:
             base.update(durable)
-            logger.info("[schwab_strategy] recovered durable state from HF after local state was missing")
+            logger.info("[alpaca_strategy] recovered durable state from HF after local state was missing")
         return base
     state.setdefault("balance", SIMULATE_STARTING_BALANCE)
     state.setdefault("positions", [])
@@ -281,40 +285,43 @@ def _save_state(state: dict[str, Any], *, push_durable: bool = False) -> None:
 
 def get_available_balance() -> float:
     """simulate mode: tracked virtual balance minus whatever's already
-    committed to open positions. live mode: the real Schwab cash balance
-    (no "committed" subtraction needed there -- Schwab's own balance
+    committed to open positions. live mode: the real Alpaca cash balance
+    (no "committed" subtraction needed there -- Alpaca's own balance
     already reflects real open positions)."""
     if MODE == "live":
-        from data import schwab_client
-        balance = schwab_client.get_account_balance()
-        return float(balance.get("cashAvailableForTrading") or balance.get("cashBalance") or 0.0)
+        from data import alpaca_client
+        account = alpaca_client.get_account()
+        return float(account.get("cash") or 0.0)
     state = _load_state()
     committed = sum(float(p["entry_price"]) * float(p["count"]) for p in (state.get("positions") or []))
     return max(0.0, float(state.get("balance", SIMULATE_STARTING_BALANCE)) - committed)
 
 
 def get_current_price(symbol: str) -> float | None:
-    """live mode: a real-time quote (cheap, no candle history needed).
-    simulate mode ALSO uses the real quote -- "simulate" means no real
-    orders are placed, not that market data is faked."""
-    from data import schwab_client
+    """live mode: a real-time-ish bid/ask quote (cheap, no bars history
+    needed). simulate mode ALSO uses the real quote -- "simulate" means no
+    real orders are placed, not that market data is faked."""
+    from data import alpaca_client
     try:
-        quote = schwab_client.get_quote(symbol)
-        price = quote.get("lastPrice") or quote.get("mark")
+        quote = alpaca_client.get_latest_quote(symbol)
+        ask, bid = quote.get("ap"), quote.get("bp")
+        if ask and bid:
+            return (float(ask) + float(bid)) / 2.0
+        price = ask or bid
         return float(price) if price else None
     except Exception as exc:
-        logger.warning("[schwab_strategy] quote fetch failed for %s: %s", symbol, exc)
+        logger.warning("[alpaca_strategy] quote fetch failed for %s: %s", symbol, exc)
         return None
 
 
 def scan_and_enter(watchlist: list[str] | None = None, *, dry_run: bool | None = None) -> dict[str, Any]:
     """Evaluates each watchlist symbol for a new entry. "simulate" mode
     always paper-trades (dry_run is irrelevant there); "live" mode places a
-    real bracket order (entry + linked take-profit/stop-loss OCO) UNLESS
+    real bracket order (entry + linked take-profit/stop-loss) UNLESS
     dry_run resolves True, in which case it only reports what it would have
     done -- same dual-gate posture as perps_strategy.py."""
-    from data.schwab_data import get_stock_watchlist, latest_feature_row, load_training_dataset
-    from data.schwab_model import predict_direction
+    from data.alpaca_data import get_stock_watchlist, latest_feature_row, load_training_dataset
+    from data.alpaca_model import predict_direction
     from data import threads_post
 
     effective_dry_run = (not LIVE_TRADING_ENABLED) if dry_run is None else dry_run
@@ -362,12 +369,12 @@ def scan_and_enter(watchlist: list[str] | None = None, *, dry_run: bool | None =
             levels = position_exit_levels({"entry_price": entry_price})
             order_id = None
             if MODE == "live" and not effective_dry_run:
-                from data import schwab_client
-                order_spec = schwab_client.build_bracket_order(
-                    symbol=symbol, quantity=count, entry_instruction="BUY", exit_instruction="SELL",
+                from data import alpaca_client
+                order_spec = alpaca_client.build_bracket_order(
+                    symbol=symbol, quantity=count, side="buy",
                     take_profit_price=levels["take_profit_price"], stop_loss_price=levels["stop_loss_price"],
                 )
-                order_id = schwab_client.place_order(order_spec)
+                order_id = alpaca_client.place_order(order_spec)
 
             position = {
                 "symbol": symbol, "entry_price": entry_price, "count": float(count),
@@ -393,8 +400,8 @@ def scan_and_enter(watchlist: list[str] | None = None, *, dry_run: bool | None =
             # Best-effort only -- see threads_post.py's own docstring. Never
             # allow a Threads failure (or it simply not being configured
             # yet) to affect the real/simulated entry that already happened
-            # above. Schwab is long-only (see decide_exit's own docstring),
-            # so side is always "long" here.
+            # above. Alpaca strategy is long-only (see decide_exit's own
+            # docstring), so side is always "long" here.
             try:
                 threads_post.post_trade_entry(
                     ticker=symbol, side="long", entry_price=entry_price,
@@ -402,7 +409,7 @@ def scan_and_enter(watchlist: list[str] | None = None, *, dry_run: bool | None =
                     reason=candidate["reason"], dry_run=trade_dry_run,
                 )
             except Exception:
-                logger.warning("[schwab_strategy] Threads post for %s entry failed", symbol, exc_info=True)
+                logger.warning("[alpaca_strategy] Threads post for %s entry failed", symbol, exc_info=True)
         except Exception as exc:
             opened.append({"symbol": symbol, "ok": False, "action": "entry_failed", "error": str(exc)})
 
@@ -413,10 +420,16 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
     """Checks every open position for an exit. In "live" mode, the
     take-profit/stop-loss are ALREADY live on the exchange as a bracket
     order the instant the entry filled (see scan_and_enter) -- this loop's
-    live-mode job is mainly to catch max_hold_time (which Schwab's bracket
-    order has no native concept of) and cancel+flatten in that case; a
-    normal TP/SL fill is reconciled here by simply noticing the position's
-    order is no longer open."""
+    live-mode job is mainly to catch max_hold_time (which Alpaca's bracket
+    order has no native concept of) and force-close in that case.
+
+    Before forcing a live exit, this checks whether the position still
+    actually exists on Alpaca (get_position). If Alpaca's own bracket
+    take-profit/stop-loss already fired the exit moments earlier, the
+    position is already gone -- forcing another close_position call there
+    would be a real double-sell attempt, not just a redundant one, so this
+    reconciles using the position's own stored target level instead of
+    calling close_position again."""
     effective_dry_run = (not LIVE_TRADING_ENABLED) if dry_run is None else dry_run
     with _STATE_LOCK:
         state = _load_state()
@@ -441,19 +454,22 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                 checks.append({"symbol": symbol, "ok": True, "exit_check": reason})
                 continue
 
-            if MODE == "live" and not effective_dry_run and position.get("order_id"):
-                from data import schwab_client
+            if MODE == "live" and not effective_dry_run:
+                from data import alpaca_client
+                still_open = True
                 try:
-                    schwab_client.cancel_order(position["order_id"])
+                    still_open = alpaca_client.get_position(symbol) is not None
                 except Exception as exc:
-                    logger.warning("[schwab_strategy] cancel of bracket order failed for %s (may have already filled): %s", symbol, exc)
-                schwab_client.place_order({
-                    "orderType": "MARKET", "session": "NORMAL", "duration": "DAY", "orderStrategyType": "SINGLE",
-                    "orderLegCollection": [{
-                        "instruction": "SELL", "quantity": position["count"],
-                        "instrument": {"symbol": symbol, "assetType": "EQUITY"},
-                    }],
-                })
+                    logger.warning("[alpaca_strategy] position lookup failed for %s, assuming still open: %s", symbol, exc)
+                if still_open:
+                    try:
+                        alpaca_client.close_position(symbol)
+                    except Exception as exc:
+                        logger.warning("[alpaca_strategy] close_position failed for %s (may have already closed): %s", symbol, exc)
+                elif "take_profit" in reason:
+                    current_price = position["take_profit_price"]
+                elif "stop_loss" in reason:
+                    current_price = position["stop_loss_price"]
 
             gross = round((current_price - float(position["entry_price"])) * float(position["count"]), 6)
             with _STATE_LOCK:
@@ -474,7 +490,7 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
             remaining_symbols.discard(symbol)
             closed.append(trade)
         except Exception as exc:
-            logger.warning("[schwab_strategy] could not process position for %s -- leaving untouched this cycle: %s", symbol, exc)
+            logger.warning("[alpaca_strategy] could not process position for %s -- leaving untouched this cycle: %s", symbol, exc)
             checks.append({"symbol": symbol, "ok": False, "error": str(exc)})
 
     return {"action": "closed" if closed else "no_change", "closed": closed, "checks": checks}

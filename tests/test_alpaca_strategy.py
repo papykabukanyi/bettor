@@ -1,4 +1,4 @@
-"""Schwab equities strategy decision logic -- separate from and parallel to
+"""Alpaca equities strategy decision logic -- separate from and parallel to
 test_perps_strategy.py. Pure-function tests: volume/volatility entry gate,
 take-profit/stop-loss/max-hold exits, position sizing, and the simulate/
 live position-lifecycle engine (state persistence, entry, exit)."""
@@ -9,7 +9,7 @@ import datetime as dt
 import pandas as pd
 import pytest
 
-from data import schwab_client, schwab_data, schwab_model, threads_post, schwab_strategy as strat
+from data import alpaca_client, alpaca_data, alpaca_model, threads_post, alpaca_strategy as strat
 
 
 def _row(**overrides):
@@ -112,7 +112,6 @@ def test_position_exit_levels():
 
 
 def test_compute_position_size_floors_to_whole_shares():
-    # $1000 budget * 10% = $100, at $30/share -> 3 whole shares, not 3.33
     count = strat.compute_position_size(1000.0, 30.0)
     assert count == int((1000.0 * strat.POSITION_SIZE_PCT) // 30.0)
 
@@ -126,7 +125,7 @@ def test_compute_position_size_zero_at_zero_price():
 # ---------------------------------------------------------------------------
 @pytest.fixture(autouse=True)
 def _isolated_state(tmp_path, monkeypatch):
-    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "schwab_state.json")
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "alpaca_state.json")
     monkeypatch.setattr(strat, "HF_API_KEY", "")  # no real network for the HF durable-state mirror by default
     monkeypatch.setattr(strat, "MODE", "simulate")
     yield
@@ -146,25 +145,27 @@ def test_get_available_balance_subtracts_committed_positions(monkeypatch):
     assert strat.get_available_balance() == 50.0
 
 
-def test_get_current_price_reads_last_price_from_a_real_time_quote(monkeypatch):
-    monkeypatch.setattr(schwab_client, "get_quote", lambda symbol: {"lastPrice": 123.45})
-    assert strat.get_current_price("AAPL") == 123.45
+def test_get_current_price_averages_bid_and_ask_from_the_latest_quote(monkeypatch):
+    monkeypatch.setattr(alpaca_client, "get_latest_quote", lambda symbol: {"ap": 124.0, "bp": 122.9})
+    assert strat.get_current_price("AAPL") == pytest.approx(123.45)
+
+
+def test_get_current_price_falls_back_to_whichever_side_is_present(monkeypatch):
+    monkeypatch.setattr(alpaca_client, "get_latest_quote", lambda symbol: {"ap": 124.0, "bp": 0})
+    assert strat.get_current_price("AAPL") == 124.0
 
 
 def test_get_current_price_returns_none_on_a_failed_quote(monkeypatch):
     def fail(symbol):
         raise RuntimeError("network down")
 
-    monkeypatch.setattr(schwab_client, "get_quote", fail)
+    monkeypatch.setattr(alpaca_client, "get_latest_quote", fail)
     assert strat.get_current_price("AAPL") is None
 
 
 def _entry_row(**overrides):
-    # A $100 simulate balance at the default 10% position size is a $10
-    # budget -- current_price must be affordable in whole shares (real
-    # constraint: a $100 account literally cannot buy a single $100+ stock
-    # at this sizing, which is exactly why the watchlist should favor
-    # lower-priced, liquid, volatile names for a small account).
+    # A $100 simulate balance at the default 45% position size needs an
+    # affordable-in-whole-shares current_price.
     base = {
         "symbol": "AAPL", "current_price": 5.0, "short_ma": 5.015,
         "dollar_volume_z": 2.0, "volatility_5": 0.002, "volatility_30": 0.001,
@@ -174,15 +175,15 @@ def _entry_row(**overrides):
 
 
 def test_scan_and_enter_simulate_mode_opens_a_paper_position_without_any_real_order(monkeypatch):
-    monkeypatch.setattr(schwab_data, "get_stock_watchlist", lambda recent: ["AAPL"])
-    monkeypatch.setattr(schwab_data, "load_training_dataset", lambda **kw: pd.DataFrame())
-    monkeypatch.setattr(schwab_data, "latest_feature_row", lambda symbol: _entry_row())
-    monkeypatch.setattr(schwab_model, "predict_direction", lambda symbol: {"model_ok": False})
+    monkeypatch.setattr(alpaca_data, "get_stock_watchlist", lambda recent: ["AAPL"])
+    monkeypatch.setattr(alpaca_data, "load_training_dataset", lambda **kw: pd.DataFrame())
+    monkeypatch.setattr(alpaca_data, "latest_feature_row", lambda symbol: _entry_row())
+    monkeypatch.setattr(alpaca_model, "predict_direction", lambda symbol: {"model_ok": False})
 
     def fail_if_called(*a, **k):
         raise AssertionError("simulate mode must never place a real order")
 
-    monkeypatch.setattr(schwab_client, "place_order", fail_if_called)
+    monkeypatch.setattr(alpaca_client, "place_order", fail_if_called)
 
     result = strat.scan_and_enter()
     assert result["opened"][0]["action"] == "opened"
@@ -199,13 +200,13 @@ def test_scan_and_enter_skips_a_symbol_already_held(monkeypatch):
         "balance": 100.0, "positions": [{"symbol": "AAPL", "entry_price": 100.0, "count": 1.0}],
         "trade_log": [], "realized_pnl_by_date": {},
     })
-    monkeypatch.setattr(schwab_data, "get_stock_watchlist", lambda recent: ["AAPL"])
-    monkeypatch.setattr(schwab_data, "load_training_dataset", lambda **kw: pd.DataFrame())
+    monkeypatch.setattr(alpaca_data, "get_stock_watchlist", lambda recent: ["AAPL"])
+    monkeypatch.setattr(alpaca_data, "load_training_dataset", lambda **kw: pd.DataFrame())
 
     def fail_if_called(symbol):
         raise AssertionError("must not re-evaluate a symbol that's already held")
 
-    monkeypatch.setattr(schwab_data, "latest_feature_row", fail_if_called)
+    monkeypatch.setattr(alpaca_data, "latest_feature_row", fail_if_called)
 
     result = strat.scan_and_enter()
     assert result["opened"] == []
@@ -222,10 +223,10 @@ def test_scan_and_enter_respects_the_daily_loss_cap(monkeypatch):
 
 
 def test_scan_and_enter_posts_to_threads_on_a_simulated_entry(monkeypatch):
-    monkeypatch.setattr(schwab_data, "get_stock_watchlist", lambda recent: ["AAPL"])
-    monkeypatch.setattr(schwab_data, "load_training_dataset", lambda **kw: pd.DataFrame())
-    monkeypatch.setattr(schwab_data, "latest_feature_row", lambda symbol: _entry_row())
-    monkeypatch.setattr(schwab_model, "predict_direction", lambda symbol: {"model_ok": False})
+    monkeypatch.setattr(alpaca_data, "get_stock_watchlist", lambda recent: ["AAPL"])
+    monkeypatch.setattr(alpaca_data, "load_training_dataset", lambda **kw: pd.DataFrame())
+    monkeypatch.setattr(alpaca_data, "latest_feature_row", lambda symbol: _entry_row())
+    monkeypatch.setattr(alpaca_model, "predict_direction", lambda symbol: {"model_ok": False})
 
     posted = {}
     monkeypatch.setattr(threads_post, "post_trade_entry", lambda **kw: posted.update(kw) or True)
@@ -243,10 +244,10 @@ def test_scan_and_enter_still_opens_the_position_even_if_threads_post_raises(mon
     """A Threads failure must never be allowed to affect a real/simulated
     entry, since post_trade_entry() is called AFTER the position is
     already saved to state."""
-    monkeypatch.setattr(schwab_data, "get_stock_watchlist", lambda recent: ["AAPL"])
-    monkeypatch.setattr(schwab_data, "load_training_dataset", lambda **kw: pd.DataFrame())
-    monkeypatch.setattr(schwab_data, "latest_feature_row", lambda symbol: _entry_row())
-    monkeypatch.setattr(schwab_model, "predict_direction", lambda symbol: {"model_ok": False})
+    monkeypatch.setattr(alpaca_data, "get_stock_watchlist", lambda recent: ["AAPL"])
+    monkeypatch.setattr(alpaca_data, "load_training_dataset", lambda **kw: pd.DataFrame())
+    monkeypatch.setattr(alpaca_data, "latest_feature_row", lambda symbol: _entry_row())
+    monkeypatch.setattr(alpaca_model, "predict_direction", lambda symbol: {"model_ok": False})
 
     def raise_error(**kwargs):
         raise RuntimeError("simulated Threads API outage")
@@ -260,16 +261,16 @@ def test_scan_and_enter_still_opens_the_position_even_if_threads_post_raises(mon
 
 
 def test_scan_and_enter_one_symbol_failing_does_not_block_the_others(monkeypatch):
-    monkeypatch.setattr(schwab_data, "get_stock_watchlist", lambda recent: ["BAD", "AAPL"])
-    monkeypatch.setattr(schwab_data, "load_training_dataset", lambda **kw: pd.DataFrame())
+    monkeypatch.setattr(alpaca_data, "get_stock_watchlist", lambda recent: ["BAD", "AAPL"])
+    monkeypatch.setattr(alpaca_data, "load_training_dataset", lambda **kw: pd.DataFrame())
 
     def fake_feature_row(symbol):
         if symbol == "BAD":
             raise RuntimeError("data fetch failed")
         return _entry_row(symbol=symbol)
 
-    monkeypatch.setattr(schwab_data, "latest_feature_row", fake_feature_row)
-    monkeypatch.setattr(schwab_model, "predict_direction", lambda symbol: {"model_ok": False})
+    monkeypatch.setattr(alpaca_data, "latest_feature_row", fake_feature_row)
+    monkeypatch.setattr(alpaca_model, "predict_direction", lambda symbol: {"model_ok": False})
 
     result = strat.scan_and_enter()
     outcomes = {o["symbol"]: o for o in result["opened"]}
@@ -291,7 +292,7 @@ def test_manage_open_positions_simulate_mode_closes_on_take_profit_and_updates_v
         "trade_log": [], "realized_pnl_by_date": {},
     })
     take_profit_price = 100.0 * (1 + strat.TAKE_PROFIT_PCT + 0.001)
-    monkeypatch.setattr(schwab_client, "get_quote", lambda symbol: {"lastPrice": take_profit_price})
+    monkeypatch.setattr(alpaca_client, "get_latest_quote", lambda symbol: {"ap": take_profit_price, "bp": take_profit_price})
 
     result = strat.manage_open_positions()
     assert result["action"] == "closed"
@@ -312,7 +313,7 @@ def test_manage_open_positions_leaves_position_open_when_nothing_triggers(monkey
         }],
         "trade_log": [], "realized_pnl_by_date": {},
     })
-    monkeypatch.setattr(schwab_client, "get_quote", lambda symbol: {"lastPrice": 100.05})
+    monkeypatch.setattr(alpaca_client, "get_latest_quote", lambda symbol: {"ap": 100.05, "bp": 100.05})
     result = strat.manage_open_positions()
     assert result["action"] == "no_change"
     state = strat._load_state()  # noqa: SLF001
@@ -333,9 +334,9 @@ def test_manage_open_positions_one_bad_quote_does_not_block_the_others(monkeypat
     def fake_quote(symbol):
         if symbol == "BAD":
             raise RuntimeError("quote service down")
-        return {"lastPrice": take_profit_price}
+        return {"ap": take_profit_price, "bp": take_profit_price}
 
-    monkeypatch.setattr(schwab_client, "get_quote", fake_quote)
+    monkeypatch.setattr(alpaca_client, "get_latest_quote", fake_quote)
     result = strat.manage_open_positions()
     assert any(c["symbol"] == "BAD" and c["ok"] is False for c in result["checks"])
     assert any(t["symbol"] == "AAPL" for t in result["closed"])
@@ -352,13 +353,68 @@ def test_manage_open_positions_never_places_a_real_order_in_simulate_mode(monkey
         "trade_log": [], "realized_pnl_by_date": {},
     })
     take_profit_price = 100.0 * (1 + strat.TAKE_PROFIT_PCT + 0.001)
-    monkeypatch.setattr(schwab_client, "get_quote", lambda symbol: {"lastPrice": take_profit_price})
+    monkeypatch.setattr(alpaca_client, "get_latest_quote", lambda symbol: {"ap": take_profit_price, "bp": take_profit_price})
 
     def fail_if_called(*a, **k):
         raise AssertionError("simulate mode must never place or cancel a real order")
 
-    monkeypatch.setattr(schwab_client, "place_order", fail_if_called)
-    monkeypatch.setattr(schwab_client, "cancel_order", fail_if_called)
+    monkeypatch.setattr(alpaca_client, "place_order", fail_if_called)
+    monkeypatch.setattr(alpaca_client, "close_position", fail_if_called)
 
     result = strat.manage_open_positions()
     assert result["action"] == "closed"
+
+
+# ---------------------------------------------------------------------------
+# Live-mode exit reconciliation -- new relative to the former Schwab
+# strategy: before forcing a live exit, check whether Alpaca's own bracket
+# take-profit/stop-loss already closed the position moments earlier (a real
+# double-sell risk if not checked).
+# ---------------------------------------------------------------------------
+def test_manage_open_positions_live_mode_closes_via_close_position_when_still_open(monkeypatch):
+    monkeypatch.setattr(strat, "MODE", "live")
+    monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", True)
+    strat._save_state({  # noqa: SLF001
+        "balance": 100.0, "positions": [{
+            "symbol": "AAPL", "entry_price": 100.0, "count": 1.0,
+            "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(), "order_id": "order-1",
+        }],
+        "trade_log": [], "realized_pnl_by_date": {},
+    })
+    take_profit_price = 100.0 * (1 + strat.TAKE_PROFIT_PCT + 0.001)
+    monkeypatch.setattr(alpaca_client, "get_latest_quote", lambda symbol: {"ap": take_profit_price, "bp": take_profit_price})
+    monkeypatch.setattr(alpaca_client, "get_position", lambda symbol: {"symbol": symbol, "qty": "1"})
+    closed_calls = []
+    monkeypatch.setattr(alpaca_client, "close_position", lambda symbol: closed_calls.append(symbol))
+
+    result = strat.manage_open_positions()
+    assert result["action"] == "closed"
+    assert closed_calls == ["AAPL"]
+
+
+def test_manage_open_positions_live_mode_reconciles_without_double_selling_when_bracket_already_closed_it(monkeypatch):
+    monkeypatch.setattr(strat, "MODE", "live")
+    monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", True)
+    strat._save_state({  # noqa: SLF001
+        "balance": 100.0, "positions": [{
+            "symbol": "AAPL", "entry_price": 100.0, "count": 1.0,
+            "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(), "order_id": "order-1",
+            "take_profit_price": 101.0, "stop_loss_price": 99.0,
+        }],
+        "trade_log": [], "realized_pnl_by_date": {},
+    })
+    take_profit_price = 100.0 * (1 + strat.TAKE_PROFIT_PCT + 0.001)
+    monkeypatch.setattr(alpaca_client, "get_latest_quote", lambda symbol: {"ap": take_profit_price, "bp": take_profit_price})
+    # Alpaca's own bracket order already closed this position -- no position exists anymore.
+    monkeypatch.setattr(alpaca_client, "get_position", lambda symbol: None)
+
+    def fail_if_called(symbol):
+        raise AssertionError("must not attempt to close a position that's already gone (double-sell risk)")
+
+    monkeypatch.setattr(alpaca_client, "close_position", fail_if_called)
+
+    result = strat.manage_open_positions()
+    assert result["action"] == "closed"
+    # Reconciled using the position's OWN stored take-profit level, not the
+    # (possibly stale) live quote fetched after the bracket already fired.
+    assert result["closed"][0]["exit_price"] == 101.0
