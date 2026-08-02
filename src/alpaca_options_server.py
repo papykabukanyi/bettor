@@ -198,11 +198,16 @@ def _ensure_background_jobs_started() -> None:
             )
 
         def _runner() -> None:
-            try:
-                _run_alpaca_options_data_collect()
-                logger.info("Startup alpaca options data collect completed")
-            except Exception as exc:
-                logger.warning("Startup alpaca options data collect failed: %s", exc)
+            # No immediate, unconditional startup data-collect call here --
+            # a real, confirmed incident on this exact sibling pattern in
+            # alpaca_crypto_server.py showed that calling it unconditionally
+            # on every boot can OOM-crash the process, and because it ran on
+            # EVERY restart, the crash-triggered restart just re-ran the same
+            # expensive step immediately, becoming a self-sustaining crash
+            # loop. Fixed there by relying on the already-scheduled
+            # alpaca_options_data_collect job (registered above with its own
+            # next_run_time delay) instead of an immediate direct call.
+            #
             # Same cold-start-only guard as every other server here: only
             # train immediately if nothing is cached yet, so a crash-
             # triggered restart can't turn into a self-sustaining retrain

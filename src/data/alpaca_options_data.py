@@ -26,6 +26,7 @@ memory cost for no real benefit here.
 from __future__ import annotations
 
 import datetime as dt
+import gc
 import logging
 import os
 import re
@@ -137,7 +138,13 @@ def push_minute_snapshot(df: pd.DataFrame) -> dict[str, Any]:
     """Minute bars (of the UNDERLYING stocks -- the model trains on
     underlying direction, not option-contract price series) sharded by
     calendar day across all underlyings, same merge-not-overwrite
-    discipline as every other pipeline here."""
+    discipline as every other pipeline here.
+
+    Explicit `del`+gc.collect() mirrors a real, confirmed OOM fix needed on
+    this exact function's sibling in alpaca_crypto_data.py (downloading the
+    existing shard, concatenating, then uploading held existing+df+combined
+    simultaneously with nothing freed) -- applied here proactively before
+    this newer, smaller pipeline's own shards grow enough to hit it too."""
     if df.empty:
         return {"ok": False, "reason": "no_rows"}
     if not HF_API_KEY:
@@ -151,12 +158,19 @@ def push_minute_snapshot(df: pd.DataFrame) -> dict[str, Any]:
         existing_path = hf_hub_download(repo_id=HF_ALPACA_OPTIONS_DATASET_REPO, filename=path_in_repo, repo_type="dataset", token=HF_API_KEY)
         existing = pd.read_parquet(existing_path)
         combined = pd.concat([existing, df], ignore_index=True)
+        del existing
     except Exception as exc:
         logger.info("[alpaca_options_data] no existing minute shard for %s yet (or fetch failed), starting fresh: %s", today, exc)
 
     if "symbol" in combined.columns and "ts" in combined.columns:
         combined = combined.drop_duplicates(subset=["symbol", "ts"]).sort_values(["symbol", "ts"]).reset_index(drop=True)
-    return _upload_shard(combined, path_in_repo=path_in_repo, commit_message=f"append options-underlying minute bars: {today}")
+    del df
+    gc.collect()
+    try:
+        return _upload_shard(combined, path_in_repo=path_in_repo, commit_message=f"append options-underlying minute bars: {today}")
+    finally:
+        del combined
+        gc.collect()
 
 
 MAX_TRAIN_ROWS = int(os.getenv("ALPACA_OPTIONS_MAX_TRAIN_ROWS", "150000") or "150000")

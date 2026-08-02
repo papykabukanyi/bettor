@@ -199,11 +199,24 @@ def _ensure_background_jobs_started() -> None:
             )
 
         def _runner() -> None:
-            try:
-                _run_alpaca_crypto_data_collect()
-                logger.info("Startup alpaca crypto data collect completed")
-            except Exception as exc:
-                logger.warning("Startup alpaca crypto data collect failed: %s", exc)
+            # Real, confirmed incident: this used to call
+            # _run_alpaca_crypto_data_collect() immediately and unconditionally
+            # on every boot. collect_dataset_rows() with no watchlist narrowing
+            # pulls LIVE_LOOKBACK_DAYS (5 days of 1-minute bars) for the FULL
+            # crypto universe (36 USD pairs on this account, confirmed via
+            # Alpaca's own /v2/assets) in one call, then push_minute_snapshot
+            # downloads the day's existing shard and holds existing+new+merged
+            # copies simultaneously while uploading -- confirmed via Render's
+            # own event log to reliably OOM (oomKilled, 512Mi) about a minute
+            # after every boot. Because this ran unconditionally on EVERY
+            # restart, the OOM-triggered restart immediately re-ran the exact
+            # same expensive step, making it a self-sustaining crash loop --
+            # exactly the failure mode the train-immediately guard below
+            # already exists to prevent, just missing here. The scheduled
+            # alpaca_crypto_data_collect job (already registered above with a
+            # next_run_time delayed by ALPACA_CRYPTO_DATA_COLLECT_MINUTES)
+            # covers first collection on a sane cadence without this.
+            #
             # Same cold-start-only guard as every other server here: only
             # train immediately if nothing is cached yet, so a crash-
             # triggered restart can't turn into a self-sustaining retrain
