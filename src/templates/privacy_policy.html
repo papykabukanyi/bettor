@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Privacy Policy -- Bettor</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg: #0a0c11; --surface: #12151c; --border: #232838;
+    --text: #e7ecf5; --muted: #8792a8; --blue: #3b82f6; --r: 10px;
+  }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 15px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    padding: 48px 20px; max-width: 720px; margin: 0 auto;
+  }
+  h1 { font-size: 26px; font-weight: 700; letter-spacing: -0.01em; margin-bottom: 6px; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 36px; }
+  h2 { font-size: 17px; font-weight: 700; margin: 32px 0 10px; }
+  p, li { color: var(--text); }
+  p { margin-bottom: 14px; }
+  ul { margin: 0 0 14px 20px; }
+  li { margin-bottom: 6px; }
+  .card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: var(--r);
+    padding: 20px 24px; margin-bottom: 8px;
+  }
+  a { color: var(--blue); }
+  footer { color: var(--muted); font-size: 12px; margin-top: 40px; }
+</style>
+</head>
+<body>
+<h1>Privacy Policy</h1>
+<div class="sub">Bettor -- Kalshi Perps automated trading bot &middot; Last updated {{ updated_at }}</div>
+
+<div class="card">
+<p>This bot is a personal, single-user automated trading tool for Kalshi Perps (cryptocurrency perpetual futures). This page describes the data it accesses and how it's used, specifically in connection with its optional integration with the Meta Threads API.</p>
+</div>
+
+<h2>What this integration does</h2>
+<p>When enabled, the bot posts a short, automated note to a single Threads account every time it enters a real trade -- the ticker, position side, entry price, take-profit/stop-loss targets, and the reason the trade was entered. It may also post a short note when the trading server restarts.</p>
+<p>This is one-way, outbound posting only. The bot does not read, monitor, collect, or store posts, replies, likes, followers, or any other data belonging to the Threads account or to any other Threads user.</p>
+
+<h2>What data is accessed</h2>
+<ul>
+  <li>An OAuth access token authorizing this app to publish posts as the single account that completed the login (Threads API scopes: <code>threads_basic</code>, <code>threads_content_publish</code>).</li>
+  <li>The Threads user ID needed to address that account's own post-publishing endpoint.</li>
+</ul>
+<p>No data about any other person or account is accessed, collected, or processed.</p>
+
+<h2>How data is stored</h2>
+<p>The access token is stored privately (mirrored to a private Hugging Face model repository the operator controls, so the bot doesn't need a fresh login after every server restart). It is never shared with, sold to, or made accessible to any third party. It is used solely to authenticate the automated posts described above.</p>
+
+<h2>Data deletion</h2>
+<p>The account owner can revoke this app's access at any time from their Meta/Threads account settings, which immediately invalidates the stored token. The operator can also delete the stored token directly.</p>
+
+<h2>Contact</h2>
+<p>Questions about this policy or this bot's data handling can be sent to <a href="mailto:papykabukanyi@gmail.com">papykabukanyi@gmail.com</a>.</p>
+
+<footer>This bot is an independent personal project and is not affiliated with, endorsed by, or operated on behalf of Meta, Threads, Kalshi, or any other named platform.</footer>
+</body>
+</html>

@@ -53,6 +53,14 @@ _TOKEN_HF_FILENAME = "threads_tokens.json"
 
 _STATE_LOCK = threading.Lock()
 _token_cache: dict[str, Any] = {}
+# Real production finding: threads_post.is_configured() (called on every
+# single /api/status poll -- confirmed live, external monitoring bots hit
+# it roughly every 20s) calls this, and before a login has ever completed
+# `_token_cache` stays permanently empty, meaning it would otherwise retry
+# the real HF network lookup on EVERY poll, forever. This cooldown makes
+# a "no tokens yet" result negative-cacheable for a while instead.
+_PULL_RETRY_COOLDOWN_SEC = 300
+_last_pull_attempt_ts = 0.0
 
 # Threads' own refresh endpoint requires the long-lived token to be at
 # least 24h old -- refreshing too early just fails, so this margin is a
@@ -170,11 +178,15 @@ def get_valid_access_token() -> str | None:
     within _REFRESH_MARGIN_SEC of expiry (and old enough for Threads to
     actually allow a refresh). None if no login has ever completed -- no
     code can substitute for that first interactive step."""
+    global _last_pull_attempt_ts
     with _STATE_LOCK:
         if not _token_cache:
-            pulled = _pull_tokens_from_hf()
-            if pulled:
-                _token_cache.update(pulled)
+            now_mono = time.monotonic()
+            if now_mono - _last_pull_attempt_ts >= _PULL_RETRY_COOLDOWN_SEC:
+                _last_pull_attempt_ts = now_mono
+                pulled = _pull_tokens_from_hf()
+                if pulled:
+                    _token_cache.update(pulled)
         if not _token_cache.get("access_token"):
             return None
 
@@ -196,11 +208,15 @@ def get_user_id() -> str | None:
     """The Threads user id posts are made as -- captured from the initial
     OAuth exchange, needed as the {threads-user-id} path segment on every
     post call."""
+    global _last_pull_attempt_ts
     with _STATE_LOCK:
         if not _token_cache:
-            pulled = _pull_tokens_from_hf()
-            if pulled:
-                _token_cache.update(pulled)
+            now_mono = time.monotonic()
+            if now_mono - _last_pull_attempt_ts >= _PULL_RETRY_COOLDOWN_SEC:
+                _last_pull_attempt_ts = now_mono
+                pulled = _pull_tokens_from_hf()
+                if pulled:
+                    _token_cache.update(pulled)
         return _token_cache.get("user_id")
 
 

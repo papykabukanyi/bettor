@@ -380,6 +380,14 @@ def schwab_redirect():
     return redirect("/")
 
 
+@app.route("/pr")
+def privacy_policy():
+    """Meta requires a Privacy Policy URL on file for any app requesting
+    Threads API scopes -- this is that page, registered in the Threads app
+    settings as this service's privacy policy URL."""
+    return render_template("privacy_policy.html", updated_at=dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d"))
+
+
 @app.route("/threads/authorize")
 def threads_authorize():
     """Convenience redirect to Threads' own login page -- the actual
