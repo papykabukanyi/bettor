@@ -30,6 +30,30 @@ THREADS_POST_ENABLED = str(os.getenv("THREADS_POST_ENABLED", "1") or "1").strip(
 
 _THREADS_POST_MAX_CHARS = 500
 
+# Every post used to say "Kalshi Perps" regardless of which of the four
+# asset-class services actually sent it -- a real mislabeling bug once
+# stocks/crypto/options started sharing this same module. `market` now
+# drives both the label and a set of contextual hashtags meant to help
+# each post actually get found/gain attention on Threads, not just report
+# the trade.
+_MARKET_LABELS = {
+    "perps": "Kalshi Perps", "stocks": "Alpaca Stocks", "crypto": "Alpaca Crypto", "options": "Alpaca Options",
+}
+_MARKET_HASHTAGS = {
+    "perps": "#Kalshi #PredictionMarkets #Crypto #Trading",
+    "stocks": "#StockMarket #Stocks #Trading #Investing",
+    "crypto": "#Crypto #Bitcoin #CryptoTrading #Altcoins",
+    "options": "#OptionsTrading #Stocks #Calls #Puts",
+}
+
+
+def _market_label(market: str) -> str:
+    return _MARKET_LABELS.get(market, _MARKET_LABELS["perps"])
+
+
+def _hashtags_for_market(market: str) -> str:
+    return _MARKET_HASHTAGS.get(market, _MARKET_HASHTAGS["perps"])
+
 
 def is_configured() -> bool:
     """True once a real login has actually completed (a token is present)
@@ -40,14 +64,15 @@ def is_configured() -> bool:
 
 def _format_trade_entry_text(
     *, ticker: str, side: str, entry_price: float, take_profit_price: float,
-    stop_loss_price: float, reason: str, dry_run: bool,
+    stop_loss_price: float, reason: str, dry_run: bool, market: str = "perps",
 ) -> str:
     tag = "[SIMULATED] " if dry_run else ""
     direction = "SHORT" if side == "short" else "LONG"
     text = (
-        f"{tag}Kalshi Perps: {direction} {ticker} @ {entry_price:.4f}\n"
+        f"{tag}{_market_label(market)}: {direction} {ticker} @ {entry_price:.4f}\n"
         f"Take-profit: {take_profit_price:.4f} | Stop-loss: {stop_loss_price:.4f}\n"
-        f"Why: {reason}"
+        f"Why: {reason}\n"
+        f"{_hashtags_for_market(market)}"
     )
     if len(text) > _THREADS_POST_MAX_CHARS:
         text = text[: _THREADS_POST_MAX_CHARS - 1] + "…"
@@ -56,7 +81,7 @@ def _format_trade_entry_text(
 
 def post_trade_entry(
     *, ticker: str, side: str, entry_price: float, take_profit_price: float,
-    stop_loss_price: float, reason: str, dry_run: bool,
+    stop_loss_price: float, reason: str, dry_run: bool, market: str = "perps",
 ) -> bool:
     """Posts one Threads post describing a just-opened position. Returns
     whether it actually posted (False for "not configured" and for any
@@ -66,13 +91,53 @@ def post_trade_entry(
         return False
     text = _format_trade_entry_text(
         ticker=ticker, side=side, entry_price=entry_price, take_profit_price=take_profit_price,
-        stop_loss_price=stop_loss_price, reason=reason, dry_run=dry_run,
+        stop_loss_price=stop_loss_price, reason=reason, dry_run=dry_run, market=market,
     )
     try:
         threads_client.create_and_publish_post(text)
         return True
     except Exception as exc:
         logger.warning("[threads_post] failed to post trade entry for %s: %s", ticker, exc)
+        return False
+
+
+def _format_trade_exit_text(
+    *, ticker: str, side: str, entry_price: float, exit_price: float,
+    pnl_usd: float, reason: str, dry_run: bool, market: str = "perps",
+) -> str:
+    tag = "[SIMULATED] " if dry_run else ""
+    direction = "SHORT" if side == "short" else "LONG"
+    result_word = "WIN" if pnl_usd > 0 else "LOSS" if pnl_usd < 0 else "FLAT"
+    text = (
+        f"{tag}{_market_label(market)}: CLOSED {direction} {ticker} -- {result_word} {pnl_usd:+.2f}\n"
+        f"Entry {entry_price:.4f} -> Exit {exit_price:.4f}\n"
+        f"Why: {reason}\n"
+        f"{_hashtags_for_market(market)}"
+    )
+    if len(text) > _THREADS_POST_MAX_CHARS:
+        text = text[: _THREADS_POST_MAX_CHARS - 1] + "…"
+    return text
+
+
+def post_trade_exit(
+    *, ticker: str, side: str, entry_price: float, exit_price: float,
+    pnl_usd: float, reason: str, dry_run: bool, market: str = "perps",
+) -> bool:
+    """Posts one Threads post describing a just-closed position -- the
+    counterpart to post_trade_entry() so followers see the full round trip
+    (entry AND exit/result), not just entries. Same best-effort, never-
+    raise contract as every other post here."""
+    if not THREADS_POST_ENABLED:
+        return False
+    text = _format_trade_exit_text(
+        ticker=ticker, side=side, entry_price=entry_price, exit_price=exit_price,
+        pnl_usd=pnl_usd, reason=reason, dry_run=dry_run, market=market,
+    )
+    try:
+        threads_client.create_and_publish_post(text)
+        return True
+    except Exception as exc:
+        logger.warning("[threads_post] failed to post trade exit for %s: %s", ticker, exc)
         return False
 
 
@@ -90,7 +155,9 @@ def post_restart_notice(message: str = "Money Bot has restarted!") -> bool:
         return False
 
 
-def _format_hourly_status_text(*, positions: list[dict], today_realized_pnl_usd: float | None) -> str:
+def _format_hourly_status_text(
+    *, positions: list[dict], today_realized_pnl_usd: float | None, market: str = "perps",
+) -> str:
     if not positions:
         text = "Hourly status: flat (no open positions) -- scanning for the next trade."
     else:
@@ -110,19 +177,22 @@ def _format_hourly_status_text(*, positions: list[dict], today_realized_pnl_usd:
         text = "\n".join(lines)
     if today_realized_pnl_usd is not None:
         text += f"\nToday's P&L: {today_realized_pnl_usd:+.2f}"
+    text += f"\n{_hashtags_for_market(market)}"
     if len(text) > _THREADS_POST_MAX_CHARS:
         text = text[: _THREADS_POST_MAX_CHARS - 1] + "…"
     return text
 
 
-def post_hourly_status(*, positions: list[dict], today_realized_pnl_usd: float | None = None) -> bool:
+def post_hourly_status(
+    *, positions: list[dict], today_realized_pnl_usd: float | None = None, market: str = "perps",
+) -> bool:
     """Posts a status update every hour regardless of whether a trade
     happened -- what position(s) the bot is currently holding (or that
     it's flat), plus today's realized P&L. Same best-effort, never-raise
     contract as the other posts here."""
     if not THREADS_POST_ENABLED:
         return False
-    text = _format_hourly_status_text(positions=positions, today_realized_pnl_usd=today_realized_pnl_usd)
+    text = _format_hourly_status_text(positions=positions, today_realized_pnl_usd=today_realized_pnl_usd, market=market)
     try:
         threads_client.create_and_publish_post(text)
         return True
@@ -133,11 +203,14 @@ def post_hourly_status(*, positions: list[dict], today_realized_pnl_usd: float |
 
 def _format_trending_news_text(*, headlines: list[str], market: str) -> str:
     label = "Crypto" if market == "crypto" else "Stocks"
+    hashtags = _hashtags_for_market("crypto" if market == "crypto" else "stocks")
+    hashtags += " #Trends #News"
     if not headlines:
-        text = f"{label} trending news: nothing notable right now."
+        text = f"{label} trending news: nothing notable right now.\n{hashtags}"
     else:
         lines = [f"{label} trending news (may be influencing current decisions):"]
         lines.extend(f"- {h}" for h in headlines)
+        lines.append(hashtags)
         text = "\n".join(lines)
     if len(text) > _THREADS_POST_MAX_CHARS:
         text = text[: _THREADS_POST_MAX_CHARS - 1] + "…"

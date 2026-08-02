@@ -406,7 +406,7 @@ def scan_and_enter(watchlist: list[str] | None = None, *, dry_run: bool | None =
                 threads_post.post_trade_entry(
                     ticker=symbol, side="long", entry_price=entry_price,
                     take_profit_price=levels["take_profit_price"], stop_loss_price=levels["stop_loss_price"],
-                    reason=candidate["reason"], dry_run=trade_dry_run,
+                    reason=candidate["reason"], dry_run=trade_dry_run, market="stocks",
                 )
             except Exception:
                 logger.warning("[alpaca_strategy] Threads post for %s entry failed", symbol, exc_info=True)
@@ -430,6 +430,8 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
     would be a real double-sell attempt, not just a redundant one, so this
     reconciles using the position's own stored target level instead of
     calling close_position again."""
+    from data import threads_post
+
     effective_dry_run = (not LIVE_TRADING_ENABLED) if dry_run is None else dry_run
     with _STATE_LOCK:
         state = _load_state()
@@ -489,6 +491,13 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                 _save_state(state, push_durable=True)
             remaining_symbols.discard(symbol)
             closed.append(trade)
+            try:
+                threads_post.post_trade_exit(
+                    ticker=symbol, side="long", entry_price=float(position["entry_price"]), exit_price=current_price,
+                    pnl_usd=gross, reason=reason, dry_run=trade["dry_run"], market="stocks",
+                )
+            except Exception:
+                logger.warning("[alpaca_strategy] Threads post for %s exit failed", symbol, exc_info=True)
         except Exception as exc:
             logger.warning("[alpaca_strategy] could not process position for %s -- leaving untouched this cycle: %s", symbol, exc)
             checks.append({"symbol": symbol, "ok": False, "error": str(exc)})

@@ -286,6 +286,28 @@ def test_manage_open_positions_returns_no_position_without_any_state():
     assert strat.manage_open_positions()["action"] == "no_position"
 
 
+def test_manage_open_positions_posts_a_threads_exit_on_close(monkeypatch):
+    strat._save_state({  # noqa: SLF001
+        "balance": 500.0, "positions": [{
+            "symbol": "AAPL240223C00195000", "underlying_symbol": "AAPL", "entry_price": 5.0, "count": 1,
+            "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(), "order_id": None,
+            "expiration_date": (dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=30)).date().isoformat(),
+        }],
+        "trade_log": [], "realized_pnl_by_date": {},
+    })
+    take_profit_price = 5.0 * (1 + strat.TAKE_PROFIT_PCT + 0.001)
+    monkeypatch.setattr(alpaca_client, "get_option_latest_quote", lambda symbol: {"ap": take_profit_price, "bp": take_profit_price})
+
+    posted = {}
+    monkeypatch.setattr(threads_post, "post_trade_exit", lambda **kw: posted.update(kw) or True)
+
+    result = strat.manage_open_positions()
+    assert result["action"] == "closed"
+    assert posted["ticker"] == "AAPL240223C00195000"
+    assert posted["market"] == "options"
+    assert posted["pnl_usd"] > 0
+
+
 def test_manage_open_positions_simulate_mode_closes_on_take_profit(monkeypatch):
     strat._save_state({  # noqa: SLF001
         "balance": 500.0, "positions": [{

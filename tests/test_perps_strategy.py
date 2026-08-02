@@ -557,6 +557,40 @@ def test_manage_open_positions_dry_run_trades_pay_no_fee(monkeypatch, tmp_path):
     assert result["closed"][0]["fee_usd"] == 0.0
 
 
+def test_manage_open_positions_posts_a_threads_exit_on_close(monkeypatch, tmp_path):
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "state.json")
+    strat._save_state({
+        "positions": [_position(ticker="KXETHPERP", entry_price=50.0, count=10.0, side="long")],
+        "realized_pnl_by_date": {}, "trade_log": [], "daily_reference_balance": {},
+    })
+    monkeypatch.setattr(strat, "get_margin_market", lambda ticker: _market_response(price=50.0 * 1.05))
+
+    posted = {}
+    monkeypatch.setattr(strat.threads_post, "post_trade_exit", lambda **kw: posted.update(kw) or True)
+
+    result = strat.manage_open_positions(dry_run=True)
+    assert result["action"] == "closed"
+    assert posted["ticker"] == "KXETHPERP"
+    assert posted["market"] == "perps"
+
+
+def test_manage_open_positions_still_closes_the_position_even_if_threads_post_raises(monkeypatch, tmp_path):
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "state.json")
+    strat._save_state({
+        "positions": [_position(ticker="KXETHPERP", entry_price=50.0, count=10.0, side="long")],
+        "realized_pnl_by_date": {}, "trade_log": [], "daily_reference_balance": {},
+    })
+    monkeypatch.setattr(strat, "get_margin_market", lambda ticker: _market_response(price=50.0 * 1.05))
+
+    def raise_error(**kwargs):
+        raise RuntimeError("simulated Threads API outage")
+
+    monkeypatch.setattr(strat.threads_post, "post_trade_exit", raise_error)
+    result = strat.manage_open_positions(dry_run=True)
+    assert result["action"] == "closed"
+    assert len(result["closed"]) == 1
+
+
 def test_scan_and_enter_opens_short_with_an_ask_order(monkeypatch, tmp_path):
     """Opening a short must place an ASK order with reduce_only NOT set --
     this is a brand new position, not closing an existing long."""

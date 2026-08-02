@@ -220,6 +220,27 @@ def test_scan_and_enter_one_symbol_failing_does_not_block_the_others(monkeypatch
     assert outcomes["BTC/USD"]["ok"] is True and outcomes["BTC/USD"]["action"] == "opened"
 
 
+def test_manage_open_positions_posts_a_threads_exit_on_close(monkeypatch):
+    strat._save_state({  # noqa: SLF001
+        "balance": 500.0, "positions": [{
+            "symbol": "BTC/USD", "entry_price": 65000.0, "count": 0.001,
+            "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(), "order_id": None,
+        }],
+        "trade_log": [], "realized_pnl_by_date": {},
+    })
+    take_profit_price = 65000.0 * (1 + strat.TAKE_PROFIT_PCT + 0.001)
+    monkeypatch.setattr(alpaca_client, "get_crypto_latest_quote", lambda symbol: {"ap": take_profit_price, "bp": take_profit_price})
+
+    posted = {}
+    monkeypatch.setattr(threads_post, "post_trade_exit", lambda **kw: posted.update(kw) or True)
+
+    result = strat.manage_open_positions()
+    assert result["action"] == "closed"
+    assert posted["ticker"] == "BTC/USD"
+    assert posted["market"] == "crypto"
+    assert posted["pnl_usd"] > 0
+
+
 def test_manage_open_positions_returns_no_position_without_any_state():
     assert strat.manage_open_positions()["action"] == "no_position"
 

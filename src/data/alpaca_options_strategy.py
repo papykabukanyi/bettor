@@ -397,6 +397,8 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
     loss/max-hold/near-expiration). No broker-native bracket to reconcile
     against -- a triggered exit is always a fresh, plain market sell of
     the contract, same as crypto's own manage_open_positions."""
+    from data import threads_post
+
     effective_dry_run = (not LIVE_TRADING_ENABLED) if dry_run is None else dry_run
     with _STATE_LOCK:
         state = _load_state()
@@ -447,6 +449,13 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                 state["positions"] = [p for p in (state.get("positions") or []) if p["symbol"] != contract_symbol]
                 _save_state(state, push_durable=True)
             closed.append(trade)
+            try:
+                threads_post.post_trade_exit(
+                    ticker=contract_symbol, side="long", entry_price=float(position["entry_price"]),
+                    exit_price=current_price, pnl_usd=gross, reason=reason, dry_run=trade["dry_run"], market="options",
+                )
+            except Exception:
+                logger.warning("[alpaca_options_strategy] Threads post for %s exit failed", contract_symbol, exc_info=True)
         except Exception as exc:
             logger.warning("[alpaca_options_strategy] could not process position for %s -- leaving untouched this cycle: %s", contract_symbol, exc)
             checks.append({"symbol": contract_symbol, "ok": False, "error": str(exc)})

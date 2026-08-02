@@ -1248,11 +1248,26 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
         # money moved, realized_pnl_by_date changed) -- not on every 20s
         # tick just because positions/velocity samples were touched.
         _save_state(state, push_durable=bool(closed))
-        return {
+        result = {
             "ok": ok, "dry_run": effective_dry_run,
             "action": "closed" if closed else ("none" if remaining else "no_position"),
             "closed": closed, "checks": checks, "open_position_count": len(remaining),
         }
+
+    # Posted AFTER the lock releases -- same reasoning as scan_and_enter's
+    # own entry post, which is likewise outside its (tightly-scoped) lock:
+    # a Threads network call must never hold up the fast 15-30s exit-check
+    # loop for every OTHER position.
+    for trade in closed:
+        try:
+            threads_post.post_trade_exit(
+                ticker=trade["ticker"], side=trade["side"], entry_price=trade["entry_price"],
+                exit_price=trade["exit_price"], pnl_usd=trade["realized_pnl_usd"], reason=trade["reason"],
+                dry_run=trade["dry_run"], market="perps",
+            )
+        except Exception:
+            logger.warning("[perps_strategy] Threads post for %s exit failed", trade["ticker"], exc_info=True)
+    return result
 
 
 def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
@@ -1466,7 +1481,7 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
                 threads_post.post_trade_entry(
                     ticker=ticker, side=side, entry_price=actual_entry_price,
                     take_profit_price=levels["take_profit_price"], stop_loss_price=levels["stop_loss_price"],
-                    reason=candidate["reason"], dry_run=effective_dry_run,
+                    reason=candidate["reason"], dry_run=effective_dry_run, market="perps",
                 )
             except Exception:
                 logger.warning("[perps_strategy] Threads post for %s entry failed", ticker, exc_info=True)

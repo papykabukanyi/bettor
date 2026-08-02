@@ -71,6 +71,36 @@ def test_post_trade_entry_marks_dry_run_trades_as_simulated(monkeypatch):
     assert "SHORT" in posted[0]
 
 
+def test_post_trade_entry_defaults_to_the_perps_label_and_hashtags(monkeypatch):
+    posted = []
+    monkeypatch.setattr(threads_post.threads_client, "create_and_publish_post", lambda text: posted.append(text))
+    threads_post.post_trade_entry(
+        ticker="KXBTCPERP", side="long", entry_price=6.5, take_profit_price=6.6,
+        stop_loss_price=6.4, reason="test", dry_run=False,
+    )
+    assert "Kalshi Perps" in posted[0]
+    assert "#Kalshi" in posted[0]
+
+
+def test_post_trade_entry_labels_and_hashtags_each_market_distinctly(monkeypatch):
+    posted = []
+    monkeypatch.setattr(threads_post.threads_client, "create_and_publish_post", lambda text: posted.append(text))
+    expectations = {
+        "stocks": ("Alpaca Stocks", "#StockMarket"),
+        "crypto": ("Alpaca Crypto", "#Bitcoin"),
+        "options": ("Alpaca Options", "#OptionsTrading"),
+    }
+    for market, (label, hashtag) in expectations.items():
+        posted.clear()
+        threads_post.post_trade_entry(
+            ticker="XYZ", side="long", entry_price=1.0, take_profit_price=1.1,
+            stop_loss_price=0.9, reason="test", dry_run=False, market=market,
+        )
+        assert label in posted[0]
+        assert hashtag in posted[0]
+        assert "Kalshi Perps" not in posted[0]
+
+
 def test_post_trade_entry_never_raises_on_api_failure(monkeypatch):
     def raise_error(text):
         raise RuntimeError("simulated Threads API failure")
@@ -79,6 +109,62 @@ def test_post_trade_entry_never_raises_on_api_failure(monkeypatch):
     result = threads_post.post_trade_entry(
         ticker="KXBTCPERP", side="long", entry_price=6.5, take_profit_price=6.6,
         stop_loss_price=6.4, reason="test", dry_run=False,
+    )
+    assert result is False
+
+
+def test_post_trade_exit_reports_a_win_with_pnl_and_hashtags(monkeypatch):
+    posted = []
+    monkeypatch.setattr(threads_post.threads_client, "create_and_publish_post", lambda text: posted.append(text))
+    result = threads_post.post_trade_exit(
+        ticker="KXBTCPERP", side="long", entry_price=6.5, exit_price=6.7,
+        pnl_usd=12.34, reason="take_profit", dry_run=False, market="perps",
+    )
+    assert result is True
+    text = posted[0]
+    assert "CLOSED LONG KXBTCPERP" in text
+    assert "WIN" in text
+    assert "+12.34" in text
+    assert "6.5000" in text and "6.7000" in text
+    assert "take_profit" in text
+    assert "#Kalshi" in text
+    assert "[SIMULATED]" not in text
+
+
+def test_post_trade_exit_reports_a_loss(monkeypatch):
+    posted = []
+    monkeypatch.setattr(threads_post.threads_client, "create_and_publish_post", lambda text: posted.append(text))
+    threads_post.post_trade_exit(
+        ticker="AAPL", side="long", entry_price=190.0, exit_price=185.0,
+        pnl_usd=-5.0, reason="stop_loss", dry_run=True, market="stocks",
+    )
+    text = posted[0]
+    assert "LOSS" in text
+    assert "-5.00" in text
+    assert "[SIMULATED]" in text
+    assert "Alpaca Stocks" in text
+
+
+def test_post_trade_exit_respects_the_disable_flag(monkeypatch):
+    monkeypatch.setattr(threads_post, "THREADS_POST_ENABLED", False)
+    posted = []
+    monkeypatch.setattr(threads_post.threads_client, "create_and_publish_post", lambda text: posted.append(text))
+    result = threads_post.post_trade_exit(
+        ticker="AAPL", side="long", entry_price=190.0, exit_price=185.0,
+        pnl_usd=-5.0, reason="stop_loss", dry_run=True,
+    )
+    assert result is False
+    assert posted == []
+
+
+def test_post_trade_exit_never_raises_on_api_failure(monkeypatch):
+    def raise_error(text):
+        raise RuntimeError("simulated Threads API failure")
+
+    monkeypatch.setattr(threads_post.threads_client, "create_and_publish_post", raise_error)
+    result = threads_post.post_trade_exit(
+        ticker="AAPL", side="long", entry_price=190.0, exit_price=185.0,
+        pnl_usd=-5.0, reason="stop_loss", dry_run=True,
     )
     assert result is False
 
