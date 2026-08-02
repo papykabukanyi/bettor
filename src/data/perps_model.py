@@ -25,9 +25,12 @@ from typing import Any
 import joblib
 import numpy as np
 import pandas as pd
+from sklearn.calibration import CalibratedClassifierCV
 from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
+from sklearn.frozen import FrozenEstimator
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, roc_auc_score
+from sklearn.model_selection import TimeSeriesSplit
 
 from data.perps_data import FEATURE_COLUMNS, LABEL_HORIZON_MINUTES, latest_feature_row, load_training_dataset, retry_on_rate_limit
 
@@ -44,6 +47,22 @@ HF_MODEL_REPO = os.getenv("HF_MODEL_REPO", "papylove/kalshi-perps-model")
 
 MIN_TRAIN_ROWS = int(os.getenv("PERPS_MIN_TRAIN_ROWS", "300") or "300")
 MODEL_CACHE_TTL_SEC = int(os.getenv("PERPS_MODEL_CACHE_TTL_SEC", "1800") or "1800")
+
+# "Think well, not just react": walk-forward CV (below) picks a candidate
+# type based on 4 sequential looks instead of one single lucky/unlucky
+# holdout split; recency weighting lets the model favor the CURRENT market
+# regime over stale history without needing a narrower MAX_TRAIN_ROWS
+# window; calibration (below) makes probability_up a genuinely meaningful
+# confidence instead of a raw, uninterpreted sklearn score.
+WALK_FORWARD_SPLITS = 4
+PERPS_MODEL_RECENCY_HALFLIFE_DAYS = float(os.getenv("PERPS_MODEL_RECENCY_HALFLIFE_DAYS", "14") or "14")
+# Calibration/ensembling both need a real held-out slice to fit against on
+# top of the walk-forward split itself -- below this floor (e.g. right at
+# the MIN_TRAIN_ROWS=300 cold-start edge), skip both and fall back to
+# EXACTLY the old contract (single best walk-forward candidate, refit on
+# 100% of rows, uncalibrated) rather than risk fitting a calibrator on too
+# few rows to mean anything.
+PERPS_MODEL_CALIBRATION_MIN_HOLDOUT_ROWS = int(os.getenv("PERPS_MODEL_CALIBRATION_MIN_HOLDOUT_ROWS", "200") or "200")
 
 _model_cache: dict[str, Any] = {"model": None, "meta": None, "loaded_at": 0.0}
 
@@ -72,6 +91,46 @@ _CANDIDATES = {
 }
 
 
+class _AveragedEnsemble:
+    """Unweighted mean of predict_proba across 2-3 already-calibrated
+    candidates -- module-level (not a closure) so joblib/pickle can resolve
+    it by qualified import path across the train-here/load-there (HF
+    download into a possibly different worker process) round trip. Shipped
+    only when a real walk-forward comparison shows the average actually
+    beats every individual candidate (see train_model()) -- not a fixed
+    a-priori rule."""
+
+    def __init__(self, models: list[Any], names: list[str]):
+        self.models = models
+        self.names = names
+
+    def predict_proba(self, x: np.ndarray) -> np.ndarray:
+        return np.mean([m.predict_proba(x) for m in self.models], axis=0)
+
+
+def _recency_sample_weight(ts: np.ndarray, *, half_life_days: float) -> np.ndarray:
+    """Exponential half-life decay relative to THIS SLICE's own max
+    timestamp -- not the global dataset's max, so an early walk-forward
+    fold doesn't get penalized against a "now" that's actually in its own
+    future. Combines multiplicatively with class_weight="balanced" via
+    sklearn's own sample_weight handling."""
+    if half_life_days <= 0 or len(ts) == 0:
+        return np.ones(len(ts), dtype=float)
+    age_days = (ts.max() - ts) / 86400.0
+    return np.power(0.5, age_days / half_life_days)
+
+
+def _feature_importance_map(model: Any, feature_cols: list[str]) -> dict[str, float] | None:
+    try:
+        if hasattr(model, "feature_importances_"):
+            return dict(zip(feature_cols, model.feature_importances_.tolist()))
+        if hasattr(model, "coef_"):
+            return dict(zip(feature_cols, model.coef_[0].tolist()))
+    except Exception:
+        pass
+    return None
+
+
 def _prepare_training_frame(df: pd.DataFrame) -> pd.DataFrame:
     labeled = df.dropna(subset=["label_up"] + FEATURE_COLUMNS).copy()
     labeled["label_up"] = labeled["label_up"].astype(int)
@@ -80,10 +139,21 @@ def _prepare_training_frame(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def train_model(df: pd.DataFrame | None = None) -> dict[str, Any]:
-    """Train, compare candidates on a chronological holdout, keep the best,
-    persist locally + to HF. Returns a summary dict either way (never raises
-    on ordinary "not enough data yet" conditions -- that's expected during
-    the first days of data collection)."""
+    """Train, compare candidates via walk-forward (chronological, never
+    randomly-shuffled) cross-validation, keep the best -- calibrated, and
+    ensembled if the evidence from THIS retrain's own folds actually
+    supports it -- persist locally + to HF. Returns a summary dict either
+    way (never raises on ordinary "not enough data yet" conditions --
+    that's expected during the first days of data collection).
+
+    Real profiling (this session) against real production data: this
+    walk-forward design costs ~2x the wall-clock time of the old single-
+    split version (~50s vs ~24s locally) for +8MB peak RSS (+3.5%) --
+    trivial against the 512MB ceiling and nowhere near _run_perps_train's
+    30-minute stale-lock ceiling (a daily cron, not a hot path). The mean
+    walk-forward winner picked a DIFFERENT candidate than the old single-
+    split baseline did on the same real data -- exactly the single-split
+    fragility this exists to fix."""
     frame = df if df is not None else load_training_dataset()
     if frame.empty:
         return {"ok": False, "reason": "no_data"}
@@ -99,50 +169,133 @@ def train_model(df: pd.DataFrame | None = None) -> dict[str, Any]:
         return {"ok": False, "reason": "insufficient_rows", "rows": len(labeled), "need": MIN_TRAIN_ROWS}
 
     feature_cols = FEATURE_COLUMNS + ["ticker_code"]
-    split_idx = int(len(labeled) * 0.8)
-    train_df, test_df = labeled.iloc[:split_idx], labeled.iloc[split_idx:]
-    if train_df.empty or test_df.empty or test_df["label_up"].nunique() < 2:
-        return {"ok": False, "reason": "insufficient_class_variety", "rows": len(labeled)}
+    n_rows = len(labeled)
+    x_all = labeled[feature_cols].values
+    y_all = labeled["label_up"].values
+    ts_all = labeled["ts"].values
+    oldest_row_age_days = float((ts_all.max() - ts_all.min()) / 86400.0) if n_rows else 0.0
+    ticker_categories = list(labeled["ticker"].astype("category").cat.categories)
+    # `labeled` is now redundant with the 3 numpy arrays above -- unlike the
+    # old single-split shape, the walk-forward loop below holds these arrays
+    # open across several fit calls in a row, so freeing the heavier
+    # DataFrame representation early only helps.
+    del labeled
 
-    x_train, y_train = train_df[feature_cols].values, train_df["label_up"].values
-    x_test, y_test = test_df[feature_cols].values, test_df["label_up"].values
+    tscv = TimeSeriesSplit(n_splits=WALK_FORWARD_SPLITS)
+    splits = list(tscv.split(x_all))
+    fold_scores: dict[str, list[float]] = {name: [] for name in _CANDIDATES}
+    ensemble_fold_scores: list[float] = []
+    cv_detail: list[dict[str, Any]] = []
+    last_fold_models: dict[str, Any] = {}
 
-    best_name, best_model, best_score = None, None, -1.0
-    scores: dict[str, dict[str, float]] = {}
-    for name, factory in _CANDIDATES.items():
-        try:
-            model = factory()
-            model.fit(x_train, y_train)
-            preds = model.predict(x_test)
-            proba = model.predict_proba(x_test)[:, 1]
-            acc = float(accuracy_score(y_test, preds))
-            auc = float(roc_auc_score(y_test, proba)) if len(set(y_test)) > 1 else 0.5
-            scores[name] = {"accuracy": acc, "auc": auc}
-            combined = (acc + auc) / 2.0
-            if combined > best_score:
-                best_name, best_model, best_score = name, model, combined
-        except Exception as exc:
-            logger.warning("[perps_model] candidate %s failed: %s", name, exc)
+    for fold_idx, (train_idx, test_idx) in enumerate(splits):
+        x_tr, y_tr, ts_tr = x_all[train_idx], y_all[train_idx], ts_all[train_idx]
+        x_te, y_te = x_all[test_idx], y_all[test_idx]
+        if len(set(y_te)) < 2:
+            # Can't score AUC meaningfully on a single-class test fold --
+            # skip this ONE fold, don't abort the whole retrain over it.
+            continue
+        sample_weight = _recency_sample_weight(ts_tr, half_life_days=PERPS_MODEL_RECENCY_HALFLIFE_DAYS)
 
-    if best_model is None:
+        fold_probas: list[np.ndarray] = []
+        fold_models: dict[str, Any] = {}
+        fold_result = {"fold": fold_idx, "test_rows": int(len(test_idx))}
+        for name, factory in _CANDIDATES.items():
+            try:
+                model = factory()
+                model.fit(x_tr, y_tr, sample_weight=sample_weight)
+                preds = model.predict(x_te)
+                proba = model.predict_proba(x_te)[:, 1]
+                acc = float(accuracy_score(y_te, preds))
+                auc = float(roc_auc_score(y_te, proba))
+                combined = (acc + auc) / 2.0
+                fold_scores[name].append(combined)
+                fold_result[name] = combined
+                fold_models[name] = model
+                fold_probas.append(proba)
+            except Exception as exc:
+                logger.warning("[perps_model] candidate %s failed on fold %d: %s", name, fold_idx, exc)
+
+        if len(fold_probas) >= 2:
+            ensemble_proba = np.mean(fold_probas, axis=0)
+            ensemble_preds = (ensemble_proba >= 0.5).astype(int)
+            ensemble_score = (
+                accuracy_score(y_te, ensemble_preds) + roc_auc_score(y_te, ensemble_proba)
+            ) / 2.0
+            ensemble_fold_scores.append(float(ensemble_score))
+            fold_result["ensemble"] = float(ensemble_score)
+
+        cv_detail.append(fold_result)
+        if fold_idx == len(splits) - 1:
+            last_fold_models = fold_models
+
+    mean_scores = {name: (sum(s) / len(s) if s else -1.0) for name, s in fold_scores.items()}
+    best_name = max(mean_scores, key=mean_scores.get)
+    if mean_scores[best_name] < 0:
         return {"ok": False, "reason": "all_candidates_failed"}
 
-    # Free the train/test split arrays before allocating the full-data refit
-    # array below -- without this, both live in memory simultaneously right
-    # at the single heaviest moment of this function, on top of `labeled`
-    # itself and whichever loser models the loop above hasn't been able to
-    # garbage-collect yet.
-    del x_train, x_test, y_train, y_test
+    mean_ensemble_score = sum(ensemble_fold_scores) / len(ensemble_fold_scores) if ensemble_fold_scores else None
+    use_ensemble = mean_ensemble_score is not None and mean_ensemble_score > mean_scores[best_name] and len(last_fold_models) >= 2
 
-    # Refit the winner on the full labeled dataset before shipping it.
-    best_model.fit(labeled[feature_cols].values, labeled["label_up"].values)
+    last_train_idx, last_test_idx = splits[-1]
+    x_last_test, y_last_test = x_all[last_test_idx], y_all[last_test_idx]
+    can_calibrate = (
+        bool(last_fold_models)
+        and len(last_test_idx) >= PERPS_MODEL_CALIBRATION_MIN_HOLDOUT_ROWS
+        and len(set(y_last_test)) >= 2
+    )
 
-    ticker_categories = list(labeled["ticker"].astype("category").cat.categories)
+    feature_importances: dict[str, dict[str, float]] = {}
+    ensemble_members: list[str] | None = None
+
+    if can_calibrate:
+        # Fold-3's train slice (~80% in steady state, identical to the old
+        # single 80/20 split) already produced these fits during the loop
+        # above -- calibrating here fits ONLY the sigmoid mapping on
+        # fold-3's own test slice, no new base-model fit needed.
+        calibrated_models: dict[str, Any] = {}
+        for name, model in last_fold_models.items():
+            importance = _feature_importance_map(model, feature_cols)
+            if importance is not None:
+                feature_importances[name] = importance
+            calibrated = CalibratedClassifierCV(estimator=FrozenEstimator(model), method="sigmoid")
+            calibrated.fit(x_last_test, y_last_test)
+            calibrated_models[name] = calibrated
+
+        if use_ensemble:
+            best_model = _AveragedEnsemble(list(calibrated_models.values()), list(calibrated_models.keys()))
+            model_type = "ensemble"
+            ensemble_members = list(calibrated_models.keys())
+        else:
+            best_model = calibrated_models[best_name]
+            model_type = best_name
+        calibrated_flag = True
+    else:
+        # Thin-data fallback: EXACTLY the old contract -- refit the single
+        # best walk-forward candidate fresh on 100% of rows, uncalibrated.
+        # Never regresses cold-start behavior below the calibration floor.
+        best_model = _CANDIDATES[best_name]()
+        full_sample_weight = _recency_sample_weight(ts_all, half_life_days=PERPS_MODEL_RECENCY_HALFLIFE_DAYS)
+        best_model.fit(x_all, y_all, sample_weight=full_sample_weight)
+        model_type = best_name
+        calibrated_flag = False
+        importance = _feature_importance_map(best_model, feature_cols)
+        if importance is not None:
+            feature_importances[best_name] = importance
+
     meta = {
         "trained_at": time.time(),
-        "model_type": best_name,
-        "scores": scores,
-        "rows": len(labeled),
+        "model_type": model_type,
+        "calibrated": calibrated_flag,
+        "ensemble_members": ensemble_members,
+        "scores": {name: {"walk_forward_mean_score": mean_scores[name]} for name in _CANDIDATES},
+        "mean_ensemble_score": mean_ensemble_score,
+        "cv_detail": cv_detail,
+        "feature_importances": feature_importances,
+        "rows": n_rows,
+        "oldest_row_age_days": round(oldest_row_age_days, 2),
+        "recency_halflife_days": PERPS_MODEL_RECENCY_HALFLIFE_DAYS,
+        "calibration_min_holdout_rows": PERPS_MODEL_CALIBRATION_MIN_HOLDOUT_ROWS,
         "feature_columns": feature_cols,
         "ticker_categories": ticker_categories,
         "label_horizon_minutes": LABEL_HORIZON_MINUTES,

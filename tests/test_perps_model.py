@@ -93,6 +93,99 @@ def test_predict_direction_reports_model_ok_false_without_a_trained_model():
     assert result["model_ok"] is False
 
 
+def test_train_model_stays_uncalibrated_below_the_holdout_floor():
+    """n=500 is exactly the pre-existing regression fixture -- its last
+    walk-forward fold's test slice (~100 rows) falls below
+    PERPS_MODEL_CALIBRATION_MIN_HOLDOUT_ROWS (200), so this MUST fall back
+    to the old, uncalibrated, single-candidate contract exactly."""
+    df = _synthetic_training_frame(n=500)
+    result = perps_model.train_model(df=df)
+    assert result["ok"] is True
+    assert result["calibrated"] is False
+    assert result["ensemble_members"] is None
+    assert result["model_type"] in {"logistic_regression", "random_forest", "gradient_boosting"}
+
+
+def test_train_model_calibrates_above_the_holdout_floor():
+    """A large enough fixture that the last walk-forward fold's test slice
+    clears PERPS_MODEL_CALIBRATION_MIN_HOLDOUT_ROWS -- must ship a
+    calibrated model (single candidate or ensemble, either is fine)."""
+    df = _synthetic_training_frame(n=3000)
+    result = perps_model.train_model(df=df)
+    assert result["ok"] is True
+    assert result["calibrated"] is True
+    assert result["model_type"] in {"logistic_regression", "random_forest", "gradient_boosting", "ensemble"}
+    if result["model_type"] == "ensemble":
+        assert set(result["ensemble_members"]) <= {"logistic_regression", "random_forest", "gradient_boosting"}
+        assert len(result["ensemble_members"]) >= 2
+    else:
+        assert result["ensemble_members"] is None
+    # Feature-importance observability: at least the winning candidate (or
+    # every ensemble member) has a real, non-empty importance map.
+    assert result["feature_importances"]
+    for name, importances in result["feature_importances"].items():
+        assert importances
+        assert all(isinstance(v, float) for v in importances.values())
+
+
+def test_train_model_cv_detail_reflects_the_walk_forward_folds():
+    df = _synthetic_training_frame(n=3000)
+    result = perps_model.train_model(df=df)
+    assert result["ok"] is True
+    assert len(result["cv_detail"]) <= perps_model.WALK_FORWARD_SPLITS
+    assert all("test_rows" in fold for fold in result["cv_detail"])
+    for name in {"logistic_regression", "random_forest", "gradient_boosting"}:
+        assert "walk_forward_mean_score" in result["scores"][name]
+
+
+def test_predict_direction_works_with_a_calibrated_model(monkeypatch):
+    df = _synthetic_training_frame(n=3000)
+    train_result = perps_model.train_model(df=df)
+    assert train_result["ok"] is True
+    assert train_result["calibrated"] is True
+
+    monkeypatch.setattr(perps_model, "latest_feature_row", lambda ticker: {
+        "ticker": ticker, "current_price": 100.0, "short_ma": 99.0, "trend_pct": 0.0,
+        "ret_1m": 0.0, "ret_3m": 0.0, "ret_5m": 0.0, "ret_10m": 0.0, "ret_15m": 0.0, "ret_30m": 0.0,
+        "trend_1h": 0.0, "trend_2h": 0.0, "trend_3h": 0.0, "trend_4h": 0.0,
+        "dist_to_ma_15": 0.03, "dist_to_ma_30": 0.015,
+        "volatility_5": 0.001, "volatility_15": 0.001, "volatility_30": 0.001,
+        "rsi_14": 0.5, "macd_hist_pct": 0.0, "bb_pct_b": 0.5, "bb_bandwidth": 0.01, "atr_pct": 0.001, "stoch_k": 0.5,
+        "volume_ratio_5": 1.0, "volume_ratio_15": 1.0, "dollar_volume_z": 0.0, "oi_change_pct": 0.0, "spread_pct": 0.001,
+        "hour_sin": 0.0, "hour_cos": 1.0, "dow_sin": 0.0, "dow_cos": 1.0,
+        "sentiment_score": 0.0,
+    })
+    prediction = perps_model.predict_direction("KXBTCPERP")
+    assert prediction["model_ok"] is True
+    assert prediction["direction"] in {"up", "down"}
+    assert 0.0 <= prediction["probability_up"] <= 1.0
+
+
+def test_averaged_ensemble_predict_proba_is_the_mean_of_its_members():
+    class _FakeModel:
+        def __init__(self, up_proba):
+            self._up_proba = up_proba
+
+        def predict_proba(self, x):
+            return np.array([[1.0 - self._up_proba, self._up_proba]] * len(x))
+
+    ensemble = perps_model._AveragedEnsemble(  # noqa: SLF001
+        [_FakeModel(0.6), _FakeModel(0.8)], ["model_a", "model_b"],
+    )
+    result = ensemble.predict_proba(np.zeros((2, 1)))
+    assert result.shape == (2, 2)
+    assert result[0][1] == pytest.approx(0.7)
+    assert result[0][0] == pytest.approx(0.3)
+
+
+def test_recency_sample_weight_favors_more_recent_rows():
+    ts = np.array([0, 43200, 86400])  # 0, 0.5, 1 day (in seconds) before "now"
+    weights = perps_model._recency_sample_weight(ts, half_life_days=1.0)  # noqa: SLF001
+    assert weights[-1] == pytest.approx(1.0)  # most recent row: zero age, full weight
+    assert weights[0] < weights[1] < weights[-1]
+    assert weights[0] == pytest.approx(0.5)  # exactly one half-life old
+
+
 def test_predict_direction_uses_trained_model(monkeypatch):
     df = _synthetic_training_frame(n=500)
     train_result = perps_model.train_model(df=df)

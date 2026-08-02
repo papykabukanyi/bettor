@@ -1,7 +1,10 @@
 # Core data science / model training
 pandas
 numpy
-scikit-learn
+# >=1.6 required: perps_model.py's calibration uses sklearn.frozen.FrozenEstimator
+# (added in 1.6) -- the API it replaces (CalibratedClassifierCV(cv="prefit"))
+# was removed entirely by 1.9.
+scikit-learn>=1.6
 joblib
 pyarrow>=12.0.0
 
