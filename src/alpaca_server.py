@@ -60,12 +60,21 @@ from server_common import DATA_DIR, is_cron_authorized, load_json, make_job_lock
 # waiting for that same lock, the blocked thread can genuinely hang past
 # gunicorn's own --timeout -- confirmed live on the predecessor Schwab
 # server as a real "WORKER TIMEOUT" stuck inside Python's own
-# `importlib._bootstrap._lock_unlock_module`. Importing it ONCE here, at
-# module load time (single-threaded, before the scheduler or Flask starts
-# handling anything), means every later lazy import anywhere else in this
-# process is just a cheap sys.modules cache hit -- no lock contention
-# possible after this point.
-import huggingface_hub  # noqa: F401
+# `importlib._bootstrap._lock_unlock_module`.
+#
+# A first attempt at this fix (bare `import huggingface_hub`) turned out
+# to be INCOMPLETE -- confirmed live on the perps server via a second real
+# WORKER TIMEOUT with this exact traceback: huggingface_hub implements
+# PEP 562 module-level `__getattr__` lazy loading, so importing the
+# top-level package does NOT resolve `hf_hub_download`/`HfApi` themselves
+# -- each is its own separate submodule import that only happens the
+# FIRST TIME that specific name is accessed, via
+# `huggingface_hub.__init__.__getattr__`. That first access can race
+# exactly the same way the top-level import used to. Naming both
+# attributes explicitly here forces THEIR lazy submodules to resolve too,
+# eagerly, single-threaded, before the scheduler or Flask starts handling
+# anything -- not just the top-level package object.
+from huggingface_hub import HfApi, hf_hub_download  # noqa: F401
 
 ALPACA_CYCLE_MINUTES = max(1, int(os.getenv("ALPACA_CYCLE_MINUTES", "2") or "2"))
 ALPACA_FAST_CHECK_SECONDS = max(5, int(os.getenv("ALPACA_FAST_CHECK_SECONDS", "20") or "20"))

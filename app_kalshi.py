@@ -75,11 +75,20 @@ from data import crypto_news, perps_data, perps_model, perps_strategy, threads_c
 # bodies, which can race between the gunicorn request-handling thread and
 # an APScheduler background job thread both importing it for the first
 # time at once -- confirmed live there as a real "WORKER TIMEOUT" stuck
-# inside Python's own import lock. Importing it ONCE here, eagerly, at
-# module load time
-# (single-threaded, before the scheduler or Flask starts handling
-# anything) closes the same latent race here too, proactively.
-import huggingface_hub  # noqa: F401
+# inside Python's own import lock.
+#
+# A first attempt at this fix (bare `import huggingface_hub`) turned out
+# to be INCOMPLETE -- confirmed live via a second real WORKER TIMEOUT with
+# this exact traceback: huggingface_hub implements PEP 562 module-level
+# `__getattr__` lazy loading, so importing the top-level package does NOT
+# resolve `hf_hub_download`/`HfApi` themselves -- each is its own separate
+# submodule import that only happens the FIRST TIME that specific name is
+# accessed, via `huggingface_hub.__init__.__getattr__`. That first access
+# can race exactly the same way the top-level import used to. Naming both
+# attributes explicitly here forces THEIR lazy submodules to resolve too,
+# eagerly, single-threaded, before the scheduler or Flask starts handling
+# anything -- not just the top-level package object.
+from huggingface_hub import HfApi, hf_hub_download  # noqa: F401
 from data.kalshi_perps import get_margin_balance, get_margin_enabled, get_margin_exchange_status, get_margin_positions
 from server_common import DATA_DIR, is_cron_authorized, load_json, make_job_lock, save_json
 
