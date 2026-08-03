@@ -1,0 +1,96 @@
+# =============================================================================
+# Bettor - Active HF + Kalshi Runtime Configuration
+# =============================================================================
+
+# --- Runtime ---
+LOG_LEVEL=INFO
+PORT=5000
+
+# --- API Ninjas (additional live crypto price cross-check) ---
+API_NINJAS_API_KEY=sbP8jyClj8Prq8IwQ1jFumqvRyA2xhybtOMNFpyV
+
+# --- Hugging Face core ---
+HF_API_KEY=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
+HF_DATASET_REPO=papylove/kalshi-perps-data
+HF_MODEL_REPO=papylove/kalshi-perps-model
+
+# Optional explicit Space URL (auto-discovery works without this)
+HF_SPACE_API_URL=
+PREDICTIONS_API_URL=
+
+# --- HF scheduler / automation ---
+HF_AUTORUN_ON_STARTUP=1
+HF_DAILY_RUN_HOUR_ET=4
+HF_DAILY_RUN_MINUTE_ET=15
+HF_DAILY_CUSTOM_MODEL=auto
+HF_DAILY_MIN_TRAIN_ROWS=200
+HF_ATTACH_KALSHI=1
+HF_BOOTSTRAP_ON_EMPTY=1
+HF_BOOTSTRAP_DAYS=365
+HF_ACTIVE_SCAN_MINUTES=30
+HF_ACTIVE_APPEND_DAYS=3
+HF_RETRAIN_INTERVAL_MINUTES=180
+
+# --- Dashboard proxy timeouts ---
+HF_PROXY_TIMEOUT=15
+HF_PROXY_DISCOVERY_TIMEOUT=4
+
+# --- Sports data providers ---
+FOOTBALL_DATA_API_KEY=4780dc39cc6147a8b4c6e1afec789f48
+THESPORTSDB_API_KEY=1
+CRICKET_RAPIDAPI_KEY=b65cec1d35msh240f423a84de0abp19075ejsn7f2de12fbc00
+CRICKET_RAPIDAPI_HOST=cricket-live-line1.p.rapidapi.com
+
+# --- Kalshi credentials / execution ---
+KALSHI_API_KEY=845bfd66-5968-42bc-a48f-a38d1ebe465c
+KALSHI_PRIVATE_KEY=-----BEGIN RSA PRIVATE KEY-----
+MIIEowIBAAKCAQEA6LMkzZ4tl5MIb20Xo5QlDzuu3pY7+sgHMJ/DjZCQUp3bK0cn
+I64dk4tJqYJ7/xibZCV4p/zHGcf1pNj06CTgKQCyhAS+tY1QcxkHdjRHXFj1YieU
+4fa6wf/5Ovo2ViSfVOSHlhM8ifnJGrysQ6ay7wrc2BGjfcsa61iH5d/f/IMx8fSx
+cdhju5JkfJQ98PW+QfoAqFXIu4URdPaxDthBpBQoIX+Tj4lDQv5z6kiuJoQS4Y+/
+XBVYk19XUQ4/0Wscn3KmiIA4vF3FrVtnCE+2g9rZDlueKhQfeDW2l3ePPsR8NoTx
+jomfiachKAnr57IK5v8GABqDTV4aol2wP5PGcQIDAQABAoIBAA95Sis6J4H6zwbJ
+1FaWVViL+XbnuplUj9XV6eUSBebYhGh+VMX0oBbdnkpdWO1/r2WbcEiLcJnwSA9s
+Nezx9s4DM9u/jQb5nK3qripYE566c6bRRv83rveTk/kuBkr4KHg2siVypgXuzEaw
+4SumfCOVL1ZW5e5JgULBIlhQ6M4bstFk8ZDF6B3tB8zFHI74aYDg8YfipXjEaQ58
+cWTK4xRA3/c0s3b/XcA9zGzMPBb0cWR62Oz96faZd8WEBserjMsty/KbL2hZFP2g
+5rkqwtuQrAUlLXD+pO5g8qSF9QtvgMkGsBOryveltW/117KA4ngusmIBwUvehFdM
+zCm4mdkCgYEA791x3qzYBAFvMsgknK0/GntHLDJAvHcjIEx9YFZ323GNPr1HoJvT
+m1+l2q0n4I0joKoQ7Y9j7aXnU/4c6DT6cCCmLNgVUhC9t5DIWA0g4q6I6uUZlxCs
+q+Te/dgcTcEapr/occFNfuqUXb4f8djtRF65fl9QGdFqsTQC7x78SHcCgYEA+FpP
+qTJLKN8T7+zGfalmBGP8Hdc7YsVFSTgg+T0eQzzAO0Yaa76OuWqZDwqSH8TQn78t
+M8qlft6y9/zWicuIQtVZvmTs9MvJkPLBj9u6KdAtptvD0HVj0FQjjj+7gGGNY7To
+zLu8vHCCbY0zqPj/7kwM/HwCfk0V0pdKOHYxilcCgYA8KqjgeSyqPI3fCBMe9doJ
+U3jz3hsc6yl1dZpRav8fnWkXnrTz1YKLy783jg2dpumT6HTckgY321CeYfRwTrGv
+JJFqWD1o22grPnbyl0Bze+I+QX9cxEL7zyocNHRNEK4Vu7ebqSg+OKtEpGcw7AAA
+EV6oE1JtV3lSv8AoqPYRWwKBgETfzt3Oa9ee3gmYsYdh9j/bdqzT5s1Chi+DGGnm
+kED3VRxbGbKtuykireXk+ZdD3tOekiud1H21xw5NGTZHsrdOMcBCfxB4f6LqH9IE
+jsFP0YlHwytJku/Qlbe6ZwZ4h1ySbEly+ymLTjCRizUeMOPmRWe0AIEEYbvwZw33
+gU+rAoGBANsIDsP7H6phCLz4UJVXoFaf6vucw/ZeYIJIFcL5liLjIpoSILsX3lHO
+wRkd8hsEaSvSYQFEJfz7f9PiPBDUGQkXvV0m9q7BK7NZKtXCAtC81Dg1bKUXwXP1
+Nf+Ku1xzaIDAnNoidV6I/hU5hoH+hezyjd0u4zsnkZVhUiVdrsAX
+-----END RSA PRIVATE KEY-----
+KALSHI_LIVE_TRADING_ENABLED=1
+# KALSHI_PERPS_LIVE_TRADING_ENABLED is deliberately NOT set here. This local
+# sandbox has its own separate data/perps_state.json from the real Render
+# deployment -- if this ran a live cycle locally, it would open/track real
+# orders in a state file Render's continuously-running scheduler never sees,
+# and vice versa. Live trading must be enabled on Render (the one persistent
+# copy actually running the schedule), not here. See render.yaml / the
+# Render dashboard's Environment tab.
+KALSHI_AUTOBET_STAKE_USD=1.0
+KALSHI_AUTOBET_MAX_SINGLE_ORDERS=1
+KALSHI_AUTOBET_MAX_COMBO_ORDERS=1
+KALSHI_AUTO_CREATE_COMBOS=1
+KALSHI_AUTO_PLACE_COMBOS=1
+KALSHI_AUTOBET_ENABLED=1
+KALSHI_COMBO_ARTIFACT_MAX=50
+KALSHI_BASE_URL=https://external-api.kalshi.com/trade-api/v2
+KALSHI_TIMEOUT_SEC=15
+# --- Auto-bet loop ---
+AUTOBET_DRY_RUN=0
+AUTOBET_AMOUNT_USD=1.0
+AUTOBET_POLL_SEC=300
+AUTOBET_MIN_CONFIDENCE=52
+AUTOBET_MAX_BETS_PER_CYCLE=10
+AUTOBET_EXCHANGES=kalshi
