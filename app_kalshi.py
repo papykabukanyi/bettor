@@ -562,6 +562,7 @@ def api_status():
             "trained_at": (meta or {}).get("trained_at"),
             "rows": (meta or {}).get("rows"),
             "scores": (meta or {}).get("scores"),
+            "feature_importances": (meta or {}).get("feature_importances"),
         },
         "latest_cycle": latest_cycle,
         "latest_position_check": latest_position_check,

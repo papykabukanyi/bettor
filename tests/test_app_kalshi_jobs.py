@@ -36,6 +36,27 @@ def test_production_jobs_actually_honor_the_live_trading_flag(monkeypatch):
     assert captured["manual_cycle"].get("dry_run") is False
 
 
+def test_api_status_surfaces_feature_importances_from_the_trained_model(monkeypatch):
+    """Real bug found in review: perps_model.train_model() computes and
+    persists feature_importances (same observability already proven on
+    every Alpaca service), but this route's hand-built "model" dict never
+    forwarded it to the JSON response -- meaning the field was silently
+    unreachable via the API even though the data existed in meta."""
+    from data import perps_model
+
+    fake_meta = {
+        "model_type": "random_forest", "trained_at": 1700000000.0, "rows": 500,
+        "scores": {"random_forest": {"accuracy": 0.55, "auc": 0.56}},
+        "feature_importances": {"random_forest": {"sentiment_score": 0.05}},
+    }
+    monkeypatch.setattr(perps_model, "load_model", lambda: (object(), fake_meta))
+
+    with app_kalshi.app.test_client() as client:
+        resp = client.get("/api/status")
+        assert resp.status_code == 200
+        assert resp.get_json()["model"]["feature_importances"] == {"random_forest": {"sentiment_score": 0.05}}
+
+
 def test_data_collect_job_refreshes_ticker_activity_cache_off_the_request_path(monkeypatch):
     """The volatility-ranking cache must only ever be refreshed from here
     (a scheduled background job) -- confirmed live that refreshing it
