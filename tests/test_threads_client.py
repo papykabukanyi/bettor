@@ -101,21 +101,42 @@ def test_get_valid_access_token_refreshes_when_near_expiry_and_old_enough(monkey
     assert threads_client._token_cache["access_token"] == "refreshed"  # noqa: SLF001
 
 
-def test_get_valid_access_token_does_not_refresh_a_token_younger_than_24h(monkeypatch):
-    """Threads' own refresh endpoint requires the token to be at least 24h
-    old -- refreshing earlier would just fail, so the still-valid current
-    token must be returned as-is instead of attempting (and failing) a
-    premature refresh."""
+def test_get_valid_access_token_does_not_refresh_a_token_younger_than_the_minimum_age(monkeypatch):
+    """Threads' refresh endpoint can reject a too-fresh token -- refreshing
+    earlier would just fail, so the still-valid current token must be
+    returned as-is instead of attempting (and failing) a premature refresh."""
     def fail_if_called(*a, **k):
-        raise AssertionError("must not attempt a refresh before the 24h floor")
+        raise AssertionError("must not attempt a refresh before the minimum-age floor")
 
     monkeypatch.setattr(threads_client.requests, "get", fail_if_called)
     threads_client._token_cache.update({  # noqa: SLF001
         "access_token": "brand-new", "user_id": "1",
-        "obtained_at": threads_client.time.time() - 3600,  # 1h old, under the 25h floor
+        "obtained_at": threads_client.time.time() - 3600,  # 1h old, under the 2h floor
         "expires_at": threads_client.time.time() + 1 * 86400,  # still inside the refresh margin
     })
     assert threads_client.get_valid_access_token() == "brand-new"
+
+
+def test_get_valid_access_token_refreshes_a_token_that_only_has_a_24h_lifetime(monkeypatch):
+    """Real, confirmed production incident: a stored token was observed
+    with only a 24h total lifetime (not the ~60 days Meta's docs describe
+    for a genuine long-lived token). The OLD 25h minimum-age floor could
+    NEVER be satisfied before such a token expired -- permanently breaking
+    Threads posting with no automatic recovery, confirmed live when calling
+    Meta's refresh endpoint directly on a 21h-old token succeeded
+    immediately. This locks in the fix: a token old enough to clear the
+    (now much lower) minimum-age floor, but with a short total lifetime,
+    must still get refreshed well before it expires."""
+    def fake_get(url, *, params, timeout):
+        return _FakeResponse({"access_token": "refreshed", "expires_in": 5107617})
+
+    monkeypatch.setattr(threads_client.requests, "get", fake_get)
+    obtained_at = threads_client.time.time() - 21 * 3600  # 21h old
+    threads_client._token_cache.update({  # noqa: SLF001
+        "access_token": "aging-short-lived", "user_id": "1",
+        "obtained_at": obtained_at, "expires_at": obtained_at + 24 * 3600,  # only a 24h lifetime
+    })
+    assert threads_client.get_valid_access_token() == "refreshed"
 
 
 def test_get_valid_access_token_returns_none_without_ever_logging_in():

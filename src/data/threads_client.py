@@ -62,12 +62,18 @@ _token_cache: dict[str, Any] = {}
 _PULL_RETRY_COOLDOWN_SEC = 300
 _last_pull_attempt_ts = 0.0
 
-# Threads' own refresh endpoint requires the long-lived token to be at
-# least 24h old -- refreshing too early just fails, so this margin is a
-# genuine floor, not a stylistic choice. Refresh once within 5 days of the
-# ~60-day expiry, giving a wide safety window without needing to refresh
-# constantly.
-_MIN_TOKEN_AGE_FOR_REFRESH_SEC = 25 * 3600
+# Real, confirmed production incident: a stored token was observed with
+# only a 24h total lifetime (obtained_at -> expires_at), not the ~60 days
+# Meta's docs describe for a genuine long-lived token -- yet calling the
+# refresh endpoint directly on that same token, at only 21h old, succeeded
+# immediately and returned a proper ~59-day expiry. The OLD 25h minimum
+# age here was therefore actively harmful for a token in this state: it
+# can never be satisfied before a 24h-lifetime token expires, permanently
+# breaking Threads posting with no automatic recovery. Lowered to 2h --
+# still a real floor in case Meta does reject a too-fresh token for some
+# accounts, but with wide safety margin under any token lifetime this
+# module might actually encounter, confirmed short-lived ones included.
+_MIN_TOKEN_AGE_FOR_REFRESH_SEC = 2 * 3600
 _REFRESH_MARGIN_SEC = 5 * 24 * 3600
 
 
