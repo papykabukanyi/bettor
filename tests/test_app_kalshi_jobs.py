@@ -161,6 +161,56 @@ def test_threads_trending_news_job_never_raises_on_failure(monkeypatch):
     assert result["ok"] is False
 
 
+def test_threads_sentiment_snapshot_job_posts_per_ticker_sentiment(monkeypatch):
+    from data import crypto_news, perps_data, threads_post
+
+    monkeypatch.setattr(perps_data, "get_watchlist", lambda: ["KXBTCPERP", "KXETHPERP"])
+    monkeypatch.setattr(perps_data, "coin_for_ticker", lambda ticker: {"KXBTCPERP": "BTC", "KXETHPERP": "ETH"}[ticker])
+    monkeypatch.setattr(crypto_news, "get_sentiment", lambda coin, **kw: {"coin": coin, "sentiment_score": 0.5 if coin == "BTC" else -0.2})
+
+    captured = {}
+    monkeypatch.setattr(threads_post, "post_sentiment_snapshot", lambda *, market, ticker_sentiments: captured.update(market=market, ticker_sentiments=ticker_sentiments) or True)
+
+    result = app_kalshi._run_perps_threads_sentiment_snapshot.__wrapped__()  # noqa: SLF001
+
+    assert result == {"ok": True, "posted": True, "ticker_count": 2}
+    assert captured["market"] == "perps"
+    assert {"ticker": "KXBTCPERP", "sentiment_score": 0.5} in captured["ticker_sentiments"]
+    assert {"ticker": "KXETHPERP", "sentiment_score": -0.2} in captured["ticker_sentiments"]
+
+
+def test_threads_sentiment_snapshot_job_one_ticker_failing_does_not_block_the_others(monkeypatch):
+    from data import crypto_news, perps_data, threads_post
+
+    monkeypatch.setattr(perps_data, "get_watchlist", lambda: ["KXBADPERP", "KXBTCPERP"])
+
+    def fake_coin_for_ticker(ticker):
+        if ticker == "KXBADPERP":
+            raise RuntimeError("unmapped ticker")
+        return "BTC"
+
+    monkeypatch.setattr(perps_data, "coin_for_ticker", fake_coin_for_ticker)
+    monkeypatch.setattr(crypto_news, "get_sentiment", lambda coin, **kw: {"coin": coin, "sentiment_score": 0.1})
+    captured = {}
+    monkeypatch.setattr(threads_post, "post_sentiment_snapshot", lambda *, market, ticker_sentiments: captured.update(ticker_sentiments=ticker_sentiments) or True)
+
+    result = app_kalshi._run_perps_threads_sentiment_snapshot.__wrapped__()  # noqa: SLF001
+    assert result["ok"] is True
+    assert result["ticker_count"] == 1
+    assert captured["ticker_sentiments"] == [{"ticker": "KXBTCPERP", "sentiment_score": 0.1}]
+
+
+def test_threads_sentiment_snapshot_job_never_raises_on_failure(monkeypatch):
+    from data import perps_data
+
+    def raise_error():
+        raise RuntimeError("watchlist unavailable")
+
+    monkeypatch.setattr(perps_data, "get_watchlist", raise_error)
+    result = app_kalshi._run_perps_threads_sentiment_snapshot.__wrapped__()  # noqa: SLF001
+    assert result["ok"] is False
+
+
 class _FakeScheduler:
     def __init__(self, running, shutdown_fn=None):
         self.running = running

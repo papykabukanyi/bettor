@@ -283,3 +283,30 @@ def maybe_post_trade_entry_chart(
     except Exception as exc:
         logger.warning("[threads_post] failed to post trade entry chart for %s: %s", ticker, exc)
         return False
+
+
+def post_sentiment_snapshot(*, market: str, ticker_sentiments: list[dict]) -> bool:
+    """Posts a per-ticker sentiment bar-chart image -- every ticker this
+    service actually tracks (its dataset/watchlist), each with its own
+    real news sentiment (not a single shared/aggregate score), refreshed
+    every time this runs since *_news.get_sentiment() itself re-checks the
+    news on its own short TTL. Genuinely different from post_trending_news
+    (headlines text) -- this is the per-ticker SCORES, as a picture.
+    Same best-effort, never-raise contract as every other post here."""
+    if not THREADS_POST_ENABLED:
+        return False
+    try:
+        from data import chart_snapshot
+        chart_path = chart_snapshot.generate_sentiment_snapshot(market=market, ticker_sentiments=ticker_sentiments)
+        if chart_path is None:
+            return False
+        image_url = chart_snapshot.public_url_for(chart_path)
+        if image_url is None:
+            return False
+
+        caption = f"{_market_label(market)}: per-ticker sentiment snapshot\n{_hashtags_for_market(market)}"
+        threads_client.create_and_publish_image_post(image_url, caption)
+        return True
+    except Exception as exc:
+        logger.warning("[threads_post] failed to post sentiment snapshot for %s: %s", market, exc)
+        return False

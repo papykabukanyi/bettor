@@ -150,6 +150,33 @@ def _run_alpaca_options_threads_trending_news() -> dict[str, Any]:
         return {"ok": False, "error": str(exc)}
 
 
+@_locked_job("alpaca_options_threads_sentiment_snapshot", stale_after_sec=600)
+def _run_alpaca_options_threads_sentiment_snapshot() -> dict[str, Any]:
+    """Posts a per-ticker sentiment bar-chart every 60 minutes -- every
+    underlying this service trades options on, each with its OWN real
+    news sentiment (stock_news.get_sentiment(symbol, company_name=...),
+    the same call collect_dataset_rows/latest_feature_row already make,
+    so this is a cache hit the large majority of the time). Genuinely
+    different from the trending-news post above: that surfaces headlines;
+    this surfaces the actual per-underlying SCORES as a picture. Read-only,
+    never touches order placement."""
+    try:
+        from data import alpaca_data
+        underlyings = alpaca_options_data.get_options_universe()
+        ticker_sentiments = []
+        for symbol in underlyings:
+            try:
+                sentiment = stock_news.get_sentiment(symbol, company_name=alpaca_data.get_company_name(symbol))
+                ticker_sentiments.append({"ticker": symbol, "sentiment_score": sentiment["sentiment_score"]})
+            except Exception as exc:
+                logger.debug("[alpaca_options_server] sentiment fetch failed for %s: %s", symbol, exc)
+        posted = threads_post.post_sentiment_snapshot(market="options", ticker_sentiments=ticker_sentiments)
+        return {"ok": True, "posted": posted, "ticker_count": len(ticker_sentiments)}
+    except Exception as exc:
+        logger.warning("[alpaca_options_server] Threads sentiment-snapshot post failed: %s", exc)
+        return {"ok": False, "error": str(exc)}
+
+
 def _ensure_background_jobs_started() -> None:
     global _startup_done
     if _startup_done:
@@ -186,6 +213,10 @@ def _ensure_background_jobs_started() -> None:
             scheduler.add_job(
                 _run_alpaca_options_threads_trending_news, "interval", minutes=30,
                 id="alpaca_options_threads_trending_news", replace_existing=True,
+            )
+            scheduler.add_job(
+                _run_alpaca_options_threads_sentiment_snapshot, "interval", minutes=60,
+                id="alpaca_options_threads_sentiment_snapshot", replace_existing=True,
             )
             scheduler.start()
             logger.info(
@@ -371,6 +402,7 @@ _JOB_LABELS = {
     "alpaca_options_fast_check": f"Alpaca options fast exit check (every {ALPACA_OPTIONS_FAST_CHECK_SECONDS}s)",
     "alpaca_options_entry_scan": f"Alpaca options entry scan (every {ALPACA_OPTIONS_CYCLE_MINUTES} min)",
     "alpaca_options_threads_trending_news": "Threads trending-news post (every 30 min)",
+    "alpaca_options_threads_sentiment_snapshot": "Threads per-ticker sentiment snapshot (every 60 min)",
 }
 
 

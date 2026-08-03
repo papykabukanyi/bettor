@@ -84,6 +84,35 @@ def test_threads_trending_news_job_never_raises_on_failure(monkeypatch):
     assert result["ok"] is False
 
 
+def test_threads_sentiment_snapshot_job_posts_per_ticker_sentiment(monkeypatch):
+    from data import alpaca_data, alpaca_options_data, stock_news, threads_post
+
+    monkeypatch.setattr(alpaca_options_data, "get_options_universe", lambda: ["AAPL", "MSFT"])
+    monkeypatch.setattr(alpaca_data, "get_company_name", lambda symbol: f"{symbol} Inc.")
+    monkeypatch.setattr(stock_news, "get_sentiment", lambda symbol, **kw: {"sentiment_score": 0.3 if symbol == "AAPL" else -0.4})
+
+    captured = {}
+    monkeypatch.setattr(threads_post, "post_sentiment_snapshot", lambda *, market, ticker_sentiments: captured.update(market=market, ticker_sentiments=ticker_sentiments) or True)
+
+    result = alpaca_options_server._run_alpaca_options_threads_sentiment_snapshot.__wrapped__()  # noqa: SLF001
+
+    assert result == {"ok": True, "posted": True, "ticker_count": 2}
+    assert captured["market"] == "options"
+    assert {"ticker": "AAPL", "sentiment_score": 0.3} in captured["ticker_sentiments"]
+    assert {"ticker": "MSFT", "sentiment_score": -0.4} in captured["ticker_sentiments"]
+
+
+def test_threads_sentiment_snapshot_job_never_raises_on_failure(monkeypatch):
+    from data import alpaca_options_data
+
+    def raise_error():
+        raise RuntimeError("universe unavailable")
+
+    monkeypatch.setattr(alpaca_options_data, "get_options_universe", raise_error)
+    result = alpaca_options_server._run_alpaca_options_threads_sentiment_snapshot.__wrapped__()  # noqa: SLF001
+    assert result["ok"] is False
+
+
 def test_api_alpaca_options_status_reports_configured_flag(monkeypatch):
     from data import alpaca_client
 

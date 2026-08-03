@@ -133,6 +133,88 @@ def generate_entry_chart(
             pass
 
 
+_SENTIMENT_ROW_HEIGHT = 26
+_SENTIMENT_TOP_MARGIN = 60
+_SENTIMENT_BOTTOM_MARGIN = 30
+_SENTIMENT_LABEL_WIDTH = 100
+_SENTIMENT_SCORE_WIDTH = 70
+_SENTIMENT_BAR_HALF_WIDTH = 260
+_SENTIMENT_POS_COLOR = (34, 197, 94)
+_SENTIMENT_NEG_COLOR = (239, 68, 68)
+_SENTIMENT_NEUTRAL_COLOR = (100, 106, 122)
+_SENTIMENT_AXIS_COLOR = (35, 40, 56)
+# Every ticker on a large watchlist (crypto's 36 pairs) in one image would
+# be unreadable -- keep the snapshot to the tickers with something actually
+# worth showing: the most bullish and most bearish, half and half.
+MAX_SENTIMENT_ROWS = int(os.getenv("CHART_SENTIMENT_MAX_ROWS", "20") or "20")
+
+
+def generate_sentiment_snapshot(*, market: str, ticker_sentiments: list[dict[str, Any]]) -> Path | None:
+    """Renders a per-ticker sentiment bar chart -- one row per ticker,
+    a bar extending right (green, bullish) or left (red, bearish) from a
+    zero-line, sized by |sentiment_score|. `ticker_sentiments` items need
+    "ticker" and "sentiment_score" (from *_news.get_sentiment(), already
+    real per-ticker news sentiment, not invented for this chart). Returns
+    None (skip posting) on empty input or any rendering failure."""
+    rows = [r for r in ticker_sentiments if r.get("ticker") and r.get("sentiment_score") is not None]
+    if not rows:
+        return None
+    try:
+        from PIL import Image, ImageDraw
+    except Exception as exc:
+        logger.warning("[chart_snapshot] Pillow unavailable: %s", exc)
+        return None
+
+    rows.sort(key=lambda r: r["sentiment_score"], reverse=True)
+    if len(rows) > MAX_SENTIMENT_ROWS:
+        half = MAX_SENTIMENT_ROWS // 2
+        rows = rows[:half] + rows[-half:]
+
+    width = _SENTIMENT_LABEL_WIDTH + _SENTIMENT_BAR_HALF_WIDTH * 2 + _SENTIMENT_SCORE_WIDTH + _MARGIN * 2
+    height = _SENTIMENT_TOP_MARGIN + len(rows) * _SENTIMENT_ROW_HEIGHT + _SENTIMENT_BOTTOM_MARGIN
+
+    try:
+        img = Image.new("RGB", (width, height), _BG)
+        draw = ImageDraw.Draw(img)
+
+        draw.text((_MARGIN, 20), f"{market.upper()} -- Sentiment Snapshot", fill=_TEXT_COLOR)
+
+        zero_x = _MARGIN + _SENTIMENT_LABEL_WIDTH + _SENTIMENT_BAR_HALF_WIDTH
+        draw.line([(zero_x, _SENTIMENT_TOP_MARGIN - 5), (zero_x, height - _SENTIMENT_BOTTOM_MARGIN)], fill=_SENTIMENT_AXIS_COLOR, width=1)
+
+        for i, row in enumerate(rows):
+            y = _SENTIMENT_TOP_MARGIN + i * _SENTIMENT_ROW_HEIGHT
+            score = max(-1.0, min(1.0, float(row["sentiment_score"])))
+            ticker = str(row["ticker"])
+            draw.text((_MARGIN, y + 5), ticker[:14], fill=_TEXT_COLOR)
+
+            bar_len = abs(score) * _SENTIMENT_BAR_HALF_WIDTH
+            color = _SENTIMENT_POS_COLOR if score > 0.02 else _SENTIMENT_NEG_COLOR if score < -0.02 else _SENTIMENT_NEUTRAL_COLOR
+            bar_top, bar_bottom = y + 3, y + _SENTIMENT_ROW_HEIGHT - 8
+            if score >= 0:
+                draw.rectangle([zero_x, bar_top, zero_x + bar_len, bar_bottom], fill=color)
+            else:
+                draw.rectangle([zero_x - bar_len, bar_top, zero_x, bar_bottom], fill=color)
+
+            score_x = _MARGIN + _SENTIMENT_LABEL_WIDTH + _SENTIMENT_BAR_HALF_WIDTH * 2 + 10
+            draw.text((score_x, y + 5), f"{score:+.2f}", fill=color)
+
+        CHARTS_DIR.mkdir(parents=True, exist_ok=True)
+        filename = f"sentiment_{_sanitize(market)}_{int(time.time())}.png"
+        out_path = CHARTS_DIR / filename
+        img.save(out_path, format="PNG")
+        _prune_old_charts()
+        return out_path
+    except Exception as exc:
+        logger.warning("[chart_snapshot] sentiment snapshot rendering failed for %s: %s", market, exc)
+        return None
+    finally:
+        try:
+            del img, draw
+        except Exception:
+            pass
+
+
 def public_url_for(chart_path: Path) -> str | None:
     """Builds the publicly-fetchable URL Threads' own servers need to
     actually retrieve the image (Threads' media-container API takes an

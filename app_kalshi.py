@@ -308,6 +308,32 @@ def _run_perps_threads_trending_news() -> dict[str, Any]:
         return {"ok": False, "error": str(exc)}
 
 
+@_locked_job("perps_threads_sentiment_snapshot", stale_after_sec=600)
+def _run_perps_threads_sentiment_snapshot() -> dict[str, Any]:
+    """Posts a per-ticker sentiment bar-chart every 60 minutes -- every
+    ticker on the current watchlist, each with its OWN real news
+    sentiment (crypto_news.get_sentiment(coin), the same call
+    perps_data.py's own collect/latest_feature_row already make, so this
+    is a cache hit the large majority of the time, not new network load).
+    Genuinely different from the trending-news post above: that surfaces
+    headlines; this surfaces the actual per-ticker SCORES as a picture.
+    Read-only, never touches order placement."""
+    try:
+        tickers = perps_data.get_watchlist()
+        ticker_sentiments = []
+        for ticker in tickers:
+            try:
+                sentiment = crypto_news.get_sentiment(perps_data.coin_for_ticker(ticker))
+                ticker_sentiments.append({"ticker": ticker, "sentiment_score": sentiment["sentiment_score"]})
+            except Exception as exc:
+                logger.debug("[app_kalshi] sentiment fetch failed for %s: %s", ticker, exc)
+        posted = threads_post.post_sentiment_snapshot(market="perps", ticker_sentiments=ticker_sentiments)
+        return {"ok": True, "posted": posted, "ticker_count": len(ticker_sentiments)}
+    except Exception as exc:
+        logger.warning("[app_kalshi] Threads sentiment-snapshot post failed: %s", exc)
+        return {"ok": False, "error": str(exc)}
+
+
 def _ensure_background_jobs_started() -> None:
     global _startup_done
     if _startup_done:
@@ -343,6 +369,10 @@ def _ensure_background_jobs_started() -> None:
             scheduler.add_job(
                 _run_perps_threads_trending_news, "interval", minutes=30,
                 id="perps_threads_trending_news", replace_existing=True,
+            )
+            scheduler.add_job(
+                _run_perps_threads_sentiment_snapshot, "interval", minutes=60,
+                id="perps_threads_sentiment_snapshot", replace_existing=True,
             )
             if ENABLE_PERPS_SCHEDULER:
                 scheduler.add_job(
@@ -666,6 +696,7 @@ _JOB_LABELS = {
     "perps_train": f"Model retrain (daily {PERPS_TRAIN_HOUR_ET:02d}:00 ET)",
     "perps_threads_hourly_status": "Threads hourly status post",
     "perps_threads_trending_news": "Threads trending-news post (every 30 min)",
+    "perps_threads_sentiment_snapshot": "Threads per-ticker sentiment snapshot (every 60 min)",
 }
 
 

@@ -99,6 +99,37 @@ def test_threads_trending_news_job_never_raises_on_failure(monkeypatch):
     assert result["ok"] is False
 
 
+def test_threads_sentiment_snapshot_job_posts_per_ticker_sentiment(monkeypatch):
+    import pandas as pd
+    from data import alpaca_data, stock_news, threads_post
+
+    monkeypatch.setattr(alpaca_data, "load_training_dataset", lambda max_rows=20000: pd.DataFrame())
+    monkeypatch.setattr(alpaca_data, "get_stock_watchlist", lambda recent: ["AAPL", "MSFT"])
+    monkeypatch.setattr(alpaca_data, "get_company_name", lambda symbol: f"{symbol} Inc.")
+    monkeypatch.setattr(stock_news, "get_sentiment", lambda symbol, **kw: {"sentiment_score": 0.4 if symbol == "AAPL" else -0.1})
+
+    captured = {}
+    monkeypatch.setattr(threads_post, "post_sentiment_snapshot", lambda *, market, ticker_sentiments: captured.update(market=market, ticker_sentiments=ticker_sentiments) or True)
+
+    result = alpaca_server._run_alpaca_threads_sentiment_snapshot.__wrapped__()  # noqa: SLF001
+
+    assert result == {"ok": True, "posted": True, "ticker_count": 2}
+    assert captured["market"] == "stocks"
+    assert {"ticker": "AAPL", "sentiment_score": 0.4} in captured["ticker_sentiments"]
+    assert {"ticker": "MSFT", "sentiment_score": -0.1} in captured["ticker_sentiments"]
+
+
+def test_threads_sentiment_snapshot_job_never_raises_on_failure(monkeypatch):
+    from data import alpaca_data
+
+    def raise_error(max_rows=20000):
+        raise RuntimeError("HF unavailable")
+
+    monkeypatch.setattr(alpaca_data, "load_training_dataset", raise_error)
+    result = alpaca_server._run_alpaca_threads_sentiment_snapshot.__wrapped__()  # noqa: SLF001
+    assert result["ok"] is False
+
+
 # ---------------------------------------------------------------------------
 # Historical backfill -- the "max historical dataset -> HF" job
 # ---------------------------------------------------------------------------

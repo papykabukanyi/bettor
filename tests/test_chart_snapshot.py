@@ -96,3 +96,45 @@ def test_public_url_for_builds_the_full_public_url(monkeypatch):
     )
     url = chart_snapshot.public_url_for(path)
     assert url == f"https://bettor-schwab.onrender.com/chart/{path.name}"
+
+
+def _sentiment_rows(n=10):
+    return [{"ticker": f"SYM{i}", "sentiment_score": (i - n / 2) / (n / 2)} for i in range(n)]
+
+
+def test_generate_sentiment_snapshot_returns_none_for_empty_input():
+    assert chart_snapshot.generate_sentiment_snapshot(market="stocks", ticker_sentiments=[]) is None
+
+
+def test_generate_sentiment_snapshot_ignores_rows_missing_required_fields():
+    rows = [{"ticker": "AAPL"}, {"sentiment_score": 0.5}, {"ticker": "MSFT", "sentiment_score": 0.2}]
+    path = chart_snapshot.generate_sentiment_snapshot(market="stocks", ticker_sentiments=rows)
+    assert path is not None
+    assert path.exists()
+    assert path.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_generate_sentiment_snapshot_saves_a_real_png_file():
+    path = chart_snapshot.generate_sentiment_snapshot(market="crypto", ticker_sentiments=_sentiment_rows())
+    assert path is not None
+    assert path.exists()
+    assert path.suffix == ".png"
+    assert path.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_generate_sentiment_snapshot_caps_a_large_universe_to_the_most_extreme_rows():
+    rows = _sentiment_rows(n=60)
+    path = chart_snapshot.generate_sentiment_snapshot(market="crypto", ticker_sentiments=rows)
+    assert path is not None
+    # Just confirms it doesn't blow up / produce an unreasonably huge image
+    # for a large universe (crypto's own 36+ pairs) -- capped rendering,
+    # not an ever-growing canvas.
+    from PIL import Image
+    with Image.open(path) as img:
+        assert img.height < 60 * chart_snapshot._SENTIMENT_ROW_HEIGHT + 200  # noqa: SLF001
+
+
+def test_generate_sentiment_snapshot_handles_all_neutral_scores():
+    rows = [{"ticker": "AAPL", "sentiment_score": 0.0}, {"ticker": "MSFT", "sentiment_score": 0.0}]
+    path = chart_snapshot.generate_sentiment_snapshot(market="stocks", ticker_sentiments=rows)
+    assert path is not None

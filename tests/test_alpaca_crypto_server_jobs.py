@@ -84,6 +84,35 @@ def test_threads_trending_news_job_never_raises_on_failure(monkeypatch):
     assert result["ok"] is False
 
 
+def test_threads_sentiment_snapshot_job_posts_per_ticker_sentiment(monkeypatch):
+    from data import alpaca_crypto_data, crypto_news, threads_post
+
+    monkeypatch.setattr(alpaca_crypto_data, "get_crypto_universe", lambda: ["BTC/USD", "ETH/USD"])
+    monkeypatch.setattr(alpaca_crypto_data, "symbol_to_coin", lambda symbol: symbol.split("/")[0])
+    monkeypatch.setattr(crypto_news, "get_sentiment", lambda coin, **kw: {"sentiment_score": 0.6 if coin == "BTC" else -0.3})
+
+    captured = {}
+    monkeypatch.setattr(threads_post, "post_sentiment_snapshot", lambda *, market, ticker_sentiments: captured.update(market=market, ticker_sentiments=ticker_sentiments) or True)
+
+    result = alpaca_crypto_server._run_alpaca_crypto_threads_sentiment_snapshot.__wrapped__()  # noqa: SLF001
+
+    assert result == {"ok": True, "posted": True, "ticker_count": 2}
+    assert captured["market"] == "crypto"
+    assert {"ticker": "BTC/USD", "sentiment_score": 0.6} in captured["ticker_sentiments"]
+    assert {"ticker": "ETH/USD", "sentiment_score": -0.3} in captured["ticker_sentiments"]
+
+
+def test_threads_sentiment_snapshot_job_never_raises_on_failure(monkeypatch):
+    from data import alpaca_crypto_data
+
+    def raise_error():
+        raise RuntimeError("universe unavailable")
+
+    monkeypatch.setattr(alpaca_crypto_data, "get_crypto_universe", raise_error)
+    result = alpaca_crypto_server._run_alpaca_crypto_threads_sentiment_snapshot.__wrapped__()  # noqa: SLF001
+    assert result["ok"] is False
+
+
 def test_api_alpaca_crypto_status_reports_configured_flag(monkeypatch):
     from data import alpaca_client
 

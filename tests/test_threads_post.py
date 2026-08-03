@@ -352,6 +352,66 @@ def test_maybe_post_trade_entry_chart_never_raises_on_api_failure(monkeypatch, t
     assert result is False
 
 
+def _sentiment_rows(n=10):
+    return [{"ticker": f"SYM{i}", "sentiment_score": (i - n / 2) / (n / 2)} for i in range(n)]
+
+
+def test_post_sentiment_snapshot_respects_the_disable_flag(monkeypatch):
+    monkeypatch.setattr(threads_post, "THREADS_POST_ENABLED", False)
+    result = threads_post.post_sentiment_snapshot(market="stocks", ticker_sentiments=_sentiment_rows())
+    assert result is False
+
+
+def test_post_sentiment_snapshot_skips_without_enough_data(monkeypatch, tmp_path):
+    from data import chart_snapshot
+
+    monkeypatch.setattr(chart_snapshot, "CHARTS_DIR", tmp_path / "charts")
+    result = threads_post.post_sentiment_snapshot(market="stocks", ticker_sentiments=[])
+    assert result is False
+
+
+def test_post_sentiment_snapshot_skips_without_a_known_public_url(monkeypatch, tmp_path):
+    from data import chart_snapshot
+
+    monkeypatch.setattr(chart_snapshot, "CHARTS_DIR", tmp_path / "charts")
+    monkeypatch.delenv("RENDER_EXTERNAL_URL", raising=False)
+    result = threads_post.post_sentiment_snapshot(market="stocks", ticker_sentiments=_sentiment_rows())
+    assert result is False
+
+
+def test_post_sentiment_snapshot_posts_the_image_when_everything_lines_up(monkeypatch, tmp_path):
+    from data import chart_snapshot
+
+    monkeypatch.setattr(chart_snapshot, "CHARTS_DIR", tmp_path / "charts")
+    monkeypatch.setenv("RENDER_EXTERNAL_URL", "https://bettor-alpaca-crypto.onrender.com")
+
+    captured = {}
+    monkeypatch.setattr(
+        threads_post.threads_client, "create_and_publish_image_post",
+        lambda image_url, text="": captured.update(image_url=image_url, text=text) or "post-1",
+    )
+
+    result = threads_post.post_sentiment_snapshot(market="crypto", ticker_sentiments=_sentiment_rows())
+    assert result is True
+    assert captured["image_url"].startswith("https://bettor-alpaca-crypto.onrender.com/chart/")
+    assert "Alpaca Crypto" in captured["text"]
+    assert "#Bitcoin" in captured["text"]
+
+
+def test_post_sentiment_snapshot_never_raises_on_api_failure(monkeypatch, tmp_path):
+    from data import chart_snapshot
+
+    monkeypatch.setattr(chart_snapshot, "CHARTS_DIR", tmp_path / "charts")
+    monkeypatch.setenv("RENDER_EXTERNAL_URL", "https://bettor-alpaca-crypto.onrender.com")
+
+    def raise_error(image_url, text=""):
+        raise RuntimeError("simulated Threads API failure")
+
+    monkeypatch.setattr(threads_post.threads_client, "create_and_publish_image_post", raise_error)
+    result = threads_post.post_sentiment_snapshot(market="crypto", ticker_sentiments=_sentiment_rows())
+    assert result is False
+
+
 def test_trending_news_reports_nothing_notable_with_no_headlines(monkeypatch):
     posted = []
     monkeypatch.setattr(threads_post.threads_client, "create_and_publish_post", lambda text: posted.append(text))

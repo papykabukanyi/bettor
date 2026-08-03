@@ -151,6 +151,35 @@ def _run_alpaca_crypto_threads_trending_news() -> dict[str, Any]:
         return {"ok": False, "error": str(exc)}
 
 
+@_locked_job("alpaca_crypto_threads_sentiment_snapshot", stale_after_sec=600)
+def _run_alpaca_crypto_threads_sentiment_snapshot() -> dict[str, Any]:
+    """Posts a per-ticker sentiment bar-chart every 60 minutes -- every
+    pair in the tradable universe, each with its OWN real news sentiment
+    (crypto_news.get_sentiment(coin), the same call collect_dataset_rows/
+    latest_feature_row already make every 15 min, so this is a cache hit
+    the large majority of the time). Genuinely different from the
+    trending-news post above: that surfaces headlines; this surfaces the
+    actual per-ticker SCORES as a picture (auto-capped to the most
+    bullish/bearish half-and-half by chart_snapshot.py itself since the
+    full 36-pair universe wouldn't fit readably in one image). Read-only,
+    never touches order placement."""
+    try:
+        from data import crypto_news
+        symbols = alpaca_crypto_data.get_crypto_universe()
+        ticker_sentiments = []
+        for symbol in symbols:
+            try:
+                sentiment = crypto_news.get_sentiment(alpaca_crypto_data.symbol_to_coin(symbol))
+                ticker_sentiments.append({"ticker": symbol, "sentiment_score": sentiment["sentiment_score"]})
+            except Exception as exc:
+                logger.debug("[alpaca_crypto_server] sentiment fetch failed for %s: %s", symbol, exc)
+        posted = threads_post.post_sentiment_snapshot(market="crypto", ticker_sentiments=ticker_sentiments)
+        return {"ok": True, "posted": posted, "ticker_count": len(ticker_sentiments)}
+    except Exception as exc:
+        logger.warning("[alpaca_crypto_server] Threads sentiment-snapshot post failed: %s", exc)
+        return {"ok": False, "error": str(exc)}
+
+
 def _ensure_background_jobs_started() -> None:
     global _startup_done
     if _startup_done:
@@ -187,6 +216,10 @@ def _ensure_background_jobs_started() -> None:
             scheduler.add_job(
                 _run_alpaca_crypto_threads_trending_news, "interval", minutes=30,
                 id="alpaca_crypto_threads_trending_news", replace_existing=True,
+            )
+            scheduler.add_job(
+                _run_alpaca_crypto_threads_sentiment_snapshot, "interval", minutes=60,
+                id="alpaca_crypto_threads_sentiment_snapshot", replace_existing=True,
             )
             scheduler.start()
             logger.info(
@@ -379,6 +412,7 @@ _JOB_LABELS = {
     "alpaca_crypto_fast_check": f"Alpaca crypto fast exit check (every {ALPACA_CRYPTO_FAST_CHECK_SECONDS}s)",
     "alpaca_crypto_entry_scan": f"Alpaca crypto entry scan (every {ALPACA_CRYPTO_CYCLE_MINUTES} min, 24/7)",
     "alpaca_crypto_threads_trending_news": "Threads trending-news post (every 30 min)",
+    "alpaca_crypto_threads_sentiment_snapshot": "Threads per-ticker sentiment snapshot (every 60 min)",
 }
 
 
