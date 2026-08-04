@@ -206,3 +206,33 @@ def test_predict_direction_uses_trained_model(monkeypatch):
     assert prediction["model_ok"] is True
     assert prediction["direction"] in {"up", "down"}
     assert 0.0 <= prediction["probability_up"] <= 1.0
+
+
+def test_download_model_from_hf_bounds_a_hang_instead_of_freezing(monkeypatch):
+    """Real, confirmed production incident: this is called directly from
+    /api/status on every cold boot (MODEL_PATH/MODEL_META_PATH only exist
+    locally after the first successful download, wiped by every restart).
+    Unbounded, a hang here (huggingface_hub's own internal session lock,
+    not a slow response) froze the entire --workers 1 process until
+    gunicorn's own worker timeout SIGKILLed it -- which wipes local disk
+    and guarantees the next boot hits this same call again: a
+    self-sustaining crash loop. This locks in the fix: a hang must degrade
+    to "no model this one time", not an unbounded freeze."""
+    import time as time_module
+
+    monkeypatch.setattr(perps_model, "HF_API_KEY", "fake-key")
+    monkeypatch.setattr(perps_model, "_MODEL_DOWNLOAD_HF_TIMEOUT_SEC", 0.2)
+
+    def hangs_forever(*a, **k):
+        time_module.sleep(30)
+        raise AssertionError("should never get here")
+
+    import huggingface_hub
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", hangs_forever)
+
+    start = time_module.monotonic()
+    result = perps_model._download_model_from_hf()  # noqa: SLF001
+    elapsed = time_module.monotonic() - start
+
+    assert result is False
+    assert elapsed < 5  # must return promptly, not wait out the full 30s hang

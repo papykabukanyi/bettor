@@ -340,10 +340,14 @@ def _push_model_to_hf() -> None:
         logger.warning("[perps_model] HF model push failed: %s", exc)
 
 
+_MODEL_DOWNLOAD_HF_TIMEOUT_SEC = int(os.getenv("PERPS_MODEL_DOWNLOAD_HF_TIMEOUT_SEC", "15") or "15")
+
+
 def _download_model_from_hf() -> bool:
     if not HF_API_KEY:
         return False
-    try:
+
+    def _download() -> bool:
         from huggingface_hub import hf_hub_download
         model_path = hf_hub_download(
             repo_id=HF_MODEL_REPO, filename="perps_model.joblib", repo_type="model", token=HF_API_KEY,
@@ -354,6 +358,20 @@ def _download_model_from_hf() -> bool:
         MODEL_PATH.write_bytes(Path(model_path).read_bytes())
         MODEL_META_PATH.write_text(Path(meta_path).read_text(encoding="utf-8"), encoding="utf-8")
         return True
+
+    try:
+        # Real, confirmed production incident (Render's own logs): this is
+        # called directly from app_kalshi.py's /api/status on every cold
+        # boot (MODEL_PATH/MODEL_META_PATH only exist locally AFTER the
+        # first successful download, wiped by every restart) -- unbounded,
+        # it hung on huggingface_hub's own internal session lock long
+        # enough to freeze this --workers 1 process until gunicorn's
+        # worker timeout SIGKILLed it, which wipes local disk and
+        # guarantees the NEXT boot hits the exact same unconditional call
+        # again: a self-sustaining crash loop, the same class of bug
+        # already fixed in _pull_durable_state_from_hf but missed here.
+        from server_common import call_with_hard_timeout
+        return bool(call_with_hard_timeout(_download, timeout_sec=_MODEL_DOWNLOAD_HF_TIMEOUT_SEC, on_timeout=False))
     except Exception as exc:
         logger.info("[perps_model] no model available on HF yet: %s", exc)
         return False

@@ -156,10 +156,14 @@ def _push_model_to_hf() -> None:
         logger.warning("[alpaca_options_model] HF model push failed: %s", exc)
 
 
+_MODEL_DOWNLOAD_HF_TIMEOUT_SEC = int(os.getenv("ALPACA_OPTIONS_MODEL_DOWNLOAD_HF_TIMEOUT_SEC", "15") or "15")
+
+
 def _download_model_from_hf() -> bool:
     if not HF_API_KEY:
         return False
-    try:
+
+    def _download() -> bool:
         from huggingface_hub import hf_hub_download
         model_path = hf_hub_download(
             repo_id=HF_ALPACA_OPTIONS_MODEL_REPO, filename="alpaca_options_model.joblib", repo_type="model", token=HF_API_KEY,
@@ -170,6 +174,17 @@ def _download_model_from_hf() -> bool:
         MODEL_PATH.write_bytes(Path(model_path).read_bytes())
         MODEL_META_PATH.write_text(Path(meta_path).read_text(encoding="utf-8"), encoding="utf-8")
         return True
+
+    try:
+        # Real, confirmed production incident (same call shape, on perps):
+        # called directly from /api/alpaca/options/status on every cold
+        # boot, unbounded this can hang on huggingface_hub's own internal
+        # session lock long enough to freeze this --workers 1 process
+        # until gunicorn's worker timeout SIGKILLs it -- which wipes local
+        # disk and guarantees the next boot hits this same unconditional
+        # call again: a self-sustaining crash loop.
+        from server_common import call_with_hard_timeout
+        return bool(call_with_hard_timeout(_download, timeout_sec=_MODEL_DOWNLOAD_HF_TIMEOUT_SEC, on_timeout=False))
     except Exception as exc:
         logger.info("[alpaca_options_model] no model available on HF yet: %s", exc)
         return False
