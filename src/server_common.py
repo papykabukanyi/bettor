@@ -23,6 +23,44 @@ DATA_DIR = ROOT_DIR / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def call_with_hard_timeout(fn, *, timeout_sec: float, on_timeout: Any = None) -> Any:
+    """Runs `fn()` on a worker thread and gives up after `timeout_sec`,
+    returning `on_timeout` instead of blocking forever.
+
+    Real, confirmed production incident (Render's own logs, 9 occurrences
+    in 24h on the perps service alone): every *_strategy.py's own
+    `_pull_durable_state_from_hf()` calls `huggingface_hub.hf_hub_download`
+    with NO timeout of its own. huggingface_hub's internal shared-session
+    lock can occasionally hang for minutes (seen live: a request stuck
+    inside `get_session()`'s `_CLIENT_LOCK`, not a slow HTTP response --
+    ordinary `except Exception` around the call never catches a hang that
+    never raises). With --workers 1, that hang froze the ENTIRE process --
+    every other request AND the background scheduler -- until gunicorn's
+    own worker timeout finally SIGKILLed it. A `try/except` cannot bound a
+    hang; only an actual deadline on a separate thread can, which is what
+    this provides.
+
+    Does NOT (and cannot, in plain Python) forcibly kill the underlying
+    thread if it's still hung when the deadline passes -- it just stops
+    THIS caller from waiting on it, converting an unbounded process-wide
+    freeze into a bounded, single-call degradation."""
+    from concurrent.futures import ThreadPoolExecutor
+    from concurrent.futures import TimeoutError as FutureTimeoutError
+
+    executor = ThreadPoolExecutor(max_workers=1)
+    try:
+        future = executor.submit(fn)
+        return future.result(timeout=timeout_sec)
+    except FutureTimeoutError:
+        logger.warning("[server_common] call_with_hard_timeout: %s exceeded %ss, giving up", getattr(fn, "__name__", fn), timeout_sec)
+        return on_timeout
+    finally:
+        # wait=False: exiting must never itself block on the (possibly
+        # still-hung) worker thread -- that would silently reintroduce the
+        # exact freeze this function exists to prevent.
+        executor.shutdown(wait=False)
+
+
 def load_json(path: Path, default: Any) -> Any:
     try:
         with path.open("r", encoding="utf-8") as handle:

@@ -480,15 +480,29 @@ def _push_durable_state_to_hf(state: dict[str, Any]) -> None:
         logger.warning("[perps_strategy] durable state push to HF failed: %s", exc)
 
 
+_DURABLE_STATE_HF_TIMEOUT_SEC = int(os.getenv("PERPS_DURABLE_STATE_HF_TIMEOUT_SEC", "10") or "10")
+
+
 def _pull_durable_state_from_hf() -> dict[str, Any] | None:
     if not HF_API_KEY:
         return None
-    try:
+
+    def _download() -> dict[str, Any]:
         from huggingface_hub import hf_hub_download
         path = hf_hub_download(
             repo_id=HF_MODEL_REPO, filename=_DURABLE_STATE_HF_FILENAME, repo_type="model", token=HF_API_KEY,
         )
         return json.loads(Path(path).read_text(encoding="utf-8"))
+
+    try:
+        # Real, confirmed production incident: this call, unbounded, hung
+        # long enough (huggingface_hub's own internal session lock, not a
+        # slow response -- see server_common.call_with_hard_timeout's own
+        # docstring) to freeze this entire --workers 1 process for minutes,
+        # 9 times in 24h, until gunicorn's own worker timeout finally
+        # SIGKILLed it. A hard deadline here is what actually bounds it.
+        from server_common import call_with_hard_timeout
+        return call_with_hard_timeout(_download, timeout_sec=_DURABLE_STATE_HF_TIMEOUT_SEC)
     except Exception as exc:
         logger.info("[perps_strategy] no durable state on HF yet (or fetch failed): %s", exc)
         return None

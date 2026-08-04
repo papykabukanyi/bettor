@@ -97,6 +97,37 @@ def test_locked_job_records_error_and_releases_lock(_lock):
     assert not (lock_dir / "test_job.lock").exists()
 
 
+def test_call_with_hard_timeout_returns_the_function_result_when_fast_enough():
+    assert server_common.call_with_hard_timeout(lambda: 42, timeout_sec=2) == 42
+
+
+def test_call_with_hard_timeout_returns_the_fallback_when_the_deadline_passes():
+    """Real, confirmed production incident this locks in: an unbounded
+    huggingface_hub call hung long enough (its own internal session lock,
+    not a slow response) to freeze an entire --workers 1 process for
+    minutes, 9 times in 24h, until gunicorn's own timeout finally killed
+    it. A plain try/except can't catch a hang that never raises -- only a
+    real deadline on a separate thread, proven here, actually bounds it."""
+    def _hangs_forever():
+        time.sleep(30)
+        return "should never get here"
+
+    start = time.monotonic()
+    result = server_common.call_with_hard_timeout(_hangs_forever, timeout_sec=0.2, on_timeout="gave_up")
+    elapsed = time.monotonic() - start
+
+    assert result == "gave_up"
+    assert elapsed < 5  # must return promptly, not wait out the full 30s hang
+
+
+def test_call_with_hard_timeout_propagates_a_real_exception_from_the_function():
+    def _raises():
+        raise RuntimeError("boom")
+
+    with pytest.raises(RuntimeError, match="boom"):
+        server_common.call_with_hard_timeout(_raises, timeout_sec=2)
+
+
 def test_is_cron_authorized_allows_everything_when_no_secret_configured(monkeypatch):
     monkeypatch.delenv("CRON_SECRET", raising=False)
 

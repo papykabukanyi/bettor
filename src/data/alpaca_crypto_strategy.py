@@ -206,15 +206,28 @@ def _push_durable_state_to_hf(state: dict[str, Any]) -> None:
         logger.warning("[alpaca_crypto_strategy] durable state push to HF failed: %s", exc)
 
 
+_DURABLE_STATE_HF_TIMEOUT_SEC = int(os.getenv("ALPACA_CRYPTO_DURABLE_STATE_HF_TIMEOUT_SEC", "10") or "10")
+
+
 def _pull_durable_state_from_hf() -> dict[str, Any] | None:
     if not HF_API_KEY:
         return None
-    try:
+
+    def _download() -> dict[str, Any]:
         from huggingface_hub import hf_hub_download
         path = hf_hub_download(
             repo_id=HF_ALPACA_CRYPTO_MODEL_REPO, filename=_DURABLE_STATE_HF_FILENAME, repo_type="model", token=HF_API_KEY,
         )
         return json.loads(Path(path).read_text(encoding="utf-8"))
+
+    try:
+        # Real, confirmed production incident (same call shape, on the
+        # perps service): unbounded, this can hang for minutes on
+        # huggingface_hub's own internal session lock, freezing this whole
+        # --workers 1 process until gunicorn's worker timeout kills it. See
+        # server_common.call_with_hard_timeout's own docstring.
+        from server_common import call_with_hard_timeout
+        return call_with_hard_timeout(_download, timeout_sec=_DURABLE_STATE_HF_TIMEOUT_SEC)
     except Exception as exc:
         logger.info("[alpaca_crypto_strategy] no durable state on HF yet (or fetch failed): %s", exc)
         return None
