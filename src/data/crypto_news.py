@@ -85,6 +85,23 @@ _general_feed_cache: dict[str, tuple[list[str], float]] = {}
 CRYPTOPANIC_API_KEY = os.getenv("CRYPTOPANIC_API_KEY", "")
 NEWSDATA_API_KEY = os.getenv("NEWSDATA_API_KEY", "")
 
+# Real gap found in review: every OTHER limited source here (newsdata.io
+# below, serpapi_client.py's own shared budget, news_sources.py's three
+# sources) proactively rations calls against its free-tier daily cap --
+# CryptoPanic had none at all, just fired a real request every single time
+# it was asked, for every ticker, every cycle. Same "manage the budget,
+# don't just react to a failure" discipline as news_sources.py's own
+# _cooldown_ok: a real minimum interval sized from CryptoPanic's stated
+# free-tier daily cap with a safety margin, not a race to the limit.
+_CRYPTOPANIC_CALLS_PER_DAY = float(os.getenv("CRYPTOPANIC_CALLS_PER_DAY", "1000") or "1000")
+_CRYPTOPANIC_SAFETY_MARGIN = 0.8
+_cryptopanic_last_call_ts = 0.0
+# Belt-and-suspenders, same as newsdata.io below: if a 429 slips through
+# anyway (the daily cap turned out to be lower than assumed, or shared
+# across other apps on the same account), stop hammering it for the day.
+_CRYPTOPANIC_429_COOLDOWN_SEC = 24 * 3600
+_cryptopanic_cooldown_until = 0.0
+
 # Confirmed live: with every active ticker each checked roughly every 10
 # minutes, newsdata.io's free-tier DAILY quota gets exhausted within the
 # first hour or two, and every subsequent call for the REST OF THAT DAY also
@@ -198,9 +215,19 @@ def _fetch_google_news_rss(query: str) -> list[str]:
 
 def _fetch_cryptopanic(coin_symbol: str) -> list[str]:
     """Optional: only runs if CRYPTOPANIC_API_KEY is set. See module
-    docstring for how to get a free token -- skipped silently otherwise."""
+    docstring for how to get a free token -- skipped silently otherwise.
+    Proactively rationed (see _CRYPTOPANIC_CALLS_PER_DAY above) PLUS a
+    reactive 429 cooldown as a second line of defense."""
+    global _cryptopanic_last_call_ts, _cryptopanic_cooldown_until
     if not CRYPTOPANIC_API_KEY:
         return []
+    now = time.time()
+    if now < _cryptopanic_cooldown_until:
+        return []
+    min_interval = 86400.0 / max(1.0, _CRYPTOPANIC_CALLS_PER_DAY * _CRYPTOPANIC_SAFETY_MARGIN)
+    if (now - _cryptopanic_last_call_ts) < min_interval:
+        return []
+    _cryptopanic_last_call_ts = now
     code = _CRYPTOPANIC_CODES.get(coin_symbol, coin_symbol)
     try:
         resp = requests.get(
@@ -208,6 +235,10 @@ def _fetch_cryptopanic(coin_symbol: str) -> list[str]:
             params={"auth_token": CRYPTOPANIC_API_KEY, "currencies": code, "public": "true"},
             timeout=_TIMEOUT_SEC,
         )
+        if resp.status_code == 429:
+            _cryptopanic_cooldown_until = now + _CRYPTOPANIC_429_COOLDOWN_SEC
+            logger.warning("[crypto_news] cryptopanic rate-limited (429) -- daily quota likely exhausted, pausing this source for 24.0 hours")
+            return []
         resp.raise_for_status()
         results = resp.json().get("results") or []
         return [r.get("title", "") for r in results if r.get("title")]

@@ -37,4 +37,4 @@ huggingface_hub>=0.20.0
 # constraint, not a style preference; Pillow's raster drawing is much
 # lighter than pulling in matplotlib's full plotting stack for what's just
 # a line + a few horizontal reference levels.
-Pillow>=10.0.0
+Pillow>=10.1.0

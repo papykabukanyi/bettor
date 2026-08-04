@@ -362,6 +362,23 @@ def build_bracket_order(
     }
 
 
+def build_extended_hours_limit_order(
+    *, symbol: str, quantity: float, side: str, limit_price: float,
+) -> dict[str, Any]:
+    """A plain limit order for pre-market/after-hours equity trading.
+    Alpaca rejects market orders AND bracket/OCO orders outside the
+    regular 9:30-4:00 ET session -- extended-hours orders must be
+    type="limit", extended_hours=true, time_in_force="day" (Alpaca's own
+    documented restriction, not this codebase's choice). Since there's no
+    broker-native bracket here, take-profit/stop-loss/max-hold must be
+    managed by the caller's own poll-and-close loop during the extended
+    session -- same pattern already proven for crypto/options."""
+    return {
+        "symbol": symbol, "qty": str(int(quantity)), "side": side, "type": "limit",
+        "time_in_force": "day", "extended_hours": True, "limit_price": f"{limit_price:.2f}",
+    }
+
+
 def place_order(order_spec: dict[str, Any]) -> str:
     """Places a real order and returns its order id."""
     resp = _trading_post("/v2/orders", json_body=order_spec)

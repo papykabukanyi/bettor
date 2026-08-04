@@ -10,7 +10,17 @@ import datetime as dt
 
 import pytest
 
-from data import alpaca_client, alpaca_options_data, alpaca_options_model, threads_post, alpaca_options_strategy as strat
+from data import alpaca_client, alpaca_data, alpaca_options_data, alpaca_options_model, threads_post, alpaca_options_strategy as strat
+
+
+@pytest.fixture(autouse=True)
+def _regular_market_session(monkeypatch):
+    """scan_and_enter is regular-hours-only now (Alpaca doesn't support
+    extended-hours options trading at all -- see alpaca_options_strategy.py's
+    own docstring) -- default every test to the regular session, matching
+    what these tests already assumed implicitly before that gate existed."""
+    monkeypatch.setattr(alpaca_data, "get_market_session", lambda: {"session": "regular", "is_open": True, "source": "test"})
+    yield
 
 
 def _row(**overrides):
@@ -179,6 +189,22 @@ def test_scan_and_enter_skips_without_a_trained_model(monkeypatch):
     assert result["opened"][0]["action"] == "skipped"
     state = strat._load_state()  # noqa: SLF001
     assert state["positions"] == []
+
+
+def test_scan_and_enter_skips_entirely_outside_regular_hours(monkeypatch):
+    """Alpaca does not support extended-hours options trading at all --
+    unlike equities, there's no limit+extended_hours order path to fall
+    back to, so this must skip outright, not just gate the order type."""
+    monkeypatch.setattr(alpaca_data, "get_market_session", lambda: {"session": "pre_market", "is_open": False, "source": "test"})
+
+    def fail_if_called(*a, **kw):
+        raise AssertionError("must not evaluate any underlying outside regular hours")
+
+    monkeypatch.setattr(alpaca_options_data, "get_options_universe", fail_if_called)
+    monkeypatch.setattr(alpaca_options_data, "latest_feature_row", fail_if_called)
+
+    result = strat.scan_and_enter()
+    assert result == {"opened": [], "action": "market_not_regular_hours"}
 
 
 def test_scan_and_enter_skips_a_symbol_already_held(monkeypatch):

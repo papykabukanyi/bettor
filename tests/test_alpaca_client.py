@@ -318,6 +318,27 @@ def test_build_bracket_order_truncates_fractional_qty_to_whole_shares():
     assert order["qty"] == "10"
 
 
+def test_build_extended_hours_limit_order_shape_for_a_buy():
+    order = alpaca_client.build_extended_hours_limit_order(
+        symbol="AAPL", quantity=10, side="buy", limit_price=100.25,
+    )
+    assert order["symbol"] == "AAPL"
+    assert order["qty"] == "10"
+    assert order["side"] == "buy"
+    assert order["type"] == "limit"
+    assert order["extended_hours"] is True
+    assert order["time_in_force"] == "day"
+    assert order["limit_price"] == "100.25"
+    assert "order_class" not in order  # Alpaca rejects brackets outside regular hours
+
+
+def test_build_extended_hours_limit_order_truncates_fractional_qty_to_whole_shares():
+    order = alpaca_client.build_extended_hours_limit_order(
+        symbol="AAPL", quantity=10.9, side="buy", limit_price=100.0,
+    )
+    assert order["qty"] == "10"
+
+
 def test_place_order_extracts_id_from_json_body(monkeypatch):
     captured = {}
 

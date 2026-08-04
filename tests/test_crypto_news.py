@@ -93,6 +93,94 @@ def test_fetch_newsdata_io_calls_again_once_cooldown_expires(monkeypatch):
     assert calls["n"] == 1
 
 
+def test_fetch_cryptopanic_skips_silently_without_a_key(monkeypatch):
+    monkeypatch.setattr(news, "CRYPTOPANIC_API_KEY", "")
+
+    def fail_if_called(*a, **k):
+        raise AssertionError("must not call the network without an API key set")
+
+    monkeypatch.setattr(news.requests, "get", fail_if_called)
+    assert news._fetch_cryptopanic("BTC") == []  # noqa: SLF001
+
+
+def test_fetch_cryptopanic_extracts_titles(monkeypatch):
+    monkeypatch.setattr(news, "CRYPTOPANIC_API_KEY", "fake-key")
+    monkeypatch.setattr(news, "_cryptopanic_last_call_ts", 0.0)
+    monkeypatch.setattr(news, "_cryptopanic_cooldown_until", 0.0)
+
+    class FakeResponse:
+        status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"results": [{"title": "Bitcoin surges to new high"}, {"title": ""}, {"no_title": True}]}
+
+    monkeypatch.setattr(news.requests, "get", lambda *a, **k: FakeResponse())
+    titles = news._fetch_cryptopanic("BTC")  # noqa: SLF001
+    assert titles == ["Bitcoin surges to new high"]
+
+
+def test_fetch_cryptopanic_proactively_rations_calls_before_ever_hitting_a_429(monkeypatch):
+    """Real gap found in review: every OTHER limited source proactively
+    rations itself against its free-tier daily cap; CryptoPanic had no
+    protection at all and would fire a real request every single call.
+    Back-to-back calls (well inside the computed minimum interval for the
+    default 1000/day cap) must skip the network entirely after the first."""
+    monkeypatch.setattr(news, "CRYPTOPANIC_API_KEY", "fake-key")
+    monkeypatch.setattr(news, "_cryptopanic_last_call_ts", 0.0)
+    monkeypatch.setattr(news, "_cryptopanic_cooldown_until", 0.0)
+
+    class FakeResponse:
+        status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"results": [{"title": "headline"}]}
+
+    calls = {"n": 0}
+
+    def fake_get(*a, **k):
+        calls["n"] += 1
+        return FakeResponse()
+
+    monkeypatch.setattr(news.requests, "get", fake_get)
+    assert news._fetch_cryptopanic("BTC") == ["headline"]  # noqa: SLF001
+    assert calls["n"] == 1
+    # Immediately after, for a DIFFERENT coin -- still inside the shared
+    # per-source cooldown window, must not call the network again.
+    assert news._fetch_cryptopanic("ETH") == []  # noqa: SLF001
+    assert calls["n"] == 1
+
+
+def test_fetch_cryptopanic_enters_cooldown_after_a_429_and_stops_calling(monkeypatch):
+    monkeypatch.setattr(news, "CRYPTOPANIC_API_KEY", "fake-key")
+    monkeypatch.setattr(news, "_cryptopanic_last_call_ts", 0.0)
+    monkeypatch.setattr(news, "_cryptopanic_cooldown_until", 0.0)
+
+    class _RateLimitedResponse:
+        status_code = 429
+
+    calls = {"n": 0}
+
+    def fake_get(*a, **k):
+        calls["n"] += 1
+        return _RateLimitedResponse()
+
+    monkeypatch.setattr(news.requests, "get", fake_get)
+    assert news._fetch_cryptopanic("BTC") == []  # noqa: SLF001
+    assert calls["n"] == 1
+
+    # Bypass the proactive per-call cooldown (simulate enough time passing
+    # for THAT), but the 429-triggered daily cooldown must still block it.
+    monkeypatch.setattr(news, "_cryptopanic_last_call_ts", 0.0)
+    assert news._fetch_cryptopanic("ETH") == []  # noqa: SLF001
+    assert calls["n"] == 1
+
+
 def test_fetch_rss_titles_cached_reuses_cache_within_ttl(monkeypatch):
     monkeypatch.setattr(news, "_general_feed_cache", {})
     calls = {"n": 0}

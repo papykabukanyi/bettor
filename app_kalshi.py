@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import atexit
 import datetime as dt
+import gc
 import logging
 import os
 import sys
@@ -231,9 +232,16 @@ def _run_perps_fast_check() -> dict[str, Any]:
 
 @_locked_job("perps_entry_scan", stale_after_sec=300)
 def _run_perps_entry_scan() -> dict[str, Any]:
-    result = perps_strategy.scan_and_enter(dry_run=False)  # see _run_perps_fast_check
-    save_json(LATEST_CYCLE_FILE, result)
-    return result
+    """Real, confirmed OOM events on this exact service this session
+    (Render's own events, oomKilled=true) -- gc.collect() here matches the
+    same defense already proven necessary on the equities entry-scan job
+    (which had none at all and was OOM-crashing every 15-20 minutes)."""
+    try:
+        result = perps_strategy.scan_and_enter(dry_run=False)  # see _run_perps_fast_check
+        save_json(LATEST_CYCLE_FILE, result)
+        return result
+    finally:
+        gc.collect()
 
 
 @_locked_job("perps_manual_cycle", stale_after_sec=300)

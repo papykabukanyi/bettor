@@ -309,10 +309,26 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
     a real trained model (see evaluate_candidate) -- no technical-only
     cold-start fallback. "simulate" mode always paper-trades; "live" mode
     places a real plain market buy order for the chosen contract UNLESS
-    dry_run resolves True."""
+    dry_run resolves True.
+
+    Regular-hours only, unlike the equities/crypto strategies -- Alpaca
+    does not support extended-hours trading on OPTIONS contracts at all
+    (no analogous type="limit"+extended_hours=true path exists for them
+    the way it does for stocks), so pre/post-market is skipped outright
+    rather than attempting an order the broker would just reject. The
+    underlying's OWN premarket/afterhours price action still reaches this
+    strategy's features regardless -- alpaca_options_data.py reuses
+    alpaca_data.py's equities feature engineering directly, and THAT data
+    collection has no session gate at all (runs continuously, same as
+    perps), so overnight moves in the underlying are already reflected by
+    the time regular-hours entries evaluate here."""
+    from data.alpaca_data import get_market_session
     from data.alpaca_options_data import get_options_universe, latest_feature_row, select_contract
     from data.alpaca_options_model import predict_direction
     from data import alpaca_client, threads_post
+
+    if get_market_session()["session"] != "regular":
+        return {"opened": [], "action": "market_not_regular_hours"}
 
     effective_dry_run = (not LIVE_TRADING_ENABLED) if dry_run is None else dry_run
     if symbols is None:

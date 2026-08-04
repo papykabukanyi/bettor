@@ -18,6 +18,7 @@ shape in perps_strategy.py.
 from __future__ import annotations
 
 import datetime as dt
+import gc
 import json
 import logging
 import os
@@ -330,20 +331,46 @@ def get_current_price(symbol: str) -> float | None:
 def scan_and_enter(watchlist: list[str] | None = None, *, dry_run: bool | None = None) -> dict[str, Any]:
     """Evaluates each watchlist symbol for a new entry. "simulate" mode
     always paper-trades (dry_run is irrelevant there); "live" mode places a
-    real bracket order (entry + linked take-profit/stop-loss) UNLESS
-    dry_run resolves True, in which case it only reports what it would have
-    done -- same dual-gate posture as perps_strategy.py."""
-    from data.alpaca_data import fetch_recent_minute_bars, get_stock_watchlist, latest_feature_row, load_training_dataset
+    real order UNLESS dry_run resolves True, in which case it only reports
+    what it would have done -- same dual-gate posture as perps_strategy.py.
+
+    Session-aware, "stream live like perps" -- data collection already ran
+    unconditionally 24/7 (no market-hours gate at all), but entries didn't
+    account for WHICH kind of order Alpaca actually allows outside the
+    regular 9:30-4:00 ET session: a bracket order (entry + linked TP/SL) is
+    regular-hours only, and even a plain order must be type="limit" with
+    extended_hours=true during pre/post-market -- a market order there is
+    simply rejected. Regular session keeps the existing bracket order
+    unchanged; pre/post-market places a plain extended-hours limit order
+    instead (manage_open_positions then owns TP/SL/max-hold via its own
+    poll loop for that position, the same pattern already proven for
+    crypto/options, which never had broker-native brackets to begin with).
+    Fully closed (no session at all, ~8pm-4am ET) skips entirely -- nothing
+    is fillable then regardless of order type."""
+    from data.alpaca_data import fetch_recent_minute_bars, get_market_session, get_stock_watchlist, latest_feature_row, load_training_dataset
     from data.alpaca_model import predict_direction
     from data import threads_post
 
     effective_dry_run = (not LIVE_TRADING_ENABLED) if dry_run is None else dry_run
+    market_session = get_market_session()
+    if market_session["session"] == "closed":
+        return {"opened": [], "action": "market_closed"}
+    is_extended_hours = market_session["session"] != "regular"
     if watchlist is None:
         try:
             recent = load_training_dataset(max_rows=20_000)
         except Exception:
             recent = None
         watchlist = get_stock_watchlist(recent if recent is not None and not recent.empty else None)
+        # Real, confirmed production incident: this call (multiple days'
+        # parquet shards read into memory) runs on EVERY scan_and_enter
+        # call -- every ALPACA_CYCLE_MINUTES (2 min by default), far more
+        # often than any other job touches this same heavy data -- yet had
+        # no memory hygiene at all, unlike every other heavy job in this
+        # codebase. Confirmed OOM-killing this service every 15-20 minutes
+        # around the clock until this was added.
+        del recent
+        gc.collect()
 
     opened: list[dict[str, Any]] = []
     with _STATE_LOCK:
@@ -383,10 +410,19 @@ def scan_and_enter(watchlist: list[str] | None = None, *, dry_run: bool | None =
             order_id = None
             if MODE == "live" and not effective_dry_run:
                 from data import alpaca_client
-                order_spec = alpaca_client.build_bracket_order(
-                    symbol=symbol, quantity=count, side="buy",
-                    take_profit_price=levels["take_profit_price"], stop_loss_price=levels["stop_loss_price"],
-                )
+                if is_extended_hours:
+                    # Small marketable buffer above the last price -- a
+                    # genuine limit (Alpaca requires one outside regular
+                    # hours), sized to actually have a real chance of
+                    # filling rather than sitting unfilled all session.
+                    order_spec = alpaca_client.build_extended_hours_limit_order(
+                        symbol=symbol, quantity=count, side="buy", limit_price=entry_price * 1.002,
+                    )
+                else:
+                    order_spec = alpaca_client.build_bracket_order(
+                        symbol=symbol, quantity=count, side="buy",
+                        take_profit_price=levels["take_profit_price"], stop_loss_price=levels["stop_loss_price"],
+                    )
                 order_id = alpaca_client.place_order(order_spec)
 
             position = {
@@ -480,6 +516,17 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
 
             if MODE == "live" and not effective_dry_run:
                 from data import alpaca_client
+                from data.alpaca_data import get_market_session
+                # Checked fresh at EXIT time, not entry time -- a position
+                # opened during regular hours can still be sitting open
+                # once the session rolls into post-market (max_hold_time,
+                # a slow-moving stop), and close_position()'s at-market
+                # liquidation would be rejected there just the same as for
+                # a position that was opened extended-hours to begin with.
+                exit_session = get_market_session()["session"]
+                if exit_session == "closed":
+                    checks.append({"symbol": symbol, "ok": True, "exit_deferred": "market_closed"})
+                    continue
                 still_open = True
                 try:
                     still_open = alpaca_client.get_position(symbol) is not None
@@ -487,7 +534,19 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                     logger.warning("[alpaca_strategy] position lookup failed for %s, assuming still open: %s", symbol, exc)
                 if still_open:
                     try:
-                        alpaca_client.close_position(symbol)
+                        if exit_session == "regular":
+                            alpaca_client.close_position(symbol)
+                        else:
+                            # Extended hours: close_position() liquidates
+                            # at market, which Alpaca rejects outside
+                            # 9:30-4:00 ET -- needs a plain limit sell with
+                            # extended_hours=true instead (no bracket to
+                            # rely on either way -- see scan_and_enter).
+                            order_spec = alpaca_client.build_extended_hours_limit_order(
+                                symbol=symbol, quantity=position["count"], side="sell",
+                                limit_price=current_price * 0.998,
+                            )
+                            alpaca_client.place_order(order_spec)
                     except Exception as exc:
                         logger.warning("[alpaca_strategy] close_position failed for %s (may have already closed): %s", symbol, exc)
                 elif "take_profit" in reason:

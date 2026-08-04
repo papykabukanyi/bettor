@@ -12,6 +12,17 @@ import pytest
 from data import alpaca_client, alpaca_data, alpaca_model, threads_post, alpaca_strategy as strat
 
 
+@pytest.fixture(autouse=True)
+def _regular_market_session(monkeypatch):
+    """scan_and_enter/manage_open_positions are now session-aware (see
+    alpaca_strategy.py's own docstrings) -- default every test to the
+    regular session, matching what these tests already assumed implicitly
+    before that awareness existed. Tests that actually exercise pre/post
+    market behavior override this explicitly."""
+    monkeypatch.setattr(alpaca_data, "get_market_session", lambda: {"session": "regular", "is_open": True, "source": "test"})
+    yield
+
+
 def _row(**overrides):
     base = {
         "symbol": "AAPL", "current_price": 100.0, "short_ma": 100.3,
@@ -193,6 +204,59 @@ def test_scan_and_enter_simulate_mode_opens_a_paper_position_without_any_real_or
     assert len(state["positions"]) == 1
     assert state["positions"][0]["symbol"] == "AAPL"
     assert state["positions"][0]["order_id"] is None
+
+
+def test_scan_and_enter_places_an_extended_hours_limit_order_in_pre_market(monkeypatch):
+    """A bracket order is regular-hours only -- pre/post-market must place
+    a plain limit order with extended_hours=true instead."""
+    monkeypatch.setattr(alpaca_data, "get_market_session", lambda: {"session": "pre_market", "is_open": False, "source": "test"})
+    monkeypatch.setattr(strat, "MODE", "live")
+    monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", True)
+    monkeypatch.setattr(alpaca_data, "get_stock_watchlist", lambda recent: ["AAPL"])
+    monkeypatch.setattr(alpaca_data, "load_training_dataset", lambda **kw: pd.DataFrame())
+    monkeypatch.setattr(alpaca_data, "latest_feature_row", lambda symbol: _entry_row())
+    monkeypatch.setattr(alpaca_model, "predict_direction", lambda symbol: {"model_ok": False})
+    monkeypatch.setattr(alpaca_client, "get_account", lambda: {"cash": "100.0"})
+
+    captured = {}
+    monkeypatch.setattr(alpaca_client, "place_order", lambda order_spec: captured.update(order_spec) or "order-1")
+
+    result = strat.scan_and_enter(dry_run=False)
+    assert result["opened"][0]["action"] == "opened"
+    assert captured["type"] == "limit"
+    assert captured["extended_hours"] is True
+    assert captured["side"] == "buy"
+    assert "order_class" not in captured
+
+
+def test_scan_and_enter_places_a_bracket_order_during_regular_hours(monkeypatch):
+    monkeypatch.setattr(strat, "MODE", "live")
+    monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", True)
+    monkeypatch.setattr(alpaca_data, "get_stock_watchlist", lambda recent: ["AAPL"])
+    monkeypatch.setattr(alpaca_data, "load_training_dataset", lambda **kw: pd.DataFrame())
+    monkeypatch.setattr(alpaca_data, "latest_feature_row", lambda symbol: _entry_row())
+    monkeypatch.setattr(alpaca_model, "predict_direction", lambda symbol: {"model_ok": False})
+    monkeypatch.setattr(alpaca_client, "get_account", lambda: {"cash": "100.0"})
+
+    captured = {}
+    monkeypatch.setattr(alpaca_client, "place_order", lambda order_spec: captured.update(order_spec) or "order-1")
+
+    result = strat.scan_and_enter(dry_run=False)
+    assert result["opened"][0]["action"] == "opened"
+    assert captured["order_class"] == "bracket"
+
+
+def test_scan_and_enter_skips_entirely_when_market_is_fully_closed(monkeypatch):
+    monkeypatch.setattr(alpaca_data, "get_market_session", lambda: {"session": "closed", "is_open": False, "source": "test"})
+
+    def fail_if_called(*a, **kw):
+        raise AssertionError("must not evaluate any symbol when the market is fully closed")
+
+    monkeypatch.setattr(alpaca_data, "get_stock_watchlist", fail_if_called)
+    monkeypatch.setattr(alpaca_data, "latest_feature_row", fail_if_called)
+
+    result = strat.scan_and_enter()
+    assert result == {"opened": [], "action": "market_closed"}
 
 
 def test_scan_and_enter_skips_a_symbol_already_held(monkeypatch):
@@ -439,3 +503,64 @@ def test_manage_open_positions_live_mode_reconciles_without_double_selling_when_
     # Reconciled using the position's OWN stored take-profit level, not the
     # (possibly stale) live quote fetched after the bracket already fired.
     assert result["closed"][0]["exit_price"] == 101.0
+
+
+def test_manage_open_positions_uses_an_extended_hours_limit_order_during_pre_market(monkeypatch):
+    """close_position() liquidates at market -- Alpaca rejects that outside
+    9:30-4:00 ET. Pre/post-market must use a plain limit sell with
+    extended_hours=true instead, checked at EXIT time (not entry time)."""
+    monkeypatch.setattr(alpaca_data, "get_market_session", lambda: {"session": "pre_market", "is_open": False, "source": "test"})
+    monkeypatch.setattr(strat, "MODE", "live")
+    monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", True)
+    strat._save_state({  # noqa: SLF001
+        "balance": 100.0, "positions": [{
+            "symbol": "AAPL", "entry_price": 100.0, "count": 1.0,
+            "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(), "order_id": "order-1",
+        }],
+        "trade_log": [], "realized_pnl_by_date": {},
+    })
+    take_profit_price = 100.0 * (1 + strat.TAKE_PROFIT_PCT + 0.001)
+    monkeypatch.setattr(alpaca_client, "get_latest_quote", lambda symbol: {"ap": take_profit_price, "bp": take_profit_price})
+    monkeypatch.setattr(alpaca_client, "get_position", lambda symbol: {"symbol": symbol, "qty": "1"})
+
+    def fail_if_called(symbol):
+        raise AssertionError("close_position() is a market order -- must not be used outside regular hours")
+
+    monkeypatch.setattr(alpaca_client, "close_position", fail_if_called)
+    captured = {}
+    monkeypatch.setattr(alpaca_client, "place_order", lambda order_spec: captured.update(order_spec) or "order-2")
+
+    result = strat.manage_open_positions()
+    assert result["action"] == "closed"
+    assert captured["type"] == "limit"
+    assert captured["extended_hours"] is True
+    assert captured["side"] == "sell"
+
+
+def test_manage_open_positions_defers_a_live_exit_when_market_is_fully_closed(monkeypatch):
+    monkeypatch.setattr(alpaca_data, "get_market_session", lambda: {"session": "closed", "is_open": False, "source": "test"})
+    monkeypatch.setattr(strat, "MODE", "live")
+    monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", True)
+    strat._save_state({  # noqa: SLF001
+        "balance": 100.0, "positions": [{
+            "symbol": "AAPL", "entry_price": 100.0, "count": 1.0,
+            "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(), "order_id": "order-1",
+        }],
+        "trade_log": [], "realized_pnl_by_date": {},
+    })
+    take_profit_price = 100.0 * (1 + strat.TAKE_PROFIT_PCT + 0.001)
+    monkeypatch.setattr(alpaca_client, "get_latest_quote", lambda symbol: {"ap": take_profit_price, "bp": take_profit_price})
+
+    def fail_if_called(*a, **kw):
+        raise AssertionError("must not attempt any order when the market is fully closed")
+
+    monkeypatch.setattr(alpaca_client, "get_position", fail_if_called)
+    monkeypatch.setattr(alpaca_client, "close_position", fail_if_called)
+    monkeypatch.setattr(alpaca_client, "place_order", fail_if_called)
+
+    result = strat.manage_open_positions()
+    assert result["action"] == "no_change"
+    # The position must still be there, untouched, to retry next cycle.
+    with strat._STATE_LOCK:  # noqa: SLF001
+        state = strat._load_state()  # noqa: SLF001
+    assert len(state["positions"]) == 1

@@ -108,9 +108,15 @@ def _run_alpaca_options_fast_check() -> dict[str, Any]:
 
 @_locked_job("alpaca_options_entry_scan", stale_after_sec=300)
 def _run_alpaca_options_entry_scan() -> dict[str, Any]:
-    result = alpaca_options_strategy.scan_and_enter()
-    save_json(ALPACA_OPTIONS_LATEST_CYCLE_FILE, result)
-    return result
+    """gc.collect() here matches the same defense proven necessary on the
+    equities entry-scan job this session (no hygiene at all there was
+    OOM-crashing that service every 15-20 minutes, around the clock)."""
+    try:
+        result = alpaca_options_strategy.scan_and_enter()
+        save_json(ALPACA_OPTIONS_LATEST_CYCLE_FILE, result)
+        return result
+    finally:
+        gc.collect()
 
 
 @_locked_job("alpaca_options_data_collect", stale_after_sec=600)

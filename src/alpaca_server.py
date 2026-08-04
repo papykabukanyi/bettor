@@ -174,9 +174,23 @@ def _run_alpaca_fast_check() -> dict[str, Any]:
 
 @_locked_job("alpaca_entry_scan", stale_after_sec=300)
 def _run_alpaca_entry_scan() -> dict[str, Any]:
-    result = alpaca_strategy.scan_and_enter()
-    save_json(ALPACA_LATEST_CYCLE_FILE, result)
-    return result
+    """Real, confirmed production incident (Render's own events, this
+    session): this service was OOM-killing every 15-20 minutes, around the
+    clock -- far more often than data_collect's own 15-minute cadence, and
+    frequent enough that the hourly/30-min Threads jobs could never survive
+    a full uninterrupted cycle (their own next_run_time resets on every
+    crash-restart). Root cause traced to THIS job specifically: unlike
+    every other heavy job here, it had no gc.collect() at all, yet
+    scan_and_enter() calls load_training_dataset(max_rows=20_000) --
+    reading multiple days' parquet shards -- on EVERY single call, every
+    ALPACA_CYCLE_MINUTES (2 min by default), far more often than any other
+    job touches that same heavy data."""
+    try:
+        result = alpaca_strategy.scan_and_enter()
+        save_json(ALPACA_LATEST_CYCLE_FILE, result)
+        return result
+    finally:
+        gc.collect()
 
 
 @_locked_job("alpaca_data_collect", stale_after_sec=600)
