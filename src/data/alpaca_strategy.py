@@ -45,17 +45,24 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-# "Something is happening right now": dollar_volume_z is how many standard
-# deviations above this symbol's OWN recent (60-min) average dollar volume
-# the current 5/15-min window is -- a spike here means real, unusual
-# interest, not just noise. Combined with the volatility ratio so a
-# volume spike accompanied by real price movement (not just a quiet block
-# trade) is what actually qualifies.
-MIN_VOLUME_Z = _env_float("ALPACA_MIN_VOLUME_Z", 1.5)
-MIN_VOLATILITY_RATIO = _env_float("ALPACA_MIN_VOLATILITY_RATIO", 1.3)  # volatility_5 / volatility_30
+# Real gap found in review: requiring a volume spike (dollar_volume_z) AND
+# a volatility-ratio jump AND a dip, all three simultaneously, made real
+# entries rare -- confirmed live, almost every cycle across the whole
+# watchlist skipped on "volume not unusual enough" before the dip signal
+# was even checked. perps_strategy.py's own decide_entry_technical (the
+# system this one was explicitly modeled on, and the one actually taking
+# opportunities) has NO volume/volatility gate at all -- just the dip/rally
+# read plus a soft trend filter. Off by default now (env-overridable back
+# on): MIN_VOLUME_Z=-inf makes "z < MIN_VOLUME_Z" unsatisfiable (a z-score
+# is always a finite real number), and MIN_VOLATILITY_RATIO=0.0 makes
+# "ratio < MIN_VOLATILITY_RATIO" unsatisfiable (a volatility ratio is
+# always >= 0) -- both checks below become genuine no-ops, not just
+# "usually true," at these defaults.
+MIN_VOLUME_Z = _env_float("ALPACA_MIN_VOLUME_Z", float("-inf"))
+MIN_VOLATILITY_RATIO = _env_float("ALPACA_MIN_VOLATILITY_RATIO", 0.0)  # volatility_5 / volatility_30
 
-# "Enter on a small pullback in an otherwise-active name, not a random tick"
-ENTRY_DIP_PCT = _env_float("ALPACA_ENTRY_DIP_PCT", 0.002)
+# "Enter on a small pullback, same 0.15% perps_strategy.py itself uses"
+ENTRY_DIP_PCT = _env_float("ALPACA_ENTRY_DIP_PCT", 0.0015)
 SHORT_MA_MINUTES = _env_int("ALPACA_SHORT_MA_MINUTES", 15)
 
 TAKE_PROFIT_PCT = _env_float("ALPACA_TAKE_PROFIT_PCT", 0.01)
@@ -99,7 +106,7 @@ def decide_entry_technical(row: dict[str, Any]) -> tuple[bool, str]:
     dip_pct = (short_ma - current_price) / short_ma
     if dip_pct < ENTRY_DIP_PCT:
         return False, f"no real dip ({dip_pct:+.3%})"
-    return True, f"volume spike (z={dollar_volume_z:.2f}) + dip ({dip_pct:+.3%})"
+    return True, f"dip ({dip_pct:+.3%}, z={dollar_volume_z:.2f})"
 
 
 def evaluate_candidate(row: dict[str, Any], model_prediction: dict[str, Any] | None) -> dict[str, Any]:

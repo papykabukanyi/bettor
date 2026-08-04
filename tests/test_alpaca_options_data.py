@@ -77,6 +77,37 @@ def test_select_contract_picks_the_nearest_strike_to_current_price(monkeypatch):
     assert contract["symbol"] == "near"
 
 
+def test_select_contract_prefers_a_liquid_contract_over_a_numerically_nearer_illiquid_one(monkeypatch):
+    """Real improvement: a contract with zero open interest can be
+    numerically "nearest the money" and still be nearly unfillable at a
+    real price -- Alpaca's own contract objects include open_interest
+    directly, so there's no excuse to ignore it."""
+    monkeypatch.setattr(
+        aod.alpaca_client, "get_option_contracts",
+        lambda **kw: [
+            _contract(symbol="nearest_but_illiquid", strike_price=195.5, open_interest=0),
+            _contract(symbol="slightly_farther_but_liquid", strike_price=197.0, open_interest=500),
+        ],
+    )
+    contract = aod.select_contract("AAPL", direction="up", current_price=195.0)
+    assert contract["symbol"] == "slightly_farther_but_liquid"
+
+
+def test_select_contract_falls_back_to_the_full_pool_when_none_are_liquid(monkeypatch):
+    """No contract clears the liquidity bar -- a real fill still beats no
+    trade at all, so this must fall back to ranking the full tradable set
+    by strike proximity, not return None."""
+    monkeypatch.setattr(
+        aod.alpaca_client, "get_option_contracts",
+        lambda **kw: [
+            _contract(symbol="far", strike_price=220.0, open_interest=0),
+            _contract(symbol="near", strike_price=196.0, open_interest=0),
+        ],
+    )
+    contract = aod.select_contract("AAPL", direction="up", current_price=195.0)
+    assert contract["symbol"] == "near"
+
+
 def test_select_contract_returns_none_when_no_contracts_are_tradable(monkeypatch):
     monkeypatch.setattr(aod.alpaca_client, "get_option_contracts", lambda **kw: [_contract(tradable=False)])
     assert aod.select_contract("AAPL", direction="up", current_price=195.0) is None

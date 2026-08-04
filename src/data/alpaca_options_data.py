@@ -69,12 +69,23 @@ MIN_DAYS_TO_EXPIRATION = int(os.getenv("ALPACA_OPTIONS_MIN_DAYS_TO_EXPIRATION", 
 MAX_DAYS_TO_EXPIRATION = int(os.getenv("ALPACA_OPTIONS_MAX_DAYS_TO_EXPIRATION", "45") or "45")
 
 
+# A contract with zero open interest can be numerically "nearest the
+# money" and still be nearly unfillable at a real price -- Alpaca's own
+# /v2/options/contracts response includes open_interest directly on each
+# contract (no extra call needed), so there's no excuse to ignore it.
+MIN_OPEN_INTEREST = int(os.getenv("ALPACA_OPTIONS_MIN_OPEN_INTEREST", "10") or "10")
+
+
 def select_contract(underlying: str, *, direction: str, current_price: float) -> dict[str, Any] | None:
     """Picks the single best contract for a directional bet on `underlying`:
-    "call" if direction == "up", "put" if direction == "down", nearest
-    strike to current_price, nearest expiration within the configured
-    window. None if no contracts are available (e.g. this underlying
-    doesn't actually have listed options, or none fall in the window)."""
+    "call" if direction == "up", "put" if direction == "down". Prefers a
+    real, liquid market over a numerically-perfect strike: contracts with
+    at least MIN_OPEN_INTEREST are ranked first (nearest strike, then
+    nearest expiration, among those), falling back to the full tradable
+    set only if NONE clear that bar -- a real fill matters more than a
+    theoretically ideal strike nobody is actually trading. None if no
+    contracts are available (e.g. this underlying doesn't actually have
+    listed options, or none fall in the expiration window)."""
     option_type = "call" if direction == "up" else "put"
     today = dt.datetime.now(dt.timezone.utc).date()
     exp_gte = (today + dt.timedelta(days=MIN_DAYS_TO_EXPIRATION)).isoformat()
@@ -95,8 +106,10 @@ def select_contract(underlying: str, *, direction: str, current_price: float) ->
         strike = float(c.get("strike_price") or 0.0)
         return (abs(strike - current_price), c.get("expiration_date") or "")
 
-    tradable.sort(key=_sort_key)
-    return tradable[0]
+    liquid = [c for c in tradable if int(c.get("open_interest") or 0) >= MIN_OPEN_INTEREST]
+    pool = liquid if liquid else tradable
+    pool.sort(key=_sort_key)
+    return pool[0]
 
 
 # ---------------------------------------------------------------------------

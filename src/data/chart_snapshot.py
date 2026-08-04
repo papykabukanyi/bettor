@@ -48,6 +48,19 @@ CHARTS_DIR = Path(os.getenv("CHART_SNAPSHOT_DIR", str(ROOT_DIR / "data" / "chart
 # unbounded across a long-running instance.
 MAX_STORED_CHARTS = int(os.getenv("CHART_SNAPSHOT_MAX_STORED", "40") or "40")
 
+# "Very clear HD" -- every dimension/line-width/font-size below is defined
+# in LOGICAL pixels and multiplied by this at the one call site (_s()) that
+# actually draws with it, so the whole chart renders at native higher
+# resolution (not a blurry upscale of a smaller image) with zero layout
+# math duplicated. Cheap: at 2x, the biggest image here is still ~5MB in
+# memory before PNG compression, trivial against the 512Mi ceiling that
+# made memory a real constraint elsewhere in this codebase.
+_SCALE = int(os.getenv("CHART_SNAPSHOT_SCALE", "2") or "2")
+
+
+def _s(n: float) -> int:
+    return round(n * _SCALE)
+
 _BG = (13, 15, 20)
 _AXIS = (42, 47, 61)
 _GRID = (28, 32, 43)
@@ -85,9 +98,9 @@ def _sanitize(ticker: str) -> str:
     return "".join(c if c.isalnum() else "_" for c in ticker)
 
 
-_WIDTH, _HEIGHT = 900, 500
-_MARGIN = 56
-_RIGHT_LABEL_WIDTH = 132
+_WIDTH, _HEIGHT = _s(900), _s(500)
+_MARGIN = _s(56)
+_RIGHT_LABEL_WIDTH = _s(132)
 
 
 def generate_entry_chart(
@@ -110,10 +123,10 @@ def generate_entry_chart(
     try:
         img = Image.new("RGB", (_WIDTH, _HEIGHT), _BG)
         draw = ImageDraw.Draw(img)
-        title_font, label_font, small_font = _font(24), _font(15), _font(13)
+        title_font, label_font, small_font = _font(_s(24)), _font(_s(15)), _font(_s(13))
 
         plot_left, plot_right = _MARGIN, _WIDTH - _MARGIN - _RIGHT_LABEL_WIDTH
-        plot_top, plot_bottom = 84, _HEIGHT - _MARGIN
+        plot_top, plot_bottom = _s(84), _HEIGHT - _MARGIN
 
         all_values = list(closes) + [entry_price, take_profit_price, stop_loss_price]
         lo, hi = min(all_values), max(all_values)
@@ -134,16 +147,16 @@ def generate_entry_chart(
         # eye without competing with the price line or reference levels.
         for frac in (0.25, 0.5, 0.75):
             gy = plot_top + frac * (plot_bottom - plot_top)
-            draw.line([(plot_left, gy), (plot_right, gy)], fill=_GRID, width=1)
-        draw.rectangle([plot_left, plot_top, plot_right, plot_bottom], outline=_AXIS, width=1)
+            draw.line([(plot_left, gy), (plot_right, gy)], fill=_GRID, width=_s(1))
+        draw.rectangle([plot_left, plot_top, plot_right, plot_bottom], outline=_AXIS, width=_s(1))
 
         def dashed_hline(value: float, color: tuple[int, int, int], label: str) -> None:
             y = y_for(value)
             x = plot_left
             while x < plot_right:
-                draw.line([(x, y), (min(x + 10, plot_right), y)], fill=color, width=2)
-                x += 17
-            draw.text((plot_right + 10, y - 8), label, fill=color, font=label_font)
+                draw.line([(x, y), (min(x + _s(10), plot_right), y)], fill=color, width=_s(2))
+                x += _s(17)
+            draw.text((plot_right + _s(10), y - _s(8)), label, fill=color, font=label_font)
 
         dashed_hline(take_profit_price, _TP_COLOR, f"TP {take_profit_price:.4f}")
         dashed_hline(stop_loss_price, _SL_COLOR, f"SL {stop_loss_price:.4f}")
@@ -151,11 +164,11 @@ def generate_entry_chart(
 
         points = [(x_for(i), y_for(v)) for i, v in enumerate(closes)]
         if len(points) >= 2:
-            draw.line(points, fill=_PRICE_LINE, width=3, joint="curve")
+            draw.line(points, fill=_PRICE_LINE, width=_s(3), joint="curve")
 
         direction = "SHORT" if side == "short" else "LONG"
-        draw.text((_MARGIN, 24), f"{market.upper()} -- {direction} {ticker}", fill=_TEXT_PRIMARY, font=title_font)
-        draw.text((_MARGIN, 56), "Recent price action", fill=_TEXT_MUTED, font=small_font)
+        draw.text((_MARGIN, _s(24)), f"{market.upper()} -- {direction} {ticker}", fill=_TEXT_PRIMARY, font=title_font)
+        draw.text((_MARGIN, _s(56)), "Recent price action", fill=_TEXT_MUTED, font=small_font)
 
         CHARTS_DIR.mkdir(parents=True, exist_ok=True)
         filename = f"{_sanitize(market)}_{_sanitize(ticker)}_{int(time.time())}.png"
@@ -171,12 +184,12 @@ def generate_entry_chart(
             del img
 
 
-_SENTIMENT_ROW_HEIGHT = 34
-_SENTIMENT_TOP_MARGIN = 96
-_SENTIMENT_BOTTOM_MARGIN = 40
-_SENTIMENT_LABEL_WIDTH = 108
-_SENTIMENT_SCORE_WIDTH = 62
-_SENTIMENT_BAR_HALF_WIDTH = 280
+_SENTIMENT_ROW_HEIGHT = _s(34)
+_SENTIMENT_TOP_MARGIN = _s(96)
+_SENTIMENT_BOTTOM_MARGIN = _s(40)
+_SENTIMENT_LABEL_WIDTH = _s(108)
+_SENTIMENT_SCORE_WIDTH = _s(62)
+_SENTIMENT_BAR_HALF_WIDTH = _s(280)
 _SENTIMENT_POS_COLOR = (22, 163, 74)   # validated: node validate_palette.js "#16a34a,#dc2626" --mode dark
 _SENTIMENT_NEG_COLOR = (220, 38, 38)   # passes lightness band + chroma floor + contrast on the dark surface
 _SENTIMENT_NEUTRAL_COLOR = (110, 116, 130)
@@ -219,43 +232,43 @@ def generate_sentiment_snapshot(*, market: str, ticker_sentiments: list[dict[str
         img = Image.new("RGB", (width, height), _BG)
         draw = ImageDraw.Draw(img)
         title_font, subtitle_font, label_font, score_font, axis_font = (
-            _font(26), _font(14), _font(15), _font(15), _font(12),
+            _font(_s(26)), _font(_s(14)), _font(_s(15)), _font(_s(15)), _font(_s(12)),
         )
 
-        draw.text((_MARGIN, 24), f"{market.upper()} -- Sentiment Snapshot", fill=_TEXT_PRIMARY, font=title_font)
-        draw.text((_MARGIN, 58), "Per-ticker news sentiment, most bullish to most bearish", fill=_TEXT_MUTED, font=subtitle_font)
+        draw.text((_MARGIN, _s(24)), f"{market.upper()} -- Sentiment Snapshot", fill=_TEXT_PRIMARY, font=title_font)
+        draw.text((_MARGIN, _s(58)), "Per-ticker news sentiment, most bullish to most bearish", fill=_TEXT_MUTED, font=subtitle_font)
 
         zero_x = _MARGIN + _SENTIMENT_LABEL_WIDTH + _SENTIMENT_BAR_HALF_WIDTH
-        axis_top = _SENTIMENT_TOP_MARGIN - 14
-        axis_bottom = height - _SENTIMENT_BOTTOM_MARGIN + 6
-        draw.line([(zero_x, axis_top), (zero_x, axis_bottom)], fill=_AXIS, width=1)
+        axis_top = _SENTIMENT_TOP_MARGIN - _s(14)
+        axis_bottom = height - _SENTIMENT_BOTTOM_MARGIN + _s(6)
+        draw.line([(zero_x, axis_top), (zero_x, axis_bottom)], fill=_AXIS, width=_s(1))
         # End labels directly on the axis -- the chart reads correctly even
         # if red/green itself doesn't (see module docstring): direction is
         # ALSO which side of this line the bar is on.
-        draw.text((zero_x - _SENTIMENT_BAR_HALF_WIDTH, axis_bottom + 6), "<- Bearish", fill=_SENTIMENT_NEG_COLOR, font=axis_font)
+        draw.text((zero_x - _SENTIMENT_BAR_HALF_WIDTH, axis_bottom + _s(6)), "<- Bearish", fill=_SENTIMENT_NEG_COLOR, font=axis_font)
         bullish_w = draw.textlength("Bullish ->", font=axis_font)
-        draw.text((zero_x + _SENTIMENT_BAR_HALF_WIDTH - bullish_w, axis_bottom + 6), "Bullish ->", fill=_SENTIMENT_POS_COLOR, font=axis_font)
+        draw.text((zero_x + _SENTIMENT_BAR_HALF_WIDTH - bullish_w, axis_bottom + _s(6)), "Bullish ->", fill=_SENTIMENT_POS_COLOR, font=axis_font)
 
         for i, row in enumerate(rows):
             y = _SENTIMENT_TOP_MARGIN + i * _SENTIMENT_ROW_HEIGHT
             score = max(-1.0, min(1.0, float(row["sentiment_score"])))
             ticker = str(row["ticker"])
-            bar_top, bar_bottom = y + 5, y + _SENTIMENT_ROW_HEIGHT - 10
+            bar_top, bar_bottom = y + _s(5), y + _SENTIMENT_ROW_HEIGHT - _s(10)
             bar_mid = (bar_top + bar_bottom) / 2
             label_h = label_font.size
             draw.text((_MARGIN, bar_mid - label_h / 2), ticker[:14], fill=_TEXT_PRIMARY, font=label_font)
 
             bar_len = abs(score) * _SENTIMENT_BAR_HALF_WIDTH
             color = _SENTIMENT_POS_COLOR if score > 0.02 else _SENTIMENT_NEG_COLOR if score < -0.02 else _SENTIMENT_NEUTRAL_COLOR
-            radius = min(4, (bar_bottom - bar_top) / 2)
+            radius = min(_s(4), (bar_bottom - bar_top) / 2)
             if bar_len < 1:
-                draw.line([(zero_x - 2, bar_mid), (zero_x + 2, bar_mid)], fill=color, width=3)
+                draw.line([(zero_x - _s(2), bar_mid), (zero_x + _s(2), bar_mid)], fill=color, width=_s(3))
             elif score >= 0:
                 draw.rounded_rectangle([zero_x, bar_top, zero_x + bar_len, bar_bottom], radius=radius, fill=color)
             else:
                 draw.rounded_rectangle([zero_x - bar_len, bar_top, zero_x, bar_bottom], radius=radius, fill=color)
 
-            score_x = _MARGIN + _SENTIMENT_LABEL_WIDTH + _SENTIMENT_BAR_HALF_WIDTH * 2 + 14
+            score_x = _MARGIN + _SENTIMENT_LABEL_WIDTH + _SENTIMENT_BAR_HALF_WIDTH * 2 + _s(14)
             draw.text((score_x, bar_mid - label_h / 2), f"{score:+.2f}", fill=color, font=score_font)
 
         CHARTS_DIR.mkdir(parents=True, exist_ok=True)

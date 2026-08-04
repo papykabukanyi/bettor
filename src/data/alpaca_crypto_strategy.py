@@ -52,9 +52,20 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-MIN_VOLUME_Z = _env_float("ALPACA_CRYPTO_MIN_VOLUME_Z", 1.5)
-MIN_VOLATILITY_RATIO = _env_float("ALPACA_CRYPTO_MIN_VOLATILITY_RATIO", 1.3)
-ENTRY_DIP_PCT = _env_float("ALPACA_CRYPTO_ENTRY_DIP_PCT", 0.002)
+# Real gap found in review (same fix as alpaca_strategy.py's own copy of
+# this): requiring a volume spike AND a volatility-ratio jump AND a dip,
+# all three simultaneously, made real entries rare -- confirmed live,
+# almost every cycle across the whole 36-pair universe skipped on "volume
+# not unusual enough" before the dip signal was even checked.
+# perps_strategy.py's own decide_entry_technical has NO volume/volatility
+# gate at all -- just the dip/rally read plus a soft trend filter. Off by
+# default now (env-overridable back on): MIN_VOLUME_Z=-inf makes
+# "z < MIN_VOLUME_Z" unsatisfiable, and MIN_VOLATILITY_RATIO=0.0 makes
+# "ratio < MIN_VOLATILITY_RATIO" unsatisfiable (a ratio is always >= 0) --
+# both checks below become genuine no-ops at these defaults.
+MIN_VOLUME_Z = _env_float("ALPACA_CRYPTO_MIN_VOLUME_Z", float("-inf"))
+MIN_VOLATILITY_RATIO = _env_float("ALPACA_CRYPTO_MIN_VOLATILITY_RATIO", 0.0)
+ENTRY_DIP_PCT = _env_float("ALPACA_CRYPTO_ENTRY_DIP_PCT", 0.0015)
 SHORT_MA_MINUTES = _env_int("ALPACA_CRYPTO_SHORT_MA_MINUTES", 15)
 
 TAKE_PROFIT_PCT = _env_float("ALPACA_CRYPTO_TAKE_PROFIT_PCT", 0.01)
@@ -89,7 +100,7 @@ def decide_entry_technical(row: dict[str, Any]) -> tuple[bool, str]:
     dip_pct = (short_ma - current_price) / short_ma
     if dip_pct < ENTRY_DIP_PCT:
         return False, f"no real dip ({dip_pct:+.3%})"
-    return True, f"volume spike (z={dollar_volume_z:.2f}) + dip ({dip_pct:+.3%})"
+    return True, f"dip ({dip_pct:+.3%}, z={dollar_volume_z:.2f})"
 
 
 def evaluate_candidate(row: dict[str, Any], model_prediction: dict[str, Any] | None) -> dict[str, Any]:

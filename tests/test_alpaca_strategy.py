@@ -32,16 +32,29 @@ def _row(**overrides):
     return base
 
 
-def test_entry_requires_an_unusual_volume_spike():
+def test_entry_does_not_require_an_unusual_volume_spike(monkeypatch):
+    """Real gap found in review: requiring a volume spike AND a
+    volatility-ratio jump AND a dip, all three simultaneously, made real
+    entries rare in practice -- perps_strategy.py's own
+    decide_entry_technical (this one's model) has no such gate at all.
+    Low/negative volume must no longer block an otherwise-valid dip entry
+    at the new defaults."""
+    should_enter, reason = strat.decide_entry_technical(_row(dollar_volume_z=-2.0))
+    assert should_enter
+    assert "dip" in reason
+
+
+def test_entry_does_not_require_elevated_volatility_relative_to_its_own_baseline():
+    should_enter, reason = strat.decide_entry_technical(_row(volatility_5=0.0005, volatility_30=0.002))
+    assert should_enter
+
+
+def test_entry_volume_gate_can_still_be_re_enabled_via_env(monkeypatch):
+    """Confirms this is a real, working opt-in override, not dead config."""
+    monkeypatch.setattr(strat, "MIN_VOLUME_Z", 1.5)
     should_enter, reason = strat.decide_entry_technical(_row(dollar_volume_z=0.5))
     assert not should_enter
     assert "volume" in reason
-
-
-def test_entry_requires_elevated_volatility_relative_to_its_own_baseline():
-    should_enter, reason = strat.decide_entry_technical(_row(volatility_5=0.001, volatility_30=0.001))
-    assert not should_enter
-    assert "volatile" in reason
 
 
 def test_entry_requires_a_real_dip():
@@ -71,7 +84,8 @@ def test_evaluate_candidate_requires_model_confidence_when_a_model_exists():
 
 
 def test_evaluate_candidate_skips_model_check_when_technical_gate_fails():
-    result = strat.evaluate_candidate(_row(dollar_volume_z=0.1), {"model_ok": True, "probability_up": 0.9})
+    no_dip_row = _row(short_ma=100.0, current_price=100.0)
+    result = strat.evaluate_candidate(no_dip_row, {"model_ok": True, "probability_up": 0.9})
     assert not result["should_enter"]
     assert result["model_ok"] is False
 

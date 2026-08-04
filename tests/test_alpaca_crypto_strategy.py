@@ -23,7 +23,19 @@ def _row(**overrides):
     return base
 
 
-def test_entry_requires_an_unusual_volume_spike():
+def test_entry_does_not_require_an_unusual_volume_spike():
+    """Real gap found in review: requiring a volume spike AND a
+    volatility-ratio jump AND a dip, all three simultaneously, made real
+    entries rare in practice across the whole 36-pair universe --
+    perps_strategy.py's own decide_entry_technical (this one's model) has
+    no such gate at all."""
+    should_enter, reason = strat.decide_entry_technical(_row(dollar_volume_z=-2.0))
+    assert should_enter
+    assert "dip" in reason
+
+
+def test_entry_volume_gate_can_still_be_re_enabled_via_env(monkeypatch):
+    monkeypatch.setattr(strat, "MIN_VOLUME_Z", 1.5)
     should_enter, reason = strat.decide_entry_technical(_row(dollar_volume_z=0.5))
     assert not should_enter
     assert "volume" in reason

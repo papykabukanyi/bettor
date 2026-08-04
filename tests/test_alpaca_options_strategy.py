@@ -20,6 +20,9 @@ def _regular_market_session(monkeypatch):
     own docstring) -- default every test to the regular session, matching
     what these tests already assumed implicitly before that gate existed."""
     monkeypatch.setattr(alpaca_data, "get_market_session", lambda: {"session": "regular", "is_open": True, "source": "test"})
+    # Also comfortably clear of the open/close-edge gate ("pick the best
+    # times" -- see alpaca_options_strategy.py's own AVOID_SESSION_EDGE_MINUTES).
+    monkeypatch.setattr(strat, "_minutes_from_session_edge", lambda: 999.0)
     yield
 
 
@@ -205,6 +208,22 @@ def test_scan_and_enter_skips_entirely_outside_regular_hours(monkeypatch):
 
     result = strat.scan_and_enter()
     assert result == {"opened": [], "action": "market_not_regular_hours"}
+
+
+def test_scan_and_enter_skips_entirely_right_at_the_session_open(monkeypatch):
+    """"Pick the best times": real options spreads are consistently widest
+    right at the open/close -- a technically-valid signal there is priced
+    worse than the exact same signal AVOID_SESSION_EDGE_MINUTES later."""
+    monkeypatch.setattr(strat, "_minutes_from_session_edge", lambda: 3.0)
+
+    def fail_if_called(*a, **kw):
+        raise AssertionError("must not evaluate any underlying right at the session edge")
+
+    monkeypatch.setattr(alpaca_options_data, "get_options_universe", fail_if_called)
+    monkeypatch.setattr(alpaca_options_data, "latest_feature_row", fail_if_called)
+
+    result = strat.scan_and_enter()
+    assert result == {"opened": [], "action": "too_close_to_session_edge"}
 
 
 def test_scan_and_enter_skips_a_symbol_already_held(monkeypatch):

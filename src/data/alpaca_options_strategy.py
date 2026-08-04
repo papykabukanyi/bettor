@@ -80,8 +80,43 @@ MAX_HOLD_MINUTES = _env_int("ALPACA_OPTIONS_MAX_HOLD_MINUTES", 180)
 # own exit signal.
 MIN_DAYS_TO_EXPIRATION_BEFORE_FORCED_EXIT = _env_int("ALPACA_OPTIONS_MIN_DAYS_TO_EXPIRATION_BEFORE_FORCED_EXIT", 2)
 
-POSITION_SIZE_PCT = _env_float("ALPACA_OPTIONS_POSITION_SIZE_PCT", 0.25)
-MAX_CONCURRENT_POSITIONS = max(1, _env_int("ALPACA_OPTIONS_MAX_CONCURRENT_POSITIONS", 2))
+# "Pick the best times": real options spreads are consistently widest right
+# at the regular-session open (overnight-gap price discovery still
+# settling) and right at the close (last-minute positioning) -- skip NEW
+# entries in those windows even though the session itself is open.
+AVOID_SESSION_EDGE_MINUTES = _env_int("ALPACA_OPTIONS_AVOID_SESSION_EDGE_MINUTES", 15)
+
+
+def _minutes_from_session_edge() -> float:
+    """Minutes since the regular session opened OR until it closes,
+    whichever is smaller -- large (effectively "not near an edge") outside
+    the regular session entirely, since the session-type gate above
+    already handles that case separately."""
+    try:
+        import zoneinfo
+        eastern = zoneinfo.ZoneInfo("America/New_York")
+    except Exception:
+        import pytz
+        eastern = pytz.timezone("America/New_York")
+    now_et = dt.datetime.now(tz=eastern)
+    open_dt = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+    close_dt = now_et.replace(hour=16, minute=0, second=0, microsecond=0)
+    since_open = (now_et - open_dt).total_seconds() / 60.0
+    until_close = (close_dt - now_et).total_seconds() / 60.0
+    return min(since_open, until_close)
+
+# Raised from 2/25% -- "place a lot of options trades of many profitable
+# legs" was explicitly asked for. Contracts are lumpy (whole units,
+# each costing premium x the 100-share multiplier -- see
+# compute_contract_qty), so slot size can't shrink as far as the equities/
+# crypto strategies' own: on a $500 account, a 15% ($75) slot couldn't
+# afford even one contract at a $1.00 premium at all. 4 slots x 20% ($100
+# each) keeps every slot able to afford a real, near-the-money weekly
+# contract while still allowing multiple simultaneous legs across
+# different underlyings, matching perps_strategy.py's own more permissive
+# concurrent-slot posture without being unaffordable in practice.
+POSITION_SIZE_PCT = _env_float("ALPACA_OPTIONS_POSITION_SIZE_PCT", 0.20)
+MAX_CONCURRENT_POSITIONS = max(1, _env_int("ALPACA_OPTIONS_MAX_CONCURRENT_POSITIONS", 4))
 DAILY_LOSS_CAP_PCT = _env_float("ALPACA_OPTIONS_DAILY_LOSS_CAP_PCT", 0.10)
 
 LIVE_TRADING_ENABLED = str(os.getenv("ALPACA_OPTIONS_LIVE_TRADING_ENABLED", "")).strip().lower() in {"1", "true", "yes"}
@@ -321,7 +356,16 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
     alpaca_data.py's equities feature engineering directly, and THAT data
     collection has no session gate at all (runs continuously, same as
     perps), so overnight moves in the underlying are already reflected by
-    the time regular-hours entries evaluate here."""
+    the time regular-hours entries evaluate here.
+
+    "Pick the best times": also skips the first/last
+    AVOID_SESSION_EDGE_MINUTES of the regular session even once it's open
+    -- real options spreads are consistently widest right at the open
+    (overnight-gap price discovery still settling) and right at the close
+    (last-minute positioning), so a technically-valid signal there is
+    priced worse than the exact same signal 15 minutes later. Exits are
+    never gated by this -- managing existing risk is always allowed,
+    only NEW entries wait out the edge."""
     from data.alpaca_data import get_market_session
     from data.alpaca_options_data import get_options_universe, latest_feature_row, select_contract
     from data.alpaca_options_model import predict_direction
@@ -329,6 +373,8 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
 
     if get_market_session()["session"] != "regular":
         return {"opened": [], "action": "market_not_regular_hours"}
+    if _minutes_from_session_edge() < AVOID_SESSION_EDGE_MINUTES:
+        return {"opened": [], "action": "too_close_to_session_edge"}
 
     effective_dry_run = (not LIVE_TRADING_ENABLED) if dry_run is None else dry_run
     if symbols is None:
