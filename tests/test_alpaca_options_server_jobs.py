@@ -81,6 +81,66 @@ def test_train_job_force_bypasses_the_regular_hours_skip(monkeypatch):
     assert result == {"ok": True, "rows": 500}
 
 
+def test_backtest_sweep_job_is_a_noop_during_regular_hours(monkeypatch):
+    from data import alpaca_data
+
+    monkeypatch.setattr(alpaca_data, "get_market_session", lambda: {"session": "regular", "is_open": True})
+    called = []
+    monkeypatch.setattr(alpaca_options_server.alpaca_options_data, "load_training_dataset", lambda: called.append(1) or pd.DataFrame())
+    result = alpaca_options_server._run_alpaca_options_backtest_sweep.__wrapped__()  # noqa: SLF001
+    assert result["skipped"] is True
+    assert result["reason"] == "regular_hours"
+    assert called == []  # must not even load the dataset while the market is open
+
+
+def test_backtest_sweep_job_skips_cleanly_with_no_data(monkeypatch):
+    from data import alpaca_data
+
+    monkeypatch.setattr(alpaca_data, "get_market_session", lambda: {"session": "closed", "is_open": False})
+    monkeypatch.setattr(alpaca_options_server.alpaca_options_data, "load_training_dataset", lambda: pd.DataFrame())
+    result = alpaca_options_server._run_alpaca_options_backtest_sweep.__wrapped__()  # noqa: SLF001
+    assert result["skipped"] is True
+    assert result["reason"] == "no_data"
+
+
+def test_backtest_sweep_job_runs_and_saves_results_when_market_closed(monkeypatch, tmp_path):
+    from data import alpaca_data
+
+    monkeypatch.setattr(alpaca_data, "get_market_session", lambda: {"session": "closed", "is_open": False})
+    df = pd.DataFrame({"symbol": ["AAPL"] * 10, "ts": list(range(10))})
+    monkeypatch.setattr(alpaca_options_server.alpaca_options_data, "load_training_dataset", lambda: df)
+    monkeypatch.setattr(alpaca_options_server.alpaca_options_backtest, "fit_backtest_model", lambda train_df: None)
+    monkeypatch.setattr(alpaca_options_server.alpaca_options_backtest, "add_model_predictions", lambda test_df, fitted: test_df)
+    fake_sweep = {"all_configs": [], "ranked": [], "best": None}
+    monkeypatch.setattr(alpaca_options_server.alpaca_options_backtest, "run_config_sweep", lambda test_with_preds, **kw: fake_sweep)
+    monkeypatch.setattr(alpaca_options_server, "ALPACA_OPTIONS_LATEST_SWEEP_FILE", tmp_path / "sweep.json")
+
+    result = alpaca_options_server._run_alpaca_options_backtest_sweep.__wrapped__()  # noqa: SLF001
+    assert result["ok"] is True
+    assert result["sweep_result"] == fake_sweep
+    assert (tmp_path / "sweep.json").exists()
+
+
+def test_backtest_sweep_job_never_raises_on_failure(monkeypatch):
+    from data import alpaca_data
+
+    monkeypatch.setattr(alpaca_data, "get_market_session", lambda: {"session": "closed", "is_open": False})
+
+    def raise_error():
+        raise RuntimeError("HF download failed")
+
+    monkeypatch.setattr(alpaca_options_server.alpaca_options_data, "load_training_dataset", raise_error)
+    result = alpaca_options_server._run_alpaca_options_backtest_sweep.__wrapped__()  # noqa: SLF001
+    assert result["ok"] is False
+
+
+def test_api_alpaca_options_backtest_route_requires_cron_auth(monkeypatch):
+    monkeypatch.setattr(alpaca_options_server, "is_cron_authorized", lambda request: False)
+    with alpaca_options_server.app.test_client() as client:
+        resp = client.get("/api/alpaca/options/backtest")
+        assert resp.status_code == 401
+
+
 def test_threads_trending_news_job_posts_the_fetched_headlines(monkeypatch):
     from data import stock_news, threads_post
 

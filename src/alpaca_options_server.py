@@ -60,7 +60,7 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from config import et_today
-from data import alpaca_client, alpaca_data, alpaca_options_data, alpaca_options_model, alpaca_options_strategy, stock_news, threads_post
+from data import alpaca_client, alpaca_data, alpaca_options_backtest, alpaca_options_data, alpaca_options_model, alpaca_options_strategy, stock_news, threads_post
 from server_common import DATA_DIR, is_cron_authorized, load_json, make_job_lock, save_json
 
 # Same real, twice-confirmed production bug already fixed on every other
@@ -83,6 +83,14 @@ ALPACA_OPTIONS_DATA_COLLECT_MINUTES = max(5, int(os.getenv("ALPACA_OPTIONS_DATA_
 # exact training path (perps_model.py, structurally identical) measured
 # ~50s wall time even on a large real dataset, nowhere near this interval.
 ALPACA_OPTIONS_OFFHOURS_TRAIN_MINUTES = max(10, int(os.getenv("ALPACA_OPTIONS_OFFHOURS_TRAIN_MINUTES", "30") or "30"))
+# Same off-hours-only reasoning as training above, on its own separate
+# cadence (a backtest sweep is heavier per-run than a single retrain --
+# alpaca_options_backtest.run_config_sweep fits/replays 4 full parameter
+# configs -- so it runs less often): "backtested for best strategies",
+# reporting findings for TAKE_PROFIT_PCT/STOP_LOSS_PCT/MAX_HOLD_MINUTES/
+# MODEL_CONFIDENCE_MIN only, never auto-applying a new config to the live
+# strategy.
+ALPACA_OPTIONS_BACKTEST_SWEEP_MINUTES = max(30, int(os.getenv("ALPACA_OPTIONS_BACKTEST_SWEEP_MINUTES", "120") or "120"))
 ALPACA_OPTIONS_STARTUP_GRACE_SECONDS = max(0, int(os.getenv("ALPACA_OPTIONS_STARTUP_GRACE_SECONDS", "60") or "60"))
 ENABLE_ALPACA_OPTIONS_SCHEDULER = str(os.getenv("ENABLE_ALPACA_OPTIONS_SCHEDULER", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
 DASHBOARD_LOCAL_AUTORUN = str(os.getenv("DASHBOARD_LOCAL_AUTORUN", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
@@ -106,6 +114,7 @@ JOB_HISTORY_FILE = DATA_DIR / "alpaca_options_job_run_history.json"
 JOB_LOCK_DIR = DATA_DIR / "alpaca_options_locks"
 ALPACA_OPTIONS_LATEST_CYCLE_FILE = DATA_DIR / "alpaca_options_latest_cycle.json"
 ALPACA_OPTIONS_LATEST_POSITION_CHECK_FILE = DATA_DIR / "alpaca_options_latest_position_check.json"
+ALPACA_OPTIONS_LATEST_SWEEP_FILE = DATA_DIR / "alpaca_options_latest_sweep.json"
 
 # Same reasoning as alpaca_server.py's own copy of this: the dashboard
 # polls /api/alpaca/options/status every 10s, and get_market_session() can
@@ -210,6 +219,48 @@ def _run_alpaca_options_train(*, force: bool = False) -> dict[str, Any]:
     return alpaca_options_model.train_model()
 
 
+@_locked_job("alpaca_options_backtest_sweep", stale_after_sec=1800)
+def _run_alpaca_options_backtest_sweep() -> dict[str, Any]:
+    """Off-hours-only, same reasoning as training: a fitted-model walk-
+    forward replay plus a 4-config TAKE_PROFIT_PCT/STOP_LOSS_PCT/
+    MAX_HOLD_MINUTES/MODEL_CONFIDENCE_MIN sweep (see
+    alpaca_options_backtest.run_config_sweep) has no business competing
+    with live entry-scan/fast-check for CPU/memory while real option
+    orders may be in flight. Reports findings to the dashboard only --
+    NEVER applies a new config to the live strategy automatically; that
+    stays a deliberate, reviewed decision.
+
+    Explicit del + gc.collect() after each heavy step mirrors the same
+    real OOM-mitigation discipline alpaca_server.py's own intensive-
+    training job already needed for the equivalent load-dataset-twice/
+    fit-multiple-models shape."""
+    from data import alpaca_data
+    session = alpaca_data.get_market_session()
+    if session["session"] == "regular":
+        return {"ok": True, "skipped": True, "reason": "regular_hours", "session": session["session"]}
+
+    try:
+        df = alpaca_options_data.load_training_dataset()
+        if df.empty:
+            return {"ok": True, "skipped": True, "reason": "no_data"}
+        cutoff_ts = df["ts"].quantile(0.7)
+        train_df = df[df["ts"] < cutoff_ts]
+        test_df = df[df["ts"] >= cutoff_ts]
+        fitted = alpaca_options_backtest.fit_backtest_model(train_df)
+        test_with_preds = alpaca_options_backtest.add_model_predictions(test_df, fitted)
+        sweep_result = alpaca_options_backtest.run_config_sweep(
+            test_with_preds, starting_balance=alpaca_options_strategy.SIMULATE_STARTING_BALANCE,
+        )
+        save_json(ALPACA_OPTIONS_LATEST_SWEEP_FILE, sweep_result)
+        del df, train_df, test_df, test_with_preds, fitted
+        return {"ok": True, "sweep_result": sweep_result}
+    except Exception as exc:
+        logger.warning("[alpaca_options_server] backtest sweep failed: %s", exc)
+        return {"ok": False, "error": str(exc)}
+    finally:
+        gc.collect()
+
+
 @_locked_job("alpaca_options_threads_trending_news", stale_after_sec=300)
 def _run_alpaca_options_threads_trending_news() -> dict[str, Any]:
     """Posts a digest of what's currently trending in stock-market news
@@ -276,6 +327,11 @@ def _ensure_background_jobs_started() -> None:
                 _run_alpaca_options_train, "interval", minutes=ALPACA_OPTIONS_OFFHOURS_TRAIN_MINUTES,
                 id="alpaca_options_train", replace_existing=True,
                 next_run_time=dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=ALPACA_OPTIONS_OFFHOURS_TRAIN_MINUTES),
+            )
+            scheduler.add_job(
+                _run_alpaca_options_backtest_sweep, "interval", minutes=ALPACA_OPTIONS_BACKTEST_SWEEP_MINUTES,
+                id="alpaca_options_backtest_sweep", replace_existing=True,
+                next_run_time=dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=ALPACA_OPTIONS_BACKTEST_SWEEP_MINUTES),
             )
             scheduler.add_job(
                 _run_alpaca_options_fast_check, "interval", seconds=ALPACA_OPTIONS_FAST_CHECK_SECONDS,
@@ -380,6 +436,7 @@ def api_alpaca_options_status():
     _, meta = alpaca_options_model.load_model()
     latest_cycle = load_json(ALPACA_OPTIONS_LATEST_CYCLE_FILE, {})
     latest_position_check = load_json(ALPACA_OPTIONS_LATEST_POSITION_CHECK_FILE, {})
+    latest_sweep = load_json(ALPACA_OPTIONS_LATEST_SWEEP_FILE, {})
     try:
         market_session = _cached_market_session()
     except Exception:
@@ -417,6 +474,7 @@ def api_alpaca_options_status():
         },
         "latest_cycle": latest_cycle,
         "latest_position_check": latest_position_check,
+        "latest_sweep": latest_sweep,
         "market_session": market_session,
         "params": {
             "position_size_pct": alpaca_options_strategy.POSITION_SIZE_PCT,
@@ -483,9 +541,20 @@ def api_alpaca_options_train():
         return jsonify({"ok": False, "error": str(exc)}), 500
 
 
+@app.route("/api/alpaca/options/backtest", methods=["GET", "POST"])
+def api_alpaca_options_backtest():
+    if not is_cron_authorized(request):
+        return jsonify({"ok": False, "error": "Unauthorized"}), 401
+    try:
+        return jsonify(_run_alpaca_options_backtest_sweep())
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
 _JOB_LABELS = {
     "alpaca_options_data_collect": f"Alpaca options data collection -> HF (every {ALPACA_OPTIONS_DATA_COLLECT_MINUTES} min)",
     "alpaca_options_train": f"Alpaca options model retrain (every {ALPACA_OPTIONS_OFFHOURS_TRAIN_MINUTES} min off-hours)",
+    "alpaca_options_backtest_sweep": f"Alpaca options backtest sweep (every {ALPACA_OPTIONS_BACKTEST_SWEEP_MINUTES} min off-hours)",
     "alpaca_options_fast_check": f"Alpaca options fast exit check (every {ALPACA_OPTIONS_FAST_CHECK_SECONDS}s)",
     "alpaca_options_entry_scan": f"Alpaca options entry scan (every {ALPACA_OPTIONS_CYCLE_MINUTES} min)",
     "alpaca_options_threads_trending_news": "Threads trending-news post (every 30 min)",

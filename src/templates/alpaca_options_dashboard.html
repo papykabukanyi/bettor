@@ -137,6 +137,16 @@
 </section>
 
 <section>
+  <h3>Off-Hours Backtest &mdash; Latest Sweep</h3>
+  <div class="scroll-x">
+    <table>
+      <thead><tr><th>Take Profit</th><th>Stop Loss</th><th>Max Hold</th><th>Confidence Min</th><th>Trades</th><th>Win Rate</th><th>Return</th></tr></thead>
+      <tbody id="sweep-body"><tr><td colspan="7" class="empty">No sweep yet -- runs automatically once the market is fully closed</td></tr></tbody>
+    </table>
+  </div>
+</section>
+
+<section>
   <h3>Server Activity</h3>
   <div class="scroll-x">
     <table>
@@ -374,6 +384,20 @@ async function refreshStatus() {
         <td>${c.count !== undefined ? fmtCount(c.count) : "--"}</td>
         <td class="sub">${c.reason || c.error || ""}</td>`, 6, "Waiting for first scan...");
   } catch (e) { console.error("candidates render failed", e); }
+
+  try {
+    const sweepRows = (data.latest_sweep && data.latest_sweep.ranked) || [];
+    const sbody = document.getElementById("sweep-body");
+    patchTable(sbody, sweepRows, (r, idx) => idx, r => `
+        <td>${(r.take_profit_pct * 100).toFixed(0)}%</td>
+        <td>${(r.stop_loss_pct * 100).toFixed(0)}%</td>
+        <td>${r.max_hold_minutes}min</td>
+        <td>${(r.model_confidence_min * 100).toFixed(0)}%</td>
+        <td>${r.trade_count}</td>
+        <td>${(r.win_rate * 100).toFixed(1)}%</td>
+        <td class="${r.return_pct > 0 ? "stat pos" : r.return_pct < 0 ? "stat neg" : ""}" style="font-size:13px;font-weight:600;">${(r.return_pct * 100).toFixed(2)}%</td>`,
+      7, "No sweep yet -- runs automatically once the market is fully closed");
+  } catch (e) { console.error("sweep render failed", e); }
 }
 
 async function refreshTrades() {
