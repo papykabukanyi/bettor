@@ -96,7 +96,7 @@
     <div><span class="k">Expiration window</span><span class="v" id="cfg-expwindow">--</span></div>
     <div><span class="k">Fast check / Entry scan</span><span class="v" id="cfg-cadence">--</span></div>
     <div><span class="k">Data collect every</span><span class="v" id="cfg-collect">--</span></div>
-    <div><span class="k">Next model retrain</span><span class="v" id="cfg-retrain">--</span></div>
+    <div><span class="k">Model retrain</span><span class="v" id="cfg-retrain">--</span></div>
   </div>
 </section>
 
@@ -234,16 +234,14 @@ function updateConnectionStatus() {
   }
 }
 
-function nextRetrainText(trainHourEt) {
-  if (trainHourEt === null || trainHourEt === undefined) return "--";
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: "America/New_York", hour: "numeric", minute: "numeric", hour12: false,
-  }).formatToParts(new Date());
-  const hour = parseInt(parts.find(p => p.type === "hour").value, 10) % 24;
-  const minute = parseInt(parts.find(p => p.type === "minute").value, 10);
-  const diffMin = (((trainHourEt * 60) - (hour * 60 + minute)) % 1440 + 1440) % 1440;
-  if (diffMin === 0) return "running now";
-  return `${Math.floor(diffMin / 60)}h ${diffMin % 60}m (${String(trainHourEt).padStart(2, "0")}:00 ET)`;
+function retrainCadenceText(offhoursTrainMinutes) {
+  // Continuous, not a fixed daily hour: retrains every N minutes for as
+  // long as the market is off-session (pre/post-market, weekends,
+  // holidays), and is a genuine no-op the instant it checks during
+  // regular hours -- so there's no single "next run" countdown to show,
+  // just the cadence itself.
+  if (offhoursTrainMinutes === null || offhoursTrainMinutes === undefined) return "--";
+  return `every ${offhoursTrainMinutes} min while market is off-hours`;
 }
 
 async function refreshStatus() {
@@ -343,7 +341,7 @@ async function refreshStatus() {
       (params.fast_check_seconds != null ? params.fast_check_seconds + "s" : "--") + " / " +
       (params.entry_scan_minutes != null ? params.entry_scan_minutes + "min" : "--");
     document.getElementById("cfg-collect").textContent = params.data_collect_minutes != null ? params.data_collect_minutes + " min" : "--";
-    document.getElementById("cfg-retrain").textContent = nextRetrainText(params.train_hour_et);
+    document.getElementById("cfg-retrain").textContent = retrainCadenceText(params.offhours_train_minutes);
   } catch (e) { console.error("config grid render failed", e); }
 
   try {

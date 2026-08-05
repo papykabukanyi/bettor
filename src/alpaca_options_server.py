@@ -15,7 +15,23 @@ Background jobs, each cross-process locked (see server_common.py):
                                  universe for a new directional entry
   - alpaca_options_data_collect every ALPACA_OPTIONS_DATA_COLLECT_MINUTES --
                                  archives fresh underlying minute bars to HF
-  - alpaca_options_train        daily at ALPACA_OPTIONS_TRAIN_HOUR_ET:00 ET
+  - alpaca_options_train        every ALPACA_OPTIONS_OFFHOURS_TRAIN_MINUTES,
+                                 but only actually retrains when the market
+                                 is NOT in its regular session (pre-market,
+                                 post-market, weekends, holidays) -- a real
+                                 no-op the instant it's checked during
+                                 regular hours, so a multi-minute training
+                                 run never contends with the live entry-scan/
+                                 fast-check jobs for CPU/memory while real
+                                 option orders may be in flight. Options only
+                                 gets ALPACA_OPTIONS_DATA_COLLECT_MINUTES of
+                                 fresh underlying data regardless of session,
+                                 so there's no reason to let the model sit
+                                 stale for up to 24h the way a once-daily
+                                 cron did -- every off-hours window is now
+                                 spent building the best-understood model
+                                 the data supports, ready before the next
+                                 regular session opens.
 
 No explicit market-hours gate on the entry scan -- same precedent already
 established by alpaca_server.py's own equities strategy (scan_and_enter has
@@ -57,7 +73,16 @@ from huggingface_hub import HfApi, hf_hub_download  # noqa: F401
 ALPACA_OPTIONS_CYCLE_MINUTES = max(1, int(os.getenv("ALPACA_OPTIONS_CYCLE_MINUTES", "5") or "5"))
 ALPACA_OPTIONS_FAST_CHECK_SECONDS = max(5, int(os.getenv("ALPACA_OPTIONS_FAST_CHECK_SECONDS", "30") or "30"))
 ALPACA_OPTIONS_DATA_COLLECT_MINUTES = max(5, int(os.getenv("ALPACA_OPTIONS_DATA_COLLECT_MINUTES", "15") or "15"))
-ALPACA_OPTIONS_TRAIN_HOUR_ET = int(os.getenv("ALPACA_OPTIONS_TRAIN_HOUR_ET", "5") or "5")
+# How often to retrain while the market is closed -- NOT how often while
+# it's open (see _run_alpaca_options_train's own session check, which
+# makes this a genuine no-op during regular hours). 30 min gives roughly
+# 35 real retrains across a typical ~17.5h off-hours window (pre-market +
+# post-market + overnight) versus the old once-daily cron's single shot,
+# each one incorporating whatever fresh rows alpaca_options_data_collect
+# has archived since the last retrain -- a full local profile of this
+# exact training path (perps_model.py, structurally identical) measured
+# ~50s wall time even on a large real dataset, nowhere near this interval.
+ALPACA_OPTIONS_OFFHOURS_TRAIN_MINUTES = max(10, int(os.getenv("ALPACA_OPTIONS_OFFHOURS_TRAIN_MINUTES", "30") or "30"))
 ALPACA_OPTIONS_STARTUP_GRACE_SECONDS = max(0, int(os.getenv("ALPACA_OPTIONS_STARTUP_GRACE_SECONDS", "60") or "60"))
 ENABLE_ALPACA_OPTIONS_SCHEDULER = str(os.getenv("ENABLE_ALPACA_OPTIONS_SCHEDULER", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
 DASHBOARD_LOCAL_AUTORUN = str(os.getenv("DASHBOARD_LOCAL_AUTORUN", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
@@ -137,7 +162,25 @@ def _run_alpaca_options_data_collect() -> dict[str, Any]:
 
 
 @_locked_job("alpaca_options_train", stale_after_sec=1800)
-def _run_alpaca_options_train() -> dict[str, Any]:
+def _run_alpaca_options_train(*, force: bool = False) -> dict[str, Any]:
+    """Runs every ALPACA_OPTIONS_OFFHOURS_TRAIN_MINUTES, but only actually
+    trains outside the regular session -- see ALPACA_OPTIONS_OFFHOURS_TRAIN_MINUTES's
+    own comment for why continuous off-hours retraining (not once a day)
+    gets the model the best possible understanding of these underlyings
+    before the next regular session opens, and why regular hours skip
+    outright (a multi-minute retrain has no business competing with live
+    entry-scan/fast-check jobs for CPU/memory while real option orders
+    may be in flight).
+
+    force=True bypasses the session check -- used by the cold-start path
+    (a fresh boot with literally no cached model needs one immediately,
+    regardless of session, same as every other service here) and by the
+    manual /api/alpaca/options/train endpoint (a human/cron explicitly
+    asking for a retrain should get one, not a silent skip)."""
+    if not force:
+        from data import alpaca_data
+        if alpaca_data.get_market_session()["session"] == "regular":
+            return {"ok": True, "skipped": "regular_hours"}
     return alpaca_options_model.train_model()
 
 
@@ -204,8 +247,9 @@ def _ensure_background_jobs_started() -> None:
                 next_run_time=dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=ALPACA_OPTIONS_DATA_COLLECT_MINUTES),
             )
             scheduler.add_job(
-                _run_alpaca_options_train, "cron", hour=ALPACA_OPTIONS_TRAIN_HOUR_ET, minute=0,
+                _run_alpaca_options_train, "interval", minutes=ALPACA_OPTIONS_OFFHOURS_TRAIN_MINUTES,
                 id="alpaca_options_train", replace_existing=True,
+                next_run_time=dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=ALPACA_OPTIONS_OFFHOURS_TRAIN_MINUTES),
             )
             scheduler.add_job(
                 _run_alpaca_options_fast_check, "interval", seconds=ALPACA_OPTIONS_FAST_CHECK_SECONDS,
@@ -227,10 +271,10 @@ def _ensure_background_jobs_started() -> None:
             scheduler.start()
             logger.info(
                 "Alpaca options scheduler started: fast exit check every %ds, entry scan every %d min "
-                "(first run in %ds), data collect every %d min, train daily at %02d:00 ET, "
-                "mode=%s live_trading=%s",
+                "(first run in %ds), data collect every %d min, retrain every %d min off-hours "
+                "(skips as a no-op during regular hours), mode=%s live_trading=%s",
                 ALPACA_OPTIONS_FAST_CHECK_SECONDS, ALPACA_OPTIONS_CYCLE_MINUTES, ALPACA_OPTIONS_STARTUP_GRACE_SECONDS,
-                ALPACA_OPTIONS_DATA_COLLECT_MINUTES, ALPACA_OPTIONS_TRAIN_HOUR_ET,
+                ALPACA_OPTIONS_DATA_COLLECT_MINUTES, ALPACA_OPTIONS_OFFHOURS_TRAIN_MINUTES,
                 alpaca_options_strategy.MODE, alpaca_options_strategy.LIVE_TRADING_ENABLED,
             )
 
@@ -251,10 +295,14 @@ def _ensure_background_jobs_started() -> None:
             # loop.
             try:
                 if alpaca_options_model.load_model()[0] is None:
-                    train_result = _run_alpaca_options_train()
+                    # force=True: a fresh boot with no cached model needs
+                    # one now regardless of session -- the routine
+                    # off-hours-only gate exists to protect regular-hours
+                    # CPU/memory, not to block the one-time cold-start case.
+                    train_result = _run_alpaca_options_train(force=True)
                     logger.info("Startup alpaca options train attempt (cold start): %s", train_result.get("reason", "ok"))
                 else:
-                    logger.info("Startup alpaca options train skipped: model already cached, daily cron will retrain")
+                    logger.info("Startup alpaca options train skipped: model already cached, off-hours interval will retrain")
             except Exception as exc:
                 logger.warning("Startup alpaca options train failed: %s", exc)
             # No immediate startup entry scan here -- same rolling-deploy
@@ -352,7 +400,7 @@ def api_alpaca_options_status():
             "fast_check_seconds": ALPACA_OPTIONS_FAST_CHECK_SECONDS,
             "entry_scan_minutes": ALPACA_OPTIONS_CYCLE_MINUTES,
             "data_collect_minutes": ALPACA_OPTIONS_DATA_COLLECT_MINUTES,
-            "train_hour_et": ALPACA_OPTIONS_TRAIN_HOUR_ET,
+            "offhours_train_minutes": ALPACA_OPTIONS_OFFHOURS_TRAIN_MINUTES,
         },
     })
 
@@ -397,14 +445,16 @@ def api_alpaca_options_train():
     if not is_cron_authorized(request):
         return jsonify({"ok": False, "error": "Unauthorized"}), 401
     try:
-        return jsonify(_run_alpaca_options_train())
+        # force=True: a human/cron explicitly hitting this endpoint wants
+        # a real retrain, not a silent "skipped: regular_hours".
+        return jsonify(_run_alpaca_options_train(force=True))
     except Exception as exc:
         return jsonify({"ok": False, "error": str(exc)}), 500
 
 
 _JOB_LABELS = {
     "alpaca_options_data_collect": f"Alpaca options data collection -> HF (every {ALPACA_OPTIONS_DATA_COLLECT_MINUTES} min)",
-    "alpaca_options_train": f"Alpaca options model retrain (daily {ALPACA_OPTIONS_TRAIN_HOUR_ET:02d}:00 ET)",
+    "alpaca_options_train": f"Alpaca options model retrain (every {ALPACA_OPTIONS_OFFHOURS_TRAIN_MINUTES} min off-hours)",
     "alpaca_options_fast_check": f"Alpaca options fast exit check (every {ALPACA_OPTIONS_FAST_CHECK_SECONDS}s)",
     "alpaca_options_entry_scan": f"Alpaca options entry scan (every {ALPACA_OPTIONS_CYCLE_MINUTES} min)",
     "alpaca_options_threads_trending_news": "Threads trending-news post (every 30 min)",

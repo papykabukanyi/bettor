@@ -52,11 +52,32 @@ def test_data_collect_job_pushes_collected_rows(monkeypatch):
     assert list(pushed["df"]["symbol"]) == ["AAPL"]
 
 
-def test_train_job_calls_train_model(monkeypatch):
-    from data import alpaca_options_model
+def test_train_job_calls_train_model_when_market_is_off_hours(monkeypatch):
+    from data import alpaca_data, alpaca_options_model
 
+    monkeypatch.setattr(alpaca_data, "get_market_session", lambda: {"session": "pre_market", "is_open": False})
     monkeypatch.setattr(alpaca_options_model, "train_model", lambda: {"ok": True, "rows": 500})
     result = alpaca_options_server._run_alpaca_options_train.__wrapped__()  # noqa: SLF001
+    assert result == {"ok": True, "rows": 500}
+
+
+def test_train_job_skips_as_a_no_op_during_regular_hours(monkeypatch):
+    from data import alpaca_data, alpaca_options_model
+
+    monkeypatch.setattr(alpaca_data, "get_market_session", lambda: {"session": "regular", "is_open": True})
+    called = {"train": False}
+    monkeypatch.setattr(alpaca_options_model, "train_model", lambda: called.update(train=True) or {"ok": True})
+    result = alpaca_options_server._run_alpaca_options_train.__wrapped__()  # noqa: SLF001
+    assert result == {"ok": True, "skipped": "regular_hours"}
+    assert called["train"] is False
+
+
+def test_train_job_force_bypasses_the_regular_hours_skip(monkeypatch):
+    from data import alpaca_data, alpaca_options_model
+
+    monkeypatch.setattr(alpaca_data, "get_market_session", lambda: {"session": "regular", "is_open": True})
+    monkeypatch.setattr(alpaca_options_model, "train_model", lambda: {"ok": True, "rows": 500})
+    result = alpaca_options_server._run_alpaca_options_train.__wrapped__(force=True)  # noqa: SLF001
     assert result == {"ok": True, "rows": 500}
 
 
