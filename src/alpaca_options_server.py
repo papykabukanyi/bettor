@@ -149,7 +149,7 @@ def _run_alpaca_options_threads_trending_news() -> dict[str, Any]:
     headlines already feeding sentiment_score apply here too)."""
     try:
         headlines = stock_news.get_trending_headlines(limit=5)
-        posted = threads_post.post_trending_news(headlines, market="stocks")
+        posted = threads_post.post_trending_news(headlines, market="options")
         return {"ok": True, "posted": posted, "headline_count": len(headlines)}
     except Exception as exc:
         logger.warning("[alpaca_options_server] Threads trending-news post failed: %s", exc)

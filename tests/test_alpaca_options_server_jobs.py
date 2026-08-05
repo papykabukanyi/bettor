@@ -70,7 +70,7 @@ def test_threads_trending_news_job_posts_the_fetched_headlines(monkeypatch):
     result = alpaca_options_server._run_alpaca_options_threads_trending_news.__wrapped__()  # noqa: SLF001
 
     assert result == {"ok": True, "posted": True, "headline_count": 2}
-    assert captured["market"] == "stocks"
+    assert captured["market"] == "options"
 
 
 def test_threads_trending_news_job_never_raises_on_failure(monkeypatch):
