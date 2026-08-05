@@ -22,13 +22,26 @@ from data.alpaca_data import FEATURE_COLUMNS
 
 logger = logging.getLogger(__name__)
 
+# n_estimators=60 (not the previous 150/100): real, confirmed production
+# OOM incidents on the live equities service (Render's own events: two
+# oomKilled restarts roughly ALPACA_INTENSIVE_TRAINING_MINUTES apart,
+# i.e. exactly on _run_alpaca_intensive_training's own cadence). That job
+# calls fit_backtest_model() (this file) in the SAME call as
+# alpaca_model.py's own train_model() -- "trains up to 6 model candidates
+# total" per that job's own docstring -- and this file's own candidates
+# had never picked up the n_estimators reduction perps_model.py/
+# alpaca_options_model.py/alpaca_model.py already proved necessary for
+# this exact multi-candidate-fit-in-one-call shape on the same 512MB
+# ceiling. This module DOES run on that same memory-capped Render dyno
+# (confirmed live via the crash trace above) -- not a one-off local/
+# offline script the way some other backtest engines here are.
 _CANDIDATES = {
     "logistic_regression": lambda: LogisticRegression(max_iter=1000, class_weight="balanced"),
     "random_forest": lambda: RandomForestClassifier(
-        n_estimators=150, max_depth=6, min_samples_leaf=20, class_weight="balanced", random_state=42, n_jobs=1,
+        n_estimators=60, max_depth=6, min_samples_leaf=20, class_weight="balanced", random_state=42, n_jobs=1,
     ),
     "gradient_boosting": lambda: GradientBoostingClassifier(
-        n_estimators=100, max_depth=3, learning_rate=0.05, random_state=42,
+        n_estimators=60, max_depth=3, learning_rate=0.05, random_state=42,
     ),
 }
 
