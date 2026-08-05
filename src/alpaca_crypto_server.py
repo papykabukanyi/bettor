@@ -19,7 +19,18 @@ market-hours gating anywhere here -- crypto trades 24/7:
                                 the tradable crypto universe for a new entry
   - alpaca_crypto_data_collect every ALPACA_CRYPTO_DATA_COLLECT_MINUTES --
                                 archives fresh minute bars to HF
-  - alpaca_crypto_train        daily at ALPACA_CRYPTO_TRAIN_HOUR_ET:00 ET
+  - alpaca_crypto_train        every ALPACA_CRYPTO_TRAIN_INTERVAL_MINUTES --
+                                unconditional, no session check at all
+                                (unlike alpaca_options_server.py's own
+                                off-hours-only retrain gate): crypto has no
+                                "off-hours" window to reserve training
+                                for in the first place, so retraining just
+                                rides the same always-on cadence as
+                                everything else here, incorporating
+                                whatever fresh rows alpaca_crypto_data_collect
+                                has archived since the last retrain instead
+                                of sitting on a once-daily cron while data
+                                keeps arriving around the clock
 """
 from __future__ import annotations
 
@@ -55,7 +66,21 @@ from huggingface_hub import HfApi, hf_hub_download  # noqa: F401
 ALPACA_CRYPTO_CYCLE_MINUTES = max(1, int(os.getenv("ALPACA_CRYPTO_CYCLE_MINUTES", "2") or "2"))
 ALPACA_CRYPTO_FAST_CHECK_SECONDS = max(5, int(os.getenv("ALPACA_CRYPTO_FAST_CHECK_SECONDS", "20") or "20"))
 ALPACA_CRYPTO_DATA_COLLECT_MINUTES = max(5, int(os.getenv("ALPACA_CRYPTO_DATA_COLLECT_MINUTES", "15") or "15"))
-ALPACA_CRYPTO_TRAIN_HOUR_ET = int(os.getenv("ALPACA_CRYPTO_TRAIN_HOUR_ET", "5") or "5")
+# Replaces a once-daily fixed-hour cron: crypto trades and collects fresh
+# data 24/7 with no closed session to speak of, so there's no "off-hours
+# window" to reserve retraining for the way options does -- it just rides
+# the same always-on interval cadence as fast_check/entry_scan/data_collect.
+# 60 min gives ~24 real retrains/day (vs the old cron's 1), each one
+# incorporating whatever fresh rows alpaca_crypto_data_collect (every
+# ALPACA_CRYPTO_DATA_COLLECT_MINUTES, also unconditional) has archived
+# since the last retrain. A full local profile of this exact training path
+# (perps_model.py, structurally identical -- same n_estimators=100
+# candidates) measured ~50s wall time even on a large real dataset, nowhere
+# near this interval; picked more conservatively than options' own 30-min
+# off-hours cadence specifically BECAUSE there's no quiet window here to
+# absorb the cost -- this always runs alongside live trading decisions,
+# never instead of them.
+ALPACA_CRYPTO_TRAIN_INTERVAL_MINUTES = max(15, int(os.getenv("ALPACA_CRYPTO_TRAIN_INTERVAL_MINUTES", "60") or "60"))
 ALPACA_CRYPTO_STARTUP_GRACE_SECONDS = max(0, int(os.getenv("ALPACA_CRYPTO_STARTUP_GRACE_SECONDS", "60") or "60"))
 ENABLE_ALPACA_CRYPTO_SCHEDULER = str(os.getenv("ENABLE_ALPACA_CRYPTO_SCHEDULER", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
 DASHBOARD_LOCAL_AUTORUN = str(os.getenv("DASHBOARD_LOCAL_AUTORUN", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
@@ -207,8 +232,9 @@ def _ensure_background_jobs_started() -> None:
                 next_run_time=dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=ALPACA_CRYPTO_DATA_COLLECT_MINUTES),
             )
             scheduler.add_job(
-                _run_alpaca_crypto_train, "cron", hour=ALPACA_CRYPTO_TRAIN_HOUR_ET, minute=0,
+                _run_alpaca_crypto_train, "interval", minutes=ALPACA_CRYPTO_TRAIN_INTERVAL_MINUTES,
                 id="alpaca_crypto_train", replace_existing=True,
+                next_run_time=dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=ALPACA_CRYPTO_TRAIN_INTERVAL_MINUTES),
             )
             scheduler.add_job(
                 _run_alpaca_crypto_fast_check, "interval", seconds=ALPACA_CRYPTO_FAST_CHECK_SECONDS,
@@ -230,10 +256,10 @@ def _ensure_background_jobs_started() -> None:
             scheduler.start()
             logger.info(
                 "Alpaca crypto scheduler started: fast exit check every %ds, entry scan every %d min "
-                "(first run in %ds), data collect every %d min, train daily at %02d:00 ET, "
+                "(first run in %ds), data collect every %d min, retrain every %d min (24/7, no session gate), "
                 "mode=%s live_trading=%s",
                 ALPACA_CRYPTO_FAST_CHECK_SECONDS, ALPACA_CRYPTO_CYCLE_MINUTES, ALPACA_CRYPTO_STARTUP_GRACE_SECONDS,
-                ALPACA_CRYPTO_DATA_COLLECT_MINUTES, ALPACA_CRYPTO_TRAIN_HOUR_ET,
+                ALPACA_CRYPTO_DATA_COLLECT_MINUTES, ALPACA_CRYPTO_TRAIN_INTERVAL_MINUTES,
                 alpaca_crypto_strategy.MODE, alpaca_crypto_strategy.LIVE_TRADING_ENABLED,
             )
 
@@ -265,7 +291,7 @@ def _ensure_background_jobs_started() -> None:
                     train_result = _run_alpaca_crypto_train()
                     logger.info("Startup alpaca crypto train attempt (cold start): %s", train_result.get("reason", "ok"))
                 else:
-                    logger.info("Startup alpaca crypto train skipped: model already cached, daily cron will retrain")
+                    logger.info("Startup alpaca crypto train skipped: model already cached, the interval retrain will pick it up")
             except Exception as exc:
                 logger.warning("Startup alpaca crypto train failed: %s", exc)
             # No immediate startup entry scan here -- same rolling-deploy
@@ -363,7 +389,7 @@ def api_alpaca_crypto_status():
             "fast_check_seconds": ALPACA_CRYPTO_FAST_CHECK_SECONDS,
             "entry_scan_minutes": ALPACA_CRYPTO_CYCLE_MINUTES,
             "data_collect_minutes": ALPACA_CRYPTO_DATA_COLLECT_MINUTES,
-            "train_hour_et": ALPACA_CRYPTO_TRAIN_HOUR_ET,
+            "train_interval_minutes": ALPACA_CRYPTO_TRAIN_INTERVAL_MINUTES,
         },
     })
 
@@ -415,7 +441,7 @@ def api_alpaca_crypto_train():
 
 _JOB_LABELS = {
     "alpaca_crypto_data_collect": f"Alpaca crypto data collection -> HF (every {ALPACA_CRYPTO_DATA_COLLECT_MINUTES} min)",
-    "alpaca_crypto_train": f"Alpaca crypto model retrain (daily {ALPACA_CRYPTO_TRAIN_HOUR_ET:02d}:00 ET)",
+    "alpaca_crypto_train": f"Alpaca crypto model retrain (every {ALPACA_CRYPTO_TRAIN_INTERVAL_MINUTES} min, 24/7)",
     "alpaca_crypto_fast_check": f"Alpaca crypto fast exit check (every {ALPACA_CRYPTO_FAST_CHECK_SECONDS}s)",
     "alpaca_crypto_entry_scan": f"Alpaca crypto entry scan (every {ALPACA_CRYPTO_CYCLE_MINUTES} min, 24/7)",
     "alpaca_crypto_threads_trending_news": "Threads trending-news post (every 30 min)",

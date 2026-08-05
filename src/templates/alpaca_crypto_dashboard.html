@@ -95,7 +95,7 @@
     <div><span class="k">Min volume z / vol ratio</span><span class="v" id="cfg-volgate">--</span></div>
     <div><span class="k">Fast check / Entry scan</span><span class="v" id="cfg-cadence">--</span></div>
     <div><span class="k">Data collect every</span><span class="v" id="cfg-collect">--</span></div>
-    <div><span class="k">Next model retrain</span><span class="v" id="cfg-retrain">--</span></div>
+    <div><span class="k">Model retrain</span><span class="v" id="cfg-retrain">--</span></div>
   </div>
 </section>
 
@@ -223,16 +223,13 @@ function updateConnectionStatus() {
   }
 }
 
-function nextRetrainText(trainHourEt) {
-  if (trainHourEt === null || trainHourEt === undefined) return "--";
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: "America/New_York", hour: "numeric", minute: "numeric", hour12: false,
-  }).formatToParts(new Date());
-  const hour = parseInt(parts.find(p => p.type === "hour").value, 10) % 24;
-  const minute = parseInt(parts.find(p => p.type === "minute").value, 10);
-  const diffMin = (((trainHourEt * 60) - (hour * 60 + minute)) % 1440 + 1440) % 1440;
-  if (diffMin === 0) return "running now";
-  return `${Math.floor(diffMin / 60)}h ${diffMin % 60}m (${String(trainHourEt).padStart(2, "0")}:00 ET)`;
+function retrainCadenceText(trainIntervalMinutes) {
+  // No fixed daily hour anymore -- crypto retrains on an always-on
+  // interval, 24/7, no session gate (unlike options, which only retrains
+  // during its own off-hours) since crypto has no closed session to
+  // reserve training for in the first place.
+  if (trainIntervalMinutes === null || trainIntervalMinutes === undefined) return "--";
+  return `every ${trainIntervalMinutes} min, 24/7`;
 }
 
 async function refreshStatus() {
@@ -326,7 +323,7 @@ async function refreshStatus() {
       (params.fast_check_seconds != null ? params.fast_check_seconds + "s" : "--") + " / " +
       (params.entry_scan_minutes != null ? params.entry_scan_minutes + "min" : "--");
     document.getElementById("cfg-collect").textContent = params.data_collect_minutes != null ? params.data_collect_minutes + " min" : "--";
-    document.getElementById("cfg-retrain").textContent = nextRetrainText(params.train_hour_et);
+    document.getElementById("cfg-retrain").textContent = retrainCadenceText(params.train_interval_minutes);
   } catch (e) { console.error("config grid render failed", e); }
 
   try {
