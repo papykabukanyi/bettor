@@ -61,6 +61,16 @@ def _hashtags_for_market(market: str) -> str:
     return _MARKET_HASHTAGS.get(market, _MARKET_HASHTAGS["perps"])
 
 
+# Short form of _MARKET_LABELS (no "Alpaca"/"Kalshi" prefix) for the
+# trending-news digest specifically, which has always used this shorter
+# style ("Stocks trending news...", not "Alpaca Stocks trending news...").
+_SHORT_MARKET_LABELS = {"perps": "Perps", "stocks": "Stocks", "crypto": "Crypto", "options": "Options"}
+
+
+def _short_market_label(market: str) -> str:
+    return _SHORT_MARKET_LABELS.get(market, "Perps")
+
+
 def is_configured() -> bool:
     """True once a real login has actually completed (a token is present)
     -- surfaced to /api/status so the dashboard can show whether this is
@@ -208,8 +218,16 @@ def post_hourly_status(
 
 
 def _format_trending_news_text(*, headlines: list[str], market: str) -> str:
-    label = "Crypto" if market == "crypto" else "Stocks"
-    hashtags = _hashtags_for_market("crypto" if market == "crypto" else "stocks")
+    """Real, confirmed mislabeling bug found in review: this used to
+    collapse EVERY market that wasn't literally "crypto" into "Stocks" --
+    so options' own trending-news post (already passing market="options"
+    at its call site, see alpaca_options_server.py) still rendered as
+    "Stocks trending news" here, indistinguishable from the actual stocks
+    service's own posts, and got the STOCKS hashtag set instead of
+    options'. Now driven by the real per-market label/hashtags, the same
+    ones post_sentiment_snapshot below already used correctly."""
+    label = _short_market_label(market)
+    hashtags = _hashtags_for_market(market)
     hashtags += " #Trends #News"
     if not headlines:
         text = f"{label} trending news: nothing notable right now.\n{hashtags}"

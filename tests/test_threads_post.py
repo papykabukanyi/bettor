@@ -437,6 +437,27 @@ def test_trending_news_labels_stocks_market(monkeypatch):
     assert "Stocks trending news" in posted[0]
 
 
+def test_trending_news_labels_options_market(monkeypatch):
+    """Real, confirmed mislabeling bug found in review: this used to
+    collapse every market that wasn't literally "crypto" into "Stocks" --
+    so options' own trending-news post rendered indistinguishably from
+    the actual stocks service's own posts, and got the wrong hashtags."""
+    posted = []
+    monkeypatch.setattr(threads_post.threads_client, "create_and_publish_post", lambda text: posted.append(text))
+    threads_post.post_trending_news(["Big tech earnings beat expectations"], market="options")
+    assert "Options trending news" in posted[0]
+    assert "Stocks trending news" not in posted[0]
+    assert "#OptionsTrading" in posted[0]
+
+
+def test_trending_news_labels_perps_market(monkeypatch):
+    posted = []
+    monkeypatch.setattr(threads_post.threads_client, "create_and_publish_post", lambda text: posted.append(text))
+    threads_post.post_trending_news(["Prediction markets see record volume"], market="perps")
+    assert "Perps trending news" in posted[0]
+    assert "#Kalshi" in posted[0]
+
+
 def test_trending_news_respects_the_disable_flag(monkeypatch):
     monkeypatch.setattr(threads_post, "THREADS_POST_ENABLED", False)
     posted = []
