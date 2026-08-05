@@ -38,3 +38,9 @@ huggingface_hub>=0.20.0
 # lighter than pulling in matplotlib's full plotting stack for what's just
 # a line + a few horizontal reference levels.
 Pillow>=10.1.0
+
+# Downloadable perps account report (PDF). fpdf2 chosen for the same
+# reason as Pillow above -- pure Python, no external binary dependency
+# (unlike weasyprint, which needs system Cairo/Pango), light enough that
+# generating a report on-demand inside this same 512Mi process is safe.
+fpdf2>=2.7.0

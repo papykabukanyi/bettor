@@ -57,6 +57,23 @@ def test_api_status_surfaces_feature_importances_from_the_trained_model(monkeypa
         assert resp.get_json()["model"]["feature_importances"] == {"random_forest": {"sentiment_score": 0.05}}
 
 
+def test_perps_report_pdf_route_returns_a_downloadable_pdf(monkeypatch):
+    from data import perps_strategy
+
+    monkeypatch.setattr(perps_strategy, "_load_state", lambda: {
+        "positions": [], "trade_log": [], "realized_pnl_by_date": {},
+    })
+    monkeypatch.setattr(app_kalshi, "_cached_account_snapshot", lambda: {"available_balance_usd": 22.18})
+
+    with app_kalshi.app.test_client() as client:
+        resp = client.get("/api/perps/report.pdf")
+        assert resp.status_code == 200
+        assert resp.mimetype == "application/pdf"
+        assert resp.data[:5] == b"%PDF-"
+        assert "attachment" in resp.headers.get("Content-Disposition", "")
+        assert ".pdf" in resp.headers.get("Content-Disposition", "")
+
+
 def test_data_collect_job_refreshes_ticker_activity_cache_off_the_request_path(monkeypatch):
     """The volatility-ranking cache must only ever be refreshed from here
     (a scheduled background job) -- confirmed live that refreshing it

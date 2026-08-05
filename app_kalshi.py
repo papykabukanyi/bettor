@@ -54,7 +54,7 @@ from pathlib import Path
 from typing import Any
 
 from apscheduler.schedulers.background import BackgroundScheduler
-from flask import Flask, jsonify, redirect, render_template, request, send_from_directory
+from flask import Flask, Response, jsonify, redirect, render_template, request, send_from_directory
 
 # This file lives at the REPO ROOT (not inside src/), unlike every module it
 # imports below -- SRC_DIR must be computed from here explicitly rather than
@@ -562,6 +562,31 @@ def threads_callback():
         logger.exception("[app_kalshi] threads token exchange failed")
         return jsonify({"ok": False, "error": str(exc)}), 500
     return jsonify({"ok": True, "message": "Threads account linked. You can close this tab."})
+
+
+@app.route("/api/perps/report.pdf")
+def api_perps_report_pdf():
+    """Downloadable PDF account report -- "what has the live account
+    actually made" as a document, not just a dashboard someone has to
+    screenshot. Pulls from the exact same durable state (trade_log,
+    realized_pnl_by_date) and real account balance /api/status itself
+    uses, so the numbers always match. Unlike the Threads-posting
+    modules, this is NOT best-effort by design: a user who just clicked
+    "download" should see a real error if generation fails, not silent
+    nothing."""
+    from data import perps_report
+
+    state = perps_strategy._load_state()  # noqa: SLF001
+    account = _cached_account_snapshot()
+    pdf_bytes = perps_report.generate_pdf_report(
+        state=state, account_balance_usd=account.get("available_balance_usd"),
+        live_trading_enabled=perps_strategy.LIVE_TRADING_ENABLED,
+    )
+    filename = f"kalshi-perps-report-{dt.datetime.now(dt.timezone.utc).date().isoformat()}.pdf"
+    return Response(
+        pdf_bytes, mimetype="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.route("/api/status")
