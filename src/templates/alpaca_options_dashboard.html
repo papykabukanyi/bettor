@@ -110,8 +110,8 @@
   <h3>Open Positions</h3>
   <div class="scroll-x">
     <table>
-      <thead><tr><th>Contract</th><th>Underlying</th><th>Type</th><th>Strike</th><th>Expires</th><th>Entry</th><th>Contracts</th><th>Take Profit</th><th>Stop Loss</th><th>Opened</th></tr></thead>
-      <tbody id="positions-body"><tr><td colspan="10" class="empty">No open positions</td></tr></tbody>
+      <thead><tr><th>Strategy</th><th>Contract(s)</th><th>Underlying</th><th>Type</th><th>Strike(s)</th><th>Expires</th><th>Entry (net)</th><th>Qty</th><th>Take Profit</th><th>Stop Loss</th><th>Opened</th></tr></thead>
+      <tbody id="positions-body"><tr><td colspan="11" class="empty">No open positions</td></tr></tbody>
     </table>
   </div>
 </section>
@@ -300,17 +300,23 @@ async function refreshStatus() {
       : "scanning underlyings for a directional entry";
 
     const posBody = document.getElementById("positions-body");
-    patchTable(posBody, positions, p => p.symbol, p => `
-        <td><strong>${p.symbol}</strong></td>
+    patchTable(posBody, positions, p => p.symbol, p => {
+      const isSpread = p.strategy === "debit_spread";
+      const contracts = isSpread ? `${p.symbol}<br><span class="sub">short: ${p.short_symbol}</span>` : p.symbol;
+      const strikes = isSpread ? `${fmtPrice(p.long_strike)} / ${fmtPrice(p.short_strike)}` : fmtPrice(p.strike_price);
+      return `
+        <td><span class="tag ${isSpread ? "wait" : "yes"}">${isSpread ? "SPREAD" : "NAKED"}</span></td>
+        <td><strong>${contracts}</strong></td>
         <td>${p.underlying_symbol}</td>
         <td><span class="tag ${p.option_type === "call" ? "call" : "put"}">${(p.option_type || "--").toUpperCase()}</span></td>
-        <td>${fmtPrice(p.strike_price)}</td>
+        <td>${strikes}</td>
         <td>${timeUntil(p.expiration_date)}</td>
         <td>${fmtPrice(p.entry_price)}</td>
         <td>${fmtCount(p.count)}</td>
         <td class="stat pos" style="font-size:13px;">${fmtPrice(p.take_profit_price)}</td>
         <td class="stat neg" style="font-size:13px;">${fmtPrice(p.stop_loss_price)}</td>
-        <td>${timeAgo(p.opened_at)}</td>`, 10, "No open positions");
+        <td>${timeAgo(p.opened_at)}</td>`;
+    }, 11, "No open positions");
   } catch (e) { console.error("positions render failed", e); }
 
   try {

@@ -28,14 +28,25 @@ just mechanically ported from the equities/crypto strategies:
     going worthless for reasons that have nothing to do with the
     strategy's own exit logic.
 
-  - No broker-native bracket order (Alpaca's own docs don't address
-    order_class for options at all -- treated here as "assume unsupported
-    until proven otherwise"), so exits are managed by this bot's own poll
-    loop, the same pattern already proven for crypto.
+  - No broker-native BRACKET order for options, so exits (take-profit/
+    stop-loss/max-hold/near-expiration) are managed by this bot's own poll
+    loop, the same pattern already proven for crypto. Alpaca DOES support
+    a real order_class for options, though: "mleg" (multi-leg), confirmed
+    via their own docs AND this account's real options_approved_level (3)
+    -- see ENTRY_STRATEGY below.
 
-  - Position sizing is a whole number of CONTRACTS (qty), sized from the
-    contract's own premium * its 100-share multiplier -- options don't
+  - Position sizing is a whole number of CONTRACTS/SPREADS (qty), sized
+    from the position's own entry cost (a naked contract's premium, or a
+    spread's net debit) * its 100-share multiplier -- options don't
     support notional orders at all (confirmed via Alpaca's docs).
+
+  - Two entry strategies, selected by ENTRY_STRATEGY (default
+    "debit_spread"): a naked long call/put (unlimited upside, full
+    premium at risk, Level 2), or a vertical debit spread (the same near-
+    the-money contract PLUS a further-out-of-the-money short leg sold
+    against it -- cheaper to enter, capped gain AND capped loss, Level 3;
+    see select_spread_contracts/build_option_spread_order). Same
+    directional signal either way -- this only changes how it's expressed.
 """
 from __future__ import annotations
 
@@ -120,6 +131,39 @@ MAX_CONCURRENT_POSITIONS = max(1, _env_int("ALPACA_OPTIONS_MAX_CONCURRENT_POSITI
 DAILY_LOSS_CAP_PCT = _env_float("ALPACA_OPTIONS_DAILY_LOSS_CAP_PCT", 0.10)
 
 LIVE_TRADING_ENABLED = str(os.getenv("ALPACA_OPTIONS_LIVE_TRADING_ENABLED", "")).strip().lower() in {"1", "true", "yes"}
+
+# "Need to know about all the ways to make money with options" -- confirmed
+# via Alpaca's own docs that this account's REAL options_approved_level is
+# 3, which explicitly covers vertical debit spreads ("Buy a call spread"/
+# "Buy a put spread") as a genuine order_class="mleg" order, not just
+# naked long calls/puts (Level 2). A debit spread buys the same near-the-
+# money contract this strategy already picks, then SELLS a further-out-of-
+# the-money contract against it -- cheaper to enter (the short leg's
+# premium partially offsets the long leg's cost) and DEFINED-RISK (max
+# gain AND max loss are both capped the instant it's opened), in exchange
+# for giving up unlimited upside. Same directional signal this strategy's
+# model already produces either way -- this only changes HOW that read
+# gets expressed, not what triggers it.
+#
+# Default "debit_spread", not "naked": cheaper entries mean the same
+# POSITION_SIZE_PCT budget affords MORE simultaneous positions -- directly
+# serves "place a lot of options trades of many profitable legs" (the
+# reason MAX_CONCURRENT_POSITIONS/POSITION_SIZE_PCT were raised earlier).
+# Fully revertable via env var if naked calls/puts (uncapped upside, no
+# short-leg liquidity dependency) turn out to perform better once there's
+# real trade history for both.
+ENTRY_STRATEGY = os.getenv("ALPACA_OPTIONS_ENTRY_STRATEGY", "debit_spread").strip().lower()
+if ENTRY_STRATEGY not in {"debit_spread", "naked"}:
+    ENTRY_STRATEGY = "debit_spread"
+
+# mleg orders require a real limit price -- unlike build_option_order's
+# plain market order, there's no way to say "fill at whatever the market
+# clears at" for a multi-leg combo (confirmed via Alpaca's own docs: every
+# multi-leg example uses type="limit"). A marketable limit priced slightly
+# worse than the current net mid (get_current_spread_price) keeps a real
+# chance of actually filling without paying/accepting an unbounded price --
+# same tradeoff any real limit order makes.
+SPREAD_LIMIT_SLIPPAGE_PCT = _env_float("ALPACA_OPTIONS_SPREAD_LIMIT_SLIPPAGE_PCT", 0.10)
 
 
 def evaluate_candidate(row: dict[str, Any], model_prediction: dict[str, Any] | None) -> dict[str, Any]:
@@ -339,6 +383,23 @@ def get_current_option_price(contract_symbol: str) -> float | None:
         return None
 
 
+def get_current_spread_price(long_symbol: str, short_symbol: str) -> float | None:
+    """Net MID value of a vertical spread -- the long leg's own mid quote
+    minus the short leg's own mid quote, same bid/ask-averaging
+    simplification get_current_option_price already uses for a single
+    contract, applied to both legs. This is what decide_exit/
+    position_exit_levels compare against entry_price for a debit-spread
+    position (see scan_and_enter) -- a rising net value is favorable, the
+    exact same "long the underlying instrument" shape a naked long call/
+    put already has, just computed from two quotes instead of one. None if
+    either leg's quote is unavailable."""
+    long_price = get_current_option_price(long_symbol)
+    short_price = get_current_option_price(short_symbol)
+    if long_price is None or short_price is None:
+        return None
+    return round(long_price - short_price, 4)
+
+
 def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = None) -> dict[str, Any]:
     """Evaluates each underlying for a directional options entry. Requires
     a real trained model (see evaluate_candidate) -- no technical-only
@@ -367,7 +428,7 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
     never gated by this -- managing existing risk is always allowed,
     only NEW entries wait out the edge."""
     from data.alpaca_data import get_market_session
-    from data.alpaca_options_data import get_options_universe, latest_feature_row, select_contract
+    from data.alpaca_options_data import get_options_universe, latest_feature_row, select_contract, select_spread_contracts
     from data.alpaca_options_model import predict_direction
     from data import alpaca_client, threads_post
 
@@ -407,36 +468,83 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
                 opened.append({"symbol": symbol, "ok": True, "action": "skipped", "reason": candidate["reason"]})
                 continue
 
-            contract = select_contract(symbol, direction=candidate["direction"], current_price=row["current_price"])
-            if contract is None:
-                opened.append({"symbol": symbol, "ok": True, "action": "skipped_no_contract"})
-                continue
-            contract_symbol = contract["symbol"]
+            if ENTRY_STRATEGY == "debit_spread":
+                spread = select_spread_contracts(symbol, direction=candidate["direction"], current_price=row["current_price"])
+                if spread is None:
+                    opened.append({"symbol": symbol, "ok": True, "action": "skipped_no_contract"})
+                    continue
+                long_contract, short_contract = spread
+                long_symbol, short_symbol = long_contract["symbol"], short_contract["symbol"]
 
-            contract_price = get_current_option_price(contract_symbol)
-            if contract_price is None or contract_price <= 0:
-                opened.append({"symbol": symbol, "ok": True, "action": "skipped_no_option_quote"})
-                continue
+                # net_debit is what a naked contract's own contract_price
+                # represents below -- the "cost per position unit"
+                # compute_contract_qty/position_exit_levels/decide_exit
+                # are all already generic against, so nothing downstream
+                # needs to know this came from two quotes instead of one.
+                net_debit = get_current_spread_price(long_symbol, short_symbol)
+                if net_debit is None or net_debit <= 0:
+                    opened.append({"symbol": symbol, "ok": True, "action": "skipped_no_option_quote"})
+                    continue
 
-            available_balance = get_available_balance()
-            qty = compute_contract_qty(available_balance, contract_price)
-            if qty < 1:
-                opened.append({"symbol": symbol, "ok": True, "action": "skipped_insufficient_budget"})
-                continue
+                available_balance = get_available_balance()
+                qty = compute_contract_qty(available_balance, net_debit)
+                if qty < 1:
+                    opened.append({"symbol": symbol, "ok": True, "action": "skipped_insufficient_budget"})
+                    continue
 
-            levels = position_exit_levels({"entry_price": contract_price})
-            order_id = None
-            if MODE == "live" and not effective_dry_run:
-                order_spec = alpaca_client.build_option_order(symbol=contract_symbol, side="buy", qty=qty)
-                order_id = alpaca_client.place_order(order_spec)
+                levels = position_exit_levels({"entry_price": net_debit})
+                order_id = None
+                if MODE == "live" and not effective_dry_run:
+                    limit_price = net_debit * (1 + SPREAD_LIMIT_SLIPPAGE_PCT)
+                    order_spec = alpaca_client.build_option_spread_order(
+                        long_symbol=long_symbol, short_symbol=short_symbol, qty=qty, limit_price=limit_price,
+                    )
+                    order_id = alpaca_client.place_order(order_spec)
 
-            position = {
-                "symbol": contract_symbol, "underlying_symbol": symbol, "option_type": contract.get("type"),
-                "expiration_date": contract.get("expiration_date"), "strike_price": contract.get("strike_price"),
-                "entry_price": contract_price, "count": qty,
-                "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(),
-                "order_id": order_id, **levels,
-            }
+                position = {
+                    "symbol": long_symbol, "underlying_symbol": symbol, "option_type": long_contract.get("type"),
+                    "strategy": "debit_spread", "short_symbol": short_symbol,
+                    "long_strike": long_contract.get("strike_price"), "short_strike": short_contract.get("strike_price"),
+                    "expiration_date": long_contract.get("expiration_date"),
+                    "entry_price": net_debit, "count": qty,
+                    "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+                    "order_id": order_id, **levels,
+                }
+                contract_symbol, contract_type, entry_price = long_symbol, long_contract.get("type"), net_debit
+            else:
+                contract = select_contract(symbol, direction=candidate["direction"], current_price=row["current_price"])
+                if contract is None:
+                    opened.append({"symbol": symbol, "ok": True, "action": "skipped_no_contract"})
+                    continue
+                contract_symbol = contract["symbol"]
+
+                contract_price = get_current_option_price(contract_symbol)
+                if contract_price is None or contract_price <= 0:
+                    opened.append({"symbol": symbol, "ok": True, "action": "skipped_no_option_quote"})
+                    continue
+
+                available_balance = get_available_balance()
+                qty = compute_contract_qty(available_balance, contract_price)
+                if qty < 1:
+                    opened.append({"symbol": symbol, "ok": True, "action": "skipped_insufficient_budget"})
+                    continue
+
+                levels = position_exit_levels({"entry_price": contract_price})
+                order_id = None
+                if MODE == "live" and not effective_dry_run:
+                    order_spec = alpaca_client.build_option_order(symbol=contract_symbol, side="buy", qty=qty)
+                    order_id = alpaca_client.place_order(order_spec)
+
+                position = {
+                    "symbol": contract_symbol, "underlying_symbol": symbol, "option_type": contract.get("type"),
+                    "strategy": "naked",
+                    "expiration_date": contract.get("expiration_date"), "strike_price": contract.get("strike_price"),
+                    "entry_price": contract_price, "count": qty,
+                    "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+                    "order_id": order_id, **levels,
+                }
+                contract_type, entry_price = contract.get("type"), contract_price
+
             with _STATE_LOCK:
                 state = _load_state()
                 positions = state.get("positions") or []
@@ -451,12 +559,13 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
             trade_dry_run = effective_dry_run if MODE == "live" else True
             opened.append({
                 "symbol": symbol, "ok": True, "action": "opened", "contract_symbol": contract_symbol,
-                "option_type": contract.get("type"), "entry_price": contract_price, "count": qty, "dry_run": trade_dry_run,
+                "strategy": position["strategy"], "option_type": contract_type, "entry_price": entry_price,
+                "count": qty, "dry_run": trade_dry_run,
             })
             try:
                 threads_post.post_trade_entry(
                     ticker=contract_symbol, side="long",
-                    entry_price=contract_price, take_profit_price=levels["take_profit_price"],
+                    entry_price=entry_price, take_profit_price=levels["take_profit_price"],
                     stop_loss_price=levels["stop_loss_price"], reason=candidate["reason"], dry_run=trade_dry_run,
                     market="options",
                 )
@@ -497,8 +606,12 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
     for position in positions:
         contract_symbol = position["symbol"]
         underlying_symbol = position["underlying_symbol"]
+        is_spread = position.get("strategy") == "debit_spread"
         try:
-            current_price = get_current_option_price(contract_symbol)
+            if is_spread:
+                current_price = get_current_spread_price(contract_symbol, position["short_symbol"])
+            else:
+                current_price = get_current_option_price(contract_symbol)
             if current_price is None:
                 checks.append({"symbol": contract_symbol, "ok": False, "error": "no_quote_available"})
                 continue
@@ -511,7 +624,19 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
             if MODE == "live" and not effective_dry_run:
                 from data import alpaca_client
                 try:
-                    order_spec = alpaca_client.build_option_order(symbol=contract_symbol, side="sell", qty=int(position["count"]))
+                    if is_spread:
+                        # Closing a debit spread is typically a net CREDIT
+                        # received (or a smaller debit paid, if closing at
+                        # a loss) -- priced slightly below the current mid
+                        # to stay marketable, same slippage buffer opening
+                        # a spread uses in the opposite direction.
+                        limit_price = max(0.01, current_price * (1 - SPREAD_LIMIT_SLIPPAGE_PCT))
+                        order_spec = alpaca_client.build_option_spread_order(
+                            long_symbol=contract_symbol, short_symbol=position["short_symbol"],
+                            qty=int(position["count"]), limit_price=limit_price, closing=True,
+                        )
+                    else:
+                        order_spec = alpaca_client.build_option_order(symbol=contract_symbol, side="sell", qty=int(position["count"]))
                     alpaca_client.place_order(order_spec)
                 except Exception as exc:
                     logger.warning("[alpaca_options_strategy] close order failed for %s: %s", contract_symbol, exc)
@@ -526,6 +651,7 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                 trade = {
                     "closed_at": dt.datetime.now(dt.timezone.utc).isoformat(),
                     "symbol": contract_symbol, "underlying_symbol": underlying_symbol,
+                    "strategy": position.get("strategy", "naked"),
                     "entry_price": position["entry_price"], "exit_price": current_price,
                     "count": position["count"], "realized_pnl_usd": gross, "reason": reason,
                     "dry_run": effective_dry_run if MODE == "live" else True,

@@ -289,6 +289,44 @@ def test_build_option_order_shape():
     assert order == {"symbol": "AAPL250620C00100000", "qty": "2", "side": "buy", "type": "market", "time_in_force": "day"}
 
 
+def test_build_option_spread_order_opening_shape():
+    """Real, confirmed-via-Alpaca's-own-docs shape: order_class="mleg",
+    a limit order, both legs with buy_to_open/sell_to_open intent."""
+    order = alpaca_client.build_option_spread_order(
+        long_symbol="AAPL250117C00190000", short_symbol="AAPL250117C00210000", qty=2, limit_price=1.5,
+    )
+    assert order["order_class"] == "mleg"
+    assert order["type"] == "limit"
+    assert order["qty"] == "2"
+    assert order["limit_price"] == "1.50"
+    assert order["time_in_force"] == "day"
+    assert order["legs"] == [
+        {"symbol": "AAPL250117C00190000", "side": "buy", "ratio_qty": "1", "position_intent": "buy_to_open"},
+        {"symbol": "AAPL250117C00210000", "side": "sell", "ratio_qty": "1", "position_intent": "sell_to_open"},
+    ]
+
+
+def test_build_option_spread_order_closing_shape_reverses_the_legs():
+    order = alpaca_client.build_option_spread_order(
+        long_symbol="AAPL250117C00190000", short_symbol="AAPL250117C00210000", qty=2, limit_price=0.8, closing=True,
+    )
+    assert order["legs"] == [
+        {"symbol": "AAPL250117C00190000", "side": "sell", "ratio_qty": "1", "position_intent": "sell_to_close"},
+        {"symbol": "AAPL250117C00210000", "side": "buy", "ratio_qty": "1", "position_intent": "buy_to_close"},
+    ]
+
+
+def test_build_option_spread_order_limit_price_is_always_positive():
+    """Confirmed via Alpaca's own docs: limit_price is always a positive
+    number regardless of debit/credit direction -- a negative net value
+    (e.g. computed from bid/ask spread math) must not leak through as a
+    negative limit_price."""
+    order = alpaca_client.build_option_spread_order(
+        long_symbol="A", short_symbol="B", qty=1, limit_price=-0.5, closing=True,
+    )
+    assert order["limit_price"] == "0.50"
+
+
 def test_build_bracket_order_shape_for_a_buy():
     order = alpaca_client.build_bracket_order(
         symbol="AAPL", quantity=10, side="buy", take_profit_price=101.0, stop_loss_price=98.0,

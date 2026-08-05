@@ -160,6 +160,7 @@ def _contract(**overrides):
 
 
 def test_scan_and_enter_simulate_mode_opens_a_paper_position_without_any_real_order(monkeypatch):
+    monkeypatch.setattr(strat, "ENTRY_STRATEGY", "naked")
     monkeypatch.setattr(alpaca_options_data, "get_options_universe", lambda: ["AAPL"])
     monkeypatch.setattr(alpaca_options_data, "latest_feature_row", lambda symbol: _row())
     monkeypatch.setattr(alpaca_options_model, "predict_direction", lambda symbol: {"model_ok": True, "probability_up": 0.7})
@@ -275,6 +276,7 @@ def test_scan_and_enter_respects_max_concurrent_positions(monkeypatch):
 
 
 def test_scan_and_enter_posts_to_threads_on_a_simulated_entry(monkeypatch):
+    monkeypatch.setattr(strat, "ENTRY_STRATEGY", "naked")
     monkeypatch.setattr(alpaca_options_data, "get_options_universe", lambda: ["AAPL"])
     monkeypatch.setattr(alpaca_options_data, "latest_feature_row", lambda symbol: _row())
     monkeypatch.setattr(alpaca_options_model, "predict_direction", lambda symbol: {"model_ok": True, "probability_up": 0.7})
@@ -292,6 +294,7 @@ def test_scan_and_enter_posts_to_threads_on_a_simulated_entry(monkeypatch):
 
 
 def test_scan_and_enter_still_opens_the_position_even_if_threads_post_raises(monkeypatch):
+    monkeypatch.setattr(strat, "ENTRY_STRATEGY", "naked")
     monkeypatch.setattr(alpaca_options_data, "get_options_universe", lambda: ["AAPL"])
     monkeypatch.setattr(alpaca_options_data, "latest_feature_row", lambda symbol: _row())
     monkeypatch.setattr(alpaca_options_model, "predict_direction", lambda symbol: {"model_ok": True, "probability_up": 0.7})
@@ -309,6 +312,7 @@ def test_scan_and_enter_still_opens_the_position_even_if_threads_post_raises(mon
 
 
 def test_scan_and_enter_one_symbol_failing_does_not_block_the_others(monkeypatch):
+    monkeypatch.setattr(strat, "ENTRY_STRATEGY", "naked")
     monkeypatch.setattr(alpaca_options_data, "get_options_universe", lambda: ["BAD", "AAPL"])
 
     def fake_feature_row(symbol):
@@ -443,3 +447,159 @@ def test_manage_open_positions_force_closes_near_expiration(monkeypatch):
     result = strat.manage_open_positions()
     assert result["action"] == "closed"
     assert result["closed"][0]["reason"] == "near_expiration"
+
+
+# ---------------------------------------------------------------------------
+# Vertical debit spreads -- ENTRY_STRATEGY's default. Confirmed via
+# Alpaca's own docs (and this account's real options_approved_level, 3)
+# that "Buy a call spread"/"Buy a put spread" is a genuine order_class=
+# "mleg" order, not just naked long calls/puts (Level 2).
+# ---------------------------------------------------------------------------
+def _spread_contracts(**overrides):
+    long_contract = {
+        "symbol": "AAPL240223C00195000", "type": "call", "strike_price": 195.0,
+        "expiration_date": (dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=30)).date().isoformat(),
+    }
+    short_contract = {
+        "symbol": "AAPL240223C00200000", "type": "call", "strike_price": 200.0,
+        "expiration_date": long_contract["expiration_date"],
+    }
+    long_contract.update(overrides.get("long", {}))
+    short_contract.update(overrides.get("short", {}))
+    return long_contract, short_contract
+
+
+def test_get_current_spread_price_is_the_net_of_both_legs_mid_quotes(monkeypatch):
+    def fake_quote(symbol):
+        return {"AAPL240223C00195000": {"ap": 2.1, "bp": 1.9}, "AAPL240223C00200000": {"ap": 1.1, "bp": 0.9}}[symbol]
+
+    monkeypatch.setattr(alpaca_client, "get_option_latest_quote", fake_quote)
+    net = strat.get_current_spread_price("AAPL240223C00195000", "AAPL240223C00200000")
+    assert net == pytest.approx(2.0 - 1.0)  # long mid (2.0) minus short mid (1.0)
+
+
+def test_get_current_spread_price_returns_none_if_either_leg_has_no_quote(monkeypatch):
+    monkeypatch.setattr(alpaca_client, "get_option_latest_quote", lambda symbol: {})
+    assert strat.get_current_spread_price("A", "B") is None
+
+
+def test_scan_and_enter_debit_spread_is_the_default_entry_strategy():
+    assert strat.ENTRY_STRATEGY == "debit_spread"
+
+
+def test_scan_and_enter_opens_a_debit_spread_position_by_default(monkeypatch):
+    monkeypatch.setattr(alpaca_options_data, "get_options_universe", lambda: ["AAPL"])
+    monkeypatch.setattr(alpaca_options_data, "latest_feature_row", lambda symbol: _row())
+    monkeypatch.setattr(alpaca_options_model, "predict_direction", lambda symbol: {"model_ok": True, "probability_up": 0.7})
+    monkeypatch.setattr(alpaca_options_data, "select_spread_contracts", lambda underlying, *, direction, current_price: _spread_contracts())
+
+    def fake_quote(symbol):
+        return {"AAPL240223C00195000": {"ap": 2.1, "bp": 1.9}, "AAPL240223C00200000": {"ap": 1.1, "bp": 0.9}}[symbol]
+
+    monkeypatch.setattr(alpaca_client, "get_option_latest_quote", fake_quote)
+
+    def fail_if_called(*a, **k):
+        raise AssertionError("simulate mode must never place a real order")
+
+    monkeypatch.setattr(alpaca_client, "place_order", fail_if_called)
+
+    result = strat.scan_and_enter()
+    assert result["opened"][0]["action"] == "opened"
+    assert result["opened"][0]["strategy"] == "debit_spread"
+    assert result["opened"][0]["entry_price"] == pytest.approx(1.0)  # net debit: long mid 2.0 - short mid 1.0
+
+    state = strat._load_state()  # noqa: SLF001
+    position = state["positions"][0]
+    assert position["symbol"] == "AAPL240223C00195000"  # the long leg
+    assert position["short_symbol"] == "AAPL240223C00200000"
+    assert position["strategy"] == "debit_spread"
+    assert position["entry_price"] == pytest.approx(1.0)
+
+
+def test_scan_and_enter_skips_a_spread_when_no_short_leg_is_available(monkeypatch):
+    monkeypatch.setattr(alpaca_options_data, "get_options_universe", lambda: ["AAPL"])
+    monkeypatch.setattr(alpaca_options_data, "latest_feature_row", lambda symbol: _row())
+    monkeypatch.setattr(alpaca_options_model, "predict_direction", lambda symbol: {"model_ok": True, "probability_up": 0.7})
+    monkeypatch.setattr(alpaca_options_data, "select_spread_contracts", lambda underlying, *, direction, current_price: None)
+
+    result = strat.scan_and_enter()
+    assert result["opened"][0]["action"] == "skipped_no_contract"
+
+
+def test_scan_and_enter_live_mode_places_a_real_mleg_order_for_a_spread(monkeypatch):
+    monkeypatch.setattr(strat, "MODE", "live")
+    monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", True)
+    monkeypatch.setattr(alpaca_options_data, "get_options_universe", lambda: ["AAPL"])
+    monkeypatch.setattr(alpaca_options_data, "latest_feature_row", lambda symbol: _row())
+    monkeypatch.setattr(alpaca_options_model, "predict_direction", lambda symbol: {"model_ok": True, "probability_up": 0.7})
+    monkeypatch.setattr(alpaca_options_data, "select_spread_contracts", lambda underlying, *, direction, current_price: _spread_contracts())
+    monkeypatch.setattr(alpaca_client, "get_account", lambda: {"cash": "500.0"})
+
+    def fake_quote(symbol):
+        return {"AAPL240223C00195000": {"ap": 2.1, "bp": 1.9}, "AAPL240223C00200000": {"ap": 1.1, "bp": 0.9}}[symbol]
+
+    monkeypatch.setattr(alpaca_client, "get_option_latest_quote", fake_quote)
+
+    captured = {}
+    monkeypatch.setattr(alpaca_client, "build_option_spread_order", lambda **kw: captured.update(kw) or {"order_class": "mleg"})
+    monkeypatch.setattr(alpaca_client, "place_order", lambda spec: "order-1")
+
+    result = strat.scan_and_enter()
+    assert result["opened"][0]["action"] == "opened"
+    assert captured["long_symbol"] == "AAPL240223C00195000"
+    assert captured["short_symbol"] == "AAPL240223C00200000"
+    assert captured["limit_price"] == pytest.approx(1.0 * (1 + strat.SPREAD_LIMIT_SLIPPAGE_PCT))
+
+
+def test_manage_open_positions_closes_a_debit_spread_on_take_profit(monkeypatch):
+    strat._save_state({  # noqa: SLF001
+        "balance": 500.0, "positions": [{
+            "symbol": "AAPL240223C00195000", "underlying_symbol": "AAPL", "strategy": "debit_spread",
+            "short_symbol": "AAPL240223C00200000", "entry_price": 1.0, "count": 1,
+            "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(), "order_id": None,
+            "expiration_date": (dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=30)).date().isoformat(),
+        }],
+        "trade_log": [], "realized_pnl_by_date": {},
+    })
+    # Net spread value rises to well past TAKE_PROFIT_PCT above the 1.0 entry debit.
+    target = 1.0 * (1 + strat.TAKE_PROFIT_PCT + 0.05)
+
+    def fake_quote(symbol):
+        return {"AAPL240223C00195000": {"ap": target + 1.0, "bp": target + 1.0}, "AAPL240223C00200000": {"ap": 1.0, "bp": 1.0}}[symbol]
+
+    monkeypatch.setattr(alpaca_client, "get_option_latest_quote", fake_quote)
+
+    result = strat.manage_open_positions()
+    assert result["action"] == "closed"
+    assert result["closed"][0]["strategy"] == "debit_spread"
+    assert "take_profit" in result["closed"][0]["reason"]
+
+
+def test_manage_open_positions_live_mode_closes_a_spread_with_a_reversed_mleg_order(monkeypatch):
+    monkeypatch.setattr(strat, "MODE", "live")
+    monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", True)
+    strat._save_state({  # noqa: SLF001
+        "balance": 500.0, "positions": [{
+            "symbol": "AAPL240223C00195000", "underlying_symbol": "AAPL", "strategy": "debit_spread",
+            "short_symbol": "AAPL240223C00200000", "entry_price": 1.0, "count": 1,
+            "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(), "order_id": "order-1",
+            "expiration_date": (dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=30)).date().isoformat(),
+        }],
+        "trade_log": [], "realized_pnl_by_date": {},
+    })
+    target = 1.0 * (1 + strat.TAKE_PROFIT_PCT + 0.05)
+
+    def fake_quote(symbol):
+        return {"AAPL240223C00195000": {"ap": target + 1.0, "bp": target + 1.0}, "AAPL240223C00200000": {"ap": 1.0, "bp": 1.0}}[symbol]
+
+    monkeypatch.setattr(alpaca_client, "get_option_latest_quote", fake_quote)
+
+    captured = {}
+    monkeypatch.setattr(alpaca_client, "build_option_spread_order", lambda **kw: captured.update(kw) or {"order_class": "mleg"})
+    monkeypatch.setattr(alpaca_client, "place_order", lambda spec: "order-2")
+
+    result = strat.manage_open_positions()
+    assert result["action"] == "closed"
+    assert captured["closing"] is True
+    assert captured["long_symbol"] == "AAPL240223C00195000"
+    assert captured["short_symbol"] == "AAPL240223C00200000"

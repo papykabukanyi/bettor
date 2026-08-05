@@ -113,6 +113,77 @@ def select_contract(underlying: str, *, direction: str, current_price: float) ->
 
 
 # ---------------------------------------------------------------------------
+# Vertical DEBIT SPREADS -- confirmed via Alpaca's own docs (options-level-3
+# -trading page): this account's real options_approved_level is 3, which
+# explicitly supports "Buy a call spread"/"Buy a put spread" as a genuine
+# order_class="mleg" order (see alpaca_client.build_option_spread_order).
+# A debit spread buys the same near-the-money contract select_contract()
+# already picks, then SELLS a further-out-of-the-money contract (same
+# underlying, same expiration) against it -- the premium collected on that
+# short leg partially offsets the long leg's cost, so the spread is
+# CHEAPER to enter than the naked long option alone, and both the max gain
+# AND max loss are capped at a known amount the instant it's opened
+# (defined risk -- a real difference from a naked long call/put, whose
+# max loss is the full premium and whose max gain is technically
+# unbounded). The tradeoff: capped upside in exchange for a cheaper entry
+# and a smaller max loss -- a genuinely different, valid way to express
+# the exact same directional read this strategy's model already produces,
+# not a different signal.
+#
+# Width in DOLLARS, not a fixed number of strikes -- strike increments
+# vary by underlying/price (e.g. $1 increments near a $150 stock, $5 or
+# more near a $600 one), so a fixed strike-count offset would mean a
+# wildly different real width across this module's own OPTIONS_UNDERLYINGS
+# list.
+SPREAD_WIDTH_DOLLARS = float(os.getenv("ALPACA_OPTIONS_SPREAD_WIDTH_DOLLARS", "5.0") or "5.0")
+
+
+def select_spread_contracts(
+    underlying: str, *, direction: str, current_price: float,
+) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    """Picks BOTH legs of a vertical debit spread for a directional bet:
+    "up" buys the near-the-money call and sells a further-OTM call against
+    it (short strike ABOVE the long strike); "down" buys the near-the-money
+    put and sells a further-OTM put (short strike BELOW the long strike).
+    Both legs come from the SAME expiration as select_contract()'s own
+    near-the-money pick -- a true vertical spread, not a calendar spread.
+    Returns (long_contract, short_contract), or None if either leg can't be
+    found (e.g. this underlying's chain has no strike far enough out, or no
+    listed options at all)."""
+    long_contract = select_contract(underlying, direction=direction, current_price=current_price)
+    if long_contract is None:
+        return None
+    option_type = long_contract["type"]
+    expiration_date = long_contract["expiration_date"]
+    long_strike = float(long_contract["strike_price"])
+
+    try:
+        same_expiry = alpaca_client.get_option_contracts(
+            underlying_symbols=[underlying], expiration_date_gte=expiration_date,
+            expiration_date_lte=expiration_date, option_type=option_type,
+        )
+    except Exception as exc:
+        logger.warning("[alpaca_options_data] short-leg lookup failed for %s: %s", underlying, exc)
+        return None
+    tradable = [c for c in same_expiry if c.get("tradable") and c.get("symbol") != long_contract["symbol"]]
+    if not tradable:
+        return None
+
+    if option_type == "call":
+        candidates = [c for c in tradable if float(c.get("strike_price") or 0.0) >= long_strike + SPREAD_WIDTH_DOLLARS]
+        candidates.sort(key=lambda c: float(c["strike_price"]))  # nearest strike above the width first
+    else:
+        candidates = [c for c in tradable if float(c.get("strike_price") or 0.0) <= long_strike - SPREAD_WIDTH_DOLLARS]
+        candidates.sort(key=lambda c: -float(c["strike_price"]))  # nearest strike below the width first
+    if not candidates:
+        return None
+
+    liquid = [c for c in candidates if int(c.get("open_interest") or 0) >= MIN_OPEN_INTEREST]
+    pool = liquid if liquid else candidates
+    return long_contract, pool[0]
+
+
+# ---------------------------------------------------------------------------
 # Dataset archival -- same shard-per-day-across-all-underlyings convention
 # as every other pipeline here, own HF repo.
 # ---------------------------------------------------------------------------

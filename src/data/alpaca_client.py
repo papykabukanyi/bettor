@@ -304,16 +304,59 @@ def get_option_latest_quote(symbol: str) -> dict[str, Any]:
 
 
 def build_option_order(*, symbol: str, side: str, qty: int) -> dict[str, Any]:
-    """A plain market order for one option contract. `qty` must be a whole
-    number of contracts (confirmed via Alpaca's own docs -- `notional` is
-    explicitly rejected for options), `time_in_force` restricted to day/gtc
-    (using "day", matching how the equities strategy already places its
-    entries). Not a bracket order -- Alpaca's docs don't address
-    order_class for options at all, which this codebase treats as "assume
-    unsupported until proven otherwise" -- so take-profit/stop-loss/
-    max-hold here are managed by the caller's own poll-and-close loop, the
-    same pattern already proven for crypto."""
+    """A plain market order for a SINGLE (naked) option contract. `qty`
+    must be a whole number of contracts (confirmed via Alpaca's own docs --
+    `notional` is explicitly rejected for options), `time_in_force`
+    restricted to day/gtc (using "day", matching how the equities strategy
+    already places its entries). Not a bracket order -- take-profit/stop-
+    loss/max-hold here are managed by the caller's own poll-and-close loop,
+    the same pattern already proven for crypto. For a two-leg vertical
+    spread instead of a single naked contract, see
+    build_option_spread_order below -- Alpaca DOES support a real
+    order_class for options (order_class="mleg", confirmed via their own
+    docs), just not a bracket one."""
     return {"symbol": symbol, "qty": str(int(qty)), "side": side, "type": "market", "time_in_force": "day"}
+
+
+def build_option_spread_order(
+    *, long_symbol: str, short_symbol: str, qty: int, limit_price: float, closing: bool = False,
+) -> dict[str, Any]:
+    """A two-leg vertical spread order -- order_class="mleg", confirmed via
+    Alpaca's own docs (options-level-3-trading) as a real, supported order
+    shape: this account's actual options_approved_level is 3, which
+    explicitly covers "Buy a call spread"/"Buy a put spread". Each leg
+    carries its own symbol/side/ratio_qty/position_intent; Alpaca's own
+    published examples show ratio_qty="1" for a simple 1:1 vertical (no
+    unequal-ratio backspread/ratio-spread support attempted here).
+
+    Alpaca requires a real LIMIT order for multi-leg -- every example in
+    their own docs uses type="limit", no market mleg order type exists.
+    `limit_price` is always a POSITIVE number representing the combined
+    net premium threshold for the WHOLE spread (confirmed via Alpaca's own
+    examples: "all limit_price values are positive numbers regardless of
+    debit/credit direction" -- Alpaca infers debit vs credit from the
+    actual leg sides, not this field's sign), not a per-leg price the way
+    build_option_order's single-leg order is.
+
+    closing=False (opening a new spread): buy_to_open the long leg,
+    sell_to_open the short leg -- a net DEBIT paid, the cost of entering.
+    closing=True (exiting an existing spread): the reverse trade --
+    sell_to_close the long leg, buy_to_close the short leg -- typically a
+    net CREDIT received (or a smaller debit paid, if closing at a loss)."""
+    if closing:
+        legs = [
+            {"symbol": long_symbol, "side": "sell", "ratio_qty": "1", "position_intent": "sell_to_close"},
+            {"symbol": short_symbol, "side": "buy", "ratio_qty": "1", "position_intent": "buy_to_close"},
+        ]
+    else:
+        legs = [
+            {"symbol": long_symbol, "side": "buy", "ratio_qty": "1", "position_intent": "buy_to_open"},
+            {"symbol": short_symbol, "side": "sell", "ratio_qty": "1", "position_intent": "sell_to_open"},
+        ]
+    return {
+        "order_class": "mleg", "qty": str(int(qty)), "type": "limit",
+        "limit_price": f"{abs(limit_price):.2f}", "time_in_force": "day", "legs": legs,
+    }
 
 
 def build_crypto_order(*, symbol: str, side: str, notional: float | None = None, qty: float | None = None) -> dict[str, Any]:
