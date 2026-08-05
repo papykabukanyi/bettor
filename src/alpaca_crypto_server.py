@@ -359,6 +359,7 @@ def api_alpaca_crypto_status():
             "model_confidence_min": alpaca_crypto_strategy.MODEL_CONFIDENCE_MIN,
             "min_volume_z": alpaca_crypto_strategy.MIN_VOLUME_Z,
             "min_volatility_ratio": alpaca_crypto_strategy.MIN_VOLATILITY_RATIO,
+            "taker_fee_rate": alpaca_crypto_strategy.TAKER_FEE_RATE,
             "fast_check_seconds": ALPACA_CRYPTO_FAST_CHECK_SECONDS,
             "entry_scan_minutes": ALPACA_CRYPTO_CYCLE_MINUTES,
             "data_collect_minutes": ALPACA_CRYPTO_DATA_COLLECT_MINUTES,

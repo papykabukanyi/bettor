@@ -61,12 +61,30 @@ _UNIVERSE_CACHE_TTL_SEC = 24 * 3600
 _universe_cache: dict[str, Any] = {"symbols": None, "computed_at": 0.0}
 
 
+# USD, and the two major dollar-pegged stablecoin quote currencies --
+# USDT/USDC both target a tight 1:1 peg to the dollar, so treating a
+# "XRP/USDT" quote as dollar-denominated for this strategy's own P&L math
+# is a reasonable, deliberate approximation, not a real currency-mixing
+# bug. Explicitly does NOT include BTC-quoted pairs (e.g. "ETH/BTC") --
+# that price is a ratio against another volatile asset, not a dollar
+# figure at all; multiplying it straight into `(current_price - entry_price)
+# * count` the way manage_open_positions() does would produce a nonsense
+# "USD" P&L number, a real correctness bug this deliberately avoids
+# introducing while still widening the pool of tradable pairs.
+_USD_EQUIVALENT_QUOTE_SUFFIXES = ("/USD", "/USDT", "/USDC")
+
+
 def get_crypto_universe(*, force: bool = False) -> list[str]:
-    """Every tradable USD-quoted crypto pair on this Alpaca account
-    (BTC/USD, ETH/USD, ...) -- non-USD-quoted pairs (BTC-quoted, USDC-
-    quoted, USDT-quoted) are skipped for now to keep P&L in a single,
-    unambiguous currency. Cached for _UNIVERSE_CACHE_TTL_SEC, same as
-    alpaca_data.py's equity universe."""
+    """Every tradable USD-equivalent-quoted crypto pair on this Alpaca
+    account (BTC/USD, ETH/USD, XRP/USDT, ... -- see
+    _USD_EQUIVALENT_QUOTE_SUFFIXES for exactly which quote currencies
+    count). Widened from USD-only: Alpaca's own crypto asset list spans
+    56 pairs across 20+ coins quoted in BTC/USD/USDT/USDC combined
+    (confirmed via Alpaca's docs), and restricting to /USD-only left real,
+    tradable pairs (anything quoted only in USDT/USDC) off the table for
+    no platform reason -- the user's own explicit ask was a WIDER universe,
+    not just deeper logic on the same narrow one. Cached for
+    _UNIVERSE_CACHE_TTL_SEC, same as alpaca_data.py's equity universe."""
     now = time.time()
     if not force and _universe_cache["symbols"] is not None and (now - _universe_cache["computed_at"]) < _UNIVERSE_CACHE_TTL_SEC:
         return _universe_cache["symbols"]
@@ -75,7 +93,7 @@ def get_crypto_universe(*, force: bool = False) -> list[str]:
         assets = alpaca_client.get_assets(status="active", asset_class="crypto")
         symbols = sorted({
             a["symbol"] for a in assets
-            if a.get("tradable") and a.get("symbol", "").endswith("/USD")
+            if a.get("tradable") and a.get("symbol", "").endswith(_USD_EQUIVALENT_QUOTE_SUFFIXES)
         })
     except Exception as exc:
         logger.warning("[alpaca_crypto_data] failed to fetch crypto asset universe: %s", exc)

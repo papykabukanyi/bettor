@@ -87,7 +87,8 @@
     <div><span class="k">Live trading</span><span class="v" id="cfg-live">--</span></div>
     <div><span class="k">Position size</span><span class="v" id="cfg-size">--</span></div>
     <div><span class="k">Max concurrent</span><span class="v" id="cfg-maxpos">--</span></div>
-    <div><span class="k">Take profit / Stop loss</span><span class="v" id="cfg-tpsl">--</span></div>
+    <div><span class="k">Take profit / Stop loss (base)</span><span class="v" id="cfg-tpsl">--</span></div>
+    <div><span class="k">Taker fee (round trip)</span><span class="v" id="cfg-fee">--</span></div>
     <div><span class="k">Max hold time</span><span class="v" id="cfg-maxhold">--</span></div>
     <div><span class="k">Daily loss cap</span><span class="v" id="cfg-losscap">--</span></div>
     <div><span class="k">Model confidence min</span><span class="v" id="cfg-conf">--</span></div>
@@ -314,6 +315,7 @@ async function refreshStatus() {
     document.getElementById("cfg-tpsl").textContent =
       (params.take_profit_pct != null ? (params.take_profit_pct * 100).toFixed(2) + "%" : "--") + " / " +
       (params.stop_loss_pct != null ? (params.stop_loss_pct * 100).toFixed(2) + "%" : "--");
+    document.getElementById("cfg-fee").textContent = params.taker_fee_rate != null ? (params.taker_fee_rate * 2 * 100).toFixed(2) + "%" : "--";
     document.getElementById("cfg-maxhold").textContent = params.max_hold_minutes != null ? params.max_hold_minutes + " min" : "--";
     document.getElementById("cfg-losscap").textContent = params.daily_loss_cap_pct != null ? (params.daily_loss_cap_pct * 100).toFixed(0) + "% of balance" : "--";
     document.getElementById("cfg-conf").textContent = params.model_confidence_min != null ? (params.model_confidence_min * 100).toFixed(0) + "%" : "--";

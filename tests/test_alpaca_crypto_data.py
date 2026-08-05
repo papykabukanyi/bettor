@@ -31,16 +31,18 @@ def test_symbol_to_coin():
     assert acd.symbol_to_coin("eth/usd") == "ETH"
 
 
-def test_get_crypto_universe_uses_tradable_usd_quoted_assets(monkeypatch):
+def test_get_crypto_universe_uses_tradable_usd_equivalent_quoted_assets(monkeypatch):
     assets = [
         {"symbol": "BTC/USD", "tradable": True},
         {"symbol": "ETH/USD", "tradable": True},
-        {"symbol": "BTC/USDT", "tradable": True},  # not USD-quoted -- excluded
+        {"symbol": "XRP/USDT", "tradable": True},  # dollar-pegged stablecoin quote -- included
+        {"symbol": "SOL/USDC", "tradable": True},  # dollar-pegged stablecoin quote -- included
+        {"symbol": "ETH/BTC", "tradable": True},  # BTC-quoted, not a dollar figure -- excluded
         {"symbol": "LTC/USD", "tradable": False},  # not tradable -- excluded
     ]
     monkeypatch.setattr(acd.alpaca_client, "get_assets", lambda **kw: assets)
     universe = acd.get_crypto_universe()
-    assert universe == ["BTC/USD", "ETH/USD"]
+    assert universe == ["BTC/USD", "ETH/USD", "SOL/USDC", "XRP/USDT"]
 
 
 def test_get_crypto_universe_is_cached(monkeypatch):

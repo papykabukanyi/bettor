@@ -1,9 +1,12 @@
 """Alpaca crypto strategy decision logic. Mirrors test_alpaca_strategy.py's
 discipline; focuses on what's genuinely different here: notional-based
 position sizing (no whole-share affordability problem), no market-hours
-gating, and plain market close orders instead of a bracket-order
-reconciliation (crypto has no bracket orders on Alpaca at all, so there's
-no "did the broker already close this" race to check for)."""
+gating, and plain market close orders instead of a bracket order (crypto
+has no bracket orders on Alpaca at all) reconciled against real
+/v2/positions state instead -- the same real-account ground-truth check
+perps_strategy.py's own manage_open_positions/scan_and_enter use, brought
+over as part of matching perps' own "brain" (fee accounting, adaptive
+per-pair exits, velocity-based quick-profit, candidate ranking by score)."""
 from __future__ import annotations
 
 import datetime as dt
@@ -332,3 +335,297 @@ def test_manage_open_positions_live_mode_places_a_plain_market_sell(monkeypatch)
     assert result["action"] == "closed"
     assert captured["side"] == "sell"
     assert captured["qty"] == 0.001
+
+
+# ---------------------------------------------------------------------------
+# Fee accounting -- real gap found in review: this strategy was booking
+# GROSS price movement as realized P&L with no fee subtracted at all.
+# ---------------------------------------------------------------------------
+def test_round_trip_fee_usd_charges_taker_rate_on_both_legs():
+    fee = strat.round_trip_fee_usd(100.0, 110.0, 2.0)
+    assert fee == round(100.0 * 2.0 * strat.TAKER_FEE_RATE + 110.0 * 2.0 * strat.TAKER_FEE_RATE, 6)
+    assert fee > 0
+
+
+def test_manage_open_positions_books_net_pnl_after_fees(monkeypatch):
+    strat._save_state({  # noqa: SLF001
+        "balance": 500.0, "positions": [{
+            "symbol": "BTC/USD", "entry_price": 65000.0, "count": 0.001,
+            "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(), "order_id": None,
+        }],
+        "trade_log": [], "realized_pnl_by_date": {},
+    })
+    take_profit_price = 65000.0 * (1 + strat.TAKE_PROFIT_PCT + 0.001)
+    monkeypatch.setattr(alpaca_client, "get_crypto_latest_quote", lambda symbol: {"ap": take_profit_price, "bp": take_profit_price})
+
+    result = strat.manage_open_positions()
+    trade = result["closed"][0]
+    expected_gross = round((take_profit_price - 65000.0) * 0.001, 6)
+    expected_fee = strat.round_trip_fee_usd(65000.0, take_profit_price, 0.001)
+    assert trade["gross_pnl_usd"] == expected_gross
+    assert trade["fee_usd"] == pytest.approx(expected_fee)
+    assert trade["realized_pnl_usd"] == pytest.approx(round(expected_gross - expected_fee, 6))
+    assert trade["realized_pnl_usd"] < trade["gross_pnl_usd"]
+
+
+# ---------------------------------------------------------------------------
+# Candidate ranking by score -- scan_and_enter must fill its limited slots
+# with the BEST qualifying candidates, not whichever sorts first.
+# ---------------------------------------------------------------------------
+def test_evaluate_candidate_score_is_model_confidence_when_model_is_used():
+    result = strat.evaluate_candidate(_row(), {"model_ok": True, "probability_up": 0.83})
+    assert result["should_enter"]
+    assert result["score"] == pytest.approx(0.83)
+
+
+def test_evaluate_candidate_score_is_zero_when_it_does_not_qualify():
+    result = strat.evaluate_candidate(_row(), {"model_ok": True, "probability_up": 0.51})
+    assert not result["should_enter"]
+    assert result["score"] == 0.0
+
+
+def test_scan_and_enter_fills_the_single_slot_with_the_best_scoring_candidate(monkeypatch):
+    monkeypatch.setattr(strat, "MAX_CONCURRENT_POSITIONS", 1)
+    monkeypatch.setattr(alpaca_crypto_data, "get_crypto_universe", lambda: ["ETH/USD", "BTC/USD"])
+
+    def fake_feature_row(symbol):
+        return _entry_row(symbol=symbol, current_price=100.0, short_ma=101.0)
+
+    def fake_predict(symbol):
+        # BTC/USD is the weaker signal, ETH/USD the stronger one -- despite
+        # sorting AFTER "BTC/USD" alphabetically, ETH/USD must win the slot.
+        return {"model_ok": True, "probability_up": 0.60 if symbol == "BTC/USD" else 0.90}
+
+    monkeypatch.setattr(alpaca_crypto_data, "latest_feature_row", fake_feature_row)
+    monkeypatch.setattr(alpaca_crypto_model, "predict_direction", fake_predict)
+
+    result = strat.scan_and_enter()
+    outcomes = {o["symbol"]: o for o in result["opened"]}
+    assert outcomes["ETH/USD"]["action"] == "opened"
+    assert outcomes["BTC/USD"]["action"] == "skipped_slot_taken"
+
+
+def test_scan_and_enter_dedupes_correlated_coins_across_quote_currencies(monkeypatch):
+    """get_crypto_universe() can return more than one quote currency for
+    the same coin (e.g. BTC/USD and BTC/USDT) -- holding both at once
+    would just be two bets on the identical underlying move."""
+    monkeypatch.setattr(strat, "MAX_CONCURRENT_POSITIONS", 5)
+    monkeypatch.setattr(alpaca_crypto_data, "get_crypto_universe", lambda: ["BTC/USD", "BTC/USDT"])
+    monkeypatch.setattr(alpaca_crypto_data, "latest_feature_row", lambda symbol: _entry_row(symbol=symbol))
+    monkeypatch.setattr(alpaca_crypto_model, "predict_direction", lambda symbol: {"model_ok": False})
+
+    result = strat.scan_and_enter()
+    opened_symbols = [o["symbol"] for o in result["opened"] if o["action"] == "opened"]
+    assert len(opened_symbols) == 1
+    state = strat._load_state()  # noqa: SLF001
+    assert len(state["positions"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# Adaptive per-pair exit levels -- scaled to each pair's own volatility_30
+# at entry, not one flat percentage applied identically to every pair.
+# ---------------------------------------------------------------------------
+def test_adaptive_exit_pcts_falls_back_to_flat_defaults_without_volatility():
+    pcts = strat.adaptive_exit_pcts(None)
+    assert pcts["take_profit_pct"] == strat.TAKE_PROFIT_PCT
+    assert pcts["stop_loss_pct"] == strat.STOP_LOSS_PCT
+
+
+def test_adaptive_exit_pcts_scales_with_entry_volatility():
+    low_vol = strat.adaptive_exit_pcts(0.0005)
+    high_vol = strat.adaptive_exit_pcts(0.01)
+    assert high_vol["take_profit_pct"] > low_vol["take_profit_pct"]
+    assert high_vol["stop_loss_pct"] > low_vol["stop_loss_pct"]
+
+
+def test_adaptive_exit_pcts_respects_floors_and_ceilings():
+    tiny = strat.adaptive_exit_pcts(1e-9)
+    assert tiny["take_profit_pct"] >= strat.MIN_TAKE_PROFIT_PCT
+    huge = strat.adaptive_exit_pcts(10.0)
+    assert huge["take_profit_pct"] <= strat.MAX_TAKE_PROFIT_PCT
+
+
+def test_adaptive_exit_pcts_falls_back_to_flat_defaults_on_nan():
+    """Real edge case: a rolling-window feature still NaN this early (e.g.
+    right after a pair's data collection started) must fall back to the
+    same flat defaults as a missing value -- Python's own `nan <= 0` and
+    `not nan` are both False, so a naive falsy/<=0 guard alone would miss
+    this and let NaN propagate into the clamped result."""
+    pcts = strat.adaptive_exit_pcts(float("nan"))
+    assert pcts["take_profit_pct"] == strat.TAKE_PROFIT_PCT
+    assert pcts["stop_loss_pct"] == strat.STOP_LOSS_PCT
+
+
+def test_decide_exit_uses_the_positions_own_adaptive_levels():
+    pos = _position(entry_price=100.0)
+    pos["entry_volatility_30"] = 0.01  # wide enough to push take-profit well above the flat default
+    exit_pcts = strat.adaptive_exit_pcts(0.01)
+    should_exit, reason = strat.decide_exit(pos, 100.0 * (1 + exit_pcts["take_profit_pct"] + 0.001))
+    assert should_exit and "take_profit" in reason
+    # The SAME gain would NOT have triggered the flat-default target if it's smaller.
+    if exit_pcts["take_profit_pct"] > strat.TAKE_PROFIT_PCT:
+        no_vol_pos = _position(entry_price=100.0)
+        still_exits, _ = strat.decide_exit(no_vol_pos, 100.0 * (1 + strat.TAKE_PROFIT_PCT + 0.0005))
+        assert still_exits  # sanity: flat default still fires on its own smaller target
+
+
+def test_position_exit_levels_includes_quick_profit_price():
+    levels = strat.position_exit_levels({"entry_price": 65000.0})
+    assert "quick_profit_price" in levels
+    assert levels["quick_profit_price"] < levels["take_profit_price"]
+
+
+# ---------------------------------------------------------------------------
+# Velocity-based quick-profit / volatility-quick-profit exits.
+# ---------------------------------------------------------------------------
+def test_update_velocity_returns_none_on_the_first_sample():
+    pos = {}
+    now = dt.datetime.now(dt.timezone.utc)
+    assert strat._update_velocity(pos, 100.0, now) is None  # noqa: SLF001
+    assert len(pos["price_samples"]) == 1
+
+
+def test_update_velocity_computes_percent_per_minute():
+    pos = {}
+    now = dt.datetime.now(dt.timezone.utc)
+    strat._update_velocity(pos, 100.0, now)  # noqa: SLF001
+    later = now + dt.timedelta(minutes=1)
+    velocity = strat._update_velocity(pos, 101.0, later)  # noqa: SLF001
+    assert velocity == pytest.approx(0.01, rel=1e-3)
+
+
+def test_sample_volatility_needs_at_least_three_samples():
+    assert strat._sample_volatility([[0, 100.0], [1, 101.0]]) is None  # noqa: SLF001
+    result = strat._sample_volatility([[0, 100.0], [1, 101.0], [2, 99.0]])  # noqa: SLF001
+    assert result is not None and result > 0
+
+
+def test_decide_exit_quick_profit_on_fast_favorable_velocity():
+    pos = _position(entry_price=100.0)
+    pos["entry_volatility_30"] = 0.01
+    exit_pcts = strat.adaptive_exit_pcts(0.01)
+    price = 100.0 * (1 + exit_pcts["quick_profit_pct"] + 0.0005)
+    should_exit, reason = strat.decide_exit(
+        pos, price, velocity_pct_per_min=strat.QUICK_PROFIT_VELOCITY_PCT_PER_MIN + 0.001,
+    )
+    assert should_exit and "quick_profit" in reason
+
+
+def test_manage_open_positions_persists_velocity_samples_across_a_non_exit_cycle(monkeypatch):
+    """Velocity tracking is useless if price_samples resets every cycle --
+    a position that doesn't exit must still have its samples PERSISTED,
+    not just mutated in memory and discarded."""
+    strat._save_state({  # noqa: SLF001
+        "balance": 500.0, "positions": [{
+            "symbol": "BTC/USD", "entry_price": 65000.0, "count": 0.001,
+            "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(), "order_id": None,
+        }],
+        "trade_log": [], "realized_pnl_by_date": {},
+    })
+    monkeypatch.setattr(alpaca_client, "get_crypto_latest_quote", lambda symbol: {"ap": 65005.0, "bp": 65005.0})
+    result = strat.manage_open_positions()
+    assert result["action"] == "no_change"
+    state = strat._load_state()  # noqa: SLF001
+    assert len(state["positions"][0].get("price_samples") or []) == 1
+
+
+# ---------------------------------------------------------------------------
+# Reconciliation against the real Alpaca account (live mode only).
+# ---------------------------------------------------------------------------
+def test_normalize_symbol_strips_separators():
+    assert strat._normalize_symbol("BTC/USD") == strat._normalize_symbol("BTCUSD")  # noqa: SLF001
+
+
+def test_real_open_positions_by_symbol_filters_to_crypto_asset_class(monkeypatch):
+    positions = [
+        {"symbol": "AAPL", "qty": "10", "avg_entry_price": "150.0", "asset_class": "us_equity"},
+        {"symbol": "BTC/USD", "qty": "0.002", "avg_entry_price": "64000.0", "asset_class": "crypto"},
+    ]
+    monkeypatch.setattr(alpaca_client, "get_positions", lambda: positions)
+    real = strat._real_open_positions_by_symbol()  # noqa: SLF001
+    assert list(real.keys()) == [strat._normalize_symbol("BTC/USD")]  # noqa: SLF001
+    assert real[strat._normalize_symbol("BTC/USD")]["count"] == pytest.approx(0.002)  # noqa: SLF001
+
+
+def test_real_open_positions_by_symbol_returns_none_on_a_failed_fetch(monkeypatch):
+    def fail():
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(alpaca_client, "get_positions", fail)
+    assert strat._real_open_positions_by_symbol() is None  # noqa: SLF001
+
+
+def test_reconcile_adopts_an_untracked_real_position(monkeypatch):
+    monkeypatch.setattr(alpaca_client, "get_positions", lambda: [
+        {"symbol": "ETH/USD", "qty": "0.5", "avg_entry_price": "3000.0", "asset_class": "crypto"},
+    ])
+    reconciled = strat._reconcile_positions_with_exchange({"positions": []})  # noqa: SLF001
+    assert len(reconciled) == 1
+    assert reconciled[0]["symbol"] == "ETH/USD"
+    assert reconciled[0]["count"] == pytest.approx(0.5)
+
+
+def test_reconcile_corrects_a_drifted_local_position(monkeypatch):
+    monkeypatch.setattr(alpaca_client, "get_positions", lambda: [
+        {"symbol": "BTC/USD", "qty": "0.002", "avg_entry_price": "64500.0", "asset_class": "crypto"},
+    ])
+    local = [{"symbol": "BTC/USD", "entry_price": 65000.0, "count": 0.001, "opened_at": "2026-01-01T00:00:00+00:00"}]
+    reconciled = strat._reconcile_positions_with_exchange({"positions": local})  # noqa: SLF001
+    assert len(reconciled) == 1
+    assert reconciled[0]["count"] == pytest.approx(0.002)
+    assert reconciled[0]["entry_price"] == pytest.approx(64500.0)
+
+
+def test_reconcile_drops_a_phantom_local_position(monkeypatch):
+    monkeypatch.setattr(alpaca_client, "get_positions", lambda: [])
+    local = [{"symbol": "BTC/USD", "entry_price": 65000.0, "count": 0.001, "opened_at": "2026-01-01T00:00:00+00:00"}]
+    reconciled = strat._reconcile_positions_with_exchange({"positions": local})  # noqa: SLF001
+    assert reconciled == []
+
+
+def test_reconcile_returns_local_positions_unchanged_when_the_real_fetch_fails(monkeypatch):
+    def fail():
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(alpaca_client, "get_positions", fail)
+    local = [{"symbol": "BTC/USD", "entry_price": 65000.0, "count": 0.001, "opened_at": "2026-01-01T00:00:00+00:00"}]
+    reconciled = strat._reconcile_positions_with_exchange({"positions": local})  # noqa: SLF001
+    assert reconciled == local
+
+
+def test_scan_and_enter_reconciles_before_entering_in_live_mode(monkeypatch):
+    """A slot already occupied by a real, untracked exchange position must
+    not also be counted as free -- reconciliation has to run BEFORE the
+    slot-availability check."""
+    monkeypatch.setattr(strat, "MODE", "live")
+    monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", True)
+    monkeypatch.setattr(strat, "MAX_CONCURRENT_POSITIONS", 1)
+    monkeypatch.setattr(alpaca_client, "get_positions", lambda: [
+        {"symbol": "ETH/USD", "qty": "0.5", "avg_entry_price": "3000.0", "asset_class": "crypto"},
+    ])
+    monkeypatch.setattr(alpaca_client, "get_account", lambda: {"cash": "500.0"})
+    monkeypatch.setattr(alpaca_crypto_data, "get_crypto_universe", lambda: ["BTC/USD"])
+    monkeypatch.setattr(alpaca_crypto_data, "latest_feature_row", lambda symbol: _entry_row())
+    monkeypatch.setattr(alpaca_crypto_model, "predict_direction", lambda symbol: {"model_ok": False})
+
+    result = strat.scan_and_enter()
+    outcomes = {o["symbol"]: o for o in result["opened"]}
+    assert outcomes["BTC/USD"]["action"] == "skipped_slot_taken"
+    state = strat._load_state()  # noqa: SLF001
+    assert any(p["symbol"] == "ETH/USD" for p in state["positions"])
+
+
+# ---------------------------------------------------------------------------
+# Daily reference balance -- fixed to the day's ACTUAL starting balance,
+# not whatever the continuously-updated tracked balance happens to be.
+# ---------------------------------------------------------------------------
+def test_reference_balance_for_today_is_captured_once():
+    state = {}
+    first = strat._reference_balance_for_today(state, 500.0)  # noqa: SLF001
+    second = strat._reference_balance_for_today(state, 999.0)  # noqa: SLF001
+    assert first == 500.0
+    assert second == 500.0  # unchanged by a later, different reading
+
+
+def test_reference_balance_for_today_returns_none_without_a_real_reading():
+    assert strat._reference_balance_for_today({}, None) is None  # noqa: SLF001
