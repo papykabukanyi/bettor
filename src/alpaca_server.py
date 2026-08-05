@@ -175,16 +175,16 @@ def _run_alpaca_fast_check() -> dict[str, Any]:
 @_locked_job("alpaca_entry_scan", stale_after_sec=300)
 def _run_alpaca_entry_scan() -> dict[str, Any]:
     """Real, confirmed production incident (Render's own events, this
-    session): this service was OOM-killing every 15-20 minutes, around the
-    clock -- far more often than data_collect's own 15-minute cadence, and
-    frequent enough that the hourly/30-min Threads jobs could never survive
-    a full uninterrupted cycle (their own next_run_time resets on every
-    crash-restart). Root cause traced to THIS job specifically: unlike
-    every other heavy job here, it had no gc.collect() at all, yet
-    scan_and_enter() calls load_training_dataset(max_rows=20_000) --
-    reading multiple days' parquet shards -- on EVERY single call, every
-    ALPACA_CYCLE_MINUTES (2 min by default), far more often than any other
-    job touches that same heavy data."""
+    session), two rounds: first, this service was OOM-killing every 15-20
+    minutes because scan_and_enter()'s load_training_dataset() call (every
+    ALPACA_CYCLE_MINUTES, 2 min by default) had no gc.collect() at all --
+    fixed by adding one. Crashes then continued at a 15-30 min cadence
+    anyway, because gc.collect() can't reduce PEAK memory reached DURING
+    that call, and a WATCHLIST_TOP_N=100 watchlist (double every other
+    service's hot-loop universe) made both that call and scan_and_enter's
+    own per-symbol loop genuinely too heavy for 512MB. Fixed by lowering
+    WATCHLIST_TOP_N to 40 and load_training_dataset's max_rows to 5000
+    (ranking-only, doesn't need training-grade depth)."""
     try:
         result = alpaca_strategy.scan_and_enter()
         save_json(ALPACA_LATEST_CYCLE_FILE, result)
@@ -208,7 +208,7 @@ def _run_alpaca_data_collect() -> dict[str, Any]:
     `finally: gc.collect()` here mirrors the same real fix perps_data.py's
     own heaviest job already needed."""
     try:
-        recent = alpaca_data.load_training_dataset(max_rows=20_000)
+        recent = alpaca_data.load_training_dataset(max_rows=5_000)
         watchlist = alpaca_data.get_stock_watchlist(recent if not recent.empty else None)
         df = alpaca_data.collect_dataset_rows(watchlist)
         if df.empty:
@@ -253,7 +253,7 @@ def _run_alpaca_threads_sentiment_snapshot() -> dict[str, Any]:
     this surfaces the actual per-ticker SCORES as a picture. Read-only,
     never touches order placement."""
     try:
-        recent = alpaca_data.load_training_dataset(max_rows=20_000)
+        recent = alpaca_data.load_training_dataset(max_rows=5_000)
         watchlist = alpaca_data.get_stock_watchlist(recent if not recent.empty else None)
         ticker_sentiments = []
         for symbol in watchlist:

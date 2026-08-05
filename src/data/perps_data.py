@@ -205,6 +205,33 @@ def _rank_tickers_by_volume_and_volatility(markets: list[dict[str, Any]]) -> lis
     )
 
 
+# Real gap found in review: get_watchlist() calls this on EVERY /api/status
+# request with zero caching -- a live, authenticated Kalshi API call
+# fetching every listed perp instrument's full detail. Confirmed live: a
+# single external consumer (a third-party "polymarket-paper-lab" client)
+# was polling /api/status roughly once every 20 seconds, meaning this
+# single-threaded (--workers 1 --threads 1) process was re-fetching and
+# re-parsing this same payload ~180 times/hour just to answer status
+# checks, layered on top of the SAME live call from fast_check/entry_scan's
+# own trading decisions -- real, continuous CPU/memory churn contributing
+# to a recurring OOM crash loop that started showing up around this same
+# window. Markets don't meaningfully change within seconds, so a short TTL
+# cache (matching app_kalshi.py's own _cached_account_snapshot pattern)
+# keeps every caller within the TTL window free.
+_MARGIN_MARKETS_CACHE: dict[str, Any] = {"markets": None, "computed_at": 0.0}
+_MARGIN_MARKETS_CACHE_TTL_SEC = int(os.getenv("PERPS_MARGIN_MARKETS_CACHE_TTL_SEC", "30") or "30")
+
+
+def _cached_list_margin_markets() -> list[dict[str, Any]]:
+    now = time.time()
+    if _MARGIN_MARKETS_CACHE["markets"] is not None and (now - _MARGIN_MARKETS_CACHE["computed_at"]) < _MARGIN_MARKETS_CACHE_TTL_SEC:
+        return _MARGIN_MARKETS_CACHE["markets"]
+    markets = list_margin_markets()
+    _MARGIN_MARKETS_CACHE["markets"] = markets
+    _MARGIN_MARKETS_CACHE["computed_at"] = now
+    return markets
+
+
 def get_active_tickers() -> list[str]:
     """EVERY active (non-inactive) perp instrument, unnarrowed -- used for
     data collection specifically, which must keep archiving history for
@@ -215,7 +242,7 @@ def get_active_tickers() -> list[str]:
     spot later -- a self-reinforcing bias where only whatever ranks well
     RIGHT NOW ever gets considered again."""
     try:
-        markets = list_margin_markets()
+        markets = _cached_list_margin_markets()
         active = sorted(m["ticker"] for m in markets if m.get("status") == "active" and m.get("ticker"))
         if active:
             return active
@@ -232,7 +259,7 @@ def get_watchlist() -> list[str]:
     (default 8) by combined volume+volatility rank rather than watching
     every active instrument regardless of how quiet or illiquid it is."""
     try:
-        markets = list_margin_markets()
+        markets = _cached_list_margin_markets()
         ranked = _rank_tickers_by_volume_and_volatility(markets)
         if ranked:
             if WATCHLIST_TOP_N > 0:

@@ -373,17 +373,20 @@ def scan_and_enter(watchlist: list[str] | None = None, *, dry_run: bool | None =
     is_extended_hours = market_session["session"] != "regular"
     if watchlist is None:
         try:
-            recent = load_training_dataset(max_rows=20_000)
+            # Real, confirmed production incident: this service kept
+            # OOM-killing every 15-30 minutes even after the del+gc.collect()
+            # below was added, because gc.collect() only frees references
+            # AFTER this call returns -- it cannot reduce the PEAK memory
+            # reached DURING load_training_dataset() itself. This call is
+            # ranking-only (feeding get_stock_watchlist's volume/volatility
+            # sort), not training, so it never needed training-grade depth --
+            # matching perps_data.py's own _recent_volatility_by_ticker(),
+            # which deliberately uses max_rows=5000 for the identical
+            # "just need a ranking signal" use case.
+            recent = load_training_dataset(max_rows=5_000)
         except Exception:
             recent = None
         watchlist = get_stock_watchlist(recent if recent is not None and not recent.empty else None)
-        # Real, confirmed production incident: this call (multiple days'
-        # parquet shards read into memory) runs on EVERY scan_and_enter
-        # call -- every ALPACA_CYCLE_MINUTES (2 min by default), far more
-        # often than any other job touches this same heavy data -- yet had
-        # no memory hygiene at all, unlike every other heavy job in this
-        # codebase. Confirmed OOM-killing this service every 15-20 minutes
-        # around the clock until this was added.
         del recent
         gc.collect()
 

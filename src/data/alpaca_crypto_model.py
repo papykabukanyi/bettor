@@ -44,13 +44,20 @@ _model_cache: dict[str, Any] = {"model": None, "meta": None, "loaded_at": 0.0}
 # n_jobs=1 (not -1): same reasoning as every other model here -- avoid
 # multiplying peak memory via RandomForest's per-worker process forking on
 # a memory-constrained deployment.
+#
+# n_estimators=60 (not 100): real, confirmed production OOM incidents on
+# this exact service (Render's own events: 3 oomKilled restarts, roughly
+# a day apart) -- this file had never picked up the same n_estimators=
+# 100->60 reduction perps_model.py/alpaca_options_model.py/alpaca_model.py
+# already proved necessary for an identical multi-candidate-fit-in-one-call
+# shape on the same 512MB ceiling.
 _CANDIDATES = {
     "logistic_regression": lambda: LogisticRegression(max_iter=1000, class_weight="balanced"),
     "random_forest": lambda: RandomForestClassifier(
-        n_estimators=100, max_depth=6, min_samples_leaf=20, class_weight="balanced", random_state=42, n_jobs=1,
+        n_estimators=60, max_depth=6, min_samples_leaf=20, class_weight="balanced", random_state=42, n_jobs=1,
     ),
     "gradient_boosting": lambda: GradientBoostingClassifier(
-        n_estimators=100, max_depth=3, learning_rate=0.05, random_state=42,
+        n_estimators=60, max_depth=3, learning_rate=0.05, random_state=42,
     ),
 }
 

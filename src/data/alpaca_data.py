@@ -406,8 +406,10 @@ def push_minute_snapshot(df: pd.DataFrame) -> dict[str, Any]:
     mid-flight inside THIS exact function (the log trail ended right
     after the HF shard-listing HEAD requests this function's own
     hf_hub_download call makes, with the crash landing a couple seconds
-    later), on a 100-symbol watchlist x 5-day lookback shard that only
-    grows larger as the day's collection cycles accumulate."""
+    later). That fix alone wasn't sufficient either -- see WATCHLIST_TOP_N's
+    own comment for the rest of this incident (the watchlist size driving
+    this shard's per-cycle growth, not just this function's own cleanup,
+    was the remaining lever)."""
     if df.empty:
         return {"ok": False, "reason": "no_rows"}
     if not HF_API_KEY:
@@ -444,8 +446,23 @@ def push_minute_snapshot(df: pd.DataFrame) -> dict[str, Any]:
 # pipeline. The full universe still gets periodic (not per-minute) daily+
 # minute backfills; only the ranked top-N watchlist gets refreshed on a
 # fast, live cadence.
+#
+# Real, confirmed production incident: this was 100 (roughly double every
+# other service's hot-loop universe -- perps: 8 tickers, options: 10
+# underlyings, crypto: up to ~56 pairs), and this service (512MB) kept
+# OOM-killing every 15-30 minutes even after two separate, real memory
+# fixes elsewhere (RandomForest/GBM n_estimators, push_minute_snapshot's
+# del/gc.collect()) were deployed and confirmed live via Render's own
+# events. Every 100-symbol watchlist cycle drives scan_and_enter's
+# per-symbol loop (fetch+engineer+predict x100, every ALPACA_CYCLE_MINUTES)
+# AND collect_dataset_rows' full 5-day-lookback feature frame per symbol
+# (x100, every ALPACA_DATA_COLLECT_MINUTES, then merged/reuploaded whole
+# via push_minute_snapshot) -- both scale linearly with this number, and
+# crypto's own comparable pipeline (up to ~56 pairs, same lookback/cadence)
+# has had zero such crashes, so the size of this watchlist -- not just the
+# cleanup discipline around it -- was the remaining real lever.
 # ---------------------------------------------------------------------------
-WATCHLIST_TOP_N = int(os.getenv("ALPACA_WATCHLIST_TOP_N", "100") or "100")
+WATCHLIST_TOP_N = int(os.getenv("ALPACA_WATCHLIST_TOP_N", "40") or "40")
 MAX_TRAIN_ROWS = int(os.getenv("ALPACA_MAX_TRAIN_ROWS", "150000") or "150000")
 _DATE_SHARD_RE = re.compile(r"^minute/\d{4}-\d{2}-\d{2}\.parquet$")
 
