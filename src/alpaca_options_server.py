@@ -33,11 +33,11 @@ Background jobs, each cross-process locked (see server_common.py):
                                  the data supports, ready before the next
                                  regular session opens.
 
-No explicit market-hours gate on the entry scan -- same precedent already
-established by alpaca_server.py's own equities strategy (scan_and_enter has
-no session check there either); outside regular hours there's simply
-nothing fresh to trade on and any order attempt is queued/rejected by
-Alpaca itself, exactly the behavior already accepted for equities.
+Unlike equities/crypto, entry_scan here IS gated to the regular session
+(plus a small edge buffer -- see alpaca_options_strategy.py's own
+AVOID_SESSION_EDGE_MINUTES): options liquidity/spreads are meaningfully
+worse right at the open/close, a cost equities and 24/7 crypto don't
+carry the same way.
 """
 from __future__ import annotations
 
@@ -60,7 +60,7 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from config import et_today
-from data import alpaca_client, alpaca_options_data, alpaca_options_model, alpaca_options_strategy, stock_news, threads_post
+from data import alpaca_client, alpaca_data, alpaca_options_data, alpaca_options_model, alpaca_options_strategy, stock_news, threads_post
 from server_common import DATA_DIR, is_cron_authorized, load_json, make_job_lock, save_json
 
 # Same real, twice-confirmed production bug already fixed on every other
@@ -106,6 +106,32 @@ JOB_HISTORY_FILE = DATA_DIR / "alpaca_options_job_run_history.json"
 JOB_LOCK_DIR = DATA_DIR / "alpaca_options_locks"
 ALPACA_OPTIONS_LATEST_CYCLE_FILE = DATA_DIR / "alpaca_options_latest_cycle.json"
 ALPACA_OPTIONS_LATEST_POSITION_CHECK_FILE = DATA_DIR / "alpaca_options_latest_position_check.json"
+
+# Same reasoning as alpaca_server.py's own copy of this: the dashboard
+# polls /api/alpaca/options/status every 10s, and get_market_session() can
+# make a real Alpaca API call. Session doesn't change within any given
+# minute, so a short cache keeps that poll cheap regardless of refresh
+# rate. Surfaced on the dashboard so it's visible at a glance whether
+# options is currently in its trading window (regular hours) or its
+# off-hours training window (see alpaca_options_train's own session gate)
+# -- there was no way to tell this from the dashboard before.
+_MARKET_SESSION_CACHE: dict[str, Any] = {}
+_MARKET_SESSION_CACHE_TS = 0.0
+_MARKET_SESSION_CACHE_LOCK = threading.Lock()
+_MARKET_SESSION_CACHE_TTL_SEC = 60
+
+
+def _cached_market_session() -> dict[str, Any]:
+    global _MARKET_SESSION_CACHE, _MARKET_SESSION_CACHE_TS
+    now = time.monotonic()
+    with _MARKET_SESSION_CACHE_LOCK:
+        if _MARKET_SESSION_CACHE and (now - _MARKET_SESSION_CACHE_TS) < _MARKET_SESSION_CACHE_TTL_SEC:
+            return dict(_MARKET_SESSION_CACHE)
+    session = alpaca_data.get_market_session()
+    with _MARKET_SESSION_CACHE_LOCK:
+        _MARKET_SESSION_CACHE = dict(session)
+        _MARKET_SESSION_CACHE_TS = time.monotonic()
+    return session
 
 
 # Same reasoning as every other server here: on SIGTERM, APScheduler's
@@ -354,6 +380,10 @@ def api_alpaca_options_status():
     _, meta = alpaca_options_model.load_model()
     latest_cycle = load_json(ALPACA_OPTIONS_LATEST_CYCLE_FILE, {})
     latest_position_check = load_json(ALPACA_OPTIONS_LATEST_POSITION_CHECK_FILE, {})
+    try:
+        market_session = _cached_market_session()
+    except Exception:
+        market_session = {"session": "unknown", "is_open": False, "source": "error"}
 
     realized_pnl_by_date = state.get("realized_pnl_by_date") or {}
     total_realized_pnl = round(sum(float(v) for v in realized_pnl_by_date.values()), 6)
@@ -387,6 +417,7 @@ def api_alpaca_options_status():
         },
         "latest_cycle": latest_cycle,
         "latest_position_check": latest_position_check,
+        "market_session": market_session,
         "params": {
             "position_size_pct": alpaca_options_strategy.POSITION_SIZE_PCT,
             "max_concurrent_positions": alpaca_options_strategy.MAX_CONCURRENT_POSITIONS,

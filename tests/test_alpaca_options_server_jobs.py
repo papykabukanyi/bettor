@@ -144,6 +144,22 @@ def test_api_alpaca_options_status_reports_configured_flag(monkeypatch):
         assert resp.get_json()["alpaca_configured"] is True
 
 
+def test_api_alpaca_options_status_reports_the_real_market_session(monkeypatch):
+    """Real gap found in review: options had no way to tell from the
+    dashboard whether it was in its trading window (regular hours) or its
+    off-hours model-retraining window -- unlike alpaca_server.py's own
+    status route, which has always surfaced this for stocks."""
+    from data import alpaca_data
+
+    monkeypatch.setattr(alpaca_data, "get_market_session", lambda: {"session": "pre_market", "is_open": False, "source": "fallback"})
+    alpaca_options_server._MARKET_SESSION_CACHE.clear()  # noqa: SLF001
+    alpaca_options_server._MARKET_SESSION_CACHE_TS = 0.0  # noqa: SLF001
+    with alpaca_options_server.app.test_client() as client:
+        resp = client.get("/api/alpaca/options/status")
+        assert resp.status_code == 200
+        assert resp.get_json()["market_session"]["session"] == "pre_market"
+
+
 def test_chart_snapshot_route_serves_a_real_saved_png(monkeypatch, tmp_path):
     from data import chart_snapshot
 

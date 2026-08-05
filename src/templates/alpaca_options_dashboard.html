@@ -69,6 +69,7 @@
   <div style="display:flex; align-items:center; gap:10px;">
     <span id="config-badge" class="badge warn">&nbsp;</span>
     <span id="mode-badge" class="badge dry">&nbsp;</span>
+    <span id="session-badge" class="badge warn">&nbsp;</span>
     <a href="{{ perps_url }}" class="toggle-btn">&#8646; Perps</a>
     <a href="{{ stocks_url }}" class="toggle-btn">&#8646; Stocks</a>
     <a href="{{ crypto_url }}" class="toggle-btn">&#8646; Crypto</a>
@@ -272,6 +273,18 @@ async function refreshStatus() {
       modeBadge.textContent = "SIMULATE";
       modeBadge.className = "badge dry";
     }
+
+    // Options only trades during "regular" -- every other state is this
+    // service's own off-hours MODEL RETRAINING window (see
+    // alpaca_options_train's own session gate), not just "market closed".
+    const session = (data.market_session && data.market_session.session) || "unknown";
+    const sessionLabel = {
+      regular: "MARKET OPEN — trading", pre_market: "PRE-MARKET — training",
+      post_market: "AFTER HOURS — training", closed: "CLOSED — training", unknown: "SESSION UNKNOWN",
+    }[session] || session.toUpperCase();
+    const sessionBadge = document.getElementById("session-badge");
+    sessionBadge.textContent = sessionLabel;
+    sessionBadge.className = session === "regular" ? "badge dry" : session === "unknown" ? "badge warn" : "badge live";
   } catch (e) { console.error("badges render failed", e); }
 
   try {
