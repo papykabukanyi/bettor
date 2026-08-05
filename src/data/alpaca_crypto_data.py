@@ -119,7 +119,19 @@ def _bars_to_df(bars: list[dict[str, Any]]) -> pd.DataFrame:
     return pd.DataFrame(rows).drop_duplicates(subset="ts").sort_values("ts").reset_index(drop=True)
 
 
-LIVE_LOOKBACK_DAYS = int(os.getenv("ALPACA_CRYPTO_LIVE_LOOKBACK_DAYS", "5") or "5")
+# Real, confirmed oomKilled crash caught live (mid-monitoring, right after
+# the n_estimators=100->60 model fix deployed -- proving that fix alone
+# wasn't sufficient) landing inside _run_alpaca_crypto_data_collect, which
+# calls collect_dataset_rows() with no symbol narrowing -- the FULL ~56-pair
+# universe, each fetched at this lookback depth, all held in memory
+# simultaneously before the final concat + push_minute_snapshot's own
+# download-existing-shard/merge/reupload. Unlike equities (which fixed the
+# equivalent issue by narrowing WATCHLIST_TOP_N), crypto deliberately
+# collects its full tradable universe with no ranking step (see this
+# module's own docstring), so the lookback depth is the lever here instead:
+# engineer_features' longest rolling window is ~90 minutes, so 5 days was
+# already far more than feature computation actually needs.
+LIVE_LOOKBACK_DAYS = int(os.getenv("ALPACA_CRYPTO_LIVE_LOOKBACK_DAYS", "2") or "2")
 _MINUTE_BAR_CACHE_TTL_SEC = int(os.getenv("ALPACA_CRYPTO_MINUTE_BAR_CACHE_TTL_SEC", "90") or "90")
 _minute_bar_cache: dict[str, tuple[pd.DataFrame, float]] = {}
 
