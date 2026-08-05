@@ -257,16 +257,29 @@ def _run_perps_manual_cycle() -> dict[str, Any]:
 
 @_locked_job("perps_data_collect", stale_after_sec=600)
 def _run_perps_data_collect() -> dict[str, Any]:
+    # Real gap found in review: every equivalent data_collect job on the
+    # other 3 services (alpaca stocks/crypto/options) wraps its body in a
+    # `finally: gc.collect()` -- this one never did, despite
+    # collect_dataset_rows()/push_dataset_snapshot() being the same
+    # confirmed-real OOM shape (an oomKilled restart landed mid-upload
+    # inside push_dataset_snapshot again during a live monitoring pass,
+    # after that function's own prior two rounds of fixes -- its own
+    # docstring already calls this "a much rarer, residual risk", so this
+    # is an additional margin, not a claim of a full fix).
+    #
     # Off the request path on purpose -- see refresh_ticker_activity_cache's
     # own docstring for why this must never be triggered from /api/status.
     try:
         perps_data.refresh_ticker_activity_cache()
     except Exception:
         logger.exception("[app_kalshi] ticker activity cache refresh failed")
-    df = perps_data.collect_dataset_rows()
-    if df.empty:
-        return {"ok": False, "reason": "no_rows_collected"}
-    return perps_data.push_dataset_snapshot(df)
+    try:
+        df = perps_data.collect_dataset_rows()
+        if df.empty:
+            return {"ok": False, "reason": "no_rows_collected"}
+        return perps_data.push_dataset_snapshot(df)
+    finally:
+        gc.collect()
 
 
 @_locked_job("perps_train", stale_after_sec=1800)
