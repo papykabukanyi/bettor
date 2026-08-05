@@ -31,6 +31,7 @@ Data flow (mirrors perps_data.py's/the former schwab_data.py's shape):
 from __future__ import annotations
 
 import datetime as dt
+import gc
 import logging
 import os
 import re
@@ -393,7 +394,20 @@ def push_minute_snapshot(df: pd.DataFrame) -> dict[str, Any]:
     dedupes (same discipline as perps_data.push_dataset_snapshot), so
     today's shard is a genuinely cumulative record of every symbol
     collected today, not just whichever ones happened to be on the
-    watchlist most recently."""
+    watchlist most recently.
+
+    Real, confirmed production OOM found in review: this had never picked
+    up the explicit del+gc.collect() fix alpaca_crypto_data.py's/
+    alpaca_options_data.py's own copies of this exact function already
+    needed (same root cause -- downloading the existing shard,
+    concatenating, then uploading held existing+df+combined
+    simultaneously with nothing freed until the whole call returned) --
+    confirmed live via Render's own logs: an oomKilled restart caught
+    mid-flight inside THIS exact function (the log trail ended right
+    after the HF shard-listing HEAD requests this function's own
+    hf_hub_download call makes, with the crash landing a couple seconds
+    later), on a 100-symbol watchlist x 5-day lookback shard that only
+    grows larger as the day's collection cycles accumulate."""
     if df.empty:
         return {"ok": False, "reason": "no_rows"}
     if not HF_API_KEY:
@@ -407,12 +421,19 @@ def push_minute_snapshot(df: pd.DataFrame) -> dict[str, Any]:
         existing_path = hf_hub_download(repo_id=HF_ALPACA_DATASET_REPO, filename=path_in_repo, repo_type="dataset", token=HF_API_KEY)
         existing = pd.read_parquet(existing_path)
         combined = pd.concat([existing, df], ignore_index=True)
+        del existing
     except Exception as exc:
         logger.info("[alpaca_data] no existing minute shard for %s yet (or fetch failed), starting fresh: %s", today, exc)
 
     if "symbol" in combined.columns and "ts" in combined.columns:
         combined = combined.drop_duplicates(subset=["symbol", "ts"]).sort_values(["symbol", "ts"]).reset_index(drop=True)
-    return _upload_shard(combined, path_in_repo=path_in_repo, commit_message=f"append minute bars: {today}")
+    del df
+    gc.collect()
+    try:
+        return _upload_shard(combined, path_in_repo=path_in_repo, commit_message=f"append minute bars: {today}")
+    finally:
+        del combined
+        gc.collect()
 
 
 # ---------------------------------------------------------------------------
