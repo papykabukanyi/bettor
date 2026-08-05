@@ -59,11 +59,18 @@ def _env_int(name: str, default: int) -> int:
 # not unusual enough" before the dip signal was even checked.
 # perps_strategy.py's own decide_entry_technical has NO volume/volatility
 # gate at all -- just the dip/rally read plus a soft trend filter. Off by
-# default now (env-overridable back on): MIN_VOLUME_Z=-inf makes
-# "z < MIN_VOLUME_Z" unsatisfiable, and MIN_VOLATILITY_RATIO=0.0 makes
+# default now (env-overridable back on): MIN_VOLUME_Z=-1e9 makes
+# "z < MIN_VOLUME_Z" unsatisfiable (a z-score is never remotely this large)
+# -- NOT float("-inf"): a real, confirmed production bug found live --
+# Python's json module happily serializes float("-inf") as the bare token
+# `-Infinity`, invalid JSON grammar, so every browser's JSON.parse() threw
+# a SyntaxError on every /api/alpaca/crypto/status poll, silently breaking
+# this dashboard's entire auto-refresh loop (caught by its own try/catch,
+# so the page just sat frozen on its initial "--" placeholders forever) --
+# and MIN_VOLATILITY_RATIO=0.0 makes
 # "ratio < MIN_VOLATILITY_RATIO" unsatisfiable (a ratio is always >= 0) --
 # both checks below become genuine no-ops at these defaults.
-MIN_VOLUME_Z = _env_float("ALPACA_CRYPTO_MIN_VOLUME_Z", float("-inf"))
+MIN_VOLUME_Z = _env_float("ALPACA_CRYPTO_MIN_VOLUME_Z", -1e9)
 MIN_VOLATILITY_RATIO = _env_float("ALPACA_CRYPTO_MIN_VOLATILITY_RATIO", 0.0)
 ENTRY_DIP_PCT = _env_float("ALPACA_CRYPTO_ENTRY_DIP_PCT", 0.0015)
 SHORT_MA_MINUTES = _env_int("ALPACA_CRYPTO_SHORT_MA_MINUTES", 15)

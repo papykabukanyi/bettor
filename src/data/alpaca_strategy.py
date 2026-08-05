@@ -53,12 +53,20 @@ def _env_int(name: str, default: int) -> int:
 # system this one was explicitly modeled on, and the one actually taking
 # opportunities) has NO volume/volatility gate at all -- just the dip/rally
 # read plus a soft trend filter. Off by default now (env-overridable back
-# on): MIN_VOLUME_Z=-inf makes "z < MIN_VOLUME_Z" unsatisfiable (a z-score
-# is always a finite real number), and MIN_VOLATILITY_RATIO=0.0 makes
+# on): MIN_VOLUME_Z=-1e9 makes "z < MIN_VOLUME_Z" unsatisfiable (a z-score
+# is always a finite real number nowhere near this magnitude) -- NOT
+# float("-inf"): a real, confirmed production bug found live -- Python's
+# json module happily serializes float("-inf") as the bare token
+# `-Infinity`, which is NOT valid JSON grammar, so every browser's
+# JSON.parse() (unlike Python's own lenient json.loads()) threw a
+# SyntaxError on every single /api/alpaca/status poll, silently breaking
+# the dashboard's entire auto-refresh loop (caught by its own try/catch,
+# so the page just sat frozen on its initial "--" placeholders forever,
+# with no visible error), and MIN_VOLATILITY_RATIO=0.0 makes
 # "ratio < MIN_VOLATILITY_RATIO" unsatisfiable (a volatility ratio is
 # always >= 0) -- both checks below become genuine no-ops, not just
 # "usually true," at these defaults.
-MIN_VOLUME_Z = _env_float("ALPACA_MIN_VOLUME_Z", float("-inf"))
+MIN_VOLUME_Z = _env_float("ALPACA_MIN_VOLUME_Z", -1e9)
 MIN_VOLATILITY_RATIO = _env_float("ALPACA_MIN_VOLATILITY_RATIO", 0.0)  # volatility_5 / volatility_30
 
 # "Enter on a small pullback, same 0.15% perps_strategy.py itself uses"
