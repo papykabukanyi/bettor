@@ -52,6 +52,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from apscheduler.executors.pool import ThreadPoolExecutor as APSThreadPoolExecutor
 from apscheduler.schedulers.background import BackgroundScheduler
 from flask import Flask, jsonify, render_template, request, send_from_directory
 
@@ -104,7 +105,16 @@ ALPACA_CRYPTO_SERVER_URL = os.getenv("ALPACA_CRYPTO_SERVER_URL", "#")
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
 app = Flask("alpaca_options_server", template_folder="templates")
-scheduler = BackgroundScheduler(timezone="America/New_York")
+# Real, confirmed production incident found in review (same mechanism
+# caught live on the equities service, see alpaca_server.py's identical
+# comment): APScheduler's default executor allows up to 10 jobs to run
+# CONCURRENTLY in separate threads within this one process -- whenever two
+# jobs' intervals share a common multiple, their peak memory STACKS
+# instead of running one at a time, even on gunicorn's own single
+# worker/thread. max_workers=1 forces every job through one queue,
+# matching this whole codebase's stated "single worker, one thing at a
+# time" design intent everywhere else.
+scheduler = BackgroundScheduler(timezone="America/New_York", executors={"default": APSThreadPoolExecutor(max_workers=1)})
 _startup_lock = threading.Lock()
 _startup_done = False
 

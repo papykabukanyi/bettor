@@ -53,6 +53,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from apscheduler.executors.pool import ThreadPoolExecutor as APSThreadPoolExecutor
 from apscheduler.schedulers.background import BackgroundScheduler
 from flask import Flask, Response, jsonify, redirect, render_template, request, send_from_directory
 
@@ -131,7 +132,25 @@ ALPACA_OPTIONS_SERVER_URL = os.getenv("ALPACA_OPTIONS_SERVER_URL", "#")
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
 app = Flask("kalshi_perps_server", template_folder=str(SRC_DIR / "templates"))
-scheduler = BackgroundScheduler(timezone="America/New_York")
+# Real, confirmed production incident found in review (same mechanism
+# caught live on the equities service, see alpaca_server.py's identical
+# comment): APScheduler's default executor allows up to 10 jobs to run
+# CONCURRENTLY in separate threads within this one process -- whenever two
+# jobs' intervals share a common multiple, their peak memory STACKS
+# instead of running one at a time, even on gunicorn's own single
+# worker/thread. "default" gets max_workers=1 for the same reason as
+# every other service. Real money here specifically: perps_fast_check is
+# the exit/TP-SL/max-hold check for OPEN positions every 20s -- it must
+# never queue behind a slow job (data_collect, the up-to-30-min daily
+# train) sharing the default pool, so it gets its own dedicated
+# single-worker executor instead of contending with everything else.
+scheduler = BackgroundScheduler(
+    timezone="America/New_York",
+    executors={
+        "default": APSThreadPoolExecutor(max_workers=1),
+        "fastcheck": APSThreadPoolExecutor(max_workers=1),
+    },
+)
 _startup_lock = threading.Lock()
 _startup_done = False
 
@@ -398,7 +417,7 @@ def _ensure_background_jobs_started() -> None:
             if ENABLE_PERPS_SCHEDULER:
                 scheduler.add_job(
                     _run_perps_fast_check, "interval", seconds=PERPS_FAST_CHECK_SECONDS,
-                    id="perps_fast_check", replace_existing=True,
+                    id="perps_fast_check", replace_existing=True, executor="fastcheck",
                 )
                 scheduler.add_job(
                     _run_perps_entry_scan, "interval", minutes=PERPS_CYCLE_MINUTES,
