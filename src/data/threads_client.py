@@ -77,6 +77,21 @@ _MIN_TOKEN_AGE_FOR_REFRESH_SEC = 2 * 3600
 _REFRESH_MARGIN_SEC = 5 * 24 * 3600
 
 
+def _raise_for_status_with_body(resp: requests.Response) -> None:
+    """Real gap found in review: plain resp.raise_for_status() raises an
+    HTTPError whose message is just "400 Client Error: Bad Request for
+    url: ..." -- Meta's own error detail (the actual reason a call was
+    rejected: bad/expired creation_id, rate limit, content policy, etc.)
+    lives in the response BODY, which raise_for_status() never includes.
+    Confirmed live: a real, repeated 400 on threads_publish for a crypto
+    trade-entry post was completely undiagnosable from the logs alone --
+    every log line just said "400 Client Error", with no way to tell
+    which of several possible causes it actually was."""
+    if resp.status_code >= 400:
+        body = resp.text[:500]
+        raise requests.exceptions.HTTPError(f"{resp.status_code} error for url: {resp.url} -- body: {body}", response=resp)
+
+
 def get_authorization_url(*, state: str = "") -> str:
     """The URL to send the account owner to. They log in on Threads' own
     site and get redirected back to THREADS_REDIRECT_URI with ?code=..."""
@@ -115,7 +130,7 @@ def exchange_code_for_tokens(code: str) -> dict[str, Any]:
         },
         timeout=TIMEOUT_SEC,
     )
-    resp.raise_for_status()
+    _raise_for_status_with_body(resp)
     short_lived = resp.json()
 
     long_lived_resp = requests.get(
@@ -126,7 +141,7 @@ def exchange_code_for_tokens(code: str) -> dict[str, Any]:
         },
         timeout=TIMEOUT_SEC,
     )
-    long_lived_resp.raise_for_status()
+    _raise_for_status_with_body(long_lived_resp)
     long_lived = long_lived_resp.json()
     _save_tokens(
         access_token=long_lived["access_token"], expires_in=long_lived.get("expires_in", 0),
@@ -139,7 +154,7 @@ def _refresh_long_lived_token(access_token: str) -> dict[str, Any]:
     resp = requests.get(
         REFRESH_URL, params={"grant_type": "th_refresh_token", "access_token": access_token}, timeout=TIMEOUT_SEC,
     )
-    resp.raise_for_status()
+    _raise_for_status_with_body(resp)
     refreshed = resp.json()
     _save_tokens(access_token=refreshed["access_token"], expires_in=refreshed.get("expires_in", 0), user_id=None)
     return refreshed
@@ -148,7 +163,8 @@ def _refresh_long_lived_token(access_token: str) -> dict[str, Any]:
 def _push_tokens_to_hf(record: dict[str, Any]) -> None:
     if not HF_API_KEY:
         return
-    try:
+
+    def _upload() -> None:
         from huggingface_hub import HfApi
         api = HfApi(token=HF_API_KEY)
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as tmp:
@@ -161,19 +177,51 @@ def _push_tokens_to_hf(record: dict[str, Any]) -> None:
             )
         finally:
             os.unlink(tmp_path)
+
+    try:
+        # Same hard-timeout protection as _pull_tokens_from_hf's own fix,
+        # for the same reason -- this runs while _STATE_LOCK is held
+        # (called from _save_tokens, reached from _refresh_long_lived_token
+        # inside get_valid_access_token's own locked section), and
+        # huggingface_hub's internal shared-session lock is a single
+        # mechanism shared across its download AND upload calls alike.
+        from server_common import call_with_hard_timeout
+        call_with_hard_timeout(_upload, timeout_sec=_PULL_TOKENS_HF_TIMEOUT_SEC)
     except Exception as exc:
         logger.warning("[threads_client] token push to HF failed: %s", exc)
+
+
+_PULL_TOKENS_HF_TIMEOUT_SEC = int(os.getenv("THREADS_PULL_TOKENS_HF_TIMEOUT_SEC", "10") or "10")
 
 
 def _pull_tokens_from_hf() -> dict[str, Any] | None:
     if not HF_API_KEY:
         return None
-    try:
+
+    def _download() -> dict[str, Any] | None:
         from huggingface_hub import hf_hub_download
         path = hf_hub_download(
             repo_id=HF_MODEL_REPO, filename=_TOKEN_HF_FILENAME, repo_type="model", token=HF_API_KEY,
         )
         return json.loads(Path(path).read_text(encoding="utf-8"))
+
+    try:
+        # Real, confirmed production incident: this is called from BOTH
+        # get_valid_access_token() and get_user_id() while holding
+        # _STATE_LOCK -- huggingface_hub's own internal shared-session lock
+        # can hang for minutes (the exact documented incident
+        # server_common.call_with_hard_timeout's own docstring describes,
+        # confirmed live on this same service's *_strategy.py durable-state
+        # pulls), and unlike those callers this one hangs WHILE HOLDING A
+        # LOCK -- so a single stuck call here doesn't just freeze itself,
+        # it blocks every other caller of get_valid_access_token()/
+        # get_user_id() too, including a plain /api/status health check.
+        # Confirmed live: gunicorn WORKER TIMEOUT (300s) killed the perps
+        # worker mid-request, stuck acquiring _STATE_LOCK, because this
+        # call was never given the same hard-timeout protection every
+        # other HF pull in this codebase already has.
+        from server_common import call_with_hard_timeout
+        return call_with_hard_timeout(_download, timeout_sec=_PULL_TOKENS_HF_TIMEOUT_SEC)
     except Exception as exc:
         logger.info("[threads_client] no tokens on HF yet (or fetch failed): %s", exc)
         return None
@@ -243,7 +291,7 @@ def create_and_publish_post(text: str) -> str:
         params={"media_type": "TEXT", "text": text, "access_token": token},
         timeout=TIMEOUT_SEC,
     )
-    create_resp.raise_for_status()
+    _raise_for_status_with_body(create_resp)
     creation_id = create_resp.json()["id"]
 
     publish_resp = requests.post(
@@ -251,7 +299,7 @@ def create_and_publish_post(text: str) -> str:
         params={"creation_id": creation_id, "access_token": token},
         timeout=TIMEOUT_SEC,
     )
-    publish_resp.raise_for_status()
+    _raise_for_status_with_body(publish_resp)
     return publish_resp.json()["id"]
 
 
@@ -275,7 +323,7 @@ def create_and_publish_image_post(image_url: str, text: str = "") -> str:
         params={"media_type": "IMAGE", "image_url": image_url, "text": text, "access_token": token},
         timeout=TIMEOUT_SEC,
     )
-    create_resp.raise_for_status()
+    _raise_for_status_with_body(create_resp)
     creation_id = create_resp.json()["id"]
 
     publish_resp = requests.post(
@@ -283,5 +331,5 @@ def create_and_publish_image_post(image_url: str, text: str = "") -> str:
         params={"creation_id": creation_id, "access_token": token},
         timeout=TIMEOUT_SEC,
     )
-    publish_resp.raise_for_status()
+    _raise_for_status_with_body(publish_resp)
     return publish_resp.json()["id"]

@@ -10,16 +10,14 @@ from data import threads_client
 
 
 class _FakeResponse:
-    def __init__(self, json_body, status_code=200):
+    def __init__(self, json_body, status_code=200, text=None, url="https://example.com/fake"):
         self._json_body = json_body
         self.status_code = status_code
+        self.text = text if text is not None else str(json_body)
+        self.url = url
 
     def json(self):
         return self._json_body
-
-    def raise_for_status(self):
-        if self.status_code >= 400:
-            raise RuntimeError(f"HTTP {self.status_code}")
 
 
 @pytest.fixture(autouse=True)
@@ -156,6 +154,52 @@ def test_get_valid_access_token_keeps_current_token_when_refresh_fails(monkeypat
     # A failed refresh attempt must not throw away the still-valid token --
     # keep using it until it actually expires.
     assert threads_client.get_valid_access_token() == "still-usable"
+
+
+def test_raise_for_status_with_body_includes_the_response_body(monkeypatch):
+    """Real gap found in review: plain resp.raise_for_status() raises an
+    HTTPError with just "400 Client Error" -- Meta's own rejection reason
+    (bad creation_id, rate limit, content policy, etc.) lives in the
+    response body, which never made it into the logs. A real, repeated
+    threads_publish 400 was undiagnosable from Render's logs alone before
+    this fix."""
+    resp = _FakeResponse({"error": {"message": "Invalid creation_id"}}, status_code=400, url="https://graph.threads.net/v1.0/x/threads_publish")
+    with pytest.raises(threads_client.requests.exceptions.HTTPError, match="Invalid creation_id"):
+        threads_client._raise_for_status_with_body(resp)  # noqa: SLF001
+
+
+def test_raise_for_status_with_body_does_not_raise_below_400():
+    resp = _FakeResponse({"id": "ok"}, status_code=200)
+    threads_client._raise_for_status_with_body(resp)  # noqa: SLF001 -- must not raise
+
+
+def test_pull_tokens_from_hf_gives_up_after_a_hard_timeout(monkeypatch):
+    """Real, confirmed production incident: huggingface_hub's own internal
+    shared-session lock can hang for minutes, and this call runs WHILE
+    _STATE_LOCK is held (from get_valid_access_token/get_user_id) -- a
+    single stuck call here doesn't just freeze itself, it blocks every
+    other caller of those two functions too, including a plain /api/status
+    health check. Confirmed live: gunicorn's own 300s WORKER TIMEOUT
+    killed the perps worker mid-request, stuck acquiring _STATE_LOCK,
+    because this call never had the same hard-timeout protection every
+    other HF pull in this codebase already has."""
+    monkeypatch.setattr(threads_client, "HF_API_KEY", "test-key")
+    monkeypatch.setattr(threads_client, "_PULL_TOKENS_HF_TIMEOUT_SEC", 0.05)
+
+    def hang_forever(*a, **k):
+        import time as t
+        t.sleep(0.5)  # comfortably longer than the 0.05s timeout below, short enough not to stall pytest's own exit
+
+    import huggingface_hub
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", hang_forever, raising=False)
+
+    import time as real_time
+    start = real_time.monotonic()
+    result = threads_client._pull_tokens_from_hf()  # noqa: SLF001
+    elapsed = real_time.monotonic() - start
+
+    assert result is None
+    assert elapsed < 2.0  # bounded by the hard timeout, not the 5s hang
 
 
 def test_get_user_id_returns_the_cached_value():
