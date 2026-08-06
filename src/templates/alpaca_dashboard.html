@@ -289,12 +289,13 @@ async function refreshStatus() {
     }
 
     const modeBadge = document.getElementById("mode-badge");
-    if (data.mode === "live") {
-      modeBadge.textContent = data.live_trading_enabled ? "LIVE" : "LIVE (armed off)";
-      modeBadge.className = data.live_trading_enabled ? "badge live" : "badge warn";
+    const acctLabel = data.account_type === "live" ? "LIVE ACCOUNT" : "PAPER";
+    if (data.live_trading_enabled) {
+      modeBadge.textContent = acctLabel;
+      modeBadge.className = data.account_type === "live" ? "badge live" : "badge dry";
     } else {
-      modeBadge.textContent = "SIMULATE";
-      modeBadge.className = "badge dry";
+      modeBadge.textContent = `${acctLabel} (armed off)`;
+      modeBadge.className = "badge warn";
     }
 
     const session = (data.market_session && data.market_session.session) || "unknown";
@@ -309,9 +310,7 @@ async function refreshStatus() {
 
   try {
     document.getElementById("balance").textContent = fmtUsd(data.balance);
-    document.getElementById("balance-sub").textContent = data.mode === "simulate"
-      ? `available ${fmtUsd(data.available_balance)} · paper trading`
-      : "real Alpaca account balance";
+    document.getElementById("balance-sub").textContent = `available ${fmtUsd(data.available_balance)} · real Alpaca ${data.account_type || "paper"} account`;
 
     const positions = data.positions || [];
     document.getElementById("position-count").textContent = `${positions.length} / ${data.max_concurrent_positions ?? "--"}`;
@@ -350,7 +349,7 @@ async function refreshStatus() {
   } catch (e) { console.error("model card render failed", e); }
 
   try {
-    document.getElementById("cfg-mode").textContent = data.mode === "live" ? "live" : "simulate ($100 paper)";
+    document.getElementById("cfg-mode").textContent = data.account_type === "live" ? "live" : "paper";
     document.getElementById("cfg-live").textContent = data.live_trading_enabled ? "ON (real orders)" : "OFF";
     document.getElementById("cfg-size").textContent = params.position_size_pct != null ? (params.position_size_pct * 100).toFixed(0) + "% of balance" : "--";
     document.getElementById("cfg-maxpos").textContent = params.max_concurrent_positions ?? "--";

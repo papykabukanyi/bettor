@@ -360,9 +360,7 @@ def _run_alpaca_intensive_training() -> dict[str, Any]:
             test_df = df[df["ts"] >= cutoff_ts]
             fitted = alpaca_backtest.fit_backtest_model(train_df)
             test_with_preds = alpaca_backtest.add_model_predictions(test_df, fitted)
-            sweep_result = alpaca_backtest.run_config_sweep(
-                test_with_preds, starting_balance=alpaca_strategy.SIMULATE_STARTING_BALANCE,
-            )
+            sweep_result = alpaca_backtest.run_config_sweep(test_with_preds)
             save_json(ALPACA_LATEST_SWEEP_FILE, sweep_result)
             del df, train_df, test_df, test_with_preds, fitted
         else:
@@ -433,10 +431,10 @@ def _ensure_background_jobs_started() -> None:
             logger.info(
                 "Alpaca scheduler started: fast exit check every %ds, entry scan every %d min (first run in %ds), "
                 "data collect every %d min, train daily at %02d:00 ET, intensive training checked every %d min, "
-                "mode=%s live_trading=%s",
+                "live_trading=%s",
                 ALPACA_FAST_CHECK_SECONDS, ALPACA_CYCLE_MINUTES, ALPACA_STARTUP_GRACE_SECONDS,
                 ALPACA_DATA_COLLECT_MINUTES, ALPACA_TRAIN_HOUR_ET, ALPACA_INTENSIVE_TRAINING_MINUTES,
-                alpaca_strategy.MODE, alpaca_strategy.LIVE_TRADING_ENABLED,
+                alpaca_strategy.LIVE_TRADING_ENABLED,
             )
 
         def _runner() -> None:
@@ -523,17 +521,18 @@ def api_alpaca_status():
         for p in (state.get("positions") or [])
     ]
 
+    account = alpaca_client.get_account() if alpaca_client.is_configured() else {}
     return jsonify({
         "ok": True,
         "now": dt.datetime.now(dt.timezone.utc).isoformat(),
-        "mode": alpaca_strategy.MODE,
+        "account_type": "paper" if "paper-api" in alpaca_client.TRADING_BASE_URL else "live",
         "live_trading_enabled": alpaca_strategy.LIVE_TRADING_ENABLED,
         # Unlike Schwab's interactive OAuth login, Alpaca just needs a
         # static key/secret pair -- "configured" (both present) is the
         # whole readiness check, there's no separate "logged in" state.
         "alpaca_configured": alpaca_client.is_configured(),
-        "balance": state.get("balance", alpaca_strategy.SIMULATE_STARTING_BALANCE),
-        "available_balance": alpaca_strategy.get_available_balance() if alpaca_strategy.MODE == "simulate" else None,
+        "balance": float(account.get("equity") or 0.0),
+        "available_balance": float(account.get("cash") or 0.0),
         "positions": positions,
         "open_position_count": len(positions),
         "max_concurrent_positions": alpaca_strategy.MAX_CONCURRENT_POSITIONS,
