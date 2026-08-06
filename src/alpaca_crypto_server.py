@@ -48,6 +48,7 @@ from typing import Any
 from apscheduler.executors.pool import ThreadPoolExecutor as APSThreadPoolExecutor
 from apscheduler.schedulers.background import BackgroundScheduler
 from flask import Flask, jsonify, render_template, request, send_from_directory
+import pandas as pd
 
 SRC_DIR = Path(__file__).resolve().parent
 if str(SRC_DIR) not in sys.path:
@@ -114,6 +115,7 @@ JOB_HISTORY_FILE = DATA_DIR / "alpaca_crypto_job_run_history.json"
 JOB_LOCK_DIR = DATA_DIR / "alpaca_crypto_locks"
 ALPACA_CRYPTO_LATEST_CYCLE_FILE = DATA_DIR / "alpaca_crypto_latest_cycle.json"
 ALPACA_CRYPTO_LATEST_POSITION_CHECK_FILE = DATA_DIR / "alpaca_crypto_latest_position_check.json"
+ALPACA_CRYPTO_LATEST_SWEEP_FILE = DATA_DIR / "alpaca_crypto_latest_sweep.json"
 
 
 # Same reasoning as every other server here: on SIGTERM, APScheduler's
@@ -246,6 +248,47 @@ def _run_alpaca_crypto_threads_hourly_status() -> dict[str, Any]:
     except Exception as exc:
         logger.warning("[alpaca_crypto_server] Threads hourly status post failed: %s", exc)
         return {"ok": False, "error": str(exc)}
+
+
+@_locked_job("alpaca_crypto_backtest_sweep", stale_after_sec=1800)
+def _run_alpaca_crypto_backtest_sweep(*, days: int = 21) -> dict[str, Any]:
+    """Manual-trigger only -- deliberately NOT registered on the scheduler
+    (see alpaca_crypto_backtest.py's own module-level comment on
+    _CANDIDATES). Unlike alpaca_options_backtest_sweep, which hides its own
+    recurring sweep in an off-hours window, crypto trades 24/7 -- there is
+    no safe idle window to run a multi-model-fit sweep in on a service
+    that's already had real, confirmed OOM incidents this session. Run via
+    POST /api/alpaca/crypto/backtest when you actually want a fresh
+    reading, not on a timer."""
+    from data import alpaca_crypto_backtest
+
+    try:
+        universe = alpaca_crypto_data.get_crypto_universe()
+        frames = []
+        for symbol in universe:
+            feats = alpaca_crypto_backtest.build_pair_frame(symbol, days=days)
+            if not feats.empty:
+                frames.append(feats)
+        if not frames:
+            return {"ok": True, "skipped": True, "reason": "no_data"}
+        combined = pd.concat(frames, ignore_index=True).sort_values("ts")
+        del frames
+        cutoff_ts = combined["ts"].quantile(0.7)
+        train_df = combined[combined["ts"] < cutoff_ts]
+        test_df = combined[combined["ts"] >= cutoff_ts]
+        fitted = alpaca_crypto_backtest.fit_backtest_model(train_df)
+        test_with_preds = alpaca_crypto_backtest.add_model_predictions(test_df, fitted)
+        del combined, train_df, test_df
+        gc.collect()
+        sweep_result = alpaca_crypto_backtest.run_config_sweep(test_with_preds)
+        del test_with_preds
+        save_json(ALPACA_CRYPTO_LATEST_SWEEP_FILE, sweep_result)
+        return sweep_result
+    except Exception as exc:
+        logger.warning("[alpaca_crypto_server] backtest sweep failed: %s", exc)
+        return {"ok": False, "error": str(exc)}
+    finally:
+        gc.collect()
 
 
 def _ensure_background_jobs_started() -> None:
@@ -403,6 +446,7 @@ def api_alpaca_crypto_status():
     _, meta = alpaca_crypto_model.load_model()
     latest_cycle = load_json(ALPACA_CRYPTO_LATEST_CYCLE_FILE, {})
     latest_position_check = load_json(ALPACA_CRYPTO_LATEST_POSITION_CHECK_FILE, {})
+    latest_sweep = load_json(ALPACA_CRYPTO_LATEST_SWEEP_FILE, {})
 
     realized_pnl_by_date = state.get("realized_pnl_by_date") or {}
     total_realized_pnl = round(sum(float(v) for v in realized_pnl_by_date.values()), 6)
@@ -436,6 +480,7 @@ def api_alpaca_crypto_status():
         },
         "latest_cycle": latest_cycle,
         "latest_position_check": latest_position_check,
+        "latest_sweep": latest_sweep,
         "params": {
             "position_size_pct": alpaca_crypto_strategy.POSITION_SIZE_PCT,
             "max_concurrent_positions": alpaca_crypto_strategy.MAX_CONCURRENT_POSITIONS,
@@ -500,9 +545,22 @@ def api_alpaca_crypto_train():
         return jsonify({"ok": False, "error": str(exc)}), 500
 
 
+@app.route("/api/alpaca/crypto/backtest", methods=["GET", "POST"])
+def api_alpaca_crypto_backtest():
+    """Manual-trigger only -- see _run_alpaca_crypto_backtest_sweep's own
+    docstring for why this deliberately has no recurring schedule."""
+    if not is_cron_authorized(request):
+        return jsonify({"ok": False, "error": "Unauthorized"}), 401
+    try:
+        return jsonify(_run_alpaca_crypto_backtest_sweep())
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
 _JOB_LABELS = {
     "alpaca_crypto_data_collect": f"Alpaca crypto data collection -> HF (every {ALPACA_CRYPTO_DATA_COLLECT_MINUTES} min)",
     "alpaca_crypto_train": f"Alpaca crypto model retrain (every {ALPACA_CRYPTO_TRAIN_INTERVAL_MINUTES} min, 24/7)",
+    "alpaca_crypto_backtest_sweep": "Alpaca crypto backtest sweep (manual trigger only)",
     "alpaca_crypto_fast_check": f"Alpaca crypto fast exit check (every {ALPACA_CRYPTO_FAST_CHECK_SECONDS}s)",
     "alpaca_crypto_entry_scan": f"Alpaca crypto entry scan (every {ALPACA_CRYPTO_CYCLE_MINUTES} min, 24/7)",
     "alpaca_crypto_threads_trending_news": "Threads trending-news post (every 30 min)",

@@ -581,6 +581,40 @@ def test_reconcile_corrects_a_drifted_local_position(monkeypatch):
     assert reconciled[0]["entry_price"] == pytest.approx(64500.0)
 
 
+def test_reconcile_adopts_a_position_using_alpacas_own_slash_less_symbol_format(monkeypatch):
+    """Real, confirmed production bug: GET /v2/positions returns crypto
+    symbols WITHOUT the "/" separator (e.g. "XRPUSD"), not the "XRP/USD"
+    format get_current_price()/fetch_recent_crypto_bars() expect
+    everywhere else -- a real ~$14,435 XRP position got adopted as
+    "XRPUSD" and every subsequent quote fetch for it failed with a 400,
+    leaving it unpriceable and unmanageable. Must be reconstructed to the
+    canonical form by matching against the tradable universe."""
+    monkeypatch.setattr(alpaca_client, "get_positions", lambda: [
+        {"symbol": "XRPUSD", "qty": "13648.492425039", "avg_entry_price": "1.057817121", "asset_class": "crypto"},
+    ])
+    monkeypatch.setattr(alpaca_crypto_data, "get_crypto_universe", lambda: ["XRP/USD", "BTC/USD", "ETH/USD"])
+    reconciled = strat._reconcile_positions_with_exchange({"positions": []})  # noqa: SLF001
+    assert len(reconciled) == 1
+    assert reconciled[0]["symbol"] == "XRP/USD"
+
+
+def test_reconcile_self_heals_a_position_already_stored_under_the_wrong_symbol(monkeypatch):
+    """A position adopted BEFORE the canonical-symbol fix existed would
+    already be sitting in state as "XRPUSD" -- normalized keys still
+    match on every later reconcile (both normalize to "XRPUSD"), so the
+    "correct drifted position" branch must also fix the symbol field
+    itself, not just count/entry_price, or a once-broken position would
+    stay broken forever even after this fix ships."""
+    monkeypatch.setattr(alpaca_client, "get_positions", lambda: [
+        {"symbol": "XRPUSD", "qty": "13648.492425039", "avg_entry_price": "1.057817121", "asset_class": "crypto"},
+    ])
+    monkeypatch.setattr(alpaca_crypto_data, "get_crypto_universe", lambda: ["XRP/USD", "BTC/USD", "ETH/USD"])
+    local = [{"symbol": "XRPUSD", "entry_price": 1.057817121, "count": 13648.492425039, "opened_at": "2026-01-01T00:00:00+00:00"}]
+    reconciled = strat._reconcile_positions_with_exchange({"positions": local})  # noqa: SLF001
+    assert len(reconciled) == 1
+    assert reconciled[0]["symbol"] == "XRP/USD"
+
+
 def test_reconcile_drops_a_phantom_local_position(monkeypatch):
     monkeypatch.setattr(alpaca_client, "get_positions", lambda: [])
     local = [{"symbol": "BTC/USD", "entry_price": 65000.0, "count": 0.001, "opened_at": "2026-01-01T00:00:00+00:00"}]

@@ -564,13 +564,27 @@ def _real_open_positions_by_symbol() -> dict[str, dict[str, Any]] | None:
     /v2/positions returns EVERY asset class this account holds (equities
     and crypto share one Alpaca account) -- filtered here to
     asset_class=="crypto" so a stock position can never be mistaken for
-    one of this strategy's own."""
+    one of this strategy's own.
+
+    Real, confirmed production bug found in review: /v2/positions returns
+    crypto symbols WITHOUT the "/" separator (e.g. "XRPUSD"), not the
+    "XRP/USD"-style format get_crypto_universe()/fetch_recent_crypto_bars()/
+    get_current_price() all expect everywhere else in this file. An
+    ADOPTED position (no local counterpart, so nothing to compare against)
+    used to store this raw, slash-less symbol as-is -- confirmed live: a
+    real ~$14,435 XRP position got adopted as "XRPUSD" and every
+    subsequent quote fetch for it failed with a 400, leaving a real open
+    position unpriceable and unmanageable (no take-profit/stop-loss/
+    max-hold could ever fire). Reconstructed here by matching against the
+    canonical universe list instead of trusting Alpaca's own raw format."""
     from data import alpaca_client
+    from data.alpaca_crypto_data import get_crypto_universe
     try:
         positions = alpaca_client.get_positions()
     except Exception as exc:
         logger.warning("[alpaca_crypto_strategy] could not fetch real positions for reconciliation: %s", exc)
         return None
+    canonical_by_normalized = {_normalize_symbol(s): s for s in get_crypto_universe()}
     result: dict[str, dict[str, Any]] = {}
     for p in positions:
         if p.get("asset_class") != "crypto":
@@ -579,8 +593,16 @@ def _real_open_positions_by_symbol() -> dict[str, dict[str, Any]] | None:
         qty = float(p.get("qty") or 0.0)
         if not raw_symbol or qty == 0:
             continue
-        result[_normalize_symbol(raw_symbol)] = {
-            "raw_symbol": raw_symbol, "count": abs(qty), "entry_price": float(p.get("avg_entry_price") or 0.0),
+        normalized = _normalize_symbol(raw_symbol)
+        canonical_symbol = canonical_by_normalized.get(normalized, raw_symbol)
+        if canonical_symbol == raw_symbol and "/" not in raw_symbol:
+            logger.warning(
+                "[alpaca_crypto_strategy] could not map real position symbol %r to a canonical BASE/QUOTE pair "
+                "(not in the current tradable universe) -- using it as-is, quote fetches for it will likely fail",
+                raw_symbol,
+            )
+        result[normalized] = {
+            "raw_symbol": canonical_symbol, "count": abs(qty), "entry_price": float(p.get("avg_entry_price") or 0.0),
         }
     return result
 
@@ -631,6 +653,19 @@ def _reconcile_positions_with_exchange(state: dict[str, Any]) -> list[dict[str, 
                 "[alpaca_crypto_strategy] correcting local position for %s: count %.6f->%.6f, entry %.6f->%.6f",
                 local["symbol"], float(local["count"]), real_pos["count"], float(local["entry_price"]), real_pos["entry_price"],
             )
+        if local["symbol"] != real_pos["raw_symbol"]:
+            # Self-heals a position adopted before the canonical-symbol
+            # mapping fix above existed (e.g. a real position stored as
+            # Alpaca's own slash-less "XRPUSD" instead of "XRP/USD") --
+            # normalized keys still match here, so this would otherwise
+            # keep updating count/entry_price forever on the wrong symbol
+            # without ever correcting the field that's actually broken
+            # (every quote fetch for it).
+            logger.warning(
+                "[alpaca_crypto_strategy] correcting local position symbol: %s -> %s",
+                local["symbol"], real_pos["raw_symbol"],
+            )
+            local["symbol"] = real_pos["raw_symbol"]
         local["count"] = real_pos["count"]
         local["entry_price"] = real_pos["entry_price"]
         reconciled.append(local)
