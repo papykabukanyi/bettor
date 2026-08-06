@@ -234,6 +234,11 @@ def _no_volatility_ranking_network_calls(monkeypatch):
     override this explicitly."""
     monkeypatch.setattr(perps_data, "_recent_volatility_by_ticker", lambda: {})
     monkeypatch.setattr(perps_data, "_TICKER_ACTIVITY_CACHE", {"volatility_by_ticker": None, "computed_at": 0.0})
+    # _cached_list_margin_markets() has its own 30s TTL cache -- without
+    # resetting it here, whichever test happens to run first within that
+    # window "wins" and every later test silently sees its stale mocked (or
+    # real) return value instead of its own.
+    monkeypatch.setattr(perps_data, "_MARGIN_MARKETS_CACHE", {"markets": None, "computed_at": 0.0})
 
 
 def test_get_watchlist_falls_back_to_known_list_on_failure(monkeypatch):
