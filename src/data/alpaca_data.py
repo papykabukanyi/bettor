@@ -709,8 +709,18 @@ def latest_feature_row(symbol: str) -> dict[str, Any] | None:
         return None
 
 
-_LOAD_TRAINING_DATASET_LIST_TIMEOUT_SEC = int(os.getenv("ALPACA_LOAD_TRAINING_DATASET_LIST_TIMEOUT_SEC", "10") or "10")
-_LOAD_TRAINING_DATASET_SHARD_TIMEOUT_SEC = int(os.getenv("ALPACA_LOAD_TRAINING_DATASET_SHARD_TIMEOUT_SEC", "8") or "8")
+# 20s/15s (not a tighter value): real, confirmed live recalibration --
+# call_with_hard_timeout runs each call on its own thread, but this service
+# still only has ONE Python interpreter (GIL) shared with the APScheduler
+# background thread's own concurrent HF/Alpaca calls (fast_check every 20s,
+# entry_scan every 2min, data_collect every 15min). A 10s/8s timeout was
+# tight enough that a real (non-hung, just GIL-contended) call regularly
+# exceeded it and returned an empty "no_data" result -- safe, but
+# needlessly conservative. Confirmed live: gunicorn's own --timeout is now
+# 300s (see render.yaml), leaving ample headroom for these more generous
+# per-call ceilings.
+_LOAD_TRAINING_DATASET_LIST_TIMEOUT_SEC = int(os.getenv("ALPACA_LOAD_TRAINING_DATASET_LIST_TIMEOUT_SEC", "20") or "20")
+_LOAD_TRAINING_DATASET_SHARD_TIMEOUT_SEC = int(os.getenv("ALPACA_LOAD_TRAINING_DATASET_SHARD_TIMEOUT_SEC", "15") or "15")
 
 
 def load_training_dataset(*, max_shards: int = 90, max_rows: int | None = None) -> pd.DataFrame:
