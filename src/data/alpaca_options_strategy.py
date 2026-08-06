@@ -247,11 +247,14 @@ def compute_contract_qty(available_balance_usd: float, contract_price: float, *,
 
 
 # ---------------------------------------------------------------------------
-# Two modes, one codebase -- same dual-gate posture as every other strategy
-# here.
+# Always trades against the real Alpaca account (paper or live, whichever
+# ALPACA_TRADING_BASE_URL points at) -- the custom local-balance "simulate"
+# mode this used to have was removed per the user's explicit request:
+# Alpaca's own paper account is now the single source of truth for balance/
+# positions/fills, not a hand-rolled virtual ledger. LIVE_TRADING_ENABLED
+# remains the one safety gate on whether an order is actually placed vs.
+# dry-run (decide but don't call the order API).
 # ---------------------------------------------------------------------------
-MODE = os.getenv("ALPACA_OPTIONS_MODE", "simulate").strip().lower()
-SIMULATE_STARTING_BALANCE = _env_float("ALPACA_OPTIONS_SIMULATE_STARTING_BALANCE", 500.0)
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 DATA_DIR = ROOT_DIR / "data"
@@ -271,10 +274,10 @@ def _today_str() -> str:
 
 def _durable_state_slice(state: dict[str, Any]) -> dict[str, Any]:
     return {
-        "balance": state.get("balance", SIMULATE_STARTING_BALANCE),
         "positions": state.get("positions") or [],
         "trade_log": state.get("trade_log") or [],
         "realized_pnl_by_date": state.get("realized_pnl_by_date") or {},
+        "daily_reference_balance": state.get("daily_reference_balance") or {},
     }
 
 
@@ -332,17 +335,17 @@ def _load_state() -> dict[str, Any]:
             state = json.load(f)
     except Exception:
         base = {
-            "balance": SIMULATE_STARTING_BALANCE, "positions": [], "trade_log": [], "realized_pnl_by_date": {},
+            "positions": [], "trade_log": [], "realized_pnl_by_date": {}, "daily_reference_balance": {},
         }
         durable = _pull_durable_state_from_hf()
         if durable:
             base.update(durable)
             logger.info("[alpaca_options_strategy] recovered durable state from HF after local state was missing")
         return base
-    state.setdefault("balance", SIMULATE_STARTING_BALANCE)
     state.setdefault("positions", [])
     state.setdefault("trade_log", [])
     state.setdefault("realized_pnl_by_date", {})
+    state.setdefault("daily_reference_balance", {})
     return state
 
 
@@ -360,13 +363,115 @@ def _save_state(state: dict[str, Any], *, push_durable: bool = False) -> None:
 
 
 def get_available_balance() -> float:
-    if MODE == "live":
-        from data import alpaca_client
-        account = alpaca_client.get_account()
-        return float(account.get("cash") or 0.0)
-    state = _load_state()
-    committed = sum(float(p["entry_price"]) * float(p["count"]) * 100 for p in (state.get("positions") or []))
-    return max(0.0, float(state.get("balance", SIMULATE_STARTING_BALANCE)) - committed)
+    """The real Alpaca cash balance."""
+    from data import alpaca_client
+    account = alpaca_client.get_account()
+    return float(account.get("cash") or 0.0)
+
+
+def _reference_balance_for_today(state: dict[str, Any], available_balance_usd: float | None) -> float | None:
+    """The daily loss cap is a percentage of the balance as it stood at the
+    START of the day, not of whatever Alpaca's account balance happens to be
+    at the moment it's checked (which drifts throughout the day as trades
+    close) -- captured once per day the first time a real balance read
+    succeeds. Same pattern as alpaca_strategy.py's/alpaca_crypto_strategy.py's
+    own _reference_balance_for_today."""
+    today = _today_str()
+    refs = state.setdefault("daily_reference_balance", {})
+    if today not in refs:
+        if available_balance_usd is None:
+            return None
+        refs[today] = available_balance_usd
+        for old_date in list(refs.keys()):
+            if old_date != today:
+                del refs[old_date]
+    return float(refs[today])
+
+
+def _real_open_positions_by_symbol() -> dict[str, dict[str, Any]] | None:
+    """Ground truth from Alpaca's own GET /v2/positions -- local bookkeeping
+    only ever records an order having been PLACED, never confirms it
+    actually FILLED at the assumed price/quantity. Returns None (never an
+    empty dict) on a failed API call so callers can tell "confirmed no real
+    positions" apart from "couldn't check" and avoid wiping out tracking on
+    a transient error -- same discipline as alpaca_crypto_strategy.py's own
+    _real_open_positions_by_symbol.
+
+    /v2/positions returns EVERY asset class this account holds (equities,
+    crypto, and options share one Alpaca account) -- filtered here to
+    asset_class=="us_option" so an equity or crypto position can never be
+    mistaken for one of this strategy's own."""
+    from data import alpaca_client
+    try:
+        positions = alpaca_client.get_positions()
+    except Exception as exc:
+        logger.warning("[alpaca_options_strategy] could not fetch real positions for reconciliation: %s", exc)
+        return None
+    result: dict[str, dict[str, Any]] = {}
+    for p in positions:
+        if p.get("asset_class") != "us_option":
+            continue
+        symbol = p.get("symbol") or ""
+        qty = float(p.get("qty") or 0.0)
+        if not symbol or qty == 0:
+            continue
+        result[symbol] = {"count": abs(qty), "entry_price": float(p.get("avg_entry_price") or 0.0)}
+    return result
+
+
+def _reconcile_positions_with_exchange(state: dict[str, Any]) -> list[dict[str, Any]]:
+    """Makes local state["positions"] match what the real Alpaca account
+    actually holds before any exit/entry decision is made -- same three-way
+    adopt/correct/drop logic as alpaca_crypto_strategy.py's own
+    _reconcile_positions_with_exchange.
+
+    Debit spreads hold TWO contracts (long + short leg) under one logical
+    position -- only the long leg's symbol is reconciled here (matching the
+    entry/exit code, which already tracks the spread as a single unit keyed
+    on the long contract's symbol); a spread's short leg is Alpaca's own
+    concern, not re-derived here.
+
+    Only ever called when live trading is actually active (see callers) --
+    in dry-run, local positions are hypothetical (no order was ever placed)
+    and deliberately have no real-exchange counterpart, so reconciling
+    would just erase them."""
+    local_positions = state.get("positions") or []
+    real = _real_open_positions_by_symbol()
+    if real is None:
+        return local_positions
+
+    local_by_symbol = {p["symbol"]: p for p in local_positions}
+    reconciled: list[dict[str, Any]] = []
+    for symbol, real_pos in real.items():
+        local = local_by_symbol.get(symbol)
+        if local is None:
+            logger.warning(
+                "[alpaca_options_strategy] adopting untracked real position: %s x%d @ %.4f",
+                symbol, int(real_pos["count"]), real_pos["entry_price"],
+            )
+            reconciled.append({
+                "symbol": symbol, "underlying_symbol": symbol, "strategy": "naked",
+                "entry_price": real_pos["entry_price"], "count": real_pos["count"],
+                "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(), "order_id": None,
+            })
+            continue
+        if (
+            abs(float(local["count"]) - real_pos["count"]) > 1e-9
+            or abs(float(local["entry_price"]) - real_pos["entry_price"]) > 1e-6
+        ):
+            logger.warning(
+                "[alpaca_options_strategy] correcting local position for %s: count %.4f->%.4f, entry %.4f->%.4f",
+                symbol, float(local["count"]), real_pos["count"], float(local["entry_price"]), real_pos["entry_price"],
+            )
+        local["count"] = real_pos["count"]
+        local["entry_price"] = real_pos["entry_price"]
+        reconciled.append(local)
+
+    for symbol in local_by_symbol:
+        if symbol not in real:
+            logger.warning("[alpaca_options_strategy] dropping phantom local position (no matching real fill): %s", symbol)
+
+    return reconciled
 
 
 def get_current_option_price(contract_symbol: str) -> float | None:
@@ -403,9 +508,9 @@ def get_current_spread_price(long_symbol: str, short_symbol: str) -> float | Non
 def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = None) -> dict[str, Any]:
     """Evaluates each underlying for a directional options entry. Requires
     a real trained model (see evaluate_candidate) -- no technical-only
-    cold-start fallback. "simulate" mode always paper-trades; "live" mode
-    places a real plain market buy order for the chosen contract UNLESS
-    dry_run resolves True.
+    cold-start fallback. Places a real plain market buy order for the
+    chosen contract against the Alpaca account ALPACA_TRADING_BASE_URL
+    points at UNLESS dry_run resolves True.
 
     Regular-hours only, unlike the equities/crypto strategies -- Alpaca
     does not support extended-hours trading on OPTIONS contracts at all
@@ -444,11 +549,29 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
     opened: list[dict[str, Any]] = []
     with _STATE_LOCK:
         state = _load_state()
+        if not effective_dry_run:
+            # Ground-truth check first, before deciding anything -- see
+            # _reconcile_positions_with_exchange. Dry-run positions are
+            # purely hypothetical (no order was ever placed), so this only
+            # ever runs when orders are actually being placed.
+            state["positions"] = _reconcile_positions_with_exchange(state)
+            _save_state(state)
         existing_underlyings = {p["underlying_symbol"] for p in (state.get("positions") or [])}
         open_count = len(state.get("positions") or [])
-        reference_balance = float(state.get("balance", SIMULATE_STARTING_BALANCE))
+        try:
+            available_balance_usd = get_available_balance()
+        except Exception as exc:
+            available_balance_usd = None
+            logger.debug("[alpaca_options_strategy] balance read for daily reference failed: %s", exc)
+        reference_was_just_set = _today_str() not in (state.get("daily_reference_balance") or {})
+        reference_balance = _reference_balance_for_today(state, available_balance_usd)
         today_pnl = float((state.get("realized_pnl_by_date") or {}).get(_today_str(), 0.0))
-    if reference_balance > 0 and today_pnl <= -abs(DAILY_LOSS_CAP_PCT) * reference_balance:
+        loss_cap_breached = bool(
+            reference_balance and reference_balance > 0
+            and today_pnl <= -abs(DAILY_LOSS_CAP_PCT) * reference_balance
+        )
+        _save_state(state, push_durable=reference_was_just_set)
+    if loss_cap_breached:
         return {"opened": [], "action": "daily_loss_cap_breached"}
 
     for symbol in symbols:
@@ -494,7 +617,7 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
 
                 levels = position_exit_levels({"entry_price": net_debit})
                 order_id = None
-                if MODE == "live" and not effective_dry_run:
+                if not effective_dry_run:
                     limit_price = net_debit * (1 + SPREAD_LIMIT_SLIPPAGE_PCT)
                     order_spec = alpaca_client.build_option_spread_order(
                         long_symbol=long_symbol, short_symbol=short_symbol, qty=qty, limit_price=limit_price,
@@ -531,7 +654,7 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
 
                 levels = position_exit_levels({"entry_price": contract_price})
                 order_id = None
-                if MODE == "live" and not effective_dry_run:
+                if not effective_dry_run:
                     order_spec = alpaca_client.build_option_order(symbol=contract_symbol, side="buy", qty=qty)
                     order_id = alpaca_client.place_order(order_spec)
 
@@ -556,7 +679,7 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
                 _save_state(state)
                 existing_underlyings.add(symbol)
                 open_count = len(positions)
-            trade_dry_run = effective_dry_run if MODE == "live" else True
+            trade_dry_run = effective_dry_run
             opened.append({
                 "symbol": symbol, "ok": True, "action": "opened", "contract_symbol": contract_symbol,
                 "strategy": position["strategy"], "option_type": contract_type, "entry_price": entry_price,
@@ -596,6 +719,9 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
     effective_dry_run = (not LIVE_TRADING_ENABLED) if dry_run is None else dry_run
     with _STATE_LOCK:
         state = _load_state()
+        if not effective_dry_run:
+            state["positions"] = _reconcile_positions_with_exchange(state)
+            _save_state(state)
         positions = list(state.get("positions") or [])
     if not positions:
         return {"action": "no_position", "checks": []}
@@ -621,7 +747,7 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                 checks.append({"symbol": contract_symbol, "ok": True, "exit_check": reason})
                 continue
 
-            if MODE == "live" and not effective_dry_run:
+            if not effective_dry_run:
                 from data import alpaca_client
                 try:
                     if is_spread:
@@ -644,7 +770,6 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
             gross = round((current_price - float(position["entry_price"])) * float(position["count"]) * 100, 6)
             with _STATE_LOCK:
                 state = _load_state()
-                state["balance"] = round(float(state.get("balance", SIMULATE_STARTING_BALANCE)) + gross, 6)
                 by_date = state.setdefault("realized_pnl_by_date", {})
                 today = _today_str()
                 by_date[today] = round(float(by_date.get(today, 0.0)) + gross, 6)
@@ -654,7 +779,7 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                     "strategy": position.get("strategy", "naked"),
                     "entry_price": position["entry_price"], "exit_price": current_price,
                     "count": position["count"], "realized_pnl_usd": gross, "reason": reason,
-                    "dry_run": effective_dry_run if MODE == "live" else True,
+                    "dry_run": effective_dry_run,
                 }
                 state.setdefault("trade_log", []).append(trade)
                 state["positions"] = [p for p in (state.get("positions") or []) if p["symbol"] != contract_symbol]

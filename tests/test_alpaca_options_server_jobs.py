@@ -198,6 +198,7 @@ def test_api_alpaca_options_status_reports_configured_flag(monkeypatch):
     from data import alpaca_client
 
     monkeypatch.setattr(alpaca_client, "is_configured", lambda: True)
+    monkeypatch.setattr(alpaca_client, "get_account", lambda: {"cash": "500.0", "equity": "500.0"})
     with alpaca_options_server.app.test_client() as client:
         resp = client.get("/api/alpaca/options/status")
         assert resp.status_code == 200

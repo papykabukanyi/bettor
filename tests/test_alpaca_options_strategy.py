@@ -121,20 +121,25 @@ def test_compute_contract_qty_is_zero_for_a_non_positive_contract_price():
 
 
 # ---------------------------------------------------------------------------
-# Simulate/live position lifecycle -- state persistence, entry, exit.
+# Position lifecycle -- state persistence, entry, exit.
 # ---------------------------------------------------------------------------
 @pytest.fixture(autouse=True)
 def _isolated_state(tmp_path, monkeypatch):
     monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "alpaca_options_state.json")
     monkeypatch.setattr(strat, "HF_API_KEY", "")
-    monkeypatch.setattr(strat, "MODE", "simulate")
+    # get_available_balance() always calls alpaca_client.get_account() (no
+    # more "simulate mode" local-math fallback) -- every scan_and_enter
+    # test implicitly depends on this succeeding for position sizing, so a
+    # sane default lives here; tests exercising the loss cap or reconcile
+    # path override it with a specific value where the number matters.
+    monkeypatch.setattr(alpaca_client, "get_account", lambda: {"cash": "500.0"})
     yield
 
 
-def test_load_state_defaults_to_the_simulate_starting_balance():
+def test_load_state_defaults_to_an_empty_position_list():
     state = strat._load_state()  # noqa: SLF001
-    assert state["balance"] == strat.SIMULATE_STARTING_BALANCE
     assert state["positions"] == []
+    assert "balance" not in state
 
 
 def test_get_current_option_price_averages_bid_and_ask(monkeypatch):
@@ -159,7 +164,7 @@ def _contract(**overrides):
     return base
 
 
-def test_scan_and_enter_simulate_mode_opens_a_paper_position_without_any_real_order(monkeypatch):
+def test_scan_and_enter_dry_run_opens_a_position_without_any_real_order(monkeypatch):
     monkeypatch.setattr(strat, "ENTRY_STRATEGY", "naked")
     monkeypatch.setattr(alpaca_options_data, "get_options_universe", lambda: ["AAPL"])
     monkeypatch.setattr(alpaca_options_data, "latest_feature_row", lambda symbol: _row())
@@ -168,7 +173,7 @@ def test_scan_and_enter_simulate_mode_opens_a_paper_position_without_any_real_or
     monkeypatch.setattr(alpaca_client, "get_option_latest_quote", lambda symbol: {"ap": 1.05, "bp": 0.95})
 
     def fail_if_called(*a, **k):
-        raise AssertionError("simulate mode must never place a real order")
+        raise AssertionError("dry-run must never place a real order")
 
     monkeypatch.setattr(alpaca_client, "place_order", fail_if_called)
 
@@ -229,7 +234,6 @@ def test_scan_and_enter_skips_entirely_right_at_the_session_open(monkeypatch):
 
 def test_scan_and_enter_skips_a_symbol_already_held(monkeypatch):
     strat._save_state({  # noqa: SLF001
-        "balance": 500.0,
         "positions": [{
             "symbol": "AAPL240223C00195000", "underlying_symbol": "AAPL", "entry_price": 5.0, "count": 1,
             "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(),
@@ -250,7 +254,7 @@ def test_scan_and_enter_skips_a_symbol_already_held(monkeypatch):
 def test_scan_and_enter_respects_the_daily_loss_cap(monkeypatch):
     today = strat._today_str()  # noqa: SLF001
     strat._save_state({  # noqa: SLF001
-        "balance": 500.0, "positions": [], "trade_log": [],
+        "positions": [], "trade_log": [],
         "realized_pnl_by_date": {today: -100.0},  # -20% of $500, breaches the 10% default cap
     })
     result = strat.scan_and_enter()
@@ -259,7 +263,6 @@ def test_scan_and_enter_respects_the_daily_loss_cap(monkeypatch):
 
 def test_scan_and_enter_respects_max_concurrent_positions(monkeypatch):
     strat._save_state({  # noqa: SLF001
-        "balance": 500.0,
         "positions": [
             {
                 "symbol": f"SYM{i}240223C00195000", "underlying_symbol": f"SYM{i}", "entry_price": 5.0, "count": 1,
@@ -275,7 +278,7 @@ def test_scan_and_enter_respects_max_concurrent_positions(monkeypatch):
     assert result["opened"][0]["action"] == "skipped_slot_taken"
 
 
-def test_scan_and_enter_posts_to_threads_on_a_simulated_entry(monkeypatch):
+def test_scan_and_enter_posts_to_threads_on_a_dry_run_entry(monkeypatch):
     monkeypatch.setattr(strat, "ENTRY_STRATEGY", "naked")
     monkeypatch.setattr(alpaca_options_data, "get_options_universe", lambda: ["AAPL"])
     monkeypatch.setattr(alpaca_options_data, "latest_feature_row", lambda symbol: _row())
@@ -337,7 +340,7 @@ def test_manage_open_positions_returns_no_position_without_any_state():
 
 def test_manage_open_positions_posts_a_threads_exit_on_close(monkeypatch):
     strat._save_state({  # noqa: SLF001
-        "balance": 500.0, "positions": [{
+        "positions": [{
             "symbol": "AAPL240223C00195000", "underlying_symbol": "AAPL", "entry_price": 5.0, "count": 1,
             "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(), "order_id": None,
             "expiration_date": (dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=30)).date().isoformat(),
@@ -357,9 +360,9 @@ def test_manage_open_positions_posts_a_threads_exit_on_close(monkeypatch):
     assert posted["pnl_usd"] > 0
 
 
-def test_manage_open_positions_simulate_mode_closes_on_take_profit(monkeypatch):
+def test_manage_open_positions_dry_run_closes_on_take_profit(monkeypatch):
     strat._save_state({  # noqa: SLF001
-        "balance": 500.0, "positions": [{
+        "positions": [{
             "symbol": "AAPL240223C00195000", "underlying_symbol": "AAPL", "entry_price": 5.0, "count": 1,
             "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(), "order_id": None,
             "expiration_date": (dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=30)).date().isoformat(),
@@ -378,7 +381,7 @@ def test_manage_open_positions_simulate_mode_closes_on_take_profit(monkeypatch):
 
 def test_manage_open_positions_leaves_position_open_when_nothing_triggers(monkeypatch):
     strat._save_state({  # noqa: SLF001
-        "balance": 500.0, "positions": [{
+        "positions": [{
             "symbol": "AAPL240223C00195000", "underlying_symbol": "AAPL", "entry_price": 5.0, "count": 1,
             "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(), "order_id": None,
             "expiration_date": (dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=30)).date().isoformat(),
@@ -390,9 +393,9 @@ def test_manage_open_positions_leaves_position_open_when_nothing_triggers(monkey
     assert result["action"] == "no_change"
 
 
-def test_manage_open_positions_never_places_a_real_order_in_simulate_mode(monkeypatch):
+def test_manage_open_positions_never_places_a_real_order_in_dry_run(monkeypatch):
     strat._save_state({  # noqa: SLF001
-        "balance": 500.0, "positions": [{
+        "positions": [{
             "symbol": "AAPL240223C00195000", "underlying_symbol": "AAPL", "entry_price": 5.0, "count": 1,
             "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(), "order_id": None,
             "expiration_date": (dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=30)).date().isoformat(),
@@ -403,7 +406,7 @@ def test_manage_open_positions_never_places_a_real_order_in_simulate_mode(monkey
     monkeypatch.setattr(alpaca_client, "get_option_latest_quote", lambda symbol: {"ap": take_profit_price, "bp": take_profit_price})
 
     def fail_if_called(*a, **k):
-        raise AssertionError("simulate mode must never place a real order")
+        raise AssertionError("dry-run must never place a real order")
 
     monkeypatch.setattr(alpaca_client, "place_order", fail_if_called)
     result = strat.manage_open_positions()
@@ -411,10 +414,9 @@ def test_manage_open_positions_never_places_a_real_order_in_simulate_mode(monkey
 
 
 def test_manage_open_positions_live_mode_places_a_plain_market_sell(monkeypatch):
-    monkeypatch.setattr(strat, "MODE", "live")
     monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", True)
     strat._save_state({  # noqa: SLF001
-        "balance": 500.0, "positions": [{
+        "positions": [{
             "symbol": "AAPL240223C00195000", "underlying_symbol": "AAPL", "entry_price": 5.0, "count": 1,
             "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(), "order_id": "order-1",
             "expiration_date": (dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=30)).date().isoformat(),
@@ -436,7 +438,7 @@ def test_manage_open_positions_live_mode_places_a_plain_market_sell(monkeypatch)
 
 def test_manage_open_positions_force_closes_near_expiration(monkeypatch):
     strat._save_state({  # noqa: SLF001
-        "balance": 500.0, "positions": [{
+        "positions": [{
             "symbol": "AAPL240223C00195000", "underlying_symbol": "AAPL", "entry_price": 5.0, "count": 1,
             "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(), "order_id": None,
             "expiration_date": (dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=1)).date().isoformat(),
@@ -499,7 +501,7 @@ def test_scan_and_enter_opens_a_debit_spread_position_by_default(monkeypatch):
     monkeypatch.setattr(alpaca_client, "get_option_latest_quote", fake_quote)
 
     def fail_if_called(*a, **k):
-        raise AssertionError("simulate mode must never place a real order")
+        raise AssertionError("dry-run must never place a real order")
 
     monkeypatch.setattr(alpaca_client, "place_order", fail_if_called)
 
@@ -527,7 +529,6 @@ def test_scan_and_enter_skips_a_spread_when_no_short_leg_is_available(monkeypatc
 
 
 def test_scan_and_enter_live_mode_places_a_real_mleg_order_for_a_spread(monkeypatch):
-    monkeypatch.setattr(strat, "MODE", "live")
     monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", True)
     monkeypatch.setattr(alpaca_options_data, "get_options_universe", lambda: ["AAPL"])
     monkeypatch.setattr(alpaca_options_data, "latest_feature_row", lambda symbol: _row())
@@ -553,7 +554,7 @@ def test_scan_and_enter_live_mode_places_a_real_mleg_order_for_a_spread(monkeypa
 
 def test_manage_open_positions_closes_a_debit_spread_on_take_profit(monkeypatch):
     strat._save_state({  # noqa: SLF001
-        "balance": 500.0, "positions": [{
+        "positions": [{
             "symbol": "AAPL240223C00195000", "underlying_symbol": "AAPL", "strategy": "debit_spread",
             "short_symbol": "AAPL240223C00200000", "entry_price": 1.0, "count": 1,
             "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(), "order_id": None,
@@ -576,10 +577,9 @@ def test_manage_open_positions_closes_a_debit_spread_on_take_profit(monkeypatch)
 
 
 def test_manage_open_positions_live_mode_closes_a_spread_with_a_reversed_mleg_order(monkeypatch):
-    monkeypatch.setattr(strat, "MODE", "live")
     monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", True)
     strat._save_state({  # noqa: SLF001
-        "balance": 500.0, "positions": [{
+        "positions": [{
             "symbol": "AAPL240223C00195000", "underlying_symbol": "AAPL", "strategy": "debit_spread",
             "short_symbol": "AAPL240223C00200000", "entry_price": 1.0, "count": 1,
             "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(), "order_id": "order-1",
@@ -603,3 +603,90 @@ def test_manage_open_positions_live_mode_closes_a_spread_with_a_reversed_mleg_or
     assert captured["closing"] is True
     assert captured["long_symbol"] == "AAPL240223C00195000"
     assert captured["short_symbol"] == "AAPL240223C00200000"
+
+
+# ---------------------------------------------------------------------------
+# Reconciliation against the real Alpaca account -- same ground-truth check
+# already proven in alpaca_crypto_strategy.py/perps_strategy.py, ported here
+# now that this strategy always trades against the real account.
+# ---------------------------------------------------------------------------
+def test_real_open_positions_by_symbol_filters_to_option_asset_class(monkeypatch):
+    positions = [
+        {"symbol": "AAPL", "qty": "10", "avg_entry_price": "150.0", "asset_class": "us_equity"},
+        {"symbol": "AAPL240223C00195000", "qty": "2", "avg_entry_price": "5.0", "asset_class": "us_option"},
+    ]
+    monkeypatch.setattr(alpaca_client, "get_positions", lambda: positions)
+    real = strat._real_open_positions_by_symbol()  # noqa: SLF001
+    assert list(real.keys()) == ["AAPL240223C00195000"]
+    assert real["AAPL240223C00195000"]["count"] == pytest.approx(2.0)
+
+
+def test_real_open_positions_by_symbol_returns_none_on_a_failed_fetch(monkeypatch):
+    def fail():
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(alpaca_client, "get_positions", fail)
+    assert strat._real_open_positions_by_symbol() is None  # noqa: SLF001
+
+
+def test_reconcile_adopts_an_untracked_real_position(monkeypatch):
+    monkeypatch.setattr(alpaca_client, "get_positions", lambda: [
+        {"symbol": "MSFT240223C00400000", "qty": "1", "avg_entry_price": "4.0", "asset_class": "us_option"},
+    ])
+    reconciled = strat._reconcile_positions_with_exchange({"positions": []})  # noqa: SLF001
+    assert len(reconciled) == 1
+    assert reconciled[0]["symbol"] == "MSFT240223C00400000"
+    assert reconciled[0]["count"] == pytest.approx(1.0)
+
+
+def test_reconcile_corrects_a_drifted_local_position(monkeypatch):
+    monkeypatch.setattr(alpaca_client, "get_positions", lambda: [
+        {"symbol": "AAPL240223C00195000", "qty": "2", "avg_entry_price": "5.25", "asset_class": "us_option"},
+    ])
+    local = [{
+        "symbol": "AAPL240223C00195000", "underlying_symbol": "AAPL", "strategy": "naked",
+        "entry_price": 5.0, "count": 1, "opened_at": "2026-01-01T00:00:00+00:00",
+    }]
+    reconciled = strat._reconcile_positions_with_exchange({"positions": local})  # noqa: SLF001
+    assert len(reconciled) == 1
+    assert reconciled[0]["count"] == pytest.approx(2.0)
+    assert reconciled[0]["entry_price"] == pytest.approx(5.25)
+
+
+def test_reconcile_drops_a_phantom_local_position(monkeypatch):
+    monkeypatch.setattr(alpaca_client, "get_positions", lambda: [])
+    local = [{
+        "symbol": "AAPL240223C00195000", "underlying_symbol": "AAPL", "strategy": "naked",
+        "entry_price": 5.0, "count": 1, "opened_at": "2026-01-01T00:00:00+00:00",
+    }]
+    reconciled = strat._reconcile_positions_with_exchange({"positions": local})  # noqa: SLF001
+    assert reconciled == []
+
+
+def test_reconcile_returns_local_positions_unchanged_when_the_real_fetch_fails(monkeypatch):
+    def fail():
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(alpaca_client, "get_positions", fail)
+    local = [{
+        "symbol": "AAPL240223C00195000", "underlying_symbol": "AAPL", "strategy": "naked",
+        "entry_price": 5.0, "count": 1, "opened_at": "2026-01-01T00:00:00+00:00",
+    }]
+    reconciled = strat._reconcile_positions_with_exchange({"positions": local})  # noqa: SLF001
+    assert reconciled == local
+
+
+# ---------------------------------------------------------------------------
+# Daily reference balance -- fixed to the day's ACTUAL starting balance,
+# not whatever the continuously-updated tracked balance happens to be.
+# ---------------------------------------------------------------------------
+def test_reference_balance_for_today_is_captured_once():
+    state = {}
+    first = strat._reference_balance_for_today(state, 500.0)  # noqa: SLF001
+    second = strat._reference_balance_for_today(state, 999.0)  # noqa: SLF001
+    assert first == 500.0
+    assert second == 500.0  # unchanged by a later, different reading
+
+
+def test_reference_balance_for_today_returns_none_without_a_real_reading():
+    assert strat._reference_balance_for_today({}, None) is None  # noqa: SLF001

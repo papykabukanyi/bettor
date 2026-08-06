@@ -258,9 +258,7 @@ def _run_alpaca_options_backtest_sweep() -> dict[str, Any]:
         test_df = df[df["ts"] >= cutoff_ts]
         fitted = alpaca_options_backtest.fit_backtest_model(train_df)
         test_with_preds = alpaca_options_backtest.add_model_predictions(test_df, fitted)
-        sweep_result = alpaca_options_backtest.run_config_sweep(
-            test_with_preds, starting_balance=alpaca_options_strategy.SIMULATE_STARTING_BALANCE,
-        )
+        sweep_result = alpaca_options_backtest.run_config_sweep(test_with_preds)
         save_json(ALPACA_OPTIONS_LATEST_SWEEP_FILE, sweep_result)
         del df, train_df, test_df, test_with_preds, fitted
         return {"ok": True, "sweep_result": sweep_result}
@@ -364,10 +362,10 @@ def _ensure_background_jobs_started() -> None:
             logger.info(
                 "Alpaca options scheduler started: fast exit check every %ds, entry scan every %d min "
                 "(first run in %ds), data collect every %d min, retrain every %d min off-hours "
-                "(skips as a no-op during regular hours), mode=%s live_trading=%s",
+                "(skips as a no-op during regular hours), live_trading=%s",
                 ALPACA_OPTIONS_FAST_CHECK_SECONDS, ALPACA_OPTIONS_CYCLE_MINUTES, ALPACA_OPTIONS_STARTUP_GRACE_SECONDS,
                 ALPACA_OPTIONS_DATA_COLLECT_MINUTES, ALPACA_OPTIONS_OFFHOURS_TRAIN_MINUTES,
-                alpaca_options_strategy.MODE, alpaca_options_strategy.LIVE_TRADING_ENABLED,
+                alpaca_options_strategy.LIVE_TRADING_ENABLED,
             )
 
         def _runner() -> None:
@@ -459,14 +457,15 @@ def api_alpaca_options_status():
         for p in (state.get("positions") or [])
     ]
 
+    account = alpaca_client.get_account() if alpaca_client.is_configured() else {}
     return jsonify({
         "ok": True,
         "now": dt.datetime.now(dt.timezone.utc).isoformat(),
-        "mode": alpaca_options_strategy.MODE,
+        "account_type": "paper" if "paper-api" in alpaca_client.TRADING_BASE_URL else "live",
         "live_trading_enabled": alpaca_options_strategy.LIVE_TRADING_ENABLED,
         "alpaca_configured": alpaca_client.is_configured(),
-        "balance": state.get("balance", alpaca_options_strategy.SIMULATE_STARTING_BALANCE),
-        "available_balance": alpaca_options_strategy.get_available_balance() if alpaca_options_strategy.MODE == "simulate" else None,
+        "balance": float(account.get("equity") or 0.0),
+        "available_balance": float(account.get("cash") or 0.0),
         "positions": positions,
         "open_position_count": len(positions),
         "max_concurrent_positions": alpaca_options_strategy.MAX_CONCURRENT_POSITIONS,
