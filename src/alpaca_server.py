@@ -470,6 +470,23 @@ def _ensure_background_jobs_started() -> None:
 
         def _runner() -> None:
             try:
+                # Real gap found in review: manage_open_positions() already
+                # reconciles against the real Alpaca account every fast-check
+                # cycle (20s), which normally catches a restart-time gap
+                # quickly enough -- but there's no EXPLICIT, immediately-
+                # observable check confirming an order placed right before a
+                # crash (state not yet saved) actually got picked back up.
+                # An explicit startup pass makes this immediate (not a ~20s
+                # implicit wait) and gives a clear, loggable confirmation.
+                if alpaca_strategy.LIVE_TRADING_ENABLED:
+                    with alpaca_strategy._STATE_LOCK:  # noqa: SLF001
+                        state = alpaca_strategy._load_state()  # noqa: SLF001
+                        state["positions"] = alpaca_strategy._reconcile_positions_with_exchange(state)  # noqa: SLF001
+                        alpaca_strategy._save_state(state)  # noqa: SLF001
+                    logger.info("Startup reconciliation: %d real open position(s) confirmed against Alpaca", len(state["positions"]))
+            except Exception as exc:
+                logger.warning("Startup reconciliation failed: %s", exc)
+            try:
                 _run_alpaca_data_collect()
                 logger.info("Startup alpaca data collect completed")
             except Exception as exc:

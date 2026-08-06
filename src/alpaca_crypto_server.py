@@ -323,6 +323,25 @@ def _ensure_background_jobs_started() -> None:
             # next_run_time delayed by ALPACA_CRYPTO_DATA_COLLECT_MINUTES)
             # covers first collection on a sane cadence without this.
             #
+            # Real gap found in review: manage_open_positions() already
+            # reconciles against the real Alpaca account every fast-check
+            # cycle (20s), which normally catches a restart-time gap
+            # quickly enough -- but there's no EXPLICIT, immediately-
+            # observable check confirming an order placed right before a
+            # crash (state not yet saved) actually got picked back up. A
+            # single get_positions() + local state read/write is cheap --
+            # not the heavy collect_dataset_rows()/push_minute_snapshot()
+            # chain the OOM incident above is specifically about, so this
+            # is safe to run unconditionally on every boot.
+            try:
+                if alpaca_crypto_strategy.LIVE_TRADING_ENABLED:
+                    with alpaca_crypto_strategy._STATE_LOCK:  # noqa: SLF001
+                        state = alpaca_crypto_strategy._load_state()  # noqa: SLF001
+                        state["positions"] = alpaca_crypto_strategy._reconcile_positions_with_exchange(state)  # noqa: SLF001
+                        alpaca_crypto_strategy._save_state(state)  # noqa: SLF001
+                    logger.info("Startup reconciliation: %d real open position(s) confirmed against Alpaca", len(state["positions"]))
+            except Exception as exc:
+                logger.warning("Startup reconciliation failed: %s", exc)
             # Same cold-start-only guard as every other server here: only
             # train immediately if nothing is cached yet, so a crash-
             # triggered restart can't turn into a self-sustaining retrain
