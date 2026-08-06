@@ -397,6 +397,9 @@ class _FakeHfApi:
         _FakeHfApi.captured_upload["df"] = pd.read_parquet(path_or_fileobj)
         _FakeHfApi.captured_upload["path_in_repo"] = path_in_repo
 
+    def create_commit(self, *, repo_id, repo_type, operations, commit_message):
+        pass  # backfill_minute_history's batched uploader -- no-op unless a test overrides it
+
 
 def test_push_minute_snapshot_merges_with_the_existing_shard(monkeypatch):
     monkeypatch.setattr(alpaca_data, "HF_API_KEY", "fake-token")
@@ -499,6 +502,160 @@ def test_push_minute_snapshot_returns_ok_false_without_an_hf_key(monkeypatch):
 def test_push_minute_snapshot_returns_ok_false_for_an_empty_frame():
     result = alpaca_data.push_minute_snapshot(pd.DataFrame())
     assert result == {"ok": False, "reason": "no_rows"}
+
+
+# ---------------------------------------------------------------------------
+# backfill_minute_history -- deep historical catch-up, real gap found in
+# review: the live collector (push_minute_snapshot) only ever writes
+# TODAY's shard, so the archive only ever grew one day at a time from
+# whenever collection first started, despite Alpaca actually providing a
+# full year of real minute bars per symbol.
+# ---------------------------------------------------------------------------
+class _FakeHfApiBatch(_FakeHfApi):
+    """create_commit-based fake -- backfill_minute_history batches many
+    date-shards into a single multi-file commit (real, confirmed incident:
+    the original one-commit-per-date loop hit HF's 128-commits/hour repo
+    cap partway through a 251-date backfill and silently dropped ~118
+    dates), so its own tests must mock create_commit, not upload_file."""
+
+    def create_commit(self, *, repo_id, repo_type, operations, commit_message):
+        for op in operations:
+            _FakeHfApiBatch.captured_upload.setdefault("commits", []).append(
+                {"path_in_repo": op.path_in_repo, "df": pd.read_parquet(op.path_or_fileobj)}
+            )
+
+
+def test_backfill_minute_history_splits_rows_by_calendar_date_and_uploads_one_shard_per_date(monkeypatch):
+    monkeypatch.setattr(alpaca_data, "HF_API_KEY", "fake-token")
+    # 2026-01-01 00:00 UTC and 2026-01-02 00:00 UTC, one row each.
+    fake_feats = pd.DataFrame({
+        "ts": [1767225600, 1767312000], "close": [100.0, 101.0], "label_up": [1, 0],
+    })
+    monkeypatch.setattr(alpaca_data, "fetch_minute_bars", lambda symbol, *, days: pd.DataFrame({"ts": [1], "close": [1.0]}))
+    monkeypatch.setattr(alpaca_data, "engineer_features", lambda df, *, sentiment_score: fake_feats.copy())
+
+    import huggingface_hub
+
+    def fail(**kw):
+        raise RuntimeError("no existing shard")
+
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", fail)
+    _FakeHfApiBatch.captured_upload = {}
+    monkeypatch.setattr(huggingface_hub, "HfApi", _FakeHfApiBatch)
+
+    result = alpaca_data.backfill_minute_history(["AAPL"], days=90)
+
+    assert result["ok"] is True
+    assert result["symbols_processed"] == 1
+    assert result["dates_written"] == 2
+    uploads = _FakeHfApiBatch.captured_upload["commits"]
+    paths = sorted(u["path_in_repo"] for u in uploads)
+    assert paths == ["minute/2026-01-01.parquet", "minute/2026-01-02.parquet"]
+
+
+def test_backfill_minute_history_batches_many_dates_into_few_commits(monkeypatch):
+    """Real, confirmed incident: uploading one commit per calendar date hit
+    HF's 128-commits/hour repo cap partway through a 251-date backfill and
+    silently dropped ~118 dates. 45 dates at the 20-per-batch chunk size
+    must land in 3 commits, not 45."""
+    monkeypatch.setattr(alpaca_data, "HF_API_KEY", "fake-token")
+    base_ts = 1767225600  # 2026-01-01 00:00 UTC
+    ts_values = [base_ts + i * 86400 for i in range(45)]
+    fake_feats = pd.DataFrame({"ts": ts_values, "close": [100.0] * 45, "label_up": [1] * 45})
+    monkeypatch.setattr(alpaca_data, "fetch_minute_bars", lambda symbol, *, days: pd.DataFrame({"ts": [1], "close": [1.0]}))
+    monkeypatch.setattr(alpaca_data, "engineer_features", lambda df, *, sentiment_score: fake_feats.copy())
+
+    import huggingface_hub
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", lambda **kw: (_ for _ in ()).throw(RuntimeError("no shard")))
+    commit_calls = []
+
+    class _CommitCountingApi(_FakeHfApi):
+        def create_commit(self, *, repo_id, repo_type, operations, commit_message):
+            commit_calls.append(len(list(operations)))
+
+    monkeypatch.setattr(huggingface_hub, "HfApi", _CommitCountingApi)
+
+    result = alpaca_data.backfill_minute_history(["AAPL"], days=90)
+
+    assert result["ok"] is True
+    assert result["dates_written"] == 45
+    assert len(commit_calls) == 3  # 20 + 20 + 5
+    assert commit_calls == [20, 20, 5]
+
+
+def test_backfill_minute_history_merges_with_an_existing_shard_for_that_date(monkeypatch):
+    monkeypatch.setattr(alpaca_data, "HF_API_KEY", "fake-token")
+    fake_feats = pd.DataFrame({"ts": [1767225600], "close": [100.0], "label_up": [1]})
+    monkeypatch.setattr(alpaca_data, "fetch_minute_bars", lambda symbol, *, days: pd.DataFrame({"ts": [1], "close": [1.0]}))
+    monkeypatch.setattr(alpaca_data, "engineer_features", lambda df, *, sentiment_score: fake_feats.copy())
+
+    import tempfile
+    existing_df = pd.DataFrame({"symbol": ["MSFT"], "ts": [999], "close": [400.0]})
+    existing_path = tempfile.NamedTemporaryFile(suffix=".parquet", delete=False).name
+    existing_df.to_parquet(existing_path, index=False)
+
+    import huggingface_hub
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", lambda **kw: existing_path)
+    _FakeHfApiBatch.captured_upload = {}
+    monkeypatch.setattr(huggingface_hub, "HfApi", _FakeHfApiBatch)
+
+    alpaca_data.backfill_minute_history(["AAPL"], days=90)
+
+    uploads = _FakeHfApiBatch.captured_upload["commits"]
+    assert len(uploads) == 1
+    assert set(uploads[0]["df"]["symbol"]) == {"AAPL", "MSFT"}
+
+
+def test_backfill_minute_history_holds_sentiment_at_neutral(monkeypatch):
+    """Historical sentiment for arbitrary past dates isn't available from
+    any free news API -- must be held at 0.0 (neutral), never today's
+    real-time sentiment applied backward onto old rows (which would be
+    actively wrong, not just absent)."""
+    monkeypatch.setattr(alpaca_data, "HF_API_KEY", "fake-token")
+    monkeypatch.setattr(alpaca_data, "fetch_minute_bars", lambda symbol, *, days: pd.DataFrame({"ts": [1], "close": [1.0]}))
+    captured_sentiment = {}
+
+    def fake_engineer(df, *, sentiment_score):
+        captured_sentiment["value"] = sentiment_score
+        return pd.DataFrame({"ts": [1767225600], "close": [100.0], "label_up": [1]})
+
+    monkeypatch.setattr(alpaca_data, "engineer_features", fake_engineer)
+
+    import huggingface_hub
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", lambda **kw: (_ for _ in ()).throw(RuntimeError("no shard")))
+    monkeypatch.setattr(huggingface_hub, "HfApi", _FakeHfApi)
+
+    alpaca_data.backfill_minute_history(["AAPL"], days=90)
+
+    assert captured_sentiment["value"] == 0.0
+
+
+def test_backfill_minute_history_returns_ok_false_without_an_hf_key(monkeypatch):
+    monkeypatch.setattr(alpaca_data, "HF_API_KEY", "")
+    result = alpaca_data.backfill_minute_history(["AAPL"], days=90)
+    assert result == {"ok": False, "reason": "no_hf_api_key"}
+
+
+def test_backfill_minute_history_continues_past_a_symbol_that_fails_to_fetch(monkeypatch):
+    monkeypatch.setattr(alpaca_data, "HF_API_KEY", "fake-token")
+
+    def fetch(symbol, *, days):
+        if symbol == "BAD":
+            raise RuntimeError("fetch failed")
+        return pd.DataFrame({"ts": [1], "close": [1.0]})
+
+    monkeypatch.setattr(alpaca_data, "fetch_minute_bars", fetch)
+    monkeypatch.setattr(alpaca_data, "engineer_features", lambda df, *, sentiment_score: pd.DataFrame({"ts": [1767225600], "close": [100.0], "label_up": [1]}))
+
+    import huggingface_hub
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", lambda **kw: (_ for _ in ()).throw(RuntimeError("no shard")))
+    monkeypatch.setattr(huggingface_hub, "HfApi", _FakeHfApi)
+
+    result = alpaca_data.backfill_minute_history(["BAD", "AAPL"], days=90)
+
+    assert result["ok"] is True
+    assert result["symbols_processed"] == 1
+    assert result["symbols_requested"] == 2
 
 
 def test_get_symbols_with_daily_bars_lists_existing_daily_shards(monkeypatch):
