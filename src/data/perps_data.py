@@ -322,7 +322,19 @@ def _candles_to_frame(candles: list[dict[str, Any]]) -> pd.DataFrame:
 
 
 _CANDLE_CACHE_TTL_SEC = int(os.getenv("PERPS_CANDLE_CACHE_TTL_SEC", "45") or "45")
+# Defensive bound matching the same fix applied to alpaca_data.py's own
+# equivalent cache after a real, confirmed OOM was traced to it never
+# being pruned -- perps' active-ticker set is small/bounded so this is
+# much less likely to matter here, but a delisted/inactive ticker's entry
+# would otherwise sit forever, and this costs nothing to guard against.
+_CANDLE_CACHE_MAX_AGE_SEC = _CANDLE_CACHE_TTL_SEC * 40
 _candle_cache: dict[str, tuple[pd.DataFrame, pd.DataFrame, float]] = {}
+
+
+def _prune_candle_cache(now_mono: float) -> None:
+    stale = [k for k, (_, _, ts) in _candle_cache.items() if (now_mono - ts) > _CANDLE_CACHE_MAX_AGE_SEC]
+    for k in stale:
+        del _candle_cache[k]
 
 
 def fetch_candle_frames(ticker: str) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -345,6 +357,7 @@ def fetch_candle_frames(ticker: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     one_min_df = _candles_to_frame(one_min.get("candlesticks") or [])
     hourly_df = _candles_to_frame(hourly.get("candlesticks") or [])
     _candle_cache[ticker] = (one_min_df, hourly_df, now_mono)
+    _prune_candle_cache(now_mono)
     return one_min_df, hourly_df
 
 

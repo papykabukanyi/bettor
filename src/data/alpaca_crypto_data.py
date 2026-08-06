@@ -133,7 +133,19 @@ def _bars_to_df(bars: list[dict[str, Any]]) -> pd.DataFrame:
 # already far more than feature computation actually needs.
 LIVE_LOOKBACK_DAYS = int(os.getenv("ALPACA_CRYPTO_LIVE_LOOKBACK_DAYS", "2") or "2")
 _MINUTE_BAR_CACHE_TTL_SEC = int(os.getenv("ALPACA_CRYPTO_MINUTE_BAR_CACHE_TTL_SEC", "90") or "90")
+# Defensive bound matching the same fix applied to alpaca_data.py's own
+# equivalent cache after a real, confirmed OOM was traced to it never
+# being pruned -- crypto's universe is small/fixed so this is much less
+# likely to matter here, but costs nothing to guard against the same
+# unbounded-growth shape.
+_MINUTE_BAR_CACHE_MAX_AGE_SEC = _MINUTE_BAR_CACHE_TTL_SEC * 40
 _minute_bar_cache: dict[str, tuple[pd.DataFrame, float]] = {}
+
+
+def _prune_minute_bar_cache(now_mono: float) -> None:
+    stale = [k for k, (_, ts) in _minute_bar_cache.items() if (now_mono - ts) > _MINUTE_BAR_CACHE_MAX_AGE_SEC]
+    for k in stale:
+        del _minute_bar_cache[k]
 
 
 def fetch_crypto_bars(symbol: str, *, days: int = LIVE_LOOKBACK_DAYS) -> pd.DataFrame:
@@ -160,6 +172,7 @@ def fetch_recent_crypto_bars(symbol: str, *, days: int = LIVE_LOOKBACK_DAYS) -> 
         return cached[0]
     df = fetch_crypto_bars(symbol, days=days)
     _minute_bar_cache[cache_key] = (df, now_mono)
+    _prune_minute_bar_cache(now_mono)
     return df
 
 

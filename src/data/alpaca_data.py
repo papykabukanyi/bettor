@@ -190,7 +190,24 @@ def fetch_minute_bars(symbol: str, *, days: int = 35) -> pd.DataFrame:
 # re-pulling a long window on every call.
 LIVE_LOOKBACK_DAYS = int(os.getenv("ALPACA_LIVE_LOOKBACK_DAYS", "5") or "5")
 _MINUTE_BAR_CACHE_TTL_SEC = int(os.getenv("ALPACA_MINUTE_BAR_CACHE_TTL_SEC", "90") or "90")
+# Real, confirmed production OOM caught live via active monitoring: this
+# cache is written on every fetch but was never pruned, and its key is
+# per-symbol -- unlike crypto/perps (a small, fixed, bounded universe of
+# pairs/tickers), the equities watchlist ranks over the full tradable
+# market and its top-N membership rotates over time, so distinct symbols
+# accumulate in here forever as different names cycle in and out of the
+# watchlist across hours of uptime. A crash landed inside data_collect
+# right as a brand-new (empty) daily shard was being checked, ruling out
+# "the shard is big" as the cause -- pointing at exactly this kind of
+# unbounded, uptime-proportional growth instead of a per-cycle peak.
+_MINUTE_BAR_CACHE_MAX_AGE_SEC = _MINUTE_BAR_CACHE_TTL_SEC * 40
 _minute_bar_cache: dict[str, tuple[pd.DataFrame, float]] = {}
+
+
+def _prune_minute_bar_cache(now_mono: float) -> None:
+    stale = [k for k, (_, ts) in _minute_bar_cache.items() if (now_mono - ts) > _MINUTE_BAR_CACHE_MAX_AGE_SEC]
+    for k in stale:
+        del _minute_bar_cache[k]
 
 
 def fetch_recent_minute_bars(symbol: str, *, days: int = LIVE_LOOKBACK_DAYS) -> pd.DataFrame:
@@ -212,6 +229,7 @@ def fetch_recent_minute_bars(symbol: str, *, days: int = LIVE_LOOKBACK_DAYS) -> 
         return cached[0]
     df = fetch_minute_bars(symbol, days=days)
     _minute_bar_cache[cache_key] = (df, now_mono)
+    _prune_minute_bar_cache(now_mono)
     return df
 
 
