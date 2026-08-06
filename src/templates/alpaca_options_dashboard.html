@@ -110,8 +110,8 @@
   <h3>Open Positions</h3>
   <div class="scroll-x">
     <table>
-      <thead><tr><th>Strategy</th><th>Contract(s)</th><th>Underlying</th><th>Type</th><th>Strike(s)</th><th>Expires</th><th>Entry (net)</th><th>Qty</th><th>Take Profit</th><th>Stop Loss</th><th>Opened</th></tr></thead>
-      <tbody id="positions-body"><tr><td colspan="11" class="empty">No open positions</td></tr></tbody>
+      <thead><tr><th>Strategy</th><th>Contract(s)</th><th>Underlying</th><th>Type</th><th>Strike(s)</th><th>Expires</th><th>Entry (net)</th><th>Qty</th><th>Take Profit</th><th>Stop Loss</th><th>Opened</th><th>Order</th></tr></thead>
+      <tbody id="positions-body"><tr><td colspan="12" class="empty">No open positions</td></tr></tbody>
     </table>
   </div>
 </section>
@@ -324,8 +324,9 @@ async function refreshStatus() {
         <td>${fmtCount(p.count)}</td>
         <td class="stat pos" style="font-size:13px;">${fmtPrice(p.take_profit_price)}</td>
         <td class="stat neg" style="font-size:13px;">${fmtPrice(p.stop_loss_price)}</td>
-        <td>${timeAgo(p.opened_at)}</td>`;
-    }, 11, "No open positions");
+        <td>${timeAgo(p.opened_at)}</td>
+        <td class="sub">${p.order_id || "paper"}</td>`;
+    }, 12, "No open positions");
   } catch (e) { console.error("positions render failed", e); }
 
   try {
