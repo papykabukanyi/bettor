@@ -386,13 +386,14 @@ def latest_feature_row(symbol: str) -> dict[str, Any] | None:
         return None
 
 
-# 20s/15s -- real, confirmed live recalibration on the equities sibling of
-# this function: a 10s/8s timeout was tight enough that a real (non-hung,
-# just GIL-contended with the scheduler's own concurrent HF/Alpaca calls)
-# call regularly exceeded it and returned an empty "no_data" result. 300s
-# gunicorn --timeout (render.yaml) leaves ample headroom for this.
-_LOAD_TRAINING_DATASET_LIST_TIMEOUT_SEC = int(os.getenv("ALPACA_CRYPTO_LOAD_TRAINING_DATASET_LIST_TIMEOUT_SEC", "20") or "20")
-_LOAD_TRAINING_DATASET_SHARD_TIMEOUT_SEC = int(os.getenv("ALPACA_CRYPTO_LOAD_TRAINING_DATASET_SHARD_TIMEOUT_SEC", "15") or "15")
+# 45s/25s -- real, confirmed live recalibration on the equities sibling of
+# this function, twice over: both 10s/8s and 20s/15s proved tight enough
+# that a real (non-hung, just GIL-contended with the scheduler's own
+# concurrent HF/Alpaca calls) call regularly exceeded them and returned an
+# empty "no_data" result. 300s gunicorn --timeout (render.yaml) leaves
+# ample headroom for this.
+_LOAD_TRAINING_DATASET_LIST_TIMEOUT_SEC = int(os.getenv("ALPACA_CRYPTO_LOAD_TRAINING_DATASET_LIST_TIMEOUT_SEC", "45") or "45")
+_LOAD_TRAINING_DATASET_SHARD_TIMEOUT_SEC = int(os.getenv("ALPACA_CRYPTO_LOAD_TRAINING_DATASET_SHARD_TIMEOUT_SEC", "25") or "25")
 
 
 def load_training_dataset(*, max_shards: int = 90, max_rows: int | None = None) -> pd.DataFrame:
