@@ -424,7 +424,19 @@ def load_training_dataset(*, max_shards: int = 90, max_rows: int | None = None) 
     DataFrames held simultaneously in memory before the final concat even
     starts. Flushing into a running `combined` frame every
     _SHARD_FLUSH_BATCH shards bounds peak "raw shard frames held at once"
-    to that batch size instead of max_shards."""
+    to that batch size instead of max_shards.
+
+    Real, confirmed production incident on the equities sibling of this
+    exact function, found immediately after deploying the timeout fix
+    above: call_with_hard_timeout spins up a FRESH ThreadPoolExecutor per
+    call and (by design) can't forcibly kill an underlying hung thread,
+    only stop waiting on it. Calling it once per shard -- up to 91 times in
+    a single invocation -- on a job that repeats regularly meant any
+    transient slow/hung call left an abandoned thread running in the
+    background indefinitely, competing for the same GIL as every later
+    call and visibly degrading them. _shared_hf_call() below reuses ONE
+    bounded-size executor for every HF call in a single invocation instead,
+    explicitly shut down when this function returns."""
     if not HF_API_KEY:
         return pd.DataFrame()
     cap = MAX_TRAIN_ROWS if max_rows is None else max_rows
@@ -442,13 +454,23 @@ def load_training_dataset(*, max_shards: int = 90, max_rows: int | None = None) 
         pending = []
         gc.collect()
 
+    from concurrent.futures import ThreadPoolExecutor
+    from concurrent.futures import TimeoutError as FutureTimeoutError
+    executor = ThreadPoolExecutor(max_workers=4)
+
+    def _shared_hf_call(fn, *, timeout_sec: float):
+        try:
+            return executor.submit(fn).result(timeout=timeout_sec)
+        except FutureTimeoutError:
+            logger.warning("[alpaca_crypto_data] HF call exceeded %ss, giving up", timeout_sec)
+            return None
+
     try:
         from huggingface_hub import HfApi, hf_hub_download
-        from server_common import call_with_hard_timeout
         api = HfApi(token=HF_API_KEY)
-        raw_files = call_with_hard_timeout(
+        raw_files = _shared_hf_call(
             lambda: api.list_repo_files(repo_id=HF_ALPACA_CRYPTO_DATASET_REPO, repo_type="dataset"),
-            timeout_sec=_LOAD_TRAINING_DATASET_LIST_TIMEOUT_SEC, on_timeout=None,
+            timeout_sec=_LOAD_TRAINING_DATASET_LIST_TIMEOUT_SEC,
         )
         if raw_files is None:
             return pd.DataFrame()
@@ -458,9 +480,9 @@ def load_training_dataset(*, max_shards: int = 90, max_rows: int | None = None) 
             if stop_after_rows and accumulated_rows >= stop_after_rows:
                 break
             try:
-                local_path = call_with_hard_timeout(
+                local_path = _shared_hf_call(
                     lambda f=f: hf_hub_download(repo_id=HF_ALPACA_CRYPTO_DATASET_REPO, filename=f, repo_type="dataset", token=HF_API_KEY),
-                    timeout_sec=_LOAD_TRAINING_DATASET_SHARD_TIMEOUT_SEC, on_timeout=None,
+                    timeout_sec=_LOAD_TRAINING_DATASET_SHARD_TIMEOUT_SEC,
                 )
                 if local_path is None:
                     continue
@@ -476,6 +498,8 @@ def load_training_dataset(*, max_shards: int = 90, max_rows: int | None = None) 
                 logger.warning("[alpaca_crypto_data] failed to read shard %s: %s", f, exc)
     except Exception as exc:
         logger.warning("[alpaca_crypto_data] HF dataset listing failed: %s", exc)
+    finally:
+        executor.shutdown(wait=False)
     _flush_pending()
 
     if combined is None or combined.empty:
