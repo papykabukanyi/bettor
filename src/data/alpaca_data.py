@@ -709,41 +709,105 @@ def latest_feature_row(symbol: str) -> dict[str, Any] | None:
         return None
 
 
+_LOAD_TRAINING_DATASET_LIST_TIMEOUT_SEC = int(os.getenv("ALPACA_LOAD_TRAINING_DATASET_LIST_TIMEOUT_SEC", "10") or "10")
+_LOAD_TRAINING_DATASET_SHARD_TIMEOUT_SEC = int(os.getenv("ALPACA_LOAD_TRAINING_DATASET_SHARD_TIMEOUT_SEC", "8") or "8")
+
+
 def load_training_dataset(*, max_shards: int = 90, max_rows: int | None = None) -> pd.DataFrame:
     """Downloads minute-bar shards from HF_ALPACA_DATASET_REPO, most-recent-
     first, stopping once enough rows are in hand to cover the cap (with a
-    safety margin for dedup)."""
+    safety margin for dedup).
+
+    Real, confirmed production incident: called synchronously from a Flask
+    request handler (both the pre-existing /api/alpaca/train route and the
+    newer /api/alpaca/train_torch route, via train_model()/
+    train_torch_candidate_model()), this used to have NO timeout on either
+    the initial list_repo_files call or any of the up-to-90 sequential
+    hf_hub_download calls. huggingface_hub's internal shared-session lock
+    can hang indefinitely (the exact same class of incident
+    call_with_hard_timeout's own docstring documents for perps'
+    _pull_durable_state_from_hf) -- and even without a hang, 90 fully
+    sequential downloads can legitimately exceed gunicorn's own --timeout
+    ceiling on these services. Seen live: gunicorn's WORKER TIMEOUT fired
+    mid-call, forcibly SIGABRT-ing the worker (and, since the background
+    APScheduler thread lives in that same process, taking every scheduled
+    job down with it until gunicorn rebooted a replacement worker).
+
+    Each call below is individually bounded so ONE stuck/slow shard
+    degrades to "skip this shard, keep going" (preserving the original
+    per-shard try/except's partial-results resilience) instead of freezing
+    the whole function -- wrapping the whole loop as a single hard-timeout
+    call would instead have discarded every already-downloaded shard the
+    moment any one of them timed out.
+
+    Real, confirmed production incident (Render's own events: oomKilled,
+    512Mi limit, during the daily 04:00 ET alpaca_train cron): this used to
+    accumulate every downloaded shard in one Python list and pd.concat()
+    them ALL at once at the end. That was fine back when the archive only
+    held a handful of days -- but the real historical backfill this same
+    session added (~8 days -> a full year, ~253 shards) means max_shards=90
+    now legitimately means up to 90 full-day, all-symbol DataFrames held
+    simultaneously in memory before the final concat even starts, on a
+    512MB container. Flushing into a running `combined` frame every
+    _SHARD_FLUSH_BATCH shards (with an explicit gc.collect()) bounds peak
+    "raw shard frames held at once" to that batch size instead of
+    max_shards, the same incremental-accumulation discipline this
+    session's own backfill_minute_history() already uses for HF uploads."""
     if not HF_API_KEY:
         return pd.DataFrame()
     cap = MAX_TRAIN_ROWS if max_rows is None else max_rows
     stop_after_rows = int(cap * 1.5) if cap else None
-    frames: list[pd.DataFrame] = []
+    _SHARD_FLUSH_BATCH = 10
+    pending: list[pd.DataFrame] = []
+    combined: pd.DataFrame | None = None
     accumulated_rows = 0
+
+    def _flush_pending() -> None:
+        nonlocal combined, pending
+        if not pending:
+            return
+        combined = pd.concat([combined, *pending], ignore_index=True) if combined is not None else pd.concat(pending, ignore_index=True)
+        pending = []
+        gc.collect()
+
     try:
         from huggingface_hub import HfApi, hf_hub_download
+        from server_common import call_with_hard_timeout
         api = HfApi(token=HF_API_KEY)
-        hf_files = [f for f in api.list_repo_files(repo_id=HF_ALPACA_DATASET_REPO, repo_type="dataset") if _DATE_SHARD_RE.match(f)]
+        raw_files = call_with_hard_timeout(
+            lambda: api.list_repo_files(repo_id=HF_ALPACA_DATASET_REPO, repo_type="dataset"),
+            timeout_sec=_LOAD_TRAINING_DATASET_LIST_TIMEOUT_SEC, on_timeout=None,
+        )
+        if raw_files is None:
+            return pd.DataFrame()
+        hf_files = [f for f in raw_files if _DATE_SHARD_RE.match(f)]
         hf_files = sorted(hf_files, reverse=True)[:max_shards]
         for f in hf_files:
             if stop_after_rows and accumulated_rows >= stop_after_rows:
                 break
             try:
-                local_path = hf_hub_download(repo_id=HF_ALPACA_DATASET_REPO, filename=f, repo_type="dataset", token=HF_API_KEY)
+                local_path = call_with_hard_timeout(
+                    lambda f=f: hf_hub_download(repo_id=HF_ALPACA_DATASET_REPO, filename=f, repo_type="dataset", token=HF_API_KEY),
+                    timeout_sec=_LOAD_TRAINING_DATASET_SHARD_TIMEOUT_SEC, on_timeout=None,
+                )
+                if local_path is None:
+                    continue
                 shard = pd.read_parquet(local_path)
                 if "symbol" in shard.columns and "ts" in shard.columns:
-                    frames.append(shard)
+                    pending.append(shard)
                     accumulated_rows += len(shard)
+                    if len(pending) >= _SHARD_FLUSH_BATCH:
+                        _flush_pending()
                 else:
                     logger.warning("[alpaca_data] skipping shard with unexpected schema: %s", f)
             except Exception as exc:
                 logger.warning("[alpaca_data] failed to read shard %s: %s", f, exc)
     except Exception as exc:
         logger.warning("[alpaca_data] HF dataset listing failed: %s", exc)
+    _flush_pending()
 
-    if not frames:
+    if combined is None or combined.empty:
         return pd.DataFrame()
-    combined = pd.concat(frames, ignore_index=True)
-    del frames
     if "symbol" in combined.columns and "ts" in combined.columns:
         combined = combined.drop_duplicates(subset=["symbol", "ts"])
         combined["symbol"] = combined["symbol"].astype("category")

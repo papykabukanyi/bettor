@@ -380,6 +380,73 @@ def test_load_training_dataset_stops_once_the_cap_is_covered(monkeypatch):
     assert len(downloaded) < len(shard_names)
 
 
+def test_load_training_dataset_returns_empty_frame_when_listing_hangs(monkeypatch):
+    """Real, confirmed production incident: called synchronously from a
+    Flask request handler (/api/alpaca/train, /api/alpaca/train_torch),
+    huggingface_hub's own internal shared-session lock can hang
+    indefinitely inside list_repo_files -- confirmed live: gunicorn's own
+    WORKER TIMEOUT fired and SIGABRT-killed the worker, taking the
+    background APScheduler thread down with it. A hard timeout must
+    convert that into a clean empty-result degradation instead."""
+    monkeypatch.setattr(alpaca_data, "HF_API_KEY", "fake-token")
+    monkeypatch.setattr(alpaca_data, "_LOAD_TRAINING_DATASET_LIST_TIMEOUT_SEC", 0.05)
+
+    class HangingApi:
+        def __init__(self, token=None):
+            pass
+
+        def list_repo_files(self, repo_id, repo_type):
+            import time as t
+            t.sleep(0.5)  # comfortably longer than the 0.05s timeout above, short enough not to stall pytest's own exit
+            return []
+
+    import huggingface_hub
+    monkeypatch.setattr(huggingface_hub, "HfApi", HangingApi)
+
+    import time as real_time
+    start = real_time.monotonic()
+    result = alpaca_data.load_training_dataset()
+    elapsed = real_time.monotonic() - start
+
+    assert result.empty
+    assert elapsed < 0.4  # gave up around the 0.05s timeout, did not wait out the 0.5s hang
+
+
+def test_load_training_dataset_skips_a_hanging_shard_and_continues(monkeypatch):
+    """A single stuck shard download must not take down the whole call --
+    same "skip it, keep going" resilience as an ordinary failed download,
+    just for a hang instead of a raised exception."""
+    monkeypatch.setattr(alpaca_data, "HF_API_KEY", "fake-token")
+    monkeypatch.setattr(alpaca_data, "_LOAD_TRAINING_DATASET_SHARD_TIMEOUT_SEC", 0.3)
+    shard_names = ["minute/2026-07-10.parquet", "minute/2026-07-11.parquet", "minute/2026-07-12.parquet"]
+
+    class FakeApi:
+        def __init__(self, token=None):
+            pass
+
+        def list_repo_files(self, repo_id, repo_type):
+            return shard_names
+
+    def fake_hf_hub_download(repo_id, filename, repo_type, token):
+        if filename == "minute/2026-07-11.parquet":
+            import time as t
+            t.sleep(1.5)  # the hanging shard -- comfortably longer than the 0.3s timeout above even under system load
+        import tempfile
+        idx = shard_names.index(filename)
+        day_df = pd.DataFrame({"symbol": ["AAPL"] * 10, "ts": [idx * 1000 + i for i in range(10)], "close": [1.0] * 10})
+        f = tempfile.NamedTemporaryFile(suffix=".parquet", delete=False)
+        day_df.to_parquet(f.name, index=False)
+        return f.name
+
+    import huggingface_hub
+    monkeypatch.setattr(huggingface_hub, "HfApi", FakeApi)
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", fake_hf_hub_download)
+
+    result = alpaca_data.load_training_dataset()
+
+    assert len(result) == 20  # 2 successful shards x 10 rows -- the hanging one was skipped, not waited on
+
+
 # ---------------------------------------------------------------------------
 # push_minute_snapshot -- must MERGE with whatever's already in today's HF
 # shard, never overwrite it (same discipline as the perps archive).
