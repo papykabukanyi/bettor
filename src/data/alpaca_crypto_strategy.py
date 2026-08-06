@@ -378,12 +378,14 @@ def compute_position_notional(available_balance_usd: float) -> float:
 
 
 # ---------------------------------------------------------------------------
-# Two modes, one codebase -- same dual-gate posture as every other strategy
-# here: "simulate" (default) tracks a virtual balance and places no real
-# orders; "live" places real orders, still gated by LIVE_TRADING_ENABLED.
+# Always trades against the real Alpaca account (paper or live, whichever
+# ALPACA_TRADING_BASE_URL points at) -- the custom local-balance "simulate"
+# mode this used to have was removed per the user's explicit request:
+# Alpaca's own paper account is now the single source of truth for balance/
+# positions/fills, not a hand-rolled virtual ledger. LIVE_TRADING_ENABLED
+# remains the one safety gate on whether an order is actually placed vs.
+# dry-run (decide but don't call the order API).
 # ---------------------------------------------------------------------------
-MODE = os.getenv("ALPACA_CRYPTO_MODE", "simulate").strip().lower()
-SIMULATE_STARTING_BALANCE = _env_float("ALPACA_CRYPTO_SIMULATE_STARTING_BALANCE", 500.0)
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 DATA_DIR = ROOT_DIR / "data"
@@ -403,7 +405,6 @@ def _today_str() -> str:
 
 def _durable_state_slice(state: dict[str, Any]) -> dict[str, Any]:
     return {
-        "balance": state.get("balance", SIMULATE_STARTING_BALANCE),
         "positions": state.get("positions") or [],
         "trade_log": state.get("trade_log") or [],
         "realized_pnl_by_date": state.get("realized_pnl_by_date") or {},
@@ -465,7 +466,7 @@ def _load_state() -> dict[str, Any]:
             state = json.load(f)
     except Exception:
         base = {
-            "balance": SIMULATE_STARTING_BALANCE, "positions": [], "trade_log": [], "realized_pnl_by_date": {},
+            "positions": [], "trade_log": [], "realized_pnl_by_date": {},
             "daily_reference_balance": {},
         }
         durable = _pull_durable_state_from_hf()
@@ -473,7 +474,6 @@ def _load_state() -> dict[str, Any]:
             base.update(durable)
             logger.info("[alpaca_crypto_strategy] recovered durable state from HF after local state was missing")
         return base
-    state.setdefault("balance", SIMULATE_STARTING_BALANCE)
     state.setdefault("positions", [])
     state.setdefault("trade_log", [])
     state.setdefault("realized_pnl_by_date", {})
@@ -495,23 +495,16 @@ def _save_state(state: dict[str, Any], *, push_durable: bool = False) -> None:
 
 
 def get_available_balance() -> float:
-    """simulate mode: tracked virtual balance minus whatever's already
-    committed to open positions. live mode: the real Alpaca cash balance
-    (shared with the equities strategy's own account -- crypto and stock
-    buying power both draw from the same underlying cash)."""
-    if MODE == "live":
-        from data import alpaca_client
-        account = alpaca_client.get_account()
-        return float(account.get("cash") or 0.0)
-    state = _load_state()
-    committed = sum(float(p["entry_price"]) * float(p["count"]) for p in (state.get("positions") or []))
-    return max(0.0, float(state.get("balance", SIMULATE_STARTING_BALANCE)) - committed)
+    """The real Alpaca cash balance (shared with the equities strategy's
+    own account -- crypto and stock buying power both draw from the same
+    underlying cash)."""
+    from data import alpaca_client
+    account = alpaca_client.get_account()
+    return float(account.get("cash") or 0.0)
 
 
 def get_current_price(symbol: str) -> float | None:
-    """live mode: a real-time-ish bid/ask quote. simulate mode ALSO uses
-    the real quote -- "simulate" means no real orders are placed, not
-    that market data is faked."""
+    """A real-time-ish bid/ask quote."""
     from data import alpaca_client
     try:
         quote = alpaca_client.get_crypto_latest_quote(symbol)
@@ -608,9 +601,9 @@ def _reconcile_positions_with_exchange(state: dict[str, Any]) -> list[dict[str, 
       - a local position has no real counterpart at all (the entry order
         never actually filled) -> DROP it without recording a fake trade.
     Only ever called when live trading is actually active (see callers) --
-    in simulate/dry-run, local positions are simulated and deliberately
-    have no real-exchange counterpart, so reconciling would just erase
-    them."""
+    in dry-run, local positions are hypothetical (no order was ever placed)
+    and deliberately have no real-exchange counterpart, so reconciling
+    would just erase them."""
     local_positions = state.get("positions") or []
     real = _real_open_positions_by_symbol()
     if real is None:
@@ -650,11 +643,11 @@ def _reconcile_positions_with_exchange(state: dict[str, Any]) -> list[dict[str, 
 
 
 def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = None) -> dict[str, Any]:
-    """Evaluates each crypto pair for a new entry. "simulate" mode always
-    paper-trades; "live" mode places a real plain market buy order
-    (notional-sized) UNLESS dry_run resolves True -- same dual-gate
-    posture as every other strategy here. No market-hours gating: crypto
-    trades 24/7.
+    """Evaluates each crypto pair for a new entry. Places a real plain
+    market buy order (notional-sized) against the Alpaca account
+    ALPACA_TRADING_BASE_URL points at, UNLESS dry_run resolves True --
+    same dual-gate posture as every other strategy here. No market-hours
+    gating: crypto trades 24/7.
 
     Two-phase, not first-fit: every symbol not already held gets evaluated
     FIRST, then qualifying candidates are ranked by score (see
@@ -680,11 +673,11 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
     opened: list[dict[str, Any]] = []
     with _STATE_LOCK:
         state = _load_state()
-        if MODE == "live" and not effective_dry_run:
+        if not effective_dry_run:
             # Ground-truth check first, before deciding anything -- see
-            # _reconcile_positions_with_exchange. Simulated positions have
-            # no real counterpart, so this only ever runs when orders are
-            # actually being placed.
+            # _reconcile_positions_with_exchange. Dry-run positions are
+            # purely hypothetical (no order was ever placed), so this only
+            # ever runs when orders are actually being placed.
             state["positions"] = _reconcile_positions_with_exchange(state)
             _save_state(state)
         positions = state.get("positions") or []
@@ -762,7 +755,7 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
             # used the adaptive ones, silently showing a misleading price.
             levels = position_exit_levels({"entry_price": entry_price, "entry_volatility_30": row.get("volatility_30")})
             order_id = None
-            if MODE == "live" and not effective_dry_run:
+            if not effective_dry_run:
                 from data import alpaca_client
                 order_spec = alpaca_client.build_crypto_order(symbol=symbol, side="buy", notional=notional)
                 order_id = alpaca_client.place_order(order_spec)
@@ -783,7 +776,7 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
                 state["positions"] = positions
                 _save_state(state)
             claimed_coins.add(coin)
-            trade_dry_run = effective_dry_run if MODE == "live" else True
+            trade_dry_run = effective_dry_run
             opened.append({
                 "symbol": symbol, "ok": True, "action": "opened", "entry_price": entry_price,
                 "notional": notional, "dry_run": trade_dry_run,
@@ -832,7 +825,7 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
     effective_dry_run = (not LIVE_TRADING_ENABLED) if dry_run is None else dry_run
     with _STATE_LOCK:
         state = _load_state()
-        if MODE == "live" and not effective_dry_run:
+        if not effective_dry_run:
             state["positions"] = _reconcile_positions_with_exchange(state)
             _save_state(state)
         positions = state.get("positions") or []
@@ -875,7 +868,7 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
 
             try:
                 closed_count = float(position["count"])
-                if MODE == "live" and not effective_dry_run:
+                if not effective_dry_run:
                     from data import alpaca_client
                     try:
                         order_spec = alpaca_client.build_crypto_order(symbol=symbol, side="sell", qty=closed_count)
@@ -910,7 +903,6 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                 fee_usd = round_trip_fee_usd(float(position["entry_price"]), current_price, closed_count)
                 gross = round((current_price - float(position["entry_price"])) * closed_count, 6)
                 net = round(gross - fee_usd, 6)
-                state["balance"] = round(float(state.get("balance", SIMULATE_STARTING_BALANCE)) + net, 6)
                 by_date = state.setdefault("realized_pnl_by_date", {})
                 today = _today_str()
                 by_date[today] = round(float(by_date.get(today, 0.0)) + net, 6)
@@ -918,7 +910,7 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                     "closed_at": dt.datetime.now(dt.timezone.utc).isoformat(),
                     "symbol": symbol, "entry_price": position["entry_price"], "exit_price": current_price,
                     "count": closed_count, "gross_pnl_usd": gross, "fee_usd": fee_usd, "realized_pnl_usd": net,
-                    "reason": reason, "dry_run": effective_dry_run if MODE == "live" else True,
+                    "reason": reason, "dry_run": effective_dry_run,
                 }
                 state.setdefault("trade_log", []).append(trade)
                 closed.append(trade)

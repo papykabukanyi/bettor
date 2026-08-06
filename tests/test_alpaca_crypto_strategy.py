@@ -111,14 +111,19 @@ def test_compute_position_notional_floors_at_zero_for_a_negative_balance():
 def _isolated_state(tmp_path, monkeypatch):
     monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "alpaca_crypto_state.json")
     monkeypatch.setattr(strat, "HF_API_KEY", "")
-    monkeypatch.setattr(strat, "MODE", "simulate")
+    # get_available_balance() now always calls alpaca_client.get_account()
+    # (no more "simulate mode" local-math fallback) -- every scan_and_enter
+    # test implicitly depends on this succeeding for position sizing, so a
+    # sane default lives here; tests exercising the loss cap or reconcile
+    # path override it with a specific value where the number matters.
+    monkeypatch.setattr(alpaca_client, "get_account", lambda: {"cash": "500.0"})
     yield
 
 
-def test_load_state_defaults_to_the_simulate_starting_balance():
+def test_load_state_defaults_to_an_empty_position_list():
     state = strat._load_state()  # noqa: SLF001
-    assert state["balance"] == strat.SIMULATE_STARTING_BALANCE
     assert state["positions"] == []
+    assert "balance" not in state
 
 
 def test_get_current_price_averages_bid_and_ask(monkeypatch):
@@ -143,13 +148,13 @@ def _entry_row(**overrides):
     return base
 
 
-def test_scan_and_enter_simulate_mode_opens_a_paper_position_without_any_real_order(monkeypatch):
+def test_scan_and_enter_dry_run_opens_a_position_without_any_real_order(monkeypatch):
     monkeypatch.setattr(alpaca_crypto_data, "get_crypto_universe", lambda: ["BTC/USD"])
     monkeypatch.setattr(alpaca_crypto_data, "latest_feature_row", lambda symbol: _entry_row())
     monkeypatch.setattr(alpaca_crypto_model, "predict_direction", lambda symbol: {"model_ok": False})
 
     def fail_if_called(*a, **k):
-        raise AssertionError("simulate mode must never place a real order")
+        raise AssertionError("dry-run must never place a real order")
 
     monkeypatch.setattr(alpaca_client, "place_order", fail_if_called)
 
@@ -165,7 +170,7 @@ def test_scan_and_enter_simulate_mode_opens_a_paper_position_without_any_real_or
 
 def test_scan_and_enter_skips_a_symbol_already_held(monkeypatch):
     strat._save_state({  # noqa: SLF001
-        "balance": 500.0, "positions": [{"symbol": "BTC/USD", "entry_price": 65000.0, "count": 0.001}],
+        "positions": [{"symbol": "BTC/USD", "entry_price": 65000.0, "count": 0.001}],
         "trade_log": [], "realized_pnl_by_date": {},
     })
     monkeypatch.setattr(alpaca_crypto_data, "get_crypto_universe", lambda: ["BTC/USD"])
@@ -181,14 +186,15 @@ def test_scan_and_enter_skips_a_symbol_already_held(monkeypatch):
 def test_scan_and_enter_respects_the_daily_loss_cap(monkeypatch):
     today = strat._today_str()  # noqa: SLF001
     strat._save_state({  # noqa: SLF001
-        "balance": 500.0, "positions": [], "trade_log": [],
+        "positions": [], "trade_log": [],
         "realized_pnl_by_date": {today: -100.0},  # -20% of $500, breaches the 10% default cap
     })
+    monkeypatch.setattr(alpaca_client, "get_account", lambda: {"cash": "500.0"})
     result = strat.scan_and_enter()
     assert result["action"] == "daily_loss_cap_breached"
 
 
-def test_scan_and_enter_posts_to_threads_on_a_simulated_entry(monkeypatch):
+def test_scan_and_enter_posts_to_threads_on_a_dry_run_entry(monkeypatch):
     monkeypatch.setattr(alpaca_crypto_data, "get_crypto_universe", lambda: ["BTC/USD"])
     monkeypatch.setattr(alpaca_crypto_data, "latest_feature_row", lambda symbol: _entry_row())
     monkeypatch.setattr(alpaca_crypto_model, "predict_direction", lambda symbol: {"model_ok": False})
@@ -237,7 +243,7 @@ def test_scan_and_enter_one_symbol_failing_does_not_block_the_others(monkeypatch
 
 def test_manage_open_positions_posts_a_threads_exit_on_close(monkeypatch):
     strat._save_state({  # noqa: SLF001
-        "balance": 500.0, "positions": [{
+        "positions": [{
             "symbol": "BTC/USD", "entry_price": 65000.0, "count": 0.001,
             "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(), "order_id": None,
         }],
@@ -260,9 +266,9 @@ def test_manage_open_positions_returns_no_position_without_any_state():
     assert strat.manage_open_positions()["action"] == "no_position"
 
 
-def test_manage_open_positions_simulate_mode_closes_on_take_profit(monkeypatch):
+def test_manage_open_positions_dry_run_closes_on_take_profit(monkeypatch):
     strat._save_state({  # noqa: SLF001
-        "balance": 500.0, "positions": [{
+        "positions": [{
             "symbol": "BTC/USD", "entry_price": 65000.0, "count": 0.001,
             "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(), "order_id": None,
         }],
@@ -280,7 +286,7 @@ def test_manage_open_positions_simulate_mode_closes_on_take_profit(monkeypatch):
 
 def test_manage_open_positions_leaves_position_open_when_nothing_triggers(monkeypatch):
     strat._save_state({  # noqa: SLF001
-        "balance": 500.0, "positions": [{
+        "positions": [{
             "symbol": "BTC/USD", "entry_price": 65000.0, "count": 0.001,
             "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(), "order_id": None,
         }],
@@ -291,9 +297,9 @@ def test_manage_open_positions_leaves_position_open_when_nothing_triggers(monkey
     assert result["action"] == "no_change"
 
 
-def test_manage_open_positions_never_places_a_real_order_in_simulate_mode(monkeypatch):
+def test_manage_open_positions_never_places_a_real_order_in_dry_run(monkeypatch):
     strat._save_state({  # noqa: SLF001
-        "balance": 500.0, "positions": [{
+        "positions": [{
             "symbol": "BTC/USD", "entry_price": 65000.0, "count": 0.001,
             "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(), "order_id": None,
         }],
@@ -303,7 +309,7 @@ def test_manage_open_positions_never_places_a_real_order_in_simulate_mode(monkey
     monkeypatch.setattr(alpaca_client, "get_crypto_latest_quote", lambda symbol: {"ap": take_profit_price, "bp": take_profit_price})
 
     def fail_if_called(*a, **k):
-        raise AssertionError("simulate mode must never place a real order")
+        raise AssertionError("dry-run must never place a real order")
 
     monkeypatch.setattr(alpaca_client, "place_order", fail_if_called)
     result = strat.manage_open_positions()
@@ -315,10 +321,9 @@ def test_manage_open_positions_live_mode_places_a_plain_market_sell(monkeypatch)
     reconciliation dance here -- crypto has no broker-native bracket order
     that could have already closed the position, so a triggered exit is
     always a fresh, plain market sell."""
-    monkeypatch.setattr(strat, "MODE", "live")
     monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", True)
     strat._save_state({  # noqa: SLF001
-        "balance": 500.0, "positions": [{
+        "positions": [{
             "symbol": "BTC/USD", "entry_price": 65000.0, "count": 0.001,
             "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(), "order_id": "order-1",
         }],
@@ -349,7 +354,7 @@ def test_round_trip_fee_usd_charges_taker_rate_on_both_legs():
 
 def test_manage_open_positions_books_net_pnl_after_fees(monkeypatch):
     strat._save_state({  # noqa: SLF001
-        "balance": 500.0, "positions": [{
+        "positions": [{
             "symbol": "BTC/USD", "entry_price": 65000.0, "count": 0.001,
             "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(), "order_id": None,
         }],
@@ -516,7 +521,7 @@ def test_manage_open_positions_persists_velocity_samples_across_a_non_exit_cycle
     a position that doesn't exit must still have its samples PERSISTED,
     not just mutated in memory and discarded."""
     strat._save_state({  # noqa: SLF001
-        "balance": 500.0, "positions": [{
+        "positions": [{
             "symbol": "BTC/USD", "entry_price": 65000.0, "count": 0.001,
             "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(), "order_id": None,
         }],
@@ -597,7 +602,6 @@ def test_scan_and_enter_reconciles_before_entering_in_live_mode(monkeypatch):
     """A slot already occupied by a real, untracked exchange position must
     not also be counted as free -- reconciliation has to run BEFORE the
     slot-availability check."""
-    monkeypatch.setattr(strat, "MODE", "live")
     monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", True)
     monkeypatch.setattr(strat, "MAX_CONCURRENT_POSITIONS", 1)
     monkeypatch.setattr(alpaca_client, "get_positions", lambda: [

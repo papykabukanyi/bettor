@@ -108,9 +108,9 @@ def _data_get(path: str, *, params: dict[str, Any] | None = None) -> Any:
 
 
 def get_account() -> dict[str, Any]:
-    """Real cash/buying_power/equity for the linked account -- used only in
-    "live" mode; "simulate" mode tracks its own virtual balance in local
-    state instead (see alpaca_strategy.py)."""
+    """Real cash/buying_power/equity for the linked account (paper or live,
+    whichever ALPACA_TRADING_BASE_URL points at) -- the single source of
+    truth every strategy here reads balance from."""
     return _trading_get("/v2/account")
 
 

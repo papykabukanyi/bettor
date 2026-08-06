@@ -267,10 +267,10 @@ def _ensure_background_jobs_started() -> None:
             logger.info(
                 "Alpaca crypto scheduler started: fast exit check every %ds, entry scan every %d min "
                 "(first run in %ds), data collect every %d min, retrain every %d min (24/7, no session gate), "
-                "mode=%s live_trading=%s",
+                "live_trading=%s",
                 ALPACA_CRYPTO_FAST_CHECK_SECONDS, ALPACA_CRYPTO_CYCLE_MINUTES, ALPACA_CRYPTO_STARTUP_GRACE_SECONDS,
                 ALPACA_CRYPTO_DATA_COLLECT_MINUTES, ALPACA_CRYPTO_TRAIN_INTERVAL_MINUTES,
-                alpaca_crypto_strategy.MODE, alpaca_crypto_strategy.LIVE_TRADING_ENABLED,
+                alpaca_crypto_strategy.LIVE_TRADING_ENABLED,
             )
 
         def _runner() -> None:
@@ -361,14 +361,15 @@ def api_alpaca_crypto_status():
         for p in (state.get("positions") or [])
     ]
 
+    account = alpaca_client.get_account() if alpaca_client.is_configured() else {}
     return jsonify({
         "ok": True,
         "now": dt.datetime.now(dt.timezone.utc).isoformat(),
-        "mode": alpaca_crypto_strategy.MODE,
+        "account_type": "paper" if "paper-api" in alpaca_client.TRADING_BASE_URL else "live",
         "live_trading_enabled": alpaca_crypto_strategy.LIVE_TRADING_ENABLED,
         "alpaca_configured": alpaca_client.is_configured(),
-        "balance": state.get("balance", alpaca_crypto_strategy.SIMULATE_STARTING_BALANCE),
-        "available_balance": alpaca_crypto_strategy.get_available_balance() if alpaca_crypto_strategy.MODE == "simulate" else None,
+        "balance": float(account.get("equity") or 0.0),
+        "available_balance": float(account.get("cash") or 0.0),
         "positions": positions,
         "open_position_count": len(positions),
         "max_concurrent_positions": alpaca_crypto_strategy.MAX_CONCURRENT_POSITIONS,
