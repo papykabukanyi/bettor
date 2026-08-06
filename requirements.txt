@@ -30,6 +30,14 @@ cryptography>=42,<44
 # Hugging Face dataset + model hub storage
 huggingface_hub>=0.20.0
 
+# Custom PyTorch candidate model (stocks/crypto/options direction
+# classifiers) -- CPU-only wheel via the official extra index. Without this
+# directive, a plain `torch` line on Linux can resolve to the default
+# CUDA-bundled build, which is several GB vs. the CPU build's ~500MB-1GB --
+# catastrophic for these 512Mi Render dynos' disk and deploy time.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch
+
 # Chart-snapshot Threads posts (occasional trade-entry chart images).
 # Pillow chosen deliberately over matplotlib -- a real, confirmed OOM
 # incident this session (see alpaca_crypto_data.py's own docstring) made

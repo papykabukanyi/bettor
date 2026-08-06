@@ -31,6 +31,16 @@ market-hours gating anywhere here -- crypto trades 24/7:
                                 has archived since the last retrain instead
                                 of sitting on a once-daily cron while data
                                 keeps arriving around the clock
+  - alpaca_crypto_torch_train  daily at ALPACA_CRYPTO_TORCH_TRAIN_HOUR_UTC:00
+                                UTC -- retrains the custom PyTorch candidate
+                                in isolation (own scheduled job, not bundled
+                                with alpaca_crypto_train's own 24/7 sklearn
+                                retrain), promotes it only if it beats the
+                                currently-live model. Deliberately much less
+                                frequent than the sklearn retrain above --
+                                see its own docstring for why isolation
+                                matters here (measured locally: importing
+                                torch alone costs ~154MB RSS).
 """
 from __future__ import annotations
 
@@ -83,6 +93,10 @@ ALPACA_CRYPTO_DATA_COLLECT_MINUTES = max(5, int(os.getenv("ALPACA_CRYPTO_DATA_CO
 # absorb the cost -- this always runs alongside live trading decisions,
 # never instead of them.
 ALPACA_CRYPTO_TRAIN_INTERVAL_MINUTES = max(15, int(os.getenv("ALPACA_CRYPTO_TRAIN_INTERVAL_MINUTES", "60") or "60"))
+# Fixed once-daily UTC hour (crypto has no market session to gate on, unlike
+# stocks/options) -- see _run_alpaca_crypto_torch_train's own docstring for
+# why this stays isolated from the sklearn retrain's own 24/7 interval.
+ALPACA_CRYPTO_TORCH_TRAIN_HOUR_UTC = int(os.getenv("ALPACA_CRYPTO_TORCH_TRAIN_HOUR_UTC", "9") or "9")
 ALPACA_CRYPTO_STARTUP_GRACE_SECONDS = max(0, int(os.getenv("ALPACA_CRYPTO_STARTUP_GRACE_SECONDS", "60") or "60"))
 ENABLE_ALPACA_CRYPTO_SCHEDULER = str(os.getenv("ENABLE_ALPACA_CRYPTO_SCHEDULER", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
 DASHBOARD_LOCAL_AUTORUN = str(os.getenv("DASHBOARD_LOCAL_AUTORUN", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
@@ -175,6 +189,34 @@ def _run_alpaca_crypto_data_collect() -> dict[str, Any]:
 @_locked_job("alpaca_crypto_train", stale_after_sec=1800)
 def _run_alpaca_crypto_train() -> dict[str, Any]:
     return alpaca_crypto_model.train_model()
+
+
+@_locked_job("alpaca_crypto_torch_train", stale_after_sec=3600)
+def _run_alpaca_crypto_torch_train() -> dict[str, Any]:
+    """Daily, fully automatic retrain of the custom PyTorch candidate --
+    "it has to do it automatically and improve and learn pattern and self
+    improve[,] gather... data and use dataset and live data alone" (the
+    user's own words): every run re-loads the SAME growing training
+    dataset (the live collector + backfill both keep feeding it) and only
+    promotes the new candidate if it actually beats whatever's currently
+    live, so the model can only ever ratchet forward, never regress.
+
+    Deliberately its OWN scheduled job, not folded into the every-
+    ALPACA_CRYPTO_TRAIN_INTERVAL_MINUTES sklearn retrain above -- see
+    _TorchMLPClassifier's own docstring in alpaca_crypto_model.py for why
+    (measured locally: importing torch alone costs ~154MB RSS, real weight
+    to keep off this service's existing OOM-documented candidate-fitting
+    calls). Unlike stocks/options, crypto has no market session to gate
+    on -- it's a fixed once-daily UTC cron instead, deliberately much less
+    frequent than the 24/7 sklearn retrain, which is the whole point of
+    keeping this isolated rather than stacked in."""
+    try:
+        return alpaca_crypto_model.train_torch_candidate_model()
+    except Exception as exc:
+        logger.warning("[alpaca_crypto_server] torch candidate training failed: %s", exc)
+        return {"ok": False, "error": str(exc)}
+    finally:
+        gc.collect()
 
 
 @_locked_job("alpaca_crypto_threads_trending_news", stale_after_sec=300)
@@ -315,6 +357,10 @@ def _ensure_background_jobs_started() -> None:
                 _run_alpaca_crypto_train, "interval", minutes=ALPACA_CRYPTO_TRAIN_INTERVAL_MINUTES,
                 id="alpaca_crypto_train", replace_existing=True,
                 next_run_time=dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=ALPACA_CRYPTO_TRAIN_INTERVAL_MINUTES),
+            )
+            scheduler.add_job(
+                _run_alpaca_crypto_torch_train, "cron", hour=ALPACA_CRYPTO_TORCH_TRAIN_HOUR_UTC, minute=0,
+                timezone="UTC", id="alpaca_crypto_torch_train", replace_existing=True,
             )
             scheduler.add_job(
                 _run_alpaca_crypto_fast_check, "interval", seconds=ALPACA_CRYPTO_FAST_CHECK_SECONDS,
@@ -545,6 +591,16 @@ def api_alpaca_crypto_train():
         return jsonify({"ok": False, "error": str(exc)}), 500
 
 
+@app.route("/api/alpaca/crypto/train_torch", methods=["GET", "POST"])
+def api_alpaca_crypto_train_torch():
+    if not is_cron_authorized(request):
+        return jsonify({"ok": False, "error": "Unauthorized"}), 401
+    try:
+        return jsonify(_run_alpaca_crypto_torch_train())
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
 @app.route("/api/alpaca/crypto/backtest", methods=["GET", "POST"])
 def api_alpaca_crypto_backtest():
     """Manual-trigger only -- see _run_alpaca_crypto_backtest_sweep's own
@@ -560,6 +616,10 @@ def api_alpaca_crypto_backtest():
 _JOB_LABELS = {
     "alpaca_crypto_data_collect": f"Alpaca crypto data collection -> HF (every {ALPACA_CRYPTO_DATA_COLLECT_MINUTES} min)",
     "alpaca_crypto_train": f"Alpaca crypto model retrain (every {ALPACA_CRYPTO_TRAIN_INTERVAL_MINUTES} min, 24/7)",
+    "alpaca_crypto_torch_train": (
+        f"Alpaca crypto custom PyTorch candidate retrain (daily {ALPACA_CRYPTO_TORCH_TRAIN_HOUR_UTC:02d}:00 UTC, "
+        f"promoted only if it beats the currently-live model)"
+    ),
     "alpaca_crypto_backtest_sweep": "Alpaca crypto backtest sweep (manual trigger only)",
     "alpaca_crypto_fast_check": f"Alpaca crypto fast exit check (every {ALPACA_CRYPTO_FAST_CHECK_SECONDS}s)",
     "alpaca_crypto_entry_scan": f"Alpaca crypto entry scan (every {ALPACA_CRYPTO_CYCLE_MINUTES} min, 24/7)",

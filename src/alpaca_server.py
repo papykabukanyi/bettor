@@ -16,6 +16,12 @@ Background jobs, each cross-process locked (see server_common.py):
                                                                      minute
                                                                      bars to HF
   - alpaca_train               daily at ALPACA_TRAIN_HOUR_ET:00 ET
+  - alpaca_torch_train         daily at ALPACA_TORCH_TRAIN_HOUR_ET:00 ET --
+                                retrains the custom PyTorch candidate in
+                                isolation (own scheduled job, not bundled
+                                with alpaca_train/intensive_training's own
+                                sklearn candidates), promotes it only if it
+                                beats the currently-live model.
   - alpaca_intensive_training  every ALPACA_INTENSIVE_TRAINING_MINUTES, but
                                 only actually DOES anything while the market
                                 is fully closed (nights, weekends): retrains,
@@ -82,6 +88,11 @@ ALPACA_CYCLE_MINUTES = max(1, int(os.getenv("ALPACA_CYCLE_MINUTES", "2") or "2")
 ALPACA_FAST_CHECK_SECONDS = max(5, int(os.getenv("ALPACA_FAST_CHECK_SECONDS", "20") or "20"))
 ALPACA_DATA_COLLECT_MINUTES = max(5, int(os.getenv("ALPACA_DATA_COLLECT_MINUTES", "15") or "15"))
 ALPACA_TRAIN_HOUR_ET = int(os.getenv("ALPACA_TRAIN_HOUR_ET", "4") or "4")
+# Staggered an hour after ALPACA_TRAIN_HOUR_ET -- purely for clear separation
+# in logs/monitoring; APScheduler's single-worker executor here already
+# serializes every job onto one thread, so there's no concurrent-execution
+# memory-stacking risk either way.
+ALPACA_TORCH_TRAIN_HOUR_ET = int(os.getenv("ALPACA_TORCH_TRAIN_HOUR_ET", "5") or "5")
 # Checked every 30 min so it picks up the fully-closed window promptly
 # (nights + weekends) -- a no-op the rest of the time.
 ALPACA_INTENSIVE_TRAINING_MINUTES = max(10, int(os.getenv("ALPACA_INTENSIVE_TRAINING_MINUTES", "30") or "30"))
@@ -236,6 +247,35 @@ def _run_alpaca_data_collect() -> dict[str, Any]:
 @_locked_job("alpaca_train", stale_after_sec=1800)
 def _run_alpaca_train() -> dict[str, Any]:
     return alpaca_model.train_model()
+
+
+@_locked_job("alpaca_torch_train", stale_after_sec=3600)
+def _run_alpaca_torch_train() -> dict[str, Any]:
+    """Daily, fully automatic retrain of the custom PyTorch candidate --
+    "it has to do it automatically and improve and learn pattern and self
+    improve[,] gather... data and use dataset and live data alone" (the
+    user's own words): every run re-loads the SAME growing training
+    dataset (the live collector + backfill both keep feeding it) and only
+    promotes the new candidate if it actually beats whatever's currently
+    live, so the model can only ever ratchet forward, never regress, purely
+    from real archived + live data with no manual trigger required.
+
+    Deliberately its OWN scheduled job, not folded into
+    _run_alpaca_intensive_training above -- see _TorchMLPClassifier's own
+    docstring in alpaca_model.py for why (measured locally: importing torch
+    alone costs ~154MB RSS, real weight to keep off that job's already
+    OOM-documented multi-candidate call). Scheduled at a different hour
+    than both alpaca_train and alpaca_intensive_training's daily neighbors
+    so it doesn't compound with them -- though APScheduler's single-worker
+    executor here already serializes every job onto one thread regardless,
+    ruling out true concurrent-execution memory stacking either way."""
+    try:
+        return alpaca_model.train_torch_candidate_model()
+    except Exception as exc:
+        logger.warning("[alpaca_server] torch candidate training failed: %s", exc)
+        return {"ok": False, "error": str(exc)}
+    finally:
+        gc.collect()
 
 
 @_locked_job("alpaca_threads_trending_news", stale_after_sec=300)
@@ -436,6 +476,10 @@ def _ensure_background_jobs_started() -> None:
             scheduler.add_job(
                 _run_alpaca_intensive_training, "interval", minutes=ALPACA_INTENSIVE_TRAINING_MINUTES,
                 id="alpaca_intensive_training", replace_existing=True,
+            )
+            scheduler.add_job(
+                _run_alpaca_torch_train, "cron", hour=ALPACA_TORCH_TRAIN_HOUR_ET, minute=0,
+                id="alpaca_torch_train", replace_existing=True,
             )
             scheduler.add_job(
                 _run_alpaca_fast_check, "interval", seconds=ALPACA_FAST_CHECK_SECONDS,
@@ -663,9 +707,23 @@ def api_alpaca_train():
         return jsonify({"ok": False, "error": str(exc)}), 500
 
 
+@app.route("/api/alpaca/train_torch", methods=["GET", "POST"])
+def api_alpaca_train_torch():
+    if not is_cron_authorized(request):
+        return jsonify({"ok": False, "error": "Unauthorized"}), 401
+    try:
+        return jsonify(_run_alpaca_torch_train())
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
 _JOB_LABELS = {
     "alpaca_data_collect": f"Alpaca stock data collection -> HF (every {ALPACA_DATA_COLLECT_MINUTES} min)",
     "alpaca_train": f"Alpaca model retrain (daily {ALPACA_TRAIN_HOUR_ET:02d}:00 ET)",
+    "alpaca_torch_train": (
+        f"Alpaca custom PyTorch candidate retrain (daily {ALPACA_TORCH_TRAIN_HOUR_ET:02d}:00 ET, "
+        f"promoted only if it beats the currently-live model)"
+    ),
     "alpaca_intensive_training": (
         f"Alpaca off-hours intensive training + sweep + historical backfill "
         f"(checked every {ALPACA_INTENSIVE_TRAINING_MINUTES} min, runs only while market is closed)"

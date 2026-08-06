@@ -4,6 +4,8 @@ pipeline. Synthetic feature data only; never touches Alpaca, HF, or the
 network."""
 from __future__ import annotations
 
+import json
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -120,3 +122,123 @@ def test_predict_direction_uses_trained_model(monkeypatch):
     assert prediction["model_ok"] is True
     assert prediction["direction"] in {"up", "down"}
     assert 0.0 <= prediction["probability_up"] <= 1.0
+
+
+# ---------------------------------------------------------------------------
+# _TorchMLPClassifier / train_torch_candidate_model -- the custom PyTorch
+# candidate, trained in complete isolation from train_model()'s existing
+# sklearn candidates (see both docstrings for why: measured locally,
+# `import torch` alone costs ~154MB RSS on a 512MB-ceiling service with real
+# OOM history). Real torch, not mocked -- these are the same correctness
+# guarantees as the sklearn candidates, just for a hand-built architecture.
+# ---------------------------------------------------------------------------
+def test_torch_mlp_classifier_fit_predict_proba_shape_and_range():
+    rng = np.random.default_rng(0)
+    x = rng.normal(size=(200, 5))
+    y = (x[:, 0] > 0).astype(int)
+
+    clf = alpaca_model._TorchMLPClassifier(input_dim=5, epochs=5)  # noqa: SLF001
+    clf.fit(x, y)
+    proba = clf.predict_proba(x)
+    assert proba.shape == (200, 2)
+    assert np.all((proba >= 0.0) & (proba <= 1.0))
+    assert np.allclose(proba.sum(axis=1), 1.0, atol=1e-5)
+    preds = clf.predict(x)
+    assert set(np.unique(preds)).issubset({0, 1})
+
+
+def test_torch_mlp_classifier_survives_a_joblib_pickle_round_trip(tmp_path):
+    import joblib
+
+    rng = np.random.default_rng(1)
+    x = rng.normal(size=(200, 5))
+    y = (x[:, 0] > 0).astype(int)
+
+    clf = alpaca_model._TorchMLPClassifier(input_dim=5, epochs=5)  # noqa: SLF001
+    clf.fit(x, y)
+    proba_before = clf.predict_proba(x)
+
+    path = tmp_path / "torch_clf.joblib"
+    joblib.dump(clf, path)
+    reloaded = joblib.load(path)
+    proba_after = reloaded.predict_proba(x)
+    assert np.allclose(proba_before, proba_after)
+
+
+def test_train_torch_candidate_model_with_no_data_returns_not_ok():
+    result = alpaca_model.train_torch_candidate_model(df=pd.DataFrame())
+    assert result["ok"] is False
+    assert result["reason"] == "no_data"
+
+
+def test_train_torch_candidate_model_with_too_few_rows_returns_not_ok():
+    small_df = _synthetic_training_frame(n=20)
+    result = alpaca_model.train_torch_candidate_model(df=small_df)
+    assert result["ok"] is False
+    assert result["reason"] == "insufficient_rows"
+
+
+def test_train_torch_candidate_model_promotes_unconditionally_with_no_current_model(monkeypatch):
+    monkeypatch.setattr(alpaca_model, "load_model", lambda: (None, None))
+    df = _synthetic_training_frame(n=500)
+
+    result = alpaca_model.train_torch_candidate_model(df=df)
+
+    assert result["ok"] is True
+    assert result["promoted"] is True
+    assert result["current_score"] is None
+    assert alpaca_model.MODEL_PATH.exists()
+    meta = json.loads(alpaca_model.MODEL_META_PATH.read_text(encoding="utf-8"))
+    assert meta["model_type"] == "torch_mlp"
+
+
+def test_train_torch_candidate_model_does_not_promote_a_worse_candidate(monkeypatch):
+    """A current model that scores perfectly on the holdout must never be
+    displaced by a torch candidate that (being a small net on noisy
+    synthetic data) can't realistically match it -- the "only ship if the
+    evidence says so" discipline this whole codebase already applies to
+    every other candidate comparison."""
+
+    class _PerfectModel:
+        def predict(self, x):
+            return (x[:, 5] > 0).astype(int)  # column 5 is dist_to_ma_15, == label_up's own generator
+
+        def predict_proba(self, x):
+            preds = self.predict(x)
+            return np.column_stack([1.0 - preds, preds]).astype(float)
+
+    monkeypatch.setattr(alpaca_model, "load_model", lambda: (_PerfectModel(), {"model_type": "perfect_stub"}))
+    before = alpaca_model.MODEL_PATH.exists()
+    df = _synthetic_training_frame(n=500)
+
+    result = alpaca_model.train_torch_candidate_model(df=df)
+
+    assert result["ok"] is True
+    assert result["promoted"] is False
+    assert result["current_score"] == 1.0
+    assert alpaca_model.MODEL_PATH.exists() == before  # untouched -- nothing was written
+
+
+def test_train_torch_candidate_model_promoted_model_is_usable_via_predict_direction(monkeypatch):
+    real_load_model = alpaca_model.load_model
+    monkeypatch.setattr(alpaca_model, "load_model", lambda: (None, None))
+    df = _synthetic_training_frame(n=500)
+    train_result = alpaca_model.train_torch_candidate_model(df=df)
+    assert train_result["ok"] is True and train_result["promoted"] is True
+
+    monkeypatch.setattr(alpaca_model, "load_model", real_load_model)  # predict_direction below needs the real one to read the just-promoted model back off disk
+    alpaca_model._model_cache.update({"model": None, "meta": None, "loaded_at": 0.0})  # noqa: SLF001 -- force a real reload from disk
+    monkeypatch.setattr(alpaca_model, "latest_feature_row", lambda symbol: {
+        "symbol": symbol, "current_price": 100.0, "short_ma": 99.0,
+        "ret_1m": 0.0, "ret_5m": 0.0, "ret_15m": 0.0, "ret_30m": 0.0, "ret_60m": 0.0,
+        "dist_to_ma_15": 0.03, "dist_to_ma_30": 0.015,
+        "volatility_5": 0.001, "volatility_15": 0.001, "volatility_30": 0.001,
+        "volume_ratio_5": 1.0, "volume_ratio_15": 1.0, "dollar_volume_z": 0.0,
+        "rsi_14": 0.5, "macd_hist_pct": 0.0, "bb_pct_b": 0.5, "bb_bandwidth": 0.01, "atr_pct": 0.001, "stoch_k": 0.5,
+        "time_of_day_pct": 0.5, "sentiment_score": 0.0,
+    })
+
+    prediction = alpaca_model.predict_direction("AAPL")
+    assert prediction["model_ok"] is True
+    assert prediction["model_type"] == "torch_mlp"
+    assert prediction["direction"] in {"up", "down"}

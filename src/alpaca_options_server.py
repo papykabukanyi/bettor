@@ -32,6 +32,13 @@ Background jobs, each cross-process locked (see server_common.py):
                                  spent building the best-understood model
                                  the data supports, ready before the next
                                  regular session opens.
+  - alpaca_options_torch_train  daily at ALPACA_OPTIONS_TORCH_TRAIN_HOUR_ET:00
+                                 ET -- retrains the custom PyTorch candidate
+                                 in isolation (own scheduled job, not bundled
+                                 with alpaca_options_train's own sklearn/
+                                 ensemble candidates), promotes it only if it
+                                 beats the currently-live model. Same
+                                 regular-hours skip discipline as the job above.
 
 Unlike equities/crypto, entry_scan here IS gated to the regular session
 (plus a small edge buffer -- see alpaca_options_strategy.py's own
@@ -84,6 +91,11 @@ ALPACA_OPTIONS_DATA_COLLECT_MINUTES = max(5, int(os.getenv("ALPACA_OPTIONS_DATA_
 # exact training path (perps_model.py, structurally identical) measured
 # ~50s wall time even on a large real dataset, nowhere near this interval.
 ALPACA_OPTIONS_OFFHOURS_TRAIN_MINUTES = max(10, int(os.getenv("ALPACA_OPTIONS_OFFHOURS_TRAIN_MINUTES", "30") or "30"))
+# Daily, not every-N-minutes like the main sklearn retrain above -- the
+# custom PyTorch candidate is a heavier, isolated job (see
+# _run_alpaca_options_torch_train's own docstring), so it gets a low,
+# predictable cadence instead.
+ALPACA_OPTIONS_TORCH_TRAIN_HOUR_ET = int(os.getenv("ALPACA_OPTIONS_TORCH_TRAIN_HOUR_ET", "5") or "5")
 # Same off-hours-only reasoning as training above, on its own separate
 # cadence (a backtest sweep is heavier per-run than a single retrain --
 # alpaca_options_backtest.run_config_sweep fits/replays 4 full parameter
@@ -229,6 +241,38 @@ def _run_alpaca_options_train(*, force: bool = False) -> dict[str, Any]:
     return alpaca_options_model.train_model()
 
 
+@_locked_job("alpaca_options_torch_train", stale_after_sec=3600)
+def _run_alpaca_options_torch_train() -> dict[str, Any]:
+    """Daily, fully automatic retrain of the custom PyTorch candidate --
+    "it has to do it automatically and improve and learn pattern and self
+    improve[,] gather... data and use dataset and live data alone" (the
+    user's own words): every run re-loads the SAME growing training
+    dataset and only promotes the new candidate if it actually beats
+    whatever's currently live, using options' own recency weighting (same
+    as the walk-forward loop above) since premium/IV dynamics move fast
+    enough that recency matters here more than for stocks/crypto.
+
+    Deliberately its OWN scheduled job at a low daily cadence, not folded
+    into _run_alpaca_options_train's own every-N-minutes off-hours loop --
+    see _TorchMLPClassifier's own docstring in alpaca_options_model.py for
+    why (measured locally: importing torch alone costs ~154MB RSS, real
+    weight to keep off a job that already fits up to 12 models per call).
+    Same regular-hours skip discipline as every other heavy job here -- a
+    multi-second-plus retrain has no business competing with live
+    entry-scan/fast-check for CPU/memory while real option orders may be
+    in flight."""
+    from data import alpaca_data
+    if alpaca_data.get_market_session()["session"] == "regular":
+        return {"ok": True, "skipped": "regular_hours"}
+    try:
+        return alpaca_options_model.train_torch_candidate_model()
+    except Exception as exc:
+        logger.warning("[alpaca_options_server] torch candidate training failed: %s", exc)
+        return {"ok": False, "error": str(exc)}
+    finally:
+        gc.collect()
+
+
 @_locked_job("alpaca_options_backtest_sweep", stale_after_sec=1800)
 def _run_alpaca_options_backtest_sweep() -> dict[str, Any]:
     """Off-hours-only, same reasoning as training: a fitted-model walk-
@@ -365,6 +409,10 @@ def _ensure_background_jobs_started() -> None:
                 _run_alpaca_options_train, "interval", minutes=ALPACA_OPTIONS_OFFHOURS_TRAIN_MINUTES,
                 id="alpaca_options_train", replace_existing=True,
                 next_run_time=dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=ALPACA_OPTIONS_OFFHOURS_TRAIN_MINUTES),
+            )
+            scheduler.add_job(
+                _run_alpaca_options_torch_train, "cron", hour=ALPACA_OPTIONS_TORCH_TRAIN_HOUR_ET, minute=0,
+                id="alpaca_options_torch_train", replace_existing=True,
             )
             scheduler.add_job(
                 _run_alpaca_options_backtest_sweep, "interval", minutes=ALPACA_OPTIONS_BACKTEST_SWEEP_MINUTES,
@@ -602,6 +650,16 @@ def api_alpaca_options_train():
         return jsonify({"ok": False, "error": str(exc)}), 500
 
 
+@app.route("/api/alpaca/options/train_torch", methods=["GET", "POST"])
+def api_alpaca_options_train_torch():
+    if not is_cron_authorized(request):
+        return jsonify({"ok": False, "error": "Unauthorized"}), 401
+    try:
+        return jsonify(alpaca_options_model.train_torch_candidate_model())
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
 @app.route("/api/alpaca/options/backtest", methods=["GET", "POST"])
 def api_alpaca_options_backtest():
     if not is_cron_authorized(request):
@@ -615,6 +673,10 @@ def api_alpaca_options_backtest():
 _JOB_LABELS = {
     "alpaca_options_data_collect": f"Alpaca options data collection -> HF (every {ALPACA_OPTIONS_DATA_COLLECT_MINUTES} min)",
     "alpaca_options_train": f"Alpaca options model retrain (every {ALPACA_OPTIONS_OFFHOURS_TRAIN_MINUTES} min off-hours)",
+    "alpaca_options_torch_train": (
+        f"Alpaca options custom PyTorch candidate retrain (daily {ALPACA_OPTIONS_TORCH_TRAIN_HOUR_ET:02d}:00 ET off-hours, "
+        f"promoted only if it beats the currently-live model)"
+    ),
     "alpaca_options_backtest_sweep": f"Alpaca options backtest sweep (every {ALPACA_OPTIONS_BACKTEST_SWEEP_MINUTES} min off-hours)",
     "alpaca_options_fast_check": f"Alpaca options fast exit check (every {ALPACA_OPTIONS_FAST_CHECK_SECONDS}s)",
     "alpaca_options_entry_scan": f"Alpaca options entry scan (every {ALPACA_OPTIONS_CYCLE_MINUTES} min)",

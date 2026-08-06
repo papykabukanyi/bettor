@@ -154,6 +154,208 @@ def train_model(df: pd.DataFrame | None = None) -> dict[str, Any]:
     return {"ok": True, **meta}
 
 
+def _suppress_torch_numpy_warning() -> None:
+    """Some torch CPU wheels (built against numpy 1.x) emit a noisy
+    UserWarning on first import under this project's numpy 2.x pin -- real,
+    confirmed harmless locally (training/inference both complete correctly
+    once .tolist() is used instead of .numpy(), see predict_proba below),
+    but would otherwise spam every single training-job log line on Render
+    looking exactly like a crash traceback."""
+    import warnings
+    warnings.filterwarnings("ignore", message=".*NumPy 1.x.*", category=UserWarning)
+    warnings.filterwarnings("ignore", message=".*Failed to initialize NumPy.*", category=UserWarning)
+
+
+class _TorchMLPClassifier:
+    """Hand-built feedforward neural net (2 hidden layers, ReLU, sigmoid
+    output via BCEWithLogitsLoss) wrapped in a scikit-learn-compatible
+    interface (.fit/.predict/.predict_proba) so it drops into the same
+    scoring/persistence machinery as every sklearn candidate in this file --
+    a genuinely custom model, not one of sklearn's canned classifiers, per
+    the user's explicit "fully custom model" request.
+
+    `torch` is imported lazily inside these methods, never at module level:
+    measured locally, `import torch` alone costs ~154MB RSS -- a real bite
+    out of this service's 512MB ceiling given its own documented OOM
+    history (see the n_estimators/n_jobs comments above). Merely importing
+    this file (done on every request path that touches predict_direction)
+    must never pay that cost -- only actually training or predicting with
+    THIS specific candidate does. For the same reason this candidate is
+    deliberately NOT added to _CANDIDATES / train_model()'s existing
+    multi-candidate loop (which already fits 3 models in one call and has
+    its own real OOM history) -- see train_torch_candidate_model() below,
+    which trains this one candidate in complete isolation, on its own
+    low-frequency schedule.
+
+    Persists as a plain state_dict + numpy normalization stats rather than
+    a live nn.Module/optimizer -- the standard PyTorch persistence idiom
+    (avoids pickling optimizer/autograd state that doesn't need to survive
+    the train-here/load-there HF round trip), and keeps the joblib-pickled
+    object's own footprint to just small tensors + arrays."""
+
+    def __init__(self, input_dim: int, hidden_dim: int = 32, epochs: int = 30,
+                 lr: float = 1e-3, batch_size: int = 256, random_state: int = 42):
+        self.input_dim = input_dim
+        self.hidden_dim = hidden_dim
+        self.epochs = epochs
+        self.lr = lr
+        self.batch_size = batch_size
+        self.random_state = random_state
+        self._state_dict: dict[str, Any] | None = None
+        self._x_mean: np.ndarray | None = None
+        self._x_std: np.ndarray | None = None
+
+    def _build_net(self):
+        from torch import nn
+        return nn.Sequential(
+            nn.Linear(self.input_dim, self.hidden_dim), nn.ReLU(),
+            nn.Linear(self.hidden_dim, max(self.hidden_dim // 2, 4)), nn.ReLU(),
+            nn.Linear(max(self.hidden_dim // 2, 4), 1),
+        )
+
+    def fit(self, x: np.ndarray, y: np.ndarray, sample_weight: np.ndarray | None = None) -> "_TorchMLPClassifier":
+        _suppress_torch_numpy_warning()
+        import torch
+        from torch import nn
+
+        torch.manual_seed(self.random_state)
+        torch.set_num_threads(1)  # avoid thread-multiplication memory, same discipline as sklearn's n_jobs=1 above
+
+        x_mean, x_std = x.mean(axis=0), x.std(axis=0)
+        x_std[x_std == 0] = 1.0
+        self._x_mean, self._x_std = x_mean, x_std
+        x_norm = (x - x_mean) / x_std
+
+        net = self._build_net()
+        x_t = torch.tensor(x_norm, dtype=torch.float32)
+        y_t = torch.tensor(y, dtype=torch.float32).view(-1, 1)
+        w_t = torch.tensor(sample_weight, dtype=torch.float32).view(-1, 1) if sample_weight is not None else None
+
+        opt = torch.optim.Adam(net.parameters(), lr=self.lr)
+        loss_fn = nn.BCEWithLogitsLoss(reduction="none" if w_t is not None else "mean")
+        n = len(x_t)
+        for _epoch in range(self.epochs):
+            perm = torch.randperm(n)
+            for start in range(0, n, self.batch_size):
+                idx = perm[start:start + self.batch_size]
+                opt.zero_grad()
+                logits = net(x_t[idx])
+                loss = loss_fn(logits, y_t[idx])
+                if w_t is not None:
+                    loss = (loss * w_t[idx]).mean()
+                loss.backward()
+                opt.step()
+
+        self._state_dict = {k: v.clone() for k, v in net.state_dict().items()}
+        del net, x_t, y_t, opt
+        return self
+
+    def predict_proba(self, x: np.ndarray) -> np.ndarray:
+        _suppress_torch_numpy_warning()
+        import torch
+
+        torch.set_num_threads(1)
+        net = self._build_net()
+        net.load_state_dict(self._state_dict)
+        net.eval()
+        x_norm = (x - self._x_mean) / self._x_std
+        with torch.no_grad():
+            logits = net(torch.tensor(x_norm, dtype=torch.float32))
+            # .tolist() rather than .numpy(): real, confirmed bug hit locally
+            # -- some torch CPU wheels (built against numpy 1.x) hard-refuse
+            # the zero-copy numpy bridge under this project's numpy 2.x
+            # ("RuntimeError: Numpy is not available"), not just a warning.
+            # .tolist() converts via pybind11 directly, independent of numpy
+            # ABI compatibility, so this works regardless of which torch/numpy
+            # build combination actually lands on a given deploy.
+            proba_up = np.asarray(torch.sigmoid(logits).view(-1).tolist())
+        return np.column_stack([1.0 - proba_up, proba_up])
+
+    def predict(self, x: np.ndarray) -> np.ndarray:
+        return (self.predict_proba(x)[:, 1] >= 0.5).astype(int)
+
+
+def train_torch_candidate_model(df: pd.DataFrame | None = None) -> dict[str, Any]:
+    """Trains the custom PyTorch MLP candidate in complete isolation from
+    train_model()'s existing sklearn candidates -- own data load, own
+    chronological split, own fit -- and promotes it to the live model ONLY
+    if it actually beats the currently-persisted model's freshly-recomputed
+    score on the SAME holdout (the same "add as a candidate, let the
+    evidence decide" discipline as _CANDIDATES, just run as a separate,
+    low-frequency job instead of being stacked into the existing
+    multi-candidate call -- see _TorchMLPClassifier's own docstring for why
+    that isolation matters on this exact 512MB service). Never raises on
+    ordinary "not enough data yet" conditions."""
+    frame = df if df is not None else load_training_dataset()
+    if frame.empty:
+        return {"ok": False, "reason": "no_data"}
+
+    labeled = _prepare_training_frame(frame)
+    del frame
+    if len(labeled) < MIN_TRAIN_ROWS:
+        return {"ok": False, "reason": "insufficient_rows", "rows": len(labeled), "need": MIN_TRAIN_ROWS}
+
+    feature_cols = FEATURE_COLUMNS + ["symbol_code"]
+    split_idx = int(len(labeled) * 0.8)
+    train_df, test_df = labeled.iloc[:split_idx], labeled.iloc[split_idx:]
+    del labeled
+    if train_df.empty or test_df.empty or test_df["label_up"].nunique() < 2:
+        return {"ok": False, "reason": "insufficient_class_variety"}
+
+    x_train, y_train = train_df[feature_cols].values, train_df["label_up"].values
+    x_test, y_test = test_df[feature_cols].values, test_df["label_up"].values
+    symbol_categories = list(train_df["symbol"].astype("category").cat.categories)
+    n_rows = len(train_df) + len(test_df)
+    del train_df, test_df
+
+    try:
+        torch_model = _TorchMLPClassifier(input_dim=len(feature_cols))
+        torch_model.fit(x_train, y_train)
+        torch_preds = torch_model.predict(x_test)
+        torch_proba = torch_model.predict_proba(x_test)[:, 1]
+        torch_score = (float(accuracy_score(y_test, torch_preds)) + float(roc_auc_score(y_test, torch_proba))) / 2.0
+    except Exception as exc:
+        logger.warning("[alpaca_model] torch candidate training failed: %s", exc)
+        del x_train, x_test
+        gc.collect()
+        return {"ok": False, "reason": "torch_training_failed", "error": str(exc)}
+    del x_train
+
+    current_model, current_meta = load_model()
+    current_score: float | None = None
+    if current_model is not None:
+        try:
+            current_preds = current_model.predict(x_test)
+            current_proba = current_model.predict_proba(x_test)[:, 1]
+            current_score = (float(accuracy_score(y_test, current_preds)) + float(roc_auc_score(y_test, current_proba))) / 2.0
+        except Exception as exc:
+            logger.warning("[alpaca_model] could not re-score current model against torch's holdout: %s", exc)
+
+    promoted = current_score is None or torch_score > current_score
+    result = {
+        "ok": True, "promoted": promoted, "torch_score": torch_score,
+        "current_score": current_score, "current_model_type": (current_meta or {}).get("model_type"),
+        "rows": n_rows,
+    }
+
+    if promoted:
+        meta = {
+            "trained_at": time.time(), "model_type": "torch_mlp",
+            "scores": {"torch_mlp": {"combined": torch_score}, "previous": {"combined": current_score}},
+            "rows": n_rows, "feature_columns": feature_cols, "symbol_categories": symbol_categories,
+            "feature_importances": None,
+        }
+        joblib.dump(torch_model, MODEL_PATH)
+        MODEL_META_PATH.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+        _model_cache.update({"model": torch_model, "meta": meta, "loaded_at": time.time()})
+        _push_model_to_hf()
+        result["meta"] = meta
+
+    del x_test, torch_model
+    gc.collect()
+    return result
+
+
 def _push_model_to_hf() -> None:
     if not HF_API_KEY:
         return
