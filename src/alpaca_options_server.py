@@ -311,6 +311,36 @@ def _run_alpaca_options_threads_sentiment_snapshot() -> dict[str, Any]:
         return {"ok": False, "error": str(exc)}
 
 
+@_locked_job("alpaca_options_threads_hourly_status", stale_after_sec=300)
+def _run_alpaca_options_threads_hourly_status() -> dict[str, Any]:
+    """Real gap found in review: perps_strategy.py already posts an hourly
+    "what am I holding right now" status regardless of whether a trade
+    happened (app_kalshi.py's own _run_perps_threads_hourly_status) --
+    options never had the equivalent. Best-effort, on top of (not instead
+    of) the real-time trade-entry/exit posts -- never allowed to affect
+    trading logic, which is why this reads state read-only and never
+    touches order placement. Uses each position's own contract symbol
+    (not the underlying) as "ticker" -- the entry/TP/SL prices are option
+    premiums, not underlying share prices, and the real-time entry/exit
+    posts already use the contract symbol the same way."""
+    try:
+        state = alpaca_options_strategy._load_state()  # noqa: SLF001
+        now = dt.datetime.now(dt.timezone.utc)
+        positions = []
+        for p in (state.get("positions") or []):
+            levels = alpaca_options_strategy.position_exit_levels(p)
+            opened_at = dt.datetime.fromisoformat(p["opened_at"])
+            held_minutes = (now - opened_at).total_seconds() / 60.0
+            positions.append({**p, **levels, "ticker": p["symbol"], "held_minutes": held_minutes})
+        realized_pnl_by_date = state.get("realized_pnl_by_date") or {}
+        today_pnl = float(realized_pnl_by_date.get(et_today().isoformat(), 0.0))
+        posted = threads_post.post_hourly_status(positions=positions, today_realized_pnl_usd=today_pnl, market="options")
+        return {"ok": True, "posted": posted, "open_position_count": len(positions)}
+    except Exception as exc:
+        logger.warning("[alpaca_options_server] Threads hourly status post failed: %s", exc)
+        return {"ok": False, "error": str(exc)}
+
+
 def _ensure_background_jobs_started() -> None:
     global _startup_done
     if _startup_done:
@@ -357,6 +387,10 @@ def _ensure_background_jobs_started() -> None:
             scheduler.add_job(
                 _run_alpaca_options_threads_sentiment_snapshot, "interval", minutes=60,
                 id="alpaca_options_threads_sentiment_snapshot", replace_existing=True,
+            )
+            scheduler.add_job(
+                _run_alpaca_options_threads_hourly_status, "interval", hours=1,
+                id="alpaca_options_threads_hourly_status", replace_existing=True,
             )
             scheduler.start()
             logger.info(
@@ -568,6 +602,7 @@ _JOB_LABELS = {
     "alpaca_options_entry_scan": f"Alpaca options entry scan (every {ALPACA_OPTIONS_CYCLE_MINUTES} min)",
     "alpaca_options_threads_trending_news": "Threads trending-news post (every 30 min)",
     "alpaca_options_threads_sentiment_snapshot": "Threads per-ticker sentiment snapshot (every 60 min)",
+    "alpaca_options_threads_hourly_status": "Threads hourly open-positions status post",
 }
 
 

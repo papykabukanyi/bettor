@@ -194,6 +194,41 @@ def test_threads_sentiment_snapshot_job_never_raises_on_failure(monkeypatch):
     assert result["ok"] is False
 
 
+def test_threads_hourly_status_job_posts_open_positions(monkeypatch):
+    import datetime as dt
+    from data import alpaca_options_strategy, threads_post
+
+    opened_at = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=15)).isoformat()
+    monkeypatch.setattr(alpaca_options_strategy, "_load_state", lambda: {
+        "positions": [{
+            "symbol": "AAPL240223C00195000", "underlying_symbol": "AAPL", "strategy": "naked",
+            "entry_price": 5.0, "count": 1, "opened_at": opened_at,
+        }],
+        "realized_pnl_by_date": {},
+    })
+
+    captured = {}
+    monkeypatch.setattr(threads_post, "post_hourly_status", lambda *, positions, today_realized_pnl_usd, market: captured.update(positions=positions, market=market) or True)
+
+    result = alpaca_options_server._run_alpaca_options_threads_hourly_status.__wrapped__()  # noqa: SLF001
+
+    assert result == {"ok": True, "posted": True, "open_position_count": 1}
+    assert captured["market"] == "options"
+    assert captured["positions"][0]["ticker"] == "AAPL240223C00195000"
+    assert captured["positions"][0]["held_minutes"] == pytest.approx(15.0, abs=0.5)
+
+
+def test_threads_hourly_status_job_never_raises_on_failure(monkeypatch):
+    from data import alpaca_options_strategy
+
+    def raise_error():
+        raise RuntimeError("state file corrupted")
+
+    monkeypatch.setattr(alpaca_options_strategy, "_load_state", raise_error)
+    result = alpaca_options_server._run_alpaca_options_threads_hourly_status.__wrapped__()  # noqa: SLF001
+    assert result["ok"] is False
+
+
 def test_api_alpaca_options_status_reports_configured_flag(monkeypatch):
     from data import alpaca_client
 
