@@ -165,8 +165,27 @@ app = Flask("kalshi_perps_server", template_folder=str(SRC_DIR / "templates"))
 # never queue behind a slow job (data_collect, the up-to-30-min daily
 # train) sharing the default pool, so it gets its own dedicated
 # single-worker executor instead of contending with everything else.
+#
+# Real, confirmed production incident found while investigating "no
+# Threads posts going out": APScheduler's own default misfire_grace_time
+# is a razor-thin 1 SECOND -- any job whose scheduled fire time slips past
+# that by even normal container/GIL scheduling jitter (routinely 10-15s,
+# confirmed live in these logs) gets silently marked "missed" and SKIPPED
+# entirely, not deferred-and-run-late. perps_fast_check (20s) and
+# perps_entry_scan (2min) dodge this by accident -- as the scheduler's own
+# most-frequent jobs, they effectively drive its internal wakeup timing,
+# so they land within that 1s window almost every time. The much-less-
+# frequent hourly/half-hourly Threads posts (hourly_status,
+# sentiment_snapshot, trending_news) do NOT get that same luck and were
+# confirmed hitting this on essentially every single interval, meaning
+# they'd never actually posted since misfire handling silently drops a
+# missed run rather than queuing it. job_defaults applies a generous grace
+# window scheduler-wide -- harmless for the real-money-critical jobs
+# (a fast_check running a few seconds late is a non-issue; it was already
+# on time regardless) and the actual fix for the ones that weren't.
 scheduler = BackgroundScheduler(
     timezone="America/New_York",
+    job_defaults={"misfire_grace_time": 300},
     executors={
         "default": APSThreadPoolExecutor(max_workers=1),
         "fastcheck": APSThreadPoolExecutor(max_workers=1),

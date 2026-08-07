@@ -134,7 +134,24 @@ app = Flask("alpaca_stocks_server", template_folder="templates")
 # fired at the identical scheduled instant. max_workers=1 forces every job
 # through one queue, matching this whole codebase's stated "single
 # worker, one thing at a time" design intent everywhere else.
-scheduler = BackgroundScheduler(timezone="America/New_York", executors={"default": APSThreadPoolExecutor(max_workers=1)})
+#
+# Real, confirmed production incident found while investigating "no
+# Threads posts going out" (see app_kalshi.py's identical fix/comment):
+# APScheduler's own default misfire_grace_time is a razor-thin 1 SECOND --
+# any job whose scheduled fire time slips past that by even normal
+# container/GIL scheduling jitter (routinely 10-15s, confirmed live in
+# these logs) gets silently marked "missed" and SKIPPED entirely, not
+# deferred-and-run-late. The frequent jobs (fast_check, entry_scan) dodge
+# this by accident, since as the scheduler's own most-frequent jobs they
+# effectively drive its internal wakeup timing; the hourly/half-hourly
+# Threads posts do not, and were confirmed hitting this on essentially
+# every single interval -- they'd never actually posted. job_defaults
+# applies a generous grace window scheduler-wide, harmless for the
+# frequent jobs (already on time regardless) and the actual fix here.
+scheduler = BackgroundScheduler(
+    timezone="America/New_York", job_defaults={"misfire_grace_time": 300},
+    executors={"default": APSThreadPoolExecutor(max_workers=1)},
+)
 _startup_lock = threading.Lock()
 _startup_done = False
 
