@@ -274,6 +274,43 @@ def get_user_id() -> str | None:
         return _token_cache.get("user_id")
 
 
+# Real, confirmed production incident: publishing immediately after
+# create_resp returned a creation_id failed with a 400 "Media Not Found"
+# (OAuthException code 24, error_subcode 4279009) on essentially EVERY
+# post attempted over several hours -- text posts included, not just
+# images. Threads' own container-processing step is asynchronous; Meta's
+# documented pattern is to poll the container's own status field until it
+# reports FINISHED before calling threads_publish, which this module
+# never did. See _wait_for_container_ready below.
+_CONTAINER_STATUS_POLL_INTERVAL_SEC = float(os.getenv("THREADS_CONTAINER_POLL_INTERVAL_SEC", "2") or "2")
+_CONTAINER_STATUS_MAX_WAIT_SEC = float(os.getenv("THREADS_CONTAINER_MAX_WAIT_SEC", "30") or "30")
+
+
+def _wait_for_container_ready(creation_id: str, token: str) -> None:
+    """Polls the container's status until it's FINISHED (ready to publish)
+    or reaches a terminal ERROR/EXPIRED state, up to
+    _CONTAINER_STATUS_MAX_WAIT_SEC. Never raises -- a status-check failure
+    or timeout just means the caller proceeds to attempt publish anyway
+    and gets Meta's own real error if it's still not ready, rather than
+    this module inventing a new failure mode on top."""
+    deadline = time.monotonic() + _CONTAINER_STATUS_MAX_WAIT_SEC
+    while time.monotonic() < deadline:
+        try:
+            status_resp = requests.get(
+                f"{API_BASE_URL}/{API_VERSION}/{creation_id}",
+                params={"fields": "status", "access_token": token},
+                timeout=TIMEOUT_SEC,
+            )
+            _raise_for_status_with_body(status_resp)
+            status = status_resp.json().get("status")
+        except Exception as exc:
+            logger.debug("[threads_client] container status check failed, will retry: %s", exc)
+            status = None
+        if status in ("FINISHED", "PUBLISHED", "ERROR", "EXPIRED"):
+            return
+        time.sleep(_CONTAINER_STATUS_POLL_INTERVAL_SEC)
+
+
 def create_and_publish_post(text: str) -> str:
     """Threads posting is a real two-step process: create a media
     container, then separately publish it. Raises on any failure --
@@ -293,6 +330,7 @@ def create_and_publish_post(text: str) -> str:
     )
     _raise_for_status_with_body(create_resp)
     creation_id = create_resp.json()["id"]
+    _wait_for_container_ready(creation_id, token)
 
     publish_resp = requests.post(
         f"{API_BASE_URL}/{API_VERSION}/{user_id}/threads_publish",
@@ -325,6 +363,7 @@ def create_and_publish_image_post(image_url: str, text: str = "") -> str:
     )
     _raise_for_status_with_body(create_resp)
     creation_id = create_resp.json()["id"]
+    _wait_for_container_ready(creation_id, token)
 
     publish_resp = requests.post(
         f"{API_BASE_URL}/{API_VERSION}/{user_id}/threads_publish",

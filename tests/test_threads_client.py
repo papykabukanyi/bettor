@@ -207,6 +207,89 @@ def test_get_user_id_returns_the_cached_value():
     assert threads_client.get_user_id() == "999"
 
 
+def test_wait_for_container_ready_returns_immediately_on_finished(monkeypatch):
+    calls = []
+
+    def fake_get(url, *, params, timeout):
+        calls.append(params)
+        return _FakeResponse({"status": "FINISHED"})
+
+    monkeypatch.setattr(threads_client.requests, "get", fake_get)
+    threads_client._wait_for_container_ready("creation-1", "token-1")  # noqa: SLF001
+    assert len(calls) == 1
+    assert calls[0]["access_token"] == "token-1"
+
+
+def test_wait_for_container_ready_polls_until_finished(monkeypatch):
+    statuses = iter(["IN_PROGRESS", "IN_PROGRESS", "FINISHED"])
+    monkeypatch.setattr(threads_client, "_CONTAINER_STATUS_POLL_INTERVAL_SEC", 0.01)
+    monkeypatch.setattr(threads_client.requests, "get", lambda url, *, params, timeout: _FakeResponse({"status": next(statuses)}))
+    threads_client._wait_for_container_ready("creation-1", "token-1")  # noqa: SLF001
+    assert next(statuses, "exhausted") == "exhausted"  # confirms all 3 statuses were actually consumed
+
+
+def test_wait_for_container_ready_stops_on_a_terminal_error_status(monkeypatch):
+    calls = {"n": 0}
+
+    def fake_get(url, *, params, timeout):
+        calls["n"] += 1
+        return _FakeResponse({"status": "ERROR"})
+
+    monkeypatch.setattr(threads_client.requests, "get", fake_get)
+    threads_client._wait_for_container_ready("creation-1", "token-1")  # noqa: SLF001
+    assert calls["n"] == 1  # stopped polling immediately, didn't keep retrying a terminal state
+
+
+def test_wait_for_container_ready_gives_up_after_the_max_wait(monkeypatch):
+    monkeypatch.setattr(threads_client, "_CONTAINER_STATUS_MAX_WAIT_SEC", 0.05)
+    monkeypatch.setattr(threads_client, "_CONTAINER_STATUS_POLL_INTERVAL_SEC", 0.01)
+    monkeypatch.setattr(threads_client.requests, "get", lambda url, *, params, timeout: _FakeResponse({"status": "IN_PROGRESS"}))
+
+    import time as real_time
+    start = real_time.monotonic()
+    threads_client._wait_for_container_ready("creation-1", "token-1")  # noqa: SLF001
+    elapsed = real_time.monotonic() - start
+    assert elapsed < 1.0  # bounded by _CONTAINER_STATUS_MAX_WAIT_SEC, not an infinite loop
+
+
+def test_wait_for_container_ready_never_raises_on_a_status_check_failure(monkeypatch):
+    monkeypatch.setattr(threads_client, "_CONTAINER_STATUS_MAX_WAIT_SEC", 0.05)
+    monkeypatch.setattr(threads_client, "_CONTAINER_STATUS_POLL_INTERVAL_SEC", 0.01)
+
+    def raise_error(url, *, params, timeout):
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(threads_client.requests, "get", raise_error)
+    threads_client._wait_for_container_ready("creation-1", "token-1")  # noqa: SLF001  # must not raise
+
+
+def test_create_and_publish_post_waits_for_the_container_before_publishing(monkeypatch):
+    """The real bug this whole fix addresses: publish must not fire until
+    the container reports FINISHED."""
+    threads_client._token_cache.update({  # noqa: SLF001
+        "access_token": "at-1", "user_id": "user-42",
+        "obtained_at": threads_client.time.time(), "expires_at": threads_client.time.time() + 1000000,
+    })
+    call_order = []
+
+    def fake_post(url, *, params, timeout):
+        call_order.append(("post", url))
+        if "threads_publish" in url:
+            return _FakeResponse({"id": "post-999"})
+        return _FakeResponse({"id": "creation-123"})
+
+    def fake_get(url, *, params, timeout):
+        call_order.append(("get", url))
+        return _FakeResponse({"status": "FINISHED"})
+
+    monkeypatch.setattr(threads_client.requests, "post", fake_post)
+    monkeypatch.setattr(threads_client.requests, "get", fake_get)
+    threads_client.create_and_publish_post("hello world")
+
+    kinds = [k for k, _ in call_order]
+    assert kinds == ["post", "get", "post"]  # create -> status check -> publish, in that order
+
+
 def test_create_and_publish_post_raises_without_a_valid_token():
     with pytest.raises(RuntimeError, match="No valid Threads access token"):
         threads_client.create_and_publish_post("hello")
@@ -225,7 +308,11 @@ def test_create_and_publish_post_does_the_container_then_publish_round_trip(monk
             return _FakeResponse({"id": "post-999"})
         return _FakeResponse({"id": "creation-123"})
 
+    def fake_get(url, *, params, timeout):
+        return _FakeResponse({"status": "FINISHED"})
+
     monkeypatch.setattr(threads_client.requests, "post", fake_post)
+    monkeypatch.setattr(threads_client.requests, "get", fake_get)
     post_id = threads_client.create_and_publish_post("hello world")
 
     assert post_id == "post-999"
@@ -254,7 +341,11 @@ def test_create_and_publish_image_post_does_the_container_then_publish_round_tri
             return _FakeResponse({"id": "post-999"})
         return _FakeResponse({"id": "creation-123"})
 
+    def fake_get(url, *, params, timeout):
+        return _FakeResponse({"status": "FINISHED"})
+
     monkeypatch.setattr(threads_client.requests, "post", fake_post)
+    monkeypatch.setattr(threads_client.requests, "get", fake_get)
     post_id = threads_client.create_and_publish_image_post("https://example.com/chart.png", "caption text")
 
     assert post_id == "post-999"
