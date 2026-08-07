@@ -293,7 +293,7 @@ def test_load_training_dataset_returns_empty_frame_when_listing_hangs(monkeypatc
 
 def test_load_training_dataset_skips_a_hanging_shard_and_continues(monkeypatch):
     monkeypatch.setattr(aod, "HF_API_KEY", "fake-token")
-    monkeypatch.setattr(aod, "_LOAD_TRAINING_DATASET_SHARD_TIMEOUT_SEC", 0.3)
+    monkeypatch.setattr(aod, "_LOAD_TRAINING_DATASET_SHARD_TIMEOUT_SEC", 2.0)
     shard_names = ["minute/2026-07-10.parquet", "minute/2026-07-11.parquet", "minute/2026-07-12.parquet"]
 
     class FakeApi:
@@ -306,7 +306,7 @@ def test_load_training_dataset_skips_a_hanging_shard_and_continues(monkeypatch):
     def fake_hf_hub_download(repo_id, filename, repo_type, token):
         if filename == "minute/2026-07-11.parquet":
             import time as t
-            t.sleep(1.5)  # the hanging shard -- comfortably longer than the 0.3s timeout above even under system load
+            t.sleep(5.0)  # the hanging shard -- comfortably longer than the 2.0s timeout above even under heavy system load (full-suite runs)
         import tempfile
         idx = shard_names.index(filename)
         day_df = pd.DataFrame({"symbol": ["AAPL"] * 10, "ts": [idx * 1000 + i for i in range(10)], "close": [1.0] * 10})

@@ -371,6 +371,11 @@ MODEL_CONFIDENCE_MIN = _env_float("PERPS_MODEL_CONFIDENCE_MIN", 0.58)
 # Daily loss cap as a PERCENTAGE of the balance measured at the start of the
 # day (not a fixed dollar figure) so it scales sensibly as the account grows.
 DAILY_LOSS_CAP_PCT = _env_float("PERPS_DAILY_LOSS_CAP_PCT", 0.15)
+# Real, confirmed production incident: trade_log had no size cap at all,
+# an already-flagged candidate contributor to this service's own recurring
+# OOM pattern over weeks of continuous live trading. Oldest entries trimmed
+# first -- see manage_open_positions's own comment at the append site.
+MAX_TRADE_LOG_ENTRIES = _env_int("PERPS_MAX_TRADE_LOG_ENTRIES", 2000)
 LIVE_TRADING_ENABLED = _env_flag("KALSHI_PERPS_LIVE_TRADING_ENABLED", default=False)
 
 # "When it's quick to go up, take profit": if a position is already up at
@@ -555,6 +560,28 @@ def _save_state(state: dict[str, Any], *, push_durable: bool = False) -> None:
         _push_durable_state_to_hf(state)
 
 
+def apply_confidence_threshold_override(new_threshold: float, *, reason: str) -> dict[str, Any]:
+    """Applies an evidence-gated confidence-floor adjustment (see
+    perps_trade_analysis.recommend_confidence_threshold) durably, WITHOUT a
+    redeploy -- stored in state["tuning"] (pushed to HF like the rest of
+    durable state) and read by scan_and_enter on every cycle, not the OS
+    env var MODEL_CONFIDENCE_MIN is seeded from at import time. Deliberately
+    NOT wired to touch Render's own deploy config -- granting the live
+    service the ability to modify its own deployment is a materially
+    different (and unnecessary) capability than adjusting a value it
+    already reads from its own durable state every cycle."""
+    with _STATE_LOCK:
+        state = _load_state()
+        previous = (state.get("tuning") or {}).get("model_confidence_min", MODEL_CONFIDENCE_MIN)
+        state["tuning"] = {
+            "model_confidence_min": new_threshold,
+            "updated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+            "reason": reason, "previous": previous,
+        }
+        _save_state(state, push_durable=True)
+        return dict(state["tuning"])
+
+
 def _today_str() -> str:
     return dt.datetime.now(dt.timezone.utc).date().isoformat()
 
@@ -628,7 +655,7 @@ def decide_entry_technical(row: dict[str, Any], side: str = "long") -> tuple[boo
     return False, f"no dip signal (price {dip_pct:+.3%} vs short MA)"
 
 
-def evaluate_candidate(ticker: str) -> dict[str, Any]:
+def evaluate_candidate(ticker: str, *, confidence_min: float | None = None) -> dict[str, Any]:
     """Combine the technical scalper filter with the direction model for one
     ticker, considering a LONG entry (dip + model predicts up) and, if
     ENABLE_SHORTS is on, a SHORT entry (rally + model predicts down) --
@@ -636,7 +663,14 @@ def evaluate_candidate(ticker: str) -> dict[str, Any]:
     most one can qualify. If no trained model exists yet, the technical
     signal alone decides (clearly flagged) -- long side only, since shorting
     without any model confirmation at all is a materially different risk to
-    take on unconfirmed technicals."""
+    take on unconfirmed technicals.
+
+    confidence_min overrides the module-level MODEL_CONFIDENCE_MIN default
+    when given -- see scan_and_enter, which reads a durable-state override
+    set by perps_trade_analysis.recommend_confidence_threshold's own
+    evidence-gated tuning (apply_confidence_threshold_override), so a
+    confidence floor genuinely learned from this account's real trade
+    history can take effect without a redeploy."""
     row = latest_feature_row(ticker)
     if row is None:
         return {"ticker": ticker, "should_enter": False, "reason": "no_feature_data", "model_ok": False, "technical_ok": False}
@@ -711,7 +745,8 @@ def evaluate_candidate(ticker: str) -> dict[str, Any]:
 
         wanted_direction = "up" if side == "long" else "down"
         confidence = prediction["probability_up"] if side == "long" else (1.0 - prediction["probability_up"])
-        if prediction["direction"] == wanted_direction and confidence >= MODEL_CONFIDENCE_MIN:
+        effective_confidence_min = confidence_min if confidence_min is not None else MODEL_CONFIDENCE_MIN
+        if prediction["direction"] == wanted_direction and confidence >= effective_confidence_min:
             result["should_enter"] = True
             result["side"] = side
             result["reason"] = f"{technical_reason}; model predicts {wanted_direction} (p={confidence:.2f})"
@@ -725,14 +760,15 @@ def evaluate_candidate(ticker: str) -> dict[str, Any]:
 
 
 def scan_for_entries(
-    tickers: list[str] | None = None, *, exclude: set[str] | None = None,
+    tickers: list[str] | None = None, *, exclude: set[str] | None = None, confidence_min: float | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Evaluate every ticker in the watchlist (minus any already held);
     return every qualifying candidate ranked best-first, plus every
-    candidate's evaluation for observability."""
+    candidate's evaluation for observability. confidence_min passed straight
+    through to evaluate_candidate -- see its own docstring."""
     watchlist = tickers or get_watchlist()
     held = exclude or set()
-    candidates = [evaluate_candidate(t) for t in watchlist if t not in held]
+    candidates = [evaluate_candidate(t, confidence_min=confidence_min) for t in watchlist if t not in held]
     qualifying = sorted((c for c in candidates if c.get("should_enter")), key=lambda c: c.get("score", 0.0), reverse=True)
     return qualifying, candidates
 
@@ -1230,15 +1266,59 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                 realized_pnl = round(gross_pnl - fee_usd, 6)
                 by_date = state.setdefault("realized_pnl_by_date", {})
                 by_date[_today_str()] = round(float(by_date.get(_today_str(), 0.0)) + realized_pnl, 6)
+                opened_at = position.get("opened_at")
+                hold_minutes = None
+                if opened_at:
+                    try:
+                        opened_dt = dt.datetime.fromisoformat(opened_at)
+                        hold_minutes = round((dt.datetime.now(dt.timezone.utc) - opened_dt).total_seconds() / 60.0, 2)
+                    except Exception:
+                        pass
                 trade = {
                     "closed_at": dt.datetime.now(dt.timezone.utc).isoformat(),
                     "ticker": ticker, "side": side, "entry_price": entry_price, "exit_price": exit_price,
                     "count": closed_count, "gross_pnl_usd": gross_pnl, "fee_usd": fee_usd,
                     "realized_pnl_usd": realized_pnl, "reason": reason, "dry_run": effective_dry_run,
                     "entry_fill_type": position.get("entry_fill_type", "taker_fallback"), "exit_fill_type": exit_fill_type,
+                    "opened_at": opened_at, "hold_minutes": hold_minutes,
+                    # Entry-time model/technical context (see scan_and_enter) --
+                    # what the model/filters actually saw at decision time, so a
+                    # post-trade analysis can ask "what led to this win/loss"
+                    # instead of only ever knowing how it ended.
+                    "entry_probability_up": position.get("entry_probability_up"),
+                    "entry_model_direction": position.get("entry_model_direction"),
+                    "entry_score": position.get("entry_score"),
+                    "entry_trend_pct": position.get("entry_trend_pct"),
+                    "entry_volatility_30": position.get("entry_volatility_30"),
+                    "entry_reason": position.get("entry_reason"),
                 }
-                state.setdefault("trade_log", []).append(trade)
+                trade_log = state.setdefault("trade_log", [])
+                trade_log.append(trade)
+                # Real, confirmed production incident found while building this
+                # feature: trade_log had no size cap at all -- an already-flagged
+                # candidate contributor to this service's own recurring OOM
+                # pattern (unbounded growth over weeks of live trading). Keeps
+                # the most recent MAX_TRADE_LOG_ENTRIES, oldest-first trimmed --
+                # analysis/retraining both already recency-weight anyway, so
+                # very old trades contribute the least regardless.
+                if len(trade_log) > MAX_TRADE_LOG_ENTRIES:
+                    del trade_log[: len(trade_log) - MAX_TRADE_LOG_ENTRIES]
                 closed.append(trade)
+                # Real, confirmed production incident found while building this
+                # feature: this whole loop used to save state ONCE at the very
+                # end, after every position had been processed. If the process
+                # got OOM-killed after a real exit fill here but before that
+                # final save, the position itself was still safe (next boot's
+                # reconciliation correctly drops the now-stale local record to
+                # match the exchange), but this trade's OWN record -- its
+                # win/loss reason, P&L, and now its entry-time context -- was
+                # silently lost forever, since the drop path only logs a
+                # warning, it doesn't reconstruct a missing trade. Saving right
+                # here, the instant the record exists, closes that gap. Cheap:
+                # push_durable's own throttle (_DURABLE_PUSH_MIN_INTERVAL_SEC)
+                # already caps how often this can actually hit HF even if
+                # several positions close in the same cycle.
+                _save_state(state, push_durable=True)
 
                 if closed_count < count:
                     # Partial fill -- the remainder is still genuinely open on
@@ -1316,6 +1396,12 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
         reference_balance = _reference_balance_for_today(state, available_balance_usd)
         loss_cap_breached = _daily_loss_cap_breached(state, reference_balance)
         held_tickers = {p["ticker"] for p in positions}
+        # A confidence floor genuinely learned from this account's own real
+        # trade history (see perps_trade_analysis.recommend_confidence_threshold
+        # + apply_confidence_threshold_override below) -- falls back to the
+        # module-level MODEL_CONFIDENCE_MIN default until enough real trades
+        # exist to justify moving it.
+        confidence_min_override = (state.get("tuning") or {}).get("model_confidence_min")
         # push_durable only on the (once-daily) event a fresh reference
         # balance gets captured -- this is the value a restart must not be
         # allowed to silently lose, see the module-level comment above
@@ -1328,7 +1414,7 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
     # Scanning (candles + model + news, all network calls) runs OUTSIDE the
     # lock so it never blocks the fast exit loop for the seconds a full
     # 16-instrument scan can take.
-    qualifying, candidates = scan_for_entries(exclude=held_tickers)
+    qualifying, candidates = scan_for_entries(exclude=held_tickers, confidence_min=confidence_min_override)
     result["candidates"] = candidates
     if not qualifying:
         return result
@@ -1464,6 +1550,23 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
                 if existing_idx is None and len(positions) >= MAX_CONCURRENT_POSITIONS:
                     opened.append({"ticker": ticker, "ok": True, "action": "skipped_slot_taken"})
                     continue
+                # Entry-time model/technical context, carried through to the
+                # closed trade_log record when this position eventually exits
+                # (see manage_open_positions) -- previously this snapshot
+                # existed only transiently in evaluate_candidate()'s return
+                # dict and was never persisted anywhere, so a post-trade
+                # analysis asking "what did the model actually see when it
+                # decided to enter" had nothing to look at. entry_score is
+                # candidate["score"] (confidence for a long, 1-probability_up
+                # for a short -- see evaluate_candidate), the one number
+                # actually compared against MODEL_CONFIDENCE_MIN at entry.
+                entry_context = {
+                    "entry_probability_up": candidate.get("probability_up"),
+                    "entry_model_direction": candidate.get("model_direction"),
+                    "entry_score": candidate.get("score"),
+                    "entry_trend_pct": candidate.get("trend_pct"),
+                    "entry_reason": candidate.get("reason"),
+                }
                 if existing_idx is not None:
                     merged = dict(positions[existing_idx])
                     merged["count"] = float(actual_count)
@@ -1471,6 +1574,7 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
                     merged["side"] = side
                     merged["entry_fill_type"] = entry_fill_type
                     merged["entry_volatility_30"] = candidate.get("volatility_30")
+                    merged.update(entry_context)
                     positions[existing_idx] = merged
                 else:
                     positions.append({
@@ -1479,6 +1583,7 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
                         "entry_volatility_30": candidate.get("volatility_30"),
                         "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(), "dry_run": effective_dry_run,
                         "sizing": sizing_detail,
+                        **entry_context,
                     })
                 state["positions"] = positions
                 _save_state(state)

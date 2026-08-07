@@ -106,6 +106,81 @@ def test_train_model_stays_uncalibrated_below_the_holdout_floor():
     assert result["model_type"] in {"logistic_regression", "random_forest", "gradient_boosting"}
 
 
+# ---------------------------------------------------------------------------
+# _trade_outcome_sample_weight -- the bot's own real trade wins/losses
+# folded into training, not just abstract next-minute price direction with
+# no connection to its actual trading history. A heuristic proxy (see its
+# own docstring), so these tests verify the MECHANICS (matching, weighting,
+# dry-run exclusion) rather than claiming any particular predictive lift.
+# ---------------------------------------------------------------------------
+def _iso(epoch_seconds: int) -> str:
+    import datetime as dt
+    return dt.datetime.fromtimestamp(epoch_seconds, tz=dt.timezone.utc).isoformat()
+
+
+def test_trade_outcome_sample_weight_returns_all_ones_without_a_trade_log():
+    tickers = np.array(["KXBTCPERP", "KXETHPERP"])
+    ts = np.array([0, 60])
+    weights = perps_model._trade_outcome_sample_weight(tickers, ts, None)  # noqa: SLF001
+    assert list(weights) == [1.0, 1.0]
+
+
+def test_trade_outcome_sample_weight_upweights_a_matching_real_win():
+    tickers = np.array(["KXBTCPERP", "KXETHPERP"])
+    ts = np.array([0, 6000])
+    trade_log = [{"ticker": "KXBTCPERP", "opened_at": _iso(0), "realized_pnl_usd": 1.0, "dry_run": False}]
+    weights = perps_model._trade_outcome_sample_weight(tickers, ts, trade_log)  # noqa: SLF001
+    assert weights[0] == perps_model.PERPS_MODEL_TRADE_OUTCOME_WIN_WEIGHT
+    assert weights[1] == 1.0  # unmatched row untouched
+
+
+def test_trade_outcome_sample_weight_upweights_a_loss_more_than_a_win():
+    tickers = np.array(["KXBTCPERP"])
+    ts = np.array([0])
+    win = perps_model._trade_outcome_sample_weight(  # noqa: SLF001
+        tickers, ts, [{"ticker": "KXBTCPERP", "opened_at": _iso(0), "realized_pnl_usd": 1.0, "dry_run": False}],
+    )
+    loss = perps_model._trade_outcome_sample_weight(  # noqa: SLF001
+        tickers, ts, [{"ticker": "KXBTCPERP", "opened_at": _iso(0), "realized_pnl_usd": -1.0, "dry_run": False}],
+    )
+    assert loss[0] > win[0]
+    assert win[0] == perps_model.PERPS_MODEL_TRADE_OUTCOME_WIN_WEIGHT
+    assert loss[0] == perps_model.PERPS_MODEL_TRADE_OUTCOME_LOSS_WEIGHT
+
+
+def test_trade_outcome_sample_weight_ignores_dry_run_trades():
+    tickers = np.array(["KXBTCPERP"])
+    ts = np.array([0])
+    trade_log = [{"ticker": "KXBTCPERP", "opened_at": _iso(0), "realized_pnl_usd": 1.0, "dry_run": True}]
+    weights = perps_model._trade_outcome_sample_weight(tickers, ts, trade_log)  # noqa: SLF001
+    assert weights[0] == 1.0
+
+
+def test_trade_outcome_sample_weight_requires_matching_ticker_not_just_time():
+    tickers = np.array(["KXETHPERP"])
+    ts = np.array([0])
+    trade_log = [{"ticker": "KXBTCPERP", "opened_at": _iso(0), "realized_pnl_usd": 1.0, "dry_run": False}]
+    weights = perps_model._trade_outcome_sample_weight(tickers, ts, trade_log)  # noqa: SLF001
+    assert weights[0] == 1.0  # different ticker at the same time -- must not match
+
+
+def test_train_model_accepts_a_trade_log_and_reports_how_many_rows_matched():
+    df = _synthetic_training_frame(n=500)
+    # Rows 0-59 all share minute_ts=0 with this trade's opened_at -- see
+    # this module's own minute-aligned matching in _trade_outcome_sample_weight.
+    trade_log = [{"ticker": "KXBTCPERP", "opened_at": _iso(0), "realized_pnl_usd": 1.0, "dry_run": False}]
+    result = perps_model.train_model(df=df, trade_log=trade_log)
+    assert result["ok"] is True
+    assert result["trade_outcome_rows_matched"] > 0
+
+
+def test_train_model_with_no_trade_log_matches_zero_rows():
+    df = _synthetic_training_frame(n=500)
+    result = perps_model.train_model(df=df, trade_log=None)
+    assert result["ok"] is True
+    assert result["trade_outcome_rows_matched"] == 0
+
+
 def test_train_model_calibrates_above_the_holdout_floor():
     """A large enough fixture that the last walk-forward fold's test slice
     clears PERPS_MODEL_CALIBRATION_MIN_HOLDOUT_ROWS -- must ship a

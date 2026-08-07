@@ -15,6 +15,7 @@ immediately instead of needing to retrain from zero first.
 """
 from __future__ import annotations
 
+import datetime as dt
 import gc
 import json
 import logging
@@ -121,6 +122,53 @@ def _recency_sample_weight(ts: np.ndarray, *, half_life_days: float) -> np.ndarr
     return np.power(0.5, age_days / half_life_days)
 
 
+PERPS_MODEL_TRADE_OUTCOME_WIN_WEIGHT = float(os.getenv("PERPS_MODEL_TRADE_OUTCOME_WIN_WEIGHT", "1.3") or "1.3")
+PERPS_MODEL_TRADE_OUTCOME_LOSS_WEIGHT = float(os.getenv("PERPS_MODEL_TRADE_OUTCOME_LOSS_WEIGHT", "1.8") or "1.8")
+
+
+def _trade_outcome_sample_weight(tickers: np.ndarray, ts: np.ndarray, trade_log: list[dict[str, Any]] | None) -> np.ndarray:
+    """Extra multiplicative weight for training rows that correspond to a
+    REAL past trade entry from the bot's own trade_log -- losses upweighted
+    more than wins (a well-established hard-example-weighting technique:
+    the model most needs to learn from situations that led to a real loss,
+    not just from abstract next-minute price direction with no connection
+    to the bot's own trading history). Combines multiplicatively with the
+    existing recency weight, same as class_weight="balanced" already does.
+
+    A heuristic proxy, not a perfect causal signal -- label_up is still the
+    same 1-minute-ahead price direction target every candidate is fit
+    against; only the WEIGHT assigned to a matching row changes based on
+    how that specific real trade eventually turned out (which can resolve
+    many minutes later, via take_profit/stop_loss/max_hold_time -- not
+    necessarily correlated with the 1-minute-ahead label itself). Every row
+    not matching a real trade entry keeps weight 1.0, unaffected -- this
+    never overrides the recency-weighted, market-data-only training signal
+    that already exists, it only sharpens it around the bot's own real
+    history where that history exists."""
+    weights = np.ones(len(tickers), dtype=float)
+    if not trade_log:
+        return weights
+    outcome_by_key: dict[tuple[str, int], bool] = {}
+    for t in trade_log:
+        if t.get("dry_run") or not t.get("opened_at") or not t.get("ticker"):
+            continue
+        try:
+            opened_ts = int(dt.datetime.fromisoformat(t["opened_at"]).timestamp())
+        except Exception:
+            continue
+        minute_ts = (opened_ts // 60) * 60
+        outcome_by_key[(t["ticker"], minute_ts)] = float(t.get("realized_pnl_usd") or 0.0) > 0
+    if not outcome_by_key:
+        return weights
+
+    minute_ts_values = (ts.astype(np.int64) // 60) * 60
+    for i in range(len(tickers)):
+        won = outcome_by_key.get((tickers[i], int(minute_ts_values[i])))
+        if won is not None:
+            weights[i] *= PERPS_MODEL_TRADE_OUTCOME_WIN_WEIGHT if won else PERPS_MODEL_TRADE_OUTCOME_LOSS_WEIGHT
+    return weights
+
+
 def _feature_importance_map(model: Any, feature_cols: list[str]) -> dict[str, float] | None:
     try:
         if hasattr(model, "feature_importances_"):
@@ -139,13 +187,19 @@ def _prepare_training_frame(df: pd.DataFrame) -> pd.DataFrame:
     return labeled.sort_values("ts").reset_index(drop=True)
 
 
-def train_model(df: pd.DataFrame | None = None) -> dict[str, Any]:
+def train_model(df: pd.DataFrame | None = None, trade_log: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     """Train, compare candidates via walk-forward (chronological, never
     randomly-shuffled) cross-validation, keep the best -- calibrated, and
     ensembled if the evidence from THIS retrain's own folds actually
     supports it -- persist locally + to HF. Returns a summary dict either
     way (never raises on ordinary "not enough data yet" conditions --
     that's expected during the first days of data collection).
+
+    trade_log (perps_strategy state's own trade_log, passed in by the
+    caller -- this module never imports perps_strategy directly, which
+    would create a circular import) feeds _trade_outcome_sample_weight: see
+    its own docstring for why the bot's real past wins/losses get folded
+    into training, not just raw market-data labels.
 
     Real profiling (this session) against real production data: this
     walk-forward design costs ~2x the wall-clock time of the old single-
@@ -176,7 +230,8 @@ def train_model(df: pd.DataFrame | None = None) -> dict[str, Any]:
     ts_all = labeled["ts"].values
     oldest_row_age_days = float((ts_all.max() - ts_all.min()) / 86400.0) if n_rows else 0.0
     ticker_categories = list(labeled["ticker"].astype("category").cat.categories)
-    # `labeled` is now redundant with the 3 numpy arrays above -- unlike the
+    outcome_weight_all = _trade_outcome_sample_weight(labeled["ticker"].values, ts_all, trade_log)
+    # `labeled` is now redundant with the numpy arrays above -- unlike the
     # old single-split shape, the walk-forward loop below holds these arrays
     # open across several fit calls in a row, so freeing the heavier
     # DataFrame representation early only helps.
@@ -197,6 +252,7 @@ def train_model(df: pd.DataFrame | None = None) -> dict[str, Any]:
             # skip this ONE fold, don't abort the whole retrain over it.
             continue
         sample_weight = _recency_sample_weight(ts_tr, half_life_days=PERPS_MODEL_RECENCY_HALFLIFE_DAYS)
+        sample_weight = sample_weight * outcome_weight_all[train_idx]
 
         fold_probas: list[np.ndarray] = []
         fold_models: dict[str, Any] = {}
@@ -277,6 +333,7 @@ def train_model(df: pd.DataFrame | None = None) -> dict[str, Any]:
         # Never regresses cold-start behavior below the calibration floor.
         best_model = _CANDIDATES[best_name]()
         full_sample_weight = _recency_sample_weight(ts_all, half_life_days=PERPS_MODEL_RECENCY_HALFLIFE_DAYS)
+        full_sample_weight = full_sample_weight * outcome_weight_all
         best_model.fit(x_all, y_all, sample_weight=full_sample_weight)
         model_type = best_name
         calibrated_flag = False
@@ -300,6 +357,11 @@ def train_model(df: pd.DataFrame | None = None) -> dict[str, Any]:
         "feature_columns": feature_cols,
         "ticker_categories": ticker_categories,
         "label_horizon_minutes": LABEL_HORIZON_MINUTES,
+        # How many training rows actually matched a real past trade entry
+        # (see _trade_outcome_sample_weight) -- 0 is expected/fine (falls
+        # back to pure recency weighting), useful to see this grow over time
+        # as the account trades more.
+        "trade_outcome_rows_matched": int(np.sum(outcome_weight_all != 1.0)),
     }
 
     joblib.dump(best_model, MODEL_PATH)

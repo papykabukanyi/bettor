@@ -601,7 +601,7 @@ def test_scan_and_enter_opens_short_with_an_ask_order(monkeypatch, tmp_path):
     monkeypatch.setattr(strat, "_available_balance_usd", lambda: 10.0)
     monkeypatch.setattr(
         strat, "scan_for_entries",
-        lambda tickers=None, exclude=None: (
+        lambda tickers=None, exclude=None, confidence_min=None: (
             [{"ticker": "KXETHPERP", "current_price": 6.60, "reason": "test rally", "score": 0.9, "side": "short"}], [],
         ),
     )
@@ -951,7 +951,7 @@ def test_scan_and_enter_never_opens_a_second_position_in_the_same_instrument(mon
     monkeypatch.setattr(strat, "_available_balance_usd", lambda: 10.0)
     monkeypatch.setattr(
         strat, "scan_for_entries",
-        lambda tickers=None, exclude=None: (
+        lambda tickers=None, exclude=None, confidence_min=None: (
             [{"ticker": "KXBTCPERP", "current_price": 6.60, "reason": "test dip", "score": 0.9}]
             if "KXBTCPERP" not in (exclude or set()) else [],
             [],
@@ -978,7 +978,7 @@ def test_scan_and_enter_rejects_entry_on_large_kalshi_external_price_deviation(m
     monkeypatch.setattr(strat, "get_fast_price", lambda coin: {"price": 50000.0, "source": "coinbase", "delayed": False})
     monkeypatch.setattr(
         strat, "scan_for_entries",
-        lambda tickers=None, exclude=None: ([{"ticker": "KXBTCPERP", "current_price": 6.60, "reason": "test dip", "score": 0.9}], []),
+        lambda tickers=None, exclude=None, confidence_min=None: ([{"ticker": "KXBTCPERP", "current_price": 6.60, "reason": "test dip", "score": 0.9}], []),
     )
 
     def fail_if_called(*a, **k):
@@ -1005,7 +1005,7 @@ def test_dry_run_never_places_a_real_order(monkeypatch, tmp_path):
     monkeypatch.setattr(strat, "_available_balance_usd", lambda: 10.0)
     monkeypatch.setattr(
         strat, "scan_for_entries",
-        lambda tickers=None, exclude=None: ([{"ticker": "KXBTCPERP", "current_price": 6.60, "reason": "test dip", "score": 0.9}], []),
+        lambda tickers=None, exclude=None, confidence_min=None: ([{"ticker": "KXBTCPERP", "current_price": 6.60, "reason": "test dip", "score": 0.9}], []),
     )
 
     result = strat.scan_and_enter()
@@ -1043,7 +1043,7 @@ def test_daily_loss_cap_is_a_percentage_of_the_days_starting_balance(monkeypatch
     })
     monkeypatch.setattr(
         strat, "scan_for_entries",
-        lambda tickers=None, exclude=None: ([], []),
+        lambda tickers=None, exclude=None, confidence_min=None: ([], []),
     )
     result = strat.scan_and_enter()
     assert result["action"] != "skipped_daily_loss_cap"
@@ -1256,7 +1256,7 @@ def test_scan_and_enter_skips_recording_a_position_when_entry_order_does_not_fil
     monkeypatch.setattr(strat, "_available_balance_usd", lambda: 10.0)
     monkeypatch.setattr(
         strat, "scan_for_entries",
-        lambda tickers=None, exclude=None: (
+        lambda tickers=None, exclude=None, confidence_min=None: (
             [{"ticker": "KXXRPPERP", "current_price": 6.60, "reason": "test dip", "score": 0.9}], [],
         ),
     )
@@ -1280,7 +1280,7 @@ def test_scan_and_enter_records_actual_filled_count_not_requested_count(monkeypa
     monkeypatch.setattr(strat, "_available_balance_usd", lambda: 10.0)  # sizes to 6 contracts, see sizing test above
     monkeypatch.setattr(
         strat, "scan_for_entries",
-        lambda tickers=None, exclude=None: (
+        lambda tickers=None, exclude=None, confidence_min=None: (
             [{"ticker": "KXSOLPERP", "current_price": 2.0, "reason": "test dip", "score": 0.9}], [],
         ),
     )
@@ -1312,7 +1312,7 @@ def test_scan_and_enter_posts_to_threads_with_the_real_entry_and_exit_levels(mon
     monkeypatch.setattr(strat, "_available_balance_usd", lambda: 10.0)
     monkeypatch.setattr(
         strat, "scan_for_entries",
-        lambda tickers=None, exclude=None: (
+        lambda tickers=None, exclude=None, confidence_min=None: (
             [{"ticker": "KXSOLPERP", "current_price": 2.0, "reason": "test dip", "volatility_30": 0.0006}], [],
         ),
     )
@@ -1345,7 +1345,7 @@ def test_scan_and_enter_still_opens_the_real_position_even_if_threads_post_raise
     monkeypatch.setattr(strat, "_available_balance_usd", lambda: 10.0)
     monkeypatch.setattr(
         strat, "scan_for_entries",
-        lambda tickers=None, exclude=None: (
+        lambda tickers=None, exclude=None, confidence_min=None: (
             [{"ticker": "KXSOLPERP", "current_price": 2.0, "reason": "test dip"}], [],
         ),
     )
@@ -1376,7 +1376,7 @@ def test_scan_and_enter_merges_a_confirmed_fill_into_a_concurrently_adopted_posi
     monkeypatch.setattr(strat, "_available_balance_usd", lambda: 10.0)
     monkeypatch.setattr(
         strat, "scan_for_entries",
-        lambda tickers=None, exclude=None: (
+        lambda tickers=None, exclude=None, confidence_min=None: (
             [{"ticker": "KXSOLPERP", "current_price": 6.60, "reason": "test dip", "score": 0.9}], [],
         ),
     )
@@ -1413,7 +1413,7 @@ def test_scan_and_enter_one_failed_entry_does_not_block_the_others(monkeypatch, 
     monkeypatch.setattr(strat, "_available_balance_usd", lambda: 10.0)
     monkeypatch.setattr(
         strat, "scan_for_entries",
-        lambda tickers=None, exclude=None: (
+        lambda tickers=None, exclude=None, confidence_min=None: (
             [
                 {"ticker": "KXBTCPERP", "current_price": 6.60, "reason": "test dip", "score": 0.95},
                 {"ticker": "KXETHPERP", "current_price": 6.60, "reason": "test dip", "score": 0.9},
@@ -1549,7 +1549,7 @@ def test_run_cycle_manages_positions_then_scans_for_entries(monkeypatch, tmp_pat
     monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", False)
     monkeypatch.setattr(strat, "get_margin_market", lambda ticker: _market_response(price=6.605))
     monkeypatch.setattr(strat, "_available_balance_usd", lambda: 10.0)
-    monkeypatch.setattr(strat, "scan_for_entries", lambda tickers=None, exclude=None: ([], []))
+    monkeypatch.setattr(strat, "scan_for_entries", lambda tickers=None, exclude=None, confidence_min=None: ([], []))
     strat._save_state({
         "positions": [_position(ticker="KXBTCPERP", entry_price=6.55)],
         "realized_pnl_by_date": {}, "trade_log": [], "daily_reference_balance": {},
@@ -1878,7 +1878,7 @@ def test_scan_and_enter_tries_maker_order_for_a_new_entry_when_enabled(monkeypat
     monkeypatch.setattr(strat, "_available_balance_usd", lambda: 100.0)
     monkeypatch.setattr(
         strat, "scan_for_entries",
-        lambda exclude=None: (
+        lambda exclude=None, confidence_min=None: (
             [{"ticker": "KXBTCPERP", "current_price": 6.60, "reason": "dip", "side": "long"}],
             [{"ticker": "KXBTCPERP", "should_enter": True, "reason": "dip"}],
         ),
@@ -1895,3 +1895,184 @@ def test_scan_and_enter_tries_maker_order_for_a_new_entry_when_enabled(monkeypat
     assert result["opened"][0]["entry_fill_type"] == "maker"
     assert placed[0]["post_only"] is True
     assert placed[0]["side"] == "bid"
+
+
+# ---------------------------------------------------------------------------
+# Post-trade analysis feature: entry-time context capture, per-trade save
+# durability, trade_log capping, and the evidence-gated confidence-
+# threshold override -- all built to feed perps_trade_analysis.py real data
+# to work with, and to close a real, confirmed gap where a trade's own
+# record could be silently lost to a crash before the loop's old batched
+# end-of-cycle save.
+# ---------------------------------------------------------------------------
+def test_evaluate_candidate_uses_module_default_confidence_when_no_override(monkeypatch):
+    monkeypatch.setattr(strat, "MODEL_CONFIDENCE_MIN", 0.6)
+    monkeypatch.setattr(strat, "latest_feature_row", lambda ticker: _row())
+    monkeypatch.setattr(strat, "predict_direction", lambda ticker: {
+        "model_ok": True, "ticker": ticker, "direction": "up", "probability_up": 0.55,
+    })
+    result = strat.evaluate_candidate("KXBTCPERP")
+    assert result["should_enter"] is False  # 0.55 < module default 0.6
+
+
+def test_evaluate_candidate_confidence_min_override_can_allow_a_lower_bar(monkeypatch):
+    monkeypatch.setattr(strat, "MODEL_CONFIDENCE_MIN", 0.6)
+    monkeypatch.setattr(strat, "latest_feature_row", lambda ticker: _row())
+    monkeypatch.setattr(strat, "predict_direction", lambda ticker: {
+        "model_ok": True, "ticker": ticker, "direction": "up", "probability_up": 0.55,
+    })
+    result = strat.evaluate_candidate("KXBTCPERP", confidence_min=0.5)
+    assert result["should_enter"] is True  # 0.55 >= the 0.5 override, even though it's below the module default
+
+
+def test_evaluate_candidate_confidence_min_override_can_raise_the_bar(monkeypatch):
+    monkeypatch.setattr(strat, "MODEL_CONFIDENCE_MIN", 0.55)
+    monkeypatch.setattr(strat, "latest_feature_row", lambda ticker: _row())
+    monkeypatch.setattr(strat, "predict_direction", lambda ticker: {
+        "model_ok": True, "ticker": ticker, "direction": "up", "probability_up": 0.58,
+    })
+    result = strat.evaluate_candidate("KXBTCPERP", confidence_min=0.62)
+    assert result["should_enter"] is False  # 0.58 clears the module default but not the (higher) override
+
+
+def test_apply_confidence_threshold_override_persists_to_state(monkeypatch, tmp_path):
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(strat, "MODEL_CONFIDENCE_MIN", 0.58)
+    strat._save_state({"positions": [], "realized_pnl_by_date": {}, "trade_log": [], "daily_reference_balance": {}})  # noqa: SLF001
+
+    result = strat.apply_confidence_threshold_override(0.63, reason="evidence-gated: test")
+
+    assert result["model_confidence_min"] == 0.63
+    assert result["previous"] == 0.58
+    assert result["reason"] == "evidence-gated: test"
+    reloaded = strat._load_state()  # noqa: SLF001
+    assert reloaded["tuning"]["model_confidence_min"] == 0.63
+
+
+def test_scan_and_enter_reads_the_confidence_override_from_state(monkeypatch, tmp_path):
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", False)
+    strat._save_state({  # noqa: SLF001
+        "positions": [], "realized_pnl_by_date": {}, "trade_log": [], "daily_reference_balance": {},
+        "tuning": {"model_confidence_min": 0.71, "updated_at": "x", "reason": "test"},
+    })
+    captured = {}
+
+    def fake_scan_for_entries(tickers=None, exclude=None, confidence_min=None):
+        captured["confidence_min"] = confidence_min
+        return [], []
+
+    monkeypatch.setattr(strat, "scan_for_entries", fake_scan_for_entries)
+    strat.scan_and_enter()
+    assert captured["confidence_min"] == 0.71
+
+
+def test_scan_and_enter_captures_entry_time_model_context_in_position(monkeypatch, tmp_path):
+    """A win/loss post-mortem needs to know what the model actually saw at
+    entry -- previously this only ever existed transiently in
+    evaluate_candidate's own return dict and was never persisted."""
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", False)
+    strat._save_state({"positions": [], "realized_pnl_by_date": {}, "trade_log": [], "daily_reference_balance": {}})  # noqa: SLF001
+    monkeypatch.setattr(strat, "_available_balance_usd", lambda: 100.0)
+    monkeypatch.setattr(
+        strat, "scan_for_entries",
+        lambda tickers=None, exclude=None, confidence_min=None: (
+            [{
+                "ticker": "KXBTCPERP", "current_price": 6.60, "reason": "dip; model predicts up (p=0.71)",
+                "side": "long", "score": 0.71, "probability_up": 0.71, "model_direction": "up",
+                "trend_pct": 0.002, "volatility_30": 0.0015,
+            }],
+            [],
+        ),
+    )
+    monkeypatch.setattr(strat, "get_margin_market", lambda ticker: _market_response(price=6.60))
+
+    result = strat.scan_and_enter(dry_run=True)
+    assert result["opened"][0]["action"] == "opened"
+
+    state = strat._load_state()  # noqa: SLF001
+    position = state["positions"][0]
+    assert position["entry_probability_up"] == 0.71
+    assert position["entry_model_direction"] == "up"
+    assert position["entry_score"] == 0.71
+    assert position["entry_trend_pct"] == 0.002
+    assert position["entry_reason"] == "dip; model predicts up (p=0.71)"
+
+
+def test_manage_open_positions_copies_entry_context_into_the_closed_trade(monkeypatch, tmp_path):
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", False)
+    position = _position(ticker="KXBTCPERP", entry_price=6.60, minutes_ago=12)
+    position.update({
+        "entry_probability_up": 0.68, "entry_model_direction": "up", "entry_score": 0.68,
+        "entry_trend_pct": 0.001, "entry_reason": "dip; model predicts up (p=0.68)",
+    })
+    strat._save_state({  # noqa: SLF001
+        "positions": [position], "realized_pnl_by_date": {}, "trade_log": [], "daily_reference_balance": {},
+    })
+    monkeypatch.setattr(strat, "get_margin_market", lambda ticker: _market_response(price=6.60 * (1 + strat.TAKE_PROFIT_PCT + 0.001)))
+
+    result = strat.manage_open_positions()
+    trade = result["closed"][0]
+    assert trade["entry_probability_up"] == 0.68
+    assert trade["entry_model_direction"] == "up"
+    assert trade["entry_score"] == 0.68
+    assert trade["entry_reason"] == "dip; model predicts up (p=0.68)"
+    assert trade["opened_at"] == position["opened_at"]
+    assert trade["hold_minutes"] == pytest.approx(12.0, abs=0.5)
+
+
+def test_manage_open_positions_saves_state_immediately_after_each_trade_closes(monkeypatch, tmp_path):
+    """Real, confirmed gap this closes: the loop used to save state ONCE at
+    the very end, after every position had been processed -- a crash after
+    a real exit fill but before that final save silently lost the trade's
+    OWN record forever (the position itself is safe either way, via
+    reconciliation). Two positions closing in the same cycle must trigger
+    (at least) two durable saves, not one."""
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", False)
+    monkeypatch.setattr(strat, "_DURABLE_PUSH_MIN_INTERVAL_SEC", 0)  # don't let the throttle mask this
+    strat._save_state({  # noqa: SLF001
+        "positions": [
+            _position(ticker="KXBTCPERP", entry_price=6.60),
+            _position(ticker="KXETHPERP", entry_price=100.0),
+        ],
+        "realized_pnl_by_date": {}, "trade_log": [], "daily_reference_balance": {},
+    })
+    # Both comfortably clear take-profit -- both close this cycle.
+    monkeypatch.setattr(strat, "get_margin_market", lambda ticker: _market_response(
+        price=(6.60 if ticker == "KXBTCPERP" else 100.0) * (1 + strat.TAKE_PROFIT_PCT + 0.001),
+    ))
+
+    durable_push_calls = []
+    monkeypatch.setattr(strat, "_push_durable_state_to_hf", lambda state: durable_push_calls.append(len(state.get("trade_log") or [])))
+
+    result = strat.manage_open_positions()
+    assert len(result["closed"]) == 2
+    # The first two pushes must show trade_log growing ONE AT A TIME (1,
+    # then 2) -- proving each trade was saved the instant it existed, not
+    # batched until the whole loop finished. (A final push with both
+    # already in it, from the loop's own end-of-cycle save, is expected
+    # and harmless -- redundant, not a bug.)
+    assert durable_push_calls[:2] == [1, 2]
+
+
+def test_manage_open_positions_caps_trade_log_at_max_entries(monkeypatch, tmp_path):
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", False)
+    monkeypatch.setattr(strat, "MAX_TRADE_LOG_ENTRIES", 5)
+    existing_trades = [{"ticker": "KXBTCPERP", "closed_at": f"2026-01-0{i+1}T00:00:00+00:00", "realized_pnl_usd": 0.01} for i in range(5)]
+    strat._save_state({  # noqa: SLF001
+        "positions": [_position(ticker="KXETHPERP", entry_price=100.0)],
+        "realized_pnl_by_date": {}, "trade_log": existing_trades, "daily_reference_balance": {},
+    })
+    monkeypatch.setattr(strat, "get_margin_market", lambda ticker: _market_response(price=100.0 * (1 + strat.TAKE_PROFIT_PCT + 0.001)))
+
+    strat.manage_open_positions()
+
+    state = strat._load_state()  # noqa: SLF001
+    assert len(state["trade_log"]) == 5  # capped, not 6
+    # The oldest entry (2026-01-01) was trimmed, the newest real close survived.
+    assert state["trade_log"][-1]["ticker"] == "KXETHPERP"
+    assert all(t.get("closed_at") != "2026-01-01T00:00:00+00:00" for t in state["trade_log"])

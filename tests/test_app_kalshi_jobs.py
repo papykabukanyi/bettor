@@ -265,3 +265,105 @@ def test_shutdown_scheduler_swallows_errors(monkeypatch):
 
     monkeypatch.setattr(app_kalshi, "scheduler", _FakeScheduler(True, raise_error))
     app_kalshi._shutdown_scheduler()  # must not raise
+
+
+def test_run_perps_train_passes_the_real_trade_log_for_outcome_aware_weighting(monkeypatch):
+    """perps_model.py never imports perps_strategy.py directly (circular
+    import risk -- see this job's own comment), so app_kalshi.py is
+    responsible for reading trade_log and threading it through."""
+    from data import perps_model, perps_strategy
+
+    fake_trade_log = [{"ticker": "KXBTCPERP", "opened_at": "x", "realized_pnl_usd": 1.0, "dry_run": False}]
+    monkeypatch.setattr(perps_strategy, "_load_state", lambda: {"trade_log": fake_trade_log})
+    captured = {}
+    monkeypatch.setattr(perps_model, "train_model", lambda **kw: captured.update(kw) or {"ok": True})
+
+    app_kalshi._run_perps_train.__wrapped__()  # noqa: SLF001
+
+    assert captured["trade_log"] == fake_trade_log
+
+
+def test_run_perps_train_survives_a_state_read_failure(monkeypatch):
+    from data import perps_model, perps_strategy
+
+    def fail():
+        raise RuntimeError("state read failed")
+
+    monkeypatch.setattr(perps_strategy, "_load_state", fail)
+    captured = {}
+    monkeypatch.setattr(perps_model, "train_model", lambda **kw: captured.update(kw) or {"ok": True})
+
+    result = app_kalshi._run_perps_train.__wrapped__()  # noqa: SLF001
+
+    assert result["ok"] is True
+    assert captured["trade_log"] is None  # degrades to plain (non-outcome-weighted) training, doesn't crash the job
+
+
+def test_run_perps_trade_analysis_posts_a_summary_and_applies_evidence_gated_tuning(monkeypatch):
+    from data import perps_strategy, perps_trade_analysis, threads_post
+
+    monkeypatch.setattr(perps_strategy, "_load_state", lambda: {"trade_log": [{"fake": "trade"}], "tuning": {}})
+    monkeypatch.setattr(perps_strategy, "MODEL_CONFIDENCE_MIN", 0.58)
+    monkeypatch.setattr(
+        perps_trade_analysis, "analyze_trade_history",
+        lambda trade_log, **kw: {"ok": True, "trades_analyzed": 20, "overall": {"win_rate": 0.6, "total_pnl_usd": 1.0, "avg_pnl_usd": 0.05}, "insights": []},
+    )
+    monkeypatch.setattr(
+        perps_trade_analysis, "recommend_confidence_threshold",
+        lambda trade_log, **kw: {"should_apply": True, "recommended_threshold": 0.63, "current_threshold": 0.58, "candidate": {"trades": 16}, "baseline": {"trades": 19}},
+    )
+    applied = {}
+    monkeypatch.setattr(perps_strategy, "apply_confidence_threshold_override", lambda threshold, *, reason: applied.update(threshold=threshold, reason=reason) or {"model_confidence_min": threshold})
+    posted = {}
+
+    def fake_post(text, **kw):
+        posted["text"] = text
+        return True
+
+    monkeypatch.setattr(threads_post, "post_trade_analysis_summary", fake_post)
+
+    result = app_kalshi._run_perps_trade_analysis.__wrapped__()  # noqa: SLF001
+
+    assert result["ok"] is True
+    assert applied["threshold"] == 0.63
+    assert result["posted"] is True
+    assert "text" in posted
+
+
+def test_run_perps_trade_analysis_does_not_apply_tuning_when_evidence_is_thin(monkeypatch):
+    from data import perps_strategy, perps_trade_analysis, threads_post
+
+    monkeypatch.setattr(perps_strategy, "_load_state", lambda: {"trade_log": [], "tuning": {}})
+    monkeypatch.setattr(perps_strategy, "MODEL_CONFIDENCE_MIN", 0.58)
+    monkeypatch.setattr(
+        perps_trade_analysis, "analyze_trade_history",
+        lambda trade_log, **kw: {"ok": True, "trades_analyzed": 0, "overall": {}, "insights": []},
+    )
+    monkeypatch.setattr(
+        perps_trade_analysis, "recommend_confidence_threshold",
+        lambda trade_log, **kw: {"should_apply": False, "reason": "insufficient_trade_history", "current_threshold": 0.58},
+    )
+
+    def fail_if_called(*a, **k):
+        raise AssertionError("must not apply a tuning override without evidence")
+
+    monkeypatch.setattr(perps_strategy, "apply_confidence_threshold_override", fail_if_called)
+    post_calls = []
+    monkeypatch.setattr(threads_post, "post_trade_analysis_summary", lambda text, **kw: post_calls.append(text) or True)
+
+    result = app_kalshi._run_perps_trade_analysis.__wrapped__()  # noqa: SLF001
+
+    assert result["ok"] is True
+    assert result["tuning_applied"] is None
+    assert post_calls == []  # nothing worth posting with zero trades analyzed
+
+
+def test_run_perps_trade_analysis_survives_a_state_read_failure(monkeypatch):
+    from data import perps_strategy
+
+    def fail():
+        raise RuntimeError("state read failed")
+
+    monkeypatch.setattr(perps_strategy, "_load_state", fail)
+    result = app_kalshi._run_perps_trade_analysis.__wrapped__()  # noqa: SLF001
+    assert result["ok"] is False

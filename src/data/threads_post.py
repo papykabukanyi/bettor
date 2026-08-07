@@ -171,6 +171,29 @@ def post_restart_notice(message: str = "Money Bot has restarted!") -> bool:
         return False
 
 
+def post_trade_analysis_summary(summary_text: str, *, market: str = "perps") -> bool:
+    """Posts the periodic post-trade analysis digest (see
+    perps_trade_analysis.format_analysis_summary_text) -- what the
+    account's own real trade history shows: win rate by exit reason/
+    confidence level, and any evidence-gated confidence-threshold
+    adjustment that got applied off it. Same best-effort, never-raise
+    contract as every other post here."""
+    if not THREADS_POST_ENABLED:
+        return False
+    text = summary_text
+    hashtags = _hashtags_for_market(market)
+    if hashtags and hashtags not in text:
+        text = f"{text}\n{hashtags}"
+    if len(text) > _THREADS_POST_MAX_CHARS:
+        text = text[: _THREADS_POST_MAX_CHARS - 1] + "…"
+    try:
+        threads_client.create_and_publish_post(text)
+        return True
+    except Exception as exc:
+        logger.warning("[threads_post] failed to post trade analysis summary: %s", exc)
+        return False
+
+
 def _format_hourly_status_text(
     *, positions: list[dict], today_realized_pnl_usd: float | None, market: str = "perps",
 ) -> str:

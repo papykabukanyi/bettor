@@ -20,9 +20,8 @@ at POSITION_SIZE_PCT of current balance, using each market's own embedded
 leverage), opens dry-run-by-default positions when the technical signal and
 the model agree, and takes profit per portion -- compounding as it grows.
 
-Four background jobs, each cross-process locked (see src/server_common.py)
-so a single `--workers 1` gunicorn process never runs a job twice
-concurrently:
+Background jobs, each cross-process locked (see src/server_common.py) so a
+single `--workers 1` gunicorn process never runs a job twice concurrently:
   - perps_fast_check    every PERPS_FAST_CHECK_SECONDS  -- ONLY manages an
                                                             existing position
                                                             (exit check incl.
@@ -38,7 +37,24 @@ concurrently:
                                                             already open)
   - perps_data_collect  every PERPS_DATA_COLLECT_MINUTES -- archive fresh
                                                             candles + news to HF
-  - perps_train         daily at PERPS_TRAIN_HOUR_ET:00 ET -- retrain the model
+  - perps_train         daily at PERPS_TRAIN_HOUR_ET:00 ET -- retrain the model,
+                                                            now outcome-weighted by
+                                                            trade_log's own real
+                                                            wins/losses (see
+                                                            perps_model.
+                                                            _trade_outcome_sample_weight)
+  - perps_trade_analysis daily at PERPS_TRADE_ANALYSIS_HOUR_ET:
+                         PERPS_TRADE_ANALYSIS_MINUTE_ET ET -- turns trade_log's
+                                                            real history into
+                                                            win/loss diagnostics
+                                                            (perps_trade_analysis.py),
+                                                            posts a summary to
+                                                            Threads, and applies a
+                                                            small evidence-gated
+                                                            MODEL_CONFIDENCE_MIN
+                                                            adjustment when the
+                                                            evidence clearly
+                                                            supports it
 """
 from __future__ import annotations
 
@@ -69,7 +85,7 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from config import et_today
-from data import crypto_news, perps_data, perps_model, perps_strategy, threads_client, threads_post
+from data import crypto_news, perps_data, perps_model, perps_strategy, perps_trade_analysis, threads_client, threads_post
 
 # Real production bug found and fixed on the sibling stocks server (now
 # alpaca_server.py, same comment there in full): every perps_*.py module
@@ -98,6 +114,11 @@ PERPS_CYCLE_MINUTES = max(1, int(os.getenv("PERPS_CYCLE_MINUTES", "2") or "2"))
 PERPS_FAST_CHECK_SECONDS = max(5, int(os.getenv("PERPS_FAST_CHECK_SECONDS", "20") or "20"))
 PERPS_DATA_COLLECT_MINUTES = max(5, int(os.getenv("PERPS_DATA_COLLECT_MINUTES", "15") or "15"))
 PERPS_TRAIN_HOUR_ET = int(os.getenv("PERPS_TRAIN_HOUR_ET", "3") or "3")
+# 30 min after PERPS_TRAIN_HOUR_ET, not the same minute -- runs after the
+# fresh model/data from the train job above have settled, not concurrently
+# with them.
+PERPS_TRADE_ANALYSIS_HOUR_ET = int(os.getenv("PERPS_TRADE_ANALYSIS_HOUR_ET", "3") or "3")
+PERPS_TRADE_ANALYSIS_MINUTE_ET = int(os.getenv("PERPS_TRADE_ANALYSIS_MINUTE_ET", "30") or "30")
 # Render's rolling (zero-downtime) deploy briefly runs the OLD and NEW
 # instance of this service at once -- the new one passes its health check
 # and starts serving before the old one receives SIGTERM. Since this app's
@@ -303,7 +324,59 @@ def _run_perps_data_collect() -> dict[str, Any]:
 
 @_locked_job("perps_train", stale_after_sec=1800)
 def _run_perps_train() -> dict[str, Any]:
-    return perps_model.train_model()
+    # perps_model.py never imports perps_strategy.py directly (perps_strategy
+    # already imports FROM perps_model -- predict_direction et al -- so the
+    # reverse import would be circular); the trade_log this feeds into
+    # outcome-aware sample weighting is read here instead, where both
+    # modules are already available.
+    try:
+        trade_log = perps_strategy._load_state().get("trade_log")  # noqa: SLF001
+    except Exception as exc:
+        logger.warning("[app_kalshi] could not read trade_log for outcome-aware training: %s", exc)
+        trade_log = None
+    return perps_model.train_model(trade_log=trade_log)
+
+
+@_locked_job("perps_trade_analysis", stale_after_sec=1800)
+def _run_perps_trade_analysis() -> dict[str, Any]:
+    """Daily: turns trade_log's own real history into win/loss diagnostics
+    (perps_trade_analysis.analyze_trade_history), posts a summary to
+    Threads, and applies a small, bounded confidence-floor adjustment ONLY
+    when the evidence clearly supports it (recommend_confidence_threshold's
+    own gate -- see its docstring). Read-only over state except for that
+    one narrow, evidence-gated write; never touches order placement or
+    position management directly."""
+    try:
+        state = perps_strategy._load_state()  # noqa: SLF001
+        trade_log = state.get("trade_log") or []
+        analysis = perps_trade_analysis.analyze_trade_history(trade_log)
+        current_threshold = (state.get("tuning") or {}).get("model_confidence_min", perps_strategy.MODEL_CONFIDENCE_MIN)
+        recommendation = perps_trade_analysis.recommend_confidence_threshold(trade_log, current_threshold=current_threshold)
+
+        tuning_applied = None
+        if recommendation.get("should_apply"):
+            tuning_applied = perps_strategy.apply_confidence_threshold_override(
+                recommendation["recommended_threshold"],
+                reason=(
+                    f"evidence-gated: {recommendation['candidate']['trades']} real trades at "
+                    f"{recommendation['recommended_threshold']:.2f}+ confidence outperformed the "
+                    f"{recommendation['baseline']['trades']}-trade baseline at {current_threshold:.2f}"
+                ),
+            )
+            logger.info("[app_kalshi] perps confidence threshold tuned: %s", tuning_applied)
+
+        posted = False
+        if analysis.get("trades_analyzed"):
+            summary_text = perps_trade_analysis.format_analysis_summary_text(analysis, tuning=recommendation)
+            try:
+                posted = threads_post.post_trade_analysis_summary(summary_text)
+            except Exception:
+                logger.warning("[app_kalshi] Threads trade-analysis post failed", exc_info=True)
+
+        return {"ok": True, "analysis": analysis, "tuning_recommendation": recommendation, "tuning_applied": tuning_applied, "posted": posted}
+    except Exception as exc:
+        logger.exception("[app_kalshi] perps trade analysis failed")
+        return {"ok": False, "error": str(exc)}
 
 
 @_locked_job("perps_threads_hourly_status", stale_after_sec=300)
@@ -401,6 +474,10 @@ def _ensure_background_jobs_started() -> None:
             scheduler.add_job(
                 _run_perps_train, "cron", hour=PERPS_TRAIN_HOUR_ET, minute=0,
                 id="perps_train", replace_existing=True,
+            )
+            scheduler.add_job(
+                _run_perps_trade_analysis, "cron", hour=PERPS_TRADE_ANALYSIS_HOUR_ET, minute=PERPS_TRADE_ANALYSIS_MINUTE_ET,
+                id="perps_trade_analysis", replace_existing=True,
             )
             scheduler.add_job(
                 _run_perps_threads_hourly_status, "interval", hours=1,
@@ -772,12 +849,26 @@ def api_perps_train():
         return jsonify({"ok": False, "error": str(exc)}), 500
 
 
+@app.route("/api/perps/trade_analysis", methods=["GET", "POST"])
+def api_perps_trade_analysis():
+    if not is_cron_authorized(request):
+        return jsonify({"ok": False, "error": "Unauthorized"}), 401
+    try:
+        return jsonify(_run_perps_trade_analysis())
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
 _JOB_LABELS = {
     "perps_fast_check": f"Fast exit check (every {PERPS_FAST_CHECK_SECONDS}s)",
     "perps_entry_scan": f"Entry scan -- all instruments (every {PERPS_CYCLE_MINUTES} min)",
     "perps_manual_cycle": "Manual full cycle",
     "perps_data_collect": f"Data collection -> HF (every {PERPS_DATA_COLLECT_MINUTES} min)",
     "perps_train": f"Model retrain (daily {PERPS_TRAIN_HOUR_ET:02d}:00 ET)",
+    "perps_trade_analysis": (
+        f"Trade win/loss analysis + evidence-gated confidence tuning "
+        f"(daily {PERPS_TRADE_ANALYSIS_HOUR_ET:02d}:{PERPS_TRADE_ANALYSIS_MINUTE_ET:02d} ET)"
+    ),
     "perps_threads_hourly_status": "Threads hourly status post",
     "perps_threads_trending_news": "Threads trending-news post (every 30 min)",
     "perps_threads_sentiment_snapshot": "Threads per-ticker sentiment snapshot (every 60 min)",
