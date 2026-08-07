@@ -1,4 +1,4 @@
-name = "bettor-pages"
+name = "bettor"
 compatibility_date = "2026-07-05"
 pages_build_output_dir = "public"
 
