@@ -148,9 +148,24 @@ app = Flask("alpaca_stocks_server", template_folder="templates")
 # every single interval -- they'd never actually posted. job_defaults
 # applies a generous grace window scheduler-wide, harmless for the
 # frequent jobs (already on time regardless) and the actual fix here.
+#
+# Real, confirmed production incident: _run_alpaca_train's data-loading
+# phase (hundreds of individual per-shard HF network round trips, made
+# meaningfully longer by the recent ALPACA_MAX_TRAIN_ROWS increase) ran
+# for 7+ minutes straight on the shared "default" single-worker pool,
+# during which alpaca_fast_check -- the real-money exit/TP-SL/max-hold
+# check for OPEN positions, meant to run every 20s -- was completely
+# blocked (confirmed live: "skipped: maximum number of running instances
+# reached" repeating for the entire duration on the equivalent options
+# service). perps already solved this exact problem for exactly this
+# reason (see its own identical comment) with a dedicated executor for
+# its own fast_check; applying the same fix here.
 scheduler = BackgroundScheduler(
     timezone="America/New_York", job_defaults={"misfire_grace_time": 300},
-    executors={"default": APSThreadPoolExecutor(max_workers=1)},
+    executors={
+        "default": APSThreadPoolExecutor(max_workers=1),
+        "fastcheck": APSThreadPoolExecutor(max_workers=1),
+    },
 )
 _startup_lock = threading.Lock()
 _startup_done = False
@@ -500,7 +515,7 @@ def _ensure_background_jobs_started() -> None:
             )
             scheduler.add_job(
                 _run_alpaca_fast_check, "interval", seconds=ALPACA_FAST_CHECK_SECONDS,
-                id="alpaca_fast_check", replace_existing=True,
+                id="alpaca_fast_check", replace_existing=True, executor="fastcheck",
             )
             scheduler.add_job(
                 _run_alpaca_entry_scan, "interval", minutes=ALPACA_CYCLE_MINUTES,
