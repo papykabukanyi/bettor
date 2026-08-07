@@ -842,7 +842,16 @@ STOP_LOSS_VOL_MULTIPLE = _env_float("PERPS_STOP_LOSS_VOL_MULTIPLE", 1.0)
 # coin with almost no recorded volatility yet shouldn't get a near-zero
 # target that fires on pure noise; a wildly volatile one shouldn't get an
 # unreasonably huge target that never fires either).
-MIN_TAKE_PROFIT_PCT = _env_float("PERPS_MIN_TAKE_PROFIT_PCT", 0.012)
+#
+# Real, confirmed finding from reviewing actual trade history: the old
+# 0.012 (1.2%) floor sat BELOW the real ~1.6% round-trip taker fee
+# (DEFAULT_TAKER_FEE_RATE=0.008, both legs) -- two real trades
+# (KXBCHPERP/KXHYPEPERP, both "take_profit" exits, +0.544%/+0.821% gross)
+# hit that floor and still booked a NET LOSS despite correctly predicting
+# direction and reaching their own target. A take-profit floor below the
+# fee cost is a structural leak, not a strategy tradeoff -- raised to sit
+# comfortably above it (matches TAKE_PROFIT_PCT's own flat fallback value).
+MIN_TAKE_PROFIT_PCT = _env_float("PERPS_MIN_TAKE_PROFIT_PCT", 0.02)
 MAX_TAKE_PROFIT_PCT = _env_float("PERPS_MAX_TAKE_PROFIT_PCT", 0.05)
 MIN_STOP_LOSS_PCT = _env_float("PERPS_MIN_STOP_LOSS_PCT", 0.01)
 MAX_STOP_LOSS_PCT = _env_float("PERPS_MAX_STOP_LOSS_PCT", 0.04)

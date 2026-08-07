@@ -158,7 +158,14 @@ TAKER_FEE_RATE = _env_float("ALPACA_CRYPTO_TAKER_FEE_RATE", 0.0025)
 # fee drag and typical hold window genuinely differ from Kalshi's.
 TAKE_PROFIT_VOL_MULTIPLE = _env_float("ALPACA_CRYPTO_TAKE_PROFIT_VOL_MULTIPLE", 1.5)
 STOP_LOSS_VOL_MULTIPLE = _env_float("ALPACA_CRYPTO_STOP_LOSS_VOL_MULTIPLE", 1.0)
-MIN_TAKE_PROFIT_PCT = _env_float("ALPACA_CRYPTO_MIN_TAKE_PROFIT_PCT", 0.006)
+# Real finding from reviewing actual trade history: the old 0.006 (0.6%)
+# floor left only a razor-thin ~0.1% margin over the real ~0.5% round-trip
+# taker fee (TAKER_FEE_RATE=0.0025, both legs) -- comfortably positive on
+# paper, but thin enough that ordinary slippage on a real fill could still
+# turn a "successful" minimum-target take-profit into a net loss (the
+# structural version of this bug already confirmed live on perps, see its
+# own identical comment). Widened to a healthier margin.
+MIN_TAKE_PROFIT_PCT = _env_float("ALPACA_CRYPTO_MIN_TAKE_PROFIT_PCT", 0.01)
 MAX_TAKE_PROFIT_PCT = _env_float("ALPACA_CRYPTO_MAX_TAKE_PROFIT_PCT", 0.04)
 MIN_STOP_LOSS_PCT = _env_float("ALPACA_CRYPTO_MIN_STOP_LOSS_PCT", 0.005)
 MAX_STOP_LOSS_PCT = _env_float("ALPACA_CRYPTO_MAX_STOP_LOSS_PCT", 0.03)
