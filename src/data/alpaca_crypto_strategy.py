@@ -108,6 +108,21 @@ SHORT_MA_MINUTES = _env_int("ALPACA_CRYPTO_SHORT_MA_MINUTES", 15)
 TAKE_PROFIT_PCT = _env_float("ALPACA_CRYPTO_TAKE_PROFIT_PCT", 0.01)
 STOP_LOSS_PCT = _env_float("ALPACA_CRYPTO_STOP_LOSS_PCT", 0.008)
 MAX_HOLD_MINUTES = _env_int("ALPACA_CRYPTO_MAX_HOLD_MINUTES", 120)
+# Real, confirmed finding from reviewing actual trade history: a position
+# that moved a literal +0.001% over its full 120-minute hold still netted a
+# real -$59 to fees alone -- the round-trip fee is paid whether or not the
+# position ever developed. Same underlying pattern perps_strategy.py found
+# and fixed with its own identical STALE_POSITION_CHECK_FRACTION (see that
+# module's comment for the full rationale) -- a position that hasn't
+# captured a meaningful fraction of its own take-profit distance by the
+# halfway point of max_hold_time is unlikely to still develop into one by
+# the full timeout, so this frees the slot early instead of paying the same
+# fee for zero informational value. Deliberately a DIFFERENT lever than
+# TAKE_PROFIT_VOL_MULTIPLE/STOP_LOSS_VOL_MULTIPLE above: this doesn't change
+# how far a position is allowed to move, only how long the bot waits for one
+# that isn't developing at all.
+STALE_POSITION_CHECK_FRACTION = _env_float("ALPACA_CRYPTO_STALE_POSITION_CHECK_FRACTION", 0.5)
+STALE_POSITION_MAX_PROGRESS_FRACTION = _env_float("ALPACA_CRYPTO_STALE_POSITION_MAX_PROGRESS_FRACTION", 0.25)
 
 MODEL_CONFIDENCE_MIN = _env_float("ALPACA_CRYPTO_MODEL_CONFIDENCE_MIN", 0.55)
 
@@ -317,6 +332,16 @@ def decide_exit(
     opened_at = dt.datetime.fromisoformat(position["opened_at"])
     now = now if now is not None else dt.datetime.now(dt.timezone.utc)
     held_minutes = (now - opened_at).total_seconds() / 60.0
+    # Stale/flat position early exit -- see STALE_POSITION_CHECK_FRACTION's
+    # own comment. Uses abs(change_pct) deliberately: this targets
+    # positions that haven't moved meaningfully in EITHER direction, not
+    # ones that are simply losing (a real, distinct case already owned by
+    # stop_loss above) -- a position sitting at -0.5% with a -0.8% stop is a
+    # normal, developing loser that should be left to either recover or
+    # hit its real stop, not cut early by a second, competing mechanism.
+    if held_minutes >= MAX_HOLD_MINUTES * STALE_POSITION_CHECK_FRACTION and take_profit_pct > 0:
+        if abs(change_pct) < take_profit_pct * STALE_POSITION_MAX_PROGRESS_FRACTION:
+            return True, f"stale_position ({held_minutes:.0f}min, {change_pct:+.3%}, flat)"
     if held_minutes >= MAX_HOLD_MINUTES:
         return True, f"max_hold_time ({held_minutes:.0f}min, {change_pct:+.3%})"
     return False, f"holding ({change_pct:+.3%}, {held_minutes:.0f}min)"

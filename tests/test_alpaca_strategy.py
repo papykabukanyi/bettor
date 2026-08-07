@@ -108,9 +108,36 @@ def test_decide_exit_stop_loss():
 
 
 def test_decide_exit_max_hold_time():
+    # +0.6% of TAKE_PROFIT_PCT: clear of the stale_position band (25% of
+    # target) but short of take_profit itself, so this isolates the
+    # max_hold_time path specifically. See test_decide_exit_stale_position*
+    # below for the dedicated stale-position tests.
     pos = _position(entry_price=100.0, minutes_ago=strat.MAX_HOLD_MINUTES + 1)
-    should_exit, reason = strat.decide_exit(pos, 100.0)  # flat price -- neither TP nor SL
+    should_exit, reason = strat.decide_exit(pos, 100.0 * (1 + strat.TAKE_PROFIT_PCT * 0.6))
     assert should_exit and "max_hold_time" in reason
+
+
+def test_decide_exit_stale_position_fires_for_flat_position_past_halfway():
+    halfway_plus = int(strat.MAX_HOLD_MINUTES * strat.STALE_POSITION_CHECK_FRACTION) + 1
+    pos = _position(entry_price=100.0, minutes_ago=halfway_plus)
+    should_exit, reason = strat.decide_exit(pos, 100.0 * 1.001)
+    assert should_exit and "stale_position" in reason
+
+
+def test_decide_exit_stale_position_does_not_fire_before_halfway():
+    before_halfway = max(1, int(strat.MAX_HOLD_MINUTES * strat.STALE_POSITION_CHECK_FRACTION) - 5)
+    pos = _position(entry_price=100.0, minutes_ago=before_halfway)
+    should_exit, reason = strat.decide_exit(pos, 100.0 * 1.001)
+    assert not should_exit
+    assert "holding" in reason
+
+
+def test_decide_exit_stale_position_does_not_intercept_a_real_developing_loss():
+    halfway_plus = int(strat.MAX_HOLD_MINUTES * strat.STALE_POSITION_CHECK_FRACTION) + 1
+    pos = _position(entry_price=100.0, minutes_ago=halfway_plus)
+    should_exit, reason = strat.decide_exit(pos, 100.0 * (1 - strat.STOP_LOSS_PCT * 0.5))
+    assert not should_exit
+    assert "holding" in reason
 
 
 def test_decide_exit_holds_when_nothing_triggers():

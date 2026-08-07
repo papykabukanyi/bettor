@@ -85,6 +85,19 @@ MODEL_CONFIDENCE_MIN = _env_float("ALPACA_OPTIONS_MODEL_CONFIDENCE_MIN", 0.58)
 TAKE_PROFIT_PCT = _env_float("ALPACA_OPTIONS_TAKE_PROFIT_PCT", 0.30)
 STOP_LOSS_PCT = _env_float("ALPACA_OPTIONS_STOP_LOSS_PCT", 0.20)
 MAX_HOLD_MINUTES = _env_int("ALPACA_OPTIONS_MAX_HOLD_MINUTES", 180)
+# Same stale/flat position early exit perps_strategy.py, alpaca_strategy.py,
+# and alpaca_crypto_strategy.py all carry (see any of those modules' own
+# comment for the full rationale) -- a contract that hasn't captured a
+# meaningful fraction of its own take-profit distance by the halfway point
+# of max_hold_time is unlikely to still develop into one by the full
+# timeout, and every minute held is real theta decay against a long
+# premium position, unlike the underlying-only exposure the other three
+# strategies carry. Ported here proactively for consistency, even without
+# its own confirmed live finding yet (options' near-zero trade volume so
+# far means there isn't enough real history to have surfaced one) -- the
+# same fee/decay-drag risk class clearly applies.
+STALE_POSITION_CHECK_FRACTION = _env_float("ALPACA_OPTIONS_STALE_POSITION_CHECK_FRACTION", 0.5)
+STALE_POSITION_MAX_PROGRESS_FRACTION = _env_float("ALPACA_OPTIONS_STALE_POSITION_MAX_PROGRESS_FRACTION", 0.25)
 # Force-close a held contract once fewer than this many days remain before
 # expiration, regardless of TP/SL/max-hold -- avoids assignment risk and a
 # contract decaying to worthless for reasons unrelated to this strategy's
@@ -224,6 +237,16 @@ def decide_exit(
 
     opened_at = dt.datetime.fromisoformat(position["opened_at"])
     held_minutes = (now - opened_at).total_seconds() / 60.0
+    # Stale/flat position early exit -- see STALE_POSITION_CHECK_FRACTION's
+    # own comment. Uses abs(change_pct) deliberately: this targets
+    # contracts that haven't moved meaningfully in EITHER direction, not
+    # ones that are simply losing (a real, distinct case already owned by
+    # stop_loss above) -- a contract sitting mid-way toward its real stop
+    # is a normal, developing loser that should be left to either recover
+    # or hit its real stop, not cut early by a second, competing mechanism.
+    if held_minutes >= MAX_HOLD_MINUTES * STALE_POSITION_CHECK_FRACTION and TAKE_PROFIT_PCT > 0:
+        if abs(change_pct) < TAKE_PROFIT_PCT * STALE_POSITION_MAX_PROGRESS_FRACTION:
+            return True, f"stale_position ({held_minutes:.0f}min, {change_pct:+.3%}, flat)"
     if held_minutes >= MAX_HOLD_MINUTES:
         return True, f"max_hold_time ({held_minutes:.0f}min, {change_pct:+.3%})"
     return False, f"holding ({change_pct:+.3%}, {held_minutes:.0f}min)"

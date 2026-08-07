@@ -76,6 +76,19 @@ SHORT_MA_MINUTES = _env_int("ALPACA_SHORT_MA_MINUTES", 15)
 TAKE_PROFIT_PCT = _env_float("ALPACA_TAKE_PROFIT_PCT", 0.01)
 STOP_LOSS_PCT = _env_float("ALPACA_STOP_LOSS_PCT", 0.008)
 MAX_HOLD_MINUTES = _env_int("ALPACA_MAX_HOLD_MINUTES", 120)
+# Same stale/flat position early exit perps_strategy.py and
+# alpaca_crypto_strategy.py both carry (see either module's own comment for
+# the full rationale) -- a position that hasn't captured a meaningful
+# fraction of its own take-profit distance by the halfway point of
+# max_hold_time is unlikely to still develop into one by the full timeout,
+# so this frees the slot early instead of tying up capital for zero
+# informational value. Ported here proactively for consistency, even though
+# stocks' own bracket-order TP/SL already caps downside/upside natively --
+# this loop's job (see manage_open_positions's own docstring) is exactly the
+# max_hold_time-style forced exit that Alpaca's bracket order has no native
+# concept of, and stale_position is that same class of forced exit.
+STALE_POSITION_CHECK_FRACTION = _env_float("ALPACA_STALE_POSITION_CHECK_FRACTION", 0.5)
+STALE_POSITION_MAX_PROGRESS_FRACTION = _env_float("ALPACA_STALE_POSITION_MAX_PROGRESS_FRACTION", 0.25)
 
 MODEL_CONFIDENCE_MIN = _env_float("ALPACA_MODEL_CONFIDENCE_MIN", 0.55)
 
@@ -164,6 +177,17 @@ def decide_exit(
     opened_at = dt.datetime.fromisoformat(position["opened_at"])
     now = now if now is not None else dt.datetime.now(dt.timezone.utc)
     held_minutes = (now - opened_at).total_seconds() / 60.0
+    # Stale/flat position early exit -- see STALE_POSITION_CHECK_FRACTION's
+    # own comment. Uses abs(change_pct) deliberately: this targets
+    # positions that haven't moved meaningfully in EITHER direction, not
+    # ones that are simply losing (a real, distinct case already owned by
+    # the bracket order's own stop-loss) -- a position sitting mid-way
+    # toward its real stop is a normal, developing loser that should be
+    # left to either recover or hit its real stop, not cut early by a
+    # second, competing mechanism.
+    if held_minutes >= MAX_HOLD_MINUTES * STALE_POSITION_CHECK_FRACTION and TAKE_PROFIT_PCT > 0:
+        if abs(change_pct) < TAKE_PROFIT_PCT * STALE_POSITION_MAX_PROGRESS_FRACTION:
+            return True, f"stale_position ({held_minutes:.0f}min, {change_pct:+.3%}, flat)"
     if held_minutes >= MAX_HOLD_MINUTES:
         return True, f"max_hold_time ({held_minutes:.0f}min, {change_pct:+.3%})"
     return False, f"holding ({change_pct:+.3%}, {held_minutes:.0f}min)"
