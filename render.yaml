@@ -19,7 +19,7 @@ services:
   - type: web
     name: bettor-dashboard
     env: python
-    plan: free
+    plan: standard  # migrated off the 512Mi free tier to a paid 2GB standard plan (new Render account)
     buildCommand: pip install -r requirements.txt
     # --workers 1 is deliberate: this app runs its own in-process background
     # scheduler (APScheduler) for the perps data-collect / train / trading
@@ -99,7 +99,7 @@ services:
   - type: web
     name: bettor-schwab
     env: python
-    plan: free
+    plan: standard  # migrated off the 512Mi free tier to a paid 2GB standard plan (new Render account)
     buildCommand: pip install -r requirements.txt
     # Same single-worker reasoning as bettor-dashboard: this process places
     # real Alpaca orders via its own in-process scheduler, so more than one
@@ -152,7 +152,7 @@ services:
   - type: web
     name: bettor-alpaca-crypto
     env: python
-    plan: free
+    plan: standard  # migrated off the 512Mi free tier to a paid 2GB standard plan (new Render account)
     buildCommand: pip install -r requirements.txt
     # Same single-worker reasoning as every other service here: this
     # process places real Alpaca crypto orders via its own in-process
@@ -195,7 +195,7 @@ services:
   - type: web
     name: bettor-alpaca-options
     env: python
-    plan: free
+    plan: standard  # migrated off the 512Mi free tier to a paid 2GB standard plan (new Render account)
     buildCommand: pip install -r requirements.txt
     # Same single-worker reasoning as every other service here: this
     # process places real Alpaca options orders via its own in-process
