@@ -556,6 +556,64 @@ def test_manage_open_positions_live_mode_places_a_plain_market_sell(monkeypatch)
     assert captured["qty"] == 1
 
 
+def test_manage_open_positions_does_not_book_a_phantom_trade_when_the_close_order_has_not_filled_yet(monkeypatch):
+    """Same real-fill-verification discipline as alpaca_strategy.py's own
+    fix (a real, confirmed incident there: booking P&L immediately after
+    SUBMITTING a close order produced duplicate trade_log entries for the
+    same real position across several fast_check cycles before the order
+    actually filled). get_position must be checked AGAIN after placing the
+    close order -- if the contract is still fully held, no trade should be
+    booked and the position must stay open for the next cycle."""
+    monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", True)
+    strat._save_state({  # noqa: SLF001
+        "positions": [{
+            "symbol": "AAPL240223C00195000", "underlying_symbol": "AAPL", "entry_price": 5.0, "count": 1,
+            "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(), "order_id": "order-1",
+            "expiration_date": (dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=30)).date().isoformat(),
+        }],
+        "trade_log": [], "realized_pnl_by_date": {},
+    })
+    take_profit_price = 5.0 * (1 + strat.TAKE_PROFIT_PCT + 0.001)
+    monkeypatch.setattr(alpaca_client, "get_option_latest_quote", lambda symbol: {"ap": take_profit_price, "bp": take_profit_price})
+    monkeypatch.setattr(alpaca_client, "build_option_order", lambda **kw: {"symbol": kw["symbol"]})
+    monkeypatch.setattr(alpaca_client, "place_order", lambda spec: "order-2")
+    # The close order was submitted but never filled -- still fully held.
+    monkeypatch.setattr(alpaca_client, "get_position", lambda symbol: {"symbol": symbol, "qty": "1"})
+
+    result = strat.manage_open_positions()
+    assert result["action"] == "no_change"
+    assert result["closed"] == []
+    assert result["checks"][0]["error"] == "exit_order_did_not_fill"
+    state = strat._load_state()  # noqa: SLF001
+    assert len(state["positions"]) == 1  # still open, not silently dropped
+    assert state["trade_log"] == []  # no phantom trade booked
+
+
+def test_manage_open_positions_books_only_the_actually_filled_quantity_on_a_partial_fill(monkeypatch):
+    monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", True)
+    strat._save_state({  # noqa: SLF001
+        "positions": [{
+            "symbol": "AAPL240223C00195000", "underlying_symbol": "AAPL", "entry_price": 5.0, "count": 10,
+            "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(), "order_id": "order-1",
+            "expiration_date": (dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=30)).date().isoformat(),
+        }],
+        "trade_log": [], "realized_pnl_by_date": {},
+    })
+    take_profit_price = 5.0 * (1 + strat.TAKE_PROFIT_PCT + 0.001)
+    monkeypatch.setattr(alpaca_client, "get_option_latest_quote", lambda symbol: {"ap": take_profit_price, "bp": take_profit_price})
+    monkeypatch.setattr(alpaca_client, "build_option_order", lambda **kw: {"symbol": kw["symbol"]})
+    monkeypatch.setattr(alpaca_client, "place_order", lambda spec: "order-2")
+    # Only 4 of the 10 contracts actually filled.
+    monkeypatch.setattr(alpaca_client, "get_position", lambda symbol: {"symbol": symbol, "qty": "6"})
+
+    result = strat.manage_open_positions()
+    assert result["action"] == "closed"
+    assert result["closed"][0]["count"] == 4.0
+    state = strat._load_state()  # noqa: SLF001
+    assert len(state["positions"]) == 1  # remainder kept open, not dropped
+    assert state["positions"][0]["count"] == 6.0
+
+
 def test_manage_open_positions_force_closes_near_expiration(monkeypatch):
     strat._save_state({  # noqa: SLF001
         "positions": [{

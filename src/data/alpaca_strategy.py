@@ -736,6 +736,7 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                 checks.append({"symbol": symbol, "ok": True, "exit_check": reason})
                 continue
 
+            closed_count = float(position["count"])
             if not effective_dry_run:
                 from data import alpaca_client
                 from data.alpaca_data import get_market_session
@@ -771,12 +772,39 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                             alpaca_client.place_order(order_spec)
                     except Exception as exc:
                         logger.warning("[alpaca_strategy] close_position failed for %s (may have already closed): %s", symbol, exc)
+                    # A submitted close order is not a confirmed fill -- real,
+                    # confirmed production incident: booking P&L here
+                    # unconditionally produced 8 duplicate "closed" trade_log
+                    # entries for the SAME real META position (a stop_loss
+                    # that took several 20s fast_check cycles to actually
+                    # fill) -- each re-discovered as "untracked" by
+                    # reconciliation next cycle and re-booked, ~$6,400 of
+                    # phantom recorded loss stacked on top of the one real
+                    # close. Same real-fill-verification discipline already
+                    # proven in perps_strategy.py/alpaca_crypto_strategy.py's
+                    # own exit paths: re-check the real remaining quantity
+                    # right after, and only book what actually closed.
+                    try:
+                        pos_after = alpaca_client.get_position(symbol)
+                        remaining_qty = float(pos_after["qty"]) if pos_after else 0.0
+                        closed_count = round(max(0.0, float(position["count"]) - remaining_qty), 6)
+                    except Exception as exc:
+                        logger.warning(
+                            "[alpaca_strategy] could not verify exit fill for %s after placing order -- assuming full close: %s",
+                            symbol, exc,
+                        )
+                    if closed_count <= 0:
+                        # Nothing actually filled yet -- keep monitoring the
+                        # still-real position next cycle rather than booking
+                        # a trade that never happened.
+                        checks.append({"symbol": symbol, "ok": False, "error": "exit_order_did_not_fill"})
+                        continue
                 elif "take_profit" in reason:
                     current_price = position["take_profit_price"]
                 elif "stop_loss" in reason:
                     current_price = position["stop_loss_price"]
 
-            gross = round((current_price - float(position["entry_price"])) * float(position["count"]), 6)
+            gross = round((current_price - float(position["entry_price"])) * closed_count, 6)
             opened_at = position.get("opened_at")
             closed_at = dt.datetime.now(dt.timezone.utc).isoformat()
             hold_minutes = None
@@ -794,7 +822,7 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                 trade = {
                     "closed_at": closed_at, "opened_at": opened_at, "hold_minutes": hold_minutes,
                     "symbol": symbol, "entry_price": position["entry_price"], "exit_price": current_price,
-                    "count": position["count"], "realized_pnl_usd": gross, "reason": reason,
+                    "count": closed_count, "realized_pnl_usd": gross, "reason": reason,
                     "dry_run": effective_dry_run,
                     # Entry-time context copied from the position -- see
                     # scan_and_enter's own comment on why.
@@ -806,7 +834,16 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                 trade_log.append(trade)
                 if len(trade_log) > MAX_TRADE_LOG_ENTRIES:
                     del trade_log[: len(trade_log) - MAX_TRADE_LOG_ENTRIES]
-                state["positions"] = [p for p in (state.get("positions") or []) if p["symbol"] != symbol]
+                if closed_count < float(position["count"]) - 1e-6:
+                    # Partial fill -- the remainder is still genuinely open,
+                    # keep monitoring it rather than dropping it.
+                    remaining_qty = round(float(position["count"]) - closed_count, 6)
+                    state["positions"] = [
+                        {**p, "count": remaining_qty} if p["symbol"] == symbol else p
+                        for p in (state.get("positions") or [])
+                    ]
+                else:
+                    state["positions"] = [p for p in (state.get("positions") or []) if p["symbol"] != symbol]
                 _save_state(state, push_durable=True)
             remaining_symbols.discard(symbol)
             closed.append(trade)
