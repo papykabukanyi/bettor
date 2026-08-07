@@ -265,55 +265,49 @@ def test_hourly_status_never_raises_on_api_failure(monkeypatch):
     assert threads_post.post_hourly_status(positions=[]) is False
 
 
-def _closes(n=60, base=100.0):
-    return [base + (i % 7) * 0.3 - 1.0 for i in range(n)]
+def _candles(n=60, base=100.0):
+    candles = []
+    price = base
+    for i in range(n):
+        o = price
+        price += (i % 7) * 0.3 - 1.0
+        c = price
+        candles.append({"ts": i, "open": o, "high": max(o, c) + 0.2, "low": min(o, c) - 0.2, "close": c})
+    return candles
 
 
-def test_maybe_post_trade_entry_chart_skips_when_the_random_roll_misses(monkeypatch):
-    monkeypatch.setattr(threads_post, "CHART_SNAPSHOT_PROBABILITY", 0.0)
-    result = threads_post.maybe_post_trade_entry_chart(
-        ticker="AAPL", market="stocks", closes=_closes(), entry_price=100.0,
-        take_profit_price=101.0, stop_loss_price=99.0, dry_run=False,
-    )
-    assert result is False
-
-
-def test_maybe_post_trade_entry_chart_respects_the_disable_flag(monkeypatch):
+def test_post_trade_entry_chart_respects_the_disable_flag(monkeypatch):
     monkeypatch.setattr(threads_post, "THREADS_POST_ENABLED", False)
-    monkeypatch.setattr(threads_post, "CHART_SNAPSHOT_PROBABILITY", 1.0)
-    result = threads_post.maybe_post_trade_entry_chart(
-        ticker="AAPL", market="stocks", closes=_closes(), entry_price=100.0,
+    result = threads_post.post_trade_entry_chart(
+        ticker="AAPL", market="stocks", candles=_candles(), entry_price=100.0,
         take_profit_price=101.0, stop_loss_price=99.0, dry_run=False,
     )
     assert result is False
 
 
-def test_maybe_post_trade_entry_chart_skips_without_enough_price_history(monkeypatch):
-    monkeypatch.setattr(threads_post, "CHART_SNAPSHOT_PROBABILITY", 1.0)
-    result = threads_post.maybe_post_trade_entry_chart(
-        ticker="AAPL", market="stocks", closes=[100.0, 100.5], entry_price=100.5,
+def test_post_trade_entry_chart_skips_without_enough_price_history():
+    result = threads_post.post_trade_entry_chart(
+        ticker="AAPL", market="stocks", candles=_candles()[:2], entry_price=100.5,
         take_profit_price=101.0, stop_loss_price=99.0, dry_run=False,
     )
     assert result is False
 
 
-def test_maybe_post_trade_entry_chart_skips_without_a_known_public_url(monkeypatch, tmp_path):
+def test_post_trade_entry_chart_skips_without_a_known_public_url(monkeypatch, tmp_path):
     from data import chart_snapshot
 
-    monkeypatch.setattr(threads_post, "CHART_SNAPSHOT_PROBABILITY", 1.0)
     monkeypatch.setattr(chart_snapshot, "CHARTS_DIR", tmp_path / "charts")
     monkeypatch.delenv("RENDER_EXTERNAL_URL", raising=False)
-    result = threads_post.maybe_post_trade_entry_chart(
-        ticker="AAPL", market="stocks", closes=_closes(), entry_price=100.0,
+    result = threads_post.post_trade_entry_chart(
+        ticker="AAPL", market="stocks", candles=_candles(), entry_price=100.0,
         take_profit_price=101.0, stop_loss_price=99.0, dry_run=False,
     )
     assert result is False
 
 
-def test_maybe_post_trade_entry_chart_posts_the_image_when_everything_lines_up(monkeypatch, tmp_path):
+def test_post_trade_entry_chart_posts_the_image_when_everything_lines_up(monkeypatch, tmp_path):
     from data import chart_snapshot
 
-    monkeypatch.setattr(threads_post, "CHART_SNAPSHOT_PROBABILITY", 1.0)
     monkeypatch.setattr(chart_snapshot, "CHARTS_DIR", tmp_path / "charts")
     monkeypatch.setenv("RENDER_EXTERNAL_URL", "https://bettor-schwab.onrender.com")
 
@@ -323,9 +317,9 @@ def test_maybe_post_trade_entry_chart_posts_the_image_when_everything_lines_up(m
         lambda image_url, text="": captured.update(image_url=image_url, text=text) or "post-1",
     )
 
-    result = threads_post.maybe_post_trade_entry_chart(
-        ticker="AAPL", market="stocks", closes=_closes(), entry_price=100.0,
-        take_profit_price=101.0, stop_loss_price=99.0, side="long", dry_run=False,
+    result = threads_post.post_trade_entry_chart(
+        ticker="AAPL", market="stocks", candles=_candles(), entry_price=100.0,
+        take_profit_price=101.0, stop_loss_price=99.0, entry_index=10, side="long", dry_run=False,
     )
     assert result is True
     assert captured["image_url"].startswith("https://bettor-schwab.onrender.com/chart/")
@@ -334,10 +328,9 @@ def test_maybe_post_trade_entry_chart_posts_the_image_when_everything_lines_up(m
     assert "#StockMarket" in captured["text"]
 
 
-def test_maybe_post_trade_entry_chart_never_raises_on_api_failure(monkeypatch, tmp_path):
+def test_post_trade_entry_chart_never_raises_on_api_failure(monkeypatch, tmp_path):
     from data import chart_snapshot
 
-    monkeypatch.setattr(threads_post, "CHART_SNAPSHOT_PROBABILITY", 1.0)
     monkeypatch.setattr(chart_snapshot, "CHARTS_DIR", tmp_path / "charts")
     monkeypatch.setenv("RENDER_EXTERNAL_URL", "https://bettor-schwab.onrender.com")
 
@@ -345,9 +338,94 @@ def test_maybe_post_trade_entry_chart_never_raises_on_api_failure(monkeypatch, t
         raise RuntimeError("simulated Threads API failure")
 
     monkeypatch.setattr(threads_post.threads_client, "create_and_publish_image_post", raise_error)
-    result = threads_post.maybe_post_trade_entry_chart(
-        ticker="AAPL", market="stocks", closes=_closes(), entry_price=100.0,
+    result = threads_post.post_trade_entry_chart(
+        ticker="AAPL", market="stocks", candles=_candles(), entry_price=100.0,
         take_profit_price=101.0, stop_loss_price=99.0, dry_run=False,
+    )
+    assert result is False
+
+
+def test_post_trade_exit_chart_respects_the_disable_flag(monkeypatch):
+    monkeypatch.setattr(threads_post, "THREADS_POST_ENABLED", False)
+    result = threads_post.post_trade_exit_chart(
+        ticker="AAPL", market="stocks", candles=_candles(), entry_price=100.0,
+        exit_price=101.0, pnl_usd=5.0, dry_run=False,
+    )
+    assert result is False
+
+
+def test_post_trade_exit_chart_posts_the_image_with_win_loss_in_the_caption(monkeypatch, tmp_path):
+    from data import chart_snapshot
+
+    monkeypatch.setattr(chart_snapshot, "CHARTS_DIR", tmp_path / "charts")
+    monkeypatch.setenv("RENDER_EXTERNAL_URL", "https://bettor-schwab.onrender.com")
+
+    captured = {}
+    monkeypatch.setattr(
+        threads_post.threads_client, "create_and_publish_image_post",
+        lambda image_url, text="": captured.update(image_url=image_url, text=text) or "post-1",
+    )
+
+    result = threads_post.post_trade_exit_chart(
+        ticker="AAPL", market="stocks", candles=_candles(), entry_price=100.0, exit_price=104.0,
+        entry_index=5, exit_index=50, side="long", pnl_usd=12.5, dry_run=False,
+    )
+    assert result is True
+    assert "WIN" in captured["text"]
+    assert "+12.50" in captured["text"]
+
+
+def test_post_trade_exit_chart_reports_loss_in_the_caption(monkeypatch, tmp_path):
+    from data import chart_snapshot
+
+    monkeypatch.setattr(chart_snapshot, "CHARTS_DIR", tmp_path / "charts")
+    monkeypatch.setenv("RENDER_EXTERNAL_URL", "https://bettor-schwab.onrender.com")
+
+    captured = {}
+    monkeypatch.setattr(
+        threads_post.threads_client, "create_and_publish_image_post",
+        lambda image_url, text="": captured.update(image_url=image_url, text=text) or "post-1",
+    )
+
+    result = threads_post.post_trade_exit_chart(
+        ticker="AAPL", market="stocks", candles=_candles(), entry_price=100.0, exit_price=97.0,
+        side="long", pnl_usd=-3.0, dry_run=False,
+    )
+    assert result is True
+    assert "LOSS" in captured["text"]
+    assert "-3.00" in captured["text"]
+
+
+def test_post_trade_exit_chart_supports_no_price_levels_for_options(monkeypatch, tmp_path):
+    """options posts an underlying-price chart with no entry/exit price
+    reference lines (a different scale than the option's own premium) --
+    just index markers and a clarifying subtitle."""
+    from data import chart_snapshot
+
+    monkeypatch.setattr(chart_snapshot, "CHARTS_DIR", tmp_path / "charts")
+    monkeypatch.setenv("RENDER_EXTERNAL_URL", "https://bettor-schwab.onrender.com")
+    monkeypatch.setattr(threads_post.threads_client, "create_and_publish_image_post", lambda url, text="": "post-1")
+
+    result = threads_post.post_trade_exit_chart(
+        ticker="AAPL260116C00150000", market="options", candles=_candles(), entry_index=5, exit_index=40,
+        side="long", pnl_usd=-8.0, dry_run=False, subtitle="Underlying price action (option premium not charted separately)",
+    )
+    assert result is True
+
+
+def test_post_trade_exit_chart_never_raises_on_api_failure(monkeypatch, tmp_path):
+    from data import chart_snapshot
+
+    monkeypatch.setattr(chart_snapshot, "CHARTS_DIR", tmp_path / "charts")
+    monkeypatch.setenv("RENDER_EXTERNAL_URL", "https://bettor-schwab.onrender.com")
+
+    def raise_error(image_url, text=""):
+        raise RuntimeError("simulated Threads API failure")
+
+    monkeypatch.setattr(threads_post.threads_client, "create_and_publish_image_post", raise_error)
+    result = threads_post.post_trade_exit_chart(
+        ticker="AAPL", market="stocks", candles=_candles(), entry_price=100.0, exit_price=99.0,
+        pnl_usd=-1.0, dry_run=False,
     )
     assert result is False
 

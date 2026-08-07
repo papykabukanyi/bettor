@@ -591,6 +591,165 @@ def test_manage_open_positions_still_closes_the_position_even_if_threads_post_ra
     assert len(result["closed"]) == 1
 
 
+def _one_min_df(n=30, base_ts=None):
+    import pandas as pd
+    base_ts = base_ts or int(dt.datetime.now(dt.timezone.utc).timestamp()) - n * 60
+    rows = []
+    price = 50.0
+    for i in range(n):
+        o = price
+        price += 0.05
+        rows.append({"ts": base_ts + i * 60, "open": o, "high": max(o, price) + 0.02, "low": min(o, price) - 0.02, "close": price})
+    return pd.DataFrame(rows)
+
+
+def test_candles_as_dicts_converts_a_dataframe_to_plain_dicts():
+    df = _one_min_df(5)
+    dicts = strat._candles_as_dicts(df)  # noqa: SLF001
+    assert len(dicts) == 5
+    assert set(dicts[0].keys()) == {"ts", "open", "high", "low", "close"}
+
+
+def test_candles_as_dicts_handles_an_empty_dataframe():
+    import pandas as pd
+    assert strat._candles_as_dicts(pd.DataFrame()) == []  # noqa: SLF001
+
+
+def test_index_for_ts_finds_the_closest_candle():
+    df = _one_min_df(10, base_ts=1000)
+    idx = strat._index_for_ts(df, dt.datetime.fromtimestamp(1000 + 3 * 60, dt.timezone.utc).isoformat())  # noqa: SLF001
+    assert idx == 3
+
+
+def test_index_for_ts_returns_none_when_target_is_far_outside_the_window():
+    df = _one_min_df(10, base_ts=1_000_000)
+    idx = strat._index_for_ts(df, dt.datetime.fromtimestamp(1, dt.timezone.utc).isoformat())  # noqa: SLF001
+    assert idx is None
+
+
+def test_index_for_ts_returns_none_without_a_timestamp():
+    df = _one_min_df(10)
+    assert strat._index_for_ts(df, None) is None  # noqa: SLF001
+
+
+def test_manage_open_positions_posts_a_candlestick_exit_chart_on_close(monkeypatch, tmp_path):
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "state.json")
+    strat._save_state({
+        "positions": [_position(ticker="KXETHPERP", entry_price=50.0, count=10.0, side="long")],
+        "realized_pnl_by_date": {}, "trade_log": [], "daily_reference_balance": {},
+    })
+    monkeypatch.setattr(strat, "get_margin_market", lambda ticker: _market_response(price=50.0 * 1.05))
+    monkeypatch.setattr(strat, "fetch_candle_frames", lambda ticker: (_one_min_df(), _one_min_df()))
+
+    posted = {}
+    monkeypatch.setattr(strat.threads_post, "post_trade_exit_chart", lambda **kw: posted.update(kw) or True)
+
+    result = strat.manage_open_positions(dry_run=True)
+    assert result["action"] == "closed"
+    assert posted["ticker"] == "KXETHPERP"
+    assert posted["market"] == "perps"
+    assert len(posted["candles"]) == 30
+    assert posted["pnl_usd"] == result["closed"][0]["realized_pnl_usd"]
+
+
+def test_manage_open_positions_still_closes_if_exit_chart_post_raises(monkeypatch, tmp_path):
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "state.json")
+    strat._save_state({
+        "positions": [_position(ticker="KXETHPERP", entry_price=50.0, count=10.0, side="long")],
+        "realized_pnl_by_date": {}, "trade_log": [], "daily_reference_balance": {},
+    })
+    monkeypatch.setattr(strat, "get_margin_market", lambda ticker: _market_response(price=50.0 * 1.05))
+    monkeypatch.setattr(strat, "fetch_candle_frames", lambda ticker: (_one_min_df(), _one_min_df()))
+
+    def raise_error(**kwargs):
+        raise RuntimeError("simulated Threads API outage")
+
+    monkeypatch.setattr(strat.threads_post, "post_trade_exit_chart", raise_error)
+    result = strat.manage_open_positions(dry_run=True)
+    assert result["action"] == "closed"
+
+
+def test_maybe_run_batch_trade_analysis_skips_below_batch_size(monkeypatch, tmp_path):
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "state.json")
+    strat._save_state({
+        "positions": [], "realized_pnl_by_date": {}, "daily_reference_balance": {},
+        "trade_log": [{"ticker": "KXBTCPERP", "realized_pnl_usd": 1.0, "dry_run": False}] * 3,
+    })
+    called = {"n": 0}
+    monkeypatch.setattr(strat.threads_post, "post_trade_analysis_summary", lambda *a, **kw: called.update(n=called["n"] + 1))
+    strat._maybe_run_batch_trade_analysis()  # noqa: SLF001
+    assert called["n"] == 0
+
+
+def test_maybe_run_batch_trade_analysis_runs_at_the_batch_boundary_and_posts(monkeypatch, tmp_path):
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "state.json")
+    trades = [
+        {
+            "ticker": "KXBTCPERP", "side": "long", "realized_pnl_usd": 1.0, "dry_run": False,
+            "reason": "take_profit (+2%)", "entry_price": 50.0, "exit_price": 51.0,
+            "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+            "closed_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        }
+        for _ in range(5)
+    ]
+    strat._save_state({
+        "positions": [], "realized_pnl_by_date": {}, "daily_reference_balance": {}, "trade_log": trades,
+    })
+    monkeypatch.setattr(strat, "fetch_candle_frames", lambda ticker: (_one_min_df(), _one_min_df()))
+    posted = {}
+    monkeypatch.setattr(strat.threads_post, "post_trade_analysis_summary", lambda text, **kw: posted.update(text=text, **kw) or True)
+
+    strat._maybe_run_batch_trade_analysis()  # noqa: SLF001
+    assert posted["market"] == "perps"
+    assert "5" in posted["text"]  # trades_analyzed count shows up in the digest
+    state = strat._load_state()
+    assert state["last_batch_analysis_trade_count"] == 5
+
+
+def test_maybe_run_batch_trade_analysis_does_not_rerun_for_the_same_trades(monkeypatch, tmp_path):
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "state.json")
+    trades = [{"ticker": "KXBTCPERP", "realized_pnl_usd": 1.0, "dry_run": False} for _ in range(5)]
+    strat._save_state({
+        "positions": [], "realized_pnl_by_date": {}, "daily_reference_balance": {},
+        "trade_log": trades, "last_batch_analysis_trade_count": 5,
+    })
+    called = {"n": 0}
+    monkeypatch.setattr(strat.threads_post, "post_trade_analysis_summary", lambda *a, **kw: called.update(n=called["n"] + 1))
+    strat._maybe_run_batch_trade_analysis()  # noqa: SLF001
+    assert called["n"] == 0
+
+
+def test_manage_open_positions_triggers_batch_analysis_on_close(monkeypatch, tmp_path):
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", True)
+    existing_trades = [
+        {"ticker": "KXBTCPERP", "realized_pnl_usd": 1.0, "dry_run": False} for _ in range(4)
+    ]
+    strat._save_state({
+        "positions": [_position(ticker="KXETHPERP", entry_price=50.0, count=10.0, side="long")],
+        "realized_pnl_by_date": {}, "daily_reference_balance": {}, "trade_log": existing_trades,
+    })
+    calls = {"n": 0}
+
+    def fake_positions():
+        calls["n"] += 1
+        count = "10.00" if calls["n"] == 1 else "0.00"
+        return {"positions": [_real_position("KXETHPERP", count, "50.0000")] if float(count) > 0 else []}
+
+    monkeypatch.setattr(strat, "get_margin_positions", fake_positions)
+    monkeypatch.setattr(strat, "get_margin_market", lambda ticker: _market_response(price=50.0 * 1.05))
+    monkeypatch.setattr(strat, "create_margin_order", lambda **kwargs: {"order": {"fill_count": str(kwargs["count"])}})
+    monkeypatch.setattr(strat, "fetch_candle_frames", lambda ticker: (_one_min_df(), _one_min_df()))
+
+    called = {"n": 0}
+    monkeypatch.setattr(strat.threads_post, "post_trade_analysis_summary", lambda *a, **kw: called.update(n=called["n"] + 1))
+
+    result = strat.manage_open_positions(dry_run=False)
+    assert result["action"] == "closed"
+    # 4 pre-existing real trades + 1 just closed real trade == 5 -> crosses the batch boundary.
+    assert called["n"] == 1
+
+
 def test_scan_and_enter_opens_short_with_an_ask_order(monkeypatch, tmp_path):
     """Opening a short must place an ASK order with reduce_only NOT set --
     this is a brand new position, not closing an existing long."""
@@ -1361,6 +1520,32 @@ def test_scan_and_enter_still_opens_the_real_position_even_if_threads_post_raise
     assert result["opened"][0]["action"] == "opened"
     state = strat._load_state()  # noqa: SLF001
     assert state["positions"][0]["count"] == 4.0
+
+
+def test_scan_and_enter_posts_a_candlestick_entry_chart(monkeypatch, tmp_path):
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", True)
+    monkeypatch.setattr(strat, "get_margin_market", lambda ticker: _market_response(price=2.0, leverage_estimate=6.0))
+    monkeypatch.setattr(strat, "_available_balance_usd", lambda: 10.0)
+    monkeypatch.setattr(
+        strat, "scan_for_entries",
+        lambda tickers=None, exclude=None, confidence_min=None: (
+            [{"ticker": "KXSOLPERP", "current_price": 2.0, "reason": "test dip", "volatility_30": 0.0006}], [],
+        ),
+    )
+    monkeypatch.setattr(strat, "create_margin_order", lambda **kwargs: {"order": {"fill_count": "4.00"}})
+    monkeypatch.setattr(strat, "get_margin_positions", lambda: {"positions": [_real_position("KXSOLPERP", "4.00", "1.9998")]})
+    monkeypatch.setattr(strat, "fetch_candle_frames", lambda ticker: (_one_min_df(base_ts=1000), _one_min_df()))
+
+    posted = {}
+    monkeypatch.setattr(strat.threads_post, "post_trade_entry_chart", lambda **kwargs: posted.update(kwargs) or True)
+
+    result = strat.scan_and_enter(dry_run=False)
+    assert result["opened"][0]["action"] == "opened"
+    assert posted["ticker"] == "KXSOLPERP"
+    assert posted["market"] == "perps"
+    assert len(posted["candles"]) == 30
+    assert posted["entry_index"] == 29  # most recent candle -- the fill just happened
 
 
 def test_scan_and_enter_merges_a_confirmed_fill_into_a_concurrently_adopted_position(monkeypatch, tmp_path):

@@ -129,6 +129,10 @@ def _minutes_from_session_edge() -> float:
 POSITION_SIZE_PCT = _env_float("ALPACA_OPTIONS_POSITION_SIZE_PCT", 0.20)
 MAX_CONCURRENT_POSITIONS = max(1, _env_int("ALPACA_OPTIONS_MAX_CONCURRENT_POSITIONS", 4))
 DAILY_LOSS_CAP_PCT = _env_float("ALPACA_OPTIONS_DAILY_LOSS_CAP_PCT", 0.10)
+# Same unbounded-growth guard perps_strategy.py already needed (a real,
+# confirmed OOM contributor there over weeks of live trading) -- keeps the
+# most recent entries, oldest-first trimmed.
+MAX_TRADE_LOG_ENTRIES = _env_int("ALPACA_OPTIONS_MAX_TRADE_LOG_ENTRIES", 2000)
 
 LIVE_TRADING_ENABLED = str(os.getenv("ALPACA_OPTIONS_LIVE_TRADING_ENABLED", "")).strip().lower() in {"1", "true", "yes"}
 
@@ -244,6 +248,93 @@ def compute_contract_qty(available_balance_usd: float, contract_price: float, *,
         return 0
     budget = max(0.0, available_balance_usd) * POSITION_SIZE_PCT
     return int(budget // cost_per_contract)
+
+
+def _entry_context(candidate: dict[str, Any]) -> dict[str, Any]:
+    """Entry-time model/technical context -- what the model actually saw at
+    decision time, so a post-trade analysis can ask "what led to this
+    win/loss" instead of only ever knowing how it ended. Same fields (by
+    name) perps_strategy.py already captures, so
+    alpaca_options_trade_analysis.py can mirror its logic."""
+    return {
+        "entry_probability_up": candidate.get("probability_up"),
+        "entry_model_direction": candidate.get("direction"),
+        "entry_reason": candidate.get("reason"),
+    }
+
+
+def _candles_as_dicts(df) -> list[dict[str, Any]]:
+    """Converts a fetch_recent_minute_bars-style DataFrame into the plain
+    list[dict] shape both chart_snapshot.generate_candlestick_chart and
+    alpaca_options_trade_analysis expect -- keeps those two modules
+    pandas-free."""
+    if df is None or df.empty:
+        return []
+    cols = [c for c in ("ts", "open", "high", "low", "close") if c in df.columns]
+    return df[cols].to_dict("records")
+
+
+def _index_for_ts(df, iso_ts: str | None) -> int | None:
+    """Which row of a fetch_recent_minute_bars-style DataFrame (of the
+    UNDERLYING -- see this module's own docstring on why options charts the
+    underlying, not the option's own premium) is closest to a given ISO
+    timestamp. None if there's no timestamp, no data, or the closest
+    candle is more than an hour away."""
+    if df is None or df.empty or not iso_ts:
+        return None
+    try:
+        target = dt.datetime.fromisoformat(str(iso_ts).replace("Z", "+00:00")).timestamp()
+    except (ValueError, TypeError):
+        return None
+    ts_list = list(df["ts"])
+    if not ts_list:
+        return None
+    best_idx, best_diff = 0, abs(ts_list[0] - target)
+    for i, ts in enumerate(ts_list):
+        diff = abs(ts - target)
+        if diff < best_diff:
+            best_idx, best_diff = i, diff
+    return best_idx if best_diff <= 3600 else None
+
+
+def _maybe_run_batch_trade_analysis() -> None:
+    """Every alpaca_options_trade_analysis.BATCH_SIZE newly-closed REAL
+    trades, studies that recent batch -- win/loss patterns and (underlying-
+    only, never premium-dollar) drift diagnostics -- and posts a Threads
+    snapshot. Called right after manage_open_positions closes trades,
+    outside _STATE_LOCK (same reasoning as every other Threads/network call
+    in this module). Best-effort: any failure here is logged and
+    swallowed, never allowed to affect trading."""
+    from data import alpaca_options_trade_analysis
+    from data import threads_post
+    from data.alpaca_data import fetch_recent_minute_bars
+
+    try:
+        with _STATE_LOCK:
+            state = _load_state()
+            trade_log = state.get("trade_log") or []
+            real_trades = [t for t in trade_log if not t.get("dry_run")]
+            last_count = int(state.get("last_batch_analysis_trade_count") or 0)
+            if len(real_trades) - last_count < alpaca_options_trade_analysis.BATCH_SIZE:
+                return
+            state["last_batch_analysis_trade_count"] = len(real_trades)
+            _save_state(state, push_durable=True)
+
+        recent = real_trades[-alpaca_options_trade_analysis.BATCH_SIZE:]
+        candles_by_underlying: dict[str, list[dict[str, Any]]] = {}
+        for underlying in {t.get("underlying_symbol") for t in recent if t.get("underlying_symbol")}:
+            try:
+                candles_by_underlying[underlying] = _candles_as_dicts(fetch_recent_minute_bars(underlying))
+            except Exception:
+                logger.debug("[alpaca_options_strategy] candle fetch for batch analysis failed for %s", underlying, exc_info=True)
+
+        batch = alpaca_options_trade_analysis.analyze_recent_trade_batch(
+            real_trades, underlying_candles_by_symbol=candles_by_underlying,
+        )
+        text = alpaca_options_trade_analysis.format_batch_snapshot_text(batch, market="options")
+        threads_post.post_trade_analysis_summary(text, market="options")
+    except Exception:
+        logger.warning("[alpaca_options_strategy] batch trade analysis failed", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -532,7 +623,7 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
     priced worse than the exact same signal 15 minutes later. Exits are
     never gated by this -- managing existing risk is always allowed,
     only NEW entries wait out the edge."""
-    from data.alpaca_data import get_market_session
+    from data.alpaca_data import fetch_recent_minute_bars, get_market_session
     from data.alpaca_options_data import get_options_universe, latest_feature_row, select_contract, select_spread_contracts
     from data.alpaca_options_model import predict_direction
     from data import alpaca_client, threads_post
@@ -631,7 +722,7 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
                     "expiration_date": long_contract.get("expiration_date"),
                     "entry_price": net_debit, "count": qty,
                     "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(),
-                    "order_id": order_id, **levels,
+                    "order_id": order_id, **levels, **_entry_context(candidate),
                 }
                 contract_symbol, contract_type, entry_price = long_symbol, long_contract.get("type"), net_debit
             else:
@@ -664,7 +755,7 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
                     "expiration_date": contract.get("expiration_date"), "strike_price": contract.get("strike_price"),
                     "entry_price": contract_price, "count": qty,
                     "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(),
-                    "order_id": order_id, **levels,
+                    "order_id": order_id, **levels, **_entry_context(candidate),
                 }
                 contract_type, entry_price = contract.get("type"), contract_price
 
@@ -694,15 +785,25 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
                 )
             except Exception:
                 logger.warning("[alpaca_options_strategy] Threads post for %s entry failed", contract_symbol, exc_info=True)
-            # No chart-snapshot post here, unlike the other three strategies:
-            # there's no historical option-PREMIUM series to chart on the
-            # same scale as entry/take-profit/stop-loss (those are premium
-            # dollars, not the underlying's price) -- this pipeline doesn't
-            # record option-quote history over time, only point-in-time
-            # quotes at scan time. Charting the underlying's own price
-            # series instead would put a strike-price reference line next
-            # to numbers on a completely different scale, which would be
-            # confusing rather than informative.
+            # Charts the UNDERLYING's own price action, not the option's
+            # premium -- this pipeline doesn't record option-quote history
+            # over time, only point-in-time quotes at scan time, so there's
+            # no premium series to chart in the first place. Deliberately
+            # passes NO entry/take-profit/stop-loss price-LEVEL lines
+            # (those are premium dollars, a different scale than the
+            # underlying's price -- would silently mislabel the chart);
+            # only an ENTRY time-marker plus a subtitle making clear this is
+            # the underlying, not the contract's own price.
+            try:
+                one_min_df = fetch_recent_minute_bars(symbol)
+                threads_post.post_trade_entry_chart(
+                    ticker=contract_symbol, market="options", candles=_candles_as_dicts(one_min_df),
+                    entry_index=(len(one_min_df) - 1) if not one_min_df.empty else None,
+                    side="long", dry_run=trade_dry_run,
+                    subtitle=f"{symbol} underlying price action (option premium not charted separately)",
+                )
+            except Exception:
+                logger.warning("[alpaca_options_strategy] Threads chart post for %s entry failed", contract_symbol, exc_info=True)
         except Exception as exc:
             opened.append({"symbol": symbol, "ok": False, "action": "entry_failed", "error": str(exc)})
 
@@ -715,6 +816,7 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
     against -- a triggered exit is always a fresh, plain market sell of
     the contract, same as crypto's own manage_open_positions."""
     from data import threads_post
+    from data.alpaca_data import fetch_recent_minute_bars
 
     effective_dry_run = (not LIVE_TRADING_ENABLED) if dry_run is None else dry_run
     with _STATE_LOCK:
@@ -768,20 +870,37 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                     logger.warning("[alpaca_options_strategy] close order failed for %s: %s", contract_symbol, exc)
 
             gross = round((current_price - float(position["entry_price"])) * float(position["count"]) * 100, 6)
+            opened_at = position.get("opened_at")
+            closed_at = dt.datetime.now(dt.timezone.utc).isoformat()
+            hold_minutes = None
+            if opened_at:
+                try:
+                    opened_dt = dt.datetime.fromisoformat(opened_at)
+                    hold_minutes = round((dt.datetime.now(dt.timezone.utc) - opened_dt).total_seconds() / 60, 2)
+                except (ValueError, TypeError):
+                    hold_minutes = None
             with _STATE_LOCK:
                 state = _load_state()
                 by_date = state.setdefault("realized_pnl_by_date", {})
                 today = _today_str()
                 by_date[today] = round(float(by_date.get(today, 0.0)) + gross, 6)
                 trade = {
-                    "closed_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+                    "closed_at": closed_at, "opened_at": opened_at, "hold_minutes": hold_minutes,
                     "symbol": contract_symbol, "underlying_symbol": underlying_symbol,
-                    "strategy": position.get("strategy", "naked"),
+                    "strategy": position.get("strategy", "naked"), "option_type": position.get("option_type"),
                     "entry_price": position["entry_price"], "exit_price": current_price,
                     "count": position["count"], "realized_pnl_usd": gross, "reason": reason,
                     "dry_run": effective_dry_run,
+                    # Entry-time context copied from the position -- see
+                    # scan_and_enter's own _entry_context() for why.
+                    "entry_probability_up": position.get("entry_probability_up"),
+                    "entry_model_direction": position.get("entry_model_direction"),
+                    "entry_reason": position.get("entry_reason"),
                 }
-                state.setdefault("trade_log", []).append(trade)
+                trade_log = state.setdefault("trade_log", [])
+                trade_log.append(trade)
+                if len(trade_log) > MAX_TRADE_LOG_ENTRIES:
+                    del trade_log[: len(trade_log) - MAX_TRADE_LOG_ENTRIES]
                 state["positions"] = [p for p in (state.get("positions") or []) if p["symbol"] != contract_symbol]
                 _save_state(state, push_durable=True)
             closed.append(trade)
@@ -792,8 +911,21 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                 )
             except Exception:
                 logger.warning("[alpaca_options_strategy] Threads post for %s exit failed", contract_symbol, exc_info=True)
+            try:
+                one_min_df = fetch_recent_minute_bars(underlying_symbol)
+                threads_post.post_trade_exit_chart(
+                    ticker=contract_symbol, market="options", candles=_candles_as_dicts(one_min_df),
+                    entry_index=_index_for_ts(one_min_df, opened_at), exit_index=_index_for_ts(one_min_df, closed_at),
+                    side="long", pnl_usd=gross, dry_run=trade["dry_run"],
+                    subtitle=f"{underlying_symbol} underlying price action (option premium not charted separately)",
+                )
+            except Exception:
+                logger.warning("[alpaca_options_strategy] Threads exit chart post for %s failed", contract_symbol, exc_info=True)
         except Exception as exc:
             logger.warning("[alpaca_options_strategy] could not process position for %s -- leaving untouched this cycle: %s", contract_symbol, exc)
             checks.append({"symbol": contract_symbol, "ok": False, "error": str(exc)})
+
+    if closed:
+        _maybe_run_batch_trade_analysis()
 
     return {"action": "closed" if closed else "no_change", "closed": closed, "checks": checks}

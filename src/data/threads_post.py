@@ -21,18 +21,12 @@ from __future__ import annotations
 
 import logging
 import os
-import random
 
 from data import threads_client
 
 logger = logging.getLogger(__name__)
 
 THREADS_POST_ENABLED = str(os.getenv("THREADS_POST_ENABLED", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
-# "sometime chart snapshot of trade" -- occasional by design, not every
-# entry: a chart on every single trade would be noisy, and Threads' image
-# posting is a heavier network call (Meta fetches the image itself) than a
-# plain text post, so this stays a minority of entries.
-CHART_SNAPSHOT_PROBABILITY = float(os.getenv("THREADS_CHART_SNAPSHOT_PROBABILITY", "0.25") or "0.25")
 
 _THREADS_POST_MAX_CHARS = 500
 
@@ -283,29 +277,30 @@ def post_trending_news(headlines: list[str], *, market: str) -> bool:
         return False
 
 
-def maybe_post_trade_entry_chart(
-    *, ticker: str, market: str, closes: list[float], entry_price: float,
-    take_profit_price: float, stop_loss_price: float, side: str = "long", dry_run: bool,
+def post_trade_entry_chart(
+    *, ticker: str, market: str, candles: list[dict], entry_price: float | None = None,
+    take_profit_price: float | None = None, stop_loss_price: float | None = None,
+    entry_index: int | None = None, side: str = "long", dry_run: bool, subtitle: str | None = None,
 ) -> bool:
-    """Occasionally (CHART_SNAPSHOT_PROBABILITY of the time) posts a chart
-    image of a just-opened trade -- recent price action plus the entry/
-    take-profit/stop-loss levels, so followers see the actual expectation,
-    not just a text line. Skips (returns False, not an error) whenever:
-    disabled, the random roll misses, not enough price history to chart,
-    Pillow/rendering fails, or this service doesn't know its own public URL
-    (RENDER_EXTERNAL_URL unset -- e.g. local dev, where Threads' servers
-    could never reach the image anyway). Same best-effort, never-raise
-    contract as every other post here -- a chart is a nice-to-have, never
-    allowed to affect trading."""
+    """Posts a candlestick-chart image of a just-opened trade -- real OHLC
+    price action plus the entry/take-profit/stop-loss levels, so followers
+    see the actual "whole idea" of the trade, not just a text line. Always
+    attempted now (every trade, not a random subset -- see this module's
+    git history for the old CHART_SNAPSHOT_PROBABILITY gate this replaced).
+    Skips (returns False, not an error) whenever: disabled, not enough
+    candle history to chart, Pillow/rendering fails, or this service
+    doesn't know its own public URL (RENDER_EXTERNAL_URL unset -- e.g.
+    local dev, where Threads' servers could never reach the image anyway).
+    Same best-effort, never-raise contract as every other post here -- a
+    chart is a nice-to-have, never allowed to affect trading."""
     if not THREADS_POST_ENABLED:
-        return False
-    if random.random() >= CHART_SNAPSHOT_PROBABILITY:
         return False
     try:
         from data import chart_snapshot
-        chart_path = chart_snapshot.generate_entry_chart(
-            ticker=ticker, market=market, closes=closes, entry_price=entry_price,
-            take_profit_price=take_profit_price, stop_loss_price=stop_loss_price, side=side,
+        chart_path = chart_snapshot.generate_candlestick_chart(
+            ticker=ticker, market=market, candles=candles, side=side,
+            entry_price=entry_price, take_profit_price=take_profit_price,
+            stop_loss_price=stop_loss_price, entry_index=entry_index, subtitle=subtitle,
         )
         if chart_path is None:
             return False
@@ -315,14 +310,56 @@ def maybe_post_trade_entry_chart(
 
         tag = "[SIMULATED] " if dry_run else ""
         direction = "SHORT" if side == "short" else "LONG"
+        entry_line = f" @ {entry_price:.4f}" if entry_price is not None else ""
         caption = (
-            f"{tag}{_market_label(market)}: {direction} {ticker} @ {entry_price:.4f}\n"
+            f"{tag}{_market_label(market)}: {direction} {ticker}{entry_line}\n"
             f"{_hashtags_for_market(market)}"
         )
         threads_client.create_and_publish_image_post(image_url, caption)
         return True
     except Exception as exc:
         logger.warning("[threads_post] failed to post trade entry chart for %s: %s", ticker, exc)
+        return False
+
+
+def post_trade_exit_chart(
+    *, ticker: str, market: str, candles: list[dict], entry_price: float | None = None,
+    exit_price: float | None = None, take_profit_price: float | None = None,
+    stop_loss_price: float | None = None, entry_index: int | None = None, exit_index: int | None = None,
+    side: str = "long", pnl_usd: float, dry_run: bool, subtitle: str | None = None,
+) -> bool:
+    """Posts a candlestick-chart image of a just-CLOSED trade -- the same
+    "whole idea" snapshot as post_trade_entry_chart, but for the round
+    trip: entry through exit, colored/labeled by the real win/loss result.
+    Always attempted (see post_trade_entry_chart's own docstring). Same
+    best-effort, never-raise contract as every other post here."""
+    if not THREADS_POST_ENABLED:
+        return False
+    try:
+        from data import chart_snapshot
+        chart_path = chart_snapshot.generate_candlestick_chart(
+            ticker=ticker, market=market, candles=candles, side=side,
+            entry_price=entry_price, exit_price=exit_price, take_profit_price=take_profit_price,
+            stop_loss_price=stop_loss_price, entry_index=entry_index, exit_index=exit_index,
+            pnl_usd=pnl_usd, subtitle=subtitle,
+        )
+        if chart_path is None:
+            return False
+        image_url = chart_snapshot.public_url_for(chart_path)
+        if image_url is None:
+            return False
+
+        tag = "[SIMULATED] " if dry_run else ""
+        direction = "SHORT" if side == "short" else "LONG"
+        result_word = "WIN" if pnl_usd > 0 else "LOSS" if pnl_usd < 0 else "FLAT"
+        caption = (
+            f"{tag}{_market_label(market)}: CLOSED {direction} {ticker} -- {result_word} {pnl_usd:+.2f}\n"
+            f"{_hashtags_for_market(market)}"
+        )
+        threads_client.create_and_publish_image_post(image_url, caption)
+        return True
+    except Exception as exc:
+        logger.warning("[threads_post] failed to post trade exit chart for %s: %s", ticker, exc)
         return False
 
 

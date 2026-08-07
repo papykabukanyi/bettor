@@ -1,9 +1,9 @@
-"""Generates PNG charts for Threads image posts -- a trade's recent price
-action + entry/take-profit/stop-loss levels (see
-threads_post.maybe_post_trade_entry_chart), and a per-ticker sentiment
-snapshot (see threads_post.post_sentiment_snapshot). Meant to show
-followers not just THAT something happened but what it actually looks
-like, at a glance, on a phone screen.
+"""Generates PNG charts for Threads image posts -- a trade's recent
+candlestick price action + entry/take-profit/stop-loss/exit levels (see
+threads_post.post_trade_entry_chart / post_trade_exit_chart), and a
+per-ticker sentiment snapshot (see threads_post.post_sentiment_snapshot).
+Meant to show followers not just THAT something happened but what it
+actually looks like, at a glance, on a phone screen.
 
 Pillow, not matplotlib: a real, confirmed OOM incident this session (see
 alpaca_crypto_data.py's own docstring) made new-dependency memory weight a
@@ -64,10 +64,13 @@ def _s(n: float) -> int:
 _BG = (13, 15, 20)
 _AXIS = (42, 47, 61)
 _GRID = (28, 32, 43)
-_PRICE_LINE = (96, 165, 250)
 _ENTRY_COLOR = (231, 236, 245)
 _TP_COLOR = (34, 197, 94)
 _SL_COLOR = (239, 68, 68)
+_WIN_COLOR = (34, 197, 94)
+_LOSS_COLOR = (239, 68, 68)
+_CANDLE_UP_COLOR = (34, 197, 94)
+_CANDLE_DOWN_COLOR = (239, 68, 68)
 _TEXT_PRIMARY = (231, 236, 245)
 _TEXT_MUTED = (146, 153, 168)
 
@@ -101,23 +104,52 @@ def _sanitize(ticker: str) -> str:
 _WIDTH, _HEIGHT = _s(900), _s(500)
 _MARGIN = _s(56)
 _RIGHT_LABEL_WIDTH = _s(132)
+# Any more candles than this on a 900-logical-pixel-wide image makes each
+# candle body sub-pixel at normal viewing size -- callers should already be
+# trimming to recent history, but this is a hard backstop so a caller
+# passing e.g. a whole day of 1-minute candles can't produce an unreadable
+# smear instead of a chart.
+MAX_CANDLESTICKS = 90
 
 
-def generate_entry_chart(
-    *, ticker: str, market: str, closes: list[float], entry_price: float,
-    take_profit_price: float, stop_loss_price: float, side: str = "long",
+def generate_candlestick_chart(
+    *, ticker: str, market: str, candles: list[dict[str, float]], side: str = "long",
+    entry_price: float | None = None, exit_price: float | None = None,
+    take_profit_price: float | None = None, stop_loss_price: float | None = None,
+    entry_index: int | None = None, exit_index: int | None = None,
+    pnl_usd: float | None = None, subtitle: str | None = None,
 ) -> Path | None:
-    """Renders recent close prices as a line, with dashed horizontal
-    reference levels for entry/take-profit/stop-loss. Returns the saved
+    """Renders real OHLC candlesticks -- the "whole idea" of a trade at a
+    glance: what price actually did, not just a single close-price line.
+    `candles` is chronological, each item needing "open"/"high"/"low"/
+    "close" (a "ts" key is fine but unused for layout, which is purely
+    index-based). Reference levels (entry/take-profit/stop-loss/exit) are
+    all optional dashed horizontal lines -- omit whichever don't apply
+    (e.g. options' underlying-price chart passes none of these, since the
+    option's own premium is on a completely different scale than the
+    underlying's price; see threads_post.post_trade_entry_chart). Optional
+    entry_index/exit_index draw a vertical dashed marker at that candle,
+    useful even when the price-level lines don't apply. pnl_usd (if given)
+    colors the title/exit line green (win) or red (loss). Returns the saved
     PNG's path, or None if there isn't enough data or rendering fails --
     callers must treat None as "skip this post", never raise."""
-    if len(closes) < 5:
+    if len(candles) < 5:
         return None
     try:
         from PIL import Image, ImageDraw
     except Exception as exc:
         logger.warning("[chart_snapshot] Pillow unavailable: %s", exc)
         return None
+
+    if len(candles) > MAX_CANDLESTICKS:
+        trim = len(candles) - MAX_CANDLESTICKS
+        candles = candles[-MAX_CANDLESTICKS:]
+        # An index that falls before the trimmed window is off-screen --
+        # clamping it to the left edge would draw a marker on a candle that
+        # isn't actually the entry/exit, silently mislabeling the chart.
+        # Dropping it (None = don't draw that marker) is the honest choice.
+        entry_index = None if entry_index is None or entry_index - trim < 0 else entry_index - trim
+        exit_index = None if exit_index is None or exit_index - trim < 0 else exit_index - trim
 
     img = None
     try:
@@ -128,7 +160,10 @@ def generate_entry_chart(
         plot_left, plot_right = _MARGIN, _WIDTH - _MARGIN - _RIGHT_LABEL_WIDTH
         plot_top, plot_bottom = _s(84), _HEIGHT - _MARGIN
 
-        all_values = list(closes) + [entry_price, take_profit_price, stop_loss_price]
+        all_values = [float(c["high"]) for c in candles] + [float(c["low"]) for c in candles]
+        for level in (entry_price, exit_price, take_profit_price, stop_loss_price):
+            if level is not None:
+                all_values.append(float(level))
         lo, hi = min(all_values), max(all_values)
         span = (hi - lo) or max(abs(hi), 1e-9)
         pad = span * 0.1
@@ -138,13 +173,14 @@ def generate_entry_chart(
         def y_for(value: float) -> float:
             return plot_bottom - ((value - lo) / span) * (plot_bottom - plot_top)
 
-        def x_for(idx: int) -> float:
-            if len(closes) <= 1:
-                return plot_left
-            return plot_left + (idx / (len(closes) - 1)) * (plot_right - plot_left)
+        n = len(candles)
+        slot_w = (plot_right - plot_left) / n
+
+        def x_center(idx: int) -> float:
+            return plot_left + (idx + 0.5) * slot_w
 
         # Faint horizontal gridlines behind everything -- an anchor for the
-        # eye without competing with the price line or reference levels.
+        # eye without competing with the candles or reference levels.
         for frac in (0.25, 0.5, 0.75):
             gy = plot_top + frac * (plot_bottom - plot_top)
             draw.line([(plot_left, gy), (plot_right, gy)], fill=_GRID, width=_s(1))
@@ -158,17 +194,54 @@ def generate_entry_chart(
                 x += _s(17)
             draw.text((plot_right + _s(10), y - _s(8)), label, fill=color, font=label_font)
 
-        dashed_hline(take_profit_price, _TP_COLOR, f"TP {take_profit_price:.4f}")
-        dashed_hline(stop_loss_price, _SL_COLOR, f"SL {stop_loss_price:.4f}")
-        dashed_hline(entry_price, _ENTRY_COLOR, f"Entry {entry_price:.4f}")
+        if take_profit_price is not None:
+            dashed_hline(take_profit_price, _TP_COLOR, f"TP {take_profit_price:.4f}")
+        if stop_loss_price is not None:
+            dashed_hline(stop_loss_price, _SL_COLOR, f"SL {stop_loss_price:.4f}")
+        if entry_price is not None:
+            dashed_hline(entry_price, _ENTRY_COLOR, f"Entry {entry_price:.4f}")
+        if exit_price is not None:
+            exit_color = _LOSS_COLOR if (pnl_usd or 0) < 0 else _WIN_COLOR
+            dashed_hline(exit_price, exit_color, f"Exit {exit_price:.4f}")
 
-        points = [(x_for(i), y_for(v)) for i, v in enumerate(closes)]
-        if len(points) >= 2:
-            draw.line(points, fill=_PRICE_LINE, width=_s(3), joint="curve")
+        # Candle body width leaves a thin gap between candles so individual
+        # bars stay visually distinct rather than forming a solid block.
+        body_w = max(1, slot_w - _s(2))
+        for i, c in enumerate(candles):
+            o, h, l, cl = float(c["open"]), float(c["high"]), float(c["low"]), float(c["close"])
+            cx = x_center(i)
+            color = _CANDLE_UP_COLOR if cl >= o else _CANDLE_DOWN_COLOR
+            draw.line([(cx, y_for(h)), (cx, y_for(l))], fill=color, width=max(1, _s(1)))
+            body_top, body_bottom = y_for(max(o, cl)), y_for(min(o, cl))
+            if body_bottom - body_top < 1:
+                body_bottom = body_top + 1
+            draw.rectangle(
+                [cx - body_w / 2, body_top, cx + body_w / 2, body_bottom], fill=color,
+            )
+
+        def dashed_vline(idx: int, color: tuple[int, int, int], label: str) -> None:
+            x = x_center(max(0, min(idx, n - 1)))
+            y = plot_top
+            while y < plot_bottom:
+                draw.line([(x, y), (x, min(y + _s(8), plot_bottom))], fill=color, width=_s(2))
+                y += _s(14)
+            draw.text((x + _s(4), plot_top - _s(2)), label, fill=color, font=small_font)
+
+        if entry_index is not None:
+            dashed_vline(entry_index, _ENTRY_COLOR, "ENTRY")
+        if exit_index is not None:
+            exit_color = _LOSS_COLOR if (pnl_usd or 0) < 0 else _WIN_COLOR
+            dashed_vline(exit_index, exit_color, "EXIT")
 
         direction = "SHORT" if side == "short" else "LONG"
-        draw.text((_MARGIN, _s(24)), f"{market.upper()} -- {direction} {ticker}", fill=_TEXT_PRIMARY, font=title_font)
-        draw.text((_MARGIN, _s(56)), "Recent price action", fill=_TEXT_MUTED, font=small_font)
+        title = f"{market.upper()} -- {direction} {ticker}"
+        title_color = _TEXT_PRIMARY
+        if pnl_usd is not None:
+            result_word = "WIN" if pnl_usd > 0 else "LOSS" if pnl_usd < 0 else "FLAT"
+            title = f"{title} -- {result_word} {pnl_usd:+.2f}"
+            title_color = _WIN_COLOR if pnl_usd > 0 else _LOSS_COLOR if pnl_usd < 0 else _TEXT_PRIMARY
+        draw.text((_MARGIN, _s(24)), title, fill=title_color, font=title_font)
+        draw.text((_MARGIN, _s(56)), subtitle or "Recent price action", fill=_TEXT_MUTED, font=small_font)
 
         CHARTS_DIR.mkdir(parents=True, exist_ok=True)
         filename = f"{_sanitize(market)}_{_sanitize(ticker)}_{int(time.time())}.png"
@@ -177,7 +250,7 @@ def generate_entry_chart(
         _prune_old_charts()
         return out_path
     except Exception as exc:
-        logger.warning("[chart_snapshot] rendering failed for %s: %s", ticker, exc)
+        logger.warning("[chart_snapshot] candlestick rendering failed for %s: %s", ticker, exc)
         return None
     finally:
         if img is not None:

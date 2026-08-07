@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import datetime as dt
 
+import pandas as pd
 import pytest
 
 from data import alpaca_client, alpaca_data, alpaca_options_data, alpaca_options_model, threads_post, alpaca_options_strategy as strat
@@ -357,7 +358,126 @@ def test_manage_open_positions_posts_a_threads_exit_on_close(monkeypatch):
     assert result["action"] == "closed"
     assert posted["ticker"] == "AAPL240223C00195000"
     assert posted["market"] == "options"
-    assert posted["pnl_usd"] > 0
+
+
+def _one_min_df(n=30, base_ts=None):
+    base_ts = base_ts or int(dt.datetime.now(dt.timezone.utc).timestamp()) - n * 60
+    rows = []
+    price = 190.0
+    for i in range(n):
+        o = price
+        price += 0.1
+        rows.append({"ts": base_ts + i * 60, "open": o, "high": max(o, price) + 0.05, "low": min(o, price) - 0.05, "close": price})
+    return pd.DataFrame(rows)
+
+
+def test_candles_as_dicts_converts_a_dataframe_to_plain_dicts():
+    dicts = strat._candles_as_dicts(_one_min_df(5))  # noqa: SLF001
+    assert len(dicts) == 5
+    assert set(dicts[0].keys()) == {"ts", "open", "high", "low", "close"}
+
+
+def test_scan_and_enter_posts_an_underlying_candlestick_entry_chart_with_no_price_levels(monkeypatch):
+    """Options charts the UNDERLYING's price action (a different scale
+    than the option's own premium) -- must post entry_index only, no
+    entry_price/take_profit_price/stop_loss_price levels."""
+    monkeypatch.setattr(strat, "ENTRY_STRATEGY", "naked")
+    monkeypatch.setattr(alpaca_options_data, "get_options_universe", lambda: ["AAPL"])
+    monkeypatch.setattr(alpaca_options_data, "latest_feature_row", lambda symbol: _row())
+    monkeypatch.setattr(alpaca_options_model, "predict_direction", lambda symbol: {"model_ok": True, "probability_up": 0.7})
+    monkeypatch.setattr(alpaca_options_data, "select_contract", lambda underlying, *, direction, current_price: _contract())
+    monkeypatch.setattr(alpaca_client, "get_option_latest_quote", lambda symbol: {"ap": 1.05, "bp": 0.95})
+    monkeypatch.setattr(alpaca_data, "fetch_recent_minute_bars", lambda symbol: _one_min_df())
+
+    posted = {}
+    monkeypatch.setattr(threads_post, "post_trade_entry_chart", lambda **kw: posted.update(kw) or True)
+
+    result = strat.scan_and_enter()
+    assert result["opened"][0]["action"] == "opened"
+    assert posted["ticker"] == "AAPL240223C00195000"
+    assert posted["market"] == "options"
+    assert len(posted["candles"]) == 30
+    assert posted["entry_index"] == 29
+    assert posted.get("entry_price") is None
+    assert posted.get("take_profit_price") is None
+    assert "underlying price action" in posted["subtitle"]
+
+
+def test_manage_open_positions_posts_an_underlying_candlestick_exit_chart_on_close(monkeypatch):
+    strat._save_state({  # noqa: SLF001
+        "positions": [{
+            "symbol": "AAPL240223C00195000", "underlying_symbol": "AAPL", "entry_price": 5.0, "count": 1,
+            "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(), "order_id": None,
+            "expiration_date": (dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=30)).date().isoformat(),
+        }],
+        "trade_log": [], "realized_pnl_by_date": {},
+    })
+    take_profit_price = 5.0 * (1 + strat.TAKE_PROFIT_PCT + 0.001)
+    monkeypatch.setattr(alpaca_client, "get_option_latest_quote", lambda symbol: {"ap": take_profit_price, "bp": take_profit_price})
+    monkeypatch.setattr(alpaca_data, "fetch_recent_minute_bars", lambda symbol: _one_min_df())
+
+    posted = {}
+    monkeypatch.setattr(threads_post, "post_trade_exit_chart", lambda **kw: posted.update(kw) or True)
+
+    result = strat.manage_open_positions()
+    assert result["action"] == "closed"
+    assert posted["ticker"] == "AAPL240223C00195000"
+    assert posted["market"] == "options"
+    assert posted["pnl_usd"] == result["closed"][0]["realized_pnl_usd"]
+    assert posted.get("entry_price") is None
+
+
+def test_manage_open_positions_records_option_type_and_entry_context_on_close(monkeypatch):
+    opened = dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=12)
+    strat._save_state({  # noqa: SLF001
+        "positions": [{
+            "symbol": "AAPL240223C00195000", "underlying_symbol": "AAPL", "entry_price": 5.0, "count": 1,
+            "opened_at": opened.isoformat(), "order_id": None, "option_type": "call",
+            "entry_probability_up": 0.7, "entry_model_direction": "up", "entry_reason": "model confident UP (70%)",
+            "expiration_date": (dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=30)).date().isoformat(),
+        }],
+        "trade_log": [], "realized_pnl_by_date": {},
+    })
+    take_profit_price = 5.0 * (1 + strat.TAKE_PROFIT_PCT + 0.001)
+    monkeypatch.setattr(alpaca_client, "get_option_latest_quote", lambda symbol: {"ap": take_profit_price, "bp": take_profit_price})
+
+    result = strat.manage_open_positions()
+    trade = result["closed"][0]
+    assert trade["option_type"] == "call"
+    assert trade["entry_probability_up"] == 0.7
+    assert trade["entry_reason"] == "model confident UP (70%)"
+    assert trade["hold_minutes"] == pytest.approx(12, abs=0.1)
+
+
+def test_maybe_run_batch_trade_analysis_runs_at_the_batch_boundary_and_posts(monkeypatch):
+    trades = [
+        {
+            "symbol": f"AAPL24022{i}C00195000", "underlying_symbol": "AAPL", "realized_pnl_usd": 1.0, "dry_run": False,
+            "reason": "take_profit (+2%)", "option_type": "call",
+            "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+            "closed_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        }
+        for i in range(5)
+    ]
+    strat._save_state({"positions": [], "realized_pnl_by_date": {}, "trade_log": trades})  # noqa: SLF001
+    monkeypatch.setattr(alpaca_data, "fetch_recent_minute_bars", lambda symbol: _one_min_df())
+    posted = {}
+    monkeypatch.setattr(threads_post, "post_trade_analysis_summary", lambda text, **kw: posted.update(text=text, **kw) or True)
+
+    strat._maybe_run_batch_trade_analysis()  # noqa: SLF001
+    assert posted["market"] == "options"
+    assert "5" in posted["text"]
+    state = strat._load_state()  # noqa: SLF001
+    assert state["last_batch_analysis_trade_count"] == 5
+
+
+def test_maybe_run_batch_trade_analysis_skips_below_batch_size(monkeypatch):
+    trades = [{"symbol": "AAPL240223C00195000", "underlying_symbol": "AAPL", "realized_pnl_usd": 1.0, "dry_run": False} for _ in range(3)]
+    strat._save_state({"positions": [], "realized_pnl_by_date": {}, "trade_log": trades})  # noqa: SLF001
+    called = {"n": 0}
+    monkeypatch.setattr(threads_post, "post_trade_analysis_summary", lambda *a, **kw: called.update(n=called["n"] + 1))
+    strat._maybe_run_batch_trade_analysis()  # noqa: SLF001
+    assert called["n"] == 0
 
 
 def test_manage_open_positions_dry_run_closes_on_take_profit(monkeypatch):

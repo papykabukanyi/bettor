@@ -262,6 +262,93 @@ def test_manage_open_positions_posts_a_threads_exit_on_close(monkeypatch):
     assert posted["pnl_usd"] > 0
 
 
+def _one_min_df(n=30, base_ts=None):
+    base_ts = base_ts or int(dt.datetime.now(dt.timezone.utc).timestamp()) - n * 60
+    rows = []
+    price = 65000.0
+    for i in range(n):
+        o = price
+        price += 10.0
+        rows.append({"ts": base_ts + i * 60, "open": o, "high": max(o, price) + 5, "low": min(o, price) - 5, "close": price})
+    return pd.DataFrame(rows)
+
+
+def test_candles_as_dicts_converts_a_dataframe_to_plain_dicts():
+    dicts = strat._candles_as_dicts(_one_min_df(5))  # noqa: SLF001
+    assert len(dicts) == 5
+    assert set(dicts[0].keys()) == {"ts", "open", "high", "low", "close"}
+
+
+def test_scan_and_enter_posts_a_candlestick_entry_chart(monkeypatch):
+    monkeypatch.setattr(alpaca_crypto_data, "get_crypto_universe", lambda: ["BTC/USD"])
+    monkeypatch.setattr(alpaca_crypto_data, "latest_feature_row", lambda symbol: _entry_row())
+    monkeypatch.setattr(alpaca_crypto_model, "predict_direction", lambda symbol: {"model_ok": False})
+    monkeypatch.setattr(alpaca_crypto_data, "fetch_recent_crypto_bars", lambda symbol: _one_min_df())
+
+    posted = {}
+    monkeypatch.setattr(threads_post, "post_trade_entry_chart", lambda **kw: posted.update(kw) or True)
+
+    result = strat.scan_and_enter()
+    assert result["opened"][0]["action"] == "opened"
+    assert posted["ticker"] == "BTC/USD"
+    assert posted["market"] == "crypto"
+    assert len(posted["candles"]) == 30
+    assert posted["entry_index"] == 29
+
+
+def test_manage_open_positions_posts_a_candlestick_exit_chart_on_close(monkeypatch):
+    strat._save_state({  # noqa: SLF001
+        "positions": [{
+            "symbol": "BTC/USD", "entry_price": 65000.0, "count": 0.001,
+            "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(), "order_id": None,
+        }],
+        "trade_log": [], "realized_pnl_by_date": {},
+    })
+    take_profit_price = 65000.0 * (1 + strat.TAKE_PROFIT_PCT + 0.001)
+    monkeypatch.setattr(alpaca_client, "get_crypto_latest_quote", lambda symbol: {"ap": take_profit_price, "bp": take_profit_price})
+    monkeypatch.setattr(alpaca_crypto_data, "fetch_recent_crypto_bars", lambda symbol: _one_min_df())
+
+    posted = {}
+    monkeypatch.setattr(threads_post, "post_trade_exit_chart", lambda **kw: posted.update(kw) or True)
+
+    result = strat.manage_open_positions()
+    assert result["action"] == "closed"
+    assert posted["ticker"] == "BTC/USD"
+    assert posted["market"] == "crypto"
+    assert posted["pnl_usd"] == result["closed"][0]["realized_pnl_usd"]
+
+
+def test_maybe_run_batch_trade_analysis_runs_at_the_batch_boundary_and_posts(monkeypatch):
+    trades = [
+        {
+            "symbol": "BTC/USD", "realized_pnl_usd": 1.0, "dry_run": False, "reason": "take_profit (+2%)",
+            "entry_price": 65000.0, "exit_price": 65100.0,
+            "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+            "closed_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        }
+        for _ in range(5)
+    ]
+    strat._save_state({"positions": [], "realized_pnl_by_date": {}, "trade_log": trades})  # noqa: SLF001
+    monkeypatch.setattr(alpaca_crypto_data, "fetch_recent_crypto_bars", lambda symbol: _one_min_df())
+    posted = {}
+    monkeypatch.setattr(threads_post, "post_trade_analysis_summary", lambda text, **kw: posted.update(text=text, **kw) or True)
+
+    strat._maybe_run_batch_trade_analysis()  # noqa: SLF001
+    assert posted["market"] == "crypto"
+    assert "5" in posted["text"]
+    state = strat._load_state()  # noqa: SLF001
+    assert state["last_batch_analysis_trade_count"] == 5
+
+
+def test_maybe_run_batch_trade_analysis_skips_below_batch_size(monkeypatch):
+    trades = [{"symbol": "BTC/USD", "realized_pnl_usd": 1.0, "dry_run": False} for _ in range(3)]
+    strat._save_state({"positions": [], "realized_pnl_by_date": {}, "trade_log": trades})  # noqa: SLF001
+    called = {"n": 0}
+    monkeypatch.setattr(threads_post, "post_trade_analysis_summary", lambda *a, **kw: called.update(n=called["n"] + 1))
+    strat._maybe_run_batch_trade_analysis()  # noqa: SLF001
+    assert called["n"] == 0
+
+
 def test_manage_open_positions_returns_no_position_without_any_state():
     assert strat.manage_open_positions()["action"] == "no_position"
 

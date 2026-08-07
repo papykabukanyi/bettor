@@ -88,7 +88,7 @@ from data.kalshi_perps import (
 )
 from data.perps_data import coin_for_ticker, fetch_candle_frames, get_watchlist, latest_feature_row
 from data.perps_model import predict_direction
-from data import threads_post
+from data import perps_trade_analysis, threads_post
 
 logger = logging.getLogger(__name__)
 
@@ -968,6 +968,85 @@ def position_exit_levels(position: dict[str, Any]) -> dict[str, float]:
     }
 
 
+def _candles_as_dicts(df) -> list[dict[str, Any]]:
+    """Converts a fetch_candle_frames-style DataFrame into the plain
+    list[dict] shape both chart_snapshot.generate_candlestick_chart and
+    perps_trade_analysis expect -- keeps those two modules pandas-free."""
+    if df is None or df.empty:
+        return []
+    cols = [c for c in ("ts", "open", "high", "low", "close") if c in df.columns]
+    return df[cols].to_dict("records")
+
+
+def _index_for_ts(df, iso_ts: str | None) -> int | None:
+    """Which row of a fetch_candle_frames-style DataFrame is closest to a
+    given ISO timestamp -- used to mark ENTRY/EXIT on the candlestick chart.
+    None if there's no timestamp, no data, or the closest candle is more
+    than an hour away (the trade's window genuinely isn't covered by this
+    rolling-lookback data -- a wildly wrong index would mislabel the
+    chart, so skip the marker instead of guessing)."""
+    if df is None or df.empty or not iso_ts:
+        return None
+    try:
+        target = dt.datetime.fromisoformat(str(iso_ts).replace("Z", "+00:00")).timestamp()
+    except (ValueError, TypeError):
+        return None
+    ts_list = list(df["ts"])
+    if not ts_list:
+        return None
+    best_idx, best_diff = 0, abs(ts_list[0] - target)
+    for i, ts in enumerate(ts_list):
+        diff = abs(ts - target)
+        if diff < best_diff:
+            best_idx, best_diff = i, diff
+    return best_idx if best_diff <= 3600 else None
+
+
+def _maybe_run_batch_trade_analysis() -> None:
+    """Every perps_trade_analysis.BATCH_SIZE newly-closed REAL trades,
+    studies that recent batch -- win/loss patterns, missed-profit/
+    premature-stop diagnostics from real OHLC (see
+    perps_trade_analysis.analyze_recent_trade_batch) -- and posts a Threads
+    snapshot. Also opportunistically re-runs the existing evidence-gated
+    confidence-threshold tuning (the same code app_kalshi.py's daily job
+    already uses) so genuine drift gets caught faster than once a day.
+    Called right after manage_open_positions closes trades, OUTSIDE
+    _STATE_LOCK (same reasoning as every other Threads/network call in
+    this module -- must never hold up the fast exit-check loop). Best-
+    effort: any failure here is logged and swallowed, never allowed to
+    affect trading."""
+    try:
+        with _STATE_LOCK:
+            state = _load_state()
+            trade_log = state.get("trade_log") or []
+            real_trades = [t for t in trade_log if not t.get("dry_run")]
+            last_count = int(state.get("last_batch_analysis_trade_count") or 0)
+            if len(real_trades) - last_count < perps_trade_analysis.BATCH_SIZE:
+                return
+            state["last_batch_analysis_trade_count"] = len(real_trades)
+            _save_state(state, push_durable=True)
+            current_threshold = (state.get("tuning") or {}).get("model_confidence_min", MODEL_CONFIDENCE_MIN)
+
+        recent = real_trades[-perps_trade_analysis.BATCH_SIZE:]
+        candles_by_ticker: dict[str, list[dict[str, Any]]] = {}
+        for ticker in {t.get("ticker") for t in recent if t.get("ticker")}:
+            try:
+                one_min_df, _ = fetch_candle_frames(ticker)
+                candles_by_ticker[ticker] = _candles_as_dicts(one_min_df)
+            except Exception:
+                logger.debug("[perps_strategy] candle fetch for batch analysis failed for %s", ticker, exc_info=True)
+
+        batch = perps_trade_analysis.analyze_recent_trade_batch(real_trades, candles_by_ticker=candles_by_ticker)
+        text = perps_trade_analysis.format_batch_snapshot_text(batch, market="perps")
+        threads_post.post_trade_analysis_summary(text, market="perps")
+
+        tuning_rec = perps_trade_analysis.recommend_confidence_threshold(real_trades, current_threshold=current_threshold)
+        if tuning_rec.get("should_apply"):
+            apply_confidence_threshold_override(tuning_rec["recommended_threshold"], reason="5-trade batch review")
+    except Exception:
+        logger.warning("[perps_strategy] batch trade analysis failed", exc_info=True)
+
+
 def _reference_balance_for_today(state: dict[str, Any], available_balance_usd: float | None) -> float | None:
     """The daily loss cap is a percentage of the balance as it stood at the
     start of the day, not of whatever the balance happens to be right now
@@ -1361,6 +1440,21 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
             )
         except Exception:
             logger.warning("[perps_strategy] Threads post for %s exit failed", trade["ticker"], exc_info=True)
+        try:
+            one_min_df, _ = fetch_candle_frames(trade["ticker"])
+            threads_post.post_trade_exit_chart(
+                ticker=trade["ticker"], market="perps", candles=_candles_as_dicts(one_min_df),
+                side=trade["side"], entry_price=trade["entry_price"], exit_price=trade["exit_price"],
+                entry_index=_index_for_ts(one_min_df, trade.get("opened_at")),
+                exit_index=_index_for_ts(one_min_df, trade.get("closed_at")),
+                pnl_usd=trade["realized_pnl_usd"], dry_run=trade["dry_run"],
+            )
+        except Exception:
+            logger.warning("[perps_strategy] Threads exit chart post for %s failed", trade["ticker"], exc_info=True)
+
+    if closed:
+        _maybe_run_batch_trade_analysis()
+
     return result
 
 
@@ -1606,10 +1700,12 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
                 logger.warning("[perps_strategy] Threads post for %s entry failed", ticker, exc_info=True)
             try:
                 one_min_df, _ = fetch_candle_frames(ticker)
-                threads_post.maybe_post_trade_entry_chart(
-                    ticker=ticker, market="perps", closes=list(one_min_df["close"].tail(90)),
+                threads_post.post_trade_entry_chart(
+                    ticker=ticker, market="perps", candles=_candles_as_dicts(one_min_df),
                     entry_price=actual_entry_price, take_profit_price=levels["take_profit_price"],
-                    stop_loss_price=levels["stop_loss_price"], side=side, dry_run=effective_dry_run,
+                    stop_loss_price=levels["stop_loss_price"],
+                    entry_index=(len(one_min_df) - 1) if not one_min_df.empty else None,
+                    side=side, dry_run=effective_dry_run,
                 )
             except Exception:
                 logger.warning("[perps_strategy] Threads chart post for %s entry failed", ticker, exc_info=True)

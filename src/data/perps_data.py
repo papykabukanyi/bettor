@@ -285,6 +285,12 @@ def _candles_to_frame(candles: list[dict[str, Any]]) -> pd.DataFrame:
         # a nonsensical (e.g. negative) range.
         high = price.get("high")
         low = price.get("low")
+        # "open" is read the same defensive way -- if this exact API
+        # response ever omits it, _fill_missing_open below approximates it
+        # from the previous row's close (standard when only a close-chain
+        # is available) rather than defaulting to close-of-self, which
+        # would silently render every candlestick as a flat doji.
+        open_ = price.get("open")
         # Confirmed live: every candle Kalshi returns ALSO carries real
         # volume, dollar volume, open interest, and a bid/ask sub-object --
         # previously fetched and immediately thrown away. These enable real
@@ -296,6 +302,7 @@ def _candles_to_frame(candles: list[dict[str, Any]]) -> pd.DataFrame:
         ask_close = ask.get("close")
         rows.append({
             "ts": int(ts), "close": float(close),
+            "open": float(open_) if open_ is not None else None,
             "high": float(high) if high is not None else float(close),
             "low": float(low) if low is not None else float(close),
             "volume": float(c.get("volume") or 0.0),
@@ -313,12 +320,30 @@ def _candles_to_frame(candles: list[dict[str, Any]]) -> pd.DataFrame:
         # back empty, breaking pd.merge_asof downstream with a dtype error.
         return pd.DataFrame({
             "ts": pd.Series(dtype="int64"), "close": pd.Series(dtype="float64"),
+            "open": pd.Series(dtype="float64"),
             "high": pd.Series(dtype="float64"), "low": pd.Series(dtype="float64"),
             "volume": pd.Series(dtype="float64"), "volume_notional": pd.Series(dtype="float64"),
             "open_interest": pd.Series(dtype="float64"),
             "bid_close": pd.Series(dtype="float64"), "ask_close": pd.Series(dtype="float64"),
         })
-    return pd.DataFrame(rows).drop_duplicates(subset="ts").sort_values("ts").reset_index(drop=True)
+    df = pd.DataFrame(rows).drop_duplicates(subset="ts").sort_values("ts").reset_index(drop=True)
+    _fill_missing_open(df)
+    return df
+
+
+def _fill_missing_open(df: pd.DataFrame) -> None:
+    """In place: any row with no real "open" from the API gets the
+    previous row's close (the first row, with no previous close, falls
+    back to its own close -- a single-candle doji is the best honest
+    guess with zero prior information)."""
+    if df.empty:
+        return
+    missing = df["open"].isna()
+    if not missing.any():
+        return
+    prev_close = df["close"].shift(1)
+    df.loc[missing, "open"] = prev_close[missing]
+    df["open"] = df["open"].fillna(df["close"])
 
 
 _CANDLE_CACHE_TTL_SEC = int(os.getenv("PERPS_CANDLE_CACHE_TTL_SEC", "45") or "45")
@@ -338,8 +363,8 @@ def _prune_candle_cache(now_mono: float) -> None:
 
 
 def fetch_candle_frames(ticker: str) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Returns (one_minute_df, hourly_df) each with columns [ts, close, high,
-    low]. Short TTL cache so a strategy scan across many tickers and a
+    """Returns (one_minute_df, hourly_df) each with columns [ts, close, open,
+    high, low]. Short TTL cache so a strategy scan across many tickers and a
     dashboard status check landing in the same window don't double the
     Kalshi API calls for the same ticker."""
     cached = _candle_cache.get(ticker)

@@ -154,3 +154,173 @@ def test_format_analysis_summary_text_mentions_applied_tuning():
     tuning = {"should_apply": True, "current_threshold": 0.58, "recommended_threshold": 0.62}
     text = pta.format_analysis_summary_text(analysis, tuning=tuning)
     assert "0.58" in text and "0.62" in text
+
+
+# ---------------------------------------------------------------------------
+# Per-trade / small-batch snapshot study
+# ---------------------------------------------------------------------------
+
+def _closed_trade(
+    *, pnl: float, side: str = "long", entry_price: float = 100.0, exit_price: float = 101.0,
+    reason: str = "take_profit (+2%)", opened_at: str = "2026-08-01T12:00:00+00:00",
+    closed_at: str = "2026-08-01T12:10:00+00:00", ticker: str = "KXBTCPERP",
+    entry_score: float | None = 0.6, dry_run: bool = False,
+) -> dict:
+    return {
+        "ticker": ticker, "side": side, "realized_pnl_usd": pnl, "reason": reason, "dry_run": dry_run,
+        "entry_price": entry_price, "exit_price": exit_price, "opened_at": opened_at, "closed_at": closed_at,
+        "entry_score": entry_score, "hold_minutes": 10.0,
+    }
+
+
+def _candle(ts: int, *, o: float, h: float, l: float, c: float) -> dict:
+    return {"ts": ts, "open": o, "high": h, "low": l, "close": c}
+
+
+def _ts(iso: str) -> int:
+    import datetime as dt
+    return int(dt.datetime.fromisoformat(iso).timestamp())
+
+
+def test_build_trade_snapshot_without_candles_skips_price_derived_fields():
+    trade = _closed_trade(pnl=5.0)
+    snap = pta.build_trade_snapshot(trade, candles=None)
+    assert snap["outcome"] == "win"
+    assert snap["ticker"] == "KXBTCPERP"
+    assert "mfe_usd" not in snap
+    assert snap["lesson"].startswith("KXBTCPERP: WIN")
+
+
+def test_build_trade_snapshot_computes_mfe_mae_for_a_long_win():
+    opened, closed = "2026-08-01T12:00:00+00:00", "2026-08-01T12:05:00+00:00"
+    trade = _closed_trade(pnl=1.0, side="long", entry_price=100.0, exit_price=101.0, opened_at=opened, closed_at=closed)
+    candles = [
+        _candle(_ts(opened), o=100.0, h=100.5, l=99.8, c=100.2),
+        _candle(_ts(opened) + 60, o=100.2, h=103.0, l=100.0, c=102.5),  # best favorable excursion: high=103
+        _candle(_ts(closed), o=102.5, h=102.6, l=101.0, c=101.0),
+    ]
+    snap = pta.build_trade_snapshot(trade, candles=candles)
+    assert snap["mfe_usd"] == 3.0  # 103 - 100 entry
+    assert snap["mae_usd"] == 0.2  # 100 - 99.8
+    assert snap["capture_ratio"] < 0.5  # realized 1.0 / mfe 3.0
+    assert "captured only" in snap["lesson"]
+
+
+def test_build_trade_snapshot_computes_mae_mfe_for_a_short():
+    opened, closed = "2026-08-01T12:00:00+00:00", "2026-08-01T12:05:00+00:00"
+    trade = _closed_trade(pnl=2.0, side="short", entry_price=100.0, exit_price=98.0, opened_at=opened, closed_at=closed)
+    candles = [
+        _candle(_ts(opened), o=100.0, h=101.0, l=99.0, c=99.5),
+        _candle(_ts(closed), o=99.5, h=100.2, l=97.0, c=98.0),
+    ]
+    snap = pta.build_trade_snapshot(trade, candles=candles)
+    # short: mfe = entry - min(low) = 100 - 97 = 3; mae = max(high) - entry = 101 - 100 = 1
+    assert snap["mfe_usd"] == 3.0
+    assert snap["mae_usd"] == 1.0
+
+
+def test_build_trade_snapshot_detects_a_premature_stop_loss():
+    opened, closed = "2026-08-01T12:00:00+00:00", "2026-08-01T12:05:00+00:00"
+    trade = _closed_trade(
+        pnl=-2.0, side="long", entry_price=100.0, exit_price=98.0, reason="stop_loss (-2%)",
+        opened_at=opened, closed_at=closed, entry_score=0.55,
+    )
+    candles = [
+        _candle(_ts(opened), o=100.0, h=100.2, l=99.0, c=99.5),
+        _candle(_ts(closed), o=99.5, h=99.6, l=98.0, c=98.0),
+        # Price reverses favorably right after the stop-out.
+        _candle(_ts(closed) + 60, o=98.0, h=100.5, l=98.0, c=100.5),
+    ]
+    snap = pta.build_trade_snapshot(trade, candles=candles)
+    assert snap["post_exit_drift_pct"] > 0
+    assert "moved back in our favor" in snap["lesson"]
+
+
+def test_build_trade_snapshot_flags_high_confidence_loss_without_reversal():
+    trade = _closed_trade(pnl=-1.0, reason="stop_loss (-1%)", entry_score=0.7)
+    snap = pta.build_trade_snapshot(trade, candles=None)
+    assert "high entry confidence" in snap["lesson"]
+
+
+def test_build_trade_snapshot_handles_a_flat_trade():
+    trade = _closed_trade(pnl=0.0)
+    snap = pta.build_trade_snapshot(trade, candles=None)
+    assert snap["outcome"] == "flat"
+    assert "flat" in snap["lesson"]
+
+
+def test_analyze_recent_trade_batch_with_no_trades():
+    result = pta.analyze_recent_trade_batch([])
+    assert result["trades_analyzed"] == 0
+    assert result["snapshots"] == []
+
+
+def test_analyze_recent_trade_batch_only_uses_the_most_recent_n():
+    trades = [_closed_trade(pnl=float(i), ticker=f"T{i}") for i in range(10)]
+    result = pta.analyze_recent_trade_batch(trades, batch_size=5)
+    assert result["trades_analyzed"] == 5
+    assert [s["ticker"] for s in result["snapshots"]] == ["T5", "T6", "T7", "T8", "T9"]
+
+
+def test_analyze_recent_trade_batch_excludes_dry_run_by_default():
+    trades = [_closed_trade(pnl=1.0, dry_run=True), _closed_trade(pnl=-1.0, dry_run=False)]
+    result = pta.analyze_recent_trade_batch(trades)
+    assert result["trades_analyzed"] == 1
+
+
+def test_analyze_recent_trade_batch_counts_wins_and_losses():
+    trades = [
+        _closed_trade(pnl=1.0, ticker="A"), _closed_trade(pnl=-1.0, ticker="B"),
+        _closed_trade(pnl=2.0, ticker="C"), _closed_trade(pnl=-0.5, ticker="D"), _closed_trade(pnl=0.0, ticker="E"),
+    ]
+    result = pta.analyze_recent_trade_batch(trades)
+    assert result["wins"] == 2
+    assert result["losses"] == 2
+    assert result["total_pnl_usd"] == 1.5
+
+
+def test_analyze_recent_trade_batch_recommends_wider_stop_on_repeated_reversals():
+    opened, closed = "2026-08-01T12:00:00+00:00", "2026-08-01T12:05:00+00:00"
+    reversal_candles = [
+        _candle(_ts(opened), o=100.0, h=100.2, l=99.0, c=99.5),
+        _candle(_ts(closed), o=99.5, h=99.6, l=98.0, c=98.0),
+        _candle(_ts(closed) + 60, o=98.0, h=101.0, l=98.0, c=101.0),
+    ]
+    trades = [
+        _closed_trade(pnl=-2.0, ticker="A", reason="stop_loss (-2%)", opened_at=opened, closed_at=closed, exit_price=98.0),
+        _closed_trade(pnl=-2.0, ticker="B", reason="stop_loss (-2%)", opened_at=opened, closed_at=closed, exit_price=98.0),
+    ]
+    candles_by_ticker = {"A": reversal_candles, "B": reversal_candles}
+    result = pta.analyze_recent_trade_batch(trades, candles_by_ticker=candles_by_ticker)
+    assert any("wider" in r or "volatility-scaled" in r for r in result["recommendations"])
+
+
+def test_analyze_recent_trade_batch_recommends_trailing_tp_on_low_capture_wins():
+    opened, closed = "2026-08-01T12:00:00+00:00", "2026-08-01T12:05:00+00:00"
+    low_capture_candles = [
+        _candle(_ts(opened), o=100.0, h=100.5, l=99.9, c=100.1),
+        _candle(_ts(opened) + 60, o=100.1, h=110.0, l=100.0, c=105.0),
+        _candle(_ts(closed), o=105.0, h=105.2, l=104.9, c=101.0),
+    ]
+    trades = [
+        _closed_trade(pnl=1.0, ticker="A", opened_at=opened, closed_at=closed, exit_price=101.0),
+        _closed_trade(pnl=1.0, ticker="B", opened_at=opened, closed_at=closed, exit_price=101.0),
+    ]
+    candles_by_ticker = {"A": low_capture_candles, "B": low_capture_candles}
+    result = pta.analyze_recent_trade_batch(trades, candles_by_ticker=candles_by_ticker)
+    assert any("trailing take-profit" in r for r in result["recommendations"])
+
+
+def test_format_batch_snapshot_text_with_no_trades():
+    text = pta.format_batch_snapshot_text({"trades_analyzed": 0})
+    assert "no closed real trades" in text.lower()
+
+
+def test_format_batch_snapshot_text_includes_each_trades_lesson():
+    trades = [_closed_trade(pnl=1.0, ticker="A"), _closed_trade(pnl=-1.0, ticker="B", reason="stop_loss (-1%)")]
+    batch = pta.analyze_recent_trade_batch(trades)
+    text = pta.format_batch_snapshot_text(batch, market="perps")
+    assert "A:" in text
+    assert "B:" in text
+    assert "2W" not in text  # sanity: not accidentally reusing analyze_trade_history's format
+    assert "1W/1L" in text

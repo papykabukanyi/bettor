@@ -260,8 +260,9 @@ def test_chart_snapshot_route_serves_a_real_saved_png(monkeypatch, tmp_path):
     from data import chart_snapshot
 
     monkeypatch.setattr(chart_snapshot, "CHARTS_DIR", tmp_path / "charts")
-    path = chart_snapshot.generate_entry_chart(
-        ticker="AAPL", market="options", closes=[100.0 + i * 0.1 for i in range(30)],
+    candles = [{"ts": i, "open": 100.0 + i * 0.1, "high": 100.2 + i * 0.1, "low": 99.9 + i * 0.1, "close": 100.1 + i * 0.1} for i in range(30)]
+    path = chart_snapshot.generate_candlestick_chart(
+        ticker="AAPL", market="options", candles=candles,
         entry_price=101.0, take_profit_price=102.0, stop_loss_price=100.0,
     )
     assert path is not None

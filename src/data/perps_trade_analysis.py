@@ -12,6 +12,23 @@ Two downstream consumers depend on this:
     (perps_strategy.apply_confidence_threshold_override) when the evidence
     is strong enough -- see recommend_confidence_threshold below.
 
+A second, finer-grained layer below (build_trade_snapshot/
+analyze_recent_trade_batch) studies the most recent BATCH_SIZE closed
+trades every time that many new ones land (see perps_strategy.py's own
+manage_open_positions -> _maybe_run_batch_trade_analysis), not just once a
+day: for each trade, real 1-minute OHLC candles spanning its own
+opened_at -> closed_at window (when still within the live candle cache's
+lookback -- older trades outside it just skip the price-derived fields
+rather than failing the whole batch) give a concrete, evidence-based
+answer to "could this win have captured more?" (max favorable excursion
+vs. what was actually realized) and "was this loss premature?" (did price
+drift back in our favor shortly after the stop-out). Deliberately does NOT
+auto-write new indicators or strategy code from this -- that's a human (or
+a future, deliberate feature-engineering pass) call, same posture as
+_build_insights above. Where a genuinely reviewed, evidence-gated lever
+already exists (recommend_confidence_threshold), the batch can pull it
+sooner than the once-a-day job would.
+
 Pure analysis over data already collected -- no network calls, no state
 mutation. trade_log is exactly the list perps_strategy.py's own
 manage_open_positions() builds and persists; this module makes no
@@ -19,6 +36,7 @@ assumption beyond that shape.
 """
 from __future__ import annotations
 
+import datetime as dt
 import logging
 from typing import Any
 
@@ -233,4 +251,227 @@ def format_analysis_summary_text(analysis: dict[str, Any], *, tuning: dict[str, 
             f"Confidence floor raised {tuning['current_threshold']:.2f} -> {tuning['recommended_threshold']:.2f} "
             f"based on this evidence."
         )
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Per-trade / small-batch snapshot study -- "every recent BATCH_SIZE trades,
+# look at what actually happened and learn from it," distinct from
+# analyze_trade_history's longer-horizon aggregate buckets above.
+# ---------------------------------------------------------------------------
+
+BATCH_SIZE = 5
+# How far past a trade's own close to look for "did price keep moving our
+# way after we left" -- 10 one-minute candles is long enough to catch an
+# immediate reversal without wandering into unrelated later price action.
+POST_EXIT_DRIFT_CANDLES = 10
+# A post-exit reversal/drift smaller than this is noise, not a signal that
+# the exit was premature -- keeps _build_batch_recommendations from firing
+# on sub-tick wiggle.
+POST_EXIT_DRIFT_MEANINGFUL_PCT = 0.003
+# A win that captured less than this fraction of its own max favorable
+# excursion is flagged as "left profit on the table."
+LOW_CAPTURE_RATIO = 0.5
+
+
+def _parse_iso(ts: str | None) -> dt.datetime | None:
+    if not ts:
+        return None
+    try:
+        return dt.datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+
+
+def _price_excursion(trade: dict[str, Any], candles: list[dict[str, Any]]) -> dict[str, Any]:
+    """Real max-favorable/max-adverse excursion during the trade's own
+    opened_at -> closed_at window, plus how price drifted in the
+    POST_EXIT_DRIFT_CANDLES right after close -- all from real 1-minute
+    OHLC, not estimated. Returns {} (not partial/fabricated values) if the
+    trade's window isn't covered by `candles` at all (e.g. older than the
+    live candle cache's lookback) or any required field is missing."""
+    side = trade.get("side", "long")
+    entry_price = trade.get("entry_price")
+    opened = _parse_iso(trade.get("opened_at"))
+    closed = _parse_iso(trade.get("closed_at"))
+    if not candles or entry_price in (None, 0) or opened is None or closed is None:
+        return {}
+    entry_price = float(entry_price)
+    opened_ts, closed_ts = opened.timestamp(), closed.timestamp()
+    ordered = sorted(candles, key=lambda c: c.get("ts", 0))
+    window = [c for c in ordered if opened_ts <= c.get("ts", 0) <= closed_ts]
+    if not window:
+        return {}
+
+    highs = [float(c["high"]) for c in window if c.get("high") is not None]
+    lows = [float(c["low"]) for c in window if c.get("low") is not None]
+    if not highs or not lows:
+        return {}
+    if side == "short":
+        mfe_usd = entry_price - min(lows)
+        mae_usd = max(highs) - entry_price
+    else:
+        mfe_usd = max(highs) - entry_price
+        mae_usd = entry_price - min(lows)
+
+    result: dict[str, Any] = {"mfe_usd": round(mfe_usd, 6), "mae_usd": round(mae_usd, 6)}
+
+    post_window = [c for c in ordered if c.get("ts", 0) > closed_ts][:POST_EXIT_DRIFT_CANDLES]
+    exit_price = trade.get("exit_price")
+    if post_window and exit_price:
+        last_close = float(post_window[-1]["close"])
+        exit_price = float(exit_price)
+        raw_drift = (last_close - exit_price) / exit_price
+        # Sign-flipped for a short so "positive" always means "price kept
+        # moving the direction that would have helped this trade" for
+        # either side, not just literally up.
+        result["post_exit_drift_pct"] = round(raw_drift if side != "short" else -raw_drift, 6)
+
+    return result
+
+
+def build_trade_snapshot(trade: dict[str, Any], *, candles: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    """One closed trade's "full snap" -- outcome, the entry-time context
+    already captured on the trade record (see perps_strategy.py's
+    manage_open_positions), and (when candles cover its window) real
+    price-action diagnostics: how much favorable move was actually
+    available (mfe_usd) vs. realized, how far the stop was actually
+    tested (mae_usd), and whether price drifted back in our favor shortly
+    after exit. `lesson` turns that into one human-readable takeaway."""
+    pnl = float(trade.get("realized_pnl_usd") or 0.0)
+    outcome = "win" if pnl > 0 else "loss" if pnl < 0 else "flat"
+    snapshot: dict[str, Any] = {
+        "ticker": trade.get("ticker"), "side": trade.get("side"), "outcome": outcome,
+        "pnl_usd": round(pnl, 6), "reason": trade.get("reason"), "hold_minutes": trade.get("hold_minutes"),
+        "entry_score": trade.get("entry_score"), "entry_probability_up": trade.get("entry_probability_up"),
+    }
+    snapshot.update(_price_excursion(trade, candles or []))
+    if snapshot.get("mfe_usd") and snapshot["mfe_usd"] > 0:
+        snapshot["capture_ratio"] = round(pnl / snapshot["mfe_usd"], 4)
+    snapshot["lesson"] = _lesson_for(snapshot)
+    return snapshot
+
+
+def _lesson_for(s: dict[str, Any]) -> str:
+    ticker = s.get("ticker") or "?"
+    pnl = s["pnl_usd"]
+    if s["outcome"] == "win":
+        capture = s.get("capture_ratio")
+        if capture is not None and capture < LOW_CAPTURE_RATIO:
+            return (
+                f"{ticker}: WIN ${pnl:.2f} but captured only {capture:.0%} of the available favorable move "
+                f"(MFE ${s['mfe_usd']:.2f}) -- exit may have been early or the take-profit too tight."
+            )
+        if capture is not None:
+            return f"{ticker}: WIN ${pnl:.2f}, captured {capture:.0%} of the available move -- well-timed exit."
+        return f"{ticker}: WIN ${pnl:.2f}."
+    if s["outcome"] == "loss":
+        drift = s.get("post_exit_drift_pct")
+        if drift is not None and drift > POST_EXIT_DRIFT_MEANINGFUL_PCT:
+            return (
+                f"{ticker}: LOSS ${pnl:.2f} ({s.get('reason')}) -- price moved back in our favor by "
+                f"{drift:.2%} shortly after exit, the stop may be too tight for current volatility."
+            )
+        confidence = s.get("entry_score")
+        if confidence is not None and confidence >= 0.65:
+            return (
+                f"{ticker}: LOSS ${pnl:.2f} despite a high entry confidence ({confidence:.0%}) -- "
+                f"worth flagging for the next retrain, possible regime the model hasn't adapted to."
+            )
+        return f"{ticker}: LOSS ${pnl:.2f} ({s.get('reason')})."
+    return f"{ticker}: closed flat."
+
+
+def _build_batch_recommendations(snapshots: list[dict[str, Any]]) -> list[str]:
+    """Pattern-level recommendations across the batch -- deliberately
+    phrased as things worth a dedicated backtest/feature-engineering look,
+    never as an auto-applied code change (see this module's own docstring
+    on why that stays a human/deliberate-pass decision)."""
+    recs: list[str] = []
+    losses = [s for s in snapshots if s["outcome"] == "loss"]
+    wins = [s for s in snapshots if s["outcome"] == "win"]
+
+    reversal_losses = [s for s in losses if (s.get("post_exit_drift_pct") or 0) > POST_EXIT_DRIFT_MEANINGFUL_PCT]
+    if len(reversal_losses) >= 2:
+        recs.append(
+            f"{len(reversal_losses)} of the last {len(losses)} losses reversed favorably shortly after exit -- "
+            f"consider a wider or volatility-scaled stop-loss for choppy conditions."
+        )
+
+    high_conf_losses = [s for s in losses if (s.get("entry_score") or 0) >= 0.65]
+    if len(high_conf_losses) >= 2:
+        recs.append(
+            f"{len(high_conf_losses)} of the last {len(losses)} losses had high entry confidence (>=65%) -- "
+            f"flagging for the next retrain, may indicate a regime the model hasn't adapted to yet."
+        )
+
+    low_capture_wins = [s for s in wins if (s.get("capture_ratio") or 1.0) < LOW_CAPTURE_RATIO]
+    if len(low_capture_wins) >= 2:
+        recs.append(
+            f"{len(low_capture_wins)} of the last {len(wins)} wins captured under half of the available "
+            f"favorable move -- consider a trailing take-profit or a wider initial target."
+        )
+
+    exit_reason_counts: dict[str, int] = {}
+    for s in losses:
+        key = _exit_reason_bucket(s.get("reason"))
+        exit_reason_counts[key] = exit_reason_counts.get(key, 0) + 1
+    if exit_reason_counts:
+        dominant_reason, dominant_count = max(exit_reason_counts.items(), key=lambda kv: kv[1])
+        if dominant_count >= 3:
+            recs.append(
+                f"{dominant_count} of the last {len(losses)} losses shared exit reason '{dominant_reason}' -- "
+                f"a recurring pattern worth a dedicated backtest sweep to see if a new indicator/filter would "
+                f"catch it earlier."
+            )
+
+    return recs
+
+
+def analyze_recent_trade_batch(
+    trade_log: list[dict[str, Any]] | None, *, candles_by_ticker: dict[str, list[dict[str, Any]]] | None = None,
+    batch_size: int = BATCH_SIZE, include_dry_run: bool = False,
+) -> dict[str, Any]:
+    """Studies the most recent `batch_size` closed real trades (oldest to
+    newest) -- see build_trade_snapshot for what each one gets. Intended to
+    run every time that many NEW trades close (see perps_strategy.py's
+    _maybe_run_batch_trade_analysis), giving faster feedback than the
+    once-daily analyze_trade_history above. `candles_by_ticker` should have
+    one entry per ticker actually appearing in the batch (recent 1-minute
+    OHLC covering at least back to the oldest trade's opened_at) -- a
+    missing/empty entry just means that trade's snapshot skips the
+    price-derived fields, never a hard failure."""
+    trade_log = trade_log or []
+    trades = [t for t in trade_log if include_dry_run or not t.get("dry_run")]
+    if not trades:
+        return {"ok": True, "trades_analyzed": 0, "wins": 0, "losses": 0, "total_pnl_usd": 0.0, "snapshots": [], "recommendations": []}
+
+    recent = trades[-batch_size:]
+    candles_by_ticker = candles_by_ticker or {}
+    snapshots = [
+        build_trade_snapshot(t, candles=candles_by_ticker.get(t.get("ticker"))) for t in recent
+    ]
+    wins = sum(1 for s in snapshots if s["outcome"] == "win")
+    losses = sum(1 for s in snapshots if s["outcome"] == "loss")
+    total_pnl = round(sum(s["pnl_usd"] for s in snapshots), 6)
+    return {
+        "ok": True, "trades_analyzed": len(snapshots), "wins": wins, "losses": losses,
+        "total_pnl_usd": total_pnl, "snapshots": snapshots,
+        "recommendations": _build_batch_recommendations(snapshots),
+    }
+
+
+def format_batch_snapshot_text(batch: dict[str, Any], *, market: str = "perps") -> str:
+    """Human-readable Threads digest for one recent-trade-batch study --
+    every trade's own one-line lesson, plus any pattern-level
+    recommendations across the batch."""
+    label = market.capitalize()
+    if not batch.get("trades_analyzed"):
+        return f"{label} trade snapshot: no closed real trades yet."
+    lines = [
+        f"{label} trade snapshot (last {batch['trades_analyzed']}): "
+        f"{batch['wins']}W/{batch['losses']}L, total ${batch['total_pnl_usd']:+.2f}",
+    ]
+    lines.extend(f"- {s['lesson']}" for s in batch["snapshots"])
+    lines.extend(batch.get("recommendations") or [])
     return "\n".join(lines)

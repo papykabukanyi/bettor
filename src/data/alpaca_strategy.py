@@ -91,6 +91,10 @@ MODEL_CONFIDENCE_MIN = _env_float("ALPACA_MODEL_CONFIDENCE_MIN", 0.55)
 POSITION_SIZE_PCT = _env_float("ALPACA_POSITION_SIZE_PCT", 0.45)
 MAX_CONCURRENT_POSITIONS = max(1, _env_int("ALPACA_MAX_CONCURRENT_POSITIONS", 2))
 DAILY_LOSS_CAP_PCT = _env_float("ALPACA_DAILY_LOSS_CAP_PCT", 0.10)
+# Same unbounded-growth guard perps_strategy.py already needed (a real,
+# confirmed OOM contributor there over weeks of live trading) -- keeps the
+# most recent entries, oldest-first trimmed.
+MAX_TRADE_LOG_ENTRIES = _env_int("ALPACA_MAX_TRADE_LOG_ENTRIES", 2000)
 
 LIVE_TRADING_ENABLED = str(os.getenv("ALPACA_LIVE_TRADING_ENABLED", "")).strip().lower() in {"1", "true", "yes"}
 
@@ -182,6 +186,78 @@ def compute_position_size(available_balance_usd: float, price: float) -> int:
         return 0
     budget = available_balance_usd * POSITION_SIZE_PCT
     return int(budget // price)
+
+
+def _candles_as_dicts(df) -> list[dict[str, Any]]:
+    """Converts a fetch_recent_minute_bars-style DataFrame into the plain
+    list[dict] shape both chart_snapshot.generate_candlestick_chart and
+    alpaca_trade_analysis expect -- keeps those two modules pandas-free."""
+    if df is None or df.empty:
+        return []
+    cols = [c for c in ("ts", "open", "high", "low", "close") if c in df.columns]
+    return df[cols].to_dict("records")
+
+
+def _index_for_ts(df, iso_ts: str | None) -> int | None:
+    """Which row of a fetch_recent_minute_bars-style DataFrame is closest to
+    a given ISO timestamp -- used to mark ENTRY/EXIT on the candlestick
+    chart. None if there's no timestamp, no data, or the closest candle is
+    more than an hour away (the trade's window genuinely isn't covered by
+    this data -- a wildly wrong index would mislabel the chart, so skip the
+    marker instead of guessing)."""
+    if df is None or df.empty or not iso_ts:
+        return None
+    try:
+        target = dt.datetime.fromisoformat(str(iso_ts).replace("Z", "+00:00")).timestamp()
+    except (ValueError, TypeError):
+        return None
+    ts_list = list(df["ts"])
+    if not ts_list:
+        return None
+    best_idx, best_diff = 0, abs(ts_list[0] - target)
+    for i, ts in enumerate(ts_list):
+        diff = abs(ts - target)
+        if diff < best_diff:
+            best_idx, best_diff = i, diff
+    return best_idx if best_diff <= 3600 else None
+
+
+def _maybe_run_batch_trade_analysis() -> None:
+    """Every alpaca_trade_analysis.BATCH_SIZE newly-closed REAL trades,
+    studies that recent batch -- win/loss patterns, missed-profit/
+    premature-stop diagnostics from real OHLC -- and posts a Threads
+    snapshot. Called right after manage_open_positions closes trades,
+    outside _STATE_LOCK (same reasoning as every other Threads/network call
+    in this module). Best-effort: any failure here is logged and
+    swallowed, never allowed to affect trading."""
+    from data import alpaca_trade_analysis
+    from data import threads_post
+    from data.alpaca_data import fetch_recent_minute_bars
+
+    try:
+        with _STATE_LOCK:
+            state = _load_state()
+            trade_log = state.get("trade_log") or []
+            real_trades = [t for t in trade_log if not t.get("dry_run")]
+            last_count = int(state.get("last_batch_analysis_trade_count") or 0)
+            if len(real_trades) - last_count < alpaca_trade_analysis.BATCH_SIZE:
+                return
+            state["last_batch_analysis_trade_count"] = len(real_trades)
+            _save_state(state, push_durable=True)
+
+        recent = real_trades[-alpaca_trade_analysis.BATCH_SIZE:]
+        candles_by_symbol: dict[str, list[dict[str, Any]]] = {}
+        for symbol in {t.get("symbol") for t in recent if t.get("symbol")}:
+            try:
+                candles_by_symbol[symbol] = _candles_as_dicts(fetch_recent_minute_bars(symbol))
+            except Exception:
+                logger.debug("[alpaca_strategy] candle fetch for batch analysis failed for %s", symbol, exc_info=True)
+
+        batch = alpaca_trade_analysis.analyze_recent_trade_batch(real_trades, candles_by_symbol=candles_by_symbol)
+        text = alpaca_trade_analysis.format_batch_snapshot_text(batch, market="stocks")
+        threads_post.post_trade_analysis_summary(text, market="stocks")
+    except Exception:
+        logger.warning("[alpaca_strategy] batch trade analysis failed", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -552,10 +628,20 @@ def scan_and_enter(watchlist: list[str] | None = None, *, dry_run: bool | None =
                     )
                 order_id = alpaca_client.place_order(order_spec)
 
+            # Entry-time model/technical context -- what the model/filters
+            # actually saw at decision time, so a post-trade analysis can
+            # ask "what led to this win/loss" instead of only ever knowing
+            # how it ended. Same fields (by name) perps_strategy.py already
+            # captures, so alpaca_trade_analysis.py can mirror its logic.
+            entry_context = {
+                "entry_probability_up": candidate.get("probability_up"),
+                "entry_model_direction": candidate.get("model_direction"),
+                "entry_reason": candidate.get("reason"),
+            }
             position = {
                 "symbol": symbol, "entry_price": entry_price, "count": float(count),
                 "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(),
-                "order_id": order_id, **levels,
+                "order_id": order_id, **levels, **entry_context,
             }
             with _STATE_LOCK:
                 state = _load_state()
@@ -588,10 +674,12 @@ def scan_and_enter(watchlist: list[str] | None = None, *, dry_run: bool | None =
                 logger.warning("[alpaca_strategy] Threads post for %s entry failed", symbol, exc_info=True)
             try:
                 one_min_df = fetch_recent_minute_bars(symbol)
-                threads_post.maybe_post_trade_entry_chart(
-                    ticker=symbol, market="stocks", closes=list(one_min_df["close"].tail(90)),
+                threads_post.post_trade_entry_chart(
+                    ticker=symbol, market="stocks", candles=_candles_as_dicts(one_min_df),
                     entry_price=entry_price, take_profit_price=levels["take_profit_price"],
-                    stop_loss_price=levels["stop_loss_price"], side="long", dry_run=trade_dry_run,
+                    stop_loss_price=levels["stop_loss_price"],
+                    entry_index=(len(one_min_df) - 1) if not one_min_df.empty else None,
+                    side="long", dry_run=trade_dry_run,
                 )
             except Exception:
                 logger.warning("[alpaca_strategy] Threads chart post for %s entry failed", symbol, exc_info=True)
@@ -619,6 +707,7 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
     adopts untracked positions, but doesn't replace this in-the-moment
     double-sell guard."""
     from data import threads_post
+    from data.alpaca_data import fetch_recent_minute_bars
 
     effective_dry_run = (not LIVE_TRADING_ENABLED) if dry_run is None else dry_run
     with _STATE_LOCK:
@@ -688,18 +777,35 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                     current_price = position["stop_loss_price"]
 
             gross = round((current_price - float(position["entry_price"])) * float(position["count"]), 6)
+            opened_at = position.get("opened_at")
+            closed_at = dt.datetime.now(dt.timezone.utc).isoformat()
+            hold_minutes = None
+            if opened_at:
+                try:
+                    opened_dt = dt.datetime.fromisoformat(opened_at)
+                    hold_minutes = round((dt.datetime.now(dt.timezone.utc) - opened_dt).total_seconds() / 60, 2)
+                except (ValueError, TypeError):
+                    hold_minutes = None
             with _STATE_LOCK:
                 state = _load_state()
                 by_date = state.setdefault("realized_pnl_by_date", {})
                 today = _today_str()
                 by_date[today] = round(float(by_date.get(today, 0.0)) + gross, 6)
                 trade = {
-                    "closed_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+                    "closed_at": closed_at, "opened_at": opened_at, "hold_minutes": hold_minutes,
                     "symbol": symbol, "entry_price": position["entry_price"], "exit_price": current_price,
                     "count": position["count"], "realized_pnl_usd": gross, "reason": reason,
                     "dry_run": effective_dry_run,
+                    # Entry-time context copied from the position -- see
+                    # scan_and_enter's own comment on why.
+                    "entry_probability_up": position.get("entry_probability_up"),
+                    "entry_model_direction": position.get("entry_model_direction"),
+                    "entry_reason": position.get("entry_reason"),
                 }
-                state.setdefault("trade_log", []).append(trade)
+                trade_log = state.setdefault("trade_log", [])
+                trade_log.append(trade)
+                if len(trade_log) > MAX_TRADE_LOG_ENTRIES:
+                    del trade_log[: len(trade_log) - MAX_TRADE_LOG_ENTRIES]
                 state["positions"] = [p for p in (state.get("positions") or []) if p["symbol"] != symbol]
                 _save_state(state, push_durable=True)
             remaining_symbols.discard(symbol)
@@ -711,8 +817,21 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                 )
             except Exception:
                 logger.warning("[alpaca_strategy] Threads post for %s exit failed", symbol, exc_info=True)
+            try:
+                one_min_df = fetch_recent_minute_bars(symbol)
+                threads_post.post_trade_exit_chart(
+                    ticker=symbol, market="stocks", candles=_candles_as_dicts(one_min_df),
+                    side="long", entry_price=float(position["entry_price"]), exit_price=current_price,
+                    entry_index=_index_for_ts(one_min_df, opened_at), exit_index=_index_for_ts(one_min_df, closed_at),
+                    pnl_usd=gross, dry_run=trade["dry_run"],
+                )
+            except Exception:
+                logger.warning("[alpaca_strategy] Threads exit chart post for %s failed", symbol, exc_info=True)
         except Exception as exc:
             logger.warning("[alpaca_strategy] could not process position for %s -- leaving untouched this cycle: %s", symbol, exc)
             checks.append({"symbol": symbol, "ok": False, "error": str(exc)})
+
+    if closed:
+        _maybe_run_batch_trade_analysis()
 
     return {"action": "closed" if closed else "no_change", "closed": closed, "checks": checks}
