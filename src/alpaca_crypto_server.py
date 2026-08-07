@@ -41,6 +41,14 @@ market-hours gating anywhere here -- crypto trades 24/7:
                                 see its own docstring for why isolation
                                 matters here (measured locally: importing
                                 torch alone costs ~154MB RSS).
+  - alpaca_crypto_backtest_sweep daily at ALPACA_CRYPTO_BACKTEST_SWEEP_HOUR_UTC:00
+                                UTC -- was manual-trigger only while this
+                                service ran on a 512MB container with real,
+                                confirmed OOM history from this exact job;
+                                scheduled automatically now that it's on a
+                                2GB (standard plan) container. Staggered an
+                                hour after alpaca_crypto_torch_train so the
+                                two heaviest jobs here don't stack.
 """
 from __future__ import annotations
 
@@ -97,6 +105,12 @@ ALPACA_CRYPTO_TRAIN_INTERVAL_MINUTES = max(15, int(os.getenv("ALPACA_CRYPTO_TRAI
 # stocks/options) -- see _run_alpaca_crypto_torch_train's own docstring for
 # why this stays isolated from the sklearn retrain's own 24/7 interval.
 ALPACA_CRYPTO_TORCH_TRAIN_HOUR_UTC = int(os.getenv("ALPACA_CRYPTO_TORCH_TRAIN_HOUR_UTC", "9") or "9")
+# Fixed once-daily UTC hour, staggered an hour after the torch retrain above
+# so the two heaviest jobs on this service don't stack. Was manual-trigger
+# only (see _run_alpaca_crypto_backtest_sweep's own docstring) while this
+# service ran on a 512MB container with real, confirmed OOM history --
+# scheduled automatically now that it's on a 2GB (standard plan) container.
+ALPACA_CRYPTO_BACKTEST_SWEEP_HOUR_UTC = int(os.getenv("ALPACA_CRYPTO_BACKTEST_SWEEP_HOUR_UTC", "10") or "10")
 ALPACA_CRYPTO_STARTUP_GRACE_SECONDS = max(0, int(os.getenv("ALPACA_CRYPTO_STARTUP_GRACE_SECONDS", "60") or "60"))
 ENABLE_ALPACA_CRYPTO_SCHEDULER = str(os.getenv("ENABLE_ALPACA_CRYPTO_SCHEDULER", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
 DASHBOARD_LOCAL_AUTORUN = str(os.getenv("DASHBOARD_LOCAL_AUTORUN", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
@@ -294,14 +308,16 @@ def _run_alpaca_crypto_threads_hourly_status() -> dict[str, Any]:
 
 @_locked_job("alpaca_crypto_backtest_sweep", stale_after_sec=1800)
 def _run_alpaca_crypto_backtest_sweep(*, days: int = 21) -> dict[str, Any]:
-    """Manual-trigger only -- deliberately NOT registered on the scheduler
-    (see alpaca_crypto_backtest.py's own module-level comment on
-    _CANDIDATES). Unlike alpaca_options_backtest_sweep, which hides its own
-    recurring sweep in an off-hours window, crypto trades 24/7 -- there is
-    no safe idle window to run a multi-model-fit sweep in on a service
-    that's already had real, confirmed OOM incidents this session. Run via
-    POST /api/alpaca/crypto/backtest when you actually want a fresh
-    reading, not on a timer."""
+    """Daily, at ALPACA_CRYPTO_BACKTEST_SWEEP_HOUR_UTC:00 -- was manual-
+    trigger only (see git history) while this service ran on a 512MB
+    container with real, confirmed OOM history from this exact job.
+    Unlike alpaca_options_backtest_sweep, which hides its own recurring
+    sweep in an off-hours window, crypto trades 24/7 -- there is no safe
+    idle window to run a multi-model-fit sweep in, so this still competes
+    with live trading decisions for CPU once a day regardless of the
+    memory headroom a 2GB container provides. Still reachable manually via
+    POST /api/alpaca/crypto/backtest whenever a fresh reading is wanted
+    outside the daily cadence."""
     from data import alpaca_crypto_backtest
 
     try:
@@ -361,6 +377,10 @@ def _ensure_background_jobs_started() -> None:
             scheduler.add_job(
                 _run_alpaca_crypto_torch_train, "cron", hour=ALPACA_CRYPTO_TORCH_TRAIN_HOUR_UTC, minute=0,
                 timezone="UTC", id="alpaca_crypto_torch_train", replace_existing=True,
+            )
+            scheduler.add_job(
+                _run_alpaca_crypto_backtest_sweep, "cron", hour=ALPACA_CRYPTO_BACKTEST_SWEEP_HOUR_UTC, minute=0,
+                timezone="UTC", id="alpaca_crypto_backtest_sweep", replace_existing=True,
             )
             scheduler.add_job(
                 _run_alpaca_crypto_fast_check, "interval", seconds=ALPACA_CRYPTO_FAST_CHECK_SECONDS,
@@ -603,8 +623,9 @@ def api_alpaca_crypto_train_torch():
 
 @app.route("/api/alpaca/crypto/backtest", methods=["GET", "POST"])
 def api_alpaca_crypto_backtest():
-    """Manual-trigger only -- see _run_alpaca_crypto_backtest_sweep's own
-    docstring for why this deliberately has no recurring schedule."""
+    """Also runs daily on its own schedule (see _run_alpaca_crypto_backtest_sweep's
+    own docstring) -- this route is for an on-demand fresh reading in
+    between those runs."""
     if not is_cron_authorized(request):
         return jsonify({"ok": False, "error": "Unauthorized"}), 401
     try:
@@ -620,7 +641,7 @@ _JOB_LABELS = {
         f"Alpaca crypto custom PyTorch candidate retrain (daily {ALPACA_CRYPTO_TORCH_TRAIN_HOUR_UTC:02d}:00 UTC, "
         f"promoted only if it beats the currently-live model)"
     ),
-    "alpaca_crypto_backtest_sweep": "Alpaca crypto backtest sweep (manual trigger only)",
+    "alpaca_crypto_backtest_sweep": f"Alpaca crypto backtest sweep (daily {ALPACA_CRYPTO_BACKTEST_SWEEP_HOUR_UTC:02d}:00 UTC)",
     "alpaca_crypto_fast_check": f"Alpaca crypto fast exit check (every {ALPACA_CRYPTO_FAST_CHECK_SECONDS}s)",
     "alpaca_crypto_entry_scan": f"Alpaca crypto entry scan (every {ALPACA_CRYPTO_CYCLE_MINUTES} min, 24/7)",
     "alpaca_crypto_threads_trending_news": "Threads trending-news post (every 30 min)",

@@ -69,20 +69,24 @@ ALPACA_OPTIONS_MODEL_CALIBRATION_MIN_HOLDOUT_ROWS = int(os.getenv("ALPACA_OPTION
 
 _model_cache: dict[str, Any] = {"model": None, "meta": None, "loaded_at": 0.0}
 
-# n_estimators=60 (not perps' pre-OOM-fix 100, nor this file's own
-# original 100): perps' walk-forward loop fits up to 4 folds x 3
-# candidates (12 models total) in sequence -- a materially different
-# memory profile from the OLD single-split shape that fit once. Perps hit
-# two real container-level OOM kills discovering that the hard way this
-# session; applying that lesson proactively here rather than waiting for
-# options to relearn it via its own crash.
+# n_estimators history: 100 -> 60 after perps' walk-forward loop (up to 4
+# folds x 3 candidates, 12 models total, fit in sequence) hit two real
+# container-level OOM kills on the OLD 512MB container -- applied
+# proactively here rather than waiting for options to relearn it via its
+# own crash, since this file uses the identical walk-forward shape. Raised
+# back up to 150 after migrating to a 2GB (standard plan) container -- same
+# value already proven safe locally in this codebase's own backtest
+# modules, not a new guess. Walk-forward's own multi-fold-multi-candidate
+# shape still means this is the single heaviest training job in the
+# system, so this stays intentionally more conservative than a blind 4x
+# scale-up would suggest.
 _CANDIDATES = {
     "logistic_regression": lambda: LogisticRegression(max_iter=1000, class_weight="balanced"),
     "random_forest": lambda: RandomForestClassifier(
-        n_estimators=60, max_depth=6, min_samples_leaf=20, class_weight="balanced", random_state=42, n_jobs=1,
+        n_estimators=150, max_depth=6, min_samples_leaf=20, class_weight="balanced", random_state=42, n_jobs=1,
     ),
     "gradient_boosting": lambda: GradientBoostingClassifier(
-        n_estimators=60, max_depth=3, learning_rate=0.05, random_state=42,
+        n_estimators=150, max_depth=3, learning_rate=0.05, random_state=42,
     ),
 }
 

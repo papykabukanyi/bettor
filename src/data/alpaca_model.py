@@ -41,25 +41,23 @@ MODEL_CACHE_TTL_SEC = int(os.getenv("ALPACA_MODEL_CACHE_TTL_SEC", "1800") or "18
 _model_cache: dict[str, Any] = {"model": None, "meta": None, "loaded_at": 0.0}
 
 # n_jobs=1 (not -1): same reasoning as perps_model.py -- avoid multiplying
-# peak memory via RandomForest's per-worker process forking on a
-# memory-constrained deployment.
+# peak memory via RandomForest's per-worker process forking, regardless of
+# container size.
 #
-# n_estimators=60 (not 100): real, confirmed production OOM incidents on
-# this exact service (Render's own events: two oomKilled restarts roughly
-# ALPACA_INTENSIVE_TRAINING_MINUTES apart, i.e. exactly on
-# _run_alpaca_intensive_training's own cadence) -- that job fits THIS
-# model AND alpaca_backtest.py's own candidates in the same call ("trains
-# up to 6 model candidates total" per its own docstring), and this file
-# had never picked up the same n_estimators=100->60 reduction perps_model.py/
-# alpaca_options_model.py already proved necessary for an identical
-# multi-candidate-fit-in-one-call shape on the same 512MB ceiling.
+# n_estimators history: 100 -> 60 after real, confirmed production OOM
+# incidents on this exact service's old 512MB container (two oomKilled
+# restarts roughly ALPACA_INTENSIVE_TRAINING_MINUTES apart -- that job fits
+# THIS model AND alpaca_backtest.py's own candidates in the same call, up to
+# 6 total). Raised back up to 150 after migrating to a 2GB (standard plan)
+# container -- same value already proven safe locally in this codebase's own
+# backtest modules, not a new guess.
 _CANDIDATES = {
     "logistic_regression": lambda: LogisticRegression(max_iter=1000, class_weight="balanced"),
     "random_forest": lambda: RandomForestClassifier(
-        n_estimators=60, max_depth=6, min_samples_leaf=20, class_weight="balanced", random_state=42, n_jobs=1,
+        n_estimators=150, max_depth=6, min_samples_leaf=20, class_weight="balanced", random_state=42, n_jobs=1,
     ),
     "gradient_boosting": lambda: GradientBoostingClassifier(
-        n_estimators=60, max_depth=3, learning_rate=0.05, random_state=42,
+        n_estimators=150, max_depth=3, learning_rate=0.05, random_state=42,
     ),
 }
 

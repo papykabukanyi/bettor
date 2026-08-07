@@ -68,27 +68,28 @@ PERPS_MODEL_CALIBRATION_MIN_HOLDOUT_ROWS = int(os.getenv("PERPS_MODEL_CALIBRATIO
 
 _model_cache: dict[str, Any] = {"model": None, "meta": None, "loaded_at": 0.0}
 
-# n_jobs=1 (not -1) is deliberate: this trains inside a 512MB-capped Render
-# web dyno, not a dedicated training box. RandomForest's default joblib
-# backend forks a separate OS process per worker, each holding its own copy
-# of the training arrays -- on a memory-constrained container that trades
-# speed for a multiple of peak memory, which is the wrong trade here. Lower
-# estimator counts for the same reason (fewer trees held in memory at once).
-# Trimmed further (100 -> 80 estimators each) alongside MAX_TRAIN_ROWS after
-# a real OOM crash following this session's feature additions (~1.4x more
-# columns with no matching adjustment) -- the model's AUC is already only
-# marginally above random, so this costs negligible quality for real
-# memory headroom.
-# Trimmed AGAIN (80 -> 60) alongside MAX_TRAIN_ROWS's second cut after that
-# fix still wasn't enough -- confirmed live via a real container-level OOM
-# kill and a separate worker SIGKILL during the daily cron retrain.
+# n_jobs=1 (not -1) is deliberate regardless of container size: RandomForest's
+# default joblib backend forks a separate OS process per worker, each holding
+# its own copy of the training arrays -- a multiple of peak memory for a
+# speed trade this isn't worth taking on a shared web dyno either way.
+#
+# n_estimators history: 100 -> 80 -> 60 across two real OOM incidents on the
+# old 512MB-capped container (confirmed live: a container-level OOM kill and
+# a separate worker SIGKILL during the daily cron retrain). Raised back up to
+# 150 after migrating to a 2GB (standard plan) container -- same value
+# already proven safe locally in this codebase's own backtest modules
+# (perps_backtest.py etc., which never had this dyno's memory ceiling to
+# begin with), not a new guess. Still n_jobs=1 -- the walk-forward CV shape
+# some of this codebase's siblings use fits multiple candidates in sequence
+# per call regardless of container size, and forking per-tree on top of that
+# would multiply peak memory for no accuracy benefit.
 _CANDIDATES = {
     "logistic_regression": lambda: LogisticRegression(max_iter=1000, class_weight="balanced"),
     "random_forest": lambda: RandomForestClassifier(
-        n_estimators=60, max_depth=6, min_samples_leaf=20, class_weight="balanced", random_state=42, n_jobs=1,
+        n_estimators=150, max_depth=6, min_samples_leaf=20, class_weight="balanced", random_state=42, n_jobs=1,
     ),
     "gradient_boosting": lambda: GradientBoostingClassifier(
-        n_estimators=60, max_depth=3, learning_rate=0.05, random_state=42,
+        n_estimators=150, max_depth=3, learning_rate=0.05, random_state=42,
     ),
 }
 
