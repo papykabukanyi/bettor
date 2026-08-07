@@ -498,17 +498,30 @@ def _ensure_background_jobs_started() -> None:
                 _run_perps_trade_analysis, "cron", hour=PERPS_TRADE_ANALYSIS_HOUR_ET, minute=PERPS_TRADE_ANALYSIS_MINUTE_ET,
                 id="perps_trade_analysis", replace_existing=True,
             )
+            # executor="fastcheck" on these (and entry_scan/fast_check below)
+            # -- real, confirmed production incident: with only fast_check
+            # isolated from "default", a slow train/data_collect run (made
+            # meaningfully longer by the recent MAX_TRAIN_ROWS increase) was
+            # still able to block entry_scan and every Threads post for
+            # 7-18+ minutes at a stretch on the equivalent Alpaca services --
+            # long enough to blow past even the widened 300s misfire grace
+            # and get silently skipped anyway. All of these are themselves
+            # fast, bounded operations (seconds, not minutes) sharing this
+            # pool safely with fast_check the same way -- moving them here
+            # protects them from the SLOW jobs still on "default" without
+            # meaningfully risking fast_check's own real-money-critical
+            # cadence.
             scheduler.add_job(
                 _run_perps_threads_hourly_status, "interval", hours=1,
-                id="perps_threads_hourly_status", replace_existing=True,
+                id="perps_threads_hourly_status", replace_existing=True, executor="fastcheck",
             )
             scheduler.add_job(
                 _run_perps_threads_trending_news, "interval", minutes=30,
-                id="perps_threads_trending_news", replace_existing=True,
+                id="perps_threads_trending_news", replace_existing=True, executor="fastcheck",
             )
             scheduler.add_job(
                 _run_perps_threads_sentiment_snapshot, "interval", minutes=60,
-                id="perps_threads_sentiment_snapshot", replace_existing=True,
+                id="perps_threads_sentiment_snapshot", replace_existing=True, executor="fastcheck",
             )
             if ENABLE_PERPS_SCHEDULER:
                 scheduler.add_job(
@@ -517,7 +530,7 @@ def _ensure_background_jobs_started() -> None:
                 )
                 scheduler.add_job(
                     _run_perps_entry_scan, "interval", minutes=PERPS_CYCLE_MINUTES,
-                    id="perps_entry_scan", replace_existing=True,
+                    id="perps_entry_scan", replace_existing=True, executor="fastcheck",
                     next_run_time=dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=PERPS_STARTUP_GRACE_SECONDS),
                 )
             scheduler.start()

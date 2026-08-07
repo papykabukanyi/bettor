@@ -455,22 +455,32 @@ def _ensure_background_jobs_started() -> None:
                 _run_alpaca_options_fast_check, "interval", seconds=ALPACA_OPTIONS_FAST_CHECK_SECONDS,
                 id="alpaca_options_fast_check", replace_existing=True, executor="fastcheck",
             )
+            # executor="fastcheck" on these too -- real, confirmed
+            # production incident: with only fast_check isolated from
+            # "default", a slow train/data_collect run (made meaningfully
+            # longer by the recent MAX_TRAIN_ROWS increase) was still able
+            # to block entry_scan and every Threads post for 7-18+ minutes
+            # at a stretch here -- long enough to blow past even the
+            # widened 300s misfire grace and get silently skipped anyway.
+            # All of these are themselves fast, bounded operations
+            # (seconds, not minutes) sharing this pool safely with
+            # fast_check the same way.
             scheduler.add_job(
                 _run_alpaca_options_entry_scan, "interval", minutes=ALPACA_OPTIONS_CYCLE_MINUTES,
-                id="alpaca_options_entry_scan", replace_existing=True,
+                id="alpaca_options_entry_scan", replace_existing=True, executor="fastcheck",
                 next_run_time=dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=ALPACA_OPTIONS_STARTUP_GRACE_SECONDS),
             )
             scheduler.add_job(
                 _run_alpaca_options_threads_trending_news, "interval", minutes=30,
-                id="alpaca_options_threads_trending_news", replace_existing=True,
+                id="alpaca_options_threads_trending_news", replace_existing=True, executor="fastcheck",
             )
             scheduler.add_job(
                 _run_alpaca_options_threads_sentiment_snapshot, "interval", minutes=60,
-                id="alpaca_options_threads_sentiment_snapshot", replace_existing=True,
+                id="alpaca_options_threads_sentiment_snapshot", replace_existing=True, executor="fastcheck",
             )
             scheduler.add_job(
                 _run_alpaca_options_threads_hourly_status, "interval", hours=1,
-                id="alpaca_options_threads_hourly_status", replace_existing=True,
+                id="alpaca_options_threads_hourly_status", replace_existing=True, executor="fastcheck",
             )
             scheduler.start()
             logger.info(
