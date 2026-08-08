@@ -153,30 +153,23 @@ def test_threads_hourly_status_job_never_raises_on_failure(monkeypatch):
     assert result["ok"] is False
 
 
-def test_threads_trending_news_job_posts_the_fetched_story(monkeypatch):
+def test_threads_trending_news_job_skips_posting_since_alpaca_crypto_owns_this_beat(monkeypatch):
+    """Real, confirmed duplication bug: this job and Alpaca crypto's own
+    trending-news job both posted the SAME crypto story to the SAME
+    shared Threads account (all 4 services share one account). Fixed by
+    having this job intentionally no-op -- must never call
+    crypto_news.get_trending_story()/threads_post.post_trending_news at all."""
     from data import crypto_news, threads_post
 
-    story = {"title": "Bitcoin rallies", "link": "https://x.com/a", "image_url": "https://x.com/i.jpg", "source": "cointelegraph", "secondary": []}
-    monkeypatch.setattr(crypto_news, "get_trending_story", lambda: story)
-    captured = {}
-    monkeypatch.setattr(threads_post, "post_trending_news", lambda s, *, market: captured.update(story=s, market=market) or True)
+    def fail_if_called(*a, **k):
+        raise AssertionError("must not fetch/post -- alpaca_crypto owns this beat now")
+
+    monkeypatch.setattr(crypto_news, "get_trending_story", fail_if_called)
+    monkeypatch.setattr(threads_post, "post_trending_news", fail_if_called)
 
     result = app_kalshi._run_perps_threads_trending_news.__wrapped__()  # noqa: SLF001
 
-    assert result == {"ok": True, "posted": True, "story": "Bitcoin rallies"}
-    assert captured["market"] == "crypto"
-    assert captured["story"] == story
-
-
-def test_threads_trending_news_job_never_raises_on_failure(monkeypatch):
-    from data import crypto_news
-
-    def raise_error():
-        raise RuntimeError("rss down")
-
-    monkeypatch.setattr(crypto_news, "get_trending_story", raise_error)
-    result = app_kalshi._run_perps_threads_trending_news.__wrapped__()  # noqa: SLF001
-    assert result["ok"] is False
+    assert result == {"ok": True, "posted": False, "action": "skipped_duplicate_beat", "owner": "alpaca_crypto"}
 
 
 def test_threads_sentiment_snapshot_job_posts_per_ticker_sentiment(monkeypatch):

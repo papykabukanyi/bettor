@@ -141,29 +141,23 @@ def test_api_alpaca_options_backtest_route_requires_cron_auth(monkeypatch):
         assert resp.status_code == 401
 
 
-def test_threads_trending_news_job_posts_the_fetched_story(monkeypatch):
+def test_threads_trending_news_job_skips_posting_since_alpaca_stocks_owns_this_beat(monkeypatch):
+    """Real, confirmed duplication bug: this job and Alpaca stocks' own
+    trending-news job both posted the SAME stock-market story to the
+    SAME shared Threads account (all 4 services share one account).
+    Fixed by having this job intentionally no-op -- must never call
+    stock_news.get_trending_story()/threads_post.post_trending_news at all."""
     from data import stock_news, threads_post
 
-    story = {"title": "Apple beats earnings", "link": "https://x.com/a", "image_url": None, "source": "cnbc.com", "secondary": ["Fed holds rates"]}
-    monkeypatch.setattr(stock_news, "get_trending_story", lambda: story)
-    captured = {}
-    monkeypatch.setattr(threads_post, "post_trending_news", lambda s, *, market: captured.update(story=s, market=market) or True)
+    def fail_if_called(*a, **k):
+        raise AssertionError("must not fetch/post -- alpaca_stocks owns this beat now")
+
+    monkeypatch.setattr(stock_news, "get_trending_story", fail_if_called)
+    monkeypatch.setattr(threads_post, "post_trending_news", fail_if_called)
 
     result = alpaca_options_server._run_alpaca_options_threads_trending_news.__wrapped__()  # noqa: SLF001
 
-    assert result == {"ok": True, "posted": True, "story": "Apple beats earnings"}
-    assert captured["market"] == "options"
-
-
-def test_threads_trending_news_job_never_raises_on_failure(monkeypatch):
-    from data import stock_news
-
-    def raise_error():
-        raise RuntimeError("rss down")
-
-    monkeypatch.setattr(stock_news, "get_trending_story", raise_error)
-    result = alpaca_options_server._run_alpaca_options_threads_trending_news.__wrapped__()  # noqa: SLF001
-    assert result["ok"] is False
+    assert result == {"ok": True, "posted": False, "action": "skipped_duplicate_beat", "owner": "alpaca_stocks"}
 
 
 def test_threads_sentiment_snapshot_job_posts_per_ticker_sentiment(monkeypatch):

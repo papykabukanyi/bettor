@@ -347,17 +347,19 @@ def _run_alpaca_options_backtest_sweep() -> dict[str, Any]:
 
 @_locked_job("alpaca_options_threads_trending_news", stale_after_sec=300)
 def _run_alpaca_options_threads_trending_news() -> dict[str, Any]:
-    """Posts a digest of what's currently trending in stock-market news
-    every 30 minutes -- reuses stock_news.py directly (the options
-    underlyings are ordinary equities, so the same general-market
-    headlines already feeding sentiment_score apply here too)."""
-    try:
-        story = stock_news.get_trending_story()
-        posted = threads_post.post_trending_news(story, market="options")
-        return {"ok": True, "posted": posted, "story": (story or {}).get("title")}
-    except Exception as exc:
-        logger.warning("[alpaca_options_server] Threads trending-news post failed: %s", exc)
-        return {"ok": False, "error": str(exc)}
+    """Real, confirmed duplication bug: this job and Alpaca stocks' own
+    trending-news job both independently fetched stock_news.get_trending_story()
+    and posted it -- but ALL 4 services share ONE real Threads account
+    (see threads_client.py's own HF_MODEL_REPO, the same durable-state
+    file every service reads its token from), so the SAME headline/photo
+    went out twice, ~30 minutes apart, under two different labels. That
+    reads as spam to a real follower, the opposite of the growth this
+    post exists for. Alpaca stocks (src/alpaca_server.py) now solely
+    owns the stock-market trending-news beat -- this job intentionally
+    no-ops rather than re-posting the same story a second time. Kept
+    scheduled (not removed) so it stays visible in the job-activity log
+    and is trivial to re-enable if the two are ever meant to diverge."""
+    return {"ok": True, "posted": False, "action": "skipped_duplicate_beat", "owner": "alpaca_stocks"}
 
 
 @_locked_job("alpaca_options_threads_sentiment_snapshot", stale_after_sec=600)

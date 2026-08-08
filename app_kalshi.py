@@ -426,20 +426,19 @@ def _run_perps_threads_hourly_status() -> dict[str, Any]:
 
 @_locked_job("perps_threads_trending_news", stale_after_sec=300)
 def _run_perps_threads_trending_news() -> dict[str, Any]:
-    """Posts the single most attention-worthy crypto news story every 30
-    minutes -- a real photo + catchy headline + topical hashtags (see
-    threads_post.post_trending_news), the same general-newsroom coverage
-    sentiment_score is already built from, surfaced so it's visible
-    rather than an invisible input -- and written to actually help this
-    account gain followers, not just log a digest. Read-only, never
-    touches order placement."""
-    try:
-        story = crypto_news.get_trending_story()
-        posted = threads_post.post_trending_news(story, market="crypto")
-        return {"ok": True, "posted": posted, "story": (story or {}).get("title")}
-    except Exception as exc:
-        logger.warning("[app_kalshi] Threads trending-news post failed: %s", exc)
-        return {"ok": False, "error": str(exc)}
+    """Real, confirmed duplication bug: this job and Alpaca crypto's own
+    trending-news job both independently fetched crypto_news.get_trending_story()
+    and posted it -- but ALL 4 services share ONE real Threads account
+    (see threads_client.py's own HF_MODEL_REPO, the same durable-state
+    file every service reads its token from), so the SAME headline/photo
+    went out twice, ~30 minutes apart, under two different labels. That
+    reads as spam to a real follower, the opposite of the growth this
+    post exists for. Alpaca crypto (src/alpaca_crypto_server.py) now
+    solely owns the crypto trending-news beat -- this job intentionally
+    no-ops rather than re-posting the same story a second time. Kept
+    scheduled (not removed) so it stays visible in the job-activity log
+    and is trivial to re-enable if the two are ever meant to diverge."""
+    return {"ok": True, "posted": False, "action": "skipped_duplicate_beat", "owner": "alpaca_crypto"}
 
 
 @_locked_job("perps_threads_sentiment_snapshot", stale_after_sec=600)
