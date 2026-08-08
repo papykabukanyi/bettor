@@ -54,8 +54,17 @@ _cache: dict[str, tuple[dict[str, Any], float]] = {}
 # swapped out for equity-specific idioms crypto headlines rarely use
 # (earnings beats/misses, guidance, downgrades) in place of pure crypto terms
 # (adoption, etf, inflows) that would mostly just fail to match here anyway.
+### "high"/"highs" removed from this list -- real bug found and fixed in
+# review, same as crypto_news.py's own identical word list: `_score_headlines`
+# is plain bag-of-words matching with no negation/context handling, and
+# "high"/"highs" fired standalone (no offsetting negative word) on real
+# headlines with the OPPOSITE of bullish meaning -- e.g. "Why Hasn't XRP
+# Hit New Highs Like Bitcoin and Ethereum..." (an underperformance
+# headline) scored purely positive from "highs" alone. Confirmed live via
+# crypto_news.py's own archived sentiment_score history: heavily skewed
+# positive (mean +0.50, 100% nonzero) across a real 66-day sample.
 _POSITIVE_WORDS = {
-    "surge", "rally", "bullish", "gain", "gains", "soar", "soars", "high", "highs",
+    "surge", "rally", "bullish", "gain", "gains", "soar", "soars",
     "beat", "beats", "upgrade", "upgraded", "outperform", "breakout", "record",
     "buy", "buying", "positive", "recover", "recovery", "boom", "jump", "jumps",
     "rise", "rises", "rising", "profit", "profits", "growth", "strong", "buyback",

@@ -112,11 +112,30 @@ _cryptopanic_cooldown_until = 0.0
 _NEWSDATA_COOLDOWN_SEC = 24 * 3600
 _newsdata_cooldown_until = 0.0
 
+### "high"/"highs"/"etf" removed from this list -- real bug found and fixed
+# in review: `_score_headlines` is plain bag-of-words matching with no
+# negation/context handling, and both words fired on real, confirmed
+# headlines with the OPPOSITE of bullish meaning -- "Why Hasn't XRP Hit New
+# Highs Like Bitcoin and Ethereum..." (an underperformance headline) and
+# "High on Their Own Supply? Ethereum, Solana Reconsider Inflation
+# Schedules" (a skeptical idiom, not a price statement) both scored purely
+# positive purely from "high"/"highs" with no self-correcting negative
+# word anywhere in the headline to offset it. "etf" is worse still: a
+# neutral product-type noun, not a sentiment word at all -- "T. Rowe Price
+# Defends Dogecoin Holding in Active Crypto ETF" and two more real T. Rowe
+# Price headlines all scored purely positive from "etf" alone despite
+# being purely descriptive, not bullish, news. Confirmed live: this
+# skewed real archived sentiment_score data heavily positive (mean +0.50,
+# 100% nonzero, min -0.5 almost never reached across a real 66-day sample)
+# -- unlike "record"/"upgrade"/etc., which usually co-occur with a real
+# direction word or a genuine crypto-specific negative ("record losses"
+# still nets near-zero via "losses"), "high"/"etf" had no such
+# self-correction and fired standalone on unrelated or inverted headlines.
 _POSITIVE_WORDS = {
-    "surge", "rally", "bullish", "gain", "gains", "soar", "soars", "high", "highs",
+    "surge", "rally", "bullish", "gain", "gains", "soar", "soars",
     "adopt", "adoption", "approve", "approval", "partnership", "breakout", "record",
     "inflow", "inflows", "buy", "buying", "upgrade", "positive", "recover", "recovery",
-    "boom", "jump", "jumps", "rise", "rises", "rising", "milestone", "etf",
+    "boom", "jump", "jumps", "rise", "rises", "rising", "milestone",
 }
 _NEGATIVE_WORDS = {
     "crash", "crashes", "plunge", "plunges", "bearish", "hack", "hacked", "ban",
