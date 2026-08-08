@@ -143,6 +143,41 @@ def test_run_config_sweep_restores_the_real_strategy_parameters_afterward(monkey
     assert strat.MAX_HOLD_MINUTES == 77
 
 
+def test_run_walkforward_backtest_returns_multiple_folds_via_the_real_pipeline(monkeypatch):
+    """End-to-end through the real fetch->fit->simulate pipeline (the HF
+    dataset download mocked out), confirming run_walkforward_backtest wires
+    walkforward.run_walkforward_folds up to this module's own
+    fit_backtest_model/simulate rather than reimplementing any of that."""
+    n = 900
+    rng = np.random.default_rng(11)
+    frames = [_synthetic_test_df(n=n, symbol=s) for s in ("AAA", "BBB")]
+    for i, f in enumerate(frames):
+        f["ts"] = f["ts"] + i * 10_000_000
+    combined = pd.concat(frames, ignore_index=True)
+    combined["label_up"] = (rng.normal(0, 1, len(combined)) > 0).astype(int)
+
+    monkeypatch.setattr(bt, "load_training_dataset", lambda *, max_shards=90: combined)
+    # 4 folds x 3 sklearn candidates is real fit cost -- cut to the
+    # cheapest candidate only. This test is about run_walkforward_backtest's
+    # own plumbing, not about which candidate wins a fit-quality contest.
+    monkeypatch.setattr(bt, "_CANDIDATES", {"logistic_regression": bt._CANDIDATES["logistic_regression"]})
+
+    result = bt.run_walkforward_backtest(starting_balance=10_000.0)
+    assert result["ok"] is True
+    assert result["fold_count"] >= 2
+    assert "profitable_fold_ratio" in result
+    assert "mean_return_pct" in result
+    for fold in result["folds"]:
+        assert "return_pct" in fold
+        assert "fold_bounds" in fold
+
+
+def test_run_walkforward_backtest_reports_no_data_when_the_dataset_is_empty(monkeypatch):
+    monkeypatch.setattr(bt, "load_training_dataset", lambda *, max_shards=90: pd.DataFrame())
+    result = bt.run_walkforward_backtest()
+    assert result == {"ok": False, "reason": "no_data"}
+
+
 def test_run_config_sweep_restores_parameters_even_if_simulate_raises(monkeypatch):
     monkeypatch.setattr(strat, "TAKE_PROFIT_PCT", 0.0123)
     monkeypatch.setattr(strat, "STOP_LOSS_PCT", 0.0099)

@@ -50,7 +50,8 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, roc_auc_score
 
 from data import alpaca_options_strategy as strat
-from data.alpaca_options_data import FEATURE_COLUMNS
+from data import walkforward
+from data.alpaca_options_data import FEATURE_COLUMNS, load_training_dataset
 
 logger = logging.getLogger(__name__)
 
@@ -328,6 +329,36 @@ def _simulate_inner(
 # trades, silently making the whole sweep meaningless -- caught before
 # shipping, not a theoretical concern.
 _ENTRY_PREMIUM_PCT_OF_UNDERLYING = float(os.getenv("ALPACA_OPTIONS_BACKTEST_ENTRY_PREMIUM_PCT", "0.005") or "0.005")
+
+
+def run_walkforward_backtest(
+    *, fold_bounds: list[tuple[float, float, float]] | None = None,
+    starting_balance: float = 500.0, max_shards: int = 90, **strategy_overrides: Any,
+) -> dict[str, Any]:
+    """Loads the same combined multi-symbol underlying dataset
+    alpaca_options_model.py's own training uses (load_training_dataset()),
+    but replays MULTIPLE expanding-window train/test folds (see
+    walkforward.py) instead of a single 70/30 split -- see
+    perps_backtest.run_walkforward_backtest's own docstring for why this
+    matters more than a single split. Subject to the same synthetic-premium
+    disclosure as this module's own simulate()/module docstring -- this
+    validates directional signal quality across multiple periods, not exact
+    expected option P&L.
+
+    Returns `{"ok", "folds": [...], "fold_count", "profitable_fold_ratio",
+    "mean_return_pct", "std_return_pct", ...}`. Deliberately not called from
+    _run_alpaca_options_backtest_sweep -- see that job's own off-hours-only
+    reasoning; multiplying its already-tight fit cost by the fold count
+    isn't worth it for a job that already runs daily off-hours."""
+    df = load_training_dataset(max_shards=max_shards)
+    if df.empty:
+        return {"ok": False, "reason": "no_data"}
+
+    result = walkforward.run_walkforward_folds(
+        df, fit_fn=fit_backtest_model, simulate_fn=simulate, fold_bounds=fold_bounds,
+        simulate_kwargs={"starting_balance": starting_balance, **strategy_overrides},
+    )
+    return result
 
 
 # Small, deliberately bounded grid -- runs as a recurring BACKGROUND job on

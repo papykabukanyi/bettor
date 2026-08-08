@@ -45,6 +45,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, roc_auc_score
 
 from data import perps_strategy as strat
+from data import walkforward
 from data.kalshi_perps import get_margin_candlesticks
 from data.perps_data import FEATURE_COLUMNS, _candles_to_frame, engineer_features, get_watchlist
 
@@ -438,4 +439,45 @@ def run_backtest(
     result["train_rows"] = len(train_df)
     result["test_rows"] = len(test_df)
     result["cutoff_ts"] = float(cutoff_ts)
+    return result
+
+
+def run_walkforward_backtest(
+    *, days: int = 30, fold_bounds: list[tuple[float, float, float]] | None = None,
+    starting_balance: float = 20.0, tickers: list[str] | None = None, **strategy_overrides: Any,
+) -> dict[str, Any]:
+    """Same data pipeline as run_backtest() (fetch extended history for
+    every requested ticker, default the full live watchlist), but replays
+    MULTIPLE expanding-window train/test folds (see walkforward.py) instead
+    of a single 70/30 split -- directly answers "backtest need to happen in
+    multiple time frame[s] to learn patterns": a strategy that only looks
+    good on one lucky split isn't one that's actually learned anything
+    durable. `days` defaults higher than run_backtest's 14 (30) since the
+    same history now gets carved into 4 folds instead of 1 -- each fold's
+    own train+test slice needs a meaningful amount of data on its own.
+
+    Returns `{"ok", "folds": [...], "fold_count", "profitable_fold_ratio",
+    "mean_return_pct", "std_return_pct", ...}` -- see
+    walkforward.summarize_folds for the full cross-fold consistency report."""
+    watchlist = tickers or get_watchlist()
+    frames = []
+    for ticker in watchlist:
+        try:
+            feats = build_ticker_frame(ticker, days=days)
+            if not feats.empty:
+                frames.append(feats)
+        except Exception as exc:
+            logger.warning("[perps_backtest] build_ticker_frame failed for %s: %s", ticker, exc)
+    if not frames:
+        return {"ok": False, "reason": "no_data"}
+
+    combined = pd.concat(frames, ignore_index=True).sort_values("ts")
+    present_tickers = sorted(combined["ticker"].unique())
+    leverage_by_ticker = fetch_leverage_by_ticker(present_tickers)
+
+    result = walkforward.run_walkforward_folds(
+        combined, fit_fn=fit_backtest_model, simulate_fn=simulate, fold_bounds=fold_bounds,
+        simulate_kwargs={"starting_balance": starting_balance, "leverage_by_ticker": leverage_by_ticker, **strategy_overrides},
+    )
+    result["tickers"] = watchlist
     return result

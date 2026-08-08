@@ -52,6 +52,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, roc_auc_score
 
 from data import alpaca_crypto_strategy as strat
+from data import walkforward
 from data.alpaca_crypto_data import FEATURE_COLUMNS, engineer_features, fetch_crypto_bars, get_crypto_universe, symbol_to_coin
 
 logger = logging.getLogger(__name__)
@@ -265,7 +266,7 @@ def _simulate_inner(
             )
             if should_exit:
                 gross = round((price - pos["entry_price"]) * pos["count"], 6)  # long-only
-                fee = strat.round_trip_fee_usd(pos["entry_price"], price, pos["count"])
+                fee = strat.round_trip_fee_usd(pos["entry_price"], price, pos["count"], taker_fee_rate=taker_fee_rate)
                 realized = round(gross - fee, 6)
                 balance += realized
                 daily_pnl[date_str] = daily_pnl.get(date_str, 0.0) + realized
@@ -392,6 +393,41 @@ def run_backtest(
     result["train_rows"] = len(train_df)
     result["test_rows"] = len(test_df)
     result["cutoff_ts"] = float(cutoff_ts)
+    return result
+
+
+def run_walkforward_backtest(
+    *, days: int = 30, fold_bounds: list[tuple[float, float, float]] | None = None,
+    starting_balance: float = 500.0, symbols: list[str] | None = None, **strategy_overrides: Any,
+) -> dict[str, Any]:
+    """Same data pipeline as run_backtest() (fetch extended history for
+    every requested pair, default the full tradable universe), but replays
+    MULTIPLE expanding-window train/test folds (see walkforward.py) instead
+    of a single 70/30 split -- see perps_backtest.run_walkforward_backtest's
+    own docstring for why this matters more than a single split. `days`
+    defaults higher than run_backtest's 14 (30) since the same history now
+    gets carved into 4 folds instead of 1.
+
+    Returns `{"ok", "folds": [...], "fold_count", "profitable_fold_ratio",
+    "mean_return_pct", "std_return_pct", ...}`."""
+    universe = symbols or get_crypto_universe()
+    frames = []
+    for symbol in universe:
+        try:
+            feats = build_pair_frame(symbol, days=days)
+            if not feats.empty:
+                frames.append(feats)
+        except Exception as exc:
+            logger.warning("[alpaca_crypto_backtest] build_pair_frame failed for %s: %s", symbol, exc)
+    if not frames:
+        return {"ok": False, "reason": "no_data"}
+
+    combined = pd.concat(frames, ignore_index=True).sort_values("ts")
+    result = walkforward.run_walkforward_folds(
+        combined, fit_fn=fit_backtest_model, simulate_fn=simulate, fold_bounds=fold_bounds,
+        simulate_kwargs={"starting_balance": starting_balance, **strategy_overrides},
+    )
+    result["symbols"] = universe
     return result
 
 

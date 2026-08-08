@@ -236,6 +236,50 @@ def test_fetch_extended_candles_chains_multiple_calls_beyond_the_cap(monkeypatch
     assert len(calls) >= 3
 
 
+# ── run_walkforward_backtest ─────────────────────────────────────────────────
+
+def test_run_walkforward_backtest_returns_multiple_folds_via_the_real_pipeline(monkeypatch):
+    """End-to-end through the real fetch->fit->simulate pipeline (network
+    calls mocked out), confirming run_walkforward_backtest actually wires
+    walkforward.run_walkforward_folds up to this module's own
+    build_ticker_frame/fit_backtest_model/simulate rather than
+    reimplementing any of that."""
+    n = 900
+    rng = np.random.default_rng(11)
+    combined = _synthetic_test_df(n_per_ticker=n, tickers=("KXBTCPERP", "KXETHPERP"))
+    combined["label_up"] = (rng.normal(0, 1, len(combined)) > 0).astype(int)
+
+    def fake_build_ticker_frame(ticker, *, days):
+        return combined[combined["ticker"] == ticker].reset_index(drop=True)
+
+    monkeypatch.setattr(bt, "build_ticker_frame", fake_build_ticker_frame)
+    monkeypatch.setattr(bt, "get_watchlist", lambda: ["KXBTCPERP", "KXETHPERP"])
+    monkeypatch.setattr(bt, "fetch_leverage_by_ticker", lambda tickers: {t: 3.0 for t in tickers})
+    # 4 folds x 3 sklearn candidates is real fit cost -- cut to the cheapest
+    # candidate only. This test is about run_walkforward_backtest's own
+    # plumbing (does it slice folds and wire fit/simulate correctly), not
+    # about which candidate wins a fit-quality contest.
+    monkeypatch.setattr(bt, "_CANDIDATES", {"logistic_regression": bt._CANDIDATES["logistic_regression"]})
+
+    result = bt.run_walkforward_backtest(days=30, starting_balance=20.0)
+    assert result["ok"] is True
+    assert result["tickers"] == ["KXBTCPERP", "KXETHPERP"]
+    assert result["fold_count"] >= 2
+    assert "profitable_fold_ratio" in result
+    assert "mean_return_pct" in result
+    for fold in result["folds"]:
+        assert "return_pct" in fold
+        assert "fold_bounds" in fold
+        assert "train_rows" in fold and "test_rows" in fold
+
+
+def test_run_walkforward_backtest_reports_no_data_when_every_ticker_fetch_is_empty(monkeypatch):
+    monkeypatch.setattr(bt, "build_ticker_frame", lambda ticker, *, days: pd.DataFrame())
+    monkeypatch.setattr(bt, "get_watchlist", lambda: ["KXBTCPERP"])
+    result = bt.run_walkforward_backtest()
+    assert result == {"ok": False, "reason": "no_data"}
+
+
 def test_fetch_extended_candles_handles_a_newly_listed_ticker(monkeypatch):
     """A ticker that only has, say, 20 days of real history returns empty
     candlesticks for the older chained windows a 50-day request would ask

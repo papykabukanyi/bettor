@@ -667,9 +667,19 @@ def api_alpaca_crypto_train_torch():
 def api_alpaca_crypto_backtest():
     """Also runs daily on its own schedule (see _run_alpaca_crypto_backtest_sweep's
     own docstring) -- this route is for an on-demand fresh reading in
-    between those runs."""
+    between those runs. ?walkforward=1 runs run_walkforward_backtest
+    (multiple expanding-window folds -- see walkforward.py) instead of the
+    single-split sweep -- heavier (a multiple of the daily sweep's own
+    already-tight fit cost), so keep this to genuinely on-demand use, not
+    scripted polling."""
     if not is_cron_authorized(request):
         return jsonify({"ok": False, "error": "Unauthorized"}), 401
+    if request.args.get("walkforward") in ("1", "true", "yes"):
+        from data import alpaca_crypto_backtest
+        try:
+            return jsonify(alpaca_crypto_backtest.run_walkforward_backtest())
+        except Exception as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 500
     try:
         return jsonify(_run_alpaca_crypto_backtest_sweep())
     except Exception as exc:

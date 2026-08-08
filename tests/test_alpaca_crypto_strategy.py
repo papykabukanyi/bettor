@@ -474,6 +474,21 @@ def test_round_trip_fee_usd_charges_taker_rate_on_both_legs():
     assert fee > 0
 
 
+def test_round_trip_fee_usd_taker_fee_rate_override_replaces_the_live_global():
+    """Real bug found and fixed in review: alpaca_crypto_backtest.py's own
+    simulate() threads a taker_fee_rate override all the way down to the
+    fee calculation, but round_trip_fee_usd used to ignore it and always
+    read the live TAKER_FEE_RATE global -- a backtest fee-rate sweep was
+    silently a no-op. The override must actually change the fee, and
+    omitting it must still fall back to the live rate (the real call site
+    in manage_open_positions never passes it)."""
+    live_fee = strat.round_trip_fee_usd(100.0, 110.0, 2.0)
+    overridden = strat.round_trip_fee_usd(100.0, 110.0, 2.0, taker_fee_rate=0.0)
+    assert overridden == 0.0
+    assert live_fee > 0
+    assert strat.round_trip_fee_usd(100.0, 110.0, 2.0) == live_fee  # no override -> unchanged live behavior
+
+
 def test_manage_open_positions_books_net_pnl_after_fees(monkeypatch):
     strat._save_state({  # noqa: SLF001
         "positions": [{

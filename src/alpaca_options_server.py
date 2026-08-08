@@ -706,8 +706,23 @@ def api_alpaca_options_train_torch():
 
 @app.route("/api/alpaca/options/backtest", methods=["GET", "POST"])
 def api_alpaca_options_backtest():
+    """?walkforward=1 runs run_walkforward_backtest (multiple expanding-
+    window folds -- see walkforward.py) instead of the single-split sweep.
+    Same off-hours-only guard as the scheduled sweep job (see
+    _run_alpaca_options_backtest_sweep's own docstring) applied directly
+    here since this path bypasses that job wrapper -- a 4-fold fit is a
+    multiple of the sweep's already-tight cost, no more welcome to compete
+    with live entry-scan/fast-check for CPU/memory during market hours."""
     if not is_cron_authorized(request):
         return jsonify({"ok": False, "error": "Unauthorized"}), 401
+    if request.args.get("walkforward") in ("1", "true", "yes"):
+        session = alpaca_data.get_market_session()
+        if session["session"] == "regular":
+            return jsonify({"ok": True, "skipped": True, "reason": "regular_hours", "session": session["session"]})
+        try:
+            return jsonify(alpaca_options_backtest.run_walkforward_backtest())
+        except Exception as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 500
     try:
         return jsonify(_run_alpaca_options_backtest_sweep())
     except Exception as exc:

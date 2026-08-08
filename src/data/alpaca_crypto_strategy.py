@@ -275,14 +275,27 @@ def evaluate_candidate(
     return result
 
 
-def round_trip_fee_usd(entry_price: float, exit_price: float, count: float) -> float:
+def round_trip_fee_usd(
+    entry_price: float, exit_price: float, count: float, *, taker_fee_rate: float | None = None,
+) -> float:
     """Real dollar cost of a round trip -- see TAKER_FEE_RATE's own
     docstring for why this was missing entirely before and why it matters
     at this strategy's take-profit scale. Every order this strategy places
     is a plain market order (a taker fill on Alpaca), so both legs use the
     same TAKER_FEE_RATE -- unlike perps, there's no maker-order placement
-    here yet to make the entry/exit rates potentially differ."""
-    return round(entry_price * count * TAKER_FEE_RATE + exit_price * count * TAKER_FEE_RATE, 6)
+    here yet to make the entry/exit rates potentially differ.
+
+    `taker_fee_rate` override exists for alpaca_crypto_backtest.py's own
+    parameter sweeps -- real bug found and fixed in review: simulate()'s own
+    `taker_fee_rate` override parameter was threaded all the way down to
+    _simulate_inner but never actually consulted, since this function used
+    to read the live TAKER_FEE_RATE global unconditionally -- a fee-rate
+    sweep silently always used today's live rate no matter what override
+    was passed in. The live call site (alpaca_crypto_strategy.py's own
+    manage_open_positions) never passes this, so it keeps reading the real
+    live rate exactly as before."""
+    effective_rate = TAKER_FEE_RATE if taker_fee_rate is None else taker_fee_rate
+    return round(entry_price * count * effective_rate + exit_price * count * effective_rate, 6)
 
 
 def adaptive_exit_pcts(entry_volatility_30: float | None) -> dict[str, float]:
