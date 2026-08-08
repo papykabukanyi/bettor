@@ -340,6 +340,138 @@ def push_minute_snapshot(df: pd.DataFrame) -> dict[str, Any]:
         gc.collect()
 
 
+def _upload_shards_batch(entries: list[tuple[str, pd.DataFrame]], *, commit_message: str) -> dict[str, bool]:
+    """Upload multiple date-shards in ONE HF commit instead of one commit per
+    shard -- independent copy of alpaca_options_data's own version (itself
+    copied from alpaca_data.py), same rationale: a real, confirmed incident
+    on the stocks backfill hit HF's 128-commits/hour repo cap partway
+    through a one-commit-per-date loop, silently dropping most of the run's
+    dates (the caller only fails per-shard, so the run still reported
+    ok:true overall). Batching many files into a single create_commit call
+    keeps total commits per backfill run far below that cap no matter how
+    many calendar dates are touched."""
+    if not entries:
+        return {}
+    import tempfile
+    from huggingface_hub import CommitOperationAdd, HfApi
+
+    api = HfApi(token=HF_API_KEY)
+    try:
+        api.repo_info(repo_id=HF_ALPACA_CRYPTO_DATASET_REPO, repo_type="dataset")
+    except Exception:
+        api.create_repo(repo_id=HF_ALPACA_CRYPTO_DATASET_REPO, repo_type="dataset", exist_ok=True, private=False)
+
+    tmp_paths = []
+    try:
+        operations = []
+        for path_in_repo, df in entries:
+            tmp = tempfile.NamedTemporaryFile(suffix=".parquet", delete=False)
+            df.to_parquet(tmp.name, index=False)
+            tmp.close()
+            tmp_paths.append(tmp.name)
+            operations.append(CommitOperationAdd(path_in_repo=path_in_repo, path_or_fileobj=tmp.name))
+        api.create_commit(repo_id=HF_ALPACA_CRYPTO_DATASET_REPO, repo_type="dataset", operations=operations, commit_message=commit_message)
+        return {path_in_repo: True for path_in_repo, _ in entries}
+    except Exception as exc:
+        logger.warning("[alpaca_crypto_data] HF batch upload failed for %d shard(s): %s", len(entries), exc)
+        return {path_in_repo: False for path_in_repo, _ in entries}
+    finally:
+        for p in tmp_paths:
+            try:
+                os.unlink(p)
+            except Exception:
+                pass
+
+
+def backfill_minute_history(symbols: list[str], *, days: int = 90) -> dict[str, Any]:
+    """Deep historical minute-bar backfill -- the live collector
+    (push_minute_snapshot, called from _run_alpaca_crypto_data_collect) only
+    ever writes TODAY's shard, so the archive load_training_dataset()/
+    backtests read from only ever grows one day at a time from whenever
+    collection first started. Same shape and reasoning as alpaca_data.py's/
+    alpaca_options_data.py's own backfill_minute_history -- crypto never
+    got this treatment: confirmed live, this pipeline's own real archive
+    only had 7 daily shards (a week) covering exactly the organic
+    collect-one-day-at-a-time growth since this pipeline started, while
+    Alpaca's own crypto bars go back much further (crypto trades 24/7, no
+    market-session gate, so a `days`-long fetch_crypto_bars call covers
+    genuinely continuous history, not just regular-session minutes the way
+    equities/options backfills do).
+
+    Historical sentiment for arbitrary past dates isn't available from any
+    free news API -- held at neutral (0.0) for every backfilled row, same
+    disclosed limitation as the equities/options versions."""
+    from collections import defaultdict
+    if not HF_API_KEY:
+        return {"ok": False, "reason": "no_hf_api_key"}
+
+    by_date: dict[str, list[pd.DataFrame]] = defaultdict(list)
+    symbols_processed = 0
+    for symbol in symbols:
+        try:
+            one_min_df = fetch_crypto_bars(symbol, days=days)
+            if one_min_df.empty:
+                continue
+            feats = engineer_features(one_min_df, sentiment_score=0.0)
+            del one_min_df
+            if feats.empty:
+                continue
+            feats.insert(0, "symbol", symbol)
+            date_strs = pd.to_datetime(feats["ts"], unit="s", utc=True).dt.strftime("%Y-%m-%d")
+            for date_str, group in feats.groupby(date_strs):
+                by_date[date_str].append(group.reset_index(drop=True))
+            del feats, date_strs
+            symbols_processed += 1
+        except Exception as exc:
+            logger.warning("[alpaca_crypto_data] backfill fetch failed for %s: %s", symbol, exc)
+        gc.collect()
+
+    from huggingface_hub import hf_hub_download
+    _BATCH_SIZE = 20  # ~5 commits for a full 90-day backfill, far under HF's 128/hour cap
+    shard_row_counts: dict[str, int] = {}
+    pending: list[tuple[str, pd.DataFrame]] = []
+
+    def _flush(batch_num: int) -> None:
+        if not pending:
+            return
+        results = _upload_shards_batch(pending, commit_message=f"backfill crypto minute bars: batch {batch_num}")
+        for path_in_repo, df in pending:
+            date_str = path_in_repo.rsplit("/", 1)[-1].removesuffix(".parquet")
+            shard_row_counts[date_str] = len(df) if results.get(path_in_repo) else -1
+        pending.clear()
+
+    batch_num = 0
+    for date_str in sorted(by_date.keys()):
+        groups = by_date.pop(date_str)
+        combined_new = pd.concat(groups, ignore_index=True)
+        del groups
+        path_in_repo = f"minute/{date_str}.parquet"
+        try:
+            existing_path = hf_hub_download(repo_id=HF_ALPACA_CRYPTO_DATASET_REPO, filename=path_in_repo, repo_type="dataset", token=HF_API_KEY)
+            existing = pd.read_parquet(existing_path)
+            combined = pd.concat([existing, combined_new], ignore_index=True)
+            del existing
+        except Exception:
+            combined = combined_new
+        del combined_new
+        combined = combined.drop_duplicates(subset=["symbol", "ts"]).sort_values(["symbol", "ts"]).reset_index(drop=True)
+        pending.append((path_in_repo, combined))
+        if len(pending) >= _BATCH_SIZE:
+            batch_num += 1
+            _flush(batch_num)
+        gc.collect()
+    if pending:
+        batch_num += 1
+        _flush(batch_num)
+
+    return {
+        "ok": True, "symbols_processed": symbols_processed, "symbols_requested": len(symbols),
+        "dates_written": sum(1 for v in shard_row_counts.values() if v >= 0),
+        "dates_failed": sum(1 for v in shard_row_counts.values() if v < 0),
+        "shard_row_counts": shard_row_counts,
+    }
+
+
 MAX_TRAIN_ROWS = int(os.getenv("ALPACA_CRYPTO_MAX_TRAIN_ROWS", "150000") or "150000")
 
 

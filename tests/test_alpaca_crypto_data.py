@@ -299,6 +299,153 @@ def test_push_minute_snapshot_returns_ok_false_for_an_empty_frame():
     assert acd.push_minute_snapshot(pd.DataFrame()) == {"ok": False, "reason": "no_rows"}
 
 
+# ---------------------------------------------------------------------------
+# backfill_minute_history -- deep historical catch-up, ported from
+# alpaca_options_data's own version (itself independent of alpaca_data.py's
+# -- separate HF repo, separate universe). Real gap found in review: unlike
+# stocks/options/perps, crypto never got this treatment -- confirmed live,
+# its real archive held only 7 daily shards (a week) matching exactly the
+# organic collect-one-day-at-a-time growth since this pipeline started.
+# ---------------------------------------------------------------------------
+class _FakeHfApiBatch(_FakeHfApi):
+    """create_commit-based fake -- backfill_minute_history batches many
+    date-shards into a single multi-file commit (same rate-limit incident
+    and fix as alpaca_data's/alpaca_options_data's own versions), so its
+    tests must mock create_commit, not upload_file."""
+
+    def create_commit(self, *, repo_id, repo_type, operations, commit_message):
+        for op in operations:
+            _FakeHfApiBatch.captured_upload.setdefault("commits", []).append(
+                {"path_in_repo": op.path_in_repo, "df": pd.read_parquet(op.path_or_fileobj)}
+            )
+
+
+def test_backfill_minute_history_splits_rows_by_calendar_date_and_uploads_one_shard_per_date(monkeypatch):
+    monkeypatch.setattr(acd, "HF_API_KEY", "fake-token")
+    fake_feats = pd.DataFrame({
+        "ts": [1767225600, 1767312000], "close": [100.0, 101.0], "label_up": [1, 0],
+    })
+    monkeypatch.setattr(acd, "fetch_crypto_bars", lambda symbol, *, days: pd.DataFrame({"ts": [1], "close": [1.0]}))
+    monkeypatch.setattr(acd, "engineer_features", lambda df, *, sentiment_score: fake_feats.copy())
+
+    import huggingface_hub
+
+    def fail(**kw):
+        raise RuntimeError("no existing shard")
+
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", fail)
+    _FakeHfApiBatch.captured_upload = {}
+    monkeypatch.setattr(huggingface_hub, "HfApi", _FakeHfApiBatch)
+
+    result = acd.backfill_minute_history(["BTC/USD"], days=90)
+
+    assert result["ok"] is True
+    assert result["symbols_processed"] == 1
+    assert result["dates_written"] == 2
+    uploads = _FakeHfApiBatch.captured_upload["commits"]
+    paths = sorted(u["path_in_repo"] for u in uploads)
+    assert paths == ["minute/2026-01-01.parquet", "minute/2026-01-02.parquet"]
+
+
+def test_backfill_minute_history_batches_many_dates_into_few_commits(monkeypatch):
+    """Real, confirmed incident on the stocks/options siblings: one commit
+    per calendar date hit HF's 128-commits/hour repo cap partway through a
+    long backfill and silently dropped most dates. 45 dates at the
+    20-per-batch chunk size must land in 3 commits, not 45."""
+    monkeypatch.setattr(acd, "HF_API_KEY", "fake-token")
+    base_ts = 1767225600
+    ts_values = [base_ts + i * 86400 for i in range(45)]
+    fake_feats = pd.DataFrame({"ts": ts_values, "close": [100.0] * 45, "label_up": [1] * 45})
+    monkeypatch.setattr(acd, "fetch_crypto_bars", lambda symbol, *, days: pd.DataFrame({"ts": [1], "close": [1.0]}))
+    monkeypatch.setattr(acd, "engineer_features", lambda df, *, sentiment_score: fake_feats.copy())
+
+    import huggingface_hub
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", lambda **kw: (_ for _ in ()).throw(RuntimeError("no shard")))
+    commit_calls = []
+
+    class _CommitCountingApi(_FakeHfApi):
+        def create_commit(self, *, repo_id, repo_type, operations, commit_message):
+            commit_calls.append(len(list(operations)))
+
+    monkeypatch.setattr(huggingface_hub, "HfApi", _CommitCountingApi)
+
+    result = acd.backfill_minute_history(["BTC/USD"], days=90)
+
+    assert result["ok"] is True
+    assert result["dates_written"] == 45
+    assert commit_calls == [20, 20, 5]
+
+
+def test_backfill_minute_history_merges_with_an_existing_shard_for_that_date(monkeypatch):
+    monkeypatch.setattr(acd, "HF_API_KEY", "fake-token")
+    fake_feats = pd.DataFrame({"ts": [1767225600], "close": [100.0], "label_up": [1]})
+    monkeypatch.setattr(acd, "fetch_crypto_bars", lambda symbol, *, days: pd.DataFrame({"ts": [1], "close": [1.0]}))
+    monkeypatch.setattr(acd, "engineer_features", lambda df, *, sentiment_score: fake_feats.copy())
+
+    import tempfile
+    existing_df = pd.DataFrame({"symbol": ["ETH/USD"], "ts": [999], "close": [3500.0]})
+    existing_path = tempfile.NamedTemporaryFile(suffix=".parquet", delete=False).name
+    existing_df.to_parquet(existing_path, index=False)
+
+    import huggingface_hub
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", lambda **kw: existing_path)
+    _FakeHfApiBatch.captured_upload = {}
+    monkeypatch.setattr(huggingface_hub, "HfApi", _FakeHfApiBatch)
+
+    acd.backfill_minute_history(["BTC/USD"], days=90)
+
+    uploads = _FakeHfApiBatch.captured_upload["commits"]
+    assert len(uploads) == 1
+    assert set(uploads[0]["df"]["symbol"]) == {"BTC/USD", "ETH/USD"}
+
+
+def test_backfill_minute_history_holds_sentiment_at_neutral(monkeypatch):
+    monkeypatch.setattr(acd, "HF_API_KEY", "fake-token")
+    monkeypatch.setattr(acd, "fetch_crypto_bars", lambda symbol, *, days: pd.DataFrame({"ts": [1], "close": [1.0]}))
+    captured_sentiment = {}
+
+    def fake_engineer(df, *, sentiment_score):
+        captured_sentiment["value"] = sentiment_score
+        return pd.DataFrame({"ts": [1767225600], "close": [100.0], "label_up": [1]})
+
+    monkeypatch.setattr(acd, "engineer_features", fake_engineer)
+
+    import huggingface_hub
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", lambda **kw: (_ for _ in ()).throw(RuntimeError("no shard")))
+    monkeypatch.setattr(huggingface_hub, "HfApi", _FakeHfApi)
+
+    acd.backfill_minute_history(["BTC/USD"], days=90)
+
+    assert captured_sentiment["value"] == 0.0
+
+
+def test_backfill_minute_history_returns_ok_false_without_an_hf_key(monkeypatch):
+    monkeypatch.setattr(acd, "HF_API_KEY", "")
+    result = acd.backfill_minute_history(["BTC/USD"], days=90)
+    assert result == {"ok": False, "reason": "no_hf_api_key"}
+
+
+def test_backfill_minute_history_continues_past_a_symbol_that_fails_to_fetch(monkeypatch):
+    monkeypatch.setattr(acd, "HF_API_KEY", "fake-token")
+
+    def fake_fetch(symbol, *, days):
+        if symbol == "BAD/USD":
+            raise RuntimeError("simulated fetch failure")
+        return pd.DataFrame({"ts": [1], "close": [1.0]})
+
+    monkeypatch.setattr(acd, "fetch_crypto_bars", fake_fetch)
+    monkeypatch.setattr(acd, "engineer_features", lambda df, *, sentiment_score: pd.DataFrame({"ts": [1767225600], "close": [100.0], "label_up": [1]}))
+
+    import huggingface_hub
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", lambda **kw: (_ for _ in ()).throw(RuntimeError("no shard")))
+    monkeypatch.setattr(huggingface_hub, "HfApi", _FakeHfApi)
+
+    result = acd.backfill_minute_history(["BAD/USD", "BTC/USD"], days=90)
+
+    assert result["symbols_processed"] == 1
+    assert result["symbols_requested"] == 2
+
+
 def test_upload_shard_creates_the_dataset_repo_if_missing(monkeypatch):
     monkeypatch.setattr(acd, "HF_API_KEY", "fake-token")
     import huggingface_hub
