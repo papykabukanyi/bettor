@@ -39,6 +39,76 @@ POST_EXIT_DRIFT_MEANINGFUL_PCT = 0.003
 _EXIT_REASON_PREFIXES = ("take_profit", "stop_loss", "max_hold_time", "near_expiration")
 
 
+def _is_win(trade: dict[str, Any]) -> bool:
+    return float(trade.get("realized_pnl_usd") or 0.0) > 0
+
+
+def _bucket_stats(trades: list[dict[str, Any]]) -> dict[str, Any]:
+    if not trades:
+        return {"trades": 0, "wins": 0, "losses": 0, "win_rate": None, "total_pnl_usd": 0.0, "avg_pnl_usd": None}
+    wins = sum(1 for t in trades if _is_win(t))
+    total_pnl = round(sum(float(t.get("realized_pnl_usd") or 0.0) for t in trades), 6)
+    return {
+        "trades": len(trades), "wins": wins, "losses": len(trades) - wins,
+        "win_rate": round(wins / len(trades), 4),
+        "total_pnl_usd": total_pnl, "avg_pnl_usd": round(total_pnl / len(trades), 6),
+    }
+
+
+# Same evidence-gated confidence-threshold tuning as perps_trade_analysis.py
+# (see its own recommend_confidence_threshold docstring for the full
+# rationale) -- this module stays pure analysis (recommends, never writes);
+# the actual narrow write happens in alpaca_options_strategy.apply_confidence_threshold_override,
+# called by the caller only when should_apply is True, mirroring perps'
+# exact recommend-vs-apply split.
+CONFIDENCE_TUNING_MIN_TRADES = 15
+CONFIDENCE_TUNING_CANDIDATE_STEPS = (0.02, 0.04, 0.06, 0.08)
+CONFIDENCE_TUNING_MAX_STEP = 0.05
+
+
+def recommend_confidence_threshold(trade_log: list[dict[str, Any]] | None, *, current_threshold: float) -> dict[str, Any]:
+    """Does real trade history show that a HIGHER confidence floor would
+    have produced a meaningfully better outcome -- both a better average
+    P&L AND an equal-or-better win rate, not just one metric skewed by a
+    single large win -- with enough real trades behind the comparison to
+    trust it? Returns should_apply=False whenever the evidence is thin or
+    doesn't clearly favor moving."""
+    trade_log = trade_log or []
+    trades = [t for t in trade_log if not t.get("dry_run") and t.get("entry_score") is not None]
+    baseline = [t for t in trades if float(t["entry_score"]) >= current_threshold]
+    baseline_stats = _bucket_stats(baseline)
+    if baseline_stats["trades"] < CONFIDENCE_TUNING_MIN_TRADES:
+        return {
+            "ok": True, "should_apply": False, "reason": "insufficient_trade_history",
+            "current_threshold": current_threshold, "trades_at_current": baseline_stats["trades"],
+        }
+
+    best_candidate: dict[str, Any] | None = None
+    for step in CONFIDENCE_TUNING_CANDIDATE_STEPS:
+        candidate_threshold = round(current_threshold + step, 4)
+        cohort = [t for t in trades if float(t["entry_score"]) >= candidate_threshold]
+        stats = _bucket_stats(cohort)
+        if stats["trades"] < CONFIDENCE_TUNING_MIN_TRADES:
+            continue
+        improves_pnl = stats["avg_pnl_usd"] is not None and stats["avg_pnl_usd"] > baseline_stats["avg_pnl_usd"]
+        improves_win_rate = stats["win_rate"] is not None and stats["win_rate"] >= baseline_stats["win_rate"]
+        if improves_pnl and improves_win_rate:
+            if best_candidate is None or stats["avg_pnl_usd"] > best_candidate["stats"]["avg_pnl_usd"]:
+                best_candidate = {"threshold": candidate_threshold, "stats": stats}
+
+    if best_candidate is None:
+        return {
+            "ok": True, "should_apply": False, "reason": "no_meaningfully_better_threshold",
+            "current_threshold": current_threshold, "baseline": baseline_stats,
+        }
+
+    new_threshold = min(best_candidate["threshold"], round(current_threshold + CONFIDENCE_TUNING_MAX_STEP, 4))
+    return {
+        "ok": True, "should_apply": True, "current_threshold": current_threshold,
+        "recommended_threshold": new_threshold, "baseline": baseline_stats, "candidate": best_candidate["stats"],
+    }
+
+
 def _exit_reason_bucket(reason: str | None) -> str:
     reason = reason or ""
     for prefix in _EXIT_REASON_PREFIXES:

@@ -511,6 +511,13 @@ def test_evaluate_candidate_score_is_zero_when_it_does_not_qualify():
     assert result["score"] == 0.0
 
 
+def test_evaluate_candidate_confidence_min_override_replaces_the_module_default():
+    with_stricter_override = strat.evaluate_candidate(_row(), {"model_ok": True, "probability_up": 0.6}, confidence_min=0.65)
+    assert not with_stricter_override["should_enter"]
+    with_looser_override = strat.evaluate_candidate(_row(), {"model_ok": True, "probability_up": 0.52}, confidence_min=0.5)
+    assert with_looser_override["should_enter"]
+
+
 def test_scan_and_enter_fills_the_single_slot_with_the_best_scoring_candidate(monkeypatch):
     monkeypatch.setattr(strat, "MAX_CONCURRENT_POSITIONS", 1)
     monkeypatch.setattr(alpaca_crypto_data, "get_crypto_universe", lambda: ["ETH/USD", "BTC/USD"])

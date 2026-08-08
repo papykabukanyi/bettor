@@ -519,11 +519,23 @@ ENABLE_SHORTS = _env_flag("PERPS_ENABLE_SHORTS", default=False)
 
 def _durable_state_slice(state: dict[str, Any]) -> dict[str, Any]:
     """The parts of state that can't be recovered from Kalshi's own account
-    (open positions can -- see _reconcile_positions_with_exchange)."""
+    (open positions can -- see _reconcile_positions_with_exchange).
+
+    Real, confirmed bug found in review: "tuning" (the evidence-gated
+    confidence-threshold override -- see apply_confidence_threshold_override)
+    was missing from this slice entirely. Confirmed live: every deploy logs
+    "recovered durable state from HF after local state was missing" (local
+    disk doesn't survive a fresh deploy) -- so any confidence threshold
+    this account had actually LEARNED from real trade history was silently
+    reset back to the hardcoded MODEL_CONFIDENCE_MIN default on every single
+    deploy, with no error or warning. The whole point of this mechanism is
+    that it persists WITHOUT a redeploy; it wasn't surviving the deploys
+    that keep happening anyway."""
     return {
         "trade_log": state.get("trade_log") or [],
         "realized_pnl_by_date": state.get("realized_pnl_by_date") or {},
         "daily_reference_balance": state.get("daily_reference_balance") or {},
+        "tuning": state.get("tuning") or {},
     }
 
 

@@ -230,12 +230,20 @@ def decide_entry_technical(row: dict[str, Any]) -> tuple[bool, str]:
     return True, f"dip ({dip_pct:+.3%}, z={dollar_volume_z:.2f})"
 
 
-def evaluate_candidate(row: dict[str, Any], model_prediction: dict[str, Any] | None) -> dict[str, Any]:
+def evaluate_candidate(
+    row: dict[str, Any], model_prediction: dict[str, Any] | None, *, confidence_min: float | None = None,
+) -> dict[str, Any]:
     """`score` (added alongside `should_enter`) is what lets scan_and_enter
     fill its limited slots with the BEST qualifying candidates instead of
     whichever sorts first alphabetically -- same shape as perps_strategy.py's
     own scan_for_entries(), which ranks qualifying candidates by score
-    before slicing to open_slots."""
+    before slicing to open_slots.
+
+    `confidence_min` overrides the module-level MODEL_CONFIDENCE_MIN
+    default when given -- see scan_and_enter, which reads a durable-state
+    override set by alpaca_crypto_trade_analysis.recommend_confidence_threshold's
+    own evidence-gated tuning (apply_confidence_threshold_override), same
+    pattern perps_strategy.py already uses."""
     technical_ok, technical_reason = decide_entry_technical(row)
     result: dict[str, Any] = {
         "symbol": row.get("symbol"), "technical_ok": technical_ok, "reason": technical_reason,
@@ -244,12 +252,13 @@ def evaluate_candidate(row: dict[str, Any], model_prediction: dict[str, Any] | N
     if not technical_ok:
         return result
 
+    effective_confidence_min = confidence_min if confidence_min is not None else MODEL_CONFIDENCE_MIN
     if model_prediction and model_prediction.get("model_ok"):
         proba_up = model_prediction["probability_up"]
         result["model_ok"] = True
         result["probability_up"] = proba_up
         result["model_direction"] = "up" if proba_up >= 0.5 else "down"
-        if proba_up >= MODEL_CONFIDENCE_MIN:
+        if proba_up >= effective_confidence_min:
             result["should_enter"] = True
             result["reason"] = f"{technical_reason} + model confident up ({proba_up:.2%})"
             result["score"] = proba_up
@@ -442,6 +451,7 @@ def _maybe_run_batch_trade_analysis() -> None:
                 return
             state["last_batch_analysis_trade_count"] = len(real_trades)
             _save_state(state, push_durable=True)
+            current_threshold = (state.get("tuning") or {}).get("model_confidence_min", MODEL_CONFIDENCE_MIN)
 
         recent = real_trades[-alpaca_crypto_trade_analysis.BATCH_SIZE:]
         candles_by_symbol: dict[str, list[dict[str, Any]]] = {}
@@ -454,6 +464,10 @@ def _maybe_run_batch_trade_analysis() -> None:
         batch = alpaca_crypto_trade_analysis.analyze_recent_trade_batch(real_trades, candles_by_symbol=candles_by_symbol)
         text = alpaca_crypto_trade_analysis.format_batch_snapshot_text(batch, market="crypto")
         threads_post.post_trade_analysis_summary(text, market="crypto")
+
+        tuning_rec = alpaca_crypto_trade_analysis.recommend_confidence_threshold(real_trades, current_threshold=current_threshold)
+        if tuning_rec.get("should_apply"):
+            apply_confidence_threshold_override(tuning_rec["recommended_threshold"], reason="5-trade batch review")
     except Exception:
         logger.warning("[alpaca_crypto_strategy] batch trade analysis failed", exc_info=True)
 
@@ -535,12 +549,38 @@ def _today_str() -> str:
     return dt.datetime.now(dt.timezone.utc).date().isoformat()
 
 
+def apply_confidence_threshold_override(new_threshold: float, *, reason: str) -> dict[str, Any]:
+    """Applies an evidence-gated confidence-floor adjustment (see
+    alpaca_crypto_trade_analysis.recommend_confidence_threshold) durably,
+    WITHOUT a redeploy -- stored in state["tuning"] (pushed to HF like the
+    rest of durable state) and read by scan_and_enter on every cycle, not
+    the OS env var MODEL_CONFIDENCE_MIN is seeded from at import time. Same
+    pattern perps_strategy.py already uses."""
+    with _STATE_LOCK:
+        state = _load_state()
+        previous = (state.get("tuning") or {}).get("model_confidence_min", MODEL_CONFIDENCE_MIN)
+        state["tuning"] = {
+            "model_confidence_min": new_threshold,
+            "updated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+            "reason": reason, "previous": previous,
+        }
+        _save_state(state, push_durable=True)
+        return dict(state["tuning"])
+
+
 def _durable_state_slice(state: dict[str, Any]) -> dict[str, Any]:
+    # "tuning" (the evidence-gated confidence-threshold override -- see
+    # apply_confidence_threshold_override) MUST be included here -- a real,
+    # confirmed bug found in perps_strategy.py's own identical slice left
+    # it out, silently resetting any confidence threshold actually LEARNED
+    # from real trade history back to the hardcoded default on every single
+    # deploy. Included from the start here rather than repeating that bug.
     return {
         "positions": state.get("positions") or [],
         "trade_log": state.get("trade_log") or [],
         "realized_pnl_by_date": state.get("realized_pnl_by_date") or {},
         "daily_reference_balance": state.get("daily_reference_balance") or {},
+        "tuning": state.get("tuning") or {},
     }
 
 
@@ -863,6 +903,12 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
             reference_balance and reference_balance > 0
             and today_pnl <= -abs(DAILY_LOSS_CAP_PCT) * reference_balance
         )
+        # A confidence floor genuinely learned from this account's own real
+        # trade history (see alpaca_crypto_trade_analysis.recommend_confidence_threshold
+        # + apply_confidence_threshold_override below) -- falls back to the
+        # module-level MODEL_CONFIDENCE_MIN default until enough real trades
+        # exist to justify moving it. Same pattern perps_strategy.py uses.
+        confidence_min_override = (state.get("tuning") or {}).get("model_confidence_min")
         # push_durable only on the (once-daily) event a fresh reference
         # balance gets captured -- the value a restart must not silently lose.
         _save_state(state, push_durable=reference_was_just_set)
@@ -880,7 +926,7 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
             if row is None:
                 continue
             model_prediction = predict_direction(symbol)
-            candidate = evaluate_candidate(row, model_prediction)
+            candidate = evaluate_candidate(row, model_prediction, confidence_min=confidence_min_override)
             if not candidate["should_enter"]:
                 opened.append({"symbol": symbol, "ok": True, "action": "skipped", "reason": candidate["reason"]})
                 continue
@@ -937,6 +983,12 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
                 "entry_probability_up": candidate.get("probability_up"),
                 "entry_model_direction": candidate.get("model_direction"),
                 "entry_reason": candidate.get("reason"),
+                # candidate["score"] -- the one number actually compared
+                # against MODEL_CONFIDENCE_MIN at entry (or the technical-
+                # only fallback's dip-depth score) -- carried through so
+                # recommend_confidence_threshold can ask real trade history
+                # whether a HIGHER floor would have performed better.
+                "entry_score": candidate.get("score"),
                 # Raw indicator values at decision time -- carried through
                 # to the closed trade record so the exit chart's indicator
                 # panel can show what the bot saw at ENTRY, not just exit
@@ -1143,6 +1195,7 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                     "entry_probability_up": position.get("entry_probability_up"),
                     "entry_model_direction": position.get("entry_model_direction"),
                     "entry_reason": position.get("entry_reason"),
+                    "entry_score": position.get("entry_score"),
                     "entry_dollar_volume_z": position.get("entry_dollar_volume_z"),
                     "entry_macd_hist_pct": position.get("entry_macd_hist_pct"),
                     "entry_bb_pct_b": position.get("entry_bb_pct_b"),

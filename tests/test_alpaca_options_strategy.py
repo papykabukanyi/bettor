@@ -60,6 +60,26 @@ def test_evaluate_candidate_skips_when_the_model_is_not_confident_either_way():
     assert result["direction"] is None
 
 
+def test_evaluate_candidate_score_is_probability_up_for_a_call():
+    result = strat.evaluate_candidate(_row(), {"model_ok": True, "probability_up": 0.7})
+    assert result["should_enter"] and result["direction"] == "up"
+    assert result["score"] == pytest.approx(0.7)
+
+
+def test_evaluate_candidate_score_is_one_minus_probability_up_for_a_put():
+    result = strat.evaluate_candidate(_row(), {"model_ok": True, "probability_up": 0.2})
+    assert result["should_enter"] and result["direction"] == "down"
+    assert result["score"] == pytest.approx(0.8)
+
+
+def test_evaluate_candidate_confidence_min_override_replaces_the_module_default():
+    # 0.6 clears the module default (0.58) but not an explicit, stricter override.
+    with_default = strat.evaluate_candidate(_row(), {"model_ok": True, "probability_up": 0.6})
+    assert with_default["should_enter"]
+    with_stricter_override = strat.evaluate_candidate(_row(), {"model_ok": True, "probability_up": 0.6}, confidence_min=0.65)
+    assert not with_stricter_override["should_enter"]
+
+
 def _position(entry_price=5.0, minutes_ago=0, expiration_days_out=30):
     opened = dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=minutes_ago)
     expiration = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=expiration_days_out)).date().isoformat()

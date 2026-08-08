@@ -17,13 +17,13 @@ def _closed_trade(
     *, pnl: float, option_type: str = "call", reason: str = "take_profit (+2%)",
     opened_at: str = "2026-08-01T12:00:00+00:00", closed_at: str = "2026-08-01T12:10:00+00:00",
     symbol: str = "AAPL240223C00195000", underlying_symbol: str = "AAPL",
-    entry_probability_up: float | None = 0.6, dry_run: bool = False,
+    entry_probability_up: float | None = 0.6, dry_run: bool = False, entry_score: float | None = 0.6,
 ) -> dict:
     return {
         "symbol": symbol, "underlying_symbol": underlying_symbol, "option_type": option_type,
         "realized_pnl_usd": pnl, "reason": reason, "dry_run": dry_run,
         "opened_at": opened_at, "closed_at": closed_at,
-        "entry_probability_up": entry_probability_up, "hold_minutes": 10.0,
+        "entry_probability_up": entry_probability_up, "hold_minutes": 10.0, "entry_score": entry_score,
     }
 
 
@@ -140,3 +140,35 @@ def test_format_batch_snapshot_text_includes_each_trades_lesson():
     text = aota.format_batch_snapshot_text(batch, market="options")
     assert "A:" in text and "B:" in text
     assert "1W/1L" in text
+
+
+def test_recommend_confidence_threshold_insufficient_history_does_not_apply():
+    trades = [_closed_trade(pnl=1.0, entry_score=0.58) for _ in range(3)]
+    result = aota.recommend_confidence_threshold(trades, current_threshold=0.58)
+    assert result["should_apply"] is False
+    assert result["reason"] == "insufficient_trade_history"
+
+
+def test_recommend_confidence_threshold_recommends_when_evidence_supports_it():
+    trades = []
+    for _ in range(aota.CONFIDENCE_TUNING_MIN_TRADES):
+        trades.append(_closed_trade(pnl=-0.2, entry_score=0.59))  # loses, below the higher band
+    for _ in range(aota.CONFIDENCE_TUNING_MIN_TRADES):
+        trades.append(_closed_trade(pnl=0.5, entry_score=0.65))  # wins, clears the higher band too
+    result = aota.recommend_confidence_threshold(trades, current_threshold=0.58)
+    assert result["should_apply"] is True
+    assert result["recommended_threshold"] > 0.58
+    assert result["recommended_threshold"] <= round(0.58 + aota.CONFIDENCE_TUNING_MAX_STEP, 4)
+
+
+def test_recommend_confidence_threshold_does_not_apply_without_a_clear_improvement():
+    trades = [_closed_trade(pnl=0.1, entry_score=score) for score in [0.59, 0.63, 0.67, 0.71] for _ in range(10)]
+    result = aota.recommend_confidence_threshold(trades, current_threshold=0.58)
+    assert result["should_apply"] is False
+
+
+def test_recommend_confidence_threshold_ignores_dry_run_trades():
+    trades = [_closed_trade(pnl=5.0, entry_score=0.65, dry_run=True) for _ in range(aota.CONFIDENCE_TUNING_MIN_TRADES)]
+    result = aota.recommend_confidence_threshold(trades, current_threshold=0.58)
+    assert result["should_apply"] is False
+    assert result["reason"] == "insufficient_trade_history"

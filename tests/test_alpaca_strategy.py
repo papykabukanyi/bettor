@@ -90,6 +90,28 @@ def test_evaluate_candidate_skips_model_check_when_technical_gate_fails():
     assert result["model_ok"] is False
 
 
+def test_evaluate_candidate_score_is_model_probability_when_model_based():
+    result = strat.evaluate_candidate(_row(), {"model_ok": True, "probability_up": 0.7})
+    assert result["should_enter"]
+    assert result["score"] == 0.7
+
+
+def test_evaluate_candidate_score_is_dip_depth_in_technical_only_fallback():
+    result = strat.evaluate_candidate(_row(), model_prediction=None)
+    assert result["should_enter"]
+    assert result["score"] > 0.0
+
+
+def test_evaluate_candidate_confidence_min_override_replaces_the_module_default():
+    # 0.6 clears the module default (0.55) but not an explicit, stricter override.
+    with_default = strat.evaluate_candidate(_row(), {"model_ok": True, "probability_up": 0.6})
+    assert with_default["should_enter"]
+    with_stricter_override = strat.evaluate_candidate(_row(), {"model_ok": True, "probability_up": 0.6}, confidence_min=0.65)
+    assert not with_stricter_override["should_enter"]
+    with_looser_override = strat.evaluate_candidate(_row(), {"model_ok": True, "probability_up": 0.52}, confidence_min=0.5)
+    assert with_looser_override["should_enter"]
+
+
 def _position(entry_price=100.0, minutes_ago=0):
     opened = dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=minutes_ago)
     return {"entry_price": entry_price, "opened_at": opened.isoformat()}
