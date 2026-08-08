@@ -404,6 +404,170 @@ def generate_sentiment_snapshot(*, market: str, ticker_sentiments: list[dict[str
             del img
 
 
+_NEWS_CARD_WIDTH = _s(900)
+_NEWS_CARD_MARGIN = _s(56)
+_NEWS_CARD_TOP_MARGIN = _s(48)
+_NEWS_CARD_HEADLINE_MAX_LINES = 4
+_NEWS_CARD_SECONDARY_MAX = 3
+_NEWS_CARD_BOTTOM_MARGIN = _s(40)
+# Per-market accent -- also gives the 4 services' trending posts a distinct
+# look at a glance, on top of each card's own headline text always being
+# genuinely different (see generate_news_card's own docstring for why this
+# whole function exists).
+_NEWS_CARD_ACCENT = {
+    "crypto": (247, 147, 26),   # bitcoin orange
+    "stocks": (59, 130, 246),   # blue
+    "options": (168, 85, 247),  # purple
+    "perps": (34, 211, 238),    # cyan
+}
+
+
+def _wrap_lines(draw, text: str, font, max_width: float, max_lines: int) -> list[str]:
+    """Greedy word-wrap (Pillow has no built-in) -- truncates the last line
+    with an ellipsis rather than overflowing past max_lines."""
+    words = text.split()
+    lines: list[str] = []
+    current = ""
+    truncated = False
+    for word in words:
+        candidate = f"{current} {word}".strip()
+        if draw.textlength(candidate, font=font) <= max_width:
+            current = candidate
+            continue
+        if current:
+            lines.append(current)
+        current = word
+        if len(lines) == max_lines:
+            truncated = True
+            break
+    else:
+        if current:
+            lines.append(current)
+
+    if len(lines) > max_lines:
+        lines = lines[:max_lines]
+        truncated = True
+
+    if truncated and lines:
+        last = lines[-1]
+        while draw.textlength(last + "…", font=font) > max_width and len(last) > 1:
+            last = last[:-1].rstrip()
+        lines[-1] = last + "…"
+    return lines
+
+
+def generate_news_card(
+    *, market: str, headline: str, source: str = "", secondary: list[str] | None = None, hashtags: str = "",
+) -> Path | None:
+    """Renders the trending-news post's own headline, source, secondary
+    headlines, and hashtags DIRECTLY ONTO a branded image -- i.e. the post
+    IS the picture, not a caption next to one.
+
+    Real, confirmed bug this replaces: the previous approach tried to
+    attach a real photo (the story's own RSS image, or one scraped from its
+    article link's og:image tag). For Google-News-sourced stories (stocks/
+    options), that scrape resolves the SAME static Google News branding
+    image for every single article regardless of headline -- confirmed live
+    by resolving 6 different real articles' og:image and getting one
+    identical URL back for all 6 (Google's own interstitial redirect page
+    doesn't carry the real publisher's og:image, since requests.get never
+    follows its JS-based redirect to the actual article). That's exactly
+    the "same picture every time" behavior reported live. Generating this
+    card instead sidesteps the scrape entirely -- every post's image is
+    trivially guaranteed distinct (it's rendered from that story's own
+    text), and never depends on a third-party page's markup staying
+    scrapeable.
+
+    Never raises -- returns None (caller falls back to a text-only post,
+    same as any other missing-image case) on any rendering failure."""
+    try:
+        from PIL import Image, ImageDraw
+    except Exception as exc:
+        logger.warning("[chart_snapshot] Pillow unavailable: %s", exc)
+        return None
+
+    accent = _NEWS_CARD_ACCENT.get(market, _NEWS_CARD_ACCENT["perps"])
+    secondary = [s for s in (secondary or []) if s][:_NEWS_CARD_SECONDARY_MAX]
+
+    img = None
+    try:
+        label_font = _font(_s(15))
+        headline_font = _font(_s(30))
+        source_font = _font(_s(15))
+        secondary_font = _font(_s(16))
+        hashtag_font = _font(_s(15))
+
+        # Build with a throwaway image first purely to measure text (Pillow
+        # needs a real ImageDraw to call textlength) -- the actual canvas
+        # height depends on how many lines the headline/secondary wrap to.
+        probe = Image.new("RGB", (1, 1))
+        probe_draw = ImageDraw.Draw(probe)
+        content_width = _NEWS_CARD_WIDTH - _NEWS_CARD_MARGIN * 2
+        headline_lines = _wrap_lines(probe_draw, headline, headline_font, content_width, _NEWS_CARD_HEADLINE_MAX_LINES)
+        secondary_lines = [_wrap_lines(probe_draw, s, secondary_font, content_width - _s(20), 1)[0] for s in secondary]
+
+        y = _NEWS_CARD_TOP_MARGIN
+        y += _s(30)  # accent bar + market label row
+        y += len(headline_lines) * _s(40) + _s(16)
+        if source:
+            y += _s(24)
+        if secondary_lines:
+            y += _s(28)  # "Also trending:" heading
+            y += len(secondary_lines) * _s(26)
+        y += _s(20)  # divider spacing
+        y += _s(30)  # hashtag line
+        height = y + _NEWS_CARD_BOTTOM_MARGIN
+
+        img = Image.new("RGB", (_NEWS_CARD_WIDTH, height), _BG)
+        draw = ImageDraw.Draw(img)
+
+        draw.rectangle([(0, 0), (_NEWS_CARD_WIDTH, _s(10))], fill=accent)
+        y = _NEWS_CARD_TOP_MARGIN
+        draw.text((_NEWS_CARD_MARGIN, y), f"{market.upper()} NEWS", fill=accent, font=label_font)
+        y += _s(30)
+
+        for line in headline_lines:
+            draw.text((_NEWS_CARD_MARGIN, y), line, fill=_TEXT_PRIMARY, font=headline_font)
+            y += _s(40)
+        y += _s(16)
+
+        if source:
+            draw.text((_NEWS_CARD_MARGIN, y), f"via {source}", fill=_TEXT_MUTED, font=source_font)
+            y += _s(24)
+
+        if secondary_lines:
+            draw.text((_NEWS_CARD_MARGIN, y), "Also trending:", fill=_TEXT_MUTED, font=source_font)
+            y += _s(28)
+            for line in secondary_lines:
+                # A plain ASCII dash, not a real bullet glyph -- Pillow's
+                # own bundled default font (see _font's own docstring on
+                # why this codebase uses it) doesn't carry U+2022, and
+                # renders it as a visible tofu box instead. Same reason
+                # generate_sentiment_snapshot uses "->"/"<-" instead of real
+                # Unicode arrows.
+                draw.text((_NEWS_CARD_MARGIN, y), f"-  {line}", fill=_TEXT_MUTED, font=secondary_font)
+                y += _s(26)
+
+        y += _s(4)
+        draw.line([(_NEWS_CARD_MARGIN, y), (_NEWS_CARD_WIDTH - _NEWS_CARD_MARGIN, y)], fill=_AXIS, width=_s(1))
+        y += _s(16)
+        if hashtags:
+            draw.text((_NEWS_CARD_MARGIN, y), hashtags, fill=accent, font=hashtag_font)
+
+        CHARTS_DIR.mkdir(parents=True, exist_ok=True)
+        filename = f"news_{_sanitize(market)}_{int(time.time())}.png"
+        out_path = CHARTS_DIR / filename
+        img.save(out_path, format="PNG")
+        _prune_old_charts()
+        return out_path
+    except Exception as exc:
+        logger.warning("[chart_snapshot] news card rendering failed for market %s: %s", market, exc)
+        return None
+    finally:
+        if img is not None:
+            del img
+
+
 def format_technical_indicators(row: dict[str, Any] | None) -> dict[str, str]:
     """Formats a raw engineered-feature-row-like dict (dollar_volume_z,
     macd_hist_pct, bb_pct_b, rsi_14, sentiment_score, volatility_30 --

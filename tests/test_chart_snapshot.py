@@ -234,3 +234,104 @@ def test_generate_sentiment_snapshot_handles_all_neutral_scores():
     rows = [{"ticker": "AAPL", "sentiment_score": 0.0}, {"ticker": "MSFT", "sentiment_score": 0.0}]
     path = chart_snapshot.generate_sentiment_snapshot(market="stocks", ticker_sentiments=rows)
     assert path is not None
+
+
+# ── generate_news_card ───────────────────────────────────────────────────────
+
+def test_generate_news_card_saves_a_real_png_file():
+    path = chart_snapshot.generate_news_card(
+        market="crypto", headline="Bitcoin surges past resistance", source="cointelegraph",
+        secondary=["ETF inflows accelerate"], hashtags="#Crypto #Bitcoin",
+    )
+    assert path is not None
+    assert path.exists()
+    assert path.suffix == ".png"
+    assert path.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_generate_news_card_handles_missing_source_and_secondary():
+    """Real headline-only stories (no RSS enclosure source, no corroborated
+    secondary items) must still render a valid, shorter card, not crash."""
+    path = chart_snapshot.generate_news_card(market="stocks", headline="Markets rally on rate cut hopes")
+    assert path is not None
+    assert path.exists()
+
+
+def test_generate_news_card_wraps_a_long_headline_without_raising():
+    long_headline = " ".join(["word"] * 60)
+    path = chart_snapshot.generate_news_card(market="options", headline=long_headline, hashtags="#Options")
+    assert path is not None
+    from PIL import Image
+    with Image.open(path) as img:
+        # Headline is capped at _NEWS_CARD_HEADLINE_MAX_LINES -- confirms the
+        # canvas doesn't grow unbounded for an unusually long real headline.
+        assert img.height < chart_snapshot._s(500)  # noqa: SLF001
+
+
+def test_generate_news_card_uses_a_distinct_accent_color_per_market():
+    """Real, confirmed bug this whole feature replaces: every trending post
+    used to attach the SAME scraped image regardless of market or story
+    (see post_trending_news's own docstring) -- confirming each market
+    renders with its own distinct accent color is a cheap, direct way to
+    verify these cards are NOT visually identical to each other."""
+    from PIL import Image
+
+    paths = {
+        market: chart_snapshot.generate_news_card(market=market, headline="Same headline text", hashtags="#Tag")
+        for market in ("crypto", "stocks", "options", "perps")
+    }
+    accent_pixels = {}
+    for market, path in paths.items():
+        assert path is not None
+        with Image.open(path) as img:
+            accent_pixels[market] = img.getpixel((5, 5))
+    assert len(set(accent_pixels.values())) == 4  # all 4 markets render a genuinely different accent color
+
+
+def test_generate_news_card_returns_none_when_pillow_is_unavailable(monkeypatch):
+    import builtins
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "PIL":
+            raise ImportError("simulated missing Pillow")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    assert chart_snapshot.generate_news_card(market="crypto", headline="Bitcoin surges") is None
+
+
+# ── _wrap_lines ───────────────────────────────────────────────────────────────
+
+def _draw():
+    from PIL import Image, ImageDraw
+    return ImageDraw.Draw(Image.new("RGB", (1, 1)))
+
+
+def test_wrap_lines_fits_short_text_on_one_line():
+    font = chart_snapshot._font(20)  # noqa: SLF001
+    lines = chart_snapshot._wrap_lines(_draw(), "Short headline", font, max_width=1000, max_lines=4)  # noqa: SLF001
+    assert lines == ["Short headline"]
+
+
+def test_wrap_lines_never_exceeds_max_lines():
+    font = chart_snapshot._font(20)  # noqa: SLF001
+    text = " ".join(["word"] * 80)
+    lines = chart_snapshot._wrap_lines(_draw(), text, font, max_width=200, max_lines=3)  # noqa: SLF001
+    assert len(lines) <= 3
+
+
+def test_wrap_lines_truncates_the_last_line_with_an_ellipsis():
+    font = chart_snapshot._font(20)  # noqa: SLF001
+    text = " ".join(["word"] * 80)
+    lines = chart_snapshot._wrap_lines(_draw(), text, font, max_width=200, max_lines=2)  # noqa: SLF001
+    assert lines[-1].endswith("…")
+
+
+def test_wrap_lines_respects_the_configured_width():
+    font = chart_snapshot._font(20)  # noqa: SLF001
+    draw = _draw()
+    text = "one two three four five six seven eight"
+    lines = chart_snapshot._wrap_lines(draw, text, font, max_width=120, max_lines=10)  # noqa: SLF001
+    for line in lines:
+        assert draw.textlength(line, font=font) <= 120

@@ -23,8 +23,6 @@ import logging
 import os
 import re
 
-import requests
-
 from data import threads_client
 
 logger = logging.getLogger(__name__)
@@ -32,7 +30,6 @@ logger = logging.getLogger(__name__)
 THREADS_POST_ENABLED = str(os.getenv("THREADS_POST_ENABLED", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
 
 _THREADS_POST_MAX_CHARS = 500
-_OG_IMAGE_TIMEOUT_SEC = 8
 
 # Every post used to say "Kalshi Perps" regardless of which of the four
 # asset-class services actually sent it -- a real mislabeling bug once
@@ -101,37 +98,6 @@ def _extract_keyword_hashtags(text: str, *, max_tags: int = 3) -> list[str]:
         if len(found) >= max_tags:
             break
     return found
-
-
-def _resolve_og_image(url: str) -> str | None:
-    """Best-effort: fetches `url` and pulls its <meta property="og:image">
-    -- used when the RSS feed itself carries no usable enclosure/media
-    image (Google News' feed, which stock_news.py's trending story relies
-    on, is the real case this exists for -- crypto_news.py's three direct
-    newsroom feeds already carry a real image URL, so this is skipped
-    there). Confirmed live: even Google News' own redirect/interstitial
-    page (it doesn't HTTP-redirect straight to the publisher) carries a
-    usable og:image of its own. Never raises -- returns None on any
-    failure, same contract as everything else in this module."""
-    if not url:
-        return None
-    try:
-        resp = requests.get(url, timeout=_OG_IMAGE_TIMEOUT_SEC, headers={"User-Agent": "Mozilla/5.0"})
-        resp.raise_for_status()
-        match = re.search(
-            r'<meta[^>]+(?:property|name)=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']',
-            resp.text, re.IGNORECASE,
-        )
-        if not match:
-            # Attribute order can be reversed (content before property).
-            match = re.search(
-                r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+(?:property|name)=["\']og:image["\']',
-                resp.text, re.IGNORECASE,
-            )
-        return match.group(1) if match else None
-    except Exception as exc:
-        logger.debug("[threads_post] og:image resolve failed for %s: %s", url, exc)
-        return None
 
 
 def _clean_headline(title: str) -> str:
@@ -341,24 +307,35 @@ def post_hourly_status(
 
 
 def post_trending_news(story: dict | None, *, market: str) -> bool:
-    """Posts the single most attention-worthy trending story right now --
-    a real photo (the story's own RSS image, or one resolved from its
-    article link -- see _resolve_og_image) plus a catchy hook headline, a
-    couple more trending headlines for context, and topical hashtags (see
-    _format_trending_story_caption). Replaces the old plain-text headline
-    list: the whole point of this post is to actually help this account
-    gain followers/engagement on Threads, not just log a digest nobody
-    stops to read. `story` comes from crypto_news.get_trending_story() /
+    """Posts the single most attention-worthy trending story right now as a
+    GENERATED image card -- the headline, source, secondary headlines, and
+    hashtags are rendered directly onto the picture itself (see
+    chart_snapshot.generate_news_card), not attached as a caption next to a
+    scraped photo. Replaces the old plain-text headline list: the whole
+    point of this post is to actually help this account gain followers/
+    engagement on Threads, not just log a digest nobody stops to read.
+    `story` comes from crypto_news.get_trending_story() /
     stock_news.get_trending_story() -- {"title", "link", "image_url",
     "source", "secondary"}, or None if every feed failed.
+
+    Real, confirmed bug this replaces: the previous version attached the
+    story's own RSS image, or one scraped from its article link's og:image
+    tag. For Google-News-sourced stories (stocks/options), that scrape
+    returns the SAME static Google News branding image for every article
+    regardless of headline (confirmed live: 6 different real articles all
+    resolved to one identical og:image URL, since Google's interstitial
+    redirect page never carries the real publisher's own image) -- exactly
+    the "same picture every time" behavior reported live. Generating the
+    card instead guarantees every post's image is genuinely distinct (it's
+    rendered from that story's own text) and never depends on a
+    third-party page's markup staying scrapeable.
 
     Runs every 30 minutes (see app_kalshi.py's/alpaca_server.py's own
     scheduled job) independent of whether any trade happened. Same
     best-effort, never-raise contract as every other post here -- and
-    specifically falls back to a plain text post if no image could be
-    resolved, or if the image post itself fails for any reason (e.g.
-    Threads rejects the source's own image URL) -- a real trending post
-    still beats none."""
+    specifically falls back to a plain text post if the card couldn't be
+    rendered/hosted, or if the image post itself fails for any reason -- a
+    real trending post still beats none."""
     if not THREADS_POST_ENABLED:
         return False
     if not story:
@@ -371,7 +348,25 @@ def post_trending_news(story: dict | None, *, market: str) -> bool:
             return False
 
     caption = _format_trending_story_caption(story, market=market)
-    image_url = story.get("image_url") or _resolve_og_image(story.get("link") or "")
+    image_url = None
+    try:
+        from data import chart_snapshot
+
+        title = _clean_headline(story["title"])
+        secondary = [_clean_headline(s) for s in (story.get("secondary") or []) if s]
+        hashtags = _hashtags_for_market(market)
+        extra_tags = _extract_keyword_hashtags(title)
+        extra_tags = [t for t in extra_tags if t.lower() not in hashtags.lower()]
+        if extra_tags:
+            hashtags = f"{hashtags} {' '.join(extra_tags)}"
+        chart_path = chart_snapshot.generate_news_card(
+            market=market, headline=title, source=story.get("source") or "", secondary=secondary, hashtags=hashtags,
+        )
+        if chart_path is not None:
+            image_url = chart_snapshot.public_url_for(chart_path)
+    except Exception as exc:
+        logger.warning("[threads_post] news card generation failed, falling back to text: %s", exc)
+
     if image_url:
         try:
             threads_client.create_and_publish_image_post(image_url, caption)

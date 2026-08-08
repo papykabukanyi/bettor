@@ -508,7 +508,23 @@ def test_trending_news_reports_nothing_notable_with_no_story(monkeypatch):
     assert "nothing notable" in posted[0].lower()
 
 
-def test_trending_news_posts_an_image_with_the_headline_and_secondary_stories(monkeypatch):
+def _mock_charts(monkeypatch, tmp_path):
+    from data import chart_snapshot
+
+    monkeypatch.setattr(chart_snapshot, "CHARTS_DIR", tmp_path / "charts")
+    monkeypatch.setenv("RENDER_EXTERNAL_URL", "https://bettor-schwab.onrender.com")
+
+
+def test_trending_news_posts_a_generated_image_card_with_the_headline_and_secondary_stories(monkeypatch, tmp_path):
+    """Real, confirmed bug this replaces: post_trending_news used to attach
+    the story's own raw image_url (or one scraped via og:image) as-is --
+    for Google-News-sourced stories that scrape resolved the SAME static
+    Google branding image for every article regardless of headline
+    (confirmed live). Now the image itself is GENERATED from the story's
+    own text (see chart_snapshot.generate_news_card), so it's always a
+    real, distinct picture with the headline literally printed on it, not
+    just a caption next to a possibly-repeated photo."""
+    _mock_charts(monkeypatch, tmp_path)
     posted = []
     monkeypatch.setattr(
         threads_post.threads_client, "create_and_publish_image_post",
@@ -516,7 +532,7 @@ def test_trending_news_posts_an_image_with_the_headline_and_secondary_stories(mo
     )
     threads_post.post_trending_news(_story(), market="crypto")
     image_url, text = posted[0]
-    assert image_url == "https://example.com/photo.jpg"
+    assert image_url.startswith("https://bettor-schwab.onrender.com/chart/")
     assert "Crypto news" in text
     assert "Bitcoin surges past resistance" in text
     assert "ETF inflows accelerate" in text
@@ -525,7 +541,32 @@ def test_trending_news_posts_an_image_with_the_headline_and_secondary_stories(mo
     assert "#Bitcoin" in text
 
 
-def test_trending_news_labels_stocks_market(monkeypatch):
+def test_trending_news_bakes_the_headline_and_hashtags_into_the_image_itself(monkeypatch, tmp_path):
+    """Direct check that the picture IS the post, not just a caption next
+    to an unrelated photo -- generate_news_card must be called with this
+    story's own real headline/source/secondary/hashtags."""
+    from data import chart_snapshot
+
+    _mock_charts(monkeypatch, tmp_path)
+    monkeypatch.setattr(threads_post.threads_client, "create_and_publish_image_post", lambda image_url, text="": None)
+    captured = {}
+    real_generate = chart_snapshot.generate_news_card
+
+    def spy(**kwargs):
+        captured.update(kwargs)
+        return real_generate(**kwargs)
+
+    monkeypatch.setattr(chart_snapshot, "generate_news_card", spy)
+    threads_post.post_trending_news(_story(), market="crypto")
+    assert captured["market"] == "crypto"
+    assert captured["headline"] == "Bitcoin surges past resistance"
+    assert captured["source"] == "cointelegraph"
+    assert captured["secondary"] == ["ETF inflows accelerate"]
+    assert "#Crypto" in captured["hashtags"]
+
+
+def test_trending_news_labels_stocks_market(monkeypatch, tmp_path):
+    _mock_charts(monkeypatch, tmp_path)
     posted = []
     monkeypatch.setattr(
         threads_post.threads_client, "create_and_publish_image_post",
@@ -535,11 +576,12 @@ def test_trending_news_labels_stocks_market(monkeypatch):
     assert "Stocks news" in posted[0][1]
 
 
-def test_trending_news_labels_options_market(monkeypatch):
+def test_trending_news_labels_options_market(monkeypatch, tmp_path):
     """Real, confirmed mislabeling bug found in review: this used to
     collapse every market that wasn't literally "crypto" into "Stocks" --
     so options' own trending-news post rendered indistinguishably from
     the actual stocks service's own posts, and got the wrong hashtags."""
+    _mock_charts(monkeypatch, tmp_path)
     posted = []
     monkeypatch.setattr(
         threads_post.threads_client, "create_and_publish_image_post",
@@ -552,7 +594,8 @@ def test_trending_news_labels_options_market(monkeypatch):
     assert "#OptionsTrading" in text
 
 
-def test_trending_news_labels_perps_market(monkeypatch):
+def test_trending_news_labels_perps_market(monkeypatch, tmp_path):
+    _mock_charts(monkeypatch, tmp_path)
     posted = []
     monkeypatch.setattr(
         threads_post.threads_client, "create_and_publish_image_post",
@@ -564,17 +607,22 @@ def test_trending_news_labels_perps_market(monkeypatch):
     assert "#Kalshi" in text
 
 
-def test_trending_news_falls_back_to_text_when_no_image_is_available(monkeypatch):
-    """No RSS enclosure and og:image resolution both came up empty -- a
-    real trending post (text-only) still beats posting nothing at all."""
+def test_trending_news_falls_back_to_text_when_the_card_cant_be_generated(monkeypatch):
+    """Card rendering failed (or no RENDER_EXTERNAL_URL to host it, e.g.
+    running locally) -- a real trending post (text-only) still beats
+    posting nothing at all."""
+    from data import chart_snapshot
+
     posted = []
     monkeypatch.setattr(threads_post.threads_client, "create_and_publish_post", lambda text: posted.append(text))
-    monkeypatch.setattr(threads_post, "_resolve_og_image", lambda url: None)
-    threads_post.post_trending_news(_story(image_url=None, secondary=[]), market="crypto")
+    monkeypatch.setattr(chart_snapshot, "generate_news_card", lambda **kwargs: None)
+    threads_post.post_trending_news(_story(secondary=[]), market="crypto")
     assert "Bitcoin surges past resistance" in posted[0]
 
 
-def test_trending_news_falls_back_to_text_when_the_image_post_itself_fails(monkeypatch):
+def test_trending_news_falls_back_to_text_when_the_image_post_itself_fails(monkeypatch, tmp_path):
+    _mock_charts(monkeypatch, tmp_path)
+
     def raise_error(image_url, text=""):
         raise RuntimeError("Threads rejected the image URL")
 
