@@ -53,6 +53,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import logging
+import math
 import os
 import tempfile
 import threading
@@ -85,6 +86,29 @@ MODEL_CONFIDENCE_MIN = _env_float("ALPACA_OPTIONS_MODEL_CONFIDENCE_MIN", 0.58)
 TAKE_PROFIT_PCT = _env_float("ALPACA_OPTIONS_TAKE_PROFIT_PCT", 0.30)
 STOP_LOSS_PCT = _env_float("ALPACA_OPTIONS_STOP_LOSS_PCT", 0.20)
 MAX_HOLD_MINUTES = _env_int("ALPACA_OPTIONS_MAX_HOLD_MINUTES", 180)
+# Per-ticker adaptive take-profit/stop-loss -- same methodology
+# perps_strategy.py/alpaca_crypto_strategy.py/alpaca_strategy.py already use
+# (see any of their own adaptive_exit_pcts docstrings). `entry_volatility_30`
+# here is the UNDERLYING's own volatility (this module reuses alpaca_data.py's
+# equities feature engineering directly -- see the module docstring), on the
+# SAME small scale as stocks'/crypto's own (roughly 0.0004-0.002), while an
+# option's own premium target is ~30x wider than theirs (0.30 vs ~0.01) --
+# see this constant block's own comment above on why. Naively reusing
+# stocks'/crypto's own vol multiples here would silently always clamp to
+# the floor (a no-op adaptive mechanism), so these are scaled up
+# proportionally (~30x, matching the flat-default ratio) instead -- a
+# reasoned starting point given real, KNOWN underlying-to-premium
+# amplification, NOT a claim of independent backtest validation (no
+# historical premium series exists to backtest against -- see
+# alpaca_options_trade_analysis.py's own docstring on that same
+# limitation). Fully env-overridable once real trade history justifies
+# retuning.
+TAKE_PROFIT_VOL_MULTIPLE = _env_float("ALPACA_OPTIONS_TAKE_PROFIT_VOL_MULTIPLE", 45.0)
+STOP_LOSS_VOL_MULTIPLE = _env_float("ALPACA_OPTIONS_STOP_LOSS_VOL_MULTIPLE", 30.0)
+MIN_TAKE_PROFIT_PCT = _env_float("ALPACA_OPTIONS_MIN_TAKE_PROFIT_PCT", 0.30)
+MAX_TAKE_PROFIT_PCT = _env_float("ALPACA_OPTIONS_MAX_TAKE_PROFIT_PCT", 1.00)
+MIN_STOP_LOSS_PCT = _env_float("ALPACA_OPTIONS_MIN_STOP_LOSS_PCT", 0.20)
+MAX_STOP_LOSS_PCT = _env_float("ALPACA_OPTIONS_MAX_STOP_LOSS_PCT", 0.60)
 # Tried and reverted: a "stale/flat position" early exit (see
 # perps_strategy.py's own comment for the identical mechanism and full
 # rationale for reverting it) was added here too, then reverted after a
@@ -241,6 +265,22 @@ def _near_expiration(position: dict[str, Any], *, now: dt.datetime) -> bool:
     return (exp - now).days < MIN_DAYS_TO_EXPIRATION_BEFORE_FORCED_EXIT
 
 
+def adaptive_exit_pcts(entry_volatility_30: float | None) -> dict[str, float]:
+    """Take-profit/stop-loss percentages customized to the UNDERLYING's own
+    volatility at entry time -- see TAKE_PROFIT_VOL_MULTIPLE's own comment
+    for the full rationale (including why the multiples are scaled ~30x
+    vs. stocks'/crypto's own). Falls back to the flat global
+    TAKE_PROFIT_PCT/STOP_LOSS_PCT if no volatility was captured, or on NaN
+    specifically -- Python's own NaN comparisons are always False, so a
+    naive falsy/<=0 guard alone would miss it."""
+    if not entry_volatility_30 or entry_volatility_30 <= 0 or math.isnan(entry_volatility_30):
+        return {"take_profit_pct": TAKE_PROFIT_PCT, "stop_loss_pct": STOP_LOSS_PCT}
+    horizon_scale = math.sqrt(max(1, MAX_HOLD_MINUTES))
+    take_profit = min(MAX_TAKE_PROFIT_PCT, max(MIN_TAKE_PROFIT_PCT, TAKE_PROFIT_VOL_MULTIPLE * entry_volatility_30 * horizon_scale))
+    stop_loss = min(MAX_STOP_LOSS_PCT, max(MIN_STOP_LOSS_PCT, STOP_LOSS_VOL_MULTIPLE * entry_volatility_30 * horizon_scale))
+    return {"take_profit_pct": take_profit, "stop_loss_pct": stop_loss}
+
+
 def decide_exit(
     position: dict[str, Any], current_price: float, *, now: dt.datetime | None = None,
     dollar_volume_z: float | None = None, momentum_pct: float | None = None,
@@ -248,7 +288,10 @@ def decide_exit(
 ) -> tuple[bool, str]:
     """Long-only (buying calls/puts is always a long position in the
     contract itself, regardless of which direction it bets on the
-    underlying): a RISING contract premium is favorable.
+    underlying): a RISING contract premium is favorable. Exit levels are
+    per-position ADAPTIVE (see adaptive_exit_pcts) -- scaled to the
+    UNDERLYING's own volatility_30 at entry, not one flat percentage
+    applied identically to every contract.
 
     `dollar_volume_z`/`momentum_pct` (macd_hist_pct)/`breakout_pct_b`
     (bb_pct_b)/`sentiment_score` feed the max_hold_time "promising position"
@@ -261,17 +304,20 @@ def decide_exit(
         return True, "near_expiration"
 
     entry_price = float(position["entry_price"])
+    exit_pcts = adaptive_exit_pcts(position.get("entry_volatility_30"))
+    take_profit_pct = exit_pcts["take_profit_pct"]
+    stop_loss_pct = exit_pcts["stop_loss_pct"]
     change_pct = (current_price - entry_price) / entry_price if entry_price > 0 else 0.0
 
-    if change_pct >= TAKE_PROFIT_PCT:
-        return True, f"take_profit ({change_pct:+.3%})"
-    if change_pct <= -STOP_LOSS_PCT:
-        return True, f"stop_loss ({change_pct:+.3%})"
+    if change_pct >= take_profit_pct:
+        return True, f"take_profit ({change_pct:+.3%}, target {take_profit_pct:.2%})"
+    if change_pct <= -stop_loss_pct:
+        return True, f"stop_loss ({change_pct:+.3%}, target {stop_loss_pct:.2%})"
 
     opened_at = dt.datetime.fromisoformat(position["opened_at"])
     held_minutes = (now - opened_at).total_seconds() / 60.0
     if held_minutes >= MAX_HOLD_MINUTES:
-        progress_frac = (change_pct / TAKE_PROFIT_PCT) if TAKE_PROFIT_PCT > 0 else 0.0
+        progress_frac = (change_pct / take_profit_pct) if take_profit_pct > 0 else 0.0
         price_promising = progress_frac >= PROMISING_PROGRESS_FRACTION
         volume_confirmed = dollar_volume_z is not None and dollar_volume_z >= PROMISING_VOLUME_Z
         momentum_promising = (
@@ -290,10 +336,16 @@ def decide_exit(
 
 
 def position_exit_levels(position: dict[str, Any]) -> dict[str, float]:
+    """The actual take-profit/stop-loss PRICE levels for a position,
+    derived from the same per-position-adaptive percentages decide_exit()
+    applies (see adaptive_exit_pcts) -- exists so callers (the dashboard)
+    can show real exit levels rather than just trusting the flat config
+    exists somewhere."""
     entry_price = float(position["entry_price"])
+    exit_pcts = adaptive_exit_pcts(position.get("entry_volatility_30"))
     return {
-        "take_profit_price": round(entry_price * (1 + TAKE_PROFIT_PCT), 6),
-        "stop_loss_price": round(entry_price * (1 - STOP_LOSS_PCT), 6),
+        "take_profit_price": round(entry_price * (1 + exit_pcts["take_profit_pct"]), 6),
+        "stop_loss_price": round(entry_price * (1 - exit_pcts["stop_loss_pct"]), 6),
     }
 
 
@@ -818,7 +870,15 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
                     opened.append({"symbol": symbol, "ok": True, "action": "skipped_insufficient_budget"})
                     continue
 
-                levels = position_exit_levels({"entry_price": net_debit})
+                # entry_volatility_30 threaded through here (not just onto
+                # the stored position below) -- without it, the STORED
+                # take_profit_price/stop_loss_price would use the flat
+                # fallback percentages while the actual exit decision
+                # (decide_exit, which reads position["entry_volatility_30"]
+                # once the position exists) used the adaptive ones -- a
+                # real bug this session already found and fixed once for
+                # crypto's own identical entry-time context capture.
+                levels = position_exit_levels({"entry_price": net_debit, "entry_volatility_30": row.get("volatility_30")})
                 order_id = None
                 if not effective_dry_run:
                     limit_price = net_debit * (1 + SPREAD_LIMIT_SLIPPAGE_PCT)
@@ -834,7 +894,8 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
                     "expiration_date": long_contract.get("expiration_date"),
                     "entry_price": net_debit, "count": qty,
                     "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(),
-                    "order_id": order_id, **levels, **_entry_context(candidate, row),
+                    "order_id": order_id, "entry_volatility_30": row.get("volatility_30"),
+                    **levels, **_entry_context(candidate, row),
                 }
                 contract_symbol, contract_type, entry_price = long_symbol, long_contract.get("type"), net_debit
             else:
@@ -855,7 +916,7 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
                     opened.append({"symbol": symbol, "ok": True, "action": "skipped_insufficient_budget"})
                     continue
 
-                levels = position_exit_levels({"entry_price": contract_price})
+                levels = position_exit_levels({"entry_price": contract_price, "entry_volatility_30": row.get("volatility_30")})
                 order_id = None
                 if not effective_dry_run:
                     order_spec = alpaca_client.build_option_order(symbol=contract_symbol, side="buy", qty=qty)
@@ -867,7 +928,8 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
                     "expiration_date": contract.get("expiration_date"), "strike_price": contract.get("strike_price"),
                     "entry_price": contract_price, "count": qty,
                     "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(),
-                    "order_id": order_id, **levels, **_entry_context(candidate, row),
+                    "order_id": order_id, "entry_volatility_30": row.get("volatility_30"),
+                    **levels, **_entry_context(candidate, row),
                 }
                 contract_type, entry_price = contract.get("type"), contract_price
 

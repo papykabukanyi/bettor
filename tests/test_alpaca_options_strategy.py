@@ -161,6 +161,53 @@ def test_position_exit_levels():
     assert levels["stop_loss_price"] == round(5.0 * (1 - strat.STOP_LOSS_PCT), 6)
 
 
+# ---------------------------------------------------------------------------
+# Adaptive per-position exit levels -- scaled to the UNDERLYING's own
+# volatility_30 at entry, not one flat percentage applied identically to
+# every contract.
+# ---------------------------------------------------------------------------
+def test_adaptive_exit_pcts_falls_back_to_flat_defaults_without_volatility():
+    pcts = strat.adaptive_exit_pcts(None)
+    assert pcts["take_profit_pct"] == strat.TAKE_PROFIT_PCT
+    assert pcts["stop_loss_pct"] == strat.STOP_LOSS_PCT
+
+
+def test_adaptive_exit_pcts_scales_with_entry_volatility():
+    low_vol = strat.adaptive_exit_pcts(0.0005)
+    high_vol = strat.adaptive_exit_pcts(0.005)
+    assert high_vol["take_profit_pct"] > low_vol["take_profit_pct"]
+    assert high_vol["stop_loss_pct"] > low_vol["stop_loss_pct"]
+
+
+def test_adaptive_exit_pcts_respects_floors_and_ceilings():
+    tiny = strat.adaptive_exit_pcts(1e-9)
+    assert tiny["take_profit_pct"] >= strat.MIN_TAKE_PROFIT_PCT
+    huge = strat.adaptive_exit_pcts(10.0)
+    assert huge["take_profit_pct"] <= strat.MAX_TAKE_PROFIT_PCT
+
+
+def test_adaptive_exit_pcts_falls_back_to_flat_defaults_on_nan():
+    pcts = strat.adaptive_exit_pcts(float("nan"))
+    assert pcts["take_profit_pct"] == strat.TAKE_PROFIT_PCT
+    assert pcts["stop_loss_pct"] == strat.STOP_LOSS_PCT
+
+
+def test_decide_exit_uses_the_positions_own_adaptive_levels():
+    pos = _position(entry_price=5.0)
+    pos["entry_volatility_30"] = 0.005  # wide enough to push take-profit well above the flat default
+    exit_pcts = strat.adaptive_exit_pcts(0.005)
+    should_exit, reason = strat.decide_exit(pos, 5.0 * (1 + exit_pcts["take_profit_pct"] + 0.001))
+    assert should_exit and "take_profit" in reason
+
+
+def test_position_exit_levels_uses_the_adaptive_percentage_not_the_flat_global():
+    pos = {"entry_price": 5.0, "entry_volatility_30": 0.005}
+    levels = strat.position_exit_levels(pos)
+    adaptive = strat.adaptive_exit_pcts(0.005)
+    assert levels["take_profit_price"] == round(5.0 * (1 + adaptive["take_profit_pct"]), 6)
+    assert adaptive["take_profit_pct"] != strat.TAKE_PROFIT_PCT
+
+
 def test_compute_contract_qty_is_a_whole_number_sized_off_the_100x_multiplier():
     qty = strat.compute_contract_qty(500.0, 1.0)
     budget = 500.0 * strat.POSITION_SIZE_PCT
