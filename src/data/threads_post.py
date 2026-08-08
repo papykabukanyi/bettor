@@ -281,6 +281,7 @@ def post_trade_entry_chart(
     *, ticker: str, market: str, candles: list[dict], entry_price: float | None = None,
     take_profit_price: float | None = None, stop_loss_price: float | None = None,
     entry_index: int | None = None, side: str = "long", dry_run: bool, subtitle: str | None = None,
+    indicators: dict | None = None,
 ) -> bool:
     """Posts a candlestick-chart image of a just-opened trade -- real OHLC
     price action plus the entry/take-profit/stop-loss levels, so followers
@@ -301,6 +302,7 @@ def post_trade_entry_chart(
             ticker=ticker, market=market, candles=candles, side=side,
             entry_price=entry_price, take_profit_price=take_profit_price,
             stop_loss_price=stop_loss_price, entry_index=entry_index, subtitle=subtitle,
+            indicators=indicators,
         )
         if chart_path is None:
             return False
@@ -327,6 +329,7 @@ def post_trade_exit_chart(
     exit_price: float | None = None, take_profit_price: float | None = None,
     stop_loss_price: float | None = None, entry_index: int | None = None, exit_index: int | None = None,
     side: str = "long", pnl_usd: float, dry_run: bool, subtitle: str | None = None,
+    indicators: dict | None = None,
 ) -> bool:
     """Posts a candlestick-chart image of a just-CLOSED trade -- the same
     "whole idea" snapshot as post_trade_entry_chart, but for the round
@@ -341,7 +344,7 @@ def post_trade_exit_chart(
             ticker=ticker, market=market, candles=candles, side=side,
             entry_price=entry_price, exit_price=exit_price, take_profit_price=take_profit_price,
             stop_loss_price=stop_loss_price, entry_index=entry_index, exit_index=exit_index,
-            pnl_usd=pnl_usd, subtitle=subtitle,
+            pnl_usd=pnl_usd, subtitle=subtitle, indicators=indicators,
         )
         if chart_path is None:
             return False

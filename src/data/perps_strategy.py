@@ -342,22 +342,69 @@ MAX_CONCURRENT_POSITIONS = max(1, _env_int("PERPS_MAX_CONCURRENT_POSITIONS", 5))
 TAKE_PROFIT_PCT = _env_float("PERPS_TAKE_PROFIT_PCT", 0.02)
 STOP_LOSS_PCT = _env_float("PERPS_STOP_LOSS_PCT", 0.015)
 MAX_HOLD_MINUTES = _env_int("PERPS_MAX_HOLD_MINUTES", 180)
-# Real, confirmed finding from reviewing actual trade history: positions
-# that haven't captured a meaningful fraction of their own take-profit
-# distance by the halfway point of max_hold_time consistently drift to a
-# near-breakeven (before fees) or fee-negative outcome at the full timeout
-# anyway -- confirmed on the equivalent crypto strategy's real trades, e.g.
-# a position that moved a literal +0.001% over its full 120-minute hold
-# and still netted a real -$59 to fees alone. Deliberately a DIFFERENT
-# lever than TAKE_PROFIT_VOL_MULTIPLE/STOP_LOSS_VOL_MULTIPLE below (already
-# tuned via a real pooled backtest sweep that found WIDER TP/SL
-# combinations tested WORSE, not better -- see that constant's own
-# comment): this doesn't change how far a position is allowed to move, it
-# changes how long the bot waits for one that isn't developing at all,
-# freeing the slot for a fresh opportunity instead of paying the same
-# round-trip fee for zero informational value.
-STALE_POSITION_CHECK_FRACTION = _env_float("PERPS_STALE_POSITION_CHECK_FRACTION", 0.5)
-STALE_POSITION_MAX_PROGRESS_FRACTION = _env_float("PERPS_STALE_POSITION_MAX_PROGRESS_FRACTION", 0.25)
+# Tried and reverted: an earlier "stale/flat position" early exit (closing a
+# position early if it hadn't moved much in either direction by the halfway
+# point of max_hold_time) was added and shipped based on a plausible
+# hypothesis, then reverted after a real multi-fold walk-forward backtest
+# (4 independent ~8-day test periods across 65 days of real history)
+# showed it performed WORSE than not having it at every single hold time
+# tested, 16/16 comparisons. The mechanism cut positions early without
+# actually reducing the fee cost of a flat trade (that cost is roughly
+# fixed regardless of when the position closes), while forfeiting the
+# chance for a quiet-then-moving position to still reach take_profit. If
+# revisiting this idea, backtest it first -- don't re-add on hypothesis alone.
+#
+# max_hold_time shouldn't be the ONLY factor forcing an exit -- a position
+# that's already most of the way to its own take_profit target, OR one
+# that's showing real building momentum even if price hasn't fully caught
+# up yet, is doing exactly what it's supposed to; force-closing it right at
+# the timeout throws away a likely winner for no reason. decide_exit()'s
+# "promising" check is now an OR of two independent paths:
+#   1. Price-progress: change_pct has already captured at least
+#      PROMISING_PROGRESS_FRACTION of take_profit_pct.
+#   2. Momentum/breakout confluence: real elevated volume
+#      (dollar_volume_z >= PROMISING_VOLUME_Z, i.e. actual participation,
+#      not noise) together with EITHER strong directional momentum
+#      (macd_hist_pct >= PROMISING_MOMENTUM_PCT) OR a breakout signal
+#      (bb_pct_b >= PROMISING_BREAKOUT_PCT_B, price pushing to/through its
+#      own recent Bollinger range) -- AND the position isn't already
+#      reversing (change_pct >= 0).
+# Real backtest results on a 13.45-day window (same fitted model/test split
+# used throughout this session's perps work): PROMISING_PROGRESS_FRACTION
+# alone (0.25, recalibrated -- see below) gave a real, if modest,
+# improvement over no extension at all (return -30.04% vs -30.20%, win
+# rate 5.2% vs 3.5%, 58 trades). The momentum/breakout path tested in
+# ISOLATION (extending on volume+momentum/breakout confluence WITHOUT
+# price already confirming) came back slightly WORSE than no extension at
+# all (-30.25% vs -30.20%) -- a technical signal without price
+# confirmation turned out noisier than hoped, not the free win it looked
+# like on paper. PROMISING_VOLUME_Z/MOMENTUM_PCT/BREAKOUT_PCT_B are
+# therefore left at conservative (originally-derived, ~90th-percentile-of-
+# all-data) levels that make this path rare/near-dormant by default rather
+# than shipped as an active driver on unproven evidence -- fully wired and
+# env-tunable if a larger real sample later justifies loosening them, but
+# not turned on by default just because the capability exists. (Thresholds
+# were first tried at the ~65-85th percentile of the CONDITIONAL
+# distribution among positions actually surviving to 180min -- a real,
+# n=25 sample -- which is what surfaced the isolated-path result above.)
+# A position that's flat/losing and shows none of this is NOT "promising"
+# and still exits on schedule exactly as before. MAX_HOLD_EXTENSION_MINUTES
+# caps how much extra time ANY promising path can grant, so this can never
+# run unbounded. Deliberately modest here (vs. the other 3 services)
+# because Kalshi perps carries a real ~4-hour funding payment this backtest
+# doesn't model (see MAX_HOLD_MINUTES's own earlier history above) -- the
+# extended ceiling (180+45=225min) stays safely short of that boundary
+# rather than risking an uncounted funding cost on top of an already-thin
+# edge. A `sentiment_score`-based path also exists (see decide_exit's own
+# docstring) but is NOT covered by the backtest below -- perps_backtest.py
+# holds sentiment at a flat 0.0 (no free historical news archive), a
+# disclosed, pre-existing limitation, not something this change fixes.
+MAX_HOLD_EXTENSION_MINUTES = _env_int("PERPS_MAX_HOLD_EXTENSION_MINUTES", 45)
+PROMISING_PROGRESS_FRACTION = _env_float("PERPS_PROMISING_PROGRESS_FRACTION", 0.25)
+PROMISING_VOLUME_Z = _env_float("PERPS_PROMISING_VOLUME_Z", 1.0)
+PROMISING_MOMENTUM_PCT = _env_float("PERPS_PROMISING_MOMENTUM_PCT", 0.0003)
+PROMISING_BREAKOUT_PCT_B = _env_float("PERPS_PROMISING_BREAKOUT_PCT_B", 0.85)
+PROMISING_SENTIMENT_SCORE = _env_float("PERPS_PROMISING_SENTIMENT_SCORE", 0.3)
 ENTRY_DIP_PCT = _env_float("PERPS_ENTRY_DIP_PCT", 0.0015)      # 0.15% below short MA triggers interest
 SHORT_MA_MINUTES = _env_int("PERPS_SHORT_MA_MINUTES", 15)
 TREND_FILTER_DOWN_PCT = _env_float("PERPS_TREND_FILTER_DOWN_PCT", 0.02)  # skip entries if down >2%
@@ -703,6 +750,16 @@ def evaluate_candidate(ticker: str, *, confidence_min: float | None = None) -> d
         # take-profit/stop-loss to THIS specific currency (see
         # adaptive_exit_pcts) instead of one flat percentage for every coin.
         "volatility_30": row.get("volatility_30"),
+        # Raw indicator values at decision time -- not used by any entry
+        # RULE here (the technical/model filters above are unchanged), only
+        # carried through for observability: the entry-chart's indicator
+        # panel (see threads_post.post_trade_entry_chart) and the trade_log
+        # entry-context snapshot both read these so a Threads follower (and
+        # a future trade-analysis pass) can see what the bot actually saw,
+        # not just what it decided.
+        "dollar_volume_z": row.get("dollar_volume_z"), "macd_hist_pct": row.get("macd_hist_pct"),
+        "bb_pct_b": row.get("bb_pct_b"), "rsi_14": row.get("rsi_14"),
+        "sentiment_score": row.get("sentiment_score"),
     }
     if model_ok:
         result["probability_up"] = prediction["probability_up"]
@@ -904,6 +961,8 @@ def decide_exit(
     position: dict[str, Any], current_price: float, *,
     velocity_pct_per_min: float | None = None, external_velocity_pct_per_min: float | None = None,
     current_volatility: float | None = None, now: dt.datetime | None = None,
+    dollar_volume_z: float | None = None, momentum_pct: float | None = None,
+    breakout_pct_b: float | None = None, sentiment_score: float | None = None,
 ) -> tuple[bool, str]:
     """`current_price` is always Kalshi's own tradable quote -- that's what
     the gain/loss threshold and the actual exit order use. `velocity` is
@@ -935,7 +994,17 @@ def decide_exit(
     MAX_HOLD_MINUTES on virtually every position's very first tick after
     opening, regardless of price movement (measured live: 99.7% of
     simulated exits were max_hold_time before this fix, vs a healthy mix of
-    take-profit/stop-loss/max_hold in real production trades)."""
+    take-profit/stop-loss/max_hold in real production trades).
+
+    `dollar_volume_z`/`momentum_pct` (macd_hist_pct)/`breakout_pct_b`
+    (bb_pct_b)/`sentiment_score` feed the max_hold_time "promising position"
+    extension only (see PROMISING_PROGRESS_FRACTION's own comment) -- all
+    optional and side-aware exactly like velocity above, so an omitted
+    value simply can't contribute to that decision rather than erroring.
+    `sentiment_score` in particular is NOT validated by this repo's own
+    backtest (perps_backtest.py holds it at a flat 0.0 -- there's no free
+    historical news archive, a disclosed, known limitation), so treat that
+    one path as a reasoned-but-backtest-unproven addition."""
     entry_price = float(position["entry_price"])
     is_short = position.get("side") == "short"
     exit_pcts = adaptive_exit_pcts(position.get("entry_volatility_30"))
@@ -947,10 +1016,16 @@ def decide_exit(
         change_pct = (entry_price - current_price) / entry_price if entry_price > 0 else 0.0
         favorable_velocity = -velocity_pct_per_min if velocity_pct_per_min is not None else None
         favorable_external_velocity = -external_velocity_pct_per_min if external_velocity_pct_per_min is not None else None
+        favorable_momentum = -momentum_pct if momentum_pct is not None else None
+        favorable_breakout = (1.0 - breakout_pct_b) if breakout_pct_b is not None else None
+        favorable_sentiment = -sentiment_score if sentiment_score is not None else None
     else:
         change_pct = (current_price - entry_price) / entry_price if entry_price > 0 else 0.0
         favorable_velocity = velocity_pct_per_min
         favorable_external_velocity = external_velocity_pct_per_min
+        favorable_momentum = momentum_pct
+        favorable_breakout = breakout_pct_b
+        favorable_sentiment = sentiment_score
 
     if change_pct >= quick_profit_pct:
         if favorable_velocity is not None and favorable_velocity >= QUICK_PROFIT_VELOCITY_PCT_PER_MIN:
@@ -969,18 +1044,29 @@ def decide_exit(
     opened_at = dt.datetime.fromisoformat(position["opened_at"])
     now = now if now is not None else dt.datetime.now(dt.timezone.utc)
     held_minutes = (now - opened_at).total_seconds() / 60.0
-    # Stale/flat position early exit -- see STALE_POSITION_CHECK_FRACTION's
-    # own comment. Uses abs(change_pct) deliberately: this targets
-    # positions that haven't moved meaningfully in EITHER direction, not
-    # ones that are simply losing (a real, distinct case already owned by
-    # stop_loss above) -- a position sitting at -1% with a -1.5% stop is a
-    # normal, developing loser that should be left to either recover or
-    # hit its real stop, not cut early by a second, competing mechanism.
-    if held_minutes >= MAX_HOLD_MINUTES * STALE_POSITION_CHECK_FRACTION and take_profit_pct > 0:
-        if abs(change_pct) < take_profit_pct * STALE_POSITION_MAX_PROGRESS_FRACTION:
-            return True, f"stale_position ({held_minutes:.0f}min, {change_pct:+.3%}, flat)"
     if held_minutes >= MAX_HOLD_MINUTES:
-        return True, f"max_hold_time ({held_minutes:.0f}min, {change_pct:+.3%})"
+        # A position already most of the way to take_profit, or one showing
+        # real building momentum/breakout on real volume, gets extra time
+        # instead of being force-closed on a blind timeout -- see
+        # PROMISING_PROGRESS_FRACTION's own comment for the full rationale
+        # and each threshold's justification. A flat/losing position
+        # showing none of this is not "promising" and exits on schedule
+        # exactly as before.
+        progress_frac = (change_pct / take_profit_pct) if take_profit_pct > 0 else 0.0
+        price_promising = progress_frac >= PROMISING_PROGRESS_FRACTION
+        volume_confirmed = dollar_volume_z is not None and dollar_volume_z >= PROMISING_VOLUME_Z
+        momentum_promising = (
+            volume_confirmed and change_pct >= 0
+            and favorable_momentum is not None and favorable_momentum >= PROMISING_MOMENTUM_PCT
+        )
+        breakout_promising = (
+            volume_confirmed and change_pct >= 0
+            and favorable_breakout is not None and favorable_breakout >= PROMISING_BREAKOUT_PCT_B
+        )
+        sentiment_promising = favorable_sentiment is not None and favorable_sentiment >= PROMISING_SENTIMENT_SCORE
+        promising = price_promising or momentum_promising or breakout_promising or sentiment_promising
+        if not promising or held_minutes >= MAX_HOLD_MINUTES + MAX_HOLD_EXTENSION_MINUTES:
+            return True, f"max_hold_time ({held_minutes:.0f}min, {change_pct:+.3%})"
     return False, f"holding ({change_pct:+.3%}, {held_minutes:.0f}min)"
 
 
@@ -1277,9 +1363,33 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                         position, float(external_quote["price"]), now, samples_key="external_price_samples",
                     )
 
+                # Volume/momentum/breakout/sentiment only matter to
+                # decide_exit's "promising position" extension, which only
+                # activates once a position has already reached
+                # MAX_HOLD_MINUTES -- fetched lazily, only in that case, so
+                # this fast loop stays cheap for the common case (see
+                # _sample_volatility's own comment on why latest_feature_row()
+                # is avoided here otherwise).
+                dollar_volume_z = momentum_pct = breakout_pct_b = sentiment_score_value = None
+                opened_at_check = dt.datetime.fromisoformat(position["opened_at"])
+                held_minutes_check = (now - opened_at_check).total_seconds() / 60.0
+                if held_minutes_check >= MAX_HOLD_MINUTES:
+                    try:
+                        promising_row = latest_feature_row(ticker)
+                    except Exception as exc:
+                        promising_row = None
+                        logger.debug("[perps_strategy] promising-signal feature fetch failed for %s: %s", ticker, exc)
+                    if promising_row:
+                        dollar_volume_z = promising_row.get("dollar_volume_z")
+                        momentum_pct = promising_row.get("macd_hist_pct")
+                        breakout_pct_b = promising_row.get("bb_pct_b")
+                        sentiment_score_value = promising_row.get("sentiment_score")
+
                 should_exit, reason = decide_exit(
                     position, current_price, velocity_pct_per_min=velocity, external_velocity_pct_per_min=external_velocity,
                     current_volatility=current_volatility, now=now,
+                    dollar_volume_z=dollar_volume_z, momentum_pct=momentum_pct,
+                    breakout_pct_b=breakout_pct_b, sentiment_score=sentiment_score_value,
                 )
                 checks.append({
                     "ticker": ticker, "ok": True, "exit_check": reason, "velocity_pct_per_min": velocity,
@@ -1405,6 +1515,11 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                     "entry_trend_pct": position.get("entry_trend_pct"),
                     "entry_volatility_30": position.get("entry_volatility_30"),
                     "entry_reason": position.get("entry_reason"),
+                    "entry_dollar_volume_z": position.get("entry_dollar_volume_z"),
+                    "entry_macd_hist_pct": position.get("entry_macd_hist_pct"),
+                    "entry_bb_pct_b": position.get("entry_bb_pct_b"),
+                    "entry_rsi_14": position.get("entry_rsi_14"),
+                    "entry_sentiment_score": position.get("entry_sentiment_score"),
                 }
                 trade_log = state.setdefault("trade_log", [])
                 trade_log.append(trade)
@@ -1476,13 +1591,29 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
         except Exception:
             logger.warning("[perps_strategy] Threads post for %s exit failed", trade["ticker"], exc_info=True)
         try:
+            from data import chart_snapshot
             one_min_df, _ = fetch_candle_frames(trade["ticker"])
+            # entry_* fields are what the bot actually saw at ENTRY time
+            # (see scan_and_enter's own entry_context) -- remapped to the
+            # plain feature names format_technical_indicators expects.
+            indicators = chart_snapshot.format_technical_indicators({
+                "rsi_14": trade.get("entry_rsi_14"), "macd_hist_pct": trade.get("entry_macd_hist_pct"),
+                "bb_pct_b": trade.get("entry_bb_pct_b"), "dollar_volume_z": trade.get("entry_dollar_volume_z"),
+                "sentiment_score": trade.get("entry_sentiment_score"), "volatility_30": trade.get("entry_volatility_30"),
+            })
+            if trade.get("entry_probability_up") is not None:
+                indicators["Model prob up"] = f"{trade['entry_probability_up']:.1%}"
+            if trade.get("hold_minutes") is not None:
+                indicators["Held"] = f"{trade['hold_minutes']:.0f}min"
+            if trade.get("fee_usd") is not None:
+                indicators["Fees"] = f"${trade['fee_usd']:.3f}"
+            indicators["Exit reason"] = str(trade.get("reason", ""))
             threads_post.post_trade_exit_chart(
                 ticker=trade["ticker"], market="perps", candles=_candles_as_dicts(one_min_df),
                 side=trade["side"], entry_price=trade["entry_price"], exit_price=trade["exit_price"],
                 entry_index=_index_for_ts(one_min_df, trade.get("opened_at")),
                 exit_index=_index_for_ts(one_min_df, trade.get("closed_at")),
-                pnl_usd=trade["realized_pnl_usd"], dry_run=trade["dry_run"],
+                pnl_usd=trade["realized_pnl_usd"], dry_run=trade["dry_run"], indicators=indicators,
             )
         except Exception:
             logger.warning("[perps_strategy] Threads exit chart post for %s failed", trade["ticker"], exc_info=True)
@@ -1695,6 +1826,15 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
                     "entry_score": candidate.get("score"),
                     "entry_trend_pct": candidate.get("trend_pct"),
                     "entry_reason": candidate.get("reason"),
+                    # Raw indicator values (see evaluate_candidate's own
+                    # comment) -- carried through the same way so the exit
+                    # chart's indicator panel can show what the bot saw at
+                    # ENTRY, not just at exit.
+                    "entry_dollar_volume_z": candidate.get("dollar_volume_z"),
+                    "entry_macd_hist_pct": candidate.get("macd_hist_pct"),
+                    "entry_bb_pct_b": candidate.get("bb_pct_b"),
+                    "entry_rsi_14": candidate.get("rsi_14"),
+                    "entry_sentiment_score": candidate.get("sentiment_score"),
                 }
                 if existing_idx is not None:
                     merged = dict(positions[existing_idx])
@@ -1734,13 +1874,19 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
             except Exception:
                 logger.warning("[perps_strategy] Threads post for %s entry failed", ticker, exc_info=True)
             try:
+                from data import chart_snapshot
                 one_min_df, _ = fetch_candle_frames(ticker)
+                indicators = chart_snapshot.format_technical_indicators(candidate)
+                if candidate.get("probability_up") is not None:
+                    indicators["Model prob up"] = f"{candidate['probability_up']:.1%}"
+                if candidate.get("score") is not None:
+                    indicators["Entry score"] = f"{candidate['score']:.3f}"
                 threads_post.post_trade_entry_chart(
                     ticker=ticker, market="perps", candles=_candles_as_dicts(one_min_df),
                     entry_price=actual_entry_price, take_profit_price=levels["take_profit_price"],
                     stop_loss_price=levels["stop_loss_price"],
                     entry_index=(len(one_min_df) - 1) if not one_min_df.empty else None,
-                    side=side, dry_run=effective_dry_run,
+                    side=side, dry_run=effective_dry_run, indicators=indicators,
                 )
             except Exception:
                 logger.warning("[perps_strategy] Threads chart post for %s entry failed", ticker, exc_info=True)

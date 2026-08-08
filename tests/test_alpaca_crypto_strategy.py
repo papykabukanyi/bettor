@@ -80,36 +80,44 @@ def test_decide_exit_stop_loss():
 
 
 def test_decide_exit_max_hold_time():
-    # +0.6% of TAKE_PROFIT_PCT: clear of the stale_position band (25% of
-    # target) but short of take_profit itself, so this isolates the
-    # max_hold_time path specifically. See test_decide_exit_stale_position*
-    # below for the dedicated stale-position tests.
     pos = _position(minutes_ago=strat.MAX_HOLD_MINUTES + 1)
-    should_exit, reason = strat.decide_exit(pos, 65000.0 * (1 + strat.TAKE_PROFIT_PCT * 0.6))
+    should_exit, reason = strat.decide_exit(pos, 65000.0)
     assert should_exit and "max_hold_time" in reason
 
 
-def test_decide_exit_stale_position_fires_for_flat_position_past_halfway():
-    halfway_plus = int(strat.MAX_HOLD_MINUTES * strat.STALE_POSITION_CHECK_FRACTION) + 1
-    pos = _position(minutes_ago=halfway_plus)
-    should_exit, reason = strat.decide_exit(pos, 65000.0 * 1.001)
-    assert should_exit and "stale_position" in reason
+# ── "Promising position" max_hold_time extension ────────────────────────────
+# See perps_strategy.py's own PROMISING_PROGRESS_FRACTION comment for the
+# full rationale and real backtest findings.
 
-
-def test_decide_exit_stale_position_does_not_fire_before_halfway():
-    before_halfway = max(1, int(strat.MAX_HOLD_MINUTES * strat.STALE_POSITION_CHECK_FRACTION) - 5)
-    pos = _position(minutes_ago=before_halfway)
-    should_exit, reason = strat.decide_exit(pos, 65000.0 * 1.001)
+def test_promising_position_by_price_progress_gets_extended_past_max_hold():
+    pos = _position(minutes_ago=strat.MAX_HOLD_MINUTES + 1)
+    should_exit, reason = strat.decide_exit(pos, 65000.0 * 1.005)  # +0.5% vs 1% TP
     assert not should_exit
     assert "holding" in reason
 
 
-def test_decide_exit_stale_position_does_not_intercept_a_real_developing_loss():
-    halfway_plus = int(strat.MAX_HOLD_MINUTES * strat.STALE_POSITION_CHECK_FRACTION) + 1
-    pos = _position(minutes_ago=halfway_plus)
-    should_exit, reason = strat.decide_exit(pos, 65000.0 * (1 - strat.STOP_LOSS_PCT * 0.5))
+def test_promising_position_still_force_closed_once_extension_window_elapses():
+    past_extension = strat.MAX_HOLD_MINUTES + strat.MAX_HOLD_EXTENSION_MINUTES + 1
+    pos = _position(minutes_ago=past_extension)
+    should_exit, reason = strat.decide_exit(pos, 65000.0 * 1.005)
+    assert should_exit and "max_hold_time" in reason
+
+
+def test_volume_and_momentum_confluence_extends_even_without_price_progress():
+    pos = _position(minutes_ago=strat.MAX_HOLD_MINUTES + 1)
+    should_exit, reason = strat.decide_exit(
+        pos, 65000.0 * 1.0005, dollar_volume_z=2.0, momentum_pct=0.001,
+    )
     assert not should_exit
     assert "holding" in reason
+
+
+def test_momentum_extension_requires_position_not_already_reversing():
+    pos = _position(minutes_ago=strat.MAX_HOLD_MINUTES + 1)
+    should_exit, reason = strat.decide_exit(
+        pos, 65000.0 * (1 - strat.STOP_LOSS_PCT * 0.5), dollar_volume_z=2.0, momentum_pct=0.001,
+    )
+    assert should_exit and "max_hold_time" in reason
 
 
 def test_position_exit_levels():

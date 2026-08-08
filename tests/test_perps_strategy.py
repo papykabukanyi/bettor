@@ -116,14 +116,9 @@ def test_stop_loss_exit():
 
 
 def test_max_hold_time_forces_exit_even_at_small_gain():
-    """A tiny gain at long hold times still forces an exit -- now via the
-    more specific stale_position path (see its own module-level comment),
-    which fires even earlier than max_hold_time would for a position this
-    flat. The original invariant (small gains don't block a forced exit at
-    long hold times) still holds, just through a better mechanism."""
     pos = _position(minutes_ago=strat.MAX_HOLD_MINUTES + 1)
     should_exit, reason = strat.decide_exit(pos, 6.601)
-    assert should_exit and ("max_hold_time" in reason or "stale_position" in reason)
+    assert should_exit and "max_hold_time" in reason
 
 
 def test_holds_when_nothing_triggered():
@@ -133,50 +128,78 @@ def test_holds_when_nothing_triggered():
     assert "holding" in reason
 
 
-# ── Stale/flat position early exit ──────────────────────────────────────────
-# Addresses two real findings from a 24h trade review: perps stop-losses
-# clustering tightly near target (a hint stops were catching noise on
-# positions that were never moving), and Alpaca crypto trades net-losing to
-# fees on positions that barely moved at all over their full hold window.
-# This mechanism is deliberately separate from stop_loss -- it only fires on
-# positions that are genuinely flat (small absolute movement in EITHER
-# direction), so it never intercepts a real, developing loss that
-# stop_loss should own.
+# ── "Promising position" max_hold_time extension ────────────────────────────
+# max_hold_time shouldn't be the ONLY factor forcing an exit -- see
+# PROMISING_PROGRESS_FRACTION's own module-level comment for the full
+# rationale and real backtest findings.
 
-def test_stale_position_exit_fires_for_flat_position_past_halfway():
-    """A position that hasn't moved meaningfully in either direction, past
-    STALE_POSITION_CHECK_FRACTION of MAX_HOLD_MINUTES, exits early instead
-    of tying up capital (and accruing fee drag) waiting for max_hold_time."""
-    halfway_plus = int(strat.MAX_HOLD_MINUTES * strat.STALE_POSITION_CHECK_FRACTION) + 1
-    pos = _position(minutes_ago=halfway_plus)
-    # +0.1% move: well inside the stale band (below take_profit_pct * 0.25).
-    should_exit, reason = strat.decide_exit(pos, 6.60 * 1.001)
-    assert should_exit and "stale_position" in reason
-
-
-def test_stale_position_exit_does_not_fire_before_halfway():
-    """Even a perfectly flat position must not be force-closed before
-    STALE_POSITION_CHECK_FRACTION of MAX_HOLD_MINUTES has elapsed -- it
-    needs a real chance to develop first."""
-    before_halfway = max(1, int(strat.MAX_HOLD_MINUTES * strat.STALE_POSITION_CHECK_FRACTION) - 5)
-    pos = _position(minutes_ago=before_halfway)
-    should_exit, reason = strat.decide_exit(pos, 6.60 * 1.001)
+def test_promising_position_by_price_progress_gets_extended_past_max_hold():
+    pos = _position(minutes_ago=strat.MAX_HOLD_MINUTES + 1)
+    # +1% gain: well above PROMISING_PROGRESS_FRACTION (0.25) of the 2%
+    # flat take_profit_pct.
+    should_exit, reason = strat.decide_exit(pos, 6.60 * 1.01)
     assert not should_exit
     assert "holding" in reason
 
 
-def test_stale_position_exit_does_not_intercept_a_real_developing_loss():
-    """A position that has moved meaningfully against the trade -- but not
-    yet far enough to hit stop_loss -- must stay owned by stop_loss alone.
-    stale_position only targets positions with small absolute movement, so
-    it must not fire here even past the halfway time mark."""
-    halfway_plus = int(strat.MAX_HOLD_MINUTES * strat.STALE_POSITION_CHECK_FRACTION) + 1
-    pos = _position(minutes_ago=halfway_plus)
-    # A real, meaningful adverse move -- clearly outside the stale band --
-    # but short of the stop_loss threshold.
-    should_exit, reason = strat.decide_exit(pos, 6.60 * (1 - strat.STOP_LOSS_PCT * 0.5))
+def test_promising_position_still_force_closed_once_extension_window_elapses():
+    past_extension = strat.MAX_HOLD_MINUTES + strat.MAX_HOLD_EXTENSION_MINUTES + 1
+    pos = _position(minutes_ago=past_extension)
+    should_exit, reason = strat.decide_exit(pos, 6.60 * 1.01)
+    assert should_exit and "max_hold_time" in reason
+
+
+def test_non_promising_position_still_exits_exactly_at_max_hold_time():
+    pos = _position(minutes_ago=strat.MAX_HOLD_MINUTES + 1)
+    # +0.1%: below the promising price threshold, no volume/momentum/
+    # breakout/sentiment signals passed -- must exit on schedule.
+    should_exit, reason = strat.decide_exit(pos, 6.60 * 1.001)
+    assert should_exit and "max_hold_time" in reason
+
+
+def test_volume_and_momentum_confluence_extends_even_without_price_progress():
+    pos = _position(minutes_ago=strat.MAX_HOLD_MINUTES + 1)
+    should_exit, reason = strat.decide_exit(
+        pos, 6.60 * 1.001,  # flat price -- not promising on its own
+        dollar_volume_z=2.0, momentum_pct=0.001,
+    )
     assert not should_exit
     assert "holding" in reason
+
+
+def test_breakout_signal_with_volume_extends_even_without_price_progress():
+    pos = _position(minutes_ago=strat.MAX_HOLD_MINUTES + 1)
+    should_exit, reason = strat.decide_exit(
+        pos, 6.60 * 1.001, dollar_volume_z=2.0, breakout_pct_b=0.95,
+    )
+    assert not should_exit
+    assert "holding" in reason
+
+
+def test_sentiment_signal_alone_extends_even_without_price_progress():
+    pos = _position(minutes_ago=strat.MAX_HOLD_MINUTES + 1)
+    should_exit, reason = strat.decide_exit(pos, 6.60 * 1.001, sentiment_score=0.5)
+    assert not should_exit
+    assert "holding" in reason
+
+
+def test_momentum_signal_without_confirming_volume_does_not_extend():
+    pos = _position(minutes_ago=strat.MAX_HOLD_MINUTES + 1)
+    should_exit, reason = strat.decide_exit(
+        pos, 6.60 * 1.001, dollar_volume_z=0.1, momentum_pct=0.001,
+    )
+    assert should_exit and "max_hold_time" in reason
+
+
+def test_momentum_extension_requires_position_not_already_reversing():
+    pos = _position(minutes_ago=strat.MAX_HOLD_MINUTES + 1)
+    # A real adverse move (short of stop_loss) with otherwise-qualifying
+    # volume/momentum must NOT be rescued by the momentum path -- that
+    # path only extends a developing WINNER, not a reversing position.
+    should_exit, reason = strat.decide_exit(
+        pos, 6.60 * (1 - strat.STOP_LOSS_PCT * 0.5), dollar_volume_z=2.0, momentum_pct=0.001,
+    )
+    assert should_exit and "max_hold_time" in reason
 
 
 # ── Per-currency adaptive exit thresholds ───────────────────────────────────
@@ -261,11 +284,9 @@ def test_position_exit_levels_falls_back_to_flat_global_without_stored_volatilit
 def test_decide_exit_uses_real_wall_clock_time_by_default():
     """Live trading correctness: without an explicit `now`, max_hold_time
     must be judged against the REAL current time, matching production
-    behavior exactly. Price is moved a clear +1% (outside the stale_position
-    band but short of take_profit) so this test still isolates the
-    max_hold_time path specifically rather than stale_position."""
+    behavior exactly."""
     pos = _position(minutes_ago=strat.MAX_HOLD_MINUTES + 1)
-    should_exit, reason = strat.decide_exit(pos, 6.60 * 1.01)
+    should_exit, reason = strat.decide_exit(pos, 6.601)
     assert should_exit and "max_hold_time" in reason
 
 
@@ -291,10 +312,9 @@ def test_decide_exit_respects_an_explicit_simulated_now():
     assert "holding" in reason
 
     # And it DOES fire once the SIMULATED clock passes MAX_HOLD_MINUTES,
-    # not the real one. Price is a clear +1% move (outside the
-    # stale_position band) so this isolates the max_hold_time path.
+    # not the real one.
     sim_now_later = long_ago + dt.timedelta(minutes=strat.MAX_HOLD_MINUTES + 1)
-    should_exit, reason = strat.decide_exit(pos, 6.60 * 1.01, now=sim_now_later)
+    should_exit, reason = strat.decide_exit(pos, 6.601, now=sim_now_later)
     assert should_exit and "max_hold_time" in reason
 
 

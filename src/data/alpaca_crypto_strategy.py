@@ -108,21 +108,31 @@ SHORT_MA_MINUTES = _env_int("ALPACA_CRYPTO_SHORT_MA_MINUTES", 15)
 TAKE_PROFIT_PCT = _env_float("ALPACA_CRYPTO_TAKE_PROFIT_PCT", 0.01)
 STOP_LOSS_PCT = _env_float("ALPACA_CRYPTO_STOP_LOSS_PCT", 0.008)
 MAX_HOLD_MINUTES = _env_int("ALPACA_CRYPTO_MAX_HOLD_MINUTES", 120)
-# Real, confirmed finding from reviewing actual trade history: a position
-# that moved a literal +0.001% over its full 120-minute hold still netted a
-# real -$59 to fees alone -- the round-trip fee is paid whether or not the
-# position ever developed. Same underlying pattern perps_strategy.py found
-# and fixed with its own identical STALE_POSITION_CHECK_FRACTION (see that
-# module's comment for the full rationale) -- a position that hasn't
-# captured a meaningful fraction of its own take-profit distance by the
-# halfway point of max_hold_time is unlikely to still develop into one by
-# the full timeout, so this frees the slot early instead of paying the same
-# fee for zero informational value. Deliberately a DIFFERENT lever than
-# TAKE_PROFIT_VOL_MULTIPLE/STOP_LOSS_VOL_MULTIPLE above: this doesn't change
-# how far a position is allowed to move, only how long the bot waits for one
-# that isn't developing at all.
-STALE_POSITION_CHECK_FRACTION = _env_float("ALPACA_CRYPTO_STALE_POSITION_CHECK_FRACTION", 0.5)
-STALE_POSITION_MAX_PROGRESS_FRACTION = _env_float("ALPACA_CRYPTO_STALE_POSITION_MAX_PROGRESS_FRACTION", 0.25)
+# Tried and reverted: a "stale/flat position" early exit (see
+# perps_strategy.py's own comment for the identical mechanism and full
+# rationale for reverting it) was added here too, then reverted after a
+# real multi-fold backtest on perps showed it performed worse than not
+# having it at every hold time tested, 16/16 comparisons -- the mechanism
+# cut positions early without reducing the fee cost of a flat trade, while
+# forfeiting the chance for a quiet-then-moving position to still reach
+# take_profit. Reverted here for consistency. If revisiting, backtest this
+# strategy's own history first -- don't re-add on hypothesis alone.
+#
+# max_hold_time shouldn't be the ONLY factor forcing an exit -- see
+# perps_strategy.py's own PROMISING_PROGRESS_FRACTION comment for the full
+# rationale, thresholds, and real backtest findings (price-progress alone
+# showed a real, if modest, improvement there; the volume/momentum/breakout
+# path tested WORSE in isolation, so it's kept conservative/near-dormant by
+# default here too -- ported for consistency, not independently backtested
+# on crypto's own history). Extension is more generous than perps' here:
+# crypto (unlike Kalshi perps) carries no periodic funding payment to worry
+# about crossing.
+MAX_HOLD_EXTENSION_MINUTES = _env_int("ALPACA_CRYPTO_MAX_HOLD_EXTENSION_MINUTES", 120)
+PROMISING_PROGRESS_FRACTION = _env_float("ALPACA_CRYPTO_PROMISING_PROGRESS_FRACTION", 0.25)
+PROMISING_VOLUME_Z = _env_float("ALPACA_CRYPTO_PROMISING_VOLUME_Z", 1.0)
+PROMISING_MOMENTUM_PCT = _env_float("ALPACA_CRYPTO_PROMISING_MOMENTUM_PCT", 0.0003)
+PROMISING_BREAKOUT_PCT_B = _env_float("ALPACA_CRYPTO_PROMISING_BREAKOUT_PCT_B", 0.85)
+PROMISING_SENTIMENT_SCORE = _env_float("ALPACA_CRYPTO_PROMISING_SENTIMENT_SCORE", 0.3)
 
 MODEL_CONFIDENCE_MIN = _env_float("ALPACA_CRYPTO_MODEL_CONFIDENCE_MIN", 0.55)
 
@@ -298,6 +308,8 @@ def decide_exit(
     position: dict[str, Any], current_price: float, *,
     velocity_pct_per_min: float | None = None, current_volatility: float | None = None,
     now: dt.datetime | None = None,
+    dollar_volume_z: float | None = None, momentum_pct: float | None = None,
+    breakout_pct_b: float | None = None, sentiment_score: float | None = None,
 ) -> tuple[bool, str]:
     """Long-only: a RISING price is favorable. Exit levels are per-position
     ADAPTIVE (see adaptive_exit_pcts) -- scaled to this specific pair's own
@@ -305,7 +317,14 @@ def decide_exit(
     BTC and a much choppier small-cap alike. `velocity_pct_per_min`/
     `current_volatility` are optional (see _update_velocity/_sample_volatility)
     -- when the caller doesn't track them, this behaves exactly like the
-    pre-upgrade version (take-profit/stop-loss/max-hold only)."""
+    pre-upgrade version (take-profit/stop-loss/max-hold only).
+
+    `dollar_volume_z`/`momentum_pct` (macd_hist_pct)/`breakout_pct_b`
+    (bb_pct_b)/`sentiment_score` feed the max_hold_time "promising position"
+    extension only -- see perps_strategy.py's own PROMISING_PROGRESS_FRACTION
+    comment for the full rationale, thresholds, and real backtest findings
+    (ported here for consistency, not independently backtested on crypto's
+    own history)."""
     entry_price = float(position["entry_price"])
     exit_pcts = adaptive_exit_pcts(position.get("entry_volatility_30"))
     take_profit_pct = exit_pcts["take_profit_pct"]
@@ -332,18 +351,22 @@ def decide_exit(
     opened_at = dt.datetime.fromisoformat(position["opened_at"])
     now = now if now is not None else dt.datetime.now(dt.timezone.utc)
     held_minutes = (now - opened_at).total_seconds() / 60.0
-    # Stale/flat position early exit -- see STALE_POSITION_CHECK_FRACTION's
-    # own comment. Uses abs(change_pct) deliberately: this targets
-    # positions that haven't moved meaningfully in EITHER direction, not
-    # ones that are simply losing (a real, distinct case already owned by
-    # stop_loss above) -- a position sitting at -0.5% with a -0.8% stop is a
-    # normal, developing loser that should be left to either recover or
-    # hit its real stop, not cut early by a second, competing mechanism.
-    if held_minutes >= MAX_HOLD_MINUTES * STALE_POSITION_CHECK_FRACTION and take_profit_pct > 0:
-        if abs(change_pct) < take_profit_pct * STALE_POSITION_MAX_PROGRESS_FRACTION:
-            return True, f"stale_position ({held_minutes:.0f}min, {change_pct:+.3%}, flat)"
     if held_minutes >= MAX_HOLD_MINUTES:
-        return True, f"max_hold_time ({held_minutes:.0f}min, {change_pct:+.3%})"
+        progress_frac = (change_pct / take_profit_pct) if take_profit_pct > 0 else 0.0
+        price_promising = progress_frac >= PROMISING_PROGRESS_FRACTION
+        volume_confirmed = dollar_volume_z is not None and dollar_volume_z >= PROMISING_VOLUME_Z
+        momentum_promising = (
+            volume_confirmed and change_pct >= 0
+            and momentum_pct is not None and momentum_pct >= PROMISING_MOMENTUM_PCT
+        )
+        breakout_promising = (
+            volume_confirmed and change_pct >= 0
+            and breakout_pct_b is not None and breakout_pct_b >= PROMISING_BREAKOUT_PCT_B
+        )
+        sentiment_promising = sentiment_score is not None and sentiment_score >= PROMISING_SENTIMENT_SCORE
+        promising = price_promising or momentum_promising or breakout_promising or sentiment_promising
+        if not promising or held_minutes >= MAX_HOLD_MINUTES + MAX_HOLD_EXTENSION_MINUTES:
+            return True, f"max_hold_time ({held_minutes:.0f}min, {change_pct:+.3%})"
     return False, f"holding ({change_pct:+.3%}, {held_minutes:.0f}min)"
 
 
@@ -914,6 +937,15 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
                 "entry_probability_up": candidate.get("probability_up"),
                 "entry_model_direction": candidate.get("model_direction"),
                 "entry_reason": candidate.get("reason"),
+                # Raw indicator values at decision time -- carried through
+                # to the closed trade record so the exit chart's indicator
+                # panel can show what the bot saw at ENTRY, not just exit
+                # (see perps_strategy.py's identical pattern).
+                "entry_dollar_volume_z": row.get("dollar_volume_z"),
+                "entry_macd_hist_pct": row.get("macd_hist_pct"),
+                "entry_bb_pct_b": row.get("bb_pct_b"),
+                "entry_rsi_14": row.get("rsi_14"),
+                "entry_sentiment_score": row.get("sentiment_score"),
             }
             position = {
                 "symbol": symbol, "entry_price": entry_price, "count": count,
@@ -945,13 +977,17 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
             except Exception:
                 logger.warning("[alpaca_crypto_strategy] Threads post for %s entry failed", symbol, exc_info=True)
             try:
+                from data import chart_snapshot
                 one_min_df = fetch_recent_crypto_bars(symbol)
+                indicators = chart_snapshot.format_technical_indicators(row)
+                if candidate.get("probability_up") is not None:
+                    indicators["Model prob up"] = f"{candidate['probability_up']:.1%}"
                 threads_post.post_trade_entry_chart(
                     ticker=symbol, market="crypto", candles=_candles_as_dicts(one_min_df),
                     entry_price=entry_price, take_profit_price=levels["take_profit_price"],
                     stop_loss_price=levels["stop_loss_price"],
                     entry_index=(len(one_min_df) - 1) if not one_min_df.empty else None,
-                    side="long", dry_run=trade_dry_run,
+                    side="long", dry_run=trade_dry_run, indicators=indicators,
                 )
             except Exception:
                 logger.warning("[alpaca_crypto_strategy] Threads chart post for %s entry failed", symbol, exc_info=True)
@@ -1007,9 +1043,33 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                 velocity = _update_velocity(position, current_price, now)
                 current_volatility = _sample_volatility(position.get("price_samples") or [])
 
+                # Volume/momentum/breakout/sentiment only matter to
+                # decide_exit's "promising position" extension, which only
+                # activates once a position has already reached
+                # MAX_HOLD_MINUTES -- fetched lazily, only in that case, to
+                # keep this loop cheap in the common case (see
+                # perps_strategy.py's identical pattern).
+                dollar_volume_z = momentum_pct = breakout_pct_b = sentiment_score_value = None
+                opened_at_check = dt.datetime.fromisoformat(position["opened_at"])
+                held_minutes_check = (now - opened_at_check).total_seconds() / 60.0
+                if held_minutes_check >= MAX_HOLD_MINUTES:
+                    try:
+                        from data.alpaca_crypto_data import latest_feature_row
+                        promising_row = latest_feature_row(symbol)
+                    except Exception as exc:
+                        promising_row = None
+                        logger.debug("[alpaca_crypto_strategy] promising-signal feature fetch failed for %s: %s", symbol, exc)
+                    if promising_row:
+                        dollar_volume_z = promising_row.get("dollar_volume_z")
+                        momentum_pct = promising_row.get("macd_hist_pct")
+                        breakout_pct_b = promising_row.get("bb_pct_b")
+                        sentiment_score_value = promising_row.get("sentiment_score")
+
                 should_exit, reason = decide_exit(
                     position, current_price, velocity_pct_per_min=velocity,
                     current_volatility=current_volatility, now=now,
+                    dollar_volume_z=dollar_volume_z, momentum_pct=momentum_pct,
+                    breakout_pct_b=breakout_pct_b, sentiment_score=sentiment_score_value,
                 )
                 if not should_exit:
                     checks.append({
@@ -1083,6 +1143,11 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                     "entry_probability_up": position.get("entry_probability_up"),
                     "entry_model_direction": position.get("entry_model_direction"),
                     "entry_reason": position.get("entry_reason"),
+                    "entry_dollar_volume_z": position.get("entry_dollar_volume_z"),
+                    "entry_macd_hist_pct": position.get("entry_macd_hist_pct"),
+                    "entry_bb_pct_b": position.get("entry_bb_pct_b"),
+                    "entry_rsi_14": position.get("entry_rsi_14"),
+                    "entry_sentiment_score": position.get("entry_sentiment_score"),
                 }
                 trade_log = state.setdefault("trade_log", [])
                 trade_log.append(trade)
@@ -1110,13 +1175,26 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
         except Exception:
             logger.warning("[alpaca_crypto_strategy] Threads post for %s exit failed", trade["symbol"], exc_info=True)
         try:
+            from data import chart_snapshot
             one_min_df = fetch_recent_crypto_bars(trade["symbol"])
+            indicators = chart_snapshot.format_technical_indicators({
+                "rsi_14": trade.get("entry_rsi_14"), "macd_hist_pct": trade.get("entry_macd_hist_pct"),
+                "bb_pct_b": trade.get("entry_bb_pct_b"), "dollar_volume_z": trade.get("entry_dollar_volume_z"),
+                "sentiment_score": trade.get("entry_sentiment_score"),
+            })
+            if trade.get("entry_probability_up") is not None:
+                indicators["Model prob up"] = f"{trade['entry_probability_up']:.1%}"
+            if trade.get("hold_minutes") is not None:
+                indicators["Held"] = f"{trade['hold_minutes']:.0f}min"
+            if trade.get("fee_usd") is not None:
+                indicators["Fees"] = f"${trade['fee_usd']:.3f}"
+            indicators["Exit reason"] = str(trade.get("reason", ""))
             threads_post.post_trade_exit_chart(
                 ticker=trade["symbol"], market="crypto", candles=_candles_as_dicts(one_min_df),
                 side="long", entry_price=float(trade["entry_price"]), exit_price=trade["exit_price"],
                 entry_index=_index_for_ts(one_min_df, trade.get("opened_at")),
                 exit_index=_index_for_ts(one_min_df, trade.get("closed_at")),
-                pnl_usd=trade["realized_pnl_usd"], dry_run=trade["dry_run"],
+                pnl_usd=trade["realized_pnl_usd"], dry_run=trade["dry_run"], indicators=indicators,
             )
         except Exception:
             logger.warning("[alpaca_crypto_strategy] Threads exit chart post for %s failed", trade["symbol"], exc_info=True)

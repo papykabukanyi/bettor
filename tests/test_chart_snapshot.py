@@ -123,6 +123,58 @@ def test_generate_candlestick_chart_colors_title_by_pnl():
     assert win_path is not None and loss_path is not None
 
 
+def test_generate_candlestick_chart_renders_an_indicator_panel_when_given():
+    from PIL import Image
+
+    # Distinct tickers -- generate_candlestick_chart's filename includes
+    # only whole-second time resolution, so two same-ticker calls back to
+    # back in a test can collide and the second overwrites the first file.
+    without_path = chart_snapshot.generate_candlestick_chart(
+        ticker="AAPL", market="stocks", candles=_candles(),
+    )
+    with_path = chart_snapshot.generate_candlestick_chart(
+        ticker="MSFT", market="stocks", candles=_candles(),
+        indicators={"RSI": "58.3", "MACD hist": "+0.03%", "Volume Z": "+1.2", "Model conf": "61.4%"},
+    )
+    assert without_path is not None and with_path is not None
+    without_height = Image.open(without_path).size[1]
+    with_height = Image.open(with_path).size[1]
+    # The indicator panel grows the canvas -- proof it actually rendered
+    # something extra, not just accepted the argument silently.
+    assert with_height > without_height
+
+
+def test_generate_candlestick_chart_indicator_panel_drops_none_values():
+    """A caller may not have every indicator available for every trade
+    (e.g. no model prediction yet) -- None entries must be skipped rather
+    than rendered as the literal string "None"."""
+    from PIL import Image
+
+    one_item_path = chart_snapshot.generate_candlestick_chart(
+        ticker="AAPL", market="stocks", candles=_candles(), indicators={"RSI": "58.3"},
+    )
+    mixed_path = chart_snapshot.generate_candlestick_chart(
+        ticker="MSFT", market="stocks", candles=_candles(),
+        indicators={"RSI": "58.3", "MACD hist": None, "Volume Z": None},
+    )
+    assert one_item_path is not None and mixed_path is not None
+    # Both have exactly one real indicator -> same single-row panel height.
+    assert Image.open(one_item_path).size[1] == Image.open(mixed_path).size[1]
+
+
+def test_generate_candlestick_chart_empty_indicators_dict_adds_no_panel():
+    from PIL import Image
+
+    omitted_path = chart_snapshot.generate_candlestick_chart(
+        ticker="AAPL", market="stocks", candles=_candles(),
+    )
+    empty_dict_path = chart_snapshot.generate_candlestick_chart(
+        ticker="MSFT", market="stocks", candles=_candles(), indicators={},
+    )
+    assert omitted_path is not None and empty_dict_path is not None
+    assert Image.open(omitted_path).size[1] == Image.open(empty_dict_path).size[1]
+
+
 def test_public_url_for_returns_none_without_render_external_url(monkeypatch):
     monkeypatch.delenv("RENDER_EXTERNAL_URL", raising=False)
     path = chart_snapshot.generate_candlestick_chart(

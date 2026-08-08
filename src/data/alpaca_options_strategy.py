@@ -85,19 +85,32 @@ MODEL_CONFIDENCE_MIN = _env_float("ALPACA_OPTIONS_MODEL_CONFIDENCE_MIN", 0.58)
 TAKE_PROFIT_PCT = _env_float("ALPACA_OPTIONS_TAKE_PROFIT_PCT", 0.30)
 STOP_LOSS_PCT = _env_float("ALPACA_OPTIONS_STOP_LOSS_PCT", 0.20)
 MAX_HOLD_MINUTES = _env_int("ALPACA_OPTIONS_MAX_HOLD_MINUTES", 180)
-# Same stale/flat position early exit perps_strategy.py, alpaca_strategy.py,
-# and alpaca_crypto_strategy.py all carry (see any of those modules' own
-# comment for the full rationale) -- a contract that hasn't captured a
-# meaningful fraction of its own take-profit distance by the halfway point
-# of max_hold_time is unlikely to still develop into one by the full
-# timeout, and every minute held is real theta decay against a long
-# premium position, unlike the underlying-only exposure the other three
-# strategies carry. Ported here proactively for consistency, even without
-# its own confirmed live finding yet (options' near-zero trade volume so
-# far means there isn't enough real history to have surfaced one) -- the
-# same fee/decay-drag risk class clearly applies.
-STALE_POSITION_CHECK_FRACTION = _env_float("ALPACA_OPTIONS_STALE_POSITION_CHECK_FRACTION", 0.5)
-STALE_POSITION_MAX_PROGRESS_FRACTION = _env_float("ALPACA_OPTIONS_STALE_POSITION_MAX_PROGRESS_FRACTION", 0.25)
+# Tried and reverted: a "stale/flat position" early exit (see
+# perps_strategy.py's own comment for the identical mechanism and full
+# rationale for reverting it) was added here too, then reverted after a
+# real multi-fold backtest on perps showed it performed worse than not
+# having it at every hold time tested, 16/16 comparisons -- the mechanism
+# cut positions early without reducing the fee/decay cost of a flat
+# contract, while forfeiting the chance for a quiet-then-moving position to
+# still reach take_profit. Reverted here for consistency. If revisiting,
+# backtest this strategy's own history first -- don't re-add on hypothesis
+# alone.
+#
+# max_hold_time shouldn't be the ONLY factor forcing an exit -- see
+# perps_strategy.py's own PROMISING_PROGRESS_FRACTION comment for the full
+# rationale, thresholds, and real backtest findings (price-progress alone
+# showed a real, if modest, improvement there; the volume/momentum/breakout
+# path tested WORSE in isolation, so it's kept conservative/near-dormant by
+# default here too -- ported for consistency, not independently backtested
+# on options' own history). Extension is more generous than perps' here: no
+# funding payment to worry about, and _near_expiration (below) already
+# provides an independent hard backstop regardless of this extension.
+MAX_HOLD_EXTENSION_MINUTES = _env_int("ALPACA_OPTIONS_MAX_HOLD_EXTENSION_MINUTES", 120)
+PROMISING_PROGRESS_FRACTION = _env_float("ALPACA_OPTIONS_PROMISING_PROGRESS_FRACTION", 0.25)
+PROMISING_VOLUME_Z = _env_float("ALPACA_OPTIONS_PROMISING_VOLUME_Z", 1.0)
+PROMISING_MOMENTUM_PCT = _env_float("ALPACA_OPTIONS_PROMISING_MOMENTUM_PCT", 0.0003)
+PROMISING_BREAKOUT_PCT_B = _env_float("ALPACA_OPTIONS_PROMISING_BREAKOUT_PCT_B", 0.85)
+PROMISING_SENTIMENT_SCORE = _env_float("ALPACA_OPTIONS_PROMISING_SENTIMENT_SCORE", 0.3)
 # Force-close a held contract once fewer than this many days remain before
 # expiration, regardless of TP/SL/max-hold -- avoids assignment risk and a
 # contract decaying to worthless for reasons unrelated to this strategy's
@@ -219,10 +232,19 @@ def _near_expiration(position: dict[str, Any], *, now: dt.datetime) -> bool:
 
 def decide_exit(
     position: dict[str, Any], current_price: float, *, now: dt.datetime | None = None,
+    dollar_volume_z: float | None = None, momentum_pct: float | None = None,
+    breakout_pct_b: float | None = None, sentiment_score: float | None = None,
 ) -> tuple[bool, str]:
     """Long-only (buying calls/puts is always a long position in the
     contract itself, regardless of which direction it bets on the
-    underlying): a RISING contract premium is favorable."""
+    underlying): a RISING contract premium is favorable.
+
+    `dollar_volume_z`/`momentum_pct` (macd_hist_pct)/`breakout_pct_b`
+    (bb_pct_b)/`sentiment_score` feed the max_hold_time "promising position"
+    extension only -- see perps_strategy.py's own PROMISING_PROGRESS_FRACTION
+    comment for the full rationale, thresholds, and real backtest findings
+    (ported here for consistency, not independently backtested on options'
+    own history)."""
     now = now if now is not None else dt.datetime.now(dt.timezone.utc)
     if _near_expiration(position, now=now):
         return True, "near_expiration"
@@ -237,18 +259,22 @@ def decide_exit(
 
     opened_at = dt.datetime.fromisoformat(position["opened_at"])
     held_minutes = (now - opened_at).total_seconds() / 60.0
-    # Stale/flat position early exit -- see STALE_POSITION_CHECK_FRACTION's
-    # own comment. Uses abs(change_pct) deliberately: this targets
-    # contracts that haven't moved meaningfully in EITHER direction, not
-    # ones that are simply losing (a real, distinct case already owned by
-    # stop_loss above) -- a contract sitting mid-way toward its real stop
-    # is a normal, developing loser that should be left to either recover
-    # or hit its real stop, not cut early by a second, competing mechanism.
-    if held_minutes >= MAX_HOLD_MINUTES * STALE_POSITION_CHECK_FRACTION and TAKE_PROFIT_PCT > 0:
-        if abs(change_pct) < TAKE_PROFIT_PCT * STALE_POSITION_MAX_PROGRESS_FRACTION:
-            return True, f"stale_position ({held_minutes:.0f}min, {change_pct:+.3%}, flat)"
     if held_minutes >= MAX_HOLD_MINUTES:
-        return True, f"max_hold_time ({held_minutes:.0f}min, {change_pct:+.3%})"
+        progress_frac = (change_pct / TAKE_PROFIT_PCT) if TAKE_PROFIT_PCT > 0 else 0.0
+        price_promising = progress_frac >= PROMISING_PROGRESS_FRACTION
+        volume_confirmed = dollar_volume_z is not None and dollar_volume_z >= PROMISING_VOLUME_Z
+        momentum_promising = (
+            volume_confirmed and change_pct >= 0
+            and momentum_pct is not None and momentum_pct >= PROMISING_MOMENTUM_PCT
+        )
+        breakout_promising = (
+            volume_confirmed and change_pct >= 0
+            and breakout_pct_b is not None and breakout_pct_b >= PROMISING_BREAKOUT_PCT_B
+        )
+        sentiment_promising = sentiment_score is not None and sentiment_score >= PROMISING_SENTIMENT_SCORE
+        promising = price_promising or momentum_promising or breakout_promising or sentiment_promising
+        if not promising or held_minutes >= MAX_HOLD_MINUTES + MAX_HOLD_EXTENSION_MINUTES:
+            return True, f"max_hold_time ({held_minutes:.0f}min, {change_pct:+.3%})"
     return False, f"holding ({change_pct:+.3%}, {held_minutes:.0f}min)"
 
 
@@ -273,16 +299,24 @@ def compute_contract_qty(available_balance_usd: float, contract_price: float, *,
     return int(budget // cost_per_contract)
 
 
-def _entry_context(candidate: dict[str, Any]) -> dict[str, Any]:
+def _entry_context(candidate: dict[str, Any], row: dict[str, Any] | None = None) -> dict[str, Any]:
     """Entry-time model/technical context -- what the model actually saw at
     decision time, so a post-trade analysis can ask "what led to this
     win/loss" instead of only ever knowing how it ended. Same fields (by
     name) perps_strategy.py already captures, so
-    alpaca_options_trade_analysis.py can mirror its logic."""
+    alpaca_options_trade_analysis.py can mirror its logic. `row` (the
+    underlying's own engineered feature row, when the caller has it) adds
+    the raw indicator values used by the exit chart's indicator panel."""
+    row = row or {}
     return {
         "entry_probability_up": candidate.get("probability_up"),
         "entry_model_direction": candidate.get("direction"),
         "entry_reason": candidate.get("reason"),
+        "entry_dollar_volume_z": row.get("dollar_volume_z"),
+        "entry_macd_hist_pct": row.get("macd_hist_pct"),
+        "entry_bb_pct_b": row.get("bb_pct_b"),
+        "entry_rsi_14": row.get("rsi_14"),
+        "entry_sentiment_score": row.get("sentiment_score"),
     }
 
 
@@ -745,7 +779,7 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
                     "expiration_date": long_contract.get("expiration_date"),
                     "entry_price": net_debit, "count": qty,
                     "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(),
-                    "order_id": order_id, **levels, **_entry_context(candidate),
+                    "order_id": order_id, **levels, **_entry_context(candidate, row),
                 }
                 contract_symbol, contract_type, entry_price = long_symbol, long_contract.get("type"), net_debit
             else:
@@ -778,7 +812,7 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
                     "expiration_date": contract.get("expiration_date"), "strike_price": contract.get("strike_price"),
                     "entry_price": contract_price, "count": qty,
                     "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(),
-                    "order_id": order_id, **levels, **_entry_context(candidate),
+                    "order_id": order_id, **levels, **_entry_context(candidate, row),
                 }
                 contract_type, entry_price = contract.get("type"), contract_price
 
@@ -818,11 +852,15 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
             # only an ENTRY time-marker plus a subtitle making clear this is
             # the underlying, not the contract's own price.
             try:
+                from data import chart_snapshot
                 one_min_df = fetch_recent_minute_bars(symbol)
+                indicators = chart_snapshot.format_technical_indicators(row)
+                if candidate.get("probability_up") is not None:
+                    indicators["Model prob up"] = f"{candidate['probability_up']:.1%}"
                 threads_post.post_trade_entry_chart(
                     ticker=contract_symbol, market="options", candles=_candles_as_dicts(one_min_df),
                     entry_index=(len(one_min_df) - 1) if not one_min_df.empty else None,
-                    side="long", dry_run=trade_dry_run,
+                    side="long", dry_run=trade_dry_run, indicators=indicators,
                     subtitle=f"{symbol} underlying price action (option premium not charted separately)",
                 )
             except Exception:
@@ -867,7 +905,33 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                 checks.append({"symbol": contract_symbol, "ok": False, "error": "no_quote_available"})
                 continue
 
-            should_exit, reason = decide_exit(position, current_price)
+            # Volume/momentum/breakout/sentiment (of the UNDERLYING, same
+            # basis the entry model itself uses) only matter to decide_exit's
+            # "promising position" extension, which only activates once a
+            # position has already reached MAX_HOLD_MINUTES -- fetched
+            # lazily, only in that case, to keep this loop cheap in the
+            # common case (see perps_strategy.py's identical pattern).
+            dollar_volume_z = momentum_pct = breakout_pct_b = sentiment_score_value = None
+            opened_at_check = dt.datetime.fromisoformat(position["opened_at"])
+            held_minutes_check = (dt.datetime.now(dt.timezone.utc) - opened_at_check).total_seconds() / 60.0
+            if held_minutes_check >= MAX_HOLD_MINUTES:
+                try:
+                    from data.alpaca_data import latest_feature_row
+                    promising_row = latest_feature_row(underlying_symbol)
+                except Exception as exc:
+                    promising_row = None
+                    logger.debug("[alpaca_options_strategy] promising-signal feature fetch failed for %s: %s", underlying_symbol, exc)
+                if promising_row:
+                    dollar_volume_z = promising_row.get("dollar_volume_z")
+                    momentum_pct = promising_row.get("macd_hist_pct")
+                    breakout_pct_b = promising_row.get("bb_pct_b")
+                    sentiment_score_value = promising_row.get("sentiment_score")
+
+            should_exit, reason = decide_exit(
+                position, current_price,
+                dollar_volume_z=dollar_volume_z, momentum_pct=momentum_pct,
+                breakout_pct_b=breakout_pct_b, sentiment_score=sentiment_score_value,
+            )
             if not should_exit:
                 checks.append({"symbol": contract_symbol, "ok": True, "exit_check": reason})
                 continue
@@ -946,6 +1010,11 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                     "entry_probability_up": position.get("entry_probability_up"),
                     "entry_model_direction": position.get("entry_model_direction"),
                     "entry_reason": position.get("entry_reason"),
+                    "entry_dollar_volume_z": position.get("entry_dollar_volume_z"),
+                    "entry_macd_hist_pct": position.get("entry_macd_hist_pct"),
+                    "entry_bb_pct_b": position.get("entry_bb_pct_b"),
+                    "entry_rsi_14": position.get("entry_rsi_14"),
+                    "entry_sentiment_score": position.get("entry_sentiment_score"),
                 }
                 trade_log = state.setdefault("trade_log", [])
                 trade_log.append(trade)
@@ -971,11 +1040,22 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
             except Exception:
                 logger.warning("[alpaca_options_strategy] Threads post for %s exit failed", contract_symbol, exc_info=True)
             try:
+                from data import chart_snapshot
                 one_min_df = fetch_recent_minute_bars(underlying_symbol)
+                indicators = chart_snapshot.format_technical_indicators({
+                    "rsi_14": trade.get("entry_rsi_14"), "macd_hist_pct": trade.get("entry_macd_hist_pct"),
+                    "bb_pct_b": trade.get("entry_bb_pct_b"), "dollar_volume_z": trade.get("entry_dollar_volume_z"),
+                    "sentiment_score": trade.get("entry_sentiment_score"),
+                })
+                if trade.get("entry_probability_up") is not None:
+                    indicators["Model prob up"] = f"{trade['entry_probability_up']:.1%}"
+                if hold_minutes is not None:
+                    indicators["Held"] = f"{hold_minutes:.0f}min"
+                indicators["Exit reason"] = str(reason)
                 threads_post.post_trade_exit_chart(
                     ticker=contract_symbol, market="options", candles=_candles_as_dicts(one_min_df),
                     entry_index=_index_for_ts(one_min_df, opened_at), exit_index=_index_for_ts(one_min_df, closed_at),
-                    side="long", pnl_usd=gross, dry_run=trade["dry_run"],
+                    side="long", pnl_usd=gross, dry_run=trade["dry_run"], indicators=indicators,
                     subtitle=f"{underlying_symbol} underlying price action (option premium not charted separately)",
                 )
             except Exception:

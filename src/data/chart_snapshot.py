@@ -110,6 +110,22 @@ _RIGHT_LABEL_WIDTH = _s(132)
 # passing e.g. a whole day of 1-minute candles can't produce an unreadable
 # smear instead of a chart.
 MAX_CANDLESTICKS = 90
+# "Make sure all the indicators used and factors are showing on that
+# picture" -- a dedicated footer strip listing whatever the caller decides
+# is relevant to THIS specific decision (technical indicators, model
+# confidence, volume/momentum/breakout/sentiment signals, exit reason,
+# etc.), not hardcoded here -- each of the 4 strategies' own feature set
+# differs (leverage for perps, IV-adjacent figures for options, ...), so
+# chart_snapshot.py stays a generic renderer and the caller supplies
+# already-labeled, already-formatted strings. Up to 4 columns per row so a
+# realistic 8-12 item indicator set still fits in 2-3 rows without
+# shrinking the font past readable-on-a-phone.
+_INDICATOR_COLUMNS = 4
+_INDICATOR_ROW_HEIGHT = _s(26)
+_INDICATOR_TOP_PADDING = _s(14)
+_INDICATOR_BOTTOM_PADDING = _s(12)
+_INDICATOR_COLOR = (180, 186, 199)
+_INDICATOR_LABEL_COLOR = (146, 153, 168)
 
 
 def generate_candlestick_chart(
@@ -118,6 +134,7 @@ def generate_candlestick_chart(
     take_profit_price: float | None = None, stop_loss_price: float | None = None,
     entry_index: int | None = None, exit_index: int | None = None,
     pnl_usd: float | None = None, subtitle: str | None = None,
+    indicators: dict[str, Any] | None = None,
 ) -> Path | None:
     """Renders real OHLC candlesticks -- the "whole idea" of a trade at a
     glance: what price actually did, not just a single close-price line.
@@ -130,9 +147,17 @@ def generate_candlestick_chart(
     underlying's price; see threads_post.post_trade_entry_chart). Optional
     entry_index/exit_index draw a vertical dashed marker at that candle,
     useful even when the price-level lines don't apply. pnl_usd (if given)
-    colors the title/exit line green (win) or red (loss). Returns the saved
-    PNG's path, or None if there isn't enough data or rendering fails --
-    callers must treat None as "skip this post", never raise."""
+    colors the title/exit line green (win) or red (loss).
+
+    `indicators` (optional): a label -> already-formatted-value mapping
+    (e.g. {"RSI": "62.3", "MACD hist": "+0.031%", "Volume Z": "+1.24",
+    "Model conf": "61.4%"}) rendered as a compact footer grid below the
+    plot, so a follower sees not just what the price did but WHY the bot
+    acted -- every real factor the decision actually used, not a curated
+    subset. Grows the image height to fit; omit for charts where no
+    decision-relevant indicators apply. Returns the saved PNG's path, or
+    None if there isn't enough data or rendering fails -- callers must
+    treat None as "skip this post", never raise."""
     if len(candles) < 5:
         return None
     try:
@@ -151,11 +176,20 @@ def generate_candlestick_chart(
         entry_index = None if entry_index is None or entry_index - trim < 0 else entry_index - trim
         exit_index = None if exit_index is None or exit_index - trim < 0 else exit_index - trim
 
+    indicator_items = [(str(k), str(v)) for k, v in (indicators or {}).items() if v is not None]
+    indicator_rows = -(-len(indicator_items) // _INDICATOR_COLUMNS) if indicator_items else 0  # ceil div
+    panel_height = (
+        _INDICATOR_TOP_PADDING + indicator_rows * _INDICATOR_ROW_HEIGHT + _INDICATOR_BOTTOM_PADDING
+        if indicator_rows else 0
+    )
+    total_height = _HEIGHT + panel_height
+
     img = None
     try:
-        img = Image.new("RGB", (_WIDTH, _HEIGHT), _BG)
+        img = Image.new("RGB", (_WIDTH, total_height), _BG)
         draw = ImageDraw.Draw(img)
         title_font, label_font, small_font = _font(_s(24)), _font(_s(15)), _font(_s(13))
+        indicator_font = _font(_s(13))
 
         plot_left, plot_right = _MARGIN, _WIDTH - _MARGIN - _RIGHT_LABEL_WIDTH
         plot_top, plot_bottom = _s(84), _HEIGHT - _MARGIN
@@ -242,6 +276,18 @@ def generate_candlestick_chart(
             title_color = _WIN_COLOR if pnl_usd > 0 else _LOSS_COLOR if pnl_usd < 0 else _TEXT_PRIMARY
         draw.text((_MARGIN, _s(24)), title, fill=title_color, font=title_font)
         draw.text((_MARGIN, _s(56)), subtitle or "Recent price action", fill=_TEXT_MUTED, font=small_font)
+
+        if indicator_items:
+            panel_top = _HEIGHT
+            draw.line([(_MARGIN, panel_top), (_WIDTH - _MARGIN, panel_top)], fill=_AXIS, width=_s(1))
+            col_w = (_WIDTH - _MARGIN * 2) / _INDICATOR_COLUMNS
+            for i, (label, value) in enumerate(indicator_items):
+                row, col = divmod(i, _INDICATOR_COLUMNS)
+                x = _MARGIN + col * col_w
+                y = panel_top + _INDICATOR_TOP_PADDING + row * _INDICATOR_ROW_HEIGHT
+                draw.text((x, y), f"{label}", fill=_INDICATOR_LABEL_COLOR, font=indicator_font)
+                label_w = draw.textlength(f"{label} ", font=indicator_font)
+                draw.text((x + label_w, y), f"{value}", fill=_INDICATOR_COLOR, font=indicator_font)
 
         CHARTS_DIR.mkdir(parents=True, exist_ok=True)
         filename = f"{_sanitize(market)}_{_sanitize(ticker)}_{int(time.time())}.png"
@@ -356,6 +402,41 @@ def generate_sentiment_snapshot(*, market: str, ticker_sentiments: list[dict[str
     finally:
         if img is not None:
             del img
+
+
+def format_technical_indicators(row: dict[str, Any] | None) -> dict[str, str]:
+    """Formats a raw engineered-feature-row-like dict (dollar_volume_z,
+    macd_hist_pct, bb_pct_b, rsi_14, sentiment_score, volatility_30 --
+    the same FEATURE_COLUMNS names every one of the 4 strategies' own data
+    modules already uses) into display-ready label -> string entries for
+    generate_candlestick_chart's `indicators` panel. Shared here so all 4
+    services format the same underlying signals identically rather than
+    four slightly-drifting copies. Missing/None values are simply omitted
+    (not rendered as "None") -- callers merge the result with their own
+    service-specific extras (model confidence, hold time, exit reason,
+    ...) before passing to generate_candlestick_chart."""
+    if not row:
+        return {}
+    out: dict[str, str] = {}
+    rsi = row.get("rsi_14")
+    if rsi is not None:
+        out["RSI"] = f"{float(rsi):.1f}"
+    macd = row.get("macd_hist_pct")
+    if macd is not None:
+        out["MACD hist"] = f"{float(macd):+.3%}"
+    bb = row.get("bb_pct_b")
+    if bb is not None:
+        out["BB %B"] = f"{float(bb):.2f}"
+    vol_z = row.get("dollar_volume_z")
+    if vol_z is not None:
+        out["Volume Z"] = f"{float(vol_z):+.2f}"
+    sentiment = row.get("sentiment_score")
+    if sentiment is not None:
+        out["Sentiment"] = f"{float(sentiment):+.2f}"
+    volatility_30 = row.get("volatility_30")
+    if volatility_30 is not None:
+        out["Volatility 30m"] = f"{float(volatility_30):.3%}"
+    return out
 
 
 def public_url_for(chart_path: Path) -> str | None:
