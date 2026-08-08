@@ -490,29 +490,49 @@ def test_post_sentiment_snapshot_never_raises_on_api_failure(monkeypatch, tmp_pa
     assert result is False
 
 
-def test_trending_news_reports_nothing_notable_with_no_headlines(monkeypatch):
+def _story(
+    title="Bitcoin surges past resistance", *, link="https://example.com/article",
+    image_url="https://example.com/photo.jpg", source="cointelegraph", secondary=None,
+):
+    return {
+        "title": title, "link": link, "image_url": image_url, "source": source,
+        "secondary": secondary if secondary is not None else ["ETF inflows accelerate"],
+    }
+
+
+def test_trending_news_reports_nothing_notable_with_no_story(monkeypatch):
     posted = []
     monkeypatch.setattr(threads_post.threads_client, "create_and_publish_post", lambda text: posted.append(text))
-    result = threads_post.post_trending_news([], market="crypto")
+    result = threads_post.post_trending_news(None, market="crypto")
     assert result is True
     assert "nothing notable" in posted[0].lower()
 
 
-def test_trending_news_lists_every_headline_and_labels_the_market(monkeypatch):
+def test_trending_news_posts_an_image_with_the_headline_and_secondary_stories(monkeypatch):
     posted = []
-    monkeypatch.setattr(threads_post.threads_client, "create_and_publish_post", lambda text: posted.append(text))
-    threads_post.post_trending_news(["Bitcoin surges past resistance", "ETF inflows accelerate"], market="crypto")
-    text = posted[0]
-    assert "Crypto trending news" in text
+    monkeypatch.setattr(
+        threads_post.threads_client, "create_and_publish_image_post",
+        lambda image_url, text="": posted.append((image_url, text)),
+    )
+    threads_post.post_trending_news(_story(), market="crypto")
+    image_url, text = posted[0]
+    assert image_url == "https://example.com/photo.jpg"
+    assert "Crypto news" in text
     assert "Bitcoin surges past resistance" in text
     assert "ETF inflows accelerate" in text
+    assert "#Crypto" in text
+    # Extracted from the headline's own text on top of the base market tags.
+    assert "#Bitcoin" in text
 
 
 def test_trending_news_labels_stocks_market(monkeypatch):
     posted = []
-    monkeypatch.setattr(threads_post.threads_client, "create_and_publish_post", lambda text: posted.append(text))
-    threads_post.post_trending_news(["Markets rally on rate cut hopes"], market="stocks")
-    assert "Stocks trending news" in posted[0]
+    monkeypatch.setattr(
+        threads_post.threads_client, "create_and_publish_image_post",
+        lambda image_url, text="": posted.append((image_url, text)),
+    )
+    threads_post.post_trending_news(_story("Markets rally on rate cut hopes", secondary=[]), market="stocks")
+    assert "Stocks news" in posted[0][1]
 
 
 def test_trending_news_labels_options_market(monkeypatch):
@@ -521,32 +541,63 @@ def test_trending_news_labels_options_market(monkeypatch):
     so options' own trending-news post rendered indistinguishably from
     the actual stocks service's own posts, and got the wrong hashtags."""
     posted = []
-    monkeypatch.setattr(threads_post.threads_client, "create_and_publish_post", lambda text: posted.append(text))
-    threads_post.post_trending_news(["Big tech earnings beat expectations"], market="options")
-    assert "Options trending news" in posted[0]
-    assert "Stocks trending news" not in posted[0]
-    assert "#OptionsTrading" in posted[0]
+    monkeypatch.setattr(
+        threads_post.threads_client, "create_and_publish_image_post",
+        lambda image_url, text="": posted.append((image_url, text)),
+    )
+    threads_post.post_trending_news(_story("Big tech earnings beat expectations", secondary=[]), market="options")
+    text = posted[0][1]
+    assert "Options news" in text
+    assert "Stocks news" not in text
+    assert "#OptionsTrading" in text
 
 
 def test_trending_news_labels_perps_market(monkeypatch):
     posted = []
+    monkeypatch.setattr(
+        threads_post.threads_client, "create_and_publish_image_post",
+        lambda image_url, text="": posted.append((image_url, text)),
+    )
+    threads_post.post_trending_news(_story("Prediction markets see record volume", secondary=[]), market="perps")
+    text = posted[0][1]
+    assert "Perps news" in text
+    assert "#Kalshi" in text
+
+
+def test_trending_news_falls_back_to_text_when_no_image_is_available(monkeypatch):
+    """No RSS enclosure and og:image resolution both came up empty -- a
+    real trending post (text-only) still beats posting nothing at all."""
+    posted = []
     monkeypatch.setattr(threads_post.threads_client, "create_and_publish_post", lambda text: posted.append(text))
-    threads_post.post_trending_news(["Prediction markets see record volume"], market="perps")
-    assert "Perps trending news" in posted[0]
-    assert "#Kalshi" in posted[0]
+    monkeypatch.setattr(threads_post, "_resolve_og_image", lambda url: None)
+    threads_post.post_trending_news(_story(image_url=None, secondary=[]), market="crypto")
+    assert "Bitcoin surges past resistance" in posted[0]
+
+
+def test_trending_news_falls_back_to_text_when_the_image_post_itself_fails(monkeypatch):
+    def raise_error(image_url, text=""):
+        raise RuntimeError("Threads rejected the image URL")
+
+    posted = []
+    monkeypatch.setattr(threads_post.threads_client, "create_and_publish_image_post", raise_error)
+    monkeypatch.setattr(threads_post.threads_client, "create_and_publish_post", lambda text: posted.append(text))
+    result = threads_post.post_trending_news(_story(secondary=[]), market="crypto")
+    assert result is True
+    assert "Bitcoin surges past resistance" in posted[0]
 
 
 def test_trending_news_respects_the_disable_flag(monkeypatch):
     monkeypatch.setattr(threads_post, "THREADS_POST_ENABLED", False)
     posted = []
-    monkeypatch.setattr(threads_post.threads_client, "create_and_publish_post", lambda text: posted.append(text))
-    assert threads_post.post_trending_news(["headline"], market="crypto") is False
+    monkeypatch.setattr(threads_post.threads_client, "create_and_publish_image_post", lambda image_url, text="": posted.append(text))
+    assert threads_post.post_trending_news(_story(), market="crypto") is False
     assert posted == []
 
 
-def test_trending_news_never_raises_on_api_failure(monkeypatch):
-    def raise_error(text):
+def test_trending_news_never_raises_when_both_image_and_text_posting_fail(monkeypatch):
+    def raise_error(*args, **kwargs):
         raise RuntimeError("simulated Threads API failure")
 
+    monkeypatch.setattr(threads_post.threads_client, "create_and_publish_image_post", raise_error)
     monkeypatch.setattr(threads_post.threads_client, "create_and_publish_post", raise_error)
-    assert threads_post.post_trending_news(["headline"], market="crypto") is False
+    assert threads_post.post_trending_news(_story(secondary=[]), market="crypto") is False

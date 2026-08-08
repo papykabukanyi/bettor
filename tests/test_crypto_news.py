@@ -302,3 +302,57 @@ def test_get_trending_headlines_drops_empty_titles(monkeypatch):
     monkeypatch.setattr(news, "_fetch_rss_titles_cached", lambda url, *, source_name, limit=40: ["real headline", "", None] if source_name == "cointelegraph" else [])
     result = news.get_trending_headlines()
     assert result == ["real headline"]
+
+
+def _rich_item(title, source, image_url="https://x.com/i.jpg"):
+    return {"title": title, "link": f"https://{source}.example/a", "pub_date": "", "image_url": image_url, "source": source}
+
+
+def test_get_trending_story_picks_the_cross_outlet_corroborated_story(monkeypatch):
+    """Real popularity signal: the same story independently covered by 2+
+    outlets is the lead, even if it isn't the very first item fetched."""
+    def fake_fetch(url, *, source_name, limit=40):
+        return {
+            "cointelegraph": [_rich_item("Quiet single-source update", "cointelegraph"), _rich_item("Bitcoin ETF inflows hit record high this week", "cointelegraph")],
+            "cryptoslate": [_rich_item("Bitcoin ETF inflows hit a record high this week", "cryptoslate", image_url=None)],
+            "decrypt": [_rich_item("Unrelated NFT drop announced today", "decrypt")],
+        }.get(source_name, [])
+
+    monkeypatch.setattr(news, "_fetch_rss_items_cached", fake_fetch)
+    story = news.get_trending_story()
+    assert story is not None
+    assert "ETF inflows" in story["title"]
+    # Prefers the version WITH an image when both sides of the corroborated pair are candidates.
+    assert story["image_url"] == "https://x.com/i.jpg"
+
+
+def test_get_trending_story_falls_back_to_freshest_item_without_corroboration(monkeypatch):
+    def fake_fetch(url, *, source_name, limit=40):
+        return {
+            "cointelegraph": [_rich_item("First distinct story from cointelegraph", "cointelegraph")],
+            "cryptoslate": [_rich_item("Second distinct story from cryptoslate", "cryptoslate")],
+            "decrypt": [_rich_item("Third distinct story from decrypt", "decrypt")],
+        }.get(source_name, [])
+
+    monkeypatch.setattr(news, "_fetch_rss_items_cached", fake_fetch)
+    story = news.get_trending_story()
+    assert story is not None
+    assert story["title"] == "First distinct story from cointelegraph"
+
+
+def test_get_trending_story_returns_none_when_every_feed_fails(monkeypatch):
+    monkeypatch.setattr(news, "_fetch_rss_items_cached", lambda url, *, source_name, limit=40: [])
+    assert news.get_trending_story() is None
+
+
+def test_get_trending_story_secondary_excludes_the_lead_and_caps_at_three(monkeypatch):
+    def fake_fetch(url, *, source_name, limit=40):
+        if source_name != "cointelegraph":
+            return []
+        return [_rich_item(f"Story {i}", "cointelegraph") for i in range(6)]
+
+    monkeypatch.setattr(news, "_fetch_rss_items_cached", fake_fetch)
+    story = news.get_trending_story()
+    assert story is not None
+    assert story["title"] not in story["secondary"]
+    assert len(story["secondary"]) == 3

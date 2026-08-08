@@ -153,27 +153,28 @@ def test_threads_hourly_status_job_never_raises_on_failure(monkeypatch):
     assert result["ok"] is False
 
 
-def test_threads_trending_news_job_posts_the_fetched_headlines(monkeypatch):
+def test_threads_trending_news_job_posts_the_fetched_story(monkeypatch):
     from data import crypto_news, threads_post
 
-    monkeypatch.setattr(crypto_news, "get_trending_headlines", lambda limit=5: ["Bitcoin rallies", "ETF inflows rise"])
+    story = {"title": "Bitcoin rallies", "link": "https://x.com/a", "image_url": "https://x.com/i.jpg", "source": "cointelegraph", "secondary": []}
+    monkeypatch.setattr(crypto_news, "get_trending_story", lambda: story)
     captured = {}
-    monkeypatch.setattr(threads_post, "post_trending_news", lambda headlines, *, market: captured.update(headlines=headlines, market=market) or True)
+    monkeypatch.setattr(threads_post, "post_trending_news", lambda s, *, market: captured.update(story=s, market=market) or True)
 
     result = app_kalshi._run_perps_threads_trending_news.__wrapped__()  # noqa: SLF001
 
-    assert result == {"ok": True, "posted": True, "headline_count": 2}
+    assert result == {"ok": True, "posted": True, "story": "Bitcoin rallies"}
     assert captured["market"] == "crypto"
-    assert captured["headlines"] == ["Bitcoin rallies", "ETF inflows rise"]
+    assert captured["story"] == story
 
 
 def test_threads_trending_news_job_never_raises_on_failure(monkeypatch):
     from data import crypto_news
 
-    def raise_error(limit=5):
+    def raise_error():
         raise RuntimeError("rss down")
 
-    monkeypatch.setattr(crypto_news, "get_trending_headlines", raise_error)
+    monkeypatch.setattr(crypto_news, "get_trending_story", raise_error)
     result = app_kalshi._run_perps_threads_trending_news.__wrapped__()  # noqa: SLF001
     assert result["ok"] is False
 

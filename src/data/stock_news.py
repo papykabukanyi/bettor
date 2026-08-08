@@ -97,6 +97,33 @@ def _fetch_google_news_rss(query: str) -> list[str]:
         return []
 
 
+def _fetch_google_news_rss_items(query: str, *, limit: int = 10) -> list[dict[str, Any]]:
+    """Same feed as _fetch_google_news_rss, but keeps title + link (a Google
+    News redirect URL -- see threads_post.py's own OG-image resolver, which
+    follows it to the real article to pull a photo, since this RSS feed
+    itself carries no enclosure/media image the way crypto_news.py's direct
+    newsroom feeds do) + source outlet name."""
+    url = "https://news.google.com/rss/search"
+    try:
+        resp = requests.get(url, params={"q": query, "hl": "en-US", "gl": "US", "ceid": "US:en"}, timeout=_TIMEOUT_SEC)
+        resp.raise_for_status()
+        root = ET.fromstring(resp.content)
+        items = []
+        for item in root.iter("item"):
+            title = item.findtext("title") or ""
+            if not title:
+                continue
+            source_el = item.find("source")
+            items.append({
+                "title": title, "link": item.findtext("link") or "",
+                "source": (source_el.text if source_el is not None else None) or "Google News",
+            })
+        return items[:limit]
+    except Exception as exc:
+        logger.warning("[stock_news] google news rich rss failed for %r: %s", query, exc)
+        return []
+
+
 def _clean_company_query(symbol: str, company_name: str | None) -> str:
     """A bare ticker is often ambiguous or a common word ("MA", "ALL", "IT"),
     so prefer the company name when available -- stripped of the generic
@@ -162,3 +189,36 @@ def get_trending_headlines(*, limit: int = 5) -> list[str]:
     if headlines:  # don't cache a transient failure's empty result over a good one
         _trending_cache = (headlines, now)
     return headlines[:limit]
+
+
+_trending_story_cache: tuple[list[dict[str, Any]], float] | None = None
+
+
+def get_trending_story(*, query: str = _TRENDING_QUERY) -> dict[str, Any] | None:
+    """Picks ONE lead story for the Threads trending-news post. Unlike
+    crypto_news.get_trending_story() (which corroborates across 3 distinct
+    newsroom feeds), this is a single aggregator query -- Google News' own
+    relevance ranking already puts its best-covered story first for a
+    broad query like "stock market", so the top result IS the popularity
+    signal here. `link` is a Google redirect, not the real article URL --
+    see threads_post.py's OG-image resolver, which follows it and pulls a
+    real photo from the actual page. Returns {"title", "link",
+    "image_url": None, "source", "secondary": [titles...]} or None if the
+    feed failed. Never raises -- same best-effort contract as the rest of
+    this module."""
+    global _trending_story_cache
+    now = time.time()
+    if _trending_story_cache and (now - _trending_story_cache[1]) < _TRENDING_CACHE_TTL_SEC:
+        items = _trending_story_cache[0]
+    else:
+        items = _fetch_google_news_rss_items(query, limit=10)
+        if items:
+            _trending_story_cache = (items, now)
+    if not items:
+        return None
+    lead = items[0]
+    secondary = [it["title"] for it in items[1:4]]
+    return {
+        "title": lead["title"], "link": lead["link"], "image_url": None,
+        "source": lead["source"], "secondary": secondary,
+    }

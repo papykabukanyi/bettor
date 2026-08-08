@@ -21,6 +21,9 @@ from __future__ import annotations
 
 import logging
 import os
+import re
+
+import requests
 
 from data import threads_client
 
@@ -29,6 +32,7 @@ logger = logging.getLogger(__name__)
 THREADS_POST_ENABLED = str(os.getenv("THREADS_POST_ENABLED", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
 
 _THREADS_POST_MAX_CHARS = 500
+_OG_IMAGE_TIMEOUT_SEC = 8
 
 # Every post used to say "Kalshi Perps" regardless of which of the four
 # asset-class services actually sent it -- a real mislabeling bug once
@@ -63,6 +67,108 @@ _SHORT_MARKET_LABELS = {"perps": "Perps", "stocks": "Stocks", "crypto": "Crypto"
 
 def _short_market_label(market: str) -> str:
     return _SHORT_MARKET_LABELS.get(market, "Perps")
+
+
+# Discovery hashtags extracted straight from the headline's own text --
+# specific/topical tags (a coin name, a ticker, "Fed", "earnings", ...) get
+# found by people searching or browsing THAT topic, on top of (not instead
+# of) the generic per-market tag set above. Several keys deliberately map to
+# the same tag (btc/bitcoin) since a headline might use either form.
+_KEYWORD_HASHTAGS = {
+    "bitcoin": "#Bitcoin", "btc": "#Bitcoin", "ethereum": "#Ethereum", "eth": "#Ethereum",
+    "solana": "#Solana", "xrp": "#XRP", "ripple": "#XRP", "dogecoin": "#Dogecoin",
+    "litecoin": "#Litecoin", "chainlink": "#Chainlink", "polkadot": "#Polkadot",
+    "hedera": "#Hedera", "hyperliquid": "#Hyperliquid", "shiba inu": "#SHIB",
+    "stellar": "#Stellar", "zcash": "#Zcash", "stablecoin": "#Stablecoins",
+    "altcoin": "#Altcoins", "defi": "#DeFi", "nft": "#NFT",
+    "etf": "#ETF", "sec": "#SEC", "fed": "#FederalReserve", "federal reserve": "#FederalReserve",
+    "inflation": "#Inflation", "rate cut": "#RateCuts", "interest rate": "#InterestRates",
+    "earnings": "#Earnings", "ipo": "#IPO", "recession": "#Recession",
+    "s&p": "#SPX", "nasdaq": "#Nasdaq", "dow jones": "#DowJones",
+    "apple": "#Apple", "tesla": "#Tesla", "nvidia": "#Nvidia", "microsoft": "#Microsoft",
+    "amazon": "#Amazon", "google": "#Google", "meta": "#Meta",
+    "regulation": "#Regulation", "hack": "#CryptoSecurity", "lawsuit": "#Lawsuit",
+    "record": "#RecordHigh", "rally": "#MarketRally", "crash": "#MarketCrash",
+}
+
+
+def _extract_keyword_hashtags(text: str, *, max_tags: int = 3) -> list[str]:
+    lowered = text.lower()
+    found: list[str] = []
+    for keyword, tag in _KEYWORD_HASHTAGS.items():
+        if keyword in lowered and tag not in found:
+            found.append(tag)
+        if len(found) >= max_tags:
+            break
+    return found
+
+
+def _resolve_og_image(url: str) -> str | None:
+    """Best-effort: fetches `url` and pulls its <meta property="og:image">
+    -- used when the RSS feed itself carries no usable enclosure/media
+    image (Google News' feed, which stock_news.py's trending story relies
+    on, is the real case this exists for -- crypto_news.py's three direct
+    newsroom feeds already carry a real image URL, so this is skipped
+    there). Confirmed live: even Google News' own redirect/interstitial
+    page (it doesn't HTTP-redirect straight to the publisher) carries a
+    usable og:image of its own. Never raises -- returns None on any
+    failure, same contract as everything else in this module."""
+    if not url:
+        return None
+    try:
+        resp = requests.get(url, timeout=_OG_IMAGE_TIMEOUT_SEC, headers={"User-Agent": "Mozilla/5.0"})
+        resp.raise_for_status()
+        match = re.search(
+            r'<meta[^>]+(?:property|name)=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']',
+            resp.text, re.IGNORECASE,
+        )
+        if not match:
+            # Attribute order can be reversed (content before property).
+            match = re.search(
+                r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+(?:property|name)=["\']og:image["\']',
+                resp.text, re.IGNORECASE,
+            )
+        return match.group(1) if match else None
+    except Exception as exc:
+        logger.debug("[threads_post] og:image resolve failed for %s: %s", url, exc)
+        return None
+
+
+def _clean_headline(title: str) -> str:
+    """Google News titles carry a trailing " - source.com" suffix that
+    reads as noise once the source is already shown separately below."""
+    return re.sub(r"\s+-\s+[\w.]+\.\w{2,}$", "", title).strip()
+
+
+def _format_trending_story_caption(story: dict, *, market: str) -> str:
+    """Builds a catchy, discoverable caption for the trending-news IMAGE
+    post: a hook line + the real headline (source outlets already write
+    these to be attention-grabbing -- the job here is presenting it well,
+    not rewriting real journalism), a couple more trending headlines for
+    context, then hashtags (per-market tags + up to 3 extracted from the
+    headline's own topic -- see _extract_keyword_hashtags)."""
+    label = _short_market_label(market)
+    title = _clean_headline(story["title"])
+    source = story.get("source") or ""
+    lines = [f"\U0001F4F0 {label} news: {title}"]
+    if source:
+        lines.append(f"(via {source})")
+    secondary = [s for s in (story.get("secondary") or []) if s][:3]
+    if secondary:
+        lines.append("")
+        lines.append("Also trending:")
+        lines.extend(f"• {_clean_headline(s)}" for s in secondary)
+    hashtags = _hashtags_for_market(market)
+    extra_tags = _extract_keyword_hashtags(title)
+    extra_tags = [t for t in extra_tags if t.lower() not in hashtags.lower()]
+    if extra_tags:
+        hashtags = f"{hashtags} {' '.join(extra_tags)}"
+    lines.append("")
+    lines.append(hashtags)
+    text = "\n".join(lines)
+    if len(text) > _THREADS_POST_MAX_CHARS:
+        text = text[: _THREADS_POST_MAX_CHARS - 1] + "…"
+    return text
 
 
 def is_configured() -> bool:
@@ -234,43 +340,46 @@ def post_hourly_status(
         return False
 
 
-def _format_trending_news_text(*, headlines: list[str], market: str) -> str:
-    """Real, confirmed mislabeling bug found in review: this used to
-    collapse EVERY market that wasn't literally "crypto" into "Stocks" --
-    so options' own trending-news post (already passing market="options"
-    at its call site, see alpaca_options_server.py) still rendered as
-    "Stocks trending news" here, indistinguishable from the actual stocks
-    service's own posts, and got the STOCKS hashtag set instead of
-    options'. Now driven by the real per-market label/hashtags, the same
-    ones post_sentiment_snapshot below already used correctly."""
-    label = _short_market_label(market)
-    hashtags = _hashtags_for_market(market)
-    hashtags += " #Trends #News"
-    if not headlines:
-        text = f"{label} trending news: nothing notable right now.\n{hashtags}"
-    else:
-        lines = [f"{label} trending news (may be influencing current decisions):"]
-        lines.extend(f"- {h}" for h in headlines)
-        lines.append(hashtags)
-        text = "\n".join(lines)
-    if len(text) > _THREADS_POST_MAX_CHARS:
-        text = text[: _THREADS_POST_MAX_CHARS - 1] + "…"
-    return text
+def post_trending_news(story: dict | None, *, market: str) -> bool:
+    """Posts the single most attention-worthy trending story right now --
+    a real photo (the story's own RSS image, or one resolved from its
+    article link -- see _resolve_og_image) plus a catchy hook headline, a
+    couple more trending headlines for context, and topical hashtags (see
+    _format_trending_story_caption). Replaces the old plain-text headline
+    list: the whole point of this post is to actually help this account
+    gain followers/engagement on Threads, not just log a digest nobody
+    stops to read. `story` comes from crypto_news.get_trending_story() /
+    stock_news.get_trending_story() -- {"title", "link", "image_url",
+    "source", "secondary"}, or None if every feed failed.
 
-
-def post_trending_news(headlines: list[str], *, market: str) -> bool:
-    """Posts a digest of what's currently trending in crypto or stock news
-    -- the same headlines (or general-market equivalent) feeding into
-    sentiment_score for the direction models, made visible rather than
-    staying an invisible input nobody can see. Runs every 30 minutes (see
-    app_kalshi.py's/alpaca_server.py's own scheduled job) independent of
-    whether any trade happened. Same best-effort, never-raise contract as
-    every other post here."""
+    Runs every 30 minutes (see app_kalshi.py's/alpaca_server.py's own
+    scheduled job) independent of whether any trade happened. Same
+    best-effort, never-raise contract as every other post here -- and
+    specifically falls back to a plain text post if no image could be
+    resolved, or if the image post itself fails for any reason (e.g.
+    Threads rejects the source's own image URL) -- a real trending post
+    still beats none."""
     if not THREADS_POST_ENABLED:
         return False
-    text = _format_trending_news_text(headlines=headlines, market=market)
+    if not story:
+        text = f"{_short_market_label(market)} trending news: nothing notable right now.\n{_hashtags_for_market(market)} #Trends #News"
+        try:
+            threads_client.create_and_publish_post(text)
+            return True
+        except Exception as exc:
+            logger.warning("[threads_post] failed to post trending news (no story): %s", exc)
+            return False
+
+    caption = _format_trending_story_caption(story, market=market)
+    image_url = story.get("image_url") or _resolve_og_image(story.get("link") or "")
+    if image_url:
+        try:
+            threads_client.create_and_publish_image_post(image_url, caption)
+            return True
+        except Exception as exc:
+            logger.warning("[threads_post] failed to post trending news as an image, falling back to text: %s", exc)
     try:
-        threads_client.create_and_publish_post(text)
+        threads_client.create_and_publish_post(caption)
         return True
     except Exception as exc:
         logger.warning("[threads_post] failed to post trending news: %s", exc)

@@ -141,26 +141,27 @@ def test_api_alpaca_options_backtest_route_requires_cron_auth(monkeypatch):
         assert resp.status_code == 401
 
 
-def test_threads_trending_news_job_posts_the_fetched_headlines(monkeypatch):
+def test_threads_trending_news_job_posts_the_fetched_story(monkeypatch):
     from data import stock_news, threads_post
 
-    monkeypatch.setattr(stock_news, "get_trending_headlines", lambda limit=5: ["Apple beats earnings", "Fed holds rates"])
+    story = {"title": "Apple beats earnings", "link": "https://x.com/a", "image_url": None, "source": "cnbc.com", "secondary": ["Fed holds rates"]}
+    monkeypatch.setattr(stock_news, "get_trending_story", lambda: story)
     captured = {}
-    monkeypatch.setattr(threads_post, "post_trending_news", lambda headlines, *, market: captured.update(headlines=headlines, market=market) or True)
+    monkeypatch.setattr(threads_post, "post_trending_news", lambda s, *, market: captured.update(story=s, market=market) or True)
 
     result = alpaca_options_server._run_alpaca_options_threads_trending_news.__wrapped__()  # noqa: SLF001
 
-    assert result == {"ok": True, "posted": True, "headline_count": 2}
+    assert result == {"ok": True, "posted": True, "story": "Apple beats earnings"}
     assert captured["market"] == "options"
 
 
 def test_threads_trending_news_job_never_raises_on_failure(monkeypatch):
     from data import stock_news
 
-    def raise_error(limit=5):
+    def raise_error():
         raise RuntimeError("rss down")
 
-    monkeypatch.setattr(stock_news, "get_trending_headlines", raise_error)
+    monkeypatch.setattr(stock_news, "get_trending_story", raise_error)
     result = alpaca_options_server._run_alpaca_options_threads_trending_news.__wrapped__()  # noqa: SLF001
     assert result["ok"] is False
 

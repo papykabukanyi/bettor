@@ -147,3 +147,45 @@ def test_get_trending_headlines_does_not_cache_a_transient_empty_failure(monkeyp
     result = news.get_trending_headlines()
     assert result == []
     assert news._trending_cache is None  # noqa: SLF001
+
+
+@pytest.fixture
+def _isolated_trending_story_cache(monkeypatch):
+    monkeypatch.setattr(news, "_trending_story_cache", None)
+    yield
+
+
+def test_get_trending_story_uses_the_top_result_as_the_lead(monkeypatch, _isolated_trending_story_cache):
+    """Google News' own relevance ranking already puts its best-covered
+    story first for a broad query -- the top result IS the popularity
+    signal here, unlike crypto's own cross-outlet corroboration."""
+    items = [
+        {"title": "S&P 500 hits record high - cnbc.com", "link": "https://news.google.com/a", "source": "cnbc.com"},
+        {"title": "Bond yields tick up - ft.com", "link": "https://news.google.com/b", "source": "ft.com"},
+        {"title": "Tech earnings beat expectations - barrons.com", "link": "https://news.google.com/c", "source": "barrons.com"},
+    ]
+    monkeypatch.setattr(news, "_fetch_google_news_rss_items", lambda query, limit=10: items)
+    story = news.get_trending_story()
+    assert story is not None
+    assert story["title"] == "S&P 500 hits record high - cnbc.com"
+    assert story["source"] == "cnbc.com"
+    assert story["image_url"] is None
+    assert story["secondary"] == ["Bond yields tick up - ft.com", "Tech earnings beat expectations - barrons.com"]
+
+
+def test_get_trending_story_returns_none_when_the_feed_fails(monkeypatch, _isolated_trending_story_cache):
+    monkeypatch.setattr(news, "_fetch_google_news_rss_items", lambda query, limit=10: [])
+    assert news.get_trending_story() is None
+
+
+def test_get_trending_story_is_cached_within_the_ttl(monkeypatch, _isolated_trending_story_cache):
+    calls = {"n": 0}
+
+    def fake_fetch(query, limit=10):
+        calls["n"] += 1
+        return [{"title": "headline", "link": "https://news.google.com/a", "source": "cnbc.com"}]
+
+    monkeypatch.setattr(news, "_fetch_google_news_rss_items", fake_fetch)
+    news.get_trending_story()
+    news.get_trending_story()
+    assert calls["n"] == 1

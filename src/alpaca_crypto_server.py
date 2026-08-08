@@ -274,9 +274,9 @@ def _run_alpaca_crypto_threads_trending_news() -> dict[str, Any]:
     directly (already coin-mapped, already proven for perps)."""
     try:
         from data import crypto_news
-        headlines = crypto_news.get_trending_headlines(limit=5)
-        posted = threads_post.post_trending_news(headlines, market="crypto")
-        return {"ok": True, "posted": posted, "headline_count": len(headlines)}
+        story = crypto_news.get_trending_story()
+        posted = threads_post.post_trending_news(story, market="crypto")
+        return {"ok": True, "posted": posted, "story": (story or {}).get("title")}
     except Exception as exc:
         logger.warning("[alpaca_crypto_server] Threads trending-news post failed: %s", exc)
         return {"ok": False, "error": str(exc)}

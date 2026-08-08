@@ -426,15 +426,17 @@ def _run_perps_threads_hourly_status() -> dict[str, Any]:
 
 @_locked_job("perps_threads_trending_news", stale_after_sec=300)
 def _run_perps_threads_trending_news() -> dict[str, Any]:
-    """Posts a digest of what's currently trending in crypto news every 30
-    minutes -- the same general-newsroom headlines sentiment_score is
-    already built from, surfaced so the news potentially influencing the
-    model's own decisions is visible rather than an invisible input.
-    Read-only, never touches order placement."""
+    """Posts the single most attention-worthy crypto news story every 30
+    minutes -- a real photo + catchy headline + topical hashtags (see
+    threads_post.post_trending_news), the same general-newsroom coverage
+    sentiment_score is already built from, surfaced so it's visible
+    rather than an invisible input -- and written to actually help this
+    account gain followers, not just log a digest. Read-only, never
+    touches order placement."""
     try:
-        headlines = crypto_news.get_trending_headlines(limit=5)
-        posted = threads_post.post_trending_news(headlines, market="crypto")
-        return {"ok": True, "posted": posted, "headline_count": len(headlines)}
+        story = crypto_news.get_trending_story()
+        posted = threads_post.post_trending_news(story, market="crypto")
+        return {"ok": True, "posted": posted, "story": (story or {}).get("title")}
     except Exception as exc:
         logger.warning("[app_kalshi] Threads trending-news post failed: %s", exc)
         return {"ok": False, "error": str(exc)}

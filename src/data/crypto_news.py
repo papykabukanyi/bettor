@@ -347,3 +347,113 @@ def get_trending_headlines(*, limit: int = 5) -> list[str]:
     headlines.extend(_fetch_rss_titles_cached("https://cryptoslate.com/feed/", source_name="cryptoslate"))
     headlines.extend(_fetch_rss_titles_cached("https://decrypt.co/feed", source_name="decrypt"))
     return [h for h in headlines if h][:limit]
+
+
+_STOPWORDS = {
+    "the", "a", "an", "of", "to", "in", "on", "for", "and", "or", "is", "are",
+    "with", "at", "by", "as", "its", "it", "this", "that", "after", "amid",
+    "over", "into", "new", "why", "how", "what", "will", "could", "may",
+    "says", "said", "vs", "than", "up", "down", "out", "now", "than",
+}
+
+
+def _significant_words(title: str) -> set[str]:
+    return {w for w in re.findall(r"[a-z0-9']+", title.lower()) if len(w) > 2 and w not in _STOPWORDS}
+
+
+_rich_feed_cache: dict[str, tuple[list[dict[str, Any]], float]] = {}
+
+
+def _fetch_rss_items_cached(url: str, *, source_name: str, limit: int = 40) -> list[dict[str, Any]]:
+    """Same feeds/cache tier as _fetch_rss_titles_cached, but keeps title +
+    link + a real image URL (RSS enclosure/media:content, which all three of
+    these newsroom feeds carry -- confirmed live 2026-08) + pubDate, so the
+    Threads trending-news post (see threads_post.get_and_post_trending_news)
+    can actually attach a real photo instead of text alone."""
+    now = time.time()
+    cached = _rich_feed_cache.get(source_name)
+    if cached and (now - cached[1]) < _GENERAL_FEED_CACHE_TTL_SEC:
+        return cached[0]
+    try:
+        resp = requests.get(url, timeout=_TIMEOUT_SEC, headers={"User-Agent": "Mozilla/5.0"})
+        resp.raise_for_status()
+        root = ET.fromstring(resp.content)
+        items = []
+        for item in root.iter("item"):
+            title = item.findtext("title") or ""
+            if not title:
+                continue
+            image_url = None
+            for tag in ("enclosure", "{http://search.yahoo.com/mrss/}content", "{http://search.yahoo.com/mrss/}thumbnail"):
+                el = item.find(tag)
+                if el is not None and el.get("url"):
+                    image_url = el.get("url")
+                    break
+            items.append({
+                "title": title, "link": item.findtext("link") or "",
+                "pub_date": item.findtext("pubDate") or "", "image_url": image_url,
+                "source": source_name,
+            })
+        items = items[:limit]
+        if items:
+            _rich_feed_cache[source_name] = (items, now)
+        return items
+    except Exception as exc:
+        logger.warning("[crypto_news] %s rich rss failed: %s", source_name, exc)
+        return []
+
+
+def get_trending_story() -> dict[str, Any] | None:
+    """Picks ONE lead story for the Threads trending-news post -- "most
+    popular" approximated by real cross-outlet corroboration: if the same
+    story is independently covered by 2+ of these 3 crypto-specific
+    newsrooms (a real, if rough, popularity signal -- a story every outlet
+    is running is bigger than one only a single outlet picked up), that's
+    the lead; otherwise falls back to the single freshest item across all
+    three. Returns {"title", "link", "image_url", "source",
+    "secondary": [titles...]} or None if every feed failed. Never raises --
+    same best-effort contract as the rest of this module."""
+    items: list[dict[str, Any]] = []
+    for url, name in (
+        ("https://cointelegraph.com/rss", "cointelegraph"),
+        ("https://cryptoslate.com/feed/", "cryptoslate"),
+        ("https://decrypt.co/feed", "decrypt"),
+    ):
+        items.extend(_fetch_rss_items_cached(url, source_name=name))
+    if not items:
+        return None
+
+    # Cross-outlet overlap: any pair of items from DIFFERENT sources sharing
+    # 3+ significant words is treated as the same real-world story.
+    best_pair: tuple[dict[str, Any], dict[str, Any]] | None = None
+    best_overlap = 0
+    for i, a in enumerate(items):
+        words_a = _significant_words(a["title"])
+        for b in items[i + 1:]:
+            if b["source"] == a["source"]:
+                continue
+            overlap = len(words_a & _significant_words(b["title"]))
+            if overlap > best_overlap and overlap >= 3:
+                best_overlap = overlap
+                best_pair = (a, b)
+
+    if best_pair:
+        lead = best_pair[0] if best_pair[0].get("image_url") else best_pair[1]
+    else:
+        # No corroborated story found -- fall back to the single freshest
+        # item (RSS feeds are already newest-first, so this is just the
+        # first item with a usable title).
+        lead = items[0]
+
+    seen_titles = {lead["title"]}
+    secondary = []
+    for it in items:
+        if it["title"] in seen_titles or len(secondary) >= 3:
+            continue
+        seen_titles.add(it["title"])
+        secondary.append(it["title"])
+
+    return {
+        "title": lead["title"], "link": lead["link"], "image_url": lead.get("image_url"),
+        "source": lead["source"], "secondary": secondary,
+    }

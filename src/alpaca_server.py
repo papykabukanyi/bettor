@@ -318,9 +318,9 @@ def _run_alpaca_threads_trending_news() -> dict[str, Any]:
     the model's own decisions is visible rather than an invisible input.
     Read-only, never touches order placement."""
     try:
-        headlines = stock_news.get_trending_headlines(limit=5)
-        posted = threads_post.post_trending_news(headlines, market="stocks")
-        return {"ok": True, "posted": posted, "headline_count": len(headlines)}
+        story = stock_news.get_trending_story()
+        posted = threads_post.post_trending_news(story, market="stocks")
+        return {"ok": True, "posted": posted, "story": (story or {}).get("title")}
     except Exception as exc:
         logger.warning("[alpaca_server] Threads trending-news post failed: %s", exc)
         return {"ok": False, "error": str(exc)}
