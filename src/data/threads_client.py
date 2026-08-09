@@ -77,6 +77,44 @@ _MIN_TOKEN_AGE_FOR_REFRESH_SEC = 2 * 3600
 _REFRESH_MARGIN_SEC = 5 * 24 * 3600
 
 
+# Real, confirmed production incident: all 4 services share ONE Threads
+# account/token (see HF_MODEL_REPO's own docstring above), and each posts
+# several DIFFERENT content types (hourly status, sentiment snapshot,
+# trending news, trade entry/exit charts) on its own independent schedule.
+# Every single post -- text or image -- goes through create -> poll ->
+# publish (see _wait_for_container_ready below), so the REAL call volume
+# against the shared account is a multiple of the visible post count, not
+# 1:1. Confirmed live: "Threads API Rate Limit Exceeded" (error_subcode
+# 4279002) fired across all 4 services within the same ~40-second window,
+# for MULTIPLE different post types each -- i.e. once the account was
+# rate-limited, every subsequent post attempt (from any of the 4
+# processes) kept hitting the API and failing anyway, burning whatever
+# quota headroom might otherwise have been recovering. This cooldown
+# makes that failure state cheaply short-circuit locally (no network call
+# at all) until it's had a real chance to clear, instead of every post
+# type in every remaining scheduled cycle re-discovering the same failure
+# the hard way.
+_RATE_LIMIT_COOLDOWN_SEC = float(os.getenv("THREADS_RATE_LIMIT_COOLDOWN_SEC", "1200") or "1200")
+_rate_limited_until = 0.0
+
+
+def is_rate_limited() -> bool:
+    """True while this process believes the shared Threads account is
+    still within a recently-observed rate-limit cooldown window -- callers
+    should skip attempting a post entirely (see create_and_publish_post/
+    create_and_publish_image_post) rather than make a doomed API call."""
+    return time.monotonic() < _rate_limited_until
+
+
+def _note_rate_limited() -> None:
+    global _rate_limited_until
+    _rate_limited_until = time.monotonic() + _RATE_LIMIT_COOLDOWN_SEC
+    logger.warning(
+        "[threads_client] Threads API rate limit hit -- pausing all posting from this "
+        "process for %.0f minutes", _RATE_LIMIT_COOLDOWN_SEC / 60,
+    )
+
+
 def _raise_for_status_with_body(resp: requests.Response) -> None:
     """Real gap found in review: plain resp.raise_for_status() raises an
     HTTPError whose message is just "400 Client Error: Bad Request for
@@ -89,6 +127,8 @@ def _raise_for_status_with_body(resp: requests.Response) -> None:
     which of several possible causes it actually was."""
     if resp.status_code >= 400:
         body = resp.text[:500]
+        if "4279002" in body or "Rate Limit Exceeded" in body:
+            _note_rate_limited()
         raise requests.exceptions.HTTPError(f"{resp.status_code} error for url: {resp.url} -- body: {body}", response=resp)
 
 
@@ -316,6 +356,8 @@ def create_and_publish_post(text: str) -> str:
     container, then separately publish it. Raises on any failure --
     callers (threads_post.py) are responsible for catching and logging,
     same "never let this block a real trade" contract as x_post.py had."""
+    if is_rate_limited():
+        raise RuntimeError("Threads API rate limit cooldown active -- skipping post attempt")
     token = get_valid_access_token()
     user_id = get_user_id()
     if not token or not user_id:
@@ -349,6 +391,8 @@ def create_and_publish_image_post(image_url: str, text: str = "") -> str:
     public_url_for() needs this service's own public onrender.com URL, not
     a local file path. Raises on any failure, same contract as
     create_and_publish_post -- callers must catch and log."""
+    if is_rate_limited():
+        raise RuntimeError("Threads API rate limit cooldown active -- skipping post attempt")
     token = get_valid_access_token()
     user_id = get_user_id()
     if not token or not user_id:

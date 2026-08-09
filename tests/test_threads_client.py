@@ -27,6 +27,7 @@ def _isolated_token_state(monkeypatch):
     monkeypatch.setattr(threads_client, "APP_SECRET", "test-app-secret")
     monkeypatch.setattr(threads_client, "REDIRECT_URI", "https://example.com/threadscallback")
     monkeypatch.setattr(threads_client, "HF_API_KEY", "")  # no real network for the HF mirror by default
+    monkeypatch.setattr(threads_client, "_rate_limited_until", 0.0)  # no leftover cooldown between tests
     yield
 
 
@@ -171,6 +172,71 @@ def test_raise_for_status_with_body_includes_the_response_body(monkeypatch):
 def test_raise_for_status_with_body_does_not_raise_below_400():
     resp = _FakeResponse({"id": "ok"}, status_code=200)
     threads_client._raise_for_status_with_body(resp)  # noqa: SLF001 -- must not raise
+
+
+# ---------------------------------------------------------------------------
+# Rate-limit cooldown -- real, confirmed production incident: all 4
+# services share one Threads account, each posting several content types
+# on its own schedule. Every post (text or image) is create->poll->publish,
+# so real call volume against the shared account is a multiple of the
+# visible post count. Confirmed live: "Threads API Rate Limit Exceeded"
+# (error_subcode 4279002) fired across all 4 services within the same
+# ~40-second window, for multiple different post types each -- i.e. once
+# rate-limited, every remaining scheduled post kept re-discovering the
+# same failure instead of backing off.
+# ---------------------------------------------------------------------------
+
+def test_raise_for_status_with_body_sets_the_cooldown_on_a_rate_limit_error():
+    assert threads_client.is_rate_limited() is False
+    resp = _FakeResponse(
+        {"error": {"message": "Calls to this api have exceeded the rate limit.", "code": 613, "error_subcode": 4279002}},
+        status_code=400,
+    )
+    with pytest.raises(threads_client.requests.exceptions.HTTPError):
+        threads_client._raise_for_status_with_body(resp)  # noqa: SLF001
+    assert threads_client.is_rate_limited() is True
+
+
+def test_raise_for_status_with_body_does_not_set_the_cooldown_for_other_errors():
+    resp = _FakeResponse({"error": {"message": "Invalid creation_id", "code": 100}}, status_code=400)
+    with pytest.raises(threads_client.requests.exceptions.HTTPError):
+        threads_client._raise_for_status_with_body(resp)  # noqa: SLF001
+    assert threads_client.is_rate_limited() is False
+
+
+def test_is_rate_limited_clears_after_the_cooldown_expires(monkeypatch):
+    monkeypatch.setattr(threads_client, "_rate_limited_until", threads_client.time.monotonic() - 1)
+    assert threads_client.is_rate_limited() is False
+
+
+def test_create_and_publish_post_skips_the_network_call_while_rate_limited(monkeypatch):
+    threads_client._token_cache.update({  # noqa: SLF001
+        "access_token": "at-1", "user_id": "user-42",
+        "obtained_at": threads_client.time.time(), "expires_at": threads_client.time.time() + 1000000,
+    })
+    monkeypatch.setattr(threads_client, "_rate_limited_until", threads_client.time.monotonic() + 1000)
+
+    def fail_if_called(*a, **k):
+        raise AssertionError("must not make a network call while the rate-limit cooldown is active")
+
+    monkeypatch.setattr(threads_client.requests, "post", fail_if_called)
+    with pytest.raises(RuntimeError, match="rate limit cooldown"):
+        threads_client.create_and_publish_post("hello world")
+
+
+def test_create_and_publish_image_post_skips_the_network_call_while_rate_limited(monkeypatch):
+    threads_client._token_cache.update({  # noqa: SLF001
+        "access_token": "at-1", "user_id": "user-42",
+        "obtained_at": threads_client.time.time(), "expires_at": threads_client.time.time() + 1000000,
+    })
+    monkeypatch.setattr(threads_client, "_rate_limited_until", threads_client.time.monotonic() + 1000)
+
+    def fail_if_called(*a, **k):
+        raise AssertionError("must not make a network call while the rate-limit cooldown is active")
+
+    monkeypatch.setattr(threads_client.requests, "post", fail_if_called)
+    with pytest.raises(RuntimeError, match="rate limit cooldown"):
+        threads_client.create_and_publish_image_post("https://example.com/chart.png", "caption")
 
 
 def test_pull_tokens_from_hf_gives_up_after_a_hard_timeout(monkeypatch):
