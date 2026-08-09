@@ -106,13 +106,36 @@ def _clean_headline(title: str) -> str:
     return re.sub(r"\s+-\s+[\w.]+\.\w{2,}$", "", title).strip()
 
 
+def _hashtags_for_story(story: dict, *, market: str) -> str:
+    """Market's own base hashtags + up to 3 extracted from the headline's
+    own topic (see _extract_keyword_hashtags), deduped. Shared by both
+    caption builders below -- the ONLY caption text posted alongside a
+    generated news-card IMAGE (see _hashtags_only_caption) and the
+    headline extraction used to build the card's own hashtag pills."""
+    title = _clean_headline(story["title"])
+    hashtags = _hashtags_for_market(market)
+    extra_tags = _extract_keyword_hashtags(title)
+    extra_tags = [t for t in extra_tags if t.lower() not in hashtags.lower()]
+    if extra_tags:
+        hashtags = f"{hashtags} {' '.join(extra_tags)}"
+    return hashtags
+
+
+def _hashtags_only_caption(story: dict, *, market: str) -> str:
+    """The Threads post TEXT for a trending-news post that HAS an image --
+    hashtags only. The headline/source/secondary-headlines content already
+    lives ON the generated news card itself (see chart_snapshot.
+    generate_news_card) -- repeating all of that again as caption text next
+    to the picture was pure duplication, real feedback confirmed live."""
+    return _hashtags_for_story(story, market=market)
+
+
 def _format_trending_story_caption(story: dict, *, market: str) -> str:
-    """Builds a catchy, discoverable caption for the trending-news IMAGE
-    post: a hook line + the real headline (source outlets already write
-    these to be attention-grabbing -- the job here is presenting it well,
-    not rewriting real journalism), a couple more trending headlines for
-    context, then hashtags (per-market tags + up to 3 extracted from the
-    headline's own topic -- see _extract_keyword_hashtags)."""
+    """Full headline + source + secondary-headlines + hashtags text --
+    used ONLY as the text-only fallback when no image could be generated/
+    posted at all (see post_trending_news). In that case the TEXT is the
+    only thing carrying the actual news content, so it needs the full
+    story, not just hashtags."""
     label = _short_market_label(market)
     title = _clean_headline(story["title"])
     source = story.get("source") or ""
@@ -124,13 +147,8 @@ def _format_trending_story_caption(story: dict, *, market: str) -> str:
         lines.append("")
         lines.append("Also trending:")
         lines.extend(f"• {_clean_headline(s)}" for s in secondary)
-    hashtags = _hashtags_for_market(market)
-    extra_tags = _extract_keyword_hashtags(title)
-    extra_tags = [t for t in extra_tags if t.lower() not in hashtags.lower()]
-    if extra_tags:
-        hashtags = f"{hashtags} {' '.join(extra_tags)}"
     lines.append("")
-    lines.append(hashtags)
+    lines.append(_hashtags_for_story(story, market=market))
     text = "\n".join(lines)
     if len(text) > _THREADS_POST_MAX_CHARS:
         text = text[: _THREADS_POST_MAX_CHARS - 1] + "…"
@@ -311,10 +329,15 @@ def post_trending_news(story: dict | None, *, market: str) -> bool:
     GENERATED image card -- the headline, source, secondary headlines, and
     hashtags are rendered directly onto the picture itself (see
     chart_snapshot.generate_news_card), not attached as a caption next to a
-    scraped photo. Replaces the old plain-text headline list: the whole
-    point of this post is to actually help this account gain followers/
-    engagement on Threads, not just log a digest nobody stops to read.
-    `story` comes from crypto_news.get_trending_story() /
+    scraped photo. The Threads post TEXT next to that image is hashtags
+    ONLY (see _hashtags_only_caption) -- real feedback confirmed the old
+    caption duplicated everything already visible on the card itself,
+    which read as redundant. The full headline/source/secondary text is
+    only used as the text-only fallback when no image is available at all
+    (see _format_trending_story_caption). Replaces the old plain-text
+    headline list: the whole point of this post is to actually help this
+    account gain followers/engagement on Threads, not just log a digest
+    nobody stops to read. `story` comes from crypto_news.get_trending_story() /
     stock_news.get_trending_story() -- {"title", "link", "image_url",
     "source", "secondary"}, or None if every feed failed.
 
@@ -347,18 +370,13 @@ def post_trending_news(story: dict | None, *, market: str) -> bool:
             logger.warning("[threads_post] failed to post trending news (no story): %s", exc)
             return False
 
-    caption = _format_trending_story_caption(story, market=market)
     image_url = None
     try:
         from data import chart_snapshot
 
         title = _clean_headline(story["title"])
         secondary = [_clean_headline(s) for s in (story.get("secondary") or []) if s]
-        hashtags = _hashtags_for_market(market)
-        extra_tags = _extract_keyword_hashtags(title)
-        extra_tags = [t for t in extra_tags if t.lower() not in hashtags.lower()]
-        if extra_tags:
-            hashtags = f"{hashtags} {' '.join(extra_tags)}"
+        hashtags = _hashtags_for_story(story, market=market)
         chart_path = chart_snapshot.generate_news_card(
             market=market, headline=title, source=story.get("source") or "", secondary=secondary, hashtags=hashtags,
         )
@@ -369,12 +387,19 @@ def post_trending_news(story: dict | None, *, market: str) -> bool:
 
     if image_url:
         try:
-            threads_client.create_and_publish_image_post(image_url, caption)
+            # Hashtags only -- the headline/source/secondary-headlines
+            # content already lives ON the card itself (see
+            # _hashtags_only_caption's own docstring for why this must not
+            # repeat what the picture already shows).
+            threads_client.create_and_publish_image_post(image_url, _hashtags_only_caption(story, market=market))
             return True
         except Exception as exc:
             logger.warning("[threads_post] failed to post trending news as an image, falling back to text: %s", exc)
     try:
-        threads_client.create_and_publish_post(caption)
+        # No image at all -- the text is the only thing carrying the real
+        # story now, so it needs the full headline/source/secondary, not
+        # just hashtags.
+        threads_client.create_and_publish_post(_format_trending_story_caption(story, market=market))
         return True
     except Exception as exc:
         logger.warning("[threads_post] failed to post trending news: %s", exc)

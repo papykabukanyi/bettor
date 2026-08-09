@@ -265,7 +265,7 @@ def test_generate_news_card_wraps_a_long_headline_without_raising():
     with Image.open(path) as img:
         # Headline is capped at _NEWS_CARD_HEADLINE_MAX_LINES -- confirms the
         # canvas doesn't grow unbounded for an unusually long real headline.
-        assert img.height < chart_snapshot._s(500)  # noqa: SLF001
+        assert img.height < chart_snapshot._s(1700)  # noqa: SLF001
 
 
 def test_generate_news_card_uses_a_distinct_accent_color_per_market():
@@ -286,6 +286,30 @@ def test_generate_news_card_uses_a_distinct_accent_color_per_market():
         with Image.open(path) as img:
             accent_pixels[market] = img.getpixel((5, 5))
     assert len(set(accent_pixels.values())) == 4  # all 4 markets render a genuinely different accent color
+
+
+def test_generate_news_card_enforces_a_minimum_height_for_short_content():
+    """Real feedback: short-content cards (no source, no secondary
+    headlines) used to render as a thin, cramped banner. A short headline
+    alone must still produce a substantial, well-proportioned card."""
+    from PIL import Image
+
+    path = chart_snapshot.generate_news_card(market="crypto", headline="Short headline", hashtags="#Tag")
+    assert path is not None
+    with Image.open(path) as img:
+        assert img.height >= chart_snapshot._NEWS_CARD_MIN_HEIGHT  # noqa: SLF001
+
+
+def test_generate_news_card_is_wide_and_substantial():
+    """Real feedback: the card read as small -- confirms the base canvas
+    is a real, large social-card size, not the old cramped 900-wide one."""
+    from PIL import Image
+
+    path = chart_snapshot.generate_news_card(market="crypto", headline="Bitcoin surges past resistance", hashtags="#Crypto")
+    assert path is not None
+    with Image.open(path) as img:
+        assert img.width == chart_snapshot._NEWS_CARD_WIDTH  # noqa: SLF001
+        assert img.width >= chart_snapshot._s(1000)  # noqa: SLF001
 
 
 def test_generate_news_card_returns_none_when_pillow_is_unavailable(monkeypatch):
@@ -335,3 +359,29 @@ def test_wrap_lines_respects_the_configured_width():
     lines = chart_snapshot._wrap_lines(draw, text, font, max_width=120, max_lines=10)  # noqa: SLF001
     for line in lines:
         assert draw.textlength(line, font=font) <= 120
+
+
+# ── _draw_hashtag_pills ────────────────────────────────────────────────────────
+
+def test_draw_hashtag_pills_returns_the_starting_y_for_no_tags():
+    font = chart_snapshot._font(20)  # noqa: SLF001
+    result = chart_snapshot._draw_hashtag_pills(_draw(), [], x=0, y=100, max_width=1000, font=font, accent=(255, 0, 0))  # noqa: SLF001
+    assert result == 100
+
+
+def test_draw_hashtag_pills_advances_y_for_a_single_row():
+    font = chart_snapshot._font(20)  # noqa: SLF001
+    result = chart_snapshot._draw_hashtag_pills(  # noqa: SLF001
+        _draw(), ["#Crypto", "#Bitcoin"], x=0, y=100, max_width=1000, font=font, accent=(255, 0, 0),
+    )
+    assert result > 100
+
+
+def test_draw_hashtag_pills_wraps_to_a_second_row_when_too_narrow():
+    font = chart_snapshot._font(20)  # noqa: SLF001
+    draw = _draw()
+    one_row = chart_snapshot._draw_hashtag_pills(draw, ["#Crypto"], x=0, y=100, max_width=1000, font=font, accent=(255, 0, 0))  # noqa: SLF001
+    two_rows = chart_snapshot._draw_hashtag_pills(  # noqa: SLF001
+        draw, ["#Crypto", "#Bitcoin", "#CryptoNews", "#BTC", "#MarketRally"], x=0, y=100, max_width=200, font=font, accent=(255, 0, 0),
+    )
+    assert two_rows > one_row  # forced to wrap across more rows at this narrow width

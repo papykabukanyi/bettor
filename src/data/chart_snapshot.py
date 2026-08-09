@@ -404,12 +404,19 @@ def generate_sentiment_snapshot(*, market: str, ticker_sentiments: list[dict[str
             del img
 
 
-_NEWS_CARD_WIDTH = _s(900)
-_NEWS_CARD_MARGIN = _s(56)
-_NEWS_CARD_TOP_MARGIN = _s(48)
+# 1080 logical (~2160px at the default _SCALE=2x) -- standard social-card
+# width, not the previous 900: real feedback was the card read as small/
+# cramped. _NEWS_CARD_MIN_HEIGHT keeps short-content cards (no source, no
+# secondary headlines) from rendering as a thin, awkward banner -- extra
+# space is distributed as vertical centering around the content block
+# rather than left as one ugly gap at the bottom (see generate_news_card).
+_NEWS_CARD_WIDTH = _s(1080)
+_NEWS_CARD_MIN_HEIGHT = _s(760)
+_NEWS_CARD_MARGIN = _s(64)
+_NEWS_CARD_BANNER_HEIGHT = _s(112)
 _NEWS_CARD_HEADLINE_MAX_LINES = 4
 _NEWS_CARD_SECONDARY_MAX = 3
-_NEWS_CARD_BOTTOM_MARGIN = _s(40)
+_NEWS_CARD_BOTTOM_MARGIN = _s(56)
 # Per-market accent -- also gives the 4 services' trending posts a distinct
 # look at a glance, on top of each card's own headline text always being
 # genuinely different (see generate_news_card's own docstring for why this
@@ -420,6 +427,7 @@ _NEWS_CARD_ACCENT = {
     "options": (168, 85, 247),  # purple
     "perps": (34, 211, 238),    # cyan
 }
+_NEWS_CARD_BANNER_TEXT = (10, 11, 15)  # near-black, reads cleanly on any of the accent colors above
 
 
 def _wrap_lines(draw, text: str, font, max_width: float, max_lines: int) -> list[str]:
@@ -456,12 +464,40 @@ def _wrap_lines(draw, text: str, font, max_width: float, max_lines: int) -> list
     return lines
 
 
+def _draw_hashtag_pills(draw, tags: list[str], *, x: float, y: float, max_width: float, font, accent) -> float:
+    """Lays out hashtag chips in a wrapped flow (multiple per row), each a
+    rounded rounded-rect pill tinted with the market's own accent color --
+    a real tag/chip look instead of a single plain line of text. Called
+    identically against a throwaway probe image first (to measure the
+    total height for the canvas-sizing pass) and then the real canvas, so
+    it must be a pure function of its inputs with no other side effects.
+    Returns the y just below the last row drawn."""
+    if not tags:
+        return y
+    pill_h = _s(40)
+    pill_pad_x = _s(16)
+    gap = _s(10)
+    pill_bg = tuple(int(c * 0.20) for c in accent)
+    cur_x, cur_y = x, y
+    for tag in tags:
+        w = draw.textlength(tag, font=font) + pill_pad_x * 2
+        if cur_x > x and cur_x + w > x + max_width:
+            cur_x = x
+            cur_y += pill_h + gap
+        draw.rounded_rectangle([cur_x, cur_y, cur_x + w, cur_y + pill_h], radius=pill_h / 2, fill=pill_bg)
+        draw.text((cur_x + pill_pad_x, cur_y + pill_h / 2 - font.size / 2), tag, fill=accent, font=font)
+        cur_x += w + gap
+    return cur_y + pill_h
+
+
 def generate_news_card(
     *, market: str, headline: str, source: str = "", secondary: list[str] | None = None, hashtags: str = "",
 ) -> Path | None:
     """Renders the trending-news post's own headline, source, secondary
     headlines, and hashtags DIRECTLY ONTO a branded image -- i.e. the post
-    IS the picture, not a caption next to one.
+    IS the picture, not a caption next to one (the Threads post TEXT next
+    to this card is hashtags only -- see threads_post._hashtags_only_caption
+    -- so this card is the ONLY place the actual news content appears).
 
     Real, confirmed bug this replaces: the previous approach tried to
     attach a real photo (the story's own RSS image, or one scraped from its
@@ -488,56 +524,69 @@ def generate_news_card(
 
     accent = _NEWS_CARD_ACCENT.get(market, _NEWS_CARD_ACCENT["perps"])
     secondary = [s for s in (secondary or []) if s][:_NEWS_CARD_SECONDARY_MAX]
+    tags = hashtags.split() if hashtags else []
 
     img = None
     try:
-        label_font = _font(_s(15))
-        headline_font = _font(_s(30))
-        source_font = _font(_s(15))
-        secondary_font = _font(_s(16))
-        hashtag_font = _font(_s(15))
+        banner_font = _font(_s(26))
+        headline_font = _font(_s(44))
+        source_font = _font(_s(20))
+        secondary_heading_font = _font(_s(19))
+        secondary_font = _font(_s(21))
+        hashtag_font = _font(_s(19))
 
         # Build with a throwaway image first purely to measure text (Pillow
-        # needs a real ImageDraw to call textlength) -- the actual canvas
-        # height depends on how many lines the headline/secondary wrap to.
+        # needs a real ImageDraw to call textlength/draw hashtag pills) --
+        # the actual canvas height depends on how many lines the headline/
+        # secondary wrap to AND how many rows the hashtag pills wrap to.
         probe = Image.new("RGB", (1, 1))
         probe_draw = ImageDraw.Draw(probe)
         content_width = _NEWS_CARD_WIDTH - _NEWS_CARD_MARGIN * 2
         headline_lines = _wrap_lines(probe_draw, headline, headline_font, content_width, _NEWS_CARD_HEADLINE_MAX_LINES)
-        secondary_lines = [_wrap_lines(probe_draw, s, secondary_font, content_width - _s(20), 1)[0] for s in secondary]
+        secondary_lines = [_wrap_lines(probe_draw, s, secondary_font, content_width - _s(24), 1)[0] for s in secondary]
 
-        y = _NEWS_CARD_TOP_MARGIN
-        y += _s(30)  # accent bar + market label row
-        y += len(headline_lines) * _s(40) + _s(16)
+        y = _NEWS_CARD_BANNER_HEIGHT + _s(48)
+        y += len(headline_lines) * _s(56) + _s(20)
         if source:
-            y += _s(24)
+            y += _s(32)
         if secondary_lines:
-            y += _s(28)  # "Also trending:" heading
-            y += len(secondary_lines) * _s(26)
-        y += _s(20)  # divider spacing
-        y += _s(30)  # hashtag line
-        height = y + _NEWS_CARD_BOTTOM_MARGIN
+            y += _s(36)  # "Trending now" heading
+            y += len(secondary_lines) * _s(34)
+        y += _s(28)  # divider spacing
+        content_bottom = _draw_hashtag_pills(probe_draw, tags, x=0, y=y, max_width=content_width, font=hashtag_font, accent=accent)
+        natural_height = content_bottom + _NEWS_CARD_BOTTOM_MARGIN
+
+        height = max(natural_height, _NEWS_CARD_MIN_HEIGHT)
+        # Extra room (short-content cards) is distributed as vertical
+        # centering of the content block below the banner, not left as one
+        # ugly gap at the bottom -- the banner itself always stays pinned
+        # to the top edge.
+        content_offset = max(0, (height - natural_height) / 2)
 
         img = Image.new("RGB", (_NEWS_CARD_WIDTH, height), _BG)
         draw = ImageDraw.Draw(img)
 
-        draw.rectangle([(0, 0), (_NEWS_CARD_WIDTH, _s(10))], fill=accent)
-        y = _NEWS_CARD_TOP_MARGIN
-        draw.text((_NEWS_CARD_MARGIN, y), f"{market.upper()} NEWS", fill=accent, font=label_font)
-        y += _s(30)
+        draw.rectangle([(0, 0), (_NEWS_CARD_WIDTH, _NEWS_CARD_BANNER_HEIGHT)], fill=accent)
+        label = f"{market.upper()} NEWS"
+        label_h = banner_font.size
+        draw.text(
+            (_NEWS_CARD_MARGIN, _NEWS_CARD_BANNER_HEIGHT / 2 - label_h / 2), label,
+            fill=_NEWS_CARD_BANNER_TEXT, font=banner_font, stroke_width=_s(1), stroke_fill=_NEWS_CARD_BANNER_TEXT,
+        )
 
+        y = _NEWS_CARD_BANNER_HEIGHT + _s(48) + content_offset
         for line in headline_lines:
-            draw.text((_NEWS_CARD_MARGIN, y), line, fill=_TEXT_PRIMARY, font=headline_font)
-            y += _s(40)
-        y += _s(16)
+            draw.text((_NEWS_CARD_MARGIN, y), line, fill=_TEXT_PRIMARY, font=headline_font, stroke_width=_s(1), stroke_fill=_TEXT_PRIMARY)
+            y += _s(56)
+        y += _s(20)
 
         if source:
             draw.text((_NEWS_CARD_MARGIN, y), f"via {source}", fill=_TEXT_MUTED, font=source_font)
-            y += _s(24)
+            y += _s(32)
 
         if secondary_lines:
-            draw.text((_NEWS_CARD_MARGIN, y), "Also trending:", fill=_TEXT_MUTED, font=source_font)
-            y += _s(28)
+            draw.text((_NEWS_CARD_MARGIN, y), "Trending now", fill=_TEXT_MUTED, font=secondary_heading_font)
+            y += _s(36)
             for line in secondary_lines:
                 # A plain ASCII dash, not a real bullet glyph -- Pillow's
                 # own bundled default font (see _font's own docstring on
@@ -546,13 +595,12 @@ def generate_news_card(
                 # generate_sentiment_snapshot uses "->"/"<-" instead of real
                 # Unicode arrows.
                 draw.text((_NEWS_CARD_MARGIN, y), f"-  {line}", fill=_TEXT_MUTED, font=secondary_font)
-                y += _s(26)
+                y += _s(34)
 
-        y += _s(4)
+        y += _s(8)
         draw.line([(_NEWS_CARD_MARGIN, y), (_NEWS_CARD_WIDTH - _NEWS_CARD_MARGIN, y)], fill=_AXIS, width=_s(1))
-        y += _s(16)
-        if hashtags:
-            draw.text((_NEWS_CARD_MARGIN, y), hashtags, fill=accent, font=hashtag_font)
+        y += _s(28)
+        _draw_hashtag_pills(draw, tags, x=_NEWS_CARD_MARGIN, y=y, max_width=content_width, font=hashtag_font, accent=accent)
 
         CHARTS_DIR.mkdir(parents=True, exist_ok=True)
         filename = f"news_{_sanitize(market)}_{int(time.time())}.png"

@@ -515,15 +515,18 @@ def _mock_charts(monkeypatch, tmp_path):
     monkeypatch.setenv("RENDER_EXTERNAL_URL", "https://bettor-schwab.onrender.com")
 
 
-def test_trending_news_posts_a_generated_image_card_with_the_headline_and_secondary_stories(monkeypatch, tmp_path):
+def test_trending_news_posts_a_generated_image_card_with_hashtags_only_caption(monkeypatch, tmp_path):
     """Real, confirmed bug this replaces: post_trending_news used to attach
     the story's own raw image_url (or one scraped via og:image) as-is --
     for Google-News-sourced stories that scrape resolved the SAME static
     Google branding image for every article regardless of headline
     (confirmed live). Now the image itself is GENERATED from the story's
     own text (see chart_snapshot.generate_news_card), so it's always a
-    real, distinct picture with the headline literally printed on it, not
-    just a caption next to a possibly-repeated photo."""
+    real, distinct picture with the headline literally printed on it.
+
+    Real feedback: the caption used to repeat everything already on the
+    card (headline, source, secondary headlines) -- pure duplication. The
+    Threads post TEXT next to an image post must now be hashtags only."""
     _mock_charts(monkeypatch, tmp_path)
     posted = []
     monkeypatch.setattr(
@@ -533,9 +536,8 @@ def test_trending_news_posts_a_generated_image_card_with_the_headline_and_second
     threads_post.post_trending_news(_story(), market="crypto")
     image_url, text = posted[0]
     assert image_url.startswith("https://bettor-schwab.onrender.com/chart/")
-    assert "Crypto news" in text
-    assert "Bitcoin surges past resistance" in text
-    assert "ETF inflows accelerate" in text
+    assert "Bitcoin surges past resistance" not in text  # lives on the card now, not the caption
+    assert "ETF inflows accelerate" not in text
     assert "#Crypto" in text
     # Extracted from the headline's own text on top of the base market tags.
     assert "#Bitcoin" in text
@@ -573,14 +575,18 @@ def test_trending_news_labels_stocks_market(monkeypatch, tmp_path):
         lambda image_url, text="": posted.append((image_url, text)),
     )
     threads_post.post_trending_news(_story("Markets rally on rate cut hopes", secondary=[]), market="stocks")
-    assert "Stocks news" in posted[0][1]
+    assert "#StockMarket" in posted[0][1]
 
 
 def test_trending_news_labels_options_market(monkeypatch, tmp_path):
     """Real, confirmed mislabeling bug found in review: this used to
     collapse every market that wasn't literally "crypto" into "Stocks" --
     so options' own trending-news post rendered indistinguishably from
-    the actual stocks service's own posts, and got the wrong hashtags."""
+    the actual stocks service's own posts, and got the wrong hashtags. The
+    market label itself now lives on the generated card's own banner (see
+    test_generate_news_card_uses_a_distinct_accent_color_per_market) --
+    this checks the caption still gets the right per-market hashtags, not
+    stocks' own."""
     _mock_charts(monkeypatch, tmp_path)
     posted = []
     monkeypatch.setattr(
@@ -589,9 +595,8 @@ def test_trending_news_labels_options_market(monkeypatch, tmp_path):
     )
     threads_post.post_trending_news(_story("Big tech earnings beat expectations", secondary=[]), market="options")
     text = posted[0][1]
-    assert "Options news" in text
-    assert "Stocks news" not in text
     assert "#OptionsTrading" in text
+    assert "#StockMarket" not in text
 
 
 def test_trending_news_labels_perps_market(monkeypatch, tmp_path):
@@ -603,7 +608,6 @@ def test_trending_news_labels_perps_market(monkeypatch, tmp_path):
     )
     threads_post.post_trending_news(_story("Prediction markets see record volume", secondary=[]), market="perps")
     text = posted[0][1]
-    assert "Perps news" in text
     assert "#Kalshi" in text
 
 
