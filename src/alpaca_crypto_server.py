@@ -65,7 +65,7 @@ from typing import Any
 
 from apscheduler.executors.pool import ThreadPoolExecutor as APSThreadPoolExecutor
 from apscheduler.schedulers.background import BackgroundScheduler
-from flask import Flask, jsonify, render_template, request, send_from_directory
+from flask import Flask, Response, jsonify, render_template, request, send_from_directory
 import pandas as pd
 
 SRC_DIR = Path(__file__).resolve().parent
@@ -111,6 +111,14 @@ ALPACA_CRYPTO_TORCH_TRAIN_HOUR_UTC = int(os.getenv("ALPACA_CRYPTO_TORCH_TRAIN_HO
 # service ran on a 512MB container with real, confirmed OOM history --
 # scheduled automatically now that it's on a 2GB (standard plan) container.
 ALPACA_CRYPTO_BACKTEST_SWEEP_HOUR_UTC = int(os.getenv("ALPACA_CRYPTO_BACKTEST_SWEEP_HOUR_UTC", "10") or "10")
+# Weekly, not daily like the sweep above -- a walk-forward backtest fits a
+# fresh model per fold (see alpaca_crypto_backtest.run_walkforward_backtest,
+# default 4 folds) instead of the sweep's single split, a real multiple of
+# an already-heavy job's own cost. Sunday (day_of_week=6) at its own hour,
+# staggered off the sweep/torch-train hours so the heaviest jobs here don't
+# stack on the same day-of-week cadence they'd otherwise all share.
+ALPACA_CRYPTO_WALKFORWARD_DAY_OF_WEEK = int(os.getenv("ALPACA_CRYPTO_WALKFORWARD_DAY_OF_WEEK", "6") or "6")
+ALPACA_CRYPTO_WALKFORWARD_HOUR_UTC = int(os.getenv("ALPACA_CRYPTO_WALKFORWARD_HOUR_UTC", "12") or "12")
 ALPACA_CRYPTO_STARTUP_GRACE_SECONDS = max(0, int(os.getenv("ALPACA_CRYPTO_STARTUP_GRACE_SECONDS", "60") or "60"))
 ENABLE_ALPACA_CRYPTO_SCHEDULER = str(os.getenv("ENABLE_ALPACA_CRYPTO_SCHEDULER", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
 DASHBOARD_LOCAL_AUTORUN = str(os.getenv("DASHBOARD_LOCAL_AUTORUN", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
@@ -176,6 +184,7 @@ JOB_LOCK_DIR = DATA_DIR / "alpaca_crypto_locks"
 ALPACA_CRYPTO_LATEST_CYCLE_FILE = DATA_DIR / "alpaca_crypto_latest_cycle.json"
 ALPACA_CRYPTO_LATEST_POSITION_CHECK_FILE = DATA_DIR / "alpaca_crypto_latest_position_check.json"
 ALPACA_CRYPTO_LATEST_SWEEP_FILE = DATA_DIR / "alpaca_crypto_latest_sweep.json"
+ALPACA_CRYPTO_LATEST_WALKFORWARD_FILE = DATA_DIR / "alpaca_crypto_latest_walkforward.json"
 
 
 # Same reasoning as every other server here: on SIGTERM, APScheduler's
@@ -381,6 +390,32 @@ def _run_alpaca_crypto_backtest_sweep(*, days: int = 21) -> dict[str, Any]:
         gc.collect()
 
 
+@_locked_job("alpaca_crypto_walkforward_backtest", stale_after_sec=10800)
+def _run_alpaca_crypto_walkforward_backtest() -> dict[str, Any]:
+    """Weekly (see ALPACA_CRYPTO_WALKFORWARD_DAY_OF_WEEK/_HOUR_UTC) -- the
+    same expanding-window multi-fold walk-forward
+    (alpaca_crypto_backtest.run_walkforward_backtest, itself built on the
+    shared data.walkforward driver every one of the 4 services' backtest
+    engines now uses) that already answers "does this hold up across
+    DIFFERENT market regimes, not just one lucky split." Cached result
+    feeds api_alpaca_crypto_report_pdf's own "Walk-Forward Backtest"
+    section directly -- real evidence in the downloadable report, not a
+    promise. Weekly, not daily like the sweep above: fitting a fresh model
+    PER FOLD (default 4) is a real multiple of the sweep's own already-
+    heavy single-split cost, generous stale_after_sec to match."""
+    from data import alpaca_crypto_backtest
+
+    try:
+        result = alpaca_crypto_backtest.run_walkforward_backtest()
+        save_json(ALPACA_CRYPTO_LATEST_WALKFORWARD_FILE, result)
+        return result
+    except Exception as exc:
+        logger.warning("[alpaca_crypto_server] walk-forward backtest failed: %s", exc)
+        return {"ok": False, "error": str(exc)}
+    finally:
+        gc.collect()
+
+
 def _ensure_background_jobs_started() -> None:
     global _startup_done
     if _startup_done:
@@ -413,6 +448,11 @@ def _ensure_background_jobs_started() -> None:
             scheduler.add_job(
                 _run_alpaca_crypto_backtest_sweep, "cron", hour=ALPACA_CRYPTO_BACKTEST_SWEEP_HOUR_UTC, minute=0,
                 timezone="UTC", id="alpaca_crypto_backtest_sweep", replace_existing=True,
+            )
+            scheduler.add_job(
+                _run_alpaca_crypto_walkforward_backtest, "cron",
+                day_of_week=ALPACA_CRYPTO_WALKFORWARD_DAY_OF_WEEK, hour=ALPACA_CRYPTO_WALKFORWARD_HOUR_UTC, minute=0,
+                timezone="UTC", id="alpaca_crypto_walkforward_backtest", replace_existing=True,
             )
             scheduler.add_job(
                 _run_alpaca_crypto_fast_check, "interval", seconds=ALPACA_CRYPTO_FAST_CHECK_SECONDS,
@@ -548,13 +588,16 @@ def chart_snapshot_image(filename):
     return send_from_directory(chart_snapshot.CHARTS_DIR, filename)
 
 
-@app.route("/api/alpaca/crypto/status")
-def api_alpaca_crypto_status():
+def _crypto_status_snapshot() -> dict[str, Any]:
+    """Everything api_alpaca_crypto_status() reports, factored out so
+    api_alpaca_crypto_report() (see below) can build the same real
+    account/config snapshot without duplicating this logic."""
     state = alpaca_crypto_strategy._load_state()  # noqa: SLF001
     _, meta = alpaca_crypto_model.load_model()
     latest_cycle = load_json(ALPACA_CRYPTO_LATEST_CYCLE_FILE, {})
     latest_position_check = load_json(ALPACA_CRYPTO_LATEST_POSITION_CHECK_FILE, {})
     latest_sweep = load_json(ALPACA_CRYPTO_LATEST_SWEEP_FILE, {})
+    latest_walkforward = load_json(ALPACA_CRYPTO_LATEST_WALKFORWARD_FILE, {})
 
     realized_pnl_by_date = state.get("realized_pnl_by_date") or {}
     total_realized_pnl = round(sum(float(v) for v in realized_pnl_by_date.values()), 6)
@@ -564,7 +607,7 @@ def api_alpaca_crypto_status():
     ]
 
     account = alpaca_client.get_account() if alpaca_client.is_configured() else {}
-    return jsonify({
+    return {
         "ok": True,
         "now": dt.datetime.now(dt.timezone.utc).isoformat(),
         "account_type": "paper" if "paper-api" in alpaca_client.TRADING_BASE_URL else "live",
@@ -578,6 +621,7 @@ def api_alpaca_crypto_status():
         "today_realized_pnl_usd": float(realized_pnl_by_date.get(et_today().isoformat(), 0.0)),
         "total_realized_pnl_usd": total_realized_pnl,
         "trade_count": len(state.get("trade_log") or []),
+        "trade_log": state.get("trade_log") or [],
         "model": {
             "trained": meta is not None,
             "model_type": (meta or {}).get("model_type"),
@@ -589,6 +633,7 @@ def api_alpaca_crypto_status():
         "latest_cycle": latest_cycle,
         "latest_position_check": latest_position_check,
         "latest_sweep": latest_sweep,
+        "latest_walkforward": latest_walkforward,
         "params": {
             "position_size_pct": alpaca_crypto_strategy.POSITION_SIZE_PCT,
             "max_concurrent_positions": alpaca_crypto_strategy.MAX_CONCURRENT_POSITIONS,
@@ -605,7 +650,39 @@ def api_alpaca_crypto_status():
             "data_collect_minutes": ALPACA_CRYPTO_DATA_COLLECT_MINUTES,
             "train_interval_minutes": ALPACA_CRYPTO_TRAIN_INTERVAL_MINUTES,
         },
-    })
+    }
+
+
+@app.route("/api/alpaca/crypto/status")
+def api_alpaca_crypto_status():
+    snapshot = _crypto_status_snapshot()
+    snapshot.pop("trade_log", None)  # /trades already exposes the full log; keep /status's own payload as before
+    return jsonify(snapshot)
+
+
+@app.route("/api/alpaca/crypto/report.pdf")
+def api_alpaca_crypto_report_pdf():
+    """Downloadable PDF strategy report -- same "not just a dashboard
+    someone has to screenshot" contract as app_kalshi.py's own
+    /api/perps/report.pdf, extended with what THIS ask specifically
+    wanted beyond the perps original: the current strategy configuration,
+    a walk-forward backtest summary, and a real trade-lesson analysis
+    ("what the bot is learning from its losses"), not just the account/
+    trade-history summary perps_report.py covers. Same DEMO/LIVE badge
+    distinction perps_report.py already established (mode_label) -- this
+    account is on Alpaca's PAPER endpoint today, so it reads DEMO now and
+    will read LIVE automatically the day ALPACA_TRADING_BASE_URL points
+    at the real endpoint, no separate "real account report" needed."""
+    from data import alpaca_crypto_report, alpaca_crypto_trade_analysis
+
+    status = _crypto_status_snapshot()
+    trade_batch = alpaca_crypto_trade_analysis.analyze_recent_trade_batch(status.get("trade_log"), batch_size=30)
+    pdf_bytes = alpaca_crypto_report.generate_pdf_report(status=status, trade_batch=trade_batch)
+    filename = f"alpaca-crypto-report-{et_today().isoformat()}.pdf"
+    return Response(
+        pdf_bytes, mimetype="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.route("/api/alpaca/crypto/trades")
@@ -694,6 +771,10 @@ _JOB_LABELS = {
         f"promoted only if it beats the currently-live model)"
     ),
     "alpaca_crypto_backtest_sweep": f"Alpaca crypto backtest sweep (daily {ALPACA_CRYPTO_BACKTEST_SWEEP_HOUR_UTC:02d}:00 UTC)",
+    "alpaca_crypto_walkforward_backtest": (
+        f"Alpaca crypto walk-forward backtest (weekly, day {ALPACA_CRYPTO_WALKFORWARD_DAY_OF_WEEK} "
+        f"{ALPACA_CRYPTO_WALKFORWARD_HOUR_UTC:02d}:00 UTC)"
+    ),
     "alpaca_crypto_fast_check": f"Alpaca crypto fast exit check (every {ALPACA_CRYPTO_FAST_CHECK_SECONDS}s)",
     "alpaca_crypto_entry_scan": f"Alpaca crypto entry scan (every {ALPACA_CRYPTO_CYCLE_MINUTES} min, 24/7)",
     "alpaca_crypto_threads_trending_news": "Threads trending-news post (every 30 min)",

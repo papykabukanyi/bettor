@@ -157,6 +157,44 @@ def test_api_alpaca_crypto_status_reports_configured_flag(monkeypatch):
         assert resp.get_json()["alpaca_configured"] is True
 
 
+def test_walkforward_backtest_job_saves_the_result(monkeypatch, tmp_path):
+    from data import alpaca_crypto_backtest
+
+    fake_result = {"ok": True, "fold_count": 4, "profitable_fold_count": 2, "mean_return_pct": 0.03}
+    monkeypatch.setattr(alpaca_crypto_backtest, "run_walkforward_backtest", lambda: fake_result)
+    monkeypatch.setattr(alpaca_crypto_server, "ALPACA_CRYPTO_LATEST_WALKFORWARD_FILE", tmp_path / "walkforward.json")
+
+    result = alpaca_crypto_server._run_alpaca_crypto_walkforward_backtest.__wrapped__()  # noqa: SLF001
+
+    assert result == fake_result
+    saved = alpaca_crypto_server.load_json(tmp_path / "walkforward.json", {})
+    assert saved == fake_result
+
+
+def test_walkforward_backtest_job_returns_ok_false_on_failure(monkeypatch):
+    from data import alpaca_crypto_backtest
+
+    def raise_error():
+        raise RuntimeError("no data available")
+
+    monkeypatch.setattr(alpaca_crypto_backtest, "run_walkforward_backtest", raise_error)
+    result = alpaca_crypto_server._run_alpaca_crypto_walkforward_backtest.__wrapped__()  # noqa: SLF001
+    assert result["ok"] is False
+
+
+def test_api_alpaca_crypto_report_pdf_downloads_a_real_pdf(monkeypatch):
+    from data import alpaca_client
+
+    monkeypatch.setattr(alpaca_client, "is_configured", lambda: True)
+    monkeypatch.setattr(alpaca_client, "get_account", lambda: {"cash": "500.0", "equity": "500.0"})
+    with alpaca_crypto_server.app.test_client() as client:
+        resp = client.get("/api/alpaca/crypto/report.pdf")
+        assert resp.status_code == 200
+        assert resp.mimetype == "application/pdf"
+        assert resp.data[:5] == b"%PDF-"
+        assert "attachment" in resp.headers.get("Content-Disposition", "")
+
+
 class _FakeScheduler:
     def __init__(self, running, shutdown_fn=None):
         self.running = running
