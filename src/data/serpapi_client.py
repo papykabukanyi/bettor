@@ -78,6 +78,21 @@ def search_news(query: str, *, num: int = 10) -> list[str]:
     if (now - _last_call_ts) < _SERPAPI_MIN_INTERVAL_SEC:
         return _last_result_cache.get(query, next(iter(_last_result_cache.values()), []))
 
+    # Real, confirmed bug found in review: this used to only update
+    # _last_call_ts on a SUCCESSFUL response (after raise_for_status()), so
+    # once the account's real quota was exhausted (or any transient
+    # failure occurred), the cooldown gate above never actually engaged --
+    # EVERY subsequent call, for every symbol in whatever loop is calling
+    # this, made its own real network attempt instead of being skipped,
+    # forever, until a call happened to succeed again. Confirmed live: a
+    # single sentiment-fetch cycle burned through 30+ consecutive 429s
+    # (one full network round-trip per coin in crypto's own universe),
+    # tying up the single-threaded worker long enough to make the
+    # dashboard itself intermittently hang. Recording the ATTEMPT (not
+    # just success) here means a failure still starts the real cooldown,
+    # so the very next call in the same loop is skipped immediately
+    # instead of also making -- and also failing -- its own network call.
+    _last_call_ts = now
     try:
         resp = requests.get(
             _SEARCH_URL,
@@ -85,7 +100,6 @@ def search_news(query: str, *, num: int = 10) -> list[str]:
             timeout=_TIMEOUT_SEC,
         )
         resp.raise_for_status()
-        _last_call_ts = now
         _bump_month_counter()
         data: dict[str, Any] = resp.json()
         results = data.get("news_results") or []

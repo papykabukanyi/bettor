@@ -71,6 +71,29 @@ def test_search_news_returns_empty_on_failure(monkeypatch):
     assert serp.search_news("bitcoin") == []
 
 
+def test_search_news_still_starts_the_cooldown_after_a_failed_call(monkeypatch):
+    """Real, confirmed bug found in review: _last_call_ts used to only
+    update on a SUCCESSFUL response, so once the account's real quota was
+    exhausted (or any transient failure occurred), the cooldown gate never
+    actually engaged -- every symbol in a scan loop made its own real,
+    doomed network call instead of being skipped. Confirmed live: a single
+    sentiment-fetch cycle burned through 30+ consecutive 429s, tying up
+    the single-threaded worker long enough to make the dashboard
+    intermittently hang. A failed call must still start the real cooldown
+    so the very next call in the same loop is skipped immediately."""
+    calls = {"n": 0}
+
+    def raise_error(*a, **k):
+        calls["n"] += 1
+        raise RuntimeError("429 Client Error: Too Many Requests")
+
+    monkeypatch.setattr(serp.requests, "get", raise_error)
+    first = serp.search_news("apple stock")
+    second = serp.search_news("bitcoin")  # a different query, moments later -- must not also hit the network
+    assert first == [] and second == []
+    assert calls["n"] == 1
+
+
 def test_search_news_respects_the_cooldown_across_callers(monkeypatch):
     """The whole point of the shared cooldown: ANY second call within the
     window -- even for a totally different query -- must reuse the cached
