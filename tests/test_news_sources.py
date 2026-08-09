@@ -14,12 +14,14 @@ def _isolated_news_sources_state(monkeypatch):
     monkeypatch.setattr(news, "THENEWSAPI_TOKEN", "fake-token")
     monkeypatch.setattr(news, "WORLDNEWSAPI_KEY", "fake-key")
     monkeypatch.setattr(news, "_last_call_ts", {})
+    monkeypatch.setattr(news, "_quota_exhausted_until", {})
     yield
 
 
 class _FakeResponse:
-    def __init__(self, body):
+    def __init__(self, body, status_code=200):
         self._body = body
+        self.status_code = status_code
 
     def raise_for_status(self):
         pass
@@ -127,3 +129,80 @@ def test_fetch_all_combines_every_source(monkeypatch):
     monkeypatch.setattr(news, "fetch_thenewsapi", lambda q: ["from thenewsapi"])
     monkeypatch.setattr(news, "fetch_worldnewsapi", lambda q: ["from worldnewsapi"])
     assert news.fetch_all("apple stock") == ["from newsapi", "from thenewsapi", "from worldnewsapi"]
+
+
+# ---------------------------------------------------------------------------
+# Quota-exhausted circuit breaker -- real, confirmed live incident:
+# thenewsapi/worldnewsapi started returning 402 Payment Required (real
+# account credits exhausted, not a transient burst), but the per-source
+# rate cooldown alone kept letting every coin in a sentiment-fetch cycle
+# make its own doomed network attempt at that source's regular interval --
+# one more contributor to the crypto dashboard's real, confirmed
+# intermittent hangs. A 402/429 now pauses that ONE source for 24h.
+# ---------------------------------------------------------------------------
+
+def test_fetch_thenewsapi_pauses_the_source_for_24h_on_402(monkeypatch):
+    calls = {"n": 0}
+
+    def fake_get(url, *, params, timeout):
+        calls["n"] += 1
+        return _FakeResponse({}, status_code=402)
+
+    monkeypatch.setattr(news.requests, "get", fake_get)
+    first = news.fetch_thenewsapi("bitcoin")
+    # A second call, even from a totally different query, moments later --
+    # must be skipped locally (no second network call) while paused.
+    monkeypatch.setattr(news, "_last_call_ts", {})  # bypass the regular per-source interval to isolate the 402 pause
+    second = news.fetch_thenewsapi("ethereum")
+    assert first == [] and second == []
+    assert calls["n"] == 1
+
+
+def test_fetch_worldnewsapi_pauses_the_source_for_24h_on_429(monkeypatch):
+    calls = {"n": 0}
+
+    def fake_get(url, *, params, headers, timeout):
+        calls["n"] += 1
+        return _FakeResponse({}, status_code=429)
+
+    monkeypatch.setattr(news.requests, "get", fake_get)
+    news.fetch_worldnewsapi("bitcoin")
+    monkeypatch.setattr(news, "_last_call_ts", {})
+    news.fetch_worldnewsapi("ethereum")
+    assert calls["n"] == 1
+
+
+def test_fetch_newsapi_org_pauses_the_source_for_24h_on_402_or_429(monkeypatch):
+    monkeypatch.setattr(news.requests, "get", lambda *a, **k: _FakeResponse({}, status_code=402))
+    news.fetch_newsapi_org("bitcoin")
+    assert news.time.time() < news._quota_exhausted_until["newsapi_org"]  # noqa: SLF001
+
+
+def test_quota_exhausted_pause_clears_after_24_hours(monkeypatch):
+    monkeypatch.setattr(news, "_quota_exhausted_until", {"thenewsapi": news.time.time() - 1})
+    calls = {"n": 0}
+
+    def fake_get(url, *, params, timeout):
+        calls["n"] += 1
+        return _FakeResponse({"data": [{"title": "Fresh headline"}]})
+
+    monkeypatch.setattr(news.requests, "get", fake_get)
+    titles = news.fetch_thenewsapi("bitcoin")
+    assert titles == ["Fresh headline"]
+    assert calls["n"] == 1
+
+
+def test_quota_exhausted_pause_is_independent_per_source(monkeypatch):
+    """thenewsapi being paused on its own real 402 must not silently mute
+    worldnewsapi or newsapi.org, which have their own separate accounts."""
+    monkeypatch.setattr(news, "_quota_exhausted_until", {"thenewsapi": news.time.time() + 999999})
+    calls = {"n": 0}
+
+    def fake_get(url, *, params, headers=None, timeout=None):
+        calls["n"] += 1
+        return _FakeResponse({"news": [{"title": "Still working"}]})
+
+    monkeypatch.setattr(news.requests, "get", fake_get)
+    assert news.fetch_thenewsapi("bitcoin") == []
+    assert news.fetch_worldnewsapi("bitcoin") == ["Still working"]
+    assert calls["n"] == 1

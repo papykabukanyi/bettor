@@ -53,6 +53,20 @@ _THENEWSAPI_CALLS_PER_DAY = float(os.getenv("THENEWSAPI_CALLS_PER_DAY", "100") o
 _WORLDNEWSAPI_CALLS_PER_DAY = float(os.getenv("WORLDNEWSAPI_CALLS_PER_DAY", "50") or "50")
 
 _last_call_ts: dict[str, float] = {}
+# Real, confirmed live incident: thenewsapi/worldnewsapi started returning
+# 402 Payment Required (their real account credits/subscription exhausted,
+# not a transient burst limit) -- but this module's own per-source
+# cooldown only throttled the CALL RATE, not "stop trying until this looks
+# fixed." Every coin in a sentiment-fetch cycle kept making its own real,
+# doomed network attempt at that source's regular interval, one more
+# contributor (alongside serpapi_client.py's own separately-fixed bug) to
+# the crypto dashboard's real, confirmed intermittent hangs (many
+# sequential per-coin network round-trips on a single-threaded worker).
+# A 402/429 now pauses that ONE source for a full day, same "don't just
+# react to a failure, manage the budget" discipline crypto_news.py's own
+# newsdata.io/cryptopanic circuit-breakers already established.
+_QUOTA_EXHAUSTED_COOLDOWN_SEC = 24 * 3600
+_quota_exhausted_until: dict[str, float] = {}
 
 
 def _min_interval_sec(calls_per_day: float) -> float:
@@ -60,18 +74,29 @@ def _min_interval_sec(calls_per_day: float) -> float:
 
 
 def _cooldown_ok(source_name: str, calls_per_day: float) -> bool:
-    """True (and marks the call as spent) if `source_name` is outside its
-    own cooldown window. Marks the slot as used the moment a real call is
-    ABOUT to be issued -- not only after a successful response -- so a
-    request that used real quota but then failed to parse still counts
-    against the budget, same conservative posture as newsdata.io's own
-    429-triggered cooldown."""
+    """True (and marks the call as spent) if `source_name` is outside both
+    its own regular cooldown window AND any active quota-exhausted pause
+    (see _note_quota_exhausted). Marks the slot as used the moment a real
+    call is ABOUT to be issued -- not only after a successful response --
+    so a request that used real quota but then failed to parse still
+    counts against the budget, same conservative posture as newsdata.io's
+    own 429-triggered cooldown."""
     now = time.time()
+    if now < _quota_exhausted_until.get(source_name, 0.0):
+        return False
     last = _last_call_ts.get(source_name, 0.0)
     if (now - last) < _min_interval_sec(calls_per_day):
         return False
     _last_call_ts[source_name] = now
     return True
+
+
+def _note_quota_exhausted(source_name: str, status_code: int) -> None:
+    _quota_exhausted_until[source_name] = time.time() + _QUOTA_EXHAUSTED_COOLDOWN_SEC
+    logger.warning(
+        "[news_sources] %s returned %d (quota/subscription likely exhausted) -- pausing this source for 24.0 hours",
+        source_name, status_code,
+    )
 
 
 def fetch_newsapi_org(query: str) -> list[str]:
@@ -83,6 +108,9 @@ def fetch_newsapi_org(query: str) -> list[str]:
             params={"q": query, "apiKey": NEWSAPI_ORG_KEY, "language": "en", "sortBy": "publishedAt", "pageSize": 10},
             timeout=_TIMEOUT_SEC,
         )
+        if resp.status_code in (402, 429):
+            _note_quota_exhausted("newsapi_org", resp.status_code)
+            return []
         resp.raise_for_status()
         articles: list[dict[str, Any]] = resp.json().get("articles") or []
         return [a.get("title", "") for a in articles if a.get("title")]
@@ -100,6 +128,9 @@ def fetch_thenewsapi(query: str) -> list[str]:
             params={"search": query, "api_token": THENEWSAPI_TOKEN, "language": "en", "limit": 10},
             timeout=_TIMEOUT_SEC,
         )
+        if resp.status_code in (402, 429):
+            _note_quota_exhausted("thenewsapi", resp.status_code)
+            return []
         resp.raise_for_status()
         articles: list[dict[str, Any]] = resp.json().get("data") or []
         return [a.get("title", "") for a in articles if a.get("title")]
@@ -118,6 +149,9 @@ def fetch_worldnewsapi(query: str) -> list[str]:
             headers={"x-api-key": WORLDNEWSAPI_KEY},
             timeout=_TIMEOUT_SEC,
         )
+        if resp.status_code in (402, 429):
+            _note_quota_exhausted("worldnewsapi", resp.status_code)
+            return []
         resp.raise_for_status()
         articles: list[dict[str, Any]] = resp.json().get("news") or []
         return [a.get("title", "") for a in articles if a.get("title")]
