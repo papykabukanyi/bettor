@@ -46,29 +46,29 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-# Real gap found in review: requiring a volume spike (dollar_volume_z) AND
-# a volatility-ratio jump AND a dip, all three simultaneously, made real
-# entries rare -- confirmed live, almost every cycle across the whole
-# watchlist skipped on "volume not unusual enough" before the dip signal
-# was even checked. perps_strategy.py's own decide_entry_technical (the
-# system this one was explicitly modeled on, and the one actually taking
-# opportunities) has NO volume/volatility gate at all -- just the dip/rally
-# read plus a soft trend filter. Off by default now (env-overridable back
-# on): MIN_VOLUME_Z=-1e9 makes "z < MIN_VOLUME_Z" unsatisfiable (a z-score
-# is always a finite real number nowhere near this magnitude) -- NOT
-# float("-inf"): a real, confirmed production bug found live -- Python's
-# json module happily serializes float("-inf") as the bare token
-# `-Infinity`, which is NOT valid JSON grammar, so every browser's
-# JSON.parse() (unlike Python's own lenient json.loads()) threw a
-# SyntaxError on every single /api/alpaca/status poll, silently breaking
-# the dashboard's entire auto-refresh loop (caught by its own try/catch,
-# so the page just sat frozen on its initial "--" placeholders forever,
-# with no visible error), and MIN_VOLATILITY_RATIO=0.0 makes
-# "ratio < MIN_VOLATILITY_RATIO" unsatisfiable (a volatility ratio is
-# always >= 0) -- both checks below become genuine no-ops, not just
-# "usually true," at these defaults.
-MIN_VOLUME_Z = _env_float("ALPACA_MIN_VOLUME_Z", -1e9)
-MIN_VOLATILITY_RATIO = _env_float("ALPACA_MIN_VOLATILITY_RATIO", 0.0)  # volatility_5 / volatility_30
+# Re-enabled with real values per explicit user direction: only enter on
+# genuine volume + volatility confirmation, even at the cost of fewer
+# entries (stocks keeps its own fast/scalping hold-time profile
+# unchanged -- this is an entry-quality filter, not a hold-duration one).
+# These WERE disabled (MIN_VOLUME_Z=-1e9 / MIN_VOLATILITY_RATIO=0.0, both
+# literally unsatisfiable-as-a-filter) after review found requiring a
+# volume spike AND a volatility-ratio jump AND a dip, all three
+# simultaneously, made real entries rare -- confirmed live, almost every
+# cycle across the whole watchlist skipped on "volume not unusual enough"
+# before the dip signal was even checked. That history is real, but the
+# tradeoff is now a deliberate choice, not an accident: 1.0 (a
+# meaningfully-above-average z-score, not an extreme one) and 1.1 (only
+# 10% more active than this ticker's OWN 30-min baseline) are picked to be
+# real filters without reproducing the near-zero-entries regime the
+# original, stricter values caused -- same reasoning and same values as
+# alpaca_crypto_strategy.py's own identical fix. Also fixes the real
+# -Infinity/JSON.parse() production bug the -1e9 sentinel itself was
+# working around: -1e9 is a real, finite float (serializes fine), unlike
+# float("-inf") which Python's json module emits as the bare token
+# `-Infinity` -- invalid JSON grammar that silently broke
+# /api/alpaca/status's entire auto-refresh loop in every browser.
+MIN_VOLUME_Z = _env_float("ALPACA_MIN_VOLUME_Z", 1.0)
+MIN_VOLATILITY_RATIO = _env_float("ALPACA_MIN_VOLATILITY_RATIO", 1.1)  # volatility_5 / volatility_30
 
 # "Enter on a small pullback, same 0.15% perps_strategy.py itself uses"
 ENTRY_DIP_PCT = _env_float("ALPACA_ENTRY_DIP_PCT", 0.0015)

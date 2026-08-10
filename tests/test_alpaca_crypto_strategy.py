@@ -26,15 +26,13 @@ def _row(**overrides):
     return base
 
 
-def test_entry_does_not_require_an_unusual_volume_spike():
-    """Real gap found in review: requiring a volume spike AND a
-    volatility-ratio jump AND a dip, all three simultaneously, made real
-    entries rare in practice across the whole 36-pair universe --
-    perps_strategy.py's own decide_entry_technical (this one's model) has
-    no such gate at all."""
+def test_entry_requires_an_unusual_volume_spike():
+    """Volume+volatility gates are now a deliberate, real filter (see
+    MIN_VOLUME_Z's own docstring in alpaca_crypto_strategy.py): low/negative
+    volume must block an otherwise-valid dip entry."""
     should_enter, reason = strat.decide_entry_technical(_row(dollar_volume_z=-2.0))
-    assert should_enter
-    assert "dip" in reason
+    assert not should_enter
+    assert "volume" in reason
 
 
 def test_entry_volume_gate_can_still_be_re_enabled_via_env(monkeypatch):

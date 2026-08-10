@@ -65,12 +65,13 @@ def test_round_trip_fee_usd_charges_both_legs():
 
 
 def _row(**overrides):
-    # volatility_5 defaults comfortably above MIN_ENTRY_VOLATILITY so
-    # existing entry tests reflect a normally-active market by default;
-    # tests specifically targeting the low-volatility gate override it.
+    # volatility_5/dollar_volume_z default comfortably above
+    # MIN_ENTRY_VOLATILITY/MIN_ENTRY_VOLUME_Z so existing entry tests
+    # reflect a normally-active market by default; tests specifically
+    # targeting the low-volatility/low-volume gates override them.
     base = {
         "ticker": "KXBTCPERP", "current_price": 6.60, "short_ma": 6.63, "trend_pct": 0.0,
-        "volatility_5": 0.002,
+        "volatility_5": 0.002, "dollar_volume_z": 2.0,
     }
     base.update(overrides)
     return base
@@ -354,7 +355,7 @@ def _rally_row(**overrides):
     # Mirror of _row(): price sits ABOVE the short MA (a small rally).
     base = {
         "ticker": "KXBTCPERP", "current_price": 6.63, "short_ma": 6.60, "trend_pct": 0.0,
-        "volatility_5": 0.002,
+        "volatility_5": 0.002, "dollar_volume_z": 2.0,
     }
     base.update(overrides)
     return base

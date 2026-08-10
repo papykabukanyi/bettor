@@ -28,7 +28,14 @@ def _regular_market_session(monkeypatch):
 
 
 def _row(**overrides):
-    base = {"symbol": "AAPL", "current_price": 190.0, "short_ma": 191.0}
+    # dollar_volume_z/volatility_5/volatility_30 default comfortably above
+    # MIN_VOLUME_Z/MIN_VOLATILITY_RATIO so existing entry tests reflect a
+    # normally-active underlying by default; tests specifically targeting
+    # the volume/volatility gates override them.
+    base = {
+        "symbol": "AAPL", "current_price": 190.0, "short_ma": 191.0,
+        "dollar_volume_z": 2.0, "volatility_5": 0.002, "volatility_30": 0.001,
+    }
     base.update(overrides)
     return base
 

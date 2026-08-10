@@ -498,6 +498,20 @@ MIN_ENTRY_VOLATILITY = _env_float("PERPS_MIN_ENTRY_VOLATILITY", 0.0008)
 # without ever showing a clear win-rate downside.
 MIN_ENTRY_RELATIVE_VOLATILITY_RATIO = _env_float("PERPS_MIN_ENTRY_RELATIVE_VOLATILITY_RATIO", 1.3)
 
+# Real gap found in review, per explicit user direction: this strategy has
+# always gated entries on volatility (see MIN_ENTRY_VOLATILITY/
+# MIN_ENTRY_RELATIVE_VOLATILITY_RATIO above), but dollar_volume_z (real
+# participation, not just price movement) was only ever CAPTURED at entry
+# time for observability/the promising-position exit extension -- never
+# actually a requirement to enter at all. A price move on thin volume is a
+# materially weaker signal than the same move with real participation
+# behind it. 1.0 (a meaningfully-above-average z-score, not an extreme
+# one) matches PROMISING_VOLUME_Z's own already-validated bar for "real
+# participation" on the exit side, applied here as an entry requirement
+# too -- same alpaca_strategy.py/alpaca_crypto_strategy.py values, for
+# consistency across all 4 services.
+MIN_ENTRY_VOLUME_Z = _env_float("PERPS_MIN_ENTRY_VOLUME_Z", 1.0)
+
 # Reject a new entry if Kalshi's quote and an independent live exchange price
 # (Coinbase/Kraken, see crypto_prices.py) disagree by more than this -- a
 # safety check against entering on a stale or erroneous Kalshi tick.
@@ -815,6 +829,16 @@ def evaluate_candidate(ticker: str, *, confidence_min: float | None = None) -> d
                     f"({relative_ratio:.2f}x < {MIN_ENTRY_RELATIVE_VOLATILITY_RATIO}x)"
                 )
                 continue
+
+        # Real participation, not just price movement -- a dip/rally on
+        # thin volume is a materially weaker signal than the same move
+        # with real activity behind it. See MIN_ENTRY_VOLUME_Z's own
+        # comment for why this was previously only captured, never
+        # enforced, at entry time.
+        entry_volume_z = row.get("dollar_volume_z")
+        if entry_volume_z is None or entry_volume_z < MIN_ENTRY_VOLUME_Z:
+            reasons.append(f"{technical_reason}, but volume not unusual enough (z={entry_volume_z})")
+            continue
 
         if not model_ok:
             if side == "short":

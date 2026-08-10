@@ -83,6 +83,19 @@ def _env_int(name: str, default: int) -> int:
 # strategies' own TP/SL -- a 1% underlying move can easily be a 10-20%+
 # option premium move.
 MODEL_CONFIDENCE_MIN = _env_float("ALPACA_OPTIONS_MODEL_CONFIDENCE_MIN", 0.58)
+# Real gap found in review, per explicit user direction: unlike the other
+# 3 services, this strategy never had ANY volume/volatility pre-filter at
+# all -- entries fired purely on model confidence, regardless of whether
+# the underlying was actually seeing real participation/movement right
+# now. A confident model prediction on a quiet, thin-volume underlying is
+# a materially weaker real-world signal than the same prediction during
+# genuine activity -- options amplify the underlying's move, so entering
+# when that move has no real momentum behind it risks paying the wide
+# TAKE_PROFIT_PCT/STOP_LOSS_PCT spread for nothing. Same real, non-extreme
+# values as alpaca_strategy.py's/alpaca_crypto_strategy.py's own identical
+# gates, for consistency across all 4 services.
+MIN_VOLUME_Z = _env_float("ALPACA_OPTIONS_MIN_VOLUME_Z", 1.0)
+MIN_VOLATILITY_RATIO = _env_float("ALPACA_OPTIONS_MIN_VOLATILITY_RATIO", 1.1)  # volatility_5 / volatility_30
 TAKE_PROFIT_PCT = _env_float("ALPACA_OPTIONS_TAKE_PROFIT_PCT", 0.30)
 STOP_LOSS_PCT = _env_float("ALPACA_OPTIONS_STOP_LOSS_PCT", 0.20)
 MAX_HOLD_MINUTES = _env_int("ALPACA_OPTIONS_MAX_HOLD_MINUTES", 180)
@@ -230,12 +243,26 @@ def evaluate_candidate(
     default when given -- see scan_and_enter, which reads a durable-state
     override set by alpaca_options_trade_analysis.recommend_confidence_threshold's
     own evidence-gated tuning (apply_confidence_threshold_override), same
-    pattern perps_strategy.py already uses."""
+    pattern perps_strategy.py already uses.
+
+    Volume/volatility checked BEFORE the model confidence itself (see
+    MIN_VOLUME_Z's own comment) -- a confident prediction on a quiet
+    underlying still doesn't clear the bar."""
     result: dict[str, Any] = {
         "symbol": row.get("symbol"), "model_ok": False, "should_enter": False, "direction": None, "score": 0.0,
     }
     if not model_prediction or not model_prediction.get("model_ok"):
         result["reason"] = "no trained model yet -- options entries require real model confidence"
+        return result
+
+    dollar_volume_z = row.get("dollar_volume_z")
+    if dollar_volume_z is None or dollar_volume_z < MIN_VOLUME_Z:
+        result["reason"] = f"underlying volume not unusual enough (z={dollar_volume_z})"
+        return result
+    volatility_5 = row.get("volatility_5") or 0.0
+    volatility_30 = row.get("volatility_30") or 0.0
+    if volatility_30 > 0 and (volatility_5 / volatility_30) < MIN_VOLATILITY_RATIO:
+        result["reason"] = "underlying not more volatile than its own recent baseline"
         return result
 
     effective_confidence_min = confidence_min if confidence_min is not None else MODEL_CONFIDENCE_MIN
