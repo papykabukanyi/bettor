@@ -277,12 +277,15 @@ def simulate(
             # PROMISING_PROGRESS_FRACTION comment) -- these ARE covered by
             # real history, unlike sentiment_score (see module docstring,
             # held at 0.0 throughout -- no free historical news archive).
+            row_proba_up = getattr(row, "model_probability_up", float("nan"))
+            row_model_ok = row_proba_up == row_proba_up  # not NaN -> a model exists for this row
             should_exit, reason = strat.decide_exit(
                 pos, price, velocity_pct_per_min=velocity, current_volatility=current_volatility, now=sim_now,
                 dollar_volume_z=getattr(row, "dollar_volume_z", None),
                 momentum_pct=getattr(row, "macd_hist_pct", None),
                 breakout_pct_b=getattr(row, "bb_pct_b", None),
                 sentiment_score=getattr(row, "sentiment_score", None),
+                model_ok=row_model_ok, probability_up=(row_proba_up if row_model_ok else None),
             )
             if should_exit:
                 if pos.get("side") == "short":

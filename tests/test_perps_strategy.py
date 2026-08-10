@@ -203,6 +203,108 @@ def test_momentum_extension_requires_position_not_already_reversing():
     assert should_exit and "max_hold_time" in reason
 
 
+def test_model_confidence_extends_past_max_hold_even_without_other_signals():
+    pos = _position(minutes_ago=strat.MAX_HOLD_MINUTES + 1)
+    should_exit, reason = strat.decide_exit(
+        pos, 6.60 * 1.001,  # flat -- not promising on price/momentum/breakout/sentiment
+        model_ok=True, probability_up=strat.PROMISING_MODEL_CONFIDENCE + 0.01,
+    )
+    assert not should_exit
+    assert "holding" in reason
+
+
+def test_model_confidence_below_bar_does_not_extend():
+    pos = _position(minutes_ago=strat.MAX_HOLD_MINUTES + 1)
+    should_exit, reason = strat.decide_exit(
+        pos, 6.60 * 1.001, model_ok=True, probability_up=strat.PROMISING_MODEL_CONFIDENCE - 0.2,
+    )
+    assert should_exit and "max_hold_time" in reason
+
+
+# ── Pre-exit study: a few minutes before max_hold, a flat/losing position
+# whose model now confidently expects a reversal, with no volume confirming
+# continuation, quits early instead of riding out a dead clock. See
+# PRE_EXIT_STUDY_MINUTES's own module-level comment for the full rationale.
+
+def test_pre_exit_study_quits_early_on_a_flat_position_the_model_now_expects_to_reverse():
+    just_inside_window = strat.MAX_HOLD_MINUTES - strat.PRE_EXIT_STUDY_MINUTES + 1
+    pos = _position(minutes_ago=just_inside_window)
+    should_exit, reason = strat.decide_exit(
+        pos, 6.60,  # flat, change_pct == 0
+        dollar_volume_z=0.1,  # not confirming continuation
+        model_ok=True, probability_up=1.0 - strat.PROMISING_MODEL_CONFIDENCE,
+    )
+    assert should_exit
+    assert "pre_exit_study" in reason
+
+
+def test_pre_exit_study_does_not_fire_before_its_window_opens():
+    too_early = strat.MAX_HOLD_MINUTES - strat.PRE_EXIT_STUDY_MINUTES - 1
+    pos = _position(minutes_ago=too_early)
+    should_exit, reason = strat.decide_exit(
+        pos, 6.60, dollar_volume_z=0.1,
+        model_ok=True, probability_up=1.0 - strat.PROMISING_MODEL_CONFIDENCE,
+    )
+    assert not should_exit
+    assert "holding" in reason
+
+
+def test_pre_exit_study_does_not_quit_a_position_that_is_still_winning():
+    just_inside_window = strat.MAX_HOLD_MINUTES - strat.PRE_EXIT_STUDY_MINUTES + 1
+    pos = _position(minutes_ago=just_inside_window)
+    should_exit, reason = strat.decide_exit(
+        pos, 6.60 * 1.001,  # a small real gain, not flat/losing
+        dollar_volume_z=0.1, model_ok=True, probability_up=1.0 - strat.PROMISING_MODEL_CONFIDENCE,
+    )
+    assert not should_exit
+    assert "holding" in reason
+
+
+def test_pre_exit_study_does_not_quit_when_volume_confirms_continuation():
+    just_inside_window = strat.MAX_HOLD_MINUTES - strat.PRE_EXIT_STUDY_MINUTES + 1
+    pos = _position(minutes_ago=just_inside_window)
+    should_exit, reason = strat.decide_exit(
+        pos, 6.60, dollar_volume_z=strat.PROMISING_VOLUME_Z,
+        model_ok=True, probability_up=1.0 - strat.PROMISING_MODEL_CONFIDENCE,
+    )
+    assert not should_exit
+    assert "holding" in reason
+
+
+def test_pre_exit_study_does_not_quit_without_a_confidently_reversing_model():
+    just_inside_window = strat.MAX_HOLD_MINUTES - strat.PRE_EXIT_STUDY_MINUTES + 1
+    pos = _position(minutes_ago=just_inside_window)
+    should_exit, reason = strat.decide_exit(
+        pos, 6.60, dollar_volume_z=0.1, model_ok=True, probability_up=0.5,
+    )
+    assert not should_exit
+    assert "holding" in reason
+
+
+def test_pre_exit_study_is_a_no_op_without_a_model_prediction():
+    """model_ok defaults to False -- every pre-existing caller/test that
+    never passes model_ok/probability_up must behave exactly as before."""
+    just_inside_window = strat.MAX_HOLD_MINUTES - strat.PRE_EXIT_STUDY_MINUTES + 1
+    pos = _position(minutes_ago=just_inside_window)
+    should_exit, reason = strat.decide_exit(pos, 6.60, dollar_volume_z=0.1)
+    assert not should_exit
+    assert "holding" in reason
+
+
+def test_pre_exit_study_is_side_aware_for_shorts():
+    """A short's favorable direction is a FALLING price -- 'model favors
+    reversal' for a short means the model now expects price to RISE
+    (probability_up high), the mirror image of the long case."""
+    just_inside_window = strat.MAX_HOLD_MINUTES - strat.PRE_EXIT_STUDY_MINUTES + 1
+    pos = _position(minutes_ago=just_inside_window, side="short")
+    should_exit, reason = strat.decide_exit(
+        pos, 6.60,  # flat
+        dollar_volume_z=0.1, model_ok=True, probability_up=strat.PROMISING_MODEL_CONFIDENCE,
+    )
+    assert should_exit
+    assert "pre_exit_study" in reason
+
+
 # ── Per-currency adaptive exit thresholds ───────────────────────────────────
 # Confirmed via a per-ticker backtest breakdown: BTC's own volatility_30 is
 # roughly 4x lower than kSHIB's -- these lock down that each position's

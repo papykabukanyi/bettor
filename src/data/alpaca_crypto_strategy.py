@@ -134,6 +134,32 @@ PROMISING_MOMENTUM_PCT = _env_float("ALPACA_CRYPTO_PROMISING_MOMENTUM_PCT", 0.00
 PROMISING_BREAKOUT_PCT_B = _env_float("ALPACA_CRYPTO_PROMISING_BREAKOUT_PCT_B", 0.85)
 PROMISING_SENTIMENT_SCORE = _env_float("ALPACA_CRYPTO_PROMISING_SENTIMENT_SCORE", 0.3)
 
+# Explicit user direction, ported from perps_strategy.py's own identical
+# feature (see PRE_EXIT_STUDY_MINUTES's own comment there for the full
+# rationale): a real model study (alpaca_crypto_model.predict_direction,
+# hosted on Hugging Face Hub, hence "HF model") re-checked within
+# PRE_EXIT_STUDY_MINUTES of MAX_HOLD_MINUTES, used two ways -- an early
+# quit if the position is flat/losing, the model now confidently expects a
+# reversal, and volume isn't confirming continuation; or one more
+# "promising" path to extend past max_hold if the model confidently still
+# favors the position. Long-only here (no is_short mirroring needed,
+# unlike perps). Like the rest of this block, ported for consistency, not
+# independently backtested on crypto's own history -- treat it the same
+# way the module docstring already treats sentiment_score.
+#
+# PROMISING_MODEL_CONFIDENCE=0.58 (not 0.62) specifically: a real
+# multi-fold walk-forward sweep on PERPS' own history (see
+# perps_strategy.py's identical constant for the full methodology and
+# numbers) found 0.58 -- which happens to exactly match
+# MODEL_CONFIDENCE_MIN, the already-live entry bar on both services --
+# beat the feature-off baseline in 4/4 folds, while the original 0.62
+# guess almost never fired at all (this class of model's real
+# probability_up rarely strays far from 0.5). Ported here at the same
+# value for the same reason every other PROMISING_* constant in this file
+# is, NOT independently reswept on crypto's own history.
+PRE_EXIT_STUDY_MINUTES = _env_float("ALPACA_CRYPTO_PRE_EXIT_STUDY_MINUTES", 6.0)
+PROMISING_MODEL_CONFIDENCE = _env_float("ALPACA_CRYPTO_PROMISING_MODEL_CONFIDENCE", 0.58)
+
 MODEL_CONFIDENCE_MIN = _env_float("ALPACA_CRYPTO_MODEL_CONFIDENCE_MIN", 0.55)
 
 POSITION_SIZE_PCT = _env_float("ALPACA_CRYPTO_POSITION_SIZE_PCT", 0.18)
@@ -332,6 +358,7 @@ def decide_exit(
     now: dt.datetime | None = None,
     dollar_volume_z: float | None = None, momentum_pct: float | None = None,
     breakout_pct_b: float | None = None, sentiment_score: float | None = None,
+    model_ok: bool = False, probability_up: float | None = None,
 ) -> tuple[bool, str]:
     """Long-only: a RISING price is favorable. Exit levels are per-position
     ADAPTIVE (see adaptive_exit_pcts) -- scaled to this specific pair's own
@@ -346,7 +373,14 @@ def decide_exit(
     extension only -- see perps_strategy.py's own PROMISING_PROGRESS_FRACTION
     comment for the full rationale, thresholds, and real backtest findings
     (ported here for consistency, not independently backtested on crypto's
-    own history)."""
+    own history).
+
+    `model_ok`/`probability_up` are alpaca_crypto_model.predict_direction's
+    own output for this pair, RE-checked close to the max_hold deadline
+    (see PRE_EXIT_STUDY_MINUTES's own comment) -- feeds both the early
+    pre-exit-study quit path and the max_hold "promising" extension path;
+    omit both (the default) to fall back to the pre-existing technical-only
+    behavior exactly."""
     entry_price = float(position["entry_price"])
     exit_pcts = adaptive_exit_pcts(position.get("entry_volatility_30"))
     take_profit_pct = exit_pcts["take_profit_pct"]
@@ -373,6 +407,22 @@ def decide_exit(
     opened_at = dt.datetime.fromisoformat(position["opened_at"])
     now = now if now is not None else dt.datetime.now(dt.timezone.utc)
     held_minutes = (now - opened_at).total_seconds() / 60.0
+    favorable_model_confidence = probability_up if (model_ok and probability_up is not None) else None
+
+    # Pre-exit study: see PRE_EXIT_STUDY_MINUTES's own comment / perps_strategy.py's
+    # identical mechanism for the full rationale.
+    if MAX_HOLD_MINUTES - PRE_EXIT_STUDY_MINUTES <= held_minutes < MAX_HOLD_MINUTES and change_pct <= 0:
+        volume_confirmed_early = dollar_volume_z is not None and dollar_volume_z >= PROMISING_VOLUME_Z
+        model_favors_reversal = (
+            favorable_model_confidence is not None
+            and favorable_model_confidence <= (1.0 - PROMISING_MODEL_CONFIDENCE)
+        )
+        if model_favors_reversal and not volume_confirmed_early:
+            return True, (
+                f"pre_exit_study ({held_minutes:.0f}min, {MAX_HOLD_MINUTES - held_minutes:.0f}min early: "
+                f"model favors reversal p_up={probability_up:.2f}, no confirming volume z={dollar_volume_z})"
+            )
+
     if held_minutes >= MAX_HOLD_MINUTES:
         progress_frac = (change_pct / take_profit_pct) if take_profit_pct > 0 else 0.0
         price_promising = progress_frac >= PROMISING_PROGRESS_FRACTION
@@ -386,7 +436,8 @@ def decide_exit(
             and breakout_pct_b is not None and breakout_pct_b >= PROMISING_BREAKOUT_PCT_B
         )
         sentiment_promising = sentiment_score is not None and sentiment_score >= PROMISING_SENTIMENT_SCORE
-        promising = price_promising or momentum_promising or breakout_promising or sentiment_promising
+        model_promising = favorable_model_confidence is not None and favorable_model_confidence >= PROMISING_MODEL_CONFIDENCE
+        promising = price_promising or momentum_promising or breakout_promising or sentiment_promising or model_promising
         if not promising or held_minutes >= MAX_HOLD_MINUTES + MAX_HOLD_EXTENSION_MINUTES:
             return True, f"max_hold_time ({held_minutes:.0f}min, {change_pct:+.3%})"
     return False, f"holding ({change_pct:+.3%}, {held_minutes:.0f}min)"
@@ -1108,16 +1159,19 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                 velocity = _update_velocity(position, current_price, now)
                 current_volatility = _sample_volatility(position.get("price_samples") or [])
 
-                # Volume/momentum/breakout/sentiment only matter to
-                # decide_exit's "promising position" extension, which only
-                # activates once a position has already reached
-                # MAX_HOLD_MINUTES -- fetched lazily, only in that case, to
-                # keep this loop cheap in the common case (see
+                # Volume/momentum/breakout/sentiment/model-confidence only
+                # matter to decide_exit's pre-exit study and max_hold
+                # "promising position" extension, which only activate once
+                # a position is within PRE_EXIT_STUDY_MINUTES of
+                # MAX_HOLD_MINUTES -- fetched lazily, only in that window,
+                # to keep this loop cheap in the common case (see
                 # perps_strategy.py's identical pattern).
                 dollar_volume_z = momentum_pct = breakout_pct_b = sentiment_score_value = None
+                model_ok_value = False
+                probability_up_value = None
                 opened_at_check = dt.datetime.fromisoformat(position["opened_at"])
                 held_minutes_check = (now - opened_at_check).total_seconds() / 60.0
-                if held_minutes_check >= MAX_HOLD_MINUTES:
+                if held_minutes_check >= MAX_HOLD_MINUTES - PRE_EXIT_STUDY_MINUTES:
                     try:
                         from data.alpaca_crypto_data import latest_feature_row
                         promising_row = latest_feature_row(symbol)
@@ -1129,12 +1183,22 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                         momentum_pct = promising_row.get("macd_hist_pct")
                         breakout_pct_b = promising_row.get("bb_pct_b")
                         sentiment_score_value = promising_row.get("sentiment_score")
+                    try:
+                        from data.alpaca_crypto_model import predict_direction
+                        prediction = predict_direction(symbol)
+                    except Exception as exc:
+                        prediction = None
+                        logger.debug("[alpaca_crypto_strategy] pre-exit model study failed for %s: %s", symbol, exc)
+                    if prediction and prediction.get("model_ok"):
+                        model_ok_value = True
+                        probability_up_value = prediction.get("probability_up")
 
                 should_exit, reason = decide_exit(
                     position, current_price, velocity_pct_per_min=velocity,
                     current_volatility=current_volatility, now=now,
                     dollar_volume_z=dollar_volume_z, momentum_pct=momentum_pct,
                     breakout_pct_b=breakout_pct_b, sentiment_score=sentiment_score_value,
+                    model_ok=model_ok_value, probability_up=probability_up_value,
                 )
                 if not should_exit:
                     checks.append({

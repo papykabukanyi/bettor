@@ -405,6 +405,44 @@ PROMISING_VOLUME_Z = _env_float("PERPS_PROMISING_VOLUME_Z", 1.0)
 PROMISING_MOMENTUM_PCT = _env_float("PERPS_PROMISING_MOMENTUM_PCT", 0.0003)
 PROMISING_BREAKOUT_PCT_B = _env_float("PERPS_PROMISING_BREAKOUT_PCT_B", 0.85)
 PROMISING_SENTIMENT_SCORE = _env_float("PERPS_PROMISING_SENTIMENT_SCORE", 0.3)
+
+# Explicit user direction: time alone shouldn't decide either side of the
+# max_hold boundary -- a position shouldn't be force-held to the exact
+# minute just to then get force-closed, and it shouldn't be force-closed
+# purely because the clock ran out either. PRE_EXIT_STUDY_MINUTES opens a
+# window BEFORE MAX_HOLD_MINUTES where decide_exit() runs a real model
+# study (perps_model.predict_direction -- the same trained classifier
+# entries use, hosted on Hugging Face Hub, hence "HF model") instead of
+# only ever reacting once the deadline has already passed:
+#   - Early quit: if the position is flat/losing (change_pct <= 0) AND the
+#     model now confidently expects the OPPOSITE direction
+#     (favorable_model_confidence <= 1-PROMISING_MODEL_CONFIDENCE) AND
+#     volume isn't confirming continuation (dollar_volume_z <
+#     PROMISING_VOLUME_Z) -- i.e. nothing is happening and the model has
+#     turned against it -- close up to PRE_EXIT_STUDY_MINUTES early instead
+#     of waiting out a dead clock.
+#   - Extension: the same model confidence, now checked THE OTHER WAY
+#     (favorable_model_confidence >= PROMISING_MODEL_CONFIDENCE), is added
+#     as one more OR path alongside price/momentum/breakout/sentiment in
+#     the existing max_hold "promising" check below.
+# PROMISING_MODEL_CONFIDENCE: real multi-fold walk-forward backtest run
+# (4 independent test folds across 65 days of real history, same
+# methodology as PROMISING_PROGRESS_FRACTION's own validation, model
+# predictions computed per-row exactly as perps_model.predict_direction
+# would live) swept 0.55/0.56/0.58/0.62 against this feature fully OFF.
+# 0.58 -- which turns out to exactly match MODEL_CONFIDENCE_MIN, the
+# already-live entry conviction bar -- beat the OFF baseline in 4/4 folds
+# (a clean, consistent win, if a modest one: return improved by roughly
+# 0.01-0.13 percentage points per fold, trade count essentially unchanged).
+# 0.55/0.56 fired more often but were a mixed bag (2/4 folds better, 2/4
+# worse); 0.62 (this constant's first guess, before checking the model's
+# actual probability spread) turned out almost never satisfiable -- this
+# model's real probability_up rarely strays more than ~3-4 std deviations
+# from 0.5, so 0.62 produced 0 early quits across all 4 folds and was a
+# no-op. Lesson: pick this kind of threshold from the model's own real
+# output distribution, not by analogy alone.
+PRE_EXIT_STUDY_MINUTES = _env_float("PERPS_PRE_EXIT_STUDY_MINUTES", 6.0)
+PROMISING_MODEL_CONFIDENCE = _env_float("PERPS_PROMISING_MODEL_CONFIDENCE", 0.58)
 ENTRY_DIP_PCT = _env_float("PERPS_ENTRY_DIP_PCT", 0.0015)      # 0.15% below short MA triggers interest
 SHORT_MA_MINUTES = _env_int("PERPS_SHORT_MA_MINUTES", 15)
 TREND_FILTER_DOWN_PCT = _env_float("PERPS_TREND_FILTER_DOWN_PCT", 0.02)  # skip entries if down >2%
@@ -999,6 +1037,7 @@ def decide_exit(
     current_volatility: float | None = None, now: dt.datetime | None = None,
     dollar_volume_z: float | None = None, momentum_pct: float | None = None,
     breakout_pct_b: float | None = None, sentiment_score: float | None = None,
+    model_ok: bool = False, probability_up: float | None = None,
 ) -> tuple[bool, str]:
     """`current_price` is always Kalshi's own tradable quote -- that's what
     the gain/loss threshold and the actual exit order use. `velocity` is
@@ -1040,7 +1079,15 @@ def decide_exit(
     `sentiment_score` in particular is NOT validated by this repo's own
     backtest (perps_backtest.py holds it at a flat 0.0 -- there's no free
     historical news archive, a disclosed, known limitation), so treat that
-    one path as a reasoned-but-backtest-unproven addition."""
+    one path as a reasoned-but-backtest-unproven addition.
+
+    `model_ok`/`probability_up` are perps_model.predict_direction's own
+    output for this ticker, RE-checked close to the max_hold deadline (see
+    PRE_EXIT_STUDY_MINUTES's own comment) rather than trusted from entry
+    time -- a live conviction read, not a stale one. Feeds both the early
+    pre-exit-study quit path and the max_hold "promising" extension path;
+    omit both (the default) to fall back to the pre-existing technical-only
+    behavior exactly."""
     entry_price = float(position["entry_price"])
     is_short = position.get("side") == "short"
     exit_pcts = adaptive_exit_pcts(position.get("entry_volatility_30"))
@@ -1055,6 +1102,7 @@ def decide_exit(
         favorable_momentum = -momentum_pct if momentum_pct is not None else None
         favorable_breakout = (1.0 - breakout_pct_b) if breakout_pct_b is not None else None
         favorable_sentiment = -sentiment_score if sentiment_score is not None else None
+        favorable_model_confidence = (1.0 - probability_up) if (model_ok and probability_up is not None) else None
     else:
         change_pct = (current_price - entry_price) / entry_price if entry_price > 0 else 0.0
         favorable_velocity = velocity_pct_per_min
@@ -1062,6 +1110,7 @@ def decide_exit(
         favorable_momentum = momentum_pct
         favorable_breakout = breakout_pct_b
         favorable_sentiment = sentiment_score
+        favorable_model_confidence = probability_up if (model_ok and probability_up is not None) else None
 
     if change_pct >= quick_profit_pct:
         if favorable_velocity is not None and favorable_velocity >= QUICK_PROFIT_VELOCITY_PCT_PER_MIN:
@@ -1080,6 +1129,25 @@ def decide_exit(
     opened_at = dt.datetime.fromisoformat(position["opened_at"])
     now = now if now is not None else dt.datetime.now(dt.timezone.utc)
     held_minutes = (now - opened_at).total_seconds() / 60.0
+
+    # Pre-exit study: within PRE_EXIT_STUDY_MINUTES of the max_hold
+    # deadline, a flat/losing position (no other exit path has fired yet
+    # at this point) that the model now confidently expects to REVERSE,
+    # with no volume confirming continuation, gets closed a few minutes
+    # early rather than forced to sit out a dead clock. See
+    # PRE_EXIT_STUDY_MINUTES's own comment for the full rationale.
+    if MAX_HOLD_MINUTES - PRE_EXIT_STUDY_MINUTES <= held_minutes < MAX_HOLD_MINUTES and change_pct <= 0:
+        volume_confirmed_early = dollar_volume_z is not None and dollar_volume_z >= PROMISING_VOLUME_Z
+        model_favors_reversal = (
+            favorable_model_confidence is not None
+            and favorable_model_confidence <= (1.0 - PROMISING_MODEL_CONFIDENCE)
+        )
+        if model_favors_reversal and not volume_confirmed_early:
+            return True, (
+                f"pre_exit_study ({held_minutes:.0f}min, {MAX_HOLD_MINUTES - held_minutes:.0f}min early: "
+                f"model favors reversal p_up={probability_up:.2f}, no confirming volume z={dollar_volume_z})"
+            )
+
     if held_minutes >= MAX_HOLD_MINUTES:
         # A position already most of the way to take_profit, or one showing
         # real building momentum/breakout on real volume, gets extra time
@@ -1100,7 +1168,8 @@ def decide_exit(
             and favorable_breakout is not None and favorable_breakout >= PROMISING_BREAKOUT_PCT_B
         )
         sentiment_promising = favorable_sentiment is not None and favorable_sentiment >= PROMISING_SENTIMENT_SCORE
-        promising = price_promising or momentum_promising or breakout_promising or sentiment_promising
+        model_promising = favorable_model_confidence is not None and favorable_model_confidence >= PROMISING_MODEL_CONFIDENCE
+        promising = price_promising or momentum_promising or breakout_promising or sentiment_promising or model_promising
         if not promising or held_minutes >= MAX_HOLD_MINUTES + MAX_HOLD_EXTENSION_MINUTES:
             return True, f"max_hold_time ({held_minutes:.0f}min, {change_pct:+.3%})"
     return False, f"holding ({change_pct:+.3%}, {held_minutes:.0f}min)"
@@ -1399,17 +1468,20 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                         position, float(external_quote["price"]), now, samples_key="external_price_samples",
                     )
 
-                # Volume/momentum/breakout/sentiment only matter to
-                # decide_exit's "promising position" extension, which only
-                # activates once a position has already reached
-                # MAX_HOLD_MINUTES -- fetched lazily, only in that case, so
-                # this fast loop stays cheap for the common case (see
+                # Volume/momentum/breakout/sentiment/model-confidence only
+                # matter to decide_exit's pre-exit study and max_hold
+                # "promising position" extension, which only activate once
+                # a position is within PRE_EXIT_STUDY_MINUTES of
+                # MAX_HOLD_MINUTES -- fetched lazily, only in that window,
+                # so this fast loop stays cheap for the common case (see
                 # _sample_volatility's own comment on why latest_feature_row()
                 # is avoided here otherwise).
                 dollar_volume_z = momentum_pct = breakout_pct_b = sentiment_score_value = None
+                model_ok_value = False
+                probability_up_value = None
                 opened_at_check = dt.datetime.fromisoformat(position["opened_at"])
                 held_minutes_check = (now - opened_at_check).total_seconds() / 60.0
-                if held_minutes_check >= MAX_HOLD_MINUTES:
+                if held_minutes_check >= MAX_HOLD_MINUTES - PRE_EXIT_STUDY_MINUTES:
                     try:
                         promising_row = latest_feature_row(ticker)
                     except Exception as exc:
@@ -1420,12 +1492,21 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                         momentum_pct = promising_row.get("macd_hist_pct")
                         breakout_pct_b = promising_row.get("bb_pct_b")
                         sentiment_score_value = promising_row.get("sentiment_score")
+                    try:
+                        prediction = predict_direction(ticker)
+                    except Exception as exc:
+                        prediction = None
+                        logger.debug("[perps_strategy] pre-exit model study failed for %s: %s", ticker, exc)
+                    if prediction and prediction.get("model_ok"):
+                        model_ok_value = True
+                        probability_up_value = prediction.get("probability_up")
 
                 should_exit, reason = decide_exit(
                     position, current_price, velocity_pct_per_min=velocity, external_velocity_pct_per_min=external_velocity,
                     current_volatility=current_volatility, now=now,
                     dollar_volume_z=dollar_volume_z, momentum_pct=momentum_pct,
                     breakout_pct_b=breakout_pct_b, sentiment_score=sentiment_score_value,
+                    model_ok=model_ok_value, probability_up=probability_up_value,
                 )
                 checks.append({
                     "ticker": ticker, "ok": True, "exit_check": reason, "velocity_pct_per_min": velocity,
