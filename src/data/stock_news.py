@@ -49,6 +49,22 @@ _TIMEOUT_SEC = 8
 _CACHE_TTL_SEC = 600
 _cache: dict[str, tuple[dict[str, Any], float]] = {}
 
+# Real gap found in review, confirmed live: 70+ consecutive 503s over 90
+# minutes on this exact endpoint (one per watchlist symbol per cycle, every
+# single one silently caught and retried next cycle anyway) -- Google News
+# RSS had no reactive backoff at all, unlike every rationed/keyed source in
+# crypto_news.py. Same "Render's outbound IPs are shared across many
+# unrelated apps" cause crypto_news.py's own CryptoSlate 429 comment
+# documents -- not our own request volume, an external condition a
+# per-symbol cache can't help with. 30 minutes (not a 24h quota-style
+# pattern -- there's no fixed daily reset here, this is a soft
+# availability signal that can clear anytime) stops hammering a
+# currently-failing endpoint without risking a full day of degraded
+# sentiment if it recovers sooner. Shared across both RSS fetchers below
+# (same endpoint, same failure mode).
+_GOOGLE_NEWS_RSS_COOLDOWN_SEC = 30 * 60
+_google_news_rss_cooldown_until = 0.0
+
 # General finance/equity vocabulary -- overlaps with crypto_news.py's lexicon
 # where the words apply equally well to stocks (surge, rally, crash, ...),
 # swapped out for equity-specific idioms crypto headlines rarely use
@@ -94,10 +110,24 @@ def _score_headlines(headlines: list[str]) -> tuple[float, int]:
     return max(-1.0, min(1.0, total / scored)), len(headlines)
 
 
+def _note_google_news_rss_cooldown(status_code: int) -> None:
+    global _google_news_rss_cooldown_until
+    _google_news_rss_cooldown_until = time.time() + _GOOGLE_NEWS_RSS_COOLDOWN_SEC
+    logger.warning(
+        "[stock_news] google news rss returned %d -- pausing this source for %.1f minutes",
+        status_code, _GOOGLE_NEWS_RSS_COOLDOWN_SEC / 60,
+    )
+
+
 def _fetch_google_news_rss(query: str) -> list[str]:
+    if time.time() < _google_news_rss_cooldown_until:
+        return []
     url = "https://news.google.com/rss/search"
     try:
         resp = requests.get(url, params={"q": query, "hl": "en-US", "gl": "US", "ceid": "US:en"}, timeout=_TIMEOUT_SEC)
+        if resp.status_code in (429, 503):
+            _note_google_news_rss_cooldown(resp.status_code)
+            return []
         resp.raise_for_status()
         root = ET.fromstring(resp.content)
         return [item.findtext("title") or "" for item in root.iter("item")][:30]
@@ -112,9 +142,14 @@ def _fetch_google_news_rss_items(query: str, *, limit: int = 10) -> list[dict[st
     follows it to the real article to pull a photo, since this RSS feed
     itself carries no enclosure/media image the way crypto_news.py's direct
     newsroom feeds do) + source outlet name."""
+    if time.time() < _google_news_rss_cooldown_until:
+        return []
     url = "https://news.google.com/rss/search"
     try:
         resp = requests.get(url, params={"q": query, "hl": "en-US", "gl": "US", "ceid": "US:en"}, timeout=_TIMEOUT_SEC)
+        if resp.status_code in (429, 503):
+            _note_google_news_rss_cooldown(resp.status_code)
+            return []
         resp.raise_for_status()
         root = ET.fromstring(resp.content)
         items = []

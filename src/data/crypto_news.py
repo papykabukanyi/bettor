@@ -102,6 +102,21 @@ _cryptopanic_last_call_ts = 0.0
 _CRYPTOPANIC_429_COOLDOWN_SEC = 24 * 3600
 _cryptopanic_cooldown_until = 0.0
 
+# Real gap found in review: unlike every rationed/keyed source above,
+# Google News RSS had NO reactive backoff at all -- confirmed live on
+# stock_news.py's identical fetch (same endpoint, same no-key/no-quota
+# shape): 70+ consecutive 503s over 90 minutes on options, one per symbol
+# per cycle, every single one silently caught and retried next cycle
+# anyway. Same "Render's outbound IPs are shared across many unrelated
+# apps" cause as CryptoSlate's own 429 above -- not our own request
+# volume, an external condition that a per-query cache can't help with.
+# 30 minutes (not the 24h quota-exhausted pattern above -- there's no
+# fixed daily reset here, this is a soft availability signal that can
+# clear anytime) stops hammering a currently-failing endpoint without
+# risking a full day of degraded sentiment if it recovers sooner.
+_GOOGLE_NEWS_RSS_COOLDOWN_SEC = 30 * 60
+_google_news_rss_cooldown_until = 0.0
+
 # Confirmed live: with every active ticker each checked roughly every 10
 # minutes, newsdata.io's free-tier DAILY quota gets exhausted within the
 # first hour or two, and every subsequent call for the REST OF THAT DAY also
@@ -221,9 +236,20 @@ def _fetch_rss_titles(url: str, *, source_name: str, limit: int = 40, headers: d
 
 
 def _fetch_google_news_rss(query: str) -> list[str]:
+    global _google_news_rss_cooldown_until
+    now = time.time()
+    if now < _google_news_rss_cooldown_until:
+        return []
     url = "https://news.google.com/rss/search"
     try:
         resp = requests.get(url, params={"q": query, "hl": "en-US", "gl": "US", "ceid": "US:en"}, timeout=_TIMEOUT_SEC)
+        if resp.status_code in (429, 503):
+            _google_news_rss_cooldown_until = now + _GOOGLE_NEWS_RSS_COOLDOWN_SEC
+            logger.warning(
+                "[crypto_news] google news rss returned %d -- pausing this source for %.1f minutes",
+                resp.status_code, _GOOGLE_NEWS_RSS_COOLDOWN_SEC / 60,
+            )
+            return []
         resp.raise_for_status()
         root = ET.fromstring(resp.content)
         return [item.findtext("title") or "" for item in root.iter("item")][:30]

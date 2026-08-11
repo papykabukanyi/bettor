@@ -57,11 +57,79 @@ def test_score_headlines_empty_list():
 
 
 def test_fetch_google_news_rss_returns_empty_on_failure(monkeypatch):
+    monkeypatch.setattr(news, "_google_news_rss_cooldown_until", 0.0)
+
     def fail(*a, **k):
         raise RuntimeError("network down")
 
     monkeypatch.setattr(news.requests, "get", fail)
     assert news._fetch_google_news_rss("Apple stock") == []  # noqa: SLF001
+
+
+def test_fetch_google_news_rss_enters_cooldown_after_a_503_and_stops_calling(monkeypatch):
+    """Confirmed live: 70+ consecutive 503s over 90 minutes on options
+    (one per watchlist symbol per cycle), every one silently caught and
+    retried next cycle anyway before this fix -- a cooldown must make it
+    stop calling the network at all for a while."""
+    monkeypatch.setattr(news, "_google_news_rss_cooldown_until", 0.0)
+    calls = {"n": 0}
+
+    class _UnavailableResponse:
+        status_code = 503
+
+    def fake_get(*a, **k):
+        calls["n"] += 1
+        return _UnavailableResponse()
+
+    monkeypatch.setattr(news.requests, "get", fake_get)
+    assert news._fetch_google_news_rss("Apple stock") == []  # noqa: SLF001
+    assert calls["n"] == 1
+
+    # Immediately after: still in cooldown, must NOT call the network again.
+    assert news._fetch_google_news_rss("Microsoft stock") == []  # noqa: SLF001
+    assert calls["n"] == 1
+
+
+def test_fetch_google_news_rss_items_also_respects_the_cooldown(monkeypatch):
+    """Same endpoint, same failure mode -- the cooldown set by one fetcher
+    must also stop the OTHER fetcher from calling the network."""
+    monkeypatch.setattr(news, "_google_news_rss_cooldown_until", 0.0)
+    calls = {"n": 0}
+
+    class _UnavailableResponse:
+        status_code = 503
+
+    def fake_get(*a, **k):
+        calls["n"] += 1
+        return _UnavailableResponse()
+
+    monkeypatch.setattr(news.requests, "get", fake_get)
+    assert news._fetch_google_news_rss("Apple stock") == []  # noqa: SLF001
+    assert calls["n"] == 1
+
+    assert news._fetch_google_news_rss_items("Apple stock") == []  # noqa: SLF001
+    assert calls["n"] == 1
+
+
+def test_fetch_google_news_rss_calls_again_once_cooldown_expires(monkeypatch):
+    monkeypatch.setattr(news, "_google_news_rss_cooldown_until", news.time.time() - 1)  # already expired
+
+    class FakeResponse:
+        status_code = 200
+        content = b"<rss><channel></channel></rss>"
+
+        def raise_for_status(self):
+            pass
+
+    calls = {"n": 0}
+
+    def fake_get(*a, **k):
+        calls["n"] += 1
+        return FakeResponse()
+
+    monkeypatch.setattr(news.requests, "get", fake_get)
+    assert news._fetch_google_news_rss("Apple stock") == []  # noqa: SLF001
+    assert calls["n"] == 1
 
 
 @pytest.fixture

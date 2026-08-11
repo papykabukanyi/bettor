@@ -93,6 +93,62 @@ def test_fetch_newsdata_io_calls_again_once_cooldown_expires(monkeypatch):
     assert calls["n"] == 1
 
 
+def test_fetch_google_news_rss_enters_cooldown_after_a_503_and_stops_calling(monkeypatch):
+    """Confirmed live: 70+ consecutive 503s over 90 minutes on this exact
+    endpoint (options), one per symbol per cycle, every one silently caught
+    and retried next cycle anyway before this fix -- a cooldown must make
+    it stop calling the network at all for a while."""
+    monkeypatch.setattr(news, "_google_news_rss_cooldown_until", 0.0)
+    calls = {"n": 0}
+
+    class _UnavailableResponse:
+        status_code = 503
+
+    def fake_get(*a, **k):
+        calls["n"] += 1
+        return _UnavailableResponse()
+
+    monkeypatch.setattr(news.requests, "get", fake_get)
+    assert news._fetch_google_news_rss("bitcoin") == []  # noqa: SLF001
+    assert calls["n"] == 1
+
+    # Immediately after: still in cooldown, must NOT call the network again.
+    assert news._fetch_google_news_rss("ethereum") == []  # noqa: SLF001
+    assert calls["n"] == 1
+
+
+def test_fetch_google_news_rss_enters_cooldown_after_a_429_too(monkeypatch):
+    monkeypatch.setattr(news, "_google_news_rss_cooldown_until", 0.0)
+
+    class _RateLimitedResponse:
+        status_code = 429
+
+    monkeypatch.setattr(news.requests, "get", lambda *a, **k: _RateLimitedResponse())
+    assert news._fetch_google_news_rss("bitcoin") == []  # noqa: SLF001
+    assert news.time.time() < news._google_news_rss_cooldown_until  # noqa: SLF001
+
+
+def test_fetch_google_news_rss_calls_again_once_cooldown_expires(monkeypatch):
+    monkeypatch.setattr(news, "_google_news_rss_cooldown_until", news.time.time() - 1)  # already expired
+
+    class FakeResponse:
+        status_code = 200
+        content = b"<rss><channel></channel></rss>"
+
+        def raise_for_status(self):
+            pass
+
+    calls = {"n": 0}
+
+    def fake_get(*a, **k):
+        calls["n"] += 1
+        return FakeResponse()
+
+    monkeypatch.setattr(news.requests, "get", fake_get)
+    assert news._fetch_google_news_rss("bitcoin") == []  # noqa: SLF001
+    assert calls["n"] == 1
+
+
 def test_fetch_cryptopanic_skips_silently_without_a_key(monkeypatch):
     monkeypatch.setattr(news, "CRYPTOPANIC_API_KEY", "")
 
