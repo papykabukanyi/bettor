@@ -160,9 +160,11 @@ def test_simulate_opens_and_profits_from_short_positions_when_enabled():
         df, _down_fitted(), starting_balance=20.0, leverage_by_ticker={"KXBTCPERP": 1.0},
         entry_dip_pct=0.005, trend_filter_down_pct=0.02, model_confidence_min=0.5,
         # The fixture's volatility_5/volatility_30 are flat (ratio exactly
-        # 1.0x) -- explicit here since this test is about short-position
-        # profit mechanics, not the relative-volatility gate itself.
+        # 1.0x) and dollar_volume_z is a flat 0.0 -- both explicit here
+        # since this test is about short-position profit mechanics, not
+        # either entry gate.
         min_entry_relative_volatility_ratio=1.0,
+        min_entry_volume_z=-1e9,
         enable_shorts=True,
     )
     assert result["trade_count"] >= 1
@@ -181,9 +183,11 @@ def test_simulate_deducts_the_real_taker_round_trip_fee_by_default():
     kwargs = dict(
         fitted=_down_fitted(), starting_balance=20.0, leverage_by_ticker={"KXBTCPERP": 1.0},
         entry_dip_pct=0.005, trend_filter_down_pct=0.02, model_confidence_min=0.5, enable_shorts=True,
-        # Same as above -- the fixture's flat volatility ratio (1.0x) is
-        # below the live strategy's current default gate.
+        # Same as above -- the fixture's flat volatility ratio (1.0x) and
+        # flat dollar_volume_z (0.0) are both below the live strategy's
+        # current default gates.
         min_entry_relative_volatility_ratio=1.0,
+        min_entry_volume_z=-1e9,
     )
     zero_fee = bt.simulate(df, taker_fee_rate=0.0, **kwargs)
     with_fee = bt.simulate(df, taker_fee_rate=strat.DEFAULT_TAKER_FEE_RATE, **kwargs)

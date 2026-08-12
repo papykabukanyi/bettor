@@ -197,6 +197,7 @@ def simulate(
     enable_shorts: bool | None = None,
     min_entry_volatility: float | None = None,
     min_entry_relative_volatility_ratio: float | None = None,
+    min_entry_volume_z: float | None = None,
     taker_fee_rate: float | None = None,
 ) -> dict[str, Any]:
     """Walk forward through `test_df` (all tickers, sorted by ts) replaying
@@ -221,6 +222,7 @@ def simulate(
         strat.MIN_ENTRY_RELATIVE_VOLATILITY_RATIO if min_entry_relative_volatility_ratio is None
         else min_entry_relative_volatility_ratio
     )
+    min_entry_volume_z = strat.MIN_ENTRY_VOLUME_Z if min_entry_volume_z is None else min_entry_volume_z
     # Confirmed live via GET /margin/fee_tiers: every entry/exit order this
     # bot places is a taker fill (time_in_force=immediate_or_cancel), at
     # 0.008 (80 bps) per leg -- a prior version of this backtest modeled NO
@@ -341,6 +343,14 @@ def simulate(
         volatility_ok = row.volatility_5 >= min_entry_volatility
         if volatility_ok and row.volatility_30 > 0:
             volatility_ok = (row.volatility_5 / row.volatility_30) >= min_entry_relative_volatility_ratio
+        # Real participation, not just price movement -- mirrors
+        # perps_strategy.py's MIN_ENTRY_VOLUME_Z gate exactly (same
+        # dollar_volume_z column this backtest already carries for the
+        # exit-side pre-exit-study feature above, now also gating entries
+        # the way production does).
+        if volatility_ok:
+            row_volume_z = getattr(row, "dollar_volume_z", None)
+            volatility_ok = row_volume_z is not None and row_volume_z >= min_entry_volume_z
 
         chosen_side = None
         if volatility_ok and row.trend_pct >= -trend_filter_down_pct and dip_pct >= entry_dip_pct:
