@@ -443,6 +443,47 @@ PROMISING_SENTIMENT_SCORE = _env_float("PERPS_PROMISING_SENTIMENT_SCORE", 0.3)
 # output distribution, not by analogy alone.
 PRE_EXIT_STUDY_MINUTES = _env_float("PERPS_PRE_EXIT_STUDY_MINUTES", 6.0)
 PROMISING_MODEL_CONFIDENCE = _env_float("PERPS_PROMISING_MODEL_CONFIDENCE", 0.58)
+
+# ── Trend + trailing-stop strategy variant (flagged, default OFF) ──────────
+# Real finding from a 2400-combo backtest grid + a genuine out-of-sample
+# holdout check this session: the fixed take-profit/stop-loss shape above
+# needs an ~87% win rate just to clear round-trip TAKER fees (2% floor TP
+# - 1.6% fee = only 0.4% net win vs a 1% floor SL + fee = -2.6% net loss)
+# -- but every entry signal tested produced a 4-13% win rate, nowhere
+# close. This variant pairs three things that, TOGETHER, closed most of
+# that gap in backtest (none alone was tested as sufficient):
+#   1. Entry requires the 4h trend to actively AGREE with the trade
+#      direction (buy dips only in uptrends, sell rallies only in
+#      downtrends) -- trend_4h was captured but never used in any entry
+#      decision before this.
+#   2. Exit replaces the fixed take-profit with a trailing stop (let a
+#      winner run, lock in profit as it develops, exit on a real
+#      retracement rather than a fixed target) plus a much longer max_hold
+#      (a real move needs time to develop) and a tighter flat stop-loss.
+#   3. Maker-fee order placement (ENABLE_MAKER_ORDERS, cuts the fee itself
+#      16x) -- must be enabled ALONGSIDE this for the backtest economics to
+#      actually apply; this flag alone does not change how orders are
+#      placed.
+# Result: win rate rose to ~31% (vs 4-13%), gross return turned slightly
+# positive, net loss shrank from -13.7% to -2.9%/+0.3% across the explore
+# fold -- but the untouched holdout fold's own sample was too thin (3
+# trades) to confirm robust profitability either way. Real, replicated
+# IMPROVEMENT over the fixed-TP shape on the same holdout data, not yet
+# proven profitable on its own -- shipped for genuine live forward testing
+# per explicit direction, not as a finished, validated strategy. Default
+# OFF, same "prove it out live" posture as ENABLE_MAKER_ORDERS/ENABLE_SHORTS.
+# KNOWN, DISCLOSED GAP: TRAILING_MAX_HOLD_MINUTES's ~24h default crosses
+# several of Kalshi's own ~4-hour funding cycles (see MAX_HOLD_MINUTES's
+# own comment on why 180min was chosen specifically to stay under ONE
+# cycle) -- funding cost is NOT modeled in the backtest above at all and
+# could erode some or all of the improvement found. Watch real funding
+# payments closely once this is live.
+USE_TREND_TRAILING_STRATEGY = _env_flag("PERPS_USE_TREND_TRAILING_STRATEGY", default=False)
+TRAILING_STOP_LOSS_PCT = _env_float("PERPS_TRAILING_STOP_LOSS_PCT", 0.01)
+TRAILING_ACTIVATION_PCT = _env_float("PERPS_TRAILING_ACTIVATION_PCT", 0.08)
+TRAILING_DISTANCE_PCT = _env_float("PERPS_TRAILING_DISTANCE_PCT", 0.02)
+TRAILING_MAX_HOLD_MINUTES = _env_int("PERPS_TRAILING_MAX_HOLD_MINUTES", 1440)
+
 ENTRY_DIP_PCT = _env_float("PERPS_ENTRY_DIP_PCT", 0.0015)      # 0.15% below short MA triggers interest
 SHORT_MA_MINUTES = _env_int("PERPS_SHORT_MA_MINUTES", 15)
 TREND_FILTER_DOWN_PCT = _env_float("PERPS_TREND_FILTER_DOWN_PCT", 0.02)  # skip entries if down >2%
@@ -878,6 +919,22 @@ def evaluate_candidate(ticker: str, *, confidence_min: float | None = None) -> d
             reasons.append(f"{technical_reason}, but volume not unusual enough (z={entry_volume_z})")
             continue
 
+        # See USE_TREND_TRAILING_STRATEGY's own comment for the full
+        # rationale/backtest -- requires the 4h trend to actively AGREE
+        # with this trade's direction, not just "not strongly against it"
+        # (TREND_FILTER_DOWN_PCT's existing, separate check above).
+        if USE_TREND_TRAILING_STRATEGY:
+            trend_4h = row.get("trend_4h")
+            if trend_4h is None:
+                reasons.append(f"{technical_reason}, but no 4h trend data")
+                continue
+            if side == "long" and trend_4h <= 0:
+                reasons.append(f"{technical_reason}, but 4h trend not up ({trend_4h:+.3%})")
+                continue
+            if side == "short" and trend_4h >= 0:
+                reasons.append(f"{technical_reason}, but 4h trend not down ({trend_4h:+.3%})")
+                continue
+
         if not model_ok:
             if side == "short":
                 # Shorting on technicals alone (no model to confirm the
@@ -1031,6 +1088,42 @@ def adaptive_exit_pcts(entry_volatility_30: float | None) -> dict[str, float]:
     }
 
 
+def _decide_exit_trailing(position: dict[str, Any], current_price: float, *, now: dt.datetime | None = None) -> tuple[bool, str]:
+    """USE_TREND_TRAILING_STRATEGY's own exit half -- see that constant's
+    module-level comment for the full backtest/rationale. Deliberately
+    simple/self-contained (stop_loss + trailing + max_hold only, none of
+    take_profit/quick_profit/pre_exit_study/promising-extension) -- those
+    mechanisms were tuned and validated against the OLD fixed-take-profit
+    shape, and mixing them with a trailing stop was never backtested, so
+    this implements EXACTLY the shape that real 2400-combo grid + holdout
+    check actually covered, not a guessed hybrid of the two."""
+    entry_price = float(position["entry_price"])
+    is_short = position.get("side") == "short"
+    change_pct = (
+        (entry_price - current_price) / entry_price if is_short else (current_price - entry_price) / entry_price
+    ) if entry_price > 0 else 0.0
+    if change_pct <= -TRAILING_STOP_LOSS_PCT:
+        return True, f"stop_loss ({change_pct:+.3%}, target {TRAILING_STOP_LOSS_PCT:.2%})"
+
+    peak = position.get("_trail_peak", entry_price)
+    peak = min(peak, current_price) if is_short else max(peak, current_price)
+    position["_trail_peak"] = peak
+    peak_change_pct = (entry_price - peak) / entry_price if is_short else (peak - entry_price) / entry_price
+    if peak_change_pct >= TRAILING_ACTIVATION_PCT:
+        retrace_pct = (
+            (current_price - peak) / entry_price if is_short else (peak - current_price) / entry_price
+        )
+        if retrace_pct >= TRAILING_DISTANCE_PCT:
+            return True, f"trailing_stop (peak {peak_change_pct:+.3%}, retraced {retrace_pct:.3%})"
+
+    opened_at = dt.datetime.fromisoformat(position["opened_at"])
+    now = now if now is not None else dt.datetime.now(dt.timezone.utc)
+    held_minutes = (now - opened_at).total_seconds() / 60.0
+    if held_minutes >= TRAILING_MAX_HOLD_MINUTES:
+        return True, f"max_hold_time ({held_minutes:.0f}min, {change_pct:+.3%})"
+    return False, f"holding ({change_pct:+.3%}, peak {peak_change_pct:+.3%}, {held_minutes:.0f}min)"
+
+
 def decide_exit(
     position: dict[str, Any], current_price: float, *,
     velocity_pct_per_min: float | None = None, external_velocity_pct_per_min: float | None = None,
@@ -1039,7 +1132,11 @@ def decide_exit(
     breakout_pct_b: float | None = None, sentiment_score: float | None = None,
     model_ok: bool = False, probability_up: float | None = None,
 ) -> tuple[bool, str]:
-    """`current_price` is always Kalshi's own tradable quote -- that's what
+    """See USE_TREND_TRAILING_STRATEGY's own comment -- when enabled, exits
+    take the simpler, separately-validated trailing-stop path below instead
+    of everything else in this function.
+
+    `current_price` is always Kalshi's own tradable quote -- that's what
     the gain/loss threshold and the actual exit order use. `velocity` is
     computed from that same Kalshi price series; `external_velocity` is
     computed independently from a live exchange cross-check (Coinbase/
@@ -1088,6 +1185,8 @@ def decide_exit(
     pre-exit-study quit path and the max_hold "promising" extension path;
     omit both (the default) to fall back to the pre-existing technical-only
     behavior exactly."""
+    if USE_TREND_TRAILING_STRATEGY:
+        return _decide_exit_trailing(position, current_price, now=now)
     entry_price = float(position["entry_price"])
     is_short = position.get("side") == "short"
     exit_pcts = adaptive_exit_pcts(position.get("entry_volatility_30"))

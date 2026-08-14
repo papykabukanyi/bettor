@@ -305,6 +305,89 @@ def test_pre_exit_study_is_side_aware_for_shorts():
     assert "pre_exit_study" in reason
 
 
+# ── USE_TREND_TRAILING_STRATEGY: trailing-stop exit ─────────────────────────
+# See the constant's own module-level comment for the full backtest/
+# rationale. Deliberately its own simple exit shape (stop_loss + trailing
+# + max_hold only) -- NOT combined with take_profit/quick_profit/
+# pre_exit_study/promising-extension, which were tuned for the old
+# fixed-take-profit shape and were never backtested together with this.
+
+def test_trend_trailing_off_by_default_uses_the_old_fixed_take_profit(monkeypatch):
+    """The flag defaults to False -- decide_exit must behave exactly as
+    before (fixed 2% take-profit) when it's off, regardless of how far
+    price has moved favorably."""
+    pos = _position(minutes_ago=1)
+    should_exit, reason = strat.decide_exit(pos, 6.60 * (1 + strat.TAKE_PROFIT_PCT + 0.001))
+    assert should_exit and "take_profit" in reason
+
+
+def test_trend_trailing_stop_loss_fires_before_any_trailing_activates(monkeypatch):
+    monkeypatch.setattr(strat, "USE_TREND_TRAILING_STRATEGY", True)
+    pos = _position(minutes_ago=1)
+    should_exit, reason = strat.decide_exit(pos, 6.60 * (1 - strat.TRAILING_STOP_LOSS_PCT - 0.001))
+    assert should_exit and "stop_loss" in reason
+
+
+def test_trend_trailing_does_not_exit_a_small_favorable_move_before_activation(monkeypatch):
+    monkeypatch.setattr(strat, "USE_TREND_TRAILING_STRATEGY", True)
+    pos = _position(minutes_ago=1)
+    should_exit, reason = strat.decide_exit(pos, 6.60 * (1 + strat.TRAILING_ACTIVATION_PCT * 0.5))
+    assert not should_exit
+    assert "holding" in reason
+
+
+def test_trend_trailing_exits_on_a_real_retracement_from_the_peak(monkeypatch):
+    monkeypatch.setattr(strat, "USE_TREND_TRAILING_STRATEGY", True)
+    pos = _position(minutes_ago=1)
+    entry_price = 6.60
+    peak_price = entry_price * (1 + strat.TRAILING_ACTIVATION_PCT * 2)
+    should_exit, reason = strat.decide_exit(pos, peak_price)  # first tick sets the peak, activates trailing
+    assert not should_exit
+
+    # retrace_pct = (peak - current) / entry_price -- an absolute move off
+    # entry_price, not a percentage of peak_price itself.
+    retraced_price = peak_price - entry_price * (strat.TRAILING_DISTANCE_PCT + 0.001)
+    should_exit, reason = strat.decide_exit(pos, retraced_price)
+    assert should_exit
+    assert "trailing_stop" in reason
+
+
+def test_trend_trailing_keeps_running_while_still_near_its_own_peak(monkeypatch):
+    monkeypatch.setattr(strat, "USE_TREND_TRAILING_STRATEGY", True)
+    pos = _position(minutes_ago=1)
+    peak_price = 6.60 * (1 + strat.TRAILING_ACTIVATION_PCT * 2)
+    strat.decide_exit(pos, peak_price)  # activates trailing
+
+    barely_off_peak = peak_price * (1 - strat.TRAILING_DISTANCE_PCT * 0.1)
+    should_exit, reason = strat.decide_exit(pos, barely_off_peak)
+    assert not should_exit
+    assert "holding" in reason
+
+
+def test_trend_trailing_exits_on_max_hold_regardless_of_price(monkeypatch):
+    monkeypatch.setattr(strat, "USE_TREND_TRAILING_STRATEGY", True)
+    pos = _position(minutes_ago=strat.TRAILING_MAX_HOLD_MINUTES + 1)
+    should_exit, reason = strat.decide_exit(pos, 6.60 * 1.001)
+    assert should_exit and "max_hold_time" in reason
+
+
+def test_trend_trailing_is_side_aware_for_a_short(monkeypatch):
+    """A short's favorable direction is a FALLING price -- stop_loss/peak/
+    retracement all mirror the long case."""
+    monkeypatch.setattr(strat, "USE_TREND_TRAILING_STRATEGY", True)
+    pos = _position(minutes_ago=1, side="short")
+    should_exit, reason = strat.decide_exit(pos, 6.60 * (1 + strat.TRAILING_STOP_LOSS_PCT + 0.001))
+    assert should_exit and "stop_loss" in reason
+
+    pos2 = _position(minutes_ago=1, side="short")
+    entry_price = 6.60
+    peak_price = entry_price * (1 - strat.TRAILING_ACTIVATION_PCT * 2)
+    strat.decide_exit(pos2, peak_price)  # activates trailing (price fell, favorable for a short)
+    retraced_price = peak_price + entry_price * (strat.TRAILING_DISTANCE_PCT + 0.001)
+    should_exit, reason = strat.decide_exit(pos2, retraced_price)
+    assert should_exit and "trailing_stop" in reason
+
+
 # ── Per-currency adaptive exit thresholds ───────────────────────────────────
 # Confirmed via a per-ticker backtest breakdown: BTC's own volatility_30 is
 # roughly 4x lower than kSHIB's -- these lock down that each position's
@@ -1032,6 +1115,75 @@ def test_evaluate_candidate_falls_back_to_technical_when_model_not_trained(monke
     assert result["should_enter"] is True
     assert result["model_ok"] is False
     assert "fallback" in result["reason"]
+
+
+# ── USE_TREND_TRAILING_STRATEGY: 4h trend alignment on entry ────────────────
+# See the constant's own module-level comment for the full backtest/rationale.
+
+def test_trend_trailing_strategy_off_by_default_ignores_trend_4h(monkeypatch):
+    """The flag defaults to False -- an unfavorable trend_4h must NOT block
+    entry unless the strategy variant is explicitly turned on."""
+    monkeypatch.setattr(strat, "latest_feature_row", lambda ticker: _row(trend_4h=-0.05))
+    monkeypatch.setattr(strat, "predict_direction", lambda ticker: {
+        "model_ok": True, "ticker": ticker, "direction": "up", "probability_up": 0.9,
+    })
+    result = strat.evaluate_candidate("KXBTCPERP")
+    assert result["should_enter"] is True
+
+
+def test_trend_trailing_strategy_blocks_a_long_dip_against_the_4h_trend(monkeypatch):
+    monkeypatch.setattr(strat, "USE_TREND_TRAILING_STRATEGY", True)
+    monkeypatch.setattr(strat, "latest_feature_row", lambda ticker: _row(trend_4h=-0.02))
+    monkeypatch.setattr(strat, "predict_direction", lambda ticker: {
+        "model_ok": True, "ticker": ticker, "direction": "up", "probability_up": 0.9,
+    })
+    result = strat.evaluate_candidate("KXBTCPERP")
+    assert result["should_enter"] is False
+    assert "4h trend" in result["reason"]
+
+
+def test_trend_trailing_strategy_allows_a_long_dip_with_the_4h_trend(monkeypatch):
+    monkeypatch.setattr(strat, "USE_TREND_TRAILING_STRATEGY", True)
+    monkeypatch.setattr(strat, "latest_feature_row", lambda ticker: _row(trend_4h=0.02))
+    monkeypatch.setattr(strat, "predict_direction", lambda ticker: {
+        "model_ok": True, "ticker": ticker, "direction": "up", "probability_up": 0.9,
+    })
+    result = strat.evaluate_candidate("KXBTCPERP")
+    assert result["should_enter"] is True
+
+
+def test_trend_trailing_strategy_blocks_entry_with_no_4h_trend_data(monkeypatch):
+    monkeypatch.setattr(strat, "USE_TREND_TRAILING_STRATEGY", True)
+    monkeypatch.setattr(strat, "latest_feature_row", lambda ticker: _row(trend_4h=None))
+    monkeypatch.setattr(strat, "predict_direction", lambda ticker: {
+        "model_ok": True, "ticker": ticker, "direction": "up", "probability_up": 0.9,
+    })
+    result = strat.evaluate_candidate("KXBTCPERP")
+    assert result["should_enter"] is False
+    assert "no 4h trend data" in result["reason"]
+
+
+def test_trend_trailing_strategy_blocks_a_short_rally_against_the_4h_trend(monkeypatch):
+    monkeypatch.setattr(strat, "USE_TREND_TRAILING_STRATEGY", True)
+    monkeypatch.setattr(strat, "ENABLE_SHORTS", True)
+    monkeypatch.setattr(strat, "latest_feature_row", lambda ticker: _rally_row(trend_4h=0.02))
+    monkeypatch.setattr(strat, "predict_direction", lambda ticker: {
+        "model_ok": True, "ticker": ticker, "direction": "down", "probability_up": 0.1,
+    })
+    result = strat.evaluate_candidate("KXBTCPERP")
+    assert result["should_enter"] is False
+    assert "4h trend" in result["reason"]
+
+
+def test_trend_trailing_strategy_allows_a_short_rally_with_the_4h_trend(monkeypatch):
+    monkeypatch.setattr(strat, "USE_TREND_TRAILING_STRATEGY", True)
+    monkeypatch.setattr(strat, "ENABLE_SHORTS", True)
+    monkeypatch.setattr(strat, "latest_feature_row", lambda ticker: _rally_row(trend_4h=-0.02))
+    monkeypatch.setattr(strat, "predict_direction", lambda ticker: {
+        "model_ok": True, "ticker": ticker, "direction": "down", "probability_up": 0.1,
+    })
+    result = strat.evaluate_candidate("KXBTCPERP")
+    assert result["should_enter"] is True
 
 
 def test_evaluate_candidate_model_blocks_entry_when_predicting_down(monkeypatch):
