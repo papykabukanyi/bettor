@@ -674,7 +674,10 @@ def scan_and_enter(watchlist: list[str] | None = None, *, dry_run: bool | None =
     crypto/options, which never had broker-native brackets to begin with).
     Fully closed (no session at all, ~8pm-4am ET) skips entirely -- nothing
     is fillable then regardless of order type."""
-    from data.alpaca_data import fetch_recent_minute_bars, get_market_session, get_stock_watchlist, latest_feature_row, load_training_dataset
+    from data.alpaca_data import (
+        fetch_recent_minute_bars, get_company_name, get_market_session, get_stock_watchlist,
+        latest_feature_row, load_training_dataset, prewarm_sentiment,
+    )
     from data.alpaca_model import predict_direction
     from data import threads_post
 
@@ -735,6 +738,16 @@ def scan_and_enter(watchlist: list[str] | None = None, *, dry_run: bool | None =
         _save_state(state, push_durable=reference_was_just_set)
     if loss_cap_breached:
         return {"opened": [], "action": "daily_loss_cap_breached"}
+
+    # See stock_news.prewarm_sentiment's own docstring for the full,
+    # confirmed root cause this fixes on the crypto side (same shape here)
+    # -- fetches sentiment for every not-yet-held symbol CONCURRENTLY so
+    # the sequential loop below hits a warm cache instead of each symbol's
+    # own blocking network fetch.
+    try:
+        prewarm_sentiment([(s, get_company_name(s)) for s in watchlist if s not in existing_symbols])
+    except Exception as exc:
+        logger.debug("[alpaca_strategy] sentiment prewarm failed (non-fatal): %s", exc)
 
     for symbol in watchlist:
         try:

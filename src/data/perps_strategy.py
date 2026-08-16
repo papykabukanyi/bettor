@@ -86,6 +86,7 @@ from data.kalshi_perps import (
     cancel_margin_order, create_margin_order, get_margin_balance, get_margin_fee_tiers, get_margin_market,
     get_margin_order, get_margin_positions,
 )
+from data.crypto_news import prewarm_sentiment
 from data.perps_data import coin_for_ticker, fetch_candle_frames, get_watchlist, latest_feature_row
 from data.perps_model import predict_direction
 from data import perps_trade_analysis, threads_post
@@ -972,7 +973,17 @@ def scan_for_entries(
     through to evaluate_candidate -- see its own docstring."""
     watchlist = tickers or get_watchlist()
     held = exclude or set()
-    candidates = [evaluate_candidate(t, confidence_min=confidence_min) for t in watchlist if t not in held]
+    to_evaluate = [t for t in watchlist if t not in held]
+    # See crypto_news.prewarm_sentiment's own docstring for the full,
+    # confirmed root cause this fixes on the crypto (Alpaca) side of this
+    # exact shared sentiment module -- fetches sentiment for every
+    # not-yet-held ticker CONCURRENTLY so the sequential loop below hits a
+    # warm cache instead of each ticker's own blocking network fetch.
+    try:
+        prewarm_sentiment([coin_for_ticker(t) for t in to_evaluate], use_limited_sources=True)
+    except Exception as exc:
+        logger.debug("[perps_strategy] sentiment prewarm failed (non-fatal): %s", exc)
+    candidates = [evaluate_candidate(t, confidence_min=confidence_min) for t in to_evaluate]
     qualifying = sorted((c for c in candidates if c.get("should_enter")), key=lambda c: c.get("score", 0.0), reverse=True)
     return qualifying, candidates
 

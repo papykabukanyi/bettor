@@ -43,7 +43,7 @@ import numpy as np
 import pandas as pd
 
 from data import alpaca_client
-from data.crypto_news import get_sentiment
+from data.crypto_news import get_sentiment, prewarm_sentiment
 
 logger = logging.getLogger(__name__)
 
@@ -480,6 +480,13 @@ def collect_dataset_rows(symbols: list[str] | None = None) -> pd.DataFrame:
     full tradable universe -- small enough, unlike equities, that there's
     no need to narrow to a ranked top-N watchlist first)."""
     target_symbols = symbols if symbols is not None else get_crypto_universe()
+    # Same real fix as scan_and_enter's own (see prewarm_sentiment's own
+    # docstring) -- this job runs across the FULL universe, not just the
+    # watchlist, so it's an even bigger sequential-fetch cost than entry_scan.
+    try:
+        prewarm_sentiment([symbol_to_coin(s) for s in target_symbols])
+    except Exception as exc:
+        logger.debug("[alpaca_crypto_data] sentiment prewarm failed (non-fatal): %s", exc)
     frames = []
     for symbol in target_symbols:
         try:

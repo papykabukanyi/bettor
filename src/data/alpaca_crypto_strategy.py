@@ -981,6 +981,16 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
 
     # --- Phase 1: evaluate every symbol not already held (network calls,
     # deliberately outside the lock) -----------------------------------
+    # See crypto_news.prewarm_sentiment's own docstring for the full,
+    # real, confirmed root cause this fixes -- fetches sentiment for every
+    # not-yet-held coin CONCURRENTLY so the sequential loop below hits a
+    # warm cache instead of each coin's own blocking network fetch.
+    try:
+        from data.crypto_news import prewarm_sentiment
+        prewarm_sentiment([symbol_to_coin(s) for s in symbols if symbol_to_coin(s) not in existing_coins])
+    except Exception as exc:
+        logger.debug("[alpaca_crypto_strategy] sentiment prewarm failed (non-fatal): %s", exc)
+
     qualifying: list[dict[str, Any]] = []
     for symbol in symbols:
         try:

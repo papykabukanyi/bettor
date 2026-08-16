@@ -14,7 +14,7 @@ import datetime as dt
 import pandas as pd
 import pytest
 
-from data import alpaca_client, alpaca_crypto_data, alpaca_crypto_model, threads_post, alpaca_crypto_strategy as strat
+from data import alpaca_client, alpaca_crypto_data, alpaca_crypto_model, crypto_news, threads_post, alpaca_crypto_strategy as strat
 
 
 def _row(**overrides):
@@ -284,6 +284,42 @@ def test_scan_and_enter_dry_run_opens_a_position_without_any_real_order(monkeypa
     assert len(state["positions"]) == 1
     assert state["positions"][0]["symbol"] == "BTC/USD"
     assert state["positions"][0]["count"] > 0  # a fractional coin count, computed from notional/entry_price
+
+
+def test_scan_and_enter_prewarms_sentiment_for_symbols_not_already_held(monkeypatch):
+    """Real, confirmed root cause this fixes: evaluating each symbol's
+    sentiment SEQUENTIALLY across the full universe was slow enough to
+    cause the separate, 20-second fast_check job to get skipped by
+    APScheduler -- see crypto_news.prewarm_sentiment's own docstring."""
+    strat._save_state({  # noqa: SLF001
+        "positions": [{"symbol": "SOL/USD", "entry_price": 150.0, "count": 1.0}],
+        "trade_log": [], "realized_pnl_by_date": {},
+    })
+    monkeypatch.setattr(alpaca_crypto_data, "get_crypto_universe", lambda: ["BTC/USD", "ETH/USD", "SOL/USD"])
+    monkeypatch.setattr(alpaca_crypto_data, "latest_feature_row", lambda symbol: None)  # short-circuit past Phase 1
+    monkeypatch.setattr(alpaca_crypto_model, "predict_direction", lambda symbol: {"model_ok": False})
+    prewarmed_with = []
+    monkeypatch.setattr(crypto_news, "prewarm_sentiment", lambda coins, **kw: prewarmed_with.extend(coins))
+
+    strat.scan_and_enter()
+    # SOL is already held (a real position above) -- must not be re-prewarmed.
+    assert sorted(prewarmed_with) == ["BTC", "ETH"]
+
+
+def test_scan_and_enter_still_works_if_sentiment_prewarm_fails(monkeypatch):
+    """Best-effort optimization only -- a failure here must never block a
+    real entry."""
+    monkeypatch.setattr(alpaca_crypto_data, "get_crypto_universe", lambda: ["BTC/USD"])
+    monkeypatch.setattr(alpaca_crypto_data, "latest_feature_row", lambda symbol: _entry_row())
+    monkeypatch.setattr(alpaca_crypto_model, "predict_direction", lambda symbol: {"model_ok": False})
+
+    def raise_error(coins, **kw):
+        raise RuntimeError("simulated prewarm failure")
+
+    monkeypatch.setattr(crypto_news, "prewarm_sentiment", raise_error)
+
+    result = strat.scan_and_enter()
+    assert result["opened"][0]["action"] == "opened"
 
 
 def test_scan_and_enter_skips_a_symbol_already_held(monkeypatch):

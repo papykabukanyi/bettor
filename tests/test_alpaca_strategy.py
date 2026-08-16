@@ -333,6 +333,46 @@ def test_scan_and_enter_dry_run_opens_a_position_without_any_real_order(monkeypa
     assert state["positions"][0]["order_id"] is None
 
 
+def test_scan_and_enter_prewarms_sentiment_for_symbols_not_already_held(monkeypatch):
+    """Real, confirmed root cause this fixes (same shape as
+    crypto_news.prewarm_sentiment, see its own docstring) -- evaluating
+    each watchlist symbol's sentiment SEQUENTIALLY risked delaying the
+    separate exit-management job on the shared single-threaded worker."""
+    strat._save_state({  # noqa: SLF001
+        "positions": [{"symbol": "MSFT", "entry_price": 300.0, "count": 1}],
+        "trade_log": [], "realized_pnl_by_date": {},
+    })
+    monkeypatch.setattr(alpaca_data, "get_stock_watchlist", lambda recent: ["AAPL", "MSFT"])
+    monkeypatch.setattr(alpaca_data, "load_training_dataset", lambda **kw: pd.DataFrame())
+    monkeypatch.setattr(alpaca_data, "get_company_name", lambda symbol: f"{symbol} Inc.")
+    monkeypatch.setattr(alpaca_data, "latest_feature_row", lambda symbol: None)  # short-circuit past the loop body
+    monkeypatch.setattr(alpaca_model, "predict_direction", lambda symbol: {"model_ok": False})
+    prewarmed_with = []
+    monkeypatch.setattr(alpaca_data, "prewarm_sentiment", lambda pairs, **kw: prewarmed_with.extend(pairs))
+
+    strat.scan_and_enter()
+    # MSFT is already held -- must not be re-prewarmed.
+    assert prewarmed_with == [("AAPL", "AAPL Inc.")]
+
+
+def test_scan_and_enter_still_works_if_sentiment_prewarm_fails(monkeypatch):
+    """Best-effort optimization only -- a failure here must never block a
+    real entry."""
+    monkeypatch.setattr(alpaca_data, "get_stock_watchlist", lambda recent: ["AAPL"])
+    monkeypatch.setattr(alpaca_data, "load_training_dataset", lambda **kw: pd.DataFrame())
+    monkeypatch.setattr(alpaca_data, "get_company_name", lambda symbol: f"{symbol} Inc.")
+    monkeypatch.setattr(alpaca_data, "latest_feature_row", lambda symbol: _entry_row())
+    monkeypatch.setattr(alpaca_model, "predict_direction", lambda symbol: {"model_ok": False})
+
+    def raise_error(pairs, **kw):
+        raise RuntimeError("simulated prewarm failure")
+
+    monkeypatch.setattr(alpaca_data, "prewarm_sentiment", raise_error)
+
+    result = strat.scan_and_enter()
+    assert result["opened"][0]["action"] == "opened"
+
+
 def test_scan_and_enter_places_an_extended_hours_limit_order_in_pre_market(monkeypatch):
     """A bracket order is regular-hours only -- pre/post-market must place
     a plain limit order with extended_hours=true instead."""

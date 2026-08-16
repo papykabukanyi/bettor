@@ -11,7 +11,7 @@ import datetime as dt
 import pandas as pd
 import pytest
 
-from data import alpaca_client, alpaca_data, alpaca_options_data, alpaca_options_model, threads_post, alpaca_options_strategy as strat
+from data import alpaca_client, alpaca_data, alpaca_options_data, alpaca_options_model, stock_news, threads_post, alpaca_options_strategy as strat
 
 
 @pytest.fixture(autouse=True)
@@ -297,6 +297,44 @@ def test_scan_and_enter_dry_run_opens_a_position_without_any_real_order(monkeypa
     assert state["positions"][0]["underlying_symbol"] == "AAPL"
     assert state["positions"][0]["symbol"] == "AAPL240223C00195000"
     assert state["positions"][0]["count"] >= 1
+
+
+def test_scan_and_enter_prewarms_sentiment_for_underlyings_not_already_held(monkeypatch):
+    """Real, confirmed root cause this fixes (same shape as
+    crypto_news.prewarm_sentiment, see its own docstring)."""
+    strat._save_state({  # noqa: SLF001
+        "positions": [{"underlying_symbol": "MSFT", "symbol": "MSFT240223C00300000", "entry_price": 1.0, "count": 1}],
+        "trade_log": [], "realized_pnl_by_date": {},
+    })
+    monkeypatch.setattr(strat, "ENTRY_STRATEGY", "naked")
+    monkeypatch.setattr(alpaca_options_data, "get_options_universe", lambda: ["AAPL", "MSFT"])
+    monkeypatch.setattr(alpaca_options_data, "latest_feature_row", lambda symbol: None)  # short-circuit past the loop body
+    monkeypatch.setattr(alpaca_options_model, "predict_direction", lambda symbol: {"model_ok": False})
+    prewarmed_with = []
+    monkeypatch.setattr(stock_news, "prewarm_sentiment", lambda pairs, **kw: prewarmed_with.extend(pairs))
+
+    strat.scan_and_enter()
+    # MSFT is already held -- must not be re-prewarmed.
+    assert prewarmed_with == [("AAPL", None)]
+
+
+def test_scan_and_enter_still_works_if_sentiment_prewarm_fails(monkeypatch):
+    """Best-effort optimization only -- a failure here must never block a
+    real entry."""
+    monkeypatch.setattr(strat, "ENTRY_STRATEGY", "naked")
+    monkeypatch.setattr(alpaca_options_data, "get_options_universe", lambda: ["AAPL"])
+    monkeypatch.setattr(alpaca_options_data, "latest_feature_row", lambda symbol: _row())
+    monkeypatch.setattr(alpaca_options_model, "predict_direction", lambda symbol: {"model_ok": True, "probability_up": 0.7})
+    monkeypatch.setattr(alpaca_options_data, "select_contract", lambda underlying, *, direction, current_price: _contract())
+    monkeypatch.setattr(alpaca_client, "get_option_latest_quote", lambda symbol: {"ap": 1.05, "bp": 0.95})
+
+    def raise_error(pairs, **kw):
+        raise RuntimeError("simulated prewarm failure")
+
+    monkeypatch.setattr(stock_news, "prewarm_sentiment", raise_error)
+
+    result = strat.scan_and_enter()
+    assert result["opened"][0]["action"] == "opened"
 
 
 def test_scan_and_enter_skips_without_a_trained_model(monkeypatch):

@@ -213,6 +213,38 @@ def get_sentiment(symbol: str, *, company_name: str | None = None, use_limited_s
     return result
 
 
+def prewarm_sentiment(
+    symbols_and_names: list[tuple[str, str | None]], *, use_limited_sources: bool = True, max_workers: int = 8,
+) -> None:
+    """Fetches sentiment for every (symbol, company_name) pair CONCURRENTLY
+    via a thread pool, populating the SAME per-symbol cache get_sentiment()
+    itself reads -- every sequential get_sentiment() call made afterward in
+    the same cycle becomes a cache hit instead of its own blocking fetch.
+    Same real fix, same rationale, as crypto_news.prewarm_sentiment (see
+    its own docstring for the full, confirmed root cause on the crypto
+    side) -- this module shares the identical sequential-per-symbol-fetch
+    shape via alpaca_data.py's collect_dataset_rows/latest_feature_row,
+    used by both the stocks and options services.
+
+    Best-effort: any symbol whose fetch fails or times out inside the pool
+    just falls through to its own normal (slower) get_sentiment() call
+    later in the sequential loop."""
+    import concurrent.futures
+
+    unique_pairs = list(dict.fromkeys((s, n) for s, n in symbols_and_names if s))  # de-dupe, preserve order
+    if not unique_pairs:
+        return
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [
+                executor.submit(get_sentiment, symbol, company_name=name, use_limited_sources=use_limited_sources)
+                for symbol, name in unique_pairs
+            ]
+            concurrent.futures.wait(futures, timeout=_TIMEOUT_SEC * 3)
+    except Exception as exc:
+        logger.debug("[stock_news] sentiment prewarm failed (non-fatal, per-symbol fetch will still run): %s", exc)
+
+
 # General "what's happening in the stock market right now" query -- NOT
 # per-symbol, so it's fetched once and cached on its own longer TTL, same
 # shared-general-feed discipline as crypto_news.py's newsroom feeds.

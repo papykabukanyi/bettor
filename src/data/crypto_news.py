@@ -380,6 +380,46 @@ def get_sentiment(coin_symbol: str, *, use_limited_sources: bool = True) -> dict
     return result
 
 
+def prewarm_sentiment(coins: list[str], *, use_limited_sources: bool = True, max_workers: int = 8) -> None:
+    """Fetches sentiment for every coin CONCURRENTLY via a thread pool,
+    populating the SAME per-coin cache get_sentiment() itself reads --
+    every sequential get_sentiment() call made afterward in the same cycle
+    becomes a cache hit instead of its own blocking fetch. get_sentiment()'s
+    real cost is network I/O (HTTP requests), not CPU, so threads (not the
+    GIL-bound compute path, and NOT gunicorn's own separate single-worker/
+    single-thread request-handling model -- this is purely internal
+    concurrency within one already-running job) are the right, safe tool
+    here.
+
+    Real, confirmed root cause this fixes: scan_and_enter's per-symbol
+    evaluation loop calling get_sentiment() (via latest_feature_row, and
+    again via predict_direction's own internal latest_feature_row call)
+    SEQUENTIALLY across a real 36-coin watchlist took 40+ seconds on a
+    cache-cold cycle -- confirmed live via a real, repeated "maximum
+    number of running instances reached" APScheduler warning on
+    _run_alpaca_crypto_fast_check (the SEPARATE, 20-second-interval
+    exit-management job): the single request-handling thread was still
+    busy inside a slow entry_scan when fast_check's own next tick came
+    due, so exit checks were being skipped/delayed, not just entries.
+
+    Best-effort: any coin whose fetch fails or times out inside the pool
+    just falls through to its own normal (slower) get_sentiment() call
+    later in the sequential loop -- this is a pure optimization, never a
+    new required step, so a partial or total failure here degrades back to
+    the pre-existing behavior rather than breaking anything."""
+    import concurrent.futures
+
+    unique_coins = list(dict.fromkeys(c for c in coins if c))  # de-dupe, preserve order
+    if not unique_coins:
+        return
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(get_sentiment, coin, use_limited_sources=use_limited_sources) for coin in unique_coins]
+            concurrent.futures.wait(futures, timeout=_TIMEOUT_SEC * 3)
+    except Exception as exc:
+        logger.debug("[crypto_news] sentiment prewarm failed (non-fatal, per-coin fetch will still run): %s", exc)
+
+
 def get_trending_headlines(*, limit: int = 5) -> list[str]:
     """General crypto-market trending headlines -- NOT one coin's own
     sentiment feed, just "what's happening in crypto right now." Powers

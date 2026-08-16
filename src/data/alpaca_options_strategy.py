@@ -811,6 +811,7 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
     from data.alpaca_data import fetch_recent_minute_bars, get_market_session
     from data.alpaca_options_data import get_options_universe, latest_feature_row, select_contract, select_spread_contracts
     from data.alpaca_options_model import predict_direction
+    from data.stock_news import prewarm_sentiment
     from data import alpaca_client, threads_post
 
     if get_market_session()["session"] != "regular":
@@ -855,6 +856,16 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
         _save_state(state, push_durable=reference_was_just_set)
     if loss_cap_breached:
         return {"opened": [], "action": "daily_loss_cap_breached"}
+
+    # See stock_news.prewarm_sentiment's own docstring for the full,
+    # confirmed root cause this fixes on the crypto side (same shape here)
+    # -- fetches sentiment for every not-yet-held underlying CONCURRENTLY
+    # so the sequential loop below hits a warm cache instead of each
+    # underlying's own blocking network fetch.
+    try:
+        prewarm_sentiment([(s, None) for s in symbols if s not in existing_underlyings])
+    except Exception as exc:
+        logger.debug("[alpaca_options_strategy] sentiment prewarm failed (non-fatal): %s", exc)
 
     for symbol in symbols:
         try:

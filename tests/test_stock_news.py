@@ -178,6 +178,40 @@ def test_get_sentiment_is_cached_within_the_ttl(monkeypatch, _isolated_sentiment
     assert calls["n"] == 1
 
 
+def test_prewarm_sentiment_populates_the_cache_for_every_symbol(monkeypatch, _isolated_sentiment_cache):
+    """Real, confirmed fix (same root cause as crypto_news.prewarm_sentiment,
+    see its own docstring): a sequential per-symbol sentiment fetch across a
+    watchlist is slow enough to risk delaying the separate exit-management
+    job on the shared single-threaded worker. After prewarming, a normal
+    get_sentiment() call for any of those symbols must be a cache hit."""
+    monkeypatch.setattr(news, "_fetch_google_news_rss", lambda query: [])
+    news.prewarm_sentiment([("AAPL", "Apple Inc."), ("MSFT", "Microsoft Corp.")])
+    assert set(news._cache.keys()) == {"AAPL", "MSFT"}  # noqa: SLF001
+
+
+def test_prewarm_sentiment_dedupes_and_ignores_empty_symbols(monkeypatch, _isolated_sentiment_cache):
+    calls = []
+    monkeypatch.setattr(news, "get_sentiment", lambda symbol, **kw: calls.append(symbol) or {"symbol": symbol})
+    news.prewarm_sentiment([("AAPL", "Apple Inc."), ("AAPL", "Apple Inc."), ("", None), (None, None), ("MSFT", None)])
+    assert sorted(calls) == ["AAPL", "MSFT"]
+
+
+def test_prewarm_sentiment_is_a_no_op_for_an_empty_list(monkeypatch, _isolated_sentiment_cache):
+    def fail_if_called(*a, **k):
+        raise AssertionError("must not call get_sentiment for an empty list")
+
+    monkeypatch.setattr(news, "get_sentiment", fail_if_called)
+    news.prewarm_sentiment([])  # must not raise
+
+
+def test_prewarm_sentiment_never_raises_even_if_every_fetch_fails(monkeypatch, _isolated_sentiment_cache):
+    def raise_error(symbol, **kw):
+        raise RuntimeError("simulated network failure")
+
+    monkeypatch.setattr(news, "get_sentiment", raise_error)
+    news.prewarm_sentiment([("AAPL", None), ("MSFT", None)])  # must not raise -- best-effort only
+
+
 @pytest.fixture
 def _isolated_trending_cache(monkeypatch):
     monkeypatch.setattr(news, "_trending_cache", None)

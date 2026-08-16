@@ -41,7 +41,7 @@ from typing import Any
 import pandas as pd
 
 from data import alpaca_client
-from data.stock_news import get_sentiment
+from data.stock_news import get_sentiment, prewarm_sentiment
 
 logger = logging.getLogger(__name__)
 
@@ -671,6 +671,14 @@ def collect_dataset_rows(symbols: list[str] | None = None) -> pd.DataFrame:
     watchlist -- NOT the full universe, which is handled by a separate,
     slower periodic backfill job)."""
     target_symbols = symbols if symbols is not None else get_stock_watchlist()
+    # Same real fix as alpaca_crypto_data.collect_dataset_rows' own (see
+    # stock_news.prewarm_sentiment's own docstring) -- fetches sentiment
+    # for every symbol CONCURRENTLY so the sequential loop below hits a
+    # warm cache instead of each symbol's own blocking network fetch.
+    try:
+        prewarm_sentiment([(s, get_company_name(s)) for s in target_symbols])
+    except Exception as exc:
+        logger.debug("[alpaca_data] sentiment prewarm failed (non-fatal): %s", exc)
     frames = []
     for symbol in target_symbols:
         try:

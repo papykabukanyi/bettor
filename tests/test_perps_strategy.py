@@ -1252,6 +1252,35 @@ def test_scan_for_entries_excludes_already_held_tickers(monkeypatch):
     assert candidates[0]["ticker"] == "KXETHPERP"
 
 
+def test_scan_for_entries_prewarms_sentiment_for_tickers_not_already_held(monkeypatch):
+    """Real, confirmed root cause this fixes on the crypto (Alpaca) side of
+    this exact shared sentiment module -- see crypto_news.prewarm_sentiment's
+    own docstring. Ported here for the same reason/consistency."""
+    monkeypatch.setattr(strat, "get_watchlist", lambda: ["KXBTCPERP", "KXETHPERP"])
+    monkeypatch.setattr(strat, "latest_feature_row", lambda ticker: _row(ticker=ticker))
+    monkeypatch.setattr(strat, "predict_direction", lambda ticker: {"model_ok": False})
+    prewarmed_with = []
+    monkeypatch.setattr(strat, "prewarm_sentiment", lambda coins, **kw: prewarmed_with.extend(coins))
+
+    strat.scan_for_entries(exclude={"KXBTCPERP"})
+    assert prewarmed_with == [strat.coin_for_ticker("KXETHPERP")]
+
+
+def test_scan_for_entries_still_works_if_sentiment_prewarm_fails(monkeypatch):
+    """Best-effort optimization only -- a failure here must never block
+    entry evaluation."""
+    monkeypatch.setattr(strat, "get_watchlist", lambda: ["KXBTCPERP"])
+    monkeypatch.setattr(strat, "latest_feature_row", lambda ticker: _row(ticker=ticker))
+    monkeypatch.setattr(strat, "predict_direction", lambda ticker: {"model_ok": False})
+
+    def raise_error(coins, **kw):
+        raise RuntimeError("simulated prewarm failure")
+
+    monkeypatch.setattr(strat, "prewarm_sentiment", raise_error)
+    qualifying, candidates = strat.scan_for_entries()
+    assert len(candidates) == 1
+
+
 # ── Leveraged position sizing ────────────────────────────────────────────────
 
 def test_compute_leveraged_count_uses_the_markets_leverage_multiplier():

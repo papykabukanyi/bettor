@@ -324,6 +324,45 @@ def test_get_sentiment_uses_limited_sources_by_default(monkeypatch, _isolated_se
     assert calls == {"cryptopanic": 1, "newsdata": 1}
 
 
+def test_prewarm_sentiment_populates_the_cache_for_every_coin(monkeypatch, _isolated_sentiment_caches):
+    """The whole point: after prewarming, a normal get_sentiment() call for
+    any of those coins must be a cache hit, not a fresh fetch."""
+    monkeypatch.setattr(news, "_fetch_cryptopanic", lambda symbol: [])
+    monkeypatch.setattr(news, "_fetch_newsdata_io", lambda symbol: [])
+    news.prewarm_sentiment(["BTC", "ETH", "SOL"])
+    assert set(news._cache.keys()) == {"BTC", "ETH", "SOL"}  # noqa: SLF001
+
+
+def test_prewarm_sentiment_dedupes_and_ignores_empty_coins(monkeypatch, _isolated_sentiment_caches):
+    calls = []
+    monkeypatch.setattr(news, "get_sentiment", lambda coin, **kw: calls.append(coin) or {"coin": coin})
+    news.prewarm_sentiment(["BTC", "BTC", "", None, "ETH"])
+    assert sorted(calls) == ["BTC", "ETH"]
+
+
+def test_prewarm_sentiment_is_a_no_op_for_an_empty_list(monkeypatch, _isolated_sentiment_caches):
+    def fail_if_called(*a, **k):
+        raise AssertionError("must not call get_sentiment for an empty coin list")
+
+    monkeypatch.setattr(news, "get_sentiment", fail_if_called)
+    news.prewarm_sentiment([])  # must not raise
+
+
+def test_prewarm_sentiment_never_raises_even_if_every_fetch_fails(monkeypatch, _isolated_sentiment_caches):
+    def raise_error(coin, **kw):
+        raise RuntimeError("simulated network failure")
+
+    monkeypatch.setattr(news, "get_sentiment", raise_error)
+    news.prewarm_sentiment(["BTC", "ETH"])  # must not raise -- best-effort only
+
+
+def test_prewarm_sentiment_respects_use_limited_sources(monkeypatch, _isolated_sentiment_caches):
+    seen = []
+    monkeypatch.setattr(news, "get_sentiment", lambda coin, *, use_limited_sources: seen.append(use_limited_sources) or {"coin": coin})
+    news.prewarm_sentiment(["BTC", "ETH"], use_limited_sources=False)
+    assert seen == [False, False]
+
+
 def test_get_sentiment_matches_general_feed_headlines_for_any_coin_not_just_btc(monkeypatch, _isolated_sentiment_caches):
     """The three newsroom feeds used to only ever get attached to BTC's
     sentiment -- every other coin got zero coverage from them. They're
