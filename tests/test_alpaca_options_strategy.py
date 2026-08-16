@@ -80,7 +80,7 @@ def test_evaluate_candidate_score_is_one_minus_probability_up_for_a_put():
 
 
 def test_evaluate_candidate_confidence_min_override_replaces_the_module_default():
-    # 0.6 clears the module default (0.58) but not an explicit, stricter override.
+    # 0.6 clears the module default (0.53) but not an explicit, stricter override.
     with_default = strat.evaluate_candidate(_row(), {"model_ok": True, "probability_up": 0.6})
     assert with_default["should_enter"]
     with_stricter_override = strat.evaluate_candidate(_row(), {"model_ok": True, "probability_up": 0.6}, confidence_min=0.65)

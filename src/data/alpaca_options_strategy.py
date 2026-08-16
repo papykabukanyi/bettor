@@ -82,7 +82,23 @@ def _env_int(name: str, default: int) -> int:
 # these defaults are deliberately wider than the equities/crypto
 # strategies' own TP/SL -- a 1% underlying move can easily be a 10-20%+
 # option premium move.
-MODEL_CONFIDENCE_MIN = _env_float("ALPACA_OPTIONS_MODEL_CONFIDENCE_MIN", 0.58)
+# Real, confirmed via a 4-fold walk-forward backtest (run_walkforward_backtest,
+# real production load_training_dataset path, 50,568 rows) plus a
+# corroborating single 80/20 split: at the old default 0.58, options placed
+# almost no trades at all (17 trades across all 4 folds combined, 3 of them
+# zero-trade folds) with a negative mean_return (-1.83%) -- essentially the
+# same "threshold above the model's own achievable confidence" miscalibration
+# already fixed for stocks (see that constant's own comment). 0.53 was the
+# best-corroborated candidate across BOTH tests (walk-forward: 0.75
+# profitable-fold-ratio, mean_return +3.29%, vs 0.58's 0.25/-1.83%; single
+# split: +3.08% vs the same split's negative numbers at every threshold
+# under the old, buggy backtest). Also confirmed via a widened sweep of 6
+# entry-signal archetypes (momentum/breakout/RSI/trend-alignment/confluence
+# confirmation layered on top of the model's directional call) that EVERY
+# technical-confirmation variant performed clearly worse than this plain
+# confidence-only baseline (-10% to -24% vs baseline's positive return) --
+# don't reintroduce one of those without new evidence.
+MODEL_CONFIDENCE_MIN = _env_float("ALPACA_OPTIONS_MODEL_CONFIDENCE_MIN", 0.53)
 # Real gap found in review, per explicit user direction: unlike the other
 # 3 services, this strategy never had ANY volume/volatility pre-filter at
 # all -- entries fired purely on model confidence, regardless of whether
