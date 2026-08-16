@@ -1282,9 +1282,29 @@ def position_exit_levels(position: dict[str, Any]) -> dict[str, float]:
     exit levels defined, rather than just trusting the config exists
     somewhere. Side-aware: a short's take-profit is BELOW entry (profits
     on a falling price) and its stop-loss is ABOVE entry, the mirror image
-    of a long."""
+    of a long.
+
+    USE_TREND_TRAILING_STRATEGY mode has no FIXED take-profit target at
+    all (that's the whole point of a trailing stop) -- real bug found and
+    fixed here: this function originally kept returning the OLD fixed-TP
+    numbers unconditionally even after decide_exit() switched to the
+    trailing path, silently showing the dashboard/Threads posts numbers
+    that no longer matched what would actually trigger an exit.
+    "take_profit_price" here becomes the TRAILING ACTIVATION price (where
+    profit-locking begins, the closest real analog) rather than a fixed
+    target; "quick_profit_price" isn't a concept in trailing mode, so it's
+    set equal to that same activation price rather than None (a caller
+    like threads_post._format_trade_entry_text formats this with `:.4f`
+    unconditionally -- None would crash it, not just look a little off)."""
     entry_price = float(position["entry_price"])
     sign = -1.0 if position.get("side") == "short" else 1.0
+    if USE_TREND_TRAILING_STRATEGY:
+        activation_price = round(entry_price * (1 + sign * TRAILING_ACTIVATION_PCT), 6)
+        return {
+            "take_profit_price": activation_price,
+            "stop_loss_price": round(entry_price * (1 - sign * TRAILING_STOP_LOSS_PCT), 6),
+            "quick_profit_price": activation_price,
+        }
     exit_pcts = adaptive_exit_pcts(position.get("entry_volatility_30"))
     return {
         "take_profit_price": round(entry_price * (1 + sign * exit_pcts["take_profit_pct"]), 6),

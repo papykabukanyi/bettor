@@ -633,6 +633,29 @@ def test_position_exit_levels_for_a_short_are_mirrored():
     assert levels["take_profit_price"] < 100.0 < levels["stop_loss_price"]
 
 
+def test_position_exit_levels_uses_the_trailing_activation_price_in_trailing_mode(monkeypatch):
+    """Real bug found and fixed: this function used to keep returning the
+    OLD fixed-take-profit numbers even after decide_exit() switched to the
+    trailing path, so the dashboard/Threads posts showed levels that no
+    longer matched what would actually trigger an exit."""
+    monkeypatch.setattr(strat, "USE_TREND_TRAILING_STRATEGY", True)
+    pos = _position(entry_price=100.0)
+    levels = strat.position_exit_levels(pos)
+    assert levels["take_profit_price"] == round(100.0 * (1 + strat.TRAILING_ACTIVATION_PCT), 6)
+    assert levels["stop_loss_price"] == round(100.0 * (1 - strat.TRAILING_STOP_LOSS_PCT), 6)
+    # No None/crash risk for a caller that formats this with :.4f unconditionally.
+    assert levels["quick_profit_price"] == levels["take_profit_price"]
+
+
+def test_position_exit_levels_trailing_mode_is_mirrored_for_a_short(monkeypatch):
+    monkeypatch.setattr(strat, "USE_TREND_TRAILING_STRATEGY", True)
+    pos = _position(entry_price=100.0, side="short")
+    levels = strat.position_exit_levels(pos)
+    assert levels["take_profit_price"] == round(100.0 * (1 - strat.TRAILING_ACTIVATION_PCT), 6)
+    assert levels["stop_loss_price"] == round(100.0 * (1 + strat.TRAILING_STOP_LOSS_PCT), 6)
+    assert levels["take_profit_price"] < 100.0 < levels["stop_loss_price"]
+
+
 def test_short_take_profit_exit_on_falling_price():
     pos = _position(side="short")
     # Price fell below entry by more than TAKE_PROFIT_PCT -- profitable for a short.

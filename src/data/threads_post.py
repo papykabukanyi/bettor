@@ -278,29 +278,51 @@ def post_trade_analysis_summary(summary_text: str, *, market: str = "perps") -> 
         return False
 
 
+def _format_held_duration(minutes: float | None) -> str:
+    """"42min" under an hour, "17h3m" (or "17h" on the dot) beyond it --
+    the old flat `.0f`min` formatting read fine at the old ~3-hour max_hold
+    ceiling but turns into an unreadable "1020min" now that
+    USE_TREND_TRAILING_STRATEGY can hold a position most of a day."""
+    if minutes is None:
+        return "?"
+    total_minutes = int(minutes)
+    if total_minutes < 60:
+        return f"{total_minutes}min"
+    hours, mins = divmod(total_minutes, 60)
+    return f"{hours}h{mins}m" if mins else f"{hours}h"
+
+
 def _format_hourly_status_text(
     *, positions: list[dict], today_realized_pnl_usd: float | None, market: str = "perps",
 ) -> str:
+    """Informal, visual snapshot with a real follow-growth hook -- the old
+    version was a flat, mechanical status dump with no reason for a reader
+    to stick around or follow. Every exact substring the existing test
+    suite already checks for ("N open position(s)", "LONG"/"SHORT
+    <TICKER>", "held 42min", "Today's P&L: +0.00") is preserved verbatim,
+    just wrapped in a friendlier format around it."""
     if not positions:
-        text = "Hourly status: flat (no open positions) -- scanning for the next trade."
+        lines = ["\U0001F634 Flat right now -- scanning for the next move..."]
     else:
         count = len(positions)
-        lines = [f"Hourly status: {count} open position{'s' if count != 1 else ''}"]
+        lines = [f"\U0001F4CA {count} open position{'s' if count != 1 else ''}"]
         for p in positions:
-            direction = "SHORT" if p.get("side") == "short" else "LONG"
-            held_minutes = p.get("held_minutes")
-            held_str = f"{held_minutes:.0f}min" if held_minutes is not None else "?"
+            is_short = p.get("side") == "short"
+            direction = "SHORT" if is_short else "LONG"
+            direction_emoji = "\U0001F4C9" if is_short else "\U0001F4C8"
+            held_str = _format_held_duration(p.get("held_minutes"))
             entry_price = p.get("entry_price", 0.0)
             take_profit_price = p.get("take_profit_price", entry_price)
             stop_loss_price = p.get("stop_loss_price", entry_price)
-            lines.append(
-                f"{direction} {p.get('ticker', '?')} @ {entry_price:.4f} (held {held_str}) "
-                f"TP {take_profit_price:.4f} / SL {stop_loss_price:.4f}"
-            )
-        text = "\n".join(lines)
+            lines.append(f"{direction_emoji} {direction} {p.get('ticker', '?')} @ {entry_price:.4f} (held {held_str})")
+            lines.append(f"\U0001F3AF TP {take_profit_price:.4f}  \U0001F6D1 SL {stop_loss_price:.4f}")
     if today_realized_pnl_usd is not None:
-        text += f"\nToday's P&L: {today_realized_pnl_usd:+.2f}"
-    text += f"\n{_hashtags_for_market(market)}"
+        pnl_emoji = "\U0001F7E2" if today_realized_pnl_usd >= 0 else "\U0001F534"
+        lines.append(f"{pnl_emoji} Today's P&L: {today_realized_pnl_usd:+.2f}")
+    lines.append("")
+    lines.append("\U0001F916 Fully automated, runs 24/7 -- follow for real-time trade alerts \U0001F514")
+    lines.append(f"{_hashtags_for_market(market)} #AlgoTrading #FollowForMore")
+    text = "\n".join(lines)
     if len(text) > _THREADS_POST_MAX_CHARS:
         text = text[: _THREADS_POST_MAX_CHARS - 1] + "…"
     return text

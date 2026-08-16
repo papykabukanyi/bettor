@@ -249,6 +249,47 @@ def test_hourly_status_omits_pnl_line_when_not_provided(monkeypatch):
     assert "P&L" not in posted[0]
 
 
+def test_hourly_status_includes_a_follow_growth_hook(monkeypatch):
+    """Real ask: the old status dump gave a reader no reason to stick
+    around or follow -- every post now carries a follow CTA and growth
+    hashtags on top of the market's own base tag set."""
+    posted = []
+    monkeypatch.setattr(threads_post.threads_client, "create_and_publish_post", lambda text: posted.append(text))
+    threads_post.post_hourly_status(positions=[])
+    text = posted[0]
+    assert "follow" in text.lower()
+    assert "#FollowForMore" in text
+    assert "#AlgoTrading" in text
+    assert threads_post._hashtags_for_market("perps") in text  # noqa: SLF001 -- base tags still present, not replaced
+
+
+def test_hourly_status_formats_a_long_hold_in_hours_not_raw_minutes(monkeypatch):
+    """Real gap: the new trailing-stop strategy can hold a position most
+    of a day (up to TRAILING_MAX_HOLD_MINUTES) -- "held 1020min" reads far
+    worse than "held 17h0m"."""
+    posted = []
+    monkeypatch.setattr(threads_post.threads_client, "create_and_publish_post", lambda text: posted.append(text))
+    threads_post.post_hourly_status(positions=[{
+        "ticker": "KXLINKPERP", "side": "short", "entry_price": 9.4179, "held_minutes": 1020.0,
+        "take_profit_price": 9.26, "stop_loss_price": 9.5241,
+    }])
+    text = posted[0]
+    assert "held 17h" in text
+    assert "1020min" not in text
+
+
+def test_format_held_duration_under_an_hour():
+    assert threads_post._format_held_duration(42.3) == "42min"  # noqa: SLF001
+
+
+def test_format_held_duration_on_the_hour_has_no_trailing_minutes():
+    assert threads_post._format_held_duration(120) == "2h"  # noqa: SLF001
+
+
+def test_format_held_duration_none_is_a_placeholder():
+    assert threads_post._format_held_duration(None) == "?"  # noqa: SLF001
+
+
 def test_hourly_status_respects_the_disable_flag(monkeypatch):
     monkeypatch.setattr(threads_post, "THREADS_POST_ENABLED", False)
     posted = []
