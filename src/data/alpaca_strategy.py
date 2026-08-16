@@ -121,7 +121,24 @@ PROMISING_MOMENTUM_PCT = _env_float("ALPACA_PROMISING_MOMENTUM_PCT", 0.0003)
 PROMISING_BREAKOUT_PCT_B = _env_float("ALPACA_PROMISING_BREAKOUT_PCT_B", 0.85)
 PROMISING_SENTIMENT_SCORE = _env_float("ALPACA_PROMISING_SENTIMENT_SCORE", 0.3)
 
-MODEL_CONFIDENCE_MIN = _env_float("ALPACA_MODEL_CONFIDENCE_MIN", 0.55)
+# Real, confirmed bug found via a real model fit + backtest this session:
+# 0.55 was NEVER a real, achievable bar -- the model's own real
+# probability_up distribution on real held-out data topped out around
+# p90=0.51 (confirmed live too: every watchlist symbol checked in
+# production sat at 48-52% confidence), so requiring 0.55 meant the
+# confident-up rate was ~0.02% of rows -- essentially zero, which is
+# exactly why this account went 10+ days without a single trade. Same
+# class of bug, same fix, as perps_strategy.py's own PROMISING_MODEL_CONFIDENCE
+# (calibrate the threshold from the model's own real output distribution,
+# not a guessed round number). A real single-split backtest (80/20,
+# random_forest, 121 days/10 symbols) swept 0.50-0.55: 0.52 was the
+# clear, real winner -- 63 trades, 61.9% win rate, +6.27% return, vs. 0
+# trades (and thus 0% return) at the old 0.55. Every threshold BELOW
+# 0.52 traded more often but for a worse risk-adjusted return (0.50: 136
+# trades but only +3.11%), so this isn't "loosen it as much as possible"
+# the way perps' volume gate wasn't -- 0.52 is a real, evidence-picked
+# middle, not the loosest option tested.
+MODEL_CONFIDENCE_MIN = _env_float("ALPACA_MODEL_CONFIDENCE_MIN", 0.52)
 
 # At the perps-style default of 10% per slot across 5 slots, a $100 account
 # gets a $10-20 budget per position -- not enough to buy even ONE share of
