@@ -473,13 +473,23 @@ def _ensure_background_jobs_started() -> None:
                 id="alpaca_crypto_entry_scan", replace_existing=True, executor="fastcheck",
                 next_run_time=dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=ALPACA_CRYPTO_STARTUP_GRACE_SECONDS),
             )
+            # Staggered next_run_time -- same real, confirmed fix as
+            # app_kalshi.py's own identical trio (see its comment for the
+            # full rationale): with no offset, hourly_status/sentiment_snapshot
+            # (both 60min) always land on the exact same tick, trending_news
+            # (30min) coincides every other cycle, and data_collect (a
+            # multiple of 15) piles on too -- together long enough to
+            # occasionally bump fast_check's own 20s cadence.
+            now_utc = dt.datetime.now(dt.timezone.utc)
             scheduler.add_job(
                 _run_alpaca_crypto_threads_trending_news, "interval", minutes=30,
                 id="alpaca_crypto_threads_trending_news", replace_existing=True, executor="fastcheck",
+                next_run_time=now_utc + dt.timedelta(minutes=5),
             )
             scheduler.add_job(
                 _run_alpaca_crypto_threads_sentiment_snapshot, "interval", minutes=60,
                 id="alpaca_crypto_threads_sentiment_snapshot", replace_existing=True, executor="fastcheck",
+                next_run_time=now_utc + dt.timedelta(minutes=10),
             )
             scheduler.add_job(
                 _run_alpaca_crypto_threads_hourly_status, "interval", hours=1,

@@ -532,13 +532,21 @@ def _ensure_background_jobs_started() -> None:
                 id="alpaca_entry_scan", replace_existing=True, executor="fastcheck",
                 next_run_time=dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=ALPACA_STARTUP_GRACE_SECONDS),
             )
+            # Staggered next_run_time -- real, confirmed fix ported from
+            # perps/crypto's own identical trio (see app_kalshi.py's
+            # perps_threads_trending_news comment for the full rationale):
+            # with no offset these all land on the same tick periodically,
+            # occasionally bumping into fast_check's own 20s cadence.
+            now_utc = dt.datetime.now(dt.timezone.utc)
             scheduler.add_job(
                 _run_alpaca_threads_trending_news, "interval", minutes=30,
                 id="alpaca_threads_trending_news", replace_existing=True, executor="fastcheck",
+                next_run_time=now_utc + dt.timedelta(minutes=5),
             )
             scheduler.add_job(
                 _run_alpaca_threads_sentiment_snapshot, "interval", minutes=60,
                 id="alpaca_threads_sentiment_snapshot", replace_existing=True, executor="fastcheck",
+                next_run_time=now_utc + dt.timedelta(minutes=10),
             )
             scheduler.add_job(
                 _run_alpaca_threads_hourly_status, "interval", hours=1,

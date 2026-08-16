@@ -512,6 +512,18 @@ def _ensure_background_jobs_started() -> None:
             # protects them from the SLOW jobs still on "default" without
             # meaningfully risking fast_check's own real-money-critical
             # cadence.
+            # Real, confirmed live: with no stagger, hourly_status (1h) and
+            # sentiment_snapshot (60min) always land on the EXACT same tick
+            # (both added back-to-back with no offset), and trending_news
+            # (30min) coincides with them every other cycle too -- data_collect
+            # (15min) piles on as well since 60 is a multiple of 15. That
+            # cluster running back-to-back took ~20s, long enough to bump
+            # into fast_check's own 20s cadence and cause a real, if minor
+            # (one cycle, immediately recovered), skip once an hour.
+            # Staggering each job's first run spreads them across the hour
+            # instead of clustering at :00 -- same next_run_time technique
+            # data_collect's own comment above already documents.
+            now_utc = dt.datetime.now(dt.timezone.utc)
             scheduler.add_job(
                 _run_perps_threads_hourly_status, "interval", hours=1,
                 id="perps_threads_hourly_status", replace_existing=True, executor="fastcheck",
@@ -519,10 +531,12 @@ def _ensure_background_jobs_started() -> None:
             scheduler.add_job(
                 _run_perps_threads_trending_news, "interval", minutes=30,
                 id="perps_threads_trending_news", replace_existing=True, executor="fastcheck",
+                next_run_time=now_utc + dt.timedelta(minutes=5),
             )
             scheduler.add_job(
                 _run_perps_threads_sentiment_snapshot, "interval", minutes=60,
                 id="perps_threads_sentiment_snapshot", replace_existing=True, executor="fastcheck",
+                next_run_time=now_utc + dt.timedelta(minutes=10),
             )
             if ENABLE_PERPS_SCHEDULER:
                 scheduler.add_job(
