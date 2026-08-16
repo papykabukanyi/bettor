@@ -26,9 +26,14 @@ def _synthetic_test_df(n: int = 300, symbol: str = "AAPL") -> pd.DataFrame:
         "dist_to_ma_15": rng.normal(0, 0.01, n), "dist_to_ma_30": rng.normal(0, 0.005, n),
         "ret_1m": rng.normal(0, 0.001, n), "ret_5m": rng.normal(0, 0.002, n),
         "ret_15m": rng.normal(0, 0.003, n), "ret_30m": rng.normal(0, 0.004, n), "ret_60m": rng.normal(0, 0.006, n),
-        "volatility_5": np.abs(rng.normal(0.0008, 0.0002, n)),
-        "volatility_15": np.abs(rng.normal(0.001, 0.0002, n)),
-        "volatility_30": np.abs(rng.normal(0.0012, 0.0003, n)),
+        # volatility_5 set well above volatility_30 (ratio ~1.5-2x, safely
+        # clearing MIN_VOLATILITY_RATIO=1.1 even with per-row noise) -- this
+        # fixture represents a row that QUALIFIES for entry by default, same
+        # as its dollar_volume_z=2.0 below clearing MIN_VOLUME_Z=1.0. Tests
+        # that need a non-qualifying row override these explicitly.
+        "volatility_5": np.abs(rng.normal(0.0018, 0.0003, n)),
+        "volatility_15": np.abs(rng.normal(0.0014, 0.0002, n)),
+        "volatility_30": np.abs(rng.normal(0.0010, 0.0002, n)),
         "volume_ratio_5": np.abs(rng.normal(1.0, 0.2, n)),
         "volume_ratio_15": np.abs(rng.normal(1.0, 0.15, n)),
         "dollar_volume_z": np.full(n, 2.0),
@@ -100,6 +105,31 @@ def test_simulate_enters_on_a_confident_down_model_too():
 def test_simulate_enters_nothing_when_the_model_is_unconfident():
     df = _synthetic_test_df(n=500)
     result = bt.simulate(df, _fitted(_UnconfidentModel()), starting_balance=500.0, model_confidence_min=0.55)
+    assert result["trade_count"] == 0
+
+
+def test_simulate_enters_nothing_when_volume_is_not_unusual_enough():
+    """Real, confirmed bug this guards against: _simulate_inner never
+    checked MIN_VOLUME_Z despite the module docstring claiming it replays
+    evaluate_candidate's real signal -- a confident model on a quiet
+    underlying used to fire a trade here that live evaluate_candidate would
+    have rejected outright."""
+    df = _synthetic_test_df(n=500)
+    df["dollar_volume_z"] = 0.1  # well below MIN_VOLUME_Z=1.0
+    result = bt.simulate(df, _fitted(_AlwaysUpModel()), starting_balance=50_000.0, model_confidence_min=0.55)
+    assert result["trade_count"] == 0
+
+
+def test_simulate_enters_nothing_when_not_more_volatile_than_baseline():
+    """Same real bug, other half of the gate: volatility_5/volatility_30
+    below MIN_VOLATILITY_RATIO must also block entry, matching
+    evaluate_candidate's "underlying not more volatile than its own recent
+    baseline" rejection."""
+    df = _synthetic_test_df(n=500)
+    df["dollar_volume_z"] = 5.0  # clears the volume gate so only volatility is under test
+    df["volatility_5"] = 0.0005
+    df["volatility_30"] = 0.005  # ratio = 0.1, well below MIN_VOLATILITY_RATIO=1.1
+    result = bt.simulate(df, _fitted(_AlwaysUpModel()), starting_balance=50_000.0, model_confidence_min=0.55)
     assert result["trade_count"] == 0
 
 

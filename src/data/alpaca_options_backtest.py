@@ -262,6 +262,26 @@ def _simulate_inner(
         model_ok = proba_up == proba_up  # not NaN -> a model exists
         if not model_ok:
             continue  # no technical-only fallback -- matches evaluate_candidate exactly
+
+        # Real, confirmed bug: this loop never checked MIN_VOLUME_Z/
+        # MIN_VOLATILITY_RATIO despite this module's own docstring claiming
+        # it "replays evaluate_candidate's REAL technical-dip + model-
+        # confidence signal" -- evaluate_candidate (alpaca_options_strategy.py)
+        # gates on both BEFORE confidence, so every backtest/sweep run
+        # through this function to date (including the confidence-threshold
+        # sweep that found options negative at every tested value) was
+        # testing a looser entry than what's actually live. Confirmed via
+        # grep: MIN_VOLUME_Z/MIN_VOLATILITY_RATIO never appeared anywhere in
+        # this file before this fix. Same class of backtest/live mismatch as
+        # perps_backtest's own volume-gate fix (see that commit).
+        dollar_volume_z = row.dollar_volume_z if hasattr(row, "dollar_volume_z") else None
+        if dollar_volume_z is None or dollar_volume_z != dollar_volume_z or dollar_volume_z < strat.MIN_VOLUME_Z:
+            continue
+        volatility_5 = getattr(row, "volatility_5", None) or 0.0
+        volatility_30 = getattr(row, "volatility_30", None) or 0.0
+        if volatility_30 > 0 and (volatility_5 / volatility_30) < strat.MIN_VOLATILITY_RATIO:
+            continue
+
         if proba_up >= model_confidence_min:
             direction = "up"
         elif proba_up <= (1.0 - model_confidence_min):
