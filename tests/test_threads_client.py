@@ -547,3 +547,127 @@ def test_create_and_publish_image_post_does_the_container_then_publish_round_tri
     assert captured[0]["params"]["image_url"] == "https://example.com/chart.png"
     assert captured[0]["params"]["text"] == "caption text"
     assert captured[1]["params"]["creation_id"] == "creation-123"
+
+
+# ---------------------------------------------------------------------------
+# create_and_publish_carousel_post -- multiple images under ONE Threads
+# post. 3-step flow: item containers (is_carousel_item=true) -> carousel
+# container (children=<ids>) -> publish.
+# ---------------------------------------------------------------------------
+
+def test_create_and_publish_carousel_post_rejects_too_few_images():
+    with pytest.raises(ValueError, match="at least"):
+        threads_client.create_and_publish_carousel_post(["https://example.com/a.png"])
+
+
+def test_create_and_publish_carousel_post_rejects_too_many_images():
+    urls = [f"https://example.com/{i}.png" for i in range(threads_client.CAROUSEL_MAX_ITEMS + 1)]
+    with pytest.raises(ValueError, match="at most"):
+        threads_client.create_and_publish_carousel_post(urls)
+
+
+def test_create_and_publish_carousel_post_skips_the_network_call_while_rate_limited(monkeypatch):
+    threads_client._token_cache.update({  # noqa: SLF001
+        "access_token": "at-1", "user_id": "user-42",
+        "obtained_at": threads_client.time.time(), "expires_at": threads_client.time.time() + 1000000,
+    })
+    monkeypatch.setattr(threads_client, "_rate_limited_until", threads_client.time.time() + 1000)
+
+    def fail_if_called(*a, **k):
+        raise AssertionError("must not make a network call while the rate-limit cooldown is active")
+
+    monkeypatch.setattr(threads_client.requests, "post", fail_if_called)
+    with pytest.raises(RuntimeError, match="rate limit cooldown"):
+        threads_client.create_and_publish_carousel_post(["https://example.com/a.png", "https://example.com/b.png"])
+
+
+def test_create_and_publish_carousel_post_raises_without_a_valid_token():
+    with pytest.raises(RuntimeError, match="No valid Threads access token"):
+        threads_client.create_and_publish_carousel_post(["https://example.com/a.png", "https://example.com/b.png"])
+
+
+def test_create_and_publish_carousel_post_creates_one_item_container_per_image_then_the_carousel(monkeypatch):
+    threads_client._token_cache.update({  # noqa: SLF001
+        "access_token": "at-1", "user_id": "user-42",
+        "obtained_at": threads_client.time.time(), "expires_at": threads_client.time.time() + 1000000,
+    })
+    urls = ["https://example.com/a.png", "https://example.com/b.png", "https://example.com/c.png"]
+    captured = []
+    creation_counter = {"n": 0}
+
+    def fake_post(url, *, params, timeout):
+        captured.append({"url": url, "params": dict(params)})
+        if "threads_publish" in url:
+            return _FakeResponse({"id": "post-999"})
+        if params.get("media_type") == "CAROUSEL":
+            return _FakeResponse({"id": "carousel-container-1"})
+        creation_counter["n"] += 1
+        return _FakeResponse({"id": f"item-{creation_counter['n']}"})
+
+    monkeypatch.setattr(threads_client.requests, "post", fake_post)
+    monkeypatch.setattr(threads_client.requests, "get", lambda url, *, params, timeout: _FakeResponse({"status": "FINISHED"}))
+
+    post_id = threads_client.create_and_publish_carousel_post(urls, "check out these 3 stories")
+
+    assert post_id == "post-999"
+    item_calls = [c for c in captured if c["params"].get("media_type") == "IMAGE"]
+    assert len(item_calls) == 3
+    for call, url in zip(item_calls, urls):
+        assert call["params"]["image_url"] == url
+        assert call["params"]["is_carousel_item"] == "true"
+        assert "text" not in call["params"]  # caption lives on the carousel container, not its children
+
+    carousel_calls = [c for c in captured if c["params"].get("media_type") == "CAROUSEL"]
+    assert len(carousel_calls) == 1
+    assert carousel_calls[0]["params"]["children"] == "item-1,item-2,item-3"
+    assert carousel_calls[0]["params"]["text"] == "check out these 3 stories"
+
+    publish_calls = [c for c in captured if "threads_publish" in c["url"]]
+    assert len(publish_calls) == 1
+    assert publish_calls[0]["params"]["creation_id"] == "carousel-container-1"
+
+
+def test_create_and_publish_carousel_post_fails_if_any_item_container_errors(monkeypatch):
+    """A partially-broken carousel must not be published at all -- same
+    discipline as the plain image/text post's own ERROR/EXPIRED check."""
+    threads_client._token_cache.update({  # noqa: SLF001
+        "access_token": "at-1", "user_id": "user-42",
+        "obtained_at": threads_client.time.time(), "expires_at": threads_client.time.time() + 1000000,
+    })
+    urls = ["https://example.com/a.png", "https://example.com/b.png"]
+    creation_counter = {"n": 0}
+
+    def fake_post(url, *, params, timeout):
+        if "threads_publish" in url:
+            raise AssertionError("must not attempt to publish when an item container failed")
+        creation_counter["n"] += 1
+        return _FakeResponse({"id": f"item-{creation_counter['n']}"})
+
+    statuses = iter(["FINISHED", "ERROR"])
+    monkeypatch.setattr(threads_client.requests, "post", fake_post)
+    monkeypatch.setattr(threads_client.requests, "get", lambda url, *, params, timeout: _FakeResponse({"status": next(statuses)}))
+
+    with pytest.raises(RuntimeError, match="terminal status ERROR"):
+        threads_client.create_and_publish_carousel_post(urls)
+
+
+def test_create_and_publish_carousel_post_refuses_to_publish_a_carousel_container_in_error(monkeypatch):
+    threads_client._token_cache.update({  # noqa: SLF001
+        "access_token": "at-1", "user_id": "user-42",
+        "obtained_at": threads_client.time.time(), "expires_at": threads_client.time.time() + 1000000,
+    })
+    urls = ["https://example.com/a.png", "https://example.com/b.png"]
+
+    def fake_post(url, *, params, timeout):
+        if "threads_publish" in url:
+            raise AssertionError("must not attempt to publish a carousel container in a terminal ERROR/EXPIRED state")
+        return _FakeResponse({"id": "some-id"})
+
+    monkeypatch.setattr(threads_client.requests, "post", fake_post)
+    # Every status check (item x2, then carousel) reports FINISHED except
+    # the LAST one (the carousel container itself), which is EXPIRED.
+    statuses = iter(["FINISHED", "FINISHED", "EXPIRED"])
+    monkeypatch.setattr(threads_client.requests, "get", lambda url, *, params, timeout: _FakeResponse({"status": next(statuses)}))
+
+    with pytest.raises(RuntimeError, match="carousel container.*terminal status EXPIRED"):
+        threads_client.create_and_publish_carousel_post(urls)

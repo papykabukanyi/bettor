@@ -616,6 +616,168 @@ def generate_news_card(
             del img
 
 
+_BULLET_CARD_WIDTH = _s(1080)
+_BULLET_CARD_MIN_HEIGHT = _s(760)  # same validated-by-feedback minimum
+# generate_news_card's own docstring describes -- big enough to feel like a
+# real, substantial card, not so tall that a short headline reads as mostly
+# empty space (a full 1:1 square was tried and looked sparse for typical
+# headline lengths).
+_BULLET_CARD_MARGIN = _s(72)
+_BULLET_CARD_BANNER_HEIGHT = _s(120)
+_BULLET_CARD_HEADLINE_MAX_LINES = 6
+_BULLET_CARD_BOTTOM_MARGIN = _s(64)
+
+
+def _news_bullet_card_fonts():
+    return {
+        "banner": _font(_s(26)), "badge": _font(_s(22)), "headline": _font(_s(58)),
+        "source": _font(_s(24)), "hashtag": _font(_s(20)),
+    }
+
+
+def _measure_news_bullet_card_natural_height(*, headline: str, source: str, hashtags: str, accent) -> float:
+    """The probe-measurement pass factored out so a caller building a
+    multi-card CAROUSEL can compute every card's natural height up front
+    and share the tallest one across the whole set (see
+    measure_news_bullet_card_height) -- Threads crops carousel items to a
+    uniform ratio, so per-card independent heights would make shorter
+    headlines' cards look inconsistently cropped next to a longer one's."""
+    from PIL import Image, ImageDraw
+    fonts = _news_bullet_card_fonts()
+    tags = hashtags.split() if hashtags else []
+    probe = Image.new("RGB", (1, 1))
+    probe_draw = ImageDraw.Draw(probe)
+    content_width = _BULLET_CARD_WIDTH - _BULLET_CARD_MARGIN * 2
+    headline_lines = _wrap_lines(probe_draw, headline, fonts["headline"], content_width, _BULLET_CARD_HEADLINE_MAX_LINES)
+
+    y = _BULLET_CARD_BANNER_HEIGHT + _s(64)
+    y += len(headline_lines) * _s(72)
+    if source:
+        y += _s(44)
+    y += _s(32)  # divider spacing
+    content_bottom = _draw_hashtag_pills(probe_draw, tags, x=0, y=y, max_width=content_width, font=fonts["hashtag"], accent=accent)
+    return content_bottom + _BULLET_CARD_BOTTOM_MARGIN
+
+
+def measure_news_bullet_card_height(*, market: str, headline: str, source: str = "", hashtags: str = "") -> int:
+    """Public wrapper for the height a solo generate_news_bullet_card call
+    would pick -- callers building a carousel set should call this for
+    EVERY headline first, take the max, and pass it back in as
+    `min_height` to every generate_news_bullet_card call so the whole set
+    renders at one consistent height (see that function's own docstring
+    for why per-card independent heights is the wrong default for a
+    carousel). Returns _BULLET_CARD_MIN_HEIGHT on any measurement failure
+    -- never raises, same contract as every chart_snapshot function."""
+    try:
+        accent = _NEWS_CARD_ACCENT.get(market, _NEWS_CARD_ACCENT["perps"])
+        natural = _measure_news_bullet_card_natural_height(headline=headline, source=source, hashtags=hashtags, accent=accent)
+        return round(max(natural, _BULLET_CARD_MIN_HEIGHT))
+    except Exception as exc:
+        logger.debug("[chart_snapshot] news bullet card height measurement failed: %s", exc)
+        return _BULLET_CARD_MIN_HEIGHT
+
+
+def generate_news_bullet_card(
+    *, market: str, headline: str, source: str = "", index: int = 1, total: int = 1, hashtags: str = "",
+    min_height: int | None = None,
+) -> Path | None:
+    """One headline, one big beautiful card -- built for a Threads
+    CAROUSEL post (see threads_client.create_and_publish_carousel_post),
+    one of these per bullet point (the lead story plus every secondary
+    "also trending" headline) instead of cramming all of them onto a
+    single cluttered image the way generate_news_card does. Meant to read
+    at a glance on a phone screen even as a lone thumbnail in a swipe
+    stack -- big stroke-weighted headline text, a story-count badge
+    ("2/4") in the banner when part of a multi-card set, and the same
+    per-market accent color and hashtag-pill footer generate_news_card
+    already uses for visual consistency across this account's whole feed.
+
+    `min_height` should be the shared, pre-measured height across every
+    card in the same carousel set (see measure_news_bullet_card_height) --
+    defaults to _BULLET_CARD_MIN_HEIGHT for a lone/solo card.
+
+    Never raises -- returns None (caller falls back to the older combined
+    single-image card, or a text-only post) on any rendering failure,
+    same contract as every chart_snapshot function."""
+    try:
+        from PIL import Image, ImageDraw
+    except Exception as exc:
+        logger.warning("[chart_snapshot] Pillow unavailable: %s", exc)
+        return None
+
+    accent = _NEWS_CARD_ACCENT.get(market, _NEWS_CARD_ACCENT["perps"])
+    tags = hashtags.split() if hashtags else []
+    effective_min_height = _BULLET_CARD_MIN_HEIGHT if min_height is None else min_height
+
+    img = None
+    try:
+        fonts = _news_bullet_card_fonts()
+        banner_font, badge_font = fonts["banner"], fonts["badge"]
+        headline_font, source_font, hashtag_font = fonts["headline"], fonts["source"], fonts["hashtag"]
+
+        probe = Image.new("RGB", (1, 1))
+        probe_draw = ImageDraw.Draw(probe)
+        content_width = _BULLET_CARD_WIDTH - _BULLET_CARD_MARGIN * 2
+        headline_lines = _wrap_lines(probe_draw, headline, headline_font, content_width, _BULLET_CARD_HEADLINE_MAX_LINES)
+
+        y = _BULLET_CARD_BANNER_HEIGHT + _s(64)
+        y += len(headline_lines) * _s(72)
+        if source:
+            y += _s(44)
+        y += _s(32)  # divider spacing
+        content_bottom = _draw_hashtag_pills(probe_draw, tags, x=0, y=y, max_width=content_width, font=hashtag_font, accent=accent)
+        natural_height = content_bottom + _BULLET_CARD_BOTTOM_MARGIN
+
+        height = max(natural_height, effective_min_height)
+        content_offset = max(0, (height - natural_height) / 2)
+
+        img = Image.new("RGB", (_BULLET_CARD_WIDTH, height), _BG)
+        draw = ImageDraw.Draw(img)
+
+        draw.rectangle([(0, 0), (_BULLET_CARD_WIDTH, _BULLET_CARD_BANNER_HEIGHT)], fill=accent)
+        label = f"{market.upper()} NEWS"
+        label_h = banner_font.size
+        draw.text(
+            (_BULLET_CARD_MARGIN, _BULLET_CARD_BANNER_HEIGHT / 2 - label_h / 2), label,
+            fill=_NEWS_CARD_BANNER_TEXT, font=banner_font, stroke_width=_s(1), stroke_fill=_NEWS_CARD_BANNER_TEXT,
+        )
+        if total > 1:
+            badge = f"{index}/{total}"
+            badge_w = draw.textlength(badge, font=badge_font)
+            draw.text(
+                (_BULLET_CARD_WIDTH - _BULLET_CARD_MARGIN - badge_w, _BULLET_CARD_BANNER_HEIGHT / 2 - badge_font.size / 2),
+                badge, fill=_NEWS_CARD_BANNER_TEXT, font=badge_font, stroke_width=_s(1), stroke_fill=_NEWS_CARD_BANNER_TEXT,
+            )
+
+        y = _BULLET_CARD_BANNER_HEIGHT + _s(64) + content_offset
+        for line in headline_lines:
+            draw.text((_BULLET_CARD_MARGIN, y), line, fill=_TEXT_PRIMARY, font=headline_font, stroke_width=_s(1), stroke_fill=_TEXT_PRIMARY)
+            y += _s(72)
+
+        if source:
+            y += _s(12)
+            draw.text((_BULLET_CARD_MARGIN, y), f"via {source}", fill=_TEXT_MUTED, font=source_font)
+            y += _s(32)
+
+        y += _s(16)
+        draw.line([(_BULLET_CARD_MARGIN, y), (_BULLET_CARD_WIDTH - _BULLET_CARD_MARGIN, y)], fill=_AXIS, width=_s(1))
+        y += _s(32)
+        _draw_hashtag_pills(draw, tags, x=_BULLET_CARD_MARGIN, y=y, max_width=content_width, font=hashtag_font, accent=accent)
+
+        CHARTS_DIR.mkdir(parents=True, exist_ok=True)
+        filename = f"newsbullet_{_sanitize(market)}_{int(time.time())}_{index}.png"
+        out_path = CHARTS_DIR / filename
+        img.save(out_path, format="PNG")
+        _prune_old_charts()
+        return out_path
+    except Exception as exc:
+        logger.warning("[chart_snapshot] news bullet card rendering failed for market %s: %s", market, exc)
+        return None
+    finally:
+        if img is not None:
+            del img
+
+
 def format_technical_indicators(row: dict[str, Any] | None) -> dict[str, str]:
     """Formats a raw engineered-feature-row-like dict (dollar_volume_z,
     macd_hist_pct, bb_pct_b, rsi_14, sentiment_score, volatility_30 --

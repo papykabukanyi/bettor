@@ -483,3 +483,80 @@ def create_and_publish_image_post(image_url: str, text: str = "") -> str:
     )
     _raise_for_status_with_body(publish_resp)
     return publish_resp.json()["id"]
+
+
+# Threads' own documented carousel limits (same as Instagram's, which the
+# Threads Graph API shares infrastructure with) -- a single-item "carousel"
+# isn't a real carousel and 21+ items is rejected outright by the API, so
+# callers get a clear local error instead of a wasted round trip.
+CAROUSEL_MIN_ITEMS = 2
+CAROUSEL_MAX_ITEMS = 20
+
+
+def create_and_publish_carousel_post(image_urls: list[str], text: str = "") -> str:
+    """Multiple images under ONE Threads post (a real carousel, swipeable
+    on the timeline) -- distinct from calling create_and_publish_image_post
+    N times, which would create N separate posts instead.
+
+    Threads' carousel shape is a 3-step version of the plain image flow:
+    1. Create one ITEM container per image (media_type=IMAGE,
+       is_carousel_item=true, no text on the item itself -- the caption
+       lives on the carousel container, not its children) and wait for
+       each to reach FINISHED individually. Meta's API requires every
+       child to already be ready before the carousel container referencing
+       them can be created at all.
+    2. Create the CAROUSEL container itself (children=<comma-separated
+       item ids>, text=<caption>) and wait for IT to reach FINISHED.
+    3. Publish the carousel container, same threads_publish call as every
+       other post type here.
+
+    Raises on any failure, including if any single item container fails --
+    a partially-broken carousel isn't published at all, matching this
+    module's existing "never publish something Meta will just reject"
+    discipline (see the ERROR/EXPIRED check on the plain image/text posts)."""
+    if len(image_urls) < CAROUSEL_MIN_ITEMS:
+        raise ValueError(f"a carousel needs at least {CAROUSEL_MIN_ITEMS} images, got {len(image_urls)}")
+    if len(image_urls) > CAROUSEL_MAX_ITEMS:
+        raise ValueError(f"a carousel allows at most {CAROUSEL_MAX_ITEMS} images, got {len(image_urls)}")
+    if is_rate_limited():
+        raise RuntimeError("Threads API rate limit cooldown active -- skipping post attempt")
+    token = get_valid_access_token()
+    user_id = get_user_id()
+    if not token or not user_id:
+        raise RuntimeError(
+            "No valid Threads access token/user id -- complete the interactive login first "
+            "(see get_authorization_url())."
+        )
+
+    item_ids: list[str] = []
+    for image_url in image_urls:
+        item_resp = requests.post(
+            f"{API_BASE_URL}/{API_VERSION}/{user_id}/threads",
+            params={"media_type": "IMAGE", "image_url": image_url, "is_carousel_item": "true", "access_token": token},
+            timeout=TIMEOUT_SEC,
+        )
+        _raise_for_status_with_body(item_resp)
+        item_id = item_resp.json()["id"]
+        item_status = _wait_for_container_ready(item_id, token)
+        if item_status in ("ERROR", "EXPIRED"):
+            raise RuntimeError(f"Threads carousel item {item_id} ({image_url}) reached terminal status {item_status}")
+        item_ids.append(item_id)
+
+    carousel_resp = requests.post(
+        f"{API_BASE_URL}/{API_VERSION}/{user_id}/threads",
+        params={"media_type": "CAROUSEL", "children": ",".join(item_ids), "text": text, "access_token": token},
+        timeout=TIMEOUT_SEC,
+    )
+    _raise_for_status_with_body(carousel_resp)
+    creation_id = carousel_resp.json()["id"]
+    status = _wait_for_container_ready(creation_id, token)
+    if status in ("ERROR", "EXPIRED"):
+        raise RuntimeError(f"Threads carousel container {creation_id} reached terminal status {status} -- not attempting publish")
+
+    publish_resp = requests.post(
+        f"{API_BASE_URL}/{API_VERSION}/{user_id}/threads_publish",
+        params={"creation_id": creation_id, "access_token": token},
+        timeout=TIMEOUT_SEC,
+    )
+    _raise_for_status_with_body(publish_resp)
+    return publish_resp.json()["id"]

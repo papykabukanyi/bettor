@@ -347,40 +347,45 @@ def post_hourly_status(
 
 
 def post_trending_news(story: dict | None, *, market: str) -> bool:
-    """Posts the single most attention-worthy trending story right now as a
-    GENERATED image card -- the headline, source, secondary headlines, and
-    hashtags are rendered directly onto the picture itself (see
-    chart_snapshot.generate_news_card), not attached as a caption next to a
-    scraped photo. The Threads post TEXT next to that image is hashtags
-    ONLY (see _hashtags_only_caption) -- real feedback confirmed the old
-    caption duplicated everything already visible on the card itself,
-    which read as redundant. The full headline/source/secondary text is
-    only used as the text-only fallback when no image is available at all
-    (see _format_trending_story_caption). Replaces the old plain-text
-    headline list: the whole point of this post is to actually help this
-    account gain followers/engagement on Threads, not just log a digest
-    nobody stops to read. `story` comes from crypto_news.get_trending_story() /
+    """Posts the current trending story (lead headline + up to
+    _NEWS_CARD_SECONDARY_MAX "also trending" secondary headlines) as
+    GENERATED image cards -- the headline, source, and hashtags are
+    rendered directly onto the picture itself (see
+    chart_snapshot.generate_news_bullet_card), not attached as a caption
+    next to a scraped photo. The Threads post TEXT next to the image(s) is
+    hashtags ONLY (see _hashtags_only_caption) -- real feedback confirmed
+    the old caption duplicated everything already visible on the card
+    itself, which read as redundant.
+
+    When there's more than one headline this cycle, this posts a real
+    Threads CAROUSEL -- one big single-headline card per bullet point,
+    swipeable in one post (see threads_client.create_and_publish_carousel_post)
+    -- instead of the old approach of cramming the lead headline plus every
+    secondary headline as small text onto one cluttered image. Falls back,
+    in order: carousel -> single combined card (chart_snapshot.generate_news_card,
+    all headlines on one image) -> plain text (see
+    _format_trending_story_caption) -- each step only triggers if the one
+    before it failed for any reason, so a real post still beats none.
+    `story` comes from crypto_news.get_trending_story() /
     stock_news.get_trending_story() -- {"title", "link", "image_url",
     "source", "secondary"}, or None if every feed failed.
 
-    Real, confirmed bug this replaces: the previous version attached the
-    story's own RSS image, or one scraped from its article link's og:image
-    tag. For Google-News-sourced stories (stocks/options), that scrape
-    returns the SAME static Google News branding image for every article
-    regardless of headline (confirmed live: 6 different real articles all
-    resolved to one identical og:image URL, since Google's interstitial
-    redirect page never carries the real publisher's own image) -- exactly
-    the "same picture every time" behavior reported live. Generating the
-    card instead guarantees every post's image is genuinely distinct (it's
+    Real, confirmed bug the image-card approach (any of the 3 fallback
+    tiers) replaces: the original version attached the story's own RSS
+    image, or one scraped from its article link's og:image tag. For
+    Google-News-sourced stories (stocks/options), that scrape returns the
+    SAME static Google News branding image for every article regardless of
+    headline (confirmed live: 6 different real articles all resolved to
+    one identical og:image URL, since Google's interstitial redirect page
+    never carries the real publisher's own image) -- exactly the "same
+    picture every time" behavior reported live. Generating the card
+    instead guarantees every post's image is genuinely distinct (it's
     rendered from that story's own text) and never depends on a
     third-party page's markup staying scrapeable.
 
     Runs every 30 minutes (see app_kalshi.py's/alpaca_server.py's own
     scheduled job) independent of whether any trade happened. Same
-    best-effort, never-raise contract as every other post here -- and
-    specifically falls back to a plain text post if the card couldn't be
-    rendered/hosted, or if the image post itself fails for any reason -- a
-    real trending post still beats none."""
+    best-effort, never-raise contract as every other post here."""
     if not THREADS_POST_ENABLED:
         return False
     if not story:
@@ -392,13 +397,53 @@ def post_trending_news(story: dict | None, *, market: str) -> bool:
             logger.warning("[threads_post] failed to post trending news (no story): %s", exc)
             return False
 
+    title = _clean_headline(story["title"])
+    secondary = [_clean_headline(s) for s in (story.get("secondary") or []) if s]
+    hashtags = _hashtags_for_story(story, market=market)
+    headlines = [title] + secondary  # lead story + up to 3 "also trending"
+
+    # Multiple headlines this cycle -> one BIG card per headline, posted as
+    # a real Threads carousel (swipeable, not crammed onto one cluttered
+    # image) -- see chart_snapshot.generate_news_bullet_card's own
+    # docstring. Falls back to the single combined card below if carousel
+    # generation/posting fails for any reason (still a real image beats
+    # none), and falls back further to plain text if that fails too.
+    if len(headlines) >= threads_client.CAROUSEL_MIN_ITEMS:
+        try:
+            from data import chart_snapshot
+
+            card_sources = [story.get("source") or "" if i == 1 else "" for i in range(1, len(headlines) + 1)]
+            # Every card in the set renders at the SAME height (the tallest
+            # any one of them needs) -- Threads crops carousel items to a
+            # uniform ratio, so letting each card size independently would
+            # make a short headline's card look inconsistently cropped next
+            # to a longer one's (see measure_news_bullet_card_height's own
+            # docstring).
+            shared_height = max(
+                chart_snapshot.measure_news_bullet_card_height(market=market, headline=line, source=src, hashtags=hashtags)
+                for line, src in zip(headlines, card_sources)
+            )
+            image_urls = []
+            for i, (line, src) in enumerate(zip(headlines, card_sources), start=1):
+                chart_path = chart_snapshot.generate_news_bullet_card(
+                    market=market, headline=line, source=src, index=i, total=len(headlines),
+                    hashtags=hashtags, min_height=shared_height,
+                )
+                if chart_path is None:
+                    raise RuntimeError(f"bullet card {i}/{len(headlines)} failed to render")
+                url = chart_snapshot.public_url_for(chart_path)
+                if not url:
+                    raise RuntimeError(f"bullet card {i}/{len(headlines)} has no public URL")
+                image_urls.append(url)
+            threads_client.create_and_publish_carousel_post(image_urls, _hashtags_only_caption(story, market=market))
+            return True
+        except Exception as exc:
+            logger.warning("[threads_post] failed to post trending news as a carousel, falling back to a single image: %s", exc)
+
     image_url = None
     try:
         from data import chart_snapshot
 
-        title = _clean_headline(story["title"])
-        secondary = [_clean_headline(s) for s in (story.get("secondary") or []) if s]
-        hashtags = _hashtags_for_story(story, market=market)
         chart_path = chart_snapshot.generate_news_card(
             market=market, headline=title, source=story.get("source") or "", secondary=secondary, hashtags=hashtags,
         )

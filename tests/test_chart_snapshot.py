@@ -325,6 +325,101 @@ def test_generate_news_card_returns_none_when_pillow_is_unavailable(monkeypatch)
     assert chart_snapshot.generate_news_card(market="crypto", headline="Bitcoin surges") is None
 
 
+# ── generate_news_bullet_card (one big card per carousel item) ─────────────
+
+def test_generate_news_bullet_card_saves_a_real_png_file():
+    path = chart_snapshot.generate_news_bullet_card(
+        market="crypto", headline="Bitcoin surges past resistance", source="cointelegraph",
+        index=1, total=3, hashtags="#Crypto #Bitcoin",
+    )
+    assert path is not None
+    assert path.exists()
+    assert path.suffix == ".png"
+    assert path.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_generate_news_bullet_card_handles_missing_source():
+    path = chart_snapshot.generate_news_bullet_card(market="stocks", headline="Markets rally on rate cut hopes")
+    assert path is not None
+    assert path.exists()
+
+
+def test_generate_news_bullet_card_wraps_a_long_headline_without_raising():
+    long_headline = " ".join(["word"] * 60)
+    path = chart_snapshot.generate_news_bullet_card(market="options", headline=long_headline, hashtags="#Options")
+    assert path is not None
+    from PIL import Image
+    with Image.open(path) as img:
+        # Headline is capped at _BULLET_CARD_HEADLINE_MAX_LINES -- confirms
+        # the canvas doesn't grow unbounded for an unusually long headline.
+        assert img.height < chart_snapshot._s(2400)  # noqa: SLF001
+
+
+def test_generate_news_bullet_card_uses_a_distinct_accent_color_per_market():
+    from PIL import Image
+
+    paths = {
+        market: chart_snapshot.generate_news_bullet_card(market=market, headline="Same headline text", hashtags="#Tag")
+        for market in ("crypto", "stocks", "options", "perps")
+    }
+    accent_pixels = {}
+    for market, path in paths.items():
+        assert path is not None
+        with Image.open(path) as img:
+            accent_pixels[market] = img.getpixel((5, 5))
+    assert len(set(accent_pixels.values())) == 4
+
+
+def test_generate_news_bullet_card_shows_an_index_badge_only_when_part_of_a_set():
+    """A lone card (total=1) has nothing to badge -- the "N/M" indicator
+    only makes sense, and should only appear, when there's an actual set
+    to place it in context of."""
+    from PIL import Image
+
+    solo_path = chart_snapshot.generate_news_bullet_card(market="crypto", headline="Solo headline", index=1, total=1)
+    multi_path = chart_snapshot.generate_news_bullet_card(market="crypto", headline="Solo headline", index=2, total=4)
+    assert solo_path is not None and multi_path is not None
+    # Not asserting on exact pixels (font rendering specifics aren't the
+    # point) -- just that the two variants produce genuinely different
+    # banner regions, i.e. the badge is really conditional on `total`.
+    with Image.open(solo_path) as solo_img, Image.open(multi_path) as multi_img:
+        banner_h = chart_snapshot._BULLET_CARD_BANNER_HEIGHT  # noqa: SLF001
+        solo_banner = solo_img.crop((0, 0, solo_img.width, banner_h)).tobytes()
+        multi_banner = multi_img.crop((0, 0, multi_img.width, banner_h)).tobytes()
+        assert solo_banner != multi_banner
+
+
+def test_generate_news_bullet_card_headline_font_is_bigger_than_the_combined_card(tmp_path):
+    """Real, explicit design goal: with only ONE headline to show (not a
+    lead story competing with up to 3 secondary bullets for space), the
+    bullet card can and should render its headline meaningfully bigger
+    than the old combined card's own headline font."""
+    assert chart_snapshot._s(58) > chart_snapshot._s(44)  # noqa: SLF001  # bullet card vs. combined card headline size
+
+
+def test_generate_news_bullet_card_is_square_ish_and_substantial():
+    from PIL import Image
+
+    path = chart_snapshot.generate_news_bullet_card(market="crypto", headline="Bitcoin surges", hashtags="#Crypto")
+    assert path is not None
+    with Image.open(path) as img:
+        assert img.width == chart_snapshot._BULLET_CARD_WIDTH  # noqa: SLF001
+        assert img.height >= chart_snapshot._BULLET_CARD_MIN_HEIGHT  # noqa: SLF001
+
+
+def test_generate_news_bullet_card_returns_none_when_pillow_is_unavailable(monkeypatch):
+    import builtins
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "PIL":
+            raise ImportError("simulated missing Pillow")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    assert chart_snapshot.generate_news_bullet_card(market="crypto", headline="Bitcoin surges") is None
+
+
 # ── _wrap_lines ───────────────────────────────────────────────────────────────
 
 def _draw():

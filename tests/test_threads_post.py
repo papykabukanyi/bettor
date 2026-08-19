@@ -556,56 +556,110 @@ def _mock_charts(monkeypatch, tmp_path):
     monkeypatch.setenv("RENDER_EXTERNAL_URL", "https://bettor-schwab.onrender.com")
 
 
-def test_trending_news_posts_a_generated_image_card_with_hashtags_only_caption(monkeypatch, tmp_path):
-    """Real, confirmed bug this replaces: post_trending_news used to attach
-    the story's own raw image_url (or one scraped via og:image) as-is --
-    for Google-News-sourced stories that scrape resolved the SAME static
-    Google branding image for every article regardless of headline
-    (confirmed live). Now the image itself is GENERATED from the story's
-    own text (see chart_snapshot.generate_news_card), so it's always a
-    real, distinct picture with the headline literally printed on it.
+def test_trending_news_posts_a_carousel_with_one_card_per_headline_and_hashtags_only_caption(monkeypatch, tmp_path):
+    """Real, confirmed bug the whole generated-image-card approach (single
+    or carousel) replaces: post_trending_news used to attach the story's
+    own raw image_url (or one scraped via og:image) as-is -- for Google-
+    News-sourced stories that scrape resolved the SAME static Google
+    branding image for every article regardless of headline (confirmed
+    live). Now the image(s) are GENERATED from the story's own text.
 
-    Real feedback: the caption used to repeat everything already on the
-    card (headline, source, secondary headlines) -- pure duplication. The
-    Threads post TEXT next to an image post must now be hashtags only."""
+    A multi-headline story (the default _story() -- 1 lead + 1 secondary =
+    2 headlines) must post a real Threads CAROUSEL, one big card per
+    headline, not cram everything onto one image. Real feedback: the
+    caption used to repeat everything already on the card(s) -- pure
+    duplication. The Threads post TEXT next to the carousel must be
+    hashtags only."""
     _mock_charts(monkeypatch, tmp_path)
     posted = []
     monkeypatch.setattr(
-        threads_post.threads_client, "create_and_publish_image_post",
-        lambda image_url, text="": posted.append((image_url, text)),
+        threads_post.threads_client, "create_and_publish_carousel_post",
+        lambda image_urls, text="": posted.append((image_urls, text)),
     )
     threads_post.post_trending_news(_story(), market="crypto")
-    image_url, text = posted[0]
-    assert image_url.startswith("https://bettor-schwab.onrender.com/chart/")
-    assert "Bitcoin surges past resistance" not in text  # lives on the card now, not the caption
+    image_urls, text = posted[0]
+    assert len(image_urls) == 2  # lead headline + 1 secondary
+    assert all(u.startswith("https://bettor-schwab.onrender.com/chart/") for u in image_urls)
+    assert "Bitcoin surges past resistance" not in text  # lives on the cards now, not the caption
     assert "ETF inflows accelerate" not in text
     assert "#Crypto" in text
     # Extracted from the headline's own text on top of the base market tags.
     assert "#Bitcoin" in text
 
 
-def test_trending_news_bakes_the_headline_and_hashtags_into_the_image_itself(monkeypatch, tmp_path):
-    """Direct check that the picture IS the post, not just a caption next
-    to an unrelated photo -- generate_news_card must be called with this
-    story's own real headline/source/secondary/hashtags."""
+def test_trending_news_bakes_each_headline_and_hashtags_into_its_own_bullet_card(monkeypatch, tmp_path):
+    """Direct check that each carousel item IS its own headline's card, not
+    a caption next to an unrelated photo -- generate_news_bullet_card must
+    be called once per headline with this story's own real text, correct
+    index/total, and the shared hashtags -- and only the LEAD card gets the
+    story's source (secondary headlines don't carry their own source)."""
     from data import chart_snapshot
 
     _mock_charts(monkeypatch, tmp_path)
-    monkeypatch.setattr(threads_post.threads_client, "create_and_publish_image_post", lambda image_url, text="": None)
-    captured = {}
-    real_generate = chart_snapshot.generate_news_card
+    monkeypatch.setattr(threads_post.threads_client, "create_and_publish_carousel_post", lambda image_urls, text="": None)
+    captured = []
+    real_generate = chart_snapshot.generate_news_bullet_card
 
     def spy(**kwargs):
-        captured.update(kwargs)
+        captured.append(kwargs)
         return real_generate(**kwargs)
 
-    monkeypatch.setattr(chart_snapshot, "generate_news_card", spy)
+    monkeypatch.setattr(chart_snapshot, "generate_news_bullet_card", spy)
     threads_post.post_trending_news(_story(), market="crypto")
-    assert captured["market"] == "crypto"
-    assert captured["headline"] == "Bitcoin surges past resistance"
-    assert captured["source"] == "cointelegraph"
-    assert captured["secondary"] == ["ETF inflows accelerate"]
-    assert "#Crypto" in captured["hashtags"]
+
+    assert len(captured) == 2
+    assert captured[0]["market"] == "crypto"
+    assert captured[0]["headline"] == "Bitcoin surges past resistance"
+    assert captured[0]["source"] == "cointelegraph"
+    assert captured[0]["index"] == 1 and captured[0]["total"] == 2
+    assert captured[1]["headline"] == "ETF inflows accelerate"
+    assert captured[1]["source"] == ""  # only the lead headline carries a source
+    assert captured[1]["index"] == 2 and captured[1]["total"] == 2
+    assert "#Crypto" in captured[0]["hashtags"] and "#Crypto" in captured[1]["hashtags"]
+
+
+def test_trending_news_with_a_single_headline_skips_the_carousel_entirely(monkeypatch, tmp_path):
+    """Only one headline this cycle (no secondary stories) -- a 1-item
+    "carousel" isn't a real carousel (Threads itself requires >=2), so this
+    must go straight to the single combined-card path without ever
+    attempting create_and_publish_carousel_post."""
+    from data import chart_snapshot
+
+    _mock_charts(monkeypatch, tmp_path)
+
+    def fail_if_called(*a, **k):
+        raise AssertionError("must not attempt a carousel with only one headline")
+
+    monkeypatch.setattr(threads_post.threads_client, "create_and_publish_carousel_post", fail_if_called)
+    monkeypatch.setattr(chart_snapshot, "generate_news_bullet_card", fail_if_called)
+    posted = []
+    monkeypatch.setattr(
+        threads_post.threads_client, "create_and_publish_image_post",
+        lambda image_url, text="": posted.append((image_url, text)),
+    )
+    threads_post.post_trending_news(_story(secondary=[]), market="crypto")
+    assert len(posted) == 1
+
+
+def test_trending_news_falls_back_to_the_single_card_when_the_carousel_post_fails(monkeypatch, tmp_path):
+    """The carousel attempt (rendering or posting) can fail for any reason
+    -- a real trending post via the older single combined-card path still
+    beats posting nothing at all."""
+    _mock_charts(monkeypatch, tmp_path)
+
+    def raise_error(image_urls, text=""):
+        raise RuntimeError("Threads rejected the carousel")
+
+    posted = []
+    monkeypatch.setattr(threads_post.threads_client, "create_and_publish_carousel_post", raise_error)
+    monkeypatch.setattr(
+        threads_post.threads_client, "create_and_publish_image_post",
+        lambda image_url, text="": posted.append((image_url, text)),
+    )
+    result = threads_post.post_trending_news(_story(), market="crypto")
+    assert result is True
+    assert len(posted) == 1
+    assert posted[0][0].startswith("https://bettor-schwab.onrender.com/chart/")
 
 
 def test_trending_news_labels_stocks_market(monkeypatch, tmp_path):
