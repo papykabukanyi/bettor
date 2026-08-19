@@ -205,8 +205,62 @@ def test_raise_for_status_with_body_does_not_set_the_cooldown_for_other_errors()
 
 
 def test_is_rate_limited_clears_after_the_cooldown_expires(monkeypatch):
-    monkeypatch.setattr(threads_client, "_rate_limited_until", threads_client.time.monotonic() - 1)
+    monkeypatch.setattr(threads_client, "_rate_limited_until", threads_client.time.time() - 1)
     assert threads_client.is_rate_limited() is False
+
+
+def test_note_rate_limited_pushes_the_cooldown_to_hf_merged_with_existing_tokens(monkeypatch):
+    """Real, confirmed gap: the cooldown used to live only in this
+    process's own memory -- each of the 4 services sharing one Threads
+    account discovered a rate limit independently instead of the instant
+    ANY of them hit it. Must push the FULL token record (not just the new
+    field) so this never clobbers the stored access_token/user_id."""
+    threads_client._token_cache.update({  # noqa: SLF001
+        "access_token": "at-1", "user_id": "user-42", "obtained_at": 1000.0, "expires_at": 2000.0,
+    })
+    pushed = {}
+    monkeypatch.setattr(threads_client, "_push_tokens_to_hf", lambda record: pushed.update(record))
+
+    threads_client._note_rate_limited()  # noqa: SLF001
+
+    assert pushed["access_token"] == "at-1"
+    assert pushed["user_id"] == "user-42"
+    assert pushed["rate_limited_until"] == pytest.approx(threads_client.time.time() + threads_client._RATE_LIMIT_COOLDOWN_SEC, abs=2)  # noqa: SLF001
+
+
+def test_note_rate_limited_does_not_push_when_there_is_no_token_yet(monkeypatch):
+    pushed = {"called": False}
+    monkeypatch.setattr(threads_client, "_push_tokens_to_hf", lambda record: pushed.update(called=True))
+
+    threads_client._note_rate_limited()  # noqa: SLF001
+
+    assert pushed["called"] is False
+
+
+def test_is_rate_limited_adopts_a_cooldown_set_by_another_process_via_hf(monkeypatch):
+    """Not locally rate-limited, but another one of the 4 services already
+    hit the shared limit and pushed a cooldown to HF -- this process must
+    back off too instead of finding out the hard way."""
+    monkeypatch.setattr(threads_client, "_last_rate_limit_hf_check_ts", 0.0)
+    future = threads_client.time.time() + 500
+    monkeypatch.setattr(threads_client, "_pull_tokens_from_hf", lambda: {"access_token": "at-1", "rate_limited_until": future})
+
+    assert threads_client.is_rate_limited() is True
+    assert threads_client._rate_limited_until == pytest.approx(future)  # noqa: SLF001
+
+
+def test_is_rate_limited_does_not_recheck_hf_within_the_cooldown_window(monkeypatch):
+    monkeypatch.setattr(threads_client, "_last_rate_limit_hf_check_ts", threads_client.time.time())
+    calls = {"n": 0}
+
+    def fake_pull():
+        calls["n"] += 1
+        return {"rate_limited_until": threads_client.time.time() + 500}
+
+    monkeypatch.setattr(threads_client, "_pull_tokens_from_hf", fake_pull)
+
+    assert threads_client.is_rate_limited() is False  # too soon since the last HF check -- must not call it again
+    assert calls["n"] == 0
 
 
 def test_create_and_publish_post_skips_the_network_call_while_rate_limited(monkeypatch):
@@ -214,7 +268,7 @@ def test_create_and_publish_post_skips_the_network_call_while_rate_limited(monke
         "access_token": "at-1", "user_id": "user-42",
         "obtained_at": threads_client.time.time(), "expires_at": threads_client.time.time() + 1000000,
     })
-    monkeypatch.setattr(threads_client, "_rate_limited_until", threads_client.time.monotonic() + 1000)
+    monkeypatch.setattr(threads_client, "_rate_limited_until", threads_client.time.time() + 1000)
 
     def fail_if_called(*a, **k):
         raise AssertionError("must not make a network call while the rate-limit cooldown is active")
@@ -229,7 +283,7 @@ def test_create_and_publish_image_post_skips_the_network_call_while_rate_limited
         "access_token": "at-1", "user_id": "user-42",
         "obtained_at": threads_client.time.time(), "expires_at": threads_client.time.time() + 1000000,
     })
-    monkeypatch.setattr(threads_client, "_rate_limited_until", threads_client.time.monotonic() + 1000)
+    monkeypatch.setattr(threads_client, "_rate_limited_until", threads_client.time.time() + 1000)
 
     def fail_if_called(*a, **k):
         raise AssertionError("must not make a network call while the rate-limit cooldown is active")
@@ -281,17 +335,19 @@ def test_wait_for_container_ready_returns_immediately_on_finished(monkeypatch):
         return _FakeResponse({"status": "FINISHED"})
 
     monkeypatch.setattr(threads_client.requests, "get", fake_get)
-    threads_client._wait_for_container_ready("creation-1", "token-1")  # noqa: SLF001
+    status = threads_client._wait_for_container_ready("creation-1", "token-1")  # noqa: SLF001
     assert len(calls) == 1
     assert calls[0]["access_token"] == "token-1"
+    assert status == "FINISHED"
 
 
 def test_wait_for_container_ready_polls_until_finished(monkeypatch):
     statuses = iter(["IN_PROGRESS", "IN_PROGRESS", "FINISHED"])
     monkeypatch.setattr(threads_client, "_CONTAINER_STATUS_POLL_INTERVAL_SEC", 0.01)
     monkeypatch.setattr(threads_client.requests, "get", lambda url, *, params, timeout: _FakeResponse({"status": next(statuses)}))
-    threads_client._wait_for_container_ready("creation-1", "token-1")  # noqa: SLF001
+    status = threads_client._wait_for_container_ready("creation-1", "token-1")  # noqa: SLF001
     assert next(statuses, "exhausted") == "exhausted"  # confirms all 3 statuses were actually consumed
+    assert status == "FINISHED"
 
 
 def test_wait_for_container_ready_stops_on_a_terminal_error_status(monkeypatch):
@@ -302,8 +358,9 @@ def test_wait_for_container_ready_stops_on_a_terminal_error_status(monkeypatch):
         return _FakeResponse({"status": "ERROR"})
 
     monkeypatch.setattr(threads_client.requests, "get", fake_get)
-    threads_client._wait_for_container_ready("creation-1", "token-1")  # noqa: SLF001
+    status = threads_client._wait_for_container_ready("creation-1", "token-1")  # noqa: SLF001
     assert calls["n"] == 1  # stopped polling immediately, didn't keep retrying a terminal state
+    assert status == "ERROR"
 
 
 def test_wait_for_container_ready_gives_up_after_the_max_wait(monkeypatch):
@@ -313,9 +370,10 @@ def test_wait_for_container_ready_gives_up_after_the_max_wait(monkeypatch):
 
     import time as real_time
     start = real_time.monotonic()
-    threads_client._wait_for_container_ready("creation-1", "token-1")  # noqa: SLF001
+    status = threads_client._wait_for_container_ready("creation-1", "token-1")  # noqa: SLF001
     elapsed = real_time.monotonic() - start
     assert elapsed < 1.0  # bounded by _CONTAINER_STATUS_MAX_WAIT_SEC, not an infinite loop
+    assert status == "IN_PROGRESS"  # never reached a terminal state -- caller still gets to decide what to do
 
 
 def test_wait_for_container_ready_never_raises_on_a_status_check_failure(monkeypatch):
@@ -326,7 +384,8 @@ def test_wait_for_container_ready_never_raises_on_a_status_check_failure(monkeyp
         raise RuntimeError("network down")
 
     monkeypatch.setattr(threads_client.requests, "get", raise_error)
-    threads_client._wait_for_container_ready("creation-1", "token-1")  # noqa: SLF001  # must not raise
+    status = threads_client._wait_for_container_ready("creation-1", "token-1")  # noqa: SLF001  # must not raise
+    assert status is None
 
 
 def test_create_and_publish_post_waits_for_the_container_before_publishing(monkeypatch):
@@ -387,6 +446,74 @@ def test_create_and_publish_post_does_the_container_then_publish_round_trip(monk
     assert captured[0]["params"]["text"] == "hello world"
     assert captured[1]["url"] == f"{threads_client.API_BASE_URL}/{threads_client.API_VERSION}/user-42/threads_publish"
     assert captured[1]["params"]["creation_id"] == "creation-123"
+
+
+def test_create_and_publish_post_refuses_to_publish_a_container_in_a_terminal_error_state(monkeypatch):
+    """Real, confirmed live bug: publishing a container that already
+    reached ERROR/EXPIRED always got rejected by Meta's API with
+    error_subcode 4279009 ("the requested resource does not exist") -- a
+    wasted call against an already rate-limit-sensitive shared account,
+    18-30 occurrences per service across 5 days. Must fail fast locally
+    instead, with a clear reason, and never even attempt the publish call."""
+    threads_client._token_cache.update({  # noqa: SLF001
+        "access_token": "at-1", "user_id": "user-42",
+        "obtained_at": threads_client.time.time(), "expires_at": threads_client.time.time() + 1000000,
+    })
+
+    def fake_post(url, *, params, timeout):
+        if "threads_publish" in url:
+            raise AssertionError("must not attempt to publish a container in a terminal ERROR/EXPIRED state")
+        return _FakeResponse({"id": "creation-123"})
+
+    monkeypatch.setattr(threads_client.requests, "post", fake_post)
+    monkeypatch.setattr(threads_client.requests, "get", lambda url, *, params, timeout: _FakeResponse({"status": "ERROR"}))
+
+    with pytest.raises(RuntimeError, match="terminal status ERROR"):
+        threads_client.create_and_publish_post("hello world")
+
+
+def test_create_and_publish_post_still_attempts_publish_when_status_is_unknown(monkeypatch):
+    """A status-check timeout/failure (status stays None) is NOT a
+    confirmed-bad state -- unlike ERROR/EXPIRED, still worth a real
+    attempt rather than giving up locally on an uncertain read."""
+    threads_client._token_cache.update({  # noqa: SLF001
+        "access_token": "at-1", "user_id": "user-42",
+        "obtained_at": threads_client.time.time(), "expires_at": threads_client.time.time() + 1000000,
+    })
+    monkeypatch.setattr(threads_client, "_CONTAINER_STATUS_MAX_WAIT_SEC", 0.05)
+    monkeypatch.setattr(threads_client, "_CONTAINER_STATUS_POLL_INTERVAL_SEC", 0.01)
+
+    def fake_post(url, *, params, timeout):
+        if "threads_publish" in url:
+            return _FakeResponse({"id": "post-999"})
+        return _FakeResponse({"id": "creation-123"})
+
+    def raise_error(url, *, params, timeout):
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(threads_client.requests, "post", fake_post)
+    monkeypatch.setattr(threads_client.requests, "get", raise_error)
+
+    post_id = threads_client.create_and_publish_post("hello world")
+    assert post_id == "post-999"
+
+
+def test_create_and_publish_image_post_refuses_to_publish_a_container_in_a_terminal_error_state(monkeypatch):
+    threads_client._token_cache.update({  # noqa: SLF001
+        "access_token": "at-1", "user_id": "user-42",
+        "obtained_at": threads_client.time.time(), "expires_at": threads_client.time.time() + 1000000,
+    })
+
+    def fake_post(url, *, params, timeout):
+        if "threads_publish" in url:
+            raise AssertionError("must not attempt to publish a container in a terminal ERROR/EXPIRED state")
+        return _FakeResponse({"id": "creation-123"})
+
+    monkeypatch.setattr(threads_client.requests, "post", fake_post)
+    monkeypatch.setattr(threads_client.requests, "get", lambda url, *, params, timeout: _FakeResponse({"status": "EXPIRED"}))
+
+    with pytest.raises(RuntimeError, match="terminal status EXPIRED"):
+        threads_client.create_and_publish_image_post("https://example.com/chart.png", "caption")
 
 
 def test_create_and_publish_image_post_raises_without_a_valid_token():

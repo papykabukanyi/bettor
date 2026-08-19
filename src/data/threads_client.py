@@ -94,25 +94,77 @@ _REFRESH_MARGIN_SEC = 5 * 24 * 3600
 # at all) until it's had a real chance to clear, instead of every post
 # type in every remaining scheduled cycle re-discovering the same failure
 # the hard way.
+#
+# Real, confirmed gap found in review (2026-08-19): the cooldown below used
+# to live ONLY in this process's own memory (time.monotonic(), which can't
+# even be compared across processes) -- each of the 4 separate Render
+# services discovered a shared-account rate limit independently, the hard
+# way, instead of finding out the instant ANY of them hit it. Persisted to
+# the same HF-hosted token record the OAuth tokens already use (one extra
+# field, piggybacked on the existing push/pull machinery, wall-clock time
+# so it's meaningful across processes) -- checked locally first (cheap,
+# no network) and only refreshed from HF at most once per
+# _RATE_LIMIT_HF_CHECK_COOLDOWN_SEC, so this doesn't turn every post
+# attempt into an HF round trip.
 _RATE_LIMIT_COOLDOWN_SEC = float(os.getenv("THREADS_RATE_LIMIT_COOLDOWN_SEC", "1200") or "1200")
+_RATE_LIMIT_HF_CHECK_COOLDOWN_SEC = float(os.getenv("THREADS_RATE_LIMIT_HF_CHECK_COOLDOWN_SEC", "60") or "60")
 _rate_limited_until = 0.0
+_last_rate_limit_hf_check_ts = 0.0
 
 
 def is_rate_limited() -> bool:
     """True while this process believes the shared Threads account is
     still within a recently-observed rate-limit cooldown window -- callers
     should skip attempting a post entirely (see create_and_publish_post/
-    create_and_publish_image_post) rather than make a doomed API call."""
-    return time.monotonic() < _rate_limited_until
+    create_and_publish_image_post) rather than make a doomed API call.
+    Also periodically checks HF for a cooldown set by a DIFFERENT one of
+    the 4 processes sharing this account, so this process backs off too
+    instead of discovering the same rate limit independently."""
+    global _last_rate_limit_hf_check_ts
+    now = time.time()
+    if now < _rate_limited_until:
+        return True
+    if now - _last_rate_limit_hf_check_ts >= _RATE_LIMIT_HF_CHECK_COOLDOWN_SEC:
+        _last_rate_limit_hf_check_ts = now
+        _adopt_shared_rate_limit_from_hf()
+    return time.time() < _rate_limited_until
+
+
+def _adopt_shared_rate_limit_from_hf() -> None:
+    global _rate_limited_until
+    try:
+        with _STATE_LOCK:
+            pulled = _pull_tokens_from_hf()
+        if pulled:
+            shared_until = float(pulled.get("rate_limited_until") or 0.0)
+            if shared_until > _rate_limited_until:
+                _rate_limited_until = shared_until
+                if shared_until > time.time():
+                    logger.warning(
+                        "[threads_client] adopting shared Threads rate-limit cooldown set by "
+                        "another process -- pausing until %.0f more seconds from now",
+                        shared_until - time.time(),
+                    )
+    except Exception as exc:
+        logger.debug("[threads_client] could not check HF for a shared rate-limit cooldown: %s", exc)
 
 
 def _note_rate_limited() -> None:
     global _rate_limited_until
-    _rate_limited_until = time.monotonic() + _RATE_LIMIT_COOLDOWN_SEC
+    _rate_limited_until = time.time() + _RATE_LIMIT_COOLDOWN_SEC
     logger.warning(
         "[threads_client] Threads API rate limit hit -- pausing all posting from this "
         "process for %.0f minutes", _RATE_LIMIT_COOLDOWN_SEC / 60,
     )
+    try:
+        with _STATE_LOCK:
+            record = dict(_token_cache)
+            record["rate_limited_until"] = _rate_limited_until
+            _token_cache["rate_limited_until"] = _rate_limited_until
+        if record.get("access_token"):
+            _push_tokens_to_hf(record)
+    except Exception as exc:
+        logger.debug("[threads_client] could not share this rate-limit cooldown via HF: %s", exc)
 
 
 def _raise_for_status_with_body(resp: requests.Response) -> None:
@@ -326,14 +378,24 @@ _CONTAINER_STATUS_POLL_INTERVAL_SEC = float(os.getenv("THREADS_CONTAINER_POLL_IN
 _CONTAINER_STATUS_MAX_WAIT_SEC = float(os.getenv("THREADS_CONTAINER_MAX_WAIT_SEC", "30") or "30")
 
 
-def _wait_for_container_ready(creation_id: str, token: str) -> None:
+def _wait_for_container_ready(creation_id: str, token: str) -> str | None:
     """Polls the container's status until it's FINISHED (ready to publish)
     or reaches a terminal ERROR/EXPIRED state, up to
-    _CONTAINER_STATUS_MAX_WAIT_SEC. Never raises -- a status-check failure
-    or timeout just means the caller proceeds to attempt publish anyway
-    and gets Meta's own real error if it's still not ready, rather than
-    this module inventing a new failure mode on top."""
+    _CONTAINER_STATUS_MAX_WAIT_SEC. Returns the last-seen status (None if
+    every status check failed, or if the deadline was hit with the
+    container still IN_PROGRESS) -- callers must check this before
+    publishing.
+
+    Real, confirmed live bug (2026-08-19): this used to return nothing and
+    let the caller attempt threads_publish unconditionally, even on a
+    container that had already reached ERROR or EXPIRED -- Meta's Graph API
+    then rejects the publish with error_subcode 4279009 ("the requested
+    resource does not exist"), a genuinely wasted API call against an
+    already-shared, rate-limit-sensitive account (18-30 occurrences per
+    service across 5 days). Returning the real status lets the caller skip
+    that doomed call and fail with a clear reason instead."""
     deadline = time.monotonic() + _CONTAINER_STATUS_MAX_WAIT_SEC
+    last_status: str | None = None
     while time.monotonic() < deadline:
         try:
             status_resp = requests.get(
@@ -342,13 +404,14 @@ def _wait_for_container_ready(creation_id: str, token: str) -> None:
                 timeout=TIMEOUT_SEC,
             )
             _raise_for_status_with_body(status_resp)
-            status = status_resp.json().get("status")
+            last_status = status_resp.json().get("status")
         except Exception as exc:
             logger.debug("[threads_client] container status check failed, will retry: %s", exc)
-            status = None
-        if status in ("FINISHED", "PUBLISHED", "ERROR", "EXPIRED"):
-            return
+            last_status = None
+        if last_status in ("FINISHED", "PUBLISHED", "ERROR", "EXPIRED"):
+            return last_status
         time.sleep(_CONTAINER_STATUS_POLL_INTERVAL_SEC)
+    return last_status
 
 
 def create_and_publish_post(text: str) -> str:
@@ -372,7 +435,9 @@ def create_and_publish_post(text: str) -> str:
     )
     _raise_for_status_with_body(create_resp)
     creation_id = create_resp.json()["id"]
-    _wait_for_container_ready(creation_id, token)
+    status = _wait_for_container_ready(creation_id, token)
+    if status in ("ERROR", "EXPIRED"):
+        raise RuntimeError(f"Threads container {creation_id} reached terminal status {status} -- not attempting publish")
 
     publish_resp = requests.post(
         f"{API_BASE_URL}/{API_VERSION}/{user_id}/threads_publish",
@@ -407,7 +472,9 @@ def create_and_publish_image_post(image_url: str, text: str = "") -> str:
     )
     _raise_for_status_with_body(create_resp)
     creation_id = create_resp.json()["id"]
-    _wait_for_container_ready(creation_id, token)
+    status = _wait_for_container_ready(creation_id, token)
+    if status in ("ERROR", "EXPIRED"):
+        raise RuntimeError(f"Threads container {creation_id} reached terminal status {status} -- not attempting publish")
 
     publish_resp = requests.post(
         f"{API_BASE_URL}/{API_VERSION}/{user_id}/threads_publish",

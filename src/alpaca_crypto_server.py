@@ -468,10 +468,26 @@ def _ensure_background_jobs_started() -> None:
             # silently skipped anyway. All of these are themselves fast,
             # bounded operations (seconds, not minutes) sharing this pool
             # safely with fast_check the same way.
+            # Real, confirmed live incident (2026-08-19): ALPACA_CRYPTO_STARTUP_GRACE_SECONDS
+            # (60) is an exact multiple of ALPACA_CRYPTO_FAST_CHECK_SECONDS
+            # (20) -- since both jobs are simple fixed intervals anchored at
+            # deploy time, that makes entry_scan's every-2-minute tick land
+            # on the EXACT SAME 20s phase as fast_check forever after every
+            # single deploy, not just by occasional chance (confirmed via
+            # "maximum number of running instances reached" skip warnings
+            # recurring at a consistent 20-second-aligned pattern across the
+            # 5 days before this fix -- unlike the OTHER threads-post jobs'
+            # own stagger fix earlier this session, this one survives every
+            # deploy because it's baked into the constants themselves, not
+            # random per-deploy timing). The `+ FAST_CHECK_SECONDS // 2`
+            # below shifts entry_scan to always land squarely between two
+            # fast_check ticks instead.
             scheduler.add_job(
                 _run_alpaca_crypto_entry_scan, "interval", minutes=ALPACA_CRYPTO_CYCLE_MINUTES,
                 id="alpaca_crypto_entry_scan", replace_existing=True, executor="fastcheck",
-                next_run_time=dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=ALPACA_CRYPTO_STARTUP_GRACE_SECONDS),
+                next_run_time=dt.datetime.now(dt.timezone.utc) + dt.timedelta(
+                    seconds=ALPACA_CRYPTO_STARTUP_GRACE_SECONDS + ALPACA_CRYPTO_FAST_CHECK_SECONDS // 2,
+                ),
             )
             # Staggered next_run_time -- same real, confirmed fix as
             # app_kalshi.py's own identical trio (see its comment for the

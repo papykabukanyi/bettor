@@ -467,10 +467,23 @@ def _ensure_background_jobs_started() -> None:
             # All of these are themselves fast, bounded operations
             # (seconds, not minutes) sharing this pool safely with
             # fast_check the same way.
+            # Real, confirmed live incident (2026-08-19): ALPACA_OPTIONS_STARTUP_GRACE_SECONDS
+            # (60) is an exact multiple of ALPACA_OPTIONS_FAST_CHECK_SECONDS
+            # (30) -- since both jobs are simple fixed intervals anchored at
+            # deploy time, that makes entry_scan's every-5-minute tick land
+            # on the EXACT SAME 30s phase as fast_check forever after every
+            # single deploy, not just by occasional chance. The
+            # `+ FAST_CHECK_SECONDS // 2` below shifts entry_scan to always
+            # land squarely between two fast_check ticks instead, confirmed
+            # via the "maximum number of running instances reached" skip
+            # warnings recurring at a consistent ~30-second-aligned pattern
+            # across the 5 days before this fix.
             scheduler.add_job(
                 _run_alpaca_options_entry_scan, "interval", minutes=ALPACA_OPTIONS_CYCLE_MINUTES,
                 id="alpaca_options_entry_scan", replace_existing=True, executor="fastcheck",
-                next_run_time=dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=ALPACA_OPTIONS_STARTUP_GRACE_SECONDS),
+                next_run_time=dt.datetime.now(dt.timezone.utc) + dt.timedelta(
+                    seconds=ALPACA_OPTIONS_STARTUP_GRACE_SECONDS + ALPACA_OPTIONS_FAST_CHECK_SECONDS // 2,
+                ),
             )
             # Staggered next_run_time -- real, confirmed fix ported from
             # perps/crypto/stocks' own identical trio (see app_kalshi.py's

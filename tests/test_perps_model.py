@@ -253,6 +253,32 @@ def test_averaged_ensemble_predict_proba_is_the_mean_of_its_members():
     assert result[0][0] == pytest.approx(0.3)
 
 
+def test_averaged_ensemble_predict_thresholds_at_half():
+    """Real, confirmed live bug on the equities-options sibling of this
+    exact class (identical copy): this class used to have no predict() at
+    all, so any caller expecting standard sklearn predict()/predict_proba()
+    symmetry (e.g. a torch-vs-current-model re-score comparison) raised
+    AttributeError whenever an averaged ensemble was the live model."""
+    class _FakeModel:
+        def __init__(self, up_proba):
+            self._up_proba = up_proba
+
+        def predict_proba(self, x):
+            return np.array([[1.0 - self._up_proba, self._up_proba]] * len(x))
+
+    ensemble = perps_model._AveragedEnsemble(  # noqa: SLF001
+        [_FakeModel(0.7), _FakeModel(0.9)], ["model_a", "model_b"],  # mean up_proba = 0.8
+    )
+    up_preds = ensemble.predict(np.zeros((2, 1)))
+    assert list(up_preds) == [1, 1]
+
+    down_ensemble = perps_model._AveragedEnsemble(  # noqa: SLF001
+        [_FakeModel(0.1), _FakeModel(0.3)], ["model_a", "model_b"],  # mean up_proba = 0.2
+    )
+    down_preds = down_ensemble.predict(np.zeros((2, 1)))
+    assert list(down_preds) == [0, 0]
+
+
 def test_recency_sample_weight_favors_more_recent_rows():
     ts = np.array([0, 43200, 86400])  # 0, 0.5, 1 day (in seconds) before "now"
     weights = perps_model._recency_sample_weight(ts, half_life_days=1.0)  # noqa: SLF001

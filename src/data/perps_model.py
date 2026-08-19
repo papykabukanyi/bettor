@@ -110,6 +110,17 @@ class _AveragedEnsemble:
     def predict_proba(self, x: np.ndarray) -> np.ndarray:
         return np.mean([m.predict_proba(x) for m in self.models], axis=0)
 
+    def predict(self, x: np.ndarray) -> np.ndarray:
+        # Real, confirmed live bug found on the equities-options sibling of
+        # this exact class (identical copy, see that module's own comment):
+        # this class only had predict_proba, but the torch-vs-current-model
+        # re-score comparison calls .predict() on whatever's currently
+        # deployed -- when an averaged ensemble WAS the live model, that
+        # comparison raised AttributeError every time and silently skipped
+        # scoring the current model at all. Standard 0.5 threshold, same
+        # convention every sklearn classifier here already uses.
+        return (self.predict_proba(x)[:, 1] >= 0.5).astype(int)
+
 
 def _recency_sample_weight(ts: np.ndarray, *, half_life_days: float) -> np.ndarray:
     """Exponential half-life decay relative to THIS SLICE's own max
