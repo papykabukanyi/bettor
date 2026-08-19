@@ -108,7 +108,7 @@ from data import crypto_news, perps_data, perps_model, perps_strategy, perps_tra
 # anything -- not just the top-level package object.
 from huggingface_hub import HfApi, hf_hub_download  # noqa: F401
 from data.kalshi_perps import get_margin_balance, get_margin_enabled, get_margin_exchange_status, get_margin_positions
-from server_common import DATA_DIR, is_cron_authorized, load_json, make_job_lock, save_json
+from server_common import DATA_DIR, is_cron_authorized, load_json, make_job_lock, save_json, win_rate_stats
 
 PERPS_CYCLE_MINUTES = max(1, int(os.getenv("PERPS_CYCLE_MINUTES", "2") or "2"))
 PERPS_FAST_CHECK_SECONDS = max(5, int(os.getenv("PERPS_FAST_CHECK_SECONDS", "20") or "20"))
@@ -774,14 +774,32 @@ def api_status():
 
     realized_pnl_by_date = state.get("realized_pnl_by_date") or {}
     total_realized_pnl = round(sum(float(v) for v in realized_pnl_by_date.values()), 6)
-    # Every open position gets its actual take-profit/stop-loss/quick-profit
-    # PRICE levels attached here -- makes it visible/auditable on the
-    # dashboard that each one really has exit levels defined, not just that
-    # the global percentage config exists somewhere.
-    positions = [
-        {**p, **perps_strategy.position_exit_levels(p)}
-        for p in (state.get("positions") or [])
-    ]
+    # Real gap found in review: the dashboard showed entry price + static
+    # TP/SL levels for every open position but never its CURRENT price or
+    # unrealized P&L -- the single highest-value "what is the bot actually
+    # doing right now" fact was missing. manage_open_positions() already
+    # fetches a fresh current_price per position every fast_check cycle
+    # (to decide whether to exit) and now records it on each check
+    # (perps_strategy.py) -- reused here via a ticker lookup instead of a
+    # second, redundant fetch. Also surfaces the real exit_check reason
+    # text (WHY a position is/isn't closing yet), previously computed but
+    # never rendered anywhere.
+    checks_by_ticker = {c["ticker"]: c for c in latest_position_check.get("checks") or [] if c.get("ticker")}
+    positions = []
+    for p in state.get("positions") or []:
+        enriched = {**p, **perps_strategy.position_exit_levels(p)}
+        check = checks_by_ticker.get(p.get("ticker"))
+        if check and check.get("current_price") is not None:
+            current_price = float(check["current_price"])
+            entry_price = float(p.get("entry_price") or 0.0)
+            count = float(p.get("count") or 0.0)
+            is_short = p.get("side") == "short"
+            signed_change = (entry_price - current_price) if is_short else (current_price - entry_price)
+            enriched["current_price"] = current_price
+            enriched["unrealized_pnl_usd"] = round(signed_change * count, 6)
+            enriched["unrealized_pnl_pct"] = round(signed_change / entry_price, 6) if entry_price > 0 else None
+            enriched["exit_check"] = check.get("exit_check")
+        positions.append(enriched)
 
     return jsonify({
         "ok": True,
@@ -794,6 +812,7 @@ def api_status():
         "today_realized_pnl_usd": float(realized_pnl_by_date.get(et_today().isoformat(), 0.0)),
         "total_realized_pnl_usd": total_realized_pnl,
         "trade_count": len(state.get("trade_log") or []),
+        "win_rate": win_rate_stats(state.get("trade_log") or []),
         "model": {
             "trained": meta is not None,
             "model_type": (meta or {}).get("model_type"),

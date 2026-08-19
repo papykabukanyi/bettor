@@ -347,3 +347,53 @@ def test_api_alpaca_status_reports_configured_flag(monkeypatch):
         resp = client.get("/api/alpaca/status")
         assert resp.status_code == 200
         assert resp.get_json()["alpaca_configured"] is True
+
+
+def test_api_alpaca_status_attaches_unrealized_pnl_and_exit_check_to_open_positions(monkeypatch):
+    """Real gap found in review: the dashboard showed entry price + static
+    TP/SL levels for every open position but never its CURRENT price,
+    unrealized P&L, or the real exit_check reason text -- even though
+    manage_open_positions() already computes both every fast_check cycle.
+    Long-only: entry 100.0, current 105.0, count 10 -> +$50.00."""
+    from data import alpaca_client
+    from data import alpaca_strategy as strat
+
+    monkeypatch.setattr(alpaca_client, "is_configured", lambda: True)
+    monkeypatch.setattr(alpaca_client, "get_account", lambda: {"cash": "100.0", "equity": "100.0"})
+    monkeypatch.setattr(strat, "_load_state", lambda: {
+        "positions": [{"symbol": "AAPL", "entry_price": 100.0, "count": 10.0, "opened_at": "2026-08-19T00:00:00+00:00"}],
+        "trade_log": [], "realized_pnl_by_date": {},
+    })
+
+    def fake_load_json(path, default):
+        if str(path).endswith("alpaca_latest_position_check.json"):
+            return {"checks": [{"symbol": "AAPL", "ok": True, "exit_check": "holding (+5.00%)", "current_price": 105.0}]}
+        return default
+
+    monkeypatch.setattr(alpaca_server, "load_json", fake_load_json)
+
+    with alpaca_server.app.test_client() as client:
+        resp = client.get("/api/alpaca/status")
+        position = resp.get_json()["positions"][0]
+        assert position["current_price"] == 105.0
+        assert position["unrealized_pnl_usd"] == pytest.approx(50.0, abs=0.01)
+        assert position["unrealized_pnl_pct"] == pytest.approx(0.05, abs=0.001)
+        assert position["exit_check"] == "holding (+5.00%)"
+
+
+def test_api_alpaca_status_omits_unrealized_pnl_when_no_current_price_is_available(monkeypatch):
+    from data import alpaca_client
+    from data import alpaca_strategy as strat
+
+    monkeypatch.setattr(alpaca_client, "is_configured", lambda: True)
+    monkeypatch.setattr(alpaca_client, "get_account", lambda: {"cash": "100.0", "equity": "100.0"})
+    monkeypatch.setattr(strat, "_load_state", lambda: {
+        "positions": [{"symbol": "AAPL", "entry_price": 100.0, "count": 10.0, "opened_at": "2026-08-19T00:00:00+00:00"}],
+        "trade_log": [], "realized_pnl_by_date": {},
+    })
+    monkeypatch.setattr(alpaca_server, "load_json", lambda path, default: default)
+
+    with alpaca_server.app.test_client() as client:
+        resp = client.get("/api/alpaca/status")
+        position = resp.get_json()["positions"][0]
+        assert "unrealized_pnl_usd" not in position

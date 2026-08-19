@@ -74,7 +74,7 @@ if str(SRC_DIR) not in sys.path:
 
 from config import et_today
 from data import alpaca_client, alpaca_crypto_data, alpaca_crypto_model, alpaca_crypto_strategy, threads_post
-from server_common import DATA_DIR, is_cron_authorized, load_json, make_job_lock, save_json
+from server_common import DATA_DIR, is_cron_authorized, load_json, make_job_lock, save_json, win_rate_stats
 
 # Same real, twice-confirmed production bug already fixed on the equities/
 # perps servers -- see their own copies of this comment for the full
@@ -614,6 +614,33 @@ def chart_snapshot_image(filename):
     return send_from_directory(chart_snapshot.CHARTS_DIR, filename)
 
 
+# Real gap found in review, same class of bug app_kalshi.py's own
+# _cached_account_snapshot already fixed (see its docstring for the full
+# "dashboard appears to lose everything and stutter" incident this exact
+# pattern prevents): _crypto_status_snapshot() called
+# alpaca_client.get_account() -- a real, uncached Alpaca API round trip --
+# on every single /api/alpaca/crypto/status poll (every 10s from the
+# browser, 24/7 since crypto never closes). Balance/equity don't need
+# millisecond freshness for a dashboard number.
+_ACCOUNT_SNAPSHOT_CACHE: dict[str, Any] = {}
+_ACCOUNT_SNAPSHOT_CACHE_TS = 0.0
+_ACCOUNT_SNAPSHOT_CACHE_LOCK = threading.Lock()
+_ACCOUNT_SNAPSHOT_CACHE_TTL_SEC = max(5, int(os.getenv("ACCOUNT_SNAPSHOT_CACHE_TTL_SEC", "12") or "12"))
+
+
+def _cached_account() -> dict[str, Any]:
+    global _ACCOUNT_SNAPSHOT_CACHE, _ACCOUNT_SNAPSHOT_CACHE_TS
+    now = time.monotonic()
+    with _ACCOUNT_SNAPSHOT_CACHE_LOCK:
+        if _ACCOUNT_SNAPSHOT_CACHE and (now - _ACCOUNT_SNAPSHOT_CACHE_TS) < _ACCOUNT_SNAPSHOT_CACHE_TTL_SEC:
+            return dict(_ACCOUNT_SNAPSHOT_CACHE)
+    account = alpaca_client.get_account() if alpaca_client.is_configured() else {}
+    with _ACCOUNT_SNAPSHOT_CACHE_LOCK:
+        _ACCOUNT_SNAPSHOT_CACHE = dict(account)
+        _ACCOUNT_SNAPSHOT_CACHE_TS = time.monotonic()
+    return account
+
+
 def _crypto_status_snapshot() -> dict[str, Any]:
     """Everything api_alpaca_crypto_status() reports, factored out so
     api_alpaca_crypto_report() (see below) can build the same real
@@ -627,12 +654,27 @@ def _crypto_status_snapshot() -> dict[str, Any]:
 
     realized_pnl_by_date = state.get("realized_pnl_by_date") or {}
     total_realized_pnl = round(sum(float(v) for v in realized_pnl_by_date.values()), 6)
-    positions = [
-        {**p, **alpaca_crypto_strategy.position_exit_levels(p)}
-        for p in (state.get("positions") or [])
-    ]
+    # Real gap found in review: the dashboard showed entry price + static
+    # TP/SL levels for every open position but never its CURRENT price or
+    # unrealized P&L, and never the real exit_check reason text
+    # (manage_open_positions() already computes both every fast_check
+    # cycle -- reused here via a symbol lookup, not a second fetch).
+    checks_by_symbol = {c["symbol"]: c for c in latest_position_check.get("checks") or [] if c.get("symbol")}
+    positions = []
+    for p in state.get("positions") or []:
+        enriched = {**p, **alpaca_crypto_strategy.position_exit_levels(p)}
+        check = checks_by_symbol.get(p.get("symbol"))
+        if check and check.get("current_price") is not None:
+            current_price = float(check["current_price"])
+            entry_price = float(p.get("entry_price") or 0.0)
+            count = float(p.get("count") or 0.0)
+            enriched["current_price"] = current_price
+            enriched["unrealized_pnl_usd"] = round((current_price - entry_price) * count, 6)
+            enriched["unrealized_pnl_pct"] = round((current_price - entry_price) / entry_price, 6) if entry_price > 0 else None
+            enriched["exit_check"] = check.get("exit_check")
+        positions.append(enriched)
 
-    account = alpaca_client.get_account() if alpaca_client.is_configured() else {}
+    account = _cached_account()
     return {
         "ok": True,
         "now": dt.datetime.now(dt.timezone.utc).isoformat(),
@@ -647,6 +689,7 @@ def _crypto_status_snapshot() -> dict[str, Any]:
         "today_realized_pnl_usd": float(realized_pnl_by_date.get(et_today().isoformat(), 0.0)),
         "total_realized_pnl_usd": total_realized_pnl,
         "trade_count": len(state.get("trade_log") or []),
+        "win_rate": win_rate_stats(state.get("trade_log") or []),
         "trade_log": state.get("trade_log") or [],
         "model": {
             "trained": meta is not None,

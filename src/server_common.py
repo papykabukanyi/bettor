@@ -75,6 +75,40 @@ def save_json(path: Path, payload: Any) -> None:
         json.dump(payload, handle, indent=2, default=str)
 
 
+# Real gap found in review: `*_trade_analysis.py` on each of the 4 services
+# already computes rich win/loss diagnostics (used for confidence-threshold
+# auto-tuning and the downloadable PDF reports), but that number was never
+# persisted anywhere a live status route could cheaply read it -- so none
+# of the 4 dashboards ever showed a running win-rate stat, even though
+# every trade already has realized_pnl_usd recorded. This is deliberately
+# NOT that deeper analysis (no confidence calibration, no per-symbol
+# breakdown) -- just a fast, live win/loss count plain enough for
+# every status route to compute on every request without it mattering.
+def win_rate_stats(trade_log: list[dict[str, Any]], *, recent_n: int = 50) -> dict[str, Any]:
+    """`trade_log` newest-last (this codebase's own convention -- appended
+    to as trades close). Returns win/loss counts + rate over the WHOLE log
+    and, separately, just the most recent `recent_n` trades -- a bot that
+    was profitable for its first 200 trades but has been losing for its
+    last 20 should show that shift, not bury it in an all-time average."""
+    closed = [t for t in trade_log if isinstance(t, dict) and t.get("realized_pnl_usd") is not None]
+    if not closed:
+        return {"trade_count": 0, "win_count": 0, "win_rate": None, "recent_trade_count": 0, "recent_win_count": 0, "recent_win_rate": None}
+
+    def _rate(trades: list[dict[str, Any]]) -> dict[str, Any]:
+        wins = sum(1 for t in trades if float(t["realized_pnl_usd"]) > 0)
+        return {"trade_count": len(trades), "win_count": wins, "win_rate": round(wins / len(trades), 4)}
+
+    overall = _rate(closed)
+    recent = closed[-recent_n:]
+    recent_stats = _rate(recent)
+    return {
+        **overall,
+        "recent_trade_count": recent_stats["trade_count"],
+        "recent_win_count": recent_stats["win_count"],
+        "recent_win_rate": recent_stats["win_rate"],
+    }
+
+
 def _summarize_job_result(result: Any) -> dict[str, Any]:
     if not isinstance(result, dict):
         return {}

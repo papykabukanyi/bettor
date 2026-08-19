@@ -77,6 +77,7 @@
   <div class="card"><h2>Positions</h2><div id="position-count" class="stat">--</div><div class="sub" id="position-sub">--</div></div>
   <div class="card"><h2>Today's P&amp;L</h2><div id="today-pnl" class="stat">--</div><div class="sub" id="total-pnl-sub">--</div></div>
   <div class="card"><h2>Direction Model</h2><div id="model-status" class="stat">--</div><div class="sub" id="model-sub">--</div></div>
+  <div class="card"><h2>Win Rate</h2><div id="win-rate" class="stat">--</div><div class="sub" id="win-rate-sub">--</div></div>
 </div>
 
 <section>
@@ -101,8 +102,8 @@
   <h3>Open Positions</h3>
   <div class="scroll-x">
     <table>
-      <thead><tr><th>Ticker</th><th>Side</th><th>Entry</th><th>Contracts</th><th>Take Profit</th><th>Stop Loss</th><th>Opened</th><th>Velocity</th></tr></thead>
-      <tbody id="positions-body"><tr><td colspan="8" class="empty">No open positions</td></tr></tbody>
+      <thead><tr><th>Ticker</th><th>Side</th><th>Entry</th><th>Current</th><th>Unrealized P&amp;L</th><th>Contracts</th><th>Take Profit</th><th>Stop Loss</th><th>Opened</th><th>Velocity</th><th>Status</th></tr></thead>
+      <tbody id="positions-body"><tr><td colspan="11" class="empty">No open positions</td></tr></tbody>
     </table>
   </div>
 </section>
@@ -306,16 +307,22 @@ async function refreshStatus() {
       const check = checksByTicker[p.ticker];
       const v = check && check.velocity_pct_per_min;
       const side = p.side || "long";
+      const hasPnl = p.unrealized_pnl_usd !== null && p.unrealized_pnl_usd !== undefined;
+      const pnlClass = hasPnl ? (p.unrealized_pnl_usd > 0 ? "pos" : p.unrealized_pnl_usd < 0 ? "neg" : "") : "";
+      const pnlText = hasPnl ? `${fmtUsd(p.unrealized_pnl_usd)} (${fmtPct(p.unrealized_pnl_pct)})` : "--";
       return `
         <td><strong>${p.ticker}</strong></td>
         <td><span class="tag ${side === "short" ? "no" : "yes"}">${side}</span></td>
         <td>${fmtPrice(p.entry_price)}</td>
+        <td>${p.current_price !== undefined ? fmtPrice(p.current_price) : "--"}</td>
+        <td class="stat ${pnlClass}">${pnlText}</td>
         <td>${p.count}</td>
         <td class="stat pos" style="font-size:13px;">${fmtPrice(p.take_profit_price)}</td>
         <td class="stat neg" style="font-size:13px;">${fmtPrice(p.stop_loss_price)}</td>
         <td>${timeAgo(p.opened_at)}</td>
-        <td>${(v !== null && v !== undefined) ? (v * 100).toFixed(2) + "%/min" : "--"}</td>`;
-    }, 8, "No open positions");
+        <td>${(v !== null && v !== undefined) ? (v * 100).toFixed(2) + "%/min" : "--"}</td>
+        <td style="font-size:12px;color:var(--muted);">${p.exit_check || "--"}</td>`;
+    }, 11, "No open positions");
   } catch (e) { console.error("positions render failed", e); }
 
   try {
@@ -326,6 +333,20 @@ async function refreshStatus() {
     document.getElementById("total-pnl-sub").textContent =
       `all-time ${fmtUsd(data.total_realized_pnl_usd)} · ${data.trade_count || 0} trades`;
   } catch (e) { console.error("pnl card render failed", e); }
+
+  try {
+    const wr = data.win_rate || {};
+    const winRateEl = document.getElementById("win-rate");
+    if (wr.trade_count) {
+      winRateEl.textContent = fmtPct(wr.win_rate);
+      winRateEl.className = "stat " + (wr.win_rate > 0.5 ? "pos" : wr.win_rate < 0.5 ? "neg" : "");
+      document.getElementById("win-rate-sub").textContent =
+        `${wr.win_count}/${wr.trade_count} all-time · last ${wr.recent_trade_count}: ${fmtPct(wr.recent_win_rate)}`;
+    } else {
+      winRateEl.textContent = "--";
+      document.getElementById("win-rate-sub").textContent = "no closed trades yet";
+    }
+  } catch (e) { console.error("win rate card render failed", e); }
 
   let params = {};
   try {

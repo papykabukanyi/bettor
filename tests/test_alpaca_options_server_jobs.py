@@ -235,6 +235,63 @@ def test_api_alpaca_options_status_reports_configured_flag(monkeypatch):
         assert resp.get_json()["alpaca_configured"] is True
 
 
+def test_api_alpaca_options_status_attaches_unrealized_pnl_and_exit_check_to_open_positions(monkeypatch):
+    """Real gap found in review: the dashboard showed entry premium +
+    static TP/SL levels for every open position but never its CURRENT
+    premium, unrealized P&L, or the real exit_check reason text -- even
+    though manage_open_positions() already computes both every fast_check
+    cycle. Same *100 contract multiplier the real exit-booking code uses:
+    entry premium 2.00, current 2.50, count 3 -> +$150.00."""
+    from data import alpaca_client
+    from data import alpaca_options_strategy as strat
+
+    monkeypatch.setattr(alpaca_client, "is_configured", lambda: True)
+    monkeypatch.setattr(alpaca_client, "get_account", lambda: {"cash": "500.0", "equity": "500.0"})
+    monkeypatch.setattr(strat, "_load_state", lambda: {
+        "positions": [{
+            "symbol": "AAPL240223C00195000", "entry_price": 2.00, "count": 3.0,
+            "opened_at": "2026-08-19T00:00:00+00:00",
+        }],
+        "trade_log": [], "realized_pnl_by_date": {},
+    })
+
+    def fake_load_json(path, default):
+        if str(path).endswith("alpaca_options_latest_position_check.json"):
+            return {"checks": [{"symbol": "AAPL240223C00195000", "ok": True, "exit_check": "holding (+25.00%)", "current_price": 2.50}]}
+        return default
+
+    monkeypatch.setattr(alpaca_options_server, "load_json", fake_load_json)
+
+    with alpaca_options_server.app.test_client() as client:
+        resp = client.get("/api/alpaca/options/status")
+        position = resp.get_json()["positions"][0]
+        assert position["current_price"] == 2.50
+        assert position["unrealized_pnl_usd"] == pytest.approx(150.0, abs=0.01)
+        assert position["unrealized_pnl_pct"] == pytest.approx(0.25, abs=0.001)
+        assert position["exit_check"] == "holding (+25.00%)"
+
+
+def test_api_alpaca_options_status_omits_unrealized_pnl_when_no_current_price_is_available(monkeypatch):
+    from data import alpaca_client
+    from data import alpaca_options_strategy as strat
+
+    monkeypatch.setattr(alpaca_client, "is_configured", lambda: True)
+    monkeypatch.setattr(alpaca_client, "get_account", lambda: {"cash": "500.0", "equity": "500.0"})
+    monkeypatch.setattr(strat, "_load_state", lambda: {
+        "positions": [{
+            "symbol": "AAPL240223C00195000", "entry_price": 2.00, "count": 3.0,
+            "opened_at": "2026-08-19T00:00:00+00:00",
+        }],
+        "trade_log": [], "realized_pnl_by_date": {},
+    })
+    monkeypatch.setattr(alpaca_options_server, "load_json", lambda path, default: default)
+
+    with alpaca_options_server.app.test_client() as client:
+        resp = client.get("/api/alpaca/options/status")
+        position = resp.get_json()["positions"][0]
+        assert "unrealized_pnl_usd" not in position
+
+
 def test_api_alpaca_options_status_reports_the_real_market_session(monkeypatch):
     """Real gap found in review: options had no way to tell from the
     dashboard whether it was in its trading window (regular hours) or its

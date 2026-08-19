@@ -81,6 +81,7 @@
   <div class="card"><h2>Positions</h2><div id="position-count" class="stat">--</div><div class="sub" id="position-sub">--</div></div>
   <div class="card"><h2>Today's P&amp;L</h2><div id="today-pnl" class="stat">--</div><div class="sub" id="total-pnl-sub">--</div></div>
   <div class="card"><h2>Direction Model</h2><div id="model-status" class="stat">--</div><div class="sub" id="model-sub">--</div></div>
+  <div class="card"><h2>Win Rate</h2><div id="win-rate" class="stat">--</div><div class="sub" id="win-rate-sub">--</div></div>
 </div>
 
 <section>
@@ -110,8 +111,8 @@
   <h3>Open Positions</h3>
   <div class="scroll-x">
     <table>
-      <thead><tr><th>Strategy</th><th>Contract(s)</th><th>Underlying</th><th>Type</th><th>Strike(s)</th><th>Expires</th><th>Entry (net)</th><th>Qty</th><th>Take Profit</th><th>Stop Loss</th><th>Opened</th><th>Order</th></tr></thead>
-      <tbody id="positions-body"><tr><td colspan="12" class="empty">No open positions</td></tr></tbody>
+      <thead><tr><th>Strategy</th><th>Contract(s)</th><th>Underlying</th><th>Type</th><th>Strike(s)</th><th>Expires</th><th>Entry (net)</th><th>Current</th><th>Unrealized P&amp;L</th><th>Qty</th><th>Take Profit</th><th>Stop Loss</th><th>Opened</th><th>Order</th><th>Status</th></tr></thead>
+      <tbody id="positions-body"><tr><td colspan="15" class="empty">No open positions</td></tr></tbody>
     </table>
   </div>
 </section>
@@ -167,6 +168,7 @@ const fmtPrice = (v) => {
   return "$" + n.toFixed(decimals);
 };
 const fmtCount = (v) => (v === null || v === undefined || isNaN(v)) ? "--" : Number(v).toFixed(0);
+const fmtPct = (v) => (v === null || v === undefined || isNaN(v)) ? "--" : (Number(v) * 100).toFixed(3) + "%";
 const timeAgo = (iso) => {
   if (!iso) return "--";
   const sec = (Date.now() - new Date(iso).getTime()) / 1000;
@@ -313,6 +315,9 @@ async function refreshStatus() {
       const isSpread = p.strategy === "debit_spread";
       const contracts = isSpread ? `${p.symbol}<br><span class="sub">short: ${p.short_symbol}</span>` : p.symbol;
       const strikes = isSpread ? `${fmtPrice(p.long_strike)} / ${fmtPrice(p.short_strike)}` : fmtPrice(p.strike_price);
+      const hasPnl = p.unrealized_pnl_usd !== null && p.unrealized_pnl_usd !== undefined;
+      const pnlClass = hasPnl ? (p.unrealized_pnl_usd > 0 ? "pos" : p.unrealized_pnl_usd < 0 ? "neg" : "") : "";
+      const pnlText = hasPnl ? `${fmtUsd(p.unrealized_pnl_usd)} (${fmtPct(p.unrealized_pnl_pct)})` : "--";
       return `
         <td><span class="tag ${isSpread ? "wait" : "yes"}">${isSpread ? "SPREAD" : "NAKED"}</span></td>
         <td><strong>${contracts}</strong></td>
@@ -321,12 +326,15 @@ async function refreshStatus() {
         <td>${strikes}</td>
         <td>${timeUntil(p.expiration_date)}</td>
         <td>${fmtPrice(p.entry_price)}</td>
+        <td>${p.current_price !== undefined ? fmtPrice(p.current_price) : "--"}</td>
+        <td class="stat ${pnlClass}">${pnlText}</td>
         <td>${fmtCount(p.count)}</td>
         <td class="stat pos" style="font-size:13px;">${fmtPrice(p.take_profit_price)}</td>
         <td class="stat neg" style="font-size:13px;">${fmtPrice(p.stop_loss_price)}</td>
         <td>${timeAgo(p.opened_at)}</td>
-        <td class="sub">${p.order_id || "paper"}</td>`;
-    }, 12, "No open positions");
+        <td class="sub">${p.order_id || "paper"}</td>
+        <td style="font-size:12px;color:var(--muted);">${p.exit_check || "--"}</td>`;
+    }, 15, "No open positions");
   } catch (e) { console.error("positions render failed", e); }
 
   try {
@@ -337,6 +345,20 @@ async function refreshStatus() {
     document.getElementById("total-pnl-sub").textContent =
       `all-time ${fmtUsd(data.total_realized_pnl_usd)} · ${data.trade_count || 0} trades`;
   } catch (e) { console.error("pnl card render failed", e); }
+
+  try {
+    const wr = data.win_rate || {};
+    const winRateEl = document.getElementById("win-rate");
+    if (wr.trade_count) {
+      winRateEl.textContent = fmtPct(wr.win_rate);
+      winRateEl.className = "stat " + (wr.win_rate > 0.5 ? "pos" : wr.win_rate < 0.5 ? "neg" : "");
+      document.getElementById("win-rate-sub").textContent =
+        `${wr.win_count}/${wr.trade_count} all-time · last ${wr.recent_trade_count}: ${fmtPct(wr.recent_win_rate)}`;
+    } else {
+      winRateEl.textContent = "--";
+      document.getElementById("win-rate-sub").textContent = "no closed trades yet";
+    }
+  } catch (e) { console.error("win rate card render failed", e); }
 
   let params = {};
   try {

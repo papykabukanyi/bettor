@@ -1104,7 +1104,7 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                 breakout_pct_b=breakout_pct_b, sentiment_score=sentiment_score_value,
             )
             if not should_exit:
-                checks.append({"symbol": contract_symbol, "ok": True, "exit_check": reason})
+                checks.append({"symbol": contract_symbol, "ok": True, "exit_check": reason, "current_price": current_price})
                 continue
 
             closed_count = float(position["count"])

@@ -1214,6 +1214,7 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                     checks.append({
                         "symbol": symbol, "ok": True, "exit_check": reason,
                         "velocity_pct_per_min": velocity, "current_volatility": current_volatility,
+                        "current_price": current_price,
                     })
                     remaining.append(position)
                     continue

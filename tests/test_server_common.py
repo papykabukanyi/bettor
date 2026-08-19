@@ -147,3 +147,46 @@ def test_is_cron_authorized_requires_matching_bearer_token(monkeypatch):
     assert server_common.is_cron_authorized(_Req("Bearer s3cret")) is True
     assert server_common.is_cron_authorized(_Req("Bearer wrong")) is False
     assert server_common.is_cron_authorized(_Req(None)) is False
+
+
+def _trade(pnl):
+    return {"realized_pnl_usd": pnl}
+
+
+def test_win_rate_stats_empty_log():
+    stats = server_common.win_rate_stats([])
+    assert stats == {
+        "trade_count": 0, "win_count": 0, "win_rate": None,
+        "recent_trade_count": 0, "recent_win_count": 0, "recent_win_rate": None,
+    }
+
+
+def test_win_rate_stats_counts_wins_and_losses():
+    """Real gap found in review: *_trade_analysis.py already computes rich
+    win/loss diagnostics, but that number was never persisted anywhere a
+    live status route could cheaply read it -- none of the 4 dashboards
+    ever showed a running win-rate stat."""
+    trades = [_trade(10.0), _trade(-5.0), _trade(3.0), _trade(0.0), _trade(-1.0)]
+    stats = server_common.win_rate_stats(trades)
+    assert stats["trade_count"] == 5
+    assert stats["win_count"] == 2  # a $0.00 trade is neither a win nor a loss
+    assert stats["win_rate"] == pytest.approx(0.4)
+
+
+def test_win_rate_stats_recent_window_can_differ_from_all_time():
+    """A bot profitable for its first 200 trades but losing its last 20
+    should show that shift, not bury it in an all-time average."""
+    old_wins = [_trade(1.0) for _ in range(20)]
+    recent_losses = [_trade(-1.0) for _ in range(5)]
+    stats = server_common.win_rate_stats(old_wins + recent_losses, recent_n=5)
+    assert stats["win_rate"] == pytest.approx(20 / 25)
+    assert stats["recent_trade_count"] == 5
+    assert stats["recent_win_count"] == 0
+    assert stats["recent_win_rate"] == pytest.approx(0.0)
+
+
+def test_win_rate_stats_ignores_trades_with_no_realized_pnl_yet():
+    trades = [_trade(10.0), {"symbol": "AAPL"}, {"realized_pnl_usd": None}]
+    stats = server_common.win_rate_stats(trades)
+    assert stats["trade_count"] == 1
+    assert stats["win_count"] == 1

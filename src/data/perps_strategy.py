@@ -1641,7 +1641,7 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                 checks.append({
                     "ticker": ticker, "ok": True, "exit_check": reason, "velocity_pct_per_min": velocity,
                     "external_velocity_pct_per_min": external_velocity, "current_volatility": current_volatility,
-                    "external_source": (external_quote or {}).get("source"),
+                    "external_source": (external_quote or {}).get("source"), "current_price": current_price,
                 })
             except Exception as exc:
                 ok = False

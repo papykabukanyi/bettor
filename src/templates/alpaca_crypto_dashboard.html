@@ -79,6 +79,7 @@
   <div class="card"><h2>Positions</h2><div id="position-count" class="stat">--</div><div class="sub" id="position-sub">--</div></div>
   <div class="card"><h2>Today's P&amp;L</h2><div id="today-pnl" class="stat">--</div><div class="sub" id="total-pnl-sub">--</div></div>
   <div class="card"><h2>Direction Model</h2><div id="model-status" class="stat">--</div><div class="sub" id="model-sub">--</div></div>
+  <div class="card"><h2>Win Rate</h2><div id="win-rate" class="stat">--</div><div class="sub" id="win-rate-sub">--</div></div>
 </div>
 
 <section>
@@ -104,8 +105,8 @@
   <h3>Open Positions</h3>
   <div class="scroll-x">
     <table>
-      <thead><tr><th>Pair</th><th>Entry</th><th>Coins</th><th>Take Profit</th><th>Stop Loss</th><th>Opened</th><th>Order</th></tr></thead>
-      <tbody id="positions-body"><tr><td colspan="7" class="empty">No open positions</td></tr></tbody>
+      <thead><tr><th>Pair</th><th>Entry</th><th>Current</th><th>Unrealized P&amp;L</th><th>Coins</th><th>Take Profit</th><th>Stop Loss</th><th>Opened</th><th>Order</th><th>Status</th></tr></thead>
+      <tbody id="positions-body"><tr><td colspan="10" class="empty">No open positions</td></tr></tbody>
     </table>
   </div>
 </section>
@@ -131,6 +132,30 @@
 </section>
 
 <section>
+  <h3>Off-Hours Backtest &mdash; Latest Sweep (strategy variants, not just TP/SL)</h3>
+  <div class="scroll-x">
+    <table>
+      <thead><tr><th>Variant</th><th>Trades</th><th>Win Rate</th><th>Return</th><th>Sample</th></tr></thead>
+      <tbody id="sweep-body"><tr><td colspan="5" class="empty">No sweep yet -- runs automatically, off-hours</td></tr></tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <h3>Weekly Walk-Forward Backtest &mdash; Consistency Across Time Periods</h3>
+  <div class="grid" style="margin-bottom:0;">
+    <div class="card"><h2>Profitable Folds</h2><div id="wf-profitable" class="stat">--</div><div class="sub" id="wf-profitable-sub">--</div></div>
+    <div class="card"><h2>Mean Return / Fold</h2><div id="wf-mean-return" class="stat">--</div><div class="sub" id="wf-mean-return-sub">--</div></div>
+  </div>
+  <div class="scroll-x" style="margin-top:12px;">
+    <table>
+      <thead><tr><th>Fold</th><th>Train/Test Window</th><th>Trades</th><th>Win Rate</th><th>Return</th></tr></thead>
+      <tbody id="walkforward-body"><tr><td colspan="5" class="empty">No walk-forward run yet -- runs automatically, weekly</td></tr></tbody>
+    </table>
+  </div>
+</section>
+
+<section>
   <h3>Server Activity</h3>
   <div class="scroll-x">
     <table>
@@ -151,6 +176,7 @@ const fmtPrice = (v) => {
   return "$" + n.toFixed(decimals);
 };
 const fmtCoins = (v) => (v === null || v === undefined || isNaN(v)) ? "--" : Number(v).toFixed(6);
+const fmtPct = (v) => (v === null || v === undefined || isNaN(v)) ? "--" : (Number(v) * 100).toFixed(3) + "%";
 const timeAgo = (iso) => {
   if (!iso) return "--";
   const sec = (Date.now() - new Date(iso).getTime()) / 1000;
@@ -275,14 +301,22 @@ async function refreshStatus() {
       : "scanning crypto universe for entries";
 
     const posBody = document.getElementById("positions-body");
-    patchTable(posBody, positions, p => p.symbol, p => `
+    patchTable(posBody, positions, p => p.symbol, p => {
+      const hasPnl = p.unrealized_pnl_usd !== null && p.unrealized_pnl_usd !== undefined;
+      const pnlClass = hasPnl ? (p.unrealized_pnl_usd > 0 ? "pos" : p.unrealized_pnl_usd < 0 ? "neg" : "") : "";
+      const pnlText = hasPnl ? `${fmtUsd(p.unrealized_pnl_usd)} (${fmtPct(p.unrealized_pnl_pct)})` : "--";
+      return `
         <td><strong>${p.symbol}</strong></td>
         <td>${fmtPrice(p.entry_price)}</td>
+        <td>${p.current_price !== undefined ? fmtPrice(p.current_price) : "--"}</td>
+        <td class="stat ${pnlClass}">${pnlText}</td>
         <td>${fmtCoins(p.count)}</td>
         <td class="stat pos" style="font-size:13px;">${fmtPrice(p.take_profit_price)}</td>
         <td class="stat neg" style="font-size:13px;">${fmtPrice(p.stop_loss_price)}</td>
         <td>${timeAgo(p.opened_at)}</td>
-        <td class="sub">${p.order_id || "paper"}</td>`, 7, "No open positions");
+        <td class="sub">${p.order_id || "paper"}</td>
+        <td style="font-size:12px;color:var(--muted);">${p.exit_check || "--"}</td>`;
+    }, 10, "No open positions");
   } catch (e) { console.error("positions render failed", e); }
 
   try {
@@ -293,6 +327,20 @@ async function refreshStatus() {
     document.getElementById("total-pnl-sub").textContent =
       `all-time ${fmtUsd(data.total_realized_pnl_usd)} · ${data.trade_count || 0} trades`;
   } catch (e) { console.error("pnl card render failed", e); }
+
+  try {
+    const wr = data.win_rate || {};
+    const winRateEl = document.getElementById("win-rate");
+    if (wr.trade_count) {
+      winRateEl.textContent = fmtPct(wr.win_rate);
+      winRateEl.className = "stat " + (wr.win_rate > 0.5 ? "pos" : wr.win_rate < 0.5 ? "neg" : "");
+      document.getElementById("win-rate-sub").textContent =
+        `${wr.win_count}/${wr.trade_count} all-time · last ${wr.recent_trade_count}: ${fmtPct(wr.recent_win_rate)}`;
+    } else {
+      winRateEl.textContent = "--";
+      document.getElementById("win-rate-sub").textContent = "no closed trades yet";
+    }
+  } catch (e) { console.error("win rate card render failed", e); }
 
   let params = {};
   try {
@@ -336,6 +384,56 @@ async function refreshStatus() {
         <td>${c.notional !== undefined ? fmtUsd(c.notional) : "--"}</td>
         <td class="sub">${c.reason || c.error || ""}</td>`, 5, "Waiting for first scan...");
   } catch (e) { console.error("candidates render failed", e); }
+
+  try {
+    // Real gap found in review: crypto runs TWO self-tuning backtest jobs
+    // (this sweep + the weekly walk-forward below) -- more than any other
+    // service -- but showed neither on its own dashboard, an inversion of
+    // what you'd expect. Crypto's sweep tries labeled STRATEGY VARIANTS
+    // (not just a TP/SL/max-hold grid the way stocks/options do), so this
+    // table's shape is deliberately different from theirs.
+    const sweepRows = (data.latest_sweep && data.latest_sweep.configs) || [];
+    const sweepBody = document.getElementById("sweep-body");
+    patchTable(sweepBody, sweepRows, (r, idx) => r.label || idx, r => `
+        <td><strong>${r.label || "--"}</strong></td>
+        <td>${r.trade_count ?? "--"}</td>
+        <td>${fmtPct(r.win_rate)}</td>
+        <td class="${r.return_pct > 0 ? "stat pos" : r.return_pct < 0 ? "stat neg" : ""}" style="font-size:13px;font-weight:600;">${fmtPct(r.return_pct)}</td>
+        <td>${r.low_sample ? '<span class="tag wait">low</span>' : '<span class="tag yes">ok</span>'}</td>`,
+      5, "No sweep yet -- runs automatically, off-hours");
+  } catch (e) { console.error("sweep render failed", e); }
+
+  try {
+    const wf = data.latest_walkforward || {};
+    const wfFolds = wf.folds || [];
+    if (wfFolds.length) {
+      document.getElementById("wf-profitable").textContent = `${wf.profitable_fold_count ?? "--"} / ${wf.fold_count ?? "--"}`;
+      document.getElementById("wf-profitable-sub").textContent = `${fmtPct(wf.profitable_fold_ratio)} of folds profitable`;
+      const meanEl = document.getElementById("wf-mean-return");
+      meanEl.textContent = fmtPct(wf.mean_return_pct);
+      meanEl.className = "stat " + (wf.mean_return_pct > 0 ? "pos" : wf.mean_return_pct < 0 ? "neg" : "");
+      document.getElementById("wf-mean-return-sub").textContent =
+        `std ${fmtPct(wf.std_return_pct)} · range ${fmtPct(wf.min_return_pct)} to ${fmtPct(wf.max_return_pct)}`;
+    } else {
+      document.getElementById("wf-profitable").textContent = "--";
+      document.getElementById("wf-profitable-sub").textContent = "no walk-forward run yet";
+      document.getElementById("wf-mean-return").textContent = "--";
+      document.getElementById("wf-mean-return-sub").textContent = "runs automatically, weekly";
+    }
+    const wfBody = document.getElementById("walkforward-body");
+    patchTable(wfBody, wfFolds, (f, idx) => idx, (f, idx) => {
+      const bounds = f.fold_bounds || [];
+      const windowText = bounds.length === 3
+        ? `train 0-${(bounds[1] * 100).toFixed(0)}% · test ${(bounds[1] * 100).toFixed(0)}-${(bounds[2] * 100).toFixed(0)}%`
+        : "--";
+      return `
+        <td>${idx + 1}</td>
+        <td class="sub">${windowText}</td>
+        <td>${f.trade_count ?? "--"}</td>
+        <td>${fmtPct(f.win_rate)}</td>
+        <td class="${f.return_pct > 0 ? "stat pos" : f.return_pct < 0 ? "stat neg" : ""}" style="font-size:13px;font-weight:600;">${fmtPct(f.return_pct)}</td>`;
+    }, 5, "No walk-forward run yet -- runs automatically, weekly");
+  } catch (e) { console.error("walkforward render failed", e); }
 }
 
 async function refreshTrades() {

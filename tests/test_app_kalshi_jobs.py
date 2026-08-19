@@ -57,6 +57,88 @@ def test_api_status_surfaces_feature_importances_from_the_trained_model(monkeypa
         assert resp.get_json()["model"]["feature_importances"] == {"random_forest": {"sentiment_score": 0.05}}
 
 
+def test_api_status_attaches_unrealized_pnl_and_exit_check_to_open_positions(monkeypatch):
+    """Real gap found in review: the dashboard showed entry price + static
+    TP/SL levels for every open position but never its CURRENT price,
+    unrealized P&L, or the real exit_check reason text -- even though
+    manage_open_positions() already computes both every fast_check cycle.
+    A long position up 5%: entry 6.60, current 6.93, count 10 -> +$3.30."""
+    from data import perps_strategy as strat
+
+    monkeypatch.setattr(strat, "_load_state", lambda: {
+        "positions": [{
+            "ticker": "KXBTCPERP", "side": "long", "entry_price": 6.60, "count": 10.0,
+            "opened_at": "2026-08-19T00:00:00+00:00",
+        }],
+        "trade_log": [], "realized_pnl_by_date": {},
+    })
+
+    def fake_load_json(path, default):
+        if str(path).endswith("perps_latest_position_check.json"):
+            return {"checks": [{"ticker": "KXBTCPERP", "ok": True, "exit_check": "holding (+5.00%)", "current_price": 6.93}]}
+        return default
+
+    monkeypatch.setattr(app_kalshi, "load_json", fake_load_json)
+
+    with app_kalshi.app.test_client() as client:
+        resp = client.get("/api/status")
+        assert resp.status_code == 200
+        position = resp.get_json()["positions"][0]
+        assert position["current_price"] == 6.93
+        assert position["unrealized_pnl_usd"] == pytest.approx(3.30, abs=0.01)
+        assert position["unrealized_pnl_pct"] == pytest.approx(0.05, abs=0.001)
+        assert position["exit_check"] == "holding (+5.00%)"
+
+
+def test_api_status_unrealized_pnl_is_negated_for_a_short_position(monkeypatch):
+    """A short profits when price FALLS -- entry 6.60, current 6.27 (-5%),
+    count 10 -> a SHORT position must show a POSITIVE unrealized P&L here,
+    not a negative one (same sign convention as the real exit-booking
+    gross_pnl computation)."""
+    from data import perps_strategy as strat
+
+    monkeypatch.setattr(strat, "_load_state", lambda: {
+        "positions": [{
+            "ticker": "KXBTCPERP", "side": "short", "entry_price": 6.60, "count": 10.0,
+            "opened_at": "2026-08-19T00:00:00+00:00",
+        }],
+        "trade_log": [], "realized_pnl_by_date": {},
+    })
+
+    def fake_load_json(path, default):
+        if str(path).endswith("perps_latest_position_check.json"):
+            return {"checks": [{"ticker": "KXBTCPERP", "ok": True, "exit_check": "holding", "current_price": 6.27}]}
+        return default
+
+    monkeypatch.setattr(app_kalshi, "load_json", fake_load_json)
+
+    with app_kalshi.app.test_client() as client:
+        resp = client.get("/api/status")
+        position = resp.get_json()["positions"][0]
+        assert position["unrealized_pnl_usd"] == pytest.approx(3.30, abs=0.01)
+
+
+def test_api_status_omits_unrealized_pnl_when_no_current_price_is_available(monkeypatch):
+    """No matching check for this ticker yet (e.g. right after a fresh
+    adopt/reconcile, before the next fast_check cycle runs) -- must not
+    crash or fabricate a P&L number from missing data."""
+    from data import perps_strategy as strat
+
+    monkeypatch.setattr(strat, "_load_state", lambda: {
+        "positions": [{
+            "ticker": "KXBTCPERP", "side": "long", "entry_price": 6.60, "count": 10.0,
+            "opened_at": "2026-08-19T00:00:00+00:00",
+        }],
+        "trade_log": [], "realized_pnl_by_date": {},
+    })
+    monkeypatch.setattr(app_kalshi, "load_json", lambda path, default: default)
+
+    with app_kalshi.app.test_client() as client:
+        resp = client.get("/api/status")
+        position = resp.get_json()["positions"][0]
+        assert "unrealized_pnl_usd" not in position
+
+
 def test_perps_report_pdf_route_returns_a_downloadable_pdf(monkeypatch):
     from data import perps_strategy
 
