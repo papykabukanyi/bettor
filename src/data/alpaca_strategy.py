@@ -1001,6 +1001,32 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                             # 9:30-4:00 ET -- needs a plain limit sell with
                             # extended_hours=true instead (no bracket to
                             # rely on either way -- see scan_and_enter).
+                            #
+                            # Real, confirmed live incident (2026-08-18):
+                            # every entry here is a bracket order, whose
+                            # take-profit/stop-loss CHILD legs stay open on
+                            # Alpaca's books until the bracket parent fills
+                            # or they're explicitly canceled -- close_position()
+                            # cancels them automatically (its own docstring),
+                            # but this manual extended-hours path never did.
+                            # Placing a new sell limit while the bracket's own
+                            # open sell-side TP leg still exists oversells the
+                            # position from Alpaca's perspective, rejected
+                            # outright with 403 -- confirmed via 1149
+                            # consecutive failures on one real NVDA position
+                            # over ~6.5 hours, unable to exit the whole time.
+                            # Cancel whatever's still open for this symbol
+                            # first so the new order is the only one live.
+                            try:
+                                for open_order in alpaca_client.get_orders(status="open", symbols=[symbol]):
+                                    order_id = open_order.get("id")
+                                    if order_id:
+                                        alpaca_client.cancel_order(order_id)
+                            except Exception as exc:
+                                logger.warning(
+                                    "[alpaca_strategy] could not cancel existing open orders for %s before "
+                                    "extended-hours exit (will still attempt the exit order): %s", symbol, exc,
+                                )
                             order_spec = alpaca_client.build_extended_hours_limit_order(
                                 symbol=symbol, quantity=position["count"], side="sell",
                                 limit_price=current_price * 0.998,

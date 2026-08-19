@@ -435,10 +435,12 @@ def get_order(order_id: str) -> dict[str, Any]:
     return _trading_get(f"/v2/orders/{order_id}")
 
 
-def get_orders(*, status: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+def get_orders(*, status: str | None = None, limit: int = 50, symbols: list[str] | None = None) -> list[dict[str, Any]]:
     params: dict[str, Any] = {"limit": limit}
     if status:
         params["status"] = status
+    if symbols:
+        params["symbols"] = ",".join(symbols)
     result = _trading_get("/v2/orders", params=params)
     return result if isinstance(result, list) else []
 

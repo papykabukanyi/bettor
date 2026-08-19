@@ -879,6 +879,7 @@ def test_manage_open_positions_uses_an_extended_hours_limit_order_during_pre_mar
         raise AssertionError("close_position() is a market order -- must not be used outside regular hours")
 
     monkeypatch.setattr(alpaca_client, "close_position", fail_if_called)
+    monkeypatch.setattr(alpaca_client, "get_orders", lambda **kwargs: [])
     captured = {}
     monkeypatch.setattr(alpaca_client, "place_order", lambda order_spec: captured.update(order_spec) or "order-2")
 
@@ -887,6 +888,83 @@ def test_manage_open_positions_uses_an_extended_hours_limit_order_during_pre_mar
     assert captured["type"] == "limit"
     assert captured["extended_hours"] is True
     assert captured["side"] == "sell"
+
+
+def test_manage_open_positions_cancels_open_bracket_legs_before_an_extended_hours_exit(monkeypatch):
+    """Real, confirmed live incident (2026-08-18): a stock position entered
+    via a bracket order still has its take-profit/stop-loss CHILD orders
+    open on Alpaca's books during extended hours (only close_position()'s
+    own market-hours path cancels them automatically). Placing a new sell
+    limit on top of that still-open bracket leg oversells the position from
+    Alpaca's perspective and gets rejected with 403 -- confirmed via 1149
+    consecutive failures on one real NVDA position, unable to exit for
+    ~6.5 hours. Any open order for the symbol must be canceled first."""
+    monkeypatch.setattr(alpaca_data, "get_market_session", lambda: {"session": "after_hours", "is_open": False, "source": "test"})
+    monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", True)
+    strat._save_state({  # noqa: SLF001
+        "positions": [{
+            "symbol": "NVDA", "entry_price": 100.0, "count": 1.0,
+            "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(), "order_id": "order-1",
+        }],
+        "trade_log": [], "realized_pnl_by_date": {},
+    })
+    take_profit_price = 100.0 * (1 + strat.TAKE_PROFIT_PCT + 0.001)
+    monkeypatch.setattr(alpaca_client, "get_latest_quote", lambda symbol: {"ap": take_profit_price, "bp": take_profit_price})
+    calls = {"n": 0}
+
+    def fake_get_position(symbol):
+        calls["n"] += 1
+        return {"symbol": symbol, "qty": "1"} if calls["n"] == 1 else None
+
+    monkeypatch.setattr(alpaca_client, "get_position", fake_get_position)
+    monkeypatch.setattr(alpaca_client, "close_position", lambda symbol: (_ for _ in ()).throw(AssertionError("must not be used outside regular hours")))
+    monkeypatch.setattr(
+        alpaca_client, "get_orders",
+        lambda **kwargs: [{"id": "bracket-tp-leg"}, {"id": "bracket-sl-leg"}] if kwargs.get("symbols") == ["NVDA"] else [],
+    )
+    canceled = []
+    monkeypatch.setattr(alpaca_client, "cancel_order", lambda order_id: canceled.append(order_id))
+    monkeypatch.setattr(alpaca_client, "place_order", lambda order_spec: "order-2")
+
+    result = strat.manage_open_positions()
+    assert result["action"] == "closed"
+    assert set(canceled) == {"bracket-tp-leg", "bracket-sl-leg"}
+
+
+def test_manage_open_positions_extended_hours_exit_still_places_order_if_cancel_fails(monkeypatch):
+    """A best-effort cleanup -- if canceling the old bracket legs itself
+    fails, still attempt the real exit order rather than giving up
+    entirely (the exit order may still succeed, or fail with a clearer
+    error that at least gets logged)."""
+    monkeypatch.setattr(alpaca_data, "get_market_session", lambda: {"session": "after_hours", "is_open": False, "source": "test"})
+    monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", True)
+    strat._save_state({  # noqa: SLF001
+        "positions": [{
+            "symbol": "NVDA", "entry_price": 100.0, "count": 1.0,
+            "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(), "order_id": "order-1",
+        }],
+        "trade_log": [], "realized_pnl_by_date": {},
+    })
+    take_profit_price = 100.0 * (1 + strat.TAKE_PROFIT_PCT + 0.001)
+    monkeypatch.setattr(alpaca_client, "get_latest_quote", lambda symbol: {"ap": take_profit_price, "bp": take_profit_price})
+    calls = {"n": 0}
+
+    def fake_get_position(symbol):
+        calls["n"] += 1
+        return {"symbol": symbol, "qty": "1"} if calls["n"] == 1 else None
+
+    monkeypatch.setattr(alpaca_client, "get_position", fake_get_position)
+
+    def raise_error(**kwargs):
+        raise RuntimeError("network error")
+
+    monkeypatch.setattr(alpaca_client, "get_orders", raise_error)
+    placed = {}
+    monkeypatch.setattr(alpaca_client, "place_order", lambda order_spec: placed.update(order_spec) or "order-2")
+
+    result = strat.manage_open_positions()
+    assert result["action"] == "closed"
+    assert placed["side"] == "sell"
 
 
 def test_manage_open_positions_defers_a_live_exit_when_market_is_fully_closed(monkeypatch):
