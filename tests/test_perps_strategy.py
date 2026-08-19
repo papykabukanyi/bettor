@@ -2336,9 +2336,13 @@ def test_maker_order_missing_order_id_treated_as_fully_unfilled(monkeypatch):
     assert fill_type == "taker_fallback"
 
 
-def test_manage_open_positions_take_profit_tries_maker_order_when_enabled(monkeypatch, tmp_path):
-    """Non-urgent exits (take-profit) should attempt the far cheaper maker
-    fee first."""
+def test_manage_open_positions_take_profit_never_attempts_a_maker_order(monkeypatch, tmp_path):
+    """Real, confirmed live incident (2026-08-19): Kalshi's API rejects
+    post_only combined with reduce_only outright ("reduce_only can only be
+    used with IoC or FoK orders") -- there is no maker-fee path available
+    for ANY exit, take-profit included, regardless of ENABLE_MAKER_ORDERS.
+    3 real positions sat stuck, unable to close, for 300+ cycles before this
+    was caught. Exits must always go straight to a plain IoC taker order."""
     monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "state.json")
     monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", True)
     monkeypatch.setattr(strat, "ENABLE_MAKER_ORDERS", True)
@@ -2364,18 +2368,19 @@ def test_manage_open_positions_take_profit_tries_maker_order_when_enabled(monkey
         return _order_response()
 
     monkeypatch.setattr(strat, "create_margin_order", fake_create)
-    monkeypatch.setattr(strat, "get_margin_order", lambda order_id: {"order": {"fill_count": 5.0, "remaining_count": 0.0}})
 
     result = strat.manage_open_positions(dry_run=False)
     assert result["action"] == "closed"
-    assert len(placed) == 1  # filled by the maker order -- no taker fallback needed
-    assert placed[0]["post_only"] is True
-    assert result["closed"][0]["exit_fill_type"] == "maker"
+    assert len(placed) == 1  # straight to taker -- no maker attempt at all
+    assert placed[0].get("post_only", False) is False
+    assert placed[0]["time_in_force"] == "immediate_or_cancel"
+    assert result["closed"][0]["exit_fill_type"] == "taker_fallback"
 
 
-def test_manage_open_positions_stop_loss_falls_back_to_taker_when_maker_unfilled(monkeypatch, tmp_path):
-    """A stop-loss is urgent -- it must not sit waiting on a maker fill that
-    never comes while the price keeps moving against the position."""
+def test_manage_open_positions_stop_loss_never_attempts_a_maker_order(monkeypatch, tmp_path):
+    """Same real incident as the take-profit test above -- a stop-loss exit
+    must also go straight to a taker order, never the (permanently broken
+    for exits) maker path."""
     monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "state.json")
     monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", True)
     monkeypatch.setattr(strat, "ENABLE_MAKER_ORDERS", True)
@@ -2396,17 +2401,15 @@ def test_manage_open_positions_stop_loss_falls_back_to_taker_when_maker_unfilled
 
     placed = []
     monkeypatch.setattr(strat, "create_margin_order", lambda **kwargs: placed.append(kwargs) or _order_response())
-    monkeypatch.setattr(strat, "get_margin_order", lambda order_id: {"order": {"fill_count": 0.0, "remaining_count": 5.0}})
-    monkeypatch.setattr(strat, "cancel_margin_order", lambda order_id: None)
 
     result = strat.manage_open_positions(dry_run=False)
     assert result["action"] == "closed"
-    assert len(placed) == 2  # maker attempt, then the guaranteed taker fallback
-    assert placed[1]["time_in_force"] == "immediate_or_cancel"
+    assert len(placed) == 1  # a single, guaranteed taker order -- no maker attempt first
+    assert placed[0]["time_in_force"] == "immediate_or_cancel"
     assert result["closed"][0]["exit_fill_type"] == "taker_fallback"
 
 
-def test_manage_open_positions_falls_back_to_taker_when_no_bid_ask_even_if_maker_enabled(monkeypatch, tmp_path):
+def test_manage_open_positions_exit_is_a_taker_order_even_with_no_bid_ask(monkeypatch, tmp_path):
     monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "state.json")
     monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", True)
     monkeypatch.setattr(strat, "ENABLE_MAKER_ORDERS", True)
@@ -2415,7 +2418,8 @@ def test_manage_open_positions_falls_back_to_taker_when_no_bid_ask_even_if_maker
         "realized_pnl_by_date": {}, "trade_log": [], "daily_reference_balance": {},
     })
     exit_price = 6.60 * (1 + strat.TAKE_PROFIT_PCT + 0.001)
-    # No bid/ask in this market response -- _maker_price must return None.
+    # No bid/ask in this market response -- irrelevant to exits now (they
+    # never call _maker_price at all), included to confirm that stays true.
     monkeypatch.setattr(strat, "get_margin_market", lambda ticker: _market_response(price=exit_price))
     calls = {"n": 0}
 

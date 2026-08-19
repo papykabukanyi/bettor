@@ -1674,26 +1674,25 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                     # buying back (bid) -- both reduce_only so it can only ever
                     # shrink/close this exact position, never open a new one.
                     exit_order_side = "ask" if side == "long" else "bid"
-                    # stop_loss/max_hold_time exits need a GUARANTEED close --
-                    # a resting maker order that never fills while the price
-                    # keeps moving against the position defeats the whole
-                    # point of a stop-loss. take_profit/quick_profit exits are
-                    # discretionary (missing one just means re-evaluating next
-                    # 20s cycle), so they're worth a real shot at the much
-                    # cheaper maker fee first.
-                    urgent = reason.startswith("stop_loss") or reason.startswith("max_hold_time")
-                    maker_px = _maker_price(exit_order_side, market.get("market") or {}, tick_size) if ENABLE_MAKER_ORDERS else None
-                    if maker_px is not None:
-                        order_result, exit_fill_type = _place_order_maker_then_fallback(
-                            ticker=ticker, order_side=exit_order_side, count=count,
-                            maker_price=maker_px, fallback_price=exit_price,
-                            reduce_only=True, urgent=urgent,
-                        )
-                    else:
-                        order_result = create_margin_order(
-                            ticker=ticker, side=exit_order_side, count=count, price=exit_price,
-                            client_order_id=str(uuid.uuid4()), time_in_force="immediate_or_cancel", reduce_only=True,
-                        )
+                    # Real, confirmed live incident (2026-08-19): exits can
+                    # NEVER go through the maker-first path -- Kalshi's API
+                    # flatly rejects post_only (a resting GTC order) combined
+                    # with reduce_only ("reduce_only can only be used with IoC
+                    # or FoK orders", a real 400 response, not a transient
+                    # error). Every exit attempt that reached
+                    # _place_order_maker_then_fallback raised there before
+                    # ever getting an order_id, got caught by this block's own
+                    # except clause below, and left the position untouched --
+                    # 3 real open positions (KXLINKPERP/KXHYPEPERP/KXNEARPERP)
+                    # sat unable to close for 300+ consecutive fast_check
+                    # cycles as a result. Exits are always a plain IoC taker
+                    # order now, unconditionally -- there is no maker-fee path
+                    # available for a reduce_only order on this exchange, so
+                    # ENABLE_MAKER_ORDERS only ever applies to entries.
+                    order_result = create_margin_order(
+                        ticker=ticker, side=exit_order_side, count=count, price=exit_price,
+                        client_order_id=str(uuid.uuid4()), time_in_force="immediate_or_cancel", reduce_only=True,
+                    )
                     # An immediate_or_cancel order can fill zero, partially, or
                     # fully -- confirmed live on this account (repeated exit
                     # attempts came back fill_count 0.00, i.e. fully canceled).
