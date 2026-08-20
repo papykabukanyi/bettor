@@ -115,6 +115,43 @@ _cryptopanic_cooldown_until = 0.0
 # clear anytime) stops hammering a currently-failing endpoint without
 # risking a full day of degraded sentiment if it recovers sooner.
 _GOOGLE_NEWS_RSS_COOLDOWN_SEC = 30 * 60
+
+# Real gap found in review (2026-08-19): the SAME no-backoff bug fixed for
+# Google News RSS above never got ported to the general-purpose RSS fetch
+# path (_fetch_rss_titles/_fetch_rss_items_cached -- cointelegraph,
+# cryptoslate, decrypt) despite this exact module's own comment already
+# naming "CryptoSlate's own 429" as a known instance of the same "shared
+# outbound IP" cause. Confirmed live: 142 "cryptoslate rss failed: 429"
+# occurrences across 5 days, every single one silently retried next cycle
+# with no cooldown at all. Keyed by source_name (one shared cooldown per
+# feed, not global) since these 3 feeds fail independently.
+_RSS_COOLDOWN_SEC = 30 * 60
+_rss_cooldown_until: dict[str, float] = {}
+
+
+def _fetch_rss_root(url: str, *, source_name: str, headers: dict[str, str] | None = None) -> Any:
+    """Shared fetch-with-backoff for every plain RSS feed in this module
+    (previously duplicated between _fetch_rss_titles and
+    _fetch_rss_items_cached, with only the LATTER even attempting real
+    error differentiation) -- returns the parsed XML root, or None on any
+    failure (rate-limited, network, malformed feed). Never raises."""
+    now = time.time()
+    if now < _rss_cooldown_until.get(source_name, 0.0):
+        return None
+    try:
+        resp = requests.get(url, timeout=_TIMEOUT_SEC, headers=headers or {"User-Agent": "Mozilla/5.0"})
+        if resp.status_code in (429, 503):
+            _rss_cooldown_until[source_name] = now + _RSS_COOLDOWN_SEC
+            logger.warning(
+                "[crypto_news] %s rss returned %d -- pausing this source for %.0f minutes",
+                source_name, resp.status_code, _RSS_COOLDOWN_SEC / 60,
+            )
+            return None
+        resp.raise_for_status()
+        return ET.fromstring(resp.content)
+    except Exception as exc:
+        logger.warning("[crypto_news] %s rss failed: %s", source_name, exc)
+        return None
 _google_news_rss_cooldown_until = 0.0
 
 # Confirmed live: with every active ticker each checked roughly every 10
@@ -225,14 +262,10 @@ def _fetch_rss_titles_cached(url: str, *, source_name: str, limit: int = 40) -> 
 
 
 def _fetch_rss_titles(url: str, *, source_name: str, limit: int = 40, headers: dict[str, str] | None = None) -> list[str]:
-    try:
-        resp = requests.get(url, timeout=_TIMEOUT_SEC, headers=headers or {"User-Agent": "Mozilla/5.0"})
-        resp.raise_for_status()
-        root = ET.fromstring(resp.content)
-        return [item.findtext("title") or "" for item in root.iter("item")][:limit]
-    except Exception as exc:
-        logger.warning("[crypto_news] %s rss failed: %s", source_name, exc)
+    root = _fetch_rss_root(url, source_name=source_name, headers=headers)
+    if root is None:
         return []
+    return [item.findtext("title") or "" for item in root.iter("item")][:limit]
 
 
 def _fetch_google_news_rss(query: str) -> list[str]:
@@ -459,33 +492,29 @@ def _fetch_rss_items_cached(url: str, *, source_name: str, limit: int = 40) -> l
     cached = _rich_feed_cache.get(source_name)
     if cached and (now - cached[1]) < _GENERAL_FEED_CACHE_TTL_SEC:
         return cached[0]
-    try:
-        resp = requests.get(url, timeout=_TIMEOUT_SEC, headers={"User-Agent": "Mozilla/5.0"})
-        resp.raise_for_status()
-        root = ET.fromstring(resp.content)
-        items = []
-        for item in root.iter("item"):
-            title = item.findtext("title") or ""
-            if not title:
-                continue
-            image_url = None
-            for tag in ("enclosure", "{http://search.yahoo.com/mrss/}content", "{http://search.yahoo.com/mrss/}thumbnail"):
-                el = item.find(tag)
-                if el is not None and el.get("url"):
-                    image_url = el.get("url")
-                    break
-            items.append({
-                "title": title, "link": item.findtext("link") or "",
-                "pub_date": item.findtext("pubDate") or "", "image_url": image_url,
-                "source": source_name,
-            })
-        items = items[:limit]
-        if items:
-            _rich_feed_cache[source_name] = (items, now)
-        return items
-    except Exception as exc:
-        logger.warning("[crypto_news] %s rich rss failed: %s", source_name, exc)
+    root = _fetch_rss_root(url, source_name=source_name)
+    if root is None:
         return []
+    items = []
+    for item in root.iter("item"):
+        title = item.findtext("title") or ""
+        if not title:
+            continue
+        image_url = None
+        for tag in ("enclosure", "{http://search.yahoo.com/mrss/}content", "{http://search.yahoo.com/mrss/}thumbnail"):
+            el = item.find(tag)
+            if el is not None and el.get("url"):
+                image_url = el.get("url")
+                break
+        items.append({
+            "title": title, "link": item.findtext("link") or "",
+            "pub_date": item.findtext("pubDate") or "", "image_url": image_url,
+            "source": source_name,
+        })
+    items = items[:limit]
+    if items:
+        _rich_feed_cache[source_name] = (items, now)
+    return items
 
 
 def get_trending_story() -> dict[str, Any] | None:

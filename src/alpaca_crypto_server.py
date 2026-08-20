@@ -130,6 +130,16 @@ ALPACA_STOCKS_SERVER_URL = os.getenv("ALPACA_STOCKS_SERVER_URL", "#")
 ALPACA_OPTIONS_SERVER_URL = os.getenv("ALPACA_OPTIONS_SERVER_URL", "#")
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+# Real, confirmed noise found in review: huggingface_hub's own internal
+# logger warns "No files have been modified since last commit. Skipping
+# to prevent empty commit." on every single upload call that happened to
+# produce identical bytes to what's already archived -- EXPECTED,
+# harmless behavior (confirmed live: 500+ occurrences per service across
+# 5 days), not a real warning, but at WARNING level it drowned out
+# genuine warnings in the same log stream. Downgraded to this specific
+# library logger only -- this app's OWN logging (via `logger` below)
+# is completely unaffected.
+logging.getLogger("huggingface_hub.hf_api").setLevel(logging.ERROR)
 logger = logging.getLogger(__name__)
 app = Flask("alpaca_crypto_server", template_folder="templates")
 # Real, confirmed production incident found in review (same mechanism

@@ -149,6 +149,66 @@ def test_fetch_google_news_rss_calls_again_once_cooldown_expires(monkeypatch):
     assert calls["n"] == 1
 
 
+def test_fetch_rss_root_enters_cooldown_after_a_429_and_stops_calling(monkeypatch):
+    """Real, confirmed gap: the general RSS fetch path (cointelegraph/
+    cryptoslate/decrypt) never had this same backoff Google News RSS
+    already got -- confirmed live via 142 "cryptoslate rss failed: 429"
+    occurrences across 5 days, every one silently retried next cycle with
+    no cooldown at all. Cooldown is keyed per source_name, not global."""
+    monkeypatch.setattr(news, "_rss_cooldown_until", {})
+    calls = {"n": 0}
+
+    class _RateLimitedResponse:
+        status_code = 429
+
+    def fake_get(*a, **k):
+        calls["n"] += 1
+        return _RateLimitedResponse()
+
+    monkeypatch.setattr(news.requests, "get", fake_get)
+    assert news._fetch_rss_root("https://cryptoslate.com/feed/", source_name="cryptoslate") is None  # noqa: SLF001
+    assert calls["n"] == 1
+
+    # Immediately after: still in cooldown for THIS source, must NOT call again.
+    assert news._fetch_rss_root("https://cryptoslate.com/feed/", source_name="cryptoslate") is None  # noqa: SLF001
+    assert calls["n"] == 1
+
+
+def test_fetch_rss_root_cooldown_is_independent_per_source(monkeypatch):
+    monkeypatch.setattr(news, "_rss_cooldown_until", {})
+
+    class _RateLimitedResponse:
+        status_code = 429
+
+    monkeypatch.setattr(news.requests, "get", lambda *a, **k: _RateLimitedResponse())
+    news._fetch_rss_root("https://cryptoslate.com/feed/", source_name="cryptoslate")  # noqa: SLF001
+
+    calls = {"n": 0}
+
+    class _OkResponse:
+        status_code = 200
+        content = b"<rss><channel></channel></rss>"
+
+        def raise_for_status(self):
+            pass
+
+    def fake_get_ok(*a, **k):
+        calls["n"] += 1
+        return _OkResponse()
+
+    monkeypatch.setattr(news.requests, "get", fake_get_ok)
+    # A DIFFERENT source's own cooldown must be unaffected by cryptoslate's.
+    result = news._fetch_rss_root("https://cointelegraph.com/rss", source_name="cointelegraph")  # noqa: SLF001
+    assert result is not None
+    assert calls["n"] == 1
+
+
+def test_fetch_rss_titles_uses_the_shared_cooldown_fetch(monkeypatch):
+    monkeypatch.setattr(news, "_rss_cooldown_until", {})
+    monkeypatch.setattr(news, "_fetch_rss_root", lambda url, *, source_name, headers=None: None)
+    assert news._fetch_rss_titles("https://cryptoslate.com/feed/", source_name="cryptoslate") == []  # noqa: SLF001
+
+
 def test_fetch_cryptopanic_skips_silently_without_a_key(monkeypatch):
     monkeypatch.setattr(news, "CRYPTOPANIC_API_KEY", "")
 
