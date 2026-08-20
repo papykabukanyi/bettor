@@ -57,7 +57,7 @@ def _trade_stats(trade_log: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def _make_pdf():
-    from fpdf import FPDF, XPos, YPos
+    from fpdf import FPDF
 
     class _ReportPDF(FPDF):
         """footer() is fpdf2's own per-page hook -- called automatically

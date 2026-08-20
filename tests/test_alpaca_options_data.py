@@ -6,8 +6,6 @@ expiration within the configured window), and reuse of alpaca_data.py's
 own feature engineering rather than duplicating it."""
 from __future__ import annotations
 
-import datetime as dt
-
 import pandas as pd
 import pytest
 

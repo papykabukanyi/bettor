@@ -86,7 +86,6 @@ def test_engineer_features_label_matches_future_direction():
     hourly_df = perps_data._candles_to_frame(_make_hourly_before(1_700_000_000))  # noqa: SLF001
 
     feats = perps_data.engineer_features(one_min_df, hourly_df, sentiment_score=0.0)
-    horizon = perps_data.LABEL_HORIZON_MINUTES
     labeled = feats.dropna(subset=["label_up"])
     # Rows sitting in the flat-100 region whose horizon lands in the flat-200
     # region must be labeled "up".

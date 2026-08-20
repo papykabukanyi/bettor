@@ -6,7 +6,6 @@ for end-to-end tests wired to its real fit_backtest_model/simulate)."""
 from __future__ import annotations
 
 import pandas as pd
-import pytest
 
 from data import walkforward as wf
 

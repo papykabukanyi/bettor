@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-import pytest
 
 from data import perps_backtest as bt
 from data import perps_strategy as strat
