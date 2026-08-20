@@ -352,6 +352,121 @@ def test_trend_trailing_exits_on_a_real_retracement_from_the_peak(monkeypatch):
     assert "trailing_stop" in reason
 
 
+# ── WIDEN_TRAILING_WHEN_PROMISING (flagged, default OFF) ────────────────────
+
+def test_widen_trailing_flag_off_by_default_preserves_existing_behavior(monkeypatch):
+    """Default-OFF must be a pure no-op -- same posture as
+    SKIP_QUICK_PROFIT_WHEN_PROMISING and USE_TREND_TRAILING_STRATEGY
+    itself when they first shipped."""
+    assert strat.WIDEN_TRAILING_WHEN_PROMISING is False
+    monkeypatch.setattr(strat, "USE_TREND_TRAILING_STRATEGY", True)
+    pos = _position(minutes_ago=1)
+    entry_price = 6.60
+    peak_price = entry_price * (1 + strat.TRAILING_ACTIVATION_PCT * 2)
+    strat.decide_exit(pos, peak_price)  # activates trailing
+    retraced_price = peak_price - entry_price * (strat.TRAILING_DISTANCE_PCT + 0.001)
+    should_exit, reason = strat.decide_exit(
+        pos, retraced_price, dollar_volume_z=strat.PROMISING_VOLUME_Z + 1.0, momentum_pct=strat.PROMISING_MOMENTUM_PCT + 0.001,
+    )
+    assert should_exit and "trailing_stop" in reason and "widened" not in reason
+
+
+def test_widen_trailing_when_promising_holds_through_the_normal_distance(monkeypatch):
+    """A retrace that would trigger the STANDARD trailing distance, with
+    real volume-confirmed momentum continuation, must NOT exit -- it needs
+    the WIDER distance instead."""
+    monkeypatch.setattr(strat, "USE_TREND_TRAILING_STRATEGY", True)
+    monkeypatch.setattr(strat, "WIDEN_TRAILING_WHEN_PROMISING", True)
+    pos = _position(minutes_ago=1)
+    entry_price = 6.60
+    peak_price = entry_price * (1 + strat.TRAILING_ACTIVATION_PCT * 2)
+    strat.decide_exit(pos, peak_price, dollar_volume_z=strat.PROMISING_VOLUME_Z + 1.0, momentum_pct=strat.PROMISING_MOMENTUM_PCT + 0.001)
+
+    retraced_price = peak_price - entry_price * (strat.TRAILING_DISTANCE_PCT + 0.001)
+    should_exit, reason = strat.decide_exit(
+        pos, retraced_price, dollar_volume_z=strat.PROMISING_VOLUME_Z + 1.0, momentum_pct=strat.PROMISING_MOMENTUM_PCT + 0.001,
+    )
+    assert not should_exit
+    assert "holding" in reason
+
+
+def test_widen_trailing_when_promising_still_exits_once_the_wider_distance_is_hit(monkeypatch):
+    monkeypatch.setattr(strat, "USE_TREND_TRAILING_STRATEGY", True)
+    monkeypatch.setattr(strat, "WIDEN_TRAILING_WHEN_PROMISING", True)
+    pos = _position(minutes_ago=1)
+    entry_price = 6.60
+    peak_price = entry_price * (1 + strat.TRAILING_ACTIVATION_PCT * 2)
+    strat.decide_exit(pos, peak_price, dollar_volume_z=strat.PROMISING_VOLUME_Z + 1.0, momentum_pct=strat.PROMISING_MOMENTUM_PCT + 0.001)
+
+    wider_distance = strat.TRAILING_DISTANCE_PCT * strat.TRAILING_DISTANCE_WIDEN_MULTIPLIER
+    retraced_price = peak_price - entry_price * (wider_distance + 0.001)
+    should_exit, reason = strat.decide_exit(
+        pos, retraced_price, dollar_volume_z=strat.PROMISING_VOLUME_Z + 1.0, momentum_pct=strat.PROMISING_MOMENTUM_PCT + 0.001,
+    )
+    assert should_exit
+    assert "trailing_stop widened" in reason
+
+
+def test_widen_trailing_when_promising_does_not_widen_without_volume_confirmation(monkeypatch):
+    """Momentum alone, with no real volume behind it, must not widen the
+    stop -- matches the same volume-gating discipline the fixed-take-profit
+    path's own promising check already applies."""
+    monkeypatch.setattr(strat, "USE_TREND_TRAILING_STRATEGY", True)
+    monkeypatch.setattr(strat, "WIDEN_TRAILING_WHEN_PROMISING", True)
+    pos = _position(minutes_ago=1)
+    entry_price = 6.60
+    peak_price = entry_price * (1 + strat.TRAILING_ACTIVATION_PCT * 2)
+    strat.decide_exit(pos, peak_price, momentum_pct=strat.PROMISING_MOMENTUM_PCT + 0.001)  # no dollar_volume_z
+
+    retraced_price = peak_price - entry_price * (strat.TRAILING_DISTANCE_PCT + 0.001)
+    should_exit, reason = strat.decide_exit(pos, retraced_price, momentum_pct=strat.PROMISING_MOMENTUM_PCT + 0.001)
+    assert should_exit and "widened" not in reason
+
+
+def test_widen_trailing_when_promising_via_breakout_signal_too(monkeypatch):
+    monkeypatch.setattr(strat, "USE_TREND_TRAILING_STRATEGY", True)
+    monkeypatch.setattr(strat, "WIDEN_TRAILING_WHEN_PROMISING", True)
+    pos = _position(minutes_ago=1)
+    entry_price = 6.60
+    peak_price = entry_price * (1 + strat.TRAILING_ACTIVATION_PCT * 2)
+    strat.decide_exit(pos, peak_price, dollar_volume_z=strat.PROMISING_VOLUME_Z + 1.0, breakout_pct_b=strat.PROMISING_BREAKOUT_PCT_B + 0.01)
+
+    retraced_price = peak_price - entry_price * (strat.TRAILING_DISTANCE_PCT + 0.001)
+    should_exit, reason = strat.decide_exit(
+        pos, retraced_price, dollar_volume_z=strat.PROMISING_VOLUME_Z + 1.0, breakout_pct_b=strat.PROMISING_BREAKOUT_PCT_B + 0.01,
+    )
+    assert not should_exit
+
+
+def test_widen_trailing_when_promising_never_touches_the_stop_loss_boundary(monkeypatch):
+    """The hard risk boundary (stop_loss) must never be widened/skipped --
+    only the discretionary retrace-based trailing trigger is affected."""
+    monkeypatch.setattr(strat, "USE_TREND_TRAILING_STRATEGY", True)
+    monkeypatch.setattr(strat, "WIDEN_TRAILING_WHEN_PROMISING", True)
+    pos = _position(minutes_ago=1)
+    price = 6.60 * (1 - strat.TRAILING_STOP_LOSS_PCT - 0.001)
+    should_exit, reason = strat.decide_exit(
+        pos, price, dollar_volume_z=strat.PROMISING_VOLUME_Z + 1.0, momentum_pct=strat.PROMISING_MOMENTUM_PCT + 0.001,
+    )
+    assert should_exit and "stop_loss" in reason
+
+
+def test_widen_trailing_when_promising_is_side_aware_for_a_short(monkeypatch):
+    monkeypatch.setattr(strat, "USE_TREND_TRAILING_STRATEGY", True)
+    monkeypatch.setattr(strat, "WIDEN_TRAILING_WHEN_PROMISING", True)
+    pos = _position(minutes_ago=1, side="short")
+    entry_price = 6.60
+    peak_price = entry_price * (1 - strat.TRAILING_ACTIVATION_PCT * 2)
+    # Falling raw momentum is FAVORABLE (continuation) for a short.
+    strat.decide_exit(pos, peak_price, dollar_volume_z=strat.PROMISING_VOLUME_Z + 1.0, momentum_pct=-(strat.PROMISING_MOMENTUM_PCT + 0.001))
+
+    retraced_price = peak_price + entry_price * (strat.TRAILING_DISTANCE_PCT + 0.001)
+    should_exit, reason = strat.decide_exit(
+        pos, retraced_price, dollar_volume_z=strat.PROMISING_VOLUME_Z + 1.0, momentum_pct=-(strat.PROMISING_MOMENTUM_PCT + 0.001),
+    )
+    assert not should_exit
+
+
 def test_trend_trailing_keeps_running_while_still_near_its_own_peak(monkeypatch):
     monkeypatch.setattr(strat, "USE_TREND_TRAILING_STRATEGY", True)
     pos = _position(minutes_ago=1)
@@ -522,6 +637,91 @@ def test_quick_profit_does_not_trigger_on_slow_gain():
     should_exit, reason = strat.decide_exit(pos, price, velocity_pct_per_min=0.0001)
     assert not should_exit
     assert "holding" in reason
+
+
+# ── SKIP_QUICK_PROFIT_WHEN_PROMISING (flagged, default OFF) ─────────────────
+
+def test_skip_quick_profit_flag_off_by_default_preserves_existing_behavior(monkeypatch):
+    """Default-OFF must be a pure no-op -- confirms this flagged feature
+    can ship without changing anything for the live account until
+    explicitly turned on, same posture as USE_TREND_TRAILING_STRATEGY."""
+    assert strat.SKIP_QUICK_PROFIT_WHEN_PROMISING is False
+    pos = _position()
+    price = 6.60 * (1 + strat.QUICK_PROFIT_PCT + 0.0002)
+    should_exit, reason = strat.decide_exit(
+        pos, price, velocity_pct_per_min=strat.QUICK_PROFIT_VELOCITY_PCT_PER_MIN + 0.001,
+        dollar_volume_z=strat.PROMISING_VOLUME_Z + 1.0, momentum_pct=strat.PROMISING_MOMENTUM_PCT + 0.001,
+    )
+    assert should_exit and "quick_profit" in reason
+
+
+def test_skip_quick_profit_when_promising_holds_through_confirmed_continuation(monkeypatch):
+    """Real, volume-confirmed momentum continuation -- with the flag on,
+    quick_profit must NOT fire; the position keeps holding toward the
+    bigger take-profit target instead."""
+    monkeypatch.setattr(strat, "SKIP_QUICK_PROFIT_WHEN_PROMISING", True)
+    pos = _position()
+    price = 6.60 * (1 + strat.QUICK_PROFIT_PCT + 0.0002)
+    should_exit, reason = strat.decide_exit(
+        pos, price, velocity_pct_per_min=strat.QUICK_PROFIT_VELOCITY_PCT_PER_MIN + 0.001,
+        dollar_volume_z=strat.PROMISING_VOLUME_Z + 1.0, momentum_pct=strat.PROMISING_MOMENTUM_PCT + 0.001,
+    )
+    assert not should_exit
+    assert "holding" in reason
+
+
+def test_skip_quick_profit_when_promising_still_fires_without_volume_confirmation(monkeypatch):
+    """Momentum alone, with no real volume behind it, must not be enough
+    to override the fast exit -- matches the same volume-gating discipline
+    the max_hold "promising" check already applies."""
+    monkeypatch.setattr(strat, "SKIP_QUICK_PROFIT_WHEN_PROMISING", True)
+    pos = _position()
+    price = 6.60 * (1 + strat.QUICK_PROFIT_PCT + 0.0002)
+    should_exit, reason = strat.decide_exit(
+        pos, price, velocity_pct_per_min=strat.QUICK_PROFIT_VELOCITY_PCT_PER_MIN + 0.001,
+        dollar_volume_z=None, momentum_pct=strat.PROMISING_MOMENTUM_PCT + 0.001,
+    )
+    assert should_exit and "quick_profit" in reason
+
+
+def test_skip_quick_profit_when_promising_via_breakout_signal_too(monkeypatch):
+    monkeypatch.setattr(strat, "SKIP_QUICK_PROFIT_WHEN_PROMISING", True)
+    pos = _position()
+    price = 6.60 * (1 + strat.QUICK_PROFIT_PCT + 0.0002)
+    should_exit, reason = strat.decide_exit(
+        pos, price, velocity_pct_per_min=strat.QUICK_PROFIT_VELOCITY_PCT_PER_MIN + 0.001,
+        dollar_volume_z=strat.PROMISING_VOLUME_Z + 1.0, breakout_pct_b=strat.PROMISING_BREAKOUT_PCT_B + 0.01,
+    )
+    assert not should_exit
+
+
+def test_skip_quick_profit_when_promising_still_fires_without_any_continuation_signal(monkeypatch):
+    """Flag on, but neither momentum nor breakout confirms continuation --
+    quick_profit still fires normally."""
+    monkeypatch.setattr(strat, "SKIP_QUICK_PROFIT_WHEN_PROMISING", True)
+    pos = _position()
+    price = 6.60 * (1 + strat.QUICK_PROFIT_PCT + 0.0002)
+    should_exit, reason = strat.decide_exit(
+        pos, price, velocity_pct_per_min=strat.QUICK_PROFIT_VELOCITY_PCT_PER_MIN + 0.001,
+        dollar_volume_z=strat.PROMISING_VOLUME_Z + 1.0,
+    )
+    assert should_exit and "quick_profit" in reason
+
+
+def test_skip_quick_profit_when_promising_applies_to_shorts_too(monkeypatch):
+    """A short position's FAVORABLE momentum/breakout are sign-flipped from
+    the raw values (same convention every other side-aware signal here
+    already uses) -- confirms the skip logic respects that, not just the
+    long-only case."""
+    monkeypatch.setattr(strat, "SKIP_QUICK_PROFIT_WHEN_PROMISING", True)
+    pos = _position(side="short")
+    price = 6.60 * (1 - strat.QUICK_PROFIT_PCT - 0.0002)
+    # Falling raw momentum is FAVORABLE (continuation) for a short.
+    should_exit, reason = strat.decide_exit(
+        pos, price, velocity_pct_per_min=-(strat.QUICK_PROFIT_VELOCITY_PCT_PER_MIN + 0.001),
+        dollar_volume_z=strat.PROMISING_VOLUME_Z + 1.0, momentum_pct=-(strat.PROMISING_MOMENTUM_PCT + 0.001),
+    )
+    assert not should_exit
 
 
 def test_update_velocity_returns_none_until_two_samples_span_time():

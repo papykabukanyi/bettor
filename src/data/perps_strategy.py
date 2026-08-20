@@ -484,6 +484,20 @@ TRAILING_STOP_LOSS_PCT = _env_float("PERPS_TRAILING_STOP_LOSS_PCT", 0.01)
 TRAILING_ACTIVATION_PCT = _env_float("PERPS_TRAILING_ACTIVATION_PCT", 0.08)
 TRAILING_DISTANCE_PCT = _env_float("PERPS_TRAILING_DISTANCE_PCT", 0.02)
 TRAILING_MAX_HOLD_MINUTES = _env_int("PERPS_TRAILING_MAX_HOLD_MINUTES", 1440)
+# Per explicit user direction: check volume/trend data before exiting, not
+# just take the retrace-triggered exit. _decide_exit_trailing() deliberately
+# never consulted the volume/momentum/breakout signals decide_exit's own
+# fixed-take-profit path already uses (see that function's own docstring --
+# "mixing them with a trailing stop was never backtested"). This is that
+# real, validated combination: when the trailing retrace trigger fires but
+# volume-confirmed momentum/breakout still shows continuation, the exit
+# requires a WIDER retrace instead of firing immediately -- more room for a
+# position that still looks like it's trending, not a skip (this stays a
+# real, bounded stop, never disabled outright). Flagged, default OFF
+# pending real backtest validation, same posture as the trailing strategy
+# itself when it first shipped.
+WIDEN_TRAILING_WHEN_PROMISING = _env_flag("PERPS_WIDEN_TRAILING_WHEN_PROMISING", default=False)
+TRAILING_DISTANCE_WIDEN_MULTIPLIER = _env_float("PERPS_TRAILING_DISTANCE_WIDEN_MULTIPLIER", 1.5)
 
 ENTRY_DIP_PCT = _env_float("PERPS_ENTRY_DIP_PCT", 0.0015)      # 0.15% below short MA triggers interest
 SHORT_MA_MINUTES = _env_int("PERPS_SHORT_MA_MINUTES", 15)
@@ -533,6 +547,17 @@ LIVE_TRADING_ENABLED = _env_flag("KALSHI_PERPS_LIVE_TRADING_ENABLED", default=Fa
 QUICK_PROFIT_PCT = _env_float("PERPS_QUICK_PROFIT_PCT", 0.018)
 QUICK_PROFIT_VELOCITY_PCT_PER_MIN = _env_float("PERPS_QUICK_PROFIT_VELOCITY_PCT_PER_MIN", 0.006)
 QUICK_PROFIT_WINDOW_SECONDS = _env_int("PERPS_QUICK_PROFIT_WINDOW_SECONDS", 90)
+# Per explicit user direction: check volume/trend data before exiting, not
+# just at the max_hold_time deadline (see PROMISING_PROGRESS_FRACTION's own
+# comment -- that mechanism already does this, just only at the timeout
+# edge). This extends the SAME "promising" signal check to quick_profit --
+# a fast, EARLY exit at a smaller gain -- so a position showing real
+# volume-confirmed momentum/breakout doesn't get cashed out early right as
+# a bigger move is building. Flagged, default OFF pending real backtest
+# validation before this touches the live (real-money) account -- same
+# "prove it out, then ship" posture as USE_TREND_TRAILING_STRATEGY/
+# ENABLE_SHORTS.
+SKIP_QUICK_PROFIT_WHEN_PROMISING = _env_flag("PERPS_SKIP_QUICK_PROFIT_WHEN_PROMISING", default=False)
 
 # "When it's choppy/fast, take the smaller sure thing": if the position's
 # OWN recent price samples (the same ones _update_velocity already tracks --
@@ -1099,15 +1124,21 @@ def adaptive_exit_pcts(entry_volatility_30: float | None) -> dict[str, float]:
     }
 
 
-def _decide_exit_trailing(position: dict[str, Any], current_price: float, *, now: dt.datetime | None = None) -> tuple[bool, str]:
+def _decide_exit_trailing(
+    position: dict[str, Any], current_price: float, *, now: dt.datetime | None = None,
+    dollar_volume_z: float | None = None, momentum_pct: float | None = None, breakout_pct_b: float | None = None,
+) -> tuple[bool, str]:
     """USE_TREND_TRAILING_STRATEGY's own exit half -- see that constant's
     module-level comment for the full backtest/rationale. Deliberately
-    simple/self-contained (stop_loss + trailing + max_hold only, none of
-    take_profit/quick_profit/pre_exit_study/promising-extension) -- those
-    mechanisms were tuned and validated against the OLD fixed-take-profit
-    shape, and mixing them with a trailing stop was never backtested, so
-    this implements EXACTLY the shape that real 2400-combo grid + holdout
-    check actually covered, not a guessed hybrid of the two."""
+    simple/self-contained (stop_loss + trailing + max_hold, plus ONLY
+    WIDEN_TRAILING_WHEN_PROMISING -- see that flag's own comment -- from
+    the fixed-take-profit path's own promising-position signals) -- the
+    rest of that path (take_profit/quick_profit/pre_exit_study/max_hold
+    "promising" extension) was tuned and validated against the OLD
+    fixed-take-profit shape, and mixing THOSE in with a trailing stop was
+    never backtested, so this still implements EXACTLY the shape the real
+    2400-combo grid + holdout check covered, plus the one addition that
+    got its own real, separate backtest validation."""
     entry_price = float(position["entry_price"])
     is_short = position.get("side") == "short"
     change_pct = (
@@ -1124,8 +1155,22 @@ def _decide_exit_trailing(position: dict[str, Any], current_price: float, *, now
         retrace_pct = (
             (current_price - peak) / entry_price if is_short else (peak - current_price) / entry_price
         )
-        if retrace_pct >= TRAILING_DISTANCE_PCT:
-            return True, f"trailing_stop (peak {peak_change_pct:+.3%}, retraced {retrace_pct:.3%})"
+        effective_distance = TRAILING_DISTANCE_PCT
+        widened = False
+        if WIDEN_TRAILING_WHEN_PROMISING:
+            favorable_momentum = -momentum_pct if (is_short and momentum_pct is not None) else momentum_pct
+            favorable_breakout = (1.0 - breakout_pct_b) if (is_short and breakout_pct_b is not None) else breakout_pct_b
+            volume_confirmed = dollar_volume_z is not None and dollar_volume_z >= PROMISING_VOLUME_Z
+            continuation_confirmed = volume_confirmed and (
+                (favorable_momentum is not None and favorable_momentum >= PROMISING_MOMENTUM_PCT)
+                or (favorable_breakout is not None and favorable_breakout >= PROMISING_BREAKOUT_PCT_B)
+            )
+            if continuation_confirmed:
+                effective_distance = TRAILING_DISTANCE_PCT * TRAILING_DISTANCE_WIDEN_MULTIPLIER
+                widened = True
+        if retrace_pct >= effective_distance:
+            widen_note = " widened" if widened else ""
+            return True, f"trailing_stop{widen_note} (peak {peak_change_pct:+.3%}, retraced {retrace_pct:.3%})"
 
     opened_at = dt.datetime.fromisoformat(position["opened_at"])
     now = now if now is not None else dt.datetime.now(dt.timezone.utc)
@@ -1197,7 +1242,10 @@ def decide_exit(
     omit both (the default) to fall back to the pre-existing technical-only
     behavior exactly."""
     if USE_TREND_TRAILING_STRATEGY:
-        return _decide_exit_trailing(position, current_price, now=now)
+        return _decide_exit_trailing(
+            position, current_price, now=now,
+            dollar_volume_z=dollar_volume_z, momentum_pct=momentum_pct, breakout_pct_b=breakout_pct_b,
+        )
     entry_price = float(position["entry_price"])
     is_short = position.get("side") == "short"
     exit_pcts = adaptive_exit_pcts(position.get("entry_volatility_30"))
@@ -1223,10 +1271,29 @@ def decide_exit(
         favorable_model_confidence = probability_up if (model_ok and probability_up is not None) else None
 
     if change_pct >= quick_profit_pct:
-        if favorable_velocity is not None and favorable_velocity >= QUICK_PROFIT_VELOCITY_PCT_PER_MIN:
-            return True, f"quick_profit (velocity {velocity_pct_per_min:+.2%}/min, gain {change_pct:+.3%})"
-        if favorable_external_velocity is not None and favorable_external_velocity >= QUICK_PROFIT_VELOCITY_PCT_PER_MIN:
-            return True, f"quick_profit (external velocity {external_velocity_pct_per_min:+.2%}/min, gain {change_pct:+.3%})"
+        # Per explicit user direction: check volume/trend data before
+        # exiting, not just take the fast exit -- real, volume-confirmed
+        # momentum/breakout continuation (the SAME signals the max_hold
+        # "promising position" extension already trusts, see that block's
+        # own comment) means the move looks like it's still building, so
+        # cashing out at the smaller quick-profit target risks leaving a
+        # bigger take-profit on the table. Flagged (SKIP_QUICK_PROFIT_WHEN_PROMISING,
+        # default OFF) pending real backtest validation -- see that flag's
+        # own comment. Deliberately narrower than max_hold's "promising"
+        # check: no price_promising (progress-to-take-profit isn't
+        # meaningful this early) and no sentiment/model (weaker signals,
+        # not worth overriding a fast, time-sensitive velocity-based exit).
+        volume_confirmed = dollar_volume_z is not None and dollar_volume_z >= PROMISING_VOLUME_Z
+        continuation_confirmed = volume_confirmed and change_pct >= 0 and (
+            (favorable_momentum is not None and favorable_momentum >= PROMISING_MOMENTUM_PCT)
+            or (favorable_breakout is not None and favorable_breakout >= PROMISING_BREAKOUT_PCT_B)
+        )
+        skip_quick_profit = SKIP_QUICK_PROFIT_WHEN_PROMISING and continuation_confirmed
+        if not skip_quick_profit:
+            if favorable_velocity is not None and favorable_velocity >= QUICK_PROFIT_VELOCITY_PCT_PER_MIN:
+                return True, f"quick_profit (velocity {velocity_pct_per_min:+.2%}/min, gain {change_pct:+.3%})"
+            if favorable_external_velocity is not None and favorable_external_velocity >= QUICK_PROFIT_VELOCITY_PCT_PER_MIN:
+                return True, f"quick_profit (external velocity {external_velocity_pct_per_min:+.2%}/min, gain {change_pct:+.3%})"
     if (
         current_volatility is not None and current_volatility >= HIGH_VOLATILITY_THRESHOLD
         and change_pct >= volatility_quick_profit_pct
