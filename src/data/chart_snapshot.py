@@ -303,12 +303,13 @@ def generate_candlestick_chart(
             del img
 
 
-_SENTIMENT_ROW_HEIGHT = _s(34)
-_SENTIMENT_TOP_MARGIN = _s(96)
-_SENTIMENT_BOTTOM_MARGIN = _s(40)
-_SENTIMENT_LABEL_WIDTH = _s(108)
-_SENTIMENT_SCORE_WIDTH = _s(62)
-_SENTIMENT_BAR_HALF_WIDTH = _s(280)
+_SENTIMENT_ROW_HEIGHT = _s(40)
+_SENTIMENT_BANNER_HEIGHT = _s(112)
+_SENTIMENT_TOP_MARGIN = _s(168)
+_SENTIMENT_BOTTOM_MARGIN = _s(120)
+_SENTIMENT_LABEL_WIDTH = _s(130)
+_SENTIMENT_SCORE_WIDTH = _s(80)
+_SENTIMENT_BAR_HALF_WIDTH = _s(300)
 _SENTIMENT_POS_COLOR = (22, 163, 74)   # validated: node validate_palette.js "#16a34a,#dc2626" --mode dark
 _SENTIMENT_NEG_COLOR = (220, 38, 38)   # passes lightness band + chroma floor + contrast on the dark surface
 _SENTIMENT_NEUTRAL_COLOR = (110, 116, 130)
@@ -328,6 +329,16 @@ def generate_sentiment_snapshot(*, market: str, ticker_sentiments: list[dict[str
     dataviz skill's own "text wears text tokens" rule. `ticker_sentiments`
     items need "ticker" and "sentiment_score" (from *_news.get_sentiment(),
     already real per-ticker news sentiment, not invented for this chart).
+
+    Real feedback: this card used to be plain small text on a bare
+    background, visually flat next to the branded news/bullet cards. Now
+    shares their same accent-banner treatment (per-market color, same as
+    generate_news_bullet_card) plus a real "X bullish / Y bearish" summary
+    badge (counted across the FULL universe, not just the rows actually
+    plotted, so it stays accurate even when MAX_SENTIMENT_ROWS trims a
+    large watchlist down) and a follow-growth footer -- same visual family
+    as every other post on this account now, not a plainer outlier.
+
     Returns None (skip posting) on empty input or any rendering failure."""
     rows = [r for r in ticker_sentiments if r.get("ticker") and r.get("sentiment_score") is not None]
     if not rows:
@@ -338,11 +349,15 @@ def generate_sentiment_snapshot(*, market: str, ticker_sentiments: list[dict[str
         logger.warning("[chart_snapshot] Pillow unavailable: %s", exc)
         return None
 
+    bullish_count = sum(1 for r in rows if float(r["sentiment_score"]) > 0.02)
+    bearish_count = sum(1 for r in rows if float(r["sentiment_score"]) < -0.02)
+
     rows.sort(key=lambda r: r["sentiment_score"], reverse=True)
     if len(rows) > MAX_SENTIMENT_ROWS:
         half = MAX_SENTIMENT_ROWS // 2
         rows = rows[:half] + rows[-half:]
 
+    accent = _NEWS_CARD_ACCENT.get(market, _NEWS_CARD_ACCENT["perps"])
     width = _MARGIN * 2 + _SENTIMENT_LABEL_WIDTH + _SENTIMENT_BAR_HALF_WIDTH * 2 + _SENTIMENT_SCORE_WIDTH
     height = _SENTIMENT_TOP_MARGIN + len(rows) * _SENTIMENT_ROW_HEIGHT + _SENTIMENT_BOTTOM_MARGIN
 
@@ -350,45 +365,77 @@ def generate_sentiment_snapshot(*, market: str, ticker_sentiments: list[dict[str
     try:
         img = Image.new("RGB", (width, height), _BG)
         draw = ImageDraw.Draw(img)
-        title_font, subtitle_font, label_font, score_font, axis_font = (
-            _font(_s(26)), _font(_s(14)), _font(_s(15)), _font(_s(15)), _font(_s(12)),
+        banner_font, badge_font, subtitle_font, label_font, score_font, axis_font, footer_font = (
+            _font(_s(30)), _font(_s(22)), _font(_s(18)), _font(_s(22)), _font(_s(22)), _font(_s(15)), _font(_s(18)),
         )
 
-        draw.text((_MARGIN, _s(24)), f"{market.upper()} -- Sentiment Snapshot", fill=_TEXT_PRIMARY, font=title_font)
-        draw.text((_MARGIN, _s(58)), "Per-ticker news sentiment, most bullish to most bearish", fill=_TEXT_MUTED, font=subtitle_font)
+        draw.rectangle([(0, 0), (width, _SENTIMENT_BANNER_HEIGHT)], fill=accent)
+        label = f"{market.upper()} SENTIMENT"
+        label_h = banner_font.size
+        draw.text(
+            (_MARGIN, _SENTIMENT_BANNER_HEIGHT / 2 - label_h / 2), label,
+            fill=_NEWS_CARD_BANNER_TEXT, font=banner_font, stroke_width=_s(1), stroke_fill=_NEWS_CARD_BANNER_TEXT,
+        )
+        badge = f"{bullish_count} bullish  ·  {bearish_count} bearish"
+        badge_w = draw.textlength(badge, font=badge_font)
+        draw.text(
+            (width - _MARGIN - badge_w, _SENTIMENT_BANNER_HEIGHT / 2 - badge_font.size / 2), badge,
+            fill=_NEWS_CARD_BANNER_TEXT, font=badge_font, stroke_width=_s(1), stroke_fill=_NEWS_CARD_BANNER_TEXT,
+        )
+        draw.text(
+            (_MARGIN, _SENTIMENT_BANNER_HEIGHT + _s(20)), "Real per-ticker news sentiment, most bullish to most bearish",
+            fill=_TEXT_MUTED, font=subtitle_font,
+        )
 
         zero_x = _MARGIN + _SENTIMENT_LABEL_WIDTH + _SENTIMENT_BAR_HALF_WIDTH
-        axis_top = _SENTIMENT_TOP_MARGIN - _s(14)
-        axis_bottom = height - _SENTIMENT_BOTTOM_MARGIN + _s(6)
+        axis_top = _SENTIMENT_TOP_MARGIN - _s(16)
+        axis_bottom = _SENTIMENT_TOP_MARGIN + len(rows) * _SENTIMENT_ROW_HEIGHT + _s(6)
         draw.line([(zero_x, axis_top), (zero_x, axis_bottom)], fill=_AXIS, width=_s(1))
         # End labels directly on the axis -- the chart reads correctly even
         # if red/green itself doesn't (see module docstring): direction is
         # ALSO which side of this line the bar is on.
-        draw.text((zero_x - _SENTIMENT_BAR_HALF_WIDTH, axis_bottom + _s(6)), "<- Bearish", fill=_SENTIMENT_NEG_COLOR, font=axis_font)
+        draw.text((zero_x - _SENTIMENT_BAR_HALF_WIDTH, axis_bottom + _s(8)), "<- Bearish", fill=_SENTIMENT_NEG_COLOR, font=axis_font)
         bullish_w = draw.textlength("Bullish ->", font=axis_font)
-        draw.text((zero_x + _SENTIMENT_BAR_HALF_WIDTH - bullish_w, axis_bottom + _s(6)), "Bullish ->", fill=_SENTIMENT_POS_COLOR, font=axis_font)
+        draw.text((zero_x + _SENTIMENT_BAR_HALF_WIDTH - bullish_w, axis_bottom + _s(8)), "Bullish ->", fill=_SENTIMENT_POS_COLOR, font=axis_font)
 
         for i, row in enumerate(rows):
             y = _SENTIMENT_TOP_MARGIN + i * _SENTIMENT_ROW_HEIGHT
             score = max(-1.0, min(1.0, float(row["sentiment_score"])))
             ticker = str(row["ticker"])
-            bar_top, bar_bottom = y + _s(5), y + _SENTIMENT_ROW_HEIGHT - _s(10)
+            bar_top, bar_bottom = y + _s(6), y + _SENTIMENT_ROW_HEIGHT - _s(12)
             bar_mid = (bar_top + bar_bottom) / 2
             label_h = label_font.size
             draw.text((_MARGIN, bar_mid - label_h / 2), ticker[:14], fill=_TEXT_PRIMARY, font=label_font)
 
             bar_len = abs(score) * _SENTIMENT_BAR_HALF_WIDTH
             color = _SENTIMENT_POS_COLOR if score > 0.02 else _SENTIMENT_NEG_COLOR if score < -0.02 else _SENTIMENT_NEUTRAL_COLOR
-            radius = min(_s(4), (bar_bottom - bar_top) / 2)
+            radius = min(_s(5), (bar_bottom - bar_top) / 2)
             if bar_len < 1:
-                draw.line([(zero_x - _s(2), bar_mid), (zero_x + _s(2), bar_mid)], fill=color, width=_s(3))
+                draw.line([(zero_x - _s(2), bar_mid), (zero_x + _s(2), bar_mid)], fill=color, width=_s(4))
             elif score >= 0:
                 draw.rounded_rectangle([zero_x, bar_top, zero_x + bar_len, bar_bottom], radius=radius, fill=color)
             else:
                 draw.rounded_rectangle([zero_x - bar_len, bar_top, zero_x, bar_bottom], radius=radius, fill=color)
 
-            score_x = _MARGIN + _SENTIMENT_LABEL_WIDTH + _SENTIMENT_BAR_HALF_WIDTH * 2 + _s(14)
+            score_x = _MARGIN + _SENTIMENT_LABEL_WIDTH + _SENTIMENT_BAR_HALF_WIDTH * 2 + _s(16)
             draw.text((score_x, bar_mid - label_h / 2), f"{score:+.2f}", fill=color, font=score_font)
+
+        # Positioned relative to axis_bottom (not `height`) so the axis
+        # end-labels ("<- Bearish"/"Bullish ->") and this footer never
+        # collide regardless of row count -- real, confirmed layout bug
+        # found in review: emoji (no longer used here -- see below) AND a
+        # height-derived offset that put this text directly on top of the
+        # axis labels for a typical row count.
+        divider_y = axis_bottom + _s(46)
+        draw.line([(_MARGIN, divider_y), (width - _MARGIN, divider_y)], fill=_AXIS, width=_s(1))
+        # No emoji -- Pillow's own bundled default font (see _font's own
+        # docstring) doesn't carry them, rendering as visible tofu boxes
+        # instead. Same reason this whole function already uses "->"/"<-"
+        # instead of real Unicode arrows.
+        draw.text(
+            (_MARGIN, divider_y + _s(18)), "Fully automated -- follow for real-time signals",
+            fill=_TEXT_MUTED, font=footer_font,
+        )
 
         CHARTS_DIR.mkdir(parents=True, exist_ok=True)
         filename = f"sentiment_{_sanitize(market)}_{int(time.time())}.png"

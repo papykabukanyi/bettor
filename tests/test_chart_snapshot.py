@@ -236,6 +236,57 @@ def test_generate_sentiment_snapshot_handles_all_neutral_scores():
     assert path is not None
 
 
+def test_generate_sentiment_snapshot_uses_a_distinct_accent_banner_per_market():
+    """Real feedback: this card used to be plain text with no branding,
+    visually flat next to the accent-banner news/bullet cards -- now
+    shares that same per-market banner treatment."""
+    from PIL import Image
+
+    paths = {
+        market: chart_snapshot.generate_sentiment_snapshot(market=market, ticker_sentiments=_sentiment_rows())
+        for market in ("crypto", "stocks", "options", "perps")
+    }
+    accent_pixels = {}
+    for market, path in paths.items():
+        assert path is not None
+        with Image.open(path) as img:
+            accent_pixels[market] = img.getpixel((5, 5))
+    assert len(set(accent_pixels.values())) == 4  # all 4 markets render a genuinely different banner color
+
+
+def test_generate_sentiment_snapshot_renders_a_large_trimmed_universe_without_raising():
+    """A large universe (crypto's 36+ pairs) only plots the most extreme
+    MAX_SENTIMENT_ROWS, but the bullish/bearish badge is computed from the
+    full input list before that trim -- confirms this larger, asymmetric
+    (30 bullish / 5 bearish) universe still renders a valid, bounded image."""
+    rows = [{"ticker": f"SYM{i}", "sentiment_score": 0.5} for i in range(30)]  # all bullish, way over MAX_SENTIMENT_ROWS
+    rows += [{"ticker": f"BEAR{i}", "sentiment_score": -0.5} for i in range(5)]
+    path = chart_snapshot.generate_sentiment_snapshot(market="crypto", ticker_sentiments=rows)
+    assert path is not None
+    from PIL import Image
+    with Image.open(path) as img:
+        # Still capped to MAX_SENTIMENT_ROWS worth of bars, not all 35 rows
+        # -- height is top margin + capped rows + bottom margin, never 35 rows'
+        # worth (which would be meaningfully taller than this bound).
+        max_expected = chart_snapshot._SENTIMENT_TOP_MARGIN + chart_snapshot.MAX_SENTIMENT_ROWS * chart_snapshot._SENTIMENT_ROW_HEIGHT + chart_snapshot._SENTIMENT_BOTTOM_MARGIN  # noqa: SLF001
+        assert img.height <= max_expected
+
+
+def test_generate_sentiment_snapshot_is_taller_than_the_old_plain_layout_for_a_follow_footer():
+    """Real feedback: no follow-growth hook anywhere on this card, unlike
+    the hourly status post's own "follow for real-time alerts" line --
+    confirms real extra vertical space exists for the new banner + footer,
+    not just the same old bar-chart body."""
+    from PIL import Image
+
+    path = chart_snapshot.generate_sentiment_snapshot(market="crypto", ticker_sentiments=_sentiment_rows(n=2))
+    assert path is not None
+    with Image.open(path) as img:
+        # 2 rows is a tiny chart body -- most of this height is now the
+        # banner + subtitle + footer, not the bars themselves.
+        assert img.height >= chart_snapshot._SENTIMENT_BANNER_HEIGHT + chart_snapshot._SENTIMENT_BOTTOM_MARGIN  # noqa: SLF001
+
+
 # ── generate_news_card ───────────────────────────────────────────────────────
 
 def test_generate_news_card_saves_a_real_png_file():

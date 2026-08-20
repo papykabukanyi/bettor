@@ -515,6 +515,10 @@ def test_post_sentiment_snapshot_posts_the_image_when_everything_lines_up(monkey
     assert captured["image_url"].startswith("https://bettor-alpaca-crypto.onrender.com/chart/")
     assert "Alpaca Crypto" in captured["text"]
     assert "#Bitcoin" in captured["text"]
+    # Real feedback: this caption was missing the same follower-growth
+    # hashtags the hourly status post already carries.
+    assert "#AlgoTrading" in captured["text"]
+    assert "#FollowForMore" in captured["text"]
 
 
 def test_post_sentiment_snapshot_never_raises_on_api_failure(monkeypatch, tmp_path):

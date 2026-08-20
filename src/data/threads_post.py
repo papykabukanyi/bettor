@@ -581,7 +581,10 @@ def post_sentiment_snapshot(*, market: str, ticker_sentiments: list[dict]) -> bo
         if image_url is None:
             return False
 
-        caption = f"{_market_label(market)}: per-ticker sentiment snapshot\n{_hashtags_for_market(market)}"
+        # #AlgoTrading #FollowForMore added per real feedback: this caption
+        # was missing the same follower-growth hashtags the hourly status
+        # post already carries (see that job's own comment).
+        caption = f"{_market_label(market)}: per-ticker sentiment snapshot\n{_hashtags_for_market(market)} #AlgoTrading #FollowForMore"
         threads_client.create_and_publish_image_post(image_url, caption)
         return True
     except Exception as exc:
