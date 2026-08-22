@@ -243,15 +243,35 @@ _ACCOUNT_SNAPSHOT_CACHE: dict[str, Any] = {}
 _ACCOUNT_SNAPSHOT_CACHE_TS = 0.0
 _ACCOUNT_SNAPSHOT_CACHE_LOCK = threading.Lock()
 _ACCOUNT_SNAPSHOT_CACHE_TTL_SEC = max(5, int(os.getenv("ACCOUNT_SNAPSHOT_CACHE_TTL_SEC", "12") or "12"))
+_ACCOUNT_SNAPSHOT_REFRESH_TIMEOUT_SEC = int(os.getenv("ACCOUNT_SNAPSHOT_REFRESH_TIMEOUT_SEC", "20") or "20")
 
 
-def _cached_account_snapshot() -> dict[str, Any]:
+def _refresh_account_snapshot_cache() -> dict[str, Any]:
+    """Does the real Kalshi network round trip and writes the cache. Real,
+    confirmed live incident (2026-08-22): calling this synchronously from
+    the HTTP request thread on a cache miss let a single slow upstream call
+    (measured 57s+ on the equivalent Alpaca account-fetch this same day)
+    run right up against gunicorn's --timeout 300, which sent the ONE
+    worker a SIGKILL ("WORKER TIMEOUT") and restarted it -- exactly the
+    "dashboard loses everything and stutters" failure mode this cache was
+    originally built to prevent, just via the miss path instead of the hit
+    path. Moving the actual fetch here and calling it ONLY from the
+    fast_check background job (see its own comment) means a slow upstream
+    call blocks a scheduler thread, never a web request -- but fast_check
+    itself is trading-critical (manage_open_positions), so this is ALSO
+    wrapped in call_with_hard_timeout (same pattern as every HF download in
+    this codebase, see server_common's own docstring) so a truly hung
+    Kalshi call can't stall real position management either, just this one
+    balance refresh."""
+    from server_common import call_with_hard_timeout
+    return call_with_hard_timeout(
+        _do_refresh_account_snapshot, timeout_sec=_ACCOUNT_SNAPSHOT_REFRESH_TIMEOUT_SEC,
+        on_timeout={"ok": False, "margin_enabled": None, "exchange_active": None, "available_balance_usd": 0.0},
+    )
+
+
+def _do_refresh_account_snapshot() -> dict[str, Any]:
     global _ACCOUNT_SNAPSHOT_CACHE, _ACCOUNT_SNAPSHOT_CACHE_TS
-    now = time.monotonic()
-    with _ACCOUNT_SNAPSHOT_CACHE_LOCK:
-        if _ACCOUNT_SNAPSHOT_CACHE and (now - _ACCOUNT_SNAPSHOT_CACHE_TS) < _ACCOUNT_SNAPSHOT_CACHE_TTL_SEC:
-            return dict(_ACCOUNT_SNAPSHOT_CACHE)
-
     account_ok = True
     balance_usd = 0.0
     margin_enabled = None
@@ -283,9 +303,21 @@ def _cached_account_snapshot() -> dict[str, Any]:
     return snapshot
 
 
+def _cached_account_snapshot() -> dict[str, Any]:
+    """Read-only from the HTTP route's point of view -- never makes a
+    network call itself (see _refresh_account_snapshot_cache's docstring
+    for why). Falls back to one inline fetch only if nothing has ever been
+    cached yet (cold start, before fast_check's first tick)."""
+    with _ACCOUNT_SNAPSHOT_CACHE_LOCK:
+        if _ACCOUNT_SNAPSHOT_CACHE:
+            return dict(_ACCOUNT_SNAPSHOT_CACHE)
+    return _refresh_account_snapshot_cache()
+
+
 JOB_HISTORY_FILE = DATA_DIR / "perps_job_run_history.json"
 LATEST_CYCLE_FILE = DATA_DIR / "perps_latest_cycle.json"
 LATEST_POSITION_CHECK_FILE = DATA_DIR / "perps_latest_position_check.json"
+MILESTONES_FILE = DATA_DIR / "perps_milestones.json"
 JOB_LOCK_DIR = DATA_DIR / "perps_locks"
 
 
@@ -303,6 +335,20 @@ def _run_perps_fast_check() -> dict[str, Any]:
     result = perps_strategy.manage_open_positions(dry_run=False)
     if result.get("action") != "no_position":
         save_json(LATEST_POSITION_CHECK_FILE, result)
+    # Refreshes the dashboard's account-balance cache from THIS background
+    # thread instead of the web request thread -- see
+    # _refresh_account_snapshot_cache's docstring for the real incident this
+    # prevents. TTL-gated here (same constant the cache always used) so it's
+    # still just one real Kalshi call per window, not one per fast_check tick.
+    now = time.monotonic()
+    if (now - _ACCOUNT_SNAPSHOT_CACHE_TS) >= _ACCOUNT_SNAPSHOT_CACHE_TTL_SEC:
+        try:
+            snapshot = _refresh_account_snapshot_cache()
+            if snapshot.get("ok"):
+                milestones = perps_strategy.record_milestone(snapshot["available_balance_usd"])
+                save_json(MILESTONES_FILE, milestones)
+        except Exception as exc:
+            logger.debug("[app_kalshi] background account snapshot refresh failed: %s", exc)
     return result
 
 
@@ -830,6 +876,7 @@ def api_status():
         "total_realized_pnl_usd": total_realized_pnl,
         "trade_count": len(state.get("trade_log") or []),
         "win_rate": win_rate_stats(state.get("trade_log") or []),
+        "milestones": load_json(MILESTONES_FILE, {}),
         "model": {
             "trained": meta is not None,
             "model_type": (meta or {}).get("model_type"),

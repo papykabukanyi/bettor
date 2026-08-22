@@ -1015,3 +1015,25 @@ def test_reference_balance_for_today_is_captured_once():
 
 def test_reference_balance_for_today_returns_none_without_a_real_reading():
     assert strat._reference_balance_for_today({}, None) is None  # noqa: SLF001
+
+
+def test_record_milestone_persists_baseline_and_high_water_mark(monkeypatch, tmp_path):
+    """Real gap found in review: the dashboard never showed progress toward
+    a goal, just the current balance in isolation. record_milestone must
+    persist its baseline/high-water-mark in the SAME durable state as
+    positions/trade_log so it survives a restart, not just live in memory."""
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "alpaca_options_state.json")
+    strat._save_state({"positions": [], "trade_log": [], "realized_pnl_by_date": {}})  # noqa: SLF001
+
+    snapshot = strat.record_milestone(100.0)
+    assert snapshot["baseline_balance"] == 100.0
+    assert snapshot["high_water_mark"] == 100.0
+
+    snapshot = strat.record_milestone(150.0)
+    assert snapshot["baseline_balance"] == 100.0  # never moves
+    assert snapshot["high_water_mark"] == 150.0
+    assert snapshot["total_return_pct"] == pytest.approx(0.5)
+
+    state = strat._load_state()  # noqa: SLF001
+    assert state["milestones"]["baseline_balance"] == 100.0
+    assert state["milestones"]["high_water_mark"] == 150.0

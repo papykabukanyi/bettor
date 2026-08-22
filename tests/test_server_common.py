@@ -190,3 +190,57 @@ def test_win_rate_stats_ignores_trades_with_no_realized_pnl_yet():
     stats = server_common.win_rate_stats(trades)
     assert stats["trade_count"] == 1
     assert stats["win_count"] == 1
+
+
+def test_milestone_snapshot_sets_baseline_on_first_call():
+    state = {}
+    snap = server_common.milestone_snapshot(state, current_balance=100.0)
+    assert snap["baseline_balance"] == 100.0
+    assert snap["high_water_mark"] == 100.0
+    assert snap["total_return_pct"] == pytest.approx(0.0)
+    assert snap["next_milestone_pct"] == 5
+
+
+def test_milestone_snapshot_baseline_persists_across_calls():
+    """Real gap found in review: a naive re-derivation of "baseline" from
+    the current balance every call would never let a gain accumulate --
+    the baseline must be set ONCE and never move, matching the same
+    durable-state discipline as daily_reference_balance elsewhere."""
+    state = {}
+    server_common.milestone_snapshot(state, current_balance=100.0)
+    snap = server_common.milestone_snapshot(state, current_balance=110.0)
+    assert snap["baseline_balance"] == 100.0
+    assert snap["total_return_pct"] == pytest.approx(0.10)
+    assert snap["last_milestone_pct"] == 10
+    assert snap["next_milestone_pct"] == 25
+    assert snap["pct_to_next_milestone"] == pytest.approx(15.0)
+
+
+def test_milestone_snapshot_tracks_high_water_mark_through_a_drawdown():
+    """A real drawdown from the peak must stay visible even while total
+    return is still positive -- "treat the balance seriously" means
+    noticing a slide from the peak, not just today vs day one."""
+    state = {}
+    server_common.milestone_snapshot(state, current_balance=100.0)
+    server_common.milestone_snapshot(state, current_balance=150.0)
+    snap = server_common.milestone_snapshot(state, current_balance=120.0)
+    assert snap["high_water_mark"] == 150.0
+    assert snap["total_return_pct"] == pytest.approx(0.20)
+    assert snap["drawdown_from_peak_pct"] == pytest.approx((120.0 - 150.0) / 150.0)
+
+
+def test_milestone_snapshot_next_milestone_is_none_past_the_last_tier():
+    state = {}
+    snap = server_common.milestone_snapshot(state, current_balance=100.0)
+    snap = server_common.milestone_snapshot(state, current_balance=100.0 * 101)  # +10,000%
+    assert snap["next_milestone_pct"] is None
+    assert snap["pct_to_next_milestone"] is None
+    assert snap["last_milestone_pct"] == 10000
+
+
+def test_milestone_snapshot_zero_baseline_does_not_divide_by_zero():
+    state = {}
+    snap = server_common.milestone_snapshot(state, current_balance=0.0)
+    assert snap["total_return_pct"] == 0.0
+    snap = server_common.milestone_snapshot(state, current_balance=5.0)
+    assert snap["drawdown_from_peak_pct"] == 0.0

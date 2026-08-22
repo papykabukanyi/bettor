@@ -80,6 +80,7 @@
   <div class="card"><h2>Today's P&amp;L</h2><div id="today-pnl" class="stat">--</div><div class="sub" id="total-pnl-sub">--</div></div>
   <div class="card"><h2>Direction Model</h2><div id="model-status" class="stat">--</div><div class="sub" id="model-sub">--</div></div>
   <div class="card"><h2>Win Rate</h2><div id="win-rate" class="stat">--</div><div class="sub" id="win-rate-sub">--</div></div>
+  <div class="card"><h2>Goal Progress</h2><div id="milestone-return" class="stat">--</div><div class="sub" id="milestone-sub">--</div></div>
 </div>
 
 <section>
@@ -341,6 +342,23 @@ async function refreshStatus() {
       document.getElementById("win-rate-sub").textContent = "no closed trades yet";
     }
   } catch (e) { console.error("win rate card render failed", e); }
+
+  try {
+    const ms = data.milestones || {};
+    const msEl = document.getElementById("milestone-return");
+    if (ms.baseline_balance !== undefined && ms.baseline_balance !== null) {
+      msEl.textContent = fmtPct(ms.total_return_pct);
+      msEl.className = "stat " + (ms.total_return_pct > 0 ? "pos" : ms.total_return_pct < 0 ? "neg" : "");
+      const nextText = (ms.next_milestone_pct !== null && ms.next_milestone_pct !== undefined)
+        ? `next goal +${ms.next_milestone_pct}% (${ms.pct_to_next_milestone.toFixed(1)}pp to go)`
+        : "all goals reached";
+      const ddText = (ms.drawdown_from_peak_pct < -0.001) ? ` · ${fmtPct(ms.drawdown_from_peak_pct)} off peak` : "";
+      document.getElementById("milestone-sub").textContent = nextText + ddText;
+    } else {
+      msEl.textContent = "--";
+      document.getElementById("milestone-sub").textContent = "warming up";
+    }
+  } catch (e) { console.error("milestone card render failed", e); }
 
   let params = {};
   try {

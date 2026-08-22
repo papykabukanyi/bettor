@@ -109,6 +109,62 @@ def win_rate_stats(trade_log: list[dict[str, Any]], *, recent_n: int = 50) -> di
     }
 
 
+# Real gap found in review: none of the 4 dashboards ever showed progress
+# toward a goal -- just the current balance, in isolation, with no sense of
+# "is this actually working" over time. Percentage-based (not fixed dollar
+# tiers) so the SAME tier ladder means something whether the account is
+# worth $70 (perps, real money) or $97,000 (Alpaca paper) -- a fixed-dollar
+# milestone list would either be meaningless noise for the small account or
+# take years to hit for the large one. `state` is the caller's own durable
+# dict (persisted by whatever mechanism that service already uses) -- this
+# function only reads/writes the one sub-key it owns and returns the
+# snapshot; it never does its own I/O, matching every other function in
+# this module.
+MILESTONE_PCT_TIERS: list[float] = [5, 10, 25, 50, 100, 200, 500, 1000, 2500, 5000, 10000]
+
+
+def milestone_snapshot(state: dict[str, Any], *, current_balance: float, key: str = "milestones") -> dict[str, Any]:
+    """Tracks two things against a durable starting baseline (set once, the
+    first time this is ever called for a given `state` dict, never reset):
+    total return % since that baseline, and the account's own all-time
+    high-water mark (so a real drawdown is visible even while total return
+    is still positive -- "treat the balance seriously" means noticing a
+    slide from the peak, not just whether today's number beats day one).
+    `next_milestone_pct`/`pct_to_next_milestone` walk MILESTONE_PCT_TIERS to
+    report the next round-number gain target still ahead."""
+    milestones = state.setdefault(key, {})
+    if not milestones or not milestones.get("baseline_balance"):
+        milestones["baseline_balance"] = current_balance
+        milestones["baseline_set_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
+        milestones["high_water_mark"] = current_balance
+        milestones["high_water_mark_at"] = milestones["baseline_set_at"]
+
+    baseline = float(milestones["baseline_balance"])
+    if current_balance > float(milestones["high_water_mark"]):
+        milestones["high_water_mark"] = current_balance
+        milestones["high_water_mark_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
+    peak = float(milestones["high_water_mark"])
+
+    total_return_pct = ((current_balance - baseline) / baseline) if baseline else 0.0
+    drawdown_from_peak_pct = ((current_balance - peak) / peak) if peak else 0.0
+
+    next_tier = next((t for t in MILESTONE_PCT_TIERS if t > total_return_pct * 100), None)
+    prev_tier = max((t for t in MILESTONE_PCT_TIERS if t <= total_return_pct * 100), default=0)
+
+    return {
+        "baseline_balance": round(baseline, 6),
+        "baseline_set_at": milestones["baseline_set_at"],
+        "high_water_mark": round(peak, 6),
+        "high_water_mark_at": milestones["high_water_mark_at"],
+        "current_balance": round(current_balance, 6),
+        "total_return_pct": round(total_return_pct, 6),
+        "drawdown_from_peak_pct": round(drawdown_from_peak_pct, 6),
+        "last_milestone_pct": prev_tier,
+        "next_milestone_pct": next_tier,
+        "pct_to_next_milestone": round(next_tier - total_return_pct * 100, 4) if next_tier is not None else None,
+    }
+
+
 def _summarize_job_result(result: Any) -> dict[str, Any]:
     if not isinstance(result, dict):
         return {}

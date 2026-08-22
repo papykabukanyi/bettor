@@ -205,6 +205,7 @@ JOB_HISTORY_FILE = DATA_DIR / "alpaca_crypto_job_run_history.json"
 JOB_LOCK_DIR = DATA_DIR / "alpaca_crypto_locks"
 ALPACA_CRYPTO_LATEST_CYCLE_FILE = DATA_DIR / "alpaca_crypto_latest_cycle.json"
 ALPACA_CRYPTO_LATEST_POSITION_CHECK_FILE = DATA_DIR / "alpaca_crypto_latest_position_check.json"
+ALPACA_CRYPTO_MILESTONES_FILE = DATA_DIR / "alpaca_crypto_milestones.json"
 ALPACA_CRYPTO_LATEST_SWEEP_FILE = DATA_DIR / "alpaca_crypto_latest_sweep.json"
 ALPACA_CRYPTO_LATEST_WALKFORWARD_FILE = DATA_DIR / "alpaca_crypto_latest_walkforward.json"
 
@@ -229,6 +230,18 @@ def _run_alpaca_crypto_fast_check() -> dict[str, Any]:
     result = alpaca_crypto_strategy.manage_open_positions()
     if result.get("action") != "no_position":
         save_json(ALPACA_CRYPTO_LATEST_POSITION_CHECK_FILE, result)
+    # Refreshes the dashboard's account-balance cache from THIS background
+    # thread instead of the web request thread -- see
+    # _refresh_account_cache's docstring for the real incident this prevents.
+    now = time.monotonic()
+    if (now - _ACCOUNT_SNAPSHOT_CACHE_TS) >= _ACCOUNT_SNAPSHOT_CACHE_TTL_SEC:
+        try:
+            account = _refresh_account_cache()
+            if account.get("equity") is not None:
+                milestones = alpaca_crypto_strategy.record_milestone(float(account["equity"]))
+                save_json(ALPACA_CRYPTO_MILESTONES_FILE, milestones)
+        except Exception as exc:
+            logger.debug("[alpaca_crypto_server] background account cache refresh failed: %s", exc)
     return result
 
 
@@ -648,19 +661,50 @@ _ACCOUNT_SNAPSHOT_CACHE: dict[str, Any] = {}
 _ACCOUNT_SNAPSHOT_CACHE_TS = 0.0
 _ACCOUNT_SNAPSHOT_CACHE_LOCK = threading.Lock()
 _ACCOUNT_SNAPSHOT_CACHE_TTL_SEC = max(5, int(os.getenv("ACCOUNT_SNAPSHOT_CACHE_TTL_SEC", "12") or "12"))
+_ACCOUNT_SNAPSHOT_REFRESH_TIMEOUT_SEC = int(os.getenv("ACCOUNT_SNAPSHOT_REFRESH_TIMEOUT_SEC", "20") or "20")
 
 
-def _cached_account() -> dict[str, Any]:
+def _do_refresh_account_cache() -> dict[str, Any]:
     global _ACCOUNT_SNAPSHOT_CACHE, _ACCOUNT_SNAPSHOT_CACHE_TS
-    now = time.monotonic()
-    with _ACCOUNT_SNAPSHOT_CACHE_LOCK:
-        if _ACCOUNT_SNAPSHOT_CACHE and (now - _ACCOUNT_SNAPSHOT_CACHE_TS) < _ACCOUNT_SNAPSHOT_CACHE_TTL_SEC:
-            return dict(_ACCOUNT_SNAPSHOT_CACHE)
     account = alpaca_client.get_account() if alpaca_client.is_configured() else {}
     with _ACCOUNT_SNAPSHOT_CACHE_LOCK:
         _ACCOUNT_SNAPSHOT_CACHE = dict(account)
         _ACCOUNT_SNAPSHOT_CACHE_TS = time.monotonic()
     return account
+
+
+def _refresh_account_cache() -> dict[str, Any]:
+    """Does the real Alpaca network round trip and writes the cache. Real,
+    confirmed live incident (2026-08-22, on the sibling stocks service which
+    shares this exact code path and this exact Alpaca account): calling this
+    synchronously from the HTTP request thread on a cache miss let a single
+    slow upstream call (measured 57s+ live, likely rate-limit-retry driven
+    since this account is shared across all 3 Alpaca-based bots -- see
+    alpaca_client.py) run right up against gunicorn's --timeout 300, which
+    sent the ONE worker a SIGKILL ("WORKER TIMEOUT") and restarted it.
+    Moving the actual fetch here and calling it ONLY from the fast_check
+    background job means a slow upstream call blocks a scheduler thread,
+    never a web request -- but fast_check itself is trading-critical
+    (manage_open_positions), so this is ALSO wrapped in call_with_hard_timeout
+    (same pattern as every HF download in this codebase, see server_common's
+    own docstring) so a truly hung Alpaca call can't stall real position
+    management either, just this one balance refresh."""
+    from server_common import call_with_hard_timeout
+    return call_with_hard_timeout(
+        _do_refresh_account_cache, timeout_sec=_ACCOUNT_SNAPSHOT_REFRESH_TIMEOUT_SEC, on_timeout={},
+    )
+    return account
+
+
+def _cached_account() -> dict[str, Any]:
+    """Read-only from the HTTP route's point of view -- never makes a
+    network call itself (see _refresh_account_cache's docstring for why).
+    Falls back to one inline fetch only if nothing has ever been cached yet
+    (cold start, before fast_check's first tick)."""
+    with _ACCOUNT_SNAPSHOT_CACHE_LOCK:
+        if _ACCOUNT_SNAPSHOT_CACHE:
+            return dict(_ACCOUNT_SNAPSHOT_CACHE)
+    return _refresh_account_cache()
 
 
 def _crypto_status_snapshot() -> dict[str, Any]:
@@ -712,6 +756,7 @@ def _crypto_status_snapshot() -> dict[str, Any]:
         "total_realized_pnl_usd": total_realized_pnl,
         "trade_count": len(state.get("trade_log") or []),
         "win_rate": win_rate_stats(state.get("trade_log") or []),
+        "milestones": load_json(ALPACA_CRYPTO_MILESTONES_FILE, {}),
         "trade_log": state.get("trade_log") or [],
         "model": {
             "trained": meta is not None,

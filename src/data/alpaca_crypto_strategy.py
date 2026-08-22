@@ -730,6 +730,25 @@ def _save_state(state: dict[str, Any], *, push_durable: bool = False) -> None:
         _push_durable_state_to_hf(state)
 
 
+def record_milestone(current_balance: float) -> dict[str, Any]:
+    """Persists profit-milestone/goal progress in the SAME durable state as
+    positions/trade_log (see server_common.milestone_snapshot for the tier
+    logic) -- called once per fast_check cycle from the server's own
+    account-cache refresh, right after a fresh real balance is fetched, so
+    this never makes its own network call. Pushed durably to HF only when
+    the all-time high-water mark actually improves (a genuinely meaningful
+    event), not on every cycle -- matches this file's existing
+    push_durable-is-for-meaningful-events-only discipline."""
+    from server_common import milestone_snapshot
+    with _STATE_LOCK:
+        state = _load_state()
+        prev_hwm = (state.get("milestones") or {}).get("high_water_mark")
+        snapshot = milestone_snapshot(state, current_balance=current_balance)
+        new_peak = prev_hwm is None or snapshot["high_water_mark"] > prev_hwm
+        _save_state(state, push_durable=new_peak)
+    return snapshot
+
+
 def get_available_balance() -> float:
     """The real Alpaca cash balance (shared with the equities strategy's
     own account -- crypto and stock buying power both draw from the same
