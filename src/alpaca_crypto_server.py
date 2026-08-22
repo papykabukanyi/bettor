@@ -181,7 +181,19 @@ scheduler = BackgroundScheduler(
     timezone="America/New_York", job_defaults={"misfire_grace_time": 300},
     executors={
         "default": APSThreadPoolExecutor(max_workers=1),
-        "fastcheck": APSThreadPoolExecutor(max_workers=1),
+        # max_workers=2, not 1 -- real, confirmed live incident (2026-08-22):
+        # measured entry_scan taking 30-37s per run (Render logs, repeated
+        # samples) and threads_trending_news taking 30-38s per run, both
+        # LONGER than fast_check's own 20s interval. With only 1 worker
+        # thread serializing all 5 jobs on this executor, every single
+        # entry_scan/trending_news run structurally guarantees at least one
+        # fast_check tick gets skipped ("maximum number of running instances
+        # reached") -- no stagger/offset fix can prevent that, since it's a
+        # capacity problem, not a timing-alignment problem. This explains why
+        # skip counts rose sharply after the Threads carousel feature made
+        # trending_news/sentiment_snapshot meaningfully slower. A 2nd worker
+        # lets fast_check run concurrently with whichever slower job is mid-run.
+        "fastcheck": APSThreadPoolExecutor(max_workers=2),
     },
 )
 _startup_lock = threading.Lock()

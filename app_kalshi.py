@@ -198,7 +198,14 @@ scheduler = BackgroundScheduler(
     job_defaults={"misfire_grace_time": 300},
     executors={
         "default": APSThreadPoolExecutor(max_workers=1),
-        "fastcheck": APSThreadPoolExecutor(max_workers=1),
+        # max_workers=2, not 1 -- same real, confirmed fix as the identical
+        # executor in alpaca_crypto_server.py (see its comment): a single
+        # worker serializing fast_check with entry_scan/trending_news/
+        # sentiment_snapshot/hourly_status structurally guarantees skipped
+        # fast_check ticks whenever any of those (measured 30s+) runs longer
+        # than fast_check's own interval -- a capacity problem no stagger
+        # offset can fix. A 2nd worker lets fast_check run concurrently.
+        "fastcheck": APSThreadPoolExecutor(max_workers=2),
     },
 )
 _startup_lock = threading.Lock()
