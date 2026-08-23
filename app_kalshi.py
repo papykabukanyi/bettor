@@ -280,18 +280,41 @@ def _do_refresh_account_snapshot() -> dict[str, Any]:
         margin_enabled = bool(get_margin_enabled().get("enabled"))
     except Exception as exc:
         account_ok = False
-        logger.debug("margin_enabled check failed: %s", exc)
+        # Raised from debug -- real, confirmed live investigation
+        # (2026-08-23): the dashboard's Balance figure sat frozen at one
+        # exact value for 3+ hours while the SEPARATELY-tracked milestone
+        # panel (record_milestone, fed from this SAME function's own
+        # return value, see _run_perps_fast_check's own caller below)
+        # showed the real balance moving the whole time -- meaning
+        # WHICHEVER of these three sub-fetches was actually failing during
+        # that window did so silently, since debug-level never reaches
+        # Render's shipped logs. Promoted to warning so a recurrence is
+        # actually visible instead of invisible-by-design.
+        logger.warning("[app_kalshi] margin_enabled check failed during account snapshot refresh: %s", exc)
     try:
         exchange_active = bool(get_margin_exchange_status().get("exchange_active"))
     except Exception as exc:
-        logger.debug("exchange_status check failed: %s", exc)
+        logger.warning("[app_kalshi] exchange_status check failed during account snapshot refresh: %s", exc)
     try:
         balance = get_margin_balance(compute_available_balance=True)
-        for sub in (balance.get("subaccount_balances") or []):
+        subaccounts = balance.get("subaccount_balances") or []
+        for sub in subaccounts:
             balance_usd = max(balance_usd, float(sub.get("available_balance") or 0.0))
+        if len(subaccounts) > 1:
+            # The real, confirmed-live discrepancy above is consistent
+            # with this max()-over-subaccounts picking a DIFFERENT (and
+            # possibly stale/inactive) subaccount than the one actually
+            # funding perps positions, if this account ever has more than
+            # one -- logged whenever that's actually the case so a
+            # recurrence can be diagnosed from real data instead of
+            # guessed at again.
+            logger.info(
+                "[app_kalshi] account snapshot: %d subaccounts, balances=%s, using max=%.4f",
+                len(subaccounts), [round(float(s.get("available_balance") or 0.0), 4) for s in subaccounts], balance_usd,
+            )
     except Exception as exc:
         account_ok = False
-        logger.debug("balance check failed: %s", exc)
+        logger.warning("[app_kalshi] balance check failed during account snapshot refresh: %s", exc)
 
     snapshot = {
         "ok": account_ok, "margin_enabled": margin_enabled,
@@ -347,8 +370,16 @@ def _run_perps_fast_check() -> dict[str, Any]:
             if snapshot.get("ok"):
                 milestones = perps_strategy.record_milestone(snapshot["available_balance_usd"])
                 save_json(MILESTONES_FILE, milestones)
+            else:
+                # Real gap found in review (2026-08-23 dashboard investigation):
+                # this branch silently skipped record_milestone with NO log at
+                # all when snapshot["ok"] was False (margin_enabled or balance
+                # check failed inside _do_refresh_account_snapshot) -- meaning
+                # the milestone panel could go stale for an unknown number of
+                # cycles with zero visibility into why. Logged at warning now.
+                logger.warning("[app_kalshi] account snapshot not ok this cycle, milestone update skipped: %s", snapshot)
         except Exception as exc:
-            logger.debug("[app_kalshi] background account snapshot refresh failed: %s", exc)
+            logger.warning("[app_kalshi] background account snapshot refresh failed: %s", exc)
     return result
 
 
