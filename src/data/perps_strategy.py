@@ -81,6 +81,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from data import crypto_correlation
 from data.crypto_prices import get_fast_price
 from data.kalshi_perps import (
     cancel_margin_order, create_margin_order, get_margin_balance, get_margin_fee_tiers, get_margin_market,
@@ -525,6 +526,29 @@ TREND_FILTER_DOWN_PCT = _env_float("PERPS_TREND_FILTER_DOWN_PCT", 0.02)  # skip 
 # history) -- same "fewer, higher-conviction trades cost less in fees"
 # pattern as the hold-time finding above.
 MODEL_CONFIDENCE_MIN = _env_float("PERPS_MODEL_CONFIDENCE_MIN", 0.58)
+# Chart-study confidence layer (see crypto_correlation.py's own module
+# docstring for the full design): multiple correlation-derived studies --
+# peer confirmation within perps' own instrument web, PLUS Alpaca crypto's
+# much broader, unlevered spot universe shared in over HF (leader
+# divergence + peer confirmation + breadth there) -- combined into one
+# bullish-signed score per coin. Default OFF pending a real backtest (same
+# "ship it default-safe" posture as SKIP_QUICK_PROFIT_WHEN_PROMISING below):
+# the score/reason are always computed and attached to every evaluate_candidate
+# result for observability (dashboard, entry-chart indicator panel) even
+# while this is off, but only NUDGE should_enter/score/decide_exit once
+# explicitly turned on. Never a hard veto either way -- an adjustment on top
+# of the existing technical+model gate, capped by
+# CORRELATION_CONFIDENCE_MAX_ADJUSTMENT so a strong disagreement can make
+# the model's own bar harder to clear, never impossible, and a strong
+# agreement can make it easier, never automatic.
+USE_CORRELATION_STUDY = _env_flag("PERPS_USE_CORRELATION_STUDY", default=False)
+CORRELATION_CONFIDENCE_MAX_ADJUSTMENT = _env_float("PERPS_CORRELATION_CONFIDENCE_MAX_ADJUSTMENT", 0.06)
+# A held position reversing against a strong-enough correlation reading
+# feeds the SAME "promising"/"pre-exit reversal" machinery decide_exit
+# already applies to momentum/breakout/sentiment/model (see PROMISING_*
+# above) -- this is just the threshold past which the correlation score
+# counts as favorable/unfavorable there.
+PROMISING_CORRELATION_SCORE = _env_float("PERPS_PROMISING_CORRELATION_SCORE", 0.35)
 # Daily loss cap as a PERCENTAGE of the balance measured at the start of the
 # day (not a fixed dollar figure) so it scales sensibly as the account grows.
 DAILY_LOSS_CAP_PCT = _env_float("PERPS_DAILY_LOSS_CAP_PCT", 0.15)
@@ -782,15 +806,59 @@ def apply_confidence_threshold_override(new_threshold: float, *, reason: str) ->
     NOT wired to touch Render's own deploy config -- granting the live
     service the ability to modify its own deployment is a materially
     different (and unnecessary) capability than adjusting a value it
-    already reads from its own durable state every cycle."""
+    already reads from its own durable state every cycle.
+
+    MERGES into state["tuning"] rather than replacing it wholesale -- real
+    bug found and fixed here: this used to overwrite the WHOLE tuning dict,
+    which would have silently wiped out apply_correlation_study_override's
+    own keys (correlation_study_enabled/correlation_confidence_max_adjustment)
+    the next time either tuning mechanism fired. Both now coexist; only the
+    shared updated_at/reason/field metadata reflects whichever fired most
+    recently, which is fine since those 3 are informational only (logged/
+    returned, never read back by key elsewhere -- confirmed via a full
+    repo search before making this safe to change)."""
     with _STATE_LOCK:
         state = _load_state()
-        previous = (state.get("tuning") or {}).get("model_confidence_min", MODEL_CONFIDENCE_MIN)
-        state["tuning"] = {
+        tuning = dict(state.get("tuning") or {})
+        previous = tuning.get("model_confidence_min", MODEL_CONFIDENCE_MIN)
+        tuning.update({
             "model_confidence_min": new_threshold,
             "updated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
-            "reason": reason, "previous": previous,
-        }
+            "reason": reason, "previous": previous, "field": "model_confidence_min",
+        })
+        state["tuning"] = tuning
+        _save_state(state, push_durable=True)
+        return dict(state["tuning"])
+
+
+def apply_correlation_study_override(
+    *, enabled: bool | None = None, max_adjustment: float | None = None, reason: str,
+) -> dict[str, Any]:
+    """Same evidence-gated, no-redeploy-needed mechanism as
+    apply_confidence_threshold_override above, for the chart-study layer
+    (see perps_trade_analysis.recommend_correlation_study_weight) -- MERGES
+    into state["tuning"] so this and the confidence-threshold override
+    coexist. `enabled`/`max_adjustment` are each optional: pass only the
+    one(s) this call is actually changing (recommend_correlation_study_weight
+    moves one variable at a time, same "gradual, reviewable movement on a
+    real-money account" discipline CONFIDENCE_TUNING_MAX_STEP already
+    documents) -- the other stays whatever it already was."""
+    with _STATE_LOCK:
+        state = _load_state()
+        tuning = dict(state.get("tuning") or {})
+        previous_enabled = tuning.get("correlation_study_enabled", USE_CORRELATION_STUDY)
+        previous_max_adjustment = tuning.get("correlation_confidence_max_adjustment", CORRELATION_CONFIDENCE_MAX_ADJUSTMENT)
+        if enabled is not None:
+            tuning["correlation_study_enabled"] = enabled
+        if max_adjustment is not None:
+            tuning["correlation_confidence_max_adjustment"] = max_adjustment
+        tuning.update({
+            "updated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+            "reason": reason, "field": "correlation_study",
+            "previous_correlation_study_enabled": previous_enabled,
+            "previous_correlation_confidence_max_adjustment": previous_max_adjustment,
+        })
+        state["tuning"] = tuning
         _save_state(state, push_durable=True)
         return dict(state["tuning"])
 
@@ -868,7 +936,10 @@ def decide_entry_technical(row: dict[str, Any], side: str = "long") -> tuple[boo
     return False, f"no dip signal (price {dip_pct:+.3%} vs short MA)"
 
 
-def evaluate_candidate(ticker: str, *, confidence_min: float | None = None) -> dict[str, Any]:
+def evaluate_candidate(
+    ticker: str, *, confidence_min: float | None = None,
+    correlation_study_enabled: bool | None = None, correlation_max_adjustment: float | None = None,
+) -> dict[str, Any]:
     """Combine the technical scalper filter with the direction model for one
     ticker, considering a LONG entry (dip + model predicts up) and, if
     ENABLE_SHORTS is on, a SHORT entry (rally + model predicts down) --
@@ -883,7 +954,16 @@ def evaluate_candidate(ticker: str, *, confidence_min: float | None = None) -> d
     set by perps_trade_analysis.recommend_confidence_threshold's own
     evidence-gated tuning (apply_confidence_threshold_override), so a
     confidence floor genuinely learned from this account's real trade
-    history can take effect without a redeploy."""
+    history can take effect without a redeploy.
+
+    correlation_study_enabled/correlation_max_adjustment override the
+    module-level USE_CORRELATION_STUDY/CORRELATION_CONFIDENCE_MAX_ADJUSTMENT
+    defaults the exact same way -- see scan_and_enter, which reads a
+    durable-state override set by
+    perps_trade_analysis.recommend_correlation_study_weight's own
+    evidence-gated tuning (apply_correlation_study_override), so real
+    closed-trade history can turn the chart-study layer on/off or trust it
+    more/less without a redeploy, same mechanism as the confidence floor."""
     row = latest_feature_row(ticker)
     if row is None:
         return {"ticker": ticker, "should_enter": False, "reason": "no_feature_data", "model_ok": False, "technical_ok": False}
@@ -914,6 +994,22 @@ def evaluate_candidate(ticker: str, *, confidence_min: float | None = None) -> d
     if model_ok:
         result["probability_up"] = prediction["probability_up"]
         result["model_direction"] = prediction["direction"]
+
+    # Chart-study confidence layer -- see USE_CORRELATION_STUDY's own
+    # comment. Computed and attached unconditionally (cheap: an in-memory
+    # dict lookup + a handful of arithmetic ops, see crypto_correlation.py's
+    # own caching design) so it's visible on the dashboard/entry-chart even
+    # while the flag is off; only actually influences should_enter/score
+    # below once explicitly turned on.
+    correlation = crypto_correlation.perps_correlation_bullishness(coin_for_ticker(ticker), row)
+    result["correlation_score"] = correlation["score"]
+    result["correlation_reason"] = correlation["reason"]
+    effective_use_correlation_study = (
+        USE_CORRELATION_STUDY if correlation_study_enabled is None else correlation_study_enabled
+    )
+    effective_correlation_max_adjustment = (
+        CORRELATION_CONFIDENCE_MAX_ADJUSTMENT if correlation_max_adjustment is None else correlation_max_adjustment
+    )
 
     reasons = []
     for side in (("long", "short") if ENABLE_SHORTS else ("long",)):
@@ -980,11 +1076,24 @@ def evaluate_candidate(ticker: str, *, confidence_min: float | None = None) -> d
                 reasons.append(f"{technical_reason}, but 4h trend not down ({trend_4h:+.3%})")
                 continue
 
+        # Bullish-signed correlation score, flipped for a short exactly like
+        # decide_exit already flips momentum_pct/breakout_pct_b/sentiment_score
+        # (see that function's own docstring for the convention).
+        side_correlation_score = correlation["score"] if side == "long" else -correlation["score"]
+
         if not model_ok:
             if side == "short":
                 # Shorting on technicals alone (no model to confirm the
                 # direction at all yet) is not a risk worth taking.
                 reasons.append(f"{technical_reason} (model not trained yet -- shorts require model confirmation)")
+                continue
+            if effective_use_correlation_study and side_correlation_score <= -PROMISING_CORRELATION_SCORE:
+                # Same extra caution already applied to shorts above,
+                # extended to this branch: entering on technicals ALONE
+                # (no model yet) is already the riskiest path this function
+                # takes -- a correlation study that actively disagrees is
+                # reason enough to skip it this cycle, not just note it.
+                reasons.append(f"{technical_reason} (model not trained yet -- correlation study disagrees: {correlation['reason']})")
                 continue
             result["should_enter"] = True
             result["side"] = side
@@ -995,11 +1104,22 @@ def evaluate_candidate(ticker: str, *, confidence_min: float | None = None) -> d
         wanted_direction = "up" if side == "long" else "down"
         confidence = prediction["probability_up"] if side == "long" else (1.0 - prediction["probability_up"])
         effective_confidence_min = confidence_min if confidence_min is not None else MODEL_CONFIDENCE_MIN
+        if effective_use_correlation_study:
+            # Confirmation lowers the bar a little, disagreement raises it a
+            # little -- capped at +/-effective_correlation_max_adjustment so
+            # this can nudge the model's own gate, never override it outright.
+            effective_confidence_min = max(
+                0.5, min(0.95, effective_confidence_min - side_correlation_score * effective_correlation_max_adjustment),
+            )
         if prediction["direction"] == wanted_direction and confidence >= effective_confidence_min:
             result["should_enter"] = True
             result["side"] = side
             result["reason"] = f"{technical_reason}; model predicts {wanted_direction} (p={confidence:.2f})"
-            result["score"] = confidence
+            score = confidence
+            if effective_use_correlation_study:
+                score += side_correlation_score * effective_correlation_max_adjustment
+                result["reason"] += f"; correlation study: {correlation['reason']}"
+            result["score"] = score
             return result
         reasons.append(f"{technical_reason}, but model predicts {prediction['direction']} (p_up={prediction['probability_up']:.2f})")
 
@@ -1010,10 +1130,12 @@ def evaluate_candidate(ticker: str, *, confidence_min: float | None = None) -> d
 
 def scan_for_entries(
     tickers: list[str] | None = None, *, exclude: set[str] | None = None, confidence_min: float | None = None,
+    correlation_study_enabled: bool | None = None, correlation_max_adjustment: float | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Evaluate every ticker in the watchlist (minus any already held);
     return every qualifying candidate ranked best-first, plus every
-    candidate's evaluation for observability. confidence_min passed straight
+    candidate's evaluation for observability. confidence_min/
+    correlation_study_enabled/correlation_max_adjustment passed straight
     through to evaluate_candidate -- see its own docstring."""
     watchlist = tickers or get_watchlist()
     held = exclude or set()
@@ -1027,7 +1149,13 @@ def scan_for_entries(
         prewarm_sentiment([coin_for_ticker(t) for t in to_evaluate], use_limited_sources=True)
     except Exception as exc:
         logger.debug("[perps_strategy] sentiment prewarm failed (non-fatal): %s", exc)
-    candidates = [evaluate_candidate(t, confidence_min=confidence_min) for t in to_evaluate]
+    candidates = [
+        evaluate_candidate(
+            t, confidence_min=confidence_min,
+            correlation_study_enabled=correlation_study_enabled, correlation_max_adjustment=correlation_max_adjustment,
+        )
+        for t in to_evaluate
+    ]
     qualifying = sorted((c for c in candidates if c.get("should_enter")), key=lambda c: c.get("score", 0.0), reverse=True)
     return qualifying, candidates
 
@@ -1206,6 +1334,7 @@ def decide_exit(
     dollar_volume_z: float | None = None, momentum_pct: float | None = None,
     breakout_pct_b: float | None = None, sentiment_score: float | None = None,
     model_ok: bool = False, probability_up: float | None = None,
+    correlation_score: float | None = None,
 ) -> tuple[bool, str]:
     """See USE_TREND_TRAILING_STRATEGY's own comment -- when enabled, exits
     take the simpler, separately-validated trailing-stop path below instead
@@ -1259,7 +1388,17 @@ def decide_exit(
     time -- a live conviction read, not a stale one. Feeds both the early
     pre-exit-study quit path and the max_hold "promising" extension path;
     omit both (the default) to fall back to the pre-existing technical-only
-    behavior exactly."""
+    behavior exactly.
+
+    `correlation_score` is crypto_correlation.perps_correlation_bullishness's
+    own live reading for this ticker (see that module's own docstring),
+    bullish-signed like momentum_pct/sentiment_score -- side-flipped below
+    the same way. Feeds the SAME three paths those two already feed
+    (quick-profit continuation check, pre-exit-study reversal, max_hold
+    "promising" extension); the caller (manage_open_positions) only passes
+    a real value when USE_CORRELATION_STUDY is on, so omitting it (the
+    default) simply can't contribute, same as every other optional param
+    here."""
     if USE_TREND_TRAILING_STRATEGY:
         return _decide_exit_trailing(
             position, current_price, now=now,
@@ -1280,6 +1419,7 @@ def decide_exit(
         favorable_breakout = (1.0 - breakout_pct_b) if breakout_pct_b is not None else None
         favorable_sentiment = -sentiment_score if sentiment_score is not None else None
         favorable_model_confidence = (1.0 - probability_up) if (model_ok and probability_up is not None) else None
+        favorable_correlation = -correlation_score if correlation_score is not None else None
     else:
         change_pct = (current_price - entry_price) / entry_price if entry_price > 0 else 0.0
         favorable_velocity = velocity_pct_per_min
@@ -1288,6 +1428,7 @@ def decide_exit(
         favorable_breakout = breakout_pct_b
         favorable_sentiment = sentiment_score
         favorable_model_confidence = probability_up if (model_ok and probability_up is not None) else None
+        favorable_correlation = correlation_score
 
     if change_pct >= quick_profit_pct:
         # Per explicit user direction: check volume/trend data before
@@ -1306,6 +1447,7 @@ def decide_exit(
         continuation_confirmed = volume_confirmed and change_pct >= 0 and (
             (favorable_momentum is not None and favorable_momentum >= PROMISING_MOMENTUM_PCT)
             or (favorable_breakout is not None and favorable_breakout >= PROMISING_BREAKOUT_PCT_B)
+            or (favorable_correlation is not None and favorable_correlation >= PROMISING_CORRELATION_SCORE)
         )
         skip_quick_profit = SKIP_QUICK_PROFIT_WHEN_PROMISING and continuation_confirmed
         if not skip_quick_profit:
@@ -1338,10 +1480,15 @@ def decide_exit(
             favorable_model_confidence is not None
             and favorable_model_confidence <= (1.0 - PROMISING_MODEL_CONFIDENCE)
         )
-        if model_favors_reversal and not volume_confirmed_early:
+        correlation_favors_reversal = (
+            favorable_correlation is not None and favorable_correlation <= -PROMISING_CORRELATION_SCORE
+        )
+        if (model_favors_reversal or correlation_favors_reversal) and not volume_confirmed_early:
             return True, (
                 f"pre_exit_study ({held_minutes:.0f}min, {MAX_HOLD_MINUTES - held_minutes:.0f}min early: "
-                f"model favors reversal p_up={probability_up:.2f}, no confirming volume z={dollar_volume_z})"
+                f"model favors reversal p_up={probability_up}, "
+                f"correlation study {'favors reversal' if correlation_favors_reversal else 'neutral'} "
+                f"({correlation_score}), no confirming volume z={dollar_volume_z})"
             )
 
     if held_minutes >= MAX_HOLD_MINUTES:
@@ -1365,7 +1512,11 @@ def decide_exit(
         )
         sentiment_promising = favorable_sentiment is not None and favorable_sentiment >= PROMISING_SENTIMENT_SCORE
         model_promising = favorable_model_confidence is not None and favorable_model_confidence >= PROMISING_MODEL_CONFIDENCE
-        promising = price_promising or momentum_promising or breakout_promising or sentiment_promising or model_promising
+        correlation_promising = favorable_correlation is not None and favorable_correlation >= PROMISING_CORRELATION_SCORE
+        promising = (
+            price_promising or momentum_promising or breakout_promising
+            or sentiment_promising or model_promising or correlation_promising
+        )
         if not promising or held_minutes >= MAX_HOLD_MINUTES + MAX_HOLD_EXTENSION_MINUTES:
             return True, f"max_hold_time ({held_minutes:.0f}min, {change_pct:+.3%})"
     return False, f"holding ({change_pct:+.3%}, {held_minutes:.0f}min)"
@@ -1450,13 +1601,13 @@ def _maybe_run_batch_trade_analysis() -> None:
     premature-stop diagnostics from real OHLC (see
     perps_trade_analysis.analyze_recent_trade_batch) -- and posts a Threads
     snapshot. Also opportunistically re-runs the existing evidence-gated
-    confidence-threshold tuning (the same code app_kalshi.py's daily job
-    already uses) so genuine drift gets caught faster than once a day.
-    Called right after manage_open_positions closes trades, OUTSIDE
-    _STATE_LOCK (same reasoning as every other Threads/network call in
-    this module -- must never hold up the fast exit-check loop). Best-
-    effort: any failure here is logged and swallowed, never allowed to
-    affect trading."""
+    confidence-threshold AND chart-study-weight tuning (the same code
+    app_kalshi.py's daily job already uses) so genuine drift gets caught
+    faster than once a day. Called right after manage_open_positions closes
+    trades, OUTSIDE _STATE_LOCK (same reasoning as every other Threads/
+    network call in this module -- must never hold up the fast exit-check
+    loop). Best-effort: any failure here is logged and swallowed, never
+    allowed to affect trading."""
     try:
         with _STATE_LOCK:
             state = _load_state()
@@ -1467,7 +1618,12 @@ def _maybe_run_batch_trade_analysis() -> None:
                 return
             state["last_batch_analysis_trade_count"] = len(real_trades)
             _save_state(state, push_durable=True)
-            current_threshold = (state.get("tuning") or {}).get("model_confidence_min", MODEL_CONFIDENCE_MIN)
+            tuning_state = state.get("tuning") or {}
+            current_threshold = tuning_state.get("model_confidence_min", MODEL_CONFIDENCE_MIN)
+            current_correlation_enabled = tuning_state.get("correlation_study_enabled", USE_CORRELATION_STUDY)
+            current_correlation_max_adjustment = tuning_state.get(
+                "correlation_confidence_max_adjustment", CORRELATION_CONFIDENCE_MAX_ADJUSTMENT,
+            )
 
         recent = real_trades[-perps_trade_analysis.BATCH_SIZE:]
         candles_by_ticker: dict[str, list[dict[str, Any]]] = {}
@@ -1485,6 +1641,16 @@ def _maybe_run_batch_trade_analysis() -> None:
         tuning_rec = perps_trade_analysis.recommend_confidence_threshold(real_trades, current_threshold=current_threshold)
         if tuning_rec.get("should_apply"):
             apply_confidence_threshold_override(tuning_rec["recommended_threshold"], reason="5-trade batch review")
+
+        correlation_rec = perps_trade_analysis.recommend_correlation_study_weight(
+            real_trades, current_enabled=current_correlation_enabled, current_max_adjustment=current_correlation_max_adjustment,
+        )
+        if correlation_rec.get("should_apply"):
+            apply_correlation_study_override(
+                enabled=correlation_rec.get("recommended_enabled"),
+                max_adjustment=correlation_rec.get("recommended_max_adjustment"),
+                reason=f"5-trade batch review ({correlation_rec['action']})",
+            )
     except Exception:
         logger.warning("[perps_strategy] batch trade analysis failed", exc_info=True)
 
@@ -1646,6 +1812,11 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
         if not positions:
             return {"ok": True, "dry_run": effective_dry_run, "action": "no_position"}
 
+        # Same evidence-gated, no-redeploy-needed override as scan_and_enter's
+        # own identical read -- see apply_correlation_study_override.
+        tuning_state = state.get("tuning") or {}
+        effective_use_correlation_study = tuning_state.get("correlation_study_enabled", USE_CORRELATION_STUDY)
+
         remaining: list[dict[str, Any]] = []
         closed: list[dict[str, Any]] = []
         checks: list[dict[str, Any]] = []
@@ -1695,6 +1866,7 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                 dollar_volume_z = momentum_pct = breakout_pct_b = sentiment_score_value = None
                 model_ok_value = False
                 probability_up_value = None
+                correlation_score_value = None
                 opened_at_check = dt.datetime.fromisoformat(position["opened_at"])
                 held_minutes_check = (now - opened_at_check).total_seconds() / 60.0
                 if held_minutes_check >= MAX_HOLD_MINUTES - PRE_EXIT_STUDY_MINUTES:
@@ -1716,6 +1888,17 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                     if prediction and prediction.get("model_ok"):
                         model_ok_value = True
                         probability_up_value = prediction.get("probability_up")
+                    if effective_use_correlation_study:
+                        # In-memory cache lookup only (see crypto_correlation.py's
+                        # own caching design) -- cheap enough to compute here
+                        # even on this fast loop, unlike the network-backed
+                        # promising_row/prediction fetches above.
+                        try:
+                            correlation_score_value = crypto_correlation.perps_correlation_bullishness(
+                                coin_for_ticker(ticker), promising_row,
+                            )["score"]
+                        except Exception as exc:
+                            logger.debug("[perps_strategy] pre-exit correlation study failed for %s: %s", ticker, exc)
 
                 should_exit, reason = decide_exit(
                     position, current_price, velocity_pct_per_min=velocity, external_velocity_pct_per_min=external_velocity,
@@ -1723,6 +1906,7 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                     dollar_volume_z=dollar_volume_z, momentum_pct=momentum_pct,
                     breakout_pct_b=breakout_pct_b, sentiment_score=sentiment_score_value,
                     model_ok=model_ok_value, probability_up=probability_up_value,
+                    correlation_score=correlation_score_value,
                 )
                 checks.append({
                     "ticker": ticker, "ok": True, "exit_check": reason, "velocity_pct_per_min": velocity,
@@ -1852,6 +2036,8 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                     "entry_bb_pct_b": position.get("entry_bb_pct_b"),
                     "entry_rsi_14": position.get("entry_rsi_14"),
                     "entry_sentiment_score": position.get("entry_sentiment_score"),
+                    "entry_correlation_score": position.get("entry_correlation_score"),
+                    "entry_correlation_reason": position.get("entry_correlation_reason"),
                 }
                 trade_log = state.setdefault("trade_log", [])
                 trade_log.append(trade)
@@ -1935,6 +2121,8 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
             })
             if trade.get("entry_probability_up") is not None:
                 indicators["Model prob up"] = f"{trade['entry_probability_up']:.1%}"
+            if trade.get("entry_correlation_score") is not None:
+                indicators["Chart study"] = f"{trade['entry_correlation_score']:+.2f}"
             if trade.get("hold_minutes") is not None:
                 indicators["Held"] = f"{trade['hold_minutes']:.0f}min"
             if trade.get("fee_usd") is not None:
@@ -1994,6 +2182,14 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
         # module-level MODEL_CONFIDENCE_MIN default until enough real trades
         # exist to justify moving it.
         confidence_min_override = (state.get("tuning") or {}).get("model_confidence_min")
+        # Same evidence-gated, no-redeploy-needed mechanism, for the
+        # chart-study layer -- see perps_trade_analysis.recommend_correlation_study_weight
+        # + apply_correlation_study_override. Falls back to the module-level
+        # USE_CORRELATION_STUDY/CORRELATION_CONFIDENCE_MAX_ADJUSTMENT
+        # defaults (both None here) until enough real trades exist.
+        tuning_state = state.get("tuning") or {}
+        correlation_study_enabled_override = tuning_state.get("correlation_study_enabled")
+        correlation_max_adjustment_override = tuning_state.get("correlation_confidence_max_adjustment")
         # push_durable only on the (once-daily) event a fresh reference
         # balance gets captured -- this is the value a restart must not be
         # allowed to silently lose, see the module-level comment above
@@ -2006,7 +2202,11 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
     # Scanning (candles + model + news, all network calls) runs OUTSIDE the
     # lock so it never blocks the fast exit loop for the seconds a full
     # 16-instrument scan can take.
-    qualifying, candidates = scan_for_entries(exclude=held_tickers, confidence_min=confidence_min_override)
+    qualifying, candidates = scan_for_entries(
+        exclude=held_tickers, confidence_min=confidence_min_override,
+        correlation_study_enabled=correlation_study_enabled_override,
+        correlation_max_adjustment=correlation_max_adjustment_override,
+    )
     result["candidates"] = candidates
     if not qualifying:
         return result
@@ -2167,6 +2367,15 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
                     "entry_bb_pct_b": candidate.get("bb_pct_b"),
                     "entry_rsi_14": candidate.get("rsi_14"),
                     "entry_sentiment_score": candidate.get("sentiment_score"),
+                    # Chart-study reading at entry -- see crypto_correlation.py's
+                    # own module docstring. Persisted the same way as every
+                    # other entry-time signal above specifically so
+                    # perps_trade_analysis.py can later ask "did trades where
+                    # this agreed with the taken side actually win more" against
+                    # REAL realized outcomes, not just a backtest -- see
+                    # recommend_correlation_study_weight there.
+                    "entry_correlation_score": candidate.get("correlation_score"),
+                    "entry_correlation_reason": candidate.get("correlation_reason"),
                 }
                 if existing_idx is not None:
                     merged = dict(positions[existing_idx])
@@ -2213,6 +2422,8 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
                     indicators["Model prob up"] = f"{candidate['probability_up']:.1%}"
                 if candidate.get("score") is not None:
                     indicators["Entry score"] = f"{candidate['score']:.3f}"
+                if candidate.get("correlation_score") is not None:
+                    indicators["Chart study"] = f"{candidate['correlation_score']:+.2f}"
                 threads_post.post_trade_entry_chart(
                     ticker=ticker, market="perps", candles=_candles_as_dicts(one_min_df),
                     entry_price=actual_entry_price, take_profit_price=levels["take_profit_price"],

@@ -43,6 +43,7 @@ import numpy as np
 import pandas as pd
 
 from data import alpaca_client
+from data.crypto_correlation import ALPACA_CRYPTO_CORRELATION_STUDY_HF_FILENAME
 from data.crypto_news import get_sentiment, prewarm_sentiment
 
 logger = logging.getLogger(__name__)
@@ -296,6 +297,45 @@ def _upload_shard(df: pd.DataFrame, *, path_in_repo: str, commit_message: str) -
         return {"ok": True, "rows": len(df), "path": path_in_repo}
     except Exception as exc:
         logger.warning("[alpaca_crypto_data] HF upload failed for %s: %s", path_in_repo, exc)
+        return {"ok": False, "error": str(exc)}
+
+
+def push_correlation_study_to_hf(study: dict[str, Any]) -> dict[str, Any]:
+    """Pushes the small correlation-study JSON (see crypto_correlation.py's
+    own module docstring) built THIS collect cycle from the same `df`
+    collect_dataset_rows() just fetched -- one small file, not the raw
+    archive, so perps_data.py's own pull (see
+    pull_alpaca_crypto_correlation_study) is cheap and fast on its own,
+    independent collect cycle. Best-effort/non-fatal by design, same as
+    perps_strategy.py's own _push_durable_state_to_hf: losing one cycle's
+    push just means the next cycle's push (15min away, well inside
+    get_remote_alpaca_study's own staleness window) catches up."""
+    if not HF_API_KEY:
+        return {"ok": False, "reason": "no_hf_api_key"}
+    import json
+    import tempfile
+    from huggingface_hub import HfApi
+
+    try:
+        api = HfApi(token=HF_API_KEY)
+        try:
+            api.repo_info(repo_id=HF_ALPACA_CRYPTO_DATASET_REPO, repo_type="dataset")
+        except Exception:
+            api.create_repo(repo_id=HF_ALPACA_CRYPTO_DATASET_REPO, repo_type="dataset", exist_ok=True, private=False)
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as tmp:
+            tmp.write(json.dumps(study, indent=2))
+            tmp_path = tmp.name
+        try:
+            api.upload_file(
+                path_or_fileobj=tmp_path, path_in_repo=ALPACA_CRYPTO_CORRELATION_STUDY_HF_FILENAME,
+                repo_id=HF_ALPACA_CRYPTO_DATASET_REPO, repo_type="dataset",
+                commit_message="update alpaca crypto correlation study",
+            )
+        finally:
+            os.unlink(tmp_path)
+        return {"ok": True, "ids": len(study.get("ids") or [])}
+    except Exception as exc:
+        logger.warning("[alpaca_crypto_data] correlation study push to HF failed: %s", exc)
         return {"ok": False, "error": str(exc)}
 
 

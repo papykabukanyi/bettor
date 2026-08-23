@@ -39,6 +39,14 @@ throughout -- it tests the TECHNICAL + MODEL signal exactly as the live
 strategy would, minus the live news feature. This is disclosed rather than
 faked with synthetic sentiment history, same as perps_backtest.py's own
 identical limitation.
+
+`use_correlation_study` (see crypto_correlation.py's own module docstring)
+validates the FULL local chart-study composite here -- peer confirmation,
+leader divergence, and breadth across Alpaca's own multi-pair historical
+frame (already walked by this backtest, unlike perps_backtest.py which
+lacks an equivalent cross-service historical archive), plus multi-timeframe
+confluence. Leakage-free: each simulated decision point only ever sees
+data up to and including its own `ts` (see build_study_from_wide).
 """
 from __future__ import annotations
 
@@ -52,6 +60,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, roc_auc_score
 
 from data import alpaca_crypto_strategy as strat
+from data import crypto_correlation as cc
 from data import walkforward
 from data.alpaca_crypto_data import FEATURE_COLUMNS, engineer_features, fetch_crypto_bars, get_crypto_universe, symbol_to_coin
 
@@ -162,6 +171,8 @@ def simulate(
     take_profit_pct: float | None = None,
     stop_loss_pct: float | None = None,
     max_hold_minutes: int | None = None,
+    use_correlation_study: bool | None = None,
+    correlation_confidence_max_adjustment: float | None = None,
 ) -> dict[str, Any]:
     """Walk forward through `test_df` (all pairs, sorted by ts) replaying
     the real strategy functions. Every strategy parameter can be overridden
@@ -191,6 +202,11 @@ def simulate(
     take_profit_pct = strat.TAKE_PROFIT_PCT if take_profit_pct is None else take_profit_pct
     stop_loss_pct = strat.STOP_LOSS_PCT if stop_loss_pct is None else stop_loss_pct
     max_hold_minutes = strat.MAX_HOLD_MINUTES if max_hold_minutes is None else max_hold_minutes
+    use_correlation_study = strat.USE_CORRELATION_STUDY if use_correlation_study is None else use_correlation_study
+    correlation_confidence_max_adjustment = (
+        strat.CORRELATION_CONFIDENCE_MAX_ADJUSTMENT if correlation_confidence_max_adjustment is None
+        else correlation_confidence_max_adjustment
+    )
 
     original_globals = {
         "TAKE_PROFIT_PCT": strat.TAKE_PROFIT_PCT, "STOP_LOSS_PCT": strat.STOP_LOSS_PCT,
@@ -205,6 +221,8 @@ def simulate(
             max_concurrent_positions=max_concurrent_positions, entry_dip_pct=entry_dip_pct, min_volume_z=min_volume_z,
             min_volatility_ratio=min_volatility_ratio, model_confidence_min=model_confidence_min,
             daily_loss_cap_pct=daily_loss_cap_pct, taker_fee_rate=taker_fee_rate,
+            use_correlation_study=use_correlation_study,
+            correlation_confidence_max_adjustment=correlation_confidence_max_adjustment,
         )
     finally:
         strat.TAKE_PROFIT_PCT = original_globals["TAKE_PROFIT_PCT"]
@@ -217,6 +235,7 @@ def _simulate_inner(
     starting_balance: float, position_size_pct: float, max_concurrent_positions: int,
     entry_dip_pct: float, min_volume_z: float, min_volatility_ratio: float, model_confidence_min: float,
     daily_loss_cap_pct: float, taker_fee_rate: float,
+    use_correlation_study: bool = False, correlation_confidence_max_adjustment: float = 0.06,
 ) -> dict[str, Any]:
     """The actual walk-forward loop -- pulled out of simulate() purely so
     that function's try/finally global-restore wrapper doesn't have to
@@ -226,6 +245,38 @@ def _simulate_inner(
     df = test_df.sort_values("ts").reset_index(drop=True)
     if "model_probability_up" not in df.columns:
         df = add_model_predictions(df, fitted)
+
+    # See crypto_correlation.py's own module docstring. Unlike
+    # perps_backtest.py, this backtest already walks a real multi-pair
+    # historical frame across Alpaca's OWN universe, so it can validate the
+    # FULL local composite (peer confirmation + leader divergence + breadth
+    # + multi-timeframe) -- no cross-service data gap here, since this IS
+    # the Alpaca side. Pivoted once up front; each simulated decision point
+    # re-slices it by its OWN `ts` via build_study_from_wide's `as_of_ts`,
+    # so a later timestamp's return can never leak into an earlier
+    # decision. Recomputed on a coarse ~15min bucket, same reasoning as
+    # perps_backtest.py's own identical cache.
+    correlation_wide = cc._pivot_returns(df, id_col="symbol", ts_col="ts", ret_col=cc.RET_COL) if use_correlation_study else pd.DataFrame()  # noqa: SLF001
+    _correlation_study_cache: dict[str, Any] = {"bucket": None, "study": {}}
+    _CORRELATION_RECOMPUTE_BUCKET_SEC = 900
+
+    def _correlation_study_as_of(ts: float) -> dict[str, Any]:
+        bucket = int(ts // _CORRELATION_RECOMPUTE_BUCKET_SEC)
+        if _correlation_study_cache["bucket"] != bucket:
+            _correlation_study_cache["study"] = cc.build_study_from_wide(correlation_wide, as_of_ts=ts, leader_id="BTC")
+            _correlation_study_cache["bucket"] = bucket
+        return _correlation_study_cache["study"]
+
+    def _correlation_bullishness_as_of(ts: float, symbol: str, row) -> float:
+        study = _correlation_study_as_of(ts)
+        coin = symbol_to_coin(symbol)
+        peer_score, _ = cc._peer_confirmation_bullishness(study, coin)  # noqa: SLF001
+        divergence_score, _ = cc._leader_divergence_bullishness(study, coin)  # noqa: SLF001
+        breadth_score, _ = cc._breadth_bullishness(study)  # noqa: SLF001
+        timeframe_row = {field: getattr(row, field, None) for field in cc._TIMEFRAME_REFERENCE_SCALES}  # noqa: SLF001
+        timeframe_row["rsi_14"] = getattr(row, "rsi_14", None)
+        multi_timeframe_score, _ = cc.multi_timeframe_bullishness(timeframe_row)
+        return max(-1.0, min(1.0, 0.3 * peer_score + 0.2 * divergence_score + 0.2 * breadth_score + 0.3 * multi_timeframe_score))
 
     balance = starting_balance
     open_positions: dict[str, dict[str, Any]] = {}
@@ -261,8 +312,10 @@ def _simulate_inner(
             # current time (this row's own timestamp), not real wall-clock
             # time, or almost every position force-exits on its first tick.
             sim_now = pd.Timestamp(row.ts, unit="s", tz="UTC").to_pydatetime()
+            exit_correlation_score = _correlation_bullishness_as_of(row.ts, symbol, row) if use_correlation_study else None
             should_exit, reason = strat.decide_exit(
                 pos, price, velocity_pct_per_min=velocity, current_volatility=current_volatility, now=sim_now,
+                correlation_score=exit_correlation_score,
             )
             if should_exit:
                 gross = round((price - pos["entry_price"]) * pos["count"], 6)  # long-only
@@ -321,8 +374,22 @@ def _simulate_inner(
 
         proba_up = row.model_probability_up
         model_ok = proba_up == proba_up  # not NaN -> a model exists
-        if model_ok and proba_up < model_confidence_min:
-            continue
+        correlation_score = _correlation_bullishness_as_of(row.ts, symbol, row) if use_correlation_study else None
+        if not model_ok:
+            # Same extra caution live evaluate_candidate applies to its own
+            # technical-only fallback (no model yet, riskiest path this
+            # function takes): skip if the correlation study actively
+            # disagrees strongly enough.
+            if use_correlation_study and correlation_score is not None and correlation_score <= -strat.PROMISING_CORRELATION_SCORE:
+                continue
+        else:
+            effective_model_confidence_min = model_confidence_min
+            if use_correlation_study and correlation_score is not None:
+                effective_model_confidence_min = max(
+                    0.5, min(0.95, effective_model_confidence_min - correlation_score * correlation_confidence_max_adjustment),
+                )
+            if proba_up < effective_model_confidence_min:
+                continue
 
         available = balance
         notional = round(max(0.0, available) * position_size_pct, 2)

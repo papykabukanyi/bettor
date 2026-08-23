@@ -268,7 +268,21 @@ def _run_alpaca_crypto_data_collect() -> dict[str, Any]:
         df = alpaca_crypto_data.collect_dataset_rows()
         if df.empty:
             return {"ok": False, "reason": "no_rows_collected"}
-        return alpaca_crypto_data.push_minute_snapshot(df)
+        result = alpaca_crypto_data.push_minute_snapshot(df)
+        # Best-effort, non-fatal -- see crypto_correlation.py's own module
+        # docstring for the full cross-market design this feeds (both this
+        # service's own entry/exit confidence layer AND, via the HF push,
+        # perps_strategy.py's). A failure here must never take down the
+        # actual minute-bar archive push above.
+        try:
+            from data import crypto_correlation
+            study = crypto_correlation.refresh_alpaca_study(
+                df, id_col="symbol", leader_id="BTC", coin_of=alpaca_crypto_data.symbol_to_coin,
+            )
+            alpaca_crypto_data.push_correlation_study_to_hf(study)
+        except Exception as exc:
+            logger.warning("[alpaca_crypto_server] correlation study refresh/push failed: %s", exc)
+        return result
     except Exception as exc:
         logger.warning("[alpaca_crypto_server] data collect failed: %s", exc)
         return {"ok": False, "error": str(exc)}

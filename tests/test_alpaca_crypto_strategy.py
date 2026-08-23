@@ -14,7 +14,7 @@ import datetime as dt
 import pandas as pd
 import pytest
 
-from data import alpaca_client, alpaca_crypto_data, alpaca_crypto_model, crypto_news, threads_post, alpaca_crypto_strategy as strat
+from data import alpaca_client, alpaca_crypto_data, alpaca_crypto_model, crypto_correlation, crypto_news, threads_post, alpaca_crypto_strategy as strat
 
 
 def _row(**overrides):
@@ -952,3 +952,148 @@ def test_record_milestone_persists_baseline_and_high_water_mark(monkeypatch, tmp
     state = strat._load_state()  # noqa: SLF001
     assert state["milestones"]["baseline_balance"] == 100.0
     assert state["milestones"]["high_water_mark"] == 150.0
+
+
+# ── Chart-study confidence layer (USE_CORRELATION_STUDY) ────────────────────
+# See crypto_correlation.py's own module docstring / perps_strategy.py's
+# identical tests for the full design. Default OFF -- the score/reason must
+# always be attached for observability, but must never change
+# should_enter/score/decide_exit until explicitly turned on.
+
+def test_evaluate_candidate_attaches_correlation_reading_even_when_flag_off(monkeypatch):
+    monkeypatch.setattr(
+        crypto_correlation, "alpaca_correlation_bullishness",
+        lambda coin, row=None: {"score": 0.9, "reason": "strong confirmation", "components": {}},
+    )
+    result = strat.evaluate_candidate(_row(), model_prediction=None)
+    assert result["correlation_score"] == 0.9
+    assert result["correlation_reason"] == "strong confirmation"
+    assert "correlation" not in result["reason"]
+
+
+def test_evaluate_candidate_correlation_confirmation_lowers_the_bar_when_flag_on(monkeypatch):
+    monkeypatch.setattr(strat, "USE_CORRELATION_STUDY", True)
+    monkeypatch.setattr(
+        crypto_correlation, "alpaca_correlation_bullishness",
+        lambda coin, row=None: {"score": 1.0, "reason": "max confirmation", "components": {}},
+    )
+    # 0.52 alone misses MODEL_CONFIDENCE_MIN (0.55) by 0.03 -- within
+    # CORRELATION_CONFIDENCE_MAX_ADJUSTMENT (0.06).
+    result = strat.evaluate_candidate(_row(), {"model_ok": True, "probability_up": 0.52})
+    assert result["should_enter"] is True
+    assert "correlation study" in result["reason"]
+
+
+def test_evaluate_candidate_correlation_disagreement_raises_the_bar_when_flag_on(monkeypatch):
+    monkeypatch.setattr(strat, "USE_CORRELATION_STUDY", True)
+    monkeypatch.setattr(
+        crypto_correlation, "alpaca_correlation_bullishness",
+        lambda coin, row=None: {"score": -1.0, "reason": "max disagreement", "components": {}},
+    )
+    # 0.58 alone clears MODEL_CONFIDENCE_MIN (0.55) -- a maximally bearish
+    # correlation reading raises the bar past it (0.55 + 0.06 = 0.61).
+    result = strat.evaluate_candidate(_row(), {"model_ok": True, "probability_up": 0.58})
+    assert result["should_enter"] is False
+
+
+def test_evaluate_candidate_correlation_veto_on_technical_only_fallback_when_flag_on(monkeypatch):
+    monkeypatch.setattr(strat, "USE_CORRELATION_STUDY", True)
+    monkeypatch.setattr(
+        crypto_correlation, "alpaca_correlation_bullishness",
+        lambda coin, row=None: {"score": -0.9, "reason": "strongly disagrees", "components": {}},
+    )
+    result = strat.evaluate_candidate(_row(), model_prediction=None)
+    assert result["should_enter"] is False
+    assert "correlation study disagrees" in result["reason"]
+
+
+def test_decide_exit_ignores_correlation_score_when_omitted():
+    pos = _position(minutes_ago=strat.MAX_HOLD_MINUTES + 1)
+    should_exit, reason = strat.decide_exit(pos, 65000.0)
+    assert should_exit and "max_hold_time" in reason
+
+
+def test_decide_exit_favorable_correlation_extends_a_flat_position_past_max_hold():
+    pos = _position(minutes_ago=strat.MAX_HOLD_MINUTES + 1)
+    should_exit, reason = strat.decide_exit(
+        pos, 65000.0 * 1.0005, correlation_score=strat.PROMISING_CORRELATION_SCORE + 0.1,
+    )
+    assert not should_exit
+    assert "holding" in reason
+
+
+def test_decide_exit_unfavorable_correlation_triggers_early_pre_exit_study():
+    past_pre_exit = strat.MAX_HOLD_MINUTES - strat.PRE_EXIT_STUDY_MINUTES + 1
+    pos = _position(minutes_ago=past_pre_exit)
+    should_exit, reason = strat.decide_exit(
+        pos, 65000.0 * 0.999, correlation_score=-(strat.PROMISING_CORRELATION_SCORE + 0.1),
+    )
+    assert should_exit
+    assert "pre_exit_study" in reason
+    assert "favors reversal" in reason
+
+
+# ── Evidence-gated "remember what works" tuning of the chart-study layer
+# itself (apply_correlation_study_override) -- see
+# alpaca_crypto_trade_analysis.recommend_correlation_study_weight and
+# test_perps_strategy.py's sibling coverage for the full rationale.
+
+def test_apply_correlation_study_override_persists_to_state(monkeypatch, tmp_path):
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "alpaca_crypto_state.json")
+    monkeypatch.setattr(strat, "USE_CORRELATION_STUDY", False)
+    monkeypatch.setattr(strat, "CORRELATION_CONFIDENCE_MAX_ADJUSTMENT", 0.06)
+    strat._save_state({"positions": [], "trade_log": [], "realized_pnl_by_date": {}})  # noqa: SLF001
+
+    result = strat.apply_correlation_study_override(enabled=True, reason="evidence-gated: test")
+
+    assert result["correlation_study_enabled"] is True
+    assert result["previous_correlation_study_enabled"] is False
+    reloaded = strat._load_state()  # noqa: SLF001
+    assert reloaded["tuning"]["correlation_study_enabled"] is True
+
+
+def test_apply_correlation_study_override_only_changes_the_field_passed(monkeypatch, tmp_path):
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "alpaca_crypto_state.json")
+    strat._save_state({  # noqa: SLF001
+        "positions": [], "trade_log": [], "realized_pnl_by_date": {},
+        "tuning": {"correlation_study_enabled": True, "correlation_confidence_max_adjustment": 0.06},
+    })
+
+    strat.apply_correlation_study_override(max_adjustment=0.09, reason="test")
+
+    reloaded = strat._load_state()  # noqa: SLF001
+    assert reloaded["tuning"]["correlation_study_enabled"] is True  # untouched
+    assert reloaded["tuning"]["correlation_confidence_max_adjustment"] == 0.09
+
+
+def test_apply_confidence_threshold_override_does_not_clobber_an_existing_correlation_override(monkeypatch, tmp_path):
+    """Real bug found and fixed: this used to overwrite state["tuning"]
+    wholesale -- see apply_confidence_threshold_override's own docstring."""
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "alpaca_crypto_state.json")
+    strat._save_state({  # noqa: SLF001
+        "positions": [], "trade_log": [], "realized_pnl_by_date": {},
+        "tuning": {"correlation_study_enabled": True, "correlation_confidence_max_adjustment": 0.09},
+    })
+
+    strat.apply_confidence_threshold_override(0.6, reason="test")
+
+    reloaded = strat._load_state()  # noqa: SLF001
+    assert reloaded["tuning"]["model_confidence_min"] == 0.6
+    assert reloaded["tuning"]["correlation_study_enabled"] is True
+    assert reloaded["tuning"]["correlation_confidence_max_adjustment"] == 0.09
+
+
+def test_evaluate_candidate_correlation_study_enabled_override_works_even_when_the_module_flag_is_off(monkeypatch):
+    assert strat.USE_CORRELATION_STUDY is False
+    monkeypatch.setattr(
+        crypto_correlation, "alpaca_correlation_bullishness",
+        lambda coin, row=None: {"score": 1.0, "reason": "max confirmation", "components": {}},
+    )
+    # 0.52 alone misses MODEL_CONFIDENCE_MIN (0.55) by 0.03 -- within the
+    # 0.06 max_adjustment passed explicitly here.
+    result = strat.evaluate_candidate(
+        _row(), {"model_ok": True, "probability_up": 0.52},
+        correlation_study_enabled=True, correlation_max_adjustment=0.06,
+    )
+    assert result["should_enter"] is True
+    assert "correlation study" in result["reason"]

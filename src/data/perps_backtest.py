@@ -31,6 +31,23 @@ sentiment, so the backtest runs with `sentiment_score` held at 0.0 (neutral)
 throughout -- it tests the TECHNICAL + MODEL signal exactly as the live
 strategy would, minus the live news feature. This is disclosed rather than
 faked with synthetic sentiment history.
+
+A second, same-shape, disclosed limitation for `use_correlation_study` (see
+crypto_correlation.py's own module docstring for the full design): this
+backtest fully covers the MULTI-TIMEFRAME confluence half of that study
+(single-instrument, needs no cross-market data -- see
+multi_timeframe_bullishness) and the PERPS-INTERNAL half of the
+correlation study (peer confirmation + breadth among perps' own ~13
+instruments, computed leakage-free from this same historical test_df via
+crypto_correlation.build_study_from_wide -- see simulate()'s own comment).
+There is no equivalent multi-week, multi-symbol historical archive of
+Alpaca crypto's own broader universe wired into this backtest yet, so the
+cross-market leader-divergence signal this codebase's own comments describe
+as the MOST useful half for perps specifically (perps can act on both the
+long and short side of it) runs at 0.0 (neutral) throughout here too, same
+as sentiment_score. A real read on the full composite signal's live edge
+still needs either a live dry-run comparison or a dedicated historical
+Alpaca archive backtest.
 """
 from __future__ import annotations
 
@@ -44,10 +61,11 @@ from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, roc_auc_score
 
+from data import crypto_correlation as cc
 from data import perps_strategy as strat
 from data import walkforward
 from data.kalshi_perps import get_margin_candlesticks
-from data.perps_data import FEATURE_COLUMNS, _candles_to_frame, engineer_features, get_watchlist
+from data.perps_data import FEATURE_COLUMNS, _candles_to_frame, coin_for_ticker, engineer_features, get_watchlist
 
 logger = logging.getLogger(__name__)
 
@@ -199,6 +217,8 @@ def simulate(
     min_entry_relative_volatility_ratio: float | None = None,
     min_entry_volume_z: float | None = None,
     taker_fee_rate: float | None = None,
+    use_correlation_study: bool | None = None,
+    correlation_confidence_max_adjustment: float | None = None,
 ) -> dict[str, Any]:
     """Walk forward through `test_df` (all tickers, sorted by ts) replaying
     the real strategy functions. Every strategy parameter can be overridden
@@ -230,10 +250,52 @@ def simulate(
     # "optimistic." A real NEAR trade on this account showed a gross gain of
     # +$0.0608 book as a NET loss of -$0.1701 once this cost applied.
     taker_fee_rate = strat.DEFAULT_TAKER_FEE_RATE if taker_fee_rate is None else taker_fee_rate
+    use_correlation_study = strat.USE_CORRELATION_STUDY if use_correlation_study is None else use_correlation_study
+    correlation_confidence_max_adjustment = (
+        strat.CORRELATION_CONFIDENCE_MAX_ADJUSTMENT if correlation_confidence_max_adjustment is None
+        else correlation_confidence_max_adjustment
+    )
 
     df = test_df.sort_values("ts").reset_index(drop=True)
     if "model_probability_up" not in df.columns:
         df = add_model_predictions(df, fitted)
+
+    # See this module's own docstring for the disclosed limitation (only the
+    # perps-internal half of the study is covered here). Pivoted ONCE up
+    # front; each simulated decision point below re-slices it by its OWN
+    # `ts` via crypto_correlation.build_study_from_wide's `as_of_ts`, so a
+    # later timestamp's return can never leak into an earlier decision.
+    # Recomputed on a coarse ~15min bucket (matching the live collect
+    # cadence, see crypto_correlation.py's own module docstring) rather than
+    # on every single row -- a full pairwise-correlation recompute per row
+    # across a multi-week, multi-ticker backtest would be needless, and
+    # nothing about the live design assumes finer granularity than that
+    # anyway (live only ever refreshes this once per collect cycle too).
+    correlation_wide = cc._pivot_returns(df, id_col="ticker", ts_col="ts", ret_col=cc.RET_COL) if use_correlation_study else pd.DataFrame()  # noqa: SLF001
+    _correlation_study_cache: dict[str, Any] = {"bucket": None, "study": {}}
+    _CORRELATION_RECOMPUTE_BUCKET_SEC = 900
+
+    def _correlation_study_as_of(ts: float) -> dict[str, Any]:
+        bucket = int(ts // _CORRELATION_RECOMPUTE_BUCKET_SEC)
+        if _correlation_study_cache["bucket"] != bucket:
+            _correlation_study_cache["study"] = cc.build_study_from_wide(correlation_wide, as_of_ts=ts, leader_id="BTC")
+            _correlation_study_cache["bucket"] = bucket
+        return _correlation_study_cache["study"]
+
+    def _correlation_bullishness_as_of(ts: float, ticker: str, row) -> float:
+        """Perps-internal peer/breadth correlation (see this module's own
+        docstring for why the Alpaca-remote half isn't covered here) BLENDED
+        with the multi-timeframe confluence read off this same historical
+        row -- that component needs no cross-instrument data at all, so
+        it's fully covered by this backtest (see
+        crypto_correlation.multi_timeframe_bullishness's own docstring)."""
+        study = _correlation_study_as_of(ts)
+        peer_score, _ = cc._peer_confirmation_bullishness(study, coin_for_ticker(ticker))  # noqa: SLF001
+        breadth_score, _ = cc._breadth_bullishness(study)  # noqa: SLF001
+        timeframe_row = {field: getattr(row, field, None) for field in cc._TIMEFRAME_REFERENCE_SCALES}  # noqa: SLF001
+        timeframe_row["rsi_14"] = getattr(row, "rsi_14", None)
+        multi_timeframe_score, _ = cc.multi_timeframe_bullishness(timeframe_row)
+        return max(-1.0, min(1.0, 0.4 * peer_score + 0.2 * breadth_score + 0.4 * multi_timeframe_score))
 
     balance = starting_balance
     open_positions: dict[str, dict[str, Any]] = {}
@@ -281,6 +343,7 @@ def simulate(
             # held at 0.0 throughout -- no free historical news archive).
             row_proba_up = getattr(row, "model_probability_up", float("nan"))
             row_model_ok = row_proba_up == row_proba_up  # not NaN -> a model exists for this row
+            exit_correlation_score = _correlation_bullishness_as_of(row.ts, ticker, row) if use_correlation_study else None
             should_exit, reason = strat.decide_exit(
                 pos, price, velocity_pct_per_min=velocity, current_volatility=current_volatility, now=sim_now,
                 dollar_volume_z=getattr(row, "dollar_volume_z", None),
@@ -288,6 +351,7 @@ def simulate(
                 breakout_pct_b=getattr(row, "bb_pct_b", None),
                 sentiment_score=getattr(row, "sentiment_score", None),
                 model_ok=row_model_ok, probability_up=(row_proba_up if row_model_ok else None),
+                correlation_score=exit_correlation_score,
             )
             if should_exit:
                 if pos.get("side") == "short":
@@ -352,17 +416,49 @@ def simulate(
             row_volume_z = getattr(row, "dollar_volume_z", None)
             volatility_ok = row_volume_z is not None and row_volume_z >= min_entry_volume_z
 
+        # Bullish-signed correlation reading for THIS ticker as of THIS row's
+        # own ts (see _correlation_bullishness_as_of's own comment on the
+        # leakage-free, coarsely-cached recompute), sign-flipped for the
+        # short side exactly like live evaluate_candidate does.
+        long_correlation_score = short_correlation_score = None
+        if use_correlation_study:
+            base_correlation_score = _correlation_bullishness_as_of(row.ts, ticker, row)
+            long_correlation_score = base_correlation_score
+            short_correlation_score = -base_correlation_score
+
         chosen_side = None
         if volatility_ok and row.trend_pct >= -trend_filter_down_pct and dip_pct >= entry_dip_pct:
-            # technical-only fallback (no model yet) is long-only, same as live.
-            if not model_ok or (proba_up >= 0.5 and proba_up >= model_confidence_min):
-                chosen_side = "long"
+            if not model_ok:
+                # technical-only fallback (no model yet) is long-only, same
+                # as live -- and, same as live's evaluate_candidate, skipped
+                # if the correlation study actively disagrees strongly
+                # enough (see PROMISING_CORRELATION_SCORE's own comment).
+                correlation_vetoes = (
+                    use_correlation_study and long_correlation_score is not None
+                    and long_correlation_score <= -strat.PROMISING_CORRELATION_SCORE
+                )
+                if not correlation_vetoes:
+                    chosen_side = "long"
+            else:
+                effective_long_min = model_confidence_min
+                if use_correlation_study and long_correlation_score is not None:
+                    effective_long_min = max(
+                        0.5, min(0.95, effective_long_min - long_correlation_score * correlation_confidence_max_adjustment),
+                    )
+                if proba_up >= 0.5 and proba_up >= effective_long_min:
+                    chosen_side = "long"
         if (
             chosen_side is None and enable_shorts and volatility_ok
             and row.trend_pct <= trend_filter_down_pct and rally_pct >= entry_dip_pct
-            and model_ok and proba_up < 0.5 and (1.0 - proba_up) >= model_confidence_min
+            and model_ok
         ):
-            chosen_side = "short"
+            effective_short_min = model_confidence_min
+            if use_correlation_study and short_correlation_score is not None:
+                effective_short_min = max(
+                    0.5, min(0.95, effective_short_min - short_correlation_score * correlation_confidence_max_adjustment),
+                )
+            if proba_up < 0.5 and (1.0 - proba_up) >= effective_short_min:
+                chosen_side = "short"
         if chosen_side is None:
             continue
 

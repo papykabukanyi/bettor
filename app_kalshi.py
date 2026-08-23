@@ -399,7 +399,27 @@ def _run_perps_data_collect() -> dict[str, Any]:
         df = perps_data.collect_dataset_rows()
         if df.empty:
             return {"ok": False, "reason": "no_rows_collected"}
-        return perps_data.push_dataset_snapshot(df)
+        result = perps_data.push_dataset_snapshot(df)
+        # Best-effort, non-fatal -- see crypto_correlation.py's own module
+        # docstring for the full cross-market design. refresh_perps_study
+        # builds perps' own within-market study straight from `df` (no
+        # extra network call); pull_alpaca_crypto_correlation_study is the
+        # ONE small HF download that brings in Alpaca crypto's own,
+        # broader-universe study (pushed by alpaca_crypto_server.py's own
+        # data-collect job). Both cached in-process so the fast/entry-scan
+        # loops (perps_strategy.py) only ever do an in-memory lookup.
+        try:
+            from data import crypto_correlation
+            crypto_correlation.refresh_perps_study(
+                df, id_col="ticker", leader_id="BTC", coin_of=perps_data.coin_for_ticker,
+            )
+        except Exception as exc:
+            logger.warning("[app_kalshi] perps correlation study refresh failed: %s", exc)
+        try:
+            perps_data.pull_alpaca_crypto_correlation_study()
+        except Exception as exc:
+            logger.warning("[app_kalshi] alpaca crypto correlation study pull failed: %s", exc)
+        return result
     finally:
         gc.collect()
 
@@ -423,16 +443,20 @@ def _run_perps_train() -> dict[str, Any]:
 def _run_perps_trade_analysis() -> dict[str, Any]:
     """Daily: turns trade_log's own real history into win/loss diagnostics
     (perps_trade_analysis.analyze_trade_history), posts a summary to
-    Threads, and applies a small, bounded confidence-floor adjustment ONLY
-    when the evidence clearly supports it (recommend_confidence_threshold's
-    own gate -- see its docstring). Read-only over state except for that
-    one narrow, evidence-gated write; never touches order placement or
-    position management directly."""
+    Threads, and applies two independent, small, bounded, evidence-gated
+    tunes -- ONLY when their own gate clearly supports it (see each
+    recommend function's own docstring): the confidence floor
+    (recommend_confidence_threshold) and, "remembering" whether the
+    chart-study layer itself is worth trusting
+    (recommend_correlation_study_weight). Read-only over state except for
+    those two narrow, evidence-gated writes; never touches order placement
+    or position management directly."""
     try:
         state = perps_strategy._load_state()  # noqa: SLF001
         trade_log = state.get("trade_log") or []
         analysis = perps_trade_analysis.analyze_trade_history(trade_log)
-        current_threshold = (state.get("tuning") or {}).get("model_confidence_min", perps_strategy.MODEL_CONFIDENCE_MIN)
+        tuning_state = state.get("tuning") or {}
+        current_threshold = tuning_state.get("model_confidence_min", perps_strategy.MODEL_CONFIDENCE_MIN)
         recommendation = perps_trade_analysis.recommend_confidence_threshold(trade_log, current_threshold=current_threshold)
 
         tuning_applied = None
@@ -447,6 +471,32 @@ def _run_perps_trade_analysis() -> dict[str, Any]:
             )
             logger.info("[app_kalshi] perps confidence threshold tuned: %s", tuning_applied)
 
+        # Same evidence-gated discipline, for whether the chart-study layer
+        # (crypto_correlation.py) itself is worth trusting -- see
+        # recommend_correlation_study_weight's own docstring for the 3
+        # possible outcomes (enable/increase_weight/disable).
+        current_correlation_enabled = tuning_state.get("correlation_study_enabled", perps_strategy.USE_CORRELATION_STUDY)
+        current_correlation_max_adjustment = tuning_state.get(
+            "correlation_confidence_max_adjustment", perps_strategy.CORRELATION_CONFIDENCE_MAX_ADJUSTMENT,
+        )
+        correlation_recommendation = perps_trade_analysis.recommend_correlation_study_weight(
+            trade_log, current_enabled=current_correlation_enabled, current_max_adjustment=current_correlation_max_adjustment,
+        )
+        correlation_tuning_applied = None
+        if correlation_recommendation.get("should_apply"):
+            correlation_tuning_applied = perps_strategy.apply_correlation_study_override(
+                enabled=correlation_recommendation.get("recommended_enabled"),
+                max_adjustment=correlation_recommendation.get("recommended_max_adjustment"),
+                reason=(
+                    f"evidence-gated: {correlation_recommendation['action']} -- "
+                    f"{correlation_recommendation['agreed']['trades']}-trade agreed bucket "
+                    f"(win rate {correlation_recommendation['agreed']['win_rate']:.0%}) vs "
+                    f"{correlation_recommendation['baseline']['trades']}-trade baseline "
+                    f"(win rate {correlation_recommendation['baseline']['win_rate']:.0%})"
+                ),
+            )
+            logger.info("[app_kalshi] perps correlation study tuned: %s", correlation_tuning_applied)
+
         posted = False
         if analysis.get("trades_analyzed"):
             summary_text = perps_trade_analysis.format_analysis_summary_text(analysis, tuning=recommendation)
@@ -455,7 +505,11 @@ def _run_perps_trade_analysis() -> dict[str, Any]:
             except Exception:
                 logger.warning("[app_kalshi] Threads trade-analysis post failed", exc_info=True)
 
-        return {"ok": True, "analysis": analysis, "tuning_recommendation": recommendation, "tuning_applied": tuning_applied, "posted": posted}
+        return {
+            "ok": True, "analysis": analysis, "tuning_recommendation": recommendation, "tuning_applied": tuning_applied,
+            "correlation_tuning_recommendation": correlation_recommendation, "correlation_tuning_applied": correlation_tuning_applied,
+            "posted": posted,
+        }
     except Exception as exc:
         logger.exception("[app_kalshi] perps trade analysis failed")
         return {"ok": False, "error": str(exc)}

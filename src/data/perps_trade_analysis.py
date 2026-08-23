@@ -233,6 +233,117 @@ def recommend_confidence_threshold(trade_log: list[dict[str, Any]] | None, *, cu
     }
 
 
+# Evidence-gated chart-study (crypto_correlation.py) tuning -- same
+# discipline as CONFIDENCE_TUNING_* above, applied to a different question:
+# not "should the confidence bar move", but "does real trade history show
+# this whole extra layer is actually helping, and if so, by how much should
+# it be trusted." Bounded per call (CORRELATION_TUNING_MAX_STEP), same
+# "gradual, reviewable movement on a real-money account" reasoning.
+CORRELATION_TUNING_MIN_TRADES = 15
+# A side-adjusted correlation reading below this is closer to noise than a
+# real "the study actually had an opinion here" reading -- mirrors
+# crypto_correlation.py's own peer-confirmation module's bar for what
+# counts as a real signal, not a fitted/backtested value.
+CORRELATION_TUNING_AGREEMENT_THRESHOLD = 0.15
+CORRELATION_TUNING_MAX_STEP = 0.03
+CORRELATION_TUNING_MAX_ADJUSTMENT_CEILING = 0.15  # never let evidence alone drive this arbitrarily high
+
+
+def recommend_correlation_study_weight(
+    trade_log: list[dict[str, Any]] | None, *, current_enabled: bool, current_max_adjustment: float,
+) -> dict[str, Any]:
+    """Does real closed-trade history show the chart-study layer (see
+    crypto_correlation.py's own module docstring) is actually helping --
+    trades where it agreed with the side actually taken outperforming
+    trades where it didn't (or was neutral), with enough real trades on
+    BOTH sides to trust the comparison? Every closed trade already carries
+    its own entry_correlation_score (see evaluate_candidate's own comment --
+    captured for observability regardless of whether the study was even ON
+    at entry time), so this works from day one, before the study has ever
+    influenced a single live decision, and keeps working to catch drift
+    after it has.
+
+    Three possible outcomes, same "only move on real evidence" posture as
+    recommend_confidence_threshold above:
+      - should_apply=False, reason="insufficient_trade_history": not
+        enough real trades in one or both buckets yet.
+      - should_apply=True, action="enable"/"increase_weight": the
+        "agreed" bucket clearly outperforms (both better avg P&L AND
+        equal-or-better win rate) -- turn it on, or trust it a bit more if
+        already on.
+      - should_apply=True, action="disable": the "agreed" bucket clearly
+        UNDERperforms (both worse avg P&L and worse win rate) while
+        currently enabled -- real evidence it's actively hurting, not just
+        unproven yet."""
+    trade_log = trade_log or []
+    trades = [t for t in trade_log if not t.get("dry_run") and t.get("entry_correlation_score") is not None]
+
+    def _agreement(t: dict[str, Any]) -> float:
+        # Bullish-signed at capture time (see evaluate_candidate) -- flip
+        # for a short exactly like decide_exit's own favorable_correlation
+        # convention, so "agreement" always means "favored the side this
+        # trade actually took."
+        score = float(t["entry_correlation_score"])
+        return score if t.get("side", "long") == "long" else -score
+
+    agreed = [t for t in trades if _agreement(t) >= CORRELATION_TUNING_AGREEMENT_THRESHOLD]
+    baseline = [t for t in trades if _agreement(t) < CORRELATION_TUNING_AGREEMENT_THRESHOLD]
+    agreed_stats = _bucket_stats(agreed)
+    baseline_stats = _bucket_stats(baseline)
+
+    if agreed_stats["trades"] < CORRELATION_TUNING_MIN_TRADES or baseline_stats["trades"] < CORRELATION_TUNING_MIN_TRADES:
+        return {
+            "ok": True, "should_apply": False, "reason": "insufficient_trade_history",
+            "current_enabled": current_enabled, "current_max_adjustment": current_max_adjustment,
+            "agreed": agreed_stats, "baseline": baseline_stats,
+        }
+
+    improves_pnl = agreed_stats["avg_pnl_usd"] > baseline_stats["avg_pnl_usd"]
+    improves_win_rate = agreed_stats["win_rate"] >= baseline_stats["win_rate"]
+    if improves_pnl and improves_win_rate:
+        if not current_enabled:
+            return {
+                "ok": True, "should_apply": True, "action": "enable",
+                "recommended_enabled": True, "recommended_max_adjustment": current_max_adjustment,
+                "agreed": agreed_stats, "baseline": baseline_stats,
+            }
+        new_max_adjustment = min(
+            round(current_max_adjustment + CORRELATION_TUNING_MAX_STEP, 4), CORRELATION_TUNING_MAX_ADJUSTMENT_CEILING,
+        )
+        if new_max_adjustment <= current_max_adjustment:
+            return {
+                "ok": True, "should_apply": False, "reason": "already_at_ceiling",
+                "current_enabled": current_enabled, "current_max_adjustment": current_max_adjustment,
+                "agreed": agreed_stats, "baseline": baseline_stats,
+            }
+        return {
+            "ok": True, "should_apply": True, "action": "increase_weight",
+            "recommended_enabled": True, "recommended_max_adjustment": new_max_adjustment,
+            "agreed": agreed_stats, "baseline": baseline_stats,
+        }
+
+    worsens_pnl = agreed_stats["avg_pnl_usd"] < baseline_stats["avg_pnl_usd"]
+    worsens_win_rate = agreed_stats["win_rate"] < baseline_stats["win_rate"]
+    if worsens_pnl and worsens_win_rate:
+        if current_enabled:
+            return {
+                "ok": True, "should_apply": True, "action": "disable",
+                "recommended_enabled": False, "recommended_max_adjustment": current_max_adjustment,
+                "agreed": agreed_stats, "baseline": baseline_stats,
+            }
+        return {
+            "ok": True, "should_apply": False, "reason": "disabled_and_evidence_confirms_that",
+            "current_enabled": current_enabled, "current_max_adjustment": current_max_adjustment,
+            "agreed": agreed_stats, "baseline": baseline_stats,
+        }
+
+    return {
+        "ok": True, "should_apply": False, "reason": "no_clear_signal",
+        "current_enabled": current_enabled, "current_max_adjustment": current_max_adjustment,
+        "agreed": agreed_stats, "baseline": baseline_stats,
+    }
+
+
 def format_analysis_summary_text(analysis: dict[str, Any], *, tuning: dict[str, Any] | None = None) -> str:
     """Human-readable digest for the Threads post -- what the account's
     real trading history shows, not a raw data dump."""

@@ -8,10 +8,12 @@ from data import perps_trade_analysis as pta
 def _trade(
     *, pnl: float, reason: str = "take_profit (+2%)", dry_run: bool = False,
     entry_score: float | None = 0.6, hold_minutes: float | None = 10.0, ticker: str = "KXBTCPERP", side: str = "long",
+    entry_correlation_score: float | None = None,
 ) -> dict:
     return {
         "ticker": ticker, "side": side, "realized_pnl_usd": pnl, "reason": reason,
         "dry_run": dry_run, "entry_score": entry_score, "hold_minutes": hold_minutes,
+        "entry_correlation_score": entry_correlation_score,
     }
 
 
@@ -131,6 +133,117 @@ def test_recommend_confidence_threshold_does_not_apply_without_a_clear_improveme
 def test_recommend_confidence_threshold_ignores_dry_run_trades():
     trades = [_trade(pnl=5.0, entry_score=0.65, dry_run=True) for _ in range(pta.CONFIDENCE_TUNING_MIN_TRADES)]
     result = pta.recommend_confidence_threshold(trades, current_threshold=0.58)
+    assert result["should_apply"] is False
+    assert result["reason"] == "insufficient_trade_history"
+
+
+# ── recommend_correlation_study_weight: evidence-gated tuning of the
+# chart-study layer itself (see crypto_correlation.py) -- "remember" what
+# real trade history shows about whether it's worth trusting, mirroring
+# recommend_confidence_threshold's own discipline above.
+
+def _corr_trade(*, pnl: float, correlation_score: float, side: str = "long", dry_run: bool = False) -> dict:
+    return _trade(pnl=pnl, side=side, dry_run=dry_run, entry_correlation_score=correlation_score)
+
+
+def test_recommend_correlation_study_weight_insufficient_history_does_not_apply():
+    trades = [_corr_trade(pnl=1.0, correlation_score=0.5) for _ in range(3)]
+    result = pta.recommend_correlation_study_weight(trades, current_enabled=False, current_max_adjustment=0.06)
+    assert result["should_apply"] is False
+    assert result["reason"] == "insufficient_trade_history"
+
+
+def test_recommend_correlation_study_weight_ignores_trades_without_a_recorded_score():
+    trades = [_trade(pnl=1.0) for _ in range(pta.CORRELATION_TUNING_MIN_TRADES * 2)]  # entry_correlation_score=None
+    result = pta.recommend_correlation_study_weight(trades, current_enabled=False, current_max_adjustment=0.06)
+    assert result["should_apply"] is False
+    assert result["reason"] == "insufficient_trade_history"
+
+
+def test_recommend_correlation_study_weight_recommends_enabling_when_agreement_outperforms():
+    trades = []
+    for _ in range(pta.CORRELATION_TUNING_MIN_TRADES):
+        trades.append(_corr_trade(pnl=1.0, correlation_score=0.8))  # agreed, wins
+    for _ in range(pta.CORRELATION_TUNING_MIN_TRADES):
+        trades.append(_corr_trade(pnl=-0.5, correlation_score=0.0))  # neutral/disagreed, loses
+    result = pta.recommend_correlation_study_weight(trades, current_enabled=False, current_max_adjustment=0.06)
+    assert result["should_apply"] is True
+    assert result["action"] == "enable"
+    assert result["recommended_enabled"] is True
+    assert result["recommended_max_adjustment"] == 0.06  # unchanged -- only enabling this step
+
+
+def test_recommend_correlation_study_weight_increases_the_weight_when_already_enabled_and_working():
+    trades = []
+    for _ in range(pta.CORRELATION_TUNING_MIN_TRADES):
+        trades.append(_corr_trade(pnl=1.0, correlation_score=0.8))
+    for _ in range(pta.CORRELATION_TUNING_MIN_TRADES):
+        trades.append(_corr_trade(pnl=-0.5, correlation_score=0.0))
+    result = pta.recommend_correlation_study_weight(trades, current_enabled=True, current_max_adjustment=0.06)
+    assert result["should_apply"] is True
+    assert result["action"] == "increase_weight"
+    assert result["recommended_max_adjustment"] == round(0.06 + pta.CORRELATION_TUNING_MAX_STEP, 4)
+
+
+def test_recommend_correlation_study_weight_stops_at_the_ceiling():
+    trades = []
+    for _ in range(pta.CORRELATION_TUNING_MIN_TRADES):
+        trades.append(_corr_trade(pnl=1.0, correlation_score=0.8))
+    for _ in range(pta.CORRELATION_TUNING_MIN_TRADES):
+        trades.append(_corr_trade(pnl=-0.5, correlation_score=0.0))
+    result = pta.recommend_correlation_study_weight(
+        trades, current_enabled=True, current_max_adjustment=pta.CORRELATION_TUNING_MAX_ADJUSTMENT_CEILING,
+    )
+    assert result["should_apply"] is False
+    assert result["reason"] == "already_at_ceiling"
+
+
+def test_recommend_correlation_study_weight_recommends_disabling_when_it_actively_hurts():
+    trades = []
+    for _ in range(pta.CORRELATION_TUNING_MIN_TRADES):
+        trades.append(_corr_trade(pnl=-0.5, correlation_score=0.8))  # agreed, but LOSES
+    for _ in range(pta.CORRELATION_TUNING_MIN_TRADES):
+        trades.append(_corr_trade(pnl=1.0, correlation_score=0.0))  # neutral, WINS
+    result = pta.recommend_correlation_study_weight(trades, current_enabled=True, current_max_adjustment=0.06)
+    assert result["should_apply"] is True
+    assert result["action"] == "disable"
+    assert result["recommended_enabled"] is False
+
+
+def test_recommend_correlation_study_weight_no_action_when_already_disabled_and_evidence_confirms_that():
+    trades = []
+    for _ in range(pta.CORRELATION_TUNING_MIN_TRADES):
+        trades.append(_corr_trade(pnl=-0.5, correlation_score=0.8))
+    for _ in range(pta.CORRELATION_TUNING_MIN_TRADES):
+        trades.append(_corr_trade(pnl=1.0, correlation_score=0.0))
+    result = pta.recommend_correlation_study_weight(trades, current_enabled=False, current_max_adjustment=0.06)
+    assert result["should_apply"] is False
+    assert result["reason"] == "disabled_and_evidence_confirms_that"
+
+
+def test_recommend_correlation_study_weight_flips_agreement_for_a_short():
+    """A short position's entry_correlation_score is stored RAW (bullish-
+    signed, see evaluate_candidate) -- a NEGATIVE score on a SHORT means the
+    study favored the side actually taken, the mirror image of a long."""
+    trades = []
+    for _ in range(pta.CORRELATION_TUNING_MIN_TRADES):
+        trades.append(_corr_trade(pnl=1.0, correlation_score=-0.8, side="short"))  # bearish score, short side -> agreed, wins
+    for _ in range(pta.CORRELATION_TUNING_MIN_TRADES):
+        trades.append(_corr_trade(pnl=-0.5, correlation_score=0.0, side="short"))  # neutral, loses
+    result = pta.recommend_correlation_study_weight(trades, current_enabled=False, current_max_adjustment=0.06)
+    assert result["should_apply"] is True
+    assert result["action"] == "enable"
+
+
+def test_recommend_correlation_study_weight_does_not_apply_without_a_clear_signal():
+    trades = [_corr_trade(pnl=0.1, correlation_score=score) for score in [0.8, 0.0, -0.8, 0.3] for _ in range(10)]
+    result = pta.recommend_correlation_study_weight(trades, current_enabled=False, current_max_adjustment=0.06)
+    assert result["should_apply"] is False
+
+
+def test_recommend_correlation_study_weight_ignores_dry_run_trades():
+    trades = [_corr_trade(pnl=5.0, correlation_score=0.8, dry_run=True) for _ in range(pta.CORRELATION_TUNING_MIN_TRADES * 2)]
+    result = pta.recommend_correlation_study_weight(trades, current_enabled=False, current_max_adjustment=0.06)
     assert result["should_apply"] is False
     assert result["reason"] == "insufficient_trade_history"
 

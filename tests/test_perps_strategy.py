@@ -1243,7 +1243,7 @@ def test_scan_and_enter_opens_short_with_an_ask_order(monkeypatch, tmp_path):
     monkeypatch.setattr(strat, "_available_balance_usd", lambda: 10.0)
     monkeypatch.setattr(
         strat, "scan_for_entries",
-        lambda tickers=None, exclude=None, confidence_min=None: (
+        lambda tickers=None, exclude=None, confidence_min=None, correlation_study_enabled=None, correlation_max_adjustment=None: (
             [{"ticker": "KXETHPERP", "current_price": 6.60, "reason": "test rally", "score": 0.9, "side": "short"}], [],
         ),
     )
@@ -1691,7 +1691,7 @@ def test_scan_and_enter_never_opens_a_second_position_in_the_same_instrument(mon
     monkeypatch.setattr(strat, "_available_balance_usd", lambda: 10.0)
     monkeypatch.setattr(
         strat, "scan_for_entries",
-        lambda tickers=None, exclude=None, confidence_min=None: (
+        lambda tickers=None, exclude=None, confidence_min=None, correlation_study_enabled=None, correlation_max_adjustment=None: (
             [{"ticker": "KXBTCPERP", "current_price": 6.60, "reason": "test dip", "score": 0.9}]
             if "KXBTCPERP" not in (exclude or set()) else [],
             [],
@@ -1718,7 +1718,7 @@ def test_scan_and_enter_rejects_entry_on_large_kalshi_external_price_deviation(m
     monkeypatch.setattr(strat, "get_fast_price", lambda coin: {"price": 50000.0, "source": "coinbase", "delayed": False})
     monkeypatch.setattr(
         strat, "scan_for_entries",
-        lambda tickers=None, exclude=None, confidence_min=None: ([{"ticker": "KXBTCPERP", "current_price": 6.60, "reason": "test dip", "score": 0.9}], []),
+        lambda tickers=None, exclude=None, confidence_min=None, correlation_study_enabled=None, correlation_max_adjustment=None: ([{"ticker": "KXBTCPERP", "current_price": 6.60, "reason": "test dip", "score": 0.9}], []),
     )
 
     def fail_if_called(*a, **k):
@@ -1745,7 +1745,7 @@ def test_dry_run_never_places_a_real_order(monkeypatch, tmp_path):
     monkeypatch.setattr(strat, "_available_balance_usd", lambda: 10.0)
     monkeypatch.setattr(
         strat, "scan_for_entries",
-        lambda tickers=None, exclude=None, confidence_min=None: ([{"ticker": "KXBTCPERP", "current_price": 6.60, "reason": "test dip", "score": 0.9}], []),
+        lambda tickers=None, exclude=None, confidence_min=None, correlation_study_enabled=None, correlation_max_adjustment=None: ([{"ticker": "KXBTCPERP", "current_price": 6.60, "reason": "test dip", "score": 0.9}], []),
     )
 
     result = strat.scan_and_enter()
@@ -1783,7 +1783,7 @@ def test_daily_loss_cap_is_a_percentage_of_the_days_starting_balance(monkeypatch
     })
     monkeypatch.setattr(
         strat, "scan_for_entries",
-        lambda tickers=None, exclude=None, confidence_min=None: ([], []),
+        lambda tickers=None, exclude=None, confidence_min=None, correlation_study_enabled=None, correlation_max_adjustment=None: ([], []),
     )
     result = strat.scan_and_enter()
     assert result["action"] != "skipped_daily_loss_cap"
@@ -1996,7 +1996,7 @@ def test_scan_and_enter_skips_recording_a_position_when_entry_order_does_not_fil
     monkeypatch.setattr(strat, "_available_balance_usd", lambda: 10.0)
     monkeypatch.setattr(
         strat, "scan_for_entries",
-        lambda tickers=None, exclude=None, confidence_min=None: (
+        lambda tickers=None, exclude=None, confidence_min=None, correlation_study_enabled=None, correlation_max_adjustment=None: (
             [{"ticker": "KXXRPPERP", "current_price": 6.60, "reason": "test dip", "score": 0.9}], [],
         ),
     )
@@ -2020,7 +2020,7 @@ def test_scan_and_enter_records_actual_filled_count_not_requested_count(monkeypa
     monkeypatch.setattr(strat, "_available_balance_usd", lambda: 10.0)  # sizes to 6 contracts, see sizing test above
     monkeypatch.setattr(
         strat, "scan_for_entries",
-        lambda tickers=None, exclude=None, confidence_min=None: (
+        lambda tickers=None, exclude=None, confidence_min=None, correlation_study_enabled=None, correlation_max_adjustment=None: (
             [{"ticker": "KXSOLPERP", "current_price": 2.0, "reason": "test dip", "score": 0.9}], [],
         ),
     )
@@ -2052,7 +2052,7 @@ def test_scan_and_enter_posts_to_threads_with_the_real_entry_and_exit_levels(mon
     monkeypatch.setattr(strat, "_available_balance_usd", lambda: 10.0)
     monkeypatch.setattr(
         strat, "scan_for_entries",
-        lambda tickers=None, exclude=None, confidence_min=None: (
+        lambda tickers=None, exclude=None, confidence_min=None, correlation_study_enabled=None, correlation_max_adjustment=None: (
             [{"ticker": "KXSOLPERP", "current_price": 2.0, "reason": "test dip", "volatility_30": 0.0006}], [],
         ),
     )
@@ -2085,7 +2085,7 @@ def test_scan_and_enter_still_opens_the_real_position_even_if_threads_post_raise
     monkeypatch.setattr(strat, "_available_balance_usd", lambda: 10.0)
     monkeypatch.setattr(
         strat, "scan_for_entries",
-        lambda tickers=None, exclude=None, confidence_min=None: (
+        lambda tickers=None, exclude=None, confidence_min=None, correlation_study_enabled=None, correlation_max_adjustment=None: (
             [{"ticker": "KXSOLPERP", "current_price": 2.0, "reason": "test dip"}], [],
         ),
     )
@@ -2110,7 +2110,7 @@ def test_scan_and_enter_posts_a_candlestick_entry_chart(monkeypatch, tmp_path):
     monkeypatch.setattr(strat, "_available_balance_usd", lambda: 10.0)
     monkeypatch.setattr(
         strat, "scan_for_entries",
-        lambda tickers=None, exclude=None, confidence_min=None: (
+        lambda tickers=None, exclude=None, confidence_min=None, correlation_study_enabled=None, correlation_max_adjustment=None: (
             [{"ticker": "KXSOLPERP", "current_price": 2.0, "reason": "test dip", "volatility_30": 0.0006}], [],
         ),
     )
@@ -2142,7 +2142,7 @@ def test_scan_and_enter_merges_a_confirmed_fill_into_a_concurrently_adopted_posi
     monkeypatch.setattr(strat, "_available_balance_usd", lambda: 10.0)
     monkeypatch.setattr(
         strat, "scan_for_entries",
-        lambda tickers=None, exclude=None, confidence_min=None: (
+        lambda tickers=None, exclude=None, confidence_min=None, correlation_study_enabled=None, correlation_max_adjustment=None: (
             [{"ticker": "KXSOLPERP", "current_price": 6.60, "reason": "test dip", "score": 0.9}], [],
         ),
     )
@@ -2179,7 +2179,7 @@ def test_scan_and_enter_one_failed_entry_does_not_block_the_others(monkeypatch, 
     monkeypatch.setattr(strat, "_available_balance_usd", lambda: 10.0)
     monkeypatch.setattr(
         strat, "scan_for_entries",
-        lambda tickers=None, exclude=None, confidence_min=None: (
+        lambda tickers=None, exclude=None, confidence_min=None, correlation_study_enabled=None, correlation_max_adjustment=None: (
             [
                 {"ticker": "KXBTCPERP", "current_price": 6.60, "reason": "test dip", "score": 0.95},
                 {"ticker": "KXETHPERP", "current_price": 6.60, "reason": "test dip", "score": 0.9},
@@ -2315,7 +2315,7 @@ def test_run_cycle_manages_positions_then_scans_for_entries(monkeypatch, tmp_pat
     monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", False)
     monkeypatch.setattr(strat, "get_margin_market", lambda ticker: _market_response(price=6.605))
     monkeypatch.setattr(strat, "_available_balance_usd", lambda: 10.0)
-    monkeypatch.setattr(strat, "scan_for_entries", lambda tickers=None, exclude=None, confidence_min=None: ([], []))
+    monkeypatch.setattr(strat, "scan_for_entries", lambda tickers=None, exclude=None, confidence_min=None, correlation_study_enabled=None, correlation_max_adjustment=None: ([], []))
     strat._save_state({
         "positions": [_position(ticker="KXBTCPERP", entry_price=6.55)],
         "realized_pnl_by_date": {}, "trade_log": [], "daily_reference_balance": {},
@@ -2648,7 +2648,7 @@ def test_scan_and_enter_tries_maker_order_for_a_new_entry_when_enabled(monkeypat
     monkeypatch.setattr(strat, "_available_balance_usd", lambda: 100.0)
     monkeypatch.setattr(
         strat, "scan_for_entries",
-        lambda exclude=None, confidence_min=None: (
+        lambda exclude=None, confidence_min=None, correlation_study_enabled=None, correlation_max_adjustment=None: (
             [{"ticker": "KXBTCPERP", "current_price": 6.60, "reason": "dip", "side": "long"}],
             [{"ticker": "KXBTCPERP", "should_enter": True, "reason": "dip"}],
         ),
@@ -2719,6 +2719,66 @@ def test_apply_confidence_threshold_override_persists_to_state(monkeypatch, tmp_
     assert reloaded["tuning"]["model_confidence_min"] == 0.63
 
 
+def test_apply_confidence_threshold_override_does_not_clobber_an_existing_correlation_override(monkeypatch, tmp_path):
+    """Real bug found and fixed: this used to overwrite state["tuning"]
+    wholesale -- applying a confidence-threshold tune after a correlation-
+    study tune (or vice versa) would silently wipe the other one out."""
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "state.json")
+    strat._save_state({  # noqa: SLF001
+        "positions": [], "realized_pnl_by_date": {}, "trade_log": [], "daily_reference_balance": {},
+        "tuning": {"correlation_study_enabled": True, "correlation_confidence_max_adjustment": 0.09},
+    })
+
+    strat.apply_confidence_threshold_override(0.63, reason="test")
+
+    reloaded = strat._load_state()  # noqa: SLF001
+    assert reloaded["tuning"]["model_confidence_min"] == 0.63
+    assert reloaded["tuning"]["correlation_study_enabled"] is True
+    assert reloaded["tuning"]["correlation_confidence_max_adjustment"] == 0.09
+
+
+def test_apply_correlation_study_override_persists_to_state(monkeypatch, tmp_path):
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(strat, "USE_CORRELATION_STUDY", False)
+    monkeypatch.setattr(strat, "CORRELATION_CONFIDENCE_MAX_ADJUSTMENT", 0.06)
+    strat._save_state({"positions": [], "realized_pnl_by_date": {}, "trade_log": [], "daily_reference_balance": {}})  # noqa: SLF001
+
+    result = strat.apply_correlation_study_override(enabled=True, reason="evidence-gated: test")
+
+    assert result["correlation_study_enabled"] is True
+    assert result["previous_correlation_study_enabled"] is False
+    reloaded = strat._load_state()  # noqa: SLF001
+    assert reloaded["tuning"]["correlation_study_enabled"] is True
+
+
+def test_apply_correlation_study_override_only_changes_the_field_passed(monkeypatch, tmp_path):
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "state.json")
+    strat._save_state({  # noqa: SLF001
+        "positions": [], "realized_pnl_by_date": {}, "trade_log": [], "daily_reference_balance": {},
+        "tuning": {"correlation_study_enabled": True, "correlation_confidence_max_adjustment": 0.06},
+    })
+
+    strat.apply_correlation_study_override(max_adjustment=0.09, reason="test")
+
+    reloaded = strat._load_state()  # noqa: SLF001
+    assert reloaded["tuning"]["correlation_study_enabled"] is True  # untouched
+    assert reloaded["tuning"]["correlation_confidence_max_adjustment"] == 0.09
+
+
+def test_apply_correlation_study_override_does_not_clobber_the_confidence_threshold(monkeypatch, tmp_path):
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "state.json")
+    strat._save_state({  # noqa: SLF001
+        "positions": [], "realized_pnl_by_date": {}, "trade_log": [], "daily_reference_balance": {},
+        "tuning": {"model_confidence_min": 0.63},
+    })
+
+    strat.apply_correlation_study_override(enabled=True, reason="test")
+
+    reloaded = strat._load_state()  # noqa: SLF001
+    assert reloaded["tuning"]["model_confidence_min"] == 0.63
+    assert reloaded["tuning"]["correlation_study_enabled"] is True
+
+
 def test_scan_and_enter_reads_the_confidence_override_from_state(monkeypatch, tmp_path):
     monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "state.json")
     monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", False)
@@ -2728,13 +2788,33 @@ def test_scan_and_enter_reads_the_confidence_override_from_state(monkeypatch, tm
     })
     captured = {}
 
-    def fake_scan_for_entries(tickers=None, exclude=None, confidence_min=None):
+    def fake_scan_for_entries(tickers=None, exclude=None, confidence_min=None, correlation_study_enabled=None, correlation_max_adjustment=None):
         captured["confidence_min"] = confidence_min
         return [], []
 
     monkeypatch.setattr(strat, "scan_for_entries", fake_scan_for_entries)
     strat.scan_and_enter()
     assert captured["confidence_min"] == 0.71
+
+
+def test_scan_and_enter_reads_the_correlation_study_override_from_state(monkeypatch, tmp_path):
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", False)
+    strat._save_state({  # noqa: SLF001
+        "positions": [], "realized_pnl_by_date": {}, "trade_log": [], "daily_reference_balance": {},
+        "tuning": {"correlation_study_enabled": True, "correlation_confidence_max_adjustment": 0.09},
+    })
+    captured = {}
+
+    def fake_scan_for_entries(tickers=None, exclude=None, confidence_min=None, correlation_study_enabled=None, correlation_max_adjustment=None):
+        captured["correlation_study_enabled"] = correlation_study_enabled
+        captured["correlation_max_adjustment"] = correlation_max_adjustment
+        return [], []
+
+    monkeypatch.setattr(strat, "scan_for_entries", fake_scan_for_entries)
+    strat.scan_and_enter()
+    assert captured["correlation_study_enabled"] is True
+    assert captured["correlation_max_adjustment"] == 0.09
 
 
 def test_scan_and_enter_captures_entry_time_model_context_in_position(monkeypatch, tmp_path):
@@ -2747,7 +2827,7 @@ def test_scan_and_enter_captures_entry_time_model_context_in_position(monkeypatc
     monkeypatch.setattr(strat, "_available_balance_usd", lambda: 100.0)
     monkeypatch.setattr(
         strat, "scan_for_entries",
-        lambda tickers=None, exclude=None, confidence_min=None: (
+        lambda tickers=None, exclude=None, confidence_min=None, correlation_study_enabled=None, correlation_max_adjustment=None: (
             [{
                 "ticker": "KXBTCPERP", "current_price": 6.60, "reason": "dip; model predicts up (p=0.71)",
                 "side": "long", "score": 0.71, "probability_up": 0.71, "model_direction": "up",
@@ -2868,3 +2948,138 @@ def test_record_milestone_persists_baseline_and_high_water_mark(monkeypatch, tmp
     state = strat._load_state()  # noqa: SLF001
     assert state["milestones"]["baseline_balance"] == 100.0
     assert state["milestones"]["high_water_mark"] == 150.0
+
+
+# ── Chart-study confidence layer (USE_CORRELATION_STUDY) ────────────────────
+# See crypto_correlation.py's own module docstring for the full design.
+# Default OFF -- the score/reason must always be attached for observability,
+# but must never change should_enter/score/decide_exit until explicitly
+# turned on.
+
+def test_evaluate_candidate_attaches_correlation_reading_even_when_flag_off(monkeypatch):
+    monkeypatch.setattr(strat, "latest_feature_row", lambda ticker: _row())
+    monkeypatch.setattr(strat, "predict_direction", lambda ticker: {"model_ok": False, "ticker": ticker})
+    monkeypatch.setattr(
+        strat.crypto_correlation, "perps_correlation_bullishness",
+        lambda coin, row=None: {"score": 0.9, "reason": "strong confirmation", "components": {}},
+    )
+    result = strat.evaluate_candidate("KXBTCPERP")
+    assert result["correlation_score"] == 0.9
+    assert result["correlation_reason"] == "strong confirmation"
+    # Flag is off by default -- score must be the plain dip-depth score, not
+    # nudged by the correlation reading above.
+    assert "correlation" not in result["reason"]
+
+
+def test_evaluate_candidate_correlation_confirmation_lowers_the_bar_when_flag_on(monkeypatch):
+    monkeypatch.setattr(strat, "USE_CORRELATION_STUDY", True)
+    monkeypatch.setattr(strat, "latest_feature_row", lambda ticker: _row())
+    # probability_up=0.55 alone would miss MODEL_CONFIDENCE_MIN (0.58) by
+    # 0.03 -- within CORRELATION_CONFIDENCE_MAX_ADJUSTMENT (0.06), so a
+    # maximally bullish correlation reading should be enough to clear it.
+    monkeypatch.setattr(strat, "predict_direction", lambda ticker: {
+        "model_ok": True, "ticker": ticker, "direction": "up", "probability_up": 0.55,
+    })
+    monkeypatch.setattr(
+        strat.crypto_correlation, "perps_correlation_bullishness",
+        lambda coin, row=None: {"score": 1.0, "reason": "max confirmation", "components": {}},
+    )
+    result = strat.evaluate_candidate("KXBTCPERP")
+    assert result["should_enter"] is True
+    assert "correlation study" in result["reason"]
+
+
+def test_evaluate_candidate_correlation_study_enabled_override_works_even_when_the_module_flag_is_off(monkeypatch):
+    """The per-call override params (correlation_study_enabled/
+    correlation_max_adjustment) are what scan_and_enter feeds from
+    apply_correlation_study_override's durable state -- must take effect
+    on their own, without the env-controlled USE_CORRELATION_STUDY flag
+    also being on, so evidence-gated tuning can enable this without a
+    redeploy."""
+    assert strat.USE_CORRELATION_STUDY is False  # module default -- not touched by this test
+    monkeypatch.setattr(strat, "latest_feature_row", lambda ticker: _row())
+    monkeypatch.setattr(strat, "predict_direction", lambda ticker: {
+        "model_ok": True, "ticker": ticker, "direction": "up", "probability_up": 0.55,
+    })
+    monkeypatch.setattr(
+        strat.crypto_correlation, "perps_correlation_bullishness",
+        lambda coin, row=None: {"score": 1.0, "reason": "max confirmation", "components": {}},
+    )
+    result = strat.evaluate_candidate("KXBTCPERP", correlation_study_enabled=True, correlation_max_adjustment=0.06)
+    assert result["should_enter"] is True
+    assert "correlation study" in result["reason"]
+
+
+def test_evaluate_candidate_correlation_disagreement_raises_the_bar_when_flag_on(monkeypatch):
+    monkeypatch.setattr(strat, "USE_CORRELATION_STUDY", True)
+    monkeypatch.setattr(strat, "latest_feature_row", lambda ticker: _row())
+    # probability_up=0.60 alone would clear MODEL_CONFIDENCE_MIN (0.58) --
+    # a maximally bearish correlation reading raises the bar past it
+    # (0.58 + 0.06 = 0.64), so this must now be rejected.
+    monkeypatch.setattr(strat, "predict_direction", lambda ticker: {
+        "model_ok": True, "ticker": ticker, "direction": "up", "probability_up": 0.60,
+    })
+    monkeypatch.setattr(
+        strat.crypto_correlation, "perps_correlation_bullishness",
+        lambda coin, row=None: {"score": -1.0, "reason": "max disagreement", "components": {}},
+    )
+    result = strat.evaluate_candidate("KXBTCPERP")
+    assert result["should_enter"] is False
+
+
+def test_evaluate_candidate_correlation_veto_on_technical_only_fallback_when_flag_on(monkeypatch):
+    monkeypatch.setattr(strat, "USE_CORRELATION_STUDY", True)
+    monkeypatch.setattr(strat, "latest_feature_row", lambda ticker: _row())
+    monkeypatch.setattr(strat, "predict_direction", lambda ticker: {"model_ok": False, "ticker": ticker})
+    monkeypatch.setattr(
+        strat.crypto_correlation, "perps_correlation_bullishness",
+        lambda coin, row=None: {"score": -0.9, "reason": "strongly disagrees", "components": {}},
+    )
+    result = strat.evaluate_candidate("KXBTCPERP")
+    assert result["should_enter"] is False
+    assert "correlation study disagrees" in result["reason"]
+
+
+def test_decide_exit_ignores_correlation_score_when_omitted():
+    """Regression guard: correlation_score defaults to None, so a flat/
+    losing position near max_hold must behave exactly as it did before this
+    param existed."""
+    pos = _position(minutes_ago=strat.MAX_HOLD_MINUTES + 1)
+    should_exit, reason = strat.decide_exit(pos, 6.60 * 1.001)
+    assert should_exit and "max_hold_time" in reason
+
+
+def test_decide_exit_favorable_correlation_extends_a_flat_position_past_max_hold():
+    pos = _position(minutes_ago=strat.MAX_HOLD_MINUTES + 1)
+    should_exit, reason = strat.decide_exit(
+        pos, 6.60 * 1.001,  # flat price -- not promising on its own
+        correlation_score=strat.PROMISING_CORRELATION_SCORE + 0.1,
+    )
+    assert not should_exit
+    assert "holding" in reason
+
+
+def test_decide_exit_unfavorable_correlation_triggers_early_pre_exit_study():
+    past_pre_exit = strat.MAX_HOLD_MINUTES - strat.PRE_EXIT_STUDY_MINUTES + 1
+    pos = _position(minutes_ago=past_pre_exit)
+    should_exit, reason = strat.decide_exit(
+        pos, 6.60 * 0.999,  # flat/losing
+        correlation_score=-(strat.PROMISING_CORRELATION_SCORE + 0.1),
+    )
+    assert should_exit
+    assert "pre_exit_study" in reason
+    assert "favors reversal" in reason
+
+
+def test_decide_exit_unfavorable_correlation_flips_sign_for_a_short():
+    """Short positions favor a FALLING price -- a bearish (negative)
+    correlation_score is therefore FAVORABLE for a short, the mirror image
+    of the long case above."""
+    past_pre_exit = strat.MAX_HOLD_MINUTES - strat.PRE_EXIT_STUDY_MINUTES + 1
+    pos = _position(minutes_ago=past_pre_exit, entry_price=6.60, side="short")
+    should_exit, reason = strat.decide_exit(
+        pos, 6.60 * 1.001,  # flat/losing for a short
+        correlation_score=strat.PROMISING_CORRELATION_SCORE + 0.1,  # bullish -> unfavorable for a short
+    )
+    assert should_exit
+    assert "pre_exit_study" in reason

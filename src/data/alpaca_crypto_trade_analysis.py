@@ -104,6 +104,87 @@ def recommend_confidence_threshold(trade_log: list[dict[str, Any]] | None, *, cu
     }
 
 
+# Evidence-gated chart-study (crypto_correlation.py) tuning -- mirrors
+# perps_trade_analysis.py's own recommend_correlation_study_weight (see its
+# docstring for the full rationale and the 3 possible outcomes). Simpler
+# here than the perps version: crypto is long-only (see this module's own
+# docstring), so entry_correlation_score needs no side-flip -- it's already
+# the correct sign directly.
+CORRELATION_TUNING_MIN_TRADES = 15
+CORRELATION_TUNING_AGREEMENT_THRESHOLD = 0.15
+CORRELATION_TUNING_MAX_STEP = 0.03
+CORRELATION_TUNING_MAX_ADJUSTMENT_CEILING = 0.15
+
+
+def recommend_correlation_study_weight(
+    trade_log: list[dict[str, Any]] | None, *, current_enabled: bool, current_max_adjustment: float,
+) -> dict[str, Any]:
+    """Does real closed-trade history show the chart-study layer is
+    actually helping -- trades it favored outperforming trades it didn't
+    (or was neutral on), with enough real trades on both sides to trust
+    the comparison? See perps_trade_analysis.recommend_correlation_study_weight's
+    own docstring for the full rationale; identical logic, long-only."""
+    trade_log = trade_log or []
+    trades = [t for t in trade_log if not t.get("dry_run") and t.get("entry_correlation_score") is not None]
+
+    agreed = [t for t in trades if float(t["entry_correlation_score"]) >= CORRELATION_TUNING_AGREEMENT_THRESHOLD]
+    baseline = [t for t in trades if float(t["entry_correlation_score"]) < CORRELATION_TUNING_AGREEMENT_THRESHOLD]
+    agreed_stats = _bucket_stats(agreed)
+    baseline_stats = _bucket_stats(baseline)
+
+    if agreed_stats["trades"] < CORRELATION_TUNING_MIN_TRADES or baseline_stats["trades"] < CORRELATION_TUNING_MIN_TRADES:
+        return {
+            "ok": True, "should_apply": False, "reason": "insufficient_trade_history",
+            "current_enabled": current_enabled, "current_max_adjustment": current_max_adjustment,
+            "agreed": agreed_stats, "baseline": baseline_stats,
+        }
+
+    improves_pnl = agreed_stats["avg_pnl_usd"] > baseline_stats["avg_pnl_usd"]
+    improves_win_rate = agreed_stats["win_rate"] >= baseline_stats["win_rate"]
+    if improves_pnl and improves_win_rate:
+        if not current_enabled:
+            return {
+                "ok": True, "should_apply": True, "action": "enable",
+                "recommended_enabled": True, "recommended_max_adjustment": current_max_adjustment,
+                "agreed": agreed_stats, "baseline": baseline_stats,
+            }
+        new_max_adjustment = min(
+            round(current_max_adjustment + CORRELATION_TUNING_MAX_STEP, 4), CORRELATION_TUNING_MAX_ADJUSTMENT_CEILING,
+        )
+        if new_max_adjustment <= current_max_adjustment:
+            return {
+                "ok": True, "should_apply": False, "reason": "already_at_ceiling",
+                "current_enabled": current_enabled, "current_max_adjustment": current_max_adjustment,
+                "agreed": agreed_stats, "baseline": baseline_stats,
+            }
+        return {
+            "ok": True, "should_apply": True, "action": "increase_weight",
+            "recommended_enabled": True, "recommended_max_adjustment": new_max_adjustment,
+            "agreed": agreed_stats, "baseline": baseline_stats,
+        }
+
+    worsens_pnl = agreed_stats["avg_pnl_usd"] < baseline_stats["avg_pnl_usd"]
+    worsens_win_rate = agreed_stats["win_rate"] < baseline_stats["win_rate"]
+    if worsens_pnl and worsens_win_rate:
+        if current_enabled:
+            return {
+                "ok": True, "should_apply": True, "action": "disable",
+                "recommended_enabled": False, "recommended_max_adjustment": current_max_adjustment,
+                "agreed": agreed_stats, "baseline": baseline_stats,
+            }
+        return {
+            "ok": True, "should_apply": False, "reason": "disabled_and_evidence_confirms_that",
+            "current_enabled": current_enabled, "current_max_adjustment": current_max_adjustment,
+            "agreed": agreed_stats, "baseline": baseline_stats,
+        }
+
+    return {
+        "ok": True, "should_apply": False, "reason": "no_clear_signal",
+        "current_enabled": current_enabled, "current_max_adjustment": current_max_adjustment,
+        "agreed": agreed_stats, "baseline": baseline_stats,
+    }
+
+
 def _exit_reason_bucket(reason: str | None) -> str:
     reason = reason or ""
     for prefix in _EXIT_REASON_PREFIXES:

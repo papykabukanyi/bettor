@@ -14,11 +14,13 @@ def _closed_trade(
     reason: str = "take_profit (+2%)", opened_at: str = "2026-08-01T12:00:00+00:00",
     closed_at: str = "2026-08-01T12:10:00+00:00", symbol: str = "BTC/USD",
     entry_probability_up: float | None = 0.6, dry_run: bool = False, entry_score: float | None = 0.6,
+    entry_correlation_score: float | None = None,
 ) -> dict:
     return {
         "symbol": symbol, "realized_pnl_usd": pnl, "reason": reason, "dry_run": dry_run,
         "entry_price": entry_price, "exit_price": exit_price, "opened_at": opened_at, "closed_at": closed_at,
         "entry_probability_up": entry_probability_up, "hold_minutes": 10.0, "entry_score": entry_score,
+        "entry_correlation_score": entry_correlation_score,
     }
 
 
@@ -148,5 +150,59 @@ def test_recommend_confidence_threshold_does_not_apply_without_a_clear_improveme
 def test_recommend_confidence_threshold_ignores_dry_run_trades():
     trades = [_closed_trade(pnl=5.0, entry_score=0.62, dry_run=True) for _ in range(acta.CONFIDENCE_TUNING_MIN_TRADES)]
     result = acta.recommend_confidence_threshold(trades, current_threshold=0.55)
+    assert result["should_apply"] is False
+    assert result["reason"] == "insufficient_trade_history"
+
+
+# ── recommend_correlation_study_weight -- see test_perps_trade_analysis.py's
+# sibling coverage for the full rationale; identical logic here, long-only
+# (no side-flip needed, see this module's own docstring).
+
+def test_recommend_correlation_study_weight_insufficient_history_does_not_apply():
+    trades = [_closed_trade(pnl=1.0, entry_correlation_score=0.5) for _ in range(3)]
+    result = acta.recommend_correlation_study_weight(trades, current_enabled=False, current_max_adjustment=0.06)
+    assert result["should_apply"] is False
+    assert result["reason"] == "insufficient_trade_history"
+
+
+def test_recommend_correlation_study_weight_recommends_enabling_when_agreement_outperforms():
+    trades = []
+    for _ in range(acta.CORRELATION_TUNING_MIN_TRADES):
+        trades.append(_closed_trade(pnl=1.0, entry_correlation_score=0.8))
+    for _ in range(acta.CORRELATION_TUNING_MIN_TRADES):
+        trades.append(_closed_trade(pnl=-0.5, entry_correlation_score=0.0))
+    result = acta.recommend_correlation_study_weight(trades, current_enabled=False, current_max_adjustment=0.06)
+    assert result["should_apply"] is True
+    assert result["action"] == "enable"
+
+
+def test_recommend_correlation_study_weight_increases_the_weight_when_already_enabled_and_working():
+    trades = []
+    for _ in range(acta.CORRELATION_TUNING_MIN_TRADES):
+        trades.append(_closed_trade(pnl=1.0, entry_correlation_score=0.8))
+    for _ in range(acta.CORRELATION_TUNING_MIN_TRADES):
+        trades.append(_closed_trade(pnl=-0.5, entry_correlation_score=0.0))
+    result = acta.recommend_correlation_study_weight(trades, current_enabled=True, current_max_adjustment=0.06)
+    assert result["should_apply"] is True
+    assert result["action"] == "increase_weight"
+    assert result["recommended_max_adjustment"] == round(0.06 + acta.CORRELATION_TUNING_MAX_STEP, 4)
+
+
+def test_recommend_correlation_study_weight_recommends_disabling_when_it_actively_hurts():
+    trades = []
+    for _ in range(acta.CORRELATION_TUNING_MIN_TRADES):
+        trades.append(_closed_trade(pnl=-0.5, entry_correlation_score=0.8))
+    for _ in range(acta.CORRELATION_TUNING_MIN_TRADES):
+        trades.append(_closed_trade(pnl=1.0, entry_correlation_score=0.0))
+    result = acta.recommend_correlation_study_weight(trades, current_enabled=True, current_max_adjustment=0.06)
+    assert result["should_apply"] is True
+    assert result["action"] == "disable"
+
+
+def test_recommend_correlation_study_weight_ignores_dry_run_trades():
+    trades = [
+        _closed_trade(pnl=5.0, entry_correlation_score=0.8, dry_run=True) for _ in range(acta.CORRELATION_TUNING_MIN_TRADES * 2)
+    ]
+    result = acta.recommend_correlation_study_weight(trades, current_enabled=False, current_max_adjustment=0.06)
     assert result["should_apply"] is False
     assert result["reason"] == "insufficient_trade_history"

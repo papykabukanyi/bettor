@@ -32,6 +32,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from data.alpaca_crypto_data import HF_ALPACA_CRYPTO_DATASET_REPO
+from data.crypto_correlation import ALPACA_CRYPTO_CORRELATION_STUDY_HF_FILENAME, set_remote_alpaca_study
 from data.crypto_news import get_sentiment
 from data.kalshi_perps import KNOWN_PERP_TICKERS, get_margin_candlesticks, list_margin_markets
 
@@ -608,6 +610,49 @@ def latest_feature_row(ticker: str) -> dict[str, Any] | None:
 _HF_REPO_VERIFIED_CACHE: dict[str, tuple[bool, float]] = {}
 _HF_REPO_VERIFIED_TTL_SEC = 24 * 3600
 _HF_REPO_FAILURE_RETRY_SEC = 300
+
+
+_ALPACA_CORRELATION_STUDY_HF_TIMEOUT_SEC = int(os.getenv("PERPS_ALPACA_CORRELATION_STUDY_HF_TIMEOUT_SEC", "10") or "10")
+
+
+def pull_alpaca_crypto_correlation_study() -> dict[str, Any] | None:
+    """Downloads the ONE small correlation-study JSON alpaca_crypto_data.py
+    pushes to its own HF dataset repo every collect cycle (see
+    push_correlation_study_to_hf there and crypto_correlation.py's own
+    module docstring for the full cross-market design) and caches it
+    in-process via crypto_correlation.set_remote_alpaca_study, so
+    perps_strategy.py's live entry/exit paths only ever read an in-memory
+    dict, never block on this. Called from app_kalshi.py's own
+    perps_data_collect job (every PERPS_DATA_COLLECT_MINUTES) -- NOT from
+    the fast/entry-scan loops.
+
+    Same hard-timeout discipline as perps_strategy.py's own
+    _pull_durable_state_from_hf: a plain try/except cannot bound an
+    hf_hub_download hang (huggingface_hub's own internal session lock can
+    hang without ever raising), only an actual deadline on a separate
+    thread can -- see server_common.call_with_hard_timeout's own
+    docstring for the real production incident this fixes."""
+    if not HF_API_KEY:
+        return None
+
+    def _download() -> dict[str, Any]:
+        import json
+        from huggingface_hub import hf_hub_download
+        path = hf_hub_download(
+            repo_id=HF_ALPACA_CRYPTO_DATASET_REPO, filename=ALPACA_CRYPTO_CORRELATION_STUDY_HF_FILENAME,
+            repo_type="dataset", token=HF_API_KEY,
+        )
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+
+    try:
+        from server_common import call_with_hard_timeout
+        study = call_with_hard_timeout(_download, timeout_sec=_ALPACA_CORRELATION_STUDY_HF_TIMEOUT_SEC)
+    except Exception as exc:
+        logger.info("[perps_data] no alpaca crypto correlation study on HF yet (or fetch failed): %s", exc)
+        return None
+    if study:
+        set_remote_alpaca_study(study)
+    return study
 
 
 def _ensure_dataset_repo() -> bool:

@@ -64,6 +64,25 @@ services:
       # this graduated from dry-run-only to the deployed default.
       - key: PERPS_ENABLE_SHORTS
         value: "1"
+      # Chart-study confidence layer (see crypto_correlation.py's own
+      # module docstring): correlation-derived + multi-timeframe-confluence
+      # studies, ADDITIVE on top of the existing technical+model gate above
+      # -- never a new, independent way to enter, only a capped nudge
+      # (+/-PERPS_CORRELATION_CONFIDENCE_MAX_ADJUSTMENT, default 0.06) to
+      # the SAME confidence bar that gate already enforces, plus an
+      # evidence-gated early-exit/extension signal decide_exit already
+      # applies to momentum/breakout/sentiment. Graduated to the deployed
+      # default per explicit user direction -- correctness is covered by
+      # 30+ unit tests and leakage-free backtest wiring
+      # (perps_backtest.run_backtest(use_correlation_study=True)), but
+      # unlike PERPS_ENABLE_SHORTS above this has NOT yet been validated by
+      # an actual historical-return backtest RUN; the evidence-gated
+      # tuner (recommend_correlation_study_weight, see
+      # perps_trade_analysis.py) watches real closed trades from here on
+      # and will scale this back down -- or disable it outright -- the
+      # moment real P&L shows it isn't helping.
+      - key: PERPS_USE_CORRELATION_STUDY
+        value: "1"
       # Cross-links to the Alpaca services' dashboards, shown as nav links
       # on this one. Render doesn't expose a way to reference ANOTHER
       # service's public URL from within a blueprint, so these have to be
@@ -170,6 +189,15 @@ services:
         value: papylove/alpaca-crypto-data
       - key: HF_ALPACA_CRYPTO_MODEL_REPO
         value: papylove/alpaca-crypto-model
+      # Chart-study confidence layer -- same graduated-default reasoning as
+      # PERPS_USE_CORRELATION_STUDY (see that key's own comment in the
+      # bettor-dashboard service above): ADDITIVE on top of the existing
+      # technical+model gate, never a new independent way to enter, capped
+      # nudge only. This service's own recommend_correlation_study_weight
+      # (alpaca_crypto_trade_analysis.py) watches real closed trades and
+      # will scale it back if it isn't helping.
+      - key: ALPACA_CRYPTO_USE_CORRELATION_STUDY
+        value: "1"
       # Cross-links to the Perps and Alpaca-stocks services' dashboards.
       - key: PERPS_SERVER_URL
         sync: false
