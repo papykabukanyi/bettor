@@ -72,6 +72,7 @@ from typing import Any
 from apscheduler.executors.pool import ThreadPoolExecutor as APSThreadPoolExecutor
 from apscheduler.schedulers.background import BackgroundScheduler
 from flask import Flask, Response, jsonify, redirect, render_template, request, send_from_directory
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 # This file lives at the REPO ROOT (not inside src/), unlike every module it
 # imports below -- SRC_DIR must be computed from here explicitly rather than
@@ -108,7 +109,7 @@ from data import crypto_news, perps_data, perps_model, perps_strategy, perps_tra
 # anything -- not just the top-level package object.
 from huggingface_hub import HfApi, hf_hub_download  # noqa: F401
 from data.kalshi_perps import get_margin_balance, get_margin_enabled, get_margin_exchange_status, get_margin_positions
-from server_common import DATA_DIR, is_cron_authorized, load_json, make_job_lock, save_json, win_rate_stats
+from server_common import DATA_DIR, check_rate_limit, is_cron_authorized, load_json, make_job_lock, save_json, win_rate_stats
 
 PERPS_CYCLE_MINUTES = max(1, int(os.getenv("PERPS_CYCLE_MINUTES", "2") or "2"))
 PERPS_FAST_CHECK_SECONDS = max(5, int(os.getenv("PERPS_FAST_CHECK_SECONDS", "20") or "20"))
@@ -163,6 +164,16 @@ logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logging.getLogger("huggingface_hub.hf_api").setLevel(logging.ERROR)
 logger = logging.getLogger(__name__)
 app = Flask("kalshi_perps_server", template_folder=str(SRC_DIR / "templates"))
+# Render terminates TLS and proxies every request to this process over its
+# own internal network -- without this, request.remote_addr is Render's
+# internal proxy IP (10.x.x.x) for every single visitor, not the real
+# client, which would make both the rate limiter below and any future
+# per-IP logic meaningless (everyone looks like the same "IP"). ProxyFix
+# trusts exactly one hop of X-Forwarded-For/-Proto, matching Render's own
+# single-proxy architecture (confirmed live: Render's own edge access logs
+# already show a real clientIP= field distinct from what this process saw
+# before this fix).
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 # Real, confirmed production incident found in review (same mechanism
 # caught live on the equities service, see alpaca_server.py's identical
 # comment): APScheduler's default executor allows up to 10 jobs to run
@@ -768,6 +779,38 @@ def _bootstrap_background_jobs() -> None:
     _ensure_background_jobs_started()
 
 
+@app.before_request
+def _enforce_rate_limit():
+    # Only the public read surface needs this -- an already-authorized
+    # (CRON_SECRET-bearing) caller is the account owner's own automation,
+    # never rate-limited. See check_rate_limit's own docstring for why
+    # this exists (protecting the single gunicorn worker from a scraped/
+    # hammered shared link) and why it's not a security boundary.
+    if request.path.startswith("/api/") and not is_cron_authorized(request):
+        client_ip = request.remote_addr or "unknown"
+        if not check_rate_limit(client_ip):
+            return jsonify({"ok": False, "error": "rate_limited"}), 429
+    return None
+
+
+@app.after_request
+def _set_security_headers(response):
+    # This dashboard is meant to be safely shareable as a read-only public
+    # link -- every route that can actually CHANGE anything already requires
+    # is_cron_authorized (a bearer-token secret, see CRON_SECRET), so these
+    # are defense-in-depth for the read-only surface, not the primary
+    # control: block this response from being framed by another site
+    # (clickjacking), stop browsers from MIME-sniffing a response into
+    # something more dangerous than its declared Content-Type, and avoid
+    # leaking this dashboard's own URL (which could contain no secrets, but
+    # there's no reason to send it) as a Referer header when a visitor
+    # clicks an outbound link.
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    return response
+
+
 # Real bug found and fixed here: under gunicorn (`gunicorn app:app`, this
 # process's ACTUAL production entrypoint), nothing calls `if __name__ ==
 # "__main__"` -- that block only runs when this file is executed directly
@@ -881,9 +924,11 @@ def threads_callback():
         return jsonify({"ok": False, "error": "missing_code"}), 400
     try:
         threads_client.exchange_code_for_tokens(code)
-    except Exception as exc:
+    except Exception:
+        # Public route (Meta's own OAuth redirect target) -- same reasoning
+        # as /api/positions above, keep the real exception in logs only.
         logger.exception("[app_kalshi] threads token exchange failed")
-        return jsonify({"ok": False, "error": str(exc)}), 500
+        return jsonify({"ok": False, "error": "token_exchange_failed"}), 500
     return jsonify({"ok": True, "message": "Threads account linked. You can close this tab."})
 
 
@@ -1013,8 +1058,13 @@ def api_positions():
     try:
         positions = get_margin_positions()
         return jsonify({"ok": True, "positions": positions.get("positions") or []})
-    except Exception as exc:
-        return jsonify({"ok": False, "error": str(exc), "positions": []})
+    except Exception:
+        # Public, unauthenticated route -- the raw exception text (which can
+        # include internal file paths, library/argument names, or upstream
+        # URLs) stays in the server's own logs only, never echoed back to an
+        # anonymous visitor of a shared dashboard link.
+        logger.warning("[app_kalshi] /api/positions failed", exc_info=True)
+        return jsonify({"ok": False, "error": "positions_unavailable", "positions": []})
 
 
 @app.route("/api/perps/tick", methods=["GET", "POST"])

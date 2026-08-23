@@ -149,6 +149,57 @@ def test_is_cron_authorized_requires_matching_bearer_token(monkeypatch):
     assert server_common.is_cron_authorized(_Req(None)) is False
 
 
+@pytest.fixture(autouse=True)
+def _reset_rate_limit_state():
+    """Module-level dict, shared across tests unless reset -- same reasoning
+    as every other module-global-cache test fixture in this repo."""
+    server_common._RATE_LIMIT_WINDOWS.clear()  # noqa: SLF001
+    yield
+    server_common._RATE_LIMIT_WINDOWS.clear()  # noqa: SLF001
+
+
+def test_check_rate_limit_allows_requests_under_the_cap():
+    for _ in range(5):
+        assert server_common.check_rate_limit("1.2.3.4", max_requests=5, window_sec=60.0) is True
+
+
+def test_check_rate_limit_blocks_once_the_cap_is_reached():
+    for _ in range(5):
+        server_common.check_rate_limit("1.2.3.4", max_requests=5, window_sec=60.0)
+    assert server_common.check_rate_limit("1.2.3.4", max_requests=5, window_sec=60.0) is False
+
+
+def test_check_rate_limit_tracks_each_ip_independently():
+    for _ in range(5):
+        server_common.check_rate_limit("1.2.3.4", max_requests=5, window_sec=60.0)
+    # A different IP has its own, fresh allowance.
+    assert server_common.check_rate_limit("5.6.7.8", max_requests=5, window_sec=60.0) is True
+
+
+def test_check_rate_limit_allows_again_once_the_window_elapses(monkeypatch):
+    fake_now = [1000.0]
+    monkeypatch.setattr(server_common.time, "monotonic", lambda: fake_now[0])
+    for _ in range(5):
+        server_common.check_rate_limit("1.2.3.4", max_requests=5, window_sec=60.0)
+    assert server_common.check_rate_limit("1.2.3.4", max_requests=5, window_sec=60.0) is False
+
+    fake_now[0] += 61.0  # past the window
+    assert server_common.check_rate_limit("1.2.3.4", max_requests=5, window_sec=60.0) is True
+
+
+def test_check_rate_limit_clears_all_state_past_the_tracked_ip_ceiling(monkeypatch):
+    monkeypatch.setattr(server_common, "_RATE_LIMIT_MAX_TRACKED_IPS", 3)
+    for i in range(4):
+        server_common.check_rate_limit(f"ip-{i}", max_requests=100, window_sec=60.0)
+    # The size check runs BEFORE each insert, so the dict is allowed to grow
+    # to exactly one past the ceiling (4) before the NEXT call sees a size
+    # that's actually over the limit and clears -- the whole dict resets
+    # rather than growing unbounded under a scrape/flood from many IPs.
+    assert len(server_common._RATE_LIMIT_WINDOWS) == 4  # noqa: SLF001
+    server_common.check_rate_limit("ip-new", max_requests=100, window_sec=60.0)
+    assert len(server_common._RATE_LIMIT_WINDOWS) == 1  # noqa: SLF001
+
+
 def _trade(pnl):
     return {"realized_pnl_usd": pnl}
 

@@ -66,6 +66,7 @@ from typing import Any
 from apscheduler.executors.pool import ThreadPoolExecutor as APSThreadPoolExecutor
 from apscheduler.schedulers.background import BackgroundScheduler
 from flask import Flask, Response, jsonify, render_template, request, send_from_directory
+from werkzeug.middleware.proxy_fix import ProxyFix
 import pandas as pd
 
 SRC_DIR = Path(__file__).resolve().parent
@@ -74,7 +75,7 @@ if str(SRC_DIR) not in sys.path:
 
 from config import et_today
 from data import alpaca_client, alpaca_crypto_data, alpaca_crypto_model, alpaca_crypto_strategy, threads_post
-from server_common import DATA_DIR, is_cron_authorized, load_json, make_job_lock, save_json, win_rate_stats
+from server_common import DATA_DIR, check_rate_limit, is_cron_authorized, load_json, make_job_lock, save_json, win_rate_stats
 
 # Same real, twice-confirmed production bug already fixed on the equities/
 # perps servers -- see their own copies of this comment for the full
@@ -142,6 +143,10 @@ logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logging.getLogger("huggingface_hub.hf_api").setLevel(logging.ERROR)
 logger = logging.getLogger(__name__)
 app = Flask("alpaca_crypto_server", template_folder="templates")
+# See app_kalshi.py's identical line for the full rationale -- Render
+# proxies every request through its own internal network, so without this
+# request.remote_addr is Render's proxy IP, not the real visitor.
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 # Real, confirmed production incident found in review (same mechanism
 # caught live on the equities service, see alpaca_server.py's identical
 # comment): APScheduler's default executor allows up to 10 jobs to run
@@ -631,6 +636,29 @@ def _ensure_background_jobs_started() -> None:
 @app.before_request
 def _bootstrap_background_jobs() -> None:
     _ensure_background_jobs_started()
+
+
+@app.before_request
+def _enforce_rate_limit():
+    # See app_kalshi.py's identical hook for the full rationale.
+    if request.path.startswith("/api/") and not is_cron_authorized(request):
+        client_ip = request.remote_addr or "unknown"
+        if not check_rate_limit(client_ip):
+            return jsonify({"ok": False, "error": "rate_limited"}), 429
+    return None
+
+
+@app.after_request
+def _set_security_headers(response):
+    # See app_kalshi.py's identical hook for the full rationale -- this
+    # dashboard is meant to be safely shareable as a read-only public link;
+    # every route that can actually change anything already requires
+    # is_cron_authorized (CRON_SECRET), so these are defense-in-depth for
+    # the read-only surface, not the primary control.
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    return response
 
 
 # Same real bug found and fixed on every other server here: under gunicorn

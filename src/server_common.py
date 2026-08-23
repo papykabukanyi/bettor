@@ -12,6 +12,7 @@ import functools
 import json
 import logging
 import os
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -269,3 +270,39 @@ def is_cron_authorized(request, secret_env_var: str = "CRON_SECRET") -> bool:
         return True
     auth = str(request.headers.get("authorization") or "")
     return auth == f"Bearer {secret}"
+
+
+# Lightweight abuse guard for the PUBLIC read surface (dashboard page +
+# /api/status, /api/trades, /api/server/activity, ...) once a dashboard
+# link is actually shared -- every route that can CHANGE anything already
+# requires is_cron_authorized (a real secret), so this exists only to keep
+# the single gunicorn worker (--workers 1 --threads 1 on every service
+# here) responsive for legitimate viewers if the link gets scraped or
+# hammered, not as a security boundary of its own. Plain in-memory sliding
+# window, safe under the confirmed single-process/single-worker deployment
+# this whole codebase already depends on elsewhere (e.g. every
+# module-level cache in app_kalshi.py) -- would need a shared store
+# (Redis, etc.) instead if a service here ever moves to >1 worker/instance.
+_RATE_LIMIT_WINDOWS: dict[str, list[float]] = {}
+_RATE_LIMIT_LOCK = threading.Lock()
+_RATE_LIMIT_MAX_TRACKED_IPS = 5000  # bounds memory if scraped by many distinct IPs at once
+
+
+def check_rate_limit(client_ip: str, *, max_requests: int = 120, window_sec: float = 60.0) -> bool:
+    """True if `client_ip` is within its allowance this window, False if
+    the caller should respond 429. Default (120 requests/60s per IP) is
+    generous for a real human with the dashboard open -- the page itself
+    polls 3 endpoints every 10s, i.e. ~18 requests/min per genuine viewer,
+    well under this ceiling even across a few open tabs."""
+    now = time.monotonic()
+    with _RATE_LIMIT_LOCK:
+        if len(_RATE_LIMIT_WINDOWS) > _RATE_LIMIT_MAX_TRACKED_IPS:
+            _RATE_LIMIT_WINDOWS.clear()
+        timestamps = _RATE_LIMIT_WINDOWS.setdefault(client_ip, [])
+        cutoff = now - window_sec
+        while timestamps and timestamps[0] < cutoff:
+            timestamps.pop(0)
+        if len(timestamps) >= max_requests:
+            return False
+        timestamps.append(now)
+        return True
