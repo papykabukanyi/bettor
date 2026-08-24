@@ -45,7 +45,23 @@ APP_SECRET = os.getenv("THREADS_APP_SECRET", "")
 REDIRECT_URI = os.getenv("THREADS_REDIRECT_URI", "")
 # threads_basic: read the account's own profile/user id (needed to post AS
 # that account). threads_content_publish: create + publish a Threads post.
-SCOPES = "threads_basic,threads_content_publish"
+# threads_manage_replies: reply to a thread, hide/unhide a reply, set who
+# can reply on a new post (reply_control). threads_keyword_search: search
+# public Threads posts by keyword -- per Meta's own docs (verified
+# 2026-08-24), Standard Access limits this to the AUTHENTICATED USER'S OWN
+# posts only; searching the wider public conversation needs Meta's App
+# Review to grant Advanced Access for this specific permission first, same
+# gate every one of these newer permissions sits behind.
+# threads_profile_discovery: look up a public profile/its posts by
+# username -- Standard Access only resolves a handful of Meta's own
+# official accounts (@meta, @threads, @instagram, @facebook); Advanced
+# Access is required for general public profile lookup. threads_location_tagging:
+# search for a location to tag on a new post. Adding these to SCOPES only
+# takes effect on the NEXT interactive login (see get_authorization_url) --
+# an already-issued long-lived token keeps whatever scopes it was granted
+# under, so a re-auth is required before any of the 4 new permissions'
+# calls will actually succeed.
+SCOPES = "threads_basic,threads_content_publish,threads_manage_replies,threads_keyword_search,threads_profile_discovery,threads_location_tagging"
 
 HF_API_KEY = os.getenv("HF_API_KEY", "")
 HF_MODEL_REPO = os.getenv("HF_MODEL_REPO", "papylove/kalshi-perps-model")
@@ -437,11 +453,21 @@ def _wait_for_container_ready(creation_id: str, token: str) -> str | None:
     return last_status
 
 
-def create_and_publish_post(text: str) -> str:
+def create_and_publish_post(
+    text: str, *, reply_to_id: str | None = None, reply_control: str | None = None,
+) -> str:
     """Threads posting is a real two-step process: create a media
     container, then separately publish it. Raises on any failure --
     callers (threads_post.py) are responsible for catching and logging,
-    same "never let this block a real trade" contract as x_post.py had."""
+    same "never let this block a real trade" contract as x_post.py had.
+
+    `reply_to_id` (requires threads_manage_replies) makes this a REPLY to
+    an existing post/reply instead of a new top-level post -- same
+    container-then-publish flow, Meta's API just treats the result as a
+    reply when this is set (see Meta's own "Create Replies" docs, verified
+    2026-08-24). `reply_control` (also threads_manage_replies) restricts
+    who can reply to THIS new post: "everyone" (default), "accounts_you_follow",
+    "mentioned_only", "parent_post_author_only", or "followers_only"."""
     if is_rate_limited():
         raise RuntimeError("Threads API rate limit cooldown active -- skipping post attempt")
     text = _with_promo_tag(text)
@@ -452,9 +478,14 @@ def create_and_publish_post(text: str) -> str:
             "No valid Threads access token/user id -- complete the interactive login first "
             "(see get_authorization_url())."
         )
+    params = {"media_type": "TEXT", "text": text, "access_token": token}
+    if reply_to_id:
+        params["reply_to_id"] = reply_to_id
+    if reply_control:
+        params["reply_control"] = reply_control
     create_resp = requests.post(
         f"{API_BASE_URL}/{API_VERSION}/{user_id}/threads",
-        params={"media_type": "TEXT", "text": text, "access_token": token},
+        params=params,
         timeout=TIMEOUT_SEC,
     )
     _raise_for_status_with_body(create_resp)
@@ -472,14 +503,22 @@ def create_and_publish_post(text: str) -> str:
     return publish_resp.json()["id"]
 
 
-def create_and_publish_image_post(image_url: str, text: str = "") -> str:
+def create_and_publish_image_post(
+    image_url: str, text: str = "", *, reply_to_id: str | None = None, reply_control: str | None = None,
+    location_id: str | None = None,
+) -> str:
     """Same create-container-then-publish flow as create_and_publish_post,
     but media_type=IMAGE with a publicly-fetchable image_url -- Threads'
     own servers fetch the image from that URL themselves (there is no raw
     binary upload step in this API), which is why chart_snapshot.py's
     public_url_for() needs this service's own public onrender.com URL, not
     a local file path. Raises on any failure, same contract as
-    create_and_publish_post -- callers must catch and log."""
+    create_and_publish_post -- callers must catch and log.
+
+    `reply_to_id`/`reply_control` -- see create_and_publish_post's own
+    docstring, identical meaning here. `location_id` (requires
+    threads_location_tagging, see search_locations) tags this post with a
+    location resolved from that search."""
     if is_rate_limited():
         raise RuntimeError("Threads API rate limit cooldown active -- skipping post attempt")
     text = _with_promo_tag(text)
@@ -490,9 +529,16 @@ def create_and_publish_image_post(image_url: str, text: str = "") -> str:
             "No valid Threads access token/user id -- complete the interactive login first "
             "(see get_authorization_url())."
         )
+    params = {"media_type": "IMAGE", "image_url": image_url, "text": text, "access_token": token}
+    if reply_to_id:
+        params["reply_to_id"] = reply_to_id
+    if reply_control:
+        params["reply_control"] = reply_control
+    if location_id:
+        params["location_id"] = location_id
     create_resp = requests.post(
         f"{API_BASE_URL}/{API_VERSION}/{user_id}/threads",
-        params={"media_type": "IMAGE", "image_url": image_url, "text": text, "access_token": token},
+        params=params,
         timeout=TIMEOUT_SEC,
     )
     _raise_for_status_with_body(create_resp)
@@ -518,7 +564,10 @@ CAROUSEL_MIN_ITEMS = 2
 CAROUSEL_MAX_ITEMS = 20
 
 
-def create_and_publish_carousel_post(image_urls: list[str], text: str = "") -> str:
+def create_and_publish_carousel_post(
+    image_urls: list[str], text: str = "", *, reply_to_id: str | None = None,
+    reply_control: str | None = None,
+) -> str:
     """Multiple images under ONE Threads post (a real carousel, swipeable
     on the timeline) -- distinct from calling create_and_publish_image_post
     N times, which would create N separate posts instead.
@@ -538,7 +587,11 @@ def create_and_publish_carousel_post(image_urls: list[str], text: str = "") -> s
     Raises on any failure, including if any single item container fails --
     a partially-broken carousel isn't published at all, matching this
     module's existing "never publish something Meta will just reject"
-    discipline (see the ERROR/EXPIRED check on the plain image/text posts)."""
+    discipline (see the ERROR/EXPIRED check on the plain image/text posts).
+
+    `reply_to_id`/`reply_control` -- see create_and_publish_post's own
+    docstring, identical meaning here; applied to the top-level CAROUSEL
+    container, not the individual item containers."""
     if len(image_urls) < CAROUSEL_MIN_ITEMS:
         raise ValueError(f"a carousel needs at least {CAROUSEL_MIN_ITEMS} images, got {len(image_urls)}")
     if len(image_urls) > CAROUSEL_MAX_ITEMS:
@@ -568,9 +621,14 @@ def create_and_publish_carousel_post(image_urls: list[str], text: str = "") -> s
             raise RuntimeError(f"Threads carousel item {item_id} ({image_url}) reached terminal status {item_status}")
         item_ids.append(item_id)
 
+    carousel_params = {"media_type": "CAROUSEL", "children": ",".join(item_ids), "text": text, "access_token": token}
+    if reply_to_id:
+        carousel_params["reply_to_id"] = reply_to_id
+    if reply_control:
+        carousel_params["reply_control"] = reply_control
     carousel_resp = requests.post(
         f"{API_BASE_URL}/{API_VERSION}/{user_id}/threads",
-        params={"media_type": "CAROUSEL", "children": ",".join(item_ids), "text": text, "access_token": token},
+        params=carousel_params,
         timeout=TIMEOUT_SEC,
     )
     _raise_for_status_with_body(carousel_resp)
@@ -586,3 +644,153 @@ def create_and_publish_carousel_post(image_urls: list[str], text: str = "") -> s
     )
     _raise_for_status_with_body(publish_resp)
     return publish_resp.json()["id"]
+
+
+# ---------------------------------------------------------------------------
+# Keyword search / location search / profile discovery / reply management --
+# the 4 additional Threads permissions requested (2026-08-23). Each is its
+# own read-mostly capability with its own daily quota, separate from the
+# create/publish rate-limit cooldown above (is_rate_limited()/_note_rate_limited
+# track error_subcode 4279002 specifically, a POSTING-only limit) -- none of
+# the functions below check or set it.
+#
+# threads_keyword_search and threads_profile_discovery are both functionally
+# crippled under Meta's default "Standard Access": keyword search only
+# returns the AUTHENTICATED USER'S OWN posts, and profile_lookup only
+# resolves a handful of Meta's own official accounts (@meta, @threads,
+# @instagram, @facebook) -- both need Meta's App Review to grant "Advanced
+# Access" for that specific permission before they do anything broader.
+# Nothing in this codebase calls these on a schedule for that reason --
+# they're available for on-demand/manual use until that review clears.
+# ---------------------------------------------------------------------------
+
+
+def search_keyword_posts(
+    query: str, *, search_type: str = "TOP", search_mode: str = "KEYWORD",
+    media_type: str | None = None, author_username: str | None = None,
+    since: str | None = None, until: str | None = None, limit: int = 25,
+) -> list[dict[str, Any]]:
+    """Public Threads posts matching `query` (see Meta's "Keyword and Topic
+    Tag Search" docs, verified 2026-08-23). Under Standard Access this only
+    ever returns the authenticated account's OWN posts -- see module note
+    above. `search_type`: TOP or RECENT. `search_mode`: KEYWORD or TAG (tag
+    search omits the leading #). Raises on any failure, same contract as
+    every other call in this module."""
+    token = get_valid_access_token()
+    if not token:
+        raise RuntimeError(
+            "No valid Threads access token -- complete the interactive login first "
+            "(see get_authorization_url())."
+        )
+    params: dict[str, Any] = {
+        "q": query, "search_type": search_type, "search_mode": search_mode,
+        "limit": limit, "access_token": token,
+    }
+    if media_type:
+        params["media_type"] = media_type
+    if author_username:
+        params["author_username"] = author_username
+    if since:
+        params["since"] = since
+    if until:
+        params["until"] = until
+    resp = requests.get(f"{API_BASE_URL}/{API_VERSION}/keyword_search", params=params, timeout=TIMEOUT_SEC)
+    _raise_for_status_with_body(resp)
+    return resp.json().get("data", [])
+
+
+def search_locations(
+    *, query: str | None = None, latitude: float | None = None, longitude: float | None = None,
+) -> list[dict[str, Any]]:
+    """Locations matching a text query and/or a coordinate pair, for
+    tagging a subsequent post via its `id` as create_and_publish_post's/
+    create_and_publish_image_post's `location_id` (requires
+    threads_location_tagging; see Meta's "Location Tagging" docs, verified
+    2026-08-23). At least one of `query` or the (`latitude`, `longitude`)
+    pair is required -- Meta's own endpoint rejects a call with neither."""
+    if not query and (latitude is None or longitude is None):
+        raise ValueError("search_locations needs `query` and/or both `latitude` and `longitude`")
+    token = get_valid_access_token()
+    if not token:
+        raise RuntimeError(
+            "No valid Threads access token -- complete the interactive login first "
+            "(see get_authorization_url())."
+        )
+    params: dict[str, Any] = {"access_token": token}
+    if query:
+        params["q"] = query
+    if latitude is not None:
+        params["latitude"] = latitude
+    if longitude is not None:
+        params["longitude"] = longitude
+    resp = requests.get(f"{API_BASE_URL}/{API_VERSION}/location_search", params=params, timeout=TIMEOUT_SEC)
+    _raise_for_status_with_body(resp)
+    return resp.json().get("data", [])
+
+
+def lookup_public_profile(username: str) -> dict[str, Any] | None:
+    """Public profile info (follower/like/quote/repost/view counts, bio,
+    verification status) for `username` (requires threads_profile_discovery;
+    see Meta's "Threads Profiles" docs, verified 2026-08-23). Under Standard
+    Access this only resolves a handful of Meta's own official accounts
+    (@meta, @threads, @instagram, @facebook) -- see module note above.
+    Returns None if the profile can't be resolved (404), raises on any
+    other failure."""
+    token = get_valid_access_token()
+    if not token:
+        raise RuntimeError(
+            "No valid Threads access token -- complete the interactive login first "
+            "(see get_authorization_url())."
+        )
+    resp = requests.get(
+        f"{API_BASE_URL}/{API_VERSION}/profile_lookup",
+        params={"username": username, "access_token": token},
+        timeout=TIMEOUT_SEC,
+    )
+    if resp.status_code == 404:
+        return None
+    _raise_for_status_with_body(resp)
+    return resp.json()
+
+
+def get_pending_replies(
+    media_id: str, *, reverse: bool = True, approval_status: str | None = None,
+) -> list[dict[str, Any]]:
+    """Replies to `media_id` awaiting this account's moderation (requires
+    threads_manage_replies; see Meta's "Reply Management" docs, verified
+    2026-08-23) -- each item's `id` is what manage_reply below acts on.
+    `approval_status`: "pending" or "ignored" to filter, omit for all."""
+    token = get_valid_access_token()
+    if not token:
+        raise RuntimeError(
+            "No valid Threads access token -- complete the interactive login first "
+            "(see get_authorization_url())."
+        )
+    params: dict[str, Any] = {"reverse": str(reverse).lower(), "access_token": token}
+    if approval_status:
+        params["approval_status"] = approval_status
+    resp = requests.get(
+        f"{API_BASE_URL}/{API_VERSION}/{media_id}/pending_replies", params=params, timeout=TIMEOUT_SEC,
+    )
+    _raise_for_status_with_body(resp)
+    return resp.json().get("data", [])
+
+
+def manage_reply(reply_id: str, *, hide: bool) -> bool:
+    """Hides (`hide=True`) or unhides (`hide=False`) a reply to one of this
+    account's posts (requires threads_manage_replies). A hidden reply stays
+    visible to anyone who navigates to it directly -- Meta's own documented
+    behavior, not a bug in this wrapper. Returns Meta's own `success` flag."""
+    token = get_valid_access_token()
+    if not token:
+        raise RuntimeError(
+            "No valid Threads access token -- complete the interactive login first "
+            "(see get_authorization_url())."
+        )
+    resp = requests.post(
+        f"{API_BASE_URL}/{API_VERSION}/{reply_id}/manage_reply",
+        params={"hide": str(hide).lower(), "access_token": token},
+        timeout=TIMEOUT_SEC,
+    )
+    _raise_for_status_with_body(resp)
+    return bool(resp.json().get("success"))

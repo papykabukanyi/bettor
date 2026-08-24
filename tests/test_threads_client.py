@@ -673,6 +673,216 @@ def test_create_and_publish_carousel_post_refuses_to_publish_a_carousel_containe
         threads_client.create_and_publish_carousel_post(urls)
 
 
+def test_create_and_publish_carousel_post_passes_through_reply_params(monkeypatch):
+    threads_client._token_cache.update({  # noqa: SLF001
+        "access_token": "at-1", "user_id": "user-42",
+        "obtained_at": threads_client.time.time(), "expires_at": threads_client.time.time() + 1000000,
+    })
+    urls = ["https://example.com/a.png", "https://example.com/b.png"]
+    captured = []
+
+    def fake_post(url, *, params, timeout):
+        captured.append(dict(params))
+        if "threads_publish" in url:
+            return _FakeResponse({"id": "post-999"})
+        if params.get("media_type") == "CAROUSEL":
+            return _FakeResponse({"id": "carousel-container-1"})
+        return _FakeResponse({"id": "item-1"})
+
+    monkeypatch.setattr(threads_client.requests, "post", fake_post)
+    monkeypatch.setattr(threads_client.requests, "get", lambda url, *, params, timeout: _FakeResponse({"status": "FINISHED"}))
+
+    threads_client.create_and_publish_carousel_post(urls, reply_to_id="thread-1", reply_control="followers_only")
+
+    carousel_call = next(c for c in captured if c.get("media_type") == "CAROUSEL")
+    assert carousel_call["reply_to_id"] == "thread-1"
+    assert carousel_call["reply_control"] == "followers_only"
+    # The reply params belong on the carousel container, not the item containers.
+    item_calls = [c for c in captured if c.get("media_type") == "IMAGE"]
+    for call in item_calls:
+        assert "reply_to_id" not in call
+        assert "reply_control" not in call
+
+
+# ---------------------------------------------------------------------------
+# search_keyword_posts / search_locations / lookup_public_profile /
+# get_pending_replies / manage_reply -- the 4 additional-permission
+# capability functions.
+# ---------------------------------------------------------------------------
+
+def _with_valid_token():
+    threads_client._token_cache.update({  # noqa: SLF001
+        "access_token": "at-1", "user_id": "user-42",
+        "obtained_at": threads_client.time.time(), "expires_at": threads_client.time.time() + 1000000,
+    })
+
+
+def test_search_keyword_posts_raises_without_a_valid_token():
+    with pytest.raises(RuntimeError, match="No valid Threads access token"):
+        threads_client.search_keyword_posts("bitcoin")
+
+
+def test_search_keyword_posts_builds_the_expected_request_and_returns_data(monkeypatch):
+    _with_valid_token()
+    captured = {}
+
+    def fake_get(url, *, params, timeout):
+        captured["url"] = url
+        captured["params"] = params
+        return _FakeResponse({"data": [{"id": "post-1", "text": "bitcoin is up"}]})
+
+    monkeypatch.setattr(threads_client.requests, "get", fake_get)
+    result = threads_client.search_keyword_posts(
+        "bitcoin", search_type="RECENT", media_type="TEXT", author_username="cumdev", limit=10,
+    )
+
+    assert captured["url"] == f"{threads_client.API_BASE_URL}/{threads_client.API_VERSION}/keyword_search"
+    assert captured["params"]["q"] == "bitcoin"
+    assert captured["params"]["search_type"] == "RECENT"
+    assert captured["params"]["media_type"] == "TEXT"
+    assert captured["params"]["author_username"] == "cumdev"
+    assert captured["params"]["limit"] == 10
+    assert result == [{"id": "post-1", "text": "bitcoin is up"}]
+
+
+def test_search_keyword_posts_raises_on_an_error_response(monkeypatch):
+    _with_valid_token()
+    monkeypatch.setattr(threads_client.requests, "get", lambda url, *, params, timeout: _FakeResponse({"error": "bad"}, status_code=400))
+    with pytest.raises(Exception):
+        threads_client.search_keyword_posts("bitcoin")
+
+
+def test_search_locations_requires_a_query_or_coordinates():
+    with pytest.raises(ValueError, match="query.*latitude.*longitude"):
+        threads_client.search_locations()
+
+
+def test_search_locations_raises_without_a_valid_token():
+    with pytest.raises(RuntimeError, match="No valid Threads access token"):
+        threads_client.search_locations(query="New York")
+
+
+def test_search_locations_builds_the_expected_request_with_a_text_query(monkeypatch):
+    _with_valid_token()
+    captured = {}
+
+    def fake_get(url, *, params, timeout):
+        captured["url"] = url
+        captured["params"] = params
+        return _FakeResponse({"data": [{"id": 1, "name": "New York"}]})
+
+    monkeypatch.setattr(threads_client.requests, "get", fake_get)
+    result = threads_client.search_locations(query="New York")
+
+    assert captured["url"] == f"{threads_client.API_BASE_URL}/{threads_client.API_VERSION}/location_search"
+    assert captured["params"]["q"] == "New York"
+    assert "latitude" not in captured["params"]
+    assert result == [{"id": 1, "name": "New York"}]
+
+
+def test_search_locations_builds_the_expected_request_with_coordinates(monkeypatch):
+    _with_valid_token()
+    captured = {}
+
+    def fake_get(url, *, params, timeout):
+        captured["params"] = params
+        return _FakeResponse({"data": []})
+
+    monkeypatch.setattr(threads_client.requests, "get", fake_get)
+    threads_client.search_locations(latitude=40.7, longitude=-74.0)
+
+    assert captured["params"]["latitude"] == 40.7
+    assert captured["params"]["longitude"] == -74.0
+    assert "q" not in captured["params"]
+
+
+def test_lookup_public_profile_raises_without_a_valid_token():
+    with pytest.raises(RuntimeError, match="No valid Threads access token"):
+        threads_client.lookup_public_profile("meta")
+
+
+def test_lookup_public_profile_returns_the_profile_data(monkeypatch):
+    _with_valid_token()
+    captured = {}
+
+    def fake_get(url, *, params, timeout):
+        captured["url"] = url
+        captured["params"] = params
+        return _FakeResponse({"username": "meta", "follower_count": 1000000})
+
+    monkeypatch.setattr(threads_client.requests, "get", fake_get)
+    result = threads_client.lookup_public_profile("meta")
+
+    assert captured["url"] == f"{threads_client.API_BASE_URL}/{threads_client.API_VERSION}/profile_lookup"
+    assert captured["params"]["username"] == "meta"
+    assert result == {"username": "meta", "follower_count": 1000000}
+
+
+def test_lookup_public_profile_returns_none_on_404(monkeypatch):
+    _with_valid_token()
+    monkeypatch.setattr(threads_client.requests, "get", lambda url, *, params, timeout: _FakeResponse({}, status_code=404))
+    assert threads_client.lookup_public_profile("nobody-real") is None
+
+
+def test_get_pending_replies_raises_without_a_valid_token():
+    with pytest.raises(RuntimeError, match="No valid Threads access token"):
+        threads_client.get_pending_replies("media-1")
+
+
+def test_get_pending_replies_builds_the_expected_request_and_returns_data(monkeypatch):
+    _with_valid_token()
+    captured = {}
+
+    def fake_get(url, *, params, timeout):
+        captured["url"] = url
+        captured["params"] = params
+        return _FakeResponse({"data": [{"id": "reply-1", "hide_status": "NOT_HIDDEN"}]})
+
+    monkeypatch.setattr(threads_client.requests, "get", fake_get)
+    result = threads_client.get_pending_replies("media-1", approval_status="pending")
+
+    assert captured["url"] == f"{threads_client.API_BASE_URL}/{threads_client.API_VERSION}/media-1/pending_replies"
+    assert captured["params"]["approval_status"] == "pending"
+    assert captured["params"]["reverse"] == "true"
+    assert result == [{"id": "reply-1", "hide_status": "NOT_HIDDEN"}]
+
+
+def test_manage_reply_raises_without_a_valid_token():
+    with pytest.raises(RuntimeError, match="No valid Threads access token"):
+        threads_client.manage_reply("reply-1", hide=True)
+
+
+def test_manage_reply_hides_a_reply(monkeypatch):
+    _with_valid_token()
+    captured = {}
+
+    def fake_post(url, *, params, timeout):
+        captured["url"] = url
+        captured["params"] = params
+        return _FakeResponse({"success": True})
+
+    monkeypatch.setattr(threads_client.requests, "post", fake_post)
+    result = threads_client.manage_reply("reply-1", hide=True)
+
+    assert captured["url"] == f"{threads_client.API_BASE_URL}/{threads_client.API_VERSION}/reply-1/manage_reply"
+    assert captured["params"]["hide"] == "true"
+    assert result is True
+
+
+def test_manage_reply_unhides_a_reply(monkeypatch):
+    _with_valid_token()
+    captured = {}
+
+    def fake_post(url, *, params, timeout):
+        captured["params"] = params
+        return _FakeResponse({"success": True})
+
+    monkeypatch.setattr(threads_client.requests, "post", fake_post)
+    threads_client.manage_reply("reply-1", hide=False)
+
+    assert captured["params"]["hide"] == "false"
+
+
 # ---------------------------------------------------------------------------
 # _with_promo_tag -- every post through this client tags the bot's own
 # site, see this module's own PROMO_URL comment.
