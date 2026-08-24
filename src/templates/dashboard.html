@@ -318,7 +318,7 @@ async function refreshStatus() {
         <td>${fmtPrice(p.entry_price)}</td>
         <td>${p.current_price !== undefined ? fmtPrice(p.current_price) : "--"}</td>
         <td class="stat ${pnlClass}">${pnlText}</td>
-        <td>${p.count}</td>
+        <td>${p.count}${(p.scale_ins && p.scale_ins.length) ? ` <span class="tag" title="scaled in ${p.scale_ins.length}x">+${p.scale_ins.length}x</span>` : ""}${p.partial_exit_taken ? ` <span class="tag" title="partial exit taken, stop locked in">partial</span>` : ""}</td>
         <td class="stat pos" style="font-size:13px;">${fmtPrice(p.take_profit_price)}</td>
         <td class="stat neg" style="font-size:13px;">${fmtPrice(p.stop_loss_price)}</td>
         <td>${timeAgo(p.opened_at)}</td>

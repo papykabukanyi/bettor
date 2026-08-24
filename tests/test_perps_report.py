@@ -66,6 +66,21 @@ def test_trade_stats_computes_win_rate_and_averages():
     assert stats["total_fees"] == 2.5
 
 
+def test_trade_stats_excludes_partial_exit_rows_from_win_loss_but_counts_their_fees():
+    """A "partial" row (perps' USE_PARTIAL_EXIT) is real P&L on a position
+    that's still open, not a resolved trade -- must not inflate win/loss
+    counts, but its fee is still real money paid and should still count."""
+    trades = [
+        _trade(realized_pnl_usd=10.0, fee_usd=1.0, exit_kind="full"),
+        _trade(realized_pnl_usd=3.0, fee_usd=0.4, exit_kind="partial"),
+    ]
+    stats = perps_report._trade_stats(trades)  # noqa: SLF001
+    assert stats["count"] == 1
+    assert stats["win_count"] == 1
+    assert stats["best_trade"] == 10.0
+    assert stats["total_fees"] == 1.4
+
+
 def test_trade_stats_handles_zero_trades():
     stats = perps_report._trade_stats([])  # noqa: SLF001
     assert stats["count"] == 0

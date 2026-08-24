@@ -228,7 +228,23 @@ def simulate(
     For a sweep (many calls over the SAME rows with only thresholds
     changing), call `add_model_predictions(test_df, fitted)` yourself once
     and pass the result with `fitted=None` here -- `simulate` will reuse the
-    existing `model_probability_up` column instead of re-predicting."""
+    existing `model_probability_up` column instead of re-predicting.
+
+    KNOWN, DISCLOSED GAP: USE_SCALE_IN, USE_PARTIAL_EXIT, and
+    USE_CONVICTION_SIZING (perps_strategy.py) are NOT modeled here. Sizing
+    below is computed manually (never calls compute_leveraged_count, so
+    conviction-scaled sizing simply can't apply), and `open_positions` is a
+    plain dict keyed by ticker with no scale-in/partial-close concept at
+    all -- this loop always fully removes a position from `open_positions`
+    the moment strat.decide_exit returns should_exit=True. Both flags
+    default OFF in live code, so this doesn't affect any backtest run
+    today. But if `decide_exit` is ever called from here with
+    USE_PARTIAL_EXIT explicitly turned on to validate it BEFORE enabling it
+    live, it can return "partial_take_profit" as should_exit=True -- this
+    loop would then incorrectly treat that as a FULL close (deleting the
+    whole position) instead of trusting a "close half, keep the rest open"
+    number this engine doesn't know how to represent. Don't trust a
+    backtest run in that configuration until this gap is closed."""
     leverage_by_ticker = leverage_by_ticker or {}
     position_size_pct = strat.POSITION_SIZE_PCT if position_size_pct is None else position_size_pct
     max_concurrent_positions = strat.MAX_CONCURRENT_POSITIONS if max_concurrent_positions is None else max_concurrent_positions

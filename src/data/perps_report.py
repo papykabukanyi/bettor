@@ -40,7 +40,15 @@ def _fmt_usd(value: float) -> str:
 
 
 def _trade_stats(trade_log: list[dict[str, Any]]) -> dict[str, Any]:
-    pnls = [float(t.get("realized_pnl_usd", 0.0)) for t in trade_log]
+    """Win/loss/avg/best/worst are computed over exit_kind == "full" rows
+    only -- a "partial" row (perps' USE_PARTIAL_EXIT, selling only part of
+    a still-open position) is real P&L but not a resolved trade outcome,
+    same exclusion server_common.win_rate_stats applies to this same
+    trade_log. total_fees still sums EVERY row (a partial exit pays a real
+    fee too). Rows without the field (predating this, or a non-perps trade
+    log) default to "full" so nothing regresses."""
+    resolved = [t for t in trade_log if t.get("exit_kind", "full") == "full"]
+    pnls = [float(t.get("realized_pnl_usd", 0.0)) for t in resolved]
     wins = [p for p in pnls if p > 0]
     losses = [p for p in pnls if p < 0]
     return {

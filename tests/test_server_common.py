@@ -243,6 +243,23 @@ def test_win_rate_stats_ignores_trades_with_no_realized_pnl_yet():
     assert stats["win_count"] == 1
 
 
+def test_win_rate_stats_excludes_partial_exit_rows():
+    """A "partial" row (perps' USE_PARTIAL_EXIT) is real P&L on a position
+    that's still open, not a resolved win/loss -- must not be counted as
+    an independent trade outcome. Rows without exit_kind (every trade log
+    predating this feature) default to "full" and are counted exactly as
+    before."""
+    trades = [
+        {**_trade(10.0), "exit_kind": "full"},
+        {**_trade(3.0), "exit_kind": "partial"},
+        {**_trade(-2.0), "exit_kind": "partial"},
+        _trade(-1.0),  # no exit_kind at all -- defaults to "full"
+    ]
+    stats = server_common.win_rate_stats(trades)
+    assert stats["trade_count"] == 2
+    assert stats["win_count"] == 1
+
+
 def test_milestone_snapshot_sets_baseline_on_first_call():
     state = {}
     snap = server_common.milestone_snapshot(state, current_balance=100.0)

@@ -241,6 +241,85 @@ def post_trade_exit(
         return False
 
 
+def _format_scale_in_text(
+    *, ticker: str, side: str, add_price: float, add_count: float, new_count: float,
+    new_entry_price: float, reason: str, dry_run: bool, market: str = "perps",
+) -> str:
+    tag = "[SIMULATED] " if dry_run else ""
+    direction = "SHORT" if side == "short" else "LONG"
+    text = (
+        f"{tag}{_market_label(market)}: ADDED to {direction} {ticker} @ {add_price:.4f} "
+        f"(+{add_count:g}, now {new_count:g} @ avg {new_entry_price:.4f})\n"
+        f"Why: {reason}\n"
+        f"{_hashtags_for_market(market)}"
+    )
+    if len(text) > _THREADS_POST_MAX_CHARS:
+        text = text[: _THREADS_POST_MAX_CHARS - 1] + "…"
+    return text
+
+
+def post_scale_in(
+    *, ticker: str, side: str, add_price: float, add_count: float, new_count: float,
+    new_entry_price: float, reason: str, dry_run: bool, market: str = "perps",
+) -> bool:
+    """Posts one Threads post describing an ADD to an already-open,
+    already-winning position (see perps_strategy.USE_SCALE_IN). Same best-
+    effort, never-raise contract as post_trade_entry()."""
+    if not THREADS_POST_ENABLED:
+        return False
+    text = _format_scale_in_text(
+        ticker=ticker, side=side, add_price=add_price, add_count=add_count, new_count=new_count,
+        new_entry_price=new_entry_price, reason=reason, dry_run=dry_run, market=market,
+    )
+    try:
+        threads_client.create_and_publish_post(text)
+        return True
+    except Exception as exc:
+        logger.warning("[threads_post] failed to post scale-in for %s: %s", ticker, exc)
+        return False
+
+
+def _format_partial_exit_text(
+    *, ticker: str, side: str, exit_price: float, closed_count: float, remaining_count: float | None,
+    pnl_usd: float, reason: str, dry_run: bool, market: str = "perps",
+) -> str:
+    tag = "[SIMULATED] " if dry_run else ""
+    direction = "SHORT" if side == "short" else "LONG"
+    remaining_note = f", {remaining_count:g} still riding" if remaining_count else ""
+    text = (
+        f"{tag}{_market_label(market)}: Partial profit on {direction} {ticker} -- "
+        f"closed {closed_count:g} @ {exit_price:.4f} for {pnl_usd:+.2f}{remaining_note} (stop now locked in)\n"
+        f"Why: {reason}\n"
+        f"{_hashtags_for_market(market)}"
+    )
+    if len(text) > _THREADS_POST_MAX_CHARS:
+        text = text[: _THREADS_POST_MAX_CHARS - 1] + "…"
+    return text
+
+
+def post_partial_exit(
+    *, ticker: str, side: str, exit_price: float, closed_count: float, remaining_count: float | None,
+    pnl_usd: float, reason: str, dry_run: bool, market: str = "perps",
+) -> bool:
+    """Posts one Threads post describing a PARTIAL close -- some of the
+    position banked as real profit, the rest still open with a tightened,
+    locked-in-profit stop (see perps_strategy.USE_PARTIAL_EXIT). Deliberately
+    NOT post_trade_exit() -- that would misleadingly read as the whole
+    position having closed. Same best-effort, never-raise contract."""
+    if not THREADS_POST_ENABLED:
+        return False
+    text = _format_partial_exit_text(
+        ticker=ticker, side=side, exit_price=exit_price, closed_count=closed_count,
+        remaining_count=remaining_count, pnl_usd=pnl_usd, reason=reason, dry_run=dry_run, market=market,
+    )
+    try:
+        threads_client.create_and_publish_post(text)
+        return True
+    except Exception as exc:
+        logger.warning("[threads_post] failed to post partial exit for %s: %s", ticker, exc)
+        return False
+
+
 def post_restart_notice(message: str = "Money Bot has restarted!") -> bool:
     """Posts a short note once per process boot -- see app_kalshi.py's
     `_ensure_background_jobs_started` for the once-per-boot call site. Same

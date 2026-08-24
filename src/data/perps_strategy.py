@@ -316,6 +316,23 @@ def _place_order_maker_then_fallback(
 # account fully deployed across up to 5 different instruments at a time).
 POSITION_SIZE_PCT = _env_float("PERPS_POSITION_SIZE_PCT", 0.20)
 MAX_CONCURRENT_POSITIONS = max(1, _env_int("PERPS_MAX_CONCURRENT_POSITIONS", 5))
+# Explicit user direction: stop sizing every qualifying entry identically --
+# a borderline-confidence entry and a maximum-conviction one currently get
+# the exact same 20% slice. Scales the slice by how far ABOVE its own
+# entry bar (MODEL_CONFIDENCE_MIN, possibly nudged by the correlation study
+# -- see evaluate_candidate's effective_confidence_min) the model's
+# confidence cleared: a just-qualifying entry gets LESS than today's flat
+# 20% (down to MIN_MULTIPLIER), a maximum-conviction one gets MORE (up to
+# MAX_MULTIPLIER) -- capital shifts toward the strongest signals instead of
+# spreading identically across every candidate that merely cleared the bar.
+# Symmetric-ish around 1.0 so this reallocates risk rather than silently
+# raising it on average. Never applies to the technical-only-fallback path
+# (see evaluate_candidate) -- that branch's score is on an unrelated scale
+# and must never drive sizing. Default OFF, same "prove it out live first"
+# posture as every other risk-shape flag in this file.
+USE_CONVICTION_SIZING = _env_flag("PERPS_USE_CONVICTION_SIZING", default=False)
+CONVICTION_SIZE_MIN_MULTIPLIER = _env_float("PERPS_CONVICTION_SIZE_MIN_MULTIPLIER", 0.7)
+CONVICTION_SIZE_MAX_MULTIPLIER = _env_float("PERPS_CONVICTION_SIZE_MAX_MULTIPLIER", 1.5)
 # Confirmed via a real backtest (14 days, 8 watchlist coins, fresh model
 # fit on today's expanded feature set): at the OLD defaults (0.4%/0.8%/30min),
 # 87% of trades timed out at max_hold_time without ever reaching either
@@ -549,6 +566,49 @@ CORRELATION_CONFIDENCE_MAX_ADJUSTMENT = _env_float("PERPS_CORRELATION_CONFIDENCE
 # above) -- this is just the threshold past which the correlation score
 # counts as favorable/unfavorable there.
 PROMISING_CORRELATION_SCORE = _env_float("PERPS_PROMISING_CORRELATION_SCORE", 0.35)
+
+# ── Scale-in: add to an already-winning position (flagged, default OFF) ────
+# Explicit user direction: let the bot buy MORE when a position it already
+# holds still looks like it has more room to run, instead of only ever
+# entering once per instrument. Deliberately conservative: a position must
+# already be MORE than halfway to its own take-profit target (stricter than
+# PROMISING_PROGRESS_FRACTION's 0.25 bar for merely not force-closing a
+# flat position -- adding real risk should need more proof than avoiding an
+# early exit does) AND show the same volume-confirmed momentum/breakout/
+# model/correlation continuation decide_exit's own max-hold "promising"
+# check already trusts (see _should_scale_in) -- no new, unvalidated
+# thresholds invented for this. At most SCALE_IN_MAX_COUNT adds, each
+# SCALE_IN_SIZE_FRACTION the size of a fresh entry, and the total position
+# is hard-capped at SCALE_IN_MAX_TOTAL_SIZE_MULTIPLE times its original
+# size regardless (see compute_scale_in_count) -- belt-and-suspenders with
+# the count x fraction cap above.
+USE_SCALE_IN = _env_flag("PERPS_USE_SCALE_IN", default=False)
+SCALE_IN_MIN_PROGRESS_FRACTION = _env_float("PERPS_SCALE_IN_MIN_PROGRESS_FRACTION", 0.5)
+SCALE_IN_MIN_MINUTES_SINCE_ENTRY = _env_float("PERPS_SCALE_IN_MIN_MINUTES_SINCE_ENTRY", 10.0)
+SCALE_IN_MIN_MINUTES_SINCE_LAST = _env_float("PERPS_SCALE_IN_MIN_MINUTES_SINCE_LAST", 10.0)
+SCALE_IN_MAX_COUNT = _env_int("PERPS_SCALE_IN_MAX_COUNT", 1)
+SCALE_IN_SIZE_FRACTION = _env_float("PERPS_SCALE_IN_SIZE_FRACTION", 0.5)
+SCALE_IN_MAX_TOTAL_SIZE_MULTIPLE = _env_float("PERPS_SCALE_IN_MAX_TOTAL_SIZE_MULTIPLE", 1.5)
+
+# ── Partial exit: sell PART of a position, let the rest ride (flagged,
+# default OFF) ──────────────────────────────────────────────────────────────
+# Explicit user direction: taking profit shouldn't always be all-or-nothing.
+# When take_profit is reached AND the same "promising" continuation signals
+# above still confirm the move looks like it has more room, close only
+# PARTIAL_EXIT_FRACTION of the position and lock in real, guaranteed gains
+# on the rest by tightening its stop (see adaptive_exit_pcts'
+# partial_exit_taken param) instead of leaving the whole position exposed
+# to a full round-trip give-back. At most ONE partial exit per position
+# (MIN_COUNT_FOR_PARTIAL_EXIT also guarantees both halves are non-zero
+# contracts) -- a second take_profit hit on the remainder closes it fully,
+# same as today. Stop-loss and quick-profit exits are NEVER partial -- full
+# de-risking only, on purpose, when the position is going the wrong way or
+# needs a fast exit.
+USE_PARTIAL_EXIT = _env_flag("PERPS_USE_PARTIAL_EXIT", default=False)
+MIN_COUNT_FOR_PARTIAL_EXIT = _env_int("PERPS_MIN_COUNT_FOR_PARTIAL_EXIT", 2)
+PARTIAL_EXIT_FRACTION = _env_float("PERPS_PARTIAL_EXIT_FRACTION", 0.5)
+PARTIAL_EXIT_STOP_LOCK_FRACTION = _env_float("PERPS_PARTIAL_EXIT_STOP_LOCK_FRACTION", 0.3)
+
 # Daily loss cap as a PERCENTAGE of the balance measured at the start of the
 # day (not a fixed dollar figure) so it scales sensibly as the account grows.
 DAILY_LOSS_CAP_PCT = _env_float("PERPS_DAILY_LOSS_CAP_PCT", 0.15)
@@ -886,24 +946,53 @@ def _available_balance_usd() -> float:
     return available
 
 
-def compute_leveraged_count(available_balance_usd: float, market: dict[str, Any]) -> tuple[int, dict[str, Any]]:
-    """How many WHOLE contracts POSITION_SIZE_PCT of the balance can control
-    at this market's own embedded leverage. The portion's dollar budget is
-    spent as MARGIN, not notional -- e.g. at ~6x leverage, a $2 margin
-    budget controls roughly $12 of notional, which is however many contracts
-    that buys at the market's price. Returns (count, detail) so callers can
-    show/log exactly how the number was derived."""
+def compute_leveraged_count(
+    available_balance_usd: float, market: dict[str, Any], *, size_multiplier: float = 1.0,
+) -> tuple[int, dict[str, Any]]:
+    """How many WHOLE contracts POSITION_SIZE_PCT (times size_multiplier) of
+    the balance can control at this market's own embedded leverage. The
+    portion's dollar budget is spent as MARGIN, not notional -- e.g. at ~6x
+    leverage, a $2 margin budget controls roughly $12 of notional, which is
+    however many contracts that buys at the market's price. Returns
+    (count, detail) so callers can show/log exactly how the number was
+    derived.
+
+    size_multiplier (default 1.0, unchanged behavior) lets a caller scale
+    this specific slice up or down -- see USE_CONVICTION_SIZING (bigger for
+    a higher-conviction entry, scan_and_enter's own call site) and
+    compute_scale_in_count (a smaller add to an already-open position)."""
     price = float(market.get("price") or 0.0)
     leverage = float(market.get("leverage_estimate") or 1.0) or 1.0
-    margin_budget_usd = round(available_balance_usd * POSITION_SIZE_PCT, 6)
+    margin_budget_usd = round(available_balance_usd * POSITION_SIZE_PCT * size_multiplier, 6)
     notional_capacity_usd = round(margin_budget_usd * leverage, 6)
     count = int(notional_capacity_usd // price) if price > 0 else 0
     detail = {
         "available_balance_usd": available_balance_usd, "position_size_pct": POSITION_SIZE_PCT,
+        "size_multiplier": size_multiplier,
         "margin_budget_usd": margin_budget_usd, "leverage_estimate": leverage,
         "notional_capacity_usd": notional_capacity_usd, "contract_price": price, "count": count,
     }
     return count, detail
+
+
+def compute_scale_in_count(
+    available_balance_usd: float, market: dict[str, Any], *, original_count: float, current_count: float,
+) -> tuple[int, dict[str, Any]]:
+    """Sizing for a scale-in ADD to an already-open position -- reuses
+    compute_leveraged_count's exact math at SCALE_IN_SIZE_FRACTION of a
+    fresh entry's size, then hard-caps the result so
+    current_count + count never exceeds original_count *
+    SCALE_IN_MAX_TOTAL_SIZE_MULTIPLE, enforced against the position's
+    CURRENT count (not just this add in isolation) so the cap holds even if
+    this is somehow called more than once for the same position."""
+    count, detail = compute_leveraged_count(available_balance_usd, market, size_multiplier=SCALE_IN_SIZE_FRACTION)
+    max_total = original_count * SCALE_IN_MAX_TOTAL_SIZE_MULTIPLE
+    room = max(0, int(max_total - current_count))
+    capped_count = min(count, room)
+    detail["uncapped_count"] = count
+    detail["max_total_count"] = max_total
+    detail["count"] = capped_count
+    return capped_count, detail
 
 
 def decide_entry_technical(row: dict[str, Any], side: str = "long") -> tuple[bool, str]:
@@ -1120,6 +1209,14 @@ def evaluate_candidate(
                 score += side_correlation_score * effective_correlation_max_adjustment
                 result["reason"] += f"; correlation study: {correlation['reason']}"
             result["score"] = score
+            # For USE_CONVICTION_SIZING (see scan_and_enter/compute_leveraged_count)
+            # -- how far above its OWN entry bar this candidate's confidence
+            # cleared. Deliberately NOT set on the technical-only-fallback
+            # return above: that branch's score is on an unrelated scale
+            # (~0.002-0.02 vs this confidence's ~0.5-1.0) and must never
+            # drive sizing.
+            result["entry_confidence"] = confidence
+            result["effective_confidence_min"] = effective_confidence_min
             return result
         reasons.append(f"{technical_reason}, but model predicts {prediction['direction']} (p_up={prediction['probability_up']:.2f})")
 
@@ -1244,30 +1341,45 @@ MIN_STOP_LOSS_PCT = _env_float("PERPS_MIN_STOP_LOSS_PCT", 0.01)
 MAX_STOP_LOSS_PCT = _env_float("PERPS_MAX_STOP_LOSS_PCT", 0.04)
 
 
-def adaptive_exit_pcts(entry_volatility_30: float | None) -> dict[str, float]:
+def adaptive_exit_pcts(entry_volatility_30: float | None, *, partial_exit_taken: bool = False) -> dict[str, float]:
     """Take-profit/stop-loss/quick-profit percentages customized to ONE
     specific currency's own volatility at entry time. Falls back to the
     flat global TAKE_PROFIT_PCT/STOP_LOSS_PCT/etc. defaults if no
     volatility was captured (e.g. a position opened before this field
     existed, or a technical-only entry where the value was unavailable) --
     same value every position used before this change, so nothing regresses
-    for positions that predate it."""
+    for positions that predate it.
+
+    partial_exit_taken (see USE_PARTIAL_EXIT): once a position has already
+    had a partial exit, the REMAINDER's stop-loss is overridden to a
+    NEGATIVE percentage -- decide_exit's own check is
+    `change_pct <= -stop_loss_pct`, so a negative value flips that
+    comparison to fire once the gain merely DROPS back to
+    PARTIAL_EXIT_STOP_LOCK_FRACTION of take_profit, locking in a
+    guaranteed profit on what's left instead of only protecting breakeven."""
     if not entry_volatility_30 or entry_volatility_30 <= 0:
-        return {
-            "take_profit_pct": TAKE_PROFIT_PCT, "stop_loss_pct": STOP_LOSS_PCT,
-            "quick_profit_pct": QUICK_PROFIT_PCT, "volatility_quick_profit_pct": VOLATILITY_QUICK_PROFIT_PCT,
-        }
-    horizon_scale = math.sqrt(max(1, MAX_HOLD_MINUTES))
-    take_profit = min(MAX_TAKE_PROFIT_PCT, max(MIN_TAKE_PROFIT_PCT, TAKE_PROFIT_VOL_MULTIPLE * entry_volatility_30 * horizon_scale))
-    stop_loss = min(MAX_STOP_LOSS_PCT, max(MIN_STOP_LOSS_PCT, STOP_LOSS_VOL_MULTIPLE * entry_volatility_30 * horizon_scale))
+        # Flat fallback -- QUICK_PROFIT_PCT/VOLATILITY_QUICK_PROFIT_PCT are
+        # their OWN independent constants here, NOT take_profit * 0.9/0.8
+        # (that derivation only applies to the volatility-scaled branch
+        # below) -- same values every position used before adaptive sizing
+        # existed, so nothing regresses for positions that predate it.
+        take_profit, stop_loss = TAKE_PROFIT_PCT, STOP_LOSS_PCT
+        quick_profit, volatility_quick_profit = QUICK_PROFIT_PCT, VOLATILITY_QUICK_PROFIT_PCT
+    else:
+        horizon_scale = math.sqrt(max(1, MAX_HOLD_MINUTES))
+        take_profit = min(MAX_TAKE_PROFIT_PCT, max(MIN_TAKE_PROFIT_PCT, TAKE_PROFIT_VOL_MULTIPLE * entry_volatility_30 * horizon_scale))
+        stop_loss = min(MAX_STOP_LOSS_PCT, max(MIN_STOP_LOSS_PCT, STOP_LOSS_VOL_MULTIPLE * entry_volatility_30 * horizon_scale))
+        # Quick-profit levels stay a fraction of the (now per-currency)
+        # take-profit target -- same "smaller than the full target" shape
+        # as the flat constants above, just scaled with everything else.
+        quick_profit, volatility_quick_profit = take_profit * 0.9, take_profit * 0.8
+    if partial_exit_taken:
+        stop_loss = -PARTIAL_EXIT_STOP_LOCK_FRACTION * take_profit
     return {
         "take_profit_pct": take_profit,
         "stop_loss_pct": stop_loss,
-        # Quick-profit levels stay a fraction of the (now per-currency)
-        # take-profit target -- same "smaller than the full target" shape
-        # as the old flat constants, just scaled with everything else.
-        "quick_profit_pct": take_profit * 0.9,
-        "volatility_quick_profit_pct": take_profit * 0.8,
+        "quick_profit_pct": quick_profit,
+        "volatility_quick_profit_pct": volatility_quick_profit,
     }
 
 
@@ -1406,7 +1518,9 @@ def decide_exit(
         )
     entry_price = float(position["entry_price"])
     is_short = position.get("side") == "short"
-    exit_pcts = adaptive_exit_pcts(position.get("entry_volatility_30"))
+    exit_pcts = adaptive_exit_pcts(
+        position.get("entry_volatility_30"), partial_exit_taken=bool(position.get("partial_exit_taken")),
+    )
     take_profit_pct = exit_pcts["take_profit_pct"]
     stop_loss_pct = exit_pcts["stop_loss_pct"]
     quick_profit_pct = exit_pcts["quick_profit_pct"]
@@ -1460,7 +1574,41 @@ def decide_exit(
         and change_pct >= volatility_quick_profit_pct
     ):
         return True, f"volatility_quick_profit (volatility {current_volatility:.4f}, gain {change_pct:+.3%})"
-    if change_pct >= take_profit_pct:
+    # Once a partial exit has already been taken, the ordinary take_profit
+    # check below is skipped entirely rather than re-evaluated -- change_pct
+    # is still at/above take_profit_pct on the very next check (price hasn't
+    # had to move at all), so leaving this active would immediately full-
+    # close the remainder moments after the partial exit fired, defeating
+    # the entire "let the rest ride" point. The remainder is instead
+    # governed by its own tightened, locked-in-profit stop (see
+    # adaptive_exit_pcts' partial_exit_taken param, checked below) plus
+    # quick_profit/volatility_quick_profit above (still active -- a real
+    # velocity/volatility spike is a legitimate reason to bank the rest
+    # fast) and max_hold_time.
+    if change_pct >= take_profit_pct and not position.get("partial_exit_taken"):
+        # Explicit user direction: taking profit shouldn't be all-or-nothing
+        # -- if the same continuation signals above (volume-confirmed
+        # momentum/breakout/model/correlation) still show real room, take
+        # PARTIAL_EXIT_FRACTION off the table (see manage_open_positions)
+        # and let the rest ride with that tightened stop instead of closing
+        # the whole thing. Capped at ONE partial exit per position by the
+        # `not position.get("partial_exit_taken")` guard above -- once set,
+        # this whole branch is skipped on every later check. Stop-loss/
+        # quick-profit stay full-exit-only on purpose (see USE_PARTIAL_EXIT's
+        # own comment).
+        if (
+            USE_PARTIAL_EXIT
+            and float(position.get("count") or 0.0) >= MIN_COUNT_FOR_PARTIAL_EXIT
+        ):
+            volume_confirmed_tp = dollar_volume_z is not None and dollar_volume_z >= PROMISING_VOLUME_Z
+            continuation_confirmed_tp = volume_confirmed_tp and (
+                (favorable_momentum is not None and favorable_momentum >= PROMISING_MOMENTUM_PCT)
+                or (favorable_breakout is not None and favorable_breakout >= PROMISING_BREAKOUT_PCT_B)
+                or (favorable_correlation is not None and favorable_correlation >= PROMISING_CORRELATION_SCORE)
+                or (favorable_model_confidence is not None and favorable_model_confidence >= PROMISING_MODEL_CONFIDENCE)
+            )
+            if continuation_confirmed_tp:
+                return True, f"partial_take_profit ({change_pct:+.3%}, target {take_profit_pct:.2%})"
         return True, f"take_profit ({change_pct:+.3%}, target {take_profit_pct:.2%})"
     if change_pct <= -stop_loss_pct:
         return True, f"stop_loss ({change_pct:+.3%}, target {stop_loss_pct:.2%})"
@@ -1522,6 +1670,93 @@ def decide_exit(
     return False, f"holding ({change_pct:+.3%}, {held_minutes:.0f}min)"
 
 
+def _scale_in_cheap_gates_pass(position: dict[str, Any], current_price: float, now: dt.datetime) -> bool:
+    """The gates in _should_scale_in that need no network call -- local
+    arithmetic only, using data manage_open_positions's fast loop already
+    has in hand. Used to decide whether the (network-backed) promising-
+    signal fetch below is even worth doing this cycle, so the fast loop
+    stays cheap for the common case of a position that isn't scale-in-
+    eligible yet (not profitable enough, on cooldown, already capped)."""
+    if not USE_SCALE_IN or USE_TREND_TRAILING_STRATEGY:
+        return False
+    # A position with no original_count recorded predates this feature (or
+    # was adopted from the exchange via reconciliation) -- fails closed
+    # rather than guessing, so nothing regresses for positions opened
+    # before this shipped.
+    if position.get("original_count") is None:
+        return False
+    if len(position.get("scale_ins") or []) >= SCALE_IN_MAX_COUNT:
+        return False
+    try:
+        opened_at = dt.datetime.fromisoformat(position["opened_at"])
+    except Exception:
+        return False
+    if (now - opened_at).total_seconds() / 60.0 < SCALE_IN_MIN_MINUTES_SINCE_ENTRY:
+        return False
+    last_scale_in_at = position.get("last_scale_in_at")
+    if last_scale_in_at:
+        try:
+            if (now - dt.datetime.fromisoformat(last_scale_in_at)).total_seconds() / 60.0 < SCALE_IN_MIN_MINUTES_SINCE_LAST:
+                return False
+        except Exception:
+            return False
+    entry_price = float(position.get("entry_price") or 0.0)
+    if entry_price <= 0:
+        return False
+    is_short = position.get("side") == "short"
+    change_pct = (entry_price - current_price) / entry_price if is_short else (current_price - entry_price) / entry_price
+    take_profit_pct = adaptive_exit_pcts(position.get("entry_volatility_30"))["take_profit_pct"]
+    return take_profit_pct > 0 and change_pct >= SCALE_IN_MIN_PROGRESS_FRACTION * take_profit_pct
+
+
+def _should_scale_in(
+    position: dict[str, Any], current_price: float, *, now: dt.datetime,
+    dollar_volume_z: float | None = None, momentum_pct: float | None = None, breakout_pct_b: float | None = None,
+    model_ok: bool = False, probability_up: float | None = None, correlation_score: float | None = None,
+) -> tuple[bool, str]:
+    """Explicit user direction: let the bot buy MORE of a position it
+    already holds when the move still looks like it has more room -- see
+    USE_SCALE_IN's own module-level comment for the full rationale/caps.
+
+    Deliberately reuses the EXACT SAME continuation-confirmation bundle
+    (volume-confirmed momentum/breakout/model/correlation) decide_exit's
+    own take_profit/max_hold "promising" checks already trust -- no new,
+    unvalidated thresholds invented just for this. Side-aware exactly like
+    decide_exit (a short's favorable direction is a FALLING price, so
+    momentum/breakout/correlation/model are all sign-flipped the same way).
+
+    Only ever called from manage_open_positions's fast loop, and only after
+    _scale_in_cheap_gates_pass already confirmed the position is profitable
+    enough and off cooldown -- this function re-derives that same cheap
+    check (fast, local) rather than trusting a caller-passed bool, so it's
+    safe to call on its own (e.g. from a test) without relying on caller
+    discipline."""
+    if not _scale_in_cheap_gates_pass(position, current_price, now):
+        return False, "scale_in gates not satisfied (disabled, capped, on cooldown, or not profitable enough yet)"
+
+    is_short = position.get("side") == "short"
+    favorable_momentum = -momentum_pct if (is_short and momentum_pct is not None) else momentum_pct
+    favorable_breakout = (1.0 - breakout_pct_b) if (is_short and breakout_pct_b is not None) else breakout_pct_b
+    favorable_correlation = -correlation_score if (is_short and correlation_score is not None) else correlation_score
+    favorable_model_confidence = None
+    if model_ok and probability_up is not None:
+        favorable_model_confidence = (1.0 - probability_up) if is_short else probability_up
+
+    volume_confirmed = dollar_volume_z is not None and dollar_volume_z >= PROMISING_VOLUME_Z
+    continuation_confirmed = volume_confirmed and (
+        (favorable_momentum is not None and favorable_momentum >= PROMISING_MOMENTUM_PCT)
+        or (favorable_breakout is not None and favorable_breakout >= PROMISING_BREAKOUT_PCT_B)
+        or (favorable_correlation is not None and favorable_correlation >= PROMISING_CORRELATION_SCORE)
+        or (favorable_model_confidence is not None and favorable_model_confidence >= PROMISING_MODEL_CONFIDENCE)
+    )
+    if not continuation_confirmed:
+        return False, f"no confirmed continuation signal (volume z={dollar_volume_z})"
+
+    entry_price = float(position["entry_price"])
+    change_pct = (entry_price - current_price) / entry_price if is_short else (current_price - entry_price) / entry_price
+    return True, f"scale_in ({change_pct:+.3%} progress, volume-confirmed continuation)"
+
+
 def position_exit_levels(position: dict[str, Any]) -> dict[str, float]:
     """The actual take-profit/stop-loss/quick-profit PRICE levels for a
     position, derived from the SAME per-currency-adaptive percentages
@@ -1553,7 +1788,9 @@ def position_exit_levels(position: dict[str, Any]) -> dict[str, float]:
             "stop_loss_price": round(entry_price * (1 - sign * TRAILING_STOP_LOSS_PCT), 6),
             "quick_profit_price": activation_price,
         }
-    exit_pcts = adaptive_exit_pcts(position.get("entry_volatility_30"))
+    exit_pcts = adaptive_exit_pcts(
+        position.get("entry_volatility_30"), partial_exit_taken=bool(position.get("partial_exit_taken")),
+    )
     return {
         "take_profit_price": round(entry_price * (1 + sign * exit_pcts["take_profit_pct"]), 6),
         "stop_loss_price": round(entry_price * (1 - sign * exit_pcts["stop_loss_pct"]), 6),
@@ -1612,7 +1849,12 @@ def _maybe_run_batch_trade_analysis() -> None:
         with _STATE_LOCK:
             state = _load_state()
             trade_log = state.get("trade_log") or []
-            real_trades = [t for t in trade_log if not t.get("dry_run")]
+            # exit_kind == "partial" (see USE_PARTIAL_EXIT) is a real P&L
+            # event on a position that's still open, not a resolved trade
+            # outcome -- excluded here the same way win_rate_stats excludes
+            # it, so one position's lifecycle can't get double-counted as
+            # multiple independent trades feeding this batch review/tuning.
+            real_trades = [t for t in trade_log if not t.get("dry_run") and t.get("exit_kind", "full") == "full"]
             last_count = int(state.get("last_batch_analysis_trade_count") or 0)
             if len(real_trades) - last_count < perps_trade_analysis.BATCH_SIZE:
                 return
@@ -1792,6 +2034,90 @@ def _reconcile_positions_with_exchange(state: dict[str, Any]) -> list[dict[str, 
     return reconciled
 
 
+def _apply_scale_in(
+    position: dict[str, Any], market: dict[str, Any], tick_size: float, current_price: float, *,
+    now: dt.datetime, reason: str, correlation_score: float | None, probability_up: float | None,
+    effective_dry_run: bool,
+) -> None:
+    """Sizes and (if not dry-run) places the scale-in order, then mutates
+    `position` in place -- called only from manage_open_positions, only
+    after _should_scale_in already confirmed this is a good add and the
+    daily loss cap isn't breached. A no-op (nothing appended to
+    position["scale_ins"], no last_scale_in_at update) if the computed add
+    size rounds down to zero contracts or nothing actually filled -- same
+    "never record a position based on a REQUESTED count, only a confirmed
+    one" discipline as every other order in this module.
+
+    Never routes through the maker-then-fallback path (see
+    _place_order_maker_then_fallback) -- that polls synchronously for up to
+    MAKER_FILL_WAIT_SECONDS, which would stall this fast loop for every
+    OTHER open position over a purely discretionary, non-urgent add. Same
+    "exits are always taker" tradeoff decide_exit's own order placement
+    already makes, applied here for the opposite (loop-latency) reason."""
+    ticker = position.get("ticker", "<unknown>")
+    side = position.get("side", "long")
+    try:
+        available_balance_usd = _available_balance_usd()
+    except Exception as exc:
+        logger.debug("[perps_strategy] scale-in balance check failed for %s: %s", ticker, exc)
+        return
+    inner_market = market.get("market") or {}
+    sizing_market = dict(inner_market)
+    add_price = _round_price(current_price, tick_size)
+    sizing_market["price"] = add_price
+    original_count = float(position.get("original_count") or position.get("count") or 0.0)
+    current_count = float(position.get("count") or 0.0)
+    add_count, _sizing_detail = compute_scale_in_count(
+        available_balance_usd, sizing_market, original_count=original_count, current_count=current_count,
+    )
+    if add_count < 1:
+        return
+
+    actual_add_count = float(add_count)
+    if not effective_dry_run:
+        entry_order_side = "bid" if side == "long" else "ask"
+        create_margin_order(
+            ticker=ticker, side=entry_order_side, count=float(add_count), price=add_price,
+            client_order_id=str(uuid.uuid4()), time_in_force="immediate_or_cancel",
+        )
+        # Never trust the requested count -- verify what actually landed,
+        # same discipline as every other order in this module (see
+        # scan_and_enter's own identical comment).
+        real_after = _real_open_positions_by_ticker()
+        if real_after is None:
+            logger.warning(
+                "[perps_strategy] could not verify scale-in fill for %s -- assuming full fill", ticker,
+            )
+            position["count"] = round(current_count + actual_add_count, 6)
+        else:
+            real_pos = real_after.get(ticker)
+            if not real_pos or real_pos["count"] <= current_count:
+                # Nothing actually filled -- leave the position untouched.
+                return
+            actual_add_count = round(real_pos["count"] - current_count, 6)
+            position["count"] = real_pos["count"]
+            position["entry_price"] = real_pos["entry_price"]
+    else:
+        # Dry-run: blend a simulated entry_price the same count-weighted
+        # way Kalshi's own real position blending works (see
+        # _real_open_positions_by_ticker), so a dry-run scale-in behaves
+        # like the live one would rather than silently doing nothing.
+        entry_price = float(position.get("entry_price") or add_price)
+        new_count = current_count + actual_add_count
+        if new_count > 0:
+            position["entry_price"] = (entry_price * current_count + add_price * actual_add_count) / new_count
+        position["count"] = round(new_count, 6)
+
+    if actual_add_count <= 0:
+        return
+    scale_ins = position.setdefault("scale_ins", [])
+    scale_ins.append({
+        "at": now.isoformat(), "count_added": actual_add_count, "price": add_price,
+        "reason": reason, "correlation_score": correlation_score, "probability_up": probability_up,
+    })
+    position["last_scale_in_at"] = now.isoformat()
+
+
 def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
     """Fast loop: ONLY checks/exits existing open positions, one cheap price
     call per position. Meant to run every 15-30 seconds so a quick,
@@ -1820,6 +2146,7 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
         remaining: list[dict[str, Any]] = []
         closed: list[dict[str, Any]] = []
         checks: list[dict[str, Any]] = []
+        scale_ins_this_cycle: list[dict[str, Any]] = []
         ok = True
         for position in positions:
             # ticker via .get(), not position["ticker"] -- this whole body
@@ -1869,7 +2196,16 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                 correlation_score_value = None
                 opened_at_check = dt.datetime.fromisoformat(position["opened_at"])
                 held_minutes_check = (now - opened_at_check).total_seconds() / 60.0
-                if held_minutes_check >= MAX_HOLD_MINUTES - PRE_EXIT_STUDY_MINUTES:
+                # Widened (see USE_SCALE_IN) to also fetch when this
+                # position's cheap, no-network scale-in gates already pass
+                # -- _should_scale_in needs the same promising-signal data
+                # decide_exit's own pre-exit-study/max-hold paths do, and
+                # this lazy fetch is exactly what already keeps that data
+                # from being pulled on every single fast-loop tick for
+                # every position regardless of relevance.
+                if held_minutes_check >= MAX_HOLD_MINUTES - PRE_EXIT_STUDY_MINUTES or (
+                    USE_SCALE_IN and _scale_in_cheap_gates_pass(position, current_price, now)
+                ):
                     try:
                         promising_row = latest_feature_row(ticker)
                     except Exception as exc:
@@ -1921,6 +2257,40 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                 continue
 
             if not should_exit:
+                # Scale-in only ever considered when the position is NOT
+                # exiting this cycle -- decide_exit is evaluated first and
+                # unconditionally wins, so the two decisions can never fire
+                # in the same cycle for the same position.
+                if USE_SCALE_IN:
+                    try:
+                        should_add, add_reason = _should_scale_in(
+                            position, current_price, now=now,
+                            dollar_volume_z=dollar_volume_z, momentum_pct=momentum_pct,
+                            breakout_pct_b=breakout_pct_b, model_ok=model_ok_value,
+                            probability_up=probability_up_value, correlation_score=correlation_score_value,
+                        )
+                    except Exception as exc:
+                        should_add, add_reason = False, str(exc)
+                        logger.debug("[perps_strategy] scale-in check failed for %s: %s", ticker, exc)
+                    if should_add:
+                        # Scale-in adds real risk -- same daily-loss-cap
+                        # posture as new entries (scan_and_enter), reading
+                        # (not setting) today's reference balance.
+                        reference_balance = (state.get("daily_reference_balance") or {}).get(_today_str())
+                        if _daily_loss_cap_breached(state, reference_balance):
+                            checks[-1]["scale_in_skipped"] = "daily_loss_cap_breached"
+                        else:
+                            try:
+                                _apply_scale_in(
+                                    position, market, tick_size, current_price, now=now,
+                                    reason=add_reason, correlation_score=correlation_score_value,
+                                    probability_up=probability_up_value, effective_dry_run=effective_dry_run,
+                                )
+                                if position.get("last_scale_in_at") == now.isoformat():
+                                    scale_ins_this_cycle.append(dict(position))
+                                    checks[-1]["scale_in"] = position["scale_ins"][-1]
+                            except Exception:
+                                logger.warning("[perps_strategy] scale-in order/booking failed for %s", ticker, exc_info=True)
                 remaining.append(position)
                 continue
 
@@ -1938,7 +2308,15 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
             try:
                 order_result = None
                 exit_fill_type = "taker_fallback"
-                closed_count = count
+                # A partial_take_profit reason (see decide_exit/USE_PARTIAL_EXIT)
+                # only ever requests PARTIAL_EXIT_FRACTION of the position --
+                # every other reason (take_profit/stop_loss/quick_profit/
+                # max_hold_time/pre_exit_study) still requests the FULL count,
+                # unchanged from before this feature existed.
+                requested_close_count = (
+                    round(count * PARTIAL_EXIT_FRACTION, 6) if reason.startswith("partial_take_profit") else count
+                )
+                closed_count = requested_close_count
                 if not effective_dry_run:
                     # Closing a long means selling (ask); closing a short means
                     # buying back (bid) -- both reduce_only so it can only ever
@@ -1960,7 +2338,7 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                     # available for a reduce_only order on this exchange, so
                     # ENABLE_MAKER_ORDERS only ever applies to entries.
                     order_result = create_margin_order(
-                        ticker=ticker, side=exit_order_side, count=count, price=exit_price,
+                        ticker=ticker, side=exit_order_side, count=requested_close_count, price=exit_price,
                         client_order_id=str(uuid.uuid4()), time_in_force="immediate_or_cancel", reduce_only=True,
                     )
                     # An immediate_or_cancel order can fill zero, partially, or
@@ -1974,7 +2352,8 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                     else:
                         logger.warning(
                             "[perps_strategy] could not verify exit fill for %s after placing order -- "
-                            "assuming full close (order_result=%s)", ticker, order_result,
+                            "assuming the requested %.4f contracts closed (order_result=%s)",
+                            ticker, requested_close_count, order_result,
                         )
 
                 if closed_count <= 0:
@@ -2038,6 +2417,23 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                     "entry_sentiment_score": position.get("entry_sentiment_score"),
                     "entry_correlation_score": position.get("entry_correlation_score"),
                     "entry_correlation_reason": position.get("entry_correlation_reason"),
+                    # "partial" (see USE_PARTIAL_EXIT) marks a real,
+                    # informational P&L event on a position that's still
+                    # open -- NOT a resolved win/loss. win_rate_stats/
+                    # _maybe_run_batch_trade_analysis/perps_report's
+                    # _trade_stats all filter on this so one position's
+                    # lifecycle can't get double-counted as multiple
+                    # independent trades. Derived from the SAME comparison
+                    # the remainder-keeping block below already makes (not
+                    # from the reason string) so both a deliberate partial
+                    # take-profit AND an accidental IOC partial fill get
+                    # tagged identically and correctly.
+                    "exit_kind": "partial" if closed_count < count else "full",
+                    # Only meaningful when exit_kind == "partial" -- how much
+                    # of the position is still open afterward (see the
+                    # remainder block below, same round(count - closed_count)
+                    # math), for the distinct partial-exit Threads post.
+                    "remaining_count": round(count - closed_count, 6) if closed_count < count else None,
                 }
                 trade_log = state.setdefault("trade_log", [])
                 trade_log.append(trade)
@@ -2070,8 +2466,19 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                 if closed_count < count:
                     # Partial fill -- the remainder is still genuinely open on
                     # the exchange, keep monitoring it rather than dropping it.
+                    # Applies equally to a DELIBERATE partial take-profit and
+                    # an accidental IOC partial fill on an ordinary full-exit
+                    # order (see USE_PARTIAL_EXIT's own comment) -- both leave
+                    # a real remainder that should get the same tightened,
+                    # locked-in-profit stop (see adaptive_exit_pcts) rather
+                    # than sitting on the pre-partial-exit risk levels.
                     remainder = dict(position)
                     remainder["count"] = round(count - closed_count, 6)
+                    remainder["partial_exit_taken"] = True
+                    remainder["partial_exit_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
+                    remainder["partial_exit_price"] = exit_price
+                    remainder["partial_exit_count"] = closed_count
+                    remainder["partial_exit_pnl_usd"] = realized_pnl
                     remaining.append(remainder)
             except Exception as exc:
                 # Placing the real exit order (or booking its result) failed
@@ -2099,7 +2506,33 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
     # own entry post, which is likewise outside its (tightly-scoped) lock:
     # a Threads network call must never hold up the fast 15-30s exit-check
     # loop for every OTHER position.
+    for position in scale_ins_this_cycle:
+        try:
+            last_add = (position.get("scale_ins") or [])[-1]
+            threads_post.post_scale_in(
+                ticker=position["ticker"], side=position.get("side", "long"),
+                add_price=last_add["price"], add_count=last_add["count_added"],
+                new_count=position["count"], new_entry_price=position["entry_price"],
+                reason=last_add["reason"], dry_run=bool(position.get("dry_run")), market="perps",
+            )
+        except Exception:
+            logger.warning("[perps_strategy] Threads post for %s scale-in failed", position.get("ticker"), exc_info=True)
+
     for trade in closed:
+        if trade.get("exit_kind") == "partial":
+            # A distinct, lightweight post -- NOT the full entry/exit chart
+            # pair below, which would misleadingly read as the position
+            # having fully closed when most of it is still open and riding.
+            try:
+                threads_post.post_partial_exit(
+                    ticker=trade["ticker"], side=trade["side"], exit_price=trade["exit_price"],
+                    closed_count=trade["count"], remaining_count=trade.get("remaining_count"),
+                    pnl_usd=trade["realized_pnl_usd"], reason=trade["reason"],
+                    dry_run=trade["dry_run"], market="perps",
+                )
+            except Exception:
+                logger.warning("[perps_strategy] Threads post for %s partial exit failed", trade["ticker"], exc_info=True)
+            continue
         try:
             threads_post.post_trade_exit(
                 ticker=trade["ticker"], side=trade["side"], entry_price=trade["entry_price"],
@@ -2264,7 +2697,24 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
         entry_price = _round_price(fresh_price, tick_size)
         sizing_market = dict(market)
         sizing_market["price"] = entry_price
-        count, sizing_detail = compute_leveraged_count(available_balance_usd, sizing_market)
+        # Explicit user direction: size in proportion to conviction instead
+        # of every qualifying candidate getting the identical flat slice --
+        # see USE_CONVICTION_SIZING's own module-level comment. Only ever
+        # applies to the model-confirmed path (candidate["entry_confidence"]/
+        # ["effective_confidence_min"], see evaluate_candidate) -- the
+        # technical-only-fallback path leaves both unset, so size_multiplier
+        # stays 1.0 (today's flat behavior) for it, never accidentally
+        # sized off that branch's unrelated score scale.
+        size_multiplier = 1.0
+        if USE_CONVICTION_SIZING and candidate.get("effective_confidence_min") is not None:
+            conf_min = candidate["effective_confidence_min"]
+            if conf_min < 1.0:
+                conviction = max(0.0, min(1.0, (candidate["entry_confidence"] - conf_min) / (1.0 - conf_min)))
+                size_multiplier = (
+                    CONVICTION_SIZE_MIN_MULTIPLIER
+                    + (CONVICTION_SIZE_MAX_MULTIPLIER - CONVICTION_SIZE_MIN_MULTIPLIER) * conviction
+                )
+        count, sizing_detail = compute_leveraged_count(available_balance_usd, sizing_market, size_multiplier=size_multiplier)
         if count < 1:
             opened.append({
                 "ticker": ticker, "ok": True, "action": "skipped_insufficient_budget",
@@ -2384,11 +2834,26 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
                     merged["side"] = side
                     merged["entry_fill_type"] = entry_fill_type
                     merged["entry_volatility_30"] = candidate.get("volatility_30")
+                    # This merge re-establishes the position from a fresh
+                    # reconciled fill (see this block's own module-level
+                    # comment -- a rare race, not a scale-in), so any
+                    # scale-in/partial-exit history from before this merge
+                    # no longer describes reality and is reset rather than
+                    # silently carried over (e.g. a stale partial_exit_taken
+                    # would otherwise apply a tightened stop to what's now a
+                    # full-size position).
+                    merged["original_count"] = float(actual_count)
+                    merged["scale_ins"] = []
+                    merged.pop("last_scale_in_at", None)
+                    merged["partial_exit_taken"] = False
+                    for _k in ("partial_exit_at", "partial_exit_price", "partial_exit_count", "partial_exit_pnl_usd"):
+                        merged.pop(_k, None)
                     merged.update(entry_context)
                     positions[existing_idx] = merged
                 else:
                     positions.append({
                         "ticker": ticker, "entry_price": actual_entry_price, "count": float(actual_count),
+                        "original_count": float(actual_count),
                         "side": side, "entry_fill_type": entry_fill_type,
                         "entry_volatility_30": candidate.get("volatility_30"),
                         "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(), "dry_run": effective_dry_run,

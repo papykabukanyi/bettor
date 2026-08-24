@@ -90,8 +90,20 @@ def win_rate_stats(trade_log: list[dict[str, Any]], *, recent_n: int = 50) -> di
     to as trades close). Returns win/loss counts + rate over the WHOLE log
     and, separately, just the most recent `recent_n` trades -- a bot that
     was profitable for its first 200 trades but has been losing for its
-    last 20 should show that shift, not bury it in an all-time average."""
-    closed = [t for t in trade_log if isinstance(t, dict) and t.get("realized_pnl_usd") is not None]
+    last 20 should show that shift, not bury it in an all-time average.
+
+    A row with exit_kind == "partial" (perps' USE_PARTIAL_EXIT -- selling
+    only part of a still-open position to lock in gains) is real,
+    informational P&L but NOT a resolved win/loss outcome, so it's excluded
+    here the same way it's excluded from the evidence-gated trade-analysis
+    tuning that also reads this trade_log -- otherwise one position's
+    lifecycle could count as multiple independent trades. Rows without the
+    field (every trade_log entry predating this, and every non-perps
+    service's trade log) default to "full" so nothing regresses."""
+    closed = [
+        t for t in trade_log
+        if isinstance(t, dict) and t.get("realized_pnl_usd") is not None and t.get("exit_kind", "full") == "full"
+    ]
     if not closed:
         return {"trade_count": 0, "win_count": 0, "win_rate": None, "recent_trade_count": 0, "recent_win_count": 0, "recent_win_rate": None}
 

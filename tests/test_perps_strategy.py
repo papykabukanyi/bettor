@@ -3083,3 +3083,622 @@ def test_decide_exit_unfavorable_correlation_flips_sign_for_a_short():
     )
     assert should_exit
     assert "pre_exit_study" in reason
+
+
+# ── Conviction-scaled entry sizing (USE_CONVICTION_SIZING) ──────────────────
+
+def test_compute_leveraged_count_applies_a_size_multiplier():
+    market = {"price": 2.0, "leverage_estimate": 6.0}
+    count, detail = strat.compute_leveraged_count(10.0, market, size_multiplier=1.5)
+    # $10 * 20% * 1.5 = $3 margin, 6x leverage = $18 notional, at $2/contract = 9.
+    assert count == 9
+    assert detail["margin_budget_usd"] == 3.0
+    assert detail["size_multiplier"] == 1.5
+
+
+def test_compute_leveraged_count_default_multiplier_matches_old_behavior():
+    market = {"price": 2.0, "leverage_estimate": 6.0}
+    count, detail = strat.compute_leveraged_count(10.0, market)
+    assert count == 6
+    assert detail["size_multiplier"] == 1.0
+
+
+def test_evaluate_candidate_exposes_entry_confidence_on_the_model_confirmed_path(monkeypatch):
+    monkeypatch.setattr(strat, "latest_feature_row", lambda ticker: _row())
+    monkeypatch.setattr(strat, "predict_direction", lambda ticker: {
+        "model_ok": True, "direction": "up", "probability_up": 0.9, "ticker": ticker,
+    })
+    result = strat.evaluate_candidate("KXBTCPERP")
+    assert result["should_enter"] is True
+    assert result["entry_confidence"] == pytest.approx(0.9)
+    assert result["effective_confidence_min"] == pytest.approx(strat.MODEL_CONFIDENCE_MIN)
+
+
+def test_evaluate_candidate_omits_entry_confidence_on_technical_only_fallback(monkeypatch):
+    """No trained model yet -- the technical-only-fallback score is on a
+    completely different scale (~0.002-0.02) than model confidence
+    (~0.5-1.0) and must never be mistaken for it by a sizing caller."""
+    monkeypatch.setattr(strat, "latest_feature_row", lambda ticker: _row())
+    monkeypatch.setattr(strat, "predict_direction", lambda ticker: {"model_ok": False, "ticker": ticker})
+    result = strat.evaluate_candidate("KXBTCPERP")
+    assert result["should_enter"] is True
+    assert "entry_confidence" not in result
+    assert "effective_confidence_min" not in result
+
+
+def test_scan_and_enter_conviction_sizing_off_by_default(monkeypatch, tmp_path):
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", False)
+    monkeypatch.setattr(strat, "get_margin_market", lambda ticker: _market_response())
+    monkeypatch.setattr(strat, "_available_balance_usd", lambda: 10.0)
+    monkeypatch.setattr(
+        strat, "scan_for_entries",
+        lambda tickers=None, exclude=None, confidence_min=None, correlation_study_enabled=None, correlation_max_adjustment=None: (
+            [{
+                "ticker": "KXBTCPERP", "current_price": 6.60, "reason": "test", "score": 0.9,
+                "entry_confidence": 0.99, "effective_confidence_min": strat.MODEL_CONFIDENCE_MIN,
+            }], [],
+        ),
+    )
+    result = strat.scan_and_enter(dry_run=True)
+    assert result["opened"][0]["sizing"]["size_multiplier"] == 1.0
+
+
+def test_scan_and_enter_sizes_a_high_conviction_entry_larger_than_a_borderline_one(monkeypatch, tmp_path):
+    monkeypatch.setattr(strat, "USE_CONVICTION_SIZING", True)
+    monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", False)
+    monkeypatch.setattr(strat, "get_margin_market", lambda ticker: _market_response())
+    monkeypatch.setattr(strat, "_available_balance_usd", lambda: 10.0)
+
+    def _run(confidence):
+        monkeypatch.setattr(strat, "STATE_FILE", tmp_path / f"state_{confidence}.json")
+        monkeypatch.setattr(
+            strat, "scan_for_entries",
+            lambda tickers=None, exclude=None, confidence_min=None, correlation_study_enabled=None, correlation_max_adjustment=None, confidence=confidence: (
+                [{
+                    "ticker": "KXBTCPERP", "current_price": 6.60, "reason": "test", "score": confidence,
+                    "entry_confidence": confidence, "effective_confidence_min": strat.MODEL_CONFIDENCE_MIN,
+                }], [],
+            ),
+        )
+        result = strat.scan_and_enter(dry_run=True)
+        return result["opened"][0]["sizing"]["size_multiplier"]
+
+    borderline_multiplier = _run(strat.MODEL_CONFIDENCE_MIN + 0.001)
+    max_conviction_multiplier = _run(1.0)
+    assert borderline_multiplier == pytest.approx(strat.CONVICTION_SIZE_MIN_MULTIPLIER, abs=0.02)
+    assert max_conviction_multiplier == pytest.approx(strat.CONVICTION_SIZE_MAX_MULTIPLIER)
+    assert max_conviction_multiplier > borderline_multiplier
+
+
+# ── Scale-in (USE_SCALE_IN) ──────────────────────────────────────────────────
+
+def _scale_in_position(*, minutes_ago=15, entry_price=6.60, count=6.0, **extra):
+    # minutes_ago/entry_price/count route through _position() (it converts
+    # minutes_ago into a real opened_at timestamp -- it isn't itself a key
+    # on the returned dict) -- everything else (original_count, scale_ins,
+    # last_scale_in_at, ...) is a plain field set/overridden afterward.
+    pos = _position(entry_price=entry_price, minutes_ago=minutes_ago, count=count)
+    pos["original_count"] = count
+    pos.update(extra)
+    return pos
+
+
+def _promising_price(pos, take_profit_fraction=0.6):
+    exit_pcts = strat.adaptive_exit_pcts(pos.get("entry_volatility_30"))
+    entry_price = pos["entry_price"]
+    return entry_price * (1 + exit_pcts["take_profit_pct"] * take_profit_fraction)
+
+
+def test_should_scale_in_false_by_default():
+    pos = _scale_in_position()
+    should_add, _ = strat._should_scale_in(  # noqa: SLF001
+        pos, _promising_price(pos), now=dt.datetime.now(dt.timezone.utc),
+        dollar_volume_z=strat.PROMISING_VOLUME_Z + 1, momentum_pct=strat.PROMISING_MOMENTUM_PCT + 0.001,
+    )
+    assert should_add is False
+
+
+def test_should_scale_in_fires_when_profitable_enough_and_continuation_confirmed(monkeypatch):
+    monkeypatch.setattr(strat, "USE_SCALE_IN", True)
+    pos = _scale_in_position()
+    should_add, reason = strat._should_scale_in(  # noqa: SLF001
+        pos, _promising_price(pos), now=dt.datetime.now(dt.timezone.utc),
+        dollar_volume_z=strat.PROMISING_VOLUME_Z + 1, momentum_pct=strat.PROMISING_MOMENTUM_PCT + 0.001,
+    )
+    assert should_add is True
+    assert "scale_in" in reason
+
+
+def test_should_scale_in_false_when_not_profitable_enough(monkeypatch):
+    monkeypatch.setattr(strat, "USE_SCALE_IN", True)
+    pos = _scale_in_position()
+    should_add, _ = strat._should_scale_in(  # noqa: SLF001
+        pos, _promising_price(pos, take_profit_fraction=0.1), now=dt.datetime.now(dt.timezone.utc),
+        dollar_volume_z=strat.PROMISING_VOLUME_Z + 1, momentum_pct=strat.PROMISING_MOMENTUM_PCT + 0.001,
+    )
+    assert should_add is False
+
+
+def test_should_scale_in_false_without_continuation_confirmation(monkeypatch):
+    monkeypatch.setattr(strat, "USE_SCALE_IN", True)
+    pos = _scale_in_position()
+    should_add, reason = strat._should_scale_in(  # noqa: SLF001
+        pos, _promising_price(pos), now=dt.datetime.now(dt.timezone.utc),
+        dollar_volume_z=None, momentum_pct=None,
+    )
+    assert should_add is False
+    assert "no confirmed continuation" in reason
+
+
+def test_should_scale_in_respects_cooldown_since_entry(monkeypatch):
+    monkeypatch.setattr(strat, "USE_SCALE_IN", True)
+    pos = _scale_in_position(minutes_ago=strat.SCALE_IN_MIN_MINUTES_SINCE_ENTRY - 1)
+    should_add, _ = strat._should_scale_in(  # noqa: SLF001
+        pos, _promising_price(pos), now=dt.datetime.now(dt.timezone.utc),
+        dollar_volume_z=strat.PROMISING_VOLUME_Z + 1, momentum_pct=strat.PROMISING_MOMENTUM_PCT + 0.001,
+    )
+    assert should_add is False
+
+
+def test_should_scale_in_respects_cooldown_since_last_scale_in(monkeypatch):
+    monkeypatch.setattr(strat, "USE_SCALE_IN", True)
+    now = dt.datetime.now(dt.timezone.utc)
+    pos = _scale_in_position(
+        last_scale_in_at=(now - dt.timedelta(minutes=strat.SCALE_IN_MIN_MINUTES_SINCE_LAST - 1)).isoformat(),
+    )
+    should_add, _ = strat._should_scale_in(  # noqa: SLF001
+        pos, _promising_price(pos), now=now,
+        dollar_volume_z=strat.PROMISING_VOLUME_Z + 1, momentum_pct=strat.PROMISING_MOMENTUM_PCT + 0.001,
+    )
+    assert should_add is False
+
+
+def test_should_scale_in_respects_max_count_cap(monkeypatch):
+    monkeypatch.setattr(strat, "USE_SCALE_IN", True)
+    pos = _scale_in_position(scale_ins=[{"at": "x", "count_added": 1.0, "price": 6.6, "reason": "r"}] * strat.SCALE_IN_MAX_COUNT)
+    should_add, _ = strat._should_scale_in(  # noqa: SLF001
+        pos, _promising_price(pos), now=dt.datetime.now(dt.timezone.utc),
+        dollar_volume_z=strat.PROMISING_VOLUME_Z + 1, momentum_pct=strat.PROMISING_MOMENTUM_PCT + 0.001,
+    )
+    assert should_add is False
+
+
+def test_should_scale_in_false_without_original_count_recorded(monkeypatch):
+    """A position adopted from exchange reconciliation, or opened before
+    this feature existed, has no original_count -- fails closed rather
+    than guessing."""
+    monkeypatch.setattr(strat, "USE_SCALE_IN", True)
+    pos = _position(entry_price=6.60, minutes_ago=15, count=6.0)  # no original_count
+    should_add, _ = strat._should_scale_in(  # noqa: SLF001
+        pos, _promising_price(pos), now=dt.datetime.now(dt.timezone.utc),
+        dollar_volume_z=strat.PROMISING_VOLUME_Z + 1, momentum_pct=strat.PROMISING_MOMENTUM_PCT + 0.001,
+    )
+    assert should_add is False
+
+
+def test_should_scale_in_disabled_in_trailing_mode(monkeypatch):
+    monkeypatch.setattr(strat, "USE_SCALE_IN", True)
+    monkeypatch.setattr(strat, "USE_TREND_TRAILING_STRATEGY", True)
+    pos = _scale_in_position()
+    should_add, _ = strat._should_scale_in(  # noqa: SLF001
+        pos, _promising_price(pos), now=dt.datetime.now(dt.timezone.utc),
+        dollar_volume_z=strat.PROMISING_VOLUME_Z + 1, momentum_pct=strat.PROMISING_MOMENTUM_PCT + 0.001,
+    )
+    assert should_add is False
+
+
+def test_compute_scale_in_count_caps_at_max_total_size_multiple():
+    market = {"price": 2.0, "leverage_estimate": 6.0}
+    # Already near the cap (original_count=6, max multiple 1.5 => cap 9,
+    # already at 8) -- only 1 more contract of room regardless of what a
+    # fresh SCALE_IN_SIZE_FRACTION-sized budget could otherwise afford.
+    count, detail = strat.compute_scale_in_count(1000.0, market, original_count=6.0, current_count=8.0)
+    assert count == 1
+    assert detail["max_total_count"] == 9.0
+
+
+def test_compute_scale_in_count_returns_zero_once_already_at_the_cap():
+    market = {"price": 2.0, "leverage_estimate": 6.0}
+    count, _ = strat.compute_scale_in_count(1000.0, market, original_count=6.0, current_count=9.0)
+    assert count == 0
+
+
+def test_manage_open_positions_places_a_non_reduce_only_scale_in_order(monkeypatch, tmp_path):
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(strat, "USE_SCALE_IN", True)
+    monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", True)
+    pos = _position(ticker="KXBTCPERP", entry_price=6.60, minutes_ago=15, count=6.0)
+    pos["original_count"] = 6.0
+    strat._save_state({  # noqa: SLF001
+        "positions": [pos], "realized_pnl_by_date": {}, "trade_log": [], "daily_reference_balance": {},
+    })
+    add_price = _promising_price(pos)
+    monkeypatch.setattr(strat, "get_margin_market", lambda ticker: _market_response(price=add_price))
+    # First call is the pre-decision reconciliation (must match local state
+    # exactly); second call is the post-scale-in-order verification, after
+    # 1 more contract has been added.
+    calls = {"n": 0}
+
+    def fake_positions():
+        calls["n"] += 1
+        count = "6.00" if calls["n"] == 1 else "7.00"
+        return {"positions": [_real_position("KXBTCPERP", count, "6.60")]}
+
+    monkeypatch.setattr(strat, "get_margin_positions", fake_positions)
+    monkeypatch.setattr(strat, "latest_feature_row", lambda ticker: _row(
+        dollar_volume_z=strat.PROMISING_VOLUME_Z + 1, macd_hist_pct=strat.PROMISING_MOMENTUM_PCT + 0.001,
+    ))
+    monkeypatch.setattr(strat, "predict_direction", lambda ticker: {"model_ok": False, "ticker": ticker})
+    monkeypatch.setattr(strat, "_available_balance_usd", lambda: 100.0)
+
+    captured = {}
+
+    def fake_create_margin_order(**kwargs):
+        captured.update(kwargs)
+        return {"order": {"fill_count": "1.00"}}
+
+    monkeypatch.setattr(strat, "create_margin_order", fake_create_margin_order)
+
+    result = strat.manage_open_positions(dry_run=False)
+    assert result["ok"] is True
+    assert captured["side"] == "bid"
+    assert captured.get("reduce_only") is not True
+
+    state = strat._load_state()  # noqa: SLF001
+    updated = state["positions"][0]
+    assert len(updated.get("scale_ins") or []) == 1
+    assert updated["count"] > 6.0  # blended count from the Kalshi re-read
+
+
+def test_manage_open_positions_does_not_scale_in_when_daily_loss_cap_breached(monkeypatch, tmp_path):
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(strat, "USE_SCALE_IN", True)
+    monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", True)
+    pos = _position(ticker="KXBTCPERP", entry_price=6.60, minutes_ago=15, count=6.0)
+    pos["original_count"] = 6.0
+    strat._save_state({  # noqa: SLF001
+        "positions": [pos], "realized_pnl_by_date": {strat._today_str(): -1000.0},  # noqa: SLF001
+        "trade_log": [], "daily_reference_balance": {strat._today_str(): 100.0},  # noqa: SLF001
+    })
+    add_price = _promising_price(pos)
+    monkeypatch.setattr(strat, "get_margin_market", lambda ticker: _market_response(price=add_price))
+    monkeypatch.setattr(strat, "get_margin_positions", lambda: {
+        "positions": [_real_position("KXBTCPERP", "6.00", "6.60")],
+    })
+    monkeypatch.setattr(strat, "latest_feature_row", lambda ticker: _row(
+        dollar_volume_z=strat.PROMISING_VOLUME_Z + 1, macd_hist_pct=strat.PROMISING_MOMENTUM_PCT + 0.001,
+    ))
+    monkeypatch.setattr(strat, "predict_direction", lambda ticker: {"model_ok": False, "ticker": ticker})
+
+    def fail_if_called(**kwargs):
+        raise AssertionError("must not place a scale-in order while the daily loss cap is breached")
+
+    monkeypatch.setattr(strat, "create_margin_order", fail_if_called)
+    result = strat.manage_open_positions(dry_run=False)
+    assert result["ok"] is True
+    state = strat._load_state()  # noqa: SLF001
+    assert (state["positions"][0].get("scale_ins") or []) == []
+
+
+def test_manage_open_positions_does_not_scale_in_in_the_same_cycle_as_an_exit(monkeypatch, tmp_path):
+    """A position that's exiting this cycle must never also get a scale-in
+    order -- decide_exit unconditionally wins."""
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(strat, "USE_SCALE_IN", True)
+    monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", False)
+    pos = _position(ticker="KXBTCPERP", entry_price=6.60, minutes_ago=15, count=6.0)
+    pos["original_count"] = 6.0
+    strat._save_state({  # noqa: SLF001
+        "positions": [pos], "realized_pnl_by_date": {}, "trade_log": [], "daily_reference_balance": {},
+    })
+    # Priced well past take_profit -- decide_exit fires a full close.
+    exit_price = pos["entry_price"] * (1 + strat.TAKE_PROFIT_PCT + 0.01)
+    monkeypatch.setattr(strat, "get_margin_market", lambda ticker: _market_response(price=exit_price))
+    monkeypatch.setattr(strat, "latest_feature_row", lambda ticker: _row(
+        dollar_volume_z=strat.PROMISING_VOLUME_Z + 1, macd_hist_pct=strat.PROMISING_MOMENTUM_PCT + 0.001,
+    ))
+    monkeypatch.setattr(strat, "predict_direction", lambda ticker: {"model_ok": False, "ticker": ticker})
+
+    def fail_if_scale_in_attempted(**kwargs):
+        if not kwargs.get("reduce_only"):
+            raise AssertionError("must not place a non-reduce_only (scale-in) order in the same cycle as an exit")
+        return {"order": {"fill_count": str(kwargs["count"])}}
+
+    monkeypatch.setattr(strat, "create_margin_order", fail_if_scale_in_attempted)
+    result = strat.manage_open_positions(dry_run=False)
+    assert result["action"] == "closed"
+
+
+def test_manage_open_positions_posts_a_scale_in_threads_message(monkeypatch, tmp_path):
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(strat, "USE_SCALE_IN", True)
+    monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", False)
+    pos = _position(ticker="KXBTCPERP", entry_price=6.60, minutes_ago=15, count=6.0)
+    pos["original_count"] = 6.0
+    strat._save_state({  # noqa: SLF001
+        "positions": [pos], "realized_pnl_by_date": {}, "trade_log": [], "daily_reference_balance": {},
+    })
+    add_price = _promising_price(pos)
+    monkeypatch.setattr(strat, "get_margin_market", lambda ticker: _market_response(price=add_price))
+    monkeypatch.setattr(strat, "_available_balance_usd", lambda: 100.0)
+    monkeypatch.setattr(strat, "latest_feature_row", lambda ticker: _row(
+        dollar_volume_z=strat.PROMISING_VOLUME_Z + 1, macd_hist_pct=strat.PROMISING_MOMENTUM_PCT + 0.001,
+    ))
+    monkeypatch.setattr(strat, "predict_direction", lambda ticker: {"model_ok": False, "ticker": ticker})
+
+    posted = {}
+    monkeypatch.setattr(strat.threads_post, "post_scale_in", lambda **kw: posted.update(kw) or True)
+
+    result = strat.manage_open_positions(dry_run=True)
+    assert result["ok"] is True
+    assert posted.get("ticker") == "KXBTCPERP"
+
+
+def test_scan_and_enter_technical_only_fallback_gets_no_conviction_size_bonus(monkeypatch, tmp_path):
+    """Regression guard: a technical-only-fallback candidate has no
+    entry_confidence/effective_confidence_min (see evaluate_candidate) --
+    USE_CONVICTION_SIZING must leave its size_multiplier at 1.0, never try
+    to interpret its unrelated score as a confidence reading."""
+    monkeypatch.setattr(strat, "USE_CONVICTION_SIZING", True)
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", False)
+    monkeypatch.setattr(strat, "get_margin_market", lambda ticker: _market_response())
+    monkeypatch.setattr(strat, "_available_balance_usd", lambda: 10.0)
+    monkeypatch.setattr(
+        strat, "scan_for_entries",
+        lambda tickers=None, exclude=None, confidence_min=None, correlation_study_enabled=None, correlation_max_adjustment=None: (
+            [{"ticker": "KXBTCPERP", "current_price": 6.60, "reason": "technical-only fallback", "score": 0.0165}], [],
+        ),
+    )
+    result = strat.scan_and_enter(dry_run=True)
+    assert result["opened"][0]["sizing"]["size_multiplier"] == 1.0
+
+
+# ── Partial exit (USE_PARTIAL_EXIT) ──────────────────────────────────────────
+
+def _tp_price(pos, extra_pct=0.001):
+    exit_pcts = strat.adaptive_exit_pcts(pos.get("entry_volatility_30"))
+    return pos["entry_price"] * (1 + exit_pcts["take_profit_pct"] + extra_pct)
+
+
+def test_decide_exit_returns_full_take_profit_when_partial_exit_disabled():
+    pos = _position(count=strat.MIN_COUNT_FOR_PARTIAL_EXIT)
+    should_exit, reason = strat.decide_exit(
+        pos, _tp_price(pos),
+        dollar_volume_z=strat.PROMISING_VOLUME_Z + 1, momentum_pct=strat.PROMISING_MOMENTUM_PCT + 0.001,
+    )
+    assert should_exit
+    assert reason.startswith("take_profit")
+
+
+def test_decide_exit_returns_partial_take_profit_when_promising_and_not_yet_taken(monkeypatch):
+    monkeypatch.setattr(strat, "USE_PARTIAL_EXIT", True)
+    pos = _position(count=strat.MIN_COUNT_FOR_PARTIAL_EXIT)
+    should_exit, reason = strat.decide_exit(
+        pos, _tp_price(pos),
+        dollar_volume_z=strat.PROMISING_VOLUME_Z + 1, momentum_pct=strat.PROMISING_MOMENTUM_PCT + 0.001,
+    )
+    assert should_exit
+    assert reason.startswith("partial_take_profit")
+
+
+def test_decide_exit_returns_full_take_profit_when_not_promising(monkeypatch):
+    monkeypatch.setattr(strat, "USE_PARTIAL_EXIT", True)
+    pos = _position(count=strat.MIN_COUNT_FOR_PARTIAL_EXIT)
+    should_exit, reason = strat.decide_exit(pos, _tp_price(pos))  # no continuation signals at all
+    assert should_exit
+    assert reason.startswith("take_profit")
+    assert not reason.startswith("partial_take_profit")
+
+
+def test_decide_exit_closes_the_remainder_fully_via_the_tightened_stop_after_retracement(monkeypatch):
+    """Once a partial exit has been taken, the remainder is governed by the
+    tightened, locked-in-profit stop (see adaptive_exit_pcts), not the
+    ordinary take_profit level -- a retracement down to that tightened
+    stop closes the WHOLE remainder via the stop_loss path, never
+    partial_take_profit again (capped at one partial exit per position)."""
+    monkeypatch.setattr(strat, "USE_PARTIAL_EXIT", True)
+    pos = _position(count=strat.MIN_COUNT_FOR_PARTIAL_EXIT)
+    pos["partial_exit_taken"] = True
+    tightened = strat.adaptive_exit_pcts(None, partial_exit_taken=True)
+    price = pos["entry_price"] * (1 - tightened["stop_loss_pct"] - 0.0005)
+    should_exit, reason = strat.decide_exit(pos, price)
+    assert should_exit
+    assert reason.startswith("stop_loss")
+
+
+def test_decide_exit_does_not_partial_exit_below_min_count(monkeypatch):
+    monkeypatch.setattr(strat, "USE_PARTIAL_EXIT", True)
+    pos = _position(count=strat.MIN_COUNT_FOR_PARTIAL_EXIT - 1)
+    should_exit, reason = strat.decide_exit(
+        pos, _tp_price(pos),
+        dollar_volume_z=strat.PROMISING_VOLUME_Z + 1, momentum_pct=strat.PROMISING_MOMENTUM_PCT + 0.001,
+    )
+    assert should_exit
+    assert reason.startswith("take_profit")
+    assert not reason.startswith("partial_take_profit")
+
+
+def test_decide_exit_a_partial_exited_position_does_not_immediately_re_trigger_take_profit(monkeypatch):
+    """Regression guard for the bug caught during implementation: once
+    partial_exit_taken is set, change_pct is STILL at/above take_profit_pct
+    on the very next check (price hasn't moved) -- the ordinary take_profit
+    branch must be skipped entirely, not just its partial sub-branch, or
+    the remainder would get fully closed moments after the partial exit."""
+    monkeypatch.setattr(strat, "USE_PARTIAL_EXIT", True)
+    pos = _position(count=strat.MIN_COUNT_FOR_PARTIAL_EXIT)
+    pos["partial_exit_taken"] = True
+    should_exit, reason = strat.decide_exit(pos, _tp_price(pos))  # price unchanged since the partial exit
+    assert not should_exit
+    assert "holding" in reason
+
+
+def test_decide_exit_stop_loss_stays_full_exit_even_with_partial_exit_enabled(monkeypatch):
+    """Stop-loss is always a full close on purpose -- partial exit only
+    ever applies to the take_profit path (see USE_PARTIAL_EXIT's own
+    comment)."""
+    monkeypatch.setattr(strat, "USE_PARTIAL_EXIT", True)
+    pos = _position(count=strat.MIN_COUNT_FOR_PARTIAL_EXIT)
+    should_exit, reason = strat.decide_exit(pos, 6.60 * (1 - strat.STOP_LOSS_PCT - 0.001))
+    assert should_exit
+    assert reason.startswith("stop_loss")
+
+
+def test_decide_exit_quick_profit_stays_full_exit_even_with_partial_exit_enabled(monkeypatch):
+    monkeypatch.setattr(strat, "USE_PARTIAL_EXIT", True)
+    pos = _position(count=strat.MIN_COUNT_FOR_PARTIAL_EXIT)
+    price = 6.60 * (1 + strat.QUICK_PROFIT_PCT + 0.001)
+    should_exit, reason = strat.decide_exit(pos, price, velocity_pct_per_min=strat.QUICK_PROFIT_VELOCITY_PCT_PER_MIN + 0.01)
+    assert should_exit
+    assert reason.startswith("quick_profit")
+
+
+def test_adaptive_exit_pcts_tightens_stop_after_partial_exit():
+    normal = strat.adaptive_exit_pcts(None)
+    tightened = strat.adaptive_exit_pcts(None, partial_exit_taken=True)
+    assert tightened["stop_loss_pct"] < 0  # flips decide_exit's check to a locked-in-PROFIT floor
+    assert tightened["stop_loss_pct"] == pytest.approx(-strat.PARTIAL_EXIT_STOP_LOCK_FRACTION * normal["take_profit_pct"])
+    assert tightened["take_profit_pct"] == normal["take_profit_pct"]  # only the stop changes
+
+
+def test_position_exit_levels_reflects_tightened_stop_after_partial_exit():
+    pos = _position(entry_price=6.60, count=4.0)
+    normal_levels = strat.position_exit_levels(pos)
+    pos["partial_exit_taken"] = True
+    tightened_levels = strat.position_exit_levels(pos)
+    # A negative stop_loss_pct means the stop price sits ABOVE entry for a
+    # long -- protecting a real profit instead of only protecting breakeven.
+    assert tightened_levels["stop_loss_price"] > pos["entry_price"]
+    assert tightened_levels["stop_loss_price"] > normal_levels["stop_loss_price"]
+
+
+def test_manage_open_positions_closes_only_the_partial_fraction_and_keeps_remainder_open(monkeypatch, tmp_path):
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(strat, "USE_PARTIAL_EXIT", True)
+    monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", True)
+    # minutes_ago set so manage_open_positions's lazy promising-signal fetch
+    # actually triggers (see the widened held_minutes_check condition) --
+    # otherwise latest_feature_row/predict_direction below are never called
+    # and decide_exit never sees any continuation signal at all.
+    pos = _position(
+        ticker="KXBTCPERP", entry_price=6.60, count=strat.MIN_COUNT_FOR_PARTIAL_EXIT * 2.0,
+        minutes_ago=strat.MAX_HOLD_MINUTES - strat.PRE_EXIT_STUDY_MINUTES,
+    )
+    strat._save_state({  # noqa: SLF001
+        "positions": [pos], "realized_pnl_by_date": {}, "trade_log": [], "daily_reference_balance": {},
+    })
+    tp_price = _tp_price(pos)
+    monkeypatch.setattr(strat, "get_margin_market", lambda ticker: _market_response(price=tp_price))
+    monkeypatch.setattr(strat, "latest_feature_row", lambda ticker: _row(
+        dollar_volume_z=strat.PROMISING_VOLUME_Z + 1, macd_hist_pct=strat.PROMISING_MOMENTUM_PCT + 0.001,
+    ))
+    monkeypatch.setattr(strat, "predict_direction", lambda ticker: {"model_ok": False, "ticker": ticker})
+
+    expected_close = round(pos["count"] * strat.PARTIAL_EXIT_FRACTION, 6)
+    captured = {}
+
+    def fake_create_margin_order(**kwargs):
+        captured.update(kwargs)
+        return {"order": {"fill_count": str(kwargs["count"])}}
+
+    monkeypatch.setattr(strat, "create_margin_order", fake_create_margin_order)
+    # First call is the pre-decision reconciliation (must match local state
+    # exactly -- the full pre-partial-exit count); second call is the
+    # post-order verification, after the partial close has filled.
+    calls = {"n": 0}
+
+    def fake_positions():
+        calls["n"] += 1
+        count = pos["count"] if calls["n"] == 1 else pos["count"] - expected_close
+        return {"positions": [_real_position("KXBTCPERP", str(count), "6.60")]}
+
+    monkeypatch.setattr(strat, "get_margin_positions", fake_positions)
+
+    result = strat.manage_open_positions(dry_run=False)
+    assert result["action"] == "closed"
+    assert captured["count"] == expected_close
+    assert captured["reduce_only"] is True
+    assert result["closed"][0]["exit_kind"] == "partial"
+    assert result["closed"][0]["remaining_count"] == pytest.approx(pos["count"] - expected_close)
+
+    state = strat._load_state()  # noqa: SLF001
+    assert len(state["positions"]) == 1
+    remainder = state["positions"][0]
+    assert remainder["count"] == pytest.approx(pos["count"] - expected_close)
+    assert remainder["partial_exit_taken"] is True
+    assert remainder["partial_exit_count"] == expected_close
+
+
+def test_manage_open_positions_full_closes_the_remainder_on_a_second_take_profit_hit(monkeypatch, tmp_path):
+    """A position that already had its partial exit closes FULLY on its
+    next take_profit-level check (decide_exit skips the partial branch once
+    partial_exit_taken is set -- see that function's own comment)."""
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(strat, "USE_PARTIAL_EXIT", True)
+    monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", False)
+    pos = _position(ticker="KXBTCPERP", entry_price=6.60, count=4.0)
+    pos["partial_exit_taken"] = True
+    strat._save_state({  # noqa: SLF001
+        "positions": [pos], "realized_pnl_by_date": {}, "trade_log": [], "daily_reference_balance": {},
+    })
+    # Price retraces to the now-tightened, locked-in-profit stop level.
+    tightened = strat.adaptive_exit_pcts(None, partial_exit_taken=True)
+    price = pos["entry_price"] * (1 - tightened["stop_loss_pct"] - 0.0005)
+    monkeypatch.setattr(strat, "get_margin_market", lambda ticker: _market_response(price=price))
+
+    result = strat.manage_open_positions(dry_run=True)
+    assert result["action"] == "closed"
+    assert result["closed"][0]["count"] == 4.0
+    assert result["closed"][0]["exit_kind"] == "full"
+    state = strat._load_state()  # noqa: SLF001
+    assert state["positions"] == []
+
+
+def test_manage_open_positions_posts_a_partial_exit_threads_message_not_the_full_exit_post(monkeypatch, tmp_path):
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(strat, "USE_PARTIAL_EXIT", True)
+    monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", False)
+    pos = _position(
+        ticker="KXBTCPERP", entry_price=6.60, count=strat.MIN_COUNT_FOR_PARTIAL_EXIT * 2.0,
+        minutes_ago=strat.MAX_HOLD_MINUTES - strat.PRE_EXIT_STUDY_MINUTES,
+    )
+    strat._save_state({  # noqa: SLF001
+        "positions": [pos], "realized_pnl_by_date": {}, "trade_log": [], "daily_reference_balance": {},
+    })
+    tp_price = _tp_price(pos)
+    monkeypatch.setattr(strat, "get_margin_market", lambda ticker: _market_response(price=tp_price))
+    monkeypatch.setattr(strat, "latest_feature_row", lambda ticker: _row(
+        dollar_volume_z=strat.PROMISING_VOLUME_Z + 1, macd_hist_pct=strat.PROMISING_MOMENTUM_PCT + 0.001,
+    ))
+    monkeypatch.setattr(strat, "predict_direction", lambda ticker: {"model_ok": False, "ticker": ticker})
+
+    def fail_if_called(**kw):
+        raise AssertionError("a partial exit must post via post_partial_exit, not the full-close post_trade_exit")
+
+    monkeypatch.setattr(strat.threads_post, "post_trade_exit", fail_if_called)
+    posted = {}
+    monkeypatch.setattr(strat.threads_post, "post_partial_exit", lambda **kw: posted.update(kw) or True)
+
+    result = strat.manage_open_positions(dry_run=True)
+    assert result["action"] == "closed"
+    assert posted.get("ticker") == "KXBTCPERP"
+
+
+# ── Trade-log correctness (exit_kind) ────────────────────────────────────────
+
+def test_batch_trade_analysis_ignores_partial_exit_rows_toward_batch_size(monkeypatch, tmp_path):
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "state.json")
+    partial_trades = [{"ticker": "KXBTCPERP", "dry_run": False, "exit_kind": "partial", "realized_pnl_usd": 1.0}] * 10
+    strat._save_state({  # noqa: SLF001
+        "positions": [], "trade_log": partial_trades, "realized_pnl_by_date": {}, "daily_reference_balance": {},
+    })
+
+    def fail_if_called(*a, **k):
+        raise AssertionError("must not run batch analysis when only partial-exit rows have accumulated")
+
+    monkeypatch.setattr(strat.perps_trade_analysis, "analyze_recent_trade_batch", fail_if_called)
+    strat._maybe_run_batch_trade_analysis()  # noqa: SLF001
+    # No assertion needed beyond "did not raise" -- fail_if_called above
+    # would have raised if the (partial-only) trade count wrongly reached
+    # perps_trade_analysis.BATCH_SIZE.
