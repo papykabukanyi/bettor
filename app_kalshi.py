@@ -163,7 +163,7 @@ logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 # is completely unaffected.
 logging.getLogger("huggingface_hub.hf_api").setLevel(logging.ERROR)
 logger = logging.getLogger(__name__)
-app = Flask("kalshi_perps_server", template_folder=str(SRC_DIR / "templates"))
+app = Flask("kalshi_perps_server", template_folder=str(SRC_DIR / "templates"), static_folder=str(SRC_DIR / "static"))
 # Render terminates TLS and proxies every request to this process over its
 # own internal network -- without this, request.remote_addr is Render's
 # internal proxy IP (10.x.x.x) for every single visitor, not the real

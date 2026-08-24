@@ -75,6 +75,49 @@ _TEXT_PRIMARY = (231, 236, 245)
 _TEXT_MUTED = (146, 153, 168)
 
 
+_WATERMARK_PATH = ROOT_DIR / "src" / "static" / "cumdev-watermark.png"
+_WATERMARK_LOGICAL_SIZE = 32  # logical px -- scaled by _s() like everything else this module draws
+_WATERMARK_MARGIN = 14
+_watermark_cache: dict[str, Any] = {}
+
+
+def _load_watermark():
+    """Cached after the first successful load -- one small PNG (see
+    src/static/cumdev-watermark.png, a pre-rasterized copy of
+    cumdev-icon.svg; Pillow can't load SVG directly) reused for every
+    chart/card this process generates rather than re-reading it from disk
+    each time."""
+    if "img" not in _watermark_cache:
+        try:
+            from PIL import Image
+            _watermark_cache["img"] = Image.open(_WATERMARK_PATH).convert("RGBA")
+        except Exception as exc:
+            logger.debug("[chart_snapshot] watermark load failed (non-fatal): %s", exc)
+            _watermark_cache["img"] = None
+    return _watermark_cache["img"]
+
+
+def _apply_watermark(img) -> None:
+    """Pastes the bot's own brand mark in the bottom-right corner of every
+    generated chart/card -- real, deliberate branding per explicit user
+    direction on every image this bot posts, not just some. Mutates `img`
+    in place. Best-effort, same contract as this whole module (see its own
+    docstring): a missing/corrupt watermark asset degrades to "no
+    watermark", never breaks chart generation."""
+    mark = _load_watermark()
+    if mark is None:
+        return
+    try:
+        size = _s(_WATERMARK_LOGICAL_SIZE)
+        margin = _s(_WATERMARK_MARGIN)
+        resized = mark.resize((size, size))
+        x = img.width - size - margin
+        y = img.height - size - margin
+        img.paste(resized, (x, y), mask=resized)
+    except Exception as exc:
+        logger.debug("[chart_snapshot] watermark paste failed (non-fatal): %s", exc)
+
+
 def _font(size: int):
     """Pillow's own bundled scalable font -- no external .ttf dependency,
     so this is guaranteed present on Render the same as locally. Falls
@@ -292,6 +335,7 @@ def generate_candlestick_chart(
         CHARTS_DIR.mkdir(parents=True, exist_ok=True)
         filename = f"{_sanitize(market)}_{_sanitize(ticker)}_{int(time.time())}.png"
         out_path = CHARTS_DIR / filename
+        _apply_watermark(img)
         img.save(out_path, format="PNG")
         _prune_old_charts()
         return out_path
@@ -440,6 +484,7 @@ def generate_sentiment_snapshot(*, market: str, ticker_sentiments: list[dict[str
         CHARTS_DIR.mkdir(parents=True, exist_ok=True)
         filename = f"sentiment_{_sanitize(market)}_{int(time.time())}.png"
         out_path = CHARTS_DIR / filename
+        _apply_watermark(img)
         img.save(out_path, format="PNG")
         _prune_old_charts()
         return out_path
@@ -652,6 +697,7 @@ def generate_news_card(
         CHARTS_DIR.mkdir(parents=True, exist_ok=True)
         filename = f"news_{_sanitize(market)}_{int(time.time())}.png"
         out_path = CHARTS_DIR / filename
+        _apply_watermark(img)
         img.save(out_path, format="PNG")
         _prune_old_charts()
         return out_path
@@ -814,6 +860,7 @@ def generate_news_bullet_card(
         CHARTS_DIR.mkdir(parents=True, exist_ok=True)
         filename = f"newsbullet_{_sanitize(market)}_{int(time.time())}_{index}.png"
         out_path = CHARTS_DIR / filename
+        _apply_watermark(img)
         img.save(out_path, format="PNG")
         _prune_old_charts()
         return out_path

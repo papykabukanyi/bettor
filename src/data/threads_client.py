@@ -52,6 +52,29 @@ HF_MODEL_REPO = os.getenv("HF_MODEL_REPO", "papylove/kalshi-perps-model")
 _TOKEN_HF_FILENAME = "threads_tokens.json"
 
 _STATE_LOCK = threading.Lock()
+
+# Real, deliberate promotion per explicit user direction: every post this
+# bot publishes to Threads, regardless of which of the 4 services or which
+# caller in threads_post.py composed it, tags the bot's own site. Applied
+# HERE (the 3 functions every single post funnels through, see below)
+# rather than in each of threads_post.py's dozen-plus caption-builders --
+# one choke point instead of a change repeated (and potentially missed) at
+# every call site. Threads' own hard cap is 500 chars total -- this trims
+# the CALLER's text if needed so the tag always fits, rather than letting
+# Threads' API silently reject or mangle an over-length post.
+PROMO_URL = "https://cumdev.onrender.com"
+_PROMO_TAG = f"\n\n{PROMO_URL}"
+_THREADS_MAX_CHARS = 500
+
+
+def _with_promo_tag(text: str) -> str:
+    text = text or ""
+    if PROMO_URL in text:
+        return text  # already tagged (e.g. a caller-supplied caption) -- don't duplicate
+    budget = _THREADS_MAX_CHARS - len(_PROMO_TAG)
+    if len(text) > budget:
+        text = text[: max(0, budget - 1)] + "…"
+    return f"{text}{_PROMO_TAG}" if text else PROMO_URL
 _token_cache: dict[str, Any] = {}
 # Real production finding: threads_post.is_configured() (called on every
 # single /api/status poll -- confirmed live, external monitoring bots hit
@@ -421,6 +444,7 @@ def create_and_publish_post(text: str) -> str:
     same "never let this block a real trade" contract as x_post.py had."""
     if is_rate_limited():
         raise RuntimeError("Threads API rate limit cooldown active -- skipping post attempt")
+    text = _with_promo_tag(text)
     token = get_valid_access_token()
     user_id = get_user_id()
     if not token or not user_id:
@@ -458,6 +482,7 @@ def create_and_publish_image_post(image_url: str, text: str = "") -> str:
     create_and_publish_post -- callers must catch and log."""
     if is_rate_limited():
         raise RuntimeError("Threads API rate limit cooldown active -- skipping post attempt")
+    text = _with_promo_tag(text)
     token = get_valid_access_token()
     user_id = get_user_id()
     if not token or not user_id:
@@ -520,6 +545,7 @@ def create_and_publish_carousel_post(image_urls: list[str], text: str = "") -> s
         raise ValueError(f"a carousel allows at most {CAROUSEL_MAX_ITEMS} images, got {len(image_urls)}")
     if is_rate_limited():
         raise RuntimeError("Threads API rate limit cooldown active -- skipping post attempt")
+    text = _with_promo_tag(text)
     token = get_valid_access_token()
     user_id = get_user_id()
     if not token or not user_id:

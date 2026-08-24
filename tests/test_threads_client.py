@@ -443,7 +443,7 @@ def test_create_and_publish_post_does_the_container_then_publish_round_trip(monk
     assert post_id == "post-999"
     assert captured[0]["url"] == f"{threads_client.API_BASE_URL}/{threads_client.API_VERSION}/user-42/threads"
     assert captured[0]["params"]["media_type"] == "TEXT"
-    assert captured[0]["params"]["text"] == "hello world"
+    assert captured[0]["params"]["text"] == f"hello world{threads_client._PROMO_TAG}"  # noqa: SLF001
     assert captured[1]["url"] == f"{threads_client.API_BASE_URL}/{threads_client.API_VERSION}/user-42/threads_publish"
     assert captured[1]["params"]["creation_id"] == "creation-123"
 
@@ -545,7 +545,7 @@ def test_create_and_publish_image_post_does_the_container_then_publish_round_tri
     assert captured[0]["url"] == f"{threads_client.API_BASE_URL}/{threads_client.API_VERSION}/user-42/threads"
     assert captured[0]["params"]["media_type"] == "IMAGE"
     assert captured[0]["params"]["image_url"] == "https://example.com/chart.png"
-    assert captured[0]["params"]["text"] == "caption text"
+    assert captured[0]["params"]["text"] == f"caption text{threads_client._PROMO_TAG}"  # noqa: SLF001
     assert captured[1]["params"]["creation_id"] == "creation-123"
 
 
@@ -620,7 +620,7 @@ def test_create_and_publish_carousel_post_creates_one_item_container_per_image_t
     carousel_calls = [c for c in captured if c["params"].get("media_type") == "CAROUSEL"]
     assert len(carousel_calls) == 1
     assert carousel_calls[0]["params"]["children"] == "item-1,item-2,item-3"
-    assert carousel_calls[0]["params"]["text"] == "check out these 3 stories"
+    assert carousel_calls[0]["params"]["text"] == f"check out these 3 stories{threads_client._PROMO_TAG}"  # noqa: SLF001
 
     publish_calls = [c for c in captured if "threads_publish" in c["url"]]
     assert len(publish_calls) == 1
@@ -671,3 +671,32 @@ def test_create_and_publish_carousel_post_refuses_to_publish_a_carousel_containe
 
     with pytest.raises(RuntimeError, match="carousel container.*terminal status EXPIRED"):
         threads_client.create_and_publish_carousel_post(urls)
+
+
+# ---------------------------------------------------------------------------
+# _with_promo_tag -- every post through this client tags the bot's own
+# site, see this module's own PROMO_URL comment.
+# ---------------------------------------------------------------------------
+
+def test_with_promo_tag_appends_the_url_to_normal_text():
+    result = threads_client._with_promo_tag("real trade update")  # noqa: SLF001
+    assert result == f"real trade update{threads_client._PROMO_TAG}"  # noqa: SLF001
+    assert result.endswith(threads_client.PROMO_URL)
+
+
+def test_with_promo_tag_on_empty_text_returns_just_the_url():
+    assert threads_client._with_promo_tag("") == threads_client.PROMO_URL  # noqa: SLF001
+    assert threads_client._with_promo_tag(None) == threads_client.PROMO_URL  # noqa: SLF001
+
+
+def test_with_promo_tag_does_not_duplicate_an_already_tagged_caption():
+    already_tagged = f"see the site: {threads_client.PROMO_URL}"
+    assert threads_client._with_promo_tag(already_tagged) == already_tagged  # noqa: SLF001
+
+
+def test_with_promo_tag_trims_long_text_so_the_tag_still_fits():
+    long_text = "x" * 600
+    result = threads_client._with_promo_tag(long_text)  # noqa: SLF001
+    assert len(result) <= threads_client._THREADS_MAX_CHARS  # noqa: SLF001
+    assert result.endswith(threads_client.PROMO_URL)
+    assert result.startswith("x")

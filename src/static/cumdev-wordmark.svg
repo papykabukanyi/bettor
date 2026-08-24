@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 220 64" role="img" aria-label="CUMDEV">
+  <title>CUMDEV</title>
+  <defs>
+    <linearGradient id="cumdevWordmarkGradient" x1="0" y1="0" x2="220" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#3b82f6"/>
+      <stop offset="0.55" stop-color="#a855f7"/>
+      <stop offset="1" stop-color="#ec4899"/>
+    </linearGradient>
+  </defs>
+  <text x="8" y="46" font-family="Sora, 'Space Grotesk', 'Segoe UI', ui-sans-serif, system-ui, sans-serif" font-size="42" font-weight="700" letter-spacing="0.5" fill="url(#cumdevWordmarkGradient)">CUMDEV</text>
+</svg>

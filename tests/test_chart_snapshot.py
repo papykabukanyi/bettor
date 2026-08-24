@@ -48,6 +48,54 @@ def test_generate_candlestick_chart_saves_a_real_png_file():
     assert path.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
 
 
+# ---------------------------------------------------------------------------
+# _apply_watermark -- the bot's own brand mark on every generated chart/
+# card, see this module's own comment for the full rationale.
+# ---------------------------------------------------------------------------
+
+def test_apply_watermark_pastes_a_real_mark_onto_the_image():
+    from PIL import Image
+    img = Image.new("RGB", (400, 300), (13, 15, 20))
+    before = img.copy()
+    chart_snapshot._apply_watermark(img)  # noqa: SLF001
+    assert list(img.getdata()) != list(before.getdata())  # something was actually drawn
+
+
+def test_apply_watermark_stays_within_the_image_bounds():
+    from PIL import Image
+    img = Image.new("RGB", (200, 150), (13, 15, 20))
+    chart_snapshot._apply_watermark(img)  # noqa: SLF001
+    assert img.size == (200, 150)  # in-place paste, never resizes the base image
+
+
+def test_apply_watermark_is_a_no_op_when_the_asset_is_missing(monkeypatch):
+    from PIL import Image
+    monkeypatch.setattr(chart_snapshot, "_WATERMARK_PATH", chart_snapshot._WATERMARK_PATH.with_name("does-not-exist.png"))  # noqa: SLF001
+    monkeypatch.setattr(chart_snapshot, "_watermark_cache", {})  # noqa: SLF001 -- force a fresh (failing) load
+    img = Image.new("RGB", (400, 300), (13, 15, 20))
+    before = img.copy()
+    chart_snapshot._apply_watermark(img)  # noqa: SLF001 -- must not raise
+    assert list(img.getdata()) == list(before.getdata())  # nothing drawn, chart generation still succeeds
+
+
+def test_generate_candlestick_chart_output_contains_the_watermark():
+    """End-to-end: a real generated chart is measurably different in its
+    bottom-right corner (where the watermark lands) than a version with no
+    watermark logic at all -- catches a regression where the wiring into
+    generate_candlestick_chart itself gets silently dropped, not just
+    _apply_watermark in isolation."""
+    path = chart_snapshot.generate_candlestick_chart(
+        ticker="AAPL", market="stocks", candles=_candles(), entry_price=100.0,
+        take_profit_price=101.0, stop_loss_price=99.0, side="long",
+    )
+    from PIL import Image
+    img = Image.open(path)
+    size = chart_snapshot._s(chart_snapshot._WATERMARK_LOGICAL_SIZE)  # noqa: SLF001
+    margin = chart_snapshot._s(chart_snapshot._WATERMARK_MARGIN)  # noqa: SLF001
+    corner_pixel = img.convert("RGB").getpixel((img.width - margin - size // 2, img.height - margin - size // 2))
+    assert corner_pixel != chart_snapshot._BG  # noqa: SLF001 -- not just the plain background color anymore
+
+
 def test_generate_candlestick_chart_sanitizes_ticker_and_market_in_the_filename():
     path = chart_snapshot.generate_candlestick_chart(
         ticker="BTC/USD", market="crypto", candles=_candles(), entry_price=100.0,
