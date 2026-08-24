@@ -83,6 +83,18 @@ services:
       # moment real P&L shows it isn't helping.
       - key: PERPS_USE_CORRELATION_STUDY
         value: "1"
+      # Conviction-scaled entry sizing (perps_strategy.py): resizes each
+      # NEW entry between 0.7x-1.5x of the flat POSITION_SIZE_PCT slice
+      # based on how far above its own confidence bar the model cleared --
+      # never changes which candidates qualify (should_enter is untouched),
+      # only how much capital a qualifying one gets. Graduated to the
+      # deployed default per explicit user direction; PERPS_USE_SCALE_IN
+      # and PERPS_USE_PARTIAL_EXIT (same file, same rollout posture) are
+      # deliberately left OFF here for now -- those add/hold real position
+      # risk beyond a single entry's original size, a bigger step than
+      # resizing an entry that was already happening.
+      - key: PERPS_USE_CONVICTION_SIZING
+        value: "1"
       # Cross-links to the Alpaca services' dashboards, shown as nav links
       # on this one. Render doesn't expose a way to reference ANOTHER
       # service's public URL from within a blueprint, so these have to be
