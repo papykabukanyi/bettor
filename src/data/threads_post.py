@@ -19,9 +19,14 @@ alone cannot post anything on their own.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
+import tempfile
+import threading
+import time
+from typing import Any
 
 from data import threads_client
 
@@ -30,6 +35,251 @@ logger = logging.getLogger(__name__)
 THREADS_POST_ENABLED = str(os.getenv("THREADS_POST_ENABLED", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
 
 _THREADS_POST_MAX_CHARS = 500
+
+# ── Recently-posted-story dedup (real feedback: the same trending headline
+# was posting again on a later 30-minute cycle whenever a slow news day left
+# it still the top/freshest item) ────────────────────────────────────────────
+# Shared via HF (same durable-state pattern threads_client.py already uses
+# for OAuth tokens) since crypto's and stocks' trending-news jobs each run
+# in their own separate Render service/process with no shared memory
+# otherwise. Keyed by `market` (crypto/stocks/perps/options each have an
+# independent news pool, so a story posted for one market says nothing
+# about another). A story "ages out" after _RECENT_NEWS_MAX_AGE_SEC so a
+# genuinely recurring story (e.g. a multi-day market event) can eventually
+# be posted again once it's no longer a same-cycle repeat.
+HF_API_KEY = os.getenv("HF_API_KEY", "")
+HF_MODEL_REPO = os.getenv("HF_MODEL_REPO", "papylove/kalshi-perps-model")
+_RECENT_NEWS_HF_FILENAME = "threads_recent_news.json"
+_RECENT_NEWS_MAX_AGE_SEC = float(os.getenv("THREADS_RECENT_NEWS_MAX_AGE_HOURS", "48") or "48") * 3600
+_RECENT_NEWS_MAX_PER_MARKET = 100
+_RECENT_NEWS_HF_TIMEOUT_SEC = int(os.getenv("THREADS_RECENT_NEWS_HF_TIMEOUT_SEC", "10") or "10")
+_recent_news_lock = threading.RLock()  # reentrant: _record_posted_story holds this while calling _load_recent_news, which also acquires it
+_recent_news_cache: dict[str, list[dict[str, Any]]] | None = None
+
+
+def _significant_words(title: str) -> set[str]:
+    """Same technique crypto_news.py's own cross-outlet corroboration
+    already uses -- lets a paraphrased repost of the same real-world story
+    (different outlet, slightly different wording) still count as a
+    duplicate, not just a byte-for-byte identical title."""
+    stopwords = {
+        "the", "a", "an", "of", "to", "in", "on", "for", "and", "or", "is", "are",
+        "with", "at", "by", "as", "its", "it", "this", "that", "after", "amid",
+        "over", "into", "new", "why", "how", "what", "will", "could", "may",
+        "says", "said", "vs", "than", "up", "down", "out", "now",
+    }
+    return {w for w in re.findall(r"[a-z0-9']+", title.lower()) if len(w) > 2 and w not in stopwords}
+
+
+def _pull_json_from_hf(filename: str, *, timeout_sec: int) -> Any:
+    """Generic small-JSON-file pull from HF_MODEL_REPO -- shared by every
+    Threads-side durable store in this module (recently-posted stories,
+    already-replied-to post ids) so the download/hard-timeout plumbing
+    exists in exactly one place. Same pattern threads_client.py's own token
+    pull uses. Returns None (never raises) on any failure, including "no
+    such file yet" (the normal first-ever-call state)."""
+    if not HF_API_KEY:
+        return None
+
+    def _download() -> Any:
+        from huggingface_hub import hf_hub_download
+        path = hf_hub_download(repo_id=HF_MODEL_REPO, filename=filename, repo_type="model", token=HF_API_KEY)
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+
+    try:
+        from server_common import call_with_hard_timeout
+        return call_with_hard_timeout(_download, timeout_sec=timeout_sec)
+    except Exception as exc:
+        logger.info("[threads_post] no %s on HF yet (or fetch failed): %s", filename, exc)
+        return None
+
+
+def _push_json_to_hf(filename: str, data: Any, *, timeout_sec: int, commit_message: str) -> None:
+    if not HF_API_KEY:
+        return
+
+    def _upload() -> None:
+        from huggingface_hub import HfApi
+        api = HfApi(token=HF_API_KEY)
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as tmp:
+            json.dump(data, tmp, indent=2)
+            tmp_path = tmp.name
+        try:
+            api.upload_file(
+                path_or_fileobj=tmp_path, path_in_repo=filename,
+                repo_id=HF_MODEL_REPO, repo_type="model", commit_message=commit_message,
+            )
+        finally:
+            os.unlink(tmp_path)
+
+    try:
+        from server_common import call_with_hard_timeout
+        call_with_hard_timeout(_upload, timeout_sec=timeout_sec)
+    except Exception as exc:
+        logger.warning("[threads_post] %s push to HF failed: %s", filename, exc)
+
+
+def _load_recent_news() -> dict[str, list[dict[str, Any]]]:
+    global _recent_news_cache
+    with _recent_news_lock:
+        if _recent_news_cache is None:
+            _recent_news_cache = _pull_json_from_hf(_RECENT_NEWS_HF_FILENAME, timeout_sec=_RECENT_NEWS_HF_TIMEOUT_SEC) or {}
+        return _recent_news_cache
+
+
+def _is_recent_duplicate_story(market: str, title: str) -> bool:
+    """True if `title` matches (exactly or as a near-duplicate -- see
+    _significant_words) any story already recorded as posted for this
+    market within _RECENT_NEWS_MAX_AGE_SEC."""
+    now = time.time()
+    entries = _load_recent_news().get(market, [])
+    words = _significant_words(title)
+    for entry in entries:
+        if now - float(entry.get("posted_at", 0)) >= _RECENT_NEWS_MAX_AGE_SEC:
+            continue
+        entry_title = entry.get("title", "")
+        if entry_title == title:
+            return True
+        if len(words & _significant_words(entry_title)) >= 3:
+            return True
+    return False
+
+
+def _record_posted_story(market: str, title: str) -> None:
+    """Best-effort -- a failure here means a duplicate might slip through on
+    a later cycle, not that the post itself (already sent) fails."""
+    try:
+        with _recent_news_lock:
+            store = dict(_load_recent_news())
+            now = time.time()
+            entries = [
+                e for e in store.get(market, [])
+                if now - float(e.get("posted_at", 0)) < _RECENT_NEWS_MAX_AGE_SEC
+            ]
+            entries.append({"title": title, "posted_at": now})
+            store[market] = entries[-_RECENT_NEWS_MAX_PER_MARKET:]
+            global _recent_news_cache
+            _recent_news_cache = store
+        _push_json_to_hf(
+            _RECENT_NEWS_HF_FILENAME, store, timeout_sec=_RECENT_NEWS_HF_TIMEOUT_SEC,
+            commit_message="update recently-posted news store",
+        )
+    except Exception as exc:
+        logger.warning("[threads_post] failed to record posted story for dedup: %s", exc)
+
+
+# ── Keyword-search auto-reply (real, working capability -- see module note
+# below on its current reach limitation) ─────────────────────────────────────
+_REPLIED_POSTS_HF_FILENAME = "threads_replied_posts.json"
+_REPLIED_POSTS_MAX_AGE_SEC = 30 * 24 * 3600  # 30 days -- plenty long to never re-reply to the same post
+_REPLIED_POSTS_MAX_STORED = 500
+_REPLIED_POSTS_HF_TIMEOUT_SEC = int(os.getenv("THREADS_REPLIED_POSTS_HF_TIMEOUT_SEC", "10") or "10")
+_replied_posts_lock = threading.RLock()  # reentrant: _record_replied_post holds this while calling _load_replied_posts, which also acquires it
+_replied_posts_cache: dict[str, float] | None = None
+# Small, deliberately conservative cap -- this reaches OTHER accounts'
+# timelines, unlike every other function in this module (which only ever
+# posts as this account). A real spam/platform-policy risk if run
+# aggressively; kept low regardless of how many qualifying posts a search
+# returns.
+MAX_AUTO_REPLIES_PER_RUN = int(os.getenv("THREADS_MAX_AUTO_REPLIES_PER_RUN", "2") or "2")
+
+
+def _load_replied_posts() -> dict[str, float]:
+    global _replied_posts_cache
+    with _replied_posts_lock:
+        if _replied_posts_cache is None:
+            _replied_posts_cache = _pull_json_from_hf(_REPLIED_POSTS_HF_FILENAME, timeout_sec=_REPLIED_POSTS_HF_TIMEOUT_SEC) or {}
+        return _replied_posts_cache
+
+
+def _record_replied_post(post_id: str) -> None:
+    try:
+        with _replied_posts_lock:
+            store = dict(_load_replied_posts())
+            now = time.time()
+            store = {pid: ts for pid, ts in store.items() if now - float(ts) < _REPLIED_POSTS_MAX_AGE_SEC}
+            store[post_id] = now
+            # Oldest-first trim once over the cap -- same unbounded-growth
+            # discipline every other durable store in this codebase applies.
+            if len(store) > _REPLIED_POSTS_MAX_STORED:
+                for pid in sorted(store, key=store.get)[: len(store) - _REPLIED_POSTS_MAX_STORED]:
+                    del store[pid]
+            global _replied_posts_cache
+            _replied_posts_cache = store
+        _push_json_to_hf(
+            _REPLIED_POSTS_HF_FILENAME, store, timeout_sec=_REPLIED_POSTS_HF_TIMEOUT_SEC,
+            commit_message="update already-replied-to posts store",
+        )
+    except Exception as exc:
+        logger.warning("[threads_post] failed to record replied post for dedup: %s", exc)
+
+
+def reply_to_trending_keyword_posts(query: str, *, market: str = "perps", max_replies: int | None = None) -> dict[str, Any]:
+    """Searches Threads for public posts matching `query` (see
+    threads_client.search_keyword_posts) and replies to up to
+    `max_replies` (default MAX_AUTO_REPLIES_PER_RUN) of them that haven't
+    already been replied to, in the "news anchor" persona (see
+    threads_persona.anchor_draft_reply) -- real engagement/marketing, not a
+    boilerplate template, and the persona is instructed to mention this
+    bot's own site only when it's actually relevant, not on every reply.
+
+    IMPORTANT, CONFIRMED LIVE LIMITATION (2026-08-23): threads_keyword_search
+    is functionally self-only under Meta's default "Standard Access" grant
+    for this app -- `query` will only ever match THIS account's own past
+    posts until Meta's App Review grants Advanced Access for that specific
+    permission. This function is real and fully wired (so it starts working
+    the moment that access is granted, no code change needed), but its
+    PRACTICAL reach today is "reply to my own old posts matching `query`",
+    not genuinely popular third-party posts -- do not expect broad
+    engagement from this until that review clears.
+
+    Never raises -- returns {"ok", "candidates_found", "replied": [...],
+    "skipped_already_replied": N} even on a total failure (empty result,
+    `ok: False` with `error`), matching every other Threads function's
+    best-effort contract. Deliberately capped low (see
+    MAX_AUTO_REPLIES_PER_RUN's own comment) since, unlike every other post
+    this module makes, a reply reaches someone ELSE's timeline."""
+    if not THREADS_POST_ENABLED:
+        return {"ok": False, "reason": "threads_post_disabled", "replied": []}
+    cap = max_replies if max_replies is not None else MAX_AUTO_REPLIES_PER_RUN
+    try:
+        candidates = threads_client.search_keyword_posts(query, search_type="TOP", limit=25)
+    except Exception as exc:
+        logger.warning("[threads_post] keyword search for %r failed: %s", query, exc)
+        return {"ok": False, "error": str(exc), "replied": []}
+
+    already_replied = _load_replied_posts()
+    replied: list[dict[str, Any]] = []
+    skipped = 0
+    for post in candidates:
+        if len(replied) >= cap:
+            break
+        post_id = post.get("id")
+        if not post_id or post_id in already_replied:
+            if post_id:
+                skipped += 1
+            continue
+        try:
+            from data import threads_persona
+            reply_text = threads_persona.anchor_draft_reply(post.get("text") or "", author_username=post.get("username"))
+        except Exception as exc:
+            logger.warning("[threads_post] reply drafting failed for post %s: %s", post_id, exc)
+            reply_text = None
+        if not reply_text:
+            continue  # never post a generic fallback reply -- a low-quality reply is worse than no reply
+        try:
+            threads_client.create_and_publish_post(reply_text, reply_to_id=post_id)
+            _record_replied_post(post_id)
+            replied.append({"post_id": post_id, "username": post.get("username"), "reply_text": reply_text})
+        except Exception as exc:
+            logger.warning("[threads_post] failed to post reply to %s: %s", post_id, exc)
+
+    return {
+        "ok": True, "query": query, "market": market, "candidates_found": len(candidates),
+        "replied": replied, "skipped_already_replied": skipped,
+    }
+
 
 # Every post used to say "Kalshi Perps" regardless of which of the four
 # asset-class services actually sent it -- a real mislabeling bug once
@@ -130,14 +380,19 @@ def _hashtags_only_caption(story: dict, *, market: str) -> str:
     return _hashtags_for_story(story, market=market)
 
 
-def _format_trending_story_caption(story: dict, *, market: str) -> str:
+def _format_trending_story_caption(story: dict, *, market: str, headline_override: str | None = None) -> str:
     """Full headline + source + secondary-headlines + hashtags text --
     used ONLY as the text-only fallback when no image could be generated/
     posted at all (see post_trending_news). In that case the TEXT is the
     only thing carrying the actual news content, so it needs the full
-    story, not just hashtags."""
+    story, not just hashtags.
+
+    `headline_override` (see threads_persona.anchor_rewrite_headline) lets
+    the caller swap in the anchor-rewritten lead headline instead of the
+    plain, cleaned one -- defaults to the plain headline when omitted/None
+    (e.g. the rewrite failed) so this still works standalone."""
     label = _short_market_label(market)
-    title = _clean_headline(story["title"])
+    title = headline_override or _clean_headline(story["title"])
     source = story.get("source") or ""
     lines = [f"\U0001F4F0 {label} news: {title}"]
     if source:
@@ -467,6 +722,15 @@ def post_trending_news(story: dict | None, *, market: str) -> bool:
     best-effort, never-raise contract as every other post here."""
     if not THREADS_POST_ENABLED:
         return False
+    # Real feedback: the same trending headline was posting again on a later
+    # 30-minute cycle whenever a slow news day left it still the top/
+    # freshest item -- see this module's own recent-news dedup comment.
+    # Checked against the RAW title (before any anchor rewrite below), since
+    # dedup must key off the real underlying story, not this cycle's own
+    # restyled wording of it.
+    if story and _is_recent_duplicate_story(market, story["title"]):
+        logger.info("[threads_post] skipping trending news for %s -- already posted recently: %s", market, story["title"])
+        story = None
     if not story:
         text = f"{_short_market_label(market)} trending news: nothing notable right now.\n{_hashtags_for_market(market)} #Trends #News"
         try:
@@ -476,8 +740,21 @@ def post_trending_news(story: dict | None, *, market: str) -> bool:
             logger.warning("[threads_post] failed to post trending news (no story): %s", exc)
             return False
 
-    title = _clean_headline(story["title"])
+    raw_title = story["title"]
+    title = _clean_headline(raw_title)
     secondary = [_clean_headline(s) for s in (story.get("secondary") or []) if s]
+    # "News anchor" persona rewrite -- see threads_persona.py's own
+    # docstring. Only the LEAD headline (one LLM call per cycle, not one
+    # per headline); falls back to the plain, cleaned headline unchanged on
+    # any failure (no API key configured, network error, empty completion)
+    # -- this must never block a real post.
+    try:
+        from data import threads_persona
+        anchor_title = threads_persona.anchor_rewrite_headline(title, source=story.get("source"), secondary=secondary)
+        if anchor_title:
+            title = anchor_title
+    except Exception as exc:
+        logger.warning("[threads_post] anchor rewrite failed, using the plain headline: %s", exc)
     hashtags = _hashtags_for_story(story, market=market)
     headlines = [title] + secondary  # lead story + up to 3 "also trending"
 
@@ -515,6 +792,7 @@ def post_trending_news(story: dict | None, *, market: str) -> bool:
                     raise RuntimeError(f"bullet card {i}/{len(headlines)} has no public URL")
                 image_urls.append(url)
             threads_client.create_and_publish_carousel_post(image_urls, _hashtags_only_caption(story, market=market))
+            _record_posted_story(market, raw_title)
             return True
         except Exception as exc:
             logger.warning("[threads_post] failed to post trending news as a carousel, falling back to a single image: %s", exc)
@@ -538,14 +816,18 @@ def post_trending_news(story: dict | None, *, market: str) -> bool:
             # _hashtags_only_caption's own docstring for why this must not
             # repeat what the picture already shows).
             threads_client.create_and_publish_image_post(image_url, _hashtags_only_caption(story, market=market))
+            _record_posted_story(market, raw_title)
             return True
         except Exception as exc:
             logger.warning("[threads_post] failed to post trending news as an image, falling back to text: %s", exc)
     try:
         # No image at all -- the text is the only thing carrying the real
         # story now, so it needs the full headline/source/secondary, not
-        # just hashtags.
-        threads_client.create_and_publish_post(_format_trending_story_caption(story, market=market))
+        # just hashtags. headline_override carries through the anchor
+        # rewrite (or the plain headline, if that failed) rather than
+        # re-deriving the plain one from scratch.
+        threads_client.create_and_publish_post(_format_trending_story_caption(story, market=market, headline_override=title))
+        _record_posted_story(market, raw_title)
         return True
     except Exception as exc:
         logger.warning("[threads_post] failed to post trending news: %s", exc)

@@ -4,7 +4,24 @@ allowed to affect real trade execution), and must format/truncate post
 text correctly."""
 from __future__ import annotations
 
+import time
+
+import pytest
+
 from data import threads_post
+
+
+@pytest.fixture(autouse=True)
+def _isolated_dedup_state(monkeypatch):
+    """Both dedup stores (recently-posted news, already-replied-to posts)
+    cache in an in-memory module global that's meant to persist for a real
+    process's whole lifetime -- reset between tests here so one test's
+    successful post doesn't "poison" a later test using the same
+    title/post id as a false recent-duplicate."""
+    monkeypatch.setattr(threads_post, "_recent_news_cache", None)
+    monkeypatch.setattr(threads_post, "_replied_posts_cache", None)
+    monkeypatch.setattr(threads_post, "HF_API_KEY", "")  # no real network for the HF mirror by default
+    yield
 
 
 def test_is_configured_reflects_whether_a_real_login_has_completed(monkeypatch):
@@ -752,3 +769,181 @@ def test_trending_news_never_raises_when_both_image_and_text_posting_fail(monkey
     monkeypatch.setattr(threads_post.threads_client, "create_and_publish_image_post", raise_error)
     monkeypatch.setattr(threads_post.threads_client, "create_and_publish_post", raise_error)
     assert threads_post.post_trending_news(_story(secondary=[]), market="crypto") is False
+
+
+# ── Recently-posted-story dedup ──────────────────────────────────────────────
+
+def test_is_recent_duplicate_story_true_for_exact_title_match():
+    threads_post._record_posted_story("crypto", "Bitcoin surges past resistance")
+    assert threads_post._is_recent_duplicate_story("crypto", "Bitcoin surges past resistance") is True  # noqa: SLF001
+
+
+def test_is_recent_duplicate_story_true_for_a_near_duplicate_title():
+    """Same technique crypto_news.py's own cross-outlet corroboration
+    uses: sharing 3+ significant words counts as the same real-world
+    story even with different wording/outlet."""
+    threads_post._record_posted_story("crypto", "Bitcoin surges past key resistance level")
+    assert threads_post._is_recent_duplicate_story("crypto", "BTC surges past resistance again today") is True  # noqa: SLF001
+
+
+def test_is_recent_duplicate_story_false_for_a_genuinely_different_story():
+    threads_post._record_posted_story("crypto", "Bitcoin surges past resistance")
+    assert threads_post._is_recent_duplicate_story("crypto", "Ethereum staking yields drop sharply") is False  # noqa: SLF001
+
+
+def test_is_recent_duplicate_story_false_once_aged_out(monkeypatch):
+    threads_post._record_posted_story("crypto", "Bitcoin surges past resistance")
+    # Push the recorded timestamp back past the max-age window.
+    stale_ts = time.time() - threads_post._RECENT_NEWS_MAX_AGE_SEC - 1  # noqa: SLF001
+    threads_post._recent_news_cache["crypto"][0]["posted_at"] = stale_ts  # noqa: SLF001
+    assert threads_post._is_recent_duplicate_story("crypto", "Bitcoin surges past resistance") is False  # noqa: SLF001
+
+
+def test_is_recent_duplicate_story_is_scoped_per_market():
+    threads_post._record_posted_story("crypto", "Bitcoin surges past resistance")
+    assert threads_post._is_recent_duplicate_story("stocks", "Bitcoin surges past resistance") is False  # noqa: SLF001
+
+
+def test_post_trending_news_skips_a_recently_posted_duplicate_story(monkeypatch):
+    threads_post._record_posted_story("crypto", "Bitcoin surges past resistance")
+    posted = []
+    monkeypatch.setattr(threads_post.threads_client, "create_and_publish_post", lambda text: posted.append(text))
+    result = threads_post.post_trending_news(_story(), market="crypto")
+    assert result is True
+    assert "nothing notable" in posted[0].lower()
+
+
+def test_post_trending_news_records_the_story_after_a_successful_text_post(monkeypatch):
+    monkeypatch.setattr(threads_post.threads_client, "create_and_publish_post", lambda text: True)
+    result = threads_post.post_trending_news(_story(secondary=[]), market="crypto")
+    assert result is True
+    assert threads_post._is_recent_duplicate_story("crypto", "Bitcoin surges past resistance") is True  # noqa: SLF001
+
+
+def test_post_trending_news_does_not_record_anything_on_total_failure(monkeypatch):
+    def raise_error(*a, **k):
+        raise RuntimeError("simulated Threads API failure")
+
+    monkeypatch.setattr(threads_post.threads_client, "create_and_publish_image_post", raise_error)
+    monkeypatch.setattr(threads_post.threads_client, "create_and_publish_post", raise_error)
+    threads_post.post_trending_news(_story(secondary=[]), market="crypto")
+    assert threads_post._is_recent_duplicate_story("crypto", "Bitcoin surges past resistance") is False  # noqa: SLF001
+
+
+# ── "News anchor" persona rewrite integration ────────────────────────────────
+
+def test_post_trending_news_uses_the_anchor_rewritten_headline_when_available(monkeypatch):
+    from data import threads_persona
+    monkeypatch.setattr(threads_persona, "anchor_rewrite_headline", lambda title, **kw: "BREAKING: BTC blasts through the ceiling")
+    posted = []
+    monkeypatch.setattr(threads_post.threads_client, "create_and_publish_post", lambda text: posted.append(text))
+    threads_post.post_trending_news(_story(secondary=[]), market="crypto")
+    assert "BREAKING: BTC blasts through the ceiling" in posted[0]
+    assert "Bitcoin surges past resistance" not in posted[0]
+
+
+def test_post_trending_news_falls_back_to_the_plain_headline_when_the_anchor_rewrite_returns_none(monkeypatch):
+    from data import threads_persona
+    monkeypatch.setattr(threads_persona, "anchor_rewrite_headline", lambda title, **kw: None)
+    posted = []
+    monkeypatch.setattr(threads_post.threads_client, "create_and_publish_post", lambda text: posted.append(text))
+    threads_post.post_trending_news(_story(secondary=[]), market="crypto")
+    assert "Bitcoin surges past resistance" in posted[0]
+
+
+def test_post_trending_news_falls_back_to_the_plain_headline_when_the_anchor_rewrite_raises(monkeypatch):
+    from data import threads_persona
+
+    def raise_error(title, **kw):
+        raise RuntimeError("simulated HF outage")
+
+    monkeypatch.setattr(threads_persona, "anchor_rewrite_headline", raise_error)
+    posted = []
+    monkeypatch.setattr(threads_post.threads_client, "create_and_publish_post", lambda text: posted.append(text))
+    result = threads_post.post_trending_news(_story(secondary=[]), market="crypto")
+    assert result is True
+    assert "Bitcoin surges past resistance" in posted[0]
+
+
+# ── reply_to_trending_keyword_posts ──────────────────────────────────────────
+
+def _keyword_post(post_id="post-1", text="crypto is having a moment", username="someuser"):
+    return {"id": post_id, "text": text, "username": username}
+
+
+def test_reply_to_trending_keyword_posts_replies_up_to_the_cap(monkeypatch):
+    from data import threads_persona
+    posts = [_keyword_post(f"post-{i}") for i in range(5)]
+    monkeypatch.setattr(threads_post.threads_client, "search_keyword_posts", lambda query, **kw: posts)
+    monkeypatch.setattr(threads_persona, "anchor_draft_reply", lambda text, **kw: "Great point!")
+    replied_calls = []
+    monkeypatch.setattr(
+        threads_post.threads_client, "create_and_publish_post",
+        lambda text, **kw: replied_calls.append((text, kw.get("reply_to_id"))),
+    )
+    result = threads_post.reply_to_trending_keyword_posts("crypto", market="crypto", max_replies=2)
+    assert result["ok"] is True
+    assert len(result["replied"]) == 2
+    assert len(replied_calls) == 2
+
+
+def test_reply_to_trending_keyword_posts_skips_already_replied_posts(monkeypatch):
+    from data import threads_persona
+    threads_post._record_replied_post("post-1")  # noqa: SLF001
+    monkeypatch.setattr(threads_post.threads_client, "search_keyword_posts", lambda query, **kw: [_keyword_post("post-1"), _keyword_post("post-2")])
+    monkeypatch.setattr(threads_persona, "anchor_draft_reply", lambda text, **kw: "Great point!")
+    replied_calls = []
+    monkeypatch.setattr(
+        threads_post.threads_client, "create_and_publish_post",
+        lambda text, **kw: replied_calls.append(kw.get("reply_to_id")),
+    )
+    result = threads_post.reply_to_trending_keyword_posts("crypto", market="crypto")
+    assert result["replied"][0]["post_id"] == "post-2"
+    assert result["skipped_already_replied"] == 1
+    assert replied_calls == ["post-2"]
+
+
+def test_reply_to_trending_keyword_posts_never_posts_a_generic_fallback_reply(monkeypatch):
+    """A drafting failure must skip the post entirely -- never fall back to
+    a generic template reply (a low-quality reply is worse than none)."""
+    from data import threads_persona
+    monkeypatch.setattr(threads_post.threads_client, "search_keyword_posts", lambda query, **kw: [_keyword_post("post-1")])
+    monkeypatch.setattr(threads_persona, "anchor_draft_reply", lambda text, **kw: None)
+
+    def fail_if_called(*a, **k):
+        raise AssertionError("must not post a reply when drafting failed")
+
+    monkeypatch.setattr(threads_post.threads_client, "create_and_publish_post", fail_if_called)
+    result = threads_post.reply_to_trending_keyword_posts("crypto", market="crypto")
+    assert result["replied"] == []
+
+
+def test_reply_to_trending_keyword_posts_returns_ok_false_when_search_fails(monkeypatch):
+    def raise_error(query, **kw):
+        raise RuntimeError("No valid Threads access token")
+
+    monkeypatch.setattr(threads_post.threads_client, "search_keyword_posts", raise_error)
+    result = threads_post.reply_to_trending_keyword_posts("crypto", market="crypto")
+    assert result["ok"] is False
+    assert result["replied"] == []
+
+
+def test_reply_to_trending_keyword_posts_respects_the_disable_flag(monkeypatch):
+    monkeypatch.setattr(threads_post, "THREADS_POST_ENABLED", False)
+
+    def fail_if_called(*a, **k):
+        raise AssertionError("must not search at all when disabled")
+
+    monkeypatch.setattr(threads_post.threads_client, "search_keyword_posts", fail_if_called)
+    result = threads_post.reply_to_trending_keyword_posts("crypto", market="crypto")
+    assert result["ok"] is False
+    assert result["replied"] == []
+
+
+def test_reply_to_trending_keyword_posts_records_replies_for_future_dedup(monkeypatch):
+    from data import threads_persona
+    monkeypatch.setattr(threads_post.threads_client, "search_keyword_posts", lambda query, **kw: [_keyword_post("post-1")])
+    monkeypatch.setattr(threads_persona, "anchor_draft_reply", lambda text, **kw: "Great point!")
+    monkeypatch.setattr(threads_post.threads_client, "create_and_publish_post", lambda text, **kw: True)
+    threads_post.reply_to_trending_keyword_posts("crypto", market="crypto")
+    assert "post-1" in threads_post._load_replied_posts()  # noqa: SLF001
