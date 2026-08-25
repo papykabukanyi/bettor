@@ -1155,7 +1155,15 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
                 correlation_max_adjustment=correlation_max_adjustment_override,
             )
             if not candidate["should_enter"]:
-                opened.append({"symbol": symbol, "ok": True, "action": "skipped", "reason": candidate["reason"]})
+                opened.append({
+                    "symbol": symbol, "ok": True, "action": "skipped", "reason": candidate["reason"],
+                    # Always computed (see evaluate_candidate's own comment) --
+                    # attached here even for a REJECTED candidate so the
+                    # dashboard can show this is a real, live-computed signal,
+                    # not just a config flag with nothing visible behind it.
+                    "correlation_score": candidate.get("correlation_score"),
+                    "correlation_reason": candidate.get("correlation_reason"),
+                })
                 continue
             candidate["row"] = row
             qualifying.append(candidate)
@@ -1250,7 +1258,9 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
             trade_dry_run = effective_dry_run
             opened.append({
                 "symbol": symbol, "ok": True, "action": "opened", "entry_price": entry_price,
-                "notional": notional, "dry_run": trade_dry_run,
+                "notional": notional, "dry_run": trade_dry_run, "reason": candidate.get("reason"),
+                "correlation_score": candidate.get("correlation_score"),
+                "correlation_reason": candidate.get("correlation_reason"),
             })
             try:
                 threads_post.post_trade_entry(

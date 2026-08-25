@@ -107,8 +107,8 @@
   <h3>Open Positions</h3>
   <div class="scroll-x">
     <table>
-      <thead><tr><th>Pair</th><th>Entry</th><th>Current</th><th>Unrealized P&amp;L</th><th>Coins</th><th>Take Profit</th><th>Stop Loss</th><th>Opened</th><th>Order</th><th>Status</th></tr></thead>
-      <tbody id="positions-body"><tr><td colspan="10" class="empty">No open positions</td></tr></tbody>
+      <thead><tr><th>Pair</th><th>Entry</th><th>Current</th><th>Unrealized P&amp;L</th><th>Coins</th><th>Take Profit</th><th>Stop Loss</th><th>Opened</th><th>Order</th><th>Chart Study</th><th>Status</th></tr></thead>
+      <tbody id="positions-body"><tr><td colspan="11" class="empty">No open positions</td></tr></tbody>
     </table>
   </div>
 </section>
@@ -117,8 +117,8 @@
   <h3>Last Entry Scan</h3>
   <div class="scroll-x">
     <table>
-      <thead><tr><th>Pair</th><th>Action</th><th>Entry</th><th>Notional</th><th>Reason</th></tr></thead>
-      <tbody id="candidates-body"><tr><td colspan="5" class="empty">Waiting for first scan...</td></tr></tbody>
+      <thead><tr><th>Pair</th><th>Action</th><th>Entry</th><th>Notional</th><th>Chart Study</th><th>Reason</th></tr></thead>
+      <tbody id="candidates-body"><tr><td colspan="6" class="empty">Waiting for first scan...</td></tr></tbody>
     </table>
   </div>
 </section>
@@ -127,8 +127,8 @@
   <h3>Recent Trades</h3>
   <div class="scroll-x">
     <table>
-      <thead><tr><th>Closed</th><th>Pair</th><th>Entry</th><th>Exit</th><th>Coins</th><th>Fee</th><th>Net P&amp;L</th><th>Reason</th></tr></thead>
-      <tbody id="trades-body"><tr><td colspan="8" class="empty">No trades yet</td></tr></tbody>
+      <thead><tr><th>Closed</th><th>Pair</th><th>Entry</th><th>Exit</th><th>Coins</th><th>Fee</th><th>Net P&amp;L</th><th>Chart Study</th><th>Reason</th></tr></thead>
+      <tbody id="trades-body"><tr><td colspan="9" class="empty">No trades yet</td></tr></tbody>
     </table>
   </div>
 </section>
@@ -179,6 +179,17 @@ const fmtPrice = (v) => {
 };
 const fmtCoins = (v) => (v === null || v === undefined || isNaN(v)) ? "--" : Number(v).toFixed(6);
 const fmtPct = (v) => (v === null || v === undefined || isNaN(v)) ? "--" : (Number(v) * 100).toFixed(3) + "%";
+// Chart-study (crypto_correlation.py) bullishness score -- bullish-signed,
+// always computed and attached for observability even while
+// USE_CORRELATION_STUDY is off (see evaluate_candidate's own comment) --
+// shown here so this is visibly a real, live-computed signal feeding
+// entries/exits, not just a config flag with nothing behind it.
+const fmtCorrelation = (v) => {
+  if (v === null || v === undefined || isNaN(v)) return '<span class="sub">--</span>';
+  const n = Number(v);
+  const cls = n > 0.05 ? "pos" : n < -0.05 ? "neg" : "";
+  return `<span class="stat ${cls}" style="font-size:13px;">${n >= 0 ? "+" : ""}${n.toFixed(2)}</span>`;
+};
 const timeAgo = (iso) => {
   if (!iso) return "--";
   const sec = (Date.now() - new Date(iso).getTime()) / 1000;
@@ -317,8 +328,9 @@ async function refreshStatus() {
         <td class="stat neg" style="font-size:13px;">${fmtPrice(p.stop_loss_price)}</td>
         <td>${timeAgo(p.opened_at)}</td>
         <td class="sub">${p.order_id || "paper"}</td>
+        <td title="${(p.entry_correlation_reason || "").replace(/"/g, '&quot;')}">${fmtCorrelation(p.entry_correlation_score)}</td>
         <td style="font-size:12px;color:var(--muted);">${p.exit_check || "--"}</td>`;
-    }, 10, "No open positions");
+    }, 11, "No open positions");
   } catch (e) { console.error("positions render failed", e); }
 
   try {
@@ -401,7 +413,8 @@ async function refreshStatus() {
         <td><span class="tag ${c.action === "opened" ? "yes" : c.ok === false ? "no" : "wait"}">${c.action || "--"}</span></td>
         <td>${c.entry_price !== undefined ? fmtPrice(c.entry_price) : "--"}</td>
         <td>${c.notional !== undefined ? fmtUsd(c.notional) : "--"}</td>
-        <td class="sub">${c.reason || c.error || ""}</td>`, 5, "Waiting for first scan...");
+        <td title="${(c.correlation_reason || "").replace(/"/g, '&quot;')}">${fmtCorrelation(c.correlation_score)}</td>
+        <td class="sub">${c.reason || c.error || ""}</td>`, 6, "Waiting for first scan...");
   } catch (e) { console.error("candidates render failed", e); }
 
   try {
@@ -469,7 +482,8 @@ async function refreshTrades() {
         <td>${fmtCoins(t.count)}</td>
         <td class="sub">${t.fee_usd != null ? fmtUsd(t.fee_usd) : "--"}</td>
         <td class="${t.realized_pnl_usd > 0 ? "stat pos" : t.realized_pnl_usd < 0 ? "stat neg" : ""}" style="font-size:13px;font-weight:600;">${fmtUsd(t.realized_pnl_usd)}</td>
-        <td class="sub">${t.reason || ""}</td>`, 8, "No trades yet");
+        <td title="${(t.entry_correlation_reason || "").replace(/"/g, '&quot;')}">${fmtCorrelation(t.entry_correlation_score)}</td>
+        <td class="sub">${t.reason || ""}</td>`, 9, "No trades yet");
   } catch (e) { console.error("trades refresh failed", e); }
 }
 
