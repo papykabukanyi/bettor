@@ -946,6 +946,25 @@ def _available_balance_usd() -> float:
     return available
 
 
+def compute_conviction_size_multiplier(
+    entry_confidence: float | None, effective_confidence_min: float | None,
+) -> float:
+    """The size_multiplier compute_leveraged_count should use for a
+    conviction-scaled entry (see USE_CONVICTION_SIZING's own module-level
+    comment) -- a single shared formula so scan_and_enter and
+    perps_backtest.simulate() can never drift apart on how this is
+    computed. Returns 1.0 (no change) if either input is missing (e.g. the
+    technical-only-fallback path -- see evaluate_candidate's own comment on
+    why that branch never sets entry_confidence/effective_confidence_min)
+    or effective_confidence_min is >= 1.0 (division-by-zero guard, not a
+    real value MODEL_CONFIDENCE_MIN/the correlation nudge would ever
+    produce, but defensive regardless)."""
+    if entry_confidence is None or effective_confidence_min is None or effective_confidence_min >= 1.0:
+        return 1.0
+    conviction = max(0.0, min(1.0, (entry_confidence - effective_confidence_min) / (1.0 - effective_confidence_min)))
+    return CONVICTION_SIZE_MIN_MULTIPLIER + (CONVICTION_SIZE_MAX_MULTIPLIER - CONVICTION_SIZE_MIN_MULTIPLIER) * conviction
+
+
 def compute_leveraged_count(
     available_balance_usd: float, market: dict[str, Any], *, size_multiplier: float = 1.0,
 ) -> tuple[int, dict[str, Any]]:
@@ -2705,15 +2724,10 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
         # technical-only-fallback path leaves both unset, so size_multiplier
         # stays 1.0 (today's flat behavior) for it, never accidentally
         # sized off that branch's unrelated score scale.
-        size_multiplier = 1.0
-        if USE_CONVICTION_SIZING and candidate.get("effective_confidence_min") is not None:
-            conf_min = candidate["effective_confidence_min"]
-            if conf_min < 1.0:
-                conviction = max(0.0, min(1.0, (candidate["entry_confidence"] - conf_min) / (1.0 - conf_min)))
-                size_multiplier = (
-                    CONVICTION_SIZE_MIN_MULTIPLIER
-                    + (CONVICTION_SIZE_MAX_MULTIPLIER - CONVICTION_SIZE_MIN_MULTIPLIER) * conviction
-                )
+        size_multiplier = (
+            compute_conviction_size_multiplier(candidate.get("entry_confidence"), candidate.get("effective_confidence_min"))
+            if USE_CONVICTION_SIZING else 1.0
+        )
         count, sizing_detail = compute_leveraged_count(available_balance_usd, sizing_market, size_multiplier=size_multiplier)
         if count < 1:
             opened.append({

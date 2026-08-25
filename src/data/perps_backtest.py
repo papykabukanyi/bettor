@@ -219,6 +219,9 @@ def simulate(
     taker_fee_rate: float | None = None,
     use_correlation_study: bool | None = None,
     correlation_confidence_max_adjustment: float | None = None,
+    use_scale_in: bool | None = None,
+    use_partial_exit: bool | None = None,
+    use_conviction_sizing: bool | None = None,
 ) -> dict[str, Any]:
     """Walk forward through `test_df` (all tickers, sorted by ts) replaying
     the real strategy functions. Every strategy parameter can be overridden
@@ -230,21 +233,39 @@ def simulate(
     and pass the result with `fitted=None` here -- `simulate` will reuse the
     existing `model_probability_up` column instead of re-predicting.
 
-    KNOWN, DISCLOSED GAP: USE_SCALE_IN, USE_PARTIAL_EXIT, and
-    USE_CONVICTION_SIZING (perps_strategy.py) are NOT modeled here. Sizing
-    below is computed manually (never calls compute_leveraged_count, so
-    conviction-scaled sizing simply can't apply), and `open_positions` is a
-    plain dict keyed by ticker with no scale-in/partial-close concept at
-    all -- this loop always fully removes a position from `open_positions`
-    the moment strat.decide_exit returns should_exit=True. Both flags
-    default OFF in live code, so this doesn't affect any backtest run
-    today. But if `decide_exit` is ever called from here with
-    USE_PARTIAL_EXIT explicitly turned on to validate it BEFORE enabling it
-    live, it can return "partial_take_profit" as should_exit=True -- this
-    loop would then incorrectly treat that as a FULL close (deleting the
-    whole position) instead of trusting a "close half, keep the rest open"
-    number this engine doesn't know how to represent. Don't trust a
-    backtest run in that configuration until this gap is closed."""
+    use_scale_in/use_partial_exit/use_conviction_sizing: unlike the other
+    overrides above, these 3 flags are read INSIDE the real, shared
+    perps_strategy functions this loop calls (decide_exit, _should_scale_in,
+    adaptive_exit_pcts) as bare module globals (USE_SCALE_IN/USE_PARTIAL_EXIT/
+    USE_CONVICTION_SIZING), not as their own parameters -- so a `None` here
+    leaves the module's current value untouched, and a real value TEMPORARILY
+    monkeypatches the module attribute for the duration of this call only
+    (restored in a `finally` block below, even on an exception), so a sweep
+    can vary these the same explicit way as every other flag here without
+    this function needing to thread them through `decide_exit`'s own
+    signature. Their SUB-parameters (SCALE_IN_MIN_PROGRESS_FRACTION,
+    PARTIAL_EXIT_FRACTION, CONVICTION_SIZE_MIN_MULTIPLIER, etc.) are, exactly
+    like several pre-existing constants this backtest already reuses live
+    (e.g. strat.QUICK_PROFIT_WINDOW_SECONDS, strat.PROMISING_VOLUME_Z), read
+    as bare module globals with no dedicated simulate() parameter -- a sweep
+    varies THOSE the same way, by setting the module attribute directly
+    before calling simulate(), matching this file's own established
+    (see e.g. the TAKE_PROFIT_VOL_MULTIPLE/STOP_LOSS_VOL_MULTIPLE sweep
+    described in perps_strategy.py's own history) ad hoc-constant-sweep
+    convention rather than growing this signature indefinitely.
+
+    Modeled here, reusing the REAL shared functions (never reimplemented):
+    scale-in add sizing via strat.compute_scale_in_count (same function
+    scan_and_enter calls), the scale-in GATE via strat._should_scale_in (same
+    function manage_open_positions calls, fed the exact same promising-signal
+    values already computed for this row's decide_exit call above), and
+    conviction-sizing via strat.compute_conviction_size_multiplier (same
+    function scan_and_enter calls). Partial exit is handled by NOT deleting
+    `open_positions[ticker]` when decide_exit's reason starts with
+    "partial_take_profit" -- only PARTIAL_EXIT_FRACTION of the position
+    closes, count/margin_committed_usd/partial_exit_taken are updated on the
+    still-open position dict, mirroring manage_open_positions's own
+    remainder-keeping logic exactly."""
     leverage_by_ticker = leverage_by_ticker or {}
     position_size_pct = strat.POSITION_SIZE_PCT if position_size_pct is None else position_size_pct
     max_concurrent_positions = strat.MAX_CONCURRENT_POSITIONS if max_concurrent_positions is None else max_concurrent_positions
@@ -319,210 +340,318 @@ def simulate(
     daily_pnl: dict[str, float] = {}
     daily_reference_balance: dict[str, float] = {}
 
-    for row in df.itertuples(index=False):
-        ticker = row.ticker
-        price = float(row.close)
-        date_str = pd.Timestamp(row.ts, unit="s", tz="UTC").strftime("%Y-%m-%d")
-        if date_str not in daily_reference_balance:
-            daily_reference_balance[date_str] = balance
-
-        # -- manage an existing position on this ticker first --
-        pos = open_positions.get(ticker)
-        if pos is not None:
-            velocity = None
-            samples = pos.setdefault("_samples", [])
-            samples.append((row.ts, price))
-            cutoff = row.ts - strat.QUICK_PROFIT_WINDOW_SECONDS
-            trimmed = [s for s in samples if s[0] >= cutoff] or samples[-1:]
-            pos["_samples"] = trimmed[-30:]
-            if len(trimmed) >= 2:
-                oldest_ts, oldest_price = trimmed[0]
-                elapsed_min = (row.ts - oldest_ts) / 60.0
-                if elapsed_min > 0 and oldest_price > 0:
-                    velocity = ((price - oldest_price) / oldest_price) / elapsed_min
-            current_volatility = strat._sample_volatility(trimmed)  # noqa: SLF001 -- same rolling samples, no extra data needed
-
-            # Real bug found and fixed here: decide_exit()'s max_hold_time
-            # check used to default to the REAL wall-clock time regardless
-            # of caller. Since a backtest replays historical rows (often
-            # weeks/months before the date this script actually runs on),
-            # that made held_minutes enormous and forced max_hold_time on
-            # almost every position's very first tick after opening --
-            # confirmed live: 99.7% of simulated exits were max_hold_time
-            # before this fix. `now` must be the SIMULATED current time
-            # (this row's own timestamp), not real wall-clock time.
-            sim_now = pd.Timestamp(row.ts, unit="s", tz="UTC").to_pydatetime()
-            # Real historical volume/momentum/breakout for the "promising
-            # position" max_hold_time extension (see decide_exit's own
-            # PROMISING_PROGRESS_FRACTION comment) -- these ARE covered by
-            # real history, unlike sentiment_score (see module docstring,
-            # held at 0.0 throughout -- no free historical news archive).
-            row_proba_up = getattr(row, "model_probability_up", float("nan"))
-            row_model_ok = row_proba_up == row_proba_up  # not NaN -> a model exists for this row
-            exit_correlation_score = _correlation_bullishness_as_of(row.ts, ticker, row) if use_correlation_study else None
-            should_exit, reason = strat.decide_exit(
-                pos, price, velocity_pct_per_min=velocity, current_volatility=current_volatility, now=sim_now,
-                dollar_volume_z=getattr(row, "dollar_volume_z", None),
-                momentum_pct=getattr(row, "macd_hist_pct", None),
-                breakout_pct_b=getattr(row, "bb_pct_b", None),
-                sentiment_score=getattr(row, "sentiment_score", None),
-                model_ok=row_model_ok, probability_up=(row_proba_up if row_model_ok else None),
-                correlation_score=exit_correlation_score,
-            )
-            if should_exit:
-                if pos.get("side") == "short":
-                    gross = round((pos["entry_price"] - price) * pos["count"], 6)  # profits on a FALLING price
-                else:
-                    gross = round((price - pos["entry_price"]) * pos["count"], 6)
-                fee = round((pos["entry_price"] + price) * pos["count"] * taker_fee_rate, 6)
-                realized = round(gross - fee, 6)
-                # `balance` is total equity throughout (only realized P&L ever
-                # changes it); margin_committed_usd was NEVER subtracted from
-                # it at open time -- it only ever reduced `available` via the
-                # running sum below. Adding it back here too would manufacture
-                # money out of nothing on every single trade.
-                balance += realized
-                daily_pnl[date_str] = daily_pnl.get(date_str, 0.0) + realized
-                trades.append({
-                    "ticker": ticker, "side": pos.get("side", "long"), "entry_price": pos["entry_price"], "exit_price": price,
-                    "count": pos["count"], "gross_pnl_usd": gross, "fee_usd": fee, "realized_pnl_usd": realized, "reason": reason,
-                    "opened_ts": pos["opened_ts"], "closed_ts": row.ts,
-                    "held_minutes": (row.ts - pos["opened_ts"]) / 60.0,
-                })
-                del open_positions[ticker]
-            continue
-
-        # -- otherwise, consider a new entry on this ticker --
-        if ticker in open_positions or len(open_positions) >= max_concurrent_positions:
-            continue
-
-        reference_balance = daily_reference_balance[date_str]
-        if reference_balance > 0 and daily_pnl.get(date_str, 0.0) <= -abs(daily_loss_cap_pct) * reference_balance:
-            continue  # daily loss cap breached -- exits still happen above, only new entries are blocked
-
-        # short_ma reconstructed from dist_to_ma_15 (= (close - ma_15) / ma_15),
-        # matching exactly what decide_entry_technical compares against live.
-        # rally_pct is exactly -dip_pct (same MA, opposite-signed comparison),
-        # mirroring decide_entry_technical's side="short" branch.
-        dist_to_ma_15 = row.dist_to_ma_15
-        short_ma = price / (1 + dist_to_ma_15) if (1 + dist_to_ma_15) != 0 else price
-        dip_pct = (short_ma - price) / short_ma if short_ma > 0 else 0.0
-        rally_pct = -dip_pct
-
-        proba_up = row.model_probability_up
-        model_ok = proba_up == proba_up  # not NaN -> a model exists
-
-        # Only enter where a fast exit is actually plausible -- mirrors
-        # perps_strategy.py's MIN_ENTRY_VOLATILITY gate (confirmed live: a
-        # real share of exits were max_hold_time timeouts in a market that
-        # just wasn't moving, not a clean take-profit/quick-profit). Also
-        # requires THIS coin to be active relative to its OWN 30-min
-        # baseline ("study each currency" -- a fixed absolute number alone
-        # can't tell "quiet for BTC" from "quiet for a naturally choppy
-        # small-cap"), on top of (not instead of) the absolute floor.
-        volatility_ok = row.volatility_5 >= min_entry_volatility
-        if volatility_ok and row.volatility_30 > 0:
-            volatility_ok = (row.volatility_5 / row.volatility_30) >= min_entry_relative_volatility_ratio
-        # Real participation, not just price movement -- mirrors
-        # perps_strategy.py's MIN_ENTRY_VOLUME_Z gate exactly (same
-        # dollar_volume_z column this backtest already carries for the
-        # exit-side pre-exit-study feature above, now also gating entries
-        # the way production does).
-        if volatility_ok:
-            row_volume_z = getattr(row, "dollar_volume_z", None)
-            volatility_ok = row_volume_z is not None and row_volume_z >= min_entry_volume_z
-
-        # Bullish-signed correlation reading for THIS ticker as of THIS row's
-        # own ts (see _correlation_bullishness_as_of's own comment on the
-        # leakage-free, coarsely-cached recompute), sign-flipped for the
-        # short side exactly like live evaluate_candidate does.
-        long_correlation_score = short_correlation_score = None
-        if use_correlation_study:
-            base_correlation_score = _correlation_bullishness_as_of(row.ts, ticker, row)
-            long_correlation_score = base_correlation_score
-            short_correlation_score = -base_correlation_score
-
-        chosen_side = None
-        if volatility_ok and row.trend_pct >= -trend_filter_down_pct and dip_pct >= entry_dip_pct:
-            if not model_ok:
-                # technical-only fallback (no model yet) is long-only, same
-                # as live -- and, same as live's evaluate_candidate, skipped
-                # if the correlation study actively disagrees strongly
-                # enough (see PROMISING_CORRELATION_SCORE's own comment).
-                correlation_vetoes = (
-                    use_correlation_study and long_correlation_score is not None
-                    and long_correlation_score <= -strat.PROMISING_CORRELATION_SCORE
-                )
-                if not correlation_vetoes:
-                    chosen_side = "long"
-            else:
-                effective_long_min = model_confidence_min
-                if use_correlation_study and long_correlation_score is not None:
-                    effective_long_min = max(
-                        0.5, min(0.95, effective_long_min - long_correlation_score * correlation_confidence_max_adjustment),
-                    )
-                if proba_up >= 0.5 and proba_up >= effective_long_min:
-                    chosen_side = "long"
-        if (
-            chosen_side is None and enable_shorts and volatility_ok
-            and row.trend_pct <= trend_filter_down_pct and rally_pct >= entry_dip_pct
-            and model_ok
-        ):
-            effective_short_min = model_confidence_min
-            if use_correlation_study and short_correlation_score is not None:
-                effective_short_min = max(
-                    0.5, min(0.95, effective_short_min - short_correlation_score * correlation_confidence_max_adjustment),
-                )
-            if proba_up < 0.5 and (1.0 - proba_up) >= effective_short_min:
-                chosen_side = "short"
-        if chosen_side is None:
-            continue
-
-        committed = sum(p["margin_committed_usd"] for p in open_positions.values())
-        available = balance - committed
-        margin_budget = available * position_size_pct
-        leverage = leverage_by_ticker.get(ticker, 1.0)
-        notional_capacity = margin_budget * leverage
-        count = int(notional_capacity // price) if price > 0 else 0
-        if count < 1:
-            continue
-        margin_committed = round(count * price / leverage, 6)
-        if margin_committed > available:
-            continue
-
-        open_positions[ticker] = {
-            "ticker": ticker, "entry_price": price, "count": float(count), "side": chosen_side,
-            "opened_at": pd.Timestamp(row.ts, unit="s", tz="UTC").isoformat(),
-            "opened_ts": row.ts, "margin_committed_usd": margin_committed, "_samples": [],
-            # This ticker's OWN volatility_30 at entry -- decide_exit() (the
-            # REAL, shared function, not reimplemented here) uses this to
-            # customize the take-profit/stop-loss to this specific currency
-            # instead of one flat percentage for every coin.
-            "entry_volatility_30": row.volatility_30,
-        }
-
-    # Mark-to-market any still-open positions at the last known price for reporting.
-    open_at_end = len(open_positions)
-
-    total_pnl = sum(t["realized_pnl_usd"] for t in trades)
-    total_fees = sum(t.get("fee_usd", 0.0) for t in trades)
-    wins = [t for t in trades if t["realized_pnl_usd"] > 0]
-    span_days = max(1e-9, (df["ts"].max() - df["ts"].min()) / 86400.0) if not df.empty else 1.0
-
-    return {
-        "starting_balance": starting_balance,
-        "ending_balance_realized": round(starting_balance + total_pnl, 6),
-        "total_realized_pnl_usd": round(total_pnl, 6),
-        "total_fees_usd": round(total_fees, 6),
-        "return_pct": round(total_pnl / starting_balance, 6) if starting_balance else 0.0,
-        "trade_count": len(trades),
-        "win_count": len(wins),
-        "win_rate": round(len(wins) / len(trades), 4) if trades else 0.0,
-        "trades_per_day": round(len(trades) / span_days, 3),
-        "open_positions_at_end": open_at_end,
-        "span_days": round(span_days, 2),
-        "trades": trades,
+    # See this function's own docstring -- these 3 flags are read as bare
+    # module globals inside decide_exit/_should_scale_in/adaptive_exit_pcts,
+    # so a real override here temporarily patches the module attribute for
+    # the duration of this call, restored in `finally` even on an exception
+    # (never leaking into any other concurrent/later caller in this process,
+    # e.g. another sweep config or, in principle, a live process that
+    # happened to import this same module).
+    _flag_overrides = {
+        "USE_SCALE_IN": use_scale_in, "USE_PARTIAL_EXIT": use_partial_exit,
+        "USE_CONVICTION_SIZING": use_conviction_sizing,
     }
+    _saved_flags = {name: getattr(strat, name) for name in _flag_overrides}
+    for name, value in _flag_overrides.items():
+        if value is not None:
+            setattr(strat, name, value)
+
+    try:
+        for row in df.itertuples(index=False):
+            ticker = row.ticker
+            price = float(row.close)
+            date_str = pd.Timestamp(row.ts, unit="s", tz="UTC").strftime("%Y-%m-%d")
+            if date_str not in daily_reference_balance:
+                daily_reference_balance[date_str] = balance
+
+            # -- manage an existing position on this ticker first --
+            pos = open_positions.get(ticker)
+            if pos is not None:
+                velocity = None
+                samples = pos.setdefault("_samples", [])
+                samples.append((row.ts, price))
+                cutoff = row.ts - strat.QUICK_PROFIT_WINDOW_SECONDS
+                trimmed = [s for s in samples if s[0] >= cutoff] or samples[-1:]
+                pos["_samples"] = trimmed[-30:]
+                if len(trimmed) >= 2:
+                    oldest_ts, oldest_price = trimmed[0]
+                    elapsed_min = (row.ts - oldest_ts) / 60.0
+                    if elapsed_min > 0 and oldest_price > 0:
+                        velocity = ((price - oldest_price) / oldest_price) / elapsed_min
+                current_volatility = strat._sample_volatility(trimmed)  # noqa: SLF001 -- same rolling samples, no extra data needed
+
+                # Real bug found and fixed here: decide_exit()'s max_hold_time
+                # check used to default to the REAL wall-clock time regardless
+                # of caller. Since a backtest replays historical rows (often
+                # weeks/months before the date this script actually runs on),
+                # that made held_minutes enormous and forced max_hold_time on
+                # almost every position's very first tick after opening --
+                # confirmed live: 99.7% of simulated exits were max_hold_time
+                # before this fix. `now` must be the SIMULATED current time
+                # (this row's own timestamp), not real wall-clock time.
+                sim_now = pd.Timestamp(row.ts, unit="s", tz="UTC").to_pydatetime()
+                # Real historical volume/momentum/breakout for the "promising
+                # position" max_hold_time extension (see decide_exit's own
+                # PROMISING_PROGRESS_FRACTION comment) -- these ARE covered by
+                # real history, unlike sentiment_score (see module docstring,
+                # held at 0.0 throughout -- no free historical news archive).
+                row_proba_up = getattr(row, "model_probability_up", float("nan"))
+                row_model_ok = row_proba_up == row_proba_up  # not NaN -> a model exists for this row
+                exit_correlation_score = _correlation_bullishness_as_of(row.ts, ticker, row) if use_correlation_study else None
+                should_exit, reason = strat.decide_exit(
+                    pos, price, velocity_pct_per_min=velocity, current_volatility=current_volatility, now=sim_now,
+                    dollar_volume_z=getattr(row, "dollar_volume_z", None),
+                    momentum_pct=getattr(row, "macd_hist_pct", None),
+                    breakout_pct_b=getattr(row, "bb_pct_b", None),
+                    sentiment_score=getattr(row, "sentiment_score", None),
+                    model_ok=row_model_ok, probability_up=(row_proba_up if row_model_ok else None),
+                    correlation_score=exit_correlation_score,
+                )
+                if should_exit:
+                    # USE_PARTIAL_EXIT (see decide_exit's own comment): only
+                    # PARTIAL_EXIT_FRACTION of the position closes, the rest
+                    # stays open on a tightened, locked-in-profit stop
+                    # (adaptive_exit_pcts' partial_exit_taken already applies
+                    # to it on the NEXT decide_exit call, since `pos` itself
+                    # is mutated in place, not replaced). Mirrors
+                    # manage_open_positions's own remainder-keeping logic.
+                    is_partial = reason.startswith("partial_take_profit")
+                    pre_close_count = pos["count"]
+                    close_count = round(pre_close_count * strat.PARTIAL_EXIT_FRACTION, 6) if is_partial else pre_close_count
+                    if pos.get("side") == "short":
+                        gross = round((pos["entry_price"] - price) * close_count, 6)  # profits on a FALLING price
+                    else:
+                        gross = round((price - pos["entry_price"]) * close_count, 6)
+                    fee = round((pos["entry_price"] + price) * close_count * taker_fee_rate, 6)
+                    realized = round(gross - fee, 6)
+                    # `balance` is total equity throughout (only realized P&L ever
+                    # changes it); margin_committed_usd was NEVER subtracted from
+                    # it at open time -- it only ever reduced `available` via the
+                    # running sum below. Adding it back here too would manufacture
+                    # money out of nothing on every single trade.
+                    balance += realized
+                    daily_pnl[date_str] = daily_pnl.get(date_str, 0.0) + realized
+                    trades.append({
+                        "ticker": ticker, "side": pos.get("side", "long"), "entry_price": pos["entry_price"], "exit_price": price,
+                        "count": close_count, "gross_pnl_usd": gross, "fee_usd": fee, "realized_pnl_usd": realized, "reason": reason,
+                        "opened_ts": pos["opened_ts"], "closed_ts": row.ts,
+                        "held_minutes": (row.ts - pos["opened_ts"]) / 60.0,
+                        "exit_kind": "partial" if is_partial else "full",
+                        "remaining_count": round(pre_close_count - close_count, 6) if is_partial else None,
+                    })
+                    if is_partial:
+                        # Margin release proportional to the fraction of the
+                        # position actually closed, regardless of any prior
+                        # scale-in history -- same logic manage_open_positions
+                        # applies to the real position's own bookkeeping.
+                        margin_released = pos["margin_committed_usd"] * (close_count / pre_close_count) if pre_close_count > 0 else 0.0
+                        pos["margin_committed_usd"] = round(pos["margin_committed_usd"] - margin_released, 6)
+                        pos["count"] = round(pre_close_count - close_count, 6)
+                        pos["partial_exit_taken"] = True
+                    else:
+                        del open_positions[ticker]
+                elif use_scale_in:
+                    # USE_SCALE_IN: reuses the REAL gate (strat._should_scale_in,
+                    # the exact function manage_open_positions calls) fed the
+                    # SAME promising-signal values already computed above for
+                    # this row's decide_exit call -- no separate computation.
+                    should_add, add_reason = strat._should_scale_in(  # noqa: SLF001
+                        pos, price, now=sim_now,
+                        dollar_volume_z=getattr(row, "dollar_volume_z", None),
+                        momentum_pct=getattr(row, "macd_hist_pct", None),
+                        breakout_pct_b=getattr(row, "bb_pct_b", None),
+                        model_ok=row_model_ok, probability_up=(row_proba_up if row_model_ok else None),
+                        correlation_score=exit_correlation_score,
+                    )
+                    if should_add:
+                        committed = sum(p["margin_committed_usd"] for p in open_positions.values())
+                        available = balance - committed
+                        leverage = leverage_by_ticker.get(ticker, 1.0)
+                        add_count, _detail = strat.compute_scale_in_count(
+                            available, {"price": price, "leverage_estimate": leverage},
+                            original_count=pos["original_count"], current_count=pos["count"],
+                        )
+                        if add_count >= 1:
+                            add_margin = round(add_count * price / leverage, 6)
+                            if add_margin <= available:
+                                new_count = pos["count"] + add_count
+                                # Count-weighted blend, same as Kalshi's own
+                                # real position aggregation (see
+                                # _real_open_positions_by_ticker's own
+                                # docstring) -- the mechanism live scale-in
+                                # relies on since the exchange has no
+                                # per-lot concept once fills land.
+                                pos["entry_price"] = (pos["entry_price"] * pos["count"] + price * add_count) / new_count
+                                pos["count"] = new_count
+                                pos["margin_committed_usd"] = round(pos["margin_committed_usd"] + add_margin, 6)
+                                pos.setdefault("scale_ins", []).append({
+                                    "at": sim_now.isoformat(), "count_added": add_count, "price": price, "reason": add_reason,
+                                })
+                                pos["last_scale_in_at"] = sim_now.isoformat()
+                continue
+
+            # -- otherwise, consider a new entry on this ticker --
+            if ticker in open_positions or len(open_positions) >= max_concurrent_positions:
+                continue
+
+            reference_balance = daily_reference_balance[date_str]
+            if reference_balance > 0 and daily_pnl.get(date_str, 0.0) <= -abs(daily_loss_cap_pct) * reference_balance:
+                continue  # daily loss cap breached -- exits still happen above, only new entries are blocked
+
+            # short_ma reconstructed from dist_to_ma_15 (= (close - ma_15) / ma_15),
+            # matching exactly what decide_entry_technical compares against live.
+            # rally_pct is exactly -dip_pct (same MA, opposite-signed comparison),
+            # mirroring decide_entry_technical's side="short" branch.
+            dist_to_ma_15 = row.dist_to_ma_15
+            short_ma = price / (1 + dist_to_ma_15) if (1 + dist_to_ma_15) != 0 else price
+            dip_pct = (short_ma - price) / short_ma if short_ma > 0 else 0.0
+            rally_pct = -dip_pct
+
+            proba_up = row.model_probability_up
+            model_ok = proba_up == proba_up  # not NaN -> a model exists
+
+            # Only enter where a fast exit is actually plausible -- mirrors
+            # perps_strategy.py's MIN_ENTRY_VOLATILITY gate (confirmed live: a
+            # real share of exits were max_hold_time timeouts in a market that
+            # just wasn't moving, not a clean take-profit/quick-profit). Also
+            # requires THIS coin to be active relative to its OWN 30-min
+            # baseline ("study each currency" -- a fixed absolute number alone
+            # can't tell "quiet for BTC" from "quiet for a naturally choppy
+            # small-cap"), on top of (not instead of) the absolute floor.
+            volatility_ok = row.volatility_5 >= min_entry_volatility
+            if volatility_ok and row.volatility_30 > 0:
+                volatility_ok = (row.volatility_5 / row.volatility_30) >= min_entry_relative_volatility_ratio
+            # Real participation, not just price movement -- mirrors
+            # perps_strategy.py's MIN_ENTRY_VOLUME_Z gate exactly (same
+            # dollar_volume_z column this backtest already carries for the
+            # exit-side pre-exit-study feature above, now also gating entries
+            # the way production does).
+            if volatility_ok:
+                row_volume_z = getattr(row, "dollar_volume_z", None)
+                volatility_ok = row_volume_z is not None and row_volume_z >= min_entry_volume_z
+
+            # Bullish-signed correlation reading for THIS ticker as of THIS row's
+            # own ts (see _correlation_bullishness_as_of's own comment on the
+            # leakage-free, coarsely-cached recompute), sign-flipped for the
+            # short side exactly like live evaluate_candidate does.
+            long_correlation_score = short_correlation_score = None
+            if use_correlation_study:
+                base_correlation_score = _correlation_bullishness_as_of(row.ts, ticker, row)
+                long_correlation_score = base_correlation_score
+                short_correlation_score = -base_correlation_score
+
+            chosen_side = None
+            # Always defined (even when the branch that would set them never
+            # runs) so the conviction-sizing block below can safely read
+            # whichever one applies to chosen_side without a NameError.
+            effective_long_min = effective_short_min = None
+            if volatility_ok and row.trend_pct >= -trend_filter_down_pct and dip_pct >= entry_dip_pct:
+                if not model_ok:
+                    # technical-only fallback (no model yet) is long-only, same
+                    # as live -- and, same as live's evaluate_candidate, skipped
+                    # if the correlation study actively disagrees strongly
+                    # enough (see PROMISING_CORRELATION_SCORE's own comment).
+                    correlation_vetoes = (
+                        use_correlation_study and long_correlation_score is not None
+                        and long_correlation_score <= -strat.PROMISING_CORRELATION_SCORE
+                    )
+                    if not correlation_vetoes:
+                        chosen_side = "long"
+                else:
+                    effective_long_min = model_confidence_min
+                    if use_correlation_study and long_correlation_score is not None:
+                        effective_long_min = max(
+                            0.5, min(0.95, effective_long_min - long_correlation_score * correlation_confidence_max_adjustment),
+                        )
+                    if proba_up >= 0.5 and proba_up >= effective_long_min:
+                        chosen_side = "long"
+            if (
+                chosen_side is None and enable_shorts and volatility_ok
+                and row.trend_pct <= trend_filter_down_pct and rally_pct >= entry_dip_pct
+                and model_ok
+            ):
+                effective_short_min = model_confidence_min
+                if use_correlation_study and short_correlation_score is not None:
+                    effective_short_min = max(
+                        0.5, min(0.95, effective_short_min - short_correlation_score * correlation_confidence_max_adjustment),
+                    )
+                if proba_up < 0.5 and (1.0 - proba_up) >= effective_short_min:
+                    chosen_side = "short"
+            if chosen_side is None:
+                continue
+
+            # USE_CONVICTION_SIZING (see compute_conviction_size_multiplier's
+            # own docstring -- the SAME shared helper scan_and_enter calls
+            # live): only ever applies on the model-confirmed path (entry
+            #_confidence/effective_min both real numbers there) -- the
+            # technical-only-fallback path (chosen_side == "long", not
+            # model_ok) leaves both None, so the multiplier stays 1.0 for it,
+            # exactly like live's evaluate_candidate/scan_and_enter.
+            size_multiplier = 1.0
+            if use_conviction_sizing and model_ok:
+                entry_confidence = proba_up if chosen_side == "long" else (1.0 - proba_up)
+                effective_min = effective_long_min if chosen_side == "long" else effective_short_min
+                size_multiplier = strat.compute_conviction_size_multiplier(entry_confidence, effective_min)
+
+            committed = sum(p["margin_committed_usd"] for p in open_positions.values())
+            available = balance - committed
+            margin_budget = available * position_size_pct * size_multiplier
+            leverage = leverage_by_ticker.get(ticker, 1.0)
+            notional_capacity = margin_budget * leverage
+            count = int(notional_capacity // price) if price > 0 else 0
+            if count < 1:
+                continue
+            margin_committed = round(count * price / leverage, 6)
+            if margin_committed > available:
+                continue
+
+            open_positions[ticker] = {
+                "ticker": ticker, "entry_price": price, "count": float(count), "side": chosen_side,
+                "opened_at": pd.Timestamp(row.ts, unit="s", tz="UTC").isoformat(),
+                "opened_ts": row.ts, "margin_committed_usd": margin_committed, "_samples": [],
+                # This ticker's OWN volatility_30 at entry -- decide_exit() (the
+                # REAL, shared function, not reimplemented here) uses this to
+                # customize the take-profit/stop-loss to this specific currency
+                # instead of one flat percentage for every coin.
+                "entry_volatility_30": row.volatility_30,
+                # See USE_SCALE_IN -- _should_scale_in fails closed without
+                # this (mirrors live's identical "adopted/predates-feature"
+                # safety net), so it's always set, not just when the flag is on.
+                "original_count": float(count), "scale_ins": [],
+            }
+
+        # Mark-to-market any still-open positions at the last known price for reporting.
+        open_at_end = len(open_positions)
+
+        total_pnl = sum(t["realized_pnl_usd"] for t in trades)
+        total_fees = sum(t.get("fee_usd", 0.0) for t in trades)
+        # Only a "full" close is a resolved win/loss outcome -- a "partial"
+        # row is real, informational P&L on a position that's still open
+        # (see USE_PARTIAL_EXIT's own comment); counting it here would let
+        # one position's lifecycle inflate trade_count/win_rate, the exact
+        # gap server_common.win_rate_stats/perps_trade_analysis close for
+        # the live trade_log this mirrors.
+        resolved_trades = [t for t in trades if t.get("exit_kind", "full") == "full"]
+        wins = [t for t in resolved_trades if t["realized_pnl_usd"] > 0]
+        span_days = max(1e-9, (df["ts"].max() - df["ts"].min()) / 86400.0) if not df.empty else 1.0
+
+        return {
+            "starting_balance": starting_balance,
+            "ending_balance_realized": round(starting_balance + total_pnl, 6),
+            "total_realized_pnl_usd": round(total_pnl, 6),
+            "total_fees_usd": round(total_fees, 6),
+            "return_pct": round(total_pnl / starting_balance, 6) if starting_balance else 0.0,
+            "trade_count": len(resolved_trades),
+            "win_count": len(wins),
+            "win_rate": round(len(wins) / len(resolved_trades), 4) if resolved_trades else 0.0,
+            "trades_per_day": round(len(resolved_trades) / span_days, 3),
+            "open_positions_at_end": open_at_end,
+            "span_days": round(span_days, 2),
+            "trades": trades,
+        }
+    finally:
+        for name, old_value in _saved_flags.items():
+            setattr(strat, name, old_value)
 
 
 def run_backtest(

@@ -302,3 +302,162 @@ def test_fetch_extended_candles_handles_a_newly_listed_ticker(monkeypatch):
     result = bt.fetch_extended_candles("KXNEWPERP", days=50, period_interval=1)
     assert len(result) == 1
     assert str(result["ts"].dtype) == "int64"
+
+
+# ── Scale-in / partial-exit / conviction-sizing modeling ─────────────────────
+
+def _dip_then_rise_df(n: int = 60) -> pd.DataFrame:
+    """Mirror of _rally_then_crash_df for the LONG side: a constant small
+    dip signal (dist_to_ma_15 negative -> decide_entry_technical's long
+    "dip" fires from row 0) followed by a STEADY, near-noiseless climb
+    (~0.06%/min) -- deliberately gentle so velocity/volatility-based quick
+    exits don't fire first, only the plain take_profit path. Continuation
+    signals (dollar_volume_z/macd_hist_pct) are set generously above every
+    "promising" threshold this module's own decide_exit/_should_scale_in
+    checks so scale-in/partial-exit fire robustly, not on a fragile
+    borderline."""
+    ts = np.arange(n) * 60
+    close = 2.00 * (1.0006 ** np.arange(n))
+    dist_to_ma_15 = np.full(n, -0.01)
+    return pd.DataFrame({
+        "ticker": "KXBTCPERP", "ts": ts, "close": close, "dist_to_ma_15": dist_to_ma_15,
+        "dist_to_ma_30": dist_to_ma_15 * 0.5, "trend_pct": np.zeros(n),
+        "ret_1m": np.zeros(n), "ret_3m": np.zeros(n), "ret_5m": np.zeros(n),
+        "ret_10m": np.zeros(n), "ret_15m": np.zeros(n), "ret_30m": np.zeros(n),
+        "trend_1h": np.zeros(n), "trend_2h": np.zeros(n), "trend_3h": np.zeros(n), "trend_4h": np.zeros(n),
+        "volatility_5": np.full(n, 0.001), "volatility_15": np.full(n, 0.001), "volatility_30": np.full(n, 0.001),
+        "rsi_14": np.full(n, 0.6), "macd_hist_pct": np.full(n, 0.01), "bb_pct_b": np.full(n, 0.95),
+        "bb_bandwidth": np.full(n, 0.01), "atr_pct": np.full(n, 0.001), "stoch_k": np.full(n, 0.5),
+        "volume_ratio_5": np.full(n, 1.0), "volume_ratio_15": np.full(n, 1.0), "dollar_volume_z": np.full(n, 5.0),
+        "oi_change_pct": np.zeros(n), "spread_pct": np.full(n, 0.001),
+        "hour_sin": np.zeros(n), "hour_cos": np.ones(n), "dow_sin": np.zeros(n), "dow_cos": np.ones(n),
+        "sentiment_score": 0.0,
+    })
+
+
+class _AlwaysUpModel:
+    def __init__(self, p_up: float = 0.9):
+        self.p_up = p_up
+
+    def predict_proba(self, x):
+        return np.tile([1.0 - self.p_up, self.p_up], (len(x), 1))
+
+
+def _up_fitted(p_up: float = 0.9):
+    return {
+        "model": _AlwaysUpModel(p_up), "model_type": "fake",
+        "feature_cols": bt.FEATURE_COLUMNS + ["ticker_code"], "ticker_categories": ["KXBTCPERP"],
+    }
+
+
+def test_simulate_flags_default_off_leave_behavior_unchanged():
+    """Baseline: all 3 new flags default to the live strat.* module values
+    (False out of the box) when not passed at all -- confirms simulate()'s
+    own resolution logic before testing the override path."""
+    df = _dip_then_rise_df(n=60)
+    kwargs = dict(
+        starting_balance=100.0, leverage_by_ticker={"KXBTCPERP": 6.0},
+        entry_dip_pct=0.005, trend_filter_down_pct=1.0, model_confidence_min=0.5,
+        min_entry_relative_volatility_ratio=1.0, min_entry_volume_z=-1e9,
+    )
+    result = bt.simulate(df, _up_fitted(0.9), **kwargs)
+    assert result["trade_count"] >= 1
+    assert all(t.get("exit_kind", "full") == "full" for t in result["trades"])
+    # strat's own module attributes must come back exactly as they started --
+    # the finally-block restore actually ran.
+    assert strat.USE_SCALE_IN is False
+    assert strat.USE_PARTIAL_EXIT is False
+    assert strat.USE_CONVICTION_SIZING is False
+
+
+def test_simulate_models_conviction_sizing_when_enabled():
+    df = _dip_then_rise_df(n=60)
+    kwargs = dict(
+        starting_balance=100.0, leverage_by_ticker={"KXBTCPERP": 1.0},
+        entry_dip_pct=0.005, trend_filter_down_pct=1.0, model_confidence_min=0.5,
+        min_entry_relative_volatility_ratio=1.0, min_entry_volume_z=-1e9, use_conviction_sizing=True,
+    )
+    low = bt.simulate(df, _up_fitted(p_up=0.51), **kwargs)  # just above the 0.5 bar -> min multiplier
+    high = bt.simulate(df, _up_fitted(p_up=1.0), **kwargs)  # max possible confidence -> max multiplier
+    assert low["trades"] and high["trades"]
+    assert high["trades"][0]["count"] > low["trades"][0]["count"]
+
+
+def test_simulate_conviction_sizing_off_by_default_sizes_identically():
+    df = _dip_then_rise_df(n=60)
+    kwargs = dict(
+        starting_balance=100.0, leverage_by_ticker={"KXBTCPERP": 1.0},
+        entry_dip_pct=0.005, trend_filter_down_pct=1.0, model_confidence_min=0.5,
+        min_entry_relative_volatility_ratio=1.0, min_entry_volume_z=-1e9,
+    )
+    low = bt.simulate(df, _up_fitted(p_up=0.51), **kwargs)
+    high = bt.simulate(df, _up_fitted(p_up=1.0), **kwargs)
+    assert low["trades"][0]["count"] == high["trades"][0]["count"]
+
+
+def test_simulate_models_scale_in_when_enabled():
+    df = _dip_then_rise_df(n=60)
+    kwargs = dict(
+        starting_balance=100.0, leverage_by_ticker={"KXBTCPERP": 6.0},
+        entry_dip_pct=0.005, trend_filter_down_pct=1.0, model_confidence_min=0.5,
+        min_entry_relative_volatility_ratio=1.0, min_entry_volume_z=-1e9,
+    )
+    without_scale_in = bt.simulate(df, _up_fitted(0.9), **kwargs)
+    with_scale_in = bt.simulate(df, _up_fitted(0.9), use_scale_in=True, **kwargs)
+    assert without_scale_in["trades"] and with_scale_in["trades"]
+    # Same entry, same price path -- only the ability to add differs, so the
+    # eventual full-close count must come out strictly larger.
+    assert with_scale_in["trades"][0]["count"] > without_scale_in["trades"][0]["count"]
+
+
+def test_simulate_scale_in_off_by_default_never_adds():
+    df = _dip_then_rise_df(n=60)
+    result = bt.simulate(
+        df, _up_fitted(0.9), starting_balance=100.0, leverage_by_ticker={"KXBTCPERP": 6.0},
+        entry_dip_pct=0.005, trend_filter_down_pct=1.0, model_confidence_min=0.5,
+        min_entry_relative_volatility_ratio=1.0, min_entry_volume_z=-1e9,
+    )
+    twice = bt.simulate(
+        df, _up_fitted(0.9), starting_balance=100.0, leverage_by_ticker={"KXBTCPERP": 6.0},
+        entry_dip_pct=0.005, trend_filter_down_pct=1.0, model_confidence_min=0.5,
+        min_entry_relative_volatility_ratio=1.0, min_entry_volume_z=-1e9,
+    )
+    assert result["trades"][0]["count"] == twice["trades"][0]["count"]
+
+
+def test_simulate_models_partial_exit_when_enabled():
+    df = _dip_then_rise_df(n=60)
+    result = bt.simulate(
+        df, _up_fitted(0.9), starting_balance=100.0, leverage_by_ticker={"KXBTCPERP": 6.0},
+        entry_dip_pct=0.005, trend_filter_down_pct=1.0, model_confidence_min=0.5,
+        min_entry_relative_volatility_ratio=1.0, min_entry_volume_z=-1e9, use_partial_exit=True,
+    )
+    partial_trades = [t for t in result["trades"] if t["exit_kind"] == "partial"]
+    assert len(partial_trades) == 1
+    assert partial_trades[0]["realized_pnl_usd"] > 0
+    assert partial_trades[0]["remaining_count"] is not None and partial_trades[0]["remaining_count"] > 0
+    # A monotonically rising price never retraces to the tightened,
+    # locked-in-profit stop -- the remainder rides to the end of this
+    # window without a second close.
+    assert result["open_positions_at_end"] == 1
+    # A "partial" row is real, informational P&L on a position that's still
+    # open, not a resolved win/loss -- excluded from trade_count/win_rate,
+    # same exclusion server_common.win_rate_stats applies to the live
+    # trade_log this mirrors.
+    assert result["trade_count"] == 0
+    assert result["win_count"] == 0
+
+
+def test_simulate_partial_exit_off_by_default_closes_fully():
+    """The constant dip signal in this fixture re-triggers a fresh entry the
+    row after the first closes (unrealistic for real data, expected here) --
+    so only the FIRST trade's exit_kind is meaningful for what's under test,
+    not open_positions_at_end."""
+    df = _dip_then_rise_df(n=60)
+    result = bt.simulate(
+        df, _up_fitted(0.9), starting_balance=100.0, leverage_by_ticker={"KXBTCPERP": 6.0},
+        entry_dip_pct=0.005, trend_filter_down_pct=1.0, model_confidence_min=0.5,
+        min_entry_relative_volatility_ratio=1.0, min_entry_volume_z=-1e9,
+    )
+    assert result["trades"]
+    assert result["trades"][0]["exit_kind"] == "full"
