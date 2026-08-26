@@ -947,3 +947,56 @@ def test_reply_to_trending_keyword_posts_records_replies_for_future_dedup(monkey
     monkeypatch.setattr(threads_post.threads_client, "create_and_publish_post", lambda text, **kw: True)
     threads_post.reply_to_trending_keyword_posts("crypto", market="crypto")
     assert "post-1" in threads_post._load_replied_posts()  # noqa: SLF001
+
+
+# ── post_trending_news's no-fresh-story fallback: reply first, not filler ──
+
+def test_post_trending_news_replies_instead_of_posting_filler_when_there_is_no_story(monkeypatch):
+    from data import threads_persona
+    monkeypatch.setattr(threads_post.threads_client, "search_keyword_posts", lambda query, **kw: [_keyword_post("post-1")])
+    monkeypatch.setattr(threads_persona, "anchor_draft_reply", lambda text, **kw: "Great point!")
+    reply_calls = []
+    monkeypatch.setattr(
+        threads_post.threads_client, "create_and_publish_post",
+        lambda text, **kw: reply_calls.append((text, kw.get("reply_to_id"))),
+    )
+    result = threads_post.post_trending_news(None, market="crypto")
+    assert result is True
+    assert len(reply_calls) == 1
+    assert reply_calls[0][1] == "post-1"  # a real reply, not the "nothing notable" filler
+
+
+def test_post_trending_news_replies_instead_of_filler_for_a_recently_posted_duplicate(monkeypatch):
+    from data import threads_persona
+    threads_post._record_posted_story("crypto", "Bitcoin surges past resistance")  # noqa: SLF001
+    monkeypatch.setattr(threads_post.threads_client, "search_keyword_posts", lambda query, **kw: [_keyword_post("post-1")])
+    monkeypatch.setattr(threads_persona, "anchor_draft_reply", lambda text, **kw: "Great point!")
+    reply_calls = []
+    monkeypatch.setattr(
+        threads_post.threads_client, "create_and_publish_post",
+        lambda text, **kw: reply_calls.append(kw.get("reply_to_id")),
+    )
+    result = threads_post.post_trending_news(_story(), market="crypto")
+    assert result is True
+    assert reply_calls == ["post-1"]
+
+
+def test_post_trending_news_falls_back_to_filler_only_when_the_reply_round_finds_nothing(monkeypatch):
+    monkeypatch.setattr(threads_post.threads_client, "search_keyword_posts", lambda query, **kw: [])
+    posted = []
+    monkeypatch.setattr(threads_post.threads_client, "create_and_publish_post", lambda text, **kw: posted.append(text))
+    result = threads_post.post_trending_news(None, market="crypto")
+    assert result is True
+    assert "nothing notable" in posted[0].lower()
+
+
+def test_post_trending_news_falls_back_to_filler_when_the_reply_round_itself_raises(monkeypatch):
+    def raise_error(*a, **k):
+        raise RuntimeError("simulated failure")
+
+    monkeypatch.setattr(threads_post, "reply_to_trending_keyword_posts", raise_error)
+    posted = []
+    monkeypatch.setattr(threads_post.threads_client, "create_and_publish_post", lambda text, **kw: posted.append(text))
+    result = threads_post.post_trending_news(None, market="crypto")
+    assert result is True
+    assert "nothing notable" in posted[0].lower()

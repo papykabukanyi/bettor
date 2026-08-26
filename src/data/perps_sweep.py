@@ -42,7 +42,14 @@ logger = logging.getLogger(__name__)
 # even though internally they're applied via a temporary module-attribute
 # patch inside simulate() itself -- see that function's own docstring).
 SIMULATE_KWARG_SPACE: dict[str, list[Any]] = {
-    "model_confidence_min": [0.55, 0.58, 0.62, 0.65],
+    # Real finding from a 40-config/14-day first pass (2026-08-25): sampling
+    # up to 0.65 here (well above the live 0.58 default) produced mostly
+    # zero-trade configs in a 14-day window -- too restrictive combined with
+    # the other entry gates to leave enough sample size to evaluate. Shifted
+    # down to stay closer to values this file's own extensive prior sweeps
+    # (see perps_strategy.py's own MODEL_CONFIDENCE_MIN history) confirm
+    # actually generate trades.
+    "model_confidence_min": [0.52, 0.55, 0.58, 0.60],
     "enable_shorts": [True, False],
     "use_correlation_study": [True, False],
     "correlation_confidence_max_adjustment": [0.04, 0.06, 0.10],
@@ -111,7 +118,7 @@ def sample_configs(n_configs: int, *, seed: int = 42) -> list[dict[str, Any]]:
 
 def run_sweep(
     *, n_configs: int = 300, days: int = 30, top_k: int = 10, tickers: list[str] | None = None,
-    seed: int = 42, progress_every: int = 25,
+    seed: int = 42, progress_every: int = 5,
 ) -> dict[str, Any]:
     """Fetches real history for `tickers` (default: the live watchlist)
     covering `days`, fits one model on the training 70% (same 70/30 split
@@ -127,14 +134,18 @@ def run_sweep(
     falls apart across folds is visibly distinguishable from one that
     holds up."""
     watchlist = tickers or bt.get_watchlist()
+    logger.info("[perps_sweep] fetching %d days of history for %d tickers: %s", days, len(watchlist), watchlist)
+    fetch_t0 = time.time()
     frames = []
     for ticker in watchlist:
+        ticker_t0 = time.time()
         try:
             feats = bt.build_ticker_frame(ticker, days=days)
             if not feats.empty:
                 frames.append(feats)
+            logger.info("[perps_sweep] fetched %s: %d rows in %.1fs", ticker, len(feats), time.time() - ticker_t0)
         except Exception as exc:
-            logger.warning("[perps_sweep] build_ticker_frame failed for %s: %s", ticker, exc)
+            logger.warning("[perps_sweep] build_ticker_frame failed for %s (%.1fs before failing): %s", ticker, time.time() - ticker_t0, exc)
     if not frames:
         return {"ok": False, "reason": "no_data"}
     combined = pd.concat(frames, ignore_index=True).sort_values("ts")
@@ -144,12 +155,21 @@ def run_sweep(
     if test_df.empty:
         return {"ok": False, "reason": "no_test_rows"}
     present_tickers = sorted(test_df["ticker"].unique())
+    logger.info(
+        "[perps_sweep] fetch done in %.1fs total -- %d train rows, %d test rows, %d tickers present",
+        time.time() - fetch_t0, len(train_df), len(test_df), len(present_tickers),
+    )
     leverage_by_ticker = bt.fetch_leverage_by_ticker(present_tickers)
 
+    fit_t0 = time.time()
     fitted = bt.fit_backtest_model(train_df)
+    logger.info("[perps_sweep] model fit done in %.1fs (%s)", time.time() - fit_t0, (fitted or {}).get("model_type"))
+    predict_t0 = time.time()
     test_df = bt.add_model_predictions(test_df, fitted)  # precomputed ONCE, reused by every screened config
+    logger.info("[perps_sweep] predictions precomputed in %.1fs", time.time() - predict_t0)
 
     configs = sample_configs(n_configs, seed=seed)
+    logger.info("[perps_sweep] sampled %d unique configs -- starting stage-1 screen", len(configs))
     original_module_attrs = {name: getattr(strat, name) for name in MODULE_ATTR_SPACE}
 
     screened: list[dict[str, Any]] = []

@@ -316,6 +316,19 @@ def _short_market_label(market: str) -> str:
     return _SHORT_MARKET_LABELS.get(market, "Perps")
 
 
+# Real feedback: a bland "nothing notable right now" filler post is low-
+# value on its own, and got noticeably WORSE once dedup started skipping
+# genuine repeats -- it could now fire on essentially every cycle a slow
+# news day produced only a duplicate, instead of just occasionally. This
+# is what post_trending_news's own no-fresh-story branch searches with
+# when it goes for real engagement (a reply round) instead of filler text.
+_REPLY_KEYWORDS_BY_MARKET = {"perps": "crypto", "crypto": "crypto", "stocks": "stocks", "options": "stocks"}
+
+
+def _reply_keyword_for_market(market: str) -> str:
+    return _REPLY_KEYWORDS_BY_MARKET.get(market, "trading")
+
+
 # Discovery hashtags extracted straight from the headline's own text --
 # specific/topical tags (a coin name, a ticker, "Fed", "earnings", ...) get
 # found by people searching or browsing THAT topic, on top of (not instead
@@ -732,6 +745,17 @@ def post_trending_news(story: dict | None, *, market: str) -> bool:
         logger.info("[threads_post] skipping trending news for %s -- already posted recently: %s", market, story["title"])
         story = None
     if not story:
+        # Real engagement instead of filler: reply to trending conversation
+        # in this market rather than posting a bland "nothing notable"
+        # line -- see _REPLY_KEYWORDS_BY_MARKET's own comment. Only falls
+        # back to a real (still better than silence) text post if the
+        # reply round itself found nothing to reply to.
+        try:
+            reply_result = reply_to_trending_keyword_posts(_reply_keyword_for_market(market), market=market)
+            if reply_result.get("replied"):
+                return True
+        except Exception as exc:
+            logger.warning("[threads_post] fallback reply round failed: %s", exc)
         text = f"{_short_market_label(market)} trending news: nothing notable right now.\n{_hashtags_for_market(market)} #Trends #News"
         try:
             threads_client.create_and_publish_post(text)
