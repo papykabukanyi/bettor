@@ -740,16 +740,44 @@ def post_trending_news(story: dict | None, *, market: str) -> bool:
     # freshest item -- see this module's own recent-news dedup comment.
     # Checked against the RAW title (before any anchor rewrite below), since
     # dedup must key off the real underlying story, not this cycle's own
-    # restyled wording of it.
+    # restyled wording of it. `duplicate_story` keeps the ORIGINAL story
+    # around after `story` itself gets nulled out, specifically so the
+    # commentary fallback right below still has something real to comment
+    # ON, instead of only ever seeing "there's nothing."
+    duplicate_story = None
     if story and _is_recent_duplicate_story(market, story["title"]):
         logger.info("[threads_post] skipping trending news for %s -- already posted recently: %s", market, story["title"])
+        duplicate_story = story
         story = None
     if not story:
+        # Real feedback: a reply-search round (see reply_to_trending_keyword_posts's
+        # own module note) is functionally self-only under Meta's current
+        # Standard Access grant, so it routinely finds nothing to reply to
+        # -- falling all the way through to a bland "nothing notable" post
+        # anyway in practice. Genuine commentary/analysis on a story the
+        # account already knows about (even a duplicate one -- a fresh TAKE
+        # is real, distinct content, not a repost) doesn't depend on that
+        # crippled search at all, so it's tried FIRST and covers the
+        # dominant real case (a duplicate headline, not an empty feed).
+        if duplicate_story:
+            try:
+                from data import threads_persona
+                commentary = threads_persona.anchor_commentary(
+                    _clean_headline(duplicate_story["title"]), source=duplicate_story.get("source"),
+                    secondary=[_clean_headline(s) for s in (duplicate_story.get("secondary") or []) if s],
+                )
+                if commentary:
+                    text = f"{commentary}\n\n{_hashtags_for_story(duplicate_story, market=market)}"
+                    if len(text) > _THREADS_POST_MAX_CHARS:
+                        text = text[: _THREADS_POST_MAX_CHARS - 1] + "…"
+                    threads_client.create_and_publish_post(text)
+                    return True
+            except Exception as exc:
+                logger.warning("[threads_post] commentary fallback failed: %s", exc)
         # Real engagement instead of filler: reply to trending conversation
-        # in this market rather than posting a bland "nothing notable"
-        # line -- see _REPLY_KEYWORDS_BY_MARKET's own comment. Only falls
-        # back to a real (still better than silence) text post if the
-        # reply round itself found nothing to reply to.
+        # in this market -- see _REPLY_KEYWORDS_BY_MARKET's own comment.
+        # Reached when there was no duplicate to comment on (a genuinely
+        # empty feed) or the commentary attempt itself failed.
         try:
             reply_result = reply_to_trending_keyword_posts(_reply_keyword_for_market(market), market=market)
             if reply_result.get("replied"):

@@ -103,6 +103,42 @@ def anchor_rewrite_headline(
     return _chat(_ANCHOR_SYSTEM_PROMPT, context + "\n\nRewrite the HEADLINE as one punchy anchor-style line.")
 
 
+_COMMENTARY_SYSTEM_PROMPT = (
+    "You are the on-air voice of CUMDEV, a crypto/stocks trading bot's Threads "
+    "account, giving your own take on a story that's still developing/still "
+    "the talk of the timeline. This is NOT a headline announcement (the "
+    "audience already saw the headline) -- it's genuine analysis or "
+    "reaction: why it matters, what to watch next, a real opinion. You NEVER "
+    "invent facts, numbers, names, or details not present in the source "
+    "material. Keep it SHORT (this is a social post, not an article -- one "
+    "to three sentences, under 250 characters). No hashtags (added "
+    "separately by the caller). At most one emoji, and only if it genuinely "
+    "earns its place. Output ONLY the commentary itself, nothing else -- no "
+    "quotes, no preamble, no 'BREAKING:' framing (that's for the headline "
+    "post, not this one)."
+)
+
+
+def anchor_commentary(title: str, *, source: str | None = None, secondary: list[str] | None = None) -> str | None:
+    """Genuine analysis/reaction/"take" on a story the account has already
+    covered (or can't re-cover as a fresh headline post right now -- see
+    threads_post.post_trending_news's own no-fresh-story fallback) --
+    deliberately NOT a rewrite of the headline itself (see
+    anchor_rewrite_headline for that): this is new, distinct content built
+    OFF the same story, not a repost/paraphrase of it, so it's genuinely
+    fresh even when the underlying news item is a duplicate. Returns None
+    (never raises) on any failure -- caller must fall back to something
+    else (a reply round, or plain filler text) rather than post nothing."""
+    if not title:
+        return None
+    context = f'Story: "{title}"'
+    if source:
+        context += f"\nSource: {source}"
+    if secondary:
+        context += "\nAlso trending right now: " + "; ".join(secondary[:3])
+    return _chat(_COMMENTARY_SYSTEM_PROMPT, context + "\n\nGive your own take on this.")
+
+
 def anchor_draft_reply(post_text: str, *, author_username: str | None = None) -> str | None:
     """Drafts a reply to another Threads post in the same anchor persona.
     Returns None (never raises) on any failure -- caller must either fall

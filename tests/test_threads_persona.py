@@ -121,3 +121,32 @@ def test_anchor_draft_reply_includes_the_username_as_context(monkeypatch):
     assert result == "Nice call on that trade!"
     assert "cryptofan" in captured["user_content"]
     assert "BTC to the moon" in captured["user_content"]
+
+
+def test_anchor_commentary_returns_none_for_an_empty_title(monkeypatch):
+    def fail_if_called(*a, **k):
+        raise AssertionError("must not call the model for an empty title")
+
+    monkeypatch.setattr(threads_persona.requests, "post", fail_if_called)
+    assert threads_persona.anchor_commentary("") is None
+
+
+def test_anchor_commentary_includes_source_and_secondary_as_context(monkeypatch):
+    captured = {}
+
+    def fake_post(url, *, headers, json, timeout):
+        captured["system_content"] = json["messages"][0]["content"]
+        captured["user_content"] = json["messages"][1]["content"]
+        return _chat_response("This is bigger than it looks -- here's why.")
+
+    monkeypatch.setattr(threads_persona.requests, "post", fake_post)
+    result = threads_persona.anchor_commentary(
+        "Bitcoin surges", source="cointelegraph", secondary=["ETF inflows accelerate"],
+    )
+    assert result == "This is bigger than it looks -- here's why."
+    assert "Bitcoin surges" in captured["user_content"]
+    assert "cointelegraph" in captured["user_content"]
+    assert "ETF inflows accelerate" in captured["user_content"]
+    # Distinct persona/prompt from the headline rewrite -- explicitly NOT a
+    # "BREAKING:"-style announcement, since the audience already saw that.
+    assert captured["system_content"] != threads_persona._ANCHOR_SYSTEM_PROMPT  # noqa: SLF001

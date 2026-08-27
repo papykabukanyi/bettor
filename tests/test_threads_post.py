@@ -1000,3 +1000,58 @@ def test_post_trending_news_falls_back_to_filler_when_the_reply_round_itself_rai
     result = threads_post.post_trending_news(None, market="crypto")
     assert result is True
     assert "nothing notable" in posted[0].lower()
+
+
+# ── post_trending_news's duplicate-story fallback: commentary first ────────
+
+def test_post_trending_news_posts_commentary_instead_of_reply_for_a_duplicate_story(monkeypatch):
+    from data import threads_persona
+    threads_post._record_posted_story("crypto", "Bitcoin surges past resistance")  # noqa: SLF001
+    monkeypatch.setattr(
+        threads_persona, "anchor_commentary",
+        lambda title, **kw: "This kind of move usually means one thing: momentum traders are just getting started.",
+    )
+
+    def fail_if_called(*a, **k):
+        raise AssertionError("commentary succeeded -- must not fall through to the reply round")
+
+    monkeypatch.setattr(threads_post, "reply_to_trending_keyword_posts", fail_if_called)
+    posted = []
+    monkeypatch.setattr(threads_post.threads_client, "create_and_publish_post", lambda text: posted.append(text))
+    result = threads_post.post_trending_news(_story(), market="crypto")
+    assert result is True
+    assert "momentum traders are just getting started" in posted[0]
+
+
+def test_post_trending_news_falls_back_to_reply_when_commentary_returns_none_for_a_duplicate(monkeypatch):
+    from data import threads_persona
+    threads_post._record_posted_story("crypto", "Bitcoin surges past resistance")  # noqa: SLF001
+    monkeypatch.setattr(threads_persona, "anchor_commentary", lambda title, **kw: None)
+    monkeypatch.setattr(threads_post.threads_client, "search_keyword_posts", lambda query, **kw: [_keyword_post("post-1")])
+    monkeypatch.setattr(threads_persona, "anchor_draft_reply", lambda text, **kw: "Great point!")
+    reply_calls = []
+    monkeypatch.setattr(
+        threads_post.threads_client, "create_and_publish_post",
+        lambda text, **kw: reply_calls.append(kw.get("reply_to_id")),
+    )
+    result = threads_post.post_trending_news(_story(), market="crypto")
+    assert result is True
+    assert reply_calls == ["post-1"]
+
+
+def test_post_trending_news_does_not_attempt_commentary_when_there_was_no_duplicate_at_all(monkeypatch):
+    """story=None from the start (every feed failed) -- there's nothing to
+    comment ON, so this must go straight to the reply round, not call the
+    commentary model with an empty/missing story."""
+    from data import threads_persona
+
+    def fail_if_called(*a, **k):
+        raise AssertionError("must not attempt commentary when there was never a duplicate story to comment on")
+
+    monkeypatch.setattr(threads_persona, "anchor_commentary", fail_if_called)
+    monkeypatch.setattr(threads_post.threads_client, "search_keyword_posts", lambda query, **kw: [])
+    posted = []
+    monkeypatch.setattr(threads_post.threads_client, "create_and_publish_post", lambda text, **kw: posted.append(text))
+    result = threads_post.post_trending_news(None, market="crypto")
+    assert result is True
+    assert "nothing notable" in posted[0].lower()
