@@ -248,6 +248,108 @@ def test_recommend_correlation_study_weight_ignores_dry_run_trades():
     assert result["reason"] == "insufficient_trade_history"
 
 
+# ── recommend_position_management_trial: evidence-gated live trial for
+# scale_in/partial_exit/conviction_sizing -- simple on/off toggles, so
+# unlike correlation_score there's no natural per-trade continuous signal
+# to split on until something has actually been enabled for a stretch.
+
+def _pm_trade(*, pnl: float, feature: str, enabled: bool | None, dry_run: bool = False) -> dict:
+    trade = _trade(pnl=pnl, dry_run=dry_run)
+    if enabled is not None:
+        trade[f"entry_{feature}_enabled"] = enabled
+    return trade
+
+
+def test_recommend_position_management_trial_insufficient_history_before_any_trial():
+    trades = [_pm_trade(pnl=1.0, feature="partial_exit", enabled=False) for _ in range(3)]
+    result = pta.recommend_position_management_trial(trades, feature="partial_exit", current_enabled=False)
+    assert result["should_apply"] is False
+    assert result["reason"] == "insufficient_trade_history"
+
+
+def test_recommend_position_management_trial_ignores_trades_with_no_recorded_flag():
+    trades = [_trade(pnl=1.0) for _ in range(50)]  # no entry_partial_exit_enabled key at all
+    result = pta.recommend_position_management_trial(trades, feature="partial_exit", current_enabled=False)
+    assert result["should_apply"] is False
+    assert result["reason"] == "insufficient_trade_history"
+
+
+def test_recommend_position_management_trial_ignores_dry_run_trades():
+    min_history = pta.POSITION_MANAGEMENT_MIN_HISTORY_TO_START["partial_exit"]
+    trades = [_pm_trade(pnl=1.0, feature="partial_exit", enabled=False, dry_run=True) for _ in range(min_history * 2)]
+    result = pta.recommend_position_management_trial(trades, feature="partial_exit", current_enabled=False)
+    assert result["should_apply"] is False
+    assert result["reason"] == "insufficient_trade_history"
+
+
+def test_recommend_position_management_trial_starts_a_trial_once_enough_history_exists():
+    min_history = pta.POSITION_MANAGEMENT_MIN_HISTORY_TO_START["partial_exit"]
+    trades = [_pm_trade(pnl=0.1, feature="partial_exit", enabled=False) for _ in range(min_history)]
+    result = pta.recommend_position_management_trial(trades, feature="partial_exit", current_enabled=False)
+    assert result["should_apply"] is True
+    assert result["action"] == "start_trial"
+    assert result["recommended_enabled"] is True
+
+
+def test_recommend_position_management_trial_never_auto_starts_scale_in():
+    """scale_in adds genuine new capital risk -- this tuner may confirm or
+    disable an already-running scale_in trial, but must never turn it on
+    for the first time by itself."""
+    trades = [_pm_trade(pnl=0.1, feature="scale_in", enabled=False) for _ in range(500)]
+    result = pta.recommend_position_management_trial(trades, feature="scale_in", current_enabled=False)
+    assert result["should_apply"] is False
+    assert result["reason"] == "insufficient_trade_history"
+
+
+def test_recommend_position_management_trial_in_progress_below_min_trades():
+    trades = [_pm_trade(pnl=0.1, feature="partial_exit", enabled=True) for _ in range(5)]
+    trades += [_pm_trade(pnl=0.1, feature="partial_exit", enabled=False) for _ in range(50)]
+    result = pta.recommend_position_management_trial(trades, feature="partial_exit", current_enabled=True)
+    assert result["should_apply"] is False
+    assert result["reason"] == "insufficient_trade_history"
+
+
+def test_recommend_position_management_trial_confirms_when_currently_enabled_and_winning():
+    n = pta.POSITION_MANAGEMENT_TRIAL_MIN_TRADES
+    trades = [_pm_trade(pnl=1.0, feature="partial_exit", enabled=True) for _ in range(n)]
+    trades += [_pm_trade(pnl=-0.5, feature="partial_exit", enabled=False) for _ in range(n)]
+    result = pta.recommend_position_management_trial(trades, feature="partial_exit", current_enabled=True)
+    assert result["should_apply"] is False
+    assert result["reason"] == "confirmed_enabled"
+
+
+def test_recommend_position_management_trial_never_auto_reenables_when_currently_off():
+    """Even when the 'with' cohort clearly wins, this never flips
+    recommended action to re-enable on its own if it's currently off --
+    only a fresh start_trial from a clean OFF state (or a human) turns it
+    on; this just reports what the evidence shows."""
+    n = pta.POSITION_MANAGEMENT_TRIAL_MIN_TRADES
+    trades = [_pm_trade(pnl=1.0, feature="partial_exit", enabled=True) for _ in range(n)]
+    trades += [_pm_trade(pnl=-0.5, feature="partial_exit", enabled=False) for _ in range(n)]
+    result = pta.recommend_position_management_trial(trades, feature="partial_exit", current_enabled=False)
+    assert result["should_apply"] is False
+    assert result["reason"] == "evidence_favors_enabling_but_currently_off"
+
+
+def test_recommend_position_management_trial_recommends_disabling_when_it_hurts():
+    n = pta.POSITION_MANAGEMENT_TRIAL_MIN_TRADES
+    trades = [_pm_trade(pnl=-0.5, feature="scale_in", enabled=True) for _ in range(n)]
+    trades += [_pm_trade(pnl=1.0, feature="scale_in", enabled=False) for _ in range(n)]
+    result = pta.recommend_position_management_trial(trades, feature="scale_in", current_enabled=True)
+    assert result["should_apply"] is True
+    assert result["action"] == "disable"
+    assert result["recommended_enabled"] is False
+
+
+def test_recommend_position_management_trial_does_not_apply_without_a_clear_signal():
+    n = pta.POSITION_MANAGEMENT_TRIAL_MIN_TRADES
+    trades = [_pm_trade(pnl=0.1, feature="conviction_sizing", enabled=True) for _ in range(n)]
+    trades += [_pm_trade(pnl=0.1, feature="conviction_sizing", enabled=False) for _ in range(n)]
+    result = pta.recommend_position_management_trial(trades, feature="conviction_sizing", current_enabled=True)
+    assert result["should_apply"] is False
+    assert result["reason"] == "no_clear_signal"
+
+
 def test_format_analysis_summary_text_with_no_trades():
     text = pta.format_analysis_summary_text({"trades_analyzed": 0, "overall": {}})
     assert "not enough" in text.lower()

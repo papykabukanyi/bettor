@@ -344,6 +344,103 @@ def recommend_correlation_study_weight(
     }
 
 
+# ---------------------------------------------------------------------------
+# Scale-in / partial-exit / conviction-sizing trial evaluator. Unlike
+# correlation_score, these 3 are simple global on/off toggles with no
+# natural continuous per-trade reading to split on -- there's no "agreed
+# vs disagreed" bucket to compare until something has actually been
+# enabled for a real stretch. This runs a genuine live trial instead:
+# recommends turning a feature ON once there's enough overall real trade
+# history to justify trying it, then -- once enough trades have closed
+# WITH it on -- compares that cohort's real performance against the
+# trades that closed BEFORE it was enabled, only keeping/re-recommending
+# it if the evidence is unambiguous.
+# ---------------------------------------------------------------------------
+
+POSITION_MANAGEMENT_TRIAL_MIN_TRADES = 20  # needed in EACH bucket before trusting a with-vs-without comparison
+POSITION_MANAGEMENT_MIN_HISTORY_TO_START = {
+    "partial_exit": 20,      # pure risk-reduction (locks in profit, tightens the stop on what's left) -- lowest bar
+    "conviction_sizing": 30,  # reallocates size within a bounded 0.7x-1.5x range among trades that already qualify
+    # "scale_in" has NO entry here on purpose: it's the one feature that
+    # adds genuine NEW capital to an already-open position, a materially
+    # different risk than resizing or timing an exit that was happening
+    # anyway. This tuner will confirm/disable a scale_in trial once a
+    # human has started one at least once, but will never auto-START it.
+}
+
+
+def recommend_position_management_trial(
+    trade_log: list[dict[str, Any]] | None, *, feature: str, current_enabled: bool,
+) -> dict[str, Any]:
+    """`feature` is one of "scale_in"/"partial_exit"/"conviction_sizing" --
+    see perps_strategy.apply_position_management_override. Reads
+    entry_{feature}_enabled off each real trade (see scan_and_enter's own
+    entry_context) to split closed trades into "entered while this was ON"
+    vs "entered while this was OFF", comparing avg P&L and win rate
+    between them once both sides have enough real trades.
+
+    Four possible outcomes:
+      - should_apply=True, action="start_trial": nothing has ever been
+        enabled yet, but there's enough overall real trade history to
+        justify trying it (see POSITION_MANAGEMENT_MIN_HISTORY_TO_START) --
+        never offered for "scale_in" (see that constant's own comment).
+      - should_apply=False, reason="insufficient_trade_history": not
+        enough real trades exist yet in one or both buckets to trust a
+        comparison (this covers "no trial started and not enough overall
+        history yet" too).
+      - should_apply=False, reason="confirmed_enabled" /
+        "evidence_favors_enabling_but_currently_off": the "with" cohort
+        clearly wins on BOTH avg P&L and win rate. Deliberately NEVER
+        auto-(re)enables here, even in the second case -- only a fresh
+        start_trial (from a clean OFF state) or a human turns something
+        on; this just reports what the evidence already shows.
+      - should_apply=True, action="disable": the "with" cohort clearly
+        LOSES on both avg P&L and win rate while currently enabled -- real
+        evidence it's hurting, not just unproven yet (same bar
+        recommend_correlation_study_weight's own disable path uses)."""
+    trade_log = trade_log or []
+    key = f"entry_{feature}_enabled"
+    real_trades = [t for t in trade_log if not t.get("dry_run") and t.get(key) is not None]
+    with_feature = [t for t in real_trades if t.get(key) is True]
+    without_feature = [t for t in real_trades if t.get(key) is False]
+    with_stats = _bucket_stats(with_feature)
+    without_stats = _bucket_stats(without_feature)
+
+    if not with_feature:
+        min_history = POSITION_MANAGEMENT_MIN_HISTORY_TO_START.get(feature)
+        if not current_enabled and min_history is not None and without_stats["trades"] >= min_history:
+            return {
+                "ok": True, "should_apply": True, "action": "start_trial",
+                "recommended_enabled": True, "with_feature": with_stats, "without_feature": without_stats,
+            }
+        return {
+            "ok": True, "should_apply": False, "reason": "insufficient_trade_history",
+            "with_feature": with_stats, "without_feature": without_stats,
+        }
+
+    if with_stats["trades"] < POSITION_MANAGEMENT_TRIAL_MIN_TRADES or without_stats["trades"] < POSITION_MANAGEMENT_TRIAL_MIN_TRADES:
+        return {
+            "ok": True, "should_apply": False, "reason": "insufficient_trade_history",
+            "with_feature": with_stats, "without_feature": without_stats,
+        }
+
+    improves_pnl = with_stats["avg_pnl_usd"] > without_stats["avg_pnl_usd"]
+    improves_win_rate = with_stats["win_rate"] >= without_stats["win_rate"]
+    if improves_pnl and improves_win_rate:
+        reason = "confirmed_enabled" if current_enabled else "evidence_favors_enabling_but_currently_off"
+        return {"ok": True, "should_apply": False, "reason": reason, "with_feature": with_stats, "without_feature": without_stats}
+
+    worsens_pnl = with_stats["avg_pnl_usd"] < without_stats["avg_pnl_usd"]
+    worsens_win_rate = with_stats["win_rate"] < without_stats["win_rate"]
+    if worsens_pnl and worsens_win_rate and current_enabled:
+        return {
+            "ok": True, "should_apply": True, "action": "disable",
+            "recommended_enabled": False, "with_feature": with_stats, "without_feature": without_stats,
+        }
+
+    return {"ok": True, "should_apply": False, "reason": "no_clear_signal", "with_feature": with_stats, "without_feature": without_stats}
+
+
 def format_analysis_summary_text(analysis: dict[str, Any], *, tuning: dict[str, Any] | None = None) -> str:
     """Human-readable digest for the Threads post -- what the account's
     real trading history shows, not a raw data dump."""

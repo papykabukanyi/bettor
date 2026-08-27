@@ -923,6 +923,42 @@ def apply_correlation_study_override(
         return dict(state["tuning"])
 
 
+# feature name -> (state["tuning"] key, module-global name). All 3 are
+# simple booleans (unlike correlation_study's extra max_adjustment knob),
+# so one shared apply function covers all of them instead of 3 near-
+# identical copies.
+_POSITION_MANAGEMENT_TUNING_KEYS = {
+    "scale_in": ("scale_in_enabled", "USE_SCALE_IN"),
+    "partial_exit": ("partial_exit_enabled", "USE_PARTIAL_EXIT"),
+    "conviction_sizing": ("conviction_sizing_enabled", "USE_CONVICTION_SIZING"),
+}
+
+
+def apply_position_management_override(feature: str, *, enabled: bool, reason: str) -> dict[str, Any]:
+    """Applies an evidence-gated enable/disable for one of the 3 position-
+    management features (scale-in, partial-exit, conviction-sizing -- see
+    perps_trade_analysis.recommend_position_management_trial) durably,
+    WITHOUT a redeploy -- same state["tuning"] merge mechanism as
+    apply_confidence_threshold_override/apply_correlation_study_override
+    (never overwrites the whole dict, so all of these coexist). `feature`
+    is one of "scale_in"/"partial_exit"/"conviction_sizing"."""
+    if feature not in _POSITION_MANAGEMENT_TUNING_KEYS:
+        raise ValueError(f"unknown position-management feature: {feature!r}")
+    tuning_key, global_name = _POSITION_MANAGEMENT_TUNING_KEYS[feature]
+    with _STATE_LOCK:
+        state = _load_state()
+        tuning = dict(state.get("tuning") or {})
+        previous = tuning.get(tuning_key, globals()[global_name])
+        tuning[tuning_key] = enabled
+        tuning.update({
+            "updated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+            "reason": reason, "field": feature, f"previous_{tuning_key}": previous,
+        })
+        state["tuning"] = tuning
+        _save_state(state, push_durable=True)
+        return dict(state["tuning"])
+
+
 def _today_str() -> str:
     return dt.datetime.now(dt.timezone.utc).date().isoformat()
 
@@ -1912,6 +1948,17 @@ def _maybe_run_batch_trade_analysis() -> None:
                 max_adjustment=correlation_rec.get("recommended_max_adjustment"),
                 reason=f"5-trade batch review ({correlation_rec['action']})",
             )
+
+        for feature, (tuning_key, global_name) in _POSITION_MANAGEMENT_TUNING_KEYS.items():
+            current_enabled = bool(tuning_state.get(tuning_key, globals()[global_name]))
+            pm_rec = perps_trade_analysis.recommend_position_management_trial(
+                real_trades, feature=feature, current_enabled=current_enabled,
+            )
+            if pm_rec.get("should_apply"):
+                apply_position_management_override(
+                    feature, enabled=bool(pm_rec["recommended_enabled"]),
+                    reason=f"5-trade batch review ({pm_rec.get('action')})",
+                )
     except Exception:
         logger.warning("[perps_strategy] batch trade analysis failed", exc_info=True)
 
@@ -2161,6 +2208,15 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
         # own identical read -- see apply_correlation_study_override.
         tuning_state = state.get("tuning") or {}
         effective_use_correlation_study = tuning_state.get("correlation_study_enabled", USE_CORRELATION_STUDY)
+        # USE_SCALE_IN/USE_PARTIAL_EXIT are read as bare module globals
+        # inside decide_exit/_should_scale_in/_scale_in_cheap_gates_pass
+        # (by design -- see perps_backtest.simulate()'s own comment on why
+        # these 3 flags aren't threaded through as explicit params). Synced
+        # from any live tuning override here, every cycle, before those
+        # functions run -- see apply_scale_in_override/apply_partial_exit_override.
+        global USE_SCALE_IN, USE_PARTIAL_EXIT
+        USE_SCALE_IN = tuning_state.get("scale_in_enabled", USE_SCALE_IN)
+        USE_PARTIAL_EXIT = tuning_state.get("partial_exit_enabled", USE_PARTIAL_EXIT)
 
         remaining: list[dict[str, Any]] = []
         closed: list[dict[str, Any]] = []
@@ -2436,6 +2492,9 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                     "entry_sentiment_score": position.get("entry_sentiment_score"),
                     "entry_correlation_score": position.get("entry_correlation_score"),
                     "entry_correlation_reason": position.get("entry_correlation_reason"),
+                    "entry_scale_in_enabled": position.get("entry_scale_in_enabled"),
+                    "entry_partial_exit_enabled": position.get("entry_partial_exit_enabled"),
+                    "entry_conviction_sizing_enabled": position.get("entry_conviction_sizing_enabled"),
                     # "partial" (see USE_PARTIAL_EXIT) marks a real,
                     # informational P&L event on a position that's still
                     # open -- NOT a resolved win/loss. win_rate_stats/
@@ -2642,6 +2701,14 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
         tuning_state = state.get("tuning") or {}
         correlation_study_enabled_override = tuning_state.get("correlation_study_enabled")
         correlation_max_adjustment_override = tuning_state.get("correlation_confidence_max_adjustment")
+        # USE_SCALE_IN/USE_CONVICTION_SIZING are read as bare module globals
+        # (see manage_open_positions's own identical sync, right before its
+        # per-position loop) -- synced here too since scan_and_enter is the
+        # one that actually opens a scale-in-eligible position's baseline
+        # (original_count) and applies conviction-scaled sizing.
+        global USE_SCALE_IN, USE_CONVICTION_SIZING
+        USE_SCALE_IN = tuning_state.get("scale_in_enabled", USE_SCALE_IN)
+        USE_CONVICTION_SIZING = tuning_state.get("conviction_sizing_enabled", USE_CONVICTION_SIZING)
         # push_durable only on the (once-daily) event a fresh reference
         # balance gets captured -- this is the value a restart must not be
         # allowed to silently lose, see the module-level comment above
@@ -2840,6 +2907,17 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
                     # recommend_correlation_study_weight there.
                     "entry_correlation_score": candidate.get("correlation_score"),
                     "entry_correlation_reason": candidate.get("correlation_reason"),
+                    # Whether each position-management feature was ACTIVE at
+                    # the moment this position opened -- see
+                    # perps_trade_analysis.recommend_position_management_trial,
+                    # which compares realized outcomes for trades entered
+                    # with a feature on vs off. Attributed at ENTRY, not
+                    # re-checked at exit, since these are simple global
+                    # toggles (unlike correlation_score, there's no
+                    # meaningful "per-trade reading" to attribute otherwise).
+                    "entry_scale_in_enabled": USE_SCALE_IN,
+                    "entry_partial_exit_enabled": USE_PARTIAL_EXIT,
+                    "entry_conviction_sizing_enabled": USE_CONVICTION_SIZING,
                 }
                 if existing_idx is not None:
                     merged = dict(positions[existing_idx])

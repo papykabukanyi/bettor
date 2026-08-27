@@ -406,6 +406,39 @@ def test_run_perps_trade_analysis_posts_a_summary_and_applies_evidence_gated_tun
     assert "text" in posted
 
 
+def test_run_perps_trade_analysis_applies_a_position_management_trial(monkeypatch):
+    from data import perps_strategy, perps_trade_analysis, threads_post
+
+    monkeypatch.setattr(perps_strategy, "_load_state", lambda: {"trade_log": [{"fake": "trade"}], "tuning": {}})
+    monkeypatch.setattr(perps_strategy, "MODEL_CONFIDENCE_MIN", 0.58)
+    monkeypatch.setattr(
+        perps_trade_analysis, "analyze_trade_history",
+        lambda trade_log, **kw: {"ok": True, "trades_analyzed": 20, "overall": {"win_rate": 0.6, "total_pnl_usd": 1.0, "avg_pnl_usd": 0.05}, "insights": []},
+    )
+    monkeypatch.setattr(perps_trade_analysis, "recommend_confidence_threshold", lambda trade_log, **kw: {"should_apply": False, "reason": "insufficient_trade_history"})
+    monkeypatch.setattr(perps_trade_analysis, "recommend_correlation_study_weight", lambda trade_log, **kw: {"should_apply": False, "reason": "insufficient_trade_history"})
+
+    def fake_recommend(trade_log, *, feature, current_enabled):
+        if feature == "partial_exit":
+            return {"should_apply": True, "action": "start_trial", "recommended_enabled": True}
+        return {"should_apply": False, "reason": "insufficient_trade_history"}
+
+    monkeypatch.setattr(perps_trade_analysis, "recommend_position_management_trial", fake_recommend)
+    applied = {}
+    monkeypatch.setattr(
+        perps_strategy, "apply_position_management_override",
+        lambda feature, *, enabled, reason: applied.update(feature=feature, enabled=enabled, reason=reason) or {"partial_exit_enabled": enabled},
+    )
+    monkeypatch.setattr(threads_post, "post_trade_analysis_summary", lambda text, **kw: True)
+
+    result = app_kalshi._run_perps_trade_analysis.__wrapped__()  # noqa: SLF001
+
+    assert result["ok"] is True
+    assert applied["feature"] == "partial_exit"
+    assert applied["enabled"] is True
+    assert result["position_management_applied"]["partial_exit"] == {"partial_exit_enabled": True}
+
+
 def test_run_perps_trade_analysis_does_not_apply_tuning_when_evidence_is_thin(monkeypatch):
     from data import perps_strategy, perps_trade_analysis, threads_post
 

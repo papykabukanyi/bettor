@@ -539,6 +539,24 @@ def _run_perps_trade_analysis() -> dict[str, Any]:
             )
             logger.info("[app_kalshi] perps correlation study tuned: %s", correlation_tuning_applied)
 
+        # Same evidence-gated discipline for the scale-in/partial-exit/
+        # conviction-sizing live trial -- see
+        # perps_trade_analysis.recommend_position_management_trial's own
+        # docstring for the 4 possible outcomes per feature.
+        position_management_applied: dict[str, Any] = {}
+        for feature, (tuning_key, global_name) in perps_strategy._POSITION_MANAGEMENT_TUNING_KEYS.items():  # noqa: SLF001
+            current_enabled = bool(tuning_state.get(tuning_key, getattr(perps_strategy, global_name)))
+            pm_recommendation = perps_trade_analysis.recommend_position_management_trial(
+                trade_log, feature=feature, current_enabled=current_enabled,
+            )
+            if pm_recommendation.get("should_apply"):
+                applied = perps_strategy.apply_position_management_override(
+                    feature, enabled=bool(pm_recommendation["recommended_enabled"]),
+                    reason=f"evidence-gated: {pm_recommendation.get('action')}",
+                )
+                position_management_applied[feature] = applied
+                logger.info("[app_kalshi] perps %s tuned: %s", feature, applied)
+
         posted = False
         if analysis.get("trades_analyzed"):
             summary_text = perps_trade_analysis.format_analysis_summary_text(analysis, tuning=recommendation)
@@ -550,6 +568,7 @@ def _run_perps_trade_analysis() -> dict[str, Any]:
         return {
             "ok": True, "analysis": analysis, "tuning_recommendation": recommendation, "tuning_applied": tuning_applied,
             "correlation_tuning_recommendation": correlation_recommendation, "correlation_tuning_applied": correlation_tuning_applied,
+            "position_management_applied": position_management_applied,
             "posted": posted,
         }
     except Exception as exc:

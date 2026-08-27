@@ -1202,6 +1202,35 @@ def test_maybe_run_batch_trade_analysis_does_not_rerun_for_the_same_trades(monke
     assert called["n"] == 0
 
 
+def test_maybe_run_batch_trade_analysis_starts_a_position_management_trial(monkeypatch, tmp_path):
+    """Once enough real trade history exists with a feature never having
+    been on, the batch review should start a live trial for it -- same
+    evidence-gated wiring as the confidence-threshold/correlation-study
+    tunes right above it in this same function."""
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "state.json")
+    trades = [
+        {
+            "ticker": "KXBTCPERP", "side": "long", "realized_pnl_usd": 0.1, "dry_run": False,
+            "reason": "take_profit (+2%)", "entry_price": 50.0, "exit_price": 51.0,
+            "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+            "closed_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+            "entry_partial_exit_enabled": False, "entry_scale_in_enabled": False, "entry_conviction_sizing_enabled": False,
+        }
+        for _ in range(20)
+    ]
+    strat._save_state({
+        "positions": [], "realized_pnl_by_date": {}, "daily_reference_balance": {}, "trade_log": trades,
+    })
+    monkeypatch.setattr(strat, "fetch_candle_frames", lambda ticker: (_one_min_df(), _one_min_df()))
+    monkeypatch.setattr(strat.threads_post, "post_trade_analysis_summary", lambda *a, **kw: True)
+
+    strat._maybe_run_batch_trade_analysis()  # noqa: SLF001
+
+    state = strat._load_state()
+    assert state["tuning"]["partial_exit_enabled"] is True
+    assert state["tuning"]["reason"] == "5-trade batch review (start_trial)"
+
+
 def test_manage_open_positions_triggers_batch_analysis_on_close(monkeypatch, tmp_path):
     monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "state.json")
     monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", True)
@@ -2777,6 +2806,65 @@ def test_apply_correlation_study_override_does_not_clobber_the_confidence_thresh
     reloaded = strat._load_state()  # noqa: SLF001
     assert reloaded["tuning"]["model_confidence_min"] == 0.63
     assert reloaded["tuning"]["correlation_study_enabled"] is True
+
+
+def test_apply_position_management_override_rejects_an_unknown_feature(monkeypatch, tmp_path):
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "state.json")
+    strat._save_state({"positions": [], "realized_pnl_by_date": {}, "trade_log": [], "daily_reference_balance": {}})  # noqa: SLF001
+    try:
+        strat.apply_position_management_override("not_a_real_feature", enabled=True, reason="test")
+        assert False, "expected ValueError"
+    except ValueError:
+        pass
+
+
+def test_apply_position_management_override_persists_to_state(monkeypatch, tmp_path):
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(strat, "USE_PARTIAL_EXIT", False)
+    strat._save_state({"positions": [], "realized_pnl_by_date": {}, "trade_log": [], "daily_reference_balance": {}})  # noqa: SLF001
+
+    result = strat.apply_position_management_override("partial_exit", enabled=True, reason="evidence-gated: test")
+
+    assert result["partial_exit_enabled"] is True
+    assert result["previous_partial_exit_enabled"] is False
+    assert result["reason"] == "evidence-gated: test"
+    reloaded = strat._load_state()  # noqa: SLF001
+    assert reloaded["tuning"]["partial_exit_enabled"] is True
+
+
+def test_apply_position_management_override_does_not_clobber_other_tuning_keys(monkeypatch, tmp_path):
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "state.json")
+    strat._save_state({  # noqa: SLF001
+        "positions": [], "realized_pnl_by_date": {}, "trade_log": [], "daily_reference_balance": {},
+        "tuning": {
+            "model_confidence_min": 0.63, "correlation_study_enabled": True,
+            "scale_in_enabled": False, "conviction_sizing_enabled": True,
+        },
+    })
+
+    strat.apply_position_management_override("partial_exit", enabled=True, reason="test")
+
+    reloaded = strat._load_state()  # noqa: SLF001
+    assert reloaded["tuning"]["model_confidence_min"] == 0.63
+    assert reloaded["tuning"]["correlation_study_enabled"] is True
+    assert reloaded["tuning"]["scale_in_enabled"] is False
+    assert reloaded["tuning"]["conviction_sizing_enabled"] is True
+    assert reloaded["tuning"]["partial_exit_enabled"] is True
+
+
+def test_apply_position_management_override_only_changes_the_feature_passed(monkeypatch, tmp_path):
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "state.json")
+    strat._save_state({  # noqa: SLF001
+        "positions": [], "realized_pnl_by_date": {}, "trade_log": [], "daily_reference_balance": {},
+        "tuning": {"scale_in_enabled": True, "partial_exit_enabled": True, "conviction_sizing_enabled": True},
+    })
+
+    strat.apply_position_management_override("conviction_sizing", enabled=False, reason="test")
+
+    reloaded = strat._load_state()  # noqa: SLF001
+    assert reloaded["tuning"]["scale_in_enabled"] is True
+    assert reloaded["tuning"]["partial_exit_enabled"] is True
+    assert reloaded["tuning"]["conviction_sizing_enabled"] is False
 
 
 def test_scan_and_enter_reads_the_confidence_override_from_state(monkeypatch, tmp_path):
