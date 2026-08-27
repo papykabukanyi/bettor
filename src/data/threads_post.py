@@ -146,9 +146,12 @@ def _is_recent_duplicate_story(market: str, title: str) -> bool:
     return False
 
 
-def _record_posted_story(market: str, title: str) -> None:
+def _record_posted_story(market: str, title: str, *, source: str | None = None, secondary: list[str] | None = None) -> None:
     """Best-effort -- a failure here means a duplicate might slip through on
-    a later cycle, not that the post itself (already sent) fails."""
+    a later cycle, not that the post itself (already sent) fails. Also the
+    source of "last known story" for this market (see _last_known_story) --
+    stores enough context (source/secondary, not just the title) to serve
+    as a genuine commentary SUBJECT later, not just a dedup key."""
     try:
         with _recent_news_lock:
             store = dict(_load_recent_news())
@@ -157,7 +160,7 @@ def _record_posted_story(market: str, title: str) -> None:
                 e for e in store.get(market, [])
                 if now - float(e.get("posted_at", 0)) < _RECENT_NEWS_MAX_AGE_SEC
             ]
-            entries.append({"title": title, "posted_at": now})
+            entries.append({"title": title, "posted_at": now, "source": source, "secondary": secondary or []})
             store[market] = entries[-_RECENT_NEWS_MAX_PER_MARKET:]
             global _recent_news_cache
             _recent_news_cache = store
@@ -167,6 +170,26 @@ def _record_posted_story(market: str, title: str) -> None:
         )
     except Exception as exc:
         logger.warning("[threads_post] failed to record posted story for dedup: %s", exc)
+
+
+def _last_known_story(market: str) -> dict[str, Any] | None:
+    """The most recently posted real story for this market (regardless of
+    how long ago -- NOT filtered by _RECENT_NEWS_MAX_AGE_SEC, unlike the
+    dedup check itself), reconstructed as a story-like dict. Used as a
+    genuine commentary SUBJECT when a cycle's feed comes back completely
+    empty (no story at all, not just a duplicate -- see
+    post_trending_news's own no-fresh-story fallback), so "nothing new
+    right now" still has something real and on-topic to say instead of
+    admitting defeat. None only if this market has never recorded a real
+    post at all (a fresh deploy, or HF unreachable)."""
+    entries = _load_recent_news().get(market, [])
+    if not entries:
+        return None
+    latest = entries[-1]
+    return {
+        "title": latest.get("title", ""), "source": latest.get("source"),
+        "secondary": latest.get("secondary") or [], "link": "", "image_url": None,
+    }
 
 
 # ── Keyword-search auto-reply (real, working capability -- see module note
@@ -755,19 +778,51 @@ def post_trending_news(story: dict | None, *, market: str) -> bool:
         # Standard Access grant, so it routinely finds nothing to reply to
         # -- falling all the way through to a bland "nothing notable" post
         # anyway in practice. Genuine commentary/analysis on a story the
-        # account already knows about (even a duplicate one -- a fresh TAKE
-        # is real, distinct content, not a repost) doesn't depend on that
-        # crippled search at all, so it's tried FIRST and covers the
-        # dominant real case (a duplicate headline, not an empty feed).
-        if duplicate_story:
+        # account already knows about doesn't depend on that crippled
+        # search at all, so it's tried FIRST. Subject is the in-window
+        # duplicate if there is one, else the last real story this market
+        # ever posted (see _last_known_story) -- a genuinely empty feed
+        # this cycle still leaves something real and on-topic to say,
+        # instead of only ever falling through to filler once there's no
+        # in-window duplicate specifically.
+        commentary_subject = duplicate_story or _last_known_story(market)
+        if commentary_subject and commentary_subject.get("title"):
             try:
                 from data import threads_persona
+                subject_title = _clean_headline(commentary_subject["title"])
+                subject_secondary = [_clean_headline(s) for s in (commentary_subject.get("secondary") or []) if s]
                 commentary = threads_persona.anchor_commentary(
-                    _clean_headline(duplicate_story["title"]), source=duplicate_story.get("source"),
-                    secondary=[_clean_headline(s) for s in (duplicate_story.get("secondary") or []) if s],
+                    subject_title, source=commentary_subject.get("source"), secondary=subject_secondary,
                 )
                 if commentary:
-                    text = f"{commentary}\n\n{_hashtags_for_story(duplicate_story, market=market)}"
+                    hashtags = _hashtags_for_story(commentary_subject, market=market)
+                    # Real feedback: this fallback path was always plain
+                    # text, unlike a fresh headline (always a generated
+                    # card) -- turn commentary into a real picture too,
+                    # same generate_news_card this module already trusts
+                    # for headlines, reusing `commentary` as its "headline"
+                    # slot. Falls back to a hashtags-only-caption image
+                    # post, then plain text, same 3-tier discipline
+                    # post_trending_news's own fresh-story path already
+                    # uses below.
+                    image_url = None
+                    try:
+                        from data import chart_snapshot
+                        chart_path = chart_snapshot.generate_news_card(
+                            market=market, headline=commentary, source=commentary_subject.get("source") or "",
+                            secondary=[], hashtags=hashtags,
+                        )
+                        if chart_path is not None:
+                            image_url = chart_snapshot.public_url_for(chart_path)
+                    except Exception as exc:
+                        logger.warning("[threads_post] commentary card generation failed, falling back to text: %s", exc)
+                    if image_url:
+                        try:
+                            threads_client.create_and_publish_image_post(image_url, _hashtags_only_caption(commentary_subject, market=market))
+                            return True
+                        except Exception as exc:
+                            logger.warning("[threads_post] failed to post commentary as an image, falling back to text: %s", exc)
+                    text = f"{commentary}\n\n{hashtags}"
                     if len(text) > _THREADS_POST_MAX_CHARS:
                         text = text[: _THREADS_POST_MAX_CHARS - 1] + "…"
                     threads_client.create_and_publish_post(text)
@@ -776,8 +831,9 @@ def post_trending_news(story: dict | None, *, market: str) -> bool:
                 logger.warning("[threads_post] commentary fallback failed: %s", exc)
         # Real engagement instead of filler: reply to trending conversation
         # in this market -- see _REPLY_KEYWORDS_BY_MARKET's own comment.
-        # Reached when there was no duplicate to comment on (a genuinely
-        # empty feed) or the commentary attempt itself failed.
+        # Reached only when there was truly nothing to comment on (this
+        # market has never posted a real story at all) or the commentary
+        # attempt itself failed end to end.
         try:
             reply_result = reply_to_trending_keyword_posts(_reply_keyword_for_market(market), market=market)
             if reply_result.get("replied"):
@@ -844,7 +900,7 @@ def post_trending_news(story: dict | None, *, market: str) -> bool:
                     raise RuntimeError(f"bullet card {i}/{len(headlines)} has no public URL")
                 image_urls.append(url)
             threads_client.create_and_publish_carousel_post(image_urls, _hashtags_only_caption(story, market=market))
-            _record_posted_story(market, raw_title)
+            _record_posted_story(market, raw_title, source=story.get("source"), secondary=story.get("secondary"))
             return True
         except Exception as exc:
             logger.warning("[threads_post] failed to post trending news as a carousel, falling back to a single image: %s", exc)
@@ -868,7 +924,7 @@ def post_trending_news(story: dict | None, *, market: str) -> bool:
             # _hashtags_only_caption's own docstring for why this must not
             # repeat what the picture already shows).
             threads_client.create_and_publish_image_post(image_url, _hashtags_only_caption(story, market=market))
-            _record_posted_story(market, raw_title)
+            _record_posted_story(market, raw_title, source=story.get("source"), secondary=story.get("secondary"))
             return True
         except Exception as exc:
             logger.warning("[threads_post] failed to post trending news as an image, falling back to text: %s", exc)
@@ -879,7 +935,7 @@ def post_trending_news(story: dict | None, *, market: str) -> bool:
         # rewrite (or the plain headline, if that failed) rather than
         # re-deriving the plain one from scratch.
         threads_client.create_and_publish_post(_format_trending_story_caption(story, market=market, headline_override=title))
-        _record_posted_story(market, raw_title)
+        _record_posted_story(market, raw_title, source=story.get("source"), secondary=story.get("secondary"))
         return True
     except Exception as exc:
         logger.warning("[threads_post] failed to post trending news: %s", exc)

@@ -1055,3 +1055,71 @@ def test_post_trending_news_does_not_attempt_commentary_when_there_was_no_duplic
     result = threads_post.post_trending_news(None, market="crypto")
     assert result is True
     assert "nothing notable" in posted[0].lower()
+
+
+# ── _last_known_story / commentary-as-a-picture ─────────────────────────────
+
+def test_last_known_story_returns_none_when_nothing_was_ever_recorded():
+    assert threads_post._last_known_story("crypto") is None  # noqa: SLF001
+
+
+def test_last_known_story_returns_the_most_recently_recorded_story():
+    threads_post._record_posted_story("crypto", "Old story", source="decrypt", secondary=["a headline"])  # noqa: SLF001
+    threads_post._record_posted_story("crypto", "Newer story", source="cointelegraph", secondary=["b headline"])  # noqa: SLF001
+    result = threads_post._last_known_story("crypto")  # noqa: SLF001
+    assert result["title"] == "Newer story"
+    assert result["source"] == "cointelegraph"
+    assert result["secondary"] == ["b headline"]
+
+
+def test_post_trending_news_comments_on_the_last_known_story_when_the_feed_is_genuinely_empty(monkeypatch):
+    """No duplicate this cycle (story=None from the very start -- every feed
+    failed), but this market DID post something earlier -- that's still a
+    real, on-topic subject worth commenting on instead of giving up."""
+    from data import threads_persona
+    threads_post._record_posted_story("crypto", "Bitcoin surges past resistance", source="cointelegraph")  # noqa: SLF001
+    monkeypatch.setattr(threads_persona, "anchor_commentary", lambda title, **kw: "Still the story everyone's watching.")
+
+    def fail_if_called(*a, **k):
+        raise AssertionError("commentary succeeded -- must not fall through to the reply round")
+
+    monkeypatch.setattr(threads_post, "reply_to_trending_keyword_posts", fail_if_called)
+    posted = []
+    monkeypatch.setattr(threads_post.threads_client, "create_and_publish_post", lambda text: posted.append(text))
+    result = threads_post.post_trending_news(None, market="crypto")
+    assert result is True
+    assert "Still the story everyone's watching." in posted[0]
+
+
+def test_post_trending_news_renders_commentary_as_an_image_card_when_possible(monkeypatch, tmp_path):
+    from data import threads_persona
+    _mock_charts(monkeypatch, tmp_path)
+    threads_post._record_posted_story("crypto", "Bitcoin surges past resistance", source="cointelegraph")  # noqa: SLF001
+    monkeypatch.setattr(threads_persona, "anchor_commentary", lambda title, **kw: "Still the story everyone's watching.")
+    posted_images = []
+    monkeypatch.setattr(
+        threads_post.threads_client, "create_and_publish_image_post",
+        lambda image_url, text="": posted_images.append((image_url, text)),
+    )
+
+    def fail_if_called(text):
+        raise AssertionError("a real card was generated -- must not fall back to a plain text post")
+
+    monkeypatch.setattr(threads_post.threads_client, "create_and_publish_post", fail_if_called)
+    result = threads_post.post_trending_news(None, market="crypto")
+    assert result is True
+    assert len(posted_images) == 1
+    assert posted_images[0][0]  # a real image URL was posted, not empty
+
+
+def test_post_trending_news_falls_back_to_text_when_the_commentary_card_cannot_be_generated(monkeypatch):
+    """No RENDER_EXTERNAL_URL / rendering failure -- still posts the real
+    commentary as plain text rather than giving up entirely."""
+    from data import threads_persona
+    threads_post._record_posted_story("crypto", "Bitcoin surges past resistance", source="cointelegraph")  # noqa: SLF001
+    monkeypatch.setattr(threads_persona, "anchor_commentary", lambda title, **kw: "Still the story everyone's watching.")
+    posted = []
+    monkeypatch.setattr(threads_post.threads_client, "create_and_publish_post", lambda text: posted.append(text))
+    result = threads_post.post_trending_news(None, market="crypto")
+    assert result is True
+    assert "Still the story everyone's watching." in posted[0]
