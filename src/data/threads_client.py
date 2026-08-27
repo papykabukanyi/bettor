@@ -794,3 +794,168 @@ def manage_reply(reply_id: str, *, hide: bool) -> bool:
     )
     _raise_for_status_with_body(resp)
     return bool(resp.json().get("success"))
+
+
+# ── Recent-posts listing (backs the public /api/threads/posts route in
+# app_kalshi.py, see that route's own docstring) -- Meta's own {threads-
+# user-id}/threads GET endpoint (verified live 2026-08-27) is the single
+# real source of truth for "everything this account has posted," across
+# ALL of this codebase's separate Render services (perps, stocks, crypto,
+# options) -- they all post as the SAME Threads account/token, so there's
+# no need to reconstruct a feed from each service's own separate local
+# state; Meta already keeps the one real, complete, correctly-ordered list.
+LIST_POSTS_FIELDS = "id,media_type,media_url,permalink,text,timestamp,shortcode,is_quote_post"
+_LIST_POSTS_CACHE_TTL_SEC = float(os.getenv("THREADS_LIST_POSTS_CACHE_TTL_SEC", "20") or "20")
+_list_posts_cache: tuple[list[dict[str, Any]], float] | None = None
+_list_posts_lock = threading.Lock()
+
+
+def list_recent_posts(*, limit: int = 25, since_id: str | None = None) -> list[dict[str, Any]]:
+    """The account's own most recent Threads posts, newest first, straight
+    from Meta -- not reconstructed from any one service's own internal
+    call log. `limit` is capped at 50 (Meta's own single-page max used
+    here; a real "load more" would need real cursor pagination, not needed
+    for a recent-activity feed). `since_id` (a post id from a previous
+    call) truncates the list to posts newer than it, for cheap incremental
+    polling -- Meta returns newest-first, so this just stops once it's
+    seen that id.
+
+    The raw 50-post fetch is cached for _LIST_POSTS_CACHE_TTL_SEC
+    (`since_id` truncation happens AFTER the cache read, so many different
+    `since_id` values reuse the same one real Meta call) -- protects
+    against Meta's own rate limits if something polls this frequently.
+    Raises on any failure (no token, HTTP error) -- same convention as
+    every other function in this module; the caller (the Flask route)
+    decides how to present that to an anonymous public caller."""
+    global _list_posts_cache
+    now = time.time()
+    with _list_posts_lock:
+        cached = _list_posts_cache
+        if cached and (now - cached[1]) < _LIST_POSTS_CACHE_TTL_SEC:
+            posts = cached[0]
+        else:
+            token = get_valid_access_token()
+            if not token:
+                raise RuntimeError(
+                    "No valid Threads access token -- complete the interactive login first "
+                    "(see get_authorization_url())."
+                )
+            user_id = get_user_id()
+            resp = requests.get(
+                f"{API_BASE_URL}/{API_VERSION}/{user_id}/threads",
+                params={"fields": LIST_POSTS_FIELDS, "limit": 50, "access_token": token},
+                timeout=TIMEOUT_SEC,
+            )
+            _raise_for_status_with_body(resp)
+            posts = resp.json().get("data", [])
+            _list_posts_cache = (posts, now)
+
+    if since_id:
+        truncated = []
+        for post in posts:
+            if post.get("id") == since_id:
+                break
+            truncated.append(post)
+        posts = truncated
+    return posts[: max(1, min(limit, 50))]
+
+
+# ── Durable posts archive -- Meta's own {threads-user-id}/threads endpoint
+# above only ever shows a shallow recent window (a single 50-item page,
+# see list_recent_posts's own docstring), so a caller wanting a real,
+# ever-growing historical feed (see docs/PUBLIC_THREADS_API.md) needs
+# something durable on this side. Render's own disk is ephemeral (wiped on
+# every restart/redeploy), so this is mirrored to HF_MODEL_REPO -- the same
+# durable-state pattern this module already uses for OAuth tokens above
+# (_push_tokens_to_hf/_pull_tokens_from_hf) -- kept sync'd by an external
+# scheduler (cron-job.org) hitting POST /api/threads/posts/sync (see
+# app_kalshi.py) on a fixed interval, since this codebase has no
+# APScheduler job of its own dedicated to Threads-only upkeep.
+_POSTS_ARCHIVE_HF_FILENAME = "threads_posts_archive.json"
+_POSTS_ARCHIVE_HF_TIMEOUT_SEC = int(os.getenv("THREADS_POSTS_ARCHIVE_HF_TIMEOUT_SEC", "10") or "10")
+_POSTS_ARCHIVE_MAX_SIZE = int(os.getenv("THREADS_POSTS_ARCHIVE_MAX_SIZE", "5000") or "5000")
+_posts_archive_lock = threading.Lock()
+_posts_archive_cache: list[dict[str, Any]] | None = None
+
+
+def _pull_posts_archive_from_hf() -> list[dict[str, Any]] | None:
+    if not HF_API_KEY:
+        return None
+
+    def _download() -> list[dict[str, Any]]:
+        from huggingface_hub import hf_hub_download
+        path = hf_hub_download(
+            repo_id=HF_MODEL_REPO, filename=_POSTS_ARCHIVE_HF_FILENAME, repo_type="model", token=HF_API_KEY,
+        )
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+
+    try:
+        from server_common import call_with_hard_timeout
+        return call_with_hard_timeout(_download, timeout_sec=_POSTS_ARCHIVE_HF_TIMEOUT_SEC)
+    except Exception as exc:
+        logger.info("[threads_client] no posts archive on HF yet (or fetch failed): %s", exc)
+        return None
+
+
+def _push_posts_archive_to_hf(archive: list[dict[str, Any]]) -> None:
+    if not HF_API_KEY:
+        return
+
+    def _upload() -> None:
+        from huggingface_hub import HfApi
+        api = HfApi(token=HF_API_KEY)
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as tmp:
+            tmp.write(json.dumps(archive, indent=2))
+            tmp_path = tmp.name
+        try:
+            api.upload_file(
+                path_or_fileobj=tmp_path, path_in_repo=_POSTS_ARCHIVE_HF_FILENAME,
+                repo_id=HF_MODEL_REPO, repo_type="model", commit_message="update threads posts archive",
+            )
+        finally:
+            os.unlink(tmp_path)
+
+    try:
+        from server_common import call_with_hard_timeout
+        call_with_hard_timeout(_upload, timeout_sec=_POSTS_ARCHIVE_HF_TIMEOUT_SEC)
+    except Exception as exc:
+        logger.warning("[threads_client] posts archive push to HF failed: %s", exc)
+
+
+def get_posts_archive() -> list[dict[str, Any]]:
+    """The full durable archive, newest first -- loaded once per process
+    lifetime (see sync_posts_archive for how it grows) and cached in
+    memory after that, same shape as list_recent_posts's own posts."""
+    global _posts_archive_cache
+    with _posts_archive_lock:
+        if _posts_archive_cache is None:
+            _posts_archive_cache = _pull_posts_archive_from_hf() or []
+        return _posts_archive_cache
+
+
+def sync_posts_archive() -> dict[str, Any]:
+    """Fetches this account's current recent posts straight from Meta
+    (bypassing list_recent_posts's own short cache -- this runs on its own
+    external schedule, not a hot request path) and merges any not already
+    in the durable archive into it, newest first, deduped by `id`. Trimmed
+    to _POSTS_ARCHIVE_MAX_SIZE oldest-dropped-first so this can't grow
+    unbounded. Meant to be called on a fixed interval by an external
+    scheduler (see POST /api/threads/posts/sync in app_kalshi.py) -- Meta's
+    own list is only ever a shallow recent window, so a sync interval
+    longer than it'd take to accumulate 50 new posts risks silently
+    missing some; see docs/PUBLIC_THREADS_API.md for the recommended
+    cadence. Raises on failure (no token, HTTP error) -- same convention as
+    every other function in this module."""
+    global _posts_archive_cache
+    fresh = list_recent_posts(limit=50)
+    with _posts_archive_lock:
+        archive = _posts_archive_cache if _posts_archive_cache is not None else (_pull_posts_archive_from_hf() or [])
+        known_ids = {post.get("id") for post in archive}
+        new_posts = [post for post in fresh if post.get("id") not in known_ids]
+        if new_posts:
+            archive = (new_posts + archive)[:_POSTS_ARCHIVE_MAX_SIZE]
+            _posts_archive_cache = archive
+            _push_posts_archive_to_hf(archive)
+        else:
+            _posts_archive_cache = archive
+    return {"new_posts": len(new_posts), "total_archived": len(archive)}

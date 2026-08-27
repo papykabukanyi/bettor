@@ -156,6 +156,93 @@ def test_perps_report_pdf_route_returns_a_downloadable_pdf(monkeypatch):
         assert ".pdf" in resp.headers.get("Content-Disposition", "")
 
 
+def test_api_threads_posts_serves_the_durable_archive(monkeypatch):
+    from data import threads_client
+
+    monkeypatch.setattr(threads_client, "get_posts_archive", lambda: [
+        {"id": "p3", "text": "third"}, {"id": "p2", "text": "second"}, {"id": "p1", "text": "first"},
+    ])
+    with app_kalshi.app.test_client() as client:
+        resp = client.get("/api/threads/posts")
+        body = resp.get_json()
+        assert resp.status_code == 200
+        assert body["ok"] is True
+        assert body["count"] == 3
+        assert [p["id"] for p in body["posts"]] == ["p3", "p2", "p1"]
+        assert resp.headers["Access-Control-Allow-Origin"] == "*"
+
+
+def test_api_threads_posts_respects_limit_and_since_id(monkeypatch):
+    from data import threads_client
+
+    monkeypatch.setattr(threads_client, "get_posts_archive", lambda: [
+        {"id": "p4"}, {"id": "p3"}, {"id": "p2"}, {"id": "p1"},
+    ])
+    with app_kalshi.app.test_client() as client:
+        resp = client.get("/api/threads/posts?since_id=p2&limit=10")
+        body = resp.get_json()
+        assert [p["id"] for p in body["posts"]] == ["p4", "p3"]
+
+
+def test_api_threads_posts_falls_back_to_a_live_fetch_when_the_archive_is_empty(monkeypatch):
+    from data import threads_client
+
+    monkeypatch.setattr(threads_client, "get_posts_archive", lambda: [])
+    monkeypatch.setattr(threads_client, "list_recent_posts", lambda limit=50: [{"id": "live-1"}])
+    with app_kalshi.app.test_client() as client:
+        resp = client.get("/api/threads/posts")
+        body = resp.get_json()
+        assert body["posts"] == [{"id": "live-1"}]
+
+
+def test_api_threads_posts_never_raises_on_a_backend_failure(monkeypatch):
+    from data import threads_client
+
+    def raise_error():
+        raise RuntimeError("no valid token")
+
+    monkeypatch.setattr(threads_client, "get_posts_archive", raise_error)
+    with app_kalshi.app.test_client() as client:
+        resp = client.get("/api/threads/posts")
+        body = resp.get_json()
+        assert resp.status_code == 200
+        assert body["ok"] is False
+        assert body["posts"] == []
+
+
+def test_api_threads_posts_sync_requires_cron_authorization(monkeypatch):
+    monkeypatch.setenv("CRON_SECRET", "real-secret")
+    with app_kalshi.app.test_client() as client:
+        resp = client.post("/api/threads/posts/sync")
+        assert resp.status_code == 401
+
+
+def test_api_threads_posts_sync_runs_when_authorized(monkeypatch):
+    from data import threads_client
+
+    monkeypatch.setenv("CRON_SECRET", "real-secret")
+    monkeypatch.setattr(threads_client, "sync_posts_archive", lambda: {"new_posts": 2, "total_archived": 10})
+    with app_kalshi.app.test_client() as client:
+        resp = client.post("/api/threads/posts/sync", headers={"Authorization": "Bearer real-secret"})
+        body = resp.get_json()
+        assert resp.status_code == 200
+        assert body == {"ok": True, "new_posts": 2, "total_archived": 10}
+
+
+def test_api_threads_posts_sync_never_raises_on_a_backend_failure(monkeypatch):
+    from data import threads_client
+
+    def raise_error():
+        raise RuntimeError("HF push failed")
+
+    monkeypatch.setattr(threads_client, "sync_posts_archive", raise_error)
+    with app_kalshi.app.test_client() as client:
+        resp = client.post("/api/threads/posts/sync")
+        body = resp.get_json()
+        assert resp.status_code == 200
+        assert body["ok"] is False
+
+
 def test_data_collect_job_refreshes_ticker_activity_cache_off_the_request_path(monkeypatch):
     """The volatility-ranking cache must only ever be refreshed from here
     (a scheduled background job) -- confirmed live that refreshing it

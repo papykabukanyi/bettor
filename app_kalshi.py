@@ -1075,6 +1075,76 @@ def api_trades():
     })
 
 
+@app.route("/api/threads/posts")
+def api_threads_posts():
+    """Public, unauthenticated, read-only feed of this account's own
+    Threads posts, newest first -- served from the durable HF-backed
+    archive (see threads_client.get_posts_archive/sync_posts_archive's own
+    docstrings) so this reflects real history, not just whatever shallow
+    recent window Meta's own API happens to show right now. Built for
+    CumDev's blog to poll (see docs/PUBLIC_THREADS_API.md for the full
+    contract) instead of CumDev needing its own separate Threads OAuth
+    connection -- every service in this codebase posts as the SAME Threads
+    account, so this one endpoint on this one service already sees
+    everything, regardless of which bot actually posted it.
+
+    Query params: `limit` (default 25, capped at 50), `since_id` (a post id
+    from a previous call -- returns only posts newer than it, for cheap
+    incremental polling). Falls back to a live (uncached-archive) Meta
+    fetch if the archive is empty (e.g. before the very first sync has
+    ever run) so this isn't useless on day one. CORS is wide open (`*`)
+    since this only ever re-serves this account's own already-public
+    Threads content -- there's nothing here a browser-side fetch from
+    another origin needs blocking."""
+    try:
+        limit = int(request.args.get("limit", 25))
+    except (TypeError, ValueError):
+        limit = 25
+    limit = max(1, min(limit, 50))
+    since_id = request.args.get("since_id") or None
+    try:
+        posts = threads_client.get_posts_archive() or threads_client.list_recent_posts(limit=50)
+        if since_id:
+            truncated = []
+            for post in posts:
+                if post.get("id") == since_id:
+                    break
+                truncated.append(post)
+            posts = truncated
+        posts = posts[:limit]
+        body = {"ok": True, "count": len(posts), "posts": posts}
+    except Exception:
+        # Public route -- the raw exception (can include upstream URLs/
+        # internal details) stays in the server's own logs only.
+        logger.warning("[app_kalshi] /api/threads/posts failed", exc_info=True)
+        body = {"ok": False, "error": "threads_posts_unavailable", "count": 0, "posts": []}
+    resp = jsonify(body)
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    return resp
+
+
+@app.route("/api/threads/posts/sync", methods=["GET", "POST"])
+def api_threads_posts_sync():
+    """Trigger route for an external scheduler (cron-job.org, see
+    docs/PUBLIC_THREADS_API.md for the recommended cadence) to keep the
+    durable posts archive above up to date -- GET+POST both accepted, same
+    convention as this file's other manual-trigger routes
+    (/api/perps/tick and friends), since a plain scheduled HTTP hit is
+    usually a GET. Requires the same CRON_SECRET bearer token every other
+    trigger route here already does (see is_cron_authorized) -- this one
+    pushes to HF on every real sync, so it's not left open to anonymous
+    callers the way the pure-read /api/threads/posts above is. Best-effort:
+    never raises, reports what happened."""
+    if not is_cron_authorized(request):
+        return jsonify({"ok": False, "error": "Unauthorized"}), 401
+    try:
+        result = threads_client.sync_posts_archive()
+        return jsonify({"ok": True, **result})
+    except Exception as exc:
+        logger.warning("[app_kalshi] /api/threads/posts/sync failed", exc_info=True)
+        return jsonify({"ok": False, "error": str(exc)})
+
+
 @app.route("/api/positions")
 def api_positions():
     try:

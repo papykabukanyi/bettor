@@ -28,6 +28,8 @@ def _isolated_token_state(monkeypatch):
     monkeypatch.setattr(threads_client, "REDIRECT_URI", "https://example.com/threadscallback")
     monkeypatch.setattr(threads_client, "HF_API_KEY", "")  # no real network for the HF mirror by default
     monkeypatch.setattr(threads_client, "_rate_limited_until", 0.0)  # no leftover cooldown between tests
+    monkeypatch.setattr(threads_client, "_list_posts_cache", None)
+    monkeypatch.setattr(threads_client, "_posts_archive_cache", None)
     yield
 
 
@@ -910,3 +912,147 @@ def test_with_promo_tag_trims_long_text_so_the_tag_still_fits():
     assert len(result) <= threads_client._THREADS_MAX_CHARS  # noqa: SLF001
     assert result.endswith(threads_client.PROMO_URL)
     assert result.startswith("x")
+
+
+# ---------------------------------------------------------------------------
+# list_recent_posts / durable posts archive -- backs the public
+# /api/threads/posts (+ /api/threads/posts/sync) routes in app_kalshi.py.
+# ---------------------------------------------------------------------------
+
+def _post(post_id: str, text: str = "some post") -> dict:
+    return {"id": post_id, "media_type": "TEXT_POST", "text": text, "timestamp": "2026-08-27T00:00:00+0000"}
+
+
+def test_list_recent_posts_raises_without_a_valid_token():
+    with pytest.raises(RuntimeError, match="No valid Threads access token"):
+        threads_client.list_recent_posts()
+
+
+def test_list_recent_posts_builds_the_expected_request_and_returns_data(monkeypatch):
+    _with_valid_token()
+    captured = {}
+
+    def fake_get(url, *, params, timeout):
+        captured["url"] = url
+        captured["params"] = params
+        return _FakeResponse({"data": [_post("p3"), _post("p2"), _post("p1")]})
+
+    monkeypatch.setattr(threads_client.requests, "get", fake_get)
+    result = threads_client.list_recent_posts(limit=2)
+
+    assert captured["url"] == f"{threads_client.API_BASE_URL}/{threads_client.API_VERSION}/user-42/threads"
+    assert captured["params"]["fields"] == threads_client.LIST_POSTS_FIELDS
+    assert [p["id"] for p in result] == ["p3", "p2"]  # capped at limit, newest-first order preserved
+
+
+def test_list_recent_posts_caps_limit_at_50(monkeypatch):
+    _with_valid_token()
+    monkeypatch.setattr(threads_client.requests, "get", lambda url, *, params, timeout: _FakeResponse({"data": [_post(str(i)) for i in range(60)]}))
+    result = threads_client.list_recent_posts(limit=999)
+    assert len(result) == 50
+
+
+def test_list_recent_posts_since_id_truncates_to_newer_posts(monkeypatch):
+    _with_valid_token()
+    monkeypatch.setattr(
+        threads_client.requests, "get",
+        lambda url, *, params, timeout: _FakeResponse({"data": [_post("p4"), _post("p3"), _post("p2"), _post("p1")]}),
+    )
+    result = threads_client.list_recent_posts(limit=50, since_id="p2")
+    assert [p["id"] for p in result] == ["p4", "p3"]
+
+
+def test_list_recent_posts_reuses_the_cache_within_the_ttl(monkeypatch):
+    _with_valid_token()
+    calls = {"n": 0}
+
+    def fake_get(url, *, params, timeout):
+        calls["n"] += 1
+        return _FakeResponse({"data": [_post("p1")]})
+
+    monkeypatch.setattr(threads_client.requests, "get", fake_get)
+    threads_client.list_recent_posts()
+    threads_client.list_recent_posts()
+    assert calls["n"] == 1
+
+
+def test_list_recent_posts_refetches_after_the_cache_expires(monkeypatch):
+    _with_valid_token()
+    monkeypatch.setattr(threads_client, "_LIST_POSTS_CACHE_TTL_SEC", 0.0)
+    calls = {"n": 0}
+
+    def fake_get(url, *, params, timeout):
+        calls["n"] += 1
+        return _FakeResponse({"data": [_post("p1")]})
+
+    monkeypatch.setattr(threads_client.requests, "get", fake_get)
+    threads_client.list_recent_posts()
+    threads_client.list_recent_posts()
+    assert calls["n"] == 2
+
+
+def test_get_posts_archive_returns_empty_without_hf_configured():
+    assert threads_client.get_posts_archive() == []
+
+
+def test_get_posts_archive_pulls_from_hf_once_and_caches(monkeypatch):
+    monkeypatch.setattr(threads_client, "HF_API_KEY", "test-key")
+    calls = {"n": 0}
+
+    def fake_pull():
+        calls["n"] += 1
+        return [_post("p1")]
+
+    monkeypatch.setattr(threads_client, "_pull_posts_archive_from_hf", fake_pull)
+    assert threads_client.get_posts_archive() == [_post("p1")]
+    assert threads_client.get_posts_archive() == [_post("p1")]
+    assert calls["n"] == 1
+
+
+def test_sync_posts_archive_merges_new_posts_ahead_of_the_existing_archive(monkeypatch):
+    _with_valid_token()
+    monkeypatch.setattr(threads_client, "HF_API_KEY", "test-key")
+    monkeypatch.setattr(threads_client, "_pull_posts_archive_from_hf", lambda: [_post("p1")])
+    pushed = {}
+    monkeypatch.setattr(threads_client, "_push_posts_archive_to_hf", lambda archive: pushed.update(archive=archive))
+    monkeypatch.setattr(
+        threads_client.requests, "get",
+        lambda url, *, params, timeout: _FakeResponse({"data": [_post("p3"), _post("p2"), _post("p1")]}),
+    )
+
+    result = threads_client.sync_posts_archive()
+
+    assert result == {"new_posts": 2, "total_archived": 3}
+    assert [p["id"] for p in pushed["archive"]] == ["p3", "p2", "p1"]
+    assert [p["id"] for p in threads_client.get_posts_archive()] == ["p3", "p2", "p1"]
+
+
+def test_sync_posts_archive_does_not_push_when_nothing_is_new(monkeypatch):
+    _with_valid_token()
+    monkeypatch.setattr(threads_client, "HF_API_KEY", "test-key")
+    monkeypatch.setattr(threads_client, "_pull_posts_archive_from_hf", lambda: [_post("p1")])
+
+    def fail_if_called(archive):
+        raise AssertionError("must not push to HF when nothing changed")
+
+    monkeypatch.setattr(threads_client, "_push_posts_archive_to_hf", fail_if_called)
+    monkeypatch.setattr(threads_client.requests, "get", lambda url, *, params, timeout: _FakeResponse({"data": [_post("p1")]}))
+
+    result = threads_client.sync_posts_archive()
+    assert result == {"new_posts": 0, "total_archived": 1}
+
+
+def test_sync_posts_archive_trims_to_the_max_size(monkeypatch):
+    _with_valid_token()
+    monkeypatch.setattr(threads_client, "HF_API_KEY", "test-key")
+    monkeypatch.setattr(threads_client, "_POSTS_ARCHIVE_MAX_SIZE", 3)
+    monkeypatch.setattr(threads_client, "_pull_posts_archive_from_hf", lambda: [_post("old1"), _post("old2")])
+    monkeypatch.setattr(threads_client, "_push_posts_archive_to_hf", lambda archive: None)
+    monkeypatch.setattr(
+        threads_client.requests, "get",
+        lambda url, *, params, timeout: _FakeResponse({"data": [_post("new2"), _post("new1")]}),
+    )
+
+    result = threads_client.sync_posts_archive()
+    assert result["total_archived"] == 3
+    assert [p["id"] for p in threads_client.get_posts_archive()] == ["new2", "new1", "old1"]
