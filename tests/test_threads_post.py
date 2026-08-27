@@ -21,6 +21,12 @@ def _isolated_dedup_state(monkeypatch):
     monkeypatch.setattr(threads_post, "_recent_news_cache", None)
     monkeypatch.setattr(threads_post, "_replied_posts_cache", None)
     monkeypatch.setattr(threads_post, "HF_API_KEY", "")  # no real network for the HF mirror by default
+    # The "nothing notable" filler's own last-resort fallback hits 3 real
+    # music-newsroom RSS feeds (see music_news.py) -- off by default here so
+    # every other test in this file doesn't silently make live network calls
+    # just by reaching post_trending_news's empty branch. Tests that
+    # actually exercise this fallback override it explicitly below.
+    monkeypatch.setattr(threads_post, "_post_music_news_fallback", lambda: False)
     yield
 
 
@@ -577,110 +583,85 @@ def _mock_charts(monkeypatch, tmp_path):
     monkeypatch.setenv("RENDER_EXTERNAL_URL", "https://bettor-schwab.onrender.com")
 
 
-def test_trending_news_posts_a_carousel_with_one_card_per_headline_and_hashtags_only_caption(monkeypatch, tmp_path):
-    """Real, confirmed bug the whole generated-image-card approach (single
-    or carousel) replaces: post_trending_news used to attach the story's
-    own raw image_url (or one scraped via og:image) as-is -- for Google-
-    News-sourced stories that scrape resolved the SAME static Google
-    branding image for every article regardless of headline (confirmed
-    live). Now the image(s) are GENERATED from the story's own text.
+def test_trending_news_posts_exactly_one_card_with_a_hashtags_only_caption(monkeypatch, tmp_path):
+    """Real, confirmed bug the generated-image-card approach replaces:
+    post_trending_news used to attach the story's own raw image_url (or one
+    scraped via og:image) as-is -- for Google-News-sourced stories that
+    scrape resolved the SAME static Google branding image for every
+    article regardless of headline (confirmed live). Now the image is
+    GENERATED from the story's own text.
 
-    A multi-headline story (the default _story() -- 1 lead + 1 secondary =
-    2 headlines) must post a real Threads CAROUSEL, one big card per
-    headline, not cram everything onto one image. Real feedback: the
-    caption used to repeat everything already on the card(s) -- pure
-    duplication. The Threads post TEXT next to the carousel must be
-    hashtags only."""
+    Real feedback: a story with secondary "also trending" headlines used to
+    post them ALL, as a multi-card carousel -- several unrelated stories
+    bundled into one post, which read as confusing. One post is now always
+    exactly one story: the lead headline only, never the secondary ones,
+    and never a carousel. The caption stays hashtags only (the headline
+    already lives on the card itself -- real feedback: repeating it in the
+    caption was pure duplication)."""
     _mock_charts(monkeypatch, tmp_path)
+
+    def fail_if_called(*a, **k):
+        raise AssertionError("must never attempt a carousel -- one post is always one story now")
+
+    monkeypatch.setattr(threads_post.threads_client, "create_and_publish_carousel_post", fail_if_called)
     posted = []
     monkeypatch.setattr(
-        threads_post.threads_client, "create_and_publish_carousel_post",
-        lambda image_urls, text="": posted.append((image_urls, text)),
+        threads_post.threads_client, "create_and_publish_image_post",
+        lambda image_url, text="": posted.append((image_url, text)),
     )
-    threads_post.post_trending_news(_story(), market="crypto")
-    image_urls, text = posted[0]
-    assert len(image_urls) == 2  # lead headline + 1 secondary
-    assert all(u.startswith("https://bettor-schwab.onrender.com/chart/") for u in image_urls)
-    assert "Bitcoin surges past resistance" not in text  # lives on the cards now, not the caption
-    assert "ETF inflows accelerate" not in text
+    threads_post.post_trending_news(_story(), market="crypto")  # default _story() carries 1 secondary headline
+    assert len(posted) == 1
+    image_url, text = posted[0]
+    assert image_url.startswith("https://bettor-schwab.onrender.com/chart/")
+    assert "Bitcoin surges past resistance" not in text  # lives on the card now, not the caption
+    assert "ETF inflows accelerate" not in text  # the secondary headline is never rendered anywhere in this post
     assert "#Crypto" in text
-    # Extracted from the headline's own text on top of the base market tags.
+    # Extracted from the lead headline's own text on top of the base market tags.
     assert "#Bitcoin" in text
 
 
-def test_trending_news_bakes_each_headline_and_hashtags_into_its_own_bullet_card(monkeypatch, tmp_path):
-    """Direct check that each carousel item IS its own headline's card, not
-    a caption next to an unrelated photo -- generate_news_bullet_card must
-    be called once per headline with this story's own real text, correct
-    index/total, and the shared hashtags -- and only the LEAD card gets the
-    story's source (secondary headlines don't carry their own source)."""
+def test_trending_news_bakes_only_the_lead_headline_into_the_card(monkeypatch, tmp_path):
+    """Direct check that the generated card carries only the lead headline
+    -- generate_news_card must be called once, with an empty secondary
+    list, even when the story itself carries secondary headlines."""
     from data import chart_snapshot
 
     _mock_charts(monkeypatch, tmp_path)
-    monkeypatch.setattr(threads_post.threads_client, "create_and_publish_carousel_post", lambda image_urls, text="": None)
     captured = []
-    real_generate = chart_snapshot.generate_news_bullet_card
+    real_generate = chart_snapshot.generate_news_card
 
     def spy(**kwargs):
         captured.append(kwargs)
         return real_generate(**kwargs)
 
-    monkeypatch.setattr(chart_snapshot, "generate_news_bullet_card", spy)
+    monkeypatch.setattr(chart_snapshot, "generate_news_card", spy)
     threads_post.post_trending_news(_story(), market="crypto")
 
-    assert len(captured) == 2
+    assert len(captured) == 1
     assert captured[0]["market"] == "crypto"
     assert captured[0]["headline"] == "Bitcoin surges past resistance"
     assert captured[0]["source"] == "cointelegraph"
-    assert captured[0]["index"] == 1 and captured[0]["total"] == 2
-    assert captured[1]["headline"] == "ETF inflows accelerate"
-    assert captured[1]["source"] == ""  # only the lead headline carries a source
-    assert captured[1]["index"] == 2 and captured[1]["total"] == 2
-    assert "#Crypto" in captured[0]["hashtags"] and "#Crypto" in captured[1]["hashtags"]
+    assert captured[0]["secondary"] == []
+    assert "#Crypto" in captured[0]["hashtags"]
 
 
-def test_trending_news_with_a_single_headline_skips_the_carousel_entirely(monkeypatch, tmp_path):
-    """Only one headline this cycle (no secondary stories) -- a 1-item
-    "carousel" isn't a real carousel (Threads itself requires >=2), so this
-    must go straight to the single combined-card path without ever
-    attempting create_and_publish_carousel_post."""
-    from data import chart_snapshot
-
+def test_trending_news_falls_back_to_text_when_the_card_post_fails(monkeypatch, tmp_path):
+    """The image post can fail for any reason -- a real trending post via
+    plain text still beats posting nothing at all, and stays one story
+    only (no "also trending" bullets in the text fallback either)."""
     _mock_charts(monkeypatch, tmp_path)
 
-    def fail_if_called(*a, **k):
-        raise AssertionError("must not attempt a carousel with only one headline")
+    def raise_error(image_url, text=""):
+        raise RuntimeError("Threads rejected the image post")
 
-    monkeypatch.setattr(threads_post.threads_client, "create_and_publish_carousel_post", fail_if_called)
-    monkeypatch.setattr(chart_snapshot, "generate_news_bullet_card", fail_if_called)
+    monkeypatch.setattr(threads_post.threads_client, "create_and_publish_image_post", raise_error)
     posted = []
-    monkeypatch.setattr(
-        threads_post.threads_client, "create_and_publish_image_post",
-        lambda image_url, text="": posted.append((image_url, text)),
-    )
-    threads_post.post_trending_news(_story(secondary=[]), market="crypto")
-    assert len(posted) == 1
-
-
-def test_trending_news_falls_back_to_the_single_card_when_the_carousel_post_fails(monkeypatch, tmp_path):
-    """The carousel attempt (rendering or posting) can fail for any reason
-    -- a real trending post via the older single combined-card path still
-    beats posting nothing at all."""
-    _mock_charts(monkeypatch, tmp_path)
-
-    def raise_error(image_urls, text=""):
-        raise RuntimeError("Threads rejected the carousel")
-
-    posted = []
-    monkeypatch.setattr(threads_post.threads_client, "create_and_publish_carousel_post", raise_error)
-    monkeypatch.setattr(
-        threads_post.threads_client, "create_and_publish_image_post",
-        lambda image_url, text="": posted.append((image_url, text)),
-    )
+    monkeypatch.setattr(threads_post.threads_client, "create_and_publish_post", lambda text: posted.append(text))
     result = threads_post.post_trending_news(_story(), market="crypto")
     assert result is True
     assert len(posted) == 1
-    assert posted[0][0].startswith("https://bettor-schwab.onrender.com/chart/")
+    assert "Bitcoin surges past resistance" in posted[0]
+    assert "ETF inflows accelerate" not in posted[0]  # secondary headline never shows up, even in the text fallback
 
 
 def test_trending_news_labels_stocks_market(monkeypatch, tmp_path):
@@ -1055,6 +1036,109 @@ def test_post_trending_news_does_not_attempt_commentary_when_there_was_no_duplic
     result = threads_post.post_trending_news(None, market="crypto")
     assert result is True
     assert "nothing notable" in posted[0].lower()
+
+
+# ── _post_music_news_fallback: real content instead of "nothing notable" ───
+# The autouse _isolated_dedup_state fixture above stubs
+# _post_music_news_fallback to a no-op by default (see its own comment) --
+# _REAL_POST_MUSIC_NEWS_FALLBACK captured here, at import time, before any
+# monkeypatching happens, lets the one test below that needs the real
+# implementation restore it.
+_REAL_POST_MUSIC_NEWS_FALLBACK = threads_post._post_music_news_fallback  # noqa: SLF001
+
+
+def _music_story(
+    title="Artist announces surprise new album", *, link="https://example.com/music",
+    image_url="https://example.com/artist.jpg", source="Pitchfork",
+):
+    return {"title": title, "link": link, "image_url": image_url, "source": source, "secondary": []}
+
+
+def test_post_trending_news_posts_music_news_instead_of_filler(monkeypatch):
+    from data import music_news
+
+    monkeypatch.setattr(threads_post, "_post_music_news_fallback", _REAL_POST_MUSIC_NEWS_FALLBACK)
+    monkeypatch.setattr(music_news, "get_trending_story", lambda: _music_story())
+    monkeypatch.setattr(threads_post.threads_client, "search_keyword_posts", lambda query, **kw: [])
+    image_calls = []
+    monkeypatch.setattr(
+        threads_post.threads_client, "create_and_publish_image_post",
+        lambda image_url, caption: image_calls.append((image_url, caption)) or "media-1",
+    )
+
+    def fail_if_called(text, **kw):
+        raise AssertionError("must not fall through to the plain-text filler when music news succeeds")
+
+    monkeypatch.setattr(threads_post.threads_client, "create_and_publish_post", fail_if_called)
+    result = threads_post.post_trending_news(None, market="stocks")
+    assert result is True
+    assert len(image_calls) == 1
+    image_url, caption = image_calls[0]
+    assert image_url == "https://example.com/artist.jpg"
+    assert "Artist announces surprise new album" in caption
+    assert "#Music" in caption
+
+
+def test_post_music_news_fallback_falls_back_to_text_when_there_is_no_photo(monkeypatch):
+    from data import music_news
+
+    monkeypatch.setattr(threads_post, "_post_music_news_fallback", _REAL_POST_MUSIC_NEWS_FALLBACK)
+    monkeypatch.setattr(music_news, "get_trending_story", lambda: _music_story(image_url=None))
+    posted = []
+    monkeypatch.setattr(threads_post.threads_client, "create_and_publish_post", lambda text: posted.append(text))
+    assert threads_post._post_music_news_fallback() is True  # noqa: SLF001
+    assert "Artist announces surprise new album" in posted[0]
+
+
+def test_post_music_news_fallback_returns_false_when_the_feed_has_nothing(monkeypatch):
+    from data import music_news
+
+    monkeypatch.setattr(threads_post, "_post_music_news_fallback", _REAL_POST_MUSIC_NEWS_FALLBACK)
+    monkeypatch.setattr(music_news, "get_trending_story", lambda: None)
+    assert threads_post._post_music_news_fallback() is False  # noqa: SLF001
+
+
+def test_post_music_news_fallback_respects_its_own_recent_dedup(monkeypatch):
+    from data import music_news
+
+    monkeypatch.setattr(threads_post, "_post_music_news_fallback", _REAL_POST_MUSIC_NEWS_FALLBACK)
+    threads_post._record_posted_story("music", "Artist announces surprise new album")  # noqa: SLF001
+    monkeypatch.setattr(music_news, "get_trending_story", lambda: _music_story())
+
+    def fail_if_called(*a, **k):
+        raise AssertionError("must not re-post a music story already posted recently")
+
+    monkeypatch.setattr(threads_post.threads_client, "create_and_publish_image_post", fail_if_called)
+    monkeypatch.setattr(threads_post.threads_client, "create_and_publish_post", fail_if_called)
+    assert threads_post._post_music_news_fallback() is False  # noqa: SLF001
+
+
+def test_post_music_news_fallback_falls_back_to_text_when_the_image_post_fails(monkeypatch):
+    from data import music_news
+
+    monkeypatch.setattr(threads_post, "_post_music_news_fallback", _REAL_POST_MUSIC_NEWS_FALLBACK)
+    monkeypatch.setattr(music_news, "get_trending_story", lambda: _music_story())
+
+    def raise_error(image_url, caption):
+        raise RuntimeError("simulated Threads image-post failure")
+
+    monkeypatch.setattr(threads_post.threads_client, "create_and_publish_image_post", raise_error)
+    posted = []
+    monkeypatch.setattr(threads_post.threads_client, "create_and_publish_post", lambda text: posted.append(text))
+    assert threads_post._post_music_news_fallback() is True  # noqa: SLF001
+    assert "Artist announces surprise new album" in posted[0]
+
+
+def test_post_music_news_fallback_never_raises_on_a_feed_failure(monkeypatch):
+    from data import music_news
+
+    monkeypatch.setattr(threads_post, "_post_music_news_fallback", _REAL_POST_MUSIC_NEWS_FALLBACK)
+
+    def raise_error():
+        raise RuntimeError("simulated feed failure")
+
+    monkeypatch.setattr(music_news, "get_trending_story", raise_error)
+    assert threads_post._post_music_news_fallback() is False  # noqa: SLF001
 
 
 # ── _last_known_story / commentary-as-a-picture ─────────────────────────────

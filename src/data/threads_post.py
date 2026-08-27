@@ -417,11 +417,14 @@ def _hashtags_only_caption(story: dict, *, market: str) -> str:
 
 
 def _format_trending_story_caption(story: dict, *, market: str, headline_override: str | None = None) -> str:
-    """Full headline + source + secondary-headlines + hashtags text --
-    used ONLY as the text-only fallback when no image could be generated/
-    posted at all (see post_trending_news). In that case the TEXT is the
-    only thing carrying the actual news content, so it needs the full
-    story, not just hashtags.
+    """Full headline + source + hashtags text -- used ONLY as the text-only
+    fallback when no image could be generated/posted at all (see
+    post_trending_news). In that case the TEXT is the only thing carrying
+    the actual news content, so it needs the full story, not just hashtags.
+    One story only -- no "also trending" bullets (real feedback: bundling
+    several unrelated headlines into one post read as confusing; see
+    post_trending_news's own comment for the fuller "one post, one story"
+    rationale this shares).
 
     `headline_override` (see threads_persona.anchor_rewrite_headline) lets
     the caller swap in the anchor-rewritten lead headline instead of the
@@ -433,17 +436,67 @@ def _format_trending_story_caption(story: dict, *, market: str, headline_overrid
     lines = [f"\U0001F4F0 {label} news: {title}"]
     if source:
         lines.append(f"(via {source})")
-    secondary = [s for s in (story.get("secondary") or []) if s][:3]
-    if secondary:
-        lines.append("")
-        lines.append("Also trending:")
-        lines.extend(f"• {_clean_headline(s)}" for s in secondary)
     lines.append("")
     lines.append(_hashtags_for_story(story, market=market))
     text = "\n".join(lines)
     if len(text) > _THREADS_POST_MAX_CHARS:
         text = text[: _THREADS_POST_MAX_CHARS - 1] + "…"
     return text
+
+
+_MUSIC_NEWS_HASHTAGS = "#Music #MusicNews #NewMusic #Entertainment #Trending"
+
+
+def _format_music_news_caption(story: dict) -> str:
+    title = _clean_headline(story["title"])
+    source = story.get("source") or ""
+    lines = [f"\U0001F3B5 {title}"]
+    if source:
+        lines.append(f"(via {source})")
+    lines.append("")
+    lines.append(_MUSIC_NEWS_HASHTAGS)
+    text = "\n".join(lines)
+    if len(text) > _THREADS_POST_MAX_CHARS:
+        text = text[: _THREADS_POST_MAX_CHARS - 1] + "…"
+    return text
+
+
+def _post_music_news_fallback() -> bool:
+    """Real fallback for a slow news day (see post_trending_news's own
+    empty-feed branch): a genuine music/entertainment headline with a real
+    artist photo instead of a bland "nothing notable" filler -- real
+    feedback confirmed that filler kept showing up in practice (the
+    commentary/reply attempts right above this one both depend on this
+    market already having real news history, or on Meta's search access,
+    neither of which is guaranteed). Namespaced under its own "music" dedup
+    market (see _is_recent_duplicate_story) so it never collides with, or
+    gets starved by, any real trading market's own recent-news pool. Only
+    posts as an IMAGE (see music_news.get_trending_story's own preference
+    for picture-bearing stories) when a real photo came back -- falls back
+    to plain text with the same hashtags otherwise, still real content
+    either way. Best-effort, never raises."""
+    try:
+        from data import music_news
+        story = music_news.get_trending_story()
+        if not story or not story.get("title"):
+            return False
+        if _is_recent_duplicate_story("music", story["title"]):
+            return False
+        caption = _format_music_news_caption(story)
+        image_url = story.get("image_url")
+        if image_url:
+            try:
+                threads_client.create_and_publish_image_post(image_url, caption)
+                _record_posted_story("music", story["title"], source=story.get("source"))
+                return True
+            except Exception as exc:
+                logger.warning("[threads_post] failed to post music news as an image, falling back to text: %s", exc)
+        threads_client.create_and_publish_post(caption)
+        _record_posted_story("music", story["title"], source=story.get("source"))
+        return True
+    except Exception as exc:
+        logger.warning("[threads_post] music-news fallback failed: %s", exc)
+        return False
 
 
 def is_configured() -> bool:
@@ -717,26 +770,26 @@ def post_hourly_status(
 
 
 def post_trending_news(story: dict | None, *, market: str) -> bool:
-    """Posts the current trending story (lead headline + up to
-    _NEWS_CARD_SECONDARY_MAX "also trending" secondary headlines) as
-    GENERATED image cards -- the headline, source, and hashtags are
-    rendered directly onto the picture itself (see
-    chart_snapshot.generate_news_bullet_card), not attached as a caption
-    next to a scraped photo. The Threads post TEXT next to the image(s) is
-    hashtags ONLY (see _hashtags_only_caption) -- real feedback confirmed
-    the old caption duplicated everything already visible on the card
-    itself, which read as redundant.
+    """Posts the current trending story's LEAD headline -- one post, one
+    story, always -- as a GENERATED image card -- the headline, source,
+    and hashtags are rendered directly onto the picture itself (see
+    chart_snapshot.generate_news_card), not attached as a caption next to a
+    scraped photo. The Threads post TEXT next to the image is hashtags ONLY
+    (see _hashtags_only_caption) -- real feedback confirmed the old caption
+    duplicated everything already visible on the card itself, which read as
+    redundant.
 
-    When there's more than one headline this cycle, this posts a real
-    Threads CAROUSEL -- one big single-headline card per bullet point,
-    swipeable in one post (see threads_client.create_and_publish_carousel_post)
-    -- instead of the old approach of cramming the lead headline plus every
-    secondary headline as small text onto one cluttered image. Falls back,
-    in order: carousel -> single combined card (chart_snapshot.generate_news_card,
-    all headlines on one image) -> plain text (see
-    _format_trending_story_caption) -- each step only triggers if the one
-    before it failed for any reason, so a real post still beats none.
-    `story` comes from crypto_news.get_trending_story() /
+    Real feedback: this used to also bundle `story`'s own up-to-3 "also
+    trending" secondary headlines into the same post -- a multi-card
+    carousel when there was an image, or a bullet list when there wasn't --
+    which read as confusing (several unrelated stories under one post).
+    `secondary` is still fetched/stored (see _record_posted_story) as
+    grounding context for a later commentary post via _last_known_story,
+    but never rendered as part of THIS post's own content anymore. Falls
+    back, in order: image card (chart_snapshot.generate_news_card) -> plain
+    text (see _format_trending_story_caption) -- each step only triggers if
+    the one before it failed for any reason, so a real post still beats
+    none. `story` comes from crypto_news.get_trending_story() /
     stock_news.get_trending_story() -- {"title", "link", "image_url",
     "source", "secondary"}, or None if every feed failed.
 
@@ -840,6 +893,12 @@ def post_trending_news(story: dict | None, *, market: str) -> bool:
                 return True
         except Exception as exc:
             logger.warning("[threads_post] fallback reply round failed: %s", exc)
+        # Last real-content resort before the bland filler below: a genuine
+        # music/entertainment headline with a real artist photo -- see
+        # _post_music_news_fallback's own docstring for why this beats
+        # admitting "nothing notable" outright.
+        if _post_music_news_fallback():
+            return True
         text = f"{_short_market_label(market)} trending news: nothing notable right now.\n{_hashtags_for_market(market)} #Trends #News"
         try:
             threads_client.create_and_publish_post(text)
@@ -864,53 +923,21 @@ def post_trending_news(story: dict | None, *, market: str) -> bool:
     except Exception as exc:
         logger.warning("[threads_post] anchor rewrite failed, using the plain headline: %s", exc)
     hashtags = _hashtags_for_story(story, market=market)
-    headlines = [title] + secondary  # lead story + up to 3 "also trending"
 
-    # Multiple headlines this cycle -> one BIG card per headline, posted as
-    # a real Threads carousel (swipeable, not crammed onto one cluttered
-    # image) -- see chart_snapshot.generate_news_bullet_card's own
-    # docstring. Falls back to the single combined card below if carousel
-    # generation/posting fails for any reason (still a real image beats
-    # none), and falls back further to plain text if that fails too.
-    if len(headlines) >= threads_client.CAROUSEL_MIN_ITEMS:
-        try:
-            from data import chart_snapshot
-
-            card_sources = [story.get("source") or "" if i == 1 else "" for i in range(1, len(headlines) + 1)]
-            # Every card in the set renders at the SAME height (the tallest
-            # any one of them needs) -- Threads crops carousel items to a
-            # uniform ratio, so letting each card size independently would
-            # make a short headline's card look inconsistently cropped next
-            # to a longer one's (see measure_news_bullet_card_height's own
-            # docstring).
-            shared_height = max(
-                chart_snapshot.measure_news_bullet_card_height(market=market, headline=line, source=src, hashtags=hashtags)
-                for line, src in zip(headlines, card_sources)
-            )
-            image_urls = []
-            for i, (line, src) in enumerate(zip(headlines, card_sources), start=1):
-                chart_path = chart_snapshot.generate_news_bullet_card(
-                    market=market, headline=line, source=src, index=i, total=len(headlines),
-                    hashtags=hashtags, min_height=shared_height,
-                )
-                if chart_path is None:
-                    raise RuntimeError(f"bullet card {i}/{len(headlines)} failed to render")
-                url = chart_snapshot.public_url_for(chart_path)
-                if not url:
-                    raise RuntimeError(f"bullet card {i}/{len(headlines)} has no public URL")
-                image_urls.append(url)
-            threads_client.create_and_publish_carousel_post(image_urls, _hashtags_only_caption(story, market=market))
-            _record_posted_story(market, raw_title, source=story.get("source"), secondary=story.get("secondary"))
-            return True
-        except Exception as exc:
-            logger.warning("[threads_post] failed to post trending news as a carousel, falling back to a single image: %s", exc)
-
+    # Real feedback: bundling the lead headline plus up to 3 unrelated
+    # "also trending" headlines into one post (a multi-card carousel, or a
+    # bullet list in the text fallback below) read as confusing -- several
+    # different stories under one caption/post. One post is now always
+    # exactly one story: the lead headline only. `secondary` is still
+    # fetched and stored (see _record_posted_story) since _last_known_story
+    # uses it as extra grounding for a later commentary post, just never
+    # rendered as part of THIS post's own content.
     image_url = None
     try:
         from data import chart_snapshot
 
         chart_path = chart_snapshot.generate_news_card(
-            market=market, headline=title, source=story.get("source") or "", secondary=secondary, hashtags=hashtags,
+            market=market, headline=title, source=story.get("source") or "", secondary=[], hashtags=hashtags,
         )
         if chart_path is not None:
             image_url = chart_snapshot.public_url_for(chart_path)
