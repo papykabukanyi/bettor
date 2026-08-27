@@ -83,18 +83,20 @@ services:
       # moment real P&L shows it isn't helping.
       - key: PERPS_USE_CORRELATION_STUDY
         value: "1"
-      # Conviction-scaled entry sizing (perps_strategy.py): resizes each
-      # NEW entry between 0.7x-1.5x of the flat POSITION_SIZE_PCT slice
-      # based on how far above its own confidence bar the model cleared --
-      # never changes which candidates qualify (should_enter is untouched),
-      # only how much capital a qualifying one gets. Graduated to the
-      # deployed default per explicit user direction; PERPS_USE_SCALE_IN
-      # and PERPS_USE_PARTIAL_EXIT (same file, same rollout posture) are
-      # deliberately left OFF here for now -- those add/hold real position
-      # risk beyond a single entry's original size, a bigger step than
-      # resizing an entry that was already happening.
+      # Conviction-scaled entry sizing, scale-in, and partial-exit
+      # (perps_strategy.py) all default OFF here. Briefly turned ON as a
+      # manual pick, then reverted: two independent backtest sweeps (40
+      # configs/14 days, then 150 configs/30 days, both with real
+      # multi-fold walk-forward confirmation -- see perps_sweep.py) found
+      # NO combination of these 3 features beating the baseline in recent
+      # history -- every finalist showed 0% profitable walk-forward folds.
+      # Consistent with this file's own long-documented thin/negative edge
+      # even before these features existed. Left off pending the live
+      # evidence-gated forward-tuner (perps_trade_analysis.py) actually
+      # trialing one with real, ongoing trade data rather than a manual
+      # pick or a backtest sample that's inherently capped at ~30-44 days.
       - key: PERPS_USE_CONVICTION_SIZING
-        value: "1"
+        value: "0"
       # Cross-links to the Alpaca services' dashboards, shown as nav links
       # on this one. Render doesn't expose a way to reference ANOTHER
       # service's public URL from within a blueprint, so these have to be
