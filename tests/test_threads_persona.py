@@ -21,6 +21,14 @@ def _isolated_persona_state(monkeypatch):
     monkeypatch.setattr(threads_persona, "_persona_config_cache", None)
     monkeypatch.setattr(threads_persona, "_last_persona_config_pull_ts", 0.0)
     monkeypatch.setattr(threads_persona, "_pull_persona_config_from_hf", lambda: None)
+    # Real few-shot examples get inserted as extra (user, assistant) message
+    # pairs between the system prompt and the real user message (see
+    # _chat's own `examples` param) -- off by default here so every
+    # existing test asserting on a fixed messages[0]/messages[1] shape
+    # doesn't silently break just because the example library is
+    # non-empty. Tests that specifically exercise few-shot injection
+    # override this explicitly.
+    monkeypatch.setattr(threads_persona, "_FEW_SHOT_SAMPLE_SIZE", 0)
     yield
 
 
@@ -217,3 +225,100 @@ def test_anchor_rewrite_headline_uses_the_pulled_prompts_max_tokens_and_temperat
 def test_pull_persona_config_from_hf_returns_none_without_an_api_key(monkeypatch):
     monkeypatch.setattr(threads_persona, "HF_API_KEY", "")
     assert threads_persona._pull_persona_config_from_hf() is None  # noqa: SLF001
+
+
+# ── few-shot example library (_sample_examples / _get_examples / _chat) ────
+# See threads_persona.py's own module docstring: the "large dataset" half
+# of the model-quality upgrade is a genuinely large, hand-curated example
+# library fed to the model as real (user, assistant) conversation turns, a
+# fresh handful sampled each real call rather than the same fixed subset
+# (or the whole library) every time.
+
+def test_every_task_has_a_real_few_shot_example_library():
+    for task in threads_persona._DEFAULT_PROMPTS:  # noqa: SLF001
+        examples = threads_persona._FEW_SHOT_EXAMPLES.get(task)  # noqa: SLF001
+        assert examples, f"{task} has no few-shot examples"
+        assert len(examples) >= 10  # a genuinely large pool, not a token gesture
+        for user_turn, assistant_turn in examples:
+            assert isinstance(user_turn, str) and user_turn
+            assert isinstance(assistant_turn, str) and assistant_turn
+
+
+def test_sample_examples_returns_a_capped_random_subset(monkeypatch):
+    monkeypatch.setattr(threads_persona, "_FEW_SHOT_SAMPLE_SIZE", 3)
+    result = threads_persona._sample_examples("anchor_rewrite_headline")  # noqa: SLF001
+    assert len(result) == 3
+    pool = threads_persona._FEW_SHOT_EXAMPLES["anchor_rewrite_headline"]  # noqa: SLF001
+    assert all(item in pool for item in result)
+
+
+def test_sample_examples_never_exceeds_the_pool_size(monkeypatch):
+    monkeypatch.setattr(threads_persona, "_FEW_SHOT_SAMPLE_SIZE", 999)
+    result = threads_persona._sample_examples("anchor_draft_reply")  # noqa: SLF001
+    assert len(result) == len(threads_persona._FEW_SHOT_EXAMPLES["anchor_draft_reply"])  # noqa: SLF001
+
+
+def test_sample_examples_returns_empty_for_an_unknown_task():
+    assert threads_persona._sample_examples("not_a_real_task") == []  # noqa: SLF001
+
+
+def test_get_examples_uses_the_hardcoded_library_when_the_prompt_has_none(monkeypatch):
+    monkeypatch.setattr(threads_persona, "_FEW_SHOT_SAMPLE_SIZE", 2)
+    result = threads_persona._get_examples("anchor_commentary", {"system": "x"})  # noqa: SLF001
+    assert len(result) == 2
+    pool = threads_persona._FEW_SHOT_EXAMPLES["anchor_commentary"]  # noqa: SLF001
+    assert all(item in pool for item in result)
+
+
+def test_get_examples_uses_the_hf_configs_own_examples_when_present(monkeypatch):
+    monkeypatch.setattr(threads_persona, "_FEW_SHOT_SAMPLE_SIZE", 5)
+    prompt = {"system": "x", "examples": [["custom user turn", "custom assistant turn"]]}
+    result = threads_persona._get_examples("anchor_commentary", prompt)  # noqa: SLF001
+    assert result == [("custom user turn", "custom assistant turn")]
+
+
+def test_chat_inserts_examples_as_real_conversation_turns_before_the_final_user_message(monkeypatch):
+    captured = {}
+
+    def fake_post(url, *, headers, json, timeout):
+        captured["messages"] = json["messages"]
+        return _chat_response("A reply")
+
+    monkeypatch.setattr(threads_persona.requests, "post", fake_post)
+    threads_persona._chat(  # noqa: SLF001
+        "system prompt", "real user prompt",
+        examples=[("example user 1", "example assistant 1"), ("example user 2", "example assistant 2")],
+    )
+    messages = captured["messages"]
+    assert messages[0] == {"role": "system", "content": "system prompt"}
+    assert messages[1] == {"role": "user", "content": "example user 1"}
+    assert messages[2] == {"role": "assistant", "content": "example assistant 1"}
+    assert messages[3] == {"role": "user", "content": "example user 2"}
+    assert messages[4] == {"role": "assistant", "content": "example assistant 2"}
+    assert messages[5] == {"role": "user", "content": "real user prompt"}
+
+
+def test_anchor_rewrite_headline_includes_few_shot_examples_by_default(monkeypatch):
+    """End-to-end: with the real (non-zeroed) sample size, a real call
+    through the public anchor_* function actually carries few-shot turns,
+    not just the system+final-user shape the other tests isolate this
+    from."""
+    monkeypatch.setattr(threads_persona, "_FEW_SHOT_SAMPLE_SIZE", 4)
+    captured = {}
+
+    def fake_post(url, *, headers, json, timeout):
+        captured["messages"] = json["messages"]
+        return _chat_response("A punchy line")
+
+    monkeypatch.setattr(threads_persona.requests, "post", fake_post)
+    threads_persona.anchor_rewrite_headline("Bitcoin surges", source="cointelegraph")
+    messages = captured["messages"]
+    assert len(messages) == 1 + 4 * 2 + 1  # system + 4 example pairs + the real user message
+    assert messages[-1]["content"].startswith('Headline: "Bitcoin surges"')
+
+
+def test_model_default_is_the_upgraded_larger_model():
+    """Real, live-verified upgrade from Llama-3.1-8B-Instruct (see this
+    module's own docstring for the confirmed side-by-side comparison) --
+    same free router/token, no new cost."""
+    assert threads_persona.MODEL == "meta-llama/Llama-3.3-70B-Instruct"
