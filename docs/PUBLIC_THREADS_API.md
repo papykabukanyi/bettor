@@ -6,7 +6,7 @@ stream it, without CumDev needing its own separate Threads OAuth
 connection. Lives on the **existing** `bettor-dashboard` Render service
 (no new service was created for this) alongside its other `/api/*` routes.
 
-**Base URL:** `https://bettor-00di.onrender.com`
+**Base URL:** `https://bettor-dashboard-18ni.onrender.com`
 
 Every bot in this codebase (Kalshi perps, Alpaca stocks/crypto/options)
 posts to Threads as the **same** account/token, so this one endpoint on
@@ -71,12 +71,12 @@ directly, no proxy needed.
 ### Example
 
 ```bash
-curl "https://bettor-00di.onrender.com/api/threads/posts?limit=10"
+curl "https://bettor-dashboard-18ni.onrender.com/api/threads/posts?limit=10"
 ```
 
 ```ts
 // CumDev-side fetch (server component, API route, or client -- CORS is open either way)
-const res = await fetch("https://bettor-00di.onrender.com/api/threads/posts?limit=25");
+const res = await fetch("https://bettor-dashboard-18ni.onrender.com/api/threads/posts?limit=25");
 const { ok, posts } = await res.json();
 ```
 
@@ -85,7 +85,7 @@ already seen:
 
 ```ts
 const res = await fetch(
-  `https://bettor-00di.onrender.com/api/threads/posts?since_id=${lastSeenId}`
+  `https://bettor-dashboard-18ni.onrender.com/api/threads/posts?since_id=${lastSeenId}`
 );
 ```
 
@@ -104,7 +104,7 @@ both accepted (a plain scheduled HTTP hit is usually a GET).
 **Requires authorization** -- same `CRON_SECRET` bearer token every other
 scheduled-trigger route on this service already uses:
 
-```
+```text
 Authorization: Bearer <CRON_SECRET>
 ```
 
@@ -123,17 +123,22 @@ it does not need to be a new one.
 
 Create one new job at [console.cron-job.org/jobs](https://console.cron-job.org/jobs):
 
-- **URL:** `https://bettor-00di.onrender.com/api/threads/posts/sync`
+- **URL:** `https://bettor-dashboard-18ni.onrender.com/api/threads/posts/sync`
 - **Method:** `GET` (or `POST` -- both work)
 - **Headers:** `Authorization: Bearer <CRON_SECRET>` (the real secret value, not this placeholder)
-- **Schedule:** every 5-15 minutes
+- **Schedule:** every 1 minute, to match the ~1-minute end-to-end freshness the CumDev blog side is targeting (its own cron interval + shortened page cache window)
 
-Why that interval: Meta's own list is capped to the 50 most recent posts
-per fetch. If this account posts more than 50 times between two syncs,
-the ones in between would be skipped. At this account's actual posting
-cadence (trending news every 30 min, hourly status, occasional trade
-events), even a 15-minute interval leaves a wide safety margin -- 5
-minutes if you want it tighter for no real reason to need it.
+Why 1 minute is safe here: Meta's own list is capped to the 50 most
+recent posts per fetch -- if this account posted more than 50 times
+between two syncs, the ones in between would be skipped, but at this
+account's actual posting cadence (trending news every 30 min, hourly
+status, occasional trade events) that's nowhere close, so a 1-minute
+interval leaves a huge safety margin, not a tight one. It also has a
+side benefit: Render's free/starter tier spins this service down after a
+period of idle, and the first request after that takes ~20-30s to wake it
+back up (confirmed live) -- a 1-minute cron keeps it warm, so CumDev's own
+polls of `/api/threads/posts` hit a warm service instead of eating that
+cold-start delay themselves.
 
 ## Why this design (not a raw push stream)
 

@@ -3,8 +3,11 @@ services:
   # Kalshi Perps -- the ORIGINAL, still-live service. Its name is left
   # UNCHANGED on purpose: Render's Blueprint sync matches services by
   # `name`, and this one already has a real public URL
-  # (bettor-00di.onrender.com) that real money / the Kalshi OAuth-adjacent
-  # config depends on.
+  # (bettor-dashboard-18ni.onrender.com -- confirmed live 2026-08-28 via
+  # the Render API; an earlier version of this comment said
+  # bettor-00di.onrender.com, which no longer resolves to anything, likely
+  # from a rename/redeploy after this comment was first written and never
+  # updated) that real money / the Kalshi OAuth-adjacent config depends on.
   #
   # NOTE: Render's ACTUAL Start Command for this specific service is set
   # manually in the Render dashboard (`gunicorn app:app`), independent of
