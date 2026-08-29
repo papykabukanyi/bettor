@@ -677,45 +677,17 @@ def _ensure_background_jobs_started() -> None:
                 _run_perps_trade_analysis, "cron", hour=PERPS_TRADE_ANALYSIS_HOUR_ET, minute=PERPS_TRADE_ANALYSIS_MINUTE_ET,
                 id="perps_trade_analysis", replace_existing=True,
             )
-            # executor="fastcheck" on these (and entry_scan/fast_check below)
-            # -- real, confirmed production incident: with only fast_check
-            # isolated from "default", a slow train/data_collect run (made
-            # meaningfully longer by the recent MAX_TRAIN_ROWS increase) was
-            # still able to block entry_scan and every Threads post for
-            # 7-18+ minutes at a stretch on the equivalent Alpaca services --
-            # long enough to blow past even the widened 300s misfire grace
-            # and get silently skipped anyway. All of these are themselves
-            # fast, bounded operations (seconds, not minutes) sharing this
-            # pool safely with fast_check the same way -- moving them here
-            # protects them from the SLOW jobs still on "default" without
-            # meaningfully risking fast_check's own real-money-critical
-            # cadence.
-            # Real, confirmed live: with no stagger, hourly_status (1h) and
-            # sentiment_snapshot (60min) always land on the EXACT same tick
-            # (both added back-to-back with no offset), and trending_news
-            # (30min) coincides with them every other cycle too -- data_collect
-            # (15min) piles on as well since 60 is a multiple of 15. That
-            # cluster running back-to-back took ~20s, long enough to bump
-            # into fast_check's own 20s cadence and cause a real, if minor
-            # (one cycle, immediately recovered), skip once an hour.
-            # Staggering each job's first run spreads them across the hour
-            # instead of clustering at :00 -- same next_run_time technique
-            # data_collect's own comment above already documents.
-            now_utc = dt.datetime.now(dt.timezone.utc)
-            scheduler.add_job(
-                _run_perps_threads_hourly_status, "interval", hours=1,
-                id="perps_threads_hourly_status", replace_existing=True, executor="fastcheck",
-            )
-            scheduler.add_job(
-                _run_perps_threads_trending_news, "interval", minutes=30,
-                id="perps_threads_trending_news", replace_existing=True, executor="fastcheck",
-                next_run_time=now_utc + dt.timedelta(minutes=5),
-            )
-            scheduler.add_job(
-                _run_perps_threads_sentiment_snapshot, "interval", minutes=60,
-                id="perps_threads_sentiment_snapshot", replace_existing=True, executor="fastcheck",
-                next_run_time=now_utc + dt.timedelta(minutes=10),
-            )
+            # Threads content jobs (hourly_status/trending_news/sentiment_snapshot)
+            # used to run here too, on their own staggered in-process
+            # APScheduler schedule -- moved to external cron-job.org
+            # triggers instead (see api_perps_threads_trending_news and its
+            # 2 siblings below) to cut non-trading-critical job/executor
+            # overhead out of this process entirely, leaving the scheduler
+            # focused on the jobs that actually need to live here
+            # (fast_check, entry_scan, data_collect, train). The staggering/
+            # dedicated-executor care that used to live in this comment is
+            # cron-job.org's own concern now (stagger each job's schedule
+            # in its own console entry) -- see docs/CRON_JOB_MIGRATION.md.
             if ENABLE_PERPS_SCHEDULER:
                 scheduler.add_job(
                     _run_perps_fast_check, "interval", seconds=PERPS_FAST_CHECK_SECONDS,
@@ -1182,6 +1154,48 @@ def api_perps_fast_check():
         return jsonify({"ok": False, "error": "Unauthorized"}), 401
     try:
         return jsonify(_run_perps_fast_check())
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+@app.route("/api/perps/threads/trending-news", methods=["GET", "POST"])
+def api_perps_threads_trending_news():
+    """Trigger route for an external scheduler (cron-job.org) to run the
+    Threads trending-news post instead of this service's own internal
+    APScheduler -- see this file's own module-level comment on moving
+    non-trading-critical Threads content jobs off Render's internal
+    scheduler to cut down on in-process job/executor overhead, keeping the
+    scheduler focused on the trading-critical jobs (fast_check, entry_scan,
+    data_collect, train). Same CRON_SECRET gate as every other trigger
+    route here."""
+    if not is_cron_authorized(request):
+        return jsonify({"ok": False, "error": "Unauthorized"}), 401
+    try:
+        return jsonify(_run_perps_threads_trending_news())
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+@app.route("/api/perps/threads/sentiment-snapshot", methods=["GET", "POST"])
+def api_perps_threads_sentiment_snapshot():
+    """Trigger route for an external scheduler -- see
+    api_perps_threads_trending_news's own docstring."""
+    if not is_cron_authorized(request):
+        return jsonify({"ok": False, "error": "Unauthorized"}), 401
+    try:
+        return jsonify(_run_perps_threads_sentiment_snapshot())
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+@app.route("/api/perps/threads/hourly-status", methods=["GET", "POST"])
+def api_perps_threads_hourly_status():
+    """Trigger route for an external scheduler -- see
+    api_perps_threads_trending_news's own docstring."""
+    if not is_cron_authorized(request):
+        return jsonify({"ok": False, "error": "Unauthorized"}), 401
+    try:
+        return jsonify(_run_perps_threads_hourly_status())
     except Exception as exc:
         return jsonify({"ok": False, "error": str(exc)}), 500
 

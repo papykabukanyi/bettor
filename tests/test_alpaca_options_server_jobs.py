@@ -361,3 +361,50 @@ def test_shutdown_scheduler_swallows_errors(monkeypatch):
 
     monkeypatch.setattr(alpaca_options_server, "scheduler", _FakeScheduler(True, raise_error))
     alpaca_options_server._shutdown_scheduler()  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# Threads content jobs moved off this service's own internal APScheduler to
+# external cron-job.org triggers (see docs/CRON_JOB_MIGRATION.md) -- these
+# routes are the trigger surface, same CRON_SECRET-gated convention as
+# /api/alpaca/options/tick and friends.
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("path,job_name", [
+    ("/api/alpaca/options/threads/trending-news", "_run_alpaca_options_threads_trending_news"),
+    ("/api/alpaca/options/threads/sentiment-snapshot", "_run_alpaca_options_threads_sentiment_snapshot"),
+    ("/api/alpaca/options/threads/hourly-status", "_run_alpaca_options_threads_hourly_status"),
+])
+def test_threads_trigger_routes_require_cron_authorization(monkeypatch, path, job_name):
+    monkeypatch.setenv("CRON_SECRET", "real-secret")
+    with alpaca_options_server.app.test_client() as client:
+        resp = client.post(path)
+        assert resp.status_code == 401
+
+
+@pytest.mark.parametrize("path,job_name", [
+    ("/api/alpaca/options/threads/trending-news", "_run_alpaca_options_threads_trending_news"),
+    ("/api/alpaca/options/threads/sentiment-snapshot", "_run_alpaca_options_threads_sentiment_snapshot"),
+    ("/api/alpaca/options/threads/hourly-status", "_run_alpaca_options_threads_hourly_status"),
+])
+def test_threads_trigger_routes_call_the_right_job_when_authorized(monkeypatch, path, job_name):
+    monkeypatch.setattr(alpaca_options_server, job_name, lambda: {"ok": True, "posted": True})
+    with alpaca_options_server.app.test_client() as client:
+        resp = client.post(path)
+        assert resp.status_code == 200
+        assert resp.get_json() == {"ok": True, "posted": True}
+
+
+@pytest.mark.parametrize("path,job_name", [
+    ("/api/alpaca/options/threads/trending-news", "_run_alpaca_options_threads_trending_news"),
+    ("/api/alpaca/options/threads/sentiment-snapshot", "_run_alpaca_options_threads_sentiment_snapshot"),
+    ("/api/alpaca/options/threads/hourly-status", "_run_alpaca_options_threads_hourly_status"),
+])
+def test_threads_trigger_routes_never_raise_on_a_backend_failure(monkeypatch, path, job_name):
+    def raise_error():
+        raise RuntimeError("simulated failure")
+
+    monkeypatch.setattr(alpaca_options_server, job_name, raise_error)
+    with alpaca_options_server.app.test_client() as client:
+        resp = client.post(path)
+        assert resp.status_code == 500
+        assert resp.get_json()["ok"] is False

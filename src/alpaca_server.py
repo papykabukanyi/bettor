@@ -623,26 +623,15 @@ def _ensure_background_jobs_started() -> None:
                 id="alpaca_entry_scan", replace_existing=True, executor="fastcheck",
                 next_run_time=dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=ALPACA_STARTUP_GRACE_SECONDS),
             )
-            # Staggered next_run_time -- real, confirmed fix ported from
-            # perps/crypto's own identical trio (see app_kalshi.py's
-            # perps_threads_trending_news comment for the full rationale):
-            # with no offset these all land on the same tick periodically,
-            # occasionally bumping into fast_check's own 20s cadence.
-            now_utc = dt.datetime.now(dt.timezone.utc)
-            scheduler.add_job(
-                _run_alpaca_threads_trending_news, "interval", minutes=30,
-                id="alpaca_threads_trending_news", replace_existing=True, executor="fastcheck",
-                next_run_time=now_utc + dt.timedelta(minutes=5),
-            )
-            scheduler.add_job(
-                _run_alpaca_threads_sentiment_snapshot, "interval", minutes=60,
-                id="alpaca_threads_sentiment_snapshot", replace_existing=True, executor="fastcheck",
-                next_run_time=now_utc + dt.timedelta(minutes=10),
-            )
-            scheduler.add_job(
-                _run_alpaca_threads_hourly_status, "interval", hours=1,
-                id="alpaca_threads_hourly_status", replace_existing=True, executor="fastcheck",
-            )
+            # Threads content jobs (hourly_status/trending_news/sentiment_snapshot)
+            # used to run here too, on their own staggered in-process
+            # APScheduler schedule -- moved to external cron-job.org
+            # triggers instead (see api_alpaca_threads_trending_news and
+            # its 2 siblings below) to cut non-trading-critical job/
+            # executor overhead out of this process entirely, leaving the
+            # scheduler focused on the jobs that actually need to live
+            # here (fast_check, entry_scan, data_collect, train). See
+            # docs/CRON_JOB_MIGRATION.md.
             scheduler.start()
             logger.info(
                 "Alpaca scheduler started: fast exit check every %ds, entry scan every %d min (first run in %ds), "
@@ -865,6 +854,43 @@ def api_alpaca_tick():
         return jsonify({"ok": True, "fast_check": fast, "entry_scan": scan})
     except Exception as exc:
         logger.exception("[alpaca_server] manual alpaca tick failed: %s", exc)
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+@app.route("/api/alpaca/threads/trending-news", methods=["GET", "POST"])
+def api_alpaca_threads_trending_news():
+    """Trigger route for an external scheduler (cron-job.org) to run the
+    Threads trending-news post instead of this service's own internal
+    APScheduler -- see docs/CRON_JOB_MIGRATION.md."""
+    if not is_cron_authorized(request):
+        return jsonify({"ok": False, "error": "Unauthorized"}), 401
+    try:
+        return jsonify(_run_alpaca_threads_trending_news())
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+@app.route("/api/alpaca/threads/sentiment-snapshot", methods=["GET", "POST"])
+def api_alpaca_threads_sentiment_snapshot():
+    """Trigger route for an external scheduler -- see
+    api_alpaca_threads_trending_news's own docstring."""
+    if not is_cron_authorized(request):
+        return jsonify({"ok": False, "error": "Unauthorized"}), 401
+    try:
+        return jsonify(_run_alpaca_threads_sentiment_snapshot())
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+@app.route("/api/alpaca/threads/hourly-status", methods=["GET", "POST"])
+def api_alpaca_threads_hourly_status():
+    """Trigger route for an external scheduler -- see
+    api_alpaca_threads_trending_news's own docstring."""
+    if not is_cron_authorized(request):
+        return jsonify({"ok": False, "error": "Unauthorized"}), 401
+    try:
+        return jsonify(_run_alpaca_threads_hourly_status())
+    except Exception as exc:
         return jsonify({"ok": False, "error": str(exc)}), 500
 
 

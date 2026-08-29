@@ -243,6 +243,53 @@ def test_api_threads_posts_sync_never_raises_on_a_backend_failure(monkeypatch):
         assert body["ok"] is False
 
 
+# ---------------------------------------------------------------------------
+# Threads content jobs moved off this service's own internal APScheduler to
+# external cron-job.org triggers (see docs/CRON_JOB_MIGRATION.md) -- these
+# routes are the trigger surface, same CRON_SECRET-gated convention as
+# /api/perps/tick and friends.
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("path,job_name", [
+    ("/api/perps/threads/trending-news", "_run_perps_threads_trending_news"),
+    ("/api/perps/threads/sentiment-snapshot", "_run_perps_threads_sentiment_snapshot"),
+    ("/api/perps/threads/hourly-status", "_run_perps_threads_hourly_status"),
+])
+def test_threads_trigger_routes_require_cron_authorization(monkeypatch, path, job_name):
+    monkeypatch.setenv("CRON_SECRET", "real-secret")
+    with app_kalshi.app.test_client() as client:
+        resp = client.post(path)
+        assert resp.status_code == 401
+
+
+@pytest.mark.parametrize("path,job_name", [
+    ("/api/perps/threads/trending-news", "_run_perps_threads_trending_news"),
+    ("/api/perps/threads/sentiment-snapshot", "_run_perps_threads_sentiment_snapshot"),
+    ("/api/perps/threads/hourly-status", "_run_perps_threads_hourly_status"),
+])
+def test_threads_trigger_routes_call_the_right_job_when_authorized(monkeypatch, path, job_name):
+    monkeypatch.setattr(app_kalshi, job_name, lambda: {"ok": True, "posted": True})
+    with app_kalshi.app.test_client() as client:
+        resp = client.post(path)
+        assert resp.status_code == 200
+        assert resp.get_json() == {"ok": True, "posted": True}
+
+
+@pytest.mark.parametrize("path,job_name", [
+    ("/api/perps/threads/trending-news", "_run_perps_threads_trending_news"),
+    ("/api/perps/threads/sentiment-snapshot", "_run_perps_threads_sentiment_snapshot"),
+    ("/api/perps/threads/hourly-status", "_run_perps_threads_hourly_status"),
+])
+def test_threads_trigger_routes_never_raise_on_a_backend_failure(monkeypatch, path, job_name):
+    def raise_error():
+        raise RuntimeError("simulated failure")
+
+    monkeypatch.setattr(app_kalshi, job_name, raise_error)
+    with app_kalshi.app.test_client() as client:
+        resp = client.post(path)
+        assert resp.status_code == 500
+        assert resp.get_json()["ok"] is False
+
+
 def test_data_collect_job_refreshes_ticker_activity_cache_off_the_request_path(monkeypatch):
     """The volatility-ranking cache must only ever be refreshed from here
     (a scheduled background job) -- confirmed live that refreshing it
