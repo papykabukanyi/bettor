@@ -1050,6 +1050,40 @@ def test_reconcile_does_not_adopt_a_tracked_spreads_own_short_leg(monkeypatch):
     assert [p["symbol"] for p in reconciled] == ["NFLX260904P00081000"]  # the short leg was never adopted as its own position
 
 
+def test_reconcile_never_overwrites_a_spreads_net_debit_entry_price(monkeypatch):
+    """Real bug found in review while cleaning up after the incident above:
+    real_pos["entry_price"] for a spread's long leg is only ever that ONE
+    leg's own fill price (0.92 here), not the position's real entry_price
+    -- the net debit of both legs combined (0.85). "Correcting" it from
+    the single leg's price would silently replace a correct, cheaper cost
+    basis with a wrong, more expensive one."""
+    monkeypatch.setattr(alpaca_client, "get_positions", lambda: [
+        {"symbol": "NFLX260904P00081000", "qty": "156", "side": "long", "avg_entry_price": "0.92", "asset_class": "us_option"},
+    ])
+    local = [{
+        "symbol": "NFLX260904P00081000", "underlying_symbol": "NFLX", "strategy": "debit_spread",
+        "short_symbol": "NFLX260904P00076000", "entry_price": 0.85, "count": 156.0,
+        "opened_at": "2026-08-28T18:00:32+00:00",
+    }]
+    reconciled = strat._reconcile_positions_with_exchange({"positions": local})  # noqa: SLF001
+    assert reconciled[0]["entry_price"] == pytest.approx(0.85)  # untouched -- still the real net debit
+    assert reconciled[0]["count"] == pytest.approx(156.0)
+
+
+def test_reconcile_still_syncs_a_naked_positions_entry_price(monkeypatch):
+    """The spread exemption above must not weaken the existing, correct
+    naked-position drift-correction behavior."""
+    monkeypatch.setattr(alpaca_client, "get_positions", lambda: [
+        {"symbol": "AAPL240223C00195000", "qty": "2", "avg_entry_price": "5.25", "asset_class": "us_option"},
+    ])
+    local = [{
+        "symbol": "AAPL240223C00195000", "underlying_symbol": "AAPL", "strategy": "naked",
+        "entry_price": 5.0, "count": 1, "opened_at": "2026-01-01T00:00:00+00:00",
+    }]
+    reconciled = strat._reconcile_positions_with_exchange({"positions": local})  # noqa: SLF001
+    assert reconciled[0]["entry_price"] == pytest.approx(5.25)
+
+
 def test_reconcile_leaves_an_unmatched_real_short_position_alone(monkeypatch):
     """A real short with no matching tracked spread at all (e.g. its long
     leg's own local record was already dropped/lost) must never be adopted

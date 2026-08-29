@@ -816,16 +816,31 @@ def _reconcile_positions_with_exchange(state: dict[str, Any]) -> list[dict[str, 
                 "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(), "order_id": None,
             })
             continue
+        # Real bug found in review while cleaning up after the incident
+        # above: for a debit_spread, real_pos["entry_price"] here is only
+        # ever the LONG leg's OWN fill price (from /v2/positions, one
+        # symbol at a time) -- not this position's real entry_price, which
+        # is the NET DEBIT of both legs combined (see scan_and_enter's own
+        # net_debit). Correcting entry_price from real_pos for a spread
+        # would silently replace a correct, cheaper net-debit cost basis
+        # with a more expensive single-leg price, understating every real
+        # gain and skewing take-profit/stop-loss thresholds off a wrong
+        # baseline. Only `count` (contract quantity) is safe to sync this
+        # way for a spread -- both legs share the same quantity, so the
+        # long leg's own real qty is a valid ground truth for that.
+        is_spread = local.get("strategy") == "debit_spread"
         if (
             abs(float(local["count"]) - real_pos["count"]) > 1e-9
-            or abs(float(local["entry_price"]) - real_pos["entry_price"]) > 1e-6
+            or (not is_spread and abs(float(local["entry_price"]) - real_pos["entry_price"]) > 1e-6)
         ):
             logger.warning(
-                "[alpaca_options_strategy] correcting local position for %s: count %.4f->%.4f, entry %.4f->%.4f",
-                symbol, float(local["count"]), real_pos["count"], float(local["entry_price"]), real_pos["entry_price"],
+                "[alpaca_options_strategy] correcting local position for %s: count %.4f->%.4f%s",
+                symbol, float(local["count"]), real_pos["count"],
+                "" if is_spread else f", entry {float(local['entry_price']):.4f}->{real_pos['entry_price']:.4f}",
             )
         local["count"] = real_pos["count"]
-        local["entry_price"] = real_pos["entry_price"]
+        if not is_spread:
+            local["entry_price"] = real_pos["entry_price"]
         reconciled.append(local)
 
     for symbol in local_by_symbol:
