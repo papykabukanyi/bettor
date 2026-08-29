@@ -726,7 +726,16 @@ def _real_open_positions_by_symbol() -> dict[str, dict[str, Any]] | None:
         qty = float(p.get("qty") or 0.0)
         if not symbol or qty == 0:
             continue
-        result[symbol] = {"count": abs(qty), "entry_price": float(p.get("avg_entry_price") or 0.0)}
+        # Real, confirmed bug this `side` field fixes: Alpaca's own qty sign
+        # (or "side") is the ONLY thing that distinguishes a genuine long
+        # holding from a SHORT one -- collapsing both to abs(qty) here threw
+        # that distinction away, and _reconcile_positions_with_exchange
+        # below used to treat a debit spread's own SHORT leg (a real
+        # position Alpaca tracks per-contract even though it was opened as
+        # one multi-leg order) as an untracked NAKED long to "sell to
+        # close." See that function's own comment for the full incident.
+        side = str(p.get("side") or "").lower() or ("short" if qty < 0 else "long")
+        result[symbol] = {"count": abs(qty), "entry_price": float(p.get("avg_entry_price") or 0.0), "side": side}
     return result
 
 
@@ -739,8 +748,26 @@ def _reconcile_positions_with_exchange(state: dict[str, Any]) -> list[dict[str, 
     Debit spreads hold TWO contracts (long + short leg) under one logical
     position -- only the long leg's symbol is reconciled here (matching the
     entry/exit code, which already tracks the spread as a single unit keyed
-    on the long contract's symbol); a spread's short leg is Alpaca's own
-    concern, not re-derived here.
+    on the long contract's symbol). The short leg is STILL a real position
+    Alpaca reports on /v2/positions (options are tracked per-contract even
+    when opened as one multi-leg order) -- it must be recognized as already
+    accounted for, not treated as untracked, and never adopted as a naked
+    position even if it somehow isn't.
+
+    Real, confirmed production incident this fixes: without excluding it,
+    a spread's own short leg looked "untracked" on EVERY reconciliation
+    call and got adopted as a fresh naked position each time (fresh
+    opened_at, entry_price = the short leg's own fill price) -- then
+    manage_open_positions evaluated it as if it were a LONG holding, so a
+    RISING quote (a real LOSS on an actual short) computed as a fake
+    PROFIT, attempted an invalid single-leg "sell to close" against a
+    position that was never long in the first place (Alpaca rejected it,
+    422), and then booked a fabricated "successful" trade anyway and
+    posted it to Threads -- repeating every fast_check cycle for as long
+    as the spread's short leg stayed open on the real account. Confirmed
+    live 2026-08-29: 199 identical fake trades over ~100 minutes, all
+    Alpaca PAPER (no real money), before the spread finally closed for
+    real and the loop stopped on its own.
 
     Only ever called when live trading is actually active (see callers) --
     in dry-run, local positions are hypothetical (no order was ever placed)
@@ -752,8 +779,31 @@ def _reconcile_positions_with_exchange(state: dict[str, Any]) -> list[dict[str, 
         return local_positions
 
     local_by_symbol = {p["symbol"]: p for p in local_positions}
+    known_short_leg_symbols = {
+        p["short_symbol"] for p in local_positions if p.get("strategy") == "debit_spread" and p.get("short_symbol")
+    }
     reconciled: list[dict[str, Any]] = []
     for symbol, real_pos in real.items():
+        if symbol in known_short_leg_symbols:
+            # Already accounted for as this spread's own short leg -- see
+            # this function's own docstring. Not added to `reconciled` on
+            # its own; the spread's long-leg entry (below, or already in
+            # local_by_symbol) is what represents this position.
+            continue
+        if real_pos.get("side") == "short":
+            # This strategy never intentionally opens/holds a naked short
+            # by itself -- a real short position that ISN'T a known
+            # spread's own leg is either a stale leg from a spread whose
+            # local record was already dropped, or a genuine anomaly.
+            # Either way, "sell to close" (what adopting this as naked
+            # would attempt) would ADD to the short, not close it -- surface
+            # it for a human instead of acting on it.
+            logger.warning(
+                "[alpaca_options_strategy] real SHORT options position with no matching tracked spread -- "
+                "leaving alone rather than risk trading it backwards: %s x%d @ %.4f",
+                symbol, int(real_pos["count"]), real_pos["entry_price"],
+            )
+            continue
         local = local_by_symbol.get(symbol)
         if local is None:
             logger.warning(

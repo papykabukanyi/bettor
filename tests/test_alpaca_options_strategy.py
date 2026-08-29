@@ -1001,6 +1001,67 @@ def test_reconcile_returns_local_positions_unchanged_when_the_real_fetch_fails(m
     assert reconciled == local
 
 
+def test_real_open_positions_by_symbol_reports_side_from_a_negative_qty(monkeypatch):
+    monkeypatch.setattr(alpaca_client, "get_positions", lambda: [
+        {"symbol": "NFLX260904P00076000", "qty": "-312", "avg_entry_price": "0.07", "asset_class": "us_option"},
+    ])
+    real = strat._real_open_positions_by_symbol()  # noqa: SLF001
+    assert real["NFLX260904P00076000"]["side"] == "short"
+    assert real["NFLX260904P00076000"]["count"] == pytest.approx(312.0)  # magnitude only, sign lives in "side"
+
+
+def test_real_open_positions_by_symbol_reports_side_from_an_explicit_field(monkeypatch):
+    monkeypatch.setattr(alpaca_client, "get_positions", lambda: [
+        {"symbol": "NFLX260904P00076000", "qty": "312", "side": "short", "avg_entry_price": "0.07", "asset_class": "us_option"},
+    ])
+    real = strat._real_open_positions_by_symbol()  # noqa: SLF001
+    assert real["NFLX260904P00076000"]["side"] == "short"
+
+
+def test_real_open_positions_by_symbol_defaults_to_long(monkeypatch):
+    monkeypatch.setattr(alpaca_client, "get_positions", lambda: [
+        {"symbol": "AAPL240223C00195000", "qty": "2", "avg_entry_price": "5.0", "asset_class": "us_option"},
+    ])
+    real = strat._real_open_positions_by_symbol()  # noqa: SLF001
+    assert real["AAPL240223C00195000"]["side"] == "long"
+
+
+def test_reconcile_does_not_adopt_a_tracked_spreads_own_short_leg(monkeypatch):
+    """Real, confirmed production incident: a debit spread's short leg is a
+    real Alpaca position too (options are tracked per-contract even when
+    opened as one multi-leg order) -- without this exclusion, it looked
+    "untracked" on every single reconciliation and got adopted as a fresh
+    naked position each cycle, computing backwards P&L (a rising quote on
+    an actual short is a LOSS, not the fake "profit" naked-position math
+    assumed) and attempting an invalid single-leg close Alpaca rejected
+    with a 422 -- 199 fabricated trades over ~100 minutes before the real
+    spread finally closed. See _reconcile_positions_with_exchange's own
+    docstring for the full incident."""
+    monkeypatch.setattr(alpaca_client, "get_positions", lambda: [
+        {"symbol": "NFLX260904P00081000", "qty": "156", "side": "long", "avg_entry_price": "0.92", "asset_class": "us_option"},
+        {"symbol": "NFLX260904P00076000", "qty": "156", "side": "short", "avg_entry_price": "0.07", "asset_class": "us_option"},
+    ])
+    local = [{
+        "symbol": "NFLX260904P00081000", "underlying_symbol": "NFLX", "strategy": "debit_spread",
+        "short_symbol": "NFLX260904P00076000", "entry_price": 0.85, "count": 156,
+        "opened_at": "2026-08-28T18:00:32+00:00",
+    }]
+    reconciled = strat._reconcile_positions_with_exchange({"positions": local})  # noqa: SLF001
+    assert [p["symbol"] for p in reconciled] == ["NFLX260904P00081000"]  # the short leg was never adopted as its own position
+
+
+def test_reconcile_leaves_an_unmatched_real_short_position_alone(monkeypatch):
+    """A real short with no matching tracked spread at all (e.g. its long
+    leg's own local record was already dropped/lost) must never be adopted
+    as a naked position either -- "sell to close" on an already-short
+    position would ADD to the short, not close it."""
+    monkeypatch.setattr(alpaca_client, "get_positions", lambda: [
+        {"symbol": "NFLX260904P00076000", "qty": "312", "side": "short", "avg_entry_price": "0.07", "asset_class": "us_option"},
+    ])
+    reconciled = strat._reconcile_positions_with_exchange({"positions": []})  # noqa: SLF001
+    assert reconciled == []
+
+
 # ---------------------------------------------------------------------------
 # Daily reference balance -- fixed to the day's ACTUAL starting balance,
 # not whatever the continuously-updated tracked balance happens to be.
