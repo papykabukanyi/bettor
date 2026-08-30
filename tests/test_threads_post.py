@@ -124,6 +124,18 @@ def test_post_trade_entry_labels_and_hashtags_each_market_distinctly(monkeypatch
         assert "Kalshi Perps" not in posted[0]
 
 
+def test_every_markets_hashtag_set_carries_the_not_financial_advice_disclaimer():
+    """Real user direction: this account is a personal automated finance-
+    growth bot, not a public advisory service -- every post needs to read
+    as "here's what a bot did with its own money," never as a
+    recommendation. #NotFinancialAdvice lives on the SHARED base hashtag
+    set (_MARKET_HASHTAGS) specifically so it lands on every market's
+    every post automatically, not just the ones a human remembers to add
+    it to one at a time."""
+    for market in ("perps", "stocks", "crypto", "options"):
+        assert "#NotFinancialAdvice" in threads_post._hashtags_for_market(market)  # noqa: SLF001
+
+
 def test_post_trade_entry_never_raises_on_api_failure(monkeypatch):
     def raise_error(text):
         raise RuntimeError("simulated Threads API failure")
@@ -542,6 +554,12 @@ def test_post_sentiment_snapshot_posts_the_image_when_everything_lines_up(monkey
     # hashtags the hourly status post already carries.
     assert "#AlgoTrading" in captured["text"]
     assert "#FollowForMore" in captured["text"]
+    # Real user direction: this account is a personal automated bot, not a
+    # public advisory service -- sentiment content specifically needs an
+    # explicit, plain-language disclaimer on top of the hashtag every
+    # caption already carries.
+    assert "#NotFinancialAdvice" in captured["text"]
+    assert "not financial advice" in captured["text"].lower()
 
 
 def test_post_sentiment_snapshot_never_raises_on_api_failure(monkeypatch, tmp_path):
@@ -1139,6 +1157,29 @@ def test_post_music_news_fallback_never_raises_on_a_feed_failure(monkeypatch):
 
     monkeypatch.setattr(music_news, "get_trending_story", raise_error)
     assert threads_post._post_music_news_fallback() is False  # noqa: SLF001
+
+
+def test_post_music_news_fallback_never_hangs_when_the_feed_fetch_hangs(monkeypatch):
+    """Real, confirmed pattern this session: get_trending_story() fetches 3
+    RSS feeds sequentially, each with its own per-request timeout -- a
+    slow/blocked feed can still eat well past what a single request handler
+    should ever wait on. Must be bounded by its own hard timeout, same as
+    every other slow-network call in this codebase."""
+    from data import music_news
+
+    monkeypatch.setattr(threads_post, "_post_music_news_fallback", _REAL_POST_MUSIC_NEWS_FALLBACK)
+    monkeypatch.setattr(threads_post, "_MUSIC_NEWS_FETCH_TIMEOUT_SEC", 0.2)
+
+    def hangs_forever():
+        import time
+        time.sleep(5)
+        return None
+
+    monkeypatch.setattr(music_news, "get_trending_story", hangs_forever)
+    import time as real_time
+    start = real_time.monotonic()
+    assert threads_post._post_music_news_fallback() is False  # noqa: SLF001 -- must return quickly, not hang for 5s
+    assert real_time.monotonic() - start < 2.0
 
 
 # ── _last_known_story / commentary-as-a-picture ─────────────────────────────

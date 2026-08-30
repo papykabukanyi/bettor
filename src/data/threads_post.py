@@ -313,11 +313,19 @@ def reply_to_trending_keyword_posts(query: str, *, market: str = "perps", max_re
 _MARKET_LABELS = {
     "perps": "Kalshi Perps", "stocks": "Alpaca Stocks", "crypto": "Alpaca Crypto", "options": "Alpaca Options",
 }
+# Real, deliberate user direction: this account is a personal, automated
+# finance-growth bot, not a public advisory service -- every post it makes
+# needs to read as "here's what a bot did with its own money," never as a
+# recommendation to the reader. #NotFinancialAdvice on every single market's
+# base tag set (used by every caption in this module via
+# _hashtags_for_market/_hashtags_for_story) is the cheapest way to make
+# that disclosure land on genuinely every post, not just the ones a human
+# remembers to add it to one at a time.
 _MARKET_HASHTAGS = {
-    "perps": "#Kalshi #PredictionMarkets #Crypto #Trading",
-    "stocks": "#StockMarket #Stocks #Trading #Investing",
-    "crypto": "#Crypto #Bitcoin #CryptoTrading #Altcoins",
-    "options": "#OptionsTrading #Stocks #Calls #Puts",
+    "perps": "#Kalshi #PredictionMarkets #Crypto #Trading #NotFinancialAdvice",
+    "stocks": "#StockMarket #Stocks #Trading #Investing #NotFinancialAdvice",
+    "crypto": "#Crypto #Bitcoin #CryptoTrading #Altcoins #NotFinancialAdvice",
+    "options": "#OptionsTrading #Stocks #Calls #Puts #NotFinancialAdvice",
 }
 
 
@@ -445,6 +453,7 @@ def _format_trending_story_caption(story: dict, *, market: str, headline_overrid
 
 
 _MUSIC_NEWS_HASHTAGS = "#Music #MusicNews #NewMusic #Entertainment #Trending"
+_MUSIC_NEWS_FETCH_TIMEOUT_SEC = int(os.getenv("THREADS_MUSIC_NEWS_FETCH_TIMEOUT_SEC", "10") or "10")
 
 
 def _format_music_news_caption(story: dict) -> str:
@@ -477,7 +486,16 @@ def _post_music_news_fallback() -> bool:
     either way. Best-effort, never raises."""
     try:
         from data import music_news
-        story = music_news.get_trending_story()
+        from server_common import call_with_hard_timeout
+        # Real, confirmed pattern this session: get_trending_story() fetches
+        # 3 separate RSS feeds SEQUENTIALLY, each with its own _TIMEOUT_SEC --
+        # a slow/blocked feed (a real possibility, same "shared outbound IPs
+        # across many unrelated apps" cause crypto_news.py's own CryptoSlate
+        # 429 comment documents) can silently eat up to 3x that before this
+        # even gets to decide there's nothing to post, right inside a request
+        # handler. Bounded the same hard-timeout way every other slow-network
+        # call in this codebase already is, rather than let it ride.
+        story = call_with_hard_timeout(music_news.get_trending_story, timeout_sec=_MUSIC_NEWS_FETCH_TIMEOUT_SEC)
         if not story or not story.get("title"):
             logger.info("[threads_post] music-news fallback: no story available from any feed")
             return False
@@ -1082,8 +1100,17 @@ def post_sentiment_snapshot(*, market: str, ticker_sentiments: list[dict]) -> bo
 
         # #AlgoTrading #FollowForMore added per real feedback: this caption
         # was missing the same follower-growth hashtags the hourly status
-        # post already carries (see that job's own comment).
-        caption = f"{_market_label(market)}: per-ticker sentiment snapshot\n{_hashtags_for_market(market)} #AlgoTrading #FollowForMore"
+        # post already carries (see that job's own comment). The explicit
+        # disclaimer line (on top of the #NotFinancialAdvice tag every
+        # caption already carries -- see _MARKET_HASHTAGS) is per real user
+        # direction: a per-ticker sentiment chart is exactly the kind of
+        # content most likely to read as a recommendation if it isn't
+        # spelled out plainly that it's just this bot's own automated data.
+        caption = (
+            f"{_market_label(market)}: per-ticker sentiment snapshot\n"
+            f"🤖 Automated bot data for my own trading -- not financial advice.\n"
+            f"{_hashtags_for_market(market)} #AlgoTrading #FollowForMore"
+        )
         threads_client.create_and_publish_image_post(image_url, caption)
         return True
     except Exception as exc:

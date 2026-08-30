@@ -29,7 +29,7 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-_TIMEOUT_SEC = 8
+_TIMEOUT_SEC = 5  # 3 feeds fetched sequentially -- kept short since the caller (see threads_post._post_music_news_fallback) also wraps the whole call in its own hard timeout
 _CACHE_TTL_SEC = 1800  # same "not minute-to-minute" cadence as stock_news/crypto_news trending feeds
 
 _FEEDS = (
