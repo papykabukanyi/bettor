@@ -479,9 +479,12 @@ def _post_music_news_fallback() -> bool:
         from data import music_news
         story = music_news.get_trending_story()
         if not story or not story.get("title"):
+            logger.info("[threads_post] music-news fallback: no story available from any feed")
             return False
         if _is_recent_duplicate_story("music", story["title"]):
+            logger.info("[threads_post] music-news fallback: %r is a recent duplicate, skipping", story["title"])
             return False
+        logger.info("[threads_post] music-news fallback: posting %r (image=%s)", story["title"], bool(story.get("image_url")))
         caption = _format_music_news_caption(story)
         image_url = story.get("image_url")
         if image_url:

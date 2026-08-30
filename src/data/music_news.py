@@ -87,6 +87,7 @@ def _fetch_rss_items(url: str, *, source_name: str, limit: int = 15) -> list[dic
     items = items[:limit]
     if items:
         _rich_feed_cache[source_name] = (items, now)
+    logger.info("[music_news] %s: %d items fetched", source_name, len(items))
     return items
 
 
