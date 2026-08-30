@@ -238,6 +238,59 @@ def _isolated_state(tmp_path, monkeypatch):
     yield
 
 
+def test_push_durable_state_to_hf_is_bounded_by_a_hard_timeout(monkeypatch):
+    """Real, confirmed production incident -- see perps_strategy.py's own
+    identical fix for the full incident writeup: this upload used to be a
+    plain, unbounded call, always made while _STATE_LOCK is held (every
+    push_durable=True caller goes through _save_state), so a genuine
+    huggingface_hub internal-session-lock hang could hold _STATE_LOCK
+    indefinitely, freezing the entire --workers 1 process until gunicorn's
+    own 300s worker timeout SIGKILLed it."""
+    import server_common
+
+    monkeypatch.setattr(strat, "HF_API_KEY", "fake-key")
+    captured = {}
+
+    def fake_hard_timeout(fn, *, timeout_sec, on_timeout=None):
+        captured["timeout_sec"] = timeout_sec
+        return fn()
+
+    monkeypatch.setattr(server_common, "call_with_hard_timeout", fake_hard_timeout)
+    uploaded = {}
+    fake_hf_api = type("FakeHfApi", (), {
+        "__init__": lambda self, token=None: None,
+        "upload_file": lambda self, **kw: uploaded.update(kw),
+    })
+    monkeypatch.setattr("huggingface_hub.HfApi", fake_hf_api)
+
+    strat._push_durable_state_to_hf({"positions": [], "trade_log": [{"x": 1}], "realized_pnl_by_date": {}, "daily_reference_balance": {}})  # noqa: SLF001
+
+    assert captured["timeout_sec"] == strat._DURABLE_STATE_HF_TIMEOUT_SEC  # noqa: SLF001
+    assert uploaded
+
+
+def test_push_durable_state_to_hf_never_hangs_when_the_upload_hangs(monkeypatch):
+    """End-to-end: even a genuinely hanging upload must not block the
+    caller past the configured timeout."""
+    monkeypatch.setattr(strat, "HF_API_KEY", "fake-key")
+    monkeypatch.setattr(strat, "_DURABLE_STATE_HF_TIMEOUT_SEC", 0.2)
+
+    class _HangingHfApi:
+        def __init__(self, token=None):
+            pass
+
+        def upload_file(self, **kw):
+            import time
+            time.sleep(5)
+
+    monkeypatch.setattr("huggingface_hub.HfApi", _HangingHfApi)
+
+    import time as real_time
+    start = real_time.monotonic()
+    strat._push_durable_state_to_hf({"positions": [], "trade_log": [], "realized_pnl_by_date": {}, "daily_reference_balance": {}})  # noqa: SLF001
+    assert real_time.monotonic() - start < 2.0
+
+
 def test_load_state_defaults_to_an_empty_position_list():
     state = strat._load_state()  # noqa: SLF001
     assert state["positions"] == []

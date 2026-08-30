@@ -2250,6 +2250,62 @@ def _durable_state(trade_log=None, realized_pnl_by_date=None, daily_reference_ba
     }
 
 
+def test_push_durable_state_to_hf_is_bounded_by_a_hard_timeout(monkeypatch):
+    """Real, confirmed production incident: this upload used to be a plain,
+    unbounded call -- always made while _STATE_LOCK is held (every
+    push_durable=True caller goes through _save_state) -- so a genuine
+    huggingface_hub internal-session-lock hang (the same one
+    call_with_hard_timeout's own docstring documents, and
+    _pull_durable_state_from_hf already guarded against) could hold
+    _STATE_LOCK indefinitely, freezing the entire --workers 1 process
+    (fast_check/entry_scan included) until gunicorn's own 300s worker
+    timeout SIGKILLed it. Confirms the push is now routed through the same
+    call_with_hard_timeout mechanism, not a direct call."""
+    import server_common
+
+    monkeypatch.setattr(strat, "HF_API_KEY", "fake-key")
+    captured = {}
+
+    def fake_hard_timeout(fn, *, timeout_sec, on_timeout=None):
+        captured["timeout_sec"] = timeout_sec
+        return fn()
+
+    monkeypatch.setattr(server_common, "call_with_hard_timeout", fake_hard_timeout)
+    uploaded = {}
+    fake_hf_api = type("FakeHfApi", (), {
+        "__init__": lambda self, token=None: None,
+        "upload_file": lambda self, **kw: uploaded.update(kw),
+    })
+    monkeypatch.setattr("huggingface_hub.HfApi", fake_hf_api)
+
+    strat._push_durable_state_to_hf(_durable_state(trade_log=[{"x": 1}]))  # noqa: SLF001
+
+    assert captured["timeout_sec"] == strat._DURABLE_STATE_HF_TIMEOUT_SEC  # noqa: SLF001
+    assert uploaded  # the upload itself still actually happened
+
+
+def test_push_durable_state_to_hf_never_hangs_when_the_upload_hangs(monkeypatch):
+    """End-to-end: even a genuinely hanging upload must not block the
+    caller past the configured timeout."""
+    monkeypatch.setattr(strat, "HF_API_KEY", "fake-key")
+    monkeypatch.setattr(strat, "_DURABLE_STATE_HF_TIMEOUT_SEC", 0.2)
+
+    class _HangingHfApi:
+        def __init__(self, token=None):
+            pass
+
+        def upload_file(self, **kw):
+            import time
+            time.sleep(5)
+
+    monkeypatch.setattr("huggingface_hub.HfApi", _HangingHfApi)
+
+    import time as real_time
+    start = real_time.monotonic()
+    strat._push_durable_state_to_hf(_durable_state())  # noqa: SLF001 -- must return quickly, not hang for 5s
+    assert real_time.monotonic() - start < 2.0
+
+
 def test_save_state_does_not_push_to_hf_by_default(monkeypatch, tmp_path):
     monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "state.json")
     monkeypatch.setattr(strat, "HF_API_KEY", "fake-key")

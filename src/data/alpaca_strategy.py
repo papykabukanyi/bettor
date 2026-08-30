@@ -460,7 +460,8 @@ def _durable_state_slice(state: dict[str, Any]) -> dict[str, Any]:
 def _push_durable_state_to_hf(state: dict[str, Any]) -> None:
     if not HF_API_KEY:
         return
-    try:
+
+    def _upload() -> None:
         from huggingface_hub import HfApi
         api = HfApi(token=HF_API_KEY)
         payload = json.dumps(_durable_state_slice(state), indent=2)
@@ -474,6 +475,16 @@ def _push_durable_state_to_hf(state: dict[str, Any]) -> None:
             )
         finally:
             os.unlink(tmp_path)
+
+    try:
+        # Real, confirmed production incident -- see perps_strategy.py's own
+        # identical fix for the full incident writeup. This call, unbounded,
+        # is ALWAYS made while _STATE_LOCK is held (every push_durable=True
+        # caller -- see _save_state), so an unbounded hang here can freeze
+        # the entire --workers 1 process until gunicorn's own 300s worker
+        # timeout SIGKILLs it.
+        from server_common import call_with_hard_timeout
+        call_with_hard_timeout(_upload, timeout_sec=_DURABLE_STATE_HF_TIMEOUT_SEC)
     except Exception as exc:
         logger.warning("[alpaca_strategy] durable state push to HF failed: %s", exc)
 

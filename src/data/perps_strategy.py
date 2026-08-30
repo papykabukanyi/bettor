@@ -745,7 +745,8 @@ def _durable_state_slice(state: dict[str, Any]) -> dict[str, Any]:
 def _push_durable_state_to_hf(state: dict[str, Any]) -> None:
     if not HF_API_KEY:
         return
-    try:
+
+    def _upload() -> None:
         from huggingface_hub import HfApi
         api = HfApi(token=HF_API_KEY)
         payload = json.dumps(_durable_state_slice(state), indent=2)
@@ -759,6 +760,22 @@ def _push_durable_state_to_hf(state: dict[str, Any]) -> None:
             )
         finally:
             os.unlink(tmp_path)
+
+    try:
+        # Real, confirmed production incident: this call, unbounded, is
+        # ALWAYS made while _STATE_LOCK is held (every push_durable=True
+        # caller -- see _save_state) -- the same huggingface_hub internal-
+        # session-lock hang server_common.call_with_hard_timeout's own
+        # docstring documents (and _pull_durable_state_from_hf below
+        # already guards against) can hold _STATE_LOCK indefinitely on this
+        # side too, freezing the entire --workers 1 process (every request
+        # AND the background scheduler, including fast_check/entry_scan)
+        # until gunicorn's own 300s worker timeout SIGKILLs it. Confirmed
+        # live: this exact SIGKILL pattern recurring across all 4 services
+        # roughly weekly, well before this specific gap was found -- the
+        # pull side was fixed first, the push side was missed.
+        from server_common import call_with_hard_timeout
+        call_with_hard_timeout(_upload, timeout_sec=_DURABLE_STATE_HF_TIMEOUT_SEC)
     except Exception as exc:
         logger.warning("[perps_strategy] durable state push to HF failed: %s", exc)
 

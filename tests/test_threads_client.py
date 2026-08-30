@@ -1056,3 +1056,90 @@ def test_sync_posts_archive_trims_to_the_max_size(monkeypatch):
     result = threads_client.sync_posts_archive()
     assert result["total_archived"] == 3
     assert [p["id"] for p in threads_client.get_posts_archive()] == ["new2", "new1", "old1"]
+
+
+# ---------------------------------------------------------------------------
+# _STATE_LOCK bounded acquisition -- real, confirmed production incident:
+# a plain `with _STATE_LOCK:` (no timeout) let ONE stuck lock-holder freeze
+# an entire gunicorn worker for 300s until Render's own watchdog SIGKILLed
+# it, taking down every other request AND the background scheduler on that
+# process. get_valid_access_token/get_user_id/_adopt_shared_rate_limit_from_hf/
+# _note_rate_limited must all degrade to a cached/best-effort fallback
+# instead of hanging when the lock is contended.
+# ---------------------------------------------------------------------------
+import threading  # noqa: E402
+
+
+def _hold_state_lock_for(seconds: float) -> threading.Thread:
+    """Simulates another thread stuck holding _STATE_LOCK -- starts a
+    background thread that acquires it immediately and only releases after
+    `seconds`, so a test can exercise the "lock busy" path deterministically."""
+    ready = threading.Event()
+
+    def _hold():
+        threads_client._STATE_LOCK.acquire()  # noqa: SLF001
+        ready.set()
+        threads_client.time.sleep(seconds)
+        threads_client._STATE_LOCK.release()  # noqa: SLF001
+
+    t = threading.Thread(target=_hold, daemon=True)
+    t.start()
+    ready.wait(timeout=2)
+    return t
+
+
+def test_get_valid_access_token_falls_back_to_cache_when_the_lock_is_busy(monkeypatch):
+    _with_valid_token()
+    monkeypatch.setattr(threads_client, "_STATE_LOCK_ACQUIRE_TIMEOUT_SEC", 0.1)
+    holder = _hold_state_lock_for(0.5)
+    try:
+        assert threads_client.get_valid_access_token() == "at-1"  # cached value, not a hang
+    finally:
+        holder.join(timeout=2)
+
+
+def test_get_valid_access_token_returns_none_when_the_lock_is_busy_and_nothing_is_cached(monkeypatch):
+    monkeypatch.setattr(threads_client, "_STATE_LOCK_ACQUIRE_TIMEOUT_SEC", 0.1)
+    holder = _hold_state_lock_for(0.5)
+    try:
+        assert threads_client.get_valid_access_token() is None
+    finally:
+        holder.join(timeout=2)
+
+
+def test_get_user_id_falls_back_to_cache_when_the_lock_is_busy(monkeypatch):
+    _with_valid_token()
+    monkeypatch.setattr(threads_client, "_STATE_LOCK_ACQUIRE_TIMEOUT_SEC", 0.1)
+    holder = _hold_state_lock_for(0.5)
+    try:
+        assert threads_client.get_user_id() == "user-42"
+    finally:
+        holder.join(timeout=2)
+
+
+def test_note_rate_limited_never_raises_when_the_lock_is_busy(monkeypatch):
+    monkeypatch.setattr(threads_client, "_STATE_LOCK_ACQUIRE_TIMEOUT_SEC", 0.1)
+    holder = _hold_state_lock_for(0.5)
+    try:
+        threads_client._note_rate_limited()  # noqa: SLF001 -- must not hang or raise
+    finally:
+        holder.join(timeout=2)
+
+
+def test_adopt_shared_rate_limit_never_raises_when_the_lock_is_busy(monkeypatch):
+    monkeypatch.setattr(threads_client, "_STATE_LOCK_ACQUIRE_TIMEOUT_SEC", 0.1)
+    holder = _hold_state_lock_for(0.5)
+    try:
+        threads_client._adopt_shared_rate_limit_from_hf()  # noqa: SLF001 -- must not hang or raise
+    finally:
+        holder.join(timeout=2)
+
+
+def test_get_valid_access_token_still_works_normally_once_the_lock_is_free(monkeypatch):
+    """The bounded-acquire change must not break the ordinary, uncontended
+    path -- a real regression risk any time a plain `with lock:` gets
+    rewritten as an explicit acquire/release."""
+    _with_valid_token()
+    monkeypatch.setattr(threads_client, "_STATE_LOCK_ACQUIRE_TIMEOUT_SEC", 5.0)
+    assert threads_client.get_valid_access_token() == "at-1"
+    assert not threads_client._STATE_LOCK.locked()  # noqa: SLF001 -- released properly

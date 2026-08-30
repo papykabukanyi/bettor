@@ -68,6 +68,26 @@ HF_MODEL_REPO = os.getenv("HF_MODEL_REPO", "papylove/kalshi-perps-model")
 _TOKEN_HF_FILENAME = "threads_tokens.json"
 
 _STATE_LOCK = threading.Lock()
+# Real, confirmed production incident 2026-08-29: a plain `with _STATE_LOCK:`
+# has no bound on how long it waits to ACQUIRE the lock -- every critical
+# section below is itself hard-timeout-protected against a slow/hung HF
+# call (see _pull_tokens_from_hf's own docstring on why that's needed:
+# huggingface_hub's internal shared-session lock can hang for MINUTES, and
+# call_with_hard_timeout's own docstring is explicit that it "does NOT (and
+# cannot, in plain Python) forcibly kill the underlying thread" -- it just
+# stops ONE caller from waiting on it, not the thread actually holding
+# _STATE_LOCK). With enough contention across this process's many callers
+# (background APScheduler jobs AND real HTTP requests, e.g. the public
+# /api/threads/posts route), that adds up: confirmed live, a request stuck
+# at `with _STATE_LOCK:` inside get_valid_access_token() got killed by
+# gunicorn's own 300s WORKER TIMEOUT watchdog -- taking the entire process
+# (every other request AND the background scheduler) down with it, on a
+# SINGLE stuck lock wait. `_STATE_LOCK.acquire(timeout=...)` below bounds
+# the WAIT itself the same hard-timeout way this file already bounds every
+# individual network call -- on a miss, callers fall back to whatever's
+# already cached in memory (a possibly-stale token beats freezing the
+# entire live-trading process for 5 minutes).
+_STATE_LOCK_ACQUIRE_TIMEOUT_SEC = float(os.getenv("THREADS_STATE_LOCK_ACQUIRE_TIMEOUT_SEC", "15") or "15")
 
 # Real, deliberate promotion per explicit user direction: every post this
 # bot publishes to Threads, regardless of which of the 4 services or which
@@ -172,8 +192,13 @@ def is_rate_limited() -> bool:
 def _adopt_shared_rate_limit_from_hf() -> None:
     global _rate_limited_until
     try:
-        with _STATE_LOCK:
+        if not _STATE_LOCK.acquire(timeout=_STATE_LOCK_ACQUIRE_TIMEOUT_SEC):
+            logger.warning("[threads_client] _STATE_LOCK busy -- skipping this shared-rate-limit check")
+            return
+        try:
             pulled = _pull_tokens_from_hf()
+        finally:
+            _STATE_LOCK.release()
         if pulled:
             shared_until = float(pulled.get("rate_limited_until") or 0.0)
             if shared_until > _rate_limited_until:
@@ -196,10 +221,15 @@ def _note_rate_limited() -> None:
         "process for %.0f minutes", _RATE_LIMIT_COOLDOWN_SEC / 60,
     )
     try:
-        with _STATE_LOCK:
+        if not _STATE_LOCK.acquire(timeout=_STATE_LOCK_ACQUIRE_TIMEOUT_SEC):
+            logger.warning("[threads_client] _STATE_LOCK busy -- skipping sharing this rate-limit cooldown")
+            return
+        try:
             record = dict(_token_cache)
             record["rate_limited_until"] = _rate_limited_until
             _token_cache["rate_limited_until"] = _rate_limited_until
+        finally:
+            _STATE_LOCK.release()
         if record.get("access_token"):
             _push_tokens_to_hf(record)
     except Exception as exc:
@@ -364,7 +394,15 @@ def get_valid_access_token() -> str | None:
     actually allow a refresh). None if no login has ever completed -- no
     code can substitute for that first interactive step."""
     global _last_pull_attempt_ts
-    with _STATE_LOCK:
+    if not _STATE_LOCK.acquire(timeout=_STATE_LOCK_ACQUIRE_TIMEOUT_SEC):
+        # Real, confirmed production incident -- see _STATE_LOCK's own
+        # comment. Falls back to whatever's already cached in memory (a
+        # possibly-stale token, or None if this process has never pulled
+        # one yet) rather than hang the entire worker waiting for a lock
+        # some other thread is stuck holding.
+        logger.warning("[threads_client] _STATE_LOCK busy -- returning the last cached token without refreshing")
+        return _token_cache.get("access_token")
+    try:
         if not _token_cache:
             now_mono = time.monotonic()
             if now_mono - _last_pull_attempt_ts >= _PULL_RETRY_COOLDOWN_SEC:
@@ -387,6 +425,8 @@ def get_valid_access_token() -> str | None:
                     "until it actually expires: %s", exc,
                 )
         return _token_cache.get("access_token")
+    finally:
+        _STATE_LOCK.release()
 
 
 def get_user_id() -> str | None:
@@ -394,7 +434,10 @@ def get_user_id() -> str | None:
     OAuth exchange, needed as the {threads-user-id} path segment on every
     post call."""
     global _last_pull_attempt_ts
-    with _STATE_LOCK:
+    if not _STATE_LOCK.acquire(timeout=_STATE_LOCK_ACQUIRE_TIMEOUT_SEC):
+        logger.warning("[threads_client] _STATE_LOCK busy -- returning the last cached user_id")
+        return _token_cache.get("user_id")
+    try:
         if not _token_cache:
             now_mono = time.monotonic()
             if now_mono - _last_pull_attempt_ts >= _PULL_RETRY_COOLDOWN_SEC:
@@ -403,6 +446,8 @@ def get_user_id() -> str | None:
                 if pulled:
                     _token_cache.update(pulled)
         return _token_cache.get("user_id")
+    finally:
+        _STATE_LOCK.release()
 
 
 # Real, confirmed production incident: publishing immediately after
