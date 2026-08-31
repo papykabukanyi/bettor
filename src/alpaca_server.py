@@ -409,7 +409,9 @@ def _run_alpaca_threads_trending_news() -> dict[str, Any]:
     the model's own decisions is visible rather than an invisible input.
     Read-only, never touches order placement."""
     try:
-        story = stock_news.get_trending_story()
+        story = stock_news.get_trending_story(
+            exclude=lambda title: threads_post.is_recent_duplicate_story("stocks", title),
+        )
         posted = threads_post.post_trending_news(story, market="stocks")
         return {"ok": True, "posted": posted, "story": (story or {}).get("title")}
     except Exception as exc:

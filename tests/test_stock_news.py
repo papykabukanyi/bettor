@@ -291,3 +291,54 @@ def test_get_trending_story_is_cached_within_the_ttl(monkeypatch, _isolated_tren
     news.get_trending_story()
     news.get_trending_story()
     assert calls["n"] == 1
+
+
+def test_get_trending_story_skips_excluded_items_and_picks_the_next_fresh_one(monkeypatch, _isolated_trending_story_cache):
+    """Real, confirmed bug this closes: the old version always took
+    items[0] as the lead and gave up entirely if it happened to be a
+    recent duplicate -- even when items[1]/items[2] held a genuinely
+    fresh, unposted story one line down. `exclude` lets the caller walk
+    past a stale top result instead of surfacing it (and then falling all
+    the way through to the "nothing notable" filler) every single cycle
+    the market's top headline doesn't change."""
+    items = [
+        {"title": "S&P 500 hits record high - cnbc.com", "link": "https://news.google.com/a", "source": "cnbc.com"},
+        {"title": "Bond yields tick up - ft.com", "link": "https://news.google.com/b", "source": "ft.com"},
+        {"title": "Tech earnings beat expectations - barrons.com", "link": "https://news.google.com/c", "source": "barrons.com"},
+    ]
+    monkeypatch.setattr(news, "_fetch_google_news_rss_items", lambda query, limit=10: items)
+    story = news.get_trending_story(exclude=lambda title: title == "S&P 500 hits record high - cnbc.com")
+    assert story is not None
+    assert story["title"] == "Bond yields tick up - ft.com"
+    assert story["source"] == "ft.com"
+
+
+def test_get_trending_story_returns_none_when_every_item_is_excluded(monkeypatch, _isolated_trending_story_cache):
+    items = [
+        {"title": "S&P 500 hits record high - cnbc.com", "link": "https://news.google.com/a", "source": "cnbc.com"},
+        {"title": "Bond yields tick up - ft.com", "link": "https://news.google.com/b", "source": "ft.com"},
+    ]
+    monkeypatch.setattr(news, "_fetch_google_news_rss_items", lambda query, limit=10: items)
+    assert news.get_trending_story(exclude=lambda title: True) is None
+
+
+def test_current_trending_query_rotates_across_cache_windows(monkeypatch):
+    monkeypatch.setattr(news.time, "time", lambda: 0.0)
+    first = news._current_trending_query()  # noqa: SLF001
+    monkeypatch.setattr(news.time, "time", lambda: news._TRENDING_CACHE_TTL_SEC * 3.0)  # noqa: SLF001
+    third_window = news._current_trending_query()  # noqa: SLF001
+    assert first == news._TRENDING_QUERIES[0]  # noqa: SLF001
+    assert third_window == news._TRENDING_QUERIES[3 % len(news._TRENDING_QUERIES)]  # noqa: SLF001
+
+
+def test_get_trending_story_defaults_to_the_rotating_query_when_none_given(monkeypatch, _isolated_trending_story_cache):
+    monkeypatch.setattr(news, "_current_trending_query", lambda: "earnings report stocks")
+    captured = {}
+
+    def fake_fetch(query, limit=10):
+        captured["query"] = query
+        return [{"title": "headline", "link": "https://news.google.com/a", "source": "cnbc.com"}]
+
+    monkeypatch.setattr(news, "_fetch_google_news_rss_items", fake_fetch)
+    news.get_trending_story()
+    assert captured["query"] == "earnings report stocks"

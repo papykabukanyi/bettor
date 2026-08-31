@@ -803,6 +803,16 @@ def test_is_recent_duplicate_story_is_scoped_per_market():
     assert threads_post._is_recent_duplicate_story("stocks", "Bitcoin surges past resistance") is False  # noqa: SLF001
 
 
+def test_is_recent_duplicate_story_public_wrapper_matches_the_private_impl():
+    """The news modules (stock_news.py/crypto_news.py) call this PUBLIC
+    name as their get_trending_story(exclude=...) predicate -- it must be
+    a real passthrough to the same dedup pool the rest of this module
+    reads/writes via the private name, not a separate check."""
+    threads_post._record_posted_story("stocks", "Fed signals a rate cut")  # noqa: SLF001
+    assert threads_post.is_recent_duplicate_story("stocks", "Fed signals a rate cut") is True
+    assert threads_post.is_recent_duplicate_story("stocks", "Totally unrelated earnings beat") is False
+
+
 def test_post_trending_news_skips_a_recently_posted_duplicate_story(monkeypatch):
     threads_post._record_posted_story("crypto", "Bitcoin surges past resistance")
     posted = []
@@ -1076,7 +1086,7 @@ def test_post_trending_news_posts_music_news_instead_of_filler(monkeypatch):
     from data import music_news
 
     monkeypatch.setattr(threads_post, "_post_music_news_fallback", _REAL_POST_MUSIC_NEWS_FALLBACK)
-    monkeypatch.setattr(music_news, "get_trending_story", lambda: _music_story())
+    monkeypatch.setattr(music_news, "get_trending_story", lambda **kw: _music_story())
     monkeypatch.setattr(threads_post.threads_client, "search_keyword_posts", lambda query, **kw: [])
     image_calls = []
     monkeypatch.setattr(
@@ -1101,7 +1111,7 @@ def test_post_music_news_fallback_falls_back_to_text_when_there_is_no_photo(monk
     from data import music_news
 
     monkeypatch.setattr(threads_post, "_post_music_news_fallback", _REAL_POST_MUSIC_NEWS_FALLBACK)
-    monkeypatch.setattr(music_news, "get_trending_story", lambda: _music_story(image_url=None))
+    monkeypatch.setattr(music_news, "get_trending_story", lambda **kw: _music_story(image_url=None))
     posted = []
     monkeypatch.setattr(threads_post.threads_client, "create_and_publish_post", lambda text: posted.append(text))
     assert threads_post._post_music_news_fallback() is True  # noqa: SLF001
@@ -1112,7 +1122,7 @@ def test_post_music_news_fallback_returns_false_when_the_feed_has_nothing(monkey
     from data import music_news
 
     monkeypatch.setattr(threads_post, "_post_music_news_fallback", _REAL_POST_MUSIC_NEWS_FALLBACK)
-    monkeypatch.setattr(music_news, "get_trending_story", lambda: None)
+    monkeypatch.setattr(music_news, "get_trending_story", lambda **kw: None)
     assert threads_post._post_music_news_fallback() is False  # noqa: SLF001
 
 
@@ -1121,7 +1131,21 @@ def test_post_music_news_fallback_respects_its_own_recent_dedup(monkeypatch):
 
     monkeypatch.setattr(threads_post, "_post_music_news_fallback", _REAL_POST_MUSIC_NEWS_FALLBACK)
     threads_post._record_posted_story("music", "Artist announces surprise new album")  # noqa: SLF001
-    monkeypatch.setattr(music_news, "get_trending_story", lambda: _music_story())
+
+    # Real behavior post-fix: threads_post no longer dedup-checks the story
+    # AFTER fetching it -- it passes an exclude predicate INTO
+    # get_trending_story so a duplicate never gets chosen as the lead in
+    # the first place (see music_news.get_trending_story's own docstring).
+    # The mock has to honor that predicate the same way the real feed-walk
+    # does, or this test would only be exercising the plumbing, not the
+    # actual dedup behavior.
+    def fake_get_trending_story(*, exclude=None):
+        story = _music_story()
+        if exclude and exclude(story["title"]):
+            return None
+        return story
+
+    monkeypatch.setattr(music_news, "get_trending_story", fake_get_trending_story)
 
     def fail_if_called(*a, **k):
         raise AssertionError("must not re-post a music story already posted recently")
@@ -1135,7 +1159,7 @@ def test_post_music_news_fallback_falls_back_to_text_when_the_image_post_fails(m
     from data import music_news
 
     monkeypatch.setattr(threads_post, "_post_music_news_fallback", _REAL_POST_MUSIC_NEWS_FALLBACK)
-    monkeypatch.setattr(music_news, "get_trending_story", lambda: _music_story())
+    monkeypatch.setattr(music_news, "get_trending_story", lambda **kw: _music_story())
 
     def raise_error(image_url, caption):
         raise RuntimeError("simulated Threads image-post failure")
@@ -1152,7 +1176,7 @@ def test_post_music_news_fallback_never_raises_on_a_feed_failure(monkeypatch):
 
     monkeypatch.setattr(threads_post, "_post_music_news_fallback", _REAL_POST_MUSIC_NEWS_FALLBACK)
 
-    def raise_error():
+    def raise_error(**kw):
         raise RuntimeError("simulated feed failure")
 
     monkeypatch.setattr(music_news, "get_trending_story", raise_error)

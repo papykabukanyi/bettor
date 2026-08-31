@@ -78,7 +78,7 @@ def test_threads_trending_news_job_posts_the_fetched_story(monkeypatch):
     from data import stock_news, threads_post
 
     story = {"title": "Markets rally", "link": "https://x.com/a", "image_url": None, "source": "cnbc.com", "secondary": ["Fed holds rates"]}
-    monkeypatch.setattr(stock_news, "get_trending_story", lambda: story)
+    monkeypatch.setattr(stock_news, "get_trending_story", lambda **kw: story)
     captured = {}
     monkeypatch.setattr(threads_post, "post_trending_news", lambda s, *, market: captured.update(story=s, market=market) or True)
 
@@ -89,10 +89,37 @@ def test_threads_trending_news_job_posts_the_fetched_story(monkeypatch):
     assert captured["story"] == story
 
 
+def test_threads_trending_news_job_wires_the_stocks_dedup_pool_as_the_exclude_predicate(monkeypatch):
+    """This job's own fresh-story fetch must be scoped to the SAME "stocks"
+    dedup pool post_trending_news itself checks -- a mismatch here would
+    silently defeat the exclude-based fix (see stock_news.get_trending_story's
+    own docstring for the recurring-filler bug it closes)."""
+    from data import stock_news, threads_post
+
+    captured_kwargs = {}
+
+    def fake_get_trending_story(**kw):
+        captured_kwargs.update(kw)
+        return None
+
+    monkeypatch.setattr(stock_news, "get_trending_story", fake_get_trending_story)
+    monkeypatch.setattr(threads_post, "post_trending_news", lambda s, *, market: False)
+    alpaca_server._run_alpaca_threads_trending_news.__wrapped__()  # noqa: SLF001
+
+    assert "exclude" in captured_kwargs
+    is_dup_calls = []
+    monkeypatch.setattr(
+        threads_post, "is_recent_duplicate_story",
+        lambda market, title: is_dup_calls.append((market, title)) or False,
+    )
+    captured_kwargs["exclude"]("some headline")
+    assert is_dup_calls == [("stocks", "some headline")]
+
+
 def test_threads_trending_news_job_never_raises_on_failure(monkeypatch):
     from data import stock_news
 
-    def raise_error():
+    def raise_error(**kw):
         raise RuntimeError("rss down")
 
     monkeypatch.setattr(stock_news, "get_trending_story", raise_error)

@@ -337,7 +337,9 @@ def _run_alpaca_crypto_threads_trending_news() -> dict[str, Any]:
     directly (already coin-mapped, already proven for perps)."""
     try:
         from data import crypto_news
-        story = crypto_news.get_trending_story()
+        story = crypto_news.get_trending_story(
+            exclude=lambda title: threads_post.is_recent_duplicate_story("crypto", title),
+        )
         posted = threads_post.post_trending_news(story, market="crypto")
         return {"ok": True, "posted": posted, "story": (story or {}).get("title")}
     except Exception as exc:

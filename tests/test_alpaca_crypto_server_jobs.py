@@ -64,7 +64,7 @@ def test_threads_trending_news_job_posts_the_fetched_story(monkeypatch):
     from data import crypto_news, threads_post
 
     story = {"title": "Bitcoin rallies", "link": "https://x.com/a", "image_url": "https://x.com/i.jpg", "source": "cointelegraph", "secondary": []}
-    monkeypatch.setattr(crypto_news, "get_trending_story", lambda: story)
+    monkeypatch.setattr(crypto_news, "get_trending_story", lambda **kw: story)
     captured = {}
     monkeypatch.setattr(threads_post, "post_trending_news", lambda s, *, market: captured.update(story=s, market=market) or True)
 
@@ -77,7 +77,7 @@ def test_threads_trending_news_job_posts_the_fetched_story(monkeypatch):
 def test_threads_trending_news_job_never_raises_on_failure(monkeypatch):
     from data import crypto_news
 
-    def raise_error():
+    def raise_error(**kw):
         raise RuntimeError("rss down")
 
     monkeypatch.setattr(crypto_news, "get_trending_story", raise_error)

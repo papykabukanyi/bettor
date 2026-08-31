@@ -37,7 +37,7 @@ import logging
 import re
 import time
 import xml.etree.ElementTree as ET
-from typing import Any
+from typing import Any, Callable
 
 import requests
 
@@ -252,6 +252,27 @@ _TRENDING_QUERY = "stock market"
 _TRENDING_CACHE_TTL_SEC = 1800
 _trending_cache: tuple[list[str], float] | None = None
 
+# Real, confirmed pattern: a single fixed query's TOP result on a broad
+# aggregator like Google News is often the SAME story for hours (the
+# market's dominant narrative doesn't turn over every 30 minutes) -- so a
+# caller that only ever looks at the top result runs dry (see
+# get_trending_story's own exclude-based fix below) far more often than
+# the underlying feed actually being empty. Rotating the query itself,
+# once per cache window, gives each fetch a genuinely different angle on
+# "what's happening" instead of re-asking the exact same question and
+# getting the exact same sticky answer. Index by cache window (not
+# fetch count) so this rotates in lockstep with the cache TTL below --
+# every fresh fetch is automatically a different topic.
+_TRENDING_QUERIES = (
+    "stock market", "Wall Street stocks", "S&P 500", "Nasdaq stocks",
+    "earnings report stocks", "Federal Reserve interest rate", "IPO stock market", "Dow Jones",
+)
+
+
+def _current_trending_query() -> str:
+    idx = int(time.time() // _TRENDING_CACHE_TTL_SEC) % len(_TRENDING_QUERIES)
+    return _TRENDING_QUERIES[idx]
+
 
 def get_trending_headlines(*, limit: int = 5) -> list[str]:
     """General stock-market trending headlines -- NOT one symbol's own
@@ -267,33 +288,56 @@ def get_trending_headlines(*, limit: int = 5) -> list[str]:
     return headlines[:limit]
 
 
-_trending_story_cache: tuple[list[dict[str, Any]], float] | None = None
+_trending_story_cache: tuple[list[dict[str, Any]], float, str] | None = None
 
 
-def get_trending_story(*, query: str = _TRENDING_QUERY) -> dict[str, Any] | None:
+def get_trending_story(
+    *, query: str | None = None, exclude: Callable[[str], bool] | None = None,
+) -> dict[str, Any] | None:
     """Picks ONE lead story for the Threads trending-news post. Unlike
     crypto_news.get_trending_story() (which corroborates across 3 distinct
     newsroom feeds), this is a single aggregator query -- Google News' own
     relevance ranking already puts its best-covered story first for a
-    broad query like "stock market", so the top result IS the popularity
-    signal here. `link` is a Google redirect, not the real article URL --
-    see threads_post.py's OG-image resolver, which follows it and pulls a
+    broad query, so the top result IS the popularity signal here. `query`
+    defaults to the rotating topic (see _current_trending_query) rather
+    than one fixed string, so consecutive fetches surface genuinely
+    different real-world news instead of re-asking the same question.
+
+    `exclude`, when given, is a predicate (e.g. "has this title already
+    been posted recently?") applied in feed order across all fetched
+    items -- the first item NOT excluded becomes the lead. Real, confirmed
+    bug this replaces: the old version always took items[0] and gave up
+    entirely (returning it as-is, letting the CALLER discover it's a
+    duplicate and fall through to filler) even when items[1..9] held a
+    genuinely fresh, unposted story the very next line down. Returns None
+    only when every fetched item is excluded (or the feed failed) --
+    i.e. there is truly nothing new to say, not just that the single
+    top-ranked item happens to be stale.
+
+    `link` is a Google redirect, not the real article URL -- see
+    threads_post.py's OG-image resolver, which follows it and pulls a
     real photo from the actual page. Returns {"title", "link",
-    "image_url": None, "source", "secondary": [titles...]} or None if the
-    feed failed. Never raises -- same best-effort contract as the rest of
-    this module."""
+    "image_url": None, "source", "secondary": [titles...]}. Never raises
+    -- same best-effort contract as the rest of this module."""
     global _trending_story_cache
+    resolved_query = query or _current_trending_query()
     now = time.time()
-    if _trending_story_cache and (now - _trending_story_cache[1]) < _TRENDING_CACHE_TTL_SEC:
+    if (
+        _trending_story_cache
+        and _trending_story_cache[2] == resolved_query
+        and (now - _trending_story_cache[1]) < _TRENDING_CACHE_TTL_SEC
+    ):
         items = _trending_story_cache[0]
     else:
-        items = _fetch_google_news_rss_items(query, limit=10)
+        items = _fetch_google_news_rss_items(resolved_query, limit=10)
         if items:
-            _trending_story_cache = (items, now)
+            _trending_story_cache = (items, now, resolved_query)
     if not items:
         return None
-    lead = items[0]
-    secondary = [it["title"] for it in items[1:4]]
+    lead = next((it for it in items if exclude is None or not exclude(it["title"])), None)
+    if lead is None:
+        return None
+    secondary = [it["title"] for it in items if it is not lead][:3]
     return {
         "title": lead["title"], "link": lead["link"], "image_url": None,
         "source": lead["source"], "secondary": secondary,

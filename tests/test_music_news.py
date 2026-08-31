@@ -60,6 +60,36 @@ def test_get_trending_story_secondary_excludes_the_lead_and_caps_at_three(monkey
     assert len(story["secondary"]) == 3
 
 
+def test_get_trending_story_skips_an_excluded_picture_item_for_the_next_fresh_one(monkeypatch):
+    """Real, confirmed bug this closes: the old version always took the
+    single freshest picture-bearing item as the lead and gave up entirely
+    if it was a recent duplicate -- even with a second fresh photo item
+    right there in the same fetch. `exclude` walks past a stale lead
+    instead of surfacing "nothing notable" every cycle a slow music news
+    day repeats the same top story."""
+    def fake_fetch(url, *, source_name, limit=15):
+        return {
+            "Pitchfork": [_rich_item("Artist announces new album", "Pitchfork")],
+            "NME": [_rich_item("A different band drops surprise single", "NME")],
+            "Billboard": [],
+        }.get(source_name, [])
+
+    monkeypatch.setattr(news, "_fetch_rss_items", fake_fetch)
+    story = news.get_trending_story(exclude=lambda title: title == "Artist announces new album")
+    assert story is not None
+    assert story["title"] == "A different band drops surprise single"
+
+
+def test_get_trending_story_returns_none_when_every_item_is_excluded(monkeypatch):
+    def fake_fetch(url, *, source_name, limit=15):
+        if source_name != "Pitchfork":
+            return []
+        return [_rich_item("Only story available", "Pitchfork")]
+
+    monkeypatch.setattr(news, "_fetch_rss_items", fake_fetch)
+    assert news.get_trending_story(exclude=lambda title: True) is None
+
+
 def _item_xml(inner: str) -> ET.Element:
     return ET.fromstring(f"<item>{inner}</item>")
 

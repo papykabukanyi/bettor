@@ -146,6 +146,17 @@ def _is_recent_duplicate_story(market: str, title: str) -> bool:
     return False
 
 
+def is_recent_duplicate_story(market: str, title: str) -> bool:
+    """Public wrapper around _is_recent_duplicate_story -- lets a news
+    module's own get_trending_story(exclude=...) call site (see
+    stock_news.py/crypto_news.py) filter candidates against THIS market's
+    dedup pool before a story is even chosen as the lead, instead of
+    picking a story blind and discovering it's a duplicate only after the
+    fact (see post_trending_news's own docstring for the recurring-filler
+    bug this closes)."""
+    return _is_recent_duplicate_story(market, title)
+
+
 def _record_posted_story(market: str, title: str, *, source: str | None = None, secondary: list[str] | None = None) -> None:
     """Best-effort -- a failure here means a duplicate might slip through on
     a later cycle, not that the post itself (already sent) fails. Also the
@@ -495,12 +506,12 @@ def _post_music_news_fallback() -> bool:
         # even gets to decide there's nothing to post, right inside a request
         # handler. Bounded the same hard-timeout way every other slow-network
         # call in this codebase already is, rather than let it ride.
-        story = call_with_hard_timeout(music_news.get_trending_story, timeout_sec=_MUSIC_NEWS_FETCH_TIMEOUT_SEC)
+        story = call_with_hard_timeout(
+            lambda: music_news.get_trending_story(exclude=lambda title: _is_recent_duplicate_story("music", title)),
+            timeout_sec=_MUSIC_NEWS_FETCH_TIMEOUT_SEC,
+        )
         if not story or not story.get("title"):
-            logger.info("[threads_post] music-news fallback: no story available from any feed")
-            return False
-        if _is_recent_duplicate_story("music", story["title"]):
-            logger.info("[threads_post] music-news fallback: %r is a recent duplicate, skipping", story["title"])
+            logger.info("[threads_post] music-news fallback: no fresh, non-duplicate story available from any feed")
             return False
         logger.info("[threads_post] music-news fallback: posting %r (image=%s)", story["title"], bool(story.get("image_url")))
         caption = _format_music_news_caption(story)

@@ -511,3 +511,32 @@ def test_get_trending_story_secondary_excludes_the_lead_and_caps_at_three(monkey
     assert story is not None
     assert story["title"] not in story["secondary"]
     assert len(story["secondary"]) == 3
+
+
+def test_get_trending_story_skips_an_excluded_corroborated_pair_for_the_next_fresh_item(monkeypatch):
+    """Real, confirmed bug this closes: the old version always took the
+    corroborated pair (or items[0] with no corroboration) as the lead and
+    gave up entirely if it was a recent duplicate. `exclude` lets it walk
+    past a stale top story to the next genuinely fresh one instead of
+    falling straight through to the "nothing notable" filler."""
+    def fake_fetch(url, *, source_name, limit=40):
+        return {
+            "cointelegraph": [_rich_item("Bitcoin ETF inflows hit record high this week", "cointelegraph")],
+            "cryptoslate": [_rich_item("Bitcoin ETF inflows hit a record high this week", "cryptoslate", image_url=None)],
+            "decrypt": [_rich_item("Fresh unrelated story about a new protocol launch", "decrypt")],
+        }.get(source_name, [])
+
+    monkeypatch.setattr(news, "_fetch_rss_items_cached", fake_fetch)
+    story = news.get_trending_story(exclude=lambda title: "ETF inflows" in title)
+    assert story is not None
+    assert story["title"] == "Fresh unrelated story about a new protocol launch"
+
+
+def test_get_trending_story_returns_none_when_every_item_is_excluded(monkeypatch):
+    def fake_fetch(url, *, source_name, limit=40):
+        if source_name != "cointelegraph":
+            return []
+        return [_rich_item("Only story available", "cointelegraph")]
+
+    monkeypatch.setattr(news, "_fetch_rss_items_cached", fake_fetch)
+    assert news.get_trending_story(exclude=lambda title: True) is None

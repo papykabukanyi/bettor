@@ -23,7 +23,7 @@ import logging
 import re
 import time
 import xml.etree.ElementTree as ET
-from typing import Any
+from typing import Any, Callable
 
 import requests
 
@@ -91,7 +91,7 @@ def _fetch_rss_items(url: str, *, source_name: str, limit: int = 15) -> list[dic
     return items
 
 
-def get_trending_story() -> dict[str, Any] | None:
+def get_trending_story(*, exclude: Callable[[str], bool] | None = None) -> dict[str, Any] | None:
     """Picks ONE lead story -- the freshest item, across all 3 newsrooms,
     that actually carries a real photo (each feed is already newest-first,
     so the first qualifying item found is the freshest picture-bearing
@@ -99,7 +99,15 @@ def get_trending_story() -> dict[str, Any] | None:
     only if literally none of them had one this cycle -- still real music
     news, just without the "artist pic" the caller asked for. Returns
     {"title", "link", "image_url", "source", "secondary": [titles...]} or
-    None if every feed failed. Never raises."""
+    None if every feed failed. Never raises.
+
+    `exclude`, when given, is a predicate (e.g. "already posted recently?")
+    applied while walking the picture-bearing items first, then the
+    no-photo items, in feed order -- the first non-excluded item wins,
+    instead of only ever considering the single freshest photo item and
+    giving up if THAT happens to be a repeat (same recurring-filler bug
+    stock_news.get_trending_story's own docstring documents). Returns
+    None only when every item is excluded (or every feed failed)."""
     items: list[dict[str, Any]] = []
     for url, name in _FEEDS:
         items.extend(_fetch_rss_items(url, source_name=name))
@@ -107,7 +115,20 @@ def get_trending_story() -> dict[str, Any] | None:
         return None
 
     with_image = [it for it in items if it.get("image_url")]
-    lead = with_image[0] if with_image else items[0]
+    without_image = [it for it in items if not it.get("image_url")]
+
+    seen = set()
+    lead = None
+    for it in with_image + without_image:
+        if it["title"] in seen:
+            continue
+        seen.add(it["title"])
+        if exclude is not None and exclude(it["title"]):
+            continue
+        lead = it
+        break
+    if lead is None:
+        return None
 
     seen_titles = {lead["title"]}
     secondary = []

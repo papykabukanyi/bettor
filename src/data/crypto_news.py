@@ -61,7 +61,7 @@ import os
 import re
 import time
 import xml.etree.ElementTree as ET
-from typing import Any
+from typing import Any, Callable
 
 import requests
 
@@ -517,7 +517,7 @@ def _fetch_rss_items_cached(url: str, *, source_name: str, limit: int = 40) -> l
     return items
 
 
-def get_trending_story() -> dict[str, Any] | None:
+def get_trending_story(*, exclude: Callable[[str], bool] | None = None) -> dict[str, Any] | None:
     """Picks ONE lead story for the Threads trending-news post -- "most
     popular" approximated by real cross-outlet corroboration: if the same
     story is independently covered by 2+ of these 3 crypto-specific
@@ -526,7 +526,16 @@ def get_trending_story() -> dict[str, Any] | None:
     the lead; otherwise falls back to the single freshest item across all
     three. Returns {"title", "link", "image_url", "source",
     "secondary": [titles...]} or None if every feed failed. Never raises --
-    same best-effort contract as the rest of this module."""
+    same best-effort contract as the rest of this module.
+
+    `exclude`, when given, is a predicate (e.g. "already posted recently?")
+    -- the corroborated pair (if any) is still preferred FIRST, but if its
+    own lead title is excluded, this falls through the rest of the fetched
+    pool in feed order looking for the first non-excluded item, rather
+    than giving up outright. See stock_news.get_trending_story's own
+    docstring for the recurring-filler bug this same pattern fixes there.
+    Returns None only when every fetched item is excluded (or every feed
+    failed)."""
     items: list[dict[str, Any]] = []
     for url, name in (
         ("https://cointelegraph.com/rss", "cointelegraph"),
@@ -551,13 +560,20 @@ def get_trending_story() -> dict[str, Any] | None:
                 best_overlap = overlap
                 best_pair = (a, b)
 
-    if best_pair:
-        lead = best_pair[0] if best_pair[0].get("image_url") else best_pair[1]
-    else:
-        # No corroborated story found -- fall back to the single freshest
-        # item (RSS feeds are already newest-first, so this is just the
-        # first item with a usable title).
-        lead = items[0]
+    preferred = (best_pair[0] if best_pair[0].get("image_url") else best_pair[1]) if best_pair else None
+    ordered_candidates = ([preferred] if preferred else []) + items
+    seen = set()
+    lead = None
+    for it in ordered_candidates:
+        if it["title"] in seen:
+            continue
+        seen.add(it["title"])
+        if exclude is not None and exclude(it["title"]):
+            continue
+        lead = it
+        break
+    if lead is None:
+        return None
 
     seen_titles = {lead["title"]}
     secondary = []
