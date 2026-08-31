@@ -184,6 +184,88 @@ def select_spread_contracts(
 
 
 # ---------------------------------------------------------------------------
+# Vertical CREDIT SPREADS -- the income-collecting sibling of the debit
+# spread above, expressing the SAME directional read from this strategy's
+# model but SELLING premium instead of buying it: "up" (bullish -- the
+# model expects the underlying to rise or at least not fall) SELLS a
+# near-the-money PUT and BUYS a further-OTM put for protection (a "bull put
+# spread" -- profits if price stays ABOVE the short strike, doesn't need to
+# actually rise); "down" (bearish) SELLS a near-the-money CALL and BUYS a
+# further-OTM call for protection (a "bear call spread" -- profits if price
+# stays BELOW the short strike). Opposite option type from the debit
+# spread's own pick for the same direction, since a credit spread bets on
+# where price WON'T go, not where it will.
+#
+# Same defined-risk shape as the debit spread (max gain = credit received,
+# max loss = spread width minus that credit, both known the instant it's
+# opened) -- see alpaca_options_strategy.py's own scan_and_enter for how
+# that max-loss figure sizes the position, since the credit received (not
+# the width) is what determines how many contracts fit the usual capital
+# budget.
+def select_credit_spread_contracts(
+    underlying: str, *, direction: str, current_price: float,
+) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    """Picks BOTH legs of a vertical credit spread: returns
+    (long_contract, short_contract) -- long_contract is the further-OTM
+    PROTECTIVE leg being BOUGHT, short_contract is the near-the-money leg
+    being SOLD for premium (the one actually determining the net credit).
+    Same (long_contract, short_contract) tuple shape as
+    select_spread_contracts's own debit-spread pick, on purpose -- lets
+    scan_and_enter's order-building/position-tracking code treat both spread
+    types identically (build_option_spread_order already infers debit vs
+    credit purely from which symbol is on which side, not from an explicit
+    flag). Returns None if either leg can't be found."""
+    option_type = "put" if direction == "up" else "call"
+    today = dt.datetime.now(dt.timezone.utc).date()
+    exp_gte = (today + dt.timedelta(days=MIN_DAYS_TO_EXPIRATION)).isoformat()
+    exp_lte = (today + dt.timedelta(days=MAX_DAYS_TO_EXPIRATION)).isoformat()
+    try:
+        contracts = alpaca_client.get_option_contracts(
+            underlying_symbols=[underlying], expiration_date_gte=exp_gte, expiration_date_lte=exp_lte,
+            option_type=option_type,
+        )
+    except Exception as exc:
+        logger.warning("[alpaca_options_data] credit-spread short-leg lookup failed for %s: %s", underlying, exc)
+        return None
+    tradable = [c for c in contracts if c.get("tradable")]
+    if not tradable:
+        return None
+
+    def _sort_key(c: dict[str, Any]) -> tuple[float, str]:
+        strike = float(c.get("strike_price") or 0.0)
+        return (abs(strike - current_price), c.get("expiration_date") or "")
+
+    liquid = [c for c in tradable if int(c.get("open_interest") or 0) >= MIN_OPEN_INTEREST]
+    pool = liquid if liquid else tradable
+    pool.sort(key=_sort_key)
+    short_contract = pool[0]
+    expiration_date = short_contract["expiration_date"]
+    short_strike = float(short_contract["strike_price"])
+
+    same_expiry = [
+        c for c in tradable
+        if c.get("expiration_date") == expiration_date and c.get("symbol") != short_contract["symbol"]
+    ]
+    if not same_expiry:
+        return None
+    if option_type == "put":
+        # Bull put spread: protective leg strikes BELOW the short put
+        # (further downside protection), nearest one first.
+        candidates = [c for c in same_expiry if float(c.get("strike_price") or 0.0) <= short_strike - SPREAD_WIDTH_DOLLARS]
+        candidates.sort(key=lambda c: -float(c["strike_price"]))
+    else:
+        # Bear call spread: protective leg strikes ABOVE the short call.
+        candidates = [c for c in same_expiry if float(c.get("strike_price") or 0.0) >= short_strike + SPREAD_WIDTH_DOLLARS]
+        candidates.sort(key=lambda c: float(c["strike_price"]))
+    if not candidates:
+        return None
+
+    liquid_candidates = [c for c in candidates if int(c.get("open_interest") or 0) >= MIN_OPEN_INTEREST]
+    long_pool = liquid_candidates if liquid_candidates else candidates
+    return long_pool[0], short_contract
+
+
+# ---------------------------------------------------------------------------
 # Dataset archival -- same shard-per-day-across-all-underlyings convention
 # as every other pipeline here, own HF repo.
 # ---------------------------------------------------------------------------

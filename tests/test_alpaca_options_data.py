@@ -199,6 +199,116 @@ def test_select_contract_returns_none_on_a_failed_lookup(monkeypatch):
     assert aod.select_contract("AAPL", direction="up", current_price=195.0) is None
 
 
+# ---------------------------------------------------------------------------
+# Vertical CREDIT spreads -- the income-collecting sibling of the debit
+# spread above, expressing the SAME directional read by selling premium
+# instead of buying it. Opposite option type from the debit spread's own
+# pick for the same direction: "up" (bullish) sells a put (bull put
+# spread), "down" (bearish) sells a call (bear call spread).
+# ---------------------------------------------------------------------------
+def _credit_spread_universe(*, option_type: str, short_strike: float, short_symbol: str):
+    """A fake get_option_contracts() answering select_credit_spread_contracts'
+    own SINGLE wide-window call -- unlike select_spread_contracts, this
+    doesn't make a second narrowed same-expiration call, so one response
+    needs to carry both the near-the-money short leg AND the further-OTM
+    protective candidates."""
+    short_contract = _contract(symbol=short_symbol, type=option_type, strike_price=short_strike, expiration_date="2024-02-23")
+    if option_type == "put":
+        far_near, far_far = short_strike - 5.0, short_strike - 10.0
+    else:
+        far_near, far_far = short_strike + 5.0, short_strike + 10.0
+    long_pool = [
+        _contract(symbol="long_near", type=option_type, strike_price=far_near, expiration_date="2024-02-23"),
+        _contract(symbol="long_far", type=option_type, strike_price=far_far, expiration_date="2024-02-23"),
+    ]
+
+    def fake(*, underlying_symbols, expiration_date_gte, expiration_date_lte, option_type):
+        return [short_contract, *long_pool]
+
+    return fake
+
+
+def test_select_credit_spread_contracts_sells_a_put_for_the_bullish_direction(monkeypatch):
+    """"up" (bullish) -- a bull put spread: sell a near put, buy a further
+    OTM put for protection. Opposite option type from the debit spread's
+    own "up" pick (a call)."""
+    captured = {}
+
+    def fake_get_option_contracts(*, underlying_symbols, expiration_date_gte, expiration_date_lte, option_type):
+        captured["option_type"] = option_type
+        return _credit_spread_universe(option_type="put", short_strike=195.0, short_symbol="short_leg")(
+            underlying_symbols=underlying_symbols, expiration_date_gte=expiration_date_gte,
+            expiration_date_lte=expiration_date_lte, option_type=option_type,
+        )
+
+    monkeypatch.setattr(aod.alpaca_client, "get_option_contracts", fake_get_option_contracts)
+    result = aod.select_credit_spread_contracts("AAPL", direction="up", current_price=195.0)
+    assert captured["option_type"] == "put"
+    assert result is not None
+    long_contract, short_contract = result
+    assert short_contract["symbol"] == "short_leg"
+    assert float(long_contract["strike_price"]) < float(short_contract["strike_price"])  # protective put strikes BELOW
+
+
+def test_select_credit_spread_contracts_sells_a_call_for_the_bearish_direction(monkeypatch):
+    """"down" (bearish) -- a bear call spread: sell a near call, buy a
+    further OTM call for protection."""
+    captured = {}
+
+    def fake_get_option_contracts(*, underlying_symbols, expiration_date_gte, expiration_date_lte, option_type):
+        captured["option_type"] = option_type
+        return _credit_spread_universe(option_type="call", short_strike=195.0, short_symbol="short_leg")(
+            underlying_symbols=underlying_symbols, expiration_date_gte=expiration_date_gte,
+            expiration_date_lte=expiration_date_lte, option_type=option_type,
+        )
+
+    monkeypatch.setattr(aod.alpaca_client, "get_option_contracts", fake_get_option_contracts)
+    result = aod.select_credit_spread_contracts("AAPL", direction="down", current_price=195.0)
+    assert captured["option_type"] == "call"
+    assert result is not None
+    long_contract, short_contract = result
+    assert float(long_contract["strike_price"]) > float(short_contract["strike_price"])  # protective call strikes ABOVE
+
+
+def test_select_credit_spread_contracts_returns_none_when_no_protective_leg_is_far_enough_out(monkeypatch):
+    def fake(*, underlying_symbols, expiration_date_gte, expiration_date_lte, option_type):
+        return [
+            _contract(symbol="short_leg", type="put", strike_price=195.0, expiration_date="2024-02-23"),
+            _contract(symbol="too_close", type="put", strike_price=194.0, expiration_date="2024-02-23"),
+        ]
+
+    monkeypatch.setattr(aod.alpaca_client, "get_option_contracts", fake)
+    assert aod.select_credit_spread_contracts("AAPL", direction="up", current_price=195.0) is None
+
+
+def test_select_credit_spread_contracts_returns_none_without_a_short_leg(monkeypatch):
+    monkeypatch.setattr(aod.alpaca_client, "get_option_contracts", lambda **kw: [])
+    assert aod.select_credit_spread_contracts("AAPL", direction="up", current_price=195.0) is None
+
+
+def test_select_credit_spread_contracts_prefers_a_liquid_protective_leg(monkeypatch):
+    def fake(*, underlying_symbols, expiration_date_gte, expiration_date_lte, option_type):
+        return [
+            _contract(symbol="short_leg", type="put", strike_price=200.0, expiration_date="2024-02-23", open_interest=500),
+            _contract(symbol="illiquid_near", type="put", strike_price=194.0, expiration_date="2024-02-23", open_interest=0),
+            _contract(symbol="liquid_farther", type="put", strike_price=192.0, expiration_date="2024-02-23", open_interest=500),
+        ]
+
+    monkeypatch.setattr(aod.alpaca_client, "get_option_contracts", fake)
+    result = aod.select_credit_spread_contracts("AAPL", direction="up", current_price=200.0)
+    assert result is not None
+    long_contract, _short_contract = result
+    assert long_contract["symbol"] == "liquid_farther"
+
+
+def test_select_credit_spread_contracts_returns_none_on_a_failed_lookup(monkeypatch):
+    def fail(**kw):
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(aod.alpaca_client, "get_option_contracts", fail)
+    assert aod.select_credit_spread_contracts("AAPL", direction="up", current_price=195.0) is None
+
+
 def _synthetic_one_min_df(n=100, base=190.0):
     closes = [base + i * 0.01 for i in range(n)]
     return pd.DataFrame({

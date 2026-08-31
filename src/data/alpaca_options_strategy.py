@@ -236,7 +236,7 @@ LIVE_TRADING_ENABLED = str(os.getenv("ALPACA_OPTIONS_LIVE_TRADING_ENABLED", ""))
 # short-leg liquidity dependency) turn out to perform better once there's
 # real trade history for both.
 ENTRY_STRATEGY = os.getenv("ALPACA_OPTIONS_ENTRY_STRATEGY", "debit_spread").strip().lower()
-if ENTRY_STRATEGY not in {"debit_spread", "naked"}:
+if ENTRY_STRATEGY not in {"debit_spread", "credit_spread", "naked"}:
     ENTRY_STRATEGY = "debit_spread"
 
 # mleg orders require a real limit price -- unlike build_option_order's
@@ -341,7 +341,20 @@ def decide_exit(
     extension only -- see perps_strategy.py's own PROMISING_PROGRESS_FRACTION
     comment for the full rationale, thresholds, and real backtest findings
     (ported here for consistency, not independently backtested on options'
-    own history)."""
+    own history).
+
+    Credit spreads (strategy == "credit_spread") are the one exception to
+    "long-only, rising premium is favorable": entry_price/current_price for
+    a spread are BOTH get_current_spread_price's own long-minus-short value
+    (see that function's own docstring), which is NEGATIVE for a credit
+    spread (the protective long leg costs less than the short leg sold
+    against it) -- and PROFIT for a credit spread means that value RISING
+    toward zero (both legs decaying), the same "rising is good" shape a
+    debit spread already has. Dividing by a NEGATIVE entry_price to get a
+    percentage flips the fraction's sign, though -- change_pct is negated
+    right back for credit spreads so every threshold comparison below
+    still reads "change_pct >= take_profit_pct means good" regardless of
+    strategy, exactly like position_exit_levels' own identical fix."""
     now = now if now is not None else dt.datetime.now(dt.timezone.utc)
     if _near_expiration(position, now=now):
         return True, "near_expiration"
@@ -350,7 +363,9 @@ def decide_exit(
     exit_pcts = adaptive_exit_pcts(position.get("entry_volatility_30"))
     take_profit_pct = exit_pcts["take_profit_pct"]
     stop_loss_pct = exit_pcts["stop_loss_pct"]
-    change_pct = (current_price - entry_price) / entry_price if entry_price > 0 else 0.0
+    is_credit = position.get("strategy") == "credit_spread"
+    raw_change_pct = (current_price - entry_price) / entry_price if entry_price != 0 else 0.0
+    change_pct = -raw_change_pct if is_credit else raw_change_pct
 
     if change_pct >= take_profit_pct:
         return True, f"take_profit ({change_pct:+.3%}, target {take_profit_pct:.2%})"
@@ -383,12 +398,21 @@ def position_exit_levels(position: dict[str, Any]) -> dict[str, float]:
     derived from the same per-position-adaptive percentages decide_exit()
     applies (see adaptive_exit_pcts) -- exists so callers (the dashboard)
     can show real exit levels rather than just trusting the flat config
-    exists somewhere."""
+    exists somewhere.
+
+    Credit spreads flip which direction is favorable -- see decide_exit's
+    own docstring for the full explanation (entry_price is negative for a
+    credit spread on the same long-minus-short scale current_price uses).
+    A take-profit for a credit spread is BELOW entry_price (the spread's
+    value dropping toward zero, both legs decaying, is the win); its
+    stop-loss is ABOVE entry_price -- the opposite of a debit spread's own
+    "take-profit above, stop-loss below" shape."""
     entry_price = float(position["entry_price"])
     exit_pcts = adaptive_exit_pcts(position.get("entry_volatility_30"))
+    sign = -1 if position.get("strategy") == "credit_spread" else 1
     return {
-        "take_profit_price": round(entry_price * (1 + exit_pcts["take_profit_pct"]), 6),
-        "stop_loss_price": round(entry_price * (1 - exit_pcts["stop_loss_pct"]), 6),
+        "take_profit_price": round(entry_price * (1 + sign * exit_pcts["take_profit_pct"]), 6),
+        "stop_loss_price": round(entry_price * (1 - sign * exit_pcts["stop_loss_pct"]), 6),
     }
 
 
@@ -920,7 +944,10 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
     never gated by this -- managing existing risk is always allowed,
     only NEW entries wait out the edge."""
     from data.alpaca_data import fetch_recent_minute_bars, get_market_session
-    from data.alpaca_options_data import get_options_universe, latest_feature_row, select_contract, select_spread_contracts
+    from data.alpaca_options_data import (
+        SPREAD_WIDTH_DOLLARS, get_options_universe, latest_feature_row, select_contract,
+        select_credit_spread_contracts, select_spread_contracts,
+    )
     from data.alpaca_options_model import predict_direction
     from data.stock_news import prewarm_sentiment
     from data import alpaca_client, threads_post
@@ -1047,6 +1074,72 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
                     **levels, **_entry_context(candidate, row),
                 }
                 contract_symbol, contract_type, entry_price = long_symbol, long_contract.get("type"), net_debit
+            elif ENTRY_STRATEGY == "credit_spread":
+                spread = select_credit_spread_contracts(symbol, direction=candidate["direction"], current_price=row["current_price"])
+                if spread is None:
+                    opened.append({"symbol": symbol, "ok": True, "action": "skipped_no_contract"})
+                    continue
+                long_contract, short_contract = spread
+                long_symbol, short_symbol = long_contract["symbol"], short_contract["symbol"]
+
+                # get_current_spread_price is long-minus-short, the SAME
+                # call the debit-spread branch above uses -- for a credit
+                # spread this is NEGATIVE (the protective long leg is
+                # cheaper than the short leg sold against it), and that's
+                # deliberate: storing entry_price on this same unified
+                # scale is what lets decide_exit/position_exit_levels/the
+                # gross P&L booking in manage_open_positions treat a credit
+                # spread's "value rising toward zero" as the SAME kind of
+                # favorable move a debit spread's "value rising" already
+                # is -- see decide_exit's own docstring for the full
+                # derivation. credit_received (positive) is only needed
+                # here, for sizing and the broker-facing limit price.
+                net_value = get_current_spread_price(long_symbol, short_symbol)
+                credit_received = -net_value if net_value is not None else 0.0
+                if net_value is None or credit_received <= 0:
+                    opened.append({"symbol": symbol, "ok": True, "action": "skipped_no_option_quote"})
+                    continue
+
+                # Sized by MAX LOSS (spread width minus the credit), not
+                # the credit itself -- the credit is cash received, not
+                # capital at risk. A small credit on a full-width spread
+                # means a big loss is possible per contract; sizing off the
+                # credit alone would badly oversize this position.
+                available_balance = get_available_balance()
+                max_loss_per_contract = max(0.01, SPREAD_WIDTH_DOLLARS - credit_received)
+                qty = compute_contract_qty(available_balance, max_loss_per_contract)
+                if qty < 1:
+                    opened.append({"symbol": symbol, "ok": True, "action": "skipped_insufficient_budget"})
+                    continue
+
+                levels = position_exit_levels({
+                    "entry_price": net_value, "strategy": "credit_spread", "entry_volatility_30": row.get("volatility_30"),
+                })
+                order_id = None
+                if not effective_dry_run:
+                    # Alpaca requires a POSITIVE limit_price regardless of
+                    # debit/credit direction (see build_option_spread_order's
+                    # own docstring) -- accept slightly LESS credit than the
+                    # current mid to stay marketable, the opposite slippage
+                    # direction from the debit spread's own "pay slightly
+                    # more" above, since here we're the one being paid.
+                    limit_price = max(0.01, credit_received * (1 - SPREAD_LIMIT_SLIPPAGE_PCT))
+                    order_spec = alpaca_client.build_option_spread_order(
+                        long_symbol=long_symbol, short_symbol=short_symbol, qty=qty, limit_price=limit_price,
+                    )
+                    order_id = alpaca_client.place_order(order_spec)
+
+                position = {
+                    "symbol": long_symbol, "underlying_symbol": symbol, "option_type": long_contract.get("type"),
+                    "strategy": "credit_spread", "short_symbol": short_symbol,
+                    "long_strike": long_contract.get("strike_price"), "short_strike": short_contract.get("strike_price"),
+                    "expiration_date": long_contract.get("expiration_date"),
+                    "entry_price": net_value, "count": qty,
+                    "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+                    "order_id": order_id, "entry_volatility_30": row.get("volatility_30"),
+                    **levels, **_entry_context(candidate, row),
+                }
+                contract_symbol, contract_type, entry_price = long_symbol, long_contract.get("type"), net_value
             else:
                 contract = select_contract(symbol, direction=candidate["direction"], current_price=row["current_price"])
                 if contract is None:
@@ -1161,9 +1254,16 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
     for position in positions:
         contract_symbol = position["symbol"]
         underlying_symbol = position["underlying_symbol"]
-        is_spread = position.get("strategy") == "debit_spread"
+        is_spread = position.get("strategy") in ("debit_spread", "credit_spread")
+        is_credit = position.get("strategy") == "credit_spread"
         try:
             if is_spread:
+                # Same long-minus-short call for both spread types, on
+                # purpose -- get_current_spread_price returns entry_price/
+                # current_price on the SAME unified scale for debit and
+                # credit spreads alike (see decide_exit's own docstring for
+                # why that scale already makes "rising is favorable" true
+                # for both), no negation needed here.
                 current_price = get_current_spread_price(contract_symbol, position["short_symbol"])
             else:
                 current_price = get_current_option_price(contract_symbol)
@@ -1207,12 +1307,26 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                 from data import alpaca_client
                 try:
                     if is_spread:
-                        # Closing a debit spread is typically a net CREDIT
-                        # received (or a smaller debit paid, if closing at
-                        # a loss) -- priced slightly below the current mid
-                        # to stay marketable, same slippage buffer opening
-                        # a spread uses in the opposite direction.
-                        limit_price = max(0.01, current_price * (1 - SPREAD_LIMIT_SLIPPAGE_PCT))
+                        if is_credit:
+                            # current_price here is the same unified (long-
+                            # minus-short) scale entry_price uses -- NEGATIVE
+                            # for a credit spread (see decide_exit's own
+                            # docstring). Closing it nets to roughly paying
+                            # back abs(current_price) per share; Alpaca
+                            # requires a POSITIVE limit_price regardless (see
+                            # build_option_spread_order's own docstring), and
+                            # we're the BUYER now, so slippage goes the
+                            # opposite direction from a debit spread's own
+                            # close: willing to pay slightly MORE to stay
+                            # marketable, not accept slightly less.
+                            limit_price = max(0.01, abs(current_price) * (1 + SPREAD_LIMIT_SLIPPAGE_PCT))
+                        else:
+                            # Closing a debit spread is typically a net CREDIT
+                            # received (or a smaller debit paid, if closing at
+                            # a loss) -- priced slightly below the current mid
+                            # to stay marketable, same slippage buffer opening
+                            # a spread uses in the opposite direction.
+                            limit_price = max(0.01, current_price * (1 - SPREAD_LIMIT_SLIPPAGE_PCT))
                         order_spec = alpaca_client.build_option_spread_order(
                             long_symbol=contract_symbol, short_symbol=position["short_symbol"],
                             qty=int(position["count"]), limit_price=limit_price, closing=True,

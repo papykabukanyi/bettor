@@ -984,6 +984,299 @@ def test_manage_open_positions_live_mode_closes_a_spread_with_a_reversed_mleg_or
 
 
 # ---------------------------------------------------------------------------
+# Credit spreads -- the income-collecting sibling of the debit spread above.
+# entry_price/current_price for a credit spread are the SAME
+# get_current_spread_price (long-minus-short) value the debit spread uses,
+# which is NEGATIVE for a credit spread (the protective long leg costs less
+# than the short leg sold against it) -- these tests exist specifically to
+# nail down the sign math: profit means that value rising TOWARD zero, the
+# opposite raw price direction from a debit spread's own "rising is good"
+# shape, but decide_exit/position_exit_levels negate it back so every
+# threshold comparison reads the same "change_pct >= take_profit_pct means
+# good" way regardless of strategy. Real, hard-won lesson this same session
+# already learned once (the reconciliation bug that computed a short
+# leg's rising price as a fake profit instead of the real loss it was) --
+# these are exactly the kind of tests that would have caught that class of
+# bug, applied here up front instead of after a live incident.
+# ---------------------------------------------------------------------------
+def _credit_spread_contracts(**overrides):
+    """long_contract is the further-OTM PROTECTIVE leg (bought), short_contract
+    is the near-the-money leg SOLD for premium -- same (long, short) tuple
+    shape select_spread_contracts' own debit-spread pick uses."""
+    long_contract = {
+        "symbol": "AAPL240223P00190000", "type": "put", "strike_price": 190.0,
+        "expiration_date": (dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=30)).date().isoformat(),
+    }
+    short_contract = {
+        "symbol": "AAPL240223P00195000", "type": "put", "strike_price": 195.0,
+        "expiration_date": long_contract["expiration_date"],
+    }
+    long_contract.update(overrides.get("long", {}))
+    short_contract.update(overrides.get("short", {}))
+    return long_contract, short_contract
+
+
+def test_decide_exit_credit_spread_take_profit_fires_when_value_drops_toward_zero(monkeypatch):
+    """entry_price=-0.35 (a $35 credit received). The spread's value
+    dropping to -0.20 (both legs decaying) is the WIN for a credit spread
+    -- must fire take_profit, not stop_loss, even though the raw price
+    technically fell."""
+    position = {
+        "entry_price": -0.35, "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "strategy": "credit_spread", "expiration_date": (dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=30)).date().isoformat(),
+    }
+    should_exit, reason = strat.decide_exit(position, -0.20)
+    assert should_exit is True
+    assert "take_profit" in reason
+
+
+def test_decide_exit_credit_spread_stop_loss_fires_when_value_rises_away_from_zero(monkeypatch):
+    """The spread's value GROWING more negative (the short leg moving
+    against us, e.g. toward being deep ITM) is the LOSS for a credit
+    spread -- must fire stop_loss, not take_profit."""
+    position = {
+        "entry_price": -0.35, "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "strategy": "credit_spread", "expiration_date": (dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=30)).date().isoformat(),
+    }
+    target = -0.35 * (1 + strat.STOP_LOSS_PCT + 0.05)  # more negative than the stop-loss threshold
+    should_exit, reason = strat.decide_exit(position, target)
+    assert should_exit is True
+    assert "stop_loss" in reason
+
+
+def test_decide_exit_credit_spread_holds_between_the_two_thresholds(monkeypatch):
+    position = {
+        "entry_price": -0.35, "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "strategy": "credit_spread", "expiration_date": (dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=30)).date().isoformat(),
+    }
+    should_exit, reason = strat.decide_exit(position, -0.34)  # barely moved
+    assert should_exit is False
+    assert "holding" in reason
+
+
+def test_decide_exit_debit_spread_unaffected_by_the_credit_sign_flip(monkeypatch):
+    """Regression guard: the credit-spread negation must be strategy-gated,
+    not accidentally applied to debit spreads too."""
+    position = {
+        "entry_price": 1.0, "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "strategy": "debit_spread", "expiration_date": (dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=30)).date().isoformat(),
+    }
+    target = 1.0 * (1 + strat.TAKE_PROFIT_PCT + 0.05)
+    should_exit, reason = strat.decide_exit(position, target)
+    assert should_exit is True
+    assert "take_profit" in reason
+
+
+def test_position_exit_levels_credit_spread_take_profit_is_below_entry():
+    levels = strat.position_exit_levels({"entry_price": -0.35, "strategy": "credit_spread"})
+    # Less negative than entry -- the spread's value dropping toward zero.
+    assert levels["take_profit_price"] > -0.35
+    assert levels["take_profit_price"] == pytest.approx(-0.35 * (1 - strat.TAKE_PROFIT_PCT))
+
+
+def test_position_exit_levels_credit_spread_stop_loss_is_above_entry():
+    levels = strat.position_exit_levels({"entry_price": -0.35, "strategy": "credit_spread"})
+    # More negative than entry -- the spread's value growing against us.
+    assert levels["stop_loss_price"] < -0.35
+    assert levels["stop_loss_price"] == pytest.approx(-0.35 * (1 + strat.STOP_LOSS_PCT))
+
+
+def test_position_exit_levels_debit_spread_unaffected_by_the_credit_sign_flip():
+    levels = strat.position_exit_levels({"entry_price": 1.0, "strategy": "debit_spread"})
+    assert levels["take_profit_price"] == pytest.approx(1.0 * (1 + strat.TAKE_PROFIT_PCT))
+    assert levels["stop_loss_price"] == pytest.approx(1.0 * (1 - strat.STOP_LOSS_PCT))
+
+
+def test_scan_and_enter_credit_spread_mode_can_be_selected(monkeypatch):
+    monkeypatch.setattr(strat, "ENTRY_STRATEGY", "credit_spread")
+    monkeypatch.setattr(alpaca_options_data, "get_options_universe", lambda: ["AAPL"])
+    monkeypatch.setattr(alpaca_options_data, "latest_feature_row", lambda symbol: _row())
+    monkeypatch.setattr(alpaca_options_model, "predict_direction", lambda symbol: {"model_ok": True, "probability_up": 0.7})
+    monkeypatch.setattr(
+        alpaca_options_data, "select_credit_spread_contracts",
+        lambda underlying, *, direction, current_price: _credit_spread_contracts(),
+    )
+
+    def fake_quote(symbol):
+        # long (protective) leg is CHEAPER than the short (sold) leg --
+        # net = long - short = 0.30 - 0.65 = -0.35, i.e. a $35 credit.
+        return {"AAPL240223P00190000": {"ap": 0.32, "bp": 0.28}, "AAPL240223P00195000": {"ap": 0.68, "bp": 0.62}}[symbol]
+
+    monkeypatch.setattr(alpaca_client, "get_option_latest_quote", fake_quote)
+    # A credit spread is sized by MAX LOSS (spread width - credit), not the
+    # credit itself -- $4.65/share at risk here needs a bigger budget than
+    # the debit-spread tests' own $500 to actually fit a contract.
+    monkeypatch.setattr(alpaca_client, "get_account", lambda: {"cash": "3000.0"})
+
+    def fail_if_called(*a, **k):
+        raise AssertionError("dry-run must never place a real order")
+
+    monkeypatch.setattr(alpaca_client, "place_order", fail_if_called)
+
+    result = strat.scan_and_enter()
+    assert result["opened"][0]["action"] == "opened"
+    assert result["opened"][0]["strategy"] == "credit_spread"
+    assert result["opened"][0]["entry_price"] == pytest.approx(-0.35)  # long mid 0.30 - short mid 0.65
+
+    state = strat._load_state()  # noqa: SLF001
+    position = state["positions"][0]
+    assert position["symbol"] == "AAPL240223P00190000"  # the long (protective) leg
+    assert position["short_symbol"] == "AAPL240223P00195000"
+    assert position["strategy"] == "credit_spread"
+    assert position["entry_price"] == pytest.approx(-0.35)
+
+
+def test_scan_and_enter_credit_spread_sizes_by_max_loss_not_credit_received(monkeypatch):
+    """Real risk this test guards against: a credit spread's capital at
+    risk is (spread width - credit), NOT the credit itself -- sizing off
+    the credit alone (a small number) would badly oversize the position."""
+    monkeypatch.setattr(strat, "ENTRY_STRATEGY", "credit_spread")
+    monkeypatch.setattr(alpaca_options_data, "get_options_universe", lambda: ["AAPL"])
+    monkeypatch.setattr(alpaca_options_data, "latest_feature_row", lambda symbol: _row())
+    monkeypatch.setattr(alpaca_options_model, "predict_direction", lambda symbol: {"model_ok": True, "probability_up": 0.7})
+    monkeypatch.setattr(
+        alpaca_options_data, "select_credit_spread_contracts",
+        lambda underlying, *, direction, current_price: _credit_spread_contracts(),
+    )
+
+    def fake_quote(symbol):
+        return {"AAPL240223P00190000": {"ap": 0.32, "bp": 0.28}, "AAPL240223P00195000": {"ap": 0.68, "bp": 0.62}}[symbol]
+
+    monkeypatch.setattr(alpaca_client, "get_option_latest_quote", fake_quote)
+    monkeypatch.setattr(alpaca_client, "get_account", lambda: {"cash": "500.0"})
+
+    captured = {}
+    monkeypatch.setattr(
+        strat, "compute_contract_qty",
+        lambda available, contract_price, **kw: captured.update(contract_price=contract_price) or 1,
+    )
+
+    strat.scan_and_enter()
+    # SPREAD_WIDTH_DOLLARS default (5.0) minus the 0.35 credit received.
+    assert captured["contract_price"] == pytest.approx(alpaca_options_data.SPREAD_WIDTH_DOLLARS - 0.35)
+
+
+def test_scan_and_enter_credit_spread_live_mode_uses_a_positive_limit_price(monkeypatch):
+    """Alpaca requires a POSITIVE limit_price regardless of debit/credit
+    direction -- accepting slightly LESS credit than the current mid to
+    stay marketable, the opposite slippage direction from a debit spread's
+    own "pay slightly more" open."""
+    monkeypatch.setattr(strat, "ENTRY_STRATEGY", "credit_spread")
+    monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", True)
+    monkeypatch.setattr(alpaca_options_data, "get_options_universe", lambda: ["AAPL"])
+    monkeypatch.setattr(alpaca_options_data, "latest_feature_row", lambda symbol: _row())
+    monkeypatch.setattr(alpaca_options_model, "predict_direction", lambda symbol: {"model_ok": True, "probability_up": 0.7})
+    monkeypatch.setattr(
+        alpaca_options_data, "select_credit_spread_contracts",
+        lambda underlying, *, direction, current_price: _credit_spread_contracts(),
+    )
+
+    def fake_quote(symbol):
+        return {"AAPL240223P00190000": {"ap": 0.32, "bp": 0.28}, "AAPL240223P00195000": {"ap": 0.68, "bp": 0.62}}[symbol]
+
+    monkeypatch.setattr(alpaca_client, "get_option_latest_quote", fake_quote)
+    # A credit spread is sized by MAX LOSS (spread width - credit), not the
+    # credit itself -- $4.65/share at risk here needs a bigger budget than
+    # the debit-spread tests' own $500 to actually fit a contract.
+    monkeypatch.setattr(alpaca_client, "get_account", lambda: {"cash": "3000.0"})
+
+    captured = {}
+    monkeypatch.setattr(alpaca_client, "build_option_spread_order", lambda **kw: captured.update(kw) or {"order_class": "mleg"})
+    monkeypatch.setattr(alpaca_client, "place_order", lambda spec: "order-1")
+
+    result = strat.scan_and_enter()
+    assert result["opened"][0]["action"] == "opened"
+    assert captured["long_symbol"] == "AAPL240223P00190000"
+    assert captured["short_symbol"] == "AAPL240223P00195000"
+    assert captured["limit_price"] > 0  # Alpaca requires positive, regardless of direction
+    assert captured["limit_price"] == pytest.approx(0.35 * (1 - strat.SPREAD_LIMIT_SLIPPAGE_PCT))
+
+
+def test_manage_open_positions_closes_a_credit_spread_on_take_profit_with_positive_pnl(monkeypatch):
+    """The real end-to-end check: a credit spread's value dropping toward
+    zero must both trigger take_profit AND book a POSITIVE realized P&L --
+    not the negative number the debit-spread formula would naively give if
+    applied here unchanged."""
+    strat._save_state({  # noqa: SLF001
+        "positions": [{
+            "symbol": "AAPL240223P00190000", "underlying_symbol": "AAPL", "strategy": "credit_spread",
+            "short_symbol": "AAPL240223P00195000", "entry_price": -0.35, "count": 1,
+            "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(), "order_id": None,
+            "expiration_date": (dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=30)).date().isoformat(),
+        }],
+        "trade_log": [], "realized_pnl_by_date": {},
+    })
+    # Both legs decayed close to zero -- current_price (long-short) close to 0.
+    def fake_quote(symbol):
+        return {"AAPL240223P00190000": {"ap": 0.03, "bp": 0.03}, "AAPL240223P00195000": {"ap": 0.05, "bp": 0.05}}[symbol]
+
+    monkeypatch.setattr(alpaca_client, "get_option_latest_quote", fake_quote)
+
+    result = strat.manage_open_positions()
+    assert result["action"] == "closed"
+    trade = result["closed"][0]
+    assert trade["strategy"] == "credit_spread"
+    assert "take_profit" in trade["reason"]
+    assert trade["realized_pnl_usd"] > 0  # a real, positive dollar profit -- not the negative a sign bug would give
+
+
+def test_manage_open_positions_closes_a_credit_spread_on_stop_loss_with_negative_pnl(monkeypatch):
+    strat._save_state({  # noqa: SLF001
+        "positions": [{
+            "symbol": "AAPL240223P00190000", "underlying_symbol": "AAPL", "strategy": "credit_spread",
+            "short_symbol": "AAPL240223P00195000", "entry_price": -0.35, "count": 1,
+            "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(), "order_id": None,
+            "expiration_date": (dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=30)).date().isoformat(),
+        }],
+        "trade_log": [], "realized_pnl_by_date": {},
+    })
+    # Short leg moved deep ITM against us -- spread cost to close blew out.
+    def fake_quote(symbol):
+        return {"AAPL240223P00190000": {"ap": 2.80, "bp": 2.80}, "AAPL240223P00195000": {"ap": 3.60, "bp": 3.60}}[symbol]
+
+    monkeypatch.setattr(alpaca_client, "get_option_latest_quote", fake_quote)
+
+    result = strat.manage_open_positions()
+    assert result["action"] == "closed"
+    trade = result["closed"][0]
+    assert "stop_loss" in trade["reason"]
+    assert trade["realized_pnl_usd"] < 0  # a real loss
+
+
+def test_manage_open_positions_live_mode_closes_a_credit_spread_with_a_positive_limit_price(monkeypatch):
+    """Closing a credit spread means BUYING it back -- the opposite
+    slippage direction from closing a debit spread (which typically nets a
+    credit): willing to pay slightly MORE to stay marketable, and still a
+    positive limit_price either way (Alpaca's own requirement)."""
+    monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", True)
+    strat._save_state({  # noqa: SLF001
+        "positions": [{
+            "symbol": "AAPL240223P00190000", "underlying_symbol": "AAPL", "strategy": "credit_spread",
+            "short_symbol": "AAPL240223P00195000", "entry_price": -0.35, "count": 1,
+            "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(), "order_id": "order-1",
+            "expiration_date": (dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=30)).date().isoformat(),
+        }],
+        "trade_log": [], "realized_pnl_by_date": {},
+    })
+
+    def fake_quote(symbol):
+        return {"AAPL240223P00190000": {"ap": 0.03, "bp": 0.03}, "AAPL240223P00195000": {"ap": 0.05, "bp": 0.05}}[symbol]
+
+    monkeypatch.setattr(alpaca_client, "get_option_latest_quote", fake_quote)
+
+    captured = {}
+    monkeypatch.setattr(alpaca_client, "build_option_spread_order", lambda **kw: captured.update(kw) or {"order_class": "mleg"})
+    monkeypatch.setattr(alpaca_client, "place_order", lambda spec: "order-2")
+
+    result = strat.manage_open_positions()
+    assert result["action"] == "closed"
+    assert captured["closing"] is True
+    assert captured["limit_price"] > 0  # Alpaca requires positive regardless of direction
+    # current_price = long(0.03) - short(0.05) = -0.02 -- abs() * (1 + slippage)
+    assert captured["limit_price"] == pytest.approx(0.02 * (1 + strat.SPREAD_LIMIT_SLIPPAGE_PCT))
+
+
+# ---------------------------------------------------------------------------
 # Reconciliation against the real Alpaca account -- same ground-truth check
 # already proven in alpaca_crypto_strategy.py/perps_strategy.py, ported here
 # now that this strategy always trades against the real account.
