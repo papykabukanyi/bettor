@@ -145,42 +145,68 @@ def select_spread_contracts(
     "up" buys the near-the-money call and sells a further-OTM call against
     it (short strike ABOVE the long strike); "down" buys the near-the-money
     put and sells a further-OTM put (short strike BELOW the long strike).
-    Both legs come from the SAME expiration as select_contract()'s own
-    near-the-money pick -- a true vertical spread, not a calendar spread.
-    Returns (long_contract, short_contract), or None if either leg can't be
-    found (e.g. this underlying's chain has no strike far enough out, or no
-    listed options at all)."""
-    long_contract = select_contract(underlying, direction=direction, current_price=current_price)
-    if long_contract is None:
-        return None
-    option_type = long_contract["type"]
-    expiration_date = long_contract["expiration_date"]
-    long_strike = float(long_contract["strike_price"])
+    The long leg is picked the same near-the-money-first, liquid-first way
+    select_contract() picks its own single contract (same sort key); the
+    short leg comes from that SAME expiration -- a true vertical spread,
+    not a calendar spread. Returns (long_contract, short_contract), or None
+    if either leg can't be found (e.g. this underlying's chain has no
+    strike far enough out, or no listed options at all).
 
+    Deliberately does NOT call select_contract() and then a second
+    get_option_contracts for the short leg (the original shape here, and a
+    real, confirmed inefficiency found in review): select_contract()'s own
+    fetch already spans MIN_DAYS_TO_EXPIRATION..MAX_DAYS_TO_EXPIRATION for
+    this exact underlying+option_type, which necessarily already contains
+    every contract at whichever single expiration the long leg ends up on
+    -- a second, narrower-dated call for the short leg was re-fetching data
+    already sitting in the first response. select_credit_spread_contracts
+    (below) never had this bug, making a single call and reusing its own
+    `tradable` list for both legs -- this mirrors that exact pattern."""
+    option_type = "call" if direction == "up" else "put"
+    today = dt.datetime.now(dt.timezone.utc).date()
+    exp_gte = (today + dt.timedelta(days=MIN_DAYS_TO_EXPIRATION)).isoformat()
+    exp_lte = (today + dt.timedelta(days=MAX_DAYS_TO_EXPIRATION)).isoformat()
     try:
-        same_expiry = alpaca_client.get_option_contracts(
-            underlying_symbols=[underlying], expiration_date_gte=expiration_date,
-            expiration_date_lte=expiration_date, option_type=option_type,
+        contracts = alpaca_client.get_option_contracts(
+            underlying_symbols=[underlying], expiration_date_gte=exp_gte, expiration_date_lte=exp_lte,
+            option_type=option_type,
         )
     except Exception as exc:
-        logger.warning("[alpaca_options_data] short-leg lookup failed for %s: %s", underlying, exc)
+        logger.warning("[alpaca_options_data] spread contract lookup failed for %s: %s", underlying, exc)
         return None
-    tradable = [c for c in same_expiry if c.get("tradable") and c.get("symbol") != long_contract["symbol"]]
+    tradable = [c for c in contracts if c.get("tradable")]
     if not tradable:
         return None
 
+    def _sort_key(c: dict[str, Any]) -> tuple[float, str]:
+        strike = float(c.get("strike_price") or 0.0)
+        return (abs(strike - current_price), c.get("expiration_date") or "")
+
+    liquid = [c for c in tradable if int(c.get("open_interest") or 0) >= MIN_OPEN_INTEREST]
+    pool = liquid if liquid else tradable
+    pool.sort(key=_sort_key)
+    long_contract = pool[0]
+    expiration_date = long_contract["expiration_date"]
+    long_strike = float(long_contract["strike_price"])
+
+    same_expiry = [
+        c for c in tradable
+        if c.get("expiration_date") == expiration_date and c.get("symbol") != long_contract["symbol"]
+    ]
+    if not same_expiry:
+        return None
     if option_type == "call":
-        candidates = [c for c in tradable if float(c.get("strike_price") or 0.0) >= long_strike + SPREAD_WIDTH_DOLLARS]
+        candidates = [c for c in same_expiry if float(c.get("strike_price") or 0.0) >= long_strike + SPREAD_WIDTH_DOLLARS]
         candidates.sort(key=lambda c: float(c["strike_price"]))  # nearest strike above the width first
     else:
-        candidates = [c for c in tradable if float(c.get("strike_price") or 0.0) <= long_strike - SPREAD_WIDTH_DOLLARS]
+        candidates = [c for c in same_expiry if float(c.get("strike_price") or 0.0) <= long_strike - SPREAD_WIDTH_DOLLARS]
         candidates.sort(key=lambda c: -float(c["strike_price"]))  # nearest strike below the width first
     if not candidates:
         return None
 
-    liquid = [c for c in candidates if int(c.get("open_interest") or 0) >= MIN_OPEN_INTEREST]
-    pool = liquid if liquid else candidates
-    return long_contract, pool[0]
+    liquid_candidates = [c for c in candidates if int(c.get("open_interest") or 0) >= MIN_OPEN_INTEREST]
+    long_pool = liquid_candidates if liquid_candidates else candidates
+    return long_contract, long_pool[0]
 
 
 # ---------------------------------------------------------------------------

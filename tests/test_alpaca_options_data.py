@@ -97,22 +97,25 @@ def test_select_contract_prefers_a_liquid_contract_over_a_numerically_nearer_ill
 # "Buy a put spread" as a genuine order_class="mleg" order.
 # ---------------------------------------------------------------------------
 def _spread_universe(*, option_type: str, long_strike: float, long_symbol: str):
-    """A fake get_option_contracts() that answers BOTH calls
-    select_spread_contracts() makes: the wide long-leg lookup (via
-    select_contract, whatever expiration window) and the narrow same-
-    expiration short-leg lookup (expiration_date_gte == expiration_date_lte).
-    Distinguishes them by that narrowing, exactly like the real underlying
-    /v2/options/contracts filters would."""
-    long_contract = _contract(symbol=long_symbol, type=option_type, strike_price=long_strike, expiration_date="2024-02-23")
+    """A fake get_option_contracts() answering select_spread_contracts' own
+    SINGLE wide-window call (see that function's own docstring for why
+    this is one call, not two, since a real, confirmed inefficiency this
+    session found and fixed) -- one response needs to carry both the
+    near-the-money long leg AND the further-OTM short-leg candidates.
+    `long_contract` is given real open_interest so it reliably wins the
+    near-the-money slot over any short-pool candidate that happens to sit
+    closer to current_price in a given test -- the same "liquid beats
+    merely-nearest" preference select_contract()/
+    select_credit_spread_contracts() already apply to their own primary
+    pick."""
+    long_contract = _contract(symbol=long_symbol, type=option_type, strike_price=long_strike, expiration_date="2024-02-23", open_interest=500)
     short_pool = [
         _contract(symbol="short_near", type=option_type, strike_price=long_strike + 5.0 if option_type == "call" else long_strike - 5.0, expiration_date="2024-02-23"),
         _contract(symbol="short_far", type=option_type, strike_price=long_strike + 10.0 if option_type == "call" else long_strike - 10.0, expiration_date="2024-02-23"),
     ]
 
     def fake(*, underlying_symbols, expiration_date_gte, expiration_date_lte, option_type):
-        if expiration_date_gte == expiration_date_lte:
-            return short_pool
-        return [long_contract]
+        return [long_contract, *short_pool]
 
     return fake
 
@@ -144,9 +147,10 @@ def test_select_spread_contracts_picks_a_put_spread_with_short_strike_below_long
 
 def test_select_spread_contracts_returns_none_when_no_short_leg_is_far_enough_out(monkeypatch):
     def fake(*, underlying_symbols, expiration_date_gte, expiration_date_lte, option_type):
-        if expiration_date_gte == expiration_date_lte:
-            return [_contract(symbol="too_close", type="call", strike_price=196.0, expiration_date="2024-02-23")]
-        return [_contract(symbol="AAPL240223C00195000", type="call", strike_price=195.0, expiration_date="2024-02-23")]
+        return [
+            _contract(symbol="AAPL240223C00195000", type="call", strike_price=195.0, expiration_date="2024-02-23", open_interest=500),
+            _contract(symbol="too_close", type="call", strike_price=196.0, expiration_date="2024-02-23"),
+        ]
 
     monkeypatch.setattr(aod.alpaca_client, "get_option_contracts", fake)
     assert aod.select_spread_contracts("AAPL", direction="up", current_price=195.0) is None
@@ -157,14 +161,34 @@ def test_select_spread_contracts_returns_none_without_a_long_leg(monkeypatch):
     assert aod.select_spread_contracts("AAPL", direction="up", current_price=195.0) is None
 
 
+def test_select_spread_contracts_makes_exactly_one_contract_lookup_call(monkeypatch):
+    """Real, confirmed inefficiency fixed in review: this used to call
+    select_contract() (its own get_option_contracts call) and THEN a
+    second, narrower same-expiration call for the short leg -- the second
+    call re-fetched data the first, wider-windowed call already contained.
+    Locks in the fix stays fixed."""
+    calls = []
+
+    def fake(*, underlying_symbols, expiration_date_gte, expiration_date_lte, option_type):
+        calls.append((expiration_date_gte, expiration_date_lte))
+        return [
+            _contract(symbol="AAPL240223C00195000", type="call", strike_price=195.0, expiration_date="2024-02-23", open_interest=500),
+            _contract(symbol="short_near", type="call", strike_price=200.0, expiration_date="2024-02-23"),
+        ]
+
+    monkeypatch.setattr(aod.alpaca_client, "get_option_contracts", fake)
+    result = aod.select_spread_contracts("AAPL", direction="up", current_price=195.0)
+    assert result is not None
+    assert len(calls) == 1
+
+
 def test_select_spread_contracts_prefers_a_liquid_short_leg(monkeypatch):
     def fake(*, underlying_symbols, expiration_date_gte, expiration_date_lte, option_type):
-        if expiration_date_gte == expiration_date_lte:
-            return [
-                _contract(symbol="illiquid_near", type="call", strike_price=200.0, expiration_date="2024-02-23", open_interest=0),
-                _contract(symbol="liquid_farther", type="call", strike_price=202.0, expiration_date="2024-02-23", open_interest=500),
-            ]
-        return [_contract(symbol="AAPL240223C00195000", type="call", strike_price=195.0, expiration_date="2024-02-23")]
+        return [
+            _contract(symbol="AAPL240223C00195000", type="call", strike_price=195.0, expiration_date="2024-02-23", open_interest=500),
+            _contract(symbol="illiquid_near", type="call", strike_price=200.0, expiration_date="2024-02-23", open_interest=0),
+            _contract(symbol="liquid_farther", type="call", strike_price=202.0, expiration_date="2024-02-23", open_interest=500),
+        ]
 
     monkeypatch.setattr(aod.alpaca_client, "get_option_contracts", fake)
     result = aod.select_spread_contracts("AAPL", direction="up", current_price=195.0)
