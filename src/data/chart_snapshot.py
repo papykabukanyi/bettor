@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -47,6 +48,20 @@ CHARTS_DIR = Path(os.getenv("CHART_SNAPSHOT_DIR", str(ROOT_DIR / "data" / "chart
 # writes -- cap how many chart files accumulate rather than growing
 # unbounded across a long-running instance.
 MAX_STORED_CHARTS = int(os.getenv("CHART_SNAPSHOT_MAX_STORED", "40") or "40")
+
+# Alternate image host for callers with no RENDER_EXTERNAL_URL of their own
+# (see public_url_for's own docstring) -- a scheduled job running on
+# Hugging Face Jobs infrastructure instead of Render has no public HTTP
+# route to serve a locally-saved PNG from, so it uploads to this PUBLIC HF
+# dataset repo instead and hands Threads that repo's own resolve URL.
+# Deliberately a SEPARATE repo from HF_MODEL_REPO (used elsewhere in this
+# codebase for Threads tokens / durable trading state): that repo is
+# private, and images here must stay public for Threads' servers to be
+# able to fetch them at all -- never reuse HF_MODEL_REPO for this.
+HF_API_KEY = os.getenv("HF_API_KEY", "")
+HF_IMAGES_REPO = os.getenv("HF_IMAGES_REPO", "")
+MAX_STORED_HF_IMAGES_PER_PREFIX = int(os.getenv("HF_IMAGES_MAX_STORED_PER_PREFIX", "3") or "3")
+_HF_IMAGES_UPLOAD_TIMEOUT_SEC = int(os.getenv("HF_IMAGES_UPLOAD_TIMEOUT_SEC", "20") or "20")
 
 # "Very clear HD" -- every dimension/line-width/font-size below is defined
 # in LOGICAL pixels and multiplied by this at the one call site (_s()) that
@@ -907,13 +922,102 @@ def format_technical_indicators(row: dict[str, Any] | None) -> dict[str, str]:
     return out
 
 
+def _hf_image_prefix(filename: str) -> str:
+    """The market/job-type portion of a chart filename, with its trailing
+    timestamp (and, for newsbullet_*, its extra _<index>) stripped -- e.g.
+    "sentiment_stocks_1735000000.png" -> "sentiment_stocks",
+    "newsbullet_crypto_1735000000_2.png" -> "newsbullet_crypto". Groups
+    files in the shared HF images repo by what generated them, so pruning
+    (see _prune_old_hf_images) only ever caps ONE market/job-type's own
+    history, never trims a different one's most recent image just because
+    it uploaded first."""
+    return re.sub(r"_\d+(_\d+)?\.png$", "", filename)
+
+
+def _prune_old_hf_images(api, prefix: str) -> None:
+    """Mirrors this module's own _prune_old_charts, applied to the shared
+    HF images repo instead of local disk. Necessary here specifically
+    because _upload_chart_to_hf deliberately never overwrites a filename
+    (see its own docstring) -- without this, the repo grows one file per
+    scheduled run forever."""
+    try:
+        files = [f for f in api.list_repo_files(repo_id=HF_IMAGES_REPO, repo_type="dataset") if _hf_image_prefix(Path(f).name) == prefix]
+        files.sort()  # the timestamp embedded in each filename makes lexicographic order == chronological order
+        excess = len(files) - MAX_STORED_HF_IMAGES_PER_PREFIX
+        for f in files[:max(0, excess)]:
+            api.delete_file(path_in_repo=f, repo_id=HF_IMAGES_REPO, repo_type="dataset")
+    except Exception as exc:
+        logger.debug("[chart_snapshot] HF images prune failed for prefix %r (non-fatal): %s", prefix, exc)
+
+
+def _upload_chart_to_hf(chart_path: Path) -> str | None:
+    """Uploads chart_path to the shared, PUBLIC HF_IMAGES_REPO under its
+    own already-timestamped filename (see every filename f-string in this
+    module -- each already embeds int(time.time())) and returns its public
+    resolve URL, or None on any failure. Deliberately never reuses/
+    overwrites a filename: a fixed name would both race a slow Threads
+    fetch of the OLD image against a newer run's upload, AND risk a
+    CDN-stale resolve URL for a stretch after the overwrite lands (HF's
+    resolve/main/... path is served through a CDN layer, not guaranteed to
+    invalidate instantly on overwrite) -- a fresh path every time sidesteps
+    both failure modes entirely, at the cost of needing _prune_old_hf_images
+    to keep the repo from growing unbounded. Verifies the URL is actually
+    publicly fetchable (a quick HEAD) before returning it -- upload success
+    doesn't guarantee the CDN has it live yet, and handing Threads a URL
+    that isn't fetchable yet would fail the post outright."""
+    if not HF_API_KEY or not HF_IMAGES_REPO:
+        return None
+    from huggingface_hub import HfApi
+
+    def _upload() -> str:
+        api = HfApi(token=HF_API_KEY)
+        try:
+            api.repo_info(repo_id=HF_IMAGES_REPO, repo_type="dataset")
+        except Exception:
+            api.create_repo(repo_id=HF_IMAGES_REPO, repo_type="dataset", exist_ok=True, private=False)
+        path_in_repo = chart_path.name
+        api.upload_file(
+            path_or_fileobj=str(chart_path), path_in_repo=path_in_repo,
+            repo_id=HF_IMAGES_REPO, repo_type="dataset", commit_message="post chart image",
+        )
+        _prune_old_hf_images(api, _hf_image_prefix(path_in_repo))
+        return f"https://huggingface.co/datasets/{HF_IMAGES_REPO}/resolve/main/{path_in_repo}"
+
+    try:
+        from server_common import call_with_hard_timeout
+        url = call_with_hard_timeout(_upload, timeout_sec=_HF_IMAGES_UPLOAD_TIMEOUT_SEC)
+    except Exception as exc:
+        logger.warning("[chart_snapshot] HF images upload failed: %s", exc)
+        return None
+    try:
+        import requests
+        resp = requests.head(url, timeout=5, allow_redirects=True)
+        if resp.status_code >= 400:
+            logger.warning("[chart_snapshot] HF images URL not reachable yet (status %s): %s", resp.status_code, url)
+            return None
+    except Exception as exc:
+        logger.warning("[chart_snapshot] HF images reachability check failed: %s", exc)
+        return None
+    return url
+
+
 def public_url_for(chart_path: Path) -> str | None:
     """Builds the publicly-fetchable URL Threads' own servers need to
     actually retrieve the image (Threads' media-container API takes an
     image_url it fetches itself, not a raw upload) -- Render auto-injects
     RENDER_EXTERNAL_URL for every web service, so this needs no per-service
-    config. None (skip posting) if that's unset, e.g. running locally."""
+    config there. Checked FIRST and unconditionally: every Render-hosted
+    caller (trade entry/exit charts, hourly status, sentiment snapshots
+    posted from Render itself) must keep behaving exactly as before, so
+    this branch's behavior is untouched by HF_IMAGES_REPO's existence.
+
+    Only when RENDER_EXTERNAL_URL is unset (e.g. a script running as a
+    scheduled Hugging Face Job, which has no public HTTP route of its own
+    to serve a local file from) does this fall through to uploading the
+    image to HF_IMAGES_REPO instead (see _upload_chart_to_hf). Returns
+    None (skip posting) if neither is configured, e.g. running locally
+    with no env set at all."""
     base_url = os.getenv("RENDER_EXTERNAL_URL", "")
-    if not base_url:
-        return None
-    return f"{base_url.rstrip('/')}/chart/{chart_path.name}"
+    if base_url:
+        return f"{base_url.rstrip('/')}/chart/{chart_path.name}"
+    return _upload_chart_to_hf(chart_path)

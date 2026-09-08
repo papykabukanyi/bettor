@@ -1,0 +1,23 @@
+# Trimmed dependency set for scripts/threads_content_job.py -- meant to run
+# as a Hugging Face Jobs scheduled run (cpu-basic flavor), NOT on Render.
+# See docs/CRON_JOB_MIGRATION.md for the full architecture.
+#
+# Deliberately excludes everything in the root requirements.txt that only
+# the trading/web-dashboard side of this codebase needs: scikit-learn,
+# torch (both CPU-only ML training, several hundred MB combined),
+# cryptography (Kalshi request signing), flask/gunicorn/APScheduler (this
+# script is a plain one-shot process, no web server or job scheduler of
+# its own), fpdf2 (PDF account reports). None of the two job types this
+# script runs (trending-news, sentiment-snapshot) import any of those --
+# confirmed by tracing every module scripts/threads_content_job.py
+# transitively imports.
+
+pandas
+numpy
+pyarrow>=12.0.0
+
+requests
+
+huggingface_hub>=0.20.0
+
+Pillow>=10.1.0

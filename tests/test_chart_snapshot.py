@@ -242,6 +242,135 @@ def test_public_url_for_builds_the_full_public_url(monkeypatch):
     assert url == f"https://bettor-schwab.onrender.com/chart/{path.name}"
 
 
+def test_hf_image_prefix_strips_the_trailing_timestamp():
+    assert chart_snapshot._hf_image_prefix("sentiment_stocks_1735000000.png") == "sentiment_stocks"  # noqa: SLF001
+
+
+def test_hf_image_prefix_strips_timestamp_and_trailing_index():
+    assert chart_snapshot._hf_image_prefix("newsbullet_crypto_1735000000_2.png") == "newsbullet_crypto"  # noqa: SLF001
+
+
+class _FakeHfApi:
+    """In-memory stand-in for huggingface_hub.HfApi -- tracks created
+    repos and uploaded/deleted files per repo_id, same shape the real SDK
+    exposes for the handful of calls _upload_chart_to_hf/_prune_old_hf_images
+    actually make."""
+    repos: set[str] = set()
+    files: dict[str, list[str]] = {}
+
+    def __init__(self, token=None):
+        self.token = token
+
+    def repo_info(self, *, repo_id, repo_type):
+        if repo_id not in self.repos:
+            raise Exception("repo not found")
+
+    def create_repo(self, *, repo_id, repo_type, exist_ok, private):
+        self.repos.add(repo_id)
+
+    def upload_file(self, *, path_or_fileobj, path_in_repo, repo_id, repo_type, commit_message):
+        self.files.setdefault(repo_id, []).append(path_in_repo)
+
+    def list_repo_files(self, *, repo_id, repo_type):
+        return list(self.files.get(repo_id, []))
+
+    def delete_file(self, *, path_in_repo, repo_id, repo_type):
+        self.files[repo_id].remove(path_in_repo)
+
+
+@pytest.fixture
+def _fake_hf_images(monkeypatch):
+    """Wires HF_API_KEY/HF_IMAGES_REPO on, swaps in _FakeHfApi (reset per
+    test), and stubs requests.head to report every URL reachable -- the
+    "happy path" baseline every HF-images test below starts from, with
+    individual tests overriding the reachability stub or the module-level
+    flags where they need to exercise a failure branch."""
+    import huggingface_hub
+    _FakeHfApi.repos = set()
+    _FakeHfApi.files = {}
+    monkeypatch.setattr(huggingface_hub, "HfApi", _FakeHfApi)
+    monkeypatch.setattr(chart_snapshot, "HF_API_KEY", "fake-hf-key")
+    monkeypatch.setattr(chart_snapshot, "HF_IMAGES_REPO", "papylove/bettor-threads-images")
+
+    class _FakeResponse:
+        status_code = 200
+
+    import requests
+    monkeypatch.setattr(requests, "head", lambda url, timeout=5, allow_redirects=True: _FakeResponse())
+    yield _FakeHfApi
+
+
+def test_public_url_for_uploads_to_hf_when_render_external_url_is_unset(monkeypatch, _fake_hf_images):
+    monkeypatch.delenv("RENDER_EXTERNAL_URL", raising=False)
+    path = chart_snapshot.generate_candlestick_chart(
+        ticker="AAPL", market="stocks", candles=_candles(), entry_price=100.0,
+        take_profit_price=101.0, stop_loss_price=99.0,
+    )
+    url = chart_snapshot.public_url_for(path)
+    assert url == f"https://huggingface.co/datasets/papylove/bettor-threads-images/resolve/main/{path.name}"
+    assert _fake_hf_images.files["papylove/bettor-threads-images"] == [path.name]
+
+
+def test_public_url_for_prefers_render_external_url_over_hf_when_both_are_set(monkeypatch, _fake_hf_images):
+    """Real requirement: Render-hosted callers (trade entry/exit charts,
+    hourly status, sentiment snapshots posted from Render itself) must
+    keep behaving exactly as before -- HF_IMAGES_REPO existing must never
+    change what they do."""
+    monkeypatch.setenv("RENDER_EXTERNAL_URL", "https://bettor-schwab.onrender.com")
+    path = chart_snapshot.generate_candlestick_chart(
+        ticker="AAPL", market="stocks", candles=_candles(), entry_price=100.0,
+        take_profit_price=101.0, stop_loss_price=99.0,
+    )
+    url = chart_snapshot.public_url_for(path)
+    assert url == f"https://bettor-schwab.onrender.com/chart/{path.name}"
+    assert _fake_hf_images.files == {}  # never even attempted the HF path
+
+
+def test_upload_chart_to_hf_returns_none_when_hf_images_repo_is_unset(monkeypatch, _fake_hf_images):
+    monkeypatch.setattr(chart_snapshot, "HF_IMAGES_REPO", "")
+    path = chart_snapshot.generate_candlestick_chart(
+        ticker="AAPL", market="stocks", candles=_candles(), entry_price=100.0,
+        take_profit_price=101.0, stop_loss_price=99.0,
+    )
+    assert chart_snapshot._upload_chart_to_hf(path) is None  # noqa: SLF001
+
+
+def test_upload_chart_to_hf_returns_none_when_the_url_is_not_yet_reachable(monkeypatch, _fake_hf_images):
+    class _NotReadyResponse:
+        status_code = 404
+
+    import requests
+    monkeypatch.setattr(requests, "head", lambda url, timeout=5, allow_redirects=True: _NotReadyResponse())
+    path = chart_snapshot.generate_candlestick_chart(
+        ticker="AAPL", market="stocks", candles=_candles(), entry_price=100.0,
+        take_profit_price=101.0, stop_loss_price=99.0,
+    )
+    assert chart_snapshot._upload_chart_to_hf(path) is None  # noqa: SLF001
+
+
+def test_upload_chart_to_hf_creates_the_repo_when_it_does_not_exist_yet(monkeypatch, _fake_hf_images):
+    path = chart_snapshot.generate_candlestick_chart(
+        ticker="AAPL", market="stocks", candles=_candles(), entry_price=100.0,
+        take_profit_price=101.0, stop_loss_price=99.0,
+    )
+    assert "papylove/bettor-threads-images" not in _fake_hf_images.repos
+    chart_snapshot._upload_chart_to_hf(path)  # noqa: SLF001
+    assert "papylove/bettor-threads-images" in _fake_hf_images.repos
+
+
+def test_prune_old_hf_images_deletes_the_oldest_past_the_cap_scoped_to_its_own_prefix(monkeypatch, _fake_hf_images):
+    monkeypatch.setattr(chart_snapshot, "MAX_STORED_HF_IMAGES_PER_PREFIX", 3)
+    repo = "papylove/bettor-threads-images"
+    _fake_hf_images.files[repo] = [
+        "sentiment_stocks_100.png", "sentiment_stocks_200.png", "sentiment_stocks_300.png", "sentiment_stocks_400.png",
+        "sentiment_crypto_150.png",  # a different prefix -- must survive even though it's also "old"
+    ]
+    api = _fake_hf_images(token="fake-hf-key")
+    chart_snapshot._prune_old_hf_images(api, "sentiment_stocks")  # noqa: SLF001
+    remaining = _fake_hf_images.files[repo]
+    assert sorted(remaining) == ["sentiment_crypto_150.png", "sentiment_stocks_200.png", "sentiment_stocks_300.png", "sentiment_stocks_400.png"]
+
+
 def _sentiment_rows(n=10):
     return [{"ticker": f"SYM{i}", "sentiment_score": (i - n / 2) / (n / 2)} for i in range(n)]
 
