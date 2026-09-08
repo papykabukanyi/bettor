@@ -157,6 +157,24 @@ def test_api_alpaca_crypto_status_reports_configured_flag(monkeypatch):
         assert resp.get_json()["alpaca_configured"] is True
 
 
+def test_api_alpaca_crypto_status_surfaces_correlation_study_health(monkeypatch):
+    """Real diagnostic gap closed -- see crypto_correlation.study_health's
+    own docstring / app_kalshi.py's identical field for perps."""
+    from data import crypto_correlation
+
+    monkeypatch.setattr(
+        crypto_correlation, "get_alpaca_study",
+        lambda: {"computed_at": "2026-01-01T00:00:00+00:00", "ids": ["BTC", "ETH", "WLD"], "corr": {"BTC": {"ETH": 0.8}}, "divergence_z": {"ETH": 0.3}, "breadth": -0.2},
+    )
+    with alpaca_crypto_server.app.test_client() as client:
+        resp = client.get("/api/alpaca/crypto/status")
+        assert resp.status_code == 200
+        assert resp.get_json()["correlation_study_health"] == {
+            "computed_at": "2026-01-01T00:00:00+00:00", "num_ids": 3,
+            "num_with_peer_data": 1, "num_with_divergence_data": 1, "breadth": -0.2,
+        }
+
+
 def test_api_alpaca_crypto_status_attaches_unrealized_pnl_and_exit_check_to_open_positions(monkeypatch):
     """Real gap found in review: the dashboard showed entry price + static
     TP/SL levels for every open position but never its CURRENT price,

@@ -57,6 +57,33 @@ def test_api_status_surfaces_feature_importances_from_the_trained_model(monkeypa
         assert resp.get_json()["model"]["feature_importances"] == {"random_forest": {"sentiment_score": 0.05}}
 
 
+def test_api_status_surfaces_correlation_study_health(monkeypatch):
+    """Real diagnostic gap closed: whether the chart-study layer actually
+    has enough coverage right now used to be invisible outside individual
+    Threads posts' own "no ... data" reason text -- see
+    crypto_correlation.study_health's own docstring."""
+    from data import crypto_correlation
+
+    monkeypatch.setattr(
+        crypto_correlation, "get_perps_study",
+        lambda: {"computed_at": "2026-01-01T00:00:00+00:00", "ids": ["BTC", "ETH"], "corr": {"BTC": {"ETH": 0.8}}, "divergence_z": {}, "breadth": 0.1},
+    )
+    monkeypatch.setattr(crypto_correlation, "get_remote_alpaca_study", lambda: {})
+
+    with app_kalshi.app.test_client() as client:
+        resp = client.get("/api/status")
+        assert resp.status_code == 200
+        health = resp.get_json()["correlation_study_health"]
+        assert health["perps_study"] == {
+            "computed_at": "2026-01-01T00:00:00+00:00", "num_ids": 2,
+            "num_with_peer_data": 1, "num_with_divergence_data": 0, "breadth": 0.1,
+        }
+        assert health["remote_alpaca_study"] == {
+            "computed_at": None, "num_ids": 0, "num_with_peer_data": 0,
+            "num_with_divergence_data": 0, "breadth": None,
+        }
+
+
 def test_api_status_attaches_unrealized_pnl_and_exit_check_to_open_positions(monkeypatch):
     """Real gap found in review: the dashboard showed entry price + static
     TP/SL levels for every open position but never its CURRENT price,

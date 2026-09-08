@@ -950,6 +950,8 @@ def api_perps_report_pdf():
 
 @app.route("/api/status")
 def api_status():
+    from data import crypto_correlation
+
     state = perps_strategy._load_state()  # noqa: SLF001
     _, meta = perps_model.load_model()
     latest_cycle = load_json(LATEST_CYCLE_FILE, {})
@@ -1009,6 +1011,17 @@ def api_status():
         "latest_cycle": latest_cycle,
         "latest_position_check": latest_position_check,
         "watchlist": perps_data.get_watchlist(),
+        # Real diagnostic visibility: how many instruments the chart-study
+        # layer actually has enough history for right now, vs. how many it
+        # knows about at all -- surfaces a real data-pipeline gap (most
+        # instruments failing to collect, or too thin a history window)
+        # directly here, instead of only showing up as scattered "no ...
+        # data" reasons in individual Threads posts (see
+        # crypto_correlation.study_health's own docstring).
+        "correlation_study_health": {
+            "perps_study": crypto_correlation.study_health(crypto_correlation.get_perps_study()),
+            "remote_alpaca_study": crypto_correlation.study_health(crypto_correlation.get_remote_alpaca_study()),
+        },
         "params": {
             "position_size_pct": perps_strategy.POSITION_SIZE_PCT,
             "max_concurrent_positions": perps_strategy.MAX_CONCURRENT_POSITIONS,

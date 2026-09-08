@@ -206,6 +206,69 @@ def test_alpaca_correlation_bullishness_uses_only_the_local_alpaca_study():
     assert result["components"]["divergence"] > 0
 
 
+def test_format_reason_omits_no_data_components():
+    """Real feedback: a coin too new/thin to correlate against anything
+    yet used to post a "Why:" reason that was mostly "no ... data"
+    placeholders -- only components that actually had something to say
+    should show up in the joined text."""
+    components = {
+        "perps_peers": (0.0, "no correlated peers with data"),
+        "alpaca_peers": (0.0, "no correlated peers with data"),
+        "alpaca_divergence": (0.4, "lagging BTC (z=-1.20)"),
+        "alpaca_breadth": (0.37, "breadth +0.37 (up-skewed)"),
+        "multi_timeframe": (0.1, "4/9 timeframes bullish, 5/9 bearish"),
+    }
+    reason = cc._format_reason(components)  # noqa: SLF001
+    assert "no correlated peers with data" not in reason
+    assert "lagging BTC" in reason
+    assert "breadth +0.37" in reason
+    assert "4/9 timeframes" in reason
+
+
+def test_format_reason_falls_back_to_a_placeholder_when_nothing_has_data():
+    components = {
+        "perps_peers": (0.0, "no correlated peers with data"),
+        "alpaca_divergence": (0.0, "no leader-divergence data"),
+        "multi_timeframe": (0.0, "no multi-timeframe data"),
+    }
+    assert cc._format_reason(components) == "no chart-study signal available yet"  # noqa: SLF001
+
+
+def test_perps_correlation_bullishness_reason_omits_no_data_components_for_an_unknown_coin():
+    """End-to-end: a coin present in neither study still gets a valid,
+    UNCHANGED score (each missing component already contributes a neutral
+    0.0), but its posted reason text shouldn't be cluttered with "no ...
+    data" placeholders for the components that have nothing to say."""
+    cc.refresh_perps_study(_returns_frame(_synthetic_universe(seed=1)), id_col="ticker", leader_id="BTC")
+    result = cc.perps_correlation_bullishness("NOT_A_REAL_COIN")
+    assert result["score"] == 0.0
+    assert "no correlated peers with data" not in result["reason"]
+    assert "no leader-divergence data" not in result["reason"]
+    assert result["reason"] == "no chart-study signal available yet"
+
+
+def test_study_health_reports_coverage():
+    study = {
+        "computed_at": "2026-01-01T00:00:00+00:00",
+        "ids": ["BTC", "ETH", "WLD"],
+        "corr": {"BTC": {"ETH": 0.8}, "ETH": {"BTC": 0.8}},
+        "divergence_z": {"ETH": 0.5},
+        "breadth": 0.37,
+    }
+    health = cc.study_health(study)
+    assert health == {
+        "computed_at": "2026-01-01T00:00:00+00:00", "num_ids": 3,
+        "num_with_peer_data": 2, "num_with_divergence_data": 1, "breadth": 0.37,
+    }
+
+
+def test_study_health_on_an_empty_study():
+    assert cc.study_health({}) == {
+        "computed_at": None, "num_ids": 0, "num_with_peer_data": 0,
+        "num_with_divergence_data": 0, "breadth": None,
+    }
+
+
 def test_multi_timeframe_bullishness_none_row_is_neutral():
     score, reason = cc.multi_timeframe_bullishness(None)
     assert score == 0.0

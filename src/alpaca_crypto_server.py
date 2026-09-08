@@ -742,6 +742,8 @@ def _crypto_status_snapshot() -> dict[str, Any]:
     """Everything api_alpaca_crypto_status() reports, factored out so
     api_alpaca_crypto_report() (see below) can build the same real
     account/config snapshot without duplicating this logic."""
+    from data import crypto_correlation
+
     state = alpaca_crypto_strategy._load_state()  # noqa: SLF001
     _, meta = alpaca_crypto_model.load_model()
     latest_cycle = load_json(ALPACA_CRYPTO_LATEST_CYCLE_FILE, {})
@@ -801,6 +803,9 @@ def _crypto_status_snapshot() -> dict[str, Any]:
         "latest_position_check": latest_position_check,
         "latest_sweep": latest_sweep,
         "latest_walkforward": latest_walkforward,
+        # Real diagnostic visibility -- see crypto_correlation.study_health's
+        # own docstring / app_kalshi.py's identical field for perps.
+        "correlation_study_health": crypto_correlation.study_health(crypto_correlation.get_alpaca_study()),
         "params": {
             "position_size_pct": alpaca_crypto_strategy.POSITION_SIZE_PCT,
             "max_concurrent_positions": alpaca_crypto_strategy.MAX_CONCURRENT_POSITIONS,

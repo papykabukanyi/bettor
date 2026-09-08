@@ -302,6 +302,25 @@ def get_remote_alpaca_study() -> dict[str, Any]:
     return _REMOTE_ALPACA_STUDY
 
 
+def study_health(study: dict[str, Any]) -> dict[str, Any]:
+    """Coverage snapshot for one study dict -- how many instruments it
+    actually knows about vs. how many of those have enough peer-
+    correlation / leader-divergence history to produce a real (non-"no
+    data") reading. Exists so a real data-pipeline gap (most instruments
+    failing to collect, or a too-thin history window) is visible on
+    /api/status directly, instead of only showing up as a string of "no
+    ... data" reasons buried in individual Threads posts that's otherwise
+    only diagnosable by reading Render logs."""
+    ids = study.get("ids") or []
+    return {
+        "computed_at": study.get("computed_at"),
+        "num_ids": len(ids),
+        "num_with_peer_data": len(study.get("corr") or {}),
+        "num_with_divergence_data": len(study.get("divergence_z") or {}),
+        "breadth": study.get("breadth"),
+    }
+
+
 # ── Individual studies (bullish-signed) ─────────────────────────────────
 
 def _peer_confirmation_bullishness(study: dict[str, Any], target_id: str, *, min_corr: float = 0.4, max_peers: int = 5) -> tuple[float, str]:
@@ -433,6 +452,28 @@ ALPACA_DIVERGENCE_WEIGHT = 0.20
 ALPACA_BREADTH_WEIGHT = 0.20
 ALPACA_MULTI_TIMEFRAME_WEIGHT = 0.30
 
+# Real feedback: a composite's posted "Why:" reason used to unconditionally
+# join every component's text, "no correlated peers with data"/"no
+# leader-divergence data" included -- for a coin genuinely too new/thin to
+# correlate against anything yet (or simply not part of Alpaca's separate
+# universe at all), most of a 5-part reason could read as a wall of "no
+# ... data" placeholders with barely any real signal in it, exactly the
+# "a lot of data points are not coming in" clutter reported live. These
+# are the exact literal strings each _*_bullishness "no data" branch
+# returns (all defined a few lines above) -- filtering them out of the
+# JOINED REASON TEXT ONLY changes what gets displayed; the weighted SCORE
+# math above is completely unaffected (a "no data" component already
+# contributes a neutral 0.0 to the score either way).
+_NO_DATA_REASONS = {
+    "no correlated peers with data", "no leader-divergence data",
+    "no breadth data", "no multi-timeframe data",
+}
+
+
+def _format_reason(components: dict[str, tuple[float, str]]) -> str:
+    meaningful = [f"{name}: {text}" for name, (_, text) in components.items() if text not in _NO_DATA_REASONS]
+    return "; ".join(meaningful) if meaningful else "no chart-study signal available yet"
+
 
 def perps_correlation_bullishness(coin: str, row: dict[str, Any] | None = None) -> dict[str, Any]:
     """Composite chart-study reading for one perps coin (already a plain
@@ -460,7 +501,7 @@ def perps_correlation_bullishness(coin: str, row: dict[str, Any] | None = None) 
         + PERPS_REMOTE_BREADTH_WEIGHT * components["alpaca_breadth"][0]
         + PERPS_MULTI_TIMEFRAME_WEIGHT * components["multi_timeframe"][0]
     )
-    reason = "; ".join(f"{name}: {text}" for name, (_, text) in components.items())
+    reason = _format_reason(components)
     return {"score": round(float(score), 4), "reason": reason, "components": {k: v[0] for k, v in components.items()}}
 
 
@@ -482,5 +523,5 @@ def alpaca_correlation_bullishness(coin: str, row: dict[str, Any] | None = None)
         + ALPACA_BREADTH_WEIGHT * components["breadth"][0]
         + ALPACA_MULTI_TIMEFRAME_WEIGHT * components["multi_timeframe"][0]
     )
-    reason = "; ".join(f"{name}: {text}" for name, (_, text) in components.items())
+    reason = _format_reason(components)
     return {"score": round(float(score), 4), "reason": reason, "components": {k: v[0] for k, v in components.items()}}
