@@ -5,10 +5,13 @@ fallback is exercised correctly) and that a trained model can actually
 produce a usable prediction from a feature row."""
 from __future__ import annotations
 
+import time as time_module
+
 import numpy as np
 import pandas as pd
 import pytest
 
+import server_common
 from data import perps_model
 
 
@@ -18,8 +21,16 @@ def _isolated_model_cache(tmp_path, monkeypatch):
     monkeypatch.setattr(perps_model, "MODEL_META_PATH", tmp_path / "model_meta.json")
     monkeypatch.setattr(perps_model, "HF_API_KEY", "")
     perps_model._model_cache.update({"model": None, "meta": None, "loaded_at": 0.0})  # noqa: SLF001
+    # _hf_recheck_state is ALSO module-level global state, shared with
+    # _model_cache's own real risk here: any OTHER test's incidental
+    # load_model() cache-hit already sets last_checked_at, which would
+    # then silently rate-limit every later test's own recheck attempt for
+    # the rest of the whole pytest process (HF_MODEL_RECHECK_INTERVAL_SEC
+    # is minutes, dwarfing this suite's own runtime) -- reset the same way.
+    perps_model._hf_recheck_state.update({"last_checked_at": 0.0, "checking": False})  # noqa: SLF001
     yield
     perps_model._model_cache.update({"model": None, "meta": None, "loaded_at": 0.0})  # noqa: SLF001
+    perps_model._hf_recheck_state.update({"last_checked_at": 0.0, "checking": False})  # noqa: SLF001
 
 
 def _synthetic_training_frame(n: int = 500, seed: int = 42) -> pd.DataFrame:
@@ -337,3 +348,62 @@ def test_download_model_from_hf_bounds_a_hang_instead_of_freezing(monkeypatch):
 
     assert result is False
     assert elapsed < 5  # must return promptly, not wait out the full 30s hang
+
+
+# ── Real, confirmed bug this closes: load_model() never used to re-check
+# HF once a local copy existed, only re-downloading if the file was
+# missing entirely -- see server_common.maybe_schedule_hf_model_recheck's
+# own docstring for the full motivation (training moving off this
+# process onto a scheduled Hugging Face Job). ─────────────────────────────
+
+def test_load_model_schedules_a_background_hf_recheck_when_something_is_already_cached(monkeypatch):
+    perps_model._model_cache.update({"model": object(), "meta": {"trained_at": "t1"}, "loaded_at": time_module.time()})  # noqa: SLF001
+    fired = server_common.threading.Event()
+    monkeypatch.setattr(perps_model, "_schedule_hf_model_recheck", lambda: fired.set())
+
+    perps_model.load_model()
+
+    assert fired.is_set()
+
+
+def test_load_model_does_not_schedule_a_recheck_with_nothing_cached_yet(monkeypatch):
+    def fail_if_called():
+        raise AssertionError("must not schedule a recheck before ever having a model")
+
+    monkeypatch.setattr(perps_model, "_schedule_hf_model_recheck", fail_if_called)
+    perps_model.load_model()  # no model file on disk (isolated tmp_path) -- falls through to the None, None path
+
+
+def test_schedule_hf_model_recheck_picks_up_a_newer_model_from_hf(monkeypatch):
+    """End-to-end through the real wiring (not just that SOME function got
+    called): a genuinely newer trained_at on HF must invalidate the cache
+    so the NEXT load_model() call re-reads from disk."""
+    perps_model._model_cache.update({"model": "old-model-object", "meta": {"trained_at": "2026-01-01T00:00:00+00:00"}, "loaded_at": time_module.time()})  # noqa: SLF001
+    monkeypatch.setattr(perps_model, "HF_API_KEY", "fake-key")
+    monkeypatch.setattr(server_common, "pull_json_from_hf", lambda *a, **k: {"trained_at": "2026-02-01T00:00:00+00:00"})
+    monkeypatch.setattr(perps_model, "_download_model_from_hf", lambda: True)
+
+    perps_model._schedule_hf_model_recheck()  # noqa: SLF001
+    # The check runs on a background thread -- give it a moment, then poll
+    # briefly rather than assuming a fixed sleep is always long enough.
+    for _ in range(50):
+        if perps_model._model_cache["loaded_at"] == 0.0:  # noqa: SLF001
+            break
+        time_module.sleep(0.02)
+    assert perps_model._model_cache["loaded_at"] == 0.0  # noqa: SLF001
+
+
+def test_schedule_hf_model_recheck_leaves_the_cache_alone_when_hf_has_nothing_newer(monkeypatch):
+    original_loaded_at = time_module.time()
+    perps_model._model_cache.update({"model": "current-model-object", "meta": {"trained_at": "2026-01-01T00:00:00+00:00"}, "loaded_at": original_loaded_at})  # noqa: SLF001
+    monkeypatch.setattr(perps_model, "HF_API_KEY", "fake-key")
+    monkeypatch.setattr(server_common, "pull_json_from_hf", lambda *a, **k: {"trained_at": "2026-01-01T00:00:00+00:00"})
+
+    def fail_if_called():
+        raise AssertionError("must not re-download when HF's trained_at matches what's already cached")
+
+    monkeypatch.setattr(perps_model, "_download_model_from_hf", fail_if_called)
+
+    perps_model._schedule_hf_model_recheck()  # noqa: SLF001
+    time_module.sleep(0.1)
+    assert perps_model._model_cache["loaded_at"] == original_loaded_at  # noqa: SLF001

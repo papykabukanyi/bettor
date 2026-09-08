@@ -5,11 +5,13 @@ network."""
 from __future__ import annotations
 
 import json
+import time as time_module
 
 import numpy as np
 import pandas as pd
 import pytest
 
+import server_common
 from data import alpaca_model
 
 
@@ -19,8 +21,15 @@ def _isolated_model_cache(tmp_path, monkeypatch):
     monkeypatch.setattr(alpaca_model, "MODEL_META_PATH", tmp_path / "model_meta.json")
     monkeypatch.setattr(alpaca_model, "HF_API_KEY", "")
     alpaca_model._model_cache.update({"model": None, "meta": None, "loaded_at": 0.0})  # noqa: SLF001
+    # _hf_recheck_state is ALSO module-level global state, shared with
+    # _model_cache's own real risk here: any OTHER test's incidental
+    # load_model() cache-hit already sets last_checked_at, which would
+    # then silently rate-limit every later test's own recheck attempt for
+    # the rest of the whole pytest process -- reset the same way.
+    alpaca_model._hf_recheck_state.update({"last_checked_at": 0.0, "checking": False})  # noqa: SLF001
     yield
     alpaca_model._model_cache.update({"model": None, "meta": None, "loaded_at": 0.0})  # noqa: SLF001
+    alpaca_model._hf_recheck_state.update({"last_checked_at": 0.0, "checking": False})  # noqa: SLF001
 
 
 def _synthetic_training_frame(n: int = 500, seed: int = 42) -> pd.DataFrame:
@@ -242,3 +251,59 @@ def test_train_torch_candidate_model_promoted_model_is_usable_via_predict_direct
     assert prediction["model_ok"] is True
     assert prediction["model_type"] == "torch_mlp"
     assert prediction["direction"] in {"up", "down"}
+
+
+# ── Real, confirmed bug this closes: load_model() never used to re-check
+# HF once a local copy existed, only re-downloading if the file was
+# missing entirely -- see server_common.maybe_schedule_hf_model_recheck's
+# own docstring / test_perps_model.py's identical coverage for the full
+# motivation (training moving off this process onto a scheduled Hugging
+# Face Job). ───────────────────────────────────────────────────────────
+
+def test_load_model_schedules_a_background_hf_recheck_when_something_is_already_cached(monkeypatch):
+    alpaca_model._model_cache.update({"model": object(), "meta": {"trained_at": "t1"}, "loaded_at": time_module.time()})  # noqa: SLF001
+    fired = server_common.threading.Event()
+    monkeypatch.setattr(alpaca_model, "_schedule_hf_model_recheck", lambda: fired.set())
+
+    alpaca_model.load_model()
+
+    assert fired.is_set()
+
+
+def test_load_model_does_not_schedule_a_recheck_with_nothing_cached_yet(monkeypatch):
+    def fail_if_called():
+        raise AssertionError("must not schedule a recheck before ever having a model")
+
+    monkeypatch.setattr(alpaca_model, "_schedule_hf_model_recheck", fail_if_called)
+    alpaca_model.load_model()  # no model file on disk (isolated tmp_path) -- falls through to the None, None path
+
+
+def test_schedule_hf_model_recheck_picks_up_a_newer_model_from_hf(monkeypatch):
+    perps_loaded_at = time_module.time()
+    alpaca_model._model_cache.update({"model": "old-model-object", "meta": {"trained_at": "2026-01-01T00:00:00+00:00"}, "loaded_at": perps_loaded_at})  # noqa: SLF001
+    monkeypatch.setattr(alpaca_model, "HF_API_KEY", "fake-key")
+    monkeypatch.setattr(server_common, "pull_json_from_hf", lambda *a, **k: {"trained_at": "2026-02-01T00:00:00+00:00"})
+    monkeypatch.setattr(alpaca_model, "_download_model_from_hf", lambda: True)
+
+    alpaca_model._schedule_hf_model_recheck()  # noqa: SLF001
+    for _ in range(50):
+        if alpaca_model._model_cache["loaded_at"] == 0.0:  # noqa: SLF001
+            break
+        time_module.sleep(0.02)
+    assert alpaca_model._model_cache["loaded_at"] == 0.0  # noqa: SLF001
+
+
+def test_schedule_hf_model_recheck_leaves_the_cache_alone_when_hf_has_nothing_newer(monkeypatch):
+    original_loaded_at = time_module.time()
+    alpaca_model._model_cache.update({"model": "current-model-object", "meta": {"trained_at": "2026-01-01T00:00:00+00:00"}, "loaded_at": original_loaded_at})  # noqa: SLF001
+    monkeypatch.setattr(alpaca_model, "HF_API_KEY", "fake-key")
+    monkeypatch.setattr(server_common, "pull_json_from_hf", lambda *a, **k: {"trained_at": "2026-01-01T00:00:00+00:00"})
+
+    def fail_if_called():
+        raise AssertionError("must not re-download when HF's trained_at matches what's already cached")
+
+    monkeypatch.setattr(alpaca_model, "_download_model_from_hf", fail_if_called)
+
+    alpaca_model._schedule_hf_model_recheck()  # noqa: SLF001
+    time_module.sleep(0.1)
+    assert alpaca_model._model_cache["loaded_at"] == original_loaded_at  # noqa: SLF001

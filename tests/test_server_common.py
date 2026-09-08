@@ -312,3 +312,193 @@ def test_milestone_snapshot_zero_baseline_does_not_divide_by_zero():
     assert snap["total_return_pct"] == 0.0
     snap = server_common.milestone_snapshot(state, current_balance=5.0)
     assert snap["drawdown_from_peak_pct"] == 0.0
+
+
+# ── pull_json_from_hf / push_json_to_hf ──────────────────────────────────
+
+def test_pull_json_from_hf_returns_none_without_a_token():
+    assert server_common.pull_json_from_hf("some/repo", "f.json", token="", timeout_sec=5) is None
+
+
+def test_pull_json_from_hf_downloads_and_parses_json(monkeypatch, tmp_path):
+    import huggingface_hub
+
+    payload_path = tmp_path / "f.json"
+    payload_path.write_text('{"a": 1}', encoding="utf-8")
+    captured = {}
+
+    def fake_hf_hub_download(*, repo_id, filename, repo_type, token):
+        captured.update(repo_id=repo_id, filename=filename, repo_type=repo_type, token=token)
+        return str(payload_path)
+
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", fake_hf_hub_download)
+    result = server_common.pull_json_from_hf("papylove/alpaca-model", "f.json", token="tok", timeout_sec=5)
+    assert result == {"a": 1}
+    assert captured == {"repo_id": "papylove/alpaca-model", "filename": "f.json", "repo_type": "model", "token": "tok"}
+
+
+def test_pull_json_from_hf_returns_none_on_failure(monkeypatch):
+    import huggingface_hub
+
+    def raise_error(**kw):
+        raise RuntimeError("not found")
+
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", raise_error)
+    assert server_common.pull_json_from_hf("some/repo", "f.json", token="tok", timeout_sec=5) is None
+
+
+def test_push_json_to_hf_is_a_noop_without_a_token(monkeypatch):
+    import huggingface_hub
+
+    def fail_if_called(*a, **k):
+        raise AssertionError("must not touch HF at all without a token")
+
+    monkeypatch.setattr(huggingface_hub, "HfApi", fail_if_called)
+    server_common.push_json_to_hf("some/repo", "f.json", {"a": 1}, token="", timeout_sec=5, commit_message="x")
+
+
+def test_push_json_to_hf_uploads_the_data(monkeypatch):
+    import huggingface_hub
+
+    captured = {}
+
+    class _FakeApi:
+        def __init__(self, token):
+            captured["token"] = token
+
+        def upload_file(self, *, path_or_fileobj, path_in_repo, repo_id, repo_type, commit_message):
+            import json
+            with open(path_or_fileobj, encoding="utf-8") as f:
+                captured["uploaded"] = json.load(f)
+            captured.update(path_in_repo=path_in_repo, repo_id=repo_id, repo_type=repo_type, commit_message=commit_message)
+
+    monkeypatch.setattr(huggingface_hub, "HfApi", _FakeApi)
+    server_common.push_json_to_hf(
+        "papylove/alpaca-model", "latest_sweep.json", {"best": "config"},
+        token="tok", timeout_sec=5, commit_message="update sweep",
+    )
+    assert captured == {
+        "token": "tok", "uploaded": {"best": "config"}, "path_in_repo": "latest_sweep.json",
+        "repo_id": "papylove/alpaca-model", "repo_type": "model", "commit_message": "update sweep",
+    }
+
+
+def test_push_json_to_hf_never_raises_on_failure(monkeypatch):
+    import huggingface_hub
+
+    def raise_error(token):
+        raise RuntimeError("HF is down")
+
+    monkeypatch.setattr(huggingface_hub, "HfApi", raise_error)
+    server_common.push_json_to_hf("some/repo", "f.json", {"a": 1}, token="tok", timeout_sec=5, commit_message="x")
+
+
+# ── maybe_schedule_hf_model_recheck / refresh_model_if_hf_has_a_newer_one ─
+
+def test_maybe_schedule_hf_model_recheck_fires_the_check_fn_once():
+    refresh_state = {"last_checked_at": 0.0, "checking": False}
+    lock = server_common.threading.Lock()
+    fired = server_common.threading.Event()
+
+    def check_fn():
+        fired.set()
+
+    server_common.maybe_schedule_hf_model_recheck(refresh_state=refresh_state, lock=lock, recheck_interval_sec=600, check_fn=check_fn)
+    assert fired.wait(timeout=2)
+
+
+def test_maybe_schedule_hf_model_recheck_respects_the_rate_limit_window():
+    refresh_state = {"last_checked_at": time.time(), "checking": False}
+    lock = server_common.threading.Lock()
+    calls = []
+
+    server_common.maybe_schedule_hf_model_recheck(
+        refresh_state=refresh_state, lock=lock, recheck_interval_sec=600, check_fn=lambda: calls.append(1),
+    )
+    time.sleep(0.1)
+    assert calls == []  # still well within the window -- must not have fired
+
+
+def test_maybe_schedule_hf_model_recheck_does_not_spawn_a_second_thread_while_one_is_in_flight():
+    refresh_state = {"last_checked_at": 0.0, "checking": False}
+    lock = server_common.threading.Lock()
+    started = server_common.threading.Event()
+    release = server_common.threading.Event()
+    call_count = {"n": 0}
+
+    def slow_check_fn():
+        call_count["n"] += 1
+        started.set()
+        release.wait(timeout=2)
+
+    server_common.maybe_schedule_hf_model_recheck(refresh_state=refresh_state, lock=lock, recheck_interval_sec=600, check_fn=slow_check_fn)
+    assert started.wait(timeout=2)
+    # A second call while the first check is still running (and well within
+    # the rate-limit window either way) must not spawn a second thread.
+    server_common.maybe_schedule_hf_model_recheck(refresh_state=refresh_state, lock=lock, recheck_interval_sec=600, check_fn=slow_check_fn)
+    release.set()
+    time.sleep(0.1)
+    assert call_count["n"] == 1
+
+
+def test_maybe_schedule_hf_model_recheck_resets_checking_flag_even_if_check_fn_raises():
+    refresh_state = {"last_checked_at": 0.0, "checking": False}
+    lock = server_common.threading.Lock()
+    done = server_common.threading.Event()
+
+    def raise_and_signal():
+        done.set()
+        raise RuntimeError("boom")
+
+    server_common.maybe_schedule_hf_model_recheck(refresh_state=refresh_state, lock=lock, recheck_interval_sec=600, check_fn=raise_and_signal)
+    assert done.wait(timeout=2)
+    time.sleep(0.05)  # let the runner's finally block actually execute
+    assert refresh_state["checking"] is False
+
+
+def test_refresh_model_if_hf_has_a_newer_one_downloads_and_invalidates_on_a_different_trained_at(monkeypatch):
+    monkeypatch.setattr(server_common, "pull_json_from_hf", lambda *a, **k: {"trained_at": "2026-02-01T00:00:00+00:00"})
+    calls = {"downloaded": False, "invalidated": False}
+    server_common.refresh_model_if_hf_has_a_newer_one(
+        model_repo="papylove/alpaca-model", token="tok", meta_filename="meta.json", timeout_sec=5,
+        current_trained_at="2026-01-01T00:00:00+00:00",
+        download_fn=lambda: calls.update(downloaded=True) or True,
+        invalidate_fn=lambda: calls.update(invalidated=True),
+    )
+    assert calls == {"downloaded": True, "invalidated": True}
+
+
+def test_refresh_model_if_hf_has_a_newer_one_is_a_noop_when_trained_at_matches(monkeypatch):
+    monkeypatch.setattr(server_common, "pull_json_from_hf", lambda *a, **k: {"trained_at": "2026-01-01T00:00:00+00:00"})
+
+    def fail_if_called():
+        raise AssertionError("must not download when trained_at is unchanged")
+
+    server_common.refresh_model_if_hf_has_a_newer_one(
+        model_repo="papylove/alpaca-model", token="tok", meta_filename="meta.json", timeout_sec=5,
+        current_trained_at="2026-01-01T00:00:00+00:00", download_fn=fail_if_called, invalidate_fn=fail_if_called,
+    )
+
+
+def test_refresh_model_if_hf_has_a_newer_one_is_a_noop_when_remote_meta_is_missing(monkeypatch):
+    monkeypatch.setattr(server_common, "pull_json_from_hf", lambda *a, **k: None)
+
+    def fail_if_called():
+        raise AssertionError("must not download without real remote meta")
+
+    server_common.refresh_model_if_hf_has_a_newer_one(
+        model_repo="papylove/alpaca-model", token="tok", meta_filename="meta.json", timeout_sec=5,
+        current_trained_at="2026-01-01T00:00:00+00:00", download_fn=fail_if_called, invalidate_fn=fail_if_called,
+    )
+
+
+def test_refresh_model_if_hf_has_a_newer_one_does_not_invalidate_if_download_fails(monkeypatch):
+    monkeypatch.setattr(server_common, "pull_json_from_hf", lambda *a, **k: {"trained_at": "2026-02-01T00:00:00+00:00"})
+
+    def fail_if_called():
+        raise AssertionError("must not invalidate the cache when the download itself failed")
+
+    server_common.refresh_model_if_hf_has_a_newer_one(
+        model_repo="papylove/alpaca-model", token="tok", meta_filename="meta.json", timeout_sec=5,
+        current_trained_at="2026-01-01T00:00:00+00:00", download_fn=lambda: False, invalidate_fn=fail_if_called,
+    )

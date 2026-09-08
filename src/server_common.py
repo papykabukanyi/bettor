@@ -15,7 +15,7 @@ import os
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +60,67 @@ def call_with_hard_timeout(fn, *, timeout_sec: float, on_timeout: Any = None) ->
         # still-hung) worker thread -- that would silently reintroduce the
         # exact freeze this function exists to prevent.
         executor.shutdown(wait=False)
+
+
+def pull_json_from_hf(repo_id: str, filename: str, *, token: str, timeout_sec: float, repo_type: str = "model") -> Any:
+    """Generic small-JSON-file pull from any HF repo -- the same shape
+    threads_post.py's own private _pull_json_from_hf has used for a while
+    (Threads dedup/token state), generalized here with a repo_id/token
+    parameter so callers reading/writing a MARKET-SPECIFIC repo (e.g. a
+    sweep/backfill/walkforward result pushed by a job that no longer runs
+    on this Render service at all) can reuse one implementation instead of
+    hand-rolling their own copy per market. None on any failure (missing
+    file, no token, network hiccup, a hang bounded by call_with_hard_timeout
+    above) -- never raises, same best-effort contract as every other
+    HF-touching function in this codebase."""
+    if not token:
+        return None
+
+    def _download() -> Any:
+        from huggingface_hub import hf_hub_download
+        path = hf_hub_download(repo_id=repo_id, filename=filename, repo_type=repo_type, token=token)
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+
+    try:
+        return call_with_hard_timeout(_download, timeout_sec=timeout_sec)
+    except Exception as exc:
+        logger.info("[server_common] no %s on HF repo %s yet (or fetch failed): %s", filename, repo_id, exc)
+        return None
+
+
+def push_json_to_hf(
+    repo_id: str, filename: str, data: Any, *, token: str, timeout_sec: float,
+    commit_message: str, repo_type: str = "model",
+) -> None:
+    """Generic small-JSON-file push to any HF repo -- see
+    pull_json_from_hf's own docstring for why this is a shared helper
+    rather than a per-market copy. Best-effort, never raises: a failed
+    push here means the next status-route read falls back to a stale/
+    cached value, not that the caller's own already-completed work is
+    lost."""
+    if not token:
+        return
+    import tempfile
+
+    def _upload() -> None:
+        from huggingface_hub import HfApi
+        api = HfApi(token=token)
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as tmp:
+            json.dump(data, tmp, indent=2, default=str)
+            tmp_path = tmp.name
+        try:
+            api.upload_file(
+                path_or_fileobj=tmp_path, path_in_repo=filename,
+                repo_id=repo_id, repo_type=repo_type, commit_message=commit_message,
+            )
+        finally:
+            os.unlink(tmp_path)
+
+    try:
+        call_with_hard_timeout(_upload, timeout_sec=timeout_sec)
+    except Exception as exc:
+        logger.warning("[server_common] %s push to HF repo %s failed: %s", filename, repo_id, exc)
 
 
 def load_json(path: Path, default: Any) -> Any:
@@ -176,6 +237,87 @@ def milestone_snapshot(state: dict[str, Any], *, current_balance: float, key: st
         "next_milestone_pct": next_tier,
         "pct_to_next_milestone": round(next_tier - total_return_pct * 100, 4) if next_tier is not None else None,
     }
+
+
+def maybe_schedule_hf_model_recheck(
+    *, refresh_state: dict[str, Any], lock: threading.Lock, recheck_interval_sec: float,
+    check_fn: Callable[[], None],
+) -> None:
+    """Fire-and-forget, rate-limited "is there a newer model on HF?" check.
+
+    Real, confirmed bug this exists to fix: every *_model.py's own
+    load_model() only ever re-downloads a model from HF when the local
+    model FILE is missing entirely -- never when a fresher one has been
+    uploaded while a local copy already exists. That was harmless while
+    training always happened IN-PROCESS (the trainer overwrites local
+    disk directly at the end of its own run, in the same process that
+    will next call load_model()) -- but once training runs somewhere else
+    entirely (a scheduled Hugging Face Job, not this Render process), the
+    live process would otherwise only ever pick up a new model on its
+    next full restart.
+
+    Callers: call this unconditionally on every load_model() invocation
+    that already has SOMETHING cached (see each *_model.py's own call
+    site) -- it self-rate-limits via `recheck_interval_sec`, so calling it
+    once per prediction (potentially many times per entry_scan cycle) is
+    cheap; real work only happens once per window. Never blocks the
+    caller: at most spawns ONE background daemon thread per window,
+    guarded by `lock` + `refresh_state["checking"]` so concurrent callers
+    (entry_scan evaluating several tickers back to back) can't spawn more
+    than one at a time. `check_fn` is expected to bound its own HF calls
+    (e.g. via call_with_hard_timeout/pull_json_from_hf above) -- this
+    function has no way to kill a hung thread once started, only to avoid
+    ever waiting on one itself."""
+    now = time.time()
+    with lock:
+        if refresh_state.get("checking") or (now - refresh_state.get("last_checked_at", 0.0)) < recheck_interval_sec:
+            return
+        refresh_state["checking"] = True
+        refresh_state["last_checked_at"] = now
+
+    def _runner() -> None:
+        try:
+            check_fn()
+        except Exception as exc:
+            logger.debug("[server_common] background HF model recheck failed: %s", exc)
+        finally:
+            with lock:
+                refresh_state["checking"] = False
+
+    threading.Thread(target=_runner, daemon=True, name="hf-model-recheck").start()
+
+
+def refresh_model_if_hf_has_a_newer_one(
+    *, model_repo: str, token: str, meta_filename: str, timeout_sec: float,
+    current_trained_at: Any, download_fn: Callable[[], bool], invalidate_fn: Callable[[], None],
+) -> None:
+    """Pulls just the small `meta_filename` JSON from `model_repo` (NOT the
+    full model artifact -- cheap enough to check often) and compares its
+    own `trained_at` against `current_trained_at` (whatever the caller's
+    in-process cache currently holds). Any DIFFERENT value is treated as
+    newer -- a real retrain always changes `trained_at`, and this
+    deliberately avoids assuming a comparable timestamp format so it works
+    unchanged regardless of how any given market formats it. Only on a
+    genuine difference does this call `download_fn()` (the caller's own
+    full model+meta HF download) and, if that succeeds, `invalidate_fn()`
+    (drop the caller's own in-process cache so the NEXT load_model() call
+    re-reads the freshly-downloaded file off local disk instead of serving
+    the stale in-memory one). A no-op -- including on any network failure
+    -- leaves the caller's current model completely untouched, meant to be
+    run from inside maybe_schedule_hf_model_recheck's own background
+    thread, never on a caller's hot path."""
+    remote_meta = pull_json_from_hf(model_repo, meta_filename, token=token, timeout_sec=timeout_sec)
+    if not remote_meta:
+        return
+    remote_trained_at = remote_meta.get("trained_at")
+    if remote_trained_at is None or remote_trained_at == current_trained_at:
+        return
+    if download_fn():
+        invalidate_fn()
+        logger.info(
+            "[server_common] picked up a newer model from HF repo %s (trained_at %s -> %s)",
+            model_repo, current_trained_at, remote_trained_at,
+        )
 
 
 def _summarize_job_result(result: Any) -> dict[str, Any]:

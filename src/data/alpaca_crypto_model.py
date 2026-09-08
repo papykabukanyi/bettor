@@ -12,6 +12,7 @@ import gc
 import json
 import logging
 import os
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -40,6 +41,17 @@ MIN_TRAIN_ROWS = int(os.getenv("ALPACA_CRYPTO_MIN_TRAIN_ROWS", "300") or "300")
 MODEL_CACHE_TTL_SEC = int(os.getenv("ALPACA_CRYPTO_MODEL_CACHE_TTL_SEC", "1800") or "1800")
 
 _model_cache: dict[str, Any] = {"model": None, "meta": None, "loaded_at": 0.0}
+
+# Bounded, background re-check that a NEWER model exists on HF than
+# whatever this process already has cached -- see
+# server_common.maybe_schedule_hf_model_recheck's own docstring (and
+# perps_model.py's identical wiring) for the real bug this fixes: this
+# cache never used to re-check HF once a local copy existed, only
+# re-downloading if the file was missing entirely. Matters once training
+# can run somewhere other than this same process.
+HF_MODEL_RECHECK_INTERVAL_SEC = int(os.getenv("ALPACA_CRYPTO_MODEL_HF_RECHECK_INTERVAL_SEC", "600") or "600")
+_hf_recheck_state: dict[str, Any] = {"last_checked_at": 0.0, "checking": False}
+_hf_recheck_lock = threading.Lock()
 
 # n_jobs=1 (not -1): same reasoning as every other model here -- avoid
 # multiplying peak memory via RandomForest's per-worker process forking,
@@ -406,10 +418,30 @@ def _download_model_from_hf() -> bool:
         return False
 
 
+def _schedule_hf_model_recheck() -> None:
+    from server_common import maybe_schedule_hf_model_recheck, refresh_model_if_hf_has_a_newer_one
+
+    def _check() -> None:
+        refresh_model_if_hf_has_a_newer_one(
+            model_repo=HF_ALPACA_CRYPTO_MODEL_REPO, token=HF_API_KEY, meta_filename="alpaca_crypto_model_meta.json",
+            timeout_sec=_MODEL_DOWNLOAD_HF_TIMEOUT_SEC,
+            current_trained_at=(_model_cache["meta"] or {}).get("trained_at"),
+            download_fn=_download_model_from_hf,
+            invalidate_fn=lambda: _model_cache.update(loaded_at=0.0),
+        )
+
+    maybe_schedule_hf_model_recheck(
+        refresh_state=_hf_recheck_state, lock=_hf_recheck_lock,
+        recheck_interval_sec=HF_MODEL_RECHECK_INTERVAL_SEC, check_fn=_check,
+    )
+
+
 def load_model() -> tuple[Any | None, dict[str, Any] | None]:
     now = time.time()
-    if _model_cache["model"] is not None and (now - _model_cache["loaded_at"]) < MODEL_CACHE_TTL_SEC:
-        return _model_cache["model"], _model_cache["meta"]
+    if _model_cache["model"] is not None:
+        _schedule_hf_model_recheck()
+        if (now - _model_cache["loaded_at"]) < MODEL_CACHE_TTL_SEC:
+            return _model_cache["model"], _model_cache["meta"]
 
     if not MODEL_PATH.exists() or not MODEL_META_PATH.exists():
         _download_model_from_hf()
