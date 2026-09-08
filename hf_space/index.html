@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bettor Bot Status</title>
+<style>
+  :root {
+    --bg: #0d0f14;
+    --card-bg: #171a22;
+    --border: #2a2f3d;
+    --grid: #1c202b;
+    --text: #e7ecf5;
+    --muted: #929aa8;
+    --green: #22c55e;
+    --red: #ef4444;
+    --accent: #60a5fa;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    padding: 24px 16px 64px;
+  }
+  header { max-width: 1100px; margin: 0 auto 24px; }
+  header h1 { font-size: 20px; margin: 0 0 4px; }
+  header p { color: var(--muted); margin: 0; font-size: 13px; }
+  #meta { color: var(--muted); font-size: 12px; margin-top: 10px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  #meta button {
+    background: var(--card-bg); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 4px 10px; font-size: 12px; cursor: pointer;
+  }
+  #meta button:hover { border-color: var(--accent); }
+  .grid {
+    max-width: 1100px; margin: 0 auto;
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px;
+  }
+  .card {
+    background: var(--card-bg); border: 1px solid var(--border); border-radius: 10px; padding: 16px;
+  }
+  .card h2 { margin: 0 0 2px; font-size: 15px; }
+  .card .subtitle { color: var(--muted); font-size: 11px; margin-bottom: 12px; }
+  .stats { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-bottom: 14px; }
+  .stat { background: var(--grid); border-radius: 8px; padding: 8px 10px; }
+  .stat .label { color: var(--muted); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.03em; }
+  .stat .value { font-size: 16px; font-weight: 600; margin-top: 2px; }
+  .pos { color: var(--green); }
+  .neg { color: var(--red); }
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  th, td { text-align: left; padding: 5px 6px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
+  th { color: var(--muted); font-weight: 500; font-size: 11px; }
+  .table-wrap { overflow-x: auto; }
+  .empty-note { color: var(--muted); font-size: 12.5px; padding: 8px 0; }
+  .error-note {
+    color: var(--red); font-size: 12.5px; background: rgba(239,68,68,0.08);
+    border: 1px solid rgba(239,68,68,0.25); border-radius: 8px; padding: 10px;
+  }
+  .badge { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 10.5px; font-weight: 600; }
+  .badge.long { background: rgba(34,197,94,0.15); color: var(--green); }
+  .badge.short { background: rgba(239,68,68,0.15); color: var(--red); }
+  .badge.strategy { background: rgba(96,165,250,0.15); color: var(--accent); }
+  footer { max-width: 1100px; margin: 24px auto 0; color: var(--muted); font-size: 11.5px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>📊 Bettor Bot Status</h1>
+  <p>Read-only view across the 4 trading bots -- positions, trade history, and realized P&amp;L, pulled straight from each bot's own durable-state file on Hugging Face.</p>
+  <div id="meta">
+    <span id="last-updated">Loading…</span>
+    <button id="refresh-btn" type="button">Refresh now</button>
+  </div>
+</header>
+
+<div class="grid" id="grid"></div>
+
+<footer>
+  Not financial advice -- personal automated trading bots, not a public investment service.
+  Data is pulled directly from each market's own public Hugging Face model repo; a market
+  shown as unavailable means its repo isn't currently public-readable.
+</footer>
+
+<script>
+// One entry per market -- repo_id must be a "model" repo, "file" is the
+// exact filename each bot's own _push_durable_state_to_hf() writes (see
+// each market's own *_strategy.py, _DURABLE_STATE_HF_FILENAME). A market
+// whose repo is private/gated simply renders as "data unavailable" below
+// -- see this space's own README for the perps-repo caveat.
+const HF_REPOS = {
+  perps:   { repo: "papylove/kalshi-perps-model",     file: "perps_durable_state.json",         label: "Kalshi Perps",   idField: "ticker",  hasSide: true  },
+  stocks:  { repo: "papylove/alpaca-model",            file: "alpaca_durable_state.json",        label: "Alpaca Stocks",  idField: "symbol",  hasSide: false },
+  crypto:  { repo: "papylove/alpaca-crypto-model",     file: "alpaca_crypto_durable_state.json", label: "Alpaca Crypto",  idField: "symbol",  hasSide: false },
+  options: { repo: "papylove/alpaca-options-model",    file: "alpaca_options_durable_state.json", label: "Alpaca Options", idField: "underlying_symbol", hasSide: false },
+};
+
+const AUTO_REFRESH_MS = 5 * 60 * 1000; // 5 min -- matches this dashboard's own "not real-time, periodically current" scope
+
+function fmtUsd(n) {
+  if (n === null || n === undefined || Number.isNaN(n)) return "—";
+  const sign = n > 0 ? "+" : "";
+  return `${sign}$${n.toFixed(2)}`;
+}
+
+function fmtPct(n) {
+  if (n === null || n === undefined || Number.isNaN(n)) return "—";
+  return `${(n * 100).toFixed(1)}%`;
+}
+
+// Same "closed, non-partial trades only" convention as
+// server_common.win_rate_stats -- a partial exit (perps' USE_PARTIAL_EXIT)
+// is real P&L but not a resolved win/loss outcome on its own.
+function winRateStats(tradeLog) {
+  const closed = (tradeLog || []).filter(t =>
+    t && t.realized_pnl_usd !== null && t.realized_pnl_usd !== undefined && (t.exit_kind || "full") === "full"
+  );
+  if (!closed.length) return { tradeCount: 0, winCount: 0, winRate: null };
+  const winCount = closed.filter(t => Number(t.realized_pnl_usd) > 0).length;
+  return { tradeCount: closed.length, winCount, winRate: winCount / closed.length };
+}
+
+function latestReferenceBalance(dailyRefBalance) {
+  const keys = Object.keys(dailyRefBalance || {}).sort();
+  if (!keys.length) return null;
+  return dailyRefBalance[keys[keys.length - 1]];
+}
+
+function totalRealizedPnl(byDate) {
+  const values = Object.values(byDate || {});
+  if (!values.length) return 0;
+  return values.reduce((a, b) => a + Number(b), 0);
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+function renderPositionsTable(positions, cfg) {
+  if (!positions || !positions.length) {
+    return `<div class="empty-note">No open positions right now.</div>`;
+  }
+  const rows = positions.map(p => {
+    const id = escapeHtml(p[cfg.idField] || p.symbol || p.ticker || "?");
+    let sideBadge = "";
+    if (cfg.hasSide && p.side) {
+      sideBadge = `<span class="badge ${p.side === "short" ? "short" : "long"}">${escapeHtml(p.side)}</span>`;
+    } else if (p.strategy) {
+      sideBadge = `<span class="badge strategy">${escapeHtml(p.strategy)}</span>`;
+    }
+    const entry = p.entry_price !== undefined ? Number(p.entry_price).toFixed(4) : "—";
+    const count = p.count !== undefined ? p.count : "—";
+    const tp = p.take_profit_price !== undefined ? Number(p.take_profit_price).toFixed(4) : "—";
+    const sl = p.stop_loss_price !== undefined ? Number(p.stop_loss_price).toFixed(4) : "—";
+    return `<tr><td>${id} ${sideBadge}</td><td>${count}</td><td>${entry}</td><td>${tp}</td><td>${sl}</td></tr>`;
+  }).join("");
+  return `
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Instrument</th><th>Qty</th><th>Entry</th><th>TP</th><th>SL</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+}
+
+function renderCard(key, cfg, state, error) {
+  const card = document.createElement("div");
+  card.className = "card";
+
+  if (error) {
+    card.innerHTML = `
+      <h2>${cfg.label}</h2>
+      <div class="subtitle">${escapeHtml(cfg.repo)}</div>
+      <div class="error-note">Data unavailable (${escapeHtml(error)}) -- this market's repo may be private/gated right now.</div>`;
+    return card;
+  }
+
+  const positions = state.positions || [];
+  const wr = winRateStats(state.trade_log);
+  const total = totalRealizedPnl(state.realized_pnl_by_date);
+  const refBalance = latestReferenceBalance(state.daily_reference_balance);
+
+  card.innerHTML = `
+    <h2>${cfg.label}</h2>
+    <div class="subtitle">${escapeHtml(cfg.repo)}</div>
+    <div class="stats">
+      <div class="stat">
+        <div class="label">Open positions</div>
+        <div class="value">${positions.length}</div>
+      </div>
+      <div class="stat">
+        <div class="label">Total realized P&amp;L</div>
+        <div class="value ${total >= 0 ? "pos" : "neg"}">${fmtUsd(total)}</div>
+      </div>
+      <div class="stat">
+        <div class="label">Closed trades</div>
+        <div class="value">${wr.tradeCount}</div>
+      </div>
+      <div class="stat">
+        <div class="label">Win rate</div>
+        <div class="value">${wr.winRate === null ? "—" : fmtPct(wr.winRate)}</div>
+      </div>
+    </div>
+    ${refBalance !== null ? `<div class="empty-note">Reference balance (last daily snapshot): $${Number(refBalance).toFixed(2)}</div>` : ""}
+    ${renderPositionsTable(positions, cfg)}
+  `;
+  return card;
+}
+
+async function fetchMarketState(cfg) {
+  const url = `https://huggingface.co/${cfg.repo}/resolve/main/${cfg.file}`;
+  const resp = await fetch(url, { cache: "no-store" });
+  if (!resp.ok) {
+    throw new Error(`HTTP ${resp.status}`);
+  }
+  return resp.json();
+}
+
+async function refreshAll() {
+  const grid = document.getElementById("grid");
+  grid.innerHTML = "";
+  const results = await Promise.all(
+    Object.entries(HF_REPOS).map(async ([key, cfg]) => {
+      try {
+        const state = await fetchMarketState(cfg);
+        return { key, cfg, state, error: null };
+      } catch (exc) {
+        return { key, cfg, state: null, error: exc.message || String(exc) };
+      }
+    })
+  );
+  for (const { key, cfg, state, error } of results) {
+    grid.appendChild(renderCard(key, cfg, state, error));
+  }
+  document.getElementById("last-updated").textContent =
+    "Last updated: " + new Date().toLocaleString();
+}
+
+document.getElementById("refresh-btn").addEventListener("click", refreshAll);
+refreshAll();
+setInterval(refreshAll, AUTO_REFRESH_MS);
+</script>
+
+</body>
+</html>
