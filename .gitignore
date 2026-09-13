@@ -83,9 +83,14 @@ celerybeat-schedule
 *.sage.py
 
 # Environments
-.env
-.env.local
-.env.production
+# Real, confirmed incident: the old explicit-names-only list below (.env/
+# .env.local/.env.production) missed ".env 2" -- a macOS duplicate-file
+# artifact carrying real Kalshi/HF/other API credentials -- which stayed
+# tracked in git and pushed to this repo's public GitHub remote for over
+# a month before being caught. A wildcard catches this file shape and any
+# other .env* variant regardless of exact name.
+.env*
+!.env.example
 .venv
 env/
 venv/
