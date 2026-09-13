@@ -235,6 +235,40 @@ def test_post_restart_notice_never_raises_on_api_failure(monkeypatch):
     assert threads_post.post_restart_notice() is False
 
 
+def test_post_restart_notice_skips_when_the_last_one_is_within_the_cooldown(monkeypatch):
+    """Real, confirmed incident this closes: with no cooldown at all, 6
+    near-identical "restarted" posts went out in ~22 minutes during a
+    single deployment's own iterative debugging (each restart re-firing
+    the once-per-boot call site)."""
+    monkeypatch.setattr(threads_post, "_pull_json_from_hf", lambda filename, *, timeout_sec: {"last_posted_at": time.time() - 60})
+
+    def fail_if_called(text):
+        raise AssertionError("must not post again within the cooldown window")
+
+    monkeypatch.setattr(threads_post.threads_client, "create_and_publish_post", fail_if_called)
+    assert threads_post.post_restart_notice() is False
+
+
+def test_post_restart_notice_posts_again_once_the_cooldown_has_elapsed(monkeypatch):
+    monkeypatch.setattr(threads_post, "_pull_json_from_hf", lambda filename, *, timeout_sec: {"last_posted_at": time.time() - threads_post._RESTART_NOTICE_COOLDOWN_SEC - 1})  # noqa: SLF001
+    posted = []
+    monkeypatch.setattr(threads_post.threads_client, "create_and_publish_post", lambda text: posted.append(text))
+    pushed = {}
+    monkeypatch.setattr(threads_post, "_push_json_to_hf", lambda filename, data, *, timeout_sec, commit_message: pushed.update(data))
+    assert threads_post.post_restart_notice() is True
+    assert posted == ["Money Bot has restarted!"]
+    assert "last_posted_at" in pushed
+
+
+def test_post_restart_notice_posts_on_the_very_first_boot_with_no_prior_record(monkeypatch):
+    monkeypatch.setattr(threads_post, "_pull_json_from_hf", lambda filename, *, timeout_sec: None)
+    posted = []
+    monkeypatch.setattr(threads_post.threads_client, "create_and_publish_post", lambda text: posted.append(text))
+    monkeypatch.setattr(threads_post, "_push_json_to_hf", lambda *a, **k: None)
+    assert threads_post.post_restart_notice() is True
+    assert posted == ["Money Bot has restarted!"]
+
+
 def test_hourly_status_reports_flat_with_no_open_positions(monkeypatch):
     posted = []
     monkeypatch.setattr(threads_post.threads_client, "create_and_publish_post", lambda text: posted.append(text))
@@ -373,7 +407,7 @@ def test_post_trade_entry_chart_skips_without_a_known_public_url(monkeypatch, tm
     from data import chart_snapshot
 
     monkeypatch.setattr(chart_snapshot, "CHARTS_DIR", tmp_path / "charts")
-    monkeypatch.delenv("RENDER_EXTERNAL_URL", raising=False)
+    monkeypatch.delenv("PUBLIC_BASE_URL", raising=False)
     result = threads_post.post_trade_entry_chart(
         ticker="AAPL", market="stocks", candles=_candles(), entry_price=100.0,
         take_profit_price=101.0, stop_loss_price=99.0, dry_run=False,
@@ -385,7 +419,7 @@ def test_post_trade_entry_chart_posts_the_image_when_everything_lines_up(monkeyp
     from data import chart_snapshot
 
     monkeypatch.setattr(chart_snapshot, "CHARTS_DIR", tmp_path / "charts")
-    monkeypatch.setenv("RENDER_EXTERNAL_URL", "https://bettor-schwab.onrender.com")
+    monkeypatch.setenv("PUBLIC_BASE_URL", "https://example-space.hf.space")
 
     captured = {}
     monkeypatch.setattr(
@@ -398,7 +432,7 @@ def test_post_trade_entry_chart_posts_the_image_when_everything_lines_up(monkeyp
         take_profit_price=101.0, stop_loss_price=99.0, entry_index=10, side="long", dry_run=False,
     )
     assert result is True
-    assert captured["image_url"].startswith("https://bettor-schwab.onrender.com/chart/")
+    assert captured["image_url"].startswith("https://example-space.hf.space/chart/")
     assert "Alpaca Stocks" in captured["text"]
     assert "AAPL" in captured["text"]
     assert "#StockMarket" in captured["text"]
@@ -408,7 +442,7 @@ def test_post_trade_entry_chart_never_raises_on_api_failure(monkeypatch, tmp_pat
     from data import chart_snapshot
 
     monkeypatch.setattr(chart_snapshot, "CHARTS_DIR", tmp_path / "charts")
-    monkeypatch.setenv("RENDER_EXTERNAL_URL", "https://bettor-schwab.onrender.com")
+    monkeypatch.setenv("PUBLIC_BASE_URL", "https://example-space.hf.space")
 
     def raise_error(image_url, text=""):
         raise RuntimeError("simulated Threads API failure")
@@ -434,7 +468,7 @@ def test_post_trade_exit_chart_posts_the_image_with_win_loss_in_the_caption(monk
     from data import chart_snapshot
 
     monkeypatch.setattr(chart_snapshot, "CHARTS_DIR", tmp_path / "charts")
-    monkeypatch.setenv("RENDER_EXTERNAL_URL", "https://bettor-schwab.onrender.com")
+    monkeypatch.setenv("PUBLIC_BASE_URL", "https://example-space.hf.space")
 
     captured = {}
     monkeypatch.setattr(
@@ -455,7 +489,7 @@ def test_post_trade_exit_chart_reports_loss_in_the_caption(monkeypatch, tmp_path
     from data import chart_snapshot
 
     monkeypatch.setattr(chart_snapshot, "CHARTS_DIR", tmp_path / "charts")
-    monkeypatch.setenv("RENDER_EXTERNAL_URL", "https://bettor-schwab.onrender.com")
+    monkeypatch.setenv("PUBLIC_BASE_URL", "https://example-space.hf.space")
 
     captured = {}
     monkeypatch.setattr(
@@ -479,7 +513,7 @@ def test_post_trade_exit_chart_supports_no_price_levels_for_options(monkeypatch,
     from data import chart_snapshot
 
     monkeypatch.setattr(chart_snapshot, "CHARTS_DIR", tmp_path / "charts")
-    monkeypatch.setenv("RENDER_EXTERNAL_URL", "https://bettor-schwab.onrender.com")
+    monkeypatch.setenv("PUBLIC_BASE_URL", "https://example-space.hf.space")
     monkeypatch.setattr(threads_post.threads_client, "create_and_publish_image_post", lambda url, text="": "post-1")
 
     result = threads_post.post_trade_exit_chart(
@@ -493,7 +527,7 @@ def test_post_trade_exit_chart_never_raises_on_api_failure(monkeypatch, tmp_path
     from data import chart_snapshot
 
     monkeypatch.setattr(chart_snapshot, "CHARTS_DIR", tmp_path / "charts")
-    monkeypatch.setenv("RENDER_EXTERNAL_URL", "https://bettor-schwab.onrender.com")
+    monkeypatch.setenv("PUBLIC_BASE_URL", "https://example-space.hf.space")
 
     def raise_error(image_url, text=""):
         raise RuntimeError("simulated Threads API failure")
@@ -528,7 +562,7 @@ def test_post_sentiment_snapshot_skips_without_a_known_public_url(monkeypatch, t
     from data import chart_snapshot
 
     monkeypatch.setattr(chart_snapshot, "CHARTS_DIR", tmp_path / "charts")
-    monkeypatch.delenv("RENDER_EXTERNAL_URL", raising=False)
+    monkeypatch.delenv("PUBLIC_BASE_URL", raising=False)
     result = threads_post.post_sentiment_snapshot(market="stocks", ticker_sentiments=_sentiment_rows())
     assert result is False
 
@@ -537,7 +571,7 @@ def test_post_sentiment_snapshot_posts_the_image_when_everything_lines_up(monkey
     from data import chart_snapshot
 
     monkeypatch.setattr(chart_snapshot, "CHARTS_DIR", tmp_path / "charts")
-    monkeypatch.setenv("RENDER_EXTERNAL_URL", "https://bettor-alpaca-crypto.onrender.com")
+    monkeypatch.setenv("PUBLIC_BASE_URL", "https://example-crypto-space.hf.space")
 
     captured = {}
     monkeypatch.setattr(
@@ -547,7 +581,7 @@ def test_post_sentiment_snapshot_posts_the_image_when_everything_lines_up(monkey
 
     result = threads_post.post_sentiment_snapshot(market="crypto", ticker_sentiments=_sentiment_rows())
     assert result is True
-    assert captured["image_url"].startswith("https://bettor-alpaca-crypto.onrender.com/chart/")
+    assert captured["image_url"].startswith("https://example-crypto-space.hf.space/chart/")
     assert "Alpaca Crypto" in captured["text"]
     assert "#Bitcoin" in captured["text"]
     # Real feedback: this caption was missing the same follower-growth
@@ -566,7 +600,7 @@ def test_post_sentiment_snapshot_never_raises_on_api_failure(monkeypatch, tmp_pa
     from data import chart_snapshot
 
     monkeypatch.setattr(chart_snapshot, "CHARTS_DIR", tmp_path / "charts")
-    monkeypatch.setenv("RENDER_EXTERNAL_URL", "https://bettor-alpaca-crypto.onrender.com")
+    monkeypatch.setenv("PUBLIC_BASE_URL", "https://example-crypto-space.hf.space")
 
     def raise_error(image_url, text=""):
         raise RuntimeError("simulated Threads API failure")
@@ -598,7 +632,7 @@ def _mock_charts(monkeypatch, tmp_path):
     from data import chart_snapshot
 
     monkeypatch.setattr(chart_snapshot, "CHARTS_DIR", tmp_path / "charts")
-    monkeypatch.setenv("RENDER_EXTERNAL_URL", "https://bettor-schwab.onrender.com")
+    monkeypatch.setenv("PUBLIC_BASE_URL", "https://example-space.hf.space")
 
 
 def test_trending_news_posts_exactly_one_card_with_a_hashtags_only_caption(monkeypatch, tmp_path):
@@ -630,7 +664,7 @@ def test_trending_news_posts_exactly_one_card_with_a_hashtags_only_caption(monke
     threads_post.post_trending_news(_story(), market="crypto")  # default _story() carries 1 secondary headline
     assert len(posted) == 1
     image_url, text = posted[0]
-    assert image_url.startswith("https://bettor-schwab.onrender.com/chart/")
+    assert image_url.startswith("https://example-space.hf.space/chart/")
     assert "Bitcoin surges past resistance" not in text  # lives on the card now, not the caption
     assert "ETF inflows accelerate" not in text  # the secondary headline is never rendered anywhere in this post
     assert "#Crypto" in text
@@ -727,7 +761,7 @@ def test_trending_news_labels_perps_market(monkeypatch, tmp_path):
 
 
 def test_trending_news_falls_back_to_text_when_the_card_cant_be_generated(monkeypatch):
-    """Card rendering failed (or no RENDER_EXTERNAL_URL to host it, e.g.
+    """Card rendering failed (or no PUBLIC_BASE_URL to host it, e.g.
     running locally) -- a real trending post (text-only) still beats
     posting nothing at all."""
     from data import chart_snapshot
@@ -1262,7 +1296,7 @@ def test_post_trending_news_renders_commentary_as_an_image_card_when_possible(mo
 
 
 def test_post_trending_news_falls_back_to_text_when_the_commentary_card_cannot_be_generated(monkeypatch):
-    """No RENDER_EXTERNAL_URL / rendering failure -- still posts the real
+    """No PUBLIC_BASE_URL / rendering failure -- still posts the real
     commentary as plain text rather than giving up entirely."""
     from data import threads_persona
     threads_post._record_posted_story("crypto", "Bitcoin surges past resistance", source="cointelegraph")  # noqa: SLF001

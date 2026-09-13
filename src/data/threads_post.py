@@ -696,14 +696,43 @@ def post_partial_exit(
         return False
 
 
+_RESTART_NOTICE_HF_FILENAME = "threads_restart_notice.json"
+_RESTART_NOTICE_COOLDOWN_SEC = float(os.getenv("THREADS_RESTART_NOTICE_COOLDOWN_MINUTES", "15") or "15") * 60
+_RESTART_NOTICE_HF_TIMEOUT_SEC = int(os.getenv("THREADS_RESTART_NOTICE_HF_TIMEOUT_SEC", "10") or "10")
+
+
 def post_restart_notice(message: str = "Money Bot has restarted!") -> bool:
     """Posts a short note once per process boot -- see app_kalshi.py's
     `_ensure_background_jobs_started` for the once-per-boot call site. Same
-    best-effort, never-raise contract as post_trade_entry()."""
+    best-effort, never-raise contract as post_trade_entry().
+
+    Real, confirmed incident this closes: this had NO cooldown at all --
+    fine under the original assumption (a genuine Render restart is a
+    rare event: a deploy, or a crash-recovery), but a real problem the
+    moment restarts get frequent for any other reason (repeated manual
+    fixes during a live deployment, or -- the actual future-proofing this
+    guards against -- a genuine crash-loop bug repeatedly restarting the
+    same process): 6 near-identical "restarted" posts went out in ~22
+    minutes during this exact migration's own iterative debugging.
+    HF-persisted (not just an in-process flag) specifically so the
+    cooldown survives the very restarts it's meant to dampen."""
     if not THREADS_POST_ENABLED:
+        return False
+    last = _pull_json_from_hf(_RESTART_NOTICE_HF_FILENAME, timeout_sec=_RESTART_NOTICE_HF_TIMEOUT_SEC) or {}
+    last_posted_at = float(last.get("last_posted_at") or 0)
+    now = time.time()
+    if (now - last_posted_at) < _RESTART_NOTICE_COOLDOWN_SEC:
+        logger.info(
+            "[threads_post] skipping restart notice -- last one was %.1f min ago (cooldown %.0f min)",
+            (now - last_posted_at) / 60, _RESTART_NOTICE_COOLDOWN_SEC / 60,
+        )
         return False
     try:
         threads_client.create_and_publish_post(message[:_THREADS_POST_MAX_CHARS])
+        _push_json_to_hf(
+            _RESTART_NOTICE_HF_FILENAME, {"last_posted_at": now}, timeout_sec=_RESTART_NOTICE_HF_TIMEOUT_SEC,
+            commit_message="update restart-notice cooldown",
+        )
         return True
     except Exception as exc:
         logger.warning("[threads_post] failed to post restart notice: %s", exc)
