@@ -1,0 +1,50 @@
+# Real, confirmed incident: the first local build of combined_app.py's
+# own Dockerfile, before this file existed, copied the repo's real .env
+# (live Kalshi/Alpaca/HF/Threads credentials, used for local dev) straight
+# into the image via `COPY . .` -- confirmed live when the resulting
+# container logged a real Kalshi account balance despite every credential
+# env var being explicitly left empty in `docker run`. A container image
+# must never carry secrets baked into a layer regardless of where it ends
+# up (a registry, a Space, docker history) -- every real secret this app
+# needs belongs ONLY in the Space's own runtime secrets/variables, never
+# in the image itself. Mirrors .gitignore's own env-file exclusions.
+# Wildcard, not just ".env"/".env.*" -- a real incident (see .gitignore's
+# identical comment) showed a plain-suffix list misses shapes like
+# ".env 2" (a macOS duplicate-file artifact with a space, not a dot).
+.env*
+!.env.example
+
+.git/
+.github/
+
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+venv/
+.venv/
+env/
+ENV/
+
+# Local runtime state (collected data, trained models, job locks/history,
+# position state) -- same "regenerated per-deployment, never shipped"
+# reasoning as .gitignore's own /data/ exclusion. The Dockerfile creates
+# an empty one itself.
+/data/
+models/*.pkl
+models/*.joblib
+
+.kalshi/
+.wrangler/
+
+# Local editor/OS cruft
+.vscode/
+.idea/
+.DS_Store
+.history/
+
+# Dev-only tooling, not needed at runtime
+requirements-dev.txt
+.claude/

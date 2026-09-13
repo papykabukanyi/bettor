@@ -142,7 +142,12 @@ logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 # is completely unaffected.
 logging.getLogger("huggingface_hub.hf_api").setLevel(logging.ERROR)
 logger = logging.getLogger(__name__)
-app = Flask("alpaca_crypto_server", template_folder="templates")
+# Absolute paths -- see src/alpaca_server.py's identical fix for the full
+# rationale (real, confirmed bug found while building combined_app.py: a
+# relative template_folder/static_folder here only worked by coincidence
+# of Render's own `--chdir src` startCommand, not anything this app's
+# code guaranteed itself).
+app = Flask("alpaca_crypto_server", template_folder=str(SRC_DIR / "templates"), static_folder=str(SRC_DIR / "static"))
 # See app_kalshi.py's identical line for the full rationale -- Render
 # proxies every request through its own internal network, so without this
 # request.remote_addr is Render's proxy IP, not the real visitor.
@@ -545,15 +550,34 @@ def _ensure_background_jobs_started() -> None:
                     seconds=ALPACA_CRYPTO_STARTUP_GRACE_SECONDS + ALPACA_CRYPTO_FAST_CHECK_SECONDS // 2,
                 ),
             )
-            # Threads content jobs (hourly_status/trending_news/sentiment_snapshot)
-            # used to run here too, on their own staggered in-process
-            # APScheduler schedule -- moved to external cron-job.org
-            # triggers instead (see api_alpaca_crypto_threads_trending_news
-            # and its 2 siblings below) to cut non-trading-critical job/
-            # executor overhead out of this process entirely, leaving the
-            # scheduler focused on the jobs that actually need to live
-            # here (fast_check, entry_scan, data_collect, train). See
-            # docs/CRON_JOB_MIGRATION.md.
+            # Threads content jobs (hourly_status/trending_news/sentiment_snapshot):
+            # briefly moved to external cron-job.org triggers (see
+            # api_alpaca_crypto_threads_trending_news and its 2 siblings
+            # below, kept as manual/fallback triggers) specifically to cut
+            # non-trading-critical job/executor overhead out of Render's
+            # own metered-cost process. Restored here as in-process jobs
+            # now that this runs on a flat-rate Hugging Face Space instead
+            # -- see app_kalshi.py's identical restoration comment for the
+            # full reasoning. Staggered next_run_time -- real, confirmed
+            # fix: with no offset, hourly_status/sentiment_snapshot (both
+            # 60min) always land on the exact same tick, trending_news
+            # (30min) coincides every other cycle, and data_collect (a
+            # multiple of 15) piles on too.
+            now_utc = dt.datetime.now(dt.timezone.utc)
+            scheduler.add_job(
+                _run_alpaca_crypto_threads_trending_news, "interval", minutes=30,
+                id="alpaca_crypto_threads_trending_news", replace_existing=True, executor="fastcheck",
+                next_run_time=now_utc + dt.timedelta(minutes=5),
+            )
+            scheduler.add_job(
+                _run_alpaca_crypto_threads_sentiment_snapshot, "interval", minutes=60,
+                id="alpaca_crypto_threads_sentiment_snapshot", replace_existing=True, executor="fastcheck",
+                next_run_time=now_utc + dt.timedelta(minutes=10),
+            )
+            scheduler.add_job(
+                _run_alpaca_crypto_threads_hourly_status, "interval", hours=1,
+                id="alpaca_crypto_threads_hourly_status", replace_existing=True, executor="fastcheck",
+            )
             scheduler.start()
             logger.info(
                 "Alpaca crypto scheduler started: fast exit check every %ds, entry scan every %d min "

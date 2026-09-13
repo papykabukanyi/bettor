@@ -677,17 +677,42 @@ def _ensure_background_jobs_started() -> None:
                 _run_perps_trade_analysis, "cron", hour=PERPS_TRADE_ANALYSIS_HOUR_ET, minute=PERPS_TRADE_ANALYSIS_MINUTE_ET,
                 id="perps_trade_analysis", replace_existing=True,
             )
-            # Threads content jobs (hourly_status/trending_news/sentiment_snapshot)
-            # used to run here too, on their own staggered in-process
-            # APScheduler schedule -- moved to external cron-job.org
-            # triggers instead (see api_perps_threads_trending_news and its
-            # 2 siblings below) to cut non-trading-critical job/executor
-            # overhead out of this process entirely, leaving the scheduler
-            # focused on the jobs that actually need to live here
-            # (fast_check, entry_scan, data_collect, train). The staggering/
-            # dedicated-executor care that used to live in this comment is
-            # cron-job.org's own concern now (stagger each job's schedule
-            # in its own console entry) -- see docs/CRON_JOB_MIGRATION.md.
+            # Threads content jobs (hourly_status/trending_news/sentiment_snapshot):
+            # briefly moved to external cron-job.org triggers (see
+            # api_perps_threads_trending_news and its 2 siblings below,
+            # kept as manual/fallback triggers) specifically to cut
+            # non-trading-critical job/executor overhead out of Render's
+            # own metered-cost process. Restored here as in-process jobs
+            # now that this runs on a flat-rate Hugging Face Space instead
+            # -- there's no more per-resource cost benefit to routing
+            # through an external scheduler, and running everything in
+            # this one already-24/7 process is simpler than coordinating
+            # an external trigger service. executor="fastcheck" (like
+            # fast_check/entry_scan below): real, confirmed production
+            # incident this session -- with only fast_check isolated from
+            # "default", a slow train/data_collect run could block these
+            # for minutes at a stretch; all of these are themselves fast,
+            # bounded operations sharing this pool safely with fast_check
+            # the same way. Staggered next_run_time so hourly_status (1h),
+            # sentiment_snapshot (60min), and trending_news (30min) don't
+            # all land on the exact same tick (confirmed live incident:
+            # that cluster running back-to-back once bumped into
+            # fast_check's own cadence and caused a one-cycle skip).
+            now_utc = dt.datetime.now(dt.timezone.utc)
+            scheduler.add_job(
+                _run_perps_threads_hourly_status, "interval", hours=1,
+                id="perps_threads_hourly_status", replace_existing=True, executor="fastcheck",
+            )
+            scheduler.add_job(
+                _run_perps_threads_trending_news, "interval", minutes=30,
+                id="perps_threads_trending_news", replace_existing=True, executor="fastcheck",
+                next_run_time=now_utc + dt.timedelta(minutes=5),
+            )
+            scheduler.add_job(
+                _run_perps_threads_sentiment_snapshot, "interval", minutes=60,
+                id="perps_threads_sentiment_snapshot", replace_existing=True, executor="fastcheck",
+                next_run_time=now_utc + dt.timedelta(minutes=10),
+            )
             if ENABLE_PERPS_SCHEDULER:
                 scheduler.add_job(
                     _run_perps_fast_check, "interval", seconds=PERPS_FAST_CHECK_SECONDS,

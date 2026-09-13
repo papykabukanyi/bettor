@@ -1,3 +1,14 @@
+---
+title: Bettor Trading Bots
+emoji: 📈
+colorFrom: blue
+colorTo: indigo
+sdk: docker
+app_port: 7860
+pinned: false
+short_description: Live perps + stocks + crypto + options trading bots
+---
+
 # Kalshi Perps Bot
 
 A scalping bot for Kalshi's crypto perpetual futures (perps): BTC, ETH, SOL,

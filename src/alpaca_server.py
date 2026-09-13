@@ -133,7 +133,21 @@ logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 # is completely unaffected.
 logging.getLogger("huggingface_hub.hf_api").setLevel(logging.ERROR)
 logger = logging.getLogger(__name__)
-app = Flask("alpaca_stocks_server", template_folder="templates")
+# Absolute paths (not the bare "templates" string this used to pass) --
+# real, confirmed bug found while building combined_app.py (see that
+# file's own docstring): Flask resolves a relative template_folder/
+# static_folder against get_root_path("alpaca_stocks_server") -- since
+# that string isn't this module's real dotted import name, Flask can't
+# find it in sys.modules and silently falls back to os.getcwd(). That
+# happened to still resolve correctly on Render only because its own
+# startCommand runs `gunicorn --chdir src alpaca_server:app`, making cwd
+# literally == this file's own directory -- a fragile, easy-to-break
+# coincidence, not something this app's own code ever guaranteed. Any
+# other way of importing this module (e.g. combined_app.py's
+# DispatcherMiddleware composition, or just running it from a different
+# cwd) would silently 404 every template and static asset. Mirrors
+# app_kalshi.py's own already-correct absolute-path pattern.
+app = Flask("alpaca_stocks_server", template_folder=str(SRC_DIR / "templates"), static_folder=str(SRC_DIR / "static"))
 # See app_kalshi.py's identical line for the full rationale -- Render
 # proxies every request through its own internal network, so without this
 # request.remote_addr is Render's proxy IP, not the real visitor.
@@ -625,15 +639,33 @@ def _ensure_background_jobs_started() -> None:
                 id="alpaca_entry_scan", replace_existing=True, executor="fastcheck",
                 next_run_time=dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=ALPACA_STARTUP_GRACE_SECONDS),
             )
-            # Threads content jobs (hourly_status/trending_news/sentiment_snapshot)
-            # used to run here too, on their own staggered in-process
-            # APScheduler schedule -- moved to external cron-job.org
-            # triggers instead (see api_alpaca_threads_trending_news and
-            # its 2 siblings below) to cut non-trading-critical job/
-            # executor overhead out of this process entirely, leaving the
-            # scheduler focused on the jobs that actually need to live
-            # here (fast_check, entry_scan, data_collect, train). See
-            # docs/CRON_JOB_MIGRATION.md.
+            # Threads content jobs (hourly_status/trending_news/sentiment_snapshot):
+            # briefly moved to external cron-job.org triggers (see
+            # api_alpaca_threads_trending_news and its 2 siblings below,
+            # kept as manual/fallback triggers) specifically to cut
+            # non-trading-critical job/executor overhead out of Render's
+            # own metered-cost process. Restored here as in-process jobs
+            # now that this runs on a flat-rate Hugging Face Space instead
+            # -- see app_kalshi.py's identical restoration comment for the
+            # full reasoning. Staggered next_run_time -- real, confirmed
+            # fix: with no offset these all land on the same tick
+            # periodically, occasionally bumping into fast_check's own
+            # cadence.
+            now_utc = dt.datetime.now(dt.timezone.utc)
+            scheduler.add_job(
+                _run_alpaca_threads_trending_news, "interval", minutes=30,
+                id="alpaca_threads_trending_news", replace_existing=True, executor="fastcheck",
+                next_run_time=now_utc + dt.timedelta(minutes=5),
+            )
+            scheduler.add_job(
+                _run_alpaca_threads_sentiment_snapshot, "interval", minutes=60,
+                id="alpaca_threads_sentiment_snapshot", replace_existing=True, executor="fastcheck",
+                next_run_time=now_utc + dt.timedelta(minutes=10),
+            )
+            scheduler.add_job(
+                _run_alpaca_threads_hourly_status, "interval", hours=1,
+                id="alpaca_threads_hourly_status", replace_existing=True, executor="fastcheck",
+            )
             scheduler.start()
             logger.info(
                 "Alpaca scheduler started: fast exit check every %ds, entry scan every %d min (first run in %ds), "
