@@ -706,12 +706,15 @@ MIN_ENTRY_VOLUME_Z = _env_float("PERPS_MIN_ENTRY_VOLUME_Z", 1.0)
 # safety check against entering on a stale or erroneous Kalshi tick.
 MAX_ENTRY_PRICE_DEVIATION_PCT = _env_float("PERPS_MAX_ENTRY_PRICE_DEVIATION_PCT", 0.02)
 
-# Default OFF: the strategy has only ever gone long in production. Shorting
-# is a materially different risk shape (a short loses on a RISING price
-# instead of a falling one) that has never run live on this account, so it
-# gets its own explicit opt-in rather than turning on the moment this code
-# ships -- same "start conservative, prove it out, then enable" posture as
-# LIVE_TRADING_ENABLED itself. When on, entries can go either direction:
+# Defaults OFF at the code level (conservative-by-default, same posture as
+# LIVE_TRADING_ENABLED itself) -- but graduated to ON for the actual
+# deployed account: shorting is a materially different risk shape (a short
+# loses on a RISING price instead of a falling one), so it needed its own
+# explicit opt-in rather than turning on the moment this code shipped, and
+# was only enabled after two backtest runs (on the fixed, simulation-clock-
+# corrected engine, two different archive sizes) both showed bidirectional
+# beating long-only by a wide margin (+37.9% vs +14.2% return on the most
+# recent run) at a comparable win rate. When on, entries can go either direction:
 # LONG on a small dip + model predicting up, SHORT on a small rally + model
 # predicting down (mirrored technical + model gate, see decide_entry_technical
 # and evaluate_candidate). Every take-profit/stop-loss/quick-profit/max-hold
@@ -1072,9 +1075,11 @@ def decide_entry_technical(row: dict[str, Any], side: str = "long") -> tuple[boo
     current_price, short_ma, trend_pct (as returned by
     perps_data.latest_feature_row / perps_model.predict_direction).
 
-    `side="long"` (default, and the only mode ever run live to date): skip
-    entries in a strong downtrend, then look for price sitting a bit BELOW
-    the short moving average (a small dip -- contrarian, expecting a bounce).
+    `side="long"` (default): skip entries in a strong downtrend, then look
+    for price sitting a bit BELOW the short moving average (a small dip --
+    contrarian, expecting a bounce). Shorts are also live now
+    (PERPS_ENABLE_SHORTS, backtested bidirectional beating long-only by a
+    wide margin) -- see `side="short"` below.
 
     `side="short"`: the mirror image -- skip entries in a strong uptrend,
     then look for price sitting a bit ABOVE the short moving average (a
