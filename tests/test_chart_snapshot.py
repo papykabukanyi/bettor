@@ -224,7 +224,7 @@ def test_generate_candlestick_chart_empty_indicators_dict_adds_no_panel():
 
 
 def test_public_url_for_returns_none_without_render_external_url(monkeypatch):
-    monkeypatch.delenv("RENDER_EXTERNAL_URL", raising=False)
+    monkeypatch.delenv("PUBLIC_BASE_URL", raising=False)
     path = chart_snapshot.generate_candlestick_chart(
         ticker="AAPL", market="stocks", candles=_candles(), entry_price=100.0,
         take_profit_price=101.0, stop_loss_price=99.0,
@@ -233,13 +233,13 @@ def test_public_url_for_returns_none_without_render_external_url(monkeypatch):
 
 
 def test_public_url_for_builds_the_full_public_url(monkeypatch):
-    monkeypatch.setenv("RENDER_EXTERNAL_URL", "https://bettor-schwab.onrender.com")
+    monkeypatch.setenv("PUBLIC_BASE_URL", "https://example-space.hf.space")
     path = chart_snapshot.generate_candlestick_chart(
         ticker="AAPL", market="stocks", candles=_candles(), entry_price=100.0,
         take_profit_price=101.0, stop_loss_price=99.0,
     )
     url = chart_snapshot.public_url_for(path)
-    assert url == f"https://bettor-schwab.onrender.com/chart/{path.name}"
+    assert url == f"https://example-space.hf.space/chart/{path.name}"
 
 
 def test_hf_image_prefix_strips_the_trailing_timestamp():
@@ -301,7 +301,7 @@ def _fake_hf_images(monkeypatch):
 
 
 def test_public_url_for_uploads_to_hf_when_render_external_url_is_unset(monkeypatch, _fake_hf_images):
-    monkeypatch.delenv("RENDER_EXTERNAL_URL", raising=False)
+    monkeypatch.delenv("PUBLIC_BASE_URL", raising=False)
     path = chart_snapshot.generate_candlestick_chart(
         ticker="AAPL", market="stocks", candles=_candles(), entry_price=100.0,
         take_profit_price=101.0, stop_loss_price=99.0,
@@ -316,13 +316,13 @@ def test_public_url_for_prefers_render_external_url_over_hf_when_both_are_set(mo
     hourly status, sentiment snapshots posted from Render itself) must
     keep behaving exactly as before -- HF_IMAGES_REPO existing must never
     change what they do."""
-    monkeypatch.setenv("RENDER_EXTERNAL_URL", "https://bettor-schwab.onrender.com")
+    monkeypatch.setenv("PUBLIC_BASE_URL", "https://example-space.hf.space")
     path = chart_snapshot.generate_candlestick_chart(
         ticker="AAPL", market="stocks", candles=_candles(), entry_price=100.0,
         take_profit_price=101.0, stop_loss_price=99.0,
     )
     url = chart_snapshot.public_url_for(path)
-    assert url == f"https://bettor-schwab.onrender.com/chart/{path.name}"
+    assert url == f"https://example-space.hf.space/chart/{path.name}"
     assert _fake_hf_images.files == {}  # never even attempted the HF path
 
 

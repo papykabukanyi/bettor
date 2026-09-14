@@ -1004,20 +1004,24 @@ def _upload_chart_to_hf(chart_path: Path) -> str | None:
 def public_url_for(chart_path: Path) -> str | None:
     """Builds the publicly-fetchable URL Threads' own servers need to
     actually retrieve the image (Threads' media-container API takes an
-    image_url it fetches itself, not a raw upload) -- Render auto-injects
-    RENDER_EXTERNAL_URL for every web service, so this needs no per-service
-    config there. Checked FIRST and unconditionally: every Render-hosted
-    caller (trade entry/exit charts, hourly status, sentiment snapshots
-    posted from Render itself) must keep behaving exactly as before, so
-    this branch's behavior is untouched by HF_IMAGES_REPO's existence.
+    image_url it fetches itself, not a raw upload). PUBLIC_BASE_URL is a
+    generic, host-agnostic name (was RENDER_EXTERNAL_URL, back when
+    Render auto-injected it for every web service -- this codebase now
+    runs on a Hugging Face Space instead, which has no equivalent
+    auto-injected variable, so this is set manually as a Space variable
+    pointing at the Space's own public https://<user>-<space>.hf.space
+    URL). Checked FIRST and unconditionally: every caller (trade entry/
+    exit charts, hourly status, sentiment snapshots) keeps behaving
+    exactly the same regardless of which host set it, so this branch's
+    behavior is untouched by HF_IMAGES_REPO's existence.
 
-    Only when RENDER_EXTERNAL_URL is unset (e.g. a script running as a
+    Only when PUBLIC_BASE_URL is unset (e.g. a script running as a
     scheduled Hugging Face Job, which has no public HTTP route of its own
     to serve a local file from) does this fall through to uploading the
     image to HF_IMAGES_REPO instead (see _upload_chart_to_hf). Returns
     None (skip posting) if neither is configured, e.g. running locally
     with no env set at all."""
-    base_url = os.getenv("RENDER_EXTERNAL_URL", "")
+    base_url = os.getenv("PUBLIC_BASE_URL", "")
     if base_url:
         return f"{base_url.rstrip('/')}/chart/{chart_path.name}"
     return _upload_chart_to_hf(chart_path)

@@ -1,5 +1,17 @@
 # Threads content jobs: moving trending-news + sentiment-snapshot to Hugging Face Jobs
 
+> **Superseded, never fully executed.** The groundwork here
+> (`scripts/threads_content_job.py`, `chart_snapshot.py`'s HF-images
+> fallback) is still real and still works, but the actual cutover
+> described below never happened -- once all 4 services moved onto one
+> flat-rate Hugging Face Docker Space (see `docs/RENDER_TO_HF_MIGRATION.md`),
+> the cost motivation for running these as SEPARATE scheduled HF Jobs
+> went away too: they now run as this same process's own in-process
+> APScheduler jobs instead (see `docs/CRON_JOB_MIGRATION.md`'s own
+> updated note). Kept for reference in case a future scaling need
+> justifies splitting this content-posting work back out onto its own
+> compute.
+
 `docs/CRON_JOB_MIGRATION.md` moved all 12 Threads content jobs off each
 Render service's own internal scheduler, to cron-job.org-triggered HTTP
 routes. This is the next step for 6 of those 12: running trending-news

@@ -1,5 +1,19 @@
 # Threads content jobs: moved to cron-job.org
 
+> **Superseded.** This described the setup while the 4 services ran on
+> separate, metered Render instances. They now run merged into one
+> process on a single flat-rate Hugging Face Docker Space (see
+> `combined_app.py`, `Dockerfile`) -- the cron-job.org-triggered HTTP
+> routes documented below are no longer used for routine operation. All
+> 12 jobs were restored as this process's own in-process APScheduler
+> jobs (see each server file's `_ensure_background_jobs_started()`),
+> since there's no more per-resource cost benefit to routing through an
+> external trigger on a flat-rate host, and running everything in this
+> one already-24/7 process removes cron-job.org as an external
+> dependency entirely. The HTTP routes themselves are kept in the
+> codebase as manual/fallback triggers, gated the same CRON_SECRET way
+> described below -- just not wired up to any external scheduler anymore.
+
 Each of the 4 trading services (perps, stocks, crypto, options) used to run
 3 "content" jobs -- trending-news post, sentiment snapshot, hourly status --
 on their own internal APScheduler, on top of the actual trading-critical
