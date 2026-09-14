@@ -848,6 +848,47 @@ def scan_and_enter(watchlist: list[str] | None = None, *, dry_run: bool | None =
                         take_profit_price=levels["take_profit_price"], stop_loss_price=levels["stop_loss_price"],
                     )
                 order_id = alpaca_client.place_order(order_spec)
+                # Real, confirmed live incident this fixes (2026-09-14):
+                # placing an order was treated as the position being OPEN,
+                # with no fill check at all. Harmless during regular hours
+                # (a bracket order fills at/near market almost instantly),
+                # but during extended hours -- where this branch places a
+                # plain LIMIT order that can easily sit unfilled -- this
+                # repeated the exact same "buy AAPL" order and Threads post
+                # every single 2-minute entry-scan cycle for 90+ minutes
+                # straight, because the never-verified, still-resting order
+                # was never recorded locally: existing_symbols never learned
+                # AAPL was "already handled," so every cycle re-evaluated it
+                # as a brand new candidate. Real trade_log history
+                # (2026-08-06, 2026-08-27) shows the same rapid-fire pattern
+                # causing real repeated losses before too. Same real-fill-
+                # verification discipline this file's own EXIT path
+                # (manage_open_positions) and every other market's exit path
+                # already apply -- ported to entry here, for both order
+                # types (defense in depth, not just the extended-hours one
+                # that triggered this specific incident).
+                try:
+                    order_after = alpaca_client.get_order(order_id)
+                except Exception as exc:
+                    logger.warning("[alpaca_strategy] could not verify fill for %s order %s: %s", symbol, order_id, exc)
+                    order_after = None
+                filled_qty = float((order_after or {}).get("filled_qty") or 0.0)
+                if filled_qty <= 0:
+                    try:
+                        alpaca_client.cancel_order(order_id)
+                    except Exception as exc:
+                        logger.warning("[alpaca_strategy] could not cancel unfilled %s order %s: %s", symbol, order_id, exc)
+                    opened.append({"symbol": symbol, "ok": True, "action": "skipped_order_not_filled"})
+                    continue
+                # Use the REAL fill, not the pre-order assumed price/count --
+                # matters most for a marketable-but-not-exact limit fill;
+                # also keeps take_profit_price/stop_loss_price consistent
+                # with whatever price this position actually filled at.
+                count = filled_qty
+                filled_avg_price = (order_after or {}).get("filled_avg_price")
+                if filled_avg_price:
+                    entry_price = float(filled_avg_price)
+                    levels = position_exit_levels({"entry_price": entry_price, "entry_volatility_30": row.get("volatility_30")})
 
             # Entry-time model/technical context -- what the model/filters
             # actually saw at decision time, so a post-trade analysis can

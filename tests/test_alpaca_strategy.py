@@ -439,6 +439,7 @@ def test_scan_and_enter_places_an_extended_hours_limit_order_in_pre_market(monke
 
     captured = {}
     monkeypatch.setattr(alpaca_client, "place_order", lambda order_spec: captured.update(order_spec) or "order-1")
+    monkeypatch.setattr(alpaca_client, "get_order", lambda order_id: {"filled_qty": "1", "filled_avg_price": "150.0"})
 
     result = strat.scan_and_enter(dry_run=False)
     assert result["opened"][0]["action"] == "opened"
@@ -458,10 +459,112 @@ def test_scan_and_enter_places_a_bracket_order_during_regular_hours(monkeypatch)
 
     captured = {}
     monkeypatch.setattr(alpaca_client, "place_order", lambda order_spec: captured.update(order_spec) or "order-1")
+    monkeypatch.setattr(alpaca_client, "get_order", lambda order_id: {"filled_qty": "1", "filled_avg_price": "150.0"})
 
     result = strat.scan_and_enter(dry_run=False)
     assert result["opened"][0]["action"] == "opened"
     assert captured["order_class"] == "bracket"
+
+
+# ── Real, confirmed live incident (2026-09-14): an order being PLACED was
+# treated as the position being OPEN, with no fill check at all -- during
+# extended hours (a plain LIMIT order, unlike a bracket order, can easily
+# sit unfilled) this repeated the same "buy AAPL" order and Threads post
+# every single 2-minute entry-scan cycle for 90+ minutes straight, because
+# the never-verified, still-resting order was never recorded locally, so
+# existing_symbols never learned AAPL was "already handled." ────────────────
+
+def test_scan_and_enter_does_not_open_a_position_for_an_unfilled_order(monkeypatch):
+    monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", True)
+    monkeypatch.setattr(alpaca_data, "get_market_session", lambda: {"session": "post_market", "is_open": False, "source": "test"})
+    monkeypatch.setattr(alpaca_data, "get_stock_watchlist", lambda recent: ["AAPL"])
+    monkeypatch.setattr(alpaca_data, "load_training_dataset", lambda **kw: pd.DataFrame())
+    monkeypatch.setattr(alpaca_data, "latest_feature_row", lambda symbol: _entry_row())
+    monkeypatch.setattr(alpaca_model, "predict_direction", lambda symbol: {"model_ok": False})
+    monkeypatch.setattr(alpaca_client, "get_account", lambda: {"cash": "100.0"})
+    monkeypatch.setattr(alpaca_client, "place_order", lambda order_spec: "order-1")
+    monkeypatch.setattr(alpaca_client, "get_order", lambda order_id: {"filled_qty": "0", "status": "accepted"})
+    cancelled = []
+    monkeypatch.setattr(alpaca_client, "cancel_order", lambda order_id: cancelled.append(order_id))
+
+    result = strat.scan_and_enter(dry_run=False)
+
+    assert result["opened"][0]["action"] == "skipped_order_not_filled"
+    assert cancelled == ["order-1"]
+    state = strat._load_state()  # noqa: SLF001
+    assert state["positions"] == []  # never recorded -- the next scan can genuinely retry
+
+
+def test_scan_and_enter_re_evaluates_the_same_symbol_after_an_unfilled_order(monkeypatch):
+    """The actual fix, not just its side effect: a symbol whose order didn't
+    fill must NOT be treated as "already handled" -- it has to remain a
+    fresh candidate on the very next scan, closing the exact loop that
+    caused 90+ minutes of repeated real orders and Threads posts."""
+    monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", True)
+    monkeypatch.setattr(alpaca_data, "get_market_session", lambda: {"session": "post_market", "is_open": False, "source": "test"})
+    monkeypatch.setattr(alpaca_data, "get_stock_watchlist", lambda recent: ["AAPL"])
+    monkeypatch.setattr(alpaca_data, "load_training_dataset", lambda **kw: pd.DataFrame())
+    monkeypatch.setattr(alpaca_data, "latest_feature_row", lambda symbol: _entry_row())
+    monkeypatch.setattr(alpaca_model, "predict_direction", lambda symbol: {"model_ok": False})
+    monkeypatch.setattr(alpaca_client, "get_account", lambda: {"cash": "100.0"})
+    monkeypatch.setattr(alpaca_client, "place_order", lambda order_spec: "order-1")
+    monkeypatch.setattr(alpaca_client, "get_order", lambda order_id: {"filled_qty": "0"})
+    monkeypatch.setattr(alpaca_client, "cancel_order", lambda order_id: None)
+
+    first = strat.scan_and_enter(dry_run=False)
+    second = strat.scan_and_enter(dry_run=False)
+
+    assert first["opened"][0]["action"] == "skipped_order_not_filled"
+    assert second["opened"][0]["action"] == "skipped_order_not_filled"  # re-evaluated, not "already held"
+
+
+def test_scan_and_enter_survives_a_fill_check_failure_by_treating_it_as_unfilled(monkeypatch):
+    """A network hiccup checking the order's own status must fail closed --
+    never assume a fill it couldn't actually verify."""
+    monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", True)
+    monkeypatch.setattr(alpaca_data, "get_stock_watchlist", lambda recent: ["AAPL"])
+    monkeypatch.setattr(alpaca_data, "load_training_dataset", lambda **kw: pd.DataFrame())
+    monkeypatch.setattr(alpaca_data, "latest_feature_row", lambda symbol: _entry_row())
+    monkeypatch.setattr(alpaca_model, "predict_direction", lambda symbol: {"model_ok": False})
+    monkeypatch.setattr(alpaca_client, "get_account", lambda: {"cash": "100.0"})
+    monkeypatch.setattr(alpaca_client, "place_order", lambda order_spec: "order-1")
+
+    def raise_error(order_id):
+        raise RuntimeError("simulated network failure")
+
+    monkeypatch.setattr(alpaca_client, "get_order", raise_error)
+    monkeypatch.setattr(alpaca_client, "cancel_order", lambda order_id: None)
+
+    result = strat.scan_and_enter(dry_run=False)
+
+    assert result["opened"][0]["action"] == "skipped_order_not_filled"
+    state = strat._load_state()  # noqa: SLF001
+    assert state["positions"] == []
+
+
+def test_scan_and_enter_uses_the_real_fill_price_not_the_pre_order_estimate(monkeypatch):
+    """A marketable limit order can fill at a slightly different price than
+    the quote it was sized against -- the recorded position (and its
+    take-profit/stop-loss levels) must reflect what actually happened, not
+    the pre-order guess."""
+    monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", True)
+    monkeypatch.setattr(alpaca_data, "get_stock_watchlist", lambda recent: ["AAPL"])
+    monkeypatch.setattr(alpaca_data, "load_training_dataset", lambda **kw: pd.DataFrame())
+    monkeypatch.setattr(alpaca_data, "latest_feature_row", lambda symbol: _entry_row(current_price=150.0, short_ma=150.45))
+    monkeypatch.setattr(alpaca_model, "predict_direction", lambda symbol: {"model_ok": False})
+    monkeypatch.setattr(alpaca_client, "get_account", lambda: {"cash": "10000.0"})
+    monkeypatch.setattr(alpaca_client, "place_order", lambda order_spec: "order-1")
+    monkeypatch.setattr(alpaca_client, "get_order", lambda order_id: {"filled_qty": "3", "filled_avg_price": "150.75"})
+
+    result = strat.scan_and_enter(dry_run=False)
+
+    assert result["opened"][0]["action"] == "opened"
+    state = strat._load_state()  # noqa: SLF001
+    position = state["positions"][0]
+    assert position["entry_price"] == 150.75
+    assert position["count"] == 3.0
+    expected_levels = strat.position_exit_levels({"entry_price": 150.75, "entry_volatility_30": 0.001})
+    assert position["take_profit_price"] == pytest.approx(expected_levels["take_profit_price"])
 
 
 def test_scan_and_enter_skips_entirely_when_market_is_fully_closed(monkeypatch):
