@@ -98,7 +98,13 @@ def test_fetch_recent_crypto_bars_caches_within_the_ttl(monkeypatch):
     pd.testing.assert_frame_equal(first, second)
 
 
-def _synthetic_one_min_df(n=100, base=100.0, vol_base=1000.0):
+def _synthetic_one_min_df(n=250, base=100.0, vol_base=1000.0):
+    # n=250 (not the old 100): MIN_ROWS_FOR_FEATURES is now 245 -- the
+    # trend_4h 240-minute window + a small buffer, ported from perps_data.py
+    # (see FEATURE_COLUMNS' own comment) -- a shorter default here would
+    # silently exercise the "not enough history" empty-frame path in every
+    # test using this fixture instead of the real feature-computation path
+    # most of them actually mean to test.
     closes = [base + i * 0.01 for i in range(n)]
     return pd.DataFrame({
         "ts": range(n),
@@ -115,7 +121,7 @@ def test_engineer_features_requires_minimum_rows():
 def test_engineer_features_has_no_market_session_feature_but_has_cyclical_time():
     """Unlike alpaca_data.py (equities), crypto trades 24/7 -- there's no
     time_of_day_pct here, replaced by hour/day-of-week cyclical encoding."""
-    feats = acd.engineer_features(_synthetic_one_min_df(n=100))
+    feats = acd.engineer_features(_synthetic_one_min_df())
     assert not feats.empty
     assert "time_of_day_pct" not in feats.columns
     for col in ("hour_sin", "hour_cos", "dow_sin", "dow_cos"):
@@ -124,18 +130,18 @@ def test_engineer_features_has_no_market_session_feature_but_has_cyclical_time()
 
 
 def test_engineer_features_broadcasts_sentiment_score():
-    feats = acd.engineer_features(_synthetic_one_min_df(n=100), sentiment_score=0.42)
+    feats = acd.engineer_features(_synthetic_one_min_df(), sentiment_score=0.42)
     assert (feats["sentiment_score"] == 0.42).all()
 
 
 def test_engineer_features_label_is_nan_for_the_most_recent_row():
-    feats = acd.engineer_features(_synthetic_one_min_df(n=100))
+    feats = acd.engineer_features(_synthetic_one_min_df())
     assert feats["label_up"].iloc[-1] is pd.NA or pd.isna(feats["label_up"].iloc[-1])
     assert feats["label_up"].iloc[-2] in (0, 1)
 
 
 def test_engineer_features_all_columns_present_in_feature_columns():
-    feats = acd.engineer_features(_synthetic_one_min_df(n=100))
+    feats = acd.engineer_features(_synthetic_one_min_df())
     for col in acd.FEATURE_COLUMNS:
         assert col in feats.columns
 
@@ -160,7 +166,7 @@ def test_collect_dataset_rows_one_symbol_failing_does_not_block_the_others(monke
     def fake_fetch(symbol):
         if symbol == "BAD/USD":
             raise RuntimeError("network error")
-        return _synthetic_one_min_df(n=100)
+        return _synthetic_one_min_df()
 
     monkeypatch.setattr(acd, "fetch_recent_crypto_bars", fake_fetch)
     result = acd.collect_dataset_rows(["BAD/USD", "BTC/USD"])
@@ -169,7 +175,7 @@ def test_collect_dataset_rows_one_symbol_failing_does_not_block_the_others(monke
 
 
 def test_collect_dataset_rows_uses_sentiment_keyed_by_coin(monkeypatch):
-    monkeypatch.setattr(acd, "fetch_recent_crypto_bars", lambda symbol: _synthetic_one_min_df(n=100))
+    monkeypatch.setattr(acd, "fetch_recent_crypto_bars", lambda symbol: _synthetic_one_min_df())
     captured = []
     monkeypatch.setattr(acd, "get_sentiment", lambda coin: captured.append(coin) or {"sentiment_score": 0.0})
     acd.collect_dataset_rows(["BTC/USD"])
@@ -180,7 +186,7 @@ def test_collect_dataset_rows_prewarms_sentiment_for_the_full_symbol_list(monkey
     """Same real fix as scan_and_enter's own -- this job runs across the
     FULL universe, an even bigger sequential-fetch cost than entry_scan's
     watchlist-only loop. See crypto_news.prewarm_sentiment's own docstring."""
-    monkeypatch.setattr(acd, "fetch_recent_crypto_bars", lambda symbol: _synthetic_one_min_df(n=100))
+    monkeypatch.setattr(acd, "fetch_recent_crypto_bars", lambda symbol: _synthetic_one_min_df())
     monkeypatch.setattr(acd, "get_sentiment", lambda coin: {"sentiment_score": 0.0})
     prewarmed_with = []
     monkeypatch.setattr(acd, "prewarm_sentiment", lambda coins, **kw: prewarmed_with.extend(coins))
@@ -189,7 +195,7 @@ def test_collect_dataset_rows_prewarms_sentiment_for_the_full_symbol_list(monkey
 
 
 def test_collect_dataset_rows_still_works_if_sentiment_prewarm_fails(monkeypatch):
-    monkeypatch.setattr(acd, "fetch_recent_crypto_bars", lambda symbol: _synthetic_one_min_df(n=100))
+    monkeypatch.setattr(acd, "fetch_recent_crypto_bars", lambda symbol: _synthetic_one_min_df())
     monkeypatch.setattr(acd, "get_sentiment", lambda coin: {"sentiment_score": 0.0})
 
     def raise_error(coins, **kw):
@@ -206,7 +212,7 @@ def test_latest_feature_row_returns_none_when_not_enough_history(monkeypatch):
 
 
 def test_latest_feature_row_returns_feature_columns_plus_symbol_and_price(monkeypatch):
-    monkeypatch.setattr(acd, "fetch_recent_crypto_bars", lambda symbol: _synthetic_one_min_df(n=100))
+    monkeypatch.setattr(acd, "fetch_recent_crypto_bars", lambda symbol: _synthetic_one_min_df())
     row = acd.latest_feature_row("BTC/USD")
     assert row is not None
     assert row["symbol"] == "BTC/USD"

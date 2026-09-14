@@ -177,6 +177,26 @@ PROMISING_MODEL_CONFIDENCE = _env_float("ALPACA_CRYPTO_PROMISING_MODEL_CONFIDENC
 # just never run against current data and reconciled with this default.
 MODEL_CONFIDENCE_MIN = _env_float("ALPACA_CRYPTO_MODEL_CONFIDENCE_MIN", 0.55)
 
+# Meta-labeling layer (see alpaca_crypto_meta_model.py's own module
+# docstring -- a direct port of perps_meta_model.py, built once crypto's
+# own primary model had the walk-forward-CV foundation this depends on):
+# a SECOND, deliberately simple classifier predicting whether THIS
+# specific model-confirmed candidate (context: volatility/liquidity
+# regime, time of day, the primary model's own confidence) is one the
+# primary model is actually reliable on. Default OFF pending a real
+# backtest (same "ship it default-safe, prove it before it touches live
+# capital" posture as USE_CORRELATION_STUDY below) -- no meta-model is
+# even trained by any scheduled job yet, so turning this on today would
+# have zero effect until one is (trust_score returns None with nothing
+# trained, which fails OPEN below, same as model_ok=False does above: a
+# missing signal never blocks a trade, only a signal that actively says
+# "don't trust this one" does). META_MODEL_TRUST_MIN is on the
+# meta-model's own predict_proba scale (0-1, "probability the primary
+# model's call is correct"), unrelated to MODEL_CONFIDENCE_MIN's own
+# scale -- 0.5 is a neutral default, not yet evidence-tuned.
+USE_META_MODEL = str(os.getenv("ALPACA_CRYPTO_USE_META_MODEL", "")).strip().lower() in {"1", "true", "yes"}
+META_MODEL_TRUST_MIN = _env_float("ALPACA_CRYPTO_META_MODEL_TRUST_MIN", 0.5)
+
 # Chart-study confidence layer -- see crypto_correlation.py's own module
 # docstring and perps_strategy.py's identical USE_CORRELATION_STUDY comment
 # for the full design (peer confirmation + leader divergence + breadth,
@@ -347,12 +367,29 @@ def evaluate_candidate(
                 0.5, min(0.95, effective_confidence_min - correlation["score"] * effective_correlation_max_adjustment),
             )
         if proba_up >= effective_confidence_min:
+            meta_trust = None
+            if USE_META_MODEL:
+                from data import alpaca_crypto_meta_model
+                meta_trust = alpaca_crypto_meta_model.trust_score(row, primary_probability_up=proba_up)
+                # None (no meta-model trained yet, or a row missing context
+                # features) fails OPEN -- same "a missing signal never
+                # blocks a trade" posture as model_ok=False's own fallback
+                # below. Only an actual low trust score vetoes.
+                if meta_trust is not None and meta_trust < META_MODEL_TRUST_MIN:
+                    result["reason"] = (
+                        f"{technical_reason} + model confident up ({proba_up:.2%}), "
+                        f"but meta-model trust too low ({meta_trust:.2f} < {META_MODEL_TRUST_MIN})"
+                    )
+                    return result
             result["should_enter"] = True
             result["reason"] = f"{technical_reason} + model confident up ({proba_up:.2%})"
             score = proba_up
             if effective_use_correlation_study:
                 score += correlation["score"] * effective_correlation_max_adjustment
                 result["reason"] += f"; correlation study: {correlation['reason']}"
+            if meta_trust is not None:
+                result["reason"] += f"; meta-model trust {meta_trust:.2f}"
+                result["meta_trust_score"] = meta_trust
             result["score"] = score
     else:
         # No trained model yet -- technical-only fallback (same posture as

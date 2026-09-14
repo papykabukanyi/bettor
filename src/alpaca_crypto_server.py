@@ -313,7 +313,22 @@ def _run_alpaca_crypto_train() -> dict[str, Any]:
     except Exception as exc:
         logger.warning("[alpaca_crypto_server] could not read trade_log for outcome-aware training: %s", exc)
         trade_log = None
-    return alpaca_crypto_model.train_model(trade_log=trade_log)
+    result = alpaca_crypto_model.train_model(trade_log=trade_log)
+    # Meta-labeling (see alpaca_crypto_meta_model.py's own module
+    # docstring) -- fully separate and best-effort: must never affect this
+    # job's own primary result either way. Only worth attempting once a
+    # fresh primary model actually exists to build out-of-fold labels
+    # from. ALPACA_CRYPTO_USE_META_MODEL stays off by default regardless
+    # of whether this succeeds -- training it here just keeps a fresh one
+    # available on HF for offline backtest validation before that flag is
+    # ever turned on. Same pattern as app_kalshi.py's own _run_perps_train.
+    if result.get("ok"):
+        try:
+            from data import alpaca_crypto_meta_model
+            alpaca_crypto_meta_model.train_meta_model()
+        except Exception as exc:
+            logger.warning("[alpaca_crypto_server] meta-model training failed (non-fatal): %s", exc)
+    return result
 
 
 @_locked_job("alpaca_crypto_torch_train", stale_after_sec=3600)

@@ -29,6 +29,8 @@ def _synthetic_test_df(n: int = 300, symbol: str = "BTC/USD") -> pd.DataFrame:
         "dist_to_ma_30": dist_to_ma_15 * 0.5,
         "ret_1m": rng.normal(0, 0.001, n), "ret_5m": rng.normal(0, 0.002, n),
         "ret_15m": rng.normal(0, 0.003, n), "ret_30m": rng.normal(0, 0.004, n), "ret_60m": rng.normal(0, 0.006, n),
+        "trend_1h": rng.normal(0, 0.006, n), "trend_2h": rng.normal(0, 0.008, n),
+        "trend_3h": rng.normal(0, 0.009, n), "trend_4h": rng.normal(0, 0.01, n),
         "volatility_5": np.abs(rng.normal(0.0008, 0.0002, n)),
         "volatility_15": np.abs(rng.normal(0.001, 0.0002, n)),
         "volatility_30": np.abs(rng.normal(0.0012, 0.0003, n)),

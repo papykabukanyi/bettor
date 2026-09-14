@@ -42,6 +42,10 @@ def _synthetic_training_frame(n: int = 500, seed: int = 42) -> pd.DataFrame:
         "ret_15m": rng.normal(0, 0.003, n),
         "ret_30m": rng.normal(0, 0.004, n),
         "ret_60m": rng.normal(0, 0.006, n),
+        "trend_1h": rng.normal(0, 0.006, n),
+        "trend_2h": rng.normal(0, 0.008, n),
+        "trend_3h": rng.normal(0, 0.009, n),
+        "trend_4h": rng.normal(0, 0.01, n),
         "dist_to_ma_15": dist,
         "dist_to_ma_30": dist * 0.5,
         "volatility_5": np.abs(rng.normal(0.0008, 0.0003, n)),
@@ -317,9 +321,11 @@ def test_train_torch_candidate_model_does_not_promote_a_worse_candidate(monkeypa
     displaced by a torch candidate that (being a small net on noisy
     synthetic data) can't realistically match it."""
 
+    dist_to_ma_15_idx = alpaca_crypto_model.FEATURE_COLUMNS.index("dist_to_ma_15")
+
     class _PerfectModel:
         def predict(self, x):
-            return (x[:, 5] > 0).astype(int)  # column 5 is dist_to_ma_15, == label_up's own generator
+            return (x[:, dist_to_ma_15_idx] > 0).astype(int)  # == label_up's own generator
 
         def predict_proba(self, x):
             preds = self.predict(x)

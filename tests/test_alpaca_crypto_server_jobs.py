@@ -53,10 +53,11 @@ def test_data_collect_job_pushes_collected_rows(monkeypatch):
 
 
 def test_train_job_calls_train_model(monkeypatch):
-    from data import alpaca_crypto_model, alpaca_crypto_strategy
+    from data import alpaca_crypto_meta_model, alpaca_crypto_model, alpaca_crypto_strategy
 
     monkeypatch.setattr(alpaca_crypto_strategy, "_load_state", lambda: {"trade_log": []})
     monkeypatch.setattr(alpaca_crypto_model, "train_model", lambda **kw: {"ok": True, "rows": 500})
+    monkeypatch.setattr(alpaca_crypto_meta_model, "train_meta_model", lambda **kw: {"ok": False, "reason": "no_data"})
     result = alpaca_crypto_server._run_alpaca_crypto_train.__wrapped__()  # noqa: SLF001
     assert result == {"ok": True, "rows": 500}
 
@@ -67,12 +68,13 @@ def test_train_job_passes_the_real_trade_log_for_outcome_aware_weighting(monkeyp
     alpaca_crypto_server.py is responsible for reading trade_log and
     threading it through -- same pattern as app_kalshi.py's own
     _run_perps_train."""
-    from data import alpaca_crypto_model, alpaca_crypto_strategy
+    from data import alpaca_crypto_meta_model, alpaca_crypto_model, alpaca_crypto_strategy
 
     fake_trade_log = [{"symbol": "BTC/USD", "opened_at": "x", "realized_pnl_usd": 1.0, "dry_run": False}]
     monkeypatch.setattr(alpaca_crypto_strategy, "_load_state", lambda: {"trade_log": fake_trade_log})
     captured = {}
     monkeypatch.setattr(alpaca_crypto_model, "train_model", lambda **kw: captured.update(kw) or {"ok": True})
+    monkeypatch.setattr(alpaca_crypto_meta_model, "train_meta_model", lambda **kw: {"ok": False, "reason": "no_data"})
 
     alpaca_crypto_server._run_alpaca_crypto_train.__wrapped__()  # noqa: SLF001
 
@@ -80,7 +82,7 @@ def test_train_job_passes_the_real_trade_log_for_outcome_aware_weighting(monkeyp
 
 
 def test_train_job_survives_a_state_read_failure(monkeypatch):
-    from data import alpaca_crypto_model, alpaca_crypto_strategy
+    from data import alpaca_crypto_meta_model, alpaca_crypto_model, alpaca_crypto_strategy
 
     def fail():
         raise RuntimeError("state read failed")
@@ -88,11 +90,66 @@ def test_train_job_survives_a_state_read_failure(monkeypatch):
     monkeypatch.setattr(alpaca_crypto_strategy, "_load_state", fail)
     captured = {}
     monkeypatch.setattr(alpaca_crypto_model, "train_model", lambda **kw: captured.update(kw) or {"ok": True})
+    monkeypatch.setattr(alpaca_crypto_meta_model, "train_meta_model", lambda **kw: {"ok": False, "reason": "no_data"})
 
     result = alpaca_crypto_server._run_alpaca_crypto_train.__wrapped__()  # noqa: SLF001
 
     assert result["ok"] is True
     assert captured["trade_log"] is None  # degrades to plain (non-outcome-weighted) training, doesn't crash the job
+
+
+# ── Meta-labeling training (see alpaca_crypto_meta_model.py's own module
+# docstring) -- additive and best-effort: must never affect this job's own
+# primary result either way. ─────────────────────────────────────────────
+
+def test_train_job_also_trains_the_meta_model_after_a_successful_primary_train(monkeypatch):
+    from data import alpaca_crypto_meta_model, alpaca_crypto_model, alpaca_crypto_strategy
+
+    monkeypatch.setattr(alpaca_crypto_strategy, "_load_state", lambda: {"trade_log": []})
+    monkeypatch.setattr(alpaca_crypto_model, "train_model", lambda **kw: {"ok": True, "model_type": "random_forest"})
+    called = []
+    monkeypatch.setattr(alpaca_crypto_meta_model, "train_meta_model", lambda **kw: called.append(kw) or {"ok": True})
+
+    result = alpaca_crypto_server._run_alpaca_crypto_train.__wrapped__()  # noqa: SLF001
+
+    assert result["ok"] is True
+    assert len(called) == 1
+
+
+def test_train_job_skips_the_meta_model_when_the_primary_train_failed(monkeypatch):
+    """Nothing new to build out-of-fold labels from without a fresh primary
+    model -- must not even attempt it."""
+    from data import alpaca_crypto_meta_model, alpaca_crypto_model, alpaca_crypto_strategy
+
+    monkeypatch.setattr(alpaca_crypto_strategy, "_load_state", lambda: {"trade_log": []})
+    monkeypatch.setattr(alpaca_crypto_model, "train_model", lambda **kw: {"ok": False, "reason": "insufficient_rows"})
+
+    def fail_if_called(**kw):
+        raise AssertionError("must not train the meta-model after a failed primary train")
+
+    monkeypatch.setattr(alpaca_crypto_meta_model, "train_meta_model", fail_if_called)
+
+    result = alpaca_crypto_server._run_alpaca_crypto_train.__wrapped__()  # noqa: SLF001
+
+    assert result["ok"] is False
+
+
+def test_train_job_survives_a_meta_model_training_failure(monkeypatch):
+    """Best-effort only -- a meta-model training crash must never take down
+    the primary job's own (already-successful) result."""
+    from data import alpaca_crypto_meta_model, alpaca_crypto_model, alpaca_crypto_strategy
+
+    monkeypatch.setattr(alpaca_crypto_strategy, "_load_state", lambda: {"trade_log": []})
+    monkeypatch.setattr(alpaca_crypto_model, "train_model", lambda **kw: {"ok": True, "model_type": "random_forest"})
+
+    def raise_error(**kw):
+        raise RuntimeError("simulated meta-model training crash")
+
+    monkeypatch.setattr(alpaca_crypto_meta_model, "train_meta_model", raise_error)
+
+    result = alpaca_crypto_server._run_alpaca_crypto_train.__wrapped__()  # noqa: SLF001
+
+    assert result["ok"] is True
 
 
 def test_threads_trending_news_job_posts_the_fetched_story(monkeypatch):

@@ -179,13 +179,22 @@ def fetch_recent_crypto_bars(symbol: str, *, days: int = LIVE_LOOKBACK_DAYS) -> 
 
 FEATURE_COLUMNS = [
     "ret_1m", "ret_5m", "ret_15m", "ret_30m", "ret_60m",
+    # trend_1h..trend_4h: real gap found in a strategy review -- these were
+    # never ported from perps_data.py, silently starving 4 of the 9 signals
+    # crypto_correlation.py's own multi_timeframe_bullishness reads
+    # (ALPACA_MULTI_TIMEFRAME_WEIGHT=0.30, the single highest-weighted
+    # component of that composite) for every crypto pair. Crypto trades
+    # 24/7 with no session gaps, so (unlike stocks) there's no reason these
+    # need a different lookback shape than perps' own -- same pct_change
+    # windows, ported directly.
+    "trend_1h", "trend_2h", "trend_3h", "trend_4h",
     "dist_to_ma_15", "dist_to_ma_30",
     "volatility_5", "volatility_15", "volatility_30",
     "volume_ratio_5", "volume_ratio_15", "dollar_volume_z",
     "rsi_14", "macd_hist_pct", "bb_pct_b", "bb_bandwidth", "atr_pct", "stoch_k",
     "hour_sin", "hour_cos", "dow_sin", "dow_cos", "sentiment_score",
 ]
-MIN_ROWS_FOR_FEATURES = 65  # the 60-minute return window + a small buffer
+MIN_ROWS_FOR_FEATURES = 245  # the 240-minute (4h) trend_4h window + a small buffer -- same floor perps_data.py's own MIN_ONE_MIN_ROWS_FOR_FEATURES uses
 
 
 def engineer_features(one_min_df: pd.DataFrame, *, sentiment_score: float = 0.0) -> pd.DataFrame:
@@ -205,6 +214,10 @@ def engineer_features(one_min_df: pd.DataFrame, *, sentiment_score: float = 0.0)
     df["ret_15m"] = df["close"].pct_change(15)
     df["ret_30m"] = df["close"].pct_change(30)
     df["ret_60m"] = df["close"].pct_change(60)
+    df["trend_1h"] = df["close"].pct_change(60)
+    df["trend_2h"] = df["close"].pct_change(120)
+    df["trend_3h"] = df["close"].pct_change(180)
+    df["trend_4h"] = df["close"].pct_change(240)
     df["ma_15"] = df["close"].rolling(15).mean()
     df["ma_30"] = df["close"].rolling(30).mean()
     df["dist_to_ma_15"] = (df["close"] - df["ma_15"]) / df["ma_15"]

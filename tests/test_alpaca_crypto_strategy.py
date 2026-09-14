@@ -14,7 +14,7 @@ import datetime as dt
 import pandas as pd
 import pytest
 
-from data import alpaca_client, alpaca_crypto_data, alpaca_crypto_model, crypto_correlation, crypto_news, threads_post, alpaca_crypto_strategy as strat
+from data import alpaca_client, alpaca_crypto_data, alpaca_crypto_meta_model, alpaca_crypto_model, crypto_correlation, crypto_news, threads_post, alpaca_crypto_strategy as strat
 
 
 def _row(**overrides):
@@ -58,6 +58,51 @@ def test_evaluate_candidate_requires_model_confidence_when_a_model_exists():
     assert not low_confidence["should_enter"]
     high_confidence = strat.evaluate_candidate(_row(), {"model_ok": True, "probability_up": 0.7})
     assert high_confidence["should_enter"]
+
+
+# ── Meta-labeling layer (USE_META_MODEL) -- see alpaca_crypto_meta_model.py's
+# own module docstring. Same "computed only when the flag is on, fails OPEN
+# on a missing signal, only an actual low score vetoes" contract as
+# perps_strategy.py's own identical wiring. ────────────────────────────────
+
+def test_evaluate_candidate_meta_model_disabled_by_default_never_calls_trust_score(monkeypatch):
+    assert strat.USE_META_MODEL is False  # module default -- not touched by this test
+
+    def fail_if_called(row, *, primary_probability_up):
+        raise AssertionError("must not call trust_score while USE_META_MODEL is off")
+
+    monkeypatch.setattr(alpaca_crypto_meta_model, "trust_score", fail_if_called)
+    result = strat.evaluate_candidate(_row(), {"model_ok": True, "probability_up": 0.7})
+    assert result["should_enter"] is True
+    assert "meta_trust_score" not in result
+
+
+def test_evaluate_candidate_meta_model_blocks_entry_on_low_trust(monkeypatch):
+    monkeypatch.setattr(strat, "USE_META_MODEL", True)
+    monkeypatch.setattr(alpaca_crypto_meta_model, "trust_score", lambda row, *, primary_probability_up: 0.1)
+    result = strat.evaluate_candidate(_row(), {"model_ok": True, "probability_up": 0.7})
+    assert result["should_enter"] is False
+    assert "meta-model trust too low" in result["reason"]
+
+
+def test_evaluate_candidate_meta_model_allows_entry_on_high_trust(monkeypatch):
+    monkeypatch.setattr(strat, "USE_META_MODEL", True)
+    monkeypatch.setattr(alpaca_crypto_meta_model, "trust_score", lambda row, *, primary_probability_up: 0.9)
+    result = strat.evaluate_candidate(_row(), {"model_ok": True, "probability_up": 0.7})
+    assert result["should_enter"] is True
+    assert result["meta_trust_score"] == 0.9
+    assert "meta-model trust" in result["reason"]
+
+
+def test_evaluate_candidate_meta_model_fails_open_with_no_trust_score_available(monkeypatch):
+    """No meta-model trained yet (or a row missing context features) must
+    never block a trade -- same "a missing signal is not a veto" posture
+    as model_ok=False's own fallback."""
+    monkeypatch.setattr(strat, "USE_META_MODEL", True)
+    monkeypatch.setattr(alpaca_crypto_meta_model, "trust_score", lambda row, *, primary_probability_up: None)
+    result = strat.evaluate_candidate(_row(), {"model_ok": True, "probability_up": 0.7})
+    assert result["should_enter"] is True
+    assert "meta_trust_score" not in result
 
 
 def _position(entry_price=65000.0, minutes_ago=0):
