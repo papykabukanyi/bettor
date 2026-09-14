@@ -89,6 +89,23 @@ def test_each_markets_own_status_route_is_reachable_through_its_mount(client):
     assert client.get("/options/api/alpaca/options/status").status_code == 200
 
 
+def test_crypto_dashboard_report_link_is_prefixed_for_its_own_mount(client):
+    """Real, confirmed bug: alpaca_crypto_dashboard.html hardcoded
+    href="/api/alpaca/crypto/report.pdf" instead of using url_for() like
+    every other same-app link in that template -- through this mount
+    (crypto is NOT the default "/" app, unlike perps) that resolved to
+    perps' own root instead of crypto's, a guaranteed 404 for anyone who
+    clicked "Download Report" on the live crypto dashboard."""
+    resp = client.get("/crypto/alpaca-crypto")
+    assert resp.status_code == 200
+    html = resp.get_data(as_text=True)
+    assert 'href="/crypto/api/alpaca/crypto/report.pdf"' in html
+    assert client.get("/crypto/api/alpaca/crypto/report.pdf").status_code == 200
+    # The bug's own broken path must not resolve through crypto's mount either
+    # (it would silently hit perps' own "/", not crypto's report route).
+    assert 'href="/api/alpaca/crypto/report.pdf"' not in html
+
+
 def test_chart_route_does_not_collide_across_markets(client):
     """All 4 apps define an identical /chart/<path:filename> route --
     confirm each is only ever reached through its own market's prefix
