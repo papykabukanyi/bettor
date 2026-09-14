@@ -1472,6 +1472,67 @@ def test_evaluate_candidate_sets_flat_technical_ok_on_a_qualifying_entry(monkeyp
     assert result["technical_ok"] is True
 
 
+# ── Meta-labeling layer (USE_META_MODEL) -- see perps_meta_model.py's own
+# module docstring. Same "computed only when the flag is on, fails OPEN on
+# a missing signal, only an actual low score vetoes" contract as the
+# correlation-study layer's own tests below apply to that separate signal. ──
+
+def test_evaluate_candidate_meta_model_disabled_by_default_never_calls_trust_score(monkeypatch):
+    assert strat.USE_META_MODEL is False  # module default -- not touched by this test
+    monkeypatch.setattr(strat, "latest_feature_row", lambda ticker: _row())
+    monkeypatch.setattr(strat, "predict_direction", lambda ticker: {
+        "model_ok": True, "ticker": ticker, "direction": "up", "probability_up": 0.9,
+    })
+
+    def fail_if_called(row, *, primary_probability_up):
+        raise AssertionError("must not call trust_score while USE_META_MODEL is off")
+
+    monkeypatch.setattr(strat.perps_meta_model, "trust_score", fail_if_called)
+    result = strat.evaluate_candidate("KXBTCPERP")
+    assert result["should_enter"] is True
+    assert "meta_trust_score" not in result
+
+
+def test_evaluate_candidate_meta_model_blocks_entry_on_low_trust(monkeypatch):
+    monkeypatch.setattr(strat, "USE_META_MODEL", True)
+    monkeypatch.setattr(strat, "latest_feature_row", lambda ticker: _row())
+    monkeypatch.setattr(strat, "predict_direction", lambda ticker: {
+        "model_ok": True, "ticker": ticker, "direction": "up", "probability_up": 0.9,
+    })
+    monkeypatch.setattr(strat.perps_meta_model, "trust_score", lambda row, *, primary_probability_up: 0.1)
+    result = strat.evaluate_candidate("KXBTCPERP")
+    assert result["should_enter"] is False
+    assert "meta-model trust too low" in result["reason"]
+
+
+def test_evaluate_candidate_meta_model_allows_entry_on_high_trust(monkeypatch):
+    monkeypatch.setattr(strat, "USE_META_MODEL", True)
+    monkeypatch.setattr(strat, "latest_feature_row", lambda ticker: _row())
+    monkeypatch.setattr(strat, "predict_direction", lambda ticker: {
+        "model_ok": True, "ticker": ticker, "direction": "up", "probability_up": 0.9,
+    })
+    monkeypatch.setattr(strat.perps_meta_model, "trust_score", lambda row, *, primary_probability_up: 0.9)
+    result = strat.evaluate_candidate("KXBTCPERP")
+    assert result["should_enter"] is True
+    assert result["meta_trust_score"] == 0.9
+    assert "meta-model trust" in result["reason"]
+
+
+def test_evaluate_candidate_meta_model_fails_open_with_no_trust_score_available(monkeypatch):
+    """No meta-model trained yet (or a row missing context features) must
+    never block a trade -- same "a missing signal is not a veto" posture
+    as model_ok=False's own fallback."""
+    monkeypatch.setattr(strat, "USE_META_MODEL", True)
+    monkeypatch.setattr(strat, "latest_feature_row", lambda ticker: _row())
+    monkeypatch.setattr(strat, "predict_direction", lambda ticker: {
+        "model_ok": True, "ticker": ticker, "direction": "up", "probability_up": 0.9,
+    })
+    monkeypatch.setattr(strat.perps_meta_model, "trust_score", lambda row, *, primary_probability_up: None)
+    result = strat.evaluate_candidate("KXBTCPERP")
+    assert result["should_enter"] is True
+    assert "meta_trust_score" not in result
+
+
 def test_scan_for_entries_excludes_already_held_tickers(monkeypatch):
     monkeypatch.setattr(strat, "get_watchlist", lambda: ["KXBTCPERP", "KXETHPERP"])
     monkeypatch.setattr(strat, "latest_feature_row", lambda ticker: _row(ticker=ticker))

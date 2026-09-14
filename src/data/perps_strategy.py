@@ -90,7 +90,7 @@ from data.kalshi_perps import (
 from data.crypto_news import prewarm_sentiment
 from data.perps_data import coin_for_ticker, fetch_candle_frames, get_watchlist, latest_feature_row
 from data.perps_model import predict_direction
-from data import perps_trade_analysis, threads_post
+from data import perps_meta_model, perps_trade_analysis, threads_post
 
 logger = logging.getLogger(__name__)
 
@@ -543,6 +543,28 @@ TREND_FILTER_DOWN_PCT = _env_float("PERPS_TREND_FILTER_DOWN_PCT", 0.02)  # skip 
 # history) -- same "fewer, higher-conviction trades cost less in fees"
 # pattern as the hold-time finding above.
 MODEL_CONFIDENCE_MIN = _env_float("PERPS_MODEL_CONFIDENCE_MIN", 0.58)
+# Meta-labeling layer (see perps_meta_model.py's own module docstring for
+# the full design): a SECOND, deliberately simple classifier predicting
+# whether THIS specific model-confirmed candidate (context: volatility/
+# liquidity regime, time of day, the primary model's own confidence) is
+# one the primary model is actually reliable on -- motivated by the
+# primary model's own thin live walk-forward AUC (~0.53-0.54), where a
+# flat confidence bar almost certainly isn't equally trustworthy across
+# every context it fires in. Default OFF pending a real backtest (same
+# "ship it default-safe, prove it before it touches live capital" posture
+# as USE_CORRELATION_STUDY below, and as USE_CONVICTION_SIZING's own
+# history of being kept OFF after two independent sweeps found no real
+# edge) -- no meta-model is even trained by any scheduled job yet, so
+# turning this on today would have zero effect until one is (trust_score
+# returns None with nothing trained, which fails OPEN below, same as
+# model_ok=False does elsewhere: a missing signal never blocks a trade,
+# only a signal that actively says "don't trust this one" does).
+# META_MODEL_TRUST_MIN is on the meta-model's own predict_proba scale
+# (0-1, "probability the primary model's call is correct"), unrelated to
+# MODEL_CONFIDENCE_MIN's own scale -- 0.5 is a neutral default (better
+# than a coin flip), not yet evidence-tuned.
+USE_META_MODEL = _env_flag("PERPS_USE_META_MODEL", default=False)
+META_MODEL_TRUST_MIN = _env_float("PERPS_META_MODEL_TRUST_MIN", 0.5)
 # Chart-study confidence layer (see crypto_correlation.py's own module
 # docstring for the full design): multiple correlation-derived studies --
 # peer confirmation within perps' own instrument web, PLUS Alpaca crypto's
@@ -1278,6 +1300,19 @@ def evaluate_candidate(
                 0.5, min(0.95, effective_confidence_min - side_correlation_score * effective_correlation_max_adjustment),
             )
         if prediction["direction"] == wanted_direction and confidence >= effective_confidence_min:
+            meta_trust = None
+            if USE_META_MODEL:
+                meta_trust = perps_meta_model.trust_score(row, primary_probability_up=prediction["probability_up"])
+                # None (no meta-model trained yet, or a row missing context
+                # features) fails OPEN -- same "a missing signal never
+                # blocks a trade" posture as model_ok=False's own fallback
+                # above. Only an actual low trust score vetoes.
+                if meta_trust is not None and meta_trust < META_MODEL_TRUST_MIN:
+                    reasons.append(
+                        f"{technical_reason}; model predicts {wanted_direction} (p={confidence:.2f}), "
+                        f"but meta-model trust too low ({meta_trust:.2f} < {META_MODEL_TRUST_MIN})"
+                    )
+                    continue
             result["should_enter"] = True
             result["side"] = side
             result["reason"] = f"{technical_reason}; model predicts {wanted_direction} (p={confidence:.2f})"
@@ -1285,6 +1320,8 @@ def evaluate_candidate(
             if effective_use_correlation_study:
                 score += side_correlation_score * effective_correlation_max_adjustment
                 result["reason"] += f"; correlation study: {correlation['reason']}"
+            if meta_trust is not None:
+                result["reason"] += f"; meta-model trust {meta_trust:.2f}"
             result["score"] = score
             # For USE_CONVICTION_SIZING (see scan_and_enter/compute_leveraged_count)
             # -- how far above its OWN entry bar this candidate's confidence
@@ -1294,6 +1331,8 @@ def evaluate_candidate(
             # drive sizing.
             result["entry_confidence"] = confidence
             result["effective_confidence_min"] = effective_confidence_min
+            if meta_trust is not None:
+                result["meta_trust_score"] = meta_trust
             return result
         reasons.append(f"{technical_reason}, but model predicts {prediction['direction']} (p_up={prediction['probability_up']:.2f})")
 

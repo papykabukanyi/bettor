@@ -86,7 +86,10 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from config import et_today
-from data import crypto_news, perps_data, perps_model, perps_strategy, perps_trade_analysis, threads_client, threads_post
+from data import (
+    crypto_news, perps_data, perps_meta_model, perps_model, perps_strategy, perps_trade_analysis,
+    threads_client, threads_post,
+)
 
 # Real production bug found and fixed on the sibling stocks server (now
 # alpaca_server.py, same comment there in full): every perps_*.py module
@@ -478,7 +481,21 @@ def _run_perps_train() -> dict[str, Any]:
     except Exception as exc:
         logger.warning("[app_kalshi] could not read trade_log for outcome-aware training: %s", exc)
         trade_log = None
-    return perps_model.train_model(trade_log=trade_log)
+    result = perps_model.train_model(trade_log=trade_log)
+    # Meta-labeling (see perps_meta_model.py's own module docstring) --
+    # fully separate and best-effort: must never affect this job's own
+    # primary result either way, so its own exception is caught here, not
+    # inside train_meta_model itself. Only worth attempting once a fresh
+    # primary model actually exists to build out-of-fold labels from.
+    # PERPS_USE_META_MODEL stays off by default regardless of whether this
+    # succeeds -- training it here just keeps a fresh one available on HF
+    # for offline backtest validation before that flag is ever turned on.
+    if result.get("ok"):
+        try:
+            perps_meta_model.train_meta_model()
+        except Exception as exc:
+            logger.warning("[app_kalshi] meta-model training failed (non-fatal): %s", exc)
+    return result
 
 
 @_locked_job("perps_trade_analysis", stale_after_sec=1800)

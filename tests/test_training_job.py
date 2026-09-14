@@ -20,11 +20,12 @@ import training_job as job  # noqa: E402
 
 
 def test_perps_train_passes_the_trade_log_through(monkeypatch):
-    from data import perps_model, perps_strategy
+    from data import perps_meta_model, perps_model, perps_strategy
 
     monkeypatch.setattr(perps_strategy, "_load_state", lambda: {"trade_log": [{"realized_pnl_usd": 1.0}]})
     captured = {}
     monkeypatch.setattr(perps_model, "train_model", lambda trade_log=None: captured.update(trade_log=trade_log) or {"ok": True, "rows": 500})
+    monkeypatch.setattr(perps_meta_model, "train_meta_model", lambda **kw: {"ok": False, "reason": "no_data"})
 
     result = job._perps_train()  # noqa: SLF001
 
@@ -38,7 +39,7 @@ def test_perps_train_still_trains_when_the_trade_log_read_fails(monkeypatch):
     not block training outright -- it should fall back to trade_log=None
     (train_model's own documented default: no outcome weighting, not "no
     training at all")."""
-    from data import perps_model, perps_strategy
+    from data import perps_meta_model, perps_model, perps_strategy
 
     def raise_error():
         raise RuntimeError("state file corrupted")
@@ -46,11 +47,44 @@ def test_perps_train_still_trains_when_the_trade_log_read_fails(monkeypatch):
     monkeypatch.setattr(perps_strategy, "_load_state", raise_error)
     captured = {}
     monkeypatch.setattr(perps_model, "train_model", lambda trade_log=None: captured.update(trade_log=trade_log) or {"ok": True, "rows": 500})
+    monkeypatch.setattr(perps_meta_model, "train_meta_model", lambda **kw: {"ok": False, "reason": "no_data"})
 
     result = job._perps_train()  # noqa: SLF001
 
     assert result == {"ok": True, "rows": 500}
     assert captured["trade_log"] is None
+
+
+def test_perps_train_also_trains_the_meta_model_after_a_successful_primary_train(monkeypatch):
+    """Mirrors app_kalshi.py's own _run_perps_train -- see that job's test
+    of the same name."""
+    from data import perps_meta_model, perps_model, perps_strategy
+
+    monkeypatch.setattr(perps_strategy, "_load_state", lambda: {"trade_log": []})
+    monkeypatch.setattr(perps_model, "train_model", lambda trade_log=None: {"ok": True, "model_type": "random_forest"})
+    called = []
+    monkeypatch.setattr(perps_meta_model, "train_meta_model", lambda **kw: called.append(kw) or {"ok": True})
+
+    result = job._perps_train()  # noqa: SLF001
+
+    assert result["ok"] is True
+    assert len(called) == 1
+
+
+def test_perps_train_survives_a_meta_model_training_failure(monkeypatch):
+    from data import perps_meta_model, perps_model, perps_strategy
+
+    monkeypatch.setattr(perps_strategy, "_load_state", lambda: {"trade_log": []})
+    monkeypatch.setattr(perps_model, "train_model", lambda trade_log=None: {"ok": True, "model_type": "random_forest"})
+
+    def raise_error(**kw):
+        raise RuntimeError("simulated meta-model training crash")
+
+    monkeypatch.setattr(perps_meta_model, "train_meta_model", raise_error)
+
+    result = job._perps_train()  # noqa: SLF001
+
+    assert result["ok"] is True
 
 
 def test_stocks_train_calls_train_model(monkeypatch):

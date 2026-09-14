@@ -83,13 +83,22 @@ def _load_dotenv() -> None:
 
 
 def _perps_train() -> dict[str, Any]:
-    from data import perps_model, perps_strategy
+    from data import perps_meta_model, perps_model, perps_strategy
     try:
         trade_log = perps_strategy._load_state().get("trade_log")  # noqa: SLF001
     except Exception as exc:
         logger.warning("could not read trade_log for outcome-aware training: %s", exc)
         trade_log = None
-    return perps_model.train_model(trade_log=trade_log)
+    result = perps_model.train_model(trade_log=trade_log)
+    # Meta-labeling (see perps_meta_model.py's own module docstring) --
+    # mirrors app_kalshi.py's own _run_perps_train: fully separate and
+    # best-effort, must never affect this job's own primary result.
+    if result.get("ok"):
+        try:
+            perps_meta_model.train_meta_model()
+        except Exception as exc:
+            logger.warning("meta-model training failed (non-fatal): %s", exc)
+    return result
 
 
 def _stocks_train() -> dict[str, Any]:

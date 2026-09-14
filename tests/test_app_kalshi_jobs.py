@@ -508,12 +508,13 @@ def test_run_perps_train_passes_the_real_trade_log_for_outcome_aware_weighting(m
     """perps_model.py never imports perps_strategy.py directly (circular
     import risk -- see this job's own comment), so app_kalshi.py is
     responsible for reading trade_log and threading it through."""
-    from data import perps_model, perps_strategy
+    from data import perps_meta_model, perps_model, perps_strategy
 
     fake_trade_log = [{"ticker": "KXBTCPERP", "opened_at": "x", "realized_pnl_usd": 1.0, "dry_run": False}]
     monkeypatch.setattr(perps_strategy, "_load_state", lambda: {"trade_log": fake_trade_log})
     captured = {}
     monkeypatch.setattr(perps_model, "train_model", lambda **kw: captured.update(kw) or {"ok": True})
+    monkeypatch.setattr(perps_meta_model, "train_meta_model", lambda **kw: {"ok": False, "reason": "no_data"})
 
     app_kalshi._run_perps_train.__wrapped__()  # noqa: SLF001
 
@@ -521,7 +522,7 @@ def test_run_perps_train_passes_the_real_trade_log_for_outcome_aware_weighting(m
 
 
 def test_run_perps_train_survives_a_state_read_failure(monkeypatch):
-    from data import perps_model, perps_strategy
+    from data import perps_meta_model, perps_model, perps_strategy
 
     def fail():
         raise RuntimeError("state read failed")
@@ -529,11 +530,66 @@ def test_run_perps_train_survives_a_state_read_failure(monkeypatch):
     monkeypatch.setattr(perps_strategy, "_load_state", fail)
     captured = {}
     monkeypatch.setattr(perps_model, "train_model", lambda **kw: captured.update(kw) or {"ok": True})
+    monkeypatch.setattr(perps_meta_model, "train_meta_model", lambda **kw: {"ok": False, "reason": "no_data"})
 
     result = app_kalshi._run_perps_train.__wrapped__()  # noqa: SLF001
 
     assert result["ok"] is True
     assert captured["trade_log"] is None  # degrades to plain (non-outcome-weighted) training, doesn't crash the job
+
+
+# ── Meta-labeling training (see perps_meta_model.py's own module docstring)
+# -- additive and best-effort: must never affect this job's own primary
+# result either way. ─────────────────────────────────────────────────────
+
+def test_run_perps_train_also_trains_the_meta_model_after_a_successful_primary_train(monkeypatch):
+    from data import perps_meta_model, perps_model, perps_strategy
+
+    monkeypatch.setattr(perps_strategy, "_load_state", lambda: {"trade_log": []})
+    monkeypatch.setattr(perps_model, "train_model", lambda **kw: {"ok": True, "model_type": "random_forest"})
+    called = []
+    monkeypatch.setattr(perps_meta_model, "train_meta_model", lambda **kw: called.append(kw) or {"ok": True})
+
+    result = app_kalshi._run_perps_train.__wrapped__()  # noqa: SLF001
+
+    assert result["ok"] is True
+    assert len(called) == 1
+
+
+def test_run_perps_train_skips_the_meta_model_when_the_primary_train_failed(monkeypatch):
+    """Nothing new to build out-of-fold labels from without a fresh primary
+    model -- must not even attempt it."""
+    from data import perps_meta_model, perps_model, perps_strategy
+
+    monkeypatch.setattr(perps_strategy, "_load_state", lambda: {"trade_log": []})
+    monkeypatch.setattr(perps_model, "train_model", lambda **kw: {"ok": False, "reason": "insufficient_rows"})
+
+    def fail_if_called(**kw):
+        raise AssertionError("must not train the meta-model after a failed primary train")
+
+    monkeypatch.setattr(perps_meta_model, "train_meta_model", fail_if_called)
+
+    result = app_kalshi._run_perps_train.__wrapped__()  # noqa: SLF001
+
+    assert result["ok"] is False
+
+
+def test_run_perps_train_survives_a_meta_model_training_failure(monkeypatch):
+    """Best-effort only -- a meta-model training crash must never take down
+    the primary job's own (already-successful) result."""
+    from data import perps_meta_model, perps_model, perps_strategy
+
+    monkeypatch.setattr(perps_strategy, "_load_state", lambda: {"trade_log": []})
+    monkeypatch.setattr(perps_model, "train_model", lambda **kw: {"ok": True, "model_type": "random_forest"})
+
+    def raise_error(**kw):
+        raise RuntimeError("simulated meta-model training crash")
+
+    monkeypatch.setattr(perps_meta_model, "train_meta_model", raise_error)
+
+    result = app_kalshi._run_perps_train.__wrapped__()  # noqa: SLF001
+
+    assert result["ok"] is True
 
 
 def test_run_perps_trade_analysis_posts_a_summary_and_applies_evidence_gated_tuning(monkeypatch):
