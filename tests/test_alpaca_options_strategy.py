@@ -162,6 +162,53 @@ def test_decide_exit_does_not_force_close_when_expiration_is_far_out():
     assert not should_exit
 
 
+# ── _expiration_from_symbol / _near_expiration's OCC-symbol fallback -- see
+# the real, confirmed need in _near_expiration's own docstring: a
+# pre-existing position with no `expiration_date` field recorded at all had
+# no other way to be recognized as expired. ─────────────────────────────
+
+def test_expiration_from_symbol_parses_a_standard_occ_symbol():
+    assert strat._expiration_from_symbol("AMD260911P00455000") == dt.date(2026, 9, 11)  # noqa: SLF001
+
+
+def test_expiration_from_symbol_handles_a_longer_root_and_call_type():
+    assert strat._expiration_from_symbol("GOOGL260320C00180000") == dt.date(2026, 3, 20)  # noqa: SLF001
+
+
+def test_expiration_from_symbol_returns_none_for_garbage():
+    assert strat._expiration_from_symbol("") is None  # noqa: SLF001
+    assert strat._expiration_from_symbol("TOO_SHORT") is None  # noqa: SLF001
+    assert strat._expiration_from_symbol("AMD260911X00455000") is None  # noqa: SLF001  # not C or P
+    assert strat._expiration_from_symbol("AMDNOTDIGITP00455000") is None  # noqa: SLF001
+
+
+def test_near_expiration_falls_back_to_the_symbol_when_expiration_date_is_missing():
+    """Real, confirmed production incident: AMD260911P00455000 was stuck
+    with no `expiration_date` field recorded at all (an older/incomplete
+    record) -- get_current_option_price already returns None for an
+    expired contract, so without this fallback _near_expiration always
+    said "not near expiration" and manage_open_positions's own
+    no-quote-plus-near-expiration force-close (see its test file) could
+    never trigger for it."""
+    pos = {"symbol": "AMD260911P00455000", "entry_price": 10.05}  # no expiration_date at all
+    now = dt.datetime(2026, 9, 14, tzinfo=dt.timezone.utc)  # 3 days past the symbol's own 2026-09-11 expiration
+    assert strat._near_expiration(pos, now=now) is True  # noqa: SLF001
+
+
+def test_near_expiration_symbol_fallback_respects_a_far_out_expiration_too():
+    pos = {"symbol": "AMD261231P00455000", "entry_price": 10.05}  # no expiration_date, but far out
+    now = dt.datetime(2026, 9, 14, tzinfo=dt.timezone.utc)
+    assert strat._near_expiration(pos, now=now) is False  # noqa: SLF001
+
+
+def test_near_expiration_prefers_the_recorded_expiration_date_over_the_symbol():
+    """expiration_date, when present, is trusted as-is -- the symbol
+    fallback only kicks in when it's missing/unparseable."""
+    pos = {"symbol": "AMD261231P00455000", "expiration_date": "2026-09-11", "entry_price": 10.05}
+    now = dt.datetime(2026, 9, 14, tzinfo=dt.timezone.utc)
+    assert strat._near_expiration(pos, now=now) is True  # noqa: SLF001
+
+
 def test_position_exit_levels():
     levels = strat.position_exit_levels({"entry_price": 5.0})
     assert levels["take_profit_price"] == round(5.0 * (1 + strat.TAKE_PROFIT_PCT), 6)
@@ -739,6 +786,30 @@ def test_manage_open_positions_force_closes_a_dry_run_position_with_no_quote_nea
     assert trade["exit_price"] == trade["entry_price"]
     state = strat._load_state()  # noqa: SLF001
     assert state["positions"] == []  # slot freed, no longer stuck
+
+
+def test_manage_open_positions_force_closes_using_the_symbol_when_expiration_date_is_missing_entirely(monkeypatch):
+    """The EXACT real, confirmed shape of the live stuck position: an
+    older/incomplete record with no `expiration_date` field recorded at
+    all (see _near_expiration's own docstring) -- must still resolve via
+    the OCC-symbol fallback, not stay stuck forever just because that one
+    field is absent."""
+    strat._save_state({  # noqa: SLF001
+        "positions": [{
+            "symbol": "AMD260911P00455000", "underlying_symbol": "AMD", "entry_price": 10.05, "count": 49,
+            "opened_at": (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=11)).isoformat(), "order_id": None,
+            # deliberately no "expiration_date" key at all
+        }],
+        "trade_log": [], "realized_pnl_by_date": {},
+    })
+    monkeypatch.setattr(alpaca_client, "get_option_latest_quote", lambda symbol: {"ap": None, "bp": None})
+
+    result = strat.manage_open_positions()
+
+    assert result["action"] == "closed"
+    assert result["closed"][0]["reason"] == "expired_no_quote_data_unknown"
+    state = strat._load_state()  # noqa: SLF001
+    assert state["positions"] == []
 
 
 def test_manage_open_positions_leaves_a_no_quote_position_open_when_not_near_expiration(monkeypatch):

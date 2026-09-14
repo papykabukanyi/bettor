@@ -300,11 +300,40 @@ def evaluate_candidate(
     return result
 
 
+def _expiration_from_symbol(symbol: str) -> dt.date | None:
+    """OCC-standard option symbols always end with a fixed 15-character
+    suffix -- 6-digit expiration (YYMMDD), 1-char type (C/P), 8-digit
+    strike -- regardless of the underlying root's own length, so this is
+    an authoritative fallback source for a position's expiration even
+    when `expiration_date` itself is missing or unparseable. Real,
+    confirmed need: a pre-existing stuck position (AMD260911P00455000, no
+    `expiration_date` field recorded at all -- an older/incomplete
+    record) had no other way to be recognized as expired at all. None on
+    anything that doesn't match the expected shape, never raises."""
+    if not symbol or len(symbol) < 15:
+        return None
+    date_part, type_part, strike_part = symbol[-15:-9], symbol[-9], symbol[-8:]
+    if type_part not in ("C", "P") or not date_part.isdigit() or not strike_part.isdigit():
+        return None
+    try:
+        return dt.datetime.strptime(date_part, "%y%m%d").date()
+    except ValueError:
+        return None
+
+
 def _near_expiration(position: dict[str, Any], *, now: dt.datetime) -> bool:
     expiration_date = position.get("expiration_date")
-    if not expiration_date:
+    exp_date: dt.date | None = None
+    if expiration_date:
+        try:
+            exp_date = dt.datetime.fromisoformat(expiration_date).date()
+        except ValueError:
+            exp_date = None
+    if exp_date is None:
+        exp_date = _expiration_from_symbol(position.get("symbol", ""))
+    if exp_date is None:
         return False
-    exp = dt.datetime.fromisoformat(expiration_date).replace(tzinfo=dt.timezone.utc)
+    exp = dt.datetime.combine(exp_date, dt.time.min, tzinfo=dt.timezone.utc)
     return (exp - now).days < MIN_DAYS_TO_EXPIRATION_BEFORE_FORCED_EXIT
 
 
