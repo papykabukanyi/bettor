@@ -302,7 +302,18 @@ def _run_alpaca_crypto_data_collect() -> dict[str, Any]:
 
 @_locked_job("alpaca_crypto_train", stale_after_sec=1800)
 def _run_alpaca_crypto_train() -> dict[str, Any]:
-    return alpaca_crypto_model.train_model()
+    # Real gap found in a strategy review: this used to call train_model()
+    # with no trade_log at all, unlike app_kalshi.py's own _run_perps_train
+    # -- alpaca_crypto_model.train_model() never got outcome-aware sample
+    # weighting to feed on in the first place. Same pattern as perps: read
+    # trade_log here (not inside alpaca_crypto_model.py itself, which would
+    # create a circular import with alpaca_crypto_strategy.py).
+    try:
+        trade_log = alpaca_crypto_strategy._load_state().get("trade_log")  # noqa: SLF001
+    except Exception as exc:
+        logger.warning("[alpaca_crypto_server] could not read trade_log for outcome-aware training: %s", exc)
+        trade_log = None
+    return alpaca_crypto_model.train_model(trade_log=trade_log)
 
 
 @_locked_job("alpaca_crypto_torch_train", stale_after_sec=3600)

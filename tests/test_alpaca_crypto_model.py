@@ -88,11 +88,139 @@ def test_train_model_succeeds_with_enough_signal_rows():
 
 
 def test_train_model_surfaces_sentiment_scores_feature_importance():
+    """feature_importances is keyed by candidate name (winning candidate
+    only below the calibration holdout floor, every candidate once above
+    it -- see test_train_model_calibrates_above_the_holdout_floor) --
+    matches perps_model.py's own contract exactly."""
     result = alpaca_crypto_model.train_model(df=_synthetic_training_frame(n=500))
     assert result["ok"] is True
     importances = result["feature_importances"]
-    assert importances is not None
-    assert "sentiment_score" in importances
+    assert importances
+    for name, feature_map in importances.items():
+        assert feature_map
+        assert "sentiment_score" in feature_map
+
+
+# ── Walk-forward CV / calibration / outcome-aware weighting -- ported from
+# perps_model.py's own design (see this module's docstring for why). ──────
+
+def test_train_model_stays_uncalibrated_below_the_holdout_floor():
+    """n=500's last walk-forward fold test slice (~100 rows) falls below
+    ALPACA_CRYPTO_MODEL_CALIBRATION_MIN_HOLDOUT_ROWS (200) -- must fall
+    back to the old, uncalibrated, single-candidate contract exactly, same
+    regression fixture shape as perps_model.py's own identical test."""
+    result = alpaca_crypto_model.train_model(df=_synthetic_training_frame(n=500))
+    assert result["ok"] is True
+    assert result["calibrated"] is False
+    assert result["ensemble_members"] is None
+    assert result["model_type"] in {"logistic_regression", "random_forest", "gradient_boosting"}
+
+
+def test_train_model_calibrates_above_the_holdout_floor():
+    """A large enough fixture that the last walk-forward fold's test slice
+    clears ALPACA_CRYPTO_MODEL_CALIBRATION_MIN_HOLDOUT_ROWS -- must ship a
+    calibrated model (single candidate or ensemble, either is fine)."""
+    result = alpaca_crypto_model.train_model(df=_synthetic_training_frame(n=3000))
+    assert result["ok"] is True
+    assert result["calibrated"] is True
+    assert result["model_type"] in {"logistic_regression", "random_forest", "gradient_boosting", "ensemble"}
+    if result["model_type"] == "ensemble":
+        assert set(result["ensemble_members"]) <= {"logistic_regression", "random_forest", "gradient_boosting"}
+        assert len(result["ensemble_members"]) >= 2
+    else:
+        assert result["ensemble_members"] is None
+
+
+def test_train_model_cv_detail_reflects_the_walk_forward_folds():
+    result = alpaca_crypto_model.train_model(df=_synthetic_training_frame(n=3000))
+    assert result["ok"] is True
+    cv_detail = result["cv_detail"]
+    assert len(cv_detail) <= alpaca_crypto_model.WALK_FORWARD_SPLITS
+    assert all("test_rows" in fold for fold in cv_detail)
+
+
+def test_recency_sample_weight_favors_more_recent_rows():
+    ts = np.array([0, 30 * 86400, 60 * 86400], dtype=float)  # oldest, mid, newest (60 days apart)
+    weights = alpaca_crypto_model._recency_sample_weight(ts, half_life_days=14)  # noqa: SLF001
+    assert weights[2] == 1.0  # newest row relative to itself -- no decay
+    assert weights[0] < weights[1] < weights[2]
+
+
+def test_trade_outcome_sample_weight_returns_all_ones_without_a_trade_log():
+    symbols = np.array(["BTC/USD", "ETH/USD"])
+    ts = np.array([1000.0, 2000.0])
+    weights = alpaca_crypto_model._trade_outcome_sample_weight(symbols, ts, None)  # noqa: SLF001
+    assert (weights == 1.0).all()
+
+
+def test_trade_outcome_sample_weight_upweights_a_matching_real_win():
+    minute_ts = 120.0
+    symbols = np.array(["BTC/USD"])
+    ts = np.array([minute_ts])
+    trade_log = [{"symbol": "BTC/USD", "opened_at": "1970-01-01T00:02:00+00:00", "realized_pnl_usd": 5.0, "dry_run": False}]
+    weights = alpaca_crypto_model._trade_outcome_sample_weight(symbols, ts, trade_log)  # noqa: SLF001
+    assert weights[0] == alpaca_crypto_model.ALPACA_CRYPTO_MODEL_TRADE_OUTCOME_WIN_WEIGHT
+
+
+def test_trade_outcome_sample_weight_upweights_a_loss_more_than_a_win():
+    ts = np.array([60.0, 120.0])
+    symbols = np.array(["BTC/USD", "ETH/USD"])
+    trade_log = [
+        {"symbol": "BTC/USD", "opened_at": "1970-01-01T00:01:00+00:00", "realized_pnl_usd": 5.0, "dry_run": False},
+        {"symbol": "ETH/USD", "opened_at": "1970-01-01T00:02:00+00:00", "realized_pnl_usd": -5.0, "dry_run": False},
+    ]
+    weights = alpaca_crypto_model._trade_outcome_sample_weight(symbols, ts, trade_log)  # noqa: SLF001
+    assert weights[1] > weights[0] > 1.0
+
+
+def test_trade_outcome_sample_weight_ignores_dry_run_trades():
+    ts = np.array([60.0])
+    symbols = np.array(["BTC/USD"])
+    trade_log = [{"symbol": "BTC/USD", "opened_at": "1970-01-01T00:01:00+00:00", "realized_pnl_usd": 5.0, "dry_run": True}]
+    weights = alpaca_crypto_model._trade_outcome_sample_weight(symbols, ts, trade_log)  # noqa: SLF001
+    assert weights[0] == 1.0
+
+
+def test_train_model_accepts_a_trade_log_and_reports_how_many_rows_matched():
+    df = _synthetic_training_frame(n=3000)
+    # Row 0 has ts=0 -- match it to a real winning trade at the same minute.
+    trade_log = [{"symbol": "BTC/USD", "opened_at": "1970-01-01T00:00:00+00:00", "realized_pnl_usd": 5.0, "dry_run": False}]
+    result = alpaca_crypto_model.train_model(df=df, trade_log=trade_log)
+    assert result["ok"] is True
+    assert result["trade_outcome_rows_matched"] >= 1
+
+
+def test_train_model_with_no_trade_log_matches_zero_rows():
+    result = alpaca_crypto_model.train_model(df=_synthetic_training_frame(n=3000))
+    assert result["ok"] is True
+    assert result["trade_outcome_rows_matched"] == 0
+
+
+def test_averaged_ensemble_predict_proba_is_the_mean_of_its_members():
+    class _Fake:
+        def __init__(self, proba):
+            self._proba = proba
+
+        def predict_proba(self, x):
+            return np.tile(self._proba, (len(x), 1))
+
+    ensemble = alpaca_crypto_model._AveragedEnsemble(  # noqa: SLF001
+        [_Fake([0.2, 0.8]), _Fake([0.6, 0.4])], ["a", "b"],
+    )
+    proba = ensemble.predict_proba(np.zeros((1, 3)))
+    assert proba[0][1] == pytest.approx(0.6)
+
+
+def test_averaged_ensemble_predict_thresholds_at_half():
+    class _Fake:
+        def __init__(self, proba):
+            self._proba = proba
+
+        def predict_proba(self, x):
+            return np.tile(self._proba, (len(x), 1))
+
+    ensemble = alpaca_crypto_model._AveragedEnsemble([_Fake([0.9, 0.1])], ["a"])  # noqa: SLF001
+    assert ensemble.predict(np.zeros((1, 3)))[0] == 0
 
 
 def test_predict_direction_reports_model_ok_false_without_a_trained_model():

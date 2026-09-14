@@ -53,11 +53,46 @@ def test_data_collect_job_pushes_collected_rows(monkeypatch):
 
 
 def test_train_job_calls_train_model(monkeypatch):
-    from data import alpaca_crypto_model
+    from data import alpaca_crypto_model, alpaca_crypto_strategy
 
-    monkeypatch.setattr(alpaca_crypto_model, "train_model", lambda: {"ok": True, "rows": 500})
+    monkeypatch.setattr(alpaca_crypto_strategy, "_load_state", lambda: {"trade_log": []})
+    monkeypatch.setattr(alpaca_crypto_model, "train_model", lambda **kw: {"ok": True, "rows": 500})
     result = alpaca_crypto_server._run_alpaca_crypto_train.__wrapped__()  # noqa: SLF001
     assert result == {"ok": True, "rows": 500}
+
+
+def test_train_job_passes_the_real_trade_log_for_outcome_aware_weighting(monkeypatch):
+    """alpaca_crypto_model.py never imports alpaca_crypto_strategy.py
+    directly (circular import risk -- see this job's own comment), so
+    alpaca_crypto_server.py is responsible for reading trade_log and
+    threading it through -- same pattern as app_kalshi.py's own
+    _run_perps_train."""
+    from data import alpaca_crypto_model, alpaca_crypto_strategy
+
+    fake_trade_log = [{"symbol": "BTC/USD", "opened_at": "x", "realized_pnl_usd": 1.0, "dry_run": False}]
+    monkeypatch.setattr(alpaca_crypto_strategy, "_load_state", lambda: {"trade_log": fake_trade_log})
+    captured = {}
+    monkeypatch.setattr(alpaca_crypto_model, "train_model", lambda **kw: captured.update(kw) or {"ok": True})
+
+    alpaca_crypto_server._run_alpaca_crypto_train.__wrapped__()  # noqa: SLF001
+
+    assert captured["trade_log"] == fake_trade_log
+
+
+def test_train_job_survives_a_state_read_failure(monkeypatch):
+    from data import alpaca_crypto_model, alpaca_crypto_strategy
+
+    def fail():
+        raise RuntimeError("state read failed")
+
+    monkeypatch.setattr(alpaca_crypto_strategy, "_load_state", fail)
+    captured = {}
+    monkeypatch.setattr(alpaca_crypto_model, "train_model", lambda **kw: captured.update(kw) or {"ok": True})
+
+    result = alpaca_crypto_server._run_alpaca_crypto_train.__wrapped__()  # noqa: SLF001
+
+    assert result["ok"] is True
+    assert captured["trade_log"] is None  # degrades to plain (non-outcome-weighted) training, doesn't crash the job
 
 
 def test_threads_trending_news_job_posts_the_fetched_story(monkeypatch):

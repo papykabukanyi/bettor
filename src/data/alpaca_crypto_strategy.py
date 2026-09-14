@@ -160,6 +160,21 @@ PROMISING_SENTIMENT_SCORE = _env_float("ALPACA_CRYPTO_PROMISING_SENTIMENT_SCORE"
 PRE_EXIT_STUDY_MINUTES = _env_float("ALPACA_CRYPTO_PRE_EXIT_STUDY_MINUTES", 6.0)
 PROMISING_MODEL_CONFIDENCE = _env_float("ALPACA_CRYPTO_PROMISING_MODEL_CONFIDENCE", 0.58)
 
+# Real gap found in a strategy review: this constant carried NO
+# justification comment at all, unlike every other tunable in this file --
+# flagging that honestly rather than retroactively inventing a rationale
+# that was never actually applied. 0.55 is lower than perps' own
+# evidence-backed 0.58 (see PROMISING_MODEL_CONFIDENCE's own comment
+# above), and alpaca_crypto_backtest.py's own module-level comment
+# documents a real 68-pair/21-day backtest at these exact live defaults
+# returning -13.7% (26.5% win rate, fees eating most of the loss) -- that
+# backtest's own proposed remedies (a "higher_confidence_only" sweep
+# variant at 0.62) point the opposite direction from where this constant
+# actually sits. Not changed here without a FRESH sweep run confirming a
+# better value first (same evidence-before-changing-a-live-risk-knob
+# discipline as every other graduated flag in this codebase) -- see
+# alpaca_crypto_backtest.run_config_sweep, already built and unit-tested,
+# just never run against current data and reconciled with this default.
 MODEL_CONFIDENCE_MIN = _env_float("ALPACA_CRYPTO_MODEL_CONFIDENCE_MIN", 0.55)
 
 # Chart-study confidence layer -- see crypto_correlation.py's own module
@@ -183,6 +198,12 @@ POSITION_SIZE_PCT = _env_float("ALPACA_CRYPTO_POSITION_SIZE_PCT", 0.18)
 # crypto's real fee drag on every round trip (see TAKER_FEE_RATE) that
 # perps doesn't carry at anywhere near this magnitude.
 MAX_CONCURRENT_POSITIONS = max(1, _env_int("ALPACA_CRYPTO_MAX_CONCURRENT_POSITIONS", 5))
+# Also flagged with no prior comment in the same review: tighter than
+# perps' own 0.15 (perps_strategy.py's DAILY_LOSS_CAP_PCT), with no
+# recorded reason for the divergence -- plausibly deliberate (crypto's
+# real fee drag on every round trip, see TAKER_FEE_RATE, plus the 24/7
+# no-close-of-session exposure this market carries that perps doesn't),
+# but not independently backtested at this exact value either way.
 DAILY_LOSS_CAP_PCT = _env_float("ALPACA_CRYPTO_DAILY_LOSS_CAP_PCT", 0.10)
 # Same unbounded-growth guard perps_strategy.py already needed (a real,
 # confirmed OOM contributor there over weeks of live trading) -- keeps the

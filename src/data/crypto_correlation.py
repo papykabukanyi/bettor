@@ -64,9 +64,12 @@ the base gate already enforces, capped at
 Gated behind PERPS_USE_CORRELATION_STUDY / ALPACA_CRYPTO_USE_CORRELATION_STUDY
 -- both default OFF at the CODE level (any other deployment, and every
 test in this repo, gets the conservative default), graduated to ON for
-the actual deployed services via render.yaml per explicit user direction,
-the same way PERPS_ENABLE_SHORTS was graduated (see that key's own comment
-in render.yaml). Correctness here is covered by 30+ unit tests and
+the actual deployed services via the live HF Space's own environment
+variables (`render.yaml`'s `sync: false` env vars served this exact role
+before this codebase's Render-to-HF migration -- confirmed still ON
+today via the Space's own configuration, not just carried over by
+assumption), the same way PERPS_ENABLE_SHORTS was graduated. Correctness
+here is covered by 30+ unit tests and
 leakage-free backtest wiring, but -- unlike ENABLE_SHORTS, which had two
 real historical-return backtest runs behind its own graduation -- this has
 not yet been validated by an actual backtest RUN showing it improves
