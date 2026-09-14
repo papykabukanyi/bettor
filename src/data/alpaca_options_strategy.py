@@ -1268,39 +1268,64 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
             else:
                 current_price = get_current_option_price(contract_symbol)
             if current_price is None:
-                checks.append({"symbol": contract_symbol, "ok": False, "error": "no_quote_available"})
-                continue
+                if effective_dry_run and _near_expiration(position, now=dt.datetime.now(dt.timezone.utc)):
+                    # Real, confirmed stuck-state bug: a dry-run-only
+                    # simulated position (never a real Alpaca order --
+                    # _reconcile_positions_with_exchange only ever runs for
+                    # LIVE positions, see its own docstring, so a live
+                    # position that actually expires gets pruned from state
+                    # there instead) whose contract has already expired, or
+                    # is about to, stops returning ANY quote from Alpaca's
+                    # own data feed -- get_current_option_price/
+                    # get_current_spread_price then return None forever, so
+                    # without this branch the loop retries (and fails) every
+                    # single fast_check cycle indefinitely: permanently
+                    # occupying one of only MAX_CONCURRENT_POSITIONS slots
+                    # and blocking re-entry into the same underlying.
+                    # Confirmed live: AMD260911P00455000, stuck failing
+                    # "no_quote_available" every 30s since its 2026-09-11
+                    # expiration. There is no real settlement value to look
+                    # up (no quote, no real order to reconcile against) --
+                    # booked as a flat $0 P&L change via entry_price ==
+                    # exit_price, clearly labeled, rather than fabricating
+                    # an ITM/OTM guess for a trade that was never real money
+                    # in the first place.
+                    current_price = float(position["entry_price"])
+                    should_exit, reason = True, "expired_no_quote_data_unknown"
+                else:
+                    checks.append({"symbol": contract_symbol, "ok": False, "error": "no_quote_available"})
+                    continue
+            else:
+                # Volume/momentum/breakout/sentiment (of the UNDERLYING, same
+                # basis the entry model itself uses) only matter to decide_exit's
+                # "promising position" extension, which only activates once a
+                # position has already reached MAX_HOLD_MINUTES -- fetched
+                # lazily, only in that case, to keep this loop cheap in the
+                # common case (see perps_strategy.py's identical pattern).
+                dollar_volume_z = momentum_pct = breakout_pct_b = sentiment_score_value = None
+                opened_at_check = dt.datetime.fromisoformat(position["opened_at"])
+                held_minutes_check = (dt.datetime.now(dt.timezone.utc) - opened_at_check).total_seconds() / 60.0
+                if held_minutes_check >= MAX_HOLD_MINUTES:
+                    try:
+                        from data.alpaca_data import latest_feature_row
+                        promising_row = latest_feature_row(underlying_symbol)
+                    except Exception as exc:
+                        promising_row = None
+                        logger.debug("[alpaca_options_strategy] promising-signal feature fetch failed for %s: %s", underlying_symbol, exc)
+                    if promising_row:
+                        dollar_volume_z = promising_row.get("dollar_volume_z")
+                        momentum_pct = promising_row.get("macd_hist_pct")
+                        breakout_pct_b = promising_row.get("bb_pct_b")
+                        sentiment_score_value = promising_row.get("sentiment_score")
 
-            # Volume/momentum/breakout/sentiment (of the UNDERLYING, same
-            # basis the entry model itself uses) only matter to decide_exit's
-            # "promising position" extension, which only activates once a
-            # position has already reached MAX_HOLD_MINUTES -- fetched
-            # lazily, only in that case, to keep this loop cheap in the
-            # common case (see perps_strategy.py's identical pattern).
-            dollar_volume_z = momentum_pct = breakout_pct_b = sentiment_score_value = None
-            opened_at_check = dt.datetime.fromisoformat(position["opened_at"])
-            held_minutes_check = (dt.datetime.now(dt.timezone.utc) - opened_at_check).total_seconds() / 60.0
-            if held_minutes_check >= MAX_HOLD_MINUTES:
-                try:
-                    from data.alpaca_data import latest_feature_row
-                    promising_row = latest_feature_row(underlying_symbol)
-                except Exception as exc:
-                    promising_row = None
-                    logger.debug("[alpaca_options_strategy] promising-signal feature fetch failed for %s: %s", underlying_symbol, exc)
-                if promising_row:
-                    dollar_volume_z = promising_row.get("dollar_volume_z")
-                    momentum_pct = promising_row.get("macd_hist_pct")
-                    breakout_pct_b = promising_row.get("bb_pct_b")
-                    sentiment_score_value = promising_row.get("sentiment_score")
-
-            should_exit, reason = decide_exit(
-                position, current_price,
-                dollar_volume_z=dollar_volume_z, momentum_pct=momentum_pct,
-                breakout_pct_b=breakout_pct_b, sentiment_score=sentiment_score_value,
-            )
-            if not should_exit:
-                checks.append({"symbol": contract_symbol, "ok": True, "exit_check": reason, "current_price": current_price})
-                continue
+                should_exit, reason = decide_exit(
+                    position, current_price,
+                    dollar_volume_z=dollar_volume_z, momentum_pct=momentum_pct,
+                    breakout_pct_b=breakout_pct_b, sentiment_score=sentiment_score_value,
+                )
+                if not should_exit:
+                    checks.append({"symbol": contract_symbol, "ok": True, "exit_check": reason, "current_price": current_price})
+                    continue
 
             closed_count = float(position["count"])
             if not effective_dry_run:

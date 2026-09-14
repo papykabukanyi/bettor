@@ -713,6 +713,81 @@ def test_manage_open_positions_leaves_position_open_when_nothing_triggers(monkey
     assert result["action"] == "no_change"
 
 
+# ── Real, confirmed stuck-state bug: a dry-run position whose contract has
+# already expired stops returning ANY quote from Alpaca -- without a fix,
+# it retries (and fails) "no_quote_available" every single fast_check cycle
+# forever, permanently occupying a MAX_CONCURRENT_POSITIONS slot. Confirmed
+# live: AMD260911P00455000, stuck since its 2026-09-11 expiration. ─────────
+
+def test_manage_open_positions_force_closes_a_dry_run_position_with_no_quote_near_expiration(monkeypatch):
+    strat._save_state({  # noqa: SLF001
+        "positions": [{
+            "symbol": "AMD260911P00455000", "underlying_symbol": "AMD", "entry_price": 10.05, "count": 49,
+            "opened_at": (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=11)).isoformat(), "order_id": None,
+            "expiration_date": (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=3)).date().isoformat(),
+        }],
+        "trade_log": [], "realized_pnl_by_date": {},
+    })
+    monkeypatch.setattr(alpaca_client, "get_option_latest_quote", lambda symbol: {"ap": None, "bp": None})
+
+    result = strat.manage_open_positions()
+
+    assert result["action"] == "closed"
+    trade = result["closed"][0]
+    assert trade["reason"] == "expired_no_quote_data_unknown"
+    assert trade["realized_pnl_usd"] == 0.0
+    assert trade["exit_price"] == trade["entry_price"]
+    state = strat._load_state()  # noqa: SLF001
+    assert state["positions"] == []  # slot freed, no longer stuck
+
+
+def test_manage_open_positions_leaves_a_no_quote_position_open_when_not_near_expiration(monkeypatch):
+    """A genuinely temporary quote outage (data feed hiccup, not an expired
+    contract) must keep retrying next cycle, not get force-closed."""
+    strat._save_state({  # noqa: SLF001
+        "positions": [{
+            "symbol": "AAPL240223C00195000", "underlying_symbol": "AAPL", "entry_price": 5.0, "count": 1,
+            "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(), "order_id": None,
+            "expiration_date": (dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=30)).date().isoformat(),
+        }],
+        "trade_log": [], "realized_pnl_by_date": {},
+    })
+    monkeypatch.setattr(alpaca_client, "get_option_latest_quote", lambda symbol: {"ap": None, "bp": None})
+
+    result = strat.manage_open_positions()
+
+    assert result["action"] == "no_change"
+    assert result["checks"][0]["error"] == "no_quote_available"
+    state = strat._load_state()  # noqa: SLF001
+    assert len(state["positions"]) == 1  # still tracked, not force-closed
+
+
+def test_manage_open_positions_does_not_force_close_a_live_position_with_no_quote_near_expiration(monkeypatch):
+    """Live positions are reconciled against the real exchange BEFORE this
+    loop runs (_reconcile_positions_with_exchange) -- a real position that
+    actually expired is pruned there instead, so this fallback is
+    deliberately scoped to dry-run only. A live position hitting this
+    branch (e.g. a genuine temporary data-feed gap right at expiration)
+    must not be force-closed on a fabricated $0 price -- that could paper
+    over a real, non-zero settlement value."""
+    monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", True)
+    monkeypatch.setattr(strat, "_reconcile_positions_with_exchange", lambda state: state.get("positions") or [])
+    strat._save_state({  # noqa: SLF001
+        "positions": [{
+            "symbol": "AMD260911P00455000", "underlying_symbol": "AMD", "entry_price": 10.05, "count": 49,
+            "opened_at": (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=11)).isoformat(), "order_id": "order-1",
+            "expiration_date": (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=3)).date().isoformat(),
+        }],
+        "trade_log": [], "realized_pnl_by_date": {},
+    })
+    monkeypatch.setattr(alpaca_client, "get_option_latest_quote", lambda symbol: {"ap": None, "bp": None})
+
+    result = strat.manage_open_positions()
+
+    assert result["action"] == "no_change"
+    assert result["checks"][0]["error"] == "no_quote_available"
+
+
 def test_manage_open_positions_never_places_a_real_order_in_dry_run(monkeypatch):
     strat._save_state({  # noqa: SLF001
         "positions": [{
