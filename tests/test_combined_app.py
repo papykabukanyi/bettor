@@ -106,6 +106,49 @@ def test_crypto_dashboard_report_link_is_prefixed_for_its_own_mount(client):
     assert 'href="/api/alpaca/crypto/report.pdf"' not in html
 
 
+# ── Real, confirmed bug, MUCH bigger in scope than the report link above:
+# every dashboard's own JS did fetch("/api/...") -- a hardcoded, un-prefixed
+# ABSOLUTE path. Server-side url_for() correctly resolves an internal
+# route to ITS OWN mount prefix, but a string baked into the page's JS
+# means nothing to the BROWSER: a leading "/" always resolves from the
+# domain root, ignoring whatever path the page was actually loaded from.
+# Confirmed live in production: stocks/crypto/options' dashboards never
+# showed a single number, every single 10s refresh 404ing silently against
+# perps' own "/" mount (which has no such routes) instead of their own. ──
+
+def test_stocks_dashboard_fetch_urls_are_prefixed_for_its_own_mount(client):
+    resp = client.get("/stocks/alpaca")
+    assert resp.status_code == 200
+    html = resp.get_data(as_text=True)
+    assert 'STATUS_URL = "/stocks/api/alpaca/status"' in html
+    assert 'TRADES_URL = "/stocks/api/alpaca/trades"' in html
+    assert 'ACTIVITY_URL = "/stocks/api/server/activity"' in html
+    for url in ("/stocks/api/alpaca/status", "/stocks/api/alpaca/trades", "/stocks/api/server/activity"):
+        assert client.get(url).status_code == 200
+
+
+def test_crypto_dashboard_fetch_urls_are_prefixed_for_its_own_mount(client):
+    resp = client.get("/crypto/alpaca-crypto")
+    assert resp.status_code == 200
+    html = resp.get_data(as_text=True)
+    assert 'STATUS_URL = "/crypto/api/alpaca/crypto/status"' in html
+    assert 'TRADES_URL = "/crypto/api/alpaca/crypto/trades"' in html
+    assert 'ACTIVITY_URL = "/crypto/api/server/activity"' in html
+    for url in ("/crypto/api/alpaca/crypto/status", "/crypto/api/alpaca/crypto/trades", "/crypto/api/server/activity"):
+        assert client.get(url).status_code == 200
+
+
+def test_options_dashboard_fetch_urls_are_prefixed_for_its_own_mount(client):
+    resp = client.get("/options/alpaca-options")
+    assert resp.status_code == 200
+    html = resp.get_data(as_text=True)
+    assert 'STATUS_URL = "/options/api/alpaca/options/status"' in html
+    assert 'TRADES_URL = "/options/api/alpaca/options/trades"' in html
+    assert 'ACTIVITY_URL = "/options/api/server/activity"' in html
+    for url in ("/options/api/alpaca/options/status", "/options/api/alpaca/options/trades", "/options/api/server/activity"):
+        assert client.get(url).status_code == 200
+
+
 def test_chart_route_does_not_collide_across_markets(client):
     """All 4 apps define an identical /chart/<path:filename> route --
     confirm each is only ever reached through its own market's prefix

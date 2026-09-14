@@ -163,6 +163,18 @@
 <footer>Auto-refreshes every 10s. Separate system from the Kalshi perps bot -- own balance, own positions, own model. <span id="connection-status"></span> &middot; Powered by <a href="https://cumdev.onrender.com" target="_blank" rel="noopener">CUMDEV</a></footer>
 
 <script>
+// Real, confirmed bug: this dashboard is served through a non-root mount
+// ("/stocks") behind werkzeug's DispatcherMiddleware -- that prefix is
+// stripped before this Flask app's OWN routing ever sees a request, but
+// it means NOTHING to the browser. A hardcoded absolute fetch("/api/...")
+// resolves from the domain root, not from wherever this page was actually
+// loaded, so it silently 404'd (Perps' own "/" mount has no such route)
+// on every single 10s refresh, live, in production -- the dashboard never
+// showed a single number. url_for() renders the correct mount-prefixed
+// path server-side at template-render time.
+const STATUS_URL = "{{ url_for('api_alpaca_status') }}";
+const TRADES_URL = "{{ url_for('api_alpaca_trades') }}";
+const ACTIVITY_URL = "{{ url_for('server_activity') }}";
 const fmtUsd = (v) => (v === null || v === undefined || isNaN(v)) ? "--" : "$" + Number(v).toFixed(2);
 const fmtPrice = (v) => {
   if (v === null || v === undefined || isNaN(v)) return "--";
@@ -274,7 +286,7 @@ function nextRetrainText(trainHourEt) {
 async function refreshStatus() {
   let data;
   try {
-    const res = await fetch("/api/alpaca/status");
+    const res = await fetch(STATUS_URL);
     data = await res.json();
     lastStatusSuccessMs = Date.now();
   } catch (e) {
@@ -455,7 +467,7 @@ async function refreshStatus() {
 
 async function refreshTrades() {
   try {
-    const res = await fetch("/api/alpaca/trades");
+    const res = await fetch(TRADES_URL);
     const data = await res.json();
     const tbody = document.getElementById("trades-body");
     const trades = (data.trades || []).slice(0, 30);
@@ -472,7 +484,7 @@ async function refreshTrades() {
 
 async function refreshActivity() {
   try {
-    const res = await fetch("/api/server/activity");
+    const res = await fetch(ACTIVITY_URL);
     const data = await res.json();
     const tbody = document.getElementById("activity-body");
     const recent = ((data.recent || []).filter(r => (r.job || "").startsWith("alpaca_"))).slice(0, 20);
