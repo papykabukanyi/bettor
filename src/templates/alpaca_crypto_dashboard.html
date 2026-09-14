@@ -8,90 +8,186 @@
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   :root {
-    --bg: #0a0c11; --surface: #12151c; --surface2: #191d27; --border: #232838;
-    --text: #e7ecf5; --muted: #8792a8; --green: #22c55e; --gdim: #12291a;
-    --red: #ef4444; --rdim: #2a1414; --yellow: #eab308; --blue: #3b82f6; --r: 10px;
+    --bg: #05060a; --surface: #12151e; --surface2: #191e2c; --surface3: #1f2534;
+    --border: #232a3d; --border2: #2c3348;
+    --text: #edf0f8; --muted: #8894ac; --muted2: #5c6580;
+    --accent: #8b7bff; --accent2: #22d3ee;
+    --green: #22c55e; --gdim: rgba(34,197,94,.13); --gborder: rgba(34,197,94,.35);
+    --red: #f4495e; --rdim: rgba(244,73,94,.13); --rborder: rgba(244,73,94,.35);
+    --yellow: #f0b429; --ydim: rgba(240,180,41,.13);
+    --r: 14px; --r-sm: 9px;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
   }
+  html { background: var(--bg); }
   body {
-    background: var(--bg); color: var(--text);
-    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    padding: 20px; max-width: 1150px; margin: 0 auto;
+    background:
+      radial-gradient(1100px 480px at 12% -10%, rgba(139,123,255,.10), transparent 60%),
+      radial-gradient(900px 420px at 100% 0%, rgba(34,211,238,.07), transparent 55%),
+      var(--bg);
+    color: var(--text);
+    font: 14px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    padding: 22px clamp(14px, 3vw, 30px) 44px;
+    max-width: 1360px; margin: 0 auto;
+    -webkit-font-smoothing: antialiased;
   }
-  header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; margin-bottom: 18px; }
-  h1 { font-size: 20px; font-weight: 700; letter-spacing: -0.01em; }
-  .badge { display: inline-block; padding: 4px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; }
-  .badge.dry { background: var(--gdim); color: var(--green); }
-  .badge.live { background: var(--rdim); color: var(--red); }
-  .badge.warn { background: #2a2510; color: var(--yellow); }
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-bottom: 16px; }
-  .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r); padding: 14px 16px; }
-  .card h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin-bottom: 8px; font-weight: 600; }
-  .stat { font-size: 22px; font-weight: 700; }
-  .stat.pos { color: var(--green); }
-  .stat.neg { color: var(--red); }
-  .sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
-  section { margin-bottom: 20px; }
-  section h3 { font-size: 14px; margin-bottom: 8px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+  ::selection { background: rgba(139,123,255,.35); }
+  .num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+
+  header {
+    display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px;
+    margin-bottom: 22px; padding-bottom: 16px; border-bottom: 1px solid var(--border);
+  }
+  .brand { display: flex; align-items: center; gap: 10px; }
+  .brand img { border-radius: 8px; box-shadow: 0 0 0 1px var(--border2), 0 4px 14px rgba(139,123,255,.18); }
+  h1 { font-size: 19px; font-weight: 700; letter-spacing: -0.01em; }
+  h1 .accent { background: linear-gradient(90deg, var(--accent), var(--accent2)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .live-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--muted2); margin-left: 8px; vertical-align: 1px; }
+  .live-dot.on { background: var(--green); box-shadow: 0 0 0 3px var(--gdim); animation: pulse 2s ease-in-out infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .45; } }
+
+  .badge { display: inline-flex; align-items:center; gap:5px; padding: 5px 11px; border-radius: 999px; font-size: 11.5px; font-weight: 700; letter-spacing: .02em; border: 1px solid transparent; }
+  .badge.dry { background: var(--gdim); color: var(--green); border-color: var(--gborder); }
+  .badge.live { background: var(--rdim); color: var(--red); border-color: var(--rborder); }
+  .badge.warn { background: var(--ydim); color: var(--yellow); border-color: rgba(240,180,41,.35); }
+
+  .toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .toggle-btn {
+    display: inline-flex; align-items: center; gap: 6px; padding: 7px 13px; border-radius: 999px;
+    background: var(--surface2); border: 1px solid var(--border2); color: var(--text);
+    text-decoration: none; font-size: 12px; font-weight: 600; transition: all .15s ease;
+  }
+  .toggle-btn:hover { background: var(--surface3); border-color: var(--accent); transform: translateY(-1px); }
+
+  section { margin-bottom: 26px; }
+  .section-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
+  .section-head h3 { font-size: 12.5px; color: var(--muted); text-transform: uppercase; letter-spacing: .07em; font-weight: 700; }
+  .section-head .hint { font-size: 11.5px; color: var(--muted2); }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; }
+  .card {
+    position: relative; background: linear-gradient(180deg, var(--surface), var(--surface2));
+    border: 1px solid var(--border); border-radius: var(--r); padding: 15px 17px; overflow: hidden;
+    transition: border-color .2s ease, transform .2s ease;
+  }
+  .card::before { content:""; position:absolute; left:0; top:0; bottom:0; width: 3px; background: var(--accentbar, var(--border2)); }
+  .card:hover { border-color: var(--border2); }
+  .card h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin-bottom: 9px; font-weight: 700; display:flex; align-items:center; gap:6px; }
+  .stat { font-size: 24px; font-weight: 700; letter-spacing: -.01em; }
+  .stat.pos { color: var(--green); } .stat.neg { color: var(--red); }
+  .sub { color: var(--muted); font-size: 11.5px; margin-top: 4px; }
+  .spark { margin-top: 8px; height: 26px; width: 100%; display: block; }
+
   table { width: 100%; border-collapse: collapse; background: var(--surface); border: 1px solid var(--border); border-radius: var(--r); overflow: hidden; }
-  th, td { text-align: left; padding: 8px 10px; font-size: 13px; border-bottom: 1px solid var(--border); white-space: nowrap; }
-  th { color: var(--muted); font-weight: 600; background: var(--surface2); }
+  th, td { text-align: left; padding: 9px 11px; font-size: 12.5px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  th { color: var(--muted); font-weight: 700; background: var(--surface2); font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em; }
   tr:last-child td { border-bottom: none; }
-  .tag { padding: 2px 8px; border-radius: 6px; font-size: 11px; font-weight: 600; }
+  tbody tr { transition: opacity .35s ease, background-color .6s ease; }
+  tbody tr:hover td { background: rgba(255,255,255,.018); }
+  tbody tr.row-enter { opacity: 0; background-color: rgba(139,123,255,.14); }
+  tbody tr.row-exit { opacity: 0; }
+  .scroll-x { overflow-x: auto; border-radius: var(--r); }
+  .empty { color: var(--muted2); padding: 22px; text-align: center; font-size: 12.5px; }
+
+  .tag { display:inline-block; padding: 2.5px 9px; border-radius: 6px; font-size: 10.5px; font-weight: 700; letter-spacing:.02em; }
   .tag.yes { background: var(--gdim); color: var(--green); }
   .tag.no { background: var(--rdim); color: var(--red); }
-  .tag.wait { background: #2a2510; color: var(--yellow); }
-  .empty { color: var(--muted); padding: 14px; text-align: center; }
-  .scroll-x { overflow-x: auto; }
-  tbody tr { transition: opacity .35s ease, background-color .6s ease; }
-  tbody tr.row-enter { opacity: 0; background-color: rgba(59,130,246,.12); }
-  tbody tr.row-exit { opacity: 0; }
-  footer { color: var(--muted); font-size: 12px; text-align: center; margin-top: 24px; }
-  a { color: var(--blue); }
-  .toggle-btn {
-    display: inline-flex; align-items: center; gap: 6px; padding: 6px 14px; border-radius: 999px;
-    background: var(--surface2); border: 1px solid var(--border); color: var(--text);
-    text-decoration: none; font-size: 12px; font-weight: 600; transition: background-color .15s ease;
-  }
-  .toggle-btn:hover { background: var(--border); }
-  .config-grid {
-    display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 6px 16px;
-    background: var(--surface); border: 1px solid var(--border); border-radius: var(--r); padding: 14px 16px;
-  }
-  .config-grid div { display: flex; justify-content: space-between; font-size: 12px; padding: 3px 0; }
+  .tag.wait { background: var(--ydim); color: var(--yellow); }
+
+  .signals { display: flex; gap: 5px; flex-wrap: wrap; align-items: center; }
+  .sig { display: inline-flex; align-items: center; gap: 3px; padding: 2px 7px; border-radius: 5px; background: var(--surface3); font-size: 10.5px; font-weight: 600; color: var(--muted); border: 1px solid var(--border); cursor: default; }
+  .sig b { color: var(--text); font-family: var(--mono); }
+  .sig.pos b { color: var(--green); } .sig.neg b { color: var(--red); }
+
+  .config-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 1px; background: var(--border); border: 1px solid var(--border); border-radius: var(--r); overflow: hidden; }
+  .config-grid div { display: flex; justify-content: space-between; gap: 10px; font-size: 12px; padding: 10px 14px; background: var(--surface); }
   .config-grid .k { color: var(--muted); }
-  .config-grid .v { font-weight: 600; }
+  .config-grid .v { font-weight: 700; font-family: var(--mono); }
+
+  .panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r); padding: 16px 18px; }
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  @media (max-width: 820px) { .two-col { grid-template-columns: 1fr; } }
+
+  .barrow { display: grid; grid-template-columns: 118px 1fr 52px; align-items: center; gap: 10px; padding: 6px 0; }
+  .barrow .lbl { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .barrow .lbl.winner { color: var(--text); font-weight: 700; }
+  .bartrack { height: 8px; border-radius: 5px; background: var(--surface3); overflow: hidden; position: relative; }
+  .barfill { height: 100%; border-radius: 5px; background: linear-gradient(90deg, var(--accent), var(--accent2)); }
+  .barfill.neg { background: linear-gradient(90deg, var(--red), #ff8a65); }
+  .barrow .val { font-family: var(--mono); font-size: 11.5px; color: var(--muted); text-align: right; }
+  .star { color: var(--yellow); margin-right: 4px; }
+
+  .coverage-strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
+  .coverage-strip .mini { text-align: center; padding: 12px 8px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-sm); }
+  .coverage-strip .mini .n { font-family: var(--mono); font-size: 20px; font-weight: 700; }
+  .coverage-strip .mini .l { font-size: 10.5px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; margin-top: 3px; }
+
+  footer { color: var(--muted2); font-size: 11.5px; text-align: center; margin-top: 30px; }
+  a { color: var(--accent2); }
 </style>
 </head>
 <body>
 <header>
-  <h1><img src="{{ url_for('static', filename='cumdev-icon.svg') }}" alt="CUMDEV" width="24" height="24" style="vertical-align:-5px;border-radius:6px;margin-right:8px;">&#8383; Alpaca Crypto</h1>
-  <div style="display:flex; align-items:center; gap:10px;">
+  <div class="brand">
+    <img src="{{ url_for('static', filename='cumdev-icon.svg') }}" alt="CUMDEV" width="26" height="26">
+    <h1>&#8383; <span class="accent">Alpaca Crypto</span><span id="live-dot" class="live-dot"></span></h1>
+  </div>
+  <div class="toolbar">
     <span id="config-badge" class="badge warn">&nbsp;</span>
     <span id="mode-badge" class="badge dry">&nbsp;</span>
-    <a href="{{ url_for('api_alpaca_crypto_report_pdf') }}" class="toggle-btn">&#11015; Download Report</a>
+    <a href="{{ url_for('api_alpaca_crypto_report_pdf') }}" class="toggle-btn">&#11015; Report</a>
     <a href="{{ perps_url }}" class="toggle-btn">&#8646; Perps</a>
     <a href="{{ stocks_url }}" class="toggle-btn">&#8646; Stocks</a>
     <a href="{{ options_url }}" class="toggle-btn">&#8646; Options</a>
   </div>
 </header>
 
-<div class="grid">
-  <div class="card"><h2>Balance</h2><div id="balance" class="stat">--</div><div class="sub" id="balance-sub">--</div></div>
-  <div class="card"><h2>Positions</h2><div id="position-count" class="stat">--</div><div class="sub" id="position-sub">--</div></div>
-  <div class="card"><h2>Today's P&amp;L</h2><div id="today-pnl" class="stat">--</div><div class="sub" id="total-pnl-sub">--</div></div>
-  <div class="card"><h2>Direction Model</h2><div id="model-status" class="stat">--</div><div class="sub" id="model-sub">--</div></div>
-  <div class="card"><h2>Win Rate</h2><div id="win-rate" class="stat">--</div><div class="sub" id="win-rate-sub">--</div></div>
-  <div class="card"><h2>Goal Progress</h2><div id="milestone-return" class="stat">--</div><div class="sub" id="milestone-sub">--</div></div>
-</div>
+<section>
+  <div class="grid">
+    <div class="card" style="--accentbar: var(--accent);">
+      <h2>Balance</h2><div id="balance" class="stat num">--</div><div class="sub" id="balance-sub">--</div>
+      <svg id="balance-spark" class="spark" viewBox="0 0 240 26" preserveAspectRatio="none"></svg>
+    </div>
+    <div class="card"><h2>Positions</h2><div id="position-count" class="stat num">--</div><div class="sub" id="position-sub">--</div></div>
+    <div class="card"><h2>Today&rsquo;s P&amp;L</h2><div id="today-pnl" class="stat num">--</div><div class="sub" id="total-pnl-sub">--</div></div>
+    <div class="card"><h2>Direction Model</h2><div id="model-status" class="stat">--</div><div class="sub" id="model-sub">--</div></div>
+    <div class="card"><h2>Win Rate</h2><div id="win-rate" class="stat num">--</div><div class="sub" id="win-rate-sub">--</div></div>
+    <div class="card"><h2>Goal Progress</h2><div id="milestone-return" class="stat num">--</div><div class="sub" id="milestone-sub">--</div></div>
+  </div>
+</section>
 
 <section>
-  <h3>Strategy &amp; Server Config &mdash; everything currently active</h3>
+  <div class="section-head"><h3>Model Intelligence</h3><span class="hint">walk-forward candidate comparison &middot; live feature weights</span></div>
+  <div class="two-col">
+    <div class="panel">
+      <div style="font-size:11.5px;color:var(--muted);margin-bottom:10px;text-transform:uppercase;letter-spacing:.05em;font-weight:700;">Candidate Models &mdash; Walk-Forward Score</div>
+      <div id="model-candidates"><div class="empty">No trained model yet</div></div>
+    </div>
+    <div class="panel">
+      <div style="font-size:11.5px;color:var(--muted);margin-bottom:10px;text-transform:uppercase;letter-spacing:.05em;font-weight:700;">Top Features &mdash; Active Model</div>
+      <div id="model-features"><div class="empty">No trained model yet</div></div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="section-head"><h3>Chart-Study Coverage</h3><span class="hint">cross-market correlation/leader-divergence signal feeding entries</span></div>
+  <div class="coverage-strip" id="coverage-strip">
+    <div class="mini"><div class="n" id="cov-ids">--</div><div class="l">Instruments</div></div>
+    <div class="mini"><div class="n" id="cov-peer">--</div><div class="l">Peer Data</div></div>
+    <div class="mini"><div class="n" id="cov-div">--</div><div class="l">Divergence Data</div></div>
+    <div class="mini"><div class="n" id="cov-breadth">--</div><div class="l">Breadth</div></div>
+    <div class="mini"><div class="n" id="cov-age">--</div><div class="l">Last Computed</div></div>
+  </div>
+</section>
+
+<section>
+  <div class="section-head"><h3>Strategy &amp; Server Config</h3><span class="hint">everything currently active</span></div>
   <div class="config-grid" id="config-grid">
     <div><span class="k">Mode</span><span class="v" id="cfg-mode">--</span></div>
     <div><span class="k">Live trading</span><span class="v" id="cfg-live">--</span></div>
     <div><span class="k">Position size</span><span class="v" id="cfg-size">--</span></div>
     <div><span class="k">Max concurrent</span><span class="v" id="cfg-maxpos">--</span></div>
-    <div><span class="k">Take profit / Stop loss (base)</span><span class="v" id="cfg-tpsl">--</span></div>
+    <div><span class="k">Take profit / Stop loss</span><span class="v" id="cfg-tpsl">--</span></div>
     <div><span class="k">Taker fee (round trip)</span><span class="v" id="cfg-fee">--</span></div>
     <div><span class="k">Max hold time</span><span class="v" id="cfg-maxhold">--</span></div>
     <div><span class="k">Daily loss cap</span><span class="v" id="cfg-losscap">--</span></div>
@@ -104,17 +200,17 @@
 </section>
 
 <section>
-  <h3>Open Positions</h3>
+  <div class="section-head"><h3>Open Positions</h3></div>
   <div class="scroll-x">
     <table>
-      <thead><tr><th>Pair</th><th>Entry</th><th>Current</th><th>Unrealized P&amp;L</th><th>Coins</th><th>Take Profit</th><th>Stop Loss</th><th>Opened</th><th>Order</th><th>Chart Study</th><th>Status</th></tr></thead>
+      <thead><tr><th>Pair</th><th>Entry</th><th>Current</th><th>Unrealized P&amp;L</th><th>Coins</th><th>Take Profit</th><th>Stop Loss</th><th>Opened</th><th>Order</th><th>Signals</th><th>Status</th></tr></thead>
       <tbody id="positions-body"><tr><td colspan="11" class="empty">No open positions</td></tr></tbody>
     </table>
   </div>
 </section>
 
 <section>
-  <h3>Last Entry Scan</h3>
+  <div class="section-head"><h3>Last Entry Scan</h3></div>
   <div class="scroll-x">
     <table>
       <thead><tr><th>Pair</th><th>Action</th><th>Entry</th><th>Notional</th><th>Chart Study</th><th>Reason</th></tr></thead>
@@ -124,41 +220,45 @@
 </section>
 
 <section>
-  <h3>Recent Trades</h3>
+  <div class="section-head"><h3>Recent Trades</h3></div>
   <div class="scroll-x">
     <table>
-      <thead><tr><th>Closed</th><th>Pair</th><th>Entry</th><th>Exit</th><th>Coins</th><th>Fee</th><th>Net P&amp;L</th><th>Chart Study</th><th>Reason</th></tr></thead>
-      <tbody id="trades-body"><tr><td colspan="9" class="empty">No trades yet</td></tr></tbody>
+      <thead><tr><th>Closed</th><th>Pair</th><th>Held</th><th>Entry</th><th>Exit</th><th>Coins</th><th>Fee</th><th>Net P&amp;L</th><th>Signals</th><th>Reason</th></tr></thead>
+      <tbody id="trades-body"><tr><td colspan="10" class="empty">No trades yet</td></tr></tbody>
     </table>
   </div>
 </section>
 
 <section>
-  <h3>Off-Hours Backtest &mdash; Latest Sweep (strategy variants, not just TP/SL)</h3>
-  <div class="scroll-x">
-    <table>
-      <thead><tr><th>Variant</th><th>Trades</th><th>Win Rate</th><th>Return</th><th>Sample</th></tr></thead>
-      <tbody id="sweep-body"><tr><td colspan="5" class="empty">No sweep yet -- runs automatically, off-hours</td></tr></tbody>
-    </table>
+  <div class="section-head"><h3>Backtest Validation</h3><span class="hint">off-hours strategy-variant sweep &middot; weekly walk-forward consistency check</span></div>
+  <div class="two-col" style="align-items:start;">
+    <div>
+      <div style="font-size:12px;color:var(--muted);margin-bottom:8px;">Latest Sweep &mdash; Strategy Variants</div>
+      <div class="scroll-x">
+        <table>
+          <thead><tr><th>Variant</th><th>Trades</th><th>Win Rate</th><th>Return</th><th>Sample</th></tr></thead>
+          <tbody id="sweep-body"><tr><td colspan="5" class="empty">No sweep yet</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+    <div>
+      <div style="font-size:12px;color:var(--muted);margin-bottom:8px;">Walk-Forward &mdash; Fold Consistency</div>
+      <div class="grid" style="grid-template-columns:1fr 1fr;margin-bottom:10px;">
+        <div class="card"><h2>Profitable Folds</h2><div id="wf-profitable" class="stat num">--</div><div class="sub" id="wf-profitable-sub">--</div></div>
+        <div class="card"><h2>Mean Return / Fold</h2><div id="wf-mean-return" class="stat num">--</div><div class="sub" id="wf-mean-return-sub">--</div></div>
+      </div>
+      <div class="scroll-x">
+        <table>
+          <thead><tr><th>Fold</th><th>Window</th><th>Trades</th><th>Win Rate</th><th>Return</th></tr></thead>
+          <tbody id="walkforward-body"><tr><td colspan="5" class="empty">No walk-forward run yet</td></tr></tbody>
+        </table>
+      </div>
+    </div>
   </div>
 </section>
 
 <section>
-  <h3>Weekly Walk-Forward Backtest &mdash; Consistency Across Time Periods</h3>
-  <div class="grid" style="margin-bottom:0;">
-    <div class="card"><h2>Profitable Folds</h2><div id="wf-profitable" class="stat">--</div><div class="sub" id="wf-profitable-sub">--</div></div>
-    <div class="card"><h2>Mean Return / Fold</h2><div id="wf-mean-return" class="stat">--</div><div class="sub" id="wf-mean-return-sub">--</div></div>
-  </div>
-  <div class="scroll-x" style="margin-top:12px;">
-    <table>
-      <thead><tr><th>Fold</th><th>Train/Test Window</th><th>Trades</th><th>Win Rate</th><th>Return</th></tr></thead>
-      <tbody id="walkforward-body"><tr><td colspan="5" class="empty">No walk-forward run yet -- runs automatically, weekly</td></tr></tbody>
-    </table>
-  </div>
-</section>
-
-<section>
-  <h3>Server Activity</h3>
+  <div class="section-head"><h3>Server Activity</h3></div>
   <div class="scroll-x">
     <table>
       <thead><tr><th>Job</th><th>Status</th><th>Started</th><th>Duration</th><th>Summary</th></tr></thead>
@@ -167,7 +267,7 @@
   </div>
 </section>
 
-<footer>Auto-refreshes every 10s. Trades 24/7 -- separate service from Kalshi perps and Alpaca stocks. <span id="connection-status"></span> &middot; Powered by <a href="https://cumdev.onrender.com" target="_blank" rel="noopener">CUMDEV</a></footer>
+<footer>Auto-refreshes every 10s. Trades 24/7 &mdash; separate service from Kalshi perps and Alpaca stocks. <span id="connection-status"></span> &middot; Powered by <a href="https://cumdev.onrender.com" target="_blank" rel="noopener">CUMDEV</a></footer>
 
 <script>
 const fmtUsd = (v) => (v === null || v === undefined || isNaN(v)) ? "--" : "$" + Number(v).toFixed(2);
@@ -179,6 +279,7 @@ const fmtPrice = (v) => {
 };
 const fmtCoins = (v) => (v === null || v === undefined || isNaN(v)) ? "--" : Number(v).toFixed(6);
 const fmtPct = (v) => (v === null || v === undefined || isNaN(v)) ? "--" : (Number(v) * 100).toFixed(3) + "%";
+const fmtPct1 = (v) => (v === null || v === undefined || isNaN(v)) ? "--" : (Number(v) * 100).toFixed(1) + "%";
 // Chart-study (crypto_correlation.py) bullishness score -- bullish-signed,
 // always computed and attached for observability even while
 // USE_CORRELATION_STUDY is off (see evaluate_candidate's own comment) --
@@ -198,6 +299,36 @@ const timeAgo = (iso) => {
   if (sec < 86400) return Math.round(sec / 3600) + "h ago";
   return Math.round(sec / 86400) + "d ago";
 };
+
+// Compact multi-signal glyph strip -- what the model/technicals actually
+// saw at entry time, for both open positions and closed trades, without
+// needing to widen the table into an unreadable wall of columns (the
+// data was always captured -- see alpaca_crypto_strategy.py's own
+// entry_context -- just never surfaced on this dashboard before).
+function signalsHtml(row) {
+  const parts = [];
+  if (row.entry_probability_up !== null && row.entry_probability_up !== undefined) {
+    const p = Number(row.entry_probability_up);
+    const dir = row.entry_model_direction === "down" ? "&#8595;" : "&#8593;";
+    const cls = p >= 0.5 ? "pos" : "neg";
+    parts.push(`<span class="sig ${cls}" title="Model prediction at entry">P${dir} <b>${(p * 100).toFixed(0)}%</b></span>`);
+  }
+  if (row.entry_sentiment_score !== null && row.entry_sentiment_score !== undefined) {
+    const s = Number(row.entry_sentiment_score);
+    const cls = s > 0.05 ? "pos" : s < -0.05 ? "neg" : "";
+    parts.push(`<span class="sig ${cls}" title="News/social sentiment at entry">S <b>${s >= 0 ? "+" : ""}${s.toFixed(2)}</b></span>`);
+  }
+  if (row.entry_rsi_14 !== null && row.entry_rsi_14 !== undefined) {
+    parts.push(`<span class="sig" title="RSI(14) at entry">RSI <b>${(Number(row.entry_rsi_14) * 100).toFixed(0)}</b></span>`);
+  }
+  if (row.entry_correlation_score !== null && row.entry_correlation_score !== undefined) {
+    const c = Number(row.entry_correlation_score);
+    const cls = c > 0.05 ? "pos" : c < -0.05 ? "neg" : "";
+    parts.push(`<span class="sig ${cls}" title="${(row.entry_correlation_reason || "chart study").replace(/"/g, '&quot;')}">CS <b>${c >= 0 ? "+" : ""}${c.toFixed(2)}</b></span>`);
+  }
+  if (!parts.length) return '<span class="sub">--</span>';
+  return `<div class="signals">${parts.join("")}</div>`;
+}
 
 function patchTable(tbody, items, keyFn, rowHtmlFn, emptyColspan, emptyMessage) {
   if (!items || !items.length) {
@@ -272,6 +403,84 @@ function retrainCadenceText(trainIntervalMinutes) {
   return `every ${trainIntervalMinutes} min, 24/7`;
 }
 
+// Tiny inline SVG sparkline of cumulative realized P&L by date -- built
+// client-side from data already in the status payload (no new endpoint
+// needed). Purely a trend indicator, not a precise chart.
+function renderSparkline(byDate) {
+  const svg = document.getElementById("balance-spark");
+  const dates = Object.keys(byDate || {}).sort();
+  if (dates.length < 2) { svg.innerHTML = ""; return; }
+  let cum = 0;
+  const points = dates.map(d => { cum += Number(byDate[d]) || 0; return cum; });
+  const min = Math.min(...points, 0), max = Math.max(...points, 0);
+  const span = (max - min) || 1;
+  const w = 240, h = 26, pad = 2;
+  const stepX = (w - pad * 2) / (points.length - 1);
+  const coords = points.map((v, i) => {
+    const x = pad + i * stepX;
+    const y = h - pad - ((v - min) / span) * (h - pad * 2);
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  });
+  const last = points[points.length - 1];
+  const color = last > 0 ? "var(--green)" : last < 0 ? "var(--red)" : "var(--muted2)";
+  const fillPoints = `${pad},${h - pad} ` + coords.join(" ") + ` ${w - pad},${h - pad}`;
+  svg.innerHTML = `
+    <polygon points="${fillPoints}" fill="${color}" opacity="0.10"></polygon>
+    <polyline points="${coords.join(" ")}" fill="none" stroke="${color}" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"></polyline>`;
+}
+
+function renderModelIntelligence(model) {
+  const candWrap = document.getElementById("model-candidates");
+  const featWrap = document.getElementById("model-features");
+  const scores = (model && model.scores) || {};
+  const names = Object.keys(scores);
+  if (!names.length) {
+    candWrap.innerHTML = '<div class="empty">No trained model yet</div>';
+    featWrap.innerHTML = '<div class="empty">No trained model yet</div>';
+    return;
+  }
+  const vals = names.map(n => Number(scores[n].walk_forward_mean_score ?? 0));
+  const maxScore = Math.max(...vals, 0.0001);
+  const rows = names.map((n, i) => {
+    const isWinner = n === model.model_type;
+    const pct = Math.max(2, (vals[i] / maxScore) * 100);
+    return `
+      <div class="barrow">
+        <div class="lbl ${isWinner ? "winner" : ""}">${isWinner ? '<span class="star">&#9733;</span>' : ""}${n.replace(/_/g, " ")}</div>
+        <div class="bartrack"><div class="barfill" style="width:${pct}%;"></div></div>
+        <div class="val">${vals[i].toFixed(3)}</div>
+      </div>`;
+  }).join("");
+  candWrap.innerHTML = rows;
+
+  const importances = (model.feature_importances && model.feature_importances[model.model_type]) || null;
+  if (!importances) {
+    featWrap.innerHTML = '<div class="empty">No feature-importance data for the active model</div>';
+    return;
+  }
+  const entries = Object.entries(importances).sort((a, b) => Math.abs(b[1]) - Math.abs(a[1])).slice(0, 8);
+  const maxAbs = Math.max(...entries.map(([, v]) => Math.abs(v)), 0.0001);
+  featWrap.innerHTML = entries.map(([name, v]) => {
+    const pct = Math.max(2, (Math.abs(v) / maxAbs) * 100);
+    const neg = v < 0;
+    return `
+      <div class="barrow">
+        <div class="lbl">${name.replace(/_/g, " ")}</div>
+        <div class="bartrack"><div class="barfill ${neg ? "neg" : ""}" style="width:${pct}%;"></div></div>
+        <div class="val">${v >= 0 ? "+" : ""}${v.toFixed(3)}</div>
+      </div>`;
+  }).join("");
+}
+
+function renderCoverage(health) {
+  const h = health || {};
+  document.getElementById("cov-ids").textContent = h.num_ids ?? "--";
+  document.getElementById("cov-peer").textContent = h.num_with_peer_data ?? "--";
+  document.getElementById("cov-div").textContent = h.num_with_divergence_data ?? "--";
+  document.getElementById("cov-breadth").textContent = (h.breadth !== null && h.breadth !== undefined) ? Number(h.breadth).toFixed(2) : "--";
+  document.getElementById("cov-age").textContent = h.computed_at ? timeAgo(h.computed_at) : "--";
+}
+
 async function refreshStatus() {
   let data;
   try {
@@ -294,18 +503,25 @@ async function refreshStatus() {
     }
     const modeBadge = document.getElementById("mode-badge");
     const acctLabel = data.account_type === "live" ? "LIVE ACCOUNT" : "PAPER";
+    const liveDot = document.getElementById("live-dot");
     if (data.live_trading_enabled) {
       modeBadge.textContent = acctLabel;
       modeBadge.className = data.account_type === "live" ? "badge live" : "badge dry";
+      liveDot.className = "live-dot on";
     } else {
       modeBadge.textContent = `${acctLabel} (armed off)`;
       modeBadge.className = "badge warn";
+      liveDot.className = "live-dot";
     }
   } catch (e) { console.error("badges render failed", e); }
 
   try {
     document.getElementById("balance").textContent = fmtUsd(data.balance);
     document.getElementById("balance-sub").textContent = `available ${fmtUsd(data.available_balance)} · real Alpaca ${data.account_type || "paper"} account`;
+    // realized_pnl_by_date isn't in /status's own payload (see /trades'
+    // own response) -- refreshTrades() populates the sparkline instead;
+    // this call is a no-op until then (renderSparkline bails out below 2
+    // points), not a real fetch.
 
     const positions = data.positions || [];
     document.getElementById("position-count").textContent = `${positions.length} / ${data.max_concurrent_positions ?? "--"}`;
@@ -320,15 +536,15 @@ async function refreshStatus() {
       const pnlText = hasPnl ? `${fmtUsd(p.unrealized_pnl_usd)} (${fmtPct(p.unrealized_pnl_pct)})` : "--";
       return `
         <td><strong>${p.symbol}</strong></td>
-        <td>${fmtPrice(p.entry_price)}</td>
-        <td>${p.current_price !== undefined ? fmtPrice(p.current_price) : "--"}</td>
-        <td class="stat ${pnlClass}">${pnlText}</td>
-        <td>${fmtCoins(p.count)}</td>
-        <td class="stat pos" style="font-size:13px;">${fmtPrice(p.take_profit_price)}</td>
-        <td class="stat neg" style="font-size:13px;">${fmtPrice(p.stop_loss_price)}</td>
+        <td class="num">${fmtPrice(p.entry_price)}</td>
+        <td class="num">${p.current_price !== undefined ? fmtPrice(p.current_price) : "--"}</td>
+        <td class="stat num ${pnlClass}" style="font-size:13px;">${pnlText}</td>
+        <td class="num">${fmtCoins(p.count)}</td>
+        <td class="stat pos num" style="font-size:13px;">${fmtPrice(p.take_profit_price)}</td>
+        <td class="stat neg num" style="font-size:13px;">${fmtPrice(p.stop_loss_price)}</td>
         <td>${timeAgo(p.opened_at)}</td>
         <td class="sub">${p.order_id || "paper"}</td>
-        <td title="${(p.entry_correlation_reason || "").replace(/"/g, '&quot;')}">${fmtCorrelation(p.entry_correlation_score)}</td>
+        <td>${signalsHtml(p)}</td>
         <td style="font-size:12px;color:var(--muted);">${p.exit_check || "--"}</td>`;
     }, 11, "No open positions");
   } catch (e) { console.error("positions render failed", e); }
@@ -337,7 +553,7 @@ async function refreshStatus() {
     const todayPnl = data.today_realized_pnl_usd || 0;
     const todayEl = document.getElementById("today-pnl");
     todayEl.textContent = fmtUsd(todayPnl);
-    todayEl.className = "stat " + (todayPnl > 0 ? "pos" : todayPnl < 0 ? "neg" : "");
+    todayEl.className = "stat num " + (todayPnl > 0 ? "pos" : todayPnl < 0 ? "neg" : "");
     document.getElementById("total-pnl-sub").textContent =
       `all-time ${fmtUsd(data.total_realized_pnl_usd)} · ${data.trade_count || 0} trades`;
   } catch (e) { console.error("pnl card render failed", e); }
@@ -347,7 +563,7 @@ async function refreshStatus() {
     const winRateEl = document.getElementById("win-rate");
     if (wr.trade_count) {
       winRateEl.textContent = fmtPct(wr.win_rate);
-      winRateEl.className = "stat " + (wr.win_rate > 0.5 ? "pos" : wr.win_rate < 0.5 ? "neg" : "");
+      winRateEl.className = "stat num " + (wr.win_rate > 0.5 ? "pos" : wr.win_rate < 0.5 ? "neg" : "");
       document.getElementById("win-rate-sub").textContent =
         `${wr.win_count}/${wr.trade_count} all-time · last ${wr.recent_trade_count}: ${fmtPct(wr.recent_win_rate)}`;
     } else {
@@ -361,7 +577,7 @@ async function refreshStatus() {
     const msEl = document.getElementById("milestone-return");
     if (ms.baseline_balance !== undefined && ms.baseline_balance !== null) {
       msEl.textContent = fmtPct(ms.total_return_pct);
-      msEl.className = "stat " + (ms.total_return_pct > 0 ? "pos" : ms.total_return_pct < 0 ? "neg" : "");
+      msEl.className = "stat num " + (ms.total_return_pct > 0 ? "pos" : ms.total_return_pct < 0 ? "neg" : "");
       const nextText = (ms.next_milestone_pct !== null && ms.next_milestone_pct !== undefined)
         ? `next goal +${ms.next_milestone_pct}% (${ms.pct_to_next_milestone.toFixed(1)}pp to go)`
         : "all goals reached";
@@ -381,7 +597,12 @@ async function refreshStatus() {
     document.getElementById("model-sub").textContent = model.trained
       ? `${model.model_type} · ${model.rows} rows · ${timeAgo(new Date(model.trained_at * 1000).toISOString())}`
       : "gathering history — technical signal active";
+    renderModelIntelligence(model);
   } catch (e) { console.error("model card render failed", e); }
+
+  try {
+    renderCoverage(data.correlation_study_health);
+  } catch (e) { console.error("coverage render failed", e); }
 
   try {
     document.getElementById("cfg-mode").textContent = data.account_type === "live" ? "live" : "paper";
@@ -411,8 +632,8 @@ async function refreshStatus() {
     patchTable(cbody, cycle, (c, idx) => `${c.symbol}_${idx}`, c => `
         <td><strong>${c.symbol}</strong></td>
         <td><span class="tag ${c.action === "opened" ? "yes" : c.ok === false ? "no" : "wait"}">${c.action || "--"}</span></td>
-        <td>${c.entry_price !== undefined ? fmtPrice(c.entry_price) : "--"}</td>
-        <td>${c.notional !== undefined ? fmtUsd(c.notional) : "--"}</td>
+        <td class="num">${c.entry_price !== undefined ? fmtPrice(c.entry_price) : "--"}</td>
+        <td class="num">${c.notional !== undefined ? fmtUsd(c.notional) : "--"}</td>
         <td title="${(c.correlation_reason || "").replace(/"/g, '&quot;')}">${fmtCorrelation(c.correlation_score)}</td>
         <td class="sub">${c.reason || c.error || ""}</td>`, 6, "Waiting for first scan...");
   } catch (e) { console.error("candidates render failed", e); }
@@ -428,9 +649,9 @@ async function refreshStatus() {
     const sweepBody = document.getElementById("sweep-body");
     patchTable(sweepBody, sweepRows, (r, idx) => r.label || idx, r => `
         <td><strong>${r.label || "--"}</strong></td>
-        <td>${r.trade_count ?? "--"}</td>
-        <td>${fmtPct(r.win_rate)}</td>
-        <td class="${r.return_pct > 0 ? "stat pos" : r.return_pct < 0 ? "stat neg" : ""}" style="font-size:13px;font-weight:600;">${fmtPct(r.return_pct)}</td>
+        <td class="num">${r.trade_count ?? "--"}</td>
+        <td class="num">${fmtPct1(r.win_rate)}</td>
+        <td class="${r.return_pct > 0 ? "stat pos" : r.return_pct < 0 ? "stat neg" : ""} num" style="font-size:13px;font-weight:600;">${fmtPct1(r.return_pct)}</td>
         <td>${r.low_sample ? '<span class="tag wait">low</span>' : '<span class="tag yes">ok</span>'}</td>`,
       5, "No sweep yet -- runs automatically, off-hours");
   } catch (e) { console.error("sweep render failed", e); }
@@ -440,12 +661,12 @@ async function refreshStatus() {
     const wfFolds = wf.folds || [];
     if (wfFolds.length) {
       document.getElementById("wf-profitable").textContent = `${wf.profitable_fold_count ?? "--"} / ${wf.fold_count ?? "--"}`;
-      document.getElementById("wf-profitable-sub").textContent = `${fmtPct(wf.profitable_fold_ratio)} of folds profitable`;
+      document.getElementById("wf-profitable-sub").textContent = `${fmtPct1(wf.profitable_fold_ratio)} of folds profitable`;
       const meanEl = document.getElementById("wf-mean-return");
-      meanEl.textContent = fmtPct(wf.mean_return_pct);
-      meanEl.className = "stat " + (wf.mean_return_pct > 0 ? "pos" : wf.mean_return_pct < 0 ? "neg" : "");
+      meanEl.textContent = fmtPct1(wf.mean_return_pct);
+      meanEl.className = "stat num " + (wf.mean_return_pct > 0 ? "pos" : wf.mean_return_pct < 0 ? "neg" : "");
       document.getElementById("wf-mean-return-sub").textContent =
-        `std ${fmtPct(wf.std_return_pct)} · range ${fmtPct(wf.min_return_pct)} to ${fmtPct(wf.max_return_pct)}`;
+        `std ${fmtPct1(wf.std_return_pct)} · range ${fmtPct1(wf.min_return_pct)} to ${fmtPct1(wf.max_return_pct)}`;
     } else {
       document.getElementById("wf-profitable").textContent = "--";
       document.getElementById("wf-profitable-sub").textContent = "no walk-forward run yet";
@@ -461,9 +682,9 @@ async function refreshStatus() {
       return `
         <td>${idx + 1}</td>
         <td class="sub">${windowText}</td>
-        <td>${f.trade_count ?? "--"}</td>
-        <td>${fmtPct(f.win_rate)}</td>
-        <td class="${f.return_pct > 0 ? "stat pos" : f.return_pct < 0 ? "stat neg" : ""}" style="font-size:13px;font-weight:600;">${fmtPct(f.return_pct)}</td>`;
+        <td class="num">${f.trade_count ?? "--"}</td>
+        <td class="num">${fmtPct1(f.win_rate)}</td>
+        <td class="${f.return_pct > 0 ? "stat pos" : f.return_pct < 0 ? "stat neg" : ""} num" style="font-size:13px;font-weight:600;">${fmtPct1(f.return_pct)}</td>`;
     }, 5, "No walk-forward run yet -- runs automatically, weekly");
   } catch (e) { console.error("walkforward render failed", e); }
 }
@@ -472,18 +693,20 @@ async function refreshTrades() {
   try {
     const res = await fetch("/api/alpaca/crypto/trades");
     const data = await res.json();
+    renderSparkline(data.realized_pnl_by_date);
     const tbody = document.getElementById("trades-body");
     const trades = (data.trades || []).slice(0, 30);
     patchTable(tbody, trades, t => `${t.symbol}_${t.closed_at}`, t => `
         <td>${timeAgo(t.closed_at)}</td>
         <td><strong>${t.symbol}</strong></td>
-        <td>${fmtPrice(t.entry_price)}</td>
-        <td>${fmtPrice(t.exit_price)}</td>
-        <td>${fmtCoins(t.count)}</td>
-        <td class="sub">${t.fee_usd != null ? fmtUsd(t.fee_usd) : "--"}</td>
-        <td class="${t.realized_pnl_usd > 0 ? "stat pos" : t.realized_pnl_usd < 0 ? "stat neg" : ""}" style="font-size:13px;font-weight:600;">${fmtUsd(t.realized_pnl_usd)}</td>
-        <td title="${(t.entry_correlation_reason || "").replace(/"/g, '&quot;')}">${fmtCorrelation(t.entry_correlation_score)}</td>
-        <td class="sub">${t.reason || ""}</td>`, 9, "No trades yet");
+        <td class="sub">${t.hold_minutes != null ? Math.round(t.hold_minutes) + "m" : "--"}</td>
+        <td class="num">${fmtPrice(t.entry_price)}</td>
+        <td class="num">${fmtPrice(t.exit_price)}</td>
+        <td class="num">${fmtCoins(t.count)}</td>
+        <td class="sub num">${t.fee_usd != null ? fmtUsd(t.fee_usd) : "--"}</td>
+        <td class="${t.realized_pnl_usd > 0 ? "stat pos" : t.realized_pnl_usd < 0 ? "stat neg" : ""} num" style="font-size:13px;font-weight:600;">${fmtUsd(t.realized_pnl_usd)}</td>
+        <td>${signalsHtml(t)}</td>
+        <td class="sub">${t.reason || ""}</td>`, 10, "No trades yet");
   } catch (e) { console.error("trades refresh failed", e); }
 }
 
@@ -497,7 +720,7 @@ async function refreshActivity() {
         <td>${r.label || r.job}</td>
         <td><span class="tag ${r.status === "ok" ? "yes" : r.status === "error" ? "no" : "wait"}">${r.status}</span></td>
         <td>${timeAgo(r.started_at)}</td>
-        <td>${r.duration_sec ? r.duration_sec + "s" : "--"}</td>
+        <td class="num">${r.duration_sec ? r.duration_sec + "s" : "--"}</td>
         <td class="sub">${JSON.stringify(r.summary || r.error || {})}</td>`, 5, "No job history yet");
   } catch (e) { console.error("activity refresh failed", e); }
 }
