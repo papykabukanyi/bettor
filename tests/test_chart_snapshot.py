@@ -311,19 +311,38 @@ def test_public_url_for_uploads_to_hf_when_render_external_url_is_unset(monkeypa
     assert _fake_hf_images.files["papylove/bettor-threads-images"] == [path.name]
 
 
-def test_public_url_for_prefers_render_external_url_over_hf_when_both_are_set(monkeypatch, _fake_hf_images):
-    """Real requirement: Render-hosted callers (trade entry/exit charts,
-    hourly status, sentiment snapshots posted from Render itself) must
-    keep behaving exactly as before -- HF_IMAGES_REPO existing must never
-    change what they do."""
+def test_public_url_for_prefers_hf_over_public_base_url_when_both_are_set(monkeypatch, _fake_hf_images):
+    """Real, confirmed live bug this priority flip fixes: PUBLIC_BASE_URL
+    points at this codebase's own HF Space, which is deliberately PRIVATE
+    -- Threads' own media-fetching crawler (an unauthenticated third
+    party) gets a 404 from HF's own edge gate trying to fetch from it,
+    exactly like any other unauthenticated caller does. The HF-images
+    upload path is genuinely public and verified-fetchable, so it must be
+    tried FIRST regardless of whether PUBLIC_BASE_URL also happens to be
+    set."""
     monkeypatch.setenv("PUBLIC_BASE_URL", "https://example-space.hf.space")
     path = chart_snapshot.generate_candlestick_chart(
         ticker="AAPL", market="stocks", candles=_candles(), entry_price=100.0,
         take_profit_price=101.0, stop_loss_price=99.0,
     )
     url = chart_snapshot.public_url_for(path)
+    assert url == f"https://huggingface.co/datasets/papylove/bettor-threads-images/resolve/main/{path.name}"
+    assert _fake_hf_images.files["papylove/bettor-threads-images"] == [path.name]
+
+
+def test_public_url_for_falls_back_to_public_base_url_when_hf_upload_fails(monkeypatch, _fake_hf_images):
+    """PUBLIC_BASE_URL is still a real, useful fallback -- a genuinely
+    public host (or local dev serving its own /chart/<file> route
+    directly) must still work when HF_API_KEY/HF_IMAGES_REPO aren't
+    configured, or the upload itself fails for any reason."""
+    monkeypatch.setenv("PUBLIC_BASE_URL", "https://example-space.hf.space")
+    monkeypatch.setattr(chart_snapshot, "HF_API_KEY", "")  # HF path unavailable
+    path = chart_snapshot.generate_candlestick_chart(
+        ticker="AAPL", market="stocks", candles=_candles(), entry_price=100.0,
+        take_profit_price=101.0, stop_loss_price=99.0,
+    )
+    url = chart_snapshot.public_url_for(path)
     assert url == f"https://example-space.hf.space/chart/{path.name}"
-    assert _fake_hf_images.files == {}  # never even attempted the HF path
 
 
 def test_upload_chart_to_hf_returns_none_when_hf_images_repo_is_unset(monkeypatch, _fake_hf_images):

@@ -1004,24 +1004,36 @@ def _upload_chart_to_hf(chart_path: Path) -> str | None:
 def public_url_for(chart_path: Path) -> str | None:
     """Builds the publicly-fetchable URL Threads' own servers need to
     actually retrieve the image (Threads' media-container API takes an
-    image_url it fetches itself, not a raw upload). PUBLIC_BASE_URL is a
-    generic, host-agnostic name (was RENDER_EXTERNAL_URL, back when
-    Render auto-injected it for every web service -- this codebase now
-    runs on a Hugging Face Space instead, which has no equivalent
-    auto-injected variable, so this is set manually as a Space variable
-    pointing at the Space's own public https://<user>-<space>.hf.space
-    URL). Checked FIRST and unconditionally: every caller (trade entry/
-    exit charts, hourly status, sentiment snapshots) keeps behaving
-    exactly the same regardless of which host set it, so this branch's
-    behavior is untouched by HF_IMAGES_REPO's existence.
+    image_url it fetches itself, not a raw upload).
 
-    Only when PUBLIC_BASE_URL is unset (e.g. a script running as a
-    scheduled Hugging Face Job, which has no public HTTP route of its own
-    to serve a local file from) does this fall through to uploading the
-    image to HF_IMAGES_REPO instead (see _upload_chart_to_hf). Returns
-    None (skip posting) if neither is configured, e.g. running locally
-    with no env set at all."""
+    Real, confirmed live bug this fixes: this used to try PUBLIC_BASE_URL
+    (the Space's own https://<user>-<space>.hf.space URL) FIRST, on the
+    old assumption -- true on Render, where every service had a genuinely
+    public domain -- that "this process's own base URL" is something an
+    external fetcher can reach. It no longer is: this codebase's HF Space
+    is deliberately PRIVATE (see docs/RENDER_TO_HF_MIGRATION.md), so
+    Threads' own media-fetching crawler -- an unauthenticated third party,
+    with no HF Bearer token of its own -- gets the exact same 404 from
+    HF's own edge gate that any other unauthenticated caller does. Every
+    single image-based post (trending-news cards, sentiment snapshots,
+    trade entry/exit charts) was silently failing this fetch and falling
+    back to plain text, unnoticed because the fallback itself succeeds
+    (see post_trending_news's own "never post nothing" contract) --
+    confirmed live via repeated "Media download has failed... doesn't
+    meet our requirements" errors from Threads' own API.
+
+    _upload_chart_to_hf (see its own docstring) uploads to a genuinely
+    PUBLIC HF dataset repo and verifies the resulting URL is actually
+    fetchable before returning it -- this works regardless of whether
+    this process's own host is public or private, so it's tried FIRST
+    now. PUBLIC_BASE_URL is kept as a fallback only (a genuinely public
+    host, or local dev serving its own /chart/<file> route directly, both
+    still work fine) for whenever HF_API_KEY/HF_IMAGES_REPO aren't
+    configured. Returns None (skip posting) if neither path works."""
+    uploaded = _upload_chart_to_hf(chart_path)
+    if uploaded:
+        return uploaded
     base_url = os.getenv("PUBLIC_BASE_URL", "")
     if base_url:
         return f"{base_url.rstrip('/')}/chart/{chart_path.name}"
-    return _upload_chart_to_hf(chart_path)
+    return None
