@@ -601,6 +601,80 @@ def test_maybe_run_batch_trade_analysis_skips_below_batch_size(monkeypatch):
     assert called["n"] == 0
 
 
+# ── maybe_auto_improve_from_backtest -- the user's own explicit request:
+# "whenever you get negative return on backtest and forward test[,] need
+# to automatically improve" the crypto side. ────────────────────────────
+
+def test_maybe_auto_improve_from_backtest_no_op_when_both_are_profitable():
+    strat._save_state({"positions": [], "realized_pnl_by_date": {}, "trade_log": []})  # noqa: SLF001
+    sweep = {"configs": [{"label": "current_defaults", "return_pct": 0.05, "trade_count": 50, "low_sample": False}]}
+    result = strat.maybe_auto_improve_from_backtest(sweep, {"mean_return_pct": 0.02})
+    assert result["triggered"] is False
+
+
+def test_maybe_auto_improve_from_backtest_applies_a_better_confidence_and_retrains(monkeypatch):
+    strat._save_state({"positions": [], "realized_pnl_by_date": {}, "trade_log": []})  # noqa: SLF001
+    sweep = {"configs": [
+        {"label": "current_defaults", "return_pct": -0.137, "trade_count": 50, "low_sample": False, "model_confidence_min": 0.55},
+        {"label": "higher_confidence_only", "return_pct": 0.05, "trade_count": 50, "low_sample": False, "model_confidence_min": 0.62},
+    ]}
+    train_calls = []
+    meta_calls = []
+    monkeypatch.setattr(alpaca_crypto_model, "train_model", lambda **kw: train_calls.append(kw) or {"ok": True, "rows": 1000})
+    monkeypatch.setattr(alpaca_crypto_meta_model, "train_meta_model", lambda **kw: meta_calls.append(kw) or {"ok": True})
+
+    result = strat.maybe_auto_improve_from_backtest(sweep, {"mean_return_pct": -0.05})
+
+    assert result["triggered"] is True
+    assert result["confidence_recommendation"]["should_apply"] is True
+    state = strat._load_state()  # noqa: SLF001
+    assert state["tuning"]["model_confidence_min"] == 0.62
+    assert len(train_calls) == 1
+    assert len(meta_calls) == 1
+
+
+def test_maybe_auto_improve_from_backtest_still_retrains_when_no_better_confidence_found(monkeypatch):
+    """A loss with no sweep evidence pointing at a better confidence floor
+    must still fall back to the "use everything the bot has" retrain --
+    the two responses are independent."""
+    strat._save_state({"positions": [], "realized_pnl_by_date": {}, "trade_log": []})  # noqa: SLF001
+    sweep = {"configs": [{"label": "current_defaults", "return_pct": -0.137, "trade_count": 50, "low_sample": False}]}
+    train_calls = []
+    monkeypatch.setattr(alpaca_crypto_model, "train_model", lambda **kw: train_calls.append(kw) or {"ok": True, "rows": 1000})
+    monkeypatch.setattr(alpaca_crypto_meta_model, "train_meta_model", lambda **kw: {"ok": True})
+
+    result = strat.maybe_auto_improve_from_backtest(sweep, None)
+
+    assert result["triggered"] is True
+    assert result["confidence_recommendation"]["should_apply"] is False
+    assert len(train_calls) == 1
+
+
+def test_maybe_auto_improve_from_backtest_survives_a_retrain_failure(monkeypatch):
+    strat._save_state({"positions": [], "realized_pnl_by_date": {}, "trade_log": []})  # noqa: SLF001
+    sweep = {"configs": [{"label": "current_defaults", "return_pct": -0.137, "trade_count": 50, "low_sample": False}]}
+
+    def raise_error(**kw):
+        raise RuntimeError("simulated retrain crash")
+
+    monkeypatch.setattr(alpaca_crypto_model, "train_model", raise_error)
+
+    result = strat.maybe_auto_improve_from_backtest(sweep, None)  # must not raise
+    assert result["triggered"] is True
+
+
+def test_maybe_auto_improve_from_backtest_never_retrains_without_a_loss(monkeypatch):
+    strat._save_state({"positions": [], "realized_pnl_by_date": {}, "trade_log": []})  # noqa: SLF001
+
+    def fail_if_called(**kw):
+        raise AssertionError("must not retrain when neither backtest shows a loss")
+
+    monkeypatch.setattr(alpaca_crypto_model, "train_model", fail_if_called)
+    sweep = {"configs": [{"label": "current_defaults", "return_pct": 0.05, "trade_count": 50, "low_sample": False}]}
+
+    strat.maybe_auto_improve_from_backtest(sweep, {"mean_return_pct": 0.02})
+
+
 def test_manage_open_positions_returns_no_position_without_any_state():
     assert strat.manage_open_positions()["action"] == "no_position"
 

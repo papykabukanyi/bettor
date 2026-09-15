@@ -681,6 +681,91 @@ def _maybe_run_batch_trade_analysis() -> None:
         logger.warning("[alpaca_crypto_strategy] batch trade analysis failed", exc_info=True)
 
 
+def maybe_auto_improve_from_backtest(
+    sweep_result: dict[str, Any] | None, walkforward_result: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """The user's own explicit request: "whenever you get negative return
+    on backtest and forward test[,] need to automatically improve the
+    whole crypto side using everything the bot has as a resource." Called
+    right after alpaca_crypto_server.py's own scheduled sweep/walk-forward
+    jobs complete (see alpaca_crypto_trade_analysis.backtest_shows_a_loss
+    for the trigger condition) -- best-effort, exception-caught, never
+    allowed to affect trading itself.
+
+    Two concrete responses when a loss is detected, both reusing EXISTING,
+    already-proven mechanisms rather than inventing new write paths:
+      1. alpaca_crypto_trade_analysis.recommend_confidence_from_backtest
+         checks whether the sweep's OWN explored variants already found a
+         higher-confidence config that would have done meaningfully
+         better -- applied via the SAME apply_confidence_threshold_override
+         _maybe_run_batch_trade_analysis above already uses for its own,
+         slower-accumulating real-trade-log-driven version of this same
+         tune. Deliberately does NOT also auto-tune TAKE_PROFIT_PCT/
+         STOP_LOSS_PCT despite the sweep varying those too -- see
+         recommend_confidence_from_backtest's own module-level comment for
+         why that lever's real-world effect is much smaller than it looks
+         (adaptive_exit_pcts scales exits to each pair's own volatility for
+         the overwhelming majority of real trades regardless of those flat
+         constants).
+      2. An extra, immediate model + meta-model retrain on the freshest
+         available data -- "use everything the bot has as a resource"
+         taken literally: a stale model is itself a real, fixable
+         contributor to bad backtest performance, and this doesn't wait
+         for the next scheduled hourly retrain. Both retrains are already
+         proven, already-scheduled operations; running one early on real
+         evidence of trouble is a bounded, safe use of them.
+
+    Returns a summary dict either way -- callers may ignore it, but it's
+    attached to the triggering job's own result for observability so this
+    is a visible, auditable action, never a silent background change."""
+    from data import alpaca_crypto_trade_analysis
+
+    result: dict[str, Any] = {"triggered": False}
+    try:
+        loss_check = alpaca_crypto_trade_analysis.backtest_shows_a_loss(sweep_result, walkforward_result)
+        result["loss_check"] = loss_check
+        if not loss_check["is_loss"]:
+            return result
+        result["triggered"] = True
+        logger.warning(
+            "[alpaca_crypto_strategy] backtest/walk-forward shows a loss (%s) -- running auto-improvement",
+            "; ".join(loss_check["reasons"]),
+        )
+
+        with _STATE_LOCK:
+            state = _load_state()
+            current_threshold = (state.get("tuning") or {}).get("model_confidence_min", MODEL_CONFIDENCE_MIN)
+
+        confidence_rec = alpaca_crypto_trade_analysis.recommend_confidence_from_backtest(
+            sweep_result, current_threshold=current_threshold,
+        )
+        result["confidence_recommendation"] = confidence_rec
+        if confidence_rec.get("should_apply"):
+            apply_confidence_threshold_override(
+                confidence_rec["recommended_threshold"],
+                reason=f"auto-improvement after a losing backtest ({'; '.join(loss_check['reasons'])})",
+            )
+    except Exception:
+        logger.warning("[alpaca_crypto_strategy] auto-improvement evaluation failed", exc_info=True)
+        return result
+
+    # Extra retrain: a fully separate best-effort step from the tuning
+    # above -- runs regardless of whether a confidence change was applied,
+    # since a stale model is a real, independent lever worth pulling on
+    # its own evidence-of-trouble signal.
+    try:
+        from data import alpaca_crypto_meta_model, alpaca_crypto_model
+        train_result = alpaca_crypto_model.train_model(trade_log=_load_state().get("trade_log"))
+        result["extra_retrain"] = {"ok": train_result.get("ok"), "rows": train_result.get("rows")}
+        if train_result.get("ok"):
+            meta_result = alpaca_crypto_meta_model.train_meta_model()
+            result["extra_meta_retrain"] = {"ok": meta_result.get("ok"), "reason": meta_result.get("reason")}
+    except Exception:
+        logger.warning("[alpaca_crypto_strategy] auto-improvement extra retrain failed", exc_info=True)
+
+    return result
+
+
 def _update_velocity(position: dict[str, Any], current_price: float, now: dt.datetime) -> float | None:
     """Tracks recent (timestamp, price) samples on the position itself and
     returns the trailing %/minute velocity over QUICK_PROFIT_WINDOW_SECONDS,

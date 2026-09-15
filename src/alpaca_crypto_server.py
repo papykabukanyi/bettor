@@ -469,6 +469,17 @@ def _run_alpaca_crypto_backtest_sweep(*, days: int = 21) -> dict[str, Any]:
         sweep_result = alpaca_crypto_backtest.run_config_sweep(test_with_preds)
         del test_with_preds
         save_json(ALPACA_CRYPTO_LATEST_SWEEP_FILE, sweep_result)
+        # See alpaca_crypto_strategy.maybe_auto_improve_from_backtest's own
+        # docstring -- the user's own explicit request: react to a losing
+        # backtest immediately, not just record it. Paired with whatever
+        # the last walk-forward run found, not just this sweep alone.
+        try:
+            walkforward_result = load_json(ALPACA_CRYPTO_LATEST_WALKFORWARD_FILE, {})
+            sweep_result["auto_improvement"] = alpaca_crypto_strategy.maybe_auto_improve_from_backtest(
+                sweep_result, walkforward_result,
+            )
+        except Exception as exc:
+            logger.warning("[alpaca_crypto_server] auto-improvement check failed: %s", exc)
         return sweep_result
     except Exception as exc:
         logger.warning("[alpaca_crypto_server] backtest sweep failed: %s", exc)
@@ -495,6 +506,14 @@ def _run_alpaca_crypto_walkforward_backtest() -> dict[str, Any]:
     try:
         result = alpaca_crypto_backtest.run_walkforward_backtest()
         save_json(ALPACA_CRYPTO_LATEST_WALKFORWARD_FILE, result)
+        # See alpaca_crypto_strategy.maybe_auto_improve_from_backtest's own
+        # docstring -- paired with the last sweep's own result, not just
+        # this walk-forward run alone.
+        try:
+            sweep_result = load_json(ALPACA_CRYPTO_LATEST_SWEEP_FILE, {})
+            result["auto_improvement"] = alpaca_crypto_strategy.maybe_auto_improve_from_backtest(sweep_result, result)
+        except Exception as exc:
+            logger.warning("[alpaca_crypto_server] auto-improvement check failed: %s", exc)
         return result
     except Exception as exc:
         logger.warning("[alpaca_crypto_server] walk-forward backtest failed: %s", exc)

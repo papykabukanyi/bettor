@@ -321,14 +321,23 @@ def test_walkforward_backtest_job_saves_the_result(monkeypatch, tmp_path):
     from data import alpaca_crypto_backtest
 
     fake_result = {"ok": True, "fold_count": 4, "profitable_fold_count": 2, "mean_return_pct": 0.03}
+    original = dict(fake_result)  # maybe_auto_improve_from_backtest mutates the SAME dict run_walkforward_backtest returns
     monkeypatch.setattr(alpaca_crypto_backtest, "run_walkforward_backtest", lambda: fake_result)
     monkeypatch.setattr(alpaca_crypto_server, "ALPACA_CRYPTO_LATEST_WALKFORWARD_FILE", tmp_path / "walkforward.json")
 
     result = alpaca_crypto_server._run_alpaca_crypto_walkforward_backtest.__wrapped__()  # noqa: SLF001
 
-    assert result == fake_result
+    assert result["fold_count"] == original["fold_count"]
+    assert result["mean_return_pct"] == original["mean_return_pct"]
+    # The saved cache file predates the auto-improvement check (see
+    # maybe_auto_improve_from_backtest's own docstring) -- it stays in the
+    # exact shape api_alpaca_crypto_report_pdf's own "Walk-Forward Backtest"
+    # section already expects, not retroactively grown with metadata that
+    # was never part of this file's own contract.
     saved = alpaca_crypto_server.load_json(tmp_path / "walkforward.json", {})
-    assert saved == fake_result
+    assert saved == original
+    assert "auto_improvement" not in saved
+    assert "auto_improvement" in result
 
 
 def test_walkforward_backtest_job_returns_ok_false_on_failure(monkeypatch):
@@ -339,6 +348,47 @@ def test_walkforward_backtest_job_returns_ok_false_on_failure(monkeypatch):
 
     monkeypatch.setattr(alpaca_crypto_backtest, "run_walkforward_backtest", raise_error)
     result = alpaca_crypto_server._run_alpaca_crypto_walkforward_backtest.__wrapped__()  # noqa: SLF001
+    assert result["ok"] is False
+
+
+def test_backtest_sweep_job_attaches_auto_improvement_and_saves_the_sweep_result(monkeypatch, tmp_path):
+    from data import alpaca_crypto_backtest, alpaca_crypto_data, alpaca_crypto_strategy
+
+    fake_df = pd.DataFrame({"ts": pd.date_range("2026-01-01", periods=3, freq="min")})
+    monkeypatch.setattr(alpaca_crypto_data, "get_crypto_universe", lambda: ["BTC/USD"])
+    monkeypatch.setattr(alpaca_crypto_backtest, "build_pair_frame", lambda symbol, days=21: fake_df)
+    monkeypatch.setattr(alpaca_crypto_backtest, "fit_backtest_model", lambda train_df: {"model": "fake"})
+    monkeypatch.setattr(alpaca_crypto_backtest, "add_model_predictions", lambda test_df, fitted: test_df)
+
+    fake_sweep_result = {"ok": True, "best_config": {"MODEL_CONFIDENCE_MIN": 0.6}, "baseline_return_pct": -0.05}
+    original = dict(fake_sweep_result)  # maybe_auto_improve_from_backtest mutates the SAME dict run_config_sweep returns
+    monkeypatch.setattr(alpaca_crypto_backtest, "run_config_sweep", lambda test_with_preds: fake_sweep_result)
+
+    monkeypatch.setattr(alpaca_crypto_server, "ALPACA_CRYPTO_LATEST_SWEEP_FILE", tmp_path / "sweep.json")
+    monkeypatch.setattr(alpaca_crypto_server, "ALPACA_CRYPTO_LATEST_WALKFORWARD_FILE", tmp_path / "walkforward.json")
+    monkeypatch.setattr(alpaca_crypto_strategy, "maybe_auto_improve_from_backtest", lambda sweep, walkforward: {"triggered": False, "loss_check": {"is_loss": False, "reasons": []}})
+
+    result = alpaca_crypto_server._run_alpaca_crypto_backtest_sweep.__wrapped__()  # noqa: SLF001
+
+    assert result["best_config"] == original["best_config"]
+    assert result["auto_improvement"] == {"triggered": False, "loss_check": {"is_loss": False, "reasons": []}}
+    # The saved cache file predates the auto-improvement check -- same
+    # pre-existing-shape contract as ALPACA_CRYPTO_LATEST_WALKFORWARD_FILE
+    # above, for api_alpaca_crypto_report_pdf's own consumption.
+    saved = alpaca_crypto_server.load_json(tmp_path / "sweep.json", {})
+    assert saved == original
+    assert "auto_improvement" not in saved
+    assert "auto_improvement" in result
+
+
+def test_backtest_sweep_job_returns_ok_false_on_failure(monkeypatch):
+    from data import alpaca_crypto_data
+
+    def raise_error():
+        raise RuntimeError("universe unavailable")
+
+    monkeypatch.setattr(alpaca_crypto_data, "get_crypto_universe", raise_error)
+    result = alpaca_crypto_server._run_alpaca_crypto_backtest_sweep.__wrapped__()  # noqa: SLF001
     assert result["ok"] is False
 
 
