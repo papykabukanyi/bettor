@@ -106,9 +106,27 @@ def test_run_config_sweep_tries_every_grid_entry_and_ranks_by_return(monkeypatch
         {"take_profit_pct": 0.02, "stop_loss_pct": 0.015, "max_hold_minutes": 60},
     ])
     result = bt.run_config_sweep(df, starting_balance=10_000.0, min_trades=0)
-    assert len(result["all_configs"]) == 2
+    # 2 monkeypatched grid entries + the live "current_defaults" anchor row
+    # _current_defaults_config() always prepends -- see its own docstring.
+    assert len(result["all_configs"]) == 3
     assert result["best"] is not None
     assert result["ranked"][0]["return_pct"] >= result["ranked"][-1]["return_pct"]
+
+
+def test_run_config_sweep_includes_a_live_current_defaults_anchor_row(monkeypatch):
+    """recommend_confidence_from_backtest needs a real apples-to-current
+    comparison point -- see _current_defaults_config's own docstring."""
+    monkeypatch.setattr(strat, "TAKE_PROFIT_PCT", 0.012)
+    monkeypatch.setattr(strat, "STOP_LOSS_PCT", 0.009)
+    monkeypatch.setattr(strat, "MAX_HOLD_MINUTES", 121)
+    df = _synthetic_test_df(n=300)
+    result = bt.run_config_sweep(df, starting_balance=10_000.0, min_trades=0)
+    anchor = next(c for c in result["all_configs"] if c.get("label") == "current_defaults")
+    assert anchor["take_profit_pct"] == 0.012
+    assert anchor["stop_loss_pct"] == 0.009
+    assert anchor["max_hold_minutes"] == 121
+    assert "low_sample" in anchor
+    assert all(c.get("label") is None for c in result["all_configs"] if c is not anchor)
 
 
 def test_run_config_sweep_excludes_configs_below_the_min_trade_count(monkeypatch):
@@ -117,9 +135,9 @@ def test_run_config_sweep_excludes_configs_below_the_min_trade_count(monkeypatch
         {"take_profit_pct": 0.5, "stop_loss_pct": 0.4, "max_hold_minutes": 5},
     ])
     result = bt.run_config_sweep(df, starting_balance=10_000.0, min_trades=1000)
-    assert result["all_configs"][0]["trade_count"] < 1000
+    assert all(c["trade_count"] < 1000 for c in result["all_configs"])
     assert result["best"] is not None  # falls back to the unqualified list rather than crashing
-    assert result["ranked"] == result["all_configs"]
+    assert sorted(result["ranked"], key=lambda r: -r["return_pct"]) == result["ranked"]
 
 
 def test_run_config_sweep_restores_the_real_strategy_parameters_afterward(monkeypatch):

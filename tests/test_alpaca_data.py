@@ -288,12 +288,20 @@ def _activity_df(rows):
     return pd.concat(frames, ignore_index=True)
 
 
-def test_get_stock_watchlist_falls_back_without_any_recent_data():
+def test_get_stock_watchlist_falls_back_without_any_recent_data(monkeypatch):
+    # Broad live ranking unavailable (no bars) -- falls through to the
+    # archive-based ranking, which also has nothing (recent_df=None) --
+    # falls through to the final static default.
+    monkeypatch.setattr(alpaca_data.alpaca_client, "get_bars", lambda *a, **kw: {})
     watchlist = alpaca_data.get_stock_watchlist(None)
     assert "AAPL" in watchlist
 
 
-def test_get_stock_watchlist_ranks_by_combined_volume_and_volatility():
+def test_get_stock_watchlist_ranks_by_combined_volume_and_volatility(monkeypatch):
+    # Broad live ranking unavailable here too -- isolates this test to the
+    # archive-based ranking path specifically (see the dedicated
+    # _live_broad_activity_ranking/broad-ranking tests below for that path).
+    monkeypatch.setattr(alpaca_data.alpaca_client, "get_bars", lambda *a, **kw: {})
     original_top_n = alpaca_data.WATCHLIST_TOP_N
     alpaca_data.WATCHLIST_TOP_N = 2
     try:
@@ -306,6 +314,86 @@ def test_get_stock_watchlist_ranks_by_combined_volume_and_volatility():
         assert watchlist == ["CHOP", "MEGA"]
     finally:
         alpaca_data.WATCHLIST_TOP_N = original_top_n
+
+
+# ── Broad live watchlist ranking -- the real, confirmed fix for a
+# structural lock-in bug: the OLD archive-only ranking could never
+# discover a symbol that wasn't already in the archive it was ranking
+# FROM (an archive built from this same ranking's own past output),
+# permanently stuck on whatever cold-start default came first. See
+# _live_broad_activity_ranking's own module-level comment for the full,
+# confirmed-live incident. ────────────────────────────────────────────
+
+def _daily_bars(closes, volumes, *, start_day=1):
+    return [
+        {"t": f"2026-01-{start_day + i:02d}T00:00:00Z", "o": c, "h": c, "l": c, "c": c, "v": v}
+        for i, (c, v) in enumerate(zip(closes, volumes))
+    ]
+
+
+def test_get_stock_watchlist_uses_the_broad_live_ranking_when_available(monkeypatch):
+    """A symbol with NO prior archive history at all -- the exact shape of
+    the real, confirmed lock-in bug -- must still be able to win a slot
+    purely from real recent activity."""
+    original_top_n = alpaca_data.WATCHLIST_TOP_N
+    original_universe = alpaca_data.BROAD_CANDIDATE_UNIVERSE
+    alpaca_data.WATCHLIST_TOP_N = 1
+    alpaca_data.BROAD_CANDIDATE_UNIVERSE = ["NEVER_ARCHIVED", "QUIET"]
+    try:
+        monkeypatch.setattr(alpaca_data.alpaca_client, "get_bars", lambda *a, **kw: {
+            "NEVER_ARCHIVED": _daily_bars([100.0] * 10, [5_000_000.0] * 10),
+            "QUIET": _daily_bars([50.0] * 10, [1_000.0] * 10),
+        })
+        # recent_df (the OLD archive-based source) never even mentions
+        # NEVER_ARCHIVED -- if the old bug were still present, it could
+        # never be picked no matter how active it really is.
+        watchlist = alpaca_data.get_stock_watchlist(_activity_df([("QUIET", 100.0, 0.01)]))
+        assert watchlist == ["NEVER_ARCHIVED"]
+    finally:
+        alpaca_data.WATCHLIST_TOP_N = original_top_n
+        alpaca_data.BROAD_CANDIDATE_UNIVERSE = original_universe
+
+
+def test_get_stock_watchlist_falls_back_to_archive_ranking_when_live_bars_fail(monkeypatch):
+    def raise_error(*a, **kw):
+        raise RuntimeError("Alpaca API key/secret not configured")
+
+    monkeypatch.setattr(alpaca_data.alpaca_client, "get_bars", raise_error)
+    original_top_n = alpaca_data.WATCHLIST_TOP_N
+    alpaca_data.WATCHLIST_TOP_N = 2
+    try:
+        df = _activity_df([("MEGA", 10_000.0, 0.0001), ("CHOP", 100.0, 0.01)])
+        watchlist = alpaca_data.get_stock_watchlist(df)
+        assert watchlist == ["CHOP", "MEGA"]
+    finally:
+        alpaca_data.WATCHLIST_TOP_N = original_top_n
+
+
+def test_live_broad_activity_ranking_computes_dollar_volume_and_volatility(monkeypatch):
+    monkeypatch.setattr(alpaca_data.alpaca_client, "get_bars", lambda *a, **kw: {
+        "AAPL": _daily_bars([100.0, 102.0, 101.0, 105.0], [1_000_000.0] * 4),
+    })
+    activity = alpaca_data._live_broad_activity_ranking()  # noqa: SLF001
+    assert list(activity["symbol"]) == ["AAPL"]
+    assert activity.iloc[0]["dollar_volume"] > 0
+    assert activity.iloc[0]["volatility"] > 0
+
+
+def test_live_broad_activity_ranking_skips_a_symbol_with_too_few_bars(monkeypatch):
+    monkeypatch.setattr(alpaca_data.alpaca_client, "get_bars", lambda *a, **kw: {
+        "THIN": _daily_bars([100.0], [1_000.0]),
+    })
+    activity = alpaca_data._live_broad_activity_ranking()  # noqa: SLF001
+    assert activity.empty
+
+
+def test_live_broad_activity_ranking_returns_empty_on_a_fetch_failure(monkeypatch):
+    def raise_error(*a, **kw):
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(alpaca_data.alpaca_client, "get_bars", raise_error)
+    activity = alpaca_data._live_broad_activity_ranking()  # noqa: SLF001
+    assert activity.empty
 
 
 def test_collect_dataset_rows_uses_the_cached_short_window_fetch(monkeypatch):

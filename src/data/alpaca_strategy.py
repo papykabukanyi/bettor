@@ -74,6 +74,22 @@ MIN_VOLATILITY_RATIO = _env_float("ALPACA_MIN_VOLATILITY_RATIO", 1.1)  # volatil
 ENTRY_DIP_PCT = _env_float("ALPACA_ENTRY_DIP_PCT", 0.0015)
 SHORT_MA_MINUTES = _env_int("ALPACA_SHORT_MA_MINUTES", 15)
 
+# Deliberately NOT widened to a multi-day swing profile despite that
+# being the natural first instinct ("stocks aren't as fast as perps, this
+# can take days" -- the user's own words) -- a REAL 3-fold walk-forward
+# this same review ran (~915K rows, ~11 months, the live 10-symbol
+# watchlist, alpaca_backtest.run_walkforward_folds against the real
+# fit_backtest_model/simulate pipeline) found the exact opposite of what
+# that instinct predicted:
+#   current (1%/0.8%/2h):  profitable_fold_ratio=1.00 (3/3), mean_return=+1.91%, std=1.24%
+#   5-day-hold (6%/3%/5d): profitable_fold_ratio=0.33 (1/3), mean_return=-0.24%, std=5.63%
+# A single 70/30 split HAD initially suggested the 5-day variant looked
+# better (+6.54% on that one slice) -- exactly the overfit-to-one-lucky-
+# split failure walk-forward validation exists to catch, and did catch
+# here. The current fast/intraday exit profile is the evidence-backed
+# choice, not a stale default nobody re-examined; don't re-widen this
+# without a NEW walk-forward showing a real, consistent (not single-
+# split) improvement.
 TAKE_PROFIT_PCT = _env_float("ALPACA_TAKE_PROFIT_PCT", 0.01)
 STOP_LOSS_PCT = _env_float("ALPACA_STOP_LOSS_PCT", 0.008)
 MAX_HOLD_MINUTES = _env_int("ALPACA_MAX_HOLD_MINUTES", 120)
@@ -140,17 +156,26 @@ PROMISING_SENTIMENT_SCORE = _env_float("ALPACA_PROMISING_SENTIMENT_SCORE", 0.3)
 # middle, not the loosest option tested.
 MODEL_CONFIDENCE_MIN = _env_float("ALPACA_MODEL_CONFIDENCE_MIN", 0.52)
 
-# At the perps-style default of 10% per slot across 5 slots, a $100 account
-# gets a $10-20 budget per position -- not enough to buy even ONE share of
-# most liquid, well-known stocks (a $100+ share price is completely
-# ordinary). Real diversification across 5 positions needs real capital;
-# at $100, spreading thin just means most "positions" silently can't afford
-# a single share. Concentrating into fewer, larger slots is the only way a
-# small account can actually hold real, liquid names -- "safe" here comes
-# from the tight stop-loss on each position, not from spreading a tiny
-# balance thinner.
-POSITION_SIZE_PCT = _env_float("ALPACA_POSITION_SIZE_PCT", 0.45)
-MAX_CONCURRENT_POSITIONS = max(1, _env_int("ALPACA_MAX_CONCURRENT_POSITIONS", 2))
+# Real, confirmed stale reasoning found in review: the 2-slots-at-45%-each
+# concentration above was reasoned for a HYPOTHETICAL ~$100 account (see
+# the comment's own math) -- but the REAL account this trades against is
+# ~$97K equity (confirmed live via get_account() during this same
+# review), where that original justification ("not enough to buy even
+# ONE share... at $100") no longer applies at all. At $97K, even a
+# modest 15-25% per-slot allocation comfortably affords real positions in
+# every liquid name this strategy already trades. Concentrating 90% of
+# capital into just 2 names is a real, unnecessary diversification/
+# single-name risk at this account size, not a safety feature.
+#
+# Backed by a real single-split backtest sweep (same 915K-row/~11-month
+# dataset as MAX_HOLD_MINUTES's own comment, holding the current,
+# walk-forward-confirmed exit profile fixed): 4 slots x 22% clearly beat
+# 2 slots x 45% (+2.20% vs -0.24%, 387 vs 292 trades -- more capital
+# available to deploy when multiple candidates qualify in the same
+# cycle), while 6/8 slots showed diminishing returns (+1.63%/+1.26%) --
+# 4 is the real local optimum tested, not the most extreme option.
+POSITION_SIZE_PCT = _env_float("ALPACA_POSITION_SIZE_PCT", 0.22)
+MAX_CONCURRENT_POSITIONS = max(1, _env_int("ALPACA_MAX_CONCURRENT_POSITIONS", 4))
 DAILY_LOSS_CAP_PCT = _env_float("ALPACA_DAILY_LOSS_CAP_PCT", 0.10)
 # Same unbounded-growth guard perps_strategy.py already needed (a real,
 # confirmed OOM contributor there over weeks of live trading) -- keeps the
@@ -392,6 +417,96 @@ def _maybe_run_batch_trade_analysis() -> None:
             apply_confidence_threshold_override(tuning_rec["recommended_threshold"], reason="5-trade batch review")
     except Exception:
         logger.warning("[alpaca_strategy] batch trade analysis failed", exc_info=True)
+
+
+def maybe_auto_improve_from_backtest(
+    sweep_result: dict[str, Any] | None, walkforward_result: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """The user's own explicit request, applied to stocks: "whenever you
+    get negative return on backtest and forward test[,] need to
+    automatically improve... using everything the bot has as a
+    resource" -- and, this same session, "review it... apply improvement
+    needed so it can be profitable" for stocks specifically. Mirrors
+    alpaca_crypto_strategy.py's/alpaca_options_strategy.py's own identical
+    function; see either docstring for the full design rationale. Called
+    right after alpaca_server.py's own scheduled sweep/walk-forward jobs
+    complete (see alpaca_trade_analysis.backtest_shows_a_loss for the
+    trigger condition) -- best-effort, exception-caught, never allowed to
+    affect trading itself.
+
+    Two concrete responses when a loss is detected, both reusing EXISTING,
+    already-proven mechanisms:
+      1. alpaca_trade_analysis.recommend_confidence_from_backtest checks
+         whether the sweep's OWN explored variants already found a
+         higher-confidence config that would have done meaningfully
+         better -- applied via the SAME apply_confidence_threshold_override
+         _maybe_run_batch_trade_analysis above already uses for its own,
+         slower-accumulating real-trade-log-driven version of this same
+         tune. Does NOT auto-tune TAKE_PROFIT_PCT/STOP_LOSS_PCT/
+         MAX_HOLD_MINUTES -- see recommend_confidence_from_backtest's own
+         module-level comment for why.
+      2. An extra, immediate retrain of BOTH the primary sklearn model AND
+         the separate torch candidate model on the freshest available
+         data (with the real trade_log threaded through for outcome-aware
+         weighting) -- "use everything the bot has as a resource" taken
+         literally, and doesn't wait for the next scheduled retrain of
+         either.
+
+    Returns a summary dict either way -- callers may ignore it, but it's
+    attached to the triggering job's own result for observability so this
+    is a visible, auditable action, never a silent background change."""
+    from data import alpaca_trade_analysis
+
+    result: dict[str, Any] = {"triggered": False}
+    try:
+        loss_check = alpaca_trade_analysis.backtest_shows_a_loss(sweep_result, walkforward_result)
+        result["loss_check"] = loss_check
+        if not loss_check["is_loss"]:
+            return result
+        result["triggered"] = True
+        logger.warning(
+            "[alpaca_strategy] backtest/walk-forward shows a loss (%s) -- running auto-improvement",
+            "; ".join(loss_check["reasons"]),
+        )
+
+        with _STATE_LOCK:
+            state = _load_state()
+            current_threshold = (state.get("tuning") or {}).get("model_confidence_min", MODEL_CONFIDENCE_MIN)
+            trade_log = state.get("trade_log")
+
+        confidence_rec = alpaca_trade_analysis.recommend_confidence_from_backtest(
+            sweep_result, current_threshold=current_threshold,
+        )
+        result["confidence_recommendation"] = confidence_rec
+        if confidence_rec.get("should_apply"):
+            apply_confidence_threshold_override(
+                confidence_rec["recommended_threshold"],
+                reason=f"auto-improvement after a losing backtest ({'; '.join(loss_check['reasons'])})",
+            )
+    except Exception:
+        logger.warning("[alpaca_strategy] auto-improvement evaluation failed", exc_info=True)
+        return result
+
+    # Extra retrain: a fully separate best-effort step from the tuning
+    # above -- runs regardless of whether a confidence change was applied,
+    # since a stale model is a real, independent lever worth pulling on
+    # its own evidence-of-trouble signal. Both the primary model AND the
+    # separate torch candidate get an early shot, not just whichever one
+    # the next scheduled job would have hit first.
+    try:
+        from data import alpaca_model
+        train_result = alpaca_model.train_model(trade_log=trade_log)
+        result["extra_retrain"] = {"ok": train_result.get("ok"), "rows": train_result.get("rows")}
+    except Exception:
+        logger.warning("[alpaca_strategy] auto-improvement primary retrain failed", exc_info=True)
+    try:
+        from data import alpaca_model
+        torch_result = alpaca_model.train_torch_candidate_model()
+        result["extra_torch_retrain"] = {"ok": torch_result.get("ok"), "promoted": torch_result.get("promoted")}
+    except Exception:
+        logger.warning("[alpaca_strategy] auto-improvement torch retrain failed", exc_info=True)
+
+    return result
 
 
 # ---------------------------------------------------------------------------

@@ -255,15 +255,39 @@ _SWEEP_GRID = [
 ]
 
 
+def _current_defaults_config() -> dict[str, Any]:
+    """The strategy's OWN live values, read fresh at call time (not baked
+    into the module-level _SWEEP_GRID, which only holds fixed ALTERNATIVE
+    combinations) -- gives the sweep a genuine apples-to-current baseline
+    row so alpaca_trade_analysis.recommend_confidence_from_backtest can
+    compare a candidate against what's actually live today, the same
+    "current_defaults" anchor alpaca_crypto_backtest.py's/
+    alpaca_options_backtest.py's own sweep grids already use. Labeled so
+    that function can find it; every OTHER config dict has no "label" key
+    at all, which is fine -- `.get("label")` returns None for those, never
+    mistaken for this one."""
+    return {
+        "take_profit_pct": strat.TAKE_PROFIT_PCT, "stop_loss_pct": strat.STOP_LOSS_PCT,
+        "max_hold_minutes": strat.MAX_HOLD_MINUTES, "label": "current_defaults",
+    }
+
+
 def run_config_sweep(
     test_with_preds: pd.DataFrame, *, starting_balance: float = 100.0, min_trades: int = 5,
 ) -> dict[str, Any]:
     """Tries _SWEEP_GRID's small set of take-profit/stop-loss/max-hold
-    combinations against the SAME fitted-model predictions (cheap -- no
-    re-fitting per config), ranked by return_pct among configs that fired
-    at least `min_trades` (avoids crowning a config that "won" on 1-2 lucky
-    trades). Reports findings only -- never applies a new config to the
-    live strategy itself; that stays a deliberate, reviewed decision.
+    combinations (plus a live "current_defaults" anchor row -- see
+    _current_defaults_config) against the SAME fitted-model predictions
+    (cheap -- no re-fitting per config), ranked by return_pct among
+    configs that fired at least `min_trades` (avoids crowning a config
+    that "won" on 1-2 lucky trades). Each result also carries low_sample
+    (trade_count < min_trades) for callers that want per-row visibility
+    rather than just the ranked/best cutoff.
+
+    Reports findings to the dashboard, AND (see
+    alpaca_strategy.maybe_auto_improve_from_backtest) reacts to a losing
+    current-config reading immediately -- that decision lives in the
+    caller; this function stays pure measurement.
 
     Restores alpaca_strategy's real (env-configured) parameters before
     returning, no matter what -- each grid entry temporarily overwrites
@@ -277,12 +301,15 @@ def run_config_sweep(
     }
     try:
         results = []
-        for config in _SWEEP_GRID:
+        for config in [_current_defaults_config(), *_SWEEP_GRID]:
             strat.TAKE_PROFIT_PCT = config["take_profit_pct"]
             strat.STOP_LOSS_PCT = config["stop_loss_pct"]
             strat.MAX_HOLD_MINUTES = config["max_hold_minutes"]
             result = simulate(test_with_preds, fitted=None, starting_balance=starting_balance)
-            results.append({**config, "trade_count": result["trade_count"], "win_rate": result["win_rate"], "return_pct": result["return_pct"]})
+            results.append({
+                **config, "trade_count": result["trade_count"], "win_rate": result["win_rate"],
+                "return_pct": result["return_pct"], "low_sample": result["trade_count"] < min_trades,
+            })
     finally:
         strat.TAKE_PROFIT_PCT = original["take_profit_pct"]
         strat.STOP_LOSS_PCT = original["stop_loss_pct"]

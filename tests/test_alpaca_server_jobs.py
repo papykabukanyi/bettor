@@ -67,11 +67,40 @@ def test_data_collect_job_pushes_collected_rows(monkeypatch):
 
 
 def test_train_job_calls_train_model(monkeypatch):
-    from data import alpaca_model
+    from data import alpaca_model, alpaca_strategy
 
-    monkeypatch.setattr(alpaca_model, "train_model", lambda: {"ok": True, "rows": 500})
+    monkeypatch.setattr(alpaca_strategy, "_load_state", lambda: {"trade_log": []})
+    monkeypatch.setattr(alpaca_model, "train_model", lambda **kw: {"ok": True, "rows": 500})
     result = alpaca_server._run_alpaca_train.__wrapped__()  # noqa: SLF001
     assert result == {"ok": True, "rows": 500}
+
+
+def test_train_job_passes_the_real_trade_log_for_outcome_aware_weighting(monkeypatch):
+    """alpaca_model.py never imports alpaca_strategy.py directly
+    (circular import risk -- see this job's own comment), so the job
+    itself must read trade_log and thread it through -- a real gap found
+    in review: this used to call train_model() with no trade_log at all."""
+    from data import alpaca_model, alpaca_strategy
+
+    monkeypatch.setattr(alpaca_strategy, "_load_state", lambda: {"trade_log": [{"symbol": "AAPL"}]})
+    captured = {}
+    monkeypatch.setattr(alpaca_model, "train_model", lambda **kw: captured.update(kw) or {"ok": True, "rows": 500})
+    alpaca_server._run_alpaca_train.__wrapped__()  # noqa: SLF001
+    assert captured["trade_log"] == [{"symbol": "AAPL"}]
+
+
+def test_train_job_survives_a_state_read_failure(monkeypatch):
+    from data import alpaca_model, alpaca_strategy
+
+    def raise_error():
+        raise RuntimeError("state file corrupted")
+
+    monkeypatch.setattr(alpaca_strategy, "_load_state", raise_error)
+    captured = {}
+    monkeypatch.setattr(alpaca_model, "train_model", lambda **kw: captured.update(kw) or {"ok": True, "rows": 500})
+    result = alpaca_server._run_alpaca_train.__wrapped__()  # noqa: SLF001
+    assert result == {"ok": True, "rows": 500}
+    assert captured["trade_log"] is None
 
 
 def test_threads_trending_news_job_posts_the_fetched_story(monkeypatch):
@@ -294,10 +323,11 @@ def test_intensive_training_is_a_noop_while_market_is_open(monkeypatch):
 
 
 def test_intensive_training_trains_and_advances_backfill_when_market_closed(monkeypatch, tmp_path):
-    from data import alpaca_data, alpaca_model
+    from data import alpaca_data, alpaca_model, alpaca_strategy
 
     monkeypatch.setattr(alpaca_data, "get_market_session", lambda: {"session": "closed", "is_open": False, "source": "fallback"})
-    monkeypatch.setattr(alpaca_model, "train_model", lambda: {"ok": True, "rows": 1000})
+    monkeypatch.setattr(alpaca_strategy, "_load_state", lambda: {"trade_log": []})
+    monkeypatch.setattr(alpaca_model, "train_model", lambda **kw: {"ok": True, "rows": 1000})
     monkeypatch.setattr(alpaca_data, "load_training_dataset", lambda: pd.DataFrame())  # empty -> sweep skipped safely
     backfill_calls = []
     monkeypatch.setattr(alpaca_server, "_advance_historical_backfill", lambda: backfill_calls.append(1) or {"action": "backfill_batch", "pushed": 5})
@@ -314,10 +344,11 @@ def test_intensive_training_still_advances_backfill_if_sweep_raises(monkeypatch)
     """A backtest sweep failure (bad data, a fitting error) must not prevent
     the historical backfill from making progress that tick -- these are two
     independent pieces of off-hours work."""
-    from data import alpaca_data, alpaca_model
+    from data import alpaca_data, alpaca_model, alpaca_strategy
 
     monkeypatch.setattr(alpaca_data, "get_market_session", lambda: {"session": "closed", "is_open": False, "source": "fallback"})
-    monkeypatch.setattr(alpaca_model, "train_model", lambda: {"ok": True, "rows": 1000})
+    monkeypatch.setattr(alpaca_strategy, "_load_state", lambda: {"trade_log": []})
+    monkeypatch.setattr(alpaca_model, "train_model", lambda **kw: {"ok": True, "rows": 1000})
 
     def raise_error(**kw):
         raise RuntimeError("HF listing failed")
@@ -331,6 +362,79 @@ def test_intensive_training_still_advances_backfill_if_sweep_raises(monkeypatch)
     assert result["ok"] is True
     assert result["sweep_result"] is None
     assert backfill_calls == [1]
+
+
+def test_intensive_training_attaches_auto_improvement_to_the_sweep_result(monkeypatch, tmp_path):
+    from data import alpaca_backtest, alpaca_data, alpaca_model, alpaca_strategy
+
+    monkeypatch.setattr(alpaca_data, "get_market_session", lambda: {"session": "closed", "is_open": False, "source": "fallback"})
+    monkeypatch.setattr(alpaca_strategy, "_load_state", lambda: {"trade_log": []})
+    monkeypatch.setattr(alpaca_model, "train_model", lambda **kw: {"ok": True, "rows": 1000})
+    fake_df = pd.DataFrame({"ts": [1, 2, 3]})
+    monkeypatch.setattr(alpaca_data, "load_training_dataset", lambda: fake_df)
+    monkeypatch.setattr(alpaca_backtest, "fit_backtest_model", lambda train_df: {"model": "fake"})
+    monkeypatch.setattr(alpaca_backtest, "add_model_predictions", lambda test_df, fitted: test_df)
+
+    fake_sweep = {"all_configs": [{"label": "current_defaults", "return_pct": 0.02, "trade_count": 50, "low_sample": False}], "ranked": [], "best": None}
+    original = dict(fake_sweep)  # maybe_auto_improve_from_backtest mutates the SAME dict run_config_sweep returns
+    monkeypatch.setattr(alpaca_backtest, "run_config_sweep", lambda test_with_preds, **kw: fake_sweep)
+    monkeypatch.setattr(alpaca_server, "ALPACA_LATEST_SWEEP_FILE", tmp_path / "sweep.json")
+    monkeypatch.setattr(alpaca_server, "ALPACA_LATEST_WALKFORWARD_FILE", tmp_path / "walkforward.json")
+    monkeypatch.setattr(alpaca_server, "_advance_historical_backfill", lambda: {"action": "backfill_complete"})
+    monkeypatch.setattr(alpaca_strategy, "maybe_auto_improve_from_backtest", lambda sweep, walkforward: {"triggered": False, "loss_check": {"is_loss": False, "reasons": []}})
+
+    result = alpaca_server._run_alpaca_intensive_training.__wrapped__()  # noqa: SLF001
+
+    assert result["sweep_result"]["all_configs"] == original["all_configs"]
+    assert result["sweep_result"]["auto_improvement"] == {"triggered": False, "loss_check": {"is_loss": False, "reasons": []}}
+    saved = alpaca_server.load_json(tmp_path / "sweep.json", {})
+    assert saved == original
+    assert "auto_improvement" not in saved
+
+
+def test_walkforward_backtest_job_is_a_noop_when_market_not_closed(monkeypatch):
+    from data import alpaca_backtest, alpaca_data
+
+    monkeypatch.setattr(alpaca_data, "get_market_session", lambda: {"session": "regular", "is_open": True})
+    called = []
+    monkeypatch.setattr(alpaca_backtest, "run_walkforward_backtest", lambda: called.append(1) or {"ok": True})
+    result = alpaca_server._run_alpaca_walkforward_backtest.__wrapped__()  # noqa: SLF001
+    assert result["skipped"] is True
+    assert result["reason"] == "market_not_closed"
+    assert called == []
+
+
+def test_walkforward_backtest_job_saves_the_result(monkeypatch, tmp_path):
+    from data import alpaca_backtest, alpaca_data
+
+    monkeypatch.setattr(alpaca_data, "get_market_session", lambda: {"session": "closed", "is_open": False})
+    fake_result = {"ok": True, "fold_count": 4, "profitable_fold_count": 2, "mean_return_pct": 0.03}
+    original = dict(fake_result)  # maybe_auto_improve_from_backtest mutates the SAME dict run_walkforward_backtest returns
+    monkeypatch.setattr(alpaca_backtest, "run_walkforward_backtest", lambda: fake_result)
+    monkeypatch.setattr(alpaca_server, "ALPACA_LATEST_WALKFORWARD_FILE", tmp_path / "walkforward.json")
+    monkeypatch.setattr(alpaca_server, "ALPACA_LATEST_SWEEP_FILE", tmp_path / "sweep.json")
+
+    result = alpaca_server._run_alpaca_walkforward_backtest.__wrapped__()  # noqa: SLF001
+
+    assert result["fold_count"] == original["fold_count"]
+    assert result["mean_return_pct"] == original["mean_return_pct"]
+    saved = alpaca_server.load_json(tmp_path / "walkforward.json", {})
+    assert saved == original
+    assert "auto_improvement" not in saved
+    assert "auto_improvement" in result
+
+
+def test_walkforward_backtest_job_returns_ok_false_on_failure(monkeypatch):
+    from data import alpaca_backtest, alpaca_data
+
+    monkeypatch.setattr(alpaca_data, "get_market_session", lambda: {"session": "closed", "is_open": False})
+
+    def raise_error():
+        raise RuntimeError("no data available")
+
+    monkeypatch.setattr(alpaca_backtest, "run_walkforward_backtest", raise_error)
+    result = alpaca_server._run_alpaca_walkforward_backtest.__wrapped__()  # noqa: SLF001
+    assert result["ok"] is False
 
 
 class _FakeScheduler:

@@ -104,6 +104,120 @@ def recommend_confidence_threshold(trade_log: list[dict[str, Any]] | None, *, cu
     }
 
 
+# Evidence-gated auto-improvement triggered by a NEGATIVE backtest/
+# walk-forward result -- "whenever you get negative return on backtest and
+# forward test, automatically improve... using everything the bot has as
+# a resource" (the user's own request, applied here to stocks too: "make
+# sure you review it... apply improvement needed so it can be
+# profitable"). Mirrors alpaca_crypto_trade_analysis.py's/
+# alpaca_options_trade_analysis.py's own identical pair of functions --
+# see either module for the full design rationale. Reuses the SAME
+# apply_confidence_threshold_override mechanism recommend_confidence_threshold
+# above already writes through (no new write path); this just adds a
+# SECOND, backtest-driven source of evidence for that one existing lever.
+#
+# Deliberately scoped to MODEL_CONFIDENCE_MIN only, not also
+# TAKE_PROFIT_PCT/STOP_LOSS_PCT/MAX_HOLD_MINUTES despite the sweep varying
+# those too -- same reasoning as crypto's/options' own identical scope
+# decision: adaptive_exit_pcts() (see its own docstring) scales take-
+# profit/stop-loss to each SYMBOL's own entry-time volatility for the
+# overwhelming majority of real trades, and only falls back to the flat
+# TAKE_PROFIT_PCT/STOP_LOSS_PCT constants when entry_volatility_30 is
+# missing. A real difference in the sweep's own reported return_pct across
+# TP/SL/hold-time variants is very likely coming from whatever ELSE that
+# variant also changed, not the TP/SL change itself, for live trading
+# specifically. Confidence, by contrast, is a plain threshold with no
+# adaptive layer in between -- safe to act on directly.
+BACKTEST_TUNING_MIN_SAMPLE_TRADES = 20
+BACKTEST_TUNING_MIN_RETURN_MARGIN_PCT = 0.02  # 2 percentage points -- avoids chasing sweep noise
+
+
+def recommend_confidence_from_backtest(sweep_result: dict[str, Any] | None, *, current_threshold: float) -> dict[str, Any]:
+    """Scans a alpaca_backtest.run_config_sweep() result (`all_configs`,
+    not just the ranked/best cutoff -- this wants every row, including
+    ones run_config_sweep's own min_trades filter would otherwise hide
+    from `ranked`) for a variant that (a) sets a DIFFERENT
+    model_confidence_min than what's live today, (b) has an adequately-
+    sized, non-low_sample trade count, and (c) returned a meaningfully
+    better return_pct than the sweep's own "current_defaults" row (see
+    alpaca_backtest._current_defaults_config), falling back to matching
+    by model_confidence_min value directly if that row is somehow missing
+    (an older cached sweep result predating that anchor row). Returns
+    should_apply=False whenever the sweep result is missing/malformed,
+    too thin to trust, or doesn't show a clear, adequately-sampled
+    improvement -- same non-committal-by-default posture as
+    recommend_confidence_threshold above.
+
+    Note: alpaca_backtest.py's own _SWEEP_GRID does not currently vary
+    model_confidence_min at all (only take_profit_pct/stop_loss_pct/
+    max_hold_minutes) -- this stays ready for whenever that grid gains a
+    confidence-varying variant, same as the OTHER 3 services' identical
+    functions; until then it will simply always report
+    no_meaningfully_better_variant, which is the correct, honest answer
+    given the evidence actually available."""
+    configs = (sweep_result or {}).get("all_configs") or []
+    if not configs:
+        return {"ok": True, "should_apply": False, "reason": "no_sweep_data", "current_threshold": current_threshold}
+
+    def _is_current(cfg: dict[str, Any]) -> bool:
+        if cfg.get("label") == "current_defaults":
+            return True
+        confidence = cfg.get("model_confidence_min")
+        return confidence is not None and abs(float(confidence) - current_threshold) < 1e-9
+
+    current_variant = next((c for c in configs if _is_current(c)), None)
+    current_return = float(current_variant["return_pct"]) if current_variant and current_variant.get("return_pct") is not None else None
+
+    best_candidate: dict[str, Any] | None = None
+    for cfg in configs:
+        confidence = cfg.get("model_confidence_min")
+        if confidence is None or abs(float(confidence) - current_threshold) < 1e-9:
+            continue  # not a confidence-varying variant, or matches what's already live
+        if cfg.get("low_sample") or (cfg.get("trade_count") or 0) < BACKTEST_TUNING_MIN_SAMPLE_TRADES:
+            continue
+        return_pct = cfg.get("return_pct")
+        if return_pct is None or return_pct <= 0:
+            continue
+        if current_return is not None and float(return_pct) < current_return + BACKTEST_TUNING_MIN_RETURN_MARGIN_PCT:
+            continue
+        if best_candidate is None or float(return_pct) > float(best_candidate["return_pct"]):
+            best_candidate = cfg
+
+    if best_candidate is None:
+        return {
+            "ok": True, "should_apply": False, "reason": "no_meaningfully_better_variant",
+            "current_threshold": current_threshold, "current_return_pct": current_return,
+        }
+
+    return {
+        "ok": True, "should_apply": True, "current_threshold": current_threshold,
+        "recommended_threshold": float(best_candidate["model_confidence_min"]),
+        "current_return_pct": current_return, "candidate": best_candidate,
+    }
+
+
+def backtest_shows_a_loss(sweep_result: dict[str, Any] | None, walkforward_result: dict[str, Any] | None) -> dict[str, Any]:
+    """True (with the evidence attached) when the most recent sweep's own
+    current-config reading, OR the walk-forward's own mean return across
+    folds, shows a real loss -- the trigger condition for the auto-
+    improvement pass above. Deliberately OR, not AND: either result on its
+    own is real evidence of a live, structural problem worth reacting to
+    immediately rather than waiting for both to agree."""
+    reasons: list[str] = []
+    configs = (sweep_result or {}).get("all_configs") or []
+    current_variant = next(
+        (c for c in configs if c.get("label") == "current_defaults"), None,
+    )
+    if current_variant and current_variant.get("return_pct") is not None and float(current_variant["return_pct"]) < 0:
+        reasons.append(f"sweep current_defaults return_pct={current_variant['return_pct']:.4f}")
+
+    wf_mean = (walkforward_result or {}).get("mean_return_pct")
+    if wf_mean is not None and float(wf_mean) < 0:
+        reasons.append(f"walk-forward mean_return_pct={wf_mean:.4f}")
+
+    return {"is_loss": bool(reasons), "reasons": reasons}
+
+
 def _exit_reason_bucket(reason: str | None) -> str:
     reason = reason or ""
     for prefix in _EXIT_REASON_PREFIXES:

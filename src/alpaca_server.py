@@ -102,6 +102,15 @@ ALPACA_INTENSIVE_TRAINING_MINUTES = max(10, int(os.getenv("ALPACA_INTENSIVE_TRAI
 # this is a resumable BATCH, not a one-shot attempt at the whole universe.
 # See _advance_historical_backfill.
 ALPACA_BACKFILL_BATCH_SIZE = max(1, int(os.getenv("ALPACA_BACKFILL_BATCH_SIZE", "50") or "50"))
+# Weekly, off-hours-guaranteed (Sunday) multi-fold walk-forward -- was
+# never reachable at all for stocks (unlike crypto/options), only the
+# single-split sweep bundled into _run_alpaca_intensive_training. A
+# scheduled run gives alpaca_strategy.maybe_auto_improve_from_backtest a
+# real, regularly-refreshed second source of loss evidence to pair with
+# that sweep, same cadence alpaca_crypto_server.py's/
+# alpaca_options_server.py's own identical jobs already use.
+ALPACA_WALKFORWARD_DAY_OF_WEEK = int(os.getenv("ALPACA_WALKFORWARD_DAY_OF_WEEK", "6") or "6")
+ALPACA_WALKFORWARD_HOUR_UTC = int(os.getenv("ALPACA_WALKFORWARD_HOUR_UTC", "14") or "14")
 ENABLE_ALPACA_SCHEDULER = str(os.getenv("ENABLE_ALPACA_SCHEDULER", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
 DASHBOARD_LOCAL_AUTORUN = str(os.getenv("DASHBOARD_LOCAL_AUTORUN", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
 # Cross-link to the separately-deployed perps server -- unknown at build
@@ -214,6 +223,7 @@ ALPACA_LATEST_CYCLE_FILE = DATA_DIR / "alpaca_latest_cycle.json"
 ALPACA_LATEST_POSITION_CHECK_FILE = DATA_DIR / "alpaca_latest_position_check.json"
 ALPACA_MILESTONES_FILE = DATA_DIR / "alpaca_milestones.json"
 ALPACA_LATEST_SWEEP_FILE = DATA_DIR / "alpaca_latest_sweep.json"
+ALPACA_LATEST_WALKFORWARD_FILE = DATA_DIR / "alpaca_latest_walkforward.json"
 ALPACA_LATEST_BACKFILL_FILE = DATA_DIR / "alpaca_latest_backfill.json"
 
 
@@ -383,7 +393,18 @@ def _run_alpaca_data_collect() -> dict[str, Any]:
 
 @_locked_job("alpaca_train", stale_after_sec=1800)
 def _run_alpaca_train() -> dict[str, Any]:
-    return alpaca_model.train_model()
+    # Real gap found in a strategy review: this used to call train_model()
+    # with no trade_log at all, unlike app_kalshi.py's own _run_perps_train
+    # -- alpaca_model.train_model() never got outcome-aware sample
+    # weighting to feed on in the first place. Same pattern as perps/
+    # crypto: read trade_log here (not inside alpaca_model.py itself,
+    # which would create a circular import with alpaca_strategy.py).
+    try:
+        trade_log = alpaca_strategy._load_state().get("trade_log")  # noqa: SLF001
+    except Exception as exc:
+        logger.warning("[alpaca_server] could not read trade_log for outcome-aware training: %s", exc)
+        trade_log = None
+    return alpaca_model.train_model(trade_log=trade_log)
 
 
 @_locked_job("alpaca_torch_train", stale_after_sec=3600)
@@ -554,7 +575,12 @@ def _run_alpaca_intensive_training() -> dict[str, Any]:
     if session["session"] != "closed":
         return {"ok": True, "skipped": True, "reason": "market_not_closed", "session": session["session"]}
 
-    train_result = alpaca_model.train_model()
+    try:
+        trade_log = alpaca_strategy._load_state().get("trade_log")  # noqa: SLF001
+    except Exception as exc:
+        logger.warning("[alpaca_server] could not read trade_log for outcome-aware training: %s", exc)
+        trade_log = None
+    train_result = alpaca_model.train_model(trade_log=trade_log)
     gc.collect()
 
     sweep_result = None
@@ -568,6 +594,18 @@ def _run_alpaca_intensive_training() -> dict[str, Any]:
             test_with_preds = alpaca_backtest.add_model_predictions(test_df, fitted)
             sweep_result = alpaca_backtest.run_config_sweep(test_with_preds)
             save_json(ALPACA_LATEST_SWEEP_FILE, sweep_result)
+            # See alpaca_strategy.maybe_auto_improve_from_backtest's own
+            # docstring -- the user's own explicit request: react to a
+            # losing backtest immediately, not just record it. Paired
+            # with whatever the last walk-forward run found, not just
+            # this sweep alone.
+            try:
+                walkforward_result = load_json(ALPACA_LATEST_WALKFORWARD_FILE, {})
+                sweep_result["auto_improvement"] = alpaca_strategy.maybe_auto_improve_from_backtest(
+                    sweep_result, walkforward_result,
+                )
+            except Exception as exc:
+                logger.warning("[alpaca_server] auto-improvement check failed: %s", exc)
             del df, train_df, test_df, test_with_preds, fitted
         else:
             del df
@@ -585,6 +623,38 @@ def _run_alpaca_intensive_training() -> dict[str, Any]:
         gc.collect()
 
     return {"ok": True, "train_result": train_result, "sweep_result": sweep_result, "backfill_result": backfill_result}
+
+
+@_locked_job("alpaca_walkforward_backtest", stale_after_sec=10800)
+def _run_alpaca_walkforward_backtest() -> dict[str, Any]:
+    """Weekly (see ALPACA_WALKFORWARD_DAY_OF_WEEK/_HOUR_UTC) -- the same
+    multi-fold walk-forward (alpaca_backtest.run_walkforward_backtest)
+    stocks never had a scheduled (or even manual) trigger for at all,
+    unlike crypto/options' own identical jobs. Gives
+    alpaca_strategy.maybe_auto_improve_from_backtest a regularly-refreshed
+    second source of loss evidence (see its own docstring), not just
+    whatever the off-hours intensive-training job's own single-split
+    sweep alone found. Off-hours-only, same reasoning as every other
+    heavy job here -- fitting a fresh model PER FOLD (default 4) is a
+    real multiple of the sweep's own already-heavy single-split cost."""
+    session = alpaca_data.get_market_session()
+    if session["session"] != "closed":
+        return {"ok": True, "skipped": True, "reason": "market_not_closed", "session": session["session"]}
+
+    try:
+        result = alpaca_backtest.run_walkforward_backtest()
+        save_json(ALPACA_LATEST_WALKFORWARD_FILE, result)
+        try:
+            sweep_result = load_json(ALPACA_LATEST_SWEEP_FILE, {})
+            result["auto_improvement"] = alpaca_strategy.maybe_auto_improve_from_backtest(sweep_result, result)
+        except Exception as exc:
+            logger.warning("[alpaca_server] auto-improvement check failed: %s", exc)
+        return result
+    except Exception as exc:
+        logger.warning("[alpaca_server] walk-forward backtest failed: %s", exc)
+        return {"ok": False, "error": str(exc)}
+    finally:
+        gc.collect()
 
 
 def _ensure_background_jobs_started() -> None:
@@ -619,6 +689,11 @@ def _ensure_background_jobs_started() -> None:
             scheduler.add_job(
                 _run_alpaca_torch_train, "cron", hour=ALPACA_TORCH_TRAIN_HOUR_ET, minute=0,
                 id="alpaca_torch_train", replace_existing=True,
+            )
+            scheduler.add_job(
+                _run_alpaca_walkforward_backtest, "cron",
+                day_of_week=ALPACA_WALKFORWARD_DAY_OF_WEEK, hour=ALPACA_WALKFORWARD_HOUR_UTC, minute=0,
+                id="alpaca_walkforward_backtest", replace_existing=True,
             )
             scheduler.add_job(
                 _run_alpaca_fast_check, "interval", seconds=ALPACA_FAST_CHECK_SECONDS,
@@ -787,6 +862,7 @@ def api_alpaca_status():
     latest_cycle = load_json(ALPACA_LATEST_CYCLE_FILE, {})
     latest_position_check = load_json(ALPACA_LATEST_POSITION_CHECK_FILE, {})
     latest_sweep = load_json(ALPACA_LATEST_SWEEP_FILE, {})
+    latest_walkforward = load_json(ALPACA_LATEST_WALKFORWARD_FILE, {})
     latest_backfill = load_json(ALPACA_LATEST_BACKFILL_FILE, {})
     try:
         market_session = _cached_market_session()
@@ -846,6 +922,7 @@ def api_alpaca_status():
         "latest_cycle": latest_cycle,
         "latest_position_check": latest_position_check,
         "latest_sweep": latest_sweep,
+        "latest_walkforward": latest_walkforward,
         "latest_backfill": latest_backfill,
         "market_session": market_session,
         "params": {
@@ -968,6 +1045,10 @@ _JOB_LABELS = {
     "alpaca_intensive_training": (
         f"Alpaca off-hours intensive training + sweep + historical backfill "
         f"(checked every {ALPACA_INTENSIVE_TRAINING_MINUTES} min, runs only while market is closed)"
+    ),
+    "alpaca_walkforward_backtest": (
+        f"Alpaca walk-forward backtest (weekly, day {ALPACA_WALKFORWARD_DAY_OF_WEEK} "
+        f"{ALPACA_WALKFORWARD_HOUR_UTC:02d}:00 UTC)"
     ),
     "alpaca_fast_check": f"Alpaca fast exit check (every {ALPACA_FAST_CHECK_SECONDS}s)",
     "alpaca_entry_scan": f"Alpaca entry scan (every {ALPACA_CYCLE_MINUTES} min)",

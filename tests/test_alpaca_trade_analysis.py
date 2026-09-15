@@ -166,3 +166,98 @@ def test_recommend_confidence_threshold_ignores_dry_run_trades():
     result = ata.recommend_confidence_threshold(trades, current_threshold=0.55)
     assert result["should_apply"] is False
     assert result["reason"] == "insufficient_trade_history"
+
+
+# ── recommend_confidence_from_backtest / backtest_shows_a_loss -- the
+# user's own explicit request: "whenever you get negative return on
+# backtest and forward test[,] need to automatically improve" applied to
+# stocks too ("review it... apply improvement needed so it can be
+# profitable"). Mirrors test_alpaca_crypto_trade_analysis.py's/
+# test_alpaca_options_trade_analysis.py's own identical coverage. ────────
+
+def _sweep_config(label, *, return_pct=None, trade_count=50, low_sample=False, model_confidence_min=None):
+    cfg = {"trade_count": trade_count, "return_pct": return_pct, "low_sample": low_sample}
+    if label is not None:
+        cfg["label"] = label
+    if model_confidence_min is not None:
+        cfg["model_confidence_min"] = model_confidence_min
+    return cfg
+
+
+def test_recommend_confidence_from_backtest_with_no_sweep_data_does_not_apply():
+    result = ata.recommend_confidence_from_backtest(None, current_threshold=0.52)
+    assert result["should_apply"] is False
+    assert result["reason"] == "no_sweep_data"
+
+
+def test_recommend_confidence_from_backtest_finds_a_meaningfully_better_variant():
+    sweep = {"all_configs": [
+        _sweep_config("current_defaults", return_pct=-0.05, model_confidence_min=0.52),
+        _sweep_config(None, return_pct=0.05, model_confidence_min=0.60),
+    ]}
+    result = ata.recommend_confidence_from_backtest(sweep, current_threshold=0.52)
+    assert result["should_apply"] is True
+    assert result["recommended_threshold"] == 0.60
+
+
+def test_recommend_confidence_from_backtest_ignores_a_low_sample_variant():
+    sweep = {"all_configs": [
+        _sweep_config("current_defaults", return_pct=-0.05, model_confidence_min=0.52),
+        _sweep_config(None, return_pct=0.5, model_confidence_min=0.60, low_sample=True),
+    ]}
+    result = ata.recommend_confidence_from_backtest(sweep, current_threshold=0.52)
+    assert result["should_apply"] is False
+    assert result["reason"] == "no_meaningfully_better_variant"
+
+
+def test_recommend_confidence_from_backtest_ignores_a_negative_variant():
+    sweep = {"all_configs": [
+        _sweep_config("current_defaults", return_pct=-0.05, model_confidence_min=0.52),
+        _sweep_config(None, return_pct=-0.02, model_confidence_min=0.60),
+    ]}
+    result = ata.recommend_confidence_from_backtest(sweep, current_threshold=0.52)
+    assert result["should_apply"] is False
+
+
+def test_recommend_confidence_from_backtest_requires_a_real_margin_not_just_any_improvement():
+    sweep = {"all_configs": [
+        _sweep_config("current_defaults", return_pct=0.01, model_confidence_min=0.52),
+        _sweep_config(None, return_pct=0.015, model_confidence_min=0.60),  # < 2pp margin
+    ]}
+    result = ata.recommend_confidence_from_backtest(sweep, current_threshold=0.52)
+    assert result["should_apply"] is False
+
+
+def test_recommend_confidence_from_backtest_picks_the_best_of_several_candidates():
+    sweep = {"all_configs": [
+        _sweep_config("current_defaults", return_pct=-0.10, model_confidence_min=0.52),
+        _sweep_config(None, return_pct=0.02, model_confidence_min=0.58),
+        _sweep_config(None, return_pct=0.08, model_confidence_min=0.65),
+    ]}
+    result = ata.recommend_confidence_from_backtest(sweep, current_threshold=0.52)
+    assert result["should_apply"] is True
+    assert result["recommended_threshold"] == 0.65
+
+
+def test_backtest_shows_a_loss_true_from_a_losing_sweep():
+    sweep = {"all_configs": [_sweep_config("current_defaults", return_pct=-0.05)]}
+    result = ata.backtest_shows_a_loss(sweep, None)
+    assert result["is_loss"] is True
+    assert any("sweep" in r for r in result["reasons"])
+
+
+def test_backtest_shows_a_loss_true_from_a_losing_walkforward():
+    result = ata.backtest_shows_a_loss(None, {"mean_return_pct": -0.03})
+    assert result["is_loss"] is True
+    assert any("walk-forward" in r for r in result["reasons"])
+
+
+def test_backtest_shows_a_loss_false_when_both_are_profitable():
+    sweep = {"all_configs": [_sweep_config("current_defaults", return_pct=0.05)]}
+    result = ata.backtest_shows_a_loss(sweep, {"mean_return_pct": 0.02})
+    assert result["is_loss"] is False
+
+
+def test_backtest_shows_a_loss_false_with_no_data_at_all():
+    result = ata.backtest_shows_a_loss(None, None)
+    assert result["is_loss"] is False

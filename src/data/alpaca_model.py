@@ -1,12 +1,24 @@
-"""Direction classifier for Alpaca-traded equities/ETFs -- separate from
-and structurally identical to perps_model.py (same chronological-holdout-
-never-random-shuffle discipline, same candidate comparison), but trained
-on alpaca_data's stock features/labels and persisted to HF_ALPACA_MODEL_REPO
+"""Direction classifier for Alpaca-traded equities/ETFs -- trained on
+alpaca_data's stock features/labels and persisted to HF_ALPACA_MODEL_REPO
 instead of the Kalshi perps bot's own model repo. Never touches any Kalshi
 perps state or files.
+
+Shares perps_model.py's own walk-forward-CV + recency/trade-outcome
+sample weighting + calibration/ensembling design (see train_model()'s own
+docstring) -- ported here after a strategy review found this file still
+on the older single-chronological-split contract perps_model.py/
+alpaca_crypto_model.py/alpaca_options_model.py all already moved past.
+This matters more here, not less: a real broad backtest this same review
+ran (~915K rows, ~11 months, the live 10-symbol watchlist) found the
+current live config barely breaks even (-0.34% over the period) -- exactly
+the kind of thin, fragile edge a single lucky-or-unlucky 80/20 split could
+overstate, and MODEL_CONFIDENCE_MIN=0.52 is compared directly against
+probability_up, a raw, uncalibrated sklearn score before this change, same
+gap the other 3 services' own calibration steps already closed.
 """
 from __future__ import annotations
 
+import datetime as dt
 import gc
 import json
 import logging
@@ -19,9 +31,12 @@ from typing import Any
 import joblib
 import numpy as np
 import pandas as pd
+from sklearn.calibration import CalibratedClassifierCV
 from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
+from sklearn.frozen import FrozenEstimator
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, roc_auc_score
+from sklearn.model_selection import TimeSeriesSplit
 
 from data.alpaca_data import FEATURE_COLUMNS, latest_feature_row, load_training_dataset
 
@@ -38,6 +53,23 @@ HF_ALPACA_MODEL_REPO = os.getenv("HF_ALPACA_MODEL_REPO", "papylove/alpaca-model"
 
 MIN_TRAIN_ROWS = int(os.getenv("ALPACA_MIN_TRAIN_ROWS", "300") or "300")
 MODEL_CACHE_TTL_SEC = int(os.getenv("ALPACA_MODEL_CACHE_TTL_SEC", "1800") or "1800")
+
+# See perps_model.py's own identical constants for the full rationale:
+# walk-forward CV picks a candidate based on 4 sequential looks instead of
+# one single lucky/unlucky holdout split; recency weighting lets the model
+# favor the CURRENT market regime over stale history; calibration makes
+# probability_up -- the exact number MODEL_CONFIDENCE_MIN is compared
+# against every entry -- a genuinely meaningful confidence instead of a
+# raw, uninterpreted sklearn score.
+WALK_FORWARD_SPLITS = 4
+ALPACA_MODEL_RECENCY_HALFLIFE_DAYS = float(os.getenv("ALPACA_MODEL_RECENCY_HALFLIFE_DAYS", "30") or "30")
+# Calibration/ensembling both need a real held-out slice to fit against on
+# top of the walk-forward split itself -- below this floor (e.g. right at
+# the MIN_TRAIN_ROWS=300 cold-start edge), skip both and fall back to
+# EXACTLY the old contract (single best walk-forward candidate, refit on
+# 100% of rows, uncalibrated) rather than risk fitting a calibrator on too
+# few rows to mean anything.
+ALPACA_MODEL_CALIBRATION_MIN_HOLDOUT_ROWS = int(os.getenv("ALPACA_MODEL_CALIBRATION_MIN_HOLDOUT_ROWS", "200") or "200")
 
 _model_cache: dict[str, Any] = {"model": None, "meta": None, "loaded_at": 0.0}
 
@@ -74,6 +106,77 @@ _CANDIDATES = {
 }
 
 
+class _AveragedEnsemble:
+    """Unweighted mean of predict_proba across 2-3 already-calibrated
+    candidates -- module-level (not a closure) so joblib/pickle can resolve
+    it by qualified import path across the train-here/load-there (HF
+    download into a possibly different worker process) round trip. Shipped
+    only when a real walk-forward comparison shows the average actually
+    beats every individual candidate (see train_model()) -- not a fixed
+    a-priori rule. Identical to perps_model.py's/alpaca_crypto_model.py's
+    own class of the same name -- replicated, not imported, matching this
+    codebase's own per-market isolation convention (no cross-market
+    imports)."""
+
+    def __init__(self, models: list[Any], names: list[str]):
+        self.models = models
+        self.names = names
+
+    def predict_proba(self, x: np.ndarray) -> np.ndarray:
+        return np.mean([m.predict_proba(x) for m in self.models], axis=0)
+
+    def predict(self, x: np.ndarray) -> np.ndarray:
+        return (self.predict_proba(x)[:, 1] >= 0.5).astype(int)
+
+
+def _recency_sample_weight(ts: np.ndarray, *, half_life_days: float) -> np.ndarray:
+    """Exponential half-life decay relative to THIS SLICE's own max
+    timestamp -- not the global dataset's max, so an early walk-forward
+    fold doesn't get penalized against a "now" that's actually in its own
+    future. Combines multiplicatively with class_weight="balanced" via
+    sklearn's own sample_weight handling."""
+    if half_life_days <= 0 or len(ts) == 0:
+        return np.ones(len(ts), dtype=float)
+    age_days = (ts.max() - ts) / 86400.0
+    return np.power(0.5, age_days / half_life_days)
+
+
+ALPACA_MODEL_TRADE_OUTCOME_WIN_WEIGHT = float(os.getenv("ALPACA_MODEL_TRADE_OUTCOME_WIN_WEIGHT", "1.3") or "1.3")
+ALPACA_MODEL_TRADE_OUTCOME_LOSS_WEIGHT = float(os.getenv("ALPACA_MODEL_TRADE_OUTCOME_LOSS_WEIGHT", "1.8") or "1.8")
+
+
+def _trade_outcome_sample_weight(symbols: np.ndarray, ts: np.ndarray, trade_log: list[dict[str, Any]] | None) -> np.ndarray:
+    """Extra multiplicative weight for training rows that correspond to a
+    REAL past trade entry from the bot's own trade_log -- losses upweighted
+    more than wins. Identical design to perps_model.py's/
+    alpaca_crypto_model.py's own function of the same name (see either's
+    docstring for the full rationale) -- keyed on symbol, otherwise
+    unchanged. Every row not matching a real trade entry keeps weight 1.0,
+    unaffected."""
+    weights = np.ones(len(symbols), dtype=float)
+    if not trade_log:
+        return weights
+    outcome_by_key: dict[tuple[str, int], bool] = {}
+    for t in trade_log:
+        if t.get("dry_run") or not t.get("opened_at") or not t.get("symbol"):
+            continue
+        try:
+            opened_ts = int(dt.datetime.fromisoformat(t["opened_at"]).timestamp())
+        except Exception:
+            continue
+        minute_ts = (opened_ts // 60) * 60
+        outcome_by_key[(t["symbol"], minute_ts)] = float(t.get("realized_pnl_usd") or 0.0) > 0
+    if not outcome_by_key:
+        return weights
+
+    minute_ts_values = (ts.astype(np.int64) // 60) * 60
+    for i in range(len(symbols)):
+        won = outcome_by_key.get((symbols[i], int(minute_ts_values[i])))
+        if won is not None:
+            weights[i] *= ALPACA_MODEL_TRADE_OUTCOME_WIN_WEIGHT if won else ALPACA_MODEL_TRADE_OUTCOME_LOSS_WEIGHT
+    return weights
+
+
 def _feature_importance_map(model: Any, feature_cols: list[str]) -> dict[str, float] | None:
     """Surfaces which features the trained model actually leaned on --
     e.g. how much weight sentiment_score carried relative to the technical
@@ -98,55 +201,170 @@ def _prepare_training_frame(df: pd.DataFrame) -> pd.DataFrame:
     return labeled.sort_values("ts").reset_index(drop=True)
 
 
-def train_model(df: pd.DataFrame | None = None) -> dict[str, Any]:
-    """Train, compare candidates on a chronological holdout, keep the best,
-    persist locally + to HF_ALPACA_MODEL_REPO. Never raises on ordinary
-    "not enough data yet" conditions -- expected during the first days of
-    stock data collection."""
+def train_model(df: pd.DataFrame | None = None, trade_log: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    """Train, compare candidates via walk-forward (chronological, never
+    randomly-shuffled) cross-validation, keep the best -- calibrated, and
+    ensembled if the evidence from THIS retrain's own folds actually
+    supports it -- persist locally + to HF_ALPACA_MODEL_REPO. Returns a
+    summary dict either way (never raises on ordinary "not enough data
+    yet" conditions -- expected during the first days of stock data
+    collection). See this module's own docstring for why this now mirrors
+    perps_model.py's/alpaca_crypto_model.py's design exactly instead of
+    the older single 80/20-split contract.
+
+    trade_log (alpaca_strategy state's own trade_log, passed in by the
+    caller -- this module never imports alpaca_strategy directly, which
+    would create a circular import) feeds _trade_outcome_sample_weight:
+    see its own docstring for why the bot's real past wins/losses get
+    folded into training, not just raw market-data labels."""
     frame = df if df is not None else load_training_dataset()
     if frame.empty:
         return {"ok": False, "reason": "no_data"}
 
     labeled = _prepare_training_frame(frame)
+    # _prepare_training_frame() already .copy()'d everything it needs into
+    # `labeled` -- `frame` itself is 100% dead weight from here on, and
+    # freeing it now (rather than letting it ride until the function
+    # returns) mirrors perps_model.py's/alpaca_crypto_model.py's own real
+    # OOM-avoidance fix.
+    del frame
     if len(labeled) < MIN_TRAIN_ROWS:
         return {"ok": False, "reason": "insufficient_rows", "rows": len(labeled), "need": MIN_TRAIN_ROWS}
 
     feature_cols = FEATURE_COLUMNS + ["symbol_code"]
-    split_idx = int(len(labeled) * 0.8)
-    train_df, test_df = labeled.iloc[:split_idx], labeled.iloc[split_idx:]
-    if train_df.empty or test_df.empty or test_df["label_up"].nunique() < 2:
-        return {"ok": False, "reason": "insufficient_class_variety", "rows": len(labeled)}
+    n_rows = len(labeled)
+    x_all = labeled[feature_cols].values
+    y_all = labeled["label_up"].values
+    ts_all = labeled["ts"].values
+    oldest_row_age_days = float((ts_all.max() - ts_all.min()) / 86400.0) if n_rows else 0.0
+    symbol_categories = list(labeled["symbol"].astype("category").cat.categories)
+    outcome_weight_all = _trade_outcome_sample_weight(labeled["symbol"].values, ts_all, trade_log)
+    del labeled
 
-    x_train, y_train = train_df[feature_cols].values, train_df["label_up"].values
-    x_test, y_test = test_df[feature_cols].values, test_df["label_up"].values
+    tscv = TimeSeriesSplit(n_splits=WALK_FORWARD_SPLITS)
+    splits = list(tscv.split(x_all))
+    fold_scores: dict[str, list[float]] = {name: [] for name in _CANDIDATES}
+    ensemble_fold_scores: list[float] = []
+    cv_detail: list[dict[str, Any]] = []
+    last_fold_models: dict[str, Any] = {}
 
-    best_name, best_model, best_score = None, None, -1.0
-    scores: dict[str, dict[str, float]] = {}
-    for name, factory in _CANDIDATES.items():
-        try:
-            model = factory()
-            model.fit(x_train, y_train)
-            preds = model.predict(x_test)
-            proba = model.predict_proba(x_test)[:, 1]
-            acc = float(accuracy_score(y_test, preds))
-            auc = float(roc_auc_score(y_test, proba)) if len(set(y_test)) > 1 else 0.5
-            scores[name] = {"accuracy": acc, "auc": auc}
-            combined = (acc + auc) / 2.0
-            if combined > best_score:
-                best_name, best_model, best_score = name, model, combined
-        except Exception as exc:
-            logger.warning("[alpaca_model] candidate %s failed: %s", name, exc)
+    for fold_idx, (train_idx, test_idx) in enumerate(splits):
+        x_tr, y_tr, ts_tr = x_all[train_idx], y_all[train_idx], ts_all[train_idx]
+        x_te, y_te = x_all[test_idx], y_all[test_idx]
+        if len(set(y_te)) < 2:
+            # Can't score AUC meaningfully on a single-class test fold --
+            # skip this ONE fold, don't abort the whole retrain over it.
+            continue
+        sample_weight = _recency_sample_weight(ts_tr, half_life_days=ALPACA_MODEL_RECENCY_HALFLIFE_DAYS)
+        sample_weight = sample_weight * outcome_weight_all[train_idx]
 
-    if best_model is None:
+        fold_probas: list[np.ndarray] = []
+        fold_models: dict[str, Any] = {}
+        fold_result = {"fold": fold_idx, "test_rows": int(len(test_idx))}
+        for name, factory in _CANDIDATES.items():
+            try:
+                model = factory()
+                model.fit(x_tr, y_tr, sample_weight=sample_weight)
+                preds = model.predict(x_te)
+                proba = model.predict_proba(x_te)[:, 1]
+                acc = float(accuracy_score(y_te, preds))
+                auc = float(roc_auc_score(y_te, proba))
+                combined = (acc + auc) / 2.0
+                fold_scores[name].append(combined)
+                fold_result[name] = combined
+                fold_models[name] = model
+                fold_probas.append(proba)
+            except Exception as exc:
+                logger.warning("[alpaca_model] candidate %s failed on fold %d: %s", name, fold_idx, exc)
+
+        if len(fold_probas) >= 2:
+            ensemble_proba = np.mean(fold_probas, axis=0)
+            ensemble_preds = (ensemble_proba >= 0.5).astype(int)
+            ensemble_score = (
+                accuracy_score(y_te, ensemble_preds) + roc_auc_score(y_te, ensemble_proba)
+            ) / 2.0
+            ensemble_fold_scores.append(float(ensemble_score))
+            fold_result["ensemble"] = float(ensemble_score)
+
+        cv_detail.append(fold_result)
+        if fold_idx == len(splits) - 1:
+            last_fold_models = fold_models
+
+    mean_scores = {name: (sum(s) / len(s) if s else -1.0) for name, s in fold_scores.items()}
+    best_name = max(mean_scores, key=mean_scores.get)
+    if mean_scores[best_name] < 0:
         return {"ok": False, "reason": "all_candidates_failed"}
 
-    best_model.fit(labeled[feature_cols].values, labeled["label_up"].values)
+    mean_ensemble_score = sum(ensemble_fold_scores) / len(ensemble_fold_scores) if ensemble_fold_scores else None
+    use_ensemble = mean_ensemble_score is not None and mean_ensemble_score > mean_scores[best_name] and len(last_fold_models) >= 2
 
-    symbol_categories = list(labeled["symbol"].astype("category").cat.categories)
+    last_train_idx, last_test_idx = splits[-1]
+    x_last_test, y_last_test = x_all[last_test_idx], y_all[last_test_idx]
+    can_calibrate = (
+        bool(last_fold_models)
+        and len(last_test_idx) >= ALPACA_MODEL_CALIBRATION_MIN_HOLDOUT_ROWS
+        and len(set(y_last_test)) >= 2
+    )
+
+    feature_importances: dict[str, dict[str, float]] = {}
+    ensemble_members: list[str] | None = None
+
+    if can_calibrate:
+        # Fold-3's train slice (~80% in steady state, identical to the old
+        # single 80/20 split) already produced these fits during the loop
+        # above -- calibrating here fits ONLY the sigmoid mapping on
+        # fold-3's own test slice, no new base-model fit needed.
+        calibrated_models: dict[str, Any] = {}
+        for name, model in last_fold_models.items():
+            importance = _feature_importance_map(model, feature_cols)
+            if importance is not None:
+                feature_importances[name] = importance
+            calibrated = CalibratedClassifierCV(estimator=FrozenEstimator(model), method="sigmoid")
+            calibrated.fit(x_last_test, y_last_test)
+            calibrated_models[name] = calibrated
+
+        if use_ensemble:
+            best_model = _AveragedEnsemble(list(calibrated_models.values()), list(calibrated_models.keys()))
+            model_type = "ensemble"
+            ensemble_members = list(calibrated_models.keys())
+        else:
+            best_model = calibrated_models[best_name]
+            model_type = best_name
+        calibrated_flag = True
+    else:
+        # Thin-data fallback: EXACTLY the old contract -- refit the single
+        # best walk-forward candidate fresh on 100% of rows, uncalibrated.
+        # Never regresses cold-start behavior below the calibration floor.
+        best_model = _CANDIDATES[best_name]()
+        full_sample_weight = _recency_sample_weight(ts_all, half_life_days=ALPACA_MODEL_RECENCY_HALFLIFE_DAYS)
+        full_sample_weight = full_sample_weight * outcome_weight_all
+        best_model.fit(x_all, y_all, sample_weight=full_sample_weight)
+        model_type = best_name
+        calibrated_flag = False
+        importance = _feature_importance_map(best_model, feature_cols)
+        if importance is not None:
+            feature_importances[best_name] = importance
+
     meta = {
-        "trained_at": time.time(), "model_type": best_name, "scores": scores,
-        "rows": len(labeled), "feature_columns": feature_cols, "symbol_categories": symbol_categories,
-        "feature_importances": _feature_importance_map(best_model, feature_cols),
+        "trained_at": time.time(),
+        "model_type": model_type,
+        "calibrated": calibrated_flag,
+        "ensemble_members": ensemble_members,
+        "scores": {name: {"walk_forward_mean_score": mean_scores[name]} for name in _CANDIDATES},
+        "mean_ensemble_score": mean_ensemble_score,
+        "cv_detail": cv_detail,
+        "feature_importances": feature_importances,
+        "rows": n_rows,
+        "oldest_row_age_days": round(oldest_row_age_days, 2),
+        "recency_halflife_days": ALPACA_MODEL_RECENCY_HALFLIFE_DAYS,
+        "calibration_min_holdout_rows": ALPACA_MODEL_CALIBRATION_MIN_HOLDOUT_ROWS,
+        "feature_columns": feature_cols,
+        "symbol_categories": symbol_categories,
+        # How many training rows actually matched a real past trade entry
+        # (see _trade_outcome_sample_weight) -- 0 is expected/fine (falls
+        # back to pure recency weighting), useful to see this grow over
+        # time as the account trades more.
+        "trade_outcome_rows_matched": int(np.sum(outcome_weight_all != 1.0)),
     }
 
     joblib.dump(best_model, MODEL_PATH)
@@ -156,10 +374,9 @@ def train_model(df: pd.DataFrame | None = None) -> dict[str, Any]:
     _push_model_to_hf()
     # Confirmed real recurring OOM on this exact service (512MB, running
     # this training job for BOTH the stock and crypto strategies in the
-    # same process) -- freeing the training frame/arrays and forcing a
-    # collection here mirrors the same real fix already proven on the
-    # perps side, not a guess.
-    del frame, labeled, train_df, test_df, x_train, x_test
+    # same process) -- freeing the walk-forward loop's own churn (up to 4
+    # folds x 3 candidates fit in sequence) mirrors the same real fix
+    # already proven on the perps side, not a guess.
     gc.collect()
     return {"ok": True, **meta}
 

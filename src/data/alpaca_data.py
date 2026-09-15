@@ -639,28 +639,129 @@ def _recent_volume_and_volatility_by_symbol(df: pd.DataFrame) -> pd.DataFrame:
     return grouped.reset_index()
 
 
+# Real, confirmed structural bug this fixes -- found in review, per
+# explicit user direction ("review it... apply improvement needed so it
+# can be profitable"): get_stock_watchlist's ranking pool used to be
+# bootstrapped ENTIRELY from its OWN historical archive (recent_df, from
+# load_training_dataset() -- itself built from whatever
+# collect_dataset_rows() previously collected, which reads its symbol
+# list from THIS SAME function's own past output). A symbol that was
+# never already in the archive could never be ranked, so once the
+# original 10-symbol cold-start fallback took hold on day one, there was
+# no path for ANY other symbol to ever enter rotation -- a permanent
+# lock-in, not a temporary cold-start state. Confirmed live: this
+# account's real archive (HF_ALPACA_DATASET_REPO, ~13 months of daily
+# shards) has held these exact same 10 symbols and nothing else for its
+# entire history, despite WATCHLIST_TOP_N=40 clearly intending a much
+# wider, dynamically-ranked pool.
+#
+# A genuinely wider, diversified, static candidate pool (large/mid-cap,
+# liquid, spanning tech/financials/healthcare/consumer/industrials/
+# energy plus a few broad index ETFs) breaks that loop: ranked from LIVE
+# daily bars fetched fresh on every call (see _live_broad_activity_ranking),
+# not from an archive this same ranking's own past output built -- a
+# symbol's recent real activity decides whether it makes the top
+# WATCHLIST_TOP_N every time, with no bootstrap dependency at all. Sized
+# to stay well within the same OOM-safety margin the 100-symbol incident
+# above already established (real per-cycle cost here is ONE batched
+# get_bars call, not a per-symbol fetch/engineer/predict loop -- that
+# heavier work only ever runs on the resulting top-N, same as before).
+BROAD_CANDIDATE_UNIVERSE = [
+    s.strip().upper() for s in os.getenv(
+        "ALPACA_BROAD_CANDIDATE_UNIVERSE",
+        "AAPL,MSFT,NVDA,GOOGL,AMZN,META,TSLA,AVGO,AMD,NFLX,CRM,ORCL,ADBE,INTC,CSCO,QCOM,TXN,IBM,NOW,INTU,"
+        "JPM,BAC,WFC,GS,MS,V,MA,AXP,C,SCHW,"
+        "UNH,JNJ,LLY,PFE,ABBV,MRK,TMO,ABT,DHR,"
+        "WMT,HD,PG,KO,PEP,MCD,NKE,SBUX,COST,DIS,TGT,"
+        "XOM,CVX,BA,CAT,GE,HON,UPS,LMT,"
+        "SPY,QQQ,IWM,DIA",
+    ).split(",") if s.strip()
+]
+
+# Volatility here is a std-of-daily-returns proxy (no intraday
+# volatility_15 available from daily bars) -- a coarser signal than the
+# minute-level one _recent_volume_and_volatility_by_symbol uses, but
+# genuinely comparable ACROSS the whole broad universe (unlike that
+# function's own minute-level figure, which only exists for symbols
+# already being minute-collected -- exactly the bootstrap problem this
+# ranking exists to avoid). 10 trading days is enough for a real std
+# without reacting to a single day's noise.
+BROAD_RANKING_LOOKBACK_DAYS = int(os.getenv("ALPACA_BROAD_RANKING_LOOKBACK_DAYS", "10") or "10")
+
+
+def _live_broad_activity_ranking() -> pd.DataFrame:
+    """Real recent (BROAD_RANKING_LOOKBACK_DAYS) dollar-volume + volatility
+    for the WHOLE BROAD_CANDIDATE_UNIVERSE, from ONE batched live
+    get_bars call (Alpaca supports one or more symbols per call -- see
+    alpaca_client.get_bars's own docstring) -- not a per-symbol loop, and
+    not sourced from any archive this same ranking's own output could
+    circularly bootstrap. Empty DataFrame (never raises) on any failure,
+    so get_stock_watchlist's own fallback chain still applies."""
+    end = dt.datetime.now(dt.timezone.utc)
+    start = end - dt.timedelta(days=int(BROAD_RANKING_LOOKBACK_DAYS * 1.6))  # weekends/holidays margin
+    try:
+        bars_by_symbol = alpaca_client.get_bars(
+            BROAD_CANDIDATE_UNIVERSE, timeframe="1Day", start=start.date().isoformat(), end=end.date().isoformat(),
+        )
+    except Exception as exc:
+        logger.warning("[alpaca_data] broad watchlist bars fetch failed: %s", exc)
+        return pd.DataFrame(columns=["symbol", "dollar_volume", "volatility"])
+
+    rows = []
+    for symbol, bars in bars_by_symbol.items():
+        df = _bars_to_df(bars).tail(BROAD_RANKING_LOOKBACK_DAYS)
+        if len(df) < 2:
+            continue
+        dollar_volume = float((df["volume"] * df["close"]).mean())
+        volatility = float(df["close"].pct_change().std())
+        if volatility != volatility:  # NaN (a single-row pct_change series, defensive)
+            continue
+        rows.append({"symbol": symbol, "dollar_volume": dollar_volume, "volatility": volatility})
+    return pd.DataFrame(rows, columns=["symbol", "dollar_volume", "volatility"])
+
+
+def _rank_by_activity(activity: pd.DataFrame, *, top_n: int) -> list[str]:
+    """Shared combined (dollar-volume rank + volatility rank) sort --
+    lower combined rank wins, same methodology
+    _recent_volume_and_volatility_by_symbol-based ranking always used,
+    factored out so both the new broad live ranking and the old archive-
+    based one apply it identically."""
+    by_volume = activity.sort_values("dollar_volume", ascending=False)
+    volume_rank = {s: i for i, s in enumerate(by_volume["symbol"])}
+    by_volatility = activity.sort_values("volatility", ascending=False)
+    volatility_rank = {s: i for i, s in enumerate(by_volatility["symbol"])}
+    fallback_rank = len(activity)
+    ranked = sorted(
+        activity["symbol"],
+        key=lambda s: volume_rank.get(s, fallback_rank) + volatility_rank.get(s, fallback_rank),
+    )
+    return sorted(ranked[:top_n])
+
+
 def get_stock_watchlist(recent_df: pd.DataFrame | None = None) -> list[str]:
     """Top WATCHLIST_TOP_N symbols by combined (recent dollar volume +
     recent volatility) rank -- the ones actually worth a fast, live-refresh
-    cadence. Falls back to a small, safe default (mega-cap, highly liquid
-    names) if no recent data has been collected yet or ranking fails."""
+    cadence. Tries the broad LIVE ranking first (see
+    _live_broad_activity_ranking's own docstring for why this replaced the
+    old archive-only ranking as primary); falls back to the narrower
+    already-collected-data ranking (still useful signal, just a smaller
+    pool) if the live fetch fails, and to a small, safe static default
+    (mega-cap, highly liquid names) only if both fail."""
     fallback = ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "AVGO", "AMD", "NFLX"]
+    try:
+        broad_activity = _live_broad_activity_ranking()
+        if not broad_activity.empty:
+            return _rank_by_activity(broad_activity, top_n=WATCHLIST_TOP_N) or fallback
+    except Exception as exc:
+        logger.warning("[alpaca_data] broad watchlist ranking failed, trying archive-based ranking: %s", exc)
+
     try:
         if recent_df is None or recent_df.empty:
             return fallback
         activity = _recent_volume_and_volatility_by_symbol(recent_df)
         if activity.empty:
             return fallback
-        by_volume = activity.sort_values("dollar_volume", ascending=False)
-        volume_rank = {s: i for i, s in enumerate(by_volume["symbol"])}
-        by_volatility = activity.sort_values("volatility", ascending=False)
-        volatility_rank = {s: i for i, s in enumerate(by_volatility["symbol"])}
-        fallback_rank = len(activity)
-        ranked = sorted(
-            activity["symbol"],
-            key=lambda s: volume_rank.get(s, fallback_rank) + volatility_rank.get(s, fallback_rank),
-        )
-        return sorted(ranked[:WATCHLIST_TOP_N]) or fallback
+        return _rank_by_activity(activity, top_n=WATCHLIST_TOP_N) or fallback
     except Exception as exc:
         logger.warning("[alpaca_data] watchlist ranking failed, using fallback: %s", exc)
         return fallback
