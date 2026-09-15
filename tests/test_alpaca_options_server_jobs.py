@@ -112,13 +112,68 @@ def test_backtest_sweep_job_runs_and_saves_results_when_market_closed(monkeypatc
     monkeypatch.setattr(alpaca_options_server.alpaca_options_backtest, "fit_backtest_model", lambda train_df: None)
     monkeypatch.setattr(alpaca_options_server.alpaca_options_backtest, "add_model_predictions", lambda test_df, fitted: test_df)
     fake_sweep = {"all_configs": [], "ranked": [], "best": None}
+    original = dict(fake_sweep)  # maybe_auto_improve_from_backtest mutates the SAME dict run_config_sweep returns
     monkeypatch.setattr(alpaca_options_server.alpaca_options_backtest, "run_config_sweep", lambda test_with_preds, **kw: fake_sweep)
     monkeypatch.setattr(alpaca_options_server, "ALPACA_OPTIONS_LATEST_SWEEP_FILE", tmp_path / "sweep.json")
+    monkeypatch.setattr(alpaca_options_server, "ALPACA_OPTIONS_LATEST_WALKFORWARD_FILE", tmp_path / "walkforward.json")
 
     result = alpaca_options_server._run_alpaca_options_backtest_sweep.__wrapped__()  # noqa: SLF001
     assert result["ok"] is True
-    assert result["sweep_result"] == fake_sweep
+    assert result["sweep_result"]["all_configs"] == original["all_configs"]
     assert (tmp_path / "sweep.json").exists()
+    # The saved cache file predates the auto-improvement check -- stays in
+    # its pre-existing shape; the check's own result is attached to the
+    # in-memory sweep_result the job returns, not retroactively written
+    # back into the file api_alpaca_options_status reads from.
+    saved = alpaca_options_server.load_json(tmp_path / "sweep.json", {})
+    assert saved == original
+    assert "auto_improvement" not in saved
+    assert "auto_improvement" in result["sweep_result"]
+
+
+def test_walkforward_backtest_job_is_a_noop_during_regular_hours(monkeypatch):
+    from data import alpaca_data
+
+    monkeypatch.setattr(alpaca_data, "get_market_session", lambda: {"session": "regular", "is_open": True})
+    called = []
+    monkeypatch.setattr(alpaca_options_server.alpaca_options_backtest, "run_walkforward_backtest", lambda: called.append(1) or {"ok": True})
+    result = alpaca_options_server._run_alpaca_options_walkforward_backtest.__wrapped__()  # noqa: SLF001
+    assert result["skipped"] is True
+    assert result["reason"] == "regular_hours"
+    assert called == []
+
+
+def test_walkforward_backtest_job_saves_the_result(monkeypatch, tmp_path):
+    from data import alpaca_data
+
+    monkeypatch.setattr(alpaca_data, "get_market_session", lambda: {"session": "closed", "is_open": False})
+    fake_result = {"ok": True, "fold_count": 4, "profitable_fold_count": 2, "mean_return_pct": 0.03}
+    original = dict(fake_result)  # maybe_auto_improve_from_backtest mutates the SAME dict run_walkforward_backtest returns
+    monkeypatch.setattr(alpaca_options_server.alpaca_options_backtest, "run_walkforward_backtest", lambda: fake_result)
+    monkeypatch.setattr(alpaca_options_server, "ALPACA_OPTIONS_LATEST_WALKFORWARD_FILE", tmp_path / "walkforward.json")
+    monkeypatch.setattr(alpaca_options_server, "ALPACA_OPTIONS_LATEST_SWEEP_FILE", tmp_path / "sweep.json")
+
+    result = alpaca_options_server._run_alpaca_options_walkforward_backtest.__wrapped__()  # noqa: SLF001
+
+    assert result["fold_count"] == original["fold_count"]
+    assert result["mean_return_pct"] == original["mean_return_pct"]
+    saved = alpaca_options_server.load_json(tmp_path / "walkforward.json", {})
+    assert saved == original
+    assert "auto_improvement" not in saved
+    assert "auto_improvement" in result
+
+
+def test_walkforward_backtest_job_returns_ok_false_on_failure(monkeypatch):
+    from data import alpaca_data
+
+    monkeypatch.setattr(alpaca_data, "get_market_session", lambda: {"session": "closed", "is_open": False})
+
+    def raise_error():
+        raise RuntimeError("no data available")
+
+    monkeypatch.setattr(alpaca_options_server.alpaca_options_backtest, "run_walkforward_backtest", raise_error)
+    result = alpaca_options_server._run_alpaca_options_walkforward_backtest.__wrapped__()  # noqa: SLF001
+    assert result["ok"] is False
 
 
 def test_backtest_sweep_job_never_raises_on_failure(monkeypatch):

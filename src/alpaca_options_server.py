@@ -102,9 +102,21 @@ ALPACA_OPTIONS_TORCH_TRAIN_HOUR_ET = int(os.getenv("ALPACA_OPTIONS_TORCH_TRAIN_H
 # alpaca_options_backtest.run_config_sweep fits/replays 4 full parameter
 # configs -- so it runs less often): "backtested for best strategies",
 # reporting findings for TAKE_PROFIT_PCT/STOP_LOSS_PCT/MAX_HOLD_MINUTES/
-# MODEL_CONFIDENCE_MIN only, never auto-applying a new config to the live
-# strategy.
+# MODEL_CONFIDENCE_MIN. A losing reading now ALSO feeds
+# alpaca_options_strategy.maybe_auto_improve_from_backtest -- per the
+# user's own explicit request ("get in more trades and able to get it by
+# itself"), which narrowly and evidence-gatedly auto-tunes
+# MODEL_CONFIDENCE_MIN (see that function's own docstring for why it's
+# scoped to confidence only, and why this supersedes the caution in this
+# comment's own earlier wording).
 ALPACA_OPTIONS_BACKTEST_SWEEP_MINUTES = max(30, int(os.getenv("ALPACA_OPTIONS_BACKTEST_SWEEP_MINUTES", "120") or "120"))
+# Weekly, off-hours-guaranteed (Sunday) multi-fold walk-forward -- was
+# manual-trigger only (?walkforward=1) until now; a scheduled run gives
+# maybe_auto_improve_from_backtest a real, regularly-refreshed SECOND
+# source of loss evidence to pair with the sweep above, same cadence
+# alpaca_crypto_server.py's own identical job already uses.
+ALPACA_OPTIONS_WALKFORWARD_DAY_OF_WEEK = int(os.getenv("ALPACA_OPTIONS_WALKFORWARD_DAY_OF_WEEK", "6") or "6")
+ALPACA_OPTIONS_WALKFORWARD_HOUR_UTC = int(os.getenv("ALPACA_OPTIONS_WALKFORWARD_HOUR_UTC", "13") or "13")
 ALPACA_OPTIONS_STARTUP_GRACE_SECONDS = max(0, int(os.getenv("ALPACA_OPTIONS_STARTUP_GRACE_SECONDS", "60") or "60"))
 ENABLE_ALPACA_OPTIONS_SCHEDULER = str(os.getenv("ENABLE_ALPACA_OPTIONS_SCHEDULER", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
 DASHBOARD_LOCAL_AUTORUN = str(os.getenv("DASHBOARD_LOCAL_AUTORUN", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
@@ -197,6 +209,7 @@ ALPACA_OPTIONS_LATEST_CYCLE_FILE = DATA_DIR / "alpaca_options_latest_cycle.json"
 ALPACA_OPTIONS_LATEST_POSITION_CHECK_FILE = DATA_DIR / "alpaca_options_latest_position_check.json"
 ALPACA_OPTIONS_MILESTONES_FILE = DATA_DIR / "alpaca_options_milestones.json"
 ALPACA_OPTIONS_LATEST_SWEEP_FILE = DATA_DIR / "alpaca_options_latest_sweep.json"
+ALPACA_OPTIONS_LATEST_WALKFORWARD_FILE = DATA_DIR / "alpaca_options_latest_walkforward.json"
 
 # Same reasoning as alpaca_server.py's own copy of this: the dashboard
 # polls /api/alpaca/options/status every 10s, and get_market_session() can
@@ -406,13 +419,14 @@ def _run_alpaca_options_torch_train() -> dict[str, Any]:
 @_locked_job("alpaca_options_backtest_sweep", stale_after_sec=1800)
 def _run_alpaca_options_backtest_sweep() -> dict[str, Any]:
     """Off-hours-only, same reasoning as training: a fitted-model walk-
-    forward replay plus a 4-config TAKE_PROFIT_PCT/STOP_LOSS_PCT/
+    forward replay plus a multi-config TAKE_PROFIT_PCT/STOP_LOSS_PCT/
     MAX_HOLD_MINUTES/MODEL_CONFIDENCE_MIN sweep (see
     alpaca_options_backtest.run_config_sweep) has no business competing
     with live entry-scan/fast-check for CPU/memory while real option
-    orders may be in flight. Reports findings to the dashboard only --
-    NEVER applies a new config to the live strategy automatically; that
-    stays a deliberate, reviewed decision.
+    orders may be in flight. Reports findings to the dashboard, AND (see
+    alpaca_options_strategy.maybe_auto_improve_from_backtest) reacts to a
+    losing current-config reading immediately -- paired with whatever the
+    last scheduled walk-forward run found, not just this sweep alone.
 
     Explicit del + gc.collect() after each heavy step mirrors the same
     real OOM-mitigation discipline alpaca_server.py's own intensive-
@@ -434,10 +448,48 @@ def _run_alpaca_options_backtest_sweep() -> dict[str, Any]:
         test_with_preds = alpaca_options_backtest.add_model_predictions(test_df, fitted)
         sweep_result = alpaca_options_backtest.run_config_sweep(test_with_preds)
         save_json(ALPACA_OPTIONS_LATEST_SWEEP_FILE, sweep_result)
+        try:
+            walkforward_result = load_json(ALPACA_OPTIONS_LATEST_WALKFORWARD_FILE, {})
+            sweep_result["auto_improvement"] = alpaca_options_strategy.maybe_auto_improve_from_backtest(
+                sweep_result, walkforward_result,
+            )
+        except Exception as exc:
+            logger.warning("[alpaca_options_server] auto-improvement check failed: %s", exc)
         del df, train_df, test_df, test_with_preds, fitted
         return {"ok": True, "sweep_result": sweep_result}
     except Exception as exc:
         logger.warning("[alpaca_options_server] backtest sweep failed: %s", exc)
+        return {"ok": False, "error": str(exc)}
+    finally:
+        gc.collect()
+
+
+@_locked_job("alpaca_options_walkforward_backtest", stale_after_sec=10800)
+def _run_alpaca_options_walkforward_backtest() -> dict[str, Any]:
+    """Weekly (see ALPACA_OPTIONS_WALKFORWARD_DAY_OF_WEEK/_HOUR_UTC) -- the
+    same multi-fold walk-forward (alpaca_options_backtest.run_walkforward_backtest)
+    already reachable manually via GET /api/alpaca/options/backtest?walkforward=1,
+    now also run on a real schedule so alpaca_options_strategy.maybe_auto_improve_from_backtest
+    has a regularly-refreshed second source of loss evidence (see its own
+    docstring), not just whatever the daily sweep alone found. Session-
+    gated the same way the sweep job is -- Sunday already guarantees
+    off-hours, this is a defensive second check, not the primary gate."""
+    from data import alpaca_data
+    session = alpaca_data.get_market_session()
+    if session["session"] == "regular":
+        return {"ok": True, "skipped": True, "reason": "regular_hours", "session": session["session"]}
+
+    try:
+        result = alpaca_options_backtest.run_walkforward_backtest()
+        save_json(ALPACA_OPTIONS_LATEST_WALKFORWARD_FILE, result)
+        try:
+            sweep_result = load_json(ALPACA_OPTIONS_LATEST_SWEEP_FILE, {})
+            result["auto_improvement"] = alpaca_options_strategy.maybe_auto_improve_from_backtest(sweep_result, result)
+        except Exception as exc:
+            logger.warning("[alpaca_options_server] auto-improvement check failed: %s", exc)
+        return result
+    except Exception as exc:
+        logger.warning("[alpaca_options_server] walk-forward backtest failed: %s", exc)
         return {"ok": False, "error": str(exc)}
     finally:
         gc.collect()
@@ -550,6 +602,11 @@ def _ensure_background_jobs_started() -> None:
                 _run_alpaca_options_backtest_sweep, "interval", minutes=ALPACA_OPTIONS_BACKTEST_SWEEP_MINUTES,
                 id="alpaca_options_backtest_sweep", replace_existing=True,
                 next_run_time=dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=ALPACA_OPTIONS_BACKTEST_SWEEP_MINUTES),
+            )
+            scheduler.add_job(
+                _run_alpaca_options_walkforward_backtest, "cron",
+                day_of_week=ALPACA_OPTIONS_WALKFORWARD_DAY_OF_WEEK, hour=ALPACA_OPTIONS_WALKFORWARD_HOUR_UTC, minute=0,
+                id="alpaca_options_walkforward_backtest", replace_existing=True,
             )
             scheduler.add_job(
                 _run_alpaca_options_fast_check, "interval", seconds=ALPACA_OPTIONS_FAST_CHECK_SECONDS,
@@ -740,6 +797,7 @@ def api_alpaca_options_status():
     latest_cycle = load_json(ALPACA_OPTIONS_LATEST_CYCLE_FILE, {})
     latest_position_check = load_json(ALPACA_OPTIONS_LATEST_POSITION_CHECK_FILE, {})
     latest_sweep = load_json(ALPACA_OPTIONS_LATEST_SWEEP_FILE, {})
+    latest_walkforward = load_json(ALPACA_OPTIONS_LATEST_WALKFORWARD_FILE, {})
     try:
         market_session = _cached_market_session()
     except Exception:
@@ -797,6 +855,7 @@ def api_alpaca_options_status():
         "latest_cycle": latest_cycle,
         "latest_position_check": latest_position_check,
         "latest_sweep": latest_sweep,
+        "latest_walkforward": latest_walkforward,
         "market_session": market_session,
         "params": {
             "position_size_pct": alpaca_options_strategy.POSITION_SIZE_PCT,
@@ -943,6 +1002,10 @@ _JOB_LABELS = {
         f"promoted only if it beats the currently-live model)"
     ),
     "alpaca_options_backtest_sweep": f"Alpaca options backtest sweep (every {ALPACA_OPTIONS_BACKTEST_SWEEP_MINUTES} min off-hours)",
+    "alpaca_options_walkforward_backtest": (
+        f"Alpaca options walk-forward backtest (weekly, day {ALPACA_OPTIONS_WALKFORWARD_DAY_OF_WEEK} "
+        f"{ALPACA_OPTIONS_WALKFORWARD_HOUR_UTC:02d}:00 UTC)"
+    ),
     "alpaca_options_fast_check": f"Alpaca options fast exit check (every {ALPACA_OPTIONS_FAST_CHECK_SECONDS}s)",
     "alpaca_options_entry_scan": f"Alpaca options entry scan (every {ALPACA_OPTIONS_CYCLE_MINUTES} min)",
     "alpaca_options_threads_trending_news": "Threads trending-news post (every 30 min)",

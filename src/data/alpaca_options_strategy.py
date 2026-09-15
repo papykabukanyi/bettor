@@ -114,7 +114,37 @@ MIN_VOLUME_Z = _env_float("ALPACA_OPTIONS_MIN_VOLUME_Z", 1.0)
 MIN_VOLATILITY_RATIO = _env_float("ALPACA_OPTIONS_MIN_VOLATILITY_RATIO", 1.1)  # volatility_5 / volatility_30
 TAKE_PROFIT_PCT = _env_float("ALPACA_OPTIONS_TAKE_PROFIT_PCT", 0.30)
 STOP_LOSS_PCT = _env_float("ALPACA_OPTIONS_STOP_LOSS_PCT", 0.20)
+# Real design mismatch found per explicit user direction ("options trades
+# can take days or hours... options strategy need to be very different"):
+# this strategy picks contracts with MIN_DAYS_TO_EXPIRATION..MAX_DAYS_TO_EXPIRATION
+# (alpaca_options_data.py) days of REAL life left -- 7 to 45 real days --
+# but was force-closing every position on a flat few-hours timer
+# regardless of how much of that life was left, an intraday-scalp-style
+# exit bolted onto an instrument chosen for a multi-week horizon. Kept as
+# a MINUTES constant (not retired) because it still serves two real roles:
+# (1) the FLOOR _effective_max_hold_minutes (below) applies so a contract
+# entered close to its own expiration still gets at least this much
+# patience, and (2) adaptive_exit_pcts' own horizon_scale, which is about
+# how WIDE take-profit/stop-loss should be for a given hold horizon, not
+# about how LONG to actually wait -- see that function's own docstring.
+# The actual "how long do we wait for take-profit before giving up"
+# decision is now MAX_HOLD_FRACTION_OF_DTE-scaled to each position's own
+# real days-to-expiration -- see _effective_max_hold_minutes.
 MAX_HOLD_MINUTES = _env_int("ALPACA_OPTIONS_MAX_HOLD_MINUTES", 180)
+# The soft max-hold check now tracks each position's OWN real time-to-
+# expiration instead of a flat timer -- "keep studying to get it to when
+# it['s] positive and take profit" (the user's own words): a contract
+# with weeks of life left deserves weeks of patience, not a same-day
+# cutoff. 0.85 leaves real margin before _near_expiration's own harder,
+# unconditional MIN_DAYS_TO_EXPIRATION_BEFORE_FORCED_EXIT backstop kicks
+# in below -- this is a SOFTER, price-progress-gated check (see
+# PROMISING_PROGRESS_FRACTION below), near_expiration is the actual final
+# word regardless of P&L. take_profit/stop_loss are UNCHANGED by any of
+# this -- either can still fire the instant its own threshold is crossed,
+# on day one or day forty; this only changes how long a position that has
+# hit NEITHER yet is allowed to keep waiting for one before max_hold_time
+# forces a decision.
+MAX_HOLD_FRACTION_OF_DTE = _env_float("ALPACA_OPTIONS_MAX_HOLD_FRACTION_OF_DTE", 0.85)
 # Per-ticker adaptive take-profit/stop-loss -- same methodology
 # perps_strategy.py/alpaca_crypto_strategy.py/alpaca_strategy.py already use
 # (see any of their own adaptive_exit_pcts docstrings). `entry_volatility_30`
@@ -353,6 +383,38 @@ def adaptive_exit_pcts(entry_volatility_30: float | None) -> dict[str, float]:
     return {"take_profit_pct": take_profit, "stop_loss_pct": stop_loss}
 
 
+def _effective_max_hold_minutes(position: dict[str, Any], *, opened_at: dt.datetime) -> float:
+    """How long decide_exit's soft max-hold check actually waits before
+    giving up on this SPECIFIC position -- see MAX_HOLD_FRACTION_OF_DTE's
+    own comment for the full rationale. Scaled to MAX_HOLD_FRACTION_OF_DTE
+    of the real time between entry and this contract's own expiration,
+    reusing the exact same expiration_date-then-OCC-symbol-fallback
+    resolution _near_expiration already uses (so the two checks always
+    agree on what expiration date a position has). Falls back to the flat
+    MAX_HOLD_MINUTES floor when expiration can't be resolved at all, or
+    when the DTE-scaled value would come out SHORTER than that floor (a
+    contract entered very close to its own MIN_DAYS_TO_EXPIRATION
+    window's short end) -- never a shorter wait than the old flat
+    behavior already provided, only a longer one when the contract's own
+    real life supports it."""
+    expiration_date = position.get("expiration_date")
+    exp_date: dt.date | None = None
+    if expiration_date:
+        try:
+            exp_date = dt.datetime.fromisoformat(expiration_date).date()
+        except ValueError:
+            exp_date = None
+    if exp_date is None:
+        exp_date = _expiration_from_symbol(position.get("symbol", ""))
+    if exp_date is None:
+        return float(MAX_HOLD_MINUTES)
+    expiration_dt = dt.datetime.combine(exp_date, dt.time.min, tzinfo=dt.timezone.utc)
+    total_lifetime_minutes = (expiration_dt - opened_at).total_seconds() / 60.0
+    if total_lifetime_minutes <= 0:
+        return float(MAX_HOLD_MINUTES)
+    return max(float(MAX_HOLD_MINUTES), total_lifetime_minutes * MAX_HOLD_FRACTION_OF_DTE)
+
+
 def decide_exit(
     position: dict[str, Any], current_price: float, *, now: dt.datetime | None = None,
     dollar_volume_z: float | None = None, momentum_pct: float | None = None,
@@ -403,7 +465,14 @@ def decide_exit(
 
     opened_at = dt.datetime.fromisoformat(position["opened_at"])
     held_minutes = (now - opened_at).total_seconds() / 60.0
-    if held_minutes >= MAX_HOLD_MINUTES:
+    # DTE-scaled, not a flat timer -- see MAX_HOLD_FRACTION_OF_DTE's own
+    # comment and _effective_max_hold_minutes' own docstring for why: a
+    # contract entered with real weeks left before expiration gets real
+    # weeks of patience to reach take_profit before this soft check even
+    # starts considering an early exit, not the same few hours a same-day
+    # scalp would get.
+    effective_max_hold_minutes = _effective_max_hold_minutes(position, opened_at=opened_at)
+    if held_minutes >= effective_max_hold_minutes:
         progress_frac = (change_pct / take_profit_pct) if take_profit_pct > 0 else 0.0
         price_promising = progress_frac >= PROMISING_PROGRESS_FRACTION
         volume_confirmed = dollar_volume_z is not None and dollar_volume_z >= PROMISING_VOLUME_Z
@@ -417,7 +486,7 @@ def decide_exit(
         )
         sentiment_promising = sentiment_score is not None and sentiment_score >= PROMISING_SENTIMENT_SCORE
         promising = price_promising or momentum_promising or breakout_promising or sentiment_promising
-        if not promising or held_minutes >= MAX_HOLD_MINUTES + MAX_HOLD_EXTENSION_MINUTES:
+        if not promising or held_minutes >= effective_max_hold_minutes + MAX_HOLD_EXTENSION_MINUTES:
             return True, f"max_hold_time ({held_minutes:.0f}min, {change_pct:+.3%})"
     return False, f"holding ({change_pct:+.3%}, {held_minutes:.0f}min)"
 
@@ -562,6 +631,102 @@ def _maybe_run_batch_trade_analysis() -> None:
             apply_confidence_threshold_override(tuning_rec["recommended_threshold"], reason="5-trade batch review")
     except Exception:
         logger.warning("[alpaca_options_strategy] batch trade analysis failed", exc_info=True)
+
+
+def maybe_auto_improve_from_backtest(
+    sweep_result: dict[str, Any] | None, walkforward_result: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """The user's own explicit request, applied to options: "whenever you
+    get negative return on backtest and forward test[,] need to
+    automatically improve the whole crypto side using everything the bot
+    has as a resource" -- and, this same session, "make sure... it get in
+    more trades and able to get it by itself" for options specifically.
+    Mirrors alpaca_crypto_strategy.py's own identical function; see its
+    docstring for the full design rationale. Called right after
+    alpaca_options_server.py's own scheduled sweep/walk-forward jobs
+    complete (see alpaca_options_trade_analysis.backtest_shows_a_loss for
+    the trigger condition) -- best-effort, exception-caught, never allowed
+    to affect trading itself.
+
+    Deliberately supersedes _run_alpaca_options_backtest_sweep's OWN
+    earlier, more cautious docstring ("NEVER applies a new config to the
+    live strategy automatically; that stays a deliberate, reviewed
+    decision") -- that was the right call before the user asked for
+    genuine self-improvement; this is the reviewed decision now, scoped
+    narrowly (confidence threshold only, evidence-gated, logged) rather
+    than a wholesale reversal of that caution.
+
+    Two concrete responses when a loss is detected, both reusing EXISTING,
+    already-proven mechanisms:
+      1. alpaca_options_trade_analysis.recommend_confidence_from_backtest
+         checks whether the sweep's OWN explored variants already found a
+         higher-confidence config that would have done meaningfully
+         better -- applied via the SAME apply_confidence_threshold_override
+         _maybe_run_batch_trade_analysis above already uses for its own,
+         slower-accumulating real-trade-log-driven version of this same
+         tune. Does NOT auto-tune TAKE_PROFIT_PCT/STOP_LOSS_PCT/
+         MAX_HOLD_MINUTES -- see recommend_confidence_from_backtest's own
+         module-level comment for why.
+      2. An extra, immediate retrain of BOTH the primary sklearn model AND
+         the separate torch candidate model on the freshest available
+         data -- "use everything the bot has as a resource" taken
+         literally, and doesn't wait for the next scheduled off-hours
+         retrain of either.
+
+    Returns a summary dict either way -- callers may ignore it, but it's
+    attached to the triggering job's own result for observability so this
+    is a visible, auditable action, never a silent background change."""
+    from data import alpaca_options_trade_analysis
+
+    result: dict[str, Any] = {"triggered": False}
+    try:
+        loss_check = alpaca_options_trade_analysis.backtest_shows_a_loss(sweep_result, walkforward_result)
+        result["loss_check"] = loss_check
+        if not loss_check["is_loss"]:
+            return result
+        result["triggered"] = True
+        logger.warning(
+            "[alpaca_options_strategy] backtest/walk-forward shows a loss (%s) -- running auto-improvement",
+            "; ".join(loss_check["reasons"]),
+        )
+
+        with _STATE_LOCK:
+            state = _load_state()
+            current_threshold = (state.get("tuning") or {}).get("model_confidence_min", MODEL_CONFIDENCE_MIN)
+
+        confidence_rec = alpaca_options_trade_analysis.recommend_confidence_from_backtest(
+            sweep_result, current_threshold=current_threshold,
+        )
+        result["confidence_recommendation"] = confidence_rec
+        if confidence_rec.get("should_apply"):
+            apply_confidence_threshold_override(
+                confidence_rec["recommended_threshold"],
+                reason=f"auto-improvement after a losing backtest ({'; '.join(loss_check['reasons'])})",
+            )
+    except Exception:
+        logger.warning("[alpaca_options_strategy] auto-improvement evaluation failed", exc_info=True)
+        return result
+
+    # Extra retrain: a fully separate best-effort step from the tuning
+    # above -- runs regardless of whether a confidence change was applied,
+    # since a stale model is a real, independent lever worth pulling on
+    # its own evidence-of-trouble signal. Both the primary model AND the
+    # separate torch candidate get an early shot, not just whichever one
+    # the next scheduled off-hours job would have hit first.
+    try:
+        from data import alpaca_options_model
+        train_result = alpaca_options_model.train_model()
+        result["extra_retrain"] = {"ok": train_result.get("ok"), "rows": train_result.get("rows")}
+    except Exception:
+        logger.warning("[alpaca_options_strategy] auto-improvement primary retrain failed", exc_info=True)
+    try:
+        from data import alpaca_options_model
+        torch_result = alpaca_options_model.train_torch_candidate_model()
+        result["extra_torch_retrain"] = {"ok": torch_result.get("ok"), "promoted": torch_result.get("promoted")}
+    except Exception:
+        logger.warning("[alpaca_options_strategy] auto-improvement torch retrain failed", exc_info=True)
+
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -843,8 +1008,18 @@ def _reconcile_positions_with_exchange(state: dict[str, Any]) -> list[dict[str, 
         return local_positions
 
     local_by_symbol = {p["symbol"]: p for p in local_positions}
+    # Real bug found in this review: credit spreads (added after this
+    # function and its own incident/fix above) ALSO carry a short_symbol
+    # leg -- restricting this set to "debit_spread" only meant a credit
+    # spread's own short leg fell through to the generic real_pos["side"]
+    # == "short" branch below every single reconciliation cycle, spamming
+    # a spurious "no matching tracked spread" warning for a completely
+    # normal, expected leg. Harmless there (that branch already just
+    # leaves it alone), but see is_spread below for the real, silent
+    # correctness bug this same gap also caused.
     known_short_leg_symbols = {
-        p["short_symbol"] for p in local_positions if p.get("strategy") == "debit_spread" and p.get("short_symbol")
+        p["short_symbol"] for p in local_positions
+        if p.get("strategy") in ("debit_spread", "credit_spread") and p.get("short_symbol")
     }
     reconciled: list[dict[str, Any]] = []
     for symbol, real_pos in real.items():
@@ -881,18 +1056,26 @@ def _reconcile_positions_with_exchange(state: dict[str, Any]) -> list[dict[str, 
             })
             continue
         # Real bug found in review while cleaning up after the incident
-        # above: for a debit_spread, real_pos["entry_price"] here is only
-        # ever the LONG leg's OWN fill price (from /v2/positions, one
-        # symbol at a time) -- not this position's real entry_price, which
-        # is the NET DEBIT of both legs combined (see scan_and_enter's own
-        # net_debit). Correcting entry_price from real_pos for a spread
-        # would silently replace a correct, cheaper net-debit cost basis
-        # with a more expensive single-leg price, understating every real
-        # gain and skewing take-profit/stop-loss thresholds off a wrong
-        # baseline. Only `count` (contract quantity) is safe to sync this
-        # way for a spread -- both legs share the same quantity, so the
-        # long leg's own real qty is a valid ground truth for that.
-        is_spread = local.get("strategy") == "debit_spread"
+        # above: for a debit_spread OR a credit_spread, real_pos["entry_price"]
+        # here is only ever the LONG leg's OWN fill price (from
+        # /v2/positions, one symbol at a time) -- not this position's real
+        # entry_price, which is the NET DEBIT (or, for a credit spread, the
+        # net long-minus-short value -- see scan_and_enter's own net_value
+        # comment, NEGATIVE on this module's own convention) of both legs
+        # combined. Correcting entry_price from real_pos for a spread would
+        # silently replace a correct net cost basis with a wrong single-leg
+        # one -- for a credit spread specifically this doesn't just skew
+        # the number, it flips its SIGN (a positive single-leg price
+        # overwriting a negative net value), which would silently break
+        # decide_exit's own "change_pct is negated for a credit spread"
+        # logic on every future exit check. Real, confirmed gap: this
+        # exception originally only covered "debit_spread", so a live
+        # credit spread's entry_price was being corrupted this way on
+        # EVERY reconciliation cycle until this fix. Only `count` (contract
+        # quantity) is safe to sync this way for either spread type -- both
+        # legs share the same quantity, so the long leg's own real qty is a
+        # valid ground truth for that.
+        is_spread = local.get("strategy") in ("debit_spread", "credit_spread")
         if (
             abs(float(local["count"]) - real_pos["count"]) > 1e-9
             or (not is_spread and abs(float(local["entry_price"]) - real_pos["entry_price"]) > 1e-6)
@@ -943,6 +1126,47 @@ def get_current_spread_price(long_symbol: str, short_symbol: str) -> float | Non
     if long_price is None or short_price is None:
         return None
     return round(long_price - short_price, 4)
+
+
+def _verify_entry_fill(order_id: str | None, *, symbol: str) -> dict[str, Any] | None:
+    """Confirms a just-placed ENTRY order actually filled before this
+    strategy treats a position as real -- the same fill-verification
+    discipline alpaca_strategy.py's/alpaca_crypto_strategy.py's own
+    scan_and_enter already apply (see their own docstrings for the real,
+    confirmed incident this class of bug caused for stocks: 42+ duplicate
+    "opened" Threads posts and ~$4,267 of real losses from treating an
+    UNFILLED order as an open position). Options were never fixed for
+    this specifically, and the gap is real here too: a naked contract
+    uses a plain market order (fills almost immediately in practice, but
+    "almost always" isn't "always"), while a debit/credit spread's mleg
+    combo REQUIRES a real LIMIT order (see build_option_spread_order's
+    own docstring -- no market mleg order type exists at all), which is
+    genuinely NOT guaranteed to fill right away.
+
+    Returns None when the order id is real but never filled (having
+    already best-effort cancelled it) -- the caller must NOT record a
+    position or post a Threads confirmation for a trade that never
+    happened. Returns {"filled_qty": None, "filled_avg_price": None} for
+    a dry-run order_id (None) -- nothing to verify. On a real fill,
+    returns the order's OWN filled_qty/filled_avg_price so the caller can
+    correct entry_price to what the position actually cost, not the
+    pre-order quote estimate."""
+    from data import alpaca_client
+    if order_id is None:
+        return {"filled_qty": None, "filled_avg_price": None}
+    try:
+        order_after = alpaca_client.get_order(order_id)
+    except Exception as exc:
+        logger.warning("[alpaca_options_strategy] could not verify fill for %s order %s: %s", symbol, order_id, exc)
+        order_after = None
+    filled_qty = float((order_after or {}).get("filled_qty") or 0.0)
+    if filled_qty <= 0:
+        try:
+            alpaca_client.cancel_order(order_id)
+        except Exception as exc:
+            logger.warning("[alpaca_options_strategy] could not cancel unfilled %s order %s: %s", symbol, order_id, exc)
+        return None
+    return {"filled_qty": filled_qty, "filled_avg_price": (order_after or {}).get("filled_avg_price")}
 
 
 def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = None) -> dict[str, Any]:
@@ -1083,7 +1307,6 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
                 # once the position exists) used the adaptive ones -- a
                 # real bug this session already found and fixed once for
                 # crypto's own identical entry-time context capture.
-                levels = position_exit_levels({"entry_price": net_debit, "entry_volatility_30": row.get("volatility_30")})
                 order_id = None
                 if not effective_dry_run:
                     limit_price = net_debit * (1 + SPREAD_LIMIT_SLIPPAGE_PCT)
@@ -1091,7 +1314,14 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
                         long_symbol=long_symbol, short_symbol=short_symbol, qty=qty, limit_price=limit_price,
                     )
                     order_id = alpaca_client.place_order(order_spec)
+                    fill = _verify_entry_fill(order_id, symbol=symbol)
+                    if fill is None:
+                        opened.append({"symbol": symbol, "ok": True, "action": "skipped_order_not_filled"})
+                        continue
+                    if fill.get("filled_avg_price"):
+                        net_debit = float(fill["filled_avg_price"])
 
+                levels = position_exit_levels({"entry_price": net_debit, "entry_volatility_30": row.get("volatility_30")})
                 position = {
                     "symbol": long_symbol, "underlying_symbol": symbol, "option_type": long_contract.get("type"),
                     "strategy": "debit_spread", "short_symbol": short_symbol,
@@ -1141,9 +1371,6 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
                     opened.append({"symbol": symbol, "ok": True, "action": "skipped_insufficient_budget"})
                     continue
 
-                levels = position_exit_levels({
-                    "entry_price": net_value, "strategy": "credit_spread", "entry_volatility_30": row.get("volatility_30"),
-                })
                 order_id = None
                 if not effective_dry_run:
                     # Alpaca requires a POSITIVE limit_price regardless of
@@ -1157,7 +1384,23 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
                         long_symbol=long_symbol, short_symbol=short_symbol, qty=qty, limit_price=limit_price,
                     )
                     order_id = alpaca_client.place_order(order_spec)
+                    fill = _verify_entry_fill(order_id, symbol=symbol)
+                    if fill is None:
+                        opened.append({"symbol": symbol, "ok": True, "action": "skipped_order_not_filled"})
+                        continue
+                    if fill.get("filled_avg_price"):
+                        # Alpaca's own filled_avg_price for the combo mirrors
+                        # limit_price's positive-net-credit scale (see above)
+                        # -- negated back to this module's own long-minus-
+                        # short net_value convention (see this branch's net_value
+                        # comment a few lines up) so decide_exit/position_exit_levels'
+                        # "negative entry_price for a credit spread" assumption
+                        # keeps holding after the real fill price is applied.
+                        net_value = -float(fill["filled_avg_price"])
 
+                levels = position_exit_levels({
+                    "entry_price": net_value, "strategy": "credit_spread", "entry_volatility_30": row.get("volatility_30"),
+                })
                 position = {
                     "symbol": long_symbol, "underlying_symbol": symbol, "option_type": long_contract.get("type"),
                     "strategy": "credit_spread", "short_symbol": short_symbol,
@@ -1187,12 +1430,18 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
                     opened.append({"symbol": symbol, "ok": True, "action": "skipped_insufficient_budget"})
                     continue
 
-                levels = position_exit_levels({"entry_price": contract_price, "entry_volatility_30": row.get("volatility_30")})
                 order_id = None
                 if not effective_dry_run:
                     order_spec = alpaca_client.build_option_order(symbol=contract_symbol, side="buy", qty=qty)
                     order_id = alpaca_client.place_order(order_spec)
+                    fill = _verify_entry_fill(order_id, symbol=symbol)
+                    if fill is None:
+                        opened.append({"symbol": symbol, "ok": True, "action": "skipped_order_not_filled"})
+                        continue
+                    if fill.get("filled_avg_price"):
+                        contract_price = float(fill["filled_avg_price"])
 
+                levels = position_exit_levels({"entry_price": contract_price, "entry_volatility_30": row.get("volatility_30")})
                 position = {
                     "symbol": contract_symbol, "underlying_symbol": symbol, "option_type": contract.get("type"),
                     "strategy": "naked",

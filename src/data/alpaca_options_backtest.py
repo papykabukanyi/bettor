@@ -235,6 +235,11 @@ def _simulate_inner(
             underlying_change_pct = (underlying_price - pos["entry_underlying_price"]) / pos["entry_underlying_price"]
             signed_change = underlying_change_pct if pos["direction"] == "up" else -underlying_change_pct
             synthetic_premium = max(0.01, pos["entry_price"] * (1 + signed_change * premium_sensitivity))
+            # Tracked on the position itself so a position still open at
+            # the very end of `df` (see the mark-to-market pass below) has
+            # a real last-known price to close out at, not a fabricated one.
+            pos["last_price"] = synthetic_premium
+            pos["last_ts"] = row.ts
 
             sim_now = pd.Timestamp(row.ts, unit="s", tz="UTC").to_pydatetime()
             should_exit, reason = strat.decide_exit(pos, synthetic_premium, now=sim_now)
@@ -310,6 +315,37 @@ def _simulate_inner(
             # own MIN/MAX_DAYS_TO_EXPIRATION window's rough midpoint.
             "expiration_date": (pd.Timestamp(row.ts, unit="s", tz="UTC") + pd.Timedelta(days=21)).date().isoformat(),
         }
+
+    # Real, confirmed side-effect of options' own DTE-scaled max_hold_time
+    # (see alpaca_options_strategy._effective_max_hold_minutes' own
+    # docstring -- "options trades can take days or hours... options
+    # strategy need to be very different", the user's own explicit
+    # direction): a position entered with real weeks of life left
+    # routinely now outlives this backtest's own (much shorter) data
+    # window, unlike the old flat few-hours timer which almost always
+    # closed every position within the window on its own. Silently
+    # dropping a still-open position here -- never counted in
+    # trade_count/return_pct at all, the ONLY behavior this function had
+    # before this fix -- would badly understate how many real decisions a
+    # run actually made and skew return_pct toward whatever smaller subset
+    # of positions happened to hit take-profit/stop-loss early. Mark-to-
+    # market at each position's own last known synthetic price instead
+    # (tracked on the position itself above), same as a real broker's own
+    # unrealized P&L -- counted, clearly labeled via `reason`, never
+    # presented as a real, broker-confirmed exit.
+    for symbol, pos in open_positions.items():
+        if "last_price" not in pos:
+            continue  # never priced even once -- never fabricate a trade from nothing
+        gross = round((pos["last_price"] - pos["entry_price"]) * pos["count"] * 100, 6)
+        date_str = pd.Timestamp(pos["last_ts"], unit="s", tz="UTC").strftime("%Y-%m-%d")
+        balance += gross
+        daily_pnl[date_str] = daily_pnl.get(date_str, 0.0) + gross
+        trades.append({
+            "symbol": symbol, "entry_price": pos["entry_price"], "exit_price": pos["last_price"],
+            "count": pos["count"], "realized_pnl_usd": gross, "reason": "backtest_window_ended_still_open",
+            "opened_ts": pos["opened_ts"], "closed_ts": pos["last_ts"],
+            "held_minutes": (pos["last_ts"] - pos["opened_ts"]) / 60.0,
+        })
 
     total_pnl = sum(t["realized_pnl_usd"] for t in trades)
     wins = [t for t in trades if t["realized_pnl_usd"] > 0]
@@ -394,24 +430,50 @@ _SWEEP_GRID = [
 ]
 
 
+def _current_defaults_config() -> dict[str, Any]:
+    """The strategy's OWN live values, read fresh at call time (not baked
+    into the module-level _SWEEP_GRID, which only holds fixed ALTERNATIVE
+    combinations) -- gives the sweep a genuine apples-to-current baseline
+    row so alpaca_options_trade_analysis.recommend_confidence_from_backtest
+    can compare a candidate against what's actually live today, the same
+    "current_defaults" anchor alpaca_crypto_backtest.py's own sweep grid
+    already uses. Labeled so that function can find it; every OTHER config
+    dict has no "label" key at all, which is fine -- `.get("label")`
+    returns None for those, never mistaken for this one."""
+    return {
+        "take_profit_pct": strat.TAKE_PROFIT_PCT, "stop_loss_pct": strat.STOP_LOSS_PCT,
+        "max_hold_minutes": strat.MAX_HOLD_MINUTES, "model_confidence_min": strat.MODEL_CONFIDENCE_MIN,
+        "label": "current_defaults",
+    }
+
+
 def run_config_sweep(
     test_with_preds: pd.DataFrame, *, starting_balance: float = 500.0, min_trades: int = 5,
 ) -> dict[str, Any]:
     """Tries _SWEEP_GRID's small set of take-profit/stop-loss/max-hold/
-    model-confidence combinations against the SAME fitted-model
+    model-confidence combinations (plus a live "current_defaults" anchor
+    row -- see _current_defaults_config) against the SAME fitted-model
     predictions (cheap -- no re-fitting per config), ranked by return_pct
     among configs that fired at least `min_trades` (avoids crowning a
-    config that "won" on 1-2 lucky trades). Reports findings only -- never
-    applies a new config to the live strategy itself; that stays a
-    deliberate, reviewed decision."""
+    config that "won" on 1-2 lucky trades). Each result also carries
+    low_sample (trade_count < min_trades) for callers that want per-row
+    visibility rather than just the ranked/best cutoff.
+
+    Reports findings to the dashboard either way. Whether a losing reading
+    here also drives an AUTOMATIC change to the live strategy is a
+    decision made by the caller (alpaca_options_strategy.maybe_auto_improve_from_backtest,
+    itself evidence-gated) -- this function stays pure measurement."""
     results = []
-    for config in _SWEEP_GRID:
+    for config in [_current_defaults_config(), *_SWEEP_GRID]:
         result = simulate(
             test_with_preds, fitted=None, starting_balance=starting_balance,
             take_profit_pct=config["take_profit_pct"], stop_loss_pct=config["stop_loss_pct"],
             max_hold_minutes=config["max_hold_minutes"], model_confidence_min=config["model_confidence_min"],
         )
-        results.append({**config, "trade_count": result["trade_count"], "win_rate": result["win_rate"], "return_pct": result["return_pct"]})
+        results.append({
+            **config, "trade_count": result["trade_count"], "win_rate": result["win_rate"],
+            "return_pct": result["return_pct"], "low_sample": result["trade_count"] < min_trades,
+        })
 
     qualified = [r for r in results if r["trade_count"] >= min_trades]
     ranked = sorted(qualified or results, key=lambda r: -r["return_pct"])

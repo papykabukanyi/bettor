@@ -78,6 +78,20 @@ def test_simulate_never_enters_without_a_trained_model():
     assert result["trade_count"] == 0
 
 
+def test_simulate_marks_a_still_open_position_to_market_at_the_end_of_the_window():
+    """Real, confirmed side-effect of options' own DTE-scaled max_hold_time
+    (alpaca_options_strategy._effective_max_hold_minutes): a position
+    entered with real weeks of life left routinely outlives this
+    backtest's own (much shorter) synthetic data window now -- it must be
+    counted (mark-to-market at its own last known price), not silently
+    dropped from trade_count/return_pct just because it never got an
+    explicit take-profit/stop-loss/max-hold exit within the window."""
+    df = _synthetic_test_df(n=500)
+    result = bt.simulate(df, _fitted(_AlwaysUpModel()), starting_balance=50_000.0, model_confidence_min=0.55)
+    assert result["trade_count"] > 0
+    assert any(t["reason"] == "backtest_window_ended_still_open" for t in result["trades"])
+
+
 def test_simulate_enters_long_on_a_confident_up_model():
     # A real, correct affordability constraint (same mechanism the live
     # compute_contract_qty already enforces): AAPL's ~$195 price implies a
@@ -191,10 +205,33 @@ def test_run_config_sweep_tries_every_grid_entry_and_ranks_by_return(monkeypatch
         {"take_profit_pct": 0.5, "stop_loss_pct": 0.3, "max_hold_minutes": 90, "model_confidence_min": 0.5},
     ])
     result = bt.run_config_sweep(df, starting_balance=50_000.0, min_trades=0)
-    assert len(result["all_configs"]) == 2
+    # 2 monkeypatched grid entries + the live "current_defaults" anchor row
+    # _current_defaults_config() always prepends -- see its own docstring.
+    assert len(result["all_configs"]) == 3
     assert result["best"] is not None
     assert any(c["trade_count"] > 0 for c in result["all_configs"])
     assert result["ranked"][0]["return_pct"] >= result["ranked"][-1]["return_pct"]
+
+
+def test_run_config_sweep_includes_a_live_current_defaults_anchor_row(monkeypatch):
+    """recommend_confidence_from_backtest needs a real apples-to-current
+    comparison point -- see _current_defaults_config's own docstring."""
+    monkeypatch.setattr(strat, "TAKE_PROFIT_PCT", 0.31)
+    monkeypatch.setattr(strat, "STOP_LOSS_PCT", 0.21)
+    monkeypatch.setattr(strat, "MAX_HOLD_MINUTES", 181)
+    monkeypatch.setattr(strat, "MODEL_CONFIDENCE_MIN", 0.53)
+    df = _synthetic_test_df(n=500)
+    df["model_probability_up"] = 0.9
+    result = bt.run_config_sweep(df, starting_balance=50_000.0, min_trades=0)
+    anchor = next(c for c in result["all_configs"] if c.get("label") == "current_defaults")
+    assert anchor["take_profit_pct"] == 0.31
+    assert anchor["stop_loss_pct"] == 0.21
+    assert anchor["max_hold_minutes"] == 181
+    assert anchor["model_confidence_min"] == 0.53
+    assert "low_sample" in anchor
+    # every non-anchor row has no label at all -- .get("label") is None,
+    # never mistaken for the anchor.
+    assert all(c.get("label") is None for c in result["all_configs"] if c is not anchor)
 
 
 def test_run_config_sweep_excludes_configs_below_the_min_trade_count():

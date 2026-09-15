@@ -105,10 +105,67 @@ def test_decide_exit_stop_loss():
     assert should_exit and "stop_loss" in reason
 
 
+# max_hold_time is DTE-scaled (MAX_HOLD_FRACTION_OF_DTE), not the flat
+# MAX_HOLD_MINUTES timer -- see _effective_max_hold_minutes' own
+# docstring ("options trades can take days or hours... options strategy
+# need to be very different", the user's own explicit direction). These
+# tests use a realistic 14-real-day-to-expiration position (>= select_contract's
+# own MIN_DAYS_TO_EXPIRATION=7) and compute the actual effective deadline
+# via the real helper rather than hardcoding the arithmetic, then pass an
+# explicit `now` to decide_exit for a fully deterministic test (no
+# wall-clock drift between fixture-build time and call time).
+def _pos_past_max_hold(*, expiration_days_out=14, extra_minutes=1):
+    opened_at = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)
+    pos = {
+        "entry_price": 5.0, "opened_at": opened_at.isoformat(),
+        "expiration_date": (opened_at + dt.timedelta(days=expiration_days_out)).date().isoformat(),
+    }
+    effective = strat._effective_max_hold_minutes(pos, opened_at=opened_at)  # noqa: SLF001
+    now = opened_at + dt.timedelta(minutes=effective + extra_minutes)
+    return pos, now
+
+
 def test_decide_exit_max_hold_time():
-    pos = _position(minutes_ago=strat.MAX_HOLD_MINUTES + 1)
-    should_exit, reason = strat.decide_exit(pos, 5.0)
+    pos, now = _pos_past_max_hold()
+    should_exit, reason = strat.decide_exit(pos, 5.0, now=now)
     assert should_exit and "max_hold_time" in reason
+
+
+def test_effective_max_hold_minutes_scales_with_real_days_to_expiration():
+    """A contract entered with real weeks of life left gets a FAR longer
+    soft max-hold deadline than the flat MAX_HOLD_MINUTES floor -- the
+    real design mismatch this fix addresses."""
+    opened_at = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)
+    pos = {"opened_at": opened_at.isoformat(), "expiration_date": (opened_at + dt.timedelta(days=14)).date().isoformat()}
+    effective = strat._effective_max_hold_minutes(pos, opened_at=opened_at)  # noqa: SLF001
+    assert effective == pytest.approx(14 * 24 * 60 * strat.MAX_HOLD_FRACTION_OF_DTE)
+    assert effective > strat.MAX_HOLD_MINUTES
+
+
+def test_effective_max_hold_minutes_never_goes_below_the_flat_floor():
+    """A contract whose real remaining lifetime is tiny (e.g. adopted via
+    reconciliation with a missing/unresolvable expiration) never gets LESS
+    patience than the old flat behavior already provided."""
+    opened_at = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)
+    pos = {"opened_at": opened_at.isoformat(), "expiration_date": (opened_at + dt.timedelta(minutes=10)).date().isoformat()}
+    effective = strat._effective_max_hold_minutes(pos, opened_at=opened_at)  # noqa: SLF001
+    assert effective == strat.MAX_HOLD_MINUTES
+
+
+def test_effective_max_hold_minutes_falls_back_to_the_flat_floor_with_no_resolvable_expiration():
+    opened_at = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)
+    pos = {"opened_at": opened_at.isoformat()}  # no expiration_date, no OCC-parseable symbol
+    effective = strat._effective_max_hold_minutes(pos, opened_at=opened_at)  # noqa: SLF001
+    assert effective == strat.MAX_HOLD_MINUTES
+
+
+def test_effective_max_hold_minutes_falls_back_via_the_occ_symbol_when_expiration_date_is_missing():
+    """Same OCC-symbol fallback _near_expiration already uses -- the two
+    checks must agree on what expiration date a position has."""
+    opened_at = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)
+    pos = {"opened_at": opened_at.isoformat(), "symbol": "AAPL260115C00195000"}  # expires 2026-01-15, 14 days out
+    effective = strat._effective_max_hold_minutes(pos, opened_at=opened_at)  # noqa: SLF001
+    assert effective == pytest.approx(14 * 24 * 60 * strat.MAX_HOLD_FRACTION_OF_DTE)
 
 
 # ── "Promising position" max_hold_time extension ────────────────────────────
@@ -116,32 +173,31 @@ def test_decide_exit_max_hold_time():
 # full rationale and real backtest findings.
 
 def test_promising_position_by_price_progress_gets_extended_past_max_hold():
-    pos = _position(minutes_ago=strat.MAX_HOLD_MINUTES + 1)
-    should_exit, reason = strat.decide_exit(pos, 5.0 * 1.10)  # +10% vs 30% TP
+    pos, now = _pos_past_max_hold()
+    should_exit, reason = strat.decide_exit(pos, 5.0 * 1.10, now=now)  # +10% vs 30% TP
     assert not should_exit
     assert "holding" in reason
 
 
 def test_promising_position_still_force_closed_once_extension_window_elapses():
-    past_extension = strat.MAX_HOLD_MINUTES + strat.MAX_HOLD_EXTENSION_MINUTES + 1
-    pos = _position(minutes_ago=past_extension)
-    should_exit, reason = strat.decide_exit(pos, 5.0 * 1.10)
+    pos, now = _pos_past_max_hold(extra_minutes=strat.MAX_HOLD_EXTENSION_MINUTES + 1)
+    should_exit, reason = strat.decide_exit(pos, 5.0 * 1.10, now=now)
     assert should_exit and "max_hold_time" in reason
 
 
 def test_volume_and_momentum_confluence_extends_even_without_price_progress():
-    pos = _position(minutes_ago=strat.MAX_HOLD_MINUTES + 1)
+    pos, now = _pos_past_max_hold()
     should_exit, reason = strat.decide_exit(
-        pos, 5.0 * 1.01, dollar_volume_z=2.0, momentum_pct=0.001,
+        pos, 5.0 * 1.01, now=now, dollar_volume_z=2.0, momentum_pct=0.001,
     )
     assert not should_exit
     assert "holding" in reason
 
 
 def test_momentum_extension_requires_position_not_already_reversing():
-    pos = _position(minutes_ago=strat.MAX_HOLD_MINUTES + 1)
+    pos, now = _pos_past_max_hold()
     should_exit, reason = strat.decide_exit(
-        pos, 5.0 * (1 - strat.STOP_LOSS_PCT * 0.5), dollar_volume_z=2.0, momentum_pct=0.001,
+        pos, 5.0 * (1 - strat.STOP_LOSS_PCT * 0.5), now=now, dollar_volume_z=2.0, momentum_pct=0.001,
     )
     assert should_exit and "max_hold_time" in reason
 
@@ -397,6 +453,94 @@ def test_scan_and_enter_dry_run_opens_a_position_without_any_real_order(monkeypa
     assert state["positions"][0]["underlying_symbol"] == "AAPL"
     assert state["positions"][0]["symbol"] == "AAPL240223C00195000"
     assert state["positions"][0]["count"] >= 1
+
+
+# ── Entry fill-verification -- same real-fill discipline as
+# alpaca_strategy.py's/alpaca_crypto_strategy.py's own scan_and_enter (see
+# their own docstrings for the confirmed incident: an UNFILLED order
+# treated as an open position caused 42+ duplicate "opened" Threads posts
+# and ~$4,267 in real losses for stocks). Options never had this check at
+# all -- a naked contract's market order fills almost immediately in
+# practice, but a debit/credit spread's mleg combo REQUIRES a real LIMIT
+# order (see build_option_spread_order's own docstring), which is
+# genuinely not guaranteed to fill right away. ───────────────────────────
+
+def test_scan_and_enter_naked_live_mode_skips_when_the_order_never_fills(monkeypatch):
+    monkeypatch.setattr(strat, "ENTRY_STRATEGY", "naked")
+    monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", True)
+    monkeypatch.setattr(alpaca_options_data, "get_options_universe", lambda: ["AAPL"])
+    monkeypatch.setattr(alpaca_options_data, "latest_feature_row", lambda symbol: _row())
+    monkeypatch.setattr(alpaca_options_model, "predict_direction", lambda symbol: {"model_ok": True, "probability_up": 0.7})
+    monkeypatch.setattr(alpaca_options_data, "select_contract", lambda underlying, *, direction, current_price: _contract())
+    monkeypatch.setattr(alpaca_client, "get_option_latest_quote", lambda symbol: {"ap": 1.05, "bp": 0.95})
+    monkeypatch.setattr(alpaca_client, "get_account", lambda: {"cash": "500.0"})
+    monkeypatch.setattr(alpaca_client, "build_option_order", lambda **kw: {"symbol": kw["symbol"]})
+    monkeypatch.setattr(alpaca_client, "place_order", lambda spec: "order-1")
+    monkeypatch.setattr(alpaca_client, "get_order", lambda order_id: {"filled_qty": "0"})
+    cancelled = []
+    monkeypatch.setattr(alpaca_client, "cancel_order", lambda order_id: cancelled.append(order_id))
+
+    result = strat.scan_and_enter()
+
+    assert result["opened"][0]["action"] == "skipped_order_not_filled"
+    assert cancelled == ["order-1"]
+    state = strat._load_state()  # noqa: SLF001
+    assert state["positions"] == []  # never recorded as open
+
+
+def test_scan_and_enter_naked_live_mode_survives_a_fill_check_failure_by_treating_it_as_unfilled(monkeypatch):
+    monkeypatch.setattr(strat, "ENTRY_STRATEGY", "naked")
+    monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", True)
+    monkeypatch.setattr(alpaca_options_data, "get_options_universe", lambda: ["AAPL"])
+    monkeypatch.setattr(alpaca_options_data, "latest_feature_row", lambda symbol: _row())
+    monkeypatch.setattr(alpaca_options_model, "predict_direction", lambda symbol: {"model_ok": True, "probability_up": 0.7})
+    monkeypatch.setattr(alpaca_options_data, "select_contract", lambda underlying, *, direction, current_price: _contract())
+    monkeypatch.setattr(alpaca_client, "get_option_latest_quote", lambda symbol: {"ap": 1.05, "bp": 0.95})
+    monkeypatch.setattr(alpaca_client, "get_account", lambda: {"cash": "500.0"})
+    monkeypatch.setattr(alpaca_client, "build_option_order", lambda **kw: {"symbol": kw["symbol"]})
+    monkeypatch.setattr(alpaca_client, "place_order", lambda spec: "order-1")
+
+    def raise_error(order_id):
+        raise RuntimeError("network blip")
+
+    monkeypatch.setattr(alpaca_client, "get_order", raise_error)
+    monkeypatch.setattr(alpaca_client, "cancel_order", lambda order_id: None)
+
+    result = strat.scan_and_enter()  # must not raise
+
+    assert result["opened"][0]["action"] == "skipped_order_not_filled"
+    state = strat._load_state()  # noqa: SLF001
+    assert state["positions"] == []
+
+
+def test_scan_and_enter_naked_live_mode_uses_the_real_fill_price_not_the_quote_estimate(monkeypatch):
+    monkeypatch.setattr(strat, "ENTRY_STRATEGY", "naked")
+    monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", True)
+    monkeypatch.setattr(alpaca_options_data, "get_options_universe", lambda: ["AAPL"])
+    monkeypatch.setattr(alpaca_options_data, "latest_feature_row", lambda symbol: _row())
+    monkeypatch.setattr(alpaca_options_model, "predict_direction", lambda symbol: {"model_ok": True, "probability_up": 0.7})
+    monkeypatch.setattr(alpaca_options_data, "select_contract", lambda underlying, *, direction, current_price: _contract())
+    # Pre-order quote estimate is 1.00 (mid of 1.05/0.95) -- the real fill
+    # below comes back meaningfully worse (1.20), same slippage-happens-in-
+    # reality gap the stocks/crypto fix already accounts for.
+    monkeypatch.setattr(alpaca_client, "get_option_latest_quote", lambda symbol: {"ap": 1.05, "bp": 0.95})
+    monkeypatch.setattr(alpaca_client, "get_account", lambda: {"cash": "500.0"})
+    monkeypatch.setattr(alpaca_client, "build_option_order", lambda **kw: {"symbol": kw["symbol"]})
+    monkeypatch.setattr(alpaca_client, "place_order", lambda spec: "order-1")
+    monkeypatch.setattr(alpaca_client, "get_order", lambda order_id: {"filled_qty": "1", "filled_avg_price": "1.20"})
+
+    result = strat.scan_and_enter()
+
+    assert result["opened"][0]["action"] == "opened"
+    assert result["opened"][0]["entry_price"] == pytest.approx(1.20)
+    state = strat._load_state()  # noqa: SLF001
+    position = state["positions"][0]
+    assert position["entry_price"] == pytest.approx(1.20)
+    # take_profit/stop_loss levels must be derived from the REAL fill
+    # price, not the pre-order 1.00 estimate.
+    levels = strat.position_exit_levels({"entry_price": 1.20, "entry_volatility_30": position.get("entry_volatility_30")})
+    assert position["take_profit_price"] == pytest.approx(levels["take_profit_price"])
+    assert position["stop_loss_price"] == pytest.approx(levels["stop_loss_price"])
 
 
 def test_scan_and_enter_prewarms_sentiment_for_underlyings_not_already_held(monkeypatch):
@@ -1068,12 +1212,39 @@ def test_scan_and_enter_live_mode_places_a_real_mleg_order_for_a_spread(monkeypa
     captured = {}
     monkeypatch.setattr(alpaca_client, "build_option_spread_order", lambda **kw: captured.update(kw) or {"order_class": "mleg"})
     monkeypatch.setattr(alpaca_client, "place_order", lambda spec: "order-1")
+    monkeypatch.setattr(alpaca_client, "get_order", lambda order_id: {"filled_qty": "1", "filled_avg_price": "1.05"})
 
     result = strat.scan_and_enter()
     assert result["opened"][0]["action"] == "opened"
     assert captured["long_symbol"] == "AAPL240223C00195000"
     assert captured["short_symbol"] == "AAPL240223C00200000"
     assert captured["limit_price"] == pytest.approx(1.0 * (1 + strat.SPREAD_LIMIT_SLIPPAGE_PCT))
+
+
+def test_scan_and_enter_debit_spread_live_mode_skips_when_the_order_never_fills(monkeypatch):
+    monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", True)
+    monkeypatch.setattr(alpaca_options_data, "get_options_universe", lambda: ["AAPL"])
+    monkeypatch.setattr(alpaca_options_data, "latest_feature_row", lambda symbol: _row())
+    monkeypatch.setattr(alpaca_options_model, "predict_direction", lambda symbol: {"model_ok": True, "probability_up": 0.7})
+    monkeypatch.setattr(alpaca_options_data, "select_spread_contracts", lambda underlying, *, direction, current_price: _spread_contracts())
+    monkeypatch.setattr(alpaca_client, "get_account", lambda: {"cash": "500.0"})
+
+    def fake_quote(symbol):
+        return {"AAPL240223C00195000": {"ap": 2.1, "bp": 1.9}, "AAPL240223C00200000": {"ap": 1.1, "bp": 0.9}}[symbol]
+
+    monkeypatch.setattr(alpaca_client, "get_option_latest_quote", fake_quote)
+    monkeypatch.setattr(alpaca_client, "build_option_spread_order", lambda **kw: {"order_class": "mleg"})
+    monkeypatch.setattr(alpaca_client, "place_order", lambda spec: "order-1")
+    monkeypatch.setattr(alpaca_client, "get_order", lambda order_id: {"filled_qty": "0"})
+    cancelled = []
+    monkeypatch.setattr(alpaca_client, "cancel_order", lambda order_id: cancelled.append(order_id))
+
+    result = strat.scan_and_enter()
+
+    assert result["opened"][0]["action"] == "skipped_order_not_filled"
+    assert cancelled == ["order-1"]
+    state = strat._load_state()  # noqa: SLF001
+    assert state["positions"] == []
 
 
 def test_manage_open_positions_closes_a_debit_spread_on_take_profit(monkeypatch):
@@ -1329,6 +1500,7 @@ def test_scan_and_enter_credit_spread_live_mode_uses_a_positive_limit_price(monk
     captured = {}
     monkeypatch.setattr(alpaca_client, "build_option_spread_order", lambda **kw: captured.update(kw) or {"order_class": "mleg"})
     monkeypatch.setattr(alpaca_client, "place_order", lambda spec: "order-1")
+    monkeypatch.setattr(alpaca_client, "get_order", lambda order_id: {"filled_qty": "1", "filled_avg_price": "0.35"})
 
     result = strat.scan_and_enter()
     assert result["opened"][0]["action"] == "opened"
@@ -1336,6 +1508,70 @@ def test_scan_and_enter_credit_spread_live_mode_uses_a_positive_limit_price(monk
     assert captured["short_symbol"] == "AAPL240223P00195000"
     assert captured["limit_price"] > 0  # Alpaca requires positive, regardless of direction
     assert captured["limit_price"] == pytest.approx(0.35 * (1 - strat.SPREAD_LIMIT_SLIPPAGE_PCT))
+
+
+def test_scan_and_enter_credit_spread_live_mode_negates_the_real_fill_price_into_net_value(monkeypatch):
+    """Alpaca's own filled_avg_price for the combo mirrors limit_price's
+    positive-net-credit scale -- must be NEGATED back to this module's own
+    long-minus-short net_value convention (see decide_exit's own
+    docstring: entry_price is negative for a credit spread), or every
+    future exit check's take_profit/stop_loss math silently breaks."""
+    monkeypatch.setattr(strat, "ENTRY_STRATEGY", "credit_spread")
+    monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", True)
+    monkeypatch.setattr(alpaca_options_data, "get_options_universe", lambda: ["AAPL"])
+    monkeypatch.setattr(alpaca_options_data, "latest_feature_row", lambda symbol: _row())
+    monkeypatch.setattr(alpaca_options_model, "predict_direction", lambda symbol: {"model_ok": True, "probability_up": 0.7})
+    monkeypatch.setattr(
+        alpaca_options_data, "select_credit_spread_contracts",
+        lambda underlying, *, direction, current_price: _credit_spread_contracts(),
+    )
+
+    def fake_quote(symbol):
+        return {"AAPL240223P00190000": {"ap": 0.32, "bp": 0.28}, "AAPL240223P00195000": {"ap": 0.68, "bp": 0.62}}[symbol]
+
+    monkeypatch.setattr(alpaca_client, "get_option_latest_quote", fake_quote)
+    monkeypatch.setattr(alpaca_client, "get_account", lambda: {"cash": "3000.0"})
+    monkeypatch.setattr(alpaca_client, "build_option_spread_order", lambda **kw: {"order_class": "mleg"})
+    monkeypatch.setattr(alpaca_client, "place_order", lambda spec: "order-1")
+    # A real fill at a WORSE credit than the 0.35 estimate -- 0.30 net credit received.
+    monkeypatch.setattr(alpaca_client, "get_order", lambda order_id: {"filled_qty": "1", "filled_avg_price": "0.30"})
+
+    result = strat.scan_and_enter()
+
+    assert result["opened"][0]["action"] == "opened"
+    assert result["opened"][0]["entry_price"] == pytest.approx(-0.30)  # negated, not the raw positive fill price
+    state = strat._load_state()  # noqa: SLF001
+    assert state["positions"][0]["entry_price"] == pytest.approx(-0.30)
+
+
+def test_scan_and_enter_credit_spread_live_mode_skips_when_the_order_never_fills(monkeypatch):
+    monkeypatch.setattr(strat, "ENTRY_STRATEGY", "credit_spread")
+    monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", True)
+    monkeypatch.setattr(alpaca_options_data, "get_options_universe", lambda: ["AAPL"])
+    monkeypatch.setattr(alpaca_options_data, "latest_feature_row", lambda symbol: _row())
+    monkeypatch.setattr(alpaca_options_model, "predict_direction", lambda symbol: {"model_ok": True, "probability_up": 0.7})
+    monkeypatch.setattr(
+        alpaca_options_data, "select_credit_spread_contracts",
+        lambda underlying, *, direction, current_price: _credit_spread_contracts(),
+    )
+
+    def fake_quote(symbol):
+        return {"AAPL240223P00190000": {"ap": 0.32, "bp": 0.28}, "AAPL240223P00195000": {"ap": 0.68, "bp": 0.62}}[symbol]
+
+    monkeypatch.setattr(alpaca_client, "get_option_latest_quote", fake_quote)
+    monkeypatch.setattr(alpaca_client, "get_account", lambda: {"cash": "3000.0"})
+    monkeypatch.setattr(alpaca_client, "build_option_spread_order", lambda **kw: {"order_class": "mleg"})
+    monkeypatch.setattr(alpaca_client, "place_order", lambda spec: "order-1")
+    monkeypatch.setattr(alpaca_client, "get_order", lambda order_id: {"filled_qty": "0"})
+    cancelled = []
+    monkeypatch.setattr(alpaca_client, "cancel_order", lambda order_id: cancelled.append(order_id))
+
+    result = strat.scan_and_enter()
+
+    assert result["opened"][0]["action"] == "skipped_order_not_filled"
+    assert cancelled == ["order-1"]
+    state = strat._load_state()  # noqa: SLF001
+    assert state["positions"] == []
 
 
 def test_manage_open_positions_closes_a_credit_spread_on_take_profit_with_positive_pnl(monkeypatch):
@@ -1562,6 +1798,50 @@ def test_reconcile_never_overwrites_a_spreads_net_debit_entry_price(monkeypatch)
     assert reconciled[0]["count"] == pytest.approx(156.0)
 
 
+def test_reconcile_does_not_adopt_a_credit_spreads_own_short_leg(monkeypatch):
+    """Same real incident class as the debit-spread test above, confirmed
+    to ALSO apply to credit spreads -- known_short_leg_symbols originally
+    only excluded "debit_spread", so a credit spread's own short leg fell
+    through to the generic real_pos["side"] == "short" branch on every
+    single reconciliation cycle instead of being silently recognized as
+    already accounted for."""
+    monkeypatch.setattr(alpaca_client, "get_positions", lambda: [
+        {"symbol": "AAPL240223P00190000", "qty": "10", "side": "long", "avg_entry_price": "0.68", "asset_class": "us_option"},
+        {"symbol": "AAPL240223P00195000", "qty": "10", "side": "short", "avg_entry_price": "1.03", "asset_class": "us_option"},
+    ])
+    local = [{
+        "symbol": "AAPL240223P00190000", "underlying_symbol": "AAPL", "strategy": "credit_spread",
+        "short_symbol": "AAPL240223P00195000", "entry_price": -0.35, "count": 10,
+        "opened_at": "2026-08-28T18:00:32+00:00",
+    }]
+    reconciled = strat._reconcile_positions_with_exchange({"positions": local})  # noqa: SLF001
+    assert [p["symbol"] for p in reconciled] == ["AAPL240223P00190000"]  # the short leg was never adopted as its own position
+
+
+def test_reconcile_never_overwrites_a_credit_spreads_net_value_entry_price(monkeypatch):
+    """The real, confirmed bug this review found and fixed: is_spread only
+    checked "debit_spread", so a credit spread's real, correct NEGATIVE
+    net_value (-0.35, long-minus-short -- see decide_exit's own docstring)
+    was being silently overwritten every reconciliation cycle with
+    real_pos["entry_price"] (0.68 here) -- the long leg's own single-
+    contract fill price, POSITIVE and on a completely different scale.
+    That doesn't just skew the number, it flips its SIGN, which would
+    silently break every future take-profit/stop-loss check for this
+    position (decide_exit negates change_pct for a credit spread on the
+    assumption entry_price stays negative)."""
+    monkeypatch.setattr(alpaca_client, "get_positions", lambda: [
+        {"symbol": "AAPL240223P00190000", "qty": "10", "side": "long", "avg_entry_price": "0.68", "asset_class": "us_option"},
+    ])
+    local = [{
+        "symbol": "AAPL240223P00190000", "underlying_symbol": "AAPL", "strategy": "credit_spread",
+        "short_symbol": "AAPL240223P00195000", "entry_price": -0.35, "count": 10.0,
+        "opened_at": "2026-08-28T18:00:32+00:00",
+    }]
+    reconciled = strat._reconcile_positions_with_exchange({"positions": local})  # noqa: SLF001
+    assert reconciled[0]["entry_price"] == pytest.approx(-0.35)  # untouched -- still negative, still the real net value
+    assert reconciled[0]["count"] == pytest.approx(10.0)
+
+
 def test_reconcile_still_syncs_a_naked_positions_entry_price(monkeypatch):
     """The spread exemption above must not weaken the existing, correct
     naked-position drift-correction behavior."""
@@ -1624,3 +1904,88 @@ def test_record_milestone_persists_baseline_and_high_water_mark(monkeypatch, tmp
     state = strat._load_state()  # noqa: SLF001
     assert state["milestones"]["baseline_balance"] == 100.0
     assert state["milestones"]["high_water_mark"] == 150.0
+
+
+# ── maybe_auto_improve_from_backtest -- the user's own explicit request:
+# "whenever you get negative return on backtest and forward test[,] need
+# to automatically improve" applied to options too ("get in more trades
+# and able to get it by itself"). Mirrors
+# test_alpaca_crypto_strategy.py's own identical coverage. ───────────────
+
+def test_maybe_auto_improve_from_backtest_no_op_when_both_are_profitable():
+    strat._save_state({"positions": [], "realized_pnl_by_date": {}, "trade_log": []})  # noqa: SLF001
+    sweep = {"all_configs": [{"label": "current_defaults", "return_pct": 0.05, "trade_count": 50, "low_sample": False}]}
+    result = strat.maybe_auto_improve_from_backtest(sweep, {"mean_return_pct": 0.02})
+    assert result["triggered"] is False
+
+
+def test_maybe_auto_improve_from_backtest_applies_a_better_confidence_and_retrains(monkeypatch):
+    from data import alpaca_options_model
+
+    strat._save_state({"positions": [], "realized_pnl_by_date": {}, "trade_log": []})  # noqa: SLF001
+    sweep = {"all_configs": [
+        {"label": "current_defaults", "return_pct": -0.137, "trade_count": 50, "low_sample": False, "model_confidence_min": 0.53},
+        {"return_pct": 0.05, "trade_count": 50, "low_sample": False, "model_confidence_min": 0.62},
+    ]}
+    train_calls = []
+    torch_calls = []
+    monkeypatch.setattr(alpaca_options_model, "train_model", lambda **kw: train_calls.append(kw) or {"ok": True, "rows": 1000})
+    monkeypatch.setattr(alpaca_options_model, "train_torch_candidate_model", lambda **kw: torch_calls.append(kw) or {"ok": True, "promoted": False})
+
+    result = strat.maybe_auto_improve_from_backtest(sweep, {"mean_return_pct": -0.05})
+
+    assert result["triggered"] is True
+    assert result["confidence_recommendation"]["should_apply"] is True
+    state = strat._load_state()  # noqa: SLF001
+    assert state["tuning"]["model_confidence_min"] == 0.62
+    assert len(train_calls) == 1
+    assert len(torch_calls) == 1
+
+
+def test_maybe_auto_improve_from_backtest_still_retrains_when_no_better_confidence_found(monkeypatch):
+    """A loss with no sweep evidence pointing at a better confidence floor
+    must still fall back to the "use everything the bot has" retrain --
+    the two responses are independent."""
+    from data import alpaca_options_model
+
+    strat._save_state({"positions": [], "realized_pnl_by_date": {}, "trade_log": []})  # noqa: SLF001
+    sweep = {"all_configs": [{"label": "current_defaults", "return_pct": -0.137, "trade_count": 50, "low_sample": False}]}
+    train_calls = []
+    monkeypatch.setattr(alpaca_options_model, "train_model", lambda **kw: train_calls.append(kw) or {"ok": True, "rows": 1000})
+    monkeypatch.setattr(alpaca_options_model, "train_torch_candidate_model", lambda **kw: {"ok": True, "promoted": False})
+
+    result = strat.maybe_auto_improve_from_backtest(sweep, None)
+
+    assert result["triggered"] is True
+    assert result["confidence_recommendation"]["should_apply"] is False
+    assert len(train_calls) == 1
+
+
+def test_maybe_auto_improve_from_backtest_survives_a_retrain_failure(monkeypatch):
+    from data import alpaca_options_model
+
+    strat._save_state({"positions": [], "realized_pnl_by_date": {}, "trade_log": []})  # noqa: SLF001
+    sweep = {"all_configs": [{"label": "current_defaults", "return_pct": -0.137, "trade_count": 50, "low_sample": False}]}
+
+    def raise_error(**kw):
+        raise RuntimeError("simulated retrain crash")
+
+    monkeypatch.setattr(alpaca_options_model, "train_model", raise_error)
+    monkeypatch.setattr(alpaca_options_model, "train_torch_candidate_model", raise_error)
+
+    result = strat.maybe_auto_improve_from_backtest(sweep, None)  # must not raise
+    assert result["triggered"] is True
+
+
+def test_maybe_auto_improve_from_backtest_never_retrains_without_a_loss(monkeypatch):
+    from data import alpaca_options_model
+
+    strat._save_state({"positions": [], "realized_pnl_by_date": {}, "trade_log": []})  # noqa: SLF001
+
+    def fail_if_called(**kw):
+        raise AssertionError("must not retrain when neither backtest shows a loss")
+
+    monkeypatch.setattr(alpaca_options_model, "train_model", fail_if_called)
+    sweep = {"all_configs": [{"label": "current_defaults", "return_pct": 0.05, "trade_count": 50, "low_sample": False}]}
+
+    strat.maybe_auto_improve_from_backtest(sweep, {"mean_return_pct": 0.02})

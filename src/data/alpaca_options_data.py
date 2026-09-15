@@ -47,9 +47,21 @@ HF_ALPACA_OPTIONS_DATASET_REPO = os.getenv("HF_ALPACA_OPTIONS_DATASET_REPO", "pa
 # bid/ask spreads, always has near-term weekly expirations. A fixed list
 # (not a ranked-from-thousands watchlist) is a deliberate, lighter-memory
 # choice -- see this module's own docstring.
+#
+# SPY/QQQ added per explicit user direction ("get in more trades") --
+# widens the entry FUNNEL (more independent underlyings scanned each
+# cycle => more chances for a real signal to clear MODEL_CONFIDENCE_MIN/
+# MIN_VOLUME_Z/MIN_VOLATILITY_RATIO) without touching any risk-per-trade
+# parameter (position sizing, confidence floor, concurrent-position cap
+# all untouched -- those need real backtest evidence to move, per this
+# file's own established discipline elsewhere). Deliberately the two
+# broadest, single-most-liquid options underlyings that exist (the S&P
+# 500 and Nasdaq-100 ETFs) -- deeper chains and tighter spreads than any
+# single stock already in this list, and lower idiosyncratic (single-
+# name) risk than adding another individual ticker would.
 OPTIONS_UNDERLYINGS = [
     s.strip().upper() for s in os.getenv(
-        "ALPACA_OPTIONS_UNDERLYINGS", "AAPL,MSFT,NVDA,AMZN,GOOGL,META,TSLA,AVGO,AMD,NFLX",
+        "ALPACA_OPTIONS_UNDERLYINGS", "AAPL,MSFT,NVDA,AMZN,GOOGL,META,TSLA,AVGO,AMD,NFLX,SPY,QQQ",
     ).split(",") if s.strip()
 ]
 
