@@ -238,6 +238,25 @@ def test_expiration_from_symbol_returns_none_for_garbage():
     assert strat._expiration_from_symbol("AMDNOTDIGITP00455000") is None  # noqa: SLF001
 
 
+# ── _underlying_from_symbol -- the real ticker root of an OCC symbol, the
+# same fixed 15-char suffix _expiration_from_symbol parses. See its own
+# docstring for the real, confirmed live bug this fixes (a wrong
+# underlying_symbol made an adopted position invisible to scan_and_enter's
+# own duplicate-entry dedup check). ──────────────────────────────────────
+
+def test_underlying_from_symbol_parses_a_short_root():
+    assert strat._underlying_from_symbol("AMD260911P00455000") == "AMD"  # noqa: SLF001
+
+
+def test_underlying_from_symbol_parses_a_longer_root():
+    assert strat._underlying_from_symbol("GOOGL260320C00180000") == "GOOGL"  # noqa: SLF001
+
+
+def test_underlying_from_symbol_returns_none_for_garbage():
+    assert strat._underlying_from_symbol("") is None  # noqa: SLF001
+    assert strat._underlying_from_symbol("TOO_SHORT") is None  # noqa: SLF001
+
+
 def test_near_expiration_falls_back_to_the_symbol_when_expiration_date_is_missing():
     """Real, confirmed production incident: AMD260911P00455000 was stuck
     with no `expiration_date` field recorded at all (an older/incomplete
@@ -1692,6 +1711,23 @@ def test_reconcile_adopts_an_untracked_real_position(monkeypatch):
     assert reconciled[0]["count"] == pytest.approx(1.0)
 
 
+def test_reconcile_adopts_an_untracked_position_with_the_real_underlying_ticker(monkeypatch):
+    """Real, confirmed live bug this fixes: underlying_symbol used to be
+    set to the OPTION's own symbol instead of the real ticker --
+    scan_and_enter's existing_underlyings dedup set is built from this
+    exact field, so an adopted position was invisible to that check,
+    risking a genuine duplicate entry on the SAME underlying the very
+    next entry-scan cycle. expiration_date must also be populated
+    directly (parsed from the OCC symbol), not left None."""
+    monkeypatch.setattr(alpaca_client, "get_positions", lambda: [
+        {"symbol": "AAPL260925P00335000", "qty": "10", "avg_entry_price": "6.2", "asset_class": "us_option"},
+    ])
+    reconciled = strat._reconcile_positions_with_exchange({"positions": []})  # noqa: SLF001
+    assert len(reconciled) == 1
+    assert reconciled[0]["underlying_symbol"] == "AAPL"
+    assert reconciled[0]["expiration_date"] == "2026-09-25"
+
+
 def test_reconcile_corrects_a_drifted_local_position(monkeypatch):
     monkeypatch.setattr(alpaca_client, "get_positions", lambda: [
         {"symbol": "AAPL240223C00195000", "qty": "2", "avg_entry_price": "5.25", "asset_class": "us_option"},
@@ -1704,6 +1740,42 @@ def test_reconcile_corrects_a_drifted_local_position(monkeypatch):
     assert len(reconciled) == 1
     assert reconciled[0]["count"] == pytest.approx(2.0)
     assert reconciled[0]["entry_price"] == pytest.approx(5.25)
+
+
+def test_reconcile_self_heals_a_previously_adopted_positions_wrong_underlying_and_missing_expiration(monkeypatch):
+    """Real, confirmed live incident this fixes: 4 real positions had
+    already been adopted (before the underlying_symbol/expiration_date
+    fix existed) with underlying_symbol wrongly set to the OPTION's own
+    symbol and no expiration_date at all -- since the adoption code only
+    runs once, at first sight, those records would have stayed wrong
+    forever without this self-heal running on every SUBSEQUENT
+    reconciliation of an already-tracked position too."""
+    monkeypatch.setattr(alpaca_client, "get_positions", lambda: [
+        {"symbol": "AAPL260925P00335000", "qty": "10", "avg_entry_price": "6.2", "asset_class": "us_option"},
+    ])
+    local = [{
+        # underlying_symbol wrongly set to the option's own symbol, and no
+        # expiration_date at all -- the exact real shape of the 4 live
+        # positions found on the account.
+        "symbol": "AAPL260925P00335000", "underlying_symbol": "AAPL260925P00335000", "strategy": "naked",
+        "entry_price": 6.2, "count": 10.0, "opened_at": "2026-09-14T22:53:42+00:00", "order_id": None,
+    }]
+    reconciled = strat._reconcile_positions_with_exchange({"positions": local})  # noqa: SLF001
+    assert reconciled[0]["underlying_symbol"] == "AAPL"
+    assert reconciled[0]["expiration_date"] == "2026-09-25"
+
+
+def test_reconcile_does_not_overwrite_an_already_correct_underlying_symbol(monkeypatch):
+    monkeypatch.setattr(alpaca_client, "get_positions", lambda: [
+        {"symbol": "AAPL240223C00195000", "qty": "1", "avg_entry_price": "5.0", "asset_class": "us_option"},
+    ])
+    local = [{
+        "symbol": "AAPL240223C00195000", "underlying_symbol": "AAPL", "strategy": "naked",
+        "entry_price": 5.0, "count": 1, "opened_at": "2026-01-01T00:00:00+00:00", "expiration_date": "2024-02-23",
+    }]
+    reconciled = strat._reconcile_positions_with_exchange({"positions": local})  # noqa: SLF001
+    assert reconciled[0]["underlying_symbol"] == "AAPL"
+    assert reconciled[0]["expiration_date"] == "2024-02-23"  # untouched -- already correct
 
 
 def test_reconcile_drops_a_phantom_local_position(monkeypatch):

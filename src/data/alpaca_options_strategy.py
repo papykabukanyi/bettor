@@ -351,6 +351,25 @@ def _expiration_from_symbol(symbol: str) -> dt.date | None:
         return None
 
 
+def _underlying_from_symbol(symbol: str) -> str | None:
+    """The real underlying ticker root of an OCC-standard option symbol --
+    everything before the same fixed 15-character expiration+type+strike
+    suffix _expiration_from_symbol parses (see its own docstring). Real,
+    confirmed bug this fixes: _reconcile_positions_with_exchange's own
+    untracked-position-adoption path used to set underlying_symbol to the
+    OPTION's own symbol (e.g. "AAPL260925P00335000") instead of the real
+    ticker ("AAPL") -- harmless-looking until scan_and_enter's own
+    existing_underlyings dedup set (built from underlying_symbol) could
+    never recognize that ticker as already held, risking a genuine
+    DUPLICATE entry on the exact same underlying the very next entry-scan
+    cycle. None on anything that doesn't match the expected shape, never
+    raises."""
+    if not symbol or len(symbol) <= 15:
+        return None
+    root = symbol[:-15]
+    return root or None
+
+
 def _near_expiration(position: dict[str, Any], *, now: dt.datetime) -> bool:
     expiration_date = position.get("expiration_date")
     exp_date: dt.date | None = None
@@ -1045,14 +1064,28 @@ def _reconcile_positions_with_exchange(state: dict[str, Any]) -> list[dict[str, 
             continue
         local = local_by_symbol.get(symbol)
         if local is None:
+            # Real, confirmed bug this fixes -- underlying_symbol MUST be
+            # the real ticker, not the option's own symbol: scan_and_enter's
+            # existing_underlyings dedup set is built from this exact
+            # field, so a wrong value here made an adopted position
+            # invisible to that check, risking a genuine duplicate entry
+            # on the SAME underlying next entry-scan cycle. expiration_date
+            # resolved the same OCC-symbol way _near_expiration/
+            # _effective_max_hold_minutes already fall back to at check
+            # time -- populated directly here too so the record is
+            # complete from the moment it's adopted, not just functional
+            # via those functions' own runtime fallback.
+            underlying_symbol = _underlying_from_symbol(symbol) or symbol
+            expiration_date = _expiration_from_symbol(symbol)
             logger.warning(
-                "[alpaca_options_strategy] adopting untracked real position: %s x%d @ %.4f",
-                symbol, int(real_pos["count"]), real_pos["entry_price"],
+                "[alpaca_options_strategy] adopting untracked real position: %s (%s) x%d @ %.4f",
+                symbol, underlying_symbol, int(real_pos["count"]), real_pos["entry_price"],
             )
             reconciled.append({
-                "symbol": symbol, "underlying_symbol": symbol, "strategy": "naked",
+                "symbol": symbol, "underlying_symbol": underlying_symbol, "strategy": "naked",
                 "entry_price": real_pos["entry_price"], "count": real_pos["count"],
                 "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(), "order_id": None,
+                "expiration_date": expiration_date.isoformat() if expiration_date else None,
             })
             continue
         # Real bug found in review while cleaning up after the incident
@@ -1088,6 +1121,25 @@ def _reconcile_positions_with_exchange(state: dict[str, Any]) -> list[dict[str, 
         local["count"] = real_pos["count"]
         if not is_spread:
             local["entry_price"] = real_pos["entry_price"]
+        # Self-heals any position ALREADY adopted before the underlying_symbol/
+        # expiration_date fix above existed (real, confirmed live incident:
+        # positions adopted with underlying_symbol wrongly set to the
+        # option's own symbol stayed wrong forever otherwise -- this branch
+        # runs on every subsequent reconciliation of an already-tracked
+        # position, the adoption code above only runs once, at first sight).
+        # Safe for every strategy type: the OCC symbol always encodes the
+        # real underlying/expiration regardless of naked/debit/credit.
+        if not local.get("expiration_date"):
+            derived_expiration = _expiration_from_symbol(symbol)
+            if derived_expiration:
+                local["expiration_date"] = derived_expiration.isoformat()
+        derived_underlying = _underlying_from_symbol(symbol)
+        if derived_underlying and local.get("underlying_symbol") != derived_underlying:
+            logger.warning(
+                "[alpaca_options_strategy] correcting wrong underlying_symbol for %s: %s -> %s",
+                symbol, local.get("underlying_symbol"), derived_underlying,
+            )
+            local["underlying_symbol"] = derived_underlying
         reconciled.append(local)
 
     for symbol in local_by_symbol:
