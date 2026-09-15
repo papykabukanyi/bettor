@@ -1728,6 +1728,148 @@ def test_reconcile_adopts_an_untracked_position_with_the_real_underlying_ticker(
     assert reconciled[0]["expiration_date"] == "2026-09-25"
 
 
+# ── _pair_untracked_spread_legs / orphaned-spread-leg self-heal -- real,
+# confirmed live incident: a debit/credit spread's long leg had been
+# adopted (or was freshly untracked) as a LONE "naked" position while its
+# own real, same-quantity short leg sat permanently unmanaged (the
+# generic "no matching tracked spread -- leaving alone" branch is a
+# deliberate, PERMANENT no-op). Confirmed live on 4 real positions
+# (AAPL/AMD/AMZN/MSFT puts). ──────────────────────────────────────────
+
+def test_pair_untracked_spread_legs_finds_a_matching_debit_spread_pair():
+    real = {
+        "AAPL260925P00335000": {"count": 10.0, "entry_price": 6.2, "side": "long"},
+        "AAPL260925P00330000": {"count": 10.0, "entry_price": 3.9, "side": "short"},
+    }
+    pairs = strat._pair_untracked_spread_legs(real, known_short_leg_symbols=set(), local_by_symbol={})  # noqa: SLF001
+    assert pairs == {"AAPL260925P00335000": "AAPL260925P00330000"}
+
+
+def test_pair_untracked_spread_legs_ignores_a_mismatched_quantity():
+    real = {
+        "AAPL260925P00335000": {"count": 10.0, "entry_price": 6.2, "side": "long"},
+        "AAPL260925P00330000": {"count": 4.0, "entry_price": 3.9, "side": "short"},
+    }
+    pairs = strat._pair_untracked_spread_legs(real, known_short_leg_symbols=set(), local_by_symbol={})  # noqa: SLF001
+    assert pairs == {}
+
+
+def test_pair_untracked_spread_legs_ignores_a_different_underlying_or_expiration():
+    real = {
+        "AAPL260925P00335000": {"count": 10.0, "entry_price": 6.2, "side": "long"},
+        "MSFT260925P00330000": {"count": 10.0, "entry_price": 3.9, "side": "short"},  # different underlying
+        "AAPL260921P00330000": {"count": 10.0, "entry_price": 3.9, "side": "short"},  # different expiration
+    }
+    pairs = strat._pair_untracked_spread_legs(real, known_short_leg_symbols=set(), local_by_symbol={})  # noqa: SLF001
+    assert pairs == {}
+
+
+def test_pair_untracked_spread_legs_never_claims_an_already_known_short_leg():
+    real = {
+        "AAPL260925P00335000": {"count": 10.0, "entry_price": 6.2, "side": "long"},
+        "AAPL260925P00330000": {"count": 10.0, "entry_price": 3.9, "side": "short"},
+    }
+    pairs = strat._pair_untracked_spread_legs(  # noqa: SLF001
+        real, known_short_leg_symbols={"AAPL260925P00330000"}, local_by_symbol={},
+    )
+    assert pairs == {}
+
+
+def test_pair_untracked_spread_legs_skips_a_long_leg_already_tracked_as_a_real_spread():
+    """A long leg that's already correctly tracked as a debit/credit
+    spread (has its own short_symbol) must never be re-paired -- only a
+    lone, mislabeled "naked" record is a real candidate."""
+    real = {
+        "AAPL260925P00335000": {"count": 10.0, "entry_price": 6.2, "side": "long"},
+        "AAPL260925P00330000": {"count": 10.0, "entry_price": 3.9, "side": "short"},
+    }
+    local_by_symbol = {"AAPL260925P00335000": {"strategy": "debit_spread", "short_symbol": "AAPL260925P00330000"}}
+    pairs = strat._pair_untracked_spread_legs(  # noqa: SLF001
+        real, known_short_leg_symbols={"AAPL260925P00330000"}, local_by_symbol=local_by_symbol,
+    )
+    assert pairs == {}
+
+
+def test_reconcile_adopts_an_untracked_debit_spread_from_paired_legs(monkeypatch):
+    """Real, confirmed live incident: a genuinely untracked spread must be
+    adopted as the real thing (debit_spread, with short_symbol and the
+    correct net-debit entry_price) from the START -- not corrupted into a
+    lone "naked" position first and only fixed on some later cycle."""
+    monkeypatch.setattr(alpaca_client, "get_positions", lambda: [
+        {"symbol": "AAPL260925P00335000", "qty": "10", "side": "long", "avg_entry_price": "6.2", "asset_class": "us_option"},
+        {"symbol": "AAPL260925P00330000", "qty": "10", "side": "short", "avg_entry_price": "3.9", "asset_class": "us_option"},
+    ])
+    reconciled = strat._reconcile_positions_with_exchange({"positions": []})  # noqa: SLF001
+    assert len(reconciled) == 1
+    position = reconciled[0]
+    assert position["symbol"] == "AAPL260925P00335000"
+    assert position["strategy"] == "debit_spread"
+    assert position["short_symbol"] == "AAPL260925P00330000"
+    assert position["entry_price"] == pytest.approx(6.2 - 3.9)
+    assert position["underlying_symbol"] == "AAPL"
+
+
+def test_reconcile_adopts_an_untracked_credit_spread_from_paired_legs(monkeypatch):
+    """A NEGATIVE net value (short leg's own fill price higher than the
+    long leg's) means this is a credit spread, not a debit one --
+    determined purely from the real fill prices' own sign, matching
+    decide_exit's own "entry_price is negative for a credit spread"
+    convention."""
+    monkeypatch.setattr(alpaca_client, "get_positions", lambda: [
+        {"symbol": "AAPL260925P00190000", "qty": "10", "side": "long", "avg_entry_price": "0.32", "asset_class": "us_option"},
+        {"symbol": "AAPL260925P00195000", "qty": "10", "side": "short", "avg_entry_price": "0.68", "asset_class": "us_option"},
+    ])
+    reconciled = strat._reconcile_positions_with_exchange({"positions": []})  # noqa: SLF001
+    assert len(reconciled) == 1
+    position = reconciled[0]
+    assert position["strategy"] == "credit_spread"
+    assert position["entry_price"] == pytest.approx(0.32 - 0.68)
+
+
+def test_reconcile_upgrades_a_previously_orphaned_naked_position_to_its_real_spread(monkeypatch):
+    """THE real, confirmed live incident: 4 real positions had already
+    been adopted as lone "naked" positions (before this fix existed)
+    while their own real, same-quantity short leg sat permanently
+    unmanaged. This must self-heal on the very next reconciliation --
+    the upgrade-detection branch runs on every cycle, unlike the one-time
+    adoption path, which only ever sees a position once."""
+    monkeypatch.setattr(alpaca_client, "get_positions", lambda: [
+        {"symbol": "AAPL260925P00335000", "qty": "10", "side": "long", "avg_entry_price": "6.2", "asset_class": "us_option"},
+        {"symbol": "AAPL260925P00330000", "qty": "10", "side": "short", "avg_entry_price": "3.9", "asset_class": "us_option"},
+    ])
+    local = [{
+        # The exact real shape found live: adopted as "naked", no
+        # short_symbol at all, entry_price is just the long leg's own
+        # single-contract fill price (inflated vs. the real net debit).
+        "symbol": "AAPL260925P00335000", "underlying_symbol": "AAPL", "strategy": "naked",
+        "entry_price": 6.2, "count": 10.0, "opened_at": "2026-09-14T22:53:42+00:00", "order_id": None,
+        "expiration_date": "2026-09-25",
+    }]
+    reconciled = strat._reconcile_positions_with_exchange({"positions": local})  # noqa: SLF001
+    assert len(reconciled) == 1
+    position = reconciled[0]
+    assert position["strategy"] == "debit_spread"
+    assert position["short_symbol"] == "AAPL260925P00330000"
+    assert position["entry_price"] == pytest.approx(6.2 - 3.9)
+
+
+def test_reconcile_does_not_upgrade_a_naked_position_with_no_real_matching_short_leg(monkeypatch):
+    """A genuinely naked position (no real short leg at all) must stay
+    naked -- the upgrade path only fires on a REAL, confirmed pairing."""
+    monkeypatch.setattr(alpaca_client, "get_positions", lambda: [
+        {"symbol": "AAPL260925P00335000", "qty": "10", "side": "long", "avg_entry_price": "6.2", "asset_class": "us_option"},
+    ])
+    local = [{
+        "symbol": "AAPL260925P00335000", "underlying_symbol": "AAPL", "strategy": "naked",
+        "entry_price": 6.2, "count": 10.0, "opened_at": "2026-09-14T22:53:42+00:00", "order_id": None,
+        "expiration_date": "2026-09-25",
+    }]
+    reconciled = strat._reconcile_positions_with_exchange({"positions": local})  # noqa: SLF001
+    assert len(reconciled) == 1
+    assert reconciled[0]["strategy"] == "naked"
+    assert reconciled[0].get("short_symbol") is None
+
+
 def test_reconcile_corrects_a_drifted_local_position(monkeypatch):
     monkeypatch.setattr(alpaca_client, "get_positions", lambda: [
         {"symbol": "AAPL240223C00195000", "qty": "2", "avg_entry_price": "5.25", "asset_class": "us_option"},

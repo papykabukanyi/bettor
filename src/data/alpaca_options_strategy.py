@@ -370,6 +370,20 @@ def _underlying_from_symbol(symbol: str) -> str | None:
     return root or None
 
 
+def _strike_from_symbol(symbol: str) -> float | None:
+    """The strike price encoded in an OCC-standard option symbol's own
+    8-digit suffix (strike x 1000, per the standard) -- same fixed-15-
+    char-suffix parsing _expiration_from_symbol/_underlying_from_symbol
+    already use. None on anything that doesn't match the expected shape,
+    never raises."""
+    if not symbol or len(symbol) < 15:
+        return None
+    type_part, strike_part = symbol[-9], symbol[-8:]
+    if type_part not in ("C", "P") or not strike_part.isdigit():
+        return None
+    return int(strike_part) / 1000.0
+
+
 def _near_expiration(position: dict[str, Any], *, now: dt.datetime) -> bool:
     expiration_date = position.get("expiration_date")
     exp_date: dt.date | None = None
@@ -987,6 +1001,70 @@ def _real_open_positions_by_symbol() -> dict[str, dict[str, Any]] | None:
     return result
 
 
+def _pair_untracked_spread_legs(
+    real: dict[str, dict[str, Any]], *, known_short_leg_symbols: set[str], local_by_symbol: dict[str, dict[str, Any]],
+) -> dict[str, str]:
+    """Real, confirmed live incident this fixes: a LONG leg adopted (or
+    already tracked) as "naked" that ALSO has a genuine, currently-
+    unaccounted-for SHORT leg on the real account (same underlying, same
+    expiration, same quantity) is a real spread whose local tracking
+    record was lost -- e.g. a state wipe during an HF outage window that
+    broke durable-state pulls -- NOT two independent things. Confirmed
+    live: 4 real positions (AAPL/AMD/AMZN/MSFT puts) had each been
+    adopted as "naked" with an inflated single-leg entry_price, while
+    their own real, same-quantity short leg one strike-width away sat
+    permanently unmanaged (the "no matching tracked spread -- leaving
+    alone" branch below is a deliberate, PERMANENT no-op for anything it
+    doesn't recognize -- a real, ongoing assignment-risk exposure with no
+    exit logic ever watching it).
+
+    A pre-pass (not folded into the main reconciliation loop itself)
+    because Alpaca's own /v2/positions response order doesn't guarantee a
+    long leg is seen before its own short leg -- computing every pairing
+    up front means the main loop never has to special-case iteration
+    order or risk a spurious one-off "no matching tracked spread" warning
+    for a leg that WILL turn out to be claimed a moment later in the same
+    pass.
+
+    Candidates for pairing: any LONG option position that's either fully
+    untracked, or already tracked but mislabeled "naked" (no short_symbol
+    at all) -- the exact shape both a brand-new orphan and one of the 4
+    already-live ones above take. Structurally safe against a false-
+    positive pairing: this strategy only ever holds ONE position per
+    underlying at a time (see scan_and_enter's own existing_underlyings/
+    existing_symbols dedup), so the only way a real long AND short
+    position can coexist for the SAME underlying+expiration+quantity is
+    if they were opened together as one real spread order.
+
+    Returns {long_symbol: short_symbol} for every pairing found; a short
+    leg is claimed by at most one long leg."""
+    pairs: dict[str, str] = {}
+    claimed: set[str] = set()
+    for symbol, real_pos in real.items():
+        if real_pos.get("side") == "short":
+            continue
+        local = local_by_symbol.get(symbol)
+        if local is not None and (local.get("strategy") != "naked" or local.get("short_symbol")):
+            continue  # already a properly-tracked spread (or a tracked naked position genuinely alone)
+        underlying = _underlying_from_symbol(symbol)
+        expiration = _expiration_from_symbol(symbol)
+        if underlying is None or expiration is None:
+            continue
+        for other_symbol, other_pos in real.items():
+            if (
+                other_symbol == symbol or other_symbol in known_short_leg_symbols or other_symbol in claimed
+                or other_pos.get("side") != "short"
+                or abs(other_pos["count"] - real_pos["count"]) > 1e-9
+                or _underlying_from_symbol(other_symbol) != underlying
+                or _expiration_from_symbol(other_symbol) != expiration
+            ):
+                continue
+            pairs[symbol] = other_symbol
+            claimed.add(other_symbol)
+            break
+    return pairs
+
+
 def _reconcile_positions_with_exchange(state: dict[str, Any]) -> list[dict[str, Any]]:
     """Makes local state["positions"] match what the real Alpaca account
     actually holds before any exit/entry decision is made -- same three-way
@@ -1040,9 +1118,17 @@ def _reconcile_positions_with_exchange(state: dict[str, Any]) -> list[dict[str, 
         p["short_symbol"] for p in local_positions
         if p.get("strategy") in ("debit_spread", "credit_spread") and p.get("short_symbol")
     }
+    # See _pair_untracked_spread_legs's own docstring for the real, live
+    # incident this fixes -- a long leg's own paired short leg, found here
+    # BEFORE the main loop below so a short leg that WILL be claimed never
+    # spuriously logs the generic "no matching tracked spread" warning.
+    paired_short_leg_by_long = _pair_untracked_spread_legs(
+        real, known_short_leg_symbols=known_short_leg_symbols, local_by_symbol=local_by_symbol,
+    )
+    claimed_short_legs = set(paired_short_leg_by_long.values())
     reconciled: list[dict[str, Any]] = []
     for symbol, real_pos in real.items():
-        if symbol in known_short_leg_symbols:
+        if symbol in known_short_leg_symbols or symbol in claimed_short_legs:
             # Already accounted for as this spread's own short leg -- see
             # this function's own docstring. Not added to `reconciled` on
             # its own; the spread's long-leg entry (below, or already in
@@ -1051,11 +1137,12 @@ def _reconcile_positions_with_exchange(state: dict[str, Any]) -> list[dict[str, 
         if real_pos.get("side") == "short":
             # This strategy never intentionally opens/holds a naked short
             # by itself -- a real short position that ISN'T a known
-            # spread's own leg is either a stale leg from a spread whose
-            # local record was already dropped, or a genuine anomaly.
-            # Either way, "sell to close" (what adopting this as naked
-            # would attempt) would ADD to the short, not close it -- surface
-            # it for a human instead of acting on it.
+            # spread's own leg (or one just paired above) is either a
+            # stale leg from a spread whose local record was already
+            # dropped, or a genuine anomaly. Either way, "sell to close"
+            # (what adopting this as naked would attempt) would ADD to
+            # the short, not close it -- surface it for a human instead
+            # of acting on it.
             logger.warning(
                 "[alpaca_options_strategy] real SHORT options position with no matching tracked spread -- "
                 "leaving alone rather than risk trading it backwards: %s x%d @ %.4f",
@@ -1063,6 +1150,29 @@ def _reconcile_positions_with_exchange(state: dict[str, Any]) -> list[dict[str, 
             )
             continue
         local = local_by_symbol.get(symbol)
+        matched_short = paired_short_leg_by_long.get(symbol)
+        if local is not None and matched_short:
+            # Real, confirmed live incident this fixes: this position was
+            # PREVIOUSLY adopted (before _pair_untracked_spread_legs
+            # existed) as a lone "naked" position, permanently orphaning
+            # its own real short leg -- see that function's own docstring
+            # for the full, confirmed-live incident. Upgrades the ALREADY-
+            # tracked record in place (this branch runs on every
+            # subsequent reconciliation of an already-tracked position,
+            # unlike the one-time adoption branch below).
+            short_pos = real[matched_short]
+            net_value = round(real_pos["entry_price"] - short_pos["entry_price"], 6)
+            logger.warning(
+                "[alpaca_options_strategy] upgrading a previously-orphaned naked position to its real spread: "
+                "%s + short %s (was naked @ %.4f, real net value %.4f)",
+                symbol, matched_short, float(local.get("entry_price") or 0.0), net_value,
+            )
+            local["strategy"] = "credit_spread" if net_value < 0 else "debit_spread"
+            local["short_symbol"] = matched_short
+            local["entry_price"] = net_value
+            local["count"] = real_pos["count"]
+            reconciled.append(local)
+            continue
         if local is None:
             # Real, confirmed bug this fixes -- underlying_symbol MUST be
             # the real ticker, not the option's own symbol: scan_and_enter's
@@ -1077,6 +1187,27 @@ def _reconcile_positions_with_exchange(state: dict[str, Any]) -> list[dict[str, 
             # via those functions' own runtime fallback.
             underlying_symbol = _underlying_from_symbol(symbol) or symbol
             expiration_date = _expiration_from_symbol(symbol)
+            if matched_short:
+                # See _pair_untracked_spread_legs's own docstring -- a
+                # genuine untracked spread, not a lone naked position;
+                # adopted as the real thing from the start, not corrupted
+                # into "naked" first and only fixed on some later cycle.
+                short_pos = real[matched_short]
+                net_value = round(real_pos["entry_price"] - short_pos["entry_price"], 6)
+                strategy = "credit_spread" if net_value < 0 else "debit_spread"
+                logger.warning(
+                    "[alpaca_options_strategy] adopting untracked real %s (paired long+short legs): "
+                    "%s (%s) + short %s x%d @ net value %.4f",
+                    strategy, symbol, underlying_symbol, matched_short, int(real_pos["count"]), net_value,
+                )
+                reconciled.append({
+                    "symbol": symbol, "underlying_symbol": underlying_symbol, "strategy": strategy,
+                    "short_symbol": matched_short,
+                    "entry_price": net_value, "count": real_pos["count"],
+                    "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(), "order_id": None,
+                    "expiration_date": expiration_date.isoformat() if expiration_date else None,
+                })
+                continue
             logger.warning(
                 "[alpaca_options_strategy] adopting untracked real position: %s (%s) x%d @ %.4f",
                 symbol, underlying_symbol, int(real_pos["count"]), real_pos["entry_price"],
