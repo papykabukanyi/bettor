@@ -210,6 +210,34 @@ def _prune_minute_bar_cache(now_mono: float) -> None:
         del _minute_bar_cache[k]
 
 
+def prewarm_minute_bars(symbols: list[str], *, days: int = LIVE_LOOKBACK_DAYS, max_workers: int = 8) -> None:
+    """Fetches fetch_recent_minute_bars for every symbol CONCURRENTLY via a
+    thread pool, populating the SAME per-symbol cache that function itself
+    reads -- every sequential fetch_recent_minute_bars() call made
+    afterward in the same cycle (scan_and_enter's own per-symbol loop,
+    collect_dataset_rows' identical one) becomes a cache hit instead of
+    its own blocking network fetch. Same pattern, same rationale, as
+    stock_news.prewarm_sentiment (see its own docstring) -- added per
+    explicit user direction ("enhance all aspects... faster... getting
+    data") now that WATCHLIST_TOP_N has grown (40 -> 80): a sequential
+    per-symbol fetch loop's wall-clock cost scales linearly with watchlist
+    size, exactly the kind of real latency more concurrency (not more raw
+    resources) actually fixes. Best-effort: any symbol whose fetch fails
+    or times out inside the pool just falls through to its own normal
+    (slower) fetch_recent_minute_bars() call later in the sequential loop."""
+    import concurrent.futures
+
+    unique_symbols = list(dict.fromkeys(s for s in symbols if s))  # de-dupe, preserve order
+    if not unique_symbols:
+        return
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(fetch_recent_minute_bars, symbol, days=days) for symbol in unique_symbols]
+            concurrent.futures.wait(futures, timeout=30.0)
+    except Exception as exc:
+        logger.debug("[alpaca_data] minute-bar prewarm failed (non-fatal, per-symbol fetch will still run): %s", exc)
+
+
 def fetch_recent_minute_bars(symbol: str, *, days: int = LIVE_LOOKBACK_DAYS) -> pd.DataFrame:
     """Short-window, short-TTL-cached minute-bar fetch for LIVE feature
     computation (latest_feature_row / the periodic dataset-collection job)
@@ -620,8 +648,23 @@ def backfill_minute_history(symbols: list[str], *, days: int = 90) -> dict[str, 
 # has had zero such crashes, so the size of this watchlist -- not just the
 # cleanup discipline around it -- was the remaining real lever.
 # ---------------------------------------------------------------------------
-WATCHLIST_TOP_N = int(os.getenv("ALPACA_WATCHLIST_TOP_N", "40") or "40")
-MAX_TRAIN_ROWS = int(os.getenv("ALPACA_MAX_TRAIN_ROWS", "150000") or "150000")
+# 40 -> 80 per explicit user direction ("maximize the use of the HF
+# server"): the 100->40 cut above was a real, confirmed OOM fix on
+# Render's own 512MB container (see this section's own incident
+# comment) -- this app now runs on a Hugging Face Docker Space's
+# "cpu-upgrade" tier (8 vCPU / 32GB RAM), ~30-60x that ceiling. Paired
+# with BROAD_CANDIDATE_UNIVERSE's own expansion (60 -> 150 symbols) so
+# there's a genuinely wider pool to rank a bigger watchlist FROM, not
+# just a bigger top-N cut off the same small pool.
+WATCHLIST_TOP_N = int(os.getenv("ALPACA_WATCHLIST_TOP_N", "80") or "80")
+# 150000 -> 400000: load_training_dataset()'s own incremental-flush
+# discipline (see its docstring -- combines every _SHARD_DOWNLOAD_WORKERS
+# shards into a running frame with an explicit gc.collect(), rather than
+# holding all downloaded shards in memory before one final concat) was
+# ALREADY built specifically so a larger row cap stays memory-safe
+# regardless of total size -- this just uses more of the real 32GB
+# ceiling to give the model genuinely more real history to learn from.
+MAX_TRAIN_ROWS = int(os.getenv("ALPACA_MAX_TRAIN_ROWS", "400000") or "400000")
 _DATE_SHARD_RE = re.compile(r"^minute/\d{4}-\d{2}-\d{2}\.parquet$")
 
 
@@ -666,15 +709,28 @@ def _recent_volume_and_volatility_by_symbol(df: pd.DataFrame) -> pd.DataFrame:
 # above already established (real per-cycle cost here is ONE batched
 # get_bars call, not a per-symbol fetch/engineer/predict loop -- that
 # heavier work only ever runs on the resulting top-N, same as before).
+#
+# 60 -> 150 per explicit user direction ("maximize the use of the HF
+# server"): that same 100-symbol OOM incident was about the ENGINEERED-
+# FEATURE loop (scan_and_enter/collect_dataset_rows, x100 symbols every
+# cycle) on a 512MB container, not this pool -- this list only ever feeds
+# ONE batched get_bars call regardless of size (a few hundred more small
+# JSON records is negligible), and the heavier per-symbol work still only
+# ever runs on the resulting WATCHLIST_TOP_N=80, not this whole pool. More
+# candidates here means more real chances for genuine unusual activity to
+# actually get discovered.
 BROAD_CANDIDATE_UNIVERSE = [
     s.strip().upper() for s in os.getenv(
         "ALPACA_BROAD_CANDIDATE_UNIVERSE",
         "AAPL,MSFT,NVDA,GOOGL,AMZN,META,TSLA,AVGO,AMD,NFLX,CRM,ORCL,ADBE,INTC,CSCO,QCOM,TXN,IBM,NOW,INTU,"
-        "JPM,BAC,WFC,GS,MS,V,MA,AXP,C,SCHW,"
-        "UNH,JNJ,LLY,PFE,ABBV,MRK,TMO,ABT,DHR,"
-        "WMT,HD,PG,KO,PEP,MCD,NKE,SBUX,COST,DIS,TGT,"
-        "XOM,CVX,BA,CAT,GE,HON,UPS,LMT,"
-        "SPY,QQQ,IWM,DIA",
+        "AMAT,MU,LRCX,KLAC,PANW,CRWD,SNOW,PLTR,UBER,ABNB,SHOP,PYPL,SQ,MRVL,DELL,"
+        "JPM,BAC,WFC,GS,MS,V,MA,AXP,C,SCHW,BLK,SPGI,ICE,CME,PGR,AIG,MET,PRU,COF,USB,"
+        "UNH,JNJ,LLY,PFE,ABBV,MRK,TMO,ABT,DHR,MDT,BMY,AMGN,GILD,CVS,CI,ELV,VRTX,REGN,ISRG,SYK,BSX,HCA,"
+        "WMT,HD,PG,KO,PEP,MCD,NKE,SBUX,COST,DIS,TGT,LOW,TJX,BKNG,CMG,YUM,MO,PM,CL,KMB,EL,LULU,DG,ROST,"
+        "XOM,CVX,BA,CAT,GE,HON,UPS,LMT,MMM,RTX,NOC,GD,DE,EMR,ETN,ITW,PH,COP,SLB,EOG,PSX,MPC,OXY,FDX,WM,"
+        "T,VZ,TMUS,CMCSA,CHTR,"
+        "PLD,AMT,EQIX,O,"
+        "SPY,QQQ,IWM,DIA,XLF,XLE,XLK,XLV,XLI",
     ).split(",") if s.strip()
 ]
 
@@ -780,6 +836,12 @@ def collect_dataset_rows(symbols: list[str] | None = None) -> pd.DataFrame:
         prewarm_sentiment([(s, get_company_name(s)) for s in target_symbols])
     except Exception as exc:
         logger.debug("[alpaca_data] sentiment prewarm failed (non-fatal): %s", exc)
+    # Same concurrent-prewarm fix for the OTHER blocking per-symbol call
+    # this loop makes -- see prewarm_minute_bars' own docstring.
+    try:
+        prewarm_minute_bars(target_symbols)
+    except Exception as exc:
+        logger.debug("[alpaca_data] minute-bar prewarm failed (non-fatal): %s", exc)
     frames = []
     for symbol in target_symbols:
         try:
@@ -869,8 +931,8 @@ def load_training_dataset(*, max_shards: int = 90, max_rows: int | None = None) 
     now legitimately means up to 90 full-day, all-symbol DataFrames held
     simultaneously in memory before the final concat even starts, on a
     512MB container. Flushing into a running `combined` frame every
-    _SHARD_FLUSH_BATCH shards (with an explicit gc.collect()) bounds peak
-    "raw shard frames held at once" to that batch size instead of
+    _SHARD_DOWNLOAD_WORKERS shards (with an explicit gc.collect()) bounds
+    peak "raw shard frames held at once" to that batch size instead of
     max_shards, the same incremental-accumulation discipline this
     session's own backfill_minute_history() already uses for HF uploads.
 
@@ -890,12 +952,35 @@ def load_training_dataset(*, max_shards: int = 90, max_rows: int | None = None) 
     and explicitly shuts it down when this function returns -- an abandoned
     call can still leave a thread running past that shutdown (Python still
     can't force-kill it), but no longer accumulates a fresh, never-cleaned-up
-    executor per shard."""
+    executor per shard.
+
+    Shard downloads now run in batches of _SHARD_DOWNLOAD_WORKERS
+    CONCURRENTLY, not one full round trip at a time, per explicit user
+    direction ("enhance all aspects... faster... getting data") -- these
+    are I/O-bound network calls (waiting on HF's own response, not CPU),
+    so real wall-clock parallelism here doesn't compete with the CPU other
+    markets' own concurrent jobs need the way a bigger n_jobs on a model
+    fit would. Still fully preserves every incident fix above: each
+    download keeps its own per-call timeout (a slow/hung one in a batch
+    doesn't block its batch-mates, just gets skipped same as before), the
+    SAME one shared, bounded executor is reused for every call
+    (list_repo_files included) and explicitly shut down on exit, and the
+    stop-once-enough-rows-accumulated check now runs between batches of
+    _SHARD_DOWNLOAD_WORKERS instead of between individual shards -- close
+    to the original per-shard granularity, not a coarser one (see that
+    check's own comment for a real regression this avoided). The same
+    batch size now also governs the memory-flush cadence (see
+    _flush_pending) -- one batch size, not two separate ones."""
     if not HF_API_KEY:
         return pd.DataFrame()
     cap = MAX_TRAIN_ROWS if max_rows is None else max_rows
     stop_after_rows = int(cap * 1.5) if cap else None
-    _SHARD_FLUSH_BATCH = 10
+    # One batch size now governs BOTH concurrency (how many downloads run
+    # at once) and the memory-flush cadence (see _flush_pending) --
+    # simpler than two separate constants, and flushing every
+    # _SHARD_DOWNLOAD_WORKERS shards is if anything a slightly TIGHTER
+    # memory bound than the old flush-every-10, not a looser one.
+    _SHARD_DOWNLOAD_WORKERS = 8
     pending: list[pd.DataFrame] = []
     combined: pd.DataFrame | None = None
     accumulated_rows = 0
@@ -910,13 +995,20 @@ def load_training_dataset(*, max_shards: int = 90, max_rows: int | None = None) 
 
     from concurrent.futures import ThreadPoolExecutor
     from concurrent.futures import TimeoutError as FutureTimeoutError
-    executor = ThreadPoolExecutor(max_workers=4)
+    executor = ThreadPoolExecutor(max_workers=_SHARD_DOWNLOAD_WORKERS)
 
     def _shared_hf_call(fn, *, timeout_sec: float):
         try:
             return executor.submit(fn).result(timeout=timeout_sec)
         except FutureTimeoutError:
             logger.warning("[alpaca_data] HF call exceeded %ss, giving up", timeout_sec)
+            return None
+
+    def _download_shard(f: str) -> str | None:
+        try:
+            return hf_hub_download(repo_id=HF_ALPACA_DATASET_REPO, filename=f, repo_type="dataset", token=HF_API_KEY)
+        except Exception as exc:
+            logger.warning("[alpaca_data] failed to download shard %s: %s", f, exc)
             return None
 
     try:
@@ -930,26 +1022,44 @@ def load_training_dataset(*, max_shards: int = 90, max_rows: int | None = None) 
             return pd.DataFrame()
         hf_files = [f for f in raw_files if _DATE_SHARD_RE.match(f)]
         hf_files = sorted(hf_files, reverse=True)[:max_shards]
-        for f in hf_files:
+        # Batched by _SHARD_DOWNLOAD_WORKERS -- submitting more than the
+        # executor's own worker count at once wouldn't download any faster
+        # (only _SHARD_DOWNLOAD_WORKERS ever run concurrently regardless).
+        # Real, confirmed regression caught in review while building this:
+        # an earlier version of this loop batched by a WIDER flush-only
+        # size, so the stop-once-enough-rows check (below) ran too
+        # coarsely -- a small max_rows cap (e.g. get_stock_watchlist's own
+        # max_rows=5_000 ranking-only call) could no longer stop early at
+        # all once the whole file list fit in one such batch, downloading
+        # every requested shard regardless of the cap. Checking between
+        # every _SHARD_DOWNLOAD_WORKERS-sized batch keeps this close to
+        # the original per-shard early-exit granularity.
+        for batch_start in range(0, len(hf_files), _SHARD_DOWNLOAD_WORKERS):
             if stop_after_rows and accumulated_rows >= stop_after_rows:
                 break
-            try:
-                local_path = _shared_hf_call(
-                    lambda f=f: hf_hub_download(repo_id=HF_ALPACA_DATASET_REPO, filename=f, repo_type="dataset", token=HF_API_KEY),
-                    timeout_sec=_LOAD_TRAINING_DATASET_SHARD_TIMEOUT_SEC,
-                )
+            batch = hf_files[batch_start:batch_start + _SHARD_DOWNLOAD_WORKERS]
+            futures = {f: executor.submit(_download_shard, f) for f in batch}
+            for f, future in futures.items():
+                try:
+                    local_path = future.result(timeout=_LOAD_TRAINING_DATASET_SHARD_TIMEOUT_SEC)
+                except FutureTimeoutError:
+                    logger.warning("[alpaca_data] shard download %s exceeded %ss, giving up", f, _LOAD_TRAINING_DATASET_SHARD_TIMEOUT_SEC)
+                    continue
+                except Exception as exc:
+                    logger.warning("[alpaca_data] failed to read shard %s: %s", f, exc)
+                    continue
                 if local_path is None:
                     continue
-                shard = pd.read_parquet(local_path)
-                if "symbol" in shard.columns and "ts" in shard.columns:
-                    pending.append(shard)
-                    accumulated_rows += len(shard)
-                    if len(pending) >= _SHARD_FLUSH_BATCH:
-                        _flush_pending()
-                else:
-                    logger.warning("[alpaca_data] skipping shard with unexpected schema: %s", f)
-            except Exception as exc:
-                logger.warning("[alpaca_data] failed to read shard %s: %s", f, exc)
+                try:
+                    shard = pd.read_parquet(local_path)
+                    if "symbol" in shard.columns and "ts" in shard.columns:
+                        pending.append(shard)
+                        accumulated_rows += len(shard)
+                    else:
+                        logger.warning("[alpaca_data] skipping shard with unexpected schema: %s", f)
+                except Exception as exc:
+                    logger.warning("[alpaca_data] failed to read shard %s: %s", f, exc)
+            _flush_pending()
     except Exception as exc:
         logger.warning("[alpaca_data] HF dataset listing failed: %s", exc)
     finally:

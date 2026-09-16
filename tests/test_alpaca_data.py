@@ -215,6 +215,44 @@ def test_fetch_recent_minute_bars_caches_each_symbol_independently(monkeypatch):
     assert len(calls) == 2
 
 
+# ── prewarm_minute_bars: concurrent cache-populating fetch -- see its own
+# docstring for the real motivation (WATCHLIST_TOP_N grown 40 -> 80, a
+# sequential per-symbol fetch loop's wall-clock cost scales linearly with
+# watchlist size). ──────────────────────────────────────────────────────
+
+def test_prewarm_minute_bars_populates_the_cache_for_every_symbol(monkeypatch):
+    calls = []
+    monkeypatch.setattr(alpaca_data, "fetch_minute_bars", lambda symbol, days=5: calls.append(symbol) or pd.DataFrame({"ts": [1], "close": [1.0]}))
+    alpaca_data.prewarm_minute_bars(["AAPL", "MSFT"])
+    assert sorted(calls) == ["AAPL", "MSFT"]
+    # A subsequent fetch_recent_minute_bars call must hit the now-warm
+    # cache, not fetch again.
+    alpaca_data.fetch_recent_minute_bars("AAPL")
+    assert len(calls) == 2
+
+
+def test_prewarm_minute_bars_dedupes_and_ignores_empty_symbols(monkeypatch):
+    calls = []
+    monkeypatch.setattr(alpaca_data, "fetch_minute_bars", lambda symbol, days=5: calls.append(symbol) or pd.DataFrame({"ts": [1], "close": [1.0]}))
+    alpaca_data.prewarm_minute_bars(["AAPL", "AAPL", "", None, "MSFT"])
+    assert sorted(calls) == ["AAPL", "MSFT"]
+
+
+def test_prewarm_minute_bars_is_a_no_op_for_an_empty_list(monkeypatch):
+    calls = []
+    monkeypatch.setattr(alpaca_data, "fetch_minute_bars", lambda symbol, days=5: calls.append(symbol) or pd.DataFrame({"ts": [1], "close": [1.0]}))
+    alpaca_data.prewarm_minute_bars([])  # must not raise
+    assert calls == []
+
+
+def test_prewarm_minute_bars_never_raises_even_if_every_fetch_fails(monkeypatch):
+    def raise_error(symbol, days=5):
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(alpaca_data, "fetch_minute_bars", raise_error)
+    alpaca_data.prewarm_minute_bars(["AAPL", "MSFT"])  # must not raise -- best-effort only
+
+
 def _synthetic_one_min_df(n=100, base=100.0, vol_base=1000.0):
     closes = [base + i * 0.01 for i in range(n)]
     return pd.DataFrame({
@@ -533,6 +571,47 @@ def test_load_training_dataset_skips_a_hanging_shard_and_continues(monkeypatch):
     result = alpaca_data.load_training_dataset()
 
     assert len(result) == 20  # 2 successful shards x 10 rows -- the hanging one was skipped, not waited on
+
+
+def test_load_training_dataset_downloads_shards_concurrently_not_sequentially(monkeypatch):
+    """Real, confirmed improvement this locks in -- see load_training_dataset's
+    own docstring ("enhance all aspects... faster... getting data"): shard
+    downloads within a batch must run CONCURRENTLY, not one full round
+    trip at a time. 6 shards each artificially delayed 0.3s would take
+    ~1.8s sequentially; comfortably under a 1.0s ceiling proves real
+    parallelism (well within _SHARD_DOWNLOAD_WORKERS=8, so all 6 run in
+    one single concurrent batch)."""
+    monkeypatch.setattr(alpaca_data, "HF_API_KEY", "fake-token")
+    shard_names = [f"minute/2026-07-{10 + i:02d}.parquet" for i in range(6)]
+
+    class FakeApi:
+        def __init__(self, token=None):
+            pass
+
+        def list_repo_files(self, repo_id, repo_type):
+            return shard_names
+
+    def fake_hf_hub_download(repo_id, filename, repo_type, token):
+        import tempfile
+        import time as t
+        t.sleep(0.3)
+        idx = shard_names.index(filename)
+        day_df = pd.DataFrame({"symbol": ["AAPL"] * 10, "ts": [idx * 1000 + i for i in range(10)], "close": [1.0] * 10})
+        f = tempfile.NamedTemporaryFile(suffix=".parquet", delete=False)
+        day_df.to_parquet(f.name, index=False)
+        return f.name
+
+    import huggingface_hub
+    monkeypatch.setattr(huggingface_hub, "HfApi", FakeApi)
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", fake_hf_hub_download)
+
+    import time as real_time
+    start = real_time.monotonic()
+    result = alpaca_data.load_training_dataset()
+    elapsed = real_time.monotonic() - start
+
+    assert len(result) == 60  # all 6 shards x 10 rows
+    assert elapsed < 1.0  # well under 6 x 0.3s = 1.8s sequential -- real concurrency, not just extra bookkeeping
 
 
 # ---------------------------------------------------------------------------

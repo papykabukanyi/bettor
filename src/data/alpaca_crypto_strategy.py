@@ -1230,7 +1230,9 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
     quote currency for the same coin (e.g. BTC/USD and BTC/USDT), and
     holding both at once would just be two bets on the identical
     underlying move, not real diversification."""
-    from data.alpaca_crypto_data import fetch_recent_crypto_bars, get_crypto_universe, latest_feature_row, symbol_to_coin
+    from data.alpaca_crypto_data import (
+        fetch_recent_crypto_bars, get_crypto_universe, latest_feature_row, prewarm_minute_bars, symbol_to_coin,
+    )
     from data.alpaca_crypto_model import predict_direction
     from data import threads_post
 
@@ -1293,6 +1295,16 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
         prewarm_sentiment([symbol_to_coin(s) for s in symbols if symbol_to_coin(s) not in existing_coins])
     except Exception as exc:
         logger.debug("[alpaca_crypto_strategy] sentiment prewarm failed (non-fatal): %s", exc)
+    # Same concurrent-prewarm fix for the OTHER blocking per-symbol call
+    # this loop makes (latest_feature_row -> fetch_recent_crypto_bars) --
+    # see alpaca_crypto_data.prewarm_minute_bars' own docstring. Added per
+    # explicit user direction ("enhance all aspects... faster decision
+    # making"): this loop scans the FULL tradable universe (up to ~56
+    # pairs) every cycle.
+    try:
+        prewarm_minute_bars([s for s in symbols if symbol_to_coin(s) not in existing_coins])
+    except Exception as exc:
+        logger.debug("[alpaca_crypto_strategy] minute-bar prewarm failed (non-fatal): %s", exc)
 
     qualifying: list[dict[str, Any]] = []
     for symbol in symbols:

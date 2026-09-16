@@ -162,6 +162,34 @@ def fetch_crypto_bars(symbol: str, *, days: int = LIVE_LOOKBACK_DAYS) -> pd.Data
     return _bars_to_df(bars)
 
 
+def prewarm_minute_bars(symbols: list[str], *, days: int = LIVE_LOOKBACK_DAYS, max_workers: int = 8) -> None:
+    """Fetches fetch_recent_crypto_bars for every symbol CONCURRENTLY via a
+    thread pool, populating the SAME per-symbol cache that function itself
+    reads -- every sequential fetch_recent_crypto_bars() call made
+    afterward in the same cycle (scan_and_enter's/collect_dataset_rows'
+    own per-symbol loops) becomes a cache hit instead of its own blocking
+    network fetch. Same pattern, same rationale, as
+    stock_news.prewarm_sentiment / alpaca_data.prewarm_minute_bars (see
+    either's own docstring) -- added per explicit user direction ("enhance
+    all aspects... faster... getting data"): this module already scans
+    the FULL tradable universe (up to ~56 pairs), an even bigger
+    sequential-fetch cost than equities' own top-N watchlist. Best-effort:
+    any symbol whose fetch fails or times out inside the pool just falls
+    through to its own normal (slower) fetch_recent_crypto_bars() call
+    later in the sequential loop."""
+    import concurrent.futures
+
+    unique_symbols = list(dict.fromkeys(s for s in symbols if s))  # de-dupe, preserve order
+    if not unique_symbols:
+        return
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(fetch_recent_crypto_bars, symbol, days=days) for symbol in unique_symbols]
+            concurrent.futures.wait(futures, timeout=30.0)
+    except Exception as exc:
+        logger.debug("[alpaca_crypto_data] minute-bar prewarm failed (non-fatal, per-symbol fetch will still run): %s", exc)
+
+
 def fetch_recent_crypto_bars(symbol: str, *, days: int = LIVE_LOOKBACK_DAYS) -> pd.DataFrame:
     """Short-window, short-TTL-cached fetch for live feature computation --
     same rate-limit-conscious caching discipline as alpaca_data.py's
@@ -525,7 +553,15 @@ def backfill_minute_history(symbols: list[str], *, days: int = 90) -> dict[str, 
     }
 
 
-MAX_TRAIN_ROWS = int(os.getenv("ALPACA_CRYPTO_MAX_TRAIN_ROWS", "150000") or "150000")
+# 150000 -> 400000 per explicit user direction ("maximize the use of the
+# HF server"): load_training_dataset()'s own incremental-flush discipline
+# (see its docstring -- combines every _SHARD_FLUSH_BATCH shards into a
+# running frame with an explicit gc.collect(), rather than holding all
+# downloaded shards in memory before one final concat) was ALREADY built
+# specifically so a larger row cap stays memory-safe regardless of total
+# size -- this just uses more of the real 32GB HF Docker Space ceiling to
+# give the model genuinely more real history to learn from.
+MAX_TRAIN_ROWS = int(os.getenv("ALPACA_CRYPTO_MAX_TRAIN_ROWS", "400000") or "400000")
 
 
 def collect_dataset_rows(symbols: list[str] | None = None) -> pd.DataFrame:
@@ -540,6 +576,10 @@ def collect_dataset_rows(symbols: list[str] | None = None) -> pd.DataFrame:
         prewarm_sentiment([symbol_to_coin(s) for s in target_symbols])
     except Exception as exc:
         logger.debug("[alpaca_crypto_data] sentiment prewarm failed (non-fatal): %s", exc)
+    try:
+        prewarm_minute_bars(target_symbols)
+    except Exception as exc:
+        logger.debug("[alpaca_crypto_data] minute-bar prewarm failed (non-fatal): %s", exc)
     frames = []
     for symbol in target_symbols:
         try:
@@ -629,12 +669,24 @@ def load_training_dataset(*, max_shards: int = 90, max_rows: int | None = None) 
     background indefinitely, competing for the same GIL as every later
     call and visibly degrading them. _shared_hf_call() below reuses ONE
     bounded-size executor for every HF call in a single invocation instead,
-    explicitly shut down when this function returns."""
+    explicitly shut down when this function returns.
+
+    Shard downloads now run in batches of _SHARD_DOWNLOAD_WORKERS
+    CONCURRENTLY, not one full round trip at a time -- see
+    alpaca_data.py's own identical copy of this docstring for the full
+    rationale (I/O-bound, doesn't compete with other markets' own CPU
+    needs) and the real regression its own comment documents avoiding
+    (batching by a wider flush-only size instead of the worker count would
+    make the stop-once-enough-rows check too coarse for a small max_rows
+    cap)."""
     if not HF_API_KEY:
         return pd.DataFrame()
     cap = MAX_TRAIN_ROWS if max_rows is None else max_rows
     stop_after_rows = int(cap * 1.5) if cap else None
-    _SHARD_FLUSH_BATCH = 10
+    # One batch size governs BOTH concurrency and the memory-flush
+    # cadence (see _flush_pending) -- see alpaca_data.py's own identical
+    # comment for why this replaced two separate constants.
+    _SHARD_DOWNLOAD_WORKERS = 8
     pending: list[pd.DataFrame] = []
     combined: pd.DataFrame | None = None
     accumulated_rows = 0
@@ -649,13 +701,20 @@ def load_training_dataset(*, max_shards: int = 90, max_rows: int | None = None) 
 
     from concurrent.futures import ThreadPoolExecutor
     from concurrent.futures import TimeoutError as FutureTimeoutError
-    executor = ThreadPoolExecutor(max_workers=4)
+    executor = ThreadPoolExecutor(max_workers=_SHARD_DOWNLOAD_WORKERS)
 
     def _shared_hf_call(fn, *, timeout_sec: float):
         try:
             return executor.submit(fn).result(timeout=timeout_sec)
         except FutureTimeoutError:
             logger.warning("[alpaca_crypto_data] HF call exceeded %ss, giving up", timeout_sec)
+            return None
+
+    def _download_shard(f: str) -> str | None:
+        try:
+            return hf_hub_download(repo_id=HF_ALPACA_CRYPTO_DATASET_REPO, filename=f, repo_type="dataset", token=HF_API_KEY)
+        except Exception as exc:
+            logger.warning("[alpaca_crypto_data] failed to download shard %s: %s", f, exc)
             return None
 
     try:
@@ -669,26 +728,32 @@ def load_training_dataset(*, max_shards: int = 90, max_rows: int | None = None) 
             return pd.DataFrame()
         hf_files = [f for f in raw_files if _DATE_SHARD_RE.match(f)]
         hf_files = sorted(hf_files, reverse=True)[:max_shards]
-        for f in hf_files:
+        for batch_start in range(0, len(hf_files), _SHARD_DOWNLOAD_WORKERS):
             if stop_after_rows and accumulated_rows >= stop_after_rows:
                 break
-            try:
-                local_path = _shared_hf_call(
-                    lambda f=f: hf_hub_download(repo_id=HF_ALPACA_CRYPTO_DATASET_REPO, filename=f, repo_type="dataset", token=HF_API_KEY),
-                    timeout_sec=_LOAD_TRAINING_DATASET_SHARD_TIMEOUT_SEC,
-                )
+            batch = hf_files[batch_start:batch_start + _SHARD_DOWNLOAD_WORKERS]
+            futures = {f: executor.submit(_download_shard, f) for f in batch}
+            for f, future in futures.items():
+                try:
+                    local_path = future.result(timeout=_LOAD_TRAINING_DATASET_SHARD_TIMEOUT_SEC)
+                except FutureTimeoutError:
+                    logger.warning("[alpaca_crypto_data] shard download %s exceeded %ss, giving up", f, _LOAD_TRAINING_DATASET_SHARD_TIMEOUT_SEC)
+                    continue
+                except Exception as exc:
+                    logger.warning("[alpaca_crypto_data] failed to read shard %s: %s", f, exc)
+                    continue
                 if local_path is None:
                     continue
-                shard = pd.read_parquet(local_path)
-                if "symbol" in shard.columns and "ts" in shard.columns:
-                    pending.append(shard)
-                    accumulated_rows += len(shard)
-                    if len(pending) >= _SHARD_FLUSH_BATCH:
-                        _flush_pending()
-                else:
-                    logger.warning("[alpaca_crypto_data] skipping shard with unexpected schema: %s", f)
-            except Exception as exc:
-                logger.warning("[alpaca_crypto_data] failed to read shard %s: %s", f, exc)
+                try:
+                    shard = pd.read_parquet(local_path)
+                    if "symbol" in shard.columns and "ts" in shard.columns:
+                        pending.append(shard)
+                        accumulated_rows += len(shard)
+                    else:
+                        logger.warning("[alpaca_crypto_data] skipping shard with unexpected schema: %s", f)
+                except Exception as exc:
+                    logger.warning("[alpaca_crypto_data] failed to read shard %s: %s", f, exc)
+            _flush_pending()
     except Exception as exc:
         logger.warning("[alpaca_crypto_data] HF dataset listing failed: %s", exc)
     finally:

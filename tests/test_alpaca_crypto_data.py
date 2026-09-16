@@ -98,6 +98,40 @@ def test_fetch_recent_crypto_bars_caches_within_the_ttl(monkeypatch):
     pd.testing.assert_frame_equal(first, second)
 
 
+# ── prewarm_minute_bars: concurrent cache-populating fetch -- see its own
+# docstring (mirrors alpaca_data.py's identical function). ──────────────
+
+def test_prewarm_minute_bars_populates_the_cache_for_every_symbol(monkeypatch):
+    calls = []
+    monkeypatch.setattr(acd, "fetch_crypto_bars", lambda symbol, days=5: calls.append(symbol) or pd.DataFrame({"ts": [1], "close": [1.0]}))
+    acd.prewarm_minute_bars(["BTC/USD", "ETH/USD"])
+    assert sorted(calls) == ["BTC/USD", "ETH/USD"]
+    acd.fetch_recent_crypto_bars("BTC/USD")
+    assert len(calls) == 2  # served from the now-warm cache, no new fetch for the second call
+
+
+def test_prewarm_minute_bars_dedupes_and_ignores_empty_symbols(monkeypatch):
+    calls = []
+    monkeypatch.setattr(acd, "fetch_crypto_bars", lambda symbol, days=5: calls.append(symbol) or pd.DataFrame({"ts": [1], "close": [1.0]}))
+    acd.prewarm_minute_bars(["BTC/USD", "BTC/USD", "", None, "ETH/USD"])
+    assert sorted(calls) == ["BTC/USD", "ETH/USD"]
+
+
+def test_prewarm_minute_bars_is_a_no_op_for_an_empty_list(monkeypatch):
+    calls = []
+    monkeypatch.setattr(acd, "fetch_crypto_bars", lambda symbol, days=5: calls.append(symbol) or pd.DataFrame({"ts": [1], "close": [1.0]}))
+    acd.prewarm_minute_bars([])  # must not raise
+    assert calls == []
+
+
+def test_prewarm_minute_bars_never_raises_even_if_every_fetch_fails(monkeypatch):
+    def raise_error(symbol, days=5):
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(acd, "fetch_crypto_bars", raise_error)
+    acd.prewarm_minute_bars(["BTC/USD", "ETH/USD"])  # must not raise -- best-effort only
+
+
 def _synthetic_one_min_df(n=250, base=100.0, vol_base=1000.0):
     # n=250 (not the old 100): MIN_ROWS_FOR_FEATURES is now 245 -- the
     # trend_4h 240-minute window + a small buffer, ported from perps_data.py

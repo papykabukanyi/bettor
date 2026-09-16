@@ -35,8 +35,8 @@ from typing import Any
 import pandas as pd
 
 from data import alpaca_client
-from data.alpaca_data import FEATURE_COLUMNS, engineer_features, fetch_minute_bars, fetch_recent_minute_bars
-from data.stock_news import get_sentiment
+from data.alpaca_data import FEATURE_COLUMNS, engineer_features, fetch_minute_bars, fetch_recent_minute_bars, prewarm_minute_bars
+from data.stock_news import get_sentiment, prewarm_sentiment
 
 logger = logging.getLogger(__name__)
 
@@ -506,13 +506,35 @@ def backfill_minute_history(symbols: list[str], *, days: int = 90) -> dict[str, 
     }
 
 
-MAX_TRAIN_ROWS = int(os.getenv("ALPACA_OPTIONS_MAX_TRAIN_ROWS", "150000") or "150000")
+# 150000 -> 400000 per explicit user direction ("maximize the use of the
+# HF server"): a prior increase to this constant made
+# _run_alpaca_options_train's data-loading phase long enough to block
+# alpaca_options_fast_check on the shared "default" executor (see
+# alpaca_options_server.py's own scheduler comment) -- since fixed there
+# by giving "default" more workers (1 -> 3) now that this app runs on a
+# 32GB HF Docker Space instead of the old 512MB Render container, not by
+# capping this constant back down. load_training_dataset()'s own
+# incremental-flush discipline was already built so a larger row cap
+# stays memory-safe regardless of total size.
+MAX_TRAIN_ROWS = int(os.getenv("ALPACA_OPTIONS_MAX_TRAIN_ROWS", "400000") or "400000")
 
 
 def collect_dataset_rows(symbols: list[str] | None = None) -> pd.DataFrame:
     """Fetch + engineer features for the given underlyings (default: the
     fixed options-friendly universe)."""
     target_symbols = symbols if symbols is not None else get_options_universe()
+    # Same concurrent-prewarm fix as alpaca_data.py's/alpaca_crypto_data.py's
+    # own collect_dataset_rows (see either prewarm function's own
+    # docstring) -- this loop's per-symbol sentiment/bar fetches would
+    # otherwise block sequentially.
+    try:
+        prewarm_sentiment([(s, None) for s in target_symbols])
+    except Exception as exc:
+        logger.debug("[alpaca_options_data] sentiment prewarm failed (non-fatal): %s", exc)
+    try:
+        prewarm_minute_bars(target_symbols)
+    except Exception as exc:
+        logger.debug("[alpaca_options_data] minute-bar prewarm failed (non-fatal): %s", exc)
     frames = []
     for symbol in target_symbols:
         try:
@@ -602,12 +624,24 @@ def load_training_dataset(*, max_shards: int = 90, max_rows: int | None = None) 
     background indefinitely, competing for the same GIL as every later
     call and visibly degrading them. _shared_hf_call() below reuses ONE
     bounded-size executor for every HF call in a single invocation instead,
-    explicitly shut down when this function returns."""
+    explicitly shut down when this function returns.
+
+    Shard downloads now run in batches of _SHARD_DOWNLOAD_WORKERS
+    CONCURRENTLY, not one full round trip at a time -- see
+    alpaca_data.py's own identical copy of this docstring for the full
+    rationale (I/O-bound, doesn't compete with other markets' own CPU
+    needs) and the real regression its own comment documents avoiding
+    (batching by a wider flush-only size instead of the worker count would
+    make the stop-once-enough-rows check too coarse for a small max_rows
+    cap)."""
     if not HF_API_KEY:
         return pd.DataFrame()
     cap = MAX_TRAIN_ROWS if max_rows is None else max_rows
     stop_after_rows = int(cap * 1.5) if cap else None
-    _SHARD_FLUSH_BATCH = 10
+    # One batch size governs BOTH concurrency and the memory-flush
+    # cadence (see _flush_pending) -- see alpaca_data.py's own identical
+    # comment for why this replaced two separate constants.
+    _SHARD_DOWNLOAD_WORKERS = 8
     pending: list[pd.DataFrame] = []
     combined: pd.DataFrame | None = None
     accumulated_rows = 0
@@ -622,13 +656,20 @@ def load_training_dataset(*, max_shards: int = 90, max_rows: int | None = None) 
 
     from concurrent.futures import ThreadPoolExecutor
     from concurrent.futures import TimeoutError as FutureTimeoutError
-    executor = ThreadPoolExecutor(max_workers=4)
+    executor = ThreadPoolExecutor(max_workers=_SHARD_DOWNLOAD_WORKERS)
 
     def _shared_hf_call(fn, *, timeout_sec: float):
         try:
             return executor.submit(fn).result(timeout=timeout_sec)
         except FutureTimeoutError:
             logger.warning("[alpaca_options_data] HF call exceeded %ss, giving up", timeout_sec)
+            return None
+
+    def _download_shard(f: str) -> str | None:
+        try:
+            return hf_hub_download(repo_id=HF_ALPACA_OPTIONS_DATASET_REPO, filename=f, repo_type="dataset", token=HF_API_KEY)
+        except Exception as exc:
+            logger.warning("[alpaca_options_data] failed to download shard %s: %s", f, exc)
             return None
 
     try:
@@ -642,26 +683,32 @@ def load_training_dataset(*, max_shards: int = 90, max_rows: int | None = None) 
             return pd.DataFrame()
         hf_files = [f for f in raw_files if _DATE_SHARD_RE.match(f)]
         hf_files = sorted(hf_files, reverse=True)[:max_shards]
-        for f in hf_files:
+        for batch_start in range(0, len(hf_files), _SHARD_DOWNLOAD_WORKERS):
             if stop_after_rows and accumulated_rows >= stop_after_rows:
                 break
-            try:
-                local_path = _shared_hf_call(
-                    lambda f=f: hf_hub_download(repo_id=HF_ALPACA_OPTIONS_DATASET_REPO, filename=f, repo_type="dataset", token=HF_API_KEY),
-                    timeout_sec=_LOAD_TRAINING_DATASET_SHARD_TIMEOUT_SEC,
-                )
+            batch = hf_files[batch_start:batch_start + _SHARD_DOWNLOAD_WORKERS]
+            futures = {f: executor.submit(_download_shard, f) for f in batch}
+            for f, future in futures.items():
+                try:
+                    local_path = future.result(timeout=_LOAD_TRAINING_DATASET_SHARD_TIMEOUT_SEC)
+                except FutureTimeoutError:
+                    logger.warning("[alpaca_options_data] shard download %s exceeded %ss, giving up", f, _LOAD_TRAINING_DATASET_SHARD_TIMEOUT_SEC)
+                    continue
+                except Exception as exc:
+                    logger.warning("[alpaca_options_data] failed to read shard %s: %s", f, exc)
+                    continue
                 if local_path is None:
                     continue
-                shard = pd.read_parquet(local_path)
-                if "symbol" in shard.columns and "ts" in shard.columns:
-                    pending.append(shard)
-                    accumulated_rows += len(shard)
-                    if len(pending) >= _SHARD_FLUSH_BATCH:
-                        _flush_pending()
-                else:
-                    logger.warning("[alpaca_options_data] skipping shard with unexpected schema: %s", f)
-            except Exception as exc:
-                logger.warning("[alpaca_options_data] failed to read shard %s: %s", f, exc)
+                try:
+                    shard = pd.read_parquet(local_path)
+                    if "symbol" in shard.columns and "ts" in shard.columns:
+                        pending.append(shard)
+                        accumulated_rows += len(shard)
+                    else:
+                        logger.warning("[alpaca_options_data] skipping shard with unexpected schema: %s", f)
+                except Exception as exc:
+                    logger.warning("[alpaca_options_data] failed to read shard %s: %s", f, exc)
+            _flush_pending()
     except Exception as exc:
         logger.warning("[alpaca_options_data] HF dataset listing failed: %s", exc)
     finally:

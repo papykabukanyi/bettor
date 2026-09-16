@@ -1379,7 +1379,7 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
     priced worse than the exact same signal 15 minutes later. Exits are
     never gated by this -- managing existing risk is always allowed,
     only NEW entries wait out the edge."""
-    from data.alpaca_data import fetch_recent_minute_bars, get_market_session
+    from data.alpaca_data import fetch_recent_minute_bars, get_market_session, prewarm_minute_bars
     from data.alpaca_options_data import (
         SPREAD_WIDTH_DOLLARS, get_options_universe, latest_feature_row, select_contract,
         select_credit_spread_contracts, select_spread_contracts,
@@ -1440,6 +1440,13 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
         prewarm_sentiment([(s, None) for s in symbols if s not in existing_underlyings])
     except Exception as exc:
         logger.debug("[alpaca_options_strategy] sentiment prewarm failed (non-fatal): %s", exc)
+    # Same concurrent-prewarm fix for the OTHER blocking per-symbol call
+    # this loop makes (latest_feature_row -> fetch_recent_minute_bars) --
+    # see alpaca_data.prewarm_minute_bars' own docstring.
+    try:
+        prewarm_minute_bars([s for s in symbols if s not in existing_underlyings])
+    except Exception as exc:
+        logger.debug("[alpaca_options_strategy] minute-bar prewarm failed (non-fatal): %s", exc)
 
     for symbol in symbols:
         try:

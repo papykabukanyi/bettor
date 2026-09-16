@@ -838,7 +838,7 @@ def scan_and_enter(watchlist: list[str] | None = None, *, dry_run: bool | None =
     is fillable then regardless of order type."""
     from data.alpaca_data import (
         fetch_recent_minute_bars, get_company_name, get_market_session, get_stock_watchlist,
-        latest_feature_row, load_training_dataset, prewarm_sentiment,
+        latest_feature_row, load_training_dataset, prewarm_minute_bars, prewarm_sentiment,
     )
     from data.alpaca_model import predict_direction
     from data import threads_post
@@ -910,6 +910,16 @@ def scan_and_enter(watchlist: list[str] | None = None, *, dry_run: bool | None =
         prewarm_sentiment([(s, get_company_name(s)) for s in watchlist if s not in existing_symbols])
     except Exception as exc:
         logger.debug("[alpaca_strategy] sentiment prewarm failed (non-fatal): %s", exc)
+    # Same concurrent-prewarm fix for the OTHER blocking per-symbol call
+    # this loop makes (latest_feature_row -> fetch_recent_minute_bars) --
+    # see prewarm_minute_bars' own docstring. Added per explicit user
+    # direction ("enhance all aspects... faster decision making") now
+    # that WATCHLIST_TOP_N has grown (40 -> 80): a sequential per-symbol
+    # fetch loop's wall-clock cost scales linearly with watchlist size.
+    try:
+        prewarm_minute_bars([s for s in watchlist if s not in existing_symbols])
+    except Exception as exc:
+        logger.debug("[alpaca_strategy] minute-bar prewarm failed (non-fatal): %s", exc)
 
     for symbol in watchlist:
         try:

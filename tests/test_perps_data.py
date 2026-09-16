@@ -543,6 +543,111 @@ def test_load_training_dataset_stops_downloading_hf_shards_once_the_cap_is_cover
     assert "data/2026-07-19.parquet" in downloaded  # the last (most recent) shard
 
 
+def test_load_training_dataset_returns_local_only_when_listing_hangs(monkeypatch, tmp_path):
+    """Real, confirmed gap this fixes: this function never had the SAME
+    hang-protection its 3 Alpaca-service siblings all needed after a real,
+    confirmed incident (huggingface_hub's own internal shared-session lock
+    can hang indefinitely inside list_repo_files) -- applied here too, for
+    the same real reason (real money, Kalshi)."""
+    monkeypatch.setattr(perps_data, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(perps_data, "HF_API_KEY", "fake-token")
+    monkeypatch.setattr(perps_data, "_LOAD_TRAINING_DATASET_LIST_TIMEOUT_SEC", 0.05)
+
+    class HangingApi:
+        def __init__(self, token=None):
+            pass
+
+        def list_repo_files(self, repo_id, repo_type):
+            import time as t
+            t.sleep(0.5)  # comfortably longer than the 0.05s timeout above
+            return []
+
+    import huggingface_hub
+    monkeypatch.setattr(huggingface_hub, "HfApi", HangingApi)
+
+    import time as real_time
+    start = real_time.monotonic()
+    result = perps_data.load_training_dataset()
+    elapsed = real_time.monotonic() - start
+
+    assert result.empty  # no local shards either in this test
+    assert elapsed < 0.4  # gave up around the 0.05s timeout, did not wait out the 0.5s hang
+
+
+def test_load_training_dataset_skips_a_hanging_shard_and_continues(monkeypatch, tmp_path):
+    """A single stuck shard download must not take down the whole call --
+    same "skip it, keep going" resilience as an ordinary failed download,
+    just for a hang instead of a raised exception."""
+    monkeypatch.setattr(perps_data, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(perps_data, "HF_API_KEY", "fake-token")
+    monkeypatch.setattr(perps_data, "_LOAD_TRAINING_DATASET_SHARD_TIMEOUT_SEC", 2.0)
+    shard_names = ["data/2026-07-10.parquet", "data/2026-07-11.parquet", "data/2026-07-12.parquet"]
+
+    class FakeApi:
+        def __init__(self, token=None):
+            pass
+
+        def list_repo_files(self, repo_id, repo_type):
+            return shard_names
+
+    def fake_hf_hub_download(repo_id, filename, repo_type, token):
+        if filename == "data/2026-07-11.parquet":
+            import time as t
+            t.sleep(5.0)  # comfortably longer than the 2.0s timeout above
+        idx = shard_names.index(filename)
+        day_df = pd.DataFrame({"ticker": ["KXBTCPERP"] * 10, "ts": [idx * 1000 + i for i in range(10)], "close": [1.0] * 10})
+        path = tmp_path / f"shard_{idx}.parquet"
+        day_df.to_parquet(path, index=False)
+        return str(path)
+
+    import huggingface_hub
+    monkeypatch.setattr(huggingface_hub, "HfApi", FakeApi)
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", fake_hf_hub_download)
+
+    result = perps_data.load_training_dataset()
+
+    assert len(result) == 20  # 2 successful shards x 10 rows -- the hanging one was skipped, not waited on
+
+
+def test_load_training_dataset_downloads_hf_shards_concurrently_not_sequentially(monkeypatch, tmp_path):
+    """Real, confirmed improvement this locks in, per explicit user
+    direction ("enhance all aspects... faster... getting data"): HF shard
+    downloads must run CONCURRENTLY, not one full round trip at a time. 6
+    shards each artificially delayed 0.3s would take ~1.8s sequentially;
+    comfortably under a 1.0s ceiling proves real parallelism."""
+    monkeypatch.setattr(perps_data, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(perps_data, "HF_API_KEY", "fake-token")
+    shard_names = [f"data/2026-07-{10 + i:02d}.parquet" for i in range(6)]
+
+    class FakeApi:
+        def __init__(self, token=None):
+            pass
+
+        def list_repo_files(self, repo_id, repo_type):
+            return shard_names
+
+    def fake_hf_hub_download(repo_id, filename, repo_type, token):
+        import time as t
+        t.sleep(0.3)
+        idx = shard_names.index(filename)
+        day_df = pd.DataFrame({"ticker": ["KXBTCPERP"] * 10, "ts": [idx * 1000 + i for i in range(10)], "close": [1.0] * 10})
+        path = tmp_path / f"shard_{idx}.parquet"
+        day_df.to_parquet(path, index=False)
+        return str(path)
+
+    import huggingface_hub
+    monkeypatch.setattr(huggingface_hub, "HfApi", FakeApi)
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", fake_hf_hub_download)
+
+    import time as real_time
+    start = real_time.monotonic()
+    result = perps_data.load_training_dataset()
+    elapsed = real_time.monotonic() - start
+
+    assert len(result) == 60  # all 6 shards x 10 rows
+    assert elapsed < 1.0  # well under 6 x 0.3s = 1.8s sequential -- real concurrency
+
+
 def test_load_training_dataset_excludes_lookalike_paths_from_another_pipeline(monkeypatch, tmp_path):
     """A previously-used HF account had an UNRELATED pipeline that also
     wrote parquet files under a "data/" prefix (e.g.

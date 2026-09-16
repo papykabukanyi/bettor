@@ -113,7 +113,15 @@ LABEL_HORIZON_MINUTES = int(os.getenv("PERPS_LABEL_HORIZON_MINUTES", "1") or "1"
 # freeing `frame` before the final refit (see train_model()) and an atomic
 # local-shard write (see push_dataset_snapshot()) so a crash mid-write can
 # no longer corrupt that day's archive.
-MAX_TRAIN_ROWS = int(os.getenv("PERPS_MAX_TRAIN_ROWS", "40000") or "40000")
+# 40000 -> 400000 per explicit user direction ("maximize the use of the
+# HF server"): the two real OOM incidents this constant's own history
+# above documents (150000 -> 80000 -> 40000) both happened on Render's own
+# "512Mi" container -- this app now runs on a Hugging Face Docker Space's
+# "cpu-upgrade" tier (8 vCPU / 32GB RAM, confirmed via this session's own
+# migration work), ~60x that ceiling, matching the same real, now-
+# available headroom the other 3 markets' own identical constants were
+# raised to.
+MAX_TRAIN_ROWS = int(os.getenv("PERPS_MAX_TRAIN_ROWS", "400000") or "400000")
 
 _TICKER_TO_COIN = {
     "KXBTCPERP": "BTC", "KXETHPERP": "ETH", "KXSOLPERP": "SOL", "KXXRPPERP": "XRP",
@@ -784,6 +792,14 @@ def push_dataset_snapshot(df: pd.DataFrame) -> dict[str, Any]:
     return result
 
 
+# 45s/25s -- same real, confirmed recalibration as every other
+# load_training_dataset in this codebase (see alpaca_data.py's own
+# identical constants' comment): a clean list_repo_files call takes well
+# under 1s, so this is generous headroom, not a tight budget.
+_LOAD_TRAINING_DATASET_LIST_TIMEOUT_SEC = int(os.getenv("PERPS_LOAD_TRAINING_DATASET_LIST_TIMEOUT_SEC", "45") or "45")
+_LOAD_TRAINING_DATASET_SHARD_TIMEOUT_SEC = int(os.getenv("PERPS_LOAD_TRAINING_DATASET_SHARD_TIMEOUT_SEC", "25") or "25")
+
+
 def load_training_dataset(*, max_shards: int = 90, max_rows: int | None = None) -> pd.DataFrame:
     """ALWAYS merges local shards with the full HF dataset archive (deduped
     on ticker+ts) rather than treating HF as only a cold-start fallback --
@@ -795,9 +811,23 @@ def load_training_dataset(*, max_shards: int = 90, max_rows: int | None = None) 
 
     The result is capped to the most recent `max_rows` rows (default
     MAX_TRAIN_ROWS) -- the HF archive grows every day forever, so without a
-    cap this would eventually load more data than fits in Render's 512MB
+    cap this would eventually load more data than fits in this app's own
     memory ceiling. Training on the most recent slice also naturally favors
-    current market regime over stale history."""
+    current market regime over stale history.
+
+    Real, confirmed gap found in review: this function never picked up the
+    timeout/incremental-flush/shared-bounded-executor protections its own
+    3 Alpaca-service siblings (alpaca_data.py/alpaca_crypto_data.py/
+    alpaca_options_data.py) all needed after real, confirmed hangs and OOM
+    incidents -- see any of their own load_training_dataset docstrings for
+    the full incident writeups this module was otherwise equally exposed
+    to (huggingface_hub's own internal shared-session lock hanging
+    indefinitely; downloading every shard into one Python list before a
+    single final concat). Applied here too, for the SAME real reasons,
+    plus (per explicit user direction, "enhance all aspects... faster...
+    getting data") the same batched-CONCURRENT download those siblings
+    also just gained -- real money (Kalshi), no reason this stayed the one
+    unprotected copy of this pattern."""
     shard_dir = DATA_DIR / "perps_dataset"
     local_files = sorted(shard_dir.glob("*.parquet")) if shard_dir.exists() else []
     frames = []
@@ -808,6 +838,28 @@ def load_training_dataset(*, max_shards: int = 90, max_rows: int | None = None) 
             logger.warning("[perps_data] failed to read local shard %s: %s", f, exc)
 
     if HF_API_KEY:
+        from concurrent.futures import ThreadPoolExecutor
+        from concurrent.futures import TimeoutError as FutureTimeoutError
+        # One batch size governs BOTH concurrency and how often results get
+        # merged into `frames` -- see alpaca_data.py's own identical
+        # load_training_dataset comment for the full rationale.
+        _SHARD_DOWNLOAD_WORKERS = 8
+        executor = ThreadPoolExecutor(max_workers=_SHARD_DOWNLOAD_WORKERS)
+
+        def _shared_hf_call(fn, *, timeout_sec: float):
+            try:
+                return executor.submit(fn).result(timeout=timeout_sec)
+            except FutureTimeoutError:
+                logger.warning("[perps_data] HF call exceeded %ss, giving up", timeout_sec)
+                return None
+
+        def _download_shard(f: str) -> str | None:
+            try:
+                return hf_hub_download(repo_id=HF_DATASET_REPO, filename=f, repo_type="dataset", token=HF_API_KEY)
+            except Exception as exc:
+                logger.warning("[perps_data] failed to download HF shard %s: %s", f, exc)
+                return None
+
         try:
             from huggingface_hub import HfApi, hf_hub_download
             api = HfApi(token=HF_API_KEY)
@@ -818,10 +870,11 @@ def load_training_dataset(*, max_shards: int = 90, max_rows: int | None = None) 
             # "data/pregame_schedule/*.parquet", which also starts with
             # "data/" and would otherwise get fully DOWNLOADED (not just
             # flagged) before the post-download schema check ever caught it.
-            hf_files = [
-                f for f in api.list_repo_files(repo_id=HF_DATASET_REPO, repo_type="dataset")
-                if _DATE_SHARD_RE.match(f)
-            ]
+            raw_files = _shared_hf_call(
+                lambda: api.list_repo_files(repo_id=HF_DATASET_REPO, repo_type="dataset"),
+                timeout_sec=_LOAD_TRAINING_DATASET_LIST_TIMEOUT_SEC,
+            )
+            hf_files = [f for f in (raw_files or []) if _DATE_SHARD_RE.match(f)]
             # Most-recent-first, and stop once enough rows are already in
             # hand to satisfy the row cap below -- the archive grows every
             # day forever, so downloading and parsing EVERY shard (up to
@@ -837,21 +890,35 @@ def load_training_dataset(*, max_shards: int = 90, max_rows: int | None = None) 
             cap = MAX_TRAIN_ROWS if max_rows is None else max_rows
             stop_after_rows = int(cap * 1.5) if cap else None
             accumulated_rows = sum(len(fr) for fr in frames)
-            for f in hf_files:
+            for batch_start in range(0, len(hf_files), _SHARD_DOWNLOAD_WORKERS):
                 if stop_after_rows and accumulated_rows >= stop_after_rows:
                     break
-                try:
-                    local_path = hf_hub_download(repo_id=HF_DATASET_REPO, filename=f, repo_type="dataset", token=HF_API_KEY)
-                    shard = pd.read_parquet(local_path)
-                    if "ticker" in shard.columns and "ts" in shard.columns:
-                        frames.append(shard)
-                        accumulated_rows += len(shard)
-                    else:
-                        logger.warning("[perps_data] skipping HF shard with unexpected schema: %s", f)
-                except Exception as exc:
-                    logger.warning("[perps_data] failed to read HF shard %s: %s", f, exc)
+                batch = hf_files[batch_start:batch_start + _SHARD_DOWNLOAD_WORKERS]
+                futures = {f: executor.submit(_download_shard, f) for f in batch}
+                for f, future in futures.items():
+                    try:
+                        local_path = future.result(timeout=_LOAD_TRAINING_DATASET_SHARD_TIMEOUT_SEC)
+                    except FutureTimeoutError:
+                        logger.warning("[perps_data] HF shard download %s exceeded %ss, giving up", f, _LOAD_TRAINING_DATASET_SHARD_TIMEOUT_SEC)
+                        continue
+                    except Exception as exc:
+                        logger.warning("[perps_data] failed to read HF shard %s: %s", f, exc)
+                        continue
+                    if local_path is None:
+                        continue
+                    try:
+                        shard = pd.read_parquet(local_path)
+                        if "ticker" in shard.columns and "ts" in shard.columns:
+                            frames.append(shard)
+                            accumulated_rows += len(shard)
+                        else:
+                            logger.warning("[perps_data] skipping HF shard with unexpected schema: %s", f)
+                    except Exception as exc:
+                        logger.warning("[perps_data] failed to read HF shard %s: %s", f, exc)
         except Exception as exc:
             logger.warning("[perps_data] HF dataset listing failed: %s", exc)
+        finally:
+            executor.shutdown(wait=False)
 
     if not frames:
         return pd.DataFrame()
