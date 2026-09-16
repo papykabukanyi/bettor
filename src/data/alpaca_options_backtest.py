@@ -63,10 +63,15 @@ logger = logging.getLogger(__name__)
 # explicitly a simplification, not a measured constant.
 OPTIONS_PREMIUM_SENSITIVITY = float(os.getenv("ALPACA_OPTIONS_BACKTEST_PREMIUM_SENSITIVITY", "12.0") or "12.0")
 
+# n_jobs=1->4 per explicit user direction ("maximize the use of the HF
+# server"): this app now runs on a Hugging Face Docker Space's
+# "cpu-upgrade" tier (8 vCPU / 32GB RAM) -- real, available parallelism
+# for a faster fit. Bounded at 4, not -1/8, since this process shares its
+# 8 vCPUs with 3 OTHER markets' own concurrent jobs in the same container.
 _CANDIDATES = {
     "logistic_regression": lambda: LogisticRegression(max_iter=1000, class_weight="balanced"),
     "random_forest": lambda: RandomForestClassifier(
-        n_estimators=150, max_depth=6, min_samples_leaf=20, class_weight="balanced", random_state=42, n_jobs=1,
+        n_estimators=150, max_depth=6, min_samples_leaf=20, class_weight="balanced", random_state=42, n_jobs=4,
     ),
     "gradient_boosting": lambda: GradientBoostingClassifier(
         n_estimators=100, max_depth=3, learning_rate=0.05, random_state=42,

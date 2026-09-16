@@ -84,9 +84,10 @@ HF_MODEL_RECHECK_INTERVAL_SEC = int(os.getenv("ALPACA_MODEL_HF_RECHECK_INTERVAL_
 _hf_recheck_state: dict[str, Any] = {"last_checked_at": 0.0, "checking": False}
 _hf_recheck_lock = threading.Lock()
 
-# n_jobs=1 (not -1): same reasoning as perps_model.py -- avoid multiplying
-# peak memory via RandomForest's per-worker process forking, regardless of
-# container size.
+# n_jobs=1->4: see perps_model.py's own comment for the full reasoning --
+# real process-forking memory multiplication, but negligible in absolute
+# terms against this app's current 32GB HF Docker Space ceiling. Bounded
+# at 4 (not -1/8) since 4 markets share these 8 vCPUs in one process now.
 #
 # n_estimators history: 100 -> 60 after real, confirmed production OOM
 # incidents on this exact service's old 512MB container (two oomKilled
@@ -98,7 +99,7 @@ _hf_recheck_lock = threading.Lock()
 _CANDIDATES = {
     "logistic_regression": lambda: LogisticRegression(max_iter=1000, class_weight="balanced"),
     "random_forest": lambda: RandomForestClassifier(
-        n_estimators=150, max_depth=6, min_samples_leaf=20, class_weight="balanced", random_state=42, n_jobs=1,
+        n_estimators=150, max_depth=6, min_samples_leaf=20, class_weight="balanced", random_state=42, n_jobs=4,
     ),
     "gradient_boosting": lambda: GradientBoostingClassifier(
         n_estimators=150, max_depth=3, learning_rate=0.05, random_state=42,
@@ -446,7 +447,7 @@ class _TorchMLPClassifier:
         from torch import nn
 
         torch.manual_seed(self.random_state)
-        torch.set_num_threads(1)  # avoid thread-multiplication memory, same discipline as sklearn's n_jobs=1 above
+        torch.set_num_threads(1)  # avoid thread-multiplication memory -- this candidate stays isolated regardless of the sklearn candidates' own n_jobs
 
         x_mean, x_std = x.mean(axis=0), x.std(axis=0)
         x_std[x_std == 0] = 1.0

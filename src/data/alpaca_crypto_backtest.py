@@ -78,19 +78,25 @@ def build_pair_frame(symbol: str, *, days: int) -> pd.DataFrame:
     return feats
 
 
-# n_estimators=200/150, n_jobs=-1 (not the live model's 60/n_jobs=1): this
-# module is never deployed as a scheduled job on the memory-capped 512MB
-# crypto dyno (see alpaca_crypto_server.py -- no backtest-sweep job is
-# registered there, deliberately, given that service's own real OOM
-# incidents this session and crypto's 24/7 trading leaving no safe
-# "off-hours" window the way alpaca_options_backtest.py hides its own
-# sweep in). Run locally or via a one-off manual trigger only -- same
-# affordable-bigger-hyperparameters reasoning perps_backtest.py already
-# uses for the identical reason.
+# Real, confirmed STALE comment this fixes: this module's own
+# alpaca_crypto_server._run_alpaca_crypto_backtest_sweep IS now a real,
+# daily-scheduled job (added this same review, wiring
+# maybe_auto_improve_from_backtest) -- the "never deployed as a scheduled
+# job" claim this comment used to make is factually false as of that
+# change; crypto's own 24/7 trading still leaves no safe off-hours window
+# the way alpaca_options_backtest.py hides its own sweep in, so this DOES
+# now compete with live trading for CPU once a day, exactly the scenario
+# n_jobs=-1 (claim every core) is genuinely risky for. n_jobs bounded to 4
+# for that reason -- real parallel-fit speed without one scheduled sweep
+# claiming all 8 vCPUs this process's 3 OTHER markets' own live fast_check/
+# entry_scan jobs also need, all in the same container now (Hugging Face
+# Docker Space "cpu-upgrade" tier, 8 vCPU / 32GB RAM -- not the old
+# per-service 512MB Render dyno this comment's own n_estimators=200 was
+# originally justified against).
 _CANDIDATES = {
     "logistic_regression": lambda: LogisticRegression(max_iter=1000, class_weight="balanced"),
     "random_forest": lambda: RandomForestClassifier(
-        n_estimators=200, max_depth=6, min_samples_leaf=20, class_weight="balanced", random_state=42, n_jobs=-1,
+        n_estimators=200, max_depth=6, min_samples_leaf=20, class_weight="balanced", random_state=42, n_jobs=4,
     ),
     "gradient_boosting": lambda: GradientBoostingClassifier(
         n_estimators=150, max_depth=3, learning_rate=0.05, random_state=42,

@@ -23,26 +23,30 @@ from data.alpaca_data import FEATURE_COLUMNS, load_training_dataset
 
 logger = logging.getLogger(__name__)
 
-# n_estimators=60 (not the previous 150/100): real, confirmed production
-# OOM incidents on the live equities service (Render's own events: two
-# oomKilled restarts roughly ALPACA_INTENSIVE_TRAINING_MINUTES apart,
-# i.e. exactly on _run_alpaca_intensive_training's own cadence). That job
-# calls fit_backtest_model() (this file) in the SAME call as
-# alpaca_model.py's own train_model() -- "trains up to 6 model candidates
-# total" per that job's own docstring -- and this file's own candidates
-# had never picked up the n_estimators reduction perps_model.py/
-# alpaca_options_model.py/alpaca_model.py already proved necessary for
-# this exact multi-candidate-fit-in-one-call shape on the same 512MB
-# ceiling. This module DOES run on that same memory-capped Render dyno
-# (confirmed live via the crash trace above) -- not a one-off local/
-# offline script the way some other backtest engines here are.
+# n_estimators=60/n_jobs=1 history: real, confirmed production OOM
+# incidents on the live equities service (Render's own events: two
+# oomKilled restarts roughly ALPACA_INTENSIVE_TRAINING_MINUTES apart, i.e.
+# exactly on _run_alpaca_intensive_training's own cadence, which calls
+# fit_backtest_model() (this file) in the SAME call as alpaca_model.py's
+# own train_model() -- "trains up to 6 model candidates total"). That was
+# Render's own 512MB-1GB per-service container. Per explicit user
+# direction ("maximize the use of the HF server"): this whole app now
+# runs on a Hugging Face Docker Space's "cpu-upgrade" tier (8 vCPU / 32GB
+# RAM, confirmed via this session's own migration work) -- raised back to
+# 150 (parity with every sibling backtest/model module -- perps_model.py/
+# alpaca_options_model.py/alpaca_model.py/alpaca_crypto_model.py all
+# already sit at 150) and n_jobs=1->4 (uses real, now-available CPU
+# parallelism for faster fits -- bounded at 4, not -1/8, since this
+# process shares its 8 vCPUs with 3 OTHER markets' own concurrent jobs in
+# the SAME container now, unlike the old one-service-per-container
+# Render days where -1 didn't compete with anything else).
 _CANDIDATES = {
     "logistic_regression": lambda: LogisticRegression(max_iter=1000, class_weight="balanced"),
     "random_forest": lambda: RandomForestClassifier(
-        n_estimators=60, max_depth=6, min_samples_leaf=20, class_weight="balanced", random_state=42, n_jobs=1,
+        n_estimators=150, max_depth=6, min_samples_leaf=20, class_weight="balanced", random_state=42, n_jobs=4,
     ),
     "gradient_boosting": lambda: GradientBoostingClassifier(
-        n_estimators=60, max_depth=3, learning_rate=0.05, random_state=42,
+        n_estimators=150, max_depth=3, learning_rate=0.05, random_state=42,
     ),
 }
 

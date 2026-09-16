@@ -88,14 +88,19 @@ _hf_recheck_lock = threading.Lock()
 # own crash, since this file uses the identical walk-forward shape. Raised
 # back up to 150 after migrating to a 2GB (standard plan) container -- same
 # value already proven safe locally in this codebase's own backtest
-# modules, not a new guess. Walk-forward's own multi-fold-multi-candidate
-# shape still means this is the single heaviest training job in the
-# system, so this stays intentionally more conservative than a blind 4x
-# scale-up would suggest.
+# modules, not a new guess.
+#
+# n_jobs=1->4: see perps_model.py's own comment for the full reasoning --
+# real process-forking memory multiplication, but negligible in absolute
+# terms against this app's current 32GB HF Docker Space ceiling. Still
+# meaningfully bounded (4, not -1/8) given walk-forward's own multi-fold-
+# multi-candidate shape (up to 4 folds x 3 candidates fit in sequence)
+# already makes this the single heaviest training job in the system, on a
+# container 3 OTHER markets' own jobs share.
 _CANDIDATES = {
     "logistic_regression": lambda: LogisticRegression(max_iter=1000, class_weight="balanced"),
     "random_forest": lambda: RandomForestClassifier(
-        n_estimators=150, max_depth=6, min_samples_leaf=20, class_weight="balanced", random_state=42, n_jobs=1,
+        n_estimators=150, max_depth=6, min_samples_leaf=20, class_weight="balanced", random_state=42, n_jobs=4,
     ),
     "gradient_boosting": lambda: GradientBoostingClassifier(
         n_estimators=150, max_depth=3, learning_rate=0.05, random_state=42,
@@ -397,7 +402,7 @@ class _TorchMLPClassifier:
         from torch import nn
 
         torch.manual_seed(self.random_state)
-        torch.set_num_threads(1)  # avoid thread-multiplication memory, same discipline as n_jobs=1 above
+        torch.set_num_threads(1)  # avoid thread-multiplication memory -- this candidate stays isolated regardless of the sklearn candidates' own n_jobs
 
         x_mean, x_std = x.mean(axis=0), x.std(axis=0)
         x_std[x_std == 0] = 1.0

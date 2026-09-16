@@ -81,10 +81,19 @@ HF_MODEL_RECHECK_INTERVAL_SEC = int(os.getenv("PERPS_MODEL_HF_RECHECK_INTERVAL_S
 _hf_recheck_state: dict[str, Any] = {"last_checked_at": 0.0, "checking": False}
 _hf_recheck_lock = threading.Lock()
 
-# n_jobs=1 (not -1) is deliberate regardless of container size: RandomForest's
-# default joblib backend forks a separate OS process per worker, each holding
-# its own copy of the training arrays -- a multiple of peak memory for a
-# speed trade this isn't worth taking on a shared web dyno either way.
+# n_jobs history: was 1 (not -1) for a real, technically-sound reason --
+# RandomForest's default joblib backend forks a separate OS PROCESS per
+# worker, each holding its own copy of the training arrays, a genuine
+# multiple of peak memory. That conclusion was container-size-dependent
+# in practice, though, not absolute: this codebase's own MAX_TRAIN_ROWS-
+# bounded training arrays (tens of thousands of rows x a few dozen
+# features) are only tens of MB even copied whole, so the multiplication
+# that mattered on the old 512MB/2GB containers is genuinely negligible
+# now. Per explicit user direction ("maximize the use of the HF server"):
+# this app runs on a Hugging Face Docker Space's "cpu-upgrade" tier
+# (8 vCPU / 32GB RAM) -- n_jobs raised 1->4 for real parallel-fit speed,
+# bounded at 4 (not -1/8) since this process shares its 8 vCPUs with 3
+# OTHER markets' own concurrent jobs in the same container now.
 #
 # n_estimators history: 100 -> 80 -> 60 across two real OOM incidents on the
 # old 512MB-capped container (confirmed live: a container-level OOM kill and
@@ -92,14 +101,11 @@ _hf_recheck_lock = threading.Lock()
 # 150 after migrating to a 2GB (standard plan) container -- same value
 # already proven safe locally in this codebase's own backtest modules
 # (perps_backtest.py etc., which never had this dyno's memory ceiling to
-# begin with), not a new guess. Still n_jobs=1 -- the walk-forward CV shape
-# some of this codebase's siblings use fits multiple candidates in sequence
-# per call regardless of container size, and forking per-tree on top of that
-# would multiply peak memory for no accuracy benefit.
+# begin with), not a new guess.
 _CANDIDATES = {
     "logistic_regression": lambda: LogisticRegression(max_iter=1000, class_weight="balanced"),
     "random_forest": lambda: RandomForestClassifier(
-        n_estimators=150, max_depth=6, min_samples_leaf=20, class_weight="balanced", random_state=42, n_jobs=1,
+        n_estimators=150, max_depth=6, min_samples_leaf=20, class_weight="balanced", random_state=42, n_jobs=4,
     ),
     "gradient_boosting": lambda: GradientBoostingClassifier(
         n_estimators=150, max_depth=3, learning_rate=0.05, random_state=42,
