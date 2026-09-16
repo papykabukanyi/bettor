@@ -198,18 +198,24 @@ app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 # service). perps already solved this exact problem for exactly this
 # reason (see its own identical comment) with a dedicated executor for
 # its own fast_check; applying the same fix here.
+# Real, confirmed constraint this whole comment block predates: every
+# incident above happened on Render's own 512MB-1GB per-service
+# containers. This process now runs on a Hugging Face Docker Space's
+# "cpu-upgrade" tier (8 vCPU / 32GB RAM, confirmed via this session's own
+# migration work) -- SHARED across all 4 markets in one process, but
+# still ~30-60x the memory headroom any single one of them had before.
+# Per explicit user direction ("maximize the use of the HF server"):
+# default bumped 1->3 -- comfortably bounded well below the 10 APScheduler
+# would allow unbounded (the ORIGINAL incident), while letting a Threads
+# post/data_collect/train no longer fully serialize behind each other the
+# way a single worker forces. fastcheck bumped 2->3 for the same
+# resource-availability reason, plus a little extra margin specifically
+# for the real-money exit check it exists to protect from ever queuing.
 scheduler = BackgroundScheduler(
     timezone="America/New_York", job_defaults={"misfire_grace_time": 300},
     executors={
-        "default": APSThreadPoolExecutor(max_workers=1),
-        # max_workers=2, not 1 -- same real, confirmed fix as the identical
-        # executor in alpaca_crypto_server.py (see its comment): a single
-        # worker serializing fast_check with entry_scan/trending_news/
-        # sentiment_snapshot/hourly_status structurally guarantees skipped
-        # fast_check ticks whenever any of those (measured 30s+) runs longer
-        # than fast_check's own interval -- a capacity problem no stagger
-        # offset can fix. A 2nd worker lets fast_check run concurrently.
-        "fastcheck": APSThreadPoolExecutor(max_workers=2),
+        "default": APSThreadPoolExecutor(max_workers=3),
+        "fastcheck": APSThreadPoolExecutor(max_workers=3),
     },
 )
 _startup_lock = threading.Lock()
