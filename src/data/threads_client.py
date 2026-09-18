@@ -98,7 +98,14 @@ _STATE_LOCK_ACQUIRE_TIMEOUT_SEC = float(os.getenv("THREADS_STATE_LOCK_ACQUIRE_TI
 # every call site. Threads' own hard cap is 500 chars total -- this trims
 # the CALLER's text if needed so the tag always fits, rather than letting
 # Threads' API silently reject or mangle an over-length post.
-PROMO_URL = "https://cumdev.onrender.com"
+#
+# Points at the HF Space now, not the old Render service (per explicit
+# user direction, same migration chart_snapshot.py's own PUBLIC_BASE_URL
+# fallback already went through) -- reads the SAME env var already
+# configured on the Space for that other purpose rather than introducing
+# a second one, so there's only ever one "the bot's own public URL" value
+# to keep correct.
+PROMO_URL = os.getenv("PUBLIC_BASE_URL") or "https://papylove-bettor-trading-bots.hf.space"
 _PROMO_TAG = f"\n\n{PROMO_URL}"
 _THREADS_MAX_CHARS = 500
 

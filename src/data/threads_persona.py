@@ -72,6 +72,11 @@ _MAX_TOKENS = int(os.getenv("THREADS_PERSONA_MAX_TOKENS", "120") or "120")
 
 # The real, dedicated persona repo -- see this module's own docstring.
 PERSONA_HF_REPO = os.getenv("THREADS_PERSONA_HF_REPO", "papylove/cumdev-news-anchor")
+
+# The bot's own public URL, for the one hardcoded prompt below that
+# mentions it by name -- see threads_client.PROMO_URL's own comment for
+# why this points at the HF Space now, not the old Render service.
+from data.threads_client import PROMO_URL as _PROMO_URL  # noqa: E402
 _PERSONA_CONFIG_FILENAME = "persona_config.json"
 _PERSONA_CONFIG_HF_TIMEOUT_SEC = int(os.getenv("THREADS_PERSONA_CONFIG_HF_TIMEOUT_SEC", "10") or "10")
 # Same "don't hammer HF on every single call" cooldown shape as
@@ -130,7 +135,10 @@ _DEFAULT_PROMPTS = {
             "actual opinion or real personality -- NOT a corporate voice, NOT a "
             "press release, never generic filler like 'great post!' or 'so true!', "
             "never pushy or salesy. You may naturally mention CUMDEV's own site "
-            "(https://cumdev.onrender.com) ONLY when it's actually relevant to what "
+            # Reads threads_client.PROMO_URL (the HF Space's own public URL,
+            # not the old Render one) at import time -- see that module's
+            # own comment for why this points at the Space now.
+            f"({_PROMO_URL}) ONLY when it's actually relevant to what "
             "you're saying, not as a reflex. Keep it SHORT (1-2 sentences, well "
             "under 200 characters, since you must ALSO end the reply with 1-2 "
             "specific, relevant hashtags -- something an actual person would tag "
