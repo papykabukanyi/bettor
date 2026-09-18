@@ -193,17 +193,37 @@ def round_trip_fee_usd(
 # NO taker-fee parameter combination that was net profitable: every config
 # lost money, and losses shrank monotonically as trade FREQUENCY was
 # reduced, converging toward "don't trade at all" as the best taker-fee
-# outcome. Placing a post_only maker order first -- falling back to a real
-# taker fill only when reliability matters more than the fee savings (a
-# stop-loss or max-hold exit) -- is the single highest-leverage lever
-# available without touching the underlying entry/exit signal at all.
+# outcome. That theoretical case is what originally motivated placing a
+# post_only maker order first for entries.
+#
+# Real, confirmed production finding overrides it, though (per explicit
+# user direction: "study all the winning and losing trades... avoid
+# patterns of losing trades when spotted"): of 121 real perps trades,
+# the 16 whose ENTRY filled via the maker path lost on 15 of them
+# (93.75%) -- 15 stop_loss, 1 trailing_stop win -- for -$3.85 total, over
+# half the account's entire -$7.58 real realized loss, from just 13% of
+# trades. Compare taker-fallback entries: 35.4% stop_loss rate, a healthy
+# mix of max_hold/take_profit/stop_loss outcomes, -$2.66 total over 79
+# trades. The mechanism is genuinely explicable, not noise: a post_only
+# BUY order resting at the current best bid only actually fills (as
+# "maker", vs falling back to a real taker order) when a seller crosses
+# INTO it during the up-to-12-second wait -- for a dip-buying strategy,
+# that's disproportionately likely to mean the price kept falling
+# through the wait window, i.e. adverse selection captures exactly the
+# "still a falling knife, not a bounce" entries the strategy is trying to
+# distinguish from real dips. The 16x fee saving (a few cents per trade
+# at this account's position sizes) never showed up as a real benefit in
+# this data -- every trade that filled via the path this exists to make
+# cheaper also turned out to be the ones losing the most.
 DEFAULT_MAKER_FEE_RATE = _env_float("PERPS_MAKER_FEE_RATE", 0.0005)
 _MAKER_FEE_RATE_CACHE: dict[str, Any] = {"rates": None, "computed_at": 0.0}
-# Default OFF: this changes HOW every real order is placed (a resting limit
-# order that might not fill at all, instead of an immediate market-like
-# fill) -- same "start conservative, prove it out, then enable" posture as
-# LIVE_TRADING_ENABLED/ENABLE_SHORTS. Only flip on after reviewing a
-# backtest run with this enabled.
+# Default OFF -- and per the finding above, this is no longer just a
+# cautious default pending evidence, it's now what the real evidence
+# itself recommends. Re-enabling this without a fix to the underlying
+# adverse-selection mechanism (e.g. re-validating the setup at fill time,
+# or shortening MAKER_FILL_WAIT_SECONDS well below its current 12s) would
+# be reintroducing an already-identified, real losing pattern on
+# hypothesis alone -- exactly what this comment exists to prevent.
 ENABLE_MAKER_ORDERS = _env_flag("PERPS_ENABLE_MAKER_ORDERS", default=False)
 MAKER_FILL_WAIT_SECONDS = _env_int("PERPS_MAKER_FILL_WAIT_SECONDS", 12)
 MAKER_FILL_POLL_INTERVAL_SEC = _env_float("PERPS_MAKER_FILL_POLL_INTERVAL_SEC", 2.0)
@@ -353,11 +373,13 @@ CONVICTION_SIZE_MAX_MULTIPLIER = _env_float("PERPS_CONVICTION_SIZE_MAX_MULTIPLIE
 # minutes to work with, a bigger target was moot (the price never got
 # there anyway); with 180 minutes, it can actually matter.
 # IMPORTANT, still true: none of this makes the strategy robustly
-# profitable on its own -- it makes it lose LESS. The single biggest real
-# lever found this session is enabling maker (post_only) orders
-# (PERPS_ENABLE_MAKER_ORDERS, see below), which cuts the fee itself ~16x;
-# that combined with this longer, more selective hold is the most credible
-# path toward actual profitability, not either alone.
+# profitable on its own -- it makes it lose LESS. Maker (post_only) entry
+# orders (PERPS_ENABLE_MAKER_ORDERS, see below) were once thought to be
+# the single biggest real lever here (cuts the fee itself ~16x) -- real
+# production data since then overturned that: see ENABLE_MAKER_ORDERS'
+# own comment for the actual finding (93.75% of maker-filled entries hit
+# stop_loss, real adverse selection eating any fee benefit many times
+# over). Left off pending a real fix to that mechanism.
 TAKE_PROFIT_PCT = _env_float("PERPS_TAKE_PROFIT_PCT", 0.02)
 STOP_LOSS_PCT = _env_float("PERPS_STOP_LOSS_PCT", 0.015)
 MAX_HOLD_MINUTES = _env_int("PERPS_MAX_HOLD_MINUTES", 180)
