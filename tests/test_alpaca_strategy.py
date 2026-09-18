@@ -23,6 +23,25 @@ def _regular_market_session(monkeypatch):
     yield
 
 
+@pytest.fixture(autouse=True)
+def _no_real_prewarm_network_calls(monkeypatch):
+    """Real, confirmed production incident: scan_and_enter now prewarms
+    sentiment/minute-bars concurrently before its main loop (see either
+    prewarm function's own docstring) -- any test that mocks the
+    per-symbol fetch but not these two left them REAL and unmocked,
+    hitting real network endpoints during a test run. One such gap
+    (test_collect_dataset_rows_uses_the_given_symbols in
+    test_alpaca_crypto_data.py) genuinely hung a full test-suite run.
+    Defaulted to a safe no-op for every test in this file; a test that
+    actually cares about prewarm behavior itself (see
+    test_scan_and_enter_prewarms_sentiment_for_symbols_not_already_held)
+    overrides this with its own monkeypatch.setattr call, which simply
+    wins since it runs later in the same test."""
+    monkeypatch.setattr(alpaca_data, "prewarm_sentiment", lambda *a, **kw: None)
+    monkeypatch.setattr(alpaca_data, "prewarm_minute_bars", lambda *a, **kw: None)
+    yield
+
+
 def _row(**overrides):
     base = {
         "symbol": "AAPL", "current_price": 100.0, "short_ma": 100.3,
@@ -402,6 +421,13 @@ def test_scan_and_enter_prewarms_sentiment_for_symbols_not_already_held(monkeypa
     monkeypatch.setattr(alpaca_model, "predict_direction", lambda symbol: {"model_ok": False})
     prewarmed_with = []
     monkeypatch.setattr(alpaca_data, "prewarm_sentiment", lambda pairs, **kw: prewarmed_with.extend(pairs))
+    # Real, confirmed test-hygiene gap: scan_and_enter also prewarms
+    # minute-bars now (see prewarm_minute_bars' own docstring) -- left
+    # unmocked here, it calls the REAL fetch_recent_minute_bars, hitting a
+    # real network endpoint during a test run (a real hang from this exact
+    # gap was observed in alpaca_crypto_data.py's own collect_dataset_rows
+    # tests).
+    monkeypatch.setattr(alpaca_data, "prewarm_minute_bars", lambda *a, **kw: None)
 
     strat.scan_and_enter()
     # MSFT is already held -- must not be re-prewarmed.
@@ -416,6 +442,7 @@ def test_scan_and_enter_still_works_if_sentiment_prewarm_fails(monkeypatch):
     monkeypatch.setattr(alpaca_data, "get_company_name", lambda symbol: f"{symbol} Inc.")
     monkeypatch.setattr(alpaca_data, "latest_feature_row", lambda symbol: _entry_row())
     monkeypatch.setattr(alpaca_model, "predict_direction", lambda symbol: {"model_ok": False})
+    monkeypatch.setattr(alpaca_data, "prewarm_minute_bars", lambda *a, **kw: None)
 
     def raise_error(pairs, **kw):
         raise RuntimeError("simulated prewarm failure")
