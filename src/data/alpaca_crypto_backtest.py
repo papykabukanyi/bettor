@@ -179,11 +179,25 @@ def simulate(
     max_hold_minutes: int | None = None,
     use_correlation_study: bool | None = None,
     correlation_confidence_max_adjustment: float | None = None,
+    use_meta_model: bool | None = None,
+    meta_model_trust_min: float | None = None,
 ) -> dict[str, Any]:
     """Walk forward through `test_df` (all pairs, sorted by ts) replaying
     the real strategy functions. Every strategy parameter can be overridden
     per-call so a parameter sweep doesn't need to touch process-wide env
     vars between runs.
+
+    use_meta_model/meta_model_trust_min validate alpaca_crypto_meta_model.py's
+    own trust_score gate (see alpaca_crypto_strategy.evaluate_candidate's
+    identical wiring) against real historical data BEFORE it's ever turned
+    on live -- exactly the evidence this codebase requires before flipping
+    ALPACA_CRYPTO_USE_META_MODEL on for real money. Uses whatever meta-model
+    is currently trained/cached (see load_meta_model's own docstring) --
+    this is the SAME artifact live trading would use, not a per-fold refit,
+    so a fold whose test window overlaps the meta-model's own training data
+    is not a fully leak-free estimate of its OUT-OF-SAMPLE value; the most
+    recent fold(s) are the least likely to overlap and the most trustworthy
+    reading here.
 
     decide_exit()/adaptive_exit_pcts() read TAKE_PROFIT_PCT/STOP_LOSS_PCT/
     MAX_HOLD_MINUTES as MODULE-LEVEL globals on alpaca_crypto_strategy, not
@@ -213,6 +227,8 @@ def simulate(
         strat.CORRELATION_CONFIDENCE_MAX_ADJUSTMENT if correlation_confidence_max_adjustment is None
         else correlation_confidence_max_adjustment
     )
+    use_meta_model = strat.USE_META_MODEL if use_meta_model is None else use_meta_model
+    meta_model_trust_min = strat.META_MODEL_TRUST_MIN if meta_model_trust_min is None else meta_model_trust_min
 
     original_globals = {
         "TAKE_PROFIT_PCT": strat.TAKE_PROFIT_PCT, "STOP_LOSS_PCT": strat.STOP_LOSS_PCT,
@@ -229,6 +245,7 @@ def simulate(
             daily_loss_cap_pct=daily_loss_cap_pct, taker_fee_rate=taker_fee_rate,
             use_correlation_study=use_correlation_study,
             correlation_confidence_max_adjustment=correlation_confidence_max_adjustment,
+            use_meta_model=use_meta_model, meta_model_trust_min=meta_model_trust_min,
         )
     finally:
         strat.TAKE_PROFIT_PCT = original_globals["TAKE_PROFIT_PCT"]
@@ -242,6 +259,7 @@ def _simulate_inner(
     entry_dip_pct: float, min_volume_z: float, min_volatility_ratio: float, model_confidence_min: float,
     daily_loss_cap_pct: float, taker_fee_rate: float,
     use_correlation_study: bool = False, correlation_confidence_max_adjustment: float = 0.06,
+    use_meta_model: bool = False, meta_model_trust_min: float = 0.5,
 ) -> dict[str, Any]:
     """The actual walk-forward loop -- pulled out of simulate() purely so
     that function's try/finally global-restore wrapper doesn't have to
@@ -251,6 +269,11 @@ def _simulate_inner(
     df = test_df.sort_values("ts").reset_index(drop=True)
     if "model_probability_up" not in df.columns:
         df = add_model_predictions(df, fitted)
+
+    meta_model_obj = meta_model_meta = None
+    if use_meta_model:
+        from data import alpaca_crypto_meta_model
+        meta_model_obj, meta_model_meta = alpaca_crypto_meta_model.load_meta_model()
 
     # See crypto_correlation.py's own module docstring. Unlike
     # perps_backtest.py, this backtest already walks a real multi-pair
@@ -396,6 +419,24 @@ def _simulate_inner(
                 )
             if proba_up < effective_model_confidence_min:
                 continue
+            if use_meta_model and meta_model_obj is not None:
+                # Same "missing signal never blocks a trade" fail-open
+                # posture as evaluate_candidate's own live gate (see its
+                # docstring) -- only an actual computed low trust score
+                # vetoes here.
+                feature_cols = (meta_model_meta or {}).get("feature_columns") or alpaca_crypto_meta_model.META_FEATURE_COLUMNS
+                try:
+                    values = []
+                    for col in feature_cols:
+                        if col == "primary_confidence":
+                            values.append(abs(proba_up - 0.5) * 2.0)
+                        else:
+                            values.append(float(getattr(row, col, 0.0) or 0.0))
+                    meta_trust = float(meta_model_obj.predict_proba([values])[0][1])
+                except Exception:
+                    meta_trust = None
+                if meta_trust is not None and meta_trust < meta_model_trust_min:
+                    continue
 
         available = balance
         notional = round(max(0.0, available) * position_size_pct, 2)
