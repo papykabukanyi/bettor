@@ -160,22 +160,29 @@ PROMISING_SENTIMENT_SCORE = _env_float("ALPACA_CRYPTO_PROMISING_SENTIMENT_SCORE"
 PRE_EXIT_STUDY_MINUTES = _env_float("ALPACA_CRYPTO_PRE_EXIT_STUDY_MINUTES", 6.0)
 PROMISING_MODEL_CONFIDENCE = _env_float("ALPACA_CRYPTO_PROMISING_MODEL_CONFIDENCE", 0.58)
 
-# Real gap found in a strategy review: this constant carried NO
-# justification comment at all, unlike every other tunable in this file --
-# flagging that honestly rather than retroactively inventing a rationale
-# that was never actually applied. 0.55 is lower than perps' own
-# evidence-backed 0.58 (see PROMISING_MODEL_CONFIDENCE's own comment
-# above), and alpaca_crypto_backtest.py's own module-level comment
-# documents a real 68-pair/21-day backtest at these exact live defaults
-# returning -13.7% (26.5% win rate, fees eating most of the loss) -- that
-# backtest's own proposed remedies (a "higher_confidence_only" sweep
-# variant at 0.62) point the opposite direction from where this constant
-# actually sits. Not changed here without a FRESH sweep run confirming a
-# better value first (same evidence-before-changing-a-live-risk-knob
-# discipline as every other graduated flag in this codebase) -- see
-# alpaca_crypto_backtest.run_config_sweep, already built and unit-tested,
-# just never run against current data and reconciled with this default.
-MODEL_CONFIDENCE_MIN = _env_float("ALPACA_CRYPTO_MODEL_CONFIDENCE_MIN", 0.55)
+# That fresh sweep run finally happened (per explicit user direction:
+# "make sure it's learning to no loss[,] implement[] strategy that
+# actively understand[s] bad position and don't get in there"). Real
+# result, live primary model (gradient_boosting) reused against a real
+# 68-pair/14-day dataset (261,898 rows, 13.83 span days), confidence
+# swept with everything else held at current live defaults:
+#   0.55 (was this default): -8.87% return, 32.91% win rate, 158 trades, -$44.32
+#   0.58:                    -5.62% return, 36.47% win rate,  85 trades, -$28.12
+#   0.60:                    -1.17% return, 45.45% win rate,  44 trades,  -$5.87
+#   0.62:                    -0.31% return, 50.00% win rate,  26 trades,  -$1.56  <- best return
+#   0.65:                    -2.06% return, 41.67% win rate,  12 trades, -$10.29  <- reverses; too few trades (noise)
+# Monotonic improvement from 0.55->0.62, then it reverses at 0.65 on a
+# too-thin 12-trade sample -- not just "fewer trades = less risk", a real
+# confidence/quality relationship up to a point. Picked 0.60 over the
+# raw-best 0.62: nearly all of the improvement (-8.87%->-1.17%, 87% of
+# the way to 0.62's -0.31%) with roughly double the sample size (44 vs 26
+# trades over the same window), a more conservative read given how thin
+# both samples still are. The meta-model trust gate (see
+# alpaca_crypto_meta_model.py) was ALSO tested on top of this, at both
+# 0.60 and 0.62 confidence -- identical results with or without it
+# (44 trades, -$5.87 either way) -- real evidence it adds nothing here,
+# so ALPACA_CRYPTO_USE_META_MODEL stays off (see its own comment).
+MODEL_CONFIDENCE_MIN = _env_float("ALPACA_CRYPTO_MODEL_CONFIDENCE_MIN", 0.60)
 
 # Meta-labeling layer (see alpaca_crypto_meta_model.py's own module
 # docstring -- a direct port of perps_meta_model.py, built once crypto's
@@ -183,17 +190,22 @@ MODEL_CONFIDENCE_MIN = _env_float("ALPACA_CRYPTO_MODEL_CONFIDENCE_MIN", 0.55)
 # a SECOND, deliberately simple classifier predicting whether THIS
 # specific model-confirmed candidate (context: volatility/liquidity
 # regime, time of day, the primary model's own confidence) is one the
-# primary model is actually reliable on. Default OFF pending a real
-# backtest (same "ship it default-safe, prove it before it touches live
-# capital" posture as USE_CORRELATION_STUDY below) -- no meta-model is
-# even trained by any scheduled job yet, so turning this on today would
-# have zero effect until one is (trust_score returns None with nothing
-# trained, which fails OPEN below, same as model_ok=False does above: a
-# missing signal never blocks a trade, only a signal that actively says
-# "don't trust this one" does). META_MODEL_TRUST_MIN is on the
-# meta-model's own predict_proba scale (0-1, "probability the primary
-# model's call is correct"), unrelated to MODEL_CONFIDENCE_MIN's own
-# scale -- 0.5 is a neutral default, not yet evidence-tuned.
+# primary model is actually reliable on.
+#
+# The real backtest this was always waiting for (see MODEL_CONFIDENCE_MIN's
+# own comment for the full sweep) came back negative for this gate
+# specifically: run at both 0.5 and 0.55 trust_min alone, it barely
+# filtered anything (158 trades unchanged at 0.5; 158->156 at 0.55, a
+# ~$0.21 P&L difference -- noise). Run on TOP of the 0.60 confidence fix,
+# it changed nothing at all (44 trades, -$5.87, identical with or
+# without it, at both 0.5 and 0.55 trust_min). The meta-model's own
+# disclosed holdout metrics (AUC 0.541, accuracy 52.3% on 68,644 real
+# out-of-fold rows) are a genuine but thin edge -- evidently too thin to
+# move the needle once the confidence floor already does the heavy
+# lifting of screening out the primary model's worst calls. Stays OFF on
+# real evidence now, not just by default-safe caution -- re-validate with
+# alpaca_crypto_backtest.simulate(use_meta_model=True) if a materially
+# different primary model or meta-model is ever trained.
 USE_META_MODEL = str(os.getenv("ALPACA_CRYPTO_USE_META_MODEL", "")).strip().lower() in {"1", "true", "yes"}
 META_MODEL_TRUST_MIN = _env_float("ALPACA_CRYPTO_META_MODEL_TRUST_MIN", 0.5)
 
