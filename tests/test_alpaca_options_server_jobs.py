@@ -56,9 +56,48 @@ def test_train_job_calls_train_model_when_market_is_off_hours(monkeypatch):
     from data import alpaca_data, alpaca_options_model
 
     monkeypatch.setattr(alpaca_data, "get_market_session", lambda: {"session": "pre_market", "is_open": False})
-    monkeypatch.setattr(alpaca_options_model, "train_model", lambda: {"ok": True, "rows": 500})
+    monkeypatch.setattr(alpaca_options_model, "train_model", lambda **kw: {"ok": True, "rows": 500})
     result = alpaca_options_server._run_alpaca_options_train.__wrapped__()  # noqa: SLF001
     assert result == {"ok": True, "rows": 500}
+
+
+def test_train_job_passes_the_real_trade_log_for_outcome_aware_weighting(monkeypatch):
+    """alpaca_options_model.py never imports alpaca_options_strategy.py
+    directly (circular import risk -- see this job's own comment), so
+    alpaca_options_server.py is responsible for reading trade_log and
+    threading it through -- same pattern as alpaca_crypto_server.py's own
+    _run_alpaca_crypto_train. Real gap found studying every market's
+    win/loss patterns together: options never had this wiring at all
+    before, unlike stocks/crypto/perps."""
+    from data import alpaca_data, alpaca_options_model, alpaca_options_strategy
+
+    monkeypatch.setattr(alpaca_data, "get_market_session", lambda: {"session": "pre_market", "is_open": False})
+    fake_trade_log = [{"underlying_symbol": "AMD", "opened_at": "x", "realized_pnl_usd": -1.0, "dry_run": False}]
+    monkeypatch.setattr(alpaca_options_strategy, "_load_state", lambda: {"trade_log": fake_trade_log})
+    captured = {}
+    monkeypatch.setattr(alpaca_options_model, "train_model", lambda **kw: captured.update(kw) or {"ok": True})
+
+    alpaca_options_server._run_alpaca_options_train.__wrapped__()  # noqa: SLF001
+
+    assert captured["trade_log"] == fake_trade_log
+
+
+def test_train_job_survives_a_state_read_failure(monkeypatch):
+    from data import alpaca_data, alpaca_options_model, alpaca_options_strategy
+
+    monkeypatch.setattr(alpaca_data, "get_market_session", lambda: {"session": "pre_market", "is_open": False})
+
+    def fail():
+        raise RuntimeError("state read failed")
+
+    monkeypatch.setattr(alpaca_options_strategy, "_load_state", fail)
+    captured = {}
+    monkeypatch.setattr(alpaca_options_model, "train_model", lambda **kw: captured.update(kw) or {"ok": True})
+
+    result = alpaca_options_server._run_alpaca_options_train.__wrapped__()  # noqa: SLF001
+
+    assert result == {"ok": True}
+    assert captured["trade_log"] is None
 
 
 def test_train_job_skips_as_a_no_op_during_regular_hours(monkeypatch):
@@ -76,7 +115,7 @@ def test_train_job_force_bypasses_the_regular_hours_skip(monkeypatch):
     from data import alpaca_data, alpaca_options_model
 
     monkeypatch.setattr(alpaca_data, "get_market_session", lambda: {"session": "regular", "is_open": True})
-    monkeypatch.setattr(alpaca_options_model, "train_model", lambda: {"ok": True, "rows": 500})
+    monkeypatch.setattr(alpaca_options_model, "train_model", lambda **kw: {"ok": True, "rows": 500})
     result = alpaca_options_server._run_alpaca_options_train.__wrapped__(force=True)  # noqa: SLF001
     assert result == {"ok": True, "rows": 500}
 

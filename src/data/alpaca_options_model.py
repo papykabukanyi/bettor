@@ -23,6 +23,7 @@ one, never as a fixed a-priori rule.
 """
 from __future__ import annotations
 
+import datetime as dt
 import gc
 import json
 import logging
@@ -148,6 +149,50 @@ def _recency_sample_weight(ts: np.ndarray, *, half_life_days: float) -> np.ndarr
     return np.power(0.5, age_days / half_life_days)
 
 
+ALPACA_OPTIONS_MODEL_TRADE_OUTCOME_WIN_WEIGHT = float(os.getenv("ALPACA_OPTIONS_MODEL_TRADE_OUTCOME_WIN_WEIGHT", "1.3") or "1.3")
+ALPACA_OPTIONS_MODEL_TRADE_OUTCOME_LOSS_WEIGHT = float(os.getenv("ALPACA_OPTIONS_MODEL_TRADE_OUTCOME_LOSS_WEIGHT", "1.8") or "1.8")
+
+
+def _trade_outcome_sample_weight(symbols: np.ndarray, ts: np.ndarray, trade_log: list[dict[str, Any]] | None) -> np.ndarray:
+    """Extra multiplicative weight for training rows that correspond to a
+    REAL past trade entry from the bot's own trade_log -- losses
+    upweighted more than wins. Real, confirmed gap found studying every
+    market's win/loss patterns together (per explicit user direction:
+    "study all the winning and losing trades... make sure the model
+    learns about that"): stocks/crypto/perps all already had this exact
+    function; options never did, so its model never got a chance to
+    learn from its own real trade outcomes at all, only from raw
+    market-data labels. Identical design to alpaca_model.py's own
+    function of the same name, EXCEPT keyed on `underlying_symbol` (not
+    `symbol`) -- an options trade_log entry's own `symbol` is the specific
+    OCC contract (e.g. "AMD260911P00455000"), but this model predicts the
+    UNDERLYING's direction (see this module's own docstring), and
+    `labeled["symbol"]` is that underlying ticker throughout. Every row
+    not matching a real trade entry keeps weight 1.0, unaffected."""
+    weights = np.ones(len(symbols), dtype=float)
+    if not trade_log:
+        return weights
+    outcome_by_key: dict[tuple[str, int], bool] = {}
+    for t in trade_log:
+        if t.get("dry_run") or not t.get("opened_at") or not t.get("underlying_symbol"):
+            continue
+        try:
+            opened_ts = int(dt.datetime.fromisoformat(t["opened_at"]).timestamp())
+        except Exception:
+            continue
+        minute_ts = (opened_ts // 60) * 60
+        outcome_by_key[(t["underlying_symbol"], minute_ts)] = float(t.get("realized_pnl_usd") or 0.0) > 0
+    if not outcome_by_key:
+        return weights
+
+    minute_ts_values = (ts.astype(np.int64) // 60) * 60
+    for i in range(len(symbols)):
+        won = outcome_by_key.get((symbols[i], int(minute_ts_values[i])))
+        if won is not None:
+            weights[i] *= ALPACA_OPTIONS_MODEL_TRADE_OUTCOME_WIN_WEIGHT if won else ALPACA_OPTIONS_MODEL_TRADE_OUTCOME_LOSS_WEIGHT
+    return weights
+
+
 def _feature_importance_map(model: Any, feature_cols: list[str]) -> dict[str, float] | None:
     try:
         if hasattr(model, "feature_importances_"):
@@ -166,7 +211,7 @@ def _prepare_training_frame(df: pd.DataFrame) -> pd.DataFrame:
     return labeled.sort_values("ts").reset_index(drop=True)
 
 
-def train_model(df: pd.DataFrame | None = None) -> dict[str, Any]:
+def train_model(df: pd.DataFrame | None = None, trade_log: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     """Train, compare candidates via walk-forward (chronological, never
     randomly-shuffled) cross-validation, keep the best -- calibrated, and
     ensembled if the evidence from THIS retrain's own folds actually
@@ -178,7 +223,17 @@ def train_model(df: pd.DataFrame | None = None) -> dict[str, Any]:
     numbers (walk-forward costs ~2x wall time / +3.5% peak RSS vs the old
     single-split version, trivial against this container's 512MB ceiling
     and nowhere near this daily-off-hours-interval job's own stale-lock
-    ceiling)."""
+    ceiling).
+
+    trade_log (alpaca_options_strategy state's own trade_log, passed in
+    by the caller -- this module never imports alpaca_options_strategy
+    directly, which would create a circular import) feeds
+    _trade_outcome_sample_weight: see its own docstring for why the bot's
+    real past wins/losses get folded into training, not just raw
+    market-data labels -- the same real capability stocks/crypto/perps
+    already had, added here per explicit user direction ("study all the
+    winning and losing trades... make sure the model learns about
+    that")."""
     frame = df if df is not None else load_training_dataset()
     if frame.empty:
         return {"ok": False, "reason": "no_data"}
@@ -195,6 +250,7 @@ def train_model(df: pd.DataFrame | None = None) -> dict[str, Any]:
     ts_all = labeled["ts"].values
     oldest_row_age_days = float((ts_all.max() - ts_all.min()) / 86400.0) if n_rows else 0.0
     symbol_categories = list(labeled["symbol"].astype("category").cat.categories)
+    outcome_weight_all = _trade_outcome_sample_weight(labeled["symbol"].values, ts_all, trade_log)
     del labeled
 
     tscv = TimeSeriesSplit(n_splits=WALK_FORWARD_SPLITS)
@@ -212,6 +268,7 @@ def train_model(df: pd.DataFrame | None = None) -> dict[str, Any]:
             # skip this ONE fold, don't abort the whole retrain over it.
             continue
         sample_weight = _recency_sample_weight(ts_tr, half_life_days=ALPACA_OPTIONS_MODEL_RECENCY_HALFLIFE_DAYS)
+        sample_weight = sample_weight * outcome_weight_all[train_idx]
 
         fold_probas: list[np.ndarray] = []
         fold_models: dict[str, Any] = {}
@@ -292,6 +349,7 @@ def train_model(df: pd.DataFrame | None = None) -> dict[str, Any]:
         # Never regresses cold-start behavior below the calibration floor.
         best_model = _CANDIDATES[best_name]()
         full_sample_weight = _recency_sample_weight(ts_all, half_life_days=ALPACA_OPTIONS_MODEL_RECENCY_HALFLIFE_DAYS)
+        full_sample_weight = full_sample_weight * outcome_weight_all
         best_model.fit(x_all, y_all, sample_weight=full_sample_weight)
         model_type = best_name
         calibrated_flag = False
@@ -314,6 +372,11 @@ def train_model(df: pd.DataFrame | None = None) -> dict[str, Any]:
         "calibration_min_holdout_rows": ALPACA_OPTIONS_MODEL_CALIBRATION_MIN_HOLDOUT_ROWS,
         "feature_columns": feature_cols,
         "symbol_categories": symbol_categories,
+        # How many training rows actually matched a real past trade entry
+        # (see _trade_outcome_sample_weight) -- 0 is expected/fine (falls
+        # back to pure recency weighting), useful to see this grow over
+        # time as the account trades more.
+        "trade_outcome_rows_matched": int(np.sum(outcome_weight_all != 1.0)),
     }
 
     joblib.dump(best_model, MODEL_PATH)

@@ -76,6 +76,63 @@ def test_train_model_with_too_few_rows_returns_not_ok():
     assert result["reason"] == "insufficient_rows"
 
 
+def test_trade_outcome_sample_weight_returns_all_ones_without_a_trade_log():
+    symbols = np.array(["AAPL", "MSFT"])
+    ts = np.array([1000.0, 2000.0])
+    weights = alpaca_options_model._trade_outcome_sample_weight(symbols, ts, None)  # noqa: SLF001
+    assert (weights == 1.0).all()
+
+
+def test_trade_outcome_sample_weight_upweights_a_matching_real_win():
+    """Keyed on underlying_symbol, NOT symbol -- an options trade_log
+    entry's own `symbol` is the specific OCC contract, but this model
+    predicts the underlying's direction (see _trade_outcome_sample_weight's
+    own docstring for why)."""
+    minute_ts = 120.0
+    symbols = np.array(["AAPL"])
+    ts = np.array([minute_ts])
+    trade_log = [{
+        "symbol": "AAPL260320C00200000", "underlying_symbol": "AAPL",
+        "opened_at": "1970-01-01T00:02:00+00:00", "realized_pnl_usd": 5.0, "dry_run": False,
+    }]
+    weights = alpaca_options_model._trade_outcome_sample_weight(symbols, ts, trade_log)  # noqa: SLF001
+    assert weights[0] == alpaca_options_model.ALPACA_OPTIONS_MODEL_TRADE_OUTCOME_WIN_WEIGHT
+
+
+def test_trade_outcome_sample_weight_upweights_a_loss_more_than_a_win():
+    ts = np.array([60.0, 120.0])
+    symbols = np.array(["AAPL", "MSFT"])
+    trade_log = [
+        {"underlying_symbol": "AAPL", "opened_at": "1970-01-01T00:01:00+00:00", "realized_pnl_usd": 5.0, "dry_run": False},
+        {"underlying_symbol": "MSFT", "opened_at": "1970-01-01T00:02:00+00:00", "realized_pnl_usd": -5.0, "dry_run": False},
+    ]
+    weights = alpaca_options_model._trade_outcome_sample_weight(symbols, ts, trade_log)  # noqa: SLF001
+    assert weights[1] > weights[0] > 1.0
+
+
+def test_trade_outcome_sample_weight_ignores_dry_run_trades():
+    ts = np.array([60.0])
+    symbols = np.array(["AAPL"])
+    trade_log = [{"underlying_symbol": "AAPL", "opened_at": "1970-01-01T00:01:00+00:00", "realized_pnl_usd": 5.0, "dry_run": True}]
+    weights = alpaca_options_model._trade_outcome_sample_weight(symbols, ts, trade_log)  # noqa: SLF001
+    assert weights[0] == 1.0
+
+
+def test_train_model_accepts_a_trade_log_and_reports_how_many_rows_matched():
+    df = _synthetic_training_frame(n=3000)
+    # Row 0 has ts=0 -- match it to a real winning trade at the same minute.
+    trade_log = [{"underlying_symbol": "AAPL", "opened_at": "1970-01-01T00:00:00+00:00", "realized_pnl_usd": 5.0, "dry_run": False}]
+    result = alpaca_options_model.train_model(df=df, trade_log=trade_log)
+    assert result["ok"] is True
+    assert result["trade_outcome_rows_matched"] >= 1
+
+
+def test_train_model_with_no_trade_log_matches_zero_rows():
+    result = alpaca_options_model.train_model(df=_synthetic_training_frame(n=3000))
+    assert result["ok"] is True
+    assert result["trade_outcome_rows_matched"] == 0
+
+
 def test_train_model_succeeds_with_enough_signal_rows():
     df = _synthetic_training_frame(n=500)
     result = alpaca_options_model.train_model(df=df)

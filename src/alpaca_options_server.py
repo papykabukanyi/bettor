@@ -387,7 +387,21 @@ def _run_alpaca_options_train(*, force: bool = False) -> dict[str, Any]:
         from data import alpaca_data
         if alpaca_data.get_market_session()["session"] == "regular":
             return {"ok": True, "skipped": "regular_hours"}
-    return alpaca_options_model.train_model()
+    # Real gap found studying every market's win/loss patterns together
+    # (per explicit user direction: "study all the winning and losing
+    # trades... make sure the model learns about that") -- this used to
+    # call train_model() with no trade_log at all, unlike every other
+    # market's own equivalent job, so alpaca_options_model.train_model's
+    # own outcome-aware sample weighting never got real data to weight.
+    # Same pattern as _run_alpaca_crypto_train: read trade_log here (not
+    # inside alpaca_options_model.py itself, which would create a
+    # circular import with alpaca_options_strategy.py).
+    try:
+        trade_log = alpaca_options_strategy._load_state().get("trade_log")  # noqa: SLF001
+    except Exception as exc:
+        logger.warning("[alpaca_options_server] could not read trade_log for outcome-aware training: %s", exc)
+        trade_log = None
+    return alpaca_options_model.train_model(trade_log=trade_log)
 
 
 @_locked_job("alpaca_options_torch_train", stale_after_sec=3600)
