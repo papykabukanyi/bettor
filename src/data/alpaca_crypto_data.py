@@ -133,7 +133,15 @@ def _bars_to_df(bars: list[dict[str, Any]]) -> pd.DataFrame:
 # engineer_features' longest rolling window is ~90 minutes, so 5 days was
 # already far more than feature computation actually needs.
 LIVE_LOOKBACK_DAYS = int(os.getenv("ALPACA_CRYPTO_LIVE_LOOKBACK_DAYS", "2") or "2")
-_MINUTE_BAR_CACHE_TTL_SEC = int(os.getenv("ALPACA_CRYPTO_MINUTE_BAR_CACHE_TTL_SEC", "90") or "90")
+# Per explicit user direction ("get very aggressive with crypto[,] make
+# sure the data are sharp and fast decisions"): 90s was already stale
+# relative to entry_scan's own former 2-minute cadence (guaranteed a
+# fresh fetch every scan regardless of this TTL) -- now that
+# alpaca_crypto_server.ALPACA_CRYPTO_CYCLE_MINUTES is 1 minute (see its
+# own comment), 45s keeps the same property (always stale by the next
+# scan) while also sharpening any OTHER caller within one cycle (e.g.
+# manage_open_positions' "promising position" study near max-hold).
+_MINUTE_BAR_CACHE_TTL_SEC = int(os.getenv("ALPACA_CRYPTO_MINUTE_BAR_CACHE_TTL_SEC", "45") or "45")
 # Defensive bound matching the same fix applied to alpaca_data.py's own
 # equivalent cache after a real, confirmed OOM was traced to it never
 # being pruned -- crypto's universe is small/fixed so this is much less

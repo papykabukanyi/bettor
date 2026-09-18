@@ -84,9 +84,32 @@ from server_common import DATA_DIR, check_rate_limit, is_cron_authorized, load_j
 # explicitly to actually force their submodules to resolve eagerly).
 from huggingface_hub import HfApi, hf_hub_download  # noqa: F401
 
-ALPACA_CRYPTO_CYCLE_MINUTES = max(1, int(os.getenv("ALPACA_CRYPTO_CYCLE_MINUTES", "2") or "2"))
+# Per explicit user direction ("get very aggressive with crypto[,] make
+# sure the data are sharp and fast decisions" -- speed/freshness only,
+# confirmed NOT a request to loosen entry risk criteria, which stays at
+# its own real-backtest-validated MODEL_CONFIDENCE_MIN=0.60, see
+# alpaca_crypto_strategy.py's own comment). 2->1 min: halves the reaction
+# time to a fresh dip signal. Safe to tighten -- entry_scan's own
+# concurrent prewarming (prewarm_sentiment/prewarm_minute_bars, see
+# either's own docstring) already makes one full 68-pair scan fast, and
+# the existing _locked_job guard (stale_after_sec=300 below) means an
+# occasional slow scan just gets skipped by the next tick rather than
+# stacking, never double-runs.
+ALPACA_CRYPTO_CYCLE_MINUTES = max(1, int(os.getenv("ALPACA_CRYPTO_CYCLE_MINUTES", "1") or "1"))
 ALPACA_CRYPTO_FAST_CHECK_SECONDS = max(5, int(os.getenv("ALPACA_CRYPTO_FAST_CHECK_SECONDS", "20") or "20"))
-ALPACA_CRYPTO_DATA_COLLECT_MINUTES = max(5, int(os.getenv("ALPACA_CRYPTO_DATA_COLLECT_MINUTES", "15") or "15"))
+# Per explicit user direction ("get aggressive with chart study on
+# crypto"): this job is the ONLY place crypto_correlation.refresh_alpaca_study
+# runs (see _run_alpaca_crypto_data_collect below) -- the peer-confirmation/
+# leader-divergence/breadth/multi-timeframe "chart study" every entry
+# decision reads was only as fresh as this interval, up to 15 real minutes
+# stale even after ALPACA_CRYPTO_CYCLE_MINUTES tightened entry_scan itself
+# to 1 minute above. 15->5 min (the existing floor, so already the
+# fastest this constant supports) cuts that worst-case staleness to a
+# third. Not tightened further than the floor without also addressing the
+# real cost this carries: each run re-fetches the full ~68-pair universe
+# AND re-uploads a merged daily shard to HF, so this is a genuine
+# 3x-more-often increase in both, not a free change.
+ALPACA_CRYPTO_DATA_COLLECT_MINUTES = max(5, int(os.getenv("ALPACA_CRYPTO_DATA_COLLECT_MINUTES", "5") or "5"))
 # Replaces a once-daily fixed-hour cron: crypto trades and collects fresh
 # data 24/7 with no closed session to speak of, so there's no "off-hours
 # window" to reserve retraining for the way options does -- it just rides
