@@ -1174,9 +1174,9 @@ def test_evaluate_candidate_correlation_confirmation_lowers_the_bar_when_flag_on
         crypto_correlation, "alpaca_correlation_bullishness",
         lambda coin, row=None: {"score": 1.0, "reason": "max confirmation", "components": {}},
     )
-    # 0.52 alone misses MODEL_CONFIDENCE_MIN (0.55) by 0.03 -- within
+    # 0.57 alone misses MODEL_CONFIDENCE_MIN (0.60) by 0.03 -- within
     # CORRELATION_CONFIDENCE_MAX_ADJUSTMENT (0.06).
-    result = strat.evaluate_candidate(_row(), {"model_ok": True, "probability_up": 0.52})
+    result = strat.evaluate_candidate(_row(), {"model_ok": True, "probability_up": 0.57})
     assert result["should_enter"] is True
     assert "correlation study" in result["reason"]
 
@@ -1187,9 +1187,9 @@ def test_evaluate_candidate_correlation_disagreement_raises_the_bar_when_flag_on
         crypto_correlation, "alpaca_correlation_bullishness",
         lambda coin, row=None: {"score": -1.0, "reason": "max disagreement", "components": {}},
     )
-    # 0.58 alone clears MODEL_CONFIDENCE_MIN (0.55) -- a maximally bearish
-    # correlation reading raises the bar past it (0.55 + 0.06 = 0.61).
-    result = strat.evaluate_candidate(_row(), {"model_ok": True, "probability_up": 0.58})
+    # 0.63 alone clears MODEL_CONFIDENCE_MIN (0.60) -- a maximally bearish
+    # correlation reading raises the bar past it (0.60 + 0.06 = 0.66).
+    result = strat.evaluate_candidate(_row(), {"model_ok": True, "probability_up": 0.63})
     assert result["should_enter"] is False
 
 
@@ -1286,10 +1286,10 @@ def test_evaluate_candidate_correlation_study_enabled_override_works_even_when_t
         crypto_correlation, "alpaca_correlation_bullishness",
         lambda coin, row=None: {"score": 1.0, "reason": "max confirmation", "components": {}},
     )
-    # 0.52 alone misses MODEL_CONFIDENCE_MIN (0.55) by 0.03 -- within the
+    # 0.57 alone misses MODEL_CONFIDENCE_MIN (0.60) by 0.03 -- within the
     # 0.06 max_adjustment passed explicitly here.
     result = strat.evaluate_candidate(
-        _row(), {"model_ok": True, "probability_up": 0.52},
+        _row(), {"model_ok": True, "probability_up": 0.57},
         correlation_study_enabled=True, correlation_max_adjustment=0.06,
     )
     assert result["should_enter"] is True

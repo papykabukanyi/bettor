@@ -16,6 +16,7 @@ import pandas as pd
 import pytest
 
 from data import alpaca_crypto_backtest as bt
+from data import alpaca_crypto_meta_model
 from data import alpaca_crypto_strategy as strat
 
 
@@ -101,6 +102,79 @@ def test_simulate_reuses_precomputed_predictions_when_present(monkeypatch):
     monkeypatch.setattr(bt, "add_model_predictions", fail_if_called)
     result = bt.simulate(df, fitted=None, starting_balance=500.0, entry_dip_pct=0.0001, min_volume_z=0.0)
     assert "trade_count" in result
+
+
+class _FakeMetaModel:
+    """Mimics alpaca_crypto_meta_model.load_meta_model()'s returned sklearn
+    object -- predict_proba([...])[0][1] is trust_score's own real call
+    shape (see alpaca_crypto_backtest.py's own use_meta_model docstring)."""
+    def __init__(self, trust: float):
+        self._trust = trust
+
+    def predict_proba(self, x):
+        return [[1.0 - self._trust, self._trust]]
+
+
+def test_simulate_use_meta_model_blocks_entries_below_the_trust_floor(monkeypatch):
+    df = _synthetic_test_df(n=300)
+    df["model_probability_up"] = 0.9  # clears any real confidence bar on its own
+    monkeypatch.setattr(
+        alpaca_crypto_meta_model, "load_meta_model",
+        lambda: (_FakeMetaModel(trust=0.1), {"feature_columns": alpaca_crypto_meta_model.META_FEATURE_COLUMNS}),
+    )
+    result = bt.simulate(
+        df, fitted=None, starting_balance=500.0, entry_dip_pct=0.0001, min_volume_z=0.0,
+        use_meta_model=True, meta_model_trust_min=0.5,
+    )
+    assert result["trade_count"] == 0
+
+
+def test_simulate_use_meta_model_allows_entries_above_the_trust_floor(monkeypatch):
+    df = _synthetic_test_df(n=300)
+    df["model_probability_up"] = 0.9
+    monkeypatch.setattr(
+        alpaca_crypto_meta_model, "load_meta_model",
+        lambda: (_FakeMetaModel(trust=0.9), {"feature_columns": alpaca_crypto_meta_model.META_FEATURE_COLUMNS}),
+    )
+    result = bt.simulate(
+        df, fitted=None, starting_balance=500.0, entry_dip_pct=0.0001, min_volume_z=0.0,
+        use_meta_model=True, meta_model_trust_min=0.5,
+    )
+    assert result["trade_count"] > 0
+
+
+def test_simulate_use_meta_model_fails_open_with_no_meta_model_trained(monkeypatch):
+    """Same "a missing signal never blocks a trade" posture as the live
+    evaluate_candidate gate -- see alpaca_crypto_strategy.py's own
+    USE_META_MODEL comment."""
+    df = _synthetic_test_df(n=300)
+    df["model_probability_up"] = 0.9
+    monkeypatch.setattr(alpaca_crypto_meta_model, "load_meta_model", lambda: (None, None))
+    with_gate = bt.simulate(
+        df, fitted=None, starting_balance=500.0, entry_dip_pct=0.0001, min_volume_z=0.0,
+        use_meta_model=True, meta_model_trust_min=0.5,
+    )
+    without_gate = bt.simulate(
+        df, fitted=None, starting_balance=500.0, entry_dip_pct=0.0001, min_volume_z=0.0,
+        use_meta_model=False,
+    )
+    assert with_gate["trade_count"] == without_gate["trade_count"] > 0
+
+
+def test_simulate_use_meta_model_defaults_to_the_live_strategy_flags(monkeypatch):
+    """use_meta_model/meta_model_trust_min fall back to
+    alpaca_crypto_strategy.USE_META_MODEL/META_MODEL_TRUST_MIN when not
+    given, same convention as every other simulate() parameter."""
+    df = _synthetic_test_df(n=300)
+    df["model_probability_up"] = 0.9
+    monkeypatch.setattr(strat, "USE_META_MODEL", True)
+    monkeypatch.setattr(strat, "META_MODEL_TRUST_MIN", 0.5)
+    monkeypatch.setattr(
+        alpaca_crypto_meta_model, "load_meta_model",
+        lambda: (_FakeMetaModel(trust=0.1), {"feature_columns": alpaca_crypto_meta_model.META_FEATURE_COLUMNS}),
+    )
+    result = bt.simulate(df, fitted=None, starting_balance=500.0, entry_dip_pct=0.0001, min_volume_z=0.0)
+    assert result["trade_count"] == 0
 
 
 def test_simulate_never_exceeds_max_concurrent_positions():
