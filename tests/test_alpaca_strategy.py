@@ -597,6 +597,69 @@ def test_scan_and_enter_skips_a_symbol_already_held(monkeypatch):
     assert result["opened"] == []
 
 
+def test_scan_and_enter_skips_a_symbol_still_on_a_post_stop_loss_cooldown(monkeypatch):
+    """Real, confirmed production incident (see
+    SYMBOL_COOLDOWN_AFTER_STOP_LOSS_MINUTES's own comment): AAPL gapped
+    down pre-market on 2026-08-27 and the strategy kept re-buying the same
+    'dip' within minutes of each stop_loss, three times, for ~$9,700 of
+    real realized loss. A symbol on an active cooldown must be skipped
+    entirely -- not even feature-fetched -- until the cooldown expires."""
+    future_cooldown = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=30)).isoformat()
+    strat._save_state({  # noqa: SLF001
+        "positions": [], "trade_log": [], "realized_pnl_by_date": {},
+        "symbol_cooldown_until": {"AAPL": future_cooldown},
+    })
+    monkeypatch.setattr(alpaca_data, "get_stock_watchlist", lambda recent: ["AAPL"])
+    monkeypatch.setattr(alpaca_data, "load_training_dataset", lambda **kw: pd.DataFrame())
+
+    def fail_if_called(symbol):
+        raise AssertionError("must not evaluate a symbol still on its stop_loss cooldown")
+
+    monkeypatch.setattr(alpaca_data, "latest_feature_row", fail_if_called)
+
+    result = strat.scan_and_enter()
+    assert result["opened"] == [{"symbol": "AAPL", "ok": True, "action": "skipped_cooldown", "reason": f"stop_loss cooldown until {future_cooldown}"}]
+
+
+def test_scan_and_enter_re_evaluates_a_symbol_once_its_cooldown_has_expired(monkeypatch):
+    past_cooldown = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=1)).isoformat()
+    strat._save_state({  # noqa: SLF001
+        "positions": [], "trade_log": [], "realized_pnl_by_date": {},
+        "symbol_cooldown_until": {"AAPL": past_cooldown},
+    })
+    monkeypatch.setattr(alpaca_data, "get_stock_watchlist", lambda recent: ["AAPL"])
+    monkeypatch.setattr(alpaca_data, "load_training_dataset", lambda **kw: pd.DataFrame())
+    monkeypatch.setattr(alpaca_data, "latest_feature_row", lambda symbol: _row(symbol=symbol))
+    monkeypatch.setattr(alpaca_model, "predict_direction", lambda symbol: None)
+    monkeypatch.setattr(strat, "get_available_balance", lambda: 100.0)
+
+    result = strat.scan_and_enter(dry_run=True)
+    assert result["opened"][0]["symbol"] == "AAPL"
+    assert result["opened"][0].get("action") != "skipped_cooldown"
+
+
+def test_manage_open_positions_sets_a_cooldown_after_a_real_stop_loss_exit(monkeypatch):
+    monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", True)
+    strat._save_state({  # noqa: SLF001
+        "positions": [{
+            "symbol": "AAPL", "entry_price": 100.0, "count": 1.0,
+            "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(), "order_id": "order-1",
+            "take_profit_price": 101.0, "stop_loss_price": 95.0,
+        }],
+        "trade_log": [], "realized_pnl_by_date": {},
+    })
+    monkeypatch.setattr(alpaca_client, "get_latest_quote", lambda symbol: {"ap": 95.0, "bp": 95.0})
+    monkeypatch.setattr(alpaca_client, "get_position", lambda symbol: None)  # bracket already closed it
+
+    result = strat.manage_open_positions()
+    assert result["action"] == "closed"
+
+    state = strat._load_state()  # noqa: SLF001
+    assert "AAPL" in state.get("symbol_cooldown_until", {})
+    cooldown_until = dt.datetime.fromisoformat(state["symbol_cooldown_until"]["AAPL"])
+    assert cooldown_until > dt.datetime.now(dt.timezone.utc)
+
+
 def test_scan_and_enter_respects_the_daily_loss_cap(monkeypatch):
     today = strat._today_str()  # noqa: SLF001
     strat._save_state({  # noqa: SLF001
@@ -1082,6 +1145,67 @@ def test_manage_open_positions_live_mode_reconciles_without_double_selling_when_
     # Reconciled using the position's OWN stored take-profit level, not the
     # (possibly stale) live quote fetched after the bracket already fired.
     assert result["closed"][0]["exit_price"] == 101.0
+
+
+def test_manage_open_positions_suppresses_a_duplicate_exit_from_repeated_re_adoption(monkeypatch):
+    """Real, confirmed production incident (see the dedup guard's own
+    comment in manage_open_positions): when Alpaca's bracket already closed
+    a position and reconciliation re-ADOPTS the same still-lingering
+    exchange position as a fresh 'untracked' one on the very next tick
+    (each adoption stamping a brand new opened_at), the still_open == False
+    branch re-booked the identical close over and over -- 8 times for one
+    real META position, 3-5 times for two real AAPL positions. Simulates
+    exactly that: two consecutive manage_open_positions calls, each seeing
+    the SAME symbol/count/stored-price position but a DIFFERENT opened_at
+    (as a fresh adoption would produce) -- only the first should book a
+    trade; the second must be suppressed, not double-counted in
+    realized_pnl_by_date."""
+    monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", True)
+
+    def _adopted_position(opened_at: str) -> dict:
+        return {
+            "symbol": "META", "entry_price": 590.027647, "count": 34.0,
+            "opened_at": opened_at, "order_id": None,
+            "take_profit_price": 620.0, "stop_loss_price": 556.37,
+        }
+
+    strat._save_state({  # noqa: SLF001
+        "positions": [_adopted_position("2026-08-06T20:00:00.000000+00:00")],
+        "trade_log": [], "realized_pnl_by_date": {},
+    })
+    monkeypatch.setattr(alpaca_client, "get_latest_quote", lambda symbol: {"ap": 556.37, "bp": 556.37})
+    # Alpaca's own bracket already closed this position -- both calls see it gone.
+    monkeypatch.setattr(alpaca_client, "get_position", lambda symbol: None)
+
+    first = strat.manage_open_positions()
+    assert first["action"] == "closed"
+    assert len(first["closed"]) == 1
+    assert first["closed"][0]["realized_pnl_usd"] == pytest.approx((556.37 - 590.027647) * 34.0)
+
+    state_after_first = strat._load_state()  # noqa: SLF001
+    assert len(state_after_first["trade_log"]) == 1
+    booked_pnl = state_after_first["realized_pnl_by_date"][strat._today_str()]  # noqa: SLF001
+
+    # Re-adoption on the next tick: same symbol/count/stored price, but a
+    # freshly-stamped (different) opened_at -- exactly what
+    # _reconcile_positions_with_exchange's adoption path produces.
+    strat._save_state({  # noqa: SLF001
+        "positions": [_adopted_position("2026-08-06T20:00:15.000000+00:00")],
+        "trade_log": state_after_first["trade_log"],
+        "realized_pnl_by_date": state_after_first["realized_pnl_by_date"],
+    })
+
+    second = strat.manage_open_positions()
+    assert second["action"] == "no_change"
+    assert second["closed"] == []
+    assert second["checks"][0]["action"] == "duplicate_exit_suppressed"
+
+    state_after_second = strat._load_state()  # noqa: SLF001
+    # No second trade_log entry, and NOT double-counted in today's realized P&L.
+    assert len(state_after_second["trade_log"]) == 1
+    assert state_after_second["realized_pnl_by_date"][strat._today_str()] == pytest.approx(booked_pnl)
+    # The phantom re-adopted position must still be cleared so it can't loop forever.
+    assert state_after_second["positions"] == []
 
 
 def test_manage_open_positions_uses_an_extended_hours_limit_order_during_pre_market(monkeypatch):

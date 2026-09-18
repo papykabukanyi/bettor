@@ -182,6 +182,20 @@ DAILY_LOSS_CAP_PCT = _env_float("ALPACA_DAILY_LOSS_CAP_PCT", 0.10)
 # most recent entries, oldest-first trimmed.
 MAX_TRADE_LOG_ENTRIES = _env_int("ALPACA_MAX_TRADE_LOG_ENTRIES", 2000)
 
+# Real, confirmed production incident: nothing ever stopped scan_and_enter
+# from re-buying the SAME symbol on the very next 2-minute cycle right
+# after a stop_loss exit -- there was no cooldown of any kind. On
+# 2026-08-27, AAPL gapped down hard pre-market; the strategy's own "dip"
+# entry gate kept re-triggering on the same falling price, re-entering AND
+# immediately stopping out again within minutes, three separate times
+# (~$9,700 of real realized loss from repeat entries into one bad move,
+# on top of the separate duplicate-booking bug fixed just above). A stock
+# that just blew through its stop-loss is exactly the kind of "still
+# looks like a dip" trap this cooldown exists to avoid -- skip re-entering
+# it for a while so a real news-driven move has time to actually resolve
+# instead of being bought every single cycle on the way down.
+SYMBOL_COOLDOWN_AFTER_STOP_LOSS_MINUTES = _env_int("ALPACA_SYMBOL_COOLDOWN_AFTER_STOP_LOSS_MINUTES", 60)
+
 LIVE_TRADING_ENABLED = str(os.getenv("ALPACA_LIVE_TRADING_ENABLED", "")).strip().lower() in {"1", "true", "yes"}
 
 
@@ -897,9 +911,14 @@ def scan_and_enter(watchlist: list[str] | None = None, *, dry_run: bool | None =
         # module-level MODEL_CONFIDENCE_MIN default until enough real trades
         # exist to justify moving it. Same pattern perps_strategy.py uses.
         confidence_min_override = (state.get("tuning") or {}).get("model_confidence_min")
+        # See SYMBOL_COOLDOWN_AFTER_STOP_LOSS_MINUTES's own comment for why
+        # this exists -- a symbol that just stopped out for real is skipped
+        # for a while rather than immediately re-bought as "still a dip".
+        symbol_cooldown_until = dict(state.get("symbol_cooldown_until") or {})
         _save_state(state, push_durable=reference_was_just_set)
     if loss_cap_breached:
         return {"opened": [], "action": "daily_loss_cap_breached"}
+    now_utc = dt.datetime.now(dt.timezone.utc)
 
     # See stock_news.prewarm_sentiment's own docstring for the full,
     # confirmed root cause this fixes on the crypto side (same shape here)
@@ -928,6 +947,18 @@ def scan_and_enter(watchlist: list[str] | None = None, *, dry_run: bool | None =
             if open_count >= MAX_CONCURRENT_POSITIONS:
                 opened.append({"symbol": symbol, "ok": True, "action": "skipped_slot_taken"})
                 continue
+            cooldown_until_str = symbol_cooldown_until.get(symbol)
+            if cooldown_until_str:
+                try:
+                    cooldown_until = dt.datetime.fromisoformat(cooldown_until_str)
+                except (ValueError, TypeError):
+                    cooldown_until = None
+                if cooldown_until and now_utc < cooldown_until:
+                    opened.append({
+                        "symbol": symbol, "ok": True, "action": "skipped_cooldown",
+                        "reason": f"stop_loss cooldown until {cooldown_until_str}",
+                    })
+                    continue
 
             row = latest_feature_row(symbol)
             if row is None:
@@ -1274,30 +1305,93 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                     hold_minutes = None
             with _STATE_LOCK:
                 state = _load_state()
-                by_date = state.setdefault("realized_pnl_by_date", {})
-                today = _today_str()
-                by_date[today] = round(float(by_date.get(today, 0.0)) + gross, 6)
-                trade = {
-                    "closed_at": closed_at, "opened_at": opened_at, "hold_minutes": hold_minutes,
-                    "symbol": symbol, "entry_price": position["entry_price"], "exit_price": current_price,
-                    "count": closed_count, "realized_pnl_usd": gross, "reason": reason,
-                    "dry_run": effective_dry_run,
-                    # Entry-time context copied from the position -- see
-                    # scan_and_enter's own comment on why.
-                    "entry_probability_up": position.get("entry_probability_up"),
-                    "entry_model_direction": position.get("entry_model_direction"),
-                    "entry_reason": position.get("entry_reason"),
-                    "entry_score": position.get("entry_score"),
-                    "entry_dollar_volume_z": position.get("entry_dollar_volume_z"),
-                    "entry_macd_hist_pct": position.get("entry_macd_hist_pct"),
-                    "entry_bb_pct_b": position.get("entry_bb_pct_b"),
-                    "entry_rsi_14": position.get("entry_rsi_14"),
-                    "entry_sentiment_score": position.get("entry_sentiment_score"),
-                }
                 trade_log = state.setdefault("trade_log", [])
-                trade_log.append(trade)
-                if len(trade_log) > MAX_TRADE_LOG_ENTRIES:
-                    del trade_log[: len(trade_log) - MAX_TRADE_LOG_ENTRIES]
+                # Real, confirmed production incident: the "position already
+                # gone from the exchange" branch above (still_open == False)
+                # trusts the STORED take_profit_price/stop_loss_price and the
+                # position's own (possibly stale) count instead of
+                # re-verifying against Alpaca, unlike the still_open == True
+                # branch's explicit pos_after check just above. Worse,
+                # _reconcile_positions_with_exchange re-ADOPTED the same
+                # still-lingering exchange position as a fresh "untracked"
+                # one on the very next tick (a real Alpaca eventual-
+                # consistency gap between its single-symbol get_position and
+                # its bulk list-positions read) -- each adoption stamps a
+                # brand new opened_at (or None, on an older code path), so a
+                # dedup keyed on opened_at would never have caught this. Real
+                # damage: a 34-share META position logged as closed 8
+                # separate times on 2026-08-06 (-1144.36 x4, then -1009.73
+                # x4, one real close inflated into ~$9,000 of phantom loss),
+                # and a 140-share AAPL position closed 3+2 times on
+                # 2026-08-27 the same way (~$9,000 more) -- confirmed via the
+                # real trade_log's own opened_at differing (or None) on every
+                # single one of these duplicates. Keyed on (symbol, count,
+                # exit_price) within a short recent window instead -- a
+                # genuinely new partial fill or a later, unrelated trade on
+                # the same symbol will differ in count, price, or simply be
+                # too far apart in time, so this only suppresses true
+                # back-to-back duplicates.
+                _dedup_window = dt.timedelta(minutes=30)
+                is_duplicate = False
+                for t in reversed(trade_log[-20:]):
+                    if t.get("symbol") != symbol:
+                        continue
+                    if abs(float(t.get("count") or 0) - closed_count) >= 1e-6:
+                        continue
+                    if abs(float(t.get("exit_price") or 0) - current_price) >= 1e-6:
+                        continue
+                    try:
+                        prior_closed_at = dt.datetime.fromisoformat(t.get("closed_at", ""))
+                    except (ValueError, TypeError):
+                        continue
+                    if dt.datetime.now(dt.timezone.utc) - prior_closed_at <= _dedup_window:
+                        is_duplicate = True
+                        break
+                if is_duplicate:
+                    logger.warning(
+                        "[alpaca_strategy] suppressed duplicate exit booking for %s "
+                        "(count=%.4f, exit_price=%.4f already logged within the last %s)",
+                        symbol, closed_count, current_price, _dedup_window,
+                    )
+                    trade = None
+                else:
+                    by_date = state.setdefault("realized_pnl_by_date", {})
+                    today = _today_str()
+                    by_date[today] = round(float(by_date.get(today, 0.0)) + gross, 6)
+                    trade = {
+                        "closed_at": closed_at, "opened_at": opened_at, "hold_minutes": hold_minutes,
+                        "symbol": symbol, "entry_price": position["entry_price"], "exit_price": current_price,
+                        "count": closed_count, "realized_pnl_usd": gross, "reason": reason,
+                        "dry_run": effective_dry_run,
+                        # Entry-time context copied from the position -- see
+                        # scan_and_enter's own comment on why.
+                        "entry_probability_up": position.get("entry_probability_up"),
+                        "entry_model_direction": position.get("entry_model_direction"),
+                        "entry_reason": position.get("entry_reason"),
+                        "entry_score": position.get("entry_score"),
+                        "entry_dollar_volume_z": position.get("entry_dollar_volume_z"),
+                        "entry_macd_hist_pct": position.get("entry_macd_hist_pct"),
+                        "entry_bb_pct_b": position.get("entry_bb_pct_b"),
+                        "entry_rsi_14": position.get("entry_rsi_14"),
+                        "entry_sentiment_score": position.get("entry_sentiment_score"),
+                    }
+                    trade_log.append(trade)
+                    if len(trade_log) > MAX_TRADE_LOG_ENTRIES:
+                        del trade_log[: len(trade_log) - MAX_TRADE_LOG_ENTRIES]
+                    if reason.startswith("stop_loss") and not effective_dry_run:
+                        # See SYMBOL_COOLDOWN_AFTER_STOP_LOSS_MINUTES's own
+                        # comment for the real incident this prevents.
+                        cooldowns = state.setdefault("symbol_cooldown_until", {})
+                        cooldowns[symbol] = (
+                            dt.datetime.now(dt.timezone.utc)
+                            + dt.timedelta(minutes=SYMBOL_COOLDOWN_AFTER_STOP_LOSS_MINUTES)
+                        ).isoformat()
+                # Position bookkeeping below runs regardless of is_duplicate
+                # -- a duplicate detection means the position is (still, or
+                # again) confirmed gone from the exchange, so local state
+                # must stop tracking it either way, or this same branch
+                # would just re-trigger and re-suppress every future tick
+                # forever instead of ever settling.
                 if closed_count < float(position["count"]) - 1e-6:
                     # Partial fill -- the remainder is still genuinely open,
                     # keep monitoring it rather than dropping it.
@@ -1310,6 +1404,9 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                     state["positions"] = [p for p in (state.get("positions") or []) if p["symbol"] != symbol]
                 _save_state(state, push_durable=True)
             remaining_symbols.discard(symbol)
+            if trade is None:
+                checks.append({"symbol": symbol, "ok": True, "action": "duplicate_exit_suppressed"})
+                continue
             closed.append(trade)
             try:
                 threads_post.post_trade_exit(
