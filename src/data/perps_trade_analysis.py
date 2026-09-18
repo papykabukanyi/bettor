@@ -47,6 +47,13 @@ logger = logging.getLogger(__name__)
 # evidence, and this is a real-money account.
 MIN_BUCKET_TRADES = 5
 
+# See _build_insights' own comment for the real incident (16 maker-filled
+# entries won 6.25% vs taker-fallback's 48%, a 42-point gap) that motivated
+# this check. Set well below that real gap but still wide enough to only
+# fire on something genuinely stark, not noise between two buckets that
+# just happen to differ.
+FILL_TYPE_WIN_RATE_GAP_THRESHOLD = 0.30
+
 _EXIT_REASON_PREFIXES = ("take_profit", "stop_loss", "max_hold_time", "quick_profit", "volatility_quick_profit")
 _CONFIDENCE_BUCKET_EDGES = [0.5, 0.55, 0.6, 0.65, 0.7, 1.01]
 _HOLD_MINUTES_BUCKETS = [(0, 5, "0-5min"), (5, 15, "5-15min"), (15, 30, "15-30min"), (30, float("inf"), "30min+")]
@@ -107,6 +114,7 @@ def _group_by(trades: list[dict[str, Any]], key_fn) -> dict[str, dict[str, Any]]
 
 def _build_insights(
     overall: dict[str, Any], by_exit_reason: dict[str, dict[str, Any]], by_confidence: dict[str, dict[str, Any]],
+    by_fill_type: dict[str, dict[str, Any]] | None = None,
 ) -> list[str]:
     """Human-readable, evidence-gated observations -- every insight names
     its own sample size so it's clear how much to trust it. Deliberately
@@ -150,6 +158,33 @@ def _build_insights(
                 f"{lowest[0]}'s {lowest[1]['win_rate']:.0%} -- confidence score is NOT reliably predictive right now."
             )
 
+    # Real, confirmed production incident this exists to catch automatically
+    # from now on (per explicit user direction: "study all the winning and
+    # losing trades... avoid patterns of losing trades when spotted"): a
+    # manual audit of the real trade log found maker-filled entries winning
+    # 6.25% (1/16) vs taker-fallback's 48% -- a stark, real, mechanistically
+    # explicable execution-quality gap (see ENABLE_MAKER_ORDERS' own comment
+    # in perps_strategy.py) that this insight generator had no way to
+    # surface on its own, since it never grouped by fill type at all.
+    # FILL_TYPE_WIN_RATE_GAP_THRESHOLD (30 points) is deliberately wide --
+    # this should only ever fire on a gap at least as stark as the one that
+    # motivated it, not chase noise between two merely-different buckets.
+    if by_fill_type:
+        fill_points = sorted(
+            ((k, v) for k, v in by_fill_type.items() if k and v["trades"] >= MIN_BUCKET_TRADES),
+            key=lambda kv: kv[1]["win_rate"],
+        )
+        if len(fill_points) >= 2:
+            worst, best = fill_points[0], fill_points[-1]
+            gap = best[1]["win_rate"] - worst[1]["win_rate"]
+            if gap >= FILL_TYPE_WIN_RATE_GAP_THRESHOLD:
+                insights.append(
+                    f"Entry fill type '{worst[0]}' wins only {worst[1]['win_rate']:.0%} "
+                    f"({worst[1]['trades']} trades, ${worst[1]['total_pnl_usd']:+.2f} total) vs "
+                    f"'{best[0]}'s {best[1]['win_rate']:.0%} -- a real execution-quality gap this stark is "
+                    f"worth investigating (or disabling the worse path) before it costs more."
+                )
+
     return insights
 
 
@@ -169,12 +204,17 @@ def analyze_trade_history(trade_log: list[dict[str, Any]] | None, *, include_dry
     by_ticker = _group_by(trades, lambda t: t.get("ticker"))
     by_side = _group_by(trades, lambda t: t.get("side"))
     by_hold_minutes_bucket = _group_by(trades, lambda t: _hold_minutes_bucket_label(t.get("hold_minutes")))
+    # See _build_insights' own comment -- a real, confirmed execution-path
+    # loss pattern (maker vs taker_fallback entry fills) that this grouping
+    # exists to catch automatically from now on, not just this once.
+    by_fill_type = _group_by(trades, lambda t: t.get("entry_fill_type"))
 
     return {
         "ok": True, "trades_analyzed": len(trades), "overall": overall,
         "by_exit_reason": by_exit_reason, "by_confidence_bucket": by_confidence_bucket,
         "by_ticker": by_ticker, "by_side": by_side, "by_hold_minutes_bucket": by_hold_minutes_bucket,
-        "insights": _build_insights(overall, by_exit_reason, by_confidence_bucket),
+        "by_fill_type": by_fill_type,
+        "insights": _build_insights(overall, by_exit_reason, by_confidence_bucket, by_fill_type),
     }
 
 

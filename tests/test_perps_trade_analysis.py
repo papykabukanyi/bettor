@@ -8,12 +8,12 @@ from data import perps_trade_analysis as pta
 def _trade(
     *, pnl: float, reason: str = "take_profit (+2%)", dry_run: bool = False,
     entry_score: float | None = 0.6, hold_minutes: float | None = 10.0, ticker: str = "KXBTCPERP", side: str = "long",
-    entry_correlation_score: float | None = None,
+    entry_correlation_score: float | None = None, entry_fill_type: str | None = None,
 ) -> dict:
     return {
         "ticker": ticker, "side": side, "realized_pnl_usd": pnl, "reason": reason,
         "dry_run": dry_run, "entry_score": entry_score, "hold_minutes": hold_minutes,
-        "entry_correlation_score": entry_correlation_score,
+        "entry_correlation_score": entry_correlation_score, "entry_fill_type": entry_fill_type,
     }
 
 
@@ -80,6 +80,44 @@ def test_analyze_trade_history_buckets_by_hold_minutes():
     assert by_hold["0-5min"]["trades"] == 1
     assert by_hold["15-30min"]["trades"] == 1
     assert by_hold["30min+"]["trades"] == 1
+
+
+def test_analyze_trade_history_buckets_by_fill_type():
+    trades = [
+        _trade(pnl=1.0, entry_fill_type="taker_fallback"),
+        _trade(pnl=1.0, entry_fill_type="maker"),
+        _trade(pnl=1.0, entry_fill_type=None),
+    ]
+    result = pta.analyze_trade_history(trades)
+    by_fill = result["by_fill_type"]
+    assert by_fill["taker_fallback"]["trades"] == 1
+    assert by_fill["maker"]["trades"] == 1
+    # entry_fill_type=None trades are excluded (can't bucket them), not silently miscounted.
+    assert sum(v["trades"] for v in by_fill.values()) == 2
+
+
+def test_analyze_trade_history_flags_a_real_fill_type_win_rate_gap():
+    """Real, confirmed production incident this exists to catch
+    automatically from now on: maker-filled entries winning 6.25% (1/16)
+    vs taker_fallback's 48% -- see perps_strategy.py's own
+    ENABLE_MAKER_ORDERS comment for the full finding."""
+    maker_losses = [_trade(pnl=-0.3, entry_fill_type="maker") for _ in range(pta.MIN_BUCKET_TRADES)]
+    taker_wins = [_trade(pnl=0.3, entry_fill_type="taker_fallback") for _ in range(pta.MIN_BUCKET_TRADES)]
+    result = pta.analyze_trade_history(maker_losses + taker_wins)
+    assert any("fill type" in insight and "maker" in insight for insight in result["insights"])
+
+
+def test_analyze_trade_history_does_not_flag_a_small_fill_type_gap():
+    """FILL_TYPE_WIN_RATE_GAP_THRESHOLD is deliberately wide -- a modest,
+    plausibly-noise difference between fill types must not fire."""
+    trades = (
+        [_trade(pnl=0.3, entry_fill_type="maker") for _ in range(3)]
+        + [_trade(pnl=-0.3, entry_fill_type="maker") for _ in range(2)]
+        + [_trade(pnl=0.3, entry_fill_type="taker_fallback") for _ in range(4)]
+        + [_trade(pnl=-0.3, entry_fill_type="taker_fallback") for _ in range(1)]
+    )
+    result = pta.analyze_trade_history(trades)
+    assert not any("fill type" in insight for insight in result["insights"])
 
 
 def test_analyze_trade_history_insights_require_minimum_sample_size():
