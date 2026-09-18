@@ -28,6 +28,20 @@ os.environ.setdefault("KALSHI_PRIVATE_KEY", "")
 os.environ.setdefault("KALSHI_PERPS_LIVE_TRADING_ENABLED", "0")
 os.environ.setdefault("ENABLE_PERPS_SCHEDULER", "0")
 os.environ.setdefault("DASHBOARD_LOCAL_AUTORUN", "0")  # never start the real scheduler in tests
+# Real, confirmed gap: THREADS_POST_ENABLED defaults to "1" (see
+# threads_post.py's own module-level read) when unset, so any strategy
+# test that reaches a real open/close event without explicitly mocking
+# threads_post's own posting functions made a REAL, unmocked call to
+# Threads' API -- create_and_publish_post() with no real OAuth token
+# configured here either failed slowly or, on this sandbox's own
+# intermittent outbound-network conditions, genuinely hung a full
+# test-suite run (confirmed: test_alpaca_strategy.py's own
+# test_manage_open_positions_suppresses_a_duplicate_exit_from_repeated_re_adoption
+# hung this way despite passing cleanly in isolation moments earlier).
+# Tests that specifically verify a Threads post happened still work fine
+# with this default off -- they explicitly monkeypatch the specific
+# threads_post function they're checking, which simply overrides this.
+os.environ.setdefault("THREADS_POST_ENABLED", "0")
 
 import pytest
 

@@ -21,6 +21,14 @@ def _isolated_dedup_state(monkeypatch):
     monkeypatch.setattr(threads_post, "_recent_news_cache", None)
     monkeypatch.setattr(threads_post, "_replied_posts_cache", None)
     monkeypatch.setattr(threads_post, "HF_API_KEY", "")  # no real network for the HF mirror by default
+    # THREADS_POST_ENABLED now defaults to "0" at the conftest.py/env level
+    # (see its own comment -- a real, confirmed hang elsewhere from tests
+    # that DIDN'T mock deep enough and hit the real, unconfigured Threads
+    # API). This file's own tests are specifically ABOUT the enabled path
+    # and already mock threads_client.create_and_publish_post (or deeper)
+    # in every test, so restore the enabled gate here -- the 9 tests that
+    # actually want the disabled/no-op path still override this locally.
+    monkeypatch.setattr(threads_post, "THREADS_POST_ENABLED", True)
     # The "nothing notable" filler's own last-resort fallback hits 3 real
     # music-newsroom RSS feeds (see music_news.py) -- off by default here so
     # every other test in this file doesn't silently make live network calls

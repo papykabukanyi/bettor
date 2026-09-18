@@ -17,6 +17,23 @@ import pytest
 from data import alpaca_client, alpaca_crypto_data, alpaca_crypto_meta_model, alpaca_crypto_model, crypto_correlation, crypto_news, threads_post, alpaca_crypto_strategy as strat
 
 
+@pytest.fixture(autouse=True)
+def _no_real_prewarm_network_calls(monkeypatch):
+    """Real, confirmed production incident: scan_and_enter now prewarms
+    sentiment/minute-bars concurrently before its main loop (see either
+    prewarm function's own docstring) -- any test that mocks the
+    per-symbol fetch but not these two left them REAL and unmocked,
+    hitting real network endpoints during a test run and genuinely
+    hanging a full test-suite run. Defaulted to a safe no-op for every
+    test in this file; a test that actually cares about prewarm behavior
+    itself (see test_scan_and_enter_prewarms_sentiment_for_symbols_not_already_held)
+    overrides this with its own monkeypatch.setattr call, which simply
+    wins since it runs later in the same test."""
+    monkeypatch.setattr(crypto_news, "prewarm_sentiment", lambda *a, **kw: None)
+    monkeypatch.setattr(alpaca_crypto_data, "prewarm_minute_bars", lambda *a, **kw: None)
+    yield
+
+
 def _row(**overrides):
     base = {
         "symbol": "BTC/USD", "current_price": 65000.0, "short_ma": 65200.0,
@@ -398,6 +415,13 @@ def test_scan_and_enter_prewarms_sentiment_for_symbols_not_already_held(monkeypa
     monkeypatch.setattr(alpaca_crypto_model, "predict_direction", lambda symbol: {"model_ok": False})
     prewarmed_with = []
     monkeypatch.setattr(crypto_news, "prewarm_sentiment", lambda coins, **kw: prewarmed_with.extend(coins))
+    # Real, confirmed test-hygiene gap: scan_and_enter also prewarms
+    # minute-bars now (see prewarm_minute_bars' own docstring) -- left
+    # unmocked here, it calls the REAL fetch_recent_crypto_bars, hitting a
+    # real network endpoint during a test run (a real hang from this exact
+    # gap was observed in alpaca_crypto_data.py's own collect_dataset_rows
+    # tests).
+    monkeypatch.setattr(alpaca_crypto_data, "prewarm_minute_bars", lambda *a, **kw: None)
 
     strat.scan_and_enter()
     # SOL is already held (a real position above) -- must not be re-prewarmed.
@@ -410,6 +434,7 @@ def test_scan_and_enter_still_works_if_sentiment_prewarm_fails(monkeypatch):
     monkeypatch.setattr(alpaca_crypto_data, "get_crypto_universe", lambda: ["BTC/USD"])
     monkeypatch.setattr(alpaca_crypto_data, "latest_feature_row", lambda symbol: _entry_row())
     monkeypatch.setattr(alpaca_crypto_model, "predict_direction", lambda symbol: {"model_ok": False})
+    monkeypatch.setattr(alpaca_crypto_data, "prewarm_minute_bars", lambda *a, **kw: None)
 
     def raise_error(coins, **kw):
         raise RuntimeError("simulated prewarm failure")

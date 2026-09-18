@@ -183,6 +183,13 @@ def test_engineer_features_all_columns_present_in_feature_columns():
 def test_collect_dataset_rows_uses_the_given_symbols(monkeypatch):
     fetched = []
     monkeypatch.setattr(acd, "fetch_recent_crypto_bars", lambda symbol: fetched.append(symbol) or pd.DataFrame())
+    # Real, confirmed test-hygiene gap: collect_dataset_rows now prewarms
+    # sentiment/minute-bars concurrently before its main loop (see either
+    # prewarm's own docstring) -- a test that mocks only
+    # fetch_recent_crypto_bars left these two REAL, unmocked, hitting real
+    # network endpoints during a test run (a real hang was observed here).
+    monkeypatch.setattr(acd, "prewarm_sentiment", lambda *a, **kw: None)
+    monkeypatch.setattr(acd, "prewarm_minute_bars", lambda *a, **kw: None)
     result = acd.collect_dataset_rows(["BTC/USD", "ETH/USD"])
     assert result.empty
     assert fetched == ["BTC/USD", "ETH/USD"]
@@ -192,6 +199,8 @@ def test_collect_dataset_rows_defaults_to_the_full_universe(monkeypatch):
     monkeypatch.setattr(acd, "get_crypto_universe", lambda: ["BTC/USD"])
     fetched = []
     monkeypatch.setattr(acd, "fetch_recent_crypto_bars", lambda symbol: fetched.append(symbol) or pd.DataFrame())
+    monkeypatch.setattr(acd, "prewarm_sentiment", lambda *a, **kw: None)
+    monkeypatch.setattr(acd, "prewarm_minute_bars", lambda *a, **kw: None)
     acd.collect_dataset_rows()
     assert fetched == ["BTC/USD"]
 
@@ -203,6 +212,8 @@ def test_collect_dataset_rows_one_symbol_failing_does_not_block_the_others(monke
         return _synthetic_one_min_df()
 
     monkeypatch.setattr(acd, "fetch_recent_crypto_bars", fake_fetch)
+    monkeypatch.setattr(acd, "prewarm_sentiment", lambda *a, **kw: None)
+    monkeypatch.setattr(acd, "prewarm_minute_bars", lambda *a, **kw: None)
     result = acd.collect_dataset_rows(["BAD/USD", "BTC/USD"])
     assert not result.empty
     assert set(result["symbol"]) == {"BTC/USD"}
@@ -212,6 +223,8 @@ def test_collect_dataset_rows_uses_sentiment_keyed_by_coin(monkeypatch):
     monkeypatch.setattr(acd, "fetch_recent_crypto_bars", lambda symbol: _synthetic_one_min_df())
     captured = []
     monkeypatch.setattr(acd, "get_sentiment", lambda coin: captured.append(coin) or {"sentiment_score": 0.0})
+    monkeypatch.setattr(acd, "prewarm_sentiment", lambda *a, **kw: None)
+    monkeypatch.setattr(acd, "prewarm_minute_bars", lambda *a, **kw: None)
     acd.collect_dataset_rows(["BTC/USD"])
     assert captured == ["BTC"]
 
@@ -222,6 +235,7 @@ def test_collect_dataset_rows_prewarms_sentiment_for_the_full_symbol_list(monkey
     watchlist-only loop. See crypto_news.prewarm_sentiment's own docstring."""
     monkeypatch.setattr(acd, "fetch_recent_crypto_bars", lambda symbol: _synthetic_one_min_df())
     monkeypatch.setattr(acd, "get_sentiment", lambda coin: {"sentiment_score": 0.0})
+    monkeypatch.setattr(acd, "prewarm_minute_bars", lambda *a, **kw: None)
     prewarmed_with = []
     monkeypatch.setattr(acd, "prewarm_sentiment", lambda coins, **kw: prewarmed_with.extend(coins))
     acd.collect_dataset_rows(["BTC/USD", "ETH/USD"])
@@ -231,6 +245,7 @@ def test_collect_dataset_rows_prewarms_sentiment_for_the_full_symbol_list(monkey
 def test_collect_dataset_rows_still_works_if_sentiment_prewarm_fails(monkeypatch):
     monkeypatch.setattr(acd, "fetch_recent_crypto_bars", lambda symbol: _synthetic_one_min_df())
     monkeypatch.setattr(acd, "get_sentiment", lambda coin: {"sentiment_score": 0.0})
+    monkeypatch.setattr(acd, "prewarm_minute_bars", lambda *a, **kw: None)
 
     def raise_error(coins, **kw):
         raise RuntimeError("simulated prewarm failure")

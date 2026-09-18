@@ -346,6 +346,14 @@ def _synthetic_one_min_df(n=100, base=190.0):
 def test_collect_dataset_rows_uses_the_given_symbols(monkeypatch):
     fetched = []
     monkeypatch.setattr(aod, "fetch_recent_minute_bars", lambda symbol: fetched.append(symbol) or pd.DataFrame())
+    # Real, confirmed test-hygiene gap: collect_dataset_rows now prewarms
+    # sentiment/minute-bars concurrently before its main loop (see either
+    # prewarm's own docstring) -- a test that mocks only
+    # fetch_recent_minute_bars left these two REAL, unmocked, hitting real
+    # network endpoints during a test run (a real hang from this exact gap
+    # was observed in alpaca_crypto_data.py's own equivalent tests).
+    monkeypatch.setattr(aod, "prewarm_sentiment", lambda *a, **kw: None)
+    monkeypatch.setattr(aod, "prewarm_minute_bars", lambda *a, **kw: None)
     result = aod.collect_dataset_rows(["AAPL", "MSFT"])
     assert result.empty
     assert fetched == ["AAPL", "MSFT"]
@@ -355,6 +363,8 @@ def test_collect_dataset_rows_defaults_to_the_options_universe(monkeypatch):
     monkeypatch.setattr(aod, "get_options_universe", lambda: ["AAPL"])
     fetched = []
     monkeypatch.setattr(aod, "fetch_recent_minute_bars", lambda symbol: fetched.append(symbol) or pd.DataFrame())
+    monkeypatch.setattr(aod, "prewarm_sentiment", lambda *a, **kw: None)
+    monkeypatch.setattr(aod, "prewarm_minute_bars", lambda *a, **kw: None)
     aod.collect_dataset_rows()
     assert fetched == ["AAPL"]
 
@@ -366,6 +376,8 @@ def test_collect_dataset_rows_one_symbol_failing_does_not_block_the_others(monke
         return _synthetic_one_min_df(n=100)
 
     monkeypatch.setattr(aod, "fetch_recent_minute_bars", fake_fetch)
+    monkeypatch.setattr(aod, "prewarm_sentiment", lambda *a, **kw: None)
+    monkeypatch.setattr(aod, "prewarm_minute_bars", lambda *a, **kw: None)
     result = aod.collect_dataset_rows(["BAD", "AAPL"])
     assert not result.empty
     assert set(result["symbol"]) == {"AAPL"}

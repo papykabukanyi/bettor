@@ -437,6 +437,16 @@ def test_live_broad_activity_ranking_returns_empty_on_a_fetch_failure(monkeypatc
 def test_collect_dataset_rows_uses_the_cached_short_window_fetch(monkeypatch):
     called = []
     monkeypatch.setattr(alpaca_data, "fetch_recent_minute_bars", lambda symbol: called.append(symbol) or pd.DataFrame())
+    # Real, confirmed test-hygiene gap: collect_dataset_rows now prewarms
+    # sentiment/minute-bars concurrently before its main loop (see either
+    # prewarm's own docstring) -- a test that mocks only
+    # fetch_recent_minute_bars left these two (and get_company_name) REAL,
+    # unmocked, hitting real network endpoints during a test run (a real
+    # hang from this exact gap was observed in alpaca_crypto_data.py's
+    # own equivalent tests).
+    monkeypatch.setattr(alpaca_data, "prewarm_sentiment", lambda *a, **kw: None)
+    monkeypatch.setattr(alpaca_data, "prewarm_minute_bars", lambda *a, **kw: None)
+    monkeypatch.setattr(alpaca_data, "get_company_name", lambda symbol: symbol)
     alpaca_data.collect_dataset_rows(["AAPL"])
     assert called == ["AAPL"]
 
@@ -448,6 +458,9 @@ def test_collect_dataset_rows_one_symbol_failing_does_not_block_the_others(monke
         return _synthetic_one_min_df(n=100)
 
     monkeypatch.setattr(alpaca_data, "fetch_recent_minute_bars", fake_fetch)
+    monkeypatch.setattr(alpaca_data, "prewarm_sentiment", lambda *a, **kw: None)
+    monkeypatch.setattr(alpaca_data, "prewarm_minute_bars", lambda *a, **kw: None)
+    monkeypatch.setattr(alpaca_data, "get_company_name", lambda symbol: symbol)
     result = alpaca_data.collect_dataset_rows(["BAD", "AAPL"])
     assert not result.empty
     assert set(result["symbol"]) == {"AAPL"}
