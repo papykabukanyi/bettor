@@ -96,7 +96,22 @@ from huggingface_hub import HfApi, hf_hub_download  # noqa: F401
 # occasional slow scan just gets skipped by the next tick rather than
 # stacking, never double-runs.
 ALPACA_CRYPTO_CYCLE_MINUTES = max(1, int(os.getenv("ALPACA_CRYPTO_CYCLE_MINUTES", "1") or "1"))
-ALPACA_CRYPTO_FAST_CHECK_SECONDS = max(5, int(os.getenv("ALPACA_CRYPTO_FAST_CHECK_SECONDS", "20") or "20"))
+# Real, confirmed loss pattern found studying the real trade log (per
+# explicit user direction: "study all the winning and losing trades...
+# avoid patterns of losing trades when spotted"): one real ADA/USD
+# stop_loss on 2026-08-22 exited at -7.6% against a 3.0% target -- a
+# 2.5x overshoot that alone accounts for over half of crypto's entire
+# real realized loss ($1,151.59 of $2,112.91). Crypto has no
+# broker-native bracket order (see manage_open_positions' own docstring)
+# -- every exit is self-managed via this polling loop, so the real
+# detection latency between "price crosses the stop" and "this loop
+# actually sees it" IS the tail-risk window a violent, thin-liquidity
+# move can blow through. 20->10s halves that worst-case window. Doesn't
+# eliminate the risk (a still-thin altcoin market sell can walk its own
+# price during a genuine flash move, and get_current_price briefly
+# failing during exactly that kind of event isn't ruled out either) --
+# disclosed, not fully solved by this alone.
+ALPACA_CRYPTO_FAST_CHECK_SECONDS = max(5, int(os.getenv("ALPACA_CRYPTO_FAST_CHECK_SECONDS", "10") or "10"))
 # Per explicit user direction ("get aggressive with chart study on
 # crypto"): this job is the ONLY place crypto_correlation.refresh_alpaca_study
 # runs (see _run_alpaca_crypto_data_collect below) -- the peer-confirmation/
@@ -601,17 +616,24 @@ def _ensure_background_jobs_started() -> None:
             # safely with fast_check the same way.
             # Real, confirmed live incident (2026-08-19): ALPACA_CRYPTO_STARTUP_GRACE_SECONDS
             # (60) is an exact multiple of ALPACA_CRYPTO_FAST_CHECK_SECONDS
-            # (20) -- since both jobs are simple fixed intervals anchored at
-            # deploy time, that makes entry_scan's every-2-minute tick land
-            # on the EXACT SAME 20s phase as fast_check forever after every
-            # single deploy, not just by occasional chance (confirmed via
-            # "maximum number of running instances reached" skip warnings
-            # recurring at a consistent 20-second-aligned pattern across the
-            # 5 days before this fix -- unlike the OTHER threads-post jobs'
-            # own stagger fix earlier this session, this one survives every
-            # deploy because it's baked into the constants themselves, not
-            # random per-deploy timing). The `+ FAST_CHECK_SECONDS // 2`
-            # below shifts entry_scan to always land squarely between two
+            # (20 at the time) -- since both jobs are simple fixed intervals
+            # anchored at deploy time, that makes entry_scan's every-2-minute
+            # tick land on the EXACT SAME 20s phase as fast_check forever
+            # after every single deploy, not just by occasional chance
+            # (confirmed via "maximum number of running instances reached"
+            # skip warnings recurring at a consistent 20-second-aligned
+            # pattern across the 5 days before this fix -- unlike the OTHER
+            # threads-post jobs' own stagger fix earlier this session, this
+            # one survives every deploy because it's baked into the
+            # constants themselves, not random per-deploy timing). Both
+            # ALPACA_CRYPTO_CYCLE_MINUTES (now 1) and
+            # ALPACA_CRYPTO_FAST_CHECK_SECONDS (now 10) have since been
+            # tightened for speed -- re-verified: 60 (startup grace) and 60
+            # (the new 1-minute cycle in seconds) are each still exact
+            # multiples of 10, so the same invariant this fix depends on
+            # still holds; re-check it again if either constant changes.
+            # The `+ FAST_CHECK_SECONDS // 2` below shifts entry_scan to
+            # always land squarely between two
             # fast_check ticks instead.
             scheduler.add_job(
                 _run_alpaca_crypto_entry_scan, "interval", minutes=ALPACA_CRYPTO_CYCLE_MINUTES,
