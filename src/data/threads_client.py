@@ -89,35 +89,20 @@ _STATE_LOCK = threading.Lock()
 # entire live-trading process for 5 minutes).
 _STATE_LOCK_ACQUIRE_TIMEOUT_SEC = float(os.getenv("THREADS_STATE_LOCK_ACQUIRE_TIMEOUT_SEC", "15") or "15")
 
-# Real, deliberate promotion per explicit user direction: every post this
-# bot publishes to Threads, regardless of which of the 4 services or which
-# caller in threads_post.py composed it, tags the bot's own site. Applied
-# HERE (the 3 functions every single post funnels through, see below)
-# rather than in each of threads_post.py's dozen-plus caption-builders --
-# one choke point instead of a change repeated (and potentially missed) at
-# every call site. Threads' own hard cap is 500 chars total -- this trims
-# the CALLER's text if needed so the tag always fits, rather than letting
-# Threads' API silently reject or mangle an over-length post.
-#
-# Points at the HF Space now, not the old Render service (per explicit
-# user direction, same migration chart_snapshot.py's own PUBLIC_BASE_URL
-# fallback already went through) -- reads the SAME env var already
-# configured on the Space for that other purpose rather than introducing
-# a second one, so there's only ever one "the bot's own public URL" value
-# to keep correct.
-PROMO_URL = os.getenv("PUBLIC_BASE_URL") or "https://papylove-bettor-trading-bots.hf.space"
-_PROMO_TAG = f"\n\n{PROMO_URL}"
+# Real, confirmed bug found and reverted: every post used to get this
+# bot's own dashboard URL appended (see git history for the removed
+# PROMO_URL/_with_promo_tag machinery). The dashboard link never actually
+# worked for real Threads readers -- the HF Space it points at is
+# private, so anyone clicking it from a real post just hit HF's generic
+# "not found" wall. The dashboard itself (app_kalshi.py) was built to be
+# safely public (read-only, every mutating route gated on CRON_SECRET),
+# but it also renders the REAL live account balance/positions/P&L, so
+# making the Space public to fix the link was rejected as too much new
+# exposure for a real-money account -- explicit user decision. Simplest
+# correct fix: stop advertising a link that doesn't work. If a genuinely
+# public, sanitized status page is built later, re-add the tag pointing
+# at THAT url instead.
 _THREADS_MAX_CHARS = 500
-
-
-def _with_promo_tag(text: str) -> str:
-    text = text or ""
-    if PROMO_URL in text:
-        return text  # already tagged (e.g. a caller-supplied caption) -- don't duplicate
-    budget = _THREADS_MAX_CHARS - len(_PROMO_TAG)
-    if len(text) > budget:
-        text = text[: max(0, budget - 1)] + "…"
-    return f"{text}{_PROMO_TAG}" if text else PROMO_URL
 _token_cache: dict[str, Any] = {}
 # Real production finding: threads_post.is_configured() (called on every
 # single /api/status poll -- confirmed live, external monitoring bots hit
@@ -522,7 +507,6 @@ def create_and_publish_post(
     "mentioned_only", "parent_post_author_only", or "followers_only"."""
     if is_rate_limited():
         raise RuntimeError("Threads API rate limit cooldown active -- skipping post attempt")
-    text = _with_promo_tag(text)
     token = get_valid_access_token()
     user_id = get_user_id()
     if not token or not user_id:
@@ -573,7 +557,6 @@ def create_and_publish_image_post(
     location resolved from that search."""
     if is_rate_limited():
         raise RuntimeError("Threads API rate limit cooldown active -- skipping post attempt")
-    text = _with_promo_tag(text)
     token = get_valid_access_token()
     user_id = get_user_id()
     if not token or not user_id:
@@ -650,7 +633,6 @@ def create_and_publish_carousel_post(
         raise ValueError(f"a carousel allows at most {CAROUSEL_MAX_ITEMS} images, got {len(image_urls)}")
     if is_rate_limited():
         raise RuntimeError("Threads API rate limit cooldown active -- skipping post attempt")
-    text = _with_promo_tag(text)
     token = get_valid_access_token()
     user_id = get_user_id()
     if not token or not user_id:
