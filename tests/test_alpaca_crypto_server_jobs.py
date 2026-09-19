@@ -482,3 +482,64 @@ def test_threads_trigger_routes_never_raise_on_a_backend_failure(monkeypatch, pa
         resp = client.post(path)
         assert resp.status_code == 500
         assert resp.get_json()["ok"] is False
+
+
+def test_trade_analysis_job_posts_a_summary_when_there_are_real_trades(monkeypatch):
+    """Mirrors app_kalshi.py's own _run_perps_trade_analysis test coverage
+    -- see _run_alpaca_crypto_trade_analysis's own docstring for why this
+    version is deliberately pure analysis (no tuning applied here)."""
+    from data import alpaca_crypto_strategy, alpaca_crypto_trade_analysis
+
+    fake_trade_log = [{"symbol": "BTC/USD", "realized_pnl_usd": 5.0, "reason": "take_profit (+2%)", "dry_run": False}]
+    monkeypatch.setattr(alpaca_crypto_strategy, "_load_state", lambda: {"trade_log": fake_trade_log})
+    posted = {}
+    monkeypatch.setattr(
+        alpaca_crypto_server.threads_post, "post_trade_analysis_summary",
+        lambda text, **kw: posted.update(text=text, kwargs=kw) or True,
+    )
+
+    result = alpaca_crypto_server._run_alpaca_crypto_trade_analysis.__wrapped__()  # noqa: SLF001
+
+    assert result["ok"] is True
+    assert result["posted"] is True
+    assert result["analysis"]["trades_analyzed"] == 1
+    assert posted["kwargs"] == {"market": "crypto"}
+    assert "Crypto trade review" in posted["text"]
+
+
+def test_trade_analysis_job_does_not_post_with_no_real_trades(monkeypatch):
+    from data import alpaca_crypto_strategy
+
+    monkeypatch.setattr(alpaca_crypto_strategy, "_load_state", lambda: {"trade_log": []})
+
+    def fail_if_called(*a, **k):
+        raise AssertionError("must not post a Threads summary with nothing to analyze")
+
+    monkeypatch.setattr(alpaca_crypto_server.threads_post, "post_trade_analysis_summary", fail_if_called)
+
+    result = alpaca_crypto_server._run_alpaca_crypto_trade_analysis.__wrapped__()  # noqa: SLF001
+
+    assert result["ok"] is True
+    assert result["posted"] is False
+
+
+def test_trade_analysis_job_never_applies_any_tuning():
+    """The one real, deliberate difference from perps' own version -- see
+    _run_alpaca_crypto_trade_analysis's own docstring for why crypto's
+    confidence tuning must stay on its existing, separate cadence."""
+    import inspect
+
+    source = inspect.getsource(alpaca_crypto_server._run_alpaca_crypto_trade_analysis)
+    assert "apply_confidence_threshold_override" not in source
+    assert "apply_correlation_study_override" not in source
+
+
+def test_trade_analysis_job_survives_a_state_read_failure(monkeypatch):
+    from data import alpaca_crypto_strategy
+
+    def fail():
+        raise RuntimeError("state read failed")
+
+    monkeypatch.setattr(alpaca_crypto_strategy, "_load_state", fail)
+    result = alpaca_crypto_server._run_alpaca_crypto_trade_analysis.__wrapped__()  # noqa: SLF001
+    assert result["ok"] is False

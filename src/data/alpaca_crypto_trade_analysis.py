@@ -422,6 +422,35 @@ def analyze_trade_history(trade_log: list[dict[str, Any]] | None, *, include_dry
     }
 
 
+def format_analysis_summary_text(analysis: dict[str, Any], *, tuning: dict[str, Any] | None = None) -> str:
+    """Human-readable digest for the Threads post -- what the account's
+    real trading history shows, not a raw data dump. Ported directly
+    from perps_trade_analysis.py's own identical function. `tuning` is
+    accepted for interface parity with perps' version (whose own daily
+    job applies a confidence-threshold tune right alongside this
+    analysis) but is never populated by _run_alpaca_crypto_trade_analysis
+    -- crypto's confidence tuning already happens on its own, more
+    frequent cadence via alpaca_crypto_strategy._maybe_run_batch_trade_analysis,
+    so this job stays pure analysis, not a second place that could also
+    decide to move the same live parameter."""
+    overall = analysis.get("overall") or {}
+    if not analysis.get("trades_analyzed"):
+        return "Crypto trade analysis: not enough closed real trades yet to draw conclusions."
+
+    lines = [
+        f"Crypto trade review ({analysis['trades_analyzed']} real trades):",
+        f"Win rate {overall['win_rate']:.0%} | Total P&L ${overall['total_pnl_usd']:.2f} | "
+        f"Avg ${overall['avg_pnl_usd']:.4f}/trade",
+    ]
+    lines.extend(analysis.get("insights") or [])
+    if tuning and tuning.get("should_apply"):
+        lines.append(
+            f"Confidence floor raised {tuning['current_threshold']:.2f} -> {tuning['recommended_threshold']:.2f} "
+            f"based on this evidence."
+        )
+    return "\n".join(lines)
+
+
 def _parse_iso(ts: str | None) -> dt.datetime | None:
     if not ts:
         return None

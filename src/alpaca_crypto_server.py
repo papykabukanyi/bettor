@@ -49,6 +49,12 @@ market-hours gating anywhere here -- crypto trades 24/7:
                                 2GB (standard plan) container. Staggered an
                                 hour after alpaca_crypto_torch_train so the
                                 two heaviest jobs here don't stack.
+  - alpaca_crypto_trade_analysis daily at ALPACA_CRYPTO_TRADE_ANALYSIS_HOUR_UTC:
+                                ALPACA_CRYPTO_TRADE_ANALYSIS_MINUTE_UTC UTC --
+                                turns trade_log's own real history into
+                                win/loss diagnostics and posts a Threads
+                                summary. Pure analysis, no tuning of its
+                                own -- see its own docstring for why.
 """
 from __future__ import annotations
 
@@ -158,6 +164,20 @@ ALPACA_CRYPTO_BACKTEST_SWEEP_HOUR_UTC = int(os.getenv("ALPACA_CRYPTO_BACKTEST_SW
 # stack on the same day-of-week cadence they'd otherwise all share.
 ALPACA_CRYPTO_WALKFORWARD_DAY_OF_WEEK = int(os.getenv("ALPACA_CRYPTO_WALKFORWARD_DAY_OF_WEEK", "6") or "6")
 ALPACA_CRYPTO_WALKFORWARD_HOUR_UTC = int(os.getenv("ALPACA_CRYPTO_WALKFORWARD_HOUR_UTC", "12") or "12")
+# Daily, once -- mirrors app_kalshi.py's own _run_perps_trade_analysis
+# cadence/shape (see that job's own docstring), added per explicit user
+# direction ("study all the winning and losing trades... make sure the
+# model learns about that"). Deliberately its OWN job, not folded into
+# alpaca_crypto_strategy._maybe_run_batch_trade_analysis (which already
+# runs its own, more frequent, real-trade-count-triggered confidence
+# tuning): this one is PURE analysis over the FULL trade_log (a longer-
+# horizon aggregate view analyze_trade_history's own docstring
+# describes), never applies any tuning itself, so there's no risk of two
+# mechanisms independently deciding to move the same live confidence
+# parameter. 11:00 UTC -- between the backtest sweep (10) and the weekly
+# walk-forward (12), so the 3 heaviest daily-ish jobs here don't stack.
+ALPACA_CRYPTO_TRADE_ANALYSIS_HOUR_UTC = int(os.getenv("ALPACA_CRYPTO_TRADE_ANALYSIS_HOUR_UTC", "11") or "11")
+ALPACA_CRYPTO_TRADE_ANALYSIS_MINUTE_UTC = int(os.getenv("ALPACA_CRYPTO_TRADE_ANALYSIS_MINUTE_UTC", "0") or "0")
 ALPACA_CRYPTO_STARTUP_GRACE_SECONDS = max(0, int(os.getenv("ALPACA_CRYPTO_STARTUP_GRACE_SECONDS", "60") or "60"))
 ENABLE_ALPACA_CRYPTO_SCHEDULER = str(os.getenv("ENABLE_ALPACA_CRYPTO_SCHEDULER", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
 DASHBOARD_LOCAL_AUTORUN = str(os.getenv("DASHBOARD_LOCAL_AUTORUN", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
@@ -562,6 +582,48 @@ def _run_alpaca_crypto_walkforward_backtest() -> dict[str, Any]:
         gc.collect()
 
 
+@_locked_job("alpaca_crypto_trade_analysis", stale_after_sec=1800)
+def _run_alpaca_crypto_trade_analysis() -> dict[str, Any]:
+    """Daily: turns trade_log's own real history into win/loss diagnostics
+    (alpaca_crypto_trade_analysis.analyze_trade_history) and posts a
+    summary to Threads -- mirrors app_kalshi.py's own
+    _run_perps_trade_analysis in shape and cadence, added per explicit
+    user direction ("study all the winning and losing trades... make
+    sure the model learns about that and avoid patterns of losing trades
+    when spotted").
+
+    Deliberately PURE analysis, unlike perps' own version: never applies
+    any confidence/correlation/position-management tuning itself.
+    Crypto's confidence tuning already happens on its own, more frequent,
+    real-trade-count-triggered cadence via
+    alpaca_crypto_strategy._maybe_run_batch_trade_analysis -- this job
+    exists to surface the longer-horizon aggregate view
+    analyze_trade_history's own docstring describes (which
+    _maybe_run_batch_trade_analysis's per-trade "lesson" snapshots don't
+    cover), not to give crypto a second place that could also decide to
+    move the same live parameter. Read-only over state; never touches
+    order placement or position management."""
+    from data import alpaca_crypto_trade_analysis
+
+    try:
+        state = alpaca_crypto_strategy._load_state()  # noqa: SLF001
+        trade_log = state.get("trade_log") or []
+        analysis = alpaca_crypto_trade_analysis.analyze_trade_history(trade_log)
+
+        posted = False
+        if analysis.get("trades_analyzed"):
+            summary_text = alpaca_crypto_trade_analysis.format_analysis_summary_text(analysis)
+            try:
+                posted = threads_post.post_trade_analysis_summary(summary_text, market="crypto")
+            except Exception:
+                logger.warning("[alpaca_crypto_server] Threads trade-analysis post failed", exc_info=True)
+
+        return {"ok": True, "analysis": analysis, "posted": posted}
+    except Exception as exc:
+        logger.warning("[alpaca_crypto_server] trade analysis failed: %s", exc)
+        return {"ok": False, "error": str(exc)}
+
+
 def _ensure_background_jobs_started() -> None:
     global _startup_done
     if _startup_done:
@@ -599,6 +661,11 @@ def _ensure_background_jobs_started() -> None:
                 _run_alpaca_crypto_walkforward_backtest, "cron",
                 day_of_week=ALPACA_CRYPTO_WALKFORWARD_DAY_OF_WEEK, hour=ALPACA_CRYPTO_WALKFORWARD_HOUR_UTC, minute=0,
                 timezone="UTC", id="alpaca_crypto_walkforward_backtest", replace_existing=True,
+            )
+            scheduler.add_job(
+                _run_alpaca_crypto_trade_analysis, "cron",
+                hour=ALPACA_CRYPTO_TRADE_ANALYSIS_HOUR_UTC, minute=ALPACA_CRYPTO_TRADE_ANALYSIS_MINUTE_UTC,
+                timezone="UTC", id="alpaca_crypto_trade_analysis", replace_existing=True,
             )
             scheduler.add_job(
                 _run_alpaca_crypto_fast_check, "interval", seconds=ALPACA_CRYPTO_FAST_CHECK_SECONDS,
