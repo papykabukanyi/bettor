@@ -1383,9 +1383,24 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                     )
                     trade = None
                 else:
-                    by_date = state.setdefault("realized_pnl_by_date", {})
-                    today = _today_str()
-                    by_date[today] = round(float(by_date.get(today, 0.0)) + gross, 6)
+                    # Real, confirmed bug found via a real dashboard-numbers
+                    # investigation: this used to add `gross` here
+                    # unconditionally, even for a dry-run "trade" that never
+                    # touched the real account -- confirmed live, 5 dry-run
+                    # AAPL stop_loss entries inflated the dashboard's
+                    # total_realized_pnl_usd by -$4,130 on top of the real
+                    # -$18,254.87, making the account look worse than it
+                    # actually is. Explicit user direction: "we doing only
+                    # real data please not dry run or fake". The trade_log
+                    # entry below still records dry-run trades (tagged
+                    # dry_run=True, same as always -- other consumers filter
+                    # them out where it matters, e.g.
+                    # _trade_outcome_sample_weight), only this aggregate
+                    # dashboard figure is gated.
+                    if not effective_dry_run:
+                        by_date = state.setdefault("realized_pnl_by_date", {})
+                        today = _today_str()
+                        by_date[today] = round(float(by_date.get(today, 0.0)) + gross, 6)
                     trade = {
                         "closed_at": closed_at, "opened_at": opened_at, "hold_minutes": hold_minutes,
                         "symbol": symbol, "entry_price": position["entry_price"], "exit_price": current_price,

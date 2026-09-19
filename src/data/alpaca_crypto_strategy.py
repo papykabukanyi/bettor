@@ -1623,9 +1623,16 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                 fee_usd = round_trip_fee_usd(float(position["entry_price"]), current_price, closed_count)
                 gross = round((current_price - float(position["entry_price"])) * closed_count, 6)
                 net = round(gross - fee_usd, 6)
-                by_date = state.setdefault("realized_pnl_by_date", {})
-                today = _today_str()
-                by_date[today] = round(float(by_date.get(today, 0.0)) + net, 6)
+                # Real, confirmed bug (same one found and fixed across all 4
+                # markets tonight): this added `net` unconditionally, even
+                # for a dry-run "trade" that never touched the real account,
+                # inflating the dashboard's total_realized_pnl_usd. Explicit
+                # user direction: "we doing only real data please not dry
+                # run or fake" -- see alpaca_strategy.py's identical fix.
+                if not effective_dry_run:
+                    by_date = state.setdefault("realized_pnl_by_date", {})
+                    today = _today_str()
+                    by_date[today] = round(float(by_date.get(today, 0.0)) + net, 6)
                 opened_at = position.get("opened_at")
                 closed_at = dt.datetime.now(dt.timezone.utc).isoformat()
                 hold_minutes = None

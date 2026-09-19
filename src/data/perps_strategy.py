@@ -2541,8 +2541,16 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                     exit_is_maker=(exit_fill_type == "maker"),
                 ) if not effective_dry_run else 0.0
                 realized_pnl = round(gross_pnl - fee_usd, 6)
-                by_date = state.setdefault("realized_pnl_by_date", {})
-                by_date[_today_str()] = round(float(by_date.get(_today_str(), 0.0)) + realized_pnl, 6)
+                # Real, confirmed bug (same one found and fixed across all 4
+                # markets tonight): this added `realized_pnl` unconditionally,
+                # even for a dry-run "trade" that never touched the real
+                # account, inflating the dashboard's total_realized_pnl_usd.
+                # Explicit user direction: "we doing only real data please
+                # not dry run or fake" -- see alpaca_strategy.py's identical
+                # fix.
+                if not effective_dry_run:
+                    by_date = state.setdefault("realized_pnl_by_date", {})
+                    by_date[_today_str()] = round(float(by_date.get(_today_str(), 0.0)) + realized_pnl, 6)
                 opened_at = position.get("opened_at")
                 hold_minutes = None
                 if opened_at:

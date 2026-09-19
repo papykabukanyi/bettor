@@ -1045,7 +1045,10 @@ def api_status():
         "max_concurrent_positions": perps_strategy.MAX_CONCURRENT_POSITIONS,
         "today_realized_pnl_usd": float(realized_pnl_by_date.get(et_today().isoformat(), 0.0)),
         "total_realized_pnl_usd": total_realized_pnl,
-        "trade_count": len(state.get("trade_log") or []),
+        # Real trades only -- explicit user direction ("we doing only real
+        # data please not dry run or fake"). See alpaca_server.py's
+        # identical fix for the full rationale.
+        "trade_count": sum(1 for t in (state.get("trade_log") or []) if not t.get("dry_run")),
         "win_rate": win_rate_stats(state.get("trade_log") or []),
         "milestones": load_json(MILESTONES_FILE, {}),
         "model": {

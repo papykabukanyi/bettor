@@ -160,10 +160,18 @@ def win_rate_stats(trade_log: list[dict[str, Any]], *, recent_n: int = 50) -> di
     tuning that also reads this trade_log -- otherwise one position's
     lifecycle could count as multiple independent trades. Rows without the
     field (every trade_log entry predating this, and every non-perps
-    service's trade log) default to "full" so nothing regresses."""
+    service's trade log) default to "full" so nothing regresses.
+
+    Real, confirmed bug found via a real dashboard-numbers investigation: a
+    dry-run "trade" (never touched the real account) was counted here right
+    alongside real ones, understating the real win rate and trade count on
+    every dashboard -- confirmed live, 5 phantom dry-run stocks trades
+    dragged a real 18-trade log's win rate down. Explicit user direction:
+    "we doing only real data please not dry run or fake"."""
     closed = [
         t for t in trade_log
-        if isinstance(t, dict) and t.get("realized_pnl_usd") is not None and t.get("exit_kind", "full") == "full"
+        if isinstance(t, dict) and t.get("realized_pnl_usd") is not None
+        and t.get("exit_kind", "full") == "full" and not t.get("dry_run")
     ]
     if not closed:
         return {"trade_count": 0, "win_count": 0, "win_rate": None, "recent_trade_count": 0, "recent_win_count": 0, "recent_win_rate": None}

@@ -1868,9 +1868,16 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                     hold_minutes = None
             with _STATE_LOCK:
                 state = _load_state()
-                by_date = state.setdefault("realized_pnl_by_date", {})
-                today = _today_str()
-                by_date[today] = round(float(by_date.get(today, 0.0)) + gross, 6)
+                # Real, confirmed bug (same one found and fixed across all 4
+                # markets tonight): this added `gross` unconditionally, even
+                # for a dry-run "trade" that never touched the real account,
+                # inflating the dashboard's total_realized_pnl_usd. Explicit
+                # user direction: "we doing only real data please not dry
+                # run or fake" -- see alpaca_strategy.py's identical fix.
+                if not effective_dry_run:
+                    by_date = state.setdefault("realized_pnl_by_date", {})
+                    today = _today_str()
+                    by_date[today] = round(float(by_date.get(today, 0.0)) + gross, 6)
                 trade = {
                     "closed_at": closed_at, "opened_at": opened_at, "hold_minutes": hold_minutes,
                     "symbol": contract_symbol, "underlying_symbol": underlying_symbol,
