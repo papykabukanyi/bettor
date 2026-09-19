@@ -300,6 +300,128 @@ def _exit_reason_bucket(reason: str | None) -> str:
     return "other"
 
 
+# Real, confirmed gap found studying every market's win/loss patterns
+# together (per explicit user direction: "study all the winning and
+# losing trades... make sure the model learns about that and avoid
+# patterns of losing trades when spotted"): unlike perps_trade_analysis.py,
+# this module never had an aggregate "bucket by X, flag a stark win-rate
+# gap" analysis at all -- only the per-trade "lesson" snapshots below.
+# Ported directly from perps_trade_analysis.py's own analyze_trade_history/
+# _build_insights/_group_by (see either's own docstring for the full
+# rationale) -- reuses this module's OWN already-identical _is_win/
+# _bucket_stats/_exit_reason_bucket rather than duplicating those.
+#
+# Deliberately narrower than perps' own version: no by_side (crypto is
+# long-only, see this module's own docstring) and no fill-type check
+# (crypto orders have no maker/taker choice at all -- see
+# alpaca_crypto_strategy.manage_open_positions' own docstring, "a
+# triggered exit is always a fresh, plain market sell").
+MIN_BUCKET_TRADES = 5
+_CONFIDENCE_BUCKET_EDGES = [0.5, 0.55, 0.6, 0.65, 0.7, 1.01]
+_HOLD_MINUTES_BUCKETS = [(0, 5, "0-5min"), (5, 15, "5-15min"), (15, 30, "15-30min"), (30, float("inf"), "30min+")]
+
+
+def _confidence_bucket_label(score: float | None) -> str | None:
+    if score is None:
+        return None
+    for i in range(len(_CONFIDENCE_BUCKET_EDGES) - 1):
+        lo, hi = _CONFIDENCE_BUCKET_EDGES[i], _CONFIDENCE_BUCKET_EDGES[i + 1]
+        if lo <= score < hi:
+            return f"{lo:.2f}-{min(hi, 1.0):.2f}"
+    return None
+
+
+def _hold_minutes_bucket_label(minutes: float | None) -> str | None:
+    if minutes is None:
+        return None
+    for lo, hi, label in _HOLD_MINUTES_BUCKETS:
+        if lo <= minutes < hi:
+            return label
+    return _HOLD_MINUTES_BUCKETS[-1][2]
+
+
+def _group_by(trades: list[dict[str, Any]], key_fn) -> dict[str, dict[str, Any]]:
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for t in trades:
+        key = key_fn(t)
+        if key is None:
+            continue
+        groups.setdefault(key, []).append(t)
+    return {k: _bucket_stats(v) for k, v in groups.items()}
+
+
+def _build_insights(
+    overall: dict[str, Any], by_exit_reason: dict[str, dict[str, Any]], by_confidence: dict[str, dict[str, Any]],
+) -> list[str]:
+    """Human-readable, evidence-gated observations -- every insight names
+    its own sample size so it's clear how much to trust it. Deliberately
+    does NOT try to invent new indicators/features on its own (an
+    open-ended research problem, not something safe to claim works
+    reliably) -- surfaces real correlations a human (or a future,
+    deliberate feature-engineering pass) can act on instead."""
+    insights: list[str] = []
+    if overall.get("trades") is None or overall["trades"] < MIN_BUCKET_TRADES:
+        return insights
+
+    stop_loss = by_exit_reason.get("stop_loss")
+    if stop_loss and stop_loss["trades"] >= MIN_BUCKET_TRADES:
+        insights.append(
+            f"{stop_loss['trades']} stop_loss exits, avg ${stop_loss['avg_pnl_usd']:.4f}/trade "
+            f"(${stop_loss['total_pnl_usd']:.2f} total)."
+        )
+    max_hold = by_exit_reason.get("max_hold_time")
+    if max_hold and max_hold["trades"] >= MIN_BUCKET_TRADES:
+        insights.append(
+            f"{max_hold['trades']} max_hold_time exits, win rate {max_hold['win_rate']:.0%} -- "
+            f"entries that never found a clean move either way before time ran out."
+        )
+    take_profit = by_exit_reason.get("take_profit")
+    if take_profit and take_profit["trades"] >= MIN_BUCKET_TRADES:
+        insights.append(f"{take_profit['trades']} take_profit exits, avg ${take_profit['avg_pnl_usd']:.4f}/trade.")
+
+    confidence_points = sorted(
+        ((k, v) for k, v in by_confidence.items() if v["trades"] >= MIN_BUCKET_TRADES), key=lambda kv: kv[0],
+    )
+    if len(confidence_points) >= 2:
+        lowest, highest = confidence_points[0], confidence_points[-1]
+        if highest[1]["win_rate"] > lowest[1]["win_rate"]:
+            insights.append(
+                f"Higher-confidence entries ({highest[0]}) win {highest[1]['win_rate']:.0%} vs "
+                f"{lowest[0]}'s {lowest[1]['win_rate']:.0%} -- confidence score is well-calibrated right now."
+            )
+        elif highest[1]["win_rate"] < lowest[1]["win_rate"]:
+            insights.append(
+                f"Higher-confidence entries ({highest[0]}) win only {highest[1]['win_rate']:.0%} vs "
+                f"{lowest[0]}'s {lowest[1]['win_rate']:.0%} -- confidence score is NOT reliably predictive right now."
+            )
+
+    return insights
+
+
+def analyze_trade_history(trade_log: list[dict[str, Any]] | None, *, include_dry_run: bool = False) -> dict[str, Any]:
+    """Real, structured win/loss diagnostics over trade_log. Defaults to
+    REAL (non-dry-run) trades only -- dry-run fills don't reflect real
+    market slippage/fees and would distort the picture of how the account
+    is actually performing."""
+    trade_log = trade_log or []
+    trades = [t for t in trade_log if include_dry_run or not t.get("dry_run")]
+    overall = _bucket_stats(trades)
+    if not trades:
+        return {"ok": True, "trades_analyzed": 0, "overall": overall, "insights": []}
+
+    by_exit_reason = _group_by(trades, lambda t: _exit_reason_bucket(t.get("reason")))
+    by_confidence_bucket = _group_by(trades, lambda t: _confidence_bucket_label(t.get("entry_score")))
+    by_symbol = _group_by(trades, lambda t: t.get("symbol"))
+    by_hold_minutes_bucket = _group_by(trades, lambda t: _hold_minutes_bucket_label(t.get("hold_minutes")))
+
+    return {
+        "ok": True, "trades_analyzed": len(trades), "overall": overall,
+        "by_exit_reason": by_exit_reason, "by_confidence_bucket": by_confidence_bucket,
+        "by_symbol": by_symbol, "by_hold_minutes_bucket": by_hold_minutes_bucket,
+        "insights": _build_insights(overall, by_exit_reason, by_confidence_bucket),
+    }
+
+
 def _parse_iso(ts: str | None) -> dt.datetime | None:
     if not ts:
         return None

@@ -299,3 +299,74 @@ def test_backtest_shows_a_loss_false_when_both_are_profitable():
 def test_backtest_shows_a_loss_false_with_no_data_at_all():
     result = acta.backtest_shows_a_loss(None, None)
     assert result["is_loss"] is False
+
+
+# analyze_trade_history / _build_insights -- ported from
+# test_perps_trade_analysis.py's own identical coverage (see
+# alpaca_crypto_trade_analysis.analyze_trade_history's own docstring for
+# why this exists here now, and how it differs from perps' version: no
+# by_side, no fill-type check).
+
+def test_analyze_trade_history_with_no_trades_returns_zero_state():
+    result = acta.analyze_trade_history([])
+    assert result["ok"] is True
+    assert result["trades_analyzed"] == 0
+
+
+def test_analyze_trade_history_excludes_dry_run_trades_by_default():
+    trades = [_closed_trade(pnl=1.0, dry_run=True), _closed_trade(pnl=-1.0, dry_run=False)]
+    result = acta.analyze_trade_history(trades)
+    assert result["trades_analyzed"] == 1
+    assert result["overall"]["total_pnl_usd"] == -1.0
+
+
+def test_analyze_trade_history_computes_win_rate_and_pnl():
+    trades = [_closed_trade(pnl=1.0), _closed_trade(pnl=-0.5), _closed_trade(pnl=2.0)]
+    result = acta.analyze_trade_history(trades)
+    assert result["overall"]["trades"] == 3
+    assert result["overall"]["wins"] == 2
+    assert result["overall"]["win_rate"] == round(2 / 3, 4)
+    assert result["overall"]["total_pnl_usd"] == 2.5
+
+
+def test_analyze_trade_history_buckets_by_exit_reason():
+    trades = [
+        _closed_trade(pnl=1.0, reason="take_profit (+2%)"),
+        _closed_trade(pnl=-0.5, reason="stop_loss (-1%)"),
+        _closed_trade(pnl=-0.2, reason="max_hold_time (30min)"),
+        _closed_trade(pnl=0.3, reason="something_unrecognized"),
+    ]
+    result = acta.analyze_trade_history(trades)
+    by_reason = result["by_exit_reason"]
+    assert by_reason["take_profit"]["trades"] == 1
+    assert by_reason["stop_loss"]["trades"] == 1
+    assert by_reason["max_hold_time"]["trades"] == 1
+    assert by_reason["other"]["trades"] == 1
+
+
+def test_analyze_trade_history_buckets_by_symbol():
+    trades = [_closed_trade(pnl=1.0, symbol="BTC/USD"), _closed_trade(pnl=-1.0, symbol="ETH/USD")]
+    result = acta.analyze_trade_history(trades)
+    assert result["by_symbol"]["BTC/USD"]["trades"] == 1
+    assert result["by_symbol"]["ETH/USD"]["trades"] == 1
+
+
+def test_analyze_trade_history_insights_require_minimum_sample_size():
+    """A 2-trade "100% win rate" is noise, not evidence -- insights must not
+    fire below MIN_BUCKET_TRADES."""
+    trades = [_closed_trade(pnl=1.0, reason="stop_loss (-1%)"), _closed_trade(pnl=1.0, reason="stop_loss (-1%)")]
+    result = acta.analyze_trade_history(trades)
+    assert result["insights"] == []
+
+
+def test_analyze_trade_history_insights_fire_with_enough_samples():
+    trades = [_closed_trade(pnl=-0.3, reason="stop_loss (-1%)") for _ in range(acta.MIN_BUCKET_TRADES)]
+    result = acta.analyze_trade_history(trades)
+    assert any("stop_loss" in insight for insight in result["insights"])
+
+
+def test_analyze_trade_history_confidence_calibration_insight():
+    low = [_closed_trade(pnl=-0.3, entry_score=0.51) for _ in range(acta.MIN_BUCKET_TRADES)]
+    high = [_closed_trade(pnl=1.0, entry_score=0.85) for _ in range(acta.MIN_BUCKET_TRADES)]
+    result = acta.analyze_trade_history(low + high)
+    assert any("well-calibrated" in insight for insight in result["insights"])
