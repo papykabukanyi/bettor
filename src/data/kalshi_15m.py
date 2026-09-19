@@ -79,6 +79,21 @@ KNOWN_15M_SERIES = {
     "XRP": "KXXRP15M", "DOGE": "KXDOGE15M",
 }
 
+# Confirmed live via GET /series?category=Commodities (2026-09-19) --
+# genuinely real, separate 15-minute series for gold/silver/copper,
+# settling against Pyth's own price feeds (GET /series/{ticker}'s own
+# settlement_sources) rather than crypto's CF Benchmarks. Real, confirmed
+# structural difference from crypto: these observe real trading-hours
+# gaps (COMEX-style, no markets open over a weekend -- confirmed live,
+# zero open KXGOLD15M/KXSILVER15M/KXCOPPER15M markets on a Saturday when
+# KXBTC15M had one open the whole time) rather than crypto's genuine
+# 24/7 availability -- get_current_window_market's own "None when
+# nothing's open" contract already handles this correctly with no special
+# casing needed; callers just see "no_open_window" more often for these 3.
+KNOWN_15M_METALS_SERIES = {
+    "GOLD": "KXGOLD15M", "SILVER": "KXSILVER15M", "COPPER": "KXCOPPER15M",
+}
+
 
 def list_series(*, category: str = "Crypto") -> list[dict[str, Any]]:
     data = _request_json("GET", "/series", params={"category": category})

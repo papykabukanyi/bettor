@@ -83,6 +83,7 @@ import os
 import sys
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -104,8 +105,9 @@ if str(SRC_DIR) not in sys.path:
 
 from config import et_today
 from data import (
-    crypto_news, kalshi_15m_data, kalshi_15m_model, kalshi_15m_strategy, perps_data, perps_meta_model, perps_model,
-    perps_strategy, perps_trade_analysis, threads_client, threads_post,
+    crypto_news, kalshi_15m, kalshi_15m_data, kalshi_15m_metals_data, kalshi_15m_metals_model, kalshi_15m_model,
+    kalshi_15m_strategy, perps_data, perps_meta_model, perps_model, perps_strategy, perps_trade_analysis,
+    threads_client, threads_post,
 )
 
 # Real production bug found and fixed on the sibling stocks server (now
@@ -142,6 +144,14 @@ PERPS_DATA_COLLECT_MINUTES = max(5, int(os.getenv("PERPS_DATA_COLLECT_MINUTES", 
 # layers still to come, since every day of delay here is a day of lost
 # training data for a market with zero archived history yet.
 KALSHI_15M_DATA_COLLECT_MINUTES = max(5, int(os.getenv("KALSHI_15M_DATA_COLLECT_MINUTES", "5") or "5"))
+# GOLD/SILVER/COPPER (kalshi_15m_metals_data.py) -- a genuinely different
+# collection cadence from crypto's above: this market has NO perps-
+# contract feed to reuse (crypto's own proxy), so it builds its own
+# price history from scratch, one point per cycle -- every 1 minute
+# (the tightest floor this whole codebase's *_DATA_COLLECT_MINUTES
+# constants use anywhere) to reach the 245-row minimum feature window as
+# fast as real-world data allows (~4 hours), not artificially slower.
+KALSHI_15M_METALS_DATA_COLLECT_MINUTES = max(1, int(os.getenv("KALSHI_15M_METALS_DATA_COLLECT_MINUTES", "1") or "1"))
 # Combined entry-scan + settlement-check cycle -- unlike perps' own
 # fast_check (a sub-minute stop-loss/take-profit reaction loop), nothing
 # here is latency-critical: a position's only exit is its window settling
@@ -531,6 +541,22 @@ def _run_kalshi_15m_data_collect() -> dict[str, Any]:
         gc.collect()
 
 
+@_locked_job("kalshi_15m_metals_data_collect", stale_after_sec=600)
+def _run_kalshi_15m_metals_data_collect() -> dict[str, Any]:
+    """Data collection for Kalshi's 15-minute GOLD/SILVER/COPPER markets
+    -- see kalshi_15m_metals_data.py's own module docstring for why this
+    is a genuinely different pipeline from the crypto one above (no
+    perps-contract feed to reuse; builds its own price history from a
+    free spot-price API, one point per cycle)."""
+    try:
+        df = kalshi_15m_metals_data.collect_dataset_rows()
+        if df.empty:
+            return {"ok": False, "reason": "no_rows_collected"}
+        return kalshi_15m_metals_data.push_dataset_snapshot(df)
+    finally:
+        gc.collect()
+
+
 @_locked_job("kalshi_15m_cycle", stale_after_sec=300)
 def _run_kalshi_15m_cycle() -> dict[str, Any]:
     """Settlement check FIRST, then entry scan -- freeing a just-settled
@@ -551,12 +577,25 @@ def _run_kalshi_15m_cycle() -> dict[str, Any]:
 
 @_locked_job("kalshi_15m_train", stale_after_sec=1800)
 def _run_kalshi_15m_train() -> dict[str, Any]:
+    """Trains BOTH models sharing this one job/cadence -- crypto's
+    kalshi_15m_model and metals' own kalshi_15m_metals_model (see
+    kalshi_15m_strategy.ASSET_SERIES' own comment for why these are two
+    separate models, not one). Each is independently best-effort: a
+    failure in one (e.g. metals not having reached MIN_TRAIN_ROWS yet)
+    must not block the other from training."""
     try:
         trade_log = kalshi_15m_strategy._load_state().get("trade_log")  # noqa: SLF001
     except Exception as exc:
         logger.warning("[app_kalshi] could not read kalshi_15m trade_log for outcome-aware training: %s", exc)
         trade_log = None
-    return kalshi_15m_model.train_model(trade_log=trade_log)
+
+    crypto_result = kalshi_15m_model.train_model(trade_log=trade_log)
+    try:
+        metals_result = kalshi_15m_metals_model.train_model(trade_log=trade_log)
+    except Exception as exc:
+        logger.warning("[app_kalshi] kalshi_15m metals training failed: %s", exc)
+        metals_result = {"ok": False, "error": str(exc)}
+    return {"ok": True, "crypto": crypto_result, "metals": metals_result}
 
 
 @_locked_job("perps_train", stale_after_sec=1800)
@@ -780,6 +819,11 @@ def _ensure_background_jobs_started() -> None:
                 _run_kalshi_15m_data_collect, "interval", minutes=KALSHI_15M_DATA_COLLECT_MINUTES,
                 id="kalshi_15m_data_collect", replace_existing=True,
                 next_run_time=dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=KALSHI_15M_DATA_COLLECT_MINUTES),
+            )
+            scheduler.add_job(
+                _run_kalshi_15m_metals_data_collect, "interval", minutes=KALSHI_15M_METALS_DATA_COLLECT_MINUTES,
+                id="kalshi_15m_metals_data_collect", replace_existing=True,
+                next_run_time=dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=KALSHI_15M_METALS_DATA_COLLECT_MINUTES),
             )
             scheduler.add_job(
                 _run_kalshi_15m_cycle, "interval", minutes=KALSHI_15M_CYCLE_MINUTES,
@@ -1220,7 +1264,8 @@ def api_trades():
 @app.route("/api/kalshi15m/status")
 def api_kalshi_15m_status():
     state = kalshi_15m_strategy._load_state()  # noqa: SLF001
-    _, meta = kalshi_15m_model.load_model()
+    _, crypto_meta = kalshi_15m_model.load_model()
+    _, metals_meta = kalshi_15m_metals_model.load_model()
     trade_log = state.get("trade_log") or []
     realized_pnl_by_date = state.get("realized_pnl_by_date") or {}
     total_realized_pnl = round(sum(float(v) for v in realized_pnl_by_date.values()), 6)
@@ -1247,15 +1292,28 @@ def api_kalshi_15m_status():
         # same session ("we doing only real data please not dry run or fake").
         "trade_count": sum(1 for t in trade_log if not t.get("dry_run")),
         "win_rate": win_rate_stats(trade_log),
+        # Two independent models -- see kalshi_15m_strategy.ASSET_SERIES'
+        # own comment for why crypto and metals can't share one (a
+        # genuinely different, leaner feature set for metals).
         "model": {
-            "trained": meta is not None,
-            "model_type": (meta or {}).get("model_type"),
-            "trained_at": (meta or {}).get("trained_at"),
-            "rows": (meta or {}).get("rows"),
-            "scores": (meta or {}).get("scores"),
-            "feature_importances": (meta or {}).get("feature_importances"),
+            "trained": crypto_meta is not None,
+            "model_type": (crypto_meta or {}).get("model_type"),
+            "trained_at": (crypto_meta or {}).get("trained_at"),
+            "rows": (crypto_meta or {}).get("rows"),
+            "scores": (crypto_meta or {}).get("scores"),
+            "feature_importances": (crypto_meta or {}).get("feature_importances"),
         },
-        "universe": kalshi_15m_data.get_universe(),
+        "metals_model": {
+            "trained": metals_meta is not None,
+            "model_type": (metals_meta or {}).get("model_type"),
+            "trained_at": (metals_meta or {}).get("trained_at"),
+            "rows": (metals_meta or {}).get("rows"),
+            "scores": (metals_meta or {}).get("scores"),
+            "feature_importances": (metals_meta or {}).get("feature_importances"),
+        },
+        "universe": list(kalshi_15m_strategy.ASSET_SERIES.keys()),
+        "crypto_universe": kalshi_15m_data.get_universe(),
+        "metals_universe": kalshi_15m_metals_data.get_universe(),
         "params": {
             "model_confidence_min": kalshi_15m_strategy.MODEL_CONFIDENCE_MIN,
             "position_size_pct": kalshi_15m_strategy.POSITION_SIZE_PCT,
@@ -1266,6 +1324,58 @@ def api_kalshi_15m_status():
             "train_hour_et": KALSHI_15M_TRAIN_HOUR_ET,
         },
     })
+
+
+@app.route("/api/kalshi15m/verify-order-mechanics", methods=["POST"])
+def api_kalshi_15m_verify_order_mechanics():
+    """One-off, manually-triggered diagnostic: places a REAL order on a
+    currently-open market to confirm kalshi_15m.create_order's
+    /portfolio/events/orders payload is actually accepted by this
+    account -- the one piece kalshi_15m_strategy.py's own docstring flags
+    as not yet verified live (this dev machine's local Kalshi credentials
+    are separately confirmed stale, blocking that check from a dev
+    machine; this route lets the already-working LIVE Space credentials
+    answer it instead).
+
+    Deliberately structured so a real fill is essentially impossible AND
+    economically trivial even if it somehow happened: 1 contract,
+    time_in_force="immediate_or_cancel" (fills instantly or cancels, no
+    resting order left over), at price=0.01 -- a real market maker would
+    have to be willing to sell a YES contract for one cent, ~100x below
+    any real 15-minute BTC/ETH/SOL/XRP/DOGE contract's own actual price
+    (see kalshi_15m.py's own confirmed live market snapshot: last_price
+    around $0.46). This is NOT wired into any scheduled job -- it exists
+    purely for this one manual verification, requires the same
+    CRON_SECRET bearer every other manual trigger route here does, and
+    does nothing to kalshi_15m_strategy.LIVE_TRADING_ENABLED itself
+    (still False regardless of this route's result -- flipping that is a
+    separate, deliberate decision made after reviewing what this
+    confirms)."""
+    if not is_cron_authorized(request):
+        return jsonify({"ok": False, "error": "Unauthorized"}), 401
+    try:
+        market = None
+        chosen_coin = None
+        for coin, series_ticker in kalshi_15m_strategy.ASSET_SERIES.items():
+            market = kalshi_15m.get_current_window_market(series_ticker)
+            if market is not None:
+                chosen_coin = coin
+                break
+        if market is None:
+            return jsonify({"ok": False, "reason": "no_open_window_on_any_asset_right_now"})
+
+        client_order_id = str(uuid.uuid4())
+        order_result = kalshi_15m.create_order(
+            ticker=market["ticker"], side="bid", count=1, price=0.01,
+            client_order_id=client_order_id, time_in_force="immediate_or_cancel",
+        )
+        return jsonify({
+            "ok": True, "coin": chosen_coin, "ticker": market["ticker"],
+            "client_order_id": client_order_id, "order_result": order_result,
+        })
+    except Exception as exc:
+        logger.warning("[app_kalshi] kalshi_15m order-mechanics verification failed", exc_info=True)
+        return jsonify({"ok": False, "error": str(exc)}), 500
 
 
 @app.route("/api/kalshi15m/trades")
@@ -1468,9 +1578,10 @@ _JOB_LABELS = {
     "perps_entry_scan": f"Entry scan -- all instruments (every {PERPS_CYCLE_MINUTES} min)",
     "perps_manual_cycle": "Manual full cycle",
     "perps_data_collect": f"Data collection -> HF (every {PERPS_DATA_COLLECT_MINUTES} min)",
-    "kalshi_15m_data_collect": f"Kalshi 15m markets data collection -> HF (every {KALSHI_15M_DATA_COLLECT_MINUTES} min)",
+    "kalshi_15m_data_collect": f"Kalshi 15m crypto markets data collection -> HF (every {KALSHI_15M_DATA_COLLECT_MINUTES} min)",
+    "kalshi_15m_metals_data_collect": f"Kalshi 15m gold/silver/copper data collection -> HF (every {KALSHI_15M_METALS_DATA_COLLECT_MINUTES} min)",
     "kalshi_15m_cycle": f"Kalshi 15m markets settlement check + entry scan (every {KALSHI_15M_CYCLE_MINUTES} min)",
-    "kalshi_15m_train": f"Kalshi 15m markets model retrain (daily {KALSHI_15M_TRAIN_HOUR_ET:02d}:00 ET)",
+    "kalshi_15m_train": f"Kalshi 15m markets model retrain, crypto + metals (daily {KALSHI_15M_TRAIN_HOUR_ET:02d}:00 ET)",
     "perps_train": f"Model retrain (daily {PERPS_TRAIN_HOUR_ET:02d}:00 ET)",
     "perps_trade_analysis": (
         f"Trade win/loss analysis + evidence-gated confidence tuning "

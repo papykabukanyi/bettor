@@ -81,7 +81,8 @@
 <div class="grid">
   <div class="card"><h2>Positions</h2><div id="position-count" class="stat">--</div><div class="sub" id="position-sub">--</div></div>
   <div class="card"><h2>Today's P&amp;L</h2><div id="today-pnl" class="stat">--</div><div class="sub" id="total-pnl-sub">--</div></div>
-  <div class="card"><h2>Direction Model</h2><div id="model-status" class="stat">--</div><div class="sub" id="model-sub">--</div></div>
+  <div class="card"><h2>Crypto Model</h2><div id="model-status" class="stat">--</div><div class="sub" id="model-sub">--</div></div>
+  <div class="card"><h2>Metals Model</h2><div id="metals-model-status" class="stat">--</div><div class="sub" id="metals-model-sub">--</div></div>
   <div class="card"><h2>Win Rate</h2><div id="win-rate" class="stat">--</div><div class="sub" id="win-rate-sub">--</div></div>
 </div>
 
@@ -159,6 +160,10 @@ async function refreshStatus() {
     const model = data.model || {};
     document.getElementById("model-status").textContent = model.trained ? (model.model_type || "trained") : "not trained yet";
     document.getElementById("model-sub").textContent = model.rows ? `${model.rows} rows` : "collecting data";
+
+    const metalsModel = data.metals_model || {};
+    document.getElementById("metals-model-status").textContent = metalsModel.trained ? (metalsModel.model_type || "trained") : "not trained yet";
+    document.getElementById("metals-model-sub").textContent = metalsModel.rows ? `${metalsModel.rows} rows` : "collecting data";
 
     const wr = data.win_rate || {};
     document.getElementById("win-rate").textContent = wr.win_rate != null ? fmtPct(wr.win_rate) : "--";

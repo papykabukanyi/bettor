@@ -394,6 +394,51 @@ def test_kalshi_15m_data_collect_job_survives_a_collection_failure(monkeypatch):
     # body itself pretending nothing went wrong).
 
 
+# ---------------------------------------------------------------------------
+# kalshi_15m_metals_data_collect -- GOLD/SILVER/COPPER's own data
+# collection (a genuinely different pipeline, see
+# kalshi_15m_metals_data.py's own module docstring), same job contract.
+# ---------------------------------------------------------------------------
+def test_kalshi_15m_metals_data_collect_job_pushes_a_snapshot_when_rows_are_collected(monkeypatch):
+    from data import kalshi_15m_metals_data
+
+    df = pd.DataFrame({"symbol": ["GOLD"], "ts": [1], "close": [4379.0]})
+    monkeypatch.setattr(kalshi_15m_metals_data, "collect_dataset_rows", lambda: df)
+    pushed = []
+    monkeypatch.setattr(kalshi_15m_metals_data, "push_dataset_snapshot", lambda d: pushed.append(d) or {"ok": True, "rows_written": 1})
+
+    result = app_kalshi._run_kalshi_15m_metals_data_collect.__wrapped__()  # noqa: SLF001
+
+    assert result == {"ok": True, "rows_written": 1}
+    assert len(pushed) == 1
+    pd.testing.assert_frame_equal(pushed[0], df)
+
+
+def test_kalshi_15m_metals_data_collect_job_reports_no_rows_without_pushing(monkeypatch):
+    from data import kalshi_15m_metals_data
+
+    monkeypatch.setattr(kalshi_15m_metals_data, "collect_dataset_rows", lambda: pd.DataFrame())
+    pushed = []
+    monkeypatch.setattr(kalshi_15m_metals_data, "push_dataset_snapshot", lambda d: pushed.append(d))
+
+    result = app_kalshi._run_kalshi_15m_metals_data_collect.__wrapped__()  # noqa: SLF001
+
+    assert result == {"ok": False, "reason": "no_rows_collected"}
+    assert pushed == []
+
+
+def test_kalshi_15m_metals_data_collect_job_survives_a_collection_failure(monkeypatch):
+    from data import kalshi_15m_metals_data
+
+    def fail():
+        raise RuntimeError("price fetch failed")
+
+    monkeypatch.setattr(kalshi_15m_metals_data, "collect_dataset_rows", fail)
+
+    with pytest.raises(RuntimeError):
+        app_kalshi._run_kalshi_15m_metals_data_collect.__wrapped__()  # noqa: SLF001
+
+
 def test_threads_hourly_status_job_reports_open_positions_with_held_minutes(monkeypatch):
     import datetime as dt
     from data import perps_strategy as strat, threads_post
@@ -773,20 +818,42 @@ def test_kalshi_15m_cycle_job_never_bypasses_the_dry_run_floor(monkeypatch):
 
 
 def test_kalshi_15m_train_job_passes_the_real_trade_log(monkeypatch):
-    from data import kalshi_15m_model, kalshi_15m_strategy
+    """Trains BOTH models (crypto + metals) off the SAME real trade_log --
+    see _run_kalshi_15m_train's own docstring for why these are two
+    independent models sharing one job/cadence."""
+    from data import kalshi_15m_metals_model, kalshi_15m_model, kalshi_15m_strategy
 
     monkeypatch.setattr(kalshi_15m_strategy, "_load_state", lambda: {"trade_log": [{"coin": "BTC"}]})
-    captured = {}
-    monkeypatch.setattr(kalshi_15m_model, "train_model", lambda **kw: captured.update(kw) or {"ok": True})
+    crypto_captured, metals_captured = {}, {}
+    monkeypatch.setattr(kalshi_15m_model, "train_model", lambda **kw: crypto_captured.update(kw) or {"ok": True})
+    monkeypatch.setattr(kalshi_15m_metals_model, "train_model", lambda **kw: metals_captured.update(kw) or {"ok": True})
 
     result = app_kalshi._run_kalshi_15m_train.__wrapped__()  # noqa: SLF001
 
-    assert captured["trade_log"] == [{"coin": "BTC"}]
-    assert result == {"ok": True}
+    assert crypto_captured["trade_log"] == [{"coin": "BTC"}]
+    assert metals_captured["trade_log"] == [{"coin": "BTC"}]
+    assert result == {"ok": True, "crypto": {"ok": True}, "metals": {"ok": True}}
+
+
+def test_kalshi_15m_train_job_metals_failure_does_not_block_crypto_training(monkeypatch):
+    from data import kalshi_15m_metals_model, kalshi_15m_model, kalshi_15m_strategy
+
+    monkeypatch.setattr(kalshi_15m_strategy, "_load_state", lambda: {"trade_log": []})
+    monkeypatch.setattr(kalshi_15m_model, "train_model", lambda **kw: {"ok": True, "model_type": "gradient_boosting"})
+
+    def fail(**kw):
+        raise RuntimeError("insufficient metals data")
+
+    monkeypatch.setattr(kalshi_15m_metals_model, "train_model", fail)
+
+    result = app_kalshi._run_kalshi_15m_train.__wrapped__()  # noqa: SLF001
+
+    assert result["crypto"] == {"ok": True, "model_type": "gradient_boosting"}
+    assert result["metals"]["ok"] is False
 
 
 def test_kalshi_15m_train_job_survives_a_state_read_failure(monkeypatch):
-    from data import kalshi_15m_model, kalshi_15m_strategy
+    from data import kalshi_15m_metals_model, kalshi_15m_model, kalshi_15m_strategy
 
     def fail():
         raise RuntimeError("state file corrupted")
@@ -794,7 +861,102 @@ def test_kalshi_15m_train_job_survives_a_state_read_failure(monkeypatch):
     monkeypatch.setattr(kalshi_15m_strategy, "_load_state", fail)
     captured = {}
     monkeypatch.setattr(kalshi_15m_model, "train_model", lambda **kw: captured.update(kw) or {"ok": True})
+    monkeypatch.setattr(kalshi_15m_metals_model, "train_model", lambda **kw: {"ok": True})
 
     app_kalshi._run_kalshi_15m_train.__wrapped__()  # noqa: SLF001
-
     assert captured["trade_log"] is None
+
+
+# ---------------------------------------------------------------------------
+# /api/kalshi15m/verify-order-mechanics -- a one-off, manually-triggered
+# diagnostic (never wired into any scheduled job) that places a real,
+# structurally-safe (IOC, 1 contract, price=0.01) test order to confirm
+# kalshi_15m.create_order's payload is actually accepted by this account.
+# See the route's own docstring for the full safety reasoning.
+# ---------------------------------------------------------------------------
+def test_verify_order_mechanics_requires_cron_auth(monkeypatch):
+    monkeypatch.setattr(app_kalshi, "is_cron_authorized", lambda request: False)
+    with app_kalshi.app.test_client() as client:
+        resp = client.post("/api/kalshi15m/verify-order-mechanics")
+        assert resp.status_code == 401
+
+
+def test_verify_order_mechanics_places_a_real_ioc_order_on_the_first_open_market(monkeypatch):
+    from data import kalshi_15m
+
+    monkeypatch.setattr(app_kalshi, "is_cron_authorized", lambda request: True)
+
+    def fake_get_current_window_market(series_ticker):
+        if series_ticker == "KXBTC15M":
+            return {"ticker": "KXBTC15M-1"}
+        return None
+
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", fake_get_current_window_market)
+    captured = {}
+
+    def fake_create_order(**kw):
+        captured.update(kw)
+        return {"order_id": "o1", "fill_count": "0", "remaining_count": "0"}
+
+    monkeypatch.setattr(kalshi_15m, "create_order", fake_create_order)
+
+    with app_kalshi.app.test_client() as client:
+        resp = client.post("/api/kalshi15m/verify-order-mechanics")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["ok"] is True
+        assert data["coin"] == "BTC"
+        assert data["order_result"]["order_id"] == "o1"
+
+    # The real safety properties this route depends on -- deliberately
+    # asserted explicitly, not just "some order got placed".
+    assert captured["ticker"] == "KXBTC15M-1"
+    assert captured["side"] == "bid"
+    assert captured["count"] == 1
+    assert captured["price"] == 0.01
+    assert captured["time_in_force"] == "immediate_or_cancel"
+
+
+def test_verify_order_mechanics_reports_no_open_window_gracefully(monkeypatch):
+    from data import kalshi_15m
+
+    monkeypatch.setattr(app_kalshi, "is_cron_authorized", lambda request: True)
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: None)
+
+    with app_kalshi.app.test_client() as client:
+        resp = client.post("/api/kalshi15m/verify-order-mechanics")
+        assert resp.status_code == 200
+        assert resp.get_json() == {"ok": False, "reason": "no_open_window_on_any_asset_right_now"}
+
+
+def test_verify_order_mechanics_never_touches_live_trading_enabled(monkeypatch):
+    """This route's whole point is to answer the verification question
+    WITHOUT itself flipping the hard safety floor -- that stays a
+    separate, deliberate decision."""
+    from data import kalshi_15m, kalshi_15m_strategy
+
+    monkeypatch.setattr(app_kalshi, "is_cron_authorized", lambda request: True)
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: {"ticker": "KXBTC15M-1"} if series_ticker == "KXBTC15M" else None)
+    monkeypatch.setattr(kalshi_15m, "create_order", lambda **kw: {"order_id": "o1"})
+
+    with app_kalshi.app.test_client() as client:
+        client.post("/api/kalshi15m/verify-order-mechanics")
+
+    assert kalshi_15m_strategy.LIVE_TRADING_ENABLED is False
+
+
+def test_verify_order_mechanics_survives_an_order_placement_failure(monkeypatch):
+    from data import kalshi_15m
+
+    monkeypatch.setattr(app_kalshi, "is_cron_authorized", lambda request: True)
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: {"ticker": "KXBTC15M-1"} if series_ticker == "KXBTC15M" else None)
+
+    def fail(**kw):
+        raise RuntimeError("exchange rejected order")
+
+    monkeypatch.setattr(kalshi_15m, "create_order", fail)
+
+    with app_kalshi.app.test_client() as client:
+        resp = client.post("/api/kalshi15m/verify-order-mechanics")
+        assert resp.status_code == 500
+        assert resp.get_json()["ok"] is False

@@ -43,10 +43,29 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from data import kalshi_15m, kalshi_15m_model
+from data import kalshi_15m, kalshi_15m_metals_model, kalshi_15m_model
 from server_common import DATA_DIR
 
 logger = logging.getLogger(__name__)
+
+# Merged coin/metal -> series-ticker mapping across BOTH universes this
+# module trades -- crypto (kalshi_15m_model, perps' own candle feed as a
+# proxy) and metals (kalshi_15m_metals_model, its own from-scratch price
+# history -- see kalshi_15m_metals_data.py's own module docstring for why
+# these need a genuinely different data/model pair, not just a longer
+# coin list on the existing one). Kept as ONE combined state file/
+# dashboard/trade_log rather than a parallel strategy module: the
+# ENTRY/SETTLEMENT decision logic below (market lookup, confidence
+# gating, order placement, settlement checking) is already fully asset-
+# agnostic -- only the MODEL CALL differs, dispatched via
+# _predict_direction below.
+ASSET_SERIES: dict[str, str] = {**kalshi_15m.KNOWN_15M_SERIES, **kalshi_15m.KNOWN_15M_METALS_SERIES}
+
+
+def _predict_direction(coin: str) -> dict[str, Any]:
+    if coin in kalshi_15m.KNOWN_15M_METALS_SERIES:
+        return kalshi_15m_metals_model.predict_direction(coin)
+    return kalshi_15m_model.predict_direction(coin)
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -131,7 +150,7 @@ def evaluate_candidate(coin: str) -> dict[str, Any]:
     the SIDE actually chosen (i.e. probability_up for "yes",
     1-probability_up for "no"), so it's always directly comparable to
     MODEL_CONFIDENCE_MIN regardless of predicted direction."""
-    series_ticker = kalshi_15m.KNOWN_15M_SERIES.get(coin)
+    series_ticker = ASSET_SERIES.get(coin)
     if not series_ticker:
         return {"ok": False, "reason": "unknown_coin"}
 
@@ -143,7 +162,7 @@ def evaluate_candidate(coin: str) -> dict[str, Any]:
     if remaining is None or remaining < MIN_SECONDS_TO_CLOSE_FOR_ENTRY:
         return {"ok": False, "reason": "too_little_time_remaining", "seconds_to_close": remaining}
 
-    prediction = kalshi_15m_model.predict_direction(coin)
+    prediction = _predict_direction(coin)
     if not prediction.get("model_ok"):
         return {"ok": False, "reason": "model_not_ready", "detail": prediction.get("reason")}
 
@@ -180,7 +199,7 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
         state = _load_state()
         open_count = len(state.get("positions") or [])
 
-    for coin in kalshi_15m.KNOWN_15M_SERIES:
+    for coin in ASSET_SERIES:
         if open_count >= MAX_CONCURRENT_POSITIONS:
             checks.append({"coin": coin, "ok": False, "reason": "max_concurrent_positions"})
             continue

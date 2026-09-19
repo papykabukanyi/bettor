@@ -10,7 +10,7 @@ import datetime as dt
 
 import pytest
 
-from data import kalshi_15m, kalshi_15m_model, kalshi_15m_strategy
+from data import kalshi_15m, kalshi_15m_metals_model, kalshi_15m_model, kalshi_15m_strategy
 
 
 @pytest.fixture(autouse=True)
@@ -93,9 +93,23 @@ def test_evaluate_candidate_picks_no_for_a_confident_down_prediction(monkeypatch
 # scan_and_enter -- dry-run by default; never places a real order in these
 # tests since LIVE_TRADING_ENABLED is False (module-level, see test above).
 # ---------------------------------------------------------------------------
+def _mock_confident_prediction(monkeypatch, probability_up: float = 0.72) -> None:
+    """Mocks BOTH model dispatch targets (crypto and metals -- see
+    kalshi_15m_strategy._predict_direction's own docstring) identically,
+    so a test exercising the FULL merged 8-asset universe doesn't
+    accidentally only cover the 5 crypto ones."""
+    monkeypatch.setattr(kalshi_15m_model, "predict_direction", lambda coin: {"model_ok": True, "probability_up": probability_up})
+    monkeypatch.setattr(kalshi_15m_metals_model, "predict_direction", lambda coin: {"model_ok": True, "probability_up": probability_up})
+
+
 def test_scan_and_enter_stays_dry_run_by_default(monkeypatch):
+    # MAX_CONCURRENT_POSITIONS' own default (5) is deliberately smaller
+    # than the full 8-asset universe -- raised here since capacity isn't
+    # what this test is about (see test_scan_and_enter_respects_max_concurrent_positions
+    # for that).
+    monkeypatch.setattr(kalshi_15m_strategy, "MAX_CONCURRENT_POSITIONS", len(kalshi_15m_strategy.ASSET_SERIES))
     monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
-    monkeypatch.setattr(kalshi_15m_model, "predict_direction", lambda coin: {"model_ok": True, "probability_up": 0.72})
+    _mock_confident_prediction(monkeypatch)
     order_calls = []
     monkeypatch.setattr(kalshi_15m, "create_order", lambda **kw: order_calls.append(kw))
 
@@ -103,7 +117,7 @@ def test_scan_and_enter_stays_dry_run_by_default(monkeypatch):
 
     assert order_calls == []  # never a real order -- the hard dry-run floor
     entered = [c for c in result["checks"] if c.get("action") == "entered"]
-    assert len(entered) == 5  # one per coin in the universe
+    assert len(entered) == len(kalshi_15m_strategy.ASSET_SERIES)  # one per asset in the FULL merged universe
     assert all(c["dry_run"] is True for c in entered)
 
 
@@ -143,7 +157,7 @@ def test_scan_and_enter_never_places_a_real_order_even_when_live_trading_is_flag
     exercising both branches deliberately."""
     monkeypatch.setattr(kalshi_15m_strategy, "LIVE_TRADING_ENABLED", True)
     monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
-    monkeypatch.setattr(kalshi_15m_model, "predict_direction", lambda coin: {"model_ok": True, "probability_up": 0.72})
+    _mock_confident_prediction(monkeypatch)
     monkeypatch.setattr(kalshi_15m_strategy, "_account_budget_usd", lambda: 100.0)
     order_calls = []
     monkeypatch.setattr(kalshi_15m, "create_order", lambda **kw: order_calls.append(kw) or {"order_id": "o1"})
@@ -156,16 +170,17 @@ def test_scan_and_enter_never_places_a_real_order_even_when_live_trading_is_flag
 
 
 def test_scan_and_enter_places_a_real_order_only_when_explicitly_forced_live(monkeypatch):
+    monkeypatch.setattr(kalshi_15m_strategy, "MAX_CONCURRENT_POSITIONS", len(kalshi_15m_strategy.ASSET_SERIES))
     monkeypatch.setattr(kalshi_15m_strategy, "LIVE_TRADING_ENABLED", True)
     monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
-    monkeypatch.setattr(kalshi_15m_model, "predict_direction", lambda coin: {"model_ok": True, "probability_up": 0.72})
+    _mock_confident_prediction(monkeypatch)
     monkeypatch.setattr(kalshi_15m_strategy, "_account_budget_usd", lambda: 100.0)
     order_calls = []
     monkeypatch.setattr(kalshi_15m, "create_order", lambda **kw: order_calls.append(kw) or {"order_id": "o1"})
 
     result = kalshi_15m_strategy.scan_and_enter(dry_run=False)
 
-    assert len(order_calls) == 5  # one per coin
+    assert len(order_calls) == len(kalshi_15m_strategy.ASSET_SERIES)  # one per asset in the FULL merged universe
     entered = [c for c in result["checks"] if c.get("action") == "entered"]
     assert all(c["dry_run"] is False for c in entered)
 
@@ -173,7 +188,7 @@ def test_scan_and_enter_places_a_real_order_only_when_explicitly_forced_live(mon
 def test_scan_and_enter_records_a_failed_order_without_opening_a_position(monkeypatch):
     monkeypatch.setattr(kalshi_15m_strategy, "LIVE_TRADING_ENABLED", True)
     monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
-    monkeypatch.setattr(kalshi_15m_model, "predict_direction", lambda coin: {"model_ok": True, "probability_up": 0.72})
+    _mock_confident_prediction(monkeypatch)
     monkeypatch.setattr(kalshi_15m_strategy, "_account_budget_usd", lambda: 100.0)
 
     def fail(**kw):
@@ -303,3 +318,31 @@ def test_check_settlements_does_not_erase_a_position_added_mid_loop(monkeypatch)
     # BTC settled and is gone; the concurrently-added ETH position must
     # have SURVIVED, not been silently erased by a stale bulk overwrite.
     assert [p["coin"] for p in state["positions"]] == ["ETH"]
+
+
+# ---------------------------------------------------------------------------
+# _predict_direction -- the dispatch between crypto's kalshi_15m_model and
+# metals' own kalshi_15m_metals_model (see kalshi_15m_strategy.py's own
+# module-level ASSET_SERIES comment for why these need genuinely
+# different data/model pairs).
+# ---------------------------------------------------------------------------
+def test_predict_direction_dispatches_crypto_coins_to_the_crypto_model(monkeypatch):
+    monkeypatch.setattr(kalshi_15m_model, "predict_direction", lambda coin: {"model_ok": True, "source": "crypto", "coin": coin})
+    monkeypatch.setattr(kalshi_15m_metals_model, "predict_direction", lambda coin: {"model_ok": True, "source": "metals", "coin": coin})
+    result = kalshi_15m_strategy._predict_direction("BTC")  # noqa: SLF001
+    assert result["source"] == "crypto"
+
+
+def test_predict_direction_dispatches_metals_to_the_metals_model(monkeypatch):
+    monkeypatch.setattr(kalshi_15m_model, "predict_direction", lambda coin: {"model_ok": True, "source": "crypto", "coin": coin})
+    monkeypatch.setattr(kalshi_15m_metals_model, "predict_direction", lambda coin: {"model_ok": True, "source": "metals", "coin": coin})
+    for metal in ("GOLD", "SILVER", "COPPER"):
+        result = kalshi_15m_strategy._predict_direction(metal)  # noqa: SLF001
+        assert result["source"] == "metals"
+
+
+def test_asset_series_covers_all_8_assets_with_no_overlap():
+    assert len(kalshi_15m_strategy.ASSET_SERIES) == 8
+    assert set(kalshi_15m_strategy.ASSET_SERIES) == {
+        "BTC", "ETH", "SOL", "XRP", "DOGE", "GOLD", "SILVER", "COPPER",
+    }

@@ -186,3 +186,13 @@ def test_get_market_returns_the_single_matching_market(monkeypatch):
     result = kalshi_15m.get_market("KXBTC15M-1")
     assert captured["params"] == {"tickers": "KXBTC15M-1"}
     assert result["result"] == "yes"
+
+
+def test_known_15m_metals_series_covers_gold_silver_copper():
+    assert set(kalshi_15m.KNOWN_15M_METALS_SERIES.keys()) == {"GOLD", "SILVER", "COPPER"}
+    assert kalshi_15m.KNOWN_15M_METALS_SERIES["GOLD"] == "KXGOLD15M"
+    assert kalshi_15m.KNOWN_15M_METALS_SERIES["SILVER"] == "KXSILVER15M"
+    assert kalshi_15m.KNOWN_15M_METALS_SERIES["COPPER"] == "KXCOPPER15M"
+    # No overlap with the crypto universe -- coin/series identity must
+    # stay unambiguous when the strategy layer merges both mappings.
+    assert not (set(kalshi_15m.KNOWN_15M_METALS_SERIES) & set(kalshi_15m.KNOWN_15M_SERIES))
