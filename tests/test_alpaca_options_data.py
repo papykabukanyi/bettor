@@ -11,10 +11,28 @@ import pytest
 
 from data import alpaca_options_data as aod
 
+# Captured at import time, BEFORE the autouse fixture below ever patches
+# aod._options_market_features away -- tests that exercise that function's
+# OWN real logic (not just something that calls it) restore this via
+# monkeypatch so they aren't vacuously passing against the autouse
+# fixture's own always-None stub.
+_REAL_OPTIONS_MARKET_FEATURES = aod._options_market_features
+
 
 @pytest.fixture(autouse=True)
 def _no_real_sentiment_network_calls(monkeypatch):
     monkeypatch.setattr(aod, "get_sentiment", lambda symbol, **kw: {"symbol": symbol, "sentiment_score": 0.0, "headline_volume": 0})
+
+
+@pytest.fixture(autouse=True)
+def _no_real_options_market_features_network_calls(monkeypatch):
+    """_options_market_features (contract lookup + a live quote, see its
+    own docstring) is a real network call this session added to
+    collect_dataset_rows/latest_feature_row -- defaults to None here so
+    every EXISTING test in this file (written before that call existed)
+    doesn't newly hit the real Alpaca API. Tests specifically covering the
+    options-features success path override this explicitly."""
+    monkeypatch.setattr(aod, "_options_market_features", lambda underlying, current_price: None)
 
 
 def test_get_options_universe_is_a_fixed_configurable_list():
@@ -681,3 +699,184 @@ def test_backfill_minute_history_continues_past_a_symbol_that_fails_to_fetch(mon
     assert result["ok"] is True
     assert result["symbols_processed"] == 1
     assert result["symbols_requested"] == 2
+
+
+# ---------------------------------------------------------------------------
+# _options_market_features / ensure_options_feature_columns / the new
+# options-specific FEATURE_COLUMNS -- real, confirmed gap found per
+# explicit user direction ("the options need to expand and get more
+# intelligent... understand all the aspect of making profit on options"):
+# this model used to train on EXACTLY the same features as the equities
+# strategy, zero awareness of the options market itself. See
+# options_greeks.py's own module docstring for why these are computed
+# locally (Alpaca's own snapshot endpoint returns no greeks/IV on this
+# account's subscription tier).
+# ---------------------------------------------------------------------------
+import datetime as _dt  # noqa: E402
+
+# ~30 days out (computed relative to "today", not a fixed far-future date):
+# a real near-term contract's own days_to_expiration -- NOT an arbitrary
+# "far enough in the future" date, which would silently break the
+# implied-volatility solver below (an option decades from expiration
+# prices at close to the FULL underlying value for any vol in the
+# solver's search band, since time value dominates completely at that
+# horizon -- a $4.70 mid-price is only achievable, and thus solvable, for
+# a realistic short-dated contract, matching what select_contract's own
+# MAX_DAYS_TO_EXPIRATION window actually selects live).
+_FUTURE_EXPIRATION = (_dt.datetime.now(_dt.timezone.utc).date() + _dt.timedelta(days=30)).isoformat()
+
+
+def test_options_specific_feature_columns_are_part_of_feature_columns():
+    for col in aod.OPTIONS_SPECIFIC_FEATURE_COLUMNS:
+        assert col in aod.FEATURE_COLUMNS
+    assert "has_options_data" in aod.OPTIONS_SPECIFIC_FEATURE_COLUMNS
+
+
+def test_options_market_features_returns_none_for_a_non_positive_price(monkeypatch):
+    monkeypatch.setattr(aod, "_options_market_features", _REAL_OPTIONS_MARKET_FEATURES)
+    assert aod._options_market_features("AAPL", 0.0) is None  # noqa: SLF001
+    assert aod._options_market_features("AAPL", -5.0) is None  # noqa: SLF001
+
+
+def test_options_market_features_returns_none_when_no_contract_is_available(monkeypatch):
+    monkeypatch.setattr(aod, "_options_market_features", _REAL_OPTIONS_MARKET_FEATURES)
+    monkeypatch.setattr(aod, "select_contract", lambda *a, **kw: None)
+    assert aod._options_market_features("AAPL", 195.0) is None  # noqa: SLF001
+
+
+def test_options_market_features_returns_none_for_an_already_expired_contract(monkeypatch):
+    monkeypatch.setattr(aod, "_options_market_features", _REAL_OPTIONS_MARKET_FEATURES)
+    monkeypatch.setattr(aod, "select_contract", lambda *a, **kw: _contract(expiration_date="2020-01-01"))
+    assert aod._options_market_features("AAPL", 195.0) is None  # noqa: SLF001
+
+
+def test_options_market_features_returns_none_on_a_quote_fetch_failure(monkeypatch):
+    monkeypatch.setattr(aod, "_options_market_features", _REAL_OPTIONS_MARKET_FEATURES)
+    monkeypatch.setattr(aod, "select_contract", lambda *a, **kw: _contract(expiration_date=_FUTURE_EXPIRATION))
+
+    def fail(symbol):
+        raise RuntimeError("network error")
+
+    monkeypatch.setattr(aod.alpaca_client, "get_option_latest_quote", fail)
+    assert aod._options_market_features("AAPL", 195.0) is None  # noqa: SLF001
+
+
+def test_options_market_features_returns_a_full_dict_with_a_real_quote(monkeypatch):
+    monkeypatch.setattr(aod, "_options_market_features", _REAL_OPTIONS_MARKET_FEATURES)
+    monkeypatch.setattr(
+        aod, "select_contract",
+        lambda *a, **kw: _contract(strike_price=195.0, expiration_date=_FUTURE_EXPIRATION),
+    )
+    monkeypatch.setattr(aod.alpaca_client, "get_option_latest_quote", lambda symbol: {"bp": 4.5, "ap": 4.9})
+    result = aod._options_market_features("AAPL", 195.0)  # noqa: SLF001
+    assert result is not None
+    for key in ("implied_volatility", "moneyness", "days_to_expiration", "bid_ask_spread_pct",
+                "delta", "gamma", "theta", "vega", "rho"):
+        assert key in result
+
+
+def test_options_market_features_returns_none_with_no_real_bid_ask(monkeypatch):
+    monkeypatch.setattr(aod, "_options_market_features", _REAL_OPTIONS_MARKET_FEATURES)
+    monkeypatch.setattr(
+        aod, "select_contract",
+        lambda *a, **kw: _contract(strike_price=195.0, expiration_date=_FUTURE_EXPIRATION),
+    )
+    monkeypatch.setattr(aod.alpaca_client, "get_option_latest_quote", lambda symbol: {"bp": None, "ap": None})
+    assert aod._options_market_features("AAPL", 195.0) is None  # noqa: SLF001
+
+
+def test_ensure_options_feature_columns_adds_missing_columns_as_neutral_defaults():
+    """The exact real-world case this exists for: an old archived shard,
+    collected before this feature shipped, has none of these columns at
+    all."""
+    df = pd.DataFrame({"symbol": ["AAPL", "MSFT"], "ret_1m": [0.01, -0.02]})
+    result = aod.ensure_options_feature_columns(df)
+    for col in aod.OPTIONS_SPECIFIC_FEATURE_COLUMNS:
+        assert col in result.columns
+    assert (result["has_options_data"] == 0.0).all()
+    assert (result["implied_volatility"] == 0.0).all()
+
+
+def test_ensure_options_feature_columns_preserves_real_values_and_flags_them():
+    df = pd.DataFrame({
+        "symbol": ["AAPL", "MSFT"],
+        "implied_volatility": [0.25, None], "moneyness": [1.02, None],
+        "days_to_expiration": [21.0, None], "bid_ask_spread_pct": [0.05, None],
+        "delta": [0.5, None], "gamma": [0.02, None], "theta": [-0.01, None],
+        "vega": [0.1, None], "rho": [0.03, None],
+    })
+    result = aod.ensure_options_feature_columns(df)
+    assert result["has_options_data"].tolist() == [1.0, 0.0]
+    assert result["implied_volatility"].tolist() == [0.25, 0.0]
+
+
+def test_ensure_options_feature_columns_is_idempotent():
+    df = pd.DataFrame({"symbol": ["AAPL"]})
+    once = aod.ensure_options_feature_columns(df.copy())
+    twice = aod.ensure_options_feature_columns(once.copy())
+    assert once["has_options_data"].tolist() == twice["has_options_data"].tolist()
+
+
+def test_collect_dataset_rows_populates_options_features_only_on_the_last_row(monkeypatch):
+    monkeypatch.setattr(aod, "fetch_recent_minute_bars", lambda symbol: _synthetic_one_min_df(n=100))
+    monkeypatch.setattr(aod, "prewarm_sentiment", lambda *a, **kw: None)
+    monkeypatch.setattr(aod, "prewarm_minute_bars", lambda *a, **kw: None)
+    monkeypatch.setattr(
+        aod, "_options_market_features",
+        lambda underlying, current_price: {"implied_volatility": 0.3, "delta": 0.5},
+    )
+    result = aod.collect_dataset_rows(["AAPL"])
+    assert not result.empty
+    # Only the LAST row for this symbol carries the real options snapshot --
+    # every earlier historical minute has no historical option-quote series
+    # to have gotten a real value from (see this module's own comment).
+    assert pd.isna(result["implied_volatility"].iloc[:-1]).all()
+    assert result["implied_volatility"].iloc[-1] == 0.3
+    assert result["delta"].iloc[-1] == 0.5
+
+
+def test_collect_dataset_rows_one_symbol_failing_does_not_block_the_others_with_options_features(monkeypatch):
+    """Re-run of the pre-existing test above (now that collect_dataset_rows
+    also calls _options_market_features) -- confirms the autouse fixture
+    keeps it real-network-call-free and the existing behavior intact."""
+    def fake_fetch(symbol):
+        if symbol == "BAD":
+            raise RuntimeError("network error")
+        return _synthetic_one_min_df(n=100)
+
+    monkeypatch.setattr(aod, "fetch_recent_minute_bars", fake_fetch)
+    monkeypatch.setattr(aod, "prewarm_sentiment", lambda *a, **kw: None)
+    monkeypatch.setattr(aod, "prewarm_minute_bars", lambda *a, **kw: None)
+    result = aod.collect_dataset_rows(["BAD", "AAPL"])
+    assert not result.empty
+    assert set(result["symbol"]) == {"AAPL"}
+
+
+def test_latest_feature_row_includes_options_features_when_available(monkeypatch):
+    monkeypatch.setattr(aod, "fetch_recent_minute_bars", lambda symbol: _synthetic_one_min_df(n=100))
+    monkeypatch.setattr(
+        aod, "_options_market_features",
+        lambda underlying, current_price: {
+            "implied_volatility": 0.28, "moneyness": 1.0, "days_to_expiration": 21.0,
+            "bid_ask_spread_pct": 0.04, "delta": 0.55, "gamma": 0.02, "theta": -0.015, "vega": 0.12, "rho": 0.03,
+        },
+    )
+    row = aod.latest_feature_row("AAPL")
+    assert row is not None
+    assert row["has_options_data"] == 1.0
+    assert row["implied_volatility"] == 0.28
+    assert row["delta"] == 0.55
+    for col in aod.FEATURE_COLUMNS:
+        assert col in row
+
+
+def test_latest_feature_row_neutrally_fills_options_features_when_unavailable(monkeypatch):
+    monkeypatch.setattr(aod, "fetch_recent_minute_bars", lambda symbol: _synthetic_one_min_df(n=100))
+    monkeypatch.setattr(aod, "_options_market_features", lambda underlying, current_price: None)
+    row = aod.latest_feature_row("AAPL")
+    assert row is not None
+    assert row["has_options_data"] == 0.0
+    assert row["implied_volatility"] == 0.0
+    assert row["delta"] == 0.0
+    for col in aod.FEATURE_COLUMNS:
+        assert col in row

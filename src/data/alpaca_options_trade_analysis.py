@@ -222,6 +222,172 @@ def _exit_reason_bucket(reason: str | None) -> str:
     return "other"
 
 
+# Real, confirmed gap found studying every market's win/loss patterns
+# together (per explicit user direction: "make sure the options is
+# studying all recent alpaca trades it made win or loss to avoid future
+# loss also on top of what it does already"): unlike perps_trade_analysis.py
+# and (as of tonight) alpaca_crypto_trade_analysis.py, this module never
+# had an aggregate "bucket by X, flag a stark win-rate gap" analysis over
+# the WHOLE trade history -- only the per-trade "lesson" snapshots above
+# (which study the last BATCH_SIZE trades) and the confidence/backtest
+# auto-tuners (which look at trade history too, but only through the
+# narrow lens of "would a higher confidence floor have done better").
+# Ported directly from alpaca_crypto_trade_analysis.py's own
+# analyze_trade_history/_build_insights/_group_by (itself ported from
+# perps_trade_analysis.py; see either's own docstring for the full
+# rationale) -- reuses this module's OWN already-identical _is_win/
+# _bucket_stats/_exit_reason_bucket rather than duplicating those.
+#
+# One real adaptation for options specifically: buckets by
+# `underlying_symbol`, not `symbol` -- an options contract's own `symbol`
+# (the OCC-style contract string) encodes strike+expiry and is therefore
+# different on almost every single trade, which would fragment this into
+# mostly-singleton buckets below MIN_BUCKET_TRADES forever. The ticker the
+# model actually predicts on, and the one a real recurring pattern would
+# show up against, is the underlying -- same reasoning
+# alpaca_options_model._trade_outcome_sample_weight already uses.
+MIN_BUCKET_TRADES = 5
+_CONFIDENCE_BUCKET_EDGES = [0.5, 0.55, 0.6, 0.65, 0.7, 1.01]
+_HOLD_MINUTES_BUCKETS = [(0, 5, "0-5min"), (5, 15, "5-15min"), (15, 30, "15-30min"), (30, float("inf"), "30min+")]
+
+
+def _confidence_bucket_label(score: float | None) -> str | None:
+    if score is None:
+        return None
+    for i in range(len(_CONFIDENCE_BUCKET_EDGES) - 1):
+        lo, hi = _CONFIDENCE_BUCKET_EDGES[i], _CONFIDENCE_BUCKET_EDGES[i + 1]
+        if lo <= score < hi:
+            return f"{lo:.2f}-{min(hi, 1.0):.2f}"
+    return None
+
+
+def _hold_minutes_bucket_label(minutes: float | None) -> str | None:
+    if minutes is None:
+        return None
+    for lo, hi, label in _HOLD_MINUTES_BUCKETS:
+        if lo <= minutes < hi:
+            return label
+    return _HOLD_MINUTES_BUCKETS[-1][2]
+
+
+def _group_by(trades: list[dict[str, Any]], key_fn) -> dict[str, dict[str, Any]]:
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for t in trades:
+        key = key_fn(t)
+        if key is None:
+            continue
+        groups.setdefault(key, []).append(t)
+    return {k: _bucket_stats(v) for k, v in groups.items()}
+
+
+def _build_insights(
+    overall: dict[str, Any], by_exit_reason: dict[str, dict[str, Any]], by_confidence: dict[str, dict[str, Any]],
+) -> list[str]:
+    """Human-readable, evidence-gated observations -- every insight names
+    its own sample size so it's clear how much to trust it. Deliberately
+    does NOT try to invent new indicators/features on its own (an
+    open-ended research problem, not something safe to claim works
+    reliably) -- surfaces real correlations a human (or a future,
+    deliberate feature-engineering pass) can act on instead."""
+    insights: list[str] = []
+    if overall.get("trades") is None or overall["trades"] < MIN_BUCKET_TRADES:
+        return insights
+
+    stop_loss = by_exit_reason.get("stop_loss")
+    if stop_loss and stop_loss["trades"] >= MIN_BUCKET_TRADES:
+        insights.append(
+            f"{stop_loss['trades']} stop_loss exits, avg ${stop_loss['avg_pnl_usd']:.4f}/trade "
+            f"(${stop_loss['total_pnl_usd']:.2f} total)."
+        )
+    max_hold = by_exit_reason.get("max_hold_time")
+    if max_hold and max_hold["trades"] >= MIN_BUCKET_TRADES:
+        insights.append(
+            f"{max_hold['trades']} max_hold_time exits, win rate {max_hold['win_rate']:.0%} -- "
+            f"entries that never found a clean move either way before time ran out."
+        )
+    take_profit = by_exit_reason.get("take_profit")
+    if take_profit and take_profit["trades"] >= MIN_BUCKET_TRADES:
+        insights.append(f"{take_profit['trades']} take_profit exits, avg ${take_profit['avg_pnl_usd']:.4f}/trade.")
+    near_expiration = by_exit_reason.get("near_expiration")
+    if near_expiration and near_expiration["trades"] >= MIN_BUCKET_TRADES:
+        insights.append(
+            f"{near_expiration['trades']} near_expiration exits, win rate {near_expiration['win_rate']:.0%} -- "
+            f"positions held too close to expiry to let the thesis play out."
+        )
+
+    confidence_points = sorted(
+        ((k, v) for k, v in by_confidence.items() if v["trades"] >= MIN_BUCKET_TRADES), key=lambda kv: kv[0],
+    )
+    if len(confidence_points) >= 2:
+        lowest, highest = confidence_points[0], confidence_points[-1]
+        if highest[1]["win_rate"] > lowest[1]["win_rate"]:
+            insights.append(
+                f"Higher-confidence entries ({highest[0]}) win {highest[1]['win_rate']:.0%} vs "
+                f"{lowest[0]}'s {lowest[1]['win_rate']:.0%} -- confidence score is well-calibrated right now."
+            )
+        elif highest[1]["win_rate"] < lowest[1]["win_rate"]:
+            insights.append(
+                f"Higher-confidence entries ({highest[0]}) win only {highest[1]['win_rate']:.0%} vs "
+                f"{lowest[0]}'s {lowest[1]['win_rate']:.0%} -- confidence score is NOT reliably predictive right now."
+            )
+
+    return insights
+
+
+def analyze_trade_history(trade_log: list[dict[str, Any]] | None, *, include_dry_run: bool = False) -> dict[str, Any]:
+    """Real, structured win/loss diagnostics over trade_log. Defaults to
+    REAL (non-dry-run) trades only -- dry-run fills don't reflect real
+    market slippage/fees and would distort the picture of how the account
+    is actually performing (explicit user direction: "we doing only real
+    data please not dry run or fake")."""
+    trade_log = trade_log or []
+    trades = [t for t in trade_log if include_dry_run or not t.get("dry_run")]
+    overall = _bucket_stats(trades)
+    if not trades:
+        return {"ok": True, "trades_analyzed": 0, "overall": overall, "insights": []}
+
+    by_exit_reason = _group_by(trades, lambda t: _exit_reason_bucket(t.get("reason")))
+    by_confidence_bucket = _group_by(trades, lambda t: _confidence_bucket_label(t.get("entry_score")))
+    by_symbol = _group_by(trades, lambda t: t.get("underlying_symbol") or t.get("symbol"))
+    by_hold_minutes_bucket = _group_by(trades, lambda t: _hold_minutes_bucket_label(t.get("hold_minutes")))
+
+    return {
+        "ok": True, "trades_analyzed": len(trades), "overall": overall,
+        "by_exit_reason": by_exit_reason, "by_confidence_bucket": by_confidence_bucket,
+        "by_symbol": by_symbol, "by_hold_minutes_bucket": by_hold_minutes_bucket,
+        "insights": _build_insights(overall, by_exit_reason, by_confidence_bucket),
+    }
+
+
+def format_analysis_summary_text(analysis: dict[str, Any], *, tuning: dict[str, Any] | None = None) -> str:
+    """Human-readable digest for the Threads post -- what the account's
+    real trading history shows, not a raw data dump. Ported directly from
+    alpaca_crypto_trade_analysis.py's own identical function. `tuning` is
+    accepted for interface parity with perps'/crypto's version but is
+    never populated by the options daily job -- options' own confidence
+    tuning already happens on its own, more frequent cadence via
+    alpaca_options_strategy._maybe_run_batch_trade_analysis and
+    maybe_auto_improve_from_backtest, so this job stays pure analysis, not
+    a second place that could also decide to move the same live
+    parameter."""
+    overall = analysis.get("overall") or {}
+    if not analysis.get("trades_analyzed"):
+        return "Options trade analysis: not enough closed real trades yet to draw conclusions."
+
+    lines = [
+        f"Options trade review ({analysis['trades_analyzed']} real trades):",
+        f"Win rate {overall['win_rate']:.0%} | Total P&L ${overall['total_pnl_usd']:.2f} | "
+        f"Avg ${overall['avg_pnl_usd']:.4f}/trade",
+    ]
+    lines.extend(analysis.get("insights") or [])
+    if tuning and tuning.get("should_apply"):
+        lines.append(
+            f"Confidence floor raised {tuning['current_threshold']:.2f} -> {tuning['recommended_threshold']:.2f} "
+            f"based on this evidence."
+        )
+    return "\n".join(lines)
+
+
 def _parse_iso(ts: str | None) -> dt.datetime | None:
     if not ts:
         return None

@@ -117,6 +117,16 @@ ALPACA_OPTIONS_BACKTEST_SWEEP_MINUTES = max(30, int(os.getenv("ALPACA_OPTIONS_BA
 # alpaca_crypto_server.py's own identical job already uses.
 ALPACA_OPTIONS_WALKFORWARD_DAY_OF_WEEK = int(os.getenv("ALPACA_OPTIONS_WALKFORWARD_DAY_OF_WEEK", "6") or "6")
 ALPACA_OPTIONS_WALKFORWARD_HOUR_UTC = int(os.getenv("ALPACA_OPTIONS_WALKFORWARD_HOUR_UTC", "13") or "13")
+# Daily aggregate win/loss review -- see alpaca_options_trade_analysis.
+# analyze_trade_history's own module comment for why this is a genuinely
+# new capability, not a duplicate of the existing 5-trade batch review or
+# confidence auto-tuners. Same hour-picking reasoning as
+# alpaca_crypto_server.py's own identical job (11 UTC there): quiet
+# relative to this market's own torch_train (5 ET, ~9-10 UTC depending on
+# DST) and the Saturday-only walkforward (13 UTC) above, so it never
+# contends with either for the shared "default" executor.
+ALPACA_OPTIONS_TRADE_ANALYSIS_HOUR_UTC = int(os.getenv("ALPACA_OPTIONS_TRADE_ANALYSIS_HOUR_UTC", "12") or "12")
+ALPACA_OPTIONS_TRADE_ANALYSIS_MINUTE_UTC = int(os.getenv("ALPACA_OPTIONS_TRADE_ANALYSIS_MINUTE_UTC", "0") or "0")
 ALPACA_OPTIONS_STARTUP_GRACE_SECONDS = max(0, int(os.getenv("ALPACA_OPTIONS_STARTUP_GRACE_SECONDS", "60") or "60"))
 ENABLE_ALPACA_OPTIONS_SCHEDULER = str(os.getenv("ENABLE_ALPACA_OPTIONS_SCHEDULER", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
 DASHBOARD_LOCAL_AUTORUN = str(os.getenv("DASHBOARD_LOCAL_AUTORUN", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
@@ -461,6 +471,13 @@ def _run_alpaca_options_backtest_sweep() -> dict[str, Any]:
         df = alpaca_options_data.load_training_dataset()
         if df.empty:
             return {"ok": True, "skipped": True, "reason": "no_data"}
+        # Applied ONCE here, before the train/test split -- see
+        # alpaca_options_backtest.run_walkforward_backtest's own identical
+        # call for the full rationale (test_df below is never routed
+        # through fit_backtest_model, which only ensures its own train
+        # slice, so without this add_model_predictions' predict_proba call
+        # would see raw NaN/missing options-columns on old data).
+        df = alpaca_options_data.ensure_options_feature_columns(df)
         cutoff_ts = df["ts"].quantile(0.7)
         train_df = df[df["ts"] < cutoff_ts]
         test_df = df[df["ts"] >= cutoff_ts]
@@ -589,6 +606,31 @@ def _run_alpaca_options_threads_hourly_status() -> dict[str, Any]:
         return {"ok": False, "error": str(exc)}
 
 
+@_locked_job("alpaca_options_trade_analysis", stale_after_sec=1800)
+def _run_alpaca_options_trade_analysis() -> dict[str, Any]:
+    """Daily aggregate win/loss review over the WHOLE real trade history --
+    see alpaca_options_trade_analysis.analyze_trade_history's own module
+    comment for why this is additive to, not a replacement for, options'
+    existing 5-trade batch review and confidence auto-tuners. Mirrors
+    alpaca_crypto_server.py's own identical job (_run_alpaca_crypto_trade_analysis)."""
+    from data import alpaca_options_trade_analysis
+    try:
+        state = alpaca_options_strategy._load_state()  # noqa: SLF001
+        trade_log = state.get("trade_log") or []
+        analysis = alpaca_options_trade_analysis.analyze_trade_history(trade_log)
+        posted = False
+        if analysis.get("trades_analyzed"):
+            summary_text = alpaca_options_trade_analysis.format_analysis_summary_text(analysis)
+            try:
+                posted = threads_post.post_trade_analysis_summary(summary_text, market="options")
+            except Exception:
+                logger.warning("[alpaca_options_server] Threads trade-analysis post failed", exc_info=True)
+        return {"ok": True, "analysis": analysis, "posted": posted}
+    except Exception as exc:
+        logger.warning("[alpaca_options_server] trade analysis failed: %s", exc)
+        return {"ok": False, "error": str(exc)}
+
+
 def _ensure_background_jobs_started() -> None:
     global _startup_done
     if _startup_done:
@@ -627,6 +669,11 @@ def _ensure_background_jobs_started() -> None:
                 _run_alpaca_options_walkforward_backtest, "cron",
                 day_of_week=ALPACA_OPTIONS_WALKFORWARD_DAY_OF_WEEK, hour=ALPACA_OPTIONS_WALKFORWARD_HOUR_UTC, minute=0,
                 id="alpaca_options_walkforward_backtest", replace_existing=True,
+            )
+            scheduler.add_job(
+                _run_alpaca_options_trade_analysis, "cron",
+                hour=ALPACA_OPTIONS_TRADE_ANALYSIS_HOUR_UTC, minute=ALPACA_OPTIONS_TRADE_ANALYSIS_MINUTE_UTC,
+                timezone="UTC", id="alpaca_options_trade_analysis", replace_existing=True,
             )
             scheduler.add_job(
                 _run_alpaca_options_fast_check, "interval", seconds=ALPACA_OPTIONS_FAST_CHECK_SECONDS,

@@ -34,11 +34,30 @@ from typing import Any
 
 import pandas as pd
 
-from data import alpaca_client
-from data.alpaca_data import FEATURE_COLUMNS, engineer_features, fetch_minute_bars, fetch_recent_minute_bars, prewarm_minute_bars
+from data import alpaca_client, options_greeks
+from data.alpaca_data import FEATURE_COLUMNS as _UNDERLYING_FEATURE_COLUMNS
+from data.alpaca_data import engineer_features, fetch_minute_bars, fetch_recent_minute_bars, prewarm_minute_bars
 from data.stock_news import get_sentiment, prewarm_sentiment
 
 logger = logging.getLogger(__name__)
+
+# Real, confirmed gap found per explicit user direction ("the options need
+# to expand and get more intelligent like perps... understand all the
+# aspect of making profit on options"): until now this model trained on
+# EXACTLY the same features as the equities strategy (see this module's
+# own docstring on why that made sense for the underlying-direction piece)
+# -- meaning it had ZERO awareness of the options market itself: how
+# expensive the premium is (implied volatility), how fast it decays
+# (theta), how sensitive it is to a further move (delta/gamma/vega). These
+# 9 columns (see options_greeks.contract_features) are computed locally
+# from a real, live reference contract's own bid/ask -- see that module's
+# own docstring for why (Alpaca's own snapshot endpoint returns no greeks/
+# IV on this account's subscription tier at all).
+OPTIONS_SPECIFIC_FEATURE_COLUMNS = [
+    "implied_volatility", "moneyness", "days_to_expiration", "bid_ask_spread_pct",
+    "delta", "gamma", "theta", "vega", "rho", "has_options_data",
+]
+FEATURE_COLUMNS = _UNDERLYING_FEATURE_COLUMNS + OPTIONS_SPECIFIC_FEATURE_COLUMNS
 
 HF_API_KEY = os.getenv("HF_API_KEY", "")
 HF_ALPACA_OPTIONS_DATASET_REPO = os.getenv("HF_ALPACA_OPTIONS_DATASET_REPO", "papylove/alpaca-options-data")
@@ -122,6 +141,76 @@ def select_contract(underlying: str, *, direction: str, current_price: float) ->
     pool = liquid if liquid else tradable
     pool.sort(key=_sort_key)
     return pool[0]
+
+
+def _options_market_features(underlying: str, current_price: float) -> dict[str, float] | None:
+    """Real, live options-market conditions for `underlying` right now --
+    IV/Greeks/moneyness/DTE/spread derived from an actual reference
+    contract's own bid/ask (see options_greeks.py's own docstring for why
+    this is computed locally rather than pulled from Alpaca directly).
+
+    Always reuses select_contract with direction="up" (a CALL) as the
+    reference, regardless of what direction the model will actually end up
+    predicting for this row -- this is a "what are current options-market
+    conditions for this underlying" measurement, not a trade decision, and
+    needs to be computed the SAME way every time (training and live) for
+    the resulting feature to mean the same thing across rows. None (not a
+    partial dict) on any failure -- a missing/illiquid chain, a stale
+    crossed quote, a contract lookup error -- callers fill every column
+    with a neutral default rather than half-populate a row (see
+    ensure_options_feature_columns below)."""
+    if current_price <= 0:
+        return None
+    try:
+        contract = select_contract(underlying, direction="up", current_price=current_price)
+        if not contract:
+            return None
+        expiration = dt.date.fromisoformat(contract["expiration_date"])
+        days_to_expiration = (expiration - dt.datetime.now(dt.timezone.utc).date()).days
+        if days_to_expiration <= 0:
+            return None
+        quote = alpaca_client.get_option_latest_quote(contract["symbol"])
+        bid, ask = quote.get("bp"), quote.get("ap")
+        return options_greeks.contract_features(
+            underlying_price=current_price, strike=float(contract["strike_price"]),
+            days_to_expiration=float(days_to_expiration), option_type="call",
+            bid=float(bid) if bid is not None else None, ask=float(ask) if ask is not None else None,
+        )
+    except Exception as exc:
+        logger.debug("[alpaca_options_data] options-market features failed for %s: %s", underlying, exc)
+        return None
+
+
+def ensure_options_feature_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Guarantees every column in OPTIONS_SPECIFIC_FEATURE_COLUMNS exists
+    and is NaN-free, deriving has_options_data from whether the OTHER
+    columns actually had a real value -- needed because pd.concat() across
+    shards collected before vs after this feature existed leaves those
+    columns fully absent (shards archived before this shipped) or legitimately
+    NaN (a live collection cycle where _options_market_features itself
+    returned None -- no liquid chain, a bad quote, whatever) for a real
+    fraction of rows. Without this, dropna(subset=[...] + FEATURE_COLUMNS)
+    in train_model/fit_backtest_model would silently drop almost the
+    ENTIRE historical archive the moment these columns were added, just
+    because most of it predates them -- exactly the kind of easy-to-miss
+    bug a fresh feature rollout could cause. Called identically at both
+    training-load time (on the full archived DataFrame) and live-predict
+    time (on the single latest_feature_row) so the two stay consistent."""
+    raw_cols = [c for c in OPTIONS_SPECIFIC_FEATURE_COLUMNS if c != "has_options_data"]
+    for col in raw_cols:
+        if col not in df.columns:
+            df[col] = float("nan")
+    # has_options_data is derived from the raw columns' OWN NaN-ness only
+    # the FIRST time this runs -- computing it fresh on every call would
+    # break idempotency the instant it's called twice on the same frame
+    # (the very first call's own fillna(0.0) below makes every column
+    # non-NaN, so a naive re-derive would then see "no NaNs" and wrongly
+    # flag already-neutral-filled rows as real data).
+    if "has_options_data" not in df.columns:
+        df["has_options_data"] = df[raw_cols].notna().all(axis=1).astype(float)
+    df[raw_cols] = df[raw_cols].fillna(0.0)
+    df["has_options_data"] = df["has_options_data"].fillna(0.0)
+    return df
 
 
 # ---------------------------------------------------------------------------
@@ -544,6 +633,19 @@ def collect_dataset_rows(symbols: list[str] | None = None) -> pd.DataFrame:
             if feats.empty:
                 continue
             feats.insert(0, "symbol", symbol)
+            # Options-market features (IV/Greeks/moneyness/etc.) are a
+            # POINT-IN-TIME snapshot of a real live quote -- there's no
+            # historical option-quote series to backfill every past minute
+            # in `feats` with, so this only ever populates the LAST (most
+            # recent) row here; every earlier historical row stays NaN and
+            # gets neutrally filled later (see ensure_options_feature_columns)
+            # rather than fabricated.
+            current_price = float(one_min_df["close"].iloc[-1])
+            market_feats = _options_market_features(symbol, current_price)
+            if market_feats:
+                last_idx = feats.index[-1]
+                for key, value in market_feats.items():
+                    feats.loc[last_idx, key] = value
             frames.append(feats)
         except Exception as exc:
             logger.warning("[alpaca_options_data] collect failed for %s: %s", symbol, exc)
@@ -555,7 +657,12 @@ def collect_dataset_rows(symbols: list[str] | None = None) -> pd.DataFrame:
 def latest_feature_row(symbol: str) -> dict[str, Any] | None:
     """The single most-recent feature row for one underlying, for live
     prediction. Its label is always NaN (the future outcome hasn't
-    happened yet) -- expected, we only need the feature columns here."""
+    happened yet) -- expected, we only need the feature columns here.
+
+    The options-market columns (see OPTIONS_SPECIFIC_FEATURE_COLUMNS) are
+    filled inline here rather than via ensure_options_feature_columns
+    (that helper is DataFrame-oriented, for the training-load path) --
+    same neutral-default-plus-flag logic, just applied to a single dict."""
     try:
         one_min_df = fetch_recent_minute_bars(symbol)
         sentiment = get_sentiment(symbol, use_limited_sources=True)
@@ -563,9 +670,15 @@ def latest_feature_row(symbol: str) -> dict[str, Any] | None:
         if feats.empty:
             return None
         last = feats.iloc[-1]
-        row = {col: float(last[col]) for col in FEATURE_COLUMNS}
+        current_price = float(one_min_df["close"].iloc[-1])
+        row = {col: float(last[col]) for col in _UNDERLYING_FEATURE_COLUMNS}
+        market_feats = _options_market_features(symbol, current_price) or {}
+        raw_cols = [c for c in OPTIONS_SPECIFIC_FEATURE_COLUMNS if c != "has_options_data"]
+        for col in raw_cols:
+            row[col] = float(market_feats[col]) if col in market_feats else 0.0
+        row["has_options_data"] = 1.0 if market_feats else 0.0
         row["symbol"] = symbol
-        row["current_price"] = float(one_min_df["close"].iloc[-1])
+        row["current_price"] = current_price
         row["short_ma"] = float(last["ma_15"])
         return row
     except Exception as exc:

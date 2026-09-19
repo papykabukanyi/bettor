@@ -51,7 +51,7 @@ from sklearn.metrics import accuracy_score, roc_auc_score
 
 from data import alpaca_options_strategy as strat
 from data import walkforward
-from data.alpaca_options_data import FEATURE_COLUMNS, load_training_dataset
+from data.alpaca_options_data import FEATURE_COLUMNS, ensure_options_feature_columns, load_training_dataset
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +87,9 @@ def fit_backtest_model(train_df: pd.DataFrame, *, min_rows: int = 300) -> dict[s
     repeatedly inside a parameter sweep, optimized for fast repeated runs,
     not the one daily production retrain. None (technical-only simulation)
     if there isn't enough training-window data yet."""
+    # Same real gap fixed in alpaca_options_model.py's own identical call --
+    # see that module's comment for the full rationale.
+    train_df = ensure_options_feature_columns(train_df)
     labeled = train_df.dropna(subset=["label_up"] + FEATURE_COLUMNS).copy()
     if len(labeled) < min_rows:
         return None
@@ -123,8 +126,18 @@ def fit_backtest_model(train_df: pd.DataFrame, *, min_rows: int = 300) -> dict[s
 
 def add_model_predictions(df: pd.DataFrame, fitted: dict[str, Any] | None) -> pd.DataFrame:
     """Batch-predict once, reused across a parameter sweep -- same
-    large-speedup rationale as alpaca_backtest.add_model_predictions."""
-    df = df.copy()
+    large-speedup rationale as alpaca_backtest.add_model_predictions.
+
+    ensure_options_feature_columns is applied here too (not just at
+    run_walkforward_backtest's/the sweep job's own call sites) -- this is
+    the actual choke point that reads `fitted["feature_cols"]` (which
+    includes the options-specific columns, see alpaca_options_data.py)
+    straight off `df`, so ANY caller (a test building its own synthetic
+    df, a future one, whatever) is safe here regardless of whether it
+    remembered to call that helper first. Idempotent, so the callers that
+    already do are unaffected."""
+    from data.alpaca_options_data import ensure_options_feature_columns
+    df = ensure_options_feature_columns(df.copy())
     if fitted is None:
         df["model_probability_up"] = np.nan
         return df
@@ -414,6 +427,14 @@ def run_walkforward_backtest(
     df = load_training_dataset(max_shards=max_shards)
     if df.empty:
         return {"ok": False, "reason": "no_data"}
+    # Applied ONCE here, before folding -- see fit_backtest_model's own
+    # identical call for the full rationale. Without this, simulate()'s
+    # own test-fold slice (never routed through fit_backtest_model, which
+    # only ensures its OWN train slice) would still carry raw NaN/missing
+    # options-columns straight into add_model_predictions' predict_proba
+    # call. Idempotent: fit_backtest_model's own call below becomes a
+    # harmless no-op once this has already run.
+    df = ensure_options_feature_columns(df)
 
     result = walkforward.run_walkforward_folds(
         df, fit_fn=fit_backtest_model, simulate_fn=simulate, fold_bounds=fold_bounds,

@@ -43,7 +43,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, roc_auc_score
 from sklearn.model_selection import TimeSeriesSplit
 
-from data.alpaca_options_data import FEATURE_COLUMNS, latest_feature_row, load_training_dataset
+from data.alpaca_options_data import FEATURE_COLUMNS, ensure_options_feature_columns, latest_feature_row, load_training_dataset
 
 logger = logging.getLogger(__name__)
 
@@ -205,6 +205,14 @@ def _feature_importance_map(model: Any, feature_cols: list[str]) -> dict[str, fl
 
 
 def _prepare_training_frame(df: pd.DataFrame) -> pd.DataFrame:
+    # Real, confirmed gap this would otherwise cause: the options-specific
+    # columns in FEATURE_COLUMNS (implied_volatility/delta/gamma/etc.,
+    # see alpaca_options_data.py's own docstring) don't exist at all on
+    # archived shards collected before this feature shipped -- without
+    # this call, the dropna below would silently drop almost the ENTIRE
+    # historical archive the first time these columns were added, just
+    # because most of it predates them.
+    df = ensure_options_feature_columns(df)
     labeled = df.dropna(subset=["label_up"] + FEATURE_COLUMNS).copy()
     labeled["label_up"] = labeled["label_up"].astype(int)
     labeled["symbol_code"] = labeled["symbol"].astype("category").cat.codes
