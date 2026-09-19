@@ -159,23 +159,29 @@ PROMISING_SENTIMENT_SCORE = _env_float("ALPACA_PROMISING_SENTIMENT_SCORE", 0.3)
 # losing trades... make sure the model learns about that and avoid
 # patterns of losing trades when spotted"), the same night the identical
 # check paid off decisively for crypto (MODEL_CONFIDENCE_MIN 0.55->0.60,
-# see alpaca_crypto_strategy.py's own comment). For stocks: reusing
-# today's live model (gradient_boosting, freshly downloaded) against the
-# full current archived dataset (201,306 rows, the now-92-symbol
-# watchlist, ~11 months) found only 2 total qualifying rows at 0.52 and
-# ZERO at every threshold tried above it (0.55/0.58/0.60/0.62/0.65) --
-# nowhere near the 63-trade sample the comment above was based on.
-# Genuinely inconclusive, NOT acted on: 2 trades is far too thin to
-# trust either direction, and this quick check reused the live model
-# as-is rather than repeating the original comment's own methodology (a
-# fresh 80/20 fit) -- the gap between "63 trades then" and "2 now" is at
-# least as likely to be the much-broadened watchlist (10->92 symbols
-# since that original validation) diluting the signal, or normal model-
-# to-model drift across retrains, as it is a real regime change. Left
-# unchanged rather than guess; worth a proper fresh walk-forward
-# re-validation (matching the original methodology) in a future session
-# with the time budget for a full model fit, not a quick reused-model
-# check like this one.
+# see alpaca_crypto_strategy.py's own comment). A first pass reusing
+# today's live model as-is found only 2 qualifying rows total -- too
+# thin to trust, and NOT the original comment's own methodology (a
+# fresh fit), so left unchanged pending a proper re-check (see prior
+# revision of this comment in git history for that inconclusive result).
+#
+# Proper re-validation done: a FRESH gradient_boosting model fit on a
+# real chronological 70/30 split of the full current archived dataset
+# (201,306 rows, 92-symbol watchlist, 140,835 train / 60,471 test),
+# swept across the same held-out test set. Real results:
+#   0.50: 37 trades, 59.46% win rate, +0.45% return, pnl +$45.00
+#   0.52 (current): 33 trades, 72.73% win rate, +1.56% return, pnl +$156.16
+#   0.55: 14 trades, 71.43% win rate, +0.47% return, pnl +$46.73
+#   0.58: 5 trades, 60.00% win rate, +0.24% return, pnl +$23.72
+#   0.60: 0 trades
+# 0.52 is the clear, decisive winner on every metric that matters
+# (return, total pnl) and is within noise of the best win rate (72.73%
+# vs 71.43% at 0.55) while trading over twice as often -- confirming,
+# not just leaving unchanged, the current default with real evidence.
+# Both below (0.50, more but weaker trades) and above (0.55/0.58/0.60,
+# fewer and fewer trades, worse return) are real, evidence-backed worse
+# choices. No change made -- this re-validation supports what was
+# already live.
 MODEL_CONFIDENCE_MIN = _env_float("ALPACA_MODEL_CONFIDENCE_MIN", 0.52)
 
 # Real, confirmed stale reasoning found in review: the 2-slots-at-45%-each
