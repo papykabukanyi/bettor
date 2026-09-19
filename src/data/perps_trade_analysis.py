@@ -129,7 +129,7 @@ def _build_insights(
     stop_loss = by_exit_reason.get("stop_loss")
     if stop_loss and stop_loss["trades"] >= MIN_BUCKET_TRADES:
         insights.append(
-            f"{stop_loss['trades']} stop_loss exits, avg ${stop_loss['avg_pnl_usd']:.4f}/trade "
+            f"{stop_loss['trades']} stop_loss exits, avg ${stop_loss['avg_pnl_usd']:.2f}/trade "
             f"(${stop_loss['total_pnl_usd']:.2f} total)."
         )
     max_hold = by_exit_reason.get("max_hold_time")
@@ -140,7 +140,7 @@ def _build_insights(
         )
     take_profit = by_exit_reason.get("take_profit")
     if take_profit and take_profit["trades"] >= MIN_BUCKET_TRADES:
-        insights.append(f"{take_profit['trades']} take_profit exits, avg ${take_profit['avg_pnl_usd']:.4f}/trade.")
+        insights.append(f"{take_profit['trades']} take_profit exits, avg ${take_profit['avg_pnl_usd']:.2f}/trade.")
 
     confidence_points = sorted(
         ((k, v) for k, v in by_confidence.items() if v["trades"] >= MIN_BUCKET_TRADES), key=lambda kv: kv[0],
@@ -491,7 +491,7 @@ def format_analysis_summary_text(analysis: dict[str, Any], *, tuning: dict[str, 
     lines = [
         f"Perps trade review ({analysis['trades_analyzed']} real trades):",
         f"Win rate {overall['win_rate']:.0%} | Total P&L ${overall['total_pnl_usd']:.2f} | "
-        f"Avg ${overall['avg_pnl_usd']:.4f}/trade",
+        f"Avg ${overall['avg_pnl_usd']:.2f}/trade",
     ]
     lines.extend(analysis.get("insights") or [])
     if tuning and tuning.get("should_apply"):

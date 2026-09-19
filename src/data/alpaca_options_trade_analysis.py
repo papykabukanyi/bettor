@@ -296,7 +296,7 @@ def _build_insights(
     stop_loss = by_exit_reason.get("stop_loss")
     if stop_loss and stop_loss["trades"] >= MIN_BUCKET_TRADES:
         insights.append(
-            f"{stop_loss['trades']} stop_loss exits, avg ${stop_loss['avg_pnl_usd']:.4f}/trade "
+            f"{stop_loss['trades']} stop_loss exits, avg ${stop_loss['avg_pnl_usd']:.2f}/trade "
             f"(${stop_loss['total_pnl_usd']:.2f} total)."
         )
     max_hold = by_exit_reason.get("max_hold_time")
@@ -307,7 +307,7 @@ def _build_insights(
         )
     take_profit = by_exit_reason.get("take_profit")
     if take_profit and take_profit["trades"] >= MIN_BUCKET_TRADES:
-        insights.append(f"{take_profit['trades']} take_profit exits, avg ${take_profit['avg_pnl_usd']:.4f}/trade.")
+        insights.append(f"{take_profit['trades']} take_profit exits, avg ${take_profit['avg_pnl_usd']:.2f}/trade.")
     near_expiration = by_exit_reason.get("near_expiration")
     if near_expiration and near_expiration["trades"] >= MIN_BUCKET_TRADES:
         insights.append(
@@ -377,7 +377,7 @@ def format_analysis_summary_text(analysis: dict[str, Any], *, tuning: dict[str, 
     lines = [
         f"Options trade review ({analysis['trades_analyzed']} real trades):",
         f"Win rate {overall['win_rate']:.0%} | Total P&L ${overall['total_pnl_usd']:.2f} | "
-        f"Avg ${overall['avg_pnl_usd']:.4f}/trade",
+        f"Avg ${overall['avg_pnl_usd']:.2f}/trade",
     ]
     lines.extend(analysis.get("insights") or [])
     if tuning and tuning.get("should_apply"):
