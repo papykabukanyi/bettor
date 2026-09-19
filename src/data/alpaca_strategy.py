@@ -154,6 +154,28 @@ PROMISING_SENTIMENT_SCORE = _env_float("ALPACA_PROMISING_SENTIMENT_SCORE", 0.3)
 # trades but only +3.11%), so this isn't "loosen it as much as possible"
 # the way perps' volume gate wasn't -- 0.52 is a real, evidence-picked
 # middle, not the loosest option tested.
+#
+# Re-checked this per explicit user direction ("study all the winning and
+# losing trades... make sure the model learns about that and avoid
+# patterns of losing trades when spotted"), the same night the identical
+# check paid off decisively for crypto (MODEL_CONFIDENCE_MIN 0.55->0.60,
+# see alpaca_crypto_strategy.py's own comment). For stocks: reusing
+# today's live model (gradient_boosting, freshly downloaded) against the
+# full current archived dataset (201,306 rows, the now-92-symbol
+# watchlist, ~11 months) found only 2 total qualifying rows at 0.52 and
+# ZERO at every threshold tried above it (0.55/0.58/0.60/0.62/0.65) --
+# nowhere near the 63-trade sample the comment above was based on.
+# Genuinely inconclusive, NOT acted on: 2 trades is far too thin to
+# trust either direction, and this quick check reused the live model
+# as-is rather than repeating the original comment's own methodology (a
+# fresh 80/20 fit) -- the gap between "63 trades then" and "2 now" is at
+# least as likely to be the much-broadened watchlist (10->92 symbols
+# since that original validation) diluting the signal, or normal model-
+# to-model drift across retrains, as it is a real regime change. Left
+# unchanged rather than guess; worth a proper fresh walk-forward
+# re-validation (matching the original methodology) in a future session
+# with the time budget for a full model fit, not a quick reused-model
+# check like this one.
 MODEL_CONFIDENCE_MIN = _env_float("ALPACA_MODEL_CONFIDENCE_MIN", 0.52)
 
 # Real, confirmed stale reasoning found in review: the 2-slots-at-45%-each
