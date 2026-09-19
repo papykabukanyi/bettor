@@ -414,17 +414,36 @@ def _suppress_torch_numpy_warning() -> None:
 
 
 class _TorchMLPClassifier:
-    """Hand-built feedforward neural net (2 hidden layers, ReLU, sigmoid
-    output via BCEWithLogitsLoss) wrapped in a scikit-learn-compatible
-    interface (.fit/.predict/.predict_proba) so it drops into the same
-    scoring/persistence machinery as every sklearn/ensemble candidate in
-    this file -- a genuinely custom model, not one of sklearn's canned
-    classifiers, per the user's explicit "fully custom model" request.
-    Accepts sample_weight in fit() so options' own _recency_sample_weight
-    can feed it exactly like the walk-forward loop above -- premium/IV
-    dynamics move fast enough that recency weighting is as relevant to this
-    candidate as to every other one here, unlike stocks/crypto's simpler
-    uniformly-weighted version of this same class.
+    """Hand-built feedforward neural net (3 hidden layers, ReLU + dropout,
+    sigmoid output via BCEWithLogitsLoss) wrapped in a scikit-learn-
+    compatible interface (.fit/.predict/.predict_proba) so it drops into
+    the same scoring/persistence machinery as every sklearn/ensemble
+    candidate in this file -- a genuinely custom model, not one of
+    sklearn's canned classifiers, per the user's explicit "fully custom
+    model" request. Accepts sample_weight in fit() so options' own
+    _recency_sample_weight can feed it exactly like the walk-forward loop
+    above -- premium/IV dynamics move fast enough that recency weighting
+    is as relevant to this candidate as to every other one here, unlike
+    stocks/crypto's simpler uniformly-weighted version of this same class.
+
+    Widened from the original 2-layer (32->16->1), no-regularization
+    network per explicit user direction ("get a way more powerful
+    [model]... incremental upgrade"): 3 layers (64->32->16->1) gives real
+    extra capacity to learn interactions across FEATURE_COLUMNS, which
+    grew meaningfully this same session (the 9 new options-specific
+    Greeks/IV columns, see alpaca_options_data.py) -- the old hidden_dim=32
+    was barely larger than the OLD input width alone. Dropout (p=0.2
+    between every hidden layer) and Adam weight_decay are the standard,
+    well-established pairing for that extra capacity -- without them,
+    more capacity is just more room to overfit financial data's real,
+    persistent noise. Early stopping (see fit() below) on an internal,
+    CHRONOLOGICAL validation slice carved from the training data itself
+    (never touching train_torch_candidate_model's own held-out test set)
+    replaces the old fixed 30-epoch guess with a data-driven stopping
+    point. None of this bypasses the existing evidence gate --
+    train_torch_candidate_model still only promotes this candidate if it
+    beats the currently-live model's freshly-scored performance on that
+    same untouched test set, exactly as before.
 
     `torch` is imported lazily inside these methods, never at module level:
     measured locally, `import torch` alone costs ~154MB RSS -- a real bite
@@ -447,24 +466,36 @@ class _TorchMLPClassifier:
     keeps the joblib-pickled object's own footprint to just small tensors +
     arrays."""
 
-    def __init__(self, input_dim: int, hidden_dim: int = 32, epochs: int = 30,
-                 lr: float = 1e-3, batch_size: int = 256, random_state: int = 42):
+    def __init__(self, input_dim: int, hidden_dim: int = 64, epochs: int = 100,
+                 lr: float = 1e-3, batch_size: int = 256, random_state: int = 42,
+                 dropout: float = 0.2, weight_decay: float = 1e-5,
+                 early_stopping_patience: int = 8, validation_fraction: float = 0.15):
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
         self.epochs = epochs
         self.lr = lr
         self.batch_size = batch_size
         self.random_state = random_state
+        self.dropout = dropout
+        self.weight_decay = weight_decay
+        # epochs=100 is now a genuine CEILING, not a fixed run length --
+        # early stopping (see fit() below) almost always stops well before
+        # it in practice; this just bounds the worst case.
+        self.early_stopping_patience = early_stopping_patience
+        self.validation_fraction = validation_fraction
         self._state_dict: dict[str, Any] | None = None
         self._x_mean: np.ndarray | None = None
         self._x_std: np.ndarray | None = None
 
     def _build_net(self):
         from torch import nn
+        mid = max(self.hidden_dim // 2, 8)
+        small = max(self.hidden_dim // 4, 4)
         return nn.Sequential(
-            nn.Linear(self.input_dim, self.hidden_dim), nn.ReLU(),
-            nn.Linear(self.hidden_dim, max(self.hidden_dim // 2, 4)), nn.ReLU(),
-            nn.Linear(max(self.hidden_dim // 2, 4), 1),
+            nn.Linear(self.input_dim, self.hidden_dim), nn.ReLU(), nn.Dropout(self.dropout),
+            nn.Linear(self.hidden_dim, mid), nn.ReLU(), nn.Dropout(self.dropout),
+            nn.Linear(mid, small), nn.ReLU(),
+            nn.Linear(small, 1),
         )
 
     def fit(self, x: np.ndarray, y: np.ndarray, sample_weight: np.ndarray | None = None) -> "_TorchMLPClassifier":
@@ -480,15 +511,51 @@ class _TorchMLPClassifier:
         self._x_mean, self._x_std = x_mean, x_std
         x_norm = (x - x_mean) / x_std
 
-        net = self._build_net()
-        x_t = torch.tensor(x_norm, dtype=torch.float32)
-        y_t = torch.tensor(y, dtype=torch.float32).view(-1, 1)
-        w_t = torch.tensor(sample_weight, dtype=torch.float32).view(-1, 1) if sample_weight is not None else None
+        # Internal early-stopping split -- CHRONOLOGICAL (a tail slice, not
+        # random rows), matching this whole codebase's own "never train on
+        # the future to validate the past" discipline elsewhere (walk-
+        # forward CV, backtest train/test splits, etc.). Falls back to no
+        # early stopping (trains the full fixed epoch count) if there's too
+        # little data for a meaningful validation slice -- an early-stage
+        # cold start shouldn't crash training, just skip this refinement.
+        n_total = len(x_norm)
+        n_val = int(n_total * self.validation_fraction)
+        use_early_stopping = n_val >= 20 and (n_total - n_val) >= 20
+        if use_early_stopping:
+            x_fit, y_fit = x_norm[:-n_val], y[:-n_val]
+            x_val, y_val = x_norm[-n_val:], y[-n_val:]
+            w_fit = sample_weight[:-n_val] if sample_weight is not None else None
+            w_val = sample_weight[-n_val:] if sample_weight is not None else None
+        else:
+            x_fit, y_fit, w_fit = x_norm, y, sample_weight
+            x_val = y_val = w_val = None
 
-        opt = torch.optim.Adam(net.parameters(), lr=self.lr)
+        net = self._build_net()
+        x_t = torch.tensor(x_fit, dtype=torch.float32)
+        y_t = torch.tensor(y_fit, dtype=torch.float32).view(-1, 1)
+        w_t = torch.tensor(w_fit, dtype=torch.float32).view(-1, 1) if w_fit is not None else None
+
+        opt = torch.optim.Adam(net.parameters(), lr=self.lr, weight_decay=self.weight_decay)
         loss_fn = nn.BCEWithLogitsLoss(reduction="none" if w_t is not None else "mean")
         n = len(x_t)
+        best_val_loss = float("inf")
+        best_state: dict[str, Any] | None = None
+        epochs_without_improvement = 0
+        x_val_t = torch.tensor(x_val, dtype=torch.float32) if x_val is not None else None
+        y_val_t = torch.tensor(y_val, dtype=torch.float32).view(-1, 1) if y_val is not None else None
+        # Weighted the SAME way training loss is -- a row training barely
+        # cares about (a heavily downweighted stale/noisy one) shouldn't
+        # be able to veto an epoch that's genuinely improving on what
+        # actually matters. Real, confirmed by a test: an UNWEIGHTED
+        # validation loss let a handful of deliberately-mislabeled,
+        # near-zero-weight rows in the validation tail dominate the
+        # stopping decision and discard an epoch that had correctly
+        # learned the real, heavily-weighted signal.
+        w_val_t = torch.tensor(w_val, dtype=torch.float32).view(-1, 1) if w_val is not None else None
+        val_loss_fn = nn.BCEWithLogitsLoss(reduction="none" if w_val_t is not None else "mean")
+
         for _epoch in range(self.epochs):
+            net.train()
             perm = torch.randperm(n)
             for start in range(0, n, self.batch_size):
                 idx = perm[start:start + self.batch_size]
@@ -500,7 +567,23 @@ class _TorchMLPClassifier:
                 loss.backward()
                 opt.step()
 
-        self._state_dict = {k: v.clone() for k, v in net.state_dict().items()}
+            if not use_early_stopping:
+                continue
+            net.eval()
+            with torch.no_grad():
+                val_logits = net(x_val_t)
+                val_loss_raw = val_loss_fn(val_logits, y_val_t)
+                val_loss = float((val_loss_raw * w_val_t).mean() if w_val_t is not None else val_loss_raw)
+            if val_loss < best_val_loss - 1e-4:
+                best_val_loss = val_loss
+                best_state = {k: v.clone() for k, v in net.state_dict().items()}
+                epochs_without_improvement = 0
+            else:
+                epochs_without_improvement += 1
+                if epochs_without_improvement >= self.early_stopping_patience:
+                    break
+
+        self._state_dict = best_state if best_state is not None else {k: v.clone() for k, v in net.state_dict().items()}
         del net, x_t, y_t, opt
         return self
 
