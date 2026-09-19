@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Kalshi 15-Minute Markets</title>
+<link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='cumdev-icon.svg') }}">
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg: #0a0c11; --surface: #12151c; --surface2: #191d27; --border: #232838;
+    --text: #e7ecf5; --muted: #8792a8; --green: #22c55e; --gdim: #12291a;
+    --red: #ef4444; --rdim: #2a1414; --yellow: #eab308; --blue: #3b82f6; --r: 10px;
+  }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    padding: 20px; max-width: 1150px; margin: 0 auto;
+  }
+  header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; margin-bottom: 18px; }
+  h1 { font-size: 20px; font-weight: 700; letter-spacing: -0.01em; }
+  .badge { display: inline-block; padding: 4px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+  .badge.dry { background: var(--gdim); color: var(--green); }
+  .badge.live { background: var(--rdim); color: var(--red); }
+  .badge.warn { background: #2a2510; color: var(--yellow); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin-bottom: 16px; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r); padding: 14px 16px; }
+  .card h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin-bottom: 8px; font-weight: 600; }
+  .stat { font-size: 22px; font-weight: 700; }
+  .stat.pos { color: var(--green); }
+  .stat.neg { color: var(--red); }
+  .sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  section { margin-bottom: 20px; }
+  section h3 { font-size: 14px; margin-bottom: 8px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+  table { width: 100%; border-collapse: collapse; background: var(--surface); border: 1px solid var(--border); border-radius: var(--r); overflow: hidden; }
+  th, td { text-align: left; padding: 8px 10px; font-size: 13px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  th { color: var(--muted); font-weight: 600; background: var(--surface2); }
+  tr:last-child td { border-bottom: none; }
+  .tag { padding: 2px 8px; border-radius: 6px; font-size: 11px; font-weight: 600; }
+  .tag.yes { background: var(--gdim); color: var(--green); }
+  .tag.no { background: var(--rdim); color: var(--red); }
+  .empty { color: var(--muted); padding: 14px; text-align: center; }
+  .scroll-x { overflow-x: auto; }
+  footer { color: var(--muted); font-size: 12px; text-align: center; margin-top: 24px; }
+  a { color: var(--blue); }
+  .toggle-btn {
+    display: inline-flex; align-items: center; gap: 6px; padding: 6px 14px; border-radius: 999px;
+    background: var(--surface2); border: 1px solid var(--border); color: var(--text);
+    text-decoration: none; font-size: 12px; font-weight: 600; transition: background-color .15s ease;
+  }
+  .toggle-btn:hover { background: var(--border); }
+  .config-grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 6px 16px;
+    background: var(--surface); border: 1px solid var(--border); border-radius: var(--r); padding: 14px 16px;
+  }
+  .config-grid div { display: flex; justify-content: space-between; font-size: 12px; padding: 3px 0; }
+  .config-grid .k { color: var(--muted); }
+  .config-grid .v { font-weight: 600; }
+  .notice {
+    background: #2a2510; border: 1px solid #4a3f10; color: var(--yellow); border-radius: var(--r);
+    padding: 10px 14px; font-size: 12px; margin-bottom: 16px;
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1><img src="{{ url_for('static', filename='cumdev-icon.svg') }}" alt="CUMDEV" width="24" height="24" style="vertical-align:-5px;border-radius:6px;margin-right:8px;">&#9203; Kalshi 15-Minute Markets</h1>
+  <div style="display:flex; align-items:center; gap:10px;">
+    <span id="mode-badge" class="badge dry">&nbsp;</span>
+    <a href="/" class="toggle-btn">&#8646; Hub</a>
+    <a href="/perps" class="toggle-btn">&#8646; Perps</a>
+  </div>
+</header>
+
+<div class="notice" id="new-market-notice">
+  A new market build in progress -- data collection and model training run
+  live now; live order placement stays dry-run-only until this account's
+  own order-execution mechanics are verified against a real fill.
+</div>
+
+<div class="grid">
+  <div class="card"><h2>Positions</h2><div id="position-count" class="stat">--</div><div class="sub" id="position-sub">--</div></div>
+  <div class="card"><h2>Today's P&amp;L</h2><div id="today-pnl" class="stat">--</div><div class="sub" id="total-pnl-sub">--</div></div>
+  <div class="card"><h2>Direction Model</h2><div id="model-status" class="stat">--</div><div class="sub" id="model-sub">--</div></div>
+  <div class="card"><h2>Win Rate</h2><div id="win-rate" class="stat">--</div><div class="sub" id="win-rate-sub">--</div></div>
+</div>
+
+<section>
+  <h3>Strategy &amp; Server Config</h3>
+  <div class="config-grid" id="config-grid">
+    <div><span class="k">Live trading</span><span class="v" id="cfg-live">--</span></div>
+    <div><span class="k">Universe</span><span class="v" id="cfg-universe">--</span></div>
+    <div><span class="k">Position size</span><span class="v" id="cfg-size">--</span></div>
+    <div><span class="k">Max concurrent</span><span class="v" id="cfg-maxpos">--</span></div>
+    <div><span class="k">Model confidence min</span><span class="v" id="cfg-conf">--</span></div>
+    <div><span class="k">Min time-to-close for entry</span><span class="v" id="cfg-mintime">--</span></div>
+    <div><span class="k">Cycle</span><span class="v" id="cfg-cycle">--</span></div>
+    <div><span class="k">Train</span><span class="v" id="cfg-train">--</span></div>
+  </div>
+</section>
+
+<section>
+  <h3>Open Positions</h3>
+  <div class="scroll-x">
+    <table>
+      <thead><tr><th>Coin</th><th>Side</th><th>Count</th><th>Entry Price</th><th>Opened</th><th>Closes In</th><th>Mode</th></tr></thead>
+      <tbody id="positions-body"><tr><td colspan="7" class="empty">No open positions</td></tr></tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <h3>Recent Trades</h3>
+  <div class="scroll-x">
+    <table>
+      <thead><tr><th>Coin</th><th>Side</th><th>Result</th><th>Count</th><th>Entry Price</th><th>P&amp;L</th><th>Closed</th><th>Mode</th></tr></thead>
+      <tbody id="trades-body"><tr><td colspan="8" class="empty">No trades yet</td></tr></tbody>
+    </table>
+  </div>
+</section>
+
+<footer>Kalshi 15-Minute Markets &middot; auto-refreshes every 10s</footer>
+
+<script>
+const fmtUsd = (v) => (v === null || v === undefined || isNaN(v)) ? "--" : "$" + Number(v).toFixed(2);
+const fmtPct = (v) => (v === null || v === undefined || isNaN(v)) ? "--" : (Number(v) * 100).toFixed(1) + "%";
+const fmtTime = (iso) => { if (!iso) return "--"; try { return new Date(iso).toLocaleString(); } catch (e) { return "--"; } };
+const fmtSeconds = (s) => {
+  if (s === null || s === undefined || isNaN(s)) return "--";
+  if (s <= 0) return "closed";
+  const m = Math.floor(s / 60), sec = Math.floor(s % 60);
+  return `${m}m ${sec}s`;
+};
+
+async function refreshStatus() {
+  try {
+    const res = await fetch("/api/kalshi15m/status");
+    const data = await res.json();
+    if (!data.ok) return;
+
+    const modeBadge = document.getElementById("mode-badge");
+    if (data.live_trading_enabled) {
+      modeBadge.textContent = "LIVE";
+      modeBadge.className = "badge live";
+    } else {
+      modeBadge.textContent = "DRY RUN";
+      modeBadge.className = "badge dry";
+    }
+
+    document.getElementById("position-count").textContent = data.open_position_count ?? "--";
+    document.getElementById("position-sub").textContent = `of ${data.max_concurrent_positions ?? "--"} max`;
+
+    const todayPnl = data.today_realized_pnl_usd ?? 0;
+    const todayEl = document.getElementById("today-pnl");
+    todayEl.textContent = fmtUsd(todayPnl);
+    todayEl.className = "stat " + (todayPnl > 0 ? "pos" : todayPnl < 0 ? "neg" : "");
+    document.getElementById("total-pnl-sub").textContent = `all-time ${fmtUsd(data.total_realized_pnl_usd)} · ${data.trade_count || 0} trades`;
+
+    const model = data.model || {};
+    document.getElementById("model-status").textContent = model.trained ? (model.model_type || "trained") : "not trained yet";
+    document.getElementById("model-sub").textContent = model.rows ? `${model.rows} rows` : "collecting data";
+
+    const wr = data.win_rate || {};
+    document.getElementById("win-rate").textContent = wr.win_rate != null ? fmtPct(wr.win_rate) : "--";
+    document.getElementById("win-rate-sub").textContent = wr.trade_count
+      ? `${wr.win_count}/${wr.trade_count} all-time`
+      : "no closed real trades yet";
+
+    const p = data.params || {};
+    document.getElementById("cfg-live").textContent = data.live_trading_enabled ? "ON" : "OFF (dry-run)";
+    document.getElementById("cfg-universe").textContent = (data.universe || []).join(", ") || "--";
+    document.getElementById("cfg-size").textContent = p.position_size_pct != null ? fmtPct(p.position_size_pct) : "--";
+    document.getElementById("cfg-maxpos").textContent = p.max_concurrent_positions ?? "--";
+    document.getElementById("cfg-conf").textContent = p.model_confidence_min != null ? fmtPct(p.model_confidence_min) : "--";
+    document.getElementById("cfg-mintime").textContent = p.min_seconds_to_close_for_entry != null ? `${p.min_seconds_to_close_for_entry}s` : "--";
+    document.getElementById("cfg-cycle").textContent = p.cycle_minutes != null ? `every ${p.cycle_minutes} min` : "--";
+    document.getElementById("cfg-train").textContent = p.train_hour_et != null ? `daily ${String(p.train_hour_et).padStart(2, "0")}:00 ET` : "--";
+
+    const tbody = document.getElementById("positions-body");
+    const positions = data.positions || [];
+    if (positions.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="7" class="empty">No open positions</td></tr>';
+    } else {
+      tbody.innerHTML = positions.map(pos => `
+        <tr>
+          <td>${pos.coin || "--"}</td>
+          <td><span class="tag ${pos.side}">${(pos.side || "--").toUpperCase()}</span></td>
+          <td>${pos.count ?? "--"}</td>
+          <td>${fmtUsd(pos.entry_price)}</td>
+          <td>${fmtTime(pos.opened_at)}</td>
+          <td>${fmtSeconds(pos.seconds_to_close)}</td>
+          <td>${pos.dry_run ? "dry-run" : "live"}</td>
+        </tr>`).join("");
+    }
+  } catch (e) { console.error("status refresh failed", e); }
+}
+
+async function refreshTrades() {
+  try {
+    const res = await fetch("/api/kalshi15m/trades");
+    const data = await res.json();
+    const tbody = document.getElementById("trades-body");
+    const trades = (data.trades || []).slice(0, 50);
+    if (trades.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="8" class="empty">No trades yet</td></tr>';
+      return;
+    }
+    tbody.innerHTML = trades.map(t => {
+      const pnl = t.realized_pnl_usd ?? 0;
+      const pnlClass = pnl > 0 ? "pos" : pnl < 0 ? "neg" : "";
+      return `
+        <tr>
+          <td>${t.coin || "--"}</td>
+          <td><span class="tag ${t.side}">${(t.side || "--").toUpperCase()}</span></td>
+          <td>${(t.result || "--").toUpperCase()}</td>
+          <td>${t.count ?? "--"}</td>
+          <td>${fmtUsd(t.entry_price)}</td>
+          <td class="${pnlClass}">${fmtUsd(pnl)}</td>
+          <td>${fmtTime(t.closed_at)}</td>
+          <td>${t.dry_run ? "dry-run" : "live"}</td>
+        </tr>`;
+    }).join("");
+  } catch (e) { console.error("trades refresh failed", e); }
+}
+
+function refreshAll() { refreshStatus(); refreshTrades(); }
+refreshAll();
+setInterval(refreshAll, 10000);
+</script>
+</body>
+</html>

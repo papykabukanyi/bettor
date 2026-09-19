@@ -1,0 +1,308 @@
+"""Data pipeline for Kalshi's 15-minute event-contract markets (see
+kalshi_15m.py's own module docstring for the product itself).
+
+Deliberately reuses perps_data.py's own candle feed and feature-engineering
+formulas rather than duplicating them: the underlying price signal (BTC/
+ETH/SOL/XRP/DOGE technicals) is IDENTICAL to what perps_strategy.py already
+predicts on, computed from the SAME Kalshi perp contract's own candlestick
+series (KXBTCPERP etc.) as a real, already-flowing proxy for the CF
+Benchmarks index these 15m markets actually settle against -- confirmed
+this account has no independent access to that exact settlement index, and
+a perp contract's own mark price tracks its underlying asset's real price
+extremely tightly via continuous arbitrage, making it the best available
+real signal without adding a new external data dependency. What's
+genuinely NEW here is only the LABEL: perps_data.engineer_features()
+computes its own label at perps_data.LABEL_HORIZON_MINUTES (1 minute) --
+this module calls that function UNCHANGED for the full feature set, then
+overwrites future_close/label_up with a 15-minute-forward horizon (see
+LABEL_HORIZON_MINUTES below), matching what Kalshi's own contract actually
+resolves on.
+
+Same "independent per-market module, not a shared base class" convention
+this whole codebase already follows (see any of the 4 existing markets'
+own *_data.py docstrings) -- this is a 5th such module, not a
+parametrization of perps_data.py itself.
+"""
+from __future__ import annotations
+
+import gc
+import logging
+import os
+import re
+from typing import Any
+
+import pandas as pd
+
+from data import perps_data
+from data.crypto_news import get_sentiment
+from server_common import DATA_DIR
+
+logger = logging.getLogger(__name__)
+
+HF_API_KEY = os.getenv("HF_API_KEY", "")
+HF_KALSHI_15M_DATASET_REPO = os.getenv("HF_KALSHI_15M_DATASET_REPO", "papylove/kalshi-15m-data")
+
+# The 5 underlyings this module trades -- see kalshi_15m.KNOWN_15M_SERIES's
+# own comment for why this is scoped to perps_strategy.py's existing 5, not
+# the full confirmed-live set of 15m series.
+COIN_TO_PERPS_TICKER = {
+    "BTC": "KXBTCPERP", "ETH": "KXETHPERP", "SOL": "KXSOLPERP",
+    "XRP": "KXXRPPERP", "DOGE": "KXDOGEPERP",
+}
+
+# The real, resolution-matching horizon: Kalshi's own 15m contracts compare
+# a reference price exactly 15 minutes apart (see kalshi_15m.py's own
+# module docstring) -- NOT perps_data.LABEL_HORIZON_MINUTES (1), which
+# stays untouched here (this module reads that constant only to know it's
+# DIFFERENT from its own, never writes it).
+LABEL_HORIZON_MINUTES = int(os.getenv("KALSHI_15M_LABEL_HORIZON_MINUTES", "15") or "15")
+
+
+def get_universe() -> list[str]:
+    return list(COIN_TO_PERPS_TICKER.keys())
+
+
+def _relabel_for_horizon(feats: pd.DataFrame) -> pd.DataFrame:
+    """Overwrites perps_data.engineer_features' own 1-minute-horizon
+    future_close/label_up with this module's 15-minute one, computed from
+    the SAME already-present `close` column -- see this module's own
+    docstring for why the rest of the feature set is reused unchanged."""
+    feats = feats.copy()
+    feats["future_close"] = feats["close"].shift(-LABEL_HORIZON_MINUTES)
+    feats["label_up"] = (feats["future_close"] > feats["close"]).astype("Int64")
+    feats.loc[feats["future_close"].isna(), "label_up"] = pd.NA
+    return feats
+
+
+def collect_dataset_rows(coins: list[str] | None = None) -> pd.DataFrame:
+    """Fetch + engineer features for the given coins (default: this
+    module's own 5-coin universe), relabeled to a 15-minute horizon."""
+    target_coins = coins if coins is not None else get_universe()
+    frames = []
+    for coin in target_coins:
+        perps_ticker = COIN_TO_PERPS_TICKER.get(coin)
+        if not perps_ticker:
+            logger.warning("[kalshi_15m_data] no perps ticker mapping for coin %s", coin)
+            continue
+        try:
+            one_min_df, hourly_df = perps_data.fetch_candle_frames(perps_ticker)
+            sentiment = get_sentiment(coin, use_limited_sources=True)
+            feats = perps_data.engineer_features(one_min_df, hourly_df, sentiment_score=sentiment["sentiment_score"])
+            if feats.empty:
+                continue
+            feats = _relabel_for_horizon(feats)
+            feats.insert(0, "symbol", coin)
+            frames.append(feats)
+        except Exception as exc:
+            logger.warning("[kalshi_15m_data] collect failed for %s: %s", coin, exc)
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True)
+
+
+def latest_feature_row(coin: str) -> dict[str, Any] | None:
+    """The single most-recent feature row for one coin, for live
+    prediction -- label is always NaN (the future 15 minutes haven't
+    happened yet), only the feature columns matter here."""
+    perps_ticker = COIN_TO_PERPS_TICKER.get(coin)
+    if not perps_ticker:
+        return None
+    try:
+        one_min_df, hourly_df = perps_data.fetch_candle_frames(perps_ticker)
+        sentiment = get_sentiment(coin, use_limited_sources=True)
+        feats = perps_data.engineer_features(one_min_df, hourly_df, sentiment_score=sentiment["sentiment_score"])
+        if feats.empty:
+            return None
+        last = feats.iloc[-1]
+        row = {col: float(last[col]) for col in perps_data.FEATURE_COLUMNS}
+        row["symbol"] = coin
+        row["current_price"] = float(one_min_df["close"].iloc[-1])
+        return row
+    except Exception as exc:
+        logger.warning("[kalshi_15m_data] latest_feature_row failed for %s: %s", coin, exc)
+        return None
+
+
+# ---------------------------------------------------------------------------
+# HF archival -- faithfully mirrors perps_data.py's own push_dataset_snapshot/
+# load_training_dataset (see either's own docstring for the full incident
+# history behind every timeout/atomic-write/OOM-avoidance choice below);
+# this is a fresh, adapted copy, not a call into perps_data.py's own
+# functions, since those are hardcoded to perps' own HF_DATASET_REPO/shard
+# directory -- see this module's own top docstring on why independent
+# per-market modules are this codebase's established convention.
+# ---------------------------------------------------------------------------
+_DATE_SHARD_RE = re.compile(r"^data/\d{4}-\d{2}-\d{2}\.parquet$")
+MAX_TRAIN_ROWS = int(os.getenv("KALSHI_15M_MAX_TRAIN_ROWS", "400000") or "400000")
+
+
+def _ensure_dataset_repo() -> bool:
+    if not HF_API_KEY:
+        return False
+    try:
+        from huggingface_hub import HfApi
+        api = HfApi(token=HF_API_KEY)
+        try:
+            api.repo_info(repo_id=HF_KALSHI_15M_DATASET_REPO, repo_type="dataset")
+        except Exception:
+            api.create_repo(repo_id=HF_KALSHI_15M_DATASET_REPO, repo_type="dataset", exist_ok=True, private=False)
+        return True
+    except Exception as exc:
+        logger.warning("[kalshi_15m_data] could not verify/create dataset repo: %s", exc)
+        return False
+
+
+def _is_rate_limit_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return "429" in text or "rate limit" in text
+
+
+def retry_on_rate_limit(fn, *, attempts: int = 3, backoff_sec: float = 5.0):
+    import time
+    last_exc: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            return fn()
+        except Exception as exc:
+            last_exc = exc
+            if not _is_rate_limit_error(exc) or attempt == attempts - 1:
+                raise
+            time.sleep(backoff_sec * (attempt + 1))
+    raise last_exc  # pragma: no cover -- attempts >= 1 always either returns or raises above
+
+
+def push_dataset_snapshot(df: pd.DataFrame) -> dict[str, Any]:
+    """Merge new rows into today's parquet shard and upload it to HF --
+    same merge/dedupe/atomic-write/OOM-avoidance discipline as
+    perps_data.push_dataset_snapshot (see its own docstring for the full
+    incident writeups this is deliberately replicating up front, rather
+    than waiting to relearn each one)."""
+    if df.empty:
+        return {"ok": False, "reason": "no_rows"}
+
+    shard_dir = DATA_DIR / "kalshi_15m_dataset"
+    shard_dir.mkdir(parents=True, exist_ok=True)
+    today = pd.Timestamp.utcnow().strftime("%Y-%m-%d")
+    shard_path = shard_dir / f"{today}.parquet"
+
+    if shard_path.exists():
+        existing = pd.read_parquet(shard_path)
+        combined = pd.concat([existing, df], ignore_index=True)
+        del existing, df
+    else:
+        combined = df
+    combined = combined.drop_duplicates(subset=["symbol", "ts"], keep="last").sort_values(["symbol", "ts"])
+    tmp_path = shard_path.with_suffix(".parquet.tmp")
+    combined.to_parquet(tmp_path, index=False)
+    os.replace(tmp_path, shard_path)
+    rows_written = len(combined)
+    del combined
+    gc.collect()
+
+    result: dict[str, Any] = {"ok": True, "rows_written": rows_written, "shard": str(shard_path)}
+    if not _ensure_dataset_repo():
+        result["hf_uploaded"] = False
+        return result
+    try:
+        from huggingface_hub import HfApi
+        api = HfApi(token=HF_API_KEY)
+        retry_on_rate_limit(lambda: api.upload_file(
+            path_or_fileobj=str(shard_path),
+            path_in_repo=f"data/{today}.parquet",
+            repo_id=HF_KALSHI_15M_DATASET_REPO,
+            repo_type="dataset",
+            commit_message=f"kalshi 15m data {today}",
+        ))
+        result["hf_uploaded"] = True
+    except Exception as exc:
+        logger.warning("[kalshi_15m_data] HF upload failed: %s", exc)
+        result["hf_uploaded"] = False
+        result["hf_error"] = str(exc)
+    gc.collect()
+    return result
+
+
+_LOAD_TRAINING_DATASET_LIST_TIMEOUT_SEC = int(os.getenv("KALSHI_15M_LOAD_TRAINING_DATASET_LIST_TIMEOUT_SEC", "45") or "45")
+_LOAD_TRAINING_DATASET_SHARD_TIMEOUT_SEC = int(os.getenv("KALSHI_15M_LOAD_TRAINING_DATASET_SHARD_TIMEOUT_SEC", "25") or "25")
+
+
+def load_training_dataset(*, max_shards: int = 90, max_rows: int | None = None) -> pd.DataFrame:
+    """ALWAYS merges local shards with the full HF dataset archive (deduped
+    on symbol+ts) -- see perps_data.load_training_dataset's own docstring
+    for the full rationale (identical here) and the real incidents (hangs,
+    OOM) the timeout/batched-download protections below were earned from."""
+    shard_dir = DATA_DIR / "kalshi_15m_dataset"
+    local_files = sorted(shard_dir.glob("*.parquet")) if shard_dir.exists() else []
+    frames = []
+    for f in local_files:
+        try:
+            frames.append(pd.read_parquet(f))
+        except Exception as exc:
+            logger.warning("[kalshi_15m_data] failed to read local shard %s: %s", f, exc)
+
+    if HF_API_KEY:
+        from concurrent.futures import ThreadPoolExecutor
+        from concurrent.futures import TimeoutError as FutureTimeoutError
+        _SHARD_DOWNLOAD_WORKERS = 8
+        executor = ThreadPoolExecutor(max_workers=_SHARD_DOWNLOAD_WORKERS)
+
+        def _download_shard(f: str) -> str | None:
+            try:
+                from huggingface_hub import hf_hub_download
+                return hf_hub_download(repo_id=HF_KALSHI_15M_DATASET_REPO, filename=f, repo_type="dataset", token=HF_API_KEY)
+            except Exception as exc:
+                logger.warning("[kalshi_15m_data] failed to download HF shard %s: %s", f, exc)
+                return None
+
+        try:
+            from huggingface_hub import HfApi
+            api = HfApi(token=HF_API_KEY)
+            raw_files = executor.submit(
+                lambda: api.list_repo_files(repo_id=HF_KALSHI_15M_DATASET_REPO, repo_type="dataset"),
+            ).result(timeout=_LOAD_TRAINING_DATASET_LIST_TIMEOUT_SEC)
+            hf_files = [f for f in (raw_files or []) if _DATE_SHARD_RE.match(f)]
+            hf_files = sorted(hf_files, reverse=True)[:max_shards]
+            cap = MAX_TRAIN_ROWS if max_rows is None else max_rows
+            stop_after_rows = int(cap * 1.5) if cap else None
+            accumulated_rows = sum(len(fr) for fr in frames)
+            for batch_start in range(0, len(hf_files), _SHARD_DOWNLOAD_WORKERS):
+                if stop_after_rows and accumulated_rows >= stop_after_rows:
+                    break
+                batch = hf_files[batch_start:batch_start + _SHARD_DOWNLOAD_WORKERS]
+                futures = {f: executor.submit(_download_shard, f) for f in batch}
+                for f, future in futures.items():
+                    try:
+                        local_path = future.result(timeout=_LOAD_TRAINING_DATASET_SHARD_TIMEOUT_SEC)
+                    except FutureTimeoutError:
+                        logger.warning("[kalshi_15m_data] HF shard download %s exceeded %ss, giving up", f, _LOAD_TRAINING_DATASET_SHARD_TIMEOUT_SEC)
+                        continue
+                    except Exception as exc:
+                        logger.warning("[kalshi_15m_data] failed to read HF shard %s: %s", f, exc)
+                        continue
+                    if local_path is None:
+                        continue
+                    try:
+                        shard = pd.read_parquet(local_path)
+                        if "symbol" in shard.columns and "ts" in shard.columns:
+                            frames.append(shard)
+                            accumulated_rows += len(shard)
+                        else:
+                            logger.warning("[kalshi_15m_data] skipping HF shard with unexpected schema: %s", f)
+                    except Exception as exc:
+                        logger.warning("[kalshi_15m_data] failed to read HF shard %s: %s", f, exc)
+        except Exception as exc:
+            logger.warning("[kalshi_15m_data] HF dataset listing failed: %s", exc)
+        finally:
+            executor.shutdown(wait=False)
+
+    if not frames:
+        return pd.DataFrame()
+    combined = pd.concat(frames, ignore_index=True)
+    del frames
+    if "symbol" in combined.columns and "ts" in combined.columns:
+        combined = combined.drop_duplicates(subset=["symbol", "ts"])
+        combined["symbol"] = combined["symbol"].astype("category")
+        cap = MAX_TRAIN_ROWS if max_rows is None else max_rows
+        if cap and len(combined) > cap:
+            combined = combined.sort_values("ts").tail(cap).reset_index(drop=True)
+    return combined

@@ -55,6 +55,23 @@ single `--workers 1` gunicorn process never runs a job twice concurrently:
                                                             adjustment when the
                                                             evidence clearly
                                                             supports it
+  - kalshi_15m_data_collect every KALSHI_15M_DATA_COLLECT_MINUTES --
+                                                            archive fresh candles
+                                                            (relabeled to a 15-
+                                                            minute horizon) for
+                                                            Kalshi's OWN separate
+                                                            15-minute event-contract
+                                                            markets (KXBTC15M etc,
+                                                            see kalshi_15m.py) to HF.
+                                                            First phase of a new
+                                                            market build -- model/
+                                                            strategy/order-execution
+                                                            still to come; this job
+                                                            exists to start
+                                                            accumulating real
+                                                            training data immediately
+                                                            rather than block on the
+                                                            rest of the build.
 """
 from __future__ import annotations
 
@@ -87,8 +104,8 @@ if str(SRC_DIR) not in sys.path:
 
 from config import et_today
 from data import (
-    crypto_news, perps_data, perps_meta_model, perps_model, perps_strategy, perps_trade_analysis,
-    threads_client, threads_post,
+    crypto_news, kalshi_15m_data, kalshi_15m_model, kalshi_15m_strategy, perps_data, perps_meta_model, perps_model,
+    perps_strategy, perps_trade_analysis, threads_client, threads_post,
 )
 
 # Real production bug found and fixed on the sibling stocks server (now
@@ -117,6 +134,27 @@ from server_common import DATA_DIR, check_rate_limit, is_cron_authorized, load_j
 PERPS_CYCLE_MINUTES = max(1, int(os.getenv("PERPS_CYCLE_MINUTES", "2") or "2"))
 PERPS_FAST_CHECK_SECONDS = max(5, int(os.getenv("PERPS_FAST_CHECK_SECONDS", "20") or "20"))
 PERPS_DATA_COLLECT_MINUTES = max(5, int(os.getenv("PERPS_DATA_COLLECT_MINUTES", "15") or "15"))
+# Kalshi's own 15-minute event-contract markets (KXBTC15M etc.) -- a
+# genuinely new, separate product from perps (see kalshi_15m.py's own
+# module docstring), first priority is just getting real data flowing:
+# per explicit user direction ("scope and start building now"), this data
+# collection job ships first, ahead of the model/strategy/order-execution
+# layers still to come, since every day of delay here is a day of lost
+# training data for a market with zero archived history yet.
+KALSHI_15M_DATA_COLLECT_MINUTES = max(5, int(os.getenv("KALSHI_15M_DATA_COLLECT_MINUTES", "5") or "5"))
+# Combined entry-scan + settlement-check cycle -- unlike perps' own
+# fast_check (a sub-minute stop-loss/take-profit reaction loop), nothing
+# here is latency-critical: a position's only exit is its window settling
+# at a fixed, known time, and a fresh window only opens every 15 minutes
+# anyway. Every 2 minutes is ample to catch a freshly-opened window with
+# still-plenty of MIN_SECONDS_TO_CLOSE_FOR_ENTRY left, and to book a
+# settlement promptly after it resolves.
+KALSHI_15M_CYCLE_MINUTES = max(1, int(os.getenv("KALSHI_15M_CYCLE_MINUTES", "2") or "2"))
+# Off-hours-agnostic (crypto trades 24/7, unlike options) -- just a
+# different hour than perps_train (3 ET) and stocks/crypto/options' own
+# daily retrains, so this doesn't contend with any of them for CPU at the
+# exact same minute.
+KALSHI_15M_TRAIN_HOUR_ET = int(os.getenv("KALSHI_15M_TRAIN_HOUR_ET", "4") or "4")
 PERPS_TRAIN_HOUR_ET = int(os.getenv("PERPS_TRAIN_HOUR_ET", "3") or "3")
 # 30 min after PERPS_TRAIN_HOUR_ET, not the same minute -- runs after the
 # fresh model/data from the train job above have settled, not concurrently
@@ -475,6 +513,52 @@ def _run_perps_data_collect() -> dict[str, Any]:
         gc.collect()
 
 
+@_locked_job("kalshi_15m_data_collect", stale_after_sec=600)
+def _run_kalshi_15m_data_collect() -> dict[str, Any]:
+    """Data collection for Kalshi's 15-minute event-contract markets --
+    see kalshi_15m_data.py's own module docstring. Deliberately simpler
+    than _run_perps_data_collect above (no ticker-activity-cache refresh,
+    no correlation-study wiring) -- this module's universe is a small
+    fixed 5-coin list, not a dynamically-ranked watchlist, and the
+    correlation-study infra is a separate, later decision, not silently
+    bundled into the first data-collection pass for a brand new market."""
+    try:
+        df = kalshi_15m_data.collect_dataset_rows()
+        if df.empty:
+            return {"ok": False, "reason": "no_rows_collected"}
+        return kalshi_15m_data.push_dataset_snapshot(df)
+    finally:
+        gc.collect()
+
+
+@_locked_job("kalshi_15m_cycle", stale_after_sec=300)
+def _run_kalshi_15m_cycle() -> dict[str, Any]:
+    """Settlement check FIRST, then entry scan -- freeing a just-settled
+    coin's slot before deciding whether to enter a new position matters
+    here (unlike perps' separate fast_check/entry_scan jobs) since this
+    single combined job is this market's only cycle, see
+    KALSHI_15M_CYCLE_MINUTES's own comment for why latency isn't a
+    concern worth two separate jobs. dry_run=False here does NOT itself
+    enable live orders -- kalshi_15m_strategy's own hard safety floor
+    (LIVE_TRADING_ENABLED, held to a stricter bar than every other
+    market's identical pattern -- see that module's own docstring) forces
+    dry-run regardless until this account's own order-placement mechanics
+    are verified live."""
+    settlement_result = kalshi_15m_strategy.check_settlements()
+    entry_result = kalshi_15m_strategy.scan_and_enter(dry_run=False)
+    return {"ok": True, "settlements": settlement_result, "entries": entry_result}
+
+
+@_locked_job("kalshi_15m_train", stale_after_sec=1800)
+def _run_kalshi_15m_train() -> dict[str, Any]:
+    try:
+        trade_log = kalshi_15m_strategy._load_state().get("trade_log")  # noqa: SLF001
+    except Exception as exc:
+        logger.warning("[app_kalshi] could not read kalshi_15m trade_log for outcome-aware training: %s", exc)
+        trade_log = None
+    return kalshi_15m_model.train_model(trade_log=trade_log)
+
+
 @_locked_job("perps_train", stale_after_sec=1800)
 def _run_perps_train() -> dict[str, Any]:
     # perps_model.py never imports perps_strategy.py directly (perps_strategy
@@ -693,6 +777,20 @@ def _ensure_background_jobs_started() -> None:
                 next_run_time=dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=PERPS_DATA_COLLECT_MINUTES),
             )
             scheduler.add_job(
+                _run_kalshi_15m_data_collect, "interval", minutes=KALSHI_15M_DATA_COLLECT_MINUTES,
+                id="kalshi_15m_data_collect", replace_existing=True,
+                next_run_time=dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=KALSHI_15M_DATA_COLLECT_MINUTES),
+            )
+            scheduler.add_job(
+                _run_kalshi_15m_cycle, "interval", minutes=KALSHI_15M_CYCLE_MINUTES,
+                id="kalshi_15m_cycle", replace_existing=True,
+                next_run_time=dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=KALSHI_15M_CYCLE_MINUTES),
+            )
+            scheduler.add_job(
+                _run_kalshi_15m_train, "cron", hour=KALSHI_15M_TRAIN_HOUR_ET, minute=0,
+                id="kalshi_15m_train", replace_existing=True,
+            )
+            scheduler.add_job(
                 _run_perps_train, "cron", hour=PERPS_TRAIN_HOUR_ET, minute=0,
                 id="perps_train", replace_existing=True,
             )
@@ -890,6 +988,14 @@ def index():
         "dashboard.html", alpaca_url=ALPACA_SERVER_URL, alpaca_crypto_url=ALPACA_CRYPTO_SERVER_URL,
         alpaca_options_url=ALPACA_OPTIONS_SERVER_URL,
     )
+
+
+@app.route("/kalshi15m")
+def kalshi_15m_dashboard():
+    """Kalshi's own 15-minute event-contract markets -- see
+    kalshi_15m.py's own module docstring for the product and
+    kalshi_15m_strategy.py's for why this stays dry-run-only for now."""
+    return render_template("kalshi_15m_dashboard.html")
 
 
 @app.route("/alpaca")
@@ -1111,6 +1217,69 @@ def api_trades():
     })
 
 
+@app.route("/api/kalshi15m/status")
+def api_kalshi_15m_status():
+    state = kalshi_15m_strategy._load_state()  # noqa: SLF001
+    _, meta = kalshi_15m_model.load_model()
+    trade_log = state.get("trade_log") or []
+    realized_pnl_by_date = state.get("realized_pnl_by_date") or {}
+    total_realized_pnl = round(sum(float(v) for v in realized_pnl_by_date.values()), 6)
+
+    positions = []
+    for p in state.get("positions") or []:
+        enriched = dict(p)
+        remaining = None
+        if p.get("close_time"):
+            remaining = kalshi_15m.seconds_to_close({"close_time": p["close_time"]})
+        enriched["seconds_to_close"] = remaining
+        positions.append(enriched)
+
+    return jsonify({
+        "ok": True,
+        "now": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "live_trading_enabled": kalshi_15m_strategy.LIVE_TRADING_ENABLED,
+        "positions": positions,
+        "open_position_count": len(positions),
+        "max_concurrent_positions": kalshi_15m_strategy.MAX_CONCURRENT_POSITIONS,
+        "today_realized_pnl_usd": float(realized_pnl_by_date.get(et_today().isoformat(), 0.0)),
+        "total_realized_pnl_usd": total_realized_pnl,
+        # Real trades only -- see alpaca_server.py's identical fix this
+        # same session ("we doing only real data please not dry run or fake").
+        "trade_count": sum(1 for t in trade_log if not t.get("dry_run")),
+        "win_rate": win_rate_stats(trade_log),
+        "model": {
+            "trained": meta is not None,
+            "model_type": (meta or {}).get("model_type"),
+            "trained_at": (meta or {}).get("trained_at"),
+            "rows": (meta or {}).get("rows"),
+            "scores": (meta or {}).get("scores"),
+            "feature_importances": (meta or {}).get("feature_importances"),
+        },
+        "universe": kalshi_15m_data.get_universe(),
+        "params": {
+            "model_confidence_min": kalshi_15m_strategy.MODEL_CONFIDENCE_MIN,
+            "position_size_pct": kalshi_15m_strategy.POSITION_SIZE_PCT,
+            "max_concurrent_positions": kalshi_15m_strategy.MAX_CONCURRENT_POSITIONS,
+            "min_seconds_to_close_for_entry": kalshi_15m_strategy.MIN_SECONDS_TO_CLOSE_FOR_ENTRY,
+            "cycle_minutes": KALSHI_15M_CYCLE_MINUTES,
+            "data_collect_minutes": KALSHI_15M_DATA_COLLECT_MINUTES,
+            "train_hour_et": KALSHI_15M_TRAIN_HOUR_ET,
+        },
+    })
+
+
+@app.route("/api/kalshi15m/trades")
+def api_kalshi_15m_trades():
+    state = kalshi_15m_strategy._load_state()  # noqa: SLF001
+    trade_log = list(reversed(state.get("trade_log") or []))
+    return jsonify({
+        "ok": True,
+        "trade_count": len(trade_log),
+        "realized_pnl_by_date": state.get("realized_pnl_by_date") or {},
+        "trades": trade_log[:200],
+    })
+
+
 @app.route("/api/threads/posts")
 def api_threads_posts():
     """Public, unauthenticated, read-only feed of this account's own
@@ -1299,6 +1468,9 @@ _JOB_LABELS = {
     "perps_entry_scan": f"Entry scan -- all instruments (every {PERPS_CYCLE_MINUTES} min)",
     "perps_manual_cycle": "Manual full cycle",
     "perps_data_collect": f"Data collection -> HF (every {PERPS_DATA_COLLECT_MINUTES} min)",
+    "kalshi_15m_data_collect": f"Kalshi 15m markets data collection -> HF (every {KALSHI_15M_DATA_COLLECT_MINUTES} min)",
+    "kalshi_15m_cycle": f"Kalshi 15m markets settlement check + entry scan (every {KALSHI_15M_CYCLE_MINUTES} min)",
+    "kalshi_15m_train": f"Kalshi 15m markets model retrain (daily {KALSHI_15M_TRAIN_HOUR_ET:02d}:00 ET)",
     "perps_train": f"Model retrain (daily {PERPS_TRAIN_HOUR_ET:02d}:00 ET)",
     "perps_trade_analysis": (
         f"Trade win/loss analysis + evidence-gated confidence tuning "

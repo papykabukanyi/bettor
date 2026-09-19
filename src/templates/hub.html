@@ -52,6 +52,13 @@
   </div>
 
   <div class="card">
+    <span class="badge pending">DRY-RUN</span>
+    <h2>&#9203; Kalshi 15-Minute Markets</h2>
+    <p>Kalshi's own fresh-every-15-minutes binary up/down contracts (KXBTC15M etc.) -- same 5 coins the perps bot trades, its own direction model. Data collection and model training run live now; real order placement stays dry-run-only until this account's own order-execution mechanics are verified.</p>
+    <a class="btn" href="/kalshi15m">Open 15-Minute Markets Dashboard &rarr;</a>
+  </div>
+
+  <div class="card">
     {% if alpaca_url and alpaca_url != "#" %}
     <span class="badge ready">LIVE</span>
     <h2>&#128200; Alpaca Stocks</h2>

@@ -11,6 +11,7 @@ import pandas as pd
 import pytest
 
 import app_kalshi
+from data import kalshi_15m_data
 
 
 def test_production_jobs_actually_honor_the_live_trading_flag(monkeypatch):
@@ -347,6 +348,50 @@ def test_data_collect_job_still_collects_if_cache_refresh_fails(monkeypatch):
     app_kalshi._run_perps_data_collect.__wrapped__()  # noqa: SLF001
 
     assert collected == [1]
+
+
+# ---------------------------------------------------------------------------
+# kalshi_15m_data_collect -- Kalshi's own 15-minute event-contract markets
+# (a genuinely new product, see kalshi_15m.py's own module docstring).
+# Simpler than perps' own data_collect job above (no ticker-activity-cache
+# refresh, no correlation-study wiring -- see this job's own docstring).
+# ---------------------------------------------------------------------------
+def test_kalshi_15m_data_collect_job_pushes_a_snapshot_when_rows_are_collected(monkeypatch):
+    df = pd.DataFrame({"symbol": ["BTC"], "ts": [1], "close": [100.0]})
+    monkeypatch.setattr(kalshi_15m_data, "collect_dataset_rows", lambda: df)
+    pushed = []
+    monkeypatch.setattr(kalshi_15m_data, "push_dataset_snapshot", lambda d: pushed.append(d) or {"ok": True, "rows_written": 1})
+
+    result = app_kalshi._run_kalshi_15m_data_collect.__wrapped__()  # noqa: SLF001
+
+    assert result == {"ok": True, "rows_written": 1}
+    assert len(pushed) == 1
+    pd.testing.assert_frame_equal(pushed[0], df)
+
+
+def test_kalshi_15m_data_collect_job_reports_no_rows_without_pushing(monkeypatch):
+    monkeypatch.setattr(kalshi_15m_data, "collect_dataset_rows", lambda: pd.DataFrame())
+    pushed = []
+    monkeypatch.setattr(kalshi_15m_data, "push_dataset_snapshot", lambda d: pushed.append(d))
+
+    result = app_kalshi._run_kalshi_15m_data_collect.__wrapped__()  # noqa: SLF001
+
+    assert result == {"ok": False, "reason": "no_rows_collected"}
+    assert pushed == []
+
+
+def test_kalshi_15m_data_collect_job_survives_a_collection_failure(monkeypatch):
+    def fail():
+        raise RuntimeError("candle fetch failed")
+
+    monkeypatch.setattr(kalshi_15m_data, "collect_dataset_rows", fail)
+
+    with pytest.raises(RuntimeError):
+        app_kalshi._run_kalshi_15m_data_collect.__wrapped__()  # noqa: SLF001
+    # Not swallowed -- matches perps_data_collect's own contract (the
+    # locked_job wrapper + scheduler's own exception handling is what
+    # keeps one failed cycle from taking the process down, not the job
+    # body itself pretending nothing went wrong).
 
 
 def test_threads_hourly_status_job_reports_open_positions_with_held_minutes(monkeypatch):
@@ -693,3 +738,63 @@ def test_run_perps_trade_analysis_survives_a_state_read_failure(monkeypatch):
     monkeypatch.setattr(perps_strategy, "_load_state", fail)
     result = app_kalshi._run_perps_trade_analysis.__wrapped__()  # noqa: SLF001
     assert result["ok"] is False
+
+
+# ---------------------------------------------------------------------------
+# kalshi_15m_cycle / kalshi_15m_train
+# ---------------------------------------------------------------------------
+def test_kalshi_15m_cycle_job_checks_settlements_before_scanning_for_entries(monkeypatch):
+    from data import kalshi_15m_strategy
+
+    order = []
+    monkeypatch.setattr(kalshi_15m_strategy, "check_settlements", lambda: order.append("settlements") or {"ok": True, "checks": []})
+    monkeypatch.setattr(kalshi_15m_strategy, "scan_and_enter", lambda **kw: order.append("entries") or {"ok": True, "checks": []})
+
+    result = app_kalshi._run_kalshi_15m_cycle.__wrapped__()  # noqa: SLF001
+
+    assert order == ["settlements", "entries"]
+    assert result["ok"] is True
+
+
+def test_kalshi_15m_cycle_job_never_bypasses_the_dry_run_floor(monkeypatch):
+    """scan_and_enter is always called with dry_run=False here -- the real
+    gate is kalshi_15m_strategy.LIVE_TRADING_ENABLED's own hard floor, not
+    this job pretending to force live trading (same contract as every
+    other market's identical fast_check/entry_scan job)."""
+    from data import kalshi_15m_strategy
+
+    captured = {}
+    monkeypatch.setattr(kalshi_15m_strategy, "check_settlements", lambda: {"ok": True, "checks": []})
+    monkeypatch.setattr(kalshi_15m_strategy, "scan_and_enter", lambda **kw: captured.update(kw) or {"ok": True, "checks": []})
+
+    app_kalshi._run_kalshi_15m_cycle.__wrapped__()  # noqa: SLF001
+
+    assert captured == {"dry_run": False}
+
+
+def test_kalshi_15m_train_job_passes_the_real_trade_log(monkeypatch):
+    from data import kalshi_15m_model, kalshi_15m_strategy
+
+    monkeypatch.setattr(kalshi_15m_strategy, "_load_state", lambda: {"trade_log": [{"coin": "BTC"}]})
+    captured = {}
+    monkeypatch.setattr(kalshi_15m_model, "train_model", lambda **kw: captured.update(kw) or {"ok": True})
+
+    result = app_kalshi._run_kalshi_15m_train.__wrapped__()  # noqa: SLF001
+
+    assert captured["trade_log"] == [{"coin": "BTC"}]
+    assert result == {"ok": True}
+
+
+def test_kalshi_15m_train_job_survives_a_state_read_failure(monkeypatch):
+    from data import kalshi_15m_model, kalshi_15m_strategy
+
+    def fail():
+        raise RuntimeError("state file corrupted")
+
+    monkeypatch.setattr(kalshi_15m_strategy, "_load_state", fail)
+    captured = {}
+    monkeypatch.setattr(kalshi_15m_model, "train_model", lambda **kw: captured.update(kw) or {"ok": True})
+
+    app_kalshi._run_kalshi_15m_train.__wrapped__()  # noqa: SLF001
+
+    assert captured["trade_log"] is None
