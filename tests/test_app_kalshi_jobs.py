@@ -238,11 +238,13 @@ def test_api_threads_posts_never_raises_on_a_backend_failure(monkeypatch):
         assert body["posts"] == []
 
 
-def test_api_threads_posts_sync_requires_cron_authorization(monkeypatch):
+def test_api_threads_posts_sync_no_longer_requires_cron_authorization(monkeypatch):
+    # is_cron_authorized always authorizes now (removed per explicit user
+    # direction -- see its own docstring in server_common.py).
     monkeypatch.setenv("CRON_SECRET", "real-secret")
     with app_kalshi.app.test_client() as client:
         resp = client.post("/api/threads/posts/sync")
-        assert resp.status_code == 401
+        assert resp.status_code != 401
 
 
 def test_api_threads_posts_sync_runs_when_authorized(monkeypatch):
@@ -282,11 +284,13 @@ def test_api_threads_posts_sync_never_raises_on_a_backend_failure(monkeypatch):
     ("/api/perps/threads/sentiment-snapshot", "_run_perps_threads_sentiment_snapshot"),
     ("/api/perps/threads/hourly-status", "_run_perps_threads_hourly_status"),
 ])
-def test_threads_trigger_routes_require_cron_authorization(monkeypatch, path, job_name):
+def test_threads_trigger_routes_no_longer_require_cron_authorization(monkeypatch, path, job_name):
+    # is_cron_authorized always authorizes now (removed per explicit user
+    # direction -- see its own docstring in server_common.py).
     monkeypatch.setenv("CRON_SECRET", "real-secret")
     with app_kalshi.app.test_client() as client:
         resp = client.post(path)
-        assert resp.status_code == 401
+        assert resp.status_code != 401
 
 
 @pytest.mark.parametrize("path,job_name", [

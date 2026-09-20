@@ -541,11 +541,15 @@ def test_api_alpaca_status_omits_unrealized_pnl_when_no_current_price_is_availab
     ("/api/alpaca/threads/sentiment-snapshot", "_run_alpaca_threads_sentiment_snapshot"),
     ("/api/alpaca/threads/hourly-status", "_run_alpaca_threads_hourly_status"),
 ])
-def test_threads_trigger_routes_require_cron_authorization(monkeypatch, path, job_name):
+def test_threads_trigger_routes_no_longer_require_cron_authorization(monkeypatch, path, job_name):
+    # is_cron_authorized always authorizes now (removed per explicit user
+    # direction -- see its own docstring in server_common.py): a request
+    # with no Authorization header at all, even with CRON_SECRET still
+    # configured, must still succeed.
     monkeypatch.setenv("CRON_SECRET", "real-secret")
     with alpaca_server.app.test_client() as client:
         resp = client.post(path)
-        assert resp.status_code == 401
+        assert resp.status_code != 401
 
 
 @pytest.mark.parametrize("path,job_name", [
