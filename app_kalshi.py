@@ -1349,6 +1349,24 @@ def api_kalshi_15m_status():
     })
 
 
+@app.route("/api/kalshi15m/balance-by-shard", methods=["GET"])
+def api_kalshi_15m_balance_by_shard():
+    """Read-only diagnostic: answers "does shard 2 (Crypto/Commodities --
+    where these 15-minute markets actually settle orders, confirmed live
+    via a real insufficient_shard_balance error) have any collateral on
+    it" without guessing -- see kalshi_15m.get_subaccount_balances's own
+    docstring for why /portfolio/balance alone (no exchange_index) can't
+    answer this (it reports pooled across all shards, not per-shard).
+    Never places an order or moves money -- a pure GET."""
+    try:
+        subaccounts = kalshi_15m.get_subaccount_balances()
+        shard2 = kalshi_15m.get_balance_by_shard(exchange_index=2)
+        return jsonify({"ok": True, "subaccount_balances": subaccounts, "shard_2_crypto_commodities": shard2})
+    except Exception as exc:
+        logger.warning("[app_kalshi] kalshi_15m balance-by-shard check failed", exc_info=True)
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
 @app.route("/api/kalshi15m/backfill", methods=["POST"])
 def api_kalshi_15m_backfill():
     """Manually triggers kalshi_15m_data.backfill_minute_history -- see its

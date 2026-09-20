@@ -872,6 +872,39 @@ def test_kalshi_15m_train_job_survives_a_state_read_failure(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# /api/kalshi15m/balance-by-shard -- read-only diagnostic, never places an
+# order or moves money. See the route's own docstring for why
+# /portfolio/balance alone can't answer "does shard 2 have collateral".
+# ---------------------------------------------------------------------------
+def test_balance_by_shard_returns_both_the_subaccount_breakdown_and_shard_2(monkeypatch):
+    from data import kalshi_15m
+
+    monkeypatch.setattr(kalshi_15m, "get_subaccount_balances", lambda: [{"exchange_index": 2, "balance": "0"}])
+    monkeypatch.setattr(kalshi_15m, "get_balance_by_shard", lambda exchange_index=None: {"balance_dollars": "0.00", "exchange_index": exchange_index})
+
+    with app_kalshi.app.test_client() as client:
+        resp = client.get("/api/kalshi15m/balance-by-shard")
+        body = resp.get_json()
+        assert resp.status_code == 200
+        assert body["ok"] is True
+        assert body["subaccount_balances"] == [{"exchange_index": 2, "balance": "0"}]
+        assert body["shard_2_crypto_commodities"] == {"balance_dollars": "0.00", "exchange_index": 2}
+
+
+def test_balance_by_shard_survives_a_kalshi_api_failure(monkeypatch):
+    from data import kalshi_15m
+
+    def raise_error():
+        raise RuntimeError("Kalshi API error 500: boom")
+
+    monkeypatch.setattr(kalshi_15m, "get_subaccount_balances", raise_error)
+    with app_kalshi.app.test_client() as client:
+        resp = client.get("/api/kalshi15m/balance-by-shard")
+        assert resp.status_code == 500
+        assert resp.get_json()["ok"] is False
+
+
+# ---------------------------------------------------------------------------
 # /api/kalshi15m/verify-order-mechanics -- a one-off, manually-triggered
 # diagnostic (never wired into any scheduled job) that places a real,
 # structurally-safe (IOC, 1 contract, price=0.01) test order to confirm

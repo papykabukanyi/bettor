@@ -99,6 +99,44 @@ def test_get_portfolio_balance_calls_the_authenticated_endpoint(monkeypatch):
     assert result["balance_dollars"] == "100.00"
 
 
+def test_get_balance_by_shard_omits_exchange_index_when_not_given(monkeypatch):
+    captured = {}
+
+    def fake(method, path, **kw):
+        captured.update(method=method, path=path, params=kw.get("params"), auth=kw.get("auth"))
+        return {"balance_dollars": "0.00"}
+
+    monkeypatch.setattr(kalshi_15m, "_request_json", fake)
+    kalshi_15m.get_balance_by_shard()
+    assert captured == {"method": "GET", "path": "/portfolio/balance", "params": {}, "auth": True}
+
+
+def test_get_balance_by_shard_passes_exchange_index_when_given(monkeypatch):
+    captured = {}
+
+    def fake(method, path, **kw):
+        captured["params"] = kw.get("params")
+        return {"balance_dollars": "0.00"}
+
+    monkeypatch.setattr(kalshi_15m, "_request_json", fake)
+    kalshi_15m.get_balance_by_shard(exchange_index=2)
+    assert captured["params"] == {"exchange_index": 2}
+
+
+def test_get_subaccount_balances_returns_the_balances_list(monkeypatch):
+    monkeypatch.setattr(kalshi_15m, "_request_json", lambda *a, **kw: {"balances": [{"exchange_index": 2, "balance": "0"}]})
+    result = kalshi_15m.get_subaccount_balances()
+    assert result == [{"exchange_index": 2, "balance": "0"}]
+
+
+def test_get_subaccount_balances_handles_a_bare_list_response(monkeypatch):
+    # Real, disclosed uncertainty in the docstring -- fall back to treating
+    # the response itself as the list if it isn't wrapped in a "balances" key.
+    monkeypatch.setattr(kalshi_15m, "_request_json", lambda *a, **kw: [{"exchange_index": 0, "balance": "6929"}])
+    result = kalshi_15m.get_subaccount_balances()
+    assert result == [{"exchange_index": 0, "balance": "6929"}]
+
+
 def test_get_portfolio_positions_filters_by_ticker_when_given(monkeypatch):
     captured = {}
 

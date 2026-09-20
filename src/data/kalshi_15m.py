@@ -158,6 +158,34 @@ def get_portfolio_balance() -> dict[str, Any]:
     return _request_json("GET", "/portfolio/balance", auth=True)
 
 
+def get_balance_by_shard(exchange_index: int | None = None) -> dict[str, Any]:
+    """Real gap this closes: get_portfolio_balance() above calls
+    /portfolio/balance with no exchange_index, which per Kalshi's own docs
+    means "include all exchange indexes" -- it can't tell you whether the
+    SPECIFIC shard a market trades on (Crypto and Commodities -- exactly
+    this module's own universe -- trade on shard 2, confirmed live via a
+    real insufficient_shard_balance error) actually has any collateral,
+    since balance/collateral is tracked PER SHARD, not pooled account-wide
+    (see docs.kalshi.com/getting_started/exchange_sharding). Pass
+    exchange_index=2 to check the shard these markets actually settle
+    orders against."""
+    params: dict[str, Any] = {}
+    if exchange_index is not None:
+        params["exchange_index"] = int(exchange_index)
+    return _request_json("GET", "/portfolio/balance", params=params, auth=True)
+
+
+def get_subaccount_balances() -> list[dict[str, Any]]:
+    """Full (exchange_index, subaccount) breakdown in one call -- the
+    definitive answer to "does shard 2 (Crypto/Commodities) actually have
+    money on it", without needing to guess which exchange_index values to
+    probe individually."""
+    data = _request_json("GET", "/portfolio/subaccounts/balances", auth=True)
+    if isinstance(data, list):
+        return data
+    return data.get("balances") or []
+
+
 def get_portfolio_positions(*, ticker: str | None = None) -> list[dict[str, Any]]:
     params: dict[str, Any] = {}
     if ticker:
