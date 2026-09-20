@@ -818,11 +818,12 @@ def _enforce_rate_limit():
 
 @app.after_request
 def _set_security_headers(response):
-    # See app_kalshi.py's identical hook for the full rationale -- this
-    # dashboard is meant to be safely shareable as a read-only public link;
-    # every route that can actually change anything already requires
-    # is_cron_authorized (CRON_SECRET), so these are defense-in-depth for
-    # the read-only surface, not the primary control.
+    # See app_kalshi.py's identical hook for the full rationale. Headers
+    # below are defense-in-depth regardless of the access model -- the
+    # primary control is this Space's own privacy (only the owner's
+    # account/collaborators can reach ANY route here at all, see
+    # is_cron_authorized's own docstring for why it's a no-op now, not a
+    # secret check).
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
     response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")

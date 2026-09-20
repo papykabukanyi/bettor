@@ -999,16 +999,16 @@ def _enforce_rate_limit():
 
 @app.after_request
 def _set_security_headers(response):
-    # This dashboard is meant to be safely shareable as a read-only public
-    # link -- every route that can actually CHANGE anything already requires
-    # is_cron_authorized (a bearer-token secret, see CRON_SECRET), so these
-    # are defense-in-depth for the read-only surface, not the primary
-    # control: block this response from being framed by another site
-    # (clickjacking), stop browsers from MIME-sniffing a response into
-    # something more dangerous than its declared Content-Type, and avoid
-    # leaking this dashboard's own URL (which could contain no secrets, but
-    # there's no reason to send it) as a Referer header when a visitor
-    # clicks an outbound link.
+    # Defense-in-depth headers regardless of the access model -- the
+    # primary control on every route here (read or write) is this Space's
+    # own privacy: only the owner's account/collaborators can reach it at
+    # all (see is_cron_authorized's own docstring for why that function is
+    # a no-op now, not a secret check). These headers: block this response
+    # from being framed by another site (clickjacking), stop browsers from
+    # MIME-sniffing a response into something more dangerous than its
+    # declared Content-Type, and avoid leaking this dashboard's own URL
+    # (which could contain no secrets, but there's no reason to send it)
+    # as a Referer header when a visitor clicks an outbound link.
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
     response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
