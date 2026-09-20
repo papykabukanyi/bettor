@@ -940,6 +940,29 @@ def _ensure_background_jobs_started() -> None:
                     logger.info("Startup train skipped: model already cached, daily cron will retrain")
             except Exception as exc:
                 logger.warning("Startup train failed: %s", exc)
+            # Same cold-start safety net as perps just above, for the same
+            # reason -- REAL gap found live: kalshi_15m_train only ever
+            # fires on its own daily cron (hour=KALSHI_15M_TRAIN_HOUR_ET),
+            # and with this process restarting periodically (the recurring
+            # dead-HF_API_KEY fix cycle, redeploys, etc.), a container can
+            # keep missing that one 5-minute daily window indefinitely --
+            # confirmed live: both kalshi-15m-model and
+            # kalshi-15m-metals-model HF repos still returned 404 (never
+            # once created) despite the data-collection side working the
+            # whole time. Only runs if EITHER model is uncached (mirrors
+            # _run_kalshi_15m_train's own "train both, tolerate one
+            # failing" design), so a normal restart with an already-cached
+            # model still skips this and waits for the daily cron.
+            try:
+                crypto_cached = kalshi_15m_model.load_model()[0] is not None
+                metals_cached = kalshi_15m_metals_model.load_model()[0] is not None
+                if not crypto_cached or not metals_cached:
+                    train_result = _run_kalshi_15m_train()
+                    logger.info("Startup kalshi_15m train attempt (cold start): %s", train_result)
+                else:
+                    logger.info("Startup kalshi_15m train skipped: both models already cached, daily cron will retrain")
+            except Exception as exc:
+                logger.warning("Startup kalshi_15m train failed: %s", exc)
             # No immediate startup entry scan here (deliberately removed) --
             # confirmed live on this account: a fresh instance calling this
             # the instant it boots, during Render's rolling-deploy overlap
@@ -1324,6 +1347,32 @@ def api_kalshi_15m_status():
             "train_hour_et": KALSHI_15M_TRAIN_HOUR_ET,
         },
     })
+
+
+@app.route("/api/kalshi15m/backfill", methods=["POST"])
+def api_kalshi_15m_backfill():
+    """Manually triggers kalshi_15m_data.backfill_minute_history -- see its
+    own docstring for the full design. Runs synchronously, requires the
+    same CRON_SECRET bearer every other manual trigger route here does.
+
+    Defaults to 7 days, not the function's own 90-day default: the
+    Dockerfile's gunicorn --timeout is 300s, and a full 90-day chunked
+    backfill (24h chunks x 90 x 5 coins = 450+ candle-fetch calls, plus up
+    to ~90 HF uploads) could genuinely exceed that and get SIGKILLed
+    mid-run -- recoverable (each date's own upload already merges with
+    whatever's there, so a partial run just needs repeating), but wasteful
+    to risk by default. Call repeatedly with different `days` values (or
+    just this same default, several times) to build up more history
+    safely within the timeout, rather than one large call."""
+    if not is_cron_authorized(request):
+        return jsonify({"ok": False, "error": "Unauthorized"}), 401
+    try:
+        days = int(request.args.get("days", "7") or "7")
+        result = kalshi_15m_data.backfill_minute_history(days=days)
+        return jsonify(result)
+    except Exception as exc:
+        logger.warning("[app_kalshi] kalshi_15m backfill failed", exc_info=True)
+        return jsonify({"ok": False, "error": str(exc)}), 500
 
 
 @app.route("/api/kalshi15m/verify-order-mechanics", methods=["POST"])

@@ -166,3 +166,141 @@ def test_load_training_dataset_reads_local_shards(tmp_path, monkeypatch):
     result = kalshi_15m_data.load_training_dataset()
     assert len(result) == 1
     assert result["symbol"].iloc[0] == "BTC"
+
+
+# ---------------------------------------------------------------------------
+# backfill_minute_history -- deep historical catch-up, per explicit user
+# direction ("the 15 min historical data need to be download"). Fetches
+# directly from Kalshi's own margin candlesticks API in chunks (see the
+# function's own docstring for why: not yet confirmed against a real
+# wide-range call, so this stays conservative rather than assume an
+# unchunked call would succeed).
+# ---------------------------------------------------------------------------
+class _FakeHfApi:
+    captured_upload: dict = {}
+
+    def __init__(self, token=None):
+        pass
+
+    def repo_info(self, *, repo_id, repo_type):
+        return {"id": repo_id}
+
+    def upload_file(self, *, path_or_fileobj, path_in_repo, repo_id, repo_type, commit_message):
+        _FakeHfApi.captured_upload.setdefault("uploads", []).append(
+            {"path_in_repo": path_in_repo, "df": pd.read_parquet(path_or_fileobj)},
+        )
+
+
+def test_backfill_minute_history_returns_ok_false_without_an_hf_key(monkeypatch):
+    monkeypatch.setattr(kalshi_15m_data, "HF_API_KEY", "")
+    result = kalshi_15m_data.backfill_minute_history(["BTC"], days=1)
+    assert result == {"ok": False, "reason": "no_hf_api_key"}
+
+
+def test_backfill_minute_history_skips_a_coin_with_no_perps_ticker_mapping(monkeypatch):
+    monkeypatch.setattr(kalshi_15m_data, "HF_API_KEY", "fake-token")
+    result = kalshi_15m_data.backfill_minute_history(["NOT_A_REAL_COIN"], days=1)
+    assert result["coins_processed"] == 0
+    assert result["dates_written"] == 0
+
+
+def test_backfill_minute_history_uploads_real_engineered_rows(monkeypatch):
+    """One coin, a small `days` window, real candle-frame/feature-
+    engineering formulas run over synthetic candles -- confirms the
+    chunked fetch -> engineer_features -> relabel -> per-date upload
+    pipeline actually produces and uploads real rows."""
+    monkeypatch.setattr(kalshi_15m_data, "HF_API_KEY", "fake-token")
+    from data import kalshi_perps
+
+    # Enough 1-minute candles across the whole window to clear
+    # perps_data's own MIN_ONE_MIN_ROWS_FOR_FEATURES floor.
+    n = 400
+
+    def fake_get_margin_candlesticks(ticker, *, start_ts, end_ts, period_interval, include_latest_before_start=False):
+        if period_interval == 1:
+            span = end_ts - start_ts
+            count = span // 60  # one point per minute within this chunk
+            candles = [
+                {"end_period_ts": start_ts + i * 60, "price": {"close": 100.0 + i * 0.01}}
+                for i in range(int(count))
+            ]
+        else:
+            candles = [{"end_period_ts": start_ts + i * 3600, "price": {"close": 100.0 + i * 0.1}} for i in range(10)]
+        return {"candlesticks": candles}
+
+    monkeypatch.setattr(kalshi_perps, "get_margin_candlesticks", fake_get_margin_candlesticks)
+
+    import huggingface_hub
+    _FakeHfApi.captured_upload = {}
+    monkeypatch.setattr(huggingface_hub, "HfApi", _FakeHfApi)
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", lambda **kw: (_ for _ in ()).throw(RuntimeError("no existing shard")))
+
+    result = kalshi_15m_data.backfill_minute_history(["BTC"], days=1)
+
+    assert result["ok"] is True
+    assert result["coins_processed"] == 1
+    assert result["dates_written"] >= 1
+    uploads = _FakeHfApi.captured_upload["uploads"]
+    assert all((u["df"]["symbol"] == "BTC").all() for u in uploads)
+    assert all(u["path_in_repo"].startswith("data/") for u in uploads)
+
+
+def test_backfill_minute_history_one_coin_failing_does_not_block_others(monkeypatch):
+    monkeypatch.setattr(kalshi_15m_data, "HF_API_KEY", "fake-token")
+    from data import kalshi_perps
+
+    def fake_get_margin_candlesticks(ticker, *, start_ts, end_ts, period_interval, include_latest_before_start=False):
+        if ticker == "KXBTCPERP":
+            raise RuntimeError("network error")
+        if period_interval == 1:
+            count = (end_ts - start_ts) // 60
+            candles = [{"end_period_ts": start_ts + i * 60, "price": {"close": 100.0 + i * 0.01}} for i in range(int(count))]
+        else:
+            candles = [{"end_period_ts": start_ts + i * 3600, "price": {"close": 100.0}} for i in range(10)]
+        return {"candlesticks": candles}
+
+    monkeypatch.setattr(kalshi_perps, "get_margin_candlesticks", fake_get_margin_candlesticks)
+
+    import huggingface_hub
+    _FakeHfApi.captured_upload = {}
+    monkeypatch.setattr(huggingface_hub, "HfApi", _FakeHfApi)
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", lambda **kw: (_ for _ in ()).throw(RuntimeError("no existing shard")))
+
+    result = kalshi_15m_data.backfill_minute_history(["BTC", "ETH"], days=1)
+
+    assert result["ok"] is True
+    assert result["coins_processed"] == 1  # BTC failed, ETH succeeded
+    uploads = _FakeHfApi.captured_upload.get("uploads", [])
+    assert all((u["df"]["symbol"] == "ETH").all() for u in uploads)
+
+
+def test_backfill_minute_history_merges_with_an_existing_shard(monkeypatch, tmp_path):
+    monkeypatch.setattr(kalshi_15m_data, "HF_API_KEY", "fake-token")
+    from data import kalshi_perps
+
+    def fake_get_margin_candlesticks(ticker, *, start_ts, end_ts, period_interval, include_latest_before_start=False):
+        if period_interval == 1:
+            count = (end_ts - start_ts) // 60
+            candles = [{"end_period_ts": start_ts + i * 60, "price": {"close": 100.0 + i * 0.01}} for i in range(int(count))]
+        else:
+            candles = [{"end_period_ts": start_ts + i * 3600, "price": {"close": 100.0}} for i in range(10)]
+        return {"candlesticks": candles}
+
+    monkeypatch.setattr(kalshi_perps, "get_margin_candlesticks", fake_get_margin_candlesticks)
+
+    existing_df = pd.DataFrame({"symbol": ["ETH"], "ts": [1], "close": [200.0]})
+    existing_path = tmp_path / "existing.parquet"
+    existing_df.to_parquet(existing_path, index=False)
+
+    import huggingface_hub
+    _FakeHfApi.captured_upload = {}
+    monkeypatch.setattr(huggingface_hub, "HfApi", _FakeHfApi)
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", lambda **kw: str(existing_path))
+
+    kalshi_15m_data.backfill_minute_history(["BTC"], days=1)
+
+    uploads = _FakeHfApi.captured_upload.get("uploads", [])
+    assert uploads
+    merged_symbols = set(uploads[0]["df"]["symbol"])
+    assert "ETH" in merged_symbols  # the pre-existing row survived the merge
+    assert "BTC" in merged_symbols

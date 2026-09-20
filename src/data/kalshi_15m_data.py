@@ -171,6 +171,133 @@ def retry_on_rate_limit(fn, *, attempts: int = 3, backoff_sec: float = 5.0):
     raise last_exc  # pragma: no cover -- attempts >= 1 always either returns or raises above
 
 
+def backfill_minute_history(coins: list[str] | None = None, *, days: int = 90) -> dict[str, Any]:
+    """Deep historical backfill -- the live collector
+    (_run_kalshi_15m_data_collect) only ever archives what it observes
+    going forward, so without this the archive load_training_dataset()/
+    a future backtest reads from would otherwise grow one 5-minute cycle
+    at a time from whenever collection first started, the same real gap
+    alpaca_crypto_data.backfill_minute_history was built to close there.
+
+    Fetches directly from Kalshi's own margin candlesticks API (the same
+    endpoint fetch_candle_frames uses live, just a much wider window here)
+    in CHUNK_HOURS-sized chunks -- not yet confirmed against a real,
+    wide-range call on this account (this dev machine's own local Kalshi
+    credentials are separately confirmed stale, see kalshi_15m.py's own
+    module docstring), so this stays conservative (1440 one-minute
+    candles per call, well under any reasonable API page-size cap) rather
+    than assume a single 90-day call would succeed unchunked. Historical
+    sentiment for arbitrary past dates isn't available from any free news
+    API -- held at neutral (0.0) for every backfilled row, same disclosed
+    limitation as alpaca_crypto_data.py's own identical backfill."""
+    import time
+    from collections import defaultdict
+
+    from data import kalshi_perps
+
+    if not HF_API_KEY:
+        return {"ok": False, "reason": "no_hf_api_key"}
+
+    target_coins = coins if coins is not None else get_universe()
+    _CHUNK_HOURS = 24
+    now = int(time.time())
+    window_start = now - days * 86400
+
+    by_date: dict[str, list[pd.DataFrame]] = defaultdict(list)
+    coins_processed = 0
+    for coin in target_coins:
+        perps_ticker = COIN_TO_PERPS_TICKER.get(coin)
+        if not perps_ticker:
+            continue
+        try:
+            one_min_frames = []
+            chunk_start = window_start
+            while chunk_start < now:
+                chunk_end = min(chunk_start + _CHUNK_HOURS * 3600, now)
+                try:
+                    raw = kalshi_perps.get_margin_candlesticks(
+                        perps_ticker, start_ts=chunk_start, end_ts=chunk_end, period_interval=1,
+                    )
+                    frame = perps_data._candles_to_frame(raw.get("candlesticks") or [])  # noqa: SLF001
+                    if not frame.empty:
+                        one_min_frames.append(frame)
+                except Exception as exc:
+                    logger.warning("[kalshi_15m_data] backfill chunk fetch failed for %s [%s, %s]: %s", coin, chunk_start, chunk_end, exc)
+                chunk_start = chunk_end
+            if not one_min_frames:
+                continue
+            one_min_df = pd.concat(one_min_frames, ignore_index=True).drop_duplicates(subset=["ts"]).sort_values("ts").reset_index(drop=True)
+            del one_min_frames
+
+            try:
+                hourly_raw = kalshi_perps.get_margin_candlesticks(
+                    perps_ticker, start_ts=window_start, end_ts=now, period_interval=60,
+                )
+                hourly_df = perps_data._candles_to_frame(hourly_raw.get("candlesticks") or [])  # noqa: SLF001
+            except Exception as exc:
+                logger.warning("[kalshi_15m_data] backfill hourly fetch failed for %s: %s", coin, exc)
+                hourly_df = pd.DataFrame()
+
+            feats = perps_data.engineer_features(one_min_df, hourly_df, sentiment_score=0.0)
+            del one_min_df, hourly_df
+            if feats.empty:
+                continue
+            feats = _relabel_for_horizon(feats)
+            feats.insert(0, "symbol", coin)
+            date_strs = pd.to_datetime(feats["ts"], unit="s", utc=True).dt.strftime("%Y-%m-%d")
+            for date_str, group in feats.groupby(date_strs):
+                by_date[date_str].append(group.reset_index(drop=True))
+            del feats, date_strs
+            coins_processed += 1
+        except Exception as exc:
+            logger.warning("[kalshi_15m_data] backfill failed for %s: %s", coin, exc)
+        gc.collect()
+
+    if not by_date:
+        return {"ok": True, "coins_processed": coins_processed, "coins_requested": len(target_coins), "dates_written": 0}
+
+    from huggingface_hub import HfApi, hf_hub_download
+    api = HfApi(token=HF_API_KEY)
+    _ensure_dataset_repo()
+    dates_written = 0
+    for date_str in sorted(by_date.keys()):
+        groups = by_date.pop(date_str)
+        combined_new = pd.concat(groups, ignore_index=True)
+        del groups
+        path_in_repo = f"data/{date_str}.parquet"
+        try:
+            existing_path = hf_hub_download(repo_id=HF_KALSHI_15M_DATASET_REPO, filename=path_in_repo, repo_type="dataset", token=HF_API_KEY)
+            existing = pd.read_parquet(existing_path)
+            combined = pd.concat([existing, combined_new], ignore_index=True)
+            del existing
+        except Exception:
+            combined = combined_new
+        del combined_new
+        combined = combined.drop_duplicates(subset=["symbol", "ts"], keep="last").sort_values(["symbol", "ts"]).reset_index(drop=True)
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as tmp:
+            combined.to_parquet(tmp.name, index=False)
+            tmp_path = tmp.name
+        try:
+            retry_on_rate_limit(lambda: api.upload_file(
+                path_or_fileobj=tmp_path, path_in_repo=path_in_repo,
+                repo_id=HF_KALSHI_15M_DATASET_REPO, repo_type="dataset",
+                commit_message=f"backfill kalshi 15m crypto minute bars: {date_str}",
+            ))
+            dates_written += 1
+        except Exception as exc:
+            logger.warning("[kalshi_15m_data] backfill upload failed for %s: %s", date_str, exc)
+        finally:
+            os.unlink(tmp_path)
+        del combined
+        gc.collect()
+
+    return {
+        "ok": True, "coins_processed": coins_processed, "coins_requested": len(target_coins),
+        "dates_written": dates_written,
+    }
+
+
 def push_dataset_snapshot(df: pd.DataFrame) -> dict[str, Any]:
     """Merge new rows into today's parquet shard and upload it to HF --
     same merge/dedupe/atomic-write/OOM-avoidance discipline as
