@@ -69,6 +69,104 @@ def test_load_price_history_returns_empty_frame_when_missing():
     assert list(history.columns) == ["ts", "close"]
 
 
+# ---------------------------------------------------------------------------
+# Real gap found and fixed: the raw price-history window used to be local-
+# disk-only, so a container restart (common: redeploys, the recurring
+# dead-HF-key fix cycle) wiped it and reset the 245-row/~4h clock back to
+# zero every time -- confirmed live: this pipeline went days without ever
+# once reaching MIN_ROWS_FOR_FEATURES. Now also backed up to/restored from
+# HF -- see this module's own docstring.
+# ---------------------------------------------------------------------------
+class _FakeHfApi:
+    captured_upload: dict = {}
+
+    def __init__(self, token=None):
+        pass
+
+    def repo_info(self, *, repo_id, repo_type):
+        return {"id": repo_id}
+
+    def upload_file(self, *, path_or_fileobj, path_in_repo, repo_id, repo_type, commit_message):
+        _FakeHfApi.captured_upload.setdefault("uploads", []).append(
+            {"path_in_repo": path_in_repo, "df": pd.read_parquet(path_or_fileobj)},
+        )
+
+
+def test_load_price_history_restores_from_hf_when_local_file_is_missing(monkeypatch):
+    monkeypatch.setattr(k, "HF_API_KEY", "fake-token")
+    backup = pd.DataFrame({"ts": [1_700_000_000, 1_700_000_060], "close": [100.0, 101.0]})
+
+    import huggingface_hub
+    tmp_file = k.DATA_DIR / "hf_backup.parquet"
+    backup.to_parquet(tmp_file, index=False)
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", lambda **kw: str(tmp_file))
+
+    result = k._load_price_history("GOLD")  # noqa: SLF001
+    assert len(result) == 2
+    assert result["close"].tolist() == [100.0, 101.0]
+    # Restored data is also written back to local disk, so the very next
+    # local load doesn't need another HF round trip.
+    assert k._price_history_path("GOLD").exists()  # noqa: SLF001
+
+
+def test_load_price_history_falls_back_to_empty_when_hf_has_no_backup_either(monkeypatch):
+    monkeypatch.setattr(k, "HF_API_KEY", "fake-token")
+    import huggingface_hub
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", lambda **kw: (_ for _ in ()).throw(RuntimeError("404")))
+
+    result = k._load_price_history("GOLD")  # noqa: SLF001
+    assert result.empty
+
+
+def test_save_price_history_pushes_to_hf_when_the_rate_limit_window_has_elapsed(monkeypatch):
+    monkeypatch.setattr(k, "HF_API_KEY", "fake-token")
+    import huggingface_hub
+    _FakeHfApi.captured_upload = {}
+    monkeypatch.setattr(huggingface_hub, "HfApi", _FakeHfApi)
+    k._last_price_history_push_at.clear()  # noqa: SLF001
+
+    df = pd.DataFrame({"ts": [1_700_000_000], "close": [100.0]})
+    k._save_price_history("GOLD", df)  # noqa: SLF001
+
+    uploads = _FakeHfApi.captured_upload["uploads"]
+    assert len(uploads) == 1
+    assert uploads[0]["path_in_repo"] == "price_history/GOLD.parquet"
+
+
+def test_save_price_history_skips_the_hf_push_within_the_rate_limit_window(monkeypatch):
+    monkeypatch.setattr(k, "HF_API_KEY", "fake-token")
+    import huggingface_hub
+    _FakeHfApi.captured_upload = {}
+    monkeypatch.setattr(huggingface_hub, "HfApi", _FakeHfApi)
+    k._last_price_history_push_at.clear()  # noqa: SLF001
+
+    df = pd.DataFrame({"ts": [1_700_000_000], "close": [100.0]})
+    k._save_price_history("GOLD", df)  # first push -- goes through  # noqa: SLF001
+    k._save_price_history("GOLD", df)  # second, immediately after -- rate-limited  # noqa: SLF001
+
+    assert len(_FakeHfApi.captured_upload["uploads"]) == 1
+
+
+def test_save_price_history_with_push_to_hf_false_never_pushes(monkeypatch):
+    monkeypatch.setattr(k, "HF_API_KEY", "fake-token")
+    import huggingface_hub
+    _FakeHfApi.captured_upload = {}
+    monkeypatch.setattr(huggingface_hub, "HfApi", _FakeHfApi)
+    k._last_price_history_push_at.clear()  # noqa: SLF001
+
+    df = pd.DataFrame({"ts": [1_700_000_000], "close": [100.0]})
+    k._save_price_history("GOLD", df, push_to_hf=False)  # noqa: SLF001
+
+    assert _FakeHfApi.captured_upload.get("uploads", []) == []
+
+
+def test_save_price_history_push_is_a_no_op_without_an_hf_key():
+    # _isolated_data_dir already sets HF_API_KEY = "" -- confirms this
+    # never even tries to import huggingface_hub in that case.
+    df = pd.DataFrame({"ts": [1_700_000_000], "close": [100.0]})
+    k._save_price_history("GOLD", df)  # noqa: SLF001 -- must not raise
+
+
 def _synthetic_price_df(prices: list[float], start_ts: int = 1_700_000_000, step: int = 60) -> pd.DataFrame:
     return pd.DataFrame({"ts": [start_ts + i * step for i in range(len(prices))], "close": prices})
 

@@ -52,9 +52,9 @@
   </div>
 
   <div class="card">
-    <span class="badge pending">DRY-RUN</span>
+    <span id="kalshi15m-badge" class="badge pending">&hellip;</span>
     <h2>&#9203; Kalshi 15-Minute Markets</h2>
-    <p>Kalshi's own fresh-every-15-minutes binary up/down contracts (KXBTC15M etc. plus gold/silver/copper) -- own direction models, trained and running live. Order-execution mechanics confirmed against a real Kalshi response. Real order placement stays dry-run until this account allocates collateral to exchange shard 2 (Crypto/Commodities) and live trading is explicitly enabled.</p>
+    <p>Kalshi's own fresh-every-15-minutes binary up/down contracts (KXBTC15M etc. plus gold/silver/copper) -- own direction models, trained and running live. Real order placement is gated on <code>KALSHI_15M_LIVE_TRADING_ENABLED</code> and this account holding collateral on Kalshi's own exchange shard 2 (Crypto/Commodities).</p>
     <a class="btn" href="/kalshi15m">Open 15-Minute Markets Dashboard &rarr;</a>
   </div>
 
@@ -105,5 +105,31 @@
 </div>
 
 <footer>Kalshi Perps, Alpaca Stocks, Alpaca Crypto, and Alpaca Options run as fully independent servers -- a problem on one cannot affect the others. &middot; Powered by <a href="https://cumdev.onrender.com" target="_blank" rel="noopener">CUMDEV</a></footer>
+
+<script>
+  // Real bug this fixes: the other 4 cards' LIVE/NOT-DEPLOYED badges are
+  // static text because those states have been permanently settled for a
+  // long time -- the 15-minute market's own live-trading state is NOT
+  // settled the same way (it's a live env-var flag that can flip), so a
+  // hardcoded badge here goes stale the moment that flag changes, exactly
+  // what happened (confirmed live: stayed "DRY-RUN" long after live
+  // trading was actually enabled). Fetched on load, no polling -- this is
+  // a landing page, not a live dashboard; open /kalshi15m for a
+  // continuously-refreshed view.
+  fetch("/api/kalshi15m/status").then(r => r.json()).then(data => {
+    const badge = document.getElementById("kalshi15m-badge");
+    if (!badge || !data.ok) return;
+    if (data.live_trading_enabled) {
+      badge.textContent = "LIVE";
+      badge.className = "badge ready";
+    } else {
+      badge.textContent = "DRY-RUN";
+      badge.className = "badge pending";
+    }
+  }).catch(() => {
+    const badge = document.getElementById("kalshi15m-badge");
+    if (badge) { badge.textContent = "DRY-RUN"; badge.className = "badge pending"; }
+  });
+</script>
 </body>
 </html>

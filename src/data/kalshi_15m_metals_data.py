@@ -23,11 +23,23 @@ market here, this module can't backfill a single day of history on day
 one. It builds its own rolling window one point per collection cycle
 (see KALSHI_15M_METALS_DATA_COLLECT_MINUTES's own comment on why that
 cadence is tighter than crypto's), persisted locally (kalshi_15m_metals_price_history/
-{metal}.parquet) so a restart doesn't reset the clock back to zero --
-this local file is NOT itself archived to HF (it's a rolling FEATURE-
-COMPUTATION window, not the durable training record; the labeled,
-feature-engineered rows this module produces each cycle ARE archived to
-HF via push_dataset_snapshot, same as every sibling module).
+{metal}.parquet).
+
+That local file USED TO be the only copy, on the reasoning that it's a
+rolling feature-computation window, not the durable training record (the
+labeled, feature-engineered rows this module produces each cycle ARE
+archived to HF via push_dataset_snapshot, same as every sibling module).
+Real gap that reasoning missed, confirmed live: MIN_ROWS_FOR_FEATURES
+(245, ~4 hours one point/minute) means this whole pipeline can't produce
+its FIRST feature row until the raw window survives that long
+uninterrupted -- and this process restarts often enough (redeploys, the
+recurring dead-HF-key fix cycle) that it went days without ever once
+reaching 245 minutes, so push_dataset_snapshot never got anything to
+archive in the first place. The raw window is now ALSO backed up to HF
+(see _maybe_push_price_history_to_hf), rate-limited to once every
+PRICE_HISTORY_HF_PUSH_MINUTES rather than every single collection tick,
+and restored from there on a cold local start -- bounding real data loss
+on a restart to that interval instead of a full reset to zero.
 
 Leaner FEATURE_COLUMNS than crypto's (see METALS_FEATURE_COLUMNS below)
 by real necessity, not oversight: a plain spot price has no volume, open
@@ -74,6 +86,17 @@ LABEL_HORIZON_MINUTES = int(os.getenv("KALSHI_15M_METALS_LABEL_HORIZON_MINUTES",
 PRICE_HISTORY_MAX_ROWS = int(os.getenv("KALSHI_15M_METALS_PRICE_HISTORY_MAX_ROWS", "1440") or "1440")
 MIN_ROWS_FOR_FEATURES = 245  # matches perps_data.MIN_ONE_MIN_ROWS_FOR_FEATURES -- the 4h/240min lookback + buffer
 
+# How often the raw rolling price-history window itself gets backed up to
+# HF (see this module's own docstring for why this exists at all) -- once
+# every N minutes per metal, not every single collection tick. 3 metals x
+# 1 upload/N-minutes is a small, deliberate HF write rate; N=15 bounds
+# real data loss on a restart to at most 15 of the 245 minutes needed to
+# ever produce a feature row, while keeping this well under the ~1
+# upload/second range that would risk HF rate limits across all 3 metals
+# combined with everything else this process already writes to HF.
+PRICE_HISTORY_HF_PUSH_MINUTES = int(os.getenv("KALSHI_15M_METALS_PRICE_HISTORY_HF_PUSH_MINUTES", "15") or "15")
+_last_price_history_push_at: dict[str, float] = {}
+
 METALS_FEATURE_COLUMNS = [
     "ret_1m", "ret_3m", "ret_5m", "ret_10m", "ret_15m", "ret_30m",
     "trend_1h", "trend_2h", "trend_3h", "trend_4h",
@@ -113,23 +136,90 @@ def _price_history_path(metal: str):
     return DATA_DIR / "kalshi_15m_metals_price_history" / f"{metal}.parquet"
 
 
-def _load_price_history(metal: str) -> pd.DataFrame:
-    path = _price_history_path(metal)
-    if not path.exists():
-        return pd.DataFrame(columns=["ts", "close"])
+def _price_history_hf_path_in_repo(metal: str) -> str:
+    return f"price_history/{metal}.parquet"
+
+
+def _restore_price_history_from_hf(metal: str) -> pd.DataFrame | None:
+    """Cold-local-start recovery -- see this module's own docstring. Best
+    effort: no HF key, no repo yet, or no prior backup all just mean
+    "nothing to restore", not an error."""
+    if not HF_API_KEY:
+        return None
     try:
+        from huggingface_hub import hf_hub_download
+        path = hf_hub_download(
+            repo_id=HF_KALSHI_15M_METALS_DATASET_REPO, filename=_price_history_hf_path_in_repo(metal),
+            repo_type="dataset", token=HF_API_KEY,
+        )
         return pd.read_parquet(path)
     except Exception as exc:
-        logger.warning("[kalshi_15m_metals_data] failed to read price history for %s: %s", metal, exc)
-        return pd.DataFrame(columns=["ts", "close"])
+        logger.info("[kalshi_15m_metals_data] no HF price-history backup to restore for %s: %s", metal, exc)
+        return None
 
 
-def _save_price_history(metal: str, df: pd.DataFrame) -> None:
+def _load_price_history(metal: str) -> pd.DataFrame:
+    path = _price_history_path(metal)
+    if path.exists():
+        try:
+            return pd.read_parquet(path)
+        except Exception as exc:
+            logger.warning("[kalshi_15m_metals_data] failed to read local price history for %s: %s", metal, exc)
+    # Local file missing (a fresh container, most likely) -- see if HF has
+    # a recent backup before falling back to a genuinely empty history.
+    restored = _restore_price_history_from_hf(metal)
+    if restored is not None:
+        try:
+            _save_price_history(metal, restored, push_to_hf=False)  # noqa: E501 -- write straight back to local disk, no need to re-push what we just pulled
+        except Exception as exc:
+            logger.warning("[kalshi_15m_metals_data] failed to write restored price history to local disk for %s: %s", metal, exc)
+        return restored
+    return pd.DataFrame(columns=["ts", "close"])
+
+
+def _maybe_push_price_history_to_hf(metal: str, df: pd.DataFrame) -> None:
+    """Rate-limited per PRICE_HISTORY_HF_PUSH_MINUTES -- see this module's
+    own docstring and PRICE_HISTORY_HF_PUSH_MINUTES's own comment for why
+    this isn't pushed on every single collection tick. Best effort: a
+    failure here never blocks the caller (the local save already
+    succeeded by the time this runs)."""
+    if not HF_API_KEY or df.empty:
+        return
+    import time
+    now = time.time()
+    last = _last_price_history_push_at.get(metal, 0.0)
+    if (now - last) < PRICE_HISTORY_HF_PUSH_MINUTES * 60:
+        return
+    try:
+        from huggingface_hub import HfApi
+        if not _ensure_dataset_repo():
+            return
+        api = HfApi(token=HF_API_KEY)
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as tmp:
+            df.to_parquet(tmp.name, index=False)
+            tmp_path = tmp.name
+        try:
+            retry_on_rate_limit(lambda: api.upload_file(
+                path_or_fileobj=tmp_path, path_in_repo=_price_history_hf_path_in_repo(metal),
+                repo_id=HF_KALSHI_15M_METALS_DATASET_REPO, repo_type="dataset",
+                commit_message=f"backup {metal} 15m metals raw price-history window",
+            ))
+            _last_price_history_push_at[metal] = now
+        finally:
+            os.unlink(tmp_path)
+    except Exception as exc:
+        logger.warning("[kalshi_15m_metals_data] price-history HF backup failed for %s: %s", metal, exc)
+
+
+def _save_price_history(metal: str, df: pd.DataFrame, *, push_to_hf: bool = True) -> None:
     path = _price_history_path(metal)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_suffix(".parquet.tmp")
     df.to_parquet(tmp_path, index=False)
     os.replace(tmp_path, path)
+    if push_to_hf:
+        _maybe_push_price_history_to_hf(metal, df)
 
 
 def _append_price_point(metal: str, ts: int, price: float) -> pd.DataFrame:
