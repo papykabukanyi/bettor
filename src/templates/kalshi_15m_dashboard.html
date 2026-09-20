@@ -56,10 +56,6 @@
   .config-grid div { display: flex; justify-content: space-between; font-size: 12px; padding: 3px 0; }
   .config-grid .k { color: var(--muted); }
   .config-grid .v { font-weight: 600; }
-  .notice {
-    background: #2a2510; border: 1px solid #4a3f10; color: var(--yellow); border-radius: var(--r);
-    padding: 10px 14px; font-size: 12px; margin-bottom: 16px;
-  }
 </style>
 </head>
 <body>
@@ -72,21 +68,15 @@
   </div>
 </header>
 
-<div class="notice" id="new-market-notice">
-  Data collection and model training run live now. Order-execution
-  mechanics have been confirmed against a real Kalshi response (not yet a
-  fill). Live order placement stays dry-run until this account allocates
-  collateral to exchange shard 2 (Crypto/Commodities -- see
-  <a href="https://kalshi.com/account/exchange-indexes" target="_blank" rel="noopener">kalshi.com/account/exchange-indexes</a>)
-  and <code>KALSHI_15M_LIVE_TRADING_ENABLED</code> is set on this Space.
-</div>
-
 <div class="grid">
   <div class="card"><h2>Positions</h2><div id="position-count" class="stat">--</div><div class="sub" id="position-sub">--</div></div>
   <div class="card"><h2>Today's P&amp;L</h2><div id="today-pnl" class="stat">--</div><div class="sub" id="total-pnl-sub">--</div></div>
   <div class="card"><h2>Crypto Model</h2><div id="model-status" class="stat">--</div><div class="sub" id="model-sub">--</div></div>
   <div class="card"><h2>Metals Model</h2><div id="metals-model-status" class="stat">--</div><div class="sub" id="metals-model-sub">--</div></div>
   <div class="card"><h2>Win Rate</h2><div id="win-rate" class="stat">--</div><div class="sub" id="win-rate-sub">--</div></div>
+  <!-- Real backend value, not a prose claim -- see refreshShardBalance's
+       own comment for why a static notice about this kept going stale. -->
+  <div class="card"><h2>Shard 2 Collateral</h2><div id="shard2-balance" class="stat">--</div><div class="sub" id="shard2-sub">Crypto &amp; Commodities</div></div>
 </div>
 
 <section>
@@ -231,9 +221,32 @@ async function refreshTrades() {
   } catch (e) { console.error("trades refresh failed", e); }
 }
 
+async function refreshShardBalance() {
+  // Replaces a static prose notice that kept going stale the moment
+  // either underlying condition changed (confirmed live, twice) -- a
+  // real number pulled fresh from Kalshi every refresh can't go stale
+  // the same way. Kalshi's own per-shard balance changes far less often
+  // than positions/trades, so this fetch runs on its own slower interval
+  // (see setInterval below) rather than every 10s alongside those.
+  try {
+    const res = await fetch("/api/kalshi15m/balance-by-shard");
+    const data = await res.json();
+    const balEl = document.getElementById("shard2-balance");
+    const subEl = document.getElementById("shard2-sub");
+    if (!data.ok) { balEl.textContent = "--"; subEl.textContent = "check failed"; return; }
+    const shard2 = data.shard_2_crypto_commodities || {};
+    const dollars = parseFloat(shard2.balance_dollars);
+    balEl.textContent = isNaN(dollars) ? "--" : fmtUsd(dollars);
+    balEl.className = "stat " + (dollars > 0 ? "pos" : "neg");
+    subEl.textContent = dollars > 0 ? "Crypto & Commodities" : "$0 -- real orders can't fill, see kalshi.com/account/exchange-indexes";
+  } catch (e) { console.error("shard balance refresh failed", e); }
+}
+
 function refreshAll() { refreshStatus(); refreshTrades(); }
 refreshAll();
+refreshShardBalance();
 setInterval(refreshAll, 10000);
+setInterval(refreshShardBalance, 60000);
 </script>
 </body>
 </html>
