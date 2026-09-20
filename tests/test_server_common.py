@@ -128,33 +128,13 @@ def test_call_with_hard_timeout_propagates_a_real_exception_from_the_function():
         server_common.call_with_hard_timeout(_raises, timeout_sec=2)
 
 
-def test_is_cron_authorized_allows_everything_when_no_secret_configured(monkeypatch):
-    monkeypatch.delenv("CRON_SECRET", raising=False)
-
-    class _Req:
-        headers: dict = {}
-
-    assert server_common.is_cron_authorized(_Req()) is True
-
-
-def test_is_cron_authorized_requires_matching_bearer_token(monkeypatch):
-    monkeypatch.setenv("CRON_SECRET", "s3cret")
-
-    class _Req:
-        def __init__(self, auth):
-            self.headers = {"authorization": auth} if auth else {}
-
-    assert server_common.is_cron_authorized(_Req("Bearer s3cret")) is True
-    assert server_common.is_cron_authorized(_Req("Bearer wrong")) is False
-    assert server_common.is_cron_authorized(_Req(None)) is False
-
-
-def test_is_cron_authorized_accepts_the_x_cron_secret_header_as_an_alternative(monkeypatch):
-    # Real bug this covers: a private HF Space's own edge gate rejects any
-    # Authorization header that isn't a real HF access token (confirmed
-    # live -- see is_cron_authorized's own docstring), so a caller sending
-    # "Authorization: Bearer <real HF token>" (to pass HF's gate) needs a
-    # SEPARATE header to also satisfy this check.
+def test_is_cron_authorized_always_authorizes(monkeypatch):
+    # Removed per explicit user direction -- see is_cron_authorized's own
+    # docstring for why the CRON_SECRET-based check became unworkable
+    # (collided with a private HF Space's own edge auth on the exact same
+    # header) and what the real remaining access boundary is (the Space's
+    # own privacy, not this function). Covers every input shape the old
+    # checks cared about, to lock in that NONE of them matter anymore.
     monkeypatch.setenv("CRON_SECRET", "s3cret")
 
     class _Req:
@@ -166,14 +146,13 @@ def test_is_cron_authorized_accepts_the_x_cron_secret_header_as_an_alternative(m
                 headers["x-cron-secret"] = x_cron_secret
             self.headers = headers
 
-    # A real HF token in Authorization (not the app's own secret) still
-    # authorizes via the alternate header.
-    assert server_common.is_cron_authorized(_Req(auth="Bearer hf_some_real_token", x_cron_secret="s3cret")) is True
-    assert server_common.is_cron_authorized(_Req(x_cron_secret="s3cret")) is True  # header alone is enough
-    assert server_common.is_cron_authorized(_Req(x_cron_secret="wrong")) is False
-    # The original Authorization-header form still works unchanged, with
-    # or without the new header present.
+    assert server_common.is_cron_authorized(_Req()) is True
     assert server_common.is_cron_authorized(_Req(auth="Bearer s3cret")) is True
+    assert server_common.is_cron_authorized(_Req(auth="Bearer wrong")) is True
+    assert server_common.is_cron_authorized(_Req(x_cron_secret="wrong")) is True
+
+    monkeypatch.delenv("CRON_SECRET", raising=False)
+    assert server_common.is_cron_authorized(_Req()) is True
 
 
 @pytest.fixture(autouse=True)

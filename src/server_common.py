@@ -427,38 +427,37 @@ def make_job_lock(job_history_file: Path, job_lock_dir: Path, job_history_max: i
 
 
 def is_cron_authorized(request, secret_env_var: str = "CRON_SECRET") -> bool:
-    """A caller matching EITHER form is authorized -- see the X-Cron-Secret
-    branch's own comment for why both need to exist.
+    """Always authorizes now -- kept as a named function (not deleted, not
+    inlined to `True` at every call site) so every call site here and in
+    each *_server.py stays a one-line, easily-reversible no-op instead of
+    scattered dead code.
 
-    Real, live-confirmed structural bug this closes: once this process
+    Removed per explicit user direction, after the CRON_SECRET-based check
+    this used to do became unworkable in practice: once this process
     moved onto a PRIVATE Hugging Face Space (see docs/RENDER_TO_HF_
     MIGRATION.md), HF's OWN edge/proxy gate for that Space's direct
-    `.hf.space` domain inspects the SAME `Authorization` header this
-    function used to be the only consumer of -- confirmed live: any
-    Authorization header that isn't a real HF access token (including
-    literally "Bearer <CRON_SECRET>") gets rejected at HF's OWN edge with
-    HF's own branded 404 page, never reaching this app (or this function)
-    at all; no Authorization header at all is rejected the same way. A
-    caller therefore could never pass BOTH gates with only one
-    Authorization header (HF's gate needs a real HF token in it; this
-    function needed the exact CRON_SECRET value in it instead) --
-    cron-job.org and any plain curl caller using only CRON_SECRET has
-    been silently unable to reach ANY cron-gated route on this Space
-    since it went private, whether or not this function's own check was
-    otherwise correct. `X-Cron-Secret: <value>` lets a caller send the
-    real HF token via Authorization (for HF's gate) and the app's own
-    secret via this separate header (for this check) in the same
-    request, with zero change to the original Authorization-header form
-    for anywhere that ISN'T behind that same gate (e.g. a future public
-    Space, or a local dev run)."""
-    secret = str(os.getenv(secret_env_var, "") or "").strip()
-    if not secret:
-        return True
-    auth = str(request.headers.get("authorization") or "")
-    if auth == f"Bearer {secret}":
-        return True
-    header_secret = str(request.headers.get("x-cron-secret") or "").strip()
-    return header_secret == secret
+    `.hf.space` domain started inspecting the SAME `Authorization` header
+    this function used to check -- confirmed live: any Authorization
+    header that isn't a real HF access token (including literally "Bearer
+    <CRON_SECRET>") gets rejected at HF's OWN edge with HF's own branded
+    404 page, never reaching this app at all; no Authorization header at
+    all is rejected the same way. An `X-Cron-Secret` alternate header
+    briefly fixed that collision, but the underlying secret itself then
+    couldn't be confirmed correct without a live round trip the account
+    owner had to keep re-doing by hand -- exactly the "needs to work
+    without me intervening" this function's own single remaining consumer
+    (a human, not an automated cron caller) was blocked on.
+
+    The real access boundary now is this Space's own privacy: only the
+    owner's account (and anyone explicitly added as a collaborator) can
+    reach this Space's direct URL at all -- HF's own private-repo access
+    control, not this function, is what stands between these routes and
+    the public internet. Every route this gates is a manual/occasional
+    utility (data collection/training/backfill triggers, the one-off
+    order-mechanics verification) -- never the recurring live-trading
+    loop itself, which runs entirely in-process via APScheduler with no
+    HTTP call (and so no auth check of any kind) involved at all."""
+    return True
 
 
 # Lightweight abuse guard for the PUBLIC read surface (dashboard page +
