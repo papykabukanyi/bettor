@@ -161,6 +161,20 @@ def test_simulate_settlement_math_on_a_loss():
     assert trade["realized_pnl_usd"] == pytest.approx(-125.0 * 0.40)
 
 
+def test_simulate_skips_rows_with_no_known_label_yet():
+    # Real bug found running this against the actual live archive: rows
+    # near the archive's own collection boundary have label_up = NaN (no
+    # future row existed yet to compute it against at collection time) --
+    # simulate() must not crash trying to int()-cast that, and must not
+    # treat those rows as tradeable (there is no ground truth to settle
+    # against).
+    df = _synthetic_test_df(symbols=("BTC",), n_per_symbol=50)
+    df.loc[df.index[-5:], "label_up"] = pd.NA
+    fitted = _fitted_with(_FixedProbaModel(0.95), symbols=("BTC",))
+    result = bt.simulate(df, fitted, starting_balance=100.0, model_confidence_min=0.5)
+    assert result["rows_with_model"] == 45
+
+
 def test_simulate_rejects_an_out_of_range_assumed_entry_price():
     df = _synthetic_test_df(symbols=("BTC",))
     with pytest.raises(ValueError):

@@ -183,7 +183,15 @@ def simulate(
     if not (0.0 < assumed_entry_price < 1.0):
         raise ValueError(f"assumed_entry_price must be strictly between 0 and 1, got {assumed_entry_price}")
 
-    df = test_df.sort_values("ts").reset_index(drop=True)
+    # Real bug found running this against the actual archive: the most
+    # recent rows near the archive's own collection boundary have no
+    # label_up yet (there was no row LABEL_HORIZON_MINUTES later at
+    # collection time to compute future_close against -- see
+    # kalshi_15m_data._relabel_for_horizon) -- an expected, not corrupt,
+    # edge of any live-collected archive, matching fit_backtest_model's
+    # own dropna(subset=["label_up"]) on the train side. Without this, a
+    # NaN label_up couldn't be int()-cast for settlement or calibration.
+    df = test_df.dropna(subset=["label_up"]).sort_values("ts").reset_index(drop=True)
     if "model_probability_up" not in df.columns:
         df = add_model_predictions(df, fitted)
 
