@@ -149,6 +149,33 @@ def test_is_cron_authorized_requires_matching_bearer_token(monkeypatch):
     assert server_common.is_cron_authorized(_Req(None)) is False
 
 
+def test_is_cron_authorized_accepts_the_x_cron_secret_header_as_an_alternative(monkeypatch):
+    # Real bug this covers: a private HF Space's own edge gate rejects any
+    # Authorization header that isn't a real HF access token (confirmed
+    # live -- see is_cron_authorized's own docstring), so a caller sending
+    # "Authorization: Bearer <real HF token>" (to pass HF's gate) needs a
+    # SEPARATE header to also satisfy this check.
+    monkeypatch.setenv("CRON_SECRET", "s3cret")
+
+    class _Req:
+        def __init__(self, auth=None, x_cron_secret=None):
+            headers = {}
+            if auth:
+                headers["authorization"] = auth
+            if x_cron_secret:
+                headers["x-cron-secret"] = x_cron_secret
+            self.headers = headers
+
+    # A real HF token in Authorization (not the app's own secret) still
+    # authorizes via the alternate header.
+    assert server_common.is_cron_authorized(_Req(auth="Bearer hf_some_real_token", x_cron_secret="s3cret")) is True
+    assert server_common.is_cron_authorized(_Req(x_cron_secret="s3cret")) is True  # header alone is enough
+    assert server_common.is_cron_authorized(_Req(x_cron_secret="wrong")) is False
+    # The original Authorization-header form still works unchanged, with
+    # or without the new header present.
+    assert server_common.is_cron_authorized(_Req(auth="Bearer s3cret")) is True
+
+
 @pytest.fixture(autouse=True)
 def _reset_rate_limit_state():
     """Module-level dict, shared across tests unless reset -- same reasoning

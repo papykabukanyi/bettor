@@ -427,11 +427,38 @@ def make_job_lock(job_history_file: Path, job_lock_dir: Path, job_history_max: i
 
 
 def is_cron_authorized(request, secret_env_var: str = "CRON_SECRET") -> bool:
+    """A caller matching EITHER form is authorized -- see the X-Cron-Secret
+    branch's own comment for why both need to exist.
+
+    Real, live-confirmed structural bug this closes: once this process
+    moved onto a PRIVATE Hugging Face Space (see docs/RENDER_TO_HF_
+    MIGRATION.md), HF's OWN edge/proxy gate for that Space's direct
+    `.hf.space` domain inspects the SAME `Authorization` header this
+    function used to be the only consumer of -- confirmed live: any
+    Authorization header that isn't a real HF access token (including
+    literally "Bearer <CRON_SECRET>") gets rejected at HF's OWN edge with
+    HF's own branded 404 page, never reaching this app (or this function)
+    at all; no Authorization header at all is rejected the same way. A
+    caller therefore could never pass BOTH gates with only one
+    Authorization header (HF's gate needs a real HF token in it; this
+    function needed the exact CRON_SECRET value in it instead) --
+    cron-job.org and any plain curl caller using only CRON_SECRET has
+    been silently unable to reach ANY cron-gated route on this Space
+    since it went private, whether or not this function's own check was
+    otherwise correct. `X-Cron-Secret: <value>` lets a caller send the
+    real HF token via Authorization (for HF's gate) and the app's own
+    secret via this separate header (for this check) in the same
+    request, with zero change to the original Authorization-header form
+    for anywhere that ISN'T behind that same gate (e.g. a future public
+    Space, or a local dev run)."""
     secret = str(os.getenv(secret_env_var, "") or "").strip()
     if not secret:
         return True
     auth = str(request.headers.get("authorization") or "")
-    return auth == f"Bearer {secret}"
+    if auth == f"Bearer {secret}":
+        return True
+    header_secret = str(request.headers.get("x-cron-secret") or "").strip()
+    return header_secret == secret
 
 
 # Lightweight abuse guard for the PUBLIC read surface (dashboard page +
