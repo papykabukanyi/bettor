@@ -122,6 +122,84 @@ STATE_FILE = Path(os.getenv("KALSHI_15M_STATE_FILE", str(DATA_DIR / "kalshi_15m_
 _STATE_LOCK = threading.Lock()
 
 HF_API_KEY = os.getenv("HF_API_KEY", "")
+# Real, live, confirmed bug this closes: unlike perps_strategy.py/
+# alpaca_strategy.py (and every other market here), this module had NO
+# HF backup for its own state at all -- purely local disk. Confirmed
+# live: a routine restart (triggered to disable live trading the moment
+# the order side/price bug above was found) wiped 118 real trades and a
+# real day's P&L total instantly, with no way to recover any of it.
+# Reuses perps' own already-private HF_MODEL_REPO rather than creating a
+# dedicated repo for one more market's durable state -- same "durable
+# trading state, must stay private" bucket, just a different filename.
+HF_DURABLE_STATE_REPO = os.getenv("HF_MODEL_REPO", "papylove/kalshi-perps-model")
+_DURABLE_STATE_HF_FILENAME = "kalshi_15m_durable_state.json"
+_DURABLE_STATE_HF_TIMEOUT_SEC = int(os.getenv("KALSHI_15M_DURABLE_STATE_HF_TIMEOUT_SEC", "10") or "10")
+
+
+def _durable_state_slice(state: dict[str, Any]) -> dict[str, Any]:
+    """Everything worth surviving a restart. Unlike perps' own version of
+    this function, `positions` IS included here (not reconstructable from
+    Kalshi's own account the way perps' margin positions are -- no
+    equivalent reconciliation exists for this market yet) -- losing track
+    of a real open position for up to 15 minutes is worse than one extra
+    small field in this payload."""
+    return {
+        "positions": state.get("positions") or [],
+        "trade_log": state.get("trade_log") or [],
+        "realized_pnl_by_date": state.get("realized_pnl_by_date") or {},
+    }
+
+
+def _push_durable_state_to_hf(state: dict[str, Any]) -> None:
+    if not HF_API_KEY:
+        return
+
+    def _upload() -> None:
+        import tempfile
+        from huggingface_hub import HfApi
+        api = HfApi(token=HF_API_KEY)
+        payload = json.dumps(_durable_state_slice(state), indent=2)
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as tmp:
+            tmp.write(payload)
+            tmp_path = tmp.name
+        try:
+            api.upload_file(
+                path_or_fileobj=tmp_path, path_in_repo=_DURABLE_STATE_HF_FILENAME,
+                repo_id=HF_DURABLE_STATE_REPO, repo_type="model", commit_message="update kalshi 15m durable state",
+            )
+        finally:
+            os.unlink(tmp_path)
+
+    try:
+        # Same real-incident-driven discipline as perps_strategy's own
+        # identical push: an unbounded huggingface_hub call can hang
+        # indefinitely on an internal lock and, while held under
+        # _STATE_LOCK (every push_durable=True caller below), freeze this
+        # entire shared --workers 1 process until gunicorn's timeout
+        # SIGKILLs it.
+        from server_common import call_with_hard_timeout
+        call_with_hard_timeout(_upload, timeout_sec=_DURABLE_STATE_HF_TIMEOUT_SEC)
+    except Exception as exc:
+        logger.warning("[kalshi_15m_strategy] durable state push to HF failed: %s", exc)
+
+
+def _pull_durable_state_from_hf() -> dict[str, Any] | None:
+    if not HF_API_KEY:
+        return None
+
+    def _download() -> dict[str, Any]:
+        from huggingface_hub import hf_hub_download
+        path = hf_hub_download(
+            repo_id=HF_DURABLE_STATE_REPO, filename=_DURABLE_STATE_HF_FILENAME, repo_type="model", token=HF_API_KEY,
+        )
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+
+    try:
+        from server_common import call_with_hard_timeout
+        return call_with_hard_timeout(_download, timeout_sec=_DURABLE_STATE_HF_TIMEOUT_SEC)
+    except Exception as exc:
+        logger.info("[kalshi_15m_strategy] no durable state on HF yet (or fetch failed): %s", exc)
+        return None
 
 
 def _load_state() -> dict[str, Any]:
@@ -129,17 +207,24 @@ def _load_state() -> dict[str, Any]:
         with open(STATE_FILE, "r", encoding="utf-8") as f:
             state = json.load(f)
     except Exception:
-        return {"positions": [], "trade_log": [], "realized_pnl_by_date": {}}
+        base = {"positions": [], "trade_log": [], "realized_pnl_by_date": {}}
+        durable = _pull_durable_state_from_hf()
+        if durable:
+            base.update(durable)
+            logger.info("[kalshi_15m_strategy] recovered durable state from HF after local state was missing")
+        return base
     state.setdefault("positions", [])
     state.setdefault("trade_log", [])
     state.setdefault("realized_pnl_by_date", {})
     return state
 
 
-def _save_state(state: dict[str, Any]) -> None:
+def _save_state(state: dict[str, Any], *, push_durable: bool = False) -> None:
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(state, f, indent=2)
+    if push_durable:
+        _push_durable_state_to_hf(state)
 
 
 def _today_str() -> str:
@@ -221,28 +306,56 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
             continue
 
         market = decision["market"]
-        side_char = "bid"  # buying (not selling) -- see kalshi_15m.create_order's own side convention
-        # Price: cross the spread at the current best offer for the chosen
-        # side (a marketable IOC order, same "pay the spread for a real
-        # fill over a resting order that might never fill" tradeoff
-        # kalshi_perps.py's own entries already accept). Kalshi's binary
-        # markets quote the NO side directly; the YES side's own best
-        # ask/bid are the complements (yes_ask = 1 - no_bid, yes_bid = 1 -
-        # no_ask) -- confirmed via Kalshi's own docs on binary market
-        # pricing, not yet cross-checked against a live quote on THIS
-        # account (see this module's own docstring on why order placement
-        # itself stays dry-run-only regardless).
+        # Price/side: cross the spread at the current best offer for the
+        # chosen side (a marketable IOC order, same "pay the spread for a
+        # real fill over a resting order that might never fill" tradeoff
+        # kalshi_perps.py's own entries already accept).
+        #
+        # REAL, LIVE, CONFIRMED BUG this fixes (found by cross-checking
+        # this account's own real Kalshi order history against this
+        # module's bookkeeping): Kalshi's create-order-v2 `side` field
+        # ALWAYS refers to the YES leg -- "bid" buys YES, "ask" sells YES
+        # (confirmed via docs.kalshi.com's own field description AND a
+        # community SDK independently, then confirmed a THIRD way against
+        # this account's own real order records: every "no"-decision
+        # order this code ever placed used side="bid", and Kalshi's own
+        # order history shows those executing as real BUY-YES fills --
+        # the exact opposite of the intended "no" position, with real
+        # money). To actually hold NO, you SELL YES (side="ask") at
+        # price = 1 - desired_no_price. This whole 15-minute-market
+        # feature was taken offline (KALSHI_15M_LIVE_TRADING_ENABLED set
+        # back to 0) the moment this was confirmed, pending this fix.
         no_ask = float(market.get("no_ask_dollars") or 0.99)
         no_bid = float(market.get("no_bid_dollars") or 0.01)
-        price = no_ask if decision["side"] == "no" else round(1.0 - no_bid, 4)
+        # `price` is always what's SENT to Kalshi (its API is YES-
+        # denominated regardless of which side we actually want -- see
+        # the comment above). `cost_basis` is the SEPARATE, real cost per
+        # contract of the side we actually end up holding, used for our
+        # own settlement bookkeeping below (check_settlements' own
+        # `count * (1 - entry_price)` / `-count * entry_price` formula) --
+        # for "no", that's no_ask (what a NO contract really costs), NOT
+        # `price` (the YES-denominated sell price Kalshi itself sees).
+        # Conflating these two was part of the same real bug: recording
+        # the YES-sell price as if it were the NO cost basis would have
+        # silently mispriced settlement P&L even after fixing the
+        # side/price sent to Kalshi.
+        if decision["side"] == "no":
+            side_char = "ask"
+            price = round(1.0 - no_ask, 4)
+            cost_basis = no_ask
+        else:
+            side_char = "bid"
+            price = round(1.0 - no_bid, 4)
+            cost_basis = price
         if price <= 0 or price >= 1:
             checks.append({"coin": coin, "ok": False, "reason": "no_valid_quote"})
             continue
 
-        contracts = max(1, int((_account_budget_usd() * POSITION_SIZE_PCT) / price))
+        contracts = max(1, int((_account_budget_usd() * POSITION_SIZE_PCT) / cost_basis))
         client_order_id = str(uuid.uuid4())
 
         order_id = None
+        filled_count = float(contracts)  # dry-run: "fills" the full requested size in the simulation
         if not effective_dry_run:
             try:
                 order_result = kalshi_15m.create_order(
@@ -255,9 +368,31 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
                 checks.append({"coin": coin, "ok": False, "reason": "order_failed", "error": str(exc)})
                 continue
 
+            # REAL, LIVE, CONFIRMED BUG this ALSO fixes: this code used to
+            # record a "position" the instant create_order returned an
+            # order_id, with no check that the order actually filled.
+            # Confirmed live: an IOC order that crosses no one (a stale
+            # quote, a too-aggressive limit) gets Kalshi's own status
+            # "canceled" with fill_count 0 -- this code was recording that
+            # as an open position anyway, and later fabricating a
+            # settlement outcome/P&L for a position the account never
+            # actually held. Read back this exact order's own real status
+            # (an authenticated but read-only call) before trusting it.
+            filled_count = 0.0
+            try:
+                fresh_orders = kalshi_15m.get_orders(ticker=market["ticker"])
+                match = next((o for o in fresh_orders if o.get("order_id") == order_id), None)
+                if match is not None:
+                    filled_count = float(match.get("fill_count_fp") or match.get("fill_count") or 0.0)
+            except Exception as exc:
+                logger.warning("[kalshi_15m_strategy] could not verify fill for order %s (%s): %s", order_id, coin, exc)
+            if filled_count <= 0:
+                checks.append({"coin": coin, "ok": False, "reason": "order_not_filled", "order_id": order_id})
+                continue
+
         position = {
             "coin": coin, "ticker": market["ticker"], "side": decision["side"],
-            "count": contracts, "entry_price": price, "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+            "count": filled_count, "entry_price": cost_basis, "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(),
             "close_time": market.get("close_time"), "entry_probability_up": decision["probability_up"],
             "entry_confidence": decision["confidence"], "dry_run": effective_dry_run,
             "client_order_id": client_order_id, "order_id": order_id,
@@ -265,9 +400,9 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
         with _STATE_LOCK:
             state = _load_state()
             state["positions"].append(position)
-            _save_state(state)
+            _save_state(state, push_durable=not effective_dry_run)
         open_count += 1
-        checks.append({"coin": coin, "ok": True, "action": "entered", "side": decision["side"], "count": contracts, "dry_run": effective_dry_run})
+        checks.append({"coin": coin, "ok": True, "action": "entered", "side": decision["side"], "count": filled_count, "dry_run": effective_dry_run})
 
     return {"ok": True, "checks": checks, "live_trading_enabled": LIVE_TRADING_ENABLED}
 
@@ -344,7 +479,7 @@ def check_settlements() -> dict[str, Any]:
                 by_date[today] = round(float(by_date.get(today, 0.0)) + trade["realized_pnl_usd"], 6)
             state["trade_log"].append(trade)
             state["positions"] = [p for p in state.get("positions") or [] if p.get("ticker") != ticker]
-            _save_state(state)
+            _save_state(state, push_durable=not trade["dry_run"])
         checks.append({"coin": position["coin"], "ok": True, "action": "settled", "won": won, "realized_pnl_usd": trade["realized_pnl_usd"]})
 
     return {"ok": True, "checks": checks}

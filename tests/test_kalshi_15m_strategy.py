@@ -177,11 +177,20 @@ def test_scan_and_enter_places_a_real_order_only_when_explicitly_forced_live(mon
     monkeypatch.setattr(kalshi_15m_strategy, "_account_budget_usd", lambda: 100.0)
     order_calls = []
     monkeypatch.setattr(kalshi_15m, "create_order", lambda **kw: order_calls.append(kw) or {"order_id": "o1"})
+    # Real bug this whole file's own suite originally missed: without
+    # mocking get_orders (the post-placement fill check), an unmocked
+    # network call fails, filled_count stays 0, and NOTHING gets recorded
+    # as "entered" -- the old version of this test's own final assertion
+    # (all(... for c in entered)) was vacuously True on an EMPTY list, so
+    # it kept "passing" without checking anything real. Mocking a real
+    # fill here restores what this test actually claims to verify.
+    monkeypatch.setattr(kalshi_15m, "get_orders", lambda ticker=None, status=None: [{"order_id": "o1", "fill_count_fp": "10.00"}])
 
     result = kalshi_15m_strategy.scan_and_enter(dry_run=False)
 
     assert len(order_calls) == len(kalshi_15m_strategy.ASSET_SERIES)  # one per asset in the FULL merged universe
     entered = [c for c in result["checks"] if c.get("action") == "entered"]
+    assert len(entered) == len(kalshi_15m_strategy.ASSET_SERIES)
     assert all(c["dry_run"] is False for c in entered)
 
 
@@ -200,6 +209,130 @@ def test_scan_and_enter_records_a_failed_order_without_opening_a_position(monkey
     assert all(c.get("reason") == "order_failed" for c in result["checks"])
     state = kalshi_15m_strategy._load_state()  # noqa: SLF001
     assert state["positions"] == []
+
+
+# ---------------------------------------------------------------------------
+# Real, live, confirmed bug found by cross-checking this account's own real
+# Kalshi order history against this module's bookkeeping: a "no" decision
+# used to submit side="bid" (buy YES) -- Kalshi's create-order-v2 `side`
+# ALWAYS refers to the YES leg, so this executed as a real BUY-YES fill,
+# the exact opposite of the intended "no" position, with real money. Fixed
+# to side="ask" (sell YES) at price = 1 - no_ask. These tests pin down the
+# exact side/price Kalshi actually receives -- the ORIGINAL bug shipped
+# specifically because no test ever asserted these values.
+# ---------------------------------------------------------------------------
+def test_scan_and_enter_sends_the_correct_side_and_price_for_a_no_decision(monkeypatch):
+    monkeypatch.setattr(kalshi_15m_strategy, "MAX_CONCURRENT_POSITIONS", 1)
+    monkeypatch.setattr(kalshi_15m_strategy, "LIVE_TRADING_ENABLED", True)
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market(no_ask=0.60, no_bid=0.55))
+    _mock_confident_prediction(monkeypatch, probability_up=0.25)  # -> "no"
+    monkeypatch.setattr(kalshi_15m_strategy, "_account_budget_usd", lambda: 100.0)
+    order_calls = []
+    monkeypatch.setattr(kalshi_15m, "create_order", lambda **kw: order_calls.append(kw) or {"order_id": "o1"})
+    monkeypatch.setattr(kalshi_15m, "get_orders", lambda ticker=None, status=None: [{"order_id": "o1", "fill_count_fp": "5.00"}])
+
+    kalshi_15m_strategy.scan_and_enter(dry_run=False)
+
+    assert len(order_calls) == 1
+    call = order_calls[0]
+    assert call["side"] == "ask"  # sell YES -- NOT "bid", the original bug
+    assert call["price"] == pytest.approx(1.0 - 0.60)  # 1 - no_ask, NOT no_ask directly
+
+
+def test_scan_and_enter_sends_the_correct_side_and_price_for_a_yes_decision(monkeypatch):
+    monkeypatch.setattr(kalshi_15m_strategy, "MAX_CONCURRENT_POSITIONS", 1)
+    monkeypatch.setattr(kalshi_15m_strategy, "LIVE_TRADING_ENABLED", True)
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market(no_ask=0.60, no_bid=0.55))
+    _mock_confident_prediction(monkeypatch, probability_up=0.75)  # -> "yes"
+    monkeypatch.setattr(kalshi_15m_strategy, "_account_budget_usd", lambda: 100.0)
+    order_calls = []
+    monkeypatch.setattr(kalshi_15m, "create_order", lambda **kw: order_calls.append(kw) or {"order_id": "o1"})
+    monkeypatch.setattr(kalshi_15m, "get_orders", lambda ticker=None, status=None: [{"order_id": "o1", "fill_count_fp": "5.00"}])
+
+    kalshi_15m_strategy.scan_and_enter(dry_run=False)
+
+    assert len(order_calls) == 1
+    call = order_calls[0]
+    assert call["side"] == "bid"  # buy YES -- unchanged, was already correct
+    assert call["price"] == pytest.approx(1.0 - 0.55)  # 1 - no_bid
+
+
+def test_scan_and_enter_records_the_no_side_cost_basis_not_the_yes_sell_price(monkeypatch):
+    """The SEPARATE real bug this also fixes: entry_price used to store
+    whatever price Kalshi received (the YES-denominated sell price for a
+    "no" position), which check_settlements' own count * (1 -
+    entry_price) formula assumes is the cost basis IN THE HELD SIDE's OWN
+    terms -- silently mispricing every "no" settlement even after fixing
+    just the side/price sent to Kalshi."""
+    monkeypatch.setattr(kalshi_15m_strategy, "MAX_CONCURRENT_POSITIONS", 1)
+    monkeypatch.setattr(kalshi_15m_strategy, "LIVE_TRADING_ENABLED", True)
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market(no_ask=0.60, no_bid=0.55))
+    _mock_confident_prediction(monkeypatch, probability_up=0.25)  # -> "no"
+    monkeypatch.setattr(kalshi_15m_strategy, "_account_budget_usd", lambda: 100.0)
+    monkeypatch.setattr(kalshi_15m, "create_order", lambda **kw: {"order_id": "o1"})
+    monkeypatch.setattr(kalshi_15m, "get_orders", lambda ticker=None, status=None: [{"order_id": "o1", "fill_count_fp": "5.00"}])
+
+    kalshi_15m_strategy.scan_and_enter(dry_run=False)
+
+    state = kalshi_15m_strategy._load_state()  # noqa: SLF001
+    position = state["positions"][0]
+    assert position["entry_price"] == pytest.approx(0.60)  # no_ask -- the real NO cost basis
+    assert position["count"] == 5.0  # the REAL fill count, not whatever was requested
+
+
+def test_scan_and_enter_does_not_open_a_position_when_the_order_never_fills(monkeypatch):
+    """Real, live, confirmed bug this fixes: this code used to record a
+    "position" the instant create_order returned an order_id, with no
+    check that the order actually filled -- an IOC order that crosses no
+    one gets Kalshi's own status "canceled" with fill_count 0, and this
+    was recording that as a real open position anyway."""
+    monkeypatch.setattr(kalshi_15m_strategy, "MAX_CONCURRENT_POSITIONS", 1)
+    monkeypatch.setattr(kalshi_15m_strategy, "LIVE_TRADING_ENABLED", True)
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
+    _mock_confident_prediction(monkeypatch)
+    monkeypatch.setattr(kalshi_15m_strategy, "_account_budget_usd", lambda: 100.0)
+    monkeypatch.setattr(kalshi_15m, "create_order", lambda **kw: {"order_id": "o1"})
+    monkeypatch.setattr(kalshi_15m, "get_orders", lambda ticker=None, status=None: [{"order_id": "o1", "status": "canceled", "fill_count_fp": "0.00"}])
+
+    result = kalshi_15m_strategy.scan_and_enter(dry_run=False)
+
+    assert all(c.get("reason") == "order_not_filled" for c in result["checks"] if not c.get("ok"))
+    state = kalshi_15m_strategy._load_state()  # noqa: SLF001
+    assert state["positions"] == []
+
+
+def test_scan_and_enter_survives_a_fill_check_failure_without_opening_a_phantom_position(monkeypatch):
+    monkeypatch.setattr(kalshi_15m_strategy, "MAX_CONCURRENT_POSITIONS", 1)
+    monkeypatch.setattr(kalshi_15m_strategy, "LIVE_TRADING_ENABLED", True)
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
+    _mock_confident_prediction(monkeypatch)
+    monkeypatch.setattr(kalshi_15m_strategy, "_account_budget_usd", lambda: 100.0)
+    monkeypatch.setattr(kalshi_15m, "create_order", lambda **kw: {"order_id": "o1"})
+
+    def fail(**kw):
+        raise RuntimeError("network error checking fill")
+
+    monkeypatch.setattr(kalshi_15m, "get_orders", fail)
+    kalshi_15m_strategy.scan_and_enter(dry_run=False)
+
+    state = kalshi_15m_strategy._load_state()  # noqa: SLF001
+    assert state["positions"] == []  # fails closed, never assumes a fill it couldn't verify
+
+
+def test_scan_and_enter_dry_run_still_records_the_full_requested_count(monkeypatch):
+    # Dry-run has no real order/fill to verify -- must keep simulating the
+    # full requested size, not silently collapse to 0.
+    monkeypatch.setattr(kalshi_15m_strategy, "MAX_CONCURRENT_POSITIONS", 1)
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market(no_ask=0.60, no_bid=0.55))
+    _mock_confident_prediction(monkeypatch, probability_up=0.25)  # -> "no"
+    monkeypatch.setattr(kalshi_15m_strategy, "_account_budget_usd", lambda: 100.0)
+
+    kalshi_15m_strategy.scan_and_enter()  # LIVE_TRADING_ENABLED is False -> dry_run
+
+    state = kalshi_15m_strategy._load_state()  # noqa: SLF001
+    position = state["positions"][0]
+    assert position["count"] > 0
+    assert position["entry_price"] == pytest.approx(0.60)
 
 
 # ---------------------------------------------------------------------------
@@ -346,3 +479,82 @@ def test_asset_series_covers_all_8_assets_with_no_overlap():
     assert set(kalshi_15m_strategy.ASSET_SERIES) == {
         "BTC", "ETH", "SOL", "XRP", "DOGE", "GOLD", "SILVER", "COPPER",
     }
+
+
+# ---------------------------------------------------------------------------
+# Durable-state HF backup -- real, live, confirmed bug this closes: unlike
+# every other market here, this module had NO HF backup for its own state
+# at all. Confirmed live: a routine restart wiped 118 real trades and a
+# real day's P&L total instantly. See HF_DURABLE_STATE_REPO's own comment.
+# ---------------------------------------------------------------------------
+class _FakeHfApi:
+    captured_upload: dict = {}
+
+    def __init__(self, token=None):
+        pass
+
+    def upload_file(self, *, path_or_fileobj, path_in_repo, repo_id, repo_type, commit_message):
+        import json as _json
+        _FakeHfApi.captured_upload.setdefault("uploads", []).append({
+            "path_in_repo": path_in_repo, "repo_id": repo_id,
+            "content": _json.loads(open(path_or_fileobj, encoding="utf-8").read()),
+        })
+
+
+def test_check_settlements_pushes_durable_state_for_a_real_settled_trade(monkeypatch):
+    import huggingface_hub
+
+    monkeypatch.setattr(kalshi_15m_strategy, "HF_API_KEY", "fake-hf-token")
+    _FakeHfApi.captured_upload = {}
+    monkeypatch.setattr(huggingface_hub, "HfApi", _FakeHfApi)
+
+    state = {"positions": [_position(coin="BTC", side="yes", entry_price=0.5, dry_run=False, ticker="KXBTC15M-1")], "trade_log": [], "realized_pnl_by_date": {}}
+    kalshi_15m_strategy._save_state(state)  # noqa: SLF001
+    monkeypatch.setattr(kalshi_15m, "get_market", lambda ticker: {"ticker": ticker, "result": "yes"})
+
+    kalshi_15m_strategy.check_settlements()
+
+    uploads = _FakeHfApi.captured_upload["uploads"]
+    assert len(uploads) == 1
+    assert uploads[0]["repo_id"] == kalshi_15m_strategy.HF_DURABLE_STATE_REPO
+    assert uploads[0]["path_in_repo"] == kalshi_15m_strategy._DURABLE_STATE_HF_FILENAME  # noqa: SLF001
+    assert len(uploads[0]["content"]["trade_log"]) == 1
+
+
+def test_check_settlements_does_not_push_durable_state_for_a_dry_run_trade(monkeypatch):
+    import huggingface_hub
+
+    monkeypatch.setattr(kalshi_15m_strategy, "HF_API_KEY", "fake-hf-token")
+    _FakeHfApi.captured_upload = {}
+    monkeypatch.setattr(huggingface_hub, "HfApi", _FakeHfApi)
+
+    state = {"positions": [_position(coin="BTC", side="yes", entry_price=0.5, dry_run=True, ticker="KXBTC15M-1")], "trade_log": [], "realized_pnl_by_date": {}}
+    kalshi_15m_strategy._save_state(state)  # noqa: SLF001
+    monkeypatch.setattr(kalshi_15m, "get_market", lambda ticker: {"ticker": ticker, "result": "yes"})
+
+    kalshi_15m_strategy.check_settlements()
+
+    assert _FakeHfApi.captured_upload.get("uploads", []) == []
+
+
+def test_load_state_restores_from_hf_when_local_file_is_missing(monkeypatch):
+    monkeypatch.setattr(kalshi_15m_strategy, "HF_API_KEY", "fake-hf-token")
+    backup = {"positions": [], "trade_log": [{"coin": "BTC", "realized_pnl_usd": 1.5}], "realized_pnl_by_date": {"2026-09-21": 1.5}}
+
+    import huggingface_hub
+    tmp_file = kalshi_15m_strategy.DATA_DIR / "hf_backup_kalshi15m_state.json"
+    tmp_file.write_text(__import__("json").dumps(backup), encoding="utf-8")
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", lambda **kw: str(tmp_file))
+
+    result = kalshi_15m_strategy._load_state()  # noqa: SLF001
+    assert result["trade_log"] == backup["trade_log"]
+    assert result["realized_pnl_by_date"] == backup["realized_pnl_by_date"]
+
+
+def test_load_state_falls_back_to_empty_when_hf_has_no_backup_either(monkeypatch):
+    monkeypatch.setattr(kalshi_15m_strategy, "HF_API_KEY", "fake-hf-token")
+    import huggingface_hub
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", lambda **kw: (_ for _ in ()).throw(RuntimeError("404")))
+
+    result = kalshi_15m_strategy._load_state()  # noqa: SLF001
+    assert result == {"positions": [], "trade_log": [], "realized_pnl_by_date": {}}
