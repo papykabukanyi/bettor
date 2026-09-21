@@ -165,6 +165,26 @@ KALSHI_15M_CYCLE_MINUTES = max(1, int(os.getenv("KALSHI_15M_CYCLE_MINUTES", "2")
 # daily retrains, so this doesn't contend with any of them for CPU at the
 # exact same minute.
 KALSHI_15M_TRAIN_HOUR_ET = int(os.getenv("KALSHI_15M_TRAIN_HOUR_ET", "4") or "4")
+# Custom PyTorch MLP challenger candidate (kalshi_15m_model.
+# train_torch_candidate_model) -- own low-frequency daily schedule, kept
+# separate from the walk-forward train job above for the same reason
+# alpaca_options_model.py's own identical candidate is: `import torch`
+# alone costs real memory (~154MB RSS, measured elsewhere in this
+# codebase), so it only gets paid when this specific job actually runs,
+# not on every walk-forward retrain. 1 hour after the regular train (not
+# the same tick) so it always re-scores against that day's freshly
+# walk-forward-trained model, not the previous day's -- see
+# train_torch_candidate_model's own champion/challenger promotion logic
+# for why that ordering matters (it only promotes if it BEATS the
+# current model's fresh score). Metals excluded for now: its own
+# archive hasn't even completed one regular walk-forward training run
+# yet (see MIN_ROWS_FOR_FEATURES's own ~4h cold-start requirement) --
+# a bigger model needs more data to justify its added capacity, not less.
+# Default 7 (not the reflexive train+1): options' OWN identical torch
+# candidate already defaults to 5 and ai_monitor to 6 -- picking a
+# distinct hour avoids two heavy torch trainings landing on the exact
+# same minute in this one shared process.
+KALSHI_15M_TORCH_TRAIN_HOUR_ET = int(os.getenv("KALSHI_15M_TORCH_TRAIN_HOUR_ET", "7") or "7")
 # Real gap this closes: the live collector only ever archives what it
 # observes going forward (see kalshi_15m_data.backfill_minute_history's
 # own docstring) -- any gap from a missed collection cycle (a restart,
@@ -632,6 +652,26 @@ def _run_kalshi_15m_train() -> dict[str, Any]:
     return {"ok": True, "crypto": crypto_result, "metals": metals_result}
 
 
+@_locked_job("kalshi_15m_torch_train", stale_after_sec=1800)
+def _run_kalshi_15m_torch_train() -> dict[str, Any]:
+    """See KALSHI_15M_TORCH_TRAIN_HOUR_ET's own comment and kalshi_15m_
+    model.train_torch_candidate_model's own docstring for the full
+    champion/challenger design -- crypto only, metals excluded for now
+    (see that same comment for why)."""
+    try:
+        trade_log = kalshi_15m_strategy._load_state().get("trade_log")  # noqa: SLF001
+    except Exception as exc:
+        logger.warning("[app_kalshi] could not read kalshi_15m trade_log for torch training: %s", exc)
+        trade_log = None
+    try:
+        return kalshi_15m_model.train_torch_candidate_model(trade_log=trade_log)
+    except Exception as exc:
+        logger.warning("[app_kalshi] kalshi_15m torch candidate training failed: %s", exc)
+        return {"ok": False, "error": str(exc)}
+    finally:
+        gc.collect()
+
+
 @_locked_job("ai_monitor", stale_after_sec=180)
 def _run_ai_monitor() -> dict[str, Any]:
     """See ai_monitor.py's own module docstring -- a read-only, project-
@@ -882,6 +922,10 @@ def _ensure_background_jobs_started() -> None:
             scheduler.add_job(
                 _run_kalshi_15m_train, "cron", hour=KALSHI_15M_TRAIN_HOUR_ET, minute=0,
                 id="kalshi_15m_train", replace_existing=True,
+            )
+            scheduler.add_job(
+                _run_kalshi_15m_torch_train, "cron", hour=KALSHI_15M_TORCH_TRAIN_HOUR_ET, minute=0,
+                id="kalshi_15m_torch_train", replace_existing=True,
             )
             scheduler.add_job(
                 _run_ai_monitor, "cron", hour=AI_MONITOR_HOUR_ET, minute=0,
@@ -1729,6 +1773,7 @@ _JOB_LABELS = {
     "kalshi_15m_cycle": f"Kalshi 15m markets settlement check + entry scan (every {KALSHI_15M_CYCLE_MINUTES} min)",
     "kalshi_15m_reconcile": f"Kalshi 15m crypto archive gap-heal, trailing {KALSHI_15M_RECONCILE_DAYS}d (daily, 30 min before training)",
     "kalshi_15m_train": f"Kalshi 15m markets model retrain, crypto + metals (daily {KALSHI_15M_TRAIN_HOUR_ET:02d}:00 ET)",
+    "kalshi_15m_torch_train": f"Kalshi 15m crypto custom PyTorch MLP challenger, promoted only if it beats the current model (daily {KALSHI_15M_TORCH_TRAIN_HOUR_ET:02d}:00 ET)",
     "ai_monitor": f"Project-wide Claude-powered status review, read-only, all 5 markets (daily {AI_MONITOR_HOUR_ET:02d}:00 ET)",
     "perps_train": f"Model retrain (daily {PERPS_TRAIN_HOUR_ET:02d}:00 ET)",
     "perps_trade_analysis": (

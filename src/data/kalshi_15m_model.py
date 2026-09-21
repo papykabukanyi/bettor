@@ -93,6 +93,167 @@ class _AveragedEnsemble:
         return (self.predict_proba(x)[:, 1] >= 0.5).astype(int)
 
 
+def _suppress_torch_numpy_warning() -> None:
+    """Identical to alpaca_options_model's own copy of this function --
+    some torch CPU wheels (built against numpy 1.x) emit a noisy
+    UserWarning on first import under this project's numpy 2.x pin, real
+    and confirmed harmless (see predict_proba below's own .tolist() use),
+    but would otherwise spam every training-job log line looking exactly
+    like a crash traceback."""
+    import warnings
+    warnings.filterwarnings("ignore", message=".*NumPy 1.x.*", category=UserWarning)
+    warnings.filterwarnings("ignore", message=".*Failed to initialize NumPy.*", category=UserWarning)
+
+
+class _TorchMLPClassifier:
+    """Hand-built feedforward neural net (3 hidden layers, ReLU + dropout,
+    sigmoid output via BCEWithLogitsLoss) wrapped in a scikit-learn-
+    compatible interface (.fit/.predict/.predict_proba) -- a genuinely
+    custom model, not one of sklearn's canned classifiers, per explicit
+    user direction ("change the model... to a more powerful model...
+    trained on finance and prediction"). Line-for-line identical
+    architecture to alpaca_options_model.py's own _TorchMLPClassifier
+    (64->32->16->1, dropout 0.2, Adam weight_decay, chronological-
+    validation-slice early stopping) -- same "independent per-market
+    module, not a shared base class" convention this whole codebase
+    already follows elsewhere, not a missed opportunity to share code.
+
+    Deliberately NOT added to _CANDIDATES / train_model()'s existing
+    walk-forward loop (which already fits up to 12 models per call across
+    4 folds x 3 candidates) -- see train_torch_candidate_model() below,
+    which trains this one candidate in complete isolation, on its own
+    low-frequency daily schedule, using a single chronological split
+    rather than the full 4-fold walk-forward. `torch` is imported lazily
+    inside these methods, never at module level: measured elsewhere in
+    this codebase, `import torch` alone costs ~154MB RSS -- merely
+    importing this file (done on every predict_direction call) must
+    never pay that cost.
+
+    Persists as a plain state_dict + numpy normalization stats rather
+    than a live nn.Module/optimizer -- keeps the joblib-pickled object's
+    own footprint to just small tensors + arrays."""
+
+    def __init__(self, input_dim: int, hidden_dim: int = 64, epochs: int = 100,
+                 lr: float = 1e-3, batch_size: int = 256, random_state: int = 42,
+                 dropout: float = 0.2, weight_decay: float = 1e-5,
+                 early_stopping_patience: int = 8, validation_fraction: float = 0.15):
+        self.input_dim = input_dim
+        self.hidden_dim = hidden_dim
+        self.epochs = epochs
+        self.lr = lr
+        self.batch_size = batch_size
+        self.random_state = random_state
+        self.dropout = dropout
+        self.weight_decay = weight_decay
+        self.early_stopping_patience = early_stopping_patience
+        self.validation_fraction = validation_fraction
+        self._state_dict: dict[str, Any] | None = None
+        self._x_mean: np.ndarray | None = None
+        self._x_std: np.ndarray | None = None
+
+    def _build_net(self):
+        from torch import nn
+        mid = max(self.hidden_dim // 2, 8)
+        small = max(self.hidden_dim // 4, 4)
+        return nn.Sequential(
+            nn.Linear(self.input_dim, self.hidden_dim), nn.ReLU(), nn.Dropout(self.dropout),
+            nn.Linear(self.hidden_dim, mid), nn.ReLU(), nn.Dropout(self.dropout),
+            nn.Linear(mid, small), nn.ReLU(),
+            nn.Linear(small, 1),
+        )
+
+    def fit(self, x: np.ndarray, y: np.ndarray, sample_weight: np.ndarray | None = None) -> "_TorchMLPClassifier":
+        _suppress_torch_numpy_warning()
+        import torch
+        from torch import nn
+
+        torch.manual_seed(self.random_state)
+        torch.set_num_threads(1)
+
+        x_mean, x_std = x.mean(axis=0), x.std(axis=0)
+        x_std[x_std == 0] = 1.0
+        self._x_mean, self._x_std = x_mean, x_std
+        x_norm = (x - x_mean) / x_std
+
+        n_total = len(x_norm)
+        n_val = int(n_total * self.validation_fraction)
+        use_early_stopping = n_val >= 20 and (n_total - n_val) >= 20
+        if use_early_stopping:
+            x_fit, y_fit = x_norm[:-n_val], y[:-n_val]
+            x_val, y_val = x_norm[-n_val:], y[-n_val:]
+            w_fit = sample_weight[:-n_val] if sample_weight is not None else None
+            w_val = sample_weight[-n_val:] if sample_weight is not None else None
+        else:
+            x_fit, y_fit, w_fit = x_norm, y, sample_weight
+            x_val = y_val = w_val = None
+
+        net = self._build_net()
+        x_t = torch.tensor(x_fit, dtype=torch.float32)
+        y_t = torch.tensor(y_fit, dtype=torch.float32).view(-1, 1)
+        w_t = torch.tensor(w_fit, dtype=torch.float32).view(-1, 1) if w_fit is not None else None
+
+        opt = torch.optim.Adam(net.parameters(), lr=self.lr, weight_decay=self.weight_decay)
+        loss_fn = nn.BCEWithLogitsLoss(reduction="none" if w_t is not None else "mean")
+        n = len(x_t)
+        best_val_loss = float("inf")
+        best_state: dict[str, Any] | None = None
+        epochs_without_improvement = 0
+        x_val_t = torch.tensor(x_val, dtype=torch.float32) if x_val is not None else None
+        y_val_t = torch.tensor(y_val, dtype=torch.float32).view(-1, 1) if y_val is not None else None
+        w_val_t = torch.tensor(w_val, dtype=torch.float32).view(-1, 1) if w_val is not None else None
+        val_loss_fn = nn.BCEWithLogitsLoss(reduction="none" if w_val_t is not None else "mean")
+
+        for _epoch in range(self.epochs):
+            net.train()
+            perm = torch.randperm(n)
+            for start in range(0, n, self.batch_size):
+                idx = perm[start:start + self.batch_size]
+                opt.zero_grad()
+                logits = net(x_t[idx])
+                loss = loss_fn(logits, y_t[idx])
+                if w_t is not None:
+                    loss = (loss * w_t[idx]).mean()
+                loss.backward()
+                opt.step()
+
+            if not use_early_stopping:
+                continue
+            net.eval()
+            with torch.no_grad():
+                val_logits = net(x_val_t)
+                val_loss_raw = val_loss_fn(val_logits, y_val_t)
+                val_loss = float((val_loss_raw * w_val_t).mean() if w_val_t is not None else val_loss_raw)
+            if val_loss < best_val_loss - 1e-4:
+                best_val_loss = val_loss
+                best_state = {k: v.clone() for k, v in net.state_dict().items()}
+                epochs_without_improvement = 0
+            else:
+                epochs_without_improvement += 1
+                if epochs_without_improvement >= self.early_stopping_patience:
+                    break
+
+        self._state_dict = best_state if best_state is not None else {k: v.clone() for k, v in net.state_dict().items()}
+        del net, x_t, y_t, opt
+        return self
+
+    def predict_proba(self, x: np.ndarray) -> np.ndarray:
+        _suppress_torch_numpy_warning()
+        import torch
+
+        torch.set_num_threads(1)
+        net = self._build_net()
+        net.load_state_dict(self._state_dict)
+        net.eval()
+        x_norm = (x - self._x_mean) / self._x_std
+        with torch.no_grad():
+            logits = net(torch.tensor(x_norm, dtype=torch.float32))
+            proba_up = np.asarray(torch.sigmoid(logits).view(-1).tolist())
+        return np.column_stack([1.0 - proba_up, proba_up])
+
+    def predict(self, x: np.ndarray) -> np.ndarray:
+        return (self.predict_proba(x)[:, 1] >= 0.5).astype(int)
+
+
 def _recency_sample_weight(ts: np.ndarray, *, half_life_days: float) -> np.ndarray:
     if half_life_days <= 0 or len(ts) == 0:
         return np.ones(len(ts), dtype=float)
@@ -298,6 +459,89 @@ def train_model(df: pd.DataFrame | None = None, trade_log: list[dict[str, Any]] 
     _push_model_to_hf()
     gc.collect()
     return {"ok": True, **meta}
+
+
+def train_torch_candidate_model(df: pd.DataFrame | None = None, trade_log: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    """Trains the custom PyTorch MLP candidate in complete isolation from
+    train_model()'s existing walk-forward sklearn/ensemble candidates --
+    own data load, own single chronological split (not the full 4-fold
+    walk-forward -- see _TorchMLPClassifier's own docstring for why), own
+    fit, with the SAME recency + trade-outcome sample weighting
+    train_model's own walk-forward loop uses -- and promotes it to the
+    live model ONLY if it actually beats the currently-persisted model's
+    freshly-recomputed score on the SAME holdout. Never raises on
+    ordinary "not enough data yet" conditions. Identical promotion logic
+    to alpaca_options_model.train_torch_candidate_model."""
+    frame = df if df is not None else load_training_dataset()
+    if frame.empty:
+        return {"ok": False, "reason": "no_data"}
+
+    labeled = _prepare_training_frame(frame)
+    del frame
+    if len(labeled) < MIN_TRAIN_ROWS:
+        return {"ok": False, "reason": "insufficient_rows", "rows": len(labeled), "need": MIN_TRAIN_ROWS}
+
+    feature_cols = FEATURE_COLUMNS + ["symbol_code"]
+    split_idx = int(len(labeled) * 0.8)
+    train_df, test_df = labeled.iloc[:split_idx], labeled.iloc[split_idx:]
+    del labeled
+    if train_df.empty or test_df.empty or test_df["label_up"].nunique() < 2:
+        return {"ok": False, "reason": "insufficient_class_variety"}
+
+    x_train, y_train, ts_train = train_df[feature_cols].values, train_df["label_up"].values, train_df["ts"].values
+    x_test, y_test = test_df[feature_cols].values, test_df["label_up"].values
+    symbol_categories = list(train_df["symbol"].astype("category").cat.categories)
+    n_rows = len(train_df) + len(test_df)
+    outcome_weight = _trade_outcome_sample_weight(train_df["symbol"].values, ts_train, trade_log)
+    del train_df, test_df
+    sample_weight = _recency_sample_weight(ts_train, half_life_days=KALSHI_15M_MODEL_RECENCY_HALFLIFE_DAYS) * outcome_weight
+
+    try:
+        torch_model = _TorchMLPClassifier(input_dim=len(feature_cols))
+        torch_model.fit(x_train, y_train, sample_weight=sample_weight)
+        torch_preds = torch_model.predict(x_test)
+        torch_proba = torch_model.predict_proba(x_test)[:, 1]
+        torch_score = (float(accuracy_score(y_test, torch_preds)) + float(roc_auc_score(y_test, torch_proba))) / 2.0
+    except Exception as exc:
+        logger.warning("[kalshi_15m_model] torch candidate training failed: %s", exc)
+        del x_train, x_test
+        gc.collect()
+        return {"ok": False, "reason": "torch_training_failed", "error": str(exc)}
+    del x_train
+
+    current_model, current_meta = load_model()
+    current_score: float | None = None
+    if current_model is not None:
+        try:
+            current_preds = current_model.predict(x_test)
+            current_proba = current_model.predict_proba(x_test)[:, 1]
+            current_score = (float(accuracy_score(y_test, current_preds)) + float(roc_auc_score(y_test, current_proba))) / 2.0
+        except Exception as exc:
+            logger.warning("[kalshi_15m_model] could not re-score current model against torch's holdout: %s", exc)
+
+    promoted = current_score is None or torch_score > current_score
+    result = {
+        "ok": True, "promoted": promoted, "torch_score": torch_score,
+        "current_score": current_score, "current_model_type": (current_meta or {}).get("model_type"),
+        "rows": n_rows,
+    }
+
+    if promoted:
+        meta = {
+            "trained_at": time.time(), "model_type": "torch_mlp", "calibrated": False, "ensemble_members": None,
+            "scores": {"torch_mlp": {"combined": torch_score}, "previous": {"combined": current_score}},
+            "rows": n_rows, "feature_columns": feature_cols, "symbol_categories": symbol_categories,
+            "feature_importances": {}, "recency_halflife_days": KALSHI_15M_MODEL_RECENCY_HALFLIFE_DAYS,
+            "label_horizon_minutes": LABEL_HORIZON_MINUTES,
+            "trade_outcome_rows_matched": int(np.sum(outcome_weight != 1.0)),
+        }
+        joblib.dump(torch_model, MODEL_PATH)
+        MODEL_META_PATH.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+        _model_cache.update({"model": torch_model, "meta": meta, "loaded_at": time.time()})
+        _push_model_to_hf()
+
+    gc.collect()
+    return result
 
 
 def _push_model_to_hf() -> None:

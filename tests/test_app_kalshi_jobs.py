@@ -902,6 +902,51 @@ def test_kalshi_15m_train_job_survives_a_state_read_failure(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# kalshi_15m_torch_train -- custom PyTorch MLP challenger, crypto only
+# (metals excluded for now -- see KALSHI_15M_TORCH_TRAIN_HOUR_ET's own
+# comment). Champion/challenger promotion logic lives in
+# kalshi_15m_model.train_torch_candidate_model itself; this job is just
+# the trade-log-passing + failure-isolation wiring around it.
+# ---------------------------------------------------------------------------
+def test_kalshi_15m_torch_train_job_passes_the_real_trade_log(monkeypatch):
+    from data import kalshi_15m_model, kalshi_15m_strategy
+
+    monkeypatch.setattr(kalshi_15m_strategy, "_load_state", lambda: {"trade_log": [{"coin": "BTC"}]})
+    captured = {}
+    monkeypatch.setattr(kalshi_15m_model, "train_torch_candidate_model", lambda **kw: captured.update(kw) or {"ok": True, "promoted": True})
+
+    result = app_kalshi._run_kalshi_15m_torch_train.__wrapped__()  # noqa: SLF001
+
+    assert captured["trade_log"] == [{"coin": "BTC"}]
+    assert result == {"ok": True, "promoted": True}
+
+
+def test_kalshi_15m_torch_train_job_survives_a_state_read_failure(monkeypatch):
+    from data import kalshi_15m_model, kalshi_15m_strategy
+
+    def fail():
+        raise RuntimeError("state file corrupted")
+
+    monkeypatch.setattr(kalshi_15m_strategy, "_load_state", fail)
+    captured = {}
+    monkeypatch.setattr(kalshi_15m_model, "train_torch_candidate_model", lambda **kw: captured.update(kw) or {"ok": True})
+
+    app_kalshi._run_kalshi_15m_torch_train.__wrapped__()  # noqa: SLF001
+    assert captured["trade_log"] is None
+
+
+def test_kalshi_15m_torch_train_job_survives_a_training_failure(monkeypatch):
+    from data import kalshi_15m_model
+
+    def fail(**kw):
+        raise RuntimeError("torch training blew up")
+
+    monkeypatch.setattr(kalshi_15m_model, "train_torch_candidate_model", fail)
+    result = app_kalshi._run_kalshi_15m_torch_train.__wrapped__()  # noqa: SLF001
+    assert result == {"ok": False, "error": "torch training blew up"}
+
+
+# ---------------------------------------------------------------------------
 # /api/kalshi15m/balance-by-shard -- read-only diagnostic, never places an
 # order or moves money. See the route's own docstring for why
 # /portfolio/balance alone can't answer "does shard 2 have collateral".

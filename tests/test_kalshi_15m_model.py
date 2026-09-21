@@ -7,6 +7,7 @@ perps_model.py's proven architecture -- "symbol"/coin names instead of
 from __future__ import annotations
 
 import datetime as dt
+import json
 
 import numpy as np
 import pandas as pd
@@ -250,3 +251,92 @@ def test_predict_direction_handles_an_unknown_symbol_gracefully(monkeypatch):
     monkeypatch.setattr(kalshi_15m_model, "latest_feature_row", _fake_feature_row)
     result = kalshi_15m_model.predict_direction("SOL")  # not in training data (only "BTC")
     assert result["model_ok"] is True
+
+
+# ---------------------------------------------------------------------------
+# train_torch_candidate_model -- custom PyTorch MLP challenger, added per
+# explicit user direction ("change the model... to a more powerful
+# model... trained on finance and prediction"). Champion/challenger
+# promotion logic is line-for-line identical to alpaca_options_model.py's
+# own version -- see that module's own test file for the precedent this
+# mirrors. Only promotes if it beats the currently-persisted model's
+# freshly-recomputed score on the SAME holdout -- never unconditional.
+# ---------------------------------------------------------------------------
+def test_train_torch_candidate_model_with_no_data_returns_not_ok():
+    result = kalshi_15m_model.train_torch_candidate_model(df=pd.DataFrame())
+    assert result["ok"] is False
+    assert result["reason"] == "no_data"
+
+
+def test_train_torch_candidate_model_with_too_few_rows_returns_not_ok():
+    result = kalshi_15m_model.train_torch_candidate_model(df=_synthetic_training_frame(n=20))
+    assert result["ok"] is False
+    assert result["reason"] == "insufficient_rows"
+
+
+def test_train_torch_candidate_model_promotes_unconditionally_with_no_current_model(monkeypatch):
+    monkeypatch.setattr(kalshi_15m_model, "load_model", lambda: (None, None))
+    df = _synthetic_training_frame(n=500)
+
+    result = kalshi_15m_model.train_torch_candidate_model(df=df)
+
+    assert result["ok"] is True
+    assert result["promoted"] is True
+    assert result["current_score"] is None
+    assert kalshi_15m_model.MODEL_PATH.exists()
+    meta = json.loads(kalshi_15m_model.MODEL_META_PATH.read_text(encoding="utf-8"))
+    assert meta["model_type"] == "torch_mlp"
+
+
+def test_train_torch_candidate_model_does_not_promote_a_worse_candidate(monkeypatch):
+    """A current model that scores perfectly on the holdout must never be
+    displaced by a torch candidate that (being a small net on noisy
+    synthetic data) can't realistically match it."""
+    dist_idx = kalshi_15m_model.FEATURE_COLUMNS.index("dist_to_ma_15")
+
+    class _PerfectModel:
+        def predict(self, x):
+            return (x[:, dist_idx] > 0).astype(int)  # == label_up's own generator
+
+        def predict_proba(self, x):
+            preds = self.predict(x)
+            return np.column_stack([1.0 - preds, preds]).astype(float)
+
+    monkeypatch.setattr(kalshi_15m_model, "load_model", lambda: (_PerfectModel(), {"model_type": "perfect_stub"}))
+    before = kalshi_15m_model.MODEL_PATH.exists()
+    df = _synthetic_training_frame(n=500)
+
+    result = kalshi_15m_model.train_torch_candidate_model(df=df)
+
+    assert result["ok"] is True
+    assert result["promoted"] is False
+    assert result["current_score"] == 1.0
+    assert kalshi_15m_model.MODEL_PATH.exists() == before
+
+
+def test_train_torch_candidate_model_survives_a_training_failure(monkeypatch):
+    monkeypatch.setattr(kalshi_15m_model, "load_model", lambda: (None, None))
+
+    class _BrokenTorchModel:
+        def fit(self, *a, **kw):
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr(kalshi_15m_model, "_TorchMLPClassifier", lambda **kw: _BrokenTorchModel())
+    result = kalshi_15m_model.train_torch_candidate_model(df=_synthetic_training_frame(n=500))
+    assert result["ok"] is False
+    assert result["reason"] == "torch_training_failed"
+
+
+def test_train_torch_candidate_model_promoted_model_is_usable_via_predict_direction(monkeypatch):
+    real_load_model = kalshi_15m_model.load_model
+    monkeypatch.setattr(kalshi_15m_model, "load_model", lambda: (None, None))
+    df = _synthetic_training_frame(n=500)
+    train_result = kalshi_15m_model.train_torch_candidate_model(df=df)
+    assert train_result["ok"] is True and train_result["promoted"] is True
+
+    monkeypatch.setattr(kalshi_15m_model, "load_model", real_load_model)
+    kalshi_15m_model._model_cache.update({"model": None, "meta": None, "loaded_at": 0.0})  # noqa: SLF001
+    monkeypatch.setattr(kalshi_15m_model, "latest_feature_row", _fake_feature_row)
+    result = kalshi_15m_model.predict_direction("BTC")
+    assert result["model_ok"] is True
+    assert 0.0 <= result["probability_up"] <= 1.0
