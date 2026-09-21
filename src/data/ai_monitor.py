@@ -74,6 +74,12 @@ AI_MONITOR_TIMEOUT_SEC = int(os.getenv("AI_MONITOR_TIMEOUT_SEC", "90") or "90")
 AI_MONITOR_MAX_TOKENS = int(os.getenv("AI_MONITOR_MAX_TOKENS", "2000") or "2000")
 
 REPORT_PATH = DATA_DIR / "ai_monitor_report.json"
+# PRIVATE (not the public per-market *.joblib convention) -- this report
+# contains real positions/trades/balances aggregated across all 5
+# markets. See _save_report's own docstring for why this exists at all.
+HF_AI_MONITOR_REPO = os.getenv("HF_AI_MONITOR_REPO", "papylove/bettor-ai-monitor")
+REPORT_HF_FILENAME = "ai_monitor_report.json"
+REPORT_HF_TIMEOUT_SEC = int(os.getenv("AI_MONITOR_REPORT_HF_TIMEOUT_SEC", "10") or "10")
 RECENT_TRADES_LIMIT = 15
 RECENT_JOBS_LIMIT = 15
 
@@ -294,13 +300,102 @@ def run_monitor_cycle() -> dict[str, Any]:
 
 
 def _save_report(result: dict[str, Any]) -> None:
+    """Real bug found live: this used to be local-disk-only, same mistake
+    kalshi_15m_metals_data.py's own raw price-history window originally
+    made -- confirmed live here too, a manually-triggered report was
+    generated successfully, then genuinely lost on the very next restart
+    (a routine redeploy), leaving the hub page showing "No review has run
+    yet" despite a real report having existed minutes earlier. Now also
+    backed up to a dedicated PRIVATE HF repo (the report contains real
+    positions/trades/balances across all 5 markets, unlike the public
+    per-market *.joblib model repos) and restored from there on a cold
+    local start."""
     try:
         save_json(REPORT_PATH, result)
     except Exception as exc:
         logger.warning("[ai_monitor] failed to save report locally: %s", exc)
+    _push_report_to_hf(result)
+
+
+def _ensure_report_repo() -> bool:
+    if not HF_API_KEY:
+        return False
+    try:
+        from huggingface_hub import HfApi
+        api = HfApi(token=HF_API_KEY)
+        try:
+            api.repo_info(repo_id=HF_AI_MONITOR_REPO, repo_type="model")
+        except Exception:
+            api.create_repo(repo_id=HF_AI_MONITOR_REPO, repo_type="model", exist_ok=True, private=True)
+        return True
+    except Exception as exc:
+        logger.warning("[ai_monitor] could not verify/create report repo: %s", exc)
+        return False
+
+
+def _push_report_to_hf(result: dict[str, Any]) -> None:
+    if not HF_API_KEY:
+        return
+
+    def _upload() -> None:
+        import tempfile
+        from huggingface_hub import HfApi
+        if not _ensure_report_repo():
+            return
+        api = HfApi(token=HF_API_KEY)
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as tmp:
+            tmp.write(json.dumps(result, indent=2, default=str))
+            tmp_path = tmp.name
+        try:
+            api.upload_file(
+                path_or_fileobj=tmp_path, path_in_repo=REPORT_HF_FILENAME,
+                repo_id=HF_AI_MONITOR_REPO, repo_type="model", commit_message="update AI project review",
+            )
+        finally:
+            os.unlink(tmp_path)
+
+    try:
+        # Same real-incident-driven discipline as perps_strategy's own
+        # identical durable-state push: an unbounded huggingface_hub call
+        # can hang indefinitely on an internal lock and, on this shared
+        # --workers 1 process, freeze every market's own request handling
+        # and background scheduler until gunicorn's 300s timeout SIGKILLs
+        # the whole thing. This call isn't made under any lock the way
+        # perps' own is, but the underlying hang risk is the same.
+        from server_common import call_with_hard_timeout
+        call_with_hard_timeout(_upload, timeout_sec=REPORT_HF_TIMEOUT_SEC)
+    except Exception as exc:
+        logger.warning("[ai_monitor] report push to HF failed: %s", exc)
+
+
+def _pull_report_from_hf() -> dict[str, Any] | None:
+    if not HF_API_KEY:
+        return None
+
+    def _download() -> dict[str, Any]:
+        from huggingface_hub import hf_hub_download
+        path = hf_hub_download(repo_id=HF_AI_MONITOR_REPO, filename=REPORT_HF_FILENAME, repo_type="model", token=HF_API_KEY)
+        return json.loads(open(path, encoding="utf-8").read())
+
+    try:
+        from server_common import call_with_hard_timeout
+        return call_with_hard_timeout(_download, timeout_sec=REPORT_HF_TIMEOUT_SEC, on_timeout=None)
+    except Exception as exc:
+        logger.info("[ai_monitor] no HF report backup to restore: %s", exc)
+        return None
 
 
 def get_latest_report() -> dict[str, Any] | None:
-    if not REPORT_PATH.exists():
-        return None
-    return load_json(REPORT_PATH, None)
+    if REPORT_PATH.exists():
+        cached = load_json(REPORT_PATH, None)
+        if cached is not None:
+            return cached
+    # Local file missing (a fresh container, most likely) -- see if HF has
+    # a recent backup before reporting "nothing has ever run".
+    restored = _pull_report_from_hf()
+    if restored is not None:
+        try:
+            save_json(REPORT_PATH, restored)
+        except Exception as exc:
+            logger.warning("[ai_monitor] failed to write restored report to local disk: %s", exc)
+    return restored

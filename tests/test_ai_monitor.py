@@ -10,6 +10,8 @@ out to be an unwanted surprise). Real network calls are always mocked
 here; no test should ever hit the real HF Inference API."""
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from data import (
@@ -259,6 +261,77 @@ def test_run_monitor_cycle_never_places_an_order_or_touches_live_trading_enabled
 
 def test_get_latest_report_returns_none_when_nothing_has_run_yet():
     assert m.get_latest_report() is None
+
+
+# ---------------------------------------------------------------------------
+# Real bug found live: the report used to be local-disk-only -- a
+# manually-triggered report was generated successfully, then genuinely
+# lost on the very next restart (a routine redeploy), leaving the hub
+# page showing "No review has run yet" minutes after a real report had
+# existed. Now also backed up to/restored from a dedicated PRIVATE HF
+# repo -- see _save_report's own docstring.
+# ---------------------------------------------------------------------------
+class _FakeHfApi:
+    captured_upload: dict = {}
+
+    def __init__(self, token=None):
+        pass
+
+    def repo_info(self, *, repo_id, repo_type):
+        return {"id": repo_id}
+
+    def create_repo(self, *, repo_id, repo_type, exist_ok, private):
+        _FakeHfApi.captured_upload["create_repo_private"] = private
+
+    def upload_file(self, *, path_or_fileobj, path_in_repo, repo_id, repo_type, commit_message):
+        _FakeHfApi.captured_upload.setdefault("uploads", []).append({
+            "path_in_repo": path_in_repo, "repo_id": repo_id,
+            "content": json.loads(open(path_or_fileobj, encoding="utf-8").read()),
+        })
+
+
+def test_run_monitor_cycle_pushes_the_report_to_the_private_hf_repo(monkeypatch):
+    import huggingface_hub
+
+    monkeypatch.setattr(m, "HF_API_KEY", "fake-hf-token")
+    monkeypatch.setattr(m, "call_model", lambda prompt: {"ok": True, "text": "All good.", "model": "moonshotai/Kimi-K2-Instruct", "usage": {}})
+    _FakeHfApi.captured_upload = {}
+    monkeypatch.setattr(huggingface_hub, "HfApi", _FakeHfApi)
+
+    result = m.run_monitor_cycle()
+
+    uploads = _FakeHfApi.captured_upload["uploads"]
+    assert len(uploads) == 1
+    assert uploads[0]["repo_id"] == m.HF_AI_MONITOR_REPO
+    assert uploads[0]["path_in_repo"] == m.REPORT_HF_FILENAME
+    assert uploads[0]["content"] == result
+
+
+def test_get_latest_report_restores_from_hf_when_local_file_is_missing(monkeypatch):
+    monkeypatch.setattr(m, "HF_API_KEY", "fake-hf-token")
+    backup = {"ok": True, "report": "restored from HF", "generated_at": "2026-09-21T00:00:00+00:00"}
+
+    import huggingface_hub
+    tmp_file = m.DATA_DIR / "hf_backup_report.json"
+    tmp_file.write_text(json.dumps(backup), encoding="utf-8")
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", lambda **kw: str(tmp_file))
+
+    result = m.get_latest_report()
+    assert result == backup
+    # Restored data is also written back to local disk.
+    assert m.REPORT_PATH.exists()
+
+
+def test_get_latest_report_returns_none_when_hf_has_no_backup_either(monkeypatch):
+    monkeypatch.setattr(m, "HF_API_KEY", "fake-hf-token")
+    import huggingface_hub
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", lambda **kw: (_ for _ in ()).throw(RuntimeError("404")))
+    assert m.get_latest_report() is None
+
+
+def test_report_push_is_a_no_op_without_an_hf_key():
+    # HF_API_KEY == "" via the autouse fixture -- must not raise.
+    m._save_report({"ok": True, "report": "x"})  # noqa: SLF001
 
 
 def test_build_prompt_mentions_every_market_by_name():
