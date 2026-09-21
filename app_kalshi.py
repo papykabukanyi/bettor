@@ -198,13 +198,16 @@ KALSHI_15M_TORCH_TRAIN_HOUR_ET = int(os.getenv("KALSHI_15M_TORCH_TRAIN_HOUR_ET",
 # still kept small (a few days, not the full backfill's 90) since this
 # runs EVERY day, not once.
 KALSHI_15M_RECONCILE_DAYS = max(1, int(os.getenv("KALSHI_15M_RECONCILE_DAYS", "3") or "3"))
-# Read-only, project-WIDE Claude-powered analysis layer covering all 5
+# Read-only, project-WIDE AI-powered analysis layer covering all 5
 # markets (perps, stocks, crypto, options, kalshi_15m), added per
 # explicit user direction (chosen over "replace the prediction model
-# with Claude entirely" via an AskUserQuestion, then explicitly widened
-# from Kalshi 15-minute markets only to "across all of the bots" in the
-# same build) -- see ai_monitor.py's own module docstring for the full
-# design and why it never touches order placement on any market. Default
+# with Claude entirely" via an AskUserQuestion, widened from Kalshi
+# 15-minute markets only to "across all of the bots" in the same build,
+# then moved off the Anthropic API onto HF's own Inference Providers --
+# reusing this same process's existing HF_API_KEY -- once the separate
+# Anthropic billing requirement turned out to be an unwanted surprise)
+# -- see ai_monitor.py's own module docstring for the full design and
+# why it never touches order placement on any market. Default
 # 6am ET: safely after every daily training job across all 5 markets
 # (perps 3, kalshi_15m/stocks 4, stocks/options' own torch retrains 5) so
 # each day's review reflects that day's freshly-trained models, not the
@@ -675,7 +678,7 @@ def _run_kalshi_15m_torch_train() -> dict[str, Any]:
 @_locked_job("ai_monitor", stale_after_sec=180)
 def _run_ai_monitor() -> dict[str, Any]:
     """See ai_monitor.py's own module docstring -- a read-only, project-
-    wide Claude-powered review across all 5 markets, never a predictor.
+    wide, AI-powered review across all 5 markets, never a predictor.
     stale_after_sec is short (180s) since a single Anthropic API call,
     not the heavy multi-candidate model fits any market's own train job
     does, is the only real work here."""
@@ -1466,7 +1469,7 @@ def api_kalshi_15m_balance_by_shard():
 
 @app.route("/api/ai-report", methods=["GET"])
 def api_ai_report():
-    """The latest saved project-wide Claude-powered status review -- see
+    """The latest saved project-wide, AI-powered status review -- see
     ai_monitor.py's own module docstring. A public read like every other
     status route here; never None-vs-missing-key ambiguous -- returns
     {"ok": True, "report": None} explicitly when nothing has run yet, not
@@ -1774,7 +1777,7 @@ _JOB_LABELS = {
     "kalshi_15m_reconcile": f"Kalshi 15m crypto archive gap-heal, trailing {KALSHI_15M_RECONCILE_DAYS}d (daily, 30 min before training)",
     "kalshi_15m_train": f"Kalshi 15m markets model retrain, crypto + metals (daily {KALSHI_15M_TRAIN_HOUR_ET:02d}:00 ET)",
     "kalshi_15m_torch_train": f"Kalshi 15m crypto custom PyTorch MLP challenger, promoted only if it beats the current model (daily {KALSHI_15M_TORCH_TRAIN_HOUR_ET:02d}:00 ET)",
-    "ai_monitor": f"Project-wide Claude-powered status review, read-only, all 5 markets (daily {AI_MONITOR_HOUR_ET:02d}:00 ET)",
+    "ai_monitor": f"Project-wide AI-powered status review (HF Inference), read-only, all 5 markets (daily {AI_MONITOR_HOUR_ET:02d}:00 ET)",
     "perps_train": f"Model retrain (daily {PERPS_TRAIN_HOUR_ET:02d}:00 ET)",
     "perps_trade_analysis": (
         f"Trade win/loss analysis + evidence-gated confidence tuning "

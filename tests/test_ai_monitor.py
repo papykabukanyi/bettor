@@ -1,11 +1,13 @@
-"""Project-wide, read-only Claude-powered status review across all 5
-markets. See ai_monitor.py's own module docstring: this NEVER places an
-order or touches any market's own LIVE_TRADING_ENABLED -- added per
-explicit user direction (chosen over "replace the prediction model with
-Claude entirely" via an AskUserQuestion, then explicitly widened from
-Kalshi 15-minute markets only to "across all of the bots" in the same
-build). Real network calls are always mocked here; no test should ever
-hit the real Anthropic API."""
+"""Project-wide, read-only AI-powered status review across all 5 markets.
+See ai_monitor.py's own module docstring: this NEVER places an order or
+touches any market's own LIVE_TRADING_ENABLED -- added per explicit user
+direction (chosen over "replace the prediction model with Claude
+entirely" via an AskUserQuestion, widened to "across all of the bots" in
+the same build, then moved off the Anthropic API entirely onto HF's own
+Inference Providers -- reusing the existing HF_API_KEY -- per explicit
+user direction once the separate Anthropic billing requirement turned
+out to be an unwanted surprise). Real network calls are always mocked
+here; no test should ever hit the real HF Inference API."""
 from __future__ import annotations
 
 import pytest
@@ -24,7 +26,7 @@ from data import (
 def _isolated(tmp_path, monkeypatch):
     monkeypatch.setattr(m, "DATA_DIR", tmp_path)
     monkeypatch.setattr(m, "REPORT_PATH", tmp_path / "report.json")
-    monkeypatch.setattr(m, "ANTHROPIC_API_KEY", "")
+    monkeypatch.setattr(m, "HF_API_KEY", "")
     # Every market's own state, isolated to this test's own tmp dir --
     # same convention each market's own test suite already uses.
     monkeypatch.setattr(perps_strategy, "STATE_FILE", tmp_path / "perps_state.json")
@@ -94,80 +96,106 @@ def test_gather_snapshot_never_raises_when_kalshi_shard_balance_check_fails(monk
     assert "error" in snapshot["markets"]["kalshi_15m"]["shard_2_balance"]
 
 
-def test_call_claude_is_a_no_op_without_an_api_key():
-    result = m.call_claude("some prompt")
-    assert result == {"ok": False, "reason": "no_anthropic_api_key"}
+def test_call_model_is_a_no_op_without_an_api_key():
+    result = m.call_model("some prompt")
+    assert result == {"ok": False, "reason": "no_hf_api_key"}
 
 
-def test_call_claude_parses_a_real_response_shape(monkeypatch):
-    monkeypatch.setattr(m, "ANTHROPIC_API_KEY", "fake-key")
+class _FakeMessage:
+    def __init__(self, content):
+        self.content = content
 
-    class _FakeResponse:
-        def raise_for_status(self):
-            pass
 
-        def json(self):
-            return {
-                "model": "claude-sonnet-5",
-                "content": [{"type": "text", "text": "All 5 markets look healthy."}],
-                "usage": {"input_tokens": 800, "output_tokens": 60},
-            }
+class _FakeChoice:
+    def __init__(self, content):
+        self.message = _FakeMessage(content)
 
-    captured = {}
 
-    def fake_post(url, headers, json, timeout):
-        captured.update(url=url, headers=headers, json=json, timeout=timeout)
-        return _FakeResponse()
+class _FakeUsage:
+    def __init__(self, prompt_tokens=800, completion_tokens=60, total_tokens=860):
+        self.prompt_tokens = prompt_tokens
+        self.completion_tokens = completion_tokens
+        self.total_tokens = total_tokens
 
-    monkeypatch.setattr(m.requests, "post", fake_post)
-    result = m.call_claude("some prompt")
+
+class _FakeChatCompletionOutput:
+    def __init__(self, text, model="moonshotai/Kimi-K2-Instruct", usage=None):
+        self.choices = [_FakeChoice(text)] if text is not None else []
+        self.model = model
+        self.usage = usage if usage is not None else _FakeUsage()
+
+
+class _FakeInferenceClient:
+    captured: dict = {}
+
+    def __init__(self, token=None, timeout=None):
+        _FakeInferenceClient.captured["token"] = token
+        _FakeInferenceClient.captured["timeout"] = timeout
+
+    def chat_completion(self, *, messages, model, max_tokens):
+        _FakeInferenceClient.captured.update(messages=messages, model=model, max_tokens=max_tokens)
+        return _FakeInferenceClient.response
+
+
+def test_call_model_parses_a_real_response_shape(monkeypatch):
+    monkeypatch.setattr(m, "HF_API_KEY", "fake-hf-token")
+    import huggingface_hub
+
+    _FakeInferenceClient.captured = {}
+    _FakeInferenceClient.response = _FakeChatCompletionOutput("All 5 markets look healthy.")
+    monkeypatch.setattr(huggingface_hub, "InferenceClient", _FakeInferenceClient)
+
+    result = m.call_model("some prompt")
     assert result["ok"] is True
     assert result["text"] == "All 5 markets look healthy."
-    assert captured["headers"]["x-api-key"] == "fake-key"
-    assert captured["json"]["messages"] == [{"role": "user", "content": "some prompt"}]
+    assert result["usage"] == {"prompt_tokens": 800, "completion_tokens": 60, "total_tokens": 860}
+    assert _FakeInferenceClient.captured["token"] == "fake-hf-token"
+    assert _FakeInferenceClient.captured["messages"] == [{"role": "user", "content": "some prompt"}]
 
 
-def test_call_claude_handles_a_network_failure(monkeypatch):
-    monkeypatch.setattr(m, "ANTHROPIC_API_KEY", "fake-key")
+def test_call_model_handles_a_network_failure(monkeypatch):
+    monkeypatch.setattr(m, "HF_API_KEY", "fake-hf-token")
+    import huggingface_hub
 
-    def fail(url, headers, json, timeout):
-        raise RuntimeError("connection refused")
+    class _FailingClient:
+        def __init__(self, token=None, timeout=None):
+            pass
 
-    monkeypatch.setattr(m.requests, "post", fail)
-    result = m.call_claude("some prompt")
+        def chat_completion(self, **kw):
+            raise RuntimeError("connection refused")
+
+    monkeypatch.setattr(huggingface_hub, "InferenceClient", _FailingClient)
+    result = m.call_model("some prompt")
     assert result["ok"] is False
     assert "connection refused" in result["reason"]
 
 
-def test_call_claude_reports_empty_response_as_not_ok(monkeypatch):
-    monkeypatch.setattr(m, "ANTHROPIC_API_KEY", "fake-key")
+def test_call_model_reports_empty_response_as_not_ok(monkeypatch):
+    monkeypatch.setattr(m, "HF_API_KEY", "fake-hf-token")
+    import huggingface_hub
 
-    class _EmptyResponse:
-        def raise_for_status(self):
-            pass
+    _FakeInferenceClient.captured = {}
+    _FakeInferenceClient.response = _FakeChatCompletionOutput(None)
+    monkeypatch.setattr(huggingface_hub, "InferenceClient", _FakeInferenceClient)
 
-        def json(self):
-            return {"content": []}
-
-    monkeypatch.setattr(m.requests, "post", lambda url, **kw: _EmptyResponse())
-    result = m.call_claude("some prompt")
+    result = m.call_model("some prompt")
     assert result == {"ok": False, "reason": "empty_response"}
 
 
-def test_run_monitor_cycle_saves_and_returns_a_no_key_result_without_calling_claude(monkeypatch):
+def test_run_monitor_cycle_saves_and_returns_a_no_key_result_without_calling_the_model(monkeypatch):
     def fail_if_called(prompt):
-        raise AssertionError("must not call Claude without an API key")
+        raise AssertionError("must not call the model without an API key")
 
-    monkeypatch.setattr(m, "call_claude", fail_if_called)
+    monkeypatch.setattr(m, "call_model", fail_if_called)
     result = m.run_monitor_cycle()
     assert result["ok"] is False
-    assert result["reason"] == "no_anthropic_api_key"
+    assert result["reason"] == "no_hf_api_key"
     assert m.get_latest_report() == result
 
 
 def test_run_monitor_cycle_saves_a_successful_report(monkeypatch):
-    monkeypatch.setattr(m, "ANTHROPIC_API_KEY", "fake-key")
-    monkeypatch.setattr(m, "call_claude", lambda prompt: {"ok": True, "text": "All good.", "model": "claude-sonnet-5", "usage": {}})
+    monkeypatch.setattr(m, "HF_API_KEY", "fake-hf-token")
+    monkeypatch.setattr(m, "call_model", lambda prompt: {"ok": True, "text": "All good.", "model": "moonshotai/Kimi-K2-Instruct", "usage": {}})
 
     result = m.run_monitor_cycle()
     assert result["ok"] is True

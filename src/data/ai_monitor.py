@@ -1,9 +1,26 @@
-"""Project-wide, read-only Claude-powered monitoring/analysis layer --
-per explicit user direction: "add Claude as a monitoring/analysis layer"
+"""Project-wide, read-only AI-powered monitoring/analysis layer -- per
+explicit user direction: "add Claude as a monitoring/analysis layer"
 (chosen over "replace the prediction model with Claude entirely" via an
-AskUserQuestion), then explicitly widened from Kalshi 15-minute markets
-only to "across all of the bots... access to check all the stuff going
-on" in the very same build.
+AskUserQuestion), widened to "across all of the bots... access to check
+all the stuff going on" in the same build, then moved off the Anthropic
+API entirely per explicit user direction ("change of place find a free
+powerful model within HF to do this task") once the separate-billing
+requirement (an Anthropic API key needs its own payment method, distinct
+from any claude.ai subscription) turned out to be an unwanted surprise.
+
+Runs on Hugging Face's own Inference Providers router instead (see
+https://huggingface.co/docs/inference-providers/pricing) via
+huggingface_hub.InferenceClient -- reuses the SAME HF_API_KEY this whole
+codebase already has configured everywhere (model/dataset uploads,
+downloads, etc.), no new credential of any kind. Real, disclosed
+economics, not assumed: every HF account gets monthly Inference Providers
+credits ($0.10 free tier, $2.00 for PRO -- this account is already PRO,
+confirmed live via whoami-v2 earlier this session), applied automatically
+before any pay-as-you-go billing kicks in. At this module's own cadence
+(one call/day, a few KB in, ~1-2K tokens out) that included allowance is
+expected to comfortably cover it -- genuinely free in practice, not just
+in name, though "$2/month included" is the real, disclosed mechanism
+rather than an unconditional guarantee for every possible model choice.
 
 Deliberately NOT a prediction engine for any of the 5 markets: each
 market's own fitted, calibrated, walk-forward-validated model (see
@@ -13,25 +30,13 @@ keeps making every real entry decision, completely unchanged by this
 module. This is a read-only reviewer across the whole project: once a
 day, it gathers a real data snapshot from EVERY market (state, model
 meta, recent trades) -- the exact same data each market's own dashboard
-already shows -- asks Claude to review all of it together, and stores
-the resulting report for a human to read. It never places an order,
-never touches any market's own LIVE_TRADING_ENABLED, and a failure here
-(missing API key, a bad response, a network error) never blocks or
-degrades any market's trading loop -- this whole module is additive, not
-load-bearing, and is never imported by any *_strategy.py or *_model.py
-file.
-
-Uses the Anthropic Messages API directly via `requests` (already a
-dependency everywhere else in this codebase) rather than adding the
-`anthropic` SDK as a new dependency for one lightweight, low-frequency
-call.
-
-Real, disclosed distinction from a Claude.ai subscription: this needs an
-Anthropic API key (console.anthropic.com), billed separately per token --
-a claude.ai Pro/Max subscription has no programmatic access and cannot
-be used here. ANTHROPIC_API_KEY unset means this module is a no-op
-throughout (matching every other optional-integration convention in this
-codebase, e.g. SERPAPI_API_KEY/CRYPTOPANIC_API_KEY).
+already shows -- asks the configured model to review all of it together,
+and stores the resulting report for a human to read. It never places an
+order, never touches any market's own LIVE_TRADING_ENABLED, and a
+failure here (missing API key, a bad response, a network error) never
+blocks or degrades any market's trading loop -- this whole module is
+additive, not load-bearing, and is never imported by any *_strategy.py
+or *_model.py file.
 
 Lives in app_kalshi.py's own process/scheduler (the default-mounted app
 in this repo's combined Docker Space, see docs/RENDER_TO_HF_MIGRATION.md)
@@ -50,21 +55,23 @@ import logging
 import os
 from typing import Any
 
-import requests
-
 from server_common import DATA_DIR, load_json, save_json
 
 logger = logging.getLogger(__name__)
 
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
-ANTHROPIC_API_VERSION = "2023-06-01"
-# Sonnet, not Opus -- this is a periodic (daily, see app_kalshi.py's own
-# AI_MONITOR_HOUR_ET) review of a few KB of real numbers across 5
-# markets, not a task that needs the most expensive model available.
-ANTHROPIC_MODEL = os.getenv("AI_MONITOR_MODEL", "claude-sonnet-5")
-ANTHROPIC_TIMEOUT_SEC = int(os.getenv("AI_MONITOR_TIMEOUT_SEC", "90") or "90")
-ANTHROPIC_MAX_TOKENS = int(os.getenv("AI_MONITOR_MAX_TOKENS", "2000") or "2000")
+HF_API_KEY = os.getenv("HF_API_KEY", "")
+# Moonshot AI's Kimi K2 (~1T-parameter MoE, text-generation checkpoint,
+# not the later multimodal K2.5+ line) -- per explicit user direction
+# ("a different model... very powerful... facebook lamda [Meta's Llama]
+# is not my favorite"), moved off both Anthropic AND Meta. Genuinely
+# frontier-class on independent benchmarks, not just "open-source good
+# enough" -- well beyond what this daily structured-data-review task
+# actually needs, same as the DeepSeek pick it replaced. Configurable --
+# swap to any chat-completion-capable text model on the Hub via this one
+# env var with no code change.
+AI_MONITOR_MODEL = os.getenv("AI_MONITOR_MODEL", "moonshotai/Kimi-K2-Instruct")
+AI_MONITOR_TIMEOUT_SEC = int(os.getenv("AI_MONITOR_TIMEOUT_SEC", "90") or "90")
+AI_MONITOR_MAX_TOKENS = int(os.getenv("AI_MONITOR_MAX_TOKENS", "2000") or "2000")
 
 REPORT_PATH = DATA_DIR / "ai_monitor_report.json"
 RECENT_TRADES_LIMIT = 15
@@ -202,33 +209,36 @@ def _build_prompt(snapshot: dict[str, Any]) -> str:
     )
 
 
-def call_claude(prompt: str) -> dict[str, Any]:
-    if not ANTHROPIC_API_KEY:
-        return {"ok": False, "reason": "no_anthropic_api_key"}
+def call_model(prompt: str) -> dict[str, Any]:
+    """`huggingface_hub` imported lazily here, not at module level --
+    matches this whole codebase's own established convention (see
+    app_kalshi.py's own long comment on the real WORKER TIMEOUT incidents
+    a module-level import caused elsewhere) even though this specific
+    call site isn't on that same hot path -- consistency, not caution
+    this module specifically needs."""
+    if not HF_API_KEY:
+        return {"ok": False, "reason": "no_hf_api_key"}
     try:
-        resp = requests.post(
-            ANTHROPIC_API_URL,
-            headers={
-                "x-api-key": ANTHROPIC_API_KEY,
-                "anthropic-version": ANTHROPIC_API_VERSION,
-                "content-type": "application/json",
-            },
-            json={
-                "model": ANTHROPIC_MODEL,
-                "max_tokens": ANTHROPIC_MAX_TOKENS,
-                "messages": [{"role": "user", "content": prompt}],
-            },
-            timeout=ANTHROPIC_TIMEOUT_SEC,
+        from huggingface_hub import InferenceClient
+        client = InferenceClient(token=HF_API_KEY, timeout=AI_MONITOR_TIMEOUT_SEC)
+        response = client.chat_completion(
+            messages=[{"role": "user", "content": prompt}],
+            model=AI_MONITOR_MODEL,
+            max_tokens=AI_MONITOR_MAX_TOKENS,
         )
-        resp.raise_for_status()
-        data = resp.json()
-        text_parts = [block.get("text", "") for block in (data.get("content") or []) if block.get("type") == "text"]
-        text = "\n".join(p for p in text_parts if p)
+        text = (response.choices[0].message.content or "").strip() if response.choices else ""
         if not text:
             return {"ok": False, "reason": "empty_response"}
-        return {"ok": True, "text": text, "model": data.get("model", ANTHROPIC_MODEL), "usage": data.get("usage")}
+        usage = None
+        if response.usage is not None:
+            usage = {
+                "prompt_tokens": response.usage.prompt_tokens,
+                "completion_tokens": response.usage.completion_tokens,
+                "total_tokens": response.usage.total_tokens,
+            }
+        return {"ok": True, "text": text, "model": response.model or AI_MONITOR_MODEL, "usage": usage}
     except Exception as exc:
-        logger.warning("[ai_monitor] Claude API call failed: %s", exc)
+        logger.warning("[ai_monitor] model call failed: %s", exc)
         return {"ok": False, "reason": str(exc)}
 
 
@@ -240,13 +250,13 @@ def run_monitor_cycle() -> dict[str, Any]:
     return value, matching every other best-effort job in this codebase,
     and never blocks any market's actual trading loop."""
     snapshot = gather_snapshot()
-    if not ANTHROPIC_API_KEY:
-        result = {"ok": False, "reason": "no_anthropic_api_key", "generated_at": snapshot["generated_at"]}
+    if not HF_API_KEY:
+        result = {"ok": False, "reason": "no_hf_api_key", "generated_at": snapshot["generated_at"]}
         _save_report(result)
         return result
 
     prompt = _build_prompt(snapshot)
-    response = call_claude(prompt)
+    response = call_model(prompt)
     result = {
         "ok": response.get("ok", False),
         "generated_at": snapshot["generated_at"],
