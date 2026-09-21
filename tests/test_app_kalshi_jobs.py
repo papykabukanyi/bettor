@@ -980,6 +980,39 @@ def test_balance_by_shard_survives_a_kalshi_api_failure(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# /api/kalshi15m/real-positions -- read-only, compares Kalshi's own real
+# account state against this app's locally-recorded bookkeeping. Never
+# places an order or moves money.
+# ---------------------------------------------------------------------------
+def test_real_positions_returns_kalshis_own_positions_and_orders(monkeypatch):
+    from data import kalshi_15m
+
+    monkeypatch.setattr(kalshi_15m, "get_portfolio_positions", lambda: [{"ticker": "KXGOLD15M-X", "position": 11}])
+    monkeypatch.setattr(kalshi_15m, "get_orders", lambda: [{"order_id": "abc", "status": "resting"}])
+
+    with app_kalshi.app.test_client() as client:
+        resp = client.get("/api/kalshi15m/real-positions")
+        body = resp.get_json()
+        assert resp.status_code == 200
+        assert body["ok"] is True
+        assert body["market_positions"] == [{"ticker": "KXGOLD15M-X", "position": 11}]
+        assert body["orders"] == [{"order_id": "abc", "status": "resting"}]
+
+
+def test_real_positions_survives_a_kalshi_api_failure(monkeypatch):
+    from data import kalshi_15m
+
+    def raise_error():
+        raise RuntimeError("Kalshi API error 500: boom")
+
+    monkeypatch.setattr(kalshi_15m, "get_portfolio_positions", raise_error)
+    with app_kalshi.app.test_client() as client:
+        resp = client.get("/api/kalshi15m/real-positions")
+        assert resp.status_code == 500
+        assert resp.get_json()["ok"] is False
+
+
+# ---------------------------------------------------------------------------
 # /api/kalshi15m/verify-order-mechanics -- a one-off, manually-triggered
 # diagnostic (never wired into any scheduled job) that places a real,
 # structurally-safe (IOC, 1 contract, price=0.01) test order to confirm

@@ -1467,6 +1467,24 @@ def api_kalshi_15m_balance_by_shard():
         return jsonify({"ok": False, "error": str(exc)}), 500
 
 
+@app.route("/api/kalshi15m/real-positions", methods=["GET"])
+def api_kalshi_15m_real_positions():
+    """Read-only diagnostic: what Kalshi's OWN account actually holds
+    right now, straight from /portfolio/positions and /portfolio/orders
+    -- for comparing against this app's own locally-recorded `positions`/
+    `trade_log` bookkeeping (see /api/kalshi15m/status), which only ever
+    reflects what THIS code intended/recorded, not independently-verified
+    proof of what Kalshi's matching engine actually did with each order.
+    Never places an order or moves money -- pure GETs."""
+    try:
+        positions = kalshi_15m.get_portfolio_positions()
+        orders = kalshi_15m.get_orders()
+        return jsonify({"ok": True, "market_positions": positions, "orders": orders})
+    except Exception as exc:
+        logger.warning("[app_kalshi] kalshi_15m real-positions check failed", exc_info=True)
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
 @app.route("/api/ai-report", methods=["GET"])
 def api_ai_report():
     """The latest saved project-wide, AI-powered status review -- see
