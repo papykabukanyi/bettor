@@ -558,3 +558,38 @@ def test_load_state_falls_back_to_empty_when_hf_has_no_backup_either(monkeypatch
 
     result = kalshi_15m_strategy._load_state()  # noqa: SLF001
     assert result == {"positions": [], "trade_log": [], "realized_pnl_by_date": {}}
+
+
+# ---------------------------------------------------------------------------
+# _account_budget_usd -- real, live, confirmed bug this fixes: used to call
+# get_portfolio_balance() with no exchange_index, which per Kalshi's own
+# docs returns the balance POOLED ACROSS ALL SHARDS -- not what's actually
+# usable on shard 2 specifically, where these markets settle orders.
+# ---------------------------------------------------------------------------
+def test_account_budget_usd_uses_the_shard_2_specific_balance_not_the_pooled_total(monkeypatch):
+    monkeypatch.setattr(kalshi_15m_strategy, "LIVE_TRADING_ENABLED", True)
+    captured = {}
+
+    def fake_get_balance_by_shard(*, exchange_index):
+        captured["exchange_index"] = exchange_index
+        return {"balance_dollars": "1.90"}
+
+    monkeypatch.setattr(kalshi_15m, "get_balance_by_shard", fake_get_balance_by_shard)
+    result = kalshi_15m_strategy._account_budget_usd()  # noqa: SLF001
+
+    assert captured["exchange_index"] == 2
+    assert result == pytest.approx(1.90)
+
+
+def test_account_budget_usd_falls_back_to_placeholder_on_a_real_api_failure(monkeypatch):
+    monkeypatch.setattr(kalshi_15m_strategy, "LIVE_TRADING_ENABLED", True)
+
+    def fail(*, exchange_index):
+        raise RuntimeError("Kalshi API error 500")
+
+    monkeypatch.setattr(kalshi_15m, "get_balance_by_shard", fail)
+    assert kalshi_15m_strategy._account_budget_usd() == 100.0  # noqa: SLF001
+
+
+def test_account_budget_usd_is_the_placeholder_in_dry_run():
+    assert kalshi_15m_strategy._account_budget_usd() == 100.0  # noqa: SLF001 -- LIVE_TRADING_ENABLED is False by default

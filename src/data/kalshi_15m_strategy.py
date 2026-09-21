@@ -407,16 +407,29 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
     return {"ok": True, "checks": checks, "live_trading_enabled": LIVE_TRADING_ENABLED}
 
 
+KALSHI_15M_SHARD_INDEX = 2  # Crypto and Commodities -- see kalshi_15m.get_balance_by_shard's own docstring
+
+
 def _account_budget_usd() -> float:
     """The dollar budget one full position slot sizes against. Real
     balance when live trading is actually verified and enabled; a fixed,
     clearly-labeled placeholder otherwise -- this module's own dry-run
     simulation doesn't need a real balance to exercise its own entry/
-    settlement logic end to end (see this module's own docstring)."""
+    settlement logic end to end (see this module's own docstring).
+
+    Real, confirmed-live bug this fixes: used to call
+    get_portfolio_balance() with no exchange_index -- per Kalshi's own
+    docs that returns the balance POOLED ACROSS ALL SHARDS, not what's
+    actually usable on shard 2 specifically (where these markets settle
+    orders -- see kalshi_15m.get_balance_by_shard's own docstring on the
+    exact same real gap already found once for the dashboard's own
+    balance display). Sizing positions off the pooled total rather than
+    the real, usable-here balance could over- or under-size every
+    position depending on how much sits on other shards."""
     if not LIVE_TRADING_ENABLED:
         return 100.0
     try:
-        balance = kalshi_15m.get_portfolio_balance()
+        balance = kalshi_15m.get_balance_by_shard(exchange_index=KALSHI_15M_SHARD_INDEX)
         return float(balance.get("balance_dollars") or 0.0)
     except Exception as exc:
         logger.warning("[kalshi_15m_strategy] balance fetch failed, using placeholder: %s", exc)

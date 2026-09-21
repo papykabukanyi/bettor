@@ -1406,6 +1406,14 @@ def api_kalshi_15m_status():
         "ok": True,
         "now": dt.datetime.now(dt.timezone.utc).isoformat(),
         "live_trading_enabled": kalshi_15m_strategy.LIVE_TRADING_ENABLED,
+        # Real gap this closes: no balance field existed here at all --
+        # the dashboard had no way to show what this strategy is actually
+        # sizing positions against. Same real shard-2-specific balance
+        # _account_budget_usd() itself now uses (see that function's own
+        # docstring for the real pooled-balance bug this shares a fix
+        # with) -- a $100 placeholder while dry-run, matching what
+        # position sizing itself falls back to.
+        "account_budget_usd": kalshi_15m_strategy._account_budget_usd(),  # noqa: SLF001
         "positions": positions,
         "open_position_count": len(positions),
         "max_concurrent_positions": kalshi_15m_strategy.MAX_CONCURRENT_POSITIONS,
