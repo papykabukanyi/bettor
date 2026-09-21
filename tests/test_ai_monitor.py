@@ -14,12 +14,20 @@ import pytest
 
 from data import (
     ai_monitor as m,
+    alpaca_crypto_model,
     alpaca_crypto_strategy,
+    alpaca_model,
+    alpaca_options_model,
     alpaca_options_strategy,
     alpaca_strategy,
+    kalshi_15m_metals_model,
+    kalshi_15m_model,
     kalshi_15m_strategy,
+    perps_model,
     perps_strategy,
 )
+
+_MODEL_MODULES = (perps_model, alpaca_model, alpaca_crypto_model, alpaca_options_model, kalshi_15m_model, kalshi_15m_metals_model)
 
 
 @pytest.fixture(autouse=True)
@@ -39,6 +47,19 @@ def _isolated(tmp_path, monkeypatch):
     # empty here regardless of what's in the real environment.
     for mod in (perps_strategy, alpaca_strategy, alpaca_crypto_strategy, alpaca_options_strategy, kalshi_15m_strategy):
         monkeypatch.setattr(mod, "HF_API_KEY", "", raising=False)
+    # Every market's own MODEL_PATH/MODEL_META_PATH + in-memory cache,
+    # isolated the same way each market's own test suite already does --
+    # without this, a real model.joblib left on this dev machine's own
+    # DATA_DIR from ordinary local use gets picked up here instead of the
+    # "no model trained yet" state these tests actually want.
+    for mod in _MODEL_MODULES:
+        monkeypatch.setattr(mod, "MODEL_PATH", tmp_path / f"{mod.__name__.rsplit('.', 1)[-1]}.joblib")
+        monkeypatch.setattr(mod, "MODEL_META_PATH", tmp_path / f"{mod.__name__.rsplit('.', 1)[-1]}_meta.json")
+        monkeypatch.setattr(mod, "HF_API_KEY", "", raising=False)
+        if hasattr(mod, "_model_cache"):
+            monkeypatch.setitem(mod._model_cache, "model", None)  # noqa: SLF001
+            monkeypatch.setitem(mod._model_cache, "meta", None)  # noqa: SLF001
+            monkeypatch.setitem(mod._model_cache, "loaded_at", 0.0)  # noqa: SLF001
 
 
 def test_gather_snapshot_covers_all_5_markets_with_no_state_anywhere():
@@ -49,6 +70,27 @@ def test_gather_snapshot_covers_all_5_markets_with_no_state_anywhere():
         assert market["open_positions"] == []
         assert market["recent_trades"] == []
     assert "generated_at" in snapshot
+
+
+def test_model_summary_marks_an_untrained_model_explicitly_rather_than_going_empty():
+    # Real bug found from the very first live run: {} (no model yet) used
+    # to be indistinguishable from "this market's model data is missing/
+    # broken" -- the model itself misread kalshi_15m's own untrained
+    # metals model as "missing entirely" in its first real report.
+    assert m._model_summary(None) == {"trained": False}  # noqa: SLF001
+    assert m._model_summary({}) == {"trained": False}  # noqa: SLF001
+
+
+def test_model_summary_marks_a_trained_model_and_strips_feature_importances():
+    result = m._model_summary({"model_type": "gradient_boosting", "rows": 500, "feature_importances": {"x": 1.0}})  # noqa: SLF001
+    assert result == {"trained": True, "model_type": "gradient_boosting", "rows": 500}
+
+
+def test_gather_snapshot_reports_trained_false_for_every_market_with_no_model_yet():
+    snapshot = m.gather_snapshot()
+    assert snapshot["markets"]["perps"]["model"] == {"trained": False}
+    assert snapshot["markets"]["kalshi_15m"]["crypto_model"] == {"trained": False}
+    assert snapshot["markets"]["kalshi_15m"]["metals_model"] == {"trained": False}
 
 
 def test_gather_snapshot_reflects_a_real_perps_position():

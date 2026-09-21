@@ -78,6 +78,23 @@ RECENT_TRADES_LIMIT = 15
 RECENT_JOBS_LIMIT = 15
 
 
+def _model_summary(meta: dict[str, Any] | None) -> dict[str, Any]:
+    """Real bug found and fixed from the very first live run of this
+    module: an untrained model (load_model() returns (None, None)) used
+    to collapse to a bare `{}` here -- indistinguishable from "this
+    market's model data is missing/broken" to a reader with no other
+    context (confirmed live: the model itself flagged kalshi_15m's own
+    untrained metals model as "missing entirely" in its first real
+    report, when the real, already-known, and expected reason is simply
+    "hasn't accumulated enough data yet" -- see kalshi_15m_metals_data.
+    MIN_ROWS_FOR_FEATURES's own ~4h cold-start requirement). An explicit
+    `trained` key removes the ambiguity regardless of what else is (or
+    isn't) in `meta`."""
+    if not meta:
+        return {"trained": False}
+    return {"trained": True, **{k: v for k, v in meta.items() if k != "feature_importances"}}
+
+
 def _perps_snapshot() -> dict[str, Any]:
     from data import perps_model, perps_strategy
 
@@ -85,7 +102,7 @@ def _perps_snapshot() -> dict[str, Any]:
     _, meta = perps_model.load_model()
     return {
         "live_trading_enabled": perps_strategy.LIVE_TRADING_ENABLED,
-        "model": {k: v for k, v in (meta or {}).items() if k != "feature_importances"},
+        "model": _model_summary(meta),
         "open_positions": state.get("positions") or [],
         "recent_trades": list(reversed(state.get("trade_log") or []))[:RECENT_TRADES_LIMIT],
         "realized_pnl_by_date": state.get("realized_pnl_by_date") or {},
@@ -106,7 +123,7 @@ def _alpaca_market_snapshot(strategy_mod_name: str, model_mod_name: str) -> dict
     _, meta = model.load_model()
     return {
         "live_trading_enabled": strategy.LIVE_TRADING_ENABLED,
-        "model": {k: v for k, v in (meta or {}).items() if k != "feature_importances"},
+        "model": _model_summary(meta),
         "open_positions": state.get("positions") or [],
         "recent_trades": list(reversed(state.get("trade_log") or []))[:RECENT_TRADES_LIMIT],
         "realized_pnl_by_date": state.get("realized_pnl_by_date") or {},
@@ -125,8 +142,8 @@ def _kalshi_15m_snapshot() -> dict[str, Any]:
         shard_2_balance = {"error": str(exc)}
     return {
         "live_trading_enabled": kalshi_15m_strategy.LIVE_TRADING_ENABLED,
-        "crypto_model": {k: v for k, v in (crypto_meta or {}).items() if k != "feature_importances"},
-        "metals_model": {k: v for k, v in (metals_meta or {}).items() if k != "feature_importances"},
+        "crypto_model": _model_summary(crypto_meta),
+        "metals_model": _model_summary(metals_meta),
         "shard_2_balance": shard_2_balance,
         "open_positions": state.get("positions") or [],
         "recent_trades": list(reversed(state.get("trade_log") or []))[:RECENT_TRADES_LIMIT],
@@ -191,6 +208,13 @@ def _build_prompt(snapshot: dict[str, Any]) -> str:
         "pulled data (model metadata, recent trades, recent scheduled-job outcomes) -- "
         "do not assume anything not shown here, and say so plainly if the data given is "
         "insufficient to judge something for a given market.\n\n"
+        "Two real field-meaning notes so you don't misread them: a trade with "
+        "\"dry_run\": true never sent a real order and was already excluded from realized "
+        "P&L totals -- if several appear together, that's simulated history being "
+        "replayed/logged, not a duplicate-execution bug. And for kalshi_15m, "
+        "\"portfolio_value\" is the mark-to-market value of currently OPEN positions "
+        "specifically (separate from \"balance\", the cash figure) -- 0 with no open "
+        "positions is expected, not a sync issue.\n\n"
         "Write a concise report covering:\n"
         "1. Data/system health, per market: any failed job outcomes, missing model "
         "training, or data gaps visible in what's given. Call out which specific "
