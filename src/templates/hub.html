@@ -8,131 +8,220 @@
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   :root {
-    --bg: #0a0c11; --surface: #12151c; --surface2: #191d27; --border: #232838;
+    --bg: #060709; --surface: #12151cd9; --surface2: #191d27; --border: #232838;
     --text: #e7ecf5; --muted: #8792a8; --green: #22c55e; --gdim: #12291a;
-    --red: #ef4444; --rdim: #2a1414; --yellow: #eab308; --blue: #3b82f6; --r: 10px;
+    --red: #ef4444; --rdim: #2a1414; --yellow: #eab308; --ydim: #2a2510;
+    --blue: #3b82f6; --violet: #8b5cf6; --r: 14px;
   }
   body {
-    background: var(--bg); color: var(--text);
-    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    padding: 40px 20px; max-width: 900px; margin: 0 auto;
+    background:
+      radial-gradient(1100px 520px at 12% -8%, #1b2340 0%, transparent 60%),
+      radial-gradient(900px 460px at 100% 0%, #2a1740 0%, transparent 55%),
+      var(--bg);
+    color: var(--text);
+    font: 14px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    padding: 48px 20px 32px; max-width: 1080px; margin: 0 auto;
+    min-height: 100vh;
   }
-  h1 { font-size: 26px; font-weight: 700; letter-spacing: -0.01em; margin-bottom: 6px; }
-  .sub { color: var(--muted); font-size: 14px; margin-bottom: 32px; }
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
+  .top { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; margin-bottom: 8px; }
+  h1 {
+    font-size: 30px; font-weight: 800; letter-spacing: -0.02em; display: flex; align-items: center; gap: 10px;
+  }
+  h1 .grad {
+    background: linear-gradient(135deg, #7dd3fc, #a78bfa 55%, #f0abfc);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  .live-count {
+    display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted);
+    background: var(--surface); border: 1px solid var(--border); padding: 6px 12px; border-radius: 999px;
+  }
+  .live-count .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 3px #22c55e33; animation: pulse 2s infinite; }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+  .sub { color: var(--muted); font-size: 14px; margin-bottom: 30px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
   .card {
-    background: var(--surface); border: 1px solid var(--border); border-radius: var(--r);
-    padding: 24px; display: flex; flex-direction: column; gap: 10px;
+    position: relative; background: var(--surface); backdrop-filter: blur(6px);
+    border: 1px solid var(--border); border-radius: var(--r);
+    padding: 22px; display: flex; flex-direction: column; gap: 12px;
+    transition: border-color .18s ease, transform .18s ease;
+    overflow: hidden;
   }
-  .card h2 { font-size: 18px; font-weight: 700; }
-  .card p { color: var(--muted); font-size: 13px; line-height: 1.5; flex-grow: 1; }
-  .badge { display: inline-block; padding: 3px 10px; border-radius: 999px; font-size: 11px; font-weight: 600; width: fit-content; }
+  .card::before {
+    content: ""; position: absolute; inset: 0; border-radius: var(--r); padding: 1px;
+    background: linear-gradient(135deg, #7dd3fc22, transparent 40%, #a78bfa22);
+    -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor; mask-composite: exclude; pointer-events: none;
+  }
+  .card:hover { border-color: #34405e; transform: translateY(-2px); }
+  .card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .card h2 { font-size: 17px; font-weight: 700; display: flex; align-items: center; gap: 8px; }
+  .card p.desc { color: var(--muted); font-size: 12.5px; line-height: 1.55; }
+  .badge {
+    display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px; border-radius: 999px;
+    font-size: 10.5px; font-weight: 700; letter-spacing: .03em; width: fit-content; white-space: nowrap;
+  }
   .badge.ready { background: var(--gdim); color: var(--green); }
-  .badge.pending { background: #2a2510; color: var(--yellow); }
+  .badge.pending { background: var(--ydim); color: var(--yellow); }
+  .badge .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+  .badge.ready .dot { animation: pulse 2s infinite; }
+  .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  .stat-box {
+    background: var(--surface2); border: 1px solid var(--border); border-radius: 8px;
+    padding: 8px 6px; text-align: center;
+  }
+  .stat-box .v { font-size: 14px; font-weight: 700; }
+  .stat-box .v.pos { color: var(--green); }
+  .stat-box .v.neg { color: var(--red); }
+  .stat-box .k { font-size: 9.5px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; margin-top: 1px; }
   .btn {
     display: inline-block; text-align: center; padding: 10px 16px; border-radius: 8px;
-    background: var(--blue); color: #fff; font-weight: 600; font-size: 13px;
-    text-decoration: none; margin-top: 4px;
+    background: linear-gradient(135deg, #3b82f6, #6366f1); color: #fff; font-weight: 700; font-size: 13px;
+    text-decoration: none; margin-top: 2px; transition: filter .15s ease;
   }
+  .btn:hover { filter: brightness(1.12); }
   .btn.disabled { background: var(--surface2); color: var(--muted); pointer-events: none; }
-  footer { color: var(--muted); font-size: 12px; text-align: center; margin-top: 32px; }
-  a { color: var(--blue); }
+  .section-label {
+    display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px;
+    text-transform: uppercase; letter-spacing: .06em; font-weight: 700; margin: 34px 0 10px;
+  }
+  .section-label .line { flex: 1; height: 1px; background: var(--border); }
+  .ai-card {
+    background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--violet);
+    border-radius: var(--r); padding: 20px 22px; white-space: pre-wrap; font-size: 13px; line-height: 1.65;
+  }
+  footer { color: var(--muted); font-size: 12px; text-align: center; margin-top: 36px; }
+  a { color: #7dd3fc; }
 </style>
 </head>
 <body>
-<h1><img src="{{ url_for('static', filename='cumdev-icon.svg') }}" alt="CUMDEV" width="28" height="28" style="vertical-align:-6px;border-radius:7px;margin-right:8px;">&#128200; Bettor</h1>
-<div class="sub">Independent trading bots, independent servers. Pick a dashboard.</div>
+<div class="top">
+  <h1><img src="{{ url_for('static', filename='cumdev-icon.svg') }}" alt="CUMDEV" width="30" height="30" style="border-radius:8px;">&#128200; <span class="grad">Bettor</span></h1>
+  <div class="live-count"><span class="dot"></span><span id="live-summary">checking status&hellip;</span></div>
+</div>
+<div class="sub">5 automated trading bots, one hub. Pick a dashboard for real-time positions, P&amp;L, and model status.</div>
 
 <div class="grid">
-  <div class="card">
-    <span class="badge ready">LIVE</span>
-    <h2>&#8383; Kalshi Perps</h2>
-    <p>Crypto perpetual futures on Kalshi -- multi-timeframe technical signal + a trained direction model, bidirectional (long &amp; short), compounding position sizing.</p>
-    <a class="btn" href="/perps">Open Perps Dashboard &rarr;</a>
+  <div class="card" data-status-url="/api/status">
+    <div class="card-head">
+      <h2>&#8383; Kalshi Perps</h2>
+      <span class="badge pending" data-badge>&hellip;</span>
+    </div>
+    <p class="desc">Crypto perpetual futures on Kalshi -- multi-timeframe technical signal + a trained direction model, bidirectional (long &amp; short), compounding position sizing.</p>
+    <div class="stats">
+      <div class="stat-box"><div class="v" data-stat="pnl">--</div><div class="k">Today P&amp;L</div></div>
+      <div class="stat-box"><div class="v" data-stat="positions">--</div><div class="k">Open</div></div>
+      <div class="stat-box"><div class="v" data-stat="winrate">--</div><div class="k">Win Rate</div></div>
+    </div>
+    <a class="btn" href="/perps">Open Dashboard &rarr;</a>
   </div>
 
-  <div class="card">
-    <span id="kalshi15m-badge" class="badge pending">&hellip;</span>
-    <h2>&#9203; Kalshi 15-Minute Markets</h2>
-    <p>Kalshi's own fresh-every-15-minutes binary up/down contracts (KXBTC15M etc. plus gold/silver/copper) -- own direction models, trained and running live. Real order placement is gated on <code>KALSHI_15M_LIVE_TRADING_ENABLED</code> and this account holding collateral on Kalshi's own exchange shard 2 (Crypto/Commodities).</p>
-    <a class="btn" href="/kalshi15m">Open 15-Minute Markets Dashboard &rarr;</a>
+  <div class="card" data-status-url="/api/kalshi15m/status">
+    <div class="card-head">
+      <h2>&#9203; Kalshi 15-Minute</h2>
+      <span class="badge pending" data-badge>&hellip;</span>
+    </div>
+    <p class="desc">Fresh-every-15-minutes binary up/down contracts (crypto + gold/silver/copper). Order placement gated on this account holding collateral on Kalshi's own exchange shard 2.</p>
+    <div class="stats">
+      <div class="stat-box"><div class="v" data-stat="pnl">--</div><div class="k">Today P&amp;L</div></div>
+      <div class="stat-box"><div class="v" data-stat="positions">--</div><div class="k">Open</div></div>
+      <div class="stat-box"><div class="v" data-stat="winrate">--</div><div class="k">Win Rate</div></div>
+    </div>
+    <a class="btn" href="/kalshi15m">Open Dashboard &rarr;</a>
   </div>
 
-  <div class="card">
-    {% if alpaca_url and alpaca_url != "#" %}
-    <span class="badge ready">LIVE</span>
-    <h2>&#128200; Alpaca Stocks</h2>
-    <p>US equities/ETFs via Alpaca (paper trading) -- pro technical indicators, a scalper strategy, real Alpaca paper-account balance/positions/fills (no local simulated ledger), off-hours intensive training and backtesting.</p>
-    <a class="btn" href="{{ alpaca_url }}">Open Alpaca Dashboard &rarr;</a>
-    {% else %}
-    <span class="badge pending">NOT DEPLOYED YET</span>
-    <h2>&#128200; Alpaca Stocks</h2>
-    <p>US equities/ETFs via Alpaca (paper trading) -- pro technical indicators, a scalper strategy, real Alpaca paper-account balance/positions/fills (no local simulated ledger), off-hours intensive training and backtesting.</p>
-    <p style="color:var(--yellow);">This runs as its own separate Render service (alpaca_server.py) that hasn't been created yet, so there's no live URL to link to. Once it exists, set ALPACA_SERVER_URL on this service to its public URL.</p>
-    <span class="btn disabled">Not available yet</span>
-    {% endif %}
+  <div class="card" data-status-url="/stocks/api/alpaca/status">
+    <div class="card-head">
+      <h2>&#128200; Alpaca Stocks</h2>
+      <span class="badge pending" data-badge>&hellip;</span>
+    </div>
+    <p class="desc">US equities/ETFs via Alpaca (paper trading) -- technical indicators, a scalper strategy, real paper-account balance/positions/fills.</p>
+    <div class="stats">
+      <div class="stat-box"><div class="v" data-stat="pnl">--</div><div class="k">Today P&amp;L</div></div>
+      <div class="stat-box"><div class="v" data-stat="positions">--</div><div class="k">Open</div></div>
+      <div class="stat-box"><div class="v" data-stat="winrate">--</div><div class="k">Win Rate</div></div>
+    </div>
+    <a class="btn" href="/stocks/">Open Dashboard &rarr;</a>
   </div>
 
-  <div class="card">
-    {% if alpaca_crypto_url and alpaca_crypto_url != "#" %}
-    <span class="badge ready">LIVE</span>
-    <h2>&#8383; Alpaca Crypto</h2>
-    <p>Crypto pairs (BTC/USD, ETH/USD, ...) via Alpaca (paper trading), 24/7 -- same technical indicators + real crypto news sentiment as the perps bot, its own trained model. Split into its own service after a real OOM incident sharing a process with the stock strategy.</p>
-    <a class="btn" href="{{ alpaca_crypto_url }}">Open Alpaca Crypto Dashboard &rarr;</a>
-    {% else %}
-    <span class="badge pending">NOT DEPLOYED YET</span>
-    <h2>&#8383; Alpaca Crypto</h2>
-    <p>Crypto pairs (BTC/USD, ETH/USD, ...) via Alpaca (paper trading), 24/7 -- same technical indicators + real crypto news sentiment as the perps bot, its own trained model.</p>
-    <p style="color:var(--yellow);">This runs as its own separate Render service (alpaca_crypto_server.py) that hasn't been created yet, so there's no live URL to link to. Once it exists, set ALPACA_CRYPTO_SERVER_URL on this service to its public URL.</p>
-    <span class="btn disabled">Not available yet</span>
-    {% endif %}
+  <div class="card" data-status-url="/crypto/api/alpaca/crypto/status">
+    <div class="card-head">
+      <h2>&#8383; Alpaca Crypto</h2>
+      <span class="badge pending" data-badge>&hellip;</span>
+    </div>
+    <p class="desc">Crypto pairs via Alpaca (paper trading), 24/7 -- same technical indicators + real news sentiment as the perps bot, its own trained model.</p>
+    <div class="stats">
+      <div class="stat-box"><div class="v" data-stat="pnl">--</div><div class="k">Today P&amp;L</div></div>
+      <div class="stat-box"><div class="v" data-stat="positions">--</div><div class="k">Open</div></div>
+      <div class="stat-box"><div class="v" data-stat="winrate">--</div><div class="k">Win Rate</div></div>
+    </div>
+    <a class="btn" href="/crypto/">Open Dashboard &rarr;</a>
   </div>
 
-  <div class="card">
-    {% if alpaca_options_url and alpaca_options_url != "#" %}
-    <span class="badge ready">LIVE</span>
-    <h2>&#9780; Alpaca Options</h2>
-    <p>Directional debit spreads (buy one leg, sell the other) on liquid stock underlyings via Alpaca (paper trading) -- reuses the equities technical/sentiment model to pick direction, then a near-the-money, near-term contract. Its own trained model, its own service.</p>
-    <a class="btn" href="{{ alpaca_options_url }}">Open Alpaca Options Dashboard &rarr;</a>
-    {% else %}
-    <span class="badge pending">NOT DEPLOYED YET</span>
-    <h2>&#9780; Alpaca Options</h2>
-    <p>Directional debit spreads (buy one leg, sell the other) on liquid stock underlyings via Alpaca (paper trading) -- reuses the equities technical/sentiment model to pick direction, then a near-the-money, near-term contract.</p>
-    <p style="color:var(--yellow);">This runs as its own separate Render service (alpaca_options_server.py) that hasn't been created yet, so there's no live URL to link to. Once it exists, set ALPACA_OPTIONS_SERVER_URL on this service to its public URL.</p>
-    <span class="btn disabled">Not available yet</span>
-    {% endif %}
+  <div class="card" data-status-url="/options/api/alpaca/options/status">
+    <div class="card-head">
+      <h2>&#9780; Alpaca Options</h2>
+      <span class="badge pending" data-badge>&hellip;</span>
+    </div>
+    <p class="desc">Directional debit spreads on liquid stock underlyings via Alpaca (paper trading) -- reuses the equities model to pick direction, then a near-the-money contract.</p>
+    <div class="stats">
+      <div class="stat-box"><div class="v" data-stat="pnl">--</div><div class="k">Today P&amp;L</div></div>
+      <div class="stat-box"><div class="v" data-stat="positions">--</div><div class="k">Open</div></div>
+      <div class="stat-box"><div class="v" data-stat="winrate">--</div><div class="k">Win Rate</div></div>
+    </div>
+    <a class="btn" href="/options/">Open Dashboard &rarr;</a>
   </div>
 </div>
 
-<div class="sub" style="margin-top:28px; margin-bottom:8px;">Claude Project Review <span id="ai-report-when"></span></div>
-<div class="card" style="white-space:pre-wrap; font-size:13px; line-height:1.6; color:var(--text);" id="ai-report-body">Loading&hellip;</div>
+<div class="section-label">&#10024; Claude Project Review <span class="line"></span> <span id="ai-report-when" style="text-transform:none; letter-spacing:normal; font-weight:400;"></span></div>
+<div class="ai-card" id="ai-report-body">Loading&hellip;</div>
 
-<footer>Kalshi Perps, Alpaca Stocks, Alpaca Crypto, and Alpaca Options run as fully independent servers -- a problem on one cannot affect the others. &middot; Powered by <a href="https://cumdev.onrender.com" target="_blank" rel="noopener">CUMDEV</a></footer>
+<footer>Kalshi Perps, Kalshi 15-Minute Markets, Alpaca Stocks, Alpaca Crypto, and Alpaca Options -- 5 independent strategies, one shared host. &middot; Powered by <a href="https://cumdev.onrender.com" target="_blank" rel="noopener">CUMDEV</a></footer>
 
 <script>
-  // Real bug this fixes: the other 4 cards' LIVE/NOT-DEPLOYED badges are
-  // static text because those states have been permanently settled for a
-  // long time -- the 15-minute market's own live-trading state is NOT
-  // settled the same way (it's a live env-var flag that can flip), so a
-  // hardcoded badge here goes stale the moment that flag changes, exactly
-  // what happened (confirmed live: stayed "DRY-RUN" long after live
-  // trading was actually enabled). Fetched on load, no polling -- this is
-  // a landing page, not a live dashboard; open /kalshi15m for a
-  // continuously-refreshed view.
-  fetch("/api/kalshi15m/status").then(r => r.json()).then(data => {
-    const badge = document.getElementById("kalshi15m-badge");
-    if (!badge || !data.ok) return;
-    if (data.live_trading_enabled) {
-      badge.textContent = "LIVE";
-      badge.className = "badge ready";
-    } else {
-      badge.textContent = "DRY-RUN";
+  const fmtUsd = (v) => (v === null || v === undefined || isNaN(v)) ? "--" : (v >= 0 ? "+$" : "-$") + Math.abs(Number(v)).toFixed(2);
+  const fmtPct = (v) => (v === null || v === undefined || isNaN(v)) ? "--" : (Number(v) * 100).toFixed(0) + "%";
+
+  // One shared hydrator for every market card -- each already exposes the
+  // same field names (live_trading_enabled, open_position_count,
+  // today_realized_pnl_usd, win_rate.win_rate) from its own real status
+  // route, so one function replaces what used to be 4 near-duplicate
+  // hardcoded-badge blocks (one of which -- kalshi15m's -- already went
+  // stale once in production because it was the only dynamic one).
+  document.querySelectorAll(".card[data-status-url]").forEach(card => {
+    const url = card.getAttribute("data-status-url");
+    fetch(url).then(r => r.json()).then(data => {
+      const badge = card.querySelector("[data-badge]");
+      if (!data.ok) { badge.textContent = "OFFLINE"; badge.className = "badge pending"; return; }
+      if (data.live_trading_enabled) {
+        badge.innerHTML = '<span class="dot"></span>LIVE';
+        badge.className = "badge ready";
+      } else {
+        badge.textContent = "DRY-RUN";
+        badge.className = "badge pending";
+      }
+      const pnlEl = card.querySelector('[data-stat="pnl"]');
+      const pnl = data.today_realized_pnl_usd;
+      pnlEl.textContent = fmtUsd(pnl);
+      pnlEl.className = "v " + (pnl > 0 ? "pos" : pnl < 0 ? "neg" : "");
+      card.querySelector('[data-stat="positions"]').textContent = data.open_position_count ?? "--";
+      const wr = (data.win_rate || {}).win_rate;
+      card.querySelector('[data-stat="winrate"]').textContent = wr != null ? fmtPct(wr) : "--";
+    }).catch(() => {
+      const badge = card.querySelector("[data-badge]");
+      badge.textContent = "OFFLINE";
       badge.className = "badge pending";
-    }
-  }).catch(() => {
-    const badge = document.getElementById("kalshi15m-badge");
-    if (badge) { badge.textContent = "DRY-RUN"; badge.className = "badge pending"; }
+    }).finally(updateLiveSummary);
   });
+
+  function updateLiveSummary() {
+    const badges = document.querySelectorAll(".card [data-badge]");
+    const liveCount = document.querySelectorAll(".card .badge.ready").length;
+    const total = badges.length;
+    const allChecked = [...badges].every(b => b.textContent.trim() !== "…");
+    if (allChecked) {
+      document.getElementById("live-summary").textContent = `${liveCount} of ${total} markets live`;
+    }
+  }
 
   // Project-wide Claude-powered status review, all 5 markets -- see
   // ai_monitor.py's own module docstring. Read-only, fetched once on
