@@ -105,9 +105,9 @@ if str(SRC_DIR) not in sys.path:
 
 from config import et_today
 from data import (
-    crypto_news, kalshi_15m, kalshi_15m_data, kalshi_15m_metals_data, kalshi_15m_metals_model, kalshi_15m_model,
-    kalshi_15m_strategy, perps_data, perps_meta_model, perps_model, perps_strategy, perps_trade_analysis,
-    threads_client, threads_post,
+    ai_monitor, crypto_news, kalshi_15m, kalshi_15m_data, kalshi_15m_metals_data, kalshi_15m_metals_model,
+    kalshi_15m_model, kalshi_15m_strategy, perps_data, perps_meta_model, perps_model, perps_strategy,
+    perps_trade_analysis, threads_client, threads_post,
 )
 
 # Real production bug found and fixed on the sibling stocks server (now
@@ -178,6 +178,18 @@ KALSHI_15M_TRAIN_HOUR_ET = int(os.getenv("KALSHI_15M_TRAIN_HOUR_ET", "4") or "4"
 # still kept small (a few days, not the full backfill's 90) since this
 # runs EVERY day, not once.
 KALSHI_15M_RECONCILE_DAYS = max(1, int(os.getenv("KALSHI_15M_RECONCILE_DAYS", "3") or "3"))
+# Read-only, project-WIDE Claude-powered analysis layer covering all 5
+# markets (perps, stocks, crypto, options, kalshi_15m), added per
+# explicit user direction (chosen over "replace the prediction model
+# with Claude entirely" via an AskUserQuestion, then explicitly widened
+# from Kalshi 15-minute markets only to "across all of the bots" in the
+# same build) -- see ai_monitor.py's own module docstring for the full
+# design and why it never touches order placement on any market. Default
+# 6am ET: safely after every daily training job across all 5 markets
+# (perps 3, kalshi_15m/stocks 4, stocks/options' own torch retrains 5) so
+# each day's review reflects that day's freshly-trained models, not the
+# previous day's.
+AI_MONITOR_HOUR_ET = int(os.getenv("AI_MONITOR_HOUR_ET", "6") or "6")
 PERPS_TRAIN_HOUR_ET = int(os.getenv("PERPS_TRAIN_HOUR_ET", "3") or "3")
 # 30 min after PERPS_TRAIN_HOUR_ET, not the same minute -- runs after the
 # fresh model/data from the train job above have settled, not concurrently
@@ -620,6 +632,16 @@ def _run_kalshi_15m_train() -> dict[str, Any]:
     return {"ok": True, "crypto": crypto_result, "metals": metals_result}
 
 
+@_locked_job("ai_monitor", stale_after_sec=180)
+def _run_ai_monitor() -> dict[str, Any]:
+    """See ai_monitor.py's own module docstring -- a read-only, project-
+    wide Claude-powered review across all 5 markets, never a predictor.
+    stale_after_sec is short (180s) since a single Anthropic API call,
+    not the heavy multi-candidate model fits any market's own train job
+    does, is the only real work here."""
+    return ai_monitor.run_monitor_cycle()
+
+
 @_locked_job("perps_train", stale_after_sec=1800)
 def _run_perps_train() -> dict[str, Any]:
     # perps_model.py never imports perps_strategy.py directly (perps_strategy
@@ -860,6 +882,10 @@ def _ensure_background_jobs_started() -> None:
             scheduler.add_job(
                 _run_kalshi_15m_train, "cron", hour=KALSHI_15M_TRAIN_HOUR_ET, minute=0,
                 id="kalshi_15m_train", replace_existing=True,
+            )
+            scheduler.add_job(
+                _run_ai_monitor, "cron", hour=AI_MONITOR_HOUR_ET, minute=0,
+                id="ai_monitor", replace_existing=True,
             )
             scheduler.add_job(
                 _run_perps_train, "cron", hour=PERPS_TRAIN_HOUR_ET, minute=0,
@@ -1394,6 +1420,32 @@ def api_kalshi_15m_balance_by_shard():
         return jsonify({"ok": False, "error": str(exc)}), 500
 
 
+@app.route("/api/ai-report", methods=["GET"])
+def api_ai_report():
+    """The latest saved project-wide Claude-powered status review -- see
+    ai_monitor.py's own module docstring. A public read like every other
+    status route here; never None-vs-missing-key ambiguous -- returns
+    {"ok": True, "report": None} explicitly when nothing has run yet, not
+    a 404, so the hub page can render a clear "not available yet" state
+    instead of treating it as an error."""
+    saved = ai_monitor.get_latest_report()
+    return jsonify({"ok": True, "report": saved})
+
+
+@app.route("/api/ai-report/run", methods=["POST"])
+def api_ai_report_run():
+    """Manual trigger -- same on-demand convention as every other manual
+    route here. Real cost note (not a safety gate, just an honest one):
+    each call spends real Anthropic API tokens, unlike every read-only
+    route on this Space."""
+    try:
+        result = ai_monitor.run_monitor_cycle()
+        return jsonify(result)
+    except Exception as exc:
+        logger.warning("[app_kalshi] AI monitor manual run failed", exc_info=True)
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
 @app.route("/api/kalshi15m/backfill", methods=["POST"])
 def api_kalshi_15m_backfill():
     """Manually triggers kalshi_15m_data.backfill_minute_history -- see its
@@ -1677,6 +1729,7 @@ _JOB_LABELS = {
     "kalshi_15m_cycle": f"Kalshi 15m markets settlement check + entry scan (every {KALSHI_15M_CYCLE_MINUTES} min)",
     "kalshi_15m_reconcile": f"Kalshi 15m crypto archive gap-heal, trailing {KALSHI_15M_RECONCILE_DAYS}d (daily, 30 min before training)",
     "kalshi_15m_train": f"Kalshi 15m markets model retrain, crypto + metals (daily {KALSHI_15M_TRAIN_HOUR_ET:02d}:00 ET)",
+    "ai_monitor": f"Project-wide Claude-powered status review, read-only, all 5 markets (daily {AI_MONITOR_HOUR_ET:02d}:00 ET)",
     "perps_train": f"Model retrain (daily {PERPS_TRAIN_HOUR_ET:02d}:00 ET)",
     "perps_trade_analysis": (
         f"Trade win/loss analysis + evidence-gated confidence tuning "

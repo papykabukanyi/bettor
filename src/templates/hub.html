@@ -104,6 +104,9 @@
   </div>
 </div>
 
+<div class="sub" style="margin-top:28px; margin-bottom:8px;">Claude Project Review <span id="ai-report-when"></span></div>
+<div class="card" style="white-space:pre-wrap; font-size:13px; line-height:1.6; color:var(--text);" id="ai-report-body">Loading&hellip;</div>
+
 <footer>Kalshi Perps, Alpaca Stocks, Alpaca Crypto, and Alpaca Options run as fully independent servers -- a problem on one cannot affect the others. &middot; Powered by <a href="https://cumdev.onrender.com" target="_blank" rel="noopener">CUMDEV</a></footer>
 
 <script>
@@ -129,6 +132,23 @@
   }).catch(() => {
     const badge = document.getElementById("kalshi15m-badge");
     if (badge) { badge.textContent = "DRY-RUN"; badge.className = "badge pending"; }
+  });
+
+  // Project-wide Claude-powered status review, all 5 markets -- see
+  // ai_monitor.py's own module docstring. Read-only, fetched once on
+  // load (this is a landing page, not a live dashboard) -- the daily
+  // scheduled job is what actually refreshes the underlying report.
+  fetch("/api/ai-report").then(r => r.json()).then(data => {
+    const body = document.getElementById("ai-report-body");
+    const when = document.getElementById("ai-report-when");
+    const report = data.report;
+    if (!data.ok || !report) { body.textContent = "No review has run yet."; return; }
+    if (report.generated_at) {
+      try { when.textContent = "-- " + new Date(report.generated_at).toLocaleString(); } catch (e) {}
+    }
+    body.textContent = (report.ok && report.report) ? report.report : `Review did not complete (${report.reason || "unknown reason"}).`;
+  }).catch(() => {
+    document.getElementById("ai-report-body").textContent = "Could not load the review.";
   });
 </script>
 </body>
