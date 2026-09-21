@@ -14,6 +14,11 @@ from data import kalshi_15m_metals_data as k
 def _isolated_data_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(k, "DATA_DIR", tmp_path)
     monkeypatch.setattr(k, "HF_API_KEY", "")
+    # Real network call otherwise (Google News RSS, up to an 8s timeout
+    # per call) -- every test in this file gets a safe, deterministic
+    # default; tests that specifically care about sentiment wiring
+    # override this themselves.
+    monkeypatch.setattr(k, "get_generic_sentiment", lambda query, cache_key: {"query": query, "sentiment_score": 0.0, "headline_volume": 0, "computed_at": 0.0})
 
 
 def test_get_universe_is_gold_silver_copper():
@@ -183,8 +188,24 @@ def test_engineer_metals_features_computes_a_leaner_column_set():
     for col in k.METALS_FEATURE_COLUMNS:
         assert col in result.columns
     # Real, deliberate omissions -- see this module's own docstring.
-    for col in ("atr_pct", "stoch_k", "volume_ratio_5", "dollar_volume_z", "oi_change_pct", "spread_pct", "sentiment_score"):
+    # sentiment_score is NOT one of them (it was a real, undisclosed gap,
+    # since fixed) -- see test_engineer_metals_features_broadcasts_
+    # sentiment_score_across_every_row below for that coverage instead.
+    for col in ("atr_pct", "stoch_k", "volume_ratio_5", "dollar_volume_z", "oi_change_pct", "spread_pct"):
         assert col not in result.columns
+
+
+def test_engineer_metals_features_broadcasts_sentiment_score_across_every_row():
+    prices = [100.0 + i * 0.01 for i in range(300)]
+    result = k.engineer_metals_features(_synthetic_price_df(prices), sentiment_score=0.42)
+    assert not result.empty
+    assert (result["sentiment_score"] == 0.42).all()
+
+
+def test_engineer_metals_features_defaults_sentiment_score_to_zero():
+    prices = [100.0 + i * 0.01 for i in range(300)]
+    result = k.engineer_metals_features(_synthetic_price_df(prices))
+    assert (result["sentiment_score"] == 0.0).all()
 
 
 def test_engineer_metals_features_label_is_nan_for_recent_rows():
@@ -237,6 +258,27 @@ def test_collect_dataset_rows_one_metal_failing_does_not_block_the_others(monkey
     assert set(result["symbol"]) == {"SILVER"}
 
 
+def test_collect_dataset_rows_wires_the_fetched_sentiment_score_through(monkeypatch):
+    prices = [100.0 + i * 0.01 for i in range(300)]
+    for i, p in enumerate(prices):
+        k._append_price_point("GOLD", ts=1_700_000_000 + i * 60, price=p)  # noqa: SLF001
+
+    captured = {}
+
+    def fake_sentiment(query, cache_key):
+        captured["query"] = query
+        captured["cache_key"] = cache_key
+        return {"sentiment_score": 0.73, "headline_volume": 4}
+
+    monkeypatch.setattr(k, "get_generic_sentiment", fake_sentiment)
+    monkeypatch.setattr(k, "fetch_latest_price", lambda metal: {"price": 105.0, "ts": 1_700_000_000 + 300 * 60})
+
+    result = k.collect_dataset_rows(["GOLD"])
+    assert (result["sentiment_score"] == 0.73).all()
+    assert captured["cache_key"] == "GOLD"
+    assert captured["query"] == k.METAL_TO_NEWS_QUERY["GOLD"]
+
+
 def test_latest_feature_row_returns_none_with_no_history():
     assert k.latest_feature_row("GOLD") is None
 
@@ -252,6 +294,16 @@ def test_latest_feature_row_returns_feature_columns_plus_symbol_and_price():
     assert row["current_price"] > 0
     for col in k.METALS_FEATURE_COLUMNS:
         assert col in row
+
+
+def test_latest_feature_row_fetches_a_fresh_sentiment_reading(monkeypatch):
+    prices = [100.0 + i * 0.01 for i in range(300)]
+    for i, p in enumerate(prices):
+        k._append_price_point("SILVER", ts=1_700_000_000 + i * 60, price=p)  # noqa: SLF001
+
+    monkeypatch.setattr(k, "get_generic_sentiment", lambda query, cache_key: {"sentiment_score": -0.5, "headline_volume": 2})
+    row = k.latest_feature_row("SILVER")
+    assert row["sentiment_score"] == -0.5
 
 
 def test_push_dataset_snapshot_with_no_rows_returns_not_ok():

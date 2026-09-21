@@ -413,6 +413,39 @@ def get_sentiment(coin_symbol: str, *, use_limited_sources: bool = True) -> dict
     return result
 
 
+def get_generic_sentiment(query: str, *, cache_key: str) -> dict[str, Any]:
+    """Real gap this closes: kalshi_15m_metals_data.py's own live data
+    collection had NO sentiment_score feature at all (not disclosed as a
+    deliberate exclusion the way volume/OI-derived features are in its own
+    docstring -- gold/silver/copper news is a real, freely-fetchable
+    signal this codebase was simply never wired up to use). get_sentiment
+    above is fundamentally crypto-shaped (CryptoPanic, the coin-specific
+    general-newsroom-feed matching, _COIN_QUERIES) -- none of that applies
+    to a commodity. This is the free-source-only subset of that same
+    pipeline (Google News RSS + _score_headlines, no crypto-specific paid/
+    quota-limited sources) for an arbitrary search query instead of a coin
+    symbol, sharing _fetch_google_news_rss's own module-level rate-limit
+    cooldown with every crypto caller (one shared source, one shared
+    cooldown, regardless of which caller hit it).
+
+    `cache_key` is caller-chosen (not derived from `query`) specifically
+    so two different callers can't collide on the exact query string by
+    coincidence -- namespaced under "generic:" in the SAME _cache dict as
+    coin symbols so a future metal/commodity ticker can never collide with
+    an actual coin symbol either."""
+    key = f"generic:{cache_key}"
+    cached = _cache.get(key)
+    now = time.time()
+    if cached and (now - cached[1]) < _CACHE_TTL_SEC:
+        return cached[0]
+
+    headlines = _fetch_google_news_rss(query)
+    score, volume = _score_headlines(headlines)
+    result = {"query": query, "sentiment_score": score, "headline_volume": volume, "computed_at": now}
+    _cache[key] = (result, now)
+    return result
+
+
 def prewarm_sentiment(coins: list[str], *, use_limited_sources: bool = True, max_workers: int = 8) -> None:
     """Fetches sentiment for every coin CONCURRENTLY via a thread pool,
     populating the SAME per-coin cache get_sentiment() itself reads --

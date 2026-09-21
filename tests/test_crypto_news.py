@@ -384,6 +384,53 @@ def test_get_sentiment_uses_limited_sources_by_default(monkeypatch, _isolated_se
     assert calls == {"cryptopanic": 1, "newsdata": 1}
 
 
+# ---------------------------------------------------------------------------
+# get_generic_sentiment -- the free-source-only subset of this same pipeline
+# for a non-coin query (built for kalshi_15m_metals_data.py's gold/silver/
+# copper sentiment -- see that module's own docstring for the real gap this
+# closes: it never had a sentiment_score feature at all before).
+# ---------------------------------------------------------------------------
+def test_get_generic_sentiment_never_touches_a_quota_limited_source(monkeypatch, _isolated_sentiment_caches):
+    def fail_if_called(*a, **k):
+        raise AssertionError("get_generic_sentiment must never call a crypto-specific/quota-limited source")
+
+    monkeypatch.setattr(news, "_fetch_cryptopanic", fail_if_called)
+    monkeypatch.setattr(news, "_fetch_newsdata_io", fail_if_called)
+    monkeypatch.setattr(news, "_fetch_serpapi", fail_if_called)
+    result = news.get_generic_sentiment("gold price commodity", cache_key="GOLD")
+    assert result["query"] == "gold price commodity"
+    assert "sentiment_score" in result
+
+
+def test_get_generic_sentiment_scores_real_headlines(monkeypatch, _isolated_sentiment_caches):
+    monkeypatch.setattr(news, "_fetch_google_news_rss", lambda query: ["Gold surges to record high", "Gold rally continues"])
+    result = news.get_generic_sentiment("gold price commodity", cache_key="GOLD")
+    assert result["sentiment_score"] > 0
+    assert result["headline_volume"] == 2
+
+
+def test_get_generic_sentiment_caches_per_cache_key_not_per_query(monkeypatch, _isolated_sentiment_caches):
+    calls = {"n": 0}
+
+    def fake_rss(query):
+        calls["n"] += 1
+        return []
+
+    monkeypatch.setattr(news, "_fetch_google_news_rss", fake_rss)
+    news.get_generic_sentiment("gold price commodity", cache_key="GOLD")
+    news.get_generic_sentiment("gold price commodity", cache_key="GOLD")  # same key -- cached, no second fetch
+    assert calls["n"] == 1
+
+
+def test_get_generic_sentiment_does_not_collide_with_a_coin_symbol_cache_entry(monkeypatch, _isolated_sentiment_caches):
+    # A metal cache_key that happened to match a real coin symbol must
+    # never read back a coin's own cached get_sentiment() result.
+    news._cache["GOLD"] = ({"coin": "GOLD", "sentiment_score": 0.9, "headline_volume": 1, "computed_at": 0.0}, 1e18)  # noqa: SLF001
+    monkeypatch.setattr(news, "_fetch_google_news_rss", lambda query: [])
+    result = news.get_generic_sentiment("gold price commodity", cache_key="GOLD")
+    assert result["sentiment_score"] == 0.0  # the real computed value, not the coin cache's 0.9
+
+
 def test_prewarm_sentiment_populates_the_cache_for_every_coin(monkeypatch, _isolated_sentiment_caches):
     """The whole point: after prewarming, a normal get_sentiment() call for
     any of those coins must be a cache hit, not a fresh fetch."""

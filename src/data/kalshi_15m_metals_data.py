@@ -63,6 +63,7 @@ import numpy as np
 import pandas as pd
 import requests
 
+from data.crypto_news import get_generic_sentiment
 from server_common import DATA_DIR
 
 logger = logging.getLogger(__name__)
@@ -74,6 +75,15 @@ GOLD_API_BASE_URL = os.getenv("GOLD_API_BASE_URL", "https://api.gold-api.com").r
 GOLD_API_TIMEOUT_SEC = int(os.getenv("GOLD_API_TIMEOUT_SEC", "10") or "10")
 
 METAL_TO_SYMBOL = {"GOLD": "XAU", "SILVER": "XAG", "COPPER": "HG"}
+
+# Real gap closed, not a deliberate exclusion this module's own docstring
+# ever actually disclosed (unlike volume/OI-derived features): live news
+# sentiment for gold/silver/copper via crypto_news.get_generic_sentiment
+# (the free-source-only, non-crypto-specific subset of that same
+# pipeline). Plain, distinctive search terms -- "gold" alone would also
+# match unrelated headlines ("gold medal", "golden"), so each query pins
+# down the commodity explicitly.
+METAL_TO_NEWS_QUERY = {"GOLD": "gold price commodity", "SILVER": "silver price commodity", "COPPER": "copper price commodity"}
 
 LABEL_HORIZON_MINUTES = int(os.getenv("KALSHI_15M_METALS_LABEL_HORIZON_MINUTES", "15") or "15")
 
@@ -104,6 +114,7 @@ METALS_FEATURE_COLUMNS = [
     "volatility_5", "volatility_15", "volatility_30",
     "rsi_14", "macd_hist_pct", "bb_pct_b", "bb_bandwidth",
     "hour_sin", "hour_cos", "dow_sin", "dow_cos",
+    "sentiment_score",
 ]
 
 
@@ -240,13 +251,23 @@ def _append_price_point(metal: str, ts: int, price: float) -> pd.DataFrame:
     return combined
 
 
-def engineer_metals_features(price_df: pd.DataFrame) -> pd.DataFrame:
+def engineer_metals_features(price_df: pd.DataFrame, sentiment_score: float = 0.0) -> pd.DataFrame:
     """Leaner sibling of perps_data.engineer_features -- see this
     module's own docstring for exactly which indicators are dropped and
     why (all need volume/OI/bid-ask/high-low, none of which a plain spot
     price has). Every formula below for a feature this DOES compute is
     identical to perps_data.engineer_features' own -- same leakage-free,
-    backward-looking-only discipline."""
+    backward-looking-only discipline.
+
+    sentiment_score: same convention as perps_data.engineer_features'
+    own identically-named parameter -- ONE scalar for the whole call,
+    broadcast across every row, since it reflects sentiment as of NOW
+    (when this function runs), not a historical time series. Real,
+    live-fetched news sentiment for the live collection/prediction path
+    (see collect_dataset_rows/latest_feature_row); the historical
+    backfill path this market has none of yet (no free API exists) would
+    pass 0.0, same disclosed-limitation convention as every sibling
+    module's own backfill."""
     if price_df.empty or len(price_df) < MIN_ROWS_FOR_FEATURES:
         return pd.DataFrame()
 
@@ -296,6 +317,7 @@ def engineer_metals_features(price_df: pd.DataFrame) -> pd.DataFrame:
     dow = ts_utc.dt.dayofweek
     df["dow_sin"] = np.sin(2 * np.pi * dow / 7.0)
     df["dow_cos"] = np.cos(2 * np.pi * dow / 7.0)
+    df["sentiment_score"] = float(sentiment_score)
 
     horizon = LABEL_HORIZON_MINUTES
     df["future_close"] = df["close"].shift(-horizon)
@@ -319,7 +341,8 @@ def collect_dataset_rows(metals: list[str] | None = None) -> pd.DataFrame:
             if point is None:
                 continue
             history = _append_price_point(metal, point["ts"], point["price"])
-            feats = engineer_metals_features(history)
+            sentiment = get_generic_sentiment(METAL_TO_NEWS_QUERY[metal], cache_key=metal)
+            feats = engineer_metals_features(history, sentiment_score=sentiment["sentiment_score"])
             if feats.empty:
                 continue
             feats.insert(0, "symbol", metal)
@@ -335,9 +358,15 @@ def latest_feature_row(metal: str) -> dict[str, Any] | None:
     """The single most-recent feature row for one metal, for live
     prediction -- does NOT fetch a new price point itself (collect_dataset_rows,
     on its own schedule, is the only writer of the rolling history) so a
-    prediction always reflects the same data the archived dataset does."""
+    prediction always reflects the same data the archived dataset does.
+    DOES fetch a fresh sentiment reading, though (cheap, cached -- see
+    get_generic_sentiment's own TTL), matching kalshi_15m_data.latest_
+    feature_row's own identical convention: a live PREDICTION should
+    reflect sentiment as of right now, not whatever it was at the last
+    collection tick."""
     history = _load_price_history(metal)
-    feats_all = engineer_metals_features(history)
+    sentiment = get_generic_sentiment(METAL_TO_NEWS_QUERY[metal], cache_key=metal)
+    feats_all = engineer_metals_features(history, sentiment_score=sentiment["sentiment_score"])
     if feats_all.empty:
         return None
     # engineer_metals_features already dropped the tail rows whose label

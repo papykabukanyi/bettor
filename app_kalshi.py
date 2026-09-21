@@ -165,6 +165,19 @@ KALSHI_15M_CYCLE_MINUTES = max(1, int(os.getenv("KALSHI_15M_CYCLE_MINUTES", "2")
 # daily retrains, so this doesn't contend with any of them for CPU at the
 # exact same minute.
 KALSHI_15M_TRAIN_HOUR_ET = int(os.getenv("KALSHI_15M_TRAIN_HOUR_ET", "4") or "4")
+# Real gap this closes: the live collector only ever archives what it
+# observes going forward (see kalshi_15m_data.backfill_minute_history's
+# own docstring) -- any gap from a missed collection cycle (a restart,
+# a transient Kalshi API failure) is a permanent hole in the training
+# archive unless something re-heals it. Runs a SMALL trailing-window
+# backfill (not the full historical depth -- that's the one-off manual
+# /api/kalshi15m/backfill route's job) daily, 30 min before training so
+# that day's model always sees a gap-healed archive. Runs in-process as
+# a background job, not an HTTP request, so the gunicorn request-timeout
+# concern that route's own docstring describes doesn't apply here --
+# still kept small (a few days, not the full backfill's 90) since this
+# runs EVERY day, not once.
+KALSHI_15M_RECONCILE_DAYS = max(1, int(os.getenv("KALSHI_15M_RECONCILE_DAYS", "3") or "3"))
 PERPS_TRAIN_HOUR_ET = int(os.getenv("PERPS_TRAIN_HOUR_ET", "3") or "3")
 # 30 min after PERPS_TRAIN_HOUR_ET, not the same minute -- runs after the
 # fresh model/data from the train job above have settled, not concurrently
@@ -564,15 +577,24 @@ def _run_kalshi_15m_cycle() -> dict[str, Any]:
     here (unlike perps' separate fast_check/entry_scan jobs) since this
     single combined job is this market's only cycle, see
     KALSHI_15M_CYCLE_MINUTES's own comment for why latency isn't a
-    concern worth two separate jobs. dry_run=False here does NOT itself
-    enable live orders -- kalshi_15m_strategy's own hard safety floor
-    (LIVE_TRADING_ENABLED, held to a stricter bar than every other
-    market's identical pattern -- see that module's own docstring) forces
-    dry-run regardless until this account's own order-placement mechanics
-    are verified live."""
+    concern worth two separate jobs. dry_run=False here defers the actual
+    live/dry decision to kalshi_15m_strategy.LIVE_TRADING_ENABLED (see
+    that module's own docstring) -- set on the live Space, order
+    mechanics confirmed against a real Kalshi response, so this places
+    real orders."""
     settlement_result = kalshi_15m_strategy.check_settlements()
     entry_result = kalshi_15m_strategy.scan_and_enter(dry_run=False)
     return {"ok": True, "settlements": settlement_result, "entries": entry_result}
+
+
+@_locked_job("kalshi_15m_reconcile", stale_after_sec=600)
+def _run_kalshi_15m_reconcile() -> dict[str, Any]:
+    """See KALSHI_15M_RECONCILE_DAYS's own comment for the full rationale.
+    Crypto only -- metals has no historical backfill capability at all
+    (no free historical price API exists, see kalshi_15m_metals_data.py's
+    own module docstring), so there's nothing for this job to reconcile
+    there."""
+    return kalshi_15m_data.backfill_minute_history(days=KALSHI_15M_RECONCILE_DAYS)
 
 
 @_locked_job("kalshi_15m_train", stale_after_sec=1800)
@@ -829,6 +851,11 @@ def _ensure_background_jobs_started() -> None:
                 _run_kalshi_15m_cycle, "interval", minutes=KALSHI_15M_CYCLE_MINUTES,
                 id="kalshi_15m_cycle", replace_existing=True,
                 next_run_time=dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=KALSHI_15M_CYCLE_MINUTES),
+            )
+            _reconcile_hour, _reconcile_minute = divmod((KALSHI_15M_TRAIN_HOUR_ET * 60 - 30) % (24 * 60), 60)
+            scheduler.add_job(
+                _run_kalshi_15m_reconcile, "cron", hour=_reconcile_hour, minute=_reconcile_minute,
+                id="kalshi_15m_reconcile", replace_existing=True,
             )
             scheduler.add_job(
                 _run_kalshi_15m_train, "cron", hour=KALSHI_15M_TRAIN_HOUR_ET, minute=0,
@@ -1648,6 +1675,7 @@ _JOB_LABELS = {
     "kalshi_15m_data_collect": f"Kalshi 15m crypto markets data collection -> HF (every {KALSHI_15M_DATA_COLLECT_MINUTES} min)",
     "kalshi_15m_metals_data_collect": f"Kalshi 15m gold/silver/copper data collection -> HF (every {KALSHI_15M_METALS_DATA_COLLECT_MINUTES} min)",
     "kalshi_15m_cycle": f"Kalshi 15m markets settlement check + entry scan (every {KALSHI_15M_CYCLE_MINUTES} min)",
+    "kalshi_15m_reconcile": f"Kalshi 15m crypto archive gap-heal, trailing {KALSHI_15M_RECONCILE_DAYS}d (daily, 30 min before training)",
     "kalshi_15m_train": f"Kalshi 15m markets model retrain, crypto + metals (daily {KALSHI_15M_TRAIN_HOUR_ET:02d}:00 ET)",
     "perps_train": f"Model retrain (daily {PERPS_TRAIN_HOUR_ET:02d}:00 ET)",
     "perps_trade_analysis": (

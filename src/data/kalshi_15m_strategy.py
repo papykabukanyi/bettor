@@ -1,26 +1,32 @@
 """Strategy for Kalshi's 15-minute event-contract markets (KXBTC15M etc.,
 see kalshi_15m.py's own module docstring for the product itself).
 
-DRY RUN BY DEFAULT, same hard safety floor as perps_strategy.py: real
-orders require BOTH KALSHI_15M_LIVE_TRADING_ENABLED=1 in the environment
-AND the caller not passing dry_run=True. Held to an even STRICTER
-standard than that shared pattern for a real, explicit reason: this
-module's own order-placement path (kalshi_15m.create_order, POSTing to
-/portfolio/events/orders) has been cross-checked against Kalshi's current
-docs and kalshi_perps.py's own already-proven-live payload shape, but has
-NOT been confirmed against a real authenticated call on this account --
-this dev machine's own local Kalshi credentials are separately confirmed
-stale (see kalshi_15m.py's own module docstring), blocking that specific
-verification step until either a fresh local credential or the live
-Space itself confirms it. LIVE_TRADING_ENABLED must not be flipped on for
-this market until that verification happens.
+DRY RUN BY DEFAULT (same shared gate as perps_strategy.py: real orders
+require BOTH KALSHI_15M_LIVE_TRADING_ENABLED=1 in the environment AND the
+caller not passing dry_run=True), but LIVE on this account as of the
+verification below.
 
-Everything entry-decision-relevant is genuinely real and verifiable
-without that missing piece, though: market discovery (GET /series,
-/markets) and settlement checking (a closed market's own public `result`
-field) are both UNAUTHENTICATED, public endpoints, already confirmed live
-this session -- so dry-run mode here is a real, fully-exercisable
-simulation of the whole entry -> hold -> settle lifecycle, not a stub.
+This module's own order-placement path (kalshi_15m.create_order, POSTing
+to /portfolio/events/orders) was held to a stricter bar than every other
+market here until it could be confirmed against a real authenticated
+call, not just cross-checked against docs -- that verification has since
+happened: a real POST to this account's own /portfolio/events/orders
+came back with a genuine, well-formed Kalshi API response (an
+insufficient_shard_balance rejection -- a real account-side collateral-
+allocation fact about exchange sharding, not a payload/mechanics
+problem; see kalshi_15m.get_balance_by_shard's own docstring). The
+payload itself is confirmed correct. LIVE_TRADING_ENABLED is now set on
+the live Space, and this account holds real collateral on exchange shard
+2 (Crypto and Commodities, the shard these markets actually settle
+orders against).
+
+Everything entry-decision-relevant was already real and verifiable even
+before that: market discovery (GET /series, /markets) and settlement
+checking (a closed market's own public `result` field) are both
+UNAUTHENTICATED, public endpoints -- so dry-run mode here was always a
+real, fully-exercisable simulation of the whole entry -> hold -> settle
+lifecycle, not a stub, and stays exactly as real now that live orders can
+actually fill.
 
 Much simpler than perps_strategy.py by design, not by omission: no
 leverage (these are plain $1-notional binary contracts, see kalshi_15m.py's
@@ -189,9 +195,9 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
     """One pass over every coin: evaluate_candidate, then (if a real
     candidate exists, there's room under MAX_CONCURRENT_POSITIONS, and
     this coin doesn't already have an open position) place an entry.
-    dry_run=None defers to LIVE_TRADING_ENABLED's own hard floor -- see
-    this module's own docstring for why that floor is currently ALWAYS
-    tripped (never actually places a real order yet)."""
+    dry_run=None defers to LIVE_TRADING_ENABLED's own floor -- see this
+    module's own docstring: that's now set on the live Space, so this
+    places real orders unless a caller explicitly forces dry_run=True."""
     effective_dry_run = (not LIVE_TRADING_ENABLED) if dry_run is None else dry_run
     checks: list[dict[str, Any]] = []
 

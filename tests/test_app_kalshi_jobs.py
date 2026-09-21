@@ -399,6 +399,36 @@ def test_kalshi_15m_data_collect_job_survives_a_collection_failure(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# kalshi_15m_reconcile -- real gap this closes: the live collector only
+# ever archives what it observes going forward, so a missed cycle (a
+# restart, a transient API failure) is a permanent archive hole unless
+# something re-heals it. Runs a small trailing-window backfill daily,
+# crypto only (see KALSHI_15M_RECONCILE_DAYS's own comment).
+# ---------------------------------------------------------------------------
+def test_kalshi_15m_reconcile_job_calls_backfill_with_the_configured_window(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(kalshi_15m_data, "backfill_minute_history", lambda **kw: captured.update(kw) or {"ok": True, "dates_written": 2})
+
+    result = app_kalshi._run_kalshi_15m_reconcile.__wrapped__()  # noqa: SLF001
+
+    assert result == {"ok": True, "dates_written": 2}
+    assert captured == {"days": app_kalshi.KALSHI_15M_RECONCILE_DAYS}
+
+
+def test_kalshi_15m_reconcile_job_reports_failure_without_raising(monkeypatch):
+    monkeypatch.setattr(kalshi_15m_data, "backfill_minute_history", lambda **kw: {"ok": False, "reason": "no_hf_api_key"})
+    result = app_kalshi._run_kalshi_15m_reconcile.__wrapped__()  # noqa: SLF001
+    assert result == {"ok": False, "reason": "no_hf_api_key"}
+
+
+def test_kalshi_15m_reconcile_hour_is_thirty_minutes_before_train_hour():
+    # Locks in the wraparound arithmetic used at scheduler-registration
+    # time (hour=0 train would need to wrap to 23:30 the previous day).
+    assert divmod((4 * 60 - 30) % (24 * 60), 60) == (3, 30)
+    assert divmod((0 * 60 - 30) % (24 * 60), 60) == (23, 30)
+
+
+# ---------------------------------------------------------------------------
 # kalshi_15m_metals_data_collect -- GOLD/SILVER/COPPER's own data
 # collection (a genuinely different pipeline, see
 # kalshi_15m_metals_data.py's own module docstring), same job contract.

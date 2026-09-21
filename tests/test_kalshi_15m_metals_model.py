@@ -60,6 +60,7 @@ def _synthetic_training_frame(n: int = 500, seed: int = 42) -> pd.DataFrame:
         "hour_cos": rng.uniform(-1, 1, n),
         "dow_sin": rng.uniform(-1, 1, n),
         "dow_cos": rng.uniform(-1, 1, n),
+        "sentiment_score": rng.uniform(-1, 1, n),
         "label_up": label,
     })
 
