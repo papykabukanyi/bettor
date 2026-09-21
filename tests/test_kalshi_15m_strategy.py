@@ -557,7 +557,7 @@ def test_load_state_falls_back_to_empty_when_hf_has_no_backup_either(monkeypatch
     monkeypatch.setattr(huggingface_hub, "hf_hub_download", lambda **kw: (_ for _ in ()).throw(RuntimeError("404")))
 
     result = kalshi_15m_strategy._load_state()  # noqa: SLF001
-    assert result == {"positions": [], "trade_log": [], "realized_pnl_by_date": {}}
+    assert result == {"positions": [], "trade_log": [], "realized_pnl_by_date": {}, "tuning": {}}
 
 
 # ---------------------------------------------------------------------------
@@ -593,3 +593,159 @@ def test_account_budget_usd_falls_back_to_placeholder_on_a_real_api_failure(monk
 
 def test_account_budget_usd_is_the_placeholder_in_dry_run():
     assert kalshi_15m_strategy._account_budget_usd() == 100.0  # noqa: SLF001 -- LIVE_TRADING_ENABLED is False by default
+
+
+# ---------------------------------------------------------------------------
+# evaluate_candidate's confidence_min override + scan_and_enter's own
+# durable-state-driven tuning + apply_confidence_threshold_override +
+# _maybe_run_batch_trade_analysis -- the "train to avoid bad positions"
+# feature: an evidence-gated confidence floor genuinely learned from this
+# account's own real trade history, same pattern every other market here
+# already uses (see kalshi_15m_trade_analysis.py's own module docstring).
+# ---------------------------------------------------------------------------
+def test_evaluate_candidate_confidence_min_override_lets_a_lower_floor_through(monkeypatch):
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
+    # confidence 0.55 fails the real module default (0.58) but clears an
+    # explicitly LOWERED override (0.50) -- proves the override, not the
+    # default, decided this.
+    monkeypatch.setattr(kalshi_15m_model, "predict_direction", lambda coin: {"model_ok": True, "probability_up": 0.55})
+    assert kalshi_15m_strategy.evaluate_candidate("BTC")["ok"] is False  # sanity: fails under the real default
+    result = kalshi_15m_strategy.evaluate_candidate("BTC", confidence_min=0.50)
+    assert result["ok"] is True
+
+
+def test_evaluate_candidate_confidence_min_override_raises_the_floor_above_default(monkeypatch):
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
+    monkeypatch.setattr(kalshi_15m_model, "predict_direction", lambda coin: {"model_ok": True, "probability_up": 0.65})
+    # 0.65 clears the real module default (0.58) but not an override raised
+    # to 0.70 -- proves the override, when given, takes priority.
+    result = kalshi_15m_strategy.evaluate_candidate("BTC", confidence_min=0.70)
+    assert result == {"ok": False, "reason": "confidence_below_floor", "confidence": pytest.approx(0.65)}
+
+
+def test_evaluate_candidate_defaults_to_the_module_floor_when_no_override_given(monkeypatch):
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
+    monkeypatch.setattr(kalshi_15m_model, "predict_direction", lambda coin: {"model_ok": True, "probability_up": 0.60})
+    result = kalshi_15m_strategy.evaluate_candidate("BTC")
+    assert result["ok"] is True  # 0.60 clears the real 0.58 default
+
+
+def test_scan_and_enter_reads_the_confidence_floor_learned_from_real_trade_history(monkeypatch):
+    """A real trade-history-driven override in state["tuning"] must take
+    priority over the module-level MODEL_CONFIDENCE_MIN default -- the
+    whole point of apply_confidence_threshold_override existing."""
+    monkeypatch.setattr(kalshi_15m_strategy, "MAX_CONCURRENT_POSITIONS", len(kalshi_15m_strategy.ASSET_SERIES))
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
+    # 0.63 confidence clears the real module default (0.58) but not the
+    # learned override below (0.70).
+    _mock_confident_prediction(monkeypatch, probability_up=0.63)
+    kalshi_15m_strategy._save_state({  # noqa: SLF001
+        "positions": [], "trade_log": [], "realized_pnl_by_date": {},
+        "tuning": {"model_confidence_min": 0.70},
+    })
+
+    result = kalshi_15m_strategy.scan_and_enter()
+
+    entered = [c for c in result["checks"] if c.get("action") == "entered"]
+    assert entered == []  # every candidate correctly rejected under the LEARNED, stricter floor
+    rejected = [c for c in result["checks"] if c.get("reason") == "confidence_below_floor"]
+    assert len(rejected) == len(kalshi_15m_strategy.ASSET_SERIES)
+
+
+def test_apply_confidence_threshold_override_persists_the_new_threshold(monkeypatch):
+    kalshi_15m_strategy._save_state({"positions": [], "trade_log": [], "realized_pnl_by_date": {}})  # noqa: SLF001
+
+    applied = kalshi_15m_strategy.apply_confidence_threshold_override(0.66, reason="test evidence")
+
+    assert applied["model_confidence_min"] == 0.66
+    assert applied["reason"] == "test evidence"
+    assert applied["previous"] == kalshi_15m_strategy.MODEL_CONFIDENCE_MIN
+    state = kalshi_15m_strategy._load_state()  # noqa: SLF001
+    assert state["tuning"]["model_confidence_min"] == 0.66
+
+
+def test_apply_confidence_threshold_override_pushes_durable_state(monkeypatch):
+    import huggingface_hub
+
+    monkeypatch.setattr(kalshi_15m_strategy, "HF_API_KEY", "fake-hf-token")
+    _FakeHfApi.captured_upload = {}
+    monkeypatch.setattr(huggingface_hub, "HfApi", _FakeHfApi)
+    kalshi_15m_strategy._save_state({"positions": [], "trade_log": [], "realized_pnl_by_date": {}})  # noqa: SLF001
+
+    kalshi_15m_strategy.apply_confidence_threshold_override(0.66, reason="test evidence")
+
+    uploads = _FakeHfApi.captured_upload["uploads"]
+    assert len(uploads) == 1
+    assert uploads[0]["content"]["tuning"]["model_confidence_min"] == 0.66
+
+
+def test_maybe_run_batch_trade_analysis_noops_before_5_new_real_trades():
+    real_trades = [
+        {"coin": "BTC", "side": "yes", "realized_pnl_usd": 1.0, "dry_run": False, "entry_confidence": 0.6,
+         "opened_at": _future_close(0), "closed_at": _future_close(0)}
+        for _ in range(4)
+    ]
+    kalshi_15m_strategy._save_state({"positions": [], "trade_log": real_trades, "realized_pnl_by_date": {}})  # noqa: SLF001
+
+    result = kalshi_15m_strategy._maybe_run_batch_trade_analysis()  # noqa: SLF001
+
+    assert result is None
+
+
+def test_maybe_run_batch_trade_analysis_runs_at_5_new_real_trades_and_applies_tuning(monkeypatch):
+    from data import kalshi_15m_trade_analysis
+
+    real_trades = [
+        {"coin": "BTC", "side": "yes", "realized_pnl_usd": 1.0, "dry_run": False, "entry_confidence": 0.6,
+         "opened_at": _future_close(0), "closed_at": _future_close(0)}
+        for _ in range(5)
+    ]
+    kalshi_15m_strategy._save_state({"positions": [], "trade_log": real_trades, "realized_pnl_by_date": {}})  # noqa: SLF001
+    monkeypatch.setattr(
+        kalshi_15m_trade_analysis, "recommend_confidence_threshold",
+        lambda trade_log, *, current_threshold: {"ok": True, "should_apply": True, "recommended_threshold": 0.66},
+    )
+
+    result = kalshi_15m_strategy._maybe_run_batch_trade_analysis()  # noqa: SLF001
+
+    assert result is not None
+    assert result["trades_analyzed"] == 5
+    state = kalshi_15m_strategy._load_state()  # noqa: SLF001
+    assert state["tuning"]["model_confidence_min"] == 0.66
+    assert state["last_batch_analysis_trade_count"] == 5
+
+
+def test_maybe_run_batch_trade_analysis_does_not_re_run_until_5_more_real_trades_land():
+    real_trades = [
+        {"coin": "BTC", "side": "yes", "realized_pnl_usd": 1.0, "dry_run": False, "entry_confidence": 0.6,
+         "opened_at": _future_close(0), "closed_at": _future_close(0)}
+        for _ in range(5)
+    ]
+    kalshi_15m_strategy._save_state({"positions": [], "trade_log": real_trades, "realized_pnl_by_date": {}})  # noqa: SLF001
+    first = kalshi_15m_strategy._maybe_run_batch_trade_analysis()  # noqa: SLF001
+    assert first is not None
+
+    second = kalshi_15m_strategy._maybe_run_batch_trade_analysis()  # noqa: SLF001
+    assert second is None  # no new real trades since the last run
+
+
+def test_check_settlements_triggers_the_batch_analysis_pass(monkeypatch):
+    """Wiring check -- check_settlements must call
+    _maybe_run_batch_trade_analysis after booking a settlement. (That
+    function's own internal try/except, exercised separately above, is
+    what keeps a real failure there from ever affecting settlement
+    booking -- same "callee owns its own safety" convention every sibling
+    market's identical call site already uses, e.g.
+    alpaca_options_strategy.manage_open_positions's own un-wrapped call.)"""
+    kalshi_15m_strategy._save_state({  # noqa: SLF001
+        "positions": [_position(coin="BTC", side="yes", entry_price=0.5, dry_run=False, ticker="KXBTC15M-1")],
+        "trade_log": [], "realized_pnl_by_date": {},
+    })
+    monkeypatch.setattr(kalshi_15m, "get_market", lambda ticker: {"ticker": ticker, "result": "yes"})
+
+    called = {"n": 0}
+    monkeypatch.setattr(kalshi_15m_strategy, "_maybe_run_batch_trade_analysis", lambda: called.__setitem__("n", called["n"] + 1))
+    result = kalshi_15m_strategy.check_settlements()
+
+    assert result["ok"] is True
+    assert called["n"] == 1

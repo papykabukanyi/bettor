@@ -147,6 +147,14 @@ def _durable_state_slice(state: dict[str, Any]) -> dict[str, Any]:
         "positions": state.get("positions") or [],
         "trade_log": state.get("trade_log") or [],
         "realized_pnl_by_date": state.get("realized_pnl_by_date") or {},
+        # "tuning" (the evidence-gated confidence-threshold override -- see
+        # apply_confidence_threshold_override below) MUST be included here
+        # -- a real, confirmed bug found in perps_strategy.py's own
+        # identical slice (fixed there, never repeated here) once left it
+        # out, silently resetting any confidence threshold actually
+        # LEARNED from real trade history back to the hardcoded default on
+        # every single deploy.
+        "tuning": state.get("tuning") or {},
     }
 
 
@@ -207,7 +215,7 @@ def _load_state() -> dict[str, Any]:
         with open(STATE_FILE, "r", encoding="utf-8") as f:
             state = json.load(f)
     except Exception:
-        base = {"positions": [], "trade_log": [], "realized_pnl_by_date": {}}
+        base = {"positions": [], "trade_log": [], "realized_pnl_by_date": {}, "tuning": {}}
         durable = _pull_durable_state_from_hf()
         if durable:
             base.update(durable)
@@ -216,6 +224,7 @@ def _load_state() -> dict[str, Any]:
     state.setdefault("positions", [])
     state.setdefault("trade_log", [])
     state.setdefault("realized_pnl_by_date", {})
+    state.setdefault("tuning", {})
     return state
 
 
@@ -231,7 +240,7 @@ def _today_str() -> str:
     return dt.datetime.now(dt.timezone.utc).date().isoformat()
 
 
-def evaluate_candidate(coin: str) -> dict[str, Any]:
+def evaluate_candidate(coin: str, *, confidence_min: float | None = None) -> dict[str, Any]:
     """Pure decision logic for one coin -- no state, no order placement,
     no side effects. Returns {"ok": False, "reason": ...} when there's
     nothing to do (no open window, too little time left, no trained model
@@ -240,7 +249,15 @@ def evaluate_candidate(coin: str) -> dict[str, Any]:
     real entry candidate exists. `confidence` is always the probability of
     the SIDE actually chosen (i.e. probability_up for "yes",
     1-probability_up for "no"), so it's always directly comparable to
-    MODEL_CONFIDENCE_MIN regardless of predicted direction."""
+    MODEL_CONFIDENCE_MIN regardless of predicted direction.
+
+    `confidence_min` overrides the module-level MODEL_CONFIDENCE_MIN
+    default when given -- see scan_and_enter, which reads a durable-state
+    override set by kalshi_15m_trade_analysis.recommend_confidence_threshold's
+    own evidence-gated tuning (apply_confidence_threshold_override below),
+    same pattern every other market here already uses. Kept as an
+    optional parameter (not a direct read of state) so this function
+    stays pure and independently testable."""
     series_ticker = ASSET_SERIES.get(coin)
     if not series_ticker:
         return {"ok": False, "reason": "unknown_coin"}
@@ -263,7 +280,8 @@ def evaluate_candidate(coin: str) -> dict[str, Any]:
     else:
         side, confidence = "no", 1.0 - probability_up
 
-    if confidence < MODEL_CONFIDENCE_MIN:
+    effective_confidence_min = confidence_min if confidence_min is not None else MODEL_CONFIDENCE_MIN
+    if confidence < effective_confidence_min:
         return {"ok": False, "reason": "confidence_below_floor", "confidence": confidence}
 
     return {
@@ -289,6 +307,13 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
     with _STATE_LOCK:
         state = _load_state()
         open_count = len(state.get("positions") or [])
+        # A confidence floor genuinely learned from this account's own real
+        # trade history (see kalshi_15m_trade_analysis.recommend_confidence_threshold
+        # + apply_confidence_threshold_override below) -- falls back to the
+        # module-level MODEL_CONFIDENCE_MIN default until enough real
+        # trades exist to justify moving it. Same pattern every other
+        # market here already uses.
+        confidence_min_override = (state.get("tuning") or {}).get("model_confidence_min")
 
     for coin in ASSET_SERIES:
         if open_count >= MAX_CONCURRENT_POSITIONS:
@@ -300,7 +325,7 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
                 checks.append({"coin": coin, "ok": False, "reason": "already_has_open_position"})
                 continue
 
-        decision = evaluate_candidate(coin)
+        decision = evaluate_candidate(coin, confidence_min=confidence_min_override)
         if not decision.get("ok"):
             checks.append({"coin": coin, **decision})
             continue
@@ -436,6 +461,78 @@ def _account_budget_usd() -> float:
         return 100.0
 
 
+def apply_confidence_threshold_override(new_threshold: float, *, reason: str) -> dict[str, Any]:
+    """Applies an evidence-gated confidence-floor adjustment (see
+    kalshi_15m_trade_analysis.recommend_confidence_threshold) durably,
+    WITHOUT a redeploy -- stored in state["tuning"] (pushed to HF like the
+    rest of durable state) and read by scan_and_enter on every cycle, not
+    the OS env var MODEL_CONFIDENCE_MIN is seeded from at import time.
+    Same pattern every other market here already uses."""
+    with _STATE_LOCK:
+        state = _load_state()
+        previous = (state.get("tuning") or {}).get("model_confidence_min", MODEL_CONFIDENCE_MIN)
+        state["tuning"] = {
+            "model_confidence_min": new_threshold,
+            "updated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+            "reason": reason, "previous": previous,
+        }
+        _save_state(state, push_durable=True)
+        return dict(state["tuning"])
+
+
+_LAST_BATCH_ANALYSIS_TRADE_COUNT_KEY = "last_batch_analysis_trade_count"
+
+
+def _maybe_run_batch_trade_analysis() -> dict[str, Any] | None:
+    """Every kalshi_15m_trade_analysis.BATCH_SIZE newly-closed REAL
+    trades, studies that recent batch -- win/loss patterns, a per-trade
+    "lesson" -- and, when the evidence supports it, raises the confidence
+    floor via apply_confidence_threshold_override. Called right after
+    check_settlements closes trades, inside the same job but outside
+    _STATE_LOCK for the actual analysis work (same reasoning as every
+    other market's identical function). Best-effort: any failure here is
+    logged and swallowed, never allowed to affect trading. Returns None
+    when fewer than BATCH_SIZE new real trades have landed since the last
+    run (nothing to do yet), otherwise the batch summary dict."""
+    from data import kalshi_15m_trade_analysis
+
+    try:
+        with _STATE_LOCK:
+            state = _load_state()
+            trade_log = state.get("trade_log") or []
+            real_trades = [t for t in trade_log if not t.get("dry_run")]
+            # Deliberately a TOP-LEVEL state key, NOT nested inside
+            # state["tuning"] -- apply_confidence_threshold_override above
+            # REPLACES state["tuning"] wholesale, so nesting this counter
+            # there would silently erase it (or be erased by it) the next
+            # time either function ran. Not part of _durable_state_slice
+            # either (same as every sibling market's identical counter):
+            # worst case after a restart is this batch re-running a little
+            # early/late, never a correctness problem worth a durable push
+            # for.
+            last_count = int(state.get(_LAST_BATCH_ANALYSIS_TRADE_COUNT_KEY) or 0)
+            if len(real_trades) - last_count < kalshi_15m_trade_analysis.BATCH_SIZE:
+                return None
+            state[_LAST_BATCH_ANALYSIS_TRADE_COUNT_KEY] = len(real_trades)
+            _save_state(state)
+            current_threshold = (state.get("tuning") or {}).get("model_confidence_min", MODEL_CONFIDENCE_MIN)
+
+        batch = kalshi_15m_trade_analysis.analyze_recent_trade_batch(real_trades)
+        logger.info(
+            "[kalshi_15m_strategy] batch trade analysis: %s",
+            kalshi_15m_trade_analysis.format_batch_snapshot_text(batch),
+        )
+
+        tuning_rec = kalshi_15m_trade_analysis.recommend_confidence_threshold(real_trades, current_threshold=current_threshold)
+        if tuning_rec.get("should_apply"):
+            applied = apply_confidence_threshold_override(tuning_rec["recommended_threshold"], reason="5-trade batch review")
+            logger.info("[kalshi_15m_strategy] confidence threshold tuned: %s", applied)
+        return batch
+    except Exception:
+        logger.warning("[kalshi_15m_strategy] batch trade analysis failed", exc_info=True)
+        return None
+
+
 def check_settlements() -> dict[str, Any]:
     """For every open position, checks whether its market has actually
     settled (a PUBLIC, unauthenticated read -- see this module's own
@@ -495,4 +592,9 @@ def check_settlements() -> dict[str, Any]:
             _save_state(state, push_durable=not trade["dry_run"])
         checks.append({"coin": position["coin"], "ok": True, "action": "settled", "won": won, "realized_pnl_usd": trade["realized_pnl_usd"]})
 
+    # Best-effort, outside any lock held above -- see
+    # _maybe_run_batch_trade_analysis's own docstring. A cheap no-op call
+    # on every cycle where fewer than BATCH_SIZE new real trades have
+    # settled since the last run (the overwhelmingly common case).
+    _maybe_run_batch_trade_analysis()
     return {"ok": True, "checks": checks}

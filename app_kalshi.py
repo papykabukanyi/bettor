@@ -198,6 +198,17 @@ KALSHI_15M_TORCH_TRAIN_HOUR_ET = int(os.getenv("KALSHI_15M_TORCH_TRAIN_HOUR_ET",
 # still kept small (a few days, not the full backfill's 90) since this
 # runs EVERY day, not once.
 KALSHI_15M_RECONCILE_DAYS = max(1, int(os.getenv("KALSHI_15M_RECONCILE_DAYS", "3") or "3"))
+# Daily aggregate win/loss review over the WHOLE real trade history --
+# see kalshi_15m_trade_analysis.analyze_trade_history's own module
+# docstring for why this is additive to, not a replacement for,
+# kalshi_15m_strategy's own existing 5-trade batch review + confidence
+# auto-tuner (kalshi_15m_strategy._maybe_run_batch_trade_analysis).
+# Mirrors alpaca_options_server.py's own identical, simpler-than-perps'
+# daily job shape (read-only report, no separate tuning pass here -- the
+# batch review above already owns that). 5:30am ET: after the regular
+# train (4) and before the torch train (7)/ai_monitor (6), an open slot.
+KALSHI_15M_TRADE_ANALYSIS_HOUR_ET = int(os.getenv("KALSHI_15M_TRADE_ANALYSIS_HOUR_ET", "5") or "5")
+KALSHI_15M_TRADE_ANALYSIS_MINUTE_ET = int(os.getenv("KALSHI_15M_TRADE_ANALYSIS_MINUTE_ET", "30") or "30")
 # Read-only, project-WIDE AI-powered analysis layer covering all 5
 # markets (perps, stocks, crypto, options, kalshi_15m), added per
 # explicit user direction (chosen over "replace the prediction model
@@ -675,6 +686,30 @@ def _run_kalshi_15m_torch_train() -> dict[str, Any]:
         gc.collect()
 
 
+@_locked_job("kalshi_15m_trade_analysis", stale_after_sec=300)
+def _run_kalshi_15m_trade_analysis() -> dict[str, Any]:
+    """Daily aggregate win/loss review over the WHOLE real trade history --
+    see KALSHI_15M_TRADE_ANALYSIS_HOUR_ET's own comment and
+    kalshi_15m_trade_analysis.analyze_trade_history's own module
+    docstring. Read-only over state (no confidence tuning here -- that
+    already happens on a faster, real-trade-count-driven cadence via
+    kalshi_15m_strategy._maybe_run_batch_trade_analysis); exposed to the
+    dashboard via /api/kalshi15m/trade_analysis below. No Threads post --
+    kalshi_15m has no Threads presence at all today (see threads_post.py:
+    every _MARKET_HASHTAGS/_MARKET_LABELS entry covers only the original
+    4 markets), so posting here would silently fall back to perps' own
+    hashtags/label, misattributing this market's analysis."""
+    from data import kalshi_15m_trade_analysis
+    try:
+        state = kalshi_15m_strategy._load_state()  # noqa: SLF001
+        trade_log = state.get("trade_log") or []
+        analysis = kalshi_15m_trade_analysis.analyze_trade_history(trade_log)
+        return {"ok": True, "analysis": analysis}
+    except Exception as exc:
+        logger.warning("[app_kalshi] kalshi_15m trade analysis failed: %s", exc)
+        return {"ok": False, "error": str(exc)}
+
+
 @_locked_job("ai_monitor", stale_after_sec=180)
 def _run_ai_monitor() -> dict[str, Any]:
     """See ai_monitor.py's own module docstring -- a read-only, project-
@@ -929,6 +964,11 @@ def _ensure_background_jobs_started() -> None:
             scheduler.add_job(
                 _run_kalshi_15m_torch_train, "cron", hour=KALSHI_15M_TORCH_TRAIN_HOUR_ET, minute=0,
                 id="kalshi_15m_torch_train", replace_existing=True,
+            )
+            scheduler.add_job(
+                _run_kalshi_15m_trade_analysis, "cron",
+                hour=KALSHI_15M_TRADE_ANALYSIS_HOUR_ET, minute=KALSHI_15M_TRADE_ANALYSIS_MINUTE_ET,
+                id="kalshi_15m_trade_analysis", replace_existing=True,
             )
             scheduler.add_job(
                 _run_ai_monitor, "cron", hour=AI_MONITOR_HOUR_ET, minute=0,
@@ -1792,6 +1832,22 @@ def api_perps_trade_analysis():
         return jsonify({"ok": False, "error": str(exc)}), 500
 
 
+@app.route("/api/kalshi15m/trade_analysis", methods=["GET", "POST"])
+def api_kalshi_15m_trade_analysis():
+    """See _run_kalshi_15m_trade_analysis's own docstring. GET for the
+    dashboard's own read; POST also accepted (matching every sibling
+    market's identical route) for an external scheduler to force a fresh
+    run on demand -- no cron secret to check any more (see
+    is_cron_authorized's own module-level note: removed entirely, this
+    Space's own privacy is the access boundary)."""
+    if not is_cron_authorized(request):
+        return jsonify({"ok": False, "error": "Unauthorized"}), 401
+    try:
+        return jsonify(_run_kalshi_15m_trade_analysis())
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
 _JOB_LABELS = {
     "perps_fast_check": f"Fast exit check (every {PERPS_FAST_CHECK_SECONDS}s)",
     "perps_entry_scan": f"Entry scan -- all instruments (every {PERPS_CYCLE_MINUTES} min)",
@@ -1803,6 +1859,10 @@ _JOB_LABELS = {
     "kalshi_15m_reconcile": f"Kalshi 15m crypto archive gap-heal, trailing {KALSHI_15M_RECONCILE_DAYS}d (daily, 30 min before training)",
     "kalshi_15m_train": f"Kalshi 15m markets model retrain, crypto + metals (daily {KALSHI_15M_TRAIN_HOUR_ET:02d}:00 ET)",
     "kalshi_15m_torch_train": f"Kalshi 15m crypto custom PyTorch MLP challenger, promoted only if it beats the current model (daily {KALSHI_15M_TORCH_TRAIN_HOUR_ET:02d}:00 ET)",
+    "kalshi_15m_trade_analysis": (
+        f"Kalshi 15m trade win/loss analysis (daily {KALSHI_15M_TRADE_ANALYSIS_HOUR_ET:02d}:{KALSHI_15M_TRADE_ANALYSIS_MINUTE_ET:02d} ET; "
+        f"a faster, evidence-gated confidence-floor auto-tune already runs every 5 real trades)"
+    ),
     "ai_monitor": f"Project-wide AI-powered status review (HF Inference), read-only, all 5 markets (daily {AI_MONITOR_HOUR_ET:02d}:00 ET)",
     "perps_train": f"Model retrain (daily {PERPS_TRAIN_HOUR_ET:02d}:00 ET)",
     "perps_trade_analysis": (

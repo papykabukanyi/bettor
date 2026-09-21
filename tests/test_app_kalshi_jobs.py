@@ -947,6 +947,49 @@ def test_kalshi_15m_torch_train_job_survives_a_training_failure(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# kalshi_15m_trade_analysis -- daily, read-only aggregate win/loss report
+# (the faster, evidence-gated confidence-floor auto-tune already runs
+# every 5 real trades via kalshi_15m_strategy._maybe_run_batch_trade_analysis;
+# this job never writes to state). No Threads post -- kalshi_15m has no
+# Threads presence today (see _run_kalshi_15m_trade_analysis's own
+# docstring).
+# ---------------------------------------------------------------------------
+def test_kalshi_15m_trade_analysis_job_analyzes_the_real_trade_log(monkeypatch):
+    from data import kalshi_15m_strategy
+
+    trade_log = [
+        {"coin": "BTC", "side": "yes", "realized_pnl_usd": 1.0, "entry_confidence": 0.6, "dry_run": False,
+         "opened_at": "2026-08-01T12:00:00+00:00", "closed_at": "2026-08-01T12:10:00+00:00"},
+    ]
+    monkeypatch.setattr(kalshi_15m_strategy, "_load_state", lambda: {"trade_log": trade_log})
+
+    result = app_kalshi._run_kalshi_15m_trade_analysis.__wrapped__()  # noqa: SLF001
+
+    assert result["ok"] is True
+    assert result["analysis"]["trades_analyzed"] == 1
+
+
+def test_kalshi_15m_trade_analysis_job_survives_a_state_read_failure(monkeypatch):
+    from data import kalshi_15m_strategy
+
+    def fail():
+        raise RuntimeError("state file corrupted")
+
+    monkeypatch.setattr(kalshi_15m_strategy, "_load_state", fail)
+    result = app_kalshi._run_kalshi_15m_trade_analysis.__wrapped__()  # noqa: SLF001
+    assert result == {"ok": False, "error": "state file corrupted"}
+
+
+def test_kalshi_15m_trade_analysis_route_returns_the_daily_report():
+    with app_kalshi.app.test_client() as client:
+        resp = client.get("/api/kalshi15m/trade_analysis")
+        body = resp.get_json()
+        assert resp.status_code == 200
+        assert body["ok"] is True
+        assert "analysis" in body
+
+
+# ---------------------------------------------------------------------------
 # /api/kalshi15m/balance-by-shard -- read-only diagnostic, never places an
 # order or moves money. See the route's own docstring for why
 # /portfolio/balance alone can't answer "does shard 2 have collateral".
