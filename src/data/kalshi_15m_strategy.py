@@ -76,6 +76,22 @@ layers on TOP of the base probability_up signal:
     KALSHI_15M_BACKTEST_HOUR_ET's own comment in app_kalshi.py), not a
     one-off manual check -- reacts to a confirmed losing result with an
     immediate extra retrain of both models.
+  - Graduated concurrency (always on -- compute_graduated_max_concurrent_positions)
+    -- per explicit user direction ("the balance is not growing because
+    it's opening too many entries and most of them are losing... let's
+    focus on 1 after another win to grow the balance, then increase to
+    2, so on and forth"): the account starts allowed only ONE concurrent
+    position, earning one more slot per real win (capped at
+    MAX_CONCURRENT_POSITIONS, the original flat ceiling), and dropping
+    straight back to one the moment a real loss breaks that streak.
+  - A per-coin trust gate (always on -- coin_is_trusted) -- per explicit
+    user direction ("the bot need to know by now... what it's best on"):
+    once a coin has enough real trade history to trust the read, a
+    clearly poor real track record (both a low win rate AND a negative
+    average P&L) pauses NEW entries on that specific coin entirely,
+    genuinely different from the loss-streak throttle's short-window
+    size-shrink above -- this looks at the coin's WHOLE real history, and
+    re-includes it the moment its own numbers improve.
 
 Every one of the risk-INCREASING levers above (correlation study,
 meta-model, conviction sizing, win-streak sizing, early exit) stays off
@@ -159,6 +175,93 @@ MODEL_CONFIDENCE_MIN = _env_float("KALSHI_15M_MODEL_CONFIDENCE_MIN", 0.58)
 
 POSITION_SIZE_PCT = _env_float("KALSHI_15M_POSITION_SIZE_PCT", 0.05)
 MAX_CONCURRENT_POSITIONS = _env_int("KALSHI_15M_MAX_CONCURRENT_POSITIONS", 5)
+
+# Graduated concurrency -- per explicit user direction: "the balance is
+# not growing because it['s] opening too many entr[ies] and most of them
+# are losing... since the balance is low let['s] focus on 1 [position]
+# after another win to grow the balance[,] [then] increase to 2 at a
+# time[,] so on and forth." MAX_CONCURRENT_POSITIONS above stays the hard
+# CEILING this can ever grow to; this is the actual STARTING point and
+# growth rule while the account is small/recovering. Always on (a pure
+# risk-REDUCER while unproven, same posture as the loss-streak throttle)
+# -- can only ever narrow how many bets are open at once relative to the
+# flat ceiling, never widen it.
+GRADUATED_CONCURRENCY_ENABLED = _env_flag("KALSHI_15M_GRADUATED_CONCURRENCY_ENABLED", default=True)
+GRADUATED_CONCURRENCY_START_SLOTS = _env_int("KALSHI_15M_GRADUATED_CONCURRENCY_START_SLOTS", 1)
+GRADUATED_CONCURRENCY_WINS_PER_SLOT = _env_int("KALSHI_15M_GRADUATED_CONCURRENCY_WINS_PER_SLOT", 1)
+
+
+def compute_graduated_max_concurrent_positions(trade_log: list[dict[str, Any]] | None) -> int:
+    """How many concurrent positions the account is currently allowed,
+    given its own REAL trade history -- starts at
+    GRADUATED_CONCURRENCY_START_SLOTS, earns +1 slot per
+    GRADUATED_CONCURRENCY_WINS_PER_SLOT consecutive real ACCOUNT-WIDE
+    wins (account-wide, not per-coin -- this is about whether the
+    account overall has earned more concurrent risk right now, a
+    separate question from which SPECIFIC coin any one slot goes to),
+    capped at MAX_CONCURRENT_POSITIONS -- and drops straight back to the
+    start the moment a real loss breaks that streak, same "reset on the
+    opposite outcome, no manual intervention" discipline
+    compute_loss_streak_size_multiplier already uses. Pure function --
+    reads the tail of trade_log directly rather than a separately-
+    persisted counter, so it can never drift out of sync with what the
+    account actually did."""
+    if not GRADUATED_CONCURRENCY_ENABLED:
+        return MAX_CONCURRENT_POSITIONS
+    real_trades = [t for t in (trade_log or []) if not t.get("dry_run")]
+    if not real_trades or float(real_trades[-1].get("realized_pnl_usd") or 0.0) <= 0:
+        return GRADUATED_CONCURRENCY_START_SLOTS
+
+    streak = 0
+    for t in reversed(real_trades):
+        if float(t.get("realized_pnl_usd") or 0.0) > 0:
+            streak += 1
+        else:
+            break
+
+    extra_slots = streak // GRADUATED_CONCURRENCY_WINS_PER_SLOT
+    return min(MAX_CONCURRENT_POSITIONS, GRADUATED_CONCURRENCY_START_SLOTS + extra_slots)
+
+
+# Per-coin trust gate -- per explicit user direction: "the bot need to
+# know by now after analyzing[,] he need to know the patterns and what
+# its best on." Genuinely different from the loss-streak throttle above:
+# that reacts to a SHORT recent run (3 trades) by shrinking size; this
+# looks at a coin's ENTIRE real track record (a longer, steadier sample)
+# and, once there's enough of it to trust the read, PAUSES new entries
+# on that coin entirely rather than merely sizing them down -- "what
+# it's best on" means some coins may simply not be worth trading at all
+# with this model, not just worth trading smaller. Always on (a pure
+# risk-REDUCER) -- narrows the tradable universe toward what has
+# actually worked, never expands it, and re-includes a coin the moment
+# its own real numbers improve (no manual reset, no permanent ban).
+COIN_TRUST_MIN_TRADES = _env_int("KALSHI_15M_COIN_TRUST_MIN_TRADES", 8)
+COIN_TRUST_MIN_WIN_RATE = _env_float("KALSHI_15M_COIN_TRUST_MIN_WIN_RATE", 0.35)
+
+
+def coin_is_trusted(coin: str, trade_log: list[dict[str, Any]] | None) -> dict[str, Any]:
+    """{"trusted": True} until this coin's own real trade history is BOTH
+    long enough (COIN_TRUST_MIN_TRADES -- avoids overreacting to a small,
+    unlucky sample) and clearly bad (win rate below
+    COIN_TRUST_MIN_WIN_RATE AND a negative average real P&L -- BOTH, not
+    just one metric skewed by a single large loss, same discipline every
+    recommend_*_trial comparison in kalshi_15m_trade_analysis.py already
+    holds itself to)."""
+    coin_trades = [t for t in (trade_log or []) if t.get("coin") == coin and not t.get("dry_run")]
+    if len(coin_trades) < COIN_TRUST_MIN_TRADES:
+        return {"trusted": True, "reason": "insufficient_history", "trades": len(coin_trades)}
+    wins = sum(1 for t in coin_trades if float(t.get("realized_pnl_usd") or 0.0) > 0)
+    win_rate = wins / len(coin_trades)
+    avg_pnl = sum(float(t.get("realized_pnl_usd") or 0.0) for t in coin_trades) / len(coin_trades)
+    if win_rate < COIN_TRUST_MIN_WIN_RATE and avg_pnl < 0:
+        return {
+            "trusted": False, "reason": "poor_real_track_record",
+            "trades": len(coin_trades), "win_rate": round(win_rate, 4), "avg_pnl_usd": round(avg_pnl, 6),
+        }
+    return {
+        "trusted": True, "reason": "track_record_ok",
+        "trades": len(coin_trades), "win_rate": round(win_rate, 4), "avg_pnl_usd": round(avg_pnl, 6),
+    }
 
 # Real, deliberate guard: entering with only a few seconds left before a
 # window closes is paying the spread for what's functionally a coin flip
@@ -627,15 +730,31 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
         # increase -- see USE_WIN_STREAK_SIZING's own comment and
         # apply_win_streak_sizing_override below.
         effective_use_win_streak_sizing = tuning_state.get("win_streak_sizing_enabled", USE_WIN_STREAK_SIZING)
+        # How many concurrent positions the account is allowed to hold
+        # RIGHT NOW -- see compute_graduated_max_concurrent_positions'
+        # own comment. Computed ONCE per scan (not re-read per coin) so
+        # one cycle's own entries can't ratchet the cap up mid-loop off
+        # a trade_log snapshot that's already stale by the second coin.
+        effective_max_concurrent_positions = compute_graduated_max_concurrent_positions(state.get("trade_log"))
 
     for coin in ASSET_SERIES:
-        if open_count >= MAX_CONCURRENT_POSITIONS:
-            checks.append({"coin": coin, "ok": False, "reason": "max_concurrent_positions"})
+        if open_count >= effective_max_concurrent_positions:
+            checks.append({
+                "coin": coin, "ok": False, "reason": "max_concurrent_positions",
+                "effective_max_concurrent_positions": effective_max_concurrent_positions,
+            })
             continue
         with _STATE_LOCK:
             state = _load_state()
             if _has_open_position(state, coin=coin):
                 checks.append({"coin": coin, "ok": False, "reason": "already_has_open_position"})
+                continue
+            # Per-coin trust gate -- see coin_is_trusted's own comment.
+            # Reuses the SAME state snapshot already read above, no extra
+            # state read needed.
+            trust = coin_is_trusted(coin, state.get("trade_log"))
+            if not trust["trusted"]:
+                checks.append({"coin": coin, "ok": False, **trust})
                 continue
 
         decision = evaluate_candidate(

@@ -108,6 +108,7 @@ def test_scan_and_enter_stays_dry_run_by_default(monkeypatch):
     # what this test is about (see test_scan_and_enter_respects_max_concurrent_positions
     # for that).
     monkeypatch.setattr(kalshi_15m_strategy, "MAX_CONCURRENT_POSITIONS", len(kalshi_15m_strategy.ASSET_SERIES))
+    monkeypatch.setattr(kalshi_15m_strategy, "GRADUATED_CONCURRENCY_ENABLED", False)
     monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
     _mock_confident_prediction(monkeypatch)
     order_calls = []
@@ -122,6 +123,11 @@ def test_scan_and_enter_stays_dry_run_by_default(monkeypatch):
 
 
 def test_scan_and_enter_skips_a_coin_that_already_has_an_open_position(monkeypatch):
+    # Graduated concurrency (default ON, 1 starting slot) would otherwise
+    # reject every coin on "max_concurrent_positions" before ever
+    # reaching the per-coin check this test is actually about -- not
+    # what's under test here.
+    monkeypatch.setattr(kalshi_15m_strategy, "GRADUATED_CONCURRENCY_ENABLED", False)
     monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
     monkeypatch.setattr(kalshi_15m_model, "predict_direction", lambda coin: {"model_ok": True, "probability_up": 0.72})
 
@@ -171,6 +177,7 @@ def test_scan_and_enter_never_places_a_real_order_even_when_live_trading_is_flag
 
 def test_scan_and_enter_places_a_real_order_only_when_explicitly_forced_live(monkeypatch):
     monkeypatch.setattr(kalshi_15m_strategy, "MAX_CONCURRENT_POSITIONS", len(kalshi_15m_strategy.ASSET_SERIES))
+    monkeypatch.setattr(kalshi_15m_strategy, "GRADUATED_CONCURRENCY_ENABLED", False)
     monkeypatch.setattr(kalshi_15m_strategy, "LIVE_TRADING_ENABLED", True)
     monkeypatch.setenv("KALSHI_15M_LIVE_TRADING_ENABLED", "1")
     monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
@@ -812,6 +819,7 @@ def test_scan_and_enter_reads_the_confidence_floor_learned_from_real_trade_histo
     priority over the module-level MODEL_CONFIDENCE_MIN default -- the
     whole point of apply_confidence_threshold_override existing."""
     monkeypatch.setattr(kalshi_15m_strategy, "MAX_CONCURRENT_POSITIONS", len(kalshi_15m_strategy.ASSET_SERIES))
+    monkeypatch.setattr(kalshi_15m_strategy, "GRADUATED_CONCURRENCY_ENABLED", False)
     monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
     # 0.63 confidence clears the real module default (0.58) but not the
     # learned override below (0.70).
@@ -1080,6 +1088,7 @@ def test_apply_confidence_threshold_override_and_apply_correlation_study_overrid
 
 def test_scan_and_enter_reads_the_correlation_override_from_state_tuning(monkeypatch):
     monkeypatch.setattr(kalshi_15m_strategy, "MAX_CONCURRENT_POSITIONS", len(kalshi_15m_strategy.ASSET_SERIES))
+    monkeypatch.setattr(kalshi_15m_strategy, "GRADUATED_CONCURRENCY_ENABLED", False)
     monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
     _mock_confident_prediction(monkeypatch, probability_up=0.60)
     monkeypatch.setattr(
@@ -1104,6 +1113,7 @@ def test_scan_and_enter_reads_the_correlation_override_from_state_tuning(monkeyp
 
 def test_scan_and_enter_records_the_entry_correlation_score_on_the_position(monkeypatch):
     monkeypatch.setattr(kalshi_15m_strategy, "MAX_CONCURRENT_POSITIONS", len(kalshi_15m_strategy.ASSET_SERIES))
+    monkeypatch.setattr(kalshi_15m_strategy, "GRADUATED_CONCURRENCY_ENABLED", False)
     monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
     _mock_confident_prediction(monkeypatch, probability_up=0.72)
     monkeypatch.setattr(
@@ -1629,3 +1639,131 @@ def test_manage_open_positions_leaves_the_position_open_when_the_exit_order_neve
 
     state = kalshi_15m_strategy._load_state()  # noqa: SLF001
     assert len(state["positions"]) == 1  # never removed -- the order never actually filled
+
+
+# ---------------------------------------------------------------------------
+# Graduated concurrency -- per explicit user direction: "since the
+# balance is low let['s] focus on 1 [position] after another win to grow
+# the balance[,] [then] increase to 2 at a time[,] so on and forth."
+# ---------------------------------------------------------------------------
+def _gc_trade(*, pnl: float, dry_run: bool = False) -> dict:
+    return {"coin": "BTC", "realized_pnl_usd": pnl, "dry_run": dry_run}
+
+
+def test_graduated_concurrency_starts_at_1_slot_with_no_real_history():
+    assert kalshi_15m_strategy.compute_graduated_max_concurrent_positions([]) == 1
+    assert kalshi_15m_strategy.compute_graduated_max_concurrent_positions(None) == 1
+
+
+def test_graduated_concurrency_grows_by_1_slot_per_real_win():
+    trades = [_gc_trade(pnl=1.0)]
+    assert kalshi_15m_strategy.compute_graduated_max_concurrent_positions(trades) == 2
+    trades = [_gc_trade(pnl=1.0), _gc_trade(pnl=1.0)]
+    assert kalshi_15m_strategy.compute_graduated_max_concurrent_positions(trades) == 3
+
+
+def test_graduated_concurrency_drops_straight_back_to_1_on_the_next_loss():
+    trades = [_gc_trade(pnl=1.0), _gc_trade(pnl=1.0), _gc_trade(pnl=1.0), _gc_trade(pnl=-1.0)]
+    assert kalshi_15m_strategy.compute_graduated_max_concurrent_positions(trades) == 1
+
+
+def test_graduated_concurrency_is_capped_at_max_concurrent_positions(monkeypatch):
+    monkeypatch.setattr(kalshi_15m_strategy, "MAX_CONCURRENT_POSITIONS", 2)
+    trades = [_gc_trade(pnl=1.0) for _ in range(10)]  # would otherwise grow to 11 slots
+    assert kalshi_15m_strategy.compute_graduated_max_concurrent_positions(trades) == 2
+
+
+def test_graduated_concurrency_ignores_dry_run_trades():
+    trades = [_gc_trade(pnl=1.0, dry_run=True) for _ in range(5)]
+    assert kalshi_15m_strategy.compute_graduated_max_concurrent_positions(trades) == 1
+
+
+def test_graduated_concurrency_returns_the_flat_ceiling_when_disabled(monkeypatch):
+    monkeypatch.setattr(kalshi_15m_strategy, "GRADUATED_CONCURRENCY_ENABLED", False)
+    monkeypatch.setattr(kalshi_15m_strategy, "MAX_CONCURRENT_POSITIONS", 5)
+    trades = []  # no real history -- would otherwise mean just 1 slot
+    assert kalshi_15m_strategy.compute_graduated_max_concurrent_positions(trades) == 5
+
+
+def test_scan_and_enter_only_opens_1_position_with_no_real_trade_history(monkeypatch):
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
+    _mock_confident_prediction(monkeypatch)
+    monkeypatch.setattr(crypto_correlation, "perps_correlation_bullishness", lambda coin, row=None: {"score": 0.0, "reason": "neutral", "components": {}})
+
+    result = kalshi_15m_strategy.scan_and_enter()
+
+    entered = [c for c in result["checks"] if c.get("action") == "entered"]
+    assert len(entered) == 1  # graduated concurrency's own starting slot, not the flat MAX_CONCURRENT_POSITIONS ceiling
+    concurrency_rejections = [c for c in result["checks"] if c.get("reason") == "max_concurrent_positions"]
+    assert len(concurrency_rejections) == len(kalshi_15m_strategy.ASSET_SERIES) - 1
+
+
+# ---------------------------------------------------------------------------
+# Per-coin trust gate -- per explicit user direction: "the bot need to
+# know by now after analyzing[,] he need to know the patterns and what
+# its best on."
+# ---------------------------------------------------------------------------
+def _trust_trade(*, coin="BTC", pnl: float, dry_run: bool = False) -> dict:
+    return {"coin": coin, "realized_pnl_usd": pnl, "dry_run": dry_run}
+
+
+def test_coin_is_trusted_with_insufficient_history():
+    trades = [_trust_trade(pnl=-1.0) for _ in range(3)]  # below the 8-trade floor
+    result = kalshi_15m_strategy.coin_is_trusted("BTC", trades)
+    assert result["trusted"] is True
+    assert result["reason"] == "insufficient_history"
+
+
+def test_coin_is_trusted_with_a_healthy_track_record():
+    trades = [_trust_trade(pnl=2.0) for _ in range(5)] + [_trust_trade(pnl=-1.0) for _ in range(3)]
+    result = kalshi_15m_strategy.coin_is_trusted("BTC", trades)
+    assert result["trusted"] is True
+    assert result["reason"] == "track_record_ok"
+
+
+def test_coin_is_trusted_pauses_a_coin_with_a_clearly_poor_track_record():
+    trades = [_trust_trade(pnl=-1.0) for _ in range(7)] + [_trust_trade(pnl=0.5) for _ in range(1)]
+    result = kalshi_15m_strategy.coin_is_trusted("BTC", trades)
+    assert result["trusted"] is False
+    assert result["reason"] == "poor_real_track_record"
+    assert result["win_rate"] < kalshi_15m_strategy.COIN_TRUST_MIN_WIN_RATE
+
+
+def test_coin_is_trusted_needs_both_a_low_win_rate_and_a_negative_average_pnl():
+    """A coin that wins RARELY but big (e.g. a few large wins offsetting
+    many small losses) must not get paused on win rate alone."""
+    trades = [_trust_trade(pnl=-0.1) for _ in range(6)] + [_trust_trade(pnl=5.0) for _ in range(2)]
+    result = kalshi_15m_strategy.coin_is_trusted("BTC", trades)
+    assert result["trusted"] is True  # win rate is low (25%) but avg P&L is positive
+
+
+def test_coin_is_trusted_ignores_dry_run_trades():
+    trades = [_trust_trade(pnl=-1.0, dry_run=True) for _ in range(10)]
+    result = kalshi_15m_strategy.coin_is_trusted("BTC", trades)
+    assert result["trusted"] is True
+    assert result["reason"] == "insufficient_history"
+
+
+def test_coin_is_trusted_is_coin_specific():
+    bad_btc = [_trust_trade(coin="BTC", pnl=-1.0) for _ in range(8)]
+    assert kalshi_15m_strategy.coin_is_trusted("BTC", bad_btc)["trusted"] is False
+    assert kalshi_15m_strategy.coin_is_trusted("ETH", bad_btc)["trusted"] is True
+
+
+def test_scan_and_enter_skips_a_coin_with_a_poor_real_track_record(monkeypatch):
+    monkeypatch.setattr(kalshi_15m_strategy, "GRADUATED_CONCURRENCY_ENABLED", False)
+    monkeypatch.setattr(kalshi_15m_strategy, "MAX_CONCURRENT_POSITIONS", len(kalshi_15m_strategy.ASSET_SERIES))
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
+    _mock_confident_prediction(monkeypatch)
+    monkeypatch.setattr(crypto_correlation, "perps_correlation_bullishness", lambda coin, row=None: {"score": 0.0, "reason": "neutral", "components": {}})
+    bad_btc_trades = [{"coin": "BTC", "realized_pnl_usd": -1.0, "dry_run": False} for _ in range(8)]
+    kalshi_15m_strategy._save_state({"positions": [], "trade_log": bad_btc_trades, "realized_pnl_by_date": {}})  # noqa: SLF001
+
+    result = kalshi_15m_strategy.scan_and_enter()
+
+    btc_check = next(c for c in result["checks"] if c["coin"] == "BTC")
+    assert btc_check["ok"] is False
+    assert btc_check["reason"] == "poor_real_track_record"
+    entered_coins = {c["coin"] for c in result["checks"] if c.get("action") == "entered"}
+    assert "BTC" not in entered_coins
+    assert "ETH" in entered_coins  # a different coin's own track record is untouched
