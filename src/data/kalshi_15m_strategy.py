@@ -543,7 +543,25 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
                     ticker=market["ticker"], side=side_char, count=contracts, price=price,
                     client_order_id=client_order_id,
                 )
-                order_id = order_result.get("order_id")
+                # REAL, LIVE, CONFIRMED BUG this fixes: Kalshi's own
+                # create-order response nests the order object under an
+                # "order" key (confirmed against this account's own real
+                # orders, and matching create_margin_order's own identical
+                # response shape -- see perps_strategy.py's own
+                # `order_result.get("order") or order_result` unwrap for
+                # the same endpoint family) -- order_result.get("order_id")
+                # directly was ALWAYS None. That None then never matched
+                # any real order_id in the fresh_orders list just below,
+                # so filled_count stayed 0 and every real order -- filled
+                # or not -- was reported as "order_not_filled" and silently
+                # dropped from local tracking. Confirmed live: two real,
+                # currently-open Kalshi positions (gold, copper) exist on
+                # this account with zero corresponding entry in local
+                # state, discovered by cross-checking /api/kalshi15m/real-positions
+                # against /api/kalshi15m/status right after this bug's own
+                # introduction (the fill-verification fix earlier today).
+                order = order_result.get("order") or order_result
+                order_id = order.get("order_id")
             except Exception as exc:
                 logger.warning("[kalshi_15m_strategy] order placement failed for %s: %s", coin, exc)
                 checks.append({"coin": coin, "ok": False, "reason": "order_failed", "error": str(exc)})

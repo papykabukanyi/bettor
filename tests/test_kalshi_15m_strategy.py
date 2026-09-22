@@ -160,7 +160,7 @@ def test_scan_and_enter_never_places_a_real_order_even_when_live_trading_is_flag
     _mock_confident_prediction(monkeypatch)
     monkeypatch.setattr(kalshi_15m_strategy, "_account_budget_usd", lambda: 100.0)
     order_calls = []
-    monkeypatch.setattr(kalshi_15m, "create_order", lambda **kw: order_calls.append(kw) or {"order_id": "o1"})
+    monkeypatch.setattr(kalshi_15m, "create_order", lambda **kw: order_calls.append(kw) or {"order": {"order_id": "o1"}})
 
     result = kalshi_15m_strategy.scan_and_enter(dry_run=True)  # caller-level override still wins
 
@@ -176,7 +176,7 @@ def test_scan_and_enter_places_a_real_order_only_when_explicitly_forced_live(mon
     _mock_confident_prediction(monkeypatch)
     monkeypatch.setattr(kalshi_15m_strategy, "_account_budget_usd", lambda: 100.0)
     order_calls = []
-    monkeypatch.setattr(kalshi_15m, "create_order", lambda **kw: order_calls.append(kw) or {"order_id": "o1"})
+    monkeypatch.setattr(kalshi_15m, "create_order", lambda **kw: order_calls.append(kw) or {"order": {"order_id": "o1"}})
     # Real bug this whole file's own suite originally missed: without
     # mocking get_orders (the post-placement fill check), an unmocked
     # network call fails, filled_count stays 0, and NOTHING gets recorded
@@ -192,6 +192,62 @@ def test_scan_and_enter_places_a_real_order_only_when_explicitly_forced_live(mon
     entered = [c for c in result["checks"] if c.get("action") == "entered"]
     assert len(entered) == len(kalshi_15m_strategy.ASSET_SERIES)
     assert all(c["dry_run"] is False for c in entered)
+
+
+def test_scan_and_enter_unwraps_the_real_nested_create_order_response(monkeypatch):
+    """SECOND real, live, confirmed bug found on this account (discovered
+    hours after the side/price fix above shipped, by cross-checking
+    /api/kalshi15m/real-positions -- two real, currently-open Kalshi
+    positions -- against /api/kalshi15m/status showing zero tracked
+    positions): Kalshi's own create-order response nests the order object
+    under an "order" key (confirmed against this account's own real
+    orders, and matching create_margin_order's own identical response
+    shape for the same endpoint family -- see perps_strategy.py's own
+    `order_result.get("order") or order_result` unwrap). The old code did
+    `order_result.get("order_id")` directly, which was ALWAYS None on a
+    real response -- that None then never matched any real order_id in
+    the fresh_orders fill-check list, so filled_count stayed 0 and every
+    real order (filled or not) was reported "order_not_filled" and
+    silently dropped from local tracking, even though the order really
+    filled and real money was really at risk. This test uses the REAL
+    nested shape (every other test in this file already does too, post-
+    fix) -- it would have failed against the old flat-only extraction."""
+    monkeypatch.setattr(kalshi_15m_strategy, "MAX_CONCURRENT_POSITIONS", 1)
+    monkeypatch.setattr(kalshi_15m_strategy, "LIVE_TRADING_ENABLED", True)
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
+    _mock_confident_prediction(monkeypatch)
+    monkeypatch.setattr(kalshi_15m_strategy, "_account_budget_usd", lambda: 100.0)
+    monkeypatch.setattr(kalshi_15m, "create_order", lambda **kw: {"order": {"order_id": "real-nested-id"}})
+    monkeypatch.setattr(kalshi_15m, "get_orders", lambda ticker=None, status=None: [{"order_id": "real-nested-id", "fill_count_fp": "5.00"}])
+
+    result = kalshi_15m_strategy.scan_and_enter(dry_run=False)
+
+    entered = [c for c in result["checks"] if c.get("action") == "entered"]
+    assert len(entered) == 1
+    state = kalshi_15m_strategy._load_state()  # noqa: SLF001
+    assert len(state["positions"]) == 1
+    assert state["positions"][0]["order_id"] == "real-nested-id"
+    assert state["positions"][0]["count"] == 5.0
+
+
+def test_scan_and_enter_still_works_with_a_flat_create_order_response(monkeypatch):
+    """Defensive fallback -- `order_result.get("order") or order_result`
+    -- keeps working if Kalshi (or a future SDK version) ever returns the
+    order flat at the top level instead of nested."""
+    monkeypatch.setattr(kalshi_15m_strategy, "MAX_CONCURRENT_POSITIONS", 1)
+    monkeypatch.setattr(kalshi_15m_strategy, "LIVE_TRADING_ENABLED", True)
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
+    _mock_confident_prediction(monkeypatch)
+    monkeypatch.setattr(kalshi_15m_strategy, "_account_budget_usd", lambda: 100.0)
+    monkeypatch.setattr(kalshi_15m, "create_order", lambda **kw: {"order_id": "flat-id"})
+    monkeypatch.setattr(kalshi_15m, "get_orders", lambda ticker=None, status=None: [{"order_id": "flat-id", "fill_count_fp": "5.00"}])
+
+    result = kalshi_15m_strategy.scan_and_enter(dry_run=False)
+
+    entered = [c for c in result["checks"] if c.get("action") == "entered"]
+    assert len(entered) == 1
+    state = kalshi_15m_strategy._load_state()  # noqa: SLF001
+    assert state["positions"][0]["order_id"] == "flat-id"
 
 
 def test_scan_and_enter_records_a_failed_order_without_opening_a_position(monkeypatch):
@@ -228,7 +284,7 @@ def test_scan_and_enter_sends_the_correct_side_and_price_for_a_no_decision(monke
     _mock_confident_prediction(monkeypatch, probability_up=0.25)  # -> "no"
     monkeypatch.setattr(kalshi_15m_strategy, "_account_budget_usd", lambda: 100.0)
     order_calls = []
-    monkeypatch.setattr(kalshi_15m, "create_order", lambda **kw: order_calls.append(kw) or {"order_id": "o1"})
+    monkeypatch.setattr(kalshi_15m, "create_order", lambda **kw: order_calls.append(kw) or {"order": {"order_id": "o1"}})
     monkeypatch.setattr(kalshi_15m, "get_orders", lambda ticker=None, status=None: [{"order_id": "o1", "fill_count_fp": "5.00"}])
 
     kalshi_15m_strategy.scan_and_enter(dry_run=False)
@@ -246,7 +302,7 @@ def test_scan_and_enter_sends_the_correct_side_and_price_for_a_yes_decision(monk
     _mock_confident_prediction(monkeypatch, probability_up=0.75)  # -> "yes"
     monkeypatch.setattr(kalshi_15m_strategy, "_account_budget_usd", lambda: 100.0)
     order_calls = []
-    monkeypatch.setattr(kalshi_15m, "create_order", lambda **kw: order_calls.append(kw) or {"order_id": "o1"})
+    monkeypatch.setattr(kalshi_15m, "create_order", lambda **kw: order_calls.append(kw) or {"order": {"order_id": "o1"}})
     monkeypatch.setattr(kalshi_15m, "get_orders", lambda ticker=None, status=None: [{"order_id": "o1", "fill_count_fp": "5.00"}])
 
     kalshi_15m_strategy.scan_and_enter(dry_run=False)
@@ -269,7 +325,7 @@ def test_scan_and_enter_records_the_no_side_cost_basis_not_the_yes_sell_price(mo
     monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market(no_ask=0.60, no_bid=0.55))
     _mock_confident_prediction(monkeypatch, probability_up=0.25)  # -> "no"
     monkeypatch.setattr(kalshi_15m_strategy, "_account_budget_usd", lambda: 100.0)
-    monkeypatch.setattr(kalshi_15m, "create_order", lambda **kw: {"order_id": "o1"})
+    monkeypatch.setattr(kalshi_15m, "create_order", lambda **kw: {"order": {"order_id": "o1"}})
     monkeypatch.setattr(kalshi_15m, "get_orders", lambda ticker=None, status=None: [{"order_id": "o1", "fill_count_fp": "5.00"}])
 
     kalshi_15m_strategy.scan_and_enter(dry_run=False)
@@ -291,7 +347,7 @@ def test_scan_and_enter_does_not_open_a_position_when_the_order_never_fills(monk
     monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
     _mock_confident_prediction(monkeypatch)
     monkeypatch.setattr(kalshi_15m_strategy, "_account_budget_usd", lambda: 100.0)
-    monkeypatch.setattr(kalshi_15m, "create_order", lambda **kw: {"order_id": "o1"})
+    monkeypatch.setattr(kalshi_15m, "create_order", lambda **kw: {"order": {"order_id": "o1"}})
     monkeypatch.setattr(kalshi_15m, "get_orders", lambda ticker=None, status=None: [{"order_id": "o1", "status": "canceled", "fill_count_fp": "0.00"}])
 
     result = kalshi_15m_strategy.scan_and_enter(dry_run=False)
@@ -307,7 +363,7 @@ def test_scan_and_enter_survives_a_fill_check_failure_without_opening_a_phantom_
     monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
     _mock_confident_prediction(monkeypatch)
     monkeypatch.setattr(kalshi_15m_strategy, "_account_budget_usd", lambda: 100.0)
-    monkeypatch.setattr(kalshi_15m, "create_order", lambda **kw: {"order_id": "o1"})
+    monkeypatch.setattr(kalshi_15m, "create_order", lambda **kw: {"order": {"order_id": "o1"}})
 
     def fail(**kw):
         raise RuntimeError("network error checking fill")
