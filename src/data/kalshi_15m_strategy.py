@@ -127,15 +127,24 @@ MIN_SECONDS_TO_CLOSE_FOR_ENTRY = _env_int("KALSHI_15M_MIN_SECONDS_TO_CLOSE_FOR_E
 # actually nudges the entry gate once real trade history earns it via
 # apply_correlation_study_override.
 #
-# Crypto coins ONLY (BTC/ETH/SOL/XRP/DOGE) -- reuses perps' own already-
-# running in-process correlation study (get_perps_study(), refreshed by
-# perps_data.py's own data-collect job, already running in this same
-# merged process) rather than building a new one from scratch: this
-# market's crypto model already proxies off perps' own data pipeline
-# (see kalshi_15m_data.latest_feature_row's own docstring), so perps'
-# instrument universe already covers these exact 5 coins. No equivalent
-# study exists for metals (gold/silver/copper) -- that component simply
-# reads neutral for those, same as any other missing signal here.
+# Covers BOTH universes this market trades, each from its OWN separate
+# study (one shared flag/adjustment -- not split per-universe -- since
+# both feed the exact same effective_confidence_min nudge below; splitting
+# would only matter if the two ever needed independently different
+# on/off states or weights, which nothing here has asked for yet):
+#   - Crypto (all of kalshi_15m.KNOWN_15M_SERIES -- BTC/ETH/SOL/XRP/DOGE/
+#     BCH/NEAR/HYPE/ZEC): reuses perps' own already-running in-process
+#     correlation study (get_perps_study(), refreshed by perps_data.py's
+#     own data-collect job, already running in this same merged process)
+#     rather than building a new one from scratch -- this market's crypto
+#     model already proxies off perps' own data pipeline (see
+#     kalshi_15m_data.latest_feature_row's own docstring), and perps' own
+#     ~13-instrument watchlist already covers all 9 of these coins.
+#   - Metals (all of kalshi_15m.KNOWN_15M_METALS_SERIES -- GOLD/SILVER/
+#     COPPER/PLATINUM/PALLADIUM): its OWN, independent 5-commodity study
+#     (see crypto_correlation.refresh_metals_study's own comment) --
+#     genuinely different data/process ownership from crypto's, but the
+#     SAME confidence-nudge mechanism once computed.
 USE_CORRELATION_STUDY = _env_flag("KALSHI_15M_USE_CORRELATION_STUDY", default=False)
 CORRELATION_CONFIDENCE_MAX_ADJUSTMENT = _env_float("KALSHI_15M_CORRELATION_CONFIDENCE_MAX_ADJUSTMENT", 0.06)
 
@@ -372,6 +381,13 @@ def evaluate_candidate(
     if coin in kalshi_15m.KNOWN_15M_SERIES:
         correlation = crypto_correlation.perps_correlation_bullishness(coin, prediction.get("feature_row"))
         correlation_score, correlation_reason = correlation["score"], correlation["reason"]
+    elif coin in kalshi_15m.KNOWN_15M_METALS_SERIES:
+        # See crypto_correlation.refresh_metals_study's own comment --
+        # this market's own 5-commodity study, refreshed by this same
+        # process's own metals data-collect job (no cross-service
+        # "remote" component needed, unlike the crypto path above).
+        correlation = crypto_correlation.metals_correlation_bullishness(coin, prediction.get("feature_row"))
+        correlation_score, correlation_reason = correlation["score"], correlation["reason"]
     # Bullish-signed (positive favors "yes"/up) -- flip for "no", same
     # convention crypto_correlation.py's own docstring documents for a
     # perps short.
@@ -538,6 +554,30 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
         order_id = None
         filled_count = float(contracts)  # dry-run: "fills" the full requested size in the simulation
         if not effective_dry_run:
+            # SECOND, INDEPENDENT, ALWAYS-FRESH safety gate -- real,
+            # confirmed user report: "i shut it off but it kept making
+            # trades". Root cause: LIVE_TRADING_ENABLED (used above via
+            # effective_dry_run) is a module-level constant, read from the
+            # env var ONCE at import time -- flipping the HF Space
+            # variable off restarts this process, but that restart is not
+            # instantaneous, and this job runs every 2 minutes; a cycle
+            # could fire mid-restart-window still holding the OLD, stale
+            # "enabled" value baked in at the process's last start. This
+            # re-reads the RAW env var fresh, every single time, right at
+            # the last possible moment before a real order would be
+            # placed -- so flipping the switch off takes effect on the
+            # VERY NEXT cycle regardless of restart timing, with zero
+            # dependency on this process ever actually restarting.
+            # Deliberately does NOT replace LIVE_TRADING_ENABLED itself
+            # (kept as-is for every existing test/observability caller);
+            # this is a strictly additive, can-only-block-more safety net.
+            if not _env_flag("KALSHI_15M_LIVE_TRADING_ENABLED", default=False):
+                logger.warning(
+                    "[kalshi_15m_strategy] live trading was just disabled -- skipping real order for %s "
+                    "this cycle (fresh env re-check caught a stale cached LIVE_TRADING_ENABLED)", coin,
+                )
+                checks.append({"coin": coin, "ok": False, "reason": "live_trading_disabled_fresh_check"})
+                continue
             try:
                 order_result = kalshi_15m.create_order(
                     ticker=market["ticker"], side=side_char, count=contracts, price=price,

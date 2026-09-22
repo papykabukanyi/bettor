@@ -77,6 +77,19 @@ from data.kalshi_client import _request_json
 KNOWN_15M_SERIES = {
     "BTC": "KXBTC15M", "ETH": "KXETH15M", "SOL": "KXSOL15M",
     "XRP": "KXXRP15M", "DOGE": "KXDOGE15M",
+    # 4 more real, confirmed-live 15-minute up/down series (GET
+    # /series?category=Crypto, 2026-09-22) with the exact same market
+    # shape as the 5 above (ticker/close_time/no_ask_dollars/no_bid_dollars/
+    # yes_ask_dollars/yes_bid_dollars -- confirmed live via a real
+    # get_current_window_market call on each), added because perps
+    # ALREADY tracks all 4 of these underlyings (see perps_data.py's own
+    # _TICKER_TO_COIN: KXBCHPERP/KXNEARPERP/KXHYPEPERP/KXZECPERP) -- zero
+    # new data-collection infrastructure needed, same "reuse perps' own
+    # already-running feed" reasoning kalshi_15m_data.py's own
+    # COIN_TO_PERPS_TICKER already documents for the original 5. More
+    # markets scanned per cycle at the SAME confidence bar -- more chances
+    # to find a real signal, not a lowered bar for any one of them.
+    "BCH": "KXBCH15M", "NEAR": "KXNEAR15M", "HYPE": "KXHYPE15M", "ZEC": "KXZEC15M",
 }
 
 # Confirmed live via GET /series?category=Commodities (2026-09-19) --
@@ -92,6 +105,11 @@ KNOWN_15M_SERIES = {
 # casing needed; callers just see "no_open_window" more often for these 3.
 KNOWN_15M_METALS_SERIES = {
     "GOLD": "KXGOLD15M", "SILVER": "KXSILVER15M", "COPPER": "KXCOPPER15M",
+    # 2 more, same free gold-api.com spot-price source (see
+    # kalshi_15m_metals_data.py's own METAL_TO_SYMBOL -- confirmed live it
+    # also serves XPT/XPD with no new credential/API needed) and the same
+    # confirmed-live 15-minute market shape as the 3 above.
+    "PLATINUM": "KXPLATINUM15M", "PALLADIUM": "KXPALLADIUM15M",
 }
 
 

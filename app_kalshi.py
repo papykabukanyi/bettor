@@ -611,6 +611,19 @@ def _run_kalshi_15m_metals_data_collect() -> dict[str, Any]:
         df = kalshi_15m_metals_data.collect_dataset_rows()
         if df.empty:
             return {"ok": False, "reason": "no_rows_collected"}
+        # Refreshes the metals correlation study (see crypto_correlation.py's
+        # own refresh_metals_study comment) on the SAME df this cycle just
+        # collected -- no extra network call. Unlike crypto's own
+        # correlation study (owned/refreshed by perps' own, separate
+        # data-collect job), metals has no other owner: this IS the one
+        # place its data gets collected, so this job is the one that must
+        # keep the study current. Best-effort -- must never block the
+        # actual archival push below.
+        try:
+            from data import crypto_correlation
+            crypto_correlation.refresh_metals_study(df)
+        except Exception as exc:
+            logger.warning("[app_kalshi] metals correlation study refresh failed (non-fatal): %s", exc)
         return kalshi_15m_metals_data.push_dataset_snapshot(df)
     finally:
         gc.collect()

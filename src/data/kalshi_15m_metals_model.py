@@ -1,6 +1,7 @@
-"""Direction classifier for Kalshi's 15-minute GOLD/SILVER/COPPER markets:
-given current technical features for one of the 3 traded metals, predict
-whether its price will be higher or lower
+"""Direction classifier for Kalshi's 15-minute GOLD/SILVER/COPPER/PLATINUM/
+PALLADIUM markets: given current technical features for one of the traded
+metals (see kalshi_15m_metals_data.METAL_TO_SYMBOL for the full list),
+predict whether its price will be higher or lower
 kalshi_15m_metals_data.LABEL_HORIZON_MINUTES (15) minutes from now --
 matching what these markets actually settle on (see kalshi_15m.py's own
 module docstring). No news sentiment here (no metals-news source exists
@@ -423,4 +424,10 @@ def predict_direction(symbol: str) -> dict[str, Any]:
     return {
         "model_ok": True, "symbol": symbol, "direction": direction, "probability_up": proba_up,
         "current_price": row.get("current_price"), "model_type": meta.get("model_type"),
+        # Same reasoning as kalshi_15m_model.predict_direction's own
+        # identical addition: kalshi_15m_strategy.evaluate_candidate's
+        # correlation-study confidence layer needs this for the
+        # multi-timeframe component, without a second, real
+        # latest_feature_row call for the same metal/cycle.
+        "feature_row": row,
     }

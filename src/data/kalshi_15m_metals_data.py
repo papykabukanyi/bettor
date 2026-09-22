@@ -1,14 +1,17 @@
-"""Data pipeline for Kalshi's 15-minute GOLD/SILVER/COPPER markets
-(KXGOLD15M/KXSILVER15M/KXCOPPER15M -- see kalshi_15m.py's own module
-docstring for the product). A genuinely different data situation from
+"""Data pipeline for Kalshi's 15-minute GOLD/SILVER/COPPER/PLATINUM/PALLADIUM
+markets (KXGOLD15M/KXSILVER15M/KXCOPPER15M/KXPLATINUM15M/KXPALLADIUM15M --
+see kalshi_15m.py's own module docstring for the product; platinum/
+palladium added once gold-api.com was confirmed live to also serve those
+two spot prices at the exact same free, no-key endpoint shape). A
+genuinely different data situation from
 kalshi_15m_data.py's own crypto universe: Kalshi has NO perpetual-futures
 contract for metals to reuse a rich candlestick feed from (crypto's own
 proxy -- see that module's docstring), so this builds its OWN price
 history from scratch, one point at a time.
 
 Price source: api.gold-api.com's plain spot-price endpoint
-(GET /price/{symbol}, symbols XAU/XAG/HG) -- confirmed live, genuinely
-free, no API key at all. Deliberately NOT Pyth's own Hermes service
+(GET /price/{symbol}, symbols XAU/XAG/HG/XPT/XPD) -- confirmed live,
+genuinely free, no API key at all. Deliberately NOT Pyth's own Hermes service
 (the actual settlement source these Kalshi markets resolve against,
 confirmed via GET /series/{ticker}'s own settlement_sources) -- confirmed
 live this session that Hermes now requires a paid API key
@@ -74,7 +77,14 @@ HF_KALSHI_15M_METALS_DATASET_REPO = os.getenv("HF_KALSHI_15M_METALS_DATASET_REPO
 GOLD_API_BASE_URL = os.getenv("GOLD_API_BASE_URL", "https://api.gold-api.com").rstrip("/")
 GOLD_API_TIMEOUT_SEC = int(os.getenv("GOLD_API_TIMEOUT_SEC", "10") or "10")
 
-METAL_TO_SYMBOL = {"GOLD": "XAU", "SILVER": "XAG", "COPPER": "HG"}
+METAL_TO_SYMBOL = {
+    "GOLD": "XAU", "SILVER": "XAG", "COPPER": "HG",
+    # 2 more real, confirmed-live 15-minute Kalshi series (see
+    # kalshi_15m.py's own KNOWN_15M_METALS_SERIES comment) -- gold-api.com
+    # confirmed live to also serve platinum/palladium spot prices at the
+    # exact same free, no-key endpoint shape as gold/silver/copper.
+    "PLATINUM": "XPT", "PALLADIUM": "XPD",
+}
 
 # Real gap closed, not a deliberate exclusion this module's own docstring
 # ever actually disclosed (unlike volume/OI-derived features): live news
@@ -83,7 +93,10 @@ METAL_TO_SYMBOL = {"GOLD": "XAU", "SILVER": "XAG", "COPPER": "HG"}
 # pipeline). Plain, distinctive search terms -- "gold" alone would also
 # match unrelated headlines ("gold medal", "golden"), so each query pins
 # down the commodity explicitly.
-METAL_TO_NEWS_QUERY = {"GOLD": "gold price commodity", "SILVER": "silver price commodity", "COPPER": "copper price commodity"}
+METAL_TO_NEWS_QUERY = {
+    "GOLD": "gold price commodity", "SILVER": "silver price commodity", "COPPER": "copper price commodity",
+    "PLATINUM": "platinum price commodity", "PALLADIUM": "palladium price commodity",
+}
 
 LABEL_HORIZON_MINUTES = int(os.getenv("KALSHI_15M_METALS_LABEL_HORIZON_MINUTES", "15") or "15")
 

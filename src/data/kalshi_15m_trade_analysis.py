@@ -140,10 +140,11 @@ def recommend_confidence_threshold(trade_log: list[dict[str, Any]] | None, *, cu
 # rationale) -- does real closed-trade history show the chart-study layer
 # (kalshi_15m_strategy.evaluate_candidate's own correlation_score,
 # captured on every trade regardless of whether the study was even ON at
-# entry time) is actually helping? Crypto trades only in practice (no
-# correlation study exists for metals -- see USE_CORRELATION_STUDY's own
-# comment -- so metals trades all carry entry_correlation_score == 0.0
-# and land in the "baseline" bucket, never "agreed").
+# entry time) is actually helping? Pools evidence across BOTH the crypto
+# and metals studies (see USE_CORRELATION_STUDY's own comment on why
+# they share one tuning lever) -- a coin whose own study genuinely has no
+# data yet still carries entry_correlation_score == 0.0 and lands in the
+# "baseline" bucket, never "agreed", same as any other missing signal.
 CORRELATION_TUNING_MIN_TRADES = 15
 CORRELATION_TUNING_AGREEMENT_THRESHOLD = 0.15
 CORRELATION_TUNING_MAX_STEP = 0.03

@@ -172,6 +172,7 @@ def test_scan_and_enter_never_places_a_real_order_even_when_live_trading_is_flag
 def test_scan_and_enter_places_a_real_order_only_when_explicitly_forced_live(monkeypatch):
     monkeypatch.setattr(kalshi_15m_strategy, "MAX_CONCURRENT_POSITIONS", len(kalshi_15m_strategy.ASSET_SERIES))
     monkeypatch.setattr(kalshi_15m_strategy, "LIVE_TRADING_ENABLED", True)
+    monkeypatch.setenv("KALSHI_15M_LIVE_TRADING_ENABLED", "1")
     monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
     _mock_confident_prediction(monkeypatch)
     monkeypatch.setattr(kalshi_15m_strategy, "_account_budget_usd", lambda: 100.0)
@@ -214,6 +215,7 @@ def test_scan_and_enter_unwraps_the_real_nested_create_order_response(monkeypatc
     fix) -- it would have failed against the old flat-only extraction."""
     monkeypatch.setattr(kalshi_15m_strategy, "MAX_CONCURRENT_POSITIONS", 1)
     monkeypatch.setattr(kalshi_15m_strategy, "LIVE_TRADING_ENABLED", True)
+    monkeypatch.setenv("KALSHI_15M_LIVE_TRADING_ENABLED", "1")
     monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
     _mock_confident_prediction(monkeypatch)
     monkeypatch.setattr(kalshi_15m_strategy, "_account_budget_usd", lambda: 100.0)
@@ -236,6 +238,7 @@ def test_scan_and_enter_still_works_with_a_flat_create_order_response(monkeypatc
     order flat at the top level instead of nested."""
     monkeypatch.setattr(kalshi_15m_strategy, "MAX_CONCURRENT_POSITIONS", 1)
     monkeypatch.setattr(kalshi_15m_strategy, "LIVE_TRADING_ENABLED", True)
+    monkeypatch.setenv("KALSHI_15M_LIVE_TRADING_ENABLED", "1")
     monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
     _mock_confident_prediction(monkeypatch)
     monkeypatch.setattr(kalshi_15m_strategy, "_account_budget_usd", lambda: 100.0)
@@ -252,6 +255,7 @@ def test_scan_and_enter_still_works_with_a_flat_create_order_response(monkeypatc
 
 def test_scan_and_enter_records_a_failed_order_without_opening_a_position(monkeypatch):
     monkeypatch.setattr(kalshi_15m_strategy, "LIVE_TRADING_ENABLED", True)
+    monkeypatch.setenv("KALSHI_15M_LIVE_TRADING_ENABLED", "1")
     monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
     _mock_confident_prediction(monkeypatch)
     monkeypatch.setattr(kalshi_15m_strategy, "_account_budget_usd", lambda: 100.0)
@@ -267,6 +271,54 @@ def test_scan_and_enter_records_a_failed_order_without_opening_a_position(monkey
     assert state["positions"] == []
 
 
+def test_scan_and_enter_blocks_a_real_order_when_the_env_var_was_just_flipped_off(monkeypatch):
+    """THIRD real, live, confirmed bug: user report "i shut it off but it
+    kept making trades". Root cause: LIVE_TRADING_ENABLED (module
+    constant, read from the env var ONCE at import time) doesn't notice a
+    live env var flip until this process itself restarts -- and an HF
+    Space variable update's own restart isn't instantaneous, so a
+    kalshi_15m_cycle run could still fire on the stale cached value
+    mid-restart-window. This test simulates exactly that: the CACHED
+    LIVE_TRADING_ENABLED constant still reads True (as if this process
+    hasn't restarted since being enabled), but the REAL env var has
+    already been flipped off -- a real order must NEVER be placed in
+    that state."""
+    monkeypatch.setattr(kalshi_15m_strategy, "LIVE_TRADING_ENABLED", True)  # stale cached "still on"
+    monkeypatch.delenv("KALSHI_15M_LIVE_TRADING_ENABLED", raising=False)  # real env var: off (unset -> default False)
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
+    _mock_confident_prediction(monkeypatch)
+    monkeypatch.setattr(kalshi_15m_strategy, "_account_budget_usd", lambda: 100.0)
+    order_calls = []
+    monkeypatch.setattr(kalshi_15m, "create_order", lambda **kw: order_calls.append(kw) or {"order": {"order_id": "o1"}})
+
+    result = kalshi_15m_strategy.scan_and_enter(dry_run=False)
+
+    assert order_calls == []  # the fresh re-check must have blocked every single one
+    assert all(c.get("reason") == "live_trading_disabled_fresh_check" for c in result["checks"] if not c.get("ok"))
+    state = kalshi_15m_strategy._load_state()  # noqa: SLF001
+    assert state["positions"] == []
+
+
+def test_scan_and_enter_still_places_a_real_order_when_the_env_var_genuinely_agrees(monkeypatch):
+    """Sanity check for the test above -- the fresh re-check isn't just
+    blocking everything; it correctly ALLOWS a real order through when
+    the real env var genuinely says live trading is on."""
+    monkeypatch.setattr(kalshi_15m_strategy, "LIVE_TRADING_ENABLED", True)
+    monkeypatch.setenv("KALSHI_15M_LIVE_TRADING_ENABLED", "1")
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
+    _mock_confident_prediction(monkeypatch)
+    monkeypatch.setattr(kalshi_15m_strategy, "_account_budget_usd", lambda: 100.0)
+    order_calls = []
+    monkeypatch.setattr(kalshi_15m, "create_order", lambda **kw: order_calls.append(kw) or {"order": {"order_id": "o1"}})
+    monkeypatch.setattr(kalshi_15m, "get_orders", lambda ticker=None, status=None: [{"order_id": "o1", "fill_count_fp": "5.00"}])
+
+    result = kalshi_15m_strategy.scan_and_enter(dry_run=False)
+
+    assert len(order_calls) >= 1
+    entered = [c for c in result["checks"] if c.get("action") == "entered"]
+    assert len(entered) >= 1
+
+
 # ---------------------------------------------------------------------------
 # Real, live, confirmed bug found by cross-checking this account's own real
 # Kalshi order history against this module's bookkeeping: a "no" decision
@@ -280,6 +332,7 @@ def test_scan_and_enter_records_a_failed_order_without_opening_a_position(monkey
 def test_scan_and_enter_sends_the_correct_side_and_price_for_a_no_decision(monkeypatch):
     monkeypatch.setattr(kalshi_15m_strategy, "MAX_CONCURRENT_POSITIONS", 1)
     monkeypatch.setattr(kalshi_15m_strategy, "LIVE_TRADING_ENABLED", True)
+    monkeypatch.setenv("KALSHI_15M_LIVE_TRADING_ENABLED", "1")
     monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market(no_ask=0.60, no_bid=0.55))
     _mock_confident_prediction(monkeypatch, probability_up=0.25)  # -> "no"
     monkeypatch.setattr(kalshi_15m_strategy, "_account_budget_usd", lambda: 100.0)
@@ -298,6 +351,7 @@ def test_scan_and_enter_sends_the_correct_side_and_price_for_a_no_decision(monke
 def test_scan_and_enter_sends_the_correct_side_and_price_for_a_yes_decision(monkeypatch):
     monkeypatch.setattr(kalshi_15m_strategy, "MAX_CONCURRENT_POSITIONS", 1)
     monkeypatch.setattr(kalshi_15m_strategy, "LIVE_TRADING_ENABLED", True)
+    monkeypatch.setenv("KALSHI_15M_LIVE_TRADING_ENABLED", "1")
     monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market(no_ask=0.60, no_bid=0.55))
     _mock_confident_prediction(monkeypatch, probability_up=0.75)  # -> "yes"
     monkeypatch.setattr(kalshi_15m_strategy, "_account_budget_usd", lambda: 100.0)
@@ -322,6 +376,7 @@ def test_scan_and_enter_records_the_no_side_cost_basis_not_the_yes_sell_price(mo
     just the side/price sent to Kalshi."""
     monkeypatch.setattr(kalshi_15m_strategy, "MAX_CONCURRENT_POSITIONS", 1)
     monkeypatch.setattr(kalshi_15m_strategy, "LIVE_TRADING_ENABLED", True)
+    monkeypatch.setenv("KALSHI_15M_LIVE_TRADING_ENABLED", "1")
     monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market(no_ask=0.60, no_bid=0.55))
     _mock_confident_prediction(monkeypatch, probability_up=0.25)  # -> "no"
     monkeypatch.setattr(kalshi_15m_strategy, "_account_budget_usd", lambda: 100.0)
@@ -344,6 +399,7 @@ def test_scan_and_enter_does_not_open_a_position_when_the_order_never_fills(monk
     was recording that as a real open position anyway."""
     monkeypatch.setattr(kalshi_15m_strategy, "MAX_CONCURRENT_POSITIONS", 1)
     monkeypatch.setattr(kalshi_15m_strategy, "LIVE_TRADING_ENABLED", True)
+    monkeypatch.setenv("KALSHI_15M_LIVE_TRADING_ENABLED", "1")
     monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
     _mock_confident_prediction(monkeypatch)
     monkeypatch.setattr(kalshi_15m_strategy, "_account_budget_usd", lambda: 100.0)
@@ -360,6 +416,7 @@ def test_scan_and_enter_does_not_open_a_position_when_the_order_never_fills(monk
 def test_scan_and_enter_survives_a_fill_check_failure_without_opening_a_phantom_position(monkeypatch):
     monkeypatch.setattr(kalshi_15m_strategy, "MAX_CONCURRENT_POSITIONS", 1)
     monkeypatch.setattr(kalshi_15m_strategy, "LIVE_TRADING_ENABLED", True)
+    monkeypatch.setenv("KALSHI_15M_LIVE_TRADING_ENABLED", "1")
     monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
     _mock_confident_prediction(monkeypatch)
     monkeypatch.setattr(kalshi_15m_strategy, "_account_budget_usd", lambda: 100.0)
@@ -530,10 +587,11 @@ def test_predict_direction_dispatches_metals_to_the_metals_model(monkeypatch):
         assert result["source"] == "metals"
 
 
-def test_asset_series_covers_all_8_assets_with_no_overlap():
-    assert len(kalshi_15m_strategy.ASSET_SERIES) == 8
+def test_asset_series_covers_all_14_assets_with_no_overlap():
+    assert len(kalshi_15m_strategy.ASSET_SERIES) == 14
     assert set(kalshi_15m_strategy.ASSET_SERIES) == {
-        "BTC", "ETH", "SOL", "XRP", "DOGE", "GOLD", "SILVER", "COPPER",
+        "BTC", "ETH", "SOL", "XRP", "DOGE", "BCH", "NEAR", "HYPE", "ZEC",
+        "GOLD", "SILVER", "COPPER", "PLATINUM", "PALLADIUM",
     }
 
 

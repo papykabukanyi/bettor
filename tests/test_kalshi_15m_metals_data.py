@@ -21,12 +21,12 @@ def _isolated_data_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(k, "get_generic_sentiment", lambda query, cache_key: {"query": query, "sentiment_score": 0.0, "headline_volume": 0, "computed_at": 0.0})
 
 
-def test_get_universe_is_gold_silver_copper():
-    assert set(k.get_universe()) == {"GOLD", "SILVER", "COPPER"}
+def test_get_universe_is_gold_silver_copper_platinum_palladium():
+    assert set(k.get_universe()) == {"GOLD", "SILVER", "COPPER", "PLATINUM", "PALLADIUM"}
 
 
 def test_fetch_latest_price_returns_none_for_an_unknown_metal():
-    assert k.fetch_latest_price("PLATINUM") is None
+    assert k.fetch_latest_price("NOT_A_REAL_METAL") is None
 
 
 def test_fetch_latest_price_parses_a_real_response(monkeypatch):

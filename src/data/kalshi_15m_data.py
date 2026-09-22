@@ -48,6 +48,11 @@ HF_KALSHI_15M_DATASET_REPO = os.getenv("HF_KALSHI_15M_DATASET_REPO", "papylove/k
 COIN_TO_PERPS_TICKER = {
     "BTC": "KXBTCPERP", "ETH": "KXETHPERP", "SOL": "KXSOLPERP",
     "XRP": "KXXRPPERP", "DOGE": "KXDOGEPERP",
+    # 4 more real, confirmed-live 15-minute series (see kalshi_15m.py's
+    # own KNOWN_15M_SERIES comment) -- perps already tracks all 4 of
+    # these underlyings via its own _TICKER_TO_COIN, so this is the same
+    # zero-new-infrastructure proxy reuse as the 5 above.
+    "BCH": "KXBCHPERP", "NEAR": "KXNEARPERP", "HYPE": "KXHYPEPERP", "ZEC": "KXZECPERP",
 }
 
 # The real, resolution-matching horizon: Kalshi's own 15m contracts compare
@@ -76,7 +81,8 @@ def _relabel_for_horizon(feats: pd.DataFrame) -> pd.DataFrame:
 
 def collect_dataset_rows(coins: list[str] | None = None) -> pd.DataFrame:
     """Fetch + engineer features for the given coins (default: this
-    module's own 5-coin universe), relabeled to a 15-minute horizon."""
+    module's own full universe -- see COIN_TO_PERPS_TICKER), relabeled to
+    a 15-minute horizon."""
     target_coins = coins if coins is not None else get_universe()
     frames = []
     for coin in target_coins:

@@ -276,6 +276,32 @@ def get_alpaca_study() -> dict[str, Any]:
     return _ALPACA_STUDY
 
 
+# Kalshi 15-minute metals (gold/silver/copper/platinum/palladium) -- a
+# THIRD, independent within-market study, added per explicit user
+# direction ("use colateration studies with the commodity available").
+# Genuinely simpler than perps'/Alpaca's own: no cross-service "remote"
+# component at all -- kalshi_15m_metals_data.py's own data-collect job
+# already runs in this SAME merged process as the strategy that consumes
+# this, so there's no HF-mediated push/pull step to build (unlike
+# Alpaca crypto's study, which perps pulls from a SEPARATE process via
+# HF). Fed directly from kalshi_15m_metals_data.collect_dataset_rows()'s
+# own output (already symbol-tagged with a real `ret_5m` column -- same
+# shape build_study already expects) on ITS OWN data-collect cycle.
+_METALS_STUDY: dict[str, Any] = {}
+
+
+def refresh_metals_study(
+    df: pd.DataFrame, *, id_col: str = "symbol", leader_id: str = "GOLD", coin_of: Callable[[str], str] | None = None,
+) -> dict[str, Any]:
+    global _METALS_STUDY
+    _METALS_STUDY = build_study(df, id_col=id_col, leader_id=leader_id, coin_of=coin_of)
+    return _METALS_STUDY
+
+
+def get_metals_study() -> dict[str, Any]:
+    return _METALS_STUDY
+
+
 def set_remote_alpaca_study(study: dict[str, Any] | None) -> None:
     """Called by perps_data.py after a successful pull from HF -- a failed
     pull (network hiccup, HF down, nothing pushed yet) simply leaves
@@ -525,6 +551,42 @@ def alpaca_correlation_bullishness(coin: str, row: dict[str, Any] | None = None)
         + ALPACA_DIVERGENCE_WEIGHT * components["divergence"][0]
         + ALPACA_BREADTH_WEIGHT * components["breadth"][0]
         + ALPACA_MULTI_TIMEFRAME_WEIGHT * components["multi_timeframe"][0]
+    )
+    reason = _format_reason(components)
+    return {"score": round(float(score), 4), "reason": reason, "components": {k: v[0] for k, v in components.items()}}
+
+
+# Same shape as ALPACA's own weights above (a single self-contained
+# study, no "remote" cross-service component) -- metals' own universe is
+# even smaller (5 commodities) than Alpaca's 36-pair crypto one, so peer
+# confirmation is weighted a little lighter here and multi_timeframe a
+# little heavier, favoring the signal this specific coin's OWN recent
+# technicals already provide over a thinner cross-commodity peer read.
+METALS_PEER_WEIGHT = 0.20
+METALS_DIVERGENCE_WEIGHT = 0.20
+METALS_BREADTH_WEIGHT = 0.15
+METALS_MULTI_TIMEFRAME_WEIGHT = 0.45
+
+
+def metals_correlation_bullishness(metal: str, row: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Composite chart-study reading for one Kalshi 15-minute metal (GOLD/
+    SILVER/COPPER/PLATINUM/PALLADIUM), from this market's own 5-commodity
+    universe only -- see refresh_metals_study's own comment on why this
+    needs no "remote" component at all. `row` (optional) feeds the
+    multi-timeframe component, same as perps_correlation_bullishness's
+    own."""
+    study = get_metals_study()
+    components = {
+        "peers": _peer_confirmation_bullishness(study, metal),
+        "divergence": _leader_divergence_bullishness(study, metal),
+        "breadth": _breadth_bullishness(study),
+        "multi_timeframe": multi_timeframe_bullishness(row),
+    }
+    score = (
+        METALS_PEER_WEIGHT * components["peers"][0]
+        + METALS_DIVERGENCE_WEIGHT * components["divergence"][0]
+        + METALS_BREADTH_WEIGHT * components["breadth"][0]
+        + METALS_MULTI_TIMEFRAME_WEIGHT * components["multi_timeframe"][0]
     )
     reason = _format_reason(components)
     return {"score": round(float(score), 4), "reason": reason, "components": {k: v[0] for k, v in components.items()}}

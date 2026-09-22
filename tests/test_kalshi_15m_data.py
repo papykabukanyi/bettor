@@ -32,9 +32,9 @@ def _feats(prices: list[float]) -> pd.DataFrame:
     return perps_data.engineer_features(one_min_df, hourly_df, sentiment_score=0.0)
 
 
-def test_get_universe_is_the_5_perps_coins():
+def test_get_universe_is_the_perps_backed_coins():
     universe = kalshi_15m_data.get_universe()
-    assert set(universe) == {"BTC", "ETH", "SOL", "XRP", "DOGE"}
+    assert set(universe) == {"BTC", "ETH", "SOL", "XRP", "DOGE", "BCH", "NEAR", "HYPE", "ZEC"}
 
 
 def test_relabel_for_horizon_uses_15_minutes_not_perps_own_1_minute():
