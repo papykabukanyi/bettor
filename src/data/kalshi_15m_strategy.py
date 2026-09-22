@@ -192,6 +192,37 @@ def compute_conviction_size_multiplier(entry_confidence: float | None, effective
     return CONVICTION_SIZE_MIN_MULTIPLIER + (CONVICTION_SIZE_MAX_MULTIPLIER - CONVICTION_SIZE_MIN_MULTIPLIER) * conviction
 
 
+# Per-symbol loss-streak throttle -- per explicit user direction: "if
+# it's keep losing a certain symbol[,] retain[,] redo and reduce size
+# until it start[s] getting strikes [wins]." Real, deliberate difference
+# from every other sizing lever here (conviction sizing, correlation
+# study, meta-model): this one ONLY EVER SHRINKS a position, never grows
+# it, so it carries no new downside from being on by default -- unlike
+# those, which stay off pending real trade-history evidence, there is no
+# "unproven experiment" risk to gate here. Keyed on COIN specifically
+# (not the whole account) -- a losing streak on one coin says nothing
+# about whether another coin's own signal is trustworthy right now.
+LOSS_STREAK_THROTTLE_LENGTH = _env_int("KALSHI_15M_LOSS_STREAK_THROTTLE_LENGTH", 3)
+LOSS_STREAK_SIZE_MULTIPLIER = _env_float("KALSHI_15M_LOSS_STREAK_SIZE_MULTIPLIER", 0.5)
+
+
+def compute_loss_streak_size_multiplier(coin: str, trade_log: list[dict[str, Any]] | None) -> float:
+    """1.0 (no change) unless this coin's own most recent
+    LOSS_STREAK_THROTTLE_LENGTH REAL (non-dry-run) closed trades are ALL
+    losses, in which case LOSS_STREAK_SIZE_MULTIPLIER (a real, shrunk
+    slice) -- resets back to 1.0 the moment this coin produces even one
+    real win, not on a timer or a manual reset. Pure function -- no
+    state, no side effects; scan_and_enter passes it the SAME trade_log
+    slice it already has on hand."""
+    trade_log = trade_log or []
+    coin_trades = [t for t in trade_log if t.get("coin") == coin and not t.get("dry_run")]
+    if len(coin_trades) < LOSS_STREAK_THROTTLE_LENGTH:
+        return 1.0
+    recent = coin_trades[-LOSS_STREAK_THROTTLE_LENGTH:]
+    all_losses = all(float(t.get("realized_pnl_usd") or 0.0) <= 0 for t in recent)
+    return LOSS_STREAK_SIZE_MULTIPLIER if all_losses else 1.0
+
+
 STATE_FILE = Path(os.getenv("KALSHI_15M_STATE_FILE", str(DATA_DIR / "kalshi_15m_state.json")))
 _STATE_LOCK = threading.Lock()
 
@@ -548,7 +579,12 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
         size_multiplier = 1.0
         if effective_use_conviction_sizing:
             size_multiplier = compute_conviction_size_multiplier(decision["confidence"], decision.get("effective_confidence_min"))
-        contracts = max(1, int((_account_budget_usd() * POSITION_SIZE_PCT * size_multiplier) / cost_basis))
+        # Per-symbol loss-streak throttle -- see its own comment. Always
+        # on (a pure risk-REDUCER, not an unproven experiment) -- reuses
+        # the SAME state snapshot already read above for the
+        # already-has-open-position check, no extra state read needed.
+        loss_streak_multiplier = compute_loss_streak_size_multiplier(coin, state.get("trade_log"))
+        contracts = max(1, int((_account_budget_usd() * POSITION_SIZE_PCT * size_multiplier * loss_streak_multiplier) / cost_basis))
         client_order_id = str(uuid.uuid4())
 
         order_id = None
@@ -645,6 +681,9 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
             # kalshi_15m_trade_analysis.recommend_conviction_sizing_trial's
             # own with-vs-without comparison.
             "entry_conviction_sizing_enabled": effective_use_conviction_sizing,
+            # Observability only -- confirms a throttled entry actually
+            # WAS sized down (1.0 whenever no loss streak was active).
+            "entry_loss_streak_multiplier": loss_streak_multiplier,
         }
         with _STATE_LOCK:
             state = _load_state()
@@ -845,6 +884,250 @@ def _maybe_run_batch_trade_analysis() -> dict[str, Any] | None:
         return None
 
 
+# ---------------------------------------------------------------------------
+# Early exit -- "stay or close" a still-open real position, instead of
+# always holding to settlement. Per explicit user direction: "i need a
+# multi time frame study to happen on the most frames and correlated
+# asset as well to enhance decision making and help also determine
+# staying or closing the winning position." Off by default
+# (USE_EARLY_EXIT) -- an evidence-gated EXPERIMENT, same "prove it out on
+# real trade history/backtest first" posture as every other new risk-
+# shape lever here (correlation study, meta-model, conviction sizing) --
+# this module's own docstring's "no stop-loss/take-profit... exactly one
+# exit" design was correct with ZERO real trade history to justify an
+# early-exit lever; this is that lever, built but not yet trusted with
+# real capital until real evidence says otherwise.
+#
+# Reuses the SAME model + correlation-study reassessment entry itself
+# uses (see _reassess_coin below) -- the correlation study's own
+# multi_timeframe_bullishness component already reads across 5m/15m/30m
+# return + 1h/2h/3h/4h trend + MACD + RSI (see crypto_correlation.py's
+# own _TIMEFRAME_REFERENCE_SCALES), and the peer/divergence/breadth
+# components already read the correlated-asset universe (perps' own for
+# crypto, this market's own 5-commodity study for metals) -- not a
+# separate, second model, just the SAME real signal re-run against
+# CURRENT data to ask "does the original entry thesis still hold."
+# ---------------------------------------------------------------------------
+USE_EARLY_EXIT = _env_flag("KALSHI_15M_USE_EARLY_EXIT", default=False)
+# Don't bother managing a position that was only just opened -- a few
+# seconds/minutes in, a "reassessment" is mostly noise around the same
+# decision just made, not a real change of mind.
+EARLY_EXIT_MIN_SECONDS_HELD = _env_int("KALSHI_15M_EARLY_EXIT_MIN_SECONDS_HELD", 120)
+# How far past a coin-flip (0.5) the reassessment's own confidence in the
+# OPPOSITE side must be before treating this as a real flip worth acting
+# on, not noise -- same role MODEL_CONFIDENCE_MIN's own margin plays at
+# entry, just measured as a margin above 0.5 instead of an absolute floor
+# (a reassessment doesn't need the SAME bar as a fresh entry: reversing
+# an already-taken position is a different decision than starting one).
+EARLY_EXIT_CONFIDENCE_FLIP_MARGIN = _env_float("KALSHI_15M_EARLY_EXIT_CONFIDENCE_FLIP_MARGIN", 0.08)
+
+
+def _reassess_coin(coin: str) -> dict[str, Any]:
+    """A leaner version of evaluate_candidate's own model + correlation-
+    study logic, WITHOUT the entry-only market-discovery/time-remaining
+    gates (a position being MANAGED is already open regardless of how
+    much time is left in its own window) -- used by decide_early_exit to
+    ask "does the original thesis still hold against CURRENT data?" Pure
+    function -- no state, no order placement, no side effects. Returns
+    {"model_ok": False} on the same "no trained model yet" condition
+    evaluate_candidate would; otherwise {"model_ok": True, "side":
+    "yes"/"no", "confidence": float, "correlation_score": float} -- same
+    field meanings as evaluate_candidate's own successful return."""
+    prediction = _predict_direction(coin)
+    if not prediction.get("model_ok"):
+        return {"model_ok": False}
+    probability_up = float(prediction["probability_up"])
+    side, confidence = ("yes", probability_up) if probability_up >= 0.5 else ("no", 1.0 - probability_up)
+    correlation_score = 0.0
+    if coin in kalshi_15m.KNOWN_15M_SERIES:
+        correlation_score = crypto_correlation.perps_correlation_bullishness(coin, prediction.get("feature_row"))["score"]
+    elif coin in kalshi_15m.KNOWN_15M_METALS_SERIES:
+        correlation_score = crypto_correlation.metals_correlation_bullishness(coin, prediction.get("feature_row"))["score"]
+    return {"model_ok": True, "side": side, "confidence": confidence, "correlation_score": correlation_score}
+
+
+def _exit_order_side_and_price(position_side: str, market: dict[str, Any]) -> tuple[str, float]:
+    """The mirror image of scan_and_enter's own entry side/price logic --
+    see this module's own top docstring on the order-side fix for the
+    full mechanics this depends on. Closing a "yes" position means
+    SELLING yes (side="ask") -- the exact same (side, price) pair
+    scan_and_enter's own entry path already uses to OPEN a "no" position.
+    Closing a "no" position means BUYING yes back (side="bid") -- the
+    exact same pair used to OPEN a "yes" position. Both cross the CURRENT
+    spread for a marketable IOC fill, same tradeoff entry already
+    accepts."""
+    no_ask = float(market.get("no_ask_dollars") or 0.99)
+    no_bid = float(market.get("no_bid_dollars") or 0.01)
+    if position_side == "yes":
+        return "ask", round(1.0 - no_ask, 4)
+    return "bid", round(1.0 - no_bid, 4)
+
+
+def _current_exit_value(position_side: str, market: dict[str, Any]) -> float:
+    """What one contract of the held side could be sold for RIGHT NOW, in
+    the SAME entry_price-comparable terms check_settlements' own P&L
+    formula already uses -- the current best bid for the held side
+    (crossing it guarantees an IOC fill). For "yes", that's the implied
+    yes_bid (1 - no_ask); for "no", the real no_bid field is already
+    NO-denominated directly."""
+    no_ask = float(market.get("no_ask_dollars") or 0.99)
+    no_bid = float(market.get("no_bid_dollars") or 0.01)
+    if position_side == "yes":
+        return round(1.0 - no_ask, 4)
+    return round(no_bid, 4)
+
+
+def decide_early_exit(position: dict[str, Any], reassessment: dict[str, Any], *, current_value: float) -> dict[str, Any]:
+    """Pure decision logic -- no state, no order placement. Should this
+    still-open REAL position be closed NOW instead of held to
+    settlement? See USE_EARLY_EXIT's own module-level comment for the
+    full design.
+
+    Only ever considers exiting when the reassessment has FLIPPED away
+    from the side this position actually holds -- the entry thesis
+    itself breaking down is the signal, not a fixed price target (this
+    market's own quadratic-fee/short-window economics make a plain
+    take-profit-percentage ladder a poor fit; see this module's own
+    docstring). Two distinct outcomes once a real flip is confirmed:
+      - "lock_in_profit": currently profitable -- exit now rather than
+        risk giving the gain back holding to a settlement the model no
+        longer expects to win.
+      - "cut_loss": currently losing -- exit now rather than let a
+        thesis the model itself has abandoned ride all the way to a full
+        loss at settlement."""
+    if not reassessment.get("model_ok"):
+        return {"should_exit": False, "reason": "reassessment_not_available"}
+
+    held_side = position["side"]
+    unrealized_pnl_per_contract = round(current_value - position["entry_price"], 6)
+
+    if reassessment["side"] == held_side:
+        return {
+            "should_exit": False, "reason": "thesis_still_agrees",
+            "unrealized_pnl_per_contract": unrealized_pnl_per_contract,
+        }
+
+    # Confidence here is already the probability of reassessment["side"]
+    # (see _reassess_coin's own docstring) -- how far past a coin-flip is
+    # a measure of how real this disagreement is, not noise.
+    flip_strength = round(reassessment["confidence"] - 0.5, 6)
+    if flip_strength < EARLY_EXIT_CONFIDENCE_FLIP_MARGIN:
+        return {
+            "should_exit": False, "reason": "flip_too_weak", "flip_strength": flip_strength,
+            "unrealized_pnl_per_contract": unrealized_pnl_per_contract,
+        }
+
+    reason = "lock_in_profit" if unrealized_pnl_per_contract > 0 else "cut_loss"
+    return {
+        "should_exit": True, "reason": reason, "flip_strength": flip_strength,
+        "unrealized_pnl_per_contract": unrealized_pnl_per_contract,
+    }
+
+
+def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
+    """For every real, currently-open position, asks decide_early_exit
+    whether to close it now instead of holding it to settlement -- see
+    that function's own and USE_EARLY_EXIT's own docstrings for the full
+    design. Computed and checked unconditionally (for observability, same
+    "visible even before this is ever turned on" posture the correlation
+    study already uses) -- only actually places a real closing order once
+    USE_EARLY_EXIT is on AND live trading is genuinely enabled.
+
+    Deliberately skips dry-run positions entirely -- a dry-run position
+    has no real order to close early, and its own settlement-only
+    lifecycle (check_settlements) is already a fully exercisable
+    simulation; this feature exists to protect REAL capital specifically.
+    """
+    effective_dry_run = (not LIVE_TRADING_ENABLED) if dry_run is None else dry_run
+    checks: list[dict[str, Any]] = []
+    with _STATE_LOCK:
+        state = _load_state()
+        real_positions = [p for p in (state.get("positions") or []) if not p.get("dry_run")]
+
+    for position in real_positions:
+        coin = position["coin"]
+        series_ticker = ASSET_SERIES.get(coin)
+        if not series_ticker:
+            continue
+        try:
+            market = kalshi_15m.get_current_window_market(series_ticker)
+        except Exception as exc:
+            logger.warning("[kalshi_15m_strategy] market lookup failed while managing %s: %s", coin, exc)
+            continue
+        if market is None or market.get("ticker") != position.get("ticker"):
+            # Either this position's own window already closed (settled
+            # separately, see check_settlements) or a brief gap between
+            # windows -- nothing to manage this tick.
+            continue
+
+        try:
+            opened_at = dt.datetime.fromisoformat(str(position["opened_at"]).replace("Z", "+00:00"))
+            held_seconds = (dt.datetime.now(dt.timezone.utc) - opened_at).total_seconds()
+        except Exception:
+            held_seconds = EARLY_EXIT_MIN_SECONDS_HELD  # fail open -- a parse hiccup shouldn't block management
+        if held_seconds < EARLY_EXIT_MIN_SECONDS_HELD:
+            checks.append({"coin": coin, "should_exit": False, "reason": "too_early_to_manage"})
+            continue
+
+        reassessment = _reassess_coin(coin)
+        current_value = _current_exit_value(position["side"], market)
+        decision = decide_early_exit(position, reassessment, current_value=current_value)
+        checks.append({"coin": coin, **decision})
+
+        if not USE_EARLY_EXIT or not decision.get("should_exit") or effective_dry_run:
+            continue
+
+        side_char, price = _exit_order_side_and_price(position["side"], market)
+        client_order_id = str(uuid.uuid4())
+        try:
+            order_result = kalshi_15m.create_order(
+                ticker=position["ticker"], side=side_char, count=position["count"], price=price,
+                client_order_id=client_order_id,
+            )
+            order = order_result.get("order") or order_result
+            order_id = order.get("order_id")
+        except Exception as exc:
+            logger.warning("[kalshi_15m_strategy] early-exit order placement failed for %s: %s", coin, exc)
+            checks[-1]["exit_order_failed"] = str(exc)
+            continue
+
+        filled_count = 0.0
+        try:
+            fresh_orders = kalshi_15m.get_orders(ticker=position["ticker"])
+            match = next((o for o in fresh_orders if o.get("order_id") == order_id), None)
+            if match is not None:
+                filled_count = float(match.get("fill_count_fp") or match.get("fill_count") or 0.0)
+        except Exception as exc:
+            logger.warning("[kalshi_15m_strategy] could not verify early-exit fill for %s (%s): %s", order_id, coin, exc)
+        if filled_count <= 0:
+            checks[-1]["exit_order_not_filled"] = True
+            continue
+
+        realized_pnl = round(filled_count * (current_value - position["entry_price"]), 6)
+        trade = {
+            "coin": coin, "ticker": position["ticker"], "side": position["side"], "count": filled_count,
+            "entry_price": position["entry_price"], "result": None, "realized_pnl_usd": realized_pnl,
+            "opened_at": position["opened_at"], "closed_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+            "entry_probability_up": position.get("entry_probability_up"), "entry_confidence": position.get("entry_confidence"),
+            "dry_run": False, "entry_correlation_score": position.get("entry_correlation_score"),
+            "entry_conviction_sizing_enabled": position.get("entry_conviction_sizing_enabled"),
+            "entry_loss_streak_multiplier": position.get("entry_loss_streak_multiplier"),
+            "exit_kind": "early", "exit_reason": decision["reason"],
+        }
+        with _STATE_LOCK:
+            state = _load_state()
+            by_date = state.setdefault("realized_pnl_by_date", {})
+            today = _today_str()
+            by_date[today] = round(float(by_date.get(today, 0.0)) + realized_pnl, 6)
+            state["trade_log"].append(trade)
+            state["positions"] = [p for p in state.get("positions") or [] if p.get("ticker") != position["ticker"]]
+            _save_state(state, push_durable=True)
+        checks[-1]["action"] = "closed_early"
+        checks[-1]["realized_pnl_usd"] = realized_pnl
+
+    return {"ok": True, "checks": checks}
+
+
 def check_settlements() -> dict[str, Any]:
     """For every open position, checks whether its market has actually
     settled (a PUBLIC, unauthenticated read -- see this module's own
@@ -884,6 +1167,8 @@ def check_settlements() -> dict[str, Any]:
             "entry_confidence": position.get("entry_confidence"), "dry_run": position.get("dry_run", True),
             "entry_correlation_score": position.get("entry_correlation_score"),
             "entry_conviction_sizing_enabled": position.get("entry_conviction_sizing_enabled"),
+            "entry_loss_streak_multiplier": position.get("entry_loss_streak_multiplier"),
+            "exit_kind": "settled",
         }
         # Removes this ONE settled position from a FRESHLY re-read state
         # (matched by ticker, which is unique per 15-minute window -- see

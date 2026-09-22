@@ -631,19 +631,26 @@ def _run_kalshi_15m_metals_data_collect() -> dict[str, Any]:
 
 @_locked_job("kalshi_15m_cycle", stale_after_sec=300)
 def _run_kalshi_15m_cycle() -> dict[str, Any]:
-    """Settlement check FIRST, then entry scan -- freeing a just-settled
-    coin's slot before deciding whether to enter a new position matters
-    here (unlike perps' separate fast_check/entry_scan jobs) since this
-    single combined job is this market's only cycle, see
+    """Settlement check FIRST, then early-exit management, then entry
+    scan -- freeing a just-settled OR just-early-exited coin's slot
+    before deciding whether to enter a new position matters here (unlike
+    perps' separate fast_check/entry_scan jobs) since this single
+    combined job is this market's only cycle, see
     KALSHI_15M_CYCLE_MINUTES's own comment for why latency isn't a
     concern worth two separate jobs. dry_run=False here defers the actual
     live/dry decision to kalshi_15m_strategy.LIVE_TRADING_ENABLED (see
     that module's own docstring) -- set on the live Space, order
     mechanics confirmed against a real Kalshi response, so this places
-    real orders."""
+    real orders. manage_open_positions' own USE_EARLY_EXIT is a separate,
+    still-off-by-default gate (see its own module-level comment) -- this
+    call is always made so its own decisions stay visible for
+    observability even before that flag is ever turned on."""
     settlement_result = kalshi_15m_strategy.check_settlements()
+    management_result = kalshi_15m_strategy.manage_open_positions(dry_run=False)
     entry_result = kalshi_15m_strategy.scan_and_enter(dry_run=False)
-    return {"ok": True, "settlements": settlement_result, "entries": entry_result}
+    return {
+        "ok": True, "settlements": settlement_result, "management": management_result, "entries": entry_result,
+    }
 
 
 @_locked_job("kalshi_15m_reconcile", stale_after_sec=600)

@@ -889,7 +889,10 @@ def test_evaluate_candidate_attaches_correlation_reading_for_a_crypto_coin_even_
     assert result["correlation_reason"] == "strong confirmation"
 
 
-def test_evaluate_candidate_never_calls_the_correlation_study_for_a_metals_coin(monkeypatch):
+def test_evaluate_candidate_never_calls_the_crypto_correlation_study_for_a_metals_coin(monkeypatch):
+    """A metals coin gets its OWN, separate study (metals_correlation_bullishness)
+    -- crypto's own perps_correlation_bullishness must never be called for
+    one, even though both now feed the same USE_CORRELATION_STUDY nudge."""
     monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
     monkeypatch.setattr(kalshi_15m_metals_model, "predict_direction", lambda coin: {"model_ok": True, "probability_up": 0.72})
     called = {"n": 0}
@@ -899,10 +902,14 @@ def test_evaluate_candidate_never_calls_the_correlation_study_for_a_metals_coin(
         raise AssertionError("should never be called for a metals coin")
 
     monkeypatch.setattr(crypto_correlation, "perps_correlation_bullishness", _boom)
+    monkeypatch.setattr(
+        crypto_correlation, "metals_correlation_bullishness",
+        lambda coin, row=None: {"score": 0.3, "reason": "some metals confirmation", "components": {}},
+    )
     result = kalshi_15m_strategy.evaluate_candidate("GOLD")
     assert result["ok"] is True
-    assert result["correlation_score"] == 0.0
-    assert result["correlation_reason"] is None
+    assert result["correlation_score"] == 0.3
+    assert result["correlation_reason"] == "some metals confirmation"
     assert called["n"] == 0
 
 
@@ -1047,7 +1054,7 @@ def test_scan_and_enter_records_the_entry_correlation_score_on_the_position(monk
     btc_position = next(p for p in state["positions"] if p["coin"] == "BTC")
     assert btc_position["entry_correlation_score"] == 0.4
     gold_position = next(p for p in state["positions"] if p["coin"] == "GOLD")
-    assert gold_position["entry_correlation_score"] == 0.0  # no correlation study for metals
+    assert gold_position["entry_correlation_score"] == 0.0  # metals study is genuinely empty in this test process
 
 
 def test_maybe_run_batch_trade_analysis_applies_correlation_tuning_too(monkeypatch):
@@ -1234,3 +1241,218 @@ def test_scan_and_enter_records_conviction_sizing_disabled_by_default(monkeypatc
     kalshi_15m_strategy.scan_and_enter()
     state = kalshi_15m_strategy._load_state()  # noqa: SLF001
     assert state["positions"][0]["entry_conviction_sizing_enabled"] is False
+
+
+# ---------------------------------------------------------------------------
+# Per-symbol loss-streak throttle -- per explicit user direction: "if it's
+# keep losing a certain symbol[,] retain[,] redo and reduce size until it
+# start[s] getting strikes." Always on (a pure risk-REDUCER).
+# ---------------------------------------------------------------------------
+def _loss_streak_trade(*, coin="BTC", pnl, dry_run=False):
+    return {"coin": coin, "realized_pnl_usd": pnl, "dry_run": dry_run}
+
+
+def test_loss_streak_multiplier_is_1_with_insufficient_history():
+    trades = [_loss_streak_trade(pnl=-1.0), _loss_streak_trade(pnl=-1.0)]  # only 2, floor is 3
+    assert kalshi_15m_strategy.compute_loss_streak_size_multiplier("BTC", trades) == 1.0
+
+
+def test_loss_streak_multiplier_throttles_after_3_consecutive_real_losses():
+    trades = [_loss_streak_trade(pnl=-1.0) for _ in range(3)]
+    result = kalshi_15m_strategy.compute_loss_streak_size_multiplier("BTC", trades)
+    assert result == kalshi_15m_strategy.LOSS_STREAK_SIZE_MULTIPLIER
+    assert result < 1.0
+
+
+def test_loss_streak_multiplier_resets_the_moment_a_real_win_lands():
+    trades = [_loss_streak_trade(pnl=-1.0), _loss_streak_trade(pnl=-1.0), _loss_streak_trade(pnl=1.0)]
+    assert kalshi_15m_strategy.compute_loss_streak_size_multiplier("BTC", trades) == 1.0
+
+
+def test_loss_streak_multiplier_ignores_dry_run_trades():
+    trades = [_loss_streak_trade(pnl=-1.0, dry_run=True) for _ in range(5)]
+    assert kalshi_15m_strategy.compute_loss_streak_size_multiplier("BTC", trades) == 1.0
+
+
+def test_loss_streak_multiplier_is_coin_specific():
+    trades = [_loss_streak_trade(coin="BTC", pnl=-1.0) for _ in range(3)]
+    assert kalshi_15m_strategy.compute_loss_streak_size_multiplier("BTC", trades) < 1.0
+    assert kalshi_15m_strategy.compute_loss_streak_size_multiplier("ETH", trades) == 1.0
+
+
+def test_scan_and_enter_shrinks_contracts_after_a_real_losing_streak_on_that_coin(monkeypatch):
+    monkeypatch.setattr(kalshi_15m_strategy, "MAX_CONCURRENT_POSITIONS", 1)
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market(no_ask=0.51, no_bid=0.5))
+    monkeypatch.setattr(kalshi_15m_model, "predict_direction", lambda coin: {"model_ok": True, "probability_up": 0.72})
+    monkeypatch.setattr(crypto_correlation, "perps_correlation_bullishness", lambda coin, row=None: {"score": 0.0, "reason": "neutral", "components": {}})
+    losing_trades = [{"coin": "BTC", "realized_pnl_usd": -1.0, "dry_run": False} for _ in range(3)]
+    kalshi_15m_strategy._save_state({"positions": [], "trade_log": losing_trades, "realized_pnl_by_date": {}})  # noqa: SLF001
+
+    kalshi_15m_strategy.scan_and_enter()
+
+    state = kalshi_15m_strategy._load_state()  # noqa: SLF001
+    btc_position = state["positions"][0]
+    assert btc_position["coin"] == "BTC"
+    # Without the throttle: int(100 * 0.05 / 0.5) = 10. Throttled at 0.5x: 5.
+    assert btc_position["count"] < 10
+    assert btc_position["entry_loss_streak_multiplier"] == kalshi_15m_strategy.LOSS_STREAK_SIZE_MULTIPLIER
+
+
+# ---------------------------------------------------------------------------
+# Early exit -- "stay or close" a still-open real position. Off by default
+# (USE_EARLY_EXIT); per explicit user direction: "help also determine
+# staying or closing the winning position."
+# ---------------------------------------------------------------------------
+def test_exit_order_side_and_price_for_a_yes_position():
+    market = _market(no_ask=0.60, no_bid=0.55)
+    side, price = kalshi_15m_strategy._exit_order_side_and_price("yes", market)  # noqa: SLF001
+    assert side == "ask"  # sell yes to close a long-yes position
+    assert price == pytest.approx(1.0 - 0.60)
+
+
+def test_exit_order_side_and_price_for_a_no_position():
+    market = _market(no_ask=0.60, no_bid=0.55)
+    side, price = kalshi_15m_strategy._exit_order_side_and_price("no", market)  # noqa: SLF001
+    assert side == "bid"  # buy yes back to close a short-yes ("no") position
+    assert price == pytest.approx(1.0 - 0.55)
+
+
+def test_current_exit_value_for_a_yes_position():
+    market = _market(no_ask=0.60, no_bid=0.55)
+    assert kalshi_15m_strategy._current_exit_value("yes", market) == pytest.approx(0.40)  # noqa: SLF001
+
+
+def test_current_exit_value_for_a_no_position():
+    market = _market(no_ask=0.60, no_bid=0.55)
+    assert kalshi_15m_strategy._current_exit_value("no", market) == pytest.approx(0.55)  # noqa: SLF001
+
+
+def _open_position(*, coin="BTC", side="yes", entry_price=0.5, ticker="KXBTC15M-1", opened_seconds_ago=300):
+    opened_at = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=opened_seconds_ago)).isoformat()
+    return {
+        "coin": coin, "ticker": ticker, "side": side, "count": 10.0, "entry_price": entry_price,
+        "opened_at": opened_at, "close_time": _future_close(5), "entry_probability_up": 0.7,
+        "entry_confidence": 0.7, "dry_run": False, "client_order_id": "c1", "order_id": "o1",
+        "entry_correlation_score": 0.0, "entry_conviction_sizing_enabled": False,
+        "entry_loss_streak_multiplier": 1.0,
+    }
+
+
+def test_decide_early_exit_holds_when_reassessment_unavailable():
+    result = kalshi_15m_strategy.decide_early_exit(_open_position(), {"model_ok": False}, current_value=0.6)
+    assert result["should_exit"] is False
+    assert result["reason"] == "reassessment_not_available"
+
+
+def test_decide_early_exit_holds_when_thesis_still_agrees():
+    position = _open_position(side="yes")
+    reassessment = {"model_ok": True, "side": "yes", "confidence": 0.9}
+    result = kalshi_15m_strategy.decide_early_exit(position, reassessment, current_value=0.6)
+    assert result["should_exit"] is False
+    assert result["reason"] == "thesis_still_agrees"
+
+
+def test_decide_early_exit_holds_when_the_flip_is_too_weak():
+    position = _open_position(side="yes")
+    reassessment = {"model_ok": True, "side": "no", "confidence": 0.52}  # flip_strength 0.02 < 0.08 default margin
+    result = kalshi_15m_strategy.decide_early_exit(position, reassessment, current_value=0.6)
+    assert result["should_exit"] is False
+    assert result["reason"] == "flip_too_weak"
+
+
+def test_decide_early_exit_locks_in_profit_on_a_strong_flip_while_winning():
+    position = _open_position(side="yes", entry_price=0.5)
+    reassessment = {"model_ok": True, "side": "no", "confidence": 0.75}
+    result = kalshi_15m_strategy.decide_early_exit(position, reassessment, current_value=0.7)  # currently profitable
+    assert result["should_exit"] is True
+    assert result["reason"] == "lock_in_profit"
+    assert result["unrealized_pnl_per_contract"] == pytest.approx(0.2)
+
+
+def test_decide_early_exit_cuts_the_loss_on_a_strong_flip_while_losing():
+    position = _open_position(side="yes", entry_price=0.5)
+    reassessment = {"model_ok": True, "side": "no", "confidence": 0.75}
+    result = kalshi_15m_strategy.decide_early_exit(position, reassessment, current_value=0.3)  # currently losing
+    assert result["should_exit"] is True
+    assert result["reason"] == "cut_loss"
+
+
+def test_manage_open_positions_skips_dry_run_positions_entirely(monkeypatch):
+    kalshi_15m_strategy._save_state({  # noqa: SLF001
+        "positions": [{**_open_position(), "dry_run": True}], "trade_log": [], "realized_pnl_by_date": {},
+    })
+
+    def fail_if_called(series_ticker):
+        raise AssertionError("must never look up a market for a dry-run position")
+
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", fail_if_called)
+    result = kalshi_15m_strategy.manage_open_positions()
+    assert result["checks"] == []
+
+
+def test_manage_open_positions_skips_a_position_held_too_briefly(monkeypatch):
+    position = _open_position(opened_seconds_ago=5)
+    kalshi_15m_strategy._save_state({"positions": [position], "trade_log": [], "realized_pnl_by_date": {}})  # noqa: SLF001
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market(ticker=position["ticker"]))
+
+    result = kalshi_15m_strategy.manage_open_positions()
+
+    assert result["checks"][0]["reason"] == "too_early_to_manage"
+
+
+def test_manage_open_positions_computes_but_never_places_a_real_order_when_the_flag_is_off(monkeypatch):
+    assert kalshi_15m_strategy.USE_EARLY_EXIT is False  # module default -- not touched by this test
+    position = _open_position(side="yes", entry_price=0.5)
+    kalshi_15m_strategy._save_state({"positions": [position], "trade_log": [], "realized_pnl_by_date": {}})  # noqa: SLF001
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market(ticker=position["ticker"], no_ask=0.65, no_bid=0.60))
+    monkeypatch.setattr(kalshi_15m_model, "predict_direction", lambda coin: {"model_ok": True, "probability_up": 0.2})  # flips hard to "no"
+    order_calls = []
+    monkeypatch.setattr(kalshi_15m, "create_order", lambda **kw: order_calls.append(kw))
+
+    # dry_run=False in isolation -- the ONLY thing blocking a real order
+    # here must be USE_EARLY_EXIT itself, not also the separate dry-run
+    # gate.
+    result = kalshi_15m_strategy.manage_open_positions(dry_run=False)
+
+    assert result["checks"][0]["should_exit"] is True  # computed for observability
+    assert order_calls == []  # never actually placed -- flag is off
+    state = kalshi_15m_strategy._load_state()  # noqa: SLF001
+    assert len(state["positions"]) == 1  # position untouched
+
+
+def test_manage_open_positions_closes_a_position_early_when_enabled(monkeypatch):
+    monkeypatch.setattr(kalshi_15m_strategy, "USE_EARLY_EXIT", True)
+    position = _open_position(side="yes", entry_price=0.5)
+    kalshi_15m_strategy._save_state({"positions": [position], "trade_log": [], "realized_pnl_by_date": {}})  # noqa: SLF001
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market(ticker=position["ticker"], no_ask=0.65, no_bid=0.60))
+    monkeypatch.setattr(kalshi_15m_model, "predict_direction", lambda coin: {"model_ok": True, "probability_up": 0.2})  # flips hard to "no"
+    order_calls = []
+    monkeypatch.setattr(kalshi_15m, "create_order", lambda **kw: order_calls.append(kw) or {"order": {"order_id": "exit1"}})
+    monkeypatch.setattr(kalshi_15m, "get_orders", lambda ticker=None, status=None: [{"order_id": "exit1", "fill_count_fp": "10.00"}])
+
+    result = kalshi_15m_strategy.manage_open_positions(dry_run=False)
+
+    assert len(order_calls) == 1
+    assert order_calls[0]["side"] == "ask"  # closing a "yes" position sells yes
+    assert result["checks"][0]["action"] == "closed_early"
+    state = kalshi_15m_strategy._load_state()  # noqa: SLF001
+    assert state["positions"] == []
+    trade = state["trade_log"][0]
+    assert trade["exit_kind"] == "early"
+    assert trade["exit_reason"] in ("lock_in_profit", "cut_loss")
+    assert trade["realized_pnl_usd"] == pytest.approx(10.0 * (0.35 - 0.5))  # current_value=1-0.65=0.35, entry=0.5
+
+
+def test_manage_open_positions_leaves_the_position_open_when_the_exit_order_never_fills(monkeypatch):
+    monkeypatch.setattr(kalshi_15m_strategy, "USE_EARLY_EXIT", True)
+    position = _open_position(side="yes", entry_price=0.5)
+    kalshi_15m_strategy._save_state({"positions": [position], "trade_log": [], "realized_pnl_by_date": {}})  # noqa: SLF001
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market(ticker=position["ticker"], no_ask=0.65, no_bid=0.60))
+    monkeypatch.setattr(kalshi_15m_model, "predict_direction", lambda coin: {"model_ok": True, "probability_up": 0.2})
+    monkeypatch.setattr(kalshi_15m, "create_order", lambda **kw: {"order": {"order_id": "exit1"}})
+    monkeypatch.setattr(kalshi_15m, "get_orders", lambda ticker=None, status=None: [{"order_id": "exit1", "fill_count_fp": "0.00"}])
+
+    kalshi_15m_strategy.manage_open_positions(dry_run=False)
+
+    state = kalshi_15m_strategy._load_state()  # noqa: SLF001
+    assert len(state["positions"]) == 1  # never removed -- the order never actually filled

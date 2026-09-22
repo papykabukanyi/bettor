@@ -822,33 +822,39 @@ def test_run_perps_trade_analysis_survives_a_state_read_failure(monkeypatch):
 # ---------------------------------------------------------------------------
 # kalshi_15m_cycle / kalshi_15m_train
 # ---------------------------------------------------------------------------
-def test_kalshi_15m_cycle_job_checks_settlements_before_scanning_for_entries(monkeypatch):
+def test_kalshi_15m_cycle_job_checks_settlements_then_manages_then_scans_for_entries(monkeypatch):
     from data import kalshi_15m_strategy
 
     order = []
     monkeypatch.setattr(kalshi_15m_strategy, "check_settlements", lambda: order.append("settlements") or {"ok": True, "checks": []})
+    monkeypatch.setattr(kalshi_15m_strategy, "manage_open_positions", lambda **kw: order.append("management") or {"ok": True, "checks": []})
     monkeypatch.setattr(kalshi_15m_strategy, "scan_and_enter", lambda **kw: order.append("entries") or {"ok": True, "checks": []})
 
     result = app_kalshi._run_kalshi_15m_cycle.__wrapped__()  # noqa: SLF001
 
-    assert order == ["settlements", "entries"]
+    assert order == ["settlements", "management", "entries"]
     assert result["ok"] is True
+    assert "management" in result
 
 
 def test_kalshi_15m_cycle_job_never_bypasses_the_dry_run_floor(monkeypatch):
-    """scan_and_enter is always called with dry_run=False here -- the real
-    gate is kalshi_15m_strategy.LIVE_TRADING_ENABLED's own hard floor, not
-    this job pretending to force live trading (same contract as every
-    other market's identical fast_check/entry_scan job)."""
+    """scan_and_enter/manage_open_positions are always called with
+    dry_run=False here -- the real gate is
+    kalshi_15m_strategy.LIVE_TRADING_ENABLED's own hard floor (for
+    entries) and each function's own fresh-env re-check (for real order
+    placement), not this job pretending to force live trading (same
+    contract as every other market's identical fast_check/entry_scan
+    job)."""
     from data import kalshi_15m_strategy
 
     captured = {}
     monkeypatch.setattr(kalshi_15m_strategy, "check_settlements", lambda: {"ok": True, "checks": []})
-    monkeypatch.setattr(kalshi_15m_strategy, "scan_and_enter", lambda **kw: captured.update(kw) or {"ok": True, "checks": []})
+    monkeypatch.setattr(kalshi_15m_strategy, "manage_open_positions", lambda **kw: captured.update(management=kw) or {"ok": True, "checks": []})
+    monkeypatch.setattr(kalshi_15m_strategy, "scan_and_enter", lambda **kw: captured.update(entries=kw) or {"ok": True, "checks": []})
 
     app_kalshi._run_kalshi_15m_cycle.__wrapped__()  # noqa: SLF001
 
-    assert captured == {"dry_run": False}
+    assert captured == {"management": {"dry_run": False}, "entries": {"dry_run": False}}
 
 
 def test_kalshi_15m_train_job_passes_the_real_trade_log(monkeypatch):
