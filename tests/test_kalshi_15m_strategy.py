@@ -10,7 +10,7 @@ import datetime as dt
 
 import pytest
 
-from data import kalshi_15m, kalshi_15m_metals_model, kalshi_15m_model, kalshi_15m_strategy
+from data import crypto_correlation, kalshi_15m, kalshi_15m_meta_model, kalshi_15m_metals_model, kalshi_15m_model, kalshi_15m_strategy
 
 
 @pytest.fixture(autouse=True)
@@ -620,7 +620,9 @@ def test_evaluate_candidate_confidence_min_override_raises_the_floor_above_defau
     # 0.65 clears the real module default (0.58) but not an override raised
     # to 0.70 -- proves the override, when given, takes priority.
     result = kalshi_15m_strategy.evaluate_candidate("BTC", confidence_min=0.70)
-    assert result == {"ok": False, "reason": "confidence_below_floor", "confidence": pytest.approx(0.65)}
+    assert result["ok"] is False
+    assert result["reason"] == "confidence_below_floor"
+    assert result["confidence"] == pytest.approx(0.65)
 
 
 def test_evaluate_candidate_defaults_to_the_module_floor_when_no_override_given(monkeypatch):
@@ -749,3 +751,372 @@ def test_check_settlements_triggers_the_batch_analysis_pass(monkeypatch):
 
     assert result["ok"] is True
     assert called["n"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Correlation-study confidence layer -- reuses perps' own already-running
+# in-process correlation study (crypto_correlation.perps_correlation_bullishness)
+# for kalshi_15m's crypto coins only. Off by default (USE_CORRELATION_STUDY);
+# computed and attached unconditionally for observability either way -- see
+# crypto_correlation.py's own module docstring and
+# test_perps_strategy.py's own identical test family for the pattern this
+# mirrors.
+# ---------------------------------------------------------------------------
+def test_evaluate_candidate_attaches_correlation_reading_for_a_crypto_coin_even_when_flag_off(monkeypatch):
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
+    monkeypatch.setattr(kalshi_15m_model, "predict_direction", lambda coin: {"model_ok": True, "probability_up": 0.72})
+    monkeypatch.setattr(
+        crypto_correlation, "perps_correlation_bullishness",
+        lambda coin, row=None: {"score": 0.9, "reason": "strong confirmation", "components": {}},
+    )
+    result = kalshi_15m_strategy.evaluate_candidate("BTC")
+    assert result["ok"] is True
+    assert result["correlation_score"] == 0.9
+    assert result["correlation_reason"] == "strong confirmation"
+
+
+def test_evaluate_candidate_never_calls_the_correlation_study_for_a_metals_coin(monkeypatch):
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
+    monkeypatch.setattr(kalshi_15m_metals_model, "predict_direction", lambda coin: {"model_ok": True, "probability_up": 0.72})
+    called = {"n": 0}
+
+    def _boom(coin, row=None):
+        called["n"] += 1
+        raise AssertionError("should never be called for a metals coin")
+
+    monkeypatch.setattr(crypto_correlation, "perps_correlation_bullishness", _boom)
+    result = kalshi_15m_strategy.evaluate_candidate("GOLD")
+    assert result["ok"] is True
+    assert result["correlation_score"] == 0.0
+    assert result["correlation_reason"] is None
+    assert called["n"] == 0
+
+
+def test_evaluate_candidate_correlation_confirmation_lowers_the_bar_when_flag_on(monkeypatch):
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
+    # probability_up=0.55 alone would miss the real default (0.58) by 0.03
+    # -- within CORRELATION_CONFIDENCE_MAX_ADJUSTMENT (0.06), so a maximally
+    # bullish correlation reading should be enough to clear it.
+    monkeypatch.setattr(kalshi_15m_model, "predict_direction", lambda coin: {"model_ok": True, "probability_up": 0.55})
+    monkeypatch.setattr(
+        crypto_correlation, "perps_correlation_bullishness",
+        lambda coin, row=None: {"score": 1.0, "reason": "max confirmation", "components": {}},
+    )
+    assert kalshi_15m_strategy.evaluate_candidate("BTC")["ok"] is False  # sanity: fails with the study off
+
+    result = kalshi_15m_strategy.evaluate_candidate("BTC", correlation_study_enabled=True)
+    assert result["ok"] is True
+
+
+def test_evaluate_candidate_correlation_disagreement_raises_the_bar_when_flag_on(monkeypatch):
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
+    # probability_up=0.60 alone clears the real default (0.58) -- a
+    # maximally bearish correlation reading raises the bar past it
+    # (0.58 + 0.06 = 0.64), so this must now be rejected.
+    monkeypatch.setattr(kalshi_15m_model, "predict_direction", lambda coin: {"model_ok": True, "probability_up": 0.60})
+    monkeypatch.setattr(
+        crypto_correlation, "perps_correlation_bullishness",
+        lambda coin, row=None: {"score": -1.0, "reason": "max disagreement", "components": {}},
+    )
+    assert kalshi_15m_strategy.evaluate_candidate("BTC")["ok"] is True  # sanity: passes with the study off
+
+    result = kalshi_15m_strategy.evaluate_candidate("BTC", correlation_study_enabled=True)
+    assert result["ok"] is False
+
+
+def test_evaluate_candidate_correlation_score_flips_sign_for_a_no_decision(monkeypatch):
+    """Bullish-signed at the source -- must flip for a "no" (down)
+    decision, same convention crypto_correlation.py documents for a perps
+    short: a maximally BEARISH reading should CONFIRM (lower the bar for)
+    a "no" decision, not disagree with it."""
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
+    # probability_up=0.45 -> side="no", confidence=0.55, which misses the
+    # real default (0.58) by 0.03 without help.
+    monkeypatch.setattr(kalshi_15m_model, "predict_direction", lambda coin: {"model_ok": True, "probability_up": 0.45})
+    monkeypatch.setattr(
+        crypto_correlation, "perps_correlation_bullishness",
+        lambda coin, row=None: {"score": -1.0, "reason": "max bearish confirmation", "components": {}},
+    )
+    result = kalshi_15m_strategy.evaluate_candidate("BTC", correlation_study_enabled=True)
+    assert result["ok"] is True
+    assert result["side"] == "no"
+
+
+def test_evaluate_candidate_passes_the_predictions_own_feature_row_to_the_correlation_study(monkeypatch):
+    """No second, real (candle fetch + sentiment + feature engineering)
+    latest_feature_row call for the same coin/cycle -- reuses the row
+    predict_direction already computed."""
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
+    sentinel_row = {"ret_5m": 0.01, "trend_1h": 0.02}
+    monkeypatch.setattr(
+        kalshi_15m_model, "predict_direction",
+        lambda coin: {"model_ok": True, "probability_up": 0.72, "feature_row": sentinel_row},
+    )
+    captured = {}
+
+    def _capture(coin, row=None):
+        captured["row"] = row
+        return {"score": 0.0, "reason": "neutral", "components": {}}
+
+    monkeypatch.setattr(crypto_correlation, "perps_correlation_bullishness", _capture)
+    kalshi_15m_strategy.evaluate_candidate("BTC")
+    assert captured["row"] is sentinel_row
+
+
+def test_apply_correlation_study_override_persists_only_the_fields_given(monkeypatch):
+    kalshi_15m_strategy._save_state({"positions": [], "trade_log": [], "realized_pnl_by_date": {}})  # noqa: SLF001
+
+    applied = kalshi_15m_strategy.apply_correlation_study_override(enabled=True, reason="test evidence")
+    assert applied["correlation_study_enabled"] is True
+    assert "correlation_confidence_max_adjustment" not in applied
+
+    applied2 = kalshi_15m_strategy.apply_correlation_study_override(max_adjustment=0.09, reason="more evidence")
+    assert applied2["correlation_study_enabled"] is True  # untouched by the second call
+    assert applied2["correlation_confidence_max_adjustment"] == 0.09
+
+
+def test_apply_confidence_threshold_override_and_apply_correlation_study_override_coexist(monkeypatch):
+    """Regression test for a real bug already found and fixed once in
+    perps_strategy.py's own identical pair: a wholesale state["tuning"]
+    replace in either function would silently erase the other's keys."""
+    kalshi_15m_strategy._save_state({"positions": [], "trade_log": [], "realized_pnl_by_date": {}})  # noqa: SLF001
+
+    kalshi_15m_strategy.apply_confidence_threshold_override(0.66, reason="confidence evidence")
+    kalshi_15m_strategy.apply_correlation_study_override(enabled=True, max_adjustment=0.09, reason="correlation evidence")
+
+    state = kalshi_15m_strategy._load_state()  # noqa: SLF001
+    assert state["tuning"]["model_confidence_min"] == 0.66  # survived the correlation override
+    assert state["tuning"]["correlation_study_enabled"] is True
+    assert state["tuning"]["correlation_confidence_max_adjustment"] == 0.09
+
+    kalshi_15m_strategy.apply_confidence_threshold_override(0.70, reason="more confidence evidence")
+    state = kalshi_15m_strategy._load_state()  # noqa: SLF001
+    assert state["tuning"]["model_confidence_min"] == 0.70
+    assert state["tuning"]["correlation_study_enabled"] is True  # survived the SECOND confidence override too
+    assert state["tuning"]["correlation_confidence_max_adjustment"] == 0.09
+
+
+def test_scan_and_enter_reads_the_correlation_override_from_state_tuning(monkeypatch):
+    monkeypatch.setattr(kalshi_15m_strategy, "MAX_CONCURRENT_POSITIONS", len(kalshi_15m_strategy.ASSET_SERIES))
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
+    _mock_confident_prediction(monkeypatch, probability_up=0.60)
+    monkeypatch.setattr(
+        crypto_correlation, "perps_correlation_bullishness",
+        lambda coin, row=None: {"score": -1.0, "reason": "max disagreement", "components": {}},
+    )
+    kalshi_15m_strategy._save_state({  # noqa: SLF001
+        "positions": [], "trade_log": [], "realized_pnl_by_date": {},
+        "tuning": {"correlation_study_enabled": True, "correlation_confidence_max_adjustment": 0.06},
+    })
+
+    result = kalshi_15m_strategy.scan_and_enter()
+
+    entered = {c["coin"] for c in result["checks"] if c.get("action") == "entered"}
+    # Every CRYPTO candidate rejected: 0.60 confidence - 0.06 disagreement
+    # penalty < 0.58 floor. Metals coins have no correlation study (see
+    # USE_CORRELATION_STUDY's own comment) and still enter normally at
+    # 0.60 >= the real 0.58 default.
+    assert entered.isdisjoint(kalshi_15m.KNOWN_15M_SERIES)
+    assert entered == set(kalshi_15m.KNOWN_15M_METALS_SERIES)
+
+
+def test_scan_and_enter_records_the_entry_correlation_score_on_the_position(monkeypatch):
+    monkeypatch.setattr(kalshi_15m_strategy, "MAX_CONCURRENT_POSITIONS", len(kalshi_15m_strategy.ASSET_SERIES))
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
+    _mock_confident_prediction(monkeypatch, probability_up=0.72)
+    monkeypatch.setattr(
+        crypto_correlation, "perps_correlation_bullishness",
+        lambda coin, row=None: {"score": 0.4, "reason": "some confirmation", "components": {}},
+    )
+    kalshi_15m_strategy.scan_and_enter()
+    state = kalshi_15m_strategy._load_state()  # noqa: SLF001
+    btc_position = next(p for p in state["positions"] if p["coin"] == "BTC")
+    assert btc_position["entry_correlation_score"] == 0.4
+    gold_position = next(p for p in state["positions"] if p["coin"] == "GOLD")
+    assert gold_position["entry_correlation_score"] == 0.0  # no correlation study for metals
+
+
+def test_maybe_run_batch_trade_analysis_applies_correlation_tuning_too(monkeypatch):
+    from data import kalshi_15m_trade_analysis
+
+    real_trades = [
+        {"coin": "BTC", "side": "yes", "realized_pnl_usd": 1.0, "dry_run": False, "entry_confidence": 0.6,
+         "entry_correlation_score": 0.5, "opened_at": _future_close(0), "closed_at": _future_close(0)}
+        for _ in range(5)
+    ]
+    kalshi_15m_strategy._save_state({"positions": [], "trade_log": real_trades, "realized_pnl_by_date": {}})  # noqa: SLF001
+    monkeypatch.setattr(
+        kalshi_15m_trade_analysis, "recommend_confidence_threshold",
+        lambda trade_log, *, current_threshold: {"ok": True, "should_apply": False},
+    )
+    monkeypatch.setattr(
+        kalshi_15m_trade_analysis, "recommend_correlation_study_weight",
+        lambda trade_log, *, current_enabled, current_max_adjustment: {
+            "ok": True, "should_apply": True, "action": "enable",
+            "recommended_enabled": True, "recommended_max_adjustment": current_max_adjustment,
+        },
+    )
+
+    kalshi_15m_strategy._maybe_run_batch_trade_analysis()  # noqa: SLF001
+
+    state = kalshi_15m_strategy._load_state()  # noqa: SLF001
+    assert state["tuning"]["correlation_study_enabled"] is True
+
+
+# ---------------------------------------------------------------------------
+# Meta-labeling layer (USE_META_MODEL) -- see kalshi_15m_meta_model.py's own
+# module docstring. Off by default; crypto only (no metals meta-model).
+# ---------------------------------------------------------------------------
+def test_evaluate_candidate_meta_model_disabled_by_default_never_calls_trust_score(monkeypatch):
+    assert kalshi_15m_strategy.USE_META_MODEL is False  # module default -- not touched by this test
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
+    monkeypatch.setattr(kalshi_15m_model, "predict_direction", lambda coin: {"model_ok": True, "probability_up": 0.72})
+
+    def fail_if_called(row, *, primary_probability_up):
+        raise AssertionError("must not call trust_score while USE_META_MODEL is off")
+
+    monkeypatch.setattr(kalshi_15m_meta_model, "trust_score", fail_if_called)
+    result = kalshi_15m_strategy.evaluate_candidate("BTC")
+    assert result["ok"] is True
+    assert "meta_trust_score" not in result
+
+
+def test_evaluate_candidate_meta_model_blocks_entry_on_low_trust(monkeypatch):
+    monkeypatch.setattr(kalshi_15m_strategy, "USE_META_MODEL", True)
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
+    monkeypatch.setattr(kalshi_15m_model, "predict_direction", lambda coin: {"model_ok": True, "probability_up": 0.72})
+    monkeypatch.setattr(kalshi_15m_meta_model, "trust_score", lambda row, *, primary_probability_up: 0.1)
+
+    result = kalshi_15m_strategy.evaluate_candidate("BTC")
+    assert result["ok"] is False
+    assert result["reason"] == "meta_model_trust_too_low"
+    assert result["meta_trust_score"] == 0.1
+
+
+def test_evaluate_candidate_meta_model_allows_entry_on_high_trust(monkeypatch):
+    monkeypatch.setattr(kalshi_15m_strategy, "USE_META_MODEL", True)
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
+    monkeypatch.setattr(kalshi_15m_model, "predict_direction", lambda coin: {"model_ok": True, "probability_up": 0.72})
+    monkeypatch.setattr(kalshi_15m_meta_model, "trust_score", lambda row, *, primary_probability_up: 0.9)
+
+    result = kalshi_15m_strategy.evaluate_candidate("BTC")
+    assert result["ok"] is True
+    assert result["meta_trust_score"] == 0.9
+
+
+def test_evaluate_candidate_meta_model_fails_open_with_no_trust_score_available(monkeypatch):
+    """None (no meta-model trained yet, or a row missing context
+    features) must never block an otherwise-qualifying entry."""
+    monkeypatch.setattr(kalshi_15m_strategy, "USE_META_MODEL", True)
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
+    monkeypatch.setattr(kalshi_15m_model, "predict_direction", lambda coin: {"model_ok": True, "probability_up": 0.72})
+    monkeypatch.setattr(kalshi_15m_meta_model, "trust_score", lambda row, *, primary_probability_up: None)
+
+    result = kalshi_15m_strategy.evaluate_candidate("BTC")
+    assert result["ok"] is True
+    assert "meta_trust_score" not in result
+
+
+def test_evaluate_candidate_meta_model_never_calls_trust_score_for_a_metals_coin(monkeypatch):
+    monkeypatch.setattr(kalshi_15m_strategy, "USE_META_MODEL", True)
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
+    monkeypatch.setattr(kalshi_15m_metals_model, "predict_direction", lambda coin: {"model_ok": True, "probability_up": 0.72})
+
+    def fail_if_called(row, *, primary_probability_up):
+        raise AssertionError("must not call trust_score for a metals coin -- no metals meta-model exists")
+
+    monkeypatch.setattr(kalshi_15m_meta_model, "trust_score", fail_if_called)
+    result = kalshi_15m_strategy.evaluate_candidate("GOLD")
+    assert result["ok"] is True
+
+
+# ---------------------------------------------------------------------------
+# Conviction sizing -- the one of perps' 3 position-management-trial
+# features that maps onto this market's product (see USE_CONVICTION_SIZING's
+# own comment on why scale-in/partial-exit have no kalshi_15m equivalent).
+# ---------------------------------------------------------------------------
+def test_compute_conviction_size_multiplier_returns_one_with_missing_inputs():
+    assert kalshi_15m_strategy.compute_conviction_size_multiplier(None, 0.58) == 1.0
+    assert kalshi_15m_strategy.compute_conviction_size_multiplier(0.7, None) == 1.0
+    assert kalshi_15m_strategy.compute_conviction_size_multiplier(0.7, 1.0) == 1.0  # division-by-zero guard
+
+
+def test_compute_conviction_size_multiplier_at_the_floor_is_the_min_multiplier():
+    result = kalshi_15m_strategy.compute_conviction_size_multiplier(0.58, 0.58)
+    assert result == pytest.approx(kalshi_15m_strategy.CONVICTION_SIZE_MIN_MULTIPLIER)
+
+
+def test_compute_conviction_size_multiplier_at_maximum_conviction_is_the_max_multiplier():
+    result = kalshi_15m_strategy.compute_conviction_size_multiplier(1.0, 0.58)
+    assert result == pytest.approx(kalshi_15m_strategy.CONVICTION_SIZE_MAX_MULTIPLIER)
+
+
+def test_compute_conviction_size_multiplier_is_monotonic_in_conviction():
+    low = kalshi_15m_strategy.compute_conviction_size_multiplier(0.60, 0.58)
+    high = kalshi_15m_strategy.compute_conviction_size_multiplier(0.80, 0.58)
+    assert low < high
+
+
+def test_evaluate_candidate_reports_the_effective_confidence_min_for_sizing(monkeypatch):
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
+    monkeypatch.setattr(kalshi_15m_model, "predict_direction", lambda coin: {"model_ok": True, "probability_up": 0.72})
+    result = kalshi_15m_strategy.evaluate_candidate("BTC")
+    assert result["effective_confidence_min"] == kalshi_15m_strategy.MODEL_CONFIDENCE_MIN
+
+
+def test_apply_conviction_sizing_override_persists_the_flag(monkeypatch):
+    kalshi_15m_strategy._save_state({"positions": [], "trade_log": [], "realized_pnl_by_date": {}})  # noqa: SLF001
+    applied = kalshi_15m_strategy.apply_conviction_sizing_override(enabled=True, reason="test evidence")
+    assert applied["conviction_sizing_enabled"] is True
+    state = kalshi_15m_strategy._load_state()  # noqa: SLF001
+    assert state["tuning"]["conviction_sizing_enabled"] is True
+
+
+def test_all_three_tuning_overrides_coexist(monkeypatch):
+    """Regression test extending test_apply_confidence_threshold_override_and_apply_correlation_study_override_coexist
+    to all 3 evidence-gated tunes -- none may wipe another's keys."""
+    kalshi_15m_strategy._save_state({"positions": [], "trade_log": [], "realized_pnl_by_date": {}})  # noqa: SLF001
+
+    kalshi_15m_strategy.apply_confidence_threshold_override(0.66, reason="confidence evidence")
+    kalshi_15m_strategy.apply_correlation_study_override(enabled=True, max_adjustment=0.09, reason="correlation evidence")
+    kalshi_15m_strategy.apply_conviction_sizing_override(enabled=True, reason="sizing evidence")
+
+    state = kalshi_15m_strategy._load_state()  # noqa: SLF001
+    tuning = state["tuning"]
+    assert tuning["model_confidence_min"] == 0.66
+    assert tuning["correlation_study_enabled"] is True
+    assert tuning["correlation_confidence_max_adjustment"] == 0.09
+    assert tuning["conviction_sizing_enabled"] is True
+
+
+def test_scan_and_enter_sizes_a_high_conviction_entry_larger_when_enabled(monkeypatch):
+    monkeypatch.setattr(kalshi_15m_strategy, "MAX_CONCURRENT_POSITIONS", 1)
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market(no_ask=0.51, no_bid=0.5))
+    monkeypatch.setattr(kalshi_15m_model, "predict_direction", lambda coin: {"model_ok": True, "probability_up": 0.99})
+    monkeypatch.setattr(crypto_correlation, "perps_correlation_bullishness", lambda coin, row=None: {"score": 0.0, "reason": "neutral", "components": {}})
+    # LIVE_TRADING_ENABLED stays False (module default) -- _account_budget_usd()
+    # then returns its fixed 100.0 placeholder with no real network call,
+    # which is exactly the deterministic budget this test's own math below
+    # assumes.
+
+    kalshi_15m_strategy._save_state({  # noqa: SLF001
+        "positions": [], "trade_log": [], "realized_pnl_by_date": {}, "tuning": {"conviction_sizing_enabled": True},
+    })
+    kalshi_15m_strategy.scan_and_enter(dry_run=True)
+    state = kalshi_15m_strategy._load_state()  # noqa: SLF001
+    entered = state["positions"][0]
+
+    # Without conviction sizing, count would be int(100 * 0.05 / 0.5) = 10.
+    # At max conviction (probability_up=0.99 vs a 0.58 floor), the
+    # multiplier is CONVICTION_SIZE_MAX_MULTIPLIER (1.5x) -> 15.
+    assert entered["count"] > 10
+    assert entered["entry_conviction_sizing_enabled"] is True
+
+
+def test_scan_and_enter_records_conviction_sizing_disabled_by_default(monkeypatch):
+    monkeypatch.setattr(kalshi_15m_strategy, "MAX_CONCURRENT_POSITIONS", 1)
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
+    monkeypatch.setattr(kalshi_15m_model, "predict_direction", lambda coin: {"model_ok": True, "probability_up": 0.72})
+    kalshi_15m_strategy.scan_and_enter()
+    state = kalshi_15m_strategy._load_state()  # noqa: SLF001
+    assert state["positions"][0]["entry_conviction_sizing_enabled"] is False

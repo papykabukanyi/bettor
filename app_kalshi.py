@@ -105,9 +105,9 @@ if str(SRC_DIR) not in sys.path:
 
 from config import et_today
 from data import (
-    ai_monitor, crypto_news, kalshi_15m, kalshi_15m_data, kalshi_15m_metals_data, kalshi_15m_metals_model,
-    kalshi_15m_model, kalshi_15m_strategy, perps_data, perps_meta_model, perps_model, perps_strategy,
-    perps_trade_analysis, threads_client, threads_post,
+    ai_monitor, crypto_news, kalshi_15m, kalshi_15m_data, kalshi_15m_meta_model, kalshi_15m_metals_data,
+    kalshi_15m_metals_model, kalshi_15m_model, kalshi_15m_strategy, perps_data, perps_meta_model, perps_model,
+    perps_strategy, perps_trade_analysis, threads_client, threads_post,
 )
 
 # Real production bug found and fixed on the sibling stocks server (now
@@ -663,6 +663,21 @@ def _run_kalshi_15m_train() -> dict[str, Any]:
     except Exception as exc:
         logger.warning("[app_kalshi] kalshi_15m metals training failed: %s", exc)
         metals_result = {"ok": False, "error": str(exc)}
+
+    # Meta-labeling (see kalshi_15m_meta_model.py's own module docstring) --
+    # fully separate and best-effort: must never affect this job's own
+    # primary result either way, same pattern _run_perps_train's own
+    # identical call uses. Crypto only (see that module's docstring on
+    # why); only worth attempting once a fresh primary crypto model
+    # actually exists to build out-of-fold labels from.
+    # KALSHI_15M_USE_META_MODEL stays off by default regardless of whether
+    # this succeeds -- training it here just keeps a fresh one available
+    # on HF for offline backtest validation before that flag is turned on.
+    if crypto_result.get("ok"):
+        try:
+            kalshi_15m_meta_model.train_meta_model()
+        except Exception as exc:
+            logger.warning("[app_kalshi] kalshi_15m meta-model training failed (non-fatal): %s", exc)
     return {"ok": True, "crypto": crypto_result, "metals": metals_result}
 
 

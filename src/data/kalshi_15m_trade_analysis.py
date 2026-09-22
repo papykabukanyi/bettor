@@ -31,11 +31,14 @@ window closes and it settles"):
 Reuses kalshi_15m_model.py's/kalshi_15m_metals_model.py's own EXISTING
 win/loss reweighting during training (`_trade_outcome_sample_weight`,
 already live in both) -- that's the silent TRAINING half of "learn from
-losses"; this module is the human/AI-readable REPORTING half, plus the
-one evidence-gated LIVE lever every sibling module already has:
-recommend_confidence_threshold, applied via
-kalshi_15m_strategy.apply_confidence_threshold_override. Neither half
-replaces the other.
+losses"; this module is the human/AI-readable REPORTING half, plus THREE
+evidence-gated LIVE levers every sibling module already has some version
+of: recommend_confidence_threshold (confidence floor),
+recommend_correlation_study_weight (the chart-study confidence nudge),
+and recommend_conviction_sizing_trial (position sizing) -- applied via
+kalshi_15m_strategy.apply_confidence_threshold_override/
+apply_correlation_study_override/apply_conviction_sizing_override
+respectively. None of these four replace each other.
 
 Pure analysis over data already collected -- no network calls, no state
 mutation.
@@ -130,6 +133,177 @@ def recommend_confidence_threshold(trade_log: list[dict[str, Any]] | None, *, cu
         "ok": True, "should_apply": True, "current_threshold": current_threshold,
         "recommended_threshold": new_threshold, "baseline": baseline_stats, "candidate": best_candidate["stats"],
     }
+
+
+# Same evidence-gated tuning as perps_trade_analysis.py's own identical
+# recommend_correlation_study_weight (see its docstring for the full
+# rationale) -- does real closed-trade history show the chart-study layer
+# (kalshi_15m_strategy.evaluate_candidate's own correlation_score,
+# captured on every trade regardless of whether the study was even ON at
+# entry time) is actually helping? Crypto trades only in practice (no
+# correlation study exists for metals -- see USE_CORRELATION_STUDY's own
+# comment -- so metals trades all carry entry_correlation_score == 0.0
+# and land in the "baseline" bucket, never "agreed").
+CORRELATION_TUNING_MIN_TRADES = 15
+CORRELATION_TUNING_AGREEMENT_THRESHOLD = 0.15
+CORRELATION_TUNING_MAX_STEP = 0.03
+CORRELATION_TUNING_MAX_ADJUSTMENT_CEILING = 0.15  # never let evidence alone drive this arbitrarily high
+
+
+def recommend_correlation_study_weight(
+    trade_log: list[dict[str, Any]] | None, *, current_enabled: bool, current_max_adjustment: float,
+) -> dict[str, Any]:
+    """Does real closed-trade history show the chart-study layer is
+    actually helping -- trades where it agreed with the side actually
+    taken outperforming trades where it didn't (or was neutral), with
+    enough real trades on BOTH sides to trust the comparison? Three
+    possible outcomes, same "only move on real evidence" posture as
+    recommend_confidence_threshold above:
+      - should_apply=False, reason="insufficient_trade_history": not
+        enough real trades in one or both buckets yet.
+      - should_apply=True, action="enable"/"increase_weight": the
+        "agreed" bucket clearly outperforms -- turn it on, or trust it a
+        bit more if already on.
+      - should_apply=True, action="disable": the "agreed" bucket clearly
+        UNDERperforms while currently enabled -- real evidence it's
+        actively hurting, not just unproven yet."""
+    trade_log = trade_log or []
+    trades = [t for t in trade_log if not t.get("dry_run") and t.get("entry_correlation_score") is not None]
+
+    def _agreement(t: dict[str, Any]) -> float:
+        # Bullish-signed at capture time -- flip for "no", same convention
+        # evaluate_candidate's own side_correlation_score uses, so
+        # "agreement" always means "favored the side this trade actually
+        # took."
+        score = float(t["entry_correlation_score"])
+        return score if t.get("side", "yes") == "yes" else -score
+
+    agreed = [t for t in trades if _agreement(t) >= CORRELATION_TUNING_AGREEMENT_THRESHOLD]
+    baseline = [t for t in trades if _agreement(t) < CORRELATION_TUNING_AGREEMENT_THRESHOLD]
+    agreed_stats = _bucket_stats(agreed)
+    baseline_stats = _bucket_stats(baseline)
+
+    if agreed_stats["trades"] < CORRELATION_TUNING_MIN_TRADES or baseline_stats["trades"] < CORRELATION_TUNING_MIN_TRADES:
+        return {
+            "ok": True, "should_apply": False, "reason": "insufficient_trade_history",
+            "current_enabled": current_enabled, "current_max_adjustment": current_max_adjustment,
+            "agreed": agreed_stats, "baseline": baseline_stats,
+        }
+
+    improves_pnl = agreed_stats["avg_pnl_usd"] > baseline_stats["avg_pnl_usd"]
+    improves_win_rate = agreed_stats["win_rate"] >= baseline_stats["win_rate"]
+    if improves_pnl and improves_win_rate:
+        if not current_enabled:
+            return {
+                "ok": True, "should_apply": True, "action": "enable",
+                "recommended_enabled": True, "recommended_max_adjustment": current_max_adjustment,
+                "agreed": agreed_stats, "baseline": baseline_stats,
+            }
+        new_max_adjustment = min(
+            round(current_max_adjustment + CORRELATION_TUNING_MAX_STEP, 4), CORRELATION_TUNING_MAX_ADJUSTMENT_CEILING,
+        )
+        if new_max_adjustment <= current_max_adjustment:
+            return {
+                "ok": True, "should_apply": False, "reason": "already_at_ceiling",
+                "current_enabled": current_enabled, "current_max_adjustment": current_max_adjustment,
+                "agreed": agreed_stats, "baseline": baseline_stats,
+            }
+        return {
+            "ok": True, "should_apply": True, "action": "increase_weight",
+            "recommended_enabled": True, "recommended_max_adjustment": new_max_adjustment,
+            "agreed": agreed_stats, "baseline": baseline_stats,
+        }
+
+    worsens_pnl = agreed_stats["avg_pnl_usd"] < baseline_stats["avg_pnl_usd"]
+    worsens_win_rate = agreed_stats["win_rate"] < baseline_stats["win_rate"]
+    if worsens_pnl and worsens_win_rate:
+        if current_enabled:
+            return {
+                "ok": True, "should_apply": True, "action": "disable",
+                "recommended_enabled": False, "recommended_max_adjustment": current_max_adjustment,
+                "agreed": agreed_stats, "baseline": baseline_stats,
+            }
+        return {
+            "ok": True, "should_apply": False, "reason": "disabled_and_evidence_confirms_that",
+            "current_enabled": current_enabled, "current_max_adjustment": current_max_adjustment,
+            "agreed": agreed_stats, "baseline": baseline_stats,
+        }
+
+    return {
+        "ok": True, "should_apply": False, "reason": "no_clear_signal",
+        "current_enabled": current_enabled, "current_max_adjustment": current_max_adjustment,
+        "agreed": agreed_stats, "baseline": baseline_stats,
+    }
+
+
+# Same evidence-gated trial as perps_trade_analysis.recommend_position_management_trial
+# (see its docstring for the full rationale), scoped down to the ONE
+# feature that actually maps onto this market's product -- conviction
+# sizing (see kalshi_15m_strategy.USE_CONVICTION_SIZING's own comment on
+# why scale-in/partial-exit have no kalshi_15m equivalent at all). A
+# single dedicated function rather than perps' generalized feature-name-
+# keyed dispatcher: with only one feature in this category, that
+# generality would be pure overhead here.
+CONVICTION_SIZING_TRIAL_MIN_TRADES = 20  # needed in EACH bucket before trusting a with-vs-without comparison
+CONVICTION_SIZING_MIN_HISTORY_TO_START = 30  # real trades (all with it OFF) before even proposing a trial
+
+
+def recommend_conviction_sizing_trial(trade_log: list[dict[str, Any]] | None, *, current_enabled: bool) -> dict[str, Any]:
+    """Reads entry_conviction_sizing_enabled off each real trade (see
+    kalshi_15m_strategy.scan_and_enter's own position dict) to split
+    closed trades into "entered while this was ON" vs "entered while this
+    was OFF", comparing avg P&L and win rate between them once both sides
+    have enough real trades. Four possible outcomes, same posture as
+    recommend_correlation_study_weight above:
+      - should_apply=True, action="start_trial": nothing has ever been
+        enabled yet, but there's enough overall real trade history to
+        justify trying it.
+      - should_apply=False, reason="insufficient_trade_history": not
+        enough real trades exist yet in one or both buckets.
+      - should_apply=False, reason="confirmed_enabled" /
+        "evidence_favors_enabling_but_currently_off": the "with" cohort
+        clearly wins -- reports it, never auto-(re)enables from here.
+      - should_apply=True, action="disable": the "with" cohort clearly
+        LOSES while currently enabled -- real evidence it's hurting."""
+    trade_log = trade_log or []
+    real_trades = [t for t in trade_log if not t.get("dry_run") and t.get("entry_conviction_sizing_enabled") is not None]
+    with_feature = [t for t in real_trades if t.get("entry_conviction_sizing_enabled") is True]
+    without_feature = [t for t in real_trades if t.get("entry_conviction_sizing_enabled") is False]
+    with_stats = _bucket_stats(with_feature)
+    without_stats = _bucket_stats(without_feature)
+
+    if not with_feature:
+        if not current_enabled and without_stats["trades"] >= CONVICTION_SIZING_MIN_HISTORY_TO_START:
+            return {
+                "ok": True, "should_apply": True, "action": "start_trial",
+                "recommended_enabled": True, "with_feature": with_stats, "without_feature": without_stats,
+            }
+        return {
+            "ok": True, "should_apply": False, "reason": "insufficient_trade_history",
+            "with_feature": with_stats, "without_feature": without_stats,
+        }
+
+    if with_stats["trades"] < CONVICTION_SIZING_TRIAL_MIN_TRADES or without_stats["trades"] < CONVICTION_SIZING_TRIAL_MIN_TRADES:
+        return {
+            "ok": True, "should_apply": False, "reason": "insufficient_trade_history",
+            "with_feature": with_stats, "without_feature": without_stats,
+        }
+
+    improves_pnl = with_stats["avg_pnl_usd"] > without_stats["avg_pnl_usd"]
+    improves_win_rate = with_stats["win_rate"] >= without_stats["win_rate"]
+    if improves_pnl and improves_win_rate:
+        reason = "confirmed_enabled" if current_enabled else "evidence_favors_enabling_but_currently_off"
+        return {"ok": True, "should_apply": False, "reason": reason, "with_feature": with_stats, "without_feature": without_stats}
+
+    worsens_pnl = with_stats["avg_pnl_usd"] < without_stats["avg_pnl_usd"]
+    worsens_win_rate = with_stats["win_rate"] < without_stats["win_rate"]
+    if worsens_pnl and worsens_win_rate and current_enabled:
+        return {
+            "ok": True, "should_apply": True, "action": "disable",
+            "recommended_enabled": False, "with_feature": with_stats, "without_feature": without_stats,
+        }
+
+    return {"ok": True, "should_apply": False, "reason": "no_clear_signal", "with_feature": with_stats, "without_feature": without_stats}
 
 
 MIN_BUCKET_TRADES = 5

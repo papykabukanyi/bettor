@@ -901,6 +901,62 @@ def test_kalshi_15m_train_job_survives_a_state_read_failure(monkeypatch):
     assert captured["trade_log"] is None
 
 
+# ── Meta-labeling training (see kalshi_15m_meta_model.py's own module
+# docstring) -- additive and best-effort: must never affect this job's
+# own primary result either way. Mirrors _run_perps_train's own identical
+# 3-test coverage. ────────────────────────────────────────────────────
+
+def test_run_kalshi_15m_train_also_trains_the_meta_model_after_a_successful_primary_train(monkeypatch):
+    from data import kalshi_15m_meta_model, kalshi_15m_metals_model, kalshi_15m_model, kalshi_15m_strategy
+
+    monkeypatch.setattr(kalshi_15m_strategy, "_load_state", lambda: {"trade_log": []})
+    monkeypatch.setattr(kalshi_15m_model, "train_model", lambda **kw: {"ok": True, "model_type": "random_forest"})
+    monkeypatch.setattr(kalshi_15m_metals_model, "train_model", lambda **kw: {"ok": True})
+    called = []
+    monkeypatch.setattr(kalshi_15m_meta_model, "train_meta_model", lambda **kw: called.append(kw) or {"ok": True})
+
+    result = app_kalshi._run_kalshi_15m_train.__wrapped__()  # noqa: SLF001
+
+    assert result["ok"] is True
+    assert len(called) == 1
+
+
+def test_run_kalshi_15m_train_skips_the_meta_model_when_the_primary_crypto_train_failed(monkeypatch):
+    """Nothing new to build out-of-fold labels from without a fresh
+    primary CRYPTO model -- must not even attempt it (a metals-only
+    success is not enough; no metals meta-model exists)."""
+    from data import kalshi_15m_meta_model, kalshi_15m_metals_model, kalshi_15m_model, kalshi_15m_strategy
+
+    monkeypatch.setattr(kalshi_15m_strategy, "_load_state", lambda: {"trade_log": []})
+    monkeypatch.setattr(kalshi_15m_model, "train_model", lambda **kw: {"ok": False, "reason": "insufficient_rows"})
+    monkeypatch.setattr(kalshi_15m_metals_model, "train_model", lambda **kw: {"ok": True})
+
+    def fail_if_called(**kw):
+        raise AssertionError("must not train the meta-model after a failed primary crypto train")
+
+    monkeypatch.setattr(kalshi_15m_meta_model, "train_meta_model", fail_if_called)
+
+    app_kalshi._run_kalshi_15m_train.__wrapped__()  # noqa: SLF001
+
+
+def test_run_kalshi_15m_train_survives_a_meta_model_training_failure(monkeypatch):
+    """Best-effort only -- a meta-model training crash must never take
+    down the primary job's own (already-successful) result."""
+    from data import kalshi_15m_meta_model, kalshi_15m_metals_model, kalshi_15m_model, kalshi_15m_strategy
+
+    monkeypatch.setattr(kalshi_15m_strategy, "_load_state", lambda: {"trade_log": []})
+    monkeypatch.setattr(kalshi_15m_model, "train_model", lambda **kw: {"ok": True, "model_type": "random_forest"})
+    monkeypatch.setattr(kalshi_15m_metals_model, "train_model", lambda **kw: {"ok": True})
+
+    def raise_error(**kw):
+        raise RuntimeError("simulated meta-model training crash")
+
+    monkeypatch.setattr(kalshi_15m_meta_model, "train_meta_model", raise_error)
+
+    result = app_kalshi._run_kalshi_15m_train.__wrapped__()  # noqa: SLF001
+    assert result["ok"] is True
+
+
 # ---------------------------------------------------------------------------
 # kalshi_15m_torch_train -- custom PyTorch MLP challenger, crypto only
 # (metals excluded for now -- see KALSHI_15M_TORCH_TRAIN_HOUR_ET's own

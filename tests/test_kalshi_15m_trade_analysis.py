@@ -1,9 +1,24 @@
-"""Post-trade win/loss analysis for Kalshi's 15-minute markets. Synthetic
-trade_log data only -- pure computation over dicts, no network/state/model
-involved. See kalshi_15m_trade_analysis.py's own module docstring for the
-two deliberate differences from every sibling *_trade_analysis.py module:
-no exit_reason bucket (there's only one exit here -- settlement), and a
-NEW `side` (yes/no) bucket this account's own real order-side bug makes
+"""Post-trade win/loss analysis for Kalshi's 15-minute markets.
+
+This file tests kalshi_15m_trade_analysis.py's own pure functions in
+isolation, on synthetic trade_log dicts -- the SAME testing convention
+every sibling *_trade_analysis.py module's own test file already uses
+(perps/options/crypto/stocks), so these tests run instantly and
+deterministically in CI with no live Kalshi account, HF credentials, or
+trained model required. That is a property of THIS TEST FILE only, not
+of the feature: in production, kalshi_15m_strategy.check_settlements
+calls these same functions with the REAL trade_log (real settled trades,
+real model confidence scores, real correlation-study readings) every
+time a trade closes, and a positive result
+(apply_confidence_threshold_override/apply_correlation_study_override)
+writes back into the REAL durable state that scan_and_enter reads on its
+next real live cycle -- see kalshi_15m_strategy.py's own module docstring
+and _maybe_run_batch_trade_analysis for that wiring.
+
+See kalshi_15m_trade_analysis.py's own module docstring for the two
+deliberate differences from every sibling *_trade_analysis.py module: no
+exit_reason bucket (there's only one exit here -- settlement), and a NEW
+`side` (yes/no) bucket this account's own real order-side bug makes
 genuinely worth watching."""
 from __future__ import annotations
 
@@ -140,6 +155,127 @@ def test_recommend_confidence_threshold_ignores_dry_run_and_missing_confidence_t
     result = k15ta.recommend_confidence_threshold(trades, current_threshold=0.58)
     assert result["should_apply"] is False
     assert result["trades_at_current"] == 0
+
+
+# ---------------------------------------------------------------------------
+# recommend_correlation_study_weight -- same evidence-gated posture, keyed
+# on entry_correlation_score (bullish-signed, flipped for "no" -- same
+# convention kalshi_15m_strategy.evaluate_candidate's own
+# side_correlation_score uses).
+# ---------------------------------------------------------------------------
+def _corr_trade(*, side: str = "yes", pnl: float, score: float, dry_run: bool = False) -> dict:
+    return {"coin": "BTC", "side": side, "realized_pnl_usd": pnl, "entry_correlation_score": score, "dry_run": dry_run}
+
+
+def test_recommend_correlation_study_weight_does_not_apply_with_thin_history():
+    trades = [_corr_trade(pnl=1.0, score=0.5) for _ in range(5)]
+    result = k15ta.recommend_correlation_study_weight(trades, current_enabled=False, current_max_adjustment=0.06)
+    assert result["should_apply"] is False
+    assert result["reason"] == "insufficient_trade_history"
+
+
+def test_recommend_correlation_study_weight_recommends_enabling_when_agreement_clearly_wins():
+    agreed = [_corr_trade(side="yes", pnl=2.0, score=0.8) for _ in range(15)]  # agrees with "yes"
+    baseline = [_corr_trade(side="yes", pnl=-0.5, score=0.0) for _ in range(15)]  # neutral/disagreeing
+    result = k15ta.recommend_correlation_study_weight(agreed + baseline, current_enabled=False, current_max_adjustment=0.06)
+    assert result["should_apply"] is True
+    assert result["action"] == "enable"
+    assert result["recommended_enabled"] is True
+
+
+def test_recommend_correlation_study_weight_increases_weight_when_already_enabled_and_winning():
+    agreed = [_corr_trade(side="yes", pnl=2.0, score=0.8) for _ in range(15)]
+    baseline = [_corr_trade(side="yes", pnl=-0.5, score=0.0) for _ in range(15)]
+    result = k15ta.recommend_correlation_study_weight(agreed + baseline, current_enabled=True, current_max_adjustment=0.06)
+    assert result["should_apply"] is True
+    assert result["action"] == "increase_weight"
+    assert result["recommended_max_adjustment"] > 0.06
+
+
+def test_recommend_correlation_study_weight_recommends_disabling_when_agreement_clearly_loses():
+    agreed = [_corr_trade(side="yes", pnl=-2.0, score=0.8) for _ in range(15)]  # agrees but LOSES
+    baseline = [_corr_trade(side="yes", pnl=1.0, score=0.0) for _ in range(15)]
+    result = k15ta.recommend_correlation_study_weight(agreed + baseline, current_enabled=True, current_max_adjustment=0.06)
+    assert result["should_apply"] is True
+    assert result["action"] == "disable"
+    assert result["recommended_enabled"] is False
+
+
+def test_recommend_correlation_study_weight_flips_sign_for_a_no_side_trade():
+    """A "no" trade with a NEGATIVE correlation score is the score
+    AGREEING with the side actually taken (bearish-signed for a "no")."""
+    agreed = [_corr_trade(side="no", pnl=2.0, score=-0.8) for _ in range(15)]
+    baseline = [_corr_trade(side="no", pnl=-0.5, score=0.0) for _ in range(15)]
+    result = k15ta.recommend_correlation_study_weight(agreed + baseline, current_enabled=False, current_max_adjustment=0.06)
+    assert result["should_apply"] is True
+    assert result["action"] == "enable"
+
+
+def test_recommend_correlation_study_weight_ignores_dry_run_and_missing_score_trades():
+    trades = [_corr_trade(pnl=1.0, score=0.8, dry_run=True)] * 20
+    trades += [{"coin": "BTC", "side": "yes", "realized_pnl_usd": 1.0, "dry_run": False}] * 20  # no entry_correlation_score
+    result = k15ta.recommend_correlation_study_weight(trades, current_enabled=False, current_max_adjustment=0.06)
+    assert result["should_apply"] is False
+    assert result["reason"] == "insufficient_trade_history"
+
+
+# ---------------------------------------------------------------------------
+# recommend_conviction_sizing_trial -- same evidence-gated trial as
+# perps' own recommend_position_management_trial, scoped to the ONE
+# feature (conviction sizing) that maps onto kalshi_15m's product.
+# ---------------------------------------------------------------------------
+def _cs_trade(*, pnl: float, enabled: bool | None) -> dict:
+    return {"coin": "BTC", "side": "yes", "realized_pnl_usd": pnl, "entry_conviction_sizing_enabled": enabled, "dry_run": False}
+
+
+def test_recommend_conviction_sizing_trial_proposes_a_start_trial_with_enough_history():
+    trades = [_cs_trade(pnl=1.0, enabled=False) for _ in range(30)]
+    result = k15ta.recommend_conviction_sizing_trial(trades, current_enabled=False)
+    assert result["should_apply"] is True
+    assert result["action"] == "start_trial"
+    assert result["recommended_enabled"] is True
+
+
+def test_recommend_conviction_sizing_trial_does_not_propose_a_trial_below_the_history_floor():
+    trades = [_cs_trade(pnl=1.0, enabled=False) for _ in range(10)]
+    result = k15ta.recommend_conviction_sizing_trial(trades, current_enabled=False)
+    assert result["should_apply"] is False
+    assert result["reason"] == "insufficient_trade_history"
+
+
+def test_recommend_conviction_sizing_trial_confirms_enabled_when_evidence_favors_it():
+    with_feature = [_cs_trade(pnl=2.0, enabled=True) for _ in range(20)]
+    without_feature = [_cs_trade(pnl=1.0, enabled=False) for _ in range(20)]
+    result = k15ta.recommend_conviction_sizing_trial(with_feature + without_feature, current_enabled=True)
+    assert result["should_apply"] is False
+    assert result["reason"] == "confirmed_enabled"
+
+
+def test_recommend_conviction_sizing_trial_reports_favoring_enabling_when_currently_off():
+    with_feature = [_cs_trade(pnl=2.0, enabled=True) for _ in range(20)]
+    without_feature = [_cs_trade(pnl=1.0, enabled=False) for _ in range(20)]
+    result = k15ta.recommend_conviction_sizing_trial(with_feature + without_feature, current_enabled=False)
+    assert result["should_apply"] is False
+    assert result["reason"] == "evidence_favors_enabling_but_currently_off"
+
+
+def test_recommend_conviction_sizing_trial_recommends_disabling_when_evidence_turns_against_it():
+    with_feature = [_cs_trade(pnl=-1.0, enabled=True) for _ in range(20)]
+    without_feature = [_cs_trade(pnl=1.0, enabled=False) for _ in range(20)]
+    result = k15ta.recommend_conviction_sizing_trial(with_feature + without_feature, current_enabled=True)
+    assert result["should_apply"] is True
+    assert result["action"] == "disable"
+    assert result["recommended_enabled"] is False
+
+
+def test_recommend_conviction_sizing_trial_ignores_dry_run_and_missing_flag_trades():
+    trades = [_cs_trade(pnl=1.0, enabled=True)] * 5
+    for t in trades:
+        t["dry_run"] = True
+    trades += [{"coin": "BTC", "side": "yes", "realized_pnl_usd": 1.0, "dry_run": False}] * 30  # no entry_conviction_sizing_enabled
+    result = k15ta.recommend_conviction_sizing_trial(trades, current_enabled=False)
+    assert result["should_apply"] is False
+    assert result["reason"] == "insufficient_trade_history"
 
 
 # ---------------------------------------------------------------------------

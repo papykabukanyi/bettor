@@ -663,4 +663,12 @@ def predict_direction(symbol: str) -> dict[str, Any]:
     return {
         "model_ok": True, "symbol": symbol, "direction": direction, "probability_up": proba_up,
         "current_price": row.get("current_price"), "model_type": meta.get("model_type"),
+        # The full feature row, for kalshi_15m_strategy.evaluate_candidate's
+        # own correlation-study confidence layer (multi_timeframe_bullishness
+        # needs the same ret_5m/trend_1h/etc. fields this row already has --
+        # see crypto_correlation.py's own docstring) -- avoids a SECOND,
+        # real, non-free latest_feature_row call (candle fetch + sentiment +
+        # feature engineering) for the exact same coin on the exact same
+        # cycle.
+        "feature_row": row,
     }

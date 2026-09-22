@@ -49,7 +49,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from data import kalshi_15m, kalshi_15m_metals_model, kalshi_15m_model
+from data import crypto_correlation, kalshi_15m, kalshi_15m_meta_model, kalshi_15m_metals_model, kalshi_15m_model
 from server_common import DATA_DIR
 
 logger = logging.getLogger(__name__)
@@ -117,6 +117,71 @@ MAX_CONCURRENT_POSITIONS = _env_int("KALSHI_15M_MAX_CONCURRENT_POSITIONS", 5)
 # docstring) makes this worse here than perps' linear one. A third of the
 # window (5 of 15 minutes) still open is the floor for a real entry.
 MIN_SECONDS_TO_CLOSE_FOR_ENTRY = _env_int("KALSHI_15M_MIN_SECONDS_TO_CLOSE_FOR_ENTRY", 300)
+
+# Chart-study confidence layer -- see crypto_correlation.py's own module
+# docstring and perps_strategy.py's identical USE_CORRELATION_STUDY
+# comment for the full rationale. Off by default there too (an evidence-
+# gated EXPERIMENT, not a proven win, even on perps -- see
+# recommend_correlation_study_weight's own docstring) -- same posture
+# here: computed and attached unconditionally for observability, only
+# actually nudges the entry gate once real trade history earns it via
+# apply_correlation_study_override.
+#
+# Crypto coins ONLY (BTC/ETH/SOL/XRP/DOGE) -- reuses perps' own already-
+# running in-process correlation study (get_perps_study(), refreshed by
+# perps_data.py's own data-collect job, already running in this same
+# merged process) rather than building a new one from scratch: this
+# market's crypto model already proxies off perps' own data pipeline
+# (see kalshi_15m_data.latest_feature_row's own docstring), so perps'
+# instrument universe already covers these exact 5 coins. No equivalent
+# study exists for metals (gold/silver/copper) -- that component simply
+# reads neutral for those, same as any other missing signal here.
+USE_CORRELATION_STUDY = _env_flag("KALSHI_15M_USE_CORRELATION_STUDY", default=False)
+CORRELATION_CONFIDENCE_MAX_ADJUSTMENT = _env_float("KALSHI_15M_CORRELATION_CONFIDENCE_MAX_ADJUSTMENT", 0.06)
+
+# Meta-labeling trust gate -- see kalshi_15m_meta_model.py's own module
+# docstring for the full design. Off by default, same as perps'
+# identical PERPS_USE_META_MODEL: a static flag pending real backtest
+# validation via kalshi_15m_backtest.py, not evidence-tuned automatically
+# the way MODEL_CONFIDENCE_MIN/USE_CORRELATION_STUDY are above. Crypto
+# only -- no metals meta-model exists (see kalshi_15m_meta_model.py's own
+# docstring on why).
+USE_META_MODEL = _env_flag("KALSHI_15M_USE_META_MODEL", default=False)
+META_MODEL_TRUST_MIN = _env_float("KALSHI_15M_META_MODEL_TRUST_MIN", 0.5)
+
+# Conviction sizing -- the ONE of perps' 3 position-management-trial
+# features (scale-in/partial-exit/conviction-sizing) that actually maps
+# onto this market's product: a position here is entered ONCE, atomically,
+# and held to settlement -- there is no open-position lifecycle to scale
+# INTO (USE_SCALE_IN) or exit PART of early (USE_PARTIAL_EXIT), so neither
+# of those two has a kalshi_15m equivalent. Conviction sizing needs no
+# early-exit lever at all: it only resizes the ONE entry itself, bigger for
+# a higher-conviction signal (how far above its own effective confidence
+# floor -- MODEL_CONFIDENCE_MIN, possibly nudged by the correlation study
+# -- this candidate's confidence cleared), smaller for a just-qualifying
+# one. Same POSITION_SIZE_PCT that already sizes every entry, plus/minus
+# this multiplier -- capital shifts toward the strongest signals instead of
+# spreading identically across every candidate that merely cleared the
+# bar. Default OFF, same "prove it out on real trade history first"
+# posture as every other risk-shape flag here.
+USE_CONVICTION_SIZING = _env_flag("KALSHI_15M_USE_CONVICTION_SIZING", default=False)
+CONVICTION_SIZE_MIN_MULTIPLIER = _env_float("KALSHI_15M_CONVICTION_SIZE_MIN_MULTIPLIER", 0.7)
+CONVICTION_SIZE_MAX_MULTIPLIER = _env_float("KALSHI_15M_CONVICTION_SIZE_MAX_MULTIPLIER", 1.5)
+
+
+def compute_conviction_size_multiplier(entry_confidence: float | None, effective_confidence_min: float | None) -> float:
+    """The size_multiplier scan_and_enter's own contracts sizing should use
+    for a conviction-scaled entry -- see USE_CONVICTION_SIZING's own
+    comment. Returns 1.0 (no change) if either input is missing, or
+    effective_confidence_min is >= 1.0 (division-by-zero guard, not a real
+    value MODEL_CONFIDENCE_MIN/the correlation nudge would ever produce,
+    but defensive regardless). Identical formula to
+    perps_strategy.compute_conviction_size_multiplier's own."""
+    if entry_confidence is None or effective_confidence_min is None or effective_confidence_min >= 1.0:
+        return 1.0
+    conviction = max(0.0, min(1.0, (entry_confidence - effective_confidence_min) / (1.0 - effective_confidence_min)))
+    return CONVICTION_SIZE_MIN_MULTIPLIER + (CONVICTION_SIZE_MAX_MULTIPLIER - CONVICTION_SIZE_MIN_MULTIPLIER) * conviction
+
 
 STATE_FILE = Path(os.getenv("KALSHI_15M_STATE_FILE", str(DATA_DIR / "kalshi_15m_state.json")))
 _STATE_LOCK = threading.Lock()
@@ -240,7 +305,10 @@ def _today_str() -> str:
     return dt.datetime.now(dt.timezone.utc).date().isoformat()
 
 
-def evaluate_candidate(coin: str, *, confidence_min: float | None = None) -> dict[str, Any]:
+def evaluate_candidate(
+    coin: str, *, confidence_min: float | None = None,
+    correlation_study_enabled: bool | None = None, correlation_max_adjustment: float | None = None,
+) -> dict[str, Any]:
     """Pure decision logic for one coin -- no state, no order placement,
     no side effects. Returns {"ok": False, "reason": ...} when there's
     nothing to do (no open window, too little time left, no trained model
@@ -257,7 +325,20 @@ def evaluate_candidate(coin: str, *, confidence_min: float | None = None) -> dic
     own evidence-gated tuning (apply_confidence_threshold_override below),
     same pattern every other market here already uses. Kept as an
     optional parameter (not a direct read of state) so this function
-    stays pure and independently testable."""
+    stays pure and independently testable.
+
+    correlation_study_enabled/correlation_max_adjustment override the
+    module-level USE_CORRELATION_STUDY/CORRELATION_CONFIDENCE_MAX_ADJUSTMENT
+    defaults the exact same way -- see scan_and_enter, which reads a
+    durable-state override set by
+    kalshi_15m_trade_analysis.recommend_correlation_study_weight's own
+    evidence-gated tuning (apply_correlation_study_override).
+
+    The meta-model trust gate (USE_META_MODEL) has no equivalent override
+    param -- unlike the two tunes above, it has no evidence-gated auto-
+    tuner (same as perps_strategy.py's own identical PERPS_USE_META_MODEL:
+    a static, manually-set flag pending real backtest validation, not
+    something this codebase's trade-history-driven tuning touches)."""
     series_ticker = ASSET_SERIES.get(coin)
     if not series_ticker:
         return {"ok": False, "reason": "unknown_coin"}
@@ -280,14 +361,68 @@ def evaluate_candidate(coin: str, *, confidence_min: float | None = None) -> dic
     else:
         side, confidence = "no", 1.0 - probability_up
 
-    effective_confidence_min = confidence_min if confidence_min is not None else MODEL_CONFIDENCE_MIN
-    if confidence < effective_confidence_min:
-        return {"ok": False, "reason": "confidence_below_floor", "confidence": confidence}
+    # Chart-study confidence layer -- see USE_CORRELATION_STUDY's own
+    # comment. Computed and attached unconditionally (cheap: an in-memory
+    # dict lookup, see crypto_correlation.py's own caching design) so it's
+    # visible for observability even while the flag is off; only actually
+    # influences the confidence floor below once explicitly turned on.
+    # Crypto only -- see USE_CORRELATION_STUDY's own comment on why no
+    # equivalent study exists for metals.
+    correlation_score, correlation_reason = 0.0, None
+    if coin in kalshi_15m.KNOWN_15M_SERIES:
+        correlation = crypto_correlation.perps_correlation_bullishness(coin, prediction.get("feature_row"))
+        correlation_score, correlation_reason = correlation["score"], correlation["reason"]
+    # Bullish-signed (positive favors "yes"/up) -- flip for "no", same
+    # convention crypto_correlation.py's own docstring documents for a
+    # perps short.
+    side_correlation_score = correlation_score if side == "yes" else -correlation_score
 
-    return {
+    effective_confidence_min = confidence_min if confidence_min is not None else MODEL_CONFIDENCE_MIN
+    effective_use_correlation_study = USE_CORRELATION_STUDY if correlation_study_enabled is None else correlation_study_enabled
+    effective_correlation_max_adjustment = (
+        CORRELATION_CONFIDENCE_MAX_ADJUSTMENT if correlation_max_adjustment is None else correlation_max_adjustment
+    )
+    if effective_use_correlation_study:
+        # Confirmation lowers the bar a little, disagreement raises it a
+        # little -- capped at +/-effective_correlation_max_adjustment so
+        # this can nudge the model's own gate, never override it outright.
+        effective_confidence_min = max(
+            0.5, min(0.95, effective_confidence_min - side_correlation_score * effective_correlation_max_adjustment),
+        )
+
+    if confidence < effective_confidence_min:
+        return {
+            "ok": False, "reason": "confidence_below_floor", "confidence": confidence,
+            "correlation_score": correlation_score, "correlation_reason": correlation_reason,
+        }
+
+    # Meta-labeling trust gate -- see USE_META_MODEL's own comment. Crypto
+    # only, same reasoning as the correlation study above (no metals
+    # meta-model exists). None (no meta-model trained yet, or a row
+    # missing context features) fails OPEN -- same "a missing signal
+    # never blocks a trade" posture as model_ok=False's own absence
+    # elsewhere; only an actual low trust score vetoes.
+    meta_trust = None
+    if USE_META_MODEL and coin in kalshi_15m.KNOWN_15M_SERIES:
+        meta_trust = kalshi_15m_meta_model.trust_score(prediction.get("feature_row"), primary_probability_up=probability_up)
+        if meta_trust is not None and meta_trust < META_MODEL_TRUST_MIN:
+            return {
+                "ok": False, "reason": "meta_model_trust_too_low", "confidence": confidence, "meta_trust_score": meta_trust,
+                "correlation_score": correlation_score, "correlation_reason": correlation_reason,
+            }
+
+    result = {
         "ok": True, "coin": coin, "side": side, "market": market,
         "probability_up": probability_up, "confidence": confidence,
+        "correlation_score": correlation_score, "correlation_reason": correlation_reason,
+        # For USE_CONVICTION_SIZING (see scan_and_enter/compute_conviction_size_multiplier)
+        # -- how far above its OWN entry bar this candidate's confidence
+        # cleared.
+        "effective_confidence_min": effective_confidence_min,
     }
+    if meta_trust is not None:
+        result["meta_trust_score"] = meta_trust
+    return result
 
 
 def _has_open_position(state: dict[str, Any], *, coin: str) -> bool:
@@ -314,6 +449,16 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
         # trades exist to justify moving it. Same pattern every other
         # market here already uses.
         confidence_min_override = (state.get("tuning") or {}).get("model_confidence_min")
+        # Same durable-state-driven override for the chart-study layer --
+        # see USE_CORRELATION_STUDY's own comment and
+        # apply_correlation_study_override below.
+        tuning_state = state.get("tuning") or {}
+        correlation_study_enabled_override = tuning_state.get("correlation_study_enabled")
+        correlation_max_adjustment_override = tuning_state.get("correlation_confidence_max_adjustment")
+        # Same durable-state-driven override for conviction sizing -- see
+        # USE_CONVICTION_SIZING's own comment and
+        # apply_conviction_sizing_override below.
+        effective_use_conviction_sizing = tuning_state.get("conviction_sizing_enabled", USE_CONVICTION_SIZING)
 
     for coin in ASSET_SERIES:
         if open_count >= MAX_CONCURRENT_POSITIONS:
@@ -325,7 +470,11 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
                 checks.append({"coin": coin, "ok": False, "reason": "already_has_open_position"})
                 continue
 
-        decision = evaluate_candidate(coin, confidence_min=confidence_min_override)
+        decision = evaluate_candidate(
+            coin, confidence_min=confidence_min_override,
+            correlation_study_enabled=correlation_study_enabled_override,
+            correlation_max_adjustment=correlation_max_adjustment_override,
+        )
         if not decision.get("ok"):
             checks.append({"coin": coin, **decision})
             continue
@@ -376,7 +525,14 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
             checks.append({"coin": coin, "ok": False, "reason": "no_valid_quote"})
             continue
 
-        contracts = max(1, int((_account_budget_usd() * POSITION_SIZE_PCT) / cost_basis))
+        # Conviction sizing -- see USE_CONVICTION_SIZING's own comment.
+        # 1.0 (no change) whenever the flag is off, so this never affects
+        # sizing until real trade history earns it via
+        # apply_conviction_sizing_override.
+        size_multiplier = 1.0
+        if effective_use_conviction_sizing:
+            size_multiplier = compute_conviction_size_multiplier(decision["confidence"], decision.get("effective_confidence_min"))
+        contracts = max(1, int((_account_budget_usd() * POSITION_SIZE_PCT * size_multiplier) / cost_basis))
         client_order_id = str(uuid.uuid4())
 
         order_id = None
@@ -421,6 +577,16 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
             "close_time": market.get("close_time"), "entry_probability_up": decision["probability_up"],
             "entry_confidence": decision["confidence"], "dry_run": effective_dry_run,
             "client_order_id": client_order_id, "order_id": order_id,
+            # Captured regardless of whether the correlation study was even
+            # ON at entry time -- see kalshi_15m_trade_analysis.recommend_correlation_study_weight's
+            # own docstring on why this makes that evidence-gated tuning
+            # work from day one.
+            "entry_correlation_score": decision.get("correlation_score"),
+            # Captured regardless of whether conviction sizing was even ON
+            # at entry time -- same "works from day one" reasoning, feeds
+            # kalshi_15m_trade_analysis.recommend_conviction_sizing_trial's
+            # own with-vs-without comparison.
+            "entry_conviction_sizing_enabled": effective_use_conviction_sizing,
         }
         with _STATE_LOCK:
             state = _load_state()
@@ -467,15 +633,72 @@ def apply_confidence_threshold_override(new_threshold: float, *, reason: str) ->
     WITHOUT a redeploy -- stored in state["tuning"] (pushed to HF like the
     rest of durable state) and read by scan_and_enter on every cycle, not
     the OS env var MODEL_CONFIDENCE_MIN is seeded from at import time.
-    Same pattern every other market here already uses."""
+    Same pattern every other market here already uses.
+
+    MERGES into state["tuning"] rather than replacing it wholesale -- a
+    real bug already found and fixed in perps_strategy.py's own identical
+    function (see its docstring): a wholesale replace here would silently
+    wipe out apply_correlation_study_override's own keys
+    (correlation_study_enabled/correlation_confidence_max_adjustment) the
+    next time either tuning mechanism fired. Not repeated here."""
     with _STATE_LOCK:
         state = _load_state()
-        previous = (state.get("tuning") or {}).get("model_confidence_min", MODEL_CONFIDENCE_MIN)
-        state["tuning"] = {
+        tuning = dict(state.get("tuning") or {})
+        previous = tuning.get("model_confidence_min", MODEL_CONFIDENCE_MIN)
+        tuning.update({
             "model_confidence_min": new_threshold,
             "updated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
-            "reason": reason, "previous": previous,
-        }
+            "reason": reason, "previous": previous, "field": "model_confidence_min",
+        })
+        state["tuning"] = tuning
+        _save_state(state, push_durable=True)
+        return dict(state["tuning"])
+
+
+def apply_correlation_study_override(*, enabled: bool | None = None, max_adjustment: float | None = None, reason: str) -> dict[str, Any]:
+    """Same evidence-gated, no-redeploy-needed mechanism as
+    apply_confidence_threshold_override above, for the chart-study layer
+    (see kalshi_15m_trade_analysis.recommend_correlation_study_weight) --
+    MERGES into state["tuning"] so this and the confidence-threshold
+    override coexist. `enabled`/`max_adjustment` are each optional: pass
+    only the one(s) this call is actually changing -- the other stays
+    whatever it already was."""
+    with _STATE_LOCK:
+        state = _load_state()
+        tuning = dict(state.get("tuning") or {})
+        previous_enabled = tuning.get("correlation_study_enabled", USE_CORRELATION_STUDY)
+        previous_max_adjustment = tuning.get("correlation_confidence_max_adjustment", CORRELATION_CONFIDENCE_MAX_ADJUSTMENT)
+        if enabled is not None:
+            tuning["correlation_study_enabled"] = enabled
+        if max_adjustment is not None:
+            tuning["correlation_confidence_max_adjustment"] = max_adjustment
+        tuning.update({
+            "updated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+            "reason": reason, "field": "correlation_study",
+            "previous_correlation_study_enabled": previous_enabled,
+            "previous_correlation_confidence_max_adjustment": previous_max_adjustment,
+        })
+        state["tuning"] = tuning
+        _save_state(state, push_durable=True)
+        return dict(state["tuning"])
+
+
+def apply_conviction_sizing_override(*, enabled: bool, reason: str) -> dict[str, Any]:
+    """Same evidence-gated, no-redeploy-needed mechanism as
+    apply_confidence_threshold_override/apply_correlation_study_override
+    above, for conviction sizing (see
+    kalshi_15m_trade_analysis.recommend_conviction_sizing_trial) --
+    MERGES into state["tuning"] so all 3 coexist."""
+    with _STATE_LOCK:
+        state = _load_state()
+        tuning = dict(state.get("tuning") or {})
+        previous = tuning.get("conviction_sizing_enabled", USE_CONVICTION_SIZING)
+        tuning.update({
+            "conviction_sizing_enabled": enabled,
+            "updated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+            "reason": reason, "field": "conviction_sizing", "previous_conviction_sizing_enabled": previous,
+        })
+        state["tuning"] = tuning
         _save_state(state, push_durable=True)
         return dict(state["tuning"])
 
@@ -486,8 +709,13 @@ _LAST_BATCH_ANALYSIS_TRADE_COUNT_KEY = "last_batch_analysis_trade_count"
 def _maybe_run_batch_trade_analysis() -> dict[str, Any] | None:
     """Every kalshi_15m_trade_analysis.BATCH_SIZE newly-closed REAL
     trades, studies that recent batch -- win/loss patterns, a per-trade
-    "lesson" -- and, when the evidence supports it, raises the confidence
-    floor via apply_confidence_threshold_override. Called right after
+    "lesson" -- and, when the evidence supports it, applies THREE
+    independent, small, bounded, evidence-gated tunes: the confidence
+    floor (apply_confidence_threshold_override), whether the
+    correlation-study layer itself is worth trusting
+    (apply_correlation_study_override), and whether conviction sizing is
+    worth trying/keeping (apply_conviction_sizing_override). Called right
+    after
     check_settlements closes trades, inside the same job but outside
     _STATE_LOCK for the actual analysis work (same reasoning as every
     other market's identical function). Best-effort: any failure here is
@@ -502,20 +730,26 @@ def _maybe_run_batch_trade_analysis() -> dict[str, Any] | None:
             trade_log = state.get("trade_log") or []
             real_trades = [t for t in trade_log if not t.get("dry_run")]
             # Deliberately a TOP-LEVEL state key, NOT nested inside
-            # state["tuning"] -- apply_confidence_threshold_override above
-            # REPLACES state["tuning"] wholesale, so nesting this counter
-            # there would silently erase it (or be erased by it) the next
-            # time either function ran. Not part of _durable_state_slice
-            # either (same as every sibling market's identical counter):
-            # worst case after a restart is this batch re-running a little
-            # early/late, never a correctness problem worth a durable push
-            # for.
+            # state["tuning"] -- kept separate from the tuning dict (which
+            # apply_confidence_threshold_override/apply_correlation_study_override
+            # both merge into, not replace) purely so this counter's own
+            # read/write doesn't need to reason about that merge at all. Not
+            # part of _durable_state_slice either (same as every sibling
+            # market's identical counter): worst case after a restart is
+            # this batch re-running a little early/late, never a
+            # correctness problem worth a durable push for.
             last_count = int(state.get(_LAST_BATCH_ANALYSIS_TRADE_COUNT_KEY) or 0)
             if len(real_trades) - last_count < kalshi_15m_trade_analysis.BATCH_SIZE:
                 return None
             state[_LAST_BATCH_ANALYSIS_TRADE_COUNT_KEY] = len(real_trades)
             _save_state(state)
-            current_threshold = (state.get("tuning") or {}).get("model_confidence_min", MODEL_CONFIDENCE_MIN)
+            tuning_state = state.get("tuning") or {}
+            current_threshold = tuning_state.get("model_confidence_min", MODEL_CONFIDENCE_MIN)
+            current_correlation_enabled = tuning_state.get("correlation_study_enabled", USE_CORRELATION_STUDY)
+            current_correlation_max_adjustment = tuning_state.get(
+                "correlation_confidence_max_adjustment", CORRELATION_CONFIDENCE_MAX_ADJUSTMENT,
+            )
+            current_conviction_sizing_enabled = tuning_state.get("conviction_sizing_enabled", USE_CONVICTION_SIZING)
 
         batch = kalshi_15m_trade_analysis.analyze_recent_trade_batch(real_trades)
         logger.info(
@@ -527,6 +761,26 @@ def _maybe_run_batch_trade_analysis() -> dict[str, Any] | None:
         if tuning_rec.get("should_apply"):
             applied = apply_confidence_threshold_override(tuning_rec["recommended_threshold"], reason="5-trade batch review")
             logger.info("[kalshi_15m_strategy] confidence threshold tuned: %s", applied)
+
+        correlation_rec = kalshi_15m_trade_analysis.recommend_correlation_study_weight(
+            real_trades, current_enabled=current_correlation_enabled, current_max_adjustment=current_correlation_max_adjustment,
+        )
+        if correlation_rec.get("should_apply"):
+            applied = apply_correlation_study_override(
+                enabled=correlation_rec.get("recommended_enabled"),
+                max_adjustment=correlation_rec.get("recommended_max_adjustment"),
+                reason=f"5-trade batch review ({correlation_rec['action']})",
+            )
+            logger.info("[kalshi_15m_strategy] correlation study tuned: %s", applied)
+
+        conviction_rec = kalshi_15m_trade_analysis.recommend_conviction_sizing_trial(
+            real_trades, current_enabled=current_conviction_sizing_enabled,
+        )
+        if conviction_rec.get("should_apply"):
+            applied = apply_conviction_sizing_override(
+                enabled=conviction_rec["recommended_enabled"], reason=f"5-trade batch review ({conviction_rec['action']})",
+            )
+            logger.info("[kalshi_15m_strategy] conviction sizing tuned: %s", applied)
         return batch
     except Exception:
         logger.warning("[kalshi_15m_strategy] batch trade analysis failed", exc_info=True)
@@ -570,6 +824,8 @@ def check_settlements() -> dict[str, Any]:
             "realized_pnl_usd": round(gross, 6), "opened_at": position["opened_at"], "closed_at": closed_at,
             "entry_probability_up": position.get("entry_probability_up"),
             "entry_confidence": position.get("entry_confidence"), "dry_run": position.get("dry_run", True),
+            "entry_correlation_score": position.get("entry_correlation_score"),
+            "entry_conviction_sizing_enabled": position.get("entry_conviction_sizing_enabled"),
         }
         # Removes this ONE settled position from a FRESHLY re-read state
         # (matched by ticker, which is unique per 15-minute window -- see

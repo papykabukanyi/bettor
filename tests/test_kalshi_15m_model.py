@@ -232,6 +232,10 @@ def test_predict_direction_works_with_a_calibrated_model(monkeypatch):
     assert result["direction"] in {"up", "down"}
     assert 0.0 <= result["probability_up"] <= 1.0
     assert result["current_price"] == 100.0
+    # kalshi_15m_strategy.evaluate_candidate's own correlation-study
+    # confidence layer needs this to feed multi_timeframe_bullishness
+    # without a second, real latest_feature_row call for the same coin.
+    assert result["feature_row"] == _fake_feature_row("BTC")
 
 
 def test_predict_direction_reports_no_feature_data_when_unavailable(monkeypatch):
