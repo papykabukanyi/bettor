@@ -92,6 +92,22 @@ layers on TOP of the base probability_up signal:
     genuinely different from the loss-streak throttle's short-window
     size-shrink above -- this looks at the coin's WHOLE real history, and
     re-includes it the moment its own numbers improve.
+  - A raised entry-timing floor (MIN_SECONDS_TO_CLOSE_FOR_ENTRY, 600
+    instead of the original 300) -- a REAL, data-driven adjustment, not
+    a guess: this account's own first 168 real trades, bucketed by hold
+    time, showed the 5-10min-held bucket (the old floor's own worst
+    tail -- entries made with only 5-10 minutes left) was clearly the
+    weakest (33% win rate) vs the 10-15min (42%) and 15min+ (46%)
+    buckets. Only entries with at least 10 of a window's 15 minutes
+    still open now qualify.
+  - Volume + price-action confirmation (USE_VOLUME_CONFIRMATION, crypto
+    only) -- per explicit user direction ("current volume need to be
+    high to enter... price action... enter trades on volume times
+    only"): requires BOTH an unusually high dollar_volume_z AND a real
+    (non-flat) ret_5m before entering, on top of everything else above.
+    Off by default pending real evidence, same posture as every other
+    risk-shape experiment here. Never applies to metals -- a plain spot
+    price has no volume figure to read at all.
 
 Every one of the risk-INCREASING levers above (correlation study,
 meta-model, conviction sizing, win-streak sizing, early exit) stays off
@@ -263,13 +279,87 @@ def coin_is_trusted(coin: str, trade_log: list[dict[str, Any]] | None) -> dict[s
         "trades": len(coin_trades), "win_rate": round(win_rate, 4), "avg_pnl_usd": round(avg_pnl, 6),
     }
 
+
+# Volume + price-action entry confirmation -- per explicit user
+# direction: "we need to use volume studies and current volume need to
+# be high to enter and exit fast... bot need to work on that and price
+# action... it enter trades on volume times only." Crypto ONLY -- metals
+# have no volume data at all (a plain gold-api.com spot price has no
+# volume figure; see kalshi_15m_metals_data.py's own docstring on why
+# its own feature set already excludes every volume-derived column), so
+# this gate fails OPEN for a metals coin (never blocks metals trading,
+# same "a missing signal never blocks a trade" posture as every other
+# optional signal here) rather than mistakenly demanding data that
+# structurally can't exist for that market.
+#
+# Both readings below are ALREADY real, already-computed columns in this
+# market's own crypto feature row (proxied off perps' own data pipeline
+# -- see kalshi_15m_data.latest_feature_row's own docstring) -- no new
+# data source, no new network call:
+#   - dollar_volume_z: how unusual THIS coin's own CURRENT dollar volume
+#     is relative to its own recent history (a z-score, not a raw
+#     number) -- already the right shape for "is real activity
+#     happening right now" regardless of which coin or how big it
+#     normally trades.
+#   - ret_5m: has price actually MOVED in the last 5 minutes, or is the
+#     model reading a signal off a dead-flat moment? "Price action... in
+#     volume" taken literally -- a volume spike with no real price
+#     response is a materially weaker signal than one where price is
+#     actively confirming it.
+# Off by default -- an evidence-gated EXPERIMENT, same "prove it out on
+# real trade history first" posture as every other new signal here.
+USE_VOLUME_CONFIRMATION = _env_flag("KALSHI_15M_USE_VOLUME_CONFIRMATION", default=False)
+VOLUME_CONFIRMATION_MIN_Z = _env_float("KALSHI_15M_VOLUME_CONFIRMATION_MIN_Z", 1.0)
+PRICE_ACTION_MIN_ABS_RET_5M = _env_float("KALSHI_15M_PRICE_ACTION_MIN_ABS_RET_5M", 0.001)
+
+
+def volume_and_price_action_confirmed(feature_row: dict[str, Any] | None) -> dict[str, Any]:
+    """{"confirmed": True} whenever feature_row is missing, or is missing
+    either the volume or the price-action reading (fails OPEN -- a
+    missing signal never blocks a trade, matching every other optional
+    signal in this module). Once BOTH readings are genuinely available,
+    REQUIRES both: dollar_volume_z >= VOLUME_CONFIRMATION_MIN_Z (real,
+    unusually high activity right now, not just this coin's normal
+    baseline) AND abs(ret_5m) >= PRICE_ACTION_MIN_ABS_RET_5M (price is
+    actually responding, not flat). Pure function -- no state, no
+    network calls, no side effects."""
+    if not feature_row:
+        return {"confirmed": True, "reason": "no_feature_row"}
+    dollar_volume_z = feature_row.get("dollar_volume_z")
+    ret_5m = feature_row.get("ret_5m")
+    if dollar_volume_z is None or ret_5m is None:
+        return {"confirmed": True, "reason": "volume_or_price_action_data_unavailable"}
+    if dollar_volume_z < VOLUME_CONFIRMATION_MIN_Z:
+        return {"confirmed": False, "reason": "volume_not_high_enough", "dollar_volume_z": dollar_volume_z}
+    if abs(ret_5m) < PRICE_ACTION_MIN_ABS_RET_5M:
+        return {"confirmed": False, "reason": "price_action_too_flat", "ret_5m": ret_5m}
+    return {
+        "confirmed": True, "reason": "volume_and_price_action_confirmed",
+        "dollar_volume_z": dollar_volume_z, "ret_5m": ret_5m,
+    }
+
+
 # Real, deliberate guard: entering with only a few seconds left before a
 # window closes is paying the spread for what's functionally a coin flip
 # (no time left for the model's own predicted direction to actually play
 # out) -- Kalshi's own quadratic fee structure (see kalshi_15m.py's own
-# docstring) makes this worse here than perps' linear one. A third of the
-# window (5 of 15 minutes) still open is the floor for a real entry.
-MIN_SECONDS_TO_CLOSE_FOR_ENTRY = _env_int("KALSHI_15M_MIN_SECONDS_TO_CLOSE_FOR_ENTRY", 300)
+# docstring) makes this worse here than perps' linear one.
+#
+# Raised from 300 (a third of the window) to 600 (two-thirds) on REAL
+# evidence, not a guess: this account's own first 168 real trades,
+# bucketed by how long each position was actually held before settling
+# (kalshi_15m_trade_analysis.analyze_trade_history's own
+# by_hold_minutes_bucket), showed the trades held only 5-10 minutes
+# (i.e. entered with only 5-10 minutes left in a 15-minute window, the
+# tail this old 300s floor let through) were CLEARLY the worst
+# performers -- 33% win rate / -$0.46 avg P&L, materially worse than the
+# 10-15min bucket's 42%/-$0.07 or the 15min+ bucket's 46%/-$0.15. Exactly
+# the failure mode this guard's own docstring already predicted (not
+# enough time left for the predicted move to play out) -- confirmed
+# live, not just theorized. Only entries with a full two-thirds of the
+# window still open (the first 5 minutes of a 15-minute window) now
+# qualify.
+MIN_SECONDS_TO_CLOSE_FOR_ENTRY = _env_int("KALSHI_15M_MIN_SECONDS_TO_CLOSE_FOR_ENTRY", 600)
 
 # Chart-study confidence layer -- see crypto_correlation.py's own module
 # docstring and perps_strategy.py's identical USE_CORRELATION_STUDY
@@ -686,6 +776,19 @@ def evaluate_candidate(
             return {
                 "ok": False, "reason": "meta_model_trust_too_low", "confidence": confidence, "meta_trust_score": meta_trust,
                 "correlation_score": correlation_score, "correlation_reason": correlation_reason,
+            }
+
+    # Volume + price-action confirmation -- see USE_VOLUME_CONFIRMATION's
+    # own comment. Crypto only, same reasoning as the correlation study/
+    # meta-model above (no volume data exists for metals at all).
+    volume_confirmation: dict[str, Any] = {"confirmed": True}
+    if USE_VOLUME_CONFIRMATION and coin in kalshi_15m.KNOWN_15M_SERIES:
+        volume_confirmation = volume_and_price_action_confirmed(prediction.get("feature_row"))
+        if not volume_confirmation["confirmed"]:
+            return {
+                "ok": False, "reason": volume_confirmation["reason"], "confidence": confidence,
+                "correlation_score": correlation_score, "correlation_reason": correlation_reason,
+                **{k: v for k, v in volume_confirmation.items() if k not in ("confirmed", "reason")},
             }
 
     result = {

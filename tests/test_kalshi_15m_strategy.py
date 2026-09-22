@@ -23,7 +23,7 @@ def _future_close(minutes: float) -> str:
     return future.isoformat().replace("+00:00", "Z")
 
 
-def _market(*, ticker: str = "KXBTC15M-1", close_in_minutes: float = 10.0, no_ask: float = 0.54, no_bid: float = 0.53) -> dict:
+def _market(*, ticker: str = "KXBTC15M-1", close_in_minutes: float = 14.0, no_ask: float = 0.54, no_bid: float = 0.53) -> dict:
     return {
         "ticker": ticker, "close_time": _future_close(close_in_minutes),
         "no_ask_dollars": str(no_ask), "no_bid_dollars": str(no_bid),
@@ -51,6 +51,21 @@ def test_evaluate_candidate_reports_no_open_window(monkeypatch):
 
 def test_evaluate_candidate_rejects_too_little_time_remaining(monkeypatch):
     monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market(close_in_minutes=1.0))
+    result = kalshi_15m_strategy.evaluate_candidate("BTC")
+    assert result["ok"] is False
+    assert result["reason"] == "too_little_time_remaining"
+
+
+def test_evaluate_candidate_rejects_the_5_to_10_minute_window_real_data_showed_was_worst(monkeypatch):
+    """REAL, data-driven adjustment: this account's own first 168 real
+    trades, bucketed by hold time, showed entries made with only 5-10
+    minutes left in the window (the old 300s/5min floor's own worst
+    tail) were clearly the weakest performers (33% win rate) vs the
+    10-15min (42%) and 15min+ (46%) buckets. MIN_SECONDS_TO_CLOSE_FOR_ENTRY
+    was raised from 300 to 600 specifically to cut this bucket out --
+    8 minutes (480s) remaining, which the OLD floor would have allowed,
+    must now be rejected."""
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market(close_in_minutes=8.0))
     result = kalshi_15m_strategy.evaluate_candidate("BTC")
     assert result["ok"] is False
     assert result["reason"] == "too_little_time_remaining"
@@ -1284,6 +1299,88 @@ def test_evaluate_candidate_meta_model_never_calls_trust_score_for_a_metals_coin
         raise AssertionError("must not call trust_score for a metals coin -- no metals meta-model exists")
 
     monkeypatch.setattr(kalshi_15m_meta_model, "trust_score", fail_if_called)
+    result = kalshi_15m_strategy.evaluate_candidate("GOLD")
+    assert result["ok"] is True
+
+
+# ---------------------------------------------------------------------------
+# Volume + price-action confirmation -- per explicit user direction: "we
+# need to use volume studies and current volume need to be high to
+# enter... bot need to work on that and price action... enter trades on
+# volume times only." Off by default; crypto only (no volume data exists
+# for metals at all).
+# ---------------------------------------------------------------------------
+def test_volume_and_price_action_confirmed_fails_open_with_no_feature_row():
+    assert kalshi_15m_strategy.volume_and_price_action_confirmed(None)["confirmed"] is True
+
+
+def test_volume_and_price_action_confirmed_fails_open_with_missing_fields():
+    result = kalshi_15m_strategy.volume_and_price_action_confirmed({"rsi_14": 0.5})  # no dollar_volume_z/ret_5m
+    assert result["confirmed"] is True
+    assert result["reason"] == "volume_or_price_action_data_unavailable"
+
+
+def test_volume_and_price_action_confirmed_rejects_low_volume():
+    row = {"dollar_volume_z": 0.5, "ret_5m": 0.01}  # below the 1.0 default floor
+    result = kalshi_15m_strategy.volume_and_price_action_confirmed(row)
+    assert result["confirmed"] is False
+    assert result["reason"] == "volume_not_high_enough"
+
+
+def test_volume_and_price_action_confirmed_rejects_a_flat_price():
+    row = {"dollar_volume_z": 2.0, "ret_5m": 0.0001}  # high volume, but price hasn't moved
+    result = kalshi_15m_strategy.volume_and_price_action_confirmed(row)
+    assert result["confirmed"] is False
+    assert result["reason"] == "price_action_too_flat"
+
+
+def test_volume_and_price_action_confirmed_passes_with_both_high_volume_and_real_movement():
+    row = {"dollar_volume_z": 2.0, "ret_5m": 0.01}
+    result = kalshi_15m_strategy.volume_and_price_action_confirmed(row)
+    assert result["confirmed"] is True
+    assert result["reason"] == "volume_and_price_action_confirmed"
+
+
+def test_evaluate_candidate_ignores_volume_confirmation_when_the_flag_is_off(monkeypatch):
+    assert kalshi_15m_strategy.USE_VOLUME_CONFIRMATION is False  # module default -- not touched by this test
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
+    monkeypatch.setattr(
+        kalshi_15m_model, "predict_direction",
+        lambda coin: {"model_ok": True, "probability_up": 0.72, "feature_row": {"dollar_volume_z": -5.0, "ret_5m": 0.0}},
+    )
+    result = kalshi_15m_strategy.evaluate_candidate("BTC")
+    assert result["ok"] is True  # low volume + flat price -- would fail if the flag were on
+
+
+def test_evaluate_candidate_blocks_entry_on_low_volume_when_enabled(monkeypatch):
+    monkeypatch.setattr(kalshi_15m_strategy, "USE_VOLUME_CONFIRMATION", True)
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
+    monkeypatch.setattr(
+        kalshi_15m_model, "predict_direction",
+        lambda coin: {"model_ok": True, "probability_up": 0.72, "feature_row": {"dollar_volume_z": 0.2, "ret_5m": 0.01}},
+    )
+    result = kalshi_15m_strategy.evaluate_candidate("BTC")
+    assert result["ok"] is False
+    assert result["reason"] == "volume_not_high_enough"
+
+
+def test_evaluate_candidate_allows_entry_on_high_volume_and_real_movement_when_enabled(monkeypatch):
+    monkeypatch.setattr(kalshi_15m_strategy, "USE_VOLUME_CONFIRMATION", True)
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
+    monkeypatch.setattr(
+        kalshi_15m_model, "predict_direction",
+        lambda coin: {"model_ok": True, "probability_up": 0.72, "feature_row": {"dollar_volume_z": 2.5, "ret_5m": 0.01}},
+    )
+    result = kalshi_15m_strategy.evaluate_candidate("BTC")
+    assert result["ok"] is True
+
+
+def test_evaluate_candidate_never_applies_volume_confirmation_to_a_metals_coin(monkeypatch):
+    """No volume data exists for metals at all (a plain spot price) --
+    this gate must never block a metals coin regardless of the flag."""
+    monkeypatch.setattr(kalshi_15m_strategy, "USE_VOLUME_CONFIRMATION", True)
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
+    monkeypatch.setattr(kalshi_15m_metals_model, "predict_direction", lambda coin: {"model_ok": True, "probability_up": 0.72})
     result = kalshi_15m_strategy.evaluate_candidate("GOLD")
     assert result["ok"] is True
 
