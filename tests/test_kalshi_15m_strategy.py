@@ -767,6 +767,48 @@ def test_load_state_falls_back_to_empty_when_hf_has_no_backup_either(monkeypatch
 
 
 # ---------------------------------------------------------------------------
+# _normalize_trade_log_exit_kind -- self-healing migration for a REAL,
+# LIVE, CONFIRMED bug: trade_log entries written before the exit_kind fix
+# persisted "settled"/"early" instead of "full", making 93 real trades
+# invisible to server_common.win_rate_stats (every dashboard's own
+# win-rate/trade-count numbers).
+# ---------------------------------------------------------------------------
+def test_normalize_trade_log_exit_kind_fixes_old_settled_entries():
+    state = {"trade_log": [{"coin": "BTC", "exit_kind": "settled"}]}
+    changed = kalshi_15m_strategy._normalize_trade_log_exit_kind(state)  # noqa: SLF001
+    assert changed is True
+    assert state["trade_log"][0]["exit_kind"] == "full"
+    assert state["trade_log"][0]["close_reason"] == "settlement"
+
+
+def test_normalize_trade_log_exit_kind_fixes_old_early_entries():
+    state = {"trade_log": [{"coin": "BTC", "exit_kind": "early"}]}
+    changed = kalshi_15m_strategy._normalize_trade_log_exit_kind(state)  # noqa: SLF001
+    assert changed is True
+    assert state["trade_log"][0]["exit_kind"] == "full"
+    assert state["trade_log"][0]["close_reason"] == "early_exit"
+
+
+def test_normalize_trade_log_exit_kind_is_a_genuine_no_op_once_already_fixed():
+    state = {"trade_log": [{"coin": "BTC", "exit_kind": "full", "close_reason": "settlement"}]}
+    changed = kalshi_15m_strategy._normalize_trade_log_exit_kind(state)  # noqa: SLF001
+    assert changed is False
+
+
+def test_load_state_self_heals_old_exit_kind_values_from_disk(monkeypatch):
+    kalshi_15m_strategy._save_state({  # noqa: SLF001
+        "positions": [], "realized_pnl_by_date": {},
+        "trade_log": [{"coin": "BTC", "realized_pnl_usd": 1.0, "dry_run": False, "exit_kind": "settled"}],
+    })
+
+    from server_common import win_rate_stats
+    state = kalshi_15m_strategy._load_state()  # noqa: SLF001
+
+    assert state["trade_log"][0]["exit_kind"] == "full"
+    assert win_rate_stats(state["trade_log"])["trade_count"] == 1
+
+
+# ---------------------------------------------------------------------------
 # _account_budget_usd -- real, live, confirmed bug this fixes: used to call
 # get_portfolio_balance() with no exchange_index, which per Kalshi's own
 # docs returns the balance POOLED ACROSS ALL SHARDS -- not what's actually

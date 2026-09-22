@@ -503,6 +503,35 @@ def _pull_durable_state_from_hf() -> dict[str, Any] | None:
         return None
 
 
+def _normalize_trade_log_exit_kind(state: dict[str, Any]) -> bool:
+    """Self-healing migration for a REAL, LIVE, CONFIRMED bug: trade_log
+    entries written before the exit_kind fix (see check_settlements'/
+    manage_open_positions' own trade-dict comments) persisted "settled"/
+    "early" instead of the shared "full" convention
+    server_common.win_rate_stats requires to count a trade at all --
+    confirmed live, 93 real trades were invisible to every dashboard's
+    own win-rate/trade-count numbers because of exactly this. Runs on
+    every _load_state call (cheap: a single pass over trade_log, a
+    genuine no-op the moment nothing needs fixing, since a trade already
+    written as "full" is untouched) rather than a one-off migration
+    script -- self-heals both this Space's own already-persisted local
+    state AND any future durable-state restore from HF with no special
+    trigger needed. Returns True if anything was actually changed
+    (caller re-persists locally only then)."""
+    changed = False
+    for trade in state.get("trade_log") or []:
+        old_kind = trade.get("exit_kind")
+        if old_kind == "settled":
+            trade["exit_kind"] = "full"
+            trade.setdefault("close_reason", "settlement")
+            changed = True
+        elif old_kind == "early":
+            trade["exit_kind"] = "full"
+            trade.setdefault("close_reason", "early_exit")
+            changed = True
+    return changed
+
+
 def _load_state() -> dict[str, Any]:
     try:
         with open(STATE_FILE, "r", encoding="utf-8") as f:
@@ -513,11 +542,24 @@ def _load_state() -> dict[str, Any]:
         if durable:
             base.update(durable)
             logger.info("[kalshi_15m_strategy] recovered durable state from HF after local state was missing")
+        _normalize_trade_log_exit_kind(base)
         return base
     state.setdefault("positions", [])
     state.setdefault("trade_log", [])
     state.setdefault("realized_pnl_by_date", {})
     state.setdefault("tuning", {})
+    if _normalize_trade_log_exit_kind(state):
+        # Local-only re-persist here (never push_durable) -- the next
+        # REAL settlement/entry pushes durable state anyway, and this
+        # process's own subsequent _load_state calls all read from the
+        # local file regardless, so this is enough to make the fix
+        # visible everywhere within THIS process immediately.
+        try:
+            STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+            with open(STATE_FILE, "w", encoding="utf-8") as f:
+                json.dump(state, f, indent=2)
+        except Exception as exc:
+            logger.warning("[kalshi_15m_strategy] could not persist exit_kind migration: %s", exc)
     return state
 
 
