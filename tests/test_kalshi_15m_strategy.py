@@ -560,6 +560,30 @@ def test_check_settlements_books_a_win(monkeypatch):
     assert state["realized_pnl_by_date"]  # a REAL (non-dry-run) win updates the daily total
 
 
+def test_check_settlements_trade_is_counted_by_the_shared_win_rate_stats_helper(monkeypatch):
+    """REAL, LIVE, CONFIRMED BUG this proves fixed: server_common.win_rate_stats
+    (the shared helper every dashboard's own win-rate/trade-count numbers
+    go through) excludes anything but exit_kind == "full" -- confirmed
+    live, this market's own dashboard showed trade_count=0/win_rate=null
+    despite 93 real, correctly-recorded trades, because this module used
+    to write "settled"/"early" instead."""
+    from server_common import win_rate_stats
+
+    kalshi_15m_strategy._save_state({  # noqa: SLF001
+        "positions": [_position(side="yes", count=10, entry_price=0.45, dry_run=False)],
+        "trade_log": [], "realized_pnl_by_date": {},
+    })
+    monkeypatch.setattr(kalshi_15m, "get_market", lambda ticker: {"ticker": ticker, "result": "yes"})
+
+    kalshi_15m_strategy.check_settlements()
+
+    state = kalshi_15m_strategy._load_state()  # noqa: SLF001
+    stats = win_rate_stats(state["trade_log"])
+    assert stats["trade_count"] == 1
+    assert stats["win_count"] == 1
+    assert stats["win_rate"] == 1.0
+
+
 def test_check_settlements_books_a_loss(monkeypatch):
     kalshi_15m_strategy._save_state({  # noqa: SLF001
         "positions": [_position(side="yes", count=10, entry_price=0.45, dry_run=False)],
@@ -1621,7 +1645,11 @@ def test_manage_open_positions_closes_a_position_early_when_enabled(monkeypatch)
     state = kalshi_15m_strategy._load_state()  # noqa: SLF001
     assert state["positions"] == []
     trade = state["trade_log"][0]
-    assert trade["exit_kind"] == "early"
+    # "full" (not "early") -- see the real win_rate_stats exit_kind bug
+    # this dict's own comment fixes; close_reason is where the
+    # settlement-vs-early distinction actually lives now.
+    assert trade["exit_kind"] == "full"
+    assert trade["close_reason"] == "early_exit"
     assert trade["exit_reason"] in ("lock_in_profit", "cut_loss")
     assert trade["realized_pnl_usd"] == pytest.approx(10.0 * (0.35 - 0.5))  # current_value=1-0.65=0.35, entry=0.5
 

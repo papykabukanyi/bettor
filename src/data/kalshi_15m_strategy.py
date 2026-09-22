@@ -1429,7 +1429,22 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
             "entry_win_streak_sizing_enabled": position.get("entry_win_streak_sizing_enabled"),
             "entry_win_streak_multiplier": position.get("entry_win_streak_multiplier"),
             "entry_feature_snapshot": position.get("entry_feature_snapshot"),
-            "exit_kind": "early", "exit_reason": decision["reason"],
+            # "full" (NOT "early"/"settled") -- REAL, LIVE, CONFIRMED BUG
+            # this fixes: server_common.win_rate_stats (the shared helper
+            # every dashboard's own win-rate/trade-count numbers go
+            # through) has its own specific exit_kind vocabulary
+            # ("full"/"partial", perps' own convention for "a complete,
+            # resolved position" vs "sold part of a still-open one") and
+            # excludes anything else entirely -- confirmed live, this
+            # market's own dashboard was showing trade_count=0/win_rate=null
+            # despite 93 real, correctly-recorded trades, because
+            # "early"/"settled" both silently failed that check. Every
+            # kalshi_15m exit (settlement OR early) always closes the
+            # COMPLETE position (no partial-exit concept exists here) --
+            # "full" is correct either way. The settlement-vs-early
+            # distinction that actually matters for kalshi_15m's OWN
+            # analysis stays available via close_reason below instead.
+            "exit_kind": "full", "close_reason": "early_exit", "exit_reason": decision["reason"],
         }
         with _STATE_LOCK:
             state = _load_state()
@@ -1488,7 +1503,11 @@ def check_settlements() -> dict[str, Any]:
             "entry_win_streak_sizing_enabled": position.get("entry_win_streak_sizing_enabled"),
             "entry_win_streak_multiplier": position.get("entry_win_streak_multiplier"),
             "entry_feature_snapshot": position.get("entry_feature_snapshot"),
-            "exit_kind": "settled",
+            # "full", not "settled" -- see manage_open_positions' own
+            # identical trade dict for the full rationale (the real bug
+            # this closes: server_common.win_rate_stats' own exit_kind
+            # vocabulary silently excluded anything but "full"/"partial").
+            "exit_kind": "full", "close_reason": "settlement",
         }
         # Removes this ONE settled position from a FRESHLY re-read state
         # (matched by ticker, which is unique per 15-minute window -- see
