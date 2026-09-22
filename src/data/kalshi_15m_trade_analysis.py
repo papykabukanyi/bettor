@@ -307,6 +307,63 @@ def recommend_conviction_sizing_trial(trade_log: list[dict[str, Any]] | None, *,
     return {"ok": True, "should_apply": False, "reason": "no_clear_signal", "with_feature": with_stats, "without_feature": without_stats}
 
 
+# Same evidence-gated trial as recommend_conviction_sizing_trial above,
+# for the WIN-streak size increase (see
+# kalshi_15m_strategy.USE_WIN_STREAK_SIZING's own comment on why this
+# needs the same "prove it out first" posture the loss-streak throttle
+# doesn't).
+WIN_STREAK_SIZING_TRIAL_MIN_TRADES = 20
+WIN_STREAK_SIZING_MIN_HISTORY_TO_START = 30
+
+
+def recommend_win_streak_sizing_trial(trade_log: list[dict[str, Any]] | None, *, current_enabled: bool) -> dict[str, Any]:
+    """Reads entry_win_streak_sizing_enabled off each real trade to split
+    closed trades into "entered while this was ON" vs "entered while this
+    was OFF", comparing avg P&L and win rate between them once both sides
+    have enough real trades -- identical structure/outcomes to
+    recommend_conviction_sizing_trial above; see its own docstring for
+    the full rationale."""
+    trade_log = trade_log or []
+    real_trades = [t for t in trade_log if not t.get("dry_run") and t.get("entry_win_streak_sizing_enabled") is not None]
+    with_feature = [t for t in real_trades if t.get("entry_win_streak_sizing_enabled") is True]
+    without_feature = [t for t in real_trades if t.get("entry_win_streak_sizing_enabled") is False]
+    with_stats = _bucket_stats(with_feature)
+    without_stats = _bucket_stats(without_feature)
+
+    if not with_feature:
+        if not current_enabled and without_stats["trades"] >= WIN_STREAK_SIZING_MIN_HISTORY_TO_START:
+            return {
+                "ok": True, "should_apply": True, "action": "start_trial",
+                "recommended_enabled": True, "with_feature": with_stats, "without_feature": without_stats,
+            }
+        return {
+            "ok": True, "should_apply": False, "reason": "insufficient_trade_history",
+            "with_feature": with_stats, "without_feature": without_stats,
+        }
+
+    if with_stats["trades"] < WIN_STREAK_SIZING_TRIAL_MIN_TRADES or without_stats["trades"] < WIN_STREAK_SIZING_TRIAL_MIN_TRADES:
+        return {
+            "ok": True, "should_apply": False, "reason": "insufficient_trade_history",
+            "with_feature": with_stats, "without_feature": without_stats,
+        }
+
+    improves_pnl = with_stats["avg_pnl_usd"] > without_stats["avg_pnl_usd"]
+    improves_win_rate = with_stats["win_rate"] >= without_stats["win_rate"]
+    if improves_pnl and improves_win_rate:
+        reason = "confirmed_enabled" if current_enabled else "evidence_favors_enabling_but_currently_off"
+        return {"ok": True, "should_apply": False, "reason": reason, "with_feature": with_stats, "without_feature": without_stats}
+
+    worsens_pnl = with_stats["avg_pnl_usd"] < without_stats["avg_pnl_usd"]
+    worsens_win_rate = with_stats["win_rate"] < without_stats["win_rate"]
+    if worsens_pnl and worsens_win_rate and current_enabled:
+        return {
+            "ok": True, "should_apply": True, "action": "disable",
+            "recommended_enabled": False, "with_feature": with_stats, "without_feature": without_stats,
+        }
+
+    return {"ok": True, "should_apply": False, "reason": "no_clear_signal", "with_feature": with_stats, "without_feature": without_stats}
+
+
 MIN_BUCKET_TRADES = 5
 _CONFIDENCE_BUCKET_EDGES = [0.5, 0.58, 0.65, 0.75, 1.01]
 

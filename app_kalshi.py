@@ -105,9 +105,9 @@ if str(SRC_DIR) not in sys.path:
 
 from config import et_today
 from data import (
-    ai_monitor, crypto_news, kalshi_15m, kalshi_15m_data, kalshi_15m_meta_model, kalshi_15m_metals_data,
-    kalshi_15m_metals_model, kalshi_15m_model, kalshi_15m_strategy, perps_data, perps_meta_model, perps_model,
-    perps_strategy, perps_trade_analysis, threads_client, threads_post,
+    ai_monitor, crypto_news, kalshi_15m, kalshi_15m_backtest, kalshi_15m_data, kalshi_15m_meta_model,
+    kalshi_15m_metals_data, kalshi_15m_metals_model, kalshi_15m_model, kalshi_15m_strategy, perps_data,
+    perps_meta_model, perps_model, perps_strategy, perps_trade_analysis, threads_client, threads_post,
 )
 
 # Real production bug found and fixed on the sibling stocks server (now
@@ -209,6 +209,20 @@ KALSHI_15M_RECONCILE_DAYS = max(1, int(os.getenv("KALSHI_15M_RECONCILE_DAYS", "3
 # train (4) and before the torch train (7)/ai_monitor (6), an open slot.
 KALSHI_15M_TRADE_ANALYSIS_HOUR_ET = int(os.getenv("KALSHI_15M_TRADE_ANALYSIS_HOUR_ET", "5") or "5")
 KALSHI_15M_TRADE_ANALYSIS_MINUTE_ET = int(os.getenv("KALSHI_15M_TRADE_ANALYSIS_MINUTE_ET", "30") or "30")
+# Regularly-scheduled backtest + forward test -- per explicit user
+# direction: "it need a backtest and a forward test to be regularly
+# implemented." kalshi_15m_backtest.run_walkforward_backtest already
+# existed (multiple expanding-window folds -- a real forward test, not
+# just one lucky split) but had only ever been run manually. Crypto only
+# for now (see kalshi_15m_backtest.py's own imports -- built on
+# kalshi_15m_model/kalshi_15m_data specifically); metals excluded for
+# the same reason its own torch-candidate/meta-model are (see
+# KALSHI_15M_TORCH_TRAIN_HOUR_ET's own comment: too little archive yet).
+# 8am ET: after every other daily kalshi_15m job (train 4, trade-analysis
+# 5:30, ai_monitor 6, torch-train 7) so this always backtests that day's
+# freshest models.
+KALSHI_15M_BACKTEST_HOUR_ET = int(os.getenv("KALSHI_15M_BACKTEST_HOUR_ET", "8") or "8")
+KALSHI_15M_LATEST_BACKTEST_FILE = DATA_DIR / "kalshi_15m_latest_backtest.json"
 # Read-only, project-WIDE AI-powered analysis layer covering all 5
 # markets (perps, stocks, crypto, options, kalshi_15m), added per
 # explicit user direction (chosen over "replace the prediction model
@@ -745,6 +759,55 @@ def _run_kalshi_15m_trade_analysis() -> dict[str, Any]:
         return {"ok": False, "error": str(exc)}
 
 
+@_locked_job("kalshi_15m_backtest", stale_after_sec=3600)
+def _run_kalshi_15m_backtest() -> dict[str, Any]:
+    """See KALSHI_15M_BACKTEST_HOUR_ET's own comment -- a regularly-
+    scheduled multi-fold walk-forward replay (a real forward test: each
+    fold's own train window is strictly earlier than its test window,
+    same leakage-free discipline as every other walk-forward in this
+    codebase), not the one-off manual run this has been until now.
+    Reacts to a confirmed losing result the same "use everything the bot
+    has as a resource" way every sibling market's own
+    maybe_auto_improve_from_backtest does: an immediate extra retrain of
+    both the primary and torch candidate models, so a real edge
+    regression doesn't just sit there until the next scheduled off-hours
+    train. Never touches order placement or position management --
+    read-only over trading, adjusts training/reporting only."""
+    try:
+        result = kalshi_15m_backtest.run_walkforward_backtest()
+        if not result.get("ok"):
+            return result
+        save_json(KALSHI_15M_LATEST_BACKTEST_FILE, result)
+
+        mean_return = result.get("mean_return_pct")
+        if mean_return is not None and mean_return < 0:
+            logger.warning(
+                "[app_kalshi] kalshi_15m walk-forward backtest shows a loss (mean_return_pct=%.4f) -- retraining now",
+                mean_return,
+            )
+            try:
+                trade_log = kalshi_15m_strategy._load_state().get("trade_log")  # noqa: SLF001
+            except Exception as exc:
+                logger.warning("[app_kalshi] could not read kalshi_15m trade_log for auto-retrain: %s", exc)
+                trade_log = None
+            try:
+                retrain_result = kalshi_15m_model.train_model(trade_log=trade_log)
+                result["auto_retrain"] = {"ok": retrain_result.get("ok"), "rows": retrain_result.get("rows")}
+            except Exception as exc:
+                logger.warning("[app_kalshi] kalshi_15m auto-retrain after losing backtest failed: %s", exc)
+            try:
+                torch_result = kalshi_15m_model.train_torch_candidate_model(trade_log=trade_log)
+                result["auto_torch_retrain"] = {"ok": torch_result.get("ok"), "promoted": torch_result.get("promoted")}
+            except Exception as exc:
+                logger.warning("[app_kalshi] kalshi_15m auto-torch-retrain after losing backtest failed: %s", exc)
+        return result
+    except Exception as exc:
+        logger.warning("[app_kalshi] kalshi_15m backtest failed: %s", exc)
+        return {"ok": False, "error": str(exc)}
+    finally:
+        gc.collect()
+
+
 @_locked_job("ai_monitor", stale_after_sec=180)
 def _run_ai_monitor() -> dict[str, Any]:
     """See ai_monitor.py's own module docstring -- a read-only, project-
@@ -1004,6 +1067,10 @@ def _ensure_background_jobs_started() -> None:
                 _run_kalshi_15m_trade_analysis, "cron",
                 hour=KALSHI_15M_TRADE_ANALYSIS_HOUR_ET, minute=KALSHI_15M_TRADE_ANALYSIS_MINUTE_ET,
                 id="kalshi_15m_trade_analysis", replace_existing=True,
+            )
+            scheduler.add_job(
+                _run_kalshi_15m_backtest, "cron", hour=KALSHI_15M_BACKTEST_HOUR_ET, minute=0,
+                id="kalshi_15m_backtest", replace_existing=True,
             )
             scheduler.add_job(
                 _run_ai_monitor, "cron", hour=AI_MONITOR_HOUR_ET, minute=0,
@@ -1883,6 +1950,25 @@ def api_kalshi_15m_trade_analysis():
         return jsonify({"ok": False, "error": str(exc)}), 500
 
 
+@app.route("/api/kalshi15m/backtest", methods=["GET", "POST"])
+def api_kalshi_15m_backtest():
+    """GET returns the last SCHEDULED result (see
+    KALSHI_15M_BACKTEST_HOUR_ET's own comment) -- cheap, instant,
+    dashboard-safe. POST actually runs a fresh walk-forward now (a real
+    cost concern -- this repo's own confirmed 90-day-backfill gunicorn-
+    timeout precedent, see /api/kalshi15m/backfill's own docstring,
+    applies here too) -- a deliberate, on-demand check, never something
+    the dashboard should call by default."""
+    if not is_cron_authorized(request):
+        return jsonify({"ok": False, "error": "Unauthorized"}), 401
+    if request.method == "GET":
+        return jsonify(load_json(KALSHI_15M_LATEST_BACKTEST_FILE, {"ok": False, "reason": "no_backtest_run_yet"}))
+    try:
+        return jsonify(_run_kalshi_15m_backtest())
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
 _JOB_LABELS = {
     "perps_fast_check": f"Fast exit check (every {PERPS_FAST_CHECK_SECONDS}s)",
     "perps_entry_scan": f"Entry scan -- all instruments (every {PERPS_CYCLE_MINUTES} min)",
@@ -1897,6 +1983,10 @@ _JOB_LABELS = {
     "kalshi_15m_trade_analysis": (
         f"Kalshi 15m trade win/loss analysis (daily {KALSHI_15M_TRADE_ANALYSIS_HOUR_ET:02d}:{KALSHI_15M_TRADE_ANALYSIS_MINUTE_ET:02d} ET; "
         f"a faster, evidence-gated confidence-floor auto-tune already runs every 5 real trades)"
+    ),
+    "kalshi_15m_backtest": (
+        f"Kalshi 15m crypto walk-forward backtest + forward test (daily {KALSHI_15M_BACKTEST_HOUR_ET:02d}:00 ET; "
+        f"auto-retrains both models immediately on a confirmed losing result)"
     ),
     "ai_monitor": f"Project-wide AI-powered status review (HF Inference), read-only, all 5 markets (daily {AI_MONITOR_HOUR_ET:02d}:00 ET)",
     "perps_train": f"Model retrain (daily {PERPS_TRAIN_HOUR_ET:02d}:00 ET)",

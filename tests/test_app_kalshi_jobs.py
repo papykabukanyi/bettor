@@ -964,6 +964,95 @@ def test_run_kalshi_15m_train_survives_a_meta_model_training_failure(monkeypatch
 
 
 # ---------------------------------------------------------------------------
+# kalshi_15m_backtest -- regularly-scheduled walk-forward backtest +
+# forward test, per explicit user direction: "it need a backtest and a
+# forward test to be regularly implemented." Auto-retrains on a
+# confirmed losing result, same "use everything the bot has as a
+# resource" posture as every sibling market's own equivalent.
+# ---------------------------------------------------------------------------
+def test_kalshi_15m_backtest_job_saves_a_winning_result_without_retraining(monkeypatch):
+    from data import kalshi_15m_backtest, kalshi_15m_model
+
+    monkeypatch.setattr(kalshi_15m_backtest, "run_walkforward_backtest", lambda: {"ok": True, "mean_return_pct": 0.02})
+
+    def fail_if_called(**kw):
+        raise AssertionError("must not retrain after a winning backtest")
+
+    monkeypatch.setattr(kalshi_15m_model, "train_model", fail_if_called)
+    monkeypatch.setattr(kalshi_15m_model, "train_torch_candidate_model", fail_if_called)
+
+    result = app_kalshi._run_kalshi_15m_backtest.__wrapped__()  # noqa: SLF001
+
+    assert result["ok"] is True
+    assert "auto_retrain" not in result
+
+
+def test_kalshi_15m_backtest_job_retrains_both_models_on_a_losing_result(monkeypatch):
+    from data import kalshi_15m_backtest, kalshi_15m_model, kalshi_15m_strategy
+
+    monkeypatch.setattr(kalshi_15m_backtest, "run_walkforward_backtest", lambda: {"ok": True, "mean_return_pct": -0.03})
+    monkeypatch.setattr(kalshi_15m_strategy, "_load_state", lambda: {"trade_log": []})
+    monkeypatch.setattr(kalshi_15m_model, "train_model", lambda **kw: {"ok": True, "rows": 1000})
+    monkeypatch.setattr(kalshi_15m_model, "train_torch_candidate_model", lambda **kw: {"ok": True, "promoted": False})
+
+    result = app_kalshi._run_kalshi_15m_backtest.__wrapped__()  # noqa: SLF001
+
+    assert result["ok"] is True
+    assert result["auto_retrain"] == {"ok": True, "rows": 1000}
+    assert result["auto_torch_retrain"] == {"ok": True, "promoted": False}
+
+
+def test_kalshi_15m_backtest_job_survives_a_backtest_failure(monkeypatch):
+    from data import kalshi_15m_backtest
+
+    def raise_error():
+        raise RuntimeError("simulated backtest crash")
+
+    monkeypatch.setattr(kalshi_15m_backtest, "run_walkforward_backtest", raise_error)
+    result = app_kalshi._run_kalshi_15m_backtest.__wrapped__()  # noqa: SLF001
+    assert result["ok"] is False
+
+
+def test_kalshi_15m_backtest_job_survives_a_retrain_failure_after_a_losing_result(monkeypatch):
+    """Best-effort only -- a retrain crash must never take down the
+    backtest job's own (already-computed) result."""
+    from data import kalshi_15m_backtest, kalshi_15m_model, kalshi_15m_strategy
+
+    monkeypatch.setattr(kalshi_15m_backtest, "run_walkforward_backtest", lambda: {"ok": True, "mean_return_pct": -0.03})
+    monkeypatch.setattr(kalshi_15m_strategy, "_load_state", lambda: {"trade_log": []})
+
+    def raise_error(**kw):
+        raise RuntimeError("simulated retrain crash")
+
+    monkeypatch.setattr(kalshi_15m_model, "train_model", raise_error)
+    monkeypatch.setattr(kalshi_15m_model, "train_torch_candidate_model", raise_error)
+
+    result = app_kalshi._run_kalshi_15m_backtest.__wrapped__()  # noqa: SLF001
+    assert result["ok"] is True
+    assert "auto_retrain" not in result
+
+
+def test_kalshi_15m_backtest_route_returns_the_cached_result_on_get(monkeypatch):
+    monkeypatch.setattr(app_kalshi, "load_json", lambda path, default: {"ok": True, "mean_return_pct": 0.01, "cached": True})
+    with app_kalshi.app.test_client() as client:
+        resp = client.get("/api/kalshi15m/backtest")
+        body = resp.get_json()
+        assert resp.status_code == 200
+        assert body["cached"] is True
+
+
+def test_kalshi_15m_backtest_route_runs_a_fresh_backtest_on_post(monkeypatch):
+    from data import kalshi_15m_backtest
+
+    monkeypatch.setattr(kalshi_15m_backtest, "run_walkforward_backtest", lambda: {"ok": True, "mean_return_pct": 0.05, "fresh": True})
+    with app_kalshi.app.test_client() as client:
+        resp = client.post("/api/kalshi15m/backtest")
+        body = resp.get_json()
+        assert resp.status_code == 200
+        assert body["fresh"] is True
+
+
+# ---------------------------------------------------------------------------
 # kalshi_15m_torch_train -- custom PyTorch MLP challenger, crypto only
 # (metals excluded for now -- see KALSHI_15M_TORCH_TRAIN_HOUR_ET's own
 # comment). Champion/challenger promotion logic lives in

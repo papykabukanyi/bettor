@@ -253,6 +253,67 @@ def test_scan_and_enter_still_works_with_a_flat_create_order_response(monkeypatc
     assert state["positions"][0]["order_id"] == "flat-id"
 
 
+def test_scan_and_enter_trusts_the_fill_count_from_the_create_response_itself(monkeypatch):
+    """FOURTH real, live, confirmed bug: found by re-reading Kalshi's own
+    create-order-v2 API reference after real positions kept appearing on
+    this account (via /api/kalshi15m/real-positions) with zero
+    corresponding local record, even AFTER the order_id-unwrap fix above
+    was already live. Root cause: the old fill-check made a SEPARATE
+    GET /portfolio/orders call immediately after CREATE returned -- a
+    real eventual-consistency race against Kalshi's own backend, where a
+    genuinely-filled order could still read back as "not found yet" a
+    few hundred milliseconds later. Kalshi's own docs confirm CREATE's
+    own response already carries fill_count/remaining_count
+    synchronously for an IOC order. This test proves the fix: get_orders
+    is mocked to return NOTHING matching (simulating that exact race),
+    yet the position must still be recorded correctly because the
+    create response itself already said it filled."""
+    monkeypatch.setattr(kalshi_15m_strategy, "MAX_CONCURRENT_POSITIONS", 1)
+    monkeypatch.setattr(kalshi_15m_strategy, "LIVE_TRADING_ENABLED", True)
+    monkeypatch.setenv("KALSHI_15M_LIVE_TRADING_ENABLED", "1")
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
+    _mock_confident_prediction(monkeypatch)
+    monkeypatch.setattr(kalshi_15m_strategy, "_account_budget_usd", lambda: 100.0)
+    monkeypatch.setattr(
+        kalshi_15m, "create_order",
+        lambda **kw: {"order": {"order_id": "race-id", "fill_count_fp": "10.00", "remaining_count_fp": "0.00"}},
+    )
+
+    def fail_if_called(ticker=None, status=None):
+        raise AssertionError("must not need the separate GET /portfolio/orders call when CREATE already answered")
+
+    monkeypatch.setattr(kalshi_15m, "get_orders", fail_if_called)
+
+    result = kalshi_15m_strategy.scan_and_enter(dry_run=False)
+
+    entered = [c for c in result["checks"] if c.get("action") == "entered"]
+    assert len(entered) == 1
+    state = kalshi_15m_strategy._load_state()  # noqa: SLF001
+    assert state["positions"][0]["count"] == 10.0
+
+
+def test_scan_and_enter_falls_back_to_get_orders_when_the_create_response_has_no_fill_info(monkeypatch):
+    """Defensive fallback still works when a real response genuinely
+    doesn't carry fill info in the CREATE response (not the expected
+    path for a real IOC order per Kalshi's own docs, but kept safe
+    regardless)."""
+    monkeypatch.setattr(kalshi_15m_strategy, "MAX_CONCURRENT_POSITIONS", 1)
+    monkeypatch.setattr(kalshi_15m_strategy, "LIVE_TRADING_ENABLED", True)
+    monkeypatch.setenv("KALSHI_15M_LIVE_TRADING_ENABLED", "1")
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
+    _mock_confident_prediction(monkeypatch)
+    monkeypatch.setattr(kalshi_15m_strategy, "_account_budget_usd", lambda: 100.0)
+    monkeypatch.setattr(kalshi_15m, "create_order", lambda **kw: {"order": {"order_id": "no-fill-info-id"}})
+    monkeypatch.setattr(kalshi_15m, "get_orders", lambda ticker=None, status=None: [{"order_id": "no-fill-info-id", "fill_count_fp": "7.00"}])
+
+    result = kalshi_15m_strategy.scan_and_enter(dry_run=False)
+
+    entered = [c for c in result["checks"] if c.get("action") == "entered"]
+    assert len(entered) == 1
+    state = kalshi_15m_strategy._load_state()  # noqa: SLF001
+    assert state["positions"][0]["count"] == 7.0
+
+
 def test_scan_and_enter_records_a_failed_order_without_opening_a_position(monkeypatch):
     monkeypatch.setattr(kalshi_15m_strategy, "LIVE_TRADING_ENABLED", True)
     monkeypatch.setenv("KALSHI_15M_LIVE_TRADING_ENABLED", "1")
@@ -1278,6 +1339,118 @@ def test_loss_streak_multiplier_is_coin_specific():
     trades = [_loss_streak_trade(coin="BTC", pnl=-1.0) for _ in range(3)]
     assert kalshi_15m_strategy.compute_loss_streak_size_multiplier("BTC", trades) < 1.0
     assert kalshi_15m_strategy.compute_loss_streak_size_multiplier("ETH", trades) == 1.0
+
+
+# ---------------------------------------------------------------------------
+# Per-symbol WIN-streak size increase -- per explicit user direction:
+# "position increase only when its consistent win after win then we
+# increase the position sizes." Off by default (unlike the loss-streak
+# throttle) -- this one INCREASES exposure, so it needs real evidence
+# first, same posture as conviction sizing/correlation study/meta-model.
+# ---------------------------------------------------------------------------
+def test_win_streak_multiplier_is_1_with_insufficient_history():
+    trades = [_loss_streak_trade(pnl=1.0), _loss_streak_trade(pnl=1.0)]  # only 2, floor is 3
+    assert kalshi_15m_strategy.compute_win_streak_size_multiplier("BTC", trades) == 1.0
+
+
+def test_win_streak_multiplier_grows_after_3_consecutive_real_wins():
+    trades = [_loss_streak_trade(pnl=1.0) for _ in range(3)]
+    result = kalshi_15m_strategy.compute_win_streak_size_multiplier("BTC", trades)
+    assert result == kalshi_15m_strategy.WIN_STREAK_SIZE_MULTIPLIER
+    assert result > 1.0
+
+
+def test_win_streak_multiplier_resets_the_moment_a_real_loss_lands():
+    trades = [_loss_streak_trade(pnl=1.0), _loss_streak_trade(pnl=1.0), _loss_streak_trade(pnl=-1.0)]
+    assert kalshi_15m_strategy.compute_win_streak_size_multiplier("BTC", trades) == 1.0
+
+
+def test_win_streak_multiplier_ignores_dry_run_trades():
+    trades = [_loss_streak_trade(pnl=1.0, dry_run=True) for _ in range(5)]
+    assert kalshi_15m_strategy.compute_win_streak_size_multiplier("BTC", trades) == 1.0
+
+
+def test_win_streak_multiplier_is_coin_specific():
+    trades = [_loss_streak_trade(coin="BTC", pnl=1.0) for _ in range(3)]
+    assert kalshi_15m_strategy.compute_win_streak_size_multiplier("BTC", trades) > 1.0
+    assert kalshi_15m_strategy.compute_win_streak_size_multiplier("ETH", trades) == 1.0
+
+
+def test_scan_and_enter_does_not_grow_contracts_after_a_win_streak_when_the_flag_is_off(monkeypatch):
+    assert kalshi_15m_strategy.USE_WIN_STREAK_SIZING is False  # module default -- not touched by this test
+    monkeypatch.setattr(kalshi_15m_strategy, "MAX_CONCURRENT_POSITIONS", 1)
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market(no_ask=0.51, no_bid=0.5))
+    monkeypatch.setattr(kalshi_15m_model, "predict_direction", lambda coin: {"model_ok": True, "probability_up": 0.72})
+    monkeypatch.setattr(crypto_correlation, "perps_correlation_bullishness", lambda coin, row=None: {"score": 0.0, "reason": "neutral", "components": {}})
+    winning_trades = [{"coin": "BTC", "realized_pnl_usd": 1.0, "dry_run": False} for _ in range(3)]
+    kalshi_15m_strategy._save_state({"positions": [], "trade_log": winning_trades, "realized_pnl_by_date": {}})  # noqa: SLF001
+
+    kalshi_15m_strategy.scan_and_enter()
+
+    state = kalshi_15m_strategy._load_state()  # noqa: SLF001
+    btc_position = state["positions"][0]
+    assert btc_position["count"] == 10  # int(100 * 0.05 / 0.5) -- unchanged, flag is off
+    assert btc_position["entry_win_streak_multiplier"] == 1.0
+
+
+def test_scan_and_enter_grows_contracts_after_a_real_winning_streak_when_enabled(monkeypatch):
+    monkeypatch.setattr(kalshi_15m_strategy, "MAX_CONCURRENT_POSITIONS", 1)
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market(no_ask=0.51, no_bid=0.5))
+    monkeypatch.setattr(kalshi_15m_model, "predict_direction", lambda coin: {"model_ok": True, "probability_up": 0.72})
+    monkeypatch.setattr(crypto_correlation, "perps_correlation_bullishness", lambda coin, row=None: {"score": 0.0, "reason": "neutral", "components": {}})
+    winning_trades = [{"coin": "BTC", "realized_pnl_usd": 1.0, "dry_run": False} for _ in range(3)]
+    kalshi_15m_strategy._save_state({  # noqa: SLF001
+        "positions": [], "trade_log": winning_trades, "realized_pnl_by_date": {},
+        "tuning": {"win_streak_sizing_enabled": True},
+    })
+
+    kalshi_15m_strategy.scan_and_enter()
+
+    state = kalshi_15m_strategy._load_state()  # noqa: SLF001
+    btc_position = state["positions"][0]
+    assert btc_position["count"] > 10  # grown above the un-multiplied 10
+    assert btc_position["entry_win_streak_multiplier"] == kalshi_15m_strategy.WIN_STREAK_SIZE_MULTIPLIER
+
+
+def test_apply_win_streak_sizing_override_persists_the_flag():
+    kalshi_15m_strategy._save_state({"positions": [], "trade_log": [], "realized_pnl_by_date": {}})  # noqa: SLF001
+    applied = kalshi_15m_strategy.apply_win_streak_sizing_override(enabled=True, reason="test evidence")
+    assert applied["win_streak_sizing_enabled"] is True
+    state = kalshi_15m_strategy._load_state()  # noqa: SLF001
+    assert state["tuning"]["win_streak_sizing_enabled"] is True
+
+
+# ---------------------------------------------------------------------------
+# Entry feature snapshot -- per explicit user direction: "this need to
+# remember what lead to a trade and study it... with all indicator and
+# times frames."
+# ---------------------------------------------------------------------------
+def test_clean_feature_snapshot_returns_none_for_missing_input():
+    assert kalshi_15m_strategy._clean_feature_snapshot(None) is None  # noqa: SLF001
+    assert kalshi_15m_strategy._clean_feature_snapshot({}) is None  # noqa: SLF001
+
+
+def test_clean_feature_snapshot_drops_non_numeric_fields_and_coerces_floats():
+    row = {"symbol": "BTC", "ret_5m": 0.01, "trend_1h": "0.02", "rsi_14": 0.6, "junk": "not a number"}
+    result = kalshi_15m_strategy._clean_feature_snapshot(row)  # noqa: SLF001
+    assert "symbol" not in result
+    assert "junk" not in result
+    assert result["ret_5m"] == 0.01
+    assert result["trend_1h"] == 0.02
+    assert result["rsi_14"] == 0.6
+
+
+def test_scan_and_enter_records_the_entry_feature_snapshot(monkeypatch):
+    monkeypatch.setattr(kalshi_15m_strategy, "MAX_CONCURRENT_POSITIONS", 1)
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
+    monkeypatch.setattr(
+        kalshi_15m_model, "predict_direction",
+        lambda coin: {"model_ok": True, "probability_up": 0.72, "feature_row": {"symbol": coin, "ret_5m": 0.02, "rsi_14": 0.7}},
+    )
+    kalshi_15m_strategy.scan_and_enter()
+    state = kalshi_15m_strategy._load_state()  # noqa: SLF001
+    btc_position = next(p for p in state["positions"] if p["coin"] == "BTC")
+    assert btc_position["entry_feature_snapshot"] == {"ret_5m": 0.02, "rsi_14": 0.7}
 
 
 def test_scan_and_enter_shrinks_contracts_after_a_real_losing_streak_on_that_coin(monkeypatch):

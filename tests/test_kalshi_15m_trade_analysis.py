@@ -279,6 +279,47 @@ def test_recommend_conviction_sizing_trial_ignores_dry_run_and_missing_flag_trad
 
 
 # ---------------------------------------------------------------------------
+# recommend_win_streak_sizing_trial -- identical structure to
+# recommend_conviction_sizing_trial above, for the win-streak size
+# increase.
+# ---------------------------------------------------------------------------
+def _ws_trade(*, pnl: float, enabled: bool | None) -> dict:
+    return {"coin": "BTC", "side": "yes", "realized_pnl_usd": pnl, "entry_win_streak_sizing_enabled": enabled, "dry_run": False}
+
+
+def test_recommend_win_streak_sizing_trial_proposes_a_start_trial_with_enough_history():
+    trades = [_ws_trade(pnl=1.0, enabled=False) for _ in range(30)]
+    result = k15ta.recommend_win_streak_sizing_trial(trades, current_enabled=False)
+    assert result["should_apply"] is True
+    assert result["action"] == "start_trial"
+    assert result["recommended_enabled"] is True
+
+
+def test_recommend_win_streak_sizing_trial_does_not_propose_a_trial_below_the_history_floor():
+    trades = [_ws_trade(pnl=1.0, enabled=False) for _ in range(10)]
+    result = k15ta.recommend_win_streak_sizing_trial(trades, current_enabled=False)
+    assert result["should_apply"] is False
+    assert result["reason"] == "insufficient_trade_history"
+
+
+def test_recommend_win_streak_sizing_trial_recommends_disabling_when_evidence_turns_against_it():
+    with_feature = [_ws_trade(pnl=-1.0, enabled=True) for _ in range(20)]
+    without_feature = [_ws_trade(pnl=1.0, enabled=False) for _ in range(20)]
+    result = k15ta.recommend_win_streak_sizing_trial(with_feature + without_feature, current_enabled=True)
+    assert result["should_apply"] is True
+    assert result["action"] == "disable"
+    assert result["recommended_enabled"] is False
+
+
+def test_recommend_win_streak_sizing_trial_confirms_enabled_when_evidence_favors_it():
+    with_feature = [_ws_trade(pnl=2.0, enabled=True) for _ in range(20)]
+    without_feature = [_ws_trade(pnl=1.0, enabled=False) for _ in range(20)]
+    result = k15ta.recommend_win_streak_sizing_trial(with_feature + without_feature, current_enabled=True)
+    assert result["should_apply"] is False
+    assert result["reason"] == "confirmed_enabled"
+
+
+# ---------------------------------------------------------------------------
 # build_trade_snapshot / _lesson_for
 # ---------------------------------------------------------------------------
 def test_build_trade_snapshot_win():

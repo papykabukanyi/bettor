@@ -28,15 +28,65 @@ real, fully-exercisable simulation of the whole entry -> hold -> settle
 lifecycle, not a stub, and stays exactly as real now that live orders can
 actually fill.
 
-Much simpler than perps_strategy.py by design, not by omission: no
-leverage (these are plain $1-notional binary contracts, see kalshi_15m.py's
-own docstring), no stop-loss/take-profit/quick-profit exit percentages (a
-position here has exactly one exit: the window closes and it settles --
-there is no "exit early" lever worth building until real evidence shows
-selling before close ever beats holding to settlement), no daily-loss-cap/
-technical-scalper-filter machinery. The model's own probability_up IS the
-entire signal, matching what a 15-minute binary contract actually needs:
-one calibrated probability, not perps' multi-signal-agreement gate.
+Simpler than perps_strategy.py in one real, permanent way: no leverage
+(these are plain $1-notional binary contracts, see kalshi_15m.py's own
+docstring) and no daily-loss-cap/technical-scalper-filter machinery this
+product's own economics don't need. The model's own probability_up IS
+the core signal, matching what a 15-minute binary contract actually
+needs: one calibrated probability, not perps' multi-signal-agreement
+gate.
+
+That said, this module is NOT "hold to settlement, no other options"
+any more -- an earlier version of this docstring said exactly that, on
+the reasoning that no real evidence yet justified an early-exit lever.
+Per explicit, repeated user direction ("the bot need to understand when
+it's not going to make it but the position is profitable so it uses
+stop loss to at least win a bit", later "i need a multi time frame
+study... to help also determine staying or closing the winning
+position"), this market now has real, if still evidence-gated, decision
+layers on TOP of the base probability_up signal:
+
+  - A chart-study confidence layer (USE_CORRELATION_STUDY) -- crypto's
+    own study reuses perps' already-running correlation web; metals get
+    an independent one of their own (see crypto_correlation.py's
+    refresh_metals_study). Both feed the SAME multi-timeframe-aware
+    (5m/15m/30m return, 1h-4h trend, MACD, RSI) confidence nudge.
+  - A meta-labeling trust gate (USE_META_MODEL, crypto only) --
+    kalshi_15m_meta_model.py, a second model judging whether to trust
+    the primary model's call in the CURRENT regime, not a second
+    opinion on direction.
+  - Conviction sizing (USE_CONVICTION_SIZING) and a win-streak size
+    increase (USE_WIN_STREAK_SIZING) -- both scale a position UP on a
+    stronger signal, both off by default pending real evidence (a
+    ~52-54% real walk-forward accuracy means a short streak is very
+    likely still noise -- see kalshi_15m_backtest.py's own results).
+  - A per-symbol loss-streak throttle (always on -- see
+    compute_loss_streak_size_multiplier's own comment for why this one
+    doesn't need the same evidence gate: it only ever REDUCES risk).
+  - Early exit (USE_EARLY_EXIT, manage_open_positions) -- re-runs the
+    SAME model + chart-study reassessment against CURRENT data on every
+    still-open real position; only acts when that reassessment has
+    genuinely flipped away from the held side, closing to lock in a
+    profit or cut a loss rather than always riding to settlement.
+  - A full indicator/timeframe snapshot recorded on every position/trade
+    (entry_feature_snapshot) -- what actually led to a win or a loss is
+    preserved for study, not just the final probability/confidence
+    numbers.
+  - A regularly-scheduled walk-forward backtest AND forward test (see
+    KALSHI_15M_BACKTEST_HOUR_ET's own comment in app_kalshi.py), not a
+    one-off manual check -- reacts to a confirmed losing result with an
+    immediate extra retrain of both models.
+
+Every one of the risk-INCREASING levers above (correlation study,
+meta-model, conviction sizing, win-streak sizing, early exit) stays off
+by default and is evidence-gated by kalshi_15m_trade_analysis.py's own
+recommend_*_trial functions, applied via apply_*_override -- exactly the
+same "prove it out on real trade history first" discipline every other
+market in this codebase already holds itself to. This module's own
+sample-reweighting during training (kalshi_15m_model._trade_outcome_sample_weight)
+is the silent, always-on complement: every real win/loss already nudges
+how much the NEXT day's retrain trusts a similar-looking row, independent
+of whether any of the live-tunable levers above are switched on.
 """
 from __future__ import annotations
 
@@ -221,6 +271,41 @@ def compute_loss_streak_size_multiplier(coin: str, trade_log: list[dict[str, Any
     recent = coin_trades[-LOSS_STREAK_THROTTLE_LENGTH:]
     all_losses = all(float(t.get("realized_pnl_usd") or 0.0) <= 0 for t in recent)
     return LOSS_STREAK_SIZE_MULTIPLIER if all_losses else 1.0
+
+
+# Per-symbol WIN-streak size increase -- the mirror image of the throttle
+# above, per explicit user direction: "position increase only when its
+# consistent win after win then we increase the position sizes." Real,
+# deliberate difference from the loss-streak throttle: this one GROWS
+# exposure, so unlike that pure risk-reducer, it needs the SAME "prove it
+# out on real trade history first" evidence-gated posture as every other
+# risk-INCREASING lever here (conviction sizing, correlation study,
+# meta-model) -- a 3-trade winning streak on a model with only ~52-54%
+# real walk-forward accuracy (see this module's own backtest results) is
+# very likely still just noise, not a genuine change in that coin's own
+# edge; chasing it with bigger size before real evidence says otherwise
+# is a real, disclosed risk this default protects against. Off by
+# default (USE_WIN_STREAK_SIZING).
+USE_WIN_STREAK_SIZING = _env_flag("KALSHI_15M_USE_WIN_STREAK_SIZING", default=False)
+WIN_STREAK_LENGTH = _env_int("KALSHI_15M_WIN_STREAK_LENGTH", 3)
+WIN_STREAK_SIZE_MULTIPLIER = _env_float("KALSHI_15M_WIN_STREAK_SIZE_MULTIPLIER", 1.5)
+
+
+def compute_win_streak_size_multiplier(coin: str, trade_log: list[dict[str, Any]] | None) -> float:
+    """1.0 (no change) unless this coin's own most recent WIN_STREAK_LENGTH
+    REAL (non-dry-run) closed trades are ALL wins, in which case
+    WIN_STREAK_SIZE_MULTIPLIER (a real, grown slice) -- resets back to
+    1.0 the moment this coin produces even one real loss. Mirror image of
+    compute_loss_streak_size_multiplier's own logic; see
+    USE_WIN_STREAK_SIZING's own comment for why this one stays off by
+    default while that one doesn't."""
+    trade_log = trade_log or []
+    coin_trades = [t for t in trade_log if t.get("coin") == coin and not t.get("dry_run")]
+    if len(coin_trades) < WIN_STREAK_LENGTH:
+        return 1.0
+    recent = coin_trades[-WIN_STREAK_LENGTH:]
+    all_wins = all(float(t.get("realized_pnl_usd") or 0.0) > 0 for t in recent)
+    return WIN_STREAK_SIZE_MULTIPLIER if all_wins else 1.0
 
 
 STATE_FILE = Path(os.getenv("KALSHI_15M_STATE_FILE", str(DATA_DIR / "kalshi_15m_state.json")))
@@ -466,6 +551,14 @@ def evaluate_candidate(
         # -- how far above its OWN entry bar this candidate's confidence
         # cleared.
         "effective_confidence_min": effective_confidence_min,
+        # The full raw indicator row this decision was made from -- per
+        # explicit user direction: "this need to remember what lead to a
+        # trade and study it... with all indicator and times frames."
+        # scan_and_enter turns this into entry_feature_snapshot on the
+        # position/trade record itself; kept as the raw dict here (not
+        # yet JSON-cleaned) so this function stays a thin, direct pass-
+        # through of what _predict_direction already computed.
+        "feature_row": prediction.get("feature_row"),
     }
     if meta_trust is not None:
         result["meta_trust_score"] = meta_trust
@@ -474,6 +567,30 @@ def evaluate_candidate(
 
 def _has_open_position(state: dict[str, Any], *, coin: str) -> bool:
     return any(p.get("coin") == coin for p in state.get("positions") or [])
+
+
+def _clean_feature_snapshot(feature_row: dict[str, Any] | None) -> dict[str, float] | None:
+    """The raw indicator/timeframe row a decision was made from, made
+    JSON-safe for durable state/trade_log storage -- per explicit user
+    direction: "this need to remember what lead to a trade and study
+    it... this is trained in the bot itself with all indicator and time
+    frames." Drops non-numeric fields (symbol/coin labels -- already
+    recorded elsewhere on the position/trade itself) and coerces every
+    remaining value to a plain float, since numpy scalar types (common in
+    a pandas-derived feature row) aren't natively JSON-serializable.
+    None in, None out -- never fabricates a snapshot that wasn't really
+    computed."""
+    if not feature_row:
+        return None
+    snapshot: dict[str, float] = {}
+    for key, value in feature_row.items():
+        if key in ("symbol", "coin"):
+            continue
+        try:
+            snapshot[key] = float(value)
+        except (TypeError, ValueError):
+            continue
+    return snapshot or None
 
 
 def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
@@ -506,6 +623,10 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
         # USE_CONVICTION_SIZING's own comment and
         # apply_conviction_sizing_override below.
         effective_use_conviction_sizing = tuning_state.get("conviction_sizing_enabled", USE_CONVICTION_SIZING)
+        # Same durable-state-driven override for the win-streak size
+        # increase -- see USE_WIN_STREAK_SIZING's own comment and
+        # apply_win_streak_sizing_override below.
+        effective_use_win_streak_sizing = tuning_state.get("win_streak_sizing_enabled", USE_WIN_STREAK_SIZING)
 
     for coin in ASSET_SERIES:
         if open_count >= MAX_CONCURRENT_POSITIONS:
@@ -584,7 +705,16 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
         # the SAME state snapshot already read above for the
         # already-has-open-position check, no extra state read needed.
         loss_streak_multiplier = compute_loss_streak_size_multiplier(coin, state.get("trade_log"))
-        contracts = max(1, int((_account_budget_usd() * POSITION_SIZE_PCT * size_multiplier * loss_streak_multiplier) / cost_basis))
+        # Per-symbol win-streak size increase -- see USE_WIN_STREAK_SIZING's
+        # own comment. Off by default, so this stays 1.0 (no change) until
+        # real trade history earns it via apply_win_streak_sizing_override.
+        win_streak_multiplier = 1.0
+        if effective_use_win_streak_sizing:
+            win_streak_multiplier = compute_win_streak_size_multiplier(coin, state.get("trade_log"))
+        contracts = max(1, int(
+            (_account_budget_usd() * POSITION_SIZE_PCT * size_multiplier * loss_streak_multiplier * win_streak_multiplier)
+            / cost_basis
+        ))
         client_order_id = str(uuid.uuid4())
 
         order_id = None
@@ -651,16 +781,37 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
             # "canceled" with fill_count 0 -- this code was recording that
             # as an open position anyway, and later fabricating a
             # settlement outcome/P&L for a position the account never
-            # actually held. Read back this exact order's own real status
-            # (an authenticated but read-only call) before trusting it.
-            filled_count = 0.0
-            try:
-                fresh_orders = kalshi_15m.get_orders(ticker=market["ticker"])
-                match = next((o for o in fresh_orders if o.get("order_id") == order_id), None)
-                if match is not None:
-                    filled_count = float(match.get("fill_count_fp") or match.get("fill_count") or 0.0)
-            except Exception as exc:
-                logger.warning("[kalshi_15m_strategy] could not verify fill for order %s (%s): %s", order_id, coin, exc)
+            # actually held.
+            #
+            # THIRD, LIVE, CONFIRMED BUG this fixes (found by re-reading
+            # Kalshi's own create-order-v2 API reference after real
+            # positions kept appearing on this account -- confirmed via
+            # /api/kalshi15m/real-positions -- with zero corresponding
+            # local record even AFTER the order_id-unwrap fix above):
+            # the ORIGINAL fill-check made a SEPARATE, immediately-
+            # following GET /portfolio/orders call to look up this same
+            # order's own fill_count_fp -- a real eventual-consistency
+            # race against Kalshi's own backend (the just-placed order
+            # isn't always visible in a LIST call microseconds after
+            # CREATE returns), so a genuinely-filled real order could
+            # still read back as "not found yet" and get wrongly
+            # discarded. Kalshi's own docs confirm the CREATE response
+            # ITSELF already carries `fill_count`/`remaining_count`
+            # synchronously -- "Number of contracts filled immediately
+            # upon placement" -- for an immediate_or_cancel order, no
+            # follow-up read needed, and no race possible. Reads that
+            # first; only falls back to the old separate GET call if the
+            # create response genuinely didn't include it (defensive,
+            # not the expected path for a real IOC fill).
+            filled_count = float(order.get("fill_count_fp") or order.get("fill_count") or 0.0)
+            if filled_count <= 0:
+                try:
+                    fresh_orders = kalshi_15m.get_orders(ticker=market["ticker"])
+                    match = next((o for o in fresh_orders if o.get("order_id") == order_id), None)
+                    if match is not None:
+                        filled_count = float(match.get("fill_count_fp") or match.get("fill_count") or 0.0)
+                except Exception as exc:
+                    logger.warning("[kalshi_15m_strategy] could not verify fill for order %s (%s): %s", order_id, coin, exc)
             if filled_count <= 0:
                 checks.append({"coin": coin, "ok": False, "reason": "order_not_filled", "order_id": order_id})
                 continue
@@ -684,6 +835,15 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
             # Observability only -- confirms a throttled entry actually
             # WAS sized down (1.0 whenever no loss streak was active).
             "entry_loss_streak_multiplier": loss_streak_multiplier,
+            # Captured regardless of whether win-streak sizing was even ON
+            # at entry time -- same "works from day one" reasoning, feeds
+            # a future evidence-gated trial's own with-vs-without
+            # comparison (see USE_WIN_STREAK_SIZING's own comment).
+            "entry_win_streak_sizing_enabled": effective_use_win_streak_sizing,
+            "entry_win_streak_multiplier": win_streak_multiplier,
+            # The full indicator/timeframe snapshot this decision was made
+            # from -- see _clean_feature_snapshot's own docstring.
+            "entry_feature_snapshot": _clean_feature_snapshot(decision.get("feature_row")),
         }
         with _STATE_LOCK:
             state = _load_state()
@@ -800,6 +960,25 @@ def apply_conviction_sizing_override(*, enabled: bool, reason: str) -> dict[str,
         return dict(state["tuning"])
 
 
+def apply_win_streak_sizing_override(*, enabled: bool, reason: str) -> dict[str, Any]:
+    """Same evidence-gated, no-redeploy-needed mechanism as
+    apply_conviction_sizing_override above, for the win-streak size
+    increase (see kalshi_15m_trade_analysis.recommend_win_streak_sizing_trial)
+    -- MERGES into state["tuning"] so all of these coexist."""
+    with _STATE_LOCK:
+        state = _load_state()
+        tuning = dict(state.get("tuning") or {})
+        previous = tuning.get("win_streak_sizing_enabled", USE_WIN_STREAK_SIZING)
+        tuning.update({
+            "win_streak_sizing_enabled": enabled,
+            "updated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+            "reason": reason, "field": "win_streak_sizing", "previous_win_streak_sizing_enabled": previous,
+        })
+        state["tuning"] = tuning
+        _save_state(state, push_durable=True)
+        return dict(state["tuning"])
+
+
 _LAST_BATCH_ANALYSIS_TRADE_COUNT_KEY = "last_batch_analysis_trade_count"
 
 
@@ -847,6 +1026,7 @@ def _maybe_run_batch_trade_analysis() -> dict[str, Any] | None:
                 "correlation_confidence_max_adjustment", CORRELATION_CONFIDENCE_MAX_ADJUSTMENT,
             )
             current_conviction_sizing_enabled = tuning_state.get("conviction_sizing_enabled", USE_CONVICTION_SIZING)
+            current_win_streak_sizing_enabled = tuning_state.get("win_streak_sizing_enabled", USE_WIN_STREAK_SIZING)
 
         batch = kalshi_15m_trade_analysis.analyze_recent_trade_batch(real_trades)
         logger.info(
@@ -878,6 +1058,15 @@ def _maybe_run_batch_trade_analysis() -> dict[str, Any] | None:
                 enabled=conviction_rec["recommended_enabled"], reason=f"5-trade batch review ({conviction_rec['action']})",
             )
             logger.info("[kalshi_15m_strategy] conviction sizing tuned: %s", applied)
+
+        win_streak_rec = kalshi_15m_trade_analysis.recommend_win_streak_sizing_trial(
+            real_trades, current_enabled=current_win_streak_sizing_enabled,
+        )
+        if win_streak_rec.get("should_apply"):
+            applied = apply_win_streak_sizing_override(
+                enabled=win_streak_rec["recommended_enabled"], reason=f"5-trade batch review ({win_streak_rec['action']})",
+            )
+            logger.info("[kalshi_15m_strategy] win-streak sizing tuned: %s", applied)
         return batch
     except Exception:
         logger.warning("[kalshi_15m_strategy] batch trade analysis failed", exc_info=True)
@@ -1091,14 +1280,20 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
             checks[-1]["exit_order_failed"] = str(exc)
             continue
 
-        filled_count = 0.0
-        try:
-            fresh_orders = kalshi_15m.get_orders(ticker=position["ticker"])
-            match = next((o for o in fresh_orders if o.get("order_id") == order_id), None)
-            if match is not None:
-                filled_count = float(match.get("fill_count_fp") or match.get("fill_count") or 0.0)
-        except Exception as exc:
-            logger.warning("[kalshi_15m_strategy] could not verify early-exit fill for %s (%s): %s", order_id, coin, exc)
+        # Reads the fill count directly off the CREATE response first --
+        # see scan_and_enter's own identical comment on why (Kalshi's own
+        # docs confirm fill_count/remaining_count are returned
+        # synchronously for an IOC order; a separate follow-up GET call
+        # is a real eventual-consistency race, not a more-reliable check).
+        filled_count = float(order.get("fill_count_fp") or order.get("fill_count") or 0.0)
+        if filled_count <= 0:
+            try:
+                fresh_orders = kalshi_15m.get_orders(ticker=position["ticker"])
+                match = next((o for o in fresh_orders if o.get("order_id") == order_id), None)
+                if match is not None:
+                    filled_count = float(match.get("fill_count_fp") or match.get("fill_count") or 0.0)
+            except Exception as exc:
+                logger.warning("[kalshi_15m_strategy] could not verify early-exit fill for %s (%s): %s", order_id, coin, exc)
         if filled_count <= 0:
             checks[-1]["exit_order_not_filled"] = True
             continue
@@ -1112,6 +1307,9 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
             "dry_run": False, "entry_correlation_score": position.get("entry_correlation_score"),
             "entry_conviction_sizing_enabled": position.get("entry_conviction_sizing_enabled"),
             "entry_loss_streak_multiplier": position.get("entry_loss_streak_multiplier"),
+            "entry_win_streak_sizing_enabled": position.get("entry_win_streak_sizing_enabled"),
+            "entry_win_streak_multiplier": position.get("entry_win_streak_multiplier"),
+            "entry_feature_snapshot": position.get("entry_feature_snapshot"),
             "exit_kind": "early", "exit_reason": decision["reason"],
         }
         with _STATE_LOCK:
@@ -1168,6 +1366,9 @@ def check_settlements() -> dict[str, Any]:
             "entry_correlation_score": position.get("entry_correlation_score"),
             "entry_conviction_sizing_enabled": position.get("entry_conviction_sizing_enabled"),
             "entry_loss_streak_multiplier": position.get("entry_loss_streak_multiplier"),
+            "entry_win_streak_sizing_enabled": position.get("entry_win_streak_sizing_enabled"),
+            "entry_win_streak_multiplier": position.get("entry_win_streak_multiplier"),
+            "entry_feature_snapshot": position.get("entry_feature_snapshot"),
             "exit_kind": "settled",
         }
         # Removes this ONE settled position from a FRESHLY re-read state
