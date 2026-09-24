@@ -289,12 +289,79 @@ def get_alpaca_study() -> dict[str, Any]:
 # shape build_study already expects) on ITS OWN data-collect cycle.
 _METALS_STUDY: dict[str, Any] = {}
 
+# Cross-asset input for the metals study above -- per explicit user
+# direction ("use other asset for correlation and learn what other
+# things correlate with GOLD/SILVER/COPPER[,] all possibilit[y]"), now
+# that GOLD/SILVER/COPPER are this account's permanent, sole live-entry
+# universe (see kalshi_15m_strategy.ACTIVE_ENTRY_COINS). The crypto
+# coins are no longer traded directly, but they're still fully collected
+# every cycle (kalshi_15m_data.py's own data-collect job) -- this just
+# reuses that already-running feed as a correlation INPUT rather than
+# retiring it. Cached here (set by the crypto data-collect job, read by
+# the metals one) so feeding it into refresh_metals_study below costs a
+# plain in-memory dict lookup, never a second collection pass -- same
+# "no extra network call" discipline this module's own docstring holds
+# every study to.
+_LATEST_KALSHI_15M_CRYPTO_DF: pd.DataFrame = pd.DataFrame()
+
+
+def set_latest_kalshi_15m_crypto_df(df: pd.DataFrame) -> None:
+    """Called by app_kalshi.py's own kalshi_15m crypto data-collect job
+    right after it collects -- best-effort, no return value. A missed/
+    failed crypto collect cycle simply leaves the previous frame in place
+    (one cycle stale, same posture as get_remote_alpaca_study), rather
+    than clearing cross-asset correlation input to nothing."""
+    global _LATEST_KALSHI_15M_CRYPTO_DF
+    if df is not None and not df.empty:
+        _LATEST_KALSHI_15M_CRYPTO_DF = df
+
+
+def get_latest_kalshi_15m_crypto_df() -> pd.DataFrame:
+    return _LATEST_KALSHI_15M_CRYPTO_DF
+
+
+# 5-minute bucketing for the cross-asset join below -- metals collect
+# every ~1 minute (kalshi_15m_metals_data.py's own gold-api.com poll),
+# crypto every ~5 minutes (kalshi_15m_data.py's own data-collect job);
+# their raw `ts` values essentially never coincide exactly, so a plain
+# _pivot_returns join on exact ts would see almost no real overlap.
+# Rounding both to the same 5-minute grid (matching RET_COL="ret_5m"'s
+# own natural horizon anyway -- a trailing 5-minute return means
+# basically the same thing sampled at :14 past the minute or :44 past
+# it) gives real, matchable timestamps on both sides without touching
+# either market's own underlying return values.
+_CROSS_ASSET_TS_BUCKET_SECONDS = 300
+
+
+def _bucket_ts_for_join(df: pd.DataFrame, *, bucket_seconds: int = _CROSS_ASSET_TS_BUCKET_SECONDS) -> pd.DataFrame:
+    if df is None or df.empty or "ts" not in df.columns or "symbol" not in df.columns:
+        return df if df is not None else pd.DataFrame()
+    out = df.copy()
+    out["ts"] = (out["ts"] // bucket_seconds) * bucket_seconds
+    return out.sort_values("ts").drop_duplicates(subset=["symbol", "ts"], keep="last")
+
 
 def refresh_metals_study(
     df: pd.DataFrame, *, id_col: str = "symbol", leader_id: str = "GOLD", coin_of: Callable[[str], str] | None = None,
+    crypto_df: pd.DataFrame | None = None,
 ) -> dict[str, Any]:
+    """crypto_df (optional) folds kalshi_15m's own crypto universe into
+    THIS SAME study as extra candidate peers -- see
+    _LATEST_KALSHI_15M_CRYPTO_DF's own comment. build_study/
+    _peer_confirmation_bullishness/_leader_divergence_bullishness/
+    _breadth_bullishness are all already fully generic over whatever ids
+    a study's own `corr`/`cum_return` dicts happen to contain (no metals-
+    specific logic anywhere in them) -- so a real BTC-GOLD or ETH-SILVER
+    correlation, once the data shows one, gets picked up automatically
+    with zero changes needed to any of those functions or to
+    metals_correlation_bullishness's own callers below. Omitted/empty
+    crypto_df: byte-for-byte the same metals-only study this function
+    has always produced."""
     global _METALS_STUDY
-    _METALS_STUDY = build_study(df, id_col=id_col, leader_id=leader_id, coin_of=coin_of)
+    work = df
+    if crypto_df is not None and not crypto_df.empty:
+        work = pd.concat([_bucket_ts_for_join(df), _bucket_ts_for_join(crypto_df)], ignore_index=True)
+    _METALS_STUDY = build_study(work, id_col=id_col, leader_id=leader_id, coin_of=coin_of)
     return _METALS_STUDY
 
 

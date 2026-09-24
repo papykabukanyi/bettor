@@ -18,6 +18,17 @@ def _isolated_state(tmp_path, monkeypatch):
     monkeypatch.setattr(kalshi_15m_strategy, "STATE_FILE", tmp_path / "state.json")
 
 
+@pytest.fixture(autouse=True)
+def _full_entry_universe(monkeypatch):
+    """ACTIVE_ENTRY_COINS defaults to GOLD/SILVER/COPPER only in
+    production (see its own comment) -- the overwhelming majority of
+    tests here exercise the full 14-coin universe via crypto-only mocks
+    and don't care about that restriction, so it's reset to the full
+    universe by default here; the handful of tests for the restriction
+    itself explicitly monkeypatch it back down."""
+    monkeypatch.setattr(kalshi_15m_strategy, "ACTIVE_ENTRY_COINS", frozenset(kalshi_15m_strategy.ASSET_SERIES))
+
+
 def _future_close(minutes: float) -> str:
     future = dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=minutes)
     return future.isoformat().replace("+00:00", "Z")
@@ -1486,6 +1497,192 @@ def test_yes_confidence_extra_required_applies_before_the_correlation_study_nudg
     result = kalshi_15m_strategy.evaluate_candidate("BTC", correlation_study_enabled=True)
     assert result["ok"] is True
     assert result["effective_confidence_min"] == pytest.approx(0.59)
+
+
+# ---------------------------------------------------------------------------
+# Permanent entry-universe narrowing -- per explicit user direction ("GOLD/
+# SILVER/COPPER let['s] boost all our focus on them"). Only gates NEW
+# entries; ASSET_SERIES itself (data collection, correlation study,
+# existing-position management) stays the full universe.
+# ---------------------------------------------------------------------------
+def test_active_entry_coins_env_default_string_is_gold_silver_copper():
+    """Documents the literal default string ACTIVE_ENTRY_COINS is built
+    from -- a regression guard against an accidental typo/reorder in that
+    literal, independent of the autouse _full_entry_universe fixture's
+    own test-time override above (which replaces the ATTRIBUTE, not the
+    source this asserts against)."""
+    import inspect
+    source = inspect.getsource(kalshi_15m_strategy)
+    assert 'os.getenv("KALSHI_15M_ACTIVE_ENTRY_COINS", "GOLD,SILVER,COPPER")' in source
+
+
+def test_scan_and_enter_skips_a_coin_outside_the_active_entry_universe(monkeypatch):
+    monkeypatch.setattr(kalshi_15m_strategy, "ACTIVE_ENTRY_COINS", frozenset({"GOLD", "SILVER", "COPPER"}))
+    monkeypatch.setattr(kalshi_15m_strategy, "MAX_CONCURRENT_POSITIONS", len(kalshi_15m_strategy.ASSET_SERIES))
+    monkeypatch.setattr(kalshi_15m_strategy, "GRADUATED_CONCURRENCY_ENABLED", False)
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
+    _mock_confident_prediction(monkeypatch)
+
+    result = kalshi_15m_strategy.scan_and_enter()
+
+    excluded_checks = {c["coin"]: c for c in result["checks"] if c["coin"] in kalshi_15m.KNOWN_15M_SERIES}
+    for coin, check in excluded_checks.items():
+        assert check["ok"] is False
+        assert check["reason"] == "coin_outside_active_entry_universe"
+    # PLATINUM/PALLADIUM (metals, but outside the default 3) are excluded too.
+    for coin in ("PLATINUM", "PALLADIUM"):
+        check = next(c for c in result["checks"] if c["coin"] == coin)
+        assert check["reason"] == "coin_outside_active_entry_universe"
+    # GOLD/SILVER/COPPER (inside the universe) proceed to a real decision --
+    # none of them get the exclusion reason.
+    for coin in ("GOLD", "SILVER", "COPPER"):
+        check = next(c for c in result["checks"] if c["coin"] == coin)
+        assert check.get("reason") != "coin_outside_active_entry_universe"
+
+
+def test_scan_and_enter_active_entry_universe_does_not_block_an_existing_open_position(monkeypatch):
+    """An already-open position on an excluded coin is untouched by this
+    gate -- it's still reported/managed via _has_open_position's own
+    check, not silently abandoned."""
+    monkeypatch.setattr(kalshi_15m_strategy, "ACTIVE_ENTRY_COINS", frozenset({"GOLD", "SILVER", "COPPER"}))
+    kalshi_15m_strategy._save_state({  # noqa: SLF001
+        "positions": [{
+            "coin": "BTC", "side": "yes", "count": 1.0, "entry_price": 0.5, "dry_run": True,
+            "ticker": "KXBTC15M-1", "close_time": _future_close(10), "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        }],
+        "trade_log": [], "realized_pnl_by_date": {},
+    })
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
+    _mock_confident_prediction(monkeypatch)
+
+    result = kalshi_15m_strategy.scan_and_enter()
+
+    btc_check = next(c for c in result["checks"] if c["coin"] == "BTC")
+    # Whichever reason wins (the universe gate fires first in the real
+    # loop order, ahead of already_has_open_position) doesn't matter here
+    # -- the point is BTC is never silently dropped from the checks list,
+    # and never treated as a fresh "entered" candidate.
+    assert btc_check["ok"] is False
+    entered = [c["coin"] for c in result["checks"] if c.get("action") == "entered"]
+    assert "BTC" not in entered
+
+
+# ---------------------------------------------------------------------------
+# Real-trade-outcome probability recalibration -- per explicit user
+# direction ("give me suggestion[s]... to get super consistant at
+# winning"), responding to this account's own real confidence-bucket
+# data showing the model's stated confidence was INVERTED (higher
+# confidence = LOWER real accuracy).
+# ---------------------------------------------------------------------------
+def _real_trade(probability_up: float, *, won: bool) -> dict:
+    return {"dry_run": False, "entry_probability_up": probability_up, "realized_pnl_usd": 1.0 if won else -1.0}
+
+
+def test_calibrate_probability_up_returns_raw_with_insufficient_history():
+    trade_log = [_real_trade(0.7, won=True)] * 5  # far fewer than the real 150-trade default
+    result = kalshi_15m_strategy.calibrate_probability_up(0.72, trade_log)
+    assert result == {
+        "probability_up": 0.72, "applied": False, "reason": "insufficient_real_trade_history", "real_trades": 5,
+    }
+
+
+def test_calibrate_probability_up_with_no_trade_log_returns_raw():
+    result = kalshi_15m_strategy.calibrate_probability_up(0.72, None)
+    assert result["probability_up"] == 0.72
+    assert result["applied"] is False
+
+
+def test_calibrate_probability_up_ignores_dry_run_trades(monkeypatch):
+    monkeypatch.setattr(kalshi_15m_strategy, "REAL_OUTCOME_CALIBRATION_MIN_TRADES", 5)
+    real = [_real_trade(0.7, won=True)] * 3
+    dry = [{**_real_trade(0.7, won=True), "dry_run": True}] * 10  # would clear the floor if wrongly counted
+    result = kalshi_15m_strategy.calibrate_probability_up(0.72, real + dry)
+    assert result["applied"] is False
+    assert result["real_trades"] == 3
+
+
+def test_calibrate_probability_up_ignores_trades_missing_required_fields(monkeypatch):
+    monkeypatch.setattr(kalshi_15m_strategy, "REAL_OUTCOME_CALIBRATION_MIN_TRADES", 5)
+    real = [_real_trade(0.7, won=True)] * 3
+    missing_prob = [{"dry_run": False, "realized_pnl_usd": 1.0}] * 10  # no entry_probability_up
+    missing_pnl = [{"dry_run": False, "entry_probability_up": 0.7}] * 10  # no realized_pnl_usd
+    result = kalshi_15m_strategy.calibrate_probability_up(0.72, real + missing_prob + missing_pnl)
+    assert result["applied"] is False
+    assert result["real_trades"] == 3
+
+
+def test_calibrate_probability_up_corrects_a_real_overconfidence_pattern(monkeypatch):
+    """This account's own real signature: LOWER stated confidence (0.6)
+    actually won every time, HIGHER stated confidence (0.9) actually lost
+    every time -- isotonic regression must pool that inversion rather
+    than trust the raw ordering, collapsing both into a single ~0.5
+    (coin-flip) region."""
+    monkeypatch.setattr(kalshi_15m_strategy, "REAL_OUTCOME_CALIBRATION_MIN_TRADES", 10)
+    trade_log = [_real_trade(0.6, won=True) for _ in range(5)] + [_real_trade(0.9, won=False) for _ in range(5)]
+    result = kalshi_15m_strategy.calibrate_probability_up(0.75, trade_log)
+    assert result["applied"] is True
+    assert result["reason"] == "real_outcome_calibrated"
+    assert result["raw_probability_up"] == 0.75
+    assert result["probability_up"] == pytest.approx(0.5, abs=0.05)  # far from the raw 0.75
+
+
+def test_calibrate_probability_up_handles_a_genuinely_well_calibrated_history(monkeypatch):
+    """The non-adversarial case: low stated confidence actually loses,
+    high stated confidence actually wins -- isotonic regression should
+    leave that ordering close to untouched, not distort a model that's
+    already reading correctly."""
+    monkeypatch.setattr(kalshi_15m_strategy, "REAL_OUTCOME_CALIBRATION_MIN_TRADES", 10)
+    trade_log = [_real_trade(0.55, won=False) for _ in range(5)] + [_real_trade(0.9, won=True) for _ in range(5)]
+    result = kalshi_15m_strategy.calibrate_probability_up(0.9, trade_log)
+    assert result["applied"] is True
+    assert result["probability_up"] > 0.5
+
+
+def test_evaluate_candidate_applies_real_outcome_calibration_when_trade_log_given(monkeypatch):
+    monkeypatch.setattr(kalshi_15m_strategy, "REAL_OUTCOME_CALIBRATION_MIN_TRADES", 10)
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
+    # A genuinely well-calibrated (non-adversarial) real history that
+    # still shifts a fresh 0.80 raw reading -- picked so the CALIBRATED
+    # value still comfortably clears the yes-adjusted confidence floor
+    # (0.65), so this test exercises the full success path, not just an
+    # early confidence_below_floor rejection (see the dedicated
+    # calibrate_probability_up unit tests above for the dramatic
+    # overconfidence-collapse case).
+    monkeypatch.setattr(kalshi_15m_model, "predict_direction", lambda coin: {"model_ok": True, "probability_up": 0.80})
+    trade_log = [_real_trade(0.65, won=False) for _ in range(5)] + [_real_trade(0.85, won=True) for _ in range(5)]
+
+    result = kalshi_15m_strategy.evaluate_candidate("BTC", trade_log=trade_log)
+
+    assert result["ok"] is True
+    assert result["raw_probability_up"] == pytest.approx(0.80)
+    assert result["real_outcome_calibration_applied"] is True
+    assert result["probability_up"] != result["raw_probability_up"]
+
+
+def test_evaluate_candidate_skips_calibration_without_a_trade_log(monkeypatch):
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
+    monkeypatch.setattr(kalshi_15m_model, "predict_direction", lambda coin: {"model_ok": True, "probability_up": 0.72})
+
+    result = kalshi_15m_strategy.evaluate_candidate("BTC")
+
+    assert result["real_outcome_calibration_applied"] is False
+    assert result["probability_up"] == result["raw_probability_up"] == pytest.approx(0.72)
+
+
+def test_evaluate_candidate_use_real_outcome_calibration_override_disables_it(monkeypatch):
+    monkeypatch.setattr(kalshi_15m_strategy, "REAL_OUTCOME_CALIBRATION_MIN_TRADES", 10)
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
+    monkeypatch.setattr(kalshi_15m_model, "predict_direction", lambda coin: {"model_ok": True, "probability_up": 0.75})
+    trade_log = [_real_trade(0.6, won=True) for _ in range(5)] + [_real_trade(0.9, won=False) for _ in range(5)]
+
+    result = kalshi_15m_strategy.evaluate_candidate("BTC", trade_log=trade_log, use_real_outcome_calibration=False)
+
+    assert result["real_outcome_calibration_applied"] is False
+    assert result["probability_up"] == result["raw_probability_up"] == pytest.approx(0.75)
+
+
+def test_use_real_outcome_calibration_defaults_to_true():
+    assert kalshi_15m_strategy.USE_REAL_OUTCOME_CALIBRATION is True
 
 
 def test_apply_conviction_sizing_override_persists_the_flag(monkeypatch):

@@ -609,6 +609,15 @@ def _run_kalshi_15m_data_collect() -> dict[str, Any]:
         df = kalshi_15m_data.collect_dataset_rows()
         if df.empty:
             return {"ok": False, "reason": "no_rows_collected"}
+        # Caches this cycle's own crypto frame for the metals data-collect
+        # job below to fold into ITS OWN correlation study as cross-asset
+        # peers (see crypto_correlation.set_latest_kalshi_15m_crypto_df's
+        # own comment) -- best-effort, must never block the archival push.
+        try:
+            from data import crypto_correlation
+            crypto_correlation.set_latest_kalshi_15m_crypto_df(df)
+        except Exception as exc:
+            logger.warning("[app_kalshi] caching crypto df for cross-asset correlation failed (non-fatal): %s", exc)
         return kalshi_15m_data.push_dataset_snapshot(df)
     finally:
         gc.collect()
@@ -627,15 +636,16 @@ def _run_kalshi_15m_metals_data_collect() -> dict[str, Any]:
             return {"ok": False, "reason": "no_rows_collected"}
         # Refreshes the metals correlation study (see crypto_correlation.py's
         # own refresh_metals_study comment) on the SAME df this cycle just
-        # collected -- no extra network call. Unlike crypto's own
-        # correlation study (owned/refreshed by perps' own, separate
-        # data-collect job), metals has no other owner: this IS the one
-        # place its data gets collected, so this job is the one that must
-        # keep the study current. Best-effort -- must never block the
+        # collected, PLUS whatever crypto frame the crypto data-collect job
+        # above last cached -- no extra network call either way. Unlike
+        # crypto's own correlation study (owned/refreshed by perps' own,
+        # separate data-collect job), metals has no other owner: this IS
+        # the one place its data gets collected, so this job is the one
+        # that must keep the study current. Best-effort -- must never block the
         # actual archival push below.
         try:
             from data import crypto_correlation
-            crypto_correlation.refresh_metals_study(df)
+            crypto_correlation.refresh_metals_study(df, crypto_df=crypto_correlation.get_latest_kalshi_15m_crypto_df())
         except Exception as exc:
             logger.warning("[app_kalshi] metals correlation study refresh failed (non-fatal): %s", exc)
         return kalshi_15m_metals_data.push_dataset_snapshot(df)
@@ -1587,11 +1597,18 @@ def api_kalshi_15m_status():
         "universe": list(kalshi_15m_strategy.ASSET_SERIES.keys()),
         "crypto_universe": kalshi_15m_data.get_universe(),
         "metals_universe": kalshi_15m_metals_data.get_universe(),
+        # See ACTIVE_ENTRY_COINS' own comment -- the rest of "universe"
+        # above stays fully wired for data collection/correlation/
+        # existing-position management, just not new entries.
+        "active_entry_coins": sorted(kalshi_15m_strategy.ACTIVE_ENTRY_COINS),
         "params": {
             "model_confidence_min": kalshi_15m_strategy.MODEL_CONFIDENCE_MIN,
+            "yes_confidence_extra_required": kalshi_15m_strategy.YES_CONFIDENCE_EXTRA_REQUIRED,
             "position_size_pct": kalshi_15m_strategy.POSITION_SIZE_PCT,
             "max_concurrent_positions": kalshi_15m_strategy.MAX_CONCURRENT_POSITIONS,
             "min_seconds_to_close_for_entry": kalshi_15m_strategy.MIN_SECONDS_TO_CLOSE_FOR_ENTRY,
+            "use_volume_confirmation": kalshi_15m_strategy.USE_VOLUME_CONFIRMATION,
+            "use_real_outcome_calibration": kalshi_15m_strategy.USE_REAL_OUTCOME_CALIBRATION,
             "cycle_minutes": KALSHI_15M_CYCLE_MINUTES,
             "data_collect_minutes": KALSHI_15M_DATA_COLLECT_MINUTES,
             "train_hour_et": KALSHI_15M_TRAIN_HOUR_ET,

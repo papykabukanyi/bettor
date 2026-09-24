@@ -105,9 +105,32 @@ layers on TOP of the base probability_up signal:
     high to enter... price action... enter trades on volume times
     only"): requires BOTH an unusually high dollar_volume_z AND a real
     (non-flat) ret_5m before entering, on top of everything else above.
-    Off by default pending real evidence, same posture as every other
-    risk-shape experiment here. Never applies to metals -- a plain spot
-    price has no volume figure to read at all.
+    On by default -- per the same user's follow-up, more explicit
+    direction ("we need to get on the position only when volume is high
+    so we in and out within those kalshi minutes"), not held back as an
+    opt-in experiment. Never applies to metals -- a plain spot price has
+    no volume figure to read at all.
+  - A per-side confidence floor (YES_CONFIDENCE_EXTRA_REQUIRED) -- this
+    account's own first 319 real trades showed "no" decisions winning
+    45.6% of the time vs "yes" decisions' 32.8%, a real, large-sample
+    asymmetry; "yes" now needs to clear a meaningfully higher bar.
+  - A real-trade-outcome probability recalibration
+    (USE_REAL_OUTCOME_CALIBRATION, calibrate_probability_up) -- this
+    account's own real trades showed the model's own stated confidence
+    was INVERTED (higher confidence buckets won LESS often: 50%, 44%,
+    41%, 41.5% across ascending buckets), the classic signature of an
+    overconfident/uncalibrated probability, not simply "no edge." Fits
+    an isotonic regression from raw probability_up -> actual real
+    outcome directly off this account's own trade_log (see its own
+    docstring) and applies that correction BEFORE side/confidence are
+    even derived, so a large enough correction can flip which side looks
+    more likely, not just how confident it sounds.
+  - A permanent entry-universe narrowing (ACTIVE_ENTRY_COINS, default
+    GOLD/SILVER/COPPER) -- per explicit user direction ("let[']s boost
+    all our focus on them"): only these 3 markets have both a real
+    sample size and a coin-trust-clearing win rate; everything else stays
+    fully wired for data collection/correlation/existing-position
+    management, just not new entries.
 
 Every one of the risk-INCREASING levers above (correlation study,
 meta-model, conviction sizing, win-streak sizing, early exit) stays off
@@ -148,6 +171,27 @@ logger = logging.getLogger(__name__)
 # agnostic -- only the MODEL CALL differs, dispatched via
 # _predict_direction below.
 ASSET_SERIES: dict[str, str] = {**kalshi_15m.KNOWN_15M_SERIES, **kalshi_15m.KNOWN_15M_METALS_SERIES}
+
+# Permanent entry-universe narrowing -- explicit user direction: "GOLD/
+# SILVER/COPPER let boost all our focus on them and use other asset for
+# correlation" (not a temporary experiment -- the crypto/PLATINUM/
+# PALLADIUM coins stay fully wired for DATA COLLECTION and as CORRELATION
+# INPUTS to the 3 approved metals -- see crypto_correlation.refresh_metals_study's
+# own crypto_df parameter -- they're just no longer traded directly).
+# This account's own real trade history is exactly why: GOLD/SILVER/
+# COPPER are the only 3 markets with both a real sample size (67-100
+# trades each) AND a coin-trust-gate-clearing win rate; everything else
+# is either too thin to mean anything (1-9 trades) or already failing
+# coin_is_trusted's own bar (PLATINUM 33%/12, PALLADIUM 35%/26). Only
+# gates NEW entries (see scan_and_enter's own loop below) -- an already-
+# open position on any coin is still fully managed to close by
+# manage_open_positions/check_settlements regardless of this list.
+# ASSET_SERIES itself stays the full universe (data collection, the
+# correlation study, and existing-position management all still need
+# every coin) -- this is a strict SUBSET used only to gate new entries.
+ACTIVE_ENTRY_COINS: frozenset[str] = frozenset(
+    c.strip().upper() for c in os.getenv("KALSHI_15M_ACTIVE_ENTRY_COINS", "GOLD,SILVER,COPPER").split(",") if c.strip()
+)
 
 
 def _predict_direction(coin: str) -> dict[str, Any]:
@@ -205,6 +249,70 @@ MODEL_CONFIDENCE_MIN = _env_float("KALSHI_15M_MODEL_CONFIDENCE_MIN", 0.58)
 # the existing daily trade-analysis/backtest jobs keep surfacing real
 # evidence if this ever needs revisiting.
 YES_CONFIDENCE_EXTRA_REQUIRED = _env_float("KALSHI_15M_YES_CONFIDENCE_EXTRA_REQUIRED", 0.07)
+
+# Real-trade-outcome probability recalibration -- a SECOND, independent
+# real-evidence-driven correction, per explicit user direction to "give
+# me suggestion[s]... to get super consistant at winning". Genuinely
+# different problem from YES_CONFIDENCE_EXTRA_REQUIRED above (a fixed
+# per-side offset): this account's own real trades show the model's
+# stated confidence is INVERTED across its own range -- accuracy in the
+# 0.50-0.58 bucket (50%) is HIGHER than the 0.75-1.00 bucket (41.5%),
+# monotonically getting worse as confidence rises. That is the textbook
+# signature of an uncalibrated (overconfident) probability model, not
+# "no edge" -- kalshi_15m_model.py's own walk-forward-CV sigmoid
+# calibration (see its own module docstring) is fit on BACKTEST holdout
+# data, which can drift out of step with the live distribution over
+# weeks; this recalibrates directly against what ACTUALLY happened on
+# real orders, closing that gap the same way any deployed model gets
+# periodically re-calibrated against production outcomes.
+#
+# Implementation: sklearn's IsotonicRegression (the same well-established
+# tool CalibratedClassifierCV itself uses internally, see
+# kalshi_15m_model.py's own import) fit on (this coin's own real
+# entry_probability_up, did that trade actually win) pairs pulled
+# straight from trade_log -- no new data collection, reuses what's
+# already recorded on every trade (see entry_feature_snapshot's own
+# comment for the broader "record everything, study it later" pattern
+# this mirrors). Gated behind a real minimum sample size (isotonic
+# regression on too few points just overfits the noise) -- returns the
+# raw, uncorrected probability whenever there isn't enough history yet,
+# so this can never make an early, thin-data account WORSE than doing
+# nothing.
+USE_REAL_OUTCOME_CALIBRATION = _env_flag("KALSHI_15M_USE_REAL_OUTCOME_CALIBRATION", default=True)
+REAL_OUTCOME_CALIBRATION_MIN_TRADES = _env_int("KALSHI_15M_REAL_OUTCOME_CALIBRATION_MIN_TRADES", 150)
+
+
+def calibrate_probability_up(probability_up: float, trade_log: list[dict[str, Any]] | None) -> dict[str, Any]:
+    """{"probability_up": <possibly corrected>, "applied": bool, "reason": str}.
+    Pure function -- trade_log is passed in explicitly (same pattern as
+    confidence_min/correlation_study_enabled below) rather than read from
+    state directly, so evaluate_candidate stays independently testable.
+    Pools ALL real (non-dry-run) trades with a recorded entry_probability_up
+    regardless of coin -- see REAL_OUTCOME_CALIBRATION_MIN_TRADES's own
+    default (150): deliberately account-wide, not per-coin, since even
+    this account's biggest single coin sample (GOLD, ~100 trades) is on
+    its own too thin to fit a stable isotonic curve, and the
+    miscalibration this corrects (raw model overconfidence) is a property
+    of the shared training/calibration pipeline, not one coin's own
+    market behavior."""
+    real_trades = [
+        t for t in (trade_log or [])
+        if not t.get("dry_run") and t.get("entry_probability_up") is not None and t.get("realized_pnl_usd") is not None
+    ]
+    if len(real_trades) < REAL_OUTCOME_CALIBRATION_MIN_TRADES:
+        return {"probability_up": probability_up, "applied": False, "reason": "insufficient_real_trade_history", "real_trades": len(real_trades)}
+    try:
+        from sklearn.isotonic import IsotonicRegression
+        x = [float(t["entry_probability_up"]) for t in real_trades]
+        y = [1.0 if float(t["realized_pnl_usd"]) > 0 else 0.0 for t in real_trades]
+        calibrator = IsotonicRegression(y_min=0.0, y_max=1.0, out_of_bounds="clip")
+        calibrator.fit(x, y)
+        calibrated = float(calibrator.predict([probability_up])[0])
+    except Exception as exc:
+        logger.warning("[kalshi_15m_strategy] real-outcome calibration failed, using raw probability: %s", exc)
+        return {"probability_up": probability_up, "applied": False, "reason": "calibration_error"}
+    return {"probability_up": calibrated, "applied": True, "reason": "real_outcome_calibrated", "real_trades": len(real_trades), "raw_probability_up": probability_up}
+
 
 POSITION_SIZE_PCT = _env_float("KALSHI_15M_POSITION_SIZE_PCT", 0.05)
 MAX_CONCURRENT_POSITIONS = _env_int("KALSHI_15M_MAX_CONCURRENT_POSITIONS", 5)
@@ -691,6 +799,7 @@ def _today_str() -> str:
 def evaluate_candidate(
     coin: str, *, confidence_min: float | None = None,
     correlation_study_enabled: bool | None = None, correlation_max_adjustment: float | None = None,
+    trade_log: list[dict[str, Any]] | None = None, use_real_outcome_calibration: bool | None = None,
 ) -> dict[str, Any]:
     """Pure decision logic for one coin -- no state, no order placement,
     no side effects. Returns {"ok": False, "reason": ...} when there's
@@ -721,7 +830,12 @@ def evaluate_candidate(
     param -- unlike the two tunes above, it has no evidence-gated auto-
     tuner (same as perps_strategy.py's own identical PERPS_USE_META_MODEL:
     a static, manually-set flag pending real backtest validation, not
-    something this codebase's trade-history-driven tuning touches)."""
+    something this codebase's trade-history-driven tuning touches).
+
+    trade_log/use_real_outcome_calibration feed calibrate_probability_up
+    (see its own comment) -- same "optional param, not a direct state
+    read" purity as every override above; scan_and_enter passes
+    state["trade_log"] in."""
     series_ticker = ASSET_SERIES.get(coin)
     if not series_ticker:
         return {"ok": False, "reason": "unknown_coin"}
@@ -738,7 +852,21 @@ def evaluate_candidate(
     if not prediction.get("model_ok"):
         return {"ok": False, "reason": "model_not_ready", "detail": prediction.get("reason")}
 
-    probability_up = float(prediction["probability_up"])
+    raw_probability_up = float(prediction["probability_up"])
+    # See calibrate_probability_up's own comment -- corrects the raw
+    # model probability against this account's own REAL trade outcomes
+    # BEFORE side/confidence are even derived below, so a large enough
+    # correction can flip which side looks more likely, not just soften
+    # how confident it sounds.
+    effective_use_real_outcome_calibration = (
+        USE_REAL_OUTCOME_CALIBRATION if use_real_outcome_calibration is None else use_real_outcome_calibration
+    )
+    calibration = (
+        calibrate_probability_up(raw_probability_up, trade_log)
+        if effective_use_real_outcome_calibration
+        else {"probability_up": raw_probability_up, "applied": False, "reason": "calibration_disabled"}
+    )
+    probability_up = calibration["probability_up"]
     if probability_up >= 0.5:
         side, confidence = "yes", probability_up
     else:
@@ -822,6 +950,11 @@ def evaluate_candidate(
     result = {
         "ok": True, "coin": coin, "side": side, "market": market,
         "probability_up": probability_up, "confidence": confidence,
+        # Observability for calibrate_probability_up's own correction --
+        # raw_probability_up is only present (and different from
+        # probability_up above) once real trade history actually
+        # triggered a correction.
+        "raw_probability_up": raw_probability_up, "real_outcome_calibration_applied": calibration["applied"],
         "correlation_score": correlation_score, "correlation_reason": correlation_reason,
         # For USE_CONVICTION_SIZING (see scan_and_enter/compute_conviction_size_multiplier)
         # -- how far above its OWN entry bar this candidate's confidence
@@ -911,6 +1044,13 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
         effective_max_concurrent_positions = compute_graduated_max_concurrent_positions(state.get("trade_log"))
 
     for coin in ASSET_SERIES:
+        # See ACTIVE_ENTRY_COINS' own comment -- checked before anything
+        # else (cheapest possible reject, and the loop below still needs
+        # to run for every coin regardless so existing positions on an
+        # excluded coin keep getting reported/managed elsewhere).
+        if coin not in ACTIVE_ENTRY_COINS:
+            checks.append({"coin": coin, "ok": False, "reason": "coin_outside_active_entry_universe"})
+            continue
         if open_count >= effective_max_concurrent_positions:
             checks.append({
                 "coin": coin, "ok": False, "reason": "max_concurrent_positions",
@@ -934,6 +1074,7 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
             coin, confidence_min=confidence_min_override,
             correlation_study_enabled=correlation_study_enabled_override,
             correlation_max_adjustment=correlation_max_adjustment_override,
+            trade_log=state.get("trade_log"),
         )
         if not decision.get("ok"):
             checks.append({"coin": coin, **decision})

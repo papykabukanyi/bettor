@@ -29,10 +29,14 @@ def _reset_caches():
     cc._PERPS_STUDY = {}
     cc._ALPACA_STUDY = {}
     cc._REMOTE_ALPACA_STUDY = {}
+    cc._METALS_STUDY = {}
+    cc._LATEST_KALSHI_15M_CRYPTO_DF = pd.DataFrame()
     yield
     cc._PERPS_STUDY = {}
     cc._ALPACA_STUDY = {}
     cc._REMOTE_ALPACA_STUDY = {}
+    cc._METALS_STUDY = {}
+    cc._LATEST_KALSHI_15M_CRYPTO_DF = pd.DataFrame()
 
 
 def _synthetic_universe(n: int = 300, seed: int = 0):
@@ -339,3 +343,107 @@ def test_build_study_coin_of_mapper_normalizes_id_column():
     ])
     study = cc.build_study(df, id_col="ticker", leader_id="BTC", coin_of=lambda t: t.replace("KX", "").replace("PERP", ""))
     assert study["ids"] == ["BTC", "ETH"]
+
+
+# ---------------------------------------------------------------------------
+# Metals cross-asset correlation -- per explicit user direction ("use other
+# asset for correlation and learn what other things correlate with
+# GOLD/SILVER/COPPER[,] all possibilit[y]"). refresh_metals_study's new
+# crypto_df param folds kalshi_15m's own crypto universe into the SAME
+# study as extra candidate peers -- see its own docstring for why no
+# other function needs to change.
+# ---------------------------------------------------------------------------
+def _symbol_frame(symbol: str, ts_values: list[float], rets: list[float]) -> pd.DataFrame:
+    return pd.DataFrame({"symbol": [symbol] * len(rets), "ts": ts_values, "ret_5m": rets})
+
+
+def test_latest_kalshi_15m_crypto_df_round_trips():
+    df = _symbol_frame("BTC", [0, 300], [0.001, 0.002])
+    cc.set_latest_kalshi_15m_crypto_df(df)
+    pd.testing.assert_frame_equal(cc.get_latest_kalshi_15m_crypto_df(), df)
+
+
+def test_latest_kalshi_15m_crypto_df_starts_empty():
+    assert cc.get_latest_kalshi_15m_crypto_df().empty
+
+
+def test_latest_kalshi_15m_crypto_df_empty_input_does_not_clear_existing():
+    df = _symbol_frame("BTC", [0, 300], [0.001, 0.002])
+    cc.set_latest_kalshi_15m_crypto_df(df)
+    cc.set_latest_kalshi_15m_crypto_df(pd.DataFrame())
+    pd.testing.assert_frame_equal(cc.get_latest_kalshi_15m_crypto_df(), df)
+
+
+def test_bucket_ts_for_join_rounds_down_to_the_5_minute_grid():
+    df = _symbol_frame("GOLD", [10, 299, 300], [0.001, 0.002, 0.003])
+    bucketed = cc._bucket_ts_for_join(df)  # noqa: SLF001
+    assert list(bucketed["ts"]) == [0, 300]  # 10 and 299 collapse into the same 0-bucket
+
+
+def test_bucket_ts_for_join_keeps_the_latest_row_within_a_collapsed_bucket():
+    df = _symbol_frame("GOLD", [10, 250], [0.001, 0.999])
+    bucketed = cc._bucket_ts_for_join(df)  # noqa: SLF001
+    assert len(bucketed) == 1
+    assert bucketed.iloc[0]["ret_5m"] == pytest.approx(0.999)  # the later (ts=250) row wins
+
+
+def test_bucket_ts_for_join_empty_or_none_returns_empty():
+    assert cc._bucket_ts_for_join(pd.DataFrame()).empty  # noqa: SLF001
+    assert cc._bucket_ts_for_join(None).empty  # noqa: SLF001
+
+
+def test_bucket_ts_for_join_missing_required_columns_passes_through_unchanged():
+    # No "symbol" column -- can't bucket for a join, so this is returned
+    # as-is (fails safe: pass through unusable-for-joining data rather
+    # than silently dropping it) instead of being emptied out.
+    df = pd.DataFrame({"ts": [1]})
+    result = cc._bucket_ts_for_join(df)  # noqa: SLF001
+    pd.testing.assert_frame_equal(result, df)
+
+
+def test_refresh_metals_study_without_crypto_df_is_unchanged():
+    metals_df = _returns_frame(_synthetic_universe(), id_col="symbol")
+    study = cc.refresh_metals_study(metals_df, leader_id="BTC")
+    assert cc.get_metals_study() is study
+    assert study["corr"]["BTC"]["ETH"] > 0.85
+
+
+def test_refresh_metals_study_folds_in_a_real_cross_asset_correlation():
+    rng = np.random.default_rng(7)
+    n = 300
+    gold = rng.normal(0, 0.001, n)
+    btc = gold * 0.9 + rng.normal(0, 0.0003, n)  # engineered to track GOLD tightly
+    # Metals collect on a clean 5-minute grid; crypto collects offset by
+    # 10s -- both must land in the SAME 5-minute bucket after rounding.
+    metals_df = _symbol_frame("GOLD", [300 * i for i in range(n)], list(gold))
+    crypto_df = _symbol_frame("BTC", [300 * i + 10 for i in range(n)], list(btc))
+
+    study = cc.refresh_metals_study(metals_df, leader_id="GOLD", crypto_df=crypto_df)
+
+    assert study["corr"]["GOLD"]["BTC"] > 0.85
+    assert study["corr"]["BTC"]["GOLD"] > 0.85  # symmetric
+
+
+def test_refresh_metals_study_ignores_an_empty_crypto_df():
+    metals_df = _returns_frame(_synthetic_universe(), id_col="symbol")
+    without = cc.build_study(metals_df, id_col="symbol", leader_id="BTC")
+    with_empty = cc.refresh_metals_study(metals_df, leader_id="BTC", crypto_df=pd.DataFrame())
+    assert with_empty["corr"] == without["corr"]
+    assert with_empty["ids"] == without["ids"]
+
+
+def test_metals_correlation_bullishness_picks_up_a_real_cross_asset_peer():
+    """End-to-end: once refresh_metals_study has folded crypto in,
+    metals_correlation_bullishness (called with a metal, exactly as
+    kalshi_15m_strategy.evaluate_candidate does) sees BTC as a real
+    correlated peer with zero changes needed to that function."""
+    rng = np.random.default_rng(11)
+    n = 300
+    gold = rng.normal(0, 0.001, n)
+    btc = gold * 0.9 + rng.normal(0, 0.0003, n)
+    metals_df = _symbol_frame("GOLD", [300 * i for i in range(n)], list(gold))
+    crypto_df = _symbol_frame("BTC", [300 * i + 10 for i in range(n)], list(btc))
+    cc.refresh_metals_study(metals_df, leader_id="GOLD", crypto_df=crypto_df)
+
+    result = cc.metals_correlation_bullishness("GOLD")
+    assert "BTC" in result["reason"]
