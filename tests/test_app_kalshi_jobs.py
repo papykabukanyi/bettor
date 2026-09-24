@@ -857,6 +857,137 @@ def test_kalshi_15m_cycle_job_never_bypasses_the_dry_run_floor(monkeypatch):
     assert captured == {"management": {"dry_run": False}, "entries": {"dry_run": False}}
 
 
+class _SyncThread:
+    """threading.Thread stand-in that runs its target SYNCHRONOUSLY on
+    start() -- lets these tests exercise the win-streak-verification
+    trigger deterministically instead of racing a real background
+    thread."""
+
+    def __init__(self, *, target=None, args=(), kwargs=None, daemon=None, name=None):
+        self._target, self._args, self._kwargs = target, args, kwargs or {}
+
+    def start(self):
+        self._target(*self._args, **self._kwargs)
+
+
+def test_kalshi_15m_cycle_job_triggers_win_streak_verification_when_cooldown_active(monkeypatch):
+    from data import kalshi_15m_strategy
+
+    monkeypatch.setattr(kalshi_15m_strategy, "check_settlements", lambda: {"ok": True, "checks": []})
+    monkeypatch.setattr(kalshi_15m_strategy, "manage_open_positions", lambda **kw: {"ok": True, "checks": []})
+    cooldown = {"active": True, "streak": 2, "real_trade_count": 10}
+    monkeypatch.setattr(kalshi_15m_strategy, "scan_and_enter", lambda **kw: {"ok": True, "checks": [], "win_streak_cooldown": cooldown})
+    monkeypatch.setattr(app_kalshi.threading, "Thread", _SyncThread)
+    captured = {}
+    monkeypatch.setattr(app_kalshi, "_run_kalshi_15m_win_streak_verification", lambda c: captured.update(cooldown=c) or {"ok": True})
+
+    app_kalshi._run_kalshi_15m_cycle.__wrapped__()  # noqa: SLF001
+
+    assert captured["cooldown"] == cooldown
+
+
+def test_kalshi_15m_cycle_job_does_not_trigger_verification_when_cooldown_inactive(monkeypatch):
+    from data import kalshi_15m_strategy
+
+    monkeypatch.setattr(kalshi_15m_strategy, "check_settlements", lambda: {"ok": True, "checks": []})
+    monkeypatch.setattr(kalshi_15m_strategy, "manage_open_positions", lambda **kw: {"ok": True, "checks": []})
+    monkeypatch.setattr(
+        kalshi_15m_strategy, "scan_and_enter",
+        lambda **kw: {"ok": True, "checks": [], "win_streak_cooldown": {"active": False, "reason": "no_streak"}},
+    )
+
+    def fail_if_called(**kw):
+        raise AssertionError("must not spawn a verification thread when the cooldown isn't active")
+
+    monkeypatch.setattr(app_kalshi.threading, "Thread", fail_if_called)
+
+    app_kalshi._run_kalshi_15m_cycle.__wrapped__()  # noqa: SLF001
+
+
+# ---------------------------------------------------------------------------
+# kalshi_15m_win_streak_verification -- per explicit user direction:
+# "after a couple of winning strikes[,] take a break and restudy...
+# retrain again with the model[,] and go back after making sure it's
+# going to keep winning."
+# ---------------------------------------------------------------------------
+def test_kalshi_15m_win_streak_verification_clears_cooldown_on_a_healthy_backtest(monkeypatch):
+    from data import kalshi_15m_backtest, kalshi_15m_metals_model, kalshi_15m_model, kalshi_15m_strategy
+
+    monkeypatch.setattr(kalshi_15m_strategy, "_load_state", lambda: {"trade_log": [{"coin": "GOLD"}]})
+    monkeypatch.setattr(kalshi_15m_model, "train_model", lambda **kw: {"ok": True, "rows": 500})
+    monkeypatch.setattr(kalshi_15m_metals_model, "train_model", lambda **kw: {"ok": True, "rows": 300})
+    monkeypatch.setattr(kalshi_15m_backtest, "run_walkforward_backtest", lambda: {"ok": True, "mean_return_pct": 0.01})
+    captured = {}
+    monkeypatch.setattr(
+        kalshi_15m_strategy, "apply_win_streak_cooldown_result",
+        lambda passed, *, real_trade_count, reason: captured.update(passed=passed, real_trade_count=real_trade_count) or {"cleared": passed},
+    )
+
+    result = app_kalshi._run_kalshi_15m_win_streak_verification.__wrapped__({"streak": 2, "real_trade_count": 10})  # noqa: SLF001
+
+    assert captured == {"passed": True, "real_trade_count": 10}
+    assert result["cooldown_result"] == {"cleared": True}
+
+
+def test_kalshi_15m_win_streak_verification_leaves_cooldown_active_on_a_losing_backtest(monkeypatch):
+    from data import kalshi_15m_backtest, kalshi_15m_metals_model, kalshi_15m_model, kalshi_15m_strategy
+
+    monkeypatch.setattr(kalshi_15m_strategy, "_load_state", lambda: {"trade_log": []})
+    monkeypatch.setattr(kalshi_15m_model, "train_model", lambda **kw: {"ok": True})
+    monkeypatch.setattr(kalshi_15m_metals_model, "train_model", lambda **kw: {"ok": True})
+    monkeypatch.setattr(kalshi_15m_backtest, "run_walkforward_backtest", lambda: {"ok": True, "mean_return_pct": -0.02})
+    captured = {}
+    monkeypatch.setattr(
+        kalshi_15m_strategy, "apply_win_streak_cooldown_result",
+        lambda passed, *, real_trade_count, reason: captured.update(passed=passed) or {"cleared": passed},
+    )
+
+    app_kalshi._run_kalshi_15m_win_streak_verification.__wrapped__({"streak": 2, "real_trade_count": 10})  # noqa: SLF001
+
+    assert captured["passed"] is False
+
+
+def test_kalshi_15m_win_streak_verification_survives_a_retrain_failure(monkeypatch):
+    from data import kalshi_15m_backtest, kalshi_15m_metals_model, kalshi_15m_model, kalshi_15m_strategy
+
+    monkeypatch.setattr(kalshi_15m_strategy, "_load_state", lambda: {"trade_log": []})
+
+    def fail(**kw):
+        raise RuntimeError("simulated retrain crash")
+
+    monkeypatch.setattr(kalshi_15m_model, "train_model", fail)
+    monkeypatch.setattr(kalshi_15m_metals_model, "train_model", lambda **kw: {"ok": True})
+    monkeypatch.setattr(kalshi_15m_backtest, "run_walkforward_backtest", lambda: {"ok": True, "mean_return_pct": 0.01})
+    monkeypatch.setattr(kalshi_15m_strategy, "apply_win_streak_cooldown_result", lambda passed, *, real_trade_count, reason: {"cleared": passed})
+
+    result = app_kalshi._run_kalshi_15m_win_streak_verification.__wrapped__({"streak": 2, "real_trade_count": 10})  # noqa: SLF001
+
+    assert result["retrain"]["crypto"]["ok"] is False
+    assert result["retrain"]["metals"]["ok"] is True
+
+
+def test_kalshi_15m_win_streak_verification_survives_a_backtest_failure(monkeypatch):
+    from data import kalshi_15m_backtest, kalshi_15m_metals_model, kalshi_15m_model, kalshi_15m_strategy
+
+    monkeypatch.setattr(kalshi_15m_strategy, "_load_state", lambda: {"trade_log": []})
+    monkeypatch.setattr(kalshi_15m_model, "train_model", lambda **kw: {"ok": True})
+    monkeypatch.setattr(kalshi_15m_metals_model, "train_model", lambda **kw: {"ok": True})
+
+    def raise_error():
+        raise RuntimeError("simulated backtest crash")
+
+    monkeypatch.setattr(kalshi_15m_backtest, "run_walkforward_backtest", raise_error)
+    captured = {}
+    monkeypatch.setattr(
+        kalshi_15m_strategy, "apply_win_streak_cooldown_result",
+        lambda passed, *, real_trade_count, reason: captured.update(passed=passed) or {"cleared": passed},
+    )
+
+    app_kalshi._run_kalshi_15m_win_streak_verification.__wrapped__({"streak": 2, "real_trade_count": 10})  # noqa: SLF001
+
+    assert captured["passed"] is False  # a crashed backtest is never treated as "healthy"
+
+
 def test_kalshi_15m_train_job_passes_the_real_trade_log(monkeypatch):
     """Trains BOTH models (crypto + metals) off the SAME real trade_log --
     see _run_kalshi_15m_train's own docstring for why these are two

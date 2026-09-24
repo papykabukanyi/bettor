@@ -332,6 +332,26 @@ GRADUATED_CONCURRENCY_START_SLOTS = _env_int("KALSHI_15M_GRADUATED_CONCURRENCY_S
 GRADUATED_CONCURRENCY_WINS_PER_SLOT = _env_int("KALSHI_15M_GRADUATED_CONCURRENCY_WINS_PER_SLOT", 1)
 
 
+def _current_real_win_streak(trade_log: list[dict[str, Any]] | None) -> int:
+    """How many of the most recent REAL (non-dry-run) trades, read
+    backwards from the end, were all wins -- 0 the moment the most recent
+    real trade wasn't one, or there are no real trades yet. Shared by
+    compute_graduated_max_concurrent_positions (grows size on a streak)
+    and compute_win_streak_cooldown_active below (pauses entries entirely
+    on one) -- the SAME real streak, two different evidence-driven
+    responses to it."""
+    real_trades = [t for t in (trade_log or []) if not t.get("dry_run")]
+    if not real_trades or float(real_trades[-1].get("realized_pnl_usd") or 0.0) <= 0:
+        return 0
+    streak = 0
+    for t in reversed(real_trades):
+        if float(t.get("realized_pnl_usd") or 0.0) > 0:
+            streak += 1
+        else:
+            break
+    return streak
+
+
 def compute_graduated_max_concurrent_positions(trade_log: list[dict[str, Any]] | None) -> int:
     """How many concurrent positions the account is currently allowed,
     given its own REAL trade history -- starts at
@@ -349,19 +369,82 @@ def compute_graduated_max_concurrent_positions(trade_log: list[dict[str, Any]] |
     account actually did."""
     if not GRADUATED_CONCURRENCY_ENABLED:
         return MAX_CONCURRENT_POSITIONS
-    real_trades = [t for t in (trade_log or []) if not t.get("dry_run")]
-    if not real_trades or float(real_trades[-1].get("realized_pnl_usd") or 0.0) <= 0:
+    streak = _current_real_win_streak(trade_log)
+    if streak == 0:
         return GRADUATED_CONCURRENCY_START_SLOTS
-
-    streak = 0
-    for t in reversed(real_trades):
-        if float(t.get("realized_pnl_usd") or 0.0) > 0:
-            streak += 1
-        else:
-            break
-
     extra_slots = streak // GRADUATED_CONCURRENCY_WINS_PER_SLOT
     return min(MAX_CONCURRENT_POSITIONS, GRADUATED_CONCURRENCY_START_SLOTS + extra_slots)
+
+
+# Win-streak cooldown -- per explicit user direction: "make sure bot need
+# to also study the fact that after a couple of winning strikes its take
+# a break and restudy with[,] and retrain again with the model[,] and go
+# back after making sure its going to keep winning." Genuinely different
+# question from graduated concurrency just above (which reacts to the
+# SAME streak by trusting the account with MORE size) -- this is a
+# quality-control CHECKPOINT: a short hot streak on a ~43% real win-rate
+# account is exactly the moment a real regime shift (or plain variance)
+# is easiest to miss if the bot just keeps going, so entries PAUSE
+# entirely, a fresh retrain + walk-forward backtest verification runs
+# (see app_kalshi._run_kalshi_15m_cycle's own wiring), and entries only
+# resume once that verification actually comes back healthy for THIS
+# streak -- "make sure it's going to keep winning" taken literally, not
+# just a fixed timer. Tied to the real streak's own trade COUNT (not a
+# timestamp) so it's immune to clock skew and trivially idempotent: the
+# same streak can never trigger a second verification once one has
+# already cleared it.
+WIN_STREAK_COOLDOWN_ENABLED = _env_flag("KALSHI_15M_WIN_STREAK_COOLDOWN_ENABLED", default=True)
+WIN_STREAK_COOLDOWN_MIN_STREAK = _env_int("KALSHI_15M_WIN_STREAK_COOLDOWN_MIN_STREAK", 2)
+
+
+def compute_win_streak_cooldown_active(state: dict[str, Any]) -> dict[str, Any]:
+    """{"active": bool, "streak": int, ...}. `active` is True the moment
+    the account's current real win streak reaches WIN_STREAK_COOLDOWN_MIN_STREAK
+    and stays True until apply_win_streak_cooldown_result below records a
+    PASSING verification for this exact streak (keyed on real trade count
+    at the time it was reached, not a timestamp)."""
+    if not WIN_STREAK_COOLDOWN_ENABLED:
+        return {"active": False, "reason": "disabled"}
+    trade_log = state.get("trade_log") or []
+    streak = _current_real_win_streak(trade_log)
+    if streak < WIN_STREAK_COOLDOWN_MIN_STREAK:
+        return {"active": False, "reason": "no_streak", "streak": streak}
+    real_trade_count = sum(1 for t in trade_log if not t.get("dry_run"))
+    cooldown = (state.get("tuning") or {}).get("win_streak_cooldown") or {}
+    if cooldown.get("cleared_at_real_trade_count") == real_trade_count:
+        return {"active": False, "reason": "cleared_after_verification", "streak": streak}
+    return {
+        "active": True, "reason": "win_streak_cooldown", "streak": streak,
+        "min_streak": WIN_STREAK_COOLDOWN_MIN_STREAK, "real_trade_count": real_trade_count,
+    }
+
+
+def apply_win_streak_cooldown_result(passed: bool, *, real_trade_count: int, reason: str) -> dict[str, Any]:
+    """Records the outcome of the retrain + backtest verification
+    app_kalshi._run_kalshi_15m_cycle runs the moment
+    compute_win_streak_cooldown_active reports active=True.
+    `real_trade_count` MUST be that same call's own "real_trade_count" --
+    a verification only ever clears the EXACT streak it was run for; a
+    real trade closing in between (this account keeps trading other
+    coins/positions while the verification itself runs) naturally starts
+    a fresh streak count that needs its own fresh verification, not a
+    stale "already cleared" flag left over from an earlier one. A failed
+    verification (passed=False) intentionally does NOT persist anything
+    -- the cooldown simply stays active and the next cycle tries again,
+    same "no manual intervention, self-heals as real evidence changes"
+    posture as every other tuning override here."""
+    if not passed:
+        return {"cleared": False, "reason": reason, "real_trade_count": real_trade_count}
+    with _STATE_LOCK:
+        state = _load_state()
+        tuning = state.setdefault("tuning", {})
+        tuning["win_streak_cooldown"] = {
+            "cleared_at_real_trade_count": real_trade_count,
+            "reason": reason,
+            "cleared_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        }
+        _save_state(state, push_durable=True)
+    return {"cleared": True, "reason": reason, "real_trade_count": real_trade_count}
 
 
 # Per-coin trust gate -- per explicit user direction: "the bot need to
@@ -467,6 +550,60 @@ def volume_and_price_action_confirmed(feature_row: dict[str, Any] | None) -> dic
     return {
         "confirmed": True, "reason": "volume_and_price_action_confirmed",
         "dollar_volume_z": dollar_volume_z, "ret_5m": ret_5m,
+    }
+
+
+def metals_volume_proxy_confirmed(metal: str, feature_row: dict[str, Any] | None) -> dict[str, Any]:
+    """Metals counterpart to volume_and_price_action_confirmed above --
+    per explicit, repeated user direction ("entry always need to happen
+    on High volume time"), this is now the ONLY volume-style gate that
+    can actually fire in production: GOLD/SILVER/COPPER are this
+    account's entire live entry universe (see ACTIVE_ENTRY_COINS), and a
+    plain spot price has no real volume figure of its own to read (see
+    kalshi_15m_metals_data.py's own docstring on why the crypto gate
+    above stays crypto-only) -- without this, "entry on high volume"
+    would silently apply to zero live coins.
+
+    Proxies "is real activity happening right now" off this metal's OWN
+    most-correlated peer in crypto_correlation.get_metals_study() -- the
+    SAME cross-asset study refresh_metals_study now folds crypto into
+    (see its own comment) -- reading that peer's own REAL dollar_volume_z
+    straight from crypto_correlation.get_latest_kalshi_15m_crypto_df(),
+    the SAME already-cached crypto frame the cross-asset study itself
+    reuses. No new network call, no new data collection: if a real
+    correlation to some crypto coin exists AND that coin's own volume is
+    running hot right now, that's read as this metal's own "high volume
+    time" too. Fails OPEN (never blocks) whenever no correlated crypto
+    peer with real volume data exists yet -- same "a missing signal never
+    blocks a trade" posture as every other optional signal here; this
+    account's own correlation study is still young. Price-action half is
+    unchanged -- this metal's own real ret_5m, exactly like the crypto
+    gate."""
+    ret_5m = (feature_row or {}).get("ret_5m")
+    peers = (crypto_correlation.get_metals_study().get("corr") or {}).get(metal) or {}
+    volume_peer_z = None
+    if peers:
+        crypto_df = crypto_correlation.get_latest_kalshi_15m_crypto_df()
+        if crypto_df is not None and not crypto_df.empty and {"symbol", "dollar_volume_z"} <= set(crypto_df.columns):
+            for peer, _corr in sorted(peers.items(), key=lambda kv: abs(kv[1]), reverse=True):
+                if peer not in kalshi_15m.KNOWN_15M_SERIES:
+                    continue
+                peer_rows = crypto_df[crypto_df["symbol"] == peer]
+                if peer_rows.empty:
+                    continue
+                candidate = peer_rows["dollar_volume_z"].iloc[-1]
+                if candidate == candidate:  # NaN check without importing math/pandas here
+                    volume_peer_z = float(candidate)
+                    break
+    if volume_peer_z is None or ret_5m is None:
+        return {"confirmed": True, "reason": "volume_proxy_or_price_action_data_unavailable"}
+    if volume_peer_z < VOLUME_CONFIRMATION_MIN_Z:
+        return {"confirmed": False, "reason": "volume_proxy_not_high_enough", "dollar_volume_z": volume_peer_z}
+    if abs(ret_5m) < PRICE_ACTION_MIN_ABS_RET_5M:
+        return {"confirmed": False, "reason": "price_action_too_flat", "ret_5m": ret_5m}
+    return {
+        "confirmed": True, "reason": "volume_proxy_and_price_action_confirmed",
+        "dollar_volume_z": volume_peer_z, "ret_5m": ret_5m,
     }
 
 
@@ -935,11 +1072,16 @@ def evaluate_candidate(
             }
 
     # Volume + price-action confirmation -- see USE_VOLUME_CONFIRMATION's
-    # own comment. Crypto only, same reasoning as the correlation study/
-    # meta-model above (no volume data exists for metals at all).
+    # own comment. Metals get metals_volume_proxy_confirmed's own real
+    # cross-asset proxy instead (see its own comment on why this can't
+    # just be skipped for metals now that they're this account's entire
+    # live entry universe).
     volume_confirmation: dict[str, Any] = {"confirmed": True}
-    if USE_VOLUME_CONFIRMATION and coin in kalshi_15m.KNOWN_15M_SERIES:
-        volume_confirmation = volume_and_price_action_confirmed(prediction.get("feature_row"))
+    if USE_VOLUME_CONFIRMATION:
+        if coin in kalshi_15m.KNOWN_15M_SERIES:
+            volume_confirmation = volume_and_price_action_confirmed(prediction.get("feature_row"))
+        elif coin in kalshi_15m.KNOWN_15M_METALS_SERIES:
+            volume_confirmation = metals_volume_proxy_confirmed(coin, prediction.get("feature_row"))
         if not volume_confirmation["confirmed"]:
             return {
                 "ok": False, "reason": volume_confirmation["reason"], "confidence": confidence,
@@ -1042,8 +1184,20 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
         # one cycle's own entries can't ratchet the cap up mid-loop off
         # a trade_log snapshot that's already stale by the second coin.
         effective_max_concurrent_positions = compute_graduated_max_concurrent_positions(state.get("trade_log"))
+        # See compute_win_streak_cooldown_active's own comment --
+        # computed ONCE per scan, same reasoning as the concurrency cap
+        # above. app_kalshi._run_kalshi_15m_cycle inspects this scan's own
+        # returned "win_streak_cooldown" key to decide whether to run a
+        # fresh retrain + backtest verification this cycle.
+        win_streak_cooldown = compute_win_streak_cooldown_active(state)
 
     for coin in ASSET_SERIES:
+        if win_streak_cooldown["active"]:
+            checks.append({
+                "coin": coin, "ok": False, "reason": "win_streak_cooldown_active",
+                "streak": win_streak_cooldown["streak"], "min_streak": win_streak_cooldown["min_streak"],
+            })
+            continue
         # See ACTIVE_ENTRY_COINS' own comment -- checked before anything
         # else (cheapest possible reject, and the loop below still needs
         # to run for every coin regardless so existing positions on an
@@ -1285,7 +1439,10 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
         open_count += 1
         checks.append({"coin": coin, "ok": True, "action": "entered", "side": decision["side"], "count": filled_count, "dry_run": effective_dry_run})
 
-    return {"ok": True, "checks": checks, "live_trading_enabled": LIVE_TRADING_ENABLED}
+    return {
+        "ok": True, "checks": checks, "live_trading_enabled": LIVE_TRADING_ENABLED,
+        "win_streak_cooldown": win_streak_cooldown,
+    }
 
 
 KALSHI_15M_SHARD_INDEX = 2  # Crypto and Commodities -- see kalshi_15m.get_balance_by_shard's own docstring

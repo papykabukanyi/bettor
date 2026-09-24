@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import datetime as dt
 
+import pandas as pd
 import pytest
 
 from data import crypto_correlation, kalshi_15m, kalshi_15m_meta_model, kalshi_15m_metals_model, kalshi_15m_model, kalshi_15m_strategy
@@ -27,6 +28,30 @@ def _full_entry_universe(monkeypatch):
     universe by default here; the handful of tests for the restriction
     itself explicitly monkeypatch it back down."""
     monkeypatch.setattr(kalshi_15m_strategy, "ACTIVE_ENTRY_COINS", frozenset(kalshi_15m_strategy.ASSET_SERIES))
+
+
+@pytest.fixture(autouse=True)
+def _no_win_streak_cooldown_by_default(monkeypatch):
+    """WIN_STREAK_COOLDOWN_ENABLED defaults to True in production (see its
+    own comment) -- a 2-real-win streak is a common, even accidental,
+    fixture shape across this file's OTHER tests (graduated concurrency,
+    conviction/win-streak sizing, etc.), none of which are testing THIS
+    feature, so it's disabled by default here; the dedicated tests for it
+    below explicitly re-enable it."""
+    monkeypatch.setattr(kalshi_15m_strategy, "WIN_STREAK_COOLDOWN_ENABLED", False)
+
+
+@pytest.fixture(autouse=True)
+def _reset_correlation_caches():
+    """crypto_correlation's own study/crypto-df caches are module-level
+    globals -- reset before AND after every test in this file (not just
+    test_crypto_correlation.py's own suite) so nothing leaks into or out
+    of the metals_volume_proxy_confirmed tests below."""
+    crypto_correlation._METALS_STUDY = {}  # noqa: SLF001
+    crypto_correlation._LATEST_KALSHI_15M_CRYPTO_DF = pd.DataFrame()  # noqa: SLF001
+    yield
+    crypto_correlation._METALS_STUDY = {}  # noqa: SLF001
+    crypto_correlation._LATEST_KALSHI_15M_CRYPTO_DF = pd.DataFrame()  # noqa: SLF001
 
 
 def _future_close(minutes: float) -> str:
@@ -1404,14 +1429,96 @@ def test_evaluate_candidate_allows_entry_on_high_volume_and_real_movement_when_e
     assert result["ok"] is True
 
 
-def test_evaluate_candidate_never_applies_volume_confirmation_to_a_metals_coin(monkeypatch):
-    """No volume data exists for metals at all (a plain spot price) --
-    this gate must never block a metals coin regardless of the flag."""
+def test_evaluate_candidate_fails_open_for_a_metals_coin_with_no_correlated_peer_data(monkeypatch):
+    """A metals coin now gets metals_volume_proxy_confirmed's own real
+    cross-asset proxy (see its own comment) instead of skipping the gate
+    entirely -- but with no correlation study data cached yet (this
+    test's fresh module state), that proxy has nothing to read and fails
+    OPEN, same "a missing signal never blocks a trade" posture as every
+    other optional signal here."""
     monkeypatch.setattr(kalshi_15m_strategy, "USE_VOLUME_CONFIRMATION", True)
     monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
     monkeypatch.setattr(kalshi_15m_metals_model, "predict_direction", lambda coin: {"model_ok": True, "probability_up": 0.72})
     result = kalshi_15m_strategy.evaluate_candidate("GOLD")
     assert result["ok"] is True
+
+
+# ---------------------------------------------------------------------------
+# metals_volume_proxy_confirmed -- per explicit, repeated user direction
+# ("entry always need to happen on High volume time"): GOLD/SILVER/COPPER
+# are this account's entire live entry universe (ACTIVE_ENTRY_COINS), so
+# volume_and_price_action_confirmed's own crypto-only scope would
+# otherwise make this gate a no-op in production. Proxies real activity
+# off this metal's own most-correlated crypto peer's REAL dollar_volume_z.
+# (See the autouse _reset_correlation_caches fixture near the top of this
+# file for why these tests can freely set crypto_correlation's own
+# module-level study/crypto-df caches without leaking into other tests.)
+# ---------------------------------------------------------------------------
+def test_metals_volume_proxy_confirmed_fails_open_with_no_feature_row():
+    result = kalshi_15m_strategy.metals_volume_proxy_confirmed("GOLD", None)
+    assert result["confirmed"] is True
+    assert result["reason"] == "volume_proxy_or_price_action_data_unavailable"
+
+
+def test_metals_volume_proxy_confirmed_fails_open_with_no_correlated_peers():
+    crypto_correlation._METALS_STUDY = {"corr": {}}  # noqa: SLF001
+    result = kalshi_15m_strategy.metals_volume_proxy_confirmed("GOLD", {"ret_5m": 0.01})
+    assert result["confirmed"] is True
+
+
+def test_metals_volume_proxy_confirmed_ignores_a_metals_only_peer():
+    # Correlated only with another metal (SILVER) -- never a valid volume
+    # proxy source (no real volume data exists for any metal).
+    crypto_correlation._METALS_STUDY = {"corr": {"GOLD": {"SILVER": 0.9}}}  # noqa: SLF001
+    result = kalshi_15m_strategy.metals_volume_proxy_confirmed("GOLD", {"ret_5m": 0.01})
+    assert result["confirmed"] is True
+    assert result["reason"] == "volume_proxy_or_price_action_data_unavailable"
+
+
+def test_metals_volume_proxy_confirmed_reads_the_most_correlated_crypto_peers_volume():
+    crypto_correlation._METALS_STUDY = {"corr": {"GOLD": {"ETH": 0.3, "BTC": 0.8}}}  # noqa: SLF001
+    crypto_correlation._LATEST_KALSHI_15M_CRYPTO_DF = pd.DataFrame({  # noqa: SLF001
+        "symbol": ["BTC", "ETH"], "ts": [1, 1], "dollar_volume_z": [2.5, 0.1],
+    })
+    result = kalshi_15m_strategy.metals_volume_proxy_confirmed("GOLD", {"ret_5m": 0.01})
+    assert result["confirmed"] is True
+    assert result["dollar_volume_z"] == pytest.approx(2.5)  # BTC (highest |corr|), not ETH
+
+
+def test_metals_volume_proxy_confirmed_rejects_low_peer_volume():
+    crypto_correlation._METALS_STUDY = {"corr": {"GOLD": {"BTC": 0.8}}}  # noqa: SLF001
+    crypto_correlation._LATEST_KALSHI_15M_CRYPTO_DF = pd.DataFrame({  # noqa: SLF001
+        "symbol": ["BTC"], "ts": [1], "dollar_volume_z": [0.2],
+    })
+    result = kalshi_15m_strategy.metals_volume_proxy_confirmed("GOLD", {"ret_5m": 0.01})
+    assert result["confirmed"] is False
+    assert result["reason"] == "volume_proxy_not_high_enough"
+
+
+def test_metals_volume_proxy_confirmed_rejects_a_flat_price():
+    crypto_correlation._METALS_STUDY = {"corr": {"GOLD": {"BTC": 0.8}}}  # noqa: SLF001
+    crypto_correlation._LATEST_KALSHI_15M_CRYPTO_DF = pd.DataFrame({  # noqa: SLF001
+        "symbol": ["BTC"], "ts": [1], "dollar_volume_z": [2.5],
+    })
+    result = kalshi_15m_strategy.metals_volume_proxy_confirmed("GOLD", {"ret_5m": 0.0001})
+    assert result["confirmed"] is False
+    assert result["reason"] == "price_action_too_flat"
+
+
+def test_evaluate_candidate_uses_the_metals_volume_proxy_when_enabled(monkeypatch):
+    monkeypatch.setattr(kalshi_15m_strategy, "USE_VOLUME_CONFIRMATION", True)
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
+    monkeypatch.setattr(
+        kalshi_15m_metals_model, "predict_direction",
+        lambda coin: {"model_ok": True, "probability_up": 0.72, "feature_row": {"ret_5m": 0.0001}},
+    )
+    crypto_correlation._METALS_STUDY = {"corr": {"GOLD": {"BTC": 0.8}}}  # noqa: SLF001
+    crypto_correlation._LATEST_KALSHI_15M_CRYPTO_DF = pd.DataFrame({  # noqa: SLF001
+        "symbol": ["BTC"], "ts": [1], "dollar_volume_z": [2.5],
+    })
+    result = kalshi_15m_strategy.evaluate_candidate("GOLD")
+    assert result["ok"] is False
+    assert result["reason"] == "price_action_too_flat"  # high peer volume, but GOLD's own price is flat
 
 
 # ---------------------------------------------------------------------------
@@ -1818,6 +1925,10 @@ def test_win_streak_multiplier_is_coin_specific():
 
 def test_scan_and_enter_does_not_grow_contracts_after_a_win_streak_when_the_flag_is_off(monkeypatch):
     assert kalshi_15m_strategy.USE_WIN_STREAK_SIZING is False  # module default -- not touched by this test
+    # This test's own 3-real-win fixture is exactly what WIN_STREAK_COOLDOWN
+    # would otherwise pause entries for (see its own tests below) -- not
+    # what this test is about, so disabled here.
+    monkeypatch.setattr(kalshi_15m_strategy, "WIN_STREAK_COOLDOWN_ENABLED", False)
     monkeypatch.setattr(kalshi_15m_strategy, "MAX_CONCURRENT_POSITIONS", 1)
     monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market(no_ask=0.51, no_bid=0.5))
     monkeypatch.setattr(kalshi_15m_model, "predict_direction", lambda coin: {"model_ok": True, "probability_up": 0.72})
@@ -1834,6 +1945,8 @@ def test_scan_and_enter_does_not_grow_contracts_after_a_win_streak_when_the_flag
 
 
 def test_scan_and_enter_grows_contracts_after_a_real_winning_streak_when_enabled(monkeypatch):
+    # See the sibling test above -- same reasoning.
+    monkeypatch.setattr(kalshi_15m_strategy, "WIN_STREAK_COOLDOWN_ENABLED", False)
     monkeypatch.setattr(kalshi_15m_strategy, "MAX_CONCURRENT_POSITIONS", 1)
     monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market(no_ask=0.51, no_bid=0.5))
     monkeypatch.setattr(kalshi_15m_model, "predict_direction", lambda coin: {"model_ok": True, "probability_up": 0.72})
@@ -2117,6 +2230,98 @@ def test_graduated_concurrency_returns_the_flat_ceiling_when_disabled(monkeypatc
     monkeypatch.setattr(kalshi_15m_strategy, "MAX_CONCURRENT_POSITIONS", 5)
     trades = []  # no real history -- would otherwise mean just 1 slot
     assert kalshi_15m_strategy.compute_graduated_max_concurrent_positions(trades) == 5
+
+
+# ---------------------------------------------------------------------------
+# Win-streak cooldown -- per explicit user direction: "after a couple of
+# winning strikes[,] take a break and restudy... retrain again with the
+# model[,] and go back after making sure it's going to keep winning."
+# ---------------------------------------------------------------------------
+def test_win_streak_cooldown_inactive_with_no_streak(monkeypatch):
+    monkeypatch.setattr(kalshi_15m_strategy, "WIN_STREAK_COOLDOWN_ENABLED", True)
+    state = {"trade_log": [_gc_trade(pnl=1.0)], "tuning": {}}  # only 1 win -- below MIN_STREAK (2)
+    result = kalshi_15m_strategy.compute_win_streak_cooldown_active(state)
+    assert result["active"] is False
+    assert result["reason"] == "no_streak"
+
+
+def test_win_streak_cooldown_activates_at_the_min_streak(monkeypatch):
+    monkeypatch.setattr(kalshi_15m_strategy, "WIN_STREAK_COOLDOWN_ENABLED", True)
+    state = {"trade_log": [_gc_trade(pnl=1.0), _gc_trade(pnl=1.0)], "tuning": {}}
+    result = kalshi_15m_strategy.compute_win_streak_cooldown_active(state)
+    assert result["active"] is True
+    assert result["streak"] == 2
+    assert result["real_trade_count"] == 2
+
+
+def test_win_streak_cooldown_disabled_flag_never_activates(monkeypatch):
+    monkeypatch.setattr(kalshi_15m_strategy, "WIN_STREAK_COOLDOWN_ENABLED", False)
+    state = {"trade_log": [_gc_trade(pnl=1.0), _gc_trade(pnl=1.0), _gc_trade(pnl=1.0)], "tuning": {}}
+    result = kalshi_15m_strategy.compute_win_streak_cooldown_active(state)
+    assert result["active"] is False
+    assert result["reason"] == "disabled"
+
+
+def test_win_streak_cooldown_clears_once_verification_recorded_for_this_exact_streak(monkeypatch):
+    monkeypatch.setattr(kalshi_15m_strategy, "WIN_STREAK_COOLDOWN_ENABLED", True)
+    trade_log = [_gc_trade(pnl=1.0), _gc_trade(pnl=1.0)]
+    state = {"trade_log": trade_log, "tuning": {"win_streak_cooldown": {"cleared_at_real_trade_count": 2}}}
+    result = kalshi_15m_strategy.compute_win_streak_cooldown_active(state)
+    assert result["active"] is False
+    assert result["reason"] == "cleared_after_verification"
+
+
+def test_win_streak_cooldown_a_new_win_after_clearing_re_triggers(monkeypatch):
+    """A stale cleared-flag from an EARLIER streak must never suppress a
+    fresh one -- cleared_at_real_trade_count only matches the exact
+    streak it was recorded for."""
+    monkeypatch.setattr(kalshi_15m_strategy, "WIN_STREAK_COOLDOWN_ENABLED", True)
+    trade_log = [_gc_trade(pnl=1.0), _gc_trade(pnl=1.0), _gc_trade(pnl=1.0)]  # streak grew to 3
+    state = {"trade_log": trade_log, "tuning": {"win_streak_cooldown": {"cleared_at_real_trade_count": 2}}}
+    result = kalshi_15m_strategy.compute_win_streak_cooldown_active(state)
+    assert result["active"] is True
+
+
+def test_apply_win_streak_cooldown_result_persists_on_pass(monkeypatch):
+    kalshi_15m_strategy._save_state({"positions": [], "trade_log": [], "realized_pnl_by_date": {}})  # noqa: SLF001
+    applied = kalshi_15m_strategy.apply_win_streak_cooldown_result(True, real_trade_count=7, reason="test evidence")
+    assert applied["cleared"] is True
+    state = kalshi_15m_strategy._load_state()  # noqa: SLF001
+    assert state["tuning"]["win_streak_cooldown"]["cleared_at_real_trade_count"] == 7
+
+
+def test_apply_win_streak_cooldown_result_persists_nothing_on_fail(monkeypatch):
+    kalshi_15m_strategy._save_state({"positions": [], "trade_log": [], "realized_pnl_by_date": {}})  # noqa: SLF001
+    applied = kalshi_15m_strategy.apply_win_streak_cooldown_result(False, real_trade_count=7, reason="still losing")
+    assert applied["cleared"] is False
+    state = kalshi_15m_strategy._load_state()  # noqa: SLF001
+    assert "win_streak_cooldown" not in state["tuning"]
+
+
+def test_scan_and_enter_blocks_all_entries_during_a_win_streak_cooldown(monkeypatch):
+    monkeypatch.setattr(kalshi_15m_strategy, "WIN_STREAK_COOLDOWN_ENABLED", True)
+    monkeypatch.setattr(kalshi_15m_strategy, "MAX_CONCURRENT_POSITIONS", len(kalshi_15m_strategy.ASSET_SERIES))
+    monkeypatch.setattr(kalshi_15m_strategy, "GRADUATED_CONCURRENCY_ENABLED", False)
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
+    _mock_confident_prediction(monkeypatch)
+    kalshi_15m_strategy._save_state({  # noqa: SLF001
+        "positions": [], "trade_log": [_gc_trade(pnl=1.0), _gc_trade(pnl=1.0)], "realized_pnl_by_date": {},
+    })
+
+    result = kalshi_15m_strategy.scan_and_enter()
+
+    assert result["win_streak_cooldown"]["active"] is True
+    entered = [c for c in result["checks"] if c.get("action") == "entered"]
+    assert entered == []
+    assert all(c["reason"] == "win_streak_cooldown_active" for c in result["checks"])
+
+
+def test_scan_and_enter_reports_win_streak_cooldown_inactive_with_no_streak(monkeypatch):
+    monkeypatch.setattr(kalshi_15m_strategy, "WIN_STREAK_COOLDOWN_ENABLED", True)
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
+    result = kalshi_15m_strategy.scan_and_enter()
+    assert result["win_streak_cooldown"]["active"] is False
+    assert result["win_streak_cooldown"]["reason"] == "no_streak"
 
 
 def test_scan_and_enter_only_opens_1_position_with_no_real_trade_history(monkeypatch):

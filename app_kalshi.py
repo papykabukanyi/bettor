@@ -672,9 +672,75 @@ def _run_kalshi_15m_cycle() -> dict[str, Any]:
     settlement_result = kalshi_15m_strategy.check_settlements()
     management_result = kalshi_15m_strategy.manage_open_positions(dry_run=False)
     entry_result = kalshi_15m_strategy.scan_and_enter(dry_run=False)
+    # See compute_win_streak_cooldown_active's own comment -- the moment a
+    # real win streak is long enough to pause on, kick off the retrain +
+    # backtest verification in the BACKGROUND (never inline here: a full
+    # retrain can genuinely take real wall-clock time, and this cycle's
+    # own settlement/management/entry-scan work for every OTHER coin must
+    # never wait on it). _locked_job below makes a second trigger while
+    # one is already running a safe no-op, so a slow verification can
+    # never stack up duplicate retrains across consecutive 2-minute ticks.
+    cooldown = entry_result.get("win_streak_cooldown") or {}
+    if cooldown.get("active"):
+        threading.Thread(
+            target=_run_kalshi_15m_win_streak_verification, args=(cooldown,),
+            daemon=True, name="kalshi15m-win-streak-verification",
+        ).start()
     return {
         "ok": True, "settlements": settlement_result, "management": management_result, "entries": entry_result,
     }
+
+
+@_locked_job("kalshi_15m_win_streak_verification", stale_after_sec=1800)
+def _run_kalshi_15m_win_streak_verification(cooldown: dict[str, Any]) -> dict[str, Any]:
+    """Triggered from _run_kalshi_15m_cycle the instant scan_and_enter's
+    own win_streak_cooldown reports active=True -- per explicit user
+    direction ("after a couple of winning strikes[,] take a break and
+    restudy... retrain again with the model[,] and go back after making
+    sure it's going to keep winning"). Retrains both models fresh (same
+    real trade_log every retrain here already trains on), then runs a
+    real walk-forward backtest -- same "make sure" standard
+    _run_kalshi_15m_backtest's own auto-retrain-on-loss trigger already
+    uses (a non-negative mean_return_pct). Passing clears the cooldown
+    for THIS exact streak (kalshi_15m_strategy.apply_win_streak_cooldown_result);
+    anything else leaves it active, so the NEXT cycle's own win-streak
+    check simply retries -- cheap and safe to re-attempt, no persistent
+    failure state to get stuck in."""
+    try:
+        trade_log = kalshi_15m_strategy._load_state().get("trade_log")  # noqa: SLF001
+    except Exception as exc:
+        logger.warning("[app_kalshi] could not read kalshi_15m trade_log for win-streak retrain: %s", exc)
+        trade_log = None
+
+    retrain_results: dict[str, Any] = {}
+    try:
+        retrain_results["crypto"] = kalshi_15m_model.train_model(trade_log=trade_log)
+    except Exception as exc:
+        logger.warning("[app_kalshi] win-streak crypto retrain failed: %s", exc)
+        retrain_results["crypto"] = {"ok": False, "error": str(exc)}
+    try:
+        retrain_results["metals"] = kalshi_15m_metals_model.train_model(trade_log=trade_log)
+    except Exception as exc:
+        logger.warning("[app_kalshi] win-streak metals retrain failed: %s", exc)
+        retrain_results["metals"] = {"ok": False, "error": str(exc)}
+
+    try:
+        backtest_result = kalshi_15m_backtest.run_walkforward_backtest()
+    except Exception as exc:
+        logger.warning("[app_kalshi] win-streak backtest verification failed: %s", exc)
+        backtest_result = {"ok": False, "error": str(exc)}
+
+    mean_return = backtest_result.get("mean_return_pct")
+    passed = bool(backtest_result.get("ok")) and mean_return is not None and mean_return >= 0
+    cooldown_result = kalshi_15m_strategy.apply_win_streak_cooldown_result(
+        passed, real_trade_count=cooldown.get("real_trade_count"),
+        reason=f"walkforward_backtest mean_return_pct={mean_return}",
+    )
+    logger.info(
+        "[app_kalshi] kalshi_15m win-streak verification (streak=%s): backtest mean_return_pct=%s -> %s",
+        cooldown.get("streak"), mean_return, "cleared" if cooldown_result.get("cleared") else "still cooling down",
+    )
+    return {"retrain": retrain_results, "backtest": backtest_result, "cooldown_result": cooldown_result}
 
 
 @_locked_job("kalshi_15m_reconcile", stale_after_sec=600)
