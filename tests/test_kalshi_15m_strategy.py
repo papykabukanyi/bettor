@@ -868,12 +868,13 @@ def test_account_budget_usd_is_the_placeholder_in_dry_run():
 # ---------------------------------------------------------------------------
 def test_evaluate_candidate_confidence_min_override_lets_a_lower_floor_through(monkeypatch):
     monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
-    # confidence 0.55 fails the real module default (0.58) but clears an
-    # explicitly LOWERED override (0.50) -- proves the override, not the
-    # default, decided this.
+    # probability_up=0.55 -> side="yes", confidence=0.55. Fails the real
+    # yes-adjusted default (0.58 + 0.07 = 0.65) but clears an explicitly
+    # LOWERED override (0.45 + 0.07 = 0.52) -- proves the override, not
+    # the default, decided this.
     monkeypatch.setattr(kalshi_15m_model, "predict_direction", lambda coin: {"model_ok": True, "probability_up": 0.55})
     assert kalshi_15m_strategy.evaluate_candidate("BTC")["ok"] is False  # sanity: fails under the real default
-    result = kalshi_15m_strategy.evaluate_candidate("BTC", confidence_min=0.50)
+    result = kalshi_15m_strategy.evaluate_candidate("BTC", confidence_min=0.45)
     assert result["ok"] is True
 
 
@@ -890,9 +891,11 @@ def test_evaluate_candidate_confidence_min_override_raises_the_floor_above_defau
 
 def test_evaluate_candidate_defaults_to_the_module_floor_when_no_override_given(monkeypatch):
     monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
-    monkeypatch.setattr(kalshi_15m_model, "predict_direction", lambda coin: {"model_ok": True, "probability_up": 0.60})
+    # probability_up=0.70 -> side="yes"; clears the real yes-adjusted
+    # default (0.58 + 0.07 = 0.65).
+    monkeypatch.setattr(kalshi_15m_model, "predict_direction", lambda coin: {"model_ok": True, "probability_up": 0.70})
     result = kalshi_15m_strategy.evaluate_candidate("BTC")
-    assert result["ok"] is True  # 0.60 clears the real 0.58 default
+    assert result["ok"] is True
 
 
 def test_scan_and_enter_reads_the_confidence_floor_learned_from_real_trade_history(monkeypatch):
@@ -1065,10 +1068,12 @@ def test_evaluate_candidate_never_calls_the_crypto_correlation_study_for_a_metal
 
 def test_evaluate_candidate_correlation_confirmation_lowers_the_bar_when_flag_on(monkeypatch):
     monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
-    # probability_up=0.55 alone would miss the real default (0.58) by 0.03
-    # -- within CORRELATION_CONFIDENCE_MAX_ADJUSTMENT (0.06), so a maximally
-    # bullish correlation reading should be enough to clear it.
-    monkeypatch.setattr(kalshi_15m_model, "predict_direction", lambda coin: {"model_ok": True, "probability_up": 0.55})
+    # probability_up=0.62 -> side="yes", confidence=0.62. The real
+    # yes-adjusted default (0.58 + YES_CONFIDENCE_EXTRA_REQUIRED's 0.07 =
+    # 0.65) misses by 0.03 -- within CORRELATION_CONFIDENCE_MAX_ADJUSTMENT
+    # (0.06), so a maximally bullish correlation reading should be enough
+    # to clear it.
+    monkeypatch.setattr(kalshi_15m_model, "predict_direction", lambda coin: {"model_ok": True, "probability_up": 0.62})
     monkeypatch.setattr(
         crypto_correlation, "perps_correlation_bullishness",
         lambda coin, row=None: {"score": 1.0, "reason": "max confirmation", "components": {}},
@@ -1081,10 +1086,11 @@ def test_evaluate_candidate_correlation_confirmation_lowers_the_bar_when_flag_on
 
 def test_evaluate_candidate_correlation_disagreement_raises_the_bar_when_flag_on(monkeypatch):
     monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
-    # probability_up=0.60 alone clears the real default (0.58) -- a
-    # maximally bearish correlation reading raises the bar past it
-    # (0.58 + 0.06 = 0.64), so this must now be rejected.
-    monkeypatch.setattr(kalshi_15m_model, "predict_direction", lambda coin: {"model_ok": True, "probability_up": 0.60})
+    # probability_up=0.68 -> side="yes", confidence=0.68, which clears the
+    # yes-adjusted default (0.58 + 0.07 = 0.65) alone -- a maximally
+    # bearish correlation reading raises the bar past it (0.65 + 0.06 =
+    # 0.71), so this must now be rejected.
+    monkeypatch.setattr(kalshi_15m_model, "predict_direction", lambda coin: {"model_ok": True, "probability_up": 0.68})
     monkeypatch.setattr(
         crypto_correlation, "perps_correlation_bullishness",
         lambda coin, row=None: {"score": -1.0, "reason": "max disagreement", "components": {}},
@@ -1171,7 +1177,9 @@ def test_scan_and_enter_reads_the_correlation_override_from_state_tuning(monkeyp
     monkeypatch.setattr(kalshi_15m_strategy, "MAX_CONCURRENT_POSITIONS", len(kalshi_15m_strategy.ASSET_SERIES))
     monkeypatch.setattr(kalshi_15m_strategy, "GRADUATED_CONCURRENCY_ENABLED", False)
     monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
-    _mock_confident_prediction(monkeypatch, probability_up=0.60)
+    # probability_up=0.68 -> side="yes" for every coin. Real yes-adjusted
+    # floor is 0.58 + 0.07 = 0.65, which 0.68 clears alone.
+    _mock_confident_prediction(monkeypatch, probability_up=0.68)
     monkeypatch.setattr(
         crypto_correlation, "perps_correlation_bullishness",
         lambda coin, row=None: {"score": -1.0, "reason": "max disagreement", "components": {}},
@@ -1184,10 +1192,12 @@ def test_scan_and_enter_reads_the_correlation_override_from_state_tuning(monkeyp
     result = kalshi_15m_strategy.scan_and_enter()
 
     entered = {c["coin"] for c in result["checks"] if c.get("action") == "entered"}
-    # Every CRYPTO candidate rejected: 0.60 confidence - 0.06 disagreement
-    # penalty < 0.58 floor. Metals coins have no correlation study (see
-    # USE_CORRELATION_STUDY's own comment) and still enter normally at
-    # 0.60 >= the real 0.58 default.
+    # Every CRYPTO candidate rejected: the disagreement penalty raises its
+    # floor to 0.65 + 0.06 = 0.71, which 0.68 misses. Metals coins get
+    # their OWN (real, unmocked) metals_correlation_bullishness reading --
+    # with no cached metals study and no feature_row in this test, that
+    # study contributes a neutral 0.0, so metals still clear the plain
+    # 0.65 yes-adjusted floor unaided.
     assert entered.isdisjoint(kalshi_15m.KNOWN_15M_SERIES)
     assert entered == set(kalshi_15m.KNOWN_15M_METALS_SERIES)
 
@@ -1304,12 +1314,18 @@ def test_evaluate_candidate_meta_model_never_calls_trust_score_for_a_metals_coin
 
 
 # ---------------------------------------------------------------------------
-# Volume + price-action confirmation -- per explicit user direction: "we
-# need to use volume studies and current volume need to be high to
-# enter... bot need to work on that and price action... enter trades on
-# volume times only." Off by default; crypto only (no volume data exists
-# for metals at all).
+# Volume + price-action confirmation -- per explicit, repeated user
+# direction: "we need to use volume studies and current volume need to
+# be high to enter... bot need to work on that and price action... enter
+# trades on volume times only" / "we need to get on the position only
+# when volume is high so we in and out within those kalshi minutes." On
+# by default (see USE_VOLUME_CONFIRMATION's own comment); crypto only (no
+# volume data exists for metals at all).
 # ---------------------------------------------------------------------------
+def test_use_volume_confirmation_defaults_to_true():
+    assert kalshi_15m_strategy.USE_VOLUME_CONFIRMATION is True
+
+
 def test_volume_and_price_action_confirmed_fails_open_with_no_feature_row():
     assert kalshi_15m_strategy.volume_and_price_action_confirmed(None)["confirmed"] is True
 
@@ -1342,7 +1358,9 @@ def test_volume_and_price_action_confirmed_passes_with_both_high_volume_and_real
 
 
 def test_evaluate_candidate_ignores_volume_confirmation_when_the_flag_is_off(monkeypatch):
-    assert kalshi_15m_strategy.USE_VOLUME_CONFIRMATION is False  # module default -- not touched by this test
+    # USE_VOLUME_CONFIRMATION now defaults to True (see its own comment) --
+    # explicitly disabled here to prove the flag, not luck, controls this.
+    monkeypatch.setattr(kalshi_15m_strategy, "USE_VOLUME_CONFIRMATION", False)
     monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
     monkeypatch.setattr(
         kalshi_15m_model, "predict_direction",
@@ -1416,7 +1434,58 @@ def test_evaluate_candidate_reports_the_effective_confidence_min_for_sizing(monk
     monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
     monkeypatch.setattr(kalshi_15m_model, "predict_direction", lambda coin: {"model_ok": True, "probability_up": 0.72})
     result = kalshi_15m_strategy.evaluate_candidate("BTC")
-    assert result["effective_confidence_min"] == kalshi_15m_strategy.MODEL_CONFIDENCE_MIN
+    # probability_up=0.72 -> side="yes", so the reported floor includes the
+    # yes-side surcharge (see YES_CONFIDENCE_EXTRA_REQUIRED's own comment).
+    assert result["effective_confidence_min"] == pytest.approx(
+        kalshi_15m_strategy.MODEL_CONFIDENCE_MIN + kalshi_15m_strategy.YES_CONFIDENCE_EXTRA_REQUIRED,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Per-side confidence floor -- a real, evidence-driven correction (see
+# YES_CONFIDENCE_EXTRA_REQUIRED's own comment): this account's own first
+# 319 real trades showed "no" decisions winning far more often than "yes"
+# decisions, so "yes" alone must now clear a meaningfully higher bar.
+# ---------------------------------------------------------------------------
+def test_yes_confidence_extra_required_raises_the_bar_for_a_yes_decision_only(monkeypatch):
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
+    # probability_up=0.60 -> side="yes", confidence=0.60. Clears the plain
+    # module default (0.58) but not once the yes-side surcharge (0.07) is
+    # added (0.58 + 0.07 = 0.65).
+    monkeypatch.setattr(kalshi_15m_model, "predict_direction", lambda coin: {"model_ok": True, "probability_up": 0.60})
+    result = kalshi_15m_strategy.evaluate_candidate("BTC")
+    assert result["ok"] is False
+    assert result["reason"] == "confidence_below_floor"
+
+
+def test_yes_confidence_extra_required_does_not_affect_a_no_decision(monkeypatch):
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
+    # probability_up=0.40 -> side="no", confidence=0.60 -- the identical
+    # confidence to the "yes" case above, but "no" gets no surcharge, so
+    # this must clear the plain 0.58 default and enter.
+    monkeypatch.setattr(kalshi_15m_model, "predict_direction", lambda coin: {"model_ok": True, "probability_up": 0.40})
+    result = kalshi_15m_strategy.evaluate_candidate("BTC")
+    assert result["ok"] is True
+    assert result["side"] == "no"
+    assert result["effective_confidence_min"] == pytest.approx(kalshi_15m_strategy.MODEL_CONFIDENCE_MIN)
+
+
+def test_yes_confidence_extra_required_applies_before_the_correlation_study_nudge(monkeypatch):
+    """A maximally bullish correlation reading should nudge off the
+    already-side-corrected 0.65 baseline (-> 0.59), not the shared 0.58 --
+    see YES_CONFIDENCE_EXTRA_REQUIRED's own comment on ordering."""
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
+    # probability_up=0.60 -> side="yes", confidence=0.60. Misses the plain
+    # yes-adjusted floor (0.65) by 0.05 -- within the 0.06 max correlation
+    # adjustment, so max bullish confirmation should be just enough.
+    monkeypatch.setattr(kalshi_15m_model, "predict_direction", lambda coin: {"model_ok": True, "probability_up": 0.60})
+    monkeypatch.setattr(
+        crypto_correlation, "perps_correlation_bullishness",
+        lambda coin, row=None: {"score": 1.0, "reason": "max confirmation", "components": {}},
+    )
+    result = kalshi_15m_strategy.evaluate_candidate("BTC", correlation_study_enabled=True)
+    assert result["ok"] is True
+    assert result["effective_confidence_min"] == pytest.approx(0.59)
 
 
 def test_apply_conviction_sizing_override_persists_the_flag(monkeypatch):
@@ -1462,8 +1531,9 @@ def test_scan_and_enter_sizes_a_high_conviction_entry_larger_when_enabled(monkey
     entered = state["positions"][0]
 
     # Without conviction sizing, count would be int(100 * 0.05 / 0.5) = 10.
-    # At max conviction (probability_up=0.99 vs a 0.58 floor), the
-    # multiplier is CONVICTION_SIZE_MAX_MULTIPLIER (1.5x) -> 15.
+    # At near-max conviction (probability_up=0.99 vs a yes-adjusted 0.65
+    # floor -- 0.58 default + YES_CONFIDENCE_EXTRA_REQUIRED's 0.07), the
+    # multiplier lands near CONVICTION_SIZE_MAX_MULTIPLIER (1.5x) -> 14+.
     assert entered["count"] > 10
     assert entered["entry_conviction_sizing_enabled"] is True
 

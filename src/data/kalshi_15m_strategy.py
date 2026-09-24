@@ -189,6 +189,23 @@ LIVE_TRADING_ENABLED = _env_flag("KALSHI_15M_LIVE_TRADING_ENABLED", default=Fals
 # -- same discipline as every other threshold in this codebase.
 MODEL_CONFIDENCE_MIN = _env_float("KALSHI_15M_MODEL_CONFIDENCE_MIN", 0.58)
 
+# Per-side confidence floor -- a REAL, evidence-driven adjustment (not a
+# guess), per explicit user direction to "analyse all those lost
+# patterns" and "come up with big improvement suggestion". This
+# account's own first 319 real trades (kalshi_15m_trade_analysis.analyze_trade_history's
+# own by_side breakdown, confirmed 2026-09-24) showed a stark, large-
+# sample structural asymmetry: "no" decisions win 45.6% of the time
+# (252 trades) vs "yes" decisions' 32.8% (67 trades) -- more than 12
+# points apart over a decently large sample, not noise. This model's own
+# raw probability_up does not correct for that asymmetry on its own, so
+# "yes" now needs to clear a meaningfully higher bar than "no" before
+# it's trusted. A static, immediately-effective adjustment for now, not
+# yet a full self-tuning trial like conviction sizing/correlation study
+# -- the asymmetry is large and clear enough today to act on directly;
+# the existing daily trade-analysis/backtest jobs keep surfacing real
+# evidence if this ever needs revisiting.
+YES_CONFIDENCE_EXTRA_REQUIRED = _env_float("KALSHI_15M_YES_CONFIDENCE_EXTRA_REQUIRED", 0.07)
+
 POSITION_SIZE_PCT = _env_float("KALSHI_15M_POSITION_SIZE_PCT", 0.05)
 MAX_CONCURRENT_POSITIONS = _env_int("KALSHI_15M_MAX_CONCURRENT_POSITIONS", 5)
 
@@ -306,9 +323,15 @@ def coin_is_trusted(coin: str, trade_log: list[dict[str, Any]] | None) -> dict[s
 #     volume" taken literally -- a volume spike with no real price
 #     response is a materially weaker signal than one where price is
 #     actively confirming it.
-# Off by default -- an evidence-gated EXPERIMENT, same "prove it out on
-# real trade history first" posture as every other new signal here.
-USE_VOLUME_CONFIRMATION = _env_flag("KALSHI_15M_USE_VOLUME_CONFIRMATION", default=False)
+# On by default -- per explicit, repeated user direction ("we need to get
+# on the position only when volume is high so we in and out within those
+# kalshi minutes"). This account's own real trade history shows a large,
+# sustained losing streak (319 trades, -$38.54 realized) with no single
+# quick-fix parameter shown to help by itself; the user has now directly
+# asked for this specific gate to be live, not held back as an opt-in
+# experiment pending further proof. Still fails OPEN for metals (no
+# volume data exists for that market -- see the docstring above).
+USE_VOLUME_CONFIRMATION = _env_flag("KALSHI_15M_USE_VOLUME_CONFIRMATION", default=True)
 VOLUME_CONFIRMATION_MIN_Z = _env_float("KALSHI_15M_VOLUME_CONFIRMATION_MIN_Z", 1.0)
 PRICE_ACTION_MIN_ABS_RET_5M = _env_float("KALSHI_15M_PRICE_ACTION_MIN_ABS_RET_5M", 0.001)
 
@@ -745,6 +768,11 @@ def evaluate_candidate(
     side_correlation_score = correlation_score if side == "yes" else -correlation_score
 
     effective_confidence_min = confidence_min if confidence_min is not None else MODEL_CONFIDENCE_MIN
+    # See YES_CONFIDENCE_EXTRA_REQUIRED's own comment -- applied BEFORE
+    # the correlation-study nudge below so that nudge still moves off the
+    # side-corrected baseline, not the shared one.
+    if side == "yes":
+        effective_confidence_min += YES_CONFIDENCE_EXTRA_REQUIRED
     effective_use_correlation_study = USE_CORRELATION_STUDY if correlation_study_enabled is None else correlation_study_enabled
     effective_correlation_max_adjustment = (
         CORRELATION_CONFIDENCE_MAX_ADJUSTMENT if correlation_max_adjustment is None else correlation_max_adjustment
