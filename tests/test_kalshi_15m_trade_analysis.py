@@ -22,16 +22,20 @@ exit_reason bucket (there's only one exit here -- settlement), and a NEW
 genuinely worth watching."""
 from __future__ import annotations
 
+import pytest
+
 from data import kalshi_15m_trade_analysis as k15ta
 
 
 def _trade(
     *, coin: str = "BTC", side: str = "yes", pnl: float, entry_confidence: float = 0.6, dry_run: bool = False,
     opened_at: str = "2026-08-01T12:00:00+00:00", closed_at: str = "2026-08-01T12:10:00+00:00",
+    entry_price: float | None = None, count: float | None = None,
 ) -> dict:
     return {
         "coin": coin, "side": side, "realized_pnl_usd": pnl, "entry_confidence": entry_confidence,
         "dry_run": dry_run, "opened_at": opened_at, "closed_at": closed_at,
+        "entry_price": entry_price, "count": count,
     }
 
 
@@ -42,6 +46,8 @@ def test_analyze_trade_history_with_no_trades_is_a_safe_empty_result():
     result = k15ta.analyze_trade_history([])
     assert result == {"ok": True, "trades_analyzed": 0, "overall": {
         "trades": 0, "wins": 0, "losses": 0, "win_rate": None, "total_pnl_usd": 0.0, "avg_pnl_usd": None,
+    }, "fees": {
+        "estimated_fees_usd": 0.0, "gross_pnl_usd": 0.0, "net_of_fees_pnl_usd": 0.0, "avg_fee_usd_per_trade": None,
     }, "insights": []}
 
 
@@ -80,6 +86,105 @@ def test_analyze_trade_history_buckets_by_side_confidence_coin_and_hold_minutes(
     assert "ETH" in result["by_coin"]
     assert result["by_confidence_bucket"]
     assert result["by_hold_minutes_bucket"]
+
+
+# ---------------------------------------------------------------------------
+# Fee-vs-edge tracking -- per explicit user direction: "worth splitting
+# out how much of that is Kalshi fees vs. bad predictions, since if it's
+# mostly fees, the fix is fewer/bigger trades, not a smarter model."
+# ---------------------------------------------------------------------------
+def test_estimate_kalshi_15m_entry_fee_usd_peaks_at_50_cents():
+    # fee = ceil(0.07 * count * price * (1-price), to the cent); P*(1-P)
+    # is maximized at P=0.5 (=0.25), the well-documented "expensive coin
+    # flip" peak of Kalshi's own quadratic fee curve.
+    at_50c = k15ta.estimate_kalshi_15m_entry_fee_usd(0.50, 100)
+    at_10c = k15ta.estimate_kalshi_15m_entry_fee_usd(0.10, 100)
+    at_90c = k15ta.estimate_kalshi_15m_entry_fee_usd(0.90, 100)
+    assert at_50c > at_10c
+    assert at_50c > at_90c
+    assert at_50c == pytest.approx(1.75, abs=0.01)  # 0.07 * 100 * 0.5 * 0.5 = 1.75, no rounding needed
+
+
+def test_estimate_kalshi_15m_entry_fee_usd_is_symmetric_around_50_cents():
+    # A "no" position's own cost_basis (e.g. 0.30) must give the IDENTICAL
+    # fee a "yes" position's yes-denominated price of 0.70 would -- see
+    # this function's own docstring on why cost_basis alone is enough.
+    assert k15ta.estimate_kalshi_15m_entry_fee_usd(0.30, 50) == k15ta.estimate_kalshi_15m_entry_fee_usd(0.70, 50)
+
+
+def test_estimate_kalshi_15m_entry_fee_usd_rounds_up_to_the_cent():
+    fee = k15ta.estimate_kalshi_15m_entry_fee_usd(0.45, 3)  # 0.07*3*0.45*0.55 = 0.0519975
+    assert fee == 0.06  # rounded UP, not to the nearest cent
+
+
+def test_estimate_kalshi_15m_entry_fee_usd_handles_missing_or_invalid_input():
+    assert k15ta.estimate_kalshi_15m_entry_fee_usd(None, 10) == 0.0
+    assert k15ta.estimate_kalshi_15m_entry_fee_usd(0.5, None) == 0.0
+    assert k15ta.estimate_kalshi_15m_entry_fee_usd(0.0, 10) == 0.0  # price must be strictly between 0 and 1
+    assert k15ta.estimate_kalshi_15m_entry_fee_usd(1.0, 10) == 0.0
+    assert k15ta.estimate_kalshi_15m_entry_fee_usd(0.5, 0) == 0.0
+
+
+def test_analyze_trade_history_reports_gross_vs_net_of_fees():
+    trades = [
+        _trade(pnl=1.0, entry_price=0.5, count=10),  # fee = ceil(0.07*10*0.25*100)/100 = 0.18
+        _trade(pnl=-1.0, entry_price=0.5, count=10),
+    ]
+    result = k15ta.analyze_trade_history(trades)
+    fees = result["fees"]
+    assert fees["gross_pnl_usd"] == 0.0
+    assert fees["estimated_fees_usd"] == pytest.approx(0.36, abs=0.001)  # 0.18 * 2 trades
+    assert fees["net_of_fees_pnl_usd"] == pytest.approx(-0.36, abs=0.001)
+    assert fees["avg_fee_usd_per_trade"] == pytest.approx(0.18, abs=0.001)
+
+
+def test_analyze_trade_history_flags_fees_as_the_dominant_cost():
+    # Gross P&L barely negative, but fees dwarf it -- fees should be
+    # flagged as the dominant driver, not "bad predictions".
+    trades = [_trade(pnl=-0.01, entry_price=0.5, count=100) for _ in range(20)]
+    result = k15ta.analyze_trade_history(trades)
+    assert any("dominant cost" in line and "fewer, bigger trades" in line for line in result["insights"])
+
+
+def test_analyze_trade_history_flags_bad_predictions_as_the_dominant_cost():
+    # A big gross loss with a tiny fee footprint (low count, extreme
+    # price) -- predictions, not fees, are clearly the driver here.
+    trades = [_trade(pnl=-5.0, entry_price=0.02, count=1) for _ in range(20)]
+    result = k15ta.analyze_trade_history(trades)
+    assert any("dominant cost" in line and "smarter model" in line and "fewer, bigger trades" not in line for line in result["insights"])
+
+
+def test_analyze_trade_history_silent_on_fees_with_no_fee_data():
+    trades = [_trade(pnl=-1.0) for _ in range(20)]  # no entry_price/count at all
+    result = k15ta.analyze_trade_history(trades)
+    assert result["fees"]["estimated_fees_usd"] == 0.0
+    assert not any("fee" in line.lower() for line in result["insights"])
+
+
+# ---------------------------------------------------------------------------
+# by_hour_of_day -- per explicit user direction: "worth checking...
+# whether certain hours have structurally better real win rates and
+# restricting entries to those windows."
+# ---------------------------------------------------------------------------
+def test_hour_of_day_label_converts_utc_to_et():
+    # 2026-08-01T18:00:00Z is 14:00 ET (EDT, UTC-4, in August).
+    trade = _trade(pnl=1.0, opened_at="2026-08-01T18:00:00+00:00")
+    assert k15ta._hour_of_day_label(trade) == "14:00 ET"  # noqa: SLF001
+
+
+def test_hour_of_day_label_missing_opened_at_is_none():
+    assert k15ta._hour_of_day_label({}) is None  # noqa: SLF001
+
+
+def test_analyze_trade_history_buckets_by_hour_of_day():
+    trades = [
+        _trade(pnl=1.0, opened_at="2026-08-01T18:00:00+00:00"),  # 14:00 ET
+        _trade(pnl=-1.0, opened_at="2026-08-01T13:00:00+00:00"),  # 09:00 ET
+    ]
+    result = k15ta.analyze_trade_history(trades)
+    assert "14:00 ET" in result["by_hour_of_day"]
+    assert "09:00 ET" in result["by_hour_of_day"]
+    assert result["by_hour_of_day"]["14:00 ET"]["trades"] == 1
 
 
 def test_analyze_trade_history_flags_a_stark_yes_no_win_rate_gap():

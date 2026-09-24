@@ -2406,3 +2406,98 @@ def test_scan_and_enter_skips_a_coin_with_a_poor_real_track_record(monkeypatch):
     entered_coins = {c["coin"] for c in result["checks"] if c.get("action") == "entered"}
     assert "BTC" not in entered_coins
     assert "ETH" in entered_coins  # a different coin's own track record is untouched
+
+
+# ---------------------------------------------------------------------------
+# Hour-of-day trust gate -- per explicit user direction: "the model
+# already has hour-of-day features[;] worth checking... whether certain
+# hours have structurally better real win rates and restricting entries
+# to those windows."
+# ---------------------------------------------------------------------------
+def _hour_trade(*, hour_et: int, pnl: float, dry_run: bool = False) -> dict:
+    """A real trade whose opened_at falls at the given ET hour TODAY --
+    dt.timezone.utc offset math avoids needing zoneinfo/pytz in the test
+    itself; ET is UTC-4 or UTC-5 depending on DST, so this builds the
+    UTC instant that corresponds to hour_et in EITHER offset and lets
+    kalshi_15m_strategy's own _trade_et_hour do the real conversion --
+    simplest correct approach: go through _et_zoneinfo directly."""
+    et_now = dt.datetime.now(tz=kalshi_15m_strategy._et_zoneinfo())  # noqa: SLF001
+    et_at_hour = et_now.replace(hour=hour_et, minute=0, second=0, microsecond=0)
+    return {"coin": "BTC", "realized_pnl_usd": pnl, "dry_run": dry_run, "opened_at": et_at_hour.isoformat()}
+
+
+def test_hour_is_trusted_with_insufficient_history(monkeypatch):
+    monkeypatch.setattr(kalshi_15m_strategy, "HOUR_TRUST_ENABLED", True)
+    trades = [_hour_trade(hour_et=14, pnl=-1.0) for _ in range(3)]  # below the 8-trade floor
+    result = kalshi_15m_strategy.hour_is_trusted(14, trades)
+    assert result["trusted"] is True
+    assert result["reason"] == "insufficient_history"
+
+
+def test_hour_is_trusted_pauses_an_hour_with_a_clearly_poor_track_record(monkeypatch):
+    monkeypatch.setattr(kalshi_15m_strategy, "HOUR_TRUST_ENABLED", True)
+    trades = [_hour_trade(hour_et=14, pnl=-1.0) for _ in range(7)] + [_hour_trade(hour_et=14, pnl=0.5) for _ in range(1)]
+    result = kalshi_15m_strategy.hour_is_trusted(14, trades)
+    assert result["trusted"] is False
+    assert result["reason"] == "poor_real_track_record"
+    assert result["hour_et"] == 14
+
+
+def test_hour_is_trusted_needs_both_a_low_win_rate_and_a_negative_average_pnl(monkeypatch):
+    monkeypatch.setattr(kalshi_15m_strategy, "HOUR_TRUST_ENABLED", True)
+    trades = [_hour_trade(hour_et=14, pnl=-0.1) for _ in range(6)] + [_hour_trade(hour_et=14, pnl=5.0) for _ in range(2)]
+    result = kalshi_15m_strategy.hour_is_trusted(14, trades)
+    assert result["trusted"] is True  # low win rate (25%) but positive avg P&L
+
+
+def test_hour_is_trusted_ignores_dry_run_trades(monkeypatch):
+    monkeypatch.setattr(kalshi_15m_strategy, "HOUR_TRUST_ENABLED", True)
+    trades = [_hour_trade(hour_et=14, pnl=-1.0, dry_run=True) for _ in range(10)]
+    result = kalshi_15m_strategy.hour_is_trusted(14, trades)
+    assert result["trusted"] is True
+    assert result["reason"] == "insufficient_history"
+
+
+def test_hour_is_trusted_is_hour_specific(monkeypatch):
+    monkeypatch.setattr(kalshi_15m_strategy, "HOUR_TRUST_ENABLED", True)
+    bad_14 = [_hour_trade(hour_et=14, pnl=-1.0) for _ in range(8)]
+    assert kalshi_15m_strategy.hour_is_trusted(14, bad_14)["trusted"] is False
+    assert kalshi_15m_strategy.hour_is_trusted(9, bad_14)["trusted"] is True
+
+
+def test_hour_is_trusted_disabled_flag_always_trusts(monkeypatch):
+    monkeypatch.setattr(kalshi_15m_strategy, "HOUR_TRUST_ENABLED", False)
+    trades = [_hour_trade(hour_et=14, pnl=-1.0) for _ in range(20)]
+    result = kalshi_15m_strategy.hour_is_trusted(14, trades)
+    assert result["trusted"] is True
+    assert result["reason"] == "disabled"
+
+
+def test_trade_et_hour_returns_none_with_no_opened_at():
+    assert kalshi_15m_strategy._trade_et_hour({}) is None  # noqa: SLF001
+
+
+def test_scan_and_enter_skips_all_coins_during_an_untrusted_hour(monkeypatch):
+    monkeypatch.setattr(kalshi_15m_strategy, "HOUR_TRUST_ENABLED", True)
+    monkeypatch.setattr(kalshi_15m_strategy, "MAX_CONCURRENT_POSITIONS", len(kalshi_15m_strategy.ASSET_SERIES))
+    monkeypatch.setattr(kalshi_15m_strategy, "GRADUATED_CONCURRENCY_ENABLED", False)
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
+    _mock_confident_prediction(monkeypatch)
+    current_hour = kalshi_15m_strategy._current_et_hour()  # noqa: SLF001
+    bad_hour_trades = [_hour_trade(hour_et=current_hour, pnl=-1.0) for _ in range(8)]
+    kalshi_15m_strategy._save_state({"positions": [], "trade_log": bad_hour_trades, "realized_pnl_by_date": {}})  # noqa: SLF001
+
+    result = kalshi_15m_strategy.scan_and_enter()
+
+    assert result["hour_trust"]["trusted"] is False
+    entered = [c for c in result["checks"] if c.get("action") == "entered"]
+    assert entered == []
+    assert all(c["reason"] == "hour_outside_trusted_track_record" for c in result["checks"])
+
+
+def test_scan_and_enter_reports_hour_trust_ok_with_no_history(monkeypatch):
+    monkeypatch.setattr(kalshi_15m_strategy, "HOUR_TRUST_ENABLED", True)
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
+    result = kalshi_15m_strategy.scan_and_enter()
+    assert result["hour_trust"]["trusted"] is True
+    assert result["hour_trust"]["reason"] == "insufficient_history"

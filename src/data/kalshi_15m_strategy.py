@@ -488,6 +488,81 @@ def coin_is_trusted(coin: str, trade_log: list[dict[str, Any]] | None) -> dict[s
     }
 
 
+# Hour-of-day trust gate -- per explicit user direction: "the model
+# already has hour-of-day features[;] worth checking... whether certain
+# hours have structurally better real win rates and restricting entries
+# to those windows." Genuinely the SAME evidence-gating discipline as
+# coin_is_trusted just above, applied to TIME instead of COIN: once an ET
+# hour has enough real trade history to trust the read, a clearly poor
+# real track record for THAT hour pauses new entries during it entirely
+# -- always on (a pure risk-reducer, same posture as coin_is_trusted),
+# and re-included the moment its own numbers improve, no manual reset.
+# hour_sin/hour_cos are ALREADY high-importance model features (confirmed
+# live: the metals model's own top 2 features by importance) -- this is
+# the explicit, dashboard-visible ENTRY RESTRICTION complement to that
+# implicit signal, not a replacement for it.
+HOUR_TRUST_ENABLED = _env_flag("KALSHI_15M_HOUR_TRUST_ENABLED", default=True)
+HOUR_TRUST_MIN_TRADES = _env_int("KALSHI_15M_HOUR_TRUST_MIN_TRADES", 8)
+HOUR_TRUST_MIN_WIN_RATE = _env_float("KALSHI_15M_HOUR_TRUST_MIN_WIN_RATE", 0.35)
+
+
+def _et_zoneinfo():
+    """Same zoneinfo-with-pytz-fallback pattern already used independently
+    by alpaca_data.py/alpaca_options_strategy.py's own _now_et -- this
+    codebase's established convention is small, duplicated per-market
+    helpers over a shared utils import (see kalshi_15m_data.py's own
+    module docstring on why independent per-market modules are
+    deliberate here)."""
+    try:
+        import zoneinfo
+        return zoneinfo.ZoneInfo("America/New_York")
+    except Exception:
+        import pytz
+        return pytz.timezone("America/New_York")
+
+
+def _current_et_hour() -> int:
+    return dt.datetime.now(tz=_et_zoneinfo()).hour
+
+
+def _trade_et_hour(trade: dict[str, Any]) -> int | None:
+    opened = trade.get("opened_at")
+    if not opened:
+        return None
+    try:
+        opened_dt = dt.datetime.fromisoformat(str(opened).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+    return opened_dt.astimezone(_et_zoneinfo()).hour
+
+
+def hour_is_trusted(hour: int, trade_log: list[dict[str, Any]] | None) -> dict[str, Any]:
+    """{"trusted": True} until this ET hour's (0-23) own real trade
+    history is BOTH long enough (HOUR_TRUST_MIN_TRADES) and clearly bad
+    (win rate below HOUR_TRUST_MIN_WIN_RATE AND a negative average real
+    P&L) -- identical gating discipline to coin_is_trusted above, just
+    bucketed by the hour each trade's own opened_at falls in (ET, matching
+    every other hour-of-day convention in this codebase, e.g.
+    KALSHI_15M_TRAIN_HOUR_ET)."""
+    if not HOUR_TRUST_ENABLED:
+        return {"trusted": True, "reason": "disabled"}
+    hour_trades = [t for t in (trade_log or []) if not t.get("dry_run") and _trade_et_hour(t) == hour]
+    if len(hour_trades) < HOUR_TRUST_MIN_TRADES:
+        return {"trusted": True, "reason": "insufficient_history", "hour_et": hour, "trades": len(hour_trades)}
+    wins = sum(1 for t in hour_trades if float(t.get("realized_pnl_usd") or 0.0) > 0)
+    win_rate = wins / len(hour_trades)
+    avg_pnl = sum(float(t.get("realized_pnl_usd") or 0.0) for t in hour_trades) / len(hour_trades)
+    if win_rate < HOUR_TRUST_MIN_WIN_RATE and avg_pnl < 0:
+        return {
+            "trusted": False, "reason": "poor_real_track_record", "hour_et": hour,
+            "trades": len(hour_trades), "win_rate": round(win_rate, 4), "avg_pnl_usd": round(avg_pnl, 6),
+        }
+    return {
+        "trusted": True, "reason": "track_record_ok", "hour_et": hour,
+        "trades": len(hour_trades), "win_rate": round(win_rate, 4), "avg_pnl_usd": round(avg_pnl, 6),
+    }
+
+
 # Volume + price-action entry confirmation -- per explicit user
 # direction: "we need to use volume studies and current volume need to
 # be high to enter and exit fast... bot need to work on that and price
@@ -1190,12 +1265,22 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
         # returned "win_streak_cooldown" key to decide whether to run a
         # fresh retrain + backtest verification this cycle.
         win_streak_cooldown = compute_win_streak_cooldown_active(state)
+        # See hour_is_trusted's own comment -- the CURRENT hour is the
+        # same for every coin in one scan pass, so computed once here too.
+        current_et_hour = _current_et_hour()
+        hour_trust = hour_is_trusted(current_et_hour, state.get("trade_log"))
 
     for coin in ASSET_SERIES:
         if win_streak_cooldown["active"]:
             checks.append({
                 "coin": coin, "ok": False, "reason": "win_streak_cooldown_active",
                 "streak": win_streak_cooldown["streak"], "min_streak": win_streak_cooldown["min_streak"],
+            })
+            continue
+        if not hour_trust["trusted"]:
+            checks.append({
+                "coin": coin, "ok": False, "reason": "hour_outside_trusted_track_record",
+                "hour_et": hour_trust["hour_et"], "hour_win_rate": hour_trust["win_rate"], "hour_avg_pnl_usd": hour_trust["avg_pnl_usd"],
             })
             continue
         # See ACTIVE_ENTRY_COINS' own comment -- checked before anything
@@ -1441,7 +1526,7 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
 
     return {
         "ok": True, "checks": checks, "live_trading_enabled": LIVE_TRADING_ENABLED,
-        "win_streak_cooldown": win_streak_cooldown,
+        "win_streak_cooldown": win_streak_cooldown, "hour_trust": hour_trust,
     }
 
 

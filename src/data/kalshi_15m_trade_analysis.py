@@ -42,16 +42,97 @@ respectively. None of these four replace each other.
 
 Pure analysis over data already collected -- no network calls, no state
 mutation.
+
+Two more real, evidence-driven additions, per explicit user direction:
+  - Fee-vs-edge tracking (estimate_kalshi_15m_entry_fee_usd/_fee_summary):
+    "worth splitting out how much of that [average per-trade loss] is
+    Kalshi fees vs. bad predictions, since if it's mostly fees, the fix
+    is fewer/bigger trades, not a smarter model." Kalshi's own public
+    fee schedule for this product's "quadratic" fee_type (confirmed via
+    kalshi_15m.py's own module docstring) is fee = ceil(0.07 * count *
+    price * (1-price), to the cent) per taker fill -- every order this
+    account places is a marketable IOC crossing the current spread (see
+    kalshi_15m_strategy.scan_and_enter's own docstring), so always
+    taker. `realized_pnl_usd` keeps its EXISTING meaning everywhere else
+    it's used (the contract's own settlement payout, gross of fees) --
+    this is purely an ADDITIVE reporting layer, no existing win/loss gate
+    changes behavior.
+  - by_hour_of_day (see hour_of_day_label): "the model already has hour-
+    of-day features[;] worth checking... whether certain hours have
+    structurally better real win rates and restricting entries to those
+    windows." hour_sin/hour_cos are already high-importance model
+    features (an implicit signal); this is the explicit, human-readable
+    surface of the SAME real pattern, and
+    kalshi_15m_strategy.hour_is_trusted is the live entry-side
+    restriction that acts on it.
 """
 from __future__ import annotations
 
+import datetime as dt
+import math
 from typing import Any
 
 BATCH_SIZE = 5
 
+# See this module's own docstring above -- Kalshi's own public "quadratic"
+# taker-fee rate for this product (docs.kalshi.com/docs/kalshi-fee-schedule.pdf).
+KALSHI_15M_TAKER_FEE_RATE = 0.07
+
 
 def _is_win(trade: dict[str, Any]) -> bool:
     return float(trade.get("realized_pnl_usd") or 0.0) > 0
+
+
+def estimate_kalshi_15m_entry_fee_usd(entry_price: float | None, count: float | None) -> float:
+    """Estimated real dollar fee Kalshi charged for one trade's own entry
+    order -- see KALSHI_15M_TAKER_FEE_RATE's own comment. `entry_price`
+    is this trade's own recorded entry_price (== cost_basis, the real
+    economic cost per contract of whichever side was actually held --
+    see kalshi_15m_strategy.scan_and_enter's own docstring on why that
+    differs from the YES-denominated price Kalshi's own order API sees).
+    price*(1-price) is symmetric under price -> 1-price, so cost_basis
+    gives the IDENTICAL fee Kalshi's own yes-denominated order price
+    would -- no need to reconstruct that original value.
+
+    Deliberately entry-only: a trade that rode to natural settlement (the
+    overwhelming majority here -- USE_EARLY_EXIT is off by default) never
+    placed a second order at all, so has no second fee leg; an early-
+    exited trade DOES pay one on its own exit order that this does not
+    estimate, making this a FLOOR on real fees for that minority of
+    trades, not an exact figure. Returns 0.0 for any missing/invalid
+    input (never raises -- this is a reporting-only estimate)."""
+    if entry_price is None or count is None:
+        return 0.0
+    try:
+        price, contracts = float(entry_price), float(count)
+    except (TypeError, ValueError):
+        return 0.0
+    if price <= 0 or price >= 1 or contracts <= 0:
+        return 0.0
+    raw = KALSHI_15M_TAKER_FEE_RATE * contracts * price * (1.0 - price)
+    # round() before ceil() kills float noise (e.g. 0.07*100*0.5*0.5 can
+    # land on 1.7500000000000002 in raw float math) that would otherwise
+    # push an exact cent boundary up to the NEXT cent -- a real,
+    # observed-in-testing off-by-one-cent artifact, not a hypothetical one.
+    return math.ceil(round(raw * 100, 6)) / 100.0
+
+
+def _fee_summary(trades: list[dict[str, Any]]) -> dict[str, Any]:
+    """Real fee-vs-edge split over the given trades -- see this module's
+    own docstring. gross_pnl_usd is the same figure `overall`'s own
+    total_pnl_usd already reports (recomputed here so this dict is
+    self-contained); net_of_fees_pnl_usd is always <= gross_pnl_usd since
+    a fee is a guaranteed cost regardless of whether the trade won."""
+    if not trades:
+        return {"estimated_fees_usd": 0.0, "gross_pnl_usd": 0.0, "net_of_fees_pnl_usd": 0.0, "avg_fee_usd_per_trade": None}
+    fees = [estimate_kalshi_15m_entry_fee_usd(t.get("entry_price"), t.get("count")) for t in trades]
+    total_fees = round(sum(fees), 6)
+    gross = round(sum(float(t.get("realized_pnl_usd") or 0.0) for t in trades), 6)
+    return {
+        "estimated_fees_usd": total_fees, "gross_pnl_usd": gross,
+        "net_of_fees_pnl_usd": round(gross - total_fees, 6),
+        "avg_fee_usd_per_trade": round(total_fees / len(trades), 6),
+    }
 
 
 def _bucket_stats(trades: list[dict[str, Any]]) -> dict[str, Any]:
@@ -384,7 +465,6 @@ def _side_bucket_label(trade: dict[str, Any]) -> str | None:
 
 
 def _hold_minutes(trade: dict[str, Any]) -> float | None:
-    import datetime as dt
     opened = trade.get("opened_at")
     closed = trade.get("closed_at")
     if not opened or not closed:
@@ -409,8 +489,39 @@ def _hold_minutes_bucket_label(minutes: float | None) -> str | None:
     return _HOLD_MINUTES_BUCKETS[-1][2]
 
 
+def _et_zoneinfo():
+    """Same zoneinfo-with-pytz-fallback pattern kalshi_15m_strategy.py's
+    own identical helper uses -- this codebase's established convention
+    is a small, duplicated per-module helper over a shared utils import
+    (see kalshi_15m_data.py's own module docstring on why independent
+    per-market modules are deliberate here)."""
+    try:
+        import zoneinfo
+        return zoneinfo.ZoneInfo("America/New_York")
+    except Exception:
+        import pytz
+        return pytz.timezone("America/New_York")
+
+
+def _hour_of_day_label(trade: dict[str, Any]) -> str | None:
+    """This trade's own opened_at hour, in ET (matching every other hour-
+    of-day convention in this codebase, e.g. KALSHI_15M_TRAIN_HOUR_ET) --
+    see this module's own docstring on why this exists and
+    kalshi_15m_strategy.hour_is_trusted for the live entry-side gate that
+    acts on the same real pattern this surfaces."""
+    opened = trade.get("opened_at")
+    if not opened:
+        return None
+    try:
+        opened_dt = dt.datetime.fromisoformat(str(opened).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+    return f"{opened_dt.astimezone(_et_zoneinfo()).hour:02d}:00 ET"
+
+
 def _build_insights(
     overall: dict[str, Any], by_side: dict[str, dict[str, Any]], by_confidence: dict[str, dict[str, Any]],
+    fees: dict[str, Any] | None = None,
 ) -> list[str]:
     """Human-readable, evidence-gated observations -- every insight names
     its own sample size so it's clear how much to trust it. Deliberately
@@ -449,6 +560,27 @@ def _build_insights(
                 f"{lowest[0]}'s {lowest[1]['win_rate']:.0%} -- confidence score is NOT reliably predictive right now."
             )
 
+    # Fee-vs-edge -- see estimate_kalshi_15m_entry_fee_usd's own comment.
+    # Only surfaced once fees are actually a meaningful share of the
+    # picture (a cent or two on a handful of trades isn't worth a line).
+    if fees and fees.get("estimated_fees_usd", 0) > 0:
+        if fees["gross_pnl_usd"] < 0:
+            fee_share = min(1.0, fees["estimated_fees_usd"] / abs(fees["gross_pnl_usd"]))
+            insights.append(
+                f"Estimated Kalshi fees (${fees['estimated_fees_usd']:.2f}, ${fees['avg_fee_usd_per_trade']:.4f}/trade "
+                f"average) account for {fee_share:.0%} of the ${abs(fees['gross_pnl_usd']):.2f} gross loss -- "
+                f"true net P&L (${fees['net_of_fees_pnl_usd']:.2f}) is worse than gross alone suggests. "
+                + ("Fees are the dominant cost here -- fewer, bigger trades would help more than a smarter model."
+                   if fee_share >= 0.5 else
+                   "Bad predictions are the dominant cost here, not fees -- a smarter model would help more than fewer trades.")
+            )
+        else:
+            insights.append(
+                f"Estimated Kalshi fees: ${fees['estimated_fees_usd']:.2f} total "
+                f"(${fees['avg_fee_usd_per_trade']:.4f}/trade average) against a ${fees['gross_pnl_usd']:.2f} gross "
+                f"gain -- net of fees: ${fees['net_of_fees_pnl_usd']:.2f}."
+            )
+
     return insights
 
 
@@ -462,18 +594,21 @@ def analyze_trade_history(trade_log: list[dict[str, Any]] | None, *, include_dry
     trades = [t for t in trade_log if include_dry_run or not t.get("dry_run")]
     overall = _bucket_stats(trades)
     if not trades:
-        return {"ok": True, "trades_analyzed": 0, "overall": overall, "insights": []}
+        return {"ok": True, "trades_analyzed": 0, "overall": overall, "fees": _fee_summary([]), "insights": []}
 
     by_side = _group_by(trades, _side_bucket_label)
     by_confidence_bucket = _group_by(trades, lambda t: _confidence_bucket_label(t.get("entry_confidence")))
     by_coin = _group_by(trades, lambda t: t.get("coin"))
     by_hold_minutes_bucket = _group_by(trades, lambda t: _hold_minutes_bucket_label(_hold_minutes(t)))
+    by_hour_of_day = _group_by(trades, _hour_of_day_label)
+    fees = _fee_summary(trades)
 
     return {
         "ok": True, "trades_analyzed": len(trades), "overall": overall,
         "by_side": by_side, "by_confidence_bucket": by_confidence_bucket,
         "by_coin": by_coin, "by_hold_minutes_bucket": by_hold_minutes_bucket,
-        "insights": _build_insights(overall, by_side, by_confidence_bucket),
+        "by_hour_of_day": by_hour_of_day, "fees": fees,
+        "insights": _build_insights(overall, by_side, by_confidence_bucket, fees),
     }
 
 
