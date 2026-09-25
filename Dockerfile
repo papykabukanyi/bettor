@@ -12,6 +12,21 @@
 # "this shape of Docker Space actually works on HF."
 FROM python:3.11-slim
 
+# REAL, LIVE, CONFIRMED INCIDENT: this Space's own "Dev Mode" setting
+# (HF's browser-VS-Code feature, toggled in Space Settings, independent
+# of anything in this Dockerfile) wraps whatever image this Dockerfile
+# produces in its OWN extra build stage that runs `git config --global
+# user.name/user.email` -- and python:3.11-slim has no git installed,
+# which took the ENTIRE merged Space (all 4 markets, not just one) down
+# with BUILD_ERROR ("git: not found", exit code 127) on a plain code
+# push that touched no infrastructure at all. Installing git here (in
+# THIS image, which that wrapper stage builds FROM) is what actually
+# fixes it -- toggling Dev Mode off in Space Settings is the other real
+# fix and avoids the wrapper stage entirely, but this is the one fix
+# that's actually version-controlled and can't silently regress if Dev
+# Mode gets re-enabled later.
+RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 ENV PYTHONDONTWRITEBYTECODE=1
