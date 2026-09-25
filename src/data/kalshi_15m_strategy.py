@@ -279,32 +279,43 @@ YES_CONFIDENCE_EXTRA_REQUIRED = _env_float("KALSHI_15M_YES_CONFIDENCE_EXTRA_REQU
 # so this can never make an early, thin-data account WORSE than doing
 # nothing.
 #
-# REAL, LIVE, CONFIRMED REGRESSION found the same day this shipped: with
-# this account's OWN full 330-trade history, the raw-confidence-vs-real-
+# REAL, LIVE, CONFIRMED REGRESSION found the same day this shipped, and
+# the REDESIGN that replaced the original gating behavior: with this
+# account's OWN full 330-trade history, the raw-confidence-vs-real-
 # outcome relationship isn't just noisy, it's DECREASING almost
 # everywhere -- and isotonic regression is a MONOTONIC fit by
 # construction, so the only way it can honor a decreasing relationship
 # is to flatten it (pool the violating segments together, exactly what
-# it's designed to do). The result: nearly every raw probability across
-# the ENTIRE 0.5-1.0 range got compressed down toward this account's own
-# ~43-46% overall win rate -- which sits BELOW MODEL_CONFIDENCE_MIN
-# (0.58) and further still below the yes-adjusted floor (0.65), so
-# almost nothing could ever clear the confidence gate anymore. Confirmed
-# live via the new /api/kalshi15m/diagnose-entries route: GOLD/SILVER/
-# COPPER all read confidence 0.54-0.56 (clustered suspiciously near the
-# account's own base rate) with zero real entries for ~19 straight
-# hours despite the win-streak cooldown being clear the whole time. The
-# math was correct -- this really is what an honest calibration of an
-# unreliable raw signal looks like -- but gating live entries on it was
-# the wrong place to apply that correction: it turned "the model's
-# confidence isn't trustworthy" into "stop trading almost entirely",
-# which is a materially worse outcome for a low-balance account that
-# needs to keep collecting real evidence, not go quiet. Off by default
-# again until a real design (e.g. gating on RAW confidence while still
-# reporting the calibrated one for study, or recalibrating within each
-# confidence bucket rather than across the whole range) replaces this
-# rather than just disabling the correction outright.
-USE_REAL_OUTCOME_CALIBRATION = _env_flag("KALSHI_15M_USE_REAL_OUTCOME_CALIBRATION", default=False)
+# it's designed to do). Gating live entries on that flattened value
+# compressed nearly every raw probability across the ENTIRE 0.5-1.0
+# range down toward this account's own ~43-46% overall win rate -- below
+# BOTH confidence floors -- so almost nothing could clear the gate
+# anymore. Confirmed live via /api/kalshi15m/diagnose-entries: GOLD/
+# SILVER/COPPER all read confidence 0.54-0.56 with zero real entries for
+# ~19 straight hours despite every other gate being clear. The math was
+# correct -- this really is what an honest calibration of an unreliable
+# raw signal looks like -- but gating live entries on it turned "the
+# model's confidence isn't trustworthy" into "stop trading almost
+# entirely", which is worse than doing nothing for a low-balance account
+# that needs to keep collecting real evidence.
+#
+# REDESIGN (per explicit user direction: "gating on raw confidence while
+# separately tracking calibrated confidence for study"): evaluate_candidate
+# now derives side/confidence/the confidence-floor gate from the RAW
+# probability_up ONLY, unconditionally -- calibration NEVER again decides
+# ok/side/confidence on its own. This flag now controls something much
+# lower-risk: whether calibrated_probability_up/calibrated_confidence
+# (attached to every successful decision, and from there to
+# entry_calibrated_probability_up/entry_calibrated_confidence on the
+# position/trade record -- see scan_and_enter's own position dict) get
+# computed at all. Safe to default back ON: the worst case is now "an
+# extra isotonic fit that nobody looks at yet", not "the account stops
+# trading" -- the whole point of collecting this going forward is real
+# evidence for whichever REAL next design (recalibrating WITHIN each
+# confidence bucket rather than across the whole range, or requiring the
+# calibrated reading to clear some separate, looser bar alongside the
+# raw one) eventually replaces this comment.
+USE_REAL_OUTCOME_CALIBRATION = _env_flag("KALSHI_15M_USE_REAL_OUTCOME_CALIBRATION", default=True)
 REAL_OUTCOME_CALIBRATION_MIN_TRADES = _env_int("KALSHI_15M_REAL_OUTCOME_CALIBRATION_MIN_TRADES", 150)
 
 
@@ -1090,25 +1101,37 @@ def evaluate_candidate(
     if not prediction.get("model_ok"):
         return {"ok": False, "reason": "model_not_ready", "detail": prediction.get("reason")}
 
-    raw_probability_up = float(prediction["probability_up"])
-    # See calibrate_probability_up's own comment -- corrects the raw
-    # model probability against this account's own REAL trade outcomes
-    # BEFORE side/confidence are even derived below, so a large enough
-    # correction can flip which side looks more likely, not just soften
-    # how confident it sounds.
-    effective_use_real_outcome_calibration = (
-        USE_REAL_OUTCOME_CALIBRATION if use_real_outcome_calibration is None else use_real_outcome_calibration
-    )
-    calibration = (
-        calibrate_probability_up(raw_probability_up, trade_log)
-        if effective_use_real_outcome_calibration
-        else {"probability_up": raw_probability_up, "applied": False, "reason": "calibration_disabled"}
-    )
-    probability_up = calibration["probability_up"]
+    probability_up = float(prediction["probability_up"])
     if probability_up >= 0.5:
         side, confidence = "yes", probability_up
     else:
         side, confidence = "no", 1.0 - probability_up
+
+    # Real-outcome probability calibration -- see calibrate_probability_up's
+    # own comment. OBSERVABILITY ONLY: computed and attached to the result
+    # below, but never feeds side/confidence/the confidence-floor gate --
+    # a real, live, confirmed incident (see USE_REAL_OUTCOME_CALIBRATION's
+    # own comment) showed that gating live entries on it can flatten
+    # nearly every prediction below the floor and silently halt trading
+    # for the whole account at once, the moment this account's own real
+    # confidence-vs-accuracy relationship isn't monotonic (which it
+    # currently isn't). Tracked purely so a future, more careful redesign
+    # (recalibrating WITHIN each confidence bucket rather than across the
+    # whole range, or requiring the calibrated reading to clear some
+    # separate, looser bar alongside the raw one) has real, already-
+    # collected evidence to work from instead of guessing live again.
+    effective_use_real_outcome_calibration = (
+        USE_REAL_OUTCOME_CALIBRATION if use_real_outcome_calibration is None else use_real_outcome_calibration
+    )
+    calibration = (
+        calibrate_probability_up(probability_up, trade_log)
+        if effective_use_real_outcome_calibration
+        else {"probability_up": probability_up, "applied": False, "reason": "calibration_disabled"}
+    )
+    calibrated_probability_up = calibration["probability_up"]
+    # Same side-relative shape as `confidence` above -- directly
+    # comparable to it regardless of which side was actually picked.
+    calibrated_confidence = calibrated_probability_up if side == "yes" else 1.0 - calibrated_probability_up
 
     # Chart-study confidence layer -- see USE_CORRELATION_STUDY's own
     # comment. Computed and attached unconditionally (cheap: an in-memory
@@ -1193,11 +1216,15 @@ def evaluate_candidate(
     result = {
         "ok": True, "coin": coin, "side": side, "market": market,
         "probability_up": probability_up, "confidence": confidence,
-        # Observability for calibrate_probability_up's own correction --
-        # raw_probability_up is only present (and different from
-        # probability_up above) once real trade history actually
-        # triggered a correction.
-        "raw_probability_up": raw_probability_up, "real_outcome_calibration_applied": calibration["applied"],
+        # Observability-only calibration -- see USE_REAL_OUTCOME_CALIBRATION's
+        # own comment on why this never affects `ok`/side/confidence/the
+        # gate above. calibrated_confidence is directly comparable to
+        # `confidence` above (same side-relative shape); real_outcome_calibration_applied
+        # is False (and calibrated_probability_up == probability_up)
+        # whenever there isn't enough real trade history yet, or the flag
+        # is off.
+        "calibrated_probability_up": calibrated_probability_up, "calibrated_confidence": calibrated_confidence,
+        "real_outcome_calibration_applied": calibration["applied"],
         "correlation_score": correlation_score, "correlation_reason": correlation_reason,
         # For USE_CONVICTION_SIZING (see scan_and_enter/compute_conviction_size_multiplier)
         # -- how far above its OWN entry bar this candidate's confidence
@@ -1520,6 +1547,17 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
             "close_time": market.get("close_time"), "entry_probability_up": decision["probability_up"],
             "entry_confidence": decision["confidence"], "dry_run": effective_dry_run,
             "client_order_id": client_order_id, "order_id": order_id,
+            # Observability-only calibration, never used to decide this
+            # entry -- see USE_REAL_OUTCOME_CALIBRATION's own comment.
+            # Captured on every trade (real_outcome_calibration_applied
+            # False whenever there wasn't enough history yet) so a future
+            # by_calibrated_confidence_bucket study
+            # (kalshi_15m_trade_analysis.py) has real evidence from day
+            # one, the same "works from day one" reasoning every other
+            # entry_* field here already follows.
+            "entry_calibrated_probability_up": decision.get("calibrated_probability_up"),
+            "entry_calibrated_confidence": decision.get("calibrated_confidence"),
+            "entry_real_outcome_calibration_applied": decision.get("real_outcome_calibration_applied"),
             # Captured regardless of whether the correlation study was even
             # ON at entry time -- see kalshi_15m_trade_analysis.recommend_correlation_study_weight's
             # own docstring on why this makes that evidence-gated tuning
@@ -2005,6 +2043,9 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
             "entry_price": position["entry_price"], "result": None, "realized_pnl_usd": realized_pnl,
             "opened_at": position["opened_at"], "closed_at": dt.datetime.now(dt.timezone.utc).isoformat(),
             "entry_probability_up": position.get("entry_probability_up"), "entry_confidence": position.get("entry_confidence"),
+            "entry_calibrated_probability_up": position.get("entry_calibrated_probability_up"),
+            "entry_calibrated_confidence": position.get("entry_calibrated_confidence"),
+            "entry_real_outcome_calibration_applied": position.get("entry_real_outcome_calibration_applied"),
             "dry_run": False, "entry_correlation_score": position.get("entry_correlation_score"),
             "entry_conviction_sizing_enabled": position.get("entry_conviction_sizing_enabled"),
             "entry_loss_streak_multiplier": position.get("entry_loss_streak_multiplier"),
@@ -2079,6 +2120,9 @@ def check_settlements() -> dict[str, Any]:
             "realized_pnl_usd": round(gross, 6), "opened_at": position["opened_at"], "closed_at": closed_at,
             "entry_probability_up": position.get("entry_probability_up"),
             "entry_confidence": position.get("entry_confidence"), "dry_run": position.get("dry_run", True),
+            "entry_calibrated_probability_up": position.get("entry_calibrated_probability_up"),
+            "entry_calibrated_confidence": position.get("entry_calibrated_confidence"),
+            "entry_real_outcome_calibration_applied": position.get("entry_real_outcome_calibration_applied"),
             "entry_correlation_score": position.get("entry_correlation_score"),
             "entry_conviction_sizing_enabled": position.get("entry_conviction_sizing_enabled"),
             "entry_loss_streak_multiplier": position.get("entry_loss_streak_multiplier"),

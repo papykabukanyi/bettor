@@ -521,7 +521,7 @@ def _hour_of_day_label(trade: dict[str, Any]) -> str | None:
 
 def _build_insights(
     overall: dict[str, Any], by_side: dict[str, dict[str, Any]], by_confidence: dict[str, dict[str, Any]],
-    fees: dict[str, Any] | None = None,
+    fees: dict[str, Any] | None = None, by_calibrated_confidence: dict[str, dict[str, Any]] | None = None,
 ) -> list[str]:
     """Human-readable, evidence-gated observations -- every insight names
     its own sample size so it's clear how much to trust it. Deliberately
@@ -559,6 +559,33 @@ def _build_insights(
                 f"Higher-confidence entries ({highest[0]}) win only {highest[1]['win_rate']:.0%} vs "
                 f"{lowest[0]}'s {lowest[1]['win_rate']:.0%} -- confidence score is NOT reliably predictive right now."
             )
+
+    # Calibrated-vs-raw confidence -- see kalshi_15m_strategy.USE_REAL_OUTCOME_CALIBRATION's
+    # own comment: calibration is observability-only there specifically
+    # so real evidence like this can accumulate before any future design
+    # decides how (or whether) to act on it again. Only compared once
+    # BOTH sides have a real, comparably-sized top/bottom bucket gap --
+    # otherwise this would just be noise dressed up as a verdict.
+    if by_calibrated_confidence:
+        calibrated_points = sorted(
+            ((k, v) for k, v in by_calibrated_confidence.items() if v["trades"] >= MIN_BUCKET_TRADES),
+            key=lambda kv: kv[0],
+        )
+        if len(calibrated_points) >= 2 and len(confidence_points) >= 2:
+            cal_lowest, cal_highest = calibrated_points[0], calibrated_points[-1]
+            cal_gap = cal_highest[1]["win_rate"] - cal_lowest[1]["win_rate"]
+            raw_gap = confidence_points[-1][1]["win_rate"] - confidence_points[0][1]["win_rate"]
+            if cal_gap > 0 and raw_gap <= 0:
+                insights.append(
+                    f"Calibrated confidence ({cal_highest[0]}: {cal_highest[1]['win_rate']:.0%} vs "
+                    f"{cal_lowest[0]}: {cal_lowest[1]['win_rate']:.0%}) tracks real outcomes BETTER than raw "
+                    f"confidence right now -- worth a real design that acts on it again, not just studies it."
+                )
+            elif cal_gap <= raw_gap:
+                insights.append(
+                    "Calibrated confidence isn't outperforming raw confidence yet -- still observability-only "
+                    "for a reason (see USE_REAL_OUTCOME_CALIBRATION's own comment)."
+                )
 
     # Fee-vs-edge -- see estimate_kalshi_15m_entry_fee_usd's own comment.
     # Only surfaced once fees are actually a meaningful share of the
@@ -598,6 +625,14 @@ def analyze_trade_history(trade_log: list[dict[str, Any]] | None, *, include_dry
 
     by_side = _group_by(trades, _side_bucket_label)
     by_confidence_bucket = _group_by(trades, lambda t: _confidence_bucket_label(t.get("entry_confidence")))
+    # Observability-only counterpart -- see kalshi_15m_strategy.USE_REAL_OUTCOME_CALIBRATION's
+    # own comment on why calibration never gates a live entry anymore;
+    # this is exactly the real evidence a future redesign needs before
+    # touching that again. Same bucket edges as the raw one (a plain
+    # 0-1 probability either way), so the two are directly comparable.
+    by_calibrated_confidence_bucket = _group_by(
+        trades, lambda t: _confidence_bucket_label(t.get("entry_calibrated_confidence")),
+    )
     by_coin = _group_by(trades, lambda t: t.get("coin"))
     by_hold_minutes_bucket = _group_by(trades, lambda t: _hold_minutes_bucket_label(_hold_minutes(t)))
     by_hour_of_day = _group_by(trades, _hour_of_day_label)
@@ -606,9 +641,10 @@ def analyze_trade_history(trade_log: list[dict[str, Any]] | None, *, include_dry
     return {
         "ok": True, "trades_analyzed": len(trades), "overall": overall,
         "by_side": by_side, "by_confidence_bucket": by_confidence_bucket,
+        "by_calibrated_confidence_bucket": by_calibrated_confidence_bucket,
         "by_coin": by_coin, "by_hold_minutes_bucket": by_hold_minutes_bucket,
         "by_hour_of_day": by_hour_of_day, "fees": fees,
-        "insights": _build_insights(overall, by_side, by_confidence_bucket, fees),
+        "insights": _build_insights(overall, by_side, by_confidence_bucket, fees, by_calibrated_confidence_bucket),
     }
 
 

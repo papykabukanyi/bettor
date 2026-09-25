@@ -1255,6 +1255,24 @@ def test_scan_and_enter_records_the_entry_correlation_score_on_the_position(monk
     assert gold_position["entry_correlation_score"] == 0.0  # metals study is genuinely empty in this test process
 
 
+def test_scan_and_enter_records_calibration_fields_on_the_position_and_trade(monkeypatch):
+    """entry_calibrated_probability_up/entry_calibrated_confidence are
+    captured on every trade from day one (see USE_REAL_OUTCOME_CALIBRATION's
+    own comment) -- observability only, never affects which coin actually
+    entered."""
+    monkeypatch.setattr(kalshi_15m_strategy, "MAX_CONCURRENT_POSITIONS", 1)
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
+    monkeypatch.setattr(kalshi_15m_model, "predict_direction", lambda coin: {"model_ok": True, "probability_up": 0.72})
+
+    kalshi_15m_strategy.scan_and_enter()
+
+    state = kalshi_15m_strategy._load_state()  # noqa: SLF001
+    position = state["positions"][0]
+    assert position["entry_calibrated_probability_up"] == pytest.approx(0.72)  # no real trade_log yet -- unchanged
+    assert position["entry_calibrated_confidence"] == pytest.approx(0.72)
+    assert position["entry_real_outcome_calibration_applied"] is False
+
+
 def test_maybe_run_batch_trade_analysis_applies_correlation_tuning_too(monkeypatch):
     from data import kalshi_15m_trade_analysis
 
@@ -1745,30 +1763,26 @@ def test_calibrate_probability_up_handles_a_genuinely_well_calibrated_history(mo
     assert result["probability_up"] > 0.5
 
 
-def test_evaluate_candidate_applies_real_outcome_calibration_when_trade_log_given(monkeypatch):
-    # USE_REAL_OUTCOME_CALIBRATION now defaults to False (see its own
-    # comment) -- explicitly enabled here since this test is about the
-    # WIRING (calibration applied when both trade_log is given AND the
-    # flag is on), not the module-level default itself.
+def test_evaluate_candidate_reports_calibration_without_it_ever_deciding_ok(monkeypatch):
+    """Redesign per explicit user direction: 'gating on raw confidence
+    while separately tracking calibrated confidence for study'.
+    calibrated_probability_up/calibrated_confidence are attached for
+    observability, but probability_up/confidence/side/ok are ALWAYS
+    derived from the raw model output, never the calibrated one."""
     monkeypatch.setattr(kalshi_15m_strategy, "USE_REAL_OUTCOME_CALIBRATION", True)
     monkeypatch.setattr(kalshi_15m_strategy, "REAL_OUTCOME_CALIBRATION_MIN_TRADES", 10)
     monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
-    # A genuinely well-calibrated (non-adversarial) real history that
-    # still shifts a fresh 0.80 raw reading -- picked so the CALIBRATED
-    # value still comfortably clears the yes-adjusted confidence floor
-    # (0.65), so this test exercises the full success path, not just an
-    # early confidence_below_floor rejection (see the dedicated
-    # calibrate_probability_up unit tests above for the dramatic
-    # overconfidence-collapse case).
     monkeypatch.setattr(kalshi_15m_model, "predict_direction", lambda coin: {"model_ok": True, "probability_up": 0.80})
     trade_log = [_real_trade(0.65, won=False) for _ in range(5)] + [_real_trade(0.85, won=True) for _ in range(5)]
 
     result = kalshi_15m_strategy.evaluate_candidate("BTC", trade_log=trade_log)
 
     assert result["ok"] is True
-    assert result["raw_probability_up"] == pytest.approx(0.80)
+    assert result["probability_up"] == pytest.approx(0.80)  # the RAW value, unchanged by calibration
+    assert result["confidence"] == pytest.approx(0.80)
     assert result["real_outcome_calibration_applied"] is True
-    assert result["probability_up"] != result["raw_probability_up"]
+    assert result["calibrated_probability_up"] != result["probability_up"]  # calibration DID shift this
+    assert result["calibrated_confidence"] != result["confidence"]
 
 
 def test_evaluate_candidate_skips_calibration_without_a_trade_log(monkeypatch):
@@ -1778,7 +1792,8 @@ def test_evaluate_candidate_skips_calibration_without_a_trade_log(monkeypatch):
     result = kalshi_15m_strategy.evaluate_candidate("BTC")
 
     assert result["real_outcome_calibration_applied"] is False
-    assert result["probability_up"] == result["raw_probability_up"] == pytest.approx(0.72)
+    assert result["probability_up"] == pytest.approx(0.72)
+    assert result["calibrated_probability_up"] == pytest.approx(0.72)  # unchanged -- insufficient history
 
 
 def test_evaluate_candidate_use_real_outcome_calibration_override_disables_it(monkeypatch):
@@ -1790,36 +1805,32 @@ def test_evaluate_candidate_use_real_outcome_calibration_override_disables_it(mo
     result = kalshi_15m_strategy.evaluate_candidate("BTC", trade_log=trade_log, use_real_outcome_calibration=False)
 
     assert result["real_outcome_calibration_applied"] is False
-    assert result["probability_up"] == result["raw_probability_up"] == pytest.approx(0.75)
+    assert result["probability_up"] == pytest.approx(0.75)
+    assert result["calibrated_probability_up"] == pytest.approx(0.75)  # override forced it off
 
 
-def test_use_real_outcome_calibration_defaults_to_false():
-    # See USE_REAL_OUTCOME_CALIBRATION's own comment on the real, live,
-    # confirmed regression this default flip fixes: this account's own
-    # full trade history has a DECREASING confidence-vs-accuracy
-    # relationship almost everywhere, which isotonic regression can only
-    # honor by flattening -- collapsing nearly every prediction below the
-    # confidence floor and silently halting entries for ~19 hours.
-    assert kalshi_15m_strategy.USE_REAL_OUTCOME_CALIBRATION is False
+def test_use_real_outcome_calibration_defaults_to_true():
+    # Safe to default ON now that it's observability-only (see its own
+    # comment) -- the worst case is an extra isotonic fit nobody looks at
+    # yet, not the account going quiet.
+    assert kalshi_15m_strategy.USE_REAL_OUTCOME_CALIBRATION is True
 
 
-def test_real_outcome_calibration_on_an_inverted_relationship_can_starve_entries(monkeypatch):
-    """Regression test for the real incident: a DECREASING confidence-vs-
-    accuracy relationship (high stated confidence historically losing,
-    low stated confidence historically winning -- exactly this account's
-    own real shape) forces isotonic regression to flatten toward the
-    overall base rate, pushing even a fresh, otherwise-clearing
-    prediction below the confidence floor once calibration is turned
-    back on. Locks in why USE_REAL_OUTCOME_CALIBRATION defaults to False
-    until a real redesign replaces it."""
+def test_real_outcome_calibration_never_starves_entries_even_on_an_inverted_relationship(monkeypatch):
+    """Regression test for the real incident this redesign fixes: even
+    this account's own real, decreasing confidence-vs-accuracy shape
+    (which flattens the CALIBRATED value below both floors) must never
+    stop a candidate that clears the floor on its RAW confidence from
+    entering -- calibration is reported, never gates."""
     monkeypatch.setattr(kalshi_15m_strategy, "USE_REAL_OUTCOME_CALIBRATION", True)
     monkeypatch.setattr(kalshi_15m_strategy, "REAL_OUTCOME_CALIBRATION_MIN_TRADES", 10)
     monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
-    # Raw probability_up=0.72 -- would clear the yes-adjusted floor
-    # (0.65) easily on its own.
+    # Raw probability_up=0.72 -- clears the yes-adjusted floor (0.65) on
+    # its own.
     monkeypatch.setattr(kalshi_15m_model, "predict_direction", lambda coin: {"model_ok": True, "probability_up": 0.72})
     # This account's own real shape: low stated confidence (0.55) mostly
-    # won, high stated confidence (0.95) mostly lost.
+    # won, high stated confidence (0.95) mostly lost -- would flatten the
+    # CALIBRATED reading down near 0.5, well below either floor.
     trade_log = (
         [_real_trade(0.55, won=True) for _ in range(9)] + [_real_trade(0.55, won=False) for _ in range(1)]
         + [_real_trade(0.95, won=False) for _ in range(9)] + [_real_trade(0.95, won=True) for _ in range(1)]
@@ -1827,8 +1838,10 @@ def test_real_outcome_calibration_on_an_inverted_relationship_can_starve_entries
 
     result = kalshi_15m_strategy.evaluate_candidate("BTC", trade_log=trade_log)
 
-    assert result["ok"] is False
-    assert result["reason"] == "confidence_below_floor"
+    assert result["ok"] is True  # never blocked -- the raw confidence is what decided this
+    assert result["probability_up"] == pytest.approx(0.72)
+    assert result["real_outcome_calibration_applied"] is True
+    assert result["calibrated_confidence"] < kalshi_15m_strategy.MODEL_CONFIDENCE_MIN  # calibration WOULD have blocked it -- reported, not acted on
 
 
 def test_apply_conviction_sizing_override_persists_the_flag(monkeypatch):

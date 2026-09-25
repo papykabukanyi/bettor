@@ -30,12 +30,12 @@ from data import kalshi_15m_trade_analysis as k15ta
 def _trade(
     *, coin: str = "BTC", side: str = "yes", pnl: float, entry_confidence: float = 0.6, dry_run: bool = False,
     opened_at: str = "2026-08-01T12:00:00+00:00", closed_at: str = "2026-08-01T12:10:00+00:00",
-    entry_price: float | None = None, count: float | None = None,
+    entry_price: float | None = None, count: float | None = None, entry_calibrated_confidence: float | None = None,
 ) -> dict:
     return {
         "coin": coin, "side": side, "realized_pnl_usd": pnl, "entry_confidence": entry_confidence,
         "dry_run": dry_run, "opened_at": opened_at, "closed_at": closed_at,
-        "entry_price": entry_price, "count": count,
+        "entry_price": entry_price, "count": count, "entry_calibrated_confidence": entry_calibrated_confidence,
     }
 
 
@@ -185,6 +185,43 @@ def test_analyze_trade_history_buckets_by_hour_of_day():
     assert "14:00 ET" in result["by_hour_of_day"]
     assert "09:00 ET" in result["by_hour_of_day"]
     assert result["by_hour_of_day"]["14:00 ET"]["trades"] == 1
+
+
+# ---------------------------------------------------------------------------
+# by_calibrated_confidence_bucket -- the observability-only counterpart
+# to by_confidence_bucket, per explicit user direction: "gating on raw
+# confidence while separately tracking calibrated confidence for study."
+# See kalshi_15m_strategy.USE_REAL_OUTCOME_CALIBRATION's own comment.
+# ---------------------------------------------------------------------------
+def test_analyze_trade_history_buckets_by_calibrated_confidence():
+    trades = [
+        _trade(pnl=1.0, entry_calibrated_confidence=0.9),
+        _trade(pnl=-1.0, entry_calibrated_confidence=0.55),
+    ]
+    result = k15ta.analyze_trade_history(trades)
+    assert result["by_calibrated_confidence_bucket"]
+    assert "0.75-1.00" in result["by_calibrated_confidence_bucket"]
+
+
+def test_analyze_trade_history_flags_calibration_outperforming_raw_confidence():
+    # Raw confidence: flat/inverted (both buckets ~50%). Calibrated
+    # confidence: a real, wide gap the raw bucketing doesn't show.
+    trades = (
+        [_trade(pnl=1.0, entry_confidence=0.6, entry_calibrated_confidence=0.9) for _ in range(3)]
+        + [_trade(pnl=-1.0, entry_confidence=0.6, entry_calibrated_confidence=0.9) for _ in range(2)]
+        + [_trade(pnl=-1.0, entry_confidence=0.95, entry_calibrated_confidence=0.55) for _ in range(4)]
+        + [_trade(pnl=1.0, entry_confidence=0.95, entry_calibrated_confidence=0.55) for _ in range(1)]
+    )
+    result = k15ta.analyze_trade_history(trades)
+    assert any("tracks real outcomes BETTER" in line for line in result["insights"])
+
+
+def test_analyze_trade_history_does_not_claim_calibration_outperforms_when_it_does_not():
+    trades = [_trade(pnl=1.0, entry_confidence=0.9, entry_calibrated_confidence=0.9) for _ in range(5)] + [
+        _trade(pnl=-1.0, entry_confidence=0.55, entry_calibrated_confidence=0.55) for _ in range(5)
+    ]
+    result = k15ta.analyze_trade_history(trades)
+    assert not any("tracks real outcomes BETTER" in line for line in result["insights"])
 
 
 def test_analyze_trade_history_flags_a_stark_yes_no_win_rate_gap():
