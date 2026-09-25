@@ -496,6 +496,24 @@ def apply_win_streak_cooldown_result(passed: bool, *, real_trade_count: int, rea
 # risk-REDUCER) -- narrows the tradable universe toward what has
 # actually worked, never expands it, and re-includes a coin the moment
 # its own real numbers improve (no manual reset, no permanent ban).
+#
+# REAL, LIVE, CONFIRMED GAP found per explicit user direction: "I don't
+# want it to just make trades, it['s] need to make profitable ones." The
+# original bar here (win rate below COIN_TRUST_MIN_WIN_RATE AND a
+# negative average P&L, BOTH required) was designed to avoid overreacting
+# to a single large loss dragging an otherwise-good coin's average
+# negative -- but on a real, large sample, the "AND" let a genuinely
+# UNPROFITABLE coin through just because its win rate wasn't
+# catastrophic: this account's entire live universe (GOLD/SILVER/COPPER,
+# 68-107 real trades each) all showed a solidly mid-40s win rate --
+# comfortably above the 0.35 floor -- WHILE ALL THREE also carried a
+# real, stable NEGATIVE average P&L. "Trusted" was reporting "not
+# obviously broken," not "actually makes money." A 68-107 trade sample is
+# not a single-loss artifact; a negative average over that many real
+# trades IS the profitability read this gate exists to act on. Now
+# untrusted whenever avg_pnl < 0 alone (given enough real history) --
+# win_rate is still reported for context, but no longer excuses a
+# structurally negative average.
 COIN_TRUST_MIN_TRADES = _env_int("KALSHI_15M_COIN_TRUST_MIN_TRADES", 8)
 COIN_TRUST_MIN_WIN_RATE = _env_float("KALSHI_15M_COIN_TRUST_MIN_WIN_RATE", 0.35)
 
@@ -503,20 +521,20 @@ COIN_TRUST_MIN_WIN_RATE = _env_float("KALSHI_15M_COIN_TRUST_MIN_WIN_RATE", 0.35)
 def coin_is_trusted(coin: str, trade_log: list[dict[str, Any]] | None) -> dict[str, Any]:
     """{"trusted": True} until this coin's own real trade history is BOTH
     long enough (COIN_TRUST_MIN_TRADES -- avoids overreacting to a small,
-    unlucky sample) and clearly bad (win rate below
-    COIN_TRUST_MIN_WIN_RATE AND a negative average real P&L -- BOTH, not
-    just one metric skewed by a single large loss, same discipline every
-    recommend_*_trial comparison in kalshi_15m_trade_analysis.py already
-    holds itself to)."""
+    unlucky sample) and UNPROFITABLE (a negative average real P&L over
+    that real sample -- see this gate's own module-level comment on why
+    win rate alone no longer excuses this). COIN_TRUST_MIN_WIN_RATE is
+    still reported on the result for observability/context, but is no
+    longer required to also be low."""
     coin_trades = [t for t in (trade_log or []) if t.get("coin") == coin and not t.get("dry_run")]
     if len(coin_trades) < COIN_TRUST_MIN_TRADES:
         return {"trusted": True, "reason": "insufficient_history", "trades": len(coin_trades)}
     wins = sum(1 for t in coin_trades if float(t.get("realized_pnl_usd") or 0.0) > 0)
     win_rate = wins / len(coin_trades)
     avg_pnl = sum(float(t.get("realized_pnl_usd") or 0.0) for t in coin_trades) / len(coin_trades)
-    if win_rate < COIN_TRUST_MIN_WIN_RATE and avg_pnl < 0:
+    if avg_pnl < 0:
         return {
-            "trusted": False, "reason": "poor_real_track_record",
+            "trusted": False, "reason": "unprofitable_real_track_record",
             "trades": len(coin_trades), "win_rate": round(win_rate, 4), "avg_pnl_usd": round(avg_pnl, 6),
         }
     return {
@@ -575,12 +593,13 @@ def _trade_et_hour(trade: dict[str, Any]) -> int | None:
 
 def hour_is_trusted(hour: int, trade_log: list[dict[str, Any]] | None) -> dict[str, Any]:
     """{"trusted": True} until this ET hour's (0-23) own real trade
-    history is BOTH long enough (HOUR_TRUST_MIN_TRADES) and clearly bad
-    (win rate below HOUR_TRUST_MIN_WIN_RATE AND a negative average real
-    P&L) -- identical gating discipline to coin_is_trusted above, just
-    bucketed by the hour each trade's own opened_at falls in (ET, matching
-    every other hour-of-day convention in this codebase, e.g.
-    KALSHI_15M_TRAIN_HOUR_ET)."""
+    history is BOTH long enough (HOUR_TRUST_MIN_TRADES) and UNPROFITABLE
+    (a negative average real P&L over that real sample) -- same
+    discipline coin_is_trusted's own comment explains (win rate alone no
+    longer excuses a structurally negative average), bucketed by the hour
+    each trade's own opened_at falls in (ET, matching every other hour-
+    of-day convention in this codebase, e.g. KALSHI_15M_TRAIN_HOUR_ET).
+    HOUR_TRUST_MIN_WIN_RATE is still reported for context, not required."""
     if not HOUR_TRUST_ENABLED:
         return {"trusted": True, "reason": "disabled"}
     hour_trades = [t for t in (trade_log or []) if not t.get("dry_run") and _trade_et_hour(t) == hour]
@@ -589,9 +608,9 @@ def hour_is_trusted(hour: int, trade_log: list[dict[str, Any]] | None) -> dict[s
     wins = sum(1 for t in hour_trades if float(t.get("realized_pnl_usd") or 0.0) > 0)
     win_rate = wins / len(hour_trades)
     avg_pnl = sum(float(t.get("realized_pnl_usd") or 0.0) for t in hour_trades) / len(hour_trades)
-    if win_rate < HOUR_TRUST_MIN_WIN_RATE and avg_pnl < 0:
+    if avg_pnl < 0:
         return {
-            "trusted": False, "reason": "poor_real_track_record", "hour_et": hour,
+            "trusted": False, "reason": "unprofitable_real_track_record", "hour_et": hour,
             "trades": len(hour_trades), "win_rate": round(win_rate, 4), "avg_pnl_usd": round(avg_pnl, 6),
         }
     return {

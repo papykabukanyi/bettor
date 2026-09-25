@@ -2416,16 +2416,37 @@ def test_coin_is_trusted_pauses_a_coin_with_a_clearly_poor_track_record():
     trades = [_trust_trade(pnl=-1.0) for _ in range(7)] + [_trust_trade(pnl=0.5) for _ in range(1)]
     result = kalshi_15m_strategy.coin_is_trusted("BTC", trades)
     assert result["trusted"] is False
-    assert result["reason"] == "poor_real_track_record"
+    assert result["reason"] == "unprofitable_real_track_record"
     assert result["win_rate"] < kalshi_15m_strategy.COIN_TRUST_MIN_WIN_RATE
 
 
-def test_coin_is_trusted_needs_both_a_low_win_rate_and_a_negative_average_pnl():
+def test_coin_is_trusted_low_win_rate_alone_is_fine_if_avg_pnl_is_positive():
     """A coin that wins RARELY but big (e.g. a few large wins offsetting
-    many small losses) must not get paused on win rate alone."""
+    many small losses) must not get paused on win rate alone -- only a
+    NEGATIVE average real P&L untrusts a coin now (see coin_is_trusted's
+    own comment on why win rate alone no longer excuses one either)."""
     trades = [_trust_trade(pnl=-0.1) for _ in range(6)] + [_trust_trade(pnl=5.0) for _ in range(2)]
     result = kalshi_15m_strategy.coin_is_trusted("BTC", trades)
     assert result["trusted"] is True  # win rate is low (25%) but avg P&L is positive
+
+
+def test_coin_is_trusted_pauses_on_negative_avg_pnl_even_with_an_ok_win_rate():
+    """REAL, LIVE, CONFIRMED GAP this closes: this account's own real
+    GOLD/SILVER/COPPER all showed a solidly mid-40s win rate (comfortably
+    above COIN_TRUST_MIN_WIN_RATE) while ALL THREE also carried a real,
+    stable NEGATIVE average P&L over 68-107 trades each -- the old "both
+    must be bad" gate called that "trusted". A win rate above the floor
+    must no longer excuse a structurally negative average on a real
+    sample."""
+    # 45% win rate (comfortably above COIN_TRUST_MIN_WIN_RATE's 0.35) but
+    # a negative average -- mirrors this account's own real shape.
+    trades = [_trust_trade(pnl=0.5) for _ in range(9)] + [_trust_trade(pnl=-1.0) for _ in range(11)]
+    result = kalshi_15m_strategy.coin_is_trusted("BTC", trades)
+    assert result["win_rate"] == pytest.approx(0.45)
+    assert result["win_rate"] > kalshi_15m_strategy.COIN_TRUST_MIN_WIN_RATE
+    assert result["avg_pnl_usd"] < 0
+    assert result["trusted"] is False
+    assert result["reason"] == "unprofitable_real_track_record"
 
 
 def test_coin_is_trusted_ignores_dry_run_trades():
@@ -2441,7 +2462,7 @@ def test_coin_is_trusted_is_coin_specific():
     assert kalshi_15m_strategy.coin_is_trusted("ETH", bad_btc)["trusted"] is True
 
 
-def test_scan_and_enter_skips_a_coin_with_a_poor_real_track_record(monkeypatch):
+def test_scan_and_enter_skips_a_coin_with_an_unprofitable_real_track_record(monkeypatch):
     monkeypatch.setattr(kalshi_15m_strategy, "GRADUATED_CONCURRENCY_ENABLED", False)
     monkeypatch.setattr(kalshi_15m_strategy, "MAX_CONCURRENT_POSITIONS", len(kalshi_15m_strategy.ASSET_SERIES))
     monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
@@ -2454,7 +2475,7 @@ def test_scan_and_enter_skips_a_coin_with_a_poor_real_track_record(monkeypatch):
 
     btc_check = next(c for c in result["checks"] if c["coin"] == "BTC")
     assert btc_check["ok"] is False
-    assert btc_check["reason"] == "poor_real_track_record"
+    assert btc_check["reason"] == "unprofitable_real_track_record"
     entered_coins = {c["coin"] for c in result["checks"] if c.get("action") == "entered"}
     assert "BTC" not in entered_coins
     assert "ETH" in entered_coins  # a different coin's own track record is untouched
@@ -2491,15 +2512,27 @@ def test_hour_is_trusted_pauses_an_hour_with_a_clearly_poor_track_record(monkeyp
     trades = [_hour_trade(hour_et=14, pnl=-1.0) for _ in range(7)] + [_hour_trade(hour_et=14, pnl=0.5) for _ in range(1)]
     result = kalshi_15m_strategy.hour_is_trusted(14, trades)
     assert result["trusted"] is False
-    assert result["reason"] == "poor_real_track_record"
+    assert result["reason"] == "unprofitable_real_track_record"
     assert result["hour_et"] == 14
 
 
-def test_hour_is_trusted_needs_both_a_low_win_rate_and_a_negative_average_pnl(monkeypatch):
+def test_hour_is_trusted_low_win_rate_alone_is_fine_if_avg_pnl_is_positive(monkeypatch):
     monkeypatch.setattr(kalshi_15m_strategy, "HOUR_TRUST_ENABLED", True)
     trades = [_hour_trade(hour_et=14, pnl=-0.1) for _ in range(6)] + [_hour_trade(hour_et=14, pnl=5.0) for _ in range(2)]
     result = kalshi_15m_strategy.hour_is_trusted(14, trades)
     assert result["trusted"] is True  # low win rate (25%) but positive avg P&L
+
+
+def test_hour_is_trusted_pauses_on_negative_avg_pnl_even_with_an_ok_win_rate(monkeypatch):
+    """Same real gap coin_is_trusted's own equivalent test closes --
+    applied to hours instead of coins."""
+    monkeypatch.setattr(kalshi_15m_strategy, "HOUR_TRUST_ENABLED", True)
+    trades = [_hour_trade(hour_et=14, pnl=0.5) for _ in range(9)] + [_hour_trade(hour_et=14, pnl=-1.0) for _ in range(11)]
+    result = kalshi_15m_strategy.hour_is_trusted(14, trades)
+    assert result["win_rate"] > kalshi_15m_strategy.HOUR_TRUST_MIN_WIN_RATE
+    assert result["avg_pnl_usd"] < 0
+    assert result["trusted"] is False
+    assert result["reason"] == "unprofitable_real_track_record"
 
 
 def test_hour_is_trusted_ignores_dry_run_trades(monkeypatch):
