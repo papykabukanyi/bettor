@@ -278,7 +278,33 @@ YES_CONFIDENCE_EXTRA_REQUIRED = _env_float("KALSHI_15M_YES_CONFIDENCE_EXTRA_REQU
 # raw, uncorrected probability whenever there isn't enough history yet,
 # so this can never make an early, thin-data account WORSE than doing
 # nothing.
-USE_REAL_OUTCOME_CALIBRATION = _env_flag("KALSHI_15M_USE_REAL_OUTCOME_CALIBRATION", default=True)
+#
+# REAL, LIVE, CONFIRMED REGRESSION found the same day this shipped: with
+# this account's OWN full 330-trade history, the raw-confidence-vs-real-
+# outcome relationship isn't just noisy, it's DECREASING almost
+# everywhere -- and isotonic regression is a MONOTONIC fit by
+# construction, so the only way it can honor a decreasing relationship
+# is to flatten it (pool the violating segments together, exactly what
+# it's designed to do). The result: nearly every raw probability across
+# the ENTIRE 0.5-1.0 range got compressed down toward this account's own
+# ~43-46% overall win rate -- which sits BELOW MODEL_CONFIDENCE_MIN
+# (0.58) and further still below the yes-adjusted floor (0.65), so
+# almost nothing could ever clear the confidence gate anymore. Confirmed
+# live via the new /api/kalshi15m/diagnose-entries route: GOLD/SILVER/
+# COPPER all read confidence 0.54-0.56 (clustered suspiciously near the
+# account's own base rate) with zero real entries for ~19 straight
+# hours despite the win-streak cooldown being clear the whole time. The
+# math was correct -- this really is what an honest calibration of an
+# unreliable raw signal looks like -- but gating live entries on it was
+# the wrong place to apply that correction: it turned "the model's
+# confidence isn't trustworthy" into "stop trading almost entirely",
+# which is a materially worse outcome for a low-balance account that
+# needs to keep collecting real evidence, not go quiet. Off by default
+# again until a real design (e.g. gating on RAW confidence while still
+# reporting the calibrated one for study, or recalibrating within each
+# confidence bucket rather than across the whole range) replaces this
+# rather than just disabling the correction outright.
+USE_REAL_OUTCOME_CALIBRATION = _env_flag("KALSHI_15M_USE_REAL_OUTCOME_CALIBRATION", default=False)
 REAL_OUTCOME_CALIBRATION_MIN_TRADES = _env_int("KALSHI_15M_REAL_OUTCOME_CALIBRATION_MIN_TRADES", 150)
 
 

@@ -1746,6 +1746,11 @@ def test_calibrate_probability_up_handles_a_genuinely_well_calibrated_history(mo
 
 
 def test_evaluate_candidate_applies_real_outcome_calibration_when_trade_log_given(monkeypatch):
+    # USE_REAL_OUTCOME_CALIBRATION now defaults to False (see its own
+    # comment) -- explicitly enabled here since this test is about the
+    # WIRING (calibration applied when both trade_log is given AND the
+    # flag is on), not the module-level default itself.
+    monkeypatch.setattr(kalshi_15m_strategy, "USE_REAL_OUTCOME_CALIBRATION", True)
     monkeypatch.setattr(kalshi_15m_strategy, "REAL_OUTCOME_CALIBRATION_MIN_TRADES", 10)
     monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
     # A genuinely well-calibrated (non-adversarial) real history that
@@ -1788,8 +1793,42 @@ def test_evaluate_candidate_use_real_outcome_calibration_override_disables_it(mo
     assert result["probability_up"] == result["raw_probability_up"] == pytest.approx(0.75)
 
 
-def test_use_real_outcome_calibration_defaults_to_true():
-    assert kalshi_15m_strategy.USE_REAL_OUTCOME_CALIBRATION is True
+def test_use_real_outcome_calibration_defaults_to_false():
+    # See USE_REAL_OUTCOME_CALIBRATION's own comment on the real, live,
+    # confirmed regression this default flip fixes: this account's own
+    # full trade history has a DECREASING confidence-vs-accuracy
+    # relationship almost everywhere, which isotonic regression can only
+    # honor by flattening -- collapsing nearly every prediction below the
+    # confidence floor and silently halting entries for ~19 hours.
+    assert kalshi_15m_strategy.USE_REAL_OUTCOME_CALIBRATION is False
+
+
+def test_real_outcome_calibration_on_an_inverted_relationship_can_starve_entries(monkeypatch):
+    """Regression test for the real incident: a DECREASING confidence-vs-
+    accuracy relationship (high stated confidence historically losing,
+    low stated confidence historically winning -- exactly this account's
+    own real shape) forces isotonic regression to flatten toward the
+    overall base rate, pushing even a fresh, otherwise-clearing
+    prediction below the confidence floor once calibration is turned
+    back on. Locks in why USE_REAL_OUTCOME_CALIBRATION defaults to False
+    until a real redesign replaces it."""
+    monkeypatch.setattr(kalshi_15m_strategy, "USE_REAL_OUTCOME_CALIBRATION", True)
+    monkeypatch.setattr(kalshi_15m_strategy, "REAL_OUTCOME_CALIBRATION_MIN_TRADES", 10)
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
+    # Raw probability_up=0.72 -- would clear the yes-adjusted floor
+    # (0.65) easily on its own.
+    monkeypatch.setattr(kalshi_15m_model, "predict_direction", lambda coin: {"model_ok": True, "probability_up": 0.72})
+    # This account's own real shape: low stated confidence (0.55) mostly
+    # won, high stated confidence (0.95) mostly lost.
+    trade_log = (
+        [_real_trade(0.55, won=True) for _ in range(9)] + [_real_trade(0.55, won=False) for _ in range(1)]
+        + [_real_trade(0.95, won=False) for _ in range(9)] + [_real_trade(0.95, won=True) for _ in range(1)]
+    )
+
+    result = kalshi_15m_strategy.evaluate_candidate("BTC", trade_log=trade_log)
+
+    assert result["ok"] is False
+    assert result["reason"] == "confidence_below_floor"
 
 
 def test_apply_conviction_sizing_override_persists_the_flag(monkeypatch):
