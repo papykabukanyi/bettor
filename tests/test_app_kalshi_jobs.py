@@ -1338,6 +1338,71 @@ def test_real_positions_survives_a_kalshi_api_failure(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# /api/kalshi15m/diagnose-entries -- read-only, runs the exact same
+# evaluate_candidate call scan_and_enter itself would make right now, per
+# explicit user need ("today no trades happen[ed], review pls tell me
+# why") -- answers that directly instead of guessing from logs that don't
+# record per-check rejection reasons.
+# ---------------------------------------------------------------------------
+def test_diagnose_entries_runs_evaluate_candidate_for_every_active_entry_coin(monkeypatch):
+    from data import kalshi_15m_strategy
+
+    monkeypatch.setattr(kalshi_15m_strategy, "_load_state", lambda: {"positions": [], "trade_log": [], "tuning": {}})
+    monkeypatch.setattr(kalshi_15m_strategy, "ACTIVE_ENTRY_COINS", frozenset({"GOLD", "SILVER"}))
+    captured = []
+
+    def fake_evaluate(coin, **kw):
+        captured.append(coin)
+        return {"ok": False, "reason": "confidence_below_floor"}
+
+    monkeypatch.setattr(kalshi_15m_strategy, "evaluate_candidate", fake_evaluate)
+
+    with app_kalshi.app.test_client() as client:
+        resp = client.get("/api/kalshi15m/diagnose-entries")
+        body = resp.get_json()
+
+    assert resp.status_code == 200
+    assert body["ok"] is True
+    assert set(captured) == {"GOLD", "SILVER"}
+    assert body["per_coin"]["GOLD"]["decision"] == {"ok": False, "reason": "confidence_below_floor"}
+    assert "win_streak_cooldown" in body
+    assert "hour_trust" in body
+
+
+def test_diagnose_entries_never_places_an_order(monkeypatch):
+    """evaluate_candidate itself never places orders -- this test locks
+    that contract in from the route's own side, so a future change to
+    this diagnostic can't accidentally start calling something that
+    does."""
+    from data import kalshi_15m, kalshi_15m_strategy
+
+    monkeypatch.setattr(kalshi_15m_strategy, "_load_state", lambda: {"positions": [], "trade_log": [], "tuning": {}})
+
+    def fail_if_called(**kw):
+        raise AssertionError("diagnose-entries must never place a real order")
+
+    monkeypatch.setattr(kalshi_15m, "create_order", fail_if_called)
+
+    with app_kalshi.app.test_client() as client:
+        resp = client.get("/api/kalshi15m/diagnose-entries")
+
+    assert resp.status_code == 200
+
+
+def test_diagnose_entries_survives_a_failure(monkeypatch):
+    from data import kalshi_15m_strategy
+
+    def raise_error():
+        raise RuntimeError("state read failed")
+
+    monkeypatch.setattr(kalshi_15m_strategy, "_load_state", raise_error)
+    with app_kalshi.app.test_client() as client:
+        resp = client.get("/api/kalshi15m/diagnose-entries")
+        assert resp.status_code == 500
+        assert resp.get_json()["ok"] is False
+
+
+# ---------------------------------------------------------------------------
 # /api/kalshi15m/verify-order-mechanics -- a one-off, manually-triggered
 # diagnostic (never wired into any scheduled job) that places a real,
 # structurally-safe (IOC, 1 contract, price=0.01) test order to confirm

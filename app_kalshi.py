@@ -1718,6 +1718,43 @@ def api_kalshi_15m_real_positions():
         return jsonify({"ok": False, "error": str(exc)}), 500
 
 
+@app.route("/api/kalshi15m/diagnose-entries", methods=["GET"])
+def api_kalshi_15m_diagnose_entries():
+    """Read-only diagnostic: runs the EXACT same evaluate_candidate call
+    scan_and_enter itself would make right now for every coin in
+    ACTIVE_ENTRY_COINS, with the SAME trade_log-derived overrides
+    (confidence floor, correlation study) -- answers "why isn't the bot
+    entering anything right now" directly instead of guessing from logs
+    that don't record per-check rejection reasons. Never places an order
+    or mutates state -- evaluate_candidate is a pure function."""
+    from data import kalshi_15m_strategy
+    try:
+        state = kalshi_15m_strategy._load_state()  # noqa: SLF001
+        tuning = state.get("tuning") or {}
+        trade_log = state.get("trade_log")
+        win_streak_cooldown = kalshi_15m_strategy.compute_win_streak_cooldown_active(state)
+        current_et_hour = kalshi_15m_strategy._current_et_hour()  # noqa: SLF001
+        hour_trust = kalshi_15m_strategy.hour_is_trusted(current_et_hour, trade_log)
+        per_coin = {}
+        for coin in sorted(kalshi_15m_strategy.ACTIVE_ENTRY_COINS):
+            coin_trust = kalshi_15m_strategy.coin_is_trusted(coin, trade_log)
+            decision = kalshi_15m_strategy.evaluate_candidate(
+                coin,
+                confidence_min=tuning.get("model_confidence_min"),
+                correlation_study_enabled=tuning.get("correlation_study_enabled"),
+                correlation_max_adjustment=tuning.get("correlation_confidence_max_adjustment"),
+                trade_log=trade_log,
+            )
+            per_coin[coin] = {"coin_trust": coin_trust, "decision": decision}
+        return jsonify({
+            "ok": True, "current_et_hour": current_et_hour, "win_streak_cooldown": win_streak_cooldown,
+            "hour_trust": hour_trust, "open_position_count": len(state.get("positions") or []), "per_coin": per_coin,
+        })
+    except Exception as exc:
+        logger.warning("[app_kalshi] kalshi_15m diagnose-entries failed", exc_info=True)
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
 @app.route("/api/ai-report", methods=["GET"])
 def api_ai_report():
     """The latest saved project-wide, AI-powered status review -- see
