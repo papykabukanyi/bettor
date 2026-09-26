@@ -1266,12 +1266,67 @@ def test_kalshi_15m_strategy_sweep_job_does_not_save_a_failed_result(monkeypatch
 
 
 def test_kalshi_15m_strategy_sweep_route_returns_the_cached_result_on_get(monkeypatch):
+    # No HF-published result available (pull_json_from_hf returns None,
+    # matching what actually happens with no HF_API_KEY in a test
+    # environment) -- falls back to the in-Space file, same as this
+    # route's original pre-HF-Job behavior.
+    monkeypatch.setattr(app_kalshi, "pull_json_from_hf", lambda *a, **kw: None)
     monkeypatch.setattr(app_kalshi, "load_json", lambda path, default: {"ok": True, "cached": True})
     with app_kalshi.app.test_client() as client:
         resp = client.get("/api/kalshi15m/strategy-sweep")
         body = resp.get_json()
         assert resp.status_code == 200
         assert body["cached"] is True
+        assert body["source"] == "in_space_fallback"
+
+
+def test_kalshi_15m_strategy_sweep_route_prefers_the_hf_published_result(monkeypatch):
+    # Per "let do this for all the bots all of those jobs are handle by
+    # HF": the real, big sweep now runs on a dedicated HF Job and
+    # publishes here -- this Space must read THAT result first, never a
+    # stale in-Space one, whenever HF actually has one.
+    captured = {}
+
+    def fake_pull(repo_id, filename, *, token, timeout_sec):
+        captured["repo_id"] = repo_id
+        captured["filename"] = filename
+        return {"ok": True, "combinations_with_evidence": 500_000}
+
+    def fail_if_called(path, default):
+        raise AssertionError("must not fall back to the local file when HF already has a result")
+
+    monkeypatch.setattr(app_kalshi, "pull_json_from_hf", fake_pull)
+    monkeypatch.setattr(app_kalshi, "load_json", fail_if_called)
+    with app_kalshi.app.test_client() as client:
+        resp = client.get("/api/kalshi15m/strategy-sweep")
+        body = resp.get_json()
+    assert resp.status_code == 200
+    assert body["combinations_with_evidence"] == 500_000
+    assert body["source"] == "hf_job"
+    assert captured["repo_id"] == app_kalshi.kalshi_15m_metals_model.HF_KALSHI_15M_METALS_MODEL_REPO
+    assert captured["filename"] == "strategy_sweep_kalshi_15m_metals.json"
+
+
+def test_kalshi_15m_strategy_sweep_route_market_query_param_selects_the_crypto_repo(monkeypatch):
+    captured = {}
+
+    def fake_pull(repo_id, filename, *, token, timeout_sec):
+        captured["repo_id"] = repo_id
+        captured["filename"] = filename
+        return {"ok": True}
+
+    monkeypatch.setattr(app_kalshi, "pull_json_from_hf", fake_pull)
+    with app_kalshi.app.test_client() as client:
+        resp = client.get("/api/kalshi15m/strategy-sweep?market=kalshi_15m")
+    assert resp.status_code == 200
+    assert captured["repo_id"] == app_kalshi.kalshi_15m_model.HF_KALSHI_15M_MODEL_REPO
+    assert captured["filename"] == "strategy_sweep_kalshi_15m.json"
+
+
+def test_kalshi_15m_strategy_sweep_route_rejects_an_unknown_market(monkeypatch):
+    with app_kalshi.app.test_client() as client:
+        resp = client.get("/api/kalshi15m/strategy-sweep?market=nonsense")
+    assert resp.status_code == 400
 
 
 class _FakeThread:

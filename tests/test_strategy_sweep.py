@@ -147,3 +147,136 @@ def test_run_parameter_sweep_reports_no_qualifying_folds_on_too_little_data(monk
     monkeypatch.setattr(metals_bt, "load_training_dataset", lambda: tiny)
     result = strategy_sweep.run_parameter_sweep(metals_bt, {"model_confidence_min": [0.55]})
     assert result == {"ok": False, "reason": "no_qualifying_folds"}
+
+
+# ---------------------------------------------------------------------------
+# n_workers > 1 -- real multi-core parallelism, per explicit user direction
+# ("take full advantage of the CPU and RAM to the max... move as much load
+# of work to HF pro"). Must be numerically IDENTICAL to the sequential
+# path -- parallelism only changes where simulate() runs, never the result.
+# ---------------------------------------------------------------------------
+def test_run_parameter_sweep_parallel_matches_sequential_results(monkeypatch):
+    monkeypatch.setattr(metals_bt, "load_training_dataset", lambda: _synthetic_df())
+    grid = {"model_confidence_min": [0.51, 0.55, 0.60, 0.90], "yes_confidence_extra_required": [0.0]}
+
+    sequential = strategy_sweep.run_parameter_sweep(metals_bt, grid, min_trades_per_fold=1, min_folds_with_trades=1, n_workers=1)
+    parallel = strategy_sweep.run_parameter_sweep(metals_bt, grid, min_trades_per_fold=1, min_folds_with_trades=1, n_workers=2)
+
+    assert parallel["ok"] is True
+    assert parallel["combinations_evaluated"] == sequential["combinations_evaluated"]
+    assert parallel["combinations_with_evidence"] == sequential["combinations_with_evidence"]
+    assert parallel["top_strategies"] == sequential["top_strategies"]
+    assert parallel["n_workers"] == 2
+
+
+def test_run_parameter_sweep_parallel_stops_early_at_the_time_budget(monkeypatch):
+    monkeypatch.setattr(metals_bt, "load_training_dataset", lambda: _synthetic_df())
+    result = strategy_sweep.run_parameter_sweep(
+        metals_bt, {"model_confidence_min": [0.51, 0.55, 0.60]},
+        min_trades_per_fold=1, min_folds_with_trades=1, max_seconds=0.0, n_workers=2,
+    )
+    assert result["ok"] is True
+    assert result["stopped_early"] is True
+    assert result["combinations_evaluated"] == 0
+    assert result["top_strategies"] == []
+
+
+# ---------------------------------------------------------------------------
+# combined= override -- lets a market whose own data pipeline doesn't
+# match kalshi_15m's load_training_dataset()/_one_row_per_window()
+# convention (perps, the 3 alpaca markets) drive the same engine.
+# ---------------------------------------------------------------------------
+def test_run_parameter_sweep_accepts_a_preloaded_combined_dataframe(monkeypatch):
+    def fail_if_called():
+        raise AssertionError("must not call load_training_dataset when combined= is given")
+
+    monkeypatch.setattr(metals_bt, "load_training_dataset", fail_if_called)
+    result = strategy_sweep.run_parameter_sweep(
+        metals_bt, {"model_confidence_min": [0.51]}, combined=_synthetic_df(),
+        min_trades_per_fold=1, min_folds_with_trades=1,
+    )
+    assert result["ok"] is True
+    assert result["combinations_with_evidence"] >= 0  # ran at all without touching load_training_dataset
+
+
+# ---------------------------------------------------------------------------
+# holdout_bounds -- the genuine forward test: real data no walk-forward
+# fold's fit or test window ever touched, evaluated only AFTER ranking,
+# never used to pick or re-rank the survivors.
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# MAX_PLAUSIBLE_MEAN_RETURN_PCT -- real, live finding: the already-deployed
+# 16,200-combination kalshi_15m_metals sweep surfaced a "top strategy"
+# with mean_return_pct = 3.09e+20, traced to assumed_entry_price=0.1
+# reinvested via position_size_pct across 700+ trades in one fold (see
+# this module's own comment on MAX_PLAUSIBLE_MEAN_RETURN_PCT for the full
+# mechanism). This locks in that such combinations are excluded from
+# ranking, not just newly-written -- the SAME near-perfectly-learnable
+# synthetic pattern every other test in this file already relies on
+# reproduces the exact artifact when swept at a real position size.
+# ---------------------------------------------------------------------------
+def test_run_parameter_sweep_excludes_unrealistic_compounding_artifacts(monkeypatch):
+    monkeypatch.setattr(metals_bt, "load_training_dataset", lambda: _synthetic_df(n_per_symbol=6000))
+    result = strategy_sweep.run_parameter_sweep(
+        metals_bt, {"model_confidence_min": [0.51], "assumed_entry_price": [0.1]},
+        min_trades_per_fold=1, min_folds_with_trades=1,
+    )
+    assert result["ok"] is True
+    assert result["combinations_excluded_as_unrealistic"] >= 1
+    for entry in result["top_strategies"]:
+        assert abs(entry["mean_return_pct"]) <= strategy_sweep.MAX_PLAUSIBLE_MEAN_RETURN_PCT
+
+
+def test_run_parameter_sweep_holdout_attaches_forward_test_results(monkeypatch):
+    monkeypatch.setattr(metals_bt, "load_training_dataset", lambda: _synthetic_df(n_per_symbol=6000))
+    # A tiny position_size_pct here, not the module default -- this
+    # synthetic pattern is near-perfectly learnable (deliberately, for
+    # every OTHER test in this file), so a real-sized position compounding
+    # near-100% wins across 1,000+ synthetic trades legitimately exceeds
+    # MAX_PLAUSIBLE_MEAN_RETURN_PCT and gets excluded, same as the real
+    # live sweep incident that constant's own comment documents -- this
+    # test only cares about holdout WIRING, not about deliberately
+    # reproducing that artifact a second time.
+    result = strategy_sweep.run_parameter_sweep(
+        metals_bt, {"model_confidence_min": [0.51]}, extra_simulate_kwargs={"position_size_pct": 0.005},
+        fold_bounds=strategy_sweep.DEFAULT_FOLD_BOUNDS_WITH_HOLDOUT,
+        holdout_bounds=strategy_sweep.DEFAULT_HOLDOUT_BOUNDS,
+        min_trades_per_fold=1, min_folds_with_trades=1, min_holdout_trades=1,
+    )
+    assert result["ok"] is True
+    assert result["top_strategies"], "expected at least one survivor to attach holdout results to"
+    for entry in result["top_strategies"]:
+        assert "holdout" in entry
+        assert "return_pct" in entry["holdout"]
+        assert "forward_tested" in entry["holdout"]
+
+
+def test_run_parameter_sweep_without_holdout_bounds_never_attaches_holdout(monkeypatch):
+    monkeypatch.setattr(metals_bt, "load_training_dataset", lambda: _synthetic_df())
+    result = strategy_sweep.run_parameter_sweep(
+        metals_bt, {"model_confidence_min": [0.51]}, min_trades_per_fold=1, min_folds_with_trades=1,
+    )
+    assert result["ok"] is True
+    for entry in result["top_strategies"]:
+        assert "holdout" not in entry
+
+
+# ---------------------------------------------------------------------------
+# extra_simulate_kwargs -- fixed (non-swept) kwargs merged into every
+# simulate() call, e.g. perps_backtest.simulate's own leverage_by_ticker.
+# ---------------------------------------------------------------------------
+def test_run_parameter_sweep_passes_extra_simulate_kwargs_through(monkeypatch):
+    monkeypatch.setattr(metals_bt, "load_training_dataset", lambda: _synthetic_df())
+    captured = {}
+    real_simulate = metals_bt.simulate
+
+    def spying_simulate(*args, **kwargs):
+        captured["assumed_entry_price"] = kwargs.get("assumed_entry_price")
+        return real_simulate(*args, **kwargs)
+
+    monkeypatch.setattr(metals_bt, "simulate", spying_simulate)
+    strategy_sweep.run_parameter_sweep(
+        metals_bt, {"model_confidence_min": [0.51]}, extra_simulate_kwargs={"assumed_entry_price": 0.42},
+        min_trades_per_fold=1, min_folds_with_trades=1,
+    )
+    assert captured["assumed_entry_price"] == 0.42

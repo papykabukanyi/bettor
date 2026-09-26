@@ -103,7 +103,7 @@ SRC_DIR = ROOT_DIR / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from config import et_today
+from config import HF_API_KEY, et_today
 from data import (
     ai_monitor, crypto_news, kalshi_15m, kalshi_15m_backtest, kalshi_15m_data, kalshi_15m_meta_model,
     kalshi_15m_metals_backtest, kalshi_15m_metals_data, kalshi_15m_metals_model, kalshi_15m_model,
@@ -132,7 +132,7 @@ from data import (
 # anything -- not just the top-level package object.
 from huggingface_hub import HfApi, hf_hub_download  # noqa: F401
 from data.kalshi_perps import get_margin_balance, get_margin_enabled, get_margin_exchange_status, get_margin_positions
-from server_common import DATA_DIR, check_rate_limit, is_cron_authorized, load_json, make_job_lock, save_json, win_rate_stats
+from server_common import DATA_DIR, check_rate_limit, is_cron_authorized, load_json, make_job_lock, pull_json_from_hf, save_json, win_rate_stats
 
 PERPS_CYCLE_MINUTES = max(1, int(os.getenv("PERPS_CYCLE_MINUTES", "2") or "2"))
 PERPS_FAST_CHECK_SECONDS = max(5, int(os.getenv("PERPS_FAST_CHECK_SECONDS", "20") or "20"))
@@ -2182,27 +2182,61 @@ def api_kalshi_15m_backtest():
         return jsonify({"ok": False, "error": str(exc)}), 500
 
 
+def _load_latest_strategy_sweep(market: str) -> dict[str, Any]:
+    """Real HF Job results FIRST, local in-Space fallback second -- per
+    "let do this for all the bots all of those jobs are handle by HF": the
+    real, big (hundreds-of-thousands-to-millions-combination) sweep now
+    runs off this process entirely via scripts/strategy_sweep_job.py on a
+    dedicated HF Job (see docs/HF_JOBS_STRATEGY_SWEEP_MIGRATION.md), which
+    publishes its result to that market's own existing HF model repo
+    (server_common.push_json_to_hf). This process only ever READS that
+    result back (pull_json_from_hf, best-effort, short timeout -- never
+    blocks a request on a slow/unreachable HF call). Falls back to
+    KALSHI_15M_LATEST_STRATEGY_SWEEP_FILE (this Space's own smaller,
+    bounded, in-process fallback job -- still real, still runs, just a
+    much smaller grid within the live trading process's own 30-minute
+    budget) only when no HF Job has ever published a result yet, or the
+    pull itself fails, so the dashboard is never worse off than before
+    this wiring existed."""
+    repo_map = {
+        "kalshi_15m": (kalshi_15m_model.HF_KALSHI_15M_MODEL_REPO, "strategy_sweep_kalshi_15m.json"),
+        "kalshi_15m_metals": (kalshi_15m_metals_model.HF_KALSHI_15M_METALS_MODEL_REPO, "strategy_sweep_kalshi_15m_metals.json"),
+    }
+    repo_id, filename = repo_map[market]
+    hf_result = pull_json_from_hf(repo_id, filename, token=HF_API_KEY, timeout_sec=10.0)
+    if hf_result is not None:
+        hf_result["source"] = "hf_job"
+        return hf_result
+    if market == "kalshi_15m_metals":
+        local = load_json(KALSHI_15M_LATEST_STRATEGY_SWEEP_FILE, None)
+        if local is not None:
+            local["source"] = "in_space_fallback"
+            return local
+    return {"ok": False, "reason": "no_sweep_run_yet"}
+
+
 @app.route("/api/kalshi15m/strategy-sweep", methods=["GET", "POST"])
 def api_kalshi_15m_strategy_sweep():
-    """GET returns the last (scheduled or manually-triggered) sweep
-    result -- cheap, instant, dashboard-safe. POST starts a fresh sweep
-    in the BACKGROUND and returns immediately with {"ok": True,
-    "started": True} -- unlike /api/kalshi15m/backtest's own synchronous
-    POST, a 10,000+-combination sweep can genuinely run for many minutes
-    (see strategy_sweep.run_parameter_sweep's own max_seconds, default 30
-    minutes), far past gunicorn's own --timeout 300 -- see
-    _run_kalshi_15m_win_streak_verification's own identical background-
-    thread pattern for why this must never block the request/response
-    cycle (or, worse, this cycle's own settlement/management/entry-scan
-    work for every market on this shared process). _locked_job makes a
-    second trigger while one is already running a safe no-op. Optional
-    JSON body {"param_grid": {...}} overrides the real, ~16,200-
-    combination default grid (_default_kalshi_15m_strategy_sweep_grid) --
-    e.g. for a smaller, faster manual sanity check."""
+    """GET returns the latest sweep result for ?market= ("kalshi_15m" or
+    "kalshi_15m_metals", default "kalshi_15m_metals" -- this account's own
+    real live-entry universe) -- see _load_latest_strategy_sweep's own
+    docstring for the real HF-Job-first, in-Space-fallback-second read
+    order. POST starts a fresh, SMALL, bounded sweep in this process's own
+    BACKGROUND thread and returns immediately with {"ok": True, "started":
+    True} -- a quick manual sanity check only now (matching this route's
+    original pre-HF-Job behavior), not the real big sweep, which runs on
+    its own dedicated HF Job instead (see
+    docs/HF_JOBS_STRATEGY_SWEEP_MIGRATION.md for how to trigger one
+    on-demand). _locked_job makes a second trigger while one is already
+    running a safe no-op. Optional JSON body {"param_grid": {...}}
+    overrides the default grid."""
     if not is_cron_authorized(request):
         return jsonify({"ok": False, "error": "Unauthorized"}), 401
     if request.method == "GET":
-        return jsonify(load_json(KALSHI_15M_LATEST_STRATEGY_SWEEP_FILE, {"ok": False, "reason": "no_sweep_run_yet"}))
+        market = request.args.get("market", "kalshi_15m_metals")
+        if market not in ("kalshi_15m", "kalshi_15m_metals"):
+            return jsonify({"ok": False, "error": "market must be 'kalshi_15m' or 'kalshi_15m_metals'"}), 400
+        return jsonify(_load_latest_strategy_sweep(market))
     body = request.get_json(silent=True) or {}
     param_grid = body.get("param_grid")
     threading.Thread(
