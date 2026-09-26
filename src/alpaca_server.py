@@ -94,6 +94,16 @@ ALPACA_TRAIN_HOUR_ET = int(os.getenv("ALPACA_TRAIN_HOUR_ET", "4") or "4")
 # serializes every job onto one thread, so there's no concurrent-execution
 # memory-stacking risk either way.
 ALPACA_TORCH_TRAIN_HOUR_ET = int(os.getenv("ALPACA_TORCH_TRAIN_HOUR_ET", "5") or "5")
+# Daily strategy-sweep RELOAD -- per explicit user direction: "on all
+# bot[s] when they have downtimes the HF strateg[y] need to reload and
+# apply to [the] most return one immediately and test make sure the
+# strategy will be working... its need to perform that everyday." Also
+# fired once immediately at process startup (see
+# _ensure_background_jobs_started) so any downtime picks up the best real
+# evidence without waiting for this daily slot. See
+# server_common.reload_and_apply_latest_strategy_sweep's own docstring.
+STRATEGY_RELOAD_HOUR_ET = int(os.getenv("STRATEGY_RELOAD_HOUR_ET", "9") or "9")
+STRATEGY_RELOAD_MINUTE_ET = int(os.getenv("STRATEGY_RELOAD_MINUTE_ET", "15") or "15")
 # Checked every 30 min so it picks up the fully-closed window promptly
 # (nights + weekends) -- a no-op the rest of the time.
 ALPACA_INTENSIVE_TRAINING_MINUTES = max(10, int(os.getenv("ALPACA_INTENSIVE_TRAINING_MINUTES", "30") or "30"))
@@ -413,6 +423,28 @@ def _run_alpaca_train() -> dict[str, Any]:
     return alpaca_model.train_model(trade_log=trade_log)
 
 
+@_locked_job("alpaca_strategy_reload", stale_after_sec=120)
+def _run_alpaca_strategy_reload() -> dict[str, Any]:
+    """Reloads stocks' own latest PUBLISHED strategy-sweep result from HF
+    and re-applies it -- per explicit user direction: "on all bot[s] when
+    they have downtimes the HF strateg[y] need to reload and apply to
+    [the] most return one immediately and test make sure the strategy
+    will be working... its need to perform that everyday." Run at process
+    startup (any downtime -- see _ensure_background_jobs_started's own
+    call below) AND on a daily schedule (STRATEGY_RELOAD_HOUR_ET). See
+    server_common.reload_and_apply_latest_strategy_sweep's own docstring
+    for the full selection rule (holdout/forward-test evidence, sane-
+    bounds gate) and what the smoke test does (confirms alpaca_model
+    still has a real, loadable model after the tuning change)."""
+    from server_common import model_smoke_test, reload_and_apply_latest_strategy_sweep
+    applied = reload_and_apply_latest_strategy_sweep(
+        repo_id=alpaca_model.HF_ALPACA_MODEL_REPO, filename="strategy_sweep_stocks.json",
+        strategy_module=alpaca_strategy, market="stocks", token=alpaca_model.HF_API_KEY,
+        smoke_test=model_smoke_test(alpaca_model),
+    )
+    return {"ok": True, "applied": applied}
+
+
 @_locked_job("alpaca_torch_train", stale_after_sec=3600)
 def _run_alpaca_torch_train() -> dict[str, Any]:
     """Daily, fully automatic retrain of the custom PyTorch candidate --
@@ -688,6 +720,16 @@ def _ensure_background_jobs_started() -> None:
                 _run_alpaca_train, "cron", hour=ALPACA_TRAIN_HOUR_ET, minute=0,
                 id="alpaca_train", replace_existing=True,
             )
+            scheduler.add_job(
+                _run_alpaca_strategy_reload, "cron", hour=STRATEGY_RELOAD_HOUR_ET, minute=STRATEGY_RELOAD_MINUTE_ET,
+                id="alpaca_strategy_reload", replace_existing=True,
+            )
+            # Fired once immediately here too -- "when they have
+            # downtimes... reload... immediately", not "wait for the next
+            # daily slot". Background thread: real network I/O (an HF
+            # pull, possibly a model load for the smoke test) that must
+            # never delay this process's own Flask/scheduler startup.
+            threading.Thread(target=_run_alpaca_strategy_reload, daemon=True, name="alpaca-strategy-reload-startup").start()
             scheduler.add_job(
                 _run_alpaca_intensive_training, "interval", minutes=ALPACA_INTENSIVE_TRAINING_MINUTES,
                 id="alpaca_intensive_training", replace_existing=True,
@@ -1049,6 +1091,10 @@ def api_alpaca_train_torch():
 _JOB_LABELS = {
     "alpaca_data_collect": f"Alpaca stock data collection -> HF (every {ALPACA_DATA_COLLECT_MINUTES} min)",
     "alpaca_train": f"Alpaca model retrain (daily {ALPACA_TRAIN_HOUR_ET:02d}:00 ET)",
+    "alpaca_strategy_reload": (
+        f"Reloads the latest PUBLISHED HF Job strategy-sweep result and re-applies it if forward-tested "
+        f"(daily {STRATEGY_RELOAD_HOUR_ET:02d}:{STRATEGY_RELOAD_MINUTE_ET:02d} ET, plus once immediately on every process start)"
+    ),
     "alpaca_torch_train": (
         f"Alpaca custom PyTorch candidate retrain (daily {ALPACA_TORCH_TRAIN_HOUR_ET:02d}:00 ET, "
         f"promoted only if it beats the currently-live model)"

@@ -248,6 +248,19 @@ KALSHI_15M_LATEST_BACKTEST_FILE = DATA_DIR / "kalshi_15m_latest_backtest.json"
 KALSHI_15M_STRATEGY_SWEEP_DAY_OF_WEEK = os.getenv("KALSHI_15M_STRATEGY_SWEEP_DAY_OF_WEEK", "sun")
 KALSHI_15M_STRATEGY_SWEEP_HOUR_ET = int(os.getenv("KALSHI_15M_STRATEGY_SWEEP_HOUR_ET", "9") or "9")
 KALSHI_15M_LATEST_STRATEGY_SWEEP_FILE = DATA_DIR / "kalshi_15m_latest_strategy_sweep.json"
+# Daily strategy-sweep RELOAD (distinct from the weekly SWEEP itself,
+# KALSHI_15M_STRATEGY_SWEEP_HOUR_ET above) -- per explicit user direction:
+# "on all bot[s] when they have downtimes the HF strateg[y] need to
+# reload and apply to [the] most return one immediately and test make
+# sure the strategy will be working... its need to perform that
+# everyday." Also fired once immediately at process startup (see
+# _ensure_background_jobs_started) so any downtime -- a crash, a deploy,
+# a Space restart -- picks up the best real evidence without waiting for
+# this daily slot. 9:15am ET: after every other daily job across perps/
+# kalshi_15m (train 3/4, trade-analysis 5:30, ai_monitor 6, backtest 8),
+# clear of the weekly sweep's own 9:00 slot.
+STRATEGY_RELOAD_HOUR_ET = int(os.getenv("STRATEGY_RELOAD_HOUR_ET", "9") or "9")
+STRATEGY_RELOAD_MINUTE_ET = int(os.getenv("STRATEGY_RELOAD_MINUTE_ET", "15") or "15")
 
 
 def _default_kalshi_15m_strategy_sweep_grid() -> dict[str, list[float | int]]:
@@ -972,6 +985,50 @@ def _run_kalshi_15m_strategy_sweep(param_grid: dict[str, list[Any]] | None = Non
         gc.collect()
 
 
+@_locked_job("perps_strategy_reload", stale_after_sec=120)
+def _run_perps_strategy_reload() -> dict[str, Any]:
+    """Reloads perps' own latest PUBLISHED strategy-sweep result from HF
+    and re-applies it -- per explicit user direction: "on all bot[s] when
+    they have downtimes the HF strateg[y] need to reload and apply to
+    [the] most return one immediately and test make sure the strategy
+    will be working... its need to perform that everyday." Run at process
+    startup (any downtime -- a crash, a deploy, a Space restart -- see
+    _ensure_background_jobs_started's own call below) AND on a daily
+    schedule (see PERPS_STRATEGY_RELOAD_HOUR_ET), not just after a fresh
+    sweep completes -- a process that's been running for days should not
+    silently drift away from the best real evidence available just
+    because no NEW sweep happened to finish while it was up.
+    See server_common.reload_and_apply_latest_strategy_sweep's own
+    docstring for the full selection rule (holdout/forward-test evidence,
+    sane-bounds gate) and what the smoke test does (confirms perps_model
+    still has a real, loadable model after the tuning change)."""
+    from server_common import model_smoke_test, reload_and_apply_latest_strategy_sweep
+    applied = reload_and_apply_latest_strategy_sweep(
+        repo_id=perps_model.HF_MODEL_REPO, filename="strategy_sweep_perps.json",
+        strategy_module=perps_strategy, market="perps", token=HF_API_KEY,
+        smoke_test=model_smoke_test(perps_model),
+    )
+    return {"ok": True, "applied": applied}
+
+
+@_locked_job("kalshi_15m_metals_strategy_reload", stale_after_sec=120)
+def _run_kalshi_15m_metals_strategy_reload() -> dict[str, Any]:
+    """Same real, evidence-gated reload as _run_perps_strategy_reload
+    above, for metals -- this account's own real, permanent live-entry
+    universe (see kalshi_15m_strategy.ACTIVE_ENTRY_COINS). kalshi_15m
+    (pure crypto) is deliberately NOT reloaded/applied here -- it shares
+    this SAME strategy module with metals, and crypto isn't the live-entry
+    universe right now (see strategy_sweep_job._MARKETS_NEVER_AUTO_APPLIED's
+    own identical exclusion)."""
+    from server_common import model_smoke_test, reload_and_apply_latest_strategy_sweep
+    applied = reload_and_apply_latest_strategy_sweep(
+        repo_id=kalshi_15m_metals_model.HF_KALSHI_15M_METALS_MODEL_REPO, filename="strategy_sweep_kalshi_15m_metals.json",
+        strategy_module=kalshi_15m_strategy, market="kalshi_15m_metals", token=HF_API_KEY,
+        smoke_test=model_smoke_test(kalshi_15m_metals_model),
+    )
+    return {"ok": True, "applied": applied}
+
+
 @_locked_job("ai_monitor", stale_after_sec=180)
 def _run_ai_monitor() -> dict[str, Any]:
     """See ai_monitor.py's own module docstring -- a read-only, project-
@@ -1253,6 +1310,22 @@ def _ensure_background_jobs_started() -> None:
                 _run_perps_trade_analysis, "cron", hour=PERPS_TRADE_ANALYSIS_HOUR_ET, minute=PERPS_TRADE_ANALYSIS_MINUTE_ET,
                 id="perps_trade_analysis", replace_existing=True,
             )
+            scheduler.add_job(
+                _run_perps_strategy_reload, "cron", hour=STRATEGY_RELOAD_HOUR_ET, minute=STRATEGY_RELOAD_MINUTE_ET,
+                id="perps_strategy_reload", replace_existing=True,
+            )
+            scheduler.add_job(
+                _run_kalshi_15m_metals_strategy_reload, "cron", hour=STRATEGY_RELOAD_HOUR_ET, minute=STRATEGY_RELOAD_MINUTE_ET,
+                id="kalshi_15m_metals_strategy_reload", replace_existing=True,
+            )
+            # Fired once immediately here too (not just on the daily cron
+            # above) -- "when they have downtimes... reload... immediately",
+            # not "wait for the next 9:15am slot". Background thread: this
+            # does real network I/O (an HF pull, possibly a model load for
+            # the smoke test) that must never delay this process's own
+            # Flask/scheduler startup.
+            threading.Thread(target=_run_perps_strategy_reload, daemon=True, name="perps-strategy-reload-startup").start()
+            threading.Thread(target=_run_kalshi_15m_metals_strategy_reload, daemon=True, name="kalshi15m-metals-strategy-reload-startup").start()
             # Threads content jobs (hourly_status/trending_news/sentiment_snapshot):
             # briefly moved to external cron-job.org triggers (see
             # api_perps_threads_trending_news and its 2 siblings below,
@@ -2271,6 +2344,14 @@ _JOB_LABELS = {
         f"reports only, never auto-applies)"
     ),
     "ai_monitor": f"Project-wide AI-powered status review (HF Inference), read-only, all 5 markets (daily {AI_MONITOR_HOUR_ET:02d}:00 ET)",
+    "perps_strategy_reload": (
+        f"Reloads perps' latest PUBLISHED HF Job strategy-sweep result and re-applies it if forward-tested "
+        f"(daily {STRATEGY_RELOAD_HOUR_ET:02d}:{STRATEGY_RELOAD_MINUTE_ET:02d} ET, plus once immediately on every process start)"
+    ),
+    "kalshi_15m_metals_strategy_reload": (
+        f"Reloads metals' latest PUBLISHED HF Job strategy-sweep result and re-applies it if forward-tested "
+        f"(daily {STRATEGY_RELOAD_HOUR_ET:02d}:{STRATEGY_RELOAD_MINUTE_ET:02d} ET, plus once immediately on every process start)"
+    ),
     "perps_train": f"Model retrain (daily {PERPS_TRAIN_HOUR_ET:02d}:00 ET)",
     "perps_trade_analysis": (
         f"Trade win/loss analysis + evidence-gated confidence tuning "

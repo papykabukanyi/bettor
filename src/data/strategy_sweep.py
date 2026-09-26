@@ -473,8 +473,26 @@ def run_parameter_sweep(
             # top_strategies[0] (see scripts/strategy_sweep_job.py) gets the
             # combination that actually held up out of sample, not the one
             # that looked best on the data used to find it.
+            #
+            # "stability_adjusted_return" (holdout return_pct * this same
+            # combination's own walk-forward profitable_fold_ratio) is the
+            # real ranking key, not raw holdout return_pct alone -- per
+            # explicit user direction: "the 4 top strategies that ha[ve]
+            # the most return AND stability". profitable_fold_ratio (0..1,
+            # already computed above from the walk-forward folds) is a
+            # real cross-fold consistency measure this combination already
+            # earned before ever reaching the holdout step -- multiplying
+            # by it means a combination that was only profitable in 1 of 4
+            # walk-forward folds can't outrank one profitable in all 4
+            # just because it happened to post a slightly higher holdout
+            # number; each entry's own component values (stored under
+            # "stability_adjusted_return") stay inspectable, not folded
+            # away into an opaque single score.
+            for entry in top_strategies:
+                holdout = entry["holdout"]
+                holdout["stability_adjusted_return"] = holdout["return_pct"] * entry.get("profitable_fold_ratio", 0.0)
             top_strategies.sort(
-                key=lambda e: (e["holdout"]["forward_tested"], e["holdout"]["return_pct"], e["holdout"]["win_rate"]),
+                key=lambda e: (e["holdout"]["forward_tested"], e["holdout"]["stability_adjusted_return"], e["holdout"]["win_rate"]),
                 reverse=True,
             )
         else:

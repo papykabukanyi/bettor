@@ -281,40 +281,23 @@ def _apply_top_strategy(market: str, result: dict[str, Any]) -> dict[str, Any] |
     4,998% in-sample to 14.3% out-of-sample -- see
     strategy_sweep.run_parameter_sweep's own holdout-reranking comment.
 
-    Applies ONLY top_strategies[0] (already the holdout-best entry once
-    holdout_bounds is used -- see that reranking), and ONLY when it
-    actually cleared forward_tested=True: a combination that never fired
-    on real, untouched holdout data hasn't been evidenced at all, walk-
-    forward ranking or not, and auto-applying it would be indistinguishable
-    from guessing. Returns None (does nothing, not an error) when there's
-    no top_strategies, no holdout info at all, the top entry isn't
-    forward_tested, or this market is in _MARKETS_NEVER_AUTO_APPLIED --
-    each a real, expected, non-error outcome (an immature archive, every
-    candidate failing to hold up out of sample, or a market with no live
-    entry surface to apply to), not a failure."""
+    Thin market-exclusion wrapper around server_common.apply_top_sweep_strategy
+    (the actual forward_tested/sane-bounds selection logic lives there,
+    shared with each *_server.py's own startup/daily reload -- see that
+    module's own docstring) -- this function's only own job is refusing
+    to apply anything for a market in _MARKETS_NEVER_AUTO_APPLIED (kalshi_15m
+    pure crypto: no live entry surface to apply to right now)."""
     if market in _MARKETS_NEVER_AUTO_APPLIED:
         return None
-    top = result.get("top_strategies") or []
-    if not top:
-        return None
-    best = top[0]
-    holdout = best.get("holdout")
-    if not holdout or not holdout.get("forward_tested"):
-        logger.info("[strategy_sweep_job] %s: top combination not forward_tested -- not auto-applying", market)
-        return None
 
-    import datetime as dt
     import importlib
 
+    from server_common import apply_top_sweep_strategy
+
     strategy_module = importlib.import_module(MARKET_CONFIGS[market]["strategy_module"])
-    source = {
-        "mean_return_pct": best.get("mean_return_pct"), "profitable_fold_ratio": best.get("profitable_fold_ratio"),
-        "holdout_return_pct": holdout.get("return_pct"), "holdout_win_rate": holdout.get("win_rate"),
-        "holdout_trade_count": holdout.get("trade_count"), "market": market,
-    }
-    reason = f"strategy sweep {dt.datetime.now(dt.timezone.utc).date().isoformat()} -- holdout return {holdout.get('return_pct')}%"
-    applied = strategy_module.apply_strategy_sweep_override(best["params"], source=source, reason=reason)
-    logger.info("[strategy_sweep_job] %s: auto-applied sweep result -- %s", market, applied.get("applied"))
+    applied = apply_top_sweep_strategy(result, strategy_module, market=market)
+    if applied:
+        logger.info("[strategy_sweep_job] %s: auto-applied sweep result -- %s", market, applied.get("applied"))
     return applied
 
 

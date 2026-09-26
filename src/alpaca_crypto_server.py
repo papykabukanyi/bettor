@@ -150,6 +150,16 @@ ALPACA_CRYPTO_TRAIN_INTERVAL_MINUTES = max(15, int(os.getenv("ALPACA_CRYPTO_TRAI
 # stocks/options) -- see _run_alpaca_crypto_torch_train's own docstring for
 # why this stays isolated from the sklearn retrain's own 24/7 interval.
 ALPACA_CRYPTO_TORCH_TRAIN_HOUR_UTC = int(os.getenv("ALPACA_CRYPTO_TORCH_TRAIN_HOUR_UTC", "9") or "9")
+# Daily strategy-sweep RELOAD -- per explicit user direction: "on all
+# bot[s] when they have downtimes the HF strateg[y] need to reload and
+# apply to [the] most return one immediately and test make sure the
+# strategy will be working... its need to perform that everyday." Also
+# fired once immediately at process startup (see
+# _ensure_background_jobs_started) so any downtime picks up the best real
+# evidence without waiting for this daily slot. See
+# server_common.reload_and_apply_latest_strategy_sweep's own docstring.
+STRATEGY_RELOAD_HOUR_UTC = int(os.getenv("STRATEGY_RELOAD_HOUR_UTC", "13") or "13")
+STRATEGY_RELOAD_MINUTE_UTC = int(os.getenv("STRATEGY_RELOAD_MINUTE_UTC", "15") or "15")
 # Fixed once-daily UTC hour, staggered an hour after the torch retrain above
 # so the two heaviest jobs on this service don't stack. Was manual-trigger
 # only (see _run_alpaca_crypto_backtest_sweep's own docstring) while this
@@ -389,6 +399,28 @@ def _run_alpaca_crypto_train() -> dict[str, Any]:
         except Exception as exc:
             logger.warning("[alpaca_crypto_server] meta-model training failed (non-fatal): %s", exc)
     return result
+
+
+@_locked_job("alpaca_crypto_strategy_reload", stale_after_sec=120)
+def _run_alpaca_crypto_strategy_reload() -> dict[str, Any]:
+    """Reloads crypto's own latest PUBLISHED strategy-sweep result from HF
+    and re-applies it -- per explicit user direction: "on all bot[s] when
+    they have downtimes the HF strateg[y] need to reload and apply to
+    [the] most return one immediately and test make sure the strategy
+    will be working... its need to perform that everyday." Run at process
+    startup (any downtime -- see _ensure_background_jobs_started's own
+    call below) AND on a daily schedule (STRATEGY_RELOAD_HOUR_UTC). See
+    server_common.reload_and_apply_latest_strategy_sweep's own docstring
+    for the full selection rule (holdout/forward-test evidence, sane-
+    bounds gate) and what the smoke test does (confirms alpaca_crypto_model
+    still has a real, loadable model after the tuning change)."""
+    from server_common import model_smoke_test, reload_and_apply_latest_strategy_sweep
+    applied = reload_and_apply_latest_strategy_sweep(
+        repo_id=alpaca_crypto_model.HF_ALPACA_CRYPTO_MODEL_REPO, filename="strategy_sweep_crypto.json",
+        strategy_module=alpaca_crypto_strategy, market="crypto", token=alpaca_crypto_model.HF_API_KEY,
+        smoke_test=model_smoke_test(alpaca_crypto_model),
+    )
+    return {"ok": True, "applied": applied}
 
 
 @_locked_job("alpaca_crypto_torch_train", stale_after_sec=3600)
@@ -653,6 +685,16 @@ def _ensure_background_jobs_started() -> None:
                 _run_alpaca_crypto_torch_train, "cron", hour=ALPACA_CRYPTO_TORCH_TRAIN_HOUR_UTC, minute=0,
                 timezone="UTC", id="alpaca_crypto_torch_train", replace_existing=True,
             )
+            scheduler.add_job(
+                _run_alpaca_crypto_strategy_reload, "cron", hour=STRATEGY_RELOAD_HOUR_UTC, minute=STRATEGY_RELOAD_MINUTE_UTC,
+                timezone="UTC", id="alpaca_crypto_strategy_reload", replace_existing=True,
+            )
+            # Fired once immediately here too -- "when they have
+            # downtimes... reload... immediately", not "wait for the next
+            # daily slot". Background thread: real network I/O (an HF
+            # pull, possibly a model load for the smoke test) that must
+            # never delay this process's own Flask/scheduler startup.
+            threading.Thread(target=_run_alpaca_crypto_strategy_reload, daemon=True, name="alpaca-crypto-strategy-reload-startup").start()
             scheduler.add_job(
                 _run_alpaca_crypto_backtest_sweep, "cron", hour=ALPACA_CRYPTO_BACKTEST_SWEEP_HOUR_UTC, minute=0,
                 timezone="UTC", id="alpaca_crypto_backtest_sweep", replace_existing=True,
@@ -1162,6 +1204,10 @@ def api_alpaca_crypto_backtest():
 _JOB_LABELS = {
     "alpaca_crypto_data_collect": f"Alpaca crypto data collection -> HF (every {ALPACA_CRYPTO_DATA_COLLECT_MINUTES} min)",
     "alpaca_crypto_train": f"Alpaca crypto model retrain (every {ALPACA_CRYPTO_TRAIN_INTERVAL_MINUTES} min, 24/7)",
+    "alpaca_crypto_strategy_reload": (
+        f"Reloads the latest PUBLISHED HF Job strategy-sweep result and re-applies it if forward-tested "
+        f"(daily {STRATEGY_RELOAD_HOUR_UTC:02d}:{STRATEGY_RELOAD_MINUTE_UTC:02d} UTC, plus once immediately on every process start)"
+    ),
     "alpaca_crypto_torch_train": (
         f"Alpaca crypto custom PyTorch candidate retrain (daily {ALPACA_CRYPTO_TORCH_TRAIN_HOUR_UTC:02d}:00 UTC, "
         f"promoted only if it beats the currently-live model)"

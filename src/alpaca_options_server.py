@@ -97,6 +97,16 @@ ALPACA_OPTIONS_OFFHOURS_TRAIN_MINUTES = max(10, int(os.getenv("ALPACA_OPTIONS_OF
 # _run_alpaca_options_torch_train's own docstring), so it gets a low,
 # predictable cadence instead.
 ALPACA_OPTIONS_TORCH_TRAIN_HOUR_ET = int(os.getenv("ALPACA_OPTIONS_TORCH_TRAIN_HOUR_ET", "5") or "5")
+# Daily strategy-sweep RELOAD -- per explicit user direction: "on all
+# bot[s] when they have downtimes the HF strateg[y] need to reload and
+# apply to [the] most return one immediately and test make sure the
+# strategy will be working... its need to perform that everyday." Also
+# fired once immediately at process startup (see
+# _ensure_background_jobs_started) so any downtime picks up the best real
+# evidence without waiting for this daily slot. See
+# server_common.reload_and_apply_latest_strategy_sweep's own docstring.
+STRATEGY_RELOAD_HOUR_ET = int(os.getenv("STRATEGY_RELOAD_HOUR_ET", "9") or "9")
+STRATEGY_RELOAD_MINUTE_ET = int(os.getenv("STRATEGY_RELOAD_MINUTE_ET", "15") or "15")
 # Same off-hours-only reasoning as training above, on its own separate
 # cadence (a backtest sweep is heavier per-run than a single retrain --
 # alpaca_options_backtest.run_config_sweep fits/replays 4 full parameter
@@ -414,6 +424,28 @@ def _run_alpaca_options_train(*, force: bool = False) -> dict[str, Any]:
     return alpaca_options_model.train_model(trade_log=trade_log)
 
 
+@_locked_job("alpaca_options_strategy_reload", stale_after_sec=120)
+def _run_alpaca_options_strategy_reload() -> dict[str, Any]:
+    """Reloads options' own latest PUBLISHED strategy-sweep result from HF
+    and re-applies it -- per explicit user direction: "on all bot[s] when
+    they have downtimes the HF strateg[y] need to reload and apply to
+    [the] most return one immediately and test make sure the strategy
+    will be working... its need to perform that everyday." Run at process
+    startup (any downtime -- see _ensure_background_jobs_started's own
+    call below) AND on a daily schedule (STRATEGY_RELOAD_HOUR_ET). See
+    server_common.reload_and_apply_latest_strategy_sweep's own docstring
+    for the full selection rule (holdout/forward-test evidence, sane-
+    bounds gate) and what the smoke test does (confirms alpaca_options_model
+    still has a real, loadable model after the tuning change)."""
+    from server_common import model_smoke_test, reload_and_apply_latest_strategy_sweep
+    applied = reload_and_apply_latest_strategy_sweep(
+        repo_id=alpaca_options_model.HF_ALPACA_OPTIONS_MODEL_REPO, filename="strategy_sweep_options.json",
+        strategy_module=alpaca_options_strategy, market="options", token=alpaca_options_model.HF_API_KEY,
+        smoke_test=model_smoke_test(alpaca_options_model),
+    )
+    return {"ok": True, "applied": applied}
+
+
 @_locked_job("alpaca_options_torch_train", stale_after_sec=3600)
 def _run_alpaca_options_torch_train() -> dict[str, Any]:
     """Daily, fully automatic retrain of the custom PyTorch candidate --
@@ -660,6 +692,16 @@ def _ensure_background_jobs_started() -> None:
                 _run_alpaca_options_torch_train, "cron", hour=ALPACA_OPTIONS_TORCH_TRAIN_HOUR_ET, minute=0,
                 id="alpaca_options_torch_train", replace_existing=True,
             )
+            scheduler.add_job(
+                _run_alpaca_options_strategy_reload, "cron", hour=STRATEGY_RELOAD_HOUR_ET, minute=STRATEGY_RELOAD_MINUTE_ET,
+                id="alpaca_options_strategy_reload", replace_existing=True,
+            )
+            # Fired once immediately here too -- "when they have
+            # downtimes... reload... immediately", not "wait for the next
+            # daily slot". Background thread: real network I/O (an HF
+            # pull, possibly a model load for the smoke test) that must
+            # never delay this process's own Flask/scheduler startup.
+            threading.Thread(target=_run_alpaca_options_strategy_reload, daemon=True, name="alpaca-options-strategy-reload-startup").start()
             scheduler.add_job(
                 _run_alpaca_options_backtest_sweep, "interval", minutes=ALPACA_OPTIONS_BACKTEST_SWEEP_MINUTES,
                 id="alpaca_options_backtest_sweep", replace_existing=True,
@@ -1068,6 +1110,10 @@ def api_alpaca_options_backtest():
 _JOB_LABELS = {
     "alpaca_options_data_collect": f"Alpaca options data collection -> HF (every {ALPACA_OPTIONS_DATA_COLLECT_MINUTES} min)",
     "alpaca_options_train": f"Alpaca options model retrain (every {ALPACA_OPTIONS_OFFHOURS_TRAIN_MINUTES} min off-hours)",
+    "alpaca_options_strategy_reload": (
+        f"Reloads the latest PUBLISHED HF Job strategy-sweep result and re-applies it if forward-tested "
+        f"(daily {STRATEGY_RELOAD_HOUR_ET:02d}:{STRATEGY_RELOAD_MINUTE_ET:02d} ET, plus once immediately on every process start)"
+    ),
     "alpaca_options_torch_train": (
         f"Alpaca options custom PyTorch candidate retrain (daily {ALPACA_OPTIONS_TORCH_TRAIN_HOUR_ET:02d}:00 ET off-hours, "
         f"promoted only if it beats the currently-live model)"

@@ -1225,6 +1225,68 @@ def test_kalshi_15m_strategy_sweep_job_saves_a_result_and_logs_the_best_combo(mo
     assert captured["kw"]["coins"] == sorted(app_kalshi.kalshi_15m_strategy.ACTIVE_ENTRY_COINS)
 
 
+# ---------------------------------------------------------------------------
+# _run_perps_strategy_reload / _run_kalshi_15m_metals_strategy_reload --
+# per explicit user direction: "on all bot[s] when they have downtimes
+# the HF strateg[y] need to reload and apply to [the] most return one
+# immediately and test make sure the strategy will be working... its
+# need to perform that everyday."
+# ---------------------------------------------------------------------------
+def test_perps_strategy_reload_job_calls_the_shared_reload_helper(monkeypatch):
+    import server_common
+
+    captured = {}
+
+    def fake_reload(*, repo_id, filename, strategy_module, market, token, smoke_test):
+        captured.update(repo_id=repo_id, filename=filename, strategy_module=strategy_module, market=market)
+        smoke_test()  # must not raise for a real model_smoke_test wiring
+        return {"applied": {"model_confidence_min": 0.6}}
+
+    monkeypatch.setattr(server_common, "reload_and_apply_latest_strategy_sweep", fake_reload)
+    monkeypatch.setattr(app_kalshi.perps_model, "load_model", lambda: (object(), {}))
+
+    result = app_kalshi._run_perps_strategy_reload.__wrapped__()  # noqa: SLF001
+
+    assert result["ok"] is True
+    assert result["applied"] == {"applied": {"model_confidence_min": 0.6}}
+    assert captured["repo_id"] == app_kalshi.perps_model.HF_MODEL_REPO
+    assert captured["filename"] == "strategy_sweep_perps.json"
+    assert captured["strategy_module"] is app_kalshi.perps_strategy
+    assert captured["market"] == "perps"
+
+
+def test_kalshi_15m_metals_strategy_reload_job_calls_the_shared_reload_helper(monkeypatch):
+    import server_common
+
+    captured = {}
+
+    def fake_reload(*, repo_id, filename, strategy_module, market, token, smoke_test):
+        captured.update(repo_id=repo_id, filename=filename, strategy_module=strategy_module, market=market)
+        smoke_test()
+        return {"applied": {"position_size_pct": 0.08}}
+
+    monkeypatch.setattr(server_common, "reload_and_apply_latest_strategy_sweep", fake_reload)
+    monkeypatch.setattr(app_kalshi.kalshi_15m_metals_model, "load_model", lambda: (object(), {}))
+
+    result = app_kalshi._run_kalshi_15m_metals_strategy_reload.__wrapped__()  # noqa: SLF001
+
+    assert result["ok"] is True
+    assert captured["repo_id"] == app_kalshi.kalshi_15m_metals_model.HF_KALSHI_15M_METALS_MODEL_REPO
+    assert captured["filename"] == "strategy_sweep_kalshi_15m_metals.json"
+    assert captured["strategy_module"] is app_kalshi.kalshi_15m_strategy
+    assert captured["market"] == "kalshi_15m_metals"
+
+
+def test_perps_strategy_reload_job_reports_none_applied_when_nothing_qualifies(monkeypatch):
+    import server_common
+
+    monkeypatch.setattr(server_common, "reload_and_apply_latest_strategy_sweep", lambda **kw: None)
+
+    result = app_kalshi._run_perps_strategy_reload.__wrapped__()  # noqa: SLF001
+
+    assert result == {"ok": True, "applied": None}
+
+
 def test_kalshi_15m_strategy_sweep_job_accepts_a_custom_grid(monkeypatch):
     from data import strategy_sweep
 

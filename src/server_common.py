@@ -123,6 +123,137 @@ def push_json_to_hf(
         logger.warning("[server_common] %s push to HF repo %s failed: %s", filename, repo_id, exc)
 
 
+# Real safety gate before ANY strategy-sweep result -- however it reached
+# this point (a fresh sweep's own top pick via scripts/strategy_sweep_job.py,
+# a daily scheduled reload, a startup-after-downtime reload) -- gets
+# applied to a real account's live trading parameters. A bug anywhere
+# upstream (a corrupted publish, a stale/malformed cached file) producing
+# e.g. model_confidence_min=1.5 or position_size_pct=5.0 must never reach
+# real sizing math just because "the sweep said so". Deliberately generous
+# (nowhere near today's live defaults on any of the 5 real strategy
+# modules) so a genuine, evidence-backed adjustment is never blocked --
+# only something that could never be a real strategy parameter.
+_SWEEP_OVERRIDE_SANE_BOUNDS: dict[str, tuple[float, float]] = {
+    "model_confidence_min": (0.5, 0.95),
+    "position_size_pct": (0.0, 0.5),
+}
+
+
+def sweep_params_are_sane(params: dict[str, Any]) -> bool:
+    for key, (low, high) in _SWEEP_OVERRIDE_SANE_BOUNDS.items():
+        if key in params and not (low <= params[key] <= high):
+            logger.warning(
+                "[server_common] refusing to apply strategy-sweep param %s=%s -- outside sane bounds (%s, %s)",
+                key, params[key], low, high,
+            )
+            return False
+    return True
+
+
+def apply_top_sweep_strategy(result: dict[str, Any], strategy_module: Any, *, market: str) -> dict[str, Any] | None:
+    """Given ONE strategy-sweep result (see data.strategy_sweep.run_parameter_sweep),
+    applies its own #1-ranked combination -- already re-sorted by holdout/
+    forward-test evidence, not raw walk-forward return, once that sweep
+    used holdout_bounds (see that function's own docstring on why:
+    a real run found the walk-forward-only "best" returning 4,998%
+    in-sample but only 14.3% on real holdout data) -- via
+    `strategy_module.apply_strategy_sweep_override`. Applies ONLY when the
+    top entry actually cleared forward_tested=True AND its params pass
+    sweep_params_are_sane above; a combination that never fired on real,
+    untouched holdout data hasn't been evidenced at all, and a param
+    outside sane bounds is far more likely a bug than a real finding --
+    neither should ever reach live trading. Returns None (does nothing,
+    not an error) in every one of those cases, or when there's simply no
+    top_strategies/holdout info at all.
+
+    Shared by scripts/strategy_sweep_job.py (right after a fresh sweep
+    completes) and reload_and_apply_latest_strategy_sweep below (on
+    startup after downtime, and on a daily schedule -- see that
+    function's own docstring) so every caller uses the exact same
+    selection rule, never a second, drifting copy of it."""
+    top = result.get("top_strategies") or []
+    if not top:
+        return None
+    best = top[0]
+    holdout = best.get("holdout")
+    if not holdout or not holdout.get("forward_tested"):
+        return None
+    if not sweep_params_are_sane(best.get("params") or {}):
+        return None
+    source = {
+        "mean_return_pct": best.get("mean_return_pct"), "profitable_fold_ratio": best.get("profitable_fold_ratio"),
+        "holdout_return_pct": holdout.get("return_pct"), "holdout_win_rate": holdout.get("win_rate"),
+        "holdout_trade_count": holdout.get("trade_count"), "market": market,
+    }
+    reason = f"strategy sweep {dt.datetime.now(dt.timezone.utc).date().isoformat()} -- holdout return {holdout.get('return_pct')}%"
+    return strategy_module.apply_strategy_sweep_override(best["params"], source=source, reason=reason)
+
+
+def model_smoke_test(model_module: Any) -> Callable[[], None]:
+    """Builds a zero-arg smoke-test callable for reload_and_apply_latest_strategy_sweep
+    below -- every one of the 6 *_model.py modules here shares the exact
+    same `load_model() -> (model, meta)` cache/signature, so one shared
+    implementation covers all of them: raises if the model itself is
+    missing (None), the one thing that would make "the strategy will be
+    working" false regardless of what tuning is currently applied."""
+    def _test() -> None:
+        model, _meta = model_module.load_model()
+        if model is None:
+            raise RuntimeError(f"{model_module.__name__}.load_model() returned no model")
+    return _test
+
+
+def reload_and_apply_latest_strategy_sweep(
+    *, repo_id: str, filename: str, strategy_module: Any, market: str, token: str,
+    smoke_test: Callable[[], None] | None = None, timeout_sec: float = 10.0,
+) -> dict[str, Any] | None:
+    """Pulls the latest PUBLISHED strategy-sweep result for `market` from
+    HF and applies it (see apply_top_sweep_strategy above) -- meant to run
+    on EVERY process boot (a crash, a deploy, a Space restart -- any
+    downtime) AND once daily on a schedule, per explicit user direction:
+    "on all bot[s] when they have downtimes the HF strateg[y] need to
+    reload and apply to [the] most return one immediately and test make
+    sure the strategy will be working... its need to perform that
+    everyday to insure it['s] going to win all day." Best-effort: any
+    failure here is logged, never raised -- a reload issue must never
+    block the process from starting up (or continuing to run) with
+    whatever tuning it already has.
+
+    `smoke_test` (optional, see model_smoke_test above for the shared
+    real one): a zero-arg callable run AFTER a successful apply, to
+    verify the strategy module still has a real, working model behind it
+    -- "test make sure the strategy will be working," per the same
+    direction. Never blocks or reverts the apply itself (which already
+    has its own sane-bounds gate in apply_top_sweep_strategy) -- a smoke-
+    test failure is logged clearly (loud enough to actually notice, not
+    swallowed) but a network hiccup calling it isn't evidence the tuning
+    itself is bad, and this function has no principled way to tell the
+    two apart."""
+    try:
+        result = pull_json_from_hf(repo_id, filename, token=token, timeout_sec=timeout_sec)
+        if not result or not result.get("ok"):
+            logger.info("[server_common] %s: no published strategy-sweep result to reload yet", market)
+            return None
+        applied = apply_top_sweep_strategy(result, strategy_module, market=market)
+        if not applied:
+            logger.info("[server_common] %s: latest strategy sweep has no forward-tested/sane combination to apply", market)
+            return None
+        logger.info("[server_common] %s: reloaded + applied latest strategy sweep -- %s", market, applied.get("applied"))
+        if smoke_test is not None:
+            try:
+                smoke_test()
+                logger.info("[server_common] %s: post-apply smoke test passed -- strategy confirmed working", market)
+            except Exception as exc:
+                logger.warning(
+                    "[server_common] %s: post-apply smoke test FAILED (tuning stays applied -- see this "
+                    "function's own docstring on why a failed smoke test doesn't revert it) -- %s", market, exc,
+                )
+        return applied
+    except Exception as exc:
+        logger.warning("[server_common] %s: strategy-sweep reload failed (non-fatal): %s", market, exc)
+        return None
+
+
 def load_json(path: Path, default: Any) -> Any:
     try:
         with path.open("r", encoding="utf-8") as handle:

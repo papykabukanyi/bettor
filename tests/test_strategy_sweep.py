@@ -261,14 +261,21 @@ def test_run_parameter_sweep_holdout_reranks_above_the_walk_forward_order(monkey
     picked it -- this is what scripts/strategy_sweep_job.py's own
     auto-apply step relies on when it takes top_strategies[0]."""
     monkeypatch.setattr(metals_bt, "load_training_dataset", lambda: _synthetic_df(n_per_symbol=6000))
+    call_counts: dict[float, int] = {}
 
     def fake_simulate(test_df, fitted, *, starting_balance, **combo):
-        # Walk-forward folds are the shorter ones (fewer rows) in
-        # DEFAULT_FOLD_BOUNDS_WITH_HOLDOUT; the holdout fold is the last,
-        # largest slice -- distinguish by row count, matching this
-        # synthetic dataset's own real fold-size shape.
-        is_holdout_call = len(test_df) > 1500
-        if combo["model_confidence_min"] == 0.55:
+        # Each combo gets exactly 3 real simulate() calls for its
+        # walk-forward folds first, then (only as a top_n survivor)
+        # exactly 1 more for its holdout fold -- a per-combo call counter
+        # distinguishes them reliably, unlike test_df row-count (this
+        # synthetic dataset's own walk-forward and holdout fold windows
+        # happen to come out the same size); the call ORDER is a real,
+        # guaranteed invariant of run_parameter_sweep itself.
+        confidence = combo["model_confidence_min"]
+        call_index = call_counts.get(confidence, 0)
+        call_counts[confidence] = call_index + 1
+        is_holdout_call = call_index >= 3
+        if confidence == 0.55:
             # "Great" on walk-forward, collapses on holdout -- the overfit one.
             return_pct = 9.0 if not is_holdout_call else 0.05
         else:
@@ -289,6 +296,56 @@ def test_run_parameter_sweep_holdout_reranks_above_the_walk_forward_order(monkey
     assert best["params"]["model_confidence_min"] == 0.60, "the holdout-robust combination must rank first, not the overfit walk-forward 'winner'"
     assert best["holdout"]["forward_tested"] is True
     assert best["holdout"]["return_pct"] == 3.0
+
+
+def test_run_parameter_sweep_holdout_ranking_weighs_return_by_stability(monkeypatch):
+    """Per explicit user direction: "the 4 top strategies that ha[ve] the
+    most return AND stability" -- a combination with a slightly higher
+    raw holdout return but LOW walk-forward consistency (profitable in
+    only 1 of 3 folds) must not outrank one with a slightly lower holdout
+    return but that was profitable in ALL 3 walk-forward folds.
+
+    Each combo gets exactly 3 real simulate() calls for its walk-forward
+    folds first, then (only for a top_n survivor) exactly 1 more for its
+    holdout fold -- a per-combo call counter distinguishes them reliably;
+    unlike test_df row-count (this synthetic dataset's own walk-forward
+    and holdout fold windows happen to come out the same size), the call
+    ORDER is a real, guaranteed invariant of run_parameter_sweep itself."""
+    monkeypatch.setattr(metals_bt, "load_training_dataset", lambda: _synthetic_df(n_per_symbol=6000))
+    call_counts: dict[float, int] = {}
+
+    def fake_simulate(test_df, fitted, *, starting_balance, **combo):
+        confidence = combo["model_confidence_min"]
+        call_index = call_counts.get(confidence, 0)
+        call_counts[confidence] = call_index + 1
+        if confidence == 0.55:
+            # Unstable: profitable in only 1 of 3 walk-forward folds
+            # (calls 0-2), but a slightly higher holdout return (call 3)
+            # than 0.60 below.
+            walk_forward_returns = [3.0, -1.0, -1.0]
+            return_pct = walk_forward_returns[call_index] if call_index < 3 else 5.5
+        else:
+            # Stable: profitable in all 3 walk-forward folds, slightly
+            # lower holdout return.
+            return_pct = 1.0 if call_index < 3 else 5.0
+        return {"return_pct": return_pct, "win_rate": 0.55, "trade_count": 50, "directional_accuracy": 0.55}
+
+    monkeypatch.setattr(metals_bt, "simulate", fake_simulate)
+    result = strategy_sweep.run_parameter_sweep(
+        metals_bt, {"model_confidence_min": [0.55, 0.60]},
+        fold_bounds=strategy_sweep.DEFAULT_FOLD_BOUNDS_WITH_HOLDOUT,
+        holdout_bounds=strategy_sweep.DEFAULT_HOLDOUT_BOUNDS,
+        min_trades_per_fold=1, min_folds_with_trades=1, min_holdout_trades=1,
+    )
+
+    assert result["ok"] is True
+    unstable = next(e for e in result["top_strategies"] if e["params"]["model_confidence_min"] == 0.55)
+    stable = next(e for e in result["top_strategies"] if e["params"]["model_confidence_min"] == 0.60)
+    assert unstable["holdout"]["return_pct"] == 5.5 > stable["holdout"]["return_pct"] == 5.0  # unstable has the higher RAW return
+    assert stable["profitable_fold_ratio"] == 1.0
+    assert unstable["profitable_fold_ratio"] < 1.0
+    best = result["top_strategies"][0]
+    assert best["params"]["model_confidence_min"] == 0.60, "the more STABLE combination must rank first despite a lower raw holdout return"
 
 
 def test_run_parameter_sweep_without_holdout_bounds_never_attaches_holdout(monkeypatch):

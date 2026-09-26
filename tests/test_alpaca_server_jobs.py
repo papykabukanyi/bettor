@@ -579,3 +579,35 @@ def test_threads_trigger_routes_never_raise_on_a_backend_failure(monkeypatch, pa
         resp = client.post(path)
         assert resp.status_code == 500
         assert resp.get_json()["ok"] is False
+
+
+def test_alpaca_strategy_reload_job_calls_the_shared_reload_helper(monkeypatch):
+    import server_common
+
+    captured = {}
+
+    def fake_reload(*, repo_id, filename, strategy_module, market, token, smoke_test):
+        captured.update(repo_id=repo_id, filename=filename, strategy_module=strategy_module, market=market)
+        smoke_test()
+        return {"applied": {"model_confidence_min": 0.55}}
+
+    monkeypatch.setattr(server_common, "reload_and_apply_latest_strategy_sweep", fake_reload)
+    monkeypatch.setattr(alpaca_server.alpaca_model, "load_model", lambda: (object(), {}))
+
+    result = alpaca_server._run_alpaca_strategy_reload.__wrapped__()  # noqa: SLF001
+
+    assert result["ok"] is True
+    assert captured["repo_id"] == alpaca_server.alpaca_model.HF_ALPACA_MODEL_REPO
+    assert captured["filename"] == "strategy_sweep_stocks.json"
+    assert captured["strategy_module"] is alpaca_server.alpaca_strategy
+    assert captured["market"] == "stocks"
+
+
+def test_alpaca_strategy_reload_job_reports_none_applied_when_nothing_qualifies(monkeypatch):
+    import server_common
+
+    monkeypatch.setattr(server_common, "reload_and_apply_latest_strategy_sweep", lambda **kw: None)
+
+    result = alpaca_server._run_alpaca_strategy_reload.__wrapped__()  # noqa: SLF001
+
+    assert result == {"ok": True, "applied": None}

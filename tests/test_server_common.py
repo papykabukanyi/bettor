@@ -508,3 +508,158 @@ def test_refresh_model_if_hf_has_a_newer_one_does_not_invalidate_if_download_fai
         model_repo="papylove/alpaca-model", token="tok", meta_filename="meta.json", timeout_sec=5,
         current_trained_at="2026-01-01T00:00:00+00:00", download_fn=lambda: False, invalidate_fn=fail_if_called,
     )
+
+
+# ---------------------------------------------------------------------------
+# sweep_params_are_sane / apply_top_sweep_strategy / model_smoke_test /
+# reload_and_apply_latest_strategy_sweep -- per explicit user direction:
+# "on all bot[s] when they have downtimes the HF strateg[y] need to reload
+# and apply to [the] most return one immediately and test make sure the
+# strategy will be working... its need to perform that everyday."
+# ---------------------------------------------------------------------------
+def test_sweep_params_are_sane_accepts_real_defaults():
+    assert server_common.sweep_params_are_sane({"model_confidence_min": 0.58, "position_size_pct": 0.05}) is True
+
+
+def test_sweep_params_are_sane_rejects_an_out_of_bounds_confidence_floor():
+    assert server_common.sweep_params_are_sane({"model_confidence_min": 1.5}) is False
+    assert server_common.sweep_params_are_sane({"model_confidence_min": 0.3}) is False
+
+
+def test_sweep_params_are_sane_rejects_an_out_of_bounds_position_size():
+    assert server_common.sweep_params_are_sane({"position_size_pct": 5.0}) is False
+
+
+def test_sweep_params_are_sane_ignores_fields_it_has_no_bounds_for():
+    assert server_common.sweep_params_are_sane({"assumed_entry_price": 999.0}) is True
+
+
+class _FakeStrategyModule:
+    def __init__(self):
+        self.calls = []
+
+    def apply_strategy_sweep_override(self, params, *, source, reason):
+        self.calls.append({"params": params, "source": source, "reason": reason})
+        return {"applied": params, "source": source}
+
+
+def _sweep_result(params, *, forward_tested=True, holdout_return_pct=5.0):
+    return {
+        "ok": True, "top_strategies": [{
+            "params": params, "mean_return_pct": 12.3, "profitable_fold_ratio": 1.0,
+            "holdout": {"return_pct": holdout_return_pct, "win_rate": 0.55, "trade_count": 40, "forward_tested": forward_tested},
+        }],
+    }
+
+
+def test_apply_top_sweep_strategy_applies_the_forward_tested_top_entry():
+    module = _FakeStrategyModule()
+    result = _sweep_result({"model_confidence_min": 0.6, "position_size_pct": 0.08})
+
+    applied = server_common.apply_top_sweep_strategy(result, module, market="kalshi_15m_metals")
+
+    assert applied == {"applied": {"model_confidence_min": 0.6, "position_size_pct": 0.08}, "source": module.calls[0]["source"]}
+    assert module.calls[0]["source"]["market"] == "kalshi_15m_metals"
+    assert module.calls[0]["source"]["holdout_return_pct"] == 5.0
+
+
+def test_apply_top_sweep_strategy_skips_when_not_forward_tested():
+    module = _FakeStrategyModule()
+    result = _sweep_result({"model_confidence_min": 0.6}, forward_tested=False)
+
+    assert server_common.apply_top_sweep_strategy(result, module, market="perps") is None
+    assert module.calls == []
+
+
+def test_apply_top_sweep_strategy_skips_when_no_top_strategies():
+    module = _FakeStrategyModule()
+    assert server_common.apply_top_sweep_strategy({"ok": True, "top_strategies": []}, module, market="perps") is None
+    assert module.calls == []
+
+
+def test_apply_top_sweep_strategy_refuses_unsane_params():
+    module = _FakeStrategyModule()
+    result = _sweep_result({"model_confidence_min": 1.7, "position_size_pct": 0.08})
+
+    assert server_common.apply_top_sweep_strategy(result, module, market="perps") is None
+    assert module.calls == []
+
+
+class _FakeModelModule:
+    __name__ = "data.fake_model"
+
+    def __init__(self, model):
+        self._model = model
+
+    def load_model(self):
+        return self._model, {"trained_at": "2026-01-01"}
+
+
+def test_model_smoke_test_passes_when_a_model_is_loaded():
+    test = server_common.model_smoke_test(_FakeModelModule(model=object()))
+    test()  # must not raise
+
+
+def test_model_smoke_test_raises_when_no_model_is_loaded():
+    test = server_common.model_smoke_test(_FakeModelModule(model=None))
+    with pytest.raises(RuntimeError):
+        test()
+
+
+def test_reload_and_apply_latest_strategy_sweep_applies_and_runs_the_smoke_test(monkeypatch):
+    module = _FakeStrategyModule()
+    result = _sweep_result({"model_confidence_min": 0.6, "position_size_pct": 0.08})
+    monkeypatch.setattr(server_common, "pull_json_from_hf", lambda *a, **kw: result)
+    smoke_calls = []
+
+    applied = server_common.reload_and_apply_latest_strategy_sweep(
+        repo_id="papylove/kalshi-15m-metals-model", filename="strategy_sweep_kalshi_15m_metals.json",
+        strategy_module=module, market="kalshi_15m_metals", token="fake-token",
+        smoke_test=lambda: smoke_calls.append(True),
+    )
+
+    assert applied is not None
+    assert smoke_calls == [True]
+
+
+def test_reload_and_apply_latest_strategy_sweep_survives_a_failed_smoke_test(monkeypatch):
+    """A smoke-test failure is logged, never raised, and never reverts the
+    already-applied tuning -- see this function's own docstring on why a
+    smoke-test failure isn't treated as evidence the tuning itself is bad."""
+    module = _FakeStrategyModule()
+    result = _sweep_result({"model_confidence_min": 0.6, "position_size_pct": 0.08})
+    monkeypatch.setattr(server_common, "pull_json_from_hf", lambda *a, **kw: result)
+
+    def failing_smoke_test():
+        raise RuntimeError("simulated model load failure")
+
+    applied = server_common.reload_and_apply_latest_strategy_sweep(
+        repo_id="papylove/kalshi-15m-metals-model", filename="strategy_sweep_kalshi_15m_metals.json",
+        strategy_module=module, market="kalshi_15m_metals", token="fake-token", smoke_test=failing_smoke_test,
+    )
+
+    assert applied is not None  # tuning was still applied despite the smoke test failing
+
+
+def test_reload_and_apply_latest_strategy_sweep_returns_none_with_no_published_result(monkeypatch):
+    module = _FakeStrategyModule()
+    monkeypatch.setattr(server_common, "pull_json_from_hf", lambda *a, **kw: None)
+
+    assert server_common.reload_and_apply_latest_strategy_sweep(
+        repo_id="papylove/kalshi-15m-metals-model", filename="strategy_sweep_kalshi_15m_metals.json",
+        strategy_module=module, market="kalshi_15m_metals", token="fake-token",
+    ) is None
+    assert module.calls == []
+
+
+def test_reload_and_apply_latest_strategy_sweep_never_raises_on_an_unexpected_error(monkeypatch):
+    def raise_error(*a, **kw):
+        raise RuntimeError("simulated network failure")
+
+    monkeypatch.setattr(server_common, "pull_json_from_hf", raise_error)
+
+    result = server_common.reload_and_apply_latest_strategy_sweep(
+        repo_id="papylove/kalshi-15m-metals-model", filename="strategy_sweep_kalshi_15m_metals.json",
+        strategy_module=_FakeStrategyModule(), market="kalshi_15m_metals", token="fake-token",
+    )
+    assert result is None

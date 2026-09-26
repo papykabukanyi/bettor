@@ -547,3 +547,35 @@ def test_trade_analysis_job_survives_a_state_read_failure(monkeypatch):
     monkeypatch.setattr(alpaca_crypto_strategy, "_load_state", fail)
     result = alpaca_crypto_server._run_alpaca_crypto_trade_analysis.__wrapped__()  # noqa: SLF001
     assert result["ok"] is False
+
+
+def test_alpaca_crypto_strategy_reload_job_calls_the_shared_reload_helper(monkeypatch):
+    import server_common
+
+    captured = {}
+
+    def fake_reload(*, repo_id, filename, strategy_module, market, token, smoke_test):
+        captured.update(repo_id=repo_id, filename=filename, strategy_module=strategy_module, market=market)
+        smoke_test()
+        return {"applied": {"model_confidence_min": 0.58}}
+
+    monkeypatch.setattr(server_common, "reload_and_apply_latest_strategy_sweep", fake_reload)
+    monkeypatch.setattr(alpaca_crypto_server.alpaca_crypto_model, "load_model", lambda: (object(), {}))
+
+    result = alpaca_crypto_server._run_alpaca_crypto_strategy_reload.__wrapped__()  # noqa: SLF001
+
+    assert result["ok"] is True
+    assert captured["repo_id"] == alpaca_crypto_server.alpaca_crypto_model.HF_ALPACA_CRYPTO_MODEL_REPO
+    assert captured["filename"] == "strategy_sweep_crypto.json"
+    assert captured["strategy_module"] is alpaca_crypto_server.alpaca_crypto_strategy
+    assert captured["market"] == "crypto"
+
+
+def test_alpaca_crypto_strategy_reload_job_reports_none_applied_when_nothing_qualifies(monkeypatch):
+    import server_common
+
+    monkeypatch.setattr(server_common, "reload_and_apply_latest_strategy_sweep", lambda **kw: None)
+
+    result = alpaca_crypto_server._run_alpaca_crypto_strategy_reload.__wrapped__()  # noqa: SLF001
+
+    assert result == {"ok": True, "applied": None}
