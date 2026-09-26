@@ -1,61 +1,60 @@
-"""Walk-forward backtest of the real Kalshi 15-minute-market strategy code
-(kalshi_15m_strategy.evaluate_candidate's own decision rule), crypto only.
+"""Walk-forward backtest of the real Kalshi 15-minute GOLD/SILVER/COPPER/
+PLATINUM/PALLADIUM strategy code (kalshi_15m_strategy.evaluate_candidate's
+own decision rule), metals only -- the direct counterpart to
+kalshi_15m_backtest.py's own crypto-only module.
 
-Metals are NOT covered here -- there is no historical price archive for
-gold/silver/copper at all (gold-api.com has no free /history endpoint, see
-kalshi_15m_metals_data.py's own module docstring), so there is nothing to
-backtest against yet. This module covers the 5 crypto coins
-(kalshi_15m.KNOWN_15M_SERIES), which DO have a real, growing HF archive
-(kalshi_15m_data.load_training_dataset, backfillable via
-kalshi_15m_data.backfill_minute_history).
-
-Deliberately much simpler than perps_backtest.py, because the product
-itself is much simpler: a Kalshi 15-minute event contract has NO exit
-mechanism at all (no stop-loss, no take-profit, no scale-in/partial-exit,
-no early close -- see kalshi_15m_strategy.py's own check_settlements, the
-ONLY place a position ever closes here) -- you hold every position to
-settlement, period. So unlike perps' minute-by-minute open-position
-management loop, this backtest only needs: pick an entry point once per
-15-minute window per coin (see ONE_ROW_PER_WINDOW below), decide whether
-the real strategy would have entered, and resolve it deterministically
-against that same window's own already-known label_up outcome exactly
-MODEL_CONFIDENCE_MIN, MIN_SECONDS_TO_CLOSE_FOR_ENTRY minutes later.
-
-Two disclosed, real limitations (same "disclose, don't fake" convention as
-perps_backtest.py's own sentiment_score=0.0 / fixed leverage-snapshot
-disclosures):
-
-1. **No historical Kalshi contract quote archive exists.** kalshi_15m.py
-   has no candlestick endpoint for the standard (non-margin) market the
-   way kalshi_perps.py's margin markets do -- a CLOSED market's own
-   yes_bid/no_bid fields reflect their last value before settlement, not
-   what they were ~5-10 minutes earlier when a real entry would fire, and
-   there is no way to reconstruct that history for now-expired 15-minute
-   windows. This backtest instead uses a single, disclosed
-   `assumed_entry_price` (default 0.50 -- a neutral coin-flip price, not a
-   number chosen to flatter results) for every simulated fill. Real
-   markets for a genuinely uncertain 15-minute crypto-direction question
-   often DO trade close to that range most of the window, but this is an
-   approximation, not measured history -- `run_backtest`/
-   `run_walkforward_backtest` accept `assumed_entry_price` so a sensitivity
-   check across a few values (e.g. 0.45/0.50/0.55) is one parameter away.
-   `directional_accuracy`/`calibration` in every report below need NO
-   pricing assumption at all and are the most trustworthy numbers here --
-   read those first.
-2. **No Kalshi per-trade fee is modeled**, matching kalshi_15m_strategy.
-   check_settlements's own current live behavor (it does not subtract a
-   fee from realized_pnl_usd either -- a related, disclosed gap in the
-   live code, not something invented here to look better). Real fills pay
-   Kalshi's own "quadratic" fee schedule for this series (distinct from
-   perps' linear one); real net returns will be lower than this reports.
+REAL GAP THIS CLOSES: kalshi_15m_backtest.py's own module docstring
+explicitly says "Metals are NOT covered here -- there is no historical
+price archive for gold/silver/copper at all (gold-api.com has no free
+/history endpoint)". That was true the day this market first went live,
+but is no longer true today: kalshi_15m_metals_data.py's own data-collect
+job has been running for weeks, continuously appending real price points
+via _append_price_point and archiving them to HF
+(kalshi_15m_metals_data.load_training_dataset) -- exactly the same
+"accumulate our own history since no bulk API exists" pattern this
+account's own real GOLD/SILVER/COPPER trade_log already relies on. Per
+explicit user direction ("we need to work on over 10000 mix of
+strategies in the backtest and... perform a forward test with real data
+and a huge historical data of the main 3 we will trade"): GOLD/SILVER/
+COPPER ARE now this account's entire live entry universe
+(kalshi_15m_strategy.ACTIVE_ENTRY_COINS) -- a backtest that only ever
+covered crypto was backtesting a market this account no longer trades at
+all. This module, not kalshi_15m_backtest.py, is now the one that
+actually matters for this account's own live risk.
 
 Same "reuse the real decision functions, never reimplement the rules"
-principle as perps_backtest.py: entry gating (MODEL_CONFIDENCE_MIN, side
-selection) mirrors kalshi_15m_strategy.evaluate_candidate exactly, and
-sizing mirrors kalshi_15m_strategy.scan_and_enter's own
-`account_budget_usd * POSITION_SIZE_PCT / price` formula and
-`check_settlements`'s own `count * (1 - price)` / `-count * price` P&L
-formula, line for line.
+principle as kalshi_15m_backtest.py's own -- entry gating
+(MODEL_CONFIDENCE_MIN, YES_CONFIDENCE_EXTRA_REQUIRED, side selection)
+mirrors kalshi_15m_strategy.evaluate_candidate exactly, and sizing/P&L
+formulas mirror scan_and_enter's/check_settlements' own line for line.
+
+Same two disclosed, real limitations as kalshi_15m_backtest.py (see its
+own module docstring for the full reasoning): no historical Kalshi
+CONTRACT quote archive exists (a fixed, disclosed `assumed_entry_price`
+stands in for one), and no Kalshi per-trade fee is modeled here either
+(see kalshi_15m_trade_analysis.estimate_kalshi_15m_entry_fee_usd for
+this account's own SEPARATE, already-shipped real-fee estimator -- not
+wired into this simulation loop, a real, disclosed gap this module
+inherits rather than silently fixing as a side effect).
+
+THREE MORE gates this account's live strategy has grown since
+kalshi_15m_backtest.py was first built are DELIBERATELY NOT replayed
+here either, disclosed rather than faked: volume_and_price_action_confirmed's
+own metals counterpart (metals_volume_proxy_confirmed) needs a LIVE
+cross-asset correlation study snapshot (crypto_correlation.get_metals_study/
+get_latest_kalshi_15m_crypto_df) that was never archived historically --
+there is no way to reconstruct "what would the correlation study have
+read at that exact past moment" from today's dataset alone. The
+correlation-study confidence nudge (USE_CORRELATION_STUDY) has the same
+problem. Per-coin/hour trust gates (coin_is_trusted/hour_is_trusted) are
+inherently ACCOUNT-STATE-dependent (they read this account's own
+trade_log as of decision time), not a property of one row's own
+features, so replaying them faithfully would require simulating the
+ENTIRE account's own trade history move-by-move, not just one coin's
+technical entry rule -- a materially bigger, different kind of backtest
+than this one. `directional_accuracy`/`calibration` (needing no pricing
+assumption or any of the above) remain the most trustworthy numbers
+here, exactly as kalshi_15m_backtest.py's own docstring already advises.
 """
 from __future__ import annotations
 
@@ -69,30 +68,23 @@ from sklearn.metrics import accuracy_score, brier_score_loss, roc_auc_score
 
 from data import kalshi_15m_strategy as strat
 from data import walkforward
-from data.kalshi_15m_data import load_training_dataset
-from data.kalshi_15m_model import _CANDIDATES  # noqa: SLF001 -- reuse, don't fork a second copy that can drift
-from data.perps_data import FEATURE_COLUMNS
+from data.kalshi_15m_metals_data import METALS_FEATURE_COLUMNS as FEATURE_COLUMNS
+from data.kalshi_15m_metals_data import load_training_dataset
+from data.kalshi_15m_metals_model import _CANDIDATES  # noqa: SLF001 -- reuse, don't fork a second copy that can drift
 
 logger = logging.getLogger(__name__)
 
-# See module docstring point 1 -- one decision point per 15-minute window
-# (the window's own opening-minute row), not a re-check every
-# KALSHI_15M_CYCLE_MINUTES the way live scan_and_enter does. The window's
-# own trailing technicals are already fully computed as of that first
-# minute, and its label_up already IS the real, deterministic 15-minutes-
-# later outcome -- re-checking mid-window would only ever change WHEN
-# within the window an entry fires, never the eventual settlement, so it
-# would add simulation complexity without changing what this backtest can
-# actually measure (there's no historical quote to make "price got better/
-# worse by minute 8" mean anything anyway -- see limitation 1 above).
+# Same reasoning as kalshi_15m_backtest.WINDOW_SECONDS -- one decision
+# point per 15-minute window, no historical intra-window quote to make a
+# finer-grained replay mean anything.
 WINDOW_SECONDS = 15 * 60
 
 
 def _one_row_per_window(df: pd.DataFrame) -> pd.DataFrame:
-    """Downsamples a per-minute engineered-feature frame to one row per
-    (symbol, 15-minute-aligned window), keeping the EARLIEST row in each
-    window (closest to "the window just opened", the earliest a real entry
-    could ever fire)."""
+    """Identical logic to kalshi_15m_backtest._one_row_per_window -- kept
+    as this module's own copy rather than a cross-import, matching this
+    codebase's own established "independent per-market module" convention
+    (see kalshi_15m_data.py's own module docstring)."""
     windowed = df.copy()
     windowed["_window_bucket"] = (windowed["ts"] // WINDOW_SECONDS) * WINDOW_SECONDS
     windowed = windowed.sort_values("ts")
@@ -106,11 +98,9 @@ def _one_row_per_window(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def fit_backtest_model(train_df: pd.DataFrame, *, min_rows: int = 300) -> dict[str, Any] | None:
-    """In-memory-only fit for the backtest -- never touches the live
-    kalshi_15m_model.joblib file or pushes anything to Hugging Face. Same
-    shape as perps_backtest.fit_backtest_model / kalshi_15m_model's own
-    single-split candidate comparison. Returns None (no-model / all-skip
-    simulation) if there isn't enough training-window data yet."""
+    """In-memory-only fit -- never touches the live kalshi_15m_metals_model.joblib
+    file or pushes anything to Hugging Face. Identical shape to
+    kalshi_15m_backtest.fit_backtest_model, metals' own candidates/features."""
     labeled = train_df.dropna(subset=["label_up"] + FEATURE_COLUMNS).copy()
     if len(labeled) < min_rows:
         return None
@@ -138,7 +128,7 @@ def fit_backtest_model(train_df: pd.DataFrame, *, min_rows: int = 300) -> dict[s
             if combined > best_score:
                 best_name, best_model, best_score = name, model, combined
         except Exception as exc:
-            logger.warning("[kalshi_15m_backtest] candidate %s failed to fit: %s", name, exc)
+            logger.warning("[kalshi_15m_metals_backtest] candidate %s failed to fit: %s", name, exc)
     if best_model is None:
         return None
     best_model.fit(labeled[feature_cols].values, labeled["label_up"].values)
@@ -146,9 +136,10 @@ def fit_backtest_model(train_df: pd.DataFrame, *, min_rows: int = 300) -> dict[s
 
 
 def add_model_predictions(df: pd.DataFrame, fitted: dict[str, Any] | None) -> pd.DataFrame:
-    """Batch-predict probability_up once, vectorized -- same reasoning as
-    perps_backtest's own identical helper (a sweep/multi-fold run reuses
-    the same rows many times with only thresholds changing)."""
+    """Batch-predict probability_up once, vectorized -- see
+    kalshi_15m_backtest.add_model_predictions's own comment on why this
+    matters for a sweep (fit once per fold, re-used across every
+    threshold/gating combination in that fold)."""
     df = df.copy()
     if fitted is None:
         df["model_probability_up"] = np.nan
@@ -172,16 +163,16 @@ def simulate(
     model_confidence_min: float | None = None,
     yes_confidence_extra_required: float | None = None,
 ) -> dict[str, Any]:
-    """Walk forward through `test_df` (all coins, sorted by ts, already one
-    row per 15-minute window -- see `_one_row_per_window`), replaying
-    kalshi_15m_strategy's own real entry rule and check_settlements' own
-    real P&L formula. See module docstring for the 2 disclosed pricing/fee
-    limitations. `yes_confidence_extra_required` replays YES_CONFIDENCE_EXTRA_REQUIRED's
-    own real, live per-side floor (added to kalshi_15m_strategy after this
-    module was first built -- see kalshi_15m_metals_backtest.simulate's
-    own identical parameter). Every strategy parameter can be overridden
-    per-call, same "no env var needed for a sweep" convention as
-    perps_backtest.simulate."""
+    """Walk forward through `test_df` (all metals, sorted by ts, already
+    one row per 15-minute window), replaying kalshi_15m_strategy's own
+    real entry rule and check_settlements' own real P&L formula. See
+    module docstring for the disclosed pricing/fee/cross-asset-gate
+    limitations. `yes_confidence_extra_required` (new vs.
+    kalshi_15m_backtest.simulate) replays YES_CONFIDENCE_EXTRA_REQUIRED's
+    own real, live per-side floor -- omitted from the ORIGINAL crypto
+    backtest simply because it didn't exist yet when that module was
+    first built. Every strategy parameter can be overridden per-call,
+    same "no env var needed for a sweep" convention as kalshi_15m_backtest.simulate."""
     position_size_pct = strat.POSITION_SIZE_PCT if position_size_pct is None else position_size_pct
     max_concurrent_positions = strat.MAX_CONCURRENT_POSITIONS if max_concurrent_positions is None else max_concurrent_positions
     model_confidence_min = strat.MODEL_CONFIDENCE_MIN if model_confidence_min is None else model_confidence_min
@@ -191,23 +182,16 @@ def simulate(
     if not (0.0 < assumed_entry_price < 1.0):
         raise ValueError(f"assumed_entry_price must be strictly between 0 and 1, got {assumed_entry_price}")
 
-    # Real bug found running this against the actual archive: the most
-    # recent rows near the archive's own collection boundary have no
-    # label_up yet (there was no row LABEL_HORIZON_MINUTES later at
-    # collection time to compute future_close against -- see
-    # kalshi_15m_data._relabel_for_horizon) -- an expected, not corrupt,
-    # edge of any live-collected archive, matching fit_backtest_model's
-    # own dropna(subset=["label_up"]) on the train side. Without this, a
-    # NaN label_up couldn't be int()-cast for settlement or calibration.
+    # Same real archive-boundary edge as kalshi_15m_backtest.simulate's
+    # own identical comment -- the most recent rows have no label_up yet.
     df = test_df.dropna(subset=["label_up"]).sort_values("ts").reset_index(drop=True)
     if "model_probability_up" not in df.columns:
         df = add_model_predictions(df, fitted)
 
     balance = starting_balance
-    # coin -> {"close_ts", "side", "count", "entry_price", "label_up", "opened_ts"}
     open_positions: dict[str, dict[str, Any]] = {}
     trades: list[dict[str, Any]] = []
-    calibration_rows: list[tuple[float, int]] = []  # (predicted probability_up, actual label_up) for every row a model existed on
+    calibration_rows: list[tuple[float, int]] = []
 
     def _settle_due(as_of_ts: float) -> None:
         nonlocal balance
@@ -235,12 +219,13 @@ def simulate(
         if coin in open_positions or len(open_positions) >= max_concurrent_positions:
             continue
         if not model_ok:
-            continue  # mirrors evaluate_candidate: no trade at all without a trained model (no technical-only fallback for this market)
+            continue
 
         # Mirrors evaluate_candidate exactly: side + confidence, then
-        # YES_CONFIDENCE_EXTRA_REQUIRED's own per-side floor bump (see
-        # this parameter's own docstring note), then the (possibly
-        # bumped) confidence floor.
+        # YES_CONFIDENCE_EXTRA_REQUIRED's own per-side floor bump, then
+        # the (possibly bumped) confidence floor -- see this account's
+        # own real 319-trade finding ("no" wins 45.6% vs "yes" 32.8%)
+        # that motivated the live per-side adjustment in the first place.
         if proba_up >= 0.5:
             side, confidence = "yes", float(proba_up)
         else:
@@ -263,16 +248,12 @@ def simulate(
             "confidence": confidence,
         }
 
-    _settle_due(float("inf"))  # resolve every remaining position at its own already-known outcome (no "mark to market" concept for a binary contract)
+    _settle_due(float("inf"))
 
     total_pnl = sum(t["realized_pnl_usd"] for t in trades)
     wins = [t for t in trades if t["won"]]
     span_days = max(1e-9, (df["ts"].max() - df["ts"].min()) / 86400.0) if not df.empty else 1.0
 
-    # Directional accuracy/calibration need NO pricing assumption at all --
-    # see module docstring on why these are the most trustworthy numbers
-    # here, computed over every row a model existed for, not just the ones
-    # confidence-gated into an actual simulated trade.
     directional_accuracy = None
     brier_score = None
     auc = None
@@ -310,10 +291,9 @@ def run_backtest(
     coins: list[str] | None = None, **strategy_overrides: Any,
 ) -> dict[str, Any]:
     """End-to-end single 70/30 split over the real, already-archived HF
-    dataset (kalshi_15m_data.load_training_dataset -- no live API calls,
-    unlike perps_backtest.run_backtest, since the archive already exists
-    here). `days` trims to the most recent N days of archive if given;
-    None uses everything available."""
+    metals dataset (kalshi_15m_metals_data.load_training_dataset). See
+    kalshi_15m_backtest.run_backtest's own docstring for the identical
+    shape/reasoning."""
     combined = load_training_dataset()
     if combined.empty:
         return {"ok": False, "reason": "no_data"}
@@ -347,13 +327,14 @@ def run_walkforward_backtest(
     *, days: int | None = None, fold_bounds: list[tuple[float, float, float]] | None = None,
     starting_balance: float = 100.0, coins: list[str] | None = None, **strategy_overrides: Any,
 ) -> dict[str, Any]:
-    """Same data source as run_backtest (the real HF archive), but replays
-    MULTIPLE expanding-window train/test folds via walkforward.py -- same
-    "a strategy that only looks good on one lucky split hasn't actually
-    learned anything durable" reasoning as perps_backtest's own
-    run_walkforward_backtest. Returns {"ok", "folds": [...], "fold_count",
-    "profitable_fold_ratio", "mean_return_pct", "std_return_pct", ...} --
-    see walkforward.summarize_folds for the full cross-fold report."""
+    """Same data source as run_backtest (the real HF metals archive), but
+    replays MULTIPLE expanding-window train/test folds via walkforward.py
+    -- see kalshi_15m_backtest.run_walkforward_backtest's own docstring
+    for the identical shape/reasoning (this IS the "forward test" per
+    explicit user direction: each fold's own test window is strictly
+    later in time than its own train window, and multiple folds check
+    this holds up across different real market stretches, not just one
+    lucky split)."""
     combined = load_training_dataset()
     if combined.empty:
         return {"ok": False, "reason": "no_data"}

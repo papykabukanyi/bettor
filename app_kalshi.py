@@ -106,8 +106,9 @@ if str(SRC_DIR) not in sys.path:
 from config import et_today
 from data import (
     ai_monitor, crypto_news, kalshi_15m, kalshi_15m_backtest, kalshi_15m_data, kalshi_15m_meta_model,
-    kalshi_15m_metals_data, kalshi_15m_metals_model, kalshi_15m_model, kalshi_15m_strategy, perps_data,
-    perps_meta_model, perps_model, perps_strategy, perps_trade_analysis, threads_client, threads_post,
+    kalshi_15m_metals_backtest, kalshi_15m_metals_data, kalshi_15m_metals_model, kalshi_15m_model,
+    kalshi_15m_strategy, perps_data, perps_meta_model, perps_model, perps_strategy, perps_trade_analysis,
+    strategy_sweep, threads_client, threads_post,
 )
 
 # Real production bug found and fixed on the sibling stocks server (now
@@ -214,15 +215,59 @@ KALSHI_15M_TRADE_ANALYSIS_MINUTE_ET = int(os.getenv("KALSHI_15M_TRADE_ANALYSIS_M
 # implemented." kalshi_15m_backtest.run_walkforward_backtest already
 # existed (multiple expanding-window folds -- a real forward test, not
 # just one lucky split) but had only ever been run manually. Crypto only
-# for now (see kalshi_15m_backtest.py's own imports -- built on
-# kalshi_15m_model/kalshi_15m_data specifically); metals excluded for
-# the same reason its own torch-candidate/meta-model are (see
-# KALSHI_15M_TORCH_TRAIN_HOUR_ET's own comment: too little archive yet).
+# (kalshi_15m_backtest.py, built on kalshi_15m_model/kalshi_15m_data) --
+# kalshi_15m_metals_backtest.py (added later the same session GOLD/
+# SILVER/COPPER became this account's own permanent, sole live-entry
+# universe -- see kalshi_15m_strategy.ACTIVE_ENTRY_COINS) is the metals
+# counterpart, wired into _run_kalshi_15m_strategy_sweep below rather
+# than this job -- this one stays crypto-only so it keeps its own
+# existing daily cadence/auto-retrain-on-loss behavior unchanged.
 # 8am ET: after every other daily kalshi_15m job (train 4, trade-analysis
 # 5:30, ai_monitor 6, torch-train 7) so this always backtests that day's
 # freshest models.
 KALSHI_15M_BACKTEST_HOUR_ET = int(os.getenv("KALSHI_15M_BACKTEST_HOUR_ET", "8") or "8")
 KALSHI_15M_LATEST_BACKTEST_FILE = DATA_DIR / "kalshi_15m_latest_backtest.json"
+# Large-scale metals strategy sweep -- per explicit user direction: "we
+# need to work on over 10000 mix of strategies in the backtest and...
+# perform a forward test with real data and a huge historical data of
+# the main 3 we will trade... generate[] [strategies,] optimise the
+# model to understand that." See strategy_sweep.py's own module
+# docstring for the full design (why 10,000+ combinations is
+# computationally realistic: no swept parameter affects model training,
+# so each walk-forward fold fits its model exactly once and replays its
+# own cached predictions through every combination). WEEKLY, not daily
+# (unlike the crypto backtest above) -- a real, disclosed cost tradeoff:
+# a 10,000+-combination sweep is a materially bigger compute job than
+# the existing daily backtest's own single-parameter-set run, on the SAME
+# shared, single-process container every live market trades on (see
+# combined_app.py's own docstring) -- see strategy_sweep.run_parameter_sweep's
+# own max_seconds safety valve for the hard runtime cap this job also
+# relies on. Sunday, 9am ET: after the metals data-collect job has had a
+# full week to accumulate more real archive, and clear of every OTHER
+# kalshi_15m daily job's own schedule.
+KALSHI_15M_STRATEGY_SWEEP_DAY_OF_WEEK = os.getenv("KALSHI_15M_STRATEGY_SWEEP_DAY_OF_WEEK", "sun")
+KALSHI_15M_STRATEGY_SWEEP_HOUR_ET = int(os.getenv("KALSHI_15M_STRATEGY_SWEEP_HOUR_ET", "9") or "9")
+KALSHI_15M_LATEST_STRATEGY_SWEEP_FILE = DATA_DIR / "kalshi_15m_latest_strategy_sweep.json"
+
+
+def _default_kalshi_15m_strategy_sweep_grid() -> dict[str, list[float | int]]:
+    """The actual '10,000+ mix of strategies' grid -- 15 confidence
+    floors x 10 yes-side surcharges x 9 assumed entry prices (a real
+    sensitivity sweep across kalshi_15m_metals_backtest.py's own
+    disclosed pricing-assumption limitation, per that module's own
+    docstring suggestion) x 4 position sizes x 3 concurrency caps =
+    16,200 combinations. A plain function (not a module-level constant)
+    so a future change to these ranges doesn't need a process restart to
+    take effect via a test's own monkeypatch, same reasoning
+    kalshi_15m_trade_analysis.py's own recommend_* functions already
+    follow for their tunable constants."""
+    return {
+        "model_confidence_min": [round(0.50 + 0.025 * i, 4) for i in range(15)],  # 0.50 .. 0.85
+        "yes_confidence_extra_required": [round(0.10 * i / 9, 4) for i in range(10)],  # 0.00 .. 0.10
+        "assumed_entry_price": [round(0.10 * i, 2) for i in range(1, 10)],  # 0.10 .. 0.90
+        "position_size_pct": [0.02, 0.05, 0.08, 0.12],
+        "max_concurrent_positions": [1, 3, 5],
+    }
 # Read-only, project-WIDE AI-powered analysis layer covering all 5
 # markets (perps, stocks, crypto, options, kalshi_15m), added per
 # explicit user direction (chosen over "replace the prediction model
@@ -884,6 +929,49 @@ def _run_kalshi_15m_backtest() -> dict[str, Any]:
         gc.collect()
 
 
+@_locked_job("kalshi_15m_strategy_sweep", stale_after_sec=3600)
+def _run_kalshi_15m_strategy_sweep(param_grid: dict[str, list[Any]] | None = None) -> dict[str, Any]:
+    """See KALSHI_15M_STRATEGY_SWEEP_HOUR_ET's own comment -- runs
+    strategy_sweep.run_parameter_sweep against kalshi_15m_metals_backtest
+    (GOLD/SILVER/COPPER -- this account's own real, permanent live-entry
+    universe, see kalshi_15m_strategy.ACTIVE_ENTRY_COINS), saves the
+    ranked result, and -- when the sweep actually surfaces a combination
+    that beats this account's OWN currently-live parameters with real,
+    walk-forward-consistent evidence -- logs that clearly rather than
+    silently. Deliberately does NOT auto-apply anything: unlike
+    apply_confidence_threshold_override's own narrow, single-parameter,
+    already-proven pattern, this sweeps FIVE parameters against a
+    disclosed-limitation backtest (see kalshi_15m_metals_backtest.py's
+    own module docstring on what it can't replay -- cross-asset
+    correlation, coin/hour trust) -- a human decision point, not a
+    for-now-safe auto-apply. Never touches order placement or position
+    management -- read-only over trading, reporting only."""
+    try:
+        grid = param_grid or _default_kalshi_15m_strategy_sweep_grid()
+        result = strategy_sweep.run_parameter_sweep(kalshi_15m_metals_backtest, grid, coins=sorted(kalshi_15m_strategy.ACTIVE_ENTRY_COINS))
+        if not result.get("ok"):
+            return result
+        save_json(KALSHI_15M_LATEST_STRATEGY_SWEEP_FILE, result)
+
+        top = result.get("top_strategies") or []
+        if top:
+            best = top[0]
+            logger.info(
+                "[app_kalshi] kalshi_15m strategy sweep: %d/%d combinations had real evidence, best = %s "
+                "(mean_return_pct=%.4f, profitable_fold_ratio=%.2f, total_trades=%d)",
+                result.get("combinations_with_evidence", 0), result.get("combinations_evaluated", 0),
+                best["params"], best["mean_return_pct"], best["profitable_fold_ratio"], best["total_trades"],
+            )
+        else:
+            logger.info("[app_kalshi] kalshi_15m strategy sweep: no combination cleared the real-evidence bar")
+        return result
+    except Exception as exc:
+        logger.warning("[app_kalshi] kalshi_15m strategy sweep failed: %s", exc)
+        return {"ok": False, "error": str(exc)}
+    finally:
+        gc.collect()
+
+
 @_locked_job("ai_monitor", stale_after_sec=180)
 def _run_ai_monitor() -> dict[str, Any]:
     """See ai_monitor.py's own module docstring -- a read-only, project-
@@ -1147,6 +1235,11 @@ def _ensure_background_jobs_started() -> None:
             scheduler.add_job(
                 _run_kalshi_15m_backtest, "cron", hour=KALSHI_15M_BACKTEST_HOUR_ET, minute=0,
                 id="kalshi_15m_backtest", replace_existing=True,
+            )
+            scheduler.add_job(
+                _run_kalshi_15m_strategy_sweep, "cron",
+                day_of_week=KALSHI_15M_STRATEGY_SWEEP_DAY_OF_WEEK, hour=KALSHI_15M_STRATEGY_SWEEP_HOUR_ET, minute=0,
+                id="kalshi_15m_strategy_sweep", replace_existing=True,
             )
             scheduler.add_job(
                 _run_ai_monitor, "cron", hour=AI_MONITOR_HOUR_ET, minute=0,
@@ -2089,6 +2182,36 @@ def api_kalshi_15m_backtest():
         return jsonify({"ok": False, "error": str(exc)}), 500
 
 
+@app.route("/api/kalshi15m/strategy-sweep", methods=["GET", "POST"])
+def api_kalshi_15m_strategy_sweep():
+    """GET returns the last (scheduled or manually-triggered) sweep
+    result -- cheap, instant, dashboard-safe. POST starts a fresh sweep
+    in the BACKGROUND and returns immediately with {"ok": True,
+    "started": True} -- unlike /api/kalshi15m/backtest's own synchronous
+    POST, a 10,000+-combination sweep can genuinely run for many minutes
+    (see strategy_sweep.run_parameter_sweep's own max_seconds, default 30
+    minutes), far past gunicorn's own --timeout 300 -- see
+    _run_kalshi_15m_win_streak_verification's own identical background-
+    thread pattern for why this must never block the request/response
+    cycle (or, worse, this cycle's own settlement/management/entry-scan
+    work for every market on this shared process). _locked_job makes a
+    second trigger while one is already running a safe no-op. Optional
+    JSON body {"param_grid": {...}} overrides the real, ~16,200-
+    combination default grid (_default_kalshi_15m_strategy_sweep_grid) --
+    e.g. for a smaller, faster manual sanity check."""
+    if not is_cron_authorized(request):
+        return jsonify({"ok": False, "error": "Unauthorized"}), 401
+    if request.method == "GET":
+        return jsonify(load_json(KALSHI_15M_LATEST_STRATEGY_SWEEP_FILE, {"ok": False, "reason": "no_sweep_run_yet"}))
+    body = request.get_json(silent=True) or {}
+    param_grid = body.get("param_grid")
+    threading.Thread(
+        target=_run_kalshi_15m_strategy_sweep, args=(param_grid,),
+        daemon=True, name="kalshi15m-strategy-sweep",
+    ).start()
+    return jsonify({"ok": True, "started": True})
+
+
 _JOB_LABELS = {
     "perps_fast_check": f"Fast exit check (every {PERPS_FAST_CHECK_SECONDS}s)",
     "perps_entry_scan": f"Entry scan -- all instruments (every {PERPS_CYCLE_MINUTES} min)",
@@ -2107,6 +2230,11 @@ _JOB_LABELS = {
     "kalshi_15m_backtest": (
         f"Kalshi 15m crypto walk-forward backtest + forward test (daily {KALSHI_15M_BACKTEST_HOUR_ET:02d}:00 ET; "
         f"auto-retrains both models immediately on a confirmed losing result)"
+    ),
+    "kalshi_15m_strategy_sweep": (
+        f"Kalshi 15m GOLD/SILVER/COPPER strategy sweep, ~16,200 parameter combinations walk-forward "
+        f"backtested and ranked (weekly, {KALSHI_15M_STRATEGY_SWEEP_DAY_OF_WEEK} {KALSHI_15M_STRATEGY_SWEEP_HOUR_ET:02d}:00 ET; "
+        f"reports only, never auto-applies)"
     ),
     "ai_monitor": f"Project-wide AI-powered status review (HF Inference), read-only, all 5 markets (daily {AI_MONITOR_HOUR_ET:02d}:00 ET)",
     "perps_train": f"Model retrain (daily {PERPS_TRAIN_HOUR_ET:02d}:00 ET)",

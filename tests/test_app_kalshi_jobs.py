@@ -1184,6 +1184,147 @@ def test_kalshi_15m_backtest_route_runs_a_fresh_backtest_on_post(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# kalshi_15m_strategy_sweep -- per explicit user direction: "we need to
+# work on over 10000 mix of strategies in the backtest and... perform a
+# forward test with real data and a huge historical data of the main 3
+# we will trade... generate[] [strategies,] optimise the model to
+# understand that." GOLD/SILVER/COPPER (kalshi_15m_metals_backtest), not
+# crypto -- see KALSHI_15M_STRATEGY_SWEEP_HOUR_ET's own comment.
+# ---------------------------------------------------------------------------
+def test_kalshi_15m_strategy_sweep_job_saves_a_result_and_logs_the_best_combo(monkeypatch):
+    from data import strategy_sweep
+
+    captured = {}
+    sweep_result = {
+        "ok": True, "combinations_tried": 2, "combinations_evaluated": 2, "combinations_with_evidence": 1,
+        "stopped_early": False, "folds_used": 2, "fold_models_used": ["gradient_boosting", "gradient_boosting"],
+        "top_strategies": [{
+            "params": {"model_confidence_min": 0.6}, "folds_with_evidence": 2, "total_folds": 2,
+            "mean_return_pct": 0.05, "std_return_pct": 0.01, "profitable_fold_ratio": 1.0,
+            "mean_win_rate": 0.55, "total_trades": 40,
+        }],
+        "elapsed_sec": 1.23,
+    }
+    monkeypatch.setattr(
+        strategy_sweep, "run_parameter_sweep",
+        lambda module, grid, **kw: captured.update(module=module, grid=grid, kw=kw) or sweep_result,
+    )
+    saved = {}
+    monkeypatch.setattr(app_kalshi, "save_json", lambda path, data: saved.update(path=path, data=data))
+
+    result = app_kalshi._run_kalshi_15m_strategy_sweep.__wrapped__()  # noqa: SLF001
+
+    assert result == sweep_result
+    assert saved["path"] == app_kalshi.KALSHI_15M_LATEST_STRATEGY_SWEEP_FILE
+    assert saved["data"] == sweep_result
+    assert captured["module"] is app_kalshi.kalshi_15m_metals_backtest
+    assert set(captured["grid"].keys()) == {
+        "model_confidence_min", "yes_confidence_extra_required", "assumed_entry_price",
+        "position_size_pct", "max_concurrent_positions",
+    }
+    assert captured["kw"]["coins"] == sorted(app_kalshi.kalshi_15m_strategy.ACTIVE_ENTRY_COINS)
+
+
+def test_kalshi_15m_strategy_sweep_job_accepts_a_custom_grid(monkeypatch):
+    from data import strategy_sweep
+
+    captured = {}
+    monkeypatch.setattr(
+        strategy_sweep, "run_parameter_sweep",
+        lambda module, grid, **kw: captured.update(grid=grid) or {"ok": True, "top_strategies": []},
+    )
+    monkeypatch.setattr(app_kalshi, "save_json", lambda path, data: None)
+
+    custom_grid = {"model_confidence_min": [0.55, 0.60]}
+    app_kalshi._run_kalshi_15m_strategy_sweep.__wrapped__(custom_grid)  # noqa: SLF001
+
+    assert captured["grid"] == custom_grid
+
+
+def test_kalshi_15m_strategy_sweep_job_survives_a_failure(monkeypatch):
+    from data import strategy_sweep
+
+    def raise_error(module, grid, **kw):
+        raise RuntimeError("simulated sweep crash")
+
+    monkeypatch.setattr(strategy_sweep, "run_parameter_sweep", raise_error)
+    result = app_kalshi._run_kalshi_15m_strategy_sweep.__wrapped__()  # noqa: SLF001
+    assert result["ok"] is False
+
+
+def test_kalshi_15m_strategy_sweep_job_does_not_save_a_failed_result(monkeypatch):
+    from data import strategy_sweep
+
+    monkeypatch.setattr(strategy_sweep, "run_parameter_sweep", lambda module, grid, **kw: {"ok": False, "reason": "no_data"})
+
+    def fail_if_called(path, data):
+        raise AssertionError("must not save a failed sweep result")
+
+    monkeypatch.setattr(app_kalshi, "save_json", fail_if_called)
+    result = app_kalshi._run_kalshi_15m_strategy_sweep.__wrapped__()  # noqa: SLF001
+    assert result == {"ok": False, "reason": "no_data"}
+
+
+def test_kalshi_15m_strategy_sweep_route_returns_the_cached_result_on_get(monkeypatch):
+    monkeypatch.setattr(app_kalshi, "load_json", lambda path, default: {"ok": True, "cached": True})
+    with app_kalshi.app.test_client() as client:
+        resp = client.get("/api/kalshi15m/strategy-sweep")
+        body = resp.get_json()
+        assert resp.status_code == 200
+        assert body["cached"] is True
+
+
+class _FakeThread:
+    """threading.Thread stand-in that runs its target SYNCHRONOUSLY isn't
+    used here on purpose -- unlike _SyncThread elsewhere in this file, a
+    strategy sweep is real, potentially long-running work this test must
+    NOT actually execute; this only records that a thread WOULD have been
+    started with the right target/args."""
+
+    def __init__(self, captured):
+        self._captured = captured
+
+    def start(self):
+        self._captured["started"] = True
+
+
+def test_kalshi_15m_strategy_sweep_route_starts_a_background_run_on_post(monkeypatch):
+    captured = {}
+
+    def fake_thread(*, target, args=(), kwargs=None, daemon=None, name=None):
+        captured["target"] = target
+        captured["args"] = args
+        return _FakeThread(captured)
+
+    monkeypatch.setattr(app_kalshi.threading, "Thread", fake_thread)
+
+    with app_kalshi.app.test_client() as client:
+        resp = client.post("/api/kalshi15m/strategy-sweep")
+        body = resp.get_json()
+
+    assert resp.status_code == 200
+    assert body == {"ok": True, "started": True}
+    assert captured["target"] is app_kalshi._run_kalshi_15m_strategy_sweep
+    assert captured["started"] is True
+
+
+def test_kalshi_15m_strategy_sweep_route_passes_a_custom_param_grid(monkeypatch):
+    captured = {}
+
+    def fake_thread(*, target, args=(), kwargs=None, daemon=None, name=None):
+        captured["args"] = args
+        return _FakeThread(captured)
+
+    monkeypatch.setattr(app_kalshi.threading, "Thread", fake_thread)
+
+    with app_kalshi.app.test_client() as client:
+        resp = client.post("/api/kalshi15m/strategy-sweep", json={"param_grid": {"model_confidence_min": [0.55]}})
+
+    assert resp.status_code == 200
+    assert captured["args"] == ({"model_confidence_min": [0.55]},)
+
+
+# ---------------------------------------------------------------------------
 # kalshi_15m_torch_train -- custom PyTorch MLP challenger, crypto only
 # (metals excluded for now -- see KALSHI_15M_TORCH_TRAIN_HOUR_ET's own
 # comment). Champion/challenger promotion logic lives in
