@@ -822,11 +822,17 @@ def _sample_volatility(samples: list[list[float]]) -> float | None:
     return statistics.stdev(changes)
 
 
-def compute_position_notional(available_balance_usd: float) -> float:
+def compute_position_notional(available_balance_usd: float, *, position_size_pct: float | None = None) -> float:
     """A dollar amount, not a share/coin count -- crypto orders accept
     `notional` directly, so unlike equities there's no whole-share
-    affordability problem to work around."""
-    return round(max(0.0, available_balance_usd) * POSITION_SIZE_PCT, 2)
+    affordability problem to work around.
+
+    position_size_pct (default None -> the module-level POSITION_SIZE_PCT)
+    lets a caller override the base slice -- see
+    apply_strategy_sweep_override's own comment on why this exists
+    alongside the confidence-floor override."""
+    effective_position_size_pct = POSITION_SIZE_PCT if position_size_pct is None else position_size_pct
+    return round(max(0.0, available_balance_usd) * effective_position_size_pct, 2)
 
 
 # ---------------------------------------------------------------------------
@@ -905,6 +911,46 @@ def apply_correlation_study_override(
             "reason": reason, "field": "correlation_study",
             "previous_correlation_study_enabled": previous_enabled,
             "previous_correlation_confidence_max_adjustment": previous_max_adjustment,
+        })
+        state["tuning"] = tuning
+        _save_state(state, push_durable=True)
+        return dict(state["tuning"])
+
+
+# Fields a strategy-sweep result (see strategy_sweep.py / scripts/
+# strategy_sweep_job.py) can actually change here -- see
+# kalshi_15m_strategy.apply_strategy_sweep_override's own identical
+# comment for the full reasoning. take_profit_pct, stop_loss_pct,
+# max_hold_minutes, and max_concurrent_positions are real live parameters
+# this sweep's own grid covers too, but none has override plumbing wired
+# through evaluate_candidate/scan_and_enter yet.
+_SWEEP_APPLICABLE_FIELDS = {"model_confidence_min", "position_size_pct"}
+
+
+def apply_strategy_sweep_override(params: dict[str, Any], *, source: dict[str, Any], reason: str) -> dict[str, Any]:
+    """Applies a strategy-sweep result's own live-tunable fields (see
+    _SWEEP_APPLICABLE_FIELDS above) the SAME durable, no-redeploy-needed
+    way apply_confidence_threshold_override already does -- MERGES into
+    state["tuning"]. `source` is that specific combination's own real
+    evidence (expected shape: holdout return_pct/win_rate/trade_count,
+    mean_return_pct, profitable_fold_ratio) -- recorded alongside the
+    applied values so anyone reading state["tuning"] later can see WHY
+    this fired, not just what changed. Silently ignores any key in
+    `params` outside _SWEEP_APPLICABLE_FIELDS rather than raising -- the
+    caller (scripts/strategy_sweep_job.py) passes a sweep's FULL params
+    dict uniformly across all 6 markets; which subset is actually
+    appliable is each market's own module's decision, not the caller's."""
+    applicable = {k: v for k, v in params.items() if k in _SWEEP_APPLICABLE_FIELDS}
+    with _STATE_LOCK:
+        state = _load_state()
+        tuning = dict(state.get("tuning") or {})
+        defaults = {"model_confidence_min": MODEL_CONFIDENCE_MIN, "position_size_pct": POSITION_SIZE_PCT}
+        previous = {k: tuning.get(k, defaults[k]) for k in applicable}
+        tuning.update(applicable)
+        tuning.update({
+            "updated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+            "reason": reason, "field": "strategy_sweep", "applied": applicable,
+            "previous": previous, "source": source,
         })
         state["tuning"] = tuning
         _save_state(state, push_durable=True)
@@ -1290,6 +1336,9 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
         tuning_state = state.get("tuning") or {}
         correlation_study_enabled_override = tuning_state.get("correlation_study_enabled")
         correlation_max_adjustment_override = tuning_state.get("correlation_confidence_max_adjustment")
+        # Same durable-state-driven override for base position sizing --
+        # see apply_strategy_sweep_override below.
+        effective_position_size_pct = tuning_state.get("position_size_pct", POSITION_SIZE_PCT)
         # push_durable only on the (once-daily) event a fresh reference
         # balance gets captured -- the value a restart must not silently lose.
         _save_state(state, push_durable=reference_was_just_set)
@@ -1366,7 +1415,7 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
             row = candidate["row"]
             available_balance = get_available_balance()
             entry_price = row["current_price"]
-            notional = compute_position_notional(available_balance)
+            notional = compute_position_notional(available_balance, position_size_pct=effective_position_size_pct)
             if notional < 1.0 or entry_price <= 0:
                 opened.append({"symbol": symbol, "ok": True, "action": "skipped_insufficient_budget"})
                 continue

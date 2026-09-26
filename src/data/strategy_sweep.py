@@ -458,6 +458,25 @@ def run_parameter_sweep(
                 except Exception as exc:
                     logger.warning("[strategy_sweep] holdout evaluation failed for %s: %s", entry["params"], exc)
                     entry["holdout"] = {"return_pct": 0.0, "win_rate": 0.0, "trade_count": 0, "forward_tested": False, "error": str(exc)}
+            # Real, live finding this re-ranking exists to act on, not just
+            # observe: the walk-forward-only order above put a combination
+            # with mean_return_pct=4,998% FIRST, whose own holdout return
+            # was 14.3% -- exactly the overfitting the holdout step exists
+            # to catch. Once holdout results exist, they become the REAL
+            # ranking key (a strategy nobody could tell apart from luck on
+            # data its own selection never touched is not "the best" one
+            # just because it fit the folds that picked it best) --
+            # forward_tested combinations sort first (by holdout return_pct,
+            # then win_rate), everything else (never forward_tested, or a
+            # holdout evaluation that itself failed) sorts after, in its
+            # original walk-forward order. Any caller that auto-applies
+            # top_strategies[0] (see scripts/strategy_sweep_job.py) gets the
+            # combination that actually held up out of sample, not the one
+            # that looked best on the data used to find it.
+            top_strategies.sort(
+                key=lambda e: (e["holdout"]["forward_tested"], e["holdout"]["return_pct"], e["holdout"]["win_rate"]),
+                reverse=True,
+            )
         else:
             logger.info("[strategy_sweep] holdout_bounds given but no qualifying holdout fold (insufficient data) -- top_strategies left without a 'holdout' key")
 

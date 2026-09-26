@@ -2969,6 +2969,57 @@ def test_apply_position_management_override_does_not_clobber_other_tuning_keys(m
     assert reloaded["tuning"]["partial_exit_enabled"] is True
 
 
+# ---------------------------------------------------------------------------
+# apply_strategy_sweep_override -- auto-applying a real strategy-sweep
+# result's own live-tunable fields, per explicit user direction ("pick the
+# top 3 with best returns and possibility and apply them... automatically
+# apply to the bots").
+# ---------------------------------------------------------------------------
+def test_apply_strategy_sweep_override_applies_only_the_supported_fields(monkeypatch, tmp_path):
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "state.json")
+    strat._save_state({"positions": [], "realized_pnl_by_date": {}, "trade_log": [], "daily_reference_balance": {}})  # noqa: SLF001
+
+    applied = strat.apply_strategy_sweep_override(
+        {"model_confidence_min": 0.62, "position_size_pct": 0.15, "entry_dip_pct": 0.02, "enable_shorts": True, "max_concurrent_positions": 3},
+        source={"holdout_return_pct": 8.1, "forward_tested": True}, reason="strategy sweep",
+    )
+
+    assert applied["model_confidence_min"] == 0.62
+    assert applied["position_size_pct"] == 0.15
+    assert applied["applied"] == {"model_confidence_min": 0.62, "position_size_pct": 0.15}
+    assert "entry_dip_pct" not in applied
+    assert "enable_shorts" not in applied
+    reloaded = strat._load_state()  # noqa: SLF001
+    assert reloaded["tuning"]["position_size_pct"] == 0.15
+
+
+def test_apply_strategy_sweep_override_does_not_clobber_other_tuning_keys(monkeypatch, tmp_path):
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "state.json")
+    strat._save_state({  # noqa: SLF001
+        "positions": [], "realized_pnl_by_date": {}, "trade_log": [], "daily_reference_balance": {},
+        "tuning": {"correlation_study_enabled": True, "scale_in_enabled": False},
+    })
+
+    strat.apply_strategy_sweep_override({"model_confidence_min": 0.6, "position_size_pct": 0.1}, source={}, reason="test")
+
+    reloaded = strat._load_state()  # noqa: SLF001
+    assert reloaded["tuning"]["correlation_study_enabled"] is True
+    assert reloaded["tuning"]["scale_in_enabled"] is False
+    assert reloaded["tuning"]["model_confidence_min"] == 0.6
+    assert reloaded["tuning"]["position_size_pct"] == 0.1
+
+
+def test_compute_leveraged_count_uses_the_overridden_position_size_pct(monkeypatch):
+    monkeypatch.setattr(strat, "POSITION_SIZE_PCT", 0.20)
+
+    default_count, default_detail = strat.compute_leveraged_count(1000.0, {"price": 10.0, "leverage_estimate": 1.0})
+    overridden_count, overridden_detail = strat.compute_leveraged_count(1000.0, {"price": 10.0, "leverage_estimate": 1.0}, position_size_pct=0.40)
+
+    assert default_detail["position_size_pct"] == 0.20
+    assert overridden_detail["position_size_pct"] == 0.40
+    assert overridden_count == default_count * 2
+
+
 def test_apply_position_management_override_only_changes_the_feature_passed(monkeypatch, tmp_path):
     monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "state.json")
     strat._save_state({  # noqa: SLF001

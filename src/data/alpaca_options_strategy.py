@@ -547,16 +547,24 @@ def position_exit_levels(position: dict[str, Any]) -> dict[str, float]:
     }
 
 
-def compute_contract_qty(available_balance_usd: float, contract_price: float, *, multiplier: int = 100) -> int:
+def compute_contract_qty(
+    available_balance_usd: float, contract_price: float, *, multiplier: int = 100, position_size_pct: float | None = None,
+) -> int:
     """Whole contracts only (confirmed required by Alpaca for options).
     `contract_price` is the per-share premium; the real cost of one
-    contract is contract_price * multiplier (typically 100 shares)."""
+    contract is contract_price * multiplier (typically 100 shares).
+
+    position_size_pct (default None -> the module-level POSITION_SIZE_PCT)
+    lets a caller override the base slice -- see
+    apply_strategy_sweep_override's own comment on why this exists
+    alongside the confidence-floor override."""
     if contract_price <= 0:
         return 0
     cost_per_contract = contract_price * multiplier
     if cost_per_contract <= 0:
         return 0
-    budget = max(0.0, available_balance_usd) * POSITION_SIZE_PCT
+    effective_position_size_pct = POSITION_SIZE_PCT if position_size_pct is None else position_size_pct
+    budget = max(0.0, available_balance_usd) * effective_position_size_pct
     return int(budget // cost_per_contract)
 
 
@@ -794,15 +802,64 @@ def apply_confidence_threshold_override(new_threshold: float, *, reason: str) ->
     WITHOUT a redeploy -- stored in state["tuning"] (pushed to HF like the
     rest of durable state) and read by scan_and_enter on every cycle, not
     the OS env var MODEL_CONFIDENCE_MIN is seeded from at import time. Same
-    pattern perps_strategy.py already uses."""
+    pattern perps_strategy.py already uses.
+
+    MERGES into state["tuning"] rather than replacing it wholesale -- real
+    bug found and fixed here (this used to do a wholesale replace, which
+    perps_strategy.py's/kalshi_15m_strategy.py's own identical functions
+    were ALREADY fixed for): a wholesale replace would silently wipe out
+    apply_strategy_sweep_override's own position_size_pct key the next
+    time this fires."""
     with _STATE_LOCK:
         state = _load_state()
-        previous = (state.get("tuning") or {}).get("model_confidence_min", MODEL_CONFIDENCE_MIN)
-        state["tuning"] = {
+        tuning = dict(state.get("tuning") or {})
+        previous = tuning.get("model_confidence_min", MODEL_CONFIDENCE_MIN)
+        tuning.update({
             "model_confidence_min": new_threshold,
             "updated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
-            "reason": reason, "previous": previous,
-        }
+            "reason": reason, "previous": previous, "field": "model_confidence_min",
+        })
+        state["tuning"] = tuning
+        _save_state(state, push_durable=True)
+        return dict(state["tuning"])
+
+
+# Fields a strategy-sweep result (see strategy_sweep.py / scripts/
+# strategy_sweep_job.py) can actually change here -- see
+# kalshi_15m_strategy.apply_strategy_sweep_override's own identical
+# comment for the full reasoning. take_profit_pct, stop_loss_pct,
+# max_hold_minutes, and max_concurrent_positions are real live parameters
+# this sweep's own grid covers too, but none has override plumbing wired
+# through evaluate_candidate/scan_and_enter yet.
+_SWEEP_APPLICABLE_FIELDS = {"model_confidence_min", "position_size_pct"}
+
+
+def apply_strategy_sweep_override(params: dict[str, Any], *, source: dict[str, Any], reason: str) -> dict[str, Any]:
+    """Applies a strategy-sweep result's own live-tunable fields (see
+    _SWEEP_APPLICABLE_FIELDS above) the SAME durable, no-redeploy-needed
+    way apply_confidence_threshold_override already does -- MERGES into
+    state["tuning"]. `source` is that specific combination's own real
+    evidence (expected shape: holdout return_pct/win_rate/trade_count,
+    mean_return_pct, profitable_fold_ratio) -- recorded alongside the
+    applied values so anyone reading state["tuning"] later can see WHY
+    this fired, not just what changed. Silently ignores any key in
+    `params` outside _SWEEP_APPLICABLE_FIELDS rather than raising -- the
+    caller (scripts/strategy_sweep_job.py) passes a sweep's FULL params
+    dict uniformly across all 6 markets; which subset is actually
+    appliable is each market's own module's decision, not the caller's."""
+    applicable = {k: v for k, v in params.items() if k in _SWEEP_APPLICABLE_FIELDS}
+    with _STATE_LOCK:
+        state = _load_state()
+        tuning = dict(state.get("tuning") or {})
+        defaults = {"model_confidence_min": MODEL_CONFIDENCE_MIN, "position_size_pct": POSITION_SIZE_PCT}
+        previous = {k: tuning.get(k, defaults[k]) for k in applicable}
+        tuning.update(applicable)
+        tuning.update({
+            "updated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+            "reason": reason, "field": "strategy_sweep", "applied": applicable,
+            "previous": previous, "source": source,
+        })
+        state["tuning"] = tuning
         _save_state(state, push_durable=True)
         return dict(state["tuning"])
 
@@ -1427,6 +1484,9 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
         # module-level MODEL_CONFIDENCE_MIN default until enough real trades
         # exist to justify moving it. Same pattern perps_strategy.py uses.
         confidence_min_override = (state.get("tuning") or {}).get("model_confidence_min")
+        # Same durable-state-driven override for base position sizing --
+        # see apply_strategy_sweep_override below.
+        effective_position_size_pct = (state.get("tuning") or {}).get("position_size_pct", POSITION_SIZE_PCT)
         _save_state(state, push_durable=reference_was_just_set)
     if loss_cap_breached:
         return {"opened": [], "action": "daily_loss_cap_breached"}
@@ -1484,7 +1544,7 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
                     continue
 
                 available_balance = get_available_balance()
-                qty = compute_contract_qty(available_balance, net_debit)
+                qty = compute_contract_qty(available_balance, net_debit, position_size_pct=effective_position_size_pct)
                 if qty < 1:
                     opened.append({"symbol": symbol, "ok": True, "action": "skipped_insufficient_budget"})
                     continue
@@ -1556,7 +1616,7 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
                 # credit alone would badly oversize this position.
                 available_balance = get_available_balance()
                 max_loss_per_contract = max(0.01, SPREAD_WIDTH_DOLLARS - credit_received)
-                qty = compute_contract_qty(available_balance, max_loss_per_contract)
+                qty = compute_contract_qty(available_balance, max_loss_per_contract, position_size_pct=effective_position_size_pct)
                 if qty < 1:
                     opened.append({"symbol": symbol, "ok": True, "action": "skipped_insufficient_budget"})
                     continue
@@ -1615,7 +1675,7 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
                     continue
 
                 available_balance = get_available_balance()
-                qty = compute_contract_qty(available_balance, contract_price)
+                qty = compute_contract_qty(available_balance, contract_price, position_size_pct=effective_position_size_pct)
                 if qty < 1:
                     opened.append({"symbol": symbol, "ok": True, "action": "skipped_insufficient_budget"})
                     continue

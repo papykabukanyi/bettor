@@ -173,6 +173,61 @@ form also exists (`hf jobs run` / `hf jobs scheduled create`) if a shell
 script is preferred over Python -- same image/command/flavor/schedule
 arguments.
 
+## Auto-applying the result to live trading
+
+Per explicit user direction ("pick the top 3 with best returns and
+possibility and apply them... make sure its automatically apply to the
+bots"), every successful run of `scripts/strategy_sweep_job.py` now also
+tries to auto-apply its own #1-ranked combination to that market's LIVE
+trading parameters -- immediately, no separate step needed. Selection
+rule (also explicit user direction, given after seeing a real result):
+rank by holdout/forward-test evidence, NOT raw walk-forward return --
+`strategy_sweep.run_parameter_sweep`'s own holdout step already re-sorts
+`top_strategies` this way once `holdout_bounds` is used (which this
+script always passes), so `top_strategies[0]` is already the
+holdout-best entry. `_apply_top_strategy` (in this script) then applies
+it via that market's own `apply_strategy_sweep_override` -- the SAME
+durable, no-redeploy-needed `state["tuning"]` mechanism every existing
+`apply_confidence_threshold_override` already uses -- ONLY when
+`top_strategies[0]["holdout"]["forward_tested"]` is True. A combination
+that never fired on real, untouched holdout data has not been evidenced
+at all, whatever its walk-forward ranking says, and does NOT get applied
+-- this is a real, deliberate gate, not a missing feature: it's exactly
+what caught the 4,998%-in-sample/14.3%-holdout gap this whole redesign
+exists to guard against.
+
+**Which fields actually change live behavior today**: only
+`model_confidence_min` and `position_size_pct`, across all 5 real
+strategy modules (`kalshi_15m_strategy`, `perps_strategy`,
+`alpaca_strategy`, `alpaca_crypto_strategy`, `alpaca_options_strategy`).
+Every sweep's own grid covers more dimensions than that (`assumed_entry_price`,
+`yes_confidence_extra_required`, `max_concurrent_positions`,
+`entry_dip_pct`, `take_profit_pct`/`stop_loss_pct`, `enable_shorts`, ...)
+-- each module's own `_SWEEP_APPLICABLE_FIELDS` set (see
+`apply_strategy_sweep_override`'s own docstring in each) lists exactly
+which are wired through to a real live read-side today and silently
+ignores the rest, rather than pretending they took effect.
+`assumed_entry_price` specifically has NO live equivalent at all -- a
+real order fills at whatever the real order book offers, never a fixed
+assumption; it exists purely so the backtest can sensitivity-test that
+disclosed pricing limitation. `max_concurrent_positions` is a real gap:
+kalshi_15m already governs concurrency via a DIFFERENT, trade-history-
+driven system (`compute_graduated_max_concurrent_positions`) that a flat
+sweep-picked ceiling needs real design work to compose with safely, not
+a same-pass addition.
+
+**kalshi_15m (pure crypto) is computed and published, never auto-applied**:
+its strategy module (`kalshi_15m_strategy.py`) is the SAME live module
+GOLD/SILVER/COPPER trade through (`ACTIVE_ENTRY_COINS`), and crypto isn't
+in that live-entry universe right now -- applying a crypto-discovered
+parameter set to a metals-only live account would be wrong on its face.
+Perps and the 3 alpaca markets DO auto-apply, same as kalshi_15m_metals.
+
+A failed apply (a transient HF push error, say) never takes down an
+already-successful, already-published sweep result -- `run_market_sweep`
+catches it, logs a warning, and reports `"auto_applied": false` rather
+than raising.
+
 Local/manual run (what this session actually used to verify the above):
 
 ```bash

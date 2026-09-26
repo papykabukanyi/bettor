@@ -251,6 +251,46 @@ def test_run_parameter_sweep_holdout_attaches_forward_test_results(monkeypatch):
         assert "forward_tested" in entry["holdout"]
 
 
+def test_run_parameter_sweep_holdout_reranks_above_the_walk_forward_order(monkeypatch):
+    """Real, live incident this locks in: the walk-forward-only order put
+    a combination with a huge in-sample return FIRST, whose own holdout
+    return was a fraction of that -- exactly the overfitting the holdout
+    step exists to catch. Once holdout results exist, top_strategies[0]
+    must be the one that actually held up out of sample (forward_tested,
+    highest holdout return), not the one merely best on the folds that
+    picked it -- this is what scripts/strategy_sweep_job.py's own
+    auto-apply step relies on when it takes top_strategies[0]."""
+    monkeypatch.setattr(metals_bt, "load_training_dataset", lambda: _synthetic_df(n_per_symbol=6000))
+
+    def fake_simulate(test_df, fitted, *, starting_balance, **combo):
+        # Walk-forward folds are the shorter ones (fewer rows) in
+        # DEFAULT_FOLD_BOUNDS_WITH_HOLDOUT; the holdout fold is the last,
+        # largest slice -- distinguish by row count, matching this
+        # synthetic dataset's own real fold-size shape.
+        is_holdout_call = len(test_df) > 1500
+        if combo["model_confidence_min"] == 0.55:
+            # "Great" on walk-forward, collapses on holdout -- the overfit one.
+            return_pct = 9.0 if not is_holdout_call else 0.05
+        else:
+            # Modest on walk-forward, holds up on holdout -- the real one.
+            return_pct = 1.0 if not is_holdout_call else 3.0
+        return {"return_pct": return_pct, "win_rate": 0.55, "trade_count": 50, "directional_accuracy": 0.55}
+
+    monkeypatch.setattr(metals_bt, "simulate", fake_simulate)
+    result = strategy_sweep.run_parameter_sweep(
+        metals_bt, {"model_confidence_min": [0.55, 0.60]},
+        fold_bounds=strategy_sweep.DEFAULT_FOLD_BOUNDS_WITH_HOLDOUT,
+        holdout_bounds=strategy_sweep.DEFAULT_HOLDOUT_BOUNDS,
+        min_trades_per_fold=1, min_folds_with_trades=1, min_holdout_trades=1,
+    )
+
+    assert result["ok"] is True
+    best = result["top_strategies"][0]
+    assert best["params"]["model_confidence_min"] == 0.60, "the holdout-robust combination must rank first, not the overfit walk-forward 'winner'"
+    assert best["holdout"]["forward_tested"] is True
+    assert best["holdout"]["return_pct"] == 3.0
+
+
 def test_run_parameter_sweep_without_holdout_bounds_never_attaches_holdout(monkeypatch):
     monkeypatch.setattr(metals_bt, "load_training_dataset", lambda: _synthetic_df())
     result = strategy_sweep.run_parameter_sweep(

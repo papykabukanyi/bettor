@@ -1294,3 +1294,47 @@ def test_evaluate_candidate_correlation_study_enabled_override_works_even_when_t
     )
     assert result["should_enter"] is True
     assert "correlation study" in result["reason"]
+
+
+# ---------------------------------------------------------------------------
+# apply_strategy_sweep_override -- auto-applying a real strategy-sweep
+# result's own live-tunable fields, per explicit user direction ("pick the
+# top 3 with best returns and possibility and apply them... automatically
+# apply to the bots").
+# ---------------------------------------------------------------------------
+def test_apply_strategy_sweep_override_applies_only_the_supported_fields(monkeypatch, tmp_path):
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "alpaca_crypto_state.json")
+    strat._save_state({"positions": [], "trade_log": [], "realized_pnl_by_date": {}})  # noqa: SLF001
+
+    applied = strat.apply_strategy_sweep_override(
+        {"model_confidence_min": 0.58, "position_size_pct": 0.12, "take_profit_pct": 0.02, "stop_loss_pct": 0.01},
+        source={"holdout_return_pct": 5.2, "forward_tested": True}, reason="strategy sweep",
+    )
+
+    assert applied["applied"] == {"model_confidence_min": 0.58, "position_size_pct": 0.12}
+    assert "take_profit_pct" not in applied
+    assert "stop_loss_pct" not in applied
+    state = strat._load_state()  # noqa: SLF001
+    assert state["tuning"]["position_size_pct"] == 0.12
+
+
+def test_apply_strategy_sweep_override_coexists_with_correlation_study_override(monkeypatch, tmp_path):
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "alpaca_crypto_state.json")
+    strat._save_state({"positions": [], "trade_log": [], "realized_pnl_by_date": {}})  # noqa: SLF001
+
+    strat.apply_correlation_study_override(enabled=True, reason="correlation evidence")
+    strat.apply_strategy_sweep_override({"model_confidence_min": 0.58, "position_size_pct": 0.12}, source={}, reason="sweep")
+
+    state = strat._load_state()  # noqa: SLF001
+    assert state["tuning"]["correlation_study_enabled"] is True
+    assert state["tuning"]["position_size_pct"] == 0.12
+
+
+def test_compute_position_notional_uses_the_overridden_position_size_pct(monkeypatch):
+    monkeypatch.setattr(strat, "POSITION_SIZE_PCT", 0.18)
+
+    default_notional = strat.compute_position_notional(1000.0)
+    overridden_notional = strat.compute_position_notional(1000.0, position_size_pct=0.36)
+
+    assert default_notional == 180.0
+    assert overridden_notional == 360.0

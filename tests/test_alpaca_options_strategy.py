@@ -2228,3 +2228,46 @@ def test_maybe_auto_improve_from_backtest_never_retrains_without_a_loss(monkeypa
     sweep = {"all_configs": [{"label": "current_defaults", "return_pct": 0.05, "trade_count": 50, "low_sample": False}]}
 
     strat.maybe_auto_improve_from_backtest(sweep, {"mean_return_pct": 0.02})
+
+
+# ---------------------------------------------------------------------------
+# apply_confidence_threshold_override / apply_strategy_sweep_override --
+# real bug found and fixed here: the confidence-threshold override used to
+# wholesale-replace state["tuning"] (perps_strategy.py's/
+# kalshi_15m_strategy.py's own identical functions were already fixed for
+# this), which would have silently wiped out a sweep-applied
+# position_size_pct override the next time it fired.
+# ---------------------------------------------------------------------------
+def test_apply_confidence_threshold_override_does_not_clobber_a_sweep_override(monkeypatch, tmp_path):
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "alpaca_options_state.json")
+    strat._save_state({"positions": [], "realized_pnl_by_date": {}, "trade_log": []})  # noqa: SLF001
+    strat.apply_strategy_sweep_override({"position_size_pct": 0.16}, source={}, reason="sweep")
+
+    strat.apply_confidence_threshold_override(0.58, reason="later evidence")
+
+    state = strat._load_state()  # noqa: SLF001
+    assert state["tuning"]["position_size_pct"] == 0.16
+    assert state["tuning"]["model_confidence_min"] == 0.58
+
+
+def test_apply_strategy_sweep_override_applies_only_the_supported_fields(monkeypatch, tmp_path):
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "alpaca_options_state.json")
+    strat._save_state({"positions": [], "realized_pnl_by_date": {}, "trade_log": []})  # noqa: SLF001
+
+    applied = strat.apply_strategy_sweep_override(
+        {"model_confidence_min": 0.56, "position_size_pct": 0.22, "take_profit_pct": 0.5, "max_hold_minutes": 60},
+        source={"holdout_return_pct": 3.1, "forward_tested": True}, reason="strategy sweep",
+    )
+
+    assert applied["applied"] == {"model_confidence_min": 0.56, "position_size_pct": 0.22}
+    assert "take_profit_pct" not in applied
+    assert "max_hold_minutes" not in applied
+
+
+def test_compute_contract_qty_uses_the_overridden_position_size_pct(monkeypatch):
+    monkeypatch.setattr(strat, "POSITION_SIZE_PCT", 0.20)
+
+    default_qty = strat.compute_contract_qty(1000.0, 1.0)
+    overridden_qty = strat.compute_contract_qty(1000.0, 1.0, position_size_pct=0.40)
+
+    assert overridden_qty == default_qty * 2

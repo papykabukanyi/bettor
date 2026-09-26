@@ -226,39 +226,96 @@ def _perps_extra_kwargs(combined: Any) -> dict[str, Any]:
     return {"leverage_by_ticker": fetch_leverage_by_ticker(tickers)}
 
 
-# name -> (backtest_module_path, grid_fn, combined_fn, extra_kwargs_fn | None, hf_repo_module_path, hf_repo_attr, result_filename)
+# name -> (backtest_module_path, grid_fn, combined_fn, extra_kwargs_fn | None,
+#          hf_repo_module_path, hf_repo_attr, result_filename, strategy_module_path)
 MARKET_CONFIGS: dict[str, dict[str, Any]] = {
     "kalshi_15m": {
         "backtest_module": "data.kalshi_15m_backtest", "grid_fn": _kalshi_15m_grid, "combined_fn": _kalshi_15m_combined,
         "extra_kwargs_fn": None, "repo_module": "data.kalshi_15m_model", "repo_attr": "HF_KALSHI_15M_MODEL_REPO",
-        "result_filename": "strategy_sweep_kalshi_15m.json",
+        "result_filename": "strategy_sweep_kalshi_15m.json", "strategy_module": "data.kalshi_15m_strategy",
     },
     "kalshi_15m_metals": {
         "backtest_module": "data.kalshi_15m_metals_backtest", "grid_fn": _kalshi_15m_grid, "combined_fn": _kalshi_15m_metals_combined,
         "extra_kwargs_fn": None, "repo_module": "data.kalshi_15m_metals_model", "repo_attr": "HF_KALSHI_15M_METALS_MODEL_REPO",
-        "result_filename": "strategy_sweep_kalshi_15m_metals.json",
+        "result_filename": "strategy_sweep_kalshi_15m_metals.json", "strategy_module": "data.kalshi_15m_strategy",
     },
     "stocks": {
         "backtest_module": "data.alpaca_backtest", "grid_fn": _stocks_grid, "combined_fn": _stocks_combined,
         "extra_kwargs_fn": None, "repo_module": "data.alpaca_model", "repo_attr": "HF_ALPACA_MODEL_REPO",
-        "result_filename": "strategy_sweep_stocks.json",
+        "result_filename": "strategy_sweep_stocks.json", "strategy_module": "data.alpaca_strategy",
     },
     "crypto": {
         "backtest_module": "data.alpaca_crypto_backtest", "grid_fn": _crypto_grid, "combined_fn": _crypto_combined,
         "extra_kwargs_fn": None, "repo_module": "data.alpaca_crypto_model", "repo_attr": "HF_ALPACA_CRYPTO_MODEL_REPO",
-        "result_filename": "strategy_sweep_crypto.json",
+        "result_filename": "strategy_sweep_crypto.json", "strategy_module": "data.alpaca_crypto_strategy",
     },
     "options": {
         "backtest_module": "data.alpaca_options_backtest", "grid_fn": _options_grid, "combined_fn": _options_combined,
         "extra_kwargs_fn": None, "repo_module": "data.alpaca_options_model", "repo_attr": "HF_ALPACA_OPTIONS_MODEL_REPO",
-        "result_filename": "strategy_sweep_options.json",
+        "result_filename": "strategy_sweep_options.json", "strategy_module": "data.alpaca_options_strategy",
     },
     "perps": {
         "backtest_module": "data.perps_backtest", "grid_fn": _perps_grid, "combined_fn": _perps_combined,
         "extra_kwargs_fn": _perps_extra_kwargs, "repo_module": "data.perps_model", "repo_attr": "HF_MODEL_REPO",
-        "result_filename": "strategy_sweep_perps.json",
+        "result_filename": "strategy_sweep_perps.json", "strategy_module": "data.perps_strategy",
     },
 }
+
+# kalshi_15m (pure crypto coins) deliberately never auto-applies: its own
+# strategy_module (data.kalshi_15m_strategy) is the SAME live module
+# GOLD/SILVER/COPPER trade through (kalshi_15m_strategy.ACTIVE_ENTRY_COINS),
+# and crypto isn't in that live-entry universe right now -- applying a
+# crypto-discovered parameter set to a metals-only live account would be
+# wrong on its face. Its sweep still runs and publishes, purely for
+# observability/future use.
+_MARKETS_NEVER_AUTO_APPLIED = {"kalshi_15m"}
+
+
+def _apply_top_strategy(market: str, result: dict[str, Any]) -> dict[str, Any] | None:
+    """Auto-applies the sweep's own #1-ranked combination to that market's
+    LIVE trading parameters -- per explicit user direction: "pick the top
+    3 with best returns and possibility and apply them... automatically
+    apply to the bots", corrected (same conversation) to rank by holdout/
+    forward-test evidence rather than raw walk-forward return, after a
+    real sweep run showed the walk-forward-only "best" collapsing from
+    4,998% in-sample to 14.3% out-of-sample -- see
+    strategy_sweep.run_parameter_sweep's own holdout-reranking comment.
+
+    Applies ONLY top_strategies[0] (already the holdout-best entry once
+    holdout_bounds is used -- see that reranking), and ONLY when it
+    actually cleared forward_tested=True: a combination that never fired
+    on real, untouched holdout data hasn't been evidenced at all, walk-
+    forward ranking or not, and auto-applying it would be indistinguishable
+    from guessing. Returns None (does nothing, not an error) when there's
+    no top_strategies, no holdout info at all, the top entry isn't
+    forward_tested, or this market is in _MARKETS_NEVER_AUTO_APPLIED --
+    each a real, expected, non-error outcome (an immature archive, every
+    candidate failing to hold up out of sample, or a market with no live
+    entry surface to apply to), not a failure."""
+    if market in _MARKETS_NEVER_AUTO_APPLIED:
+        return None
+    top = result.get("top_strategies") or []
+    if not top:
+        return None
+    best = top[0]
+    holdout = best.get("holdout")
+    if not holdout or not holdout.get("forward_tested"):
+        logger.info("[strategy_sweep_job] %s: top combination not forward_tested -- not auto-applying", market)
+        return None
+
+    import datetime as dt
+    import importlib
+
+    strategy_module = importlib.import_module(MARKET_CONFIGS[market]["strategy_module"])
+    source = {
+        "mean_return_pct": best.get("mean_return_pct"), "profitable_fold_ratio": best.get("profitable_fold_ratio"),
+        "holdout_return_pct": holdout.get("return_pct"), "holdout_win_rate": holdout.get("win_rate"),
+        "holdout_trade_count": holdout.get("trade_count"), "market": market,
+    }
+    reason = f"strategy sweep {dt.datetime.now(dt.timezone.utc).date().isoformat()} -- holdout return {holdout.get('return_pct')}%"
+    applied = strategy_module.apply_strategy_sweep_override(best["params"], source=source, reason=reason)
+    logger.info("[strategy_sweep_job] %s: auto-applied sweep result -- %s", market, applied.get("applied"))
+    return applied
 
 
 def run_market_sweep(
@@ -307,6 +364,12 @@ def run_market_sweep(
 
     if result.get("ok"):
         _publish_result(market, result)
+        try:
+            applied = _apply_top_strategy(market, result)
+            result["auto_applied"] = applied is not None
+        except Exception as exc:  # never let a live-tuning write take down an already-successful sweep result
+            logger.warning("[strategy_sweep_job] %s: auto-apply failed (sweep result still valid): %s", market, exc)
+            result["auto_applied"] = False
     return result
 
 

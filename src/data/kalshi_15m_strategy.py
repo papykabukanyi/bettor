@@ -1325,6 +1325,11 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
         # increase -- see USE_WIN_STREAK_SIZING's own comment and
         # apply_win_streak_sizing_override below.
         effective_use_win_streak_sizing = tuning_state.get("win_streak_sizing_enabled", USE_WIN_STREAK_SIZING)
+        # Same durable-state-driven override for base position sizing --
+        # see apply_strategy_sweep_override below (the first field here
+        # a strategy-sweep result can actually change live, alongside
+        # model_confidence_min above).
+        effective_position_size_pct = tuning_state.get("position_size_pct", POSITION_SIZE_PCT)
         # How many concurrent positions the account is allowed to hold
         # RIGHT NOW -- see compute_graduated_max_concurrent_positions'
         # own comment. Computed ONCE per scan (not re-read per coin) so
@@ -1456,7 +1461,7 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
         if effective_use_win_streak_sizing:
             win_streak_multiplier = compute_win_streak_size_multiplier(coin, state.get("trade_log"))
         contracts = max(1, int(
-            (_account_budget_usd() * POSITION_SIZE_PCT * size_multiplier * loss_streak_multiplier * win_streak_multiplier)
+            (_account_budget_usd() * effective_position_size_pct * size_multiplier * loss_streak_multiplier * win_streak_multiplier)
             / cost_basis
         ))
         client_order_id = str(uuid.uuid4())
@@ -1692,6 +1697,56 @@ def apply_correlation_study_override(*, enabled: bool | None = None, max_adjustm
             "reason": reason, "field": "correlation_study",
             "previous_correlation_study_enabled": previous_enabled,
             "previous_correlation_confidence_max_adjustment": previous_max_adjustment,
+        })
+        state["tuning"] = tuning
+        _save_state(state, push_durable=True)
+        return dict(state["tuning"])
+
+
+# Fields a strategy-sweep result (see strategy_sweep.py / scripts/
+# strategy_sweep_job.py) can actually change here -- NOT every key a
+# sweep's own `params` dict contains. assumed_entry_price has no live
+# equivalent at all: a real Kalshi order fills at whatever the real order
+# book actually offers, never a fixed assumption -- that parameter exists
+# purely so the backtest can sensitivity-test its own disclosed pricing
+# limitation, not as something a live strategy could ever "set".
+# yes_confidence_extra_required and max_concurrent_positions ARE real
+# live parameters but aren't tuning-aware yet: the former has no override
+# plumbing threaded through evaluate_candidate's own signature the way
+# confidence_min already does, and the latter is already governed by a
+# DIFFERENT, trade-history-driven system (compute_graduated_max_concurrent_positions)
+# that a flat sweep-picked ceiling would need real design work to compose
+# with safely, not a same-pass addition. Left out of this set (not
+# silently accepted and then dropped) so apply_strategy_sweep_override's
+# own return value honestly reflects only what actually changed.
+_SWEEP_APPLICABLE_FIELDS = {"model_confidence_min", "position_size_pct"}
+
+
+def apply_strategy_sweep_override(params: dict[str, Any], *, source: dict[str, Any], reason: str) -> dict[str, Any]:
+    """Applies a strategy-sweep result's own live-tunable fields (see
+    _SWEEP_APPLICABLE_FIELDS above) the SAME durable, no-redeploy-needed
+    way apply_confidence_threshold_override already does -- MERGED into
+    state["tuning"] (never a wholesale replace, same reasoning as every
+    other apply_*_override here). `source` is that specific combination's
+    own real evidence (expected shape: holdout return_pct/win_rate/
+    trade_count, mean_return_pct, profitable_fold_ratio) -- recorded
+    alongside the applied values so anyone reading state["tuning"] later
+    can see WHY this fired, not just what changed. Silently ignores any
+    key in `params` outside _SWEEP_APPLICABLE_FIELDS rather than raising --
+    the caller (scripts/strategy_sweep_job.py) passes a sweep's FULL
+    params dict uniformly across all 6 markets; which subset is actually
+    appliable is each market's own module's decision, not the caller's."""
+    applicable = {k: v for k, v in params.items() if k in _SWEEP_APPLICABLE_FIELDS}
+    with _STATE_LOCK:
+        state = _load_state()
+        tuning = dict(state.get("tuning") or {})
+        defaults = {"model_confidence_min": MODEL_CONFIDENCE_MIN, "position_size_pct": POSITION_SIZE_PCT}
+        previous = {k: tuning.get(k, defaults[k]) for k in applicable}
+        tuning.update(applicable)
+        tuning.update({
+            "updated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+            "reason": reason, "field": "strategy_sweep", "applied": applicable,
+            "previous": previous, "source": source,
         })
         state["tuning"] = tuning
         _save_state(state, push_durable=True)

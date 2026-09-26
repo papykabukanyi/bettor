@@ -1500,3 +1500,59 @@ def test_record_milestone_persists_baseline_and_high_water_mark(monkeypatch, tmp
     state = strat._load_state()  # noqa: SLF001
     assert state["milestones"]["baseline_balance"] == 100.0
     assert state["milestones"]["high_water_mark"] == 150.0
+
+
+# ---------------------------------------------------------------------------
+# apply_confidence_threshold_override / apply_strategy_sweep_override --
+# real bug found and fixed here: the confidence-threshold override used to
+# wholesale-replace state["tuning"] (perps_strategy.py's/
+# kalshi_15m_strategy.py's own identical functions were already fixed for
+# this), which would have silently wiped out a sweep-applied
+# position_size_pct override the next time it fired.
+# ---------------------------------------------------------------------------
+def test_apply_confidence_threshold_override_persists_to_state(monkeypatch, tmp_path):
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "alpaca_state.json")
+    strat._save_state({"positions": [], "trade_log": [], "realized_pnl_by_date": {}})  # noqa: SLF001
+
+    result = strat.apply_confidence_threshold_override(0.60, reason="evidence-gated: test")
+
+    assert result["model_confidence_min"] == 0.60
+    assert result["previous"] == strat.MODEL_CONFIDENCE_MIN
+    state = strat._load_state()  # noqa: SLF001
+    assert state["tuning"]["model_confidence_min"] == 0.60
+
+
+def test_apply_confidence_threshold_override_does_not_clobber_a_sweep_override(monkeypatch, tmp_path):
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "alpaca_state.json")
+    strat._save_state({"positions": [], "trade_log": [], "realized_pnl_by_date": {}})  # noqa: SLF001
+    strat.apply_strategy_sweep_override({"position_size_pct": 0.15}, source={}, reason="sweep")
+
+    strat.apply_confidence_threshold_override(0.60, reason="later evidence")
+
+    state = strat._load_state()  # noqa: SLF001
+    assert state["tuning"]["position_size_pct"] == 0.15  # survived the confidence-only override
+    assert state["tuning"]["model_confidence_min"] == 0.60
+
+
+def test_apply_strategy_sweep_override_applies_only_the_supported_fields(monkeypatch, tmp_path):
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "alpaca_state.json")
+    strat._save_state({"positions": [], "trade_log": [], "realized_pnl_by_date": {}})  # noqa: SLF001
+
+    applied = strat.apply_strategy_sweep_override(
+        {"model_confidence_min": 0.55, "position_size_pct": 0.18, "entry_dip_pct": 0.01, "min_volume_z": 0.5},
+        source={"holdout_return_pct": 6.4, "forward_tested": True}, reason="strategy sweep",
+    )
+
+    assert applied["applied"] == {"model_confidence_min": 0.55, "position_size_pct": 0.18}
+    assert "entry_dip_pct" not in applied
+    assert "min_volume_z" not in applied
+
+
+def test_compute_position_size_uses_the_overridden_position_size_pct(monkeypatch):
+    monkeypatch.setattr(strat, "POSITION_SIZE_PCT", 0.22)
+
+    default_count = strat.compute_position_size(1000.0, 10.0)
+    overridden_count = strat.compute_position_size(1000.0, 10.0, position_size_pct=0.44)
+
+    assert default_count == 22
+    assert overridden_count == 44

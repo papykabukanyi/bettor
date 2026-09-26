@@ -1202,11 +1202,95 @@ def test_apply_confidence_threshold_override_and_apply_correlation_study_overrid
     assert state["tuning"]["correlation_study_enabled"] is True
     assert state["tuning"]["correlation_confidence_max_adjustment"] == 0.09
 
-    kalshi_15m_strategy.apply_confidence_threshold_override(0.70, reason="more confidence evidence")
+
+# ---------------------------------------------------------------------------
+# apply_strategy_sweep_override -- auto-applying a real strategy-sweep
+# result's own live-tunable fields, per explicit user direction ("pick the
+# top 3 with best returns and possibility and apply them... automatically
+# apply to the bots"), corrected to rank by holdout/forward-test evidence
+# after a real sweep run showed the walk-forward-only "best" collapsing
+# out of sample.
+# ---------------------------------------------------------------------------
+def test_apply_strategy_sweep_override_applies_only_the_supported_fields(monkeypatch):
+    kalshi_15m_strategy._save_state({"positions": [], "trade_log": [], "realized_pnl_by_date": {}})  # noqa: SLF001
+
+    applied = kalshi_15m_strategy.apply_strategy_sweep_override(
+        {
+            "model_confidence_min": 0.6, "position_size_pct": 0.07,
+            "assumed_entry_price": 0.35, "yes_confidence_extra_required": 0.02, "max_concurrent_positions": 3,
+        },
+        source={"holdout_return_pct": 14.3, "forward_tested": True},
+        reason="strategy sweep 2026-09-26",
+    )
+
+    assert applied["model_confidence_min"] == 0.6
+    assert applied["position_size_pct"] == 0.07
+    assert applied["applied"] == {"model_confidence_min": 0.6, "position_size_pct": 0.07}
+    assert "assumed_entry_price" not in applied
+    assert "yes_confidence_extra_required" not in applied
+    assert applied["source"]["forward_tested"] is True
     state = kalshi_15m_strategy._load_state()  # noqa: SLF001
-    assert state["tuning"]["model_confidence_min"] == 0.70
-    assert state["tuning"]["correlation_study_enabled"] is True  # survived the SECOND confidence override too
-    assert state["tuning"]["correlation_confidence_max_adjustment"] == 0.09
+    assert state["tuning"]["model_confidence_min"] == 0.6
+    assert state["tuning"]["position_size_pct"] == 0.07
+
+
+def test_apply_strategy_sweep_override_records_the_previous_values(monkeypatch):
+    kalshi_15m_strategy._save_state({"positions": [], "trade_log": [], "realized_pnl_by_date": {}})  # noqa: SLF001
+    kalshi_15m_strategy.apply_confidence_threshold_override(0.62, reason="earlier evidence")
+
+    applied = kalshi_15m_strategy.apply_strategy_sweep_override(
+        {"model_confidence_min": 0.6, "position_size_pct": 0.07}, source={}, reason="strategy sweep",
+    )
+
+    assert applied["previous"]["model_confidence_min"] == 0.62  # the prior override, not the module default
+    assert applied["previous"]["position_size_pct"] == kalshi_15m_strategy.POSITION_SIZE_PCT  # never set before
+
+
+def test_apply_strategy_sweep_override_coexists_with_correlation_study_override(monkeypatch):
+    kalshi_15m_strategy._save_state({"positions": [], "trade_log": [], "realized_pnl_by_date": {}})  # noqa: SLF001
+
+    kalshi_15m_strategy.apply_correlation_study_override(enabled=True, reason="correlation evidence")
+    kalshi_15m_strategy.apply_strategy_sweep_override(
+        {"model_confidence_min": 0.6, "position_size_pct": 0.07}, source={}, reason="strategy sweep",
+    )
+
+    state = kalshi_15m_strategy._load_state()  # noqa: SLF001
+    assert state["tuning"]["correlation_study_enabled"] is True  # survived the sweep override
+    assert state["tuning"]["model_confidence_min"] == 0.6
+    assert state["tuning"]["position_size_pct"] == 0.07
+
+
+def test_scan_and_enter_sizes_positions_using_a_tuned_position_size_pct_override(monkeypatch):
+    """Real behavior this locks in: apply_strategy_sweep_override's own
+    position_size_pct must actually change what scan_and_enter sizes with,
+    not just sit in state["tuning"] unread -- the exact "no-redeploy-needed"
+    contract every other apply_*_override here already delivers. Every
+    trust/cooldown gate is left at its own real default (empty trade_log
+    -> "insufficient_history"/"no_streak", both pass) rather than mocked,
+    so this exercises the actual live gating path, not a stand-in for it."""
+    kalshi_15m_strategy._save_state({"positions": [], "trade_log": [], "realized_pnl_by_date": {}})  # noqa: SLF001
+    kalshi_15m_strategy.apply_strategy_sweep_override(
+        {"position_size_pct": 0.30}, source={}, reason="test evidence",
+    )
+    monkeypatch.setattr(kalshi_15m_strategy, "_account_budget_usd", lambda: 100.0)
+
+    def fake_evaluate_candidate(coin, **kw):
+        return {
+            "ok": True, "side": "yes", "confidence": 0.9, "probability_up": 0.9,
+            "market": {"ticker": f"KX{coin}-TEST", "no_bid_dollars": 0.50, "close_ts": 9_999_999_999},
+            "effective_confidence_min": 0.58,
+        }
+
+    monkeypatch.setattr(kalshi_15m_strategy, "evaluate_candidate", fake_evaluate_candidate)
+
+    result = kalshi_15m_strategy.scan_and_enter(dry_run=True)
+
+    entered = [c for c in result["checks"] if c.get("action") == "entered"]
+    assert entered, f"expected at least one real entry, got: {result['checks']}"
+    # 0.30 * $100 budget / $0.50 cost_basis = 60 contracts -- would be 10
+    # at the module's own default POSITION_SIZE_PCT (0.05).
+    assert entered[0]["count"] > int(100.0 * kalshi_15m_strategy.POSITION_SIZE_PCT / 0.50)
+    assert entered[0]["count"] == 60
 
 
 def test_scan_and_enter_reads_the_correlation_override_from_state_tuning(monkeypatch):

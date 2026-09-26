@@ -163,6 +163,118 @@ def test_kalshi_15m_metals_combined_dedupes_to_one_row_per_window(monkeypatch):
     assert result is deduped
 
 
+# ---------------------------------------------------------------------------
+# _apply_top_strategy -- auto-applying the sweep's own #1-ranked (by
+# holdout/forward-test evidence) combination to live trading parameters,
+# per explicit user direction: "pick the top 3 with best returns and
+# possibility and apply them... automatically apply to the bots",
+# corrected to require forward_tested=True after a real sweep run showed
+# the walk-forward-only "best" collapsing out of sample.
+# ---------------------------------------------------------------------------
+def _sweep_result_with_top(params, *, forward_tested=True, holdout_return_pct=5.0):
+    return {
+        "ok": True, "top_strategies": [{
+            "params": params, "mean_return_pct": 12.3, "profitable_fold_ratio": 1.0,
+            "holdout": {"return_pct": holdout_return_pct, "win_rate": 0.55, "trade_count": 40, "forward_tested": forward_tested},
+        }],
+    }
+
+
+def test_apply_top_strategy_applies_the_forward_tested_top_entry(monkeypatch):
+    from data import kalshi_15m_metals_model, kalshi_15m_strategy
+
+    monkeypatch.setattr(kalshi_15m_metals_model, "HF_KALSHI_15M_METALS_MODEL_REPO", "papylove/kalshi-15m-metals-model")
+    captured = {}
+
+    def fake_apply(params, *, source, reason):
+        captured.update(params=params, source=source, reason=reason)
+        return {"applied": params}
+
+    monkeypatch.setattr(kalshi_15m_strategy, "apply_strategy_sweep_override", fake_apply)
+    result = _sweep_result_with_top({"model_confidence_min": 0.6, "position_size_pct": 0.08})
+
+    applied = job._apply_top_strategy("kalshi_15m_metals", result)  # noqa: SLF001
+
+    assert applied == {"applied": {"model_confidence_min": 0.6, "position_size_pct": 0.08}}
+    assert captured["params"] == {"model_confidence_min": 0.6, "position_size_pct": 0.08}
+    assert captured["source"]["holdout_return_pct"] == 5.0
+    assert captured["source"]["market"] == "kalshi_15m_metals"
+
+
+def test_apply_top_strategy_skips_when_not_forward_tested(monkeypatch):
+    from data import kalshi_15m_strategy
+
+    def fail_if_called(*a, **kw):
+        raise AssertionError("must not apply a combination that was never forward_tested")
+
+    monkeypatch.setattr(kalshi_15m_strategy, "apply_strategy_sweep_override", fail_if_called)
+    result = _sweep_result_with_top({"model_confidence_min": 0.6}, forward_tested=False)
+
+    assert job._apply_top_strategy("kalshi_15m_metals", result) is None  # noqa: SLF001
+
+
+def test_apply_top_strategy_skips_when_there_are_no_top_strategies():
+    assert job._apply_top_strategy("kalshi_15m_metals", {"ok": True, "top_strategies": []}) is None  # noqa: SLF001
+
+
+def test_apply_top_strategy_never_auto_applies_kalshi_15m_crypto(monkeypatch):
+    """kalshi_15m (pure crypto) shares its strategy module with metals, but
+    crypto isn't in the live-entry universe right now -- applying a
+    crypto-discovered parameter set to a metals-only live account would be
+    wrong on its face."""
+    from data import kalshi_15m_strategy
+
+    def fail_if_called(*a, **kw):
+        raise AssertionError("kalshi_15m must never auto-apply")
+
+    monkeypatch.setattr(kalshi_15m_strategy, "apply_strategy_sweep_override", fail_if_called)
+    result = _sweep_result_with_top({"model_confidence_min": 0.6})
+
+    assert job._apply_top_strategy("kalshi_15m", result) is None  # noqa: SLF001
+
+
+def test_run_market_sweep_auto_applies_after_publishing(monkeypatch):
+    from data import strategy_sweep
+
+    monkeypatch.setitem(job.MARKET_CONFIGS["kalshi_15m_metals"], "combined_fn", lambda days: pd.DataFrame({"ts": [1], "symbol": ["GOLD"]}))
+    sweep_result = _sweep_result_with_top({"model_confidence_min": 0.6})
+    monkeypatch.setattr(strategy_sweep, "run_parameter_sweep", lambda *a, **kw: sweep_result)
+    monkeypatch.setattr(job, "_publish_result", lambda market, result: None)
+    monkeypatch.setattr(job, "_apply_top_strategy", lambda market, result: {"applied": {"model_confidence_min": 0.6}})
+
+    result = job.run_market_sweep(
+        "kalshi_15m_metals", n_workers=1, max_seconds=10.0, max_combinations=10,
+        days=None, param_grid={"model_confidence_min": [0.6]}, dry_run=False,
+    )
+
+    assert result["auto_applied"] is True
+
+
+def test_run_market_sweep_survives_an_auto_apply_failure(monkeypatch):
+    """A live-tuning write failing (e.g. a transient HF push error) must
+    never take down an already-successful, already-published sweep
+    result."""
+    from data import strategy_sweep
+
+    monkeypatch.setitem(job.MARKET_CONFIGS["kalshi_15m_metals"], "combined_fn", lambda days: pd.DataFrame({"ts": [1], "symbol": ["GOLD"]}))
+    sweep_result = _sweep_result_with_top({"model_confidence_min": 0.6})
+    monkeypatch.setattr(strategy_sweep, "run_parameter_sweep", lambda *a, **kw: sweep_result)
+    monkeypatch.setattr(job, "_publish_result", lambda market, result: None)
+
+    def raise_error(market, result):
+        raise RuntimeError("simulated HF push failure")
+
+    monkeypatch.setattr(job, "_apply_top_strategy", raise_error)
+
+    result = job.run_market_sweep(
+        "kalshi_15m_metals", n_workers=1, max_seconds=10.0, max_combinations=10,
+        days=None, param_grid={"model_confidence_min": [0.6]}, dry_run=False,
+    )
+
+    assert result["ok"] is True
+    assert result["auto_applied"] is False
+
+
 def test_perps_extra_kwargs_computed_from_the_combined_frame(monkeypatch):
     from data import perps_backtest
 

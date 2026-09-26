@@ -987,6 +987,48 @@ def apply_correlation_study_override(
         return dict(state["tuning"])
 
 
+# Fields a strategy-sweep result (see strategy_sweep.py / scripts/
+# strategy_sweep_job.py) can actually change here -- see
+# kalshi_15m_strategy.apply_strategy_sweep_override's own identical
+# comment for the full reasoning. entry_dip_pct, enable_shorts, and
+# max_concurrent_positions are real live parameters this sweep's own grid
+# covers too, but none has override plumbing wired through
+# scan_for_entries/evaluate_candidate yet -- left out (not silently
+# accepted and dropped) rather than pretending they took effect.
+_SWEEP_APPLICABLE_FIELDS = {"model_confidence_min", "position_size_pct"}
+
+
+def apply_strategy_sweep_override(params: dict[str, Any], *, source: dict[str, Any], reason: str) -> dict[str, Any]:
+    """Applies a strategy-sweep result's own live-tunable fields (see
+    _SWEEP_APPLICABLE_FIELDS above) the SAME durable, no-redeploy-needed
+    way apply_confidence_threshold_override already does -- MERGES into
+    state["tuning"] (never a wholesale replace, same reasoning as every
+    other apply_*_override here). `source` is that specific combination's
+    own real evidence (expected shape: holdout return_pct/win_rate/
+    trade_count, mean_return_pct, profitable_fold_ratio) -- recorded
+    alongside the applied values so anyone reading state["tuning"] later
+    can see WHY this fired, not just what changed. Silently ignores any
+    key in `params` outside _SWEEP_APPLICABLE_FIELDS rather than raising --
+    the caller (scripts/strategy_sweep_job.py) passes a sweep's FULL
+    params dict uniformly across all 6 markets; which subset is actually
+    appliable is each market's own module's decision, not the caller's."""
+    applicable = {k: v for k, v in params.items() if k in _SWEEP_APPLICABLE_FIELDS}
+    with _STATE_LOCK:
+        state = _load_state()
+        tuning = dict(state.get("tuning") or {})
+        defaults = {"model_confidence_min": MODEL_CONFIDENCE_MIN, "position_size_pct": POSITION_SIZE_PCT}
+        previous = {k: tuning.get(k, defaults[k]) for k in applicable}
+        tuning.update(applicable)
+        tuning.update({
+            "updated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+            "reason": reason, "field": "strategy_sweep", "applied": applicable,
+            "previous": previous, "source": source,
+        })
+        state["tuning"] = tuning
+        _save_state(state, push_durable=True)
+        return dict(state["tuning"])
+
+
 # feature name -> (state["tuning"] key, module-global name). All 3 are
 # simple booleans (unlike correlation_study's extra max_adjustment knob),
 # so one shared apply function covers all of them instead of 3 near-
@@ -1067,6 +1109,7 @@ def compute_conviction_size_multiplier(
 
 def compute_leveraged_count(
     available_balance_usd: float, market: dict[str, Any], *, size_multiplier: float = 1.0,
+    position_size_pct: float | None = None,
 ) -> tuple[int, dict[str, Any]]:
     """How many WHOLE contracts POSITION_SIZE_PCT (times size_multiplier) of
     the balance can control at this market's own embedded leverage. The
@@ -1079,14 +1122,20 @@ def compute_leveraged_count(
     size_multiplier (default 1.0, unchanged behavior) lets a caller scale
     this specific slice up or down -- see USE_CONVICTION_SIZING (bigger for
     a higher-conviction entry, scan_and_enter's own call site) and
-    compute_scale_in_count (a smaller add to an already-open position)."""
+    compute_scale_in_count (a smaller add to an already-open position).
+
+    position_size_pct (default None -> the module-level POSITION_SIZE_PCT)
+    lets a caller override the base slice itself -- see
+    apply_strategy_sweep_override's own comment on why this exists
+    alongside the confidence-floor override."""
+    effective_position_size_pct = POSITION_SIZE_PCT if position_size_pct is None else position_size_pct
     price = float(market.get("price") or 0.0)
     leverage = float(market.get("leverage_estimate") or 1.0) or 1.0
-    margin_budget_usd = round(available_balance_usd * POSITION_SIZE_PCT * size_multiplier, 6)
+    margin_budget_usd = round(available_balance_usd * effective_position_size_pct * size_multiplier, 6)
     notional_capacity_usd = round(margin_budget_usd * leverage, 6)
     count = int(notional_capacity_usd // price) if price > 0 else 0
     detail = {
-        "available_balance_usd": available_balance_usd, "position_size_pct": POSITION_SIZE_PCT,
+        "available_balance_usd": available_balance_usd, "position_size_pct": effective_position_size_pct,
         "size_multiplier": size_multiplier,
         "margin_budget_usd": margin_budget_usd, "leverage_estimate": leverage,
         "notional_capacity_usd": notional_capacity_usd, "contract_price": price, "count": count,
@@ -2792,6 +2841,9 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
         tuning_state = state.get("tuning") or {}
         correlation_study_enabled_override = tuning_state.get("correlation_study_enabled")
         correlation_max_adjustment_override = tuning_state.get("correlation_confidence_max_adjustment")
+        # Same durable-state-driven override for base position sizing --
+        # see apply_strategy_sweep_override below.
+        effective_position_size_pct = tuning_state.get("position_size_pct", POSITION_SIZE_PCT)
         # USE_SCALE_IN/USE_CONVICTION_SIZING are read as bare module globals
         # (see manage_open_positions's own identical sync, right before its
         # per-position loop) -- synced here too since scan_and_enter is the
@@ -2886,7 +2938,9 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
             compute_conviction_size_multiplier(candidate.get("entry_confidence"), candidate.get("effective_confidence_min"))
             if USE_CONVICTION_SIZING else 1.0
         )
-        count, sizing_detail = compute_leveraged_count(available_balance_usd, sizing_market, size_multiplier=size_multiplier)
+        count, sizing_detail = compute_leveraged_count(
+            available_balance_usd, sizing_market, size_multiplier=size_multiplier, position_size_pct=effective_position_size_pct,
+        )
         if count < 1:
             opened.append({
                 "ticker": ticker, "ok": True, "action": "skipped_insufficient_budget",
