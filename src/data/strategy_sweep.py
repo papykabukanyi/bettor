@@ -95,7 +95,7 @@ DEFAULT_MAX_COMBINATIONS = 50_000
 
 # Real, live finding (not a hypothetical): the already-deployed 16,200-
 # combination kalshi_15m_metals sweep surfaced top_strategies with
-# mean_return_pct as high as 3.09e+20 -- traced to assumed_entry_price=0.1
+# mean_return_pct as high as 3.09e+20 -- traced to a low assumed_entry_price
 # (kalshi_15m_backtest.simulate's/kalshi_15m_metals_backtest.simulate's own
 # disclosed pricing-assumption limitation: EVERY trade fills at one fixed
 # price regardless of the model's real confidence) combined with
@@ -108,12 +108,19 @@ DEFAULT_MAX_COMBINATIONS = 50_000
 # that size -- excluded from ranking/top_strategies entirely (counted
 # separately in combinations_excluded_as_unrealistic) rather than left to
 # silently crowd out real, plausible findings or mislead anyone glancing
-# at "top strategy: 3e20% return." The ceiling here is deliberately far
-# above anything a genuine edge could plausibly produce over one fold's
-# test window (a real strategy compounding to even 1000% in one fold would
-# already be an extraordinary, highly suspect result) -- generous enough
-# to never hide a real finding, not tuned to this one incident.
-MAX_PLAUSIBLE_MEAN_RETURN_PCT = 100_000.0
+# at "top strategy: 3e20% return."
+#
+# First set to 100,000 (1000x) as a "clearly generous, never hides a real
+# finding" ceiling -- but a REAL full 544,000-combination run on real HF
+# Job compute (see docs/HF_JOBS_STRATEGY_SWEEP_MIGRATION.md) showed that
+# was still too loose: entries at ~98,000% (980x an account, in the SAME
+# assumed_entry_price=0.15 mechanism) slipped through easily, just under
+# the old bar. Tightened to 5,000% (50x an account in one fold's test
+# window) -- even a genuinely exceptional real trading edge sustained
+# over a few hundred trades in a matter of weeks should not plausibly
+# exceed that; anything beyond it is far more likely to be this same
+# fixed-price-compounding artifact than a real, executable finding.
+MAX_PLAUSIBLE_MEAN_RETURN_PCT = 5_000.0
 
 # The same 4 expanding-window folds walkforward.DEFAULT_FOLD_BOUNDS
 # already uses, minus the last one -- reserved instead as an untouched

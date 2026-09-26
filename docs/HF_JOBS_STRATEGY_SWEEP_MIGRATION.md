@@ -40,11 +40,23 @@ schedule it.
   HF-published result FIRST (falling back to its own smaller in-Space job
   only if HF has nothing yet) -- `?market=kalshi_15m` or
   `?market=kalshi_15m_metals` (default).
-- Real, live-verified end to end: a manual run against the real
-  `kalshi_15m_metals` archive (1,858 real rows today) completed in 8
-  seconds and published to `papylove/kalshi-15m-metals-model`. It also
-  caught something real on the way in: the walk-forward-only ranking's
-  "best" combination (`model_confidence_min=0.52`) returned 5.2% mean
+- Real, live-verified end to end, twice: a small manual run (local
+  machine) against the real `kalshi_15m_metals` archive (1,858 real rows
+  at the time) completed in 8 seconds and published to
+  `papylove/kalshi-15m-metals-model`. Then a REAL Hugging Face Job (not
+  local -- `cpu-upgrade`, 6 workers) ran the FULL 544,000-combination
+  default grid for 10 real minutes: 131,520 combinations actually
+  evaluated (~219 combos/sec on this archive's current size -- faster
+  than the "mature archive" planning table below, since this market's
+  real archive is still young), 113,991 cleared the evidence bar, and
+  17,529 were caught and excluded by MAX_PLAUSIBLE_MEAN_RETURN_PCT --
+  which is itself how a SECOND real bug got found: the first ceiling
+  (100,000%) was still too loose, letting ~98,000%-return entries through
+  (same assumed_entry_price-compounding artifact, just under the old
+  bar) -- tightened to 5,000% after this real run exposed it. Also caught
+  something real on the way in that's a genuine finding, not a bug: the
+  walk-forward-only ranking's "best" combination (`model_confidence_min=0.52`)
+  returned 5.2% mean
   return across the 3 walk-forward folds, but only 0.56% on the untouched
   holdout slice -- while `0.60`, ranked *worst* on walk-forward, held up
   best out of sample (2.21%, 63% win rate). Exactly the overfitting
@@ -65,7 +77,11 @@ Each combination needs 3 `simulate()` calls (one per walk-forward fold,
 check if it survives ranking -- call it ~3 calls/combination for the
 throughput math below. Using the MATURE-archive number (20.1 calls/sec/
 core -> ~6.7 combos/sec/core) as the honest planning baseline, since every
-market's archive keeps growing and per-call cost grows with it:
+market's archive keeps growing and per-call cost grows with it (a real
+`cpu-upgrade`/6-worker HF Job run against the metals archive's CURRENT,
+still-young size measured ~219 combos/sec -- notably faster than this
+table's own planning number, confirming this table is the conservative,
+not optimistic, estimate):
 
 | HF flavor | vCPU | $/hour | workers used (vCPU-2) | combos/sec | combos/hour |
 |---|---|---|---|---|---|
@@ -115,6 +131,7 @@ run_job(
     image="python:3.11-slim",
     command=[
         "bash", "-c",
+        "apt-get update -qq && apt-get install -y -qq --no-install-recommends git >/dev/null && "
         "git clone --depth 1 https://github.com/papykabukanyi/bettor.git /app && "
         "cd /app && pip install -q -r requirements.txt && "
         "python scripts/strategy_sweep_job.py --market kalshi_15m_metals --n-workers 30 --max-seconds 7200",
@@ -137,6 +154,7 @@ create_scheduled_job(
     image="python:3.11-slim",
     command=[
         "bash", "-c",
+        "apt-get update -qq && apt-get install -y -qq --no-install-recommends git >/dev/null && "
         "git clone --depth 1 https://github.com/papykabukanyi/bettor.git /app && "
         "cd /app && pip install -q -r requirements.txt && "
         "python scripts/strategy_sweep_job.py --market kalshi_15m_metals --n-workers 30 --max-seconds 7200",
