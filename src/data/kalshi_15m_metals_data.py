@@ -98,6 +98,15 @@ METAL_TO_NEWS_QUERY = {
     "PLATINUM": "platinum price commodity", "PALLADIUM": "palladium price commodity",
 }
 
+# A second, metals-specific newsroom feed (matched per-metal the same way
+# crypto_news.get_sentiment's own _match_headlines_for_coin matches
+# CoinTelegraph/CryptoSlate/Decrypt per-coin) was tried here and pulled
+# back out after live re-verification failed: Mining.com's feed returned
+# real RSS once, then 403'd four straight times; the next candidate tried
+# (FXStreet) failed the same way under repeat requests. See
+# crypto_news.get_generic_sentiment's own docstring for the full evidence.
+# Metals runs on the single Google News query below until a genuinely
+# reliable second source turns up.
 LABEL_HORIZON_MINUTES = int(os.getenv("KALSHI_15M_METALS_LABEL_HORIZON_MINUTES", "15") or "15")
 
 # A bounded rolling window, not the full ever-growing history -- this file

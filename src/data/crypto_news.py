@@ -5,6 +5,14 @@ Free, no-key sources (live-tested 2026-07-22, all return real content):
   2. CoinTelegraph RSS -- crypto-specific newsroom (general feed)
   3. CryptoSlate RSS   -- crypto-specific newsroom (general feed)
   4. Decrypt RSS       -- crypto-specific newsroom (general feed)
+  5. Alternative.me Fear & Greed Index (live-tested 2026-09-26,
+     https://api.alternative.me/fng/) -- a genuinely DIFFERENT kind of
+     signal from the four headline sources above: a numeric 0-100,
+     market-WIDE (not per-coin) crowd risk-appetite gauge, updated
+     roughly once a day, no key required. See
+     _fetch_fear_greed_contribution's own comment for how this blends
+     into sentiment_score (additive, not a replacement -- headline-based
+     score keeps most of the weight).
 
 The three newsroom feeds are general (not per-coin) but free and unlimited,
 so every coin gets its OWN individual slice of them: each feed is fetched
@@ -81,6 +89,14 @@ _cache: dict[str, tuple[dict[str, Any], float]] = {}
 # a lighter neighbor, not a bug in our own request volume.
 _GENERAL_FEED_CACHE_TTL_SEC = 1800
 _general_feed_cache: dict[str, tuple[list[str], float]] = {}
+
+# Fear & Greed Index -- market-wide, not per-coin, and updates roughly
+# once a day (its own API response reports a ~21h "time_until_update" in
+# a real live check) -- an hourly re-check is more than enough, no need
+# to burn a request every sentiment call.
+_FEAR_GREED_URL = "https://api.alternative.me/fng/?limit=1"
+_FEAR_GREED_CACHE_TTL_SEC = 3600
+_fear_greed_cache: tuple[float, float] | None = None  # (contribution, cached_at)
 
 CRYPTOPANIC_API_KEY = os.getenv("CRYPTOPANIC_API_KEY", "")
 NEWSDATA_API_KEY = os.getenv("NEWSDATA_API_KEY", "")
@@ -368,6 +384,36 @@ def _fetch_serpapi(coin_symbol: str) -> list[str]:
     return serpapi_client.search_news(query)
 
 
+def _fetch_fear_greed_contribution() -> float:
+    """Alternative.me's Fear & Greed Index (free, no key, confirmed live
+    2026-09-26: https://api.alternative.me/fng/) -- crypto market-WIDE
+    (not per-coin) risk-appetite gauge, a real numeric 0-100 index rather
+    than more headline text. Rescaled to the same [-1, 1] range
+    _score_headlines' own output already uses (50 = neutral, matching
+    that function's own "no signal" 0.0) so it blends into sentiment_score
+    as one more vote in get_sentiment below, not a new feature column of
+    its own -- adding a genuinely new feature column ripples through
+    every market's own FEATURE_COLUMNS/trained model/historical-row
+    backward-compatibility, a materially bigger change than blending an
+    extra signal into an already-existing one. Returns 0.0 (neutral, no
+    contribution) on any failure -- same "a missing signal never blocks a
+    trade" posture as every other optional source here."""
+    global _fear_greed_cache
+    now = time.time()
+    if _fear_greed_cache and (now - _fear_greed_cache[1]) < _FEAR_GREED_CACHE_TTL_SEC:
+        return _fear_greed_cache[0]
+    contribution = 0.0
+    try:
+        resp = requests.get(_FEAR_GREED_URL, timeout=_TIMEOUT_SEC, headers={"User-Agent": "Mozilla/5.0"})
+        resp.raise_for_status()
+        value = float(resp.json()["data"][0]["value"])
+        contribution = max(-1.0, min(1.0, (value - 50.0) / 50.0))
+    except Exception as exc:
+        logger.warning("[crypto_news] Fear & Greed Index fetch failed: %s", exc)
+    _fear_greed_cache = (contribution, now)
+    return contribution
+
+
 def get_sentiment(coin_symbol: str, *, use_limited_sources: bool = True) -> dict[str, Any]:
     """Sentiment for one coin symbol (e.g. "BTC"). Cached per-coin for
     _CACHE_TTL_SEC since news doesn't meaningfully change minute to minute.
@@ -404,9 +450,17 @@ def get_sentiment(coin_symbol: str, *, use_limited_sources: bool = True) -> dict
     general_feed_headlines.extend(_fetch_rss_titles_cached("https://decrypt.co/feed", source_name="decrypt"))
     headlines.extend(_match_headlines_for_coin(general_feed_headlines, symbol))
 
-    score, volume = _score_headlines(headlines)
+    headline_score, volume = _score_headlines(headlines)
+    # Blended, not replaced -- this coin's own real headlines keep most of
+    # the weight (80%); the market-wide Fear & Greed reading adds a
+    # smaller (20%) risk-appetite nudge on top. See
+    # _fetch_fear_greed_contribution's own comment on why this is additive
+    # rather than a new feature column.
+    fear_greed = _fetch_fear_greed_contribution()
+    score = max(-1.0, min(1.0, headline_score * 0.8 + fear_greed * 0.2))
     result = {
         "coin": symbol, "sentiment_score": score, "headline_volume": volume,
+        "headline_sentiment_score": headline_score, "fear_greed_index_contribution": fear_greed,
         "computed_at": time.time(),
     }
     _cache[symbol] = (result, now)
@@ -432,7 +486,17 @@ def get_generic_sentiment(query: str, *, cache_key: str) -> dict[str, Any]:
     so two different callers can't collide on the exact query string by
     coincidence -- namespaced under "generic:" in the SAME _cache dict as
     coin symbols so a future metal/commodity ticker can never collide with
-    an actual coin symbol either."""
+    an actual coin symbol either.
+
+    A second, metals-specific newsroom feed (Mining.com) was tried here and
+    deliberately pulled back out: it returned real RSS on the FIRST check,
+    but four follow-up checks came back Cloudflare-blocked (403), and the
+    next candidate tried (FXStreet's general feed) failed the same way
+    under repeat requests (429 / Cloudflare error 1015) even after backing
+    off. Neither held up to the "actually reliable, not a one-time fluke"
+    bar this codebase holds every other source to (see this module's own
+    docstring), so metals stays on the single Google News query below
+    until a genuinely reliable second source is found."""
     key = f"generic:{cache_key}"
     cached = _cache.get(key)
     now = time.time()

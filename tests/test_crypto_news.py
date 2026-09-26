@@ -358,11 +358,18 @@ def test_match_headlines_for_coin_avoids_false_positives_on_common_words():
 def _isolated_sentiment_caches(monkeypatch):
     """NOT autouse -- only the get_sentiment() tests below need this; the
     _fetch_rss_titles_cached-specific tests above test that function's real
-    caching behavior and must not have it stubbed out from under them."""
+    caching behavior and must not have it stubbed out from under them.
+    _fetch_fear_greed_contribution is stubbed too -- unlike every other
+    source here, it needs no API key at all, so without this it would
+    make a REAL network call (api.alternative.me) on every test in this
+    file that exercises get_sentiment(), the exact "instant and
+    deterministic in CI" property this codebase's own test suites hold
+    themselves to elsewhere."""
     monkeypatch.setattr(news, "_cache", {})
     monkeypatch.setattr(news, "_general_feed_cache", {})
     monkeypatch.setattr(news, "_fetch_google_news_rss", lambda query: [])
     monkeypatch.setattr(news, "_fetch_rss_titles_cached", lambda url, *, source_name, limit=40: [])
+    monkeypatch.setattr(news, "_fetch_fear_greed_contribution", lambda: 0.0)
     yield
 
 
@@ -429,6 +436,100 @@ def test_get_generic_sentiment_does_not_collide_with_a_coin_symbol_cache_entry(m
     monkeypatch.setattr(news, "_fetch_google_news_rss", lambda query: [])
     result = news.get_generic_sentiment("gold price commodity", cache_key="GOLD")
     assert result["sentiment_score"] == 0.0  # the real computed value, not the coin cache's 0.9
+
+
+# ---------------------------------------------------------------------------
+# A second, metals-specific newsroom feed (Mining.com, then FXStreet as a
+# fallback candidate) was tried here per explicit user direction ("add more
+# free source[s] of... news sentiments") and deliberately pulled back out:
+# live re-verification found both Cloudflare-blocked under repeat requests
+# (403, then 429 / error 1015) rather than reliably live -- see
+# get_generic_sentiment's own docstring for the full evidence. This test
+# guards against silently reintroducing a second-source fetch without that
+# same re-verification bar being met again.
+# ---------------------------------------------------------------------------
+def test_get_generic_sentiment_only_ever_fetches_google_news_no_second_source(monkeypatch, _isolated_sentiment_caches):
+    def fail_if_called(url, *, source_name, limit=40):
+        raise AssertionError("get_generic_sentiment must not fetch any second newsroom feed")
+
+    monkeypatch.setattr(news, "_fetch_rss_titles_cached", fail_if_called)
+    monkeypatch.setattr(news, "_fetch_google_news_rss", lambda query: ["Gold miners report record output"])
+    result = news.get_generic_sentiment("gold price commodity", cache_key="GOLD")
+    assert result["headline_volume"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Fear & Greed Index -- per explicit user direction, a genuinely
+# DIFFERENT (non-text, market-wide) signal blended into get_sentiment's
+# own sentiment_score.
+# ---------------------------------------------------------------------------
+def test_fetch_fear_greed_contribution_rescales_to_minus_one_to_one(monkeypatch):
+    monkeypatch.setattr(news, "_fear_greed_cache", None)
+
+    class _FakeResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"data": [{"value": "100"}]}  # max greed
+
+    monkeypatch.setattr(news.requests, "get", lambda url, timeout, headers: _FakeResponse())
+    assert news._fetch_fear_greed_contribution() == pytest.approx(1.0)  # noqa: SLF001
+
+
+def test_fetch_fear_greed_contribution_neutral_at_50(monkeypatch):
+    monkeypatch.setattr(news, "_fear_greed_cache", None)
+
+    class _FakeResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"data": [{"value": "50"}]}
+
+    monkeypatch.setattr(news.requests, "get", lambda url, timeout, headers: _FakeResponse())
+    assert news._fetch_fear_greed_contribution() == pytest.approx(0.0)  # noqa: SLF001
+
+
+def test_fetch_fear_greed_contribution_returns_neutral_on_failure(monkeypatch):
+    monkeypatch.setattr(news, "_fear_greed_cache", None)
+
+    def fail(url, timeout, headers):
+        raise RuntimeError("network error")
+
+    monkeypatch.setattr(news.requests, "get", fail)
+    assert news._fetch_fear_greed_contribution() == 0.0  # noqa: SLF001
+
+
+def test_fetch_fear_greed_contribution_is_cached(monkeypatch):
+    monkeypatch.setattr(news, "_fear_greed_cache", None)
+    calls = {"n": 0}
+
+    class _FakeResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            calls["n"] += 1
+            return {"data": [{"value": "75"}]}
+
+    monkeypatch.setattr(news.requests, "get", lambda url, timeout, headers: _FakeResponse())
+    news._fetch_fear_greed_contribution()  # noqa: SLF001
+    news._fetch_fear_greed_contribution()  # noqa: SLF001 -- cached, no second fetch
+    assert calls["n"] == 1
+
+
+def test_get_sentiment_blends_fear_greed_into_the_final_score(monkeypatch, _isolated_sentiment_caches):
+    monkeypatch.setattr(news, "_fetch_fear_greed_contribution", lambda: 1.0)  # max greed
+    monkeypatch.setattr(news, "_fetch_cryptopanic", lambda symbol: [])
+    monkeypatch.setattr(news, "_fetch_newsdata_io", lambda symbol: [])
+    # No headlines at all -- headline_sentiment_score is neutral (0.0), so
+    # the final blended score should be exactly the Fear & Greed
+    # contribution's own 20% weight.
+    result = news.get_sentiment("BTC")
+    assert result["headline_sentiment_score"] == 0.0
+    assert result["fear_greed_index_contribution"] == 1.0
+    assert result["sentiment_score"] == pytest.approx(0.2)
 
 
 def test_prewarm_sentiment_populates_the_cache_for_every_coin(monkeypatch, _isolated_sentiment_caches):
