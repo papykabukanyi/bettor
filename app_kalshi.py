@@ -1662,6 +1662,7 @@ def api_status():
     latest_cycle = load_json(LATEST_CYCLE_FILE, {})
     latest_position_check = load_json(LATEST_POSITION_CHECK_FILE, {})
     account = _cached_account_snapshot()
+    effective_params = perps_strategy.effective_strategy_params(state)
 
     realized_pnl_by_date = state.get("realized_pnl_by_date") or {}
     total_realized_pnl = round(sum(float(v) for v in realized_pnl_by_date.values()), 6)
@@ -1699,7 +1700,7 @@ def api_status():
         "account": account,
         "positions": positions,
         "open_position_count": len(positions),
-        "max_concurrent_positions": perps_strategy.MAX_CONCURRENT_POSITIONS,
+        "max_concurrent_positions": effective_params["max_concurrent_positions"],
         "today_realized_pnl_usd": float(realized_pnl_by_date.get(et_today().isoformat(), 0.0)),
         "total_realized_pnl_usd": total_realized_pnl,
         # Real trades only -- explicit user direction ("we doing only real
@@ -1731,8 +1732,8 @@ def api_status():
             "remote_alpaca_study": crypto_correlation.study_health(crypto_correlation.get_remote_alpaca_study()),
         },
         "params": {
-            "position_size_pct": perps_strategy.POSITION_SIZE_PCT,
-            "max_concurrent_positions": perps_strategy.MAX_CONCURRENT_POSITIONS,
+            "position_size_pct": effective_params["position_size_pct"],
+            "max_concurrent_positions": effective_params["max_concurrent_positions"],
             "take_profit_pct": perps_strategy.TAKE_PROFIT_PCT,
             "stop_loss_pct": perps_strategy.STOP_LOSS_PCT,
             "quick_profit_pct": perps_strategy.QUICK_PROFIT_PCT,
@@ -1741,7 +1742,7 @@ def api_status():
             "volatility_quick_profit_pct": perps_strategy.VOLATILITY_QUICK_PROFIT_PCT,
             "max_hold_minutes": perps_strategy.MAX_HOLD_MINUTES,
             "daily_loss_cap_pct": perps_strategy.DAILY_LOSS_CAP_PCT,
-            "model_confidence_min": perps_strategy.MODEL_CONFIDENCE_MIN,
+            "model_confidence_min": effective_params["model_confidence_min"],
             "shorts_enabled": perps_strategy.ENABLE_SHORTS,
             "maker_orders_enabled": perps_strategy.ENABLE_MAKER_ORDERS,
             "scale_in_enabled": perps_strategy.USE_SCALE_IN,
@@ -1776,6 +1777,7 @@ def api_kalshi_15m_status():
     trade_log = state.get("trade_log") or []
     realized_pnl_by_date = state.get("realized_pnl_by_date") or {}
     total_realized_pnl = round(sum(float(v) for v in realized_pnl_by_date.values()), 6)
+    effective_params = kalshi_15m_strategy.effective_strategy_params(state)
 
     positions = []
     for p in state.get("positions") or []:
@@ -1800,7 +1802,7 @@ def api_kalshi_15m_status():
         "account_budget_usd": kalshi_15m_strategy._account_budget_usd(),  # noqa: SLF001
         "positions": positions,
         "open_position_count": len(positions),
-        "max_concurrent_positions": kalshi_15m_strategy.MAX_CONCURRENT_POSITIONS,
+        "max_concurrent_positions": effective_params["max_concurrent_positions"],
         "today_realized_pnl_usd": float(realized_pnl_by_date.get(et_today().isoformat(), 0.0)),
         "total_realized_pnl_usd": total_realized_pnl,
         # Real trades only -- see alpaca_server.py's identical fix this
@@ -1834,10 +1836,10 @@ def api_kalshi_15m_status():
         # existing-position management, just not new entries.
         "active_entry_coins": sorted(kalshi_15m_strategy.ACTIVE_ENTRY_COINS),
         "params": {
-            "model_confidence_min": kalshi_15m_strategy.MODEL_CONFIDENCE_MIN,
+            "model_confidence_min": effective_params["model_confidence_min"],
             "yes_confidence_extra_required": kalshi_15m_strategy.YES_CONFIDENCE_EXTRA_REQUIRED,
-            "position_size_pct": kalshi_15m_strategy.POSITION_SIZE_PCT,
-            "max_concurrent_positions": kalshi_15m_strategy.MAX_CONCURRENT_POSITIONS,
+            "position_size_pct": effective_params["position_size_pct"],
+            "max_concurrent_positions": effective_params["max_concurrent_positions"],
             "min_seconds_to_close_for_entry": kalshi_15m_strategy.MIN_SECONDS_TO_CLOSE_FOR_ENTRY,
             "use_volume_confirmation": kalshi_15m_strategy.USE_VOLUME_CONFIRMATION,
             "use_real_outcome_calibration": kalshi_15m_strategy.USE_REAL_OUTCOME_CALIBRATION,

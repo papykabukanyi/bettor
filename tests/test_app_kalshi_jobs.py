@@ -1753,3 +1753,27 @@ def test_verify_order_mechanics_survives_an_order_placement_failure(monkeypatch)
         resp = client.post("/api/kalshi15m/verify-order-mechanics")
         assert resp.status_code == 500
         assert resp.get_json()["ok"] is False
+
+
+def test_api_kalshi_15m_status_reports_effective_not_raw_tuning_params(monkeypatch):
+    """Real, confirmed bug this locks in: this route used to report
+    kalshi_15m_strategy.MODEL_CONFIDENCE_MIN/.POSITION_SIZE_PCT directly --
+    stale the moment ANY tuning override fires. Confirmed live: after a
+    strategy-sweep auto-apply changed the real model_confidence_min to
+    0.5628 and position_size_pct to 0.10, the dashboard kept showing
+    0.58/0.05."""
+    from data import kalshi_15m_strategy
+
+    kalshi_15m_strategy._save_state({"positions": [], "trade_log": [], "realized_pnl_by_date": {}})  # noqa: SLF001
+    kalshi_15m_strategy.apply_strategy_sweep_override(
+        {"model_confidence_min": 0.5628, "position_size_pct": 0.10}, source={}, reason="strategy sweep",
+    )
+
+    with app_kalshi.app.test_client() as client:
+        resp = client.get("/api/kalshi15m/status")
+        body = resp.get_json()
+
+    assert resp.status_code == 200
+    assert body["params"]["model_confidence_min"] == 0.5628
+    assert body["params"]["position_size_pct"] == 0.10
+    assert body["max_concurrent_positions"] == body["params"]["max_concurrent_positions"]

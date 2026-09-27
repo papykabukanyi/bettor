@@ -915,6 +915,7 @@ def api_alpaca_options_status():
 
     realized_pnl_by_date = state.get("realized_pnl_by_date") or {}
     total_realized_pnl = round(sum(float(v) for v in realized_pnl_by_date.values()), 6)
+    effective_params = alpaca_options_strategy.effective_strategy_params(state)
     # Real gap found in review: the dashboard showed entry premium + static
     # TP/SL levels for every open position but never its CURRENT premium or
     # unrealized P&L, and never the real exit_check reason text
@@ -947,7 +948,7 @@ def api_alpaca_options_status():
         "available_balance": float(account.get("cash") or 0.0),
         "positions": positions,
         "open_position_count": len(positions),
-        "max_concurrent_positions": alpaca_options_strategy.MAX_CONCURRENT_POSITIONS,
+        "max_concurrent_positions": effective_params["max_concurrent_positions"],
         "today_realized_pnl_usd": float(realized_pnl_by_date.get(et_today().isoformat(), 0.0)),
         "total_realized_pnl_usd": total_realized_pnl,
         # Real trades only -- explicit user direction ("we doing only real
@@ -971,13 +972,13 @@ def api_alpaca_options_status():
         "latest_walkforward": latest_walkforward,
         "market_session": market_session,
         "params": {
-            "position_size_pct": alpaca_options_strategy.POSITION_SIZE_PCT,
-            "max_concurrent_positions": alpaca_options_strategy.MAX_CONCURRENT_POSITIONS,
+            "position_size_pct": effective_params["position_size_pct"],
+            "max_concurrent_positions": effective_params["max_concurrent_positions"],
             "take_profit_pct": alpaca_options_strategy.TAKE_PROFIT_PCT,
             "stop_loss_pct": alpaca_options_strategy.STOP_LOSS_PCT,
             "max_hold_minutes": alpaca_options_strategy.MAX_HOLD_MINUTES,
             "daily_loss_cap_pct": alpaca_options_strategy.DAILY_LOSS_CAP_PCT,
-            "model_confidence_min": alpaca_options_strategy.MODEL_CONFIDENCE_MIN,
+            "model_confidence_min": effective_params["model_confidence_min"],
             "min_days_to_expiration": alpaca_options_data.MIN_DAYS_TO_EXPIRATION,
             "max_days_to_expiration": alpaca_options_data.MAX_DAYS_TO_EXPIRATION,
             "fast_check_seconds": ALPACA_OPTIONS_FAST_CHECK_SECONDS,

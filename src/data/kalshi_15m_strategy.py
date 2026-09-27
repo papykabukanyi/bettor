@@ -1618,6 +1618,33 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
     }
 
 
+def effective_strategy_params(state: dict[str, Any] | None = None) -> dict[str, Any]:
+    """The REAL, currently-effective values scan_and_enter actually trades
+    with -- tuning-aware overrides where any exist (apply_confidence_threshold_override,
+    apply_strategy_sweep_override, the graduated-concurrency system), falling
+    back to the module-level env-var defaults otherwise. Real, confirmed bug
+    this fixes: /api/kalshi15m/status used to report the raw module
+    constants directly (kalshi_15m_strategy.MODEL_CONFIDENCE_MIN, .POSITION_SIZE_PCT,
+    .MAX_CONCURRENT_POSITIONS) -- accurate only until the FIRST tuning
+    override ever fires. Confirmed live: after a strategy-sweep auto-apply
+    changed the real, live model_confidence_min to 0.5628 and
+    position_size_pct to 0.10, the dashboard kept showing 0.58/0.05 --
+    the module defaults, not what real trades were actually being sized
+    and gated with. One shared function so the status route and
+    scan_and_enter itself can never drift apart on what "effective" means
+    (scan_and_enter still computes these inline for its own hot path, not
+    by calling this -- see its own comments; this exists for reporting/
+    display callers that don't already have a loaded `state`)."""
+    if state is None:
+        state = _load_state()
+    tuning = state.get("tuning") or {}
+    return {
+        "model_confidence_min": tuning.get("model_confidence_min", MODEL_CONFIDENCE_MIN),
+        "position_size_pct": tuning.get("position_size_pct", POSITION_SIZE_PCT),
+        "max_concurrent_positions": compute_graduated_max_concurrent_positions(state.get("trade_log")),
+    }
+
+
 KALSHI_15M_SHARD_INDEX = 2  # Crypto and Commodities -- see kalshi_15m.get_balance_by_shard's own docstring
 
 

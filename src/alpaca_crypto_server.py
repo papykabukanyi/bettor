@@ -979,6 +979,7 @@ def _crypto_status_snapshot() -> dict[str, Any]:
 
     realized_pnl_by_date = state.get("realized_pnl_by_date") or {}
     total_realized_pnl = round(sum(float(v) for v in realized_pnl_by_date.values()), 6)
+    effective_params = alpaca_crypto_strategy.effective_strategy_params(state)
     # Real gap found in review: the dashboard showed entry price + static
     # TP/SL levels for every open position but never its CURRENT price or
     # unrealized P&L, and never the real exit_check reason text
@@ -1010,7 +1011,7 @@ def _crypto_status_snapshot() -> dict[str, Any]:
         "available_balance": float(account.get("cash") or 0.0),
         "positions": positions,
         "open_position_count": len(positions),
-        "max_concurrent_positions": alpaca_crypto_strategy.MAX_CONCURRENT_POSITIONS,
+        "max_concurrent_positions": effective_params["max_concurrent_positions"],
         "today_realized_pnl_usd": float(realized_pnl_by_date.get(et_today().isoformat(), 0.0)),
         "total_realized_pnl_usd": total_realized_pnl,
         # Real trades only -- explicit user direction ("we doing only real
@@ -1036,13 +1037,13 @@ def _crypto_status_snapshot() -> dict[str, Any]:
         # own docstring / app_kalshi.py's identical field for perps.
         "correlation_study_health": crypto_correlation.study_health(crypto_correlation.get_alpaca_study()),
         "params": {
-            "position_size_pct": alpaca_crypto_strategy.POSITION_SIZE_PCT,
-            "max_concurrent_positions": alpaca_crypto_strategy.MAX_CONCURRENT_POSITIONS,
+            "position_size_pct": effective_params["position_size_pct"],
+            "max_concurrent_positions": effective_params["max_concurrent_positions"],
             "take_profit_pct": alpaca_crypto_strategy.TAKE_PROFIT_PCT,
             "stop_loss_pct": alpaca_crypto_strategy.STOP_LOSS_PCT,
             "max_hold_minutes": alpaca_crypto_strategy.MAX_HOLD_MINUTES,
             "daily_loss_cap_pct": alpaca_crypto_strategy.DAILY_LOSS_CAP_PCT,
-            "model_confidence_min": alpaca_crypto_strategy.MODEL_CONFIDENCE_MIN,
+            "model_confidence_min": effective_params["model_confidence_min"],
             "min_volume_z": alpaca_crypto_strategy.MIN_VOLUME_Z,
             "min_volatility_ratio": alpaca_crypto_strategy.MIN_VOLATILITY_RATIO,
             "taker_fee_rate": alpaca_crypto_strategy.TAKER_FEE_RATE,

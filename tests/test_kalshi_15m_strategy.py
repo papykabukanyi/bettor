@@ -1293,6 +1293,44 @@ def test_scan_and_enter_sizes_positions_using_a_tuned_position_size_pct_override
     assert entered[0]["count"] == 60
 
 
+# ---------------------------------------------------------------------------
+# effective_strategy_params -- real, confirmed bug this fixes: a status
+# route reporting the raw module constants (MODEL_CONFIDENCE_MIN,
+# POSITION_SIZE_PCT, MAX_CONCURRENT_POSITIONS) directly stayed accurate
+# only until the FIRST tuning override ever fired. Confirmed live: after
+# a strategy-sweep auto-apply changed the real model_confidence_min to
+# 0.5628 and position_size_pct to 0.10, /api/kalshi15m/status kept
+# reporting 0.58/0.05 -- the module defaults, not what real trades were
+# actually being sized and gated with.
+# ---------------------------------------------------------------------------
+def test_effective_strategy_params_falls_back_to_module_defaults_with_no_tuning(monkeypatch):
+    kalshi_15m_strategy._save_state({"positions": [], "trade_log": [], "realized_pnl_by_date": {}})  # noqa: SLF001
+
+    params = kalshi_15m_strategy.effective_strategy_params()
+
+    assert params["model_confidence_min"] == kalshi_15m_strategy.MODEL_CONFIDENCE_MIN
+    assert params["position_size_pct"] == kalshi_15m_strategy.POSITION_SIZE_PCT
+    assert params["max_concurrent_positions"] == kalshi_15m_strategy.GRADUATED_CONCURRENCY_START_SLOTS
+
+
+def test_effective_strategy_params_reflects_a_sweep_override(monkeypatch):
+    kalshi_15m_strategy._save_state({"positions": [], "trade_log": [], "realized_pnl_by_date": {}})  # noqa: SLF001
+    kalshi_15m_strategy.apply_strategy_sweep_override(
+        {"model_confidence_min": 0.5628, "position_size_pct": 0.10}, source={}, reason="strategy sweep",
+    )
+
+    params = kalshi_15m_strategy.effective_strategy_params()
+
+    assert params["model_confidence_min"] == 0.5628
+    assert params["position_size_pct"] == 0.10
+
+
+def test_effective_strategy_params_accepts_an_already_loaded_state():
+    state = {"positions": [], "trade_log": [], "tuning": {"model_confidence_min": 0.7}}
+    params = kalshi_15m_strategy.effective_strategy_params(state)
+    assert params["model_confidence_min"] == 0.7
+
+
 def test_scan_and_enter_reads_the_correlation_override_from_state_tuning(monkeypatch):
     monkeypatch.setattr(kalshi_15m_strategy, "MAX_CONCURRENT_POSITIONS", len(kalshi_15m_strategy.ASSET_SERIES))
     monkeypatch.setattr(kalshi_15m_strategy, "GRADUATED_CONCURRENCY_ENABLED", False)

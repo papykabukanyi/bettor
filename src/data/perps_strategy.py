@@ -1029,6 +1029,29 @@ def apply_strategy_sweep_override(params: dict[str, Any], *, source: dict[str, A
         return dict(state["tuning"])
 
 
+def effective_strategy_params(state: dict[str, Any] | None = None) -> dict[str, Any]:
+    """The REAL, currently-effective values scan_and_enter actually trades
+    with -- tuning-aware overrides where any exist (apply_confidence_threshold_override,
+    apply_strategy_sweep_override), falling back to the module-level
+    env-var defaults otherwise. Real, confirmed bug this fixes (found and
+    fixed first in kalshi_15m_strategy.py's own identical function, then
+    confirmed to affect every other market's status route too): reporting
+    the raw module constants directly is accurate only until the FIRST
+    tuning override ever fires. max_concurrent_positions has no override
+    mechanism here (unlike kalshi_15m's own graduated-concurrency system),
+    so the raw module constant for it is genuinely always accurate --
+    included anyway so callers never need to know which fields happen to
+    be tunable today."""
+    if state is None:
+        state = _load_state()
+    tuning = state.get("tuning") or {}
+    return {
+        "model_confidence_min": tuning.get("model_confidence_min", MODEL_CONFIDENCE_MIN),
+        "position_size_pct": tuning.get("position_size_pct", POSITION_SIZE_PCT),
+        "max_concurrent_positions": MAX_CONCURRENT_POSITIONS,
+    }
+
+
 # feature name -> (state["tuning"] key, module-global name). All 3 are
 # simple booleans (unlike correlation_study's extra max_adjustment knob),
 # so one shared apply function covers all of them instead of 3 near-

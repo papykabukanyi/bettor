@@ -864,6 +864,24 @@ def apply_strategy_sweep_override(params: dict[str, Any], *, source: dict[str, A
         return dict(state["tuning"])
 
 
+def effective_strategy_params(state: dict[str, Any] | None = None) -> dict[str, Any]:
+    """The REAL, currently-effective values scan_and_enter actually trades
+    with -- tuning-aware overrides where any exist, falling back to the
+    module-level env-var defaults otherwise. Real, confirmed bug this
+    fixes (found first in kalshi_15m_strategy.py's own identical function,
+    confirmed to affect every market's status route): reporting the raw
+    module constants directly is accurate only until the FIRST tuning
+    override ever fires."""
+    if state is None:
+        state = _load_state()
+    tuning = state.get("tuning") or {}
+    return {
+        "model_confidence_min": tuning.get("model_confidence_min", MODEL_CONFIDENCE_MIN),
+        "position_size_pct": tuning.get("position_size_pct", POSITION_SIZE_PCT),
+        "max_concurrent_positions": MAX_CONCURRENT_POSITIONS,
+    }
+
+
 def _durable_state_slice(state: dict[str, Any]) -> dict[str, Any]:
     # "tuning" (the evidence-gated confidence-threshold override -- see
     # apply_confidence_threshold_override above) MUST be included here -- a
