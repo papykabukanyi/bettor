@@ -763,9 +763,54 @@ def _run_kalshi_15m_cycle() -> dict[str, Any]:
             target=_run_kalshi_15m_win_streak_verification, args=(cooldown,),
             daemon=True, name="kalshi15m-win-streak-verification",
         ).start()
+    # Crypto's own separate, simpler loss-triggered retrain -- see
+    # compute_crypto_sequential_gate's own docstring. Same "kick off in
+    # the BACKGROUND, _locked_job dedupes a second trigger" reasoning as
+    # the win-streak verification above.
+    crypto_gate = entry_result.get("crypto_sequential_gate") or {}
+    if crypto_gate.get("retrain_pending"):
+        threading.Thread(
+            target=_run_kalshi_15m_crypto_loss_retrain, args=(crypto_gate,),
+            daemon=True, name="kalshi15m-crypto-loss-retrain",
+        ).start()
     return {
         "ok": True, "settlements": settlement_result, "management": management_result, "entries": entry_result,
     }
+
+
+@_locked_job("kalshi_15m_crypto_loss_retrain", stale_after_sec=1800)
+def _run_kalshi_15m_crypto_loss_retrain(gate: dict[str, Any]) -> dict[str, Any]:
+    """Triggered from _run_kalshi_15m_cycle the instant scan_and_enter's
+    own crypto_sequential_gate reports retrain_pending=True -- per
+    explicit user direction ("if it[’s a] lost[,] it retrain[s]" / "stop[,]
+    retrain after 1 loss"). Deliberately simpler than the win-streak
+    verification above: retrains kalshi_15m_model only (crypto's own,
+    never metals'), then clears the gate unconditionally on a successful
+    retrain -- no backtest-verification bar (unlike win_streak_cooldown's
+    own), matching the user's own simpler spec of "retrain then go
+    again", not "retrain and prove it first". A failed retrain leaves the
+    gate closed; the next cycle's own gate check just tries again, same
+    self-healing posture as every other tuning override here."""
+    try:
+        trade_log = kalshi_15m_strategy._load_state().get("trade_log")  # noqa: SLF001
+    except Exception as exc:
+        logger.warning("[app_kalshi] could not read kalshi_15m trade_log for crypto loss retrain: %s", exc)
+        trade_log = None
+
+    try:
+        retrain_result = kalshi_15m_model.train_model(trade_log=trade_log)
+    except Exception as exc:
+        logger.warning("[app_kalshi] crypto loss-triggered retrain failed: %s", exc)
+        retrain_result = {"ok": False, "error": str(exc)}
+
+    gate_result = kalshi_15m_strategy.apply_crypto_loss_retrain_result(
+        real_trade_count=gate.get("real_trade_count"), retrain_ok=bool(retrain_result.get("ok")),
+    )
+    logger.info(
+        "[app_kalshi] kalshi_15m crypto loss retrain (real_trade_count=%s): retrain_ok=%s -> %s",
+        gate.get("real_trade_count"), retrain_result.get("ok"), "cleared" if gate_result.get("cleared") else "still pending",
+    )
+    return {"retrain": retrain_result, "gate_result": gate_result}
 
 
 @_locked_job("kalshi_15m_win_streak_verification", stale_after_sec=1800)
@@ -986,7 +1031,16 @@ def _run_kalshi_15m_strategy_sweep(param_grid: dict[str, list[Any]] | None = Non
     management -- read-only over trading, reporting only."""
     try:
         grid = param_grid or _default_kalshi_15m_strategy_sweep_grid()
-        result = strategy_sweep.run_parameter_sweep(kalshi_15m_metals_backtest, grid, coins=sorted(kalshi_15m_strategy.ACTIVE_ENTRY_COINS))
+        # ACTIVE_ENTRY_COINS now ALSO includes crypto coins (a later,
+        # separate decision -- see that constant's own comment); this
+        # sweep is metals-only by design (kalshi_15m_metals_backtest,
+        # above), so it's intersected with the metals series here rather
+        # than passed the raw, now-wider set directly -- a crypto ticker
+        # handed to the metals backtest module would be real, silent
+        # garbage (wrong price data, wrong feature engineering), not a
+        # loud failure.
+        metals_active_coins = sorted(kalshi_15m_strategy.ACTIVE_ENTRY_COINS & set(kalshi_15m.KNOWN_15M_METALS_SERIES))
+        result = strategy_sweep.run_parameter_sweep(kalshi_15m_metals_backtest, grid, coins=metals_active_coins)
         if not result.get("ok"):
             return result
         save_json(KALSHI_15M_LATEST_STRATEGY_SWEEP_FILE, result)

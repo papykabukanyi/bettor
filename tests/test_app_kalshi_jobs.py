@@ -963,6 +963,106 @@ def test_kalshi_15m_cycle_job_does_not_trigger_verification_when_cooldown_inacti
     app_kalshi._run_kalshi_15m_cycle.__wrapped__()  # noqa: SLF001
 
 
+def test_kalshi_15m_cycle_job_triggers_crypto_loss_retrain_when_pending(monkeypatch):
+    from data import kalshi_15m_strategy
+
+    monkeypatch.setattr(kalshi_15m_strategy, "check_settlements", lambda: {"ok": True, "checks": []})
+    monkeypatch.setattr(kalshi_15m_strategy, "manage_open_positions", lambda **kw: {"ok": True, "checks": []})
+    gate = {"open": False, "reason": "crypto_loss_retrain_pending", "retrain_pending": True, "real_trade_count": 5}
+    monkeypatch.setattr(
+        kalshi_15m_strategy, "scan_and_enter",
+        lambda **kw: {"ok": True, "checks": [], "win_streak_cooldown": {"active": False}, "crypto_sequential_gate": gate},
+    )
+    monkeypatch.setattr(app_kalshi.threading, "Thread", _SyncThread)
+    captured = {}
+    monkeypatch.setattr(app_kalshi, "_run_kalshi_15m_crypto_loss_retrain", lambda g: captured.update(gate=g) or {"ok": True})
+
+    app_kalshi._run_kalshi_15m_cycle.__wrapped__()  # noqa: SLF001
+
+    assert captured["gate"] == gate
+
+
+def test_kalshi_15m_cycle_job_does_not_trigger_crypto_retrain_when_not_pending(monkeypatch):
+    from data import kalshi_15m_strategy
+
+    monkeypatch.setattr(kalshi_15m_strategy, "check_settlements", lambda: {"ok": True, "checks": []})
+    monkeypatch.setattr(kalshi_15m_strategy, "manage_open_positions", lambda **kw: {"ok": True, "checks": []})
+    monkeypatch.setattr(
+        kalshi_15m_strategy, "scan_and_enter",
+        lambda **kw: {
+            "ok": True, "checks": [], "win_streak_cooldown": {"active": False},
+            "crypto_sequential_gate": {"open": True, "reason": "previous_crypto_trade_won"},
+        },
+    )
+
+    def fail_if_called(**kw):
+        raise AssertionError("must not spawn a crypto retrain thread when nothing is pending")
+
+    monkeypatch.setattr(app_kalshi.threading, "Thread", fail_if_called)
+
+    app_kalshi._run_kalshi_15m_cycle.__wrapped__()  # noqa: SLF001
+
+
+# ---------------------------------------------------------------------------
+# kalshi_15m_crypto_loss_retrain -- per explicit user direction ("if it[’s
+# a] lost[,] it retrain[s]" / "stop[,] retrain after 1 loss"). Genuinely
+# simpler than the win-streak verification below: crypto's own model
+# only, no backtest-verification bar.
+# ---------------------------------------------------------------------------
+def test_kalshi_15m_crypto_loss_retrain_clears_the_gate_on_a_successful_retrain(monkeypatch):
+    from data import kalshi_15m_model, kalshi_15m_strategy
+
+    monkeypatch.setattr(kalshi_15m_strategy, "_load_state", lambda: {"trade_log": [{"coin": "BTC"}]})
+    monkeypatch.setattr(kalshi_15m_model, "train_model", lambda **kw: {"ok": True, "rows": 500})
+    captured = {}
+    monkeypatch.setattr(
+        kalshi_15m_strategy, "apply_crypto_loss_retrain_result",
+        lambda *, real_trade_count, retrain_ok: captured.update(real_trade_count=real_trade_count, retrain_ok=retrain_ok) or {"cleared": retrain_ok},
+    )
+
+    result = app_kalshi._run_kalshi_15m_crypto_loss_retrain.__wrapped__({"real_trade_count": 5})  # noqa: SLF001
+
+    assert captured == {"real_trade_count": 5, "retrain_ok": True}
+    assert result["gate_result"] == {"cleared": True}
+
+
+def test_kalshi_15m_crypto_loss_retrain_leaves_the_gate_closed_on_a_retrain_failure(monkeypatch):
+    from data import kalshi_15m_model, kalshi_15m_strategy
+
+    monkeypatch.setattr(kalshi_15m_strategy, "_load_state", lambda: {"trade_log": []})
+
+    def fail(**kw):
+        raise RuntimeError("simulated retrain crash")
+
+    monkeypatch.setattr(kalshi_15m_model, "train_model", fail)
+    captured = {}
+    monkeypatch.setattr(
+        kalshi_15m_strategy, "apply_crypto_loss_retrain_result",
+        lambda *, real_trade_count, retrain_ok: captured.update(retrain_ok=retrain_ok) or {"cleared": retrain_ok},
+    )
+
+    result = app_kalshi._run_kalshi_15m_crypto_loss_retrain.__wrapped__({"real_trade_count": 5})  # noqa: SLF001
+
+    assert captured["retrain_ok"] is False
+    assert result["retrain"]["ok"] is False
+    assert result["gate_result"] == {"cleared": False}
+
+
+def test_kalshi_15m_crypto_loss_retrain_survives_a_state_read_failure(monkeypatch):
+    from data import kalshi_15m_model, kalshi_15m_strategy
+
+    def fail_load_state():
+        raise RuntimeError("simulated state read crash")
+
+    monkeypatch.setattr(kalshi_15m_strategy, "_load_state", fail_load_state)
+    monkeypatch.setattr(kalshi_15m_model, "train_model", lambda **kw: {"ok": True})
+    monkeypatch.setattr(kalshi_15m_strategy, "apply_crypto_loss_retrain_result", lambda *, real_trade_count, retrain_ok: {"cleared": retrain_ok})
+
+    result = app_kalshi._run_kalshi_15m_crypto_loss_retrain.__wrapped__({"real_trade_count": 5})  # noqa: SLF001
+
+    assert result["retrain"]["ok"] is True  # train_model was still called, just with trade_log=None
+
+
 # ---------------------------------------------------------------------------
 # kalshi_15m_win_streak_verification -- per explicit user direction:
 # "after a couple of winning strikes[,] take a break and restudy...
@@ -1281,7 +1381,15 @@ def test_kalshi_15m_strategy_sweep_job_saves_a_result_and_logs_the_best_combo(mo
         "model_confidence_min", "yes_confidence_extra_required", "assumed_entry_price",
         "position_size_pct", "max_concurrent_positions",
     }
-    assert captured["kw"]["coins"] == sorted(app_kalshi.kalshi_15m_strategy.ACTIVE_ENTRY_COINS)
+    # Intersected with the metals series, NOT the raw ACTIVE_ENTRY_COINS
+    # directly -- that set now ALSO includes crypto coins (a later,
+    # separate decision), and this sweep is metals-only by design
+    # (kalshi_15m_metals_backtest, asserted above) -- see
+    # _run_kalshi_15m_strategy_sweep's own comment on why a crypto ticker
+    # here would be real, silent garbage rather than a loud failure.
+    assert captured["kw"]["coins"] == sorted(
+        app_kalshi.kalshi_15m_strategy.ACTIVE_ENTRY_COINS & set(app_kalshi.kalshi_15m.KNOWN_15M_METALS_SERIES),
+    )
 
 
 # ---------------------------------------------------------------------------

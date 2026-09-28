@@ -172,25 +172,33 @@ logger = logging.getLogger(__name__)
 # _predict_direction below.
 ASSET_SERIES: dict[str, str] = {**kalshi_15m.KNOWN_15M_SERIES, **kalshi_15m.KNOWN_15M_METALS_SERIES}
 
-# Permanent entry-universe narrowing -- explicit user direction: "GOLD/
-# SILVER/COPPER let boost all our focus on them and use other asset for
-# correlation" (not a temporary experiment -- the crypto/PLATINUM/
-# PALLADIUM coins stay fully wired for DATA COLLECTION and as CORRELATION
-# INPUTS to the 3 approved metals -- see crypto_correlation.refresh_metals_study's
-# own crypto_df parameter -- they're just no longer traded directly).
-# This account's own real trade history is exactly why: GOLD/SILVER/
-# COPPER are the only 3 markets with both a real sample size (67-100
-# trades each) AND a coin-trust-gate-clearing win rate; everything else
-# is either too thin to mean anything (1-9 trades) or already failing
-# coin_is_trusted's own bar (PLATINUM 33%/12, PALLADIUM 35%/26). Only
-# gates NEW entries (see scan_and_enter's own loop below) -- an already-
-# open position on any coin is still fully managed to close by
+# Entry-universe narrowing -- ORIGINALLY "permanent" per earlier explicit
+# user direction: "GOLD/SILVER/COPPER let boost all our focus on them and
+# use other asset for correlation", because this account's own real trade
+# history showed GOLD/SILVER/COPPER were the only 3 markets with both a
+# real sample size (67-100 trades each) AND a coin-trust-gate-clearing win
+# rate (PLATINUM 33%/12 trades, PALLADIUM 35%/26, crypto 1-9 trades each
+# -- too thin or already failing coin_is_trusted's own bar). REVERSED by
+# a later, explicit user decision ("re-open crypto to live entries too")
+# once the crypto side gained its own real gating infrastructure this same
+# session (the sequential entry gate, the fair-value research log, live
+# data confirmed flowing + a trained, coin-aware model for all 9 crypto
+# coins) -- crypto's own coin_is_trusted gate (still fully in effect,
+# still evidence-only, see that function's own comment) is what now
+# guards against repeating the earlier thin-sample-failing-track-record
+# problem, not a blanket exclusion. PLATINUM/PALLADIUM stay excluded --
+# no new evidence or decision here has touched them. Only gates NEW
+# entries (see scan_and_enter's own loop below) -- an already-open
+# position on any coin is still fully managed to close by
 # manage_open_positions/check_settlements regardless of this list.
 # ASSET_SERIES itself stays the full universe (data collection, the
 # correlation study, and existing-position management all still need
 # every coin) -- this is a strict SUBSET used only to gate new entries.
 ACTIVE_ENTRY_COINS: frozenset[str] = frozenset(
-    c.strip().upper() for c in os.getenv("KALSHI_15M_ACTIVE_ENTRY_COINS", "GOLD,SILVER,COPPER").split(",") if c.strip()
+    c.strip().upper() for c in os.getenv(
+        "KALSHI_15M_ACTIVE_ENTRY_COINS",
+        "GOLD,SILVER,COPPER,BTC,ETH,SOL,XRP,DOGE,BCH,NEAR,HYPE,ZEC",
+    ).split(",") if c.strip()
 )
 
 
@@ -482,6 +490,97 @@ def apply_win_streak_cooldown_result(passed: bool, *, real_trade_count: int, rea
         }
         _save_state(state, push_durable=True)
     return {"cleared": True, "reason": reason, "real_trade_count": real_trade_count}
+
+
+def _market_of(coin: str | None) -> str:
+    """'crypto'/'metals'/'unknown' -- the SAME split _predict_direction
+    already dispatches models on, exposed here for gating so
+    win_streak_cooldown/graduated_concurrency (metals) and the crypto
+    sequential gate below never blend each other's trades/positions
+    together. Real, necessary fix: both existing mechanisms read
+    state["trade_log"]/state["positions"] UNFILTERED, which was harmless
+    while ACTIVE_ENTRY_COINS excluded crypto entirely (every real trade
+    WAS a metals trade), but would silently let a crypto win/loss move
+    metals' own concurrency cap or break metals' own win streak the
+    moment crypto trades started interleaving into the same log."""
+    if coin in kalshi_15m.KNOWN_15M_METALS_SERIES:
+        return "metals"
+    if coin in kalshi_15m.KNOWN_15M_SERIES:
+        return "crypto"
+    return "unknown"
+
+
+# Crypto sequential entry gate -- per explicit user direction ("only on the
+# 15 min it has to make 1 entry and wait for that entry to end[,] then
+# check [if] the previous entry was a win or a loss[,] and if it[’s] a
+# win[,] it goes again and if it[’s a] lost[,] it retrain[s]" / "this bot
+# need to enter 1 entry at [a] time and check if previous entry was a win
+# continue and stop[,] retrain after 1 loss"), scoped to crypto ONLY --
+# metals keeps its own existing win_streak_cooldown/graduated_concurrency
+# (see those functions' own comments), a DIFFERENT, already-tuned regime
+# with a real 334-trade track record this gate must not disturb. REPLACES
+# graduated_concurrency/win_streak_cooldown for crypto entirely (explicit
+# user choice) rather than layering on top -- crypto starts fresh under
+# this simpler, stricter rule: at most ONE crypto position open across
+# ALL crypto coins combined (not one per coin -- "the whole market"), and
+# every real loss forces a fresh retrain of kalshi_15m_model before the
+# next crypto entry, no backtest-verification bar (unlike
+# win_streak_cooldown's own bar) -- the user's own spec was simply
+# "retrain then go again", not "retrain and prove it first".
+CRYPTO_SEQUENTIAL_GATE_ENABLED = _env_flag("KALSHI_15M_CRYPTO_SEQUENTIAL_GATE_ENABLED", default=True)
+
+
+def compute_crypto_sequential_gate(state: dict[str, Any]) -> dict[str, Any]:
+    """{"open": bool, "reason": str, ...}. `open` is False whenever a
+    crypto position is currently held anywhere (wait for it to resolve)
+    OR the most recent real crypto trade was a loss that hasn't yet been
+    cleared by a completed retrain (apply_crypto_loss_retrain_result
+    below) -- keyed on real crypto trade COUNT, not a timestamp, same
+    idempotency discipline as compute_win_streak_cooldown_active (a
+    retrain only ever clears the EXACT loss it ran for)."""
+    if not CRYPTO_SEQUENTIAL_GATE_ENABLED:
+        return {"open": True, "reason": "gate_disabled"}
+    crypto_positions = [p for p in state.get("positions") or [] if _market_of(p.get("coin")) == "crypto"]
+    if crypto_positions:
+        return {"open": False, "reason": "crypto_position_already_open"}
+    crypto_trades = [
+        t for t in state.get("trade_log") or [] if not t.get("dry_run") and _market_of(t.get("coin")) == "crypto"
+    ]
+    if not crypto_trades:
+        return {"open": True, "reason": "no_crypto_trades_yet"}
+    real_trade_count = len(crypto_trades)
+    last = crypto_trades[-1]
+    if float(last.get("realized_pnl_usd") or 0.0) > 0:
+        return {"open": True, "reason": "previous_crypto_trade_won", "real_trade_count": real_trade_count}
+    retrain_state = (state.get("tuning") or {}).get("crypto_loss_retrain") or {}
+    if retrain_state.get("cleared_at_real_trade_count") == real_trade_count:
+        return {"open": True, "reason": "loss_retrain_already_cleared", "real_trade_count": real_trade_count}
+    return {
+        "open": False, "reason": "crypto_loss_retrain_pending", "retrain_pending": True,
+        "real_trade_count": real_trade_count,
+    }
+
+
+def apply_crypto_loss_retrain_result(*, real_trade_count: int, retrain_ok: bool) -> dict[str, Any]:
+    """Records that the retrain app_kalshi._run_kalshi_15m_cycle runs the
+    moment compute_crypto_sequential_gate reports retrain_pending=True has
+    completed -- see that gate's own docstring. Only ever clears the
+    EXACT loss it was run for (real_trade_count must match); a failed
+    retrain (retrain_ok=False, e.g. an exception or insufficient data)
+    intentionally does NOT persist anything -- the gate simply stays
+    closed and the next cycle tries again, same self-healing posture as
+    apply_win_streak_cooldown_result's own failed-verification case."""
+    if not retrain_ok:
+        return {"cleared": False, "real_trade_count": real_trade_count}
+    with _STATE_LOCK:
+        state = _load_state()
+        tuning = state.setdefault("tuning", {})
+        tuning["crypto_loss_retrain"] = {
+            "cleared_at_real_trade_count": real_trade_count,
+            "cleared_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        }
+        _save_state(state, push_durable=True)
+    return {"cleared": True, "real_trade_count": real_trade_count}
 
 
 # Per-coin trust gate -- per explicit user direction: "the bot need to
@@ -1303,7 +1402,12 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
 
     with _STATE_LOCK:
         state = _load_state()
-        open_count = len(state.get("positions") or [])
+        # Metals-scoped, NOT state.get("positions") directly -- see
+        # _market_of's own comment: crypto now has its own separate
+        # compute_crypto_sequential_gate below, and metals'
+        # max_concurrent_positions must only ever count metals' OWN open
+        # positions, never a crypto one sharing this same state file.
+        metals_open_count = len([p for p in state.get("positions") or [] if _market_of(p.get("coin")) == "metals"])
         # A confidence floor genuinely learned from this account's own real
         # trade history (see kalshi_15m_trade_analysis.recommend_confidence_threshold
         # + apply_confidence_threshold_override below) -- falls back to the
@@ -1330,30 +1434,36 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
         # a strategy-sweep result can actually change live, alongside
         # model_confidence_min above).
         effective_position_size_pct = tuning_state.get("position_size_pct", POSITION_SIZE_PCT)
-        # How many concurrent positions the account is allowed to hold
-        # RIGHT NOW -- see compute_graduated_max_concurrent_positions'
-        # own comment. Computed ONCE per scan (not re-read per coin) so
-        # one cycle's own entries can't ratchet the cap up mid-loop off
+        # How many concurrent METALS positions the account is allowed to
+        # hold RIGHT NOW -- see compute_graduated_max_concurrent_positions'
+        # own comment. Metals-scoped trade_log (see _market_of's own
+        # comment) so a crypto win/loss can never move metals' own
+        # concurrency cap. Computed ONCE per scan (not re-read per coin)
+        # so one cycle's own entries can't ratchet the cap up mid-loop off
         # a trade_log snapshot that's already stale by the second coin.
-        effective_max_concurrent_positions = compute_graduated_max_concurrent_positions(state.get("trade_log"))
+        metals_trade_log = [t for t in (state.get("trade_log") or []) if _market_of(t.get("coin")) == "metals"]
+        effective_max_concurrent_positions = compute_graduated_max_concurrent_positions(metals_trade_log)
         # See compute_win_streak_cooldown_active's own comment --
         # computed ONCE per scan, same reasoning as the concurrency cap
-        # above. app_kalshi._run_kalshi_15m_cycle inspects this scan's own
-        # returned "win_streak_cooldown" key to decide whether to run a
-        # fresh retrain + backtest verification this cycle.
-        win_streak_cooldown = compute_win_streak_cooldown_active(state)
+        # above. Metals-scoped state (own comment above) -- app_kalshi.
+        # _run_kalshi_15m_cycle inspects this scan's own returned
+        # "win_streak_cooldown" key to decide whether to run a fresh
+        # retrain + backtest verification this cycle, for METALS only;
+        # crypto's own loss-triggered retrain is a separate, simpler gate
+        # (see compute_crypto_sequential_gate below).
+        win_streak_cooldown = compute_win_streak_cooldown_active({**state, "trade_log": metals_trade_log})
+        # Crypto's own sequential gate -- see its own docstring. Computed
+        # ONCE per scan, same "stale mid-loop" reasoning as the metals
+        # gates above (this scan's own entries can't fill or lose a
+        # crypto slot mid-loop off a snapshot that's already behind).
+        crypto_gate = compute_crypto_sequential_gate(state)
         # See hour_is_trusted's own comment -- the CURRENT hour is the
         # same for every coin in one scan pass, so computed once here too.
         current_et_hour = _current_et_hour()
         hour_trust = hour_is_trusted(current_et_hour, state.get("trade_log"))
 
     for coin in ASSET_SERIES:
-        if win_streak_cooldown["active"]:
-            checks.append({
-                "coin": coin, "ok": False, "reason": "win_streak_cooldown_active",
-                "streak": win_streak_cooldown["streak"], "min_streak": win_streak_cooldown["min_streak"],
-            })
-            continue
+        coin_market = _market_of(coin)
         if not hour_trust["trusted"]:
             checks.append({
                 "coin": coin, "ok": False, "reason": "hour_outside_trusted_track_record",
@@ -1367,7 +1477,23 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
         if coin not in ACTIVE_ENTRY_COINS:
             checks.append({"coin": coin, "ok": False, "reason": "coin_outside_active_entry_universe"})
             continue
-        if open_count >= effective_max_concurrent_positions:
+        if coin_market == "crypto":
+            # Crypto's own sequential gate REPLACES win_streak_cooldown/
+            # graduated_concurrency entirely here (explicit user choice) --
+            # see compute_crypto_sequential_gate's own docstring.
+            if not crypto_gate["open"]:
+                checks.append({"coin": coin, "ok": False, "reason": crypto_gate["reason"], **{
+                    k: v for k, v in crypto_gate.items() if k not in ("open", "reason")
+                }})
+                continue
+        elif coin_market == "metals":
+            if win_streak_cooldown["active"]:
+                checks.append({
+                    "coin": coin, "ok": False, "reason": "win_streak_cooldown_active",
+                    "streak": win_streak_cooldown["streak"], "min_streak": win_streak_cooldown["min_streak"],
+                })
+                continue
+        if coin_market == "metals" and metals_open_count >= effective_max_concurrent_positions:
             checks.append({
                 "coin": coin, "ok": False, "reason": "max_concurrent_positions",
                 "effective_max_concurrent_positions": effective_max_concurrent_positions,
@@ -1609,12 +1735,24 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
             state = _load_state()
             state["positions"].append(position)
             _save_state(state, push_durable=not effective_dry_run)
-        open_count += 1
+        if coin_market == "metals":
+            metals_open_count += 1
+        elif CRYPTO_SEQUENTIAL_GATE_ENABLED:
+            # Closes the crypto gate for the REST of this same scan pass
+            # -- crypto_gate above is a pre-loop snapshot, so without this
+            # a second crypto coin later in the SAME ASSET_SERIES loop
+            # would still see the stale "open": True and could also enter,
+            # violating "at most ONE crypto position across the whole
+            # market" the moment more than one crypto candidate clears its
+            # own confidence bar in the same cycle. Guarded by the same
+            # flag as the gate check itself -- with the gate disabled,
+            # crypto has no concurrency limit to enforce here at all.
+            crypto_gate = {**crypto_gate, "open": False, "reason": "crypto_position_just_opened_this_cycle"}
         checks.append({"coin": coin, "ok": True, "action": "entered", "side": decision["side"], "count": filled_count, "dry_run": effective_dry_run})
 
     return {
         "ok": True, "checks": checks, "live_trading_enabled": LIVE_TRADING_ENABLED,
-        "win_streak_cooldown": win_streak_cooldown, "hour_trust": hour_trust,
+        "win_streak_cooldown": win_streak_cooldown, "hour_trust": hour_trust, "crypto_sequential_gate": crypto_gate,
     }
 
 
@@ -1638,10 +1776,18 @@ def effective_strategy_params(state: dict[str, Any] | None = None) -> dict[str, 
     if state is None:
         state = _load_state()
     tuning = state.get("tuning") or {}
+    # Metals-scoped -- see _market_of's own comment: scan_and_enter itself
+    # computes this off a metals-only trade_log now (crypto has its own
+    # separate compute_crypto_sequential_gate, reported alongside this
+    # below), so reporting the UNFILTERED trade_log here would silently
+    # drift from what metals entries are actually gated by the moment any
+    # real crypto trade exists.
+    metals_trade_log = [t for t in (state.get("trade_log") or []) if _market_of(t.get("coin")) == "metals"]
     return {
         "model_confidence_min": tuning.get("model_confidence_min", MODEL_CONFIDENCE_MIN),
         "position_size_pct": tuning.get("position_size_pct", POSITION_SIZE_PCT),
-        "max_concurrent_positions": compute_graduated_max_concurrent_positions(state.get("trade_log")),
+        "max_concurrent_positions": compute_graduated_max_concurrent_positions(metals_trade_log),
+        "crypto_sequential_gate": compute_crypto_sequential_gate(state),
     }
 
 
@@ -1915,64 +2061,45 @@ def _maybe_run_batch_trade_analysis() -> dict[str, Any] | None:
 
 # ---------------------------------------------------------------------------
 # Early exit -- "stay or close" a still-open real position, instead of
-# always holding to settlement. Per explicit user direction: "i need a
-# multi time frame study to happen on the most frames and correlated
-# asset as well to enhance decision making and help also determine
-# staying or closing the winning position." Off by default
-# (USE_EARLY_EXIT) -- an evidence-gated EXPERIMENT, same "prove it out on
-# real trade history/backtest first" posture as every other new risk-
-# shape lever here (correlation study, meta-model, conviction sizing) --
-# this module's own docstring's "no stop-loss/take-profit... exactly one
-# exit" design was correct with ZERO real trade history to justify an
-# early-exit lever; this is that lever, built but not yet trusted with
-# real capital until real evidence says otherwise.
+# always holding to settlement. Off by default (USE_EARLY_EXIT) -- an
+# evidence-gated EXPERIMENT, same "prove it out on real trade history/
+# backtest first" posture as every other new risk-shape lever here
+# (correlation study, meta-model, conviction sizing).
 #
-# Reuses the SAME model + correlation-study reassessment entry itself
-# uses (see _reassess_coin below) -- the correlation study's own
-# multi_timeframe_bullishness component already reads across 5m/15m/30m
-# return + 1h/2h/3h/4h trend + MACD + RSI (see crypto_correlation.py's
-# own _TIMEFRAME_REFERENCE_SCALES), and the peer/divergence/breadth
-# components already read the correlated-asset universe (perps' own for
-# crypto, this market's own 5-commodity study for metals) -- not a
-# separate, second model, just the SAME real signal re-run against
-# CURRENT data to ask "does the original entry thesis still hold."
+# ORIGINALLY a model-flip-based design (re-run the model + correlation
+# study, exit only if the thesis itself reversed) -- deliberately NOT a
+# plain price-based trailing stop at the time, per this module's own past
+# reasoning: "this market's own quadratic-fee/short-window economics make
+# a plain take-profit-percentage ladder a poor fit." REPLACED by explicit,
+# later user decision ("use trailing stops... see what you can reuse on
+# perps") with perps_strategy._decide_exit_trailing's own real, already-
+# battle-tested design (stop_loss + trailing-lock-on-peak-gain), adapted
+# to THIS product's own price semantics below -- see decide_early_exit's
+# own docstring for exactly how. The old flip-based reasoning is preserved
+# here, not deleted, since it's real prior evidence a future revisit
+# should weigh, not silently lost.
 # ---------------------------------------------------------------------------
 USE_EARLY_EXIT = _env_flag("KALSHI_15M_USE_EARLY_EXIT", default=False)
 # Don't bother managing a position that was only just opened -- a few
-# seconds/minutes in, a "reassessment" is mostly noise around the same
-# decision just made, not a real change of mind.
+# seconds/minutes in, a fresh contract's own price is mostly noise around
+# the entry fill itself, not a real move worth trailing yet.
 EARLY_EXIT_MIN_SECONDS_HELD = _env_int("KALSHI_15M_EARLY_EXIT_MIN_SECONDS_HELD", 120)
-# How far past a coin-flip (0.5) the reassessment's own confidence in the
-# OPPOSITE side must be before treating this as a real flip worth acting
-# on, not noise -- same role MODEL_CONFIDENCE_MIN's own margin plays at
-# entry, just measured as a margin above 0.5 instead of an absolute floor
-# (a reassessment doesn't need the SAME bar as a fresh entry: reversing
-# an already-taken position is a different decision than starting one).
-EARLY_EXIT_CONFIDENCE_FLIP_MARGIN = _env_float("KALSHI_15M_EARLY_EXIT_CONFIDENCE_FLIP_MARGIN", 0.08)
 
-
-def _reassess_coin(coin: str) -> dict[str, Any]:
-    """A leaner version of evaluate_candidate's own model + correlation-
-    study logic, WITHOUT the entry-only market-discovery/time-remaining
-    gates (a position being MANAGED is already open regardless of how
-    much time is left in its own window) -- used by decide_early_exit to
-    ask "does the original thesis still hold against CURRENT data?" Pure
-    function -- no state, no order placement, no side effects. Returns
-    {"model_ok": False} on the same "no trained model yet" condition
-    evaluate_candidate would; otherwise {"model_ok": True, "side":
-    "yes"/"no", "confidence": float, "correlation_score": float} -- same
-    field meanings as evaluate_candidate's own successful return."""
-    prediction = _predict_direction(coin)
-    if not prediction.get("model_ok"):
-        return {"model_ok": False}
-    probability_up = float(prediction["probability_up"])
-    side, confidence = ("yes", probability_up) if probability_up >= 0.5 else ("no", 1.0 - probability_up)
-    correlation_score = 0.0
-    if coin in kalshi_15m.KNOWN_15M_SERIES:
-        correlation_score = crypto_correlation.perps_correlation_bullishness(coin, prediction.get("feature_row"))["score"]
-    elif coin in kalshi_15m.KNOWN_15M_METALS_SERIES:
-        correlation_score = crypto_correlation.metals_correlation_bullishness(coin, prediction.get("feature_row"))["score"]
-    return {"model_ok": True, "side": side, "confidence": confidence, "correlation_score": correlation_score}
+# Trailing-stop thresholds -- a Kalshi contract's own price is already
+# bounded [0, 1] and IS a probability-like quantity (not an arbitrary
+# asset price needing a % normalization the way perps' own pct-of-entry
+# framing uses) -- so these are plain, straight moves on that same [0, 1]
+# scale: a position bought at 0.40 moving to 0.50 is a real +0.10 move,
+# the unit these thresholds are denominated in directly. Real, adapted
+# defaults (not yet backtested for this product's own price dynamics,
+# same honest "starting point, prove it out on real trade history" bar
+# every other new lever here was held to before this) -- reasonable
+# starting points given perps' own validated stop_loss/activation/
+# distance RATIOS (roughly 1:1:0.5), not a blind copy of perps' own
+# percentage-of-asset-price VALUES, which are a different unit entirely.
+TRAILING_STOP_LOSS = _env_float("KALSHI_15M_TRAILING_STOP_LOSS", 0.10)
+TRAILING_ACTIVATION = _env_float("KALSHI_15M_TRAILING_ACTIVATION", 0.10)
+TRAILING_DISTANCE = _env_float("KALSHI_15M_TRAILING_DISTANCE", 0.05)
 
 
 def _exit_order_side_and_price(position_side: str, market: dict[str, Any]) -> tuple[str, float]:
@@ -2006,50 +2133,47 @@ def _current_exit_value(position_side: str, market: dict[str, Any]) -> float:
     return round(no_bid, 4)
 
 
-def decide_early_exit(position: dict[str, Any], reassessment: dict[str, Any], *, current_value: float) -> dict[str, Any]:
-    """Pure decision logic -- no state, no order placement. Should this
-    still-open REAL position be closed NOW instead of held to
+def decide_early_exit(position: dict[str, Any], *, current_value: float) -> dict[str, Any]:
+    """Pure-ISH decision logic (one real side effect: writes position[
+    "_trail_peak"] in place so the caller can persist it -- see
+    manage_open_positions' own comment on why that's necessary here,
+    unlike perps' own equivalent) -- no state read, no order placement.
+    Should this still-open REAL position be closed NOW instead of held to
     settlement? See USE_EARLY_EXIT's own module-level comment for the
-    full design.
+    full design and why this replaced a model-flip-based version.
 
-    Only ever considers exiting when the reassessment has FLIPPED away
-    from the side this position actually holds -- the entry thesis
-    itself breaking down is the signal, not a fixed price target (this
-    market's own quadratic-fee/short-window economics make a plain
-    take-profit-percentage ladder a poor fit; see this module's own
-    docstring). Two distinct outcomes once a real flip is confirmed:
-      - "lock_in_profit": currently profitable -- exit now rather than
-        risk giving the gain back holding to a settlement the model no
-        longer expects to win.
-      - "cut_loss": currently losing -- exit now rather than let a
-        thesis the model itself has abandoned ride all the way to a full
-        loss at settlement."""
-    if not reassessment.get("model_ok"):
-        return {"should_exit": False, "reason": "reassessment_not_available"}
+    Adapted from perps_strategy._decide_exit_trailing (see its own
+    docstring for the full backtest/rationale this borrows): a plain
+    stop-loss floor, plus a trailing lock that only arms once the
+    position has moved TRAILING_ACTIVATION in its favor from entry, then
+    exits the moment it retraces TRAILING_DISTANCE off its own peak.
+    Deliberately simpler than perps' own version -- no volume-confirmed
+    widening (PROMISING_VOLUME_Z-style continuation signals were tuned
+    against perps' own asset-price dynamics, not this product's own
+    contract-price ones; a real, separate backtest would be needed before
+    reusing that piece too) and no max-hold-time exit (every position
+    here already has a hard ceiling: the window's own settlement, at most
+    15 minutes away by construction)."""
+    entry_price = float(position["entry_price"])
+    change = round(current_value - entry_price, 6)
 
-    held_side = position["side"]
-    unrealized_pnl_per_contract = round(current_value - position["entry_price"], 6)
+    if change <= -TRAILING_STOP_LOSS:
+        return {"should_exit": True, "reason": "stop_loss", "unrealized_pnl_per_contract": change, "change": change}
 
-    if reassessment["side"] == held_side:
-        return {
-            "should_exit": False, "reason": "thesis_still_agrees",
-            "unrealized_pnl_per_contract": unrealized_pnl_per_contract,
-        }
+    peak = max(position.get("_trail_peak", entry_price), current_value)
+    position["_trail_peak"] = peak
+    peak_change = round(peak - entry_price, 6)
+    if peak_change >= TRAILING_ACTIVATION:
+        retrace = round(peak - current_value, 6)
+        if retrace >= TRAILING_DISTANCE:
+            return {
+                "should_exit": True, "reason": "trailing_stop", "unrealized_pnl_per_contract": change,
+                "change": change, "peak_change": peak_change, "retrace": retrace,
+            }
 
-    # Confidence here is already the probability of reassessment["side"]
-    # (see _reassess_coin's own docstring) -- how far past a coin-flip is
-    # a measure of how real this disagreement is, not noise.
-    flip_strength = round(reassessment["confidence"] - 0.5, 6)
-    if flip_strength < EARLY_EXIT_CONFIDENCE_FLIP_MARGIN:
-        return {
-            "should_exit": False, "reason": "flip_too_weak", "flip_strength": flip_strength,
-            "unrealized_pnl_per_contract": unrealized_pnl_per_contract,
-        }
-
-    reason = "lock_in_profit" if unrealized_pnl_per_contract > 0 else "cut_loss"
     return {
-        "should_exit": True, "reason": reason, "flip_strength": flip_strength,
-        "unrealized_pnl_per_contract": unrealized_pnl_per_contract,
+        "should_exit": False, "reason": "holding", "unrealized_pnl_per_contract": change,
+        "change": change, "peak_change": peak_change,
     }
 
 
@@ -2098,10 +2222,29 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
             checks.append({"coin": coin, "should_exit": False, "reason": "too_early_to_manage"})
             continue
 
-        reassessment = _reassess_coin(coin)
         current_value = _current_exit_value(position["side"], market)
-        decision = decide_early_exit(position, reassessment, current_value=current_value)
+        decision = decide_early_exit(position, current_value=current_value)
         checks.append({"coin": coin, **decision})
+
+        # Persists the trailing peak decide_early_exit just wrote onto
+        # `position` in place -- `position` here is a snapshot read
+        # BEFORE this loop started, not a live reference into a currently-
+        # held state lock, so without this the peak would never survive
+        # to the NEXT cycle and the trailing stop could never actually
+        # arm. Re-acquires the lock and updates the SAME coin's live
+        # position by (coin, ticker) match rather than reusing the stale
+        # snapshot object, so a concurrent write (e.g. a fresh entry on a
+        # different coin) between then and now isn't clobbered.
+        # push_durable=False -- an internal bookkeeping float, not a new
+        # or closed position; no need to push this to HF every cycle.
+        if "_trail_peak" in position:
+            with _STATE_LOCK:
+                fresh_state = _load_state()
+                for p in fresh_state.get("positions") or []:
+                    if p.get("coin") == coin and p.get("ticker") == position.get("ticker"):
+                        p["_trail_peak"] = position["_trail_peak"]
+                        break
+                _save_state(fresh_state, push_durable=False)
 
         if not USE_EARLY_EXIT or not decision.get("should_exit") or effective_dry_run:
             continue

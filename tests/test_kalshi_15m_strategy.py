@@ -157,9 +157,13 @@ def test_scan_and_enter_stays_dry_run_by_default(monkeypatch):
     # MAX_CONCURRENT_POSITIONS' own default (5) is deliberately smaller
     # than the full 8-asset universe -- raised here since capacity isn't
     # what this test is about (see test_scan_and_enter_respects_max_concurrent_positions
-    # for that).
+    # for that). CRYPTO_SEQUENTIAL_GATE_ENABLED also disabled -- crypto's
+    # own always-on 1-at-a-time gate (see its own docstring) would
+    # otherwise cap crypto at 1 regardless of the metals-only settings
+    # above, and capacity isn't what THIS test is about either.
     monkeypatch.setattr(kalshi_15m_strategy, "MAX_CONCURRENT_POSITIONS", len(kalshi_15m_strategy.ASSET_SERIES))
     monkeypatch.setattr(kalshi_15m_strategy, "GRADUATED_CONCURRENCY_ENABLED", False)
+    monkeypatch.setattr(kalshi_15m_strategy, "CRYPTO_SEQUENTIAL_GATE_ENABLED", False)
     monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
     _mock_confident_prediction(monkeypatch)
     order_calls = []
@@ -187,21 +191,39 @@ def test_scan_and_enter_skips_a_coin_that_already_has_an_open_position(monkeypat
     })
     result = kalshi_15m_strategy.scan_and_enter()
     btc_check = next(c for c in result["checks"] if c["coin"] == "BTC")
-    assert btc_check == {"coin": "BTC", "ok": False, "reason": "already_has_open_position"}
+    # "crypto_position_already_open" (compute_crypto_sequential_gate), not
+    # "already_has_open_position" (_has_open_position) -- BTC is crypto,
+    # so its own sequential gate catches this FIRST and more broadly (ANY
+    # open crypto position blocks ANY new crypto entry, not just this
+    # exact coin's own) -- see that gate's own docstring. A metals coin in
+    # this same scenario would still surface "already_has_open_position".
+    assert btc_check == {"coin": "BTC", "ok": False, "reason": "crypto_position_already_open"}
 
 
 def test_scan_and_enter_respects_max_concurrent_positions(monkeypatch):
+    # MAX_CONCURRENT_POSITIONS now only bounds METALS (see _market_of's
+    # own comment -- crypto has its own separate, always-on sequential
+    # gate) -- a metals coin (GOLD) already open is what actually tests
+    # this ceiling; ETH would instead hit crypto's own
+    # "crypto_position_already_open" gate, a different mechanism entirely.
     monkeypatch.setattr(kalshi_15m_strategy, "MAX_CONCURRENT_POSITIONS", 1)
     monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
     monkeypatch.setattr(kalshi_15m_model, "predict_direction", lambda coin: {"model_ok": True, "probability_up": 0.72})
+    monkeypatch.setattr(kalshi_15m_metals_model, "predict_direction", lambda coin: {"model_ok": True, "probability_up": 0.72})
 
     kalshi_15m_strategy._save_state({  # noqa: SLF001
-        "positions": [{"coin": "ETH", "ticker": "KXETH15M-1"}], "trade_log": [], "realized_pnl_by_date": {},
+        "positions": [{"coin": "GOLD", "ticker": "KXGOLD15M-1"}], "trade_log": [], "realized_pnl_by_date": {},
     })
     result = kalshi_15m_strategy.scan_and_enter()
-    entered = [c for c in result["checks"] if c.get("action") == "entered"]
-    assert entered == []
-    assert all(c["reason"] == "max_concurrent_positions" for c in result["checks"] if not c.get("ok"))
+    metals_checks = [c for c in result["checks"] if c["coin"] in kalshi_15m.KNOWN_15M_METALS_SERIES]
+    entered_metals = [c for c in metals_checks if c.get("action") == "entered"]
+    assert entered_metals == []
+    # GOLD's own open position counts toward metals_open_count too (the
+    # check doesn't exempt the position that's already contributing to
+    # the count), so every metals coin -- GOLD included -- rejects on the
+    # SAME "max_concurrent_positions" reason here, not
+    # "already_has_open_position".
+    assert all(c["reason"] == "max_concurrent_positions" for c in metals_checks if not c.get("ok"))
 
 
 def test_scan_and_enter_never_places_a_real_order_even_when_live_trading_is_flagged_on(monkeypatch):
@@ -229,6 +251,12 @@ def test_scan_and_enter_never_places_a_real_order_even_when_live_trading_is_flag
 def test_scan_and_enter_places_a_real_order_only_when_explicitly_forced_live(monkeypatch):
     monkeypatch.setattr(kalshi_15m_strategy, "MAX_CONCURRENT_POSITIONS", len(kalshi_15m_strategy.ASSET_SERIES))
     monkeypatch.setattr(kalshi_15m_strategy, "GRADUATED_CONCURRENCY_ENABLED", False)
+    # Crypto's own always-on 1-at-a-time gate would otherwise cap crypto
+    # regardless of the metals-only settings above -- see
+    # compute_crypto_sequential_gate's own docstring. Not what's under
+    # test here (dry-run vs. forced-live), same reasoning as the other
+    # "let everything in" tests in this file.
+    monkeypatch.setattr(kalshi_15m_strategy, "CRYPTO_SEQUENTIAL_GATE_ENABLED", False)
     monkeypatch.setattr(kalshi_15m_strategy, "LIVE_TRADING_ENABLED", True)
     monkeypatch.setenv("KALSHI_15M_LIVE_TRADING_ENABLED", "1")
     monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
@@ -283,9 +311,9 @@ def test_scan_and_enter_unwraps_the_real_nested_create_order_response(monkeypatc
     result = kalshi_15m_strategy.scan_and_enter(dry_run=False)
 
     entered = [c for c in result["checks"] if c.get("action") == "entered"]
-    assert len(entered) == 1
+    assert len(entered) == 2  # BTC (crypto's own 1 slot) + GOLD (metals' own 1 slot, MAX_CONCURRENT_POSITIONS=1)
     state = kalshi_15m_strategy._load_state()  # noqa: SLF001
-    assert len(state["positions"]) == 1
+    assert len(state["positions"]) == 2
     assert state["positions"][0]["order_id"] == "real-nested-id"
     assert state["positions"][0]["count"] == 5.0
 
@@ -306,7 +334,7 @@ def test_scan_and_enter_still_works_with_a_flat_create_order_response(monkeypatc
     result = kalshi_15m_strategy.scan_and_enter(dry_run=False)
 
     entered = [c for c in result["checks"] if c.get("action") == "entered"]
-    assert len(entered) == 1
+    assert len(entered) == 2  # BTC (crypto's own 1 slot) + GOLD (metals' own 1 slot, MAX_CONCURRENT_POSITIONS=1)
     state = kalshi_15m_strategy._load_state()  # noqa: SLF001
     assert state["positions"][0]["order_id"] == "flat-id"
 
@@ -345,7 +373,7 @@ def test_scan_and_enter_trusts_the_fill_count_from_the_create_response_itself(mo
     result = kalshi_15m_strategy.scan_and_enter(dry_run=False)
 
     entered = [c for c in result["checks"] if c.get("action") == "entered"]
-    assert len(entered) == 1
+    assert len(entered) == 2  # BTC (crypto's own 1 slot) + GOLD (metals' own 1 slot, MAX_CONCURRENT_POSITIONS=1)
     state = kalshi_15m_strategy._load_state()  # noqa: SLF001
     assert state["positions"][0]["count"] == 10.0
 
@@ -367,7 +395,7 @@ def test_scan_and_enter_falls_back_to_get_orders_when_the_create_response_has_no
     result = kalshi_15m_strategy.scan_and_enter(dry_run=False)
 
     entered = [c for c in result["checks"] if c.get("action") == "entered"]
-    assert len(entered) == 1
+    assert len(entered) == 2  # BTC (crypto's own 1 slot) + GOLD (metals' own 1 slot, MAX_CONCURRENT_POSITIONS=1)
     state = kalshi_15m_strategy._load_state()  # noqa: SLF001
     assert state["positions"][0]["count"] == 7.0
 
@@ -461,7 +489,7 @@ def test_scan_and_enter_sends_the_correct_side_and_price_for_a_no_decision(monke
 
     kalshi_15m_strategy.scan_and_enter(dry_run=False)
 
-    assert len(order_calls) == 1
+    assert len(order_calls) == 2  # BTC (crypto's own 1 slot) + GOLD (metals' own 1 slot, MAX_CONCURRENT_POSITIONS=1)
     call = order_calls[0]
     assert call["side"] == "ask"  # sell YES -- NOT "bid", the original bug
     assert call["price"] == pytest.approx(1.0 - 0.60)  # 1 - no_ask, NOT no_ask directly
@@ -480,7 +508,7 @@ def test_scan_and_enter_sends_the_correct_side_and_price_for_a_yes_decision(monk
 
     kalshi_15m_strategy.scan_and_enter(dry_run=False)
 
-    assert len(order_calls) == 1
+    assert len(order_calls) == 2  # BTC (crypto's own 1 slot) + GOLD (metals' own 1 slot, MAX_CONCURRENT_POSITIONS=1)
     call = order_calls[0]
     assert call["side"] == "bid"  # buy YES -- unchanged, was already correct
     assert call["price"] == pytest.approx(1.0 - 0.55)  # 1 - no_bid
@@ -1331,6 +1359,19 @@ def test_effective_strategy_params_accepts_an_already_loaded_state():
     assert params["model_confidence_min"] == 0.7
 
 
+def test_effective_strategy_params_reports_the_crypto_gate_and_stays_metals_scoped():
+    # A crypto LOSS must never move max_concurrent_positions (a metals-
+    # only figure now, see _market_of's own comment) -- but it SHOULD
+    # show up in the separate crypto_sequential_gate field.
+    state = {
+        "positions": [], "trade_log": [{"coin": "BTC", "realized_pnl_usd": -1.0, "dry_run": False}],
+    }
+    params = kalshi_15m_strategy.effective_strategy_params(state)
+    assert params["max_concurrent_positions"] == kalshi_15m_strategy.GRADUATED_CONCURRENCY_START_SLOTS
+    assert params["crypto_sequential_gate"]["open"] is False
+    assert params["crypto_sequential_gate"]["reason"] == "crypto_loss_retrain_pending"
+
+
 def test_scan_and_enter_reads_the_correlation_override_from_state_tuning(monkeypatch):
     monkeypatch.setattr(kalshi_15m_strategy, "MAX_CONCURRENT_POSITIONS", len(kalshi_15m_strategy.ASSET_SERIES))
     monkeypatch.setattr(kalshi_15m_strategy, "GRADUATED_CONCURRENCY_ENABLED", False)
@@ -1752,15 +1793,17 @@ def test_yes_confidence_extra_required_applies_before_the_correlation_study_nudg
 # entries; ASSET_SERIES itself (data collection, correlation study,
 # existing-position management) stays the full universe.
 # ---------------------------------------------------------------------------
-def test_active_entry_coins_env_default_string_is_gold_silver_copper():
+def test_active_entry_coins_env_default_string_is_gold_silver_copper_plus_crypto():
     """Documents the literal default string ACTIVE_ENTRY_COINS is built
     from -- a regression guard against an accidental typo/reorder in that
     literal, independent of the autouse _full_entry_universe fixture's
     own test-time override above (which replaces the ATTRIBUTE, not the
-    source this asserts against)."""
+    source this asserts against). Widened from GOLD,SILVER,COPPER-only by
+    a later, explicit user decision to re-open crypto to live entries --
+    see ACTIVE_ENTRY_COINS' own comment for the full history."""
     import inspect
     source = inspect.getsource(kalshi_15m_strategy)
-    assert 'os.getenv("KALSHI_15M_ACTIVE_ENTRY_COINS", "GOLD,SILVER,COPPER")' in source
+    assert 'os.getenv(\n        "KALSHI_15M_ACTIVE_ENTRY_COINS",\n        "GOLD,SILVER,COPPER,BTC,ETH,SOL,XRP,DOGE,BCH,NEAR,HYPE,ZEC",\n    )' in source
 
 
 def test_scan_and_enter_skips_a_coin_outside_the_active_entry_universe(monkeypatch):
@@ -2181,21 +2224,30 @@ def test_scan_and_enter_records_the_entry_feature_snapshot(monkeypatch):
 
 
 def test_scan_and_enter_shrinks_contracts_after_a_real_losing_streak_on_that_coin(monkeypatch):
+    # A METALS coin (GOLD) -- not BTC -- deliberately: 3 real BTC losses
+    # would now ALSO trip compute_crypto_sequential_gate's own
+    # loss-triggered retrain block (a DIFFERENT mechanism than the loss-
+    # streak SIZE throttle this test is actually about), preventing BTC
+    # from entering at all rather than just entering smaller. GOLD has no
+    # such cross-coin gate, so the size-throttle behavior is still
+    # cleanly observable there.
     monkeypatch.setattr(kalshi_15m_strategy, "MAX_CONCURRENT_POSITIONS", 1)
+    monkeypatch.setattr(kalshi_15m_strategy, "CRYPTO_SEQUENTIAL_GATE_ENABLED", False)  # no crypto trade history here to gate on; keep this test metals-only
     monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market(no_ask=0.51, no_bid=0.5))
-    monkeypatch.setattr(kalshi_15m_model, "predict_direction", lambda coin: {"model_ok": True, "probability_up": 0.72})
+    monkeypatch.setattr(kalshi_15m_metals_model, "predict_direction", lambda coin: {"model_ok": True, "probability_up": 0.72})
+    monkeypatch.setattr(kalshi_15m_model, "predict_direction", lambda coin: {"model_ok": False})  # keep this test metals-only
     monkeypatch.setattr(crypto_correlation, "perps_correlation_bullishness", lambda coin, row=None: {"score": 0.0, "reason": "neutral", "components": {}})
-    losing_trades = [{"coin": "BTC", "realized_pnl_usd": -1.0, "dry_run": False} for _ in range(3)]
+    losing_trades = [{"coin": "GOLD", "realized_pnl_usd": -1.0, "dry_run": False} for _ in range(3)]
     kalshi_15m_strategy._save_state({"positions": [], "trade_log": losing_trades, "realized_pnl_by_date": {}})  # noqa: SLF001
 
     kalshi_15m_strategy.scan_and_enter()
 
     state = kalshi_15m_strategy._load_state()  # noqa: SLF001
-    btc_position = state["positions"][0]
-    assert btc_position["coin"] == "BTC"
+    gold_position = state["positions"][0]
+    assert gold_position["coin"] == "GOLD"
     # Without the throttle: int(100 * 0.05 / 0.5) = 10. Throttled at 0.5x: 5.
-    assert btc_position["count"] < 10
-    assert btc_position["entry_loss_streak_multiplier"] == kalshi_15m_strategy.LOSS_STREAK_SIZE_MULTIPLIER
+    assert gold_position["count"] < 10
+    assert gold_position["entry_loss_streak_multiplier"] == kalshi_15m_strategy.LOSS_STREAK_SIZE_MULTIPLIER
 
 
 # ---------------------------------------------------------------------------
@@ -2238,43 +2290,49 @@ def _open_position(*, coin="BTC", side="yes", entry_price=0.5, ticker="KXBTC15M-
     }
 
 
-def test_decide_early_exit_holds_when_reassessment_unavailable():
-    result = kalshi_15m_strategy.decide_early_exit(_open_position(), {"model_ok": False}, current_value=0.6)
-    assert result["should_exit"] is False
-    assert result["reason"] == "reassessment_not_available"
-
-
-def test_decide_early_exit_holds_when_thesis_still_agrees():
-    position = _open_position(side="yes")
-    reassessment = {"model_ok": True, "side": "yes", "confidence": 0.9}
-    result = kalshi_15m_strategy.decide_early_exit(position, reassessment, current_value=0.6)
-    assert result["should_exit"] is False
-    assert result["reason"] == "thesis_still_agrees"
-
-
-def test_decide_early_exit_holds_when_the_flip_is_too_weak():
-    position = _open_position(side="yes")
-    reassessment = {"model_ok": True, "side": "no", "confidence": 0.52}  # flip_strength 0.02 < 0.08 default margin
-    result = kalshi_15m_strategy.decide_early_exit(position, reassessment, current_value=0.6)
-    assert result["should_exit"] is False
-    assert result["reason"] == "flip_too_weak"
-
-
-def test_decide_early_exit_locks_in_profit_on_a_strong_flip_while_winning():
+def test_decide_early_exit_holds_on_a_small_move_that_clears_neither_bar():
     position = _open_position(side="yes", entry_price=0.5)
-    reassessment = {"model_ok": True, "side": "no", "confidence": 0.75}
-    result = kalshi_15m_strategy.decide_early_exit(position, reassessment, current_value=0.7)  # currently profitable
-    assert result["should_exit"] is True
-    assert result["reason"] == "lock_in_profit"
-    assert result["unrealized_pnl_per_contract"] == pytest.approx(0.2)
+    result = kalshi_15m_strategy.decide_early_exit(position, current_value=0.52)  # +0.02, below TRAILING_ACTIVATION
+    assert result["should_exit"] is False
+    assert result["reason"] == "holding"
+    assert result["change"] == pytest.approx(0.02)
+    assert result["peak_change"] == pytest.approx(0.02)
 
 
-def test_decide_early_exit_cuts_the_loss_on_a_strong_flip_while_losing():
+def test_decide_early_exit_triggers_stop_loss_on_a_big_adverse_move():
     position = _open_position(side="yes", entry_price=0.5)
-    reassessment = {"model_ok": True, "side": "no", "confidence": 0.75}
-    result = kalshi_15m_strategy.decide_early_exit(position, reassessment, current_value=0.3)  # currently losing
+    result = kalshi_15m_strategy.decide_early_exit(position, current_value=0.35)  # -0.15 <= -TRAILING_STOP_LOSS (0.10)
     assert result["should_exit"] is True
-    assert result["reason"] == "cut_loss"
+    assert result["reason"] == "stop_loss"
+    assert result["unrealized_pnl_per_contract"] == pytest.approx(-0.15)
+
+
+def test_decide_early_exit_holds_once_trailing_activates_but_hasnt_retraced_yet():
+    position = _open_position(side="yes", entry_price=0.5)
+    # +0.15 >= TRAILING_ACTIVATION (0.10) -- trailing arms, but current == peak
+    # so there's nothing to retrace from yet.
+    result = kalshi_15m_strategy.decide_early_exit(position, current_value=0.65)
+    assert result["should_exit"] is False
+    assert result["reason"] == "holding"
+    assert position["_trail_peak"] == pytest.approx(0.65)  # written in place for the NEXT cycle to read
+
+
+def test_decide_early_exit_triggers_trailing_stop_after_a_retrace_from_peak():
+    position = _open_position(side="yes", entry_price=0.5)
+    kalshi_15m_strategy.decide_early_exit(position, current_value=0.65)  # arms the trail, peak=0.65
+    result = kalshi_15m_strategy.decide_early_exit(position, current_value=0.58)  # retrace 0.07 >= TRAILING_DISTANCE (0.05)
+    assert result["should_exit"] is True
+    assert result["reason"] == "trailing_stop"
+    assert result["peak_change"] == pytest.approx(0.15)
+    assert result["retrace"] == pytest.approx(0.07)
+    assert result["unrealized_pnl_per_contract"] == pytest.approx(0.08)  # still profitable overall, just off its peak
+
+
+def test_decide_early_exit_keeps_trailing_a_new_higher_peak():
+    position = _open_position(side="yes", entry_price=0.5)
+    kalshi_15m_strategy.decide_early_exit(position, current_value=0.65)  # peak=0.65
+    kalshi_15m_strategy.decide_early_exit(position, current_value=0.68)  # new peak=0.68, no retrace yet
+    assert position["_trail_peak"] == pytest.approx(0.68)
 
 
 def test_manage_open_positions_skips_dry_run_positions_entirely(monkeypatch):
@@ -2324,8 +2382,10 @@ def test_manage_open_positions_closes_a_position_early_when_enabled(monkeypatch)
     monkeypatch.setattr(kalshi_15m_strategy, "USE_EARLY_EXIT", True)
     position = _open_position(side="yes", entry_price=0.5)
     kalshi_15m_strategy._save_state({"positions": [position], "trade_log": [], "realized_pnl_by_date": {}})  # noqa: SLF001
+    # current_value = 1 - 0.65 = 0.35 -- a -0.15 move from entry, past
+    # TRAILING_STOP_LOSS's own 0.10 default (see decide_early_exit's own
+    # docstring for why this replaced a model-flip-based design).
     monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market(ticker=position["ticker"], no_ask=0.65, no_bid=0.60))
-    monkeypatch.setattr(kalshi_15m_model, "predict_direction", lambda coin: {"model_ok": True, "probability_up": 0.2})  # flips hard to "no"
     order_calls = []
     monkeypatch.setattr(kalshi_15m, "create_order", lambda **kw: order_calls.append(kw) or {"order": {"order_id": "exit1"}})
     monkeypatch.setattr(kalshi_15m, "get_orders", lambda ticker=None, status=None: [{"order_id": "exit1", "fill_count_fp": "10.00"}])
@@ -2343,7 +2403,7 @@ def test_manage_open_positions_closes_a_position_early_when_enabled(monkeypatch)
     # settlement-vs-early distinction actually lives now.
     assert trade["exit_kind"] == "full"
     assert trade["close_reason"] == "early_exit"
-    assert trade["exit_reason"] in ("lock_in_profit", "cut_loss")
+    assert trade["exit_reason"] == "stop_loss"
     assert trade["realized_pnl_usd"] == pytest.approx(10.0 * (0.35 - 0.5))  # current_value=1-0.65=0.35, entry=0.5
 
 
@@ -2360,6 +2420,124 @@ def test_manage_open_positions_leaves_the_position_open_when_the_exit_order_neve
 
     state = kalshi_15m_strategy._load_state()  # noqa: SLF001
     assert len(state["positions"]) == 1  # never removed -- the order never actually filled
+
+
+# ---------------------------------------------------------------------------
+# Crypto sequential entry gate -- per explicit user direction ("only on the
+# 15 min it has to make 1 entry and wait for that entry to end[,] then
+# check [if] the previous entry was a win or a loss[,] and if it[’s] a
+# win[,] it goes again and if it[’s a] lost[,] it retrain[s]"), scoped to
+# crypto only -- see compute_crypto_sequential_gate's own docstring.
+# ---------------------------------------------------------------------------
+def test_market_of_classifies_crypto_metals_and_unknown():
+    assert kalshi_15m_strategy._market_of("BTC") == "crypto"  # noqa: SLF001
+    assert kalshi_15m_strategy._market_of("GOLD") == "metals"  # noqa: SLF001
+    assert kalshi_15m_strategy._market_of("NOTACOIN") == "unknown"  # noqa: SLF001
+    assert kalshi_15m_strategy._market_of(None) == "unknown"  # noqa: SLF001
+
+
+def test_crypto_sequential_gate_open_with_no_crypto_trades_yet():
+    result = kalshi_15m_strategy.compute_crypto_sequential_gate({"positions": [], "trade_log": []})
+    assert result == {"open": True, "reason": "no_crypto_trades_yet"}
+
+
+def test_crypto_sequential_gate_closed_while_a_crypto_position_is_open():
+    state = {"positions": [{"coin": "BTC"}], "trade_log": []}
+    result = kalshi_15m_strategy.compute_crypto_sequential_gate(state)
+    assert result == {"open": False, "reason": "crypto_position_already_open"}
+
+
+def test_crypto_sequential_gate_ignores_a_metals_position_when_checking_crypto_slots():
+    # A metals position open must never block crypto -- these are
+    # separate, independent gates (see _market_of's own comment).
+    state = {"positions": [{"coin": "GOLD"}], "trade_log": []}
+    result = kalshi_15m_strategy.compute_crypto_sequential_gate(state)
+    assert result == {"open": True, "reason": "no_crypto_trades_yet"}
+
+
+def test_crypto_sequential_gate_open_after_the_previous_crypto_trade_won():
+    state = {"positions": [], "trade_log": [{"coin": "BTC", "realized_pnl_usd": 1.0, "dry_run": False}]}
+    result = kalshi_15m_strategy.compute_crypto_sequential_gate(state)
+    assert result == {"open": True, "reason": "previous_crypto_trade_won", "real_trade_count": 1}
+
+
+def test_crypto_sequential_gate_closed_pending_retrain_after_a_loss():
+    state = {"positions": [], "trade_log": [{"coin": "ETH", "realized_pnl_usd": -1.0, "dry_run": False}]}
+    result = kalshi_15m_strategy.compute_crypto_sequential_gate(state)
+    assert result == {
+        "open": False, "reason": "crypto_loss_retrain_pending", "retrain_pending": True, "real_trade_count": 1,
+    }
+
+
+def test_crypto_sequential_gate_ignores_dry_run_trades():
+    state = {"positions": [], "trade_log": [{"coin": "BTC", "realized_pnl_usd": -1.0, "dry_run": True}]}
+    result = kalshi_15m_strategy.compute_crypto_sequential_gate(state)
+    assert result == {"open": True, "reason": "no_crypto_trades_yet"}
+
+
+def test_crypto_sequential_gate_ignores_metals_trades_when_checking_the_last_crypto_outcome():
+    state = {
+        "positions": [],
+        "trade_log": [
+            {"coin": "BTC", "realized_pnl_usd": 1.0, "dry_run": False},
+            {"coin": "GOLD", "realized_pnl_usd": -1.0, "dry_run": False},
+        ],
+    }
+    result = kalshi_15m_strategy.compute_crypto_sequential_gate(state)
+    # The metals loss must never be read as "the last crypto trade" --
+    # BTC's own real win is still the last CRYPTO trade.
+    assert result == {"open": True, "reason": "previous_crypto_trade_won", "real_trade_count": 1}
+
+
+def test_crypto_sequential_gate_reopens_once_the_matching_retrain_is_cleared():
+    state = {
+        "positions": [], "trade_log": [{"coin": "BTC", "realized_pnl_usd": -1.0, "dry_run": False}],
+        "tuning": {"crypto_loss_retrain": {"cleared_at_real_trade_count": 1}},
+    }
+    result = kalshi_15m_strategy.compute_crypto_sequential_gate(state)
+    assert result == {"open": True, "reason": "loss_retrain_already_cleared", "real_trade_count": 1}
+
+
+def test_crypto_sequential_gate_stays_closed_for_a_stale_retrain_clearance():
+    # cleared_at_real_trade_count=1 doesn't match the CURRENT real trade
+    # count (2) -- a fresh loss after that clearance needs its OWN fresh
+    # retrain, same idempotency discipline as win_streak_cooldown's own.
+    state = {
+        "positions": [],
+        "trade_log": [
+            {"coin": "BTC", "realized_pnl_usd": 1.0, "dry_run": False},
+            {"coin": "BTC", "realized_pnl_usd": -1.0, "dry_run": False},
+        ],
+        "tuning": {"crypto_loss_retrain": {"cleared_at_real_trade_count": 1}},
+    }
+    result = kalshi_15m_strategy.compute_crypto_sequential_gate(state)
+    assert result == {
+        "open": False, "reason": "crypto_loss_retrain_pending", "retrain_pending": True, "real_trade_count": 2,
+    }
+
+
+def test_crypto_sequential_gate_disabled_always_reports_open():
+    state = {"positions": [{"coin": "BTC"}], "trade_log": [{"coin": "BTC", "realized_pnl_usd": -1.0, "dry_run": False}]}
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(kalshi_15m_strategy, "CRYPTO_SEQUENTIAL_GATE_ENABLED", False)
+        result = kalshi_15m_strategy.compute_crypto_sequential_gate(state)
+    assert result == {"open": True, "reason": "gate_disabled"}
+
+
+def test_apply_crypto_loss_retrain_result_persists_the_clearance():
+    kalshi_15m_strategy._save_state({"positions": [], "trade_log": [], "realized_pnl_by_date": {}})  # noqa: SLF001
+    result = kalshi_15m_strategy.apply_crypto_loss_retrain_result(real_trade_count=3, retrain_ok=True)
+    assert result == {"cleared": True, "real_trade_count": 3}
+    state = kalshi_15m_strategy._load_state()  # noqa: SLF001
+    assert state["tuning"]["crypto_loss_retrain"]["cleared_at_real_trade_count"] == 3
+
+
+def test_apply_crypto_loss_retrain_result_does_not_persist_on_failure():
+    kalshi_15m_strategy._save_state({"positions": [], "trade_log": [], "realized_pnl_by_date": {}})  # noqa: SLF001
+    result = kalshi_15m_strategy.apply_crypto_loss_retrain_result(real_trade_count=3, retrain_ok=False)
+    assert result == {"cleared": False, "real_trade_count": 3}
+    state = kalshi_15m_strategy._load_state()  # noqa: SLF001
+    assert "crypto_loss_retrain" not in state.get("tuning", {})
 
 
 # ---------------------------------------------------------------------------
@@ -2473,13 +2651,20 @@ def test_apply_win_streak_cooldown_result_persists_nothing_on_fail(monkeypatch):
 
 
 def test_scan_and_enter_blocks_all_entries_during_a_win_streak_cooldown(monkeypatch):
+    # win_streak_cooldown is now METALS-scoped (see _market_of's own
+    # comment -- crypto has its own separate compute_crypto_sequential_gate),
+    # so this uses a metals win streak (GOLD, not _gc_trade's hardcoded
+    # BTC) and disables crypto entries entirely to keep the test focused
+    # on what's actually under test here.
     monkeypatch.setattr(kalshi_15m_strategy, "WIN_STREAK_COOLDOWN_ENABLED", True)
     monkeypatch.setattr(kalshi_15m_strategy, "MAX_CONCURRENT_POSITIONS", len(kalshi_15m_strategy.ASSET_SERIES))
     monkeypatch.setattr(kalshi_15m_strategy, "GRADUATED_CONCURRENCY_ENABLED", False)
     monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
-    _mock_confident_prediction(monkeypatch)
+    monkeypatch.setattr(kalshi_15m_metals_model, "predict_direction", lambda coin: {"model_ok": True, "probability_up": 0.72})
+    monkeypatch.setattr(kalshi_15m_model, "predict_direction", lambda coin: {"model_ok": False})  # crypto stays out of this test entirely
+    gold_win_trades = [{"coin": "GOLD", "realized_pnl_usd": 1.0, "dry_run": False} for _ in range(2)]
     kalshi_15m_strategy._save_state({  # noqa: SLF001
-        "positions": [], "trade_log": [_gc_trade(pnl=1.0), _gc_trade(pnl=1.0)], "realized_pnl_by_date": {},
+        "positions": [], "trade_log": gold_win_trades, "realized_pnl_by_date": {},
     })
 
     result = kalshi_15m_strategy.scan_and_enter()
@@ -2487,7 +2672,8 @@ def test_scan_and_enter_blocks_all_entries_during_a_win_streak_cooldown(monkeypa
     assert result["win_streak_cooldown"]["active"] is True
     entered = [c for c in result["checks"] if c.get("action") == "entered"]
     assert entered == []
-    assert all(c["reason"] == "win_streak_cooldown_active" for c in result["checks"])
+    metals_checks = [c for c in result["checks"] if c["coin"] in kalshi_15m.KNOWN_15M_METALS_SERIES]
+    assert all(c["reason"] == "win_streak_cooldown_active" for c in metals_checks)
 
 
 def test_scan_and_enter_reports_win_streak_cooldown_inactive_with_no_streak(monkeypatch):
@@ -2506,9 +2692,14 @@ def test_scan_and_enter_only_opens_1_position_with_no_real_trade_history(monkeyp
     result = kalshi_15m_strategy.scan_and_enter()
 
     entered = [c for c in result["checks"] if c.get("action") == "entered"]
-    assert len(entered) == 1  # graduated concurrency's own starting slot, not the flat MAX_CONCURRENT_POSITIONS ceiling
+    # graduated concurrency's own starting slot for METALS (1) + crypto's
+    # own separate always-on sequential gate (also 1, a DIFFERENT
+    # mechanism -- see compute_crypto_sequential_gate's own docstring) --
+    # not the flat MAX_CONCURRENT_POSITIONS ceiling for either.
+    assert len(entered) == 2
+    assert {c["coin"] for c in entered} == {"BTC", "GOLD"}
     concurrency_rejections = [c for c in result["checks"] if c.get("reason") == "max_concurrent_positions"]
-    assert len(concurrency_rejections) == len(kalshi_15m_strategy.ASSET_SERIES) - 1
+    assert len(concurrency_rejections) == len(kalshi_15m.KNOWN_15M_METALS_SERIES) - 1
 
 
 # ---------------------------------------------------------------------------
@@ -2585,22 +2776,30 @@ def test_coin_is_trusted_is_coin_specific():
 
 
 def test_scan_and_enter_skips_a_coin_with_an_unprofitable_real_track_record(monkeypatch):
+    # A METALS pair -- not crypto -- deliberately: crypto's own real
+    # trades now ALSO feed compute_crypto_sequential_gate (a real loss on
+    # ANY crypto coin blocks entries on EVERY crypto coin until a
+    # retrain, see that gate's own docstring), so BTC/ETH could no longer
+    # cleanly isolate "this coin's own bad track record doesn't affect a
+    # DIFFERENT coin" -- coin_is_trusted's own per-coin independence is
+    # still real and still applies to both markets, just only cleanly
+    # observable on metals now, where no cross-coin gate exists.
     monkeypatch.setattr(kalshi_15m_strategy, "GRADUATED_CONCURRENCY_ENABLED", False)
     monkeypatch.setattr(kalshi_15m_strategy, "MAX_CONCURRENT_POSITIONS", len(kalshi_15m_strategy.ASSET_SERIES))
     monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: _market())
     _mock_confident_prediction(monkeypatch)
     monkeypatch.setattr(crypto_correlation, "perps_correlation_bullishness", lambda coin, row=None: {"score": 0.0, "reason": "neutral", "components": {}})
-    bad_btc_trades = [{"coin": "BTC", "realized_pnl_usd": -1.0, "dry_run": False} for _ in range(8)]
-    kalshi_15m_strategy._save_state({"positions": [], "trade_log": bad_btc_trades, "realized_pnl_by_date": {}})  # noqa: SLF001
+    bad_gold_trades = [{"coin": "GOLD", "realized_pnl_usd": -1.0, "dry_run": False} for _ in range(8)]
+    kalshi_15m_strategy._save_state({"positions": [], "trade_log": bad_gold_trades, "realized_pnl_by_date": {}})  # noqa: SLF001
 
     result = kalshi_15m_strategy.scan_and_enter()
 
-    btc_check = next(c for c in result["checks"] if c["coin"] == "BTC")
-    assert btc_check["ok"] is False
-    assert btc_check["reason"] == "unprofitable_real_track_record"
+    gold_check = next(c for c in result["checks"] if c["coin"] == "GOLD")
+    assert gold_check["ok"] is False
+    assert gold_check["reason"] == "unprofitable_real_track_record"
     entered_coins = {c["coin"] for c in result["checks"] if c.get("action") == "entered"}
-    assert "BTC" not in entered_coins
-    assert "ETH" in entered_coins  # a different coin's own track record is untouched
+    assert "GOLD" not in entered_coins
+    assert "SILVER" in entered_coins  # a different coin's own track record is untouched
 
 
 # ---------------------------------------------------------------------------
