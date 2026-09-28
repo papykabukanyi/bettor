@@ -406,19 +406,31 @@ def test_kalshi_15m_data_collect_job_survives_a_collection_failure(monkeypatch):
 # crypto only (see KALSHI_15M_RECONCILE_DAYS's own comment).
 # ---------------------------------------------------------------------------
 def test_kalshi_15m_reconcile_job_calls_backfill_with_the_configured_window(monkeypatch):
-    captured = {}
-    monkeypatch.setattr(kalshi_15m_data, "backfill_minute_history", lambda **kw: captured.update(kw) or {"ok": True, "dates_written": 2})
+    """Covers BOTH crypto and metals now -- metals gained a real
+    historical backfill capability this session (Yahoo Finance futures
+    data), closing a real gap this job used to disclose as unfixable."""
+    from data import kalshi_15m_metals_data
+
+    captured_crypto, captured_metals = {}, {}
+    monkeypatch.setattr(kalshi_15m_data, "backfill_minute_history", lambda **kw: captured_crypto.update(kw) or {"ok": True, "dates_written": 2})
+    monkeypatch.setattr(kalshi_15m_metals_data, "backfill_minute_history", lambda **kw: captured_metals.update(kw) or {"ok": True, "dates_written": 3})
 
     result = app_kalshi._run_kalshi_15m_reconcile.__wrapped__()  # noqa: SLF001
 
-    assert result == {"ok": True, "dates_written": 2}
-    assert captured == {"days": app_kalshi.KALSHI_15M_RECONCILE_DAYS}
+    assert result == {"crypto": {"ok": True, "dates_written": 2}, "metals": {"ok": True, "dates_written": 3}}
+    assert captured_crypto == {"days": app_kalshi.KALSHI_15M_RECONCILE_DAYS}
+    assert captured_metals == {"days": app_kalshi.KALSHI_15M_RECONCILE_DAYS}
 
 
 def test_kalshi_15m_reconcile_job_reports_failure_without_raising(monkeypatch):
+    from data import kalshi_15m_metals_data
+
     monkeypatch.setattr(kalshi_15m_data, "backfill_minute_history", lambda **kw: {"ok": False, "reason": "no_hf_api_key"})
+    monkeypatch.setattr(kalshi_15m_metals_data, "backfill_minute_history", lambda **kw: {"ok": False, "reason": "no_hf_api_key"})
     result = app_kalshi._run_kalshi_15m_reconcile.__wrapped__()  # noqa: SLF001
-    assert result == {"ok": False, "reason": "no_hf_api_key"}
+    assert result == {
+        "crypto": {"ok": False, "reason": "no_hf_api_key"}, "metals": {"ok": False, "reason": "no_hf_api_key"},
+    }
 
 
 def test_kalshi_15m_reconcile_hour_is_thirty_minutes_before_train_hour():
@@ -1777,3 +1789,48 @@ def test_api_kalshi_15m_status_reports_effective_not_raw_tuning_params(monkeypat
     assert body["params"]["model_confidence_min"] == 0.5628
     assert body["params"]["position_size_pct"] == 0.10
     assert body["max_concurrent_positions"] == body["params"]["max_concurrent_positions"]
+
+
+def test_api_kalshi_15m_metals_backfill_route_calls_the_real_backfill(monkeypatch):
+    from data import kalshi_15m_metals_data
+
+    captured = {}
+    monkeypatch.setattr(
+        kalshi_15m_metals_data, "backfill_minute_history",
+        lambda **kw: captured.update(kw) or {"ok": True, "metals_processed": 5, "metals_requested": 5, "dates_written": 23},
+    )
+
+    with app_kalshi.app.test_client() as client:
+        resp = client.post("/api/kalshi15m/metals-backfill")
+        body = resp.get_json()
+
+    assert resp.status_code == 200
+    assert body["dates_written"] == 23
+    assert captured["days"] == kalshi_15m_metals_data._YAHOO_MAX_1M_LOOKBACK_DAYS  # noqa: SLF001
+
+
+def test_api_kalshi_15m_metals_backfill_route_accepts_a_custom_days_param(monkeypatch):
+    from data import kalshi_15m_metals_data
+
+    captured = {}
+    monkeypatch.setattr(kalshi_15m_metals_data, "backfill_minute_history", lambda **kw: captured.update(kw) or {"ok": True})
+
+    with app_kalshi.app.test_client() as client:
+        client.post("/api/kalshi15m/metals-backfill?days=5")
+
+    assert captured["days"] == 5
+
+
+def test_api_kalshi_15m_metals_backfill_route_survives_a_failure(monkeypatch):
+    from data import kalshi_15m_metals_data
+
+    def raise_error(**kw):
+        raise RuntimeError("simulated failure")
+
+    monkeypatch.setattr(kalshi_15m_metals_data, "backfill_minute_history", raise_error)
+
+    with app_kalshi.app.test_client() as client:
+        resp = client.post("/api/kalshi15m/metals-backfill")
+
+    assert resp.status_code == 500
+    assert resp.get_json()["ok"] is False

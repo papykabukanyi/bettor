@@ -804,11 +804,17 @@ def _run_kalshi_15m_win_streak_verification(cooldown: dict[str, Any]) -> dict[st
 @_locked_job("kalshi_15m_reconcile", stale_after_sec=600)
 def _run_kalshi_15m_reconcile() -> dict[str, Any]:
     """See KALSHI_15M_RECONCILE_DAYS's own comment for the full rationale.
-    Crypto only -- metals has no historical backfill capability at all
-    (no free historical price API exists, see kalshi_15m_metals_data.py's
-    own module docstring), so there's nothing for this job to reconcile
-    there."""
-    return kalshi_15m_data.backfill_minute_history(days=KALSHI_15M_RECONCILE_DAYS)
+    Covers BOTH crypto and metals now -- metals gained a real historical
+    backfill capability this session (Yahoo Finance futures data, found
+    and live-verified after gold-api.com's own /history endpoint turned
+    out to need a paid key; see kalshi_15m_metals_data.py's own module
+    docstring for the full evidence), closing a real gap this job's own
+    docstring used to disclose as unfixable ("metals has no historical
+    backfill capability at all")."""
+    return {
+        "crypto": kalshi_15m_data.backfill_minute_history(days=KALSHI_15M_RECONCILE_DAYS),
+        "metals": kalshi_15m_metals_data.backfill_minute_history(days=KALSHI_15M_RECONCILE_DAYS),
+    }
 
 
 @_locked_job("kalshi_15m_train", stale_after_sec=1800)
@@ -1975,6 +1981,31 @@ def api_kalshi_15m_backfill():
         return jsonify({"ok": False, "error": str(exc)}), 500
 
 
+@app.route("/api/kalshi15m/metals-backfill", methods=["POST"])
+def api_kalshi_15m_metals_backfill():
+    """Manually triggers kalshi_15m_metals_data.backfill_minute_history --
+    see its own docstring for the full design (Yahoo Finance futures data,
+    found and live-verified this session; real per-request/total-retention
+    limits it already respects internally). Runs synchronously, requires
+    the same CRON_SECRET bearer every other manual trigger route here does.
+
+    Defaults to the function's own real max (29 days) rather than a
+    smaller window the way the crypto backfill route does -- metals' own
+    real per-metal request count is far smaller (a handful of 7-day chunks
+    per metal vs. crypto's many 24-hour chunks over a much longer window),
+    confirmed live to complete a full 5-metal/29-day run in well under a
+    minute, comfortably inside gunicorn's own 300s --timeout."""
+    if not is_cron_authorized(request):
+        return jsonify({"ok": False, "error": "Unauthorized"}), 401
+    try:
+        days = int(request.args.get("days", str(kalshi_15m_metals_data._YAHOO_MAX_1M_LOOKBACK_DAYS)) or "29")  # noqa: SLF001
+        result = kalshi_15m_metals_data.backfill_minute_history(days=days)
+        return jsonify(result)
+    except Exception as exc:
+        logger.warning("[app_kalshi] kalshi_15m metals backfill failed", exc_info=True)
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
 @app.route("/api/kalshi15m/verify-order-mechanics", methods=["POST"])
 def api_kalshi_15m_verify_order_mechanics():
     """One-off, manually-triggered diagnostic: places a REAL order on a
@@ -2329,7 +2360,7 @@ _JOB_LABELS = {
     "kalshi_15m_data_collect": f"Kalshi 15m crypto markets data collection -> HF (every {KALSHI_15M_DATA_COLLECT_MINUTES} min)",
     "kalshi_15m_metals_data_collect": f"Kalshi 15m gold/silver/copper data collection -> HF (every {KALSHI_15M_METALS_DATA_COLLECT_MINUTES} min)",
     "kalshi_15m_cycle": f"Kalshi 15m markets settlement check + entry scan (every {KALSHI_15M_CYCLE_MINUTES} min)",
-    "kalshi_15m_reconcile": f"Kalshi 15m crypto archive gap-heal, trailing {KALSHI_15M_RECONCILE_DAYS}d (daily, 30 min before training)",
+    "kalshi_15m_reconcile": f"Kalshi 15m crypto + metals archive gap-heal, trailing {KALSHI_15M_RECONCILE_DAYS}d (daily, 30 min before training)",
     "kalshi_15m_train": f"Kalshi 15m markets model retrain, crypto + metals (daily {KALSHI_15M_TRAIN_HOUR_ET:02d}:00 ET)",
     "kalshi_15m_torch_train": f"Kalshi 15m crypto custom PyTorch MLP challenger, promoted only if it beats the current model (daily {KALSHI_15M_TORCH_TRAIN_HOUR_ET:02d}:00 ET)",
     "kalshi_15m_trade_analysis": (

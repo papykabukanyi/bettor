@@ -21,12 +21,27 @@ to separately obtain; gold-api.com's own values track spot gold/silver/
 copper closely enough for a DIRECTION classifier (never claims exact
 settlement-price parity the way perps' proxy reasoning does for crypto).
 
-No historical bars exist anywhere free for this -- unlike every other
-market here, this module can't backfill a single day of history on day
-one. It builds its own rolling window one point per collection cycle
-(see KALSHI_15M_METALS_DATA_COLLECT_MINUTES's own comment on why that
-cadence is tighter than crypto's), persisted locally (kalshi_15m_metals_price_history/
-{metal}.parquet).
+Real historical backfill DOES exist now (see backfill_minute_history) --
+found and live-verified this session, closing a real gap this docstring
+used to claim didn't have a fix: gold-api.com's own /history endpoint is
+real but requires a paid API key (confirmed live: HTTP 401, "No x-api-key
+header"), but Yahoo Finance's public chart API serves real, free, no-key
+1-minute OHLC for the underlying COMEX futures contract per metal
+(GC=F/SI=F/HG=F/PL=F/PA=F) -- a disclosed proxy for spot (futures track
+spot closely enough for a direction classifier, same "proxy, not
+settlement-price parity" reasoning already used above for gold-api.com
+itself), confirmed live for all 5 metals. Two real, confirmed API
+constraints (never guessed): at most 8 days of 1-minute data per request,
+and 1-minute data is retained for only the last 30 real days total --
+both confirmed via a real HTTP 422 from Yahoo's own API at each boundary.
+
+Day-to-day, this still builds its own rolling window one point per
+collection cycle (see KALSHI_15M_METALS_DATA_COLLECT_MINUTES's own comment
+on why that cadence is tighter than crypto's), persisted locally
+(kalshi_15m_metals_price_history/{metal}.parquet) -- the backfill only
+closes the STARTING gap (an archive with days of real history instead of
+however long the live collector has happened to be running), it doesn't
+replace the live collector's own ongoing, real-time-priced role.
 
 That local file USED TO be the only copy, on the reasoning that it's a
 rolling feature-computation window, not the durable training record (the
@@ -142,6 +157,154 @@ METALS_FEATURE_COLUMNS = [
 
 def get_universe() -> list[str]:
     return list(METAL_TO_SYMBOL.keys())
+
+
+# Real, free, no-key historical minute-bar source -- found and live-
+# verified this session, closing the gap this module's own top docstring
+# used to claim had no fix. See that docstring for the full evidence
+# (gold-api.com's own /history needs a paid key; Yahoo Finance's public
+# chart API doesn't) and the 2 real API constraints backfill_minute_history
+# below respects.
+YAHOO_FUTURES_SYMBOL = {
+    "GOLD": "GC=F", "SILVER": "SI=F", "COPPER": "HG=F", "PLATINUM": "PL=F", "PALLADIUM": "PA=F",
+}
+_YAHOO_CHART_BASE_URL = "https://query1.finance.yahoo.com/v8/finance/chart"
+_YAHOO_MAX_1M_DAYS_PER_REQUEST = 7  # real limit confirmed live at 8 -- kept a day under as a safety margin against boundary rounding
+_YAHOO_MAX_1M_LOOKBACK_DAYS = 29  # real limit confirmed live at 30 -- same safety margin
+
+
+def _fetch_yahoo_1m_chunk(symbol: str, start_ts: int, end_ts: int) -> pd.DataFrame:
+    """One real HTTP call to Yahoo Finance's public chart API -- no key,
+    no auth, confirmed live for all 5 of this module's own futures
+    symbols. Returns a DataFrame with real "ts"/"close" columns (empty on
+    any failure -- never raises, matching every other real-data fetch in
+    this module)."""
+    try:
+        resp = requests.get(
+            f"{_YAHOO_CHART_BASE_URL}/{symbol}",
+            params={"interval": "1m", "period1": start_ts, "period2": end_ts},
+            headers={"User-Agent": "Mozilla/5.0"}, timeout=GOLD_API_TIMEOUT_SEC,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        result = (data.get("chart") or {}).get("result") or []
+        if not result:
+            return pd.DataFrame()
+        ts = result[0].get("timestamp") or []
+        quote = ((result[0].get("indicators") or {}).get("quote") or [{}])[0]
+        closes = quote.get("close") or []
+        if not ts or not closes:
+            return pd.DataFrame()
+        df = pd.DataFrame({"ts": ts, "close": closes}).dropna()
+        df["ts"] = df["ts"].astype(int)
+        return df
+    except Exception as exc:
+        logger.warning("[kalshi_15m_metals_data] Yahoo Finance chunk fetch failed for %s: %s", symbol, exc)
+        return pd.DataFrame()
+
+
+def backfill_minute_history(metals: list[str] | None = None, *, days: int = _YAHOO_MAX_1M_LOOKBACK_DAYS) -> dict[str, Any]:
+    """Deep historical backfill -- the live collector
+    (_run_kalshi_15m_metals_data_collect) only ever archives what it
+    observes going forward, so without this the archive
+    load_training_dataset() reads from would otherwise grow one collection
+    cycle at a time from whenever collection first started, the same real
+    gap kalshi_15m_data.backfill_minute_history/
+    alpaca_crypto_data.backfill_minute_history were each built to close
+    for their own markets. See this module's own top docstring for the
+    real source (Yahoo Finance futures) and its 2 real, confirmed
+    constraints (`days` is silently capped at _YAHOO_MAX_1M_LOOKBACK_DAYS,
+    the real total-retention limit; requests are chunked at
+    _YAHOO_MAX_1M_DAYS_PER_REQUEST, the real per-request limit).
+
+    Historical news sentiment for arbitrary past dates isn't available
+    from any free API -- held at neutral (0.0) for every backfilled row,
+    same disclosed limitation as every sibling module's own backfill."""
+    if not HF_API_KEY:
+        return {"ok": False, "reason": "no_hf_api_key"}
+    days = min(days, _YAHOO_MAX_1M_LOOKBACK_DAYS)
+
+    target_metals = metals if metals is not None else get_universe()
+    now = int(dt.datetime.now(dt.timezone.utc).timestamp())
+    window_start = now - days * 86400
+
+    by_date: dict[str, list[pd.DataFrame]] = {}
+    metals_processed = 0
+    for metal in target_metals:
+        symbol = YAHOO_FUTURES_SYMBOL.get(metal)
+        if not symbol:
+            continue
+        try:
+            chunks = []
+            chunk_start = window_start
+            while chunk_start < now:
+                chunk_end = min(chunk_start + _YAHOO_MAX_1M_DAYS_PER_REQUEST * 86400, now)
+                chunk_df = _fetch_yahoo_1m_chunk(symbol, chunk_start, chunk_end)
+                if not chunk_df.empty:
+                    chunks.append(chunk_df)
+                chunk_start = chunk_end
+            if not chunks:
+                continue
+            price_df = pd.concat(chunks, ignore_index=True).drop_duplicates(subset=["ts"]).sort_values("ts").reset_index(drop=True)
+            del chunks
+
+            feats = engineer_metals_features(price_df, sentiment_score=0.0)
+            del price_df
+            if feats.empty:
+                continue
+            feats.insert(0, "symbol", metal)
+            date_strs = pd.to_datetime(feats["ts"], unit="s", utc=True).dt.strftime("%Y-%m-%d")
+            for date_str, group in feats.groupby(date_strs):
+                by_date.setdefault(date_str, []).append(group.reset_index(drop=True))
+            del feats, date_strs
+            metals_processed += 1
+        except Exception as exc:
+            logger.warning("[kalshi_15m_metals_data] backfill failed for %s: %s", metal, exc)
+        gc.collect()
+
+    if not by_date:
+        return {"ok": True, "metals_processed": metals_processed, "metals_requested": len(target_metals), "dates_written": 0}
+
+    import tempfile
+
+    from huggingface_hub import HfApi, hf_hub_download
+    api = HfApi(token=HF_API_KEY)
+    _ensure_dataset_repo()
+    dates_written = 0
+    for date_str in sorted(by_date.keys()):
+        groups = by_date.pop(date_str)
+        combined_new = pd.concat(groups, ignore_index=True)
+        del groups
+        path_in_repo = f"data/{date_str}.parquet"
+        try:
+            existing_path = hf_hub_download(repo_id=HF_KALSHI_15M_METALS_DATASET_REPO, filename=path_in_repo, repo_type="dataset", token=HF_API_KEY)
+            existing = pd.read_parquet(existing_path)
+            combined = pd.concat([existing, combined_new], ignore_index=True)
+            del existing
+        except Exception:
+            combined = combined_new
+        combined = combined.drop_duplicates(subset=["symbol", "ts"], keep="last").sort_values(["symbol", "ts"])
+        del combined_new
+        tmp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as tmp:
+                combined.to_parquet(tmp.name, index=False)
+                tmp_path = tmp.name
+            del combined
+            retry_on_rate_limit(lambda tp=tmp_path, pir=path_in_repo, ds=date_str: api.upload_file(
+                path_or_fileobj=tp, path_in_repo=pir,
+                repo_id=HF_KALSHI_15M_METALS_DATASET_REPO, repo_type="dataset",
+                commit_message=f"kalshi 15m metals backfill {ds}",
+            ))
+            dates_written += 1
+        except Exception as exc:
+            logger.warning("[kalshi_15m_metals_data] backfill upload failed for %s: %s", date_str, exc)
+        finally:
+            if tmp_path:
+                os.unlink(tmp_path)
+        gc.collect()
+
+    return {"ok": True, "metals_processed": metals_processed, "metals_requested": len(target_metals), "dates_written": dates_written}
 
 
 def fetch_latest_price(metal: str) -> dict[str, Any] | None:
