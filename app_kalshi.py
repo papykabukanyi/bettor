@@ -681,6 +681,25 @@ def _run_kalshi_15m_data_collect() -> dict[str, Any]:
         gc.collect()
 
 
+@_locked_job("kalshi_15m_fair_value_observation", stale_after_sec=600)
+def _run_kalshi_15m_fair_value_observation() -> dict[str, Any]:
+    """Observation-only: logs Kalshi's own live quote alongside this
+    account's closed-form fair-value estimate for every open crypto 15m
+    market, every cycle -- see kalshi_15m_data.py's own module-level
+    comment (right above collect_fair_value_observations) for the full
+    real-evidence rationale. Never places an order, never touches
+    scan_and_enter/evaluate_candidate -- purely additive data collection,
+    same as every other *_data_collect job here, just a second, narrower
+    research question running alongside the real training archive."""
+    try:
+        df = kalshi_15m_data.collect_fair_value_observations()
+        if df.empty:
+            return {"ok": False, "reason": "no_rows_collected"}
+        return kalshi_15m_data.push_fair_value_log(df)
+    finally:
+        gc.collect()
+
+
 @_locked_job("kalshi_15m_metals_data_collect", stale_after_sec=600)
 def _run_kalshi_15m_metals_data_collect() -> dict[str, Any]:
     """Data collection for Kalshi's 15-minute GOLD/SILVER/COPPER markets
@@ -1275,6 +1294,11 @@ def _ensure_background_jobs_started() -> None:
             scheduler.add_job(
                 _run_kalshi_15m_cycle, "interval", minutes=KALSHI_15M_CYCLE_MINUTES,
                 id="kalshi_15m_cycle", replace_existing=True,
+                next_run_time=dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=KALSHI_15M_CYCLE_MINUTES),
+            )
+            scheduler.add_job(
+                _run_kalshi_15m_fair_value_observation, "interval", minutes=KALSHI_15M_CYCLE_MINUTES,
+                id="kalshi_15m_fair_value_observation", replace_existing=True,
                 next_run_time=dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=KALSHI_15M_CYCLE_MINUTES),
             )
             _reconcile_hour, _reconcile_minute = divmod((KALSHI_15M_TRAIN_HOUR_ET * 60 - 30) % (24 * 60), 60)
@@ -2360,6 +2384,10 @@ _JOB_LABELS = {
     "kalshi_15m_data_collect": f"Kalshi 15m crypto markets data collection -> HF (every {KALSHI_15M_DATA_COLLECT_MINUTES} min)",
     "kalshi_15m_metals_data_collect": f"Kalshi 15m gold/silver/copper data collection -> HF (every {KALSHI_15M_METALS_DATA_COLLECT_MINUTES} min)",
     "kalshi_15m_cycle": f"Kalshi 15m markets settlement check + entry scan (every {KALSHI_15M_CYCLE_MINUTES} min)",
+    "kalshi_15m_fair_value_observation": (
+        f"Kalshi 15m crypto fair-value-vs-live-quote research log, observation only, no orders "
+        f"(every {KALSHI_15M_CYCLE_MINUTES} min)"
+    ),
     "kalshi_15m_reconcile": f"Kalshi 15m crypto + metals archive gap-heal, trailing {KALSHI_15M_RECONCILE_DAYS}d (daily, 30 min before training)",
     "kalshi_15m_train": f"Kalshi 15m markets model retrain, crypto + metals (daily {KALSHI_15M_TRAIN_HOUR_ET:02d}:00 ET)",
     "kalshi_15m_torch_train": f"Kalshi 15m crypto custom PyTorch MLP challenger, promoted only if it beats the current model (daily {KALSHI_15M_TORCH_TRAIN_HOUR_ET:02d}:00 ET)",

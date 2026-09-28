@@ -304,3 +304,130 @@ def test_backfill_minute_history_merges_with_an_existing_shard(monkeypatch, tmp_
     merged_symbols = set(uploads[0]["df"]["symbol"])
     assert "ETH" in merged_symbols  # the pre-existing row survived the merge
     assert "BTC" in merged_symbols
+
+
+# ---------------------------------------------------------------------------
+# Fair-value (digital-option) mispricing research -- see
+# kalshi_15m_data.py's own module-level comment (right above
+# collect_fair_value_observations) for the real backtest finding that
+# motivated this: a closed-form fair-value estimate is genuinely
+# well-calibrated against real outcomes (88% late-window accuracy on this
+# account's own archived crypto data), but whether it beats Kalshi's own
+# LIVE quote is a separate, still-open question this logger exists to
+# answer honestly with real, forward-collected evidence.
+# ---------------------------------------------------------------------------
+def test_compute_fair_value_probability_up_returns_none_on_invalid_inputs():
+    assert kalshi_15m_data.compute_fair_value_probability_up(None, 100.0, 0.001, 5.0) is None
+    assert kalshi_15m_data.compute_fair_value_probability_up(100.0, None, 0.001, 5.0) is None
+    assert kalshi_15m_data.compute_fair_value_probability_up(100.0, 100.0, None, 5.0) is None
+    assert kalshi_15m_data.compute_fair_value_probability_up(100.0, 100.0, 0.001, None) is None
+    assert kalshi_15m_data.compute_fair_value_probability_up(100.0, 100.0, 0.0, 5.0) is None  # zero vol
+    assert kalshi_15m_data.compute_fair_value_probability_up(100.0, 100.0, 0.001, 0.0) is None  # no time left
+    assert kalshi_15m_data.compute_fair_value_probability_up(-1.0, 100.0, 0.001, 5.0) is None
+    assert kalshi_15m_data.compute_fair_value_probability_up(100.0, -1.0, 0.001, 5.0) is None
+
+
+def test_compute_fair_value_probability_up_is_exactly_half_when_price_equals_strike():
+    # Zero-drift random walk exactly AT the strike, any real vol/time-left
+    # combination -> the digital option is a genuine coin flip.
+    p = kalshi_15m_data.compute_fair_value_probability_up(100.0, 100.0, 0.002, 7.5)
+    assert p is not None
+    assert abs(p - 0.5) < 1e-9
+
+
+def test_compute_fair_value_probability_up_increases_with_distance_above_strike():
+    low = kalshi_15m_data.compute_fair_value_probability_up(100.5, 100.0, 0.002, 5.0)
+    high = kalshi_15m_data.compute_fair_value_probability_up(102.0, 100.0, 0.002, 5.0)
+    assert 0.5 < low < high < 1.0
+
+
+def test_compute_fair_value_probability_up_decreases_with_distance_below_strike():
+    high = kalshi_15m_data.compute_fair_value_probability_up(99.5, 100.0, 0.002, 5.0)
+    low = kalshi_15m_data.compute_fair_value_probability_up(98.0, 100.0, 0.002, 5.0)
+    assert 0.0 < low < high < 0.5
+
+
+def test_compute_fair_value_probability_up_moves_toward_certainty_as_time_runs_out():
+    # Same real distance-above-strike, less and less time left to random-
+    # walk back to 50/50 -- probability should march toward 1.0, the exact
+    # "near-certain late in the window" mechanic the real backtest found.
+    far_out = kalshi_15m_data.compute_fair_value_probability_up(101.0, 100.0, 0.002, 14.0)
+    near_close = kalshi_15m_data.compute_fair_value_probability_up(101.0, 100.0, 0.002, 1.0)
+    assert far_out is not None and near_close is not None
+    assert far_out < near_close
+    assert near_close > 0.9
+
+
+def test_collect_fair_value_observations_assembles_one_row_per_open_market(monkeypatch):
+    from data import kalshi_15m
+
+    monkeypatch.setattr(kalshi_15m, "KNOWN_15M_SERIES", {"BTC": "KXBTC15M"})
+
+    fake_market = {
+        "ticker": "KXBTC15M-TEST-00", "floor_strike": 100.0,
+        "yes_bid_dollars": "0.45", "yes_ask_dollars": "0.47", "last_price_dollars": "0.46",
+    }
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: fake_market)
+    monkeypatch.setattr(kalshi_15m, "seconds_to_close", lambda market: 300.0)  # 5 min left
+    monkeypatch.setattr(
+        kalshi_15m_data, "latest_feature_row",
+        lambda coin: {"current_price": 101.0, "volatility_15": 0.002},
+    )
+
+    df = kalshi_15m_data.collect_fair_value_observations()
+    assert len(df) == 1
+    row = df.iloc[0]
+    assert row["coin"] == "BTC"
+    assert row["ticker"] == "KXBTC15M-TEST-00"
+    assert row["strike_price"] == 100.0
+    assert row["current_price"] == 101.0
+    assert row["minutes_remaining"] == pytest.approx(5.0)
+    assert row["elapsed_minutes"] == pytest.approx(10.0)
+    assert row["kalshi_yes_bid"] == pytest.approx(0.45)
+    assert row["kalshi_yes_ask"] == pytest.approx(0.47)
+    assert row["kalshi_last_price"] == pytest.approx(0.46)
+    assert row["fair_value_prob_up"] is not None
+    assert row["fair_value_prob_up"] > 0.5  # current_price above strike
+
+
+def test_collect_fair_value_observations_skips_a_market_with_no_open_window(monkeypatch):
+    from data import kalshi_15m
+
+    monkeypatch.setattr(kalshi_15m, "KNOWN_15M_SERIES", {"BTC": "KXBTC15M"})
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: None)
+
+    df = kalshi_15m_data.collect_fair_value_observations()
+    assert df.empty
+
+
+def test_collect_fair_value_observations_skips_a_coin_with_no_feature_data(monkeypatch):
+    from data import kalshi_15m
+
+    monkeypatch.setattr(kalshi_15m, "KNOWN_15M_SERIES", {"BTC": "KXBTC15M"})
+    fake_market = {"ticker": "KXBTC15M-TEST-00", "floor_strike": 100.0}
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: fake_market)
+    monkeypatch.setattr(kalshi_15m, "seconds_to_close", lambda market: 300.0)
+    monkeypatch.setattr(kalshi_15m_data, "latest_feature_row", lambda coin: None)
+
+    df = kalshi_15m_data.collect_fair_value_observations()
+    assert df.empty
+
+
+def test_push_fair_value_log_with_no_rows_returns_not_ok():
+    result = kalshi_15m_data.push_fair_value_log(pd.DataFrame())
+    assert result == {"ok": False, "reason": "no_rows"}
+
+
+def test_push_fair_value_log_writes_a_local_shard_and_dedupes(tmp_path, monkeypatch):
+    monkeypatch.setattr(kalshi_15m_data, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(kalshi_15m_data, "HF_API_KEY", "")  # skip the HF upload leg entirely
+    df = pd.DataFrame({
+        "coin": ["BTC", "BTC"], "ts": [1.0, 1.0], "fair_value_prob_up": [0.5, 0.6],
+    })
+    result = kalshi_15m_data.push_fair_value_log(df)
+    assert result["ok"] is True
+    assert result["hf_uploaded"] is False
+    assert result["rows_written"] == 1  # deduped on (coin, ts), keep="last"
+
+    shard = pd.read_parquet(result["shard"])
+    assert shard["fair_value_prob_up"].iloc[0] == 0.6  # the LATER-in-the-input-order row won

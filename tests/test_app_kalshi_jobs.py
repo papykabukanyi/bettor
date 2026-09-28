@@ -399,6 +399,53 @@ def test_kalshi_15m_data_collect_job_survives_a_collection_failure(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# kalshi_15m_fair_value_observation -- observation-only research log, never
+# places an order. See kalshi_15m_data.py's own module-level comment (right
+# above collect_fair_value_observations) for the real finding motivating
+# this: a closed-form digital-option fair-value estimate is well-calibrated
+# against real outcomes, but whether Kalshi's own live quote lags it (a
+# real, tradable gap) is still unknown without this real, forward-collected
+# evidence.
+# ---------------------------------------------------------------------------
+def test_kalshi_15m_fair_value_observation_job_pushes_a_log_when_rows_are_collected(monkeypatch):
+    df = pd.DataFrame({"coin": ["BTC"], "ts": [1.0], "fair_value_prob_up": [0.6]})
+    monkeypatch.setattr(kalshi_15m_data, "collect_fair_value_observations", lambda: df)
+    pushed = []
+    monkeypatch.setattr(
+        kalshi_15m_data, "push_fair_value_log",
+        lambda d: pushed.append(d) or {"ok": True, "rows_written": 1},
+    )
+
+    result = app_kalshi._run_kalshi_15m_fair_value_observation.__wrapped__()  # noqa: SLF001
+
+    assert result == {"ok": True, "rows_written": 1}
+    assert len(pushed) == 1
+    pd.testing.assert_frame_equal(pushed[0], df)
+
+
+def test_kalshi_15m_fair_value_observation_job_reports_no_rows_without_pushing(monkeypatch):
+    monkeypatch.setattr(kalshi_15m_data, "collect_fair_value_observations", lambda: pd.DataFrame())
+    pushed = []
+    monkeypatch.setattr(kalshi_15m_data, "push_fair_value_log", lambda d: pushed.append(d))
+
+    result = app_kalshi._run_kalshi_15m_fair_value_observation.__wrapped__()  # noqa: SLF001
+
+    assert result == {"ok": False, "reason": "no_rows_collected"}
+    assert pushed == []
+
+
+def test_kalshi_15m_fair_value_observation_job_survives_a_collection_failure(monkeypatch):
+    def fail():
+        raise RuntimeError("market fetch failed")
+
+    monkeypatch.setattr(kalshi_15m_data, "collect_fair_value_observations", fail)
+
+    with pytest.raises(RuntimeError):
+        app_kalshi._run_kalshi_15m_fair_value_observation.__wrapped__()  # noqa: SLF001
+    # Not swallowed -- same contract as kalshi_15m_data_collect above.
+
+
+# ---------------------------------------------------------------------------
 # kalshi_15m_reconcile -- real gap this closes: the live collector only
 # ever archives what it observes going forward, so a missed cycle (a
 # restart, a transient API failure) is a permanent archive hole unless

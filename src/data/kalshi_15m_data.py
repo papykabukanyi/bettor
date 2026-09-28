@@ -27,13 +27,14 @@ from __future__ import annotations
 
 import gc
 import logging
+import math
 import os
 import re
 from typing import Any
 
 import pandas as pd
 
-from data import perps_data
+from data import kalshi_15m, perps_data
 from data.crypto_news import get_sentiment
 from server_common import DATA_DIR
 
@@ -349,6 +350,183 @@ def push_dataset_snapshot(df: pd.DataFrame) -> dict[str, Any]:
         result["hf_uploaded"] = True
     except Exception as exc:
         logger.warning("[kalshi_15m_data] HF upload failed: %s", exc)
+        result["hf_uploaded"] = False
+        result["hf_error"] = str(exc)
+    gc.collect()
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Fair-value (digital-option) mispricing research -- observability only,
+# never wired into scan_and_enter/evaluate_candidate, no orders placed.
+#
+# Real finding this answers: kalshi_15m_strategy.py's own technical-
+# indicator ML classifier (RSI/MACD/returns/etc. -> up/down) shows no real
+# edge (~50% walk-forward on the metals sibling market, confirmed by a full
+# archive rebuild; the crypto RL pilot's calibrated pricing made things
+# WORSE, not better) -- both point at the same root problem: predicting the
+# next random-walk step of a liquid asset over 15 minutes is one of the
+# hardest questions in finance. Kalshi's own docs (this module's own
+# kalshi_15m.py docstring) confirm these contracts are literally digital
+# options: "resolution compares price at window open vs. window close."
+# That means the RIGHT question isn't "which way will it move" -- it's
+# "given how far price has ALREADY moved from the window's own floor_strike
+# and how much time is left, what does a genuine random-walk model say the
+# probability already is" -- a closed-form, well-precedented calculation
+# (the same math underlying any digital/binary option's fair value), not a
+# directional guess.
+#
+# A real backtest against this account's own archived crypto data (2026-
+# 09-28, 400,000 rows, 9 coins) confirmed the formula below is genuinely
+# well-calibrated against REAL window outcomes (88.0% accuracy / 0.087
+# Brier score late in the window across all 9 coins, vs. flat-baseline
+# 0.250 -- a real, large improvement). But calibration against the
+# EVENTUAL outcome is NOT the same question as beating Kalshi's own LIVE
+# quote -- outcomes become mechanically near-certain late in any digital
+# option's life regardless of whether there's a tradable mispricing, and a
+# real, live check of one actual BTC market this same session showed
+# Kalshi's own yes_bid/yes_ask already re-pricing in real time as price and
+# time-remaining changed. Whether Kalshi's quote LAGS this formula (a real,
+# tradable gap) or already matches it (no edge, just an efficient market)
+# is genuinely unknown -- no historical archive of Kalshi's own quotes
+# through time exists yet to test it retroactively. This logger closes
+# that real gap going forward: every 2-minute cycle, for every open crypto
+# 15m market, record the fair-value estimate ALONGSIDE Kalshi's actual live
+# quote, so a future honest analysis (not a guess) can say whether a real,
+# fee-clearing gap exists, how often, and how large -- before this ever
+# risks a single real dollar.
+# ---------------------------------------------------------------------------
+FAIR_VALUE_WINDOW_MINUTES = 15.0
+
+
+def compute_fair_value_probability_up(
+    current_price: float | None, strike_price: float | None,
+    volatility_per_min: float | None, minutes_remaining: float | None,
+) -> float | None:
+    """Closed-form digital-option fair value: given a zero-drift random
+    walk with the given per-minute volatility, what's the probability
+    price finishes >= strike_price with `minutes_remaining` left? None on
+    any invalid/degenerate input (zero-or-negative price/vol/time) rather
+    than raising -- a live caller sees a market with no clean answer yet
+    far more often than not (a fresh window has ~0 real volatility signal
+    in its very first few observations)."""
+    if current_price is None or strike_price is None or volatility_per_min is None or minutes_remaining is None:
+        return None
+    if current_price <= 0 or strike_price <= 0 or volatility_per_min <= 0 or minutes_remaining <= 0:
+        return None
+    log_ret_since_open = math.log(current_price / strike_price)
+    denom = volatility_per_min * math.sqrt(minutes_remaining)
+    if denom <= 0:
+        return None
+    z = log_ret_since_open / denom
+    return 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
+
+
+def collect_fair_value_observations() -> pd.DataFrame:
+    """One real, live snapshot per currently-open crypto 15m market:
+    Kalshi's own actual quote (yes_bid/yes_ask/last_price) alongside this
+    module's own closed-form fair-value estimate for the SAME market at
+    the SAME instant. Reuses latest_feature_row's own already-live
+    current_price/volatility_15 (no new external price source), and
+    kalshi_15m.get_current_window_market's own already-live market read
+    (the exact same call scan_and_enter already makes for these coins) --
+    the only genuinely new network cost here is looping over coins whose
+    window scan_and_enter itself might skip this cycle (e.g.
+    too_little_time_remaining), since this logger deliberately wants
+    EVERY elapsed-time bucket, not just the ones the live entry gate
+    currently considers."""
+    rows: list[dict[str, Any]] = []
+    now_ts = pd.Timestamp.utcnow().timestamp()
+    for coin, series_ticker in kalshi_15m.KNOWN_15M_SERIES.items():
+        try:
+            market = kalshi_15m.get_current_window_market(series_ticker)
+            if market is None:
+                continue
+            remaining_sec = kalshi_15m.seconds_to_close(market)
+            if remaining_sec is None or remaining_sec <= 0:
+                continue
+            minutes_remaining = remaining_sec / 60.0
+            strike_price = market.get("floor_strike")
+            if strike_price is None:
+                continue
+
+            feature_row = latest_feature_row(coin)
+            if feature_row is None:
+                continue
+            current_price = feature_row.get("current_price")
+            volatility_per_min = feature_row.get("volatility_15")
+            fair_value_prob_up = compute_fair_value_probability_up(
+                current_price=current_price, strike_price=float(strike_price),
+                volatility_per_min=volatility_per_min, minutes_remaining=minutes_remaining,
+            )
+
+            def _to_float(v: Any) -> float | None:
+                try:
+                    return float(v) if v is not None else None
+                except Exception:
+                    return None
+
+            rows.append({
+                "coin": coin, "ts": now_ts, "ticker": market.get("ticker"),
+                "elapsed_minutes": max(0.0, FAIR_VALUE_WINDOW_MINUTES - minutes_remaining),
+                "minutes_remaining": minutes_remaining,
+                "strike_price": float(strike_price), "current_price": current_price,
+                "volatility_per_min": volatility_per_min,
+                "fair_value_prob_up": fair_value_prob_up,
+                "kalshi_yes_bid": _to_float(market.get("yes_bid_dollars")),
+                "kalshi_yes_ask": _to_float(market.get("yes_ask_dollars")),
+                "kalshi_last_price": _to_float(market.get("last_price_dollars")),
+            })
+        except Exception as exc:
+            logger.warning("[kalshi_15m_data] fair-value observation failed for %s: %s", coin, exc)
+    return pd.DataFrame(rows)
+
+
+def push_fair_value_log(df: pd.DataFrame) -> dict[str, Any]:
+    """Same local-shard-merge + HF-upload discipline as push_dataset_snapshot
+    (see its own docstring), a fully separate shard family
+    (fair_value_log/{date}.parquet, own local dir) so this pure-research
+    log can never collide with or get pruned alongside the real training
+    archive's own data/{date}.parquet shards."""
+    if df.empty:
+        return {"ok": False, "reason": "no_rows"}
+
+    shard_dir = DATA_DIR / "kalshi_15m_fair_value_log"
+    shard_dir.mkdir(parents=True, exist_ok=True)
+    today = pd.Timestamp.utcnow().strftime("%Y-%m-%d")
+    shard_path = shard_dir / f"{today}.parquet"
+
+    if shard_path.exists():
+        existing = pd.read_parquet(shard_path)
+        combined = pd.concat([existing, df], ignore_index=True)
+        del existing
+    else:
+        combined = df
+    combined = combined.drop_duplicates(subset=["coin", "ts"], keep="last").sort_values(["coin", "ts"])
+    tmp_path = shard_path.with_suffix(".parquet.tmp")
+    combined.to_parquet(tmp_path, index=False)
+    os.replace(tmp_path, shard_path)
+    rows_written = len(combined)
+    del combined
+    gc.collect()
+
+    result: dict[str, Any] = {"ok": True, "rows_written": rows_written, "shard": str(shard_path)}
+    if not _ensure_dataset_repo():
+        result["hf_uploaded"] = False
+        return result
+    try:
+        from huggingface_hub import HfApi
+        api = HfApi(token=HF_API_KEY)
+        retry_on_rate_limit(lambda: api.upload_file(
+            path_or_fileobj=str(shard_path),
+            path_in_repo=f"fair_value_log/{today}.parquet",
+            repo_id=HF_KALSHI_15M_DATASET_REPO,
+            repo_type="dataset",
+            commit_message=f"kalshi 15m fair-value observation log {today}",
+        ))
+        result["hf_uploaded"] = True
+    except Exception as exc:
+        logger.warning("[kalshi_15m_data] fair-value log HF upload failed: %s", exc)
         result["hf_uploaded"] = False
         result["hf_error"] = str(exc)
     gc.collect()
