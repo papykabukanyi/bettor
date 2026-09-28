@@ -105,10 +105,10 @@ KNOWN_15M_SERIES = {
 # casing needed; callers just see "no_open_window" more often for these 3.
 KNOWN_15M_METALS_SERIES = {
     "GOLD": "KXGOLD15M", "SILVER": "KXSILVER15M", "COPPER": "KXCOPPER15M",
-    # 2 more, same free gold-api.com spot-price source (see
-    # kalshi_15m_metals_data.py's own METAL_TO_SYMBOL -- confirmed live it
-    # also serves XPT/XPD with no new credential/API needed) and the same
-    # confirmed-live 15-minute market shape as the 3 above.
+    # 2 more, same free Yahoo Finance futures source (see
+    # kalshi_15m_metals_data.py's own YAHOO_FUTURES_SYMBOL -- confirmed
+    # live it also serves PL=F/PA=F with no new credential/API needed) and
+    # the same confirmed-live 15-minute market shape as the 3 above.
     "PLATINUM": "KXPLATINUM15M", "PALLADIUM": "KXPALLADIUM15M",
 }
 

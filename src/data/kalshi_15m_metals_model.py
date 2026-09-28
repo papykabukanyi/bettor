@@ -1,6 +1,6 @@
 """Direction classifier for Kalshi's 15-minute GOLD/SILVER/COPPER/PLATINUM/
 PALLADIUM markets: given current technical features for one of the traded
-metals (see kalshi_15m_metals_data.METAL_TO_SYMBOL for the full list),
+metals (see kalshi_15m_metals_data.YAHOO_FUTURES_SYMBOL for the full list),
 predict whether its price will be higher or lower
 kalshi_15m_metals_data.LABEL_HORIZON_MINUTES (15) minutes from now --
 matching what these markets actually settle on (see kalshi_15m.py's own

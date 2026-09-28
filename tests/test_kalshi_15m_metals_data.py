@@ -35,16 +35,39 @@ def test_fetch_latest_price_parses_a_real_response(monkeypatch):
             pass
 
         def json(self):
-            return {"price": 4379.0, "updatedAt": "2026-09-19T22:34:17Z"}
+            return {"chart": {"result": [{
+                "timestamp": [1_700_000_000, 1_700_000_060],
+                "indicators": {"quote": [{"close": [4378.0, 4379.0]}]},
+            }]}}
 
-    monkeypatch.setattr(k.requests, "get", lambda url, timeout: _FakeResponse())
+    monkeypatch.setattr(k.requests, "get", lambda url, params, headers, timeout: _FakeResponse())
     result = k.fetch_latest_price("GOLD")
-    assert result["price"] == 4379.0
-    assert result["ts"] > 0
+    assert result["price"] == 4379.0  # the LAST real close, not the first
+    assert result["ts"] == 1_700_000_060
+
+
+def test_fetch_latest_price_skips_a_trailing_null_close(monkeypatch):
+    """Yahoo's own last bar for a live symbol is sometimes still-forming
+    (a null close) -- must walk back to the most recent REAL price, not
+    return None or a null."""
+    class _FakeResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"chart": {"result": [{
+                "timestamp": [1_700_000_000, 1_700_000_060],
+                "indicators": {"quote": [{"close": [4378.0, None]}]},
+            }]}}
+
+    monkeypatch.setattr(k.requests, "get", lambda url, params, headers, timeout: _FakeResponse())
+    result = k.fetch_latest_price("GOLD")
+    assert result["price"] == 4378.0
+    assert result["ts"] == 1_700_000_000
 
 
 def test_fetch_latest_price_returns_none_on_a_network_failure(monkeypatch):
-    def fail(url, timeout):
+    def fail(url, params, headers, timeout):
         raise RuntimeError("network error")
 
     monkeypatch.setattr(k.requests, "get", fail)

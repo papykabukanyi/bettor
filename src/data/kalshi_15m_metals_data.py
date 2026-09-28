@@ -9,31 +9,43 @@ contract for metals to reuse a rich candlestick feed from (crypto's own
 proxy -- see that module's docstring), so this builds its OWN price
 history from scratch, one point at a time.
 
-Price source: api.gold-api.com's plain spot-price endpoint
-(GET /price/{symbol}, symbols XAU/XAG/HG/XPT/XPD) -- confirmed live,
-genuinely free, no API key at all. Deliberately NOT Pyth's own Hermes service
-(the actual settlement source these Kalshi markets resolve against,
-confirmed via GET /series/{ticker}'s own settlement_sources) -- confirmed
-live this session that Hermes now requires a paid API key
-(HTTP 401 on /v2/updates/price/latest as of the August 2026 Pyth Core
-upgrade) that would add a new credential dependency the user would need
-to separately obtain; gold-api.com's own values track spot gold/silver/
-copper closely enough for a DIRECTION classifier (never claims exact
-settlement-price parity the way perps' proxy reasoning does for crypto).
+Price source, BOTH historical and live: Yahoo Finance's public chart API,
+real 1-minute OHLC for the underlying COMEX futures contract per metal
+(GC=F/SI=F/HG=F/PL=F/PA=F) -- confirmed live, free, no API key. A
+disclosed proxy for spot (futures track spot closely enough for a
+direction classifier, never exact settlement-price parity -- same
+reasoning perps' own crypto proxy already uses). Deliberately NOT Pyth's
+own Hermes service (the actual settlement source these Kalshi markets
+resolve against, confirmed via GET /series/{ticker}'s own
+settlement_sources) -- confirmed live this session that Hermes now
+requires a paid API key (HTTP 401 on /v2/updates/price/latest as of the
+August 2026 Pyth Core upgrade).
 
-Real historical backfill DOES exist now (see backfill_minute_history) --
-found and live-verified this session, closing a real gap this docstring
-used to claim didn't have a fix: gold-api.com's own /history endpoint is
-real but requires a paid API key (confirmed live: HTTP 401, "No x-api-key
-header"), but Yahoo Finance's public chart API serves real, free, no-key
-1-minute OHLC for the underlying COMEX futures contract per metal
-(GC=F/SI=F/HG=F/PL=F/PA=F) -- a disclosed proxy for spot (futures track
-spot closely enough for a direction classifier, same "proxy, not
-settlement-price parity" reasoning already used above for gold-api.com
-itself), confirmed live for all 5 metals. Two real, confirmed API
-constraints (never guessed): at most 8 days of 1-minute data per request,
-and 1-minute data is retained for only the last 30 real days total --
-both confirmed via a real HTTP 422 from Yahoo's own API at each boundary.
+Real, live-confirmed reason this ISN'T gold-api.com's own spot-price
+endpoint (the original source here, used for live collection only until
+this same session's own investigation): at the exact same moment,
+gold-api.com's spot price and Yahoo's own futures price for gold differed
+by $28.50 (0.67%) -- a real, persistent spot/futures basis, not noise.
+Historical backfill (see backfill_minute_history, added the same session)
+used Yahoo Finance from the start (gold-api.com's own /history endpoint
+is real but needs a paid key -- confirmed live: HTTP 401, "No x-api-key
+header"), so splicing gold-api.com spot (live) with Yahoo futures
+(backfilled) into one training archive baked a fake, non-market price
+jump into every return-based feature at that splice boundary -- a real,
+concrete, evidence-backed explanation for why a 4.3x-bigger archive
+didn't move walk-forward accuracy off ~50%, per explicit user direction:
+"something is wrong with the data source... we need different data
+source that actually works and provide data reliably." Switching live
+collection to the SAME Yahoo Finance source the backfill already used
+eliminates that splice artifact at the root, rather than papering over it
+with a rescale. The existing (spot/futures-mixed) archive was wiped and
+rebuilt from Yahoo alone rather than patched, once this fix shipped.
+
+Two real, confirmed Yahoo Finance API constraints (never guessed, see
+backfill_minute_history's own use of them): at most 8 days of 1-minute
+data per request, and 1-minute data is retained for only the last 30 real
+days total -- both confirmed via a real HTTP 422 from Yahoo's own API at
+each boundary.
 
 Day-to-day, this still builds its own rolling window one point per
 collection cycle (see KALSHI_15M_METALS_DATA_COLLECT_MINUTES's own comment
@@ -89,17 +101,13 @@ logger = logging.getLogger(__name__)
 HF_API_KEY = os.getenv("HF_API_KEY", "")
 HF_KALSHI_15M_METALS_DATASET_REPO = os.getenv("HF_KALSHI_15M_METALS_DATASET_REPO", "papylove/kalshi-15m-metals-data")
 
-GOLD_API_BASE_URL = os.getenv("GOLD_API_BASE_URL", "https://api.gold-api.com").rstrip("/")
-GOLD_API_TIMEOUT_SEC = int(os.getenv("GOLD_API_TIMEOUT_SEC", "10") or "10")
-
-METAL_TO_SYMBOL = {
-    "GOLD": "XAU", "SILVER": "XAG", "COPPER": "HG",
-    # 2 more real, confirmed-live 15-minute Kalshi series (see
-    # kalshi_15m.py's own KNOWN_15M_METALS_SERIES comment) -- gold-api.com
-    # confirmed live to also serve platinum/palladium spot prices at the
-    # exact same free, no-key endpoint shape as gold/silver/copper.
-    "PLATINUM": "XPT", "PALLADIUM": "XPD",
-}
+# EXTERNAL_PRICE_API_TIMEOUT_SEC (not GOLD_API_TIMEOUT_SEC -- renamed once
+# gold-api.com stopped being the only, or even the live-collection, price
+# source here; see fetch_latest_price's own docstring for why): shared
+# real-network-call timeout for every external price fetch this module
+# makes (Yahoo Finance, for both backfill_minute_history and
+# fetch_latest_price).
+EXTERNAL_PRICE_API_TIMEOUT_SEC = int(os.getenv("EXTERNAL_PRICE_API_TIMEOUT_SEC", "10") or "10")
 
 # Real gap closed, not a deliberate exclusion this module's own docstring
 # ever actually disclosed (unlike volume/OI-derived features): live news
@@ -156,7 +164,7 @@ METALS_FEATURE_COLUMNS = [
 
 
 def get_universe() -> list[str]:
-    return list(METAL_TO_SYMBOL.keys())
+    return list(YAHOO_FUTURES_SYMBOL.keys())
 
 
 # Real, free, no-key historical minute-bar source -- found and live-
@@ -183,7 +191,7 @@ def _fetch_yahoo_1m_chunk(symbol: str, start_ts: int, end_ts: int) -> pd.DataFra
         resp = requests.get(
             f"{_YAHOO_CHART_BASE_URL}/{symbol}",
             params={"interval": "1m", "period1": start_ts, "period2": end_ts},
-            headers={"User-Agent": "Mozilla/5.0"}, timeout=GOLD_API_TIMEOUT_SEC,
+            headers={"User-Agent": "Mozilla/5.0"}, timeout=EXTERNAL_PRICE_API_TIMEOUT_SEC,
         )
         resp.raise_for_status()
         data = resp.json()
@@ -308,21 +316,47 @@ def backfill_minute_history(metals: list[str] | None = None, *, days: int = _YAH
 
 
 def fetch_latest_price(metal: str) -> dict[str, Any] | None:
-    """One real, current spot price -- {"price": float, "ts": int} or None
-    on any failure (network error, unexpected symbol, malformed response).
+    """One real, current price -- {"price": float, "ts": int} or None on
+    any failure (network error, unexpected symbol, malformed response).
     Never raises -- a missing point this cycle just means the rolling
-    history has one fewer row, not a hard failure."""
-    symbol = METAL_TO_SYMBOL.get(metal)
+    history has one fewer row, not a hard failure.
+
+    Yahoo Finance futures (the SAME real source backfill_minute_history
+    uses for historical data) -- switched from gold-api.com's own spot
+    price after a real, live-confirmed finding: at the exact same moment,
+    gold-api.com's spot price and Yahoo's own futures price differed by
+    $28.50 on gold (0.67%) -- a real, persistent spot/futures basis, not
+    noise. Splicing spot (live-collected) and futures (backfilled) data
+    into one training archive baked a fake, non-market price jump into
+    every return-based feature at that splice boundary -- a real, concrete
+    explanation for why a 4.3x-bigger archive didn't move walk-forward
+    accuracy off ~50%. One consistent real source for both historical and
+    live data eliminates that artifact at the root, per explicit user
+    direction after this finding: "we need different data source that
+    actually works and provide data reliably.\""""
+    symbol = YAHOO_FUTURES_SYMBOL.get(metal)
     if not symbol:
         return None
     try:
-        resp = requests.get(f"{GOLD_API_BASE_URL}/price/{symbol}", timeout=GOLD_API_TIMEOUT_SEC)
+        resp = requests.get(
+            f"{_YAHOO_CHART_BASE_URL}/{symbol}",
+            params={"interval": "1m", "range": "1d"},
+            headers={"User-Agent": "Mozilla/5.0"}, timeout=EXTERNAL_PRICE_API_TIMEOUT_SEC,
+        )
         resp.raise_for_status()
         data = resp.json()
-        price = float(data["price"])
-        updated_at = data.get("updatedAt")
-        ts = int(dt.datetime.fromisoformat(str(updated_at).replace("Z", "+00:00")).timestamp()) if updated_at else int(dt.datetime.now(dt.timezone.utc).timestamp())
-        return {"price": price, "ts": ts}
+        result = (data.get("chart") or {}).get("result") or []
+        if not result:
+            return None
+        ts_list = result[0].get("timestamp") or []
+        quote = ((result[0].get("indicators") or {}).get("quote") or [{}])[0]
+        closes = quote.get("close") or []
+        # Walk backward for the most recent REAL (non-null) close -- a
+        # live symbol's own last bar is sometimes still-forming/null.
+        for i in range(len(closes) - 1, -1, -1):
+            if closes[i] is not None and ts_list[i] is not None:
+                return {"price": float(closes[i]), "ts": int(ts_list[i])}
+        return None
     except Exception as exc:
         logger.warning("[kalshi_15m_metals_data] price fetch failed for %s: %s", metal, exc)
         return None
