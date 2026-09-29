@@ -1946,6 +1946,30 @@ def test_api_kalshi_15m_status_reports_effective_not_raw_tuning_params(monkeypat
     assert body["max_concurrent_positions"] == body["params"]["max_concurrent_positions"]
 
 
+def test_api_kalshi_15m_status_reports_the_crypto_gate_and_win_streak_cooldown(monkeypatch):
+    """Real observability gap this closes: neither of these ever appeared
+    in this route before, even though either can silently block every
+    new entry account-wide (crypto) or metals-wide (win_streak_cooldown)
+    -- confirmed live on 2026-09-29: a real crypto loss (XRP) left this
+    genuinely impossible to diagnose from the dashboard alone."""
+    from data import kalshi_15m_strategy
+
+    kalshi_15m_strategy._save_state({  # noqa: SLF001
+        "positions": [], "trade_log": [{"coin": "BTC", "realized_pnl_usd": -1.0, "dry_run": False}],
+        "realized_pnl_by_date": {},
+    })
+
+    with app_kalshi.app.test_client() as client:
+        resp = client.get("/api/kalshi15m/status")
+        body = resp.get_json()
+
+    assert resp.status_code == 200
+    assert body["crypto_sequential_gate"] == {
+        "open": False, "reason": "crypto_loss_retrain_pending", "retrain_pending": True, "real_trade_count": 1,
+    }
+    assert body["win_streak_cooldown"]["active"] is False  # no win streak in this fixture
+
+
 def test_api_kalshi_15m_metals_backfill_route_calls_the_real_backfill(monkeypatch):
     from data import kalshi_15m_metals_data
 

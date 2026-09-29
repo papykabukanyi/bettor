@@ -1944,6 +1944,15 @@ def api_kalshi_15m_status():
             "data_collect_minutes": KALSHI_15M_DATA_COLLECT_MINUTES,
             "train_hour_et": KALSHI_15M_TRAIN_HOUR_ET,
         },
+        # Real observability gap this closes: neither of these ever
+        # appeared in this route before, even though they can each
+        # silently block EVERY new entry account-wide (crypto's own
+        # sequential gate) or metals-wide (win_streak_cooldown) --
+        # "why isn't it trading" was previously unanswerable from this
+        # endpoint alone for either state. See compute_crypto_sequential_gate's
+        # and compute_win_streak_cooldown_active's own docstrings.
+        "crypto_sequential_gate": effective_params.get("crypto_sequential_gate"),
+        "win_streak_cooldown": kalshi_15m_strategy.compute_win_streak_cooldown_active(state),
     })
 
 
