@@ -1606,11 +1606,24 @@ _ensure_background_jobs_started()
 # ---------------------------------------------------------------------------
 @app.route("/")
 def hub():
-    """A link hub, not the perps dashboard itself -- this domain is the
-    first thing anyone hits, and now that the Alpaca stocks and Alpaca
-    crypto bots are each their own separate server on their own domain,
-    "/" needs to point to all of them rather than silently assuming perps.
-    See hub.html; /perps below is the actual dashboard."""
+    """Public front door -- per explicit user direction ("redesign the
+    whole dashboard to hide the bots... change the link to Re-DevAfrica"):
+    this domain's own "/" is now Re-DevAfrica's own mission/info page, not
+    a trading-bot hub. The bots aren't gone -- every dashboard below stays
+    fully reachable, just tucked into the small sticky bar at the bottom
+    of redevafrica.html instead of being the first thing a visitor sees.
+    See bots() below for the old bot-status-grid hub, still available at
+    /bots for anyone who wants that view directly."""
+    return render_template("redevafrica.html")
+
+
+@app.route("/bots")
+def bots():
+    """The ORIGINAL bot-status-grid hub (hub.html, unchanged) -- kept
+    reachable here rather than deleted once "/" became Re-DevAfrica's own
+    page above; the sticky bar's own direct dashboard links cover the
+    common case, this is for anyone who specifically wants the live-
+    status overview across all 5 markets in one place."""
     return render_template(
         "hub.html", alpaca_url=ALPACA_SERVER_URL, alpaca_crypto_url=ALPACA_CRYPTO_SERVER_URL,
         alpaca_options_url=ALPACA_OPTIONS_SERVER_URL,

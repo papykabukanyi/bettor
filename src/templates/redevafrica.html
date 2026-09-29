@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Re-DevAfrica &mdash; Redeveloping Africa, Together</title>
+<meta name="description" content="Re-DevAfrica is a non-profit organization working toward Africa's redevelopment -- education, health, economic opportunity, and sustainable infrastructure, led by and for African communities.">
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0%25' stop-color='%23d4a537'/%3E%3Cstop offset='55%25' stop-color='%23c2703d'/%3E%3Cstop offset='100%25' stop-color='%232f6b4f'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='32' height='32' rx='8' fill='url(%23g)'/%3E%3C/svg%3E">
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg: #0e0c0a; --bg2: #16120e; --surface: #1c1712e0; --border: #34291d;
+    --text: #f3ece1; --muted: #b9ab97;
+    --gold: #d4a537; --terracotta: #c2703d; --green: #2f6b4f; --cream: #f3ece1;
+    --r: 16px;
+  }
+  html { scroll-behavior: smooth; }
+  body {
+    background:
+      radial-gradient(1200px 600px at 15% -10%, #3a2412 0%, transparent 55%),
+      radial-gradient(900px 500px at 100% 10%, #1f3a2c 0%, transparent 55%),
+      var(--bg);
+    color: var(--text);
+    font: 15px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    min-height: 100vh;
+    padding-bottom: 64px; /* room for the sticky bar */
+  }
+  a { color: var(--gold); }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 0 24px; }
+
+  /* ---------------- Hero ---------------- */
+  header.hero { padding: 72px 0 56px; text-align: center; }
+  .wordmark {
+    font-size: 15px; font-weight: 800; letter-spacing: .12em; text-transform: uppercase;
+    color: var(--gold); margin-bottom: 22px; display: inline-flex; align-items: center; gap: 10px;
+  }
+  .wordmark .mark {
+    width: 28px; height: 28px; border-radius: 8px; display: inline-block;
+    background: conic-gradient(from 200deg, var(--terracotta), var(--gold), var(--green), var(--terracotta));
+  }
+  h1.tagline {
+    font-size: clamp(32px, 5vw, 54px); font-weight: 800; letter-spacing: -0.02em; line-height: 1.12;
+    max-width: 780px; margin: 0 auto 22px;
+  }
+  h1.tagline .accent {
+    background: linear-gradient(135deg, var(--gold), var(--terracotta) 60%, var(--green));
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  .hero-sub { color: var(--muted); font-size: 17px; max-width: 640px; margin: 0 auto; }
+
+  /* ---------------- Section shells ---------------- */
+  section { padding: 52px 0; border-top: 1px solid var(--border); }
+  section.first { border-top: none; }
+  .section-label {
+    font-size: 12px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; color: var(--terracotta);
+    margin-bottom: 14px;
+  }
+  h2 { font-size: clamp(24px, 3.4vw, 32px); font-weight: 800; letter-spacing: -0.01em; margin-bottom: 18px; max-width: 640px; }
+  p.lede { color: var(--muted); font-size: 16px; max-width: 700px; }
+
+  /* ---------------- Mission ---------------- */
+  .mission-grid { display: grid; grid-template-columns: 1.1fr 0.9fr; gap: 40px; align-items: start; }
+  @media (max-width: 760px) { .mission-grid { grid-template-columns: 1fr; } }
+  .mission-quote {
+    background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--gold);
+    border-radius: var(--r); padding: 26px 28px; font-size: 17px; line-height: 1.7; color: var(--cream);
+  }
+
+  /* ---------------- Pillars ---------------- */
+  .pillars { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 18px; margin-top: 28px; }
+  .pillar {
+    background: var(--surface); border: 1px solid var(--border); border-radius: var(--r);
+    padding: 24px; display: flex; flex-direction: column; gap: 10px;
+  }
+  .pillar .icon {
+    width: 42px; height: 42px; border-radius: 11px; display: flex; align-items: center; justify-content: center;
+    font-size: 20px; background: linear-gradient(135deg, #3a2412, #1f3a2c); border: 1px solid var(--border);
+  }
+  .pillar h3 { font-size: 16px; font-weight: 700; }
+  .pillar p { color: var(--muted); font-size: 13.5px; line-height: 1.6; }
+
+  /* ---------------- Approach ---------------- */
+  .approach-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 18px; margin-top: 28px; }
+  .approach-item { display: flex; gap: 14px; }
+  .approach-item .num {
+    flex: none; width: 34px; height: 34px; border-radius: 50%; border: 1px solid var(--gold); color: var(--gold);
+    display: flex; align-items: center; justify-content: center; font-weight: 800; font-size: 13px;
+  }
+  .approach-item h3 { font-size: 15px; font-weight: 700; margin-bottom: 4px; }
+  .approach-item p { color: var(--muted); font-size: 13.5px; line-height: 1.6; }
+
+  /* ---------------- Get involved ---------------- */
+  .involved-card {
+    background: linear-gradient(135deg, #3a241299, #1f3a2c99), var(--surface);
+    border: 1px solid var(--border); border-radius: var(--r); padding: 36px; text-align: center;
+  }
+  .involved-card h2 { margin: 0 auto 10px; }
+  .involved-card p { color: var(--muted); max-width: 560px; margin: 0 auto 22px; }
+  .cta-row { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+  .btn {
+    display: inline-block; padding: 12px 22px; border-radius: 999px; font-weight: 700; font-size: 13.5px;
+    text-decoration: none; transition: filter .15s ease, transform .15s ease;
+  }
+  .btn.primary { background: linear-gradient(135deg, var(--gold), var(--terracotta)); color: #1a1208; }
+  .btn.ghost { border: 1px solid var(--border); color: var(--text); }
+  .btn:hover { filter: brightness(1.08); transform: translateY(-1px); }
+  .note {
+    margin-top: 16px; font-size: 11.5px; color: var(--muted); opacity: .75;
+  }
+
+  footer.page-footer { text-align: center; color: var(--muted); font-size: 12px; padding: 30px 0 0; }
+
+  /* ---------------- Sticky bottom bar (bots, tucked away) ---------------- */
+  .ops-bar {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 40;
+    background: #0b0a08ee; backdrop-filter: blur(8px); border-top: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: center; gap: 4px; flex-wrap: wrap;
+    padding: 8px 12px;
+  }
+  .ops-bar .ops-label {
+    font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); opacity: .6;
+    margin-right: 10px; white-space: nowrap;
+  }
+  .ops-bar a {
+    font-size: 11.5px; color: var(--muted); text-decoration: none; padding: 5px 11px; border-radius: 999px;
+    border: 1px solid transparent; transition: color .15s ease, border-color .15s ease, background .15s ease;
+    white-space: nowrap;
+  }
+  .ops-bar a:hover { color: var(--cream); border-color: var(--border); background: #1c1712; }
+  @media (max-width: 640px) {
+    .ops-bar { justify-content: flex-start; overflow-x: auto; }
+    .ops-bar .ops-label { display: none; }
+  }
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="wrap">
+    <div class="wordmark"><span class="mark"></span> Re-DevAfrica</div>
+    <h1 class="tagline">Redeveloping Africa, <span class="accent">one community at a time.</span></h1>
+    <p class="hero-sub">Re-DevAfrica is a non-profit organization dedicated to Africa's redevelopment &mdash;
+      investing in education, health, economic opportunity, and sustainable infrastructure so that
+      communities across the continent can build their own lasting future.</p>
+  </div>
+</header>
+
+<section class="first">
+  <div class="wrap">
+    <div class="section-label">Our Mission</div>
+    <div class="mission-grid">
+      <div>
+        <h2>A continent redeveloped from within.</h2>
+        <p class="lede">We believe Africa's redevelopment has to be led by the people who call it home.
+          Our work is about removing the barriers that stand between African communities and the tools,
+          skills, and infrastructure they need to thrive on their own terms &mdash; not aid that ends
+          when the funding does, but capacity that outlasts it.</p>
+      </div>
+      <div class="mission-quote">
+        &ldquo;Redevelopment isn&rsquo;t something done <em>to</em> a community &mdash; it&rsquo;s something
+        built <em>with</em> one, and sustained <em>by</em> one.&rdquo;
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <div class="section-label">Where We Focus</div>
+    <h2>Four pillars, one continent.</h2>
+    <p class="lede">Real redevelopment touches every part of daily life. We organize our work around
+      four areas where a real, durable difference is possible.</p>
+    <div class="pillars">
+      <div class="pillar">
+        <div class="icon">&#128218;</div>
+        <h3>Education &amp; Skills</h3>
+        <p>Expanding access to quality schooling and practical, market-relevant skills training so young
+          people can build careers at home.</p>
+      </div>
+      <div class="pillar">
+        <div class="icon">&#10084;&#65039;</div>
+        <h3>Healthcare Access</h3>
+        <p>Supporting community health infrastructure and preventive care so a family's health is never
+          the barrier to their future.</p>
+      </div>
+      <div class="pillar">
+        <div class="icon">&#128176;</div>
+        <h3>Economic Empowerment</h3>
+        <p>Backing local entrepreneurs and small businesses with the capital, mentorship, and market
+          access to grow sustainably.</p>
+      </div>
+      <div class="pillar">
+        <div class="icon">&#127959;&#65039;</div>
+        <h3>Sustainable Infrastructure</h3>
+        <p>Investing in clean energy, clean water, and digital connectivity built to last generations,
+          not just election cycles.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <div class="section-label">How We Work</div>
+    <h2>Principles we hold ourselves to.</h2>
+    <div class="approach-list">
+      <div class="approach-item">
+        <div class="num">1</div>
+        <div>
+          <h3>Community-led</h3>
+          <p>Every initiative starts with the community it serves, not a plan handed down from outside it.</p>
+        </div>
+      </div>
+      <div class="approach-item">
+        <div class="num">2</div>
+        <div>
+          <h3>Partnership-driven</h3>
+          <p>We work alongside local organizations, institutions, and leaders already doing the work on the ground.</p>
+        </div>
+      </div>
+      <div class="approach-item">
+        <div class="num">3</div>
+        <div>
+          <h3>Built to last</h3>
+          <p>We measure success by what keeps running after we've stepped back, not by what looks good on day one.</p>
+        </div>
+      </div>
+      <div class="approach-item">
+        <div class="num">4</div>
+        <div>
+          <h3>Transparent</h3>
+          <p>Where our support goes and what it accomplishes should always be a straightforward, honest answer.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="involved">
+  <div class="wrap">
+    <div class="involved-card">
+      <h2>Be part of the redevelopment.</h2>
+      <p>Whether you want to partner with us, volunteer, or support the work directly, we'd like to hear
+        from you.</p>
+      <div class="cta-row">
+        <a class="btn primary" href="mailto:hello@redevafrica.org">Get In Touch</a>
+        <a class="btn ghost" href="#involved">Learn More</a>
+      </div>
+      <div class="note">Contact details and program specifics are placeholders &mdash; replace with
+        Re-DevAfrica's real information.</div>
+    </div>
+  </div>
+</section>
+
+<footer class="page-footer">
+  <div class="wrap">&copy; <span id="year"></span> Re-DevAfrica. A non-profit working toward Africa's redevelopment.</div>
+</footer>
+
+<nav class="ops-bar" aria-label="Internal tools">
+  <span class="ops-label">Internal</span>
+  <a href="/perps">&#8383; Perps</a>
+  <a href="/kalshi15m">&#9203; 15-Min</a>
+  <a href="/stocks/">&#128200; Stocks</a>
+  <a href="/crypto/">&#8383; Crypto</a>
+  <a href="/options/">&#9780; Options</a>
+</nav>
+
+<script>document.getElementById("year").textContent = new Date().getFullYear();</script>
+</body>
+</html>

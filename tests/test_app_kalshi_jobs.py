@@ -1989,3 +1989,31 @@ def test_api_kalshi_15m_metals_backfill_route_survives_a_failure(monkeypatch):
 
     assert resp.status_code == 500
     assert resp.get_json()["ok"] is False
+
+
+# ---------------------------------------------------------------------------
+# "/" -- per explicit user direction ("redesign the whole dashboard to hide
+# the bots... change the link to Re-DevAfrica"): the public front door is
+# now Re-DevAfrica's own mission page, not a trading-bot hub. The old
+# bot-status-grid hub still exists, unchanged, at /bots.
+# ---------------------------------------------------------------------------
+def test_root_route_serves_the_redevafrica_page():
+    with app_kalshi.app.test_client() as client:
+        resp = client.get("/")
+
+    assert resp.status_code == 200
+    body = resp.get_data(as_text=True)
+    assert "Re-DevAfrica" in body
+    # The bots aren't gone -- just tucked into the sticky bar.
+    for href in ("/perps", "/kalshi15m", "/stocks/", "/crypto/", "/options/"):
+        assert href in body
+
+
+def test_bots_route_still_serves_the_original_bot_status_hub():
+    with app_kalshi.app.test_client() as client:
+        resp = client.get("/bots")
+
+    assert resp.status_code == 200
+    body = resp.get_data(as_text=True)
+    assert "Bettor" in body
+    assert "/api/status" in body  # the live-status card grid, unchanged
