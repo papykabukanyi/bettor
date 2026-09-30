@@ -3031,3 +3031,14 @@ def test_ev_mode_only_trades_coins_the_certified_model_is_eligible_for(ev_mode, 
     result = kalshi_15m_strategy.evaluate_candidate("BTC", live_context=ctx)
     assert result["ok"] is False and result["reason"] == "coin_not_eligible"
     assert result["ev"]["edge"] > 0.1
+
+
+def test_scan_and_enter_records_its_decisions_for_the_dashboard(ev_mode, monkeypatch):
+    monkeypatch.setattr(kalshi_15m_edge_model, "load_artifact", lambda: _ev_artifact(intercept=0.0))
+    monkeypatch.setattr(kalshi_15m_strategy, "build_live_context", lambda: {"markets": {"BTC": _ev_market()}, "flow": {}})
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: None)
+    kalshi_15m_strategy.scan_and_enter(dry_run=True)
+    scan = kalshi_15m_strategy.last_scan()
+    btc = next(c for c in scan["checks"] if c["coin"] == "BTC")
+    assert btc["reason"] == "edge_below_minimum" and "ev" in btc and "market" not in btc
+    assert scan["entry_mode"] == "ev" and scan["at"]

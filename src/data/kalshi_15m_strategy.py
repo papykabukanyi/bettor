@@ -1907,10 +1907,24 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
             crypto_gate = {**crypto_gate, "open": False, "reason": "crypto_position_just_opened_this_cycle"}
         checks.append({"coin": coin, "ok": True, "action": "entered", "side": decision["side"], "count": filled_count, "dry_run": effective_dry_run})
 
+    _LAST_SCAN.clear()
+    _LAST_SCAN.update({
+        "at": dt.datetime.now(dt.timezone.utc).isoformat(), "entry_mode": mode, "dry_run": effective_dry_run,
+        "checks": [{k: v for k, v in c.items() if k not in ("market", "feature_row")} for c in checks],
+    })
     return {
         "ok": True, "checks": checks, "live_trading_enabled": LIVE_TRADING_ENABLED,
         "win_streak_cooldown": win_streak_cooldown, "hour_trust": hour_trust, "crypto_sequential_gate": crypto_gate,
     }
+
+
+_LAST_SCAN: dict[str, Any] = {}
+
+
+def last_scan() -> dict[str, Any]:
+    """What the most recent scan_and_enter decided for every coin (EV
+    breakdowns included) -- read by the dashboard instead of re-scanning."""
+    return dict(_LAST_SCAN)
 
 
 def effective_strategy_params(state: dict[str, Any] | None = None) -> dict[str, Any]:

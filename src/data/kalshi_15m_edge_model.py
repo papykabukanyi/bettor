@@ -718,6 +718,7 @@ def evaluate_market(
     if live_quote is None:
         return {**base, "ok": False, "reason": "no_valid_quote"}
     live_bid, live_ask = live_quote
+    base["live_mid"] = round((live_bid + live_ask) / 2.0, 4)
 
     if flow_row is not None and flow_row.get("ticker") == market.get("ticker"):
         close_quote = _quote({"yes_bid_dollars": flow_row.get("yes_bid"), "yes_ask_dollars": flow_row.get("yes_ask")})

@@ -62,6 +62,7 @@
   }
   .badge.ready { background: var(--gdim); color: var(--green); }
   .badge.pending { background: var(--ydim); color: var(--yellow); }
+  .badge.off { background: var(--rdim); color: var(--red); }
   .badge .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
   .badge.ready .dot { animation: pulse 2s infinite; }
   .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
@@ -101,7 +102,7 @@
 <div class="sub">5 automated trading bots, one hub. Pick a dashboard for real-time positions, P&amp;L, and model status.</div>
 
 <div class="grid">
-  <div class="card" data-status-url="/api/status">
+  <div class="card" data-status-url="/api/status" data-bot="perps">
     <div class="card-head">
       <h2>&#8383; Kalshi Perps</h2>
       <span class="badge pending" data-badge>&hellip;</span>
@@ -115,7 +116,7 @@
     <a class="btn" href="/perps">Open Dashboard &rarr;</a>
   </div>
 
-  <div class="card" data-status-url="/api/kalshi15m/status">
+  <div class="card" data-status-url="/api/kalshi15m/status" data-bot="kalshi15m">
     <div class="card-head">
       <h2>&#9203; Kalshi 15-Minute</h2>
       <span class="badge pending" data-badge>&hellip;</span>
@@ -129,7 +130,7 @@
     <a class="btn" href="/kalshi15m">Open Dashboard &rarr;</a>
   </div>
 
-  <div class="card" data-status-url="/stocks/api/alpaca/status">
+  <div class="card" data-status-url="/stocks/api/alpaca/status" data-bot="stocks">
     <div class="card-head">
       <h2>&#128200; Alpaca Stocks</h2>
       <span class="badge pending" data-badge>&hellip;</span>
@@ -143,7 +144,7 @@
     <a class="btn" href="/stocks/">Open Dashboard &rarr;</a>
   </div>
 
-  <div class="card" data-status-url="/crypto/api/alpaca/crypto/status">
+  <div class="card" data-status-url="/crypto/api/alpaca/crypto/status" data-bot="crypto">
     <div class="card-head">
       <h2>&#8383; Alpaca Crypto</h2>
       <span class="badge pending" data-badge>&hellip;</span>
@@ -157,7 +158,7 @@
     <a class="btn" href="/crypto/">Open Dashboard &rarr;</a>
   </div>
 
-  <div class="card" data-status-url="/options/api/alpaca/options/status">
+  <div class="card" data-status-url="/options/api/alpaca/options/status" data-bot="options">
     <div class="card-head">
       <h2>&#9780; Alpaca Options</h2>
       <span class="badge pending" data-badge>&hellip;</span>
@@ -187,18 +188,10 @@
   // route, so one function replaces what used to be 4 near-duplicate
   // hardcoded-badge blocks (one of which -- kalshi15m's -- already went
   // stale once in production because it was the only dynamic one).
+  // Per-card stats from each bot's own status route.
   document.querySelectorAll(".card[data-status-url]").forEach(card => {
-    const url = card.getAttribute("data-status-url");
-    fetch(url).then(r => r.json()).then(data => {
-      const badge = card.querySelector("[data-badge]");
-      if (!data.ok) { badge.textContent = "OFFLINE"; badge.className = "badge pending"; return; }
-      if (data.live_trading_enabled) {
-        badge.innerHTML = '<span class="dot"></span>LIVE';
-        badge.className = "badge ready";
-      } else {
-        badge.textContent = "DRY-RUN";
-        badge.className = "badge pending";
-      }
+    fetch(card.getAttribute("data-status-url")).then(r => r.json()).then(data => {
+      if (!data.ok) return;
       const pnlEl = card.querySelector('[data-stat="pnl"]');
       const pnl = data.today_realized_pnl_usd;
       pnlEl.textContent = fmtUsd(pnl);
@@ -206,22 +199,45 @@
       card.querySelector('[data-stat="positions"]').textContent = data.open_position_count ?? "--";
       const wr = (data.win_rate || {}).win_rate;
       card.querySelector('[data-stat="winrate"]').textContent = wr != null ? fmtPct(wr) : "--";
-    }).catch(() => {
-      const badge = card.querySelector("[data-badge]");
-      badge.textContent = "OFFLINE";
-      badge.className = "badge pending";
-    }).finally(updateLiveSummary);
+    }).catch(() => {});
   });
 
-  function updateLiveSummary() {
-    const badges = document.querySelectorAll(".card [data-badge]");
-    const liveCount = document.querySelectorAll(".card .badge.ready").length;
-    const total = badges.length;
-    const allChecked = [...badges].every(b => b.textContent.trim() !== "…");
-    if (allChecked) {
-      document.getElementById("live-summary").textContent = `${liveCount} of ${total} markets live`;
+  // LIVE only when the bot's running code has real-order trading on AND its
+  // trading loop completed a run in the last 10 minutes -- one shared
+  // definition (/api/bots/live) for this hub and the front page's bot bar.
+  async function refreshLiveBadges() {
+    let bots = null;
+    try {
+      const res = await fetch("/api/bots/live", { cache: "no-store" });
+      if (res.ok) bots = (await res.json()).bots || null;
+    } catch (e) { bots = null; }
+    let liveCount = 0;
+    const cards = document.querySelectorAll(".card[data-bot]");
+    cards.forEach(card => {
+      const badge = card.querySelector("[data-badge]");
+      const bot = bots && bots.find(b => b.key === card.dataset.bot);
+      if (bot && bot.live) {
+        liveCount += 1;
+        badge.innerHTML = '<span class="dot"></span>LIVE';
+        badge.className = "badge ready";
+      } else {
+        badge.innerHTML = '<span class="dot"></span>NOT LIVE';
+        badge.className = "badge off";
+      }
+      badge.title = bot ? `${bot.reason} (${bot.account})` : "Live status unavailable";
+    });
+    document.getElementById("live-summary").textContent = bots
+      ? `${liveCount} of ${cards.length} markets live`
+      : "live status unavailable";
+    const summaryDot = document.querySelector(".live-count .dot");
+    if (summaryDot) {
+      const allLive = bots && liveCount === cards.length;
+      summaryDot.style.background = allLive ? "var(--green)" : liveCount === 0 ? "var(--red)" : "var(--yellow)";
+      summaryDot.style.boxShadow = allLive ? "" : "none";
     }
   }
+  refreshLiveBadges();
+  setInterval(refreshLiveBadges, 30000);
 
   // Project-wide, AI-powered status review (HF Inference), all 5 markets -- see
   // ai_monitor.py's own module docstring. Read-only, fetched once on

@@ -2076,6 +2076,11 @@ def api_kalshi_15m_status():
             "cycle_minutes": KALSHI_15M_CYCLE_MINUTES,
             "data_collect_minutes": KALSHI_15M_DATA_COLLECT_MINUTES,
             "train_hour_et": KALSHI_15M_TRAIN_HOUR_ET,
+            "ev_min_edge": kalshi_15m_edge_model.EV_MIN_EDGE,
+            "ev_entry_min_minute": kalshi_15m_edge_model.EV_ENTRY_MIN_MINUTE,
+            "ev_entry_max_minute": kalshi_15m_edge_model.EV_ENTRY_MAX_MINUTE,
+            "ev_require_certified": kalshi_15m_strategy.EV_REQUIRE_CERTIFIED,
+            "edge_model_hour_et": KALSHI_15M_EDGE_MODEL_HOUR_ET,
         },
         # Real observability gap this closes: neither of these ever
         # appeared in this route before, even though they can each
@@ -2087,6 +2092,7 @@ def api_kalshi_15m_status():
         "crypto_sequential_gate": effective_params.get("crypto_sequential_gate"),
         "win_streak_cooldown": kalshi_15m_strategy.compute_win_streak_cooldown_active(state),
         "entry_mode": kalshi_15m_strategy.entry_mode(),
+        "last_scan": kalshi_15m_strategy.last_scan(),
         "edge_model": kalshi_15m_edge_model.summary(),
         "quote_history_last_collect": dict(_KALSHI_15M_QUOTE_LAST_RUN),
         "spot_history_last_collect": dict(_KALSHI_15M_SPOT_LAST_RUN),
@@ -2150,6 +2156,74 @@ def api_kalshi_15m_quotes():
             logger.warning("[app_kalshi] quote backfill failed", exc_info=True)
             return jsonify({"ok": False, "error": str(exc)}), 500
     return jsonify({"ok": True, "archive": kalshi_15m_quotes.archive_summary(), "last_collect": dict(_KALSHI_15M_QUOTE_LAST_RUN)})
+
+
+# Every bot's trading loop and live flag, all in this one process (see
+# combined_app.py). A bot is live only when its running code has real-order
+# trading switched on AND its trading loop actually completed a run within
+# BOT_LIVE_STALL_SEC -- a flag with a dead loop is not live.
+BOT_LIVE_STALL_SEC = 600
+_BOT_LOOPS = [
+    ("perps", "Perps", "/perps", "perps_job_run_history.json", ("perps_fast_check", "perps_entry_scan"), "data.perps_strategy", "kalshi"),
+    ("kalshi15m", "15-Min", "/kalshi15m", "perps_job_run_history.json", ("kalshi_15m_cycle",), "data.kalshi_15m_strategy", "kalshi"),
+    ("stocks", "Stocks", "/stocks/", "alpaca_job_run_history.json", ("alpaca_fast_check", "alpaca_entry_scan"), "data.alpaca_strategy", "alpaca"),
+    ("crypto", "Crypto", "/crypto/", "alpaca_crypto_job_run_history.json", ("alpaca_crypto_fast_check", "alpaca_crypto_entry_scan"), "data.alpaca_crypto_strategy", "alpaca"),
+    ("options", "Options", "/options/", "alpaca_options_job_run_history.json", ("alpaca_options_fast_check", "alpaca_options_entry_scan"), "data.alpaca_options_strategy", "alpaca"),
+]
+
+
+def bot_live_status(now: dt.datetime | None = None) -> list[dict[str, Any]]:
+    import importlib
+
+    now = now or dt.datetime.now(dt.timezone.utc)
+    out = []
+    for key, label, url, history_name, loop_jobs, module_name, venue in _BOT_LOOPS:
+        try:
+            trading_enabled = bool(importlib.import_module(module_name).LIVE_TRADING_ENABLED)
+        except Exception as exc:
+            logger.warning("[app_kalshi] live flag unavailable for %s: %s", key, exc)
+            trading_enabled = False
+        history = load_json(DATA_DIR / history_name, [])
+        runs = [r for r in (history if isinstance(history, list) else []) if r.get("job") in loop_jobs and r.get("status") in ("ok", "failed")]
+        last_run_at, age_sec = None, None
+        if runs:
+            stamp = runs[-1].get("finished_at") or runs[-1].get("started_at")
+            try:
+                last = dt.datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+                last_run_at, age_sec = last.isoformat(), max(0.0, (now - last).total_seconds())
+            except (TypeError, ValueError):
+                pass
+        loop_running = age_sec is not None and age_sec <= BOT_LIVE_STALL_SEC
+        if not trading_enabled:
+            reason = "Live trading is off (dry run)"
+        elif age_sec is None:
+            reason = "Trading loop has not completed a run since the last restart"
+        elif not loop_running:
+            reason = f"Trading loop stalled: last run {int(age_sec // 60)} min ago"
+        else:
+            reason = "Live: real-order trading on, trading loop running"
+        account = "real money (Kalshi)"
+        if venue == "alpaca":
+            try:
+                from data import alpaca_client
+                account = "Alpaca paper account" if "paper-api" in alpaca_client.TRADING_BASE_URL else "Alpaca live account"
+            except Exception:
+                account = "Alpaca"
+        out.append({
+            "key": key, "label": label, "url": url, "live": trading_enabled and loop_running,
+            "trading_enabled": trading_enabled, "loop_running": loop_running, "loop_last_run_at": last_run_at,
+            "loop_age_sec": None if age_sec is None else round(age_sec, 1), "account": account, "reason": reason,
+        })
+    return out
+
+
+@app.route("/api/bots/live")
+def api_bots_live():
+    """One shared answer to "is each bot live right now" for every page's
+    status dots/badges."""
+    bots = bot_live_status()
+    return jsonify({"ok": True, "now": dt.datetime.now(dt.timezone.utc).isoformat(), "stall_after_sec": BOT_LIVE_STALL_SEC,
+                    "live_count": sum(1 for b in bots if b["live"]), "bots": bots})
 
 
 @app.route("/api/perps/spot-lead", methods=["GET", "POST"])

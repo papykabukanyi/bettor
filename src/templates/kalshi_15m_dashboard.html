@@ -10,37 +10,56 @@
   :root {
     --bg: #0a0c11; --surface: #12151c; --surface2: #191d27; --border: #232838;
     --text: #e7ecf5; --muted: #8792a8; --green: #22c55e; --gdim: #12291a;
-    --red: #ef4444; --rdim: #2a1414; --yellow: #eab308; --blue: #3b82f6; --r: 10px;
+    --red: #ef4444; --rdim: #2a1414; --yellow: #eab308; --ydim: #2a2510; --blue: #3b82f6; --r: 10px;
+    /* diverging pair for "pushes toward YES / NO" (validated on --surface) */
+    --toward-yes: #3987e5; --toward-no: #e66767; --zero: #4a5163;
   }
   body {
     background: var(--bg); color: var(--text);
     font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     padding: 20px; max-width: 1150px; margin: 0 auto;
   }
-  header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; margin-bottom: 18px; }
+  @media (max-width: 640px) { body { padding: 16px; } }
+  header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; margin-bottom: 14px; }
   h1 { font-size: 20px; font-weight: 700; letter-spacing: -0.01em; }
-  .badge { display: inline-block; padding: 4px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; }
-  .badge.dry { background: var(--gdim); color: var(--green); }
-  .badge.live { background: var(--rdim); color: var(--red); }
-  .badge.warn { background: #2a2510; color: var(--yellow); }
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin-bottom: 16px; }
+  .header-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .badge { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+  .badge.on { background: var(--gdim); color: var(--green); }
+  .badge.off { background: var(--rdim); color: var(--red); }
+  .badge.neutral { background: var(--surface2); color: var(--muted); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; display: inline-block; }
+  .banner { border: 1px solid var(--border); border-radius: var(--r); padding: 12px 16px; margin-bottom: 16px; background: var(--surface); }
+  .banner strong { display: block; font-size: 15px; margin-bottom: 2px; }
+  .banner.go { border-color: #1f5a33; background: var(--gdim); }
+  .banner.wait { border-color: #5a4a14; background: var(--ydim); }
+  .banner.stop { border-color: #5a1f1f; background: var(--rdim); }
+  .banner .sub { color: var(--text); opacity: .8; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; margin-bottom: 16px; }
   .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r); padding: 14px 16px; }
   .card h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin-bottom: 8px; font-weight: 600; }
   .stat { font-size: 22px; font-weight: 700; }
-  .stat.pos { color: var(--green); }
-  .stat.neg { color: var(--red); }
+  .stat.small { font-size: 17px; }
+  .pos { color: var(--green); }
+  .neg { color: var(--red); }
   .sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
-  section { margin-bottom: 20px; }
-  section h3 { font-size: 14px; margin-bottom: 8px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+  section { margin-bottom: 22px; }
+  section h3 { font-size: 14px; margin-bottom: 4px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+  section p.note { color: var(--muted); font-size: 12px; margin-bottom: 8px; max-width: 900px; }
   table { width: 100%; border-collapse: collapse; background: var(--surface); border: 1px solid var(--border); border-radius: var(--r); overflow: hidden; }
   th, td { text-align: left; padding: 8px 10px; font-size: 13px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  td.wrap { white-space: normal; }
   th { color: var(--muted); font-weight: 600; background: var(--surface2); }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
   tr:last-child td { border-bottom: none; }
   .tag { padding: 2px 8px; border-radius: 6px; font-size: 11px; font-weight: 600; }
-  .tag.yes { background: var(--gdim); color: var(--green); }
-  .tag.no { background: var(--rdim); color: var(--red); }
+  .tag.yes, .tag.ok { background: var(--gdim); color: var(--green); }
+  .tag.no, .tag.bad { background: var(--rdim); color: var(--red); }
+  .tag.wait { background: var(--ydim); color: var(--yellow); }
+  .tag.muted { background: var(--surface2); color: var(--muted); }
   .empty { color: var(--muted); padding: 14px; text-align: center; }
   .scroll-x { overflow-x: auto; }
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  @media (max-width: 860px) { .two-col { grid-template-columns: 1fr; } }
   footer { color: var(--muted); font-size: 12px; text-align: center; margin-top: 24px; }
   a { color: var(--blue); }
   .toggle-btn {
@@ -50,46 +69,148 @@
   }
   .toggle-btn:hover { background: var(--border); }
   .config-grid {
-    display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 6px 16px;
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 6px 16px;
     background: var(--surface); border: 1px solid var(--border); border-radius: var(--r); padding: 14px 16px;
   }
-  .config-grid div { display: flex; justify-content: space-between; font-size: 12px; padding: 3px 0; }
+  .config-grid div { display: flex; justify-content: space-between; gap: 10px; font-size: 12px; padding: 3px 0; }
   .config-grid .k { color: var(--muted); }
-  .config-grid .v { font-weight: 600; }
+  .config-grid .v { font-weight: 600; text-align: right; }
+  /* Diverging bars: zero line in the middle, 12px bars, 4px rounded data-end */
+  .pull-chart { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r); padding: 12px 16px; }
+  .pull-axis { display: grid; grid-template-columns: 230px 1fr; gap: 10px; font-size: 11px; color: var(--muted); margin-bottom: 6px; }
+  .pull-axis .ends { display: flex; justify-content: space-between; }
+  .pull-row { display: grid; grid-template-columns: 230px 1fr; gap: 10px; align-items: center; padding: 3px 0; }
+  .pull-row .name { font-size: 12px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pull-track { position: relative; height: 20px; }
+  .pull-track::before { content: ""; position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background: var(--zero); }
+  .pull-bar { position: absolute; top: 4px; height: 12px; }
+  .pull-bar.yes { left: 50%; background: var(--toward-yes); border-radius: 0 4px 4px 0; }
+  .pull-bar.no { right: 50%; background: var(--toward-no); border-radius: 4px 0 0 4px; }
+  .pull-val { position: absolute; top: 1px; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  @media (max-width: 640px) {
+    .pull-axis, .pull-row { grid-template-columns: 120px 1fr; }
+  }
 </style>
 </head>
 <body>
 <header>
   <h1><img src="{{ url_for('static', filename='cumdev-icon.svg') }}" alt="CUMDEV" width="24" height="24" style="vertical-align:-5px;border-radius:6px;margin-right:8px;">&#9203; Kalshi 15-Minute Markets</h1>
-  <div style="display:flex; align-items:center; gap:10px;">
-    <span id="mode-badge" class="badge dry">&nbsp;</span>
-    <a href="/" class="toggle-btn">&#8646; Hub</a>
+  <div class="header-actions">
+    <span id="live-badge" class="badge neutral" title="Checking live status"><span class="dot"></span>checking&hellip;</span>
+    <span id="mode-badge" class="badge neutral">&nbsp;</span>
+    <a href="/bots" class="toggle-btn">&#8646; All Bots</a>
     <a href="/perps" class="toggle-btn">&#8646; Perps</a>
   </div>
 </header>
 
+<div id="state-banner" class="banner"><strong>Loading&hellip;</strong><div class="sub">&nbsp;</div></div>
+
 <div class="grid">
   <div class="card"><h2>Positions</h2><div id="position-count" class="stat">--</div><div class="sub" id="position-sub">--</div></div>
-  <div class="card"><h2>Today's P&amp;L</h2><div id="today-pnl" class="stat">--</div><div class="sub" id="total-pnl-sub">--</div></div>
-  <div class="card"><h2>Crypto Model</h2><div id="model-status" class="stat">--</div><div class="sub" id="model-sub">--</div></div>
-  <div class="card"><h2>Metals Model</h2><div id="metals-model-status" class="stat">--</div><div class="sub" id="metals-model-sub">--</div></div>
+  <div class="card"><h2>Today's P&amp;L (after fees)</h2><div id="today-pnl" class="stat">--</div><div class="sub" id="total-pnl-sub">--</div></div>
   <div class="card"><h2>Win Rate</h2><div id="win-rate" class="stat">--</div><div class="sub" id="win-rate-sub">--</div></div>
-  <!-- Real backend value, not a prose claim -- see refreshShardBalance's
-       own comment for why a static notice about this kept going stale. -->
+  <div class="card"><h2>Crypto Edge Model</h2><div id="crypto-model" class="stat small">--</div><div class="sub" id="crypto-model-sub">--</div></div>
+  <div class="card"><h2>Metals Edge Model</h2><div id="metals-model" class="stat small">--</div><div class="sub" id="metals-model-sub">--</div></div>
   <div class="card"><h2>Shard 2 Collateral</h2><div id="shard2-balance" class="stat">--</div><div class="sub" id="shard2-sub">Crypto &amp; Commodities</div></div>
 </div>
 
 <section>
+  <h3>Live Market Scan</h3>
+  <p class="note" id="scan-note">What the bot decided for every market on its last cycle: Kalshi's price, the model's probability, and the edge of each side after Kalshi's taker fee at the real ask.</p>
+  <div class="scroll-x">
+    <table>
+      <thead><tr><th>Market</th><th class="num">Minute</th><th class="num">Kalshi price now (yes)</th><th class="num">Model p(yes)</th><th class="num">Edge YES</th><th class="num">Edge NO</th><th>Coin eligible</th><th>Decision</th></tr></thead>
+      <tbody id="scan-body"><tr><td colspan="8" class="empty">Waiting for the first scan&hellip;</td></tr></tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <h3>Prediction Accuracy (out of sample)</h3>
+  <p class="note" id="accuracy-note">How often the side each probability favored actually won, on windows the model never trained on. Kalshi's own price is the benchmark to beat.</p>
+  <div class="two-col">
+    <div class="scroll-x">
+      <table>
+        <thead><tr><th>Crypto &middot; window minute</th><th class="num">Model</th><th class="num">Kalshi price</th><th class="num">Predictions</th></tr></thead>
+        <tbody id="acc-crypto"><tr><td colspan="4" class="empty">--</td></tr></tbody>
+      </table>
+    </div>
+    <div class="scroll-x">
+      <table>
+        <thead><tr><th>Metals &middot; window minute</th><th class="num">Model</th><th class="num">Kalshi price</th><th class="num">Predictions</th></tr></thead>
+        <tbody id="acc-metals"><tr><td colspan="4" class="empty">--</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h3>Edge Model Certification</h3>
+  <p class="note" id="cert-note">Every candidate is re-tested daily, walk-forward by day, with the exact live rule. A market trades only when its model beats Kalshi's price out of sample AND makes money at real asks after fees (t &ge; 2.5).</p>
+  <div class="scroll-x">
+    <table>
+      <thead><tr><th>Market</th><th>Candidate</th><th class="num">Test windows</th><th>Beats Kalshi's price?</th><th class="num">Test trades</th><th class="num">P&amp;L / contract</th><th class="num">t-stat</th><th class="num">Profitable days</th><th>Status</th></tr></thead>
+      <tbody id="cert-body"><tr><td colspan="9" class="empty">--</td></tr></tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <h3>What the Crypto Model Learned</h3>
+  <p class="note">How far each pattern moves the model's probability away from Kalshi's own price (change in log-odds per standard deviation of the feature). Right of the line pushes toward YES, left toward NO.</p>
+  <div class="pull-chart">
+    <div class="pull-axis"><span>Pattern</span><div class="ends"><span>&larr; toward NO</span><span>toward YES &rarr;</span></div></div>
+    <div id="pull-body"><div class="empty">--</div></div>
+  </div>
+  <div class="two-col" style="margin-top:12px;">
+    <div class="scroll-x">
+      <table>
+        <thead><tr><th>Test results by minute</th><th class="num">Trades</th><th class="num">Win rate</th><th class="num">P&amp;L / contract</th></tr></thead>
+        <tbody id="opp-minute"><tr><td colspan="4" class="empty">--</td></tr></tbody>
+      </table>
+    </div>
+    <div class="scroll-x">
+      <table>
+        <thead><tr><th>Test results by side</th><th class="num">Trades</th><th class="num">Win rate</th><th class="num">P&amp;L / contract</th></tr></thead>
+        <tbody id="opp-side"><tr><td colspan="4" class="empty">--</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h3>Coin Eligibility</h3>
+  <p class="note">Inside a certified market, a coin trades only with 20+ days of real history, a profitable out-of-sample record on that coin, and (crypto) spot data that reproduces Kalshi's own settlements.</p>
+  <div class="scroll-x">
+    <table>
+      <thead><tr><th>Coin</th><th>Market</th><th class="num">History days</th><th class="num">Test trades</th><th class="num">Test P&amp;L / contract</th><th class="num">Spot matches settlement</th><th>Eligible</th><th>Why not</th></tr></thead>
+      <tbody id="coin-body"><tr><td colspan="8" class="empty">--</td></tr></tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <h3>Data Feeds</h3>
+  <div class="config-grid">
+    <div><span class="k">Kalshi quote history (last collect)</span><span class="v" id="feed-quotes">--</span></div>
+    <div><span class="k">Coinbase spot (last collect)</span><span class="v" id="feed-spot">--</span></div>
+    <div><span class="k">Spot vs Kalshi settlements</span><span class="v" id="feed-validation">--</span></div>
+    <div><span class="k">Edge model built</span><span class="v" id="feed-model">--</span></div>
+    <div><span class="k">Last scan</span><span class="v" id="feed-scan">--</span></div>
+  </div>
+</section>
+
+<section>
   <h3>Strategy &amp; Server Config</h3>
-  <div class="config-grid" id="config-grid">
+  <div class="config-grid">
     <div><span class="k">Live trading</span><span class="v" id="cfg-live">--</span></div>
-    <div><span class="k">Universe</span><span class="v" id="cfg-universe">--</span></div>
+    <div><span class="k">Entry mode</span><span class="v" id="cfg-mode">--</span></div>
+    <div><span class="k">Requires certified edge</span><span class="v" id="cfg-cert">--</span></div>
+    <div><span class="k">Minimum edge after fees</span><span class="v" id="cfg-edge">--</span></div>
+    <div><span class="k">Entry minutes</span><span class="v" id="cfg-minutes">--</span></div>
     <div><span class="k">Position size</span><span class="v" id="cfg-size">--</span></div>
-    <div><span class="k">Max concurrent</span><span class="v" id="cfg-maxpos">--</span></div>
-    <div><span class="k">Model confidence min</span><span class="v" id="cfg-conf">--</span></div>
-    <div><span class="k">Min time-to-close for entry</span><span class="v" id="cfg-mintime">--</span></div>
-    <div><span class="k">Cycle</span><span class="v" id="cfg-cycle">--</span></div>
-    <div><span class="k">Train</span><span class="v" id="cfg-train">--</span></div>
+    <div><span class="k">Scan cycle</span><span class="v" id="cfg-cycle">--</span></div>
+    <div><span class="k">Re-certification</span><span class="v" id="cfg-recert">--</span></div>
   </div>
 </section>
 
@@ -97,8 +218,8 @@
   <h3>Open Positions</h3>
   <div class="scroll-x">
     <table>
-      <thead><tr><th>Coin</th><th>Side</th><th>Count</th><th>Entry Price</th><th>Opened</th><th>Closes In</th><th>Mode</th></tr></thead>
-      <tbody id="positions-body"><tr><td colspan="7" class="empty">No open positions</td></tr></tbody>
+      <thead><tr><th>Coin</th><th>Side</th><th class="num">Count</th><th class="num">Entry price</th><th class="num">Edge at entry</th><th>Opened</th><th class="num">Closes in</th><th>Mode</th></tr></thead>
+      <tbody id="positions-body"><tr><td colspan="8" class="empty">No open positions</td></tr></tbody>
     </table>
   </div>
 </section>
@@ -107,92 +228,327 @@
   <h3>Recent Trades</h3>
   <div class="scroll-x">
     <table>
-      <thead><tr><th>Coin</th><th>Side</th><th>Result</th><th>Count</th><th>Entry Price</th><th>P&amp;L</th><th>Closed</th><th>Mode</th></tr></thead>
-      <tbody id="trades-body"><tr><td colspan="8" class="empty">No trades yet</td></tr></tbody>
+      <thead><tr><th>Coin</th><th>Side</th><th>Result</th><th class="num">Count</th><th class="num">Entry price</th><th class="num">Fees</th><th class="num">Net P&amp;L</th><th class="num">Edge at entry</th><th>Closed</th><th>Mode</th></tr></thead>
+      <tbody id="trades-body"><tr><td colspan="10" class="empty">No trades yet</td></tr></tbody>
     </table>
   </div>
 </section>
 
-<!-- The Claude-powered status review is project-wide now (all 5 markets,
-     not just this one) -- see it on the hub page (/) instead. -->
-
 <footer>Kalshi 15-Minute Markets &middot; auto-refreshes every 10s</footer>
 
 <script>
-const fmtUsd = (v) => (v === null || v === undefined || isNaN(v)) ? "--" : "$" + Number(v).toFixed(2);
-const fmtPct = (v) => (v === null || v === undefined || isNaN(v)) ? "--" : (Number(v) * 100).toFixed(1) + "%";
-const fmtTime = (iso) => { if (!iso) return "--"; try { return new Date(iso).toLocaleString(); } catch (e) { return "--"; } };
-const fmtSeconds = (s) => {
-  if (s === null || s === undefined || isNaN(s)) return "--";
-  if (s <= 0) return "closed";
-  const m = Math.floor(s / 60), sec = Math.floor(s % 60);
-  return `${m}m ${sec}s`;
+const esc = (v) => String(v ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const isNum = (v) => v !== null && v !== undefined && v !== "" && !isNaN(v);
+const fmtUsd = (v) => isNum(v) ? (v < 0 ? "-$" : "$") + Math.abs(Number(v)).toFixed(2) : "--";
+const fmtPct = (v, d = 1) => isNum(v) ? (Number(v) * 100).toFixed(d) + "%" : "--";
+const fmtCents = (v) => isNum(v) ? (Number(v) >= 0 ? "+" : "") + (Number(v) * 100).toFixed(1) + "¢" : "--";
+const fmtTime = (iso) => { if (!iso) return "--"; const d = new Date(iso); return isNaN(d) ? "--" : d.toLocaleString(); };
+const fmtAgo = (iso) => {
+  if (!iso) return "never";
+  const s = (Date.now() - new Date(iso).getTime()) / 1000;
+  if (isNaN(s)) return "--";
+  if (s < 90) return `${Math.max(0, Math.round(s))}s ago`;
+  if (s < 5400) return `${Math.round(s / 60)} min ago`;
+  return `${(s / 3600).toFixed(1)} h ago`;
 };
+const fmtSeconds = (s) => {
+  if (!isNum(s)) return "--";
+  if (s <= 0) return "closed";
+  return `${Math.floor(s / 60)}m ${Math.floor(s % 60)}s`;
+};
+const signClass = (v) => isNum(v) ? (v > 0 ? "pos" : v < 0 ? "neg" : "") : "";
+
+const REASONS = {
+  edge_model_not_certified: "No certified edge",
+  coin_not_eligible: "Coin not eligible",
+  edge_below_minimum: "Edge below minimum",
+  outside_ev_entry_minutes: "Outside entry minutes",
+  quote_moved_since_minute_close: "Quote moving, waiting",
+  no_open_window: "No open window",
+  no_valid_quote: "No valid quote", no_valid_minute_close_quote: "No valid quote",
+  flow_features_unavailable: "Live data unavailable",
+  underlying_unavailable: "Spot data unavailable", cross_asset_spot_unavailable: "Spot data unavailable",
+  no_edge_model_yet: "Model not built yet",
+  coin_outside_active_entry_universe: "Not in entry universe",
+  already_has_open_position: "Position already open",
+  crypto_position_already_open: "Another crypto position open",
+  crypto_loss_retrain_pending: "Re-certifying after a loss",
+  win_streak_cooldown_active: "Win-streak check running",
+  max_concurrent_positions: "Max positions reached",
+  hour_outside_trusted_track_record: "Hour paused (track record)",
+  unprofitable_real_track_record: "Coin paused (track record)",
+  order_not_filled: "Order not filled", order_failed: "Order failed",
+  live_trading_disabled_fresh_check: "Live trading just disabled",
+};
+const CERT_REASONS = {
+  does_not_beat_kalshi_quote_out_of_sample: "doesn't beat Kalshi's price",
+  too_few_out_of_sample_trades: "too few test trades",
+  pnl_not_significant: "profit not significant",
+  too_few_out_of_sample_days: "too few test days",
+  too_few_profitable_days: "too few profitable days",
+  not_enough_history: "not enough history",
+  no_spot_history: "no spot history",
+  market_not_certified: "market not certified",
+  not_profitable_out_of_sample: "lost money in testing",
+  spot_data_not_validated: "spot data not validated",
+};
+const FEATURES = {
+  move_z: "Spot vs strike", m5: "5-min momentum", m15: "15-min momentum", m1h: "1-hour trend", m4h: "4-hour trend",
+  m8h: "8-hour trend", m1d: "1-day trend", cascade: "8-timeframe agreement", dvz: "Dollar-volume surge",
+  d1: "Contract 1-min move", d3: "Contract 3-min move", vol_rel: "Contract volume surge", oi_chg: "Open-interest change",
+  mkt_gap: "Other contracts' price gap", mkt_d1: "Other contracts' 1-min move", lead_gap: "BTC contract price gap",
+  lead_d1: "BTC contract 1-min move", lead_move_z: "BTC spot vs its strike", lead_m5: "BTC 5-min momentum",
+  mkt_move_z: "Other coins' spot vs strike", mkt_m5: "Other coins' 5-min momentum",
+};
+const featureLabel = (f) => f.endsWith("_t") ? `${FEATURES[f.slice(0, -2)] || f.slice(0, -2)} (late)` : (FEATURES[f] || f);
+const MINUTE_BUCKETS = ["1-3", "4-6", "7-9", "10-12", "13-15"];
+const reasonLabel = (r) => REASONS[r] || String(r || "").replace(/_/g, " ");
+const certReasons = (s) => String(s || "").split(",").filter(Boolean).map(r => CERT_REASONS[r] || r.replace(/_/g, " ")).join(", ");
+
+let liveBot = null;
+
+async function refreshLive() {
+  const badge = document.getElementById("live-badge");
+  try {
+    const res = await fetch("/api/bots/live", { cache: "no-store" });
+    const data = await res.json();
+    liveBot = (data.bots || []).find(b => b.key === "kalshi15m") || null;
+  } catch (e) { liveBot = null; }
+  if (liveBot && liveBot.live) {
+    badge.className = "badge on"; badge.innerHTML = '<span class="dot"></span>LIVE';
+  } else {
+    badge.className = "badge off"; badge.innerHTML = '<span class="dot"></span>NOT LIVE';
+  }
+  badge.title = liveBot ? `${liveBot.reason} (${liveBot.account})` : "Live status unavailable";
+}
+
+function renderBanner(data) {
+  const el = document.getElementById("state-banner");
+  const em = data.edge_model || {};
+  const markets = em.markets || {};
+  if (liveBot && !liveBot.live) {
+    el.className = "banner stop";
+    el.innerHTML = `<strong>Not live</strong><div class="sub">${esc(liveBot.reason)}</div>`;
+    return;
+  }
+  if (data.entry_mode === "legacy") {
+    el.className = "banner wait";
+    el.innerHTML = `<strong>Legacy entry mode</strong><div class="sub">Entries use the direction model against a confidence floor, not the certified-edge rule.</div>`;
+    return;
+  }
+  if (!em.available) {
+    el.className = "banner wait";
+    el.innerHTML = `<strong>Waiting for the edge model</strong><div class="sub">No certification has been published yet.</div>`;
+    return;
+  }
+  const eligible = Object.entries(markets).flatMap(([k, m]) => (m.certified ? (m.eligible_coins || []) : []));
+  if (eligible.length) {
+    el.className = "banner go";
+    el.innerHTML = `<strong>Trading: ${eligible.length} eligible coin${eligible.length > 1 ? "s" : ""}</strong><div class="sub">${esc(eligible.join(", "))} &middot; enters only when the edge after fees is at least ${fmtCents((data.params || {}).ev_min_edge)} per contract.</div>`;
+    return;
+  }
+  const crypto = markets.crypto || {};
+  const best = (crypto.candidates || {})[crypto.model] || {};
+  const bar = (data.params || {}).ev_require_certified ? "Every market needs a certified edge before it trades" : "Certification not required";
+  el.className = "banner wait";
+  el.innerHTML = `<strong>Standing by: no market has a certified edge</strong><div class="sub">${esc(bar)}. Best crypto candidate (${esc(crypto.model || "--")}): ${fmtCents(best.pnl_per_contract)} per contract over ${esc(best.trades ?? "--")} test trades, t = ${esc(best.t_stat ?? "--")} (needs &ge; 2.5). Re-tested daily on the newest data.</div>`;
+}
+
+function renderModelCard(prefix, m) {
+  const statEl = document.getElementById(`${prefix}-model`);
+  const subEl = document.getElementById(`${prefix}-model-sub`);
+  if (!m) { statEl.textContent = "not built"; statEl.className = "stat small"; subEl.textContent = "--"; return; }
+  statEl.innerHTML = m.certified ? '<span class="tag ok">CERTIFIED</span>' : '<span class="tag wait">NOT CERTIFIED</span>';
+  const eligible = (m.eligible_coins || []).length;
+  subEl.textContent = `${m.model || "--"} · ${eligible} eligible coin${eligible === 1 ? "" : "s"}`;
+}
+
+function renderScan(scan) {
+  const body = document.getElementById("scan-body");
+  document.getElementById("feed-scan").textContent = scan && scan.at ? fmtAgo(scan.at) : "not yet";
+  const checks = (scan && scan.checks) || [];
+  if (!checks.length) { body.innerHTML = '<tr><td colspan="8" class="empty">Waiting for the first scan&hellip;</td></tr>'; return; }
+  const rows = [...checks].sort((a, b) => String(a.coin).localeCompare(String(b.coin)));
+  body.innerHTML = rows.map(c => {
+    const ev = c.ev || {};
+    const entered = c.action === "entered";
+    const decision = entered
+      ? `<span class="tag ok">ENTERED ${esc((c.side || "").toUpperCase())}</span>`
+      : `<span class="tag ${c.reason === "no_open_window" ? "muted" : "wait"}">${esc(reasonLabel(c.reason))}</span>`;
+    const eligible = ev.coin_eligible === undefined ? "--" : (ev.coin_eligible ? '<span class="tag ok">yes</span>' : '<span class="tag muted">no</span>');
+    return `<tr>
+      <td><strong>${esc(c.coin)}</strong> <span class="sub">${esc(ev.model || "")}</span></td>
+      <td class="num">${isNum(ev.minute) ? Number(ev.minute).toFixed(0) : "--"}</td>
+      <td class="num">${isNum(ev.live_mid ?? ev.mid) ? fmtPct(ev.live_mid ?? ev.mid, 1) : "--"}</td>
+      <td class="num">${isNum(ev.p_yes) ? fmtPct(ev.p_yes, 1) : "--"}</td>
+      <td class="num ${signClass(ev.edge_yes)}">${fmtCents(ev.edge_yes)}</td>
+      <td class="num ${signClass(ev.edge_no)}">${fmtCents(ev.edge_no)}</td>
+      <td>${eligible}</td>
+      <td>${decision}</td>
+    </tr>`;
+  }).join("");
+}
+
+function renderAccuracy(targetId, m) {
+  const body = document.getElementById(targetId);
+  const acc = (((m || {}).candidates || {})[(m || {}).model] || {}).accuracy;
+  if (!acc) { body.innerHTML = '<tr><td colspan="4" class="empty">Published with the next certification</td></tr>'; return; }
+  const byMinute = acc.by_minute || {};
+  const rows = MINUTE_BUCKETS.filter(b => byMinute[b]).map(b => [b, byMinute[b]]).map(([bucket, v]) => `<tr>
+    <td>Minutes ${esc(bucket)}</td><td class="num">${fmtPct(v.model)}</td><td class="num">${fmtPct(v.kalshi_mid)}</td><td class="num">${esc((v.rows || 0).toLocaleString())}</td></tr>`);
+  rows.push(`<tr><td><strong>All minutes</strong></td><td class="num"><strong>${fmtPct(acc.model_hit_rate)}</strong></td><td class="num"><strong>${fmtPct(acc.kalshi_mid_hit_rate)}</strong></td><td class="num">${esc((acc.rows || 0).toLocaleString())}</td></tr>`);
+  body.innerHTML = rows.join("");
+}
+
+function renderCertification(em) {
+  const body = document.getElementById("cert-body");
+  const markets = em.markets || {};
+  const rows = [];
+  for (const [kind, m] of Object.entries(markets)) {
+    for (const [name, s] of Object.entries(m.candidates || {})) {
+      const ci = s.log_loss_gain_ci95;
+      const beats = Array.isArray(ci) ? (ci[0] > 0 ? '<span class="tag ok">yes</span>' : '<span class="tag no">no</span>') : "--";
+      const status = s.certified ? '<span class="tag ok">CERTIFIED</span>' : `<span class="sub">${esc(certReasons(s.reason))}</span>`;
+      rows.push(`<tr>
+        <td>${esc(kind)}</td>
+        <td>${esc(name)}${name === m.model ? ' <span class="tag muted">in use</span>' : ""}</td>
+        <td class="num">${esc((s.oos_windows ?? "--").toLocaleString())}</td>
+        <td>${beats}</td>
+        <td class="num">${esc((s.trades ?? "--").toLocaleString())}</td>
+        <td class="num ${signClass(s.pnl_per_contract)}">${fmtCents(s.pnl_per_contract)}</td>
+        <td class="num">${esc(s.t_stat ?? "--")}</td>
+        <td class="num">${isNum(s.profitable_day_share) ? fmtPct(s.profitable_day_share, 0) : "--"}</td>
+        <td class="wrap">${status}</td></tr>`);
+    }
+  }
+  body.innerHTML = rows.length ? rows.join("") : '<tr><td colspan="9" class="empty">No certification published yet</td></tr>';
+  const rule = em.rule || {};
+  document.getElementById("cert-note").textContent =
+    `Re-tested daily, walk-forward by day, on ${em.days ?? "--"} days / ${(em.windows ?? 0).toLocaleString()} real windows with the exact live rule ` +
+    `(edge after fees ≥ ${fmtCents(rule.min_edge)}, minutes ${rule.entry_min_minute ?? "--"}–${rule.entry_max_minute ?? "--"}). ` +
+    `A market trades only when its model beats Kalshi's price out of sample AND makes money at real asks after fees (t ≥ 2.5). Built ${fmtTime(em.built_at_utc)}.`;
+}
+
+function renderLearned(m) {
+  const lp = (m || {}).learned_patterns || {};
+  const pulls = Object.entries(lp.feature_pull_per_sd || {}).sort((a, b) => Math.abs(b[1]) - Math.abs(a[1])).slice(0, 12);
+  const body = document.getElementById("pull-body");
+  if (!pulls.length) { body.innerHTML = '<div class="empty">No learned patterns published yet</div>'; }
+  else {
+    const maxAbs = Math.max(...pulls.map(([, v]) => Math.abs(v)), 1e-9);
+    body.innerHTML = pulls.map(([f, v]) => {
+      const pct = (Math.abs(v) / maxAbs) * 50;
+      const side = v >= 0 ? "yes" : "no";
+      const label = `${featureLabel(f)}: ${v >= 0 ? "+" : ""}${v.toFixed(3)} log-odds per SD, pushes toward ${side.toUpperCase()}`;
+      const valPos = v >= 0 ? `left: calc(50% + ${pct}% + 4px)` : `right: calc(50% + ${pct}% + 4px)`;
+      return `<div class="pull-row" title="${esc(label)}">
+        <div class="name">${esc(featureLabel(f))}</div>
+        <div class="pull-track" role="img" aria-label="${esc(label)}">
+          <div class="pull-bar ${side}" style="width:${pct}%"></div>
+          <span class="pull-val" style="${valPos}">${v >= 0 ? "+" : ""}${v.toFixed(2)}</span>
+        </div></div>`;
+    }).join("");
+  }
+  const table = (id, data, order) => {
+    const el = document.getElementById(id);
+    const keys = order ? order.filter(k => data && data[k]) : Object.keys(data || {});
+    el.innerHTML = keys.length ? keys.map(k => {
+      const v = data[k];
+      return `<tr><td>${esc(k)}</td><td class="num">${esc(v.trades)}</td><td class="num">${fmtPct(v.win_rate)}</td><td class="num ${signClass(v.pnl_per_contract)}">${fmtCents(v.pnl_per_contract)}</td></tr>`;
+    }).join("") : '<tr><td colspan="4" class="empty">--</td></tr>';
+  };
+  table("opp-minute", lp.by_minute, MINUTE_BUCKETS);
+  table("opp-side", lp.by_side, ["yes", "no"]);
+}
+
+function renderCoins(em) {
+  const body = document.getElementById("coin-body");
+  const rows = [];
+  for (const [kind, m] of Object.entries(em.markets || {})) {
+    for (const [coin, s] of Object.entries(m.coin_stats || {})) {
+      rows.push(`<tr>
+        <td><strong>${esc(coin)}</strong></td><td>${esc(kind)}</td>
+        <td class="num">${esc(s.history_days ?? "--")}</td>
+        <td class="num">${esc(s.oos_trades ?? "--")}</td>
+        <td class="num ${signClass(s.oos_pnl_per_contract)}">${fmtCents(s.oos_pnl_per_contract)}</td>
+        <td class="num">${isNum(s.spot_outcome_match) ? fmtPct(s.spot_outcome_match) : "--"}</td>
+        <td>${s.eligible ? '<span class="tag ok">yes</span>' : '<span class="tag muted">no</span>'}</td>
+        <td class="wrap sub">${esc((s.reasons || []).map(r => CERT_REASONS[r] || r.replace(/_/g, " ")).join(", "))}</td></tr>`);
+    }
+  }
+  body.innerHTML = rows.length ? rows.join("") : '<tr><td colspan="8" class="empty">Published with the next certification</td></tr>';
+}
+
+function renderFeeds(data) {
+  const q = data.quote_history_last_collect || {};
+  const s = data.spot_history_last_collect || {};
+  const v = (data.edge_model || {}).spot_data_validation || {};
+  document.getElementById("feed-quotes").textContent = q.at ? `${fmtAgo(q.at)} · ${q.windows ?? 0} windows` : "not yet since restart";
+  document.getElementById("feed-spot").textContent = s.at ? `${fmtAgo(s.at)} · ${(s.rows ?? 0).toLocaleString()} candles` : "not yet since restart";
+  document.getElementById("feed-validation").textContent = v.ok
+    ? `${fmtPct(v.outcome_match)} direction match · ${v.close_err_bps_median} bps median · ${(v.graded || 0).toLocaleString()} windows`
+    : "--";
+  const em = data.edge_model || {};
+  document.getElementById("feed-model").textContent = em.available ? `${fmtAgo(em.built_at_utc)} · ${em.days} days` : "not yet";
+}
 
 async function refreshStatus() {
   try {
     const res = await fetch("/api/kalshi15m/status");
     const data = await res.json();
     if (!data.ok) return;
+    const p = data.params || {};
+    const em = data.edge_model || {};
+    const markets = em.markets || {};
 
     const modeBadge = document.getElementById("mode-badge");
-    if (data.live_trading_enabled) {
-      modeBadge.textContent = "LIVE";
-      modeBadge.className = "badge live";
-    } else {
-      modeBadge.textContent = "DRY RUN";
-      modeBadge.className = "badge dry";
-    }
+    modeBadge.className = "badge neutral";
+    modeBadge.textContent = data.entry_mode === "ev" ? (p.ev_require_certified ? "EV · certified only" : "EV · uncertified allowed") : "Legacy mode";
 
+    renderBanner(data);
     document.getElementById("position-count").textContent = data.open_position_count ?? "--";
-    document.getElementById("position-sub").textContent = `of ${data.max_concurrent_positions ?? "--"} max`;
-
+    const realTrades = data.trade_count || 0;
+    document.getElementById("position-sub").textContent = `${realTrades} real trade${realTrades === 1 ? "" : "s"} all-time`;
     const todayPnl = data.today_realized_pnl_usd ?? 0;
     const todayEl = document.getElementById("today-pnl");
     todayEl.textContent = fmtUsd(todayPnl);
-    todayEl.className = "stat " + (todayPnl > 0 ? "pos" : todayPnl < 0 ? "neg" : "");
-    document.getElementById("total-pnl-sub").textContent = `all-time ${fmtUsd(data.total_realized_pnl_usd)} · ${data.trade_count || 0} trades`;
-
-    const model = data.model || {};
-    document.getElementById("model-status").textContent = model.trained ? (model.model_type || "trained") : "not trained yet";
-    document.getElementById("model-sub").textContent = model.rows ? `${model.rows} rows` : "collecting data";
-
-    const metalsModel = data.metals_model || {};
-    document.getElementById("metals-model-status").textContent = metalsModel.trained ? (metalsModel.model_type || "trained") : "not trained yet";
-    document.getElementById("metals-model-sub").textContent = metalsModel.rows ? `${metalsModel.rows} rows` : "collecting data";
-
+    todayEl.className = "stat " + signClass(todayPnl);
+    document.getElementById("total-pnl-sub").textContent = `all-time ${fmtUsd(data.total_realized_pnl_usd)}`;
     const wr = data.win_rate || {};
     document.getElementById("win-rate").textContent = wr.win_rate != null ? fmtPct(wr.win_rate) : "--";
-    document.getElementById("win-rate-sub").textContent = wr.trade_count
-      ? `${wr.win_count}/${wr.trade_count} all-time`
-      : "no closed real trades yet";
+    document.getElementById("win-rate-sub").textContent = wr.trade_count ? `${wr.win_count}/${wr.trade_count} real trades` : "no closed real trades yet";
+    renderModelCard("crypto", markets.crypto);
+    renderModelCard("metals", markets.metals);
 
-    const p = data.params || {};
-    document.getElementById("cfg-live").textContent = data.live_trading_enabled ? "ON" : "OFF (dry-run)";
-    document.getElementById("cfg-universe").textContent = (data.universe || []).join(", ") || "--";
-    document.getElementById("cfg-size").textContent = p.position_size_pct != null ? fmtPct(p.position_size_pct) : "--";
-    document.getElementById("cfg-maxpos").textContent = p.max_concurrent_positions ?? "--";
-    document.getElementById("cfg-conf").textContent = p.model_confidence_min != null ? fmtPct(p.model_confidence_min) : "--";
-    document.getElementById("cfg-mintime").textContent = p.min_seconds_to_close_for_entry != null ? `${p.min_seconds_to_close_for_entry}s` : "--";
-    document.getElementById("cfg-cycle").textContent = p.cycle_minutes != null ? `every ${p.cycle_minutes} min` : "--";
-    document.getElementById("cfg-train").textContent = p.train_hour_et != null ? `daily ${String(p.train_hour_et).padStart(2, "0")}:00 ET` : "--";
+    renderScan(data.last_scan);
+    renderAccuracy("acc-crypto", markets.crypto);
+    renderAccuracy("acc-metals", markets.metals);
+    renderCertification(em);
+    renderLearned(markets.crypto);
+    renderCoins(em);
+    renderFeeds(data);
+
+    document.getElementById("cfg-live").textContent = data.live_trading_enabled ? "ON (real orders)" : "OFF (dry run)";
+    document.getElementById("cfg-mode").textContent = data.entry_mode === "ev" ? "Expected value at the real ask" : "Legacy direction model";
+    document.getElementById("cfg-cert").textContent = p.ev_require_certified ? "Yes" : "No";
+    document.getElementById("cfg-edge").textContent = isNum(p.ev_min_edge) ? `${fmtCents(p.ev_min_edge)} / contract` : "--";
+    document.getElementById("cfg-minutes").textContent = isNum(p.ev_entry_min_minute) ? `${p.ev_entry_min_minute}–${p.ev_entry_max_minute} of 15` : "--";
+    document.getElementById("cfg-size").textContent = isNum(p.position_size_pct) ? fmtPct(p.position_size_pct) + " of shard balance" : "--";
+    document.getElementById("cfg-cycle").textContent = isNum(p.cycle_minutes) ? `every ${p.cycle_minutes} min` : "--";
+    document.getElementById("cfg-recert").textContent = isNum(p.edge_model_hour_et) ? `daily ${String(p.edge_model_hour_et).padStart(2, "0")}:20 ET + after every crypto loss` : "--";
 
     const tbody = document.getElementById("positions-body");
     const positions = data.positions || [];
-    if (positions.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="7" class="empty">No open positions</td></tr>';
-    } else {
-      tbody.innerHTML = positions.map(pos => `
-        <tr>
-          <td>${pos.coin || "--"}</td>
-          <td><span class="tag ${pos.side}">${(pos.side || "--").toUpperCase()}</span></td>
-          <td>${pos.count ?? "--"}</td>
-          <td>${fmtUsd(pos.entry_price)}</td>
-          <td>${fmtTime(pos.opened_at)}</td>
-          <td>${fmtSeconds(pos.seconds_to_close)}</td>
-          <td>${pos.dry_run ? "dry-run" : "live"}</td>
-        </tr>`).join("");
-    }
+    tbody.innerHTML = positions.length ? positions.map(pos => `<tr>
+        <td>${esc(pos.coin || "--")}</td>
+        <td><span class="tag ${pos.side === "yes" ? "yes" : "no"}">${esc((pos.side || "--").toUpperCase())}</span></td>
+        <td class="num">${esc(pos.count ?? "--")}</td>
+        <td class="num">${fmtUsd(pos.entry_price)}</td>
+        <td class="num">${fmtCents(pos.entry_edge_usd)}</td>
+        <td>${fmtTime(pos.opened_at)}</td>
+        <td class="num">${fmtSeconds(pos.seconds_to_close)}</td>
+        <td>${pos.dry_run ? "dry run" : "live"}</td></tr>`).join("")
+      : '<tr><td colspan="8" class="empty">No open positions</td></tr>';
   } catch (e) { console.error("status refresh failed", e); }
 }
 
@@ -202,50 +558,38 @@ async function refreshTrades() {
     const data = await res.json();
     const tbody = document.getElementById("trades-body");
     const trades = (data.trades || []).slice(0, 50);
-    if (trades.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="8" class="empty">No trades yet</td></tr>';
-      return;
-    }
-    tbody.innerHTML = trades.map(t => {
+    tbody.innerHTML = trades.length ? trades.map(t => {
       const pnl = t.realized_pnl_usd ?? 0;
-      const pnlClass = pnl > 0 ? "pos" : pnl < 0 ? "neg" : "";
-      return `
-        <tr>
-          <td>${t.coin || "--"}</td>
-          <td><span class="tag ${t.side}">${(t.side || "--").toUpperCase()}</span></td>
-          <td>${(t.result || "--").toUpperCase()}</td>
-          <td>${t.count ?? "--"}</td>
-          <td>${fmtUsd(t.entry_price)}</td>
-          <td class="${pnlClass}">${fmtUsd(pnl)}</td>
-          <td>${fmtTime(t.closed_at)}</td>
-          <td>${t.dry_run ? "dry-run" : "live"}</td>
-        </tr>`;
-    }).join("");
+      return `<tr>
+        <td>${esc(t.coin || "--")}</td>
+        <td><span class="tag ${t.side === "yes" ? "yes" : "no"}">${esc((t.side || "--").toUpperCase())}</span></td>
+        <td>${esc((t.result || t.close_reason || "--").toUpperCase())}</td>
+        <td class="num">${esc(t.count ?? "--")}</td>
+        <td class="num">${fmtUsd(t.entry_price)}</td>
+        <td class="num">${isNum(t.fees_usd) ? fmtUsd(t.fees_usd) : "--"}</td>
+        <td class="num ${signClass(pnl)}">${fmtUsd(pnl)}</td>
+        <td class="num">${fmtCents(t.entry_edge_usd)}</td>
+        <td>${fmtTime(t.closed_at)}</td>
+        <td>${t.dry_run ? "dry run" : "live"}</td></tr>`;
+    }).join("") : '<tr><td colspan="10" class="empty">No trades yet</td></tr>';
   } catch (e) { console.error("trades refresh failed", e); }
 }
 
 async function refreshShardBalance() {
-  // Replaces a static prose notice that kept going stale the moment
-  // either underlying condition changed (confirmed live, twice) -- a
-  // real number pulled fresh from Kalshi every refresh can't go stale
-  // the same way. Kalshi's own per-shard balance changes far less often
-  // than positions/trades, so this fetch runs on its own slower interval
-  // (see setInterval below) rather than every 10s alongside those.
   try {
     const res = await fetch("/api/kalshi15m/balance-by-shard");
     const data = await res.json();
     const balEl = document.getElementById("shard2-balance");
     const subEl = document.getElementById("shard2-sub");
     if (!data.ok) { balEl.textContent = "--"; subEl.textContent = "check failed"; return; }
-    const shard2 = data.shard_2_crypto_commodities || {};
-    const dollars = parseFloat(shard2.balance_dollars);
+    const dollars = parseFloat((data.shard_2_crypto_commodities || {}).balance_dollars);
     balEl.textContent = isNaN(dollars) ? "--" : fmtUsd(dollars);
     balEl.className = "stat " + (dollars > 0 ? "pos" : "neg");
-    subEl.textContent = dollars > 0 ? "Crypto & Commodities" : "$0 -- real orders can't fill, see kalshi.com/account/exchange-indexes";
+    subEl.textContent = dollars > 0 ? "Crypto & Commodities" : "$0: real orders can't fill";
   } catch (e) { console.error("shard balance refresh failed", e); }
 }
 
-function refreshAll() { refreshStatus(); refreshTrades(); }
+async function refreshAll() { await refreshLive(); refreshStatus(); refreshTrades(); }
 refreshAll();
 refreshShardBalance();
 setInterval(refreshAll, 10000);

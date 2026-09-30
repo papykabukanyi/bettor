@@ -2146,3 +2146,57 @@ def test_perps_spot_lead_endpoint_reports_the_model_and_live_predictions(monkeyp
         body = client.get("/api/perps/spot-lead").get_json()
     assert body["model"]["certified"] is True
     assert body["live"]["KXHYPEPERP"]["pred_bps"] == 6.5
+
+
+def _write_history(path, job, minutes_ago, status="ok"):
+    import datetime as dt
+    import json
+    at = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=minutes_ago)).isoformat()
+    existing = json.loads(path.read_text()) if path.exists() else []
+    existing.append({"job": job, "status": status, "started_at": at, "finished_at": at})
+    path.write_text(json.dumps(existing))
+
+
+@pytest.fixture
+def bot_env(tmp_path, monkeypatch):
+    from data import alpaca_crypto_strategy, alpaca_options_strategy, alpaca_strategy, kalshi_15m_strategy, perps_strategy
+    monkeypatch.setattr(app_kalshi, "DATA_DIR", tmp_path)
+    for module in (perps_strategy, kalshi_15m_strategy, alpaca_strategy, alpaca_crypto_strategy, alpaca_options_strategy):
+        monkeypatch.setattr(module, "LIVE_TRADING_ENABLED", True)
+    return tmp_path
+
+
+def test_a_bot_is_live_only_with_trading_on_and_a_recent_loop_run(bot_env, monkeypatch):
+    from data import alpaca_options_strategy
+    _write_history(bot_env / "perps_job_run_history.json", "perps_fast_check", 1)
+    _write_history(bot_env / "perps_job_run_history.json", "kalshi_15m_cycle", 30)
+    _write_history(bot_env / "alpaca_job_run_history.json", "alpaca_fast_check", 2)
+    _write_history(bot_env / "alpaca_crypto_job_run_history.json", "alpaca_crypto_fast_check", 1, status="error")
+    _write_history(bot_env / "alpaca_options_job_run_history.json", "alpaca_options_entry_scan", 1)
+    monkeypatch.setattr(alpaca_options_strategy, "LIVE_TRADING_ENABLED", False)
+
+    bots = {b["key"]: b for b in app_kalshi.bot_live_status()}
+
+    assert bots["perps"]["live"] is True
+    assert bots["kalshi15m"]["live"] is False and "stalled" in bots["kalshi15m"]["reason"]
+    assert bots["stocks"]["live"] is True and "paper" in bots["stocks"]["account"].lower()
+    assert bots["crypto"]["live"] is False and "since the last restart" in bots["crypto"]["reason"]
+    assert bots["options"]["live"] is False and "dry run" in bots["options"]["reason"]
+
+
+def test_bots_live_endpoint(bot_env):
+    _write_history(bot_env / "perps_job_run_history.json", "perps_entry_scan", 3)
+    with app_kalshi.app.test_client() as client:
+        body = client.get("/api/bots/live").get_json()
+    assert body["ok"] is True and body["stall_after_sec"] == app_kalshi.BOT_LIVE_STALL_SEC
+    assert [b["key"] for b in body["bots"]] == ["perps", "kalshi15m", "stocks", "crypto", "options"]
+    assert body["live_count"] == 1
+
+
+def test_kalshi15m_status_carries_the_last_scan(monkeypatch):
+    from data import kalshi_15m_strategy
+    monkeypatch.setattr(kalshi_15m_strategy, "_LAST_SCAN", {"at": "2026-09-30T00:00:00+00:00", "checks": [{"coin": "BTC", "ok": False, "reason": "edge_model_not_certified"}]})
+    with app_kalshi.app.test_client() as client:
+        body = client.get("/api/kalshi15m/status").get_json()
+    assert body["last_scan"]["checks"][0]["reason"] == "edge_model_not_certified"
+    assert "ev_min_edge" in body["params"]

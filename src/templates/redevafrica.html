@@ -127,6 +127,12 @@
     white-space: nowrap;
   }
   .ops-bar a:hover { color: var(--cream); border-color: var(--border); background: #1c1712; }
+  .ops-bar .live-dot {
+    display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px;
+    background: #6b6358; vertical-align: 0;
+  }
+  .ops-bar .live-dot.on { background: #3fb950; box-shadow: 0 0 0 3px #3fb95033; }
+  .ops-bar .live-dot.off { background: #f85149; }
   @media (max-width: 640px) {
     .ops-bar { justify-content: flex-start; overflow-x: auto; }
     .ops-bar .ops-label { display: none; }
@@ -258,13 +264,36 @@
 
 <nav class="ops-bar" aria-label="Internal tools">
   <span class="ops-label">Internal</span>
-  <a href="/perps">&#8383; Perps</a>
-  <a href="/kalshi15m">&#9203; 15-Min</a>
-  <a href="/stocks/">&#128200; Stocks</a>
-  <a href="/crypto/">&#8383; Crypto</a>
-  <a href="/options/">&#9780; Options</a>
+  <a href="/perps" data-bot="perps"><span class="live-dot" aria-hidden="true"></span>&#8383; Perps</a>
+  <a href="/kalshi15m" data-bot="kalshi15m"><span class="live-dot" aria-hidden="true"></span>&#9203; 15-Min</a>
+  <a href="/stocks/" data-bot="stocks"><span class="live-dot" aria-hidden="true"></span>&#128200; Stocks</a>
+  <a href="/crypto/" data-bot="crypto"><span class="live-dot" aria-hidden="true"></span>&#8383; Crypto</a>
+  <a href="/options/" data-bot="options"><span class="live-dot" aria-hidden="true"></span>&#9780; Options</a>
 </nav>
 
-<script>document.getElementById("year").textContent = new Date().getFullYear();</script>
+<script>
+document.getElementById("year").textContent = new Date().getFullYear();
+
+// Green = the bot's running code has real-order trading on AND its trading
+// loop completed a run in the last 10 minutes; red otherwise (reason on hover).
+async function refreshLiveDots() {
+  let bots = null;
+  try {
+    const res = await fetch("/api/bots/live", { cache: "no-store" });
+    if (res.ok) bots = (await res.json()).bots || null;
+  } catch (e) { bots = null; }
+  document.querySelectorAll(".ops-bar a[data-bot]").forEach(link => {
+    const dot = link.querySelector(".live-dot");
+    const name = link.textContent.trim();
+    const bot = bots && bots.find(b => b.key === link.dataset.bot);
+    const live = !!(bot && bot.live);
+    dot.className = "live-dot " + (live ? "on" : "off");
+    link.title = bot ? `${bot.reason} (${bot.account})` : "Live status unavailable";
+    link.setAttribute("aria-label", `${name}: ${live ? "live" : "not live"}`);
+  });
+}
+refreshLiveDots();
+setInterval(refreshLiveDots, 30000);
+</script>
 </body>
 </html>
