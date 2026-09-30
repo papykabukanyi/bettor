@@ -107,7 +107,7 @@ from config import HF_API_KEY, et_today
 from data import (
     ai_monitor, crypto_news, kalshi_15m, kalshi_15m_backtest, kalshi_15m_data, kalshi_15m_edge_model,
     kalshi_15m_meta_model, kalshi_15m_metals_backtest, kalshi_15m_metals_data, kalshi_15m_metals_model,
-    kalshi_15m_model, kalshi_15m_pattern_study, kalshi_15m_quotes, kalshi_15m_strategy, perps_data,
+    kalshi_15m_model, kalshi_15m_pattern_study, kalshi_15m_quotes, kalshi_15m_spot, kalshi_15m_strategy, perps_data,
     perps_meta_model, perps_model, perps_strategy, perps_trade_analysis, strategy_sweep, threads_client,
     threads_post,
 )
@@ -729,6 +729,22 @@ def _run_kalshi_15m_quote_collect() -> dict[str, Any]:
         gc.collect()
 
 
+_KALSHI_15M_SPOT_LAST_RUN: dict[str, Any] = {}
+
+
+@_locked_job("kalshi_15m_spot_collect", stale_after_sec=900)
+def _run_kalshi_15m_spot_collect() -> dict[str, Any]:
+    """Real Coinbase 1-minute spot candles for every crypto underlying into
+    spot_history/ on HF (see kalshi_15m_spot); also keeps the live feature
+    cache current."""
+    try:
+        result = kalshi_15m_spot.run_incremental(lookback_hours=2.0)
+        _KALSHI_15M_SPOT_LAST_RUN.update({**result, "at": dt.datetime.now(dt.timezone.utc).isoformat()})
+        return result
+    finally:
+        gc.collect()
+
+
 @_locked_job("kalshi_15m_edge_model_train", stale_after_sec=3600)
 def _run_kalshi_15m_edge_model_train() -> dict[str, Any]:
     """Walk-forward retrain + certification of every edge-model candidate on
@@ -842,6 +858,7 @@ def _run_kalshi_15m_crypto_loss_retrain(gate: dict[str, Any]) -> dict[str, Any]:
         # certification on the latest real quotes (fold in the newest windows,
         # possibly de-certify) before the next crypto entry.
         _run_kalshi_15m_quote_collect()
+        _run_kalshi_15m_spot_collect()
         try:
             retrain_result = kalshi_15m_edge_model.train_and_certify()
         except Exception as exc:
@@ -891,6 +908,7 @@ def _run_kalshi_15m_win_streak_verification(cooldown: dict[str, Any]) -> dict[st
     return says nothing about entries paying Kalshi's real ask)."""
     if kalshi_15m_strategy.entry_mode() == "ev":
         _run_kalshi_15m_quote_collect()
+        _run_kalshi_15m_spot_collect()
         try:
             recert = kalshi_15m_edge_model.train_and_certify()
         except Exception as exc:
@@ -1465,6 +1483,11 @@ def _ensure_background_jobs_started() -> None:
                 _run_kalshi_15m_quote_collect, "interval", minutes=KALSHI_15M_QUOTE_COLLECT_MINUTES,
                 id="kalshi_15m_quote_collect", replace_existing=True,
                 next_run_time=dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=2),
+            )
+            scheduler.add_job(
+                _run_kalshi_15m_spot_collect, "interval", minutes=KALSHI_15M_QUOTE_COLLECT_MINUTES,
+                id="kalshi_15m_spot_collect", replace_existing=True,
+                next_run_time=dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=1),
             )
             scheduler.add_job(
                 _run_kalshi_15m_edge_model_train, "cron", hour=KALSHI_15M_EDGE_MODEL_HOUR_ET, minute=20,
@@ -2046,6 +2069,7 @@ def api_kalshi_15m_status():
         "entry_mode": kalshi_15m_strategy.entry_mode(),
         "edge_model": kalshi_15m_edge_model.summary(),
         "quote_history_last_collect": dict(_KALSHI_15M_QUOTE_LAST_RUN),
+        "spot_history_last_collect": dict(_KALSHI_15M_SPOT_LAST_RUN),
         "pattern_study": {
             coin: {
                 "total_samples": p.get("total_samples"),
@@ -2106,6 +2130,29 @@ def api_kalshi_15m_quotes():
             logger.warning("[app_kalshi] quote backfill failed", exc_info=True)
             return jsonify({"ok": False, "error": str(exc)}), 500
     return jsonify({"ok": True, "archive": kalshi_15m_quotes.archive_summary(), "last_collect": dict(_KALSHI_15M_QUOTE_LAST_RUN)})
+
+
+@app.route("/api/kalshi15m/spot", methods=["GET", "POST"])
+def api_kalshi_15m_spot():
+    """GET: real spot-history coverage on HF, last collection, and the latest
+    accuracy grade against Kalshi's settlement values. POST ?days=N:
+    backfill N days of Coinbase 1-minute candles (default 7, max 90)."""
+    if request.method == "POST":
+        try:
+            days = max(1, min(90, int(request.args.get("days", 7))))
+        except (TypeError, ValueError):
+            days = 7
+        try:
+            return jsonify(kalshi_15m_spot.backfill(days=days))
+        except Exception as exc:
+            logger.warning("[app_kalshi] spot backfill failed", exc_info=True)
+            return jsonify({"ok": False, "error": str(exc)}), 500
+    dates = kalshi_15m_spot.list_hf_shard_dates()
+    return jsonify({
+        "ok": True, "hf_shard_dates": len(dates), "first_date": dates[0] if dates else None, "last_date": dates[-1] if dates else None,
+        "last_collect": dict(_KALSHI_15M_SPOT_LAST_RUN),
+        "settlement_validation": (kalshi_15m_edge_model.load_artifact() or {}).get("spot_data_validation"),
+    })
 
 
 @app.route("/api/kalshi15m/pattern-study", methods=["GET", "POST"])

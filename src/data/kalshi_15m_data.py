@@ -148,31 +148,6 @@ def latest_feature_row(coin: str) -> dict[str, Any] | None:
         return None
 
 
-def underlying_row_for_window(coin: str, market: dict[str, Any]) -> dict[str, Any] | None:
-    """The live underlying inputs kalshi_15m_edge_model's multi-timeframe
-    candidate needs for one open window: the latest feature row, the perp
-    close at the window's open, and the 8h/1d reference closes implied by
-    trend_8h/trend_1d (same quantities its training join computes)."""
-    perps_ticker = COIN_TO_PERPS_TICKER.get(coin)
-    row = latest_feature_row(coin)
-    if not perps_ticker or row is None or not market.get("open_time"):
-        return None
-    import datetime as dt
-    open_ts = int(dt.datetime.fromisoformat(str(market["open_time"]).replace("Z", "+00:00")).timestamp())
-    one_min_df, _ = perps_data.fetch_candle_frames(perps_ticker)
-    prior = one_min_df[one_min_df["ts"] <= open_ts]
-    close_open = None
-    if not prior.empty and open_ts - int(prior["ts"].iloc[-1]) <= 90:
-        close_open = float(prior["close"].iloc[-1])
-    close = row.get("current_price")
-    out = dict(row)
-    out.update({"close": close, "close_open": close_open})
-    for horizon in ("8h", "1d"):
-        trend = row.get(f"trend_{horizon}")
-        out[f"close_{horizon}"] = close / (1.0 + trend) if close and trend is not None and trend > -1 else None
-    return out
-
-
 # ---------------------------------------------------------------------------
 # HF archival -- faithfully mirrors perps_data.py's own push_dataset_snapshot/
 # load_training_dataset (see either's own docstring for the full incident

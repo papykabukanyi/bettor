@@ -5,9 +5,10 @@ Starts from Kalshi's own quote as the probability (it is well calibrated:
 whether anything moves it enough to beat the real ask after fees:
 
   quote      logit(mid), logit(mid) x elapsed -- a pure recalibration
-  quote_mtf  (crypto) + the underlying's move since window open and its
-             5m/15m/1h/4h/8h/1d momentum (vol-normalized), the 8-timeframe
-             cascade vote, and dollar-volume z, each also x elapsed
+  quote_mtf  (crypto) + real Coinbase spot (kalshi_15m_spot): distance from
+             the window's strike in vol units, 5m/15m/1h/4h/8h/1d momentum
+             (vol-normalized), the 8-timeframe cascade vote, and dollar-
+             volume z, each also x elapsed
   quote_flow + the contract's own price action (1m/3m quote change), its
              volume and open-interest flow, and cross-market correlation:
              every series shares the same 15-minute windows, so the other
@@ -78,24 +79,41 @@ CERTIFY_MIN_T = _env_float("KALSHI_15M_EV_CERTIFY_MIN_T", 2.5)
 CERTIFY_MIN_OOS_DAYS = _env_int("KALSHI_15M_EV_CERTIFY_MIN_OOS_DAYS", 5)
 CERTIFY_MIN_PROFITABLE_DAY_SHARE = _env_float("KALSHI_15M_EV_CERTIFY_MIN_PROFITABLE_DAY_SHARE", 0.55)
 TRAIN_MIN_DAYS = _env_int("KALSHI_15M_EV_TRAIN_MIN_DAYS", 7)
-HISTORY_DAYS = _env_int("KALSHI_15M_EV_HISTORY_DAYS", 45)
+HISTORY_DAYS = _env_int("KALSHI_15M_EV_HISTORY_DAYS", 90)
 
 EV_MAX_QUOTE_DRIFT = _env_float("KALSHI_15M_EV_MAX_QUOTE_DRIFT", 0.03)
 
 MTF_BASE = ["move_z", "m5", "m15", "m1h", "m4h", "m8h", "m1d", "cascade", "dvz"]
 FLOW_BASE = ["d1", "d3", "vol_rel", "oi_chg", "mkt_gap", "mkt_d1", "lead_gap", "lead_d1"]
+XSPOT_BASE = ["lead_move_z", "lead_m5", "mkt_move_z", "mkt_m5"]
+SPOT_BASED = set(MTF_BASE) | set(XSPOT_BASE)
 QUOTE_FEATURES = ["lm", "lm_t"]
-MTF_FEATURES = QUOTE_FEATURES + MTF_BASE + [f"{f}_t" for f in MTF_BASE]
-FLOW_FEATURES = QUOTE_FEATURES + FLOW_BASE + [f"{f}_t" for f in FLOW_BASE]
+
+
+def _with_elapsed(base: list[str]) -> list[str]:
+    return base + [f"{f}_t" for f in base]
+
+
+MTF_FEATURES = QUOTE_FEATURES + _with_elapsed(MTF_BASE)
+FLOW_FEATURES = QUOTE_FEATURES + _with_elapsed(FLOW_BASE)
+FULL_FEATURES = QUOTE_FEATURES + _with_elapsed(FLOW_BASE) + _with_elapsed(MTF_BASE) + _with_elapsed(XSPOT_BASE)
 CANDIDATES: dict[str, dict[str, list[str]]] = {
-    "crypto": {"quote": QUOTE_FEATURES, "quote_mtf": MTF_FEATURES, "quote_flow": FLOW_FEATURES},
+    "crypto": {"quote": QUOTE_FEATURES, "quote_mtf": MTF_FEATURES, "quote_flow": FLOW_FEATURES, "quote_full": FULL_FEATURES},
     "metals": {"quote": QUOTE_FEATURES, "quote_flow": FLOW_FEATURES},
 }
-REGULARIZATION_C = {"quote": 1.0, "quote_mtf": 0.1, "quote_flow": 0.1}
+REGULARIZATION_C = {"quote": 1.0, "quote_mtf": 0.1, "quote_flow": 0.1, "quote_full": 0.05}
+
+# Per-coin eligibility inside a certified market: real data behind the coin
+# and the certified model actually working on it out of sample.
+COIN_MIN_HISTORY_DAYS = _env_int("KALSHI_15M_EV_COIN_MIN_HISTORY_DAYS", 20)
+COIN_MIN_OOS_TRADES = _env_int("KALSHI_15M_EV_COIN_MIN_OOS_TRADES", 30)
+COIN_MIN_SPOT_COVERAGE = _env_float("KALSHI_15M_EV_COIN_MIN_SPOT_COVERAGE", 0.95)
+COIN_MIN_SPOT_OUTCOME_MATCH = _env_float("KALSHI_15M_EV_COIN_MIN_SPOT_OUTCOME_MATCH", 0.90)
+SPOT_MAX_AGE_SEC = _env_int("KALSHI_15M_EV_SPOT_MAX_AGE_SEC", 180)
 LEAD_COIN = {"crypto": "BTC", "metals": "GOLD"}
 CASCADE_SOURCE_COLUMNS = ["ret_5m", "ret_10m", "ret_15m", "ret_30m", "trend_1h", "trend_2h", "trend_4h", "trend_8h"]
 UNDERLYING_COLUMNS = [
-    "close", "ret_5m", "ret_10m", "ret_15m", "ret_30m", "trend_1h", "trend_2h", "trend_4h",
+    "close", "ret_5m", "ret_10m", "ret_15m", "ret_30m", "trend_1h", "trend_2h", "trend_4h", "trend_8h", "trend_1d",
     "volatility_15", "volatility_30", "dollar_volume_z",
 ]
 
@@ -167,8 +185,8 @@ def add_flow_features(rows: "pd.DataFrame") -> "pd.DataFrame":  # noqa: F821
 
 def add_features(df: "pd.DataFrame") -> "pd.DataFrame":  # noqa: F821
     """Vectorized feature construction shared by training and live scoring.
-    Needs mid and minute; the mtf columns also need close, close_open,
-    close_8h, close_1d plus UNDERLYING_COLUMNS (missing ones become 0)."""
+    Needs mid and minute; the mtf columns also need floor_strike plus the
+    spot UNDERLYING_COLUMNS (missing ones become 0)."""
     import numpy as np
 
     out = df.copy()
@@ -176,18 +194,22 @@ def add_features(df: "pd.DataFrame") -> "pd.DataFrame":  # noqa: F821
     t = out["minute"].astype(float) / 15.0
     out["lm"] = np.log(mid / (1 - mid))
     out["lm_t"] = out["lm"] * t
-    for col in FLOW_BASE:
+    for col in FLOW_BASE + XSPOT_BASE:
         if col in out.columns:
             out[f"{col}_t"] = out[col].astype(float) * t
     if "close" not in out.columns:
         return out
+    for col in UNDERLYING_COLUMNS + ["floor_strike"]:
+        if col not in out.columns:
+            out[col] = np.nan
     tau = (15.0 - out["minute"].astype(float)).clip(lower=0.5)
     v15 = out["volatility_15"].astype(float)
     v30 = out["volatility_30"].astype(float).fillna(v15)
-    out["trend_8h"] = out["close"] / out["close_8h"] - 1.0
-    out["trend_1d"] = out["close"] / out["close_1d"] - 1.0
+    for col in ("trend_8h", "trend_1d"):
+        if col not in out.columns:
+            out[col] = np.nan
     with np.errstate(divide="ignore", invalid="ignore"):
-        out["move_z"] = np.log(out["close"] / out["close_open"]) / (v15 * np.sqrt(tau))
+        out["move_z"] = np.log(out["close"].astype(float) / out["floor_strike"].astype(float)) / (v15 * np.sqrt(tau))
         out["m5"] = out["ret_5m"] / (v15 * math.sqrt(5))
         out["m15"] = out["ret_15m"] / (v15 * math.sqrt(15))
         out["m1h"] = out["trend_1h"] / (v30 * math.sqrt(60))
@@ -206,11 +228,41 @@ def add_features(df: "pd.DataFrame") -> "pd.DataFrame":  # noqa: F821
     return out
 
 
+def add_cross_spot_features(q: "pd.DataFrame") -> "pd.DataFrame":  # noqa: F821
+    """Cross-asset spot correlation at each shared window minute: the lead
+    coin's (BTC's) distance from its own strike and 5m momentum, and the
+    leave-one-out average of every other coin's. Needs market, open_ts,
+    minute, has_underlying, move_z, m5 (from add_features)."""
+    import numpy as np
+
+    q = q.copy()
+    key = ["market", "open_ts", "minute"]
+    has = q["has_underlying"].astype(bool)
+    own_mz = q["move_z"].where(has, 0.0).astype(float)
+    own_m5 = q["m5"].where(has, 0.0).astype(float)
+    q["_mz"], q["_m5"], q["_has"] = own_mz, own_m5, has.astype(int)
+    sums = q.groupby(key).agg(_s_mz=("_mz", "sum"), _s_m5=("_m5", "sum"), _n=("_has", "sum")).reset_index()
+    q = q.merge(sums, on=key, how="left")
+    others = (q["_n"] - q["_has"]).where(lambda s: s > 0)
+    q["mkt_move_z"] = ((q["_s_mz"] - q["_mz"]) / others).fillna(0.0)
+    q["mkt_m5"] = ((q["_s_m5"] - q["_m5"]) / others).fillna(0.0)
+    is_lead = q["coin"] == q["market"].map(LEAD_COIN)
+    lead = q[is_lead & has][key + ["_mz", "_m5"]].drop_duplicates(key).rename(columns={"_mz": "lead_move_z", "_m5": "lead_m5"})
+    q = q.merge(lead, on=key, how="left")
+    for col in ("lead_move_z", "lead_m5"):
+        q[col] = q[col].where(~is_lead.values).fillna(0.0)
+    t = q["minute"].astype(float) / 15.0
+    for col in XSPOT_BASE:
+        q[col] = q[col].replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-6, 6)
+        q[f"{col}_t"] = q[col] * t
+    return q.drop(columns=["_mz", "_m5", "_has", "_s_mz", "_s_m5", "_n"])
+
+
 def build_frame(quotes: "pd.DataFrame", underlying: "pd.DataFrame | None" = None) -> "pd.DataFrame":  # noqa: F821
     """Valid quote rows (0 < bid < ask < 1, spread <= EV_MAX_SPREAD, minutes
-    1-14) with outcome, day, market kind and features. `underlying` is the
-    crypto perp archive (symbol, ts, close, ...); joined as of one minute
-    before each quote."""
+    1-14) with outcome, day, market kind and features. `underlying` is
+    kalshi_15m_spot.engineer_spot_features output (coin, ts, close, ...),
+    joined as of one minute before each quote."""
     import numpy as np
     import pandas as pd
 
@@ -236,18 +288,13 @@ def build_frame(quotes: "pd.DataFrame", underlying: "pd.DataFrame | None" = None
             return merged.drop(columns="_rts")
 
         q["_feat_ts"] = q.end_period_ts.astype("int64") - 60
-        q["_open_ts"] = q.open_ts.astype("int64")
-        q["_ts_8h"] = q["_feat_ts"] - 480 * 60
-        q["_ts_1d"] = q["_feat_ts"] - 1440 * 60
-        q = asof(q, "_feat_ts", cols, "")
-        q = asof(q, "_open_ts", ["close"], "_open")
-        q = asof(q, "_ts_8h", ["close"], "_8h")
-        q = asof(q, "_ts_1d", ["close"], "_1d")
-        q = q.drop(columns=["_feat_ts", "_open_ts", "_ts_8h", "_ts_1d"])
-        q["has_underlying"] = q["close"].notna() & q["close_open"].notna() & (q["volatility_15"].fillna(0) > 0)
+        q = asof(q, "_feat_ts", cols, "").drop(columns=["_feat_ts"])
+        q["has_underlying"] = q["close"].notna() & q["floor_strike"].notna() & (q["volatility_15"].fillna(0) > 0)
     else:
         q["has_underlying"] = False
     q = add_features(q)
+    if "move_z" in q.columns:
+        q = add_cross_spot_features(q)
     return q.reset_index(drop=True)
 
 
@@ -348,56 +395,155 @@ def certify(oos: "pd.DataFrame", trades: "pd.DataFrame") -> dict[str, Any]:  # n
     return stats
 
 
-def train_and_certify(quotes: "pd.DataFrame | None" = None, underlying: "pd.DataFrame | None" = None) -> dict[str, Any]:  # noqa: F821
-    from data import kalshi_15m_quotes
+def _uses_spot(features: list[str]) -> bool:
+    return any(f in SPOT_BASED for f in features)
+
+
+def _trade_breakdown(trades: "pd.DataFrame", by: "str | pd.Series") -> dict[str, Any]:  # noqa: F821
+    if trades.empty:
+        return {}
+    g = trades.groupby(by)
+    return {
+        str(k): {"trades": int(len(v)), "pnl_per_contract": round(float(v.pnl.mean()), 4),
+                 "pnl_total_1ct": round(float(v.pnl.sum()), 2), "win_rate": round(float((v.pnl > 0).mean()), 4)}
+        for k, v in g
+    }
+
+
+def coin_eligibility(
+    part: "pd.DataFrame", trades: "pd.DataFrame", *, market_certified: bool, uses_spot: bool,  # noqa: F821
+    spot_validation: dict[str, Any] | None,
+) -> tuple[list[str], dict[str, Any]]:
+    """A coin trades only if its market's model is certified AND the coin
+    has its own real history, the model made money on it out of sample, and
+    (for spot-based models) its spot data reproduces Kalshi's settlements."""
+    per_spot = (spot_validation or {}).get("per_coin") or {}
+    eligible, stats = [], {}
+    for coin in sorted(part.coin.unique()):
+        ct = trades[trades.coin == coin] if not trades.empty else trades
+        s: dict[str, Any] = {
+            "history_days": int(part[part.coin == coin].day.nunique()), "oos_trades": int(len(ct)),
+            "oos_pnl_total_1ct": round(float(ct.pnl.sum()), 2) if len(ct) else 0.0,
+            "oos_pnl_per_contract": round(float(ct.pnl.mean()), 4) if len(ct) else None,
+        }
+        reasons = []
+        if not market_certified:
+            reasons.append("market_not_certified")
+        if s["history_days"] < COIN_MIN_HISTORY_DAYS:
+            reasons.append("not_enough_history")
+        if s["oos_trades"] < COIN_MIN_OOS_TRADES:
+            reasons.append("too_few_out_of_sample_trades")
+        if s["oos_pnl_total_1ct"] <= 0:
+            reasons.append("not_profitable_out_of_sample")
+        if uses_spot:
+            v = per_spot.get(coin) or {}
+            s["spot_coverage"], s["spot_outcome_match"] = v.get("coverage"), v.get("outcome_match")
+            if (v.get("coverage") or 0) < COIN_MIN_SPOT_COVERAGE or (v.get("outcome_match") or 0) < COIN_MIN_SPOT_OUTCOME_MATCH:
+                reasons.append("spot_data_not_validated")
+        s["eligible"] = not reasons
+        s["reasons"] = reasons
+        stats[coin] = s
+        if not reasons:
+            eligible.append(coin)
+    return eligible, stats
+
+
+def learned_patterns(rows: "pd.DataFrame", features: list[str], coef: list[float], trades: "pd.DataFrame") -> dict[str, Any]:  # noqa: F821
+    """What the model learned: each feature's pull on the log-odds per one
+    standard deviation (how far it moves p away from Kalshi's own price),
+    and where its out-of-sample opportunities came from."""
+    import pandas as pd
+    sd = rows[features].astype(float).std().fillna(0.0)
+    pull = sorted(((f, round(float(c) * float(sd[f]), 4)) for f, c in zip(features, coef) if f not in ("lm", "lm_t")),
+                  key=lambda kv: -abs(kv[1]))
+    out: dict[str, Any] = {"feature_pull_per_sd": dict(pull[:15])}
+    if not trades.empty:
+        minute_bucket = pd.cut(trades.minute, [0, 3, 6, 9, 12, 15], labels=["1-3", "4-6", "7-9", "10-12", "13-15"])
+        out["by_minute"] = _trade_breakdown(trades, minute_bucket.astype(str))
+        out["by_side"] = _trade_breakdown(trades, trades.side_yes.map({True: "yes", False: "no"}))
+        out["by_coin"] = _trade_breakdown(trades, "coin")
+        out["by_entry_price"] = _trade_breakdown(trades, pd.cut(trades.price, [0, .3, .5, .7, .9, 1]).astype(str))
+    return out
+
+
+def train_and_certify(
+    quotes: "pd.DataFrame | None" = None, underlying: "pd.DataFrame | None" = None,  # noqa: F821
+    spot: "pd.DataFrame | None" = None,  # noqa: F821
+) -> dict[str, Any]:
+    """`underlying` = already-engineered spot features; `spot` = raw spot
+    candles (engineered and graded here). Both default to the HF archives."""
+    from data import kalshi_15m_quotes, kalshi_15m_spot
 
     if quotes is None:
         quotes = kalshi_15m_quotes.load_quote_history(days=HISTORY_DAYS)
     if quotes.empty:
         return {"ok": False, "reason": "no_quote_history"}
+
+    data_validation: dict[str, Any] = {"ok": False, "reason": "no_spot_history"}
     if underlying is None:
         try:
-            from data import kalshi_15m_data
-            underlying = kalshi_15m_data.load_training_dataset(max_shards=HISTORY_DAYS + 2)
+            if spot is None:
+                spot = kalshi_15m_spot.load_spot_history(days=HISTORY_DAYS + 2)
+            if not spot.empty:
+                data_validation = kalshi_15m_spot.grade_against_settlements(quotes, spot)
+                underlying = kalshi_15m_spot.engineer_spot_features(spot)
         except Exception as exc:
-            logger.warning("[kalshi_15m_edge_model] underlying archive load failed: %s", exc)
+            logger.warning("[kalshi_15m_edge_model] spot history load failed: %s", exc)
             underlying = None
+        spot = None
     frame = build_frame(quotes, underlying)
 
     markets: dict[str, Any] = {}
     for kind, candidates in CANDIDATES.items():
         part = frame[frame.market == kind]
         results: dict[str, Any] = {}
+        trades_by: dict[str, Any] = {}
         for name, features in candidates.items():
-            rows = part[part.has_underlying] if any(f in MTF_BASE for f in features) else part
+            if _uses_spot(features) and "move_z" not in part.columns:
+                results[name] = {"certified": False, "reason": "no_spot_history"}
+                continue
+            rows = part[part.has_underlying] if _uses_spot(features) else part
             if rows.day.nunique() <= TRAIN_MIN_DAYS or rows.y.nunique() < 2:
                 results[name] = {"certified": False, "reason": "not_enough_history", "days": int(rows.day.nunique())}
                 continue
             oos = walk_forward(rows, features, REGULARIZATION_C[name])
-            stats = certify(oos, simulate_rule(oos))
+            trades = simulate_rule(oos)
+            stats = certify(oos, trades)
             coef, intercept = _fit(rows[features].values, rows.y.values, REGULARIZATION_C[name])
-            results[name] = {**stats, "features": features, "coef": coef, "intercept": intercept}
+            results[name] = {**stats, "features": features, "coef": coef, "intercept": intercept,
+                             "oos_by_coin": _trade_breakdown(trades, "coin")}
+            trades_by[name] = (rows, trades)
         certified = [n for n, r in results.items() if r.get("certified")]
         pool = certified or [n for n in results if "coef" in results[n]]
         chosen = min(pool, key=lambda n: results[n].get("log_loss_model", 9.9)) if pool else None
-        markets[kind] = {
+        spec: dict[str, Any] = {
             "model": chosen, "certified": bool(chosen and results[chosen].get("certified")),
             "features": results[chosen]["features"] if chosen else [], "coef": results[chosen]["coef"] if chosen else [],
-            "intercept": results[chosen]["intercept"] if chosen else 0.0,
+            "intercept": results[chosen]["intercept"] if chosen else 0.0, "eligible_coins": [], "coin_stats": {},
             "candidates": {n: {k: v for k, v in r.items() if k not in ("coef", "intercept", "features")} for n, r in results.items()},
         }
+        if chosen:
+            rows, trades = trades_by[chosen]
+            spec["eligible_coins"], spec["coin_stats"] = coin_eligibility(
+                part, trades, market_certified=spec["certified"], uses_spot=_uses_spot(spec["features"]),
+                spot_validation=data_validation,
+            )
+            spec["learned_patterns"] = learned_patterns(rows, spec["features"], spec["coef"], trades)
+        markets[kind] = spec
 
     artifact = {
         "built_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "quote_rows": int(len(frame)), "windows": int(frame.ticker.nunique()), "days": int(frame.day.nunique()),
         "first_day": frame.day.min(), "last_day": frame.day.max(),
         "rule": {"min_edge": EV_MIN_EDGE, "entry_min_minute": EV_ENTRY_MIN_MINUTE, "entry_max_minute": EV_ENTRY_MAX_MINUTE, "fee_contracts": FEE_CONTRACTS},
+        "spot_data_validation": data_validation,
         "markets": markets,
     }
     save_artifact(artifact)
     return {"ok": True, **{k: v for k, v in artifact.items() if k != "markets"},
             "certified": {k: v["certified"] for k, v in markets.items()},
             "chosen": {k: v["model"] for k, v in markets.items()},
+            "eligible_coins": {k: v["eligible_coins"] for k, v in markets.items()},
             "candidates": {k: v["candidates"] for k, v in markets.items()}}
 
 
@@ -491,6 +637,39 @@ def live_flow_rows(markets_by_coin: dict[str, dict[str, Any]]) -> dict[str, dict
     return {r["coin"]: r for r in latest.to_dict("records")}
 
 
+def live_spot_rows(markets_by_coin: dict[str, dict[str, Any]], minute_by_coin: dict[str, float] | None = None) -> dict[str, dict[str, Any]]:
+    """Per crypto coin: spot features as of one minute before its quote
+    minute (as in training) plus the cross-asset spot features computed
+    across every coin at that same minute, through the same functions
+    training uses."""
+    import pandas as pd
+
+    from data import kalshi_15m_quotes, kalshi_15m_spot
+
+    now = time.time()
+    rows = []
+    for coin, market in markets_by_coin.items():
+        if market_kind(coin) != "crypto" or coin not in kalshi_15m_spot.COINBASE_PRODUCTS or not market.get("open_time"):
+            continue
+        open_ts = kalshi_15m_quotes._iso_ts(market["open_time"])  # noqa: SLF001
+        minute = (minute_by_coin or {}).get(coin)
+        if minute is None:
+            minute = float(int((now - open_ts) // 60))
+        try:
+            u = kalshi_15m_spot.live_underlying_row(coin, market, as_of_ts=open_ts + 60 * (int(minute) - 1))
+        except Exception as exc:
+            logger.warning("[kalshi_15m_edge_model] live spot row failed for %s: %s", coin, exc)
+            continue
+        if not u or not u.get("floor_strike") or not u.get("volatility_15"):
+            continue
+        rows.append({**u, "coin": coin, "market": "crypto", "open_ts": open_ts, "minute": float(minute), "mid": 0.5, "has_underlying": True})
+    if not rows:
+        return {}
+    feats = add_cross_spot_features(add_features(pd.DataFrame(rows)))
+    keep = UNDERLYING_COLUMNS + ["floor_strike", "minute"] + XSPOT_BASE
+    return {r["coin"]: {k: r.get(k) for k in keep} for r in feats.to_dict("records")}
+
+
 def evaluate_market(
     coin: str, market: dict[str, Any], *, seconds_to_close: float,
     underlying_row: dict[str, Any] | None = None, flow_row: dict[str, Any] | None = None,
@@ -538,11 +717,13 @@ def evaluate_market(
 
     if not (EV_ENTRY_MIN_MINUTE <= minute <= EV_ENTRY_MAX_MINUTE):
         return {**base, "ok": False, "reason": "outside_ev_entry_minutes"}
-    if any(f in MTF_BASE for f in features):
+    if _uses_spot(features):
         u = underlying_row or {}
-        if not u.get("close") or not u.get("close_open") or not u.get("volatility_15"):
+        if not u.get("close") or not u.get("floor_strike") or not u.get("volatility_15"):
             return {**base, "ok": False, "reason": "underlying_unavailable"}
-        row.update({k: u.get(k) for k in UNDERLYING_COLUMNS + ["close_open", "close_8h", "close_1d"]})
+        if any(f in XSPOT_BASE for f in features) and any(u.get(f) is None for f in XSPOT_BASE):
+            return {**base, "ok": False, "reason": "cross_asset_spot_unavailable"}
+        row.update({k: u.get(k) for k in UNDERLYING_COLUMNS + ["floor_strike"] + XSPOT_BASE})
     feats = add_features(pd.DataFrame([row]))
     x = [float(feats.iloc[0][f]) for f in features]
     p_yes = _sigmoid(spec["intercept"] + sum(c * v for c, v in zip(spec["coef"], x)))
@@ -550,7 +731,8 @@ def evaluate_market(
     edge_no = (1.0 - p_yes) - exec_no_ask - fee_per_contract(exec_no_ask)
     side = "yes" if edge_yes >= edge_no else "no"
     return {
-        **base, "ok": True, "p_yes": round(p_yes, 4), "mid": round(row["mid"], 4),
+        **base, "ok": True, "coin_eligible": coin in (spec.get("eligible_coins") or []),
+        "p_yes": round(p_yes, 4), "mid": round(row["mid"], 4),
         "yes_bid": live_bid, "yes_ask": live_ask,
         "edge_yes": round(edge_yes, 4), "edge_no": round(edge_no, 4), "side": side, "edge": round(max(edge_yes, edge_no), 4),
         "p_side": round(p_yes if side == "yes" else 1.0 - p_yes, 4),
@@ -565,8 +747,12 @@ def summary() -> dict[str, Any]:
     return {
         "available": True, "built_at_utc": artifact.get("built_at_utc"), "days": artifact.get("days"),
         "windows": artifact.get("windows"), "rule": artifact.get("rule"),
+        "spot_data_validation": artifact.get("spot_data_validation"),
         "markets": {
-            k: {"model": v.get("model"), "certified": v.get("certified"), "candidates": v.get("candidates")}
+            k: {
+                "model": v.get("model"), "certified": v.get("certified"), "eligible_coins": v.get("eligible_coins") or [],
+                "coin_stats": v.get("coin_stats"), "learned_patterns": v.get("learned_patterns"), "candidates": v.get("candidates"),
+            }
             for k, v in (artifact.get("markets") or {}).items()
         },
     }

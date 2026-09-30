@@ -2949,8 +2949,11 @@ def _ev_market(*, ticker="KXBTC15M-EV", close_in_minutes=10.0, yes_bid=0.49, yes
     }
 
 
-def _ev_artifact(*, intercept, certified=True):
-    return {"markets": {"crypto": {"model": "quote", "certified": certified, "features": ["lm", "lm_t"], "coef": [1.0, 0.0], "intercept": intercept}}}
+def _ev_artifact(*, intercept, certified=True, eligible=("BTC",)):
+    return {"markets": {"crypto": {
+        "model": "quote", "certified": certified, "features": ["lm", "lm_t"], "coef": [1.0, 0.0], "intercept": intercept,
+        "eligible_coins": list(eligible),
+    }}}
 
 
 @pytest.fixture
@@ -3020,3 +3023,11 @@ def test_ev_gates_learn_only_from_ev_trades(ev_mode):
 def test_legacy_mode_still_sees_pre_ev_trades(monkeypatch):
     trades = [{"coin": "BTC"}, {"coin": "ETH", "entry_mode": "ev"}, {"coin": "SOL", "entry_mode": "legacy"}]
     assert [t["coin"] for t in kalshi_15m_strategy._mode_trades(trades)] == ["BTC", "SOL"]  # noqa: SLF001
+
+
+def test_ev_mode_only_trades_coins_the_certified_model_is_eligible_for(ev_mode, monkeypatch):
+    monkeypatch.setattr(kalshi_15m_edge_model, "load_artifact", lambda: _ev_artifact(intercept=1.0, eligible=("ETH",)))
+    ctx = {"markets": {"BTC": _ev_market()}, "flow": {}}
+    result = kalshi_15m_strategy.evaluate_candidate("BTC", live_context=ctx)
+    assert result["ok"] is False and result["reason"] == "coin_not_eligible"
+    assert result["ev"]["edge"] > 0.1

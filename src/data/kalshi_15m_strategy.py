@@ -909,7 +909,15 @@ def build_live_context() -> dict[str, Any]:
         flow = kalshi_15m_edge_model.live_flow_rows(markets)
     except Exception as exc:
         logger.warning("[kalshi_15m_strategy] live flow features unavailable: %s", exc)
-    return {"markets": markets, "flow": flow}
+    spot: dict[str, dict[str, Any]] = {}
+    crypto_spec = ((kalshi_15m_edge_model.load_artifact() or {}).get("markets") or {}).get("crypto") or {}
+    if kalshi_15m_edge_model._uses_spot(crypto_spec.get("features") or []):  # noqa: SLF001
+        try:
+            minutes = {c: float(r["minute"]) for c, r in flow.items() if r.get("minute") is not None}
+            spot = kalshi_15m_edge_model.live_spot_rows(markets, minutes)
+        except Exception as exc:
+            logger.warning("[kalshi_15m_strategy] live spot features unavailable: %s", exc)
+    return {"markets": markets, "flow": flow, "spot": spot}
 
 
 # Real, deliberate guard: entering with only a few seconds left before a
@@ -1478,10 +1486,7 @@ def _evaluate_candidate_ev(
     flow_row = (context.get("flow") or {}).get(coin)
     artifact = kalshi_15m_edge_model.load_artifact()
     spec = ((artifact or {}).get("markets") or {}).get(kalshi_15m_edge_model.market_kind(coin) or "") or {}
-    underlying = None
-    if any(f in kalshi_15m_edge_model.MTF_BASE for f in spec.get("features") or []):
-        from data import kalshi_15m_data
-        underlying = kalshi_15m_data.underlying_row_for_window(coin, market)
+    underlying = (context.get("spot") or {}).get(coin) if kalshi_15m_edge_model._uses_spot(spec.get("features") or []) else None  # noqa: SLF001
     ev = kalshi_15m_edge_model.evaluate_market(
         coin, market, seconds_to_close=seconds_to_close, underlying_row=underlying, flow_row=flow_row, artifact=artifact,
     )
@@ -1489,6 +1494,8 @@ def _evaluate_candidate_ev(
         return {"ok": False, "reason": ev.get("reason"), "ev": ev}
     if EV_REQUIRE_CERTIFIED and not ev.get("certified"):
         return {"ok": False, "reason": "edge_model_not_certified", "ev": ev}
+    if EV_REQUIRE_CERTIFIED and not ev.get("coin_eligible"):
+        return {"ok": False, "reason": "coin_not_eligible", "ev": ev}
     if ev["edge"] < kalshi_15m_edge_model.EV_MIN_EDGE:
         return {"ok": False, "reason": "edge_below_minimum", "ev": ev}
     feature_row = {k: v for k, v in (flow_row or {}).items() if k in kalshi_15m_edge_model.FLOW_BASE}

@@ -2061,10 +2061,11 @@ def ev_mode(monkeypatch):
 
 
 def test_ev_loss_retrain_recertifies_the_edge_model_instead_of_the_legacy_model(ev_mode, monkeypatch):
-    from data import kalshi_15m_edge_model, kalshi_15m_model, kalshi_15m_quotes, kalshi_15m_strategy
+    from data import kalshi_15m_edge_model, kalshi_15m_model, kalshi_15m_quotes, kalshi_15m_spot, kalshi_15m_strategy
 
     monkeypatch.setattr(kalshi_15m_model, "train_model", lambda **kw: pytest.fail("legacy model must not retrain in EV mode"))
     monkeypatch.setattr(kalshi_15m_quotes, "run_incremental", lambda **kw: {"ok": True, "rows": 0})
+    monkeypatch.setattr(kalshi_15m_spot, "run_incremental", lambda **kw: {"ok": True, "rows": 0})
     monkeypatch.setattr(kalshi_15m_edge_model, "train_and_certify", lambda: {"ok": True, "certified": {"crypto": False}})
     captured = {}
     monkeypatch.setattr(
@@ -2080,10 +2081,11 @@ def test_ev_loss_retrain_recertifies_the_edge_model_instead_of_the_legacy_model(
 
 @pytest.mark.parametrize("metals_certified", [True, False])
 def test_ev_win_streak_verification_requires_metals_to_stay_certified(ev_mode, monkeypatch, metals_certified):
-    from data import kalshi_15m_backtest, kalshi_15m_edge_model, kalshi_15m_quotes, kalshi_15m_strategy
+    from data import kalshi_15m_backtest, kalshi_15m_edge_model, kalshi_15m_quotes, kalshi_15m_spot, kalshi_15m_strategy
 
     monkeypatch.setattr(kalshi_15m_backtest, "run_walkforward_backtest", lambda: pytest.fail("fixed-price backtest must not gate EV mode"))
     monkeypatch.setattr(kalshi_15m_quotes, "run_incremental", lambda **kw: {"ok": True})
+    monkeypatch.setattr(kalshi_15m_spot, "run_incremental", lambda **kw: {"ok": True})
     monkeypatch.setattr(kalshi_15m_edge_model, "train_and_certify", lambda: {"ok": True, "certified": {"metals": metals_certified}})
     captured = {}
     monkeypatch.setattr(
@@ -2124,3 +2126,11 @@ def test_status_reports_entry_mode_and_edge_model(ev_mode, monkeypatch):
     assert body["entry_mode"] == "ev"
     assert body["edge_model"] == {"available": False}
     assert "quote_history_last_collect" in body
+
+
+def test_spot_collect_job_records_its_last_run(monkeypatch):
+    from data import kalshi_15m_spot
+
+    monkeypatch.setattr(kalshi_15m_spot, "run_incremental", lambda **kw: {"ok": True, "rows": 1080})
+    app_kalshi._run_kalshi_15m_spot_collect.__wrapped__()  # noqa: SLF001
+    assert app_kalshi._KALSHI_15M_SPOT_LAST_RUN["rows"] == 1080  # noqa: SLF001
