@@ -727,6 +727,28 @@ def retry_on_rate_limit(fn, *, attempts: int = 3, backoff_sec: float = 5.0):
     raise last_exc  # unreachable given the loop above always returns or raises
 
 
+def _seed_local_shard_from_hf(path_in_repo: str, local_path: Path) -> None:
+    """Local disk is wiped on every Space restart. Without this, the first
+    push after a restart uploads only post-restart rows and overwrites the
+    day's earlier data on HF (seen in the archive: days holding ~16 hours)."""
+    if local_path.exists() or not HF_API_KEY:
+        return
+
+    def _download() -> str | None:
+        from huggingface_hub import hf_hub_download
+        try:
+            return hf_hub_download(repo_id=HF_DATASET_REPO, filename=path_in_repo, repo_type="dataset", token=HF_API_KEY)
+        except Exception:
+            return None
+
+    from server_common import call_with_hard_timeout
+    remote = call_with_hard_timeout(_download, timeout_sec=30)
+    if remote:
+        import shutil
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(remote, local_path)
+
+
 def push_dataset_snapshot(df: pd.DataFrame) -> dict[str, Any]:
     """Merge new rows into today's parquet shard and upload it to HF. Local
     shard files under data/perps_dataset/ are the source of truth for the
@@ -737,8 +759,9 @@ def push_dataset_snapshot(df: pd.DataFrame) -> dict[str, Any]:
 
     shard_dir = DATA_DIR / "perps_dataset"
     shard_dir.mkdir(parents=True, exist_ok=True)
-    today = pd.Timestamp.utcnow().strftime("%Y-%m-%d")
+    today = pd.Timestamp.now("UTC").strftime("%Y-%m-%d")
     shard_path = shard_dir / f"{today}.parquet"
+    _seed_local_shard_from_hf(f"data/{today}.parquet", shard_path)
 
     if shard_path.exists():
         existing = pd.read_parquet(shard_path)

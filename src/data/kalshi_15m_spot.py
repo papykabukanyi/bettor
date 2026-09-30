@@ -41,6 +41,8 @@ COINBASE_URL = "https://api.exchange.coinbase.com/products/{product}/candles"
 COINBASE_PRODUCTS = {
     "BTC": "BTC-USD", "ETH": "ETH-USD", "SOL": "SOL-USD", "XRP": "XRP-USD", "DOGE": "DOGE-USD",
     "BCH": "BCH-USD", "NEAR": "NEAR-USD", "HYPE": "HYPE-USD", "ZEC": "ZEC-USD",
+    # Perp-only underlyings (no Kalshi 15m series), for perps_spot_lead.
+    "LINK": "LINK-USD", "LTC": "LTC-USD", "SUI": "SUI-USD", "ADA": "ADA-USD", "AAVE": "AAVE-USD", "BNB": "BNB-USD",
 }
 MAX_CANDLES_PER_CALL = 300
 REQUEST_SPACING_SEC = 0.12

@@ -90,7 +90,7 @@ from data.kalshi_perps import (
 from data.crypto_news import prewarm_sentiment
 from data.perps_data import coin_for_ticker, fetch_candle_frames, get_watchlist, latest_feature_row
 from data.perps_model import predict_direction
-from data import perps_meta_model, perps_trade_analysis, threads_post
+from data import perps_meta_model, perps_spot_lead, perps_trade_analysis, threads_post
 
 logger = logging.getLogger(__name__)
 
@@ -1218,6 +1218,25 @@ def decide_entry_technical(row: dict[str, Any], side: str = "long") -> tuple[boo
     return False, f"no dip signal (price {dip_pct:+.3%} vs short MA)"
 
 
+# Coinbase spot-lead entry timing -- see perps_spot_lead's module docstring.
+# Real Coinbase spot leads the Kalshi perp by minutes; when its certified
+# model predicts the perp will move at least SPOT_LEAD_ADVERSE_BPS against
+# the side about to be entered over the next few minutes, that entry is
+# skipped this cycle (the next cycle re-evaluates at a better price). Only
+# ever defers an entry, and only acts when the model's out-of-sample strong
+# signals were right often enough to certify it; any missing, stale or
+# bad-print data fails open.
+USE_SPOT_LEAD_TIMING = _env_flag("PERPS_USE_SPOT_LEAD_TIMING", default=True)
+SPOT_LEAD_ADVERSE_BPS = _env_float("PERPS_SPOT_LEAD_ADVERSE_BPS", 5.0)
+
+
+def _spot_lead_blocks(lead: dict[str, Any], side: str) -> bool:
+    if not USE_SPOT_LEAD_TIMING or not lead.get("ok") or not lead.get("certified"):
+        return False
+    side_pred = lead["pred_bps"] if side == "long" else -lead["pred_bps"]
+    return side_pred <= -SPOT_LEAD_ADVERSE_BPS
+
+
 def evaluate_candidate(
     ticker: str, *, confidence_min: float | None = None,
     correlation_study_enabled: bool | None = None, correlation_max_adjustment: float | None = None,
@@ -1276,6 +1295,14 @@ def evaluate_candidate(
     if model_ok:
         result["probability_up"] = prediction["probability_up"]
         result["model_direction"] = prediction["direction"]
+
+    try:
+        spot_lead = perps_spot_lead.live_prediction(ticker)
+    except Exception as exc:
+        logger.warning("[perps_strategy] spot-lead prediction failed for %s: %s", ticker, exc)
+        spot_lead = {"ok": False, "reason": "error"}
+    result["spot_lead_pred_bps"] = spot_lead.get("pred_bps")
+    result["spot_lead_reason"] = None if spot_lead.get("ok") else spot_lead.get("reason")
 
     # Chart-study confidence layer -- see USE_CORRELATION_STUDY's own
     # comment. Computed and attached unconditionally (cheap: an in-memory
@@ -1377,6 +1404,9 @@ def evaluate_candidate(
                 # reason enough to skip it this cycle, not just note it.
                 reasons.append(f"{technical_reason} (model not trained yet -- correlation study disagrees: {correlation['reason']})")
                 continue
+            if _spot_lead_blocks(spot_lead, side):
+                reasons.append(f"{technical_reason}, but Coinbase spot lead predicts {spot_lead['pred_bps']:+.1f}bps against a {side}")
+                continue
             result["should_enter"] = True
             result["side"] = side
             result["reason"] = f"{technical_reason} (model not trained yet -- technical-only fallback)"
@@ -1394,6 +1424,12 @@ def evaluate_candidate(
                 0.5, min(0.95, effective_confidence_min - side_correlation_score * effective_correlation_max_adjustment),
             )
         if prediction["direction"] == wanted_direction and confidence >= effective_confidence_min:
+            if _spot_lead_blocks(spot_lead, side):
+                reasons.append(
+                    f"{technical_reason}; model predicts {wanted_direction} (p={confidence:.2f}), "
+                    f"but Coinbase spot lead predicts {spot_lead['pred_bps']:+.1f}bps against a {side}"
+                )
+                continue
             meta_trust = None
             if USE_META_MODEL:
                 meta_trust = perps_meta_model.trust_score(row, primary_probability_up=prediction["probability_up"])
@@ -2643,6 +2679,7 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                     # post-trade analysis can ask "what led to this win/loss"
                     # instead of only ever knowing how it ended.
                     "entry_probability_up": position.get("entry_probability_up"),
+                    "entry_spot_lead_pred_bps": position.get("entry_spot_lead_pred_bps"),
                     "entry_model_direction": position.get("entry_model_direction"),
                     "entry_score": position.get("entry_score"),
                     "entry_trend_pct": position.get("entry_trend_pct"),
@@ -3052,6 +3089,7 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
                 # for a short -- see evaluate_candidate), the one number
                 # actually compared against MODEL_CONFIDENCE_MIN at entry.
                 entry_context = {
+                    "entry_spot_lead_pred_bps": candidate.get("spot_lead_pred_bps"),
                     "entry_probability_up": candidate.get("probability_up"),
                     "entry_model_direction": candidate.get("model_direction"),
                     "entry_score": candidate.get("score"),

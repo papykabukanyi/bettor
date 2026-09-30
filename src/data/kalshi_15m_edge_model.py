@@ -353,6 +353,27 @@ def _log_loss(p: "np.ndarray", y: "np.ndarray") -> "np.ndarray":  # noqa: F821
     return -(y * np.log(p) + (1 - y) * np.log(1 - p))
 
 
+def prediction_accuracy(oos: "pd.DataFrame") -> dict[str, Any]:  # noqa: F821
+    """How often the side each probability favors actually won, out of
+    sample: the model's p vs Kalshi's own mid, overall and by elapsed
+    minute. Both get more accurate as a window ages; the comparison is
+    what shows whether the model knows anything the quote doesn't."""
+    import pandas as pd
+
+    def hit(p: "pd.Series", y: "pd.Series") -> float | None:
+        decided = p != 0.5
+        return round(float(((p[decided] > 0.5) == (y[decided] == 1)).mean()), 4) if decided.any() else None
+
+    buckets = pd.cut(oos.minute, [0, 3, 6, 9, 12, 15], labels=["1-3", "4-6", "7-9", "10-12", "13-15"])
+    return {
+        "model_hit_rate": hit(oos.p, oos.y), "kalshi_mid_hit_rate": hit(oos.mid, oos.y), "rows": int(len(oos)),
+        "by_minute": {
+            str(b): {"rows": int(len(g)), "model": hit(g.p, g.y), "kalshi_mid": hit(g.mid, g.y)}
+            for b, g in oos.groupby(buckets, observed=True)
+        },
+    }
+
+
 def certify(oos: "pd.DataFrame", trades: "pd.DataFrame") -> dict[str, Any]:  # noqa: F821
     import numpy as np
     import pandas as pd
@@ -368,6 +389,7 @@ def certify(oos: "pd.DataFrame", trades: "pd.DataFrame") -> dict[str, Any]:  # n
         "log_loss_mid": round(float(ll_mid.mean()), 5), "log_loss_model": round(float(ll_model.mean()), 5),
         "log_loss_gain_ci95": [round(float(np.percentile(boots, 2.5)), 5), round(float(np.percentile(boots, 97.5)), 5)],
         "trades": int(len(trades)),
+        "accuracy": prediction_accuracy(oos),
     }
     if len(trades):
         per_open = trades.groupby("open_ts").pnl.sum()

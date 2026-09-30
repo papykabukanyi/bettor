@@ -108,7 +108,7 @@ from data import (
     ai_monitor, crypto_news, kalshi_15m, kalshi_15m_backtest, kalshi_15m_data, kalshi_15m_edge_model,
     kalshi_15m_meta_model, kalshi_15m_metals_backtest, kalshi_15m_metals_data, kalshi_15m_metals_model,
     kalshi_15m_model, kalshi_15m_pattern_study, kalshi_15m_quotes, kalshi_15m_spot, kalshi_15m_strategy, perps_data,
-    perps_meta_model, perps_model, perps_strategy, perps_trade_analysis, strategy_sweep, threads_client,
+    perps_meta_model, perps_model, perps_spot_lead, perps_strategy, perps_trade_analysis, strategy_sweep, threads_client,
     threads_post,
 )
 
@@ -757,7 +757,21 @@ def _run_kalshi_15m_edge_model_train() -> dict[str, Any]:
         gc.collect()
 
 
+@_locked_job("perps_spot_lead_train", stale_after_sec=3600)
+def _run_perps_spot_lead_train() -> dict[str, Any]:
+    """Walk-forward retrain of the Coinbase spot-lead predictor on the perps
+    archive + Coinbase spot history (see perps_spot_lead)."""
+    try:
+        result = perps_spot_lead.train_and_evaluate()
+        logger.info("[app_kalshi] perps spot-lead model: certified=%s oos=%s", result.get("certified"), (result.get("oos") or {}).get("strong_5bps"))
+        return result
+    finally:
+        gc.collect()
+
+
 def _ensure_edge_model_at_startup() -> None:
+    if perps_spot_lead.load_artifact() is None:
+        _run_perps_spot_lead_train()
     if kalshi_15m_edge_model.load_artifact() is None:
         _run_kalshi_15m_edge_model_train()
 
@@ -1490,6 +1504,10 @@ def _ensure_background_jobs_started() -> None:
                 next_run_time=dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=1),
             )
             scheduler.add_job(
+                _run_perps_spot_lead_train, "cron", hour=KALSHI_15M_EDGE_MODEL_HOUR_ET, minute=50,
+                id="perps_spot_lead_train", replace_existing=True,
+            )
+            scheduler.add_job(
                 _run_kalshi_15m_edge_model_train, "cron", hour=KALSHI_15M_EDGE_MODEL_HOUR_ET, minute=20,
                 id="kalshi_15m_edge_model_train", replace_existing=True,
             )
@@ -1941,6 +1959,8 @@ def api_status():
             "perps_study": crypto_correlation.study_health(crypto_correlation.get_perps_study()),
             "remote_alpaca_study": crypto_correlation.study_health(crypto_correlation.get_remote_alpaca_study()),
         },
+        "spot_lead": {**perps_spot_lead.summary(), "timing_gate_enabled": perps_strategy.USE_SPOT_LEAD_TIMING,
+                      "adverse_bps": perps_strategy.SPOT_LEAD_ADVERSE_BPS},
         "params": {
             "position_size_pct": effective_params["position_size_pct"],
             "max_concurrent_positions": effective_params["max_concurrent_positions"],
@@ -2130,6 +2150,25 @@ def api_kalshi_15m_quotes():
             logger.warning("[app_kalshi] quote backfill failed", exc_info=True)
             return jsonify({"ok": False, "error": str(exc)}), 500
     return jsonify({"ok": True, "archive": kalshi_15m_quotes.archive_summary(), "last_collect": dict(_KALSHI_15M_QUOTE_LAST_RUN)})
+
+
+@app.route("/api/perps/spot-lead", methods=["GET", "POST"])
+def api_perps_spot_lead():
+    """GET: the Coinbase spot-lead predictor -- certification, out-of-sample
+    accuracy, and a live prediction per watchlist ticker. POST: retrain."""
+    if request.method == "POST":
+        try:
+            return jsonify(_run_perps_spot_lead_train())
+        except Exception as exc:
+            logger.warning("[app_kalshi] spot-lead train failed", exc_info=True)
+            return jsonify({"ok": False, "error": str(exc)}), 500
+    live = {}
+    for ticker in perps_data.get_watchlist():
+        try:
+            live[ticker] = perps_spot_lead.live_prediction(ticker)
+        except Exception as exc:
+            live[ticker] = {"ok": False, "reason": str(exc)}
+    return jsonify({"ok": True, "model": perps_spot_lead.summary(), "live": live})
 
 
 @app.route("/api/kalshi15m/spot", methods=["GET", "POST"])

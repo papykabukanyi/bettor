@@ -699,3 +699,16 @@ def test_trend_1d_comes_from_hourly_candles_a_day_before_each_row():
     last = feats.iloc[-1]
     day_ago_close = hourly[hourly.ts <= int(last.ts) - 86400].close.iloc[-1]
     assert last["trend_1d"] == pytest.approx(last["close"] / day_ago_close - 1.0)
+
+
+def test_first_perps_push_after_a_restart_keeps_the_days_earlier_hf_rows(tmp_path, monkeypatch):
+    import server_common
+
+    earlier = tmp_path / "remote.parquet"
+    pd.DataFrame({"ticker": ["KXBTCPERP"], "ts": [1], "close": [1.0]}).to_parquet(earlier, index=False)
+    monkeypatch.setattr(perps_data, "DATA_DIR", tmp_path / "data")
+    monkeypatch.setattr(perps_data, "HF_API_KEY", "token")
+    monkeypatch.setattr(perps_data, "_ensure_dataset_repo", lambda: False)
+    monkeypatch.setattr(server_common, "call_with_hard_timeout", lambda fn, timeout_sec: str(earlier))
+    result = perps_data.push_dataset_snapshot(pd.DataFrame({"ticker": ["KXBTCPERP"], "ts": [2], "close": [1.1]}))
+    assert result["rows_written"] == 2

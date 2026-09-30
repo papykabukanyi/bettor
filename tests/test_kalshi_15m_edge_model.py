@@ -250,3 +250,11 @@ def test_live_spot_rows_uses_spot_from_the_minute_before_the_quote(monkeypatch):
     assert seen == {"BTC": open_ts + 240, "ETH": open_ts + 240}
     assert set(rows) == {"BTC", "ETH"}
     assert rows["ETH"]["lead_move_z"] > 0 and rows["BTC"]["lead_move_z"] == 0.0
+
+
+def test_prediction_accuracy_compares_the_model_with_kalshis_mid():
+    oos = pd.DataFrame({"minute": [2, 2, 8, 8], "p": [0.7, 0.4, 0.6, 0.5], "mid": [0.6, 0.6, 0.4, 0.55], "y": [1, 0, 1, 1]})
+    acc = em.prediction_accuracy(oos)
+    assert acc["model_hit_rate"] == pytest.approx(1.0)
+    assert acc["kalshi_mid_hit_rate"] == pytest.approx(0.5)
+    assert acc["by_minute"]["7-9"] == {"rows": 2, "model": 1.0, "kalshi_mid": 0.5}

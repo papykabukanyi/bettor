@@ -2134,3 +2134,15 @@ def test_spot_collect_job_records_its_last_run(monkeypatch):
     monkeypatch.setattr(kalshi_15m_spot, "run_incremental", lambda **kw: {"ok": True, "rows": 1080})
     app_kalshi._run_kalshi_15m_spot_collect.__wrapped__()  # noqa: SLF001
     assert app_kalshi._KALSHI_15M_SPOT_LAST_RUN["rows"] == 1080  # noqa: SLF001
+
+
+def test_perps_spot_lead_endpoint_reports_the_model_and_live_predictions(monkeypatch):
+    from data import perps_data, perps_spot_lead
+
+    monkeypatch.setattr(perps_spot_lead, "summary", lambda: {"available": True, "certified": True})
+    monkeypatch.setattr(perps_data, "get_watchlist", lambda: ["KXHYPEPERP"])
+    monkeypatch.setattr(perps_spot_lead, "live_prediction", lambda ticker: {"ok": True, "pred_bps": 6.5, "certified": True})
+    with app_kalshi.app.test_client() as client:
+        body = client.get("/api/perps/spot-lead").get_json()
+    assert body["model"]["certified"] is True
+    assert body["live"]["KXHYPEPERP"]["pred_bps"] == 6.5

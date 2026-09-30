@@ -25,6 +25,14 @@ def _no_external_price_network_calls(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_spot_lead_network_calls(monkeypatch):
+    """perps_spot_lead.live_prediction reads Coinbase and the perp feed --
+    unavailable by default here (which fails open); the spot-lead gate tests
+    override it."""
+    monkeypatch.setattr(strat.perps_spot_lead, "live_prediction", lambda ticker: {"ok": False, "reason": "stubbed"})
+
+
+@pytest.fixture(autouse=True)
 def _deterministic_fee_rate(monkeypatch):
     """round_trip_fee_usd() would otherwise hit the real GET /margin/fee_tiers
     endpoint on a cache miss -- every test here gets a fixed, pre-populated
@@ -3958,3 +3966,47 @@ def test_batch_trade_analysis_ignores_partial_exit_rows_toward_batch_size(monkey
     # No assertion needed beyond "did not raise" -- fail_if_called above
     # would have raised if the (partial-only) trade count wrongly reached
     # perps_trade_analysis.BATCH_SIZE.
+
+
+
+def _entering_long(monkeypatch):
+    monkeypatch.setattr(strat, "latest_feature_row", lambda ticker: _row(volatility_5=strat.MIN_ENTRY_VOLATILITY + 0.0001))
+    monkeypatch.setattr(strat, "predict_direction", lambda ticker: {
+        "model_ok": True, "ticker": ticker, "direction": "up", "probability_up": 0.9,
+    })
+
+
+@pytest.mark.parametrize("pred,certified,enters", [
+    (-8.0, True, False),   # certified spot lead says the perp is about to fall: wait
+    (-8.0, False, True),   # uncertified model never blocks
+    (-2.0, True, True),    # below the adverse threshold
+    (8.0, True, True),     # spot lead agrees with the long
+])
+def test_spot_lead_defers_a_long_the_perp_is_about_to_move_against(monkeypatch, pred, certified, enters):
+    _entering_long(monkeypatch)
+    monkeypatch.setattr(strat.perps_spot_lead, "live_prediction", lambda ticker: {"ok": True, "pred_bps": pred, "certified": certified})
+    result = strat.evaluate_candidate("KXBTCPERP")
+    assert result["should_enter"] is enters
+    assert result["spot_lead_pred_bps"] == pred
+
+
+def test_spot_lead_defers_a_short_when_spot_says_the_perp_will_rise(monkeypatch):
+    monkeypatch.setattr(strat, "ENABLE_SHORTS", True)
+    monkeypatch.setattr(strat, "latest_feature_row", lambda ticker: _rally_row())
+    monkeypatch.setattr(strat, "predict_direction", lambda ticker: {
+        "model_ok": True, "ticker": ticker, "direction": "down", "probability_up": 0.1,
+    })
+    monkeypatch.setattr(strat.perps_spot_lead, "live_prediction", lambda ticker: {"ok": True, "pred_bps": 9.0, "certified": True})
+    result = strat.evaluate_candidate("KXBTCPERP")
+    assert result["should_enter"] is False
+    assert "spot lead" in result["reason"]
+
+
+def test_spot_lead_failure_never_blocks_an_entry(monkeypatch):
+    _entering_long(monkeypatch)
+
+    def boom(ticker):
+        raise RuntimeError("coinbase down")
+
+    monkeypatch.setattr(strat.perps_spot_lead, "live_prediction", boom)
+    assert strat.evaluate_candidate("KXBTCPERP")["should_enter"] is True
