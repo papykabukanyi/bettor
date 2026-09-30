@@ -105,10 +105,11 @@ if str(SRC_DIR) not in sys.path:
 
 from config import HF_API_KEY, et_today
 from data import (
-    ai_monitor, crypto_news, kalshi_15m, kalshi_15m_backtest, kalshi_15m_data, kalshi_15m_meta_model,
-    kalshi_15m_metals_backtest, kalshi_15m_metals_data, kalshi_15m_metals_model, kalshi_15m_model,
-    kalshi_15m_pattern_study, kalshi_15m_strategy, perps_data, perps_meta_model, perps_model,
-    perps_strategy, perps_trade_analysis, strategy_sweep, threads_client, threads_post,
+    ai_monitor, crypto_news, kalshi_15m, kalshi_15m_backtest, kalshi_15m_data, kalshi_15m_edge_model,
+    kalshi_15m_meta_model, kalshi_15m_metals_backtest, kalshi_15m_metals_data, kalshi_15m_metals_model,
+    kalshi_15m_model, kalshi_15m_pattern_study, kalshi_15m_quotes, kalshi_15m_strategy, perps_data,
+    perps_meta_model, perps_model, perps_strategy, perps_trade_analysis, strategy_sweep, threads_client,
+    threads_post,
 )
 
 # Real production bug found and fixed on the sibling stocks server (now
@@ -700,20 +701,49 @@ def _run_kalshi_15m_fair_value_observation() -> dict[str, Any]:
         gc.collect()
 
 
-@_locked_job("kalshi_15m_pattern_study", stale_after_sec=21600)
+@_locked_job("kalshi_15m_pattern_study", stale_after_sec=3600)
 def _run_kalshi_15m_pattern_study() -> dict[str, Any]:
-    """Rebuilds per-coin behavioral pattern profiles from the full historical
-    archive and saves them locally + to HF. Profiles are used by
-    evaluate_candidate to score the current market conditions against each
-    coin's own historical win-rate patterns across 6 dimensions (hour-of-day,
-    volatility regime, RSI regime, multi-timeframe 1hr/15min alignment, volume
-    regime, MACD direction) -- see kalshi_15m_pattern_study.py's own module
-    docstring. stale_after_sec=21600 (6 hours) matches REBUILD_INTERVAL_HOURS,
-    so a duplicate manual trigger is always a safe no-op."""
+    """Rebuilds the per-coin pattern profiles (observability; see
+    kalshi_15m_pattern_study's docstring) from both archives."""
     try:
         return kalshi_15m_pattern_study.build_pattern_profiles()
     finally:
         gc.collect()
+
+
+KALSHI_15M_QUOTE_COLLECT_MINUTES = max(5, int(os.getenv("KALSHI_15M_QUOTE_COLLECT_MINUTES", "15") or "15"))
+KALSHI_15M_QUOTE_LOOKBACK_HOURS = float(os.getenv("KALSHI_15M_QUOTE_LOOKBACK_HOURS", "1.5") or "1.5")
+KALSHI_15M_EDGE_MODEL_HOUR_ET = int(os.getenv("KALSHI_15M_EDGE_MODEL_HOUR_ET", "1") or "1")
+_KALSHI_15M_QUOTE_LAST_RUN: dict[str, Any] = {}
+
+
+@_locked_job("kalshi_15m_quote_collect", stale_after_sec=900)
+def _run_kalshi_15m_quote_collect() -> dict[str, Any]:
+    """Every settled 15m window's per-minute quote chart + outcome into
+    quote_history/ on HF -- the dataset the edge model is certified on."""
+    try:
+        result = kalshi_15m_quotes.run_incremental(lookback_hours=KALSHI_15M_QUOTE_LOOKBACK_HOURS)
+        _KALSHI_15M_QUOTE_LAST_RUN.update({**result, "at": dt.datetime.now(dt.timezone.utc).isoformat()})
+        return result
+    finally:
+        gc.collect()
+
+
+@_locked_job("kalshi_15m_edge_model_train", stale_after_sec=3600)
+def _run_kalshi_15m_edge_model_train() -> dict[str, Any]:
+    """Walk-forward retrain + certification of every edge-model candidate on
+    the real quote archive (see kalshi_15m_edge_model)."""
+    try:
+        result = kalshi_15m_edge_model.train_and_certify()
+        logger.info("[app_kalshi] kalshi_15m edge model: chosen=%s certified=%s", result.get("chosen"), result.get("certified"))
+        return result
+    finally:
+        gc.collect()
+
+
+def _ensure_edge_model_at_startup() -> None:
+    if kalshi_15m_edge_model.load_artifact() is None:
+        _run_kalshi_15m_edge_model_train()
 
 
 @_locked_job("kalshi_15m_metals_data_collect", stale_after_sec=600)
@@ -807,17 +837,27 @@ def _run_kalshi_15m_crypto_loss_retrain(gate: dict[str, Any]) -> dict[str, Any]:
     again", not "retrain and prove it first". A failed retrain leaves the
     gate closed; the next cycle's own gate check just tries again, same
     self-healing posture as every other tuning override here."""
-    try:
-        trade_log = kalshi_15m_strategy._load_state().get("trade_log")  # noqa: SLF001
-    except Exception as exc:
-        logger.warning("[app_kalshi] could not read kalshi_15m trade_log for crypto loss retrain: %s", exc)
-        trade_log = None
-
-    try:
-        retrain_result = kalshi_15m_model.train_model(trade_log=trade_log)
-    except Exception as exc:
-        logger.warning("[app_kalshi] crypto loss-triggered retrain failed: %s", exc)
-        retrain_result = {"ok": False, "error": str(exc)}
+    if kalshi_15m_strategy.entry_mode() == "ev":
+        # EV mode's model is the edge model: a loss re-runs its walk-forward
+        # certification on the latest real quotes (fold in the newest windows,
+        # possibly de-certify) before the next crypto entry.
+        _run_kalshi_15m_quote_collect()
+        try:
+            retrain_result = kalshi_15m_edge_model.train_and_certify()
+        except Exception as exc:
+            logger.warning("[app_kalshi] crypto loss-triggered edge-model recertification failed: %s", exc)
+            retrain_result = {"ok": False, "error": str(exc)}
+    else:
+        try:
+            trade_log = kalshi_15m_strategy._load_state().get("trade_log")  # noqa: SLF001
+        except Exception as exc:
+            logger.warning("[app_kalshi] could not read kalshi_15m trade_log for crypto loss retrain: %s", exc)
+            trade_log = None
+        try:
+            retrain_result = kalshi_15m_model.train_model(trade_log=trade_log)
+        except Exception as exc:
+            logger.warning("[app_kalshi] crypto loss-triggered retrain failed: %s", exc)
+            retrain_result = {"ok": False, "error": str(exc)}
 
     gate_result = kalshi_15m_strategy.apply_crypto_loss_retrain_result(
         real_trade_count=gate.get("real_trade_count"), retrain_ok=bool(retrain_result.get("ok")),
@@ -843,7 +883,26 @@ def _run_kalshi_15m_win_streak_verification(cooldown: dict[str, Any]) -> dict[st
     for THIS exact streak (kalshi_15m_strategy.apply_win_streak_cooldown_result);
     anything else leaves it active, so the NEXT cycle's own win-streak
     check simply retries -- cheap and safe to re-attempt, no persistent
-    failure state to get stuck in."""
+    failure state to get stuck in.
+
+    In EV entry mode the check is the edge model's own: re-certify on the
+    latest real quotes and resume metals only if metals is still certified
+    (the legacy walk-forward backtest fills at a fixed assumed price, so its
+    return says nothing about entries paying Kalshi's real ask)."""
+    if kalshi_15m_strategy.entry_mode() == "ev":
+        _run_kalshi_15m_quote_collect()
+        try:
+            recert = kalshi_15m_edge_model.train_and_certify()
+        except Exception as exc:
+            logger.warning("[app_kalshi] win-streak edge-model recertification failed: %s", exc)
+            recert = {"ok": False, "error": str(exc)}
+        passed = bool(recert.get("ok")) and bool((recert.get("certified") or {}).get("metals"))
+        cooldown_result = kalshi_15m_strategy.apply_win_streak_cooldown_result(
+            passed, real_trade_count=cooldown.get("real_trade_count"),
+            reason=f"edge_model metals certified={passed}",
+        )
+        return {"recertification": recert, "cooldown_result": cooldown_result}
+
     try:
         trade_log = kalshi_15m_strategy._load_state().get("trade_log")  # noqa: SLF001
     except Exception as exc:
@@ -1399,9 +1458,19 @@ def _ensure_background_jobs_started() -> None:
                 id="kalshi_15m_strategy_sweep", replace_existing=True,
             )
             scheduler.add_job(
-                _run_kalshi_15m_pattern_study, "interval", hours=6,
+                _run_kalshi_15m_pattern_study, "interval", hours=24,
                 id="kalshi_15m_pattern_study", replace_existing=True,
             )
+            scheduler.add_job(
+                _run_kalshi_15m_quote_collect, "interval", minutes=KALSHI_15M_QUOTE_COLLECT_MINUTES,
+                id="kalshi_15m_quote_collect", replace_existing=True,
+                next_run_time=dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=2),
+            )
+            scheduler.add_job(
+                _run_kalshi_15m_edge_model_train, "cron", hour=KALSHI_15M_EDGE_MODEL_HOUR_ET, minute=20,
+                id="kalshi_15m_edge_model_train", replace_existing=True,
+            )
+            threading.Thread(target=_ensure_edge_model_at_startup, daemon=True, name="kalshi15m-edge-model-startup").start()
             scheduler.add_job(
                 _run_ai_monitor, "cron", hour=AI_MONITOR_HOUR_ET, minute=0,
                 id="ai_monitor", replace_existing=True,
@@ -1418,10 +1487,12 @@ def _ensure_background_jobs_started() -> None:
                 _run_perps_strategy_reload, "cron", hour=STRATEGY_RELOAD_HOUR_ET, minute=STRATEGY_RELOAD_MINUTE_ET,
                 id="perps_strategy_reload", replace_existing=True,
             )
-            scheduler.add_job(
-                _run_kalshi_15m_metals_strategy_reload, "cron", hour=STRATEGY_RELOAD_HOUR_ET, minute=STRATEGY_RELOAD_MINUTE_ET,
-                id="kalshi_15m_metals_strategy_reload", replace_existing=True,
-            )
+            # kalshi_15m_metals_strategy_reload is no longer scheduled: the
+            # metals sweep it re-applied is scored by a backtest that fills
+            # at a fixed assumed price (one published result claimed a
+            # 432,719% holdout return), and it wrote an account-wide
+            # confidence floor that crypto inherited too. Still callable
+            # manually via _run_kalshi_15m_metals_strategy_reload.
             # Fired once immediately here too (not just on the daily cron
             # above) -- "when they have downtimes... reload... immediately",
             # not "wait for the next 9:15am slot". Background thread: this
@@ -1429,7 +1500,6 @@ def _ensure_background_jobs_started() -> None:
             # the smoke test) that must never delay this process's own
             # Flask/scheduler startup.
             threading.Thread(target=_run_perps_strategy_reload, daemon=True, name="perps-strategy-reload-startup").start()
-            threading.Thread(target=_run_kalshi_15m_metals_strategy_reload, daemon=True, name="kalshi15m-metals-strategy-reload-startup").start()
             # Threads content jobs (hourly_status/trending_news/sentiment_snapshot):
             # briefly moved to external cron-job.org triggers (see
             # api_perps_threads_trending_news and its 2 siblings below,
@@ -1973,9 +2043,9 @@ def api_kalshi_15m_status():
         # and compute_win_streak_cooldown_active's own docstrings.
         "crypto_sequential_gate": effective_params.get("crypto_sequential_gate"),
         "win_streak_cooldown": kalshi_15m_strategy.compute_win_streak_cooldown_active(state),
-        # Pattern study observability: which coins have profiles, how many samples
-        # each has, when they were last built. Gives a live read on whether the
-        # behavioral learning has enough history to be useful.
+        "entry_mode": kalshi_15m_strategy.entry_mode(),
+        "edge_model": kalshi_15m_edge_model.summary(),
+        "quote_history_last_collect": dict(_KALSHI_15M_QUOTE_LAST_RUN),
         "pattern_study": {
             coin: {
                 "total_samples": p.get("total_samples"),
@@ -2005,6 +2075,37 @@ def api_kalshi_15m_balance_by_shard():
     except Exception as exc:
         logger.warning("[app_kalshi] kalshi_15m balance-by-shard check failed", exc_info=True)
         return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+@app.route("/api/kalshi15m/edge-model", methods=["GET", "POST"])
+def api_kalshi_15m_edge_model():
+    """GET: the current edge-model artifact summary -- chosen model and
+    certification per market, with every candidate's out-of-sample stats.
+    POST: re-run walk-forward training + certification now."""
+    if request.method == "POST":
+        try:
+            return jsonify(_run_kalshi_15m_edge_model_train())
+        except Exception as exc:
+            logger.warning("[app_kalshi] edge model train failed", exc_info=True)
+            return jsonify({"ok": False, "error": str(exc)}), 500
+    return jsonify({"ok": True, **kalshi_15m_edge_model.summary()})
+
+
+@app.route("/api/kalshi15m/quotes", methods=["GET", "POST"])
+def api_kalshi_15m_quotes():
+    """GET: quote-history archive coverage on HF plus the last collection.
+    POST ?days=N: backfill N days of settled windows (default 21, max 60)."""
+    if request.method == "POST":
+        try:
+            days = max(1, min(60, int(request.args.get("days", 21))))
+        except (TypeError, ValueError):
+            days = 21
+        try:
+            return jsonify(kalshi_15m_quotes.backfill(days=days))
+        except Exception as exc:
+            logger.warning("[app_kalshi] quote backfill failed", exc_info=True)
+            return jsonify({"ok": False, "error": str(exc)}), 500
+    return jsonify({"ok": True, "archive": kalshi_15m_quotes.archive_summary(), "last_collect": dict(_KALSHI_15M_QUOTE_LAST_RUN)})
 
 
 @app.route("/api/kalshi15m/pattern-study", methods=["GET", "POST"])
@@ -2057,10 +2158,13 @@ def api_kalshi_15m_diagnose_entries():
     try:
         state = kalshi_15m_strategy._load_state()  # noqa: SLF001
         tuning = state.get("tuning") or {}
-        trade_log = state.get("trade_log")
-        win_streak_cooldown = kalshi_15m_strategy.compute_win_streak_cooldown_active(state)
+        trade_log = kalshi_15m_strategy._mode_trades(state.get("trade_log"))  # noqa: SLF001
+        gate_state = {**state, "trade_log": trade_log}
+        win_streak_cooldown = kalshi_15m_strategy.compute_win_streak_cooldown_active(gate_state)
         current_et_hour = kalshi_15m_strategy._current_et_hour()  # noqa: SLF001
         hour_trust = kalshi_15m_strategy.hour_is_trusted(current_et_hour, trade_log)
+        mode = kalshi_15m_strategy.entry_mode()
+        live_context = kalshi_15m_strategy.build_live_context() if mode == "ev" else None
         per_coin = {}
         for coin in sorted(kalshi_15m_strategy.ACTIVE_ENTRY_COINS):
             coin_trust = kalshi_15m_strategy.coin_is_trusted(coin, trade_log)
@@ -2069,11 +2173,13 @@ def api_kalshi_15m_diagnose_entries():
                 confidence_min=tuning.get("model_confidence_min"),
                 correlation_study_enabled=tuning.get("correlation_study_enabled"),
                 correlation_max_adjustment=tuning.get("correlation_confidence_max_adjustment"),
-                trade_log=trade_log,
+                trade_log=trade_log, live_context=live_context,
             )
+            decision = {k: v for k, v in decision.items() if k not in ("market", "feature_row")}
             per_coin[coin] = {"coin_trust": coin_trust, "decision": decision}
         return jsonify({
-            "ok": True, "current_et_hour": current_et_hour, "win_streak_cooldown": win_streak_cooldown,
+            "ok": True, "entry_mode": mode, "current_et_hour": current_et_hour, "win_streak_cooldown": win_streak_cooldown,
+            "crypto_sequential_gate": kalshi_15m_strategy.compute_crypto_sequential_gate(gate_state),
             "hour_trust": hour_trust, "open_position_count": len(state.get("positions") or []), "per_coin": per_coin,
         })
     except Exception as exc:

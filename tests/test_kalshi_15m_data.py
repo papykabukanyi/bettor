@@ -431,3 +431,52 @@ def test_push_fair_value_log_writes_a_local_shard_and_dedupes(tmp_path, monkeypa
 
     shard = pd.read_parquet(result["shard"])
     assert shard["fair_value_prob_up"].iloc[0] == 0.6  # the LATER-in-the-input-order row won
+
+
+@pytest.mark.parametrize("perp,strike,expected", [
+    (8.3562, 83572.15, 83562.0),   # BTC perp quotes 1/10,000 BTC
+    (2.6792, 2680.16, 2679.2),     # ETH x1,000
+    (9.4044, 0.09406, 0.094044),   # DOGE x0.01
+    (1.49415, 1.4938, 1.49415),    # XRP 1:1
+])
+def test_perp_price_in_strike_units(perp, strike, expected):
+    assert kalshi_15m_data.perp_price_in_strike_units(perp, strike) == pytest.approx(expected)
+
+
+def test_fair_value_compares_a_scaled_perp_price_to_the_strike(monkeypatch):
+    """Live log bug: BTC perp 8.36 vs strike 83,607 pinned fair value at 0."""
+    from data import kalshi_15m
+
+    monkeypatch.setattr(kalshi_15m, "KNOWN_15M_SERIES", {"BTC": "KXBTC15M"})
+    market = {"ticker": "KXBTC15M-T", "floor_strike": 83600.0, "yes_bid_dollars": "0.5", "yes_ask_dollars": "0.52"}
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: market)
+    monkeypatch.setattr(kalshi_15m, "seconds_to_close", lambda m: 300.0)
+    monkeypatch.setattr(kalshi_15m_data, "latest_feature_row", lambda coin: {"current_price": 8.3610, "volatility_15": 0.0003})
+    row = kalshi_15m_data.collect_fair_value_observations().iloc[0]
+    assert row["current_price"] == pytest.approx(83610.0)
+    assert 0.5 < row["fair_value_prob_up"] < 0.99
+
+
+def test_first_push_after_a_restart_keeps_the_days_earlier_hf_rows(tmp_path, monkeypatch):
+    import server_common
+
+    earlier = tmp_path / "remote.parquet"
+    pd.DataFrame({"symbol": ["BTC"], "ts": [1], "close": [100.0]}).to_parquet(earlier, index=False)
+    monkeypatch.setattr(kalshi_15m_data, "DATA_DIR", tmp_path / "data")
+    monkeypatch.setattr(kalshi_15m_data, "HF_API_KEY", "token")
+    monkeypatch.setattr(kalshi_15m_data, "_ensure_dataset_repo", lambda: False)
+    monkeypatch.setattr(server_common, "call_with_hard_timeout", lambda fn, timeout_sec: str(earlier))
+
+    result = kalshi_15m_data.push_dataset_snapshot(pd.DataFrame({"symbol": ["BTC"], "ts": [2], "close": [101.0]}))
+
+    assert result["rows_written"] == 2
+
+
+def test_seed_is_skipped_when_the_local_shard_exists(tmp_path, monkeypatch):
+    import server_common
+
+    local = tmp_path / "shard.parquet"
+    local.write_bytes(b"x")
+    monkeypatch.setattr(kalshi_15m_data, "HF_API_KEY", "token")
+    monkeypatch.setattr(server_common, "call_with_hard_timeout", lambda fn, timeout_sec: pytest.fail("should not download"))
+    kalshi_15m_data._seed_local_shard_from_hf("data/x.parquet", local)  # noqa: SLF001

@@ -643,14 +643,36 @@ def retry_on_rate_limit(fn, *, attempts: int = 3, backoff_sec: float = 5.0):
     raise last_exc  # pragma: no cover
 
 
+def _seed_local_shard_from_hf(path_in_repo: str, local_path) -> None:
+    """See kalshi_15m_data._seed_local_shard_from_hf: prevents the first
+    push after a restart from overwriting the day's earlier HF data."""
+    if local_path.exists() or not HF_API_KEY:
+        return
+
+    def _download() -> str | None:
+        from huggingface_hub import hf_hub_download
+        try:
+            return hf_hub_download(repo_id=HF_KALSHI_15M_METALS_DATASET_REPO, filename=path_in_repo, repo_type="dataset", token=HF_API_KEY)
+        except Exception:
+            return None
+
+    from server_common import call_with_hard_timeout
+    remote = call_with_hard_timeout(_download, timeout_sec=30)
+    if remote:
+        import shutil
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(remote, local_path)
+
+
 def push_dataset_snapshot(df: pd.DataFrame) -> dict[str, Any]:
     if df.empty:
         return {"ok": False, "reason": "no_rows"}
 
     shard_dir = DATA_DIR / "kalshi_15m_metals_dataset"
     shard_dir.mkdir(parents=True, exist_ok=True)
-    today = pd.Timestamp.utcnow().strftime("%Y-%m-%d")
+    today = pd.Timestamp.now("UTC").strftime("%Y-%m-%d")
     shard_path = shard_dir / f"{today}.parquet"
+    _seed_local_shard_from_hf(f"data/{today}.parquet", shard_path)
 
     if shard_path.exists():
         existing = pd.read_parquet(shard_path)

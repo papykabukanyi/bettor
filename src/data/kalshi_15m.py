@@ -63,6 +63,7 @@ Endpoints used here:
 from __future__ import annotations
 
 import datetime as dt
+import math
 from typing import Any
 
 from data.kalshi_client import _request_json
@@ -111,6 +112,30 @@ KNOWN_15M_METALS_SERIES = {
     # the same confirmed-live 15-minute market shape as the 3 above.
     "PLATINUM": "KXPLATINUM15M", "PALLADIUM": "KXPALLADIUM15M",
 }
+
+
+TAKER_FEE_RATE = 0.07
+
+
+def taker_fee_usd(count: float, price: float) -> float:
+    """Kalshi's quadratic taker fee for one order (fee_type "quadratic",
+    fee_multiplier 1 on every KX*15M series, confirmed via GET /series):
+    ceil-to-the-cent of 0.07 * C * P * (1 - P). Settlement itself is free."""
+    if count <= 0 or not (0.0 < price < 1.0):
+        return 0.0
+    return math.ceil(TAKER_FEE_RATE * count * price * (1.0 - price) * 100.0 - 1e-9) / 100.0
+
+
+def order_fee_usd(order: dict[str, Any] | None, *, count: float, price: float) -> tuple[float, str]:
+    """The fee Kalshi actually charged on a filled order when its response
+    reports one in dollars, else the schedule estimate above."""
+    reported = (order or {}).get("taker_fees_dollars")
+    if reported not in (None, ""):
+        try:
+            return float(reported), "reported"
+        except (TypeError, ValueError):
+            pass
+    return taker_fee_usd(count, price), "estimated"
 
 
 def list_series(*, category: str = "Crypto") -> list[dict[str, Any]]:

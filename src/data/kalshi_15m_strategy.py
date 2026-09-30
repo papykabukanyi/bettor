@@ -154,7 +154,10 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from data import crypto_correlation, kalshi_15m, kalshi_15m_meta_model, kalshi_15m_metals_model, kalshi_15m_model, kalshi_15m_pattern_study
+from data import (
+    crypto_correlation, kalshi_15m, kalshi_15m_edge_model, kalshi_15m_meta_model, kalshi_15m_metals_model,
+    kalshi_15m_model, kalshi_15m_pattern_study,
+)
 from server_common import DATA_DIR
 
 logger = logging.getLogger(__name__)
@@ -844,24 +847,69 @@ def metals_volume_proxy_confirmed(metal: str, feature_row: dict[str, Any] | None
 # those other currency and understand with the 15 min how to get
 # profitable and learn its patterns."
 #
-# kalshi_15m_pattern_study.py analyzes the historical archive per-coin
-# to extract win-rate profiles across 6 dimensions (hour-of-day, volatility
-# regime, RSI regime, multi-timeframe 1hr-vs-15min alignment, volume
-# regime, MACD direction). score_entry_conditions() returns a net count of
-# favorable vs unfavorable conditions for the specific side being considered
-# (direction-aware: a high historical win rate in the current condition is
-# favorable for "yes", unfavorable for "no").
+# kalshi_15m_pattern_study.py profiles each coin's archive across 7
+# dimensions (hour, volatility, RSI, 1h-vs-15m alignment, volume, MACD,
+# 8-timeframe cascade); score_entry_conditions() nets the statistically
+# significant favorable vs unfavorable buckets for the side considered. The
+# score is always attached to legacy decisions; it blocks an entry only
+# when USE_PATTERN_STUDY is on and score <= PATTERN_STUDY_MIN_SCORE (two
+# net unfavorable conditions by default).
 #
-# Observability-first (score always attached to evaluate_candidate's result,
-# same discipline as USE_REAL_OUTCOME_CALIBRATION) -- gates entries only
-# when USE_PATTERN_STUDY is True AND the score is below PATTERN_STUDY_MIN_SCORE.
-# Default min score -1: two net unfavorable conditions. This is intentionally
-# loose (suppresses only clearly adverse multi-condition combinations) because
-# individual condition win-rate differences are small (~4%) and the archive
-# may still be thin per bucket. Tighten with a negative env var value once
-# enough real history exists to trust tighter bucketing.
-USE_PATTERN_STUDY = _env_flag("KALSHI_15M_USE_PATTERN_STUDY", default=True)
-PATTERN_STUDY_MIN_SCORE = _env_int("KALSHI_15M_PATTERN_STUDY_MIN_SCORE", -1)
+# Off by default: the study measures unconditional up-rates, not whether the
+# current condition beats the price Kalshi is charging, so it can only ever
+# be a price-blind blocker. The same multi-timeframe features are tested
+# against the real quote in kalshi_15m_edge_model. Legacy entry mode only.
+USE_PATTERN_STUDY = _env_flag("KALSHI_15M_USE_PATTERN_STUDY", default=False)
+PATTERN_STUDY_MIN_SCORE = _env_int("KALSHI_15M_PATTERN_STUDY_MIN_SCORE", -2)
+
+
+# Entry mode.
+#   "ev"     -- enter only where kalshi_15m_edge_model's p(side) beats the
+#               real ask after Kalshi's taker fee by at least
+#               kalshi_15m_edge_model.EV_MIN_EDGE, and (EV_REQUIRE_CERTIFIED)
+#               only in a market whose model passed walk-forward
+#               certification on the real quote archive.
+#   "legacy" -- the original direction model against a confidence floor,
+#               blind to the price paid. Its real record: 336 trades, 42.9%
+#               wins at an average 48.7c entry, -$39.10 gross (~-$48 after
+#               fees); win rate tracked the price paid, and the more the
+#               model disagreed with Kalshi's price, the worse it did.
+ENTRY_MODE = (os.getenv("KALSHI_15M_ENTRY_MODE", "ev") or "ev").strip().lower()
+EV_REQUIRE_CERTIFIED = _env_flag("KALSHI_15M_EV_REQUIRE_CERTIFIED", default=True)
+
+
+def entry_mode() -> str:
+    return "legacy" if ENTRY_MODE == "legacy" else "ev"
+
+
+def _mode_trades(trade_log: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """The trade history the trust/streak/concurrency gates learn from: only
+    trades placed under the current entry mode (pre-EV trades carry no
+    entry_mode and count as legacy), so EV entries are not blocked by the
+    legacy model's record or vice versa."""
+    if entry_mode() == "ev":
+        return [t for t in trade_log or [] if t.get("entry_mode") == "ev"]
+    return [t for t in trade_log or [] if t.get("entry_mode") in (None, "legacy")]
+
+
+def build_live_context() -> dict[str, Any]:
+    """Every series' current window plus flow features at each window's last
+    closed minute -- cross-market features need all of them together."""
+    markets: dict[str, dict[str, Any]] = {}
+    for coin, series_ticker in ASSET_SERIES.items():
+        try:
+            market = kalshi_15m.get_current_window_market(series_ticker)
+        except Exception as exc:
+            logger.warning("[kalshi_15m_strategy] market lookup failed for %s: %s", coin, exc)
+            continue
+        if market:
+            markets[coin] = market
+    flow: dict[str, dict[str, Any]] = {}
+    try:
+        flow = kalshi_15m_edge_model.live_flow_rows(markets)
+    except Exception as exc:
+        logger.warning("[kalshi_15m_strategy] live flow features unavailable: %s", exc)
+    return {"markets": markets, "flow": flow}
 
 
 # Real, deliberate guard: entering with only a few seconds left before a
@@ -1194,6 +1242,7 @@ def evaluate_candidate(
     coin: str, *, confidence_min: float | None = None,
     correlation_study_enabled: bool | None = None, correlation_max_adjustment: float | None = None,
     trade_log: list[dict[str, Any]] | None = None, use_real_outcome_calibration: bool | None = None,
+    live_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Pure decision logic for one coin -- no state, no order placement,
     no side effects. Returns {"ok": False, "reason": ...} when there's
@@ -1234,11 +1283,15 @@ def evaluate_candidate(
     if not series_ticker:
         return {"ok": False, "reason": "unknown_coin"}
 
-    market = kalshi_15m.get_current_window_market(series_ticker)
+    market = ((live_context or {}).get("markets") or {}).get(coin)
+    if market is None:
+        market = kalshi_15m.get_current_window_market(series_ticker)
     if market is None:
         return {"ok": False, "reason": "no_open_window"}
 
     remaining = kalshi_15m.seconds_to_close(market)
+    if remaining is not None and entry_mode() == "ev":
+        return _evaluate_candidate_ev(coin, market, remaining, live_context)
     if remaining is None or remaining < MIN_SECONDS_TO_CLOSE_FOR_ENTRY:
         return {"ok": False, "reason": "too_little_time_remaining", "seconds_to_close": remaining}
 
@@ -1415,6 +1468,40 @@ def evaluate_candidate(
     return result
 
 
+def _evaluate_candidate_ev(
+    coin: str, market: dict[str, Any], seconds_to_close: float, live_context: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """EV-mode decision for one coin -- see ENTRY_MODE. Blocked results still
+    carry the full `ev` breakdown (p, each side's edge, model, certified) so
+    diagnostics show exactly how far from an entry each market is."""
+    context = live_context if live_context is not None else build_live_context()
+    flow_row = (context.get("flow") or {}).get(coin)
+    artifact = kalshi_15m_edge_model.load_artifact()
+    spec = ((artifact or {}).get("markets") or {}).get(kalshi_15m_edge_model.market_kind(coin) or "") or {}
+    underlying = None
+    if any(f in kalshi_15m_edge_model.MTF_BASE for f in spec.get("features") or []):
+        from data import kalshi_15m_data
+        underlying = kalshi_15m_data.underlying_row_for_window(coin, market)
+    ev = kalshi_15m_edge_model.evaluate_market(
+        coin, market, seconds_to_close=seconds_to_close, underlying_row=underlying, flow_row=flow_row, artifact=artifact,
+    )
+    if not ev.get("ok"):
+        return {"ok": False, "reason": ev.get("reason"), "ev": ev}
+    if EV_REQUIRE_CERTIFIED and not ev.get("certified"):
+        return {"ok": False, "reason": "edge_model_not_certified", "ev": ev}
+    if ev["edge"] < kalshi_15m_edge_model.EV_MIN_EDGE:
+        return {"ok": False, "reason": "edge_below_minimum", "ev": ev}
+    feature_row = {k: v for k, v in (flow_row or {}).items() if k in kalshi_15m_edge_model.FLOW_BASE}
+    feature_row.update({k: v for k, v in (underlying or {}).items() if isinstance(v, (int, float))})
+    return {
+        "ok": True, "coin": coin, "side": ev["side"], "market": market,
+        "probability_up": ev["p_yes"], "confidence": ev["p_side"], "effective_confidence_min": None,
+        "entry_mode": "ev", "entry_edge_usd": ev["edge"], "entry_minute": ev["minute"], "model_p_side": ev["p_side"],
+        "model_name": ev.get("model"), "model_certified": ev.get("certified"), "ev": ev,
+        "feature_row": feature_row or None,
+    }
+
+
 def _has_open_position(state: dict[str, Any], *, coin: str) -> bool:
     return any(p.get("coin") == coin for p in state.get("positions") or [])
 
@@ -1452,9 +1539,12 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
     places real orders unless a caller explicitly forces dry_run=True."""
     effective_dry_run = (not LIVE_TRADING_ENABLED) if dry_run is None else dry_run
     checks: list[dict[str, Any]] = []
+    mode = entry_mode()
+    live_context = build_live_context() if mode == "ev" else None
 
     with _STATE_LOCK:
         state = _load_state()
+        state = {**state, "trade_log": _mode_trades(state.get("trade_log"))}
         # Metals-scoped, NOT state.get("positions") directly -- see
         # _market_of's own comment: crypto now has its own separate
         # compute_crypto_sequential_gate below, and metals'
@@ -1554,6 +1644,7 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
             continue
         with _STATE_LOCK:
             state = _load_state()
+            state = {**state, "trade_log": _mode_trades(state.get("trade_log"))}
             if _has_open_position(state, coin=coin):
                 checks.append({"coin": coin, "ok": False, "reason": "already_has_open_position"})
                 continue
@@ -1569,7 +1660,7 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
             coin, confidence_min=confidence_min_override,
             correlation_study_enabled=correlation_study_enabled_override,
             correlation_max_adjustment=correlation_max_adjustment_override,
-            trade_log=state.get("trade_log"),
+            trade_log=state.get("trade_log"), live_context=live_context,
         )
         if not decision.get("ok"):
             checks.append({"coin": coin, **decision})
@@ -1646,6 +1737,7 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
         client_order_id = str(uuid.uuid4())
 
         order_id = None
+        order: dict[str, Any] | None = None
         filled_count = float(contracts)  # dry-run: "fills" the full requested size in the simulation
         if not effective_dry_run:
             # SECOND, INDEPENDENT, ALWAYS-FRESH safety gate -- real,
@@ -1744,9 +1836,14 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
                 checks.append({"coin": coin, "ok": False, "reason": "order_not_filled", "order_id": order_id})
                 continue
 
+        entry_fee_usd, entry_fee_source = kalshi_15m.order_fee_usd(order, count=filled_count, price=cost_basis)
         position = {
             "coin": coin, "ticker": market["ticker"], "side": decision["side"],
             "count": filled_count, "entry_price": cost_basis, "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+            "entry_fee_usd": entry_fee_usd, "entry_fee_source": entry_fee_source,
+            "entry_mode": mode, "entry_edge_usd": decision.get("entry_edge_usd"),
+            "entry_model_p_side": decision.get("model_p_side"), "entry_minute": decision.get("entry_minute"),
+            "entry_model_name": decision.get("model_name"), "entry_model_certified": decision.get("model_certified"),
             "close_time": market.get("close_time"), "entry_probability_up": decision["probability_up"],
             "entry_confidence": decision["confidence"], "dry_run": effective_dry_run,
             "client_order_id": client_order_id, "order_id": order_id,
@@ -1829,6 +1926,7 @@ def effective_strategy_params(state: dict[str, Any] | None = None) -> dict[str, 
     if state is None:
         state = _load_state()
     tuning = state.get("tuning") or {}
+    state = {**state, "trade_log": _mode_trades(state.get("trade_log"))}
     # Metals-scoped -- see _market_of's own comment: scan_and_enter itself
     # computes this off a metals-only trade_log now (crypto has its own
     # separate compute_crypto_sequential_gate, reported alongside this
@@ -1837,6 +1935,9 @@ def effective_strategy_params(state: dict[str, Any] | None = None) -> dict[str, 
     # real crypto trade exists.
     metals_trade_log = [t for t in (state.get("trade_log") or []) if _market_of(t.get("coin")) == "metals"]
     return {
+        "entry_mode": entry_mode(),
+        "ev_min_edge": kalshi_15m_edge_model.EV_MIN_EDGE,
+        "ev_require_certified": EV_REQUIRE_CERTIFIED,
         "model_confidence_min": tuning.get("model_confidence_min", MODEL_CONFIDENCE_MIN),
         "position_size_pct": tuning.get("position_size_pct", POSITION_SIZE_PCT),
         "max_concurrent_positions": compute_graduated_max_concurrent_positions(metals_trade_log),
@@ -2172,6 +2273,15 @@ def _exit_order_side_and_price(position_side: str, market: dict[str, Any]) -> tu
     return "bid", round(1.0 - no_bid, 4)
 
 
+def _position_entry_fee(position: dict[str, Any]) -> float:
+    """Positions opened before entry fees were recorded still paid one, so
+    they're charged the schedule estimate rather than zero."""
+    fee = position.get("entry_fee_usd")
+    if fee is not None:
+        return float(fee)
+    return kalshi_15m.taker_fee_usd(float(position.get("count") or 0.0), float(position.get("entry_price") or 0.0))
+
+
 def _current_exit_value(position_side: str, market: dict[str, Any]) -> float:
     """What one contract of the held side could be sold for RIGHT NOW, in
     the SAME entry_price-comparable terms check_settlements' own P&L
@@ -2334,10 +2444,17 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
             checks[-1]["exit_order_not_filled"] = True
             continue
 
-        realized_pnl = round(filled_count * (current_value - position["entry_price"]), 6)
+        gross_pnl = round(filled_count * (current_value - position["entry_price"]), 6)
+        exit_fee, _ = kalshi_15m.order_fee_usd(order, count=filled_count, price=current_value)
+        fees = round(_position_entry_fee(position) + exit_fee, 6)
+        realized_pnl = round(gross_pnl - fees, 6)
         trade = {
             "coin": coin, "ticker": position["ticker"], "side": position["side"], "count": filled_count,
             "entry_price": position["entry_price"], "result": None, "realized_pnl_usd": realized_pnl,
+            "gross_pnl_usd": gross_pnl, "fees_usd": fees,
+            "entry_edge_usd": position.get("entry_edge_usd"), "entry_model_p_side": position.get("entry_model_p_side"),
+            "entry_minute": position.get("entry_minute"), "entry_mode": position.get("entry_mode"),
+            "entry_model_name": position.get("entry_model_name"), "entry_model_certified": position.get("entry_model_certified"),
             "opened_at": position["opened_at"], "closed_at": dt.datetime.now(dt.timezone.utc).isoformat(),
             "entry_probability_up": position.get("entry_probability_up"), "entry_confidence": position.get("entry_confidence"),
             "entry_calibrated_probability_up": position.get("entry_calibrated_probability_up"),
@@ -2410,11 +2527,16 @@ def check_settlements() -> dict[str, Any]:
 
         won = result == position["side"]
         gross = position["count"] * (1.0 - position["entry_price"]) if won else -position["count"] * position["entry_price"]
+        entry_fee = _position_entry_fee(position)
         closed_at = dt.datetime.now(dt.timezone.utc).isoformat()
         trade = {
             "coin": position["coin"], "ticker": ticker, "side": position["side"],
             "count": position["count"], "entry_price": position["entry_price"], "result": result,
-            "realized_pnl_usd": round(gross, 6), "opened_at": position["opened_at"], "closed_at": closed_at,
+            "realized_pnl_usd": round(gross - entry_fee, 6), "gross_pnl_usd": round(gross, 6), "fees_usd": entry_fee,
+            "opened_at": position["opened_at"], "closed_at": closed_at,
+            "entry_edge_usd": position.get("entry_edge_usd"), "entry_model_p_side": position.get("entry_model_p_side"),
+            "entry_minute": position.get("entry_minute"), "entry_mode": position.get("entry_mode"),
+            "entry_model_name": position.get("entry_model_name"), "entry_model_certified": position.get("entry_model_certified"),
             "entry_probability_up": position.get("entry_probability_up"),
             "entry_confidence": position.get("entry_confidence"), "dry_run": position.get("dry_run", True),
             "entry_calibrated_probability_up": position.get("entry_calibrated_probability_up"),

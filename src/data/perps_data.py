@@ -75,7 +75,8 @@ _DATE_SHARD_RE = re.compile(r"^data/\d{4}-\d{2}-\d{2}\.parquet$")
 # moved (246MB vs 236MB at 8h), nowhere near the level that caused the
 # original crash loop.
 CANDLE_1M_LOOKBACK_HOURS = int(os.getenv("PERPS_CANDLE_1M_LOOKBACK_HOURS", "20") or "20")
-CANDLE_60M_LOOKBACK_HOURS = int(os.getenv("PERPS_CANDLE_60M_LOOKBACK_HOURS", "24") or "24")
+# 30 (not 24): trend_1d needs an hourly close from a full day before the newest minute.
+CANDLE_60M_LOOKBACK_HOURS = int(os.getenv("PERPS_CANDLE_60M_LOOKBACK_HOURS", "30") or "30")
 # 1 minute (not 30) -- matches how this strategy actually holds a position:
 # take-profit/quick-profit/stop-loss are all evaluated every
 # PERPS_FAST_CHECK_SECONDS (20s), so a model trained to predict "up or down
@@ -428,16 +429,10 @@ def engineer_features(one_min_df: pd.DataFrame, hourly_df: pd.DataFrame, *, sent
     df["trend_2h"] = df["close"].pct_change(120)
     df["trend_3h"] = df["close"].pct_change(180)
     df["trend_4h"] = df["close"].pct_change(240)
-    # Extended higher-timeframe trends -- NOT in FEATURE_COLUMNS (kept below to
-    # avoid breaking already-trained model checkpoints that expect the current
-    # 31-column input), but stored in the archive alongside the base features so
-    # the pattern study and any future model retrain can use them without a second
-    # data-collection pass. pct_change(480) = 8 hours; pct_change(1440) = 1 trading
-    # day (24h * 60min) -- only populated for rows with >= that many candles before
-    # them, NaN for early rows (standard pandas rolling behavior, consistent with how
-    # trend_4h is already handled -- this is intentional, not a gap to fill).
+    # Not in FEATURE_COLUMNS (existing model checkpoints expect the current
+    # input width); archived for the pattern study and edge model. trend_1d
+    # is derived from hourly candles further down.
     df["trend_8h"] = df["close"].pct_change(480)
-    df["trend_1d"] = df["close"].pct_change(1440)
     df["ma_5"] = df["close"].rolling(5).mean()
     df["ma_15"] = df["close"].rolling(15).mean()
     df["ma_30"] = df["close"].rolling(30).mean()
@@ -550,6 +545,17 @@ def engineer_features(one_min_df: pd.DataFrame, hourly_df: pd.DataFrame, *, sent
         )
     else:
         df["trend_pct"] = 0.0
+
+    # 1-day trend from the hourly candles: the live 1-minute fetch covers only
+    # CANDLE_1M_LOOKBACK_HOURS (20h), so a 1440-row pct_change is never populated.
+    if not hourly_df.empty:
+        day_ago = hourly_df[["ts", "close"]].rename(columns={"close": "_close_1d_ago"}).sort_values("ts")
+        day_ago["ts"] = day_ago["ts"] + 86400
+        df = pd.merge_asof(df.sort_values("ts"), day_ago, on="ts", direction="backward", tolerance=3600)
+        df["trend_1d"] = df["close"] / df["_close_1d_ago"] - 1.0
+        df = df.drop(columns="_close_1d_ago")
+    else:
+        df["trend_1d"] = float("nan")
 
     df["sentiment_score"] = float(sentiment_score)
 

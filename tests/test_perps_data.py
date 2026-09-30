@@ -687,3 +687,15 @@ def test_load_training_dataset_excludes_lookalike_paths_from_another_pipeline(mo
 
     perps_data.load_training_dataset()
     assert downloaded == ["data/2026-06-01.parquet"]
+
+
+def test_trend_1d_comes_from_hourly_candles_a_day_before_each_row():
+    """The live 1-minute fetch covers 20h, so a 1440-row pct_change was never
+    populated; the day-ago close is read from the hourly candles instead."""
+    start = 1_700_000_000 - (1_700_000_000 % 3600)
+    one_min = perps_data._candles_to_frame(_make_candles([200.0 + i * 0.01 for i in range(300)], start_ts=start))  # noqa: SLF001
+    hourly = perps_data._candles_to_frame(_make_candles([100.0 + i for i in range(30)], start_ts=start - 30 * 3600, step=3600))  # noqa: SLF001
+    feats = perps_data.engineer_features(one_min, hourly, sentiment_score=0.0)
+    last = feats.iloc[-1]
+    day_ago_close = hourly[hourly.ts <= int(last.ts) - 86400].close.iloc[-1]
+    assert last["trend_1d"] == pytest.approx(last["close"] / day_ago_close - 1.0)

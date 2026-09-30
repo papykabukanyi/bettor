@@ -7,6 +7,7 @@ checking is a real, fully-exercisable simulation even in dry-run mode
 from __future__ import annotations
 
 import datetime as dt
+import math
 
 import pandas as pd
 import pytest
@@ -28,6 +29,13 @@ def _full_entry_universe(monkeypatch):
     universe by default here; the handful of tests for the restriction
     itself explicitly monkeypatch it back down."""
     monkeypatch.setattr(kalshi_15m_strategy, "ACTIVE_ENTRY_COINS", frozenset(kalshi_15m_strategy.ASSET_SERIES))
+
+
+@pytest.fixture(autouse=True)
+def _legacy_entry_mode_by_default(monkeypatch):
+    """Production defaults to EV entry mode; the bulk of this file covers the
+    legacy direction-model path. EV-mode tests set ENTRY_MODE themselves."""
+    monkeypatch.setattr(kalshi_15m_strategy, "ENTRY_MODE", "legacy")
 
 
 @pytest.fixture(autouse=True)
@@ -630,12 +638,15 @@ def test_check_settlements_books_a_win(monkeypatch):
 
     assert result["checks"][0]["action"] == "settled"
     assert result["checks"][0]["won"] is True
-    # A winning YES contract pays $1, cost $0.45 -- 10 contracts nets $5.50.
-    assert result["checks"][0]["realized_pnl_usd"] == pytest.approx(5.5)
+    # A winning YES contract pays $1, cost $0.45 -- 10 contracts gross $5.50,
+    # minus Kalshi's taker fee ceil(0.07*10*0.45*0.55) = $0.18.
+    assert result["checks"][0]["realized_pnl_usd"] == pytest.approx(5.32)
 
     state = kalshi_15m_strategy._load_state()  # noqa: SLF001
     assert state["positions"] == []
     assert len(state["trade_log"]) == 1
+    assert state["trade_log"][0]["gross_pnl_usd"] == pytest.approx(5.5)
+    assert state["trade_log"][0]["fees_usd"] == pytest.approx(0.18)
     assert state["realized_pnl_by_date"]  # a REAL (non-dry-run) win updates the daily total
 
 
@@ -673,8 +684,19 @@ def test_check_settlements_books_a_loss(monkeypatch):
     result = kalshi_15m_strategy.check_settlements()
 
     assert result["checks"][0]["won"] is False
-    # A losing YES contract pays $0, cost $0.45 -- 10 contracts loses $4.50.
-    assert result["checks"][0]["realized_pnl_usd"] == pytest.approx(-4.5)
+    # A losing YES contract pays $0, cost $0.45 -- 10 contracts loses $4.50 plus the $0.18 entry fee.
+    assert result["checks"][0]["realized_pnl_usd"] == pytest.approx(-4.68)
+
+
+def test_check_settlements_uses_the_entry_fee_recorded_on_the_position(monkeypatch):
+    position = _position(side="yes", count=10, entry_price=0.45, dry_run=False)
+    position["entry_fee_usd"] = 0.25
+    kalshi_15m_strategy._save_state({"positions": [position], "trade_log": [], "realized_pnl_by_date": {}})  # noqa: SLF001
+    monkeypatch.setattr(kalshi_15m, "get_market", lambda ticker: {"ticker": ticker, "result": "yes"})
+
+    result = kalshi_15m_strategy.check_settlements()
+
+    assert result["checks"][0]["realized_pnl_usd"] == pytest.approx(5.25)
 
 
 def test_check_settlements_does_not_pollute_real_pnl_with_a_dry_run_trade(monkeypatch):
@@ -2404,7 +2426,11 @@ def test_manage_open_positions_closes_a_position_early_when_enabled(monkeypatch)
     assert trade["exit_kind"] == "full"
     assert trade["close_reason"] == "early_exit"
     assert trade["exit_reason"] == "stop_loss"
-    assert trade["realized_pnl_usd"] == pytest.approx(10.0 * (0.35 - 0.5))  # current_value=1-0.65=0.35, entry=0.5
+    # current_value=1-0.65=0.35, entry=0.5: gross -1.50, plus entry fee
+    # ceil(0.07*10*0.5*0.5)=0.18 and exit fee ceil(0.07*10*0.35*0.65)=0.16.
+    assert trade["gross_pnl_usd"] == pytest.approx(10.0 * (0.35 - 0.5))
+    assert trade["fees_usd"] == pytest.approx(0.34)
+    assert trade["realized_pnl_usd"] == pytest.approx(-1.84)
 
 
 def test_manage_open_positions_leaves_the_position_open_when_the_exit_order_never_fills(monkeypatch):
@@ -2907,3 +2933,90 @@ def test_scan_and_enter_reports_hour_trust_ok_with_no_history(monkeypatch):
     result = kalshi_15m_strategy.scan_and_enter()
     assert result["hour_trust"]["trusted"] is True
     assert result["hour_trust"]["reason"] == "insufficient_history"
+
+
+# ---------------------------------------------------------------------------
+# EV entry mode (kalshi_15m_edge_model)
+# ---------------------------------------------------------------------------
+from data import kalshi_15m_edge_model  # noqa: E402
+
+
+def _ev_market(*, ticker="KXBTC15M-EV", close_in_minutes=10.0, yes_bid=0.49, yes_ask=0.51):
+    return {
+        "ticker": ticker, "close_time": _future_close(close_in_minutes),
+        "yes_bid_dollars": str(yes_bid), "yes_ask_dollars": str(yes_ask),
+        "no_bid_dollars": str(round(1 - yes_ask, 4)), "no_ask_dollars": str(round(1 - yes_bid, 4)),
+    }
+
+
+def _ev_artifact(*, intercept, certified=True):
+    return {"markets": {"crypto": {"model": "quote", "certified": certified, "features": ["lm", "lm_t"], "coef": [1.0, 0.0], "intercept": intercept}}}
+
+
+@pytest.fixture
+def ev_mode(monkeypatch):
+    monkeypatch.setattr(kalshi_15m_strategy, "ENTRY_MODE", "ev")
+    monkeypatch.setattr(kalshi_15m_edge_model, "load_artifact", lambda: None)
+
+
+def test_ev_mode_without_an_edge_model_never_enters(ev_mode):
+    ctx = {"markets": {"BTC": _ev_market()}, "flow": {}}
+    result = kalshi_15m_strategy.evaluate_candidate("BTC", live_context=ctx)
+    assert result["ok"] is False and result["reason"] == "no_edge_model_yet"
+
+
+def test_ev_mode_blocks_an_uncertified_model_but_reports_its_edge(ev_mode, monkeypatch):
+    monkeypatch.setattr(kalshi_15m_edge_model, "load_artifact", lambda: _ev_artifact(intercept=1.0, certified=False))
+    ctx = {"markets": {"BTC": _ev_market()}, "flow": {}}
+    result = kalshi_15m_strategy.evaluate_candidate("BTC", live_context=ctx)
+    assert result["reason"] == "edge_model_not_certified"
+    assert result["ev"]["edge"] > 0.1
+
+
+def test_ev_mode_blocks_an_edge_below_the_minimum(ev_mode, monkeypatch):
+    monkeypatch.setattr(kalshi_15m_edge_model, "load_artifact", lambda: _ev_artifact(intercept=0.0))
+    ctx = {"markets": {"BTC": _ev_market()}, "flow": {}}
+    assert kalshi_15m_strategy.evaluate_candidate("BTC", live_context=ctx)["reason"] == "edge_below_minimum"
+
+
+def test_ev_mode_enters_the_side_with_positive_edge_after_fees(ev_mode, monkeypatch):
+    monkeypatch.setattr(kalshi_15m_edge_model, "load_artifact", lambda: _ev_artifact(intercept=1.0))
+    ctx = {"markets": {"BTC": _ev_market()}, "flow": {}}
+    result = kalshi_15m_strategy.evaluate_candidate("BTC", live_context=ctx)
+    assert result["ok"] is True and result["side"] == "yes" and result["entry_mode"] == "ev"
+    assert result["confidence"] == pytest.approx(1 / (1 + math.exp(-1.0)), abs=1e-4)
+    assert result["entry_edge_usd"] == pytest.approx(result["confidence"] - 0.51 - 0.02, abs=1e-4)
+
+
+def test_ev_mode_ignores_the_legacy_timing_floor(ev_mode, monkeypatch):
+    monkeypatch.setattr(kalshi_15m_edge_model, "load_artifact", lambda: _ev_artifact(intercept=1.0))
+    ctx = {"markets": {"BTC": _ev_market(close_in_minutes=5.0)}, "flow": {}}
+    assert kalshi_15m_strategy.evaluate_candidate("BTC", live_context=ctx)["ok"] is True
+
+
+def test_scan_and_enter_in_ev_mode_records_the_edge_on_the_position(ev_mode, monkeypatch):
+    monkeypatch.setattr(kalshi_15m_edge_model, "load_artifact", lambda: _ev_artifact(intercept=1.0))
+    monkeypatch.setattr(kalshi_15m_strategy, "build_live_context", lambda: {"markets": {"BTC": _ev_market()}, "flow": {}})
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series_ticker: None)
+
+    result = kalshi_15m_strategy.scan_and_enter(dry_run=True)
+
+    entered = [c for c in result["checks"] if c.get("action") == "entered"]
+    assert [c["coin"] for c in entered] == ["BTC"]
+    position = kalshi_15m_strategy._load_state()["positions"][0]  # noqa: SLF001
+    assert position["entry_mode"] == "ev" and position["entry_model_name"] == "quote"
+    assert position["entry_edge_usd"] > 0.1
+    assert position["entry_price"] == pytest.approx(0.51)
+    assert position["entry_fee_usd"] > 0 and position["entry_fee_source"] == "estimated"
+
+
+def test_ev_gates_learn_only_from_ev_trades(ev_mode):
+    legacy_losses = [{"coin": "BTC", "realized_pnl_usd": -1.0, "dry_run": False} for _ in range(20)]
+    ev_trades = kalshi_15m_strategy._mode_trades(legacy_losses)  # noqa: SLF001
+    assert ev_trades == []
+    assert kalshi_15m_strategy.coin_is_trusted("BTC", ev_trades)["trusted"] is True
+
+
+def test_legacy_mode_still_sees_pre_ev_trades(monkeypatch):
+    trades = [{"coin": "BTC"}, {"coin": "ETH", "entry_mode": "ev"}, {"coin": "SOL", "entry_mode": "legacy"}]
+    assert [t["coin"] for t in kalshi_15m_strategy._mode_trades(trades)] == ["BTC", "SOL"]  # noqa: SLF001

@@ -238,3 +238,14 @@ def test_known_15m_metals_series_covers_gold_silver_copper_platinum_palladium():
     # No overlap with the crypto universe -- coin/series identity must
     # stay unambiguous when the strategy layer merges both mappings.
     assert not (set(kalshi_15m.KNOWN_15M_METALS_SERIES) & set(kalshi_15m.KNOWN_15M_SERIES))
+
+
+@pytest.mark.parametrize("count,price,fee", [(1, 0.5, 0.02), (10, 0.45, 0.18), (100, 0.5, 1.75), (1, 0.99, 0.01), (5, 0.0, 0.0), (5, 1.0, 0.0)])
+def test_taker_fee_usd_matches_kalshis_quadratic_schedule(count, price, fee):
+    assert kalshi_15m.taker_fee_usd(count, price) == pytest.approx(fee)
+
+
+def test_order_fee_prefers_the_fee_kalshi_reports():
+    assert kalshi_15m.order_fee_usd({"taker_fees_dollars": "0.0300"}, count=1, price=0.5) == (0.03, "reported")
+    assert kalshi_15m.order_fee_usd({}, count=1, price=0.5) == (0.02, "estimated")
+    assert kalshi_15m.order_fee_usd(None, count=10, price=0.45) == (0.18, "estimated")

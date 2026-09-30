@@ -148,6 +148,31 @@ def latest_feature_row(coin: str) -> dict[str, Any] | None:
         return None
 
 
+def underlying_row_for_window(coin: str, market: dict[str, Any]) -> dict[str, Any] | None:
+    """The live underlying inputs kalshi_15m_edge_model's multi-timeframe
+    candidate needs for one open window: the latest feature row, the perp
+    close at the window's open, and the 8h/1d reference closes implied by
+    trend_8h/trend_1d (same quantities its training join computes)."""
+    perps_ticker = COIN_TO_PERPS_TICKER.get(coin)
+    row = latest_feature_row(coin)
+    if not perps_ticker or row is None or not market.get("open_time"):
+        return None
+    import datetime as dt
+    open_ts = int(dt.datetime.fromisoformat(str(market["open_time"]).replace("Z", "+00:00")).timestamp())
+    one_min_df, _ = perps_data.fetch_candle_frames(perps_ticker)
+    prior = one_min_df[one_min_df["ts"] <= open_ts]
+    close_open = None
+    if not prior.empty and open_ts - int(prior["ts"].iloc[-1]) <= 90:
+        close_open = float(prior["close"].iloc[-1])
+    close = row.get("current_price")
+    out = dict(row)
+    out.update({"close": close, "close_open": close_open})
+    for horizon in ("8h", "1d"):
+        trend = row.get(f"trend_{horizon}")
+        out[f"close_{horizon}"] = close / (1.0 + trend) if close and trend is not None and trend > -1 else None
+    return out
+
+
 # ---------------------------------------------------------------------------
 # HF archival -- faithfully mirrors perps_data.py's own push_dataset_snapshot/
 # load_training_dataset (see either's own docstring for the full incident
@@ -323,6 +348,28 @@ def backfill_minute_history(coins: list[str] | None = None, *, days: int = 90) -
     }
 
 
+def _seed_local_shard_from_hf(path_in_repo: str, local_path) -> None:
+    """Local disk is wiped on every Space restart. Without this, the first
+    push after a restart uploads only post-restart rows and overwrites the
+    day's earlier data on HF."""
+    if local_path.exists() or not HF_API_KEY:
+        return
+
+    def _download() -> str | None:
+        from huggingface_hub import hf_hub_download
+        try:
+            return hf_hub_download(repo_id=HF_KALSHI_15M_DATASET_REPO, filename=path_in_repo, repo_type="dataset", token=HF_API_KEY)
+        except Exception:
+            return None
+
+    from server_common import call_with_hard_timeout
+    remote = call_with_hard_timeout(_download, timeout_sec=30)
+    if remote:
+        import shutil
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(remote, local_path)
+
+
 def push_dataset_snapshot(df: pd.DataFrame) -> dict[str, Any]:
     """Merge new rows into today's parquet shard and upload it to HF --
     same merge/dedupe/atomic-write/OOM-avoidance discipline as
@@ -334,8 +381,9 @@ def push_dataset_snapshot(df: pd.DataFrame) -> dict[str, Any]:
 
     shard_dir = DATA_DIR / "kalshi_15m_dataset"
     shard_dir.mkdir(parents=True, exist_ok=True)
-    today = pd.Timestamp.utcnow().strftime("%Y-%m-%d")
+    today = pd.Timestamp.now("UTC").strftime("%Y-%m-%d")
     shard_path = shard_dir / f"{today}.parquet"
+    _seed_local_shard_from_hf(f"data/{today}.parquet", shard_path)
 
     if shard_path.exists():
         existing = pd.read_parquet(shard_path)
@@ -417,6 +465,18 @@ def push_dataset_snapshot(df: pd.DataFrame) -> dict[str, Any]:
 FAIR_VALUE_WINDOW_MINUTES = 15.0
 
 
+def perp_price_in_strike_units(perp_price: float | None, strike_price: float | None) -> float | None:
+    """Kalshi's perp contracts quote a power-of-ten multiple of the spot
+    asset (confirmed on the live log: BTC perp 8.36 vs strike 83,607 is
+    x10,000; ETH x1,000; ZEC x100; SOL/HYPE x10; DOGE x0.01; NEAR/XRP x1),
+    so the perp price is rescaled by that power of ten before comparing it
+    to a floor_strike quoted in spot units."""
+    if not perp_price or not strike_price or perp_price <= 0 or strike_price <= 0:
+        return None
+    scale = 10.0 ** round(math.log10(strike_price / perp_price))
+    return perp_price * scale
+
+
 def compute_fair_value_probability_up(
     current_price: float | None, strike_price: float | None,
     volatility_per_min: float | None, minutes_remaining: float | None,
@@ -471,7 +531,7 @@ def collect_fair_value_observations() -> pd.DataFrame:
             feature_row = latest_feature_row(coin)
             if feature_row is None:
                 continue
-            current_price = feature_row.get("current_price")
+            current_price = perp_price_in_strike_units(feature_row.get("current_price"), float(strike_price))
             volatility_per_min = feature_row.get("volatility_15")
             fair_value_prob_up = compute_fair_value_probability_up(
                 current_price=current_price, strike_price=float(strike_price),
@@ -511,8 +571,9 @@ def push_fair_value_log(df: pd.DataFrame) -> dict[str, Any]:
 
     shard_dir = DATA_DIR / "kalshi_15m_fair_value_log"
     shard_dir.mkdir(parents=True, exist_ok=True)
-    today = pd.Timestamp.utcnow().strftime("%Y-%m-%d")
+    today = pd.Timestamp.now("UTC").strftime("%Y-%m-%d")
     shard_path = shard_dir / f"{today}.parquet"
+    _seed_local_shard_from_hf(f"fair_value_log/{today}.parquet", shard_path)
 
     if shard_path.exists():
         existing = pd.read_parquet(shard_path)

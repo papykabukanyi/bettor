@@ -14,6 +14,14 @@ import app_kalshi
 from data import kalshi_15m_data
 
 
+@pytest.fixture(autouse=True)
+def _legacy_kalshi_15m_entry_mode_by_default(monkeypatch):
+    """Production defaults to EV entry mode; most kalshi_15m job tests here
+    cover the legacy retrain/backtest wiring. EV tests opt in explicitly."""
+    from data import kalshi_15m_strategy
+    monkeypatch.setattr(kalshi_15m_strategy, "ENTRY_MODE", "legacy")
+
+
 def test_production_jobs_actually_honor_the_live_trading_flag(monkeypatch):
     """perps_strategy's dry_run default is safe-by-default (None -> True)
     specifically so ad-hoc/manual callers never go live by accident -- but
@@ -2041,3 +2049,78 @@ def test_bots_route_still_serves_the_original_bot_status_hub():
     body = resp.get_data(as_text=True)
     assert "Bettor" in body
     assert "/api/status" in body  # the live-status card grid, unchanged
+
+
+# ---------------------------------------------------------------------------
+# EV entry mode wiring (kalshi_15m_edge_model / kalshi_15m_quotes)
+# ---------------------------------------------------------------------------
+@pytest.fixture
+def ev_mode(monkeypatch):
+    from data import kalshi_15m_strategy
+    monkeypatch.setattr(kalshi_15m_strategy, "ENTRY_MODE", "ev")
+
+
+def test_ev_loss_retrain_recertifies_the_edge_model_instead_of_the_legacy_model(ev_mode, monkeypatch):
+    from data import kalshi_15m_edge_model, kalshi_15m_model, kalshi_15m_quotes, kalshi_15m_strategy
+
+    monkeypatch.setattr(kalshi_15m_model, "train_model", lambda **kw: pytest.fail("legacy model must not retrain in EV mode"))
+    monkeypatch.setattr(kalshi_15m_quotes, "run_incremental", lambda **kw: {"ok": True, "rows": 0})
+    monkeypatch.setattr(kalshi_15m_edge_model, "train_and_certify", lambda: {"ok": True, "certified": {"crypto": False}})
+    captured = {}
+    monkeypatch.setattr(
+        kalshi_15m_strategy, "apply_crypto_loss_retrain_result",
+        lambda *, real_trade_count, retrain_ok: captured.update(retrain_ok=retrain_ok) or {"cleared": retrain_ok},
+    )
+
+    result = app_kalshi._run_kalshi_15m_crypto_loss_retrain.__wrapped__({"real_trade_count": 1})  # noqa: SLF001
+
+    assert captured["retrain_ok"] is True
+    assert result["retrain"]["certified"] == {"crypto": False}
+
+
+@pytest.mark.parametrize("metals_certified", [True, False])
+def test_ev_win_streak_verification_requires_metals_to_stay_certified(ev_mode, monkeypatch, metals_certified):
+    from data import kalshi_15m_backtest, kalshi_15m_edge_model, kalshi_15m_quotes, kalshi_15m_strategy
+
+    monkeypatch.setattr(kalshi_15m_backtest, "run_walkforward_backtest", lambda: pytest.fail("fixed-price backtest must not gate EV mode"))
+    monkeypatch.setattr(kalshi_15m_quotes, "run_incremental", lambda **kw: {"ok": True})
+    monkeypatch.setattr(kalshi_15m_edge_model, "train_and_certify", lambda: {"ok": True, "certified": {"metals": metals_certified}})
+    captured = {}
+    monkeypatch.setattr(
+        kalshi_15m_strategy, "apply_win_streak_cooldown_result",
+        lambda passed, *, real_trade_count, reason: captured.update(passed=passed) or {"cleared": passed},
+    )
+
+    app_kalshi._run_kalshi_15m_win_streak_verification.__wrapped__({"real_trade_count": 3, "streak": 2})  # noqa: SLF001
+
+    assert captured["passed"] is metals_certified
+
+
+def test_quote_collect_job_records_its_last_run(monkeypatch):
+    from data import kalshi_15m_quotes
+
+    monkeypatch.setattr(kalshi_15m_quotes, "run_incremental", lambda **kw: {"ok": True, "rows": 42, "windows": 3})
+    app_kalshi._run_kalshi_15m_quote_collect.__wrapped__()  # noqa: SLF001
+    assert app_kalshi._KALSHI_15M_QUOTE_LAST_RUN["rows"] == 42  # noqa: SLF001
+    assert "at" in app_kalshi._KALSHI_15M_QUOTE_LAST_RUN  # noqa: SLF001
+
+
+def test_edge_model_endpoints(monkeypatch):
+    from data import kalshi_15m_edge_model
+
+    monkeypatch.setattr(kalshi_15m_edge_model, "summary", lambda: {"available": True, "markets": {"crypto": {"certified": False}}})
+    monkeypatch.setattr(app_kalshi, "_run_kalshi_15m_edge_model_train", lambda: {"ok": True, "certified": {"crypto": False}})
+    with app_kalshi.app.test_client() as client:
+        assert client.get("/api/kalshi15m/edge-model").get_json()["markets"]["crypto"]["certified"] is False
+        assert client.post("/api/kalshi15m/edge-model").get_json()["certified"] == {"crypto": False}
+
+
+def test_status_reports_entry_mode_and_edge_model(ev_mode, monkeypatch):
+    from data import kalshi_15m_edge_model
+
+    monkeypatch.setattr(kalshi_15m_edge_model, "summary", lambda: {"available": False})
+    with app_kalshi.app.test_client() as client:
+        body = client.get("/api/kalshi15m/status").get_json()
+    assert body["entry_mode"] == "ev"
+    assert body["edge_model"] == {"available": False}
+    assert "quote_history_last_collect" in body
