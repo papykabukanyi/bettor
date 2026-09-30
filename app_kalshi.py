@@ -107,8 +107,8 @@ from config import HF_API_KEY, et_today
 from data import (
     ai_monitor, crypto_news, kalshi_15m, kalshi_15m_backtest, kalshi_15m_data, kalshi_15m_meta_model,
     kalshi_15m_metals_backtest, kalshi_15m_metals_data, kalshi_15m_metals_model, kalshi_15m_model,
-    kalshi_15m_strategy, perps_data, perps_meta_model, perps_model, perps_strategy, perps_trade_analysis,
-    strategy_sweep, threads_client, threads_post,
+    kalshi_15m_pattern_study, kalshi_15m_strategy, perps_data, perps_meta_model, perps_model,
+    perps_strategy, perps_trade_analysis, strategy_sweep, threads_client, threads_post,
 )
 
 # Real production bug found and fixed on the sibling stocks server (now
@@ -696,6 +696,22 @@ def _run_kalshi_15m_fair_value_observation() -> dict[str, Any]:
         if df.empty:
             return {"ok": False, "reason": "no_rows_collected"}
         return kalshi_15m_data.push_fair_value_log(df)
+    finally:
+        gc.collect()
+
+
+@_locked_job("kalshi_15m_pattern_study", stale_after_sec=21600)
+def _run_kalshi_15m_pattern_study() -> dict[str, Any]:
+    """Rebuilds per-coin behavioral pattern profiles from the full historical
+    archive and saves them locally + to HF. Profiles are used by
+    evaluate_candidate to score the current market conditions against each
+    coin's own historical win-rate patterns across 6 dimensions (hour-of-day,
+    volatility regime, RSI regime, multi-timeframe 1hr/15min alignment, volume
+    regime, MACD direction) -- see kalshi_15m_pattern_study.py's own module
+    docstring. stale_after_sec=21600 (6 hours) matches REBUILD_INTERVAL_HOURS,
+    so a duplicate manual trigger is always a safe no-op."""
+    try:
+        return kalshi_15m_pattern_study.build_pattern_profiles()
     finally:
         gc.collect()
 
@@ -1383,6 +1399,10 @@ def _ensure_background_jobs_started() -> None:
                 id="kalshi_15m_strategy_sweep", replace_existing=True,
             )
             scheduler.add_job(
+                _run_kalshi_15m_pattern_study, "interval", hours=6,
+                id="kalshi_15m_pattern_study", replace_existing=True,
+            )
+            scheduler.add_job(
                 _run_ai_monitor, "cron", hour=AI_MONITOR_HOUR_ET, minute=0,
                 id="ai_monitor", replace_existing=True,
             )
@@ -1953,6 +1973,19 @@ def api_kalshi_15m_status():
         # and compute_win_streak_cooldown_active's own docstrings.
         "crypto_sequential_gate": effective_params.get("crypto_sequential_gate"),
         "win_streak_cooldown": kalshi_15m_strategy.compute_win_streak_cooldown_active(state),
+        # Pattern study observability: which coins have profiles, how many samples
+        # each has, when they were last built. Gives a live read on whether the
+        # behavioral learning has enough history to be useful.
+        "pattern_study": {
+            coin: {
+                "total_samples": p.get("total_samples"),
+                "overall_win_rate": p.get("overall_win_rate"),
+                "best_hours": p.get("best_hours", []),
+                "worst_hours": p.get("worst_hours", []),
+                "computed_at_utc": p.get("computed_at_utc"),
+            }
+            for coin, p in (kalshi_15m_pattern_study.load_pattern_profiles() or {}).items()
+        },
     })
 
 
@@ -1972,6 +2005,25 @@ def api_kalshi_15m_balance_by_shard():
     except Exception as exc:
         logger.warning("[app_kalshi] kalshi_15m balance-by-shard check failed", exc_info=True)
         return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+@app.route("/api/kalshi15m/pattern-study", methods=["GET", "POST"])
+def api_kalshi_15m_pattern_study():
+    """GET: returns the current per-coin behavioral profiles (win-rate breakdowns
+    by hour, volatility regime, RSI regime, multi-timeframe alignment, volume
+    regime, MACD direction) -- the full details, not the summary shown in /status.
+    POST: triggers an immediate profile rebuild from the full archive (same as
+    the scheduled 6-hourly job) and returns the rebuild result."""
+    if request.method == "POST":
+        try:
+            result = _run_kalshi_15m_pattern_study()
+            return jsonify(result)
+        except Exception as exc:
+            logger.warning("[app_kalshi] pattern study rebuild failed", exc_info=True)
+            return jsonify({"ok": False, "error": str(exc)}), 500
+    else:
+        profiles = kalshi_15m_pattern_study.load_pattern_profiles()
+        return jsonify({"ok": True, "profiles": profiles, "coin_count": len(profiles)})
 
 
 @app.route("/api/kalshi15m/real-positions", methods=["GET"])

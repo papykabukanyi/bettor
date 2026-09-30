@@ -428,6 +428,16 @@ def engineer_features(one_min_df: pd.DataFrame, hourly_df: pd.DataFrame, *, sent
     df["trend_2h"] = df["close"].pct_change(120)
     df["trend_3h"] = df["close"].pct_change(180)
     df["trend_4h"] = df["close"].pct_change(240)
+    # Extended higher-timeframe trends -- NOT in FEATURE_COLUMNS (kept below to
+    # avoid breaking already-trained model checkpoints that expect the current
+    # 31-column input), but stored in the archive alongside the base features so
+    # the pattern study and any future model retrain can use them without a second
+    # data-collection pass. pct_change(480) = 8 hours; pct_change(1440) = 1 trading
+    # day (24h * 60min) -- only populated for rows with >= that many candles before
+    # them, NaN for early rows (standard pandas rolling behavior, consistent with how
+    # trend_4h is already handled -- this is intentional, not a gap to fill).
+    df["trend_8h"] = df["close"].pct_change(480)
+    df["trend_1d"] = df["close"].pct_change(1440)
     df["ma_5"] = df["close"].rolling(5).mean()
     df["ma_15"] = df["close"].rolling(15).mean()
     df["ma_30"] = df["close"].rolling(30).mean()

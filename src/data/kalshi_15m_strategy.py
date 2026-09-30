@@ -154,7 +154,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from data import crypto_correlation, kalshi_15m, kalshi_15m_meta_model, kalshi_15m_metals_model, kalshi_15m_model
+from data import crypto_correlation, kalshi_15m, kalshi_15m_meta_model, kalshi_15m_metals_model, kalshi_15m_model, kalshi_15m_pattern_study
 from server_common import DATA_DIR
 
 logger = logging.getLogger(__name__)
@@ -837,6 +837,33 @@ def metals_volume_proxy_confirmed(metal: str, feature_row: dict[str, Any] | None
     }
 
 
+# Per-coin behavioral pattern study gate -- per explicit user direction:
+# "create a logic and algorithm that follow studied all the previous 15
+# min instruments ticker by ticker to understand how its move logically
+# to the 15 min ticker charts and study all the other ticker hr for all
+# those other currency and understand with the 15 min how to get
+# profitable and learn its patterns."
+#
+# kalshi_15m_pattern_study.py analyzes the historical archive per-coin
+# to extract win-rate profiles across 6 dimensions (hour-of-day, volatility
+# regime, RSI regime, multi-timeframe 1hr-vs-15min alignment, volume
+# regime, MACD direction). score_entry_conditions() returns a net count of
+# favorable vs unfavorable conditions for the specific side being considered
+# (direction-aware: a high historical win rate in the current condition is
+# favorable for "yes", unfavorable for "no").
+#
+# Observability-first (score always attached to evaluate_candidate's result,
+# same discipline as USE_REAL_OUTCOME_CALIBRATION) -- gates entries only
+# when USE_PATTERN_STUDY is True AND the score is below PATTERN_STUDY_MIN_SCORE.
+# Default min score -1: two net unfavorable conditions. This is intentionally
+# loose (suppresses only clearly adverse multi-condition combinations) because
+# individual condition win-rate differences are small (~4%) and the archive
+# may still be thin per bucket. Tighten with a negative env var value once
+# enough real history exists to trust tighter bucketing.
+USE_PATTERN_STUDY = _env_flag("KALSHI_15M_USE_PATTERN_STUDY", default=True)
+PATTERN_STUDY_MIN_SCORE = _env_int("KALSHI_15M_PATTERN_STUDY_MIN_SCORE", -1)
+
+
 # Real, deliberate guard: entering with only a few seconds left before a
 # window closes is paying the spread for what's functionally a coin flip
 # (no time left for the model's own predicted direction to actually play
@@ -1331,6 +1358,26 @@ def evaluate_candidate(
                 **{k: v for k, v in volume_confirmation.items() if k not in ("confirmed", "reason")},
             }
 
+    # Behavioral pattern study -- see USE_PATTERN_STUDY's own comment above.
+    # Always compute for observability; only gate when the flag is on AND
+    # the score is clearly negative (PATTERN_STUDY_MIN_SCORE, default -1).
+    # load_pattern_profiles() returns a cached dict (rebuilt every few hours,
+    # never an IO call on a cache hit) so this is fast.
+    pattern_result = kalshi_15m_pattern_study.score_entry_conditions(
+        coin, side,
+        feature_row=prediction.get("feature_row"),
+        profiles=kalshi_15m_pattern_study.load_pattern_profiles(),
+    )
+    if USE_PATTERN_STUDY and pattern_result.get("score", 0) <= PATTERN_STUDY_MIN_SCORE:
+        return {
+            "ok": False, "reason": "pattern_study_unfavorable",
+            "pattern_score": pattern_result["score"],
+            "pattern_unfavorable": pattern_result.get("unfavorable", []),
+            "pattern_favorable": pattern_result.get("favorable", []),
+            "confidence": confidence,
+            "correlation_score": correlation_score, "correlation_reason": correlation_reason,
+        }
+
     result = {
         "ok": True, "coin": coin, "side": side, "market": market,
         "probability_up": probability_up, "confidence": confidence,
@@ -1356,6 +1403,12 @@ def evaluate_candidate(
         # yet JSON-cleaned) so this function stays a thin, direct pass-
         # through of what _predict_direction already computed.
         "feature_row": prediction.get("feature_row"),
+        # Pattern study observability -- always present, score 0 when no profile
+        # data exists yet. Details include per-dimension win rates vs baseline.
+        "pattern_score": pattern_result.get("score", 0),
+        "pattern_favorable": pattern_result.get("favorable", []),
+        "pattern_unfavorable": pattern_result.get("unfavorable", []),
+        "pattern_details": pattern_result.get("details", {}),
     }
     if meta_trust is not None:
         result["meta_trust_score"] = meta_trust

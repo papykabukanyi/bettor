@@ -124,6 +124,24 @@ def latest_feature_row(coin: str) -> dict[str, Any] | None:
         row = {col: float(last[col]) for col in perps_data.FEATURE_COLUMNS}
         row["symbol"] = coin
         row["current_price"] = float(one_min_df["close"].iloc[-1])
+        # Extended higher-timeframe trends (computed by engineer_features but not
+        # in FEATURE_COLUMNS -- see perps_data.py's own comment on why they stay
+        # out of the model's own input until after a retrain). Always included here
+        # so evaluate_candidate / pattern_study can use all 8 timeframes live.
+        for extra_col in ("trend_8h", "trend_1d"):
+            if extra_col in feats.columns and not pd.isna(last[extra_col]):
+                row[extra_col] = float(last[extra_col])
+        # Multi-timeframe cascade alignment score: what fraction of the 8 key
+        # timeframes (5m, 10m, 15m, 30m, 1h, 2h, 4h, 8h) are currently trending
+        # in the same direction? Ranges from -1.0 (all bearish) to +1.0 (all
+        # bullish). A score near ±1 = all timeframes agree = highest-conviction
+        # setup. Omit if fewer than 4 timeframes have valid (non-NaN) values.
+        _tf_cols = ["ret_5m", "ret_10m", "ret_15m", "ret_30m",
+                    "trend_1h", "trend_2h", "trend_4h", "trend_8h"]
+        _tf_vals = [row.get(c) for c in _tf_cols if row.get(c) is not None]
+        if len(_tf_vals) >= 4:
+            _up = sum(1 for v in _tf_vals if v > 0)
+            row["mtf_cascade_score"] = round((_up / len(_tf_vals)) * 2.0 - 1.0, 4)
         return row
     except Exception as exc:
         logger.warning("[kalshi_15m_data] latest_feature_row failed for %s: %s", coin, exc)
