@@ -313,7 +313,9 @@ if __name__ == "__main__":
 # real-data replay (the live system, correlation rule included) is
 # profitable after costs. Exits are never gated.
 # ---------------------------------------------------------------------------
-EVIDENCE_GATE_BOTS = frozenset(b.strip() for b in os.getenv("SETUP_EVIDENCE_GATE_BOTS", "perps,kalshi15m").split(",") if b.strip())
+# Off by default (user decision 2026-10-01: all bots trade the setup system
+# live); SETUP_EVIDENCE_GATE_BOTS="perps,kalshi15m" turns it on per bot.
+EVIDENCE_GATE_BOTS = frozenset(b.strip() for b in os.getenv("SETUP_EVIDENCE_GATE_BOTS", "").split(",") if b.strip())
 EVIDENCE_MIN_TRADES = int(os.getenv("SETUP_EVIDENCE_MIN_TRADES", "20") or "20")
 EVIDENCE_MIN_T = float(os.getenv("SETUP_EVIDENCE_MIN_T", "1.0") or "1.0")
 EVIDENCE_MAX_AGE_HOURS = float(os.getenv("SETUP_EVIDENCE_MAX_AGE_HOURS", "48") or "48")

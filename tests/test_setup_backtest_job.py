@@ -94,3 +94,7 @@ def test_evidence_gate_opens_only_on_a_fresh_profitable_replay(monkeypatch, bt, 
     g = job.evidence_gate("perps")
     assert g["open"] is open_ and g["reason"] == reason
     assert job.evidence_gate("stocks") == {"open": True, "gated": False, "reason": "not_gated"}
+
+
+def test_no_bot_is_gated_by_default():
+    assert job.EVIDENCE_GATE_BOTS == frozenset()
