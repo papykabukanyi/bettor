@@ -108,3 +108,40 @@ def test_stocks_are_decided_on_consolidated_bars_once_they_get_past_the_price_st
     r = m.live_setup("COST", news_score=None)
     assert (r["chart_source"] == "consolidated (Yahoo)") is decides_on_consolidated
     assert calls == ([False, True] if decides_on_consolidated else [False])
+
+
+def test_gold_perp_reads_gld_with_silver_as_leader(monkeypatch):
+    from data import kalshi_15m_setup, perps_setup
+    seen = []
+    monkeypatch.setattr(kalshi_15m_setup, "metals_candles", lambda metal: seen.append(metal) or pd.read_parquet(FIXTURE))
+    assert not perps_setup.chart_candles("KXGOLDPERP").empty and seen == ["GOLD"]
+    assert perps_setup.leader_for("GOLD") == "SILVER" and perps_setup.chart_session("GOLD") == "us_equity"
+    assert perps_setup.chart_session("BTC") == "utc_day"
+
+
+def test_alpaca_crypto_reads_the_more_complete_real_chart(monkeypatch):
+    from data import alpaca_crypto_data, alpaca_crypto_setup, kalshi_15m_spot
+    now = 1_790_100_000
+    full = pd.DataFrame({"ts": now // 60 * 60 - 60 * np.arange(300)[::-1], "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 1.0})
+    gappy_bars = full.iloc[::3].assign(ts=lambda d: d.ts - 60)  # Alpaca bars are stamped by start
+    monkeypatch.setattr(alpaca_crypto_data, "fetch_recent_crypto_bars", lambda symbol, **kw: gappy_bars)
+    monkeypatch.setattr(kalshi_15m_spot, "is_listed", lambda coin: True)
+    monkeypatch.setattr(kalshi_15m_spot, "recent_series", lambda coin: full.assign(coin=coin))
+    df, source = alpaca_crypto_setup.chart_candles("SOL/USD", now=now)
+    assert source.startswith("Coinbase SOL-USD (100% complete") and len(df) == 300
+    monkeypatch.setattr(kalshi_15m_spot, "is_listed", lambda coin: False)
+    df, source = alpaca_crypto_setup.chart_candles("SOL/USD", now=now)
+    assert source.startswith("Alpaca SOL/USD")
+
+
+def test_stablecoin_pairs_are_never_traded():
+    from data import alpaca_crypto_setup
+    r = alpaca_crypto_setup.live_setup("USDT/USD", fee_rate_roundtrip=0.005, news_score=None)
+    assert r["valid"] is False and "stablecoin" in r["checks"]["data"]["detail"]
+
+
+def test_a_coinbase_plan_is_carried_to_the_alpaca_price():
+    from data import alpaca_crypto_setup
+    plan = alpaca_crypto_setup.plan_at_price({"plan": {"stop": 99.0, "target": 106.0}}, price=100.5, fee_rate_roundtrip=0.0,
+                                             spread_bps=0.0, chart_price=100.0, min_rr=1.0)
+    assert plan["stop"] == pytest.approx(99.495) and plan["target"] == pytest.approx(106.53)

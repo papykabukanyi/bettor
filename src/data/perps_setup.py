@@ -105,7 +105,7 @@ CORR_MIN = _env_float("PERPS_SETUP_CORR_MIN", 0.5)
 CORR_MIN_OVERLAP = 60
 COVERAGE_WINDOW_MIN = _env_int("PERPS_SETUP_COVERAGE_WINDOW_MIN", 240)
 MIN_COVERAGE = _env_float("PERPS_SETUP_MIN_COVERAGE", 0.8)            # share of 1m candles that must exist
-LEADER_OVERRIDES: dict[str, str] = {"BTC": "ETH"}
+LEADER_OVERRIDES: dict[str, str] = {"BTC": "ETH", "GOLD": "SILVER", "SILVER": "GOLD"}
 DEFAULT_LEADER = "BTC"
 
 
@@ -792,16 +792,31 @@ def live_quote(market: dict[str, Any]) -> dict[str, float] | None:
     return {"bid": bid, "ask": ask, "mid": (bid + ask) / 2.0}
 
 
-def chart_candles(ticker: str) -> pd.DataFrame:
-    """The coin's real Coinbase spot 1-minute candles (ts = END). The perp's
-    own candles are too thin to read volume from (it goes idle for minutes
-    at a time and prints outliers), so the chart -- trend, zones, volume,
-    VWAP, RSI/MACD -- is read on the real market the perp tracks."""
-    from data import kalshi_15m_spot, perps_data
-    coin = kalshi_15m_spot.chart_coin(perps_data.coin_for_ticker(ticker))
+METAL_COINS = frozenset({"GOLD", "SILVER"})
+
+
+def chart_session(coin: str) -> str:
+    """Metal perps are read on their ETF (US-equity session); coins trade 24/7."""
+    return "us_equity" if coin in METAL_COINS else SESSION
+
+
+def _chart_for_coin(coin: str) -> pd.DataFrame:
+    from data import kalshi_15m_setup, kalshi_15m_spot
+    if coin in METAL_COINS:
+        return kalshi_15m_setup.metals_candles(coin)
     if coin not in kalshi_15m_spot.COINBASE_PRODUCTS:
         return pd.DataFrame()
     return kalshi_15m_spot.recent_series(coin)[["ts", "open", "high", "low", "close", "volume"]]
+
+
+def chart_candles(ticker: str) -> pd.DataFrame:
+    """The perp's real 1-minute chart (ts = END): the coin's Coinbase spot
+    market -- the perp itself goes idle and prints outliers, so its own
+    volume can't carry the volume rule -- or, for the gold and silver
+    perps, GLD/SLV (real-time exchange data, US session; see
+    kalshi_15m_setup.METAL_CHART_SYMBOL for how they were graded)."""
+    from data import kalshi_15m_spot, perps_data
+    return _chart_for_coin(kalshi_15m_spot.chart_coin(perps_data.coin_for_ticker(ticker)))
 
 
 def live_setup(ticker: str, *, sides: tuple[str, ...], fee_rate_roundtrip: float, news_score: float | None,
@@ -809,18 +824,20 @@ def live_setup(ticker: str, *, sides: tuple[str, ...], fee_rate_roundtrip: float
     """The setup on this perp's coin right now (Coinbase spot chart), with
     its leader's Coinbase chart for the correlation rule."""
     from data import kalshi_15m_spot, perps_data
-    leader_symbol = leader_for(kalshi_15m_spot.chart_coin(perps_data.coin_for_ticker(ticker)))
-    leader_candles = (kalshi_15m_spot.recent_series(leader_symbol)[["ts", "open", "high", "low", "close", "volume"]]
-                      if leader_symbol in kalshi_15m_spot.COINBASE_PRODUCTS else None)
+    coin = kalshi_15m_spot.chart_coin(perps_data.coin_for_ticker(ticker))
+    leader_symbol = leader_for(coin)
+    leader_candles = _chart_for_coin(leader_symbol)
     return setup_from_candles(chart_candles(ticker), sides=sides, fee_rate_roundtrip=fee_rate_roundtrip,
                               news_score=news_score, spread_bps=spread_bps, now=now,
-                              leader_candles=leader_candles, leader_symbol=leader_symbol, require_leader=True)
+                              leader_candles=leader_candles if not leader_candles.empty else None,
+                              leader_symbol=leader_symbol, require_leader=True,
+                              session=chart_session(coin), leader_session=chart_session(leader_symbol))
 
 
 def setup_from_candles(one_min: pd.DataFrame, *, sides: tuple[str, ...], fee_rate_roundtrip: float,
                        news_score: float | None, spread_bps: float | None = None, now: float | None = None,
                        leader_candles: pd.DataFrame | None = None, leader_symbol: str | None = None,
-                       require_leader: bool = False) -> dict[str, Any]:
+                       require_leader: bool = False, session: str = SESSION, leader_session: str | None = None) -> dict[str, Any]:
     """spread_bps: the traded instrument's spread; None reads it from the
     candles' own bid_close/ask_close when they carry them."""
     now = time.time() if now is None else now
@@ -836,8 +853,9 @@ def setup_from_candles(one_min: pd.DataFrame, *, sides: tuple[str, ...], fee_rat
             mid = (last["bid_close"] + last["ask_close"]) / 2.0
             spread_bps = max(0.0, float((last["ask_close"] - last["bid_close"]) / mid * 1e4))
     as_of = latest_closed_5m(min(now, last_ts))
-    ctx = prepare(one_min[["ts", "open", "high", "low", "close", "volume"]], session=SESSION)
-    leader = prepare(leader_candles, session=SESSION) if leader_candles is not None and not leader_candles.empty else None
+    ctx = prepare(one_min[["ts", "open", "high", "low", "close", "volume"]], session=session)
+    leader = (prepare(leader_candles, session=leader_session or session)
+              if leader_candles is not None and not leader_candles.empty else None)
     result = evaluate(ctx, as_of, sides=sides, fee_rate_roundtrip=fee_rate_roundtrip, spread_bps=spread_bps, news_score=news_score,
                       leader=leader, leader_symbol=leader_symbol, require_leader=require_leader)
     chart_price = float(one_min.sort_values("ts")["close"].iloc[-1])

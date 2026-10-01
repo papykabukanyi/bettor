@@ -773,43 +773,94 @@ def candles_from_bars(bars: pd.DataFrame) -> pd.DataFrame:
     return d[["ts", "open", "high", "low", "close", "volume"]]
 
 
+# Chart sources. Alpaca's own crypto venue is thin: over a live 4 hours on
+# 2026-10-01 SOL/USD had 76% of its minutes, ETH/USD's last candle was 213s
+# old, BTC/USDC 44%. The pair is read on whichever real chart is more
+# complete over the last COVERAGE_WINDOW_MIN minutes -- the coin's Coinbase
+# USD market (deep, usually complete) or Alpaca's own bars -- and the plan's
+# stop/target are carried to Alpaca's price by plan_at_price.
+STABLECOINS = frozenset({"USDC", "USDT", "USDG", "DAI", "PYUSD", "USDP", "TUSD", "FDUSD", "EURC", "GUSD", "USDE"})
+
+
+def _recent_coverage(one_min: pd.DataFrame, now: float) -> float:
+    if one_min is None or one_min.empty:
+        return 0.0
+    end = int(now) // 60 * 60
+    ends = np.arange(end - COVERAGE_WINDOW_MIN * 60 + 60, end + 1, 60, dtype="int64")
+    return float(np.isin(ends, one_min["ts"].to_numpy("int64")).mean())
+
+
+def chart_candles(symbol: str, *, now: float | None = None) -> tuple[pd.DataFrame, str]:
+    """The pair's most complete real 1-minute chart (ts = END) and its source."""
+    from data import alpaca_crypto_data, kalshi_15m_spot
+    now = time.time() if now is None else now
+    coin = symbol.split("/")[0].upper()
+    alpaca = candles_from_bars(alpaca_crypto_data.fetch_recent_crypto_bars(symbol))
+    coinbase = pd.DataFrame(columns=["ts", "open", "high", "low", "close", "volume"])
+    if kalshi_15m_spot.is_listed(coin):
+        try:
+            series = kalshi_15m_spot.recent_series(coin)
+            if not series.empty:
+                coinbase = series[["ts", "open", "high", "low", "close", "volume"]]
+        except Exception:
+            pass
+    cb_cov, al_cov = _recent_coverage(coinbase, now), _recent_coverage(alpaca, now)
+    if cb_cov >= al_cov and not coinbase.empty:
+        return coinbase, f"Coinbase {coin}-USD ({cb_cov:.0%} complete; Alpaca {al_cov:.0%})"
+    return alpaca, f"Alpaca {symbol} ({al_cov:.0%} complete; Coinbase {cb_cov:.0%})"
+
+
 def live_setup(symbol: str, *, fee_rate_roundtrip: float, news_score: float | None, now: float | None = None) -> dict[str, Any]:
-    from data import alpaca_crypto_data
+    if symbol.split("/")[0].upper() in STABLECOINS:
+        return {"valid": False, "reason": "data", "checks": {"data": {"ok": False, "detail": "stablecoin pair: no price action to trade"}}}
     leader_symbol = leader_for(symbol)
-    return setup_from_bars(alpaca_crypto_data.fetch_recent_crypto_bars(symbol), fee_rate_roundtrip=fee_rate_roundtrip,
-                           news_score=news_score, now=now, leader_bars=alpaca_crypto_data.fetch_recent_crypto_bars(leader_symbol),
-                           leader_symbol=leader_symbol, require_leader=True)
+    one_min, source = chart_candles(symbol, now=now)
+    leader_candles, _ = chart_candles(leader_symbol, now=now)
+    result = setup_from_candles(one_min, fee_rate_roundtrip=fee_rate_roundtrip, news_score=news_score, now=now,
+                                leader_candles=leader_candles, leader_symbol=leader_symbol, require_leader=True)
+    return {**result, "chart_source": source}
 
 
 def setup_from_bars(bars: pd.DataFrame, *, fee_rate_roundtrip: float, news_score: float | None, now: float | None = None,
                     leader_bars: pd.DataFrame | None = None, leader_symbol: str | None = None,
                     require_leader: bool = False) -> dict[str, Any]:
+    """Alpaca bars (ts = bar START) in, the setup out."""
+    return setup_from_candles(candles_from_bars(bars), fee_rate_roundtrip=fee_rate_roundtrip, news_score=news_score, now=now,
+                              leader_candles=candles_from_bars(leader_bars) if leader_bars is not None else None,
+                              leader_symbol=leader_symbol, require_leader=require_leader)
+
+
+def setup_from_candles(one_min: pd.DataFrame, *, fee_rate_roundtrip: float, news_score: float | None, now: float | None = None,
+                       leader_candles: pd.DataFrame | None = None, leader_symbol: str | None = None,
+                       require_leader: bool = False) -> dict[str, Any]:
     now = time.time() if now is None else now
-    one_min = candles_from_bars(bars)
-    if one_min.empty:
+    if one_min is None or one_min.empty:
         return {"valid": False, "reason": "data", "checks": {"data": {"ok": False, "detail": "no candles"}}}
     last_ts = int(one_min["ts"].max())
     if now - last_ts > STALE_AFTER_SEC:
         return {"valid": False, "reason": "data", "checks": {"data": {"ok": False, "detail": f"last candle {int(now - last_ts)}s old"}}}
     as_of = latest_closed_5m(min(now, last_ts))
     ctx = prepare(one_min, session=SESSION)
-    leader_candles = candles_from_bars(leader_bars) if leader_bars is not None else None
     leader = prepare(leader_candles, session=SESSION) if leader_candles is not None and not leader_candles.empty else None
     result = evaluate(ctx, as_of, sides=("long",), fee_rate_roundtrip=fee_rate_roundtrip, spread_bps=SPREAD_BPS, news_score=news_score,
                       leader=leader, leader_symbol=leader_symbol, require_leader=require_leader)
-    return {**result, "as_of": as_of, "spread_bps": SPREAD_BPS}
+    chart_price = float(one_min.sort_values("ts")["close"].iloc[-1])
+    return {**result, "as_of": as_of, "spread_bps": SPREAD_BPS, "chart_price": chart_price}
 
 
 def plan_at_price(setup: dict[str, Any], *, price: float, fee_rate_roundtrip: float, spread_bps: float = SPREAD_BPS,
-                  min_rr: float | None = None) -> dict[str, Any]:
+                  min_rr: float | None = None, chart_price: float | None = None) -> dict[str, Any]:
     """Re-check the plan at the real execution price (the live quote, not
     the 5-minute close it was read on): skipped if price is already past the
     stop or target, or reward/risk after costs no longer clears min_rr."""
     min_rr = MIN_RR if min_rr is None else min_rr
     plan = setup["plan"]
-    stop, target = float(plan["stop"]), float(plan["target"])
     if price <= 0:
         return {"ok": False, "reason": "no_price"}
+    # A plan read on another venue's chart (Coinbase) is carried to this
+    # pair's price at the live ratio.
+    k = price / chart_price if chart_price and chart_price > 0 else 1.0
+    stop, target = float(plan["stop"]) * k, float(plan["target"]) * k
     risk, reward = price - stop, target - price
     cost = price * (fee_rate_roundtrip + spread_bps / 1e4)
     rr_net = (reward - cost) / (risk + cost) if risk > 0 else 0.0

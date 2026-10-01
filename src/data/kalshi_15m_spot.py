@@ -68,9 +68,25 @@ _cache_lock = threading.Lock()
 _live_cache: dict[str, pd.DataFrame] = {}
 
 
+_unlisted: dict[str, float] = {}  # coin -> time Coinbase said it has no {coin}-USD product
+_last_refresh: dict[str, float] = {}
+LIVE_REFRESH_MIN_SEC = 20
+
+
+def product_for(coin: str) -> str:
+    """The Coinbase product for a coin: the configured one, else {coin}-USD
+    (charts for any coin another bot trades, e.g. Alpaca crypto pairs)."""
+    return COINBASE_PRODUCTS.get(coin) or f"{coin}-USD"
+
+
+def is_listed(coin: str) -> bool:
+    return coin in COINBASE_PRODUCTS or time.time() - _unlisted.get(coin, 0.0) > 86400
+
+
 def fetch_candles(coin: str, start_ts: int, end_ts: int) -> pd.DataFrame:
-    """1-minute candles for [start_ts, end_ts), paginated 300 per request."""
-    product = COINBASE_PRODUCTS[coin]
+    """1-minute candles for [start_ts, end_ts), paginated 300 per request;
+    empty when Coinbase doesn't list the coin (remembered for a day)."""
+    product = product_for(coin)
     rows: list[list[float]] = []
     t = int(start_ts)
     while t < end_ts:
@@ -81,6 +97,9 @@ def fetch_candles(coin: str, start_ts: int, end_ts: int) -> pd.DataFrame:
             if resp.status_code == 429:
                 time.sleep(1.0 + attempt)
                 continue
+            if resp.status_code in (400, 404) and coin not in COINBASE_PRODUCTS:
+                _unlisted[coin] = time.time()
+                return pd.DataFrame(columns=COLUMNS)
             resp.raise_for_status()
             rows += resp.json()
             break
@@ -268,8 +287,17 @@ def recent_series(coin: str) -> pd.DataFrame:
     """The last LIVE_CACHE_HOURS of 1-minute candles: the process cache
     (filled from HF/Coinbase once) topped up with the newest 300 minutes."""
     now = int(time.time())
+    if not is_listed(coin):
+        return pd.DataFrame(columns=COLUMNS)
     with _cache_lock:
         cached = _live_cache.get(coin)
+        fresh = time.time() - _last_refresh.get(coin, 0.0) < LIVE_REFRESH_MIN_SEC
+    if fresh and cached is not None and not cached.empty:
+        # Several bots read the same coin within one cycle: one request per
+        # LIVE_REFRESH_MIN_SEC (a still-forming minute is re-fetched after).
+        return cached.copy()
+    with _cache_lock:
+        _last_refresh[coin] = time.time()
     if cached is None or cached.empty or int(cached["ts"].min()) > now - (LIVE_CACHE_HOURS - 1) * 3600:
         _merge_into_live_cache(fetch_candles(coin, now - LIVE_CACHE_HOURS * 3600, now))
     else:

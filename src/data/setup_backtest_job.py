@@ -175,10 +175,22 @@ def run_options(days: int) -> dict[str, Any]:
 
 def run_crypto(days: int) -> dict[str, Any]:
     from data import alpaca_crypto_data, alpaca_crypto_setup, alpaca_crypto_strategy
-    symbols = alpaca_crypto_data.get_crypto_universe()[:MAX_SYMBOLS]
+    from data import kalshi_15m_spot
+    symbols = [s for s in alpaca_crypto_data.get_crypto_universe()
+               if s.split("/")[0].upper() not in alpaca_crypto_setup.STABLECOINS][:MAX_SYMBOLS]
     leaders = {s: alpaca_crypto_setup.leader_for(s) for s in symbols}
-    bars = {s: alpaca_crypto_setup.candles_from_bars(alpaca_crypto_data.fetch_crypto_bars(s, days=days))
-            for s in sorted(set(symbols) | set(leaders.values()))}
+    # Same chart the live bot reads: the coin's Coinbase history (HF archive)
+    # when it has one, else Alpaca's own bars.
+    spot = kalshi_15m_spot.load_spot_history(days=days)
+    archived = set(spot["coin"]) if not spot.empty else set()
+
+    def chart(sym: str) -> pd.DataFrame:
+        coin = sym.split("/")[0].upper()
+        if coin in archived:
+            return spot[spot.coin == coin][SPOT_COLUMNS].sort_values("ts").reset_index(drop=True)
+        return alpaca_crypto_setup.candles_from_bars(alpaca_crypto_data.fetch_crypto_bars(sym, days=days))
+
+    bars = {s: chart(s) for s in sorted(set(symbols) | set(leaders.values()))}
     fee = 2 * alpaca_crypto_strategy.TAKER_FEE_RATE
 
     def go(with_corr: bool) -> dict[str, Any]:

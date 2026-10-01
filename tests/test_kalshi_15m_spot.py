@@ -94,12 +94,26 @@ def test_recent_series_tops_up_the_live_cache(monkeypatch):
         return _minutes(coin, [100.0] * 3, start=end - 180)
 
     monkeypatch.setattr(ks, "fetch_candles", fake_fetch)
+    monkeypatch.setattr(ks, "_last_refresh", {})
     ks.recent_series("BTC")
     first_span = calls[0][1] - calls[0][0]
     assert first_span == ks.LIVE_CACHE_HOURS * 3600
     ks._live_cache["BTC"] = _minutes("BTC", [100.0] * 1700, start=int(ks.time.time()) - 1700 * 60)  # noqa: SLF001
+    ks._last_refresh.clear()  # noqa: SLF001
     ks.recent_series("BTC")
     assert calls[1][1] - calls[1][0] <= ks.MAX_CANDLES_PER_CALL * 60
+
+
+def test_bots_reading_the_same_coin_within_seconds_share_one_request(monkeypatch):
+    calls = []
+    monkeypatch.setattr(ks, "fetch_candles", lambda coin, start, end: calls.append(coin) or _minutes(coin, [100.0] * 3, start=end - 180))
+    monkeypatch.setattr(ks, "_last_refresh", {})
+    ks.recent_series("ETH")
+    ks.recent_series("ETH")
+    assert calls == ["ETH"]
+    monkeypatch.setattr(ks, "_last_refresh", {"ETH": ks.time.time() - ks.LIVE_REFRESH_MIN_SEC - 1})
+    ks.recent_series("ETH")
+    assert calls == ["ETH", "ETH"]
 
 
 def test_live_underlying_row_carries_the_strike(monkeypatch):

@@ -354,6 +354,7 @@ def evaluate_setup_candidate(symbol: str, *, traded_setup_ids: frozenset[str] = 
         "setup_valid": bool(setup.get("valid")), "setup_reason": setup.get("reason"), "setup": setup.get("setup"),
         "setup_id": setup.get("setup_id"), "setup_plan": setup.get("plan"), "setup_checks": setup.get("checks"),
         "setup_as_of": setup.get("as_of"), "setup_fee_rate_roundtrip": fee,
+        "chart_source": setup.get("chart_source"), "chart_price": setup.get("chart_price"),
     }
     if not setup.get("valid"):
         result["reason"] = f"no setup: {setup.get('reason')} rule not met"
@@ -1489,7 +1490,7 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
                     # not just a config flag with nothing visible behind it.
                     "correlation_score": candidate.get("correlation_score"),
                     "correlation_reason": candidate.get("correlation_reason"),
-                    **({k: candidate.get(k) for k in ("setup_reason", "setup_checks", "setup_plan", "setup")} if setup_mode else {}),
+                    **({k: candidate.get(k) for k in ("setup_reason", "setup_checks", "setup_plan", "setup", "chart_source")} if setup_mode else {}),
                 })
                 continue
             candidate["row"] = row
@@ -1523,6 +1524,7 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
                 entry_price = get_current_price(symbol) or 0.0
                 setup_plan = alpaca_crypto_setup.plan_at_price(
                     {"plan": candidate["setup_plan"]}, price=entry_price, fee_rate_roundtrip=candidate["setup_fee_rate_roundtrip"],
+                    chart_price=candidate.get("chart_price"),
                 )
                 if not setup_plan["ok"]:
                     opened.append({"symbol": symbol, "ok": True, "action": "skipped_setup_plan_at_price", "plan": setup_plan})
