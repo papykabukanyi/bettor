@@ -279,6 +279,72 @@ if ENTRY_STRATEGY not in {"debit_spread", "credit_spread", "naked"}:
 SPREAD_LIMIT_SLIPPAGE_PCT = _env_float("ALPACA_OPTIONS_SPREAD_LIMIT_SLIPPAGE_PCT", 0.10)
 
 
+# The trading method (alpaca_options_setup): a position opens only on a
+# confirmed price-action setup on the UNDERLYING's regular-session chart --
+# long setups (15m uptrend, resistance breakout that retests and holds, or a
+# failed breakdown) buy the bullish contract, short setups (the mirror
+# image) the bearish one -- with breakout volume, VWAP, RSI/MACD and no news
+# against it; the underlying's stop, target and reward/risk are planned
+# before entry, premium at risk is capped at RISK_PER_TRADE_PCT of the
+# balance, and the contract is closed when the underlying hits the stop or
+# target, or flat by 15:55 ET. No model or volume-z gate decides a setup
+# entry. ALPACA_OPTIONS_ENTRY_SYSTEM=legacy restores the old model path.
+ENTRY_SYSTEM = (os.getenv("ALPACA_OPTIONS_ENTRY_SYSTEM", "setup") or "setup").strip().lower()
+SETUP_IDS_REMEMBERED = 500
+
+
+def get_underlying_price(symbol: str) -> float | None:
+    """The underlying stock's live bid/ask mid."""
+    from data import alpaca_client
+    try:
+        quote = alpaca_client.get_latest_quote(symbol)
+        ask, bid = quote.get("ap"), quote.get("bp")
+        if ask and bid:
+            return (float(ask) + float(bid)) / 2.0
+        price = ask or bid
+        return float(price) if price else None
+    except Exception as exc:
+        logger.warning("[alpaca_options_strategy] underlying quote failed for %s: %s", symbol, exc)
+        return None
+
+
+def evaluate_setup_candidate(symbol: str, *, traded_setup_ids: frozenset[str] = frozenset()) -> dict[str, Any]:
+    from data import alpaca_options_setup
+    from data.stock_news import get_sentiment
+
+    try:
+        news = get_sentiment(symbol).get("sentiment_score")
+    except Exception as exc:
+        logger.debug("[alpaca_options_strategy] sentiment read failed for %s: %s", symbol, exc)
+        news = None
+    try:
+        setup = alpaca_options_setup.live_setup(symbol, news_score=news)
+    except Exception as exc:
+        logger.warning("[alpaca_options_strategy] setup evaluation failed for %s: %s", symbol, exc)
+        setup = {"valid": False, "reason": "data", "checks": {"data": {"ok": False, "detail": f"error: {exc}"}}}
+    result: dict[str, Any] = {
+        "symbol": symbol, "entry_system": "setup", "sentiment_score": news, "model_ok": False, "should_enter": False,
+        "direction": None, "score": 0.0, "setup_valid": bool(setup.get("valid")), "setup_reason": setup.get("reason"),
+        "setup": setup.get("setup"), "setup_side": setup.get("side") or setup.get("closest_side"),
+        "setup_id": setup.get("setup_id"), "setup_plan": setup.get("plan"), "setup_checks": setup.get("checks"),
+        "setup_as_of": setup.get("as_of"), "chart_source": setup.get("chart_source"),
+    }
+    if not setup.get("valid"):
+        result["reason"] = f"no setup: {setup.get('reason')} rule not met"
+        return result
+    if setup["setup_id"] in traded_setup_ids:
+        result["reason"] = f"{setup['setup']} already traded ({setup['setup_id']})"
+        return result
+    plan = setup["plan"]
+    direction = "up" if setup["side"] == "long" else "down"
+    result.update(
+        should_enter=True, direction=direction, score=float(plan["rr_net"]),
+        reason=(f"{setup['setup']} {setup['side']} on {symbol}: stop {plan['stop']:.2f}, target {plan['target']:.2f}, "
+                f"reward/risk {plan['rr_net']:.2f} -- buying the {'call' if direction == 'up' else 'put'} side"),
+    )
+    return result
+
+
 def evaluate_candidate(
     row: dict[str, Any], model_prediction: dict[str, Any] | None, *, confidence_min: float | None = None,
 ) -> dict[str, Any]:
@@ -452,6 +518,7 @@ def decide_exit(
     position: dict[str, Any], current_price: float, *, now: dt.datetime | None = None,
     dollar_volume_z: float | None = None, momentum_pct: float | None = None,
     breakout_pct_b: float | None = None, sentiment_score: float | None = None,
+    underlying_price: float | None = None,
 ) -> tuple[bool, str]:
     """Long-only (buying calls/puts is always a long position in the
     contract itself, regardless of which direction it bets on the
@@ -482,6 +549,20 @@ def decide_exit(
     now = now if now is not None else dt.datetime.now(dt.timezone.utc)
     if _near_expiration(position, now=now):
         return True, "near_expiration"
+
+    # A setup position exits only when the UNDERLYING hits the planned stop
+    # or target, or flat by 15:55 ET.
+    from data import alpaca_options_setup
+    if alpaca_options_setup.has_plan(position):
+        if alpaca_options_setup.must_be_flat(int(now.timestamp())):
+            return True, "session_close (flat by 15:55 ET)"
+        if underlying_price is None:
+            return False, "holding (no underlying quote this cycle)"
+        held_minutes = (now - dt.datetime.fromisoformat(position["opened_at"])).total_seconds() / 60.0
+        should, reason = alpaca_options_setup.plan_exit(
+            alpaca_options_setup.underlying_plan_position(position), underlying_price, held_minutes=held_minutes,
+        )
+        return should, (f"{reason} on the underlying at {underlying_price:.2f}" if should else reason)
 
     entry_price = float(position["entry_price"])
     exit_pcts = adaptive_exit_pcts(position.get("entry_volatility_30"))
@@ -537,7 +618,13 @@ def position_exit_levels(position: dict[str, Any]) -> dict[str, float]:
     A take-profit for a credit spread is BELOW entry_price (the spread's
     value dropping toward zero, both legs decaying, is the win); its
     stop-loss is ABOVE entry_price -- the opposite of a debit spread's own
-    "take-profit above, stop-loss below" shape."""
+    "take-profit above, stop-loss below" shape.
+
+    A setup position's levels are its planned stop and target on the
+    UNDERLYING (levels_on="underlying"), not premium prices."""
+    from data import alpaca_options_setup
+    if alpaca_options_setup.has_plan(position):
+        return {**alpaca_options_setup.exit_levels(alpaca_options_setup.underlying_plan_position(position)), "levels_on": "underlying"}
     entry_price = float(position["entry_price"])
     exit_pcts = adaptive_exit_pcts(position.get("entry_volatility_30"))
     sign = -1 if position.get("strategy") == "credit_spread" else 1
@@ -790,6 +877,7 @@ HF_ALPACA_OPTIONS_MODEL_REPO = os.getenv("HF_ALPACA_OPTIONS_MODEL_REPO", "papylo
 _DURABLE_STATE_HF_FILENAME = "alpaca_options_durable_state.json"
 _DURABLE_PUSH_MIN_INTERVAL_SEC = 30
 _last_durable_push_ts = 0.0
+_durable_push_pending = False
 
 
 def _today_str() -> str:
@@ -896,6 +984,7 @@ def _durable_state_slice(state: dict[str, Any]) -> dict[str, Any]:
         "realized_pnl_by_date": state.get("realized_pnl_by_date") or {},
         "daily_reference_balance": state.get("daily_reference_balance") or {},
         "tuning": state.get("tuning") or {},
+        "setup_ids_traded": state.get("setup_ids_traded") or [],
     }
 
 
@@ -979,16 +1068,22 @@ def _load_state() -> dict[str, Any]:
 
 
 def _save_state(state: dict[str, Any], *, push_durable: bool = False) -> None:
+    global _last_durable_push_ts, _durable_push_pending
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(state, f, indent=2)
-    if not push_durable:
+    if not push_durable and not _durable_push_pending:
         return
-    global _last_durable_push_ts
     now = time.time()
     if now - _last_durable_push_ts >= _DURABLE_PUSH_MIN_INTERVAL_SEC:
         _last_durable_push_ts = now
+        _durable_push_pending = False
         _push_durable_state_to_hf(state)
+    else:
+        # Throttled: the next save after the interval pushes instead, so a
+        # change inside the window (e.g. a new setup position and its plan)
+        # still reaches HF.
+        _durable_push_pending = True
 
 
 def record_milestone(current_balance: float) -> dict[str, Any]:
@@ -1505,9 +1600,19 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
         # Same durable-state-driven override for base position sizing --
         # see apply_strategy_sweep_override below.
         effective_position_size_pct = (state.get("tuning") or {}).get("position_size_pct", POSITION_SIZE_PCT)
+        traded_setup_ids = frozenset(state.get("setup_ids_traded") or [])
         _save_state(state, push_durable=reference_was_just_set)
     if loss_cap_breached:
         return {"opened": [], "action": "daily_loss_cap_breached"}
+    setup_mode = ENTRY_SYSTEM == "setup"
+    evidence_gate = None
+    if setup_mode:
+        from data import setup_backtest_job
+        evidence_gate = setup_backtest_job.evidence_gate("options")
+    if setup_mode:
+        from data import alpaca_options_setup
+        if not alpaca_options_setup.entry_allowed(int(time.time())):
+            return {"opened": [], "action": "outside_setup_entry_window"}
 
     # See stock_news.prewarm_sentiment's own docstring for the full,
     # confirmed root cause this fixes on the crypto side (same shape here)
@@ -1534,14 +1639,55 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
                 opened.append({"symbol": symbol, "ok": True, "action": "skipped_slot_taken"})
                 continue
 
-            row = latest_feature_row(symbol)
-            if row is None:
-                continue
-            model_prediction = predict_direction(symbol)
-            candidate = evaluate_candidate(row, model_prediction, confidence_min=confidence_min_override)
+            setup_plan = None
+            setup_fields: dict[str, Any] = {}
+            if setup_mode:
+                candidate = evaluate_setup_candidate(symbol, traded_setup_ids=traded_setup_ids)
+                row = {"symbol": symbol, "sentiment_score": candidate.get("sentiment_score")}
+            else:
+                row = latest_feature_row(symbol)
+                if row is None:
+                    continue
+                model_prediction = predict_direction(symbol)
+                candidate = evaluate_candidate(row, model_prediction, confidence_min=confidence_min_override)
             if not candidate["should_enter"]:
-                opened.append({"symbol": symbol, "ok": True, "action": "skipped", "reason": candidate["reason"]})
+                opened.append({
+                    "symbol": symbol, "ok": True, "action": "skipped", "reason": candidate["reason"],
+                    **({k: candidate.get(k) for k in ("setup_reason", "setup_checks", "setup_plan", "setup", "setup_side", "chart_source")} if setup_mode else {}),
+                })
                 continue
+            if setup_mode:
+                # Plan the entry and exit at the underlying's live quote;
+                # skipped if it already ran past the plan.
+                underlying_now = get_underlying_price(symbol) or 0.0
+                setup_plan = alpaca_options_setup.plan_at_price(
+                    {"side": "long" if candidate["direction"] == "up" else "short", "plan": candidate["setup_plan"]}, price=underlying_now,
+                )
+                if not setup_plan["ok"]:
+                    opened.append({"symbol": symbol, "ok": True, "action": "skipped_setup_plan_at_price", "plan": setup_plan})
+                    continue
+                from data import global_correlation_monitor
+                setup_direction = "long" if candidate["direction"] == "up" else "short"
+                exposure = global_correlation_monitor.correlated_exposure(symbol, setup_direction, bot="options")
+                candidate.setdefault("setup_checks", {})["exposure"] = exposure
+                if exposure["blocked"]:
+                    opened.append({"symbol": symbol, "ok": True, "action": "skipped_correlated_exposure", "exposure": exposure,
+                                   "reason": f"correlated exposure: {exposure['detail']}",
+                                   **{k: candidate.get(k) for k in ("setup_reason", "setup_checks", "setup_plan", "setup", "setup_side")}})
+                    continue
+                if evidence_gate is not None and not evidence_gate["open"]:
+                    opened.append({"symbol": symbol, "ok": True, "action": "skipped_evidence_gate", "evidence_gate": evidence_gate,
+                                   "reason": f"evidence gate closed: {evidence_gate['reason']}",
+                                   **{k: candidate.get(k) for k in ("setup_reason", "setup_checks", "setup_plan", "setup", "setup_side")}})
+                    continue
+                row["current_price"] = underlying_now
+                setup_fields = {
+                    "entry_system": "setup", "setup_side": "long" if candidate["direction"] == "up" else "short",
+                    "setup_stop_price": setup_plan["stop"], "setup_target_price": setup_plan["target"],
+                    "setup_id": candidate["setup_id"], "setup_kind": candidate["setup"], "setup_rr_net": setup_plan["rr_net"],
+                    "setup_risk_pct": setup_plan["risk_pct"], "setup_checks": candidate.get("setup_checks"),
+                    "entry_underlying_price": underlying_now,
+                }
 
             if ENTRY_STRATEGY == "debit_spread":
                 spread = select_spread_contracts(symbol, direction=candidate["direction"], current_price=row["current_price"])
@@ -1563,6 +1709,9 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
 
                 available_balance = get_available_balance()
                 qty = compute_contract_qty(available_balance, net_debit, position_size_pct=effective_position_size_pct)
+                if setup_plan is not None:
+                    qty = min(qty, alpaca_options_setup.risk_sized_contracts(
+                        balance_usd=available_balance, max_loss_per_contract_usd=net_debit * 100))
                 if qty < 1:
                     opened.append({"symbol": symbol, "ok": True, "action": "skipped_insufficient_budget"})
                     continue
@@ -1589,7 +1738,7 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
                     if fill.get("filled_avg_price"):
                         net_debit = float(fill["filled_avg_price"])
 
-                levels = position_exit_levels({"entry_price": net_debit, "entry_volatility_30": row.get("volatility_30")})
+                levels = position_exit_levels({"entry_price": net_debit, "entry_volatility_30": row.get("volatility_30"), **setup_fields})
                 position = {
                     "symbol": long_symbol, "underlying_symbol": symbol, "option_type": long_contract.get("type"),
                     "strategy": "debit_spread", "short_symbol": short_symbol,
@@ -1598,7 +1747,7 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
                     "entry_price": net_debit, "count": qty,
                     "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(),
                     "order_id": order_id, "entry_volatility_30": row.get("volatility_30"),
-                    **levels, **_entry_context(candidate, row),
+                    **levels, **_entry_context(candidate, row), **setup_fields,
                 }
                 contract_symbol, contract_type, entry_price = long_symbol, long_contract.get("type"), net_debit
             elif ENTRY_STRATEGY == "credit_spread":
@@ -1635,6 +1784,9 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
                 available_balance = get_available_balance()
                 max_loss_per_contract = max(0.01, SPREAD_WIDTH_DOLLARS - credit_received)
                 qty = compute_contract_qty(available_balance, max_loss_per_contract, position_size_pct=effective_position_size_pct)
+                if setup_plan is not None:
+                    qty = min(qty, alpaca_options_setup.risk_sized_contracts(
+                        balance_usd=available_balance, max_loss_per_contract_usd=max_loss_per_contract * 100))
                 if qty < 1:
                     opened.append({"symbol": symbol, "ok": True, "action": "skipped_insufficient_budget"})
                     continue
@@ -1668,6 +1820,7 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
 
                 levels = position_exit_levels({
                     "entry_price": net_value, "strategy": "credit_spread", "entry_volatility_30": row.get("volatility_30"),
+                    **setup_fields,
                 })
                 position = {
                     "symbol": long_symbol, "underlying_symbol": symbol, "option_type": long_contract.get("type"),
@@ -1677,7 +1830,7 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
                     "entry_price": net_value, "count": qty,
                     "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(),
                     "order_id": order_id, "entry_volatility_30": row.get("volatility_30"),
-                    **levels, **_entry_context(candidate, row),
+                    **levels, **_entry_context(candidate, row), **setup_fields,
                 }
                 contract_symbol, contract_type, entry_price = long_symbol, long_contract.get("type"), net_value
             else:
@@ -1694,6 +1847,9 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
 
                 available_balance = get_available_balance()
                 qty = compute_contract_qty(available_balance, contract_price, position_size_pct=effective_position_size_pct)
+                if setup_plan is not None:
+                    qty = min(qty, alpaca_options_setup.risk_sized_contracts(
+                        balance_usd=available_balance, max_loss_per_contract_usd=contract_price * 100))
                 if qty < 1:
                     opened.append({"symbol": symbol, "ok": True, "action": "skipped_insufficient_budget"})
                     continue
@@ -1709,7 +1865,7 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
                     if fill.get("filled_avg_price"):
                         contract_price = float(fill["filled_avg_price"])
 
-                levels = position_exit_levels({"entry_price": contract_price, "entry_volatility_30": row.get("volatility_30")})
+                levels = position_exit_levels({"entry_price": contract_price, "entry_volatility_30": row.get("volatility_30"), **setup_fields})
                 position = {
                     "symbol": contract_symbol, "underlying_symbol": symbol, "option_type": contract.get("type"),
                     "strategy": "naked",
@@ -1717,7 +1873,7 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
                     "entry_price": contract_price, "count": qty,
                     "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(),
                     "order_id": order_id, "entry_volatility_30": row.get("volatility_30"),
-                    **levels, **_entry_context(candidate, row),
+                    **levels, **_entry_context(candidate, row), **setup_fields,
                 }
                 contract_type, entry_price = contract.get("type"), contract_price
 
@@ -1729,14 +1885,19 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
                     continue
                 positions.append(position)
                 state["positions"] = positions
-                _save_state(state)
+                if setup_plan is not None:
+                    state["setup_ids_traded"] = ((state.get("setup_ids_traded") or []) + [candidate["setup_id"]])[-SETUP_IDS_REMEMBERED:]
+                # A setup position's plan must survive a restart (positions
+                # are part of the durable slice).
+                _save_state(state, push_durable=setup_plan is not None and not effective_dry_run)
                 existing_underlyings.add(symbol)
                 open_count = len(positions)
             trade_dry_run = effective_dry_run
             opened.append({
                 "symbol": symbol, "ok": True, "action": "opened", "contract_symbol": contract_symbol,
                 "strategy": position["strategy"], "option_type": contract_type, "entry_price": entry_price,
-                "count": qty, "dry_run": trade_dry_run,
+                "count": qty, "dry_run": trade_dry_run, "reason": candidate.get("reason"),
+                **({k: candidate.get(k) for k in ("setup_reason", "setup_checks", "setup_plan", "setup", "setup_side")} if setup_plan is not None else {}),
             })
             try:
                 threads_post.post_trade_entry(
@@ -1849,9 +2010,13 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                 # lazily, only in that case, to keep this loop cheap in the
                 # common case (see perps_strategy.py's identical pattern).
                 dollar_volume_z = momentum_pct = breakout_pct_b = sentiment_score_value = None
+                underlying_price = None
                 opened_at_check = dt.datetime.fromisoformat(position["opened_at"])
                 held_minutes_check = (dt.datetime.now(dt.timezone.utc) - opened_at_check).total_seconds() / 60.0
-                if held_minutes_check >= MAX_HOLD_MINUTES:
+                is_setup_position = bool(position.get("setup_stop_price"))
+                if is_setup_position:
+                    underlying_price = get_underlying_price(underlying_symbol)
+                elif held_minutes_check >= MAX_HOLD_MINUTES:
                     try:
                         from data.alpaca_data import latest_feature_row
                         promising_row = latest_feature_row(underlying_symbol)
@@ -1868,9 +2033,11 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                     position, current_price,
                     dollar_volume_z=dollar_volume_z, momentum_pct=momentum_pct,
                     breakout_pct_b=breakout_pct_b, sentiment_score=sentiment_score_value,
+                    underlying_price=underlying_price,
                 )
                 if not should_exit:
-                    checks.append({"symbol": contract_symbol, "ok": True, "exit_check": reason, "current_price": current_price})
+                    checks.append({"symbol": contract_symbol, "ok": True, "exit_check": reason, "current_price": current_price,
+                                   "underlying_price": underlying_price})
                     continue
 
             closed_count = float(position["count"])
@@ -1974,6 +2141,10 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                     "entry_bb_pct_b": position.get("entry_bb_pct_b"),
                     "entry_rsi_14": position.get("entry_rsi_14"),
                     "entry_sentiment_score": position.get("entry_sentiment_score"),
+                    "entry_system": position.get("entry_system", "legacy"), "setup_id": position.get("setup_id"),
+                    "setup_kind": position.get("setup_kind"), "setup_side": position.get("setup_side"),
+                    "setup_stop_price": position.get("setup_stop_price"), "setup_target_price": position.get("setup_target_price"),
+                    "setup_rr_net": position.get("setup_rr_net"),
                 }
                 trade_log = state.setdefault("trade_log", [])
                 trade_log.append(trade)

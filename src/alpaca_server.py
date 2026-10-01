@@ -705,6 +705,16 @@ def _ensure_background_jobs_started() -> None:
         if _startup_done:
             return
         if not scheduler.running and ENABLE_ALPACA_SCHEDULER:
+            # This bot's setup strategy re-tested daily on real data in its own
+            # low-priority process, published to its HF model repo
+            # (setup_backtest_job); once soon after a deploy if none exists.
+            from data import setup_backtest_job
+            scheduler.add_job(setup_backtest_job.launch, "cron", hour=4, minute=10, args=["stocks"],
+                              id="stocks_setup_backtest", replace_existing=True)
+            if setup_backtest_job.latest("stocks") is None:
+                scheduler.add_job(setup_backtest_job.launch, "date", args=["stocks"], id="stocks_setup_backtest_startup",
+                                  run_date=dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=70),
+                                  replace_existing=True)
             # next_run_time delayed a full interval -- see the identical fix
             # and its comment in app_kalshi.py's own perps_data_collect
             # registration: without this, APScheduler fires an interval job's
@@ -979,7 +989,12 @@ def api_alpaca_status():
         "latest_walkforward": latest_walkforward,
         "latest_backfill": latest_backfill,
         "market_session": market_session,
+        "setup_backtest": __import__("data.setup_backtest_job", fromlist=["latest"]).latest("stocks"),
+        "setup_evidence_gate": __import__("data.setup_backtest_job", fromlist=["evidence_gate"]).evidence_gate("stocks"),
         "params": {
+            "entry_system": alpaca_strategy.ENTRY_SYSTEM,
+            "setup_min_rr": __import__("data.alpaca_setup", fromlist=["MIN_RR"]).MIN_RR,
+            "setup_risk_per_trade_pct": __import__("data.alpaca_setup", fromlist=["RISK_PER_TRADE_PCT"]).RISK_PER_TRADE_PCT,
             "position_size_pct": effective_params["position_size_pct"],
             "max_concurrent_positions": effective_params["max_concurrent_positions"],
             "take_profit_pct": alpaca_strategy.TAKE_PROFIT_PCT,

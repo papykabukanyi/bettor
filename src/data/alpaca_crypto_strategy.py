@@ -320,6 +320,56 @@ def decide_entry_technical(row: dict[str, Any]) -> tuple[bool, str]:
     return True, f"dip ({dip_pct:+.3%}, z={dollar_volume_z:.2f})"
 
 
+# The trading method (alpaca_crypto_setup): a position opens only on a
+# confirmed price-action setup on the pair's own chart -- 15m uptrend, a
+# resistance breakout that retests and holds (or a failed breakdown),
+# breakout volume, price above a rising VWAP, RSI/MACD, no news against it
+# -- with stop, target and reward/risk planned before entry, and closes
+# only at that stop or target. Long only (Alpaca crypto is spot, no
+# shorting). No model, correlation or dip gate decides a setup entry.
+# ALPACA_CRYPTO_ENTRY_SYSTEM=legacy restores the old model/technical path.
+ENTRY_SYSTEM = (os.getenv("ALPACA_CRYPTO_ENTRY_SYSTEM", "setup") or "setup").strip().lower()
+SETUP_IDS_REMEMBERED = 500
+
+
+def evaluate_setup_candidate(symbol: str, *, traded_setup_ids: frozenset[str] = frozenset()) -> dict[str, Any]:
+    from data import alpaca_crypto_setup
+    from data.alpaca_crypto_data import symbol_to_coin
+    from data.crypto_news import get_sentiment
+
+    fee = 2 * TAKER_FEE_RATE
+    try:
+        news = get_sentiment(symbol_to_coin(symbol)).get("sentiment_score")
+    except Exception as exc:
+        logger.debug("[alpaca_crypto_strategy] sentiment read failed for %s: %s", symbol, exc)
+        news = None
+    try:
+        setup = alpaca_crypto_setup.live_setup(symbol, fee_rate_roundtrip=fee, news_score=news)
+    except Exception as exc:
+        logger.warning("[alpaca_crypto_strategy] setup evaluation failed for %s: %s", symbol, exc)
+        setup = {"valid": False, "reason": "data", "checks": {"data": {"ok": False, "detail": f"error: {exc}"}}}
+    result: dict[str, Any] = {
+        "symbol": symbol, "entry_system": "setup", "sentiment_score": news, "model_ok": False,
+        "technical_ok": bool(setup.get("valid")), "should_enter": False, "score": 0.0,
+        "setup_valid": bool(setup.get("valid")), "setup_reason": setup.get("reason"), "setup": setup.get("setup"),
+        "setup_id": setup.get("setup_id"), "setup_plan": setup.get("plan"), "setup_checks": setup.get("checks"),
+        "setup_as_of": setup.get("as_of"), "setup_fee_rate_roundtrip": fee,
+    }
+    if not setup.get("valid"):
+        result["reason"] = f"no setup: {setup.get('reason')} rule not met"
+        return result
+    if setup["setup_id"] in traded_setup_ids:
+        result["reason"] = f"{setup['setup']} already traded ({setup['setup_id']})"
+        return result
+    plan = setup["plan"]
+    result.update(
+        should_enter=True, score=float(plan["rr_net"]),
+        reason=(f"{setup['setup']} long: stop {plan['stop']:.6g}, target {plan['target']:.6g}, "
+                f"reward/risk {plan['rr_net']:.2f} after costs"),
+    )
+    return result
+
+
 def evaluate_candidate(
     row: dict[str, Any], model_prediction: dict[str, Any] | None, *, confidence_min: float | None = None,
     correlation_study_enabled: bool | None = None, correlation_max_adjustment: float | None = None,
@@ -511,7 +561,15 @@ def decide_exit(
     bullish-signed -- long-only here, so unlike perps_strategy.py's own
     identical param there's no side to flip it for. The caller
     (manage_open_positions) only passes a real value when
-    ALPACA_CRYPTO_USE_CORRELATION_STUDY is on."""
+    ALPACA_CRYPTO_USE_CORRELATION_STUDY is on.
+
+    A position opened on a price-action setup exits only at its planned
+    stop or target (alpaca_crypto_setup.plan_exit)."""
+    from data import alpaca_crypto_setup
+    if alpaca_crypto_setup.has_plan(position):
+        now = now if now is not None else dt.datetime.now(dt.timezone.utc)
+        held_minutes = (now - dt.datetime.fromisoformat(position["opened_at"])).total_seconds() / 60.0
+        return alpaca_crypto_setup.plan_exit(position, current_price, held_minutes=held_minutes)
     entry_price = float(position["entry_price"])
     exit_pcts = adaptive_exit_pcts(position.get("entry_volatility_30"))
     take_profit_pct = exit_pcts["take_profit_pct"]
@@ -586,7 +644,12 @@ def position_exit_levels(position: dict[str, Any]) -> dict[str, float]:
     position, derived from the same per-pair-adaptive percentages
     decide_exit() applies (see adaptive_exit_pcts) -- exists so callers
     (the dashboard) can show, per open position, real exit levels rather
-    than just trusting the config exists somewhere."""
+    than just trusting the config exists somewhere. A setup position's
+    levels are its planned stop and target."""
+    from data import alpaca_crypto_setup
+    if alpaca_crypto_setup.has_plan(position):
+        levels = alpaca_crypto_setup.exit_levels(position)
+        return {**levels, "quick_profit_price": levels["take_profit_price"]}
     entry_price = float(position["entry_price"])
     exit_pcts = adaptive_exit_pcts(position.get("entry_volatility_30"))
     return {
@@ -855,6 +918,7 @@ HF_ALPACA_CRYPTO_MODEL_REPO = os.getenv("HF_ALPACA_CRYPTO_MODEL_REPO", "papylove
 _DURABLE_STATE_HF_FILENAME = "alpaca_crypto_durable_state.json"
 _DURABLE_PUSH_MIN_INTERVAL_SEC = 30
 _last_durable_push_ts = 0.0
+_durable_push_pending = False
 
 
 def _today_str() -> str:
@@ -988,6 +1052,7 @@ def _durable_state_slice(state: dict[str, Any]) -> dict[str, Any]:
         "realized_pnl_by_date": state.get("realized_pnl_by_date") or {},
         "daily_reference_balance": state.get("daily_reference_balance") or {},
         "tuning": state.get("tuning") or {},
+        "setup_ids_traded": state.get("setup_ids_traded") or [],
     }
 
 
@@ -1072,16 +1137,22 @@ def _load_state() -> dict[str, Any]:
 
 
 def _save_state(state: dict[str, Any], *, push_durable: bool = False) -> None:
+    global _last_durable_push_ts, _durable_push_pending
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(state, f, indent=2)
-    if not push_durable:
+    if not push_durable and not _durable_push_pending:
         return
-    global _last_durable_push_ts
     now = time.time()
     if now - _last_durable_push_ts >= _DURABLE_PUSH_MIN_INTERVAL_SEC:
         _last_durable_push_ts = now
+        _durable_push_pending = False
         _push_durable_state_to_hf(state)
+    else:
+        # Throttled: the next save after the interval pushes instead, so a
+        # change inside the window (e.g. a new setup position and its plan)
+        # still reaches HF.
+        _durable_push_pending = True
 
 
 def record_milestone(current_balance: float) -> dict[str, Any]:
@@ -1357,11 +1428,17 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
         # Same durable-state-driven override for base position sizing --
         # see apply_strategy_sweep_override below.
         effective_position_size_pct = tuning_state.get("position_size_pct", POSITION_SIZE_PCT)
+        traded_setup_ids = frozenset(state.get("setup_ids_traded") or [])
         # push_durable only on the (once-daily) event a fresh reference
         # balance gets captured -- the value a restart must not silently lose.
         _save_state(state, push_durable=reference_was_just_set)
     if loss_cap_breached:
         return {"opened": [], "action": "daily_loss_cap_breached"}
+    setup_mode = ENTRY_SYSTEM == "setup"
+    evidence_gate = None
+    if setup_mode:
+        from data import setup_backtest_job
+        evidence_gate = setup_backtest_job.evidence_gate("crypto")
 
     # --- Phase 1: evaluate every symbol not already held (network calls,
     # deliberately outside the lock) -----------------------------------
@@ -1390,15 +1467,19 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
         try:
             if symbol_to_coin(symbol) in existing_coins:
                 continue
-            row = latest_feature_row(symbol)
-            if row is None:
-                continue
-            model_prediction = predict_direction(symbol)
-            candidate = evaluate_candidate(
-                row, model_prediction, confidence_min=confidence_min_override,
-                correlation_study_enabled=correlation_study_enabled_override,
-                correlation_max_adjustment=correlation_max_adjustment_override,
-            )
+            if setup_mode:
+                candidate = evaluate_setup_candidate(symbol, traded_setup_ids=traded_setup_ids)
+                row = {"symbol": symbol, "sentiment_score": candidate.get("sentiment_score")}
+            else:
+                row = latest_feature_row(symbol)
+                if row is None:
+                    continue
+                model_prediction = predict_direction(symbol)
+                candidate = evaluate_candidate(
+                    row, model_prediction, confidence_min=confidence_min_override,
+                    correlation_study_enabled=correlation_study_enabled_override,
+                    correlation_max_adjustment=correlation_max_adjustment_override,
+                )
             if not candidate["should_enter"]:
                 opened.append({
                     "symbol": symbol, "ok": True, "action": "skipped", "reason": candidate["reason"],
@@ -1408,6 +1489,7 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
                     # not just a config flag with nothing visible behind it.
                     "correlation_score": candidate.get("correlation_score"),
                     "correlation_reason": candidate.get("correlation_reason"),
+                    **({k: candidate.get(k) for k in ("setup_reason", "setup_checks", "setup_plan", "setup")} if setup_mode else {}),
                 })
                 continue
             candidate["row"] = row
@@ -1432,8 +1514,42 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
         try:
             row = candidate["row"]
             available_balance = get_available_balance()
-            entry_price = row["current_price"]
+            setup_plan = None
+            if candidate.get("entry_system") == "setup":
+                # Plan the entry and exit at the live quote: skipped if
+                # price already ran past the plan or reward/risk no longer
+                # pays after costs.
+                from data import alpaca_crypto_setup
+                entry_price = get_current_price(symbol) or 0.0
+                setup_plan = alpaca_crypto_setup.plan_at_price(
+                    {"plan": candidate["setup_plan"]}, price=entry_price, fee_rate_roundtrip=candidate["setup_fee_rate_roundtrip"],
+                )
+                if not setup_plan["ok"]:
+                    opened.append({"symbol": symbol, "ok": True, "action": "skipped_setup_plan_at_price", "plan": setup_plan})
+                    continue
+                from data import global_correlation_monitor
+                exposure = global_correlation_monitor.correlated_exposure(coin, "long", bot="crypto")
+                candidate.setdefault("setup_checks", {})["exposure"] = exposure
+                if exposure["blocked"]:
+                    opened.append({"symbol": symbol, "ok": True, "action": "skipped_correlated_exposure", "exposure": exposure,
+                                   "reason": f"correlated exposure: {exposure['detail']}",
+                                   **{k: candidate.get(k) for k in ("setup_reason", "setup_checks", "setup_plan", "setup")}})
+                    continue
+                if evidence_gate is not None and not evidence_gate["open"]:
+                    opened.append({"symbol": symbol, "ok": True, "action": "skipped_evidence_gate", "evidence_gate": evidence_gate,
+                                   "reason": f"evidence gate closed: {evidence_gate['reason']}",
+                                   **{k: candidate.get(k) for k in ("setup_reason", "setup_checks", "setup_plan", "setup")}})
+                    continue
+            else:
+                entry_price = row["current_price"]
             notional = compute_position_notional(available_balance, position_size_pct=effective_position_size_pct)
+            if setup_plan is not None:
+                # Calculate the risk: never more than loses RISK_PER_TRADE_PCT
+                # of the balance at the stop.
+                notional = min(notional, alpaca_crypto_setup.risk_sized_notional(
+                    balance_usd=available_balance, price=entry_price, stop=setup_plan["stop"],
+                    fee_rate_roundtrip=candidate["setup_fee_rate_roundtrip"],
+                ))
             if notional < 1.0 or entry_price <= 0:
                 opened.append({"symbol": symbol, "ok": True, "action": "skipped_insufficient_budget"})
                 continue
@@ -1446,7 +1562,14 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
             # actual exit decision (decide_exit, which reads
             # position["entry_volatility_30"] once the position exists)
             # used the adaptive ones, silently showing a misleading price.
-            levels = position_exit_levels({"entry_price": entry_price, "entry_volatility_30": row.get("volatility_30")})
+            setup_fields: dict[str, Any] = {}
+            if setup_plan is not None:
+                setup_fields = {
+                    "entry_system": "setup", "setup_stop_price": setup_plan["stop"], "setup_target_price": setup_plan["target"],
+                    "setup_id": candidate["setup_id"], "setup_kind": candidate["setup"], "setup_rr_net": setup_plan["rr_net"],
+                    "setup_risk_pct": setup_plan["risk_pct"], "setup_checks": candidate.get("setup_checks"),
+                }
+            levels = position_exit_levels({"entry_price": entry_price, "entry_volatility_30": row.get("volatility_30"), **setup_fields})
             order_id = None
             if not effective_dry_run:
                 from data import alpaca_client
@@ -1488,7 +1611,7 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
                 "symbol": symbol, "entry_price": entry_price, "count": count,
                 "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(),
                 "order_id": order_id, "entry_volatility_30": row.get("volatility_30"), "price_samples": [],
-                **levels, **entry_context,
+                **levels, **entry_context, **setup_fields,
             }
             with _STATE_LOCK:
                 state = _load_state()
@@ -1498,7 +1621,11 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
                     continue
                 positions.append(position)
                 state["positions"] = positions
-                _save_state(state)
+                if setup_plan is not None:
+                    state["setup_ids_traded"] = ((state.get("setup_ids_traded") or []) + [candidate["setup_id"]])[-SETUP_IDS_REMEMBERED:]
+                # A setup position's plan must survive a restart (positions
+                # are part of the durable slice).
+                _save_state(state, push_durable=setup_plan is not None and not effective_dry_run)
             claimed_coins.add(coin)
             trade_dry_run = effective_dry_run
             opened.append({
@@ -1506,6 +1633,7 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
                 "notional": notional, "dry_run": trade_dry_run, "reason": candidate.get("reason"),
                 "correlation_score": candidate.get("correlation_score"),
                 "correlation_reason": candidate.get("correlation_reason"),
+                **({k: candidate.get(k) for k in ("setup_reason", "setup_checks", "setup_plan", "setup")} if setup_plan is not None else {}),
             })
             try:
                 threads_post.post_trade_entry(
@@ -1602,7 +1730,7 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                 correlation_score_value = None
                 opened_at_check = dt.datetime.fromisoformat(position["opened_at"])
                 held_minutes_check = (now - opened_at_check).total_seconds() / 60.0
-                if held_minutes_check >= MAX_HOLD_MINUTES - PRE_EXIT_STUDY_MINUTES:
+                if held_minutes_check >= MAX_HOLD_MINUTES - PRE_EXIT_STUDY_MINUTES and not position.get("setup_stop_price"):
                     try:
                         from data.alpaca_crypto_data import latest_feature_row
                         promising_row = latest_feature_row(symbol)
@@ -1727,6 +1855,9 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                     "entry_sentiment_score": position.get("entry_sentiment_score"),
                     "entry_correlation_score": position.get("entry_correlation_score"),
                     "entry_correlation_reason": position.get("entry_correlation_reason"),
+                    "entry_system": position.get("entry_system", "legacy"), "setup_id": position.get("setup_id"),
+                    "setup_kind": position.get("setup_kind"), "setup_stop_price": position.get("setup_stop_price"),
+                    "setup_target_price": position.get("setup_target_price"), "setup_rr_net": position.get("setup_rr_net"),
                 }
                 trade_log = state.setdefault("trade_log", [])
                 trade_log.append(trade)

@@ -92,6 +92,23 @@
   }
   footer { color: var(--muted); font-size: 12px; text-align: center; margin-top: 36px; }
   a { color: #7dd3fc; }
+  .corr-wrap { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r); padding: 16px; margin-bottom: 22px; }
+  .corr-leaders { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 12px; }
+  .corr-chip { background: var(--surface2); border: 1px solid var(--border); border-radius: 10px; padding: 8px 12px; font-size: 13px; }
+  .corr-chip .st { font-weight: 700; margin-left: 6px; }
+  .corr-chip .st.up { color: var(--green); } .corr-chip .st.down { color: var(--red); } .corr-chip .st.mixed { color: var(--muted); }
+  .corr-note { color: var(--muted); font-size: 12px; margin: 6px 0 10px; }
+  .corr-grid { border-collapse: collapse; font-size: 11px; }
+  .corr-grid th { color: var(--muted); font-weight: 600; padding: 2px 4px; white-space: nowrap; }
+  .corr-grid th.row { text-align: right; }
+  .corr-grid td { width: 26px; height: 22px; border: 2px solid var(--surface); border-radius: 4px; text-align: center; color: transparent; }
+  .corr-grid td:hover { color: var(--text); outline: 1px solid var(--text); }
+  .corr-legend { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--muted); margin-top: 8px; }
+  .corr-legend .bar { width: 160px; height: 10px; border-radius: 5px; background: linear-gradient(90deg, #e66767, #2a2f3a, #3987e5); }
+  .corr-table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 8px; }
+  .corr-table th, .corr-table td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+  .corr-table th { color: var(--muted); font-weight: 600; }
+  .corr-scroll { overflow-x: auto; }
 </style>
 </head>
 <body>
@@ -171,6 +188,17 @@
     </div>
     <a class="btn" href="/options/">Open Dashboard &rarr;</a>
   </div>
+</div>
+
+<div class="section-label">&#128279; Global Correlation <span class="line"></span> <span id="corr-when" style="text-transform:none; letter-spacing:normal; font-weight:400;"></span></div>
+<div class="corr-wrap">
+  <div class="corr-leaders" id="corr-leaders"><span class="corr-chip">Loading&hellip;</span></div>
+  <div class="corr-note">Each bot checks its own market leader before an entry; across all five bots, a new position is skipped when <span id="corr-max">--</span> open positions would already be on effectively the same bet (same direction, correlation &ge; <span id="corr-min">--</span>, or the same symbol in two bots).</div>
+  <div id="corr-clusters" class="corr-note"></div>
+  <div class="corr-scroll"><table class="corr-table"><thead><tr><th>Bot</th><th>Symbol</th><th>Direction</th><th>Mode</th></tr></thead><tbody id="corr-exposures"><tr><td colspan="4" style="color:var(--muted)">Loading&hellip;</td></tr></tbody></table></div>
+  <div class="corr-note" style="margin-top:14px">Correlation of 15-minute returns over the last two days (hover a cell for the value; blank = not enough overlapping data).</div>
+  <div class="corr-scroll"><table class="corr-grid" id="corr-grid"></table></div>
+  <div class="corr-legend"><span>-1</span><span class="bar"></span><span>+1</span><span style="margin-left:10px">red: move opposite &middot; gray: unrelated &middot; blue: move together</span></div>
 </div>
 
 <div class="section-label">&#10024; AI Project Review <span class="line"></span> <span id="ai-report-when" style="text-transform:none; letter-spacing:normal; font-weight:400;"></span></div>
@@ -254,6 +282,49 @@
     body.textContent = (report.ok && report.report) ? report.report : `Review did not complete (${report.reason || "unknown reason"}).`;
   }).catch(() => {
     document.getElementById("ai-report-body").textContent = "Could not load the review.";
+  });
+
+  // Global correlation monitor (global_correlation_monitor.py on the Space).
+  const CORR_ORDER = ["BTC", "ETH", "SOL", "XRP", "DOGE", "BCH", "NEAR", "HYPE", "ZEC", "LINK", "LTC", "SUI", "ADA", "AAVE", "BNB", "SPY", "QQQ", "GOLD", "SILVER", "COPPER"];
+  const esc = (v) => String(v ?? "").replace(/[&<>"]/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[ch]));
+  function corrColor(v) {
+    if (v == null) return "transparent";
+    const mid = [42, 47, 58], pos = [57, 135, 229], neg = [230, 103, 103];
+    const pole = v >= 0 ? pos : neg, t = Math.min(1, Math.abs(v));
+    const c = mid.map((m, i) => Math.round(m + (pole[i] - m) * t));
+    return `rgb(${c[0]},${c[1]},${c[2]})`;
+  }
+  fetch("/api/correlation/global").then(r => r.json()).then(d => {
+    if (!d || !d.matrix) {
+      document.getElementById("corr-leaders").innerHTML = '<span class="corr-chip">Not computed yet: the monitor runs every 15 minutes.</span>';
+      document.getElementById("corr-exposures").innerHTML = "";
+      return;
+    }
+    document.getElementById("corr-when").textContent = d.computed_at ? "-- " + new Date(d.computed_at).toLocaleString() : "";
+    document.getElementById("corr-max").textContent = (d.params || {}).max_same_bet ?? "--";
+    document.getElementById("corr-min").textContent = (d.params || {}).exposure_corr ?? "--";
+    const L = d.leaders || {};
+    document.getElementById("corr-leaders").innerHTML = Object.entries(L).map(([group, x]) =>
+      `<span class="corr-chip">${esc(group)} leader <strong>${esc(x.symbol)}</strong><span class="st ${esc(x.state)}">${esc(x.state || "unknown")}</span>` +
+      `<span style="color:var(--muted)"> &middot; 1h ${x.ret_1h_pct ?? "--"}% &middot; 4h ${x.ret_4h_pct ?? "--"}%</span></span>`).join("");
+    const clusters = d.clusters || [];
+    document.getElementById("corr-clusters").innerHTML = clusters.length
+      ? clusters.map(c => `&#9888; Same bet across ${c.size} positions: ` + c.positions.map(p => `${esc(p.bot)} ${esc(p.direction)} ${esc(p.symbol)}`).join(", ")).join("<br>")
+      : "No two open positions are on the same bet right now.";
+    const ex = d.exposures || [];
+    document.getElementById("corr-exposures").innerHTML = ex.length
+      ? ex.map(e => `<tr><td>${esc(e.bot)}</td><td>${esc(e.symbol)}</td><td>${esc(e.direction)}</td><td>${e.dry_run ? "dry run" : "live"}</td></tr>`).join("")
+      : '<tr><td colspan="4" style="color:var(--muted)">No open positions in any bot.</td></tr>';
+    const syms = CORR_ORDER.filter(s => d.matrix[s]).concat((d.symbols || []).filter(s => !CORR_ORDER.includes(s)));
+    const head = "<tr><th></th>" + syms.map(s => `<th>${esc(s)}</th>`).join("") + "</tr>";
+    const rows = syms.map(a => `<tr><th class="row">${esc(a)}</th>` + syms.map(b => {
+      const v = a === b ? null : (d.matrix[a] || {})[b];
+      const title = a === b ? a : `${a} / ${b}: ${v == null ? "not enough overlap" : v.toFixed(2)}`;
+      return `<td title="${esc(title)}" style="background:${a === b ? "var(--surface2)" : corrColor(v)}">${v == null ? "" : v.toFixed(1)}</td>`;
+    }).join("") + "</tr>").join("");
+    document.getElementById("corr-grid").innerHTML = head + rows;
+  }).catch(() => {
+    document.getElementById("corr-leaders").innerHTML = '<span class="corr-chip">Could not load the correlation monitor.</span>';
   });
 </script>
 </body>

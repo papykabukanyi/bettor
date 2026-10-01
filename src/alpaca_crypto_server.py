@@ -666,6 +666,16 @@ def _ensure_background_jobs_started() -> None:
         if _startup_done:
             return
         if not scheduler.running and ENABLE_ALPACA_CRYPTO_SCHEDULER:
+            # This bot's setup strategy re-tested daily on real data in its own
+            # low-priority process, published to its HF model repo
+            # (setup_backtest_job); once soon after a deploy if none exists.
+            from data import setup_backtest_job
+            scheduler.add_job(setup_backtest_job.launch, "cron", hour=4, minute=40, args=["crypto"],
+                              id="crypto_setup_backtest", replace_existing=True)
+            if setup_backtest_job.latest("crypto") is None:
+                scheduler.add_job(setup_backtest_job.launch, "date", args=["crypto"], id="crypto_setup_backtest_startup",
+                                  run_date=dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=100),
+                                  replace_existing=True)
             # next_run_time delayed a full interval -- see the identical
             # fix and its comment in app_kalshi.py's own perps_data_collect
             # registration: without this, APScheduler fires an interval
@@ -1036,7 +1046,12 @@ def _crypto_status_snapshot() -> dict[str, Any]:
         # Real diagnostic visibility -- see crypto_correlation.study_health's
         # own docstring / app_kalshi.py's identical field for perps.
         "correlation_study_health": crypto_correlation.study_health(crypto_correlation.get_alpaca_study()),
+        "setup_backtest": __import__("data.setup_backtest_job", fromlist=["latest"]).latest("crypto"),
+        "setup_evidence_gate": __import__("data.setup_backtest_job", fromlist=["evidence_gate"]).evidence_gate("crypto"),
         "params": {
+            "entry_system": alpaca_crypto_strategy.ENTRY_SYSTEM,
+            "setup_min_rr": __import__("data.alpaca_crypto_setup", fromlist=["MIN_RR"]).MIN_RR,
+            "setup_risk_per_trade_pct": __import__("data.alpaca_crypto_setup", fromlist=["RISK_PER_TRADE_PCT"]).RISK_PER_TRADE_PCT,
             "position_size_pct": effective_params["position_size_pct"],
             "max_concurrent_positions": effective_params["max_concurrent_positions"],
             "take_profit_pct": alpaca_crypto_strategy.TAKE_PROFIT_PCT,

@@ -44,6 +44,25 @@ def _no_real_prewarm_network_calls(monkeypatch):
     yield
 
 
+@pytest.fixture(autouse=True)
+def _no_global_exposure_reads(monkeypatch):
+    """global_correlation_monitor.correlated_exposure reads every bot's real
+    state file -- stubbed open here; the exposure tests set it themselves."""
+    from data import global_correlation_monitor
+    monkeypatch.setattr(global_correlation_monitor, "correlated_exposure",
+                        lambda symbol, direction, *, bot: {"ok": True, "blocked": False, "matches": [], "detail": "stub"})
+    from data import setup_backtest_job
+    monkeypatch.setattr(setup_backtest_job, "evidence_gate", lambda bot: {"open": True, "gated": False, "reason": "stub"})
+
+
+@pytest.fixture(autouse=True)
+def _legacy_entry_system(monkeypatch):
+    """Most tests here lock down the legacy model entry path; the
+    price-action setup path has its own section (those set "setup")."""
+    monkeypatch.setattr(strat, "ENTRY_SYSTEM", "legacy")
+    monkeypatch.setattr(strat, "_durable_push_pending", False)
+
+
 def _row(**overrides):
     # dollar_volume_z/volatility_5/volatility_30 default comfortably above
     # MIN_VOLUME_Z/MIN_VOLATILITY_RATIO so existing entry tests reflect a
@@ -2271,3 +2290,108 @@ def test_compute_contract_qty_uses_the_overridden_position_size_pct(monkeypatch)
     overridden_qty = strat.compute_contract_qty(1000.0, 1.0, position_size_pct=0.40)
 
     assert overridden_qty == default_qty * 2
+
+
+# ---- price-action setup entry system (alpaca_options_setup) ----
+
+_SETUP = {
+    "valid": True, "side": "long", "setup": "breakout_retest", "reason": "setup_confirmed",
+    "setup_id": "breakout_retest:1790000000:196", "as_of": 1790000000,
+    "plan": {"entry": 196.0, "stop": 194.0, "target": 202.0, "rr_net": 2.9},
+    "checks": {"trend": {"ok": True}},
+}
+
+
+@pytest.fixture
+def setup_mode(monkeypatch, tmp_path):
+    from data import alpaca_options_setup
+    monkeypatch.setattr(strat, "ENTRY_SYSTEM", "setup")
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", False)
+    monkeypatch.setattr(alpaca_options_setup, "entry_allowed", lambda ts: True)
+    monkeypatch.setattr(alpaca_options_setup, "must_be_flat", lambda ts: False)
+    monkeypatch.setattr(alpaca_options_setup, "live_setup", lambda symbol, **kw: dict(_SETUP))
+    monkeypatch.setattr(stock_news, "get_sentiment", lambda symbol, **kw: {"sentiment_score": 0.0})
+    monkeypatch.setattr(strat, "get_underlying_price", lambda symbol: 196.1)
+    monkeypatch.setattr(strat, "get_available_balance", lambda: 100_000.0)
+    monkeypatch.setattr(alpaca_options_data, "get_options_universe", lambda: ["AAPL"])
+    seen = {}
+
+    def spread(underlying, *, direction, current_price):
+        seen["direction"], seen["price"] = direction, current_price
+        return _spread_contracts()
+
+    monkeypatch.setattr(alpaca_options_data, "select_spread_contracts", spread)
+    monkeypatch.setattr(alpaca_client, "get_option_latest_quote",
+                        lambda symbol: {"AAPL240223C00195000": {"ap": 2.1, "bp": 1.9}, "AAPL240223C00200000": {"ap": 1.1, "bp": 0.9}}[symbol])
+    monkeypatch.setattr(threads_post, "post_trade_entry", lambda **kw: None)
+    monkeypatch.setattr(threads_post, "post_trade_entry_chart", lambda **kw: None)
+    monkeypatch.setattr(alpaca_data, "fetch_recent_minute_bars", lambda symbol, **kw: pd.DataFrame())
+
+    def fail(*a, **k):
+        raise AssertionError("no model/feature read in setup mode")
+
+    monkeypatch.setattr(alpaca_options_data, "latest_feature_row", fail)
+    monkeypatch.setattr(alpaca_options_model, "predict_direction", fail)
+    return seen
+
+
+def test_setup_entry_buys_the_bullish_spread_with_the_underlying_plan(setup_mode):
+    result = strat.scan_and_enter()
+    assert result["opened"][0]["action"] == "opened"
+    assert setup_mode == {"direction": "up", "price": 196.1}
+    position = strat._load_state()["positions"][0]  # noqa: SLF001
+    assert position["setup_side"] == "long" and position["setup_stop_price"] == 194.0 and position["setup_target_price"] == 202.0
+    assert position["levels_on"] == "underlying"
+    # Premium at risk capped at 1% of $100k: net debit $1.00 x 100 = $100/contract -> 10 contracts.
+    assert position["count"] == min(strat.compute_contract_qty(100_000.0, 1.0), 10)
+
+
+def test_a_short_setup_buys_the_bearish_side(setup_mode, monkeypatch):
+    from data import alpaca_options_setup
+    short = {**_SETUP, "side": "short", "plan": {"entry": 196.0, "stop": 198.0, "target": 190.0, "rr_net": 2.9}}
+    monkeypatch.setattr(alpaca_options_setup, "live_setup", lambda symbol, **kw: dict(short))
+    assert strat.scan_and_enter()["opened"][0]["action"] == "opened"
+    assert setup_mode["direction"] == "down"
+    assert strat._load_state()["positions"][0]["setup_side"] == "short"  # noqa: SLF001
+
+
+def test_setup_entry_skipped_when_the_underlying_ran_past_the_plan(setup_mode, monkeypatch):
+    monkeypatch.setattr(strat, "get_underlying_price", lambda symbol: 201.9)
+    assert strat.scan_and_enter()["opened"][0]["action"] == "skipped_setup_plan_at_price"
+
+
+@pytest.mark.parametrize("side,underlying,exits,why", [
+    ("long", 193.9, True, "stop_loss"), ("long", 202.1, True, "take_profit"), ("long", 197.0, False, None),
+    ("short", 198.1, True, "stop_loss"), ("short", 189.9, True, "take_profit"),
+])
+def test_setup_option_exits_on_the_underlying_plan(monkeypatch, side, underlying, exits, why):
+    from data import alpaca_options_setup
+    monkeypatch.setattr(alpaca_options_setup, "must_be_flat", lambda ts: False)
+    stop, target = (194.0, 202.0) if side == "long" else (198.0, 190.0)
+    pos = {**_position(minutes_ago=30), "setup_side": side, "setup_stop_price": stop, "setup_target_price": target}
+    # A premium move that would fire the legacy take-profit does not exit a setup position.
+    should, reason = strat.decide_exit(pos, 5.0 * (1 + strat.TAKE_PROFIT_PCT + 0.5), underlying_price=underlying)
+    assert should is exits
+    if why:
+        assert reason.startswith(why)
+
+
+def test_setup_option_is_flat_by_the_close(monkeypatch):
+    from data import alpaca_options_setup
+    monkeypatch.setattr(alpaca_options_setup, "must_be_flat", lambda ts: True)
+    pos = {**_position(minutes_ago=30), "setup_side": "long", "setup_stop_price": 194.0, "setup_target_price": 202.0}
+    should, reason = strat.decide_exit(pos, 5.0, underlying_price=197.0)
+    assert should and reason.startswith("session_close")
+
+
+def test_setup_entry_is_skipped_when_the_bet_is_already_open_across_bots(setup_mode, monkeypatch):
+    from data import global_correlation_monitor
+    seen = {}
+    monkeypatch.setattr(global_correlation_monitor, "correlated_exposure",
+                        lambda symbol, direction, *, bot: seen.update(symbol=symbol, direction=direction, bot=bot) or (lambda symbol, direction, *, bot: {"ok": False, "blocked": True, "matches": [{"bot": "crypto", "symbol": symbol}],
+                                                      "detail": "2 open position(s) already on this bet"})(symbol, direction, bot=bot))
+    result = strat.scan_and_enter()
+    assert result["opened"][0]["action"] == "skipped_correlated_exposure"
+    assert seen == {"symbol": "AAPL", "direction": "long", "bot": "options"}
+    assert strat._load_state()["positions"] == []  # noqa: SLF001

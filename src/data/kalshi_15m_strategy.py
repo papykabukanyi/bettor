@@ -150,6 +150,7 @@ import json
 import logging
 import os
 import threading
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -864,6 +865,19 @@ PATTERN_STUDY_MIN_SCORE = _env_int("KALSHI_15M_PATTERN_STUDY_MIN_SCORE", -2)
 
 
 # Entry mode.
+#   "setup"  -- the trading method (kalshi_15m_setup), the default: a
+#               confirmed price-action setup on the underlying's own chart
+#               (Coinbase spot for crypto, COMEX futures for metals) -- 15m
+#               trend, a support/resistance breakout that retests and holds
+#               (or a failed breakdown), breakout volume, VWAP, RSI/MACD, no
+#               news against it -- with stop and target planned on the
+#               underlying. A long setup buys YES, a short setup buys NO,
+#               only when the contract's own reward/risk at the real ask
+#               after Kalshi's fee on both legs clears the setup's MIN_RR.
+#               Sized so the planned stop loses at most RISK_PER_TRADE_PCT
+#               of the budget; sold when the underlying reaches the stop or
+#               target, otherwise settled. No model, trust or streak gate
+#               decides a setup entry.
 #   "ev"     -- enter only where kalshi_15m_edge_model's p(side) beats the
 #               real ask after Kalshi's taker fee by at least
 #               kalshi_15m_edge_model.EV_MIN_EDGE, and (EV_REQUIRE_CERTIFIED)
@@ -874,22 +888,88 @@ PATTERN_STUDY_MIN_SCORE = _env_int("KALSHI_15M_PATTERN_STUDY_MIN_SCORE", -2)
 #               wins at an average 48.7c entry, -$39.10 gross (~-$48 after
 #               fees); win rate tracked the price paid, and the more the
 #               model disagreed with Kalshi's price, the worse it did.
-ENTRY_MODE = (os.getenv("KALSHI_15M_ENTRY_MODE", "ev") or "ev").strip().lower()
+ENTRY_MODE = (os.getenv("KALSHI_15M_ENTRY_MODE", "setup") or "setup").strip().lower()
 EV_REQUIRE_CERTIFIED = _env_flag("KALSHI_15M_EV_REQUIRE_CERTIFIED", default=True)
+SETUP_IDS_REMEMBERED = 500
 
 
 def entry_mode() -> str:
-    return "legacy" if ENTRY_MODE == "legacy" else "ev"
+    return ENTRY_MODE if ENTRY_MODE in ("legacy", "ev") else "setup"
 
 
 def _mode_trades(trade_log: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
     """The trade history the trust/streak/concurrency gates learn from: only
     trades placed under the current entry mode (pre-EV trades carry no
-    entry_mode and count as legacy), so EV entries are not blocked by the
-    legacy model's record or vice versa."""
-    if entry_mode() == "ev":
-        return [t for t in trade_log or [] if t.get("entry_mode") == "ev"]
+    entry_mode and count as legacy), so one mode's entries are never blocked
+    by another mode's record."""
+    mode = entry_mode()
+    if mode in ("ev", "setup"):
+        return [t for t in trade_log or [] if t.get("entry_mode") == mode]
     return [t for t in trade_log or [] if t.get("entry_mode") in (None, "legacy")]
+
+
+def _setup_news_score(coin: str) -> float | None:
+    try:
+        if coin in kalshi_15m.KNOWN_15M_METALS_SERIES:
+            from data.crypto_news import get_generic_sentiment
+            return get_generic_sentiment(f"{coin.lower()} price", cache_key=f"metal:{coin}").get("sentiment_score")
+        from data.crypto_news import get_sentiment
+        return get_sentiment(coin).get("sentiment_score")
+    except Exception as exc:
+        logger.debug("[kalshi_15m_strategy] news read failed for %s: %s", coin, exc)
+        return None
+
+
+def _evaluate_candidate_setup(
+    coin: str, market: dict[str, Any], seconds_to_close: float, *, traded_setup_ids: frozenset[str] = frozenset(),
+) -> dict[str, Any]:
+    """Setup-mode decision for one coin -- see ENTRY_MODE. Blocked results
+    carry the checklist so the dashboard shows which rule stopped it."""
+    from data import kalshi_15m_setup
+    open_ts = None
+    if market.get("open_time"):
+        try:
+            open_ts = int(dt.datetime.fromisoformat(str(market["open_time"]).replace("Z", "+00:00")).timestamp())
+        except (TypeError, ValueError):
+            open_ts = None
+    news = _setup_news_score(coin)
+    try:
+        setup = kalshi_15m_setup.live_setup(coin, news_score=news, strike_ts=open_ts)
+    except Exception as exc:
+        logger.warning("[kalshi_15m_strategy] setup evaluation failed for %s: %s", coin, exc)
+        setup = {"valid": False, "reason": "data", "checks": {"data": {"ok": False, "detail": f"error: {exc}"}}}
+    info = {
+        "entry_mode": "setup", "setup_reason": setup.get("reason"), "setup": setup.get("setup"),
+        "setup_side": setup.get("side") or setup.get("closest_side"), "setup_id": setup.get("setup_id"),
+        "setup_plan": setup.get("plan"), "setup_checks": setup.get("checks"), "setup_as_of": setup.get("as_of"),
+        "underlying_price": setup.get("underlying_price"), "strike_underlying": setup.get("strike_underlying"),
+        "sentiment_score": news,
+    }
+    # The chart is read every cycle (the dashboard's checklist), but an
+    # entry needs enough of the window left for the planned move.
+    if seconds_to_close < MIN_SECONDS_TO_CLOSE_FOR_ENTRY:
+        return {"ok": False, "reason": "too_little_time_remaining", "seconds_to_close": seconds_to_close, **info}
+    if not setup.get("valid"):
+        return {"ok": False, "reason": f"setup_{setup.get('reason')}", **info}
+    if setup["setup_id"] in traded_setup_ids:
+        return {"ok": False, "reason": "setup_already_traded", **info}
+    if setup.get("strike_underlying") is None:
+        return {"ok": False, "reason": "no_strike_reference", **info}
+    plan = kalshi_15m_setup.contract_plan(setup, market, seconds_to_close=seconds_to_close,
+                                          strike_underlying=float(setup["strike_underlying"]))
+    info["contract_plan"] = plan
+    if not plan.get("ok"):
+        return {"ok": False, "reason": plan.get("reason"), **info}
+    p_yes_now = kalshi_15m_setup.fair_value_yes(
+        float(setup["underlying_price"]), float(setup["strike_underlying"]), float(setup.get("vol_per_min") or 0.0),
+        seconds_to_close / 60.0,
+    )
+    side = plan["contract_side"]
+    return {
+        "ok": True, "coin": coin, "side": side, "market": market,
+        "probability_up": p_yes_now, "confidence": p_yes_now if side == "yes" else 1.0 - p_yes_now,
+        "effective_confidence_min": None, "feature_row": None, **info,
+    }
 
 
 def build_live_context() -> dict[str, Any]:
@@ -1119,6 +1199,7 @@ def _durable_state_slice(state: dict[str, Any]) -> dict[str, Any]:
         # LEARNED from real trade history back to the hardcoded default on
         # every single deploy.
         "tuning": state.get("tuning") or {},
+        "setup_ids_traded": state.get("setup_ids_traded") or [],
     }
 
 
@@ -1250,7 +1331,7 @@ def evaluate_candidate(
     coin: str, *, confidence_min: float | None = None,
     correlation_study_enabled: bool | None = None, correlation_max_adjustment: float | None = None,
     trade_log: list[dict[str, Any]] | None = None, use_real_outcome_calibration: bool | None = None,
-    live_context: dict[str, Any] | None = None,
+    live_context: dict[str, Any] | None = None, traded_setup_ids: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     """Pure decision logic for one coin -- no state, no order placement,
     no side effects. Returns {"ok": False, "reason": ...} when there's
@@ -1298,6 +1379,8 @@ def evaluate_candidate(
         return {"ok": False, "reason": "no_open_window"}
 
     remaining = kalshi_15m.seconds_to_close(market)
+    if remaining is not None and entry_mode() == "setup":
+        return _evaluate_candidate_setup(coin, market, remaining, traded_setup_ids=traded_setup_ids)
     if remaining is not None and entry_mode() == "ev":
         return _evaluate_candidate_ev(coin, market, remaining, live_context)
     if remaining is None or remaining < MIN_SECONDS_TO_CLOSE_FOR_ENTRY:
@@ -1611,6 +1694,20 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
         # same for every coin in one scan pass, so computed once here too.
         current_et_hour = _current_et_hour()
         hour_trust = hour_is_trusted(current_et_hour, state.get("trade_log"))
+        traded_setup_ids = frozenset(state.get("setup_ids_traded") or [])
+        if mode == "setup":
+            # The setup alone decides: the model-era trust, streak-cooldown
+            # and loss-retrain gates don't apply. Kept: one position per
+            # coin, one crypto position at a time, metals' concurrency cap.
+            hour_trust = {**hour_trust, "trusted": True, "reason": "not_applied_in_setup_mode"}
+            win_streak_cooldown = {**win_streak_cooldown, "active": False}
+            if crypto_gate.get("reason") == "crypto_loss_retrain_pending":
+                crypto_gate = {"open": True, "reason": "setup_mode_no_retrain_gate"}
+
+    evidence_gate = {"open": True, "gated": False, "reason": "not_setup_mode"}
+    if mode == "setup":
+        from data import setup_backtest_job
+        evidence_gate = setup_backtest_job.evidence_gate("kalshi15m")
 
     for coin in ASSET_SERIES:
         coin_market = _market_of(coin)
@@ -1658,7 +1755,7 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
             # Per-coin trust gate -- see coin_is_trusted's own comment.
             # Reuses the SAME state snapshot already read above, no extra
             # state read needed.
-            trust = coin_is_trusted(coin, state.get("trade_log"))
+            trust = coin_is_trusted(coin, state.get("trade_log")) if mode != "setup" else {"trusted": True}
             if not trust["trusted"]:
                 checks.append({"coin": coin, "ok": False, **trust})
                 continue
@@ -1667,13 +1764,27 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
             coin, confidence_min=confidence_min_override,
             correlation_study_enabled=correlation_study_enabled_override,
             correlation_max_adjustment=correlation_max_adjustment_override,
-            trade_log=state.get("trade_log"), live_context=live_context,
+            trade_log=state.get("trade_log"), live_context=live_context, traded_setup_ids=traded_setup_ids,
         )
         if not decision.get("ok"):
             checks.append({"coin": coin, **decision})
             continue
 
         market = decision["market"]
+        if mode == "setup" and not evidence_gate["open"]:
+            checks.append({"coin": coin, "ok": False, "reason": "evidence_gate_closed", "evidence_gate": evidence_gate,
+                           **{k: decision.get(k) for k in ("setup_reason", "setup_checks", "setup_plan", "setup", "setup_side",
+                                                            "contract_plan")}})
+            continue
+        if mode == "setup":
+            from data import global_correlation_monitor
+            exposure = global_correlation_monitor.correlated_exposure(coin, decision["setup_side"], bot="kalshi15m")
+            decision.setdefault("setup_checks", {})["exposure"] = exposure
+            if exposure["blocked"]:
+                checks.append({"coin": coin, "ok": False, "reason": "correlated_exposure", "exposure": exposure,
+                               **{k: decision.get(k) for k in ("setup_reason", "setup_checks", "setup_plan", "setup", "setup_side",
+                                                                "contract_plan")}})
+                continue
         # Price/side: cross the spread at the current best offer for the
         # chosen side (a marketable IOC order, same "pay the spread for a
         # real fill over a resting order that might never fill" tradeoff
@@ -1737,10 +1848,23 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
         win_streak_multiplier = 1.0
         if effective_use_win_streak_sizing:
             win_streak_multiplier = compute_win_streak_size_multiplier(coin, state.get("trade_log"))
+        budget_usd = _account_budget_usd()
         contracts = max(1, int(
-            (_account_budget_usd() * effective_position_size_pct * size_multiplier * loss_streak_multiplier * win_streak_multiplier)
+            (budget_usd * effective_position_size_pct * size_multiplier * loss_streak_multiplier * win_streak_multiplier)
             / cost_basis
         ))
+        if mode == "setup":
+            # Calculate the risk: never more contracts than lose
+            # RISK_PER_TRADE_PCT of the budget if sold at the planned stop.
+            from data import kalshi_15m_setup
+            risk_contracts = kalshi_15m_setup.risk_sized_contracts(
+                budget_usd=budget_usd, risk_per_contract_usd=float(decision["contract_plan"]["risk"]),
+            )
+            if risk_contracts < 1:
+                checks.append({"coin": coin, "ok": False, "reason": "setup_risk_budget_below_one_contract",
+                               "risk_per_contract_usd": decision["contract_plan"]["risk"]})
+                continue
+            contracts = min(contracts, risk_contracts)
         client_order_id = str(uuid.uuid4())
 
         order_id = None
@@ -1888,9 +2012,19 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
             # from -- see _clean_feature_snapshot's own docstring.
             "entry_feature_snapshot": _clean_feature_snapshot(decision.get("feature_row")),
         }
+        if mode == "setup":
+            plan = decision["setup_plan"]
+            position.update({
+                "setup_side": decision["setup_side"], "setup_stop_price": plan["stop"], "setup_target_price": plan["target"],
+                "setup_id": decision["setup_id"], "setup_kind": decision["setup"], "setup_rr_net": plan["rr_net"],
+                "setup_strike_underlying": decision["strike_underlying"], "setup_contract_plan": decision["contract_plan"],
+                "setup_checks": decision.get("setup_checks"), "entry_underlying_price": decision.get("underlying_price"),
+            })
         with _STATE_LOCK:
             state = _load_state()
             state["positions"].append(position)
+            if mode == "setup":
+                state["setup_ids_traded"] = ((state.get("setup_ids_traded") or []) + [decision["setup_id"]])[-SETUP_IDS_REMEMBERED:]
             _save_state(state, push_durable=not effective_dry_run)
         if coin_market == "metals":
             metals_open_count += 1
@@ -1905,16 +2039,22 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
             # flag as the gate check itself -- with the gate disabled,
             # crypto has no concurrency limit to enforce here at all.
             crypto_gate = {**crypto_gate, "open": False, "reason": "crypto_position_just_opened_this_cycle"}
-        checks.append({"coin": coin, "ok": True, "action": "entered", "side": decision["side"], "count": filled_count, "dry_run": effective_dry_run})
+        checks.append({
+            "coin": coin, "ok": True, "action": "entered", "side": decision["side"], "count": filled_count, "dry_run": effective_dry_run,
+            **({k: decision.get(k) for k in ("setup_reason", "setup_checks", "setup_plan", "setup", "setup_side", "contract_plan")}
+               if mode == "setup" else {}),
+        })
 
     _LAST_SCAN.clear()
     _LAST_SCAN.update({
         "at": dt.datetime.now(dt.timezone.utc).isoformat(), "entry_mode": mode, "dry_run": effective_dry_run,
+        "evidence_gate": evidence_gate,
         "checks": [{k: v for k, v in c.items() if k not in ("market", "feature_row")} for c in checks],
     })
     return {
         "ok": True, "checks": checks, "live_trading_enabled": LIVE_TRADING_ENABLED,
         "win_streak_cooldown": win_streak_cooldown, "hour_trust": hour_trust, "crypto_sequential_gate": crypto_gate,
+        "evidence_gate": evidence_gate,
     }
 
 
@@ -2361,6 +2501,130 @@ def decide_early_exit(position: dict[str, Any], *, current_value: float) -> dict
     }
 
 
+def _close_position_now(
+    position: dict[str, Any], market: dict[str, Any], *, current_value: float, exit_reason: str, close_reason: str,
+    dry_run: bool, check: dict[str, Any],
+) -> None:
+    """Sell the held side now (a marketable IOC order at the current bid)
+    and book the trade; a dry-run position books the same exit simulated at
+    that bid. Updates `check` with what happened."""
+    coin = position["coin"]
+    filled_count = float(position["count"])
+    order: dict[str, Any] | None = None
+    if not dry_run:
+        side_char, price = _exit_order_side_and_price(position["side"], market)
+        client_order_id = str(uuid.uuid4())
+        try:
+            order_result = kalshi_15m.create_order(
+                ticker=position["ticker"], side=side_char, count=position["count"], price=price,
+                client_order_id=client_order_id,
+            )
+            order = order_result.get("order") or order_result
+            order_id = order.get("order_id")
+        except Exception as exc:
+            logger.warning("[kalshi_15m_strategy] early-exit order placement failed for %s: %s", coin, exc)
+            check["exit_order_failed"] = str(exc)
+            return
+
+        # Reads the fill count directly off the CREATE response first --
+        # see scan_and_enter's own identical comment on why (Kalshi's own
+        # docs confirm fill_count/remaining_count are returned
+        # synchronously for an IOC order; a separate follow-up GET call
+        # is a real eventual-consistency race, not a more-reliable check).
+        filled_count = float(order.get("fill_count_fp") or order.get("fill_count") or 0.0)
+        if filled_count <= 0:
+            try:
+                fresh_orders = kalshi_15m.get_orders(ticker=position["ticker"])
+                match = next((o for o in fresh_orders if o.get("order_id") == order_id), None)
+                if match is not None:
+                    filled_count = float(match.get("fill_count_fp") or match.get("fill_count") or 0.0)
+            except Exception as exc:
+                logger.warning("[kalshi_15m_strategy] could not verify early-exit fill for %s (%s): %s", order_id, coin, exc)
+        if filled_count <= 0:
+            check["exit_order_not_filled"] = True
+            return
+
+    gross_pnl = round(filled_count * (current_value - position["entry_price"]), 6)
+    exit_fee, _ = kalshi_15m.order_fee_usd(order, count=filled_count, price=current_value)
+    fees = round(_position_entry_fee(position) + exit_fee, 6)
+    realized_pnl = round(gross_pnl - fees, 6)
+    trade = {
+        "coin": coin, "ticker": position["ticker"], "side": position["side"], "count": filled_count,
+        "entry_price": position["entry_price"], "exit_price": current_value, "result": None, "realized_pnl_usd": realized_pnl,
+        "gross_pnl_usd": gross_pnl, "fees_usd": fees,
+        "entry_edge_usd": position.get("entry_edge_usd"), "entry_model_p_side": position.get("entry_model_p_side"),
+        "entry_minute": position.get("entry_minute"), "entry_mode": position.get("entry_mode"),
+        "entry_model_name": position.get("entry_model_name"), "entry_model_certified": position.get("entry_model_certified"),
+        "opened_at": position["opened_at"], "closed_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "entry_probability_up": position.get("entry_probability_up"), "entry_confidence": position.get("entry_confidence"),
+        "entry_calibrated_probability_up": position.get("entry_calibrated_probability_up"),
+        "entry_calibrated_confidence": position.get("entry_calibrated_confidence"),
+        "entry_real_outcome_calibration_applied": position.get("entry_real_outcome_calibration_applied"),
+        "dry_run": dry_run, "entry_correlation_score": position.get("entry_correlation_score"),
+        "entry_conviction_sizing_enabled": position.get("entry_conviction_sizing_enabled"),
+        "entry_loss_streak_multiplier": position.get("entry_loss_streak_multiplier"),
+        "entry_win_streak_sizing_enabled": position.get("entry_win_streak_sizing_enabled"),
+        "entry_win_streak_multiplier": position.get("entry_win_streak_multiplier"),
+        "entry_feature_snapshot": position.get("entry_feature_snapshot"),
+        "setup_id": position.get("setup_id"), "setup_kind": position.get("setup_kind"), "setup_side": position.get("setup_side"),
+        "setup_stop_price": position.get("setup_stop_price"), "setup_target_price": position.get("setup_target_price"),
+        "setup_rr_net": position.get("setup_rr_net"),
+        # "full" (NOT "early"/"settled") -- REAL, LIVE, CONFIRMED BUG
+        # this fixes: server_common.win_rate_stats (the shared helper
+        # every dashboard's own win-rate/trade-count numbers go
+        # through) has its own specific exit_kind vocabulary
+        # ("full"/"partial", perps' own convention for "a complete,
+        # resolved position" vs "sold part of a still-open one") and
+        # excludes anything else entirely -- confirmed live, this
+        # market's own dashboard was showing trade_count=0/win_rate=null
+        # despite 93 real, correctly-recorded trades, because
+        # "early"/"settled" both silently failed that check. Every
+        # kalshi_15m exit (settlement OR early) always closes the
+        # COMPLETE position (no partial-exit concept exists here) --
+        # "full" is correct either way. The settlement-vs-early
+        # distinction that actually matters for kalshi_15m's OWN
+        # analysis stays available via close_reason below instead.
+        "exit_kind": "full", "close_reason": close_reason, "exit_reason": exit_reason,
+    }
+    with _STATE_LOCK:
+        state = _load_state()
+        if not dry_run:
+            by_date = state.setdefault("realized_pnl_by_date", {})
+            today = _today_str()
+            by_date[today] = round(float(by_date.get(today, 0.0)) + realized_pnl, 6)
+        state["trade_log"].append(trade)
+        state["positions"] = [p for p in state.get("positions") or [] if p.get("ticker") != position["ticker"]]
+        _save_state(state, push_durable=not dry_run)
+    check["action"] = "closed_early"
+    check["realized_pnl_usd"] = realized_pnl
+
+
+def _manage_setup_position(position: dict[str, Any], market: dict[str, Any], *, dry_run: bool,
+                           checks: list[dict[str, Any]]) -> None:
+    """Sell a setup position the moment the underlying reaches the planned
+    stop or target (kalshi_15m_setup.plan_exit); otherwise it rides to
+    settlement. A stale or missing underlying price holds (never guesses)."""
+    from data import kalshi_15m_setup
+    coin = position["coin"]
+    try:
+        candles = kalshi_15m_setup.underlying_candles(coin)
+    except Exception as exc:
+        logger.warning("[kalshi_15m_strategy] underlying price unavailable for %s: %s", coin, exc)
+        candles = None
+    if candles is None or candles.empty or time.time() - int(candles["ts"].max()) > kalshi_15m_setup.STALE_AFTER_SEC:
+        checks.append({"coin": coin, "should_exit": False, "reason": "no_fresh_underlying_price"})
+        return
+    underlying = float(candles.sort_values("ts")["close"].iloc[-1])
+    should, reason = kalshi_15m_setup.plan_exit(kalshi_15m_setup.underlying_plan_position(position), underlying)
+    check = {"coin": coin, "should_exit": should, "reason": reason, "underlying_price": underlying}
+    checks.append(check)
+    if not should:
+        return
+    current_value = _current_exit_value(position["side"], market)
+    _close_position_now(position, market, current_value=current_value, exit_reason=reason, close_reason="setup_exit",
+                        dry_run=dry_run, check=check)
+
+
 def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
     """For every real, currently-open position, asks decide_early_exit
     whether to close it now instead of holding it to settlement -- see
@@ -2379,7 +2643,11 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
     checks: list[dict[str, Any]] = []
     with _STATE_LOCK:
         state = _load_state()
-        real_positions = [p for p in (state.get("positions") or []) if not p.get("dry_run")]
+        # Setup positions (real or dry-run) are always managed: their plan
+        # says sell at the stop or target. Other dry-run positions just settle.
+        real_positions = [
+            p for p in (state.get("positions") or []) if not p.get("dry_run") or p.get("setup_stop_price") is not None
+        ]
 
     for position in real_positions:
         coin = position["coin"]
@@ -2395,6 +2663,10 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
             # Either this position's own window already closed (settled
             # separately, see check_settlements) or a brief gap between
             # windows -- nothing to manage this tick.
+            continue
+
+        if position.get("setup_stop_price") is not None:
+            _manage_setup_position(position, market, dry_run=bool(position.get("dry_run")) or effective_dry_run, checks=checks)
             continue
 
         try:
@@ -2432,88 +2704,8 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
 
         if not USE_EARLY_EXIT or not decision.get("should_exit") or effective_dry_run:
             continue
-
-        side_char, price = _exit_order_side_and_price(position["side"], market)
-        client_order_id = str(uuid.uuid4())
-        try:
-            order_result = kalshi_15m.create_order(
-                ticker=position["ticker"], side=side_char, count=position["count"], price=price,
-                client_order_id=client_order_id,
-            )
-            order = order_result.get("order") or order_result
-            order_id = order.get("order_id")
-        except Exception as exc:
-            logger.warning("[kalshi_15m_strategy] early-exit order placement failed for %s: %s", coin, exc)
-            checks[-1]["exit_order_failed"] = str(exc)
-            continue
-
-        # Reads the fill count directly off the CREATE response first --
-        # see scan_and_enter's own identical comment on why (Kalshi's own
-        # docs confirm fill_count/remaining_count are returned
-        # synchronously for an IOC order; a separate follow-up GET call
-        # is a real eventual-consistency race, not a more-reliable check).
-        filled_count = float(order.get("fill_count_fp") or order.get("fill_count") or 0.0)
-        if filled_count <= 0:
-            try:
-                fresh_orders = kalshi_15m.get_orders(ticker=position["ticker"])
-                match = next((o for o in fresh_orders if o.get("order_id") == order_id), None)
-                if match is not None:
-                    filled_count = float(match.get("fill_count_fp") or match.get("fill_count") or 0.0)
-            except Exception as exc:
-                logger.warning("[kalshi_15m_strategy] could not verify early-exit fill for %s (%s): %s", order_id, coin, exc)
-        if filled_count <= 0:
-            checks[-1]["exit_order_not_filled"] = True
-            continue
-
-        gross_pnl = round(filled_count * (current_value - position["entry_price"]), 6)
-        exit_fee, _ = kalshi_15m.order_fee_usd(order, count=filled_count, price=current_value)
-        fees = round(_position_entry_fee(position) + exit_fee, 6)
-        realized_pnl = round(gross_pnl - fees, 6)
-        trade = {
-            "coin": coin, "ticker": position["ticker"], "side": position["side"], "count": filled_count,
-            "entry_price": position["entry_price"], "result": None, "realized_pnl_usd": realized_pnl,
-            "gross_pnl_usd": gross_pnl, "fees_usd": fees,
-            "entry_edge_usd": position.get("entry_edge_usd"), "entry_model_p_side": position.get("entry_model_p_side"),
-            "entry_minute": position.get("entry_minute"), "entry_mode": position.get("entry_mode"),
-            "entry_model_name": position.get("entry_model_name"), "entry_model_certified": position.get("entry_model_certified"),
-            "opened_at": position["opened_at"], "closed_at": dt.datetime.now(dt.timezone.utc).isoformat(),
-            "entry_probability_up": position.get("entry_probability_up"), "entry_confidence": position.get("entry_confidence"),
-            "entry_calibrated_probability_up": position.get("entry_calibrated_probability_up"),
-            "entry_calibrated_confidence": position.get("entry_calibrated_confidence"),
-            "entry_real_outcome_calibration_applied": position.get("entry_real_outcome_calibration_applied"),
-            "dry_run": False, "entry_correlation_score": position.get("entry_correlation_score"),
-            "entry_conviction_sizing_enabled": position.get("entry_conviction_sizing_enabled"),
-            "entry_loss_streak_multiplier": position.get("entry_loss_streak_multiplier"),
-            "entry_win_streak_sizing_enabled": position.get("entry_win_streak_sizing_enabled"),
-            "entry_win_streak_multiplier": position.get("entry_win_streak_multiplier"),
-            "entry_feature_snapshot": position.get("entry_feature_snapshot"),
-            # "full" (NOT "early"/"settled") -- REAL, LIVE, CONFIRMED BUG
-            # this fixes: server_common.win_rate_stats (the shared helper
-            # every dashboard's own win-rate/trade-count numbers go
-            # through) has its own specific exit_kind vocabulary
-            # ("full"/"partial", perps' own convention for "a complete,
-            # resolved position" vs "sold part of a still-open one") and
-            # excludes anything else entirely -- confirmed live, this
-            # market's own dashboard was showing trade_count=0/win_rate=null
-            # despite 93 real, correctly-recorded trades, because
-            # "early"/"settled" both silently failed that check. Every
-            # kalshi_15m exit (settlement OR early) always closes the
-            # COMPLETE position (no partial-exit concept exists here) --
-            # "full" is correct either way. The settlement-vs-early
-            # distinction that actually matters for kalshi_15m's OWN
-            # analysis stays available via close_reason below instead.
-            "exit_kind": "full", "close_reason": "early_exit", "exit_reason": decision["reason"],
-        }
-        with _STATE_LOCK:
-            state = _load_state()
-            by_date = state.setdefault("realized_pnl_by_date", {})
-            today = _today_str()
-            by_date[today] = round(float(by_date.get(today, 0.0)) + realized_pnl, 6)
-            state["trade_log"].append(trade)
-            state["positions"] = [p for p in state.get("positions") or [] if p.get("ticker") != position["ticker"]]
-            _save_state(state, push_durable=True)
-        checks[-1]["action"] = "closed_early"
-        checks[-1]["realized_pnl_usd"] = realized_pnl
+        _close_position_now(position, market, current_value=current_value, exit_reason=decision["reason"],
+                            close_reason="early_exit", dry_run=False, check=checks[-1])
 
     return {"ok": True, "checks": checks}
 
@@ -2569,6 +2761,9 @@ def check_settlements() -> dict[str, Any]:
             "entry_win_streak_sizing_enabled": position.get("entry_win_streak_sizing_enabled"),
             "entry_win_streak_multiplier": position.get("entry_win_streak_multiplier"),
             "entry_feature_snapshot": position.get("entry_feature_snapshot"),
+            "setup_id": position.get("setup_id"), "setup_kind": position.get("setup_kind"), "setup_side": position.get("setup_side"),
+            "setup_stop_price": position.get("setup_stop_price"), "setup_target_price": position.get("setup_target_price"),
+            "setup_rr_net": position.get("setup_rr_net"),
             # "full", not "settled" -- see manage_open_positions' own
             # identical trade dict for the full rationale (the real bug
             # this closes: server_common.win_rate_stats' own exit_kind

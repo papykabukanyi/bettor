@@ -32,9 +32,21 @@ def _full_entry_universe(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_global_exposure_reads(monkeypatch):
+    """global_correlation_monitor.correlated_exposure reads every bot's real
+    state file -- stubbed open here; the exposure tests set it themselves."""
+    from data import global_correlation_monitor
+    monkeypatch.setattr(global_correlation_monitor, "correlated_exposure",
+                        lambda symbol, direction, *, bot: {"ok": True, "blocked": False, "matches": [], "detail": "stub"})
+    from data import setup_backtest_job
+    monkeypatch.setattr(setup_backtest_job, "evidence_gate", lambda bot: {"open": True, "gated": False, "reason": "stub"})
+
+
+@pytest.fixture(autouse=True)
 def _legacy_entry_mode_by_default(monkeypatch):
-    """Production defaults to EV entry mode; the bulk of this file covers the
-    legacy direction-model path. EV-mode tests set ENTRY_MODE themselves."""
+    """Production defaults to the price-action setup entry mode; the bulk of
+    this file covers the legacy direction-model path. EV- and setup-mode
+    tests set ENTRY_MODE themselves."""
     monkeypatch.setattr(kalshi_15m_strategy, "ENTRY_MODE", "legacy")
 
 
@@ -3042,3 +3054,181 @@ def test_scan_and_enter_records_its_decisions_for_the_dashboard(ev_mode, monkeyp
     btc = next(c for c in scan["checks"] if c["coin"] == "BTC")
     assert btc["reason"] == "edge_below_minimum" and "ev" in btc and "market" not in btc
     assert scan["entry_mode"] == "ev" and scan["at"]
+
+
+# ---------------------------------------------------------------------------
+# Setup entry mode (kalshi_15m_setup) -- the trading method.
+# ---------------------------------------------------------------------------
+_SETUP = {
+    "valid": True, "side": "long", "setup": "breakout_retest", "reason": "setup_confirmed",
+    "setup_id": "breakout_retest:1790000000:66000", "as_of": 1790000000,
+    "plan": {"entry": 66000.0, "stop": 65900.0, "target": 66400.0, "rr_net": 3.0},
+    "checks": {"trend": {"ok": True}}, "underlying_price": 65990.0, "vol_per_min": 0.0006, "strike_underlying": 66010.0,
+}
+
+
+def _setup_market(*, close_in_minutes: float = 13.0, yes_bid: float = 0.40, yes_ask: float = 0.42) -> dict:
+    opened = dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=15 - close_in_minutes)
+    return {
+        "ticker": "KXBTC15M-S", "open_time": opened.isoformat().replace("+00:00", "Z"), "close_time": _future_close(close_in_minutes),
+        "yes_bid_dollars": str(yes_bid), "yes_ask_dollars": str(yes_ask),
+        "no_bid_dollars": str(round(1 - yes_ask, 4)), "no_ask_dollars": str(round(1 - yes_bid, 4)),
+    }
+
+
+@pytest.fixture
+def setup_mode(monkeypatch):
+    from data import kalshi_15m_setup
+    monkeypatch.setattr(kalshi_15m_strategy, "ENTRY_MODE", "setup")
+    monkeypatch.setattr(kalshi_15m_strategy, "_setup_news_score", lambda coin: 0.0)
+    calls = []
+
+    def fake_live_setup(coin, **kw):
+        calls.append((coin, kw))
+        return dict(_SETUP)
+
+    monkeypatch.setattr(kalshi_15m_setup, "live_setup", fake_live_setup)
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series: _setup_market())
+
+    def fail(*a, **k):
+        raise AssertionError("no model read in setup mode")
+
+    monkeypatch.setattr(kalshi_15m_strategy, "_predict_direction", fail)
+    return calls
+
+
+def test_setup_is_the_entry_mode_unless_legacy_or_ev_is_chosen(monkeypatch):
+    for configured, expected in (("", "setup"), ("setup", "setup"), ("ev", "ev"), ("legacy", "legacy"), ("typo", "setup")):
+        monkeypatch.setattr(kalshi_15m_strategy, "ENTRY_MODE", configured)
+        assert kalshi_15m_strategy.entry_mode() == expected
+
+
+def test_setup_long_buys_yes_when_the_contract_pays_for_its_risk(setup_mode):
+    result = kalshi_15m_strategy.evaluate_candidate("BTC")
+    assert result["ok"] is True and result["side"] == "yes" and result["entry_mode"] == "setup"
+    assert result["contract_plan"]["rr"] >= result["contract_plan"]["min_rr"]
+    coin, kw = setup_mode[0]
+    # The strike reference is the chart's own price at the window open.
+    opened = int(dt.datetime.fromisoformat(_setup_market()["open_time"].replace("Z", "+00:00")).timestamp())
+    assert coin == "BTC" and abs(kw["strike_ts"] - opened) <= 1
+
+
+@pytest.mark.parametrize("setup_override,reason", [
+    ({"valid": False, "reason": "volume"}, "setup_volume"),
+    ({"strike_underlying": None}, "no_strike_reference"),
+])
+def test_setup_mode_blocks_with_the_rule_that_failed(setup_mode, monkeypatch, setup_override, reason):
+    from data import kalshi_15m_setup
+    monkeypatch.setattr(kalshi_15m_setup, "live_setup", lambda coin, **kw: {**_SETUP, **setup_override})
+    assert kalshi_15m_strategy.evaluate_candidate("BTC")["reason"] == reason
+
+
+def test_setup_mode_skips_when_the_contract_is_too_expensive_for_the_plan(setup_mode, monkeypatch):
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series: _setup_market(yes_bid=0.90, yes_ask=0.92))
+    assert kalshi_15m_strategy.evaluate_candidate("BTC")["reason"] == "contract_rr_below_min"
+
+
+def test_setup_mode_never_trades_the_same_breakout_twice(setup_mode):
+    result = kalshi_15m_strategy.evaluate_candidate("BTC", traded_setup_ids=frozenset({_SETUP["setup_id"]}))
+    assert result["reason"] == "setup_already_traded"
+
+
+def test_setup_scan_enters_sized_by_planned_risk_and_ignores_model_era_gates(setup_mode, monkeypatch):
+    monkeypatch.setattr(kalshi_15m_strategy, "ACTIVE_ENTRY_COINS", frozenset({"BTC"}))
+    monkeypatch.setattr(kalshi_15m_strategy, "_account_budget_usd", lambda: 1000.0)
+    # A losing legacy record in this hour would block legacy entries; setup mode ignores it.
+    monkeypatch.setattr(kalshi_15m_strategy, "hour_is_trusted", lambda hour, log: {"trusted": False, "hour_et": hour, "win_rate": 0.0, "avg_pnl_usd": -1.0})
+    result = kalshi_15m_strategy.scan_and_enter(dry_run=True)
+    entered = [c for c in result["checks"] if c.get("action") == "entered"]
+    assert len(entered) == 1 and entered[0]["side"] == "yes"
+    state = kalshi_15m_strategy._load_state()  # noqa: SLF001
+    position = state["positions"][0]
+    assert position["entry_mode"] == "setup" and position["setup_side"] == "long"
+    assert position["setup_stop_price"] == 65900.0 and position["setup_target_price"] == 66400.0
+    risk = position["setup_contract_plan"]["risk"]
+    assert position["count"] == min(int(1000.0 * kalshi_15m_strategy.POSITION_SIZE_PCT / position["entry_price"]), int(10.0 // risk))
+    assert _SETUP["setup_id"] in state["setup_ids_traded"]
+
+
+def _open_setup_position(monkeypatch, *, dry_run=True):
+    kalshi_15m_strategy._save_state({  # noqa: SLF001
+        "positions": [{
+            "coin": "BTC", "ticker": "KXBTC15M-S", "side": "yes", "count": 5.0, "entry_price": 0.42, "entry_fee_usd": 0.09,
+            "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(), "dry_run": dry_run, "entry_mode": "setup",
+            "setup_side": "long", "setup_stop_price": 65900.0, "setup_target_price": 66400.0, "setup_id": "x",
+        }],
+        "trade_log": [], "realized_pnl_by_date": {},
+    })
+
+
+def _underlying(monkeypatch, price, *, age_sec=20):
+    from data import kalshi_15m_setup
+    now = int(kalshi_15m_strategy.time.time())
+    monkeypatch.setattr(kalshi_15m_setup, "underlying_candles",
+                        lambda coin: pd.DataFrame({"ts": [now - age_sec], "open": [price], "high": [price], "low": [price], "close": [price], "volume": [1.0]}))
+
+
+@pytest.mark.parametrize("price,closes,why", [(65890.0, True, "stop_loss"), (66410.0, True, "take_profit"), (66100.0, False, None)])
+def test_setup_position_is_sold_when_the_underlying_hits_the_plan(setup_mode, monkeypatch, price, closes, why):
+    _open_setup_position(monkeypatch)
+    _underlying(monkeypatch, price)
+    result = kalshi_15m_strategy.manage_open_positions(dry_run=True)
+    state = kalshi_15m_strategy._load_state()  # noqa: SLF001
+    assert (state["positions"] == []) is closes
+    if closes:
+        trade = state["trade_log"][-1]
+        assert trade["close_reason"] == "setup_exit" and trade["exit_reason"].startswith(why) and trade["dry_run"] is True
+        assert trade["exit_price"] == 0.40  # sold at the yes bid
+        assert state["realized_pnl_by_date"] == {}  # dry-run never touches real P&L
+    else:
+        assert result["checks"][0]["should_exit"] is False
+
+
+def test_setup_position_holds_on_a_stale_underlying_price(setup_mode, monkeypatch):
+    _open_setup_position(monkeypatch)
+    _underlying(monkeypatch, 65000.0, age_sec=600)
+    result = kalshi_15m_strategy.manage_open_positions(dry_run=True)
+    assert result["checks"][0]["reason"] == "no_fresh_underlying_price"
+    assert kalshi_15m_strategy._load_state()["positions"]  # noqa: SLF001
+
+
+def test_a_real_setup_position_is_sold_with_a_real_order(setup_mode, monkeypatch):
+    _open_setup_position(monkeypatch, dry_run=False)
+    _underlying(monkeypatch, 65890.0)
+    orders = []
+    monkeypatch.setattr(kalshi_15m, "create_order", lambda **kw: orders.append(kw) or {"order": {"order_id": "o1", "fill_count": 5}})
+    kalshi_15m_strategy.manage_open_positions(dry_run=False)
+    assert orders and orders[0]["side"] == "ask" and orders[0]["count"] == 5.0
+    state = kalshi_15m_strategy._load_state()  # noqa: SLF001
+    assert state["positions"] == [] and state["trade_log"][-1]["dry_run"] is False
+
+
+def test_setup_mode_reads_the_chart_even_late_in_the_window(setup_mode, monkeypatch):
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series: _setup_market(close_in_minutes=4.0))
+    result = kalshi_15m_strategy.evaluate_candidate("BTC")
+    assert result["ok"] is False and result["reason"] == "too_little_time_remaining"
+    assert result["setup_checks"] == _SETUP["checks"] and setup_mode  # the checklist is still reported
+
+
+def test_setup_entry_is_skipped_when_the_bet_is_already_open_across_bots(setup_mode, monkeypatch):
+    from data import global_correlation_monitor
+    monkeypatch.setattr(global_correlation_monitor, "correlated_exposure", lambda symbol, direction, *, bot: {"ok": False, "blocked": True, "matches": [{"bot": "crypto", "symbol": symbol}],
+                                                      "detail": "2 open position(s) already on this bet"})
+    monkeypatch.setattr(kalshi_15m_strategy, "ACTIVE_ENTRY_COINS", frozenset({"BTC"}))
+    monkeypatch.setattr(kalshi_15m_strategy, "_account_budget_usd", lambda: 1000.0)
+    result = kalshi_15m_strategy.scan_and_enter(dry_run=True)
+    btc = [c for c in result["checks"] if c["coin"] == "BTC"]
+    assert [c["reason"] for c in btc] == ["correlated_exposure"]
+    assert not any(c.get("action") == "entered" for c in result["checks"])
+    assert kalshi_15m_strategy._load_state()["positions"] == []  # noqa: SLF001
+
+
+def test_a_closed_evidence_gate_blocks_15m_setup_entries(setup_mode, monkeypatch):
+    from data import setup_backtest_job
+    monkeypatch.setattr(setup_backtest_job, "evidence_gate",
+                        lambda bot: {"open": False, "gated": True, "reason": "replay_not_profitable"})
+    monkeypatch.setattr(kalshi_15m_strategy, "ACTIVE_ENTRY_COINS", frozenset({"BTC"}))
+    result = kalshi_15m_strategy.scan_and_enter(dry_run=True)
+    btc = [c for c in result["checks"] if c["coin"] == "BTC"]
+    assert [c["reason"] for c in btc] == ["evidence_gate_closed"] and btc[0]["setup_checks"]
+    assert kalshi_15m_strategy._load_state()["positions"] == []  # noqa: SLF001

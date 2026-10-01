@@ -87,10 +87,10 @@ from data.kalshi_perps import (
     cancel_margin_order, create_margin_order, get_margin_balance, get_margin_fee_tiers, get_margin_market,
     get_margin_order, get_margin_positions,
 )
-from data.crypto_news import prewarm_sentiment
+from data.crypto_news import get_sentiment, prewarm_sentiment
 from data.perps_data import coin_for_ticker, fetch_candle_frames, get_watchlist, latest_feature_row
 from data.perps_model import predict_direction
-from data import perps_meta_model, perps_spot_lead, perps_trade_analysis, threads_post
+from data import global_correlation_monitor, perps_meta_model, perps_setup, perps_spot_lead, perps_trade_analysis, threads_post
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +118,7 @@ HF_MODEL_REPO = os.getenv("HF_MODEL_REPO", "papylove/kalshi-perps-model")
 _DURABLE_STATE_HF_FILENAME = "perps_durable_state.json"
 _DURABLE_PUSH_MIN_INTERVAL_SEC = 30  # avoid HF's stricter per-commit rate limit on back-to-back pushes
 _last_durable_push_ts = 0.0
+_durable_push_pending = False
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -786,6 +787,28 @@ def _durable_state_slice(state: dict[str, Any]) -> dict[str, Any]:
         "realized_pnl_by_date": state.get("realized_pnl_by_date") or {},
         "daily_reference_balance": state.get("daily_reference_balance") or {},
         "tuning": state.get("tuning") or {},
+        # Kalshi knows an open position's size and side but not the setup's
+        # planned stop/target -- carried here so a restart re-attaches them
+        # (see _reconcile_positions_with_exchange) instead of the position
+        # falling back to non-setup exits.
+        "open_setup_plans": _open_setup_plans(state),
+        "setup_ids_traded": state.get("setup_ids_traded") or [],
+    }
+
+
+_SETUP_POSITION_KEYS = (
+    "side", "opened_at", "entry_system", "setup_stop_price", "setup_target_price", "setup_id", "setup_kind",
+    "setup_rr_net", "setup_risk_pct", "setup_chart_plan",
+)
+
+
+def _open_setup_plans(state: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    # Plans recovered from HF but not yet re-attached (reconciliation pops
+    # them) are kept, so a push before reconciliation can't erase them.
+    return {
+        **(state.get("open_setup_plans") or {}),
+        **{p["ticker"]: {k: p.get(k) for k in _SETUP_POSITION_KEYS}
+           for p in state.get("positions") or [] if p.get("ticker") and perps_setup.has_plan(p)},
     }
 
 
@@ -886,20 +909,26 @@ def _load_state() -> dict[str, Any]:
 
 
 def _save_state(state: dict[str, Any], *, push_durable: bool = False) -> None:
+    global _last_durable_push_ts, _durable_push_pending
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(state, f, indent=2)
-    if not push_durable:
+    if not push_durable and not _durable_push_pending:
         return
     # Throttled, not on every call -- push_durable is only ever passed True
     # on genuinely infrequent events (a trade just closed, or a new day's
     # reference balance was just captured), but the guard is cheap insurance
     # against HF's stricter per-commit rate limit if those ever coincide.
-    global _last_durable_push_ts
     now = time.time()
     if now - _last_durable_push_ts >= _DURABLE_PUSH_MIN_INTERVAL_SEC:
         _last_durable_push_ts = now
+        _durable_push_pending = False
         _push_durable_state_to_hf(state)
+    else:
+        # Throttled: the next save after the interval pushes instead, so a
+        # change that landed inside the window (e.g. a new setup position's
+        # plan) is never silently left out of HF.
+        _durable_push_pending = True
 
 
 def record_milestone(current_balance: float) -> dict[str, Any]:
@@ -1237,9 +1266,72 @@ def _spot_lead_blocks(lead: dict[str, Any], side: str) -> bool:
     return side_pred <= -SPOT_LEAD_ADVERSE_BPS
 
 
+# The trading method (perps_setup): a position opens only on a confirmed
+# price-action setup -- 15m trend, a support/resistance breakout that
+# retests and holds (or a failed breakdown), breakout volume, VWAP,
+# RSI/MACD, no news against it -- with its stop, target and reward/risk
+# planned before entry, and closes only at that stop or target. No model,
+# correlation, spot-lead or dip/rally gate decides a setup entry.
+# PERPS_ENTRY_SYSTEM=legacy restores the old model/technical path.
+ENTRY_SYSTEM = (os.getenv("PERPS_ENTRY_SYSTEM", "setup") or "setup").strip().lower()
+SETUP_IDS_REMEMBERED = 500
+
+
+def setup_fee_rate_roundtrip(ticker: str) -> float:
+    """Both legs of a setup trade: the entry is a maker order when maker
+    orders are on (an unfilled maker entry is skipped, never chased), the
+    exit at stop or target is a taker order."""
+    entry = _maker_fee_rate(ticker) if ENABLE_MAKER_ORDERS else _taker_fee_rate(ticker)
+    return entry + _taker_fee_rate(ticker)
+
+
+def _evaluate_candidate_setup(ticker: str, *, traded_setup_ids: frozenset[str] = frozenset()) -> dict[str, Any]:
+    sides = ("long", "short") if ENABLE_SHORTS else ("long",)
+    fee = setup_fee_rate_roundtrip(ticker)
+    try:
+        news = get_sentiment(coin_for_ticker(ticker), use_limited_sources=True).get("sentiment_score")
+    except Exception as exc:
+        logger.debug("[perps_strategy] sentiment read failed for %s: %s", ticker, exc)
+        news = None
+    current_price, spread_bps = None, None
+    try:
+        market = get_margin_market(ticker).get("market") or {}
+        current_price = float(market.get("price") or 0.0) or None
+        spread_bps = perps_setup.market_spread_bps(market)
+    except Exception as exc:
+        logger.debug("[perps_strategy] market read failed for %s: %s", ticker, exc)
+    try:
+        setup = perps_setup.live_setup(ticker, sides=sides, fee_rate_roundtrip=fee, news_score=news, spread_bps=spread_bps or 0.0)
+    except Exception as exc:
+        logger.warning("[perps_strategy] setup evaluation failed for %s: %s", ticker, exc)
+        setup = {"valid": False, "reason": "data", "checks": {"data": {"ok": False, "detail": f"error: {exc}"}}}
+    result: dict[str, Any] = {
+        "ticker": ticker, "entry_system": "setup", "current_price": current_price, "sentiment_score": news,
+        "model_ok": False, "technical_ok": bool(setup.get("valid")),
+        "setup_valid": bool(setup.get("valid")), "setup_reason": setup.get("reason"), "setup": setup.get("setup"),
+        "setup_side": setup.get("side") or setup.get("closest_side"), "setup_id": setup.get("setup_id"),
+        "setup_plan": setup.get("plan"), "setup_checks": setup.get("checks"), "setup_as_of": setup.get("as_of"),
+        "chart_price": setup.get("chart_price"), "setup_fee_rate_roundtrip": fee, "spread_bps": spread_bps,
+    }
+    if not setup.get("valid"):
+        result.update(should_enter=False, reason=f"no setup: {setup.get('reason')} rule not met")
+        return result
+    if setup["setup_id"] in traded_setup_ids:
+        result.update(should_enter=False, reason=f"{setup['setup']} {setup['side']} already traded ({setup['setup_id']})")
+        return result
+    plan = setup["plan"]
+    result.update(
+        should_enter=True, side=setup["side"], score=float(plan["rr_net"]),
+        reason=(f"{setup['setup']} {setup['side']}: stop {plan['stop']:.6g}, target {plan['target']:.6g}, "
+                f"reward/risk {plan['rr_net']:.2f} after costs"),
+    )
+    return result
+
+
 def evaluate_candidate(
     ticker: str, *, confidence_min: float | None = None,
     correlation_study_enabled: bool | None = None, correlation_max_adjustment: float | None = None,
+    traded_setup_ids: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     """Combine the technical scalper filter with the direction model for one
     ticker, considering a LONG entry (dip + model predicts up) and, if
@@ -1264,7 +1356,12 @@ def evaluate_candidate(
     perps_trade_analysis.recommend_correlation_study_weight's own
     evidence-gated tuning (apply_correlation_study_override), so real
     closed-trade history can turn the chart-study layer on/off or trust it
-    more/less without a redeploy, same mechanism as the confidence floor."""
+    more/less without a redeploy, same mechanism as the confidence floor.
+
+    With ENTRY_SYSTEM "setup" (the default) the price-action setup alone
+    decides -- see _evaluate_candidate_setup."""
+    if ENTRY_SYSTEM == "setup":
+        return _evaluate_candidate_setup(ticker, traded_setup_ids=traded_setup_ids)
     row = latest_feature_row(ticker)
     if row is None:
         return {"ticker": ticker, "should_enter": False, "reason": "no_feature_data", "model_ok": False, "technical_ok": False}
@@ -1474,6 +1571,7 @@ def evaluate_candidate(
 def scan_for_entries(
     tickers: list[str] | None = None, *, exclude: set[str] | None = None, confidence_min: float | None = None,
     correlation_study_enabled: bool | None = None, correlation_max_adjustment: float | None = None,
+    traded_setup_ids: frozenset[str] = frozenset(),
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Evaluate every ticker in the watchlist (minus any already held);
     return every qualifying candidate ranked best-first, plus every
@@ -1496,6 +1594,7 @@ def scan_for_entries(
         evaluate_candidate(
             t, confidence_min=confidence_min,
             correlation_study_enabled=correlation_study_enabled, correlation_max_adjustment=correlation_max_adjustment,
+            traded_setup_ids=traded_setup_ids,
         )
         for t in to_evaluate
     ]
@@ -1756,7 +1855,14 @@ def decide_exit(
     "promising" extension); the caller (manage_open_positions) only passes
     a real value when USE_CORRELATION_STUDY is on, so omitting it (the
     default) simply can't contribute, same as every other optional param
-    here."""
+    here.
+
+    A position opened on a price-action setup (perps_setup.has_plan) exits
+    only at its planned stop or target -- none of the paths below apply."""
+    if perps_setup.has_plan(position):
+        now = now if now is not None else dt.datetime.now(dt.timezone.utc)
+        held_minutes = (now - dt.datetime.fromisoformat(position["opened_at"])).total_seconds() / 60.0
+        return perps_setup.plan_exit(position, current_price, held_minutes=held_minutes)
     if USE_TREND_TRAILING_STRATEGY:
         return _decide_exit_trailing(
             position, current_price, now=now,
@@ -1923,7 +2029,7 @@ def _scale_in_cheap_gates_pass(position: dict[str, Any], current_price: float, n
     signal fetch below is even worth doing this cycle, so the fast loop
     stays cheap for the common case of a position that isn't scale-in-
     eligible yet (not profitable enough, on cooldown, already capped)."""
-    if not USE_SCALE_IN or USE_TREND_TRAILING_STRATEGY:
+    if not USE_SCALE_IN or USE_TREND_TRAILING_STRATEGY or perps_setup.has_plan(position):
         return False
     # A position with no original_count recorded predates this feature (or
     # was adopted from the exchange via reconciliation) -- fails closed
@@ -2024,7 +2130,12 @@ def position_exit_levels(position: dict[str, Any]) -> dict[str, float]:
     target; "quick_profit_price" isn't a concept in trailing mode, so it's
     set equal to that same activation price rather than None (a caller
     like threads_post._format_trade_entry_text formats this with `:.4f`
-    unconditionally -- None would crash it, not just look a little off)."""
+    unconditionally -- None would crash it, not just look a little off).
+
+    A setup position's levels are its planned stop and target."""
+    if perps_setup.has_plan(position):
+        levels = perps_setup.exit_levels(position)
+        return {**levels, "quick_profit_price": levels["take_profit_price"]}
     entry_price = float(position["entry_price"])
     sign = -1.0 if position.get("side") == "short" else 1.0
     if USE_TREND_TRAILING_STRATEGY:
@@ -2255,6 +2366,8 @@ def _reconcile_positions_with_exchange(state: dict[str, Any]) -> list[dict[str, 
         return local_positions
 
     local_by_ticker = {p["ticker"]: p for p in local_positions}
+    # Setup plans recovered from HF after a restart -- consumed here, once.
+    saved_plans = state.pop("open_setup_plans", None) or {}
     reconciled: list[dict[str, Any]] = []
     for ticker, real_pos in real.items():
         local = local_by_ticker.get(ticker)
@@ -2263,12 +2376,17 @@ def _reconcile_positions_with_exchange(state: dict[str, Any]) -> list[dict[str, 
                 "[perps_strategy] adopting untracked real position: %s %s x%.2f @ %.4f",
                 real_pos["side"], ticker, real_pos["count"], real_pos["entry_price"],
             )
-            reconciled.append({
+            adopted = {
                 "ticker": ticker, "entry_price": real_pos["entry_price"], "count": real_pos["count"],
                 "side": real_pos["side"],
                 "opened_at": dt.datetime.now(dt.timezone.utc).isoformat(), "dry_run": False,
                 "sizing": {"note": "adopted_from_exchange_reconciliation"},
-            })
+            }
+            plan = saved_plans.get(ticker)
+            if plan and plan.get("side") == real_pos["side"] and perps_setup.has_plan(plan):
+                adopted.update({k: v for k, v in plan.items() if v is not None})
+                adopted["sizing"] = {"note": "adopted_from_exchange_reconciliation_with_saved_setup_plan"}
+            reconciled.append(adopted)
             continue
         if (
             abs(float(local["count"]) - real_pos["count"]) > 1e-9
@@ -2432,6 +2550,16 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                 market = get_margin_market(ticker)
                 current_price = float((market.get("market") or {}).get("price") or 0.0)
                 tick_size = float((market.get("market") or {}).get("tick_size") or 0.0001)
+                setup_exit_order_price = None
+                if perps_setup.has_plan(position):
+                    # A thin perp's last trade can sit stale while the market
+                    # moves: a setup's stop/target is checked on the live
+                    # bid/ask mid, and its exit crosses the spread (sell at
+                    # the bid, buy back at the ask) so the IOC order fills.
+                    quote = perps_setup.live_quote(market.get("market") or {})
+                    if quote is not None:
+                        current_price = quote["mid"]
+                        setup_exit_order_price = quote["bid"] if position.get("side", "long") == "long" else quote["ask"]
 
                 now = dt.datetime.now(dt.timezone.utc)
                 velocity = _update_velocity(position, current_price, now)
@@ -2469,8 +2597,9 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                 # this lazy fetch is exactly what already keeps that data
                 # from being pulled on every single fast-loop tick for
                 # every position regardless of relevance.
-                if held_minutes_check >= MAX_HOLD_MINUTES - PRE_EXIT_STUDY_MINUTES or (
-                    USE_SCALE_IN and _scale_in_cheap_gates_pass(position, current_price, now)
+                if not perps_setup.has_plan(position) and (
+                    held_minutes_check >= MAX_HOLD_MINUTES - PRE_EXIT_STUDY_MINUTES
+                    or (USE_SCALE_IN and _scale_in_cheap_gates_pass(position, current_price, now))
                 ):
                     try:
                         promising_row = latest_feature_row(ticker)
@@ -2563,7 +2692,7 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
             try:
                 count = float(position["count"])
                 side = position.get("side", "long")
-                exit_price = _round_price(current_price, tick_size)
+                exit_price = _round_price(setup_exit_order_price if setup_exit_order_price is not None else current_price, tick_size)
                 entry_price = float(position["entry_price"])
             except Exception as exc:
                 ok = False
@@ -2695,6 +2824,9 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                     "entry_scale_in_enabled": position.get("entry_scale_in_enabled"),
                     "entry_partial_exit_enabled": position.get("entry_partial_exit_enabled"),
                     "entry_conviction_sizing_enabled": position.get("entry_conviction_sizing_enabled"),
+                    "entry_system": position.get("entry_system", "legacy"), "setup_id": position.get("setup_id"),
+                    "setup_kind": position.get("setup_kind"), "setup_stop_price": position.get("setup_stop_price"),
+                    "setup_target_price": position.get("setup_target_price"), "setup_rr_net": position.get("setup_rr_net"),
                     # "partial" (see USE_PARTIAL_EXIT) marks a real,
                     # informational P&L event on a position that's still
                     # open -- NOT a resolved win/loss. win_rate_stats/
@@ -2912,6 +3044,7 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
         global USE_SCALE_IN, USE_CONVICTION_SIZING
         USE_SCALE_IN = tuning_state.get("scale_in_enabled", USE_SCALE_IN)
         USE_CONVICTION_SIZING = tuning_state.get("conviction_sizing_enabled", USE_CONVICTION_SIZING)
+        traded_setup_ids = frozenset(state.get("setup_ids_traded") or [])
         # push_durable only on the (once-daily) event a fresh reference
         # balance gets captured -- this is the value a restart must not be
         # allowed to silently lose, see the module-level comment above
@@ -2921,6 +3054,15 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
             return {"ok": True, "dry_run": effective_dry_run, "action": "skipped_daily_loss_cap"}
 
     result: dict[str, Any] = {"ok": True, "dry_run": effective_dry_run, "action": "none", "opened": []}
+    if ENTRY_SYSTEM == "setup":
+        from data import setup_backtest_job
+        gate = setup_backtest_job.evidence_gate("perps")
+        result["evidence_gate"] = gate
+        if not gate["open"]:
+            # Still scan, so the dashboard's checklist stays live; just no entries.
+            result["action"] = "evidence_gate_closed"
+            _, result["candidates"] = scan_for_entries(exclude=held_tickers)
+            return result
     # Scanning (candles + model + news, all network calls) runs OUTSIDE the
     # lock so it never blocks the fast exit loop for the seconds a full
     # 16-instrument scan can take.
@@ -2928,6 +3070,7 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
         exclude=held_tickers, confidence_min=confidence_min_override,
         correlation_study_enabled=correlation_study_enabled_override,
         correlation_max_adjustment=correlation_max_adjustment_override,
+        traded_setup_ids=traded_setup_ids,
     )
     result["candidates"] = candidates
     if not qualifying:
@@ -2984,6 +3127,28 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
             continue
 
         entry_price = _round_price(fresh_price, tick_size)
+        setup_plan = None
+        if candidate.get("entry_system") == "setup":
+            # Plan the entry and exit at the real execution price: the
+            # chart's stop/target carried into perp units, reward/risk
+            # re-checked with the live spread, skipped if it no longer pays.
+            live_spot = external_quote["price"] if external_quote and not external_quote.get("delayed") else None
+            setup_plan = perps_setup.plan_at_price(
+                {"side": candidate["side"], "plan": candidate["setup_plan"]}, price=entry_price,
+                chart_price=float(live_spot or candidate["chart_price"]),
+                fee_rate_roundtrip=candidate["setup_fee_rate_roundtrip"],
+                spread_bps=perps_setup.market_spread_bps(market) or 0.0,
+            )
+            if not setup_plan["ok"]:
+                opened.append({"ticker": ticker, "ok": True, "action": "skipped_setup_plan_at_price", "plan": setup_plan})
+                continue
+            from data.kalshi_15m_spot import chart_coin
+            exposure = global_correlation_monitor.correlated_exposure(chart_coin(coin_for_ticker(ticker)), candidate["side"], bot="perps")
+            candidate.setdefault("setup_checks", {})["exposure"] = exposure
+            if exposure["blocked"]:
+                candidate.update(should_enter=False, reason=f"correlated exposure: {exposure['detail']}")
+                opened.append({"ticker": ticker, "ok": True, "action": "skipped_correlated_exposure", "exposure": exposure})
+                continue
         sizing_market = dict(market)
         sizing_market["price"] = entry_price
         # Explicit user direction: size in proportion to conviction instead
@@ -3001,6 +3166,17 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
         count, sizing_detail = compute_leveraged_count(
             available_balance_usd, sizing_market, size_multiplier=size_multiplier, position_size_pct=effective_position_size_pct,
         )
+        if setup_plan is not None:
+            # Calculate the risk: never more contracts than lose
+            # RISK_PER_TRADE_PCT of the balance if the stop is hit.
+            risk_count = perps_setup.risk_sized_count(
+                balance_usd=available_balance_usd, risk_pct_of_balance=perps_setup.RISK_PER_TRADE_PCT,
+                price=entry_price, stop=setup_plan["stop"], fee_rate_roundtrip=candidate["setup_fee_rate_roundtrip"],
+            )
+            sizing_detail = {**sizing_detail, "slice_count": count, "risk_count": risk_count,
+                             "risk_per_trade_pct": perps_setup.RISK_PER_TRADE_PCT}
+            count = min(count, risk_count)
+            sizing_detail["count"] = count
         if count < 1:
             opened.append({
                 "ticker": ticker, "ok": True, "action": "skipped_insufficient_budget",
@@ -3124,7 +3300,16 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
                     "entry_scale_in_enabled": USE_SCALE_IN,
                     "entry_partial_exit_enabled": USE_PARTIAL_EXIT,
                     "entry_conviction_sizing_enabled": USE_CONVICTION_SIZING,
+                    "entry_system": candidate.get("entry_system", "legacy"),
                 }
+                if setup_plan is not None:
+                    entry_context.update({
+                        "setup_stop_price": setup_plan["stop"], "setup_target_price": setup_plan["target"],
+                        "setup_id": candidate["setup_id"], "setup_kind": candidate["setup"],
+                        "setup_rr_net": setup_plan["rr_net"], "setup_risk_pct": setup_plan["risk_pct"],
+                        "setup_chart_plan": candidate["setup_plan"], "setup_checks": candidate.get("setup_checks"),
+                    })
+                    state["setup_ids_traded"] = ((state.get("setup_ids_traded") or []) + [candidate["setup_id"]])[-SETUP_IDS_REMEMBERED:]
                 if existing_idx is not None:
                     merged = dict(positions[existing_idx])
                     merged["count"] = float(actual_count)
@@ -3159,7 +3344,7 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
                         **entry_context,
                     })
                 state["positions"] = positions
-                _save_state(state)
+                _save_state(state, push_durable=setup_plan is not None and not effective_dry_run)
             opened.append({
                 "ticker": ticker, "ok": True, "action": "opened", "side": side, "entry_price": actual_entry_price,
                 "count": actual_count, "reason": candidate["reason"], "sizing": sizing_detail, "order_result": order_result,

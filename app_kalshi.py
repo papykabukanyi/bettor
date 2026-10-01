@@ -108,8 +108,8 @@ from data import (
     ai_monitor, crypto_news, kalshi_15m, kalshi_15m_backtest, kalshi_15m_data, kalshi_15m_edge_model,
     kalshi_15m_meta_model, kalshi_15m_metals_backtest, kalshi_15m_metals_data, kalshi_15m_metals_model,
     kalshi_15m_model, kalshi_15m_pattern_study, kalshi_15m_quotes, kalshi_15m_spot, kalshi_15m_strategy, perps_data,
-    perps_meta_model, perps_model, perps_spot_lead, perps_strategy, perps_trade_analysis, strategy_sweep, threads_client,
-    threads_post,
+    global_correlation_monitor, kalshi_15m_setup, perps_meta_model, perps_model, perps_setup, perps_spot_lead, perps_strategy,
+    perps_trade_analysis, setup_backtest_job, strategy_sweep, threads_client, threads_post,
 )
 
 # Real production bug found and fixed on the sibling stocks server (now
@@ -712,6 +712,7 @@ def _run_kalshi_15m_pattern_study() -> dict[str, Any]:
 
 
 KALSHI_15M_QUOTE_COLLECT_MINUTES = max(5, int(os.getenv("KALSHI_15M_QUOTE_COLLECT_MINUTES", "15") or "15"))
+GLOBAL_CORRELATION_REFRESH_MINUTES = max(5, int(os.getenv("GLOBAL_CORRELATION_REFRESH_MINUTES", "15") or "15"))
 KALSHI_15M_QUOTE_LOOKBACK_HOURS = float(os.getenv("KALSHI_15M_QUOTE_LOOKBACK_HOURS", "1.5") or "1.5")
 KALSHI_15M_EDGE_MODEL_HOUR_ET = int(os.getenv("KALSHI_15M_EDGE_MODEL_HOUR_ET", "1") or "1")
 _KALSHI_15M_QUOTE_LAST_RUN: dict[str, Any] = {}
@@ -769,7 +770,31 @@ def _run_perps_spot_lead_train() -> dict[str, Any]:
         gc.collect()
 
 
+@_locked_job("global_correlation_refresh", stale_after_sec=900)
+def _run_global_correlation_refresh() -> dict[str, Any]:
+    """Recompute the cross-bot correlation snapshot (see
+    global_correlation_monitor): the matrix every bot's exposure check reads."""
+    try:
+        return global_correlation_monitor.refresh()
+    finally:
+        gc.collect()
+
+
+def _run_setup_backtest(bot: str) -> dict[str, Any]:
+    """Launch one bot's daily real-data replay in its own low-priority
+    process (setup_backtest_job), published to that bot's HF model repo."""
+    result = setup_backtest_job.launch(bot)
+    logger.info("[app_kalshi] %s setup backtest: %s", bot, result)
+    return result
+
+
 def _ensure_edge_model_at_startup() -> None:
+    try:
+        # Real history for any Coinbase product added since the archive began
+        # (e.g. DOT/HBAR/XLM/SHIB for the perps that had no chart).
+        logger.info("[app_kalshi] spot backfill for new products: %s", kalshi_15m_spot.backfill_missing_products(days=70))
+    except Exception as exc:
+        logger.warning("[app_kalshi] spot backfill for new products failed: %s", exc)
     if perps_spot_lead.load_artifact() is None:
         _run_perps_spot_lead_train()
     if kalshi_15m_edge_model.load_artifact() is None:
@@ -1513,6 +1538,18 @@ def _ensure_background_jobs_started() -> None:
             )
             threading.Thread(target=_ensure_edge_model_at_startup, daemon=True, name="kalshi15m-edge-model-startup").start()
             scheduler.add_job(
+                _run_global_correlation_refresh, "interval", minutes=GLOBAL_CORRELATION_REFRESH_MINUTES,
+                id="global_correlation_refresh", replace_existing=True,
+                next_run_time=dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=3),
+            )
+            for bot, (hour, minute, startup_delay_min) in (("perps", (3, 10, 10)), ("kalshi15m", (3, 40, 40))):
+                scheduler.add_job(_run_setup_backtest, "cron", hour=hour, minute=minute, args=[bot],
+                                  id=f"{bot}_setup_backtest", replace_existing=True)
+                if setup_backtest_job.latest(bot) is None:
+                    scheduler.add_job(_run_setup_backtest, "date", args=[bot], id=f"{bot}_setup_backtest_startup",
+                                      run_date=dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=startup_delay_min),
+                                      replace_existing=True)
+            scheduler.add_job(
                 _run_ai_monitor, "cron", hour=AI_MONITOR_HOUR_ET, minute=0,
                 id="ai_monitor", replace_existing=True,
             )
@@ -1959,9 +1996,16 @@ def api_status():
             "perps_study": crypto_correlation.study_health(crypto_correlation.get_perps_study()),
             "remote_alpaca_study": crypto_correlation.study_health(crypto_correlation.get_remote_alpaca_study()),
         },
+        "setup_backtest": setup_backtest_job.latest("perps"),
+        "setup_evidence_gate": setup_backtest_job.evidence_gate("perps"),
+        "global_correlation": {k: (global_correlation_monitor.latest() or {}).get(k) for k in ("computed_at", "leaders", "clusters")},
         "spot_lead": {**perps_spot_lead.summary(), "timing_gate_enabled": perps_strategy.USE_SPOT_LEAD_TIMING,
                       "adverse_bps": perps_strategy.SPOT_LEAD_ADVERSE_BPS},
         "params": {
+            "entry_system": perps_strategy.ENTRY_SYSTEM,
+            "setup_min_rr": perps_setup.MIN_RR,
+            "setup_risk_per_trade_pct": perps_setup.RISK_PER_TRADE_PCT,
+            "setup_fee_rate_roundtrip_default": perps_strategy.DEFAULT_TAKER_FEE_RATE * 2,
             "position_size_pct": effective_params["position_size_pct"],
             "max_concurrent_positions": effective_params["max_concurrent_positions"],
             "take_profit_pct": perps_strategy.TAKE_PROFIT_PCT,
@@ -2080,6 +2124,8 @@ def api_kalshi_15m_status():
             "ev_entry_min_minute": kalshi_15m_edge_model.EV_ENTRY_MIN_MINUTE,
             "ev_entry_max_minute": kalshi_15m_edge_model.EV_ENTRY_MAX_MINUTE,
             "ev_require_certified": kalshi_15m_strategy.EV_REQUIRE_CERTIFIED,
+            "setup_min_rr": kalshi_15m_setup.MIN_RR,
+            "setup_risk_per_trade_pct": kalshi_15m_setup.RISK_PER_TRADE_PCT,
             "edge_model_hour_et": KALSHI_15M_EDGE_MODEL_HOUR_ET,
         },
         # Real observability gap this closes: neither of these ever
@@ -2093,6 +2139,8 @@ def api_kalshi_15m_status():
         "win_streak_cooldown": kalshi_15m_strategy.compute_win_streak_cooldown_active(state),
         "entry_mode": kalshi_15m_strategy.entry_mode(),
         "last_scan": kalshi_15m_strategy.last_scan(),
+        "setup_backtest": setup_backtest_job.latest("kalshi15m"),
+        "setup_evidence_gate": setup_backtest_job.evidence_gate("kalshi15m"),
         "edge_model": kalshi_15m_edge_model.summary(),
         "quote_history_last_collect": dict(_KALSHI_15M_QUOTE_LAST_RUN),
         "spot_history_last_collect": dict(_KALSHI_15M_SPOT_LAST_RUN),
@@ -2226,6 +2274,27 @@ def api_bots_live():
                     "live_count": sum(1 for b in bots if b["live"]), "bots": bots})
 
 
+@app.route("/api/correlation/global", methods=["GET"])
+def api_global_correlation():
+    """The cross-bot correlation snapshot: matrix, leader regimes, every
+    bot's open exposure, and same-bet clusters (global_correlation_monitor)."""
+    return jsonify(global_correlation_monitor.latest())
+
+
+@app.route("/api/setup-backtest/<bot>", methods=["GET", "POST"])
+def api_setup_backtest(bot: str):
+    """GET: a bot's latest real-data replay of its setup strategy (as
+    published to its HF model repo). POST (CRON_SECRET): launch one now."""
+    if bot not in setup_backtest_job.RUNNERS:
+        return jsonify({"ok": False, "error": "unknown bot"}), 404
+    if request.method == "POST":
+        if not is_cron_authorized(request):
+            return jsonify({"ok": False, "error": "unauthorized"}), 401
+        return jsonify(_run_setup_backtest(bot))
+    return jsonify({"ok": True, "bot": bot, "card": setup_backtest_job.strategy_card(bot),
+                    "latest": setup_backtest_job.latest(bot)})
+
+
 @app.route("/api/perps/spot-lead", methods=["GET", "POST"])
 def api_perps_spot_lead():
     """GET: the Coinbase spot-lead predictor -- certification, out-of-sample
@@ -2334,6 +2403,7 @@ def api_kalshi_15m_diagnose_entries():
                 correlation_study_enabled=tuning.get("correlation_study_enabled"),
                 correlation_max_adjustment=tuning.get("correlation_confidence_max_adjustment"),
                 trade_log=trade_log, live_context=live_context,
+                traded_setup_ids=frozenset(state.get("setup_ids_traded") or []),
             )
             decision = {k: v for k, v in decision.items() if k not in ("market", "feature_row")}
             per_coin[coin] = {"coin_trust": coin_trust, "decision": decision}

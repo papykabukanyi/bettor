@@ -43,7 +43,16 @@ COINBASE_PRODUCTS = {
     "BCH": "BCH-USD", "NEAR": "NEAR-USD", "HYPE": "HYPE-USD", "ZEC": "ZEC-USD",
     # Perp-only underlyings (no Kalshi 15m series), for perps_spot_lead.
     "LINK": "LINK-USD", "LTC": "LTC-USD", "SUI": "SUI-USD", "ADA": "ADA-USD", "AAVE": "AAVE-USD", "BNB": "BNB-USD",
+    # Kalshi perps that had no chart before (all confirmed live on Coinbase).
+    "DOT": "DOT-USD", "HBAR": "HBAR-USD", "XLM": "XLM-USD", "SHIB": "SHIB-USD",
 }
+# A traded symbol whose chart is another product's (kSHIB perp = 1,000 SHIB;
+# price units differ, the chart's shape doesn't).
+CHART_ALIASES = {"KSHIB": "SHIB"}
+
+
+def chart_coin(coin: str) -> str:
+    return CHART_ALIASES.get(coin, coin)
 MAX_CANDLES_PER_CALL = 300
 REQUEST_SPACING_SEC = 0.12
 LOCAL_DIR = DATA_DIR / "kalshi_15m_spot_history"
@@ -158,13 +167,14 @@ def run_incremental(*, lookback_hours: float = 2.0) -> dict[str, Any]:
     return result
 
 
-def backfill(*, days: int = 70) -> dict[str, Any]:
-    """Day by day so memory stays bounded."""
+def backfill(*, days: int = 70, coins: list[str] | None = None) -> dict[str, Any]:
+    """Day by day so memory stays bounded; `coins` limits it to some products
+    (each day's shard merges with what HF already holds)."""
     now = int(time.time())
-    totals: dict[str, Any] = {"ok": True, "rows": 0, "dates_written": []}
+    totals: dict[str, Any] = {"ok": True, "rows": 0, "dates_written": [], "coins": coins or list(COINBASE_PRODUCTS)}
     for day in range(days, 0, -1):
         start = now - day * 86400
-        df = collect_since(start, until_ts=start + 86400)
+        df = collect_since(start, until_ts=start + 86400, coins=coins)
         if df.empty:
             continue
         result = push_spot_history(df)
@@ -330,3 +340,17 @@ def grade_against_settlements(quotes: pd.DataFrame, spot: pd.DataFrame) -> dict[
         "close_err_bps_median": round(float(g.err_close_bps.median()), 2) if len(g) else None,
         "per_coin": per_coin,
     }
+
+
+def backfill_missing_products(*, days: int = 70) -> dict[str, Any]:
+    """Real history for any product the most recent HF shard doesn't carry
+    yet (e.g. a coin just added to COINBASE_PRODUCTS)."""
+    dates = list_hf_shard_dates()
+    if not dates:
+        return {"ok": False, "reason": "no_hf_history"}
+    latest = load_spot_history(days=1)
+    have = set(latest["coin"]) if not latest.empty else set()
+    missing = [c for c in COINBASE_PRODUCTS if c not in have]
+    if not missing:
+        return {"ok": True, "missing": []}
+    return {**backfill(days=days, coins=missing), "missing": missing}

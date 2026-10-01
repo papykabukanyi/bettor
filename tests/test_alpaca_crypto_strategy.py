@@ -34,6 +34,25 @@ def _no_real_prewarm_network_calls(monkeypatch):
     yield
 
 
+@pytest.fixture(autouse=True)
+def _no_global_exposure_reads(monkeypatch):
+    """global_correlation_monitor.correlated_exposure reads every bot's real
+    state file -- stubbed open here; the exposure tests set it themselves."""
+    from data import global_correlation_monitor
+    monkeypatch.setattr(global_correlation_monitor, "correlated_exposure",
+                        lambda symbol, direction, *, bot: {"ok": True, "blocked": False, "matches": [], "detail": "stub"})
+    from data import setup_backtest_job
+    monkeypatch.setattr(setup_backtest_job, "evidence_gate", lambda bot: {"open": True, "gated": False, "reason": "stub"})
+
+
+@pytest.fixture(autouse=True)
+def _legacy_entry_system(monkeypatch):
+    """Most tests here lock down the legacy model/technical entry path; the
+    price-action setup path has its own section (those set "setup")."""
+    monkeypatch.setattr(strat, "ENTRY_SYSTEM", "legacy")
+    monkeypatch.setattr(strat, "_durable_push_pending", False)
+
+
 def _row(**overrides):
     base = {
         "symbol": "BTC/USD", "current_price": 65000.0, "short_ma": 65200.0,
@@ -1338,3 +1357,91 @@ def test_compute_position_notional_uses_the_overridden_position_size_pct(monkeyp
 
     assert default_notional == 180.0
     assert overridden_notional == 360.0
+
+
+# ---- price-action setup entry system (alpaca_crypto_setup) ----
+
+_SETUP = {
+    "valid": True, "side": "long", "setup": "breakout_retest", "reason": "setup_confirmed",
+    "setup_id": "breakout_retest:1790000000:65000", "as_of": 1790000000,
+    "plan": {"entry": 65000.0, "stop": 64350.0, "target": 67600.0, "rr_net": 2.9},
+    "checks": {"trend": {"ok": True}},
+}
+
+
+@pytest.fixture
+def setup_mode(monkeypatch, tmp_path):
+    from data import alpaca_crypto_setup
+    monkeypatch.setattr(strat, "ENTRY_SYSTEM", "setup")
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", False)
+    monkeypatch.setattr(crypto_news, "get_sentiment", lambda coin, **kw: {"sentiment_score": 0.0})
+    monkeypatch.setattr(alpaca_crypto_setup, "live_setup", lambda symbol, **kw: dict(_SETUP))
+    monkeypatch.setattr(strat, "get_current_price", lambda symbol: 65050.0)
+    monkeypatch.setattr(strat, "get_available_balance", lambda: 10_000.0)
+    monkeypatch.setattr(threads_post, "post_trade_entry", lambda **kw: None)
+    monkeypatch.setattr(threads_post, "post_trade_entry_chart", lambda **kw: None)
+    monkeypatch.setattr(alpaca_crypto_data, "fetch_recent_crypto_bars", lambda symbol, **kw: pd.DataFrame())
+
+    def fail(*a, **k):
+        raise AssertionError("no model/feature read in setup mode")
+
+    monkeypatch.setattr(alpaca_crypto_data, "latest_feature_row", fail)
+    monkeypatch.setattr(alpaca_crypto_model, "predict_direction", fail)
+
+
+def test_setup_entry_opens_with_the_planned_stop_and_target_sized_by_risk(setup_mode):
+    result = strat.scan_and_enter(["BTC/USD"], dry_run=True)
+    assert result["opened"][0]["action"] == "opened"
+    position = strat._load_state()["positions"][0]  # noqa: SLF001
+    assert position["setup_stop_price"] == 64350.0 and position["setup_target_price"] == 67600.0
+    assert position["take_profit_price"] == 67600.0 and position["stop_loss_price"] == 64350.0
+    # 1% of $10k at risk; loss fraction = stop distance + both fees.
+    loss_fraction = (65050.0 - 64350.0) / 65050.0 + 2 * strat.TAKER_FEE_RATE
+    expected = min(strat.compute_position_notional(10_000.0), 100.0 / loss_fraction)
+    assert position["count"] * 65050.0 == pytest.approx(expected)
+    assert _SETUP["setup_id"] in strat._load_state()["setup_ids_traded"]  # noqa: SLF001
+
+
+def test_setup_is_not_traded_twice(setup_mode):
+    strat.scan_and_enter(["BTC/USD"], dry_run=True)
+    state = strat._load_state()  # noqa: SLF001
+    state["positions"] = []
+    strat._save_state(state)  # noqa: SLF001
+    result = strat.scan_and_enter(["BTC/USD"], dry_run=True)
+    assert result["opened"][0]["action"] == "skipped" and "already traded" in result["opened"][0]["reason"]
+
+
+def test_setup_entry_skipped_when_the_live_quote_ran_past_the_plan(setup_mode, monkeypatch):
+    monkeypatch.setattr(strat, "get_current_price", lambda symbol: 67000.0)
+    result = strat.scan_and_enter(["BTC/USD"], dry_run=True)
+    assert result["opened"][0]["action"] == "skipped_setup_plan_at_price"
+
+
+def test_failed_setup_rule_is_reported(setup_mode, monkeypatch):
+    from data import alpaca_crypto_setup
+    monkeypatch.setattr(alpaca_crypto_setup, "live_setup", lambda symbol, **kw: {"valid": False, "reason": "vwap", "checks": {}})
+    skipped = strat.scan_and_enter(["BTC/USD"], dry_run=True)["opened"][0]
+    assert skipped["action"] == "skipped" and skipped["setup_reason"] == "vwap"
+
+
+@pytest.mark.parametrize("price,exits,why", [(64300.0, True, "stop_loss"), (67700.0, True, "take_profit"),
+                                             (65000.0 * (1 + strat.TAKE_PROFIT_PCT + 0.001), False, None)])
+def test_setup_position_exits_only_at_plan(price, exits, why):
+    pos = {**_position(minutes_ago=30), "setup_stop_price": 64350.0, "setup_target_price": 67600.0}
+    should, reason = strat.decide_exit(pos, price, velocity_pct_per_min=0.05)
+    assert should is exits
+    if why:
+        assert reason.startswith(why)
+
+
+def test_setup_entry_is_skipped_when_the_bet_is_already_open_across_bots(setup_mode, monkeypatch):
+    from data import global_correlation_monitor
+    seen = {}
+    monkeypatch.setattr(global_correlation_monitor, "correlated_exposure",
+                        lambda symbol, direction, *, bot: seen.update(symbol=symbol, direction=direction, bot=bot) or (lambda symbol, direction, *, bot: {"ok": False, "blocked": True, "matches": [{"bot": "crypto", "symbol": symbol}],
+                                                      "detail": "2 open position(s) already on this bet"})(symbol, direction, bot=bot))
+    result = strat.scan_and_enter(["BTC/USD"], dry_run=True)
+    assert result["opened"][0]["action"] == "skipped_correlated_exposure"
+    assert seen == {"symbol": "BTC", "direction": "long", "bot": "crypto"}
+    assert strat._load_state()["positions"] == []  # noqa: SLF001

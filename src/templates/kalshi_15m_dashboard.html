@@ -90,6 +90,11 @@
   @media (max-width: 640px) {
     .pull-axis, .pull-row { grid-template-columns: 120px 1fr; }
   }
+  .setup-cell { text-align: center; }
+  #setup-section th, #setup-section td { padding: 7px 6px; }
+  #setup-section td.setup-why { white-space: normal; min-width: 200px; max-width: 320px; }
+  .setup-na { color: var(--muted); }
+  .setup-note { color: var(--muted); font-size: 12px; margin: -2px 0 8px; }
 </style>
 </head>
 <body>
@@ -109,12 +114,35 @@
   <div class="card"><h2>Positions</h2><div id="position-count" class="stat">--</div><div class="sub" id="position-sub">--</div></div>
   <div class="card"><h2>Today's P&amp;L (after fees)</h2><div id="today-pnl" class="stat">--</div><div class="sub" id="total-pnl-sub">--</div></div>
   <div class="card"><h2>Win Rate</h2><div id="win-rate" class="stat">--</div><div class="sub" id="win-rate-sub">--</div></div>
-  <div class="card"><h2>Crypto Edge Model</h2><div id="crypto-model" class="stat small">--</div><div class="sub" id="crypto-model-sub">--</div></div>
-  <div class="card"><h2>Metals Edge Model</h2><div id="metals-model" class="stat small">--</div><div class="sub" id="metals-model-sub">--</div></div>
+  <div class="card ev-only"><h2>Crypto Edge Model</h2><div id="crypto-model" class="stat small">--</div><div class="sub" id="crypto-model-sub">--</div></div>
+  <div class="card ev-only"><h2>Metals Edge Model</h2><div id="metals-model" class="stat small">--</div><div class="sub" id="metals-model-sub">--</div></div>
   <div class="card"><h2>Shard 2 Collateral</h2><div id="shard2-balance" class="stat">--</div><div class="sub" id="shard2-sub">Crypto &amp; Commodities</div></div>
 </div>
 
-<section>
+<section id="setup-evidence-section">
+  <h3>Strategy Evidence &mdash; this bot's rules re-tested daily on real data (on the HF Space)</h3>
+  <p class="setup-note" id="setup-evidence-note">Waiting for the first daily replay&hellip;</p>
+  <p class="setup-note" id="setup-gate-note"></p>
+  <div class="scroll-x">
+    <table>
+      <thead><tr><th>Version</th><th>Trades</th><th>Win rate</th><th>Avg per trade</th><th>Total</th><th>Profit factor</th><th>t-stat</th><th>First half avg</th><th>Second half avg</th></tr></thead>
+      <tbody id="setup-evidence-body"><tr><td colspan="9" class="empty">Waiting for the first daily replay&hellip;</td></tr></tbody>
+    </table>
+  </div>
+</section>
+
+<section id="setup-section">
+  <h3>Setup Checklist &mdash; the trading method on each underlying's chart</h3>
+  <p class="setup-note">Every market from the last cycle against each rule, in order. A long setup buys YES, a short setup buys NO, only when the contract's own reward/risk at Kalshi's real ask after fees clears the bar; R:R here is the contract's. Sold when the underlying reaches the stop or target, otherwise settled. &#10003; passed &middot; &#10007; failed &middot; &middot; not reached (an earlier rule failed). A trade needs every rule and reward/risk of at least <span id="setup-min-rr">--</span> after costs. Hover a cell for the reading.</p>
+  <div class="scroll-x">
+    <table>
+      <thead><tr><th>Market</th><th>Side</th><th title="15m higher highs and higher lows (lower highs and lower lows for a short)">Trend</th><th title="5m close through a support/resistance zone">Break</th><th title="Breakout candle volume vs its 20-candle average">Volume</th><th title="Price came back to the level">Retest</th><th title="The retest held the level with a reaction candle">Hold</th><th title="Price on the right side of a rising/falling session VWAP">VWAP</th><th title="RSI and MACD confirm, or a supporting divergence">RSI/MACD</th><th title="No divergence against the trade">Diverg.</th><th title="No news against the trade">News</th><th title="Planned reward vs risk after costs">R/R ok</th><th title="Market leader not moving against the trade (when correlated)">Leader</th><th title="Not already on the same bet across all bots">Exposure</th><th title="Planned stop and target on the underlying's chart">Stop / target</th><th>R:R</th><th>Decision</th><th>Why</th></tr></thead>
+      <tbody id="setup-body"><tr><td colspan="18" class="empty">Waiting for the first scan&hellip;</td></tr></tbody>
+    </table>
+  </div>
+</section>
+
+<section id="ev-scan-section">
   <h3>Live Market Scan</h3>
   <p class="note" id="scan-note">What the bot decided for every market on its last cycle: Kalshi's price, the model's probability, and the edge of each side after Kalshi's taker fee at the real ask.</p>
   <div class="scroll-x">
@@ -125,7 +153,7 @@
   </div>
 </section>
 
-<section>
+<section class="ev-only">
   <h3>Prediction Accuracy (out of sample)</h3>
   <p class="note" id="accuracy-note">How often the side each probability favored actually won, on windows the model never trained on. Kalshi's own price is the benchmark to beat.</p>
   <div class="two-col">
@@ -144,7 +172,7 @@
   </div>
 </section>
 
-<section>
+<section class="ev-only">
   <h3>Edge Model Certification</h3>
   <p class="note" id="cert-note">Every candidate is re-tested daily, walk-forward by day, with the exact live rule. A market trades only when its model beats Kalshi's price out of sample AND makes money at real asks after fees (t &ge; 2.5).</p>
   <div class="scroll-x">
@@ -155,7 +183,7 @@
   </div>
 </section>
 
-<section>
+<section class="ev-only">
   <h3>What the Crypto Model Learned</h3>
   <p class="note">How far each pattern moves the model's probability away from Kalshi's own price (change in log-odds per standard deviation of the feature). Right of the line pushes toward YES, left toward NO.</p>
   <div class="pull-chart">
@@ -178,7 +206,7 @@
   </div>
 </section>
 
-<section>
+<section class="ev-only">
   <h3>Coin Eligibility</h3>
   <p class="note">Inside a certified market, a coin trades only with 20+ days of real history, a profitable out-of-sample record on that coin, and (crypto) spot data that reproduces Kalshi's own settlements.</p>
   <div class="scroll-x">
@@ -329,6 +357,15 @@ function renderBanner(data) {
   if (liveBot && !liveBot.live) {
     el.className = "banner stop";
     el.innerHTML = `<strong>Not live</strong><div class="sub">${esc(liveBot.reason)}</div>`;
+    return;
+  }
+  if (data.entry_mode === "setup") {
+    const checks = ((data.last_scan || {}).checks) || [];
+    const entered = checks.filter(c => c.action === "entered").map(c => c.coin);
+    el.className = entered.length ? "banner go" : "banner wait";
+    el.innerHTML = entered.length
+      ? `<strong>Entered: ${esc(entered.join(", "))}</strong><div class="sub">On a confirmed price-action setup; sold at the planned stop or target, otherwise settled.</div>`
+      : `<strong>Setup mode: waiting for a confirmed setup</strong><div class="sub">Every market is checked each cycle against trend, level break, volume, retest, VWAP, RSI/MACD and news; a contract is bought only when its own reward/risk after fees is at least ${esc((data.params || {}).setup_min_rr ?? "--")}.</div>`;
     return;
   }
   if (data.entry_mode === "legacy") {
@@ -503,7 +540,8 @@ async function refreshStatus() {
 
     const modeBadge = document.getElementById("mode-badge");
     modeBadge.className = "badge neutral";
-    modeBadge.textContent = data.entry_mode === "ev" ? (p.ev_require_certified ? "EV · certified only" : "EV · uncertified allowed") : "Legacy mode";
+    modeBadge.textContent = data.entry_mode === "setup" ? "Setup · price action"
+      : data.entry_mode === "ev" ? (p.ev_require_certified ? "EV · certified only" : "EV · uncertified allowed") : "Legacy mode";
 
     renderBanner(data);
     document.getElementById("position-count").textContent = data.open_position_count ?? "--";
@@ -521,6 +559,13 @@ async function refreshStatus() {
     renderModelCard("metals", markets.metals);
 
     renderScan(data.last_scan);
+    const setupMode = data.entry_mode === "setup";
+    document.getElementById("setup-section").style.display = setupMode ? "" : "none";
+    document.getElementById("ev-scan-section").style.display = setupMode ? "none" : "";
+    document.querySelectorAll(".ev-only").forEach(el => { el.style.display = setupMode ? "none" : ""; });
+    try { renderSetupGate(data.setup_evidence_gate); } catch (e) { console.error("gate render failed", e); }
+    try { renderSetupEvidence(data.setup_backtest); } catch (e) { console.error("setup evidence render failed", e); }
+    try { renderSetupChecklist((data.last_scan || {}).checks, p.setup_min_rr); } catch (e) { console.error("setup checklist render failed", e); }
     renderAccuracy("acc-crypto", markets.crypto);
     renderAccuracy("acc-metals", markets.metals);
     renderCertification(em);
@@ -536,6 +581,14 @@ async function refreshStatus() {
     document.getElementById("cfg-size").textContent = isNum(p.position_size_pct) ? fmtPct(p.position_size_pct) + " of shard balance" : "--";
     document.getElementById("cfg-cycle").textContent = isNum(p.cycle_minutes) ? `every ${p.cycle_minutes} min` : "--";
     document.getElementById("cfg-recert").textContent = isNum(p.edge_model_hour_et) ? `daily ${String(p.edge_model_hour_et).padStart(2, "0")}:20 ET + after every crypto loss` : "--";
+    if (data.entry_mode === "setup") {
+      const k = (id, label, value) => { const v = document.getElementById(id); v.textContent = value; v.previousElementSibling.textContent = label; };
+      k("cfg-mode", "Entry mode", "Price-action setup");
+      k("cfg-cert", "Min contract reward/risk", isNum(p.setup_min_rr) ? `${Number(p.setup_min_rr).toFixed(1)} after fees` : "--");
+      k("cfg-edge", "Risk per trade", isNum(p.setup_risk_per_trade_pct) ? `${fmtPct(p.setup_risk_per_trade_pct)} of budget at the stop` : "--");
+      k("cfg-minutes", "Entry window", "with ≥ 10 min left in the window");
+      k("cfg-recert", "Daily re-test", "real-data replay on the HF Space");
+    }
 
     const tbody = document.getElementById("positions-body");
     const positions = data.positions || [];
@@ -594,6 +647,106 @@ refreshAll();
 refreshShardBalance();
 setInterval(refreshAll, 10000);
 setInterval(refreshShardBalance, 60000);
+
+// ---- Setup checklist: this bot's 5-component price-action method ----
+const SETUP_RULES = [
+  ["trend", "Trend"], ["breakout", "Level break"], ["volume", "Volume"], ["retest", "Retest"], ["hold", "Hold"],
+  ["vwap", "VWAP"], ["momentum", "RSI/MACD"], ["divergence", "Divergence"], ["news", "News"], ["risk_reward", "Reward/risk"],
+  ["correlation", "Correlation"], ["exposure", "Exposure"],
+];
+const SETUP_RULE_LABEL = Object.fromEntries(SETUP_RULES.concat([["data", "Data"], ["session", "Session"]]));
+function setupEsc(s) { return String(s ?? "").replace(/[&<>"]/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[ch])); }
+function setupLevel(v) {
+  if (v == null || !isFinite(v)) return "--";
+  const a = Math.abs(Number(v));
+  return a >= 1000 ? Number(v).toFixed(0) : a >= 10 ? Number(v).toFixed(2) : Number(v).toPrecision(4);
+}
+function setupCellTitle(c) {
+  const parts = [];
+  if (c.detail) parts.push(c.detail);
+  if (c.higher_high != null) parts.push(`higher high ${c.higher_high ? "yes" : "no"}, higher low ${c.higher_low ? "yes" : "no"}`);
+  if (c.lower_low != null) parts.push(`lower high ${c.lower_high ? "yes" : "no"}, lower low ${c.lower_low ? "yes" : "no"}`);
+  if (c.zone_low != null && c.zone_high != null) parts.push(`zone ${setupLevel(c.zone_low)}-${setupLevel(c.zone_high)}`);
+  if (c.volume_ratio != null) parts.push(`${c.volume_ratio}x average volume`);
+  if (c.vwap != null) parts.push(`VWAP ${setupLevel(c.vwap)}`);
+  if (c.rsi != null) parts.push(`RSI ${c.rsi}`);
+  if (c.via) parts.push(c.via);
+  if (c.sentiment != null) parts.push(`news score ${Number(c.sentiment).toFixed(2)}`);
+  if (c.rr_net != null) parts.push(`reward/risk ${Number(c.rr_net).toFixed(2)}${c.min_rr != null ? " (needs " + c.min_rr + ")" : ""}`);
+  if (c.corr != null) parts.push(`${c.leader || "leader"} correlation ${Number(c.corr).toFixed(2)}, leader ${c.leader_dir || "?"}`);
+  return setupEsc(parts.join(" · ") || (c.ok ? "passed" : "failed"));
+}
+function setupCell(c) {
+  if (!c) return '<td class="setup-cell" title="not reached: an earlier rule failed"><span class="setup-na">&middot;</span></td>';
+  return `<td class="setup-cell" title="${setupCellTitle(c)}"><span class="tag ${c.ok ? "yes" : "no"}">${c.ok ? "&#10003;" : "&#10007;"}</span></td>`;
+}
+function setupSymbol(r) { return r.ticker || r.symbol || r.coin || "--"; }
+function setupEntered(r) { return !!(r.should_enter || r.action === "opened" || r.action === "entered"); }
+function setupProgress(r) { return Object.values(r.setup_checks || {}).filter(c => c && c.ok === true).length; }
+function setupWhy(r) {
+  if (setupEntered(r)) return r.setup ? r.setup.replace(/_/g, " ") : "setup confirmed";
+  const rule = r.setup_reason;
+  if (rule && rule !== "setup_confirmed") {
+    const detail = ((r.setup_checks || {})[rule] || {}).detail;
+    return `${SETUP_RULE_LABEL[rule] || rule.replace(/_/g, " ")} not met${detail ? ": " + detail : ""}`;
+  }
+  return String(r.reason || "").replace(/_/g, " ");
+}
+function renderSetupChecklist(rows, minRr) {
+  const body = document.getElementById("setup-body");
+  if (!body) return;
+  const mr = document.getElementById("setup-min-rr");
+  if (mr && minRr != null) mr.textContent = Number(minRr).toFixed(1);
+  const items = (rows || []).filter(r => r && (r.setup_checks || r.setup_reason));
+  if (!items.length) { body.innerHTML = '<tr><td colspan="18" class="empty">Waiting for the next scan&hellip;</td></tr>'; return; }
+  items.sort((a, b) => (setupEntered(b) - setupEntered(a)) || (setupProgress(b) - setupProgress(a)) || setupSymbol(a).localeCompare(setupSymbol(b)));
+  body.innerHTML = items.map(r => {
+    const checks = r.setup_checks || {};
+    const plan = r.setup_plan || null;
+    const blocked = (checks.data && !checks.data.ok) || (checks.session && !checks.session.ok);
+    const entered = setupEntered(r);
+    const side = r.setup_side || (entered ? r.side : null);
+    const rr = r.contract_plan && r.contract_plan.rr != null ? r.contract_plan.rr : (plan && plan.rr_net != null ? plan.rr_net : null);
+    const cells = blocked ? SETUP_RULES.map(() => '<td class="setup-cell"><span class="setup-na">&middot;</span></td>').join("")
+                          : SETUP_RULES.map(([k]) => setupCell(checks[k])).join("");
+    return `<tr>
+      <td title="${setupEsc(r.chart_source ? "chart: " + r.chart_source : "")}"><strong>${setupEsc(setupSymbol(r))}</strong>${r.chart_source && r.chart_source.startsWith("consolidated") ? ' <span class="sub">cons.</span>' : ""}</td>
+      <td>${side ? setupEsc(side) : "--"}</td>${cells}
+      <td>${plan ? setupLevel(plan.stop) + " / " + setupLevel(plan.target) : "--"}</td>
+      <td>${rr != null ? Number(rr).toFixed(2) : "--"}</td>
+      <td>${entered ? `<span class="tag yes">ENTER${side ? " " + setupEsc(side) : ""}</span>` : '<span class="tag no">skip</span>'}</td>
+      <td class="sub setup-why">${setupEsc(setupWhy(r))}</td>
+    </tr>`;
+  }).join("");
+}
+
+function renderSetupGate(g) {
+  const el = document.getElementById("setup-gate-note");
+  if (!el || !g) return;
+  if (!g.gated) { el.innerHTML = "Entry gate: off for this bot (entries follow the live setup alone)."; return; }
+  const why = { replay_profitable: "the latest replay is profitable after costs", no_replay_yet: "waiting for the first replay",
+    last_replay_failed: "the last replay failed", replay_stale: "the replay is out of date",
+    too_few_replay_trades: `fewer than ${g.min_trades} replay trades`, replay_not_profitable: `the replay is not profitable (needs avg > 0 and t ≥ ${g.min_t})` }[g.reason] || g.reason;
+  el.innerHTML = `Entry gate: <span class="tag ${g.open ? "yes" : "no"}">${g.open ? "OPEN" : "CLOSED"}</span> ${setupEsc(why)}. New positions open only while this bot's own real-data replay is profitable; exits always run.`;
+}
+function renderSetupEvidence(bt) {
+  const body = document.getElementById("setup-evidence-body");
+  const note = document.getElementById("setup-evidence-note");
+  if (!body) return;
+  if (!bt) { body.innerHTML = '<tr><td colspan="9" class="empty">Waiting for the first daily replay&hellip;</td></tr>'; return; }
+  if (!bt.ok) { body.innerHTML = `<tr><td colspan="9" class="empty">Last replay failed: ${setupEsc(bt.error || "unknown error")}</td></tr>`; return; }
+  const perContract = (bt.with_correlation || {}).unit === "usd_per_contract";
+  const fmt = v => v == null ? "--" : perContract ? `${(v * 100).toFixed(1)}&cent;` : `${(v * 100).toFixed(2)}%`;
+  const fmtTotal = v => v == null ? "--" : perContract ? `$${Number(v).toFixed(2)}/contract` : `${(v * 100).toFixed(1)}%`;
+  const row = (label, s) => !s || !s.trades ? `<tr><td>${label}</td><td colspan="8" class="sub">no trades</td></tr>` : `<tr>
+      <td>${label}</td><td>${s.trades}</td><td>${(s.win_rate * 100).toFixed(1)}%</td>
+      <td class="${s.avg > 0 ? "pos" : s.avg < 0 ? "neg" : ""}">${fmt(s.avg)}</td><td>${fmtTotal(s.total)}</td>
+      <td>${s.profit_factor ?? "--"}</td><td>${s.t_stat ?? "--"}</td>
+      <td>${fmt((s.first_half || {}).avg)}</td><td>${fmt((s.second_half || {}).avg)}</td></tr>`;
+  body.innerHTML = row("<strong>Live system</strong> (with correlation rule)", bt.with_correlation) + row("Without correlation rule", bt.without_correlation);
+  if (note) note.textContent = `Last ${bt.days} days, ${(bt.universe || []).length} symbols, replayed ${bt.computed_at ? new Date(bt.computed_at).toLocaleString() : "--"}`
+    + (bt.published ? ` · published to ${bt.hf_repo}` : "") + ". Costs included; past results are evidence, not a promise.";
+}
 </script>
 </body>
 </html>
