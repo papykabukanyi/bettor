@@ -166,3 +166,21 @@ def test_new_product_backfill_uploads_in_a_few_commits_not_one_per_day(monkeypat
     r = ks.backfill_missing_products(days=60, files_per_commit=25)
     assert r["missing"] == ["DOT"] and len(r["dates_written"]) == 60
     assert commits == [25, 25, 10]
+
+
+def test_an_upload_keeps_rows_another_writer_put_on_hf(monkeypatch, tmp_path):
+    """A gap backfilled into HF while this process held its own local copy
+    of the day must survive this process's next upload."""
+    monkeypatch.setattr(ks, "LOCAL_DIR", tmp_path)
+    monkeypatch.setattr(ks, "HF_API_KEY", "")
+    day0 = 1_790_812_800  # 2026-10-02 00:00 UTC
+    local = _minutes("BTC", [1.0] * 5, start=day0 + 3600)          # this process, after its restart
+    gap = _minutes("BTC", [2.0] * 5, start=day0 + 60)               # recovered by a backfill, on HF only
+    local.to_parquet(tmp_path / "2026-10-02.parquet", index=False)
+    remote_file = tmp_path / "remote.parquet"
+    gap.to_parquet(remote_file, index=False)
+    monkeypatch.setattr(ks, "_hf_download", lambda path: str(remote_file))
+    new = _minutes("BTC", [3.0] * 2, start=day0 + 7200)
+    ks.push_spot_history(new)
+    merged = pd.read_parquet(tmp_path / "2026-10-02.parquet")
+    assert set(gap.ts) | set(local.ts) | set(new.ts) == set(merged.ts)

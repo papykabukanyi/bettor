@@ -142,8 +142,8 @@ def _hf_download(path_in_repo: str) -> str | None:
 
 
 def push_spot_history(df: pd.DataFrame) -> dict[str, Any]:
-    """Merges into each UTC date's shard (seeded from HF when the local copy
-    is missing, e.g. after a restart) and uploads it."""
+    """Merges into each UTC date's shard -- unioned with the shard already on
+    HF -- and uploads it."""
     if df.empty:
         return {"ok": False, "reason": "no_rows"}
     LOCAL_DIR.mkdir(parents=True, exist_ok=True)
@@ -156,13 +156,16 @@ def push_spot_history(df: pd.DataFrame) -> dict[str, Any]:
     for date_str, part in df.groupby(dates):
         path_in_repo = f"spot_history/{date_str}.parquet"
         local_path = LOCAL_DIR / f"{date_str}.parquet"
+        # Union with what HF already holds, every time (not only when the
+        # local copy is missing): rows another writer added -- a gap backfill,
+        # a run before a restart -- are kept, never overwritten. Local and
+        # new rows win on duplicates.
         frames = [part]
         if local_path.exists():
             frames.insert(0, pd.read_parquet(local_path))
-        else:
-            remote = _hf_download(path_in_repo)
-            if remote:
-                frames.insert(0, pd.read_parquet(remote))
+        remote = _hf_download(path_in_repo)
+        if remote:
+            frames.insert(0, pd.read_parquet(remote))
         combined = pd.concat(frames, ignore_index=True).drop_duplicates(["coin", "ts"], keep="last").sort_values(["coin", "ts"])
         tmp = local_path.with_suffix(".parquet.tmp")
         combined.to_parquet(tmp, index=False)
