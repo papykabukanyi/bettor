@@ -143,3 +143,26 @@ def test_live_underlying_row_refuses_stale_spot(monkeypatch):
     assert ks.live_underlying_row("BTC", {"floor_strike": 100.0}, as_of_ts=fresh_as_of)["ts"] == fresh_as_of
     assert ks.live_underlying_row("BTC", {"floor_strike": 100.0}, as_of_ts=fresh_as_of + 600) is None
     assert ks.live_underlying_row("BTC", {"floor_strike": 100.0}, as_of_ts=T0 + 60 * 100)["ts"] == T0 + 60 * 100
+
+
+def test_new_product_backfill_uploads_in_a_few_commits_not_one_per_day(monkeypatch, tmp_path):
+    import huggingface_hub
+    monkeypatch.setattr(ks, "LOCAL_DIR", tmp_path)
+    monkeypatch.setattr(ks, "HF_API_KEY", "token")
+    monkeypatch.setattr(ks, "list_hf_shard_dates", lambda: ["2026-09-30"])
+    monkeypatch.setattr(ks, "load_spot_history", lambda days: pd.DataFrame({"coin": [c for c in ks.COINBASE_PRODUCTS if c != "DOT"]}))
+    monkeypatch.setattr(ks, "_hf_download", lambda path: None)
+    monkeypatch.setattr(ks, "collect_since", lambda start, until_ts=None, coins=None: _minutes(coins[0], [1.0] * 3, start=start + 60))
+    commits = []
+
+    class FakeApi:
+        def __init__(self, token):
+            pass
+
+        def create_commit(self, **kw):
+            commits.append(len(kw["operations"]))
+
+    monkeypatch.setattr(huggingface_hub, "HfApi", FakeApi)
+    r = ks.backfill_missing_products(days=60, files_per_commit=25)
+    assert r["missing"] == ["DOT"] and len(r["dates_written"]) == 60
+    assert commits == [25, 25, 10]

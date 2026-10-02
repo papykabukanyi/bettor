@@ -170,8 +170,10 @@ def push_spot_history(df: pd.DataFrame) -> dict[str, Any]:
         written.append(date_str)
         if api is not None:
             try:
-                api.upload_file(path_or_fileobj=str(local_path), path_in_repo=path_in_repo, repo_id=HF_KALSHI_15M_DATASET_REPO,
-                                repo_type="dataset", commit_message=f"coinbase 1m spot history {date_str}")
+                from server_common import call_with_hard_timeout
+                call_with_hard_timeout(lambda lp=local_path, pir=path_in_repo, ds=date_str: api.upload_file(
+                    path_or_fileobj=str(lp), path_in_repo=pir, repo_id=HF_KALSHI_15M_DATASET_REPO,
+                    repo_type="dataset", commit_message=f"coinbase 1m spot history {ds}"), timeout_sec=_HF_TIMEOUT_SEC * 2)
                 uploaded.append(date_str)
             except Exception as exc:
                 logger.warning("[kalshi_15m_spot] HF upload failed for %s: %s", date_str, exc)
@@ -370,9 +372,12 @@ def grade_against_settlements(quotes: pd.DataFrame, spot: pd.DataFrame) -> dict[
     }
 
 
-def backfill_missing_products(*, days: int = 70) -> dict[str, Any]:
+def backfill_missing_products(*, days: int = 70, files_per_commit: int = 25) -> dict[str, Any]:
     """Real history for any product the most recent HF shard doesn't carry
-    yet (e.g. a coin just added to COINBASE_PRODUCTS)."""
+    yet (e.g. a coin just added to COINBASE_PRODUCTS). All days are merged
+    into their local shards first, then uploaded a few dozen shards per
+    commit -- never one commit per day, which would eat the dataset repo's
+    commit quota that every live collector shares."""
     dates = list_hf_shard_dates()
     if not dates:
         return {"ok": False, "reason": "no_hf_history"}
@@ -381,4 +386,45 @@ def backfill_missing_products(*, days: int = 70) -> dict[str, Any]:
     missing = [c for c in COINBASE_PRODUCTS if c not in have]
     if not missing:
         return {"ok": True, "missing": []}
-    return {**backfill(days=days, coins=missing), "missing": missing}
+    LOCAL_DIR.mkdir(parents=True, exist_ok=True)
+    now = int(time.time())
+    touched: list[str] = []
+    for day in range(days, 0, -1):
+        start = now - day * 86400
+        df = collect_since(start, until_ts=start + 86400, coins=missing)
+        if df.empty:
+            continue
+        for date_str, part in df.groupby(pd.to_datetime(df["ts"], unit="s", utc=True).dt.strftime("%Y-%m-%d")):
+            local_path = LOCAL_DIR / f"{date_str}.parquet"
+            frames = [part]
+            if local_path.exists():
+                frames.insert(0, pd.read_parquet(local_path))
+            else:
+                remote = _hf_download(f"spot_history/{date_str}.parquet")
+                if remote:
+                    frames.insert(0, pd.read_parquet(remote))
+            combined = pd.concat(frames, ignore_index=True).drop_duplicates(["coin", "ts"], keep="last").sort_values(["coin", "ts"])
+            tmp = local_path.with_suffix(".parquet.tmp")
+            combined.to_parquet(tmp, index=False)
+            os.replace(tmp, local_path)
+            if date_str not in touched:
+                touched.append(date_str)
+        gc.collect()
+    uploaded: list[str] = []
+    if HF_API_KEY and touched:
+        from huggingface_hub import CommitOperationAdd, HfApi
+
+        from server_common import call_with_hard_timeout
+        api = HfApi(token=HF_API_KEY)
+        for i in range(0, len(touched), files_per_commit):
+            batch = touched[i:i + files_per_commit]
+            ops = [CommitOperationAdd(f"spot_history/{d}.parquet", str(LOCAL_DIR / f"{d}.parquet")) for d in batch]
+            try:
+                call_with_hard_timeout(lambda o=ops, b=batch: api.create_commit(
+                    repo_id=HF_KALSHI_15M_DATASET_REPO, repo_type="dataset", operations=o,
+                    commit_message=f"coinbase 1m spot history backfill {b[0]}..{b[-1]} ({', '.join(missing)})"), timeout_sec=300)
+                uploaded += batch
+            except Exception as exc:
+                logger.warning("[kalshi_15m_spot] backfill upload failed for %s..%s: %s", batch[0], batch[-1], exc)
+    return {"ok": True, "missing": missing, "dates_written": touched, "dates_uploaded": uploaded,
+            "commits": (len(touched) + files_per_commit - 1) // files_per_commit}
