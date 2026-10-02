@@ -173,7 +173,7 @@ def test_an_upload_keeps_rows_another_writer_put_on_hf(monkeypatch, tmp_path):
     of the day must survive this process's next upload."""
     monkeypatch.setattr(ks, "LOCAL_DIR", tmp_path)
     monkeypatch.setattr(ks, "HF_API_KEY", "")
-    day0 = 1_790_812_800  # 2026-10-02 00:00 UTC
+    day0 = int(pd.Timestamp("2026-10-02", tz="UTC").timestamp())
     local = _minutes("BTC", [1.0] * 5, start=day0 + 3600)          # this process, after its restart
     gap = _minutes("BTC", [2.0] * 5, start=day0 + 60)               # recovered by a backfill, on HF only
     local.to_parquet(tmp_path / "2026-10-02.parquet", index=False)
