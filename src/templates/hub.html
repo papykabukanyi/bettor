@@ -114,7 +114,10 @@
 <body>
 <div class="top">
   <h1><img src="{{ url_for('static', filename='cumdev-icon.svg') }}" alt="CUMDEV" width="30" height="30" style="border-radius:8px;">&#128200; <span class="grad">Bettor</span></h1>
-  <div class="live-count"><span class="dot"></span><span id="live-summary">checking status&hellip;</span></div>
+  <div style="display:flex; gap:10px; flex-wrap:wrap;">
+    <div class="live-count"><span class="dot"></span><span id="live-summary">checking status&hellip;</span></div>
+    <div class="live-count" id="hf-sync" title="checking HF access&hellip;"><span class="dot" id="hf-dot"></span><span id="hf-summary">HF sync&hellip;</span></div>
+  </div>
 </div>
 <div class="sub">5 automated trading bots, one hub. Pick a dashboard for real-time positions, P&amp;L, and model status.</div>
 
@@ -234,11 +237,15 @@
   // trading loop completed a run in the last 10 minutes -- one shared
   // definition (/api/bots/live) for this hub and the front page's bot bar.
   async function refreshLiveBadges() {
-    let bots = null;
+    let bots = null, hf = null;
     try {
       const res = await fetch("/api/bots/live", { cache: "no-store" });
-      if (res.ok) bots = (await res.json()).bots || null;
+      if (res.ok) { const body = await res.json(); bots = body.bots || null; hf = body.hf || null; }
     } catch (e) { bots = null; }
+    const hfOk = !!(hf && hf.ok);
+    document.getElementById("hf-summary").textContent = hf ? (hfOk ? "HF sync working" : "HF sync FAILING") : "HF status unavailable";
+    document.getElementById("hf-dot").style.background = hfOk ? "var(--green)" : "var(--red)";
+    document.getElementById("hf-sync").title = hf ? `${hf.detail}${hf.checked_at ? " -- checked " + new Date(hf.checked_at).toLocaleTimeString() : ""}` : "";
     let liveCount = 0;
     const cards = document.querySelectorAll(".card[data-bot]");
     cards.forEach(card => {

@@ -2200,3 +2200,29 @@ def test_kalshi15m_status_carries_the_last_scan(monkeypatch):
         body = client.get("/api/kalshi15m/status").get_json()
     assert body["last_scan"]["checks"][0]["reason"] == "edge_model_not_certified"
     assert "ev_min_edge" in body["params"]
+
+
+def test_hf_health_check_flags_a_rejected_token(monkeypatch):
+    import huggingface_hub
+    import app_kalshi
+
+    class Rejecting:
+        def __init__(self, token):
+            pass
+
+        def whoami(self):
+            raise RuntimeError("401 Client Error: Unauthorized")
+
+    class Accepting(Rejecting):
+        def whoami(self):
+            return {"name": "papylove", "auth": {"accessToken": {"role": "write"}}}
+
+    monkeypatch.setenv("HF_API_KEY", "hf_x")
+    monkeypatch.setattr(huggingface_hub, "HfApi", Rejecting)
+    bad = app_kalshi._run_hf_health_check()  # noqa: SLF001
+    assert bad["ok"] is False and "revoked or rotated" in bad["detail"]
+    monkeypatch.setattr(huggingface_hub, "HfApi", Accepting)
+    good = app_kalshi._run_hf_health_check()  # noqa: SLF001
+    assert good["ok"] is True and good["last_ok_at"]
+    body = app_kalshi.app.test_client().get("/api/bots/live").get_json()
+    assert body["hf"]["ok"] is True

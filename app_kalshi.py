@@ -1538,6 +1538,10 @@ def _ensure_background_jobs_started() -> None:
             )
             threading.Thread(target=_ensure_edge_model_at_startup, daemon=True, name="kalshi15m-edge-model-startup").start()
             scheduler.add_job(
+                _run_hf_health_check, "interval", minutes=HF_HEALTH_CHECK_MINUTES, id="hf_health_check", replace_existing=True,
+                next_run_time=dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=20),
+            )
+            scheduler.add_job(
                 _run_global_correlation_refresh, "interval", minutes=GLOBAL_CORRELATION_REFRESH_MINUTES,
                 id="global_correlation_refresh", replace_existing=True,
                 next_run_time=dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=3),
@@ -2265,13 +2269,48 @@ def bot_live_status(now: dt.datetime | None = None) -> list[dict[str, Any]]:
     return out
 
 
+# HF access health. Every bot uploads/downloads its data, models and
+# durable state with the Space's HF_API_KEY; on 2026-10-01 that token was
+# rotated and every HF call failed with 401 for ~5.5 hours while the bots
+# kept running, with nothing visible. Checked every HF_HEALTH_CHECK_MINUTES
+# and shown next to the bots' live dots.
+HF_HEALTH_CHECK_MINUTES = max(1, int(os.getenv("HF_HEALTH_CHECK_MINUTES", "5") or "5"))
+_HF_HEALTH: dict[str, Any] = {"ok": None, "detail": "not checked yet"}
+
+
+def _run_hf_health_check() -> dict[str, Any]:
+    from huggingface_hub import HfApi
+
+    from server_common import call_with_hard_timeout
+    now = dt.datetime.now(dt.timezone.utc).isoformat()
+    token = os.getenv("HF_API_KEY", "")
+    if not token:
+        result = {"ok": False, "detail": "HF_API_KEY is not set on the Space"}
+    else:
+        try:
+            who = call_with_hard_timeout(lambda: HfApi(token=token).whoami(), timeout_sec=20)
+            role = ((who.get("auth") or {}).get("accessToken") or {}).get("role")
+            result = {"ok": True, "detail": f"HF accepts the Space's token ({who.get('name')}, {role})"}
+        except Exception as exc:
+            text = str(exc)
+            reason = ("HF rejects the Space's token (401): it was revoked or rotated -- update the HF_API_KEY secret"
+                      if "401" in text else f"HF unreachable: {text[:160]}")
+            result = {"ok": False, "detail": reason}
+    if result["ok"]:
+        _HF_HEALTH["last_ok_at"] = now
+    else:
+        logger.error("[app_kalshi] HF access check FAILED: %s", result["detail"])
+    _HF_HEALTH.update({**result, "checked_at": now})
+    return dict(_HF_HEALTH)
+
+
 @app.route("/api/bots/live")
 def api_bots_live():
     """One shared answer to "is each bot live right now" for every page's
-    status dots/badges."""
+    status dots/badges, plus HF access health (uploads/downloads)."""
     bots = bot_live_status()
     return jsonify({"ok": True, "now": dt.datetime.now(dt.timezone.utc).isoformat(), "stall_after_sec": BOT_LIVE_STALL_SEC,
-                    "live_count": sum(1 for b in bots if b["live"]), "bots": bots})
+                    "live_count": sum(1 for b in bots if b["live"]), "bots": bots, "hf": dict(_HF_HEALTH)})
 
 
 @app.route("/api/correlation/global", methods=["GET"])

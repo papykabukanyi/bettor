@@ -269,6 +269,7 @@
   <a href="/stocks/" data-bot="stocks"><span class="live-dot" aria-hidden="true"></span>&#128200; Stocks</a>
   <a href="/crypto/" data-bot="crypto"><span class="live-dot" aria-hidden="true"></span>&#8383; Crypto</a>
   <a href="/options/" data-bot="options"><span class="live-dot" aria-hidden="true"></span>&#9780; Options</a>
+  <a href="/bots" id="hf-sync"><span class="live-dot" aria-hidden="true"></span>&#129303; HF sync</a>
 </nav>
 
 <script>
@@ -277,11 +278,20 @@ document.getElementById("year").textContent = new Date().getFullYear();
 // Green = the bot's running code has real-order trading on AND its trading
 // loop completed a run in the last 10 minutes; red otherwise (reason on hover).
 async function refreshLiveDots() {
-  let bots = null;
+  let bots = null, hf = null;
   try {
     const res = await fetch("/api/bots/live", { cache: "no-store" });
-    if (res.ok) bots = (await res.json()).bots || null;
+    if (res.ok) { const body = await res.json(); bots = body.bots || null; hf = body.hf || null; }
   } catch (e) { bots = null; }
+  // Green only when HF accepts the Space's token: every upload and download
+  // (data, models, saved bot state) depends on it.
+  const hfLink = document.getElementById("hf-sync");
+  if (hfLink) {
+    const ok = !!(hf && hf.ok);
+    hfLink.querySelector(".live-dot").className = "live-dot " + (ok ? "on" : "off");
+    hfLink.title = hf ? `${hf.detail}${hf.checked_at ? " -- checked " + new Date(hf.checked_at).toLocaleTimeString() : ""}` : "HF status unavailable";
+    hfLink.setAttribute("aria-label", `HF sync: ${ok ? "working" : "failing"}`);
+  }
   document.querySelectorAll(".ops-bar a[data-bot]").forEach(link => {
     const dot = link.querySelector(".live-dot");
     const name = link.textContent.trim();
