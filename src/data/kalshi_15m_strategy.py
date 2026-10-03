@@ -911,13 +911,15 @@ def _mode_trades(trade_log: list[dict[str, Any]] | None) -> list[dict[str, Any]]
     return [t for t in trade_log or [] if t.get("entry_mode") in (None, "legacy")]
 
 
-def _setup_news_score(coin: str) -> float | None:
+def _setup_news(coin: str) -> tuple[float | None, float | None]:
+    """(sentiment score, article count) from Alpaca news, or (None, None)."""
     try:
         from data import alpaca_news
-        return alpaca_news.sentiment(coin).get("sentiment_score")
+        info = alpaca_news.sentiment(coin)
+        return info.get("sentiment_score"), info.get("headline_volume")
     except Exception as exc:
         logger.debug("[kalshi_15m_strategy] news read failed for %s: %s", coin, exc)
-        return None
+        return None, None
 
 
 def _evaluate_candidate_setup(
@@ -925,14 +927,27 @@ def _evaluate_candidate_setup(
 ) -> dict[str, Any]:
     """Setup-mode decision for one coin -- see ENTRY_MODE. Blocked results
     carry the checklist so the dashboard shows which rule stopped it."""
-    from data import kalshi_15m_setup
+    from data import kalshi_15m_setup, setup_backtest_job
+    # Multi-year evidence (setup_backtest_job.run_multiyear on Alpaca's
+    # archives): when the walk-forward proves it, the trained plan setting,
+    # the assets with a profitable record and the entry conditions that lost.
+    elig = setup_backtest_job.eligibility("kalshi15m")
+    enforce = bool(elig and elig.get("enforce"))
+    if enforce and elig.get("params"):
+        for key, value in elig["params"].items():
+            if value is not None and key in ("STOP_BUFFER_ATR15", "MIN_RR"):
+                setattr(kalshi_15m_setup, key, float(value))
+    if enforce and coin not in set(elig.get("symbols") or []):
+        detail = f"no profitable multi-year record ({elig.get('rule')})"
+        return {"ok": False, "reason": "not_eligible", "entry_mode": "setup", "setup_reason": "eligibility",
+                "setup_checks": {"data": {"ok": False, "detail": f"not eligible: {detail}"}}}
     open_ts = None
     if market.get("open_time"):
         try:
             open_ts = int(dt.datetime.fromisoformat(str(market["open_time"]).replace("Z", "+00:00")).timestamp())
         except (TypeError, ValueError):
             open_ts = None
-    news = _setup_news_score(coin)
+    news, news_count = _setup_news(coin)
     try:
         setup = kalshi_15m_setup.live_setup(coin, news_score=news, strike_ts=open_ts)
     except Exception as exc:
@@ -955,6 +970,13 @@ def _evaluate_candidate_setup(
         return {"ok": False, "reason": "setup_already_traded", **info}
     if setup.get("strike_underlying") is None:
         return {"ok": False, "reason": "no_strike_reference", **info}
+    corr = (setup.get("checks") or {}).get("correlation") or {}
+    info["entry_conditions"] = setup_backtest_job.pattern_features(
+        ts=int(time.time()), side=setup["side"], news_count=news_count, news_score=news,
+        leader_corr=corr.get("corr"), leader_dir=corr.get("leader_dir"))
+    blocked = setup_backtest_job.blocked_reason(elig.get("blocked") if enforce else None, info["entry_conditions"])
+    if blocked:
+        return {"ok": False, "reason": f"learned_losing_condition:{blocked}", **info}
     plan = kalshi_15m_setup.contract_plan(setup, market, seconds_to_close=seconds_to_close,
                                           strike_underlying=float(setup["strike_underlying"]))
     info["contract_plan"] = plan

@@ -1286,13 +1286,30 @@ def setup_fee_rate_roundtrip(ticker: str) -> float:
 
 
 def _evaluate_candidate_setup(ticker: str, *, traded_setup_ids: frozenset[str] = frozenset()) -> dict[str, Any]:
+    from data import kalshi_15m_spot, setup_backtest_job
     sides = ("long", "short") if ENABLE_SHORTS else ("long",)
     fee = setup_fee_rate_roundtrip(ticker)
+    # Multi-year evidence (setup_backtest_job.run_multiyear on Alpaca's
+    # archives): when the walk-forward proves it, the trained plan setting,
+    # the coins with a profitable record and the entry conditions that lost.
+    coin = kalshi_15m_spot.chart_coin(coin_for_ticker(ticker))
+    elig = setup_backtest_job.eligibility("perps")
+    enforce = bool(elig and elig.get("enforce"))
+    if enforce and elig.get("params"):
+        for key, value in elig["params"].items():
+            if value is not None and key in ("STOP_BUFFER_ATR15", "MIN_RR"):
+                setattr(perps_setup, key, float(value))
+    if enforce and coin not in set(elig.get("symbols") or []):
+        detail = f"no profitable multi-year record ({elig.get('rule')})"
+        return {"ticker": ticker, "entry_system": "setup", "should_enter": False, "model_ok": False, "setup_valid": False,
+                "setup_reason": "eligibility", "reason": f"not eligible: {detail}",
+                "setup_checks": {"data": {"ok": False, "detail": f"not eligible: {detail}"}}}
+    news, news_count = None, None
     try:
-        news = alpaca_news.sentiment(coin_for_ticker(ticker)).get("sentiment_score")
+        news_info = alpaca_news.sentiment(coin_for_ticker(ticker))
+        news, news_count = news_info.get("sentiment_score"), news_info.get("headline_volume")
     except Exception as exc:
         logger.debug("[perps_strategy] sentiment read failed for %s: %s", ticker, exc)
-        news = None
     current_price, spread_bps = None, None
     try:
         market = get_margin_market(ticker).get("market") or {}
@@ -1318,6 +1335,14 @@ def _evaluate_candidate_setup(ticker: str, *, traded_setup_ids: frozenset[str] =
         return result
     if setup["setup_id"] in traded_setup_ids:
         result.update(should_enter=False, reason=f"{setup['setup']} {setup['side']} already traded ({setup['setup_id']})")
+        return result
+    corr = (setup.get("checks") or {}).get("correlation") or {}
+    result["entry_conditions"] = setup_backtest_job.pattern_features(
+        ts=int(time.time()), side=setup["side"], news_count=news_count, news_score=news,
+        leader_corr=corr.get("corr"), leader_dir=corr.get("leader_dir"))
+    blocked = setup_backtest_job.blocked_reason(elig.get("blocked") if enforce else None, result["entry_conditions"])
+    if blocked:
+        result.update(should_enter=False, reason=f"{setup['setup']} {setup['side']}: skipped, the study found this condition loses ({blocked})")
         return result
     plan = setup["plan"]
     result.update(

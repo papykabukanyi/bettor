@@ -4217,3 +4217,14 @@ def test_a_closed_evidence_gate_scans_but_never_enters(monkeypatch, tmp_path, se
     result = strat.scan_and_enter(dry_run=True)
     assert result["action"] == "evidence_gate_closed" and result["candidates"][0]["setup_valid"] is True
     assert strat._load_state()["positions"] == []  # noqa: SLF001
+
+
+def test_setup_entry_skips_a_condition_the_study_found_losing(monkeypatch, setup_mode):
+    from data import setup_backtest_job
+    hour_block = f"h{dt.datetime.now(dt.timezone.utc).hour // 4 * 4:02d}"
+    monkeypatch.setattr(setup_backtest_job, "eligibility", lambda bot: {"enforce": True, "symbols": ["BTC"], "rule": "r",
+                                                                         "params": None, "blocked": {"hour_block": [hour_block]}})
+    c = strat.evaluate_candidate("KXBTCPERP")
+    assert c["should_enter"] is False and f"hour_block={hour_block}" in c["reason"]
+    monkeypatch.setattr(setup_backtest_job, "eligibility", lambda bot: {"enforce": True, "symbols": ["ETH"], "rule": "r"})
+    assert "not eligible" in strat.evaluate_candidate("KXBTCPERP")["reason"]

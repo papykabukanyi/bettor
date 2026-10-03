@@ -271,6 +271,231 @@ def _multiyear_symbol(args: tuple) -> pd.DataFrame:
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
+# ---------------------------------------------------------------------------
+# Perps and the 15m bot study on Alpaca's archives: Kraken-via-Alpaca minute
+# bars (crypto, since 2023) and SIP (commodity ETFs, since 2016). Every trade
+# carries what was known at its entry -- hour and weekday, the news in the
+# hours before (Alpaca news archive, no lookahead), the leader's reading --
+# so the walk-forward can learn which conditions the setup pays in.
+# ---------------------------------------------------------------------------
+KALSHI_STUDY_BOTS = ("perps", "kalshi15m")
+MULTIYEAR.update({
+    "perps": {"module": "perps_setup", "sides": ("long", "short"), "lookback": 1},
+    "kalshi15m": {"module": "kalshi_15m_setup", "sides": ("long", "short"), "lookback": 1},
+})
+# The Kalshi bots search a wider plan grid: every stop distance x every
+# minimum reward/risk (16 settings), each crossed with every coin and the
+# entry conditions below -- all scored only on years the choice never saw.
+KALSHI_PARAM_GRID = [tuple(float(x) for x in item.split(":")) for item in os.getenv(
+    "SETUP_MULTIYEAR_KALSHI_PARAM_GRID",
+    ",".join(f"{sb}:{rr}" for sb in (0.5, 1.0, 1.5, 2.0) for rr in (1.5, 2.0, 3.0, 4.0))).split(",") if ":" in item]
+PATTERN_FEATURES = ("hour_block", "weekday", "news", "leader")
+PATTERN_MIN_TRADES = int(os.getenv("SETUP_PATTERN_MIN_TRADES", "20") or "20")
+PATTERN_MAX_T = float(os.getenv("SETUP_PATTERN_MAX_T", "-1.0") or "-1.0")
+NEWS_HOURS = 6.0
+_WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+
+
+def pattern_features(*, ts: int, side: str, news_count: float | None, news_score: float | None,
+                     leader_corr: float | None, leader_dir: str | None) -> dict[str, str]:
+    """The conditions a trade entered in, bucketed the same way in the
+    studies and live: 4-hour UTC block, weekday, the news over the prior
+    NEWS_HOURS relative to the trade's side, and the leader."""
+    t = dt.datetime.fromtimestamp(int(ts), dt.timezone.utc)
+    sign = 1.0 if side == "long" else -1.0
+    if not news_count:
+        news = "none"
+    else:
+        aligned = (news_score or 0.0) * sign
+        news = "with" if aligned > 0.05 else ("against" if aligned < -0.05 else "neutral")
+    if leader_corr is None or leader_dir is None:
+        leader = "n/a"
+    elif abs(float(leader_corr)) < 0.5:
+        leader = "independent"
+    else:
+        implied = {"up": 1, "down": -1}.get(leader_dir, 0) * (1 if float(leader_corr) > 0 else -1)
+        leader = "with" if implied == sign else ("mixed" if implied == 0 else "against")
+    return {"hour_block": f"h{t.hour // 4 * 4:02d}", "weekday": _WEEKDAYS[t.weekday()], "news": news, "leader": leader}
+
+
+def blocked_reason(blocked: dict[str, list[str]] | None, features: dict[str, str]) -> str | None:
+    """Which learned losing condition (if any) this entry falls in."""
+    for f, buckets in (blocked or {}).items():
+        if features.get(f) in set(buckets):
+            return f"{f}={features[f]}"
+    return None
+
+
+def _study_candles(sym: str) -> tuple[pd.DataFrame, str]:
+    """(1-minute candles with ts = END, session) from Alpaca's archives."""
+    from data import alpaca_crypto_history, alpaca_setup, alpaca_sip_history, kalshi_15m_setup
+    if sym in kalshi_15m_setup.METAL_CHART_SYMBOL:
+        return alpaca_setup.regular_session_candles(alpaca_sip_history.load(kalshi_15m_setup.METAL_CHART_SYMBOL[sym])), "us_equity"
+    return alpaca_crypto_history.candles(sym), "utc_day"
+
+
+def _annotate(trades: pd.DataFrame, sym: str, news_idx) -> pd.DataFrame:
+    rows = []
+    for r in trades.itertuples(index=False):
+        n = news_idx.at(int(r.entry_ts), hours=NEWS_HOURS) if news_idx is not None else {"count": 0.0, "score": 0.0}
+        rows.append(pattern_features(ts=int(r.entry_ts), side=r.side, news_count=n["count"], news_score=n["score"],
+                                     leader_corr=getattr(r, "leader_corr", None), leader_dir=getattr(r, "leader_dir", None))
+                    | {"news_count": n["count"], "news_score": n["score"]})
+    return pd.concat([trades.reset_index(drop=True), pd.DataFrame(rows)], axis=1)
+
+
+def _multiyear_kalshi_symbol(args: tuple) -> pd.DataFrame:
+    """One perps/15m study symbol over Alpaca's whole archive, once per plan
+    setting, each trade annotated with its entry conditions."""
+    bot, sym, grid, cost = args
+    try:
+        os.nice(15)
+    except (AttributeError, OSError):
+        pass
+    import importlib
+
+    from data import alpaca_news, alpaca_news_history
+    m = importlib.import_module(f"data.{MULTIYEAR[bot]['module']}")
+    candles, session = _study_candles(sym)
+    if candles.empty:
+        return pd.DataFrame()
+    lead_sym = m.leader_for(sym)
+    lead, lead_session = _study_candles(lead_sym)
+    archive = alpaca_news_history.load()
+    news_idx = alpaca_news_history.NewsIndex(archive, alpaca_news.news_symbols(sym)) if not archive.empty else None
+    del archive
+    default = (m.STOP_BUFFER_ATR15, m.MIN_RR)
+    frames = []
+    for setting in grid:
+        m.STOP_BUFFER_ATR15, m.MIN_RR = setting
+        if bot == "perps":
+            t = m.replay(candles, sides=MULTIYEAR[bot]["sides"], fee_rate_roundtrip=cost["fee_rate_roundtrip"],
+                         spread_bps=cost["spread_bps"], leader_df=lead if not lead.empty else None, leader_symbol=lead_sym,
+                         session=session, leader_session=lead_session)
+        else:
+            t = m.replay_windows(candles, half_spread=cost["half_spread"], leader_1m=lead if not lead.empty else None,
+                                 leader_symbol=lead_sym, session=session, leader_session=lead_session)
+        if not t.empty:
+            frames.append(_annotate(t, sym, news_idx).assign(symbol=sym, param=f"{setting[0]}:{setting[1]}"))
+    m.STOP_BUFFER_ATR15, m.MIN_RR = default
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+
+def _kalshi_study_costs(bot: str, symbols: list[str]) -> dict[str, dict[str, float]]:
+    """Real costs per symbol, read once before the study: perps' fee
+    schedule and live spread; the 15m bot's median half-spread at minutes
+    1-5 in the Kalshi quote archive (the overall median for coins without
+    quotes yet)."""
+    costs: dict[str, dict[str, float]] = {}
+    if bot == "perps":
+        from data import kalshi_15m_spot, perps_setup, perps_strategy
+        from data.kalshi_perps import KNOWN_PERP_TICKERS, get_margin_market
+        from data.perps_data import coin_for_ticker
+        tickers = {kalshi_15m_spot.chart_coin(coin_for_ticker(t)): t for t in KNOWN_PERP_TICKERS}
+        tickers.update({c: f"KX{c}PERP" for c in ("GOLD", "SILVER")})
+        for sym in symbols:
+            ticker = tickers.get(sym, f"KX{sym}PERP")
+            try:
+                fee = float(perps_strategy.setup_fee_rate_roundtrip(ticker))
+            except Exception:
+                fee = 0.0015
+            try:
+                spread = perps_setup.market_spread_bps(get_margin_market(ticker).get("market") or {})
+            except Exception:
+                spread = None
+            costs[sym] = {"fee_rate_roundtrip": fee, "spread_bps": spread if spread is not None else 5.0}
+        return costs
+    from data import kalshi_15m_quotes
+    try:
+        q = kalshi_15m_quotes.load_quote_history(days=30)
+        q = q[(q["minute"] >= 1) & (q["minute"] <= 5) & (q["yes_ask"] > q["yes_bid"])]
+        half = ((q["yes_ask"] - q["yes_bid"]) / 2.0).groupby(q["coin"]).median().to_dict()
+        overall = float(((q["yes_ask"] - q["yes_bid"]) / 2.0).median()) if not q.empty else 0.01
+    except Exception:
+        half, overall = {}, 0.01
+    return {sym: {"half_spread": float(half.get(sym, overall))} for sym in symbols}
+
+
+def learn_blocked(window: pd.DataFrame, *, min_trades: int = PATTERN_MIN_TRADES, max_t: float = PATTERN_MAX_T) -> dict[str, list[str]]:
+    """Conditions the setup clearly lost money in over `window`: per
+    feature, buckets with >= min_trades and a t-stat of the mean net return
+    at or below max_t."""
+    blocked: dict[str, list[str]] = {}
+    for f in PATTERN_FEATURES:
+        if f not in window or window.empty:
+            continue
+        per = window.groupby(f)["net_return"].agg(["size", "mean", "std"])
+        t = per["mean"] / (per["std"] / np.sqrt(per["size"]))
+        bad = per[(per["size"] >= min_trades) & (per["mean"] < 0) & (t <= max_t)]
+        if len(bad):
+            blocked[f] = sorted(str(b) for b in bad.index)
+    return blocked
+
+
+def _keep(df: pd.DataFrame, blocked: dict[str, list[str]]) -> pd.Series:
+    keep = pd.Series(True, index=df.index)
+    for f, buckets in blocked.items():
+        if f in df:
+            keep &= ~df[f].astype(str).isin(buckets)
+    return keep
+
+
+def _choose_setting(window: pd.DataFrame, *, min_trades: int, min_train_trades: int) -> tuple[str | None, set[str], float]:
+    """The plan setting whose eligible symbols made the most over `window`."""
+    best: tuple[str | None, set[str], float] = (None, set(), float("-inf"))
+    for param, g in window.groupby("param"):
+        per = g.groupby("symbol")["net_return"].agg(["size", "mean"])
+        eligible = set(per[(per["size"] >= min_trades) & (per["mean"] > 0)].index)
+        picked = g[g["symbol"].isin(eligible)]["net_return"]
+        if len(picked) >= min_train_trades and picked.sum() > best[2]:
+            best = (str(param), eligible, float(picked.sum()))
+    return best
+
+
+def walk_forward_patterns(trades: pd.DataFrame, *, default_param: str, lookback_years: int,
+                          min_trades: int = ELIGIBILITY_MIN_TRADES, min_train_trades: int = 30) -> dict[str, Any]:
+    """Training on top of the trained setting and symbols: each year, also
+    learn from the prior `lookback_years` which entry conditions lost
+    (learn_blocked), and skip them in the year itself. Reports the
+    out-of-sample record with and without the learned conditions, per
+    condition what the setup earned, and today's blocked conditions."""
+    t = trades.copy()
+    t["year"] = pd.to_datetime(t["entry_ts"], unit="s", utc=True).dt.year
+    years, plain, filtered = [], [], []
+    for y in range(int(t["year"].min()) + lookback_years, int(t["year"].max()) + 1):
+        window = t[(t["year"] >= y - lookback_years) & (t["year"] < y)]
+        param, eligible, _ = _choose_setting(window, min_trades=min_trades, min_train_trades=min_train_trades)
+        if not param:
+            years.append({"year": y, "param": None})
+            continue
+        blocked = learn_blocked(window[(window["param"] == param) & window["symbol"].isin(eligible)])
+        test = t[(t["year"] == y) & (t["param"] == param) & t["symbol"].isin(eligible)]
+        kept = test[_keep(test, blocked)]
+        plain.append(test)
+        filtered.append(kept)
+        years.append({"year": y, "param": param, "eligible": len(eligible), "blocked": blocked,
+                      "trained": _trade_stats(test["net_return"]), "with_patterns": _trade_stats(kept["net_return"])})
+    cat = lambda fr: pd.concat(fr, ignore_index=True) if fr else pd.DataFrame(columns=["net_return"])  # noqa: E731
+    p_all, f_all = cat(plain), cat(filtered)
+    trained, with_patterns = _trade_stats(p_all["net_return"]), _trade_stats(f_all["net_return"])
+    positive_years = sum(1 for y in years if (y.get("with_patterns") or {}).get("avg", 0) > 0)
+    latest = int(t["year"].max())
+    recent = t[t["year"] > latest - lookback_years]
+    param_now, eligible_now, _ = _choose_setting(recent, min_trades=min_trades, min_train_trades=min_train_trades)
+    blocked_now = learn_blocked(recent[(recent["param"] == param_now) & recent["symbol"].isin(eligible_now)]) if param_now else {}
+    base = t[(t["year"] >= int(t["year"].min()) + lookback_years) & (t["param"] == default_param)]
+    by_condition = {f: {str(k): _trade_stats(g["net_return"]) for k, g in base.groupby(f)} for f in PATTERN_FEATURES if f in base}
+    enforce = bool(with_patterns.get("trades", 0) >= 30 and (with_patterns.get("avg") or 0) > 0
+                   and (with_patterns.get("avg") or 0) >= (trained.get("avg") or 0) and positive_years * 2 >= len(years))
+    stop_buffer, min_rr = (float(x) for x in param_now.split(":")) if param_now else (None, None)
+    return {"years": years, "trained": trained, "with_patterns": with_patterns,
+            "default_every_symbol": _trade_stats(base["net_return"]), "positive_years": positive_years,
+            "test_years": len(years), "by_condition": by_condition, "param_now": {"STOP_BUFFER_ATR15": stop_buffer, "MIN_RR": min_rr},
+            "eligible_now": sorted(eligible_now), "blocked_now": blocked_now, "enforce": enforce,
+            "rule": (f"setting, symbols and losing entry conditions learned on the prior {lookback_years} year(s); "
+                     f"a condition is skipped when >= {PATTERN_MIN_TRADES} trades lost with t <= {PATTERN_MAX_T}")}
+
+
 def _trade_stats(x: pd.Series) -> dict[str, Any]:
     x = pd.Series(x, dtype=float)
     if x.empty:
@@ -359,17 +584,28 @@ def walk_forward_trained(trades: pd.DataFrame, *, default_param: str, min_trades
 def run_multiyear(bot: str, *, publish: bool = True) -> dict[str, Any]:
     from concurrent.futures import ProcessPoolExecutor
 
-    from data import alpaca_data, alpaca_options_data
+    import importlib
+
     cfg = MULTIYEAR[bot]
-    symbols = (sorted(set(alpaca_data.BROAD_CANDIDATE_UNIVERSE) | {"SPY", "QQQ"}) if bot == "stocks"
-               else list(alpaca_options_data.OPTIONS_UNDERLYINGS))
+    symbols = _study_symbols(bot)
+    grid = study_grid(bot)
     started = time.time()
     frames = []
     LOCAL_DIR.mkdir(parents=True, exist_ok=True)
     progress_path = LOCAL_DIR / f"{bot}_multiyear_progress.json"
+    if bot in KALSHI_STUDY_BOTS:
+        # Archives to local disk once, before the workers read them.
+        from data import alpaca_news_history
+        alpaca_news_history.load()
+        for sym in sorted(set(symbols) | {importlib.import_module(f"data.{cfg['module']}").leader_for(s) for s in symbols}):
+            _study_candles(sym)
+        costs = _kalshi_study_costs(bot, symbols)
+        jobs = {sym: (_multiyear_kalshi_symbol, (bot, sym, grid, costs[sym])) for sym in symbols}
+    else:
+        jobs = {sym: (_multiyear_symbol, (sym, cfg["module"], cfg["sides"], grid or [None])) for sym in symbols}
     from concurrent.futures import as_completed
     with ProcessPoolExecutor(MULTIYEAR_WORKERS) as pool:
-        futures = {pool.submit(_multiyear_symbol, (sym, cfg["module"], cfg["sides"], PARAM_GRID or [None])): sym for sym in symbols}
+        futures = {pool.submit(fn, args): sym for sym, (fn, args) in jobs.items()}
         done = 0
         for fut in as_completed(futures):
             done += 1
@@ -387,18 +623,21 @@ def run_multiyear(bot: str, *, publish: bool = True) -> dict[str, Any]:
             }), encoding="utf-8")
     trades = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
     result: dict[str, Any] = {"ok": not trades.empty, "bot": bot, "symbols": len(symbols), "module": cfg["module"],
-                              "grid": [f"{a}:{b}" for a, b in PARAM_GRID],
+                              "grid": [f"{a}:{b}" for a, b in grid], "universe": symbols,
                               "computed_at": dt.datetime.now(dt.timezone.utc).isoformat(), "seconds": round(time.time() - started)}
     if not trades.empty:
-        import importlib
         mod = importlib.import_module(f"data.{cfg['module']}")
         default_param = f"{mod.STOP_BUFFER_ATR15}:{mod.MIN_RR}"
         base = trades[trades["param"] == default_param] if "param" in trades and default_param in set(trades["param"]) else trades
+        lookback = int(cfg.get("lookback", ELIGIBILITY_LOOKBACK_YEARS))
         result["default_param"] = default_param
+        result["lookback_years"] = lookback
         result["all_trades"] = summarize(base, "net_return")
-        result["walk_forward"] = walk_forward_eligibility(base)
+        result["walk_forward"] = walk_forward_eligibility(base, lookback_years=lookback)
         if "param" in trades and trades["param"].nunique() > 1:
-            result["trained"] = walk_forward_trained(trades, default_param=default_param)
+            result["trained"] = walk_forward_trained(trades, default_param=default_param, lookback_years=lookback)
+        if all(f in trades for f in PATTERN_FEATURES):
+            result["patterns"] = walk_forward_patterns(trades, default_param=default_param, lookback_years=lookback)
     LOCAL_DIR.mkdir(parents=True, exist_ok=True)
     (LOCAL_DIR / f"{bot}_multiyear.json").write_text(json.dumps(result, default=str), encoding="utf-8")
     if not trades.empty:
@@ -411,12 +650,20 @@ def run_multiyear(bot: str, *, publish: bool = True) -> dict[str, Any]:
 
 def _eligibility_from(result: dict[str, Any]) -> dict[str, Any]:
     """What the bot enforces: the trained setting + symbols when training
-    beat the untrained walk-forward out of sample, else the plain list."""
-    wf, tr = result.get("walk_forward") or {}, result.get("trained") or {}
+    beat the untrained walk-forward out of sample, else the plain list --
+    and, when learning the losing entry conditions beat that too, the
+    trained setting + symbols + those conditions."""
+    wf, tr, pt = result.get("walk_forward") or {}, result.get("trained") or {}, result.get("patterns") or {}
     use_trained = bool(tr.get("enforce") and (tr.get("out_of_sample", {}).get("avg") or 0) > (wf.get("out_of_sample", {}).get("avg") or 0))
+    best_avg = max((tr.get("out_of_sample", {}).get("avg") or 0) if use_trained else float("-inf"),
+                   (wf.get("out_of_sample", {}).get("avg") or 0))
+    if pt.get("enforce") and (pt.get("with_patterns", {}).get("avg") or 0) > best_avg:
+        return {"enforce": True, "symbols": pt.get("eligible_now", []), "rule": pt.get("rule"), "params": pt.get("param_now"),
+                "blocked": pt.get("blocked_now") or {}, "source": "patterns", "computed_at": result.get("computed_at"),
+                "out_of_sample": pt.get("with_patterns"), "grid": result.get("grid")}
     src = tr if use_trained else wf
     return {"enforce": bool(src.get("enforce")), "symbols": src.get("eligible_now", []), "rule": src.get("rule"),
-            "params": tr.get("param_now") if use_trained else None, "source": "trained" if use_trained else "walk_forward",
+            "params": tr.get("param_now") if use_trained else None, "blocked": {}, "source": "trained" if use_trained else "walk_forward",
             "computed_at": result.get("computed_at"), "out_of_sample": src.get("out_of_sample"), "grid": result.get("grid")}
 
 
@@ -438,7 +685,28 @@ def _publish_multiyear(bot: str, result: dict[str, Any]) -> bool:
         return False
 
 
+def study_grid(bot: str) -> list[tuple[float, float]]:
+    """The plan settings a bot's study replays: PARAM_GRID for stocks and
+    options; KALSHI_PARAM_GRID plus the module's own current setting (so the
+    baseline is real) for perps and the 15m bot."""
+    if bot not in KALSHI_STUDY_BOTS:
+        return list(PARAM_GRID)
+    import importlib
+    m = importlib.import_module(f"data.{MULTIYEAR[bot]['module']}")
+    return sorted(set(KALSHI_PARAM_GRID) | {(float(m.STOP_BUFFER_ATR15), float(m.MIN_RR))})
+
+
 def _study_symbols(bot: str) -> list[str]:
+    if bot == "perps":
+        from data import kalshi_15m_spot
+        from data.kalshi_perps import KNOWN_PERP_TICKERS
+        from data.perps_data import coin_for_ticker
+        coins = {kalshi_15m_spot.chart_coin(coin_for_ticker(t)) for t in KNOWN_PERP_TICKERS}
+        return sorted(c for c in coins if c in kalshi_15m_spot.SPOT_PRODUCTS) + ["GOLD", "SILVER"]
+    if bot == "kalshi15m":
+        from data import kalshi_15m_setup, kalshi_15m_spot, kalshi_15m_strategy
+        return sorted(c for c in kalshi_15m_strategy.ACTIVE_ENTRY_COINS
+                      if c in kalshi_15m_spot.SPOT_PRODUCTS or c in kalshi_15m_setup.METAL_CHART_SYMBOL)
     from data import alpaca_data, alpaca_options_data
     return (sorted(set(alpaca_data.BROAD_CANDIDATE_UNIVERSE) | {"SPY", "QQQ"}) if bot == "stocks"
             else list(alpaca_options_data.OPTIONS_UNDERLYINGS))
@@ -446,7 +714,15 @@ def _study_symbols(bot: str) -> list[str]:
 
 def archive_ready(bot: str, *, min_fraction: float = 0.98) -> bool:
     """True once the SIP archive on HF holds this year's file for (nearly)
-    every symbol the study replays -- never start on a partial upload."""
+    every symbol the study replays -- never start on a partial upload. The
+    Kalshi bots also need the Alpaca crypto and news archives complete."""
+    if bot in KALSHI_STUDY_BOTS:
+        from data import alpaca_crypto_history, alpaca_news_history, alpaca_sip_history
+        try:
+            return (alpaca_crypto_history.archive_ready(min_fraction=min_fraction) and alpaca_news_history.archive_ready()
+                    and not set(alpaca_sip_history.commodity_etfs()) & set(alpaca_sip_history.missing_symbols()))
+        except Exception:
+            return False
     token = os.getenv("HF_API_KEY", "")
     if not token:
         return False
@@ -479,7 +755,7 @@ def maybe_start_multiyear(bot: str) -> dict[str, Any]:
     the archive is complete, if it has no published study yet and no other
     study is running (one study at a time gets every core)."""
     current = eligibility(bot)
-    if current is not None and current.get("grid") == [f"{a}:{b}" for a, b in PARAM_GRID]:
+    if current is not None and current.get("grid") == [f"{a}:{b}" for a, b in study_grid(bot)]:
         return {"ok": True, "action": "already_published"}
     if any(_running(f"{b}_multiyear") for b in MULTIYEAR):
         return {"ok": True, "action": "a_study_is_running"}
@@ -503,7 +779,13 @@ def multiyear_status(bot: str) -> dict[str, Any]:
         out["latest"]["walk_forward"] = {k: wf.get(k) for k in ("out_of_sample", "every_symbol", "positive_years", "test_years",
                                                                  "enforce", "rule", "years")}
         out["latest"]["walk_forward"]["eligible_now"] = len(wf.get("eligible_now") or [])
-        tr = (json.loads((LOCAL_DIR / f"{bot}_multiyear.json").read_text(encoding="utf-8")).get("trained") or {})
+        full = json.loads((LOCAL_DIR / f"{bot}_multiyear.json").read_text(encoding="utf-8"))
+        pt = full.get("patterns") or {}
+        if pt:
+            out["latest"]["patterns"] = {k: pt.get(k) for k in ("trained", "with_patterns", "default_every_symbol", "positive_years",
+                                                                "test_years", "param_now", "blocked_now", "by_condition", "enforce")}
+            out["latest"]["patterns"]["eligible_now"] = pt.get("eligible_now") or []
+        tr = full.get("trained") or {}
         if tr:
             out["latest"]["trained"] = {k: tr.get(k) for k in ("out_of_sample", "default_every_symbol", "positive_years",
                                                                 "test_years", "param_now", "enforce", "years")}

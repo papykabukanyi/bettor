@@ -221,7 +221,9 @@ def load(coin: str, *, years: list[int] | None = None) -> pd.DataFrame:
         remote = _download(coin, year)
         if remote is not None:
             path.parent.mkdir(parents=True, exist_ok=True)
-            remote.to_parquet(path, index=False)
+            tmp = path.with_suffix(f".{os.getpid()}.tmp")  # study workers read the same coin at once
+            remote.to_parquet(tmp, index=False)
+            os.replace(tmp, path)
             frames.append(remote)
     if not frames:
         return pd.DataFrame(columns=COLUMNS)

@@ -195,7 +195,9 @@ def load(*, start_year: int = START_YEAR, end_year: int | None = None) -> pd.Dat
                 from huggingface_hub import hf_hub_download
                 src = hf_hub_download(HF_REPO, _repo_path(key), repo_type="dataset", token=token)
                 path.parent.mkdir(parents=True, exist_ok=True)
-                pd.read_parquet(src).to_parquet(path, index=False)
+                tmp = path.with_suffix(f".{os.getpid()}.tmp")  # study workers read the archive at once
+                pd.read_parquet(src).to_parquet(tmp, index=False)
+                os.replace(tmp, path)
             except Exception:
                 continue
         if path.exists():

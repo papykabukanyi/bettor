@@ -3081,7 +3081,7 @@ def _setup_market(*, close_in_minutes: float = 13.0, yes_bid: float = 0.40, yes_
 def setup_mode(monkeypatch):
     from data import kalshi_15m_setup
     monkeypatch.setattr(kalshi_15m_strategy, "ENTRY_MODE", "setup")
-    monkeypatch.setattr(kalshi_15m_strategy, "_setup_news_score", lambda coin: 0.0)
+    monkeypatch.setattr(kalshi_15m_strategy, "_setup_news", lambda coin: (0.0, 0.0))
     calls = []
 
     def fake_live_setup(coin, **kw):
@@ -3233,3 +3233,17 @@ def test_a_closed_evidence_gate_blocks_15m_setup_entries(setup_mode, monkeypatch
     btc = [c for c in result["checks"] if c["coin"] == "BTC"]
     assert [c["reason"] for c in btc] == ["evidence_gate_closed"] and btc[0]["setup_checks"]
     assert kalshi_15m_strategy._load_state()["positions"] == []  # noqa: SLF001
+
+
+def test_setup_mode_skips_a_condition_the_study_found_losing(setup_mode, monkeypatch):
+    from data import setup_backtest_job
+    weekday = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")[dt.datetime.now(dt.timezone.utc).weekday()]
+    monkeypatch.setattr(setup_backtest_job, "eligibility", lambda bot: {"enforce": True, "symbols": ["BTC"], "rule": "r",
+                                                                         "params": None, "blocked": {"weekday": [weekday]}})
+    result = kalshi_15m_strategy.evaluate_candidate("BTC")
+    assert result["ok"] is False and result["reason"] == f"learned_losing_condition:weekday={weekday}"
+    assert result["entry_conditions"]["weekday"] == weekday
+    monkeypatch.setattr(setup_backtest_job, "eligibility", lambda bot: {"enforce": True, "symbols": ["ETH"], "rule": "r"})
+    assert kalshi_15m_strategy.evaluate_candidate("BTC")["reason"] == "not_eligible"
+    monkeypatch.setattr(setup_backtest_job, "eligibility", lambda bot: {"enforce": False, "symbols": [], "blocked": {"weekday": [weekday]}})
+    assert kalshi_15m_strategy.evaluate_candidate("BTC")["ok"] is True  # not proven: nothing enforced

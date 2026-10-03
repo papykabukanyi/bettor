@@ -1642,6 +1642,19 @@ def _ensure_background_jobs_started() -> None:
                               replace_existing=True)
             scheduler.add_job(_run_alpaca_archives_append, "cron", hour=0, minute=40, id="alpaca_archives_append",
                               replace_existing=True)
+            # Weekly multi-year study per Kalshi bot on Alpaca's archives (and
+            # once the archives are complete, if none is published yet): the
+            # trained plan setting, coins with a profitable record, and the
+            # entry conditions (hour, weekday, news, leader) that lost --
+            # one study at a time on the Space's cores.
+            for bot, weekday in (("perps", "sun"), ("kalshi15m", "sun")):
+                scheduler.add_job(setup_backtest_job.launch, "cron", day_of_week=weekday,
+                                  hour=6 if bot == "perps" else 9, minute=0, args=[f"{bot}_multiyear"],
+                                  id=f"{bot}_multiyear_study", replace_existing=True)
+                scheduler.add_job(setup_backtest_job.maybe_start_multiyear, "interval", minutes=10, args=[bot],
+                                  id=f"{bot}_multiyear_startup", replace_existing=True,
+                                  next_run_time=dt.datetime.now(dt.timezone.utc) + dt.timedelta(
+                                      minutes=int(os.getenv("SETUP_MULTIYEAR_KALSHI_STARTUP_DELAY_MIN", "30") or "30")))
             for bot, (hour, minute, startup_delay_min) in (("perps", (3, 10, 10)), ("kalshi15m", (3, 40, 40))):
                 scheduler.add_job(_run_setup_backtest, "cron", hour=hour, minute=minute, args=[bot],
                                   id=f"{bot}_setup_backtest", replace_existing=True)
