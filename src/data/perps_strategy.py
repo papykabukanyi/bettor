@@ -1328,7 +1328,8 @@ def _evaluate_candidate_setup(ticker: str, *, traded_setup_ids: frozenset[str] =
         "setup_valid": bool(setup.get("valid")), "setup_reason": setup.get("reason"), "setup": setup.get("setup"),
         "setup_side": setup.get("side") or setup.get("closest_side"), "setup_id": setup.get("setup_id"),
         "setup_plan": setup.get("plan"), "setup_checks": setup.get("checks"), "setup_as_of": setup.get("as_of"),
-        "chart_price": setup.get("chart_price"), "setup_fee_rate_roundtrip": fee, "spread_bps": spread_bps,
+        "chart_price": setup.get("chart_price"), "chart_price_source": setup.get("chart_price_source") or "last 1m close",
+        "setup_fee_rate_roundtrip": fee, "spread_bps": spread_bps, "news_count": news_count,
     }
     if not setup.get("valid"):
         result.update(should_enter=False, reason=f"no setup: {setup.get('reason')} rule not met")

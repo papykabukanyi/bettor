@@ -958,7 +958,7 @@ def _evaluate_candidate_setup(
         "setup_side": setup.get("side") or setup.get("closest_side"), "setup_id": setup.get("setup_id"),
         "setup_plan": setup.get("plan"), "setup_checks": setup.get("checks"), "setup_as_of": setup.get("as_of"),
         "underlying_price": setup.get("underlying_price"), "strike_underlying": setup.get("strike_underlying"),
-        "sentiment_score": news,
+        "underlying_price_source": setup.get("underlying_price_source"), "sentiment_score": news, "news_count": news_count,
     }
     # The chart is read every cycle (the dashboard's checklist), but an
     # entry needs enough of the window left for the planned move.
