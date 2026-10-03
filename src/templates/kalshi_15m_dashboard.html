@@ -125,6 +125,7 @@
   <p class="setup-note" id="setup-gate-note"></p>
   <p class="setup-note" id="market-data-note"></p>
   <p class="setup-note" id="study-note"></p>
+  <p class="setup-note" id="funding-note"></p>
   <div class="scroll-x">
     <table>
       <thead><tr><th>Version</th><th>Trades</th><th>Win rate</th><th>Avg per trade</th><th>Total</th><th>Profit factor</th><th>t-stat</th><th>First half avg</th><th>Second half avg</th></tr></thead>
@@ -567,6 +568,7 @@ async function refreshStatus() {
     document.querySelectorAll(".ev-only").forEach(el => { el.style.display = setupMode ? "none" : ""; });
     try { renderSetupGate(data.setup_evidence_gate); } catch (e) { console.error("gate render failed", e); }
     try { renderAlpacaData(data.market_data); } catch (e) { console.error("market data render failed", e); }
+    try { renderFunding(data.funding); } catch (e) { console.error("funding render failed", e); }
     loadStudy("kalshi15m");
     try { renderSetupEvidence(data.setup_backtest); } catch (e) { console.error("setup evidence render failed", e); }
     try { renderSetupChecklist((data.last_scan || {}).checks, p.setup_min_rr); } catch (e) { console.error("setup checklist render failed", e); }
@@ -724,6 +726,20 @@ function renderSetupChecklist(rows, minRr) {
   }).join("");
 }
 
+function renderFunding(f) {
+  const el = document.getElementById("funding-note");
+  if (!el || !f) return;
+  if (!f.enabled) { el.innerHTML = "Funding: automatic split off."; return; }
+  const l = f.last || {};
+  const usd = x => x == null ? "--" : "$" + Number(x).toFixed(2);
+  const why = { in_band: "split within the band", perps_has_open_positions: "waiting: perps has an open position",
+    "15m_has_open_positions": "waiting: the 15m bot has an open position", rebalance: "rebalanced", live_trading_off: "live trading off",
+    nothing_to_move: "nothing to move", disabled: "off" }[l.action] || (l.error ? "error: " + l.error : "--");
+  const last = (f.recent_transfers || []).slice(-1)[0];
+  el.innerHTML = `Funding (your 50/50 split of Kalshi cash): perps ${usd(l.perps_usd)} &middot; 15m ${usd(l.fifteen_usd)}`
+    + (l.idle_usd ? ` &middot; idle ${usd(l.idle_usd)}` : "") + ` &middot; 15m target ${usd(l.target_15m_usd)} &mdash; ${setupEsc(why)}`
+    + (last ? `. Last transfer ${usd(last.amount_usd)} (${setupEsc(last.why || "")}) at ${setupEsc(String(last.at || "").slice(11, 16))} UTC.` : ".");
+}
 function renderAlpacaData(md) {
   const el = document.getElementById("market-data-note");
   if (!el || !md) return;

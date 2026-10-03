@@ -862,6 +862,11 @@ def _run_alpaca_archives_append() -> dict[str, Any]:
     return out
 
 
+def _run_kalshi_funding() -> dict[str, Any]:
+    from data import kalshi_funding
+    return kalshi_funding.rebalance()
+
+
 def _kalshi_market_data() -> dict[str, Any]:
     """Where the Kalshi bots' charts, live prices and news come from: all
     Alpaca (crypto on its Kraken US feed, commodities on SIP ETFs)."""
@@ -1634,6 +1639,13 @@ def _ensure_background_jobs_started() -> None:
                 id="global_correlation_refresh", replace_existing=True,
                 next_run_time=dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=3),
             )
+            # The user's 50/50 split of Kalshi cash between perps (margined)
+            # and the 15m bot (event-contract exchange 2): API orders don't
+            # move money between them the way Kalshi's app does.
+            from data import kalshi_funding
+            scheduler.add_job(_run_kalshi_funding, "interval", minutes=kalshi_funding.REBALANCE_MINUTES,
+                              id="kalshi_funding_rebalance", replace_existing=True,
+                              next_run_time=dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=3))
             # Alpaca archives the perps/15m studies learn from: Kraken-via-
             # Alpaca minute bars since 2023 and Benzinga news since 2016 --
             # missing pieces filled once after boot, topped up nightly.
@@ -2113,6 +2125,7 @@ def api_status():
         "setup_backtest": setup_backtest_job.latest("perps"),
         "setup_evidence_gate": setup_backtest_job.evidence_gate("perps"),
         "market_data": _kalshi_market_data(),
+        "funding": __import__("data.kalshi_funding", fromlist=["status"]).status(),
         "global_correlation": {k: (global_correlation_monitor.latest() or {}).get(k) for k in ("computed_at", "leaders", "clusters")},
         "spot_lead": {**perps_spot_lead.summary(), "timing_gate_enabled": perps_strategy.USE_SPOT_LEAD_TIMING,
                       "adverse_bps": perps_strategy.SPOT_LEAD_ADVERSE_BPS},
@@ -2257,6 +2270,7 @@ def api_kalshi_15m_status():
         "setup_backtest": setup_backtest_job.latest("kalshi15m"),
         "setup_evidence_gate": setup_backtest_job.evidence_gate("kalshi15m"),
         "market_data": _kalshi_market_data(),
+        "funding": __import__("data.kalshi_funding", fromlist=["status"]).status(),
         "edge_model": kalshi_15m_edge_model.summary(),
         "quote_history_last_collect": dict(_KALSHI_15M_QUOTE_LAST_RUN),
         "spot_history_last_collect": dict(_KALSHI_15M_SPOT_LAST_RUN),
