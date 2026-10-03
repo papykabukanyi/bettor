@@ -190,6 +190,7 @@
   <div class="config-grid" id="config-grid">
     <div><span class="k">Mode</span><span class="v" id="cfg-mode">--</span></div>
     <div><span class="k">Live trading</span><span class="v" id="cfg-live">--</span></div>
+    <div><span class="k">Market data</span><span class="v" id="cfg-data">--</span></div>
     <div><span class="k">Position size</span><span class="v" id="cfg-size">--</span></div>
     <div><span class="k">Max concurrent</span><span class="v" id="cfg-maxpos">--</span></div>
     <div><span class="k">Take profit / Stop loss</span><span class="v" id="cfg-tpsl">--</span></div>
@@ -673,6 +674,17 @@ async function refreshStatus() {
       const mh = document.getElementById("cfg-maxhold");
       if (mh) mh.textContent = "until stop / target";
     }
+    try {
+      const md = data.market_data || {};
+      const st = (md.streams || {})["crypto"];
+      const feed = md.feed === "sip" ? "SIP (all exchanges)" : (md.feed || "--").toUpperCase();
+      const stream = !st ? "stream off" : st.connected
+        ? `streaming ${st.subscribed} symbols${st.last_bar_age_sec != null ? ", last bar " + Math.round(st.last_bar_age_sec) + "s ago" : ""}`
+        : `stream reconnecting${st.last_error ? " (" + st.last_error + ")" : ""}`;
+      const el = document.getElementById("cfg-data");
+      el.textContent = `${feed} · ${stream}`;
+      el.style.color = st && !st.connected ? "var(--red)" : "";
+    } catch (e) { console.error("market data render failed", e); }
   } catch (e) { console.error("config grid render failed", e); }
 
   try {

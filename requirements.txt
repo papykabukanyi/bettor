@@ -52,3 +52,8 @@ Pillow>=10.1.0
 # (unlike weasyprint, which needs system Cairo/Pango), light enough that
 # generating a report on-demand inside this same 512Mi process is safe.
 fpdf2>=2.7.0
+
+# Live Alpaca market-data streams (alpaca_stream) and the options (OPRA)
+# stream encoding.
+websocket-client>=1.7
+msgpack>=1.0

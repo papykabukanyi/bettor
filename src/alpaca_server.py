@@ -695,6 +695,18 @@ def _run_alpaca_walkforward_backtest() -> dict[str, Any]:
         gc.collect()
 
 
+@_locked_job("alpaca_sip_history_append", stale_after_sec=3600)
+def _run_sip_history_append() -> dict[str, Any]:
+    """Nightly: the last few days of consolidated (SIP) 1-minute bars for
+    every symbol the stock/options bots trade, merged into the HF archive
+    (alpaca_sip_history)."""
+    from data import alpaca_sip_history
+    try:
+        return alpaca_sip_history.append_recent()
+    finally:
+        gc.collect()
+
+
 def _ensure_background_jobs_started() -> None:
     global _startup_done
     if _startup_done:
@@ -708,6 +720,13 @@ def _ensure_background_jobs_started() -> None:
             # This bot's setup strategy re-tested daily on real data in its own
             # low-priority process, published to its HF model repo
             # (setup_backtest_job); once soon after a deploy if none exists.
+            # Real-time minute bars over WebSocket for every stock and crypto
+            # symbol the Alpaca bots trade (alpaca_stream; one connection per
+            # feed for the whole process).
+            from data import alpaca_stream
+            logger.info("Alpaca market-data streams: %s", alpaca_stream.start_all())
+            scheduler.add_job(_run_sip_history_append, "cron", day_of_week="mon-fri", hour=20, minute=30,
+                              id="alpaca_sip_history_append", replace_existing=True)
             from data import setup_backtest_job
             scheduler.add_job(setup_backtest_job.launch, "cron", hour=4, minute=10, args=["stocks"],
                               id="stocks_setup_backtest", replace_existing=True)
@@ -991,6 +1010,8 @@ def api_alpaca_status():
         "market_session": market_session,
         "setup_backtest": __import__("data.setup_backtest_job", fromlist=["latest"]).latest("stocks"),
         "setup_evidence_gate": __import__("data.setup_backtest_job", fromlist=["evidence_gate"]).evidence_gate("stocks"),
+        "market_data": {"feed": __import__("data.alpaca_client", fromlist=["DATA_FEED"]).DATA_FEED,
+                        "streams": __import__("data.alpaca_stream", fromlist=["status"]).status()},
         "params": {
             "entry_system": alpaca_strategy.ENTRY_SYSTEM,
             "setup_min_rr": __import__("data.alpaca_setup", fromlist=["MIN_RR"]).MIN_RR,

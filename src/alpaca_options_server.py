@@ -983,6 +983,8 @@ def api_alpaca_options_status():
         "market_session": market_session,
         "setup_backtest": __import__("data.setup_backtest_job", fromlist=["latest"]).latest("options"),
         "setup_evidence_gate": __import__("data.setup_backtest_job", fromlist=["evidence_gate"]).evidence_gate("options"),
+        "market_data": {"feed": __import__("data.alpaca_client", fromlist=["DATA_FEED"]).DATA_FEED,
+                        "streams": __import__("data.alpaca_stream", fromlist=["status"]).status()},
         "params": {
             "entry_system": alpaca_options_strategy.ENTRY_SYSTEM,
             "setup_min_rr": __import__("data.alpaca_options_setup", fromlist=["MIN_RR"]).MIN_RR,

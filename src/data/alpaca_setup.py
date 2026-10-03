@@ -46,9 +46,12 @@ timestamps are candle END times in unix seconds.
 """
 from __future__ import annotations
 
+import datetime as _dt
 import math
 import os
 import time
+from functools import lru_cache
+from zoneinfo import ZoneInfo
 from dataclasses import dataclass
 from typing import Any
 
@@ -98,6 +101,7 @@ CORR_LOOKBACK_5M = _env_int("ALPACA_SETUP_CORR_LOOKBACK_5M", 156)
 CORR_MIN = _env_float("ALPACA_SETUP_CORR_MIN", 0.5)
 CORR_MIN_OVERLAP = 60
 COVERAGE_WINDOW_MIN = _env_int("ALPACA_SETUP_COVERAGE_WINDOW_MIN", 240)
+_ET = ZoneInfo("America/New_York")
 MIN_COVERAGE = _env_float("ALPACA_SETUP_MIN_COVERAGE", 0.8)            # share of 1m candles that must exist
 LEADER_OVERRIDES: dict[str, str] = {"SPY": "QQQ"}
 DEFAULT_LEADER = "SPY"
@@ -540,6 +544,19 @@ def _unmirror(result: dict[str, Any]) -> dict[str, Any]:
 
 
 
+
+@lru_cache(maxsize=8192)
+def _et_offset_sec(day_index: int) -> int:
+    """New York's UTC offset (seconds) on a UTC day -- DST-aware, cached."""
+    return int(_dt.datetime.fromtimestamp(day_index * 86400 + 43200, _ET).utcoffset().total_seconds())
+
+
+def _et_minute_weekday(ts_start: np.ndarray, day_index: int) -> tuple[np.ndarray, np.ndarray]:
+    """ET minute-of-day and weekday (Mon=0) for candle START times, using
+    one day's offset (a 4-hour window never spans a trading-time DST switch)."""
+    local = ts_start + _et_offset_sec(day_index)
+    return (local % 86400) // 60, ((local // 86400) + 3) % 7
+
 def data_coverage(ctx: Context, as_of: int) -> dict[str, Any]:
     """How complete the 1-minute chart is over the last COVERAGE_WINDOW_MIN
     minutes before as_of (trading minutes only for a US-equity session):
@@ -547,13 +564,15 @@ def data_coverage(ctx: Context, as_of: int) -> dict[str, Any]:
     volume spike, so a setup needs at least MIN_COVERAGE."""
     ends = np.arange(as_of - COVERAGE_WINDOW_MIN * 60 + 60, as_of + 1, 60, dtype="int64")
     if ctx.session == "us_equity":
-        t = pd.to_datetime(ends - 60, unit="s", utc=True).tz_convert("America/New_York")
-        minute = np.asarray(t.hour * 60 + t.minute)
-        ends = ends[(minute >= 9 * 60 + 30) & (minute < 16 * 60) & (np.asarray(t.weekday) < 5)]
+        minute, weekday = _et_minute_weekday(ends - 60, as_of // 86400)
+        ends = ends[(minute >= 9 * 60 + 30) & (minute < 16 * 60) & (weekday < 5)]
     expected = int(len(ends))
     if expected < 30:
         return {"ok": True, "coverage": None, "expected_minutes": expected, "detail": "too early in the session to measure"}
-    present = int(np.isin(ends, ctx.ts1).sum())
+    # Only the window's slice of the (sorted) history: O(log n), not O(n).
+    lo = int(np.searchsorted(ctx.ts1, as_of - COVERAGE_WINDOW_MIN * 60, side="right"))
+    hi = int(np.searchsorted(ctx.ts1, as_of, side="right"))
+    present = int(np.isin(ends, ctx.ts1[lo:hi]).sum())
     coverage = present / expected
     ok = coverage >= MIN_COVERAGE
     return {"ok": ok, "coverage": round(coverage, 3), "expected_minutes": expected, "present_minutes": present,
@@ -769,8 +788,10 @@ FLAT_BY_MINUTE_ET = 15 * 60 + 55
 
 
 def _et_minute_and_day(ts_end: int) -> tuple[int, str, int]:
-    t = pd.Timestamp(ts_end - 60, unit="s", tz="UTC").tz_convert("America/New_York")
-    return t.hour * 60 + t.minute, t.strftime("%Y-%m-%d"), t.weekday()
+    start = int(ts_end) - 60
+    local = start + _et_offset_sec(start // 86400)
+    day = _dt.datetime.fromtimestamp(local - local % 86400, _dt.timezone.utc).strftime("%Y-%m-%d")
+    return int((local % 86400) // 60), day, int(((local // 86400) + 3) % 7)
 
 
 def regular_session_candles(bars: pd.DataFrame) -> pd.DataFrame:
@@ -839,8 +860,17 @@ def consolidated_bars(symbol: str) -> pd.DataFrame | None:
 
 
 def live_setup(symbol: str, *, news_score: float | None, now: float | None = None) -> dict[str, Any]:
-    from data import alpaca_data
+    from data import alpaca_client, alpaca_data, alpaca_stream
     leader_symbol = leader_for(symbol)
+    if alpaca_client.DATA_FEED == "sip":
+        # The account's SIP feed (Algo Trader Plus): every US exchange,
+        # consolidated volume, real time -- complete on its own, with the
+        # live stream's newest bars on top.
+        bars = alpaca_stream.merge_live("stocks", symbol, alpaca_data.fetch_recent_minute_bars(symbol))
+        leader = alpaca_stream.merge_live("stocks", leader_symbol, alpaca_data.fetch_recent_minute_bars(leader_symbol))
+        result = setup_from_bars(bars, news_score=news_score, now=now, leader_bars=leader, leader_symbol=leader_symbol,
+                                 require_leader=True)
+        return {**result, "chart_source": "SIP consolidated (Alpaca)"}
     leader_bars = consolidated_bars(leader_symbol)
     if leader_bars is None:
         leader_bars = alpaca_data.fetch_recent_minute_bars(leader_symbol)

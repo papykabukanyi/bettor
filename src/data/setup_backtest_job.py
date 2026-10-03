@@ -145,8 +145,20 @@ def _alpaca_stock_replay(module_name: str, symbols: list[str], days: int, sides:
     from data import alpaca_data
     m = importlib.import_module(f"data.{module_name}")
     leaders = {s: m.leader_for(s) for s in symbols}
-    bars = {s: m.regular_session_candles(alpaca_data.fetch_minute_bars(s, days=days))
-            for s in sorted(set(symbols) | set(leaders.values()))}
+
+    def history(sym: str) -> pd.DataFrame:
+        # The consolidated (SIP) archive on HF when it has the symbol, else
+        # Alpaca's REST bars.
+        from data import alpaca_sip_history
+        import datetime as _d
+        cutoff = int(time.time()) - int(days * 1.45) * 86400  # trading days -> calendar days
+        years = sorted({_d.datetime.fromtimestamp(cutoff, _d.timezone.utc).year, _d.datetime.now(_d.timezone.utc).year})
+        stored = alpaca_sip_history.load(sym, years=list(range(years[0], years[-1] + 1)))
+        if not stored.empty:
+            return m.regular_session_candles(stored[stored.ts >= cutoff])
+        return m.regular_session_candles(alpaca_data.fetch_minute_bars(sym, days=days))
+
+    bars = {s: history(s) for s in sorted(set(symbols) | set(leaders.values()))}
 
     def go(with_corr: bool) -> dict[str, Any]:
         frames = []
@@ -162,15 +174,19 @@ def _alpaca_stock_replay(module_name: str, symbols: list[str], days: int, sides:
     return {"universe": symbols, "sides": list(sides), **_both(go)}
 
 
+STOCK_REPLAY_DAYS = int(os.getenv("SETUP_BACKTEST_STOCK_DAYS", "120") or "120")
+
+
 def run_stocks(days: int) -> dict[str, Any]:
     from data import alpaca_data
-    return _alpaca_stock_replay("alpaca_setup", alpaca_data.get_stock_watchlist(None)[:MAX_SYMBOLS], days, ("long",))
+    return _alpaca_stock_replay("alpaca_setup", alpaca_data.get_stock_watchlist(None)[:MAX_SYMBOLS], max(days, STOCK_REPLAY_DAYS),
+                                ("long",))
 
 
 def run_options(days: int) -> dict[str, Any]:
     from data import alpaca_options_data
-    return _alpaca_stock_replay("alpaca_options_setup", alpaca_options_data.get_options_universe()[:MAX_SYMBOLS], days,
-                                ("long", "short"))
+    return _alpaca_stock_replay("alpaca_options_setup", alpaca_options_data.get_options_universe()[:MAX_SYMBOLS],
+                                max(days, STOCK_REPLAY_DAYS), ("long", "short"))
 
 
 def run_crypto(days: int) -> dict[str, Any]:
