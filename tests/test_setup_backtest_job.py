@@ -135,3 +135,20 @@ def test_an_enforced_eligibility_list_skips_other_stocks(monkeypatch):
     monkeypatch.setattr(job, "eligibility", lambda bot: {"enforce": False, "symbols": ["NVDA"], "rule": "r"})
     monkeypatch.setattr(alpaca_setup, "live_setup", lambda *a, **k: {"valid": False, "reason": "trend", "checks": {}})
     assert alpaca_strategy.evaluate_setup_candidate("COST")["setup_reason"] == "trend"
+
+
+def test_a_study_starts_only_on_a_complete_archive_and_one_at_a_time(monkeypatch):
+    launched = []
+    monkeypatch.setattr(job, "launch", lambda bot: launched.append(bot) or {"action": "launched"})
+    monkeypatch.setattr(job, "eligibility", lambda bot: None)
+    monkeypatch.setattr(job, "_running", lambda name: False)
+    monkeypatch.setattr(job, "archive_ready", lambda bot: False)
+    assert job.maybe_start_multiyear("stocks")["action"] == "waiting_for_archive"
+    monkeypatch.setattr(job, "archive_ready", lambda bot: True)
+    job.maybe_start_multiyear("stocks")
+    assert launched == ["stocks_multiyear"]
+    monkeypatch.setattr(job, "_running", lambda name: name == "stocks_multiyear")
+    assert job.maybe_start_multiyear("options")["action"] == "a_study_is_running"
+    monkeypatch.setattr(job, "_running", lambda name: False)
+    monkeypatch.setattr(job, "eligibility", lambda bot: {"enforce": False})
+    assert job.maybe_start_multiyear("stocks")["action"] == "already_published"

@@ -732,10 +732,10 @@ def _ensure_background_jobs_started() -> None:
             # deploy if none is published yet): symbol eligibility.
             scheduler.add_job(setup_backtest_job.launch, "cron", day_of_week="sat", hour=6, minute=0, args=["stocks_multiyear"],
                               id="stocks_multiyear_study", replace_existing=True)
-            if setup_backtest_job.eligibility("stocks") is None:
-                scheduler.add_job(setup_backtest_job.launch, "date", args=["stocks_multiyear"], id="stocks_multiyear_startup",
-                                  run_date=dt.datetime.now(dt.timezone.utc) + dt.timedelta(
-                                      minutes=int(os.getenv("SETUP_MULTIYEAR_STARTUP_DELAY_MIN", "150") or "150")), replace_existing=True)
+            scheduler.add_job(setup_backtest_job.maybe_start_multiyear, "interval", minutes=10, args=["stocks"],
+                              id="stocks_multiyear_startup", replace_existing=True,
+                              next_run_time=dt.datetime.now(dt.timezone.utc) + dt.timedelta(
+                                  minutes=int(os.getenv("SETUP_MULTIYEAR_STARTUP_DELAY_MIN", "150") or "150")))
             scheduler.add_job(setup_backtest_job.launch, "cron", hour=4, minute=10, args=["stocks"],
                               id="stocks_setup_backtest", replace_existing=True)
             if setup_backtest_job.latest("stocks") is None:

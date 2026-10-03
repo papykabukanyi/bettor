@@ -367,6 +367,56 @@ def _publish_multiyear(bot: str, result: dict[str, Any]) -> bool:
         return False
 
 
+def _study_symbols(bot: str) -> list[str]:
+    from data import alpaca_data, alpaca_options_data
+    return (sorted(set(alpaca_data.BROAD_CANDIDATE_UNIVERSE) | {"SPY", "QQQ"}) if bot == "stocks"
+            else list(alpaca_options_data.OPTIONS_UNDERLYINGS))
+
+
+def archive_ready(bot: str, *, min_fraction: float = 0.98) -> bool:
+    """True once the SIP archive on HF holds this year's file for (nearly)
+    every symbol the study replays -- never start on a partial upload."""
+    token = os.getenv("HF_API_KEY", "")
+    if not token:
+        return False
+    try:
+        from huggingface_hub import HfApi
+
+        from data import alpaca_sip_history
+        files = set(HfApi(token=token).list_repo_files(alpaca_sip_history.HF_REPO, repo_type="dataset"))
+    except Exception:
+        return False
+    year = dt.datetime.now(dt.timezone.utc).year
+    symbols = _study_symbols(bot)
+    present = sum(1 for s in symbols if f"bars_1m/{s}/{year}.parquet" in files and f"bars_1m/{s}/{year - 1}.parquet" in files)
+    return bool(symbols) and present >= min_fraction * len(symbols)
+
+
+def _running(name: str) -> bool:
+    pid_file = LOCAL_DIR / f"{name}.pid"
+    if not pid_file.exists():
+        return False
+    try:
+        os.kill(int(pid_file.read_text()), 0)
+        return True
+    except (ValueError, ProcessLookupError, PermissionError):
+        return False
+
+
+def maybe_start_multiyear(bot: str) -> dict[str, Any]:
+    """Checked every few minutes on the Space: launch this bot's study once
+    the archive is complete, if it has no published study yet and no other
+    study is running (one study at a time gets every core)."""
+    if eligibility(bot) is not None:
+        return {"ok": True, "action": "already_published"}
+    if any(_running(f"{b}_multiyear") for b in MULTIYEAR):
+        return {"ok": True, "action": "a_study_is_running"}
+    if not archive_ready(bot):
+        return {"ok": True, "action": "waiting_for_archive"}
+    _eligibility_cache.pop(bot, None)
+    return launch(f"{bot}_multiyear")
+
+
 def multiyear_status(bot: str) -> dict[str, Any]:
     """Progress of a running study and the latest finished one."""
     out: dict[str, Any] = {"bot": bot}
@@ -381,8 +431,7 @@ def multiyear_status(bot: str) -> dict[str, Any]:
         out["latest"]["walk_forward"] = {k: wf.get(k) for k in ("out_of_sample", "every_symbol", "positive_years", "test_years",
                                                                  "enforce", "rule", "years")}
         out["latest"]["walk_forward"]["eligible_now"] = len(wf.get("eligible_now") or [])
-    pid_file = LOCAL_DIR / f"{bot}_multiyear.pid"
-    out["running"] = pid_file.exists()
+    out["running"] = _running(f"{bot}_multiyear")
     return out
 
 
