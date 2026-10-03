@@ -88,7 +88,15 @@ def test_tick_channels_are_subscribed_alongside_bars():
 def test_the_crypto_stream_reads_the_chart_venue_with_the_kalshi_coins(monkeypatch):
     from data import alpaca_client, alpaca_crypto_data
     monkeypatch.setenv("ALPACA_API_KEY_ID", "k")
-    monkeypatch.setattr(alpaca_crypto_data, "get_crypto_universe", lambda: ["SOL/USD", "USDT/USD", "PEPE/USDC"])
+    monkeypatch.setattr(alpaca_crypto_data, "get_crypto_universe", lambda: ["SOL/USD", "USDT/USD", "PEPE/USDC", "NEAR/USD"])
+    fresh = pd.Timestamp.now(tz="UTC").isoformat()
+
+    def latest_bars(path, *, params):
+        assert path.endswith(f"/{alpaca_client.CHART_CRYPTO_LOC}/latest/bars")
+        return {"bars": {p: {"t": "2025-10-03T04:59:00Z" if p == "NEAR/USD" else fresh} for p in params["symbols"].split(",")}}
+
+    monkeypatch.setattr(alpaca_client, "_crypto_data_get", latest_bars)
+    monkeypatch.setattr(s, "_venue_cache", {"at": 0.0, "key": None, "pairs": None})
     started = []
     monkeypatch.setattr(s.BarStream, "start", lambda self: started.append(self.name))
     monkeypatch.setattr(s, "_streams", {})
@@ -98,4 +106,5 @@ def test_the_crypto_stream_reads_the_chart_venue_with_the_kalshi_coins(monkeypat
     symbols = crypto.symbols_fn()
     assert "SOL/USD" in symbols and "BTC/USD" in symbols and "HYPE/USD" in symbols
     assert "USDT/USD" not in symbols and "PEPE/USDC" not in symbols
+    assert "NEAR/USD" not in symbols  # the venue's last bar for it is a year old
     assert "GLD" in s._streams["stocks"].symbols_fn() and s._streams["stocks"].ticks_fn() == {"trades": s._commodity_etfs()}  # noqa: SLF001

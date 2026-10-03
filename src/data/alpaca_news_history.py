@@ -55,16 +55,32 @@ def fetch_month(year: int, month: int, *, symbols: list[str] | None = None, max_
     start = dt.datetime(year, month, 1, tzinfo=dt.timezone.utc)
     end = (start + dt.timedelta(days=32)).replace(day=1)
     rows: list[dict[str, Any]] = []
-    for i in range(0, len(symbols), SYMBOLS_PER_REQUEST):
-        params: dict[str, Any] = {"symbols": ",".join(symbols[i:i + SYMBOLS_PER_REQUEST]), "limit": 50, "sort": "asc",
+
+    def pull(chunk: list[str]) -> list[dict[str, Any]]:
+        got: list[dict[str, Any]] = []
+        params: dict[str, Any] = {"symbols": ",".join(chunk), "limit": 50, "sort": "asc",
                                   "start": start.strftime("%Y-%m-%dT%H:%M:%SZ"), "end": end.strftime("%Y-%m-%dT%H:%M:%SZ"),
                                   "include_content": "false"}
         for _ in range(max_pages):
             data = alpaca_client._data_get("/v1beta1/news", params=params)  # noqa: SLF001
-            rows += data.get("news") or []
+            got += data.get("news") or []
             if not data.get("next_page_token"):
                 break
             params["page_token"] = data["next_page_token"]
+        return got
+
+    for i in range(0, len(symbols), SYMBOLS_PER_REQUEST):
+        chunk = symbols[i:i + SYMBOLS_PER_REQUEST]
+        try:
+            rows += pull(chunk)
+        except Exception as exc:
+            # One ticker Alpaca rejects must not cost the month: one by one.
+            logger.warning("[alpaca_news_history] %s-%02d batch failed (%s); per ticker", year, month, exc)
+            for sym in chunk:
+                try:
+                    rows += pull([sym])
+                except Exception as exc2:
+                    logger.warning("[alpaca_news_history] %s %s-%02d skipped: %s", sym, year, month, exc2)
     if not rows:
         return pd.DataFrame(columns=COLUMNS)
     df = pd.DataFrame(rows)

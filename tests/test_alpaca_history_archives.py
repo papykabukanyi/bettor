@@ -64,3 +64,15 @@ def test_news_reads_never_look_ahead():
 def test_news_universe_covers_every_kalshi_coin_and_commodity():
     u = nh.universe()
     assert {"BTCUSD", "ETHUSD", "HYPEUSD", "GLD", "USO", "UNG", "SPY"} <= set(u)
+
+
+def test_one_rejected_ticker_does_not_cost_the_month(monkeypatch):
+    def fake_get(path, *, params):
+        if "BADUSD" in params["symbols"].split(","):
+            raise RuntimeError("400 invalid symbol")
+        return {"news": [{"id": 7, "created_at": "2024-03-01T10:00:00Z", "headline": "Bitcoin rallies", "summary": "",
+                          "symbols": ["BTCUSD"]}], "next_page_token": None}
+
+    monkeypatch.setattr(alpaca_client, "_data_get", fake_get)
+    df = nh.fetch_month(2024, 3, symbols=["BADUSD", "BTCUSD"])
+    assert df.id.tolist() == [7]

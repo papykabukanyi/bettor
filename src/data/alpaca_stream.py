@@ -242,6 +242,33 @@ def _kalshi_crypto_pairs() -> list[str]:
     return sorted(set(kalshi_15m_spot.SPOT_PRODUCTS.values()))
 
 
+_venue_cache: dict[str, Any] = {"at": 0.0, "key": None, "pairs": None}
+VENUE_CHECK_SEC = 6 * 3600
+
+
+def _live_on_chart_venue(pairs: list[str]) -> list[str]:
+    """The pairs the chart venue printed a bar for in the last 2 days (it
+    still answers for pairs it stopped listing long ago -- NEAR/USD's last
+    Kraken bar is from Oct 2025). Re-checked every VENUE_CHECK_SEC."""
+    key = ",".join(sorted(pairs))
+    if _venue_cache["key"] == key and time.time() - _venue_cache["at"] < VENUE_CHECK_SEC:
+        return list(_venue_cache["pairs"])
+    from data import alpaca_client
+    cutoff = time.time() - 2 * 86400
+    live: list[str] = []
+    for i in range(0, len(pairs), 100):
+        data = alpaca_client._crypto_data_get(  # noqa: SLF001
+            f"/v1beta3/crypto/{alpaca_client.CHART_CRYPTO_LOC}/latest/bars", params={"symbols": ",".join(pairs[i:i + 100])})
+        for pair, bar in (data.get("bars") or {}).items():
+            try:
+                if pd.Timestamp(bar["t"]).timestamp() >= cutoff:
+                    live.append(pair)
+            except (KeyError, TypeError, ValueError):
+                continue
+    _venue_cache.update(at=time.time(), key=key, pairs=sorted(live))
+    return sorted(live)
+
+
 def _crypto_symbols() -> list[str]:
     from data import alpaca_crypto_data
     from data.alpaca_crypto_setup import STABLECOINS
@@ -251,7 +278,12 @@ def _crypto_symbols() -> list[str]:
     except Exception as exc:
         logger.warning("[alpaca_stream] crypto bot universe unavailable: %s", exc)
         pairs = []
-    return sorted(set(pairs) | set(_kalshi_crypto_pairs()))
+    wanted = sorted(set(pairs) | set(_kalshi_crypto_pairs()))
+    try:
+        return _live_on_chart_venue(wanted)
+    except Exception as exc:
+        logger.warning("[alpaca_stream] chart venue check failed: %s", exc)
+        return _kalshi_crypto_pairs()
 
 
 def _crypto_ticks() -> dict[str, list[str]]:
