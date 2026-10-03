@@ -211,7 +211,7 @@ def test_an_upload_keeps_rows_another_writer_put_on_hf(monkeypatch, tmp_path):
     assert set(gap.ts) | set(local.ts) | set(new.ts) == set(merged.ts)
 
 
-def test_the_archive_is_rebuilt_from_alpaca_once(monkeypatch, tmp_path):
+def _rebuild_env(monkeypatch, tmp_path, collect):
     import json
 
     import huggingface_hub
@@ -220,14 +220,7 @@ def test_the_archive_is_rebuilt_from_alpaca_once(monkeypatch, tmp_path):
     monkeypatch.setattr(ks, "list_hf_shard_dates", lambda: ["2026-09-01"])
     marker: dict = {}
     monkeypatch.setattr(ks, "archive_source", lambda: marker.get("info"))
-    monkeypatch.setattr(ks, "_hf_download", lambda path: None)
-    fetched = []
-
-    def fake_collect(start, until_ts=None, coins=None):
-        fetched.append(coins)
-        return _minutes("BTC", [2.0] * 3, start=start + 60) if len(fetched) == 1 else pd.DataFrame(columns=ks.COLUMNS)
-
-    monkeypatch.setattr(ks, "collect_since", fake_collect)
+    monkeypatch.setattr(ks, "collect_since", collect)
     commits = []
 
     class FakeApi:
@@ -241,7 +234,45 @@ def test_the_archive_is_rebuilt_from_alpaca_once(monkeypatch, tmp_path):
                     marker["info"] = json.loads(op.path_or_fileobj)
 
     monkeypatch.setattr(huggingface_hub, "HfApi", FakeApi)
+    return marker, commits
+
+
+def test_the_archive_is_rebuilt_from_alpaca_alone_once(monkeypatch, tmp_path):
+    day0 = int(pd.Timestamp("2026-10-01", tz="UTC").timestamp())
+    # An earlier-source shard on disk: a coin Alpaca doesn't carry and an
+    # Alpaca coin's minute. Neither may survive the rebuild.
+    pd.concat([_minutes("NEAR", [5.0] * 2, start=day0), _minutes("BTC", [1.0], start=day0 + 7200)]).to_parquet(
+        tmp_path / "2026-10-01.parquet", index=False)
+    monkeypatch.setattr(ks, "_hf_download", lambda path: None)
+    fetched = []
+
+    def collect(start, until_ts=None, coins=None):
+        fetched.append(coins)
+        return _minutes("BTC", [2.0] * 3, start=day0 + 60) if len(fetched) == 1 else pd.DataFrame(columns=ks.COLUMNS)
+
+    marker, commits = _rebuild_env(monkeypatch, tmp_path, collect)
     r = ks.rebuild_from_alpaca(days=3)
-    assert r["ok"] and r["dates_written"] == 1 and fetched[0] == list(ks.SPOT_PRODUCTS)
-    assert ks.SOURCE_MARKER in commits[-1] and marker["info"]["source"] == "alpaca"
-    assert ks.rebuild_from_alpaca(days=3)["action"] == "already_rebuilt"
+    assert r["dates_written"] == 1 and fetched[0] == list(ks.SPOT_PRODUCTS)
+    shard = pd.read_parquet(tmp_path / "2026-10-01.parquet")
+    assert set(shard.coin) == {"BTC"} and shard.close.tolist() == [2.0, 2.0, 2.0]  # Alpaca's rows only
+    assert r["days_failed"] == 2 and r["ok"] is False and "info" not in marker  # empty days: no marker, runs again
+
+
+def test_a_complete_rebuild_writes_its_marker_and_runs_once(monkeypatch, tmp_path):
+    monkeypatch.setattr(ks, "_hf_download", lambda path: None)
+    marker, commits = _rebuild_env(monkeypatch, tmp_path, lambda start, until_ts=None, coins=None: _minutes(
+        "BTC", [2.0] * 3, start=start + 60))
+    r = ks.rebuild_from_alpaca(days=2)
+    assert r["ok"] and r["days_failed"] == 0 and ks.SOURCE_MARKER in commits[-1]
+    assert marker["info"]["source"] == "alpaca-only"
+    assert ks.rebuild_from_alpaca(days=2)["action"] == "already_rebuilt"
+
+
+def test_reads_and_writes_keep_only_alpacas_coins(monkeypatch, tmp_path):
+    monkeypatch.setattr(ks, "LOCAL_DIR", tmp_path)
+    monkeypatch.setattr(ks, "_hf_download", lambda path: None)
+    ks.push_spot_history(pd.concat([_minutes("NEAR", [5.0]), _minutes("BTC", [1.0])]))
+    assert set(pd.read_parquet(next(tmp_path.glob("*.parquet"))).coin) == {"BTC"}
+    pd.concat([_minutes("ZEC", [5.0]), _minutes("ETH", [1.0])]).to_parquet(tmp_path / "2026-01-01.parquet", index=False)
+    monkeypatch.setattr(ks, "list_hf_shard_dates", lambda: [])
+    assert "ZEC" not in set(ks.load_spot_history(days=400).coin)

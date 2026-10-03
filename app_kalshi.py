@@ -2597,9 +2597,8 @@ def api_kalshi_15m_backfill():
 @app.route("/api/kalshi15m/metals-backfill", methods=["POST"])
 def api_kalshi_15m_metals_backfill():
     """Manually triggers kalshi_15m_metals_data.backfill_minute_history --
-    see its own docstring for the full design (Yahoo Finance futures data,
-    found and live-verified this session; real per-request/total-retention
-    limits it already respects internally). Runs synchronously, requires
+    see its own docstring for the full design (Alpaca SIP bars of each
+    commodity's ETF, fetched in 7-day chunks). Runs synchronously, requires
     the same CRON_SECRET bearer every other manual trigger route here does.
 
     Defaults to the function's own real max (29 days) rather than a
@@ -2611,7 +2610,7 @@ def api_kalshi_15m_metals_backfill():
     if not is_cron_authorized(request):
         return jsonify({"ok": False, "error": "Unauthorized"}), 401
     try:
-        days = int(request.args.get("days", str(kalshi_15m_metals_data._YAHOO_MAX_1M_LOOKBACK_DAYS)) or "29")  # noqa: SLF001
+        days = int(request.args.get("days", "29") or "29")
         result = kalshi_15m_metals_data.backfill_minute_history(days=days)
         return jsonify(result)
     except Exception as exc:

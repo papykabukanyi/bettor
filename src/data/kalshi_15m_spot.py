@@ -45,7 +45,7 @@ logger = logging.getLogger(__name__)
 HF_API_KEY = os.getenv("HF_API_KEY", "")
 HF_KALSHI_15M_DATASET_REPO = os.getenv("HF_KALSHI_15M_DATASET_REPO", "papylove/kalshi-15m-data")
 
-SOURCE = "alpaca"
+SOURCE = "alpaca-only"  # every row from Alpaca; see rebuild_from_alpaca
 # Every coin a Kalshi bot trades that Alpaca's Kraken feed carries (checked
 # Oct 2026: a bar every minute of a 24h window for each).
 SPOT_PRODUCTS = {
@@ -181,6 +181,7 @@ def push_spot_history(df: pd.DataFrame) -> dict[str, Any]:
         if remote:
             frames.insert(0, pd.read_parquet(remote))
         combined = pd.concat(frames, ignore_index=True).drop_duplicates(["coin", "ts"], keep="last").sort_values(["coin", "ts"])
+        combined = combined[combined["coin"].isin(SPOT_PRODUCTS)]  # Alpaca's coins only
         tmp = local_path.with_suffix(".parquet.tmp")
         combined.to_parquet(tmp, index=False)
         os.replace(tmp, local_path)
@@ -249,7 +250,8 @@ def load_spot_history(*, days: int = 90) -> pd.DataFrame:
                 logger.warning("[kalshi_15m_spot] could not read shard %s: %s", date_str, exc)
     if not frames:
         return pd.DataFrame(columns=COLUMNS)
-    return pd.concat(frames, ignore_index=True).drop_duplicates(["coin", "ts"], keep="last").sort_values(["coin", "ts"])
+    df = pd.concat(frames, ignore_index=True).drop_duplicates(["coin", "ts"], keep="last").sort_values(["coin", "ts"])
+    return df[df["coin"].isin(SPOT_PRODUCTS)]  # Alpaca's coins only
 
 
 def complete_minutes(df: pd.DataFrame) -> pd.DataFrame:
@@ -406,22 +408,29 @@ def grade_against_settlements(quotes: pd.DataFrame, spot: pd.DataFrame) -> dict[
     }
 
 
-def _merge_days(coins: list[str], days: int) -> list[str]:
+def _merge_days(coins: list[str], days: int, *, replace: bool = False, failed: list[int] | None = None) -> list[str]:
     """Fetch `days` of Alpaca history for `coins` day by day and merge each
     day into its local shard (unioned with HF's copy; the new Alpaca rows
-    win minute for minute). Returns the dates touched."""
+    win minute for minute) -- or, with replace, write the shard as Alpaca's
+    rows alone. Days Alpaca returned nothing for go into `failed`. Returns
+    the dates touched."""
     LOCAL_DIR.mkdir(parents=True, exist_ok=True)
     now = int(time.time())
     touched: list[str] = []
+    replaced: set[str] = set()
     for day in range(days, 0, -1):
         start = now - day * 86400
         df = collect_since(start, until_ts=start + 86400, coins=coins)
         if df.empty:
+            if failed is not None:
+                failed.append(start)
             continue
         for date_str, part in df.groupby(pd.to_datetime(df["ts"], unit="s", utc=True).dt.strftime("%Y-%m-%d")):
             local_path = LOCAL_DIR / f"{date_str}.parquet"
             frames = [part]
-            if local_path.exists():
+            if replace and date_str not in replaced:
+                replaced.add(date_str)  # first write of this date in a rebuild: Alpaca's rows only
+            elif local_path.exists():
                 frames.insert(0, pd.read_parquet(local_path))
             else:
                 remote = _hf_download(f"spot_history/{date_str}.parquet")
@@ -496,10 +505,10 @@ def archive_source() -> dict[str, Any] | None:
 
 
 def rebuild_from_alpaca(*, days: int | None = None, files_per_commit: int = 25) -> dict[str, Any]:
-    """Once: re-read the whole archive window from Alpaca so backtests read
-    the same source the bots trade on. Alpaca rows replace the Coinbase-era
-    rows minute for minute; coins Alpaca doesn't list keep their old rows.
-    Writes SOURCE.json last, so an interrupted rebuild runs again."""
+    """Once: rewrite every shard of the archive window from Alpaca alone, so
+    backtests and studies read only the data the bots trade on -- no row
+    from any earlier source survives. Writes SOURCE.json last and only when
+    every day came back, so an interrupted or partial rebuild runs again."""
     marker = archive_source()
     if marker and marker.get("source") == SOURCE:
         return {"ok": True, "action": "already_rebuilt", "marker": marker}
@@ -509,10 +518,11 @@ def rebuild_from_alpaca(*, days: int | None = None, files_per_commit: int = 25) 
     if days is None:
         first = dt.datetime.strptime(dates[0], "%Y-%m-%d").replace(tzinfo=dt.timezone.utc)
         days = (dt.datetime.now(dt.timezone.utc) - first).days + 1
-    touched = _merge_days(list(SPOT_PRODUCTS), days)
+    failed: list[int] = []
+    touched = _merge_days(list(SPOT_PRODUCTS), days, replace=True, failed=failed)
     info = {"source": SOURCE, "venue": "Kraken US via Alpaca (us-1)", "coins": sorted(SPOT_PRODUCTS),
             "rebuilt_at": dt.datetime.now(dt.timezone.utc).isoformat(), "days": days, "first_date": dates[0]}
-    uploaded = _upload_dates(touched, message="alpaca crypto 1m spot history rebuild", files_per_commit=files_per_commit,
-                             extra={SOURCE_MARKER: json.dumps(info, indent=2).encode()})
-    ok = len(uploaded) == len(touched)
-    return {"ok": ok, "days": days, "dates_written": len(touched), "dates_uploaded": len(uploaded)}
+    uploaded = _upload_dates(touched, message="alpaca-only crypto 1m spot history rebuild", files_per_commit=files_per_commit,
+                             extra=None if failed else {SOURCE_MARKER: json.dumps(info, indent=2).encode()})
+    ok = len(uploaded) == len(touched) and not failed
+    return {"ok": ok, "days": days, "dates_written": len(touched), "dates_uploaded": len(uploaded), "days_failed": len(failed)}

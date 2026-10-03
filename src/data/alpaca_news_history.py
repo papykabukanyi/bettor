@@ -44,8 +44,8 @@ def universe() -> list[str]:
 
 
 def _score(text: str) -> float:
-    from data.crypto_news import _score_headlines
-    return float(_score_headlines([text])[0])
+    from data.alpaca_news import score_headlines
+    return float(score_headlines([text])[0])
 
 
 def fetch_month(year: int, month: int, *, symbols: list[str] | None = None, max_pages: int = 2000) -> pd.DataFrame:

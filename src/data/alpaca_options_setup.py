@@ -814,75 +814,18 @@ def must_be_flat(ts_end: int) -> bool:
     return minute >= FLAT_BY_MINUTE_ET
 
 
-# Chart sources. Alpaca's free feed is IEX only: ~2-3% of US volume, and
-# thinner names miss minutes (COST 62%, LLY 70%, BA 76% of session minutes
-# over Aug-Sep 2026). Yahoo's 1-minute bars carry the consolidated tape's
-# volume (14-29x IEX) with every minute present and prices within ~1 bp of
-# Alpaca's. IEX pre-screens the price structure (trend, level break) for the
-# whole watchlist; any symbol that gets further, or whose IEX chart is
-# incomplete or stale, is decided on the consolidated bars.
-_YAHOO_CHART = "https://query1.finance.yahoo.com/v8/finance/chart"
-_consolidated_cache: dict[str, tuple[float, pd.DataFrame]] = {}
-_yahoo_backoff_until = 0.0
-
-
-def consolidated_bars(symbol: str) -> pd.DataFrame | None:
-    """Five days of Yahoo 1-minute bars in Alpaca's bar shape (ts = bar
-    START), cached 60s; None when unavailable (rate limit backs off 5 min)."""
-    global _yahoo_backoff_until
-    cached = _consolidated_cache.get(symbol)
-    if cached and time.time() - cached[0] < 60:
-        return cached[1]
-    if time.time() < _yahoo_backoff_until:
-        return None
-    import requests
-    try:
-        resp = requests.get(f"{_YAHOO_CHART}/{symbol}", params={"interval": "1m", "range": "5d"},
-                            headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
-        if resp.status_code == 429:
-            _yahoo_backoff_until = time.time() + 300
-            return None
-        resp.raise_for_status()
-        result = ((resp.json().get("chart") or {}).get("result") or [None])[0] or {}
-        quote = ((result.get("indicators") or {}).get("quote") or [{}])[0]
-        df = pd.DataFrame({"ts": result.get("timestamp") or [], "open": quote.get("open") or [], "high": quote.get("high") or [],
-                           "low": quote.get("low") or [], "close": quote.get("close") or [], "volume": quote.get("volume") or []})
-    except Exception:
-        return None
-    df = df.dropna(subset=["open", "high", "low", "close"])
-    df = df[df["ts"] % 60 == 0].astype({"ts": "int64"})  # drop Yahoo's still-forming point
-    df["volume"] = df["volume"].fillna(0.0)
-    if df.empty:
-        return None
-    _consolidated_cache[symbol] = (time.time(), df)
-    return df
-
-
+# Chart source: Alpaca only -- the account's feed (ALPACA_DATA_FEED: "sip"
+# with Algo Trader Plus, every US exchange consolidated, real time), with
+# the live stream's newest bars on top.
 def live_setup(symbol: str, *, news_score: float | None, now: float | None = None) -> dict[str, Any]:
     from data import alpaca_client, alpaca_data, alpaca_stream
     leader_symbol = leader_for(symbol)
-    if alpaca_client.DATA_FEED == "sip":
-        # The account's SIP feed (Algo Trader Plus): every US exchange,
-        # consolidated volume, real time -- complete on its own, with the
-        # live stream's newest bars on top.
-        bars = alpaca_stream.merge_live("stocks", symbol, alpaca_data.fetch_recent_minute_bars(symbol))
-        leader = alpaca_stream.merge_live("stocks", leader_symbol, alpaca_data.fetch_recent_minute_bars(leader_symbol))
-        result = setup_from_bars(bars, news_score=news_score, now=now, leader_bars=leader, leader_symbol=leader_symbol,
-                                 require_leader=True)
-        return {**result, "chart_source": "SIP consolidated (Alpaca)"}
-    leader_bars = consolidated_bars(leader_symbol)
-    if leader_bars is None:
-        leader_bars = alpaca_data.fetch_recent_minute_bars(leader_symbol)
-    result = setup_from_bars(alpaca_data.fetch_recent_minute_bars(symbol), news_score=news_score, now=now,
-                             leader_bars=leader_bars, leader_symbol=leader_symbol, require_leader=True)
-    if result.get("reason") in ("session", "trend", "breakout"):
-        return {**result, "chart_source": "IEX (Alpaca)"}
-    bars = consolidated_bars(symbol)
-    if bars is None:
-        return {**result, "chart_source": "IEX (Alpaca); consolidated bars unavailable"}
-    decided = setup_from_bars(bars, news_score=news_score, now=now, leader_bars=leader_bars, leader_symbol=leader_symbol,
-                              require_leader=True)
-    return {**decided, "chart_source": "consolidated (Yahoo)"}
+    bars = alpaca_stream.merge_live("stocks", symbol, alpaca_data.fetch_recent_minute_bars(symbol))
+    leader = alpaca_stream.merge_live("stocks", leader_symbol, alpaca_data.fetch_recent_minute_bars(leader_symbol))
+    result = setup_from_bars(bars, news_score=news_score, now=now, leader_bars=leader, leader_symbol=leader_symbol,
+                             require_leader=True)
+    feed = "SIP consolidated" if alpaca_client.DATA_FEED == "sip" else alpaca_client.DATA_FEED.upper()
+    return {**result, "chart_source": f"{feed} (Alpaca)"}
 
 
 def setup_from_bars(bars: pd.DataFrame, *, news_score: float | None, now: float | None = None,

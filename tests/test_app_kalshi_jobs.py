@@ -1993,7 +1993,7 @@ def test_api_kalshi_15m_metals_backfill_route_calls_the_real_backfill(monkeypatc
 
     assert resp.status_code == 200
     assert body["dates_written"] == 23
-    assert captured["days"] == kalshi_15m_metals_data._YAHOO_MAX_1M_LOOKBACK_DAYS  # noqa: SLF001
+    assert captured["days"] == 29
 
 
 def test_api_kalshi_15m_metals_backfill_route_accepts_a_custom_days_param(monkeypatch):

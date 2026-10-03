@@ -2625,7 +2625,10 @@ def _manage_setup_position(position: dict[str, Any], market: dict[str, Any], *, 
                            checks: list[dict[str, Any]]) -> None:
     """Sell a setup position the moment the underlying reaches the planned
     stop or target (kalshi_15m_setup.plan_exit); otherwise it rides to
-    settlement. A stale or missing underlying price holds (never guesses)."""
+    settlement. "Reached" is what the study counts: any Alpaca 1-minute
+    bar since entry whose high/low touched the level, or the live Alpaca
+    tick now (stop first when both were touched). A stale or missing
+    underlying price holds (never guesses)."""
     from data import kalshi_15m_setup
     coin = position["coin"]
     try:
@@ -2636,9 +2639,27 @@ def _manage_setup_position(position: dict[str, Any], market: dict[str, Any], *, 
     if candles is None or candles.empty or time.time() - int(candles["ts"].max()) > kalshi_15m_setup.STALE_AFTER_SEC:
         checks.append({"coin": coin, "should_exit": False, "reason": "no_fresh_underlying_price"})
         return
-    underlying = float(candles.sort_values("ts")["close"].iloc[-1])
-    should, reason = kalshi_15m_setup.plan_exit(kalshi_15m_setup.underlying_plan_position(position), underlying)
-    check = {"coin": coin, "should_exit": should, "reason": reason, "underlying_price": underlying}
+    candles = candles.sort_values("ts")
+    try:
+        tick = kalshi_15m_setup.live_price(coin)
+    except Exception:
+        tick = None
+    underlying = float(tick["price"]) if tick else float(candles["close"].iloc[-1])
+    try:
+        opened_ts = dt.datetime.fromisoformat(str(position["opened_at"]).replace("Z", "+00:00")).timestamp()
+    except (KeyError, TypeError, ValueError):
+        opened_ts = time.time()
+    since = candles[candles["ts"] > opened_ts]  # bars that closed after the entry
+    lows = [underlying] + ([float(since["low"].min())] if not since.empty else [])
+    highs = [underlying] + ([float(since["high"].max())] if not since.empty else [])
+    plan_pos = kalshi_15m_setup.underlying_plan_position(position)
+    worst, best = (max(highs), min(lows)) if plan_pos.get("side") == "short" else (min(lows), max(highs))
+    should, reason = kalshi_15m_setup.plan_exit(plan_pos, worst)
+    if not should:
+        should, reason = kalshi_15m_setup.plan_exit(plan_pos, best)
+    check = {"coin": coin, "should_exit": should, "reason": reason, "underlying_price": underlying,
+             "price_source": f"live {tick['kind']}" if tick else "last 1m close",
+             "range_since_entry": [min(lows), max(highs)]}
     checks.append(check)
     if not should:
         return

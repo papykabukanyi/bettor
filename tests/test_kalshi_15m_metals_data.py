@@ -1,7 +1,5 @@
-"""Data pipeline for Kalshi's 15-minute GOLD/SILVER/COPPER markets. See
-kalshi_15m_metals_data.py's own module docstring for why this builds its
-own price history from scratch (no perps-contract proxy exists for
-metals) via a genuinely free, no-API-key spot-price endpoint."""
+"""Data pipeline for Kalshi's 15-minute commodity markets, priced on each
+commodity's ETF from Alpaca (SIP bars, live stream) only."""
 from __future__ import annotations
 
 import pandas as pd
@@ -14,63 +12,41 @@ from data import kalshi_15m_metals_data as k
 def _isolated_data_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(k, "DATA_DIR", tmp_path)
     monkeypatch.setattr(k, "HF_API_KEY", "")
-    # Real network call otherwise (Google News RSS, up to an 8s timeout
-    # per call) -- every test in this file gets a safe, deterministic
-    # default; tests that specifically care about sentiment wiring
-    # override this themselves.
+    # Alpaca news otherwise -- every test in this file gets a safe,
+    # deterministic default; tests that specifically care about sentiment
+    # wiring override this themselves.
     monkeypatch.setattr(k, "get_generic_sentiment", lambda query, cache_key: {"query": query, "sentiment_score": 0.0, "headline_volume": 0, "computed_at": 0.0})
 
 
-def test_get_universe_is_gold_silver_copper_platinum_palladium():
-    assert set(k.get_universe()) == {"GOLD", "SILVER", "COPPER", "PLATINUM", "PALLADIUM"}
+def test_get_universe_is_every_commodity_with_an_alpaca_etf():
+    assert set(k.get_universe()) == {"GOLD", "SILVER", "COPPER", "PLATINUM", "PALLADIUM", "WTI", "NATGAS"}
+    assert k.ETF_SYMBOL["GOLD"] == "GLD" and k.ETF_SYMBOL["WTI"] == "USO"
 
 
 def test_fetch_latest_price_returns_none_for_an_unknown_metal():
     assert k.fetch_latest_price("NOT_A_REAL_METAL") is None
 
 
-def test_fetch_latest_price_parses_a_real_response(monkeypatch):
-    class _FakeResponse:
-        def raise_for_status(self):
-            pass
-
-        def json(self):
-            return {"chart": {"result": [{
-                "timestamp": [1_700_000_000, 1_700_000_060],
-                "indicators": {"quote": [{"close": [4378.0, 4379.0]}]},
-            }]}}
-
-    monkeypatch.setattr(k.requests, "get", lambda url, params, headers, timeout: _FakeResponse())
-    result = k.fetch_latest_price("GOLD")
-    assert result["price"] == 4379.0  # the LAST real close, not the first
-    assert result["ts"] == 1_700_000_060
+def test_fetch_latest_price_reads_the_alpaca_stream_first(monkeypatch):
+    from data import alpaca_stream
+    monkeypatch.setattr(alpaca_stream, "latest_price", lambda kind, symbol, max_age_sec: {"price": 380.5, "at": 1_700_000_100.0}
+                        if (kind, symbol) == ("stocks", "GLD") else None)
+    monkeypatch.setattr(k, "_fetch_alpaca_1m_chunk", lambda *a: (_ for _ in ()).throw(AssertionError("no REST when the stream is fresh")))
+    assert k.fetch_latest_price("GOLD") == {"price": 380.5, "ts": 1_700_000_100}
 
 
-def test_fetch_latest_price_skips_a_trailing_null_close(monkeypatch):
-    """Yahoo's own last bar for a live symbol is sometimes still-forming
-    (a null close) -- must walk back to the most recent REAL price, not
-    return None or a null."""
-    class _FakeResponse:
-        def raise_for_status(self):
-            pass
-
-        def json(self):
-            return {"chart": {"result": [{
-                "timestamp": [1_700_000_000, 1_700_000_060],
-                "indicators": {"quote": [{"close": [4378.0, None]}]},
-            }]}}
-
-    monkeypatch.setattr(k.requests, "get", lambda url, params, headers, timeout: _FakeResponse())
-    result = k.fetch_latest_price("GOLD")
-    assert result["price"] == 4378.0
-    assert result["ts"] == 1_700_000_000
+def test_fetch_latest_price_falls_back_to_the_last_sip_bar(monkeypatch):
+    from data import alpaca_stream
+    monkeypatch.setattr(alpaca_stream, "latest_price", lambda *a, **kw: None)
+    monkeypatch.setattr(k, "_fetch_alpaca_1m_chunk", lambda symbol, start, end: pd.DataFrame(
+        {"ts": [1_700_000_000, 1_700_000_060], "close": [4378.0, 4379.0]}))
+    assert k.fetch_latest_price("GOLD") == {"price": 4379.0, "ts": 1_700_000_060}
 
 
-def test_fetch_latest_price_returns_none_on_a_network_failure(monkeypatch):
-    def fail(url, params, headers, timeout):
-        raise RuntimeError("network error")
-
-    monkeypatch.setattr(k.requests, "get", fail)
+def test_fetch_latest_price_returns_none_without_any_alpaca_data(monkeypatch):
+    from data import alpaca_stream
+    monkeypatch.setattr(alpaca_stream, "latest_price", lambda *a, **kw: None)
+    monkeypatch.setattr(k, "_fetch_alpaca_1m_chunk", lambda *a: pd.DataFrame())
     assert k.fetch_latest_price("GOLD") is None
 
 
@@ -158,7 +134,7 @@ def test_save_price_history_pushes_to_hf_when_the_rate_limit_window_has_elapsed(
 
     uploads = _FakeHfApi.captured_upload["uploads"]
     assert len(uploads) == 1
-    assert uploads[0]["path_in_repo"] == "price_history/GOLD.parquet"
+    assert uploads[0]["path_in_repo"] == "price_history_alpaca/GOLD.parquet"
 
 
 def test_save_price_history_skips_the_hf_push_within_the_rate_limit_window(monkeypatch):
@@ -299,7 +275,7 @@ def test_collect_dataset_rows_wires_the_fetched_sentiment_score_through(monkeypa
     result = k.collect_dataset_rows(["GOLD"])
     assert (result["sentiment_score"] == 0.73).all()
     assert captured["cache_key"] == "GOLD"
-    assert captured["query"] == k.METAL_TO_NEWS_QUERY["GOLD"]
+    assert captured["query"] == "GOLD"
 
 
 def test_latest_feature_row_returns_none_with_no_history():
@@ -359,54 +335,29 @@ def test_load_training_dataset_reads_local_shards(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# backfill_minute_history / _fetch_yahoo_1m_chunk -- real, free, no-key
-# historical minute-bar source found and live-verified this session
-# (Yahoo Finance's public chart API for the underlying COMEX futures
-# contract per metal), closing the real gap this module's own top
-# docstring used to disclose as unfixable ("No historical bars exist
-# anywhere free for this").
+# backfill_minute_history / _fetch_alpaca_1m_chunk -- the commodity ETF's
+# SIP 1-minute bars from Alpaca.
 # ---------------------------------------------------------------------------
-def _fake_yahoo_response(ts_list, closes):
-    class _FakeResponse:
-        def raise_for_status(self):
-            pass
+def test_fetch_alpaca_1m_chunk_reads_sip_bars_by_their_start(monkeypatch):
+    from data import alpaca_client
+    calls = []
 
-        def json(self):
-            return {"chart": {"result": [{"timestamp": ts_list, "indicators": {"quote": [{"close": closes}]}}]}}
+    def fake_bars(symbols, *, timeframe, start, end, feed):
+        calls.append((symbols, feed))
+        return {"GLD": [{"t": "2023-11-14T22:13:20Z", "c": 100.0}, {"t": "2023-11-14T22:14:20Z", "c": 101.0}]}
 
-    return _FakeResponse()
-
-
-def test_fetch_yahoo_1m_chunk_parses_a_real_shaped_response(monkeypatch):
-    monkeypatch.setattr(
-        k.requests, "get",
-        lambda url, params, headers, timeout: _fake_yahoo_response([1_700_000_000, 1_700_000_060], [100.0, 101.0]),
-    )
-    result = k._fetch_yahoo_1m_chunk("GC=F", 1_700_000_000, 1_700_000_100)  # noqa: SLF001
-    assert list(result["ts"]) == [1_700_000_000, 1_700_000_060]
-    assert list(result["close"]) == [100.0, 101.0]
+    monkeypatch.setattr(alpaca_client, "get_bars", fake_bars)
+    result = k._fetch_alpaca_1m_chunk("GLD", 1_700_000_000, 1_700_000_100)  # noqa: SLF001
+    assert calls == [(["GLD"], "sip")]
+    assert list(result["ts"]) == [1_700_000_000, 1_700_000_060] and list(result["close"]) == [100.0, 101.0]
 
 
-def test_fetch_yahoo_1m_chunk_returns_empty_on_no_result(monkeypatch):
-    class _EmptyResponse:
-        def raise_for_status(self):
-            pass
-
-        def json(self):
-            return {"chart": {"result": None, "error": {"code": "Unprocessable Entity"}}}
-
-    monkeypatch.setattr(k.requests, "get", lambda url, params, headers, timeout: _EmptyResponse())
-    result = k._fetch_yahoo_1m_chunk("GC=F", 1_700_000_000, 1_700_000_100)  # noqa: SLF001
-    assert result.empty
-
-
-def test_fetch_yahoo_1m_chunk_returns_empty_on_a_network_failure(monkeypatch):
-    def fail(url, params, headers, timeout):
-        raise RuntimeError("network error")
-
-    monkeypatch.setattr(k.requests, "get", fail)
-    result = k._fetch_yahoo_1m_chunk("GC=F", 1_700_000_000, 1_700_000_100)  # noqa: SLF001
-    assert result.empty
+def test_fetch_alpaca_1m_chunk_returns_empty_on_a_failure(monkeypatch):
+    from data import alpaca_client
+    monkeypatch.setattr(alpaca_client, "get_bars", lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("403")))
+    assert k._fetch_alpaca_1m_chunk("GLD", 1_700_000_000, 1_700_000_100).empty  # noqa: SLF001
+    monkeypatch.setattr(alpaca_client, "get_bars", lambda *a, **kw: {})
+    assert k._fetch_alpaca_1m_chunk("GLD", 1_700_000_000, 1_700_000_100).empty  # noqa: SLF001
 
 
 def test_backfill_minute_history_requires_hf_api_key():
@@ -414,7 +365,7 @@ def test_backfill_minute_history_requires_hf_api_key():
     assert result == {"ok": False, "reason": "no_hf_api_key"}
 
 
-def test_backfill_minute_history_caps_days_at_the_real_yahoo_retention_limit(monkeypatch):
+def test_backfill_minute_history_caps_days(monkeypatch):
     monkeypatch.setattr(k, "HF_API_KEY", "fake-token")
     captured_windows = []
 
@@ -422,11 +373,11 @@ def test_backfill_minute_history_caps_days_at_the_real_yahoo_retention_limit(mon
         captured_windows.append((start_ts, end_ts))
         return pd.DataFrame()
 
-    monkeypatch.setattr(k, "_fetch_yahoo_1m_chunk", fake_chunk)
-    k.backfill_minute_history(["GOLD"], days=9999)  # absurdly large -- must be silently capped, not sent to Yahoo as-is
+    monkeypatch.setattr(k, "_fetch_alpaca_1m_chunk", fake_chunk)
+    k.backfill_minute_history(["GOLD"], days=9999)  # absurdly large -- must be silently capped
 
     total_span = captured_windows[-1][1] - captured_windows[0][0]
-    assert total_span <= k._YAHOO_MAX_1M_LOOKBACK_DAYS * 86400 + 60  # noqa: SLF001 -- small slack for wall-clock jitter between now() calls
+    assert total_span <= k._MAX_BACKFILL_DAYS * 86400 + 60  # noqa: SLF001 -- small slack for wall-clock jitter between now() calls
 
 
 def test_backfill_minute_history_chunks_requests_within_the_real_per_request_limit(monkeypatch):
@@ -437,12 +388,12 @@ def test_backfill_minute_history_chunks_requests_within_the_real_per_request_lim
         captured_windows.append((start_ts, end_ts))
         return pd.DataFrame()
 
-    monkeypatch.setattr(k, "_fetch_yahoo_1m_chunk", fake_chunk)
+    monkeypatch.setattr(k, "_fetch_alpaca_1m_chunk", fake_chunk)
     k.backfill_minute_history(["GOLD"], days=20)  # bigger than one chunk's own real per-request limit
 
     assert len(captured_windows) >= 2
     for start_ts, end_ts in captured_windows:
-        assert (end_ts - start_ts) <= k._YAHOO_MAX_1M_DAYS_PER_REQUEST * 86400  # noqa: SLF001
+        assert (end_ts - start_ts) <= k._MAX_DAYS_PER_REQUEST * 86400  # noqa: SLF001
 
 
 def test_backfill_minute_history_writes_real_feature_rows_to_hf(monkeypatch):
@@ -458,7 +409,7 @@ def test_backfill_minute_history_writes_real_feature_rows_to_hf(monkeypatch):
     ts_list = [base_ts + i * 60 for i in range(n)]
     closes = [100.0 + (i % 10) * 0.1 for i in range(n)]
     monkeypatch.setattr(
-        k, "_fetch_yahoo_1m_chunk",
+        k, "_fetch_alpaca_1m_chunk",
         lambda symbol, start_ts, end_ts: pd.DataFrame({"ts": ts_list, "close": closes}),
     )
 
@@ -477,7 +428,7 @@ def test_backfill_minute_history_writes_real_feature_rows_to_hf(monkeypatch):
 
 def test_backfill_minute_history_skips_a_metal_with_no_real_data(monkeypatch):
     monkeypatch.setattr(k, "HF_API_KEY", "fake-token")
-    monkeypatch.setattr(k, "_fetch_yahoo_1m_chunk", lambda symbol, start_ts, end_ts: pd.DataFrame())
+    monkeypatch.setattr(k, "_fetch_alpaca_1m_chunk", lambda symbol, start_ts, end_ts: pd.DataFrame())
 
     result = k.backfill_minute_history(["GOLD"], days=5)
 

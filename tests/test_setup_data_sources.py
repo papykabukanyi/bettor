@@ -101,26 +101,19 @@ def _bars(n=10):
 
 
 @pytest.mark.parametrize("module", ["alpaca_setup", "alpaca_options_setup"])
-@pytest.mark.parametrize("first_reason,decides_on_consolidated", [("trend", False), ("breakout", False), ("volume", True), ("data", True)])
-def test_stocks_are_decided_on_consolidated_bars_once_they_get_past_the_price_structure(
-        monkeypatch, module, first_reason, decides_on_consolidated):
+def test_stocks_are_decided_on_alpaca_bars_only(monkeypatch, module):
     import importlib
 
-    from data import alpaca_data
+    from data import alpaca_client, alpaca_data, alpaca_stream
     m = importlib.import_module(f"data.{module}")
-    iex, cons = _bars(), _bars().assign(volume=25.0)
-    monkeypatch.setattr(alpaca_data, "fetch_recent_minute_bars", lambda symbol, **kw: iex)
-    monkeypatch.setattr(m, "consolidated_bars", lambda symbol: cons)
-    calls = []
-
-    def fake_setup_from_bars(bars, **kw):
-        calls.append(bars is cons)
-        return {"valid": False, "reason": first_reason if len(calls) == 1 else "risk_reward", "checks": {}}
-
-    monkeypatch.setattr(m, "setup_from_bars", fake_setup_from_bars)
+    reads = []
+    monkeypatch.setattr(alpaca_data, "fetch_recent_minute_bars", lambda symbol, **kw: reads.append(symbol) or _bars())
+    monkeypatch.setattr(alpaca_stream, "_streams", {})
+    monkeypatch.setattr(alpaca_client, "DATA_FEED", "sip")
+    monkeypatch.setattr(m, "setup_from_bars", lambda bars, **kw: {"valid": False, "reason": "volume", "checks": {}})
     r = m.live_setup("COST", news_score=None)
-    assert (r["chart_source"] == "consolidated (Yahoo)") is decides_on_consolidated
-    assert calls == ([False, True] if decides_on_consolidated else [False])
+    assert r["chart_source"] == "SIP consolidated (Alpaca)" and reads == ["COST", m.leader_for("COST")]
+    assert not hasattr(m, "consolidated_bars")
 
 
 def test_gold_perp_reads_gld_with_silver_as_leader(monkeypatch):

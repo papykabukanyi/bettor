@@ -3247,3 +3247,28 @@ def test_setup_mode_skips_a_condition_the_study_found_losing(setup_mode, monkeyp
     assert kalshi_15m_strategy.evaluate_candidate("BTC")["reason"] == "not_eligible"
     monkeypatch.setattr(setup_backtest_job, "eligibility", lambda bot: {"enforce": False, "symbols": [], "blocked": {"weekday": [weekday]}})
     assert kalshi_15m_strategy.evaluate_candidate("BTC")["ok"] is True  # not proven: nothing enforced
+
+
+def test_setup_position_exits_on_a_touch_since_entry_like_the_study(setup_mode, monkeypatch):
+    """The study exits the minute a bar's high/low reaches the level; live
+    does the same even if the price has come back by the next check."""
+    from data import alpaca_stream, kalshi_15m_setup
+    _open_setup_position(monkeypatch)
+    opened = dt.datetime.fromisoformat(kalshi_15m_strategy._load_state()["positions"][0]["opened_at"]).timestamp()  # noqa: SLF001
+    now = int(kalshi_15m_strategy.time.time())
+    monkeypatch.setattr(kalshi_15m_setup, "underlying_candles", lambda coin: pd.DataFrame({
+        "ts": [int(opened) - 60, int(opened) + 60, now], "open": [66100.0] * 3, "high": [66150.0, 66120.0, 66110.0],
+        "low": [66050.0, 65880.0, 66090.0], "close": [66100.0, 66090.0, 66100.0], "volume": [1.0] * 3}))
+    monkeypatch.setattr(alpaca_stream, "_streams", {})
+    kalshi_15m_strategy.manage_open_positions(dry_run=True)
+    trade = kalshi_15m_strategy._load_state()["trade_log"][-1]  # noqa: SLF001
+    assert trade["exit_reason"].startswith("stop_loss")
+
+
+def test_setup_position_reads_the_live_alpaca_tick(setup_mode, monkeypatch):
+    from data import kalshi_15m_setup
+    _open_setup_position(monkeypatch)
+    _underlying(monkeypatch, 66100.0)
+    monkeypatch.setattr(kalshi_15m_setup, "live_price", lambda coin: {"price": 66420.0, "kind": "quote_mid", "age_sec": 0.5})
+    result = kalshi_15m_strategy.manage_open_positions(dry_run=True)
+    assert result["checks"][0]["reason"].startswith("take_profit") and result["checks"][0]["price_source"] == "live quote_mid"

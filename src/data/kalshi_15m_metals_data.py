@@ -1,4 +1,12 @@
-"""Data pipeline for Kalshi's 15-minute GOLD/SILVER/COPPER/PLATINUM/PALLADIUM
+"""PRICE SOURCE (Oct 2026, user: "use alpaca data on all of my bot"): Alpaca
+only -- consolidated (SIP) 1-minute bars of each commodity's ETF (kalshi_15m_
+setup.METAL_CHART_SYMBOL: GLD, SLV, CPER, PPLT, PALL, USO, UNG), live from
+the Alpaca stream, history from Alpaca's REST bars. The ETF series is kept
+under its own paths (price_history_alpaca/) so it never splices into the
+earlier futures-priced history. The notes below describe the earlier
+sources and why they were replaced.
+
+Data pipeline for Kalshi's 15-minute GOLD/SILVER/COPPER/PLATINUM/PALLADIUM
 markets (KXGOLD15M/KXSILVER15M/KXCOPPER15M/KXPLATINUM15M/KXPALLADIUM15M --
 see kalshi_15m.py's own module docstring for the product; platinum/
 palladium added once gold-api.com was confirmed live to also serve those
@@ -87,11 +95,11 @@ import gc
 import logging
 import os
 import re
+import time
 from typing import Any
 
 import numpy as np
 import pandas as pd
-import requests
 
 from data.crypto_news import get_generic_sentiment
 from server_common import DATA_DIR
@@ -164,54 +172,38 @@ METALS_FEATURE_COLUMNS = [
 
 
 def get_universe() -> list[str]:
-    return list(YAHOO_FUTURES_SYMBOL.keys())
+    return list(ETF_SYMBOL)
 
 
-# Real, free, no-key historical minute-bar source -- found and live-
-# verified this session, closing the gap this module's own top docstring
-# used to claim had no fix. See that docstring for the full evidence
-# (gold-api.com's own /history needs a paid key; Yahoo Finance's public
-# chart API doesn't) and the 2 real API constraints backfill_minute_history
-# below respects.
-YAHOO_FUTURES_SYMBOL = {
-    "GOLD": "GC=F", "SILVER": "SI=F", "COPPER": "HG=F", "PLATINUM": "PL=F", "PALLADIUM": "PA=F",
-}
-_YAHOO_CHART_BASE_URL = "https://query1.finance.yahoo.com/v8/finance/chart"
-_YAHOO_MAX_1M_DAYS_PER_REQUEST = 7  # real limit confirmed live at 8 -- kept a day under as a safety margin against boundary rounding
-_YAHOO_MAX_1M_LOOKBACK_DAYS = 29  # real limit confirmed live at 30 -- same safety margin
+def _etf_symbols() -> dict[str, str]:
+    from data import kalshi_15m_setup
+    return {k: v for k, v in kalshi_15m_setup.METAL_CHART_SYMBOL.items() if k != "BRENT"}
 
 
-def _fetch_yahoo_1m_chunk(symbol: str, start_ts: int, end_ts: int) -> pd.DataFrame:
-    """One real HTTP call to Yahoo Finance's public chart API -- no key,
-    no auth, confirmed live for all 5 of this module's own futures
-    symbols. Returns a DataFrame with real "ts"/"close" columns (empty on
-    any failure -- never raises, matching every other real-data fetch in
-    this module)."""
+ETF_SYMBOL = _etf_symbols()
+_MAX_DAYS_PER_REQUEST = 7
+_MAX_BACKFILL_DAYS = 365
+
+
+def _fetch_alpaca_1m_chunk(symbol: str, start_ts: int, end_ts: int) -> pd.DataFrame:
+    """The ETF's SIP 1-minute bars in [start_ts, end_ts) from Alpaca: "ts"
+    (bar start) and "close". Empty on any failure -- never raises."""
+    from data import alpaca_client
+    iso = lambda t: dt.datetime.fromtimestamp(int(t), dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")  # noqa: E731
     try:
-        resp = requests.get(
-            f"{_YAHOO_CHART_BASE_URL}/{symbol}",
-            params={"interval": "1m", "period1": start_ts, "period2": end_ts},
-            headers={"User-Agent": "Mozilla/5.0"}, timeout=EXTERNAL_PRICE_API_TIMEOUT_SEC,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        result = (data.get("chart") or {}).get("result") or []
-        if not result:
-            return pd.DataFrame()
-        ts = result[0].get("timestamp") or []
-        quote = ((result[0].get("indicators") or {}).get("quote") or [{}])[0]
-        closes = quote.get("close") or []
-        if not ts or not closes:
-            return pd.DataFrame()
-        df = pd.DataFrame({"ts": ts, "close": closes}).dropna()
-        df["ts"] = df["ts"].astype(int)
-        return df
+        rows = alpaca_client.get_bars([symbol], timeframe="1Min", start=iso(start_ts), end=iso(end_ts), feed="sip").get(symbol) or []
     except Exception as exc:
-        logger.warning("[kalshi_15m_metals_data] Yahoo Finance chunk fetch failed for %s: %s", symbol, exc)
+        logger.warning("[kalshi_15m_metals_data] Alpaca SIP fetch failed for %s: %s", symbol, exc)
         return pd.DataFrame()
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows)
+    out = pd.DataFrame({"ts": ((pd.to_datetime(df["t"], utc=True) - pd.Timestamp("1970-01-01", tz="UTC"))
+                               // pd.Timedelta(seconds=1)).astype(int), "close": df["c"].astype(float)})
+    return out.dropna()
 
 
-def backfill_minute_history(metals: list[str] | None = None, *, days: int = _YAHOO_MAX_1M_LOOKBACK_DAYS) -> dict[str, Any]:
+def backfill_minute_history(metals: list[str] | None = None, *, days: int = 29) -> dict[str, Any]:
     """Deep historical backfill -- the live collector
     (_run_kalshi_15m_metals_data_collect) only ever archives what it
     observes going forward, so without this the archive
@@ -220,17 +212,16 @@ def backfill_minute_history(metals: list[str] | None = None, *, days: int = _YAH
     gap kalshi_15m_data.backfill_minute_history/
     alpaca_crypto_data.backfill_minute_history were each built to close
     for their own markets. See this module's own top docstring for the
-    real source (Yahoo Finance futures) and its 2 real, confirmed
-    constraints (`days` is silently capped at _YAHOO_MAX_1M_LOOKBACK_DAYS,
-    the real total-retention limit; requests are chunked at
-    _YAHOO_MAX_1M_DAYS_PER_REQUEST, the real per-request limit).
+    real source (Alpaca SIP bars of each commodity's ETF; requests are
+    chunked at _MAX_DAYS_PER_REQUEST days, `days` capped at
+    _MAX_BACKFILL_DAYS).
 
     Historical news sentiment for arbitrary past dates isn't available
     from any free API -- held at neutral (0.0) for every backfilled row,
     same disclosed limitation as every sibling module's own backfill."""
     if not HF_API_KEY:
         return {"ok": False, "reason": "no_hf_api_key"}
-    days = min(days, _YAHOO_MAX_1M_LOOKBACK_DAYS)
+    days = min(days, _MAX_BACKFILL_DAYS)
 
     target_metals = metals if metals is not None else get_universe()
     now = int(dt.datetime.now(dt.timezone.utc).timestamp())
@@ -239,15 +230,15 @@ def backfill_minute_history(metals: list[str] | None = None, *, days: int = _YAH
     by_date: dict[str, list[pd.DataFrame]] = {}
     metals_processed = 0
     for metal in target_metals:
-        symbol = YAHOO_FUTURES_SYMBOL.get(metal)
+        symbol = ETF_SYMBOL.get(metal)
         if not symbol:
             continue
         try:
             chunks = []
             chunk_start = window_start
             while chunk_start < now:
-                chunk_end = min(chunk_start + _YAHOO_MAX_1M_DAYS_PER_REQUEST * 86400, now)
-                chunk_df = _fetch_yahoo_1m_chunk(symbol, chunk_start, chunk_end)
+                chunk_end = min(chunk_start + _MAX_DAYS_PER_REQUEST * 86400, now)
+                chunk_df = _fetch_alpaca_1m_chunk(symbol, chunk_start, chunk_end)
                 if not chunk_df.empty:
                     chunks.append(chunk_df)
                 chunk_start = chunk_end
@@ -316,58 +307,30 @@ def backfill_minute_history(metals: list[str] | None = None, *, days: int = _YAH
 
 
 def fetch_latest_price(metal: str) -> dict[str, Any] | None:
-    """One real, current price -- {"price": float, "ts": int} or None on
-    any failure (network error, unexpected symbol, malformed response).
-    Never raises -- a missing point this cycle just means the rolling
-    history has one fewer row, not a hard failure.
-
-    Yahoo Finance futures (the SAME real source backfill_minute_history
-    uses for historical data) -- switched from gold-api.com's own spot
-    price after a real, live-confirmed finding: at the exact same moment,
-    gold-api.com's spot price and Yahoo's own futures price differed by
-    $28.50 on gold (0.67%) -- a real, persistent spot/futures basis, not
-    noise. Splicing spot (live-collected) and futures (backfilled) data
-    into one training archive baked a fake, non-market price jump into
-    every return-based feature at that splice boundary -- a real, concrete
-    explanation for why a 4.3x-bigger archive didn't move walk-forward
-    accuracy off ~50%. One consistent real source for both historical and
-    live data eliminates that artifact at the root, per explicit user
-    direction after this finding: "we need different data source that
-    actually works and provide data reliably.\""""
-    symbol = YAHOO_FUTURES_SYMBOL.get(metal)
+    """The ETF's current price from Alpaca -- {"price", "ts"} or None: the
+    stream's last trade when fresh, else the last SIP 1-minute bar of the
+    past day. Never raises."""
+    from data import alpaca_stream
+    symbol = ETF_SYMBOL.get(metal)
     if not symbol:
         return None
-    try:
-        resp = requests.get(
-            f"{_YAHOO_CHART_BASE_URL}/{symbol}",
-            params={"interval": "1m", "range": "1d"},
-            headers={"User-Agent": "Mozilla/5.0"}, timeout=EXTERNAL_PRICE_API_TIMEOUT_SEC,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        result = (data.get("chart") or {}).get("result") or []
-        if not result:
-            return None
-        ts_list = result[0].get("timestamp") or []
-        quote = ((result[0].get("indicators") or {}).get("quote") or [{}])[0]
-        closes = quote.get("close") or []
-        # Walk backward for the most recent REAL (non-null) close -- a
-        # live symbol's own last bar is sometimes still-forming/null.
-        for i in range(len(closes) - 1, -1, -1):
-            if closes[i] is not None and ts_list[i] is not None:
-                return {"price": float(closes[i]), "ts": int(ts_list[i])}
+    tick = alpaca_stream.latest_price("stocks", symbol, max_age_sec=60)
+    if tick:
+        return {"price": float(tick["price"]), "ts": int(tick["at"])}
+    now = int(time.time())
+    df = _fetch_alpaca_1m_chunk(symbol, now - 86400, now)
+    if df.empty:
         return None
-    except Exception as exc:
-        logger.warning("[kalshi_15m_metals_data] price fetch failed for %s: %s", metal, exc)
-        return None
+    last = df.sort_values("ts").iloc[-1]
+    return {"price": float(last["close"]), "ts": int(last["ts"])}
 
 
 def _price_history_path(metal: str):
-    return DATA_DIR / "kalshi_15m_metals_price_history" / f"{metal}.parquet"
+    return DATA_DIR / "kalshi_15m_metals_price_history_alpaca" / f"{metal}.parquet"
 
 
 def _price_history_hf_path_in_repo(metal: str) -> str:
-    return f"price_history/{metal}.parquet"
+    return f"price_history_alpaca/{metal}.parquet"
 
 
 def _restore_price_history_from_hf(metal: str) -> pd.DataFrame | None:
@@ -560,7 +523,7 @@ def collect_dataset_rows(metals: list[str] | None = None) -> pd.DataFrame:
             if point is None:
                 continue
             history = _append_price_point(metal, point["ts"], point["price"])
-            sentiment = get_generic_sentiment(METAL_TO_NEWS_QUERY[metal], cache_key=metal)
+            sentiment = get_generic_sentiment(metal, cache_key=metal)
             feats = engineer_metals_features(history, sentiment_score=sentiment["sentiment_score"])
             if feats.empty:
                 continue
@@ -583,10 +546,8 @@ def latest_feature_row(metal: str) -> dict[str, Any] | None:
     feature_row's own identical convention: a live PREDICTION should
     reflect sentiment as of right now, not whatever it was at the last
     collection tick."""
-    if metal not in METAL_TO_NEWS_QUERY:
-        return None  # a commodity this legacy model never covered (WTI, NATGAS)
     history = _load_price_history(metal)
-    sentiment = get_generic_sentiment(METAL_TO_NEWS_QUERY[metal], cache_key=metal)
+    sentiment = get_generic_sentiment(metal, cache_key=metal)
     feats_all = engineer_metals_features(history, sentiment_score=sentiment["sentiment_score"])
     if feats_all.empty:
         return None

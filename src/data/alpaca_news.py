@@ -37,6 +37,40 @@ COMMODITY_NEWS_SYMBOLS = {
     "PALLADIUM": ["PALL"], "WTI": ["USO", "XLE"], "NATGAS": ["UNG"], "BRENT": ["BNO"],
 }
 
+# Headline sentiment: the word lists the bots' news rules have always used
+# (crypto and stock wording together), scored per headline in [-1, 1].
+POSITIVE_WORDS = {
+    "surge", "rally", "bullish", "gain", "gains", "soar", "soars", "adopt", "adoption", "approve", "approval",
+    "partnership", "breakout", "record", "inflow", "inflows", "buy", "buying", "upgrade", "upgraded", "positive",
+    "recover", "recovery", "boom", "jump", "jumps", "rise", "rises", "rising", "milestone", "beat", "beats",
+    "outperform", "profit", "profits", "growth", "strong", "buyback",
+}
+NEGATIVE_WORDS = {
+    "crash", "crashes", "plunge", "plunges", "bearish", "hack", "hacked", "ban", "banned", "lawsuit", "dump", "dumps",
+    "sell-off", "selloff", "crackdown", "regulation", "regulatory", "fear", "loss", "losses", "outflow", "outflows",
+    "collapse", "liquidation", "liquidated", "scam", "fraud", "decline", "declines", "drop", "drops", "falling", "fell",
+    "fine", "investigation", "miss", "misses", "downgrade", "downgraded", "underperform", "layoffs", "layoff", "recall",
+    "weak", "cut", "cuts", "warning",
+}
+
+
+def score_headlines(headlines: list[str]) -> tuple[float, int]:
+    """(mean sentiment of the headlines that carry sentiment words, count of
+    all headlines); 0.0 when none carry any."""
+    import re
+    total, scored = 0.0, 0
+    for headline in headlines:
+        words = set(re.findall(r"[a-z]+", str(headline).lower()))
+        pos, neg = len(words & POSITIVE_WORDS), len(words & NEGATIVE_WORDS)
+        if pos == 0 and neg == 0:
+            continue
+        total += (pos - neg) / max(1, pos + neg)
+        scored += 1
+    if scored == 0:
+        return 0.0, len(headlines)
+    return max(-1.0, min(1.0, total / scored)), len(headlines)
+
+
 _lock = threading.Lock()
 _articles: dict[int, dict[str, Any]] = {}  # id -> article (stream and REST)
 _rest_cache: dict[str, float] = {}  # symbol-set key -> fetched at
@@ -71,9 +105,11 @@ def _store(article: dict[str, Any]) -> None:
     except (KeyError, TypeError, ValueError):
         return
     created = _parse_ts(article.get("created_at")) or time.time()
+    images = {str(i.get("size")): i.get("url") for i in article.get("images") or [] if isinstance(i, dict) and i.get("url")}
     row = {"id": aid, "headline": str(article.get("headline") or ""), "summary": str(article.get("summary") or ""),
            "symbols": [str(s).upper() for s in article.get("symbols") or []], "created_at": created,
-           "source": article.get("source") or "benzinga", "url": article.get("url")}
+           "source": article.get("source") or "benzinga", "url": article.get("url"),
+           "image_url": images.get("large") or images.get("small") or images.get("thumb") or next(iter(images.values()), None)}
     cutoff = time.time() - KEEP_HOURS * 3600
     with _lock:
         _articles[aid] = row
@@ -134,17 +170,38 @@ def articles(symbols: list[str], *, hours: float = DEFAULT_HOURS, now: float | N
 def sentiment(asset: str, *, hours: float = DEFAULT_HOURS, now: float | None = None) -> dict[str, Any]:
     """{"sentiment_score" in [-1, 1], "headline_volume", "symbols",
     "latest_headline"} for an asset (see news_symbols)."""
-    from data.crypto_news import _score_headlines
     symbols = news_symbols(asset)
     try:
         fetch(symbols, hours=hours)
     except Exception as exc:
         logger.debug("[alpaca_news] fetch failed for %s: %s", symbols, exc)
     rows = articles(symbols, hours=hours, now=now)
-    score, volume = _score_headlines([f"{a['headline']} {a['summary']}" for a in rows])
+    score, volume = score_headlines([f"{a['headline']} {a['summary']}" for a in rows])
     return {"sentiment_score": score if rows else 0.0, "headline_volume": volume, "symbols": symbols,
             "latest_headline": rows[0]["headline"] if rows else None, "source": "Alpaca news (Benzinga)",
             "computed_at": time.time()}
+
+
+def latest_story(symbols: list[str], *, hours: float = 12.0, exclude=None) -> dict[str, Any] | None:
+    """The lead story for a social post: among the last `hours` of articles
+    tagged with these tickers, the one tagged with the most of them (the
+    widest story), newest first, preferring one with an image; `exclude`
+    skips titles already posted. {"title", "link", "image_url", "source",
+    "secondary": [titles]} or None."""
+    try:
+        fetch(symbols, hours=hours)
+    except Exception as exc:
+        logger.debug("[alpaca_news] story fetch failed: %s", exc)
+    wanted = {s.upper() for s in symbols}
+    rows = articles(symbols, hours=hours)
+    rows = [a for a in rows if a["headline"] and not (exclude is not None and exclude(a["headline"]))]
+    if not rows:
+        return None
+    rows.sort(key=lambda a: (bool(a.get("image_url")), len(wanted & set(a["symbols"])), a["created_at"]), reverse=True)
+    lead = rows[0]
+    secondary = [a["headline"] for a in rows[1:] if a["headline"] != lead["headline"]][:3]
+    return {"title": lead["headline"], "link": lead.get("url") or "", "image_url": lead.get("image_url"),
+            "source": "Benzinga via Alpaca", "secondary": secondary}
 
 
 # ---------------------------------------------------------------------------

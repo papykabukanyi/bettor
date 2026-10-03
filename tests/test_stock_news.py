@@ -1,344 +1,50 @@
-"""Stock news sentiment -- the equities counterpart to test_crypto_news.py.
-Only one source (Google News RSS, free/unlimited), so this focuses on the
-company-name-based query construction (the one genuinely different piece
-from crypto_news.py, which uses a small hardcoded per-coin dict instead)
-plus the same keyword-scoring and per-symbol caching discipline."""
+"""stock_news: the same functions every caller uses, now Alpaca news only."""
 from __future__ import annotations
+
+import time
 
 import pytest
 
-from data import stock_news as news
+from data import alpaca_client, alpaca_news, stock_news
 
 
-def test_clean_company_query_strips_common_stock_suffix():
-    query = news._clean_company_query("AAPL", "Apple Inc. Common Stock")  # noqa: SLF001
-    assert "common stock" not in query.lower()
-    assert "apple" in query.lower()
-    assert query.endswith("stock")
+@pytest.fixture(autouse=True)
+def _isolated(monkeypatch):
+    monkeypatch.setattr(alpaca_news, "_articles", {})
+    monkeypatch.setattr(alpaca_news, "_rest_cache", {})
+    monkeypatch.setattr(stock_news, "_cache", {})
+    monkeypatch.setattr(alpaca_client, "is_configured", lambda: False)
 
 
-def test_clean_company_query_strips_corp_and_class_suffixes():
-    query = news._clean_company_query("GOOGL", "Alphabet Inc. Class A Common Stock")  # noqa: SLF001
-    assert "class a" not in query.lower()
-    assert "alphabet" in query.lower()
+def _store(aid, headline, symbols, minutes_ago=5):
+    created = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - minutes_ago * 60))
+    alpaca_news._store({"id": aid, "headline": headline, "summary": "", "symbols": symbols, "created_at": created})  # noqa: SLF001
 
 
-def test_clean_company_query_falls_back_to_ticker_without_a_company_name():
-    query = news._clean_company_query("AAPL", None)  # noqa: SLF001
-    assert query == "AAPL stock"
+def test_symbol_sentiment_reads_alpaca_news_for_the_ticker():
+    _store(1, "Apple misses estimates, shares drop", ["AAPL"])
+    s = stock_news.get_sentiment("aapl", company_name="Apple Inc.")
+    assert s["symbol"] == "AAPL" and s["sentiment_score"] < 0 and s["headline_volume"] == 1
+    assert stock_news.get_sentiment("MSFT")["sentiment_score"] == 0.0
 
 
-def test_clean_company_query_falls_back_to_ticker_when_name_is_only_boilerplate():
-    query = news._clean_company_query("XYZ", "Inc. Common Stock")  # noqa: SLF001
-    assert query == "XYZ stock"
+def test_prewarm_is_one_bulk_alpaca_pull(monkeypatch):
+    seen = []
+    monkeypatch.setattr(alpaca_news, "prefetch", lambda assets: seen.append(list(assets)))
+    stock_news.prewarm_sentiment([("AAPL", "Apple"), ("NVDA", None)])
+    assert seen == [["AAPL", "NVDA"]]
 
 
-def test_score_headlines_positive_and_negative_words():
-    score, volume = news._score_headlines(["Stock surges to record high after earnings beat"])  # noqa: SLF001
-    assert score > 0
-    assert volume == 1
+def test_trending_story_reads_market_news_or_one_ticker():
+    _store(2, "Stocks rally as Nvidia beats", ["NVDA", "SPY"])
+    _store(3, "Tesla recall widens", ["TSLA"], minutes_ago=1)
+    assert stock_news.get_trending_story()["title"] == "Stocks rally as Nvidia beats"
+    assert stock_news.get_trending_story(query="TSLA")["title"] == "Tesla recall widens"
+    assert stock_news.get_trending_story(query="stock market")["title"] == "Stocks rally as Nvidia beats"
 
 
-def test_score_headlines_negative():
-    score, volume = news._score_headlines(["Shares plunge after guidance cut and lawsuit filed"])  # noqa: SLF001
-    assert score < 0
-
-
-def test_score_headlines_neutral_when_no_scored_words_match():
-    score, volume = news._score_headlines(["Company announces quarterly meeting date"])  # noqa: SLF001
-    assert score == 0.0
-    assert volume == 1
-
-
-def test_score_headlines_empty_list():
-    score, volume = news._score_headlines([])  # noqa: SLF001
-    assert score == 0.0
-    assert volume == 0
-
-
-def test_fetch_google_news_rss_returns_empty_on_failure(monkeypatch):
-    monkeypatch.setattr(news, "_google_news_rss_cooldown_until", 0.0)
-
-    def fail(*a, **k):
-        raise RuntimeError("network down")
-
-    monkeypatch.setattr(news.requests, "get", fail)
-    assert news._fetch_google_news_rss("Apple stock") == []  # noqa: SLF001
-
-
-def test_fetch_google_news_rss_enters_cooldown_after_a_503_and_stops_calling(monkeypatch):
-    """Confirmed live: 70+ consecutive 503s over 90 minutes on options
-    (one per watchlist symbol per cycle), every one silently caught and
-    retried next cycle anyway before this fix -- a cooldown must make it
-    stop calling the network at all for a while."""
-    monkeypatch.setattr(news, "_google_news_rss_cooldown_until", 0.0)
-    calls = {"n": 0}
-
-    class _UnavailableResponse:
-        status_code = 503
-
-    def fake_get(*a, **k):
-        calls["n"] += 1
-        return _UnavailableResponse()
-
-    monkeypatch.setattr(news.requests, "get", fake_get)
-    assert news._fetch_google_news_rss("Apple stock") == []  # noqa: SLF001
-    assert calls["n"] == 1
-
-    # Immediately after: still in cooldown, must NOT call the network again.
-    assert news._fetch_google_news_rss("Microsoft stock") == []  # noqa: SLF001
-    assert calls["n"] == 1
-
-
-def test_fetch_google_news_rss_items_also_respects_the_cooldown(monkeypatch):
-    """Same endpoint, same failure mode -- the cooldown set by one fetcher
-    must also stop the OTHER fetcher from calling the network."""
-    monkeypatch.setattr(news, "_google_news_rss_cooldown_until", 0.0)
-    calls = {"n": 0}
-
-    class _UnavailableResponse:
-        status_code = 503
-
-    def fake_get(*a, **k):
-        calls["n"] += 1
-        return _UnavailableResponse()
-
-    monkeypatch.setattr(news.requests, "get", fake_get)
-    assert news._fetch_google_news_rss("Apple stock") == []  # noqa: SLF001
-    assert calls["n"] == 1
-
-    assert news._fetch_google_news_rss_items("Apple stock") == []  # noqa: SLF001
-    assert calls["n"] == 1
-
-
-def test_fetch_google_news_rss_calls_again_once_cooldown_expires(monkeypatch):
-    monkeypatch.setattr(news, "_google_news_rss_cooldown_until", news.time.time() - 1)  # already expired
-
-    class FakeResponse:
-        status_code = 200
-        content = b"<rss><channel></channel></rss>"
-
-        def raise_for_status(self):
-            pass
-
-    calls = {"n": 0}
-
-    def fake_get(*a, **k):
-        calls["n"] += 1
-        return FakeResponse()
-
-    monkeypatch.setattr(news.requests, "get", fake_get)
-    assert news._fetch_google_news_rss("Apple stock") == []  # noqa: SLF001
-    assert calls["n"] == 1
-
-
-@pytest.fixture
-def _isolated_sentiment_cache(monkeypatch):
-    monkeypatch.setattr(news, "_cache", {})
-    yield
-
-
-def test_get_sentiment_uses_the_company_name_in_its_query(monkeypatch, _isolated_sentiment_cache):
-    captured = {}
-
-    def fake_fetch(query):
-        captured["query"] = query
-        return ["Apple surges on strong iPhone sales"]
-
-    monkeypatch.setattr(news, "_fetch_google_news_rss", fake_fetch)
-    result = news.get_sentiment("AAPL", company_name="Apple Inc. Common Stock")
-    assert "apple" in captured["query"].lower()
-    assert result["symbol"] == "AAPL"
-    assert result["sentiment_score"] > 0
-
-
-def test_get_sentiment_falls_back_to_ticker_without_a_company_name(monkeypatch, _isolated_sentiment_cache):
-    captured = {}
-
-    def fake_fetch(query):
-        captured["query"] = query
-        return []
-
-    monkeypatch.setattr(news, "_fetch_google_news_rss", fake_fetch)
-    news.get_sentiment("MSFT")
-    assert captured["query"] == "MSFT stock"
-
-
-def test_get_sentiment_is_cached_within_the_ttl(monkeypatch, _isolated_sentiment_cache):
-    calls = {"n": 0}
-
-    def fake_fetch(query):
-        calls["n"] += 1
-        return ["some headline"]
-
-    monkeypatch.setattr(news, "_fetch_google_news_rss", fake_fetch)
-    first = news.get_sentiment("AAPL", company_name="Apple Inc.")
-    second = news.get_sentiment("AAPL", company_name="Apple Inc.")
-    assert first == second
-    assert calls["n"] == 1
-
-
-def test_prewarm_sentiment_populates_the_cache_for_every_symbol(monkeypatch, _isolated_sentiment_cache):
-    """Real, confirmed fix (same root cause as crypto_news.prewarm_sentiment,
-    see its own docstring): a sequential per-symbol sentiment fetch across a
-    watchlist is slow enough to risk delaying the separate exit-management
-    job on the shared single-threaded worker. After prewarming, a normal
-    get_sentiment() call for any of those symbols must be a cache hit."""
-    monkeypatch.setattr(news, "_fetch_google_news_rss", lambda query: [])
-    news.prewarm_sentiment([("AAPL", "Apple Inc."), ("MSFT", "Microsoft Corp.")])
-    assert set(news._cache.keys()) == {"AAPL", "MSFT"}  # noqa: SLF001
-
-
-def test_prewarm_sentiment_dedupes_and_ignores_empty_symbols(monkeypatch, _isolated_sentiment_cache):
-    calls = []
-    monkeypatch.setattr(news, "get_sentiment", lambda symbol, **kw: calls.append(symbol) or {"symbol": symbol})
-    news.prewarm_sentiment([("AAPL", "Apple Inc."), ("AAPL", "Apple Inc."), ("", None), (None, None), ("MSFT", None)])
-    assert sorted(calls) == ["AAPL", "MSFT"]
-
-
-def test_prewarm_sentiment_is_a_no_op_for_an_empty_list(monkeypatch, _isolated_sentiment_cache):
-    def fail_if_called(*a, **k):
-        raise AssertionError("must not call get_sentiment for an empty list")
-
-    monkeypatch.setattr(news, "get_sentiment", fail_if_called)
-    news.prewarm_sentiment([])  # must not raise
-
-
-def test_prewarm_sentiment_never_raises_even_if_every_fetch_fails(monkeypatch, _isolated_sentiment_cache):
-    def raise_error(symbol, **kw):
-        raise RuntimeError("simulated network failure")
-
-    monkeypatch.setattr(news, "get_sentiment", raise_error)
-    news.prewarm_sentiment([("AAPL", None), ("MSFT", None)])  # must not raise -- best-effort only
-
-
-@pytest.fixture
-def _isolated_trending_cache(monkeypatch):
-    monkeypatch.setattr(news, "_trending_cache", None)
-    yield
-
-
-def test_get_trending_headlines_queries_the_general_market(monkeypatch, _isolated_trending_cache):
-    captured = {}
-
-    def fake_fetch(query):
-        captured["query"] = query
-        return ["Market rallies broadly", "Fed signals rate cuts", "Tech leads gains", "extra", "another", "one more"]
-
-    monkeypatch.setattr(news, "_fetch_google_news_rss", fake_fetch)
-    headlines = news.get_trending_headlines(limit=3)
-    assert captured["query"] == news._TRENDING_QUERY  # noqa: SLF001
-    assert len(headlines) == 3
-
-
-def test_get_trending_headlines_is_cached_within_the_ttl(monkeypatch, _isolated_trending_cache):
-    calls = {"n": 0}
-
-    def fake_fetch(query):
-        calls["n"] += 1
-        return ["headline"]
-
-    monkeypatch.setattr(news, "_fetch_google_news_rss", fake_fetch)
-    news.get_trending_headlines()
-    news.get_trending_headlines()
-    assert calls["n"] == 1
-
-
-def test_get_trending_headlines_does_not_cache_a_transient_empty_failure(monkeypatch, _isolated_trending_cache):
-    monkeypatch.setattr(news, "_fetch_google_news_rss", lambda query: [])
-    result = news.get_trending_headlines()
-    assert result == []
-    assert news._trending_cache is None  # noqa: SLF001
-
-
-@pytest.fixture
-def _isolated_trending_story_cache(monkeypatch):
-    monkeypatch.setattr(news, "_trending_story_cache", None)
-    yield
-
-
-def test_get_trending_story_uses_the_top_result_as_the_lead(monkeypatch, _isolated_trending_story_cache):
-    """Google News' own relevance ranking already puts its best-covered
-    story first for a broad query -- the top result IS the popularity
-    signal here, unlike crypto's own cross-outlet corroboration."""
-    items = [
-        {"title": "S&P 500 hits record high - cnbc.com", "link": "https://news.google.com/a", "source": "cnbc.com"},
-        {"title": "Bond yields tick up - ft.com", "link": "https://news.google.com/b", "source": "ft.com"},
-        {"title": "Tech earnings beat expectations - barrons.com", "link": "https://news.google.com/c", "source": "barrons.com"},
-    ]
-    monkeypatch.setattr(news, "_fetch_google_news_rss_items", lambda query, limit=10: items)
-    story = news.get_trending_story()
-    assert story is not None
-    assert story["title"] == "S&P 500 hits record high - cnbc.com"
-    assert story["source"] == "cnbc.com"
-    assert story["image_url"] is None
-    assert story["secondary"] == ["Bond yields tick up - ft.com", "Tech earnings beat expectations - barrons.com"]
-
-
-def test_get_trending_story_returns_none_when_the_feed_fails(monkeypatch, _isolated_trending_story_cache):
-    monkeypatch.setattr(news, "_fetch_google_news_rss_items", lambda query, limit=10: [])
-    assert news.get_trending_story() is None
-
-
-def test_get_trending_story_is_cached_within_the_ttl(monkeypatch, _isolated_trending_story_cache):
-    calls = {"n": 0}
-
-    def fake_fetch(query, limit=10):
-        calls["n"] += 1
-        return [{"title": "headline", "link": "https://news.google.com/a", "source": "cnbc.com"}]
-
-    monkeypatch.setattr(news, "_fetch_google_news_rss_items", fake_fetch)
-    news.get_trending_story()
-    news.get_trending_story()
-    assert calls["n"] == 1
-
-
-def test_get_trending_story_skips_excluded_items_and_picks_the_next_fresh_one(monkeypatch, _isolated_trending_story_cache):
-    """Real, confirmed bug this closes: the old version always took
-    items[0] as the lead and gave up entirely if it happened to be a
-    recent duplicate -- even when items[1]/items[2] held a genuinely
-    fresh, unposted story one line down. `exclude` lets the caller walk
-    past a stale top result instead of surfacing it (and then falling all
-    the way through to the "nothing notable" filler) every single cycle
-    the market's top headline doesn't change."""
-    items = [
-        {"title": "S&P 500 hits record high - cnbc.com", "link": "https://news.google.com/a", "source": "cnbc.com"},
-        {"title": "Bond yields tick up - ft.com", "link": "https://news.google.com/b", "source": "ft.com"},
-        {"title": "Tech earnings beat expectations - barrons.com", "link": "https://news.google.com/c", "source": "barrons.com"},
-    ]
-    monkeypatch.setattr(news, "_fetch_google_news_rss_items", lambda query, limit=10: items)
-    story = news.get_trending_story(exclude=lambda title: title == "S&P 500 hits record high - cnbc.com")
-    assert story is not None
-    assert story["title"] == "Bond yields tick up - ft.com"
-    assert story["source"] == "ft.com"
-
-
-def test_get_trending_story_returns_none_when_every_item_is_excluded(monkeypatch, _isolated_trending_story_cache):
-    items = [
-        {"title": "S&P 500 hits record high - cnbc.com", "link": "https://news.google.com/a", "source": "cnbc.com"},
-        {"title": "Bond yields tick up - ft.com", "link": "https://news.google.com/b", "source": "ft.com"},
-    ]
-    monkeypatch.setattr(news, "_fetch_google_news_rss_items", lambda query, limit=10: items)
-    assert news.get_trending_story(exclude=lambda title: True) is None
-
-
-def test_current_trending_query_rotates_across_cache_windows(monkeypatch):
-    monkeypatch.setattr(news.time, "time", lambda: 0.0)
-    first = news._current_trending_query()  # noqa: SLF001
-    monkeypatch.setattr(news.time, "time", lambda: news._TRENDING_CACHE_TTL_SEC * 3.0)  # noqa: SLF001
-    third_window = news._current_trending_query()  # noqa: SLF001
-    assert first == news._TRENDING_QUERIES[0]  # noqa: SLF001
-    assert third_window == news._TRENDING_QUERIES[3 % len(news._TRENDING_QUERIES)]  # noqa: SLF001
-
-
-def test_get_trending_story_defaults_to_the_rotating_query_when_none_given(monkeypatch, _isolated_trending_story_cache):
-    monkeypatch.setattr(news, "_current_trending_query", lambda: "earnings report stocks")
-    captured = {}
-
-    def fake_fetch(query, limit=10):
-        captured["query"] = query
-        return [{"title": "headline", "link": "https://news.google.com/a", "source": "cnbc.com"}]
-
-    monkeypatch.setattr(news, "_fetch_google_news_rss_items", fake_fetch)
-    news.get_trending_story()
-    assert captured["query"] == "earnings report stocks"
+def test_no_other_news_source_is_left():
+    import inspect
+    src = inspect.getsource(stock_news).lower()
+    for host in ("google", "serpapi", "newsapi", "rss"):
+        assert host not in src
