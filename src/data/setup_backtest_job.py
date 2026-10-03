@@ -223,6 +223,165 @@ def run_crypto(days: int) -> dict[str, Any]:
     return {"universe": symbols, "fee_rate_roundtrip": fee, **_both(go)}
 
 
+# ---------------------------------------------------------------------------
+# Multi-year study (stocks/options): every symbol over the whole SIP archive
+# ---------------------------------------------------------------------------
+MULTIYEAR_WORKERS = int(os.getenv("SETUP_MULTIYEAR_WORKERS", "5") or "5")
+ELIGIBILITY_MIN_TRADES = int(os.getenv("SETUP_ELIGIBILITY_MIN_TRADES", "6") or "6")
+ELIGIBILITY_LOOKBACK_YEARS = int(os.getenv("SETUP_ELIGIBILITY_LOOKBACK_YEARS", "2") or "2")
+MULTIYEAR = {
+    "stocks": {"module": "alpaca_setup", "sides": ("long",)},
+    "options": {"module": "alpaca_options_setup", "sides": ("long", "short")},
+}
+
+
+def _multiyear_symbol(args: tuple[str, str, tuple[str, ...]]) -> pd.DataFrame:
+    """One symbol's full-archive replay through its bot's own module."""
+    sym, module, sides = args
+    try:
+        os.nice(15)
+    except (AttributeError, OSError):
+        pass
+    import importlib
+
+    from data import alpaca_sip_history
+    m = importlib.import_module(f"data.{module}")
+    bars = alpaca_sip_history.load(sym)
+    if bars.empty:
+        return pd.DataFrame()
+    lead_sym = m.leader_for(sym)
+    lead = alpaca_sip_history.load(lead_sym)
+    t = m.replay(m.regular_session_candles(bars), sides=sides, fee_rate_roundtrip=0.0, spread_bps=m.SPREAD_BPS,
+                 entry_allowed=m.entry_allowed, force_exit=m.must_be_flat,
+                 leader_df=m.regular_session_candles(lead) if not lead.empty else None, leader_symbol=lead_sym)
+    return t.assign(symbol=sym) if not t.empty else t
+
+
+def _trade_stats(x: pd.Series) -> dict[str, Any]:
+    x = pd.Series(x, dtype=float)
+    if x.empty:
+        return {"trades": 0}
+    t = x.mean() / (x.std(ddof=1) / np.sqrt(len(x))) if len(x) > 2 and x.std(ddof=1) > 0 else None
+    return {"trades": int(len(x)), "win_rate": round(float((x > 0).mean()), 4), "avg": round(float(x.mean()), 6),
+            "total": round(float(x.sum()), 4), "t_stat": None if t is None else round(float(t), 2)}
+
+
+def walk_forward_eligibility(trades: pd.DataFrame, *, min_trades: int = ELIGIBILITY_MIN_TRADES,
+                             lookback_years: int = ELIGIBILITY_LOOKBACK_YEARS) -> dict[str, Any]:
+    """Each year, trade only symbols whose setup made money (>= min_trades,
+    average net return > 0) over the prior `lookback_years`; score that on
+    the year itself, which the selection never saw. Returns the per-year
+    record, the out-of-sample total vs trading every symbol, today's
+    eligible list, and whether the evidence supports enforcing it."""
+    t = trades.copy()
+    t["year"] = pd.to_datetime(t["entry_ts"], unit="s", utc=True).dt.year
+    years, picked_frames = [], []
+    for y in range(int(t["year"].min()) + lookback_years, int(t["year"].max()) + 1):
+        train = t[(t["year"] >= y - lookback_years) & (t["year"] < y)]
+        per = train.groupby("symbol")["net_return"].agg(["size", "mean"])
+        eligible = set(per[(per["size"] >= min_trades) & (per["mean"] > 0)].index)
+        test = t[t["year"] == y]
+        picked = test[test["symbol"].isin(eligible)]
+        picked_frames.append(picked)
+        years.append({"year": y, "eligible": len(eligible), "picked": _trade_stats(picked["net_return"]),
+                      "all": _trade_stats(test["net_return"])})
+    picked_all = pd.concat(picked_frames, ignore_index=True) if picked_frames else pd.DataFrame(columns=["net_return"])
+    first_test = int(t["year"].min()) + lookback_years
+    every = t[t["year"] >= first_test]
+    oos, base = _trade_stats(picked_all["net_return"]), _trade_stats(every["net_return"])
+    positive_years = sum(1 for y in years if (y["picked"].get("avg") or 0) > 0)
+    latest_year = int(t["year"].max())
+    recent = t[t["year"] > latest_year - lookback_years]
+    per = recent.groupby("symbol")["net_return"].agg(["size", "mean"])
+    current = sorted(per[(per["size"] >= min_trades) & (per["mean"] > 0)].index)
+    enforce = bool(oos.get("trades", 0) >= 30 and (oos.get("avg") or 0) > 0 and (oos.get("avg") or 0) > (base.get("avg") or 0)
+                   and positive_years * 2 >= len(years))
+    return {"years": years, "out_of_sample": oos, "every_symbol": base, "positive_years": positive_years,
+            "test_years": len(years), "eligible_now": current, "enforce": enforce,
+            "rule": f">= {min_trades} trades and average net > 0 over the prior {lookback_years} years"}
+
+
+def run_multiyear(bot: str, *, publish: bool = True) -> dict[str, Any]:
+    from concurrent.futures import ProcessPoolExecutor
+
+    from data import alpaca_data, alpaca_options_data
+    cfg = MULTIYEAR[bot]
+    symbols = (sorted(set(alpaca_data.BROAD_CANDIDATE_UNIVERSE) | {"SPY", "QQQ"}) if bot == "stocks"
+               else list(alpaca_options_data.OPTIONS_UNDERLYINGS))
+    started = time.time()
+    frames = []
+    with ProcessPoolExecutor(MULTIYEAR_WORKERS) as pool:
+        for t in pool.map(_multiyear_symbol, [(sym, cfg["module"], cfg["sides"]) for sym in symbols]):
+            if not t.empty:
+                frames.append(t)
+    trades = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    result: dict[str, Any] = {"ok": not trades.empty, "bot": bot, "symbols": len(symbols), "module": cfg["module"],
+                              "computed_at": dt.datetime.now(dt.timezone.utc).isoformat(), "seconds": round(time.time() - started)}
+    if not trades.empty:
+        result["all_trades"] = summarize(trades, "net_return")
+        result["walk_forward"] = walk_forward_eligibility(trades)
+    LOCAL_DIR.mkdir(parents=True, exist_ok=True)
+    (LOCAL_DIR / f"{bot}_multiyear.json").write_text(json.dumps(result, default=str), encoding="utf-8")
+    if not trades.empty:
+        trades.to_parquet(LOCAL_DIR / f"{bot}_multiyear_trades.parquet", index=False)
+    if publish and not trades.empty:
+        result["published"] = _publish_multiyear(bot, result)
+        (LOCAL_DIR / f"{bot}_multiyear.json").write_text(json.dumps(result, default=str), encoding="utf-8")
+    return result
+
+
+def _publish_multiyear(bot: str, result: dict[str, Any]) -> bool:
+    token = os.getenv("HF_API_KEY", "")
+    if not token:
+        return False
+    try:
+        from huggingface_hub import CommitOperationAdd, HfApi
+        wf = result.get("walk_forward") or {}
+        eligibility = {"enforce": wf.get("enforce", False), "symbols": wf.get("eligible_now", []), "rule": wf.get("rule"),
+                       "computed_at": result["computed_at"], "out_of_sample": wf.get("out_of_sample"),
+                       "every_symbol": wf.get("every_symbol")}
+        ops = [CommitOperationAdd("setup_strategy/multiyear/report.json", json.dumps(result, indent=2, default=str).encode()),
+               CommitOperationAdd("setup_strategy/multiyear/trades.parquet", str(LOCAL_DIR / f"{bot}_multiyear_trades.parquet")),
+               CommitOperationAdd("setup_strategy/eligibility.json", json.dumps(eligibility, indent=2).encode())]
+        HfApi(token=token).create_commit(repo_id=REPOS[bot], repo_type="model", operations=ops,
+                                         commit_message=f"{bot} multi-year setup study {result['computed_at'][:10]}")
+        return True
+    except Exception as exc:
+        logger.warning("[setup_backtest] multi-year publish failed for %s: %s", bot, exc)
+        return False
+
+
+_eligibility_cache: dict[str, tuple[float, dict[str, Any] | None]] = {}
+
+
+def eligibility(bot: str) -> dict[str, Any] | None:
+    """The bot's published symbol eligibility (cached an hour), or None."""
+    cached = _eligibility_cache.get(bot)
+    if cached and time.time() - cached[0] < 3600:
+        return cached[1]
+    data = None
+    local = LOCAL_DIR / f"{bot}_multiyear.json"
+    try:
+        body = json.loads(local.read_text(encoding="utf-8"))
+        wf = body.get("walk_forward") or {}
+        data = {"enforce": wf.get("enforce", False), "symbols": wf.get("eligible_now", []), "rule": wf.get("rule"),
+                "computed_at": body.get("computed_at")}
+    except Exception:
+        token = os.getenv("HF_API_KEY", "")
+        if token:
+            try:
+                from huggingface_hub import hf_hub_download
+
+                from server_common import call_with_hard_timeout
+                path = call_with_hard_timeout(lambda: hf_hub_download(REPOS[bot], "setup_strategy/eligibility.json",
+                                                                      repo_type="model", token=token), timeout_sec=10)
+                data = json.loads(Path(path).read_text(encoding="utf-8"))
+            except Exception:
+                data = None
+    _eligibility_cache[bot] = (time.time(), data)
+    return data
+
+
 RUNNERS = {"perps": run_perps, "kalshi15m": run_kalshi15m, "stocks": run_stocks, "crypto": run_crypto, "options": run_options}
 
 
@@ -328,7 +487,7 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     sys.path.insert(0, str(SRC_DIR))
     bot_arg = sys.argv[1]
-    out = run(bot_arg)
+    out = run_multiyear(bot_arg.removesuffix("_multiyear")) if bot_arg.endswith("_multiyear") else run(bot_arg)
     print(json.dumps({k: v for k, v in out.items() if k in ("ok", "bot", "seconds", "published", "error")}))
     try:
         (LOCAL_DIR / f"{bot_arg}.pid").unlink()

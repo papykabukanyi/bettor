@@ -677,6 +677,13 @@ def _ensure_background_jobs_started() -> None:
             # low-priority process, published to its HF model repo
             # (setup_backtest_job); once soon after a deploy if none exists.
             from data import setup_backtest_job
+            # Weekly multi-year study over the SIP archive (and once after a
+            # deploy if none is published yet): symbol eligibility.
+            scheduler.add_job(setup_backtest_job.launch, "cron", day_of_week="sat", hour=10, minute=0, args=["options_multiyear"],
+                              id="options_multiyear_study", replace_existing=True)
+            if setup_backtest_job.eligibility("options") is None:
+                scheduler.add_job(setup_backtest_job.launch, "date", args=["options_multiyear"], id="options_multiyear_startup",
+                                  run_date=dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=200), replace_existing=True)
             scheduler.add_job(setup_backtest_job.launch, "cron", hour=5, minute=10, args=["options"],
                               id="options_setup_backtest", replace_existing=True)
             if setup_backtest_job.latest("options") is None:

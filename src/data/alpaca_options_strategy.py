@@ -312,6 +312,18 @@ def evaluate_setup_candidate(symbol: str, *, traded_setup_ids: frozenset[str] = 
     from data import alpaca_options_setup
     from data.stock_news import get_sentiment
 
+    # Multi-year evidence (setup_backtest_job.run_multiyear on the SIP
+    # archive): when the walk-forward showed that trading only symbols with
+    # a profitable prior record beats trading all of them, the study turns
+    # this on and the bot skips the rest.
+    from data import setup_backtest_job
+    elig = setup_backtest_job.eligibility("options")
+    if elig and elig.get("enforce") and symbol not in set(elig.get("symbols") or []):
+        detail = f"no profitable multi-year record ({elig.get('rule')})"
+        return {"symbol": symbol, "entry_system": "setup", "should_enter": False, "score": 0.0, "model_ok": False,
+                "setup_valid": False, "setup_reason": "eligibility", "reason": f"not eligible: {detail}",
+                "setup_checks": {"data": {"ok": False, "detail": f"not eligible: {detail}"}}}
+
     try:
         news = get_sentiment(symbol).get("sentiment_score")
     except Exception as exc:

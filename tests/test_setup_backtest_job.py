@@ -98,3 +98,40 @@ def test_evidence_gate_opens_only_on_a_fresh_profitable_replay(monkeypatch, bt, 
 
 def test_no_bot_is_gated_by_default():
     assert job.EVIDENCE_GATE_BOTS == frozenset()
+
+
+def _multiyear_trades():
+    """Symbol A makes money every year, B loses every year, C is mixed."""
+    rows = []
+    for year in range(2016, 2026):
+        ts = int(pd.Timestamp(f"{year}-06-01", tz="UTC").timestamp())
+        for i in range(8):
+            rows.append({"symbol": "A", "entry_ts": ts + i, "net_return": 0.004 if i % 4 else -0.002})
+            rows.append({"symbol": "B", "entry_ts": ts + i, "net_return": -0.004 if i % 4 else 0.002})
+            rows.append({"symbol": "C", "entry_ts": ts + i, "net_return": 0.003 if (year + i) % 2 else -0.003})
+    return pd.DataFrame(rows)
+
+
+def test_walk_forward_eligibility_scores_only_unseen_years_and_enforces_when_it_helps():
+    wf = job.walk_forward_eligibility(_multiyear_trades(), min_trades=6, lookback_years=2)
+    assert wf["test_years"] == 8 and wf["years"][0]["year"] == 2018
+    assert "A" in wf["eligible_now"] and "B" not in wf["eligible_now"]
+    assert wf["out_of_sample"]["avg"] > wf["every_symbol"]["avg"] and wf["enforce"] is True
+
+
+def test_eligibility_stays_off_when_picking_does_not_beat_trading_everything():
+    t = _multiyear_trades()
+    t = t[t.symbol == "C"]  # past results say nothing about the next year
+    wf = job.walk_forward_eligibility(t, min_trades=6, lookback_years=2)
+    assert wf["enforce"] is False
+
+
+def test_an_enforced_eligibility_list_skips_other_stocks(monkeypatch):
+    from data import alpaca_setup, alpaca_strategy
+    monkeypatch.setattr(job, "eligibility", lambda bot: {"enforce": True, "symbols": ["NVDA"], "rule": "r"})
+    monkeypatch.setattr(alpaca_setup, "live_setup", lambda *a, **k: (_ for _ in ()).throw(AssertionError("not evaluated")))
+    c = alpaca_strategy.evaluate_setup_candidate("COST")
+    assert c["should_enter"] is False and c["setup_reason"] == "eligibility"
+    monkeypatch.setattr(job, "eligibility", lambda bot: {"enforce": False, "symbols": ["NVDA"], "rule": "r"})
+    monkeypatch.setattr(alpaca_setup, "live_setup", lambda *a, **k: {"valid": False, "reason": "trend", "checks": {}})
+    assert alpaca_strategy.evaluate_setup_candidate("COST")["setup_reason"] == "trend"
