@@ -823,10 +823,62 @@ def _run_setup_backtest(bot: str) -> dict[str, Any]:
     return result
 
 
+_archives_thread: threading.Thread | None = None
+
+
+def _alpaca_archives_backfill() -> None:
+    from data import alpaca_crypto_history, alpaca_news_history
+    try:
+        logger.info("[app_kalshi] Alpaca crypto archive backfill: %s", alpaca_crypto_history.backfill_missing())
+    except Exception as exc:
+        logger.warning("[app_kalshi] Alpaca crypto archive backfill failed: %s", exc)
+    try:
+        logger.info("[app_kalshi] Alpaca news archive backfill: %s", alpaca_news_history.backfill())
+    except Exception as exc:
+        logger.warning("[app_kalshi] Alpaca news archive backfill failed: %s", exc)
+    gc.collect()
+
+
+def _start_alpaca_archives_backfill() -> dict[str, Any]:
+    """Long, network-bound: its own daemon thread, never a scheduler worker."""
+    global _archives_thread
+    if _archives_thread is not None and _archives_thread.is_alive():
+        return {"ok": True, "action": "already_running"}
+    _archives_thread = threading.Thread(target=_alpaca_archives_backfill, daemon=True, name="alpaca-archives-backfill")
+    _archives_thread.start()
+    return {"ok": True, "action": "started"}
+
+
+def _run_alpaca_archives_append() -> dict[str, Any]:
+    from data import alpaca_crypto_history, alpaca_news_history
+    out: dict[str, Any] = {}
+    for name, fn in (("crypto", alpaca_crypto_history.append_recent), ("news", alpaca_news_history.append_recent)):
+        try:
+            out[name] = fn()
+        except Exception as exc:
+            out[name] = {"ok": False, "error": str(exc)}
+    gc.collect()
+    return out
+
+
+def _kalshi_market_data() -> dict[str, Any]:
+    """Where the Kalshi bots' charts, live prices and news come from: all
+    Alpaca (crypto on its Kraken US feed, commodities on SIP ETFs)."""
+    from data import alpaca_client, alpaca_news, alpaca_stream, kalshi_15m_setup
+    return {"source": "Alpaca", "crypto_venue": f"Kraken US via Alpaca ({alpaca_client.CHART_CRYPTO_LOC})",
+            "crypto_coins": sorted(kalshi_15m_spot.SPOT_PRODUCTS), "commodity_etfs": kalshi_15m_setup.METAL_CHART_SYMBOL,
+            "stock_feed": alpaca_client.DATA_FEED, "streams": alpaca_stream.status(), "news": alpaca_news.status()}
+
+
 def _ensure_edge_model_at_startup() -> None:
     try:
-        # Real history for any Coinbase product added since the archive began
-        # (e.g. DOT/HBAR/XLM/SHIB for the perps that had no chart).
+        # Once: the whole spot archive re-read from Alpaca (the bots' only
+        # chart source), so backtests and live charts read one source.
+        logger.info("[app_kalshi] spot archive rebuild from Alpaca: %s", kalshi_15m_spot.rebuild_from_alpaca())
+    except Exception as exc:
+        logger.warning("[app_kalshi] spot archive rebuild from Alpaca failed: %s", exc)
+    try:
+        # Real history for any product added since the archive began.
         logger.info("[app_kalshi] spot backfill for new products: %s", kalshi_15m_spot.backfill_missing_products(days=70))
     except Exception as exc:
         logger.warning("[app_kalshi] spot backfill for new products failed: %s", exc)
@@ -1581,6 +1633,15 @@ def _ensure_background_jobs_started() -> None:
                 id="global_correlation_refresh", replace_existing=True,
                 next_run_time=dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=3),
             )
+            # Alpaca archives the perps/15m studies learn from: Kraken-via-
+            # Alpaca minute bars since 2023 and Benzinga news since 2016 --
+            # missing pieces filled once after boot, topped up nightly.
+            scheduler.add_job(_start_alpaca_archives_backfill, "date", id="alpaca_archives_backfill",
+                              run_date=dt.datetime.now(dt.timezone.utc) + dt.timedelta(
+                                  minutes=int(os.getenv("ALPACA_ARCHIVES_STARTUP_DELAY_MIN", "20") or "20")),
+                              replace_existing=True)
+            scheduler.add_job(_run_alpaca_archives_append, "cron", hour=0, minute=40, id="alpaca_archives_append",
+                              replace_existing=True)
             for bot, (hour, minute, startup_delay_min) in (("perps", (3, 10, 10)), ("kalshi15m", (3, 40, 40))):
                 scheduler.add_job(_run_setup_backtest, "cron", hour=hour, minute=minute, args=[bot],
                                   id=f"{bot}_setup_backtest", replace_existing=True)
@@ -2037,6 +2098,7 @@ def api_status():
         },
         "setup_backtest": setup_backtest_job.latest("perps"),
         "setup_evidence_gate": setup_backtest_job.evidence_gate("perps"),
+        "market_data": _kalshi_market_data(),
         "global_correlation": {k: (global_correlation_monitor.latest() or {}).get(k) for k in ("computed_at", "leaders", "clusters")},
         "spot_lead": {**perps_spot_lead.summary(), "timing_gate_enabled": perps_strategy.USE_SPOT_LEAD_TIMING,
                       "adverse_bps": perps_strategy.SPOT_LEAD_ADVERSE_BPS},
@@ -2180,6 +2242,7 @@ def api_kalshi_15m_status():
         "last_scan": kalshi_15m_strategy.last_scan(),
         "setup_backtest": setup_backtest_job.latest("kalshi15m"),
         "setup_evidence_gate": setup_backtest_job.evidence_gate("kalshi15m"),
+        "market_data": _kalshi_market_data(),
         "edge_model": kalshi_15m_edge_model.summary(),
         "quote_history_last_collect": dict(_KALSHI_15M_QUOTE_LAST_RUN),
         "spot_history_last_collect": dict(_KALSHI_15M_SPOT_LAST_RUN),

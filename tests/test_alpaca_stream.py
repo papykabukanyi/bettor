@@ -56,3 +56,46 @@ def test_subscriptions_follow_the_trading_universe():
 def test_streams_stay_off_without_keys(monkeypatch):
     monkeypatch.delenv("ALPACA_API_KEY_ID", raising=False)
     assert s.start_all() == {"ok": False, "reason": "disabled_or_no_keys"}
+
+
+def test_live_ticks_give_the_price_as_of_now():
+    st = s.BarStream("crypto", "wss://example/v1beta3/crypto/us-1", lambda: ["BTC/USD"],
+                     lambda: {"quotes": ["BTC/USD"]})
+    st._handle([{"T": "q", "S": "BTC/USD", "t": "2026-10-05T13:30:05Z", "bp": 100.0, "ap": 100.2, "bs": 1, "as": 1}])  # noqa: SLF001
+    st._handle([{"T": "q", "S": "BTC/USD", "t": "2026-10-05T13:30:01Z", "bp": 90.0, "ap": 90.2}])  # noqa: SLF001 (older: ignored)
+    st._handle([{"T": "t", "S": "GLD", "t": "2026-10-05T13:30:07Z", "p": 380.5, "s": 10}])  # noqa: SLF001
+    s._streams["crypto"] = st  # noqa: SLF001
+    try:
+        at = pd.Timestamp("2026-10-05T13:30:05Z").timestamp()
+        tick = s.latest_price("crypto", "BTC/USD", now=at + 3)
+        assert tick["price"] == 100.1 and tick["kind"] == "quote_mid" and tick["age_sec"] == 3.0
+        assert s.latest_price("crypto", "BTC/USD", now=at + 60) is None  # too old: callers use the bar close
+        assert s.latest_price("crypto", "GLD", now=at + 3)["price"] == 380.5
+        assert s.latest_price("stocks", "GLD", now=at) is None  # no stocks stream running
+    finally:
+        s._streams.pop("crypto", None)  # noqa: SLF001
+
+
+def test_tick_channels_are_subscribed_alongside_bars():
+    st = s.BarStream("crypto", "wss://example", lambda: ["BTC/USD", "SOL/USD"], lambda: {"quotes": ["BTC/USD"]})
+    ws = _FakeWs()
+    st._subscribe(ws, force=True)  # noqa: SLF001
+    assert ws.sent[-1] == {"action": "subscribe", "bars": ["BTC/USD", "SOL/USD"], "updatedBars": ["BTC/USD", "SOL/USD"],
+                           "quotes": ["BTC/USD"]}
+    assert st.status()["subscribed_ticks"] == 1
+
+
+def test_the_crypto_stream_reads_the_chart_venue_with_the_kalshi_coins(monkeypatch):
+    from data import alpaca_client, alpaca_crypto_data
+    monkeypatch.setenv("ALPACA_API_KEY_ID", "k")
+    monkeypatch.setattr(alpaca_crypto_data, "get_crypto_universe", lambda: ["SOL/USD", "USDT/USD", "PEPE/USDC"])
+    started = []
+    monkeypatch.setattr(s.BarStream, "start", lambda self: started.append(self.name))
+    monkeypatch.setattr(s, "_streams", {})
+    s.start_all()
+    crypto = s._streams["crypto"]  # noqa: SLF001
+    assert crypto.url.endswith(f"/v1beta3/crypto/{alpaca_client.CHART_CRYPTO_LOC}")
+    symbols = crypto.symbols_fn()
+    assert "SOL/USD" in symbols and "BTC/USD" in symbols and "HYPE/USD" in symbols
+    assert "USDT/USD" not in symbols and "PEPE/USDC" not in symbols
+    assert "GLD" in s._streams["stocks"].symbols_fn() and s._streams["stocks"].ticks_fn() == {"trades": s._commodity_etfs()}  # noqa: SLF001

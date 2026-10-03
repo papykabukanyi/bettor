@@ -63,7 +63,7 @@ _cache: dict[str, Any] = {"artifact": None, "last_remote_attempt": 0.0}
 def coin_for_perp(ticker: str) -> str | None:
     from data import kalshi_15m_spot, perps_data
     coin = perps_data.coin_for_ticker(ticker)
-    return coin if coin in kalshi_15m_spot.COINBASE_PRODUCTS else None
+    return coin if coin in kalshi_15m_spot.SPOT_PRODUCTS else None
 
 
 def build_features(perp: pd.DataFrame, spot: pd.DataFrame, *, with_target: bool = True) -> pd.DataFrame:

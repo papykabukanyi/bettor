@@ -91,6 +91,10 @@ KNOWN_15M_SERIES = {
     # markets scanned per cycle at the SAME confidence bar -- more chances
     # to find a real signal, not a lowered bar for any one of them.
     "BCH": "KXBCH15M", "NEAR": "KXNEAR15M", "HYPE": "KXHYPE15M", "ZEC": "KXZEC15M",
+    # Charted on Alpaca's Kraken feed like the rest (Oct 2026). NEAR/ZEC
+    # (and BNB/TON) have no Alpaca chart, so the setup system never enters
+    # them; they stay listed for data collection and open-position care.
+    "ADA": "KXADA15M",
 }
 
 # Confirmed live via GET /series?category=Commodities (2026-09-19) --
@@ -111,6 +115,10 @@ KNOWN_15M_METALS_SERIES = {
     # live it also serves PL=F/PA=F with no new credential/API needed) and
     # the same confirmed-live 15-minute market shape as the 3 above.
     "PLATINUM": "KXPLATINUM15M", "PALLADIUM": "KXPALLADIUM15M",
+    # Energy, same 15-minute up/down shape settling on Pyth (KXWTI15M,
+    # KXNATGAS15M, confirmed live Oct 2026): charted on USO/UNG over Alpaca
+    # SIP like the metals' ETFs (kalshi_15m_setup.METAL_CHART_SYMBOL).
+    "WTI": "KXWTI15M", "NATGAS": "KXNATGAS15M",
 }
 
 

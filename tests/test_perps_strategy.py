@@ -17,7 +17,7 @@ from data import perps_strategy as strat
 
 @pytest.fixture(autouse=True)
 def _no_external_price_network_calls(monkeypatch):
-    """crypto_prices.get_fast_price hits real exchanges (Coinbase/Kraken) --
+    """crypto_prices.get_fast_price hits Alpaca's live quotes --
     every test here defaults it to "unavailable" so the suite never touches
     the network; tests that specifically exercise the external-price
     integration override this explicitly."""
@@ -4044,7 +4044,7 @@ _SETUP = {
 @pytest.fixture
 def setup_mode(monkeypatch):
     monkeypatch.setattr(strat, "ENTRY_SYSTEM", "setup")
-    monkeypatch.setattr(strat, "get_sentiment", lambda coin, use_limited_sources=True: {"sentiment_score": 0.1})
+    monkeypatch.setattr(strat.alpaca_news, "sentiment", lambda asset: {"sentiment_score": 0.1})
     monkeypatch.setattr(strat, "get_margin_market", lambda ticker: _market_response(price=6.60, bid=6.599, ask=6.601))
     calls = []
 

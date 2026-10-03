@@ -12,10 +12,12 @@ import pytest
 from data import kalshi_15m
 
 
-def test_known_15m_series_covers_the_perps_backed_coins():
+def test_known_15m_series_covers_the_perps_backed_coins_and_ada():
     assert set(kalshi_15m.KNOWN_15M_SERIES.keys()) == {
-        "BTC", "ETH", "SOL", "XRP", "DOGE", "BCH", "NEAR", "HYPE", "ZEC",
+        "BTC", "ETH", "SOL", "XRP", "DOGE", "BCH", "NEAR", "HYPE", "ZEC", "ADA",
     }
+    assert kalshi_15m.KNOWN_15M_METALS_SERIES["WTI"] == "KXWTI15M"
+    assert kalshi_15m.KNOWN_15M_METALS_SERIES["NATGAS"] == "KXNATGAS15M"
     assert kalshi_15m.KNOWN_15M_SERIES["BTC"] == "KXBTC15M"
     assert kalshi_15m.KNOWN_15M_SERIES["ZEC"] == "KXZEC15M"
 
@@ -229,8 +231,8 @@ def test_get_market_returns_the_single_matching_market(monkeypatch):
     assert result["result"] == "yes"
 
 
-def test_known_15m_metals_series_covers_gold_silver_copper_platinum_palladium():
-    assert set(kalshi_15m.KNOWN_15M_METALS_SERIES.keys()) == {"GOLD", "SILVER", "COPPER", "PLATINUM", "PALLADIUM"}
+def test_known_15m_commodity_series_covers_the_metals_and_energy():
+    assert set(kalshi_15m.KNOWN_15M_METALS_SERIES.keys()) == {"GOLD", "SILVER", "COPPER", "PLATINUM", "PALLADIUM", "WTI", "NATGAS"}
     assert kalshi_15m.KNOWN_15M_METALS_SERIES["GOLD"] == "KXGOLD15M"
     assert kalshi_15m.KNOWN_15M_METALS_SERIES["PLATINUM"] == "KXPLATINUM15M"
     assert kalshi_15m.KNOWN_15M_METALS_SERIES["SILVER"] == "KXSILVER15M"

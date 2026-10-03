@@ -792,11 +792,11 @@ def test_predict_direction_dispatches_metals_to_the_metals_model(monkeypatch):
         assert result["source"] == "metals"
 
 
-def test_asset_series_covers_all_14_assets_with_no_overlap():
-    assert len(kalshi_15m_strategy.ASSET_SERIES) == 14
+def test_asset_series_covers_all_17_assets_with_no_overlap():
+    assert len(kalshi_15m_strategy.ASSET_SERIES) == 17
     assert set(kalshi_15m_strategy.ASSET_SERIES) == {
-        "BTC", "ETH", "SOL", "XRP", "DOGE", "BCH", "NEAR", "HYPE", "ZEC",
-        "GOLD", "SILVER", "COPPER", "PLATINUM", "PALLADIUM",
+        "BTC", "ETH", "SOL", "XRP", "DOGE", "BCH", "NEAR", "HYPE", "ZEC", "ADA",
+        "GOLD", "SILVER", "COPPER", "PLATINUM", "PALLADIUM", "WTI", "NATGAS",
     }
 
 
@@ -1827,7 +1827,7 @@ def test_yes_confidence_extra_required_applies_before_the_correlation_study_nudg
 # entries; ASSET_SERIES itself (data collection, correlation study,
 # existing-position management) stays the full universe.
 # ---------------------------------------------------------------------------
-def test_active_entry_coins_env_default_string_is_gold_silver_copper_plus_crypto():
+def test_active_entry_coins_env_default_string_is_every_alpaca_charted_asset():
     """Documents the literal default string ACTIVE_ENTRY_COINS is built
     from -- a regression guard against an accidental typo/reorder in that
     literal, independent of the autouse _full_entry_universe fixture's
@@ -1837,7 +1837,8 @@ def test_active_entry_coins_env_default_string_is_gold_silver_copper_plus_crypto
     see ACTIVE_ENTRY_COINS' own comment for the full history."""
     import inspect
     source = inspect.getsource(kalshi_15m_strategy)
-    assert 'os.getenv(\n        "KALSHI_15M_ACTIVE_ENTRY_COINS",\n        "GOLD,SILVER,COPPER,BTC,ETH,SOL,XRP,DOGE,BCH,NEAR,HYPE,ZEC",\n    )' in source
+    assert ('os.getenv(\n        "KALSHI_15M_ACTIVE_ENTRY_COINS",\n'
+            '        "GOLD,SILVER,COPPER,PLATINUM,PALLADIUM,WTI,NATGAS,BTC,ETH,SOL,XRP,DOGE,BCH,HYPE,ADA",\n    )') in source
 
 
 def test_scan_and_enter_skips_a_coin_outside_the_active_entry_universe(monkeypatch):

@@ -583,6 +583,8 @@ def latest_feature_row(metal: str) -> dict[str, Any] | None:
     feature_row's own identical convention: a live PREDICTION should
     reflect sentiment as of right now, not whatever it was at the last
     collection tick."""
+    if metal not in METAL_TO_NEWS_QUERY:
+        return None  # a commodity this legacy model never covered (WTI, NATGAS)
     history = _load_price_history(metal)
     sentiment = get_generic_sentiment(METAL_TO_NEWS_QUERY[metal], cache_key=metal)
     feats_all = engineer_metals_features(history, sentiment_score=sentiment["sentiment_score"])

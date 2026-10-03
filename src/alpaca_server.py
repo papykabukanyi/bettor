@@ -707,6 +707,14 @@ def _run_sip_history_append() -> dict[str, Any]:
         gc.collect()
 
 
+def _run_sip_history_backfill_missing() -> dict[str, Any]:
+    from data import alpaca_sip_history
+    try:
+        return alpaca_sip_history.backfill_missing()
+    finally:
+        gc.collect()
+
+
 def _ensure_background_jobs_started() -> None:
     global _startup_done
     if _startup_done:
@@ -723,10 +731,17 @@ def _ensure_background_jobs_started() -> None:
             # Real-time minute bars over WebSocket for every stock and crypto
             # symbol the Alpaca bots trade (alpaca_stream; one connection per
             # feed for the whole process).
-            from data import alpaca_stream
+            from data import alpaca_news, alpaca_stream
             logger.info("Alpaca market-data streams: %s", alpaca_stream.start_all())
+            # Every bot's news rule reads Alpaca news (Benzinga); the stream
+            # keeps every article live.
+            logger.info("Alpaca news stream: %s", alpaca_news.start_stream())
             scheduler.add_job(_run_sip_history_append, "cron", day_of_week="mon-fri", hour=20, minute=30,
                               id="alpaca_sip_history_append", replace_existing=True)
+            # Full history for any symbol just added to the archive's universe
+            # (the Kalshi bots' commodity ETFs), once, shortly after boot.
+            scheduler.add_job(_run_sip_history_backfill_missing, "date", id="alpaca_sip_history_backfill_missing",
+                              run_date=dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=15), replace_existing=True)
             from data import setup_backtest_job
             # Weekly multi-year study over the SIP archive (and once after a
             # deploy if none is published yet): symbol eligibility.
@@ -1019,7 +1034,8 @@ def api_alpaca_status():
         "setup_backtest": __import__("data.setup_backtest_job", fromlist=["latest"]).latest("stocks"),
         "setup_evidence_gate": __import__("data.setup_backtest_job", fromlist=["evidence_gate"]).evidence_gate("stocks"),
         "market_data": {"feed": __import__("data.alpaca_client", fromlist=["DATA_FEED"]).DATA_FEED,
-                        "streams": __import__("data.alpaca_stream", fromlist=["status"]).status()},
+                        "streams": __import__("data.alpaca_stream", fromlist=["status"]).status(),
+                        "news": __import__("data.alpaca_news", fromlist=["status"]).status()},
         "params": {
             "entry_system": alpaca_strategy.ENTRY_SYSTEM,
             "setup_min_rr": __import__("data.alpaca_setup", fromlist=["MIN_RR"]).MIN_RR,

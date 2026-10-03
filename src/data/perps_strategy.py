@@ -90,7 +90,7 @@ from data.kalshi_perps import (
 from data.crypto_news import get_sentiment, prewarm_sentiment
 from data.perps_data import coin_for_ticker, fetch_candle_frames, get_watchlist, latest_feature_row
 from data.perps_model import predict_direction
-from data import global_correlation_monitor, perps_meta_model, perps_setup, perps_spot_lead, perps_trade_analysis, threads_post
+from data import alpaca_news, global_correlation_monitor, perps_meta_model, perps_setup, perps_spot_lead, perps_trade_analysis, threads_post
 
 logger = logging.getLogger(__name__)
 
@@ -747,7 +747,7 @@ MIN_ENTRY_RELATIVE_VOLATILITY_RATIO = _env_float("PERPS_MIN_ENTRY_RELATIVE_VOLAT
 MIN_ENTRY_VOLUME_Z = _env_float("PERPS_MIN_ENTRY_VOLUME_Z", 1.0)
 
 # Reject a new entry if Kalshi's quote and an independent live exchange price
-# (Coinbase/Kraken, see crypto_prices.py) disagree by more than this -- a
+# (Alpaca, see crypto_prices.py) disagree by more than this -- a
 # safety check against entering on a stale or erroneous Kalshi tick.
 MAX_ENTRY_PRICE_DEVIATION_PCT = _env_float("PERPS_MAX_ENTRY_PRICE_DEVIATION_PCT", 0.02)
 
@@ -1289,7 +1289,7 @@ def _evaluate_candidate_setup(ticker: str, *, traded_setup_ids: frozenset[str] =
     sides = ("long", "short") if ENABLE_SHORTS else ("long",)
     fee = setup_fee_rate_roundtrip(ticker)
     try:
-        news = get_sentiment(coin_for_ticker(ticker), use_limited_sources=True).get("sentiment_score")
+        news = alpaca_news.sentiment(coin_for_ticker(ticker)).get("sentiment_score")
     except Exception as exc:
         logger.debug("[perps_strategy] sentiment read failed for %s: %s", ticker, exc)
         news = None
@@ -1586,8 +1586,12 @@ def scan_for_entries(
     # exact shared sentiment module -- fetches sentiment for every
     # not-yet-held ticker CONCURRENTLY so the sequential loop below hits a
     # warm cache instead of each ticker's own blocking network fetch.
+    # Setup mode reads Alpaca news: one bulk pull for the whole scan.
     try:
-        prewarm_sentiment([coin_for_ticker(t) for t in to_evaluate], use_limited_sources=True)
+        if ENTRY_SYSTEM == "setup":
+            alpaca_news.prefetch([coin_for_ticker(t) for t in to_evaluate])
+        else:
+            prewarm_sentiment([coin_for_ticker(t) for t in to_evaluate], use_limited_sources=True)
     except Exception as exc:
         logger.debug("[perps_strategy] sentiment prewarm failed (non-fatal): %s", exc)
     candidates = [
@@ -1800,8 +1804,8 @@ def decide_exit(
     `current_price` is always Kalshi's own tradable quote -- that's what
     the gain/loss threshold and the actual exit order use. `velocity` is
     computed from that same Kalshi price series; `external_velocity` is
-    computed independently from a live exchange cross-check (Coinbase/
-    Kraken, see crypto_prices.py) and can ALSO trigger quick-profit -- since
+    computed independently from a live exchange cross-check (Alpaca
+    quotes, see crypto_prices.py) and can ALSO trigger quick-profit -- since
     Kalshi's own perp quote can lag a deep, liquid spot venue by a tick or
     two, the external reading is sometimes the first place a fast move
     actually shows up.

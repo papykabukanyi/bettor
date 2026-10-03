@@ -190,8 +190,11 @@ ASSET_SERIES: dict[str, str] = {**kalshi_15m.KNOWN_15M_SERIES, **kalshi_15m.KNOW
 # coins) -- crypto's own coin_is_trusted gate (still fully in effect,
 # still evidence-only, see that function's own comment) is what now
 # guards against repeating the earlier thin-sample-failing-track-record
-# problem, not a blanket exclusion. PLATINUM/PALLADIUM stay excluded --
-# no new evidence or decision here has touched them. Only gates NEW
+# problem, not a blanket exclusion. Oct 2026 (user: "just use alpaca"):
+# every chart is Alpaca's, so PLATINUM/PALLADIUM (no longer on delayed
+# COMEX quotes) and the new WTI/NATGAS series enter on their graded SIP
+# ETFs (kalshi_15m_setup.METAL_CHART_SYMBOL), ADA joins on Alpaca's Kraken
+# feed, and NEAR/ZEC leave -- Alpaca has no chart for them. Only gates NEW
 # entries (see scan_and_enter's own loop below) -- an already-open
 # position on any coin is still fully managed to close by
 # manage_open_positions/check_settlements regardless of this list.
@@ -201,7 +204,7 @@ ASSET_SERIES: dict[str, str] = {**kalshi_15m.KNOWN_15M_SERIES, **kalshi_15m.KNOW
 ACTIVE_ENTRY_COINS: frozenset[str] = frozenset(
     c.strip().upper() for c in os.getenv(
         "KALSHI_15M_ACTIVE_ENTRY_COINS",
-        "GOLD,SILVER,COPPER,BTC,ETH,SOL,XRP,DOGE,BCH,NEAR,HYPE,ZEC",
+        "GOLD,SILVER,COPPER,PLATINUM,PALLADIUM,WTI,NATGAS,BTC,ETH,SOL,XRP,DOGE,BCH,HYPE,ADA",
     ).split(",") if c.strip()
 )
 
@@ -910,11 +913,8 @@ def _mode_trades(trade_log: list[dict[str, Any]] | None) -> list[dict[str, Any]]
 
 def _setup_news_score(coin: str) -> float | None:
     try:
-        if coin in kalshi_15m.KNOWN_15M_METALS_SERIES:
-            from data.crypto_news import get_generic_sentiment
-            return get_generic_sentiment(f"{coin.lower()} price", cache_key=f"metal:{coin}").get("sentiment_score")
-        from data.crypto_news import get_sentiment
-        return get_sentiment(coin).get("sentiment_score")
+        from data import alpaca_news
+        return alpaca_news.sentiment(coin).get("sentiment_score")
     except Exception as exc:
         logger.debug("[kalshi_15m_strategy] news read failed for %s: %s", coin, exc)
         return None

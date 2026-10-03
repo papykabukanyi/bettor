@@ -810,24 +810,26 @@ def _recent_coverage(one_min: pd.DataFrame, now: float) -> float:
 
 
 def chart_candles(symbol: str, *, now: float | None = None) -> tuple[pd.DataFrame, str]:
-    """The pair's most complete real 1-minute chart (ts = END) and its source."""
+    """The pair's most complete real 1-minute chart (ts = END) and its source,
+    both from Alpaca: the Kraken US feed (kalshi_15m_spot, live stream on
+    top -- complete, trade-driven minutes) or Alpaca's own exchange, where
+    orders execute (mostly quote-only minutes)."""
     from data import alpaca_crypto_data, kalshi_15m_spot
     now = time.time() if now is None else now
     coin = symbol.split("/")[0].upper()
-    from data import alpaca_stream
-    alpaca = candles_from_bars(alpaca_stream.merge_live("crypto", symbol, alpaca_crypto_data.fetch_recent_crypto_bars(symbol)))
-    coinbase = pd.DataFrame(columns=["ts", "open", "high", "low", "close", "volume"])
+    exchange = candles_from_bars(alpaca_crypto_data.fetch_recent_crypto_bars(symbol))
+    kraken = pd.DataFrame(columns=["ts", "open", "high", "low", "close", "volume"])
     if kalshi_15m_spot.is_listed(coin):
         try:
             series = kalshi_15m_spot.recent_series(coin)
             if not series.empty:
-                coinbase = series[["ts", "open", "high", "low", "close", "volume"]]
+                kraken = series[["ts", "open", "high", "low", "close", "volume"]]
         except Exception:
             pass
-    cb_cov, al_cov = _recent_coverage(coinbase, now), _recent_coverage(alpaca, now)
-    if cb_cov >= al_cov and not coinbase.empty:
-        return coinbase, f"Coinbase {coin}-USD ({cb_cov:.0%} complete; Alpaca {al_cov:.0%})"
-    return alpaca, f"Alpaca {symbol} ({al_cov:.0%} complete; Coinbase {cb_cov:.0%})"
+    kr_cov, ex_cov = _recent_coverage(kraken, now), _recent_coverage(exchange, now)
+    if kr_cov >= ex_cov and not kraken.empty:
+        return kraken, f"Alpaca Kraken US {symbol} ({kr_cov:.0%} complete; Alpaca exchange {ex_cov:.0%})"
+    return exchange, f"Alpaca exchange {symbol} ({ex_cov:.0%} complete; Kraken US {kr_cov:.0%})"
 
 
 def live_setup(symbol: str, *, fee_rate_roundtrip: float, news_score: float | None, now: float | None = None) -> dict[str, Any]:

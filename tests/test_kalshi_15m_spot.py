@@ -1,5 +1,5 @@
-"""kalshi_15m_spot: real Coinbase 1-minute spot history, features, and its
-accuracy grade against Kalshi's own settlement values."""
+"""kalshi_15m_spot: real Alpaca (Kraken US feed) 1-minute spot history,
+features, and its accuracy grade against Kalshi's own settlement values."""
 from __future__ import annotations
 
 import numpy as np
@@ -26,38 +26,59 @@ def _minutes(coin, closes, start=T0, volume=1.0, skip=()):
     ], columns=ks.COLUMNS)
 
 
-class _Resp:
-    def __init__(self, payload, status=200):
-        self._payload, self.status_code = payload, status
-
-    def json(self):
-        return self._payload
-
-    def raise_for_status(self):
-        if self.status_code >= 400:
-            raise RuntimeError(self.status_code)
+def _alpaca_bars(pair_starts: dict[str, list[int]], close: float = 1.6) -> dict[str, list[dict]]:
+    return {pair: [{"t": pd.Timestamp(t, unit="s", tz="UTC").isoformat().replace("+00:00", "Z"),
+                    "o": 1.5, "h": 2.0, "l": 1.0, "c": close, "v": 10.0} for t in starts]
+            for pair, starts in pair_starts.items()}
 
 
-def test_fetch_candles_pages_and_converts_start_to_candle_end(monkeypatch):
+def test_fetch_reads_alpacas_kraken_feed_and_stores_bars_by_their_end(monkeypatch):
+    from data import alpaca_client
     calls = []
 
-    def fake_get(url, params, headers, timeout):
-        calls.append(params)
-        rows = [[t, 1.0, 2.0, 1.5, 1.6, 10.0] for t in range(params["start"], params["end"], 60)]
-        return _Resp(list(reversed(rows)))
+    def fake_bars(symbols, *, start, end, loc, max_pages, **kw):
+        calls.append((symbols, start, end, loc))
+        return _alpaca_bars({"BTC/USD": [T0 - 60 + 60 * i for i in range(402)]})
 
-    monkeypatch.setattr(ks.requests, "get", fake_get)
+    monkeypatch.setattr(alpaca_client, "get_crypto_bars", fake_bars)
     df = ks.fetch_candles("BTC", T0, T0 + 400 * 60)
-    assert len(calls) == 2
-    assert df.ts.iloc[0] == T0 + 60 and df.ts.iloc[-1] == T0 + 400 * 60
-    assert df.ts.is_monotonic_increasing and df.close.iloc[0] == 1.6
+    assert calls[0][0] == ["BTC/USD"] and calls[0][3] == alpaca_client.CHART_CRYPTO_LOC == "us-1"
+    assert df.ts.iloc[0] == T0 + 60 and df.ts.iloc[-1] == T0 + 400 * 60  # START + 60, inside (start, end]
+    assert df.ts.is_monotonic_increasing and df.close.iloc[0] == 1.6 and set(df.coin) == {"BTC"}
 
 
-def test_fetch_candles_retries_rate_limits(monkeypatch):
-    responses = [_Resp({}, 429), _Resp([[T0, 1, 1, 1, 1, 1]])]
-    monkeypatch.setattr(ks.requests, "get", lambda *a, **k: responses.pop(0))
-    monkeypatch.setattr(ks.time, "sleep", lambda s: None)
-    assert len(ks.fetch_candles("BTC", T0, T0 + 60)) == 1
+def test_collect_reads_every_coin_in_one_request(monkeypatch):
+    from data import alpaca_client
+    calls = []
+    monkeypatch.setattr(alpaca_client, "get_crypto_bars", lambda symbols, **kw: calls.append(symbols) or _alpaca_bars(
+        {p: [T0] for p in symbols}))
+    df = ks.collect_since(T0, until_ts=T0 + 120)
+    assert len(calls) == 1 and sorted(calls[0]) == sorted(ks.SPOT_PRODUCTS.values())
+    assert set(df.coin) == set(ks.SPOT_PRODUCTS)
+
+
+def test_a_coin_alpaca_does_not_list_is_remembered(monkeypatch):
+    from data import alpaca_client
+    monkeypatch.setattr(alpaca_client, "get_crypto_bars", lambda symbols, **kw: {})
+    monkeypatch.setattr(ks, "_unlisted", {})
+    assert ks.fetch_candles("NEAR", T0, T0 + 7200).empty
+    assert not ks.is_listed("NEAR") and ks.is_listed("BTC")
+
+
+def test_live_reads_carry_the_streams_newest_bar(monkeypatch):
+    from data import alpaca_stream
+    now = int(ks.time.time()) // 60 * 60
+    monkeypatch.setattr(ks, "fetch_candles", lambda coin, start, end: _minutes(coin, [100.0] * 3, start=now - 240))
+
+    class FakeStream:
+        def bars(self, symbol):
+            assert symbol == "ETH/USD"
+            return pd.DataFrame([{"ts": now - 60, "open": 101.0, "high": 101.0, "low": 101.0, "close": 101.0, "volume": 2.0}])
+
+    monkeypatch.setattr(alpaca_stream, "_streams", {"crypto": FakeStream()})
+    monkeypatch.setattr(ks, "_last_refresh", {})
+    series = ks.recent_series("ETH")
+    assert int(series.ts.iloc[-1]) == now and series.close.iloc[-1] == 101.0
 
 
 def test_complete_minutes_forward_fills_no_trade_minutes():
@@ -87,6 +108,8 @@ def test_push_merges_with_the_hf_shard_after_a_restart(tmp_path, monkeypatch):
 
 
 def test_recent_series_tops_up_the_live_cache(monkeypatch):
+    from data import alpaca_stream
+    monkeypatch.setattr(alpaca_stream, "_streams", {})
     calls = []
 
     def fake_fetch(coin, start, end):
@@ -105,6 +128,8 @@ def test_recent_series_tops_up_the_live_cache(monkeypatch):
 
 
 def test_bots_reading_the_same_coin_within_seconds_share_one_request(monkeypatch):
+    from data import alpaca_stream
+    monkeypatch.setattr(alpaca_stream, "_streams", {})
     calls = []
     monkeypatch.setattr(ks, "fetch_candles", lambda coin, start, end: calls.append(coin) or _minutes(coin, [100.0] * 3, start=end - 180))
     monkeypatch.setattr(ks, "_last_refresh", {})
@@ -150,7 +175,7 @@ def test_new_product_backfill_uploads_in_a_few_commits_not_one_per_day(monkeypat
     monkeypatch.setattr(ks, "LOCAL_DIR", tmp_path)
     monkeypatch.setattr(ks, "HF_API_KEY", "token")
     monkeypatch.setattr(ks, "list_hf_shard_dates", lambda: ["2026-09-30"])
-    monkeypatch.setattr(ks, "load_spot_history", lambda days: pd.DataFrame({"coin": [c for c in ks.COINBASE_PRODUCTS if c != "DOT"]}))
+    monkeypatch.setattr(ks, "load_spot_history", lambda days: pd.DataFrame({"coin": [c for c in ks.SPOT_PRODUCTS if c != "DOT"]}))
     monkeypatch.setattr(ks, "_hf_download", lambda path: None)
     monkeypatch.setattr(ks, "collect_since", lambda start, until_ts=None, coins=None: _minutes(coins[0], [1.0] * 3, start=start + 60))
     commits = []
@@ -184,3 +209,39 @@ def test_an_upload_keeps_rows_another_writer_put_on_hf(monkeypatch, tmp_path):
     ks.push_spot_history(new)
     merged = pd.read_parquet(tmp_path / "2026-10-02.parquet")
     assert set(gap.ts) | set(local.ts) | set(new.ts) == set(merged.ts)
+
+
+def test_the_archive_is_rebuilt_from_alpaca_once(monkeypatch, tmp_path):
+    import json
+
+    import huggingface_hub
+    monkeypatch.setattr(ks, "LOCAL_DIR", tmp_path)
+    monkeypatch.setattr(ks, "HF_API_KEY", "token")
+    monkeypatch.setattr(ks, "list_hf_shard_dates", lambda: ["2026-09-01"])
+    marker: dict = {}
+    monkeypatch.setattr(ks, "archive_source", lambda: marker.get("info"))
+    monkeypatch.setattr(ks, "_hf_download", lambda path: None)
+    fetched = []
+
+    def fake_collect(start, until_ts=None, coins=None):
+        fetched.append(coins)
+        return _minutes("BTC", [2.0] * 3, start=start + 60) if len(fetched) == 1 else pd.DataFrame(columns=ks.COLUMNS)
+
+    monkeypatch.setattr(ks, "collect_since", fake_collect)
+    commits = []
+
+    class FakeApi:
+        def __init__(self, token):
+            pass
+
+        def create_commit(self, **kw):
+            commits.append([op.path_in_repo for op in kw["operations"]])
+            for op in kw["operations"]:
+                if op.path_in_repo == ks.SOURCE_MARKER:
+                    marker["info"] = json.loads(op.path_or_fileobj)
+
+    monkeypatch.setattr(huggingface_hub, "HfApi", FakeApi)
+    r = ks.rebuild_from_alpaca(days=3)
+    assert r["ok"] and r["dates_written"] == 1 and fetched[0] == list(ks.SPOT_PRODUCTS)
+    assert ks.SOURCE_MARKER in commits[-1] and marker["info"]["source"] == "alpaca"
+    assert ks.rebuild_from_alpaca(days=3)["action"] == "already_rebuilt"

@@ -213,16 +213,33 @@ def get_latest_quote(symbol: str) -> dict[str, Any]:
 # (see build_crypto_order's own docstring).
 # ---------------------------------------------------------------------------
 _CRYPTO_LOC = os.getenv("ALPACA_CRYPTO_LOC", "us")
+# Where crypto CHARTS are read: Alpaca's "us-1" location is Kraken US's
+# order book (a CF Benchmarks constituent exchange), served by Alpaca. Its
+# 1-minute bars are complete and trade-driven for every major pair (Oct
+# 2026, 24h check: BTC/ETH/SOL 1440/1440 minutes, all with volume, 0.4 bps
+# median from Coinbase), where Alpaca's own exchange ("us", where the
+# crypto bot executes) leaves most minutes without a trade (BTC 399/1440).
+CHART_CRYPTO_LOC = os.getenv("ALPACA_CHART_CRYPTO_LOC", "us-1")
+
+
+def _crypto_data_get(path: str, *, params: dict[str, Any]) -> Any:
+    """Crypto market data: keyed when keys are set (the plan's rate limit),
+    public otherwise -- Alpaca serves crypto bars without a key."""
+    headers = _auth_headers() if is_configured() else {}
+    resp = _get_with_retry(f"{DATA_BASE_URL}{path}", headers=headers, params=params)
+    resp.raise_for_status()
+    return resp.json() if resp.content else {}
 
 
 def get_crypto_bars(
     symbols: list[str], *, timeframe: str = "1Min", start: str | None = None,
-    end: str | None = None, limit: int = 10000,
+    end: str | None = None, limit: int = 10000, loc: str | None = None, max_pages: int = _MAX_BAR_PAGES,
 ) -> dict[str, list[dict[str, Any]]]:
     """Historical OHLCV bars for one or more crypto pairs (e.g. "BTC/USD")
     in a single call -- same multi-symbol-in-one-call advantage as
     get_bars(), same internal pagination. No `feed` param here -- unlike
-    stocks, Alpaca crypto data has no separate paid/free feed tiers."""
+    stocks, Alpaca crypto data has no separate paid/free feed tiers.
+    loc: the venue (default the trading venue, ALPACA_CRYPTO_LOC)."""
     params: dict[str, Any] = {"symbols": ",".join(symbols), "timeframe": timeframe, "limit": limit}
     if start:
         params["start"] = start
@@ -231,10 +248,10 @@ def get_crypto_bars(
 
     bars_by_symbol: dict[str, list[dict[str, Any]]] = {}
     page_token = None
-    for _ in range(_MAX_BAR_PAGES):
+    for _ in range(max_pages):
         if page_token:
             params["page_token"] = page_token
-        data = _data_get(f"/v1beta3/crypto/{_CRYPTO_LOC}/bars", params=params)
+        data = _crypto_data_get(f"/v1beta3/crypto/{loc or _CRYPTO_LOC}/bars", params=params)
         for symbol, bars in (data.get("bars") or {}).items():
             bars_by_symbol.setdefault(symbol, []).extend(bars)
         page_token = data.get("next_page_token")

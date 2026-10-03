@@ -106,7 +106,8 @@ CORR_MIN_OVERLAP = 60
 COVERAGE_WINDOW_MIN = _env_int("KALSHI_15M_SETUP_COVERAGE_WINDOW_MIN", 240)
 _ET = ZoneInfo("America/New_York")
 MIN_COVERAGE = _env_float("KALSHI_15M_SETUP_MIN_COVERAGE", 0.8)            # share of 1m candles that must exist
-LEADER_OVERRIDES: dict[str, str] = {"BTC": "ETH", "GOLD": "SILVER", "SILVER": "GOLD", "COPPER": "GOLD", "PLATINUM": "GOLD", "PALLADIUM": "GOLD"}
+LEADER_OVERRIDES: dict[str, str] = {"BTC": "ETH", "GOLD": "SILVER", "SILVER": "GOLD", "COPPER": "GOLD", "PLATINUM": "GOLD",
+                                    "PALLADIUM": "GOLD", "WTI": "BRENT", "NATGAS": "WTI"}
 DEFAULT_LEADER = "BTC"
 
 
@@ -785,19 +786,23 @@ def summarize(trades: pd.DataFrame) -> dict[str, Any]:
         "by_setup": {k: int(v) for k, v in trades.setup.value_counts().items()},
     }
 
-_YAHOO_CHART = "https://query1.finance.yahoo.com/v8/finance/chart"
 _metals_cache: dict[str, tuple[float, pd.DataFrame]] = {}
+METALS_CACHE_SEC = 20
+METALS_HISTORY_DAYS = 6
 
 
-# Gold and silver are read on their ETFs (GLD, SLV): real-time exchange
-# 1-minute candles with full volume during the US session. Graded against
-# Kalshi's own settlements (Sep 2026, same windows): GLD called the settled
-# direction 97.3% (COMEX futures 96.4%), SLV 96.4% (94.9%) -- and COMEX on
-# Yahoo arrives ~10 minutes late, which a 15-minute contract can't use.
-# Copper's ETF (CPER) is too thin (88.6%, 71% minute coverage), so copper
-# stays on COMEX and its staleness keeps it from trading. Outside US hours
-# the ETF chart is stale, so metals don't trade then either.
-METAL_CHART_SYMBOL = {"GOLD": "GLD", "SILVER": "SLV"}
+# Commodities are read on their ETFs: consolidated (SIP) 1-minute bars from
+# Alpaca with every US exchange's volume, live over the Alpaca stream, US
+# session only. Graded against Kalshi's own 15-minute settlements (Oct 2026,
+# last 5 sessions, every window with ETF data at open and close): the ETF's
+# close-vs-open direction matched the settled result GLD 97.6%, SLV 97.6%,
+# UNG 95.9%, PALL 95.6%, CPER 95.5%, USO 93.6%, PPLT 91.5% (125-111 windows
+# each). Thin ETFs (CPER ~77% of minutes traded, PALL ~83%) trade only when
+# the data rule finds the last 4 hours complete enough. Outside US hours the
+# chart is stale, so commodities don't trade then. BRENT (BNO) is charted
+# only as oil's leader for the correlation rule.
+METAL_CHART_SYMBOL = {"GOLD": "GLD", "SILVER": "SLV", "COPPER": "CPER", "PLATINUM": "PPLT", "PALLADIUM": "PALL",
+                      "WTI": "USO", "NATGAS": "UNG", "BRENT": "BNO"}
 
 
 def session_for(coin: str) -> str:
@@ -807,39 +812,55 @@ def session_for(coin: str) -> str:
 
 
 def metals_candles(metal: str) -> pd.DataFrame:
-    """Five days of real Yahoo 1-minute candles (ts = END) for the metal's
-    chart symbol (METAL_CHART_SYMBOL, else its COMEX future), cached for
-    60s. Yahoo stamps candles by START."""
-    import requests
+    """The commodity's ETF chart: METALS_HISTORY_DAYS of Alpaca SIP 1-minute
+    bars with the stream's newer bars on top (ts = END), cached
+    METALS_CACHE_SEC. Alpaca stamps bars by START."""
+    import datetime as dt
 
-    from data import kalshi_15m_metals_data
+    from data import alpaca_client, alpaca_stream
     cached = _metals_cache.get(metal)
-    if cached and time.time() - cached[0] < 60:
+    if cached and time.time() - cached[0] < METALS_CACHE_SEC:
         return cached[1]
-    symbol = METAL_CHART_SYMBOL.get(metal) or kalshi_15m_metals_data.YAHOO_FUTURES_SYMBOL.get(metal)
+    symbol = METAL_CHART_SYMBOL.get(metal)
     if not symbol:
         return pd.DataFrame()
-    resp = requests.get(f"{_YAHOO_CHART}/{symbol}", params={"interval": "1m", "range": "5d"},
-                        headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
-    resp.raise_for_status()
-    result = ((resp.json().get("chart") or {}).get("result") or [None])[0] or {}
-    quote = ((result.get("indicators") or {}).get("quote") or [{}])[0]
-    df = pd.DataFrame({"ts": result.get("timestamp") or [], "open": quote.get("open") or [], "high": quote.get("high") or [],
-                       "low": quote.get("low") or [], "close": quote.get("close") or [], "volume": quote.get("volume") or []})
-    df = df.dropna(subset=["open", "high", "low", "close"])
+    start = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=METALS_HISTORY_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    rows = alpaca_client.get_bars([symbol], timeframe="1Min", start=start, feed="sip").get(symbol) or []
+    bars = pd.DataFrame(rows).rename(columns={"o": "open", "h": "high", "l": "low", "c": "close", "v": "volume"})
+    if not bars.empty:
+        bars["ts"] = ((pd.to_datetime(bars["t"], utc=True) - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta(seconds=1)).astype("int64")
+        bars = bars[["ts", "open", "high", "low", "close", "volume"]]
+    df = alpaca_stream.merge_live("stocks", symbol, bars if not bars.empty else None)
+    if df is None or df.empty:
+        return pd.DataFrame()
+    df = df.copy()
     df["ts"] = df["ts"].astype("int64") + 60
     df["volume"] = df["volume"].fillna(0.0)
+    df = df.sort_values("ts").reset_index(drop=True)
     _metals_cache[metal] = (time.time(), df)
     return df
 
 
 def underlying_candles(coin: str) -> pd.DataFrame:
-    from data import kalshi_15m, kalshi_15m_spot
-    if coin in kalshi_15m.KNOWN_15M_METALS_SERIES:
+    from data import kalshi_15m_spot
+    if coin in METAL_CHART_SYMBOL:
         return metals_candles(coin)
-    if coin in kalshi_15m_spot.COINBASE_PRODUCTS:
+    if coin in kalshi_15m_spot.SPOT_PRODUCTS:
         return kalshi_15m_spot.recent_series(coin)[["ts", "open", "high", "low", "close", "volume"]]
     return pd.DataFrame()
+
+
+LIVE_PRICE_MAX_AGE_SEC = {"crypto": 15.0, "stocks": 30.0}
+
+
+def live_price(coin: str) -> dict[str, Any] | None:
+    """The underlying's price as of now from Alpaca's stream (crypto: quote
+    mid; commodity ETF: last trade), or None when nothing that fresh."""
+    from data import alpaca_stream, kalshi_15m_spot
+    if coin in METAL_CHART_SYMBOL:
+        return alpaca_stream.latest_price("stocks", METAL_CHART_SYMBOL[coin], max_age_sec=LIVE_PRICE_MAX_AGE_SEC["stocks"])
+    pair = kalshi_15m_spot.product_for(kalshi_15m_spot.chart_coin(coin))
+    return alpaca_stream.latest_price("crypto", pair, max_age_sec=LIVE_PRICE_MAX_AGE_SEC["crypto"])
 
 
 def price_at(one_min: pd.DataFrame, ts: int, *, tolerance_sec: int = 120) -> float | None:
@@ -883,7 +904,17 @@ def live_setup(coin: str, *, news_score: float | None, now: float | None = None,
     rets = np.diff(np.log(one_min.sort_values("ts")["close"].to_numpy(float)[-31:]))
     vol = float(np.std(rets, ddof=1)) if len(rets) > 5 else None
     strike = price_at(one_min, int(strike_ts)) if strike_ts is not None else None
-    return {**result, "as_of": as_of, "underlying_price": last_close, "vol_per_min": vol, "strike_underlying": strike}
+    # Fair value is priced off the underlying right now: the stream's live
+    # tick when fresh (candles=None means a live read), else the last close.
+    tick = None
+    if candles is None:
+        try:
+            tick = live_price(coin)
+        except Exception:
+            tick = None
+    price_now = float(tick["price"]) if tick else last_close
+    return {**result, "as_of": as_of, "underlying_price": price_now, "vol_per_min": vol, "strike_underlying": strike,
+            "underlying_price_source": f"live {tick['kind']} ({tick['age_sec']}s old)" if tick else "last 1m close"}
 
 
 def fair_value_yes(price: float, strike: float, vol_per_min: float, minutes_left: float) -> float:
@@ -949,6 +980,97 @@ def strategy_card() -> dict[str, Any]:
     params = {k: v for k, v in globals().items()
               if k.isupper() and not k.startswith("_") and isinstance(v, (int, float, str, list, tuple, dict))}
     return {"module": __name__, "method": (__doc__ or "").strip(), "params": params}
+
+
+def replay_windows(spot_1m: pd.DataFrame, *, half_spread: float, leader_1m: pd.DataFrame | None = None,
+                   leader_symbol: str | None = None, entry_minutes: tuple[int, ...] = (1, 2, 3, 4, 5),
+                   min_seconds_left: int = 600, contracts: int = 10, session: str = SESSION,
+                   leader_session: str | None = None) -> pd.DataFrame:
+    """Multi-year study of this bot's contract trading on real charts: every
+    15-minute window of `spot_1m` (ts = end) is a contract settling YES if
+    the window closes at or above its open. Charts, setups, stop/target hits
+    and settlements are real; the contract's price is modeled -- fair value
+    (fair_value_yes, the bot's own pricing) +/- `half_spread`, the real
+    median half-spread from the Kalshi quote archive -- since Kalshi quotes
+    exist only from Sep 2026. Entry, exits and fees follow replay_contracts:
+    minutes 1-5 with min_seconds_left to go, contract_plan must clear MIN_RR
+    at that ask, out at the bid when the underlying reaches the stop or
+    target, else settled. net_return = P&L per contract / the price paid."""
+    from data import kalshi_15m
+    fee = lambda p: kalshi_15m.taker_fee_usd(contracts, p) / contracts  # noqa: E731
+    spot = spot_1m.sort_values("ts").drop_duplicates("ts").reset_index(drop=True)
+    if len(spot) < 100:
+        return pd.DataFrame()
+    ctx = prepare(spot[["ts", "open", "high", "low", "close", "volume"]], session=session)
+    leader = (prepare(leader_1m, session=leader_session or session)
+              if leader_1m is not None and not leader_1m.empty else None)
+    ts1 = spot["ts"].to_numpy("int64")
+    hi, lo, cl = (spot[k].to_numpy(float) for k in ("high", "low", "close"))
+    logc = np.log(cl)
+
+    def bar_at(t: int) -> int | None:
+        j = int(np.searchsorted(ts1, t, side="right")) - 1
+        return j if j >= 0 and ts1[j] == t else None
+
+    def quote(p_yes: float) -> tuple[float, float]:
+        return min(max(p_yes - half_spread, 0.01), 0.98), max(min(p_yes + half_spread, 0.99), 0.02)
+
+    cache: dict[int, dict[str, Any]] = {}
+    used: set[str] = set()
+    trades: list[dict[str, Any]] = []
+    first = int(ts1[0]) // 900 * 900 + 900
+    for open_ts in range(first, int(ts1[-1]) - 900 + 1, 900):
+        close_ts = open_ts + 900
+        i_open, i_close = bar_at(open_ts), bar_at(close_ts)
+        if i_open is None or i_close is None:
+            continue  # no real print at the window's open or close (session gap)
+        strike = cl[i_open]
+        for m in entry_minutes:
+            t = open_ts + 60 * m
+            if close_ts - t < min_seconds_left:
+                continue
+            i_t = bar_at(t)
+            if i_t is None or i_t < 31:
+                continue
+            as_of = latest_closed_5m(t)
+            if as_of not in cache:
+                cache[as_of] = evaluate(ctx, as_of, sides=("long", "short"), leader=leader, leader_symbol=leader_symbol,
+                                        require_leader=leader_1m is not None)
+            setup = cache[as_of]
+            if not setup.get("valid") or setup["setup_id"] in used:
+                continue
+            vol = float(np.std(np.diff(logc[i_t - 30:i_t + 1]), ddof=1))
+            minutes_left = (close_ts - t) / 60.0
+            bid, ask = quote(fair_value_yes(cl[i_t], strike, vol, minutes_left))
+            cp = contract_plan({**setup, "vol_per_min": vol}, {"yes_bid_dollars": bid, "yes_ask_dollars": ask},
+                               seconds_to_close=close_ts - t, strike_underlying=strike)
+            if not cp.get("ok"):
+                continue
+            used.add(setup["setup_id"])
+            side, price = cp["contract_side"], cp["ask"]
+            stop, target, long_ = setup["plan"]["stop"], setup["plan"]["target"], setup["side"] == "long"
+            exit_value, how = None, "settled"
+            for k in range(m + 1, 15):
+                j = bar_at(open_ts + 60 * k)
+                if j is None:
+                    continue
+                hit_stop = lo[j] <= stop if long_ else hi[j] >= stop
+                hit_target = hi[j] >= target if long_ else lo[j] <= target
+                if hit_stop or hit_target:
+                    b, a = quote(fair_value_yes(cl[j], strike, vol, (close_ts - ts1[j]) / 60.0))
+                    exit_value = b if side == "yes" else 1.0 - a
+                    how = "stop" if hit_stop else "target"
+                    break
+            result = "yes" if cl[i_close] >= strike else "no"
+            cost = price + fee(price)
+            pnl = ((1.0 if result == side else 0.0) - cost) if exit_value is None else (exit_value - fee(exit_value) - cost)
+            corr = (setup.get("checks") or {}).get("correlation") or {}
+            trades.append({"entry_ts": int(t), "open_ts": int(open_ts), "minute": m, "side": setup["side"], "contract_side": side,
+                           "setup": setup["setup"], "ask": price, "exit": how, "exit_value": exit_value, "result": result,
+                           "planned_rr": cp["rr"], "pnl_per_contract": pnl, "net_return": pnl / price,
+                           "leader_corr": corr.get("corr"), "leader_dir": corr.get("leader_dir")})
+            break
+    return pd.DataFrame(trades)
 
 
 def replay_contracts(quotes: pd.DataFrame, spot_1m: pd.DataFrame, *, leader_1m: pd.DataFrame | None = None,

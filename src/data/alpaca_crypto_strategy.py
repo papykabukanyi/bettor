@@ -333,13 +333,11 @@ SETUP_IDS_REMEMBERED = 500
 
 
 def evaluate_setup_candidate(symbol: str, *, traded_setup_ids: frozenset[str] = frozenset()) -> dict[str, Any]:
-    from data import alpaca_crypto_setup
-    from data.alpaca_crypto_data import symbol_to_coin
-    from data.crypto_news import get_sentiment
+    from data import alpaca_crypto_setup, alpaca_news
 
     fee = 2 * TAKER_FEE_RATE
     try:
-        news = get_sentiment(symbol_to_coin(symbol)).get("sentiment_score")
+        news = alpaca_news.sentiment(symbol).get("sentiment_score")
     except Exception as exc:
         logger.debug("[alpaca_crypto_strategy] sentiment read failed for %s: %s", symbol, exc)
         news = None
@@ -1447,9 +1445,15 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
     # real, confirmed root cause this fixes -- fetches sentiment for every
     # not-yet-held coin CONCURRENTLY so the sequential loop below hits a
     # warm cache instead of each coin's own blocking network fetch.
+    # Setup mode reads Alpaca news: one bulk pull for the whole scan.
     try:
-        from data.crypto_news import prewarm_sentiment
-        prewarm_sentiment([symbol_to_coin(s) for s in symbols if symbol_to_coin(s) not in existing_coins])
+        to_read = [s for s in symbols if symbol_to_coin(s) not in existing_coins]
+        if setup_mode:
+            from data import alpaca_news
+            alpaca_news.prefetch(to_read)
+        else:
+            from data.crypto_news import prewarm_sentiment
+            prewarm_sentiment([symbol_to_coin(s) for s in to_read])
     except Exception as exc:
         logger.debug("[alpaca_crypto_strategy] sentiment prewarm failed (non-fatal): %s", exc)
     # Same concurrent-prewarm fix for the OTHER blocking per-symbol call

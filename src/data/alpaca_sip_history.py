@@ -37,10 +37,18 @@ PAGE_LIMIT = 10000
 COLUMNS = ["ts", "open", "high", "low", "close", "volume", "trade_count", "vwap"]
 
 
+def commodity_etfs() -> list[str]:
+    """The ETFs the Kalshi bots chart commodities on (GLD, SLV, CPER, ...)."""
+    from data import kalshi_15m_setup
+    return sorted(set(kalshi_15m_setup.METAL_CHART_SYMBOL.values()))
+
+
 def universe() -> list[str]:
-    """Every symbol the stock and options bots can trade, plus the leaders."""
+    """Every symbol the stock and options bots can trade, plus the leaders
+    and the Kalshi bots' commodity ETFs."""
     from data import alpaca_data, alpaca_options_data
-    return sorted(set(alpaca_data.BROAD_CANDIDATE_UNIVERSE) | set(alpaca_options_data.OPTIONS_UNDERLYINGS) | {"SPY", "QQQ"})
+    return sorted(set(alpaca_data.BROAD_CANDIDATE_UNIVERSE) | set(alpaca_options_data.OPTIONS_UNDERLYINGS) | {"SPY", "QQQ"}
+                  | set(commodity_etfs()))
 
 
 def _headers(key_id: str | None = None, secret: str | None = None) -> dict[str, str]:
@@ -168,6 +176,26 @@ def backfill(symbols: list[str] | None = None, *, start_year: int = START_YEAR, 
             rows += len(df)
     uploaded = upload(written, message="SIP 1m bars backfill") if publish else []
     return {"ok": True, "symbols": len(symbols), "files": len(written), "rows": rows, "uploaded": len(uploaded)}
+
+
+def missing_symbols() -> list[str]:
+    """Universe symbols with no file for this year on HF yet."""
+    token = _hf_token()
+    if not token:
+        return []
+    from huggingface_hub import HfApi
+    files = set(HfApi(token=token).list_repo_files(HF_REPO, repo_type="dataset"))
+    year = dt.datetime.now(dt.timezone.utc).year
+    return [s for s in universe() if _repo_path(s, year) not in files]
+
+
+def backfill_missing() -> dict[str, Any]:
+    """Full history for any symbol just added to the universe (e.g. a new
+    commodity ETF); a no-op once every symbol has its files."""
+    missing = missing_symbols()
+    if not missing:
+        return {"ok": True, "missing": []}
+    return {**backfill(missing), "missing": missing}
 
 
 def append_recent(symbols: list[str] | None = None, *, days: int = 4) -> dict[str, Any]:

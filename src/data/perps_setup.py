@@ -33,9 +33,11 @@ reward/risk after costs is at least MIN_RR. Exits are the planned stop or
 target only.
 
 Kalshi perps specifics: long and short (shorts only when perps_strategy
-ENABLE_SHORTS is on). The chart is the coin's real Coinbase spot 1-minute
-candles (chart_candles) -- the perp itself goes idle and prints outliers,
-so its own volume can't carry the volume rule. The plan's stop and target
+ENABLE_SHORTS is on). The chart is the coin's real spot 1-minute candles
+from Alpaca (Kraken US feed, live stream on top; commodity perps on their
+SIP ETF, see chart_candles) -- the perp itself goes idle and prints
+outliers, so its own volume can't carry the volume rule. Coins Alpaca
+doesn't carry have no chart and are not traded. The plan's stop and target
 are carried into the perp's price by plan_at_price, which re-checks
 reward/risk at the real execution price. Costs are Kalshi's real perp fee
 (both legs, passed in by perps_strategy) plus the perp's live bid/ask
@@ -97,7 +99,7 @@ MAX_RISK_PCT = _env_float("PERPS_SETUP_MAX_RISK_PCT", 0.03)
 RISK_PER_TRADE_PCT = _env_float("PERPS_SETUP_RISK_PER_TRADE_PCT", 0.01)  # balance lost if the stop is hit
 NEWS_BLOCK = _env_float("PERPS_SETUP_NEWS_BLOCK", 0.3)
 
-# 6. Correlation -- the coin's leader is BTC (ETH for BTC itself), read on its Coinbase chart. Over the last
+# 6. Correlation -- the coin's leader is BTC (ETH for BTC itself), read on its Alpaca chart. Over the last
 # CORR_LOOKBACK_5M closed 5-minute returns, when the symbol moves with its
 # leader (|correlation| >= CORR_MIN) the leader must not be going the other
 # way right now: leader above its session VWAP with a rising last hour is
@@ -109,7 +111,8 @@ CORR_MIN_OVERLAP = 60
 COVERAGE_WINDOW_MIN = _env_int("PERPS_SETUP_COVERAGE_WINDOW_MIN", 240)
 _ET = ZoneInfo("America/New_York")
 MIN_COVERAGE = _env_float("PERPS_SETUP_MIN_COVERAGE", 0.8)            # share of 1m candles that must exist
-LEADER_OVERRIDES: dict[str, str] = {"BTC": "ETH", "GOLD": "SILVER", "SILVER": "GOLD"}
+LEADER_OVERRIDES: dict[str, str] = {"BTC": "ETH", "GOLD": "SILVER", "SILVER": "GOLD", "COPPER": "GOLD", "PLATINUM": "GOLD",
+                                    "PALLADIUM": "GOLD", "WTI": "BRENT", "NATGAS": "WTI"}
 DEFAULT_LEADER = "BTC"
 
 
@@ -720,14 +723,17 @@ def plan_exit(position: dict[str, Any], price: float, *, held_minutes: float | N
 
 def replay(df1: pd.DataFrame, *, sides: tuple[str, ...], fee_rate_roundtrip: float, spread_bps: float,
            entry_allowed=None, force_exit=None, max_hold_minutes: int | None = None,
-           leader_df: pd.DataFrame | None = None, leader_symbol: str | None = None) -> pd.DataFrame:
+           leader_df: pd.DataFrame | None = None, leader_symbol: str | None = None,
+           session: str = SESSION, leader_session: str | None = None) -> pd.DataFrame:
     """Backtest on real 1-minute candles (ts = candle end): evaluate every
     closed 5m candle, enter at the next 1m open, exit only at the planned
     stop or target (stop first when both fall inside one candle), one
     position at a time, each breakout traded once. entry_allowed(ts) and
-    force_exit(ts) let a market add session rules."""
-    ctx = prepare(df1, session=SESSION)
-    leader_ctx = prepare(leader_df, session=SESSION) if leader_df is not None and not leader_df.empty else None
+    force_exit(ts) let a market add session rules. Each trade records the
+    leader reading at entry (correlation and direction) for the studies."""
+    ctx = prepare(df1, session=session)
+    leader_ctx = (prepare(leader_df, session=leader_session or session)
+                  if leader_df is not None and not leader_df.empty else None)
     d = df1.sort_values("ts").reset_index(drop=True)
     ts1 = d["ts"].to_numpy("int64")
     o, h, lo, c = (d[k].to_numpy(float) for k in ("open", "high", "low", "close"))
@@ -766,10 +772,11 @@ def replay(df1: pd.DataFrame, *, sides: tuple[str, ...], fee_rate_roundtrip: flo
             exit_px, why = c[j], "max_hold_safety"
         gross = sign * (exit_px - entry) / entry
         net = gross - fee_rate_roundtrip - spread_bps / 1e4
+        corr = (r.get("checks") or {}).get("correlation") or {}
         trades.append({"entry_ts": int(ts1[i]), "exit_ts": int(ts1[j]), "side": r["side"], "setup": r.get("setup"),
                        "entry": float(entry), "stop": float(stop), "target": float(target), "exit": why,
                        "gross_return": gross, "net_return": net, "r_multiple": net / (sign * (entry - stop) / entry),
-                       "planned_rr": r["plan"]["rr_net"]})
+                       "planned_rr": r["plan"]["rr_net"], "leader_corr": corr.get("corr"), "leader_dir": corr.get("leader_dir")})
         busy_until = int(ts1[j])
     return pd.DataFrame(trades)
 
@@ -811,11 +818,13 @@ def live_quote(market: dict[str, Any]) -> dict[str, float] | None:
     return {"bid": bid, "ask": ask, "mid": (bid + ask) / 2.0}
 
 
-METAL_COINS = frozenset({"GOLD", "SILVER"})
+# Commodity perps (and oil's leader, BRENT) chart on their SIP ETF -- see
+# kalshi_15m_setup.METAL_CHART_SYMBOL for the ETFs and how they were graded.
+METAL_COINS = frozenset({"GOLD", "SILVER", "COPPER", "PLATINUM", "PALLADIUM", "WTI", "NATGAS", "BRENT"})
 
 
 def chart_session(coin: str) -> str:
-    """Metal perps are read on their ETF (US-equity session); coins trade 24/7."""
+    """Commodity perps are read on their ETF (US-equity session); coins trade 24/7."""
     return "us_equity" if coin in METAL_COINS else SESSION
 
 
@@ -823,16 +832,16 @@ def _chart_for_coin(coin: str) -> pd.DataFrame:
     from data import kalshi_15m_setup, kalshi_15m_spot
     if coin in METAL_COINS:
         return kalshi_15m_setup.metals_candles(coin)
-    if coin not in kalshi_15m_spot.COINBASE_PRODUCTS:
+    if coin not in kalshi_15m_spot.SPOT_PRODUCTS:
         return pd.DataFrame()
     return kalshi_15m_spot.recent_series(coin)[["ts", "open", "high", "low", "close", "volume"]]
 
 
 def chart_candles(ticker: str) -> pd.DataFrame:
-    """The perp's real 1-minute chart (ts = END): the coin's Coinbase spot
-    market -- the perp itself goes idle and prints outliers, so its own
-    volume can't carry the volume rule -- or, for the gold and silver
-    perps, GLD/SLV (real-time exchange data, US session; see
+    """The perp's real 1-minute chart (ts = END), all from Alpaca: the
+    coin's spot market on the Kraken US feed -- the perp itself goes idle
+    and prints outliers, so its own volume can't carry the volume rule --
+    or, for commodity perps, the SIP ETF (US session; see
     kalshi_15m_setup.METAL_CHART_SYMBOL for how they were graded)."""
     from data import kalshi_15m_spot, perps_data
     return _chart_for_coin(kalshi_15m_spot.chart_coin(perps_data.coin_for_ticker(ticker)))
@@ -840,17 +849,29 @@ def chart_candles(ticker: str) -> pd.DataFrame:
 
 def live_setup(ticker: str, *, sides: tuple[str, ...], fee_rate_roundtrip: float, news_score: float | None,
                spread_bps: float = 0.0, now: float | None = None) -> dict[str, Any]:
-    """The setup on this perp's coin right now (Coinbase spot chart), with
-    its leader's Coinbase chart for the correlation rule."""
+    """The setup on this perp's coin right now (Alpaca chart), with its
+    leader's Alpaca chart for the correlation rule."""
     from data import kalshi_15m_spot, perps_data
     coin = kalshi_15m_spot.chart_coin(perps_data.coin_for_ticker(ticker))
     leader_symbol = leader_for(coin)
     leader_candles = _chart_for_coin(leader_symbol)
-    return setup_from_candles(chart_candles(ticker), sides=sides, fee_rate_roundtrip=fee_rate_roundtrip,
-                              news_score=news_score, spread_bps=spread_bps, now=now,
-                              leader_candles=leader_candles if not leader_candles.empty else None,
-                              leader_symbol=leader_symbol, require_leader=True,
-                              session=chart_session(coin), leader_session=chart_session(leader_symbol))
+    result = setup_from_candles(chart_candles(ticker), sides=sides, fee_rate_roundtrip=fee_rate_roundtrip,
+                                news_score=news_score, spread_bps=spread_bps, now=now,
+                                leader_candles=leader_candles if not leader_candles.empty else None,
+                                leader_symbol=leader_symbol, require_leader=True,
+                                session=chart_session(coin), leader_session=chart_session(leader_symbol))
+    # The chart -> perp price conversion (plan_at_price) uses the
+    # underlying as of now: Alpaca's live tick when fresh.
+    if now is None and result.get("chart_price"):
+        from data import kalshi_15m_setup
+        try:
+            tick = kalshi_15m_setup.live_price(coin)
+        except Exception:
+            tick = None
+        if tick:
+            result = {**result, "chart_price": float(tick["price"]),
+                      "chart_price_source": f"live {tick['kind']} ({tick['age_sec']}s old)"}
+    return result
 
 
 def setup_from_candles(one_min: pd.DataFrame, *, sides: tuple[str, ...], fee_rate_roundtrip: float,

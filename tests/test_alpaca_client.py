@@ -213,6 +213,21 @@ def test_get_crypto_bars_paginates(monkeypatch):
     assert len(calls) == 2
 
 
+def test_get_crypto_bars_reads_another_venue_and_works_without_keys(monkeypatch):
+    captured = {}
+
+    def fake_get(url, *, headers, params, timeout):
+        captured.update(url=url, headers=dict(headers))
+        return _FakeResponse({"bars": {}, "next_page_token": None})
+
+    monkeypatch.setattr(alpaca_client, "API_KEY_ID", "")
+    monkeypatch.setattr(alpaca_client, "API_SECRET_KEY", "")
+    monkeypatch.setattr(alpaca_client.requests, "get", fake_get)
+    assert alpaca_client.get_crypto_bars(["BTC/USD"], loc="us-1") == {}
+    assert captured["url"].endswith("/v1beta3/crypto/us-1/bars")
+    assert captured["headers"] == {}
+
+
 def test_get_crypto_latest_quote_unwraps_the_symbol(monkeypatch):
     captured = {}
 

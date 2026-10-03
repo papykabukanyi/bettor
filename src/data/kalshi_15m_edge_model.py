@@ -671,7 +671,7 @@ def live_spot_rows(markets_by_coin: dict[str, dict[str, Any]], minute_by_coin: d
     now = time.time()
     rows = []
     for coin, market in markets_by_coin.items():
-        if market_kind(coin) != "crypto" or coin not in kalshi_15m_spot.COINBASE_PRODUCTS or not market.get("open_time"):
+        if market_kind(coin) != "crypto" or coin not in kalshi_15m_spot.SPOT_PRODUCTS or not market.get("open_time"):
             continue
         open_ts = kalshi_15m_quotes._iso_ts(market["open_time"])  # noqa: SLF001
         minute = (minute_by_coin or {}).get(coin)

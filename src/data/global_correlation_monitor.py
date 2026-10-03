@@ -180,7 +180,7 @@ def regime(one_min: pd.DataFrame) -> dict[str, Any]:
 def _load_series(exposures: list[dict[str, Any]]) -> dict[str, pd.DataFrame]:
     from data import alpaca_data, kalshi_15m_setup, kalshi_15m_spot
     series: dict[str, pd.DataFrame] = {}
-    for coin in kalshi_15m_spot.COINBASE_PRODUCTS:
+    for coin in kalshi_15m_spot.SPOT_PRODUCTS:
         try:
             series[coin] = kalshi_15m_spot.recent_series(coin)
         except Exception as exc:

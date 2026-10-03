@@ -322,8 +322,7 @@ SETUP_IDS_REMEMBERED = 500
 
 def evaluate_setup_candidate(symbol: str, *, company_name: str | None = None,
                              traded_setup_ids: frozenset[str] = frozenset()) -> dict[str, Any]:
-    from data import alpaca_setup
-    from data.stock_news import get_sentiment
+    from data import alpaca_news, alpaca_setup
 
     # Multi-year evidence (setup_backtest_job.run_multiyear on the SIP
     # archive): when the walk-forward showed that trading only symbols with
@@ -343,7 +342,7 @@ def evaluate_setup_candidate(symbol: str, *, company_name: str | None = None,
                 "setup_checks": {"data": {"ok": False, "detail": f"not eligible: {detail}"}}}
 
     try:
-        news = get_sentiment(symbol, company_name=company_name).get("sentiment_score")
+        news = alpaca_news.sentiment(symbol).get("sentiment_score")
     except Exception as exc:
         logger.debug("[alpaca_strategy] sentiment read failed for %s: %s", symbol, exc)
         news = None
@@ -1129,8 +1128,13 @@ def scan_and_enter(watchlist: list[str] | None = None, *, dry_run: bool | None =
     # -- fetches sentiment for every not-yet-held symbol CONCURRENTLY so
     # the sequential loop below hits a warm cache instead of each symbol's
     # own blocking network fetch.
+    # Setup mode reads Alpaca news: one bulk pull for the whole scan.
     try:
-        prewarm_sentiment([(s, get_company_name(s)) for s in watchlist if s not in existing_symbols])
+        if setup_mode:
+            from data import alpaca_news
+            alpaca_news.prefetch([s for s in watchlist if s not in existing_symbols])
+        else:
+            prewarm_sentiment([(s, get_company_name(s)) for s in watchlist if s not in existing_symbols])
     except Exception as exc:
         logger.debug("[alpaca_strategy] sentiment prewarm failed (non-fatal): %s", exc)
     # Same concurrent-prewarm fix for the OTHER blocking per-symbol call
