@@ -5,10 +5,9 @@ correlation_check against its own leader). This module watches the whole
 book instead:
 
   - a correlation matrix of 15-minute log returns across every instrument
-    the bots trade or lead with: the Coinbase coins (real 1-minute spot),
-    SPY/QQQ and any stock or option underlying currently held (Alpaca), and
-    the COMEX metals (Yahoo, ~10 minutes delayed -- fine for correlation over
-    a day, never used to time an entry);
+    the bots trade or lead with, all from Alpaca: the coins (Kraken US
+    feed, 1-minute), SPY/QQQ and any stock or option underlying currently
+    held (SIP), and the commodities on their SIP ETFs (US session);
   - each leader's regime (BTC for crypto, SPY for stocks, GOLD for metals):
     last hour and last four hours up, down, or mixed;
   - every open position across perps, Kalshi 15m, Alpaca stocks, crypto and
@@ -60,7 +59,7 @@ MAX_SAME_BET = _env_int("GLOBAL_CORR_MAX_SAME_BET", 2)
 MIN_OVERLAP = _env_int("GLOBAL_CORR_MIN_OVERLAP", 40)       # overlapping 15m returns needed for a pair
 LOOKBACK_15M = _env_int("GLOBAL_CORR_LOOKBACK_15M", 192)    # two days of 15m returns
 STOCK_LEADERS = ("SPY", "QQQ")
-METALS = ("GOLD", "SILVER", "COPPER")
+METALS = ("GOLD", "SILVER", "COPPER", "PLATINUM", "PALLADIUM", "WTI", "NATGAS")
 LEADERS = {"crypto": "BTC", "stocks": "SPY", "metals": "GOLD"}
 HF_REPO = os.getenv("HF_DATASET_REPO", "papylove/kalshi-perps-data")
 HF_PATH = "correlation/latest.json"
@@ -184,7 +183,7 @@ def _load_series(exposures: list[dict[str, Any]]) -> dict[str, pd.DataFrame]:
         try:
             series[coin] = kalshi_15m_spot.recent_series(coin)
         except Exception as exc:
-            logger.warning("[global_correlation] Coinbase series failed for %s: %s", coin, exc)
+            logger.warning("[global_correlation] Alpaca crypto series failed for %s: %s", coin, exc)
     stocks = set(STOCK_LEADERS) | {e["symbol"] for e in exposures if e["bot"] in ("stocks", "options")}
     for sym in sorted(stocks):
         try:
@@ -197,7 +196,7 @@ def _load_series(exposures: list[dict[str, Any]]) -> dict[str, pd.DataFrame]:
         try:
             series[metal] = kalshi_15m_setup.metals_candles(metal)
         except Exception as exc:
-            logger.warning("[global_correlation] Yahoo series failed for %s: %s", metal, exc)
+            logger.warning("[global_correlation] Alpaca SIP ETF series failed for %s: %s", metal, exc)
     return {k: v for k, v in series.items() if v is not None and not v.empty}
 
 
@@ -248,7 +247,7 @@ def refresh() -> dict[str, Any]:
         "exposures": exposures, "clusters": same_bet_clusters(exposures, matrix),
         "params": {"exposure_corr": EXPOSURE_CORR, "max_same_bet": MAX_SAME_BET, "lookback_15m": LOOKBACK_15M,
                    "min_overlap": MIN_OVERLAP},
-        "notes": {"metals": "Yahoo COMEX 1-minute data is ~10 minutes delayed: used for correlation, never for entry timing."},
+        "notes": {"metals": "Commodities are read on their SIP ETFs (GLD, SLV, CPER, PPLT, PALL, USO, UNG): US session only, so their correlations use session hours."},
     }
     with _lock:
         _snapshot.clear()

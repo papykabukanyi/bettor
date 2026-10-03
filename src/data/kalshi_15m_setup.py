@@ -33,8 +33,9 @@ reward/risk after costs is at least MIN_RR. Exits are the planned stop or
 target only.
 
 Kalshi 15-minute specifics: the setup is read on the UNDERLYING's chart
-(real Coinbase 1-minute spot for crypto via kalshi_15m_spot; Yahoo Finance
-1-minute futures candles for metals). A long setup buys YES, a short setup
+(Alpaca's Kraken US 1-minute spot for crypto via kalshi_15m_spot; SIP
+1-minute bars of each commodity's ETF, with the live stream, for metals and
+energy). A long setup buys YES, a short setup
 buys NO. The planned stop/target are underlying prices; the contract's own
 reward/risk is priced from them with the digital-option fair value (what
 the contract is worth with the underlying at that level and the window's
@@ -879,7 +880,7 @@ def live_setup(coin: str, *, news_score: float | None, now: float | None = None,
     """strike_ts: the window's open time. The window settles YES if the
     underlying closes above its reference price at the open, so the strike
     in chart units is the chart's own close at that minute -- no basis
-    between the chart source (Coinbase spot, COMEX futures) and Kalshi's
+    between the chart source (Alpaca spot, SIP ETFs) and Kalshi's
     settlement source (CF Benchmarks, Pyth) enters the comparison."""
     now = time.time() if now is None else now
     one_min = underlying_candles(coin) if candles is None else candles

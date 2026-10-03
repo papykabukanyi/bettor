@@ -218,7 +218,7 @@ const timeAgo = (iso) => {
 // closing into a trade, or a candidate leaving the watchlist) -- so a row
 // that's still open just sits there being updated smoothly, not
 // disappearing and reappearing.
-// Coinbase spot-lead prediction for a candidate: signed bps, or why there's none.
+// Spot-lead prediction (Alpaca spot) for a candidate: signed bps, or why there's none.
 function fmtSpotLead(bps, reason) {
   if (bps === null || bps === undefined || isNaN(bps)) {
     const why = { stale_data: "perp idle", bad_print: "bad print", no_coinbase_market: "n/a", no_spot_lead_model_yet: "no model" }[reason];

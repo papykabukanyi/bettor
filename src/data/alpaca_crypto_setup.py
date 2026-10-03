@@ -795,9 +795,9 @@ def candles_from_bars(bars: pd.DataFrame) -> pd.DataFrame:
 # Chart sources. Alpaca's own crypto venue is thin: over a live 4 hours on
 # 2026-10-01 SOL/USD had 76% of its minutes, ETH/USD's last candle was 213s
 # old, BTC/USDC 44%. The pair is read on whichever real chart is more
-# complete over the last COVERAGE_WINDOW_MIN minutes -- the coin's Coinbase
-# USD market (deep, usually complete) or Alpaca's own bars -- and the plan's
-# stop/target are carried to Alpaca's price by plan_at_price.
+# complete over the last COVERAGE_WINDOW_MIN minutes -- Alpaca's Kraken US
+# feed (deep, every minute present) or Alpaca's own venue's bars -- and the
+# plan's stop/target are carried to Alpaca's price by plan_at_price.
 STABLECOINS = frozenset({"USDC", "USDT", "USDG", "DAI", "PYUSD", "USDP", "TUSD", "FDUSD", "EURC", "GUSD", "USDE"})
 
 
@@ -879,7 +879,7 @@ def plan_at_price(setup: dict[str, Any], *, price: float, fee_rate_roundtrip: fl
     plan = setup["plan"]
     if price <= 0:
         return {"ok": False, "reason": "no_price"}
-    # A plan read on another venue's chart (Coinbase) is carried to this
+    # A plan read on another venue's chart (Kraken US via Alpaca) is carried to this
     # pair's price at the live ratio.
     k = price / chart_price if chart_price and chart_price > 0 else 1.0
     stop, target = float(plan["stop"]) * k, float(plan["target"]) * k
